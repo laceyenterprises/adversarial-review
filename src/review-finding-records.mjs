@@ -7,6 +7,7 @@ import { attributeFindingCommits, findingPath } from './finding-commit-attributi
 import { withSqliteBusyRetrySync } from './sqlite-busy-retry.mjs';
 
 const digest = value => createHash('sha256').update(JSON.stringify(value)).digest('hex');
+
 const REVIEW_KINDS = new Set(['first-pass', 'rereview']);
 
 // Fixed field order makes content identities independent of object key order.
@@ -16,7 +17,7 @@ export function findingContent(finding, blocking) {
     whyItMatters: finding.whyItMatters ?? null, recommendedFix: finding.recommendedFix ?? null };
 }
 
-export function persistReviewFindings(db, passId) {
+export function persistReviewFindings(db, passId, { historicalProjection = false } = {}) {
   // Acquire the WAL write lock before reading a snapshot. A deferred snapshot
   // upgrade can fail immediately without consulting the connection busy timeout.
   return db.transaction(() => {
@@ -24,11 +25,13 @@ export function persistReviewFindings(db, passId) {
     if (!pass?.body_md || !REVIEW_KINDS.has(pass.pass_kind)) return 0;
     const note = extractSimplicityNote(pass.body_md);
     // Snapshot advice independently: an advisory-only review has no finding row.
-    db.prepare('DELETE FROM finding_batch_notes WHERE pass_id=? AND batch_id IS NULL').run(passId);
+    const noteId = note && pass.head_sha ? digest([passId, note]) : null;
+    db.prepare(`DELETE FROM finding_batch_notes WHERE pass_id=? AND batch_id IS NULL
+      AND (? IS NULL OR note_id<>?)`).run(passId, noteId, noteId);
     if (note && pass.head_sha) db.prepare(`INSERT INTO finding_batch_notes
-      (note_id,pass_id,repo,pr_number,head_sha,note) VALUES (?,?,?,?,?,?)
-      ON CONFLICT(note_id) DO NOTHING`)
-      .run(digest([passId, note]), passId, pass.repo, pass.pr_number, pass.head_sha, note);
+      (note_id,pass_id,repo,pr_number,head_sha,note,historical_projection) VALUES (?,?,?,?,?,?,?)
+      ON CONFLICT(note_id) DO UPDATE SET historical_projection=min(finding_batch_notes.historical_projection,excluded.historical_projection)`)
+      .run(noteId, passId, pass.repo, pass.pr_number, pass.head_sha, note, Number(historicalProjection));
     const parsed = parseReviewFindings(pass.body_md);
     const findings = [...parsed.blocking.findings.map(f => ({ f, blocking: 1 })),
       ...parsed.nonBlocking.findings.map(f => ({ f, blocking: 0 }))];
@@ -37,29 +40,42 @@ export function persistReviewFindings(db, passId) {
     db.prepare('UPDATE review_findings SET current_body=0 WHERE pass_id=?').run(passId);
     const insert = db.prepare(`INSERT INTO review_findings
       (finding_id, pass_id, ordinal, content_sha256, blocking, category, file, lines, title,
-       finding_json, reviewer_identity, reviewer_model, reasoning_effort, head_sha, hammer_identity)
+       finding_json, reviewer_identity, reviewer_model, reasoning_effort, head_sha, hammer_identity, historical_projection)
       VALUES (@id, @pass, @ordinal, @hash, @blocking, @category, @file, @lines, @title,
-        @json, @identity, @model, @effort, @head, @hammer)
+        @json, @identity, @model, @effort, @head, @hammer, @historical)
       ON CONFLICT(finding_id) DO UPDATE SET reviewer_identity=excluded.reviewer_identity,
         reviewer_model=excluded.reviewer_model, reasoning_effort=excluded.reasoning_effort,
-        head_sha=excluded.head_sha, current_body=1`);
-    const exists = db.prepare('SELECT 1 FROM review_findings WHERE finding_id=?');
+        head_sha=excluded.head_sha, current_body=1,
+        historical_projection=min(review_findings.historical_projection,excluded.historical_projection)`);
+    const exists = db.prepare('SELECT historical_projection FROM review_findings WHERE finding_id=?');
+    const promoted = [];
     let inserted = 0;
     for (const [index, { f, blocking }] of findings.entries()) {
       const content = findingContent(f, blocking);
       const hash = digest(content);
       const id = `${passId}:${index + 1}:${hash}`;
-      if (!exists.get(id)) inserted++;
+      const previous = exists.get(id);
+      if (!previous) inserted++;
+      else if (!historicalProjection && previous.historical_projection === 1) promoted.push(id);
       insert.run({ id, pass: passId, ordinal: index + 1, hash, ...content,
         json: JSON.stringify(content), identity: metadata?.reviewerAttribution?.identity || pass.reviewer_class,
         model: pass.reviewer_model, effort: pass.reasoning_effort, head: pass.head_sha,
-        hammer: blockingFindingIdentity(f) });
+        hammer: blockingFindingIdentity(f), historical: Number(historicalProjection) });
     }
     db.prepare(`UPDATE review_findings SET reviewer_harness=?,prompt_set=?,prompt_digest=?,prompt_stage=?,prompt_digests_json=?
       WHERE pass_id=?`).run(metadata?.reviewerExecution?.harness ?? null,
       metadata?.reviewerExecution?.promptSet ?? null, metadata?.reviewerExecution?.promptDigest ?? null,
       metadata?.reviewerExecution?.promptStage ?? null,
       metadata?.reviewerExecution?.promptDigests ? JSON.stringify(metadata.reviewerExecution.promptDigests) : null, passId);
+    // A genuine live capture can arrive after a historical projection. The
+    // receipt trigger ran before this projection promoted the existing rows.
+    if (promoted.length) db.prepare(`INSERT OR IGNORE INTO finding_backlog
+      (finding_id,repo,pr_number,head_sha,content_sha256,reviewer_family,area)
+      SELECT c.* FROM finding_backlog_candidates c
+      JOIN review_findings f USING(finding_id)
+      JOIN reviewed_prs r ON r.repo=c.repo AND r.pr_number=c.pr_number
+      WHERE f.finding_id IN (SELECT value FROM json_each(?)) AND r.pr_state='merged'`)
+      .run(JSON.stringify(promoted));
     syncFindingDisputes(db, { passId });
     return inserted;
   }).immediate();
@@ -67,12 +83,12 @@ export function persistReviewFindings(db, passId) {
 
 // These records are observations only. Errors never change review or dispatch
 // results; the stored bodies and jobs remain the repair source for backfill.
-export function persistReviewFindingsSafe(db, passId, log = console) {
+export function persistReviewFindingsSafe(db, passId, log = console, options = {}) {
   try {
-    return withSqliteBusyRetrySync(() => persistReviewFindings(db, passId),
+    return withSqliteBusyRetrySync(() => persistReviewFindings(db, passId, options),
       { delaysMs: [100], label: `review-findings:${passId}`, log });
   }
-  catch { log.warn?.(`[review-findings] projection failed for pass ${passId}; backfill required`); return 0; }
+  catch { log.warn?.(`[review-findings] projection failed for pass ${passId}; backfill required for evidence only; automatic enrollment is not restored`); return 0; }
 }
 
 export function syncFindingDisputes(db, { passId = null } = {}) {
@@ -98,7 +114,7 @@ export function backfillReviewFindings(db, { afterPassId = 0, limit = 500, repo 
       AND (? IS NULL OR repo=?) ORDER BY pass_id LIMIT ?`).all(afterPassId, repo, repo, limit);
   let inserted = 0;
   for (const row of rows) {
-    const added = persistReviewFindings(db, row.pass_id);
+    const added = persistReviewFindings(db, row.pass_id, { historicalProjection: true });
     inserted += added;
     // Report only committed work, including passes before a later busy failure.
     onPass({ passId: row.pass_id, inserted: added });
@@ -107,7 +123,7 @@ export function backfillReviewFindings(db, { afterPassId = 0, limit = 500, repo 
 }
 
 export function linkFindingRemediation(db, { job, workspaceDir, roundNumber = job?.remediationPlan?.currentRound,
-  attribute = attributeFindingCommits } = {}) {
+  attribute = attributeFindingCommits, historicalProjection = false } = {}) {
   const round = job?.remediationPlan?.rounds?.find(r => r.round === roundNumber);
   if (!job?.jobId || !round) return { linked: 0, reason: 'missing-round' };
   const start = round.startHeadSha;
@@ -122,7 +138,7 @@ export function linkFindingRemediation(db, { job, workspaceDir, roundNumber = jo
     AND head_sha=? AND body_md=? AND pass_kind IN ('first-pass','rereview')`)
     .all(job.repo, job.prNumber, job.revisionRef || start, job.reviewBody || '');
   const findings = passes.flatMap(p => {
-    persistReviewFindings(db, p.pass_id);
+    persistReviewFindings(db, p.pass_id, { historicalProjection });
     return db.prepare('SELECT * FROM review_findings WHERE pass_id=? AND current_body=1 ORDER BY ordinal').all(p.pass_id);
   });
   if (!findings.length) return { linked: 0, reason: 'no-matching-review' };

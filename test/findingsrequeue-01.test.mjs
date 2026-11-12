@@ -12,6 +12,8 @@ import { claimFindingBatches, releaseFindingBatch, runFindingBatches, settleFind
 import { summarizeFindingBacklog } from '../src/findings-backlog.mjs';
 
 // Synthetic repository, findings and launches only.
+const fixtureNow = Date.parse('2026-01-02T00:00:00Z');
+
 const repo = 'sample/service', head = 'a'.repeat(40), DAY = 24 * 3600000;
 const finding = title => `- **${title}**
   - **File:** \`src/result.mjs\`
@@ -55,7 +57,7 @@ function fixture(t, titles = ['First result', 'Second result', 'Third result']) 
       status: 'running' }]);
     return { stdout: JSON.stringify({ launchRequestId: id }) };
   };
-  const options = { db, rootDir, env, execFileImpl, logger: { warn() {} },
+  const options = { now: fixtureNow, db, rootDir, env, execFileImpl, logger: { warn() {} },
     readLaunches: async ({ idempotencyKey }) => ({ ok: true, rows: launches.get(idempotencyKey) || [] }),
     readLaunchSnapshot: async ({ launchRequestIds }) => {
       const rows = [...launches.values()].flat().filter(row => launchRequestIds.includes(row.launch_request_id));
@@ -64,7 +66,7 @@ function fixture(t, titles = ['First result', 'Second result', 'Third result']) 
     },
     fetchPublication: async () => { reads.publication++; return publication; },
     fetchPr: async () => ({ state: 'MERGED' }) };
-  const run = overrides => runFindingBatches({ ...options, ...overrides });
+  const run = overrides => runFindingBatches({ now: fixtureNow, ...options, ...overrides });
   const batches = () => db.prepare('SELECT * FROM finding_batches ORDER BY rowid').all();
   const backlog = () => db.prepare('SELECT finding_id,batch_id,batch_attempts,outcome,reason FROM finding_backlog ORDER BY finding_id').all();
   const endLaunches = (value = 'blocked_needs_decision') => {
@@ -122,7 +124,7 @@ test('a batch with any live keyed launch, or unreadable launch evidence, is unto
   await t.test('live preparation past the timeout with no outcomes', async t => {
     const f = fixture(t);
     await f.run({ day: '2026-01-02' });
-    await f.run({ resolutionOnly: true, now: Date.now() + 3 * DAY });
+    await f.run({ resolutionOnly: true, now: fixtureNow + 3 * DAY });
     assert.equal(f.batches()[0].released_at, null);
     assert.ok(f.backlog().every(r => r.batch_id === f.batches()[0].batch_id && r.batch_attempts === 0));
   });
@@ -145,7 +147,7 @@ test('a batch with any live keyed launch, or unreadable launch evidence, is unto
     await f.run({ day: '2026-01-02' });
     const [batch] = f.batches();
     f.writeOutcomes(batch, f.ids(batch).map(applied));
-    await f.run({ resolutionOnly: true, now: Date.now() + 3 * DAY,
+    await f.run({ resolutionOnly: true, now: fixtureNow + 3 * DAY,
       readLaunches: async () => ({ ok: false, reason: 'synthetic-unavailable' }) });
     assert.equal(f.batches()[0].released_at, null);
   });
@@ -174,26 +176,31 @@ test('a missing direct snapshot holds custody while a terminal keyed launch can 
   const timeout = fixture(t);
   await timeout.run({ day: '2026-01-02' });
   timeout.endLaunches('failed');
-  await timeout.run({ resolutionOnly: true, now: Date.now() + 2 * 3600000,
+  await timeout.run({ resolutionOnly: true, now: fixtureNow + 2 * 3600000,
     env: { ...timeout.env, ADVERSARIAL_FINDINGS_BATCH_TIMEOUT_MS: '3600000' } });
   assert.ok(timeout.batches()[0].released_at, 'the timeout is configurable');
 });
 
-test('the attempt cap drops a finding with the exhausted reason instead of leaving it open', async t => {
+test('releases past the merge-age window remain batchable until the third attempt exhausts', async t => {
   const f = fixture(t, ['Only result']);
   assert.equal(FINDING_BATCH_MAX_ATTEMPTS, 3);
   for (let attempt = 1; attempt <= 3; attempt++) {
-    const [batch] = claimFindingBatches(f.db, `2026-01-0${attempt}`);
+    const now = fixtureNow + (attempt - 1) * 3 * DAY;
+    const [batch] = claimFindingBatches(f.db, new Date(now).toISOString().slice(0, 10), { now, maxAgeMs: 2 * DAY });
     assert.ok(batch, `attempt ${attempt} is batched`);
     const released = releaseFindingBatch(f.db, batch, `batch-preparation-failed\n  detail ${attempt}`);
     assert.deepEqual([released.requeued, released.exhausted], attempt < 3 ? [1, 0] : [0, 1]);
     assert.equal(releaseFindingBatch(f.db, batch, 'again'), null, 'release is idempotent');
+    const health = summarizeFindingBacklog(f.db, now + 3 * DAY, { maxAgeMs: 2 * DAY });
+    assert.equal(health.available, true, health.error);
+    assert.equal(health.batchableCount, attempt < 3 ? 1 : 0);
+    assert.equal(health.outOfWindow, 0, 'released work never ages out of retries');
   }
   const [row] = f.backlog();
   assert.equal(row.outcome, 'dropped');
   assert.equal(row.reason, 'batch-retry-exhausted: batch-preparation-failed detail 3');
   assert.equal(row.batch_attempts, 3);
-  assert.deepEqual(claimFindingBatches(f.db, '2026-01-09'), []);
+  assert.deepEqual(claimFindingBatches(f.db, '2026-01-09', { now: fixtureNow }), []);
   assert.deepEqual(f.db.prepare('SELECT attempt,disposition FROM finding_batch_releases ORDER BY release_id').all(),
     [{ attempt: 1, disposition: 'requeued' }, { attempt: 2, disposition: 'requeued' }, { attempt: 3, disposition: 'exhausted' }]);
   assert.ok(f.db.prepare('SELECT resolved_at FROM finding_backlog').get().resolved_at);
@@ -253,7 +260,7 @@ test('a batch that legitimately produces no change settles cleanly without push 
     reason: 'stale-code-changed: The cited function no longer exists on main' })));
   f.status.milestones = { branch_pushed: { status: 'not_started' } };
   f.endLaunches('succeeded');
-  await f.run({ resolutionOnly: true, now: Date.now() + 3 * DAY });
+  await f.run({ resolutionOnly: true, now: fixtureNow + 3 * DAY });
   const stored = f.batches()[0];
   assert.ok(stored.completed_at);
   assert.equal(stored.error, null);
@@ -265,7 +272,7 @@ test('a batch that legitimately produces no change settles cleanly without push 
 test('backlog progress reports open, unbatched, batched, stranded, retrying and exhausted counts', async t => {
   const f = fixture(t, ['A result', 'B result', 'C result', 'D result', 'E result']);
   const ids = f.backlog().map(r => r.finding_id);
-  const summary = () => summarizeFindingBacklog(f.db).progress;
+  const summary = () => summarizeFindingBacklog(f.db, fixtureNow).progress;
   assert.deepEqual(summary(), { open: 5, unbatched: 5, batched: 0, stranded: 0, retrying: 0, exhausted: 0, releasedBatches: 0 });
   const insertBatch = (id, error = null) => f.db.prepare(`INSERT INTO finding_batches(batch_id,repo,area,day,launch_id,error)
     VALUES (?,?,'src','2026-01-02','synthetic',?)`).run(id, repo, error);
@@ -277,14 +284,14 @@ test('backlog progress reports open, unbatched, batched, stranded, retrying and 
   f.db.prepare("UPDATE finding_backlog SET batch_id='synthetic-released' WHERE finding_id IN (?,?)").run(ids[3], ids[4]);
   f.db.prepare("UPDATE finding_backlog SET batch_attempts=2 WHERE finding_id=?").run(ids[4]);
   releaseFindingBatch(f.db, { batch_id: 'synthetic-released' }, 'batch-preparation-failed');
-  const health = summarizeFindingBacklog(f.db);
+  const health = summarizeFindingBacklog(f.db, fixtureNow);
   assert.deepEqual(health.progress, { open: 4, unbatched: 1, batched: 1, stranded: 2, retrying: 1, exhausted: 1, releasedBatches: 1 });
   assert.equal(health.openCount, health.progress.open);
   assert.deepEqual(health.batchErrors, [{ error: 'batch-push-evidence-missing', count: 1 }]);
   // The release pass drains the stranded pair once their launch has ended.
   releaseFindingBatch(f.db, { batch_id: 'synthetic-errored' }, 'batch-push-evidence-missing');
   assert.deepEqual(summary(), { open: 4, unbatched: 3, batched: 1, stranded: 0, retrying: 3, exhausted: 1, releasedBatches: 2 });
-  assert.deepEqual(summarizeFindingBacklog(f.db).batchErrors, []);
+  assert.deepEqual(summarizeFindingBacklog(f.db, fixtureNow).batchErrors, []);
 });
 
 test('released advisories are retired with the reason and leave the unresolved view', async t => {
@@ -293,17 +300,17 @@ test('released advisories are retired with the reason and leave the unresolved v
   const passId = f.db.prepare('SELECT pass_id FROM reviewer_passes').get().pass_id;
   f.db.prepare(`INSERT INTO finding_batch_notes(note_id,pass_id,repo,pr_number,head_sha,note)
     VALUES ('synthetic-note',?,?,7,?,'Reuse the formatter (~5 lines saved).')`).run(passId, repo, head);
-  const [batch] = claimFindingBatches(f.db, '2026-01-02');
+  const [batch] = claimFindingBatches(f.db, '2026-01-02', { now: fixtureNow });
   assert.equal(f.db.prepare('SELECT batch_id FROM finding_batch_notes').get().batch_id, batch.batch_id);
   assert.equal(releaseFindingBatch(f.db, batch, 'batch-preparation-failed').notes, 1);
   assert.equal(f.db.prepare('SELECT dropped_reason FROM finding_batch_notes').get().dropped_reason,
     'batch-released: batch-preparation-failed');
-  assert.deepEqual(summarizeFindingBacklog(f.db).areas.map(a => a.size), [1]);
+  assert.deepEqual(summarizeFindingBacklog(f.db, fixtureNow).areas.map(a => a.size), [1]);
 });
 
 test('the requeue migration is idempotent on re-application', async t => {
   const f = fixture(t, ['Only result']);
-  const [batch] = claimFindingBatches(f.db, '2026-01-02');
+  const [batch] = claimFindingBatches(f.db, '2026-01-02', { now: fixtureNow });
   releaseFindingBatch(f.db, batch, 'batch-preparation-failed');
   f.db.prepare("DELETE FROM schema_migrations WHERE id='20261107_findings_batch_requeue.sql'").run();
   ensureReviewStateSchema(f.db);
@@ -314,7 +321,7 @@ test('the requeue migration is idempotent on re-application', async t => {
 
 test('settlement still refuses an already-fixed drop whose fix PR is unverified', async t => {
   const f = fixture(t, ['Only result']);
-  const [batch] = claimFindingBatches(f.db, '2026-01-02');
+  const [batch] = claimFindingBatches(f.db, '2026-01-02', { now: fixtureNow });
   const [id] = f.ids(batch);
   const result = { batchId: batch.batch_id, findings: [{ findingId: id, outcome: 'dropped', reason: 'already fixed in #23: removed it' }] };
   assert.throws(() => settleFindingBatch(f.db, batch, result), /batch-drop-pr-unverified/);
@@ -324,7 +331,7 @@ test('settlement still refuses an already-fixed drop whose fix PR is unverified'
 
 test('settlement refuses a batch a concurrent collector already released', async t => {
   const f = fixture(t, ['Only result']);
-  const [batch] = claimFindingBatches(f.db, '2026-01-02');
+  const [batch] = claimFindingBatches(f.db, '2026-01-02', { now: fixtureNow });
   const [id] = f.ids(batch);
   releaseFindingBatch(f.db, batch, 'batch-preparation-failed');
   assert.throws(() => settleFindingBatch(f.db, batch, { batchId: batch.batch_id,
@@ -334,10 +341,10 @@ test('settlement refuses a batch a concurrent collector already released', async
 
 test('a store not yet migrated keeps its backlog summary and reports progress as null', async t => {
   const f = fixture(t, ['Only result']);
-  claimFindingBatches(f.db, '2026-01-02');
+  claimFindingBatches(f.db, '2026-01-02', { now: fixtureNow });
   f.db.prepare("UPDATE finding_batches SET error='batch-preparation-failed'").run();
   for (const column of ['released_at', 'release_reason', 'launched_at']) f.db.exec(`ALTER TABLE finding_batches DROP COLUMN ${column}`);
-  const health = summarizeFindingBacklog(f.db);
+  const health = summarizeFindingBacklog(f.db, fixtureNow);
   assert.equal(health.available, true, health.error);
   assert.equal(health.openCount, 1);
   assert.equal(health.progress, null);
@@ -347,7 +354,7 @@ test('a store not yet migrated keeps its backlog summary and reports progress as
 test('never-launched errored batches release after timeout, without another dispatch or lost accounting', async t => {
   for (const error of ['batch-push-evidence-missing', 'synthetic launch failure']) await t.test(error, async t => {
     const f = fixture(t);
-    const [batch] = claimFindingBatches(f.db, '2026-01-02');
+    const [batch] = claimFindingBatches(f.db, '2026-01-02', { now: fixtureNow });
     f.db.prepare('UPDATE finding_batches SET error=?').run(error);
     const run = now => f.run({ resolutionOnly: true, now, execFileImpl: async () => assert.fail('must not dispatch') });
     await run(Date.parse('2026-01-02T23:59:59Z'));
@@ -451,7 +458,7 @@ test('temporary dispatch failures retain the batch and never exhaust findings, e
         stderr: `synthetic admission refused: Bearer synthetic-token password=synthetic-secret ${'x'.repeat(1000)}`,
       });
     } };
-  const [batch] = claimFindingBatches(f.db, '2026-01-02');
+  const [batch] = claimFindingBatches(f.db, '2026-01-02', { now: fixtureNow });
   // Include an old capped row from before dispatch failures were classified.
   f.db.prepare('UPDATE finding_batches SET batch_attempts=3,error=?')
     .run('Command failed: hq dispatch --priority normal\nsynthetic stderr');
@@ -515,7 +522,7 @@ test('interleaved transient failures preserve the invalid-receipt cap', async t 
 
 test('dispatch cap holds any live launch without making a fourth submission', async t => {
   const f = fixture(t);
-  const [batch] = claimFindingBatches(f.db, '2026-01-02');
+  const [batch] = claimFindingBatches(f.db, '2026-01-02', { now: fixtureNow });
   f.db.prepare("UPDATE finding_batches SET batch_attempts=3,error='batch-dispatch-receipt-invalid: lost receipt'").run();
   f.launches.set(`findings-batch-${batch.batch_id}`, [{
     launch_request_id: 'synthetic-live', idempotency_key: `findings-batch-${batch.batch_id}`, status: 'running',
@@ -548,7 +555,7 @@ test('normal publisher receipt pending and transient status read failures remain
 
 test('dispatch-attempt migration reapplication preserves durable counts', t => {
   const f = fixture(t);
-  claimFindingBatches(f.db, '2026-01-02');
+  claimFindingBatches(f.db, '2026-01-02', { now: fixtureNow });
   f.db.prepare('UPDATE finding_batches SET batch_attempts=2').run();
   f.db.prepare("DELETE FROM schema_migrations WHERE id='20261109_findings_batch_dispatch_attempts.sql'").run();
   ensureReviewStateSchema(f.db);

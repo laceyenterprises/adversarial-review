@@ -57,6 +57,8 @@ Gate readers never parse reply artifacts or execute reproduction commands.
 **Source of truth:** `src/review-finding-records.mjs`,
 `src/finding-commit-attribution.mjs`, `src/finding-remediation-capture.mjs`,
 `src/findings-backlog.mjs`, `src/findings-batch.mjs`,
+`src/finding-backlog-window.mjs`, `migrations/20261112_historical_projection.sql`,
+`bin/review-findings.mjs`,
 `migrations/20261024_simplicity_batch_lifecycle.sql`,
 `migrations/20261107_findings_batch_requeue.sql`
 
@@ -195,12 +197,45 @@ node bin/review-findings.mjs backfill --db /path/to/reviews.db --limit 500 --aft
 node bin/review-findings.mjs link-job --db /path/to/reviews.db --job /path/to/job.json --workspace /path/to/history --round 1
 ```
 
+**Operational hard stop:** no activation re-run or other review-store backfill
+or projection until OSGBACKFILLENROLL-01 and OSGPROJECTLOCK-01 are both merged
+and floated in both repositories. Verify deployed revisions before any write.
+
+A failed live projection warning requests backfill for evidence recovery only.
+Backfill does not restore automatic enrollment, even for a recently merged PR.
+Without a later genuine live projection, the recovered observations remain
+historical; explicit manifest processing requires its normal consensus validation.
+
 Repeat `backfill` with the returned `nextPassId` until `scanned` is zero. A rerun
-from zero is idempotent. `link-job` defaults to the current round; specify each
+from zero is idempotent. Historical projection inserts findings and simplicity
+observations with `historical_projection=1` (integer 0/1, default 0), added by
+`migrations/20261112_historical_projection.sql`. Both automatic candidate views
+exclude these records, so insert, merge and late posting-receipt triggers cannot
+enroll them. Existing records retain their original marker when replayed; a
+historical replay cannot revoke an existing live capture. Historical projection
+preserves matching advisory snapshots and retires stale unassigned notes. `persistReviewFindings` accepts
+`{ historicalProjection: true }` for historical callers; `backfillReviewFindings`,
+the body-repair backfill and historical link CLI always supply it. A genuine live
+projection can promote matching historical observations to live and enroll them
+when the source is merged, recovering receipts that arrived before projection.
+Only observations actually promoted from historical to live in this call get
+explicit enrollment; replaying an already-live legacy observation does not
+create a missing backlog row. New inserts retain their existing capture trigger.
+The verified merge-capture boundary can therefore activate a previously backfilled
+open PR. A raw receipt metadata update alone preserves the historical marker. Explicit manifest enrollment remains available after consensus
+validation and deliberately bypasses this automatic enrollment boundary. `link-job` defaults to the current round; specify each
 historical round explicitly. Without `--workspace`, reply links are retained
 with `missing-history` rather than guessed commit evidence. Run migrations and
 backfill through the normal deployment/maintenance lane after merge; no live
 database, service or configuration change is part of a coding test.
+
+The migration does not infer old provenance: every pre-migration finding and
+note, including earlier historical-backfill incident rows, keeps the default
+`historical_projection=0`. Replaying historical evidence does not reclassify
+these live-default rows. Their first automatic claim is protected only by the
+merge-age window; increasing that window can expose old incident data again.
+Do not widen it to drain historical evidence. Any one-shot reclassification
+requires separate operator authorization and remains subject to the hard stop.
 
 ## Non-blocking backlog (FINDINGSBATCH-01)
 
@@ -473,12 +508,33 @@ repository/area reports `size`, `oldestAt`, `oldestAgeMs`, `waitingForMerge`,
 `inBatch` and `error`. Size and age cover findings plus pending or
 assigned-unsettled notes, including advisory-only batches and their launch or
 settlement errors; completed notes and dropped unassigned notes are excluded.
+Unassigned historical notes and merged-source notes outside the age window
+are also excluded from `areas`. `notesHistorical` counts unassigned, undropped
+historical notes; `notesOutOfWindow` separately counts unassigned, undropped
+live-default notes whose merged source has an old or unknown merge timestamp.
+These evidence counters do not dispatch work or trigger the finding-only
+overdue alert. Assigned notes remain monitored in their owning area regardless
+of age or provenance.
 Unassigned notes waiting for a source merge use `_simplicity` until assignment;
 assigned notes retain the owning batch's area. Missing schema/store reports
 `available: false`, never a healthy empty backlog. No new alert transport or per-item provider read is added.
 Ready captures superseded by the final merged review are retained as dropped
 with reason `stale-code-changed: Final posted review superseded this finding`; they cannot inflate a later batch.
-Late posting receipts also enroll findings for already-observed merges.
+Live late posting receipts also enroll findings for already-observed merges.
+First automatic batch claims require a valid source `merged_at` within
+`ADVERSARIAL_FINDINGS_BACKLOG_MAX_AGE_MS` (default 48 hours) of the current clock;
+the boundary is inclusive. This applies to findings and simplicity advice.
+Released findings (`batch_attempts > 0`) remain eligible regardless of source
+merge age or timestamp validity, until settlement or third-attempt exhaustion.
+Unknown merge times fail closed for never-claimed work. Skipped findings retain
+their rows, outcome, reason and ownership. Summary `outOfWindow` counts automatic, open, unassigned
+findings with no prior release and old or unknown merge times; these are excluded
+from `batchableCount` and its oldest timestamp. Already-owned batches remain monitored regardless of
+source age, as do released findings awaiting retry. Explicit manifests bypass the
+automatic age filter and remain separately accounted in `selectedBacklog`.
+Direct `claimFindingBatches` callers may pass `env` for the default age window.
+Explicit manifest claims do not read or validate the unused automatic window
+or clock.
 Ready captures closed without merge are dropped with
 `false-positive: Source PR closed without merge; reviewed changes did not land`;
 if reopened and merged with that same final finding, merge enrollment restores
@@ -517,8 +573,35 @@ unresolved `batchErrors` (released batches excluded), plus the drain view
 error), `retrying` (open after at least one release), `exhausted` (dropped with
 `batch-retry-exhausted:`) and `releasedBatches`. The drain is complete when `open`
 is 0. `review:findings_backlog_overdue` enters the existing
-pipeline-health/Sentinel findings path when oldest open age exceeds
+pipeline-health/Sentinel findings path when the oldest batchable finding exceeds
 `ADVERSARIAL_FINDINGS_BACKLOG_MAX_AGE_MS` (default 172800000, 48 hours).
+It also fires whenever `outOfWindow > 0`, so ordinary merge-time enrollments
+remain visible after a stalled runner misses their first-claim window. Operator
+batch backfill can reclaim released findings regardless of age; never-claimed
+out-of-window findings can use an explicit consensus-validated manifest or an
+operator expiry disposition, including ungraded findings:
+
+```sh
+node bin/review-findings.mjs retire-expired --db <existing-review-db> \
+  --repo <owner/repo> --limit 100 --reason '<operator disposition rationale>'
+```
+
+This defaults to a read-only preview of at most 100 finding IDs (limit 1–500).
+After reviewing the candidates and obtaining live-operation authorization,
+repeat with `--apply`. Each invocation reselects under an immediate transaction,
+so concurrent claims retain their owner. Only automatic, merged-source,
+never-claimed, unassigned, unresolved rows outside the configured window are
+eligible, including unknown merge times. Selected and released work is excluded.
+Apply retains every source/backlog record, writes `outcome='dropped'` and
+`reason='out-of-window: <rationale>'`, and uses the existing `resolved_at`
+transition trigger. It makes no correctness grade, batch, release or paid
+dispatch. Repeated bounded invocations clear the expired count and its alert;
+newly aged-out work can alert again. No live invocation is authorized by this
+source change; the existing backfill/projection hard stop remains in force.
+
+Pipeline health uses its resolved `findingsBacklogMaxAgeMs` for both summary and
+alert thresholds. Invalid direct summary defaults return `available: false`
+without throwing out of the health API.
 This is an operational alert, with no additional merge or CI gate.
 
 After deployment and watcher restart, SRE explicitly runs the one-shot drain:
@@ -584,3 +667,9 @@ No selection is automatically activated.
 Settlement writes append-only `batch-remediator` grades (`lifecycle` for `life.*`) atomically with valid
 outcomes after existing publication/PR checks. Requeue and exhaustion produce
 no correctness grade. No new lifecycle state or merge authority is introduced.
+
+At deployment, the operator receipt records `outOfWindow` and
+`notesOutOfWindow` from `node bin/review-findings.mjs backlog --db <existing-review-db>`
+as a known standing alert baseline. Late-observed merges retain their original
+merge time; missing merge times fail closed. Enrollment does not restart the
+window. Retiring expired rows requires separate authorization under the hard stop.

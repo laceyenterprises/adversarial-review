@@ -6313,7 +6313,7 @@ function collectReviewPipelineHealth({
         };
     const snapshot = {
       laneLiveness: collectLaneLivenessEvidence({ db, rootDir, hqRoot, nowMs }),
-      nonBlockingBacklog: summarizeFindingBacklog(db, nowMs),
+      nonBlockingBacklog: summarizeFindingBacklog(db, nowMs, { maxAgeMs: config.findingsBacklogMaxAgeMs }),
       held: readHeldOpenPrCount(db),
       observedAt,
       rootDir,

@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto';
 import { openReviewStateDb } from './review-state.mjs';
+import { findingBacklogMaxAgeMs } from './finding-backlog-window.mjs';
 import { persistReviewFindings } from './review-finding-records.mjs';
 
 // Called at the merge command boundary. Missing/stale capture defers the merge,
@@ -51,11 +52,16 @@ export function captureReadyFindings({ rootDir, repo, prNumber, headSha, version
 }
 
 // Missing schema is unavailable evidence, never an empty/healthy backlog.
-export function summarizeFindingBacklog(db, now = Date.now()) {
+export function summarizeFindingBacklog(db, now = Date.now(), { maxAgeMs } = {}) {
   if (!db) return { available: false, error: 'review-store-unavailable', areas: null };
   try {
+    maxAgeMs ??= findingBacklogMaxAgeMs();
+    if (!Number.isFinite(now) || !Number.isSafeInteger(maxAgeMs) || maxAgeMs < 1) throw Error('invalid backlog window');
+    const cutoff = new Date(now - maxAgeMs).toISOString();
     const selectionScope = Boolean(db.prepare("SELECT 1 FROM pragma_table_info('finding_backlog') WHERE name='manifest_sha256'").get());
     const batchSelection = Boolean(db.prepare("SELECT 1 FROM pragma_table_info('finding_batches') WHERE name='manifest_sha256'").get());
+    const historicalNotes = Boolean(db.prepare("SELECT 1 FROM pragma_table_info('finding_batch_notes') WHERE name='historical_projection'").get());
+    const liveNote = historicalNotes ? 'n.historical_projection=0' : '1';
     const backlogScope = selectionScope ? 'manifest_sha256 IS NULL AND ' : '';
     const batchScope = batchSelection ? 'manifest_sha256 IS NULL AND ' : '';
     const areas = db.prepare(`WITH unresolved AS (
@@ -68,23 +74,38 @@ export function summarizeFindingBacklog(db, now = Date.now()) {
       LEFT JOIN finding_batches a USING(batch_id)
       LEFT JOIN finding_batch_note_candidates c USING(note_id)
       WHERE n.dropped_reason IS NULL AND (n.batch_id IS NULL OR a.completed_at IS NULL)
+        AND (n.batch_id IS NOT NULL OR (${liveNote}
+          AND (r.pr_state<>'merged' OR julianday(r.merged_at) >= julianday(?))))
     ) SELECT b.repo,b.area,count(*) AS size,min(b.captured_at) AS oldestAt,
       sum(b.batch_id IS NOT NULL) AS inBatch,sum(b.pr_state<>'merged') AS waitingForMerge,
       max(a.error) AS error FROM unresolved b LEFT JOIN finding_batches a USING(batch_id)
-      GROUP BY b.repo,b.area ORDER BY b.repo,b.area`).all()
+      GROUP BY b.repo,b.area ORDER BY b.repo,b.area`).all(cutoff)
       .map(row => ({ ...row, oldestAgeMs: Math.max(0, now - Date.parse(row.oldestAt)) }));
     const open = db.prepare(`SELECT count(*) AS openCount,min(captured_at) AS oldestOpenAt,
       sum(batch_id IS NULL) AS unbatchedCount FROM finding_backlog WHERE ${backlogScope}outcome IS NULL`).get();
+    // A store not yet migrated by the watcher retains its summary while
+    // retry progress remains unavailable.
+    const requeue = Boolean(db.prepare("SELECT 1 FROM pragma_table_info('finding_batches') WHERE name='released_at'").get());
     const batchable = db.prepare(`SELECT count(*) AS batchableCount,min(b.captured_at) AS oldestBatchableAt
       FROM finding_backlog b JOIN reviewed_prs r USING(repo,pr_number)
-      WHERE ${selectionScope ? 'b.manifest_sha256 IS NULL AND ' : ''}b.outcome IS NULL AND r.pr_state='merged'`).get();
+      WHERE ${selectionScope ? 'b.manifest_sha256 IS NULL AND ' : ''}b.outcome IS NULL AND r.pr_state='merged'
+        AND (b.batch_id IS NOT NULL OR ${requeue ? 'b.batch_attempts > 0 OR ' : ''}julianday(r.merged_at) >= julianday(?))`).get(cutoff);
+    const excluded = db.prepare(`SELECT (SELECT count(*)
+      FROM finding_backlog b JOIN reviewed_prs r USING(repo,pr_number)
+      WHERE ${selectionScope ? 'b.manifest_sha256 IS NULL AND ' : ''}b.outcome IS NULL
+        AND b.batch_id IS NULL AND ${requeue ? 'b.batch_attempts=0 AND ' : ''}r.pr_state='merged'
+        AND (julianday(r.merged_at) IS NULL OR julianday(r.merged_at) < julianday(@cutoff))) AS outOfWindow,
+      (SELECT count(*) FROM finding_batch_notes n JOIN reviewed_prs r USING(repo,pr_number)
+        WHERE n.batch_id IS NULL AND n.dropped_reason IS NULL AND ${liveNote}
+          AND r.pr_state='merged'
+          AND (julianday(r.merged_at) IS NULL OR julianday(r.merged_at) < julianday(@cutoff))) AS notesOutOfWindow,
+      (SELECT count(*) FROM finding_batch_notes
+        WHERE batch_id IS NULL AND dropped_reason IS NULL AND ${historicalNotes ? 'historical_projection=1' : '0'}) AS notesHistorical`)
+      .get({ cutoff });
     const perDay = db.prepare(`SELECT substr(resolved_at,1,10) AS day,
       sum(outcome='applied') AS applied,sum(outcome='dropped') AS dropped
       FROM finding_backlog WHERE ${backlogScope}outcome IS NOT NULL AND resolved_at IS NOT NULL
       GROUP BY day ORDER BY day DESC`).all();
-    // A store not yet migrated by the watcher reports progress as null rather
-    // than losing the whole summary.
-    const requeue = Boolean(db.prepare("SELECT 1 FROM pragma_table_info('finding_batches') WHERE name='released_at'").get());
     const batchErrors = db.prepare(`SELECT error,count(*) AS count FROM finding_batches
       WHERE ${batchScope}completed_at IS NULL ${requeue ? 'AND released_at IS NULL' : ''} AND error IS NOT NULL GROUP BY error ORDER BY error`).all();
     // Drain progress: open = unbatched + batched + stranded. Stranded findings
@@ -110,22 +131,49 @@ export function summarizeFindingBacklog(db, now = Date.now()) {
       FROM finding_backlog b LEFT JOIN finding_batches a USING(batch_id)
       WHERE b.manifest_sha256 IS NOT NULL GROUP BY b.manifest_sha256
       ORDER BY b.manifest_sha256`).all() : null;
-    return { available: true, areas, ...open, ...batchable, unbatchedCount: open.unbatchedCount || 0,
+    return { available: true, areas, ...open, ...batchable, ...excluded, unbatchedCount: open.unbatchedCount || 0,
       oldestOpenAgeMs: open.oldestOpenAt ? Math.max(0, now - Date.parse(open.oldestOpenAt)) : 0,
       oldestBatchableAgeMs: batchable.oldestBatchableAt ? Math.max(0, now - Date.parse(batchable.oldestBatchableAt)) : 0,
       perDay, batchErrors, progress, selectedBacklog };
   } catch (error) { return { available: false, error: error.message, areas: null }; }
 }
 
+// Operator disposition only: preserve the source observation, queue identity
+// and terminal timestamp. Never release an owner or consume retry/selected work.
+export function retireExpiredFindings(db, { repo, reason, limit = 100, apply = false,
+  now = Date.now(), maxAgeMs = findingBacklogMaxAgeMs() } = {}) {
+  if (typeof repo !== 'string' || !/^[^/\s]+\/[^/\s]+$/.test(repo)
+    || typeof reason !== 'string' || !reason.trim() || /[\r\n]/.test(reason) || reason.length > 1200
+    || !Number.isSafeInteger(limit) || limit < 1 || limit > 500
+    || typeof apply !== 'boolean'
+    || !Number.isFinite(now) || !Number.isSafeInteger(maxAgeMs) || maxAgeMs < 1) {
+    throw Error('invalid expired finding disposition');
+  }
+  const cutoff = new Date(now - maxAgeMs).toISOString();
+  const disposition = `out-of-window: ${reason.trim()}`;
+  const retire = db.transaction(() => {
+    const findings = db.prepare(`SELECT b.finding_id FROM finding_backlog b
+      JOIN reviewed_prs r USING(repo,pr_number)
+      WHERE b.repo=? AND b.outcome IS NULL AND b.batch_id IS NULL
+        AND b.batch_attempts=0 AND b.manifest_sha256 IS NULL AND r.pr_state='merged'
+        AND (julianday(r.merged_at) IS NULL OR julianday(r.merged_at) < julianday(?))
+      ORDER BY b.captured_at,b.finding_id LIMIT ?`).all(repo, cutoff, limit).map(row => row.finding_id);
+    if (apply) db.prepare(`UPDATE finding_backlog SET outcome='dropped',reason=?
+      WHERE finding_id IN (SELECT value FROM json_each(?))`).run(disposition, JSON.stringify(findings));
+    return { applied: apply, findings, retired: apply ? findings.length : 0, reason: disposition, cutoff };
+  });
+  return apply ? retire.immediate() : retire();
+}
+
 export function findingBacklogAlert(backlog, maxAgeMs = 48 * 3600000) {
-  if (!backlog?.available || !(backlog.oldestBatchableAgeMs > maxAgeMs)) return null;
+  if (!backlog?.available || !(backlog.oldestBatchableAgeMs > maxAgeMs || backlog.outOfWindow > 0)) return null;
   return {
     code: 'review:findings_backlog_overdue',
     tier: 'ticket',
     subject: 'Non-blocking findings backlog is overdue',
-    message: `${backlog.batchableCount} open findings on merged PRs; oldest is ${Math.floor(backlog.oldestBatchableAgeMs / 3600000)} hours old`,
-    evidence: [`oldestBatchableAt=${backlog.oldestBatchableAt}`, `maxAgeMs=${maxAgeMs}`],
-    recommendedAction: 'Inspect progress and batch errors; ended batches release automatically. Run the operator findings batch backfill to re-batch released findings.',
+    message: `${backlog.batchableCount} batchable findings; ${backlog.outOfWindow || 0} unclaimed findings outside the merge-age window; oldest open finding is ${Math.floor(backlog.oldestOpenAgeMs / 3600000)} hours old`,
+    evidence: [`oldestBatchableAt=${backlog.oldestBatchableAt}`, `outOfWindow=${backlog.outOfWindow || 0}`, `maxAgeMs=${maxAgeMs}`],
+    recommendedAction: 'Inspect runner health, progress and batch errors; ended batches release automatically. The operator findings batch backfill can re-batch released findings regardless of source age. For never-claimed expired findings, preview review-findings retire-expired with an explicit DB, repo, limit and reason; operator-authorized --apply retains an out-of-window disposition. An explicit consensus-validated manifest can instead select verified real findings.',
     details: { ...backlog, maxAgeMs },
   };
 }

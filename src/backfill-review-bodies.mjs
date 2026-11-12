@@ -528,7 +528,7 @@ async function backfillReviewerPassBodies(rootDir, {
             row.metadata_json,
           );
           if (updated.changes !== 1) throw new Error('reviewer pass changed during backfill; retry with fresh evidence');
-          persistReviewFindingsSafe(db, row.pass_id, log);
+          persistReviewFindingsSafe(db, row.pass_id, log, { historicalProjection: true });
           summary.populated += 1;
           if (nodeId) claimedNodeIds.add(nodeId);
         } catch (err) {

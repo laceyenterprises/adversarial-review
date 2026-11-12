@@ -248,7 +248,7 @@ test('projection failure preserves body capture and reports the backfill require
   assert.equal(db.prepare('SELECT body_md FROM reviewer_passes').get().body_md, body);
   assert.equal(db.prepare('SELECT COUNT(*) AS n FROM review_findings').get().n, 0);
   assert.equal(warnings.length, 1);
-  assert.match(warnings[0], /backfill required/);
+  assert.match(warnings[0], /backfill required for evidence only; automatic enrollment is not restored/);
 });
 
 test('missing, nonlinear and over-budget history never invent addressing commits', () => {
@@ -332,7 +332,7 @@ test('rescue: findings CLI retains the actionable argument error', () => {
   const result = spawnSync(process.execPath, [command, 'unknown-command'], { encoding: 'utf8' });
   assert.equal(result.status, 1);
   assert.equal(result.stdout, '');
-  assert.match(result.stderr, /expected show, backlog, backfill or link-job/);
+  assert.match(result.stderr, /expected show, backlog, backfill, link-job or retire-expired/);
 });
 
 test('rescue: finding read executes four queries for a populated page', async t => {

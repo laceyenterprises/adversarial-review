@@ -1,0 +1,19 @@
+operator_steps:
+  - description: >-
+      Hard stop: no activation re-run or other review-store backfill or projection
+      until both OSGBACKFILLENROLL-01 and OSGPROJECTLOCK-01 are merged and floated
+      in both repositories. Only after the deployed revisions satisfy that
+      prerequisite does the designated operator run the documented activation
+      once, retaining pre/post open backlog counts. Counts must be unchanged except verified live activity; the reviewer
+      report must show no backfill required gap. Stop at the first database is
+      locked error and never retry-loop. In the post-merge receipt record the
+      deploy-time outOfWindow and notesOutOfWindow counts from the read-only
+      backlog command as a known standing alert baseline, including late-observed
+      and missing merged_at cases. Do not widen the window or retire rows without
+      separate operator authorization. This command displays the store contract.
+    run_as: designated operator
+    command: /bin/cat docs/data-model/review-findings.md
+actions: []
+catchup:
+  catchup_timeout_s: 1800
+contact_on_failure: operator

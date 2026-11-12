@@ -6,7 +6,8 @@ import { ensureReviewStateSchema } from '../src/review-state.mjs';
 import { backfillFindingGrades, readFindingGrades } from '../src/review-finding-grades.mjs';
 
 // Explicit path only; reads never migrate or write the database.
-export function main(argv = process.argv.slice(2), write = text => process.stdout.write(text)) {
+export function main(argv = process.argv.slice(2), write = text => process.stdout.write(text),
+  writeProgress = text => process.stderr.write(text)) {
   const [command, ...args] = argv;
   if (!['show', 'export', 'backfill'].includes(command)) throw new Error('expected show, export or backfill');
   const options = {};
@@ -25,9 +26,20 @@ export function main(argv = process.argv.slice(2), write = text => process.stdou
   try {
     if (command === 'backfill') {
       ensureReviewStateSchema(db);
-      const result = backfillFindingGrades(db);
-      write(`${JSON.stringify(result)}\n`);
-      return result;
+      const progress = { committedPasses: 0, committedInserted: 0, lastPassId: null };
+      try {
+        const result = backfillFindingGrades(db, { onPass(pass) {
+          progress.committedPasses += 1;
+          progress.committedInserted += pass.inserted;
+          progress.lastPassId = pass.passId;
+          writeProgress(`${JSON.stringify({ event: 'backfill-pass', ...pass, ...progress })}\n`);
+        } });
+        write(`${JSON.stringify(result)}\n`);
+        return result;
+      } catch (error) {
+        writeProgress(`${JSON.stringify({ event: 'backfill-failed', ...progress })}\n`);
+        throw error;
+      }
     }
     const grades = readFindingGrades(db, { findingId: options['--finding-id'] ?? null,
       repo: options['--repo'] ?? null, afterGradeId: integer('--after-grade-id', 0), limit: integer('--limit', 500) });

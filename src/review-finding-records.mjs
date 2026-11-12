@@ -4,6 +4,7 @@ import { extractSimplicityNote } from './kernel/verdict.mjs';
 import { disputeEvidenceForFinding, normalizeCoverageTitle, validateRemediationReply } from './kernel/remediation-reply.mjs';
 import { blockingFindingIdentity, evidenceDigest, REMEDIATOR_WITHDRAWN_RESOLUTION } from './ama/hammer-adjudication.mjs';
 import { attributeFindingCommits, findingPath } from './finding-commit-attribution.mjs';
+import { withSqliteBusyRetrySync } from './sqlite-busy-retry.mjs';
 
 const digest = value => createHash('sha256').update(JSON.stringify(value)).digest('hex');
 const REVIEW_KINDS = new Set(['first-pass', 'rereview']);
@@ -16,6 +17,8 @@ export function findingContent(finding, blocking) {
 }
 
 export function persistReviewFindings(db, passId) {
+  // Acquire the WAL write lock before reading a snapshot. A deferred snapshot
+  // upgrade can fail immediately without consulting the connection busy timeout.
   return db.transaction(() => {
     const pass = db.prepare('SELECT * FROM reviewer_passes WHERE pass_id = ?').get(passId);
     if (!pass?.body_md || !REVIEW_KINDS.has(pass.pass_kind)) return 0;
@@ -59,13 +62,16 @@ export function persistReviewFindings(db, passId) {
       metadata?.reviewerExecution?.promptDigests ? JSON.stringify(metadata.reviewerExecution.promptDigests) : null, passId);
     syncFindingDisputes(db, { passId });
     return inserted;
-  })();
+  }).immediate();
 }
 
 // These records are observations only. Errors never change review or dispatch
 // results; the stored bodies and jobs remain the repair source for backfill.
 export function persistReviewFindingsSafe(db, passId, log = console) {
-  try { return persistReviewFindings(db, passId); }
+  try {
+    return withSqliteBusyRetrySync(() => persistReviewFindings(db, passId),
+      { delaysMs: [100], label: `review-findings:${passId}`, log });
+  }
   catch { log.warn?.(`[review-findings] projection failed for pass ${passId}; backfill required`); return 0; }
 }
 
@@ -84,13 +90,19 @@ export function syncFindingDisputes(db, { passId = null } = {}) {
       requests=excluded.requests, refusals=excluded.refusals`).run(passId, passId).changes;
 }
 
-export function backfillReviewFindings(db, { afterPassId = 0, limit = 500, repo = null } = {}) {
+export function backfillReviewFindings(db, { afterPassId = 0, limit = 500, repo = null,
+  onPass = () => {} } = {}) {
   if (!Number.isInteger(limit) || limit < 1 || limit > 5000) throw new Error('limit must be 1..5000');
   const rows = db.prepare(`SELECT pass_id FROM reviewer_passes
     WHERE pass_id>? AND body_md IS NOT NULL AND pass_kind IN ('first-pass','rereview')
       AND (? IS NULL OR repo=?) ORDER BY pass_id LIMIT ?`).all(afterPassId, repo, repo, limit);
   let inserted = 0;
-  for (const row of rows) inserted += persistReviewFindings(db, row.pass_id);
+  for (const row of rows) {
+    const added = persistReviewFindings(db, row.pass_id);
+    inserted += added;
+    // Report only committed work, including passes before a later busy failure.
+    onPass({ passId: row.pass_id, inserted: added });
+  }
   return { scanned: rows.length, inserted, nextPassId: rows.at(-1)?.pass_id ?? afterPassId };
 }
 
@@ -168,7 +180,7 @@ export function linkFindingRemediation(db, { job, workspaceDir, roundNumber = jo
           addressed ? overlap?.commitSha ?? null : null, reason);
     }
     return { linked: findings.length, replyId };
-  })();
+  }).immediate();
 }
 
 // A caller-owned SQLite connection can be read-only. Missing/legacy schema is

@@ -356,7 +356,7 @@ function updateReviewerPassBodyCapture(rootDir, {
           );
         }
         return result;
-      })();
+      }).immediate();
     } finally {
       db.close();
     }

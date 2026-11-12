@@ -1,0 +1,26 @@
+operator_steps:
+  - description: >-
+      MANUAL ACCEPTANCE ONLY. After the review-service update and its consuming application's backfill
+      command deploy, the designated operator completes the explicit findings
+      and grades backfill twice while review daemons remain active. Retain
+      page and final receipts, stable finding and grade counts, and a seven-day
+      reviewer report without backfill-required gaps. Follow the consuming
+      application's maintenance runbook; this plan executes no live write
+      automatically on merge. Follow docs/changes/OSGPROJECTLOCK-01.md for
+      exact commands. The command below is a bounded read-only count receipt,
+      not proof that the manual backfills or seven-day report passed. Do not
+      acknowledge completion without the retained manual evidence.
+    run_as: designated service operator
+    command: >-
+      bash bin/run-bounded.sh --timeout 30 -- node --input-type=module -e
+      'import Database from "better-sqlite3";
+      const db = new Database(process.argv[1], { readonly: true, fileMustExist: true, timeout: 5000 });
+      try { console.log(JSON.stringify(db.transaction(() => ({
+      findings: db.prepare("SELECT count(*) n FROM review_findings").get().n,
+      grades: db.prepare("SELECT count(*) n FROM review_finding_grades").get().n
+      }))())); } finally { db.close(); }'
+      "${ADVERSARIAL_REVIEW_DB:?set the explicit deployed reviews.db path}"
+actions: []
+catchup:
+  catchup_timeout_s: 1800
+contact_on_failure: operator

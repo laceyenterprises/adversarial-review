@@ -21,7 +21,7 @@
       "primaryKey": [
         "grade_id"
       ],
-      "compatibility": "Additive multi-source grades with immutable source keys; explicit historical backfill and atomic batch settlement writes. Explicit manifest remediation consumes grades; no live review or merge predicate consumes them. Backfill excludes decisions already graded at settlement; lifecycle grade kind agrees across paths."
+      "compatibility": "Additive multi-source grades with immutable source keys; explicit historical backfill and atomic batch settlement writes. Explicit manifest remediation consumes grades; no live review or merge predicate consumes them. Backfill excludes decisions already graded at settlement; lifecycle grade kind agrees across paths. Projection/backfill writers acquire IMMEDIATE write locks before reads; finding and grade backfills commit per pass and optionally report committed inserts through onPass. Safe live finding projection retries busy once."
     },
     {
       "id": "review-findings",
@@ -52,7 +52,7 @@
         "migrations/20261109_findings_batch_dispatch_attempts.sql"
       ],
       "owner": "review-body capture and remediation completion observations",
-      "compatibility": "FINDINGSSTUCK-01: additive replay-safe finding_batches.batch_attempts counts returned invalid initial receipts separately from per-finding release attempts. Failed dispatch subprocesses preserve that counter and retry the same batch/key without a finding charge. Legacy ambiguous errors reset the old counter once. Overdue retries report needs-operator; actual releases retain their existing requeue/exhaustion audit."
+      "compatibility": "FINDINGSSTUCK-01: additive replay-safe finding_batches.batch_attempts counts returned invalid initial receipts separately from per-finding release attempts. Failed dispatch subprocesses preserve that counter and retry the same batch/key without a finding charge. Legacy ambiguous errors reset the old counter once. Overdue retries report needs-operator; actual releases retain their existing requeue/exhaustion audit. Projection/backfill writers acquire IMMEDIATE write locks before reads; finding and grade backfills commit per pass and optionally report committed inserts through onPass. Safe live finding projection retries busy once."
     }
   ]
 }

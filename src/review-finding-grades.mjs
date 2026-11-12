@@ -61,9 +61,10 @@ export function recordFindingGrade(db, grade) {
 
 // Explicit offline/local operation, never called by review or merge readers.
 // Unknown historical model, cost, evaluation head and confidence remain NULL.
-export function backfillFindingGrades(db) {
-  return db.transaction(() => {
-    syncFindingDisputes(db);
+export function backfillFindingGrades(db, { onPass = () => {} } = {}) {
+  const passes = db.prepare('SELECT DISTINCT pass_id FROM review_findings ORDER BY pass_id').all();
+  const projectPass = db.transaction(passId => {
+    syncFindingDisputes(db, { passId });
     let inserted = 0;
     const add = (source, row, code, kind, head = null, interested = false, at = null) => {
       if (!code) return;
@@ -72,10 +73,11 @@ export function backfillFindingGrades(db) {
         findingId: row.finding_id, taxonomyCode: code, graderKind: kind, gradedHeadSha: head,
         interestedParty: interested, evidence, gradedAt: at || new Date().toISOString() });
     };
-    for (const row of db.prepare(`SELECT b.* FROM finding_backlog b WHERE outcome IS NOT NULL
+    for (const row of db.prepare(`SELECT b.* FROM finding_backlog b
+      JOIN review_findings f USING(finding_id) WHERE f.pass_id=? AND outcome IS NOT NULL
       AND NOT EXISTS (SELECT 1 FROM review_finding_grades g
         WHERE g.source_key='batch:' || b.batch_id || ':' || b.finding_id)
-      ORDER BY finding_id`).all()) {
+      ORDER BY b.finding_id`).all(passId)) {
       // Selection provenance is not a new worker observation. Keep historical
       // backlog source hashes stable across the additive scope migration.
       delete row.manifest_sha256;
@@ -84,13 +86,16 @@ export function backfillFindingGrades(db) {
     }
     for (const row of db.prepare(`SELECT m.*,r.start_head_sha,r.published_head_sha,r.payload_json,r.round_number
       FROM review_finding_remediations m JOIN review_finding_replies r USING(reply_id)
-      ORDER BY m.finding_id,m.reply_id`).all()) {
+      JOIN review_findings f USING(finding_id) WHERE f.pass_id=?
+      ORDER BY m.finding_id,m.reply_id`).all(passId)) {
       const withdrawn = row.reason === 'disputed-with-evidence' || row.reason === 'withdrawn-by-remediator';
       const code = withdrawn ? 'fp.unclassified' : row.commit_sha ? 'tp.valid' : null;
       add('remediation', row, code, 'remediator', withdrawn ? row.start_head_sha : null, withdrawn);
     }
-    for (const row of db.prepare(`SELECT * FROM review_finding_disputes
-      WHERE resolution='withdrawn-by-hammer' AND comment_id<>'' ORDER BY finding_id,head_sha,comment_id`).all()) {
+    for (const row of db.prepare(`SELECT d.* FROM review_finding_disputes d
+      JOIN review_findings f USING(finding_id)
+      WHERE f.pass_id=? AND resolution='withdrawn-by-hammer' AND comment_id<>''
+      ORDER BY d.finding_id,d.head_sha,d.comment_id`).all(passId)) {
       add('dispute', row, 'fp.unclassified', 'hammer', row.head_sha, true);
     }
     // Remediator withdrawals deliberately have no GitHub comment and therefore
@@ -99,12 +104,20 @@ export function backfillFindingGrades(db) {
       JOIN reviewer_passes p ON p.repo=d.repo AND p.pr_number=d.pr_number
       JOIN review_findings f ON f.pass_id=p.pass_id AND f.hammer_identity=d.identity
         AND f.head_sha=d.finding_reviewed_head AND f.blocking=1
-      WHERE d.resolution='withdrawn-by-remediator' AND d.reply_id IS NOT NULL
-      ORDER BY f.finding_id`).all()) {
+      WHERE f.pass_id=? AND d.resolution='withdrawn-by-remediator' AND d.reply_id IS NOT NULL
+      ORDER BY f.finding_id`).all(passId)) {
       add('remediator-dispute', row, 'fp.unclassified', 'remediator', row.head_sha, true, row.resolved_at);
     }
-    return { inserted };
-  })();
+    return inserted;
+  });
+  // A corpus backfill must not hold the shared writer lock for the whole run.
+  let inserted = 0;
+  for (const { pass_id } of passes) {
+    const added = projectPass.immediate(pass_id);
+    inserted += added;
+    onPass({ passId: pass_id, inserted: added });
+  }
+  return { inserted };
 }
 
 export function readFindingGrades(db, { findingId = null, repo = null, afterGradeId = 0, limit = 500 } = {}) {

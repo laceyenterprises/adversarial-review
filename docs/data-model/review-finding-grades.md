@@ -63,7 +63,18 @@ node bin/review-grades.mjs export --db <local-database> --after-grade-id 0 --lim
 ```
 
 Backfill explicitly migrates the selected database, synchronizes dispute
-projections and adds grades in a transaction. It does not run automatically at
+projections and adds grades in one `IMMEDIATE` transaction per finding-bearing
+review pass. The write lock is acquired before reading source observations, and
+released between passes so a historical run does not monopolize the shared WAL
+writer. Programmatic `backfillFindingGrades(db, { onPass })` optionally reports
+`{ passId, inserted }` after each committed pass, including work before a later
+failure; immutable source keys keep retries idempotent. The backfill CLI emits
+`backfill-pass` JSON receipts to stderr with `passId`, `inserted`, cumulative
+`committedPasses`, `committedInserted` and `lastPassId`. On failure it emits a
+`backfill-failed` receipt with committed totals (zero and a null last ID before
+any pass commits), then exits nonzero. Stdout keeps its existing final
+`{ inserted }` result on success. Retain both streams; a retry safely replays
+completed passes without duplicating grades. It does not run automatically at
 startup or deployment. `show` and `export` open SQLite read-only and never migrate.
 Both accept optional `--finding-id`, `--repo`, `--after-grade-id` and `--limit`
 (1–5000). Show emits a JSON page with `grades` and `nextCursor`; export emits one

@@ -211,7 +211,9 @@ test('22 concurrent reservation runs each retain exactly one repair owner', asyn
       const identity = { ...f, rootDir: roundRoot, ownerKey: `writer-${writer}` };
       const code = `import { reserveRepairEpoch } from ${JSON.stringify(moduleUrl)};
         let result;
-        for (let attempt = 0; attempt < 100; attempt++) {
+        // Bound by wall time, not attempts: a loaded host can hold the
+        // flock past a fixed count of short retries.
+        for (const deadline = Date.now() + 10000; Date.now() < deadline;) {
           try { result = reserveRepairEpoch(${JSON.stringify(identity)}); break; }
           catch (error) { if (error.code !== 'EBUSY') throw error;
             await new Promise(resolve => setTimeout(resolve, 5)); }

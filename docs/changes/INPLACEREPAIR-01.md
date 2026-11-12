@@ -53,3 +53,11 @@ promises are unchanged.
 
 The existing Node 22 and Node 26 CI failures both identified only the stale
 closer source projection; no workflow, check or CI gate was changed.
+
+## CI repair (Node 22 and Node 26)
+
+The health runbook paragraph no longer repeats the backticked stalled-PR
+finding code, so the documented finding set again equals the emitted
+definitions. The concurrent reservation test now bounds `EBUSY` retries by a
+10-second deadline instead of 100 short attempts; it still asserts exactly
+one owner and one ledger epoch per round. No source, check or gate changed.

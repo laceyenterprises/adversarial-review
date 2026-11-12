@@ -5824,6 +5824,12 @@ entirely in a live pack's guarded files, the PR's own pack included, is resolved
 by policy with `Resolved-By-Policy: live-pack-plan <path> requires an operator
 live edit`; `remainingBlocking` lists the blockers still owed. A failed lookup
 protects every guarded pack path. The hammer runs the helper in both strict modes.
+The helper requires the complete recommended fix to use recognized edit-only
+wording: explicit protected filenames, or backtick-quoted field identifiers in
+an explicit protected file (including activation-assertion fields). A protected
+`File` field alone grants no resolution. Additional actions such as revoking a
+token, even when they name no file, and unrecognized wording remain unresolved;
+the protected files still cannot be edited.
 
 `roles.adversarial.merge_authority.strict_non_blocking_remediation` is **on by
 default**. Because adversarial reviewers almost always emit at least one

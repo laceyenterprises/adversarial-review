@@ -12,8 +12,8 @@ running DAG run.
 Remediators now never edit a live pack's `SPEC.md`, `SPEC.meta.json`,
 `plan.json` or `prompts/**`, own pack included, and a PR that is itself an
 approved live edit is covered too (the operator's approval covers the author's
-change, not a remediator's). A finding whose fix would edit one is resolved by
-policy:
+change, not a remediator's). A finding whose complete fix consists exclusively
+of recognized edits to protected files is resolved by policy:
 
 ```
 Resolved-By-Policy: live-pack-plan <path> requires an operator live edit
@@ -22,6 +22,9 @@ Resolved-By-Policy: live-pack-plan <path> requires an operator live edit
 No edit, no blocker, no operator decision. Liveness is data, not a list: the
 live-pack review gate's base-plan plus dispatch-read evaluation. Any failed or
 inconclusive lookup protects every guarded pack path (fail closed).
+Filename coverage alone does not prove remedy coverage. Unknown wording and
+mixed remedies, including credential revocation or other actions without
+filenames, stay unresolved and earn no policy audit or closure credit.
 
 This extends the existing mechanisms rather than adding one:
 
@@ -51,6 +54,8 @@ This extends the existing mechanisms rather than adding one:
 
 No CI check, gate, ratchet, guard or override label is added. The predicate and
 every merge safety gate are unchanged.
+The helper accepts explicit file edits and backtick-quoted field edits in an
+explicit protected file; a protected `File` field alone is insufficient.
 
 ## Verification
 
@@ -69,3 +74,14 @@ Run under the netguard environment, each file with `node --test <file>`:
   `test/ama-hammer-merge-protocol-prompt.test.mjs` 45/45,
   `test/hammertrim-contract.test.mjs` 53/53 (rendered hammer prompt 59,319 B of the
   60 KiB cap), `test/hammer-prompt-contract.test.mjs` 6/6.
+
+Final comment-only remediation: added regression coverage for unknown and
+missing remedies, mixed actions before/after a protected-file edit, multiple
+protected files, and blocking/non-blocking audit and closure accounting. The two
+new tests failed on the reviewed head before the fix. After the fix,
+`node --test test/remediationliveplan-01.test.mjs test/guard-forbidden-paths.test.mjs test/reviewguard-close.test.mjs test/reviewguard-context.test.mjs`
+passes 27/27.
+`npm run lint` passes with zero errors (149 existing warnings),
+`npm run typecheck:contracts` passes, and
+`bash demo/research-finding-walkthrough.sh` passes with byte-stable deliveries.
+The full suite is left to PR-head CI.

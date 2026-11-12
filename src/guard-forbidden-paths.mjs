@@ -30,10 +30,9 @@ function findingPath(value) {
   return safePath(path) ? path : '';
 }
 
-// The finding's fix lies entirely in protected live-pack files: its File field
-// and every path its recommended fix names. A mixed remedy, a finding without
-// a protected path, or the live-pack review gate's own operator-gated finding
-// returns null and keeps normal remediation.
+// Require affirmative edit-only wording for the entire remedy as well as
+// protected paths. Filename coverage alone cannot account for actions such as
+// revoking a credential. Unknown wording keeps normal remediation.
 export function livePackOnlyRemedy(finding, protects) {
   if (typeof protects !== 'function') return null;
   const text = ['title', 'file', 'problem', 'recommendedFix'].map(key => finding?.[key] || '').join('\n');
@@ -46,6 +45,15 @@ export function livePackOnlyRemedy(finding, protects) {
   if (!covered.length || covered.length !== paths.length) return null;
   const basenames = new Set(covered.map(path => path.split('/').pop()));
   if (named.some(path => !path.includes('/') && !basenames.has(path))) return null;
+  const alternatives = covered.map(path => path.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|');
+  const path = `(?:${alternatives}|\`(?:${alternatives})\`)`;
+  const pathsObject = `(?:the\\s+)?(?:files?\\s+)?${path}(?:\\s*(?:,|and)\\s*${path})*`;
+  const field = '`[A-Za-z_][\\w.]*`';
+  const fields = `${field}(?:\\s*(?:,|and)\\s*${field})*`;
+  const fieldObject = `${fields}(?:\\s+of\\s+the\\s+activation\\s+assertion)?\\s+in\\s+${path}`;
+  const clause = `(?:update|edit|correct|revise|replace|remove|delete|add)\\s+(?:${pathsObject}|${fieldObject})`;
+  const editOnly = new RegExp(`^(?:please\\s+)?${clause}(?:\\s*(?:and|then|[.;])\\s*${clause})*[.!]?$`, 'i');
+  if (!editOnly.test(String(finding?.recommendedFix || '').replace(/\s+/g, ' ').trim())) return null;
   return covered.sort();
 }
 

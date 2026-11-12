@@ -177,6 +177,51 @@ test('mixed remedies, the operator-gated cross-edit finding and missing policy g
   assert.equal(resolveGuardForbiddenNonBlocking(review({ nonBlocking: [liveCard] }), []).resolved.length, 0);
 });
 
+test('live-pack policy requires a complete recognized edit-only remedy', () => {
+  const path = 'projects/demo-live-pack/plan.json';
+  const spec = 'projects/demo-live-pack/SPEC.md';
+  const protects = candidate => [path, spec].includes(candidate);
+  const finding = recommendedFix => ({ file: path, recommendedFix });
+  for (const fix of [
+    `Update \`${path}\`.`,
+    `Edit \`${path}\` and \`${spec}\`.`,
+    `Update \`expected_jq\` and \`surface\` of the activation assertion in \`${path}\`.`,
+    `Update \`expected_jq\` in \`${path}\`.`,
+    `Edit \`${path}\`; update \`${spec}\`.`,
+  ]) {
+    assert.ok(livePackOnlyRemedy(finding(fix), protects), fix);
+  }
+  for (const fix of [
+    '',
+    'Revoke the exposed token in GitHub.',
+    'Update the assertion.',
+    `Investigate \`${path}\`.`,
+    `Update \`${path}\` as needed.`,
+    `Remove the embedded credential from \`${path}\` and revoke the exposed token in GitHub.`,
+    `Update \`${path}\`; revoke the exposed token in GitHub.`,
+    `Revoke the exposed token in GitHub, then update \`${path}\`.`,
+    `Update \`expected_jq\` in \`${path}\` and rotate credentials.`,
+    `Update \`${path}\` and update the GitHub settings.`,
+    `Update \`${path}\`.\nNotify the operator.`,
+  ]) {
+    assert.equal(livePackOnlyRemedy(finding(fix), protects), null, fix);
+  }
+});
+
+test('mixed remedies without additional filenames retain findings and grant no audit or closure credit', () => {
+  const mixed = card('Exposed credential', 'projects/demo-live-pack/plan.json',
+    'Remove the embedded credential from `projects/demo-live-pack/plan.json` and revoke the exposed token in GitHub.');
+  for (const blocking of [false, true]) {
+    const body = review(blocking ? { blocking: [mixed], verdict: 'Request changes' } : { nonBlocking: [mixed] });
+    const policy = resolveGuardForbiddenNonBlocking(body, [], { livePackProtects: () => true });
+    assert.deepEqual(policy.resolved, []);
+    assert.equal(policy.auditDetails, '');
+    assert.deepEqual((blocking ? policy.remainingBlocking : policy.remaining).map(finding => finding.title),
+      ['Exposed credential']);
+    if (!blocking) assert.equal(close(body, policy).eligible, false);
+  }
+});
+
 test('workflow-path behaviour from HAMMERNOCI-01 is unchanged and live-pack policy never covers it', async () => {
   const workflow = card('Wire the check into CI', '.github/workflows/ci.yml', 'Add a step to `.github/workflows/ci.yml`.');
   const policy = resolveGuardForbiddenNonBlocking(review({ nonBlocking: [workflow] }), [], { livePackProtects: () => true });

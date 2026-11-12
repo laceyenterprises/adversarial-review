@@ -143,6 +143,28 @@ If a pass fails, a `backfill-failed` receipt reports those committed totals
 Stdout retains the final page result on success. Retain both streams when
 backfilling a live database; replay from the prior page cursor is idempotent.
 
+Backfill shares the database with live writers, so it paces itself and does no
+work for unchanged passes (OSGBACKFILLPACE-01). For each pass it reads the row
+and parses the review body outside any transaction. A read-only snapshot then
+compares the planned projection with the stored notes, findings, attribution,
+prompt fields and dispute links. A pass whose projection is already current is
+skipped without a write transaction. Otherwise one short `IMMEDIATE`
+transaction re-reads the pass row and writes only if the row is unchanged. If a
+live writer changed the row, the backfill re-reads and re-parses it outside the
+lock. After three changed attempts it re-plans under the lock from the latest
+row. A stale parse is never written. Live projection (`persistReviewFindings`)
+keeps its read, parse and write inside one immediate transaction. After every
+write transaction, including one that inserts nothing or fails, the backfill
+yields so that write time stays at or below `maxWriteDutyCycle` of the
+wall-clock time (default `0.2`; `1` disables pacing). The finding and grade
+backfills accept `maxWriteDutyCycle` or a caller-owned pacer from
+`createBackfillWritePacer`, so one pacer can span pages and both phases. The CLI
+flag is `--max-write-duty-cycle`, validated before the database is opened. The
+page result adds `written`, `skipped`, `replanned` and `pacing`. The `pacing`
+object holds `maxWriteDutyCycle`, `writeTransactions`, `writeMs`, `yieldMs`,
+`elapsedMs` and the effective `writeDutyCycle`. The module exports
+`BACKFILL_WRITE_PACING_SUPPORTED = true` for companion callers.
+
 ## Hammer evidence
 
 `review_finding_disputes` retains the existing hammer finding identity, evidence

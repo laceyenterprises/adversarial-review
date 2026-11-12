@@ -72,8 +72,11 @@ failure; immutable source keys keep retries idempotent. The backfill CLI emits
 `backfill-pass` JSON receipts to stderr with `passId`, `inserted`, cumulative
 `committedPasses`, `committedInserted` and `lastPassId`. On failure it emits a
 `backfill-failed` receipt with committed totals (zero and a null last ID before
-any pass commits), then exits nonzero. Stdout keeps its existing final
-`{ inserted }` result on success. Retain both streams; a retry safely replays
+any pass commits), then exits nonzero. Stdout keeps its final result on
+success: `{ inserted, pacing }`. The shared backfill write pacer yields after
+every per-pass transaction, so write time stays at or below
+`maxWriteDutyCycle` (default `0.2`; CLI `--max-write-duty-cycle`). Callers can
+pass one `pacer` across the finding and grade phases (OSGBACKFILLPACE-01). Retain both streams; a retry safely replays
 completed passes without duplicating grades. It does not run automatically at
 startup or deployment. `show` and `export` open SQLite read-only and never migrate.
 Both accept optional `--finding-id`, `--repo`, `--after-grade-id` and `--limit`

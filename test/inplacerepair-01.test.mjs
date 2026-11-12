@@ -300,6 +300,25 @@ test('harness refunds have a PR-wide cap and bounded failure evidence', t => {
   assert.ok(refunds.every(refund => refund.failure.length <= 512));
 });
 
+test('watcher reconciliation resolves reviewed heads while pending custody takes precedence', async t => {
+  const f = fixture(t);
+  const options = { ...f, headSha: head, includeReviewedHead: true,
+    readImpl: async () => ({ ok: false }) };
+  assert.equal(await reconcileRepairOwner(options), null);
+  const first = reserveRepairEpoch(f).epoch;
+  bindRepairHead({ ...f, epochId: first.id, headSha: head });
+  assert.equal(await reconcileRepairOwner({ ...options, includeReviewedHead: false }), null);
+  assert.equal((await reconcileRepairOwner(options)).id, first.id);
+  assert.equal(await reconcileRepairOwner({ ...options, headSha: later }), null);
+  const second = reserveRepairEpoch({ ...f, headSha: head, ownerKey: 'second-owner' }).epoch;
+  assert.equal((await reconcileRepairOwner(options)).id, second.id);
+  const retired = await reconcileRepairOwner({ ...options,
+    now: Date.now() + REPAIR_PROVISION_DEADLINE_MS,
+    readImpl: async () => ({ ok: true, roots: [], absenceProof: {} }) });
+  assert.equal(retired.id, first.id, 'retirement still falls back to the reviewed-head epoch');
+  assert.equal(pendingRepairEpoch(f.rootDir, f), null);
+});
+
 test('watcher reconciliation retires terminal or absent repair launches and projects ownerless', async t => {
   const { resolveTtmOwner } = await import('../src/ttm-owner.mjs');
   for (const absent of [false, true]) {

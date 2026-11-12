@@ -6409,8 +6409,7 @@ async function maybeDispatchAmaCloserAttempt({
           const outcomeClass = exitedWithoutClose && !existingDispatchHeadAdvanced
             && (terminalLivePr.headRefOid || targetRemediationSha) === existingRecord.headSha
             ? classifyCloserOutcome({ reason: noMergeDetails.lastPhase,
-              failureClass: prefetchedLaunchRequestProbe?.row?.failure_class,
-              failureDetail: prefetchedLaunchRequestProbe?.row?.failure_detail }) : null;
+              failureClass: prefetchedLaunchRequestProbe?.row?.failure_class }) : null;
           let inconclusiveRefund = null;
           if (outcomeClass?.kind === 'inconclusive' && isHammerWorkerClass(existingRecord.workerClass || workerClass)) {
             inconclusiveOutcome = outcomeClass;
@@ -7205,8 +7204,7 @@ async function maybeDispatchAmaCloserAttempt({
         const launchClass = classifyCloserOutcome({
           reason: hammerNoMergeDetails({ hqRoot, launchRequestId: existingRecord.launchRequestId,
             runId: existingRecord.workerRunId, raw: null }).lastPhase,
-          failureClass: launchRequestProbe?.row?.failure_class,
-          failureDetail: launchRequestProbe?.row?.failure_detail });
+          failureClass: launchRequestProbe?.row?.failure_class });
         if (launchClass.kind === 'inconclusive') {
           inconclusiveOutcome = launchClass;
           refundInconclusiveCloserLaunch({ rootDir, repo, prNumber, jobKey: reviewedSha,

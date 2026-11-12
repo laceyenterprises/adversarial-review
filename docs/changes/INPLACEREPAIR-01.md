@@ -138,3 +138,33 @@ src/review-harness-retry.mjs.
 - `node scripts/validate-data-model-catalog.mjs`: 95 entries validated.
 - `bash demo/research-finding-walkthrough.sh`: three byte-stable deliveries.
 - `git diff --check`: passed. Full-suite validation remains with PR-head CI.
+
+## Final review cleanup
+
+### Summary
+
+Watcher admission reuses the repair ledger snapshot to resolve a historical
+reviewed head when no pending epoch owns the branch. Pending custody still takes
+precedence; after terminal-owner retirement the fallback reads the updated ledger.
+Removed unused failure-detail arguments from the two closer outcome classifiers
+and verified the state source projections already match without changing the lifecycle graph.
+
+### Interface changes
+
+`reconcileRepairOwner` accepts optional `includeReviewedHead: true` for watcher
+admission. Other callers retain pending-owner-only results. No persistent shape,
+merge predicate or smoke promise changes.
+
+### Verification
+
+- Canonical `hammer-validate.mjs --canonical` selection for the changed sources,
+  repair regression, watcher claim-loop and complete SMV suite: 4,843 tests in
+  106 files passed.
+- Filesystem instrumentation: ordinary non-repair watcher subject uses one
+  ledger read instead of the prior two.
+- `npm run lint`: zero errors (existing warnings).
+- `npm run typecheck:contracts`: passed.
+- `bash demo/research-finding-walkthrough.sh`: three byte-stable deliveries.
+- `git diff --check`: passed.
+- Canonical projections for orchestration, watcher and closer sources already
+  match `state-machines.json`; no hash or lifecycle graph edit was needed.

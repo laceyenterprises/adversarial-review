@@ -34,16 +34,20 @@ export async function observeRepairOwner({ rootDir, epoch, now = Date.now(), rea
 // Reconcile before watcher admission. Unknown evidence retains custody; only
 // complete terminal retry evidence or proven absence after provisioning retires.
 export async function reconcileRepairOwner({ rootDir, repo, prNumber, headSha, now = Date.now(),
-  readImpl = readDispatchLaunches }) {
-  const epoch = pendingRepairEpoch(rootDir, { repo, prNumber });
-  if (!epoch) return null;
+  readImpl = readDispatchLaunches, includeReviewedHead = false }) {
+  const ledger = readHammerRetryCapLedger(rootDir, { repo, prNumber });
+  if (ledger?.__corrupt) throw new Error('repair ledger unreadable');
+  const epoch = ledger?.repairEpochs?.findLast(entry => !entry.reviewHead && !entry.terminalAt);
+  // The watcher can resolve historical admission from this same snapshot.
+  if (!epoch) return includeReviewedHead
+    ? ledger?.repairEpochs?.find(entry => entry.reviewHead === headSha) || null : null;
   // Publication may finish before this poll observes the new head. Admission
   // must bind that head before terminal worker observation can retire custody.
   if (headSha && epoch.baseHead !== headSha) return epoch;
   const age = now - Date.parse(epoch.ownerObservedAt);
   if (age >= 0 && age < REPAIR_OWNER_OBSERVE_MS) return epoch;
   const observed = await observeRepairOwner({ rootDir, epoch, now, readImpl });
-  return mutateRepairEpochs(rootDir, { repo, prNumber }, ledger => {
+  const reconciled = mutateRepairEpochs(rootDir, { repo, prNumber }, ledger => {
     const current = ledger.repairEpochs?.find(entry => entry.id === epoch.id && entry.ownerKey === epoch.ownerKey);
     if (!current || current.reviewHead || current.terminalAt) return null;
     current.ownerObservedAt = new Date(now).toISOString();
@@ -56,6 +60,7 @@ export async function reconcileRepairOwner({ rootDir, repo, prNumber, headSha, n
     }
     return current;
   });
+  return reconciled || (includeReviewedHead ? repairEpochForHead(rootDir, { repo, prNumber }, headSha) : null);
 }
 
 export function repairCause({ ledger, row, cycleExhausted = false, conflicting = false } = {}) {

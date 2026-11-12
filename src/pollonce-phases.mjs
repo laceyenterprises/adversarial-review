@@ -277,7 +277,7 @@ import {
 } from './reviewer-spawn-settle.mjs';
 import { maybeDispatchReviewerTimeoutExhaustedMergeAgent } from './reviewer-timeout-exhausted-dispatch.mjs';
 import { admitExhaustedHeadVerdict, isExhaustedHeadVerdictRequested } from './exhausted-head-verdict.mjs';
-import { reconcileRepairOwner, repairEpochForHead, bindRepairHead } from './repair-epochs.mjs';
+import { reconcileRepairOwner, bindRepairHead } from './repair-epochs.mjs';
 import { refundReviewHarnessFault } from './review-harness-retry.mjs';
 import { isReviewCycleCapRoutedToHammer, maybeRouteReviewCycleCapToHammer } from './review-cycle-cap-hammer.mjs';
 import { latestReviewedHeadSha, maybeRouteCiBlockedToHammer } from './ci-blocked-hammer.mjs';
@@ -1503,8 +1503,8 @@ export async function processReviewSubject(entry, ctx) {
       let repairEpoch = null;
       if (effectiveDomainId === CODE_PR_DOMAIN_ID && !subject.terminal) {
         try {
-          repairEpoch = await reconcileRepairOwner({ rootDir: ROOT, repo: repoPath, prNumber, headSha: subject.headSha })
-            || repairEpochForHead(ROOT, { repo: repoPath, prNumber }, subject.headSha);
+          repairEpoch = await reconcileRepairOwner({ rootDir: ROOT, repo: repoPath, prNumber,
+            headSha: subject.headSha, includeReviewedHead: true });
           const refund = refundReviewHarnessFault({ rootDir: ROOT, db, row: existing });
           existing = refund.row;
           if (refund.wait) return;

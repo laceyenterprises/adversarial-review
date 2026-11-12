@@ -14,6 +14,7 @@ import { blockingFindingIdentity } from '../src/ama/hammer-adjudication.mjs';
 import * as records from '../src/review-finding-records.mjs';
 import { backfillFindingGrades } from '../src/review-finding-grades.mjs';
 import { createBackfillWritePacer, parseWriteDutyCycle } from '../src/backfill-write-pacer.mjs';
+import { sleepSync } from '../src/sqlite-busy-retry.mjs';
 
 const { backfillReviewFindings, persistReviewFindings } = records;
 const repo = 'sample/service', head = 'a'.repeat(40);
@@ -51,42 +52,62 @@ const dump = db => Object.fromEntries(['review_findings', 'finding_batch_notes',
 const totalChanges = db => db.prepare('SELECT total_changes() n').get().n;
 
 // The second connection runs on another thread so it can contend while this
-// thread runs the synchronous backfill. It records every write attempt.
-function liveWriter(t, path, busyTimeoutMs) {
-  const flags = new Int32Array(new SharedArrayBuffer(16));
+// thread runs the synchronous backfill. It writes on demand: at every yield the
+// pacer grants it one turn, and it reports whether that turn committed. With
+// busy_timeout=0 a turn that finds the write lock held fails at once, so the
+// result depends only on whether the backfill released the lock before
+// yielding, never on how long a transaction took on this host.
+function liveWriter(t, path) {
+  // [0] state: 1 ready, 2 closed; [1] stop; [2] commits; [3] busy;
+  // [4] turns granted; [5] turns finished.
+  const flags = new Int32Array(new SharedArrayBuffer(32));
   const worker = new Worker(`
     const { workerData } = require('node:worker_threads');
     const Database = require(workerData.module);
-    const db = new Database(workerData.path, { timeout: workerData.busyTimeoutMs });
+    const db = new Database(workerData.path, { timeout: 0 });
     const f = new Int32Array(workerData.buffer);
     Atomics.store(f, 0, 1); Atomics.notify(f, 0);
-    while (Atomics.load(f, 1) === 0) {
+    for (;;) {
+      const finished = Atomics.load(f, 5);
+      while (Atomics.load(f, 4) === finished && Atomics.load(f, 1) === 0) Atomics.wait(f, 4, finished);
+      if (Atomics.load(f, 4) === finished) break;
       try { db.exec('BEGIN IMMEDIATE; UPDATE contention_fixture SET value=value+1; COMMIT'); Atomics.add(f, 2, 1); }
       catch (err) {
         if (!/SQLITE_BUSY|SQLITE_LOCKED/.test(String(err.code))) throw err;
         if (db.inTransaction) db.exec('ROLLBACK');
         Atomics.add(f, 3, 1);
       }
-      Atomics.wait(f, 1, 0, 2);
+      Atomics.add(f, 5, 1); Atomics.notify(f, 5);
     }
     db.close();
     Atomics.store(f, 0, 2); Atomics.notify(f, 0);
-  `, { eval: true, workerData: { path, busyTimeoutMs, buffer: flags.buffer,
+  `, { eval: true, workerData: { path, buffer: flags.buffer,
     module: fileURLToPath(import.meta.resolve('better-sqlite3')) } });
+  let failure = null;
+  worker.once('error', error => { failure = error; });
   t.after(() => worker.terminate());
-  const waitFor = value => {
-    const deadline = Date.now() + 10000;
-    while (Atomics.load(flags, 0) !== value) {
-      assert.ok(Date.now() < deadline, 'live writer handshake timed out');
-      Atomics.wait(flags, 0, Atomics.load(flags, 0), 20);
+  // Wait on a condition. The deadline only turns a dead worker into a clear
+  // failure instead of a hang; it is never what the assertion measures.
+  const waitUntil = (index, done, what) => {
+    const deadline = Date.now() + 30000;
+    for (let seen = Atomics.load(flags, index); !done(seen); seen = Atomics.load(flags, index)) {
+      if (failure) throw failure;
+      assert.ok(Date.now() < deadline, `live writer ${what} timed out`);
+      Atomics.wait(flags, index, seen, 50);
     }
   };
-  waitFor(1);
+  waitUntil(0, state => state === 1, 'handshake');
   return {
+    // One write turn, run to completion before the backfill continues.
+    turn() {
+      const granted = Atomics.add(flags, 4, 1) + 1;
+      Atomics.notify(flags, 4);
+      waitUntil(5, finished => finished === granted, 'turn');
+    },
     stop() {
-      Atomics.store(flags, 1, 1); Atomics.notify(flags, 1);
-      waitFor(2);
-      return { ok: Atomics.load(flags, 2), busy: Atomics.load(flags, 3) };
+      Atomics.store(flags, 1, 1); Atomics.notify(flags, 4);
+      waitUntil(0, state => state === 2, 'shutdown');
+      return { ok: Atomics.load(flags, 2), busy: Atomics.load(flags, 3), turns: Atomics.load(flags, 4) };
     },
   };
 }
@@ -100,11 +121,17 @@ test('capability flag tells the companion backfill command that pacing is availa
 
 test('a live writer with a short busy timeout keeps committing while the backfill projects new and captured passes', t => {
   const { db, path, ids } = corpus(t, { passes: 120, findings: 40 });
-  const writer = liveWriter(t, path, 100);
-  const fresh = backfillReviewFindings(db, { limit: 5000 });
+  const writer = liveWriter(t, path);
+  // The production pacer, with its yield extended by one live-writer turn. The
+  // turn runs while the backfill is paused in its yield; the pacer still sleeps
+  // its full computed yield afterwards, so its duty-cycle accounting is real.
+  const pacer = createBackfillWritePacer({ sleep: ms => { writer.turn(); sleepSync(ms); } });
+  const fresh = backfillReviewFindings(db, { limit: 5000, pacer });
   const replay = backfillReviewFindings(db, { limit: 5000 });
-  const { ok, busy } = writer.stop();
+  const { ok, busy, turns } = writer.stop();
   assert.equal(busy, 0, `live writer hit SQLITE_BUSY ${busy} times (${ok} commits)`);
+  assert.equal(turns, fresh.pacing.writeTransactions, 'the writer gets a turn at every backfill yield');
+  assert.equal(ok, turns, `live writer committed ${ok} of ${turns} turns`);
   assert.ok(ok > 10, `live writer committed only ${ok} times`);
   assert.equal(fresh.scanned, ids.length);
   assert.equal(fresh.written, ids.length);

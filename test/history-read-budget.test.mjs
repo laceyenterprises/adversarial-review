@@ -34,10 +34,24 @@ function value(path) {
   assert.fail(`unexpected read ${path}`);
 }
 
-test('HAMHISTORYBUDGET-01: an injected reader ignoring cancellation returns a classified whole-verification timeout', { timeout: 2000 }, async () => {
+// Deadlines below run on mocked timers: a test arms the deadline, waits for
+// the condition it is about (a read in flight, a proof stage reached), then
+// advances the clock. Host speed cannot move an expiry before that condition.
+function signalled() {
+  let fire;
+  const reached = new Promise(resolve => { fire = resolve; });
+  return { reached, fire };
+}
+
+test('HAMHISTORYBUDGET-01: an injected reader ignoring cancellation returns a classified whole-verification timeout', { timeout: 2000 }, async t => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
   let reads = 0;
-  const evidence = await fetchPrimaryChange({ ...args, get: () => { reads++; return never(); } },
+  const started = signalled();
+  const pending = fetchPrimaryChange({ ...args, get: () => { reads++; started.fire(); return never(); } },
     { contextTimeoutMs: 25 });
+  await started.reached;
+  t.mock.timers.tick(25);
+  const evidence = await pending;
   assert.equal(evidence.historyReadTimedOut, true);
   assert.equal(evidence.historyReadFailed, true);
   assert.equal(evidence.readFailed, true);
@@ -78,9 +92,15 @@ test('HISTREADLOAD-01: collector and nested reader honor a load-scaled budget ab
   assert.equal((await pending).historyReadTimedOut, true);
 });
 
-test('a shorter reader deadline retains timeout classification in collected evidence', { timeout: 2000 }, async () => {
-  const get = createHistoryReader({ contextTimeoutMs: 25, execGhWithRetryImpl: never });
-  const evidence = await fetchPrimaryChange({ ...args, get });
+test('a shorter reader deadline retains timeout classification in collected evidence', { timeout: 2000 }, async t => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const started = signalled();
+  const get = createHistoryReader({ contextTimeoutMs: 25, nowMs: () => 0,
+    execGhWithRetryImpl: () => { started.fire(); return never(); } });
+  const pending = fetchPrimaryChange({ ...args, get });
+  await started.reached;
+  t.mock.timers.tick(25);
+  const evidence = await pending;
   assert.equal(evidence.historyReadTimedOut, true);
   assert.equal(checkPrimaryChange(evidence, head).reason, 'history-read-failed');
 });
@@ -113,32 +133,49 @@ test('binding collection cancellation cannot reset an already consumed reader bu
 test('timed-out stored history does not strand the next exact-head collection', { timeout: 2000 }, async t => {
   const rootDir = mkdtempSync(join(tmpdir(), 'history-budget-'));
   t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  t.mock.timers.enable({ apis: ['setTimeout'] });
   let stalled = true;
-  const get = Object.assign(async path => path.includes('/compare/') && stalled ? never() : value(path),
-    { persistPrimaryChange: true, metadata: async () => compare });
+  const stalledRead = signalled();
+  const get = Object.assign(async path => {
+    if (!path.includes('/compare/') || !stalled) return value(path);
+    stalledRead.fire();
+    return never();
+  }, { persistPrimaryChange: true, metadata: async () => compare });
   const options = { contextTimeoutMs: 25, fetchCiCostImpl: async () => ({ headSha: head, ok: true }) };
-  const failed = await fetchPrimaryChange({ ...args, get, rootDir }, options);
+  const pending = fetchPrimaryChange({ ...args, get, rootDir }, options);
+  await stalledRead.reached;
+  t.mock.timers.tick(25);
+  const failed = await pending;
   assert.equal(failed.historyReadTimedOut, true);
-  await delay(0);
+  await new Promise(setImmediate);
   stalled = false;
+  // Its 1000 ms deadline is never advanced, so the recovery cannot be outrun.
   const recovered = await fetchPrimaryChange({ ...args, get, rootDir }, { ...options, contextTimeoutMs: 1000 });
   assert.equal(checkPrimaryChange(recovered, head).ok, true);
 });
 
-test('the budget includes optional proof stages after history has succeeded', { timeout: 2000 }, async () => {
+test('the budget includes optional proof stages after history has succeeded', { timeout: 2000 }, async t => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
   let proofSignal, laterProofs = 0, finish;
-  const evidence = await fetchPrimaryChange({ ...args, get: async path => value(path) }, {
+  const atProof = signalled();
+  const pending = fetchPrimaryChange({ ...args, get: async path => value(path) }, {
     contextTimeoutMs: 25,
     fetchCiCostImpl: ({ signal }) => {
       proofSignal = signal;
+      atProof.fire();
       return new Promise(resolve => { finish = resolve; });
     },
     proveDerivedArtifactsImpl: async () => { laterProofs++; return []; },
   });
+  // History must finish inside the budget; only then does the deadline pass.
+  await Promise.race([atProof.reached, pending]);
+  assert.ok(proofSignal, 'history completed and reached the proof stage before the deadline');
+  t.mock.timers.tick(25);
+  const evidence = await pending;
   assert.equal(evidence.historyReadTimedOut, true);
   assert.equal(proofSignal.aborted, true);
   finish({ headSha: head, ok: true });
-  await delay(0);
+  await new Promise(setImmediate);
   assert.equal(laterProofs, 0, 'a late success must not continue verification');
 });
 
@@ -278,21 +315,47 @@ test('production child executor preserves stdout, diff exit 1 and bounded output
     'setInterval(() => {}, 1000)'], { timeout: 50 }), error => error.killed && error.signal === 'SIGKILL');
 });
 
-test('an injected diff ignoring abort cannot strand scratch cleanup', { timeout: 2000 }, async () => {
-  let directory;
-  const get = createHistoryReader({ contextTimeoutMs: 100,
+// Run a compare read whose deadline can expire only once the fixture reached
+// the local diff. The reader's clock and its deadline timers are virtual, so a
+// slow host cannot spend the budget on the GitHub reads, blob writes or child
+// spawn first. Expiry is then a real timer callback, advanced explicitly.
+async function compareTimesOutAtDiff(t, { contextTimeoutMs, diffImpl }) {
+  let clock = 0, reached;
+  const atDiff = new Promise(resolve => { reached = resolve; });
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  t.after(() => t.mock.timers.reset());
+  const get = createHistoryReader({ contextTimeoutMs, nowMs: () => clock,
     execGhWithRetryImpl: async ({ args }) => ({ stdout: JSON.stringify(value(args[1])) }),
+    diffImpl: (...call) => { const pending = diffImpl(...call); reached(); return pending; } });
+  const read = get(`repos/fixture/repo/compare/${base}...${head}`);
+  // A read that fails before the diff fails the test here, not by timeout.
+  await Promise.race([atDiff, read]);
+  clock += contextTimeoutMs;
+  t.mock.timers.tick(contextTimeoutMs);
+  await assert.rejects(read, { code: 'HISTORY_READ_TIMEOUT' });
+  t.mock.timers.reset();
+}
+
+// Scratch cleanup settles after the read rejects. Wait for that condition;
+// the test timeout is the hang guard.
+async function removed(directory) {
+  while (existsSync(directory)) await delay(5);
+  return true;
+}
+
+test('an injected diff ignoring abort cannot strand scratch cleanup', { timeout: 2000 }, async t => {
+  let directory;
+  await compareTimesOutAtDiff(t, { contextTimeoutMs: 100,
     diffImpl: (_command, _args, options) => { directory = options.cwd; return never(); } });
-  await assert.rejects(get(`repos/fixture/repo/compare/${base}...${head}`), { code: 'HISTORY_READ_TIMEOUT' });
   assert.ok(directory);
-  for (let i = 0; i < 100 && existsSync(directory); i++) await delay(5);
+  assert.equal(await removed(directory), true);
   assert.equal(existsSync(directory), false);
 });
 
 test('deadline kills a real stalled diff child and removes its scratch directory', { timeout: 3000 }, async t => {
   let child, directory, closed;
-  const get = createHistoryReader({ contextTimeoutMs: 250,
-    execGhWithRetryImpl: async ({ args }) => ({ stdout: JSON.stringify(value(args[1])) }),
+  t.after(() => { if (child && child.exitCode === null && child.signalCode === null) child.kill('SIGKILL'); });
+  await compareTimesOutAtDiff(t, { contextTimeoutMs: 250,
     diffImpl: (_command, _argv, options) => {
       assert.equal(options.killSignal, 'SIGKILL');
       directory = options.cwd;
@@ -302,10 +365,8 @@ test('deadline kills a real stalled diff child and removes its scratch directory
       closed = new Promise(resolve => child.once('close', (_code, signal) => resolve(signal)));
       return pending;
     } });
-  t.after(() => { if (child && child.exitCode === null && child.signalCode === null) child.kill('SIGKILL'); });
-  await assert.rejects(get(`repos/fixture/repo/compare/${base}...${head}`), { code: 'HISTORY_READ_TIMEOUT' });
   assert.ok(child, 'fixture reached local diff');
-  assert.equal(await Promise.race([closed, delay(500).then(() => 'child did not close')]), 'SIGKILL');
-  for (let i = 0; i < 100 && existsSync(directory); i++) await delay(5);
+  assert.equal(await closed, 'SIGKILL');
+  assert.equal(await removed(directory), true);
   assert.equal(existsSync(directory), false);
 });

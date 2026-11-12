@@ -1979,9 +1979,25 @@ a linked HAM author with a foreign rebase committer only with exact-SHA App
 validation or the matching immutable original HAM reversal proof below.
 Suppression also rejects terminal trailers with either linked foreign identity.
 The remote GitHub probe requires linked closer provenance; an unidentified remote
-commit cannot suppress review. Local Git retains the offline trailer-only
+commit cannot suppress review. Local Git retains the offline trailer
 fallback, so this guard does not eliminate deliberate trailer forgery on the
 local-first path. Downstream closure authority remains independently verified.
+
+REBASETRAILER-01: the producer of the head commit decides whether a head is a
+closer head. A rebase or cherry-pick keeps a closer commit's author and trailers
+but writes its own committer. A trailered commit is therefore not a closer
+commit when its committer has no linked login and its committer email is neither
+the author's nor a closer's GitHub noreply address. Local Git and the remote
+probe both read those emails, and an unknown email keeps the earlier rule. A
+non-closer rebase that replays closer commits thus refreshes the review. A range
+since the reviewed head is closer-only only if every commit in it passes this
+classifier. The hammer retry-series reset reads the same classifier and keeps
+the cap for a head it calls closer-produced. When the gate's posted review is
+stale and that classifier calls the live head closer-produced, the gate reports
+`pending (closer-produced-head)` instead of `pending (stale-review-head)`.
+Refresh is suppressed and, per MSM, the closer validates that head, so no
+re-review is pending. The gate stays pending; it never reports success for an
+unreviewed head.
 
 Once a review settles on the current head, each watcher tick routes closure
 down exactly one of two paths:

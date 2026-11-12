@@ -1,5 +1,6 @@
 import { isCurrentAuthoritativeFamilyReview, amaAuthoritativeReviewerLoginsForModel } from './ama/reviewer-authority.mjs';
 import { carryHammerWithdrawals, createReviewCurrencyReader, rebaseCurrencyCovers } from './ama/review-currency.mjs';
+import { hammerHeadOwnership } from './hammer-head-ownership.mjs';
 import { readReviewCarryForwardRecord } from './review-carry-forward.mjs';
 import { meteredExecFile } from './metered-gh.mjs';
 import { classifyOperatorGatedFindings } from './ama/operator-label-gates.mjs';
@@ -732,6 +733,7 @@ function pickAdversarialGateStatus({
   hammerWithdrawals = [],
   reviewCurrency = null,
   reviewCarryForward = null,
+  closerProducedHead = null,
 } = {}) {
   const context = resolveGateStatusContext(env);
   let operatorLabelGates = [];
@@ -996,6 +998,17 @@ function pickAdversarialGateStatus({
   const carriedForward = Boolean(reviewCarryForward && reviewCarryForward.reviewedHead === reviewedHead
     && reviewCarryForward.currentHead === headSha);
   if (primaryRowIsStale && !rebaseCurrencyCovers(reviewCurrency, reviewedHead, headSha) && !carriedForward) {
+    // REBASETRAILER-01: the classifier that suppressed the review refresh for
+    // this head also tells the gate. Under MSM a closer-produced head is the
+    // closer's to validate and needs no re-review, so the gate does not claim
+    // one is pending. It stays pending: only the closer's merge settles it.
+    if (hammerHeadOwnership(closerProducedHead, headSha)) {
+      return decide(
+        'pending',
+        'The closer produced this head and validates it; no re-review of the current head is pending.',
+        'closer-produced-head'
+      );
+    }
     return decide(
       'pending',
       'Live head has advanced past the reviewed head; re-review of the current head is pending.',
@@ -1421,6 +1434,7 @@ async function projectAdversarialGateStatus(rootDir, {
   reviewCurrencyCwd = undefined,
   domainId = 'code-pr',
   now = () => new Date(),
+  closerProducedHead = null,
 } = {}) {
   const snapshot = await buildAdversarialGateSnapshot(rootDir, {
     repo,
@@ -1436,7 +1450,7 @@ async function projectAdversarialGateStatus(rootDir, {
     fetchLatestLabelEventImpl,
     operatorApprovalEvent,
   });
-  const decision = pickAdversarialGateStatus({ ...snapshot, env });
+  const decision = pickAdversarialGateStatus({ ...snapshot, env, closerProducedHead });
   const durableDecision = durableGateDecision(decision, {
     repo,
     prNumber,

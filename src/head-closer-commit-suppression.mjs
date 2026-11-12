@@ -197,10 +197,11 @@ export async function fetchVerifiedCommitFromLocalGit({
   const readCommit = async () => {
     // Two calls avoid any in-body separator hazard: an identity line (%H + %P are
     // all hex, whitespace-separated) then the raw body (%B, may contain newlines).
-    const identityParts = extractIdentityHashes(
-      await runGit(['show', '-s', '--format=%H %P', `${sha}^{commit}`]),
-      sha,
-    );
+    // REBASETRAILER-01: the git author and committer emails ride after a NUL,
+    // so a rebase that replays a closer commit can be told from the closer's own.
+    const [hashOutput, authorEmail = null, committerEmail = null] =
+      (await runGit(['show', '-s', '--format=%H %P%x00%ae%x00%ce', `${sha}^{commit}`])).split('\0');
+    const identityParts = extractIdentityHashes(hashOutput, sha);
     const readSha = String(identityParts[0] || sha).trim();
     const parents = identityParts
       .slice(1)
@@ -218,8 +219,8 @@ export async function fetchVerifiedCommitFromLocalGit({
       sha: readSha,
       message,
       commit: { message },
-      committer: { login: null },
-      author: { login: null },
+      committer: { login: null, email: gitEmail(committerEmail) },
+      author: { login: null, email: gitEmail(authorEmail) },
       parents: parents.map((parentSha) => ({ sha: parentSha })),
       files: files.map((filename) => ({ filename })),
     };
@@ -308,6 +309,10 @@ function normalizeIdentityPart(value) {
   return String(value || '').trim().toLowerCase();
 }
 
+function gitEmail(value) {
+  return normalizeIdentityPart(String(value ?? '').split('\n')[0]) || null;
+}
+
 const TERMINAL_CLOSER_BOT_IDENTITIES = new Set([
   'hammer',
   'merge-agent-lacey',
@@ -340,7 +345,34 @@ function normalizeCommitTrailers(trailers) {
   return normalized;
 }
 
+// REBASETRAILER-01: a closer head is decided by who produced the head commit.
+// A rebase or cherry-pick keeps the author and the message, trailers included,
+// but writes its own committer. So a commit whose committer has no linked login
+// and an email that is neither the author's nor a closer's GitHub noreply
+// address was replayed by another producer: it is not a closer commit, even
+// though it carries the closer trailer. Unknown emails keep the earlier rule.
+// A linked committer login is judged by `hamCommitIdentityMatches` instead.
+const GITHUB_NOREPLY_EMAIL_RE = /^(?:\d+\+)?([^@\s]+)@users\.noreply\.github\.com$/;
+
+function isCloserNoreplyEmail(email) {
+  const login = GITHUB_NOREPLY_EMAIL_RE.exec(email)?.[1] || '';
+  return TERMINAL_CLOSER_LINKED_LOGINS.has(login) || TERMINAL_CLOSER_LINKED_LOGINS.has(`${login}[bot]`);
+}
+
+export function closerCommitReplayedByOtherProducer(commit = {}) {
+  const identity = (value) => (value && typeof value === 'object' ? value : {});
+  const author = identity(commit?.author), committer = identity(commit?.committer);
+  if (normalizeIdentityPart(committer.login)) return false;
+  const authorEmail = gitEmail(author.email ?? commit?.commit?.author?.email);
+  const committerEmail = gitEmail(committer.email ?? commit?.commit?.committer?.email);
+  if (!authorEmail || !committerEmail || authorEmail === committerEmail) return false;
+  return !isCloserNoreplyEmail(committerEmail);
+}
+
 export function isTerminalCloserCommitIdentity(commit = {}, { requireLinkedIdentity = false } = {}) {
+  if (closerCommitReplayedByOtherProducer(commit)) {
+    return { suppressed: false, reason: null, producer: 'replayed-by-non-closer' };
+  }
   const message = commit?.commit?.message || commit?.message || '';
   const trailers = {
     ...parseCommitTrailers(message),
@@ -565,7 +597,8 @@ export async function getHeadCloserCommitSuppression({
         'api',
         `repos/${repoPath}/commits/${sha}`,
         '--jq',
-        '{sha:.sha,message:.commit.message,authorLogin:.author.login,committerLogin:.committer.login,commit:{verification:.commit.verification}}',
+        '{sha:.sha,message:.commit.message,authorLogin:.author.login,committerLogin:.committer.login,'
+          + 'authorEmail:.commit.author.email,committerEmail:.commit.committer.email,commit:{verification:.commit.verification}}',
       ],
       retries: retryDelays.length,
       backoffMs: Number(retryDelays[0]) || 500,
@@ -576,8 +609,8 @@ export async function getHeadCloserCommitSuppression({
       sha: raw.sha || sha,
       message: raw.message || '',
       commit: raw.commit,
-      author: { login: raw.authorLogin || null },
-      committer: { login: raw.committerLogin || null },
+      author: { login: raw.authorLogin || null, email: raw.authorEmail || null },
+      committer: { login: raw.committerLogin || null, email: raw.committerEmail || null },
     };
     const identity = isTerminalCloserCommitIdentity(commit, { requireLinkedIdentity: true });
     if (identity.suppressed || !prNumber) return identity;

@@ -1809,9 +1809,16 @@ async function dispatchAmaClosureFor({
   // the proof compared that head, and the hammer series was recorded under it.
   // `reviewState.headSha` follows the gate's evidence head, which can differ;
   // a differing jobKey already makes the cap below start a fresh series.
+  // REBASETRAILER-01: the reset also reads the head-producer classifier the
+  // watcher's review refresh uses; a head it calls closer-produced keeps the cap.
   try {
+    const headProducer = closerHeadProof?.proven !== true && closerHeadProof?.currentHeadHammerAttested === false
+      ? await runCoexistenceOperation('head-producer-proof', ({ signal: operationSignal }) => cachedSuppression({
+        repoPath, prNumber, headSha: currentPrHeadSha, logger, signal: operationSignal,
+      }), { timeoutMs: operationTimeoutMs, parentSignal: signal, operationTracker, logger, repoPath, prNumber })
+      : null;
     const seriesReset = resetHammerSeriesForNonCloserHead(rootDir, { repo: repoPath, prNumber }, {
-      jobKey: originalReviewedHead, headSha: currentPrHeadSha, headProof: closerHeadProof,
+      jobKey: originalReviewedHead, headSha: currentPrHeadSha, headProof: closerHeadProof, headProducer,
       now: new Date(now()).toISOString(),
     });
     if (seriesReset.reset) {
@@ -1819,7 +1826,9 @@ async function dispatchAmaClosureFor({
         + `@${String(currentPrHeadSha).slice(0, 12)} (prior attempts ${seriesReset.receipt.priorAttemptCount})`);
     }
   } catch (err) {
-    // A busy or unwritable ledger keeps the recorded cap; the next pass retries.
+    throwIfAborted(signal);
+    // A busy or unwritable ledger, or an unread head producer, keeps the
+    // recorded cap; the next pass retries.
     logger?.warn?.(`[watcher] hammer retry series reset skipped for ${repoPath}#${prNumber}: ${err?.message || err}`);
   }
   const ownerCap = evaluateHammerRetryCap(readHammerRetryCapLedger(rootDir, { repo: repoPath, prNumber }), {

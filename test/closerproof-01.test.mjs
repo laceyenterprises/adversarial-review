@@ -208,7 +208,7 @@ test('a reset never refunds the lifetime count of a legacy ledger', async t => {
 
 // The closure orchestration applies the reset with the same proof it used to
 // decide closer authorship, before the owner cap is evaluated.
-async function orchestrate(t, headSha, headProof) {
+async function orchestrate(t, headSha, headProof, headProducer = { suppressed: false, reason: null }) {
   const rootDir = exhaustedLedger(t);
   const body = '## Blocking issues\n- None.\n\n## Non-blocking issues\n- Synthetic finding\n\n## Verdict\nComment only';
   const quiet = { log() {}, warn() {}, error() {} };
@@ -221,6 +221,8 @@ async function orchestrate(t, headSha, headProof) {
     now: () => Date.parse('2026-11-01T02:00:00.000Z'), logger: quiet,
     loadConfigImpl: () => ({ getMergeAuthorityConfig: () => ({ enabled: true }) }),
     proveCloserAuthoredStaleHeadImpl: async () => headProof,
+    // REBASETRAILER-01: the reset also reads the shared head-producer classifier.
+    resolveHeadCloserCommitSuppressionImpl: async () => headProducer,
     fetchLatestHeadReviewBodiesImpl: async () => [body],
     fetchMergedProtectiveDependentsImpl: async () => [],
     requestEligibleHammerWakeImpl: () => ({ requested: false }),
@@ -235,6 +237,11 @@ test('the closure pass resets the series for a non-closer head and leaves an att
   const rebasedRoot = await orchestrate(t, REBASED, await prove(REBASED));
   assert.ok(readHammerRetryCapLedger(rebasedRoot, IDENTITY).nonCloserHeadResets?.[REBASED]);
   assert.equal(evaluate(rebasedRoot, REBASED).capExhausted, false);
+
+  // The same head, called closer-produced by the classifier the review refresh uses, keeps its cap.
+  const closerRoot = await orchestrate(t, REBASED, await prove(REBASED), { suppressed: true, reason: 'closer-commit-trailer' });
+  assert.equal(readHammerRetryCapLedger(closerRoot, IDENTITY).nonCloserHeadResets, undefined);
+  assert.equal(evaluate(closerRoot, REBASED).capExhausted, true);
 
   const hammerRoot = await orchestrate(t, HAMMER_2, await prove(HAMMER_2));
   assert.equal(readHammerRetryCapLedger(hammerRoot, IDENTITY).nonCloserHeadResets, undefined);

@@ -17,7 +17,7 @@ export function documentedExamples(markdown) {
       if (!logical.trim() || /^\s*#/.test(logical)) continue;
       // Definitions are loaded verbatim into every execution shell below.
       if (/^\s*ham_\w+\(\)/.test(logical)) continue;
-      const start = logical.search(/(?:source\s+["']?<<ROOT_DIR>>\/bin\/|(?:node|"\$HAM_NODE_BIN"|"\$\{HAM_NODE_BIN:-node\}"|\/usr\/bin\/perl)\s+|ham_(?:read|step|gh)\s+)/);
+      const start = logical.search(/(?:source\s+["']?<<ROOT_DIR>>\/bin\/|(?:node|"\$HAM_NODE_BIN"|"\$\{HAM_NODE_BIN:-node\}"|\/usr\/bin\/perl|\/bin\/bash)\s+|ham_(?:read|step|gh)\s+)/);
       // Bare filenames/subcommands in prose refer to helpers, rather than
       // specifying a runnable argv (for example "merge-lease.mjs acquire").
       if (start < 0) {

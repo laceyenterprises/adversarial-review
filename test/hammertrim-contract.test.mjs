@@ -64,8 +64,11 @@ test('sourced phase wrapper reports terminal outcomes and keeps its shell alive'
   const leaseNode = join(bin, 'lease-node');
   writeFileSync(leaseNode, '#!/bin/sh\ncase "$1" in\n  */bin/metered-gh.mjs) shift 2; exec gh "$@" ;;\n  */bin/hammer-pr-read.mjs) repo="$2"; shift 2; number="$1"; shift; exec gh pr view "$number" -R "$repo" "$@" ;;\n  --input-type=module) exec ' + JSON.stringify(process.execPath) + ' "$@" ;;\n  */bin/merge-lease.mjs) if [ "$2" = recover-cap ]; then echo \'{"action":"page"}\'; exit 0; fi; echo LEASE_PROGRESS >&2; echo \'{"parked":true,"reason":"max-gate-attempts","closingStatus":"Reset the capped head"}\' | sed "s/max-gate-attempts/${FIXTURE_PARK_REASON:-max-gate-attempts}/"; exit 70 ;;\n  */bin/hammer-ci-stop.mjs) exec ' + JSON.stringify(process.execPath) + ' "$@" ;;\n  */bin/ama-audit.mjs) exit 0 ;;\nesac\nexit 1\n');
   chmodSync(leaseNode, 0o755);
-  const wrapper = template.match(/For each phase,[\s\S]*?```bash\n([\s\S]*?)\n```/)?.[1];
-  assert.ok(wrapper);
+  // HAMCONTROLLERSCRIPT-01: the status-capturing wrapper is shipped code.
+  const wrapperFunction = readFileSync(join(root, 'bin/hammer-close-controller.sh'), 'utf8')
+    .match(/^ham_close_phase\(\) \{\n[\s\S]*?\n\}$/m)?.[0];
+  assert.ok(wrapperFunction);
+  const wrapper = `${wrapperFunction}\nham_close_phase "$PHASE" || true`;
   for (const [phase, outcome, diagnostic, status, parkReason] of [
     ['hammer-verify-head', 'parked:max-gate-attempts', 'AMG-04 parked', 20],
     ['hammer-verify-head', 'parked:repeated-no-merge-release', 'AMG-04 parked', 20, 'repeated-no-merge-release'],

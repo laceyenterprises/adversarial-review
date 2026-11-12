@@ -278,6 +278,10 @@ test('every concrete hammer prompt helper call executes against the real helper 
           return claimValues[key];
         }).replaceAll('updated | skipped_superproject | not_applicable', 'updated'));
       writeFileSync(join(f.run, 'terminal-remediation.json'), JSON.stringify(claim));
+    } else if (value.auditDetailsFile && value.remediated && value.docCurrency) {
+      // HAMCONTROLLERSCRIPT-01: the close command's only closer input is data.
+      writeFileSync(join(f.run, value.auditDetailsFile), '**Findings addressed**\n- Synthetic correction (blocking): src/example.mjs; fixed\n');
+      writeFileSync(join(f.run, 'close-plan.json'), JSON.stringify(value));
     } else if (value.base && value.ours && value.theirs && value.resolved) {
       assert.deepEqual(value.resolved, { ...value.base, ...value.ours, ...value.theirs });
     } else assert.fail(`unbound JSON example: ${JSON.stringify(value)}`);
@@ -307,7 +311,7 @@ test('every concrete hammer prompt helper call executes against the real helper 
       'hammer-base-head.mjs', 'hammer-controller.mjs', 'guard-forbidden-paths.mjs', 'hammer-edit-plan.mjs',
       'dispute-finding.mjs', 'stacked-base-check.mjs', 'hammer-pr-read.mjs', 'hammer-progress.mjs',
       'hammer-conflict-primary.mjs', 'hammer-predicate-inputs.mjs', 'hammer-claim-head.mjs',
-      'primary-change-context.mjs', 'ama-check.mjs']);
+      'primary-change-context.mjs', 'ama-check.mjs', 'hammer-close.sh']);
     for (const name of names) {
       assert.ok(known.has(name), `add a real-helper fixture for ${name} at prompt line ${line}`);
       seen.add(name);
@@ -315,6 +319,16 @@ test('every concrete hammer prompt helper call executes against the real helper 
     // Repeated identical examples share one execution; each occurrence still
     // passes discovery, binding and shell-function checks.
     const rendered = f.render(command);
+    if (names.includes('hammer-close.sh')) {
+      // The close command itself is exercised by hamcontrollerscript-01; here
+      // the documented plan must pass the shipped validator unchanged.
+      assert.match(rendered, /^\/bin\/bash "[^"]+\/bin\/hammer-close\.sh" "[^"]+\/close-plan\.json"$/);
+      const plan = rendered.match(/"([^"]+\/close-plan\.json)"$/)[1];
+      execFileSync(process.execPath, [join(root, 'bin/hammer-close-plan.mjs'), 'check', plan],
+        { env: { ...f.env, NODE_OPTIONS: '' }, timeout: 5000, stdio: 'pipe' });
+      executed.add(rendered);
+      continue;
+    }
     if (executed.has(rendered)) continue;
     executed.add(rendered);
     const editPlan = names.includes('hammer-edit-plan.mjs') && !/\s--help$/.test(rendered);

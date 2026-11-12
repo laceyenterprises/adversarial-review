@@ -34,8 +34,8 @@ test -f "<<RUN_DIR>>/inputs.sh" || {
 source "<<RUN_DIR>>/inputs.sh"
 ```
 
-Use Appendix A's status-capturing wrapper in one persistent Bash shell under
-the foreground controller. Preserve FD 4 and all HQ/controller environment.
+Close only through Appendix A's one shipped close command, in the foreground;
+it owns the controller, FD 4, phase order and lease. Preserve HQ environment.
 After failure, follow only the explicit conflict/deferred paths below.
 
 ### State machine
@@ -45,31 +45,26 @@ After failure, follow only the explicit conflict/deferred paths below.
 2. **Repair:** remediate findings, preserve author intent, run targeted tests
    outside the lease, and commit only changed files with the contiguous HAM
    provenance trailers in Appendix C. Reuse already-fixed heads; no empty commit.
-3. **Publish commit:** export `HAM_COMMIT_PUBLICATION_ONLY=1`, source
-   `hammer-publish.sh`, then unset the flag on success. This does not publish a
-   validated audit. Use Appendix C's ordinary publication block.
-4. **Verify head:** source `hammer-verify-head.sh`; act on the table below.
-   CONFLICTING/DIRTY enters bounded repair before absent-CI waits; UNKNOWN observes.
-5. **Publish audit:** with revalidation complete and the lease held, source
-   `hammer-publish.sh` without publication-only mode. Prepare audit inputs in
-   Appendix A. Run Appendix E's bounded exact-head CI wait, then build and run its predicate.
-6. **Merge:** source `hammer-merge.sh` without arguments only after that predicate succeeds;
-   confirm the live merged head and finish Appendix E's closing audit.
+3. **Close:** write Appendix A's close data files, then run its ONE shipped
+   close command. It publishes the commit, verifies head (CONFLICTING/DIRTY
+   exits 21 before absent-CI waits), revalidates, publishes the audit, waits
+   for exact-head CI, runs Appendix E's predicate and merges. Its result
+   `stage` names the phase in the table below.
+4. **After merge:** confirm the live merged head and finish Appendix E's closing audit.
 
 ### Phase → exit code → next action
 
+The close command's `close-result.json` `stage` is the phase; `status` is its exit code.
+
 | Phase | Exit code | Next action |
 | --- | --- | --- |
-| verify-head | 0 | If `HAM_NEEDS_REVALIDATION=true`, save produced head/base, yield for targeted tests (Appendix C), rerun verify-head. Otherwise publish audit, then predicate (Appendix E), then merge. |
+| any | 0 | Outcome `merged`: confirm the exact validated head merged and finish closing audit (Appendix E). |
 | verify-head | 20 | Stop with the printed named outcome. Preserve parked/deferred audits and retry semantics (Appendix B, mandate 0b); `already-merged` goes to confirmed closeout, never remediation. `ci-infrastructure` stops without HQ decision. |
-| verify-head | 21 | Run **Appendix D — Resolving merge conflicts**, starting with its lease-state query/release block. Repair, publish commit, revalidate, then re-enter **verify-head**. |
-| verify-head | other | Stop with the printed reason; release/audit via the stop conditions below. |
-| publish (publication-only) | 0 | Unset `HAM_COMMIT_PUBLICATION_ONLY`; refresh context after push; enter verify-head. |
-| publish (audit) | 0 | Build and run Appendix E's predicate on the published audit head, then merge. |
-| publish (either mode) | nonzero | Stop; preserve pushed-head provenance and the named failure. No merge or source re-review. |
-| merge | 0 | Confirm the exact validated head merged and finish closing audit (Appendix E). |
-| merge | 21 | Run Appendix D's conflict block; publish, revalidate, re-enter verify-head, rebuild audit/predicate, then merge. |
+| verify-head / merge | 21 | Run **Appendix D — Resolving merge conflicts**, starting with its lease-state query/release block. Repair, commit, then rerun the close command. |
+| publish | nonzero | Stop; preserve pushed-head provenance and the named failure. No merge or source re-review. |
+| local-validation | nonzero | Failed tests: repair, commit and rerun the close command, or release for another hammer pass. |
 | merge | 20 / 75 / other nonzero | Stop with printed outcome. Preserve retryable deferrals such as `lane-busy`; if merge may have been accepted, reconcile authoritative live state, never retry mutation blindly (Appendix E). |
+| other | nonzero | Stop with the printed reason; 75 is a retryable deferral. Release/audit via the stop conditions below. |
 
 ### Observe lease state
 
@@ -107,7 +102,10 @@ then remediate or record the policy-permitted backlog deferral.
 Never reinterpret a policy refusal of the plan's substance as a usage error.
 
 For controller setup or a mistakenly ended owning shell, retry setup once
-inside this run only after the existing controller confirms cleanup. Resume
+inside this run only after the existing controller confirms cleanup. The
+controller is shipped (HAMCONTROLLERSCRIPT-01): a setup stop (125, or a helper
+timeout 142/143) is retried by rerunning the same close command in this
+workspace; never end the run to obtain a fresh workspace for it. Resume
 with verify-head and fresh lease/head checks; never replay publication or merge.
 An unknown cleanup or live owner retains custody and forbids a second controller.
 An exhausted closer fault is a **deferred harness fault**, never a terminal PR
@@ -272,76 +270,43 @@ export HAM_ROOT_DIR='<<ROOT_DIR>>' HAM_HQ_ROOT='<<HQ_ROOT>>' HAM_HQ_OWNER='<<HQ_
 export HAM_AUDIT_PATH='<<AUDIT_PATH>>' HAM_REVIEWER='<<REVIEWER>>'
 export HAM_AMA_TRAILERS=<<AMA_TRAILERS_SHELL>>
 source "<<ROOT_DIR>>/bin/hammer-shell-helpers.sh" || { return 1 2>/dev/null || exit 1; }
-ham_step() { /usr/bin/perl -e 'shift or exit 1; exec @ARGV; die $!' "$HAM_NODE_BIN" "<<ROOT_DIR>>/bin/hammer-helper-step.mjs" "$@"; }
+ham_step() { /usr/bin/perl -e 'my $n = shift or exit 1; exec $n, @ARGV; die $!' "$HAM_NODE_BIN" "<<ROOT_DIR>>/bin/hammer-helper-step.mjs" "$@"; }
 ham_read() { ham_step read:report "$1" 90 540 "${@:2}"; }
 HAM_INPUTS
 source "<<RUN_DIR>>/inputs.sh"
 "${HAM_NODE_BIN:-node}" "<<ROOT_DIR>>/bin/hammer-controller.mjs" resolve-environment || exit $?
 ```
 
-Write `<<RUN_DIR>>/close-controller.sh`; run in foreground:
+Close with ONE shipped command (HAMCONTROLLERSCRIPT-01); never write controller
+shell, read `/dev/tty` or stdin, or source phases yourself. Write data only:
+write the complete audit markdown to a file under `<<RUN_DIR>>` with `**Findings addressed**` and one single-line
+bullet per finding (exact title, blocking class, changed files, fix; no Doc-currency
+line), `$HAM_RUN_DIR/terminal-remediation.json` (Appendix E), and
+`<<RUN_DIR>>/close-plan.json`:
 
-```bash
-"${HAM_NODE_BIN:-node}" "<<ROOT_DIR>>/bin/hammer-controller.mjs" run "<<RUN_DIR>>/close-controller.sh"
+```json
+{"auditDetailsFile":"audit-details.md","remediated":{"total":2,"blocking":1,"nonBlocking":1},"failingTestsFixed":"suite already green","docCurrency":{"status":"not applicable","reason":"src/example.mjs: no canonical doc covers it"},"validationFiles":["src/example.mjs"]}
 ```
 
-Before lease acquisition; preserve HQ/controller env and FD 4.
-No direct/detached shell or nested controller; validators share its group.
+`docCurrency.status`: `applicable`, `not applicable` or `skipped superproject-doc
+obligation`. Commit, then run in the foreground (it sources inputs, holds FD 4):
 
-Before the lease, write the complete audit markdown to a file under `<<RUN_DIR>>`; export
-`HAM_AUDIT_DETAILS_FILE`. Include `**Findings addressed**` and one single-line
-bullet per finding: exact title, blocking class, changed files and fix.
-Export decimal `HAM_AUDIT_REMEDIATED_TOTAL`, `HAM_AUDIT_REMEDIATED_BLOCKING`,
-`HAM_AUDIT_REMEDIATED_NON_BLOCKING` (the classes sum to the total), and
-`HAM_FAILING_TESTS_FIXED` (actual repairs or `suite already green`).
-Export `HAM_DOC_CURRENCY` (`applicable`, `not applicable`, or
-`skipped superproject-doc obligation`) and
-`HAM_DOC_CURRENCY_REASON`: one line naming covered changed files and updated
-docs when applicable. The publication step renders Doc-currency; omit it from
-the details file. Missing or placeholder inputs release the lease. Keep these
-values in the same shell for the merge audit.
+```bash
+/bin/bash "<<ROOT_DIR>>/bin/hammer-close.sh" "<<RUN_DIR>>/close-plan.json"
+```
 
-Use `source "<<RUN_DIR>>/hammer-merge.sh" --wait-ci` after publication and before the predicate for bounded exact-head required-check waits.
+It publishes a new commit, verifies head under the lease, revalidates
+`validationFiles` outside it, publishes the audit, waits for exact-head CI,
+builds the claim and predicate, and merges. It prints `close-result.json`
+(`status`, `outcome`); act on them per the exit-code table; 21 enters Appendix D,
+then rerun it. Exit 65 `close-plan-invalid`: correct the plan once and rerun.
+
 GitHub calls: `ham_gh` or `ham_pr`. No `--watch` or polling loops.
 API helpers refresh per call, then refresh and retry once on a credential rejection.
 Use the controller's refresh-on-request `ham_git` for remote operations and
 `ham_bounded_git_sync` for fetches. Failed Git credential minting stops with
 retryable `git-credential-refresh-failed`.
 Never read or print raw token variables.
-
-For each phase, in that shell, set `PHASE` to `hammer-verify-head`, `hammer-publish`, or `hammer-merge` and run:
-
-```bash
-case "$PHASE" in
-  hammer-verify-head) HAM_PHASE_SCRIPT='<<RUN_DIR>>/hammer-verify-head.sh' ;;
-  hammer-publish) HAM_PHASE_SCRIPT='<<RUN_DIR>>/hammer-publish.sh' ;;
-  hammer-merge) HAM_PHASE_SCRIPT='<<RUN_DIR>>/hammer-merge.sh' ;;
-esac
-HAM_PHASE_LOG=$(mktemp '<<RUN_DIR>>/phase-log.XXXXXX') || exit 1
-HAM_PHASE_OUTCOME=not-run
-# Descriptor 3 streams lease-wait progress; buffer diagnostics.
-if source "$HAM_PHASE_SCRIPT" 3>&2 > "$HAM_PHASE_LOG" 2>&1; then
-  HAM_PHASE_STATUS=0
-else
-  HAM_PHASE_STATUS=$?
-fi
-tail -c 4096 "$HAM_PHASE_LOG"
-rm -f "$HAM_PHASE_LOG"
-if [ "$PHASE" = hammer-merge ] && [ -n "${HAM_VERDICT_FILE:-}" ]; then
-  rm -f "$HAM_VERDICT_FILE"
-  if [ -n "${HAM_PRIMARY_CHANGE_FILE:-}" ]; then rm -f "$HAM_PRIMARY_CHANGE_FILE"; fi
-fi
-printf '\nHAM phase %s: status=%s outcome=%s lease-held=%s\n' \
-  "$PHASE" "$HAM_PHASE_STATUS" "$HAM_PHASE_OUTCOME" "${HAM_MERGE_LEASE_HELD:-0}"
-[ "$HAM_PHASE_STATUS" -eq 0 ]
-```
-
-Before `hammer-merge` without arguments, wait for published-head CI, build the terminal-remediation claim JSON and run the
-predicate. Source phases in one persistent Bash shell/tool invocation; otherwise
-stop before acquiring a lease. Use dispatch's deployed scripts unchanged; never
-render copies. A failed source follows the operating-core exit-code table;
-exit 21 enters Appendix D. Audit publication/merge require the held lease;
-publication-only mode precedes it. Keep HQ merge-signal integration.
 
 Effective strict non-blocking remediation policy: `<<STRICT_NON_BLOCKING_REMEDIATION>>`. True: required non-blocking findings may authorize cited reversions. False: preserve protected author code and record advisory conflicts. The live predicate independently resolves policy.
 
@@ -936,13 +901,13 @@ For commit/validation progress receipt semantics, read Appendix G4.
 The commit helper requires `HEAD` to differ from and descend from `HAM_TARGET_REMEDIATION_SHA || HAM_REVIEWED_SHA` before recording `remediation-committed`; an already-advanced dispatch target earns no credit by itself. The bounded validation helper records `validation-passed` or `validation-failed` for completed commands (exit 0 or 1–123); timeouts remain unknown. These validation receipts are advisory liveness signals, not proof tests ran or passed. Each receipt kind earns one bounded outcome slice per run; repeating it earns no additional time.
 <!-- /hammer-reference:G4 -->
 
-Before head validation, export `HAM_COMMIT_PUBLICATION_ONLY=1` and `source "<<RUN_DIR>>/hammer-publish.sh"`. Stop on failure; unset the flag on success. Ordinary remediation retains the conflict-repair guards.
+Before head validation, the close command publishes a new local commit (`HAM_COMMIT_PUBLICATION_ONLY=1` with `hammer-publish.sh`) and stops on failure. Ordinary remediation retains the conflict-repair guards.
 
 Refresh and validate the live head:
 
 These waits are fixed by the procedure; do not export or shorten them. A hammer that has only the lease left waits for it.
 
-In the same shell with dispatch values exported, `source "<<RUN_DIR>>/hammer-verify-head.sh"`. Wait ≤300s for `HAM_PUSHED_HEAD` to replace `HAM_PUSHED_FROM_HEAD`. Retry transient errors/alarms within that bound; retain cached JSON. Permanent errors/invalid heads stop; third heads take the race path. Acquire the lease, rebase within bounds, validate. Nonzero stops: 20 parked/blocked, 21 conflict. Resolve, revalidate, rerun verify-head.
+The close command then sources `hammer-verify-head.sh`. Wait ≤300s for `HAM_PUSHED_HEAD` to replace `HAM_PUSHED_FROM_HEAD`. Retry transient errors/alarms within that bound; retain cached JSON. Permanent errors/invalid heads stop; third heads take the race path. Acquire the lease, rebase within bounds, validate. Nonzero stops: 20 parked/blocked, 21 conflict. Resolve, revalidate, rerun verify-head.
 
 If `HAM_NEEDS_REVALIDATION=true`, save `HAM_PRODUCED_HEAD`/`HAM_CURRENT_BASE_SHA`
 before `ham_release_merge_lease --yield local-validation`. Run step-2b tests via
@@ -1076,12 +1041,10 @@ while true; do
   sleep $((HAM_CONFLICT_SUBMODULE_SYNC_ATTEMPT * 2))
   HAM_CONFLICT_SUBMODULE_SYNC_ATTEMPT=$((HAM_CONFLICT_SUBMODULE_SYNC_ATTEMPT + 1))
 done
-# Publish; rebased/multi-commit history keeps the lease-protected git route.
-HAM_COMMIT_PUBLICATION_ONLY=1
-export HAM_COMMIT_PUBLICATION_ONLY
-source "<<RUN_DIR>>/hammer-publish.sh" || exit 1
-unset HAM_COMMIT_PUBLICATION_ONLY
 ```
+
+Rerun the close command: it publishes this commit first (rebased/multi-commit
+history keeps the lease-protected git route).
 
 `conflict-primary-unproven` routes this head to the watcher's builder-tag
 follow-up remediation queue: resolve onto current base, preserve both sides,
@@ -1089,8 +1052,8 @@ fix findings and push for full review and full-range validation. No replay retry
 Report reviewed head and captured base.
 `conflict-primary-timeout`/`-failed`: proof did not run, not a mismatch.
 
-After conflict repair and commit publication, refresh context and re-run
-changed-surface tests (2b) outside the lease. Re-enter **verify-head** (Appendix C)
+After conflict repair, refresh context and re-run changed-surface tests (2b)
+outside the lease. Rerun the close command; it re-enters **verify-head** (Appendix C)
 to acquire the lease and recheck head/base and exact-head required checks. Follow
 `HAM_NEEDS_REVALIDATION` as usual, rebuild audit/predicate, then merge. Never
 jump straight from conflict repair to audit publication or merge.
@@ -1099,13 +1062,13 @@ jump straight from conflict repair to audit publication or merge.
 
 Post the PR audit comment. Use `ham_gh` with refreshed entitled credentials. Include every final finding, blocking class and changed path.
 
-In the persistent merge-lease shell, `source "<<RUN_DIR>>/hammer-publish.sh"` with the exported dispatch values. Publish the validation audit under lease. If the captured starting base cannot be proven, the procedure sets `HAM_BASE_HEAD=<<REVIEWED_SHA>>` and audits the full reviewed-to-built range. Nonzero status blocks continuation and releases for a later hammer pass; it never requests review.
+Under the lease, the close command sources `hammer-publish.sh` to publish the validation audit. If the captured starting base cannot be proven, the procedure sets `HAM_BASE_HEAD=<<REVIEWED_SHA>>` and audits the full reviewed-to-built range. Nonzero status blocks continuation and releases for a later hammer pass; it never requests review.
 
-Before building claim/predicate inputs, run `source "<<RUN_DIR>>/hammer-merge.sh" --wait-ci` in the same shell. It waits only when this run published a changed head (including a server rebase), yields the first CI wait, and reacquires under the existing lease rules. Exit 21 takes Appendix D before any further check wait. Pending checks exhaust the existing CI deadline with `required-checks-pending` / `remote-ci-timeout`, never `predicate-failed`. A run with no publication returns `ci-wait-not-needed`. This mode cannot merge and needs no predicate verdict. The normal merge invocation retains the same deadline and all merge fences.
+Before building claim/predicate inputs, the close command runs `hammer-merge.sh --wait-ci`. It waits only when this run published a changed head (including a server rebase), yields the first CI wait, and reacquires under the existing lease rules. Exit 21 takes Appendix D before any further check wait. Pending checks exhaust the existing CI deadline with `required-checks-pending` / `remote-ci-timeout`, never `predicate-failed`. A run with no publication returns `ci-wait-not-needed`. This mode cannot merge and needs no predicate verdict. The normal merge invocation retains the same deadline and all merge fences.
 
 On success, refresh all exact-head inputs below. If the wait's bounded base retry changed `POST_REMEDIATION_SHA`, re-source `hammer-publish.sh` under the reacquired lease to publish the new head's audit before constructing the predicate. Phase head variables are exported for child processes.
 
-Run this block verbatim; never re-type its reads. The helper writes `pr-after.json`, `reviews.json`, `protection.json`, `timeline.json` and `commit.json` for `$POST_REMEDIATION_SHA`, retrying transient failures in place. Exit 75 is a retryable closure deferral (not final for this head); exit 1 prints its named refusal.
+The close command runs this block; never run or re-type it. The helper writes `pr-after.json`, `reviews.json`, `protection.json`, `timeline.json` and `commit.json` for `$POST_REMEDIATION_SHA`, retrying transient failures in place. Exit 75 is a retryable closure deferral (not final for this head); exit 1 prints its named refusal.
 
 ```bash
 export HAM_PROCEDURE_STEP=predicate-input-refresh
@@ -1161,7 +1124,7 @@ API-publish one single-parent commit above fetched remote HEAD; rebased/multi-co
 }
 ```
 
-Bind the claim with the deployed helper; never write interpreter glue to read phase variables.
+The close command binds the claim with the deployed helper; never write interpreter glue to read phase variables.
 Publication exports `HAM_AUDIT_COMMENT_BODY`; the helper copies it only when its
 single `HAM-Validated-Head` line matches the exported head, preserving the claim's
 findings and doc-currency evidence:
@@ -1172,7 +1135,7 @@ HAM_PHASE_OUTCOME=claim-build-failed
 "$HAM_NODE_BIN" "<<ROOT_DIR>>/bin/hammer-claim-head.mjs" "$HAM_RUN_DIR/terminal-remediation.json" || exit 1
 ```
 
-Validate the live post-remediation head after publishing the audit. Export the owned, run-scoped verdict file for the merge helper. Remove both owned files after merge:
+The close command validates the live post-remediation head after publishing the audit. It exports the owned, run-scoped verdict file for the merge helper. Remove both owned files after merge:
 
 ```bash
 export HAM_PROCEDURE_STEP=predicate
@@ -1225,12 +1188,14 @@ All preconditions must hold: the exact live head is the hammer's own HAM commit,
 verified from GitHub's full commit message with `Worker-Class: hammer`,
 `Worker-Ticket: HAM`, and `Reviewed-Head:` matching the trusted reviewed SHA;
 GitHub explicitly reports **both author and committer logins null** (the trace's
-`authorLoginNull` and `committerLoginNull` must both be true); and the hammer holds
-the merge lease (`HAM_MERGE_LEASE_HELD=1`, matching nonempty
-`HAM_MERGE_LEASE_ID`, unexpired and owned by this PR/run). Never re-author a
-non-hammer commit or infer ownership from the null identities alone.
+`authorLoginNull` and `committerLoginNull` must both be true); and the refusal came
+from this run's close command for this exact head, holding its merge lease (its
+`close-result.json` names that head; the verdict is kept in
+`$HAM_RUN_DIR/predicate-verdict.json`). Never re-author a non-hammer commit or
+infer ownership from the null identities alone.
 
-At most one re-author per run, in the same persistent lease shell:
+At most one re-author per run, after that close command released its lease
+(conflict repair pushes outside the lease the same way):
 
 1. Save the exact old live head SHA and branch. Require local HEAD to equal it,
    a clean index/worktree, and all spawned `GIT_AUTHOR_*` / `GIT_COMMITTER_*`
@@ -1244,12 +1209,11 @@ At most one re-author per run, in the same persistent lease shell:
    `ham_git push origin "HEAD:refs/heads/$branch" --force-with-lease="$branch:$old_head"`,
    where `old_head` is the exact saved SHA, never a refreshed tracking ref.
    A failed lease push stops the repair; never retry with a weaker lease.
-4. Re-run `node <<ROOT_DIR>>/bin/hammer-context.mjs <<REPO>> <<PR_NUMBER>>` once.
-   Refresh `POST_REMEDIATION_SHA`, live PR/reviews/checks/protection/timeline and
-   GitHub commit inputs. Update the claim SHA and re-publish the head-bound audit
-   using `hammer-publish` under the same held lease. Invalidate the old verdict
-   readiness marker and re-run the predicate command above **once**, writing
-   the fresh result to the owned verdict file. The new commit must pass the
+4. Re-run `node <<ROOT_DIR>>/bin/hammer-context.mjs <<REPO>> <<PR_NUMBER>>` once,
+   then rerun the close command **once**. It reacquires the lease, refreshes
+   `POST_REMEDIATION_SHA` and every live input, rebinds the claim, re-publishes
+   the head-bound audit (`hammer-publish`) and re-runs the predicate into a fresh
+   owned verdict file. The new commit must pass the
    unchanged identity check on its own merits; no re-review is needed for an
    identical tree. Merge only if the fresh predicate and all merge guards pass.
 5. If the predicate still fails, release the lease. For a primary-change refusal
@@ -1284,7 +1248,7 @@ Do not merge unless all of these are true:
 
 In-lease merge:
 
-In the persistent merge-lease shell, `source "<<RUN_DIR>>/hammer-merge.sh"` with exported dispatch values. It requires successful audit publication and an eligible `POST_REMEDIATION_SHA` predicate, then rechecks live head/CI under lease. Either missing prerequisite appends `failed-without-merge` and releases the lease. The wrapper reports bounded diagnostics, status, outcome and lease state. Nonzero status on an open PR requires mandate 0b's report; preserve retryable deferrals such as `lane-busy`.
+The close command then sources `hammer-merge.sh` under the lease. It requires successful audit publication and an eligible `POST_REMEDIATION_SHA` predicate, then rechecks live head/CI under lease. Either missing prerequisite appends `failed-without-merge` and releases the lease. The wrapper reports bounded diagnostics, status, outcome and lease state. Nonzero status on an open PR requires mandate 0b's report; preserve retryable deferrals such as `lane-busy`.
 
 
 After the merged audit append succeeds, emit the merge signal and then release

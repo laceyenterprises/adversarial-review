@@ -21,7 +21,8 @@ const HAMMER_TEMPLATE = readFileSync(join(REPO_ROOT, 'templates', 'hammer-prompt
 // Structural merge-protocol assertions inspect the extracted versioned procedures
 // at their call sites, while the dispatched prompt remains small.
 const HAMMER_PROMPT = HAMMER_TEMPLATE.replace(
-  /In (?:the persistent merge-lease shell,|the same shell with dispatch values exported,) `source "<<RUN_DIR>>\/(hammer-[a-z-]+)\.sh"`[^\n]*\n/g,
+  // HAMCONTROLLERSCRIPT-01: the shipped close command sources each phase.
+  /(?:The close command then sources|Under the lease, the close command sources) `(hammer-[a-z-]+)\.sh`[^\n]*\n/g,
   (_, phase) => `\`\`\`bash\n${readFileSync(join(REPO_ROOT, 'bin', `${phase}.sh`), 'utf8')}\`\`\`\n`,
 );
 
@@ -40,14 +41,17 @@ test('HAMPROMPT-01: rendered operating core directs execution, observable state 
   assert.match(core, /test -f "\/fixture\/run\/hammer-verify-head.sh" -a -f "\/fixture\/run\/hammer-publish.sh" -a -f "\/fixture\/run\/hammer-merge.sh"/);
   assert.match(core, /test -f "\/fixture\/run\/inputs.sh"/);
   assert.match(core, /hammer-lease-state.mjs.*--pr "42".*--head/);
-  for (const code of ['0', '20', '21', 'other']) {
-    assert.ok(core.includes(`| verify-head | ${code} |`));
-  }
-  assert.match(core, /verify-head \| 21 \| Run \*\*Appendix D — Resolving merge conflicts\*\*.*re-enter \*\*verify-head\*\*/);
-  assert.match(core, /publish \(publication-only\) \| 0/);
-  assert.match(core, /publish \(audit\) \| 0/);
-  assert.match(core, /publish \(either mode\) \| nonzero/);
-  assert.match(core, /merge \| 21/);
+  // HAMCONTROLLERSCRIPT-01: phases run inside the one shipped close command;
+  // its result stage/status select the next action.
+  assert.ok(core.includes('| any | 0 |'));
+  assert.ok(core.includes('| verify-head | 20 |'));
+  assert.match(core, /verify-head \/ merge \| 21 \| Run \*\*Appendix D — Resolving merge conflicts\*\*.*rerun the close command/);
+  assert.match(core, /publish \| nonzero/);
+  assert.match(core, /local-validation \| nonzero/);
+  assert.match(core, /merge \| 20 \/ 75 \/ other nonzero/);
+  assert.match(core, /other \| nonzero/);
+  assert.match(prompt, /\/bin\/bash "\/fixture\/deployed\/bin\/hammer-close\.sh" "\/fixture\/run\/close-plan\.json"/);
+  assert.doesNotMatch(prompt, /close-controller\.sh|hammer-controller\.mjs" run/);
   assert.match(core, /same next step twice without executing it, execute it\nnow/);
   assert.match(core, /hammer-terminal-audit.mjs.*procedure-stalled/s);
   assert.doesNotMatch(prompt, /check phase scripts/);
@@ -195,45 +199,39 @@ test('merge-agent controller setup and launch blocks execute without prose or pa
   const launch = blocks.find(block => /^node [^\n]*hammer-controller\.mjs[^\n]* run /.test(block));
   assert.ok(setup, 'directory setup must be executable fenced Bash');
   assert.ok(launch, 'controller launch must be executable fenced Bash');
-  assert.ok(prompt.indexOf(setup) < prompt.indexOf('set -euo pipefail'));
-  assert.ok(prompt.indexOf(launch) > prompt.indexOf('set -euo pipefail'));
+  // HAMCONTROLLERSCRIPT-01: no controller shell body; one shipped command.
+  assert.doesNotMatch(prompt, /set -euo pipefail|close-controller\.sh"/);
+  assert.ok(prompt.indexOf(setup) < prompt.indexOf(launch));
   const result = spawnSync('/bin/bash', ['-euc', `
 mktemp() { command mktemp "$@" "$TMPDIR/run.XXXXXX"; }
-node() { test -f "$3"; printf '%s\\n' "$@" "$HAM_REPO" "$HAM_PR_NUMBER" "$HAM_ROOT_DIR"; }
+node() { test -f "$1" && test -f "$3"; printf '%s\\n' "$@" "$HAM_REPO" "$HAM_PR_NUMBER" "$HAM_ROOT_DIR"; }
 ${setup}
-printf '%s\\n' '#!/bin/bash' > "$HAM_RUN_DIR/close-controller.sh"
 ${launch}
 `], { encoding: 'utf8', timeout: 5000, env: { ...process.env, TMPDIR: root } });
   assert.ifError(result.error);
   assert.equal(result.status, 0, result.stderr);
-  const [helper, action, script, repo, pr, deployedRoot] = result.stdout.trim().split('\n');
+  const [helper, action, script, ...rest] = result.stdout.trim().split('\n');
   assert.equal(helper, join(REPO_ROOT, 'bin/hammer-controller.mjs'));
   assert.equal(action, 'run');
-  assert.ok(script.startsWith(`${root}/`));
-  assert.ok(script.endsWith('/close-controller.sh'));
-  assert.equal(repo, 'fixture/repo');
-  assert.equal(pr, '42');
+  assert.equal(script, join(REPO_ROOT, 'bin/merge-agent-close-controller.sh'));
+  const [repoFlag, repo, baseFlag, base, prFlag, pr, commandsFlag, commands, envRepo, envPr, deployedRoot] = rest;
+  assert.deepEqual([repoFlag, repo, baseFlag, base, prFlag, pr, commandsFlag],
+    ['--repo', 'fixture/repo', '--base', 'main', '--pr', '42', '--commands']);
+  assert.ok(commands.startsWith(`${root}/`) && commands.endsWith('/close-commands.json'));
+  assert.equal(envRepo, 'fixture/repo');
+  assert.equal(envPr, '42');
   assert.equal(deployedRoot, `${REPO_ROOT}/`);
 });
 
-test('hammer controller launch honors an isolated Node executable and the PATH fallback', t => {
-  const root = mkdtempSync(join(tmpdir(), 'hammer-node-prompt-'));
-  t.after(() => rmSync(root, { recursive: true, force: true }));
-  const customNode = join(root, 'isolated node');
-  const stub = '#!/bin/sh\nprintf "%s\\n" "$@"\n';
-  writeFileSync(customNode, stub, { mode: 0o755 });
-  writeFileSync(join(root, 'node'), stub, { mode: 0o755 });
-  const launch = HAMMER_TEMPLATE.match(/```bash\n([^\n]*hammer-controller\.mjs[^\n]*)\n```/)?.[1];
-  assert.ok(launch);
-  const script = launch.replaceAll('<<ROOT_DIR>>', '/deployed root').replaceAll('<<RUN_DIR>>', '/private run');
-  for (const nodeBin of [customNode, '']) {
-    const result = spawnSync('/bin/bash', ['-euc', script], { encoding: 'utf8', timeout: 5000,
-      env: { ...process.env, HAM_NODE_BIN: nodeBin, PATH: nodeBin ? '' : root } });
-    assert.ifError(result.error);
-    assert.equal(result.status, 0, result.stderr);
-    assert.deepEqual(result.stdout.trim().split('\n'), [
-      '/deployed root/bin/hammer-controller.mjs', 'run', '/private run/close-controller.sh',
-    ]);
+test('HAMCONTROLLERSCRIPT-01: the hammer prompt closes with one shipped command and no controller shell', () => {
+  const launch = HAMMER_TEMPLATE.match(/```bash\n([^\n]*hammer-close\.sh[^\n]*)\n```/)?.[1];
+  assert.equal(launch, '/bin/bash "<<ROOT_DIR>>/bin/hammer-close.sh" "<<RUN_DIR>>/close-plan.json"');
+  assert.doesNotMatch(HAMMER_TEMPLATE, /close-controller\.sh|Write `<<RUN_DIR>>\/[^`]*\.sh`/);
+  assert.doesNotMatch(HAMMER_TEMPLATE, /set -euo pipefail|trap [^\n]*EXIT\n[\s\S]*hammer-controller\.mjs[^\n]* run/);
+  assert.match(HAMMER_TEMPLATE, /never write controller\s+shell, read `\/dev\/tty` or stdin/);
+  // No bash block in the prompt sources a phase script any more.
+  for (const [, block] of HAMMER_TEMPLATE.matchAll(/```bash\n([\s\S]*?)\n```/g)) {
+    assert.doesNotMatch(block, /source "?<<RUN_DIR>>\/hammer-(?:verify-head|publish|merge)\.sh/);
   }
 });
 
@@ -272,7 +270,8 @@ test('ordinary remediation publishes before validating the live head', () => {
   const ordinary = HAMMER_TEMPLATE.slice(HAMMER_TEMPLATE.indexOf('Commit the remediation:'),
     HAMMER_TEMPLATE.indexOf('## Resolving merge conflicts'));
   assert.match(ordinary, /HAM_COMMIT_PUBLICATION_ONLY=1/);
-  assert.match(ordinary, /source "<<RUN_DIR>>\/hammer-publish\.sh"/);
+  // HAMCONTROLLERSCRIPT-01: the shipped close command runs the publication.
+  assert.match(ordinary, /the close command publishes a new local commit \(`HAM_COMMIT_PUBLICATION_ONLY=1` with `hammer-publish\.sh`\)/);
   assert.ok(ordinary.indexOf('HAM_COMMIT_PUBLICATION_ONLY=1') < ordinary.indexOf('Refresh and validate the live head'));
   assert.match(HAMMER_TEMPLATE, /rebased\/multi-commit history uses lease-protected git/);
 });
@@ -492,7 +491,7 @@ test('hammer prompt enforces the lease guarded GitHub-required-gate merge protoc
   // CLOSERGATES-01: protection classification lives in the deployed helper;
   // the prompt runs it verbatim and never re-types its reads.
   assert.doesNotMatch(HAMMER_PROMPT, /protection_plan_unavailable_re=|repos\/[^"]*\/branches\/\$base_enc\/protection/);
-  assert.match(HAMMER_PROMPT, /Run this block verbatim; never re-type its reads\./);
+  assert.match(HAMMER_PROMPT, /The close command runs this block; never run or re-type it\./);
   assert.match(HAMMER_PROMPT, /trap 'ham_release_merge_lease' EXIT\n"\$\{HAM_NODE_BIN:-node\}" "[^"]*\/bin\/hammer-predicate-inputs\.mjs"/);
   assert.doesNotMatch(HAMMER_PROMPT, /\|\s*IN\(/);
   assert.match(HAMMER_PROMPT, /summarizeChecksConclusion\(pr\.statusCheckRollup\) === 'SUCCESS'/);
@@ -838,10 +837,12 @@ test('HAMIDENT-02: bounded unlinked identity repair requires own HAM trailers an
   for (const required of [
     'ham-commit-identity-unlinked', 'only failing', 'Worker-Class: hammer',
     'Worker-Ticket: HAM', 'Reviewed-Head:', 'both author and committer logins null',
-    'HAM_MERGE_LEASE_HELD=1', 'HAM_MERGE_LEASE_ID', 'unexpired',
+    // HAMCONTROLLERSCRIPT-01: the refusal must come from this run's close
+    // command holding its lease for the exact head; the rerun reacquires it.
+    "this run's close command for this exact head, holding its merge lease", 'close-result.json',
     'At most one re-author per run', 'git commit --amend --no-edit --reset-author',
     '--force-with-lease="$branch:$old_head"', 'byte-identical',
-    'hammer-context.mjs', 'hammer-publish', 'predicate command above **once**',
+    'hammer-context.mjs', 'hammer-publish', 'rerun the close command **once**', 'reacquires the lease',
     'Never re-author a', 'Never attempt a second re-author',
   ]) assert.ok(step.includes(required), `missing repair guard: ${required}`);
 });
@@ -940,7 +941,7 @@ test('GATECAPBASE-01: prompt preserves recovery ownership after merge-lease caps
 // operating instructions and the detailed predicate appendix.
 test('published-head CI settles before Appendix E predicate evaluation', () => {
   const appendix = HAMMER_TEMPLATE.slice(HAMMER_TEMPLATE.indexOf('## Appendix E'));
-  assert.match(appendix, /hammer-merge\.sh" --wait-ci/);
+  assert.match(appendix, /the close command runs `hammer-merge\.sh --wait-ci`/);
   assert.ok(appendix.indexOf('--wait-ci') < appendix.indexOf('bin/ama-check.mjs'));
   assert.match(appendix, /bin\/hammer-claim-head\.mjs/);
   assert.match(HAMMER_TEMPLATE, /HAM_PROCEDURE_STEP=claim-build/);

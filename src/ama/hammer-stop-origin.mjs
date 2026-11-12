@@ -142,6 +142,9 @@ export const HAMMER_STOP_ORIGINS = Object.freeze({
   'controller-setup-failed': 'closer',
   'conflict-sync-failed': 'closer',
   'claim-build-failed': 'closer',
+  // HAMCONTROLLERSCRIPT-01: the shipped close command's own data/build stops.
+  'close-plan-invalid': 'closer',
+  'predicate-build-failed': 'closer',
   'hammer-verify-head-failed': 'closer',
   'hammer-publish-failed': 'closer',
   'hammer-merge-failed': 'closer',

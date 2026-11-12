@@ -23,11 +23,16 @@ async function run(code, options = {}) {
 test('legacy lease-owning prompt requires the same bounded validation helper and release trap', () => {
   const prompt = buildMergeAgentPrompt({ repo: 'fixture/repo', prNumber: 42, baseBranch: 'main' },
     { trigger: FINAL_PASS_ON_BUDGET_EXHAUSTED_TRIGGER });
-  assert.ok(prompt.includes("hammer-validate.mjs' --pytest -- <required test paths>"));
+  // HAMCONTROLLERSCRIPT-01: validation commands are data run by the shipped controller.
+  assert.ok(prompt.includes('`hammer-validate.mjs [--pytest] -- <args>`'));
   assert.ok(prompt.includes('unscaled 120s no-output bound'));
-  assert.ok(prompt.includes('Any timeout, cancellation or test failure must exit nonzero'));
-  assert.ok(prompt.includes('trap cleanup_merge_lease EXIT'));
-  assert.ok(prompt.includes('--changed-files-from "$POST_REMEDIATION_SHA"'));
+  assert.ok(prompt.includes('Its EXIT trap releases the lease on every path after acquisition'));
+  const script = readFileSync(new URL('../bin/merge-agent-close-controller.sh', import.meta.url), 'utf8');
+  assert.ok(script.includes('any timeout,\n# cancellation or failure exits nonzero through the lease-release trap')
+    || /any timeout,\s*(?:#\s*)?cancellation or failure exits nonzero through the lease-release trap/.test(script));
+  assert.ok(script.includes('"$MERGE_NODE" "$VALIDATION_HELPER" "$@"'));
+  assert.ok(script.includes('trap cleanup_merge_lease EXIT'));
+  assert.ok(script.includes('--changed-files-from "$POST_REMEDIATION_SHA"'));
 });
 
 test('supervisor CLIs are directly executable and report usage for missing input', () => {

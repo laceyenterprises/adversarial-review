@@ -296,8 +296,10 @@ touch "$HAM_RUN_DIR/sync-recovered"
   f.env.PATH = `${join(f.dir, 'bin')}:${process.env.PATH}`;
   const prompt = readFileSync(new URL('../templates/hammer-prompt.md', import.meta.url), 'utf8');
   const step = prompt.match(/^ham_step\(\).*$/m)[0];
-  const loop = prompt.slice(prompt.indexOf('HAM_CONFLICT_SUBMODULE_SYNC_CAP='),
-    prompt.indexOf('# Publish; rebased/multi-commit history'));
+  // HAMCONTROLLERSCRIPT-01: publication now belongs to the close command, so
+  // the loop runs to the end of its fenced block.
+  const loopStart = prompt.indexOf('HAM_CONFLICT_SUBMODULE_SYNC_CAP=');
+  const loop = prompt.slice(loopStart, prompt.indexOf('\n```', loopStart));
   const result = f.run(`${step}\nsleep() { :; }\n${loop}`);
   assert.equal(result.status, 0, result.stderr);
   assert.ok(existsSync(join(f.dir, 'sync-recovered')));

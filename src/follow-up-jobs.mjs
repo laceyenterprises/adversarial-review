@@ -19,6 +19,10 @@ import { userInfo } from 'node:os';
 import { randomUUID } from 'node:crypto';
 import { basename, dirname, join, resolve } from 'node:path';
 import { writeFileAtomic } from './atomic-write.mjs';
+import {
+  CHARGED_TO, followUpRoundId, followUpRoundKind, formatPrRoundLedgerSummary, isFollowUpRoundKind,
+  recordPrRound, summarizePrRoundLedger, voidPrRound,
+} from './pr-round-ledger.mjs';
 import { findLiveAmaCloserLease, isHeldAmaCloserLease } from './ama/closer-lease.mjs';
 import { isDaemonMergeReviewAllowed } from './ama/daemon-merge.mjs';
 import { isActiveAmaCloserDispatchRecord, readAmaCloserDispatchRecord, reconcileAmaCloserLease } from './ama/dispatch-closer.mjs';
@@ -1731,6 +1735,9 @@ function summarizePRRemediationLedger(rootDir, { domainId = 'code-pr', repo, prN
     return { completedRoundsForPR: 0, consecutiveNonBlockingRounds: 0, latestMaxRounds: null, latestJobId: null };
   }
   const matches = followUpJobFileFilter({ rootDir, repo: targetRepo, prNumber: targetPr });
+  // REVIEWROUNDLEDGER-01: follow-up rounds of a job still queued or running
+  // are not settled yet; the round ledger excludes them like the legacy scan.
+  const activeJobIds = new Set();
 
   let completedRoundsForPR = 0;
   const infrastructureRefunds = new Set();
@@ -1845,6 +1852,7 @@ function summarizePRRemediationLedger(rootDir, { domainId = 'code-pr', repo, prN
 
       recordInfrastructureHistory(job);
       if (refundsOnly) continue;
+      if (!terminalKeys.has(key) && job.jobId) activeJobIds.add(job.jobId);
       if (terminalKeys.has(key)) recordCommentOnlyFinalRound(rawJob, key);
 
       if (terminalKeys.has(key)) {
@@ -1889,7 +1897,8 @@ function summarizePRRemediationLedger(rootDir, { domainId = 'code-pr', repo, prN
           if (Number.isFinite(cur) && cur >= 0 && terminalAt) {
             completedRoundTimestamps.push({ round: cur, terminalAt });
             if (cur > 0) {
-              completedRoundTriggers.push({ round: cur, terminalAt, nonBlockingOnly: job.nonBlockingOnly === true });
+              completedRoundTriggers.push({ round: cur, terminalAt, nonBlockingOnly: job.nonBlockingOnly === true,
+                jobId: job.jobId || jobPath });
             }
             const revisionRef = String(job?.revisionRef || '').trim();
             if (revisionRef) completedRemediationRevisionRefs.add(revisionRef);
@@ -1928,12 +1937,16 @@ function summarizePRRemediationLedger(rootDir, { domainId = 'code-pr', repo, prN
   }
 
   const latestMaxRoundsRaw = Number(latestJob?.remediationPlan?.maxRounds);
+  // REVIEWROUNDLEDGER-01: one entry per (job, round). Keying by the round
+  // number alone collapsed separate jobs that carried the same number.
   const latestTriggerByRound = new Map();
   for (const entry of completedRoundTriggers) {
-    const prior = latestTriggerByRound.get(entry.round);
-    if (!prior || entry.terminalAt > prior.terminalAt) latestTriggerByRound.set(entry.round, entry);
+    const key = `${entry.jobId}:${entry.round}`;
+    const prior = latestTriggerByRound.get(key);
+    if (!prior || entry.terminalAt > prior.terminalAt) latestTriggerByRound.set(key, entry);
   }
-  const orderedTriggers = [...latestTriggerByRound.values()].sort((a, b) => a.round - b.round);
+  const orderedTriggers = [...latestTriggerByRound.values()]
+    .sort((a, b) => a.round - b.round || String(a.terminalAt).localeCompare(String(b.terminalAt)));
   let consecutiveNonBlockingRounds = 0;
   for (const entry of orderedTriggers) {
     consecutiveNonBlockingRounds = entry.nonBlockingOnly ? consecutiveNonBlockingRounds + 1 : 0;
@@ -1948,6 +1961,24 @@ function summarizePRRemediationLedger(rootDir, { domainId = 'code-pr', repo, prN
   // `latestRiskClass` falls back to DEFAULT_RISK_CLASS when no job
   // records a riskClass (legacy or spec-less PRs).
   const latestRiskClass = normalizeRiskClass(latestJob?.riskClass) || DEFAULT_RISK_CLASS;
+
+  // REVIEWROUNDLEDGER-01: the per-PR round ledger is written by every producer
+  // (follow-up spawns, hammer dispatches, HQ PR-updates, operator retriggers).
+  // The job-derived count stays a floor, so a PR whose rounds predate the
+  // ledger keeps its spent budget; the ledger can only raise the count.
+  const prRoundLedger = refundsOnly ? null : summarizePrRoundLedger(rootDir, {
+    domainId: targetDomainId, repo: targetRepo, prNumber: targetPr,
+  }, { excludeJobIds: activeJobIds, budget: ROUND_BUDGET_BY_RISK_CLASS[latestRiskClass] ?? null });
+  if (prRoundLedger) {
+    // Follow-up rounds already carry their terminal timestamps above; only
+    // rounds from other producers add a budget-reached timestamp.
+    for (const stamp of prRoundLedger.remediationRoundTimestamps) {
+      if (!isFollowUpRoundKind(stamp.kind) && stamp.recordedAt) {
+        completedRoundTimestamps.push({ round: stamp.round, terminalAt: stamp.recordedAt });
+      }
+    }
+    completedRoundsForPR = Math.max(completedRoundsForPR, prRoundLedger.remediationRoundsUsed);
+  }
 
   return {
     completedRoundsForPR,
@@ -1968,6 +1999,9 @@ function summarizePRRemediationLedger(rootDir, { domainId = 'code-pr', repo, prN
     // SINGLEREVIEW-01: unvoided single-review stops still spending budget.
     singleReviewStopJobIds,
     singleReviewVoidedAt,
+    // REVIEWROUNDLEDGER-01: present only once a producer has written the PR's ledger.
+    ...(prRoundLedger && (prRoundLedger.remediationRoundsUsed || prRoundLedger.reviewPasses
+      || Object.keys(prRoundLedger.byKind).length) ? { prRoundLedger } : {}),
   };
 }
 
@@ -2292,7 +2326,9 @@ function createFollowUpJob({ rootDir, readPRHeadImpl, ...jobInput }) {
   try {
     // Clean reviews never publish remediation, so branch evidence cannot hold settlement.
     const job = isSettledReviewJob(baseJob) ? baseJob : resolveFollowUpBranch(baseJob, { readPRHeadImpl });
-    return writeNewFollowUpJob(rootDir, job, jobInput);
+    const created = writeNewFollowUpJob(rootDir, job, jobInput);
+    recordReviewPassRound(rootDir, created.job);
+    return created;
   } finally {
     reviewClaim.release();
   }
@@ -2668,6 +2704,11 @@ function claimNextFollowUpJob({
       continue;
     }
 
+    // REVIEWROUNDLEDGER-01: rounds spent by other producers since this job
+    // was created (hammer, HQ PR-update, another job) lift its PR-wide round
+    // count, so the cap below binds on every source.
+    const prRound = resolvePrRoundAtClaim(rootDir, job);
+    if (prRound?.liftTo) job.remediationPlan = { ...job.remediationPlan, currentRound: prRound.liftTo };
     const currentRound = Number(job?.remediationPlan?.currentRound || 0);
     const maxRounds = Number(job?.remediationPlan?.maxRounds || DEFAULT_MAX_REMEDIATION_ROUNDS);
     const nonBlockingCapReached = job.nonBlockingOnly === true
@@ -2709,7 +2750,8 @@ function claimNextFollowUpJob({
             ? `single-review: super-small PR; the first review was the final round (${job.singleReview.basis || 'super-small'}); handing to the hammer without remediation.`
             : nonBlockingCapReached
             ? `Reached non-blocking remediation rounds (${job.nonBlockingRoundsBefore}/${job.nonBlockingMaxRounds}) before claim. No successor dispatched. ${finalCapResult.nextAction}`
-            : `Reached max remediation rounds (${currentRound}/${maxRounds}) before claim.`,
+            : `Reached max remediation rounds (${currentRound}/${maxRounds}) before claim.${prRound?.liftTo
+              ? ` PR round ledger: ${formatPrRoundLedgerSummary(prRound.summary)}.` : ''}`,
           jobUpdates: { finalCapResult },
         });
       } catch (err) {
@@ -2744,6 +2786,7 @@ function claimNextFollowUpJob({
       remediationPlan: {
         ...(job.remediationPlan || buildRemediationRoundPlan()),
         currentRound: nextRoundNumber,
+        ...(prRound ? { prRound: prRoundStamp(prRound, job, nextRoundNumber) } : {}),
         retryAfter: null,
         stopReason: null,
         // A claimed job is live; a stop record left by an older requeue would
@@ -2785,6 +2828,125 @@ function claimNextFollowUpJob({
   }
 
   return null;
+}
+
+// REVIEWROUNDLEDGER-01 — the PR-wide round count at claim time.
+//
+// `settled` is every settled round on the PR from every producer, excluding
+// this job (it is in progress during the claim). `own` is the rounds this job
+// already spawned. A normal job's `currentRound` was seeded from the settled
+// count when it was created, so the lift is `max(currentRound, settled + own)`.
+// Closure hand-off jobs (final-fix-all, conflict-primary) keep their own
+// one-round cap: they are the closure path the budget hands to. An operator
+// override is never lifted; its round is charged to the operator instead.
+function resolvePrRoundAtClaim(rootDir, job) {
+  try {
+    const ledger = summarizePRRemediationLedger(rootDir, job);
+    const plan = job?.remediationPlan || {};
+    const currentRound = Number(plan.currentRound || 0);
+    const own = (plan.rounds || []).filter(round => round?.spawnedAt && Number(round.round) <= currentRound).length;
+    const closure = Boolean(job?.closureHandoff?.reason);
+    const settled = Number(ledger.completedRoundsForPR || 0);
+    const used = Math.max(settled + own, closure ? 0 : currentRound);
+    const operatorOverride = plan.nextAction?.operatorOverride === true;
+    const riskClass = normalizeRiskClass(job?.riskClass) || ledger.latestRiskClass || DEFAULT_RISK_CLASS;
+    const tierBudget = ROUND_BUDGET_BY_RISK_CLASS[riskClass] ?? DEFAULT_MAX_REMEDIATION_ROUNDS;
+    return {
+      used,
+      tierBudget,
+      closure,
+      operatorOverride,
+      summary: ledger.prRoundLedger ? { ...ledger.prRoundLedger, budget: tierBudget } : null,
+      liftTo: !closure && !operatorOverride && used > currentRound ? used : null,
+    };
+  } catch (err) {
+    console.warn(`[follow-up-jobs] pr_round_ledger_claim_read_failed job=${job?.jobId}: ${err?.message || err}`);
+    return null;
+  }
+}
+
+function prRoundStamp(prRound, job, jobRound) {
+  const number = prRound.used + 1;
+  const budget = prRound.closure ? prRound.tierBudget
+    : Number(job?.remediationPlan?.maxRounds) || prRound.tierBudget;
+  const kind = followUpRoundKind(job);
+  const chargedTo = prRound.operatorOverride || (!prRound.closure && number > budget)
+    ? CHARGED_TO.OPERATOR : CHARGED_TO.PIPELINE;
+  const byKind = { ...(prRound.summary?.byKind || {}) };
+  byKind[kind] = (byKind[kind] || 0) + 1;
+  return {
+    jobRound,
+    number,
+    budget,
+    tierBudget: prRound.tierBudget,
+    kind,
+    // Past the budget only the closure path or an operator may run a round;
+    // an operator's round is never free.
+    chargedTo,
+    summary: {
+      remediationRoundsUsed: number,
+      reviewPasses: prRound.summary?.reviewPasses || 0,
+      operatorCharged: (prRound.summary?.operatorCharged || 0) + (chargedTo === CHARGED_TO.OPERATOR ? 1 : 0),
+      byKind,
+      budget: prRound.tierBudget,
+    },
+  };
+}
+
+// A posted review that queued a follow-up is one review pass on the PR round
+// ledger (visibility only; review passes do not spend the remediation budget).
+// Closure hand-off jobs re-use an earlier review, so they are not a new pass.
+function recordReviewPassRound(rootDir, job) {
+  if (!rootDir || !job?.jobId || job.closureHandoff?.reason) return;
+  try {
+    recordPrRound(rootDir, {
+      domainId: job.domainId || 'code-pr',
+      repo: job.repo,
+      prNumber: job.prNumber,
+      roundId: `review:${job.revisionRef || 'unknown'}:${job.createdAt || job.jobId}`,
+      kind: 'review-pass',
+      headSha: job.revisionRef || null,
+      jobId: job.jobId,
+      actor: job.reviewerModel || null,
+      source: 'follow-up-create',
+    });
+  } catch (err) {
+    console.warn(`[follow-up-jobs] pr_round_ledger_review_record_failed job=${job.jobId}: ${err?.message || err}`);
+  }
+}
+
+// Record a spawned follow-up round. Best-effort: the worker is already live,
+// and the job-derived count still charges the round if this write fails.
+function recordFollowUpRoundSpawned(rootDir, job) {
+  const round = Number(job?.remediationPlan?.currentRound || 0);
+  if (!rootDir || !job?.jobId || round <= 0) return;
+  const stamp = job.remediationPlan?.prRound?.jobRound === round ? job.remediationPlan.prRound : null;
+  try {
+    recordPrRound(rootDir, {
+      domainId: job.domainId || 'code-pr',
+      repo: job.repo,
+      prNumber: job.prNumber,
+      roundId: followUpRoundId(job.jobId, round),
+      kind: followUpRoundKind(job),
+      chargedTo: stamp?.chargedTo || (job.remediationPlan?.nextAction?.operatorOverride === true
+        ? CHARGED_TO.OPERATOR : CHARGED_TO.PIPELINE),
+      headSha: job.revisionRef || null,
+      jobId: job.jobId,
+      source: 'follow-up-daemon',
+    });
+  } catch (err) {
+    console.warn(`[follow-up-jobs] pr_round_ledger_record_failed job=${job.jobId}: ${err?.message || err}`);
+  }
+}
+
+function voidFollowUpRound(rootDir, job, round, reason) {
+  if (!rootDir || !job?.jobId || !(Number(round) > 0)) return;
+  try {
+    voidPrRound(rootDir, { domainId: job.domainId || 'code-pr', repo: job.repo, prNumber: job.prNumber,
+      roundId: followUpRoundId(job.jobId, round), reason });
+  } catch (err) {
+    console.warn(`[follow-up-jobs] pr_round_ledger_void_failed job=${job.jobId}: ${err?.message || err}`);
+  }
 }
 
 function stopPendingNoRemediationJobs({
@@ -2917,6 +3079,7 @@ function markFollowUpJobSpawned({
   }
 
   writeFollowUpJob(jobPath, nextJob);
+  recordFollowUpRoundSpawned(passRootDir, nextJob);
   recordRemediationPassStartedSafe({
     rootDir: passRootDir,
     job: nextJob,
@@ -3022,6 +3185,8 @@ function requeueInProgressFollowUpJobForRetry({
   }
 
   const moved = moveFollowUpJob(rootDir, jobPath, 'pending', nextJob);
+  // The round is not charged: the next claim reuses its number and re-records it.
+  voidFollowUpRound(rootDir, currentJob, currentRoundNumber, retryMetadata?.code || 'transient-retry');
   // Close the lost attempt while its log and session evidence still exist.
   // The next spawn replaces the per-job artifact directory.
   recordRemediationPassTerminalSafe({

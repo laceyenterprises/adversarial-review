@@ -1523,10 +1523,15 @@ test('retrigger-review re-evaluates retries after a refused row with the same id
 
 test('retrigger-review returns runtime exit code with concise stderr when rereview throws', async () => {
   const err = makeCaptureStream();
+  // REVIEWROUNDLEDGER-01: the retrigger records its round before the reset,
+  // so keep the write in a temp root rather than the checkout.
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'retrigger-review-'));
   const rc = await main([
     '--repo', 'laceyenterprises/agent-os',
     '--pr', '238',
     '--reason', 'retry',
+    '--root-dir', rootDir,
+    '--audit-root-dir', rootDir,
   ], {
     stdout: makeCaptureStream(),
     stderr: err,

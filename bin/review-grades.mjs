@@ -4,6 +4,7 @@ import { resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { ensureReviewStateSchema } from '../src/review-state.mjs';
 import { backfillFindingGrades, readFindingGrades } from '../src/review-finding-grades.mjs';
+import { DEFAULT_BACKFILL_WRITE_DUTY_CYCLE, parseWriteDutyCycle } from '../src/backfill-write-pacer.mjs';
 
 // Explicit path only; reads never migrate or write the database.
 export function main(argv = process.argv.slice(2), write = text => process.stdout.write(text),
@@ -12,11 +13,14 @@ export function main(argv = process.argv.slice(2), write = text => process.stdou
   if (!['show', 'export', 'backfill'].includes(command)) throw new Error('expected show, export or backfill');
   const options = {};
   for (let i = 0; i < args.length; i += 2) {
-    if (!['--db', '--finding-id', '--repo', '--after-grade-id', '--limit'].includes(args[i])
+    if (!['--db', '--finding-id', '--repo', '--after-grade-id', '--limit',
+      ...(command === 'backfill' ? ['--max-write-duty-cycle'] : [])].includes(args[i])
       || !args[i + 1] || args[i + 1].startsWith('--')) throw new Error(`invalid option: ${args[i]}`);
     options[args[i]] = args[i + 1];
   }
   if (!options['--db']) throw new Error('--db is required');
+  // Validate before opening the database: an invalid pace must not migrate it.
+  const maxWriteDutyCycle = parseWriteDutyCycle(options['--max-write-duty-cycle'] ?? DEFAULT_BACKFILL_WRITE_DUTY_CYCLE);
   const integer = (key, fallback) => {
     if (options[key] === undefined) return fallback;
     if (!/^\d+$/.test(options[key]) || !Number.isSafeInteger(Number(options[key]))) throw new Error(`invalid integer: ${key}`);
@@ -28,7 +32,7 @@ export function main(argv = process.argv.slice(2), write = text => process.stdou
       ensureReviewStateSchema(db);
       const progress = { committedPasses: 0, committedInserted: 0, lastPassId: null };
       try {
-        const result = backfillFindingGrades(db, { onPass(pass) {
+        const result = backfillFindingGrades(db, { maxWriteDutyCycle, onPass(pass) {
           progress.committedPasses += 1;
           progress.committedInserted += pass.inserted;
           progress.lastPassId = pass.passId;

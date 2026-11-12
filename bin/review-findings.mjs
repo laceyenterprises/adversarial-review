@@ -6,6 +6,7 @@ import { resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { ensureReviewStateSchema } from '../src/review-state.mjs';
 import { backfillReviewFindings, linkFindingRemediation, readReviewFindings } from '../src/review-finding-records.mjs';
+import { DEFAULT_BACKFILL_WRITE_DUTY_CYCLE, parseWriteDutyCycle } from '../src/backfill-write-pacer.mjs';
 
 // An explicit database is required. There is no implicit production target,
 // provider lookup, history fetch or network operation in this command.
@@ -23,12 +24,15 @@ export function main(argv = process.argv.slice(2), writeProgress = text => proce
       continue;
     }
     const allowed = command === 'retire-expired' ? ['--db', '--repo', '--limit', '--reason']
-      : ['--db', '--repo', '--pr', '--limit', '--after-pass-id', '--after-ordinal', '--job', '--workspace', '--round'];
+      : ['--db', '--repo', '--pr', '--limit', '--after-pass-id', '--after-ordinal', '--job', '--workspace', '--round',
+        ...(command === 'backfill' ? ['--max-write-duty-cycle'] : [])];
     if (!allowed.includes(key) || options[key]
       || !args[i + 1] || args[i + 1].startsWith('--')) throw new Error(`invalid option: ${key}`);
     options[key] = args[i + 1];
   }
   if (!options['--db']) throw new Error('--db is required');
+  // Validate before opening the database: an invalid pace must not migrate it.
+  const maxWriteDutyCycle = parseWriteDutyCycle(options['--max-write-duty-cycle'] ?? DEFAULT_BACKFILL_WRITE_DUTY_CYCLE);
   const integer = (key, fallback) => {
     if (options[key] === undefined) return fallback;
     if (!/^\d+$/.test(options[key]) || !Number.isSafeInteger(Number(options[key]))) throw new Error(`invalid integer: ${key}`);
@@ -53,7 +57,7 @@ export function main(argv = process.argv.slice(2), writeProgress = text => proce
     if (command === 'backfill') {
       const progress = { committedPasses: 0, committedInserted: 0, lastPassId: null };
       try {
-        return backfillReviewFindings(db, { ...filter, onPass(pass) {
+        return backfillReviewFindings(db, { ...filter, maxWriteDutyCycle, onPass(pass) {
           progress.committedPasses += 1;
           progress.committedInserted += pass.inserted;
           progress.lastPassId = pass.passId;

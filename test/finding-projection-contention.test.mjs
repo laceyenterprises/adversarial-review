@@ -171,7 +171,9 @@ test('finding backfill resumes after a pass and reports committed work idempoten
   const { db, ids } = fixture(t);
   const commits = [];
   const result = backfillReviewFindings(db, { afterPassId: ids[0], onPass: p => commits.push(p) });
-  assert.deepEqual(result, { scanned: 1, inserted: 1, nextPassId: ids[1] });
+  const { scanned, inserted, nextPassId, written, skipped, pacing } = result;
+  assert.deepEqual({ scanned, inserted, nextPassId, written, skipped }, { scanned: 1, inserted: 1, nextPassId: ids[1], written: 1, skipped: 0 });
+  assert.equal(pacing.writeTransactions, 1);
   assert.deepEqual(commits, [{ passId: ids[1], inserted: 1 }]);
   assert.equal(db.prepare('SELECT count(*) n FROM review_findings WHERE pass_id=?').get(ids[0]).n, 0);
   assert.equal(backfillReviewFindings(db, { afterPassId: ids[0] }).inserted, 0);
@@ -195,8 +197,8 @@ test('grade backfill commits and reports one pass at a time and safely replays c
   } }), /synthetic interruption/);
   assert.deepEqual(committed, [{ passId: ids[0], inserted: 1 }]);
   assert.equal(db.prepare('SELECT count(*) n FROM review_finding_grades').get().n, 1);
-  assert.deepEqual(backfillFindingGrades(db), { inserted: 1 });
-  assert.deepEqual(backfillFindingGrades(db), { inserted: 0 });
+  assert.equal(backfillFindingGrades(db).inserted, 1);
+  assert.equal(backfillFindingGrades(db).inserted, 0);
 });
 
 test('safe live projection does not retry non-busy errors', t => {

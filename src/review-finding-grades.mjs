@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
 import { normalizeDroppedReason } from './finding-drop-reason.mjs';
 import { syncFindingDisputes } from './review-finding-records.mjs';
+import { createBackfillWritePacer, DEFAULT_BACKFILL_WRITE_DUTY_CYCLE } from './backfill-write-pacer.mjs';
 
 export const GRADE_KINDS = Object.freeze(['batch-remediator', 'grader', 'judge', 'hammer', 'remediator', 'lifecycle', 'scar', 'operator']);
 export const GRADE_TAXONOMY = Object.freeze({
@@ -61,7 +62,8 @@ export function recordFindingGrade(db, grade) {
 
 // Explicit offline/local operation, never called by review or merge readers.
 // Unknown historical model, cost, evaluation head and confidence remain NULL.
-export function backfillFindingGrades(db, { onPass = () => {} } = {}) {
+export function backfillFindingGrades(db, { onPass = () => {}, maxWriteDutyCycle = DEFAULT_BACKFILL_WRITE_DUTY_CYCLE,
+  pacer = createBackfillWritePacer({ maxWriteDutyCycle }) } = {}) {
   const passes = db.prepare('SELECT DISTINCT pass_id FROM review_findings ORDER BY pass_id').all();
   const projectPass = db.transaction(passId => {
     syncFindingDisputes(db, { passId });
@@ -110,14 +112,15 @@ export function backfillFindingGrades(db, { onPass = () => {} } = {}) {
     }
     return inserted;
   });
-  // A corpus backfill must not hold the shared writer lock for the whole run.
+  // A corpus backfill must not hold the shared writer lock for the whole run,
+  // nor re-acquire it back to back: the pacer yields after every pass.
   let inserted = 0;
   for (const { pass_id } of passes) {
-    const added = projectPass.immediate(pass_id);
+    const added = pacer.write(() => projectPass.immediate(pass_id));
     inserted += added;
     onPass({ passId: pass_id, inserted: added });
   }
-  return { inserted };
+  return { inserted, pacing: pacer.summary() };
 }
 
 export function readFindingGrades(db, { findingId = null, repo = null, afterGradeId = 0, limit = 500 } = {}) {

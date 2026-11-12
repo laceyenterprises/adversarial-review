@@ -45,6 +45,17 @@ lease for the same PR at any head, including a rekeyed hammer head. An active
 closer dispatch record continues to defer claims after the lease's 30-minute
 age threshold; stale leases without active dispatch evidence can expire.
 
+The daemon also queries `hq merge-agent pr-owner --repo <repo> --pr <n> --json`
+before claim. An observed live HQ launch or unreadable ownership evidence keeps
+the job pending without charging a round. Each claim performs at most 25 lookups;
+at that limit a durable filename cursor lets the next pass resume with later
+jobs and wrap, including after restart. A fresh lookup precedes each claim.
+This query does not reserve the PR against later HQ dispatches: a launch after
+the lookup can still race local remediation. A shared reservation and handoff
+requires companion HQ changes. See the
+[admission snapshot and cursor contract](data-model/follow-up-jobs.md#live-pr-owner-admission-snapshot-remediationowner-01),
+including the exact unsupported-command deployment fallback.
+
 Operator-label CI holds belong to closure, not review-findings consumption.
 Remediation may restore a review-flagged guarded change to its base state even
 while its label gate is red. The final pre-spawn lifecycle gate gives

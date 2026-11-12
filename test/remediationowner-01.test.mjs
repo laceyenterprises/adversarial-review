@@ -1,5 +1,5 @@
-// REMEDIATIONOWNER-01: a follow-up remediation job never starts on a PR whose
-// branch a live HQ launch already owns. Synthetic repos, PRs and launch ids.
+// REMEDIATIONOWNER-01: a follow-up remediation job defers to an observed live
+// HQ launch. Synthetic repos, PRs and launch ids.
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
@@ -10,6 +10,7 @@ import {
   claimNextFollowUpJob,
   createFollowUpJob,
   getFollowUpJobDir,
+  listPendingFollowUpJobPaths,
   readFollowUpJob,
 } from '../src/follow-up-jobs.mjs';
 import { consumeNextFollowUpJob } from '../src/follow-up-remediation.mjs';
@@ -54,9 +55,9 @@ const liveUpdate = (launchRequestId = 'lrq_synthetic_update') => ({
 
 function claimOnce(rootDir, lookupImpl, { delayedPendingPaths = new Set(), observedAt = CLAIMED_AT } = {}) {
   return claimWithLivePrOwnerGate({
-    lookupImpl, observedAt, log: quiet,
-    claim: (claimedAt, livePrOwnerDecision) => claimNextFollowUpJob({
-      rootDir, claimedAt, returnStopped: true, delayedPendingPaths, livePrOwnerDecision,
+    rootDir, lookupImpl, observedAt, log: quiet,
+    claim: (claimedAt, livePrOwnerDecision, pendingAfter) => claimNextFollowUpJob({
+      rootDir, claimedAt, returnStopped: true, delayedPendingPaths, livePrOwnerDecision, pendingAfter,
     }),
   });
 }
@@ -214,6 +215,52 @@ test('one claim spends a bounded number of owner lookups', async (t) => {
   const claimed = await claimOnce(rootDir, async () => { lookups++; return liveUpdate(); });
   assert.deepEqual(claimed, { ownerLookupBudget: true });
   assert.equal(lookups, LIVE_PR_OWNER_LOOKUPS_PER_CLAIM);
+});
+
+for (const state of ['owned', 'unknown']) {
+  test(`the next pass reaches a free PR behind 25 ${state} PRs using the durable cursor`, async (t) => {
+    const rootDir = tempRoot(t);
+    for (let i = 0; i <= LIVE_PR_OWNER_LOOKUPS_PER_CLAIM; i++) pendingJob(rootDir, 5100 + i);
+    const paths = listPendingFollowUpJobPaths(rootDir);
+    const free = readFollowUpJob(paths.at(-1));
+    const lookup = async ({ prNumber }) => prNumber === free.prNumber
+      ? { state: 'free' } : state === 'owned' ? liveUpdate() : { state: 'unknown', reason: 'lookup-timeout' };
+    assert.deepEqual(await claimOnce(rootDir, lookup), { ownerLookupBudget: true });
+    const cursorPath = path.join(rootDir, 'data/follow-up-jobs/live-pr-owner-scan-cursor.json');
+    assert.deepEqual(JSON.parse(readFileSync(cursorPath, 'utf8')), { after: path.basename(paths.at(-2)) });
+    // A fresh lookup function and delayed-path set simulate a daemon restart.
+    const asked = [];
+    const claimed = await claimOnce(rootDir, async args => { asked.push(args.prNumber); return lookup(args); });
+    assert.equal(claimed.job.jobId, free.jobId);
+    assert.deepEqual(asked, [free.prNumber]);
+    assert.equal(existsSync(cursorPath), false, 'successful claim clears the cursor');
+    for (const pendingPath of paths.slice(0, -1)) {
+      assert.equal(readFollowUpJob(pendingPath).remediationPlan.currentRound, 0);
+    }
+  });
+}
+
+test('a removed cursor job and an empty suffix wrap to earlier pending jobs', async (t) => {
+  const rootDir = tempRoot(t);
+  for (let i = 0; i <= LIVE_PR_OWNER_LOOKUPS_PER_CLAIM; i++) pendingJob(rootDir, 5200 + i);
+  const paths = listPendingFollowUpJobPaths(rootDir);
+  const firstJob = readFollowUpJob(paths[0]);
+  assert.deepEqual(await claimOnce(rootDir, async () => liveUpdate()), { ownerLookupBudget: true });
+  rmSync(paths.at(-2));
+  rmSync(paths.at(-1));
+  const claimed = await claimOnce(rootDir, async () => ({ state: 'free' }));
+  assert.equal(claimed.job.jobId, firstJob.jobId);
+});
+
+test('a malformed scan cursor restarts the scan without bypassing ownership checks', async (t) => {
+  const rootDir = tempRoot(t);
+  pendingJob(rootDir, 5300);
+  const cursorPath = path.join(rootDir, 'data/follow-up-jobs/live-pr-owner-scan-cursor.json');
+  writeFileSync(cursorPath, '{broken');
+  let asked = 0;
+  assert.equal(await claimOnce(rootDir, async () => { asked++; return liveUpdate(); }), null);
+  assert.equal(asked, 1);
+  assert.equal(existsSync(cursorPath), false);
 });
 
 test('without a lookup the claim path is unchanged', async (t) => {

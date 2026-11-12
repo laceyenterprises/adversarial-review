@@ -1,4 +1,4 @@
-// REMEDIATIONOWNER-01: one owner per PR branch.
+// REMEDIATIONOWNER-01: defer to an observed live PR owner.
 //
 // A follow-up remediation job runs either locally (bare mode) or as an HQ
 // launch. A local job is invisible to HQ, so `hq dispatch --pr` cannot refuse
@@ -13,6 +13,9 @@
 // job exactly like a live owner does. The deferral is recorded on the pending
 // job and re-evaluated on the next claim pass. Nothing here cancels or
 // touches a job that is already running.
+// This is an admission snapshot, not a shared reservation: an HQ launch that
+// starts after the lookup can still race a local worker. A cross-dispatch
+// ownership guarantee requires a companion HQ reservation/handoff protocol.
 //
 // Companion-deploy seam: an HQ CLI that predates the `pr-owner` subcommand
 // rejects it as unknown. That is not an unreadable owner; it means HQ offers
@@ -20,15 +23,18 @@
 // (the same seam `hq dispatch --pr` uses for the repair-in-place companion)
 // and logs a warning on every lookup until the companion is deployed.
 import { execFile } from 'node:child_process';
+import { readFileSync, rmSync } from 'node:fs';
+import { basename, join } from 'node:path';
 import { promisify } from 'node:util';
 
+import { writeFileAtomic } from './atomic-write.mjs';
 import { loadAwareTimeoutMs } from './load-aware-timeout.mjs';
 import { writeFollowUpJob } from './follow-up-job-write.mjs';
 
 export const LIVE_PR_OWNER_DEFERRED = 'deferred-live-pr-owner';
 export const LIVE_PR_OWNER_UNKNOWN = 'deferred-live-pr-owner-unknown';
 // Bounds the number of HQ lookups one claim attempt may spend. A pass that
-// hits it claims nothing more; the unchecked jobs wait for the next pass.
+// hits it saves its scan position so the next pass starts with unchecked jobs.
 export const LIVE_PR_OWNER_LOOKUPS_PER_CLAIM = 25;
 const LAUNCH_ID = /^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$/u;
 // The exact usage error an older `hq merge-agent` prints for this subcommand.
@@ -134,7 +140,8 @@ export function createLivePrOwnerClaimDecision({ results, observedAt, writeJobIm
   return function decideLivePrOwner(pendingJob, pendingPath) {
     const key = livePrOwnerKey(pendingJob);
     if (!results.has(key)) {
-      return { action: 'lookup', lookup: { key, repo: pendingJob.repo, prNumber: Number(pendingJob.prNumber) } };
+      return { action: 'lookup', lookup: { key, repo: pendingJob.repo,
+        prNumber: Number(pendingJob.prNumber), pendingName: basename(pendingPath) } };
     }
     const record = livePrOwnerDeferralRecord(results.get(key), observedAt);
     const previous = pendingJob.livePrOwnerDeferral || null;
@@ -157,22 +164,52 @@ export function createLivePrOwnerClaimDecision({ results, observedAt, writeJobIm
   };
 }
 
-// Claim one follow-up job under the one-owner rule. `claim(claimedAt, decision)`
-// runs the synchronous queue claim. Without a lookup the claim is unchanged.
+// Claim one follow-up job after checking observed ownership.
+// `claim(claimedAt, decision, pendingAfter)` runs the synchronous queue claim,
+// rotating its lexical pending scan after pendingAfter (a filename, not a path).
+// Without a lookup the claim is unchanged.
 // Each `lookup` answer settles one repo#pr key and the claim is retried, so the
 // loop ends after at most LIVE_PR_OWNER_LOOKUPS_PER_CLAIM lookups.
-export async function claimWithLivePrOwnerGate({ claim, lookupImpl, observedAt, log = console }) {
+export async function claimWithLivePrOwnerGate({ claim, lookupImpl, rootDir, observedAt, log = console }) {
   if (!lookupImpl) return claim(observedAt, null);
+  const cursorPath = rootDir ? join(rootDir, 'data', 'follow-up-jobs', 'live-pr-owner-scan-cursor.json') : null;
+  let pendingAfter = null;
+  if (cursorPath) {
+    try {
+      const cursor = JSON.parse(readFileSync(cursorPath, 'utf8'));
+      if (typeof cursor.after === 'string' && /^[^/\\]+\.json$/u.test(cursor.after)) pendingAfter = cursor.after;
+    } catch (error) {
+      if (error.code !== 'ENOENT') log.warn?.(`[follow-up] live PR-owner cursor unreadable: ${error.message}`);
+    }
+  }
   const results = new Map();
   const decision = createLivePrOwnerClaimDecision({ results, observedAt, log });
+  let lastLookedUp = null;
+  const saveCursor = after => {
+    if (!cursorPath) return;
+    try {
+      if (after) writeFileAtomic(cursorPath, `${JSON.stringify({ after })}\n`);
+      else rmSync(cursorPath, { force: true });
+    } catch (error) {
+      // Cursor persistence cannot strand an already claimed job before spawn.
+      log.warn?.(`[follow-up] live PR-owner cursor update failed: ${error.message}`);
+    }
+  };
   for (;;) {
-    const claimed = claim(observedAt, decision);
-    if (!claimed?.ownerLookup) return claimed;
-    if (results.size >= LIVE_PR_OWNER_LOOKUPS_PER_CLAIM) return { ownerLookupBudget: true };
+    const claimed = claim(observedAt, decision, pendingAfter);
+    if (!claimed?.ownerLookup) {
+      saveCursor(null);
+      return claimed;
+    }
+    if (results.size >= LIVE_PR_OWNER_LOOKUPS_PER_CLAIM) {
+      saveCursor(lastLookedUp);
+      return { ownerLookupBudget: true };
+    }
     const { key, repo, prNumber } = claimed.ownerLookup;
     let result = null;
     try { result = await lookupImpl({ repo, prNumber }); } catch { /* unknown below */ }
     // A thrown or empty answer is unknown, and unknown defers like an owner.
     results.set(key, result && typeof result === 'object' ? result : unknown('lookup-failed'));
+    lastLookedUp = claimed.ownerLookup.pendingName;
   }
 }

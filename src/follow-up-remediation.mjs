@@ -3149,14 +3149,14 @@ async function consumeNextFollowUpJobWithinRepositoryCycle({
   // pointed at Claude Code's CLI rather than incorrectly blocking on
   // codex auth state — and vice versa.
   // onClaim reserves repo#pr synchronously with the claim; concurrent drains rely on it.
-  const claim = (claimedAt, livePrOwnerDecision) => {
+  const claim = (claimedAt, livePrOwnerDecision, pendingAfter = null) => {
     const next = claimNextFollowUpJob({ rootDir, claimedAt, returnStopped: true, excludedRepoPrKeys,
-      onExcludedRepoPrKey, delayedPendingPaths, onDelayedPendingJob, quotaHoldRevalidator, livePrOwnerDecision });
+      onExcludedRepoPrKey, delayedPendingPaths, onDelayedPendingJob, quotaHoldRevalidator, livePrOwnerDecision, pendingAfter });
     if (next?.job && !next.stopped) onClaim?.(next.job);
     return next;
   };
   const claimed = livePrOwnerLookupImpl ? await claimWithLivePrOwnerGate({ claim,
-    lookupImpl: livePrOwnerLookupImpl, observedAt: now(), log }) : claim(now(), null);
+    rootDir, lookupImpl: livePrOwnerLookupImpl, observedAt: now(), log }) : claim(now(), null);
   if (claimed?.ownerLookupBudget) return { consumed: false, reason: 'live-pr-owner-lookup-budget' };
   if (!claimed) {
     return { consumed: false, reason: 'no-pending-jobs' };

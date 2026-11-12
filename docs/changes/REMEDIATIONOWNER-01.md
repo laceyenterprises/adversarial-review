@@ -11,6 +11,15 @@ another remediator), the job stays pending with a typed `livePrOwnerDeferral`
 that names the owning launch. The check repeats on the next pass. A failed or
 timed-out lookup also defers, because unknown ownership is not free.
 
+The final Comment-only round fixes lookup starvation: after 25 lookups a durable
+filename cursor rotates the next pending scan, including after daemon restart.
+The canonical data-model catalog now records both the optional deferral field
+and the cursor, with `src/remediation-live-pr-owner.mjs` as a schema surface.
+The query remains an admission snapshot. A later HQ launch can race local
+remediation; shared reservation through handoff is a companion HQ follow-up,
+not a guarantee delivered by this PR. Governing runbook, state/smoke declarations
+and data-model docs now state this limitation explicitly.
+
 ## Interface changes
 
 - New `src/remediation-live-pr-owner.mjs`: `createLivePrOwnerLookup` (runs
@@ -20,11 +29,14 @@ timed-out lookup also defers, because unknown ownership is not free.
   `deferred-live-pr-owner-unknown`.
 - `claimNextFollowUpJob` accepts `livePrOwnerDecision`. It is a synchronous
   pre-claim hook that can return `lookup`, `defer` or `claim`.
+- `claimWithLivePrOwnerGate` accepts `rootDir` to persist its scan cursor and
+  passes the cursor filename as the third `claim` callback argument.
+  `claimNextFollowUpJob` accepts `pendingAfter` to rotate its lexical scan.
 - `consumeNextFollowUpJob` and `consumeFollowUpJobsUntilCapacity` accept
   `livePrOwnerLookupImpl`. The follow-up daemon and `follow-up-remediation.mjs`
   `main()` wire the HQ lookup in. Other callers keep the previous behavior.
 - Pending job records may carry `livePrOwnerDeferral`; see
-  `docs/data-model/follow-up-jobs.md` ("One owner per PR branch").
+  `docs/data-model/follow-up-jobs.md` ("Live PR-owner admission snapshot").
 - Uses the companion agent-os read command `hq merge-agent pr-owner`. It wraps
   `_active_worker_for_pr_head(pr_wide=True)`, which is the query behind the
   `hq dispatch --pr` "existing worker owns this PR" refusal. An older HQ CLI
@@ -38,21 +50,31 @@ by this check. No CI check, gate, ratchet or label is added.
 
 ## Verification
 
-- `node --test test/remediationowner-01.test.mjs`: 12/12. The suite covers:
+- `node --test test/remediationowner-01.test.mjs`: 16/16. The suite covers:
   - a live PR-update owner defers and is named;
   - a terminal owner proceeds and the deferral is cleared;
   - a failed, thrown or empty lookup defers;
   - a different PR still proceeds;
   - an unchanged record is not rewritten;
   - the lookup budget holds;
+  - a free PR behind 25 owned or unknown PRs proceeds on the next pass;
+  - durable cursor recovery, removed-job wrap and malformed-cursor fallback;
   - the ungated path is unchanged;
   - concurrent gated claims keep the same-PR reservation;
   - an HQ CLI without the subcommand keeps the old behavior and warns;
   - `consumeNextFollowUpJob` leaves a running remediation untouched.
-- `follow-up-remediation`: 385/385. `follow-up-jobs`: 172/172.
+- Original implementation validation: `follow-up-remediation`: 385/385. `follow-up-jobs`: 172/172.
   `watcher-claim-loop`: 168/168. `arc19-boundary-gate`, `smv`: green.
-- The 51 other test files that drive claim/consume/daemon paths pass through
+- Original implementation: the 51 other test files that drive claim/consume/daemon paths passed through
   `node test/run-tests.mjs`.
 - A read-only smoke through `createLivePrOwnerLookup` returned
   `{"state":"unsupported"}` against the deployed HQ CLI and `{"state":"free"}`
   against the companion branch's CLI, for a PR with no live owner.
+- Final-round targeted validation passed: `remediationowner-01` (16/16),
+  `follow-up-jobs` (172/172), `follow-up-remediation`, `watcher-claim-loop`
+  (168/168), `arc19-boundary-gate`, and `smv` including its disposable sandbox
+  smoke. Long commands used `bin/run-bounded.sh`; the full local suite was not run.
+- Final-round guards passed: `npm run lint` (zero errors),
+  `npm run typecheck:contracts`, `node scripts/validate-data-model-catalog.mjs`
+  (94 entries), `bash demo/research-finding-walkthrough.sh`, and
+  `git diff --check`. Both affected existing state-source projections are unchanged.

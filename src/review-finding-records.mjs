@@ -8,6 +8,13 @@ import { withSqliteBusyRetrySync } from './sqlite-busy-retry.mjs';
 
 const digest = value => createHash('sha256').update(JSON.stringify(value)).digest('hex');
 
+// Cross-repo capability flag read by the companion explicit OSG backfill, which
+// refuses to run unless it is true. It asserts: backfillReviewFindings persists
+// historical_projection=1, and finding_backlog_candidates excludes those rows,
+// so a backfill never enrolls remediation work. Pinned by
+// test/osgboundaryflag-01.test.mjs; it has no in-repo caller, so do not remove it.
+export const HISTORICAL_PROJECTION_SUPPORTED = true;
+
 const REVIEW_KINDS = new Set(['first-pass', 'rereview']);
 
 // Fixed field order makes content identities independent of object key order.

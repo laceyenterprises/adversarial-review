@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto';
 import { openReviewStateDb } from './review-state.mjs';
+import { findingBacklogMaxAgeMs } from './finding-backlog-window.mjs';
 import { persistReviewFindings } from './review-finding-records.mjs';
 
 // Called at the merge command boundary. Missing/stale capture defers the merge,
@@ -51,9 +52,10 @@ export function captureReadyFindings({ rootDir, repo, prNumber, headSha, version
 }
 
 // Missing schema is unavailable evidence, never an empty/healthy backlog.
-export function summarizeFindingBacklog(db, now = Date.now()) {
+export function summarizeFindingBacklog(db, now = Date.now(), { maxAgeMs = findingBacklogMaxAgeMs() } = {}) {
   if (!db) return { available: false, error: 'review-store-unavailable', areas: null };
   try {
+    const cutoff = new Date(now - maxAgeMs).toISOString();
     const selectionScope = Boolean(db.prepare("SELECT 1 FROM pragma_table_info('finding_backlog') WHERE name='manifest_sha256'").get());
     const batchSelection = Boolean(db.prepare("SELECT 1 FROM pragma_table_info('finding_batches') WHERE name='manifest_sha256'").get());
     const backlogScope = selectionScope ? 'manifest_sha256 IS NULL AND ' : '';
@@ -77,7 +79,13 @@ export function summarizeFindingBacklog(db, now = Date.now()) {
       sum(batch_id IS NULL) AS unbatchedCount FROM finding_backlog WHERE ${backlogScope}outcome IS NULL`).get();
     const batchable = db.prepare(`SELECT count(*) AS batchableCount,min(b.captured_at) AS oldestBatchableAt
       FROM finding_backlog b JOIN reviewed_prs r USING(repo,pr_number)
-      WHERE ${selectionScope ? 'b.manifest_sha256 IS NULL AND ' : ''}b.outcome IS NULL AND r.pr_state='merged'`).get();
+      WHERE ${selectionScope ? 'b.manifest_sha256 IS NULL AND ' : ''}b.outcome IS NULL AND r.pr_state='merged'
+        AND (b.batch_id IS NOT NULL OR julianday(r.merged_at) >= julianday(?))`).get(cutoff);
+    const { outOfWindow } = db.prepare(`SELECT count(*) AS outOfWindow
+      FROM finding_backlog b JOIN reviewed_prs r USING(repo,pr_number)
+      WHERE ${selectionScope ? 'b.manifest_sha256 IS NULL AND ' : ''}b.outcome IS NULL
+        AND b.batch_id IS NULL AND r.pr_state='merged'
+        AND (julianday(r.merged_at) IS NULL OR julianday(r.merged_at) < julianday(?))`).get(cutoff);
     const perDay = db.prepare(`SELECT substr(resolved_at,1,10) AS day,
       sum(outcome='applied') AS applied,sum(outcome='dropped') AS dropped
       FROM finding_backlog WHERE ${backlogScope}outcome IS NOT NULL AND resolved_at IS NOT NULL
@@ -110,7 +118,7 @@ export function summarizeFindingBacklog(db, now = Date.now()) {
       FROM finding_backlog b LEFT JOIN finding_batches a USING(batch_id)
       WHERE b.manifest_sha256 IS NOT NULL GROUP BY b.manifest_sha256
       ORDER BY b.manifest_sha256`).all() : null;
-    return { available: true, areas, ...open, ...batchable, unbatchedCount: open.unbatchedCount || 0,
+    return { available: true, areas, ...open, ...batchable, outOfWindow, unbatchedCount: open.unbatchedCount || 0,
       oldestOpenAgeMs: open.oldestOpenAt ? Math.max(0, now - Date.parse(open.oldestOpenAt)) : 0,
       oldestBatchableAgeMs: batchable.oldestBatchableAt ? Math.max(0, now - Date.parse(batchable.oldestBatchableAt)) : 0,
       perDay, batchErrors, progress, selectedBacklog };

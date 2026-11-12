@@ -19,6 +19,8 @@ import { normalizeDroppedReason } from './finding-drop-reason.mjs';
 import { backlogGradeCode, recordFindingGrade } from './review-finding-grades.mjs';
 import { validateFindingManifest, readRemediationConsensus, enrollManifestFindings } from './finding-remediation-selection.mjs';
 
+import { findingBacklogMaxAgeMs } from './finding-backlog-window.mjs';
+
 export { normalizeDroppedReason } from './finding-drop-reason.mjs';
 
 const execFileAsync = promisify(execFile);
@@ -58,7 +60,7 @@ export function findingBatchOptions(env = process.env) {
   return {
     batchSize: positive('ADVERSARIAL_FINDINGS_BATCH_SIZE', 100),
     intervalMs: positive('ADVERSARIAL_FINDINGS_BATCH_INTERVAL_MS', 3600000),
-    maxAgeMs: positive('ADVERSARIAL_FINDINGS_BACKLOG_MAX_AGE_MS', 48 * 3600000),
+    maxAgeMs: findingBacklogMaxAgeMs(env),
     timeoutMs: positive('ADVERSARIAL_FINDINGS_BATCH_TIMEOUT_MS', 24 * 3600000),
   };
 }
@@ -66,8 +68,11 @@ export function findingBatchOptions(env = process.env) {
 // Immediate assignment is the CAS: every open finding gets one durable owner,
 // even while an older batch in its area is still running. Dispatch admission
 // continues to own worker capacity and budget.
-export function claimFindingBatches(db, day, { batchSize = 100, manifest = null, readConsensus = readRemediationConsensus } = {}) {
+export function claimFindingBatches(db, day, { batchSize = 100, manifest = null, readConsensus = readRemediationConsensus,
+  now = Date.now(), maxAgeMs = findingBacklogMaxAgeMs() } = {}) {
   if (!Number.isSafeInteger(batchSize) || batchSize < 1) throw Error('invalid batchSize');
+  if (!Number.isFinite(now) || !Number.isSafeInteger(maxAgeMs) || maxAgeMs < 1) throw Error('invalid backlog window');
+  const cutoff = new Date(now - maxAgeMs).toISOString();
   const selection = manifest === null ? null : validateFindingManifest(db, manifest);
   // Validate and read consensus once, before taking the SQLite writer lock.
   const admitted = selection === null ? null : new Map([...selection].filter(([, row]) =>
@@ -79,13 +84,15 @@ export function claimFindingBatches(db, day, { batchSize = 100, manifest = null,
       FROM finding_backlog b JOIN review_findings f USING(finding_id)
       JOIN reviewed_prs r ON r.repo=b.repo AND r.pr_number=b.pr_number
       WHERE b.outcome IS NULL AND b.batch_id IS NULL AND r.pr_state='merged'
-        ${selection === null ? 'AND b.manifest_sha256 IS NULL' : ''}
-      ORDER BY priority,b.captured_at,b.finding_id`).all()
+        ${selection === null ? 'AND b.manifest_sha256 IS NULL AND julianday(r.merged_at) >= julianday(@cutoff)' : ''}
+      ORDER BY priority,b.captured_at,b.finding_id`).all(selection === null ? { cutoff } : {})
       .filter(row => admitted === null || admitted.has(row.finding_id));
     // Snapshot advisory placement before assignment changes the candidate view.
     const notes = selection ? [] : db.prepare(`SELECT c.note_id,c.repo,c.area,p.body_captured_at AS captured_at,4 AS priority
       FROM finding_batch_note_candidates c JOIN reviewer_passes p USING(pass_id)
-      ORDER BY p.body_captured_at,c.note_id`).all();
+      JOIN reviewed_prs r ON r.repo=c.repo AND r.pr_number=c.pr_number
+      WHERE julianday(r.merged_at) >= julianday(?)
+      ORDER BY p.body_captured_at,c.note_id`).all(cutoff);
     const groups = new Map();
     for (const row of [...pending, ...notes].sort((a, b) => a.priority - b.priority
       || a.captured_at.localeCompare(b.captured_at)
@@ -516,7 +523,7 @@ export async function runFindingBatches({ db, rootDir, env = process.env, day = 
   timeoutMs = findingBatchOptions(env).timeoutMs, manifest = null, readConsensus = readRemediationConsensus }) {
   if (!Number.isSafeInteger(concurrency) || concurrency < 1) throw Error('invalid concurrency');
   if (resolutionOnly && manifest !== null) validateFindingManifest(db, manifest);
-  if (!resolutionOnly) claimFindingBatches(db, day, { batchSize, manifest, readConsensus });
+  if (!resolutionOnly) claimFindingBatches(db, day, { batchSize, manifest, readConsensus, now, maxAgeMs: findingBatchOptions(env).maxAgeMs });
   const queue = db.prepare('SELECT * FROM finding_batches WHERE completed_at IS NULL AND released_at IS NULL ORDER BY rowid').all()
     .filter(batch => manifest === null || batch.manifest_sha256 === manifest.sha256);
   let stopped = false;

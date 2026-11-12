@@ -12,6 +12,8 @@ import { claimFindingBatches, releaseFindingBatch, runFindingBatches, settleFind
 import { summarizeFindingBacklog } from '../src/findings-backlog.mjs';
 
 // Synthetic repository, findings and launches only.
+test.mock.method(Date, 'now', () => Date.parse('2026-01-02T00:00:00Z'));
+
 const repo = 'sample/service', head = 'a'.repeat(40), DAY = 24 * 3600000;
 const finding = title => `- **${title}**
   - **File:** \`src/result.mjs\`

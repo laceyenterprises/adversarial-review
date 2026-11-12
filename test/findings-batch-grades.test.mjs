@@ -14,6 +14,8 @@ import { readRemediationConsensus, validateFindingManifest } from '../src/findin
 import { summarizeFindingBacklog, findingBacklogAlert } from '../src/findings-backlog.mjs';
 import { main } from '../bin/findings-batch-backfill.mjs';
 
+test.mock.method(Date, 'now', () => Date.parse('2026-01-02T00:00:00Z'));
+
 const repo = 'sample/service', head = 'a'.repeat(40), day = '2026-01-02';
 function fixture(t, advisory = false) {
   const rootDir = mkdtempSync(join(tmpdir(), 'batch-grades-'));

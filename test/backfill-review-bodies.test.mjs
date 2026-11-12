@@ -925,3 +925,31 @@ test('closeout summary splits body captured, empty confirmed, and empty retryabl
   // closeout no longer inflates the "advanced" counter.
   assert.match(result.stdout, /closeout rows advanced:\s+2\s+\(66\.7%\)/);
 });
+
+
+test('historical body repair projects findings without automatic backlog enrollment', async () => {
+  const rootDir = buildBodiesFixtureRoot();
+  const fixtures = buildBodiesFixtures();
+  const endpoint = Object.keys(fixtures).find(key => key.endsWith('/101/reviews'));
+  const reviews = fixtures[endpoint].trim().split('\n').map(line => JSON.parse(line));
+  reviews[0].commit_id = 'a'.repeat(40);
+  reviews[0].body = `## Blocking Issues
+- None.
+## Non-blocking Issues
+- **Explain result**
+  - **File:** \`src/result.mjs\`
+  - **Lines:** 2
+  - **Problem:** The result lacks documentation.
+`;
+  fixtures[endpoint] = jsonLines(reviews);
+  withDb(rootDir, db => db.prepare("UPDATE reviewer_passes SET head_sha=? WHERE pr_number=101").run('a'.repeat(40)));
+  const result = await runCli(rootDir, ['--apply', '--pass', 'bodies'], {
+    execFileImpl: makeExecFileStub(fixtures), now: () => '2026-05-29T12:30:00Z',
+  });
+  assert.equal(result.code, 0, result.stderr);
+  withDb(rootDir, db => {
+    assert.equal(db.prepare('SELECT count(*) n FROM review_findings').get().n, 1, result.stdout + result.stderr);
+    assert.equal(db.prepare('SELECT historical_projection FROM review_findings').get().historical_projection, 1);
+    assert.equal(db.prepare('SELECT count(*) n FROM finding_backlog').get().n, 0);
+  });
+});

@@ -53,7 +53,7 @@ export function main(argv = process.argv.slice(2), writeProgress = text => proce
     if (!options['--job']) throw new Error('--job is required');
     const job = JSON.parse(readFileSync(options['--job'], 'utf8'));
     return linkFindingRemediation(db, { job, workspaceDir: options['--workspace'] ? resolve(options['--workspace']) : null,
-      roundNumber: integer('--round', job.remediationPlan?.currentRound) });
+      roundNumber: integer('--round', job.remediationPlan?.currentRound), historicalProjection: true });
   } finally { db.close(); }
 }
 

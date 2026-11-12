@@ -1,0 +1,13 @@
+operator_steps:
+  - description: >-
+      After the companion deployment, the designated operator runs the documented
+      historical projection activation once, retaining pre/post open backlog
+      counts. Counts must be unchanged except verified live activity; the reviewer
+      report must show no backfill required gap. Stop at the first database is
+      locked error and never retry-loop. This command displays the store contract.
+    run_as: designated operator
+    command: /bin/cat docs/data-model/review-findings.md
+actions: []
+catchup:
+  catchup_timeout_s: 1800
+contact_on_failure: operator

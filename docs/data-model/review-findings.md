@@ -196,7 +196,20 @@ node bin/review-findings.mjs link-job --db /path/to/reviews.db --job /path/to/jo
 ```
 
 Repeat `backfill` with the returned `nextPassId` until `scanned` is zero. A rerun
-from zero is idempotent. `link-job` defaults to the current round; specify each
+from zero is idempotent. Historical projection inserts findings and simplicity
+observations with `historical_projection=1` (integer 0/1, default 0), added by
+`migrations/20261112_historical_projection.sql`. Both automatic candidate views
+exclude these records, so insert, merge and late posting-receipt triggers cannot
+enroll them. Existing records retain their original marker when replayed; a
+historical replay cannot revoke an existing live capture. Historical projection
+preserves matching advisory snapshots and retires stale unassigned notes. `persistReviewFindings` accepts
+`{ historicalProjection: true }` for historical callers; `backfillReviewFindings`,
+the body-repair backfill and historical link CLI always supply it. A genuine live
+projection can promote matching historical observations to live and enroll them
+when the source is merged, recovering receipts that arrived before projection.
+The verified merge-capture boundary can therefore activate a previously backfilled
+open PR. A raw receipt metadata update alone preserves the historical marker. Explicit manifest enrollment remains available after consensus
+validation and deliberately bypasses this automatic enrollment boundary. `link-job` defaults to the current round; specify each
 historical round explicitly. Without `--workspace`, reply links are retained
 with `missing-history` rather than guessed commit evidence. Run migrations and
 backfill through the normal deployment/maintenance lane after merge; no live
@@ -478,7 +491,16 @@ assigned notes retain the owning batch's area. Missing schema/store reports
 `available: false`, never a healthy empty backlog. No new alert transport or per-item provider read is added.
 Ready captures superseded by the final merged review are retained as dropped
 with reason `stale-code-changed: Final posted review superseded this finding`; they cannot inflate a later batch.
-Late posting receipts also enroll findings for already-observed merges.
+Live late posting receipts also enroll findings for already-observed merges.
+Automatic batch claims require a valid source `merged_at` within
+`ADVERSARIAL_FINDINGS_BACKLOG_MAX_AGE_MS` (default 48 hours) of the current clock;
+the boundary is inclusive. This applies to findings and simplicity advice.
+Unknown merge times fail closed. Skipped findings retain their rows, outcome,
+reason and ownership. Summary `outOfWindow` counts automatic, open, unassigned
+findings with old or unknown merge times; these are excluded from `batchableCount`
+and its oldest timestamp. Already-owned batches remain monitored regardless of
+source age. Explicit manifests bypass the automatic age filter and remain
+separately accounted in `selectedBacklog`.
 Ready captures closed without merge are dropped with
 `false-positive: Source PR closed without merge; reviewed changes did not land`;
 if reopened and merged with that same final finding, merge enrollment restores

@@ -102,6 +102,12 @@ FROM (
 );
 ```
 
+Body-repair backfill projects findings and simplicity notes as historical
+observations. Those new observations cannot enter automatic remediation
+candidates, including through later raw posting metadata updates. A subsequent
+live capture or an explicit consensus-validated manifest can activate them; see
+[review finding records](data-model/review-findings.md).
+
 Backfill is handled by `scripts/backfill-review-bodies.mjs`. It defaults to `--dry-run`; use `--apply` to write. Re-running is safe: pass-body rows with `body_md IS NOT NULL` are skipped, and empty closeout checks never erase a previously captured closeout body. Transient `gh` failures (timeouts, 5xx, TLS/DNS hiccups) are retried with bounded backoff inside `src/gh-cli.mjs`; the body pass mirrors the closeout pass and charges any group whose retries exhaust as `unmatched/gh_fetch_error` so a single PR cannot abort the entire run. The closeout summary splits the previously-conflated `advanced` counter into `body captured`, `empty confirmed`, and `empty retryable` lines. Overlapping same-reviewer passes are deduplicated per group: the second pass to claim a given `gh_comment_id` records `reason=duplicate_artifact_claim` so the `UNIQUE` index cannot crash an `--apply` run mid-flight. `--limit` requires a positive integer; `--limit 0` is rejected. Operators can redirect the structured stdout logs to a file when running against a copied DB, for example:
 
 ```sh

@@ -14,6 +14,8 @@ import { openReviewStateDb, ensureReviewStateSchema } from '../src/review-state.
 import { beginReviewerPass } from '../src/reviewer-pass-tokens.mjs';
 import { updateReviewerPassBodyCapture } from '../src/review-body-capture.mjs';
 
+test.mock.method(Date, 'now', () => Date.parse('2026-01-02T00:00:00Z'));
+
 const repo = 'sample/service', head = 'a'.repeat(40);
 const body = `## Blocking Issues
 - None.

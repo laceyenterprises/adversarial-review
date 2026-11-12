@@ -50,11 +50,13 @@ before claim. An observed live HQ launch or unreadable ownership evidence keeps
 the job pending without charging a round. Each claim performs at most 25 lookups;
 at that limit a durable filename cursor lets the next pass resume with later
 jobs and wrap, including after restart. A fresh lookup precedes each claim.
-This query does not reserve the PR against later HQ dispatches: a launch after
-the lookup can still race local remediation. A shared reservation and handoff
-requires companion HQ changes. See the
-[admission snapshot and cursor contract](data-model/follow-up-jobs.md#live-pr-owner-admission-snapshot-remediationowner-01),
-including the exact unsupported-command deployment fallback.
+The daemon asks again immediately before the worker spawns; a live or unreadable
+owner then returns the claimed job to pending, budget neutral, with
+`livePrOwnerDeferral` naming the owner. An HQ CLI without `pr-owner` defers as
+`lookup-unsupported`; it never proceeds. Neither read reserves the PR: an HQ
+launch admitted after the spawn-time lookup is HQ's admission to refuse. See the
+[admission and spawn-time contract](data-model/follow-up-jobs.md#live-pr-owner-admission-snapshot-remediationowner-01).
+To inspect a waiting job, run `hq merge-agent rescue <PR#>` (`REMEDIATION WAITING:`).
 
 Operator-label CI holds belong to closure, not review-findings consumption.
 Remediation may restore a review-flagged guarded change to its base state even

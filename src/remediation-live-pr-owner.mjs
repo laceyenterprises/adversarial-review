@@ -9,19 +9,20 @@
 // live-launch query that `hq dispatch --pr` uses for its own refusal
 // (`hq merge-agent pr-owner`), rather than a second ownership store.
 //
-// Unknown is not free: a failed, timed-out or malformed lookup defers the
-// job exactly like a live owner does. The deferral is recorded on the pending
-// job and re-evaluated on the next claim pass. Nothing here cancels or
-// touches a job that is already running.
-// This is an admission snapshot, not a shared reservation: an HQ launch that
-// starts after the lookup can still race a local worker. A cross-dispatch
-// ownership guarantee requires a companion HQ reservation/handoff protocol.
+// Unknown is not free: a failed, timed-out, malformed or unsupported lookup
+// defers the job exactly like a live owner does. The deferral is recorded on
+// the pending job and re-evaluated on the next claim pass. Nothing here
+// cancels or touches a job that is already running.
 //
-// Companion-deploy seam: an HQ CLI that predates the `pr-owner` subcommand
-// rejects it as unknown. That is not an unreadable owner; it means HQ offers
-// no answer at all, so the claim keeps its pre-REMEDIATIONOWNER-01 behavior
-// (the same seam `hq dispatch --pr` uses for the repair-in-place companion)
-// and logs a warning on every lookup until the companion is deployed.
+// The path that starts work asks twice. The claim-time lookup admits a pending
+// job; `deferClaimedJobForLivePrOwner` asks HQ again immediately before the
+// worker runtime starts, after the slow pre-spawn gates (OAuth, workspace
+// preparation, lifecycle and mergeability reads). A launch that HQ started in
+// between returns the claimed job to pending, budget neutral, naming the owner.
+// The HQ answer remains a read: an HQ launch admitted after the spawn-time
+// lookup, or an HQ dispatch that cannot see a running local worker, is the HQ
+// side's admission to refuse (agent-os REMEDIATIONOWNER-01 residual risk).
+// There is no second ownership store.
 import { execFile } from 'node:child_process';
 import { readFileSync, rmSync } from 'node:fs';
 import { basename, join } from 'node:path';
@@ -30,6 +31,7 @@ import { promisify } from 'node:util';
 import { writeFileAtomic } from './atomic-write.mjs';
 import { loadAwareTimeoutMs } from './load-aware-timeout.mjs';
 import { writeFollowUpJob } from './follow-up-job-write.mjs';
+import { requeueClaimedFollowUpJobBeforeSpawn } from './remediation-claimed-requeue.mjs';
 
 export const LIVE_PR_OWNER_DEFERRED = 'deferred-live-pr-owner';
 export const LIVE_PR_OWNER_UNKNOWN = 'deferred-live-pr-owner-unknown';
@@ -38,6 +40,7 @@ export const LIVE_PR_OWNER_UNKNOWN = 'deferred-live-pr-owner-unknown';
 export const LIVE_PR_OWNER_LOOKUPS_PER_CLAIM = 25;
 const LAUNCH_ID = /^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$/u;
 // The exact usage error an older `hq merge-agent` prints for this subcommand.
+// It is reported as its own unknown reason so the operator sees a deploy gap.
 const UNSUPPORTED = /unknown merge-agent subcommand: pr-owner\b/u;
 
 function bounded(value, max = 128) {
@@ -96,8 +99,9 @@ export function createLivePrOwnerLookup({
       }));
     } catch (error) {
       if (error?.code === 64 && UNSUPPORTED.test(String(error.stderr || ''))) {
-        log.warn?.('[follow-up] hq merge-agent pr-owner is not deployed; live PR-owner check unavailable');
-        return { state: 'unsupported' };
+        // HQ offers no answer, so ownership is unknown: defer rather than proceed.
+        log.warn?.('[follow-up] hq merge-agent pr-owner is not deployed; deferring remediation until it is');
+        return unknown('lookup-unsupported');
       }
       // A non-zero exit may still carry a typed refusal on stdout.
       const typed = error?.stdout ? parseLivePrOwnerReply(error.stdout) : null;
@@ -110,7 +114,7 @@ export function createLivePrOwnerLookup({
 }
 
 export function livePrOwnerDeferralRecord(result, observedAt) {
-  if (result?.state === 'free' || result?.state === 'unsupported') return null;
+  if (result?.state === 'free') return null;
   if (result?.state === 'owned') {
     return { reason: LIVE_PR_OWNER_DEFERRED, ...result.owner, observedAt };
   }
@@ -206,10 +210,53 @@ export async function claimWithLivePrOwnerGate({ claim, lookupImpl, rootDir, obs
       return { ownerLookupBudget: true };
     }
     const { key, repo, prNumber } = claimed.ownerLookup;
-    let result = null;
-    try { result = await lookupImpl({ repo, prNumber }); } catch { /* unknown below */ }
     // A thrown or empty answer is unknown, and unknown defers like an owner.
-    results.set(key, result && typeof result === 'object' ? result : unknown('lookup-failed'));
+    results.set(key, await lookupOnce(lookupImpl, { repo, prNumber }));
     lastLookedUp = claimed.ownerLookup.pendingName;
   }
+}
+
+async function lookupOnce(lookupImpl, job) {
+  let result = null;
+  try { result = await lookupImpl({ repo: job.repo, prNumber: Number(job.prNumber) }); } catch { /* unknown below */ }
+  return result && typeof result === 'object' ? result : unknown('lookup-failed');
+}
+
+// Spawn-time recheck for a claimed job that has not reached the worker runtime.
+// Returns null when HQ reports no live owner. Otherwise the job goes back to
+// pending through the shared budget-neutral pre-spawn requeue, carrying the
+// typed `livePrOwnerDeferral` that names the owner, and keeps an explicit
+// operator retrigger's one-shot override (see requeueClaimedJobForConflictedBaseProbe).
+export async function deferClaimedJobForLivePrOwner({
+  rootDir, claimed, lookupImpl, now = () => new Date().toISOString(), delayedPendingPaths = null,
+  requeueImpl = requeueClaimedFollowUpJobBeforeSpawn, writeJobImpl = writeFollowUpJob, log = console,
+}) {
+  if (!lookupImpl || !claimed?.job || !claimed.jobPath) return null;
+  const observedAt = now();
+  const record = livePrOwnerDeferralRecord(await lookupOnce(lookupImpl, claimed.job), observedAt);
+  if (!record) return null;
+  const override = claimed.job.remediationPlan?.nextAction;
+  const previous = claimed.job.livePrOwnerDeferral || null;
+  const requeued = requeueImpl({ rootDir, jobPath: claimed.jobPath, requeuedAt: observedAt });
+  const since = previous?.reason === record.reason ? previous.since || previous.observedAt || observedAt : observedAt;
+  const job = { ...requeued.job, livePrOwnerDeferral: { ...record, since } };
+  if (override?.operatorOverride === true) {
+    job.remediationPlan = { ...job.remediationPlan,
+      nextAction: { ...override, ...job.remediationPlan?.nextAction, operatorOverride: true } };
+  }
+  writeJobImpl(requeued.jobPath, job);
+  delayedPendingPaths?.add?.(requeued.jobPath);
+  const waitingFor = record.launchRequestId
+    ? `${record.launchRequestId} (${record.workerClass || 'unknown class'}, ${record.launchStatus || 'live'})`
+    : `unknown owner (${record.lookupReason})`;
+  log.warn?.(`[follow-up] ${record.reason} before spawn ${claimed.job.repo}#${claimed.job.prNumber} `
+    + `job=${claimed.job.jobId}: returned to pending; owner ${waitingFor}`);
+  return {
+    consumed: false,
+    reason: record.reason,
+    ...(record.launchRequestId ? { owner: { launchRequestId: record.launchRequestId, workerClass: record.workerClass,
+      launchStatus: record.launchStatus, kind: record.kind } } : { lookupReason: record.lookupReason }),
+    job,
+    jobPath: requeued.jobPath,
+  };
 }

@@ -434,15 +434,25 @@ failures log a warning and cannot undo a claim or bypass an ownership lookup.
 Concurrent drains share this scheduling hint, not an ownership lock.
 Callers that pass no lookup, such as tests and standalone deployments,
 keep the previous claim behavior. An HQ CLI that predates the subcommand exits 64
-with `unknown merge-agent subcommand: pr-owner`. That case is a companion-deploy
-seam: HQ has no answer to give, so the claim keeps its previous behavior and
-logs a warning on each lookup. Any other failure is still unknown and defers.
+with `unknown merge-agent subcommand: pr-owner`; that is recorded as
+`lookupReason: "lookup-unsupported"` and defers like any other unknown answer,
+with a warning on each lookup. No lookup answer other than an explicit
+`owner: null` lets a job proceed.
 
-This query is not a shared per-PR reservation. HQ may start a new launch after
-the lookup, and local remediation remains invisible to HQ after claim. Exclusive
-ownership through worker handoff requires a companion HQ reservation protocol
-honored by both dispatch paths; this repository's read-only admission snapshot
-does not provide that guarantee.
+The spawn path asks HQ a second time, immediately before the worker runtime
+starts (after the OAuth, workspace, lifecycle and mergeability gates, which can
+take minutes). If HQ now reports a live owner, or the lookup fails, times out or
+is malformed, the claimed job returns to `pending` through the shared pre-spawn
+requeue: the never-spawned round is dropped, `currentRound` is restored, no
+worker record is written, and an explicit operator retrigger keeps its one-shot
+`operatorOverride`. The pending job carries the same `livePrOwnerDeferral`
+shape, and `consumeNextFollowUpJob` returns `{ consumed: false, reason, owner |
+lookupReason }` naming the owner. The job is skipped for the rest of the pass.
+
+Both lookups read HQ's own live-launch state; this repository adds no second
+ownership store. The remaining window is HQ's to close: a launch HQ admits after
+the spawn-time lookup, or an `hq dispatch --pr` that cannot see a running local
+worker. The agent-os side records that inverse check as its residual risk.
 
 ## Branch and publication contract (REMEDBRANCH-01)
 

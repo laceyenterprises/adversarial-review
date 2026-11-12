@@ -101,15 +101,14 @@ test('createLivePrOwnerLookup asks hq merge-agent pr-owner and treats failures a
   } });
   assert.equal((await missing({ repo: REPO, prNumber: 4101 })).reason, 'lookup-failed');
 
-  // Any other usage failure stays unknown; only the exact unknown-subcommand
-  // reply from an older HQ CLI is the companion-deploy seam.
+  // Any other usage failure stays unknown too.
   const usage = createLivePrOwnerLookup({ env, timeoutMs: 1000, log: quiet, execFileImpl: async () => {
     throw Object.assign(new Error('exit 64'), { code: 64, stdout: '', stderr: '[hq] error: --repo must be owner/name' });
   } });
   assert.equal((await usage({ repo: REPO, prNumber: 4101 })).state, 'unknown');
 });
 
-test('an HQ CLI without the pr-owner subcommand keeps the previous claim behavior and warns', async (t) => {
+test('an HQ CLI without the pr-owner subcommand defers as unknown and warns; it never proceeds', async (t) => {
   const warnings = [];
   const lookup = createLivePrOwnerLookup({
     env: { HQ_BIN: '/synthetic/bin/hq' }, timeoutMs: 1000,
@@ -117,14 +116,16 @@ test('an HQ CLI without the pr-owner subcommand keeps the previous claim behavio
     execFileImpl: async () => { throw Object.assign(new Error('exit 64'), { code: 64, stdout: '',
       stderr: 'Usage: hq merge-agent rescue <PR#> [options]\n[hq] error: unknown merge-agent subcommand: pr-owner\n' }); },
   });
-  assert.deepEqual(await lookup({ repo: REPO, prNumber: 4112 }), { state: 'unsupported' });
+  assert.deepEqual(await lookup({ repo: REPO, prNumber: 4112 }), { state: 'unknown', reason: 'lookup-unsupported' });
   assert.equal(warnings.length, 1);
 
   const rootDir = tempRoot(t);
-  const { job } = pendingJob(rootDir, 4112);
-  const claimed = await claimOnce(rootDir, lookup);
-  assert.equal(claimed.job.jobId, job.jobId);
-  assert.equal(claimed.job.livePrOwnerDeferral, undefined);
+  const { jobPath } = pendingJob(rootDir, 4112);
+  assert.equal(await claimOnce(rootDir, lookup), null, 'no answer from HQ is not a free branch');
+  const job = readFollowUpJob(jobPath);
+  assert.equal(job.status, 'pending');
+  assert.equal(job.livePrOwnerDeferral.reason, LIVE_PR_OWNER_UNKNOWN);
+  assert.equal(job.livePrOwnerDeferral.lookupReason, 'lookup-unsupported');
 });
 
 test('a live PR-update owner defers the remediation job before claim and names the owning launch', async (t) => {

@@ -207,7 +207,7 @@ import {
 import { formatCiCheckList } from './ci-check-format.mjs';
 import { inspectRemediationCiRegression } from './remediation-ci-regression.mjs';
 import { requeueForWorkspaceResume, resumeLostRemediationWorker } from './remediation-worker-resume.mjs';
-import { claimWithLivePrOwnerGate, createLivePrOwnerLookup } from './remediation-live-pr-owner.mjs';
+import { claimWithLivePrOwnerGate, createLivePrOwnerLookup, deferClaimedJobForLivePrOwner } from './remediation-live-pr-owner.mjs';
 import {
   cancelHqDispatch,
   classifyHqDispatchFailure,
@@ -3158,9 +3158,7 @@ async function consumeNextFollowUpJobWithinRepositoryCycle({
   const claimed = livePrOwnerLookupImpl ? await claimWithLivePrOwnerGate({ claim,
     rootDir, lookupImpl: livePrOwnerLookupImpl, observedAt: now(), log }) : claim(now(), null);
   if (claimed?.ownerLookupBudget) return { consumed: false, reason: 'live-pr-owner-lookup-budget' };
-  if (!claimed) {
-    return { consumed: false, reason: 'no-pending-jobs' };
-  }
+  if (!claimed) return { consumed: false, reason: 'no-pending-jobs' };
   if (claimed.stopped) claimed.job.remediationPlan.publishedRoundsForPR = summarizePRRemediationLedger(rootDir, claimed.job).publishedRoundsForPR || 0;
   if (claimed.stopped) {
     const stoppedAt = now();
@@ -3626,6 +3624,8 @@ async function consumeNextFollowUpJobWithinRepositoryCycle({
     // REMCONFLICT-01: read live mergeability at dispatch time (src/remediation-conflicted-base.mjs).
     const conflictedBase = hqDispatchEnabled && conflictedBaseGateImpl ? await conflictedBaseGateImpl({ rootDir, job: claimed.job, jobPath: claimed.jobPath, env: jobEnv, execFileImpl, now, log, stopJobImpl: (stop) => stopConsumedJobWithComment({ ...stop, postCommentImpl, now, log }) }) : null;
     if (conflictedBase?.result) return conflictedBase.result;
+    const ownerAtSpawn = await deferClaimedJobForLivePrOwner({ rootDir, claimed, lookupImpl: livePrOwnerLookupImpl, now, delayedPendingPaths, log }); // REMEDIATIONOWNER-01: re-ask HQ at spawn
+    if (ownerAtSpawn) return ownerAtSpawn;
 
     // ARC-08: the health-routed AgentRuntime handles OS or local dispatch and
     // returns the worker descriptor. The subject adapter owns git workspace prep.

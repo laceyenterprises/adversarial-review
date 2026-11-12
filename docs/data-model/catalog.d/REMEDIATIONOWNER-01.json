@@ -17,7 +17,7 @@
         "livePrOwnerDeferral: { reason: deferred-live-pr-owner, launchRequestId, workerClass, launchStatus, kind, observedAt, since }",
         "livePrOwnerDeferral: { reason: deferred-live-pr-owner-unknown, lookupReason, lookupDetail?, observedAt, since }"
       ],
-      "compatibility": "Additive field on pending jobs only, written before claim and removed when the owner lookup reports no live owner. No round is charged, no claim is consumed, and in-progress jobs are never read or rewritten by this path."
+      "compatibility": "Additive field on pending jobs only, written before claim or when a never-spawned claimed job returns to pending at the spawn-time recheck, and removed when the owner lookup reports no live owner. No round is charged, an operator override survives, and spawned in-progress jobs are never read or rewritten by this path."
     }
   ]
 }

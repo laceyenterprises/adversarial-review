@@ -543,7 +543,9 @@
         "ownerFields": ["launchRequestId", "workerClass", "launchStatus", "kind"],
         "unknownFields": ["lookupReason", "lookupDetail?"],
         "timestamps": ["observedAt", "since"],
-        "retention": "pending only; cleared when a fresh lookup reports free or the companion command is unsupported; no claim or round is consumed by deferral"
+        "lookupReasonValues": ["lookup-failed", "lookup-timeout", "lookup-malformed", "lookup-unsupported", "lookup-unavailable", "ledger-unavailable", "<HQ typed reason>"],
+        "writers": ["pre-claim admission", "spawn-time requeue of a never-spawned claimed job"],
+        "retention": "pending only; cleared when a fresh lookup reports free; no claim or round is consumed by deferral"
       },
       "livePrOwnerScanCursor": {
         "store": "data/follow-up-jobs/live-pr-owner-scan-cursor.json",

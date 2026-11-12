@@ -1,0 +1,12 @@
+operator_steps:
+  - description: >-
+      SRE deploys the companion Agent OS release-branch command with its registered
+      dispatcher consumer reload, allows the adversarial-review float, and restarts watcher and follow-up through their
+      registered service owners. Verify PID start times against deployment.
+      Over 24 hours require zero closer checkout-failed with a terminal holder
+      and zero already-checked-out provision refusals for terminal holders.
+      Record deployed SHAs, PID start times, observation interval, refusal counts
+      and salvage/audit evidence. Live, dirty and uncertain holds remain expected.
+      Coding validation authorizes no live mutation, restart or synthetic release.
+    run_as: Authorized SRE/operator
+    command: /usr/bin/less "${ADVERSARIAL_REVIEW_ROOT:?}/docs/changes/HAMCHECKOUTHOLDER-01.md"

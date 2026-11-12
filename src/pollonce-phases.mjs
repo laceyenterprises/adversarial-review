@@ -277,7 +277,7 @@ import {
 } from './reviewer-spawn-settle.mjs';
 import { maybeDispatchReviewerTimeoutExhaustedMergeAgent } from './reviewer-timeout-exhausted-dispatch.mjs';
 import { admitExhaustedHeadVerdict, isExhaustedHeadVerdictRequested } from './exhausted-head-verdict.mjs';
-import { pendingRepairEpoch, repairEpochForHead, bindRepairHead } from './repair-epochs.mjs';
+import { reconcileRepairOwner, repairEpochForHead, bindRepairHead } from './repair-epochs.mjs';
 import { refundReviewHarnessFault } from './review-harness-retry.mjs';
 import { isReviewCycleCapRoutedToHammer, maybeRouteReviewCycleCapToHammer } from './review-cycle-cap-hammer.mjs';
 import { latestReviewedHeadSha, maybeRouteCiBlockedToHammer } from './ci-blocked-hammer.mjs';
@@ -1498,16 +1498,22 @@ export async function processReviewSubject(entry, ctx) {
       };
       const finalRemediationPush = effectiveDomainId === CODE_PR_DOMAIN_ID && !subject.terminal
         ? findFinalRemediationPushJob(ROOT, { repo: repoPath, prNumber, headSha: subject.headSha }) : null;
-      if (effectiveDomainId === CODE_PR_DOMAIN_ID && !subject.terminal) {
-        const refund = refundReviewHarnessFault({ rootDir: ROOT, db, row: existing });
-        existing = refund.row;
-        if (refund.wait) return;
-      }
       // EXHAUSTEDHEADOWNER-01: one delivered verdict per distinct builder head.
       // The request CAS coalesces ticks and refuses to overwrite a live claim.
-      const repairEpoch = effectiveDomainId === CODE_PR_DOMAIN_ID && !subject.terminal
-        ? pendingRepairEpoch(ROOT, { repo: repoPath, prNumber })
-          || repairEpochForHead(ROOT, { repo: repoPath, prNumber }, subject.headSha) : null;
+      let repairEpoch = null;
+      if (effectiveDomainId === CODE_PR_DOMAIN_ID && !subject.terminal) {
+        try {
+          repairEpoch = await reconcileRepairOwner({ rootDir: ROOT, repo: repoPath, prNumber, headSha: subject.headSha })
+            || repairEpochForHead(ROOT, { repo: repoPath, prNumber }, subject.headSha);
+          const refund = refundReviewHarnessFault({ rootDir: ROOT, db, row: existing });
+          existing = refund.row;
+          if (refund.wait) return;
+        } catch (error) {
+          // A corrupt per-PR ledger or a busy writer defers this subject only.
+          console.error(`[watcher] repair/refund observation deferred for ${repoPath}#${prNumber}: ${error.message}`);
+          return;
+        }
+      }
       // The reserved builder owns this unchanged head through provisioning and
       // publication; ordinary review/remediation must not mint another owner.
       if (repairEpoch && !repairEpoch.reviewHead && repairEpoch.baseHead === subject.headSha) return;

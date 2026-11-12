@@ -63,12 +63,12 @@ function code(value) {
 /**
  * @returns {{ kind: 'inconclusive'|'real', reason: string, origin: string }}
  */
-export function classifyCloserOutcome({ reason = null, failureClass = null, failureDetail = null } = {}) {
+export function classifyCloserOutcome({ reason = null, failureClass = null } = {}) {
   const raw = String(reason ?? '').trim();
   // A wall-clock stop can be the outer supervisor expiring while provision
   // waits. Require positive launch evidence; a bare expiry stays counted.
   if (code(raw) === 'hammer-wall-clock-exceeded'
-    && isHarnessFault(`${raw} ${failureClass ?? ''} ${failureDetail ?? ''}`)) {
+    && isHarnessFault(code(failureClass))) {
     return { kind: 'inconclusive', reason: code(raw), origin: 'infrastructure' };
   }
   if (raw) {
@@ -83,7 +83,7 @@ export function classifyCloserOutcome({ reason = null, failureClass = null, fail
       return { kind: 'inconclusive', reason: code(raw), origin: 'infrastructure' };
     }
   }
-  if (isHarnessFault(`${failureClass ?? ''} ${failureDetail ?? ''}`)) {
+  if (isHarnessFault(code(failureClass))) {
     return { kind: 'inconclusive', reason: code(failureClass), origin: 'infrastructure' };
   }
   const launch = code(failureClass);

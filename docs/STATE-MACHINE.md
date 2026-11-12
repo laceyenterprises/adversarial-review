@@ -54,6 +54,16 @@ pre-spawn requeue (`in_progress → pending`), keeping an operator override.
 An HQ launch admitted after that read is HQ's admission to refuse.
 Existing lifecycle graph and automated smoke promises are unchanged.
 
+Pending in-place repair reservations are observed before watcher admission at
+most once per thirty seconds. Complete terminal launch/retry evidence, or a
+proven absent launch after ten minutes of provisioning, retires custody under
+the ledger flock; live and unreadable evidence retain it. Retirement removes
+repair custody from canonical next-action and TTM projections, restoring the
+existing ownerless clock and SEV1 path. Reviewer harness refunds are limited
+to three per PR across heads; later failures keep ordinary infra charges and
+cap alerts. Ledger faults defer only one PR. Existing lifecycle values, merge
+predicates and automated smoke commands are unchanged.
+
 Zero-output admission refusals without a launch move closer dispatch custody to
 `operator-escalated` for that head. The watcher clears the generic slow-retry
 clock, records the operator owner, and pages once per PR/head. Legacy

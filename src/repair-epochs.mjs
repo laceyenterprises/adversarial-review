@@ -5,21 +5,57 @@ import { readDispatchLaunches, launchProbe } from './dispatch-read-client.mjs';
 import { launchRequestOwned } from './ama/launch-request-status.mjs';
 
 export const REPAIR_EPOCH_CAP = 2;
+export const REPAIR_PROVISION_DEADLINE_MS = 10 * 60_000;
+export const REPAIR_OWNER_OBSERVE_MS = 30_000;
 const SHA = /^[a-f0-9]{40}$/i;
 const EXHAUSTION = new Set(['closure-retry-exhausted', 'closure-lifetime-exhausted',
   'retry-exhausted', 'lifetime-exhausted', 'closer-self-error-budget-exhausted',
   'budget-exhausted-closure', 'system-budget-exhausted-closure',
   'remediation-round-budget-exhausted', 'review-cycle-cap-paused']);
 
-export async function observeRepairOwner({ rootDir, epoch, readImpl = readDispatchLaunches }) {
+export async function observeRepairOwner({ rootDir, epoch, now = Date.now(), readImpl = readDispatchLaunches }) {
   if (!epoch || epoch.reviewHead || epoch.terminalAt) return epoch;
-  const result = await readImpl({ idempotency_key: epoch.ownerKey, include_retry_chain: true },
+  // Absence proofs require an exact-key selector without traversal options.
+  const result = await readImpl({ idempotency_key: epoch.ownerKey },
     { rootDir, timeoutMs: 8000 });
+  if (result.ok && result.roots?.length === 0 && result.absenceProof
+    && now - Date.parse(epoch.reservedAt) >= REPAIR_PROVISION_DEADLINE_MS) {
+    return { ...epoch, ownerState: 'terminal', ownerLaunch: null };
+  }
   if (!result.ok || result.roots?.length !== 1) return { ...epoch, ownerState: 'unknown' };
-  const probe = launchProbe(result, result.roots[0], true);
+  const chain = await readImpl({ launch_request_ids: [result.roots[0]], include_retry_chain: true },
+    { rootDir, timeoutMs: 8000 });
+  const probe = launchProbe(chain, result.roots[0], true);
   const owned = launchRequestOwned(probe);
   return { ...epoch, ownerState: owned === false ? 'terminal' : owned ? 'live' : 'unknown',
     ownerLaunch: result.roots[0] };
+}
+
+// Reconcile before watcher admission. Unknown evidence retains custody; only
+// complete terminal retry evidence or proven absence after provisioning retires.
+export async function reconcileRepairOwner({ rootDir, repo, prNumber, headSha, now = Date.now(),
+  readImpl = readDispatchLaunches }) {
+  const epoch = pendingRepairEpoch(rootDir, { repo, prNumber });
+  if (!epoch) return null;
+  // Publication may finish before this poll observes the new head. Admission
+  // must bind that head before terminal worker observation can retire custody.
+  if (headSha && epoch.baseHead !== headSha) return epoch;
+  const age = now - Date.parse(epoch.ownerObservedAt);
+  if (age >= 0 && age < REPAIR_OWNER_OBSERVE_MS) return epoch;
+  const observed = await observeRepairOwner({ rootDir, epoch, now, readImpl });
+  return mutateRepairEpochs(rootDir, { repo, prNumber }, ledger => {
+    const current = ledger.repairEpochs?.find(entry => entry.id === epoch.id && entry.ownerKey === epoch.ownerKey);
+    if (!current || current.reviewHead || current.terminalAt) return null;
+    current.ownerObservedAt = new Date(now).toISOString();
+    current.ownerState = observed.ownerState;
+    current.ownerLaunch = observed.ownerLaunch || null;
+    if (observed.ownerState === 'terminal') {
+      current.terminalAt = current.ownerObservedAt;
+      current.terminalLaunch = current.ownerLaunch;
+      return null;
+    }
+    return current;
+  });
 }
 
 export function repairCause({ ledger, row, cycleExhausted = false, conflicting = false } = {}) {

@@ -841,11 +841,26 @@ with the full history. Canonical next-action and health projections retain the
 reservation as remediation custody during provisioning and publication. A
 pending reservation takes precedence over a prior epoch that reviewed the same
 base head, so the watcher cannot admit competing review work on that head. A live
-or uncertain submission retains custody; only
-complete terminal launch/retry evidence allows a successor. No replacement PR
+or uncertain submission retains custody. Before admission the watcher observes
+pending repair ownership at most once per 30 seconds. Complete terminal
+launch/retry evidence retires the reservation under the ledger flock; an exact-key
+absence proof also retires an unlaunched reservation after ten minutes from
+`reservedAt`. Unreadable or unproven absence retains custody. Retirement removes
+repair ownership from next-action and TTM projections, allowing the existing
+ownerless clock and SEV1 page. Corrupt ledgers and busy refund writers defer only
+the affected PR. No replacement PR
 is opened. After both dispatch and review-service versions load, the runtime
 owner must retain an original-branch merge receipt and a 24-hour observation
 without replacement PRs used to escape budgets.
+
+Reviewer harness refunds are separate from unlimited inconclusive **closer**
+refunds: only three failed reviewer claims per PR, across all heads, receive
+credit. Later failures keep their charges so ordinary infrastructure cap/alert
+handling remains reachable. Receipts retain at most 512 characters of failure
+text; already-applied receipts are read without locking or writing. Bare
+142/143 exits do not establish a harness fault. Closer classification uses
+registered stop origins and structured failure classes; free-text failure
+detail cannot refund an otherwise real stop or bare wall-clock expiry.
 
 Cycle exhaustion ends remediation rounds. A later builder-authored head still
 owes one exact-head verdict review. Admission classifies the live commit, checks

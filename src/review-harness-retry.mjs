@@ -1,7 +1,11 @@
 import { createHash } from 'node:crypto';
 import { isHarnessFault } from './harness-fault.mjs';
-import { mutateRepairEpochs } from './ama/hammer-retry-cap.mjs';
+import { mutateRepairEpochs, readHammerRetryCapLedger } from './ama/hammer-retry-cap.mjs';
 import { closerInconclusiveRetryDelayMs } from './ama/closer-inconclusive-retry.mjs';
+
+// PR-wide, including head changes: a sustained outage must eventually reach
+// the ordinary infrastructure cap and its alert.
+export const REVIEW_HARNESS_REFUND_CAP = 3;
 
 // The failure CAS refunds only the latest failed claim, once. The pass journal
 // retains its raw outcome; a PR-wide attempt count is never wiped. Reservations
@@ -13,16 +17,25 @@ export function refundReviewHarnessFault({ rootDir, db, row, now = Date.now() })
   const id = applied || createHash('sha256').update(JSON.stringify([
     row.failed_at, row.failure_message, row.reviewer_session_uuid, row.reviewer_head_sha,
   ])).digest('hex');
-  const receipt = mutateRepairEpochs(rootDir, { repo: row.repo, prNumber: row.pr_number }, ledger => {
+  const identity = { repo: row.repo, prNumber: row.pr_number };
+  const ledger = readHammerRetryCapLedger(rootDir, identity);
+  if (ledger?.__corrupt) throw new Error('review refund ledger unreadable');
+  const prior = ledger?.reviewHarnessRefunds || {};
+  // Already-applied receipts only pace the retry; no flock or rewrite.
+  if (applied) return { row, wait: Date.parse(prior[applied]?.nextRetryAt) > now, receipt: prior[applied] };
+  if (!prior[id] && Object.keys(prior).length >= REVIEW_HARNESS_REFUND_CAP) return { row, wait: false };
+  const receipt = prior[id] || mutateRepairEpochs(rootDir, identity, ledger => {
     const refunds = ledger.reviewHarnessRefunds ||= {};
     if (!refunds[id]) {
+      if (Object.keys(refunds).length >= REVIEW_HARNESS_REFUND_CAP) return null;
       const count = Object.values(refunds).filter(refund => refund.headSha === row.reviewer_head_sha).length + 1;
-      refunds[id] = { id, headSha: row.reviewer_head_sha, failure: row.failure_message,
+      refunds[id] = { id, headSha: row.reviewer_head_sha, failure: row.failure_message.slice(0, 512),
         reservedAt: new Date(now).toISOString(),
         nextRetryAt: new Date(now + closerInconclusiveRetryDelayMs(count)).toISOString() };
     }
     return refunds[id];
   });
+  if (!receipt) return { row, wait: false };
   if (!applied) {
     db.prepare(`UPDATE reviewed_prs SET review_status='pending-upstream',
       review_attempts=MAX(0, review_attempts-1),

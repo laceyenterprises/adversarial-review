@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync, mkdirSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, rmSync, mkdirSync, writeFileSync, readFileSync, statSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import Database from 'better-sqlite3';
@@ -8,13 +8,15 @@ import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { pathToFileURL } from 'node:url';
 import { reserveRepairEpoch, bindRepairHead, repairCause, pageRepairCap,
-  pendingRepairEpoch, observeRepairOwner } from '../src/repair-epochs.mjs';
+  pendingRepairEpoch, observeRepairOwner, reconcileRepairOwner,
+  REPAIR_PROVISION_DEADLINE_MS } from '../src/repair-epochs.mjs';
 import { admitExhaustedHeadVerdict, isExhaustedHeadVerdictRequested } from '../src/exhausted-head-verdict.mjs';
-import { readHammerRetryCapLedger, recordHammerRetryDispatch, refundCloserSelfError } from '../src/ama/hammer-retry-cap.mjs';
+import { readHammerRetryCapLedger, recordHammerRetryDispatch, refundCloserSelfError,
+  hammerRetryCapFilePath } from '../src/ama/hammer-retry-cap.mjs';
 import { classifyClosureOwnership } from '../src/merge-agent-rescue-classifier.mjs';
 import { classifyCloserOutcome } from '../src/ama/closer-inconclusive-retry.mjs';
 import { isHarnessFault } from '../src/harness-fault.mjs';
-import { refundReviewHarnessFault } from '../src/review-harness-retry.mjs';
+import { refundReviewHarnessFault, REVIEW_HARNESS_REFUND_CAP } from '../src/review-harness-retry.mjs';
 import { ensureReviewStateSchema, requestReviewRereview } from '../src/review-state.mjs';
 
 const repo = 'example/widgets', prNumber = 17;
@@ -160,8 +162,8 @@ test('only terminal launch and complete retry evidence permit a successor epoch'
 });
 
 for (const fault of ['provision-failed', 'workspace-wait timeout',
-  'hammer-wall-clock-exceeded while waiting for a workspace', 'helper exit 142',
-  'command failed with code 143', 'controller-setup-failed', 'quota-exhausted', 'credential-outage']) {
+  'hammer-wall-clock-exceeded while waiting for a workspace',
+  'controller-setup-failed', 'quota-exhausted', 'credential-outage']) {
   test(`${fault} refunds review and closer spend and leaves evidence`, t => {
     const f = fixture(t), db = reviewDb(t);
     assert.equal(isHarnessFault(fault), true);
@@ -173,7 +175,12 @@ for (const fault of ['provision-failed', 'workspace-wait timeout',
     assert.equal(refund.row.review_attempts, 2);
     assert.equal(refund.row.infra_auto_recover_attempts, 1);
     assert.match(refund.row.failure_message, /harness-budget-refunded/);
+    const path = hammerRetryCapFilePath(f.rootDir, f);
+    const before = statSync(path);
+    const contents = readFileSync(path, 'utf8');
     row = refundReviewHarnessFault({ ...f, db, row: refund.row }).row;
+    assert.equal(statSync(path).ino, before.ino, 'applied path never rewrites the ledger');
+    assert.equal(readFileSync(path, 'utf8'), contents);
     assert.equal(row.review_attempts, 2);
     recordHammerRetryDispatch(f.rootDir, f, { jobKey: old, headSha: old, launchRequestId: 'fault-launch' });
     assert.equal(refundCloserSelfError(f.rootDir, f, {
@@ -184,7 +191,7 @@ for (const fault of ['provision-failed', 'workspace-wait timeout',
 test('structured workspace wait evidence refunds an outer wall-clock stop', () => {
   assert.equal(classifyCloserOutcome({
     reason: 'hammer-wall-clock-exceeded',
-    failureClass: 'runtime_timeout',
+    failureClass: 'workspace_wait',
     failureDetail: 'Supervisor expired while waiting for a workspace',
   }).kind, 'inconclusive');
   assert.equal(classifyCloserOutcome({
@@ -197,6 +204,83 @@ test('real findings and unqualified wall-clock expiry remain charged', () => {
   for (const reason of ['predicate-failed', 'conflict-primary-unproven', 'hammer-wall-clock-exceeded']) {
     assert.equal(isHarnessFault(reason), false);
   }
+});
+
+test('free-text detail and bare signal exits do not refund unregistered stops', () => {
+  for (const detail of ['Command failed with code 143', 'helper exit 142',
+    'waiting for a workspace wall clock', 'workspace-wait timeout']) {
+    assert.equal(classifyCloserOutcome({ reason: 'unregistered-real-stop',
+      failureClass: 'runtime_timeout', failureDetail: detail }).kind, 'real');
+  }
+  for (const failure of ['Command failed with code 143', 'helper exit 142']) {
+    assert.equal(isHarnessFault(failure), false);
+  }
+  assert.equal(isHarnessFault('Command failed with code 143: provision-failed'), true);
+});
+
+test('harness refunds have a PR-wide cap and bounded failure evidence', t => {
+  const f = fixture(t), db = reviewDb(t);
+  for (let i = 0; i < REVIEW_HARNESS_REFUND_CAP + 3; i++) {
+    db.prepare(`UPDATE reviewed_prs SET review_status='failed', failed_at=?,
+      failure_message=?, reviewer_head_sha=?`).run(`failure-${i}`,
+      `[hcp-unavailable] ${'x'.repeat(2000)}`, i % 2 ? head : old);
+    const row = db.prepare('SELECT * FROM reviewed_prs').get();
+    const result = refundReviewHarnessFault({ ...f, db, row });
+    assert.equal(result.row.review_attempts, row.review_attempts - (i < REVIEW_HARNESS_REFUND_CAP ? 1 : 0));
+  }
+  const refunds = Object.values(readHammerRetryCapLedger(f.rootDir, f).reviewHarnessRefunds);
+  assert.equal(refunds.length, REVIEW_HARNESS_REFUND_CAP);
+  assert.ok(refunds.every(refund => refund.failure.length <= 512));
+});
+
+test('watcher reconciliation retires terminal or absent repair launches and projects ownerless', async t => {
+  const { resolveTtmOwner } = await import('../src/ttm-owner.mjs');
+  for (const absent of [false, true]) {
+    const f = { ...fixture(t), now: '2026-01-01T00:00:00Z' };
+    reserveRepairEpoch(f);
+    const now = Date.parse(f.now) + REPAIR_PROVISION_DEADLINE_MS;
+    const readImpl = async () => absent
+      ? { ok: true, roots: [], absenceProof: { kind: 'canonical-exact-selector-absence' } }
+      : { ok: true, roots: ['fixture-launch'], retryEdges: [],
+        rows: [{ launch_request_id: 'fixture-launch', status: 'failed' }] };
+    assert.equal(await reconcileRepairOwner({ ...f, now, readImpl }), null);
+    assert.equal(pendingRepairEpoch(f.rootDir, f), null);
+    assert.ok(readHammerRetryCapLedger(f.rootDir, f).repairEpochs[0].terminalAt);
+    assert.equal(resolveTtmOwner({ repairEpoch: pendingRepairEpoch(f.rootDir, f),
+      review: { status: 'posted', suppressed: true } }, new Date(now).toISOString()).owner, null);
+  }
+});
+
+test('repair observation bounds cadence and retains live, early absent and unreadable owners', async t => {
+  for (const state of ['live', 'early-absent', 'unreadable', 'unproven-absent', 'retry']) {
+    const f = { ...fixture(t), now: '2026-01-01T00:00:00Z' };
+    reserveRepairEpoch(f);
+    const now = Date.parse(f.now) + (state === 'early-absent' ? 1000 : REPAIR_PROVISION_DEADLINE_MS);
+    let reads = 0;
+    const readImpl = async () => {
+      reads++;
+      if (state === 'unreadable') return { ok: false };
+      if (state.includes('absent')) return { ok: true, roots: [],
+        ...(state === 'early-absent' ? { absenceProof: {} } : {}) };
+      return { ok: true, roots: ['fixture-launch'],
+        retryEdges: state === 'retry' ? [{ parent: 'fixture-launch', child: 'retry' }] : [],
+        rows: [{ launch_request_id: 'fixture-launch', status: state === 'retry' ? 'failed' : 'running' },
+          ...(state === 'retry' ? [{ launch_request_id: 'retry', status: 'running' }] : [])] };
+    };
+    assert.ok(await reconcileRepairOwner({ ...f, now, readImpl }));
+    const count = reads;
+    assert.ok(await reconcileRepairOwner({ ...f, now: now + 1000, readImpl }));
+    assert.equal(reads, count, 'no repeated SDK read inside the cadence');
+    assert.equal(pendingRepairEpoch(f.rootDir, f).terminalAt, undefined);
+  }
+});
+
+test('a changed builder head binds before terminal worker retirement', async t => {
+  const f = fixture(t), epoch = reserveRepairEpoch(f).epoch;
+  const pending = await reconcileRepairOwner({ ...f, headSha: head,
+    readImpl: async () => { throw new Error('must admit publication before probing retirement'); } });
+  assert.equal(pending.id, epoch.id);
+  assert.equal(bindRepairHead({ ...f, headSha: head, epochId: pending.id }).reviewHead, head);
 });
 
 // Exercise the existing cross-process flock rather than a mocked in-process

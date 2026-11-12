@@ -11,7 +11,9 @@ the full history. No replacement pull request is created.
 
 Harness faults reuse the closer's inconclusive-refund/backoff contract.
 Review harness failures receive an idempotent CAS refund and an owned retry,
-with failure evidence retained. Bare wall-clock expiries remain unknown.
+bounded to three receipts per PR across heads, with failure evidence retained.
+Later failures retain ordinary infrastructure cap/alert handling. Bare
+wall-clock expiries and signal exits remain unknown.
 Strict findings, exact-head evidence and all merge predicates remain required.
 Fixtures are synthetic and offline.
 
@@ -61,3 +63,37 @@ finding code, so the documented finding set again equals the emitted
 definitions. The concurrent reservation test now bounds `EBUSY` retries by a
 10-second deadline instead of 100 short attempts; it still asserts exactly
 one owner and one ledger epoch per round. No source, check or gate changed.
+
+## Reservation and harness retry remediation
+
+### Summary
+
+The watcher now retires terminal repair reservations, or proven absent launches
+after a ten-minute provisioning deadline, under the ledger flock. Observations
+are paced at thirty seconds; live and unknown launches retain custody. Corrupt
+or busy ledger operations defer only that PR. Reviewer harness refunds are
+bounded to three per PR across heads, store at most 512 characters of failure
+evidence, and read already-applied receipts without writing. Bare signal exits
+and free-text closer failure details cannot establish refundable faults.
+
+### Interface changes
+
+Repair epochs add ownerObservedAt, ownerState and nullable ownerLaunch.
+Terminal reservations leave the existing ownership projections. Lifecycle
+values and merge checks are unchanged. Canonical ledger, runbook and lifecycle
+declarations describe retirement and bounded reviewer retries. The companion
+Agent OS SPEC is outside this repository; its currency remains an operator
+follow-up for the repair/refund contract in src/repair-epochs.mjs and
+src/review-harness-retry.mjs.
+
+### Verification
+
+- `node test/run-tests.mjs test/watcher-claim-loop.test.mjs test/inplacerepair-01.test.mjs`: 201 passed.
+- The combined targeted run also passed the inconclusiveretry-01b, ttm-owner
+  and smv files (34 tests); two new watcher fixture failures were corrected
+  before the final 201-test run above.
+- `npm run lint`: zero errors (existing warnings); changed-source ESLint: clean.
+- `npm run typecheck:contracts`: passed.
+- `node scripts/validate-data-model-catalog.mjs`: 94 entries validated.
+- `bash demo/research-finding-walkthrough.sh`: byte-stable offline demo passed.
+- `git diff --check`: passed. Full-suite validation is delegated to PR-head CI.

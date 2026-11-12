@@ -5312,3 +5312,62 @@ test('LABELREARM-01: discovery arms a fresh exact-head review from an operator-g
     `,
   });
 });
+
+test('pending second repair epoch retains custody over a prior epoch reviewed head', () => {
+  const tmp = mkdtempSync(path.join(tmpdir(), 'watcher-second-repair-'));
+  try {
+    const head = 'b'.repeat(40), rootDir = path.join(tmp, 'repair-root');
+    const repairUrl = fileUrl('src', 'repair-epochs.mjs');
+    const loaderPath = path.join(tmp, 'loader.mjs');
+    const registerPath = path.join(tmp, 'register.mjs');
+    const runnerPath = path.join(tmp, 'runner.mjs');
+    const wrapper = `
+      import * as actual from ${JSON.stringify(`${repairUrl}?actual`)};
+      export * from ${JSON.stringify(`${repairUrl}?actual`)};
+      export function pendingRepairEpoch(_root, identity) {
+        return actual.pendingRepairEpoch(${JSON.stringify(rootDir)}, identity);
+      }
+      export function repairEpochForHead(_root, identity, head) {
+        return actual.repairEpochForHead(${JSON.stringify(rootDir)}, identity, head);
+      }
+    `;
+    writeFileSync(loaderPath, buildLoaderSource({ subjectHeads: { 101: head } }).replace(
+      '  return nextLoad(url, context);',
+      `  if (url === ${JSON.stringify(repairUrl)}) {
+        return { format: 'module', shortCircuit: true, source: ${JSON.stringify(wrapper)} };
+      }
+      return nextLoad(url, context);`,
+    ));
+    writeFileSync(registerPath, buildRegisterSource(loaderPath));
+    writeFileSync(runnerPath, buildRunnerSource({
+      prePollSetup: `
+        const { reserveRepairEpoch, bindRepairHead } = await import(${JSON.stringify(`${repairUrl}?actual`)});
+        const identity = { rootDir: ${JSON.stringify(rootDir)},
+          repo: 'laceyenterprises/adversarial-review', prNumber: 101,
+          headSha: 'a'.repeat(40), ownerKey: 'first', cause: 'closure-retry-exhausted' };
+        const first = reserveRepairEpoch(identity).epoch;
+        bindRepairHead({ ...identity, epochId: first.id, headSha: '${head}' });
+        assert.equal(reserveRepairEpoch({ ...identity, headSha: '${head}', ownerKey: 'second' }).ok, true);
+        db.prepare(\`INSERT INTO reviewed_prs (repo, pr_number, reviewed_at, reviewer,
+          pr_state, review_status, reviewer_head_sha, revision_ref, rereview_requested_at)
+          VALUES (?, 101, ?, 'claude', 'open', 'pending', ?, ?, ?)\`).run(
+            identity.repo, new Date().toISOString(), '${head}', '${head}', new Date().toISOString());
+      `,
+      afterFirstPoll: `
+        const verify = () => {
+          assert.ok(!claims.some(claim => claim.prNumber === 101), 'repair builder retains exclusive custody');
+          assert.ok(!(globalThis.__watcherClaimLoopReviewerSpawns || [])
+            .some(spawn => spawn.subjectContext?.prNumber === 101));
+          assert.equal(db.prepare('SELECT review_status FROM reviewed_prs WHERE pr_number=101').get().review_status, 'pending');
+        };
+        verify();
+        await pollOnce(octokit, pollOptions);
+        verify();
+      `,
+    }));
+    const result = spawnSync(process.execPath,
+      ['--no-warnings', '--import', pathToFileURL(registerPath).href, runnerPath],
+      { cwd: REPO_ROOT, encoding: 'utf8', env: fixtureEnv(installGhFixture(tmp)), timeout: 60000 });
+    assert.equal(result.status, 0, `${result.stdout || ''}${result.stderr || ''}`);
+  } finally { rmSync(tmp, { recursive: true, force: true }); }
+});

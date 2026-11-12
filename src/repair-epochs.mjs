@@ -28,7 +28,10 @@ export function repairCause({ ledger, row, cycleExhausted = false, conflicting =
   if (cap.lifetimeCapExhausted) return 'closure-lifetime-exhausted';
   if (cap.capExhausted) return 'closure-retry-exhausted';
   let action = row?.next_action_json;
-  if (typeof action === 'string') action = JSON.parse(action);
+  if (typeof action === 'string') {
+    try { action = JSON.parse(action); }
+    catch { action = null; }
+  }
   const reason = action?.reason || row?.rereview_reason;
   if (EXHAUSTION.has(reason)) return reason;
   if (cycleExhausted) return 'review-cycle-exhausted';

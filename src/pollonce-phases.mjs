@@ -1506,8 +1506,8 @@ export async function processReviewSubject(entry, ctx) {
       // EXHAUSTEDHEADOWNER-01: one delivered verdict per distinct builder head.
       // The request CAS coalesces ticks and refuses to overwrite a live claim.
       const repairEpoch = effectiveDomainId === CODE_PR_DOMAIN_ID && !subject.terminal
-        ? repairEpochForHead(ROOT, { repo: repoPath, prNumber }, subject.headSha)
-          || pendingRepairEpoch(ROOT, { repo: repoPath, prNumber }) : null;
+        ? pendingRepairEpoch(ROOT, { repo: repoPath, prNumber })
+          || repairEpochForHead(ROOT, { repo: repoPath, prNumber }, subject.headSha) : null;
       // The reserved builder owns this unchanged head through provisioning and
       // publication; ordinary review/remediation must not mint another owner.
       if (repairEpoch && !repairEpoch.reviewHead && repairEpoch.baseHead === subject.headSha) return;

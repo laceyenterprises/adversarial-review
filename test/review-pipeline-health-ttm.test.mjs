@@ -326,6 +326,7 @@ test('HOLDOWNER-01: ownerless flags reach the progress-stalled finding with lane
   const snapshot = collectReviewPipelineHealth({ rootDir, hqRoot: rootDir, env: {}, now: () => new Date(NOW) });
   const finding = findingFor(snapshot, 'review:pr_progress_stalled');
   assert.ok(finding);
+  assert.equal(finding.tier, 'ticket', 'the watcher pages STUCK directly, independently of health tier');
   assert.ok(finding.details.flagKinds.includes('ownerless'));
   assert.equal(finding.details.severity, 'SEV1');
   assert.equal(finding.details.nextOwner, 'none');

@@ -19,3 +19,37 @@ After the companion dispatch integration deploys and services load both
 versions, the runtime owner observes the next exhausted pull request merging
 on its original branch, then 24 hours with no replacement pull request opened
 to escape budgets. Source tests do not establish that live receipt.
+
+## Final comment-only remediation
+
+### Summary
+
+Pending repair reservations now take precedence over historical reviewed-head
+epochs in watcher admission. Malformed next-action JSON falls back to the
+review row's exhaustion reason, cycle exhaustion or conflict evidence.
+The health runbook clarifies that ownerless STUCK observations already page
+SEV1 through the watcher independently of the ticket-tier health finding.
+Reviewed the existing closer admission custody guard and refreshed its stale
+state source projection; its lifecycle graph is unchanged.
+
+### Interface changes
+
+None. Persistent shapes, lifecycle states, merge predicates and existing smoke
+promises are unchanged.
+
+### Verification
+
+- `node --test test/inplacerepair-01.test.mjs`: 26 passed.
+- `node test/run-tests.mjs test/watcher-claim-loop.test.mjs`: 169 passed.
+- `node test/run-tests.mjs test/review-pipeline-health-ttm.test.mjs test/ttm-owner.test.mjs test/alert-delivery.test.mjs`: 106 passed.
+- The watcher regression passes with pending-first lookup; a temporary fixture
+  using the old lookup reproduces a competing claim.
+- `npm run lint`: zero errors; existing warnings remain.
+- `npm run typecheck:contracts`, `node scripts/validate-data-model-catalog.mjs`
+  (94 entries) and `git diff --check`: passed.
+- `node --test --test-name-pattern 'SMV independent graph|SMV ignores unrelated source comments' test/smv.test.mjs`:
+  both previously failing source projection tests passed.
+- `bash demo/research-finding-walkthrough.sh`: three byte-stable deliveries.
+
+The existing Node 22 and Node 26 CI failures both identified only the stale
+closer source projection; no workflow, check or CI gate was changed.

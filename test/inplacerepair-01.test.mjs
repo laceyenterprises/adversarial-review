@@ -55,6 +55,19 @@ test('conflict and cycle-exhausted PR updates reserve a single epoch and retain 
   assert.equal(pendingRepairEpoch(f.rootDir, f).id, first.epoch.id);
 });
 
+test('malformed next-action JSON retains fallback repair causes', () => {
+  const row = { next_action_json: '{"reason":' };
+  assert.equal(repairCause({ row: { ...row, rereview_reason: 'closure-retry-exhausted' } }),
+    'closure-retry-exhausted');
+  assert.equal(repairCause({ row, cycleExhausted: true }), 'review-cycle-exhausted');
+  assert.equal(repairCause({ row, conflicting: true }), 'conflict-without-owner');
+  assert.equal(repairCause({ row }), null);
+  assert.equal(repairCause({ row: { next_action_json: '{"reason":"review-cycle-cap-paused"}',
+    rereview_reason: 'closure-retry-exhausted' } }), 'review-cycle-cap-paused');
+  assert.throws(() => repairCause({ ledger: { __corrupt: true }, row }),
+    /repair ledger unreadable/);
+});
+
 test('repair push admits exactly one head review through the real request CAS and refreshes closure budget', async t => {
   const f = fixture(t), db = reviewDb(t);
   for (let n = 0; n < 5; n++) recordHammerRetryDispatch(f.rootDir, f, {

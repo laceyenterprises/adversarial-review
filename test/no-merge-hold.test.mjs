@@ -12,6 +12,7 @@ import {
 } from '../src/no-merge-hold.mjs';
 import { NO_MERGE_HOLD_LABEL } from '../src/follow-up-merge-agent.mjs';
 import { rateLimitClock } from '../src/rate-limit-throttle.mjs';
+import { meteredExecFile } from '../src/metered-gh.mjs';
 
 test('parseArgs supports apply and resume modes', () => {
   assert.deepEqual(parseArgs([
@@ -264,7 +265,8 @@ test('a gh call that never exits is named in the failure line and its receipt', 
   assert.equal(code, 1);
   assert.match(lines.error[0], /timed out after 150ms waiting for `gh pr edit` to exit/);
   assert.equal(signal.aborted, true, 'the hung gh child is signalled');
-  assert.equal(onlyReceipt(rootDir).applied, false);
+  assert.equal(onlyReceipt(rootDir).applied, null, 'a spawned mutation without a result is uncertain');
+  assert.match(lines.error[0], /applied=unknown/);
 });
 
 test('a meter that resolves after the deadline never spawns gh', { timeout: 10_000 }, async () => {
@@ -290,7 +292,7 @@ test('a meter that resolves after the deadline never spawns gh', { timeout: 10_0
   assert.equal(onlyReceipt(rootDir).applied, false);
 });
 
-test('a real gh failure is receipted applied=false and is not mistaken for an absent label', async () => {
+test('a rejected gh mutation is receipted as uncertain and is not mistaken for an absent label', async () => {
   const rootDir = mkdtempSync(path.join(tmpdir(), 'no-merge-hold-'));
   const { lines, io } = cliHarness();
   const code = await runNoMergeHoldCli(['--repo', REPO, '--pr', String(PR)], {
@@ -304,9 +306,9 @@ test('a real gh failure is receipted applied=false and is not mistaken for an ab
     },
   });
   assert.equal(code, 1);
-  assert.match(lines.error[0], /Command failed: gh pr edit HTTP 403: Resource not accessible applied=false/);
+  assert.match(lines.error[0], /Command failed: gh pr edit HTTP 403: Resource not accessible applied=unknown/);
   const receipt = onlyReceipt(rootDir);
-  assert.equal(receipt.applied, false);
+  assert.equal(receipt.applied, null);
   assert.match(receipt.error, /HTTP 403/);
 });
 
@@ -342,4 +344,83 @@ test('a failed attempt whose receipt cannot be written still says applied=false'
   });
   assert.equal(code, 1);
   assert.match(lines.error[0], /waiting for GitHub metering\/budget admission before spawning `gh pr edit` applied=false receipt-write-failed=/);
+});
+
+test('synchronous entitled refresh is bounded by the attempt deadline and never spawns gh afterward', { timeout: 10_000 }, async () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'no-merge-hold-'));
+  const quote = value => `'${value.replaceAll("'", "'\\''")}'`;
+  const env = {
+    HAM_ROOT_DIR: rootDir,
+    GHO_RATE_LIMIT_SHARED_STATE_PATH: path.join(rootDir, 'budget.json'),
+    HAMMER_LACEY_GH_TOKEN_REFRESH_COMMAND:
+      `exec ${quote(process.execPath)} -e 'setInterval(() => {}, 1000)'`,
+  };
+  let spawned = false;
+  const started = Date.now();
+  await assert.rejects(applyNoMergeHold({
+    rootDir, repo: REPO, prNumber: PR, resume: true, timeoutMs: 150,
+    meteredExecFileImpl: (exec, cmd, args, options) => meteredExecFile(exec, cmd, args, { ...options, env }),
+    execFileImpl: async () => { spawned = true; return { stdout: '', stderr: '' }; },
+  }), { code: 'ETIMEDOUT', phase: 'admission' });
+  assert.ok(Date.now() - started < 3_000, 'the refresh must not use its nominal 150-second allowance');
+  assert.equal(spawned, false);
+  assert.equal(onlyReceipt(rootDir).applied, false);
+});
+
+test('synchronous admission that overruns the deadline cannot spawn before the timer runs', async () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'no-merge-hold-'));
+  let spawned = false;
+  await assert.rejects(applyNoMergeHold({
+    rootDir, repo: REPO, prNumber: PR, resume: true, timeoutMs: 25,
+    meteredExecFileImpl: (exec, cmd, args, options) => {
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 75);
+      return exec(cmd, args, options);
+    },
+    execFileImpl: async () => { spawned = true; return { stdout: '', stderr: '' }; },
+  }), { code: 'ETIMEDOUT', phase: 'admission' });
+  assert.equal(spawned, false);
+  assert.equal(onlyReceipt(rootDir).applied, false);
+});
+
+for (const resume of [false, true]) for (const stalled of [false, true]) {
+  test(`successful ${resume ? 'release' : 'hold'} retains applied=true when response recording ${stalled ? 'stalls' : 'fails'}`, async () => {
+    const rootDir = mkdtempSync(path.join(tmpdir(), 'no-merge-hold-'));
+    const { lines, io } = cliHarness();
+    let edits = 0;
+    const code = await runNoMergeHoldCli(['--repo', REPO, '--pr', String(PR), ...(resume ? ['--resume'] : [])], {
+      ...io, rootDir, timeoutMs: 100,
+      meteredExecFileImpl: async (exec, cmd, args, options) => {
+        const result = await exec(cmd, args, options);
+        if (args[0] !== 'pr') return result;
+        if (stalled) return new Promise(() => {});
+        throw new Error('recording lock not found');
+      },
+      execFileImpl: async (_cmd, args) => {
+        if (args[0] === 'pr') edits += 1;
+        return { stdout: '', stderr: '' };
+      },
+    });
+    assert.equal(code, 1);
+    assert.equal(edits, 1);
+    assert.match(lines.error[0], /applied=true receipt=/);
+    const receipt = onlyReceipt(rootDir);
+    assert.equal(receipt.applied, true);
+    assert.equal(receipt.held, !resume);
+    assert.match(receipt.error, stalled ? /metering to record/ : /recording lock not found/);
+  });
+}
+
+test('successful label creation with stalled recording does not imply the PR hold was applied', async () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'no-merge-hold-'));
+  const calls = [];
+  await assert.rejects(applyNoMergeHold({
+    rootDir, repo: REPO, prNumber: PR, timeoutMs: 100,
+    meteredExecFileImpl: async (exec, cmd, args, options) => {
+      await exec(cmd, args, options);
+      return new Promise(() => {});
+    },
+    execFileImpl: async (_cmd, args) => { calls.push(args[0]); return { stdout: '', stderr: '' }; },
+  }), { code: 'ETIMEDOUT', phase: 'record' });
+  assert.deepEqual(calls, ['label']);
+  assert.equal(onlyReceipt(rootDir).applied, false);
 });

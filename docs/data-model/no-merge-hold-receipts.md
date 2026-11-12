@@ -25,11 +25,18 @@ receipts: they are an audit trail.
 | `repo` | string | `owner/repo`. |
 | `prNumber` | integer | PR number. |
 | `held` | boolean | The **requested** state: `true` for a hold, `false` for `--resume`/`--release`. |
-| `applied` | boolean | Whether the label change took effect. `false` means the attempt failed. Receipts written before NOMERGEHOLDHANG-01 lack it and were written only on success. |
-| `error` | string, only when `applied` is `false` | One-line failure, for example `timed out after 30000ms waiting for GitHub metering/budget admission before spawning \`gh label create\``. |
+| `applied` | boolean or null | `true` means the PR label edit succeeded (or a release found the label absent). `false` means the PR edit was never spawned. `null` means the edit was spawned but its effect is uncertain, including a timeout or rejected command without success confirmation. Receipts written before NOMERGEHOLDHANG-01 lack it and were written only on success. |
+| `error` | optional string | One-line attempt failure, including metering failure after a confirmed edit (`applied: true`). For example `timed out after 30000ms waiting for GitHub metering/budget admission before spawning \`gh label create\``. |
 | `label` | string | `no-merge-hold`. |
 
-A release that finds the label already absent counts as applied. If a receipt
+A release that finds the label already absent counts as applied. Metering
+failure after a successful PR edit exits 1 but preserves `applied: true` and
+records the metering error. A successful repository-label creation alone never
+proves that the PR hold was applied. For an uncertain spawned edit, the CLI
+prints `applied=unknown`; inspect the live PR before relying on the requested
+state. A late completion cannot rewrite the attempt's receipt.
+
+If a receipt
 cannot be written, the CLI exits 1 and says so on its failure line
 (`receipt-write-failed=...`), with `applied=true` when the label change landed
 anyway. No file exists in that case.

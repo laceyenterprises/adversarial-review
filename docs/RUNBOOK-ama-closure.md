@@ -7753,6 +7753,15 @@ child diagnostics are discarded. After an actual throttle wait
 it refreshes again immediately before execution and attributes the response to
 that credential. Without a refresh command, the current token is used unchanged.
 
+Node callers may pass an absolute Unix-millisecond `credentialDeadlineMs`
+through the metered execution options. Each `session.prepare()` computes its
+remaining allowance, including preparation after a throttle wait or a rejected
+credential; no refresh starts after expiry. The option is consumed by the
+credential session and is not forwarded to the child process. The no-merge
+hold CLI supplies its shared attempt deadline and separately checks wall-clock
+expiry immediately before each `gh` spawn, even when synchronous refresh has
+prevented the JavaScript timeout callback from running.
+
 The launch refresh command (`hq github-token refresh`) prints one
 `export NAME=VALUE` line per variable, each value quoted as Python's
 `shlex.quote` does (HAMTOKEN-06). The helper takes the token from the session's

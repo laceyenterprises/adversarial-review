@@ -22,19 +22,30 @@ balance other callers drained could starve an operator's emergency hold.
   admission before spawning `gh <cmd>`, `gh <cmd>` to exit, and metering to
   record the response. A metering wait that resolves after the deadline is
   refused rather than spawned, and a `gh` child still running is signalled.
-- Every attempt writes a receipt. Failures are marked `applied: false` with a
-  one-line `error`; successes are marked `applied: true`. The CLI exits 1 on any
-  failure, with the receipt path on its failure line.
+  Credential preparation receives that absolute deadline, clipping synchronous
+  refresh, and the spawn guard checks wall-clock expiry even before timers run.
+- Every attempt writes a receipt. Confirmed PR edits retain `applied: true`
+  even if subsequent response metering fails; pre-spawn failures use
+  `applied: false`. Spawned edits without success confirmation use
+  `applied: null`. Failures record a one-line `error` and exit 1 with the receipt
+  path on the failure line. Repository-label creation alone cannot prove a hold.
+- The receipt schema is registered in `docs/data-model/catalog.json`; the
+  original fragment was moved into the canonical inventory.
 
 ## Interface changes
 
-- Receipt fields `applied` (always) and `error` (failures only) are added. See
+- Receipt fields `applied` (boolean or null, always) and `error` (failures only)
+  are added. See
   `docs/data-model/no-merge-hold-receipts.md`. `schemaVersion` stays 1 because
   the change is additive. `held` remains the requested state.
 - CLI success line gains `applied=true`. The failure line is now
   `[no-merge-hold] Failed: repo=<r> pr=<n> <error> applied=<bool> receipt=<path>`.
   It ends `receipt-write-failed=<reason>` when the receipt could not be written.
-  `applied=true` appears there only when the label landed but its receipt did not.
+  `applied=true` can accompany metering or receipt-write failure after the
+  label landed; `applied=unknown` identifies an uncertain spawned edit.
+- Metered Node options accept `credentialDeadlineMs` (absolute Unix milliseconds).
+  Token preparation recomputes the remaining refresh allowance on every attempt,
+  including credential retries; the option is not forwarded to subprocesses.
 - `withGitHubBudgetScope({ operatorSafety: true }, fn)` is a new scope option.
 - New exports from `src/no-merge-hold.mjs`: `runNoMergeHoldCli`,
   `createBoundedGhRunner` and `resolveNoMergeHoldTimeoutMs`.
@@ -42,14 +53,23 @@ balance other callers drained could starve an operator's emergency hold.
 
 ## Verification
 
-- `node --test test/no-merge-hold.test.mjs`: 16 pass. Covers a never-resolving
+- `node --test test/no-merge-hold.test.mjs test/hammer-token.test.mjs test/metered-gh-sync-env.test.mjs test/rate-limit-throttle.test.mjs`:
+  passed under `bash bin/run-bounded.sh --timeout 120 -- ...` after the fresh
+  main rebase. Covers a never-resolving
   fake meter for hold and `--resume` (exit 1 within the bound, one line,
   `applied=false` receipt, no `gh` spawn), the normal hold/release CLI path,
   an exhausted shared budget (no sleep, label applied), a hung `gh`, a late
-  meter that must not spawn, a real `gh` failure, and receipt-write failures
-  on both the success path and the failure path.
-- `test/rate-limit-throttle.test.mjs` (27 pass) and
-  `test/metered-gh-sync-env.test.mjs` (7 pass) cover the `operatorSafety` scope.
+  meter that must not spawn, a rejected `gh` mutation, and receipt-write failures
+  on both the success path and the failure path. Added synchronous stalled
+  refresh, expired synchronous admission, forced-refresh deadline, successful
+  edits followed by failed/stalled recording, and repository-label-only coverage.
+  The rate-limit and synchronous metering fixtures cover `operatorSafety`.
+- `npm run lint`: passed, zero errors (149 existing warnings).
+- `npm run typecheck:contracts` and
+  `bash demo/research-finding-walkthrough.sh`: passed.
+- `node scripts/validate-data-model-catalog.mjs`: passed, 95 entries.
+- `git diff --check`: passed. Full-suite execution is reserved for PR-head CI
+  under the remediation job's validation rule.
 - A/B: with the `rate-limit-throttle.mjs` change reverted, the exhausted-budget
   tests and the operator-safety scope tests fail.
 - Real process, fake `gh` on PATH, synthetic store with `core`/`graphql`

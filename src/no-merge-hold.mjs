@@ -89,6 +89,9 @@ function createBoundedGhRunner({
   return async function runGh(args) {
     const step = `gh ${args.slice(0, 2).join(' ')}`;
     let phase = 'admission';
+    // false: never spawned; null: spawned, outcome uncertain; true: exited 0.
+    // Metering completion is independent of the mutation's result.
+    let applied = false;
     const waitedFor = () => ({
       admission: `GitHub metering/budget admission before spawning \`${step}\``,
       gh: `\`${step}\` to exit`,
@@ -96,14 +99,16 @@ function createBoundedGhRunner({
     })[phase];
     const timeoutError = () => Object.assign(
       new Error(`timed out after ${timeoutMs}ms waiting for ${waitedFor()}`),
-      { code: 'ETIMEDOUT', noMergeHoldTimeout: true, phase, step },
+      { code: 'ETIMEDOUT', noMergeHoldTimeout: true, phase, step, noMergeHoldApplied: applied },
     );
     const remaining = deadline - Date.now();
     if (expired || remaining < 1) throw timeoutError();
     const guardedExecFile = (command, argv, options) => {
-      if (expired) throw timeoutError();
+      if (expired || Date.now() >= deadline) throw timeoutError();
       phase = 'gh';
+      applied = null;
       return Promise.resolve(execFileImpl(command, argv, { ...options, signal: controller.signal }))
+        .then(result => { applied = true; return result; })
         .finally(() => { phase = 'record'; });
     };
     let timer;
@@ -117,9 +122,16 @@ function createBoundedGhRunner({
     try {
       return await Promise.race([
         withGitHubBudgetScope({ operatorSafety: true },
-          () => meteredExecFileImpl(guardedExecFile, 'gh', args)),
+          () => meteredExecFileImpl(guardedExecFile, 'gh', args, { credentialDeadlineMs: deadline })),
         bound,
       ]);
+    } catch (thrown) {
+      // A synchronous refresh may consume the allowance before timers can run.
+      const err = Date.now() >= deadline && phase === 'admission'
+        ? timeoutError()
+        : thrown instanceof Error ? thrown : new Error(String(thrown));
+      err.noMergeHoldApplied = applied;
+      throw err;
     } finally {
       clearTimeout(timer);
     }
@@ -142,7 +154,7 @@ async function ensureNoMergeHoldLabel({ repo, execFileImpl = execFileAsync, runG
 }
 
 function isAbsentLabelRemovalError(err) {
-  if (err?.noMergeHoldTimeout) return false;
+  if (err?.noMergeHoldTimeout || err?.noMergeHoldApplied === true) return false;
   const text = [err?.message, err?.stderr, err?.stdout].filter(Boolean).join('\n').toLowerCase();
   return /not found|does not exist|http 422|could not remove|unable to remove|label.*not.*found/.test(text);
 }
@@ -179,11 +191,13 @@ async function applyNoMergeHold({
     held: !resume,
     label: NO_MERGE_HOLD_LABEL,
   };
+  let prMutationStarted = false;
   try {
     if (!resume) {
       await ensureNoMergeHoldLabel({ repo, runGh });
     }
     try {
+      prMutationStarted = true;
       await runGh([
         'pr',
         'edit',
@@ -199,8 +213,10 @@ async function applyNoMergeHold({
   } catch (thrown) {
     // A failed attempt is still an operator mutation attempt: audit it.
     const err = thrown instanceof Error ? thrown : new Error(String(thrown));
-    const failed = { ...receipt, applied: false, error: oneLine(err.message) };
-    err.applied = false;
+    // Repository-label creation does not prove that the PR label was changed.
+    const applied = prMutationStarted ? err.noMergeHoldApplied ?? null : false;
+    const failed = { ...receipt, applied, error: oneLine(err.message) };
+    err.applied = applied;
     err.receiptPath = receiptPath;
     err.receipt = failed;
     try {
@@ -260,7 +276,7 @@ async function runNoMergeHoldCli(argv, {
     const receipt = err?.receiptPath
       ? ` receipt=${err.receiptPath}`
       : ` receipt-write-failed=${JSON.stringify(err?.receiptError || 'unknown')}`;
-    error(`[no-merge-hold] Failed: repo=${args.repo} pr=${args.prNumber} ${oneLine(err?.message || err)} applied=${err?.applied === true}${receipt}`);
+    error(`[no-merge-hold] Failed: repo=${args.repo} pr=${args.prNumber} ${oneLine(err?.message || err)} applied=${err?.applied ?? 'unknown'}${receipt}`);
     return 1;
   }
 }

@@ -2,12 +2,12 @@ import './helpers/load-aware-timeout-fixture.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync, spawnSync } from 'node:child_process';
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { meteredExecFile, meteredExecFileSync } from '../src/metered-gh.mjs';
 import { execGhWithRetry } from '../src/gh-cli.mjs';
-import { hammerTokenSession, withHammerTokenSync } from '../src/hammer-token.mjs';
+import { hammerTokenSession, withHammerToken, withHammerTokenSync } from '../src/hammer-token.mjs';
 import { githubCredential, githubBudgetKey, markGitHubRateLimited, withGitHubBudgetScope } from '../src/rate-limit-throttle.mjs';
 import { assertProducerContract, recordedFixture, fixtureProvenance } from './helpers/recorded-producer-fixtures.mjs';
 
@@ -627,6 +627,23 @@ test('refresh command respects an explicit deadline and discards its diagnostics
   const command = `exec ${quote(process.execPath)} -e 'process.stderr.write("synthetic-secret"); setInterval(() => {}, 1000)'`;
   assert.throws(() => hammerTokenSession({ env: { ...f.env, HAMMER_LACEY_GH_TOKEN_REFRESH_COMMAND: command } }).prepare({ timeoutMs: 25 }),
     error => /refresh failed \(timeout or signal\)/.test(error.message) && !error.message.includes('synthetic-secret'));
+});
+
+test('an absolute credential deadline fences forced retry preparation and is not a child option', async t => {
+  const f = fixture(t);
+  const start = Date.now();
+  let now = start;
+  t.mock.method(Date, 'now', () => now);
+  f.env.HAMMER_LACEY_GH_TOKEN_EXPIRES_AT = new Date(start + 3_600_000).toISOString();
+  let calls = 0;
+  await assert.rejects(withHammerToken(active => {
+    assert.equal('credentialDeadlineMs' in active, false);
+    calls += 1;
+    now = start + 100;
+    throw rejected();
+  }, { env: f.env, credentialDeadlineMs: start + 100 }), /failed \(deadline expired\)/);
+  assert.equal(calls, 1);
+  assert.equal(existsSync(f.refreshes), false, 'no refresh starts after the deadline');
 });
 
 for (const action of ['exec', 'exec-hammer']) for (const failure of [false, true]) {

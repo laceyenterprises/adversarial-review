@@ -42,7 +42,7 @@ export async function main(args) {
       if (owned !== false) return { ok: false, reason: 'closer-owned-or-unknown' };
     }
     const pending = facts.epochs.find(epoch => !epoch.reviewHead && !epoch.terminalAt);
-    const terminalOwner = await observeRepairOwner({ rootDir, repo, epoch: pending });
+    const terminalOwner = await observeRepairOwner({ rootDir, epoch: pending });
     result = reserveRepairEpoch({ rootDir, repo, prNumber, headSha, ownerKey,
       cause: facts.cause, terminalOwner });
   } finally { release(); }

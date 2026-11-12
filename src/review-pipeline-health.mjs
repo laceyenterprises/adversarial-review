@@ -5601,7 +5601,7 @@ function evaluateReviewPipelineFindings(snapshot, { observedAt }) {
     findings.push(buildFinding({
       code: 'review:pr_progress_stalled',
       tier: 'ticket',
-      subject: `${distinctPrs.size} open PR(s) are not progressing (${reasonSummary})`,
+      subject: `${flagKinds.includes('ownerless') ? 'SEV1: ' : ''}${distinctPrs.size} open PR(s) are not progressing (${reasonSummary})`,
       message: `${sample.repo}#${sample.prNumber} has made no progress for ${Math.round(sample.stallMinutes)}m: ${sample.details?.stallReason || sample.flagKind}. Stall reasons this tick: ${reasonSummary}.${queuedRereviewText} This is independent of the TTM budget -- a busy host still starts the pass it promised.`,
       evidence: progressStalls.map((flag) => (
         `reviews.db ttm ${flag.repo}#${flag.prNumber} ${flag.flagKind} stalled=${Math.round(flag.stallMinutes)}m `
@@ -5622,6 +5622,7 @@ function evaluateReviewPipelineFindings(snapshot, { observedAt }) {
       observedAt,
       details: {
         progressClass: 'stuck',
+        ...(flagKinds.includes('ownerless') ? { severity: 'SEV1', nextOwner: 'none' } : {}),
         flagKind: flagKinds.length === 1 ? flagKinds[0] : 'multiple',
         flagKinds,
         byReason: Object.fromEntries(byReason),

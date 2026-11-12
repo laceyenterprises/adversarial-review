@@ -1,5 +1,27 @@
 # Data Model - Hammer Retry Cap Ledger
 
+`repairEpochs` is an optional ordered array, capped at two entries per PR.
+Each reservation records `id`, dispatch idempotency `ownerKey`, `baseHead`,
+exhaustion `cause`, `reservedAt`, `priorSpend` (series/head/lifetime counters),
+`refundedSpend` and nullable `reviewHead`. It shares the existing retry-ledger
+flock and closer intent lock with dispatch. A changed builder head binds once,
+recording `boundAt` and starting new series/head/lifetime episode counters.
+Confirmed `dispatchCharges` remain intact. The review-request reason
+`system-repair-epoch:<id>:<head>` records admission; request/claim CAS and the
+delivered-pass journal prevent duplicate review. Live/unknown reservations
+exclude another writer. Complete terminal launch/retry evidence can retire a
+reservation with `terminalAt` and `terminalLaunch` before a bounded successor.
+The existing closure-wait store deduplicates the final cap page across heads.
+
+`reviewHarnessRefunds` maps the SHA-256 identity of a failed reviewer claim to
+`{id, headSha, failure, reservedAt, nextRetryAt}`. The identity includes failed
+time, raw failure message, session and head. Reservation precedes a review-row
+CAS; the CAS credits one review attempt and at most one infrastructure recovery
+attempt and retains `pending-upstream` ownership. Its failure message records
+`[harness-budget-refunded:<id>]`, preventing double credit after interruption.
+Retry pacing reuses the closer inconclusive backoff. The pass journal and raw
+failure remain evidence. Real findings and unqualified timeouts are not refunds.
+
 `selfErrorRefunds` (optional) maps each dispatch head to the most recent (up to
 32) charged launch IDs refunded for inconclusive closer outcomes: closer-originated
 helper/validation/controller faults (HAMSELFERRORS-01) and inconclusive ended or

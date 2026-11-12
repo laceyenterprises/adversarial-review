@@ -327,5 +327,8 @@ test('HOLDOWNER-01: ownerless flags reach the progress-stalled finding with lane
   const finding = findingFor(snapshot, 'review:pr_progress_stalled');
   assert.ok(finding);
   assert.ok(finding.details.flagKinds.includes('ownerless'));
+  assert.equal(finding.details.severity, 'SEV1');
+  assert.equal(finding.details.nextOwner, 'none');
+  assert.match(finding.subject, /^SEV1:/);
   assert.ok(finding.evidence.some(line => /example\/project#1.*hammer-validated-head/.test(line)));
 });

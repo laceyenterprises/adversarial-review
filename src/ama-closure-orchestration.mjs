@@ -1,3 +1,4 @@
+import { repairEpochObservation } from './repair-epochs.mjs';
 import { handoffFinalFixAll } from './ama/final-fix-all.mjs';
 import { parseKnownPrefix } from './adapters/subject/github-pr/title-tagging.mjs';
 import { maybeDispatchCapRehead, capReheadCounters } from './ama/cap-rehead.mjs';
@@ -1934,6 +1935,7 @@ async function dispatchAmaClosureFor({
     ? null : resolvedNextAction) || await resolveOwner();
   if (resolvedNextAction) shared = reviseClosureNextAction(shared, { progress: {
     ...shared.snapshot.observations.progress?.value, hammerResume,
+    ...repairEpochObservation(rootDir, { repo: repoPath, prNumber }),
   } }, passSnapshot);
   // Scheduling failures are observations, not durable head-independent truth.
   // Re-read even on the same head: finding authorization/evidence may improve.
@@ -1951,6 +1953,13 @@ async function dispatchAmaClosureFor({
       ...(shared.snapshot.observations.progress?.value ?? shared.snapshot.observations.progress),
       primaryChange: { ...primary, headSha: currentPrHeadSha },
     } }, passSnapshot);
+  }
+  if (shared.decision.reason === 'repair-in-place-owned') {
+    return bindClosureNextAction(withAmaDispatchMetadata({ dispatched: false, skipMergeAgent: true,
+      inFlight: true, reason: shared.decision.reason, nextAction: shared.decision,
+      closureOwner: closureOwnerFromDecision(shared.decision),
+      repairEpoch: shared.snapshot.observations.progress?.value?.repairEpoch?.id,
+    }, { amaEnabled: true }), shared);
   }
   // LANEAUTO-01: spend one builder round before findings closure. Ownership,
   // operator holds and structural repair still take precedence in shared policy.

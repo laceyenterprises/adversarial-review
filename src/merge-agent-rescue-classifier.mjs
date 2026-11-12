@@ -38,6 +38,14 @@ function parseIssueSection(reviewBody, heading, kind) {
 // never turn into launch permission, and diagnostic reason text is opaque.
 export function classifyClosureOwnership(decision, headSha = null) {
   const closureOwner = closureOwnerFromDecision(decision);
+  const repairable = ['closure-retry-exhausted', 'closure-lifetime-exhausted',
+    'retry-exhausted', 'lifetime-exhausted', 'closer-self-error-budget-exhausted',
+    'budget-exhausted-closure', 'conflict-rebase'].includes(decision.reason);
+  if (repairable && ['reconcile', 'dispatch'].includes(decision.queue?.intent)
+    && (!headSha || !decision.head || decision.head === headSha)) {
+    return { decision: 'repair-in-place', reason: decision.reason,
+      closureOwner: { ...closureOwner, owner: 'repair-worker' } };
+  }
   const waiting = decision.actor === 'closure-recovery'
     || ['owned', 'reconcile', 'observe'].includes(decision.queue?.intent)
     || decision.queue?.deferredBy || (headSha && decision.head !== headSha);

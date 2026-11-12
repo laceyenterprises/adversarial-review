@@ -1,4 +1,5 @@
 // HOLDOWNER-01: observation only. No admission, retries or routing live here.
+import { pendingRepairEpoch } from './repair-epochs.mjs';
 import { isOperatorHeld } from './operator-hold-labels.mjs';
 import { readAmaCloserLease, readAmaCloserDispatchLease } from './ama/closer-lease.mjs';
 import { readAmaCloserDispatchRecordsForPR } from './ama/dispatch-record-read.mjs';
@@ -18,9 +19,12 @@ function holdDeclineReason(hold) {
 }
 
 /** Exactly one selected owner, or a diagnostic naming every declined lane. */
-export function resolveTtmOwner({ labels = [], review = {}, closers = [], holds = [] } = {}, nowIso) {
+export function resolveTtmOwner({ labels = [], review = {}, closers = [], holds = [], repairEpoch = null } = {}, nowIso) {
   if (isOperatorHeld(labels)) return { owner: 'operator-hold', reason: 'operator hold label' };
   if (closers.some(closer => closer.live === true)) return { owner: 'live-closer', reason: 'non-terminal closer or remediator' };
+  if (repairEpoch?.id && !repairEpoch.reviewHead && !repairEpoch.terminalAt) {
+    return { owner: 'repair-worker', reason: `repair epoch ${repairEpoch.id}`, repairEpoch: repairEpoch.id };
+  }
   const activeHold = holds.find(hold => RELEASE_CONDITIONS.has(hold.releaseCondition) && Number.isFinite(time(hold.deadline))
     && time(hold.deadline) > time(nowIso) && !hold.releasedAt);
   if (activeHold) return { owner: 'hold', reason: activeHold.reason, hold: activeHold };
@@ -106,6 +110,7 @@ export function readTtmOwnerEvidence(rootDir, row, state, { hqRoot } = {}) {
   }
   if (row.quotaResetAt) holds.push({ reason: 'review quota reset', releaseCondition: 'quota-reset-time', deadline: row.quotaResetAt });
   return { labels: row.labels, closers, holds,
+    repairEpoch: rootDir ? pendingRepairEpoch(rootDir, identity) : null,
     review: { status: row.reviewStatus,
       live: row.reviewStatus === 'reviewing' && time(row.reviewerLeaseExpiresAt) > time(row.observedAt),
       suppressed: Boolean(headState?.review_suppressed) || row.reviewerLeaseExpiredMinutes != null,

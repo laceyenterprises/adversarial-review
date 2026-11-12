@@ -3307,7 +3307,7 @@ for (const [name, status, message, chargedCounter] of [
         assert.equal(globalThis.__claimSnapshots.length, 2, 'next retry claimed');
         const nextClaim = globalThis.__claimSnapshots[1];
         assert.equal(nextClaim.review_status, 'reviewing');
-        ${chargedCounter ? `assert.equal(nextClaim.${chargedCounter}, beforeClaim.${chargedCounter} + 1, 'next retry uses bounded CAS');` : ''}
+        ${chargedCounter ? `assert.equal(nextClaim.${chargedCounter}, beforeClaim.${chargedCounter} + ${message.includes('hcp-unavailable') ? 0 : 1}, 'next retry preserves refunded harness spend and the claim CAS');` : ''}
         assert.ok((globalThis.__watcherClaimLoopReviewerSpawns || []).some(s => s.subjectContext.prNumber === 101));
       `,
     });
@@ -3338,9 +3338,9 @@ test('HOLDRELEASE-01: rollback cannot overwrite a replacement session', () => {
       const row = db.prepare('SELECT * FROM reviewed_prs WHERE pr_number = 101').get();
       assert.equal(row.review_status, 'reviewing');
       assert.equal(row.reviewer_session_uuid, 'replacement-session');
-      assert.equal(row.infra_auto_recover_attempts, 2);
-      assert.equal(row.failed_at, null);
-      assert.equal(row.failure_message, null);
+      assert.equal(row.infra_auto_recover_attempts, 0, 'refunded harness fault is retried through ordinary claim CAS');
+      assert.equal(row.failed_at, '2026-05-15T12:01:00Z', 'raw failure evidence survives a replacement claim');
+      assert.match(row.failure_message, /harness-budget-refunded/);
       assert.ok(!(globalThis.__watcherClaimLoopReviewerSpawns || []).some(s => s.subjectContext.prNumber === 101));
     `,
   });

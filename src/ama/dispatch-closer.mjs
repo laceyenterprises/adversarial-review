@@ -28,6 +28,7 @@ import { resolveOsgRemediatorRoute } from '../osg-remediator.mjs';
 import { randomUUID } from 'node:crypto';
 import { captureCloserProcess } from './dispatch-submitter.mjs';
 import { closerLaunchMatches, isPreReceiptIntent, isTerminalCloserPullRequest, reconcilePreReceiptIntent, tryAcquireCloserIntentLock, withCloserIntentWriteLock } from './pre-receipt-intent.mjs';
+import { pendingRepairEpoch } from '../repair-epochs.mjs';
 import { refreshClosureRecoveryCustody } from './closure-recovery.mjs';
 import { loadAwareTimeoutMs, timerDelayMs, progressingOperationTimeoutMs } from '../load-aware-timeout.mjs';
 import { readDispatchReceipt, parseDispatchJsonOutput } from '../producer-contracts/dispatch-receipt.mjs';
@@ -7814,6 +7815,9 @@ async function maybeDispatchAmaCloserAttempt({
   releaseIntentLock = tryAcquireCloserIntentLock(rootDir, { repo, prNumber });
   if (!releaseIntentLock) return noAmaDispatch({ dispatched: false, skipMergeAgent: true,
     inFlight: true, reason: 'ama-closer-launch-in-progress' });
+  const repairOwner = pendingRepairEpoch(rootDir, { repo, prNumber });
+  if (repairOwner) return noAmaDispatch({ dispatched: false, skipMergeAgent: true,
+    inFlight: true, reason: 'repair-in-place-owned', owner: 'repair-worker', repairEpoch: repairOwner.id });
   // Share the PR intent lock with final fix-all enqueue, including rescue.
   if (finalFixAllQueueOwner(rootDir, { repo, prNumber })) return noAmaDispatch({
     dispatched: false, skipMergeAgent: true, reason: 'final-fix-all-builder-owner',

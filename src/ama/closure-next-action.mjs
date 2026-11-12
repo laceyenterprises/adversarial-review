@@ -1,3 +1,4 @@
+import { repairEpochObservation } from '../repair-epochs.mjs';
 import { hasUnreviewedBuilderHead } from '../exhausted-head-verdict.mjs';
 import { deriveNextActionSnapshot, nextAction } from '../pr-next-action.mjs';
 import { closureOwnerShadowEvidence } from '../pr-next-action-consumer.mjs';
@@ -85,7 +86,17 @@ export async function resolveClosureNextAction({ input, passSnapshot = null, rea
   const evidence = closureOwnerShadowEvidence(input, { ...options,
     ...(staleBuilderHead ? { anchors: { firstActionableAt: options.observedAt } } : {}) });
   if (readLaunches) evidence.readLaunches = readLaunches;
-  const shared = await resolveSharedNextAction({ passSnapshot, evidence, refreshEvidence: true });
+  let shared = await resolveSharedNextAction({ passSnapshot, evidence, refreshEvidence: true });
+  if (options.rootDir) {
+    const separator = shared.snapshot.subjectKey.lastIndexOf('#');
+    const repairObservation = repairEpochObservation(options.rootDir, {
+      repo: shared.snapshot.subjectKey.slice(0, separator),
+      prNumber: Number(shared.snapshot.subjectKey.slice(separator + 1)),
+    });
+    shared = reviseClosureNextAction(shared, { progress: {
+      ...shared.snapshot.observations.progress?.value, ...repairObservation,
+    } }, passSnapshot);
+  }
   if (options.rootDir && (staleBuilderHead || shared.decision.deadline?.anchorSource === 'observed')) {
     try {
       const separator = shared.snapshot.subjectKey.lastIndexOf('#');

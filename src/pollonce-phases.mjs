@@ -277,6 +277,8 @@ import {
 } from './reviewer-spawn-settle.mjs';
 import { maybeDispatchReviewerTimeoutExhaustedMergeAgent } from './reviewer-timeout-exhausted-dispatch.mjs';
 import { admitExhaustedHeadVerdict, isExhaustedHeadVerdictRequested } from './exhausted-head-verdict.mjs';
+import { pendingRepairEpoch, repairEpochForHead, bindRepairHead } from './repair-epochs.mjs';
+import { refundReviewHarnessFault } from './review-harness-retry.mjs';
 import { isReviewCycleCapRoutedToHammer, maybeRouteReviewCycleCapToHammer } from './review-cycle-cap-hammer.mjs';
 import { latestReviewedHeadSha, maybeRouteCiBlockedToHammer } from './ci-blocked-hammer.mjs';
 import { hammerHeadOwnership } from './hammer-head-ownership.mjs';
@@ -1496,12 +1498,23 @@ export async function processReviewSubject(entry, ctx) {
       };
       const finalRemediationPush = effectiveDomainId === CODE_PR_DOMAIN_ID && !subject.terminal
         ? findFinalRemediationPushJob(ROOT, { repo: repoPath, prNumber, headSha: subject.headSha }) : null;
+      if (effectiveDomainId === CODE_PR_DOMAIN_ID && !subject.terminal) {
+        const refund = refundReviewHarnessFault({ rootDir: ROOT, db, row: existing });
+        existing = refund.row;
+        if (refund.wait) return;
+      }
       // EXHAUSTEDHEADOWNER-01: one delivered verdict per distinct builder head.
       // The request CAS coalesces ticks and refuses to overwrite a live claim.
-      if (effectiveDomainId === CODE_PR_DOMAIN_ID && existing?.reviewer_head_sha
-        && existing.reviewer_head_sha !== subject.headSha && !subject.terminal
+      const repairEpoch = effectiveDomainId === CODE_PR_DOMAIN_ID && !subject.terminal
+        ? repairEpochForHead(ROOT, { repo: repoPath, prNumber }, subject.headSha)
+          || pendingRepairEpoch(ROOT, { repo: repoPath, prNumber }) : null;
+      // The reserved builder owns this unchanged head through provisioning and
+      // publication; ordinary review/remediation must not mint another owner.
+      if (repairEpoch && !repairEpoch.reviewHead && repairEpoch.baseHead === subject.headSha) return;
+      if (effectiveDomainId === CODE_PR_DOMAIN_ID && (existing?.reviewer_head_sha || repairEpoch)
+        && existing?.reviewer_head_sha !== subject.headSha && !subject.terminal
         && !isExhaustedHeadVerdictRequested(existing, subject.headSha)
-        && !isCompletedFinalRemediationJob(finalRemediationPush)) {
+        && (repairEpoch || !isCompletedFinalRemediationJob(finalRemediationPush))) {
         const { ledger, effectiveRoundBudget } = resolveRemediationBudget();
         const exhausted = reviewCycleExhaustedFromRounds({
           effectiveRoundBudget,
@@ -1517,6 +1530,9 @@ export async function processReviewSubject(entry, ctx) {
         try {
           existing = await admitExhaustedHeadVerdict({
             lifetimeExhausted,
+            repairEpoch,
+            bindRepair: epoch => bindRepairHead({ rootDir: ROOT, repo: repoPath, prNumber,
+              headSha: subject.headSha, epochId: epoch.id }),
             exhausted: exhausted || isReviewCycleCapRoutedToHammer({ db, repoPath, prNumber, reviewRow: existing, labelNames: prLabelNames }),
             headSha: subject.headSha, row: existing,
             countDelivered: () => countReviewCeilingUnits({ db, rootDir: ROOT, repoPath, prNumber, headSha: subject.headSha }),

@@ -51,6 +51,7 @@ import { reconcileInProgressFollowUpJobs } from '../src/follow-up-reconcile.mjs'
 import { resolveRemediationWorkerClassWithFallback } from '../src/remediation-worker-class-fallback.mjs';
 import { mintClaudeCodeRemediationBrokerToken } from '../src/remediation-oauth-preflight.mjs';
 import { gateRemediationConflictedBase } from '../src/remediation-conflicted-base.mjs';
+import { createLivePrOwnerLookup } from '../src/remediation-live-pr-owner.mjs';
 import { retryFailedCommentDeliveries } from '../src/adapters/comms/github-pr-comments/comment-delivery.mjs';
 import {
   refreshFollowUpGithubToken,
@@ -635,6 +636,7 @@ async function runFollowUpDaemonIterationWithinRepositoryCycle({
   sweepStuckInProgressClaimsImpl = sweepStuckInProgressClaims,
   reapFinishedPrFollowUpJobsImpl = reapFinishedPrFollowUpJobs,
   consumeFollowUpJobsUntilCapacityImpl = consumeFollowUpJobsUntilCapacity,
+  createLivePrOwnerLookupImpl = createLivePrOwnerLookup,
   reapCloserHammerWorktreesImpl = reapCloserHammerWorktrees,
   retryFailedCommentDeliveriesImpl = retryFailedCommentDeliveries,
   diagnoseStuckRereviewImpl = diagnoseStuckRereviewMain,
@@ -816,6 +818,8 @@ async function runFollowUpDaemonIterationWithinRepositoryCycle({
         mintClaudeCodeRemediationTokenImpl: mintClaudeCodeRemediationBrokerToken,
         // REMCONFLICT-01: a CONFLICTING PR's hq dispatch carries --allow-conflicted-base.
         conflictedBaseGateImpl: gateRemediationConflictedBase,
+        // REMEDIATIONOWNER-01: one owner per PR branch; HQ live owners defer.
+        livePrOwnerLookupImpl: createLivePrOwnerLookupImpl({ env }),
         shouldStop,
       });
       logTick(

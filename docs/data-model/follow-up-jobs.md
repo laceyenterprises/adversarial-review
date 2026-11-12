@@ -404,6 +404,31 @@ or reviewer-pass reaper, which can recover the persisted single-review
 decision and PR-wide round budget before creation. No new lifecycle status
 or round allowance is introduced.
 
+## One owner per PR branch (REMEDIATIONOWNER-01)
+
+A local follow-up remediation has no HQ launch row, so HQ cannot refuse a PR
+update on its behalf. The follow-up daemon therefore checks before it claims a
+pending job. It runs `hq merge-agent pr-owner --repo <repo> --pr <n> --json`, which
+wraps the same live-launch query (`leased`, `starting` or `running` rows matched by
+PR) that `hq dispatch --pr` uses for its own refusal. If a live PR update,
+closer, repair-in-place epoch or other remediator owns the PR, the job stays in
+`pending` with `livePrOwnerDeferral: { reason: "deferred-live-pr-owner",
+launchRequestId, workerClass, launchStatus, kind, observedAt, since }` and is
+skipped for the rest of the pass. A lookup that fails, times out or returns a
+malformed answer stores `reason: "deferred-live-pr-owner-unknown"` with
+`lookupReason` instead, because unknown ownership is not free.
+
+The check runs before the atomic claim. It consumes no claim, operator override
+or remediation round, and it is re-evaluated on every pass. When HQ reports no
+live owner the field is removed and the claim proceeds normally. An unchanged
+deferral is not rewritten, so `since` keeps the first observation. The check
+never reads, stops or rewrites an in-progress job. One claim spends at most 25
+lookups. Callers that pass no lookup, such as tests and standalone deployments,
+keep the previous claim behavior. An HQ CLI that predates the subcommand exits 64
+with `unknown merge-agent subcommand: pr-owner`. That case is a companion-deploy
+seam: HQ has no answer to give, so the claim keeps its previous behavior and
+logs a warning on each lookup. Any other failure is still unknown and defers.
+
 ## Branch and publication contract (REMEDBRANCH-01)
 
 Every reviewer runtime carries the subject's PR head `branch` and title-prefix

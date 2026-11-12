@@ -79,6 +79,19 @@ test('synchronous admission uses the caller budget path and throttle floor', asy
   assert.equal(calls, 1);
 });
 
+test('synchronous operator safety calls bypass the floor without the wait bridge (NOMERGEHOLDHANG-01)', async t => {
+  const { explicit, env } = fixture(t);
+  writeBudget(explicit, 0, Date.now() + 20_000);
+  let calls = 0;
+  await withGitHubBudgetScope({ operatorSafety: true }, async scope => {
+    const started = Date.now();
+    assert.equal(meteredExecFileSync(() => { calls++; return '{}'; }, 'gh', ['api', 'repos/fixture/repo'], { env }), '{}');
+    assert.ok(Date.now() - started < 10_000, 'must not wait for the budget reset');
+    assert.equal(scope.deferred, false);
+  });
+  assert.equal(calls, 1);
+});
+
 test('synchronous wait bridge waits for the caller budget reset', t => {
   const { ambient, explicit, env } = fixture(t);
   const resetAt = Date.now() + 50;

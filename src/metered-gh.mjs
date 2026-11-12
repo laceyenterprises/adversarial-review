@@ -238,6 +238,7 @@ function executeGhSync(execFileImpl, command, args, activeOptions, session) {
     const bucket = buckets[githubBudgetKey(res, credential)];
     const limited = scopedGitHubRateLimit(res, credential);
     if (limited) throw new GitHubBudgetDeferredError(limited, { credential });
+    if (scope?.operatorSafety) continue; // Never starved by the floor (NOMERGEHOLDHANG-01).
     // The floor is capped by the bucket's observed limit (WATCHERANONBUCKET-01).
     if (githubBudgetBelowFloor(bucket, resolveThrottleFloor(env)) && Date.parse(bucket.resetAt) > Date.now()) {
       if (scope?.urgent && bucket.remaining > 0) continue;

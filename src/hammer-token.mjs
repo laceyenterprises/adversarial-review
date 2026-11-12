@@ -94,6 +94,7 @@ function warnProactiveFailure(outcome) {
 // refresh keeps a held token; only the refresh after a rejection must succeed.
 function tokenContext(options) {
   const { credentialEnv = options.env || process.env, hammerToken = false, ...childOptions } = options;
+  delete childOptions.credentialDeadlineMs;
   const variable = ENTITLED_VARS.find(key => credentialEnv[key] || credentialEnv[`${key}_REFRESH_COMMAND`])
     || ['GH_TOKEN', 'GITHUB_TOKEN'].find(key => credentialEnv[key]);
   const command = (variable && credentialEnv[`${variable}_REFRESH_COMMAND`])
@@ -292,7 +293,9 @@ export function hammerTokenSession(options = {}) {
         throw error;
       }
     },
-    prepare({ timeoutMs } = {}) {
+    // Absolute caller deadlines also cover forced refreshes and preparation
+    // after budget admission. Recompute the allowance on every preparation.
+    prepare({ timeoutMs = options.credentialDeadlineMs === undefined ? undefined : options.credentialDeadlineMs - Date.now() } = {}) {
       if (timeoutMs !== undefined && (!Number.isFinite(timeoutMs) || timeoutMs <= 0)) throw failure('failed (deadline expired)');
       if (!managed) return childOptions;
       const refreshTimeout = () => Math.min(loadAwareTimeoutMs(REFRESH_COMMAND_TIMEOUT_MS),

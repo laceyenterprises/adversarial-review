@@ -74,17 +74,39 @@ test('verdict admission recognizes mixed-case revision references without admitt
   }
 });
 
-test('repair facts count only array-shaped closer refund receipts', t => {
+test('repair facts exclude malformed refund receipts from informational spend', t => {
   const f = fixture(t), db = reviewDb(t);
   const path = hammerRetryCapFilePath(f.rootDir, f);
   reserveRepairEpoch(f);
   const ledger = readHammerRetryCapLedger(f.rootDir, f);
   ledger.selfErrorRefunds = { [old]: ['launch-one', 'launch-two'], [head]: ['launch-three'],
     nullEntry: null, numberEntry: 3, stringEntry: 'not-launches', objectEntry: { length: 99 } };
+  ledger.reviewHarnessRefunds = {
+    complete: { id: 'receipt-one', headSha: old },
+    idOnly: { id: 'receipt-two' }, headOnly: { headSha: head },
+    nullEntry: null, numberEntry: 3, stringEntry: 'not-a-receipt', arrayEntry: [],
+    objectEntry: {}, invalidFields: { id: 3, headSha: false }, emptyFields: { id: '', headSha: '' },
+  };
   writeFileSync(path, JSON.stringify(ledger));
   const row = db.prepare('SELECT * FROM reviewed_prs').get();
   const facts = readRepairFacts({ ...f, db, row });
   assert.equal(facts.refundedSpend.closer, 3);
+  assert.equal(facts.refundedSpend.review, 3);
+});
+
+test('already-reviewed heads skip admission callbacks regardless of SHA casing', async () => {
+  const mixed = 'bB'.repeat(20);
+  const fail = () => assert.fail('an already-reviewed head must not probe or mutate admission');
+  for (const reviewed of [head, head.toUpperCase(), mixed]) {
+    for (const requested of [head, head.toUpperCase(), mixed]) {
+      for (const repairEpoch of [null, { id: 'repair-123a-bc', baseHead: old }]) {
+        const row = { reviewer_head_sha: reviewed, revision_ref: old, review_status: 'posted' };
+        assert.equal(await admitExhaustedHeadVerdict({ exhausted: true, headSha: requested, row,
+          repairEpoch, countDelivered: fail, classifyCloser: fail, bindRepair: fail,
+          request: fail, readRow: fail }), row);
+      }
+    }
+  }
 });
 
 for (const faultAtEnd of [false, true]) test(`refunded review messages stay bounded and keep their idempotency receipt (fault at end: ${faultAtEnd})`, t => {

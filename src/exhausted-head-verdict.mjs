@@ -39,7 +39,8 @@ export async function admitExhaustedHeadVerdict({ exhausted, headSha, row,
   // Refuse malformed input before mutating the review row.
   if (typeof headSha !== 'string' || !/^[0-9a-f]{40}$/i.test(headSha)) return row;
   if (isExhaustedHeadVerdictRequested(row, headSha)) return row;
-  if ((!repairEpoch && (lifetimeExhausted || !exhausted)) || !headSha || !row || row.reviewer_head_sha === headSha
+  if ((!repairEpoch && (lifetimeExhausted || !exhausted)) || !headSha || !row
+    || row.reviewer_head_sha?.toLowerCase() === headSha.toLowerCase()
     || countDelivered() !== 0) return row;
   const closer = await classifyCloser();
   if (repairEpoch ? closer.suppressed : !owesExhaustedHeadVerdict({ exhausted, headSha,

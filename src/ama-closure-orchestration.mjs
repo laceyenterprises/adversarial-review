@@ -15,7 +15,7 @@ import { remediationBudgetHandoffAllowed } from './remediation-round-recovery.mj
 import { remediationJobMissingDetail } from './remediation-hold-cause.mjs';
 import { evaluateHammerStopHold } from './ama/hammer-stop-hold.mjs';
 import { closerSupersedeOf, deriveNextActionSnapshot, hasLiveRemediationJob, isClosureRecoveryDecision, nextAction } from './pr-next-action.mjs';
-import { supersedeNotBootedCloser } from './ama/closer-supersede.mjs';
+import { supersedeHeadMovedCloser, supersedeNotBootedCloser } from './ama/closer-supersede.mjs';
 import { withDaemonMergeReservation } from './ama/merge-lease.mjs';
 import { loadAwareTimeoutMs } from './load-aware-timeout.mjs';
 import { withClosureEvaluationReadCache } from './closure-evaluation-cache.mjs';
@@ -1042,6 +1042,7 @@ async function dispatchAmaClosureFor({
   closureOwnerSink = null,
   probeClosureOwnershipImpl = probeOrphanOwnership,
   supersedeNotBootedCloserImpl = supersedeNotBootedCloser,
+  supersedeHeadMovedCloserImpl = supersedeHeadMovedCloser,
   closerLeaseLivenessOptions = {},
   preReceiptIntentOptions = {},
   observeClosureWaitImpl = observeClosureWait,
@@ -1598,7 +1599,32 @@ async function dispatchAmaClosureFor({
   if (currentPrHeadSha) {
     try {
       const liveLease = findLiveAmaCloserLease(rootDir, { repo: repoPath, prNumber });
-      if (liveLease && liveLease.headSha && liveLease.headSha !== currentPrHeadSha) {
+      // CLOSERHEADPIN-01: a closer that has not booted cannot have authored the
+      // new head, and its inputs stay pinned to the old one. End it with the
+      // typed `superseded-head-moved` outcome instead of carrying its lease to a
+      // head it would refuse. An unconfirmed cancel keeps the CLR-01 carry; that
+      // closer then stands down with `head-changed` and ends with the same type.
+      const headMoved = liveLease && liveLease.headSha && liveLease.headSha !== currentPrHeadSha
+        && liveLease.lease?.lrqId && ['pending', 'dispatched'].includes(liveLease.lease.status)
+        && cfg?.autonomousMergeExecutionEnabled !== false
+        ? await runCoexistenceOperation('closer-head-moved-supersede',
+          ({ signal: operationSignal }) => supersedeHeadMovedCloserImpl({ rootDir, repo: repoPath, prNumber,
+            pinnedHeadSha: liveLease.headSha, liveHeadSha: currentPrHeadSha,
+            launchRequestId: liveLease.lease.lrqId,
+            recordHeadSha: liveLease.lease.rekeyedFromHeadSha || liveLease.headSha,
+            hqRoot: resolveHqRoot(env), signal: operationSignal, logger }),
+          { timeoutMs: operationTimeoutMs, parentSignal: signal, operationTracker, logger, repoPath, prNumber })
+          .catch(error => {
+            throwIfAborted(signal);
+            if (error?.code === 'AMA_COEXISTENCE_OPERATION_TIMEOUT') throw error;
+            return { superseded: false, reason: 'closer-head-moved-supersede-failed' };
+          })
+        : null;
+      if (headMoved?.superseded) {
+        logger?.log?.(`[watcher] AMA closer superseded-head-moved for ${repoPath}#${prNumber}: `
+          + `${String(liveLease.headSha).slice(0, 12)} -> ${String(currentPrHeadSha).slice(0, 12)} `
+          + `(lrq=${liveLease.lease.lrqId} not booted; closure re-arms at the new head)`);
+      } else if (liveLease && liveLease.headSha && liveLease.headSha !== currentPrHeadSha) {
         const rekey = rekeyAmaCloserLease({
           rootDir,
           repo: repoPath,

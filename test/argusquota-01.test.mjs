@@ -38,6 +38,8 @@ async function withPool(fn) {
     },
     deliverAlertImpl: async () => { throw new Error('unexpected alert'); },
     isPgidAliveImpl: () => true,
+    // Synthetic child PIDs must not be compared with unrelated host processes.
+    verifyPgidIdentityImpl: async () => ({ match: true }),
   };
   const pool = createAgyReviewerIdentityPool(poolOptions);
   const cooldown = (identityUser) => startGeminiQuotaCooldown({

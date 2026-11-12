@@ -8,6 +8,7 @@ import { appendCloserOutcome } from './closer-outcomes.mjs';
 import { ownershipReadBudgets as closerScanBudgets, boundedOwnershipRead as boundedCloserScanRead } from '../ownership-read.mjs';
 import { HAMMER_RETRYABLE_READ_OUTCOMES } from './hammer-phase-outcome.mjs';
 import { HAMMER_CLOSER_FAULTS } from './hammer-stop-origin.mjs';
+import { readLaunchWorldRefusal, worldRefusalLeaseOutcome } from './closer-head-pin.mjs';
 import { refundCloserSelfError } from './hammer-retry-cap.mjs';
 import { CLOSER_INCONCLUSIVE_BACKOFF_REASON, CLOSER_INCONCLUSIVE_WAIT_CLASS, classifyCloserOutcome,
   closerInconclusiveNotice, closerInconclusiveRetryPolicy, evaluateCloserInconclusiveRetryGate,
@@ -1708,12 +1709,17 @@ function* reconcileAmaCloserLeaseSteps({
     // Record terminality now; scratch remains while closure leases are held.
     // The shared writer retries cleanup after their fenced settlement.
     if (record && !recordTerminalCloserLaunch(rootDir, dispatchIdentity, launchRequestId, status, now, cleanupScratchImpl)) return false;
-    const deferral = [identity, dispatchIdentity].map(key =>
+    // CLOSERHEADPIN-01: this launch's own world refusal, at any head, is its
+    // decision. A later closer deferral from the same launch cannot outrank it.
+    const worldRefusal = readLaunchWorldRefusal(hqRoot || rootDir, identity, launchRequestId);
+    const deferral = worldRefusal ? null : [identity, dispatchIdentity].map(key =>
       readAmaAuditEntry(hqRoot || rootDir, key.repo, key.prNumber, key.headSha)?.attempts?.at(-1))
       .find(attempt => attempt?.launchRequestId === launchRequestId && retryableAmaCloserDeferralOutcome(attempt)
         && (!HAMMER_RETRYABLE_READ_OUTCOMES.has(attempt.reason) || ['succeeded', 'failed'].includes(status)));
-    const auditOutcome = retryableAmaCloserDeferralOutcome(deferral) || readAmaAuditTerminalOutcome(hqRoot || rootDir, identity)
+    const documentOutcome = readAmaAuditTerminalOutcome(hqRoot || rootDir, identity)
       || readAmaAuditTerminalOutcome(hqRoot || rootDir, dispatchIdentity);
+    const auditOutcome = retryableAmaCloserDeferralOutcome(deferral)
+      || (documentOutcome !== 'succeeded' ? worldRefusalLeaseOutcome(worldRefusal) : null) || documentOutcome;
     // A merged completion proves success only for this lease head.
     const mergedSignal = deferral ? null : yield readMergedSignalImpl({
       ...identity, hqRoot, rootDir, ledgerTarget, ledgerDbPath, env, signal, logger,

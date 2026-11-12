@@ -6,6 +6,7 @@ import { readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { writeFileAtomic } from '../atomic-write.mjs';
 import { hammerStopOrigin, closerFaultRecovery } from './hammer-stop-origin.mjs';
+import { readLaunchWorldRefusal } from './closer-head-pin.mjs';
 
 export class CloserCorrectionRequired extends Error {
   constructor(reason) {
@@ -100,11 +101,25 @@ export function recordHammerEarlyFailure(reason, { env = process.env, headSha, f
     return null;
   }
   const launchRequestId = env.HQ_LAUNCH_REQUEST_ID || null;
-  const existing = readAmaAuditEntry(identity.hqRoot, identity.repo, identity.prNumber, identity.headSha);
-  const prior = existing?.attempts?.findLast(attempt =>
+  let existing = readAmaAuditEntry(identity.hqRoot, identity.repo, identity.prNumber, identity.headSha);
+  let prior = existing?.attempts?.findLast(attempt =>
     (launchRequestId ? attempt.launchRequestId === launchRequestId
       : !attempt.launchRequestId && attempt.attemptPhase === 'hammer-early-exit') &&
     ['succeeded', 'failed-without-merge', 'superseded', 'deferred'].includes(attempt.outcome));
+  // CLOSERHEADPIN-01: a world refusal this launch already recorded at another
+  // head (the live head it refused, or its dispatch target) still wins over a
+  // later generic stop. Otherwise a closing-status step failure keyed to the
+  // pinned target became a closer deferral that outranked `head-changed`.
+  if (!prior && launchRequestId && origin !== 'world') {
+    const refusal = readLaunchWorldRefusal(identity.hqRoot, identity, launchRequestId);
+    if (refusal && refusal.headSha !== identity.headSha) {
+      existing = readAmaAuditEntry(identity.hqRoot, identity.repo, identity.prNumber, refusal.headSha);
+      prior = refusal;
+      // The run's terminal receipt names the refusal it ended on, not the
+      // closing-status step that failed after it.
+      reason = refusal.reason;
+    }
+  }
   // A world refusal wins over a later generic controller failure.
   if (!prior || prior.outcome === 'deferred') requireCorrection();
   // A later authoritative fence overrides an observation failure. Generic

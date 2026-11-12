@@ -28,9 +28,8 @@ function shellSingleQuote(value) {
 }
 
 function buildMergeAgentPrompt(job, { trigger = null } = {}) {
-  const mergeLeaseHelper = shellSingleQuote(fileURLToPath(new URL('../bin/merge-lease.mjs', import.meta.url)));
-  const validationHelper = shellSingleQuote(fileURLToPath(new URL('../bin/hammer-validate.mjs', import.meta.url)));
   const controllerHelper = shellSingleQuote(fileURLToPath(new URL('../bin/hammer-controller.mjs', import.meta.url)));
+  const closeControllerScript = shellSingleQuote(fileURLToPath(new URL('../bin/merge-agent-close-controller.sh', import.meta.url)));
   const stackedBaseChecker = shellSingleQuote(fileURLToPath(new URL('../bin/stacked-base-check.mjs', import.meta.url)));
   const stackedBaseRoot = shellSingleQuote(fileURLToPath(new URL('..', import.meta.url)));
   const ciCostChecker = shellSingleQuote(fileURLToPath(new URL('../bin/ci-cost-check.mjs', import.meta.url)));
@@ -316,126 +315,32 @@ function buildMergeAgentPrompt(job, { trigger = null } = {}) {
         lines.push(`export HAM_REPO=${mergeRepoLiteral} HAM_PR_NUMBER=${mergePrLiteral} HAM_ROOT_DIR=${stackedBaseRoot}`);
         lines.push('export HAM_RUN_DIR=$(mktemp -d)');
         lines.push('```');
-        lines.push('Write the following complete rebase/validation/merge script as "$HAM_RUN_DIR/close-controller.sh"; never execute a detached ad hoc shell.');
+        // HAMCONTROLLERSCRIPT-01: the rebase/validation/merge controller is
+        // shipped code. The model writes only data and runs one command.
         lines.push(
           'Merge gate for the rebase-to-merge step only: after remediation is'
-          + ' complete and you are ready to rebase for merge, acquire the'
-          + ' blocking merge lease before rebasing. Run the entire'
-          + ' rebase/validation/merge sequence from this single shell script;'
-          + ' it passes that shell pid as `--owner-pid "$$"` and releases the'
-          + ' lease through the EXIT trap on every path after acquisition:'
+          + ' complete and you are ready to rebase for merge, run the shipped close'
+          + ' controller below. Never write controller shell, read `/dev/tty` or'
+          + ' stdin, or run a detached ad hoc shell. Under the launch-bound'
+          + ' controller it acquires the blocking merge lease for its own shell pid'
+          + ' before rebasing, rebases onto the latest base, runs your validation'
+          + ' commands against the rebased head, pushes with --force-with-lease,'
+          + ' checks revalidation, protective predecessors and CI cost, then merges'
+          + ' with `--match-head-commit` on the validated head (never `--admin`).'
+          + ' Its EXIT trap releases the lease on every path after acquisition.'
         );
-        lines.push('');
-        lines.push('```bash');
-        lines.push('set -euo pipefail');
-        lines.push(`MERGE_REPO=${mergeRepoLiteral}`);
-        lines.push(`MERGE_BASE=${mergeBaseLiteral}`);
-        lines.push(`MERGE_PR=${mergePrLiteral}`);
-        lines.push('MERGE_PR_STATE_JSON=$(mktemp)');
-        lines.push('gh pr view "$MERGE_PR" --repo "$MERGE_REPO" --json headRefName,body > "$MERGE_PR_STATE_JSON"');
-        lines.push('MERGE_HEAD_REF=$(jq -r \'.headRefName\' "$MERGE_PR_STATE_JSON")');
-        lines.push('POST_REMEDIATION_SHA=$(git rev-parse HEAD)');
-        lines.push('MERGE_GATE_ATTEMPT_HEAD="$POST_REMEDIATION_SHA"');
-        lines.push('MERGE_LEASE_JSON="$HAM_RUN_DIR/merge-lease-acquire.json"');
-        lines.push('MERGE_REVALIDATION_JSON=$(mktemp)');
-        lines.push('MERGE_LEASE_ID=""');
-        lines.push('cleanup_merge_lease() {');
-        lines.push('  status=$?');
-        lines.push(`  if [ -n "\${MERGE_LEASE_ID:-}" ] && [ "\${HAM_CONTROLLER_CANCELLED:-0}" -eq 0 ] && node ${controllerHelper} assert-owner; then`);
-        lines.push(`    node ${mergeLeaseHelper} release --repo "$MERGE_REPO" --base "$MERGE_BASE" --pr "$MERGE_PR" --lease-id "$MERGE_LEASE_ID" || true`);
-        lines.push('  fi');
-        lines.push('  rm -f "$MERGE_REVALIDATION_JSON" "$MERGE_PR_STATE_JSON"');
-        lines.push('  exit "$status"');
-        lines.push('}');
-        lines.push('trap cleanup_merge_lease EXIT');
-        lines.push('');
-        lines.push('set +e');
-        lines.push(`node ${controllerHelper} assert-owner || exit 125`);
-        lines.push(`node ${mergeLeaseHelper} acquire --repo "$MERGE_REPO" --base "$MERGE_BASE" --pr "$MERGE_PR" --head "$MERGE_GATE_ATTEMPT_HEAD" --pr-state-file "$MERGE_PR_STATE_JSON" --owner-pid "$$" --wait 300 > "$MERGE_LEASE_JSON"`);
-        lines.push('MERGE_LEASE_EXIT=$?');
-        lines.push('set -e');
-        lines.push('if [ "$MERGE_LEASE_EXIT" -eq 70 ] && jq -e \'.parked == true\' "$MERGE_LEASE_JSON" >/dev/null; then');
-        lines.push('  PARK_REASON=$(jq -r \'.reason // "merge-gate-parked"\' "$MERGE_LEASE_JSON")');
-        lines.push('  echo "merge gate parked PR: $PARK_REASON" >&2');
-        lines.push('  # Stop merge attempts and park/escalate with the emitted reason.');
-        lines.push('  exit 70');
-        lines.push('fi');
-        lines.push('if [ "$MERGE_LEASE_EXIT" -ne 0 ]; then');
-        lines.push('  exit "$MERGE_LEASE_EXIT"');
-        lines.push('fi');
-        lines.push('MERGE_LEASE_ID=$(jq -r \'.leaseId\' "$MERGE_LEASE_JSON")');
-        lines.push('');
-        lines.push('# While holding the lease, rebase onto the latest base and validate the exact rebased head.');
-        lines.push('# If rebase or validation fails, exit non-zero here; the EXIT trap releases the lease.');
-        lines.push('git fetch --prune origin "$MERGE_BASE" "$MERGE_HEAD_REF"');
-        lines.push('VALIDATION_BASE=$(git rev-parse --verify "origin/$MERGE_BASE^{commit}")');
-        lines.push('# GENCONFLICT-01: registered committed outputs are regenerated per replayed commit.');
-        lines.push('# Failure aborts the rebase and removes this worktree; stop on nonzero status.');
-        lines.push('hq generated-conflicts rebase --worktree "$PWD" --onto "$VALIDATION_BASE"');
-        lines.push('# Run the project validation required for this PR here, against the rebased head.');
-        lines.push(`# Required: node ${validationHelper} --pytest -- <required test paths> (omit --pytest for other commands).`);
-        lines.push('# This enforces an unscaled 120s no-output bound and load-scaled absolute ceiling.');
-        lines.push('# Any timeout, cancellation or test failure must exit nonzero through the lease-release trap.');
-        lines.push('# Never nest buffering runners or publish acceptance after incomplete validation.');
-        lines.push('git fetch --prune origin "$MERGE_BASE"');
-        lines.push('CURRENT_BASE=$(git rev-parse --verify "origin/$MERGE_BASE^{commit}")');
-        lines.push('POST_REMEDIATION_SHA=$(git rev-parse HEAD)');
-        lines.push('git push --force-with-lease origin "HEAD:$MERGE_HEAD_REF"');
-        lines.push('');
-        lines.push('set +e');
-        lines.push(`node ${mergeLeaseHelper} needs-revalidation --repo-path "$PWD" --base "$MERGE_BASE" --validation-base "$VALIDATION_BASE" --current-base "$CURRENT_BASE" --changed-files-from "$POST_REMEDIATION_SHA" > "$MERGE_REVALIDATION_JSON"`);
-        lines.push('MERGE_REVALIDATION_EXIT=$?');
-        lines.push('set -e');
-        lines.push('if [ "$MERGE_REVALIDATION_EXIT" -ne 0 ]; then');
-        lines.push('  echo "merge revalidation failed; escalate instead of retrying the same invocation" >&2');
-        lines.push('  exit "$MERGE_REVALIDATION_EXIT"');
-        lines.push('fi');
-        lines.push('if ! jq -e \'.needsRevalidation == false\' "$MERGE_REVALIDATION_JSON" >/dev/null; then');
-        lines.push('  if ! jq -e \'.needsRevalidation == true\' "$MERGE_REVALIDATION_JSON" >/dev/null; then');
-        lines.push('    echo "merge revalidation returned an unrecognized decision; escalate" >&2');
-        lines.push('    exit 64');
-        lines.push('  fi');
-        lines.push('  # Base moved with overlapping risk; restart rebase/validation under a fresh lease.');
-        lines.push('  exit 75');
-        lines.push('fi');
-        lines.push('');
-        lines.push('if ! PROTECTIVE_PREDECESSORS=$(gh pr view "$MERGE_PR" --repo "$MERGE_REPO" --json body --jq \'.body // ""\' | awk \'/^[[:space:]]*Protects-Against-Unsafe-Merge-Until-PR[[:space:]]*:/ {print $0}\'); then');
-        lines.push('  echo "protective predecessor body read failed; refusing merge" >&2');
-        lines.push('  exit 75');
-        lines.push('fi');
-        lines.push('if [ -n "$PROTECTIVE_PREDECESSORS" ]; then');
-        lines.push('  while IFS= read -r predecessor_line; do');
-        lines.push('    PROTECTOR_PR=$(printf "%s" "$predecessor_line" | sed -nE \'s/^[[:space:]]*Protects-Against-Unsafe-Merge-Until-PR[[:space:]]*:[[:space:]]*#?([1-9][0-9]*)[[:space:]]*$/\\1/p\')');
-        lines.push('    if [ -z "$PROTECTOR_PR" ]; then');
-        lines.push('      echo "malformed protective predecessor trailer; refusing merge" >&2');
-        lines.push('      exit 75');
-        lines.push('    fi');
-        lines.push('    if [ "$PROTECTOR_PR" = "$MERGE_PR" ]; then');
-        lines.push('      echo "protective predecessor declaration points at this PR; ignoring malformed self-reference" >&2');
-        lines.push('      continue');
-        lines.push('    fi');
-        lines.push('    if ! PROTECTOR_STATE=$(gh pr view "$PROTECTOR_PR" --repo "$MERGE_REPO" --json state --jq \'.state // ""\'); then');
-        lines.push('      echo "protective predecessor state unreadable for PR #$PROTECTOR_PR; refusing merge" >&2');
-        lines.push('      exit 75');
-        lines.push('    fi');
-        lines.push('    if [ -z "$PROTECTOR_STATE" ]; then');
-        lines.push('      echo "protective predecessor state unreadable for PR #$PROTECTOR_PR; refusing merge" >&2');
-        lines.push('      exit 75');
-        lines.push('    fi');
-        lines.push('    if [ "$PROTECTOR_STATE" = "OPEN" ]; then');
-        lines.push('      echo "protective predecessor PR #$PROTECTOR_PR is still open; refusing merge" >&2');
-        lines.push('      exit 75');
-        lines.push('    fi');
-        lines.push('  done <<EOF_PROTECTIVE_PREDECESSORS');
-        lines.push('$PROTECTIVE_PREDECESSORS');
-        lines.push('EOF_PROTECTIVE_PREDECESSORS');
-        lines.push('fi');
-        lines.push('');
-        lines.push(`node ${ciCostChecker} "$MERGE_REPO" "$MERGE_PR" "$POST_REMEDIATION_SHA" && gh pr merge "$MERGE_PR" --repo "$MERGE_REPO" --squash --auto --match-head-commit "$POST_REMEDIATION_SHA"`);
+        lines.push(
+          'First write the validation commands as data to "$HAM_RUN_DIR/close-commands.json".'
+          + ' Each entry runs as `hammer-validate.mjs [--pytest] -- <args>`'
+          + ' (pytest: test paths; otherwise the command argv), with its unscaled'
+          + ' 120s no-output bound and load-scaled ceiling:'
+        );
+        lines.push('```json');
+        lines.push('{"validations": [{"pytest": true, "args": ["tests/test_example.py"]}]}');
         lines.push('```');
-        lines.push('Then start the script in the foreground through the launch-bound controller, from the same calling shell. The controller records group drain independently of HQ terminal status and only releases a matching owned lease.');
+        lines.push('Then run this ONE command in the foreground from the same calling shell. The controller records group drain independently of HQ terminal status and only releases a matching owned lease. Exit 65 means the commands file is invalid: correct it once and rerun; 70 parked, 75 retry later, other nonzero escalate.');
         lines.push('```bash');
-        lines.push(`node ${controllerHelper} run "$HAM_RUN_DIR/close-controller.sh"`);
+        lines.push(`node ${controllerHelper} run ${closeControllerScript} --repo ${mergeRepoLiteral} --base ${mergeBaseLiteral} --pr ${mergePrLiteral} --commands "$HAM_RUN_DIR/close-commands.json"`);
         lines.push('```');
       }
     }

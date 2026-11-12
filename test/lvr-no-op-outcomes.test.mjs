@@ -164,8 +164,11 @@ test('LVR-02 closer prompt carries terminal evidence and the incident snapshot t
     labels: [], mergeable: 'MERGEABLE', checksConclusion: 'SUCCESS' },
   { trigger: FINAL_PASS_ON_BUDGET_EXHAUSTED_TRIGGER });
   assert.match(prompt, /terminal AMA audit tied to HQ_LAUNCH_REQUEST_ID/);
-  assert.match(prompt, /--json headRefName,body > "\$MERGE_PR_STATE_JSON"/);
-  assert.match(prompt, /--pr-state-file "\$MERGE_PR_STATE_JSON"/);
+  // HAMCONTROLLERSCRIPT-01: the incident snapshot is taken by the shipped controller.
+  assert.match(prompt, /merge-agent-close-controller\.sh/);
+  const script = readFileSync(join(root, 'bin/merge-agent-close-controller.sh'), 'utf8');
+  assert.match(script, /--json headRefName,body > "\$MERGE_PR_STATE_JSON"/);
+  assert.match(script, /--pr-state-file "\$MERGE_PR_STATE_JSON"/);
 });
 
 test('LVR-02 normal terminal audit CLI binds its own launch, overriding stale attempt identity', t => {

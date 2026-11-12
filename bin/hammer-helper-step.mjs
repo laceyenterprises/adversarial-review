@@ -10,6 +10,7 @@ import { isLoadTimeout, OVERLOAD_DEFERRED } from '../src/overload-deferral.mjs';
 import { writeFileAtomic } from '../src/atomic-write.mjs';
 import { HAMMER_CLOSER_FAULTS, closerFaultRecovery } from '../src/ama/hammer-stop-origin.mjs';
 import { releaseCheckoutHolder } from '../src/ama/checkout-holder.mjs';
+import { resolveHammerShellHelper } from '../src/ama/hammer-shell-helper-command.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
 
@@ -83,6 +84,8 @@ export async function runHelperStep({ mode, step, nominal, ceiling, command, arg
     || !Number.isSafeInteger(nominal) || nominal <= 0 || !Number.isSafeInteger(ceiling)
     || ceiling < nominal || ceiling > Math.floor(MAX_TIMER_DELAY_MS / 1000)
     || !command) throw new TypeError('invalid hammer helper step');
+  // ham_gh/ham_git/ham_pr are shell functions; spawn their deployed executables.
+  ({ command, args } = resolveHammerShellHelper(command, args, { env }));
   // Callers own retries, tolerated writes and semantic stops unless they
   // explicitly delegate terminal reporting. Child reports stay provisional.
   const reportsFailure = mode.endsWith(':report');

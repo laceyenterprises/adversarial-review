@@ -4771,45 +4771,39 @@ test('buildMergeAgentPrompt surfaces final-pass mode + triage contract when trig
   assert.ok(prompt.includes('never copy'));
   assert.ok(prompt.includes('quoted secrets'));
   assert.ok(prompt.includes('Merge gate for the rebase-to-merge step only'));
-  assert.ok(prompt.includes("merge-lease.mjs' acquire"));
-  assert.ok(prompt.includes('set -euo pipefail'));
-  assert.ok(prompt.includes("MERGE_REPO='laceyenterprises/agent-os'"));
-  assert.ok(prompt.includes("MERGE_BASE='main'"));
-  assert.ok(prompt.includes("MERGE_PR='401'"));
-  assert.ok(prompt.includes('gh pr view "$MERGE_PR" --repo "$MERGE_REPO" --json headRefName,body > "$MERGE_PR_STATE_JSON"'));
-  assert.ok(prompt.includes('MERGE_HEAD_REF=$(jq -r \'.headRefName\' "$MERGE_PR_STATE_JSON")'));
-  assert.ok(prompt.includes('--pr-state-file "$MERGE_PR_STATE_JSON"'));
-  assert.ok(prompt.includes('POST_REMEDIATION_SHA=$(git rev-parse HEAD)'));
-  assert.ok(prompt.includes('MERGE_GATE_ATTEMPT_HEAD="$POST_REMEDIATION_SHA"'));
-  assert.ok(prompt.includes('MERGE_REVALIDATION_JSON=$(mktemp)'));
-  assert.ok(prompt.includes('trap cleanup_merge_lease EXIT'));
-  assert.ok(prompt.includes('--owner-pid "$$"'));
-  assert.ok(prompt.includes('--wait 300'));
-  assert.ok(prompt.includes('--head "$MERGE_GATE_ATTEMPT_HEAD"'));
-  assert.ok(prompt.includes('MERGE_LEASE_ID=$(jq -r \'.leaseId\' "$MERGE_LEASE_JSON")'));
-  assert.ok(prompt.includes('MERGE_LEASE_EXIT" -eq 70'));
-  assert.ok(prompt.includes('jq -e \'.parked == true\''));
-  assert.ok(prompt.includes('park/escalate with the emitted reason'));
-  assert.ok(prompt.includes('exit 70'));
-  assert.ok(prompt.includes('git fetch --prune origin "$MERGE_BASE" "$MERGE_HEAD_REF"'));
-  assert.ok(prompt.includes('VALIDATION_BASE=$(git rev-parse --verify "origin/$MERGE_BASE^{commit}")'));
-  assert.ok(prompt.includes('hq generated-conflicts rebase --worktree "$PWD" --onto "$VALIDATION_BASE"'));
-  assert.ok(prompt.includes('Run the project validation required for this PR here'));
-  assert.ok(prompt.includes('CURRENT_BASE=$(git rev-parse --verify "origin/$MERGE_BASE^{commit}")'));
-  assert.ok(prompt.includes('git push --force-with-lease origin "HEAD:$MERGE_HEAD_REF"'));
-  assert.ok(prompt.includes("merge-lease.mjs' needs-revalidation"));
-  assert.ok(prompt.includes('--current-base "$CURRENT_BASE"'));
-  assert.ok(prompt.includes('--validation-base "$VALIDATION_BASE"'));
-  assert.ok(prompt.includes('--changed-files-from "$POST_REMEDIATION_SHA"'));
-  assert.ok(prompt.includes('MERGE_REVALIDATION_EXIT=$?'));
-  assert.ok(prompt.includes('merge revalidation failed; escalate instead of retrying'));
-  assert.ok(prompt.includes('jq -e \'.needsRevalidation == false\''));
-  assert.ok(prompt.includes('jq -e \'.needsRevalidation == true\''));
-  assert.ok(prompt.includes('exit 64'));
-  assert.ok(prompt.includes('gh pr merge "$MERGE_PR" --repo "$MERGE_REPO" --squash --auto --match-head-commit "$POST_REMEDIATION_SHA"'));
-  assert.ok(prompt.includes('--match-head-commit "$POST_REMEDIATION_SHA"'));
-  assert.ok(prompt.includes('If rebase or validation fails, exit non-zero here; the EXIT trap releases the lease.'));
-  assert.ok(prompt.includes('release --repo "$MERGE_REPO" --base "$MERGE_BASE" --pr "$MERGE_PR" --lease-id "$MERGE_LEASE_ID"'));
+  // HAMCONTROLLERSCRIPT-01: the controller is shipped code; the prompt runs it
+  // with data arguments and never carries a controller shell body.
+  assert.ok(prompt.includes("merge-agent-close-controller.sh' --repo 'laceyenterprises/agent-os' --base 'main' --pr '401' --commands \"$HAM_RUN_DIR/close-commands.json\""));
+  assert.ok(!prompt.includes('set -euo pipefail'));
+  assert.ok(!prompt.includes('trap cleanup_merge_lease EXIT'));
+  assert.ok(!prompt.includes('close-controller.sh"'));
+  assert.ok(prompt.includes('`--match-head-commit` on the validated head (never `--admin`)'));
+  const script = readFileSync(new URL('../bin/merge-agent-close-controller.sh', import.meta.url), 'utf8');
+  for (const required of [
+    'set -euo pipefail', 'exec 0</dev/null',
+    '"$MERGE_LEASE_HELPER" acquire', '--pr-state-file "$MERGE_PR_STATE_JSON"',
+    'gh pr view "$MERGE_PR" --repo "$MERGE_REPO" --json headRefName,body > "$MERGE_PR_STATE_JSON"',
+    'MERGE_HEAD_REF=$(jq -r \'.headRefName\' "$MERGE_PR_STATE_JSON")',
+    'POST_REMEDIATION_SHA=$(git rev-parse HEAD)', 'MERGE_GATE_ATTEMPT_HEAD="$POST_REMEDIATION_SHA"',
+    'trap cleanup_merge_lease EXIT', '--owner-pid "$$"', '--wait 300', '--head "$MERGE_GATE_ATTEMPT_HEAD"',
+    'MERGE_LEASE_ID=$(jq -r \'.leaseId\' "$MERGE_LEASE_JSON")', 'MERGE_LEASE_EXIT" -eq 70',
+    'jq -e \'.parked == true\'', 'park/escalate with the emitted reason', 'exit 70',
+    'git fetch --prune origin "$MERGE_BASE" "$MERGE_HEAD_REF"',
+    'VALIDATION_BASE=$(git rev-parse --verify "origin/$MERGE_BASE^{commit}")',
+    'hq generated-conflicts rebase --worktree "$PWD" --onto "$VALIDATION_BASE"',
+    '"$MERGE_NODE" "$VALIDATION_HELPER" "$@"',
+    'CURRENT_BASE=$(git rev-parse --verify "origin/$MERGE_BASE^{commit}")',
+    'git push --force-with-lease origin "HEAD:$MERGE_HEAD_REF"', '"$MERGE_LEASE_HELPER" needs-revalidation',
+    '--current-base "$CURRENT_BASE"', '--validation-base "$VALIDATION_BASE"',
+    '--changed-files-from "$POST_REMEDIATION_SHA"', 'MERGE_REVALIDATION_EXIT=$?',
+    'merge revalidation failed; escalate instead of retrying', 'jq -e \'.needsRevalidation == false\'',
+    'jq -e \'.needsRevalidation == true\'', 'exit 64',
+    'gh pr merge "$MERGE_PR" --repo "$MERGE_REPO" --squash --auto --match-head-commit "$POST_REMEDIATION_SHA"',
+    'If rebase or validation fails, exit non-zero here; the EXIT trap releases the lease.',
+    'release --repo "$MERGE_REPO" --base "$MERGE_BASE" --pr "$MERGE_PR" --lease-id "$MERGE_LEASE_ID"',
+  ]) assert.ok(script.includes(required), `shipped merge controller lost: ${required}`);
+  assert.ok(!/gh pr merge[^\n]*--admin/.test(script));
+  assert.ok(!script.includes('/dev/tty'));
   assert.ok(!prompt.includes('gh pr merge --squash --admin'));
   assert.ok(!prompt.includes('MERGE_GATE_ATTEMPT_KEY='));
   assert.ok(!prompt.includes('gh pr merge --squash --match-head-commit "$POST_REMEDIATION_SHA"'));

@@ -6435,12 +6435,26 @@ Local-first trailer suppression still lacks authenticated linked identity;
 source-aware stale-head resume verification is tracked in LAC-1848.
 ## LAC-2093: detached closer cancellation ownership
 
-For newly rendered closers, source `inputs.sh` in the calling shell, write the
-complete persistent closure script inside the private run directory, then run
-`node <deployed-root>/bin/hammer-controller.mjs run <run-dir>/close-controller.sh`
-in the foreground. Keep the inherited HQ launch/spawn markers and FD 4. Direct
+For newly rendered closers, the closer writes data only (the audit details
+file, `terminal-remediation.json` and `<run-dir>/close-plan.json`) and runs the
+shipped close command in the foreground:
+`/bin/bash <deployed-root>/bin/hammer-close.sh <run-dir>/close-plan.json`.
+That launcher sources `inputs.sh`, resolves the launch environment, then runs
+the shipped `bin/hammer-close-controller.sh` through
+`hammer-controller.mjs run`; it never reads a terminal or stdin
+(HAMCONTROLLERSCRIPT-01). Keep the inherited HQ launch/spawn markers. Direct
 execution of a dispatched shell refuses lease acquisition. The legacy final-pass
-merge-agent prompt uses the same wrapper and named acquisition receipt.
+merge-agent prompt runs the shipped `bin/merge-agent-close-controller.sh` under
+the same wrapper with its validation commands as a data file, and keeps the
+named acquisition receipt.
+
+The hammer's generated `inputs.sh` sources `bin/hammer-node-runtime.sh`, which
+exports the absolute Node executable from `HAM_NODE_BIN`, `AGENT_OS_NODE_BIN`,
+or PATH, in that order. An omitted or empty pin uses that fallback; an invalid
+explicit pin refuses startup. When a close plan omits `validationFiles`,
+revalidation reads NUL-delimited git paths so whitespace and Unicode filenames
+reach the validator intact. The merge-agent runs its CI-cost check as a separate
+command before merge; refusal exits immediately through lease cleanup.
 
 The controller registers before execution and watches its exact HQ launch through
 the existing read adapter and producer vocabulary. Validation runs in that shell's

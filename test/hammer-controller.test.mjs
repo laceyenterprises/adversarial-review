@@ -596,7 +596,8 @@ test('HAMMERLAUNCHREAD-01: the prompt resolves the environment before remediatio
   const resolveAt = prompt.indexOf('bin/hammer-controller.mjs" resolve-environment || exit $?');
   // It is the step right after the one-time inputs initialization.
   assert.ok(resolveAt > prompt.indexOf(`cat > '<<RUN_DIR>>/inputs.sh'`));
-  for (const later of ['bin/hammer-controller.mjs" run', '## Appendix B', '## Mandate', '## Appendix C']) {
+  // HAMCONTROLLERSCRIPT-01: the closing controller starts from the shipped close command.
+  for (const later of ['bin/hammer-close.sh" "<<RUN_DIR>>/close-plan.json"', '## Appendix B', '## Mandate', '## Appendix C']) {
     assert.ok(resolveAt < prompt.indexOf(later), later);
   }
 });

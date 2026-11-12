@@ -319,7 +319,7 @@ test('HAMTMP-01: same-PR renders are fresh and every rendered helper uses privat
       rootDir: repoRoot, scratchDir, prNumber: 42 });
     assert.doesNotMatch(prompt, /\/tmp\/ham-/);
     assert.ok(prompt.includes(`export HAM_RUN_DIR='${scratchDir}'`));
-    assert.ok(prompt.includes(`source "${scratchDir}/hammer-publish.sh"`));
+    assert.ok(prompt.includes(`/bin/hammer-close.sh" "${scratchDir}/close-plan.json"`));
     for (const phase of HAMMER_PHASES) {
       const rendered = spawnSync(process.execPath, [join(repoRoot, 'bin/hammer-procedure.mjs'), phase, '--render'], {
         env: { ...process.env, ...values }, encoding: 'utf8', timeout: 10000,
@@ -494,7 +494,9 @@ test('HAMTMP-02: dispatch snapshots deployed phases and the prompt sources only 
   assert.match(prompt, /Fresh shells reset state(?:\/| and )cwd\./);
   for (const phase of ['hammer-verify-head', 'hammer-publish', 'hammer-merge']) {
     const path = join(record.scratchDir, `${phase}.sh`);
-    assert.ok(prompt.includes(`source "${path}"`), phase);
+    // HAMCONTROLLERSCRIPT-01: the shipped close command sources the private
+    // snapshot; the prompt only checks that it exists.
+    assert.ok(prompt.includes(`-f "${path}"`), phase);
     assert.equal(statSync(path).mode & 0o777, 0o600);
     const script = readFileSync(path, 'utf8');
     assert.doesNotMatch(script, /\/tmp\/ham-|<<[A-Z_]+>>|synthetic untrusted procedure/);
@@ -563,8 +565,13 @@ test('HAMTMP-02: sibling remediation and fallback merge prompts invoke deployed 
     assert.doesNotMatch(prompt, /`bin\/run-bounded|\$\{ADVERSARIAL_REVIEW_ROOT\}/);
   }
   const prompt = buildMergeAgentPrompt(job, { trigger: FINAL_PASS_ON_BUDGET_EXHAUSTED_TRIGGER });
+  // HAMCONTROLLERSCRIPT-01: the shipped controller resolves the lease helper
+  // from its own checkout; the prompt names that script absolutely.
+  assert.ok(prompt.includes(`'${repoRoot}/bin/hammer-controller.mjs' run '${repoRoot}/bin/merge-agent-close-controller.sh'`));
+  const script = readFileSync(join(repoRoot, 'bin/merge-agent-close-controller.sh'), 'utf8');
+  assert.ok(script.includes('MERGE_LEASE_HELPER="$MERGE_CLOSE_ROOT/bin/merge-lease.mjs"'));
   for (const action of ['acquire', 'release', 'needs-revalidation']) {
-    assert.ok(prompt.includes(`'${repoRoot}/bin/merge-lease.mjs' ${action}`));
+    assert.ok(script.includes(`"$MERGE_LEASE_HELPER" ${action}`));
   }
   assert.doesNotMatch(prompt, /node bin\//);
 });
@@ -575,10 +582,12 @@ test('GENCONFLICT-01: merge-agent leased rebase uses the same generated-conflict
     repo: 'fixture/repo', prNumber: 42, branch: 'feature', baseBranch: 'main',
     headSha: head, strictRemediation: true,
   }, { trigger: FINAL_PASS_ON_BUDGET_EXHAUSTED_TRIGGER });
-  // The normal merge path emits this shell only when a merge is authorized.
-  assert.match(prompt, /hq generated-conflicts rebase --worktree "\$PWD" --onto "\$VALIDATION_BASE"/);
-  assert.doesNotMatch(prompt, /\ngit rebase "\$VALIDATION_BASE"/);
-  assert.match(prompt, /Failure aborts the rebase and removes this worktree/);
+  // The normal merge path runs the shipped controller only when a merge is authorized.
+  assert.match(prompt, /merge-agent-close-controller\.sh/);
+  const script = readFileSync(join(repoRoot, 'bin/merge-agent-close-controller.sh'), 'utf8');
+  assert.match(script, /hq generated-conflicts rebase --worktree "\$PWD" --onto "\$VALIDATION_BASE"/);
+  assert.doesNotMatch(script, /\ngit rebase "\$VALIDATION_BASE"/);
+  assert.match(script, /Failure aborts the rebase and removes this worktree/);
 });
 
 for (const status of ['requested', 'starting', 'running', 'parked']) {

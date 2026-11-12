@@ -72,13 +72,13 @@ The reported stale `closer-lease.mjs` projection is already correct:
 The manifest stores state projections, not whole-file digests; no hash edit is
 needed.
 
-The synchronous audit-enumeration concern remains a performance follow-up.
-`reconcileAmaCloserLeaseSteps` returns before the scan for nonterminal launches,
-so ordinary live-launch reconciliation does not enumerate audits. Terminal
-launches awaiting settlement can repeat the scan. Retaining cross-head discovery
-preserves world-refusal precedence when the refused head differs from both the
-lease and dispatch heads; caching or restricting heads needs an invalidation
-contract before it can safely replace that lookup.
+Launch-world-refusal resolutions now use a bounded 128-launch cache. Each
+lookup still discovers audit files across all heads, but unchanged file metadata
+avoids repeated JSON reads and parsing. Nanosecond modification/change times,
+file identity and size invalidate the cache on rewrites; new or removed heads
+also invalidate it. Metadata failures disable caching. Returned evidence is
+copied so callers cannot mutate the cached decision. No persistent record or
+state-machine contract changes.
 
 Final-round validation: `node test/run-tests.mjs` with
 `test/closerheadpin-01.test.mjs`, `test/daemonsupersede-01.test.mjs`,
@@ -88,3 +88,9 @@ Final-round validation: `node test/run-tests.mjs` with
 (95 entries), `bash demo/research-finding-walkthrough.sh` and
 `git diff --check` pass. The full local test suite was not run; PR-head CI
 owns that gate.
+
+HAM validation of the cache: canonical changed-surface runner passes 24 tests;
+all 11 `test/smv.test.mjs` cases pass, confirming the unchanged projection hash.
+Lint has zero errors (149 existing warnings); contract typechecking and the
+offline research-finding walkthrough pass. Full-suite validation remains with
+exact-head remote CI.

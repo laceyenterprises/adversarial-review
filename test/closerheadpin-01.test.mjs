@@ -200,3 +200,27 @@ test('head moved again before boot: supersede settles the rekeyed lease and reta
   assert.equal(acquireAmaCloserLease({ ...identity, headSha: nextHead, now: AT }).acquired, true,
     'the retired rekeyed lease permits closure at the next head');
 });
+
+test('cached launch refusals observe new heads and rewrites and isolate returned evidence', t => {
+  const rootDir = scratch(t);
+  const identity = { repo: REPO, prNumber: PR };
+  const read = () => readLaunchWorldRefusal(rootDir, identity, LRQ);
+  // An existing audit directory with no refusal may be cached, but a newly
+  // published refusal at another head must invalidate that negative result.
+  appendAmaAuditAttempt({ hqRoot: rootDir, ...identity, headSha: PINNED, now: AT,
+    attempt: { outcome: 'deferred', reason: 'local-validation', launchRequestId: LRQ } });
+  assert.equal(read(), null);
+  recordHammerEarlyFailure('head-changed', { env: hammerEnv(rootDir), headSha: MOVED });
+  assert.equal(read().headSha, MOVED);
+  const first = read();
+  first.reason = 'mutated-by-caller';
+  assert.equal(read().reason, 'head-changed', 'cache evidence cannot be mutated by a caller');
+  // Rewriting an existing head is significant even without a directory change.
+  appendAmaAuditAttempt({ hqRoot: rootDir, ...identity, headSha: MOVED,
+    now: '2099-01-01T00:00:00.000Z', attempt: { outcome: 'failed-without-merge',
+      reason: 'required-checks-failed', stopOrigin: 'world', launchRequestId: LRQ } });
+  assert.equal(read().reason, 'required-checks-failed');
+  assert.equal(read().reason, 'required-checks-failed');
+  rmSync(rootDir, { recursive: true, force: true });
+  assert.equal(read(), null, 'a removed audit directory never returns cached evidence');
+});

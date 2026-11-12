@@ -16,11 +16,29 @@
 // the launch's decision: `readLaunchWorldRefusal` lets it win over any later
 // closer deferral from the same launch, and the lease ends `superseded-head-moved`.
 import { readdirSync } from 'node:fs';
+import { statSync } from 'node:fs';
+import { join } from 'node:path';
 import { basename, dirname } from 'node:path';
 import { amaAuditFilePath, readAmaAuditEntry } from './audit.mjs';
 import { hammerStopOrigin } from './hammer-stop-origin.mjs';
 
 export const SUPERSEDED_HEAD_MOVED = 'superseded-head-moved';
+
+// Bound memory across launches. Metadata is checked every time: neither a late
+// refusal nor an audit rewrite may be hidden behind a cached resolution.
+const launchRefusals = new Map();
+const MAX_CACHED_LAUNCHES = 128;
+
+function auditFingerprint(directory, names, prefix) {
+  try {
+    return JSON.stringify(names.filter(name => name.startsWith(prefix)
+      && /^[a-f0-9]{40}\.json$/i.test(name.slice(prefix.length))).sort().map(name => {
+      const stat = statSync(join(directory, name), { bigint: true });
+      return [name, String(stat.dev), String(stat.ino), String(stat.size),
+        String(stat.mtimeNs), String(stat.ctimeNs)];
+    }));
+  } catch { return null; }
+}
 
 function worldOrigin(attempt) {
   if (attempt?.stopOrigin === 'world') return true;
@@ -41,6 +59,13 @@ export function readLaunchWorldRefusal(hqRoot, { repo, prNumber }, launchRequest
   const prefix = basename(sample).slice(0, -'H.json'.length);
   let names;
   try { names = readdirImpl(dirname(sample)); } catch { return null; }
+  const cacheKey = JSON.stringify([hqRoot, repo, prNumber, launchRequestId]);
+  const fingerprint = auditFingerprint(dirname(sample), names, prefix);
+  const cached = launchRefusals.get(cacheKey);
+  if (fingerprint !== null && cached?.fingerprint === fingerprint) {
+    return cached.refusal ? { ...cached.refusal } : null;
+  }
+  let readableAudits = 0;
   let latest = null;
   for (const name of names) {
     if (!name.startsWith(prefix) || !name.endsWith('.json')) continue;
@@ -48,12 +73,23 @@ export function readLaunchWorldRefusal(hqRoot, { repo, prNumber }, launchRequest
     if (!/^[a-f0-9]{40}$/i.test(headSha)) continue;
     let doc;
     try { doc = readAmaAuditEntry(hqRoot, repo, prNumber, headSha); } catch { continue; }
+    if (doc) readableAudits++;
     for (const attempt of Array.isArray(doc?.attempts) ? doc.attempts : []) {
       if (attempt?.launchRequestId !== launchRequestId || attempt.outcome !== 'failed-without-merge'
         || !worldOrigin(attempt)) continue;
       if (!latest || String(attempt.startedAt || '') >= String(latest.startedAt || '')) {
         latest = { ...attempt, headSha };
       }
+    }
+  }
+  // Do not cache a snapshot that changed while it was being read. Failures to
+  // stat also disable caching rather than preserving possibly stale evidence.
+  if (fingerprint !== null && readableAudits === JSON.parse(fingerprint).length
+    && auditFingerprint(dirname(sample), names, prefix) === fingerprint) {
+    launchRefusals.delete(cacheKey);
+    launchRefusals.set(cacheKey, { fingerprint, refusal: latest ? { ...latest } : null });
+    if (launchRefusals.size > MAX_CACHED_LAUNCHES) {
+      launchRefusals.delete(launchRefusals.keys().next().value);
     }
   }
   return latest;

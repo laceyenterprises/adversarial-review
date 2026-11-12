@@ -21,6 +21,29 @@ function options(candidates, extra = {}) {
   };
 }
 
+for (const [label, result] of [
+  ['undefined', undefined],
+  ['null', null],
+  ['empty object', {}],
+  ['missing deferred candidates', { dispatched: 0, deferred: 1 }],
+]) {
+  test(`REVIEWSPILLSTALL-01: ${label} drain result preserves not-started accounting`, async () => {
+    const refunded = [], retained = [], prepared = [];
+    const waiting = candidate(201);
+    waiting.refundDepthSpill = reason => refunded.push(reason);
+    waiting.retainDepthSpill = reason => { retained.push(reason); return false; };
+    waiting.prepareAdmission = () => prepared.push(waiting.prNumber);
+    const queue = [waiting];
+    const drain = createReviewerDispatchDrain(options(queue, { runQueue: async () => result }));
+
+    assert.deepEqual(await drain('capacity-freed'), { ...result, admissions: [] });
+    assert.deepEqual(queue, [waiting]);
+    assert.deepEqual(prepared, [201]);
+    assert.deepEqual(retained, ['not-started']);
+    assert.deepEqual(refunded, ['not-started']);
+  });
+}
+
 for (const age of [600, 901]) {
   test(`re-review telemetry derives its pass kind and bound without depthPassKind (${age}s)`, async () => {
     const logs = [];

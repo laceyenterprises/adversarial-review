@@ -63,7 +63,7 @@ export function createReviewerAdmissionQueue({ candidates = [], logger = console
     // In-flight ownership stays with the existing head lease and claim CAS;
     // a new head (or a recovered expired claim) must remain eligible to queue.
     if (index >= 0) {
-      candidates[index].refundDepthSpill?.();
+      candidates[index].refundDepthSpill?.('candidate-refreshed');
       candidates[index] = candidate;
     } else {
       candidates.push(candidate);

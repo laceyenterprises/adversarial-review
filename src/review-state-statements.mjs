@@ -505,8 +505,13 @@ export const SQL_COUNT_OPEN_AWAITING_REREVIEW =
   `AND NOT ${operatorHeldSql()} ` +
   // Only rows awaiting reviewer admission contribute pressure. Failed and
   // artifact/terminal states cannot spend a reviewer slot until rearmed.
-  "AND review_status IN ('pending', 'pending-upstream') " +
-  "AND (rereview_requested_at IS NOT NULL OR posted_at IS NULL) " +
+  // REVIEWSPILLSTALL-01: a review posted at an older head does not cover the
+  // current head. A posted row whose revision moved past its reviewed head
+  // is unreviewed demand, whether or not its row was re-armed yet.
+  "AND ((review_status IN ('pending', 'pending-upstream') " +
+  "AND (rereview_requested_at IS NOT NULL OR posted_at IS NULL)) " +
+  "OR (review_status = 'posted' AND COALESCE(revision_ref, '') <> '' " +
+  "AND revision_ref <> COALESCE(reviewer_head_sha, ''))) " +
   "AND EXISTS ( " +
   "  SELECT 1 FROM reviewer_passes " +
   "  WHERE reviewer_passes.repo = reviewed_prs.repo " +
@@ -527,11 +532,13 @@ export const SQL_COUNT_OPEN_AWAITING_REREVIEW =
 
 // REVIEWSPILL-01: both spill lanes see the whole actionable review queue.
 // The first-pass pager retains its historical undelivered-review population.
+// The rereview population applies its own status predicate, including the
+// posted-at-an-older-head rows above.
 export const SQL_COUNT_OPEN_AWAITING_REVIEW =
   `SELECT COUNT(*) AS n FROM reviewed_prs WHERE is_draft = 0 ` +
-  "AND review_status IN ('pending', 'pending-upstream') AND (repo, pr_number) IN (" +
+  "AND ((review_status IN ('pending', 'pending-upstream') AND (repo, pr_number) IN (" +
   SQL_COUNT_OPEN_AWAITING_FIRST_PASS_REVIEW.replace('COUNT(*) AS n', 'repo, pr_number') +
-  ' UNION ' + SQL_COUNT_OPEN_AWAITING_REREVIEW.replace('COUNT(*) AS n', 'repo, pr_number') + ')';
+  ')) OR (repo, pr_number) IN (' + SQL_COUNT_OPEN_AWAITING_REREVIEW.replace('COUNT(*) AS n', 'repo, pr_number') + '))';
 
 // RPL-07 — observed reviewer spend inside a burst-lease window, in
 // `BURST_SPEND_UNIT` (see `reviewer-burst-lease.mjs`): summed

@@ -24,6 +24,13 @@ export function createReviewerDispatchDrain({
     const candidates = [...reviewerDispatchCandidates];
     const startedCandidates = new Set();
     const admissionResults = new Map();
+    // REVIEWSPILLSTALL-01: the pool's own reason for every unstarted
+    // candidate. "Not started" is never reported as a pool-capacity signal.
+    const deferredReasons = new Map();
+    let drainCompleted = false;
+    const notStartedReason = candidate => (candidate.admissionBlocked?.()
+      ? candidate.admissionBlockReason?.() || 'admission-blocked'
+      : deferredReasons.get(candidate) || 'not-started');
     const startedAt = process.hrtime.bigint();
     logger.log(
       `[watcher] Draining ${candidates.length} reviewer dispatch candidate(s) before ${reason}`
@@ -46,7 +53,7 @@ export function createReviewerDispatchDrain({
           startedCandidates.add(started.candidate);
           const settleAdmission = (result) => {
             admissionResults.set(started.candidate, result);
-            if (result?.dispatched === false) started.candidate.refundDepthSpill?.();
+            if (result?.dispatched === false) started.candidate.refundDepthSpill?.(result.reason || 'admission-refused');
           };
           started.promise?.then(settleAdmission,
             () => settleAdmission({ dispatched: false, reason: 'admission-error' }));
@@ -55,7 +62,11 @@ export function createReviewerDispatchDrain({
           detachedReviewerDispatchTracker.track(started);
         },
         logger,
+      }) ?? {};
+      (drainResult.deferredCandidates || []).forEach((candidate, index) => {
+        deferredReasons.set(candidate, drainResult.deferredReasons?.[index]?.reason || 'not-started');
       });
+      drainCompleted = true;
       // Prepare the next bounded wave while the current reviewers use their
       // seats. This continuation owns no reviewer capacity and is observed.
       void Promise.allSettled(reviewerDispatchCandidates.filter(candidate => !candidate.admissionBlocked?.()).slice(0, reviewerPoolConfig.maxConcurrent)
@@ -80,9 +91,9 @@ export function createReviewerDispatchDrain({
           const result = admissionResults.get(candidate);
           const spilled = started && result?.dispatched !== false && candidate.reviewerModel !== 'gemini';
           const decision = result?.dispatched === false ? result.reason || 'admission-refused'
-            : spilled ? 'spilled' : candidate.admissionBlocked?.() ? 'admission-blocked'
+            : spilled ? 'spilled' : candidate.admissionBlocked?.() ? candidate.admissionBlockReason?.() || 'admission-blocked'
             : candidate.pipelineGeminiSeats > 0 ? 'pipeline-requires-gemini'
-            : started ? 'gemini-admitted' : candidate.spillDecisionReason || 'pool-admission-deferred';
+            : started ? 'gemini-admitted' : candidate.spillDecisionReason || notStartedReason(candidate);
           const account = candidate.spawnClaudeAccountSelection || candidate.claudeAccountSelection;
           logger.log?.(`[watcher] review-wait-decision repo=${candidate.repoPath} pr=${candidate.prNumber} `
             + `admission=${JSON.stringify(reason)} pass_kind=${passKind} `
@@ -93,7 +104,15 @@ export function createReviewerDispatchDrain({
         }
         if (!startedCandidates.has(candidate)) {
           candidate.retainWakeForCapacity?.();
-          candidate.refundDepthSpill?.();
+          // A spill the pool deferred keeps its alternate class and its
+          // reservation, and retries there on the next drain; it never falls
+          // back to a saturated Gemini lane. A thrown drain or a candidate no
+          // longer queued still refunds, so no reservation outlives its queue.
+          const notStarted = notStartedReason(candidate);
+          if (!(drainCompleted && reviewerDispatchCandidates.includes(candidate)
+            && candidate.retainDepthSpill?.(notStarted) === true)) {
+            candidate.refundDepthSpill?.(drainCompleted ? notStarted : 'admission-error');
+          }
         }
       }
       const elapsedMs = Number(process.hrtime.bigint() - startedAt) / 1_000_000;

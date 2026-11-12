@@ -6,7 +6,11 @@ operator_steps:
       prerequisite does the designated operator run the documented activation
       once, retaining pre/post open backlog counts. Counts must be unchanged except verified live activity; the reviewer
       report must show no backfill required gap. Stop at the first database is
-      locked error and never retry-loop. This command displays the store contract.
+      locked error and never retry-loop. In the post-merge receipt record the
+      deploy-time outOfWindow and notesOutOfWindow counts from the read-only
+      backlog command as a known standing alert baseline, including late-observed
+      and missing merged_at cases. Do not widen the window or retire rows without
+      separate operator authorization. This command displays the store contract.
     run_as: designated operator
     command: /bin/cat docs/data-model/review-findings.md
 actions: []

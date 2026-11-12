@@ -60,6 +60,8 @@ export function summarizeFindingBacklog(db, now = Date.now(), { maxAgeMs } = {})
     const cutoff = new Date(now - maxAgeMs).toISOString();
     const selectionScope = Boolean(db.prepare("SELECT 1 FROM pragma_table_info('finding_backlog') WHERE name='manifest_sha256'").get());
     const batchSelection = Boolean(db.prepare("SELECT 1 FROM pragma_table_info('finding_batches') WHERE name='manifest_sha256'").get());
+    const historicalNotes = Boolean(db.prepare("SELECT 1 FROM pragma_table_info('finding_batch_notes') WHERE name='historical_projection'").get());
+    const liveNote = historicalNotes ? 'n.historical_projection=0' : '1';
     const backlogScope = selectionScope ? 'manifest_sha256 IS NULL AND ' : '';
     const batchScope = batchSelection ? 'manifest_sha256 IS NULL AND ' : '';
     const areas = db.prepare(`WITH unresolved AS (
@@ -72,7 +74,7 @@ export function summarizeFindingBacklog(db, now = Date.now(), { maxAgeMs } = {})
       LEFT JOIN finding_batches a USING(batch_id)
       LEFT JOIN finding_batch_note_candidates c USING(note_id)
       WHERE n.dropped_reason IS NULL AND (n.batch_id IS NULL OR a.completed_at IS NULL)
-        AND (n.batch_id IS NOT NULL OR (n.historical_projection=0
+        AND (n.batch_id IS NOT NULL OR (${liveNote}
           AND (r.pr_state<>'merged' OR julianday(r.merged_at) >= julianday(?))))
     ) SELECT b.repo,b.area,count(*) AS size,min(b.captured_at) AS oldestAt,
       sum(b.batch_id IS NOT NULL) AS inBatch,sum(b.pr_state<>'merged') AS waitingForMerge,
@@ -94,11 +96,11 @@ export function summarizeFindingBacklog(db, now = Date.now(), { maxAgeMs } = {})
         AND b.batch_id IS NULL AND ${requeue ? 'b.batch_attempts=0 AND ' : ''}r.pr_state='merged'
         AND (julianday(r.merged_at) IS NULL OR julianday(r.merged_at) < julianday(@cutoff))) AS outOfWindow,
       (SELECT count(*) FROM finding_batch_notes n JOIN reviewed_prs r USING(repo,pr_number)
-        WHERE n.batch_id IS NULL AND n.dropped_reason IS NULL AND n.historical_projection=0
+        WHERE n.batch_id IS NULL AND n.dropped_reason IS NULL AND ${liveNote}
           AND r.pr_state='merged'
           AND (julianday(r.merged_at) IS NULL OR julianday(r.merged_at) < julianday(@cutoff))) AS notesOutOfWindow,
       (SELECT count(*) FROM finding_batch_notes
-        WHERE batch_id IS NULL AND dropped_reason IS NULL AND historical_projection=1) AS notesHistorical`)
+        WHERE batch_id IS NULL AND dropped_reason IS NULL AND ${historicalNotes ? 'historical_projection=1' : '0'}) AS notesHistorical`)
       .get({ cutoff });
     const perDay = db.prepare(`SELECT substr(resolved_at,1,10) AS day,
       sum(outcome='applied') AS applied,sum(outcome='dropped') AS dropped

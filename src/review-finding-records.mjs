@@ -7,7 +7,6 @@ import { attributeFindingCommits, findingPath } from './finding-commit-attributi
 import { withSqliteBusyRetrySync } from './sqlite-busy-retry.mjs';
 
 const digest = value => createHash('sha256').update(JSON.stringify(value)).digest('hex');
-export const HISTORICAL_PROJECTION_SUPPORTED = true;
 
 const REVIEW_KINDS = new Set(['first-pass', 'rereview']);
 
@@ -89,7 +88,7 @@ export function persistReviewFindingsSafe(db, passId, log = console, options = {
     return withSqliteBusyRetrySync(() => persistReviewFindings(db, passId, options),
       { delaysMs: [100], label: `review-findings:${passId}`, log });
   }
-  catch { log.warn?.(`[review-findings] projection failed for pass ${passId}; backfill required`); return 0; }
+  catch { log.warn?.(`[review-findings] projection failed for pass ${passId}; backfill required for evidence only; automatic enrollment is not restored`); return 0; }
 }
 
 export function syncFindingDisputes(db, { passId = null } = {}) {

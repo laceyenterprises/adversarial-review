@@ -284,3 +284,23 @@ test('verified live merge capture activates a previously backfilled open PR', t 
   db.prepare("UPDATE reviewed_prs SET pr_state='merged'").run();
   assert.ok(claimFindingBatches(db, '2026-06-10', { now, maxAgeMs }).length);
 });
+
+test('unmigrated note provenance retains live summary counts without writing the store', t => {
+  for (const mergedAt of ['2026-06-10T00:00:00Z', '2026-06-08T11:59:59.999Z']) {
+    const { db, pass } = fixture(t, mergedAt);
+    persistReviewFindings(db, pass.pass_id);
+    const view = db.prepare("SELECT sql FROM sqlite_master WHERE name='finding_batch_note_candidates'").get().sql;
+    db.exec('DROP VIEW finding_batch_note_candidates');
+    db.exec('ALTER TABLE finding_batch_notes DROP COLUMN historical_projection');
+    db.exec(view.replace('n.historical_projection=0', '1'));
+    const before = db.prepare('SELECT * FROM finding_batch_notes').all();
+    const summary = summarizeFindingBacklog(db, now, { maxAgeMs });
+    assert.equal(summary.available, true, summary.error);
+    assert.equal(summary.openCount, 1);
+    assert.equal(summary.notesHistorical, 0);
+    const expired = mergedAt === '2026-06-08T11:59:59.999Z';
+    assert.equal(summary.notesOutOfWindow, expired ? 1 : 0);
+    assert.equal(summary.areas.reduce((sum, area) => sum + area.size, 0), expired ? 1 : 2);
+    assert.deepEqual(db.prepare('SELECT * FROM finding_batch_notes').all(), before);
+  }
+});

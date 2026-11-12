@@ -13,8 +13,7 @@ explicit consensus-validated manifests retain selection authority.
 the explicit finding/body backfills and historical link CLI supply it. A genuine
 live projection can activate matching historical observations, including at
 verified merge capture. Findings and advisory
-notes gain `historical_projection` (0/1, default 0). The companion capability
-export allows activation callers to refuse older implementations.
+notes gain `historical_projection` (0/1, default 0).
 `claimFindingBatches` accepts `now` and `maxAgeMs`; the runner forwards its clock
 and configured age window. Backlog summaries add `outOfWindow` and exclude
 expired never-claimed findings from batchable metrics, preserving owned monitoring.
@@ -88,3 +87,14 @@ The watcher claim-loop guard passed all 168 tests in 219 seconds under the
 360-second bound (the initial 120-second bound expired after 89 passing cases).
 The full PR diff also passes whitespace validation after removing a trailing
 blank line from the historical-projection migration.
+
+HAM final-review remediation clarifies that failed live projection backfill
+recovers evidence without automatic enrollment. Deployment receipts must record
+the standing expired-source alert baseline. Summaries probe historical-note
+provenance for compatibility with unmigrated stores; canonical source lists
+include the migration and window module. The unused capability export is removed.
+Validation: canonical changed-surface runner passed 276 tests in 13 files,
+including the unmigrated-note regression and projection warning assertions.
+Lint passed with zero errors (149 existing warnings); contract typecheck,
+offline research walkthrough, 94-entry data-model catalog and whitespace checks
+passed. Full-suite validation remains with exact-head remote CI.

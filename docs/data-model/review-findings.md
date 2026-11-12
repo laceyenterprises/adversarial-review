@@ -57,6 +57,7 @@ Gate readers never parse reply artifacts or execute reproduction commands.
 **Source of truth:** `src/review-finding-records.mjs`,
 `src/finding-commit-attribution.mjs`, `src/finding-remediation-capture.mjs`,
 `src/findings-backlog.mjs`, `src/findings-batch.mjs`,
+`src/finding-backlog-window.mjs`, `migrations/20261112_historical_projection.sql`,
 `bin/review-findings.mjs`,
 `migrations/20261024_simplicity_batch_lifecycle.sql`,
 `migrations/20261107_findings_batch_requeue.sql`
@@ -199,6 +200,11 @@ node bin/review-findings.mjs link-job --db /path/to/reviews.db --job /path/to/jo
 **Operational hard stop:** no activation re-run or other review-store backfill
 or projection until OSGBACKFILLENROLL-01 and OSGPROJECTLOCK-01 are both merged
 and floated in both repositories. Verify deployed revisions before any write.
+
+A failed live projection warning requests backfill for evidence recovery only.
+Backfill does not restore automatic enrollment, even for a recently merged PR.
+Without a later genuine live projection, the recovered observations remain
+historical; explicit manifest processing requires its normal consensus validation.
 
 Repeat `backfill` with the returned `nextPassId` until `scanned` is zero. A rerun
 from zero is idempotent. Historical projection inserts findings and simplicity
@@ -661,3 +667,9 @@ No selection is automatically activated.
 Settlement writes append-only `batch-remediator` grades (`lifecycle` for `life.*`) atomically with valid
 outcomes after existing publication/PR checks. Requeue and exhaustion produce
 no correctness grade. No new lifecycle state or merge authority is introduced.
+
+At deployment, the operator receipt records `outOfWindow` and
+`notesOutOfWindow` from `node bin/review-findings.mjs backlog --db <existing-review-db>`
+as a known standing alert baseline. Late-observed merges retain their original
+merge time; missing merge times fail closed. Enrollment does not restart the
+window. Retiring expired rows requires separate authorization under the hard stop.

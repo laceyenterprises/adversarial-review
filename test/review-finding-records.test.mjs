@@ -248,7 +248,7 @@ test('projection failure preserves body capture and reports the backfill require
   assert.equal(db.prepare('SELECT body_md FROM reviewer_passes').get().body_md, body);
   assert.equal(db.prepare('SELECT COUNT(*) AS n FROM review_findings').get().n, 0);
   assert.equal(warnings.length, 1);
-  assert.match(warnings[0], /backfill required/);
+  assert.match(warnings[0], /backfill required for evidence only; automatic enrollment is not restored/);
 });
 
 test('missing, nonlinear and over-budget history never invent addressing commits', () => {

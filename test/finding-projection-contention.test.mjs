@@ -163,7 +163,7 @@ test('safe live projection retries busy once and preserves failure isolation', t
     const failed = [];
     assert.equal(persistReviewFindingsSafe(db, ids[1], { warn: m => failed.push(m) }), 0);
     assert.equal(failed.length, 2);
-    assert.match(failed[1], /backfill required/);
+    assert.match(failed[1], /backfill required for evidence only; automatic enrollment is not restored/);
   } finally { other.close(); }
 });
 
@@ -204,5 +204,5 @@ test('safe live projection does not retry non-busy errors', t => {
   t.after(() => db.close());
   const warnings = [];
   assert.equal(persistReviewFindingsSafe(db, 1, { warn: m => warnings.push(m) }), 0);
-  assert.deepEqual(warnings, ['[review-findings] projection failed for pass 1; backfill required']);
+  assert.deepEqual(warnings, ['[review-findings] projection failed for pass 1; backfill required for evidence only; automatic enrollment is not restored']);
 });

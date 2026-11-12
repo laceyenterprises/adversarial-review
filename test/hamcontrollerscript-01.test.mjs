@@ -79,7 +79,12 @@ case "$(basename "$path")" in
       run) shift; ctl="$1"; shift; log "controller-run $(basename "$ctl")"
         exec /bin/bash -c 'IFS= read -r ready || true; source "$@"' hammer-controller "$ctl" "$@" < /dev/null ;;
     esac ;;
-  hammer-validate.mjs) log "validate $*"; exit "\${FIXTURE_VALIDATE_EXIT:-0}" ;;
+  hammer-validate.mjs)
+    log "validate $*"
+    if [ -n "\${FIXTURE_VALIDATION_ARGV:-}" ]; then
+      ${shellQuote(process.execPath)} -e 'require("node:fs").writeFileSync(process.env.FIXTURE_VALIDATION_ARGV, JSON.stringify(process.argv.slice(1)))' -- "$@"
+    fi
+    exit "\${FIXTURE_VALIDATE_EXIT:-0}" ;;
   hammer-predicate-inputs.mjs) log predicate-inputs ;;
   primary-change-context.mjs) echo '{}' ;;
   ama-check.mjs) log "ama-check reviewed=$(printf '%s' "$*" | sed -n 's/.*--reviewed-sha \\([0-9a-f]*\\).*/\\1/p')"; echo '{"eligible":true}' ;;
@@ -195,6 +200,35 @@ test('a local commit the PR lacks is published before verify-head; revalidation 
   assert.ok(firstVerify < yielded && yielded < validated && validated < secondVerify, events.join('\n'));
 });
 
+test('the launcher resolves an unset or empty Node pin through the real inputs runtime resolver', async t => {
+  for (const pin of [undefined, '']) {
+    const f = hammerFixture(t);
+    const result = await f.close({ HAM_NODE_BIN: pin, AGENT_OS_NODE_BIN: undefined,
+      PATH: `${join(f.dir, 'fake-bin')}:/usr/bin:/bin` });
+    assert.equal(result.status, 0, `${result.stderr}\n${result.stdout}`);
+    assert.equal(result.closeResult.outcome, 'merged');
+    assert.ok(f.events().includes('resolve-environment'));
+  }
+});
+
+test('fallback revalidation preserves unusual git paths as individual validator arguments', async t => {
+  const f = hammerFixture(t);
+  const paths = ['src/with space.mjs', 'src/with\ttab.mjs', 'src/with\nnewline.mjs',
+    'src/café.mjs', 'src/with"quote.mjs', 'src/with\\backslash.mjs'];
+  for (const path of paths) writeFileSync(join(f.checkout, path), 'export const fixed = true;\n');
+  execFileSync('git', ['add', '--', ...paths], { cwd: f.checkout });
+  execFileSync('git', ['-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid',
+    'commit', '--no-verify', '-qm', 'Synthetic unusual paths'], { cwd: f.checkout });
+  const { validationFiles: _omitted, ...plan } = f.plan;
+  writeFileSync(join(f.run, 'close-plan.json'), JSON.stringify(plan));
+  const argvPath = join(f.dir, 'validation-argv.json');
+  const result = await f.close({ FIXTURE_NEEDS_REVALIDATION: '1', FIXTURE_VALIDATION_ARGV: argvPath });
+  assert.equal(result.status, 0, `${result.stderr}\n${result.stdout}`);
+  const argv = JSON.parse(readFileSync(argvPath, 'utf8'));
+  assert.deepEqual(argv.slice(0, 2), ['--canonical', '--']);
+  assert.deepEqual(argv.slice(2).sort(), ['src/example.mjs', ...paths].sort());
+});
+
 test('a refusal at every stage stops without merge and releases a held lease', async t => {
   for (const [extra, status, outcome, stage, held] of [
     [{ FIXTURE_VERIFY_EXIT: '21' }, 21, 'rebase-conflict', 'hammer-verify-head', true],
@@ -275,7 +309,8 @@ test('ham_gh, ham_git and ham_pr resolve to deployed executables with a minimal 
 
 // ------------------------------------------------------------ merge-agent close
 
-function mergeFixture(t, { commands, predecessors = '', ciCostExit = 0, leaseExit = 0, validateExit = 0 } = {}) {
+function mergeFixture(t, { commands, predecessors = '', ciCostExit = 0, leaseExit = 0, validateExit = 0,
+  afterController = false } = {}) {
   const dir = scratch(t, 'hamcontrollerscript-merge-');
   const checkout = join(dir, 'checkout');
   const bin = join(dir, 'fake-bin');
@@ -325,7 +360,18 @@ exec ${shellQuote(realGit)} "$@"
     FIXTURE_LOG: log, FIXTURE_BASE: shas.reviewed, FIXTURE_PREDECESSORS: predecessors,
     FIXTURE_CI_COST_EXIT: String(ciCostExit), FIXTURE_LEASE_EXIT: String(leaseExit),
     FIXTURE_VALIDATE_EXIT: String(validateExit), GIT_CONFIG_GLOBAL: '/dev/null' };
-  const close = () => runDetached(join(root, 'bin/merge-agent-close-controller.sh'),
+  let script = join(root, 'bin/merge-agent-close-controller.sh');
+  if (afterController) {
+    const deployedBin = join(dir, 'deployed', 'bin');
+    mkdirSync(deployedBin, { recursive: true });
+    for (const helper of ['hammer-node-runtime.sh', 'close-commands.mjs']) {
+      writeFileSync(join(deployedBin, helper), readFileSync(join(root, 'bin', helper)));
+    }
+    const extended = join(deployedBin, 'merge-agent-close-controller.sh');
+    writeFileSync(extended, `${readFileSync(script, 'utf8')}\nprintf 'after-controller\\n' >> "$FIXTURE_LOG"\n`);
+    script = extended;
+  }
+  const close = () => runDetached(script,
     ['--repo', 'fixture/repo', '--base', 'main', '--pr', '42', '--commands', join(run, 'close-commands.json')], env, checkout);
   const events = () => (existsSync(log) ? readFileSync(log, 'utf8').trim().split('\n') : []);
   return { checkout, shas, close, events };
@@ -366,6 +412,17 @@ test('the shipped merge-agent controller refuses on blockers and releases the le
     assert.equal(events.some(event => event.startsWith('lease-acquire')), status !== 65, JSON.stringify(options));
     assert.equal(events.some(event => event.startsWith('lease-release')), acquired, JSON.stringify(options));
   }
+});
+
+test('a refused CI cost check exits before a subsequent diagnostic and preserves its status through cleanup', async t => {
+  const f = mergeFixture(t, { ciCostExit: 3, afterController: true });
+  const result = await f.close();
+  assert.equal(result.status, 3, result.stderr);
+  const events = f.events();
+  assert.ok(events.some(event => event.startsWith('ci-cost ')));
+  assert.ok(events.some(event => event.startsWith('lease-release ')));
+  assert.ok(!events.some(event => event.startsWith('gh pr merge')));
+  assert.ok(!events.includes('after-controller'));
 });
 
 test('close commands are argv data for hammer-validate', () => {

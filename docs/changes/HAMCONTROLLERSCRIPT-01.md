@@ -68,6 +68,12 @@ rule now says so explicitly.
   the shipped script invocation.
 - `hammer-controller.mjs run`, the lease, strict mode, review verdict semantics
   and every merge predicate are unchanged.
+- Final comment-only remediation preserves unusual filenames in fallback
+  revalidation with NUL-delimited git output and runs the merge-agent CI-cost
+  check separately so refusal exits immediately, even if diagnostics follow.
+  The launcher already resolves an unset/empty Node pin through the generated
+  `inputs.sh`; focused coverage confirms this without changing runtime policy.
+  These repairs change no lifecycle states, durable store shapes or smoke steps.
 
 ## Not in this change
 
@@ -101,3 +107,17 @@ Each command ran under the netguard environment, bounded to 600 s:
 - `npx eslint` on the changed sources: 0 errors. `npm run typecheck:contracts`
   passes. `shellcheck -S warning` passes on the three shipped scripts.
 - The rendered hammer prompt is 59,021 bytes, under the 60 KiB budget.
+
+Final comment-only remediation verification:
+
+- `node --test test/hamcontrollerscript-01.test.mjs test/ama-hammer-merge-protocol-prompt.test.mjs test/hammer-procedure-generation.test.mjs`:
+  69/69 pass under `bin/run-bounded.sh --timeout 120`. New regressions exercise
+  unset/empty runtime pins, exact argv preservation for whitespace, Unicode,
+  quote and backslash filenames, and cost refusal before appended diagnostics
+  with lease release and the original failure status. The latter two
+  regressions fail against the reviewed controllers and pass with the repairs.
+- `npm run lint`: 0 errors (149 existing warnings).
+- `npm run typecheck:contracts`, `bash demo/research-finding-walkthrough.sh`,
+  `bash -n` and `shellcheck -S warning` on all three shipped shell entrypoints,
+  and `git diff --check`: pass.
+- Full-suite validation remains owned by PR-head CI in this bounded round.

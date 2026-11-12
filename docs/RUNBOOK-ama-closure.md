@@ -6448,6 +6448,14 @@ merge-agent prompt runs the shipped `bin/merge-agent-close-controller.sh` under
 the same wrapper with its validation commands as a data file, and keeps the
 named acquisition receipt.
 
+The hammer's generated `inputs.sh` sources `bin/hammer-node-runtime.sh`, which
+exports the absolute Node executable from `HAM_NODE_BIN`, `AGENT_OS_NODE_BIN`,
+or PATH, in that order. An omitted or empty pin uses that fallback; an invalid
+explicit pin refuses startup. When a close plan omits `validationFiles`,
+revalidation reads NUL-delimited git paths so whitespace and Unicode filenames
+reach the validator intact. The merge-agent runs its CI-cost check as a separate
+command before merge; refusal exits immediately through lease cleanup.
+
 The controller registers before execution and watches its exact HQ launch through
 the existing read adapter and producer vocabulary. Validation runs in that shell's
 group. Terminal, parked or mismatched ownership stops the round at once; failed

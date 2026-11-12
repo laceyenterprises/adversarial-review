@@ -107,9 +107,9 @@ while :; do
   ham_release_merge_lease --yield local-validation || ham_close_finish 125 "${HAM_PHASE_OUTCOME:-controller-owner-lost}"
   ham_close_files=("${HAM_CLOSE_VALIDATION_FILES[@]}")
   if [ "${#ham_close_files[@]}" -eq 0 ]; then
-    while IFS= read -r ham_close_file; do
+    while IFS= read -r -d '' ham_close_file; do
       [ -n "$ham_close_file" ] && ham_close_files+=("$ham_close_file")
-    done < <(git diff --name-only --diff-filter=d "$HAM_REVIEWED_SHA" HEAD --)
+    done < <(git diff -z --name-only --diff-filter=d "$HAM_REVIEWED_SHA" HEAD --)
   fi
   export HAM_PROCEDURE_STEP=local-validation
   HAM_PHASE_OUTCOME=targeted-validation-failed

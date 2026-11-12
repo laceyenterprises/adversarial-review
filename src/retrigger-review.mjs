@@ -1000,9 +1000,12 @@ if (import.meta.url === `file://${process.argv[1]}`) {
     process.exitCode = code;
     try {
       flushDefaultApiCallRecorder();
-      // Writable queues even an empty write behind earlier chunks; its
-      // callback is a completion barrier for diagnostics already buffered.
-      process.stderr.write('', () => process.exit(code));
+      // Wait for buffered diagnostics before terminating leftover metering timers.
+      if (process.stderr.writableNeedDrain) {
+        process.stderr.once('drain', () => process.exit(code));
+      } else {
+        process.stderr.write('', () => process.exit(code));
+      }
     } catch {
       process.exit(code);
     }

@@ -1817,7 +1817,8 @@ test('failed CLI drains queued stderr to a slow pipe before exiting with a live 
   const payload = 'diagnostic\n'.repeat(400_000);
   const child = spawn(process.execPath, ['--input-type=module', '-e', `
     import { fileURLToPath } from 'node:url';
-    process.argv = [process.execPath, fileURLToPath(${JSON.stringify(cliUrl.href)}), '--unknown-option'];
+    import { realpathSync } from 'node:fs';
+    process.argv = [process.execPath, realpathSync(fileURLToPath(${JSON.stringify(cliUrl.href)})), '--unknown-option'];
     if (process.stderr.write('diagnostic\\n'.repeat(400_000))) {
       throw new Error('fixture failed to create stderr backpressure');
     }

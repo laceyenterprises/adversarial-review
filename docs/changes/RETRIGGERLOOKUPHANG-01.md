@@ -86,3 +86,15 @@ command then finished in about a second.
 - An extra Node 22 slow-pipe test invocation could not load the available
   Node 26 `fs-ext` native binary (ABI 147 versus 127); Node 22 coverage remains
   with the existing PR CI lane.
+
+### Hammer CI repair
+
+- Explicitly wait for stderr backpressure to drain before failure exit.
+- Resolve the slow-pipe CLI fixture entrypoint to its real path so the isolated
+  symlink test runner executes main instead of leaving only the fixture interval.
+- Stub process identity alongside process liveness in the Argus pool fixture;
+  a real host PID 123 must not determine synthetic lease adoption.
+- Verification: canonical changed-surface validation passed all 130 tests in five
+  files; lint passed with zero errors (149 existing warnings), contract typecheck
+  and the offline byte-equivalence demo passed. Full-suite validation remains
+  with exact-head remote CI.

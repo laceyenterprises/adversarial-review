@@ -21,10 +21,11 @@ export function owesExhaustedHeadVerdict({ exhausted, headSha, reviewedHeadSha, 
 }
 
 export const exhaustedHeadVerdictReason = headSha => `system-exhausted-head-verdict:${headSha}`;
+const REPAIR_HEAD_REASON = /^system-repair-epoch:repair-[a-f0-9-]+:([a-f0-9]{40})$/i;
 export function isExhaustedHeadVerdictRequested(row, headSha) {
-  return Boolean(headSha && row?.rereview_requested_at && row.revision_ref === headSha
-    && (row.rereview_reason === exhaustedHeadVerdictReason(headSha)
-      || new RegExp(`^system-repair-epoch:repair-[a-f0-9-]+:${headSha}$`, 'i').test(row.rereview_reason || '')));
+  if (!headSha || !row?.rereview_requested_at || row.revision_ref !== headSha) return false;
+  return row.rereview_reason === exhaustedHeadVerdictReason(headSha)
+    || REPAIR_HEAD_REASON.exec(row.rereview_reason || '')?.[1].toLowerCase() === headSha.toLowerCase();
 }
 
 // Admission only: the normal claim CAS, retry limits and pass journal still own

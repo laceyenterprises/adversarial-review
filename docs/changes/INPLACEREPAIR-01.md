@@ -97,3 +97,44 @@ src/review-harness-retry.mjs.
 - `node scripts/validate-data-model-catalog.mjs`: 94 entries validated.
 - `bash demo/research-finding-walkthrough.sh`: byte-stable offline demo passed.
 - `git diff --check`: passed. Full-suite validation is delegated to PR-head CI.
+
+## Final fix-all review remediation
+
+### Summary
+
+The repair helper validates the commit SHA before database or lease I/O.
+Repair admission uses one precompiled reason pattern, retaining exact-head
+and epoch-ID checks. Informational refunded-spend aggregation ignores malformed
+non-array closer histories. Refunded review-row messages are capped at 4096
+characters including their intact idempotency receipt; repeated observations
+retain retry pacing even if truncation removed the fault text. Raw failure
+evidence remains in the pass journal.
+
+### Interface changes
+
+Invalid repair heads fail immediately with `invalid repair request`.
+The ledger shape, lifecycle graph, merge predicates and smoke promises are
+unchanged. The ledger data-model doc/catalog and closure runbook document the
+message limit and degraded informational spend aggregation.
+The companion Agent OS SPEC follow-up described above remains outside this
+checkout; this remediation changes bin/repair-in-place.mjs,
+src/exhausted-head-verdict.mjs, src/repair-facts.mjs and
+src/review-harness-retry.mjs.
+
+### Verification
+
+- `node --test --test-reporter=spec test/inplacerepair-01.test.mjs`:
+  34 passed, including five new boundary/receipt cases.
+- `node test/run-tests.mjs test/watcher-claim-loop.test.mjs`:
+  173 passed. The initial combined run hit its 180-second bound; the isolated
+  watcher run completed within its 600-second bound.
+- The targeted combined run passed all 18 exhausted-head-owner and SMV tests.
+  Two new repair assertions incorrectly expected backoff on the first fault;
+  the fixture now exercises the third fault, and all 34 repair tests passed
+  on rerun.
+- `npm run lint`: zero errors, 149 existing warnings; changed-source ESLint
+  passed without warnings.
+- `npm run typecheck:contracts`: passed.
+- `node scripts/validate-data-model-catalog.mjs`: 95 entries validated.
+- `bash demo/research-finding-walkthrough.sh`: three byte-stable deliveries.
+- `git diff --check`: passed. Full-suite validation remains with PR-head CI.

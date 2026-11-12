@@ -29,8 +29,11 @@ attempt and retains `pending-upstream` ownership. Its failure message records
 `[harness-budget-refunded:<id>]`, preventing double credit after interruption.
 At most three receipts may be reserved per PR across all heads; subsequent
 failures retain their charges and reach ordinary infrastructure cap/alert
-handling. Stored failure text is truncated to 512 characters; the pass journal
-and review row retain raw evidence. Already-applied receipts are read-only,
+handling. Ledger failure text is truncated to 512 characters; the refunded
+review row's failure message is capped at 4096 characters including its intact
+receipt marker. The pass journal retains raw evidence. The marker preserves
+retry pacing even when truncation removes the original fault text.
+Already-applied receipts are read-only,
 without a flock or ledger rewrite. Retry pacing reuses the closer inconclusive
 backoff. Real findings, bare signal exits (142/143), and unqualified timeouts
 are not refunds. An unreadable or busy ledger defers only its PR's admission.

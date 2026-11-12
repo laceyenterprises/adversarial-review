@@ -14,7 +14,8 @@ import { launchRequestOwned } from '../src/ama/launch-request-status.mjs';
 export async function main(args) {
   const [rootDir, repo, prRaw, headSha, ownerKey, conflicting] = args;
   const prNumber = Number(prRaw);
-  if (!rootDir || !repo?.includes('/') || !(prNumber > 0) || !ownerKey) throw new Error('invalid repair request');
+  if (!rootDir || !repo?.includes('/') || !(prNumber > 0) || !ownerKey
+    || !/^[0-9a-f]{40}$/i.test(headSha)) throw new Error('invalid repair request');
   const db = new Database(resolve(rootDir, 'data/reviews.db'), { readonly: true, fileMustExist: true });
   let facts;
   try {

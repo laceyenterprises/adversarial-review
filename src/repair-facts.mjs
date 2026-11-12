@@ -9,7 +9,8 @@ export function readRepairFacts({ rootDir, db, repo, prNumber, headSha, row, con
     prNumber, domainId: 'code-pr', currentHeadSha: headSha, reviewRow: row });
   return { cause: repairCause({ ledger, row, cycleExhausted: isBudgetExhaustedReviewSuppression(suppression), conflicting }),
     epochCap: REPAIR_EPOCH_CAP, epochs: ledger?.repairEpochs || [], refundedSpend: {
-      closer: Object.values(ledger?.selfErrorRefunds || {}).reduce((sum, launches) => sum + launches.length, 0),
+      closer: Object.values(ledger?.selfErrorRefunds || {})
+        .reduce((sum, launches) => sum + (Array.isArray(launches) ? launches.length : 0), 0),
       review: Object.keys(ledger?.reviewHarnessRefunds || {}).length,
     } };
 }

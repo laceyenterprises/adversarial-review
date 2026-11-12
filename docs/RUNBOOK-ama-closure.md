@@ -853,11 +853,19 @@ is opened. After both dispatch and review-service versions load, the runtime
 owner must retain an original-branch merge receipt and a 24-hour observation
 without replacement PRs used to escape budgets.
 
+`bin/repair-in-place.mjs` rejects missing or malformed heads (anything other
+than 40 hexadecimal characters) before opening the review database or reading
+leases. Repair facts count only array-valued closer refund histories; malformed
+entries contribute zero to the informational refunded-spend total.
+
 Reviewer harness refunds are separate from unlimited inconclusive **closer**
 refunds: only three failed reviewer claims per PR, across all heads, receive
 credit. Later failures keep their charges so ordinary infrastructure cap/alert
 handling remains reachable. Receipts retain at most 512 characters of failure
-text; already-applied receipts are read without locking or writing. Bare
+text. Refunded review-row messages retain at most 4096 characters including an
+intact receipt marker; the pass journal retains the original failure.
+Already-applied receipts retain retry pacing even if truncation removed the
+fault text and are read without locking or writing. Bare
 142/143 exits do not establish a harness fault. Closer classification uses
 registered stop origins and structured failure classes; free-text failure
 detail cannot refund an otherwise real stop or bare wall-clock expiry.

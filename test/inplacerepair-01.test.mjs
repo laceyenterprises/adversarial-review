@@ -18,6 +18,7 @@ import { classifyCloserOutcome } from '../src/ama/closer-inconclusive-retry.mjs'
 import { isHarnessFault } from '../src/harness-fault.mjs';
 import { refundReviewHarnessFault, REVIEW_HARNESS_REFUND_CAP } from '../src/review-harness-retry.mjs';
 import { ensureReviewStateSchema, requestReviewRereview } from '../src/review-state.mjs';
+import { readRepairFacts } from '../src/repair-facts.mjs';
 
 const repo = 'example/widgets', prNumber = 17;
 const old = 'a'.repeat(40), head = 'b'.repeat(40), later = 'c'.repeat(40);
@@ -35,6 +36,72 @@ function reviewDb(t) {
   t.after(() => db.close());
   return db;
 }
+
+test('repair helper rejects malformed heads before opening the review database', async t => {
+  const f = fixture(t);
+  const { main } = await import('../bin/repair-in-place.mjs');
+  // No database exists: reaching SQLite would produce a different error.
+  for (const sha of [undefined, '', old.slice(1), `${old}a`, 'g'.repeat(40)]) {
+    await assert.rejects(main([f.rootDir, repo, String(prNumber), sha, f.ownerKey]),
+      { message: 'invalid repair request' });
+  }
+});
+
+test('repair admission recognizes only a complete repair reason for the requested head', () => {
+  const row = { revision_ref: head, rereview_requested_at: '2026-01-01T00:00:00Z' };
+  const reason = `system-repair-epoch:repair-123a-bc:${head}`;
+  for (const value of [reason, reason.toUpperCase(), `system-exhausted-head-verdict:${head}`]) {
+    assert.equal(isExhaustedHeadVerdictRequested({ ...row, rereview_reason: value }, head), true);
+  }
+  for (const value of [null, '', `extra:${reason}`, `${reason}:extra`,
+    `system-repair-epoch:repair-:${head}`, `system-repair-epoch:repair-xyz:${head}`,
+    `system-repair-epoch:repair-123a-bc:${later}`]) {
+    assert.equal(isExhaustedHeadVerdictRequested({ ...row, rereview_reason: value }, head), false);
+  }
+  assert.equal(isExhaustedHeadVerdictRequested({ ...row, rereview_reason: reason }, later), false);
+  assert.equal(isExhaustedHeadVerdictRequested({ ...row, rereview_requested_at: null,
+    rereview_reason: reason }, head), false);
+});
+
+test('repair facts count only array-shaped closer refund receipts', t => {
+  const f = fixture(t), db = reviewDb(t);
+  const path = hammerRetryCapFilePath(f.rootDir, f);
+  reserveRepairEpoch(f);
+  const ledger = readHammerRetryCapLedger(f.rootDir, f);
+  ledger.selfErrorRefunds = { [old]: ['launch-one', 'launch-two'], [head]: ['launch-three'],
+    nullEntry: null, numberEntry: 3, stringEntry: 'not-launches', objectEntry: { length: 99 } };
+  writeFileSync(path, JSON.stringify(ledger));
+  const row = db.prepare('SELECT * FROM reviewed_prs').get();
+  const facts = readRepairFacts({ ...f, db, row });
+  assert.equal(facts.refundedSpend.closer, 3);
+});
+
+for (const faultAtEnd of [false, true]) test(`refunded review messages stay bounded and keep their idempotency receipt (fault at end: ${faultAtEnd})`, t => {
+  const f = fixture(t), db = reviewDb(t);
+  const now = Date.parse('2026-01-01T00:01:00Z');
+  // The first two faults retry immediately; the third receives backoff.
+  for (let i = 0; i < 2; i++) {
+    db.prepare(`UPDATE reviewed_prs SET review_status='failed', failure_message='[hcp-unavailable]', failed_at=?`)
+      .run(`earlier-fault-${i}`);
+    refundReviewHarnessFault({ ...f, db, row: db.prepare('SELECT * FROM reviewed_prs').get(), now });
+  }
+  db.prepare(`UPDATE reviewed_prs SET review_status='failed', failure_message=?, failed_at=?`)
+    .run(faultAtEnd ? `${'x'.repeat(20_000)} [hcp-unavailable]` : `[hcp-unavailable] ${'x'.repeat(20_000)}`,
+      '2026-01-01T00:00:00Z');
+  const row = db.prepare('SELECT * FROM reviewed_prs').get();
+  const refunded = refundReviewHarnessFault({ ...f, db, row, now });
+  assert.ok(refunded.row.failure_message.length <= 4096);
+  assert.ok(refunded.row.failure_message.startsWith(faultAtEnd ? 'xxx' : '[hcp-unavailable]'));
+  assert.ok(refunded.row.failure_message.endsWith(`[harness-budget-refunded:${refunded.receipt.id}]`));
+  for (let i = 0; i < 5; i++) {
+    const repeated = refundReviewHarnessFault({ ...f, db, row: refunded.row, now });
+    assert.equal(repeated.row.failure_message, refunded.row.failure_message);
+    assert.equal(repeated.row.review_attempts, refunded.row.review_attempts);
+    assert.equal(repeated.receipt.id, refunded.receipt.id);
+    assert.equal(repeated.wait, true);
+  }
+  assert.equal(Object.keys(readHammerRetryCapLedger(f.rootDir, f).reviewHarnessRefunds).length, 3);
+});
 
 for (const cause of ['closure-retry-exhausted', 'closure-lifetime-exhausted',
   'closer-self-error-budget-exhausted', 'budget-exhausted-closure', 'retry-exhausted', 'lifetime-exhausted']) {

@@ -685,9 +685,74 @@ async function listPullRequestFiles(repo, prNumber, {
   return [...paths];
 }
 
+// REMEDIATIONLIVEPLAN-01: a remediator never edits a live pack's guarded
+// files, the PR's own pack included. Live-pack plan changes are operator live
+// edits; a finding that needs one is resolved by policy, not by an edit and
+// not by an operator decision.
+const LIVE_PACK_POLICY_AUDIT = 'Resolved-By-Policy: live-pack-plan <path> requires an operator live edit';
+const GUARDED_PACK_PATH_TOKEN_RE = /projects\/[\w.-]+\/(?:SPEC\.md|SPEC\.meta\.json|plan\.json|prompts\/[\w./-]*[\w-])/g;
+
+// Every guarded pack path named anywhere in a text (for example a review
+// body), so remediation reads liveness for packs a finding cites even when the
+// PR diff does not touch them yet.
+function guardedPackPathsInText(text) {
+  return [...new Set(String(text || '').match(GUARDED_PACK_PATH_TOKEN_RE) || [])].sort();
+}
+
+// Liveness of every pack among `paths`, for remediation policy. Liveness is
+// the review gate's own evaluation (base plan + dispatch read surface); an
+// inconclusive pack is live. Any failure returns `failClosed: true`, which
+// protects every guarded pack path. `ownPack` is deliberately not consulted.
+async function loadLivePackPolicy({
+  repo,
+  baseRef = '',
+  headRef = '',
+  paths = [],
+  fetchFileAtRefImpl = fetchRepoFileAtRef,
+  readActiveDagRunsImpl = defaultReadActiveDagRuns,
+  listBasePlanPathsImpl = listBasePlanPaths,
+  resolvePackLivenessImpl = resolvePackLiveness,
+  sleepImpl = delay,
+} = {}) {
+  try {
+    if (!normalizeText(repo) || !normalizeText(baseRef)) throw new Error('repository or base ref unknown');
+    const readBasePlansImpl = basePlanReader({ repo, baseRef, listBasePlanPathsImpl, fetchFileAtRefImpl });
+    const packs = [];
+    for (const [slug] of touchedPacksFromPaths(paths, { guardedOnly: true })) {
+      const pack = await resolvePackLivenessImpl({
+        repo, slug, baseRef, headRef, fetchFileAtRefImpl, readActiveDagRunsImpl,
+        listBasePlanPathsImpl, readBasePlansImpl, sleepImpl,
+      });
+      packs.push({
+        slug,
+        planId: pack?.planId ?? null,
+        live: Boolean(pack?.live || pack?.inconclusive || !pack),
+        inconclusive: Boolean(pack?.inconclusive || !pack),
+        runIds: (pack?.runs || []).map((run) => run.run_id).filter(Boolean),
+      });
+    }
+    return { failClosed: false, packs };
+  } catch (err) {
+    return { failClosed: true, packs: [], reason: err?.message || String(err) };
+  }
+}
+
+// True when remediation must not edit `path`. Only a pack the policy read
+// conclusively as not live is editable; a missing policy, a failed read or an
+// unread pack protects the path.
+function livePackPolicyProtects(policy, path) {
+  const match = PACK_DIR_RE.exec(String(path || ''));
+  if (!match || !GUARDED_PACK_FILE_RE.test(match[2])) return false;
+  if (!policy || policy.failClosed !== false) return true;
+  const pack = (policy.packs || []).find((entry) => entry.slug === match[1]);
+  return !pack || pack.live !== false;
+}
+
 const REMEDIATION_RULE =
-  'Do not edit another live pack\'s spec, plan or prompts; if the fix seems to need it, stop and report ' +
-  '(record a `blockers[]` entry naming the pack and run id, and set `reReview.requested = false`).';
+  'Do not edit the spec, plan or prompts of any pack whose `live` is true, this PR\'s own pack included ' +
+  '(`ownPack` grants no edit right, and an approved live-edit PR covers only the author\'s change). ' +
+  'For a finding whose fix would edit one, change nothing for that file and record ' +
+  `\`${LIVE_PACK_POLICY_AUDIT}\` in its \`pushback[].reasoning\`; do not raise a blocker or an operator decision for it.`;
 
 function formatLivePackRemediationContext({ packs = [], error = null } = {}) {
   if (error) {
@@ -711,17 +776,18 @@ The orchestrator could not determine which build packs this PR touches are runni
     retryCount: pack.retryCount ?? 0,
     runs: pack.runs.map((run) => ({ runId: run.run_id, state: run.state })),
     touchedFiles: pack.touchedFiles,
+    ...(pack.citedFiles ? { citedFiles: pack.citedFiles } : {}),
   }));
   const fence = '```';
   return `
 
 ## Trusted Live Build Pack Facts
-This PR touches the build pack directories below. The orchestrator checks base plans and, when needed, the session ledger; a pack whose live check was inconclusive is treated as live (fail closed).
+This PR or its review findings touch the build pack directories below. The orchestrator checks base plans and, when needed, the session ledger; a pack whose live check was inconclusive is treated as live (fail closed).
 ${fence}json
 ${JSON.stringify(facts, null, 2)}
 ${fence}
 - ${REMEDIATION_RULE}
-- A pack is "another" pack when \`ownPack\` is false. Only its \`SPEC.md\`, \`SPEC.meta.json\`, \`plan.json\` and \`prompts/**\` are protected; do not re-stamp its specRef either.
+- Only a live pack's \`SPEC.md\`, \`SPEC.meta.json\`, \`plan.json\` and \`prompts/**\` are protected; do not re-stamp its specRef either. A pack listed with \`live: false\` is remediated normally; a pack not listed here is treated as live.
 - A \`${LIVE_PACK_CROSS_EDIT_KIND}\` finding requires operator attention and the \`${LIVE_PACK_EDIT_WAIVER_LABEL}\` label. Leave the listed changes in place; never revert them to satisfy this finding.
 - Do not revert or rewrite the PR's intended pack edits. Continue remediating addressable findings outside those guarded edits while the operator waiver is pending.
 - Never apply the \`${LIVE_PACK_EDIT_WAIVER_LABEL}\` label yourself; it is an operator waiver.
@@ -738,6 +804,7 @@ async function resolveLivePackRemediationContext({
   headRef = '',
   branch = '',
   title = '',
+  reviewBody = '',
   listPrFilesImpl = listPullRequestFiles,
   loadPrTitleImpl = null,
   fetchFileAtRefImpl = fetchRepoFileAtRef,
@@ -748,14 +815,19 @@ async function resolveLivePackRemediationContext({
   try {
     const paths = await listPrFilesImpl(repo, prNumber);
     const touched = touchedPacksFromPaths(paths, { guardedOnly: false });
-    if (touched.size === 0) return '';
+    // REMEDIATIONLIVEPLAN-01: also read packs the review findings cite, so a
+    // remediator learns a pack is live before its first edit there.
+    const cited = touchedPacksFromPaths(guardedPackPathsInText(reviewBody), { guardedOnly: true });
+    const slugs = [...new Set([...touched.keys(), ...cited.keys()])].sort();
+    if (slugs.length === 0) return '';
     // Existing durable jobs have no PR title. Resolve it only for pack
     // edits, and let a failed metadata read render the fail-closed block.
     if (!title && loadPrTitleImpl) title = await loadPrTitleImpl(repo, prNumber);
     const prTicketIds = extractPrTicketIds({ branch, title });
     const packs = [];
     const readBasePlansImpl = basePlanReader({ repo, baseRef: baseBranch, listBasePlanPathsImpl, fetchFileAtRefImpl });
-    for (const [slug, touchedFiles] of touched) {
+    for (const slug of slugs) {
+      const touchedFiles = touched.get(slug) || [];
       const pack = await resolvePackLiveness({
         repo,
         slug,
@@ -767,7 +839,8 @@ async function resolveLivePackRemediationContext({
         sleepImpl,
       });
       if (!pack.planId && !pack.inconclusive) continue;
-      packs.push({ ...pack, ownPack: prTicketIds.some((id) => pack.ticketIds.includes(id)), touchedFiles });
+      packs.push({ ...pack, ownPack: prTicketIds.some((id) => pack.ticketIds.includes(id)), touchedFiles,
+        ...(cited.has(slug) ? { citedFiles: cited.get(slug) } : {}) });
     }
     return formatLivePackRemediationContext({ packs });
   } catch (err) {
@@ -868,6 +941,7 @@ function resolveLivePackContextForJob({ job, execFileImpl = execFileAsync, readA
     headRef: job?.revisionRef || job?.branch || '',
     branch: job?.branch || '',
     title: job?.prTitle || job?.title || '',
+    reviewBody: job?.reviewBody || '',
     readActiveDagRunsImpl,
     listPrFilesImpl: (repo, prNumber) => listPullRequestFiles(repo, prNumber, { execFileImpl }),
     loadPrTitleImpl: async (repo, prNumber) => {
@@ -888,6 +962,7 @@ export {
   LIVE_PACK_CROSS_EDIT_KIND,
   LIVE_PACK_EDIT_WAIVER_LABEL,
   LIVE_PACK_FINDING_HEADING,
+  LIVE_PACK_POLICY_AUDIT,
   LIVE_PACK_STAMP_EXEMPTION_HEADING,
   appendLivePackStampExemptions,
   applyLivePackCrossEditFindings,
@@ -898,9 +973,12 @@ export {
   evaluateLivePackCrossEdits,
   extractPrTicketIds,
   formatLivePackRemediationContext,
+  guardedPackPathsInText,
   inconclusiveFindingsForDiff,
   listPullRequestFiles,
   listBasePlanPaths,
+  loadLivePackPolicy,
+  livePackPolicyProtects,
   loadPackPlan,
   resolveLivePackContextForJob,
   resolveLivePackRemediationContext,

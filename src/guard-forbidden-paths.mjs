@@ -14,6 +14,41 @@ Resolved-By-Policy: guard:<check name> forbids <path>
 Then continue to the predicate. Blocking findings keep the current remediation/dispute behaviour. In strict mode, every remaining finding still requires normal remediation. Unknown or unreadable policy and mixed remedies grant no policy resolution. Never infer a policy match from the File field alone or an author assertion. A failed helper read leaves all findings unresolved.
 If every required finding is resolved by policy, no code edit or empty HAM commit is needed. Publish the head-bound audit and perform the existing exact-head validation, required checks, predicate and lease-protected merge. These policy resolutions do not waive any merge safety gate.`;
 
+// REMEDIATIONLIVEPLAN-01: live build pack plans and specs are operator-governed
+// like generated paths. Liveness comes from `livePack` (the live-pack review
+// gate's evaluation at the PR base), never from a hand list.
+export const LIVE_PACK_POLICY_INSTRUCTIONS = `REMEDIATIONLIVEPLAN-01: Never edit a live build pack's projects/<slug>/plan.json, SPEC.md, SPEC.meta.json or prompts/**, including this PR's own pack and a PR that is itself an approved live edit; that approval covers the author's change, not a remediator's. A pack is editable only when livePack lists it with live false. When livePack.failClosed is true or this helper fails, every such path is protected.
+Each resolved entry with livePackPaths, blocking or non-blocking, is resolved by policy: do not edit the file, do not raise an operator decision, and do not invoke the dispute helper. Copy its auditDetails line, count it in Remediated-Findings, and include one audit line per path:
+Resolved-By-Policy: live-pack-plan <path> requires an operator live edit
+remainingBlocking lists the blocking findings that still need remediation. A finding that mixes a protected path with other work is remediated normally, leaving the protected path unedited. A live_pack_cross_edit finding stays operator-gated. These policy resolutions do not waive any merge safety gate.`;
+
+const LIVE_PACK_FILE_RE = /^projects\/[\w.-]+\/(?:SPEC\.md|SPEC\.meta\.json|plan\.json|prompts\/.+)$/;
+
+function findingPath(value) {
+  const path = String(value || '').replace(/[`'"*]/g, '').trim().split(/\s+/)[0]
+    .replace(/^\.\//, '').replace(/:\d.*$/, '').replace(/[.,;]+$/, '');
+  return safePath(path) ? path : '';
+}
+
+// The finding's fix lies entirely in protected live-pack files: its File field
+// and every path its recommended fix names. A mixed remedy, a finding without
+// a protected path, or the live-pack review gate's own operator-gated finding
+// returns null and keeps normal remediation.
+export function livePackOnlyRemedy(finding, protects) {
+  if (typeof protects !== 'function') return null;
+  const text = ['title', 'file', 'problem', 'recommendedFix'].map(key => finding?.[key] || '').join('\n');
+  if (/live[_-]pack[_-]cross[_-]edit/i.test(text)) return null;
+  const named = (String(finding?.recommendedFix || '')
+    .match(/(?:[\w.-]+\/)+[\w.-]+|\b[\w-]+\.(?:md|json|mjs|cjs|js|ts|py|sh|ya?ml|toml|txt)\b/g) || [])
+    .map(path => path.replace(/[.,;]+$/, ''));
+  const paths = [...new Set([findingPath(finding?.file), ...named.filter(path => path.includes('/'))].filter(Boolean))];
+  const covered = paths.filter(path => LIVE_PACK_FILE_RE.test(path) && protects(path));
+  if (!covered.length || covered.length !== paths.length) return null;
+  const basenames = new Set(covered.map(path => path.split('/').pop()));
+  if (named.some(path => !path.includes('/') && !basenames.has(path))) return null;
+  return covered.sort();
+}
+
 function safePath(value) {
   return typeof value === 'string' && /^[\w.-]+(?:\/[\w.-]+)*$/.test(value)
     && !value.split('/').some(part => part === '.' || part === '..');
@@ -197,34 +232,62 @@ export function filterGuardForbiddenFindings(reviewText, guards = [], { log = co
   return result;
 }
 
-export function resolveGuardForbiddenNonBlocking(reviewText, guards = [], { strictNonBlockingRemediation = true } = {}) {
-  const resolved = [];
-  const nonBlocking = parseNonBlockingFindingsSection(reviewText);
+function completeSlots(reviewText, headingRe, heading, parsed) {
   let rawSection;
-  transformSections(String(reviewText), (heading, body) => {
-    if (rawSection === undefined && /^##[ \t]+Non[- \t]+blocking[ \t]+Issues?[ \t]*\r?\n?$/i.test(heading)) rawSection = body;
-    return heading + body;
+  transformSections(String(reviewText), (sectionHeading, body) => {
+    if (rawSection === undefined && headingRe.test(sectionHeading)) rawSection = body;
+    return sectionHeading + body;
   });
   const blocks = rawSection === undefined ? null : findingBlocks(rawSection);
   // Quoted cards can create multiple kernel entries inside one fenced block.
   // Leave all of those slots unresolved so later clean cards keep their index.
-  let complete = blocks && nonBlocking
+  const parse = /^## Blocking/.test(heading) ? parseBlockingFindingsSection : parseNonBlockingFindingsSection;
+  const complete = blocks && parsed
     ? blocks.flatMap(block => {
-      const parsed = parseNonBlockingFindingsSection(`## Non-blocking issues\n${block.join('\n')}`) || [];
-      return parsed.map(() => completeCard(block) && parsed.length === 1);
+      const entries = parse(`${heading}\n${block.join('\n')}`) || [];
+      return entries.map(() => completeCard(block) && entries.length === 1);
     })
     : [];
-  if (complete.length !== nonBlocking?.length) complete = [];
+  return complete.length === parsed?.length ? complete : [];
+}
+
+function livePackResolution(finding, paths, blocking) {
+  return { ...finding, blocking, addressed: true, livePackPaths: paths,
+    auditLines: paths.map(path => `Resolved-By-Policy: live-pack-plan ${path} requires an operator live edit`) };
+}
+
+// `livePackProtects(path)` reports whether remediation must not edit a live
+// pack path. Without it, no live-pack resolution is granted.
+export function resolveGuardForbiddenNonBlocking(reviewText, guards = [],
+  { strictNonBlockingRemediation = true, livePackProtects = null } = {}) {
+  const resolved = [];
+  const nonBlocking = parseNonBlockingFindingsSection(reviewText);
+  const blocking = parseBlockingFindingsSection(reviewText);
+  const complete = completeSlots(reviewText, /^##[ \t]+Non[- \t]+blocking[ \t]+Issues?[ \t]*\r?\n?$/i, '## Non-blocking issues', nonBlocking);
   const remaining = [];
   for (const [index, finding] of (nonBlocking || []).entries()) {
     const matched = strictNonBlockingRemediation && complete[index] && guardOnlyRemedy(finding, guards);
-    if (!matched) { remaining.push(finding); continue; }
-    const auditLines = matched.map(({ check, path }) => `Resolved-By-Policy: guard:${check} forbids ${path}`);
-    resolved.push({ ...finding, blocking: false, addressed: true, guards: matched, auditLines });
+    if (matched) {
+      const auditLines = matched.map(({ check, path }) => `Resolved-By-Policy: guard:${check} forbids ${path}`);
+      resolved.push({ ...finding, blocking: false, addressed: true, guards: matched, auditLines });
+      continue;
+    }
+    const livePaths = complete[index] && livePackOnlyRemedy(finding, livePackProtects);
+    if (livePaths) resolved.push(livePackResolution(finding, livePaths, false));
+    else remaining.push(finding);
   }
-  const auditDetails = resolved.map(finding =>
-    `- **${finding.title}** (non-blocking) — resolved by policy; ${finding.guards.map(guard => guard.path).join(', ')} is regenerated by automation.`);
+  const blockingComplete = completeSlots(reviewText, /^##[ \t]+Blocking[ \t]+Issues?[ \t]*\r?\n?$/i, '## Blocking issues', blocking);
+  const remainingBlocking = [];
+  for (const [index, finding] of (blocking || []).entries()) {
+    const livePaths = blockingComplete[index] && livePackOnlyRemedy(finding, livePackProtects);
+    if (livePaths) resolved.push(livePackResolution(finding, livePaths, true));
+    else remainingBlocking.push(finding);
+  }
+  const auditDetails = resolved.map(finding => (finding.guards
+    ? `- **${finding.title}** (non-blocking) — resolved by policy; ${finding.guards.map(guard => guard.path).join(', ')} is regenerated by automation.`
+    : `- **${finding.title}** (${finding.blocking ? 'blocking' : 'non-blocking'}) — resolved by policy; ${finding.livePackPaths.join(', ')} belongs to a live build pack and requires an operator live edit.`));
   auditDetails.push(...new Set(resolved.flatMap(finding => finding.auditLines)));
-  return { instructions: GUARD_POLICY_INSTRUCTIONS, resolved, remaining: nonBlocking === null ? null : remaining,
-    blocking: parseBlockingFindingsSection(reviewText), auditDetails: auditDetails.join('\n') };
+  return { instructions: `${GUARD_POLICY_INSTRUCTIONS}\n${LIVE_PACK_POLICY_INSTRUCTIONS}`, resolved,
+    remaining: nonBlocking === null ? null : remaining,
+    blocking, remainingBlocking: blocking === null ? null : remainingBlocking, auditDetails: auditDetails.join('\n') };
 }

@@ -42,7 +42,7 @@ export function classifyClosureOwnership(decision, headSha = null) {
     'retry-exhausted', 'lifetime-exhausted', 'closer-self-error-budget-exhausted',
     'budget-exhausted-closure', 'conflict-rebase'].includes(decision.reason);
   if (repairable && ['reconcile', 'dispatch'].includes(decision.queue?.intent)
-    && (!headSha || !decision.head || decision.head === headSha)) {
+    && (!headSha || !decision.head || decision.head.toLowerCase() === headSha.toLowerCase())) {
     return { decision: 'repair-in-place', reason: decision.reason,
       closureOwner: { ...closureOwner, owner: 'repair-worker' } };
   }

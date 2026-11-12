@@ -63,6 +63,17 @@ test('repair admission recognizes only a complete repair reason for the requeste
     rereview_reason: reason }, head), false);
 });
 
+test('verdict admission recognizes mixed-case revision references without admitting a different head', () => {
+  for (const revision of [head, head.toUpperCase()]) {
+    for (const requested of [head, head.toUpperCase()]) {
+      const row = { revision_ref: revision, rereview_requested_at: '2026-01-01T00:00:00Z',
+        rereview_reason: `system-repair-epoch:repair-123a-bc:${head}` };
+      assert.equal(isExhaustedHeadVerdictRequested(row, requested), true);
+      assert.equal(isExhaustedHeadVerdictRequested({ ...row, revision_ref: later }, requested), false);
+    }
+  }
+});
+
 test('repair facts count only array-shaped closer refund receipts', t => {
   const f = fixture(t), db = reviewDb(t);
   const path = hammerRetryCapFilePath(f.rootDir, f);
@@ -146,6 +157,8 @@ for (const cause of ['closure-retry-exhausted', 'closure-lifetime-exhausted',
     const decision = { action: 'hammer', actor: 'closure-recovery', reason: cause,
       head: old, queue: { intent: 'reconcile' } };
     assert.equal(classifyClosureOwnership(decision, old).decision, 'repair-in-place');
+    assert.equal(classifyClosureOwnership(decision, old.toUpperCase()).decision, 'repair-in-place');
+    assert.notEqual(classifyClosureOwnership(decision, head).decision, 'repair-in-place');
     assert.equal(repairCause({ row: { next_action_json: JSON.stringify(decision) } }), cause);
     assert.notEqual(classifyClosureOwnership({ ...decision, reason: 'live-owner',
       actor: 'hammer', queue: { intent: 'owned' } }, old).decision, 'repair-in-place');
@@ -441,6 +454,25 @@ test('repair observation bounds cadence and retains live, early absent and unrea
     assert.equal(reads, count, 'no repeated SDK read inside the cadence');
     assert.equal(pendingRepairEpoch(f.rootDir, f).terminalAt, undefined);
   }
+});
+
+test('failed retry-chain lookup retains repair custody as unknown', async t => {
+  const f = { ...fixture(t), now: '2026-01-01T00:00:00Z' };
+  const epoch = reserveRepairEpoch(f).epoch;
+  const now = Date.parse(f.now) + REPAIR_PROVISION_DEADLINE_MS;
+  let reads = 0;
+  const readImpl = async selector => {
+    reads++;
+    if (selector.idempotency_key) return { ok: true, roots: ['fixture-launch'] };
+    assert.deepEqual(selector, { launch_request_ids: ['fixture-launch'], include_retry_chain: true });
+    return { ok: false, reason: 'timeout' };
+  };
+  const observed = await reconcileRepairOwner({ ...f, now, readImpl });
+  assert.equal(reads, 2);
+  assert.equal(observed.id, epoch.id);
+  assert.equal(observed.ownerState, 'unknown');
+  assert.equal(observed.ownerLaunch, 'fixture-launch');
+  assert.equal(pendingRepairEpoch(f.rootDir, f).terminalAt, undefined);
 });
 
 test('a changed builder head binds before terminal worker retirement', async t => {

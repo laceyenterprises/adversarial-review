@@ -5313,7 +5313,7 @@ test('LABELREARM-01: discovery arms a fresh exact-head review from an operator-g
   });
 });
 
-test('pending second repair epoch retains custody over a prior epoch reviewed head', () => {
+for (const uppercase of [false, true]) test(`pending second repair epoch retains custody over a prior epoch reviewed head (mixed-case: ${uppercase})`, () => {
   const tmp = mkdtempSync(path.join(tmpdir(), 'watcher-second-repair-'));
   try {
     const head = 'b'.repeat(40), rootDir = path.join(tmp, 'repair-root');
@@ -5335,7 +5335,7 @@ test('pending second repair epoch retains custody over a prior epoch reviewed he
         return actual.repairEpochForHead(${JSON.stringify(rootDir)}, identity, head);
       }
     `;
-    writeFileSync(loaderPath, buildLoaderSource({ subjectHeads: { 101: head } }).replace(
+    writeFileSync(loaderPath, buildLoaderSource({ subjectHeads: { 101: uppercase ? head.toUpperCase() : head } }).replace(
       '  return nextLoad(url, context);',
       `  if (url === ${JSON.stringify(repairUrl)}) {
         return { format: 'module', shortCircuit: true, source: ${JSON.stringify(wrapper)} };

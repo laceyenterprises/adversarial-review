@@ -219,3 +219,47 @@ retry-cap document records the pacing and diagnostic behavior.
 - `node scripts/validate-data-model-catalog.mjs`: 96 entries validated.
 - `bash demo/research-finding-walkthrough.sh`: three byte-stable deliveries.
 - `git diff --check`: passed. Full-suite validation remains with exact-head CI.
+
+## Final fix-all head matching and isolation evidence
+
+### Summary
+
+Verdict admission compares revision references case-insensitively. Rescue
+classification applies the same comparison to repair routing.
+Watcher branch custody now recognizes an unchanged reserved base head
+even when the subject uses uppercase hex. The closure runbook documents these
+identity comparisons.
+
+Two alleged unhandled failures were reproduced against the reviewed source and
+proved already isolated: `attachTtmOwnership` catches a strict repair-ledger read
+per PR and preserves unreadable-evidence diagnostics; `launchProbe` passes failed
+reads through to the tri-state `launchRequestOwned`, retaining unknown custody.
+New regressions exercise the actual health collector with corrupt and healthy
+PRs, and a successful primary lookup followed by a failed retry-chain query.
+Neither path requires a source change.
+
+### Interface changes
+
+None. No persistent shape, lifecycle state, smoke promise or merge predicate
+changes. The watcher state projection is unchanged. The previously recorded
+companion Agent OS SPEC follow-up remains outside this service checkout;
+this patch touches `src/exhausted-head-verdict.mjs`,
+`src/merge-agent-rescue-classifier.mjs` and `src/pollonce-phases.mjs`.
+
+### Verification
+
+- The new verdict and rescue casing assertions failed against the reviewed
+  source before the fixes. The focused pre-fix watcher run hit its time bound.
+- Before source edits, the corrupt-ledger collector and failed retry-chain
+  regressions both passed against reviewed head
+  `e164ad35edb56726a1834ebc9c313f8478e35fc6`.
+- `node --test test/inplacerepair-01.test.mjs test/merge-agent-rescue-classifier.test.mjs test/exhausted-head-owner.test.mjs test/ttm-owner.test.mjs test/review-pipeline-health-ttm.test.mjs test/smv.test.mjs`:
+  85 passed, including the complete state-machine and sandbox-smoke suite.
+- Final repair/rescue rerun after narrowing the classifier edit: 52 passed.
+- `node test/run-tests.mjs test/watcher-claim-loop.test.mjs`: 176 passed,
+  including unchanged mixed-case repair custody across two polls.
+- `npm run lint`: zero errors, 149 existing warnings; changed-file ESLint passed.
+- `npm run typecheck:contracts`: passed.
+- `node scripts/validate-data-model-catalog.mjs`: 96 entries validated.
+- `bash demo/research-finding-walkthrough.sh`: three byte-stable deliveries.
+- `git diff --check`: passed. Full-suite validation remains with PR-head CI.

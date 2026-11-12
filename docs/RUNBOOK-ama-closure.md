@@ -840,7 +840,9 @@ epochs bound automatic repair; the existing wait store pages the operator once
 with the full history. Canonical next-action and health projections retain the
 reservation as remediation custody during provisioning and publication. A
 pending reservation takes precedence over a prior epoch that reviewed the same
-base head, so the watcher cannot admit competing review work on that head. A live
+base head, so the watcher cannot admit competing review work on that head.
+Watcher custody, verdict admission revision references and rescue head matching
+compare hexadecimal commit SHAs case-insensitively, preserving stored spelling. A live
 or uncertain submission retains custody. Before admission the watcher observes
 pending repair ownership at most once per 30 seconds. Complete terminal
 launch/retry evidence retires the reservation under the ledger flock; an exact-key

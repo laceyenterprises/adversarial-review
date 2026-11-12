@@ -1516,7 +1516,8 @@ export async function processReviewSubject(entry, ctx) {
       }
       // The reserved builder owns this unchanged head through provisioning and
       // publication; ordinary review/remediation must not mint another owner.
-      if (repairEpoch && !repairEpoch.reviewHead && repairEpoch.baseHead === subject.headSha) return;
+      if (repairEpoch && !repairEpoch.reviewHead
+        && repairEpoch.baseHead.toLowerCase() === subject.headSha?.toLowerCase()) return;
       if (effectiveDomainId === CODE_PR_DOMAIN_ID && (existing?.reviewer_head_sha || repairEpoch)
         && existing?.reviewer_head_sha !== subject.headSha && !subject.terminal
         && !isExhaustedHeadVerdictRequested(existing, subject.headSha)

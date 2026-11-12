@@ -16,7 +16,8 @@ export function hasUnreviewedBuilderHead(input = {}) {
 // new content. Callers must classify the live commit before granting admission.
 export function owesExhaustedHeadVerdict({ exhausted, headSha, reviewedHeadSha, closerAuthored = false,
   deliveredReviews = 0 } = {}) {
-  return exhausted === true && Boolean(headSha && reviewedHeadSha && headSha !== reviewedHeadSha)
+  return exhausted === true && Boolean(headSha && reviewedHeadSha
+    && headSha.toLowerCase() !== reviewedHeadSha.toLowerCase())
     && closerAuthored === false && deliveredReviews === 0;
 }
 

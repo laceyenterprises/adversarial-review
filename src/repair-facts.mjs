@@ -13,7 +13,7 @@ export function readRepairFacts({ rootDir, db, repo, prNumber, headSha, row, con
         .reduce((sum, launches) => sum + (Array.isArray(launches) ? launches.length : 0), 0),
       review: Object.values(ledger?.reviewHarnessRefunds || {}).filter(receipt =>
         receipt !== null && typeof receipt === 'object' && !Array.isArray(receipt)
-        && (typeof receipt.id === 'string' && receipt.id.length > 0
-          || typeof receipt.headSha === 'string' && receipt.headSha.length > 0)).length,
+        && typeof receipt.id === 'string' && receipt.id.length > 0
+        && typeof receipt.headSha === 'string' && receipt.headSha.length > 0).length,
     } };
 }

@@ -175,3 +175,28 @@ test('a booted closer is never cancelled for a head move, and identity mismatche
     assert.equal(result.reason, 'supersede-identity-mismatch');
   }
 });
+
+test('head moved again before boot: supersede settles the rekeyed lease and retains the original dispatch record', async t => {
+  const rootDir = scratch(t);
+  const identity = seedDispatchedCloser(rootDir);
+  const nextHead = 'a'.repeat(40);
+  assert.equal(rekeyAmaCloserLease({ ...identity, fromHeadSha: PINNED, toHeadSha: MOVED, now: AT }).rekeyed, true);
+  const state = { status: 'admitted' };
+  const result = await supersedeHeadMovedCloser({ rootDir, repo: REPO, prNumber: PR,
+    pinnedHeadSha: MOVED, recordHeadSha: PINNED, liveHeadSha: nextHead, launchRequestId: LRQ,
+    hqPath: 'hq', retryDelaysMs: [], logger: QUIET,
+    readLaunchImpl: async () => observation(state.status),
+    execFileImpl: async () => { state.status = 'canceled'; return { stdout: '{}' }; } });
+  assert.equal(result.superseded, true);
+  const lease = readAmaCloserLease(rootDir, { ...identity, headSha: MOVED });
+  assert.deepEqual([lease.headSha, lease.rekeyedFromHeadSha, lease.status, lease.terminalOutcome],
+    [MOVED, PINNED, 'terminal', SUPERSEDED_HEAD_MOVED]);
+  assert.equal(readAmaCloserLease(rootDir, identity), null, 'the historical dispatch head has no lease');
+  const record = readAmaCloserDispatchRecord(rootDir, identity);
+  assert.deepEqual([record.supersededByHeadMove.headSha, record.supersededByHeadMove.liveHeadSha,
+    record.supersededByHeadMove.observedStatus], [MOVED, nextHead, 'canceled']);
+  assert.equal(readAmaCloserDispatchRecord(rootDir, { ...identity, headSha: MOVED }), null);
+  assert.equal(findLiveAmaCloserLease(rootDir, { repo: REPO, prNumber: PR }), null);
+  assert.equal(acquireAmaCloserLease({ ...identity, headSha: nextHead, now: AT }).acquired, true,
+    'the retired rekeyed lease permits closure at the next head');
+});

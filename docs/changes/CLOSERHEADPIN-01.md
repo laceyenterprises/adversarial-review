@@ -57,3 +57,34 @@ environment, one file at a time:
   `watcher-claim-loop` 169, `smv` (after refreshing the orchestration
   projection hash): all pass.
 - ESLint on the changed sources and `npm run typecheck:contracts`: clean.
+
+## Final comment-only remediation
+
+Cancellation now looks up the lease at its current head while retaining the
+original dispatch head for marker writes. An offline regression rekeys a lease,
+moves the PR head again before boot, and verifies terminal settlement, the
+original dispatch marker and successful acquisition at the next head. Before the
+fix, this test reproduced the orphaned `dispatched` lease.
+
+The reported stale `closer-lease.mjs` projection is already correct:
+`digest(stateProjection(source))` matches the declared
+`c2aa021100d2cc5fc0ba2de3ca035dab42d46d416039853d0df4a69a8b2c3900`.
+The manifest stores state projections, not whole-file digests; no hash edit is
+needed.
+
+The synchronous audit-enumeration concern remains a performance follow-up.
+`reconcileAmaCloserLeaseSteps` returns before the scan for nonterminal launches,
+so ordinary live-launch reconciliation does not enumerate audits. Terminal
+launches awaiting settlement can repeat the scan. Retaining cross-head discovery
+preserves world-refusal precedence when the refused head differs from both the
+lease and dispatch heads; caching or restricting heads needs an invalidation
+contract before it can safely replace that lookup.
+
+Final-round validation: `node test/run-tests.mjs` with
+`test/closerheadpin-01.test.mjs`, `test/daemonsupersede-01.test.mjs`,
+`test/closer-lease-rekey.test.mjs` and `test/smv.test.mjs` passes all 53 tests.
+`npm run lint` passes with zero errors (149 existing warnings),
+`npm run typecheck:contracts`, `node scripts/validate-data-model-catalog.mjs`
+(95 entries), `bash demo/research-finding-walkthrough.sh` and
+`git diff --check` pass. The full local test suite was not run; PR-head CI
+owns that gate.

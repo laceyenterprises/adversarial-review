@@ -128,9 +128,10 @@ async function cancelNotBootedCloser({
     logger?.warn?.(`[ama-closer] supersede status write failed for ${repo}#${prNumber}: ${error?.message || error}`);
   }
   try {
-    const lease = readLeaseImpl(rootDir, { repo, prNumber, headSha: recordHeadSha });
+    // CLR-01 moves the lease, while its dispatch record stays at recordHeadSha.
+    const lease = readLeaseImpl(rootDir, { repo, prNumber, headSha });
     if (lease?.lrqId === launchRequestId && ['pending', 'dispatched'].includes(lease.status)) {
-      updateLeaseImpl({ rootDir, repo, prNumber, headSha: lease.headSha || recordHeadSha,
+      updateLeaseImpl({ rootDir, repo, prNumber, headSha: lease.headSha || headSha,
         status: 'terminal', terminalOutcome, now: at });
     }
   } catch (error) {

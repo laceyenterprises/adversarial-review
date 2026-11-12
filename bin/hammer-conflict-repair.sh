@@ -92,6 +92,7 @@ if [ "$ham_conflict_continue" -eq 0 ]; then
   printf 'HAM_CONFLICT_SOURCE=%s\nHAM_CONFLICT_BASE=%s\n' "$HAM_CONFLICT_SOURCE" "$HAM_CONFLICT_BASE" \
     > "$HAM_CONFLICT_STATE" || ham_conflict_stop 1 conflict-state-unwritable
   if ! ( ham_conflict_comment_char; git rebase "origin/$BASE_BRANCH" ); then
+    ham_conflict_rebasing || ham_conflict_stop 1 conflict-rebase-failed
     git diff --name-only --diff-filter=U >&2 || true
     echo 'HAM next: merge and stage the hand-written sources listed above, preserving both sides (Appendix D); leave registered generated outputs to the resolver; then rerun with --continue.' >&2
     ham_conflict_stop 22 conflict-markers-pending

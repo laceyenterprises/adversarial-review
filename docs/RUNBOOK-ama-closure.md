@@ -817,8 +817,10 @@ Exit 21 from verify-head or merge enters Appendix D: observe the lease state
 `bin/hammer-conflict-repair.sh <run-dir>/inputs.sh` (HAMCONFLICTSYNC-01). It
 sources `inputs.sh` itself, fetches through `ham_bounded_git_sync`, checks out
 the exact fetched head and rebases it onto the live base without squashing
-author commits. On a stopped rebase it exits 22 `conflict-markers-pending`; the
-closer resolves and stages hand-written sources, then reruns it with
+author commits. A failure before Git creates a rebase directory exits 1
+`conflict-rebase-failed`; correct the reported precondition and rerun without
+`--continue`. When Git leaves a rebase in progress it exits 22
+`conflict-markers-pending`; the closer resolves and stages hand-written sources, then reruns it with
 `--continue`, which runs the deployed committed-generated-files resolver for
 registered outputs, the reviewed-head preservation proof and submodule sync.
 Exit 76 is the retryable `git-credential-refresh-failed`. The closer then reruns

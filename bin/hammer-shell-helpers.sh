@@ -50,6 +50,7 @@ ham_bounded_git_operation() {
 }
 
 ham_bounded_git_sync() {
+  local ham_git_sync_attempt ham_git_sync_timeout ham_git_sync_stderr ham_git_sync_exit
   ham_git_sync_attempt=1
   while [ "$ham_git_sync_attempt" -le 2 ]; do
     ham_git_sync_timeout=$("$HAM_NODE_BIN" "${HAM_ROOT_DIR}/bin/load-aware-timeout.mjs" "$HAM_GIT_SYNC_NOMINAL_SECONDS" || true)

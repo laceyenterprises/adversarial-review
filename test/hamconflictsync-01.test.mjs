@@ -222,6 +222,39 @@ test('the shared bounded fetch helpers are the rendered verify-head definitions'
   assert.equal(helpers.slice(helpers.indexOf('ham_update_branch_transient() {')).trimEnd(), copy);
 });
 
+test('bounded fetch leaves caller variables intact on success, failure and retry', t => {
+  const { run } = realInputs(t);
+  const timeoutNode = join(run, 'timeout-node');
+  writeFileSync(timeoutNode, '#!/bin/sh\necho 30\n', { mode: 0o755 });
+  for (const status of [0, 1, 76, 124]) {
+    const result = spawnSync('/bin/bash', ['-c', `
+source ${shellQuote(join(run, 'inputs.sh'))} || exit 9
+ham_bounded_git_operation() { return ${status}; }
+sleep() { :; }
+check_sync() {
+  local result=0
+  ham_bounded_git_sync main || result=$?
+  [ "$result" -eq ${status === 124 ? 1 : status} ] || exit 10
+}
+names=(ham_git_sync_attempt ham_git_sync_timeout ham_git_sync_stderr ham_git_sync_exit)
+unset "\${names[@]}"
+check_sync
+for name in "\${names[@]}"; do
+  ! declare -p "$name" >/dev/null 2>&1 || exit 11
+  printf -v "$name" '%s' "caller-$name"
+done
+check_sync
+for name in "\${names[@]}"; do
+  [ "\${!name}" = "caller-$name" ] || exit 12
+done
+`], {
+      encoding: 'utf8', timeout: 10_000,
+      env: { PATH: '/usr/bin:/bin', HOME: run, TMPDIR: run, HAM_NODE_BIN: timeoutNode },
+    });
+    assert.equal(result.status, 0, `sync status ${status}: ${result.stderr}`);
+  }
+});
+
 // --- A synthetic CONFLICTING PR through the real shipped conflict repair.
 const fakeNode = realNode => `#!/bin/bash
 log() { printf '%s\\n' "$*" >> "$FIXTURE_LOG"; }
@@ -338,6 +371,20 @@ test('a clean replay finishes in one invocation with the reviewed-head proof', t
   assert.equal(f.git(f.work, 'rev-parse', 'HEAD^'), f.base);
   assert.doesNotMatch(f.events(), /^hq /m, 'no resolver for a clean replay');
   assert.equal(JSON.parse(readFileSync(join(f.run, 'conflict-primary.json'), 'utf8')).proof, 'conflict-primary-preserved');
+});
+
+test('a rebase precondition failure reports failure without requesting conflict resolution', t => {
+  const f = conflictFixture(t);
+  writeFileSync(join(f.work, 'example.txt'), 'uncommitted local edit\n');
+  const result = f.repair();
+  assert.equal(result.status, 1, result.stderr);
+  assert.match(result.stderr, /conflict-rebase-failed/);
+  assert.doesNotMatch(result.stderr, /conflict-markers-pending|merge and stage|rerun with --continue/);
+  assert.equal(f.git(f.work, 'rev-parse', 'HEAD'), f.reviewed, 'no author commit was changed');
+  assert.equal(f.git(f.work, 'diff', '--name-only', '--diff-filter=U'), '');
+  assert.equal(existsSync(join(f.work, '.git/rebase-merge')), false);
+  assert.equal(existsSync(join(f.work, '.git/rebase-apply')), false);
+  assert.doesNotMatch(f.events(), /^hq |terminal-audit/m);
 });
 
 test('conflict repair refuses a head that is not the fetched PR head, and --continue without a capture', t => {

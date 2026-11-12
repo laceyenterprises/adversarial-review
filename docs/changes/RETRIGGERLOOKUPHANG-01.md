@@ -31,6 +31,14 @@ command then finished in about a second.
 - A failed CLI run now exits explicitly once stderr drains, after the
   telemetry flush that a natural exit would have run. A read abandoned at
   its budget therefore cannot leave a metering timer that keeps the process alive.
+- Final comment-only remediation preserves the `gh` timeout phase when a child
+  rejects; only a successful child response advances to `record`. It also
+  replaces tabs in the head-lookup helper block with two-space indentation.
+- The reported empty-write drain failure was not reproduced: Node's Writable
+  queues that callback after prior writes. Retained the exit handler and added
+  a real slow-pipe regression proving complete diagnostics precede forced exit,
+  even with a live interval. No public interface, durable store, lifecycle or
+  deployed smoke promise changes in this remediation.
 
 ## Interface changes
 
@@ -48,14 +56,19 @@ command then finished in about a second.
 ## Verification
 
 - `node --test test/operator-gh-read.test.mjs test/retrigger-review.test.mjs`:
-  65 pass. New cases cover a hung `gh` child, which is signalled at the budget
-  with the typed reason and phase. They also cover a never-resolving metering
+  68 pass on Node 26 after final remediation. New cases cover a hung `gh` child,
+  which is signalled at the budget with the typed reason and phase.
+  They also cover a never-resolving metering
   admission, which is still bounded, retry progress lines, a real GitHub error
   that keeps its message, and the budget cap at incident load
   (`load_per_core=11` reaches 60 s, not 180 s). Further cases: the
   `--exact-head-now` and default modes with a stubbed slow `gh` (exit 4 inside
   the bound, typed reason and hint, nothing re-armed), `--head-sha` performing
   no lookup, and flag validation.
+- Final remediation regressions cover a rejected/killed child retaining `gh`,
+  a successful response with stalled metering retaining `record`, and all
+  4.4 MB of queued stderr plus the complete usage error reaching a slow pipe
+  before exit 2 with a live interval.
 - Existing suites green: `retrigger-remediation`, `operator-retrigger-helpers`,
   `follow-up-retrigger-label`, `follow-up-retrigger-review-label`,
   `explicit-review-intent`, `pr-round-ledger`, `cli-output-lifecycle`,
@@ -67,3 +80,9 @@ command then finished in about a second.
   left no `gh` child behind. With `--head-sha` it exited 0 in under 1 s.
 - `npm run typecheck:contracts`, `bash demo/research-finding-walkthrough.sh`,
   ESLint on the changed sources: passed.
+- Final remediation: `npm run lint` passed with 0 errors (149 existing
+  warnings); `npm run typecheck:contracts`, the offline research-finding demo
+  and `git diff --check` passed. The full suite is left to PR-head CI.
+- An extra Node 22 slow-pipe test invocation could not load the available
+  Node 26 `fs-ext` native binary (ABI 147 versus 127); Node 22 coverage remains
+  with the existing PR CI lane.

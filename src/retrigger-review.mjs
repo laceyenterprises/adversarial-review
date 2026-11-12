@@ -530,35 +530,35 @@ async function main(argv, {
 
   const ts = new Date().toISOString();
   const operator = process.env.HQ_OPERATOR || process.env.USER || 'unknown';
-	let targetRevisionRef = values['head-sha'] || null;
-	let githubBudgetMs;
-	try {
-		githubBudgetMs = resolveOperatorGhReadBudgetMs({ overrideMs: values.githubTimeoutMs });
-	} catch (err) {
-		stderr.write(`error: ${err.message}\n\n${USAGE}`);
-		return EXIT_USAGE;
-	}
-	const fetchHeadArgs = { repo: values.repo, prNumber: values.pr, budgetMs: githubBudgetMs, stderr };
-	const writeHeadLookupTimeout = (err) => {
-		const skip = values['exact-head-now'] ? '--head-sha <sha>' : '--exact-head-now --head-sha <sha>';
-		stderr.write(`failed:${HEAD_LOOKUP_TIMEOUT_REASON}: ${values.repo}#${values.pr} (${err.message})\n`
-			+ `hint: pass ${skip} to skip the lookup, or raise --github-timeout-seconds\n`);
-		return EXIT_RUNTIME;
-	};
-	const resolveExactHeadTargetRevisionRef = async () => {
-		if (!values['exact-head-now'] || targetRevisionRef) return targetRevisionRef;
-		try {
-			targetRevisionRef = await fetchCurrentHeadShaImpl(fetchHeadArgs);
-		} catch (err) {
-			if (err instanceof OperatorGhReadTimeoutError) throw err;
-			throw new Error(`could not resolve current PR head for exact-head review: ${err.message}`);
-		}
-		baseAudit.targetRevisionRef = targetRevisionRef;
-		return targetRevisionRef;
-	};
-	const baseAudit = {
-		ts,
-		repo: values.repo,
+  let targetRevisionRef = values['head-sha'] || null;
+  let githubBudgetMs;
+  try {
+    githubBudgetMs = resolveOperatorGhReadBudgetMs({ overrideMs: values.githubTimeoutMs });
+  } catch (err) {
+    stderr.write(`error: ${err.message}\n\n${USAGE}`);
+    return EXIT_USAGE;
+  }
+  const fetchHeadArgs = { repo: values.repo, prNumber: values.pr, budgetMs: githubBudgetMs, stderr };
+  const writeHeadLookupTimeout = (err) => {
+    const skip = values['exact-head-now'] ? '--head-sha <sha>' : '--exact-head-now --head-sha <sha>';
+    stderr.write(`failed:${HEAD_LOOKUP_TIMEOUT_REASON}: ${values.repo}#${values.pr} (${err.message})\n`
+      + `hint: pass ${skip} to skip the lookup, or raise --github-timeout-seconds\n`);
+    return EXIT_RUNTIME;
+  };
+  const resolveExactHeadTargetRevisionRef = async () => {
+    if (!values['exact-head-now'] || targetRevisionRef) return targetRevisionRef;
+    try {
+      targetRevisionRef = await fetchCurrentHeadShaImpl(fetchHeadArgs);
+    } catch (err) {
+      if (err instanceof OperatorGhReadTimeoutError) throw err;
+      throw new Error(`could not resolve current PR head for exact-head review: ${err.message}`);
+    }
+    baseAudit.targetRevisionRef = targetRevisionRef;
+    return targetRevisionRef;
+  };
+  const baseAudit = {
+    ts,
+    repo: values.repo,
     pr: values.pr,
     reason,
     operator,
@@ -1000,6 +1000,8 @@ if (import.meta.url === `file://${process.argv[1]}`) {
     process.exitCode = code;
     try {
       flushDefaultApiCallRecorder();
+      // Writable queues even an empty write behind earlier chunks; its
+      // callback is a completion barrier for diagnostics already buffered.
       process.stderr.write('', () => process.exit(code));
     } catch {
       process.exit(code);

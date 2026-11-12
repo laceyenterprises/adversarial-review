@@ -135,7 +135,10 @@ export async function runOperatorGhRead({
     attempts += 1;
     phase = 'gh';
     return Promise.resolve(execFileImpl(command, argv, { ...options, signal: controller.signal }))
-      .finally(() => { phase = 'record'; });
+      .then((result) => {
+        phase = 'record';
+        return result;
+      });
   };
 
   note(`start ${label}: \`${step}\` (budget ${seconds(budgetMs)})`);

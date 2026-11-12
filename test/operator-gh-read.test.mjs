@@ -82,6 +82,51 @@ test('a wait that never reaches gh (metering admission) is bounded too', async (
   );
 });
 
+test('a killed gh attempt retains the execution phase when it rejects', async () => {
+  const cause = Object.assign(new Error('Command failed: gh'), { killed: true, signal: 'SIGTERM' });
+  await assert.rejects(
+    runOperatorGhRead({
+      args: ['pr', 'view'],
+      label: 'head lookup',
+      timeoutReason: 'head-lookup-timeout',
+      budgetMs: 10_000,
+      retries: 0,
+      execFileImpl: async () => { throw cause; },
+    }),
+    (err) => {
+      assert.ok(err instanceof OperatorGhReadTimeoutError);
+      assert.equal(err.phase, 'gh');
+      assert.equal(err.attempts, 1);
+      assert.equal(err.cause, cause);
+      assert.match(err.message, /waiting for `gh pr view` to exit/);
+      return true;
+    },
+  );
+});
+
+test('a successful gh response followed by stalled metering retains the record phase', async () => {
+  await assert.rejects(
+    runOperatorGhRead({
+      args: ['pr', 'view'],
+      label: 'head lookup',
+      timeoutReason: 'head-lookup-timeout',
+      budgetMs: 100,
+      execFileImpl: async () => ({ stdout: 'head-sha\n', stderr: '' }),
+      execGhWithRetryImpl: async ({ execFileImpl }) => {
+        await execFileImpl('gh', ['pr', 'view'], {});
+        return new Promise(() => {});
+      },
+    }),
+    (err) => {
+      assert.ok(err instanceof OperatorGhReadTimeoutError);
+      assert.equal(err.phase, 'record');
+      assert.equal(err.attempts, 1);
+      assert.match(err.message, /waiting for GitHub metering to record the `gh pr view` response/);
+      return true;
+    },
+  );
+});
+
 test('retries are reported on stderr and share the one budget', async () => {
   const stderr = capture();
   let calls = 0;

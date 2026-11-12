@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { spawn } from 'node:child_process';
 import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
@@ -10,6 +11,7 @@ import {
   normalizeOperatorRetriggerReason,
   parseArgs,
   waitForReviewerExit,
+  USAGE,
 } from '../src/retrigger-review.mjs';
 import {
   ensureReviewStateSchema,
@@ -1804,4 +1806,52 @@ test('RETRIGGERLOOKUPHANG-01: --github-timeout-seconds must be a positive bounde
   for (const bad of ['0', '-1', 'abc', '1e3', '3601']) {
     assert.throws(() => parseArgs([...base, `--github-timeout-seconds=${bad}`]), /--github-timeout-seconds must be/);
   }
+});
+
+test('failed CLI drains queued stderr to a slow pipe before exiting with a live timer', async (t) => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'retrigger-stderr-'));
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  const configPath = path.join(rootDir, 'global.yaml');
+  writeFileSync(configPath, 'version: 1\nroles: {}\n');
+  const cliUrl = new URL('../src/retrigger-review.mjs', import.meta.url);
+  const payload = 'diagnostic\n'.repeat(400_000);
+  const child = spawn(process.execPath, ['--input-type=module', '-e', `
+    import { fileURLToPath } from 'node:url';
+    process.argv = [process.execPath, fileURLToPath(${JSON.stringify(cliUrl.href)}), '--unknown-option'];
+    if (process.stderr.write('diagnostic\\n'.repeat(400_000))) {
+      throw new Error('fixture failed to create stderr backpressure');
+    }
+    setInterval(() => {}, 1000);
+    await import(${JSON.stringify(cliUrl.href)});
+  `], {
+    env: {
+      PATH: path.dirname(process.execPath), HOME: rootDir, USERPROFILE: rootDir,
+      TMPDIR: tmpdir(), HQ_ROOT: rootDir, AGENT_OS_HQ_ROOT: rootDir,
+      AGENT_OS_CONFIG_PATH: configPath, GHO_API_CALL_LOG_DISABLE: '1',
+    },
+    stdio: ['ignore', 'ignore', 'pipe'],
+    timeout: 10_000,
+    killSignal: 'SIGKILL',
+  });
+  t.after(() => { if (child.exitCode === null) child.kill('SIGKILL'); });
+  const chunks = [];
+  let resumeTimer;
+  t.after(() => clearTimeout(resumeTimer));
+  child.stderr.on('data', (chunk) => {
+    chunks.push(chunk);
+    child.stderr.pause();
+    resumeTimer = setTimeout(() => child.stderr.resume(), 5);
+  });
+  child.stderr.pause();
+  resumeTimer = setTimeout(() => child.stderr.resume(), 100);
+  const result = await new Promise((resolve, reject) => {
+    child.once('error', reject);
+    child.once('close', (code, signal) => resolve({ code, signal }));
+  });
+  const stderr = Buffer.concat(chunks).toString();
+  assert.equal(result.signal, null);
+  assert.equal(result.code, 2, stderr.slice(payload.length));
+  assert.equal(stderr.slice(0, payload.length), payload);
+  assert.match(stderr.slice(payload.length), /^error: Unknown option/);
+  assert.ok(stderr.endsWith(USAGE), 'the complete final error and usage reached the pipe');
 });

@@ -168,6 +168,18 @@ for (const fault of ['provision-failed', 'workspace-wait timeout',
     assert.equal(readHammerRetryCapLedger(f.rootDir, f).lifetimeAttemptCount, 0);
   });
 }
+test('structured workspace wait evidence refunds an outer wall-clock stop', () => {
+  assert.equal(classifyCloserOutcome({
+    reason: 'hammer-wall-clock-exceeded',
+    failureClass: 'runtime_timeout',
+    failureDetail: 'Supervisor expired while waiting for a workspace',
+  }).kind, 'inconclusive');
+  assert.equal(classifyCloserOutcome({
+    reason: 'conflict-primary-unproven',
+    failureDetail: 'workspace-wait timeout',
+  }).kind, 'real');
+});
+
 test('real findings and unqualified wall-clock expiry remain charged', () => {
   for (const reason of ['predicate-failed', 'conflict-primary-unproven', 'hammer-wall-clock-exceeded']) {
     assert.equal(isHarnessFault(reason), false);

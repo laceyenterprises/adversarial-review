@@ -676,7 +676,10 @@ test('remediation prompt includes the live-run facts and the stop-and-report rul
   assert.match(prompt, new RegExp(`"runId": "${TOC_RUN}"`));
   assert.match(prompt, /"ownPack": true/);
   assert.match(prompt, /"slug": "finished-pack"[\s\S]*?"live": false/);
-  assert.match(prompt, /do not edit another live pack's spec, plan or prompts; if the fix seems to need it, stop and report/i);
+  // REMEDIATIONLIVEPLAN-01: the own pack is protected too; policy, not a blocker.
+  assert.match(prompt, /do not edit the spec, plan or prompts of any pack whose `live` is true, this PR's own pack included/i);
+  assert.match(prompt, /Resolved-By-Policy: live-pack-plan <path> requires an operator live edit/);
+  assert.doesNotMatch(prompt, /stop and report/);
   assert.match(prompt, new RegExp(`Never apply the \`${LIVE_PACK_EDIT_WAIVER_LABEL}\` label yourself`));
   // The block sits in the trusted part of the prompt, before the operating rules.
   assert.ok(prompt.indexOf('## Trusted Live Build Pack Facts') < prompt.indexOf('## Required Operating Rules'));
@@ -701,7 +704,7 @@ test('remediation context is empty when no pack dir is touched and fails closed 
   });
   assert.match(failed, /could not determine which build packs/);
   assert.match(failed, /Treat every build pack under `projects\/` as live/);
-  assert.match(failed, /stop and report/);
+  assert.match(failed, /this PR's own pack included/);
   const unreadable = await resolveLivePackRemediationContext({
     repo: REPO,
     prNumber: 1,

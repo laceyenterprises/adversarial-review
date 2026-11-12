@@ -62,7 +62,7 @@ export function createReviewerDispatchDrain({
           detachedReviewerDispatchTracker.track(started);
         },
         logger,
-      });
+      }) ?? {};
       (drainResult.deferredCandidates || []).forEach((candidate, index) => {
         deferredReasons.set(candidate, drainResult.deferredReasons?.[index]?.reason || 'not-started');
       });

@@ -35,6 +35,10 @@ demand. The pool cap and the per-lane spill budgets are unchanged.
   `revision_ref` has moved past `reviewer_head_sha` and has no delivered review.
   In-place repairs leave rows in that shape, and the old predicate counted them
   as already reviewed. The first-pass stall pager population is unchanged.
+- **Missing drain results preserve normal accounting.** A queue implementation
+  returning `undefined` or `null` is treated as an empty result, avoiding errors
+  in both deferred-candidate unpacking and dispatch logging. Unstarted
+  candidates stay queued and use `not-started` when no deferral reason is given.
 
 ## Interface changes
 
@@ -62,3 +66,16 @@ demand. The pool cap and the per-lane spill budgets are unchanged.
   `watcher-reviewer-dispatch`, `watcher-reviewer-admission`,
   `watcher-reviewer-refill`, `watcher-reviewer-pool`, `operator-hold-counts`
   and `smv` are green.
+- Final comment-only remediation adds dispatch regression cases for
+  `undefined`, `null`, empty and partial queue results, checking queue retention,
+  next-wave preparation and `not-started` reservation accounting.
+- `node test/run-tests.mjs test/watcher-reviewer-dispatch.test.mjs
+  test/reviewspillstall-01.test.mjs`: 30/30 pass.
+- The broader claim-loop run reached its 120-second bound without reporting
+  assertion failures. A 30-second name-filtered retry also timed out because
+  the isolation helper re-executes through the runner without forwarding the
+  name filter. Full claim-loop completion remains a PR-head CI check.
+- `npm run lint`: passes with 0 errors (149 existing warnings).
+- `npm run typecheck:contracts`: passes.
+- `bash demo/research-finding-walkthrough.sh`: passes offline with three
+  byte-stable transcript deliveries.

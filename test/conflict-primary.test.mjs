@@ -166,9 +166,10 @@ test('HAMEMPTYPRIMARY-01: the publication helper preserves Git failure diagnosti
     cwd: dir, encoding: 'utf8', timeout: 10000, stdio: ['ignore', 'pipe', 'pipe'],
     env: { ...process.env, GIT_DIR: join(dir, 'missing.git') },
   }), error => {
-    assert.equal(error.status, 1);
+    // INCONCLUSIVERETRY-01b: a proof that could not run is not a refusal.
+    assert.equal(error.status, 75);
     assert.equal(error.stdout, '');
-    assert.match(error.stderr, /conflict-primary-unproven: retain the reviewed author commits and patches before publication/);
+    assert.match(error.stderr, /conflict-primary-failed: the preservation proof could not run; retry/);
     assert.match(error.stderr, /fatal: not a git repository/);
     return true;
   });
@@ -181,8 +182,9 @@ test('HAMEMPTYPRIMARY-01: Git errors inside the proof reach the publication diag
   assert.throws(() => execFileSync(process.execPath, [cli, missing, missing, f.base], {
     cwd: f.dir, encoding: 'utf8', timeout: 10000, stdio: ['ignore', 'pipe', 'pipe'],
   }), error => {
-    assert.equal(error.status, 1);
+    assert.equal(error.status, 75, 'missing proof evidence is inconclusive');
     assert.equal(error.stdout, '');
+    assert.match(error.stderr, /conflict-primary-failed/);
     assert.match(error.stderr, /fatal: Not a valid commit name/);
     return true;
   });

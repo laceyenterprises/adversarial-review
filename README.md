@@ -1029,8 +1029,9 @@ Living contract: [`docs/SPEC-adversarial-review-auto-remediation.md`](docs/SPEC-
 
 The world-fact stop rule applies throughout closure: correct closer-owned helper
 or environment mistakes once, then defer exhausted harness faults. An ended,
-charged launch receives a bounded per-head refund; three refunds park recovery
-and page once without spending PR adjudication budget. Canonical local runner
+charged launch is refunded and owned by the watcher with backoff
+(INCONCLUSIVERETRY-01b): it never parks, and from attempt N it is surfaced once
+without spending PR adjudication budget. Canonical local runner
 setup failures leave the exact-head GitHub required gate authoritative and claim
 no local pass. Review, head, CI, policy and GitHub facts retain stop authority;
 strict mode, attestation, reversal checks, leases and merge predicates remain

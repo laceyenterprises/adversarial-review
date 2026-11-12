@@ -10,7 +10,7 @@ import { HAMMER_STOP_ORIGINS, hammerStopOrigin, closerFaultRecovery } from '../s
 import { recordHammerEarlyFailure, CloserCorrectionRequired } from '../src/ama/hammer-terminal-audit.mjs';
 import { runHelperStep } from '../bin/hammer-helper-step.mjs';
 import { recordHammerRetryDispatch, refundCloserSelfError, readHammerRetryCapLedger,
-  HAMMER_SELF_ERROR_REFUND_LIMIT } from '../src/ama/hammer-retry-cap.mjs';
+} from '../src/ama/hammer-retry-cap.mjs';
 import { observeClosureWait } from '../src/ama/closure-wait.mjs';
 import { readAmaAuditEntry } from '../src/ama/audit.mjs';
 import { projectHammerStopAudit, hammerPhaseAttempt } from '../src/ama/hammer-phase-outcome.mjs';
@@ -244,31 +244,28 @@ test('canonical selection resolves helper and source importers relative to each 
   }
 });
 
-test('harness refunds preserve all attempt budgets, dedupe, cap per head and page once durably', async t => {
+test('harness refunds preserve all attempt budgets and dedupe, beyond the surfacing attempt (INCONCLUSIVERETRY-01b)', async t => {
   const root = scratch(t), identity = { repo: 'synthetic/repo', prNumber: 1 };
   let pages = 0;
-  for (let index = 0; index < HAMMER_SELF_ERROR_REFUND_LIMIT; index++) {
+  for (let index = 0; index < 5; index++) {
     const launchRequestId = `lrq_synthetic-${index}`;
     recordHammerRetryDispatch(root, identity, { jobKey: head, headSha: head, launchRequestId });
     const result = refundCloserSelfError(root, identity, { jobKey: head, headSha: head, launchRequestId });
-    assert.equal(result.refunded, true);
-    assert.equal(result.exhausted, index === HAMMER_SELF_ERROR_REFUND_LIMIT - 1);
+    assert.equal(result.refunded, true, 'a harness fault never spends adjudication budget');
     assert.equal(refundCloserSelfError(root, identity, { jobKey: head, headSha: head, launchRequestId }).reason, 'already-refunded');
     const ledger = readHammerRetryCapLedger(root, identity);
     for (const key of ['attemptCount', 'targetAttemptCount', 'lifetimeAttemptCount']) assert.equal(ledger[key], 0, key);
   }
   for (let poll = 0; poll < 3; poll++) {
-    const result = refundCloserSelfError(root, identity, { jobKey: head, headSha: head, launchRequestId: 'lrq_synthetic-2' });
-    assert.equal(result.exhausted, true);
     await observeClosureWait({ rootDir: root, ...identity, headSha: head, reason: 'synthetic harness faults',
-      waitClass: 'closer-self-error', immediate: true, pageImpl: async () => { pages++; } });
+      waitClass: 'closer-inconclusive', immediate: true, pageImpl: async () => { pages++; } });
   }
   assert.equal(pages, 1);
-  assert.equal(refundCloserSelfError(root, identity, { jobKey: head, headSha: head, launchRequestId: 'lrq_extra' }).reason, 'self-error-budget-exhausted');
+  assert.equal(refundCloserSelfError(root, identity, { jobKey: head, headSha: head, launchRequestId: 'lrq_extra' }).reason, 'no-unrefunded-charge');
   assert.equal(refundCloserSelfError(root, identity, { jobKey: 'other', headSha: head, launchRequestId: 'lrq_extra' }).reason, 'identity-mismatch');
   recordHammerRetryDispatch(root, identity, {
     jobKey: 'b'.repeat(40), headSha: 'b'.repeat(40), launchRequestId: 'lrq_synthetic-new-series',
   });
-  assert.equal(readHammerRetryCapLedger(root, identity).selfErrorRefunds[head].length,
-    HAMMER_SELF_ERROR_REFUND_LIMIT, 'a new review/head cannot erase the old head refund cap');
+  assert.equal(readHammerRetryCapLedger(root, identity).selfErrorRefunds[head].length, 5,
+    'a new review/head keeps the old head refund receipts');
 });

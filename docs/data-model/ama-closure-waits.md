@@ -1,10 +1,12 @@
 # Data Model - AMA Closure Waits
 
-HAMSELFERRORS-01 uses `class=closer-self-error`, keyed by the existing PR/head,
-for the immediate once-per-head page after three harness-fault refunds.
-The durable `paged` latch survives watcher restarts and repeated polls; failed
-delivery refunds the existing reservation for retry. This parks harness recovery
-without declaring PR adjudication retry exhaustion or granting merge authority.
+INCONCLUSIVERETRY-01b uses `class=closer-inconclusive`, keyed by the existing
+PR/head, for the once-per-head owner notice from attempt N of an inconclusive
+closer result. It replaces HAMSELFERRORS-01's `class=closer-self-error`, whose
+old rows are inert. The durable `paged` latch survives watcher restarts and
+repeated polls; failed delivery refunds the reservation for retry. The notice
+does not park the PR, declare retry exhaustion or grant merge authority.
+`closure-retry-exhausted` rows now page only when real attempts spent the budget.
 
 `waitClass=overload-exhausted` reserves one immediate exhaustion page per PR/head
 in the ordinary PR-keyed database. It survives watcher restart and retries failed

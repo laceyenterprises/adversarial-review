@@ -1053,10 +1053,8 @@ if [ "$HAM_CONFLICT_SOURCE" = "<<REVIEWED_SHA>>" ]; then
     "<<REVIEWED_SHA>>" "$HAM_CONFLICT_SOURCE" "$HAM_CONFLICT_BASE" \
     > "<<RUN_DIR>>/conflict-primary.json" || {
       HAM_CONFLICT_PROOF_STATUS=$?
-      HAM_CONFLICT_PROOF_REASON=conflict-primary-unproven
-      if [ "$HAM_CONFLICT_PROOF_STATUS" -eq 124 ] || [ "$HAM_CONFLICT_PROOF_STATUS" -eq 142 ]; then
-        HAM_CONFLICT_PROOF_REASON=conflict-primary-timeout
-      fi
+      case $HAM_CONFLICT_PROOF_STATUS in 1) HAM_CONFLICT_PROOF_REASON=conflict-primary-unproven;;
+        124|142) HAM_CONFLICT_PROOF_REASON=conflict-primary-timeout;; *) HAM_CONFLICT_PROOF_REASON=conflict-primary-failed;; esac
       "${HAM_NODE_BIN:-node}" "<<ROOT_DIR>>/bin/hammer-terminal-audit.mjs" "$HAM_CONFLICT_PROOF_REASON"
       exit 1
     }
@@ -1089,7 +1087,7 @@ unset HAM_COMMIT_PUBLICATION_ONLY
 follow-up remediation queue: resolve onto current base, preserve both sides,
 fix findings and push for full review and full-range validation. No replay retry.
 Report reviewed head and captured base.
-`conflict-primary-timeout` means proof budget expired, not a patch mismatch.
+`conflict-primary-timeout`/`-failed`: proof did not run, not a mismatch.
 
 After conflict repair and commit publication, refresh context and re-run
 changed-surface tests (2b) outside the lease. Re-enter **verify-head** (Appendix C)

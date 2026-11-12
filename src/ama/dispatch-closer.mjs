@@ -6,7 +6,11 @@ import { appendCloserOutcome } from './closer-outcomes.mjs';
 import { ownershipReadBudgets as closerScanBudgets, boundedOwnershipRead as boundedCloserScanRead } from '../ownership-read.mjs';
 import { HAMMER_RETRYABLE_READ_OUTCOMES } from './hammer-phase-outcome.mjs';
 import { HAMMER_CLOSER_FAULTS } from './hammer-stop-origin.mjs';
-import { refundCloserSelfError, HAMMER_SELF_ERROR_REFUND_LIMIT } from './hammer-retry-cap.mjs';
+import { refundCloserSelfError } from './hammer-retry-cap.mjs';
+import { CLOSER_INCONCLUSIVE_BACKOFF_REASON, CLOSER_INCONCLUSIVE_WAIT_CLASS, classifyCloserOutcome,
+  closerInconclusiveNotice, closerInconclusiveRetryPolicy, evaluateCloserInconclusiveRetryGate,
+  markCloserInconclusiveRetrySurfaced, readCloserInconclusiveRetries, recordCloserInconclusiveRetry,
+} from './closer-inconclusive-retry.mjs';
 import { repositoryObservationCache } from '../repository-state-cache.mjs';
 import { withRepositoryStateCycle } from '../repository-state-lock.mjs';
 import { infrastructureOnlyFailures, recordedCiFailures } from '../ci-infrastructure.mjs';
@@ -421,14 +425,66 @@ export function namedAmaNoDispatchReason(reason, reasons = []) {
   return reason;
 }
 
-async function holdForCloserSelfError({ rootDir, repo, prNumber, headSha, now, deliverAlertImpl }) {
-  await observeClosureWait({ rootDir, repo, prNumber, headSha,
-    reason: 'closer harness correction/refund budget exhausted; PR adjudication budget preserved',
-    waitClass: 'closer-self-error', immediate: true, now: Date.parse(now),
-    pageImpl: message => deliverAlertImpl(message, { event: 'ama_closer.self_error_exhausted',
-      payload: { repo, prNumber, headSha } }) });
-  return noAmaDispatch({ dispatched: false, skipMergeAgent: true,
-    reason: 'closer-self-error-budget-exhausted', needsOperator: true });
+// INCONCLUSIVERETRY-01b: the watcher owns an inconclusive ended launch. Record
+// it, surface it once from attempt N on, and pace the next ordinary dispatch.
+// Returns null when that dispatch may run now; it is never a park.
+async function ownInconclusiveCloserRetry({ rootDir, repo, prNumber, headSha, launchRequestId, reason,
+  cfg, now, deliverAlertImpl, logger }) {
+  try {
+    const owned = recordCloserInconclusiveRetry(rootDir, { repo, prNumber }, { headSha, launchRequestId,
+      reason, now, policy: closerInconclusiveRetryPolicy(cfg) });
+    if (owned.recorded) logAmaCloserDispatchEvent(logger, 'ama_closer.inconclusive_owned_retry', {
+      repo, prNumber, headSha, launchRequestId, ...owned.entry, launches: undefined });
+  } catch (error) {
+    logger?.warn?.(`[ama-closer] inconclusive retry record failed for ${repo}#${prNumber}: ${error?.message || error}`);
+  }
+  return gateInconclusiveCloserRetry({ rootDir, repo, prNumber, headSha, now, deliverAlertImpl, logger });
+}
+
+// Refund an inconclusive launch's charge in full. Best effort: a missed refund
+// leaves the charge for the closure-budget escalation to repair, because the
+// launch is still recorded as inconclusive by its owner.
+function refundInconclusiveCloserLaunch({ rootDir, repo, prNumber, jobKey, record, dispatchIdentity, updateRecord, now, logger }) {
+  let refund;
+  try {
+    refund = refundCloserSelfError(rootDir, { repo, prNumber }, { jobKey,
+      headSha: record.targetRemediationSha || record.headSha, launchRequestId: record.launchRequestId, now });
+  } catch (error) {
+    logger?.warn?.(`[ama-closer] inconclusive refund failed for ${repo}#${prNumber}: ${error?.message || error}`);
+    return { refunded: false, reason: 'refund-failed' };
+  }
+  if (refund.refunded || refund.reason === 'already-refunded') {
+    updateRecord(rootDir, dispatchIdentity, current => (
+      current?.launchRequestId === record.launchRequestId
+        && current.selfErrorRefundedLaunchRequestId !== record.launchRequestId
+        ? { ...current, selfErrorRefundedLaunchRequestId: record.launchRequestId,
+          unexecutedRefundCount: Number(current.unexecutedRefundCount || 0) + 1 } : null));
+  }
+  return refund;
+}
+
+async function gateInconclusiveCloserRetry({ rootDir, repo, prNumber, headSha, now, deliverAlertImpl, logger }) {
+  const identity = { repo, prNumber };
+  const { wait, retryAfterMs, entry } = evaluateCloserInconclusiveRetryGate(
+    readCloserInconclusiveRetries(rootDir, identity), { headSha, now });
+  if (!entry) return null;
+  if (entry.attempt >= entry.surfaceAfterAttempts && !entry.surfacedAt) {
+    try {
+      await observeClosureWait({ rootDir, repo, prNumber, headSha, reason: closerInconclusiveNotice({ entry }),
+        waitClass: CLOSER_INCONCLUSIVE_WAIT_CLASS, immediate: true, now: Date.parse(now),
+        pageImpl: message => deliverAlertImpl(message, { event: 'ama_closer.inconclusive_retry_surfaced',
+          payload: { repo, prNumber, headSha, owner: entry.owner, attempt: entry.attempt,
+            reason: entry.reason, nextAttemptAt: entry.nextAttemptAt } }) });
+      markCloserInconclusiveRetrySurfaced(rootDir, identity, { headSha, now });
+    } catch (error) {
+      logger?.warn?.(`[ama-closer] inconclusive retry notice failed; retry next pass: ${error?.message || error}`);
+    }
+  }
+  if (!wait) return null;
+  return noAmaDispatch({ dispatched: false, skipMergeAgent: true, recoveryWait: true,
+    reason: CLOSER_INCONCLUSIVE_BACKOFF_REASON, retryAfterMs,
+    ownedRetry: { owner: entry.owner, attempt: entry.attempt, reason: entry.reason,
+      nextAttemptAt: entry.nextAttemptAt, deadline: entry.deadline } });
 }
 
 function noAmaDispatch(result) {
@@ -5634,22 +5690,24 @@ async function maybeDispatchAmaCloserAttempt({
         jobKey: reviewedSha, headSha: existingRecord.headSha,
         launchRequestId: existingRecord.launchRequestId, now: dispatchContext.dispatchedAt,
       });
-      if (!refund.exhausted && !refund.refunded && refund.reason !== 'already-refunded') {
+      if (!refund.refunded && refund.reason !== 'already-refunded') {
         return noAmaDispatch({ dispatched: false, skipMergeAgent: true,
           reason: 'closer-self-error-refund-unavailable', recoveryWait: true });
       }
-      if (refund.refunded || refund.reason === 'already-refunded') existingRecord = updateDispatchRecord(rootDir, existingDispatchIdentity, current => {
+      existingRecord = updateDispatchRecord(rootDir, existingDispatchIdentity, current => {
         if (current?.launchRequestId !== existingRecord.launchRequestId
           || current.selfErrorRefundedLaunchRequestId === existingRecord.launchRequestId) return null;
         return { ...current, selfErrorRefundedLaunchRequestId: existingRecord.launchRequestId,
           unexecutedRefundCount: Number(current.unexecutedRefundCount || 0) + 1 };
       }) || existingRecord;
-      if (refund.exhausted) {
+      const backoff = await ownInconclusiveCloserRetry({ rootDir, repo, prNumber, headSha: existingRecord.headSha,
+        launchRequestId: existingRecord.launchRequestId, reason: parkReason, cfg,
+        now: dispatchContext.dispatchedAt, deliverAlertImpl, logger });
+      if (backoff) {
         finalizeAmaCloserLeaseBestEffort({ rootDir, leaseIdentity: existingRecordLeaseIdentity,
           terminalOutcome: `retryable-${parkReason}`, launchRequestId: existingRecord.launchRequestId,
           now: dispatchContext.dispatchedAt, logger, repo, prNumber });
-        return holdForCloserSelfError({ rootDir, repo, prNumber, headSha: existingRecord.headSha,
-          now: dispatchContext.dispatchedAt, deliverAlertImpl });
+        return backoff;
       }
     }
     parkLedger = deferHammerRetryDispatch(rootDir, { repo, prNumber }, {
@@ -6108,6 +6166,8 @@ async function maybeDispatchAmaCloserAttempt({
     let hammerEndedWithoutMerge = false;
     // CLOSERRETRY-01: failure class of a hammer that ended with the PR still open.
     let hammerNoDeliveryClass = null;
+    // INCONCLUSIVERETRY-01b: an ended launch that could not conclude.
+    let inconclusiveOutcome = null;
     throwIfAborted(signal);
     const statusProbe = await probeAmaCloserDispatchStatus({
       hqPath,
@@ -6399,9 +6459,27 @@ async function maybeDispatchAmaCloserAttempt({
             lastError: noMergeOutcome,
             outcome: noMergeOutcome,
           }));
+          const noMergeDetails = hammerNoMergeDetails({ hqRoot, launchRequestId: existingRecord.launchRequestId,
+            runId: existingRecord.workerRunId, raw: hammerOutcome.reason || noMergeOutcome });
+          // INCONCLUSIVERETRY-01b: the closer's own terminal-stop/last-phase
+          // receipt or the launch failure decides. An unmoved head that could
+          // not conclude is refunded in full; a real or unknown stop keeps the
+          // bounded exit refund below and stays counted.
+          const outcomeClass = exitedWithoutClose && !existingDispatchHeadAdvanced
+            && (terminalLivePr.headRefOid || targetRemediationSha) === existingRecord.headSha
+            ? classifyCloserOutcome({ reason: noMergeDetails.lastPhase,
+              failureClass: prefetchedLaunchRequestProbe?.row?.failure_class }) : null;
+          let inconclusiveRefund = null;
+          if (outcomeClass?.kind === 'inconclusive' && isHammerWorkerClass(existingRecord.workerClass || workerClass)) {
+            inconclusiveOutcome = outcomeClass;
+            inconclusiveRefund = refundInconclusiveCloserLaunch({ rootDir, repo, prNumber, jobKey: reviewedSha,
+              record: existingRecord, dispatchIdentity: existingDispatchIdentity, updateRecord: updateDispatchRecord,
+              now: dispatchContext.dispatchedAt, logger });
+          }
           // An exit without a close never ran its close, so its re-arm is
           // refunded (bounded) instead of spending the series' real retry.
           const retryRefund = exitedWithoutClose
+            && !(inconclusiveRefund?.refunded || inconclusiveRefund?.reason === 'already-refunded')
             && existingRecord.dispatchReason !== 'exhausted-final-hammer'
             && dispatchContext.dispatchReason !== 'exhausted-final-hammer'
             && isHammerWorkerClass(existingRecord.workerClass || workerClass)
@@ -6415,8 +6493,6 @@ async function maybeDispatchAmaCloserAttempt({
               logger,
             })
             : null;
-          const noMergeDetails = hammerNoMergeDetails({ hqRoot, launchRequestId: existingRecord.launchRequestId,
-            runId: existingRecord.workerRunId, raw: hammerOutcome.reason || noMergeOutcome });
           hammerNoDeliveryClass = noMergeDetails.phaseOutcome !== 'unclassified'
             ? noMergeDetails.phaseOutcome : noMergeOutcome;
           logAmaCloserDispatchEvent(logger, exitedWithoutClose
@@ -6432,6 +6508,7 @@ async function maybeDispatchAmaCloserAttempt({
             classification: exitedWithoutClose ? HAMMER_EXITED_WITHOUT_CLOSE : 'hammer-ended-without-merge',
             ...noMergeDetails,
             ...(retryRefund ? { retryRefund } : {}),
+            ...(inconclusiveOutcome ? { inconclusive: inconclusiveOutcome } : {}),
           }, { level: 'warn' });
         }
       }
@@ -7176,6 +7253,24 @@ async function maybeDispatchAmaCloserAttempt({
           ));
         }
       }
+      // INCONCLUSIVERETRY-01b: a launch that failed before any closer helper
+      // could conclude (never started, checkout/provision/bootstrap failure)
+      // and pushed nothing is refunded in full and owned, not counted.
+      if (status === 'failed' && !hammerEndedWithoutMerge && !existingDispatchHeadAdvanced
+        && deadHammerRearmOutcome?.rearmed !== true && existingRecord.launchRequestId
+        && existingRecord.headSha === targetRemediationSha
+        && isHammerWorkerClass(existingRecord.workerClass || workerClass)) {
+        const launchClass = classifyCloserOutcome({
+          reason: hammerNoMergeDetails({ hqRoot, launchRequestId: existingRecord.launchRequestId,
+            runId: existingRecord.workerRunId, raw: null }).lastPhase,
+          failureClass: launchRequestProbe?.row?.failure_class });
+        if (launchClass.kind === 'inconclusive') {
+          inconclusiveOutcome = launchClass;
+          refundInconclusiveCloserLaunch({ rootDir, repo, prNumber, jobKey: reviewedSha,
+            record: existingRecord, dispatchIdentity: existingDispatchIdentity, updateRecord: updateDispatchRecord,
+              now: dispatchContext.dispatchedAt, logger });
+        }
+      }
       // CLOSERRETRY-01: a launch that ended with the PR open and the head
       // unmoved delivered neither a merge nor a push. Key it on (PR, head,
       // failure class) so the gate before the prompt load can refuse a repeat.
@@ -7184,7 +7279,7 @@ async function maybeDispatchAmaCloserAttempt({
       // A deferral for infrastructure reads or a busy lane is an observation, not
       // an attempt to close: it spends no key.
       if (status === 'failed' && !existingDispatchHeadAdvanced && existingRecord.headSha
-        && !laneBusyPark && !infrastructureReadPark
+        && !laneBusyPark && !infrastructureReadPark && !inconclusiveOutcome
         && deadHammerRearmOutcome?.rearmed !== true) {
         try {
           recordCloserNoDeliveryAttempt(rootDir, { repo, prNumber }, {
@@ -7201,6 +7296,12 @@ async function maybeDispatchAmaCloserAttempt({
           // A missed record only leaves the older per-head bounds in charge.
           logger?.warn?.(`[ama-closer] no-delivery attempt record failed for ${repo}#${prNumber}: ${error?.message || error}`);
         }
+      }
+      if (inconclusiveOutcome) {
+        const backoff = await ownInconclusiveCloserRetry({ rootDir, repo, prNumber,
+          headSha: existingRecord.headSha, launchRequestId: existingRecord.launchRequestId,
+          reason: inconclusiveOutcome.reason, cfg, now: dispatchContext.dispatchedAt, deliverAlertImpl, logger });
+        if (backoff) return backoff;
       }
     }
     if (
@@ -7403,10 +7504,9 @@ async function maybeDispatchAmaCloserAttempt({
   if (isHammerWorkerClass(workerClass) && !ownerProofRecovery) {
     const hammerCapIdentity = { repo, prNumber };
     const hammerRetryLedger = readHammerRetryCapLedger(rootDir, hammerCapIdentity);
-    if (hammerRetryLedger?.selfErrorRefunds?.[prMetadata.headSha]?.length >= HAMMER_SELF_ERROR_REFUND_LIMIT) {
-      return holdForCloserSelfError({ rootDir, repo, prNumber, headSha: prMetadata.headSha,
-        now: dispatchContext.dispatchedAt, deliverAlertImpl });
-    }
+    const inconclusiveBackoff = await gateInconclusiveCloserRetry({ rootDir, repo, prNumber,
+      headSha: prMetadata.headSha, now: dispatchContext.dispatchedAt, deliverAlertImpl, logger });
+    if (inconclusiveBackoff) return inconclusiveBackoff;
     const hammerLifetimeDispatchCeiling = normalizeHammerLifetimeDispatchCeiling(
       cfg?.hammerLifetimeDispatchCeiling,
     );

@@ -164,12 +164,21 @@ for (const [reason, status] of [
     assert.equal(again.dispatched, false, JSON.stringify(again));
     assert.equal(launches.length, reason.startsWith('quota-') ? 2 : 3);
     if (!reason.startsWith('quota-')) {
-      assert.equal(again.reason, 'closer-self-error-budget-exhausted');
+      // INCONCLUSIVERETRY-01b: the third harness fault is surfaced once and
+      // owned with backoff; it is never a park and never spends budget.
+      assert.equal(again.reason, 'closer-inconclusive-retry-backoff');
+      assert.equal(again.recoveryWait, true);
+      assert.notEqual(again.needsOperator, true);
+      assert.equal(again.ownedRetry.owner, 'watcher');
       const ledger = readHammerRetryCapLedger(root, identity);
       assert.equal(ledger.selfErrorRefunds[head].length, 3);
       assert.equal(ledger.attemptCount, 0);
       assert.equal(alerts.length, 1);
-      assert.equal(alerts[0].options.event, 'ama_closer.self_error_exhausted');
+      assert.equal(alerts[0].options.event, 'ama_closer.inconclusive_retry_surfaced');
+      args.dispatchContext = { ...args.dispatchContext, dispatchedAt: again.ownedRetry.nextAttemptAt };
+      const retried = await maybeDispatchAmaCloser({ ...args, readLaunchRequestStatusImpl, execFileImpl });
+      assert.equal(retried.dispatched, true, JSON.stringify(retried));
+      assert.equal(alerts.length, 1, 'surfaced once');
     }
   });
 }

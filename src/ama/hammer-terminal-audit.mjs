@@ -86,7 +86,13 @@ export function recordHammerEarlyFailure(reason, { env = process.env, headSha, f
   };
   const requireCorrection = () => {
     if (origin === 'closer' && final === true
-      && closerFaultRecovery(reason, { env }) === 'correct') throw new CloserCorrectionRequired(reason);
+      && closerFaultRecovery(reason, { env }) === 'correct') {
+      // INCONCLUSIVERETRY-01b: if the closer ends before correcting, its
+      // diagnostic last phase still names the fault, so the watcher owns a
+      // retry instead of counting an unexplained exit. Grants no authority.
+      try { recordHammerPhase(reason, { env }); } catch { /* Diagnostic only. */ }
+      throw new CloserCorrectionRequired(reason);
+    }
   };
   if (!identity.hqRoot || !identity.repo || !identity.prNumber || !identity.headSha) {
     requireCorrection();

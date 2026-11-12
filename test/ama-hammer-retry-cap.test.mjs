@@ -4825,7 +4825,7 @@ for (const scenario of [
   assert.equal(result.attemptCount, scenario.charged);
 });
 
-test('HAMSELFERRORS-01: real dispatch refunds historical harness stops, preserves all budgets and parks/pages once at the per-head cap', async t => {
+test('HAMSELFERRORS-01 / INCONCLUSIVERETRY-01b: real dispatch refunds harness stops, preserves all budgets, surfaces once and keeps an owned retry with backoff', async t => {
   const rootDir = mkdtempSync(join(tmpdir(), 'synthetic-self-error-dispatch-'));
   t.after(() => rmSync(rootDir, { recursive: true, force: true }));
   const identity = { repo: REPO, prNumber: PR_NUMBER, headSha: REVIEWED_HEAD };
@@ -4841,7 +4841,7 @@ test('HAMSELFERRORS-01: real dispatch refunds historical harness stops, preserve
       return { stdout: '{}' };
     },
     deliverAlertImpl: async (_text, options) => {
-      if (options?.event === 'ama_closer.self_error_exhausted') pages++;
+      if (options?.event === 'ama_closer.inconclusive_retry_surfaced') pages++;
       return { ok: true };
     },
   });
@@ -4866,14 +4866,19 @@ test('HAMSELFERRORS-01: real dispatch refunds historical harness stops, preserve
     assert.equal(ledger.selfErrorRefunds[REVIEWED_HEAD].length, count);
     assert.equal(readAmaCloserDispatchRecord(rootDir, identity).unexecutedRefundCount, count);
     if (count === 3) {
-      assert.equal(result.reason, 'closer-self-error-budget-exhausted');
-      for (const poll of [now + 1, now + 1000, now + 10000]) {
+      assert.equal(result.reason, 'closer-inconclusive-retry-backoff');
+      assert.notEqual(result.needsOperator, true, 'an owned retry is never a park');
+      assert.equal(result.ownedRetry.attempt, 3);
+      assert.equal(Date.parse(result.ownedRetry.nextAttemptAt) - Date.parse(at(now)), 5 * 60_000);
+      for (const poll of [now + 1, now + 200]) {
         const repeated = await run(poll);
         assert.equal(repeated.dispatched, false);
-        assert.equal(repeated.reason, 'closer-self-error-budget-exhausted');
+        assert.equal(repeated.reason, 'closer-inconclusive-retry-backoff');
       }
+      const retried = await run(now + 300);
+      assert.equal(retried.dispatched, true, JSON.stringify(retried));
     }
   }
-  assert.equal(launches, 3);
+  assert.equal(launches, 4);
   assert.equal(pages, 1);
 });

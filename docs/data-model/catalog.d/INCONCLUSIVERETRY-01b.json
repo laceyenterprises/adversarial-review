@@ -1,0 +1,17 @@
+{
+  "version": 1,
+  "entries": [
+    {
+      "id": "closer-inconclusive-retries",
+      "title": "Closer Inconclusive Retries",
+      "path": "docs/data-model/closer-inconclusive-retries.md",
+      "store": "data/follow-up-jobs/closer-inconclusive-retries/<repo>-pr-<n>.json",
+      "schemaSurface": "src/ama/closer-inconclusive-retry.mjs",
+      "relatedSchemaSurfaces": [
+        "src/ama/dispatch-closer.mjs",
+        "src/ama/closure-budget-escalation.mjs"
+      ],
+      "owner": "watcher AMA closer"
+    }
+  ]
+}

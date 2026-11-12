@@ -69,10 +69,14 @@ export function findingBatchOptions(env = process.env) {
 // even while an older batch in its area is still running. Dispatch admission
 // continues to own worker capacity and budget.
 export function claimFindingBatches(db, day, { batchSize = 100, manifest = null, readConsensus = readRemediationConsensus,
-  now = Date.now(), maxAgeMs = findingBacklogMaxAgeMs() } = {}) {
+  now = Date.now(), env = process.env, maxAgeMs } = {}) {
   if (!Number.isSafeInteger(batchSize) || batchSize < 1) throw Error('invalid batchSize');
-  if (!Number.isFinite(now) || !Number.isSafeInteger(maxAgeMs) || maxAgeMs < 1) throw Error('invalid backlog window');
-  const cutoff = new Date(now - maxAgeMs).toISOString();
+  let cutoff;
+  if (manifest === null) {
+    maxAgeMs ??= findingBacklogMaxAgeMs(env);
+    if (!Number.isFinite(now) || !Number.isSafeInteger(maxAgeMs) || maxAgeMs < 1) throw Error('invalid backlog window');
+    cutoff = new Date(now - maxAgeMs).toISOString();
+  }
   const selection = manifest === null ? null : validateFindingManifest(db, manifest);
   // Validate and read consensus once, before taking the SQLite writer lock.
   const admitted = selection === null ? null : new Map([...selection].filter(([, row]) =>

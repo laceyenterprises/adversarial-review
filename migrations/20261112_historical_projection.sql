@@ -33,4 +33,3 @@ CREATE VIEW finding_batch_note_candidates AS
       (SELECT applied_at FROM schema_migrations WHERE id='20261024_simplicity_batch.sql'))
     AND NOT EXISTS (SELECT 1 FROM finding_batch_note_dispositions d
       WHERE d.note_id=n.note_id AND d.reason IS NOT NULL);
-

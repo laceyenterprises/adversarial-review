@@ -48,13 +48,16 @@ export function persistReviewFindings(db, passId, { historicalProjection = false
         reviewer_model=excluded.reviewer_model, reasoning_effort=excluded.reasoning_effort,
         head_sha=excluded.head_sha, current_body=1,
         historical_projection=min(review_findings.historical_projection,excluded.historical_projection)`);
-    const exists = db.prepare('SELECT 1 FROM review_findings WHERE finding_id=?');
+    const exists = db.prepare('SELECT historical_projection FROM review_findings WHERE finding_id=?');
+    const promoted = [];
     let inserted = 0;
     for (const [index, { f, blocking }] of findings.entries()) {
       const content = findingContent(f, blocking);
       const hash = digest(content);
       const id = `${passId}:${index + 1}:${hash}`;
-      if (!exists.get(id)) inserted++;
+      const previous = exists.get(id);
+      if (!previous) inserted++;
+      else if (!historicalProjection && previous.historical_projection === 1) promoted.push(id);
       insert.run({ id, pass: passId, ordinal: index + 1, hash, ...content,
         json: JSON.stringify(content), identity: metadata?.reviewerAttribution?.identity || pass.reviewer_class,
         model: pass.reviewer_model, effort: pass.reasoning_effort, head: pass.head_sha,
@@ -67,12 +70,13 @@ export function persistReviewFindings(db, passId, { historicalProjection = false
       metadata?.reviewerExecution?.promptDigests ? JSON.stringify(metadata.reviewerExecution.promptDigests) : null, passId);
     // A genuine live capture can arrive after a historical projection. The
     // receipt trigger ran before this projection promoted the existing rows.
-    if (!historicalProjection) db.prepare(`INSERT OR IGNORE INTO finding_backlog
+    if (promoted.length) db.prepare(`INSERT OR IGNORE INTO finding_backlog
       (finding_id,repo,pr_number,head_sha,content_sha256,reviewer_family,area)
       SELECT c.* FROM finding_backlog_candidates c
       JOIN review_findings f USING(finding_id)
       JOIN reviewed_prs r ON r.repo=c.repo AND r.pr_number=c.pr_number
-      WHERE f.pass_id=? AND r.pr_state='merged'`).run(passId);
+      WHERE f.finding_id IN (SELECT value FROM json_each(?)) AND r.pr_state='merged'`)
+      .run(JSON.stringify(promoted));
     syncFindingDisputes(db, { passId });
     return inserted;
   }).immediate();

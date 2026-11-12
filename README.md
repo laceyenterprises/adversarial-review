@@ -1819,8 +1819,17 @@ and any never-claimed automatic findings outside the merge-age window.
 Released findings remain eligible for retry regardless of source age until
 settlement or third-attempt exhaustion; selected findings still require their
 explicit manifest. Health summaries use the same configured window as alerts.
+Expired never-claimed findings, including ungraded work, can be previewed with
+`node bin/review-findings.mjs retire-expired --db <db> --repo <owner/repo> --limit 100 --reason '<rationale>'`.
+An operator-authorized repeat with `--apply` records an `out-of-window:`
+disposition and terminal timestamp, retaining the source evidence. It excludes
+owned, retried and selected work. No live execution is authorized by this change.
+Unassigned excluded advice stays out of area counts and is reported separately
+as `notesHistorical` and `notesOutOfWindow`; assigned advice stays monitored.
 Within 24 hours, SRE retains a receipt showing the open backlog trends down,
-visible applied/dropped daily counts and no evidence-format losses. See the
+visible applied/dropped daily counts and no evidence-format losses, including
+the deploy-time `outOfWindow`, `notesOutOfWindow` and `notesHistorical` baseline.
+See the
 [batch lifecycle and recovery contract](docs/data-model/review-findings.md#non-blocking-backlog-findingsbatch-01)
 and `post-merge-verify.json`. No new CI check or smoke step is added.
 

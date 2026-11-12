@@ -9,7 +9,8 @@ import { beginReviewerPass } from '../src/reviewer-pass-tokens.mjs';
 import { updateReviewerPassBodyCapture } from '../src/review-body-capture.mjs';
 import { backfillReviewFindings, persistReviewFindings } from '../src/review-finding-records.mjs';
 import { claimFindingBatches } from '../src/findings-batch.mjs';
-import { captureReadyFindings, summarizeFindingBacklog, findingBacklogAlert } from '../src/findings-backlog.mjs';
+import { captureReadyFindings, summarizeFindingBacklog, findingBacklogAlert, retireExpiredFindings } from '../src/findings-backlog.mjs';
+import { main as reviewFindingsCli } from '../bin/review-findings.mjs';
 
 const repo = 'sample/service', head = 'a'.repeat(40);
 const now = Date.parse('2026-06-10T12:00:00Z'), maxAgeMs = 48 * 3600000;
@@ -51,6 +52,11 @@ for (const mergedAt of ['2026-02-01T00:00:00Z', '2026-06-10T00:00:00Z']) {
     assert.equal(db.prepare('SELECT count(*) n FROM finding_batch_note_candidates').get().n, 0);
     assert.deepEqual(claimFindingBatches(db, '2026-06-10', { now, maxAgeMs }), []);
     assert.equal(db.prepare('SELECT historical_projection FROM review_findings').get().historical_projection, 1);
+    const health = summarizeFindingBacklog(db, now, { maxAgeMs });
+    assert.equal(health.available, true, health.error);
+    assert.deepEqual(health.areas, []);
+    assert.equal(health.notesHistorical, 1);
+    assert.equal(health.notesOutOfWindow, 0);
   });
 }
 
@@ -85,6 +91,10 @@ test('automatic claims skip old or unknown merge times without changing rows, in
     assert.equal(health.outOfWindow, 1);
     assert.equal(health.batchableCount, 0);
     assert.equal(health.openCount, 1);
+    // Unknown merge clocks already receive a lifecycle drop on note capture.
+    assert.equal(health.notesOutOfWindow, mergedAt === '2026-06-08T11:59:59.999Z' ? 1 : 0);
+    assert.equal(health.notesHistorical, 0);
+    assert.equal(health.areas.reduce((sum, area) => sum + area.size, 0), 1);
   }
 });
 
@@ -94,6 +104,9 @@ test('the window includes its exact boundary and honors configured duration', t 
   assert.deepEqual(claimFindingBatches(db, '2026-06-10', { now, maxAgeMs: maxAgeMs - 1 }), []);
   assert.equal(summarizeFindingBacklog(db, now, { maxAgeMs }).outOfWindow, 0);
   assert.ok(claimFindingBatches(db, '2026-06-10', { now, maxAgeMs }).length);
+  const owned = summarizeFindingBacklog(db, now + maxAgeMs, { maxAgeMs });
+  assert.equal(owned.areas.reduce((sum, area) => sum + area.size, 0), 2);
+  assert.equal(owned.notesOutOfWindow, 0);
 });
 
 test('a stalled runner alerts after ordinary merge-time enrollments age out', t => {
@@ -110,8 +123,17 @@ test('a stalled runner alerts after ordinary merge-time enrollments age out', t 
   assert.ok(alert.evidence.includes('outOfWindow=1'));
   assert.match(alert.recommendedAction, /explicit consensus-validated manifest/);
   assert.deepEqual(claimFindingBatches(db, '2026-06-12', { now: later, maxAgeMs }), []);
-  db.prepare("UPDATE finding_backlog SET outcome='dropped',reason='false-positive: Already resolved'").run();
+  const retired = retireExpiredFindings(db, { repo, reason: 'Operator accepted expiry without a correctness judgment',
+    now: later, maxAgeMs, apply: true });
+  assert.equal(retired.retired, 1);
+  const row = db.prepare('SELECT * FROM finding_backlog').get();
+  assert.equal(row.outcome, 'dropped');
+  assert.equal(row.reason, 'out-of-window: Operator accepted expiry without a correctness judgment');
+  assert.ok(row.resolved_at);
+  assert.equal(row.batch_attempts, 0);
+  assert.equal(row.result_pr, null);
   assert.equal(findingBacklogAlert(summarizeFindingBacklog(db, later, { maxAgeMs }), maxAgeMs), null);
+  assert.equal(retireExpiredFindings(db, { repo, reason: 'Repeated disposition', now: later, maxAgeMs, apply: true }).retired, 0);
 });
 
 test('invalid default windows degrade only backlog health and explicit windows take precedence', t => {
@@ -157,6 +179,83 @@ test('a manifest explicitly enrolls a historical finding outside the automatic w
   assert.equal(batches.length, 1);
   assert.equal(db.prepare('SELECT manifest_sha256 FROM finding_backlog').get().manifest_sha256, manifest.sha256);
   assert.equal(summarizeFindingBacklog(db, now, { maxAgeMs }).outOfWindow, 0);
+});
+
+test('manifest claims ignore automatic clock/window configuration', t => {
+  const { db } = fixture(t);
+  backfillReviewFindings(db);
+  const { finding_id } = db.prepare('SELECT finding_id FROM review_findings').get();
+  const findings = [{ finding_id, head_sha: head, pr_number: 7, repo }];
+  const manifest = { version: 1, findings, heads: [{ head_sha: head, pr_number: 7, repo }],
+    sha256: createHash('sha256').update(JSON.stringify({ findings, version: 1 })).digest('hex') };
+  const previous = process.env.ADVERSARIAL_FINDINGS_BACKLOG_MAX_AGE_MS;
+  try {
+    process.env.ADVERSARIAL_FINDINGS_BACKLOG_MAX_AGE_MS = 'invalid';
+    assert.equal(claimFindingBatches(db, '2026-06-10', { manifest, now: NaN,
+      readConsensus: () => ({ label: 'real' }) }).length, 1);
+  } finally {
+    if (previous === undefined) delete process.env.ADVERSARIAL_FINDINGS_BACKLOG_MAX_AGE_MS;
+    else process.env.ADVERSARIAL_FINDINGS_BACKLOG_MAX_AGE_MS = previous;
+  }
+});
+
+test('direct automatic claims resolve their window from the caller env', t => {
+  const { db, pass } = fixture(t, '2026-06-08T12:00:00Z');
+  persistReviewFindings(db, pass.pass_id);
+  const env = { ADVERSARIAL_FINDINGS_BACKLOG_MAX_AGE_MS: String(maxAgeMs - 1) };
+  assert.deepEqual(claimFindingBatches(db, '2026-06-10', { now, env }), []);
+  assert.ok(claimFindingBatches(db, '2026-06-10', { now,
+    env: { ADVERSARIAL_FINDINGS_BACKLOG_MAX_AGE_MS: String(maxAgeMs) } }).length);
+});
+
+test('live replays of existing legacy observations do not create backlog enrollment', t => {
+  const { db, pass } = fixture(t);
+  persistReviewFindings(db, pass.pass_id);
+  // Simulate a live-default observation predating backlog deployment.
+  db.prepare('DELETE FROM finding_backlog').run();
+  assert.equal(persistReviewFindings(db, pass.pass_id), 0);
+  assert.equal(db.prepare('SELECT count(*) n FROM finding_backlog').get().n, 0);
+  assert.equal(summarizeFindingBacklog(db, now, { maxAgeMs }).outOfWindow, 0);
+});
+
+test('bounded expiry disposition previews read-only and preserves ownership, retries and selections', t => {
+  const { db, pass, root } = fixture(t);
+  const findings = Array.from({ length: 9 }, (_, i) => `- **Finding ${i}**
+  - **File:** src/result.mjs
+  - **Lines:** 2
+  - **Problem:** Missing documentation ${i}.`).join('\n');
+  db.prepare('UPDATE reviewer_passes SET body_md=? WHERE pass_id=?')
+    .run(`## Blocking Issues\n- None.\n## Non-blocking Issues\n${findings}`, pass.pass_id);
+  persistReviewFindings(db, pass.pass_id);
+  const rows = db.prepare('SELECT * FROM finding_backlog ORDER BY finding_id').all();
+  assert.equal(rows.length, 9);
+  db.prepare("INSERT INTO finding_batches(batch_id,repo,area,day) VALUES ('owned',?,'src','2026-06-10')").run(repo);
+  db.prepare("UPDATE finding_backlog SET batch_id='owned' WHERE finding_id=?").run(rows[2].finding_id);
+  db.prepare('UPDATE finding_backlog SET batch_attempts=1 WHERE finding_id=?').run(rows[3].finding_id);
+  db.prepare('UPDATE finding_backlog SET manifest_sha256=? WHERE finding_id=?').run('b'.repeat(64), rows[4].finding_id);
+  db.prepare("UPDATE finding_backlog SET outcome='dropped',reason='not-reproducible: Verified' WHERE finding_id=?")
+    .run(rows[5].finding_id);
+  db.prepare(`INSERT INTO reviewed_prs(repo,pr_number,reviewed_at,reviewer,pr_state,merged_at)
+    VALUES (?,8,'2026-06-10','codex','merged','9999-01-01T00:00:00Z'),(?,9,'2026-06-10','codex','open',NULL)`).run(repo, repo);
+  db.prepare('UPDATE finding_backlog SET pr_number=8 WHERE finding_id=?').run(rows[6].finding_id);
+  db.prepare('UPDATE finding_backlog SET pr_number=9 WHERE finding_id=?').run(rows[7].finding_id);
+  db.prepare("UPDATE finding_backlog SET repo='other/service' WHERE finding_id=?").run(rows[8].finding_id);
+  const before = db.prepare('SELECT * FROM finding_backlog ORDER BY finding_id').all();
+  const args = ['retire-expired', '--db', join(root, 'data', 'reviews.db'), '--repo', repo,
+    '--limit', '1', '--reason', 'Operator accepts age expiry'];
+  const preview = reviewFindingsCli(args);
+  assert.equal(preview.applied, false);
+  assert.equal(preview.retired, 0);
+  assert.deepEqual(preview.findings, [rows[0].finding_id]);
+  assert.deepEqual(db.prepare('SELECT * FROM finding_backlog ORDER BY finding_id').all(), before);
+  assert.equal(reviewFindingsCli([...args, '--apply']).retired, 1);
+  assert.equal(reviewFindingsCli([...args, '--apply']).retired, 1);
+  assert.equal(reviewFindingsCli([...args, '--apply']).retired, 0);
+  assert.deepEqual(db.prepare('SELECT * FROM finding_backlog WHERE finding_id NOT IN (?,?) ORDER BY finding_id')
+    .all(rows[0].finding_id, rows[1].finding_id), before.slice(2));
+  for (const bad of [{ repo: null }, { reason: '' }, { reason: 'multiple\nlines' }, { limit: 0 }, { limit: 501 }]) {
+    assert.throws(() => retireExpiredFindings(db, { repo, reason: 'Expiry', now, maxAgeMs, ...bad }));
+  }
 });
 
 

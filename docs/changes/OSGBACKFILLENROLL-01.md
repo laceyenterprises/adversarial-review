@@ -59,3 +59,32 @@ existing publication latency and state/smoke suites passed (44 tests). Lint
 reported zero errors and 149 existing warnings; contract typecheck, the offline
 research demo, 94-entry data-model catalog validation and diff whitespace check
 passed. No full local suite or live review-store operation was run.
+
+The final review's advisory fixes add bounded operator expiry disposition
+(`review-findings retire-expired`, read-only preview by default, `--apply` to
+retain an `out-of-window:` reason and terminal timestamp). Owned, retried and
+selected work is excluded. Backlog areas exclude unassigned historical/expired
+advice and expose `notesHistorical` and `notesOutOfWindow` separately. Explicit
+live enrollment now covers only actual historical-to-live promotions. Direct
+automatic claims read the caller's `env`; manifest claims ignore the unused
+window/clock. The canonical store doc records that old incident rows keep their
+live-default marker and rely on the age window.
+
+The earlier local full-suite failures are superseded by the reviewed head's
+[green Node 22 and Node 26 full-suite CI run](https://github.com/laceyenterprises/adversarial-review/actions/runs/43169358963)
+at `59ca2bcd63c5ca7f2dc38649459b5eb12f421025`; no inference that all three
+failures also occurred on main is needed. The current base also has a
+[green full-suite run](https://github.com/laceyenterprises/adversarial-review/actions/runs/43166501772)
+at `6a64b9f3a9055f10d4be67ad17820ca345ebf83a`.
+
+Advisory remediation validation: 214 targeted batch, grade, retry, contention,
+state/smoke and closure-latency tests passed; after correcting two fixture
+expectations, the 34 projection/CLI and historical-enrollment tests passed.
+Lint has zero errors (149 existing warnings); contract typecheck, the offline
+research demo, 94-entry catalog validation and whitespace checks passed.
+The initial workspace lacked dependencies; locked `npm ci` restored them.
+No full local suite or live store maintenance was run in this round.
+The watcher claim-loop guard passed all 168 tests in 219 seconds under the
+360-second bound (the initial 120-second bound expired after 89 passing cases).
+The full PR diff also passes whitespace validation after removing a trailing
+blank line from the historical-projection migration.

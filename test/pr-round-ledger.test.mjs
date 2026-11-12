@@ -4,7 +4,7 @@ import './helpers/rate-limit-state-isolation.mjs';
 // and makes the risk-tier budget bind on all of them. Synthetic fixtures only.
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { appendFileSync, mkdtempSync } from 'node:fs';
+import { appendFileSync, mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import {
@@ -28,8 +28,13 @@ import {
   voidPrRound,
 } from '../src/pr-round-ledger.mjs';
 import { buildRemediationOutcomeCommentBody } from '../src/adapters/comms/github-pr-comments/pr-comments.mjs';
-import { main as ledgerCliMain } from '../bin/pr-round-ledger.mjs';
+import { buildPrRoundLedgerView, main as ledgerCliMain } from '../bin/pr-round-ledger.mjs';
 import { main as retriggerReviewMain } from '../src/retrigger-review.mjs';
+import {
+  recordHammerRetryDispatch, refundUnexecutedHammerDispatch, reserveHammerRepairDispatch,
+} from '../src/ama/hammer-retry-cap.mjs';
+import { noWorkVerdict } from './fixtures/execution-verdict.mjs';
+import { DEFAULT_ROUND_BUDGET_BY_RISK } from '../src/kernel/convergence-budget.mjs';
 
 const REPO = 'example-org/example-repo';
 const PR = 42;
@@ -190,6 +195,67 @@ test('the non-blocking streak keeps separate jobs that share a round number', ()
   assert.equal(summarizePRRemediationLedger(rootDir, { repo: REPO, prNumber: PR }).consecutiveNonBlockingRounds, 2);
 });
 
+test('the non-blocking streak follows terminal time when round numbers move backwards', () => {
+  const rootDir = tmpRoot();
+  const completedPaths = [];
+  for (const [index, reviewBody] of [NON_BLOCKING_BODY, BLOCKING_BODY, NON_BLOCKING_BODY].entries()) {
+    const day = index + 1;
+    const { jobPath, job } = createJob(rootDir, { reviewBody, revisionRef: HEAD(day),
+      reviewPostedAt: `2026-01-0${day}T00:00:00.000Z`, maxRemediationRounds: 3 });
+    if (job.nonBlockingOnly) liftNonBlockingCap(jobPath);
+    completedPaths.push(runRound(rootDir, `2026-01-0${day}T01:00:00.000Z`,
+      `2026-01-0${day}T02:00:00.000Z`).completed.jobPath);
+  }
+  for (const [index, jobPath] of completedPaths.entries()) {
+    const job = readFollowUpJob(jobPath);
+    writeFollowUpJob(jobPath, { ...job, remediationPlan: { ...job.remediationPlan,
+      currentRound: [9, 1, 2][index] } });
+  }
+  assert.equal(summarizePRRemediationLedger(rootDir, { repo: REPO, prNumber: PR }).consecutiveNonBlockingRounds, 1);
+});
+
+for (const [riskClass, budget] of Object.entries(DEFAULT_ROUND_BUDGET_BY_RISK)) {
+  test(`CLI charges a legacy exhausted ${riskClass} PR update to the operator before its first ledger write`, () => {
+    const rootDir = tmpRoot();
+    createJob(rootDir, { riskClass, revisionRef: HEAD(1), reviewPostedAt: '2026-01-01T00:00:00.000Z' });
+    const { completed } = runRound(rootDir, '2026-01-01T01:00:00.000Z', '2026-01-01T02:00:00.000Z');
+    const job = readFollowUpJob(completed.jobPath);
+    writeFollowUpJob(completed.jobPath, { ...job, remediationPlan: { ...job.remediationPlan, currentRound: budget } });
+    // Legacy jobs predate both the review-pass and remediation ledger writes.
+    rmSync(prRoundLedgerPath(rootDir, { repo: REPO, prNumber: PR }));
+    assert.equal(summarizePRRemediationLedger(rootDir, { repo: REPO, prNumber: PR }).prRoundLedger, undefined);
+    const before = buildPrRoundLedgerView(rootDir, { repo: REPO, prNumber: PR });
+    assert.equal(before.budget, budget);
+    assert.equal(before.budgetReached, true);
+    assert.match(before.summary, new RegExp(`^${budget} of ${budget} remediation rounds used`, 'u'));
+    const out = capture();
+    assert.equal(ledgerCliMain(['record', '--repo', REPO, '--pr', String(PR), '--kind', 'hq-pr-update',
+      '--round-id', 'hq:legacy-update', '--root-dir', rootDir], { stdout: out, stderr: capture() }), 0);
+    assert.equal(JSON.parse(out.text()).chargedTo, CHARGED_TO.OPERATOR);
+    assert.equal(readPrRoundLedger(rootDir, { repo: REPO, prNumber: PR })[0].chargedTo, CHARGED_TO.OPERATOR);
+  });
+}
+
+for (const record of [recordHammerRetryDispatch, reserveHammerRepairDispatch]) {
+  test(`${record.name} records and refunds the hammer round in its own domain`, () => {
+    const rootDir = tmpRoot();
+    const identity = { domainId: 'synthetic-domain', repo: REPO, prNumber: PR };
+    const options = { dispatchKey: 'domain-key', launchRequestId: 'domain-launch', jobKey: 'review', headSha: 'head' };
+    record(rootDir, identity, options);
+    const entries = readPrRoundLedger(rootDir, identity);
+    assert.equal(entries.length, 1);
+    assert.equal(entries[0].domainId, identity.domainId);
+    assert.equal(entries[0].voided, false);
+    assert.deepEqual(readPrRoundLedger(rootDir, { repo: REPO, prNumber: PR }), []);
+    // Refund recovery can have only the launch ID, without its dispatch key.
+    const { dispatchKey: _dispatchKey, ...refundOptions } = options;
+    assert.equal(refundUnexecutedHammerDispatch(rootDir, identity, { ...refundOptions,
+      executionVerdict: noWorkVerdict(options.launchRequestId) }).refunded, true);
+    assert.equal(readPrRoundLedger(rootDir, identity)[0].voided, true);
+    assert.deepEqual(readPrRoundLedger(rootDir, { repo: REPO, prNumber: PR }), []);
+  });
+}
+
 test('an HQ PR-update and an operator retrigger are recorded and counted; the retrigger is operator-charged', () => {
   const rootDir = tmpRoot();
   const out = capture();
@@ -333,4 +399,17 @@ test('voidPrRound is a no-op for an unknown round and the reader skips torn line
   recordPrRound(rootDir, { repo: REPO, prNumber: PR, roundId: 'hammer:dispatch:k2', kind: PR_ROUND_KINDS.HAMMER });
   assert.deepEqual(readPrRoundLedger(rootDir, { repo: REPO, prNumber: PR }, { logger: null }).map(entry => entry.roundId),
     ['hammer:dispatch:k1', 'hammer:dispatch:k2']);
+});
+
+test('voidPrRound normalizes round IDs exactly as the recorder does', () => {
+  const rootDir = tmpRoot();
+  const identity = { repo: REPO, prNumber: PR };
+  for (const roundId of ['  hammer:whitespace  ', `hammer:${'x'.repeat(350)}  `]) {
+    const { entry } = recordPrRound(rootDir, { ...identity, roundId, kind: PR_ROUND_KINDS.HAMMER });
+    assert.deepEqual(voidPrRound(rootDir, { ...identity, roundId }), { voided: true });
+    assert.equal(readPrRoundLedger(rootDir, identity).find(row => row.roundId === entry.roundId).voided, true);
+    assert.deepEqual(voidPrRound(rootDir, { ...identity, roundId }), { voided: false });
+  }
+  assert.deepEqual(voidPrRound(rootDir, { ...identity, roundId: '  ' }), { voided: false });
+  assert.equal(summarizePrRoundLedger(rootDir, identity).remediationRoundsUsed, 0);
 });

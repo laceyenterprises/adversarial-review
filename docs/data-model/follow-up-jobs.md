@@ -56,7 +56,9 @@ The remediation comment header renders `round <number> of <budget>`, with
 `(operator-charged)` when charged to the operator, followed by a
 `> Round ledger:` summary line. The non-blocking streak
 (`consecutiveNonBlockingRounds`) is keyed per (job, round), so two jobs that
-carry the same round number no longer collapse.
+carry the same round number no longer collapse. It is evaluated in terminal
+timestamp order, with round number breaking timestamp ties; a reseeded or
+operator-overridden round number cannot move a job out of chronological order.
 
 ## Builder authorship recovery
 

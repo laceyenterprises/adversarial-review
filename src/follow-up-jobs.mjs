@@ -1946,7 +1946,7 @@ function summarizePRRemediationLedger(rootDir, { domainId = 'code-pr', repo, prN
     if (!prior || entry.terminalAt > prior.terminalAt) latestTriggerByRound.set(key, entry);
   }
   const orderedTriggers = [...latestTriggerByRound.values()]
-    .sort((a, b) => a.round - b.round || String(a.terminalAt).localeCompare(String(b.terminalAt)));
+    .sort((a, b) => String(a.terminalAt).localeCompare(String(b.terminalAt)) || a.round - b.round);
   let consecutiveNonBlockingRounds = 0;
   for (const entry of orderedTriggers) {
     consecutiveNonBlockingRounds = entry.nonBlockingOnly ? consecutiveNonBlockingRounds + 1 : 0;

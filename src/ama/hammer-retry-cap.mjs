@@ -963,7 +963,7 @@ function recordHammerPrRound(rootDir, identity, options) {
   const roundId = hammerRoundId(options);
   if (!roundId) return;
   try {
-    recordPrRound(rootDir, { repo: identity?.repo, prNumber: identity?.prNumber, roundId,
+    recordPrRound(rootDir, { domainId: identity?.domainId, repo: identity?.repo, prNumber: identity?.prNumber, roundId,
       kind: PR_ROUND_KINDS.HAMMER, headSha: options.headSha || null, source: 'ama-closer',
       launchRequestId: normalizeKey(options.launchRequestId) || null,
       recordedAt: options.now || undefined });
@@ -981,7 +981,7 @@ function voidHammerPrRound(rootDir, identity, options, result, reason) {
       if (launch && entry.kind === PR_ROUND_KINDS.HAMMER && entry.launchRequestId === launch) ids.add(entry.roundId);
     }
     for (const roundId of ids) {
-      voidPrRound(rootDir, { repo: identity?.repo, prNumber: identity?.prNumber, roundId, reason });
+      voidPrRound(rootDir, { domainId: identity?.domainId, repo: identity?.repo, prNumber: identity?.prNumber, roundId, reason });
     }
   } catch (err) {
     console.warn(`[hammer-retry-cap] pr_round_ledger_void_failed ${identity?.repo}#${identity?.prNumber}: ${err?.message || err}`);

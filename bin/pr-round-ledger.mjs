@@ -15,6 +15,7 @@ import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { parseArgs } from 'node:util';
 import { summarizePRRemediationLedger } from '../src/follow-up-jobs.mjs';
+import { DEFAULT_ROUND_BUDGET_BY_RISK } from '../src/kernel/convergence-budget.mjs';
 import {
   CHARGED_TO, PR_ROUND_KINDS, formatPrRoundLedgerSummary, readPrRoundLedger, recordPrRound, voidPrRound,
 } from '../src/pr-round-ledger.mjs';
@@ -34,7 +35,7 @@ export function buildPrRoundLedgerView(rootDir, { repo, prNumber }) {
     byKind: {}, budget: null };
   // The enforced count is the max of the job-derived floor and the ledger.
   const used = Number(ledger.completedRoundsForPR || 0);
-  const budget = summary.budget;
+  const budget = summary.budget ?? DEFAULT_ROUND_BUDGET_BY_RISK[ledger.latestRiskClass] ?? null;
   return {
     repo,
     prNumber,
@@ -46,7 +47,7 @@ export function buildPrRoundLedgerView(rootDir, { repo, prNumber }) {
     operatorCharged: summary.operatorCharged,
     byKind: summary.byKind,
     ledgerRemediationRounds: summary.remediationRoundsUsed,
-    summary: formatPrRoundLedgerSummary({ ...summary, remediationRoundsUsed: used }),
+    summary: formatPrRoundLedgerSummary({ ...summary, budget, remediationRoundsUsed: used }),
     entries: readPrRoundLedger(rootDir, { repo, prNumber }).map(entry => ({
       roundId: entry.roundId, kind: entry.kind, chargedTo: entry.chargedTo, voided: entry.voided,
       headSha: entry.headSha, recordedAt: entry.firstRecordedAt || entry.recordedAt,

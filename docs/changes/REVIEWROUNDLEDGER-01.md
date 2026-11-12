@@ -18,6 +18,11 @@ follow-up daemon stops the job `max-rounds-reached` and hands it to the hammer,
 whichever producer spent the rounds. Remediation comments show the PR-wide
 `round N of B` and a ledger summary.
 
+Final comment-only remediation orders the non-blocking streak by terminal time,
+normalizes record/void round IDs identically, and preserves hammer ledger domain
+identity on charge and refund. The CLI resolves the risk-tier budget before the
+first ledger write, including for exhausted legacy jobs.
+
 ## Interface changes
 
 - New store `data/pr-round-ledger/*.jsonl`; see
@@ -34,6 +39,12 @@ whichever producer spent the rounds. Remediation comments show the PR-wide
   (`chargedTo`, `overBudget`, summary).
 - Tier budgets, strict mode and reviewer prompts are unchanged. `high` already
   has a tier value (2) in `src/kernel/convergence-budget.mjs`.
+- Round IDs are trimmed and truncated to 300 characters for both operations.
+  Store schema, lifecycle states and smoke promises are unchanged.
+- The alleged missing `targetRevisionRef` is already present in the reviewed
+  head's retrigger call. The existing live-head integration test passes through
+  the production request validator and persists the correct request head;
+  no retrigger implementation change is needed.
 
 ## Verification
 
@@ -49,3 +60,19 @@ whichever producer spent the rounds. Remediation comments show the PR-wide
   failed only on this branch pass on their own.
 - `npm run lint` on changed files: 0 errors. `npm run typecheck:contracts`: pass.
   `bash demo/research-finding-walkthrough.sh`: pass.
+- Final remediation: `node --test test/pr-round-ledger.test.mjs
+  test/retrigger-review.test.mjs`: pass (17 ledger tests and 56 retrigger tests).
+  Regressions cover non-monotonic round numbers, legacy exhaustion at all four
+  risk tiers, domain-preserving hammer dispatch/reservation refunds, and round-ID
+  normalization.
+- Final remediation guards: `npm run lint` (0 errors, 149 warnings),
+  `npm run typecheck:contracts`, `node scripts/validate-data-model-catalog.mjs`
+  (96 entries), `bash demo/research-finding-walkthrough.sh` and
+  `git diff --check`: pass. Full local test suite intentionally deferred to
+  PR-head CI.
+- `node test/run-tests.mjs test/follow-up-jobs.test.mjs
+  test/follow-up-pr-ledger.test.mjs`: 188 pass. Broader hammer/watcher file runs
+  exceeded the 60-second and 180-second local bounds; they are not claimed as
+  passing. The ledger regression suite directly covers both hammer recording
+  entrypoints and their domain-specific no-work refunds. Full-file completion
+  remains with PR-head CI.

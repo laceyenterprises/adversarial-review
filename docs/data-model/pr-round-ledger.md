@@ -1,6 +1,6 @@
 # Data Model - Per-PR round ledger (REVIEWROUNDLEDGER-01)
 
-Owner: follow-up remediation queue. Source: `src/pr-round-ledger.mjs`.
+Owner: follow-up remediation queue. Source of truth: `src/pr-round-ledger.mjs`.
 Store: `data/pr-round-ledger/<domain>--<owner__repo lowercased>-pr-<N>.jsonl`.
 
 One append-only JSONL file per (domain, repository, PR). Every producer of a
@@ -13,7 +13,7 @@ different rounds can never collapse into one entry.
 |---|---|
 | `schemaVersion` | `1`. |
 | `op` | `record` or `void`. A `void` uncharges a live round; a later `record` of the same id charges it again. |
-| `roundId` | Stable id. `follow-up:<jobId>:r<round>`, `hammer:dispatch:<dispatchKey>` (or `hammer:lrq:<id>`), `operator-retrigger:<idempotencyKey>`, `review:<head>:<createdAt>`, or the caller's id for `hq-pr-update`. |
+| `roundId` | Stable id, trimmed and truncated to 300 characters on both record and void. `follow-up:<jobId>:r<round>`, `hammer:dispatch:<dispatchKey>` (or `hammer:lrq:<id>`), `operator-retrigger:<idempotencyKey>`, `review:<head>:<createdAt>`, or the caller's id for `hq-pr-update`. |
 | `kind` | Remediation kinds: `follow-up-blocking`, `follow-up-non-blocking`, `final-fix-all`, `conflict-primary`, `hammer`, `hq-pr-update`. Review kinds: `review-pass`, `operator-retrigger`. |
 | `class` | `remediation` (spends the tier budget) or `review` (visibility only). |
 | `chargedTo` | `pipeline` or `operator`. An `operator-retrigger` is always `operator`. A follow-up round run under an operator override, or past the job's budget, is `operator`. A CLI-recorded HQ PR-update after the budget is spent defaults to `operator`. |
@@ -31,6 +31,9 @@ Writers:
 | `retrigger-review` | before the review reset; voided if the reset is refused or throws | `operator-retrigger` |
 | `bin/pr-round-ledger.mjs record --kind hq-pr-update` | an in-place HQ PR-update finished | `hq-pr-update` |
 
+Hammer records and refunds preserve the caller's `domainId`, defaulting to
+`code-pr` when omitted.
+
 Readers:
 
 - `summarizePRRemediationLedger` folds the ledger in. `completedRoundsForPR` is
@@ -45,7 +48,9 @@ Readers:
   count before the cap check and stamps `remediationPlan.prRound` (see
   `follow-up-jobs.md`).
 - `bin/pr-round-ledger.mjs show --repo R --pr N [--json]` prints the enforced
-  count, the budget and per-kind counts.
+  count, the budget and per-kind counts. Before the first ledger write, the
+  budget comes from the latest job's risk tier (or the default medium tier),
+  so exhausted legacy PRs already default HQ updates to an operator charge.
 
 Authority: the ledger counts rounds. It grants no merge, dispatch or re-review
 authority. A torn or unparseable line is skipped with a warning; the job-derived

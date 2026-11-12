@@ -217,11 +217,12 @@ export function recordPrRound(rootDir, {
 /** Uncharge a round that did not run. No-op when the id was never recorded. */
 export function voidPrRound(rootDir, { domainId = 'code-pr', repo, prNumber, roundId, reason = null,
   recordedAt = new Date().toISOString() } = {}) {
-  if (!rootDir || !validIdentity({ repo, prNumber }) || !roundId) return { voided: false };
+  const id = cleanString(roundId, 300);
+  if (!rootDir || !validIdentity({ repo, prNumber }) || !id) return { voided: false };
   const identity = { domainId, repo, prNumber };
-  const live = readPrRoundLedger(rootDir, identity).find(entry => entry.roundId === roundId && !entry.voided);
+  const live = readPrRoundLedger(rootDir, identity).find(entry => entry.roundId === id && !entry.voided);
   if (!live) return { voided: false };
-  appendLine(rootDir, identity, { schemaVersion: PR_ROUND_LEDGER_SCHEMA_VERSION, op: 'void', roundId,
+  appendLine(rootDir, identity, { schemaVersion: PR_ROUND_LEDGER_SCHEMA_VERSION, op: 'void', roundId: id,
     reason: cleanString(reason, 400), recordedAt });
   return { voided: true };
 }

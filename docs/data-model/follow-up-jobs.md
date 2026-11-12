@@ -314,8 +314,8 @@ Failures preserve job completion and leave the stored job available for offline
 replay. Factual-dispute admission is the explicit closure exception described below; other observations change no queue state, retry budget or merge decision.
 
 **Owner:** follow-up remediation queue
-**Store:** `data/follow-up-jobs/{pending,in-progress,completed,failed,stopped}/*.json`, `data/follow-up-jobs/single-review-voids/*.json`, `data/follow-up-jobs/missing-label-events/*.json`
-**Source of truth:** `src/remediation-builder-authorship.mjs`, `src/follow-up-jobs.mjs`, `src/follow-up-branch.mjs`, `src/remediation-unpublished.mjs`, `src/review-mode-selection.mjs`, `src/follow-up-remediation.mjs`, `src/follow-up-retrigger-review-label.mjs`, `src/remediation-quota-hold.mjs`, `src/remediation-claimed-requeue.mjs`, `src/remediation-worker-class-fallback.mjs`, `src/worker-token-pool.mjs`, `src/remediation-round-accounting.mjs`, `src/remediation-infrastructure-refund.mjs`, `src/github-auth-recovery.mjs`, `src/remediation-published-head.mjs`, `src/remediation-closeout.mjs`, `src/remediation-job-ownership.mjs`
+**Store:** `data/follow-up-jobs/{pending,in-progress,completed,failed,stopped}/*.json`, `data/follow-up-jobs/single-review-voids/*.json`, `data/follow-up-jobs/missing-label-events/*.json`, `data/follow-up-jobs/live-pr-owner-scan-cursor.json`
+**Source of truth:** `src/remediation-builder-authorship.mjs`, `src/follow-up-jobs.mjs`, `src/follow-up-branch.mjs`, `src/remediation-unpublished.mjs`, `src/review-mode-selection.mjs`, `src/follow-up-remediation.mjs`, `src/follow-up-retrigger-review-label.mjs`, `src/remediation-quota-hold.mjs`, `src/remediation-claimed-requeue.mjs`, `src/remediation-worker-class-fallback.mjs`, `src/worker-token-pool.mjs`, `src/remediation-round-accounting.mjs`, `src/remediation-infrastructure-refund.mjs`, `src/github-auth-recovery.mjs`, `src/remediation-published-head.mjs`, `src/remediation-closeout.mjs`, `src/remediation-job-ownership.mjs`, `src/remediation-live-pr-owner.mjs`
 **Runtime surface:** `src/comment-only-final-round.mjs`, `src/comment-only-final-round-completion.mjs`, `src/ama-closure-orchestration.mjs`, `src/adapters/comms/github-pr-comments/comment-delivery.mjs`, `src/reviewer-ci-admission.mjs`
 
 ## Simplicity advisory (REVIEWSIMPLE-01)
@@ -403,6 +403,56 @@ reached the ceiling. A completely missing initial job stays with the reviewer
 or reviewer-pass reaper, which can recover the persisted single-review
 decision and PR-wide round budget before creation. No new lifecycle status
 or round allowance is introduced.
+
+## Live PR-owner admission snapshot (REMEDIATIONOWNER-01)
+
+A local follow-up remediation has no HQ launch row, so HQ cannot refuse a PR
+update on its behalf. The follow-up daemon therefore checks before it claims a
+pending job. It runs `hq merge-agent pr-owner --repo <repo> --pr <n> --json`, which
+wraps the same live-launch query (`leased`, `starting` or `running` rows matched by
+PR) that `hq dispatch --pr` uses for its own refusal. If a live PR update,
+closer, repair-in-place epoch or other remediator owns the PR, the job stays in
+`pending` with `livePrOwnerDeferral: { reason: "deferred-live-pr-owner",
+launchRequestId, workerClass, launchStatus, kind, observedAt, since }` and is
+skipped for the rest of the pass. A lookup that fails, times out or returns a
+malformed answer stores `reason: "deferred-live-pr-owner-unknown"` with
+`lookupReason` instead, because unknown ownership is not free.
+
+The check runs before the atomic claim. It consumes no claim, operator override
+or remediation round, and it is re-evaluated on every pass. When HQ reports no
+live owner the field is removed and the claim proceeds normally. An unchanged
+deferral is not rewritten, so `since` keeps the first observation. The check
+never reads, stops or rewrites an in-progress job. One claim spends at most 25
+lookups. At that limit, `claimWithLivePrOwnerGate` persists `{ after: <pending
+filename> }` in `data/follow-up-jobs/live-pr-owner-scan-cursor.json`, using the last
+looked-up job's filename. With `rootDir` supplied, the next claim rotates the
+lexical pending scan after that filename and wraps to earlier files. The cursor
+survives restarts and does not require its named job to remain pending. It is
+removed after a claim or a completed scan. Cached answers are never reused across
+attempts. Missing or malformed cursors restart at the beginning; cursor I/O
+failures log a warning and cannot undo a claim or bypass an ownership lookup.
+Concurrent drains share this scheduling hint, not an ownership lock.
+Callers that pass no lookup, such as tests and standalone deployments,
+keep the previous claim behavior. An HQ CLI that predates the subcommand exits 64
+with `unknown merge-agent subcommand: pr-owner`; that is recorded as
+`lookupReason: "lookup-unsupported"` and defers like any other unknown answer,
+with a warning on each lookup. No lookup answer other than an explicit
+`owner: null` lets a job proceed.
+
+The spawn path asks HQ a second time, immediately before the worker runtime
+starts (after the OAuth, workspace, lifecycle and mergeability gates, which can
+take minutes). If HQ now reports a live owner, or the lookup fails, times out or
+is malformed, the claimed job returns to `pending` through the shared pre-spawn
+requeue: the never-spawned round is dropped, `currentRound` is restored, no
+worker record is written, and an explicit operator retrigger keeps its one-shot
+`operatorOverride`. The pending job carries the same `livePrOwnerDeferral`
+shape, and `consumeNextFollowUpJob` returns `{ consumed: false, reason, owner |
+lookupReason }` naming the owner. The job is skipped for the rest of the pass.
+
+Both lookups read HQ's own live-launch state; this repository adds no second
+ownership store. The remaining window is HQ's to close: a launch HQ admits after
+the spawn-time lookup, or an `hq dispatch --pr` that cannot see a running local
+worker. The agent-os side records that inverse check as its residual risk.
 
 ## Branch and publication contract (REMEDBRANCH-01)
 

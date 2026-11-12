@@ -2524,6 +2524,11 @@ function claimNextFollowUpJob({
   quotaHoldRevalidator = null,
   closerReconciliationOptions = {},
   readPRHeadImpl,
+  // REMEDIATIONOWNER-01: sync claim-time decision built by the consumer from
+  // HQ live-owner lookups. `lookup` returns without claiming so the caller can
+  // read HQ asynchronously and retry; `defer` skips this pending job.
+  livePrOwnerDecision = null,
+  pendingAfter = null,
 } = {}) {
   const reconciliation = { probed: new Set(), options: closerReconciliationOptions };
   ensureFollowUpJobDirs(rootDir);
@@ -2531,7 +2536,10 @@ function claimNextFollowUpJob({
     Array.from(excludedRepoPrKeys || [], (key) => String(key || '').toLowerCase())
   );
 
-  for (const pendingPath of listPendingFollowUpJobPaths(rootDir)) {
+  const pendingPaths = listPendingFollowUpJobPaths(rootDir);
+  const start = pendingAfter ? pendingPaths.findIndex(p => basename(p) > pendingAfter) : -1;
+  const orderedPaths = start > 0 ? [...pendingPaths.slice(start), ...pendingPaths.slice(0, start)] : pendingPaths;
+  for (const pendingPath of orderedPaths) {
     if (delayedPendingPaths?.has?.(pendingPath)) continue;
 
     let pendingJob = null;
@@ -2578,6 +2586,16 @@ function claimNextFollowUpJob({
     const branchBlocked = pendingJob.branchResolution?.state === 'blocked' && !isSettledReviewJob(pendingJob);
     if (branchBlocked
       && Date.parse(pendingJob.branchResolution.retryAfter) > Date.parse(claimedAt)) continue;
+
+    // An observed live HQ launch, or an unreadable owner, holds
+    // this job pending before the claim, so no retrigger override is consumed.
+    const ownerDecision = livePrOwnerDecision?.(pendingJob, pendingPath);
+    if (ownerDecision?.action === 'lookup') return { ownerLookup: ownerDecision.lookup };
+    if (ownerDecision?.action === 'defer') {
+      delayedPendingPaths?.add?.(pendingPath);
+      onDelayedPendingJob?.(pendingPath, pendingJob);
+      continue;
+    }
 
     const inProgressPath = join(getFollowUpJobDir(rootDir, 'inProgress'), basename(pendingPath));
 

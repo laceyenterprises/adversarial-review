@@ -1,0 +1,23 @@
+{
+  "version": 1,
+  "entries": [
+    {
+      "id": "follow-up-live-pr-owner-deferral",
+      "title": "Follow-up live PR-owner deferral",
+      "path": "docs/data-model/follow-up-jobs.md",
+      "store": "data/follow-up-jobs/pending/",
+      "schemaSurface": "src/remediation-live-pr-owner.mjs",
+      "relatedSchemaSurfaces": [
+        "src/follow-up-jobs.mjs",
+        "src/follow-up-remediation.mjs",
+        "scripts/adversarial-follow-up-daemon.mjs"
+      ],
+      "owner": "follow-up daemon",
+      "optionalFields": [
+        "livePrOwnerDeferral: { reason: deferred-live-pr-owner, launchRequestId, workerClass, launchStatus, kind, observedAt, since }",
+        "livePrOwnerDeferral: { reason: deferred-live-pr-owner-unknown, lookupReason, lookupDetail?, observedAt, since }"
+      ],
+      "compatibility": "Additive field on pending jobs only, written before claim or when a never-spawned claimed job returns to pending at the spawn-time recheck, and removed when the owner lookup reports no live owner. No round is charged, an operator override survives, and spawned in-progress jobs are never read or rewritten by this path."
+    }
+  ]
+}

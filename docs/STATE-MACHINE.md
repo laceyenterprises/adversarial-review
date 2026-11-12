@@ -43,6 +43,17 @@ See [the closure runbook](RUNBOOK-ama-closure.md).
 
 # Adversarial Review State Machine Notes
 
+REMEDIATIONOWNER-01 retains the existing follow-up lifecycle: observed live or
+unreadable HQ PR ownership defers before claim, without charging a round.
+Exhausting the 25-lookup budget saves a filename cursor and the next claim
+rotates the pending scan after it, wrapping without reusing previous lookup
+answers. This scheduling hint survives restart and is not ownership proof.
+The spawn path re-asks HQ just before the worker starts; a live or unreadable
+owner returns the claimed job to pending through the existing budget-neutral
+pre-spawn requeue (`in_progress → pending`), keeping an operator override.
+An HQ launch admitted after that read is HQ's admission to refuse.
+Existing lifecycle graph and automated smoke promises are unchanged.
+
 Zero-output admission refusals without a launch move closer dispatch custody to
 `operator-escalated` for that head. The watcher clears the generic slow-retry
 clock, records the operator owner, and pages once per PR/head. Legacy

@@ -1581,6 +1581,16 @@ that no longer lease agy holders. This uses the existing `launching → failed`
 transition; verified live leaders retain their records. Offline coverage is in
 `test/agystalelaunch-01.test.mjs`; existing smoke commands are unchanged.
 
+Follow-up admission defers to observed live HQ PR owners and unreadable
+ownership evidence without leaving `pending` or charging a round. A durable
+filename cursor rotates the scan after each exhausted 25-lookup budget, so later
+jobs receive lookup opportunities across passes and restarts. The spawn path
+re-asks HQ just before the worker starts and returns a claimed job to pending,
+budget neutral, while HQ reports a live or unreadable owner. Offline coverage is in
+`test/remediationowner-01.test.mjs` and `test/remediationowner-01-spawn.test.mjs`. Existing lifecycle states and automated smoke
+commands are unchanged; source validation does not prove deployed exclusivity.
+See the [queue contract](docs/data-model/follow-up-jobs.md#live-pr-owner-admission-snapshot-remediationowner-01).
+
 Closer intents use distinct per-attempt worker IDs. A terminal launch and its
 complete terminal retry chain release closure ownership independently of retained
 directory teardown; live, parked, unknown and replacement owners still hold.

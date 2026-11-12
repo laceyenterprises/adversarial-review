@@ -207,6 +207,7 @@ import {
 import { formatCiCheckList } from './ci-check-format.mjs';
 import { inspectRemediationCiRegression } from './remediation-ci-regression.mjs';
 import { requeueForWorkspaceResume, resumeLostRemediationWorker } from './remediation-worker-resume.mjs';
+import { claimWithLivePrOwnerGate, createLivePrOwnerLookup, deferClaimedJobForLivePrOwner } from './remediation-live-pr-owner.mjs';
 import {
   cancelHqDispatch,
   classifyHqDispatchFailure,
@@ -3130,6 +3131,7 @@ async function consumeNextFollowUpJobWithinRepositoryCycle({
   deliverAlertImpl = deliverAlert,
   healthRouter = null,
   readBuilderEvidenceImpl = readRemediationBuilderEvidence,
+  livePrOwnerLookupImpl = null, // REMEDIATIONOWNER-01: composition roots wire the HQ lookup.
   topPath, loaderImpl,
   log = console,
 } = {}) {
@@ -3146,20 +3148,17 @@ async function consumeNextFollowUpJobWithinRepositoryCycle({
   // an `[claude-code]` PR (reviewerModel=codex) get its OAuth pre-flight
   // pointed at Claude Code's CLI rather than incorrectly blocking on
   // codex auth state — and vice versa.
-  const claimed = claimNextFollowUpJob({
-    rootDir,
-    claimedAt: now(),
-    returnStopped: true,
-    excludedRepoPrKeys,
-    onExcludedRepoPrKey,
-    delayedPendingPaths,
-    onDelayedPendingJob,
-    quotaHoldRevalidator,
-  });
-
-  if (!claimed) {
-    return { consumed: false, reason: 'no-pending-jobs' };
-  }
+  // onClaim reserves repo#pr synchronously with the claim; concurrent drains rely on it.
+  const claim = (claimedAt, livePrOwnerDecision, pendingAfter = null) => {
+    const next = claimNextFollowUpJob({ rootDir, claimedAt, returnStopped: true, excludedRepoPrKeys,
+      onExcludedRepoPrKey, delayedPendingPaths, onDelayedPendingJob, quotaHoldRevalidator, livePrOwnerDecision, pendingAfter });
+    if (next?.job && !next.stopped) onClaim?.(next.job);
+    return next;
+  };
+  const claimed = livePrOwnerLookupImpl ? await claimWithLivePrOwnerGate({ claim,
+    rootDir, lookupImpl: livePrOwnerLookupImpl, observedAt: now(), log }) : claim(now(), null);
+  if (claimed?.ownerLookupBudget) return { consumed: false, reason: 'live-pr-owner-lookup-budget' };
+  if (!claimed) return { consumed: false, reason: 'no-pending-jobs' };
   if (claimed.stopped) claimed.job.remediationPlan.publishedRoundsForPR = summarizePRRemediationLedger(rootDir, claimed.job).publishedRoundsForPR || 0;
   if (claimed.stopped) {
     const stoppedAt = now();
@@ -3192,8 +3191,6 @@ async function consumeNextFollowUpJobWithinRepositoryCycle({
       ...(claimed.finalCapResult ? { finalCapResult: claimed.finalCapResult } : {}),
     };
   }
-
-  onClaim?.(claimed.job);
 
   // Lifecycle gate: stop the bounded loop on any non-open PR state. If
   // the operator already merged or closed the PR there's nothing for
@@ -3627,6 +3624,8 @@ async function consumeNextFollowUpJobWithinRepositoryCycle({
     // REMCONFLICT-01: read live mergeability at dispatch time (src/remediation-conflicted-base.mjs).
     const conflictedBase = hqDispatchEnabled && conflictedBaseGateImpl ? await conflictedBaseGateImpl({ rootDir, job: claimed.job, jobPath: claimed.jobPath, env: jobEnv, execFileImpl, now, log, stopJobImpl: (stop) => stopConsumedJobWithComment({ ...stop, postCommentImpl, now, log }) }) : null;
     if (conflictedBase?.result) return conflictedBase.result;
+    const ownerAtSpawn = await deferClaimedJobForLivePrOwner({ rootDir, claimed, lookupImpl: livePrOwnerLookupImpl, now, delayedPendingPaths, log }); // REMEDIATIONOWNER-01: re-ask HQ at spawn
+    if (ownerAtSpawn) return ownerAtSpawn;
 
     // ARC-08: the health-routed AgentRuntime handles OS or local dispatch and
     // returns the worker descriptor. The subject adapter owns git workspace prep.
@@ -3920,7 +3919,7 @@ async function consumeFollowUpJobsUntilCapacityWithinRepositoryCycle({
   conflictedBaseGateImpl = null,
   guardStackedBaseImpl = guardStackedBase,
   deliverAlertImpl = deliverAlert,
-  healthRouter = null,
+  healthRouter = null, livePrOwnerLookupImpl = null,
   log = console,
 } = {}) {
   const concurrencyCap = normalizeMaxConcurrentFollowUpJobs(maxConcurrent);
@@ -3974,7 +3973,7 @@ async function consumeFollowUpJobsUntilCapacityWithinRepositoryCycle({
         mintClaudeCodeRemediationTokenImpl,
         conflictedBaseGateImpl,
         guardStackedBaseImpl,
-        deliverAlertImpl,
+        deliverAlertImpl, livePrOwnerLookupImpl,
         log,
       }),
     onError: (err) => {
@@ -4106,6 +4105,7 @@ async function main() {
 
     const drain = await consumeFollowUpJobsUntilCapacity({
       resolveRemediationWorkerClassImpl: resolveRemediationWorkerClassWithFallback,
+      livePrOwnerLookupImpl: createLivePrOwnerLookup({ env: process.env }),
     });
     if (isDrainQueueIdle(drain)) {
       console.log('[follow-up-remediation] No pending follow-up jobs to consume.');

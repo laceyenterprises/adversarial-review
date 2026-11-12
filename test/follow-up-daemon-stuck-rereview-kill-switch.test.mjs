@@ -6,6 +6,7 @@ import {
   runFollowUpDaemonIteration,
   resolveStuckRereviewApplyEnabled,
 } from '../scripts/adversarial-follow-up-daemon.mjs';
+import { createLivePrOwnerLookup } from '../src/remediation-live-pr-owner.mjs';
 
 // The `stuck-rereview-apply` tick step is the only part of the follow-up daemon
 // tick that writes review-pipeline state on behalf of a stuck row. Every other
@@ -48,9 +49,19 @@ test('kill switch env var name is stable', () => {
 
 test('follow-up daemon iteration disarms stuck-rereview apply through injected env', async () => {
   const calls = [];
+  const warnings = [];
 
   await runFollowUpDaemonIteration({
     env: { [STUCK_REREVIEW_APPLY_ENABLED_ENV]: '0' },
+    log: { warn: message => warnings.push(message) },
+    createLivePrOwnerLookupImpl: options => createLivePrOwnerLookup({
+      ...options,
+      execFileImpl: async () => {
+        throw Object.assign(new Error('exit 64'), {
+          code: 64, stderr: 'unknown merge-agent subcommand: pr-owner',
+        });
+      },
+    }),
     refreshFollowUpGithubTokenImpl: async () => {
       calls.push('github-token-refresh');
     },
@@ -100,8 +111,10 @@ test('follow-up daemon iteration disarms stuck-rereview apply through injected e
     },
     resolveMaxConcurrentJobsImpl: () => 1,
     writeConfigSignatureStatusImpl: () => null,
-    consumeFollowUpJobsUntilCapacityImpl: async () => {
+    consumeFollowUpJobsUntilCapacityImpl: async ({ livePrOwnerLookupImpl }) => {
       calls.push('consume');
+      assert.deepEqual(await livePrOwnerLookupImpl({ repo: 'example-org/sample-service', prNumber: 1 }),
+        { state: 'unknown', reason: 'lookup-unsupported' });
       return {
         maxConcurrent: 1,
         activeAtStart: 0,
@@ -139,4 +152,6 @@ test('follow-up daemon iteration disarms stuck-rereview apply through injected e
 
   assert.ok(calls.includes('reap-finished-pr'));
   assert.ok(calls.includes('consume'));
+  assert.equal(warnings.length, 1, 'ownership diagnostics use the injected iteration logger');
+  assert.match(warnings[0], /pr-owner is not deployed/u);
 });

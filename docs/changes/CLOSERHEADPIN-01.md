@@ -94,3 +94,9 @@ all 11 `test/smv.test.mjs` cases pass, confirming the unchanged projection hash.
 Lint has zero errors (149 existing warnings); contract typechecking and the
 offline research-finding walkthrough pass. Full-suite validation remains with
 exact-head remote CI.
+
+HAM CI repair: the Argus quota fixture now injects matching process identity
+evidence alongside its synthetic live process group. The restart-adoption test
+uses PID 123, which can identify an unrelated real process on Linux; consulting
+the host incorrectly classified that synthetic child as a recycled process.
+Production process-identity verification is unchanged.

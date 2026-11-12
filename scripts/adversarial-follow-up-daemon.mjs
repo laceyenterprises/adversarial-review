@@ -629,6 +629,7 @@ async function runFollowUpDaemonIteration(args = {}) {
 
 async function runFollowUpDaemonIterationWithinRepositoryCycle({
   env = process.env,
+  log = console,
   refreshFollowUpGithubTokenImpl = refreshFollowUpGithubToken,
   refreshReviewerBrokerTokensImpl = refreshReviewerBrokerTokens,
   reconcileInProgressFollowUpJobsImpl = reconcileInProgressFollowUpJobs,
@@ -819,7 +820,7 @@ async function runFollowUpDaemonIterationWithinRepositoryCycle({
         // REMCONFLICT-01: a CONFLICTING PR's hq dispatch carries --allow-conflicted-base.
         conflictedBaseGateImpl: gateRemediationConflictedBase,
         // REMEDIATIONOWNER-01: one owner per PR branch; HQ live owners defer.
-        livePrOwnerLookupImpl: createLivePrOwnerLookupImpl({ env }),
+        livePrOwnerLookupImpl: createLivePrOwnerLookupImpl({ env, log }),
         shouldStop,
       });
       logTick(

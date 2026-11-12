@@ -27,6 +27,11 @@ behavior: no answer is unknown, and unknown defers. There is no second ownership
 store. HQ admitting a launch after the spawn-time read, or refusing a PR update
 while a local worker runs, is recorded as the agent-os side's residual risk.
 
+The final fix-all pass forwards the daemon iteration's optional logger to the
+HQ lookup. Unsupported-command diagnostics inspect both stderr and stdout,
+including wrappers that emit unrelated stderr alongside the usage error on
+stdout. Both cases retain the existing fail-closed deferral.
+
 ## Interface changes
 
 - New `src/remediation-live-pr-owner.mjs`: `createLivePrOwnerLookup` (runs
@@ -53,6 +58,9 @@ while a local worker runs, is recorded as the agent-os side's residual risk.
   rejects the subcommand with exit 64 and `unknown merge-agent subcommand:
   pr-owner`; that defers as `lookup-unsupported` with a warning. Every failure
   defers.
+- The daemon iteration accepts optional `log` (default `console`) and passes it
+  to the live-owner lookup factory for ownership warnings. No durable fields,
+  lifecycle transitions or smoke promises change.
 
 No new kill or cancel path exists. In-progress jobs are never read or rewritten
 by this check. No CI check, gate, ratchet or label is added.
@@ -101,3 +109,23 @@ by this check. No CI check, gate, ratchet or label is added.
   With the recheck removed, 7 of the 8 fail.
 - `hq merge-agent pr-owner --repo <owner/name> --pr <n> --json` on this host
   returns `{"ok": true, "owner": null, ...}` with exit 0 for a PR with no live owner.
+
+### Final fix-all diagnostic coverage
+
+- Regression cases extend `test/remediationowner-01.test.mjs` to cover usage
+  errors on stderr, stdout, and stdout alongside unrelated stderr, with pending
+  deferral and the typed reason preserved in each case.
+- `test/follow-up-daemon-stuck-rereview-kill-switch.test.mjs` invokes the
+  production lookup through the iteration's consume seam and checks that its
+  warning reaches the injected logger. Both findings reproduced before repair.
+- `node test/run-tests.mjs test/remediationowner-01.test.mjs
+  test/remediationowner-01-spawn.test.mjs
+  test/follow-up-daemon-stuck-rereview-kill-switch.test.mjs
+  test/follow-up-daemon-maintenance-state.test.mjs test/smv.test.mjs` passed:
+  62 tests across five files, including the sandbox state-machine smoke.
+- `node test/run-tests.mjs test/watcher-claim-loop.test.mjs` passed 169/169
+  through `bin/run-bounded.sh --timeout 600`. The earlier combined run hit its
+  240-second bound; the isolated watcher check completed in 238 seconds.
+- `npm run lint` passed with zero errors; `npm run typecheck:contracts`,
+  `node scripts/validate-data-model-catalog.mjs` (95 entries),
+  `bash demo/research-finding-walkthrough.sh` and `git diff --check` passed.

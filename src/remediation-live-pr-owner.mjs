@@ -98,7 +98,7 @@ export function createLivePrOwnerLookup({
         env, timeout: timeoutMs, maxBuffer: 1024 * 1024, encoding: 'utf8',
       }));
     } catch (error) {
-      if (error?.code === 64 && UNSUPPORTED.test(String(error.stderr || ''))) {
+      if (error?.code === 64 && [error.stderr, error.stdout].some(output => UNSUPPORTED.test(String(output || '')))) {
         // HQ offers no answer, so ownership is unknown: defer rather than proceed.
         log.warn?.('[follow-up] hq merge-agent pr-owner is not deployed; deferring remediation until it is');
         return unknown('lookup-unsupported');

@@ -109,23 +109,28 @@ test('createLivePrOwnerLookup asks hq merge-agent pr-owner and treats failures a
 });
 
 test('an HQ CLI without the pr-owner subcommand defers as unknown and warns; it never proceeds', async (t) => {
-  const warnings = [];
-  const lookup = createLivePrOwnerLookup({
-    env: { HQ_BIN: '/synthetic/bin/hq' }, timeoutMs: 1000,
-    log: { ...quiet, warn: message => warnings.push(message) },
-    execFileImpl: async () => { throw Object.assign(new Error('exit 64'), { code: 64, stdout: '',
-      stderr: 'Usage: hq merge-agent rescue <PR#> [options]\n[hq] error: unknown merge-agent subcommand: pr-owner\n' }); },
-  });
-  assert.deepEqual(await lookup({ repo: REPO, prNumber: 4112 }), { state: 'unknown', reason: 'lookup-unsupported' });
-  assert.equal(warnings.length, 1);
+  for (const output of [
+    { stderr: 'Usage: hq merge-agent rescue <PR#> [options]\n[hq] error: unknown merge-agent subcommand: pr-owner\n' },
+    { stdout: '[hq] error: unknown merge-agent subcommand: pr-owner\n' },
+    { stdout: '[hq] error: unknown merge-agent subcommand: pr-owner\n', stderr: 'wrapper diagnostic\n' },
+  ]) {
+    const warnings = [];
+    const lookup = createLivePrOwnerLookup({
+      env: { HQ_BIN: '/synthetic/bin/hq' }, timeoutMs: 1000,
+      log: { ...quiet, warn: message => warnings.push(message) },
+      execFileImpl: async () => { throw Object.assign(new Error('exit 64'), { code: 64, ...output }); },
+    });
+    assert.deepEqual(await lookup({ repo: REPO, prNumber: 4112 }), { state: 'unknown', reason: 'lookup-unsupported' });
+    assert.equal(warnings.length, 1);
 
-  const rootDir = tempRoot(t);
-  const { jobPath } = pendingJob(rootDir, 4112);
-  assert.equal(await claimOnce(rootDir, lookup), null, 'no answer from HQ is not a free branch');
-  const job = readFollowUpJob(jobPath);
-  assert.equal(job.status, 'pending');
-  assert.equal(job.livePrOwnerDeferral.reason, LIVE_PR_OWNER_UNKNOWN);
-  assert.equal(job.livePrOwnerDeferral.lookupReason, 'lookup-unsupported');
+    const rootDir = tempRoot(t);
+    const { jobPath } = pendingJob(rootDir, 4112);
+    assert.equal(await claimOnce(rootDir, lookup), null, 'no answer from HQ is not a free branch');
+    const job = readFollowUpJob(jobPath);
+    assert.equal(job.status, 'pending');
+    assert.equal(job.livePrOwnerDeferral.reason, LIVE_PR_OWNER_UNKNOWN);
+    assert.equal(job.livePrOwnerDeferral.lookupReason, 'lookup-unsupported');
+  }
 });
 
 test('a live PR-update owner defers the remediation job before claim and names the owning launch', async (t) => {

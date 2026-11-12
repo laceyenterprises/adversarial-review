@@ -506,54 +506,57 @@ test('missing holder directory prunes only its owning repository', async () => {
   assert.equal(calls.some(call => call.args.includes('remove')), false);
 });
 
-test('terminal coding branch-holder is torn down and emits release telemetry', async () => {
-  const hqRoot = join(tmpdir(), `agent-os-hq-terminal-${Date.now()}`);
-  const workerId = 'codex-lsh-03-terminal';
-  const launchRequestId = 'lrq_terminal_holder';
-  writeBranchHolderWorker({ hqRoot, workerId, launchRequestId });
-  const err = {
-    stderr: `fatal: 'codex-lsh-03-terminal/LSH-03' is already used by worktree at '${hqRoot}/workers/${workerId}/agent-os'`,
-  };
-  const calls = [];
-  const logs = [];
+for (const wording of ['already used by worktree at', 'already checked out at', 'already checked out in worktree']) {
+  test(`terminal coding branch-holder is torn down and emits release telemetry: ${wording}`, async t => {
+    const hqRoot = join(tmpdir(), `agent-os-hq-terminal-${Date.now()}`);
+    t.after(() => rmSync(hqRoot, { recursive: true, force: true }));
+    const workerId = 'codex-lsh-03-terminal';
+    const launchRequestId = 'lrq_terminal_holder';
+    writeBranchHolderWorker({ hqRoot, workerId, launchRequestId });
+    const err = {
+      stderr: `fatal: 'codex-lsh-03-terminal/LSH-03' is ${wording} '${hqRoot}/workers/${workerId}/agent-os'`,
+    };
+    const calls = [];
+    const logs = [];
 
-  const result = await __testables__.teardownSamePrHammerHolder({
-    existsSyncImpl: () => true,
-    err,
-    prNumber: 777,
-    repo: 'agent-os',
-    headSha: 'abc123',
-    hqPath: '/opt/hq/bin/hq',
-    hqRoot,
-    inspectHolderImpl: async () => ({ safe: true, clean: true, patchEquivalent: true, branch: 'feature' }),
-    execFileImpl: async (cmd, args) => {
-      calls.push({ cmd, args });
-      return { stdout: '', stderr: '' };
-    },
-    readLatestWorkerRunStatusImpl: async ({ launchRequestId: actual }) => {
-      assert.equal(actual, launchRequestId);
-      return {
-        ok: true,
-        row: {
-          launch_request_id: launchRequestId,
-          run_id: `run-${workerId}`,
-          status: 'failed',
-        },
-      };
-    },
-    logger: { warn(line) { logs.push(JSON.parse(line)); } },
+    const result = await __testables__.teardownSamePrHammerHolder({
+      existsSyncImpl: () => true,
+      err,
+      prNumber: 777,
+      repo: 'agent-os',
+      headSha: 'abc123',
+      hqPath: '/opt/hq/bin/hq',
+      hqRoot,
+      inspectHolderImpl: async () => ({ safe: true, clean: true, patchEquivalent: true, branch: 'feature' }),
+      execFileImpl: async (cmd, args) => {
+        calls.push({ cmd, args });
+        return { stdout: '', stderr: '' };
+      },
+      readLatestWorkerRunStatusImpl: async ({ launchRequestId: actual }) => {
+        assert.equal(actual, launchRequestId);
+        return {
+          ok: true,
+          row: {
+            launch_request_id: launchRequestId,
+            run_id: `run-${workerId}`,
+            status: 'failed',
+          },
+        };
+      },
+      logger: { warn(line) { logs.push(JSON.parse(line)); } },
+    });
+
+    assert.equal(result.ok, true);
+    assert.deepEqual(calls.map(call => call.cmd), ['git', '/opt/hq/bin/hq']);
+    assert.deepEqual(calls[1].args, ['worker', 'tear-down', workerId, '--force', '--root', hqRoot]);
+    assert.equal(logs.some(log => (
+      log.event === 'branch_holder_deadlock_released'
+      && log.workerId === workerId
+      && log.workerStatus === 'failed'
+      && log.launchRequestId === launchRequestId
+    )), true);
   });
-
-  assert.equal(result.ok, true);
-  assert.deepEqual(calls.map(call => call.cmd), ['git', '/opt/hq/bin/hq']);
-  assert.deepEqual(calls[1].args, ['worker', 'tear-down', workerId, '--force', '--root', hqRoot]);
-  assert.equal(logs.some(log => (
-    log.event === 'branch_holder_deadlock_released'
-    && log.workerId === workerId
-    && log.workerStatus === 'failed'
-    && log.launchRequestId === launchRequestId
-  )), true);
-});
+}
 
 test('live coding branch-holder is not torn down and falls back to branch-holder backoff', async () => {
   const hqRoot = join(tmpdir(), `agent-os-hq-live-${Date.now()}`);

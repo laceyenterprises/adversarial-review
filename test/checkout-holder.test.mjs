@@ -1,3 +1,4 @@
+import './helpers/load-aware-timeout-fixture.mjs';
 import assert from 'node:assert/strict';
 import { execFileSync, execFile } from 'node:child_process';
 import { mkdtempSync, mkdirSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
@@ -8,6 +9,7 @@ import test from 'node:test';
 import { runHelperStep } from '../bin/hammer-helper-step.mjs';
 import { releaseCheckoutHolder } from '../src/ama/checkout-holder.mjs';
 import { samePrHammerHolderWorktreePaths } from '../src/ama/branch-holder-paths.mjs';
+import { loadAwareTimeoutMs } from '../src/load-aware-timeout.mjs';
 
 const exec = promisify(execFile);
 for (const state of ['terminal', 'terminal-different-basename', 'live', 'dirty', 'uncertain', 'release-failed', 'reacquired']) {
@@ -113,10 +115,11 @@ test('checkout recovery rejects a different repository despite matching director
     execFileSync('git', ['-C', repo, 'init', '-b', 'feature'], { stdio: 'pipe' });
   }
   const commands = [];
+  let errors = '';
   assert.equal(await releaseCheckoutHolder({
     command: 'git', args: ['checkout', 'feature'],
     errors: `fatal: 'feature' is already checked out at '${holder}'`,
-    env: { ...process.env, HAM_HQ_ROOT: root }, stderr: () => {},
+    env: { ...process.env, HAM_HQ_ROOT: root }, stderr: text => { errors += text; },
   }, {
     cwd: closer, execFileImpl: async (cmd, args, opts) => {
       commands.push(cmd);
@@ -125,7 +128,64 @@ test('checkout recovery rejects a different repository despite matching director
     },
   }), false);
   assert.deepEqual(commands, ['git', 'git'], 'repository mismatch must never invoke HQ');
+  assert.match(errors, /retained=.*; repository mismatch/);
 });
+
+for (const state of ['released', 'branch-mismatch', 'detach-unproven', 'id-failed', 'sudo-failed']) {
+  test(`cross-user checkout holder: ${state}`, async t => {
+    const dir = realpathSync(mkdtempSync(join(tmpdir(), 'checkout-owner-')));
+    t.after(() => rmSync(dir, { recursive: true, force: true }));
+    const root = join(dir, 'hq');
+    const holder = join(root, 'workers', 'builder', 'repo');
+    mkdirSync(holder, { recursive: true });
+    const calls = [];
+    let errors = '';
+    const result = await releaseCheckoutHolder({
+      command: 'git', args: ['checkout', 'feature'],
+      errors: `fatal: 'feature' is already checked out at '${holder}'`,
+      env: { HAM_HQ_ROOT: root }, stderr: text => { errors += text; },
+    }, {
+      cwd: dir, statImpl: () => ({ uid: 501 }), callerUid: 502,
+      timeoutMs: base => loadAwareTimeoutMs(base, {
+        loadAvg1m: 3, cpuCount: 1, cpuBusyPercent: 100, enabled: true, maxMultiplier: 6,
+      }),
+      execFileImpl: async (cmd, args, options) => {
+        calls.push({ cmd, args, timeout: options.timeout });
+        if (cmd === 'id') {
+          assert.deepEqual(args, ['-un', '501']);
+          if (state === 'id-failed') throw new Error('no identity');
+          return { stdout: 'placey\n' };
+        }
+        if (cmd === 'sudo') {
+          assert.deepEqual(args.slice(0, 9), ['-A', '-H', '-u', 'placey',
+            'git', '-c', `safe.directory=${holder}`, '-C', holder]);
+          if (state === 'sudo-failed') throw new Error('sudo unavailable');
+        } else if (cmd === 'git') {
+          assert.deepEqual(args.slice(0, 4), ['-c', `safe.directory=${dir}`, '-C', dir]);
+        } else {
+          assert.equal(cmd, 'hq');
+          return { stdout: '{}' };
+        }
+        if (args.includes('--git-common-dir')) return { stdout: dir };
+        if (args.includes('symbolic-ref')) return { stdout: state === 'branch-mismatch' ? 'other' : 'feature' };
+        assert.ok(args.includes('--abbrev-ref'));
+        return { stdout: state === 'detach-unproven' ? 'feature' : 'HEAD' };
+      },
+    });
+    assert.equal(result, state === 'released', errors);
+    assert.ok(calls.every(call => call.timeout === (call.cmd === 'hq' ? 720_000 : 90_000)));
+    assert.match(errors, /recovery probeBudget=90000ms releaseBudget=720000ms/);
+    assert.match(errors, /recovery elapsed=\d+ms; additional to helper command budget/);
+    if (state === 'released') {
+      assert.equal(calls.filter(call => call.cmd === 'sudo').length, 3);
+      assert.equal(calls.filter(call => call.cmd === 'hq').length, 1);
+    } else {
+      assert.match(errors, new RegExp(`retained=.*; ${state === 'branch-mismatch'
+        ? 'branch mismatch' : state === 'detach-unproven' ? 'detach unproven' : 'release unproven'}`));
+      if (state !== 'detach-unproven') assert.ok(calls.every(call => call.cmd !== 'hq'));
+    }
+  });
+}
 
 test('checkout recovery never executes arbitrary mutations or ambiguous diagnostics', async () => {
   for (const args of [['checkout', '-f', 'feature'], ['checkout', '-b', 'feature'], ['reset', '--hard'], ['checkout', '--', 'file']]) {

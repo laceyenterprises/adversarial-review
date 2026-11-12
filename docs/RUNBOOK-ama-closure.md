@@ -709,6 +709,16 @@ The holder and closer directory basenames may differ; Git's common directory
 proves repository identity. Symlinked HQ roots, workers directories and holder
 paths remain refused. The triggering checkout error precedes recovery
 diagnostics, and a failed path preflight explicitly reports retained custody.
+Holder-side Git probes run as the worktree owner's OS user, using
+`sudo -A -H -u OWNER` for cross-user holders and an explicit per-path
+`safe.directory`. Missing owner identity or sudo access retains custody.
+Probe and release deadlines scale through `loadAwareTimeoutMs` from nominal
+15-second and 120-second bounds. Recovery logs these separate per-command
+budgets and its elapsed wall time; they are additional to each checkout
+attempt's helper command budget. Repository mismatch, branch mismatch and
+unproven detach each log an explicit retained-holder reason. The helper's
+terminal failure reason remains `checkout-failed` for compatibility; use
+the retained-holder diagnostic to classify recovery refusals.
 Agent OS owns the terminal/lease/process/cleanliness proofs, salvage refs and
 fenced detach. A successful release permits exactly one checkout retry; live,
 dirty, uncertain or unavailable release evidence stops with the holder named.

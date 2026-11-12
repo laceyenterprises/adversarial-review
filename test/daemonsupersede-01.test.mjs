@@ -12,7 +12,7 @@ import { join } from 'node:path';
 
 import { CLOSER_SUPERSEDE_REASON, closerSupersedeOf, nextAction } from '../src/pr-next-action.mjs';
 import { closureOwnerShadowEvidence, launchSource } from '../src/pr-next-action-consumer.mjs';
-import { closerBootState, supersedeNotBootedCloser } from '../src/ama/closer-supersede.mjs';
+import { closerBootState, supersedeHeadMovedCloser, supersedeNotBootedCloser } from '../src/ama/closer-supersede.mjs';
 import { mergeLeaseAdmissionReason } from '../src/ama/merge-lease-admission.mjs';
 import { maybeDispatchAmaClosureFor } from '../src/ama-closure-orchestration.mjs';
 import { acquireAmaCloserLease, readAmaCloserLease, updateAmaCloserLease } from '../src/ama/closer-lease.mjs';
@@ -299,6 +299,8 @@ function closureArgs(rootDir, { body = CLEAN_BODY, calls, state, headSha = HEAD 
     maybeDispatchAmaCloserImpl: async () => { calls.hammer.push('dispatch'); return { dispatched: false, reason: 'fixture' }; },
     supersedeNotBootedCloserImpl: args => supersedeNotBootedCloser({ ...args, hqPath: 'hq', retryDelaysMs: [],
       execFileImpl: async (bin, argv) => { calls.cancel.push(argv); state.status = 'canceled'; return { stdout: '{"ok":true}' }; } }),
+    supersedeHeadMovedCloserImpl: args => supersedeHeadMovedCloser({ ...args, hqPath: 'hq', retryDelaysMs: [],
+      execFileImpl: async (bin, argv) => { calls.cancel.push(argv); state.status = 'canceled'; return { stdout: '{"ok":true}' }; } }),
     runDaemonCleanMergeAttemptImpl: async args => {
       calls.daemon.push(args.sharedNextAction?.decision);
       return { disposition: 'merged', reason: 'merged', remoteMergedConfirmed: true, mergedAt: OBSERVED };
@@ -372,14 +374,24 @@ test('a failed post-cancel status write and deferred merge retain daemon ownersh
 test('end to end: a review with a finding, or a moved head, never supersedes the admitted hammer', async t => {
   for (const [name, options] of [['finding', { body: FINDING_BODY }], ['head mismatch', { headSha: OLD }]]) {
     const rootDir = scratch(t);
-    seedCloser(rootDir);
+    const identity = seedCloser(rootDir);
     const state = { status: 'admitted' };
     t.mock.restoreAll();
     mockLedger(t, state);
     const calls = { cancel: [], daemon: [], hammer: [] };
     await maybeDispatchAmaClosureFor(closureArgs(rootDir, { calls, state, ...options }));
-    assert.deepEqual(calls.cancel, [], name);
     assert.equal(calls.daemon.filter(decision => closerSupersedeOf(decision)).length, 0, name);
-    assert.equal(state.status, 'admitted', name);
+    assert.equal(calls.cancel.some(argv => argv.includes(CLOSER_SUPERSEDE_REASON)), false, name);
+    if (name === 'finding') {
+      assert.deepEqual(calls.cancel, [], name);
+      assert.equal(state.status, 'admitted', name);
+    } else {
+      // CLOSERHEADPIN-01: the admitted hammer's inputs are pinned to HEAD, so
+      // a moved PR head ends it with its own typed outcome, never the clean-
+      // review supersede, and its lease is not carried to the moved head.
+      assert.deepEqual(calls.cancel, [['dispatch', 'cancel', LRQ, '--reason', 'superseded-head-moved']], name);
+      assert.equal(readAmaCloserLease(rootDir, identity).terminalOutcome, 'superseded-head-moved', name);
+      assert.equal(readAmaCloserLease(rootDir, { ...identity, headSha: OLD }), null, name);
+    }
   }
 });

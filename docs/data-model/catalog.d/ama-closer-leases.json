@@ -36,7 +36,8 @@
       "optionalFields": [
         "watcherStartedAt: UTC process start identity; null/unset when unavailable or legacy"
       ],
-      "processIdentityCompatibility": "DEADWATCHERLEASE-01 final remediation: acquisition captures only positive integer local PIDs and tolerates capture failures with null watcherStartedAt; invalid or missing watcherPid persists as null. Conditional deletion/restoration equates missing/null start identity but rejects different identities; full-snapshot expectedLease updates stay exact. The legacy reaper age selector checks shared start identity before retaining a live PID; verified reuse permits age fallback, matching/unreadable identity retains live custody."
+      "processIdentityCompatibility": "DEADWATCHERLEASE-01 final remediation: acquisition captures only positive integer local PIDs and tolerates capture failures with null watcherStartedAt; invalid or missing watcherPid persists as null. Conditional deletion/restoration equates missing/null start identity but rejects different identities; full-snapshot expectedLease updates stay exact. The legacy reaper age selector checks shared start identity before retaining a live PID; verified reuse permits age fallback, matching/unreadable identity retains live custody.",
+      "closerHeadPin": "CLOSERHEADPIN-01: terminalOutcome adds superseded-head-moved (reclaimable): the closer stood down on head-changed, or the watcher cancelled a not-booted closer whose PR head moved off its pinned head instead of rekeying its lease. Dispatch records gain an optional supersededByHeadMove marker {launchRequestId, headSha, liveHeadSha, reason, observedStatus, supersededAt}. A launch's own world refusal at any head outranks its later closer deferral in the reconciler."
     }
   ]
 }

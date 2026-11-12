@@ -46,8 +46,32 @@ function refused(reason, extra = {}) {
  * Never throws for HQ/ledger failures: an unconfirmed cancel keeps the closer
  * as owner, so the daemon does not merge on that tick.
  */
-export async function supersedeNotBootedCloser({
-  rootDir, repo, prNumber, headSha, reviewedHeadSha, launchRequestId,
+export async function supersedeNotBootedCloser({ headSha, reviewedHeadSha, launchRequestId, ...options } = {}) {
+  if (!launchRequestId || !headSha || reviewedHeadSha !== headSha) return refused('supersede-identity-mismatch');
+  return cancelNotBootedCloser({ ...options, headSha, launchRequestId, reason: CLOSER_SUPERSEDE_REASON,
+    markerField: 'supersededByReview', markerFacts: { reviewedHeadSha }, terminalOutcome: 'superseded' });
+}
+
+/**
+ * CLOSERHEADPIN-01: the PR head moved off the head a not-booted closer's
+ * inputs are pinned to (`pinnedHeadSha`). Such a closer cannot have authored
+ * the new head, so it is ended with the typed `superseded-head-moved` outcome
+ * through the same audited cancel, instead of carrying its lease onto a head
+ * its inputs would refuse. An unconfirmed cancel keeps the closer as owner.
+ */
+export async function supersedeHeadMovedCloser({ pinnedHeadSha, liveHeadSha, launchRequestId, ...options } = {}) {
+  if (!launchRequestId || !pinnedHeadSha || !liveHeadSha || pinnedHeadSha === liveHeadSha) {
+    return refused('supersede-identity-mismatch');
+  }
+  return cancelNotBootedCloser({ ...options, headSha: pinnedHeadSha, launchRequestId,
+    reason: CLOSER_HEAD_MOVED_REASON, markerField: 'supersededByHeadMove',
+    markerFacts: { liveHeadSha }, terminalOutcome: CLOSER_HEAD_MOVED_REASON });
+}
+
+export const CLOSER_HEAD_MOVED_REASON = 'superseded-head-moved';
+
+async function cancelNotBootedCloser({
+  rootDir, repo, prNumber, headSha, launchRequestId, reason, markerField, markerFacts, terminalOutcome,
   recordHeadSha = headSha, hqRoot = process.env.HQ_ROOT, hqPath = resolveHqBin(process.env),
   readLaunchImpl = readLaunchRequestObservationFromLedgerAsync,
   cancelImpl = execHqDispatchCancel, execFileImpl = execFileAsync,
@@ -55,7 +79,6 @@ export async function supersedeNotBootedCloser({
   readLeaseImpl = readAmaCloserLease, updateLeaseImpl = updateAmaCloserLease,
   retryDelaysMs, signal = null, logger = console, now = () => new Date().toISOString(),
 } = {}) {
-  if (!launchRequestId || !headSha || reviewedHeadSha !== headSha) return refused('supersede-identity-mismatch');
   const read = async () => {
     try { return await readLaunchImpl({ rootDir, launchRequestId, signal }); }
     catch { return null; }
@@ -68,12 +91,12 @@ export async function supersedeNotBootedCloser({
   // write after HQ cancels must not turn this launch into a fresh hammer retry.
   // The policy still requires terminal launch evidence before using the marker.
   const at = now();
-  const marker = { launchRequestId, headSha, reviewedHeadSha, reason: CLOSER_SUPERSEDE_REASON,
+  const marker = { launchRequestId, headSha, ...markerFacts, reason,
     observedStatus: null, supersededAt: at };
   try {
     const recorded = updateDispatchRecordImpl(rootDir, { repo, prNumber, headSha: recordHeadSha }, record =>
-      record?.launchRequestId === launchRequestId ? { ...record, supersededByReview: marker } : null);
-    if (recorded?.supersededByReview !== marker) return refused('supersede-record-mismatch');
+      record?.launchRequestId === launchRequestId ? { ...record, [markerField]: marker } : null);
+    if (recorded?.[markerField] !== marker) return refused('supersede-record-mismatch');
   } catch (error) {
     logger?.warn?.(`[ama-closer] supersede marker write failed for ${repo}#${prNumber}: ${error?.message || error}`);
     return refused('supersede-marker-write-failed');
@@ -82,7 +105,7 @@ export async function supersedeNotBootedCloser({
   const ready = closerBootState(await read());
   if (ready !== 'not-booted') return refused(`closer-${ready}`);
   try {
-    await cancelImpl({ hqPath, launchRequestId, reason: CLOSER_SUPERSEDE_REASON, retryDelaysMs,
+    await cancelImpl({ hqPath, launchRequestId, reason, retryDelaysMs,
       hqExecFileImpl: (bin, args, options) => execFileImpl(bin, args, {
         ...options, timeout: HQ_CANCEL_TIMEOUT_MS, ...(signal ? { signal } : {}) }),
       env: { ...process.env, ...(hqRoot ? { HQ_ROOT: hqRoot } : {}) } });
@@ -99,7 +122,7 @@ export async function supersedeNotBootedCloser({
   const confirmedMarker = { ...marker, observedStatus };
   try {
     updateDispatchRecordImpl(rootDir, { repo, prNumber, headSha: recordHeadSha }, record => record && ({
-      ...record, supersededByReview: confirmedMarker, lastObservedStatus: observedStatus, lastObservedAt: at,
+      ...record, [markerField]: confirmedMarker, lastObservedStatus: observedStatus, lastObservedAt: at,
     }));
   } catch (error) {
     logger?.warn?.(`[ama-closer] supersede status write failed for ${repo}#${prNumber}: ${error?.message || error}`);
@@ -108,12 +131,12 @@ export async function supersedeNotBootedCloser({
     const lease = readLeaseImpl(rootDir, { repo, prNumber, headSha: recordHeadSha });
     if (lease?.lrqId === launchRequestId && ['pending', 'dispatched'].includes(lease.status)) {
       updateLeaseImpl({ rootDir, repo, prNumber, headSha: lease.headSha || recordHeadSha,
-        status: 'terminal', terminalOutcome: 'superseded', now: at });
+        status: 'terminal', terminalOutcome, now: at });
     }
   } catch (error) {
     logger?.warn?.(`[ama-closer] supersede lease release failed for ${repo}#${prNumber}: ${error?.message || error}`);
   }
   logger?.log?.(JSON.stringify({ event: 'ama.closer_superseded', repo, pr: prNumber, headSha,
-    launchRequestId, reason: CLOSER_SUPERSEDE_REASON, observedStatus }));
+    launchRequestId, reason, observedStatus }));
   return { superseded: true, launchRequestId, observedStatus, marker: confirmedMarker };
 }

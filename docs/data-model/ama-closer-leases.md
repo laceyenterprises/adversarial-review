@@ -64,14 +64,19 @@ receipt-bearing predecessor lease back by CAS instead of leaving a receipt-less
 `deferred` replacement, including when reclaim throws. A launch-read outage
 is charged through normal admission on every tick before the lease-held return;
 the original bounded wait and once-only page survive restart.
-Rekeys retain
+Only a closer that has booted can be rekeyed by the watcher: a not-booted
+launch cannot have authored the new head, so CLOSERHEADPIN-01 ends it with
+`superseded-head-moved` instead (an unconfirmed cancel keeps the rekey). Rekeys retain
 `rekeyedFromHeadSha` and `supersededHeads` so the current lease can identify
 the original dispatch record after the PR head changes.
 
 The terminal `terminalOutcome` is one of `succeeded`,
 `failed-without-merge`, `deferred`, `superseded`, `pr-merged-externally`,
 `pr-closed-externally`, `no-merge:concurrent-writer`, or
-`no-merge:pr-merged-externally`, `abandoned-holder-dead`, or `abandoned-timeout`. Terminal leases are never demoted in place. TERMLEASE-01 removes a terminal
+`no-merge:pr-merged-externally`, `abandoned-holder-dead`, `abandoned-timeout`, or
+`superseded-head-moved` (CLOSERHEADPIN-01: the closer stood down, or was cancelled
+before boot, because the PR head moved off the head its inputs were pinned to; it is
+reclaimable, so closure re-arms at the new head). Terminal leases are never demoted in place. TERMLEASE-01 removes a terminal
 `superseded`, `failed-without-merge` or `deferred` lease immediately when its
 launch is terminal in the ledger or a matching dispatch record, or the ledger
 confirms the launch is absent. Positive live launch/retry evidence and unreadable

@@ -1444,6 +1444,24 @@ cancelled launch from becoming a fresh hammer retry for that head. A closer
 that boots in the race reads `pr-merged` at lease admission and closes out as
 `already-merged`.
 
+CLOSERHEADPIN-01: a closer lease and the closer's pinned inputs
+(`HAM_TARGET_REMEDIATION_SHA`) name one head. CLR-01 carries a live lease to
+a new PR head so a closer's own push does not orphan it, but a closer that
+has not booted cannot have authored a new head, and the hammer never adopts an
+unreviewed foreign head. So when the PR head moves off a live lease whose
+launch is still `requested`/`admitted`, the watcher uses the DAEMONSUPERSEDE-01
+executor with its own marker and reason: it records `supersededByHeadMove`
+intent, rechecks boot state, runs `hq dispatch cancel --reason
+superseded-head-moved`, confirms the launch ended and settles the lease
+`terminal`/`superseded-head-moved` on its pinned head. That outcome is
+reclaimable, so the ordinary closure path re-arms at the new head (its own
+review and closer). A booted, unreadable or unconfirmed launch keeps the
+CLR-01 rekey. When a booted closer then stands down with `head-changed`, that
+world refusal is the launch's decision at any head: the terminal-audit writer
+does not add a later closer deferral for the same launch (for example a
+closing-status step keyed to the pinned head), and the lease reconciler
+settles `superseded-head-moved` instead of `retryable-stop-reason-unregistered`.
+
 Wake transport preserves the existing reserved/requested/failed outcomes.
 Initial delivery starts a fresh admission budget at reservation, even when the
 original decision deadline (retained in the audit) is already overdue.

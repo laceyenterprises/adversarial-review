@@ -83,6 +83,9 @@ const VALID_TERMINAL_OUTCOMES = new Set([
   'no-merge:pr-merged-externally',
   'abandoned-holder-dead',
   'abandoned-timeout',
+  // CLOSERHEADPIN-01: the closer stood down because the PR head moved off the
+  // head its inputs were pinned to. No merge; closure re-arms at the new head.
+  'superseded-head-moved',
 ]);
 
 // These attempts spent no closure authority. Retry admission remains owned by
@@ -91,7 +94,7 @@ export const AMA_CLOSER_RECLAIMABLE_TERMINAL_OUTCOMES = new Set([
   ...RETRYABLE_DEFERRAL_OUTCOMES,
   'failed-without-merge', 'deferred', 'superseded',
   'pr-closed-externally', 'no-merge:concurrent-writer',
-  'abandoned-holder-dead', 'abandoned-timeout',
+  'abandoned-holder-dead', 'abandoned-timeout', 'superseded-head-moved',
 ]);
 
 // Shared with dispatch-closer so retry/poll changes also update the reclaim
@@ -239,7 +242,7 @@ function isCurrentAmaCloserLeaseWithinRepositoryState(rootDir, lease) {
 export function isReclaimableTerminalAmaCloserLease(lease, { launchStatusProbe, dispatchRecord } = {}) {
   if (lease?.status !== TERMINAL
     || ![...RETRYABLE_DEFERRAL_OUTCOMES, 'superseded', 'failed-without-merge', 'deferred',
-      'abandoned-holder-dead', 'abandoned-timeout'].includes(lease.terminalOutcome)) return false;
+      'abandoned-holder-dead', 'abandoned-timeout', 'superseded-head-moved'].includes(lease.terminalOutcome)) return false;
   if (launchRequestParked(launchStatusProbe)) return false;
   const inFlight = launchRequestInFlight(launchStatusProbe);
   if (inFlight === true || launchStatusProbe?.retryChainUnreadable) return false;

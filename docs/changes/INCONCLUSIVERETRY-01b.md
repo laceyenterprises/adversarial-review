@@ -46,6 +46,10 @@ only the launch-level failures that registry cannot see.
   kind is `conflict` or `unavailable`. `bin/hammer-conflict-primary.mjs` exits
   75 when the proof could not run.
 - No CI check, label, gate or live action.
+- Final comment-only remediation: `refundInconclusiveExhaustion` defaults an
+  omitted `now` to `Date.now()`. `evaluateCloserInconclusiveRetryGate` accepts
+  epoch milliseconds as well as ISO timestamps, preserving backoff before its
+  deadline. Store shapes, lifecycle transitions and smoke promises are unchanged.
 
 ## Verification
 
@@ -63,3 +67,15 @@ All test commands ran under the netguard prefix with
   passes.
 
 The rendered hammer prompt stays under its 60 KiB budget.
+
+Final comment-only remediation adds regressions for an omitted refund timestamp
+and for ISO/numeric retry timestamps before, at and after the deadline. Both new
+tests fail against the original helpers.
+
+- `bin/run-bounded.sh --timeout 300 -- node test/run-tests.mjs test/inconclusiveretry-01b.test.mjs test/watcher-claim-loop.test.mjs`:
+  182 passed, 0 failed.
+- `npm run lint`: 0 errors (149 existing warnings).
+- `npm run typecheck:contracts`, `bash demo/research-finding-walkthrough.sh`,
+  `node scripts/validate-data-model-catalog.mjs` (94 entries) and
+  `git diff --check`: passed.
+- Full-suite validation remains with PR-head CI.

@@ -99,6 +99,21 @@ test('config loader exposes the tunable with defaults', t => {
   assert.deepEqual(cfg.closerInconclusiveRetry, { surfaceAfterAttempts: 3, backoffBaseMs: 300_000, backoffMaxMs: 3_600_000 });
 });
 
+test('retry gate enforces the same backoff for ISO and numeric timestamps', () => {
+  const due = Date.parse('2026-11-01T00:02:00.000Z');
+  const entry = { nextAttemptAt: new Date(due).toISOString() };
+  const doc = { heads: { [HEAD]: entry } };
+  for (const offset of [-60_000, 0, 60_000]) {
+    const nowMs = due + offset;
+    for (const now of [nowMs, new Date(nowMs).toISOString()]) {
+      const result = evaluateCloserInconclusiveRetryGate(doc, { headSha: HEAD, now });
+      assert.equal(result.wait, offset < 0);
+      assert.equal(result.retryAfterMs, Math.max(0, -offset));
+      assert.equal(result.entry, entry);
+    }
+  }
+});
+
 function dispatchArgs(root, dispatchedAt, overrides = {}) {
   const user = userInfo().username;
   return {
@@ -249,6 +264,22 @@ function exhaustedLedger(root, launches) {
 }
 
 const R07 = { row: 'R07-stop', reason: 'retry-exhausted', head: HEAD };
+
+test('exhaustion refunds use the current time when called without now', t => {
+  const root = scratch(t);
+  const identity = exhaustedLedger(root, ['lrq_default_time']);
+  recordCloserInconclusiveRetry(root, identity, { headSha: HEAD, launchRequestId: 'lrq_default_time',
+    reason: 'checkout-failed', now: minutes(0) });
+  const before = Date.now();
+  const result = refundInconclusiveExhaustion({ rootDir: root, ...identity });
+  const after = Date.now();
+  assert.equal(result.recovered, true);
+  assert.equal(result.refunded, 1);
+  const ledger = readHammerRetryCapLedger(root, identity);
+  for (const key of ['attemptCount', 'targetAttemptCount', 'lifetimeAttemptCount']) assert.equal(ledger[key], 0, key);
+  const refundedAt = Date.parse(ledger.updatedAt);
+  assert.ok(refundedAt >= before && refundedAt <= after, 'refund persists the current timestamp');
+});
 
 test('site 2: exhaustion reached only through inconclusive attempts does not exhaust', async t => {
   const root = scratch(t);

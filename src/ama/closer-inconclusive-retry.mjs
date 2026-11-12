@@ -181,7 +181,8 @@ export function markCloserInconclusiveRetrySurfaced(rootDir, identity, { headSha
 /** Pure: must the next closer dispatch for this head wait for its backoff? */
 export function evaluateCloserInconclusiveRetryGate(doc, { headSha, now }) {
   const entry = doc?.heads?.[headSha] || null;
-  const retryAfterMs = entry ? Date.parse(entry.nextAttemptAt) - Date.parse(now) : NaN;
+  const nowMs = typeof now === 'number' ? now : Date.parse(now);
+  const retryAfterMs = entry ? Date.parse(entry.nextAttemptAt) - nowMs : NaN;
   return { wait: Number.isFinite(retryAfterMs) && retryAfterMs > 0, retryAfterMs: Math.max(0, retryAfterMs || 0), entry };
 }
 

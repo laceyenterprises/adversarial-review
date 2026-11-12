@@ -9,7 +9,7 @@ export const CLOSURE_BUDGET_NEXT_ACTION = 'inspect the latest closer audit for t
 // INCONCLUSIVERETRY-01b: a budget spent only by launches the owner recorded as
 // inconclusive was never spent. Refund those charges in full so the ordinary
 // closer path, with every merge check, resumes. Any real charge keeps it spent.
-export function refundInconclusiveExhaustion({ rootDir, repo, prNumber, now, readLedgerImpl = readHammerRetryCapLedger,
+export function refundInconclusiveExhaustion({ rootDir, repo, prNumber, now = Date.now(), readLedgerImpl = readHammerRetryCapLedger,
   refundImpl = refundCloserSelfError, readRetriesImpl = readCloserInconclusiveRetries } = {}) {
   const identity = { repo, prNumber };
   const ledger = readLedgerImpl(rootDir, identity);

@@ -12,7 +12,8 @@ import {
   ensureReviewStateSchema,
   requestReviewRereview,
 } from './review-state.mjs';
-import { isActiveFollowUpJobStatus } from './follow-up-jobs.mjs';
+import { isActiveFollowUpJobStatus, summarizePRRemediationLedger } from './follow-up-jobs.mjs';
+import { CHARGED_TO, PR_ROUND_KINDS, formatPrRoundLedgerSummary, recordPrRound, voidPrRound } from './pr-round-ledger.mjs';
 import { bumpRemediationBudget, findLatestFollowUpJob } from './operator-retrigger-helpers.mjs';
 import {
   EX_DATAERR,
@@ -297,6 +298,7 @@ function makeAuditRow({
   targetRevisionRef = null,
   staleFollowUpStopped = false,
   activeReviewReset = null,
+  prRoundLedger = null,
 }) {
   const subjectIdentity = buildCodePrSubjectIdentity({
     repo,
@@ -321,6 +323,30 @@ function makeAuditRow({
     exactHeadNow,
     staleFollowUpStopped,
     activeReviewReset,
+    ...(prRoundLedger ? { prRoundLedger } : {}),
+  };
+}
+
+// REVIEWROUNDLEDGER-01: an operator retrigger is a review pass charged to the
+// operator on the per-PR round ledger, and the audit row says whether it ran
+// past the PR's budget. It is recorded before the reset so it is never free; a
+// refused reset voids it.
+function recordOperatorRetriggerRound({ rootDir, repo, prNumber, idempotencyKey, operator, headSha, reason,
+  recordImpl, summarizeImpl }) {
+  const roundId = `operator-retrigger:${idempotencyKey}`;
+  recordImpl(rootDir, { repo, prNumber, roundId, kind: PR_ROUND_KINDS.OPERATOR_RETRIGGER,
+    chargedTo: CHARGED_TO.OPERATOR, actor: operator, headSha, source: 'retrigger-review', reason });
+  const ledger = summarizeImpl(rootDir, { repo, prNumber });
+  const budget = ledger?.prRoundLedger?.budget ?? null;
+  const used = Number(ledger?.completedRoundsForPR || 0);
+  return {
+    roundId,
+    chargedTo: CHARGED_TO.OPERATOR,
+    remediationRoundsUsed: used,
+    budget,
+    overBudget: budget !== null && used >= budget,
+    summary: ledger?.prRoundLedger
+      ? formatPrRoundLedgerSummary({ ...ledger.prRoundLedger, remediationRoundsUsed: used }) : null,
   };
 }
 
@@ -428,6 +454,9 @@ async function main(argv, {
   waitForReviewerExitImpl = waitForReviewerExit,
   isPgidAliveImpl = isPgidAlive,
   fetchCurrentHeadShaImpl = fetchCurrentPrHeadSha,
+  recordRoundImpl = recordPrRound,
+  voidRoundImpl = voidPrRound,
+  summarizeLedgerImpl = summarizePRRemediationLedger,
 } = {}) {
   let parsed;
   try {
@@ -821,6 +850,20 @@ async function main(argv, {
     }
   }
 
+  let prRoundLedger;
+  try {
+    prRoundLedger = recordOperatorRetriggerRound({ rootDir, repo: values.repo, prNumber: values.pr,
+      idempotencyKey, operator, headSha: targetRevisionRef, reason,
+      recordImpl: recordRoundImpl, summarizeImpl: summarizeLedgerImpl });
+  } catch (err) {
+    stderr.write(`error: could not record the operator retrigger on the PR round ledger: ${err.message}\n`);
+    return EXIT_RUNTIME;
+  }
+  if (prRoundLedger.overBudget) {
+    stderr.write(`note: ${values.repo}#${values.pr} is past its round budget `
+      + `(${prRoundLedger.remediationRoundsUsed}/${prRoundLedger.budget}); this retrigger is operator-charged.\n`);
+  }
+
   let result;
   try {
     result = rereview({
@@ -832,11 +875,23 @@ async function main(argv, {
       explicitReviewRequest: { requestId: idempotencyKey, actor: operator },
     });
   } catch (err) {
+    try {
+      voidRoundImpl(rootDir, { repo: values.repo, prNumber: values.pr, roundId: prRoundLedger.roundId,
+        reason: 'rereview-failed' });
+    } catch (voidErr) {
+      stderr.write(`warning: could not void the failed retrigger round: ${voidErr.message}\n`);
+    }
     stderr.write(`error: rereview failed: ${err.message}\n`);
     return EXIT_RUNTIME;
   }
 
   if (!result.triggered && result.status !== 'already-pending') {
+    try {
+      voidRoundImpl(rootDir, { repo: values.repo, prNumber: values.pr, roundId: prRoundLedger.roundId,
+        reason: `refused:not-eligible:${result.reason || 'unknown'}` });
+    } catch (err) {
+      stderr.write(`warning: could not void the refused retrigger round: ${err.message}\n`);
+    }
     const row = makeAuditRow({
       ...baseAudit,
       priorMaxRounds: budgetResult?.priorMaxRounds ?? latestJob?.job?.remediationPlan?.maxRounds ?? null,
@@ -866,6 +921,7 @@ async function main(argv, {
     exactHeadNow: values['exact-head-now'],
     staleFollowUpStopped,
     activeReviewReset,
+    prRoundLedger,
   });
   if (!appendTerminalAuditRow({ appendAuditRow, auditRootDir, row, stderr })) {
     return EXIT_RUNTIME;

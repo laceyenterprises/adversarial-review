@@ -1,0 +1,31 @@
+{
+  "version": 1,
+  "entries": [
+    {
+      "id": "pr-round-ledger",
+      "title": "Per-PR round ledger",
+      "path": "docs/data-model/pr-round-ledger.md",
+      "store": "data/pr-round-ledger/*.jsonl",
+      "schemaSurface": "src/pr-round-ledger.mjs",
+      "relatedSchemaSurfaces": [
+        "src/follow-up-jobs.mjs",
+        "src/ama/hammer-retry-cap.mjs",
+        "src/retrigger-review.mjs",
+        "bin/pr-round-ledger.mjs"
+      ],
+      "owner": "follow-up remediation queue",
+      "authority": "Counts review and remediation rounds; grants no merge, dispatch or re-review authority. The job-derived count remains a floor."
+    },
+    {
+      "id": "follow-up-pr-round-stamp",
+      "title": "Follow-up PR-wide round stamp",
+      "path": "docs/data-model/follow-up-jobs.md",
+      "store": "data/follow-up-jobs/{in-progress,completed,failed,stopped}/*.json",
+      "schemaSurface": "src/follow-up-jobs.mjs",
+      "relatedSchemaSurfaces": ["src/adapters/comms/github-pr-comments/pr-comments.mjs"],
+      "owner": "follow-up remediation queue",
+      "optionalField": "remediationPlan.prRound: { jobRound, number, budget, tierBudget, kind, chargedTo, summary }",
+      "compatibility": "Additive. Jobs claimed before this field render the legacy currentRound/maxRounds label."
+    }
+  ]
+}

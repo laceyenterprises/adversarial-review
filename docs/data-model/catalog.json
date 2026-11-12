@@ -2,6 +2,21 @@
   "version": 1,
   "entries": [
     {
+      "id": "pr-round-ledger",
+      "title": "Per-PR round ledger",
+      "path": "docs/data-model/pr-round-ledger.md",
+      "store": "data/pr-round-ledger/<domain>--<owner__repo lowercased>-pr-<N>.jsonl",
+      "schemaSurface": "src/pr-round-ledger.mjs",
+      "relatedSchemaSurfaces": [
+        "src/follow-up-jobs.mjs",
+        "src/ama/hammer-retry-cap.mjs",
+        "src/retrigger-review.mjs",
+        "bin/pr-round-ledger.mjs"
+      ],
+      "owner": "follow-up remediation queue",
+      "compatibility": "Append-only schema version 1; record and void normalize round IDs identically. Hammer records and refunds retain the caller domain. Job-derived counts remain a floor, and the CLI resolves the risk-tier budget before the first ledger write."
+    },
+    {
       "id": "no-merge-hold-receipts",
       "title": "No-Merge Hold Receipts",
       "path": "docs/data-model/no-merge-hold-receipts.md",

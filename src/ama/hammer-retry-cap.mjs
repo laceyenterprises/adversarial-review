@@ -30,6 +30,7 @@ import { validNoWorkVerdict } from '../execution-verdict.mjs';
 import { join } from 'node:path';
 
 import { writeFileAtomic } from '../atomic-write.mjs';
+import { PR_ROUND_KINDS, readPrRoundLedger, recordPrRound, voidPrRound } from '../pr-round-ledger.mjs';
 import { deferOverload } from '../overload-deferral.mjs';
 import {
   DEFAULT_RISK_CLASS,
@@ -947,14 +948,57 @@ function mutateHammerLedger(rootDir, identity, mutate) {
   } finally { closeSync(fd); }
 }
 
+// REVIEWROUNDLEDGER-01: a hammer pass is a remediation round on the PR's
+// per-PR round ledger. Keyed by the dispatch idempotency key (shared by the
+// reservation, confirmed-launch and receipt-recovery paths) so one dispatch
+// charges one round; best-effort, the hammer is already live.
+function hammerRoundIds({ launchRequestId, dispatchKey } = {}) {
+  const launch = normalizeKey(launchRequestId);
+  return [dispatchKey ? `hammer:dispatch:${dispatchKey}` : null, launch ? `hammer:lrq:${launch}` : null]
+    .filter(Boolean);
+}
+const hammerRoundId = options => hammerRoundIds(options)[0] || null;
+
+function recordHammerPrRound(rootDir, identity, options) {
+  const roundId = hammerRoundId(options);
+  if (!roundId) return;
+  try {
+    recordPrRound(rootDir, { domainId: identity?.domainId, repo: identity?.repo, prNumber: identity?.prNumber, roundId,
+      kind: PR_ROUND_KINDS.HAMMER, headSha: options.headSha || null, source: 'ama-closer',
+      launchRequestId: normalizeKey(options.launchRequestId) || null,
+      recordedAt: options.now || undefined });
+  } catch (err) {
+    console.warn(`[hammer-retry-cap] pr_round_ledger_record_failed ${identity?.repo}#${identity?.prNumber}: ${err?.message || err}`);
+  }
+}
+
+function voidHammerPrRound(rootDir, identity, options, result, reason) {
+  if (!result?.refunded) return result;
+  try {
+    const launch = normalizeKey(options?.launchRequestId);
+    const ids = new Set(hammerRoundIds(options));
+    for (const entry of readPrRoundLedger(rootDir, identity)) {
+      if (launch && entry.kind === PR_ROUND_KINDS.HAMMER && entry.launchRequestId === launch) ids.add(entry.roundId);
+    }
+    for (const roundId of ids) {
+      voidPrRound(rootDir, { domainId: identity?.domainId, repo: identity?.repo, prNumber: identity?.prNumber, roundId, reason });
+    }
+  } catch (err) {
+    console.warn(`[hammer-retry-cap] pr_round_ledger_void_failed ${identity?.repo}#${identity?.prNumber}: ${err?.message || err}`);
+  }
+  return result;
+}
+
 export function recordHammerRetryDispatch(rootDir, identity, options = {}) {
-  return mutateHammerLedger(rootDir, identity, () => recordHammerRetryDispatchUnlocked(rootDir, identity, options));
+  const result = mutateHammerLedger(rootDir, identity, () => recordHammerRetryDispatchUnlocked(rootDir, identity, options));
+  recordHammerPrRound(rootDir, identity, options);
+  return result;
 }
 
 // Safety-stop repair spends the existing budget before submission. An uncertain
 // submission keeps its charge; it must never mint a second attempt after a crash.
 export function reserveHammerRepairDispatch(rootDir, identity, options) {
-  return mutateHammerLedger(rootDir, identity, () => {
+  const reserved = mutateHammerLedger(rootDir, identity, () => {
     const ledger = readHammerRetryCapLedger(rootDir, identity);
     if (ledger?.__corrupt) throw new Error('corrupt hammer retry ledger');
     if (ledger?.chargedDispatchKeys?.includes(options.dispatchKey)) return false;
@@ -968,6 +1012,8 @@ export function reserveHammerRepairDispatch(rootDir, identity, options) {
     }
     return true;
   });
+  if (reserved) recordHammerPrRound(rootDir, identity, options);
+  return reserved;
 }
 
 export function markHammerRetryCapExhausted(rootDir, identity, options = {}) {
@@ -979,7 +1025,9 @@ export function refundHammerRetryDispatch(rootDir, identity, options = {}) {
 }
 
 export function refundUnexecutedHammerDispatch(rootDir, identity, options = {}) {
-  return mutateHammerLedger(rootDir, identity, () => refundUnexecutedHammerDispatchUnlocked(rootDir, identity, options));
+  return voidHammerPrRound(rootDir, identity, options,
+    mutateHammerLedger(rootDir, identity, () => refundUnexecutedHammerDispatchUnlocked(rootDir, identity, options)),
+    'hammer-dispatch-unexecuted');
 }
 
 // HAMSELFERRORS-01: refund only the recorded charged launch, atomically.

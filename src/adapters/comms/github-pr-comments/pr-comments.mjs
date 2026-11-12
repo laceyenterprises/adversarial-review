@@ -1,4 +1,5 @@
 import { loadAwareTimeoutMs } from '../../../load-aware-timeout.mjs';
+import { formatPrRoundLedgerSummary } from '../../../pr-round-ledger.mjs';
 import { meteredExecFile } from '../../../metered-gh.mjs';
 import { filterGitHubBody } from '../../../github-outbound-body.mjs';
 import { classifyRemediationBlockers, operationalBlockerOwner } from '../../../remediation-blocker-ownership.mjs';
@@ -610,7 +611,14 @@ function buildRemediationOutcomeCommentBody({
 }) {
   const round = Number(job?.remediationPlan?.currentRound || 0) || 1;
   const maxRounds = Number(job?.remediationPlan?.maxRounds || 0) || null;
-  const roundLabel = maxRounds ? `${round} of ${maxRounds}` : String(round);
+  // REVIEWROUNDLEDGER-01: the claim stamps the PR-wide round number from the
+  // per-PR round ledger. The job's own `currentRound` restarts for closure
+  // hand-off jobs, so it is only the fallback for jobs claimed before the stamp.
+  const prRound = job?.remediationPlan?.prRound;
+  const stamped = prRound && Number(prRound.jobRound) === round && Number(prRound.number) > 0;
+  const roundLabel = stamped
+    ? `${prRound.number} of ${prRound.budget ?? '?'}${prRound.chargedTo === 'operator' ? ' (operator-charged)' : ''}`
+    : maxRounds ? `${round} of ${maxRounds}` : String(round);
   const headerClass = workerClass || 'unknown';
   const marker = buildRemediationOutcomeCommentMarker({
     jobId: job?.jobId,
@@ -633,6 +641,9 @@ function buildRemediationOutcomeCommentBody({
   };
   const harness = String(workerClass || execution.workerClass || 'unknown').replace(/^remediator-/, '');
   lines.push(`> Remediator: ${harness} · ${execution.resolvedModel || execution.model || 'unknown'} · ${execution.resolvedReasoningLevel || 'none'}`);
+  if (stamped && prRound.summary) {
+    lines.push(`> Round ledger: ${sanitizeInlineText(formatPrRoundLedgerSummary(prRound.summary), 400)}`);
+  }
   lines.push('');
 
   if (action === 'refunded') {

@@ -27,6 +27,39 @@ write null and return no top-level result. Consume emits one structured warning
 `remediation.final_cap_operator_action_required` containing the result when it
 receives a cap refusal. The removed pending file prevents repeated-poll notices.
 
+## PR-wide round numbering and budget (REVIEWROUNDLEDGER-01)
+
+The claim reads the per-PR round ledger (`pr-round-ledger.md`) through
+`summarizePRRemediationLedger`, which counts rounds from every producer. For a
+normal follow-up job the claim lifts `remediationPlan.currentRound` to
+`max(currentRound, settled PR rounds + rounds this job already spawned)` before
+the `currentRound >= maxRounds` cap. A PR whose budget was spent by a hammer
+pass, an HQ PR-update or another job therefore stops `max-rounds-reached` and
+takes the existing hammer hand-off. The stop reason appends the ledger summary.
+Closure hand-off jobs (`final-fix-all`, `conflict-primary`) keep their own
+one-round cap: they are the closure path. A job with
+`nextAction.operatorOverride: true` is never lifted; its round is charged to
+the operator.
+
+The claim also stamps `remediationPlan.prRound`:
+
+| Field | Contract |
+|---|---|
+| `jobRound` | The job's `currentRound` the stamp belongs to; the comment ignores a stale stamp. |
+| `number` | PR-wide remediation round number, this round included. |
+| `budget` | The job's `maxRounds`, or the risk-tier budget for a closure hand-off job. |
+| `tierBudget` | `ROUND_BUDGET_BY_RISK_CLASS[riskClass]`. |
+| `kind`, `chargedTo` | The ledger kind and charge this round records at spawn. |
+| `summary` | Rounds used, review passes, operator-charged count and per-kind counts. |
+
+The remediation comment header renders `round <number> of <budget>`, with
+`(operator-charged)` when charged to the operator, followed by a
+`> Round ledger:` summary line. The non-blocking streak
+(`consecutiveNonBlockingRounds`) is keyed per (job, round), so two jobs that
+carry the same round number no longer collapse. It is evaluated in terminal
+timestamp order, with round number breaking timestamp ties; a reseeded or
+operator-overridden round number cannot move a job out of chronological order.
+
 ## Builder authorship recovery
 
 Grok subject-policy refusals before spawn, including after an assignment

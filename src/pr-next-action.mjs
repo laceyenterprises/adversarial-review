@@ -407,6 +407,14 @@ function selectRow(facts, options = {}) {
   if (review.live) {
     return { row: 'R03-live-owner', action: 'review', actor: 'reviewer', reason: 'live-owner', deadlineKind: 'liveDispatched', queue: 'owned' };
   }
+  // Repair reservation is durable branch custody while synchronous provision
+  // or publication is in flight. It reuses remediation's owner and never
+  // grants review/merge eligibility. Explicit holds and live owners win above.
+  if (progress?.repairEpoch?.id && !progress.repairEpoch.reviewHead && !progress.repairEpoch.terminalAt) {
+    return { row: 'R03-live-owner', action: 'remediate', actor: 'remediator',
+      reason: 'repair-in-place-owned', deadlineKind: 'liveDispatched', queue: 'owned',
+      refs: [`repair-epoch:${progress.repairEpoch.id}`] };
+  }
   // R04: ownership reconciliation. Unreadable lease/launch evidence never
   // licenses a speculative launch; the recovery owner re-reads it. A launch
   // needs this head's lease, so with no lease an unreadable ledger owns nothing.

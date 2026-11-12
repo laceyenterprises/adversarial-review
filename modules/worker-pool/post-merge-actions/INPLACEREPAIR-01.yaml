@@ -1,0 +1,11 @@
+operator_steps:
+  - description: >-
+      After both review-service and companion dispatch changes merge, float and
+      load through the normal service-owner activation path. The runtime owner
+      runs hq merge-agent rescue <PR> --apply on the next exhausted pull request
+      and records the original branch, repair epoch, worker, publication,
+      re-review and merge receipts. It must merge on its own branch without a
+      new pull request. Observe 24 hours with no replacement pull request opened
+      to escape budgets. The command below displays these instructions only.
+    run_as: registered review-service runtime owner
+    command: /usr/bin/less docs/changes/INPLACEREPAIR-01.md

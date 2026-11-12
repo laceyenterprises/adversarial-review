@@ -1,0 +1,22 @@
+{
+  "version": 1,
+  "entries": [
+    {
+      "id": "in-place-repair-epochs",
+      "title": "In-place repair epochs and review harness refunds",
+      "path": "docs/data-model/hammer-retry-cap.md",
+      "store": "data/follow-up-jobs/hammer-retry-cap/<repo>-pr-<n>.json",
+      "schemaSurface": "src/repair-epochs.mjs",
+      "relatedSchemaSurfaces": [
+        "src/ama/hammer-retry-cap.mjs",
+        "src/review-harness-retry.mjs",
+        "src/exhausted-head-verdict.mjs",
+        "bin/repair-in-place.mjs",
+        "src/pr-next-action.mjs",
+        "src/ama/closure-next-action.mjs",
+        "src/ttm-owner.mjs"
+      ],
+      "owner": "watcher and PR repair dispatcher"
+    }
+  ]
+}

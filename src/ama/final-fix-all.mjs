@@ -1,4 +1,5 @@
 import { createFollowUpJob, listFollowUpJobsInDir } from '../follow-up-jobs.mjs';
+import { pendingRepairEpoch } from '../repair-epochs.mjs';
 import { tryAcquireCloserIntentLock } from './pre-receipt-intent.mjs';
 import { findLiveAmaCloserLease } from './closer-lease.mjs';
 import { listActiveAmaCloserDispatches } from './dispatch-closer.mjs';
@@ -24,6 +25,9 @@ export async function handoffFinalFixAll({ rootDir, repo, prNumber, headSha, rev
   const release = tryAcquireCloserIntentLock(rootDir, identity);
   if (!release) return { action: 'hold', reason: 'final-fix-all-owner-busy' };
   try {
+    if (pendingRepairEpoch(rootDir, { repo, prNumber })) {
+      return { action: 'hold', reason: 'repair-in-place-owned' };
+    }
     const duplicate = findFollowUpForJob(rootDir, identity);
     if (duplicate) {
       const job = existingJob(rootDir, duplicate);

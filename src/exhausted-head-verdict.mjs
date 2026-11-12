@@ -21,26 +21,32 @@ export function owesExhaustedHeadVerdict({ exhausted, headSha, reviewedHeadSha, 
 }
 
 export const exhaustedHeadVerdictReason = headSha => `system-exhausted-head-verdict:${headSha}`;
+const REPAIR_HEAD_REASON = /^system-repair-epoch:repair-[a-f0-9-]+:([a-f0-9]{40})$/i;
 export function isExhaustedHeadVerdictRequested(row, headSha) {
-  return Boolean(headSha && row?.rereview_requested_at && row.revision_ref === headSha
-    && row.rereview_reason === exhaustedHeadVerdictReason(headSha));
+  if (!headSha || !row?.rereview_requested_at
+    || row.revision_ref?.toLowerCase() !== headSha.toLowerCase()) return false;
+  return row.rereview_reason === exhaustedHeadVerdictReason(headSha)
+    || REPAIR_HEAD_REASON.exec(row.rereview_reason || '')?.[1].toLowerCase() === headSha.toLowerCase();
 }
 
 // Admission only: the normal claim CAS, retry limits and pass journal still own
 // execution. A completed delivered pass prevents re-admission even after a
 // later push away from, and back to, the same commit.
 export async function admitExhaustedHeadVerdict({ exhausted, headSha, row,
-  countDelivered, classifyCloser, request, readRow, lifetimeExhausted = false }) {
+  countDelivered, classifyCloser, request, readRow, lifetimeExhausted = false,
+  repairEpoch = null, bindRepair = null }) {
   // Code-PR revision references must survive the canonical SHA normalizer.
   // Refuse malformed input before mutating the review row.
   if (typeof headSha !== 'string' || !/^[0-9a-f]{40}$/i.test(headSha)) return row;
   if (isExhaustedHeadVerdictRequested(row, headSha)) return row;
-  if (lifetimeExhausted || !exhausted || !headSha || !row || row.reviewer_head_sha === headSha
+  if ((!repairEpoch && (lifetimeExhausted || !exhausted)) || !headSha || !row || row.reviewer_head_sha === headSha
     || countDelivered() !== 0) return row;
   const closer = await classifyCloser();
-  if (!owesExhaustedHeadVerdict({ exhausted, headSha,
+  if (repairEpoch ? closer.suppressed : !owesExhaustedHeadVerdict({ exhausted, headSha,
     reviewedHeadSha: row.reviewer_head_sha, closerAuthored: closer.suppressed })) return row;
-  request({ targetRevisionRef: headSha, reason: exhaustedHeadVerdictReason(headSha),
-    preserveBudgets: true, ownerlessRecovery: true });
+  if (repairEpoch && !bindRepair?.(repairEpoch)) return row;
+  request({ targetRevisionRef: headSha, reason: repairEpoch
+    ? `system-repair-epoch:${repairEpoch.id}:${headSha}` : exhaustedHeadVerdictReason(headSha),
+    preserveBudgets: !repairEpoch, ownerlessRecovery: true });
   return readRow();
 }

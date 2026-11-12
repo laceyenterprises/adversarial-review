@@ -828,6 +828,50 @@ state, merge eligibility rule or runtime timeout changes here.
 
 ## Exhausted cycles and new builder heads (EXHAUSTEDHEADOWNER-01)
 
+A rescue or existing-PR coding update can reserve an audited in-place repair
+epoch when review or closure is exhausted. The worker repairs the PR's own
+branch and publishes a changed builder head. The existing request/claim CAS
+admits exactly one verdict for that epoch/head, recording
+`system-repair-epoch:<id>:<head>`. Admission refreshes closure counters for the
+new episode, retaining prior counters and confirmed charge history. The final
+review either reaches ordinary clean daemon merge or hands all findings to
+the final-fix-all remediator or closer with the refreshed head budget. No finding or merge predicate is waived. Two repair
+epochs bound automatic repair; the existing wait store pages the operator once
+with the full history. Canonical next-action and health projections retain the
+reservation as remediation custody during provisioning and publication. A
+pending reservation takes precedence over a prior epoch that reviewed the same
+base head, so the watcher cannot admit competing review work on that head.
+Watcher custody, verdict admission revision references and rescue head matching
+compare hexadecimal commit SHAs case-insensitively, preserving stored spelling. A live
+or uncertain submission retains custody. Before admission the watcher observes
+pending repair ownership at most once per 30 seconds. Complete terminal
+launch/retry evidence retires the reservation under the ledger flock; an exact-key
+absence proof also retires an unlaunched reservation after ten minutes from
+`reservedAt`. Unreadable or unproven absence retains custody. Retirement removes
+repair ownership from next-action and TTM projections, allowing the existing
+ownerless clock and SEV1 page. Corrupt ledgers and busy refund writers defer only
+the affected PR. No replacement PR
+is opened. After both dispatch and review-service versions load, the runtime
+owner must retain an original-branch merge receipt and a 24-hour observation
+without replacement PRs used to escape budgets.
+
+`bin/repair-in-place.mjs` rejects missing or malformed heads (anything other
+than 40 hexadecimal characters) before opening the review database or reading
+leases. Repair facts count only array-valued closer refund histories; malformed
+entries contribute zero to the informational refunded-spend total.
+
+Reviewer harness refunds are separate from unlimited inconclusive **closer**
+refunds: only three failed reviewer claims per PR, across all heads, receive
+credit. Later failures keep their charges so ordinary infrastructure cap/alert
+handling remains reachable. Receipts retain at most 512 characters of failure
+text. Refunded review-row messages retain at most 4096 characters including an
+intact receipt marker; the pass journal retains the original failure.
+Already-applied receipts retain retry pacing even if truncation removed the
+fault text and are read without locking or writing. Bare
+142/143 exits do not establish a harness fault. Closer classification uses
+registered stop origins and structured failure classes; free-text failure
+detail cannot refund an otherwise real stop or bare wall-clock expiry.
+
 Cycle exhaustion ends remediation rounds. A later builder-authored head still
 owes one exact-head verdict review. Admission classifies the live commit, checks
 the delivered-pass journal, and records `system-exhausted-head-verdict:<head>`
@@ -849,8 +893,8 @@ checks, mergeability, primary-change preservation, attestation and merge authori
 The shared closure projection binds retry exhaustion to the reviewed-head series
 that spent it. A new builder head receives a verdict owner before any closer
 retry. Once reviewed, its new series receives the existing per-head budget.
-Same-head and PR-lifetime caps remain unchanged; closer head churn cannot refund
-its series. Head changes discard previous next-action deadline anchors. A
+Outside an explicitly reserved repair epoch, same-head and PR-lifetime caps
+remain in force; closer head churn cannot refund its series. Head changes discard previous next-action deadline anchors. A
 builder head awaiting review uses its persisted per-head wait anchor, never an
 older head's posting or final-round timestamp.
 

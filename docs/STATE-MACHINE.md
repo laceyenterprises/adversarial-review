@@ -54,6 +54,16 @@ pre-spawn requeue (`in_progress → pending`), keeping an operator override.
 An HQ launch admitted after that read is HQ's admission to refuse.
 Existing lifecycle graph and automated smoke promises are unchanged.
 
+Pending in-place repair reservations are observed before watcher admission at
+most once per thirty seconds. Complete terminal launch/retry evidence, or a
+proven absent launch after ten minutes of provisioning, retires custody under
+the ledger flock; live and unreadable evidence retain it. Retirement removes
+repair custody from canonical next-action and TTM projections, restoring the
+existing ownerless clock and SEV1 path. Reviewer harness refunds are limited
+to three per PR across heads; later failures keep ordinary infra charges and
+cap alerts. Ledger faults defer only one PR. Existing lifecycle values, merge
+predicates and automated smoke commands are unchanged.
+
 Zero-output admission refusals without a launch move closer dispatch custody to
 `operator-escalated` for that head. The watcher clears the generic slow-retry
 clock, records the operator owner, and pages once per PR/head. Legacy
@@ -3549,6 +3559,25 @@ added.
 
 ## Exhausted cycles and new builder heads (EXHAUSTEDHEADOWNER-01)
 
+A rescue or existing-PR coding update can reserve an audited in-place repair
+epoch when review or closure is exhausted. The worker repairs the PR's own
+branch and publishes a changed builder head. The existing request/claim CAS
+admits exactly one verdict for that epoch/head, recording
+`system-repair-epoch:<id>:<head>`. Admission refreshes closure counters for the
+new episode, retaining prior counters and confirmed charge history. The final
+review either reaches ordinary clean daemon merge or hands all findings to
+the final-fix-all remediator or closer with the refreshed head budget. No finding or merge predicate is waived. Two repair
+epochs bound automatic repair; the existing wait store pages the operator once
+with the full history. Canonical next-action and health projections retain the
+reservation as remediation custody during provisioning and publication. A
+pending reservation takes precedence over a prior epoch that reviewed the same
+base head, so the watcher cannot admit competing review work on that head. A live
+or uncertain submission retains custody; only
+complete terminal launch/retry evidence allows a successor. No replacement PR
+is opened. After both dispatch and review-service versions load, the runtime
+owner must retain an original-branch merge receipt and a 24-hour observation
+without replacement PRs used to escape budgets.
+
 Cycle exhaustion ends remediation rounds. A later builder-authored head still
 owes one exact-head verdict review. Admission classifies the live commit, checks
 the delivered-pass journal, and records `system-exhausted-head-verdict:<head>`
@@ -3570,8 +3599,8 @@ checks, mergeability, primary-change preservation, attestation and merge authori
 The shared closure projection binds retry exhaustion to the reviewed-head series
 that spent it. A new builder head receives a verdict owner before any closer
 retry. Once reviewed, its new series receives the existing per-head budget.
-Same-head and PR-lifetime caps remain unchanged; closer head churn cannot refund
-its series. Queued automatic reviews with certain budget suppression transition
+Outside an explicitly reserved repair epoch, same-head and PR-lifetime caps
+remain in force; closer head churn cannot refund its series. Queued automatic reviews with certain budget suppression transition
 back to `posted` under the inspected request's CAS, restoring only the latest
 delivered review's head and timestamp. `system-budget-exhausted-closure` assigns
 unreviewed heads to the closer without granting merge permission. Completed

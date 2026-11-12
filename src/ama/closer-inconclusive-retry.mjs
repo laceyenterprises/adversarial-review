@@ -18,6 +18,7 @@ import { join } from 'node:path';
 
 import { writeFileAtomic } from '../atomic-write.mjs';
 import { hammerStopOrigin } from './hammer-stop-origin.mjs';
+import { isHarnessFault } from '../harness-fault.mjs';
 
 export const CLOSER_INCONCLUSIVE_RETRY_OWNER = 'watcher';
 export const CLOSER_INCONCLUSIVE_WAIT_CLASS = 'closer-inconclusive';
@@ -64,14 +65,26 @@ function code(value) {
  */
 export function classifyCloserOutcome({ reason = null, failureClass = null } = {}) {
   const raw = String(reason ?? '').trim();
+  // A wall-clock stop can be the outer supervisor expiring while provision
+  // waits. Require positive launch evidence; a bare expiry stays counted.
+  if (code(raw) === 'hammer-wall-clock-exceeded'
+    && isHarnessFault(code(failureClass))) {
+    return { kind: 'inconclusive', reason: code(raw), origin: 'infrastructure' };
+  }
   if (raw) {
     try {
       const origin = hammerStopOrigin(raw);
       return { kind: origin === 'world' ? 'real' : 'inconclusive', reason: code(raw), origin };
     } catch { /* Not a registered stop reason. */ }
+    if (isHarnessFault(raw)) {
+      return { kind: 'inconclusive', reason: code(raw), origin: 'infrastructure' };
+    }
     if (INCONCLUSIVE_OBSERVATIONS.has(code(raw))) {
       return { kind: 'inconclusive', reason: code(raw), origin: 'infrastructure' };
     }
+  }
+  if (isHarnessFault(code(failureClass))) {
+    return { kind: 'inconclusive', reason: code(failureClass), origin: 'infrastructure' };
   }
   const launch = code(failureClass);
   if (CLOSER_INCONCLUSIVE_LAUNCH_FAILURES.has(launch)) return { kind: 'inconclusive', reason: launch, origin: 'launch' };

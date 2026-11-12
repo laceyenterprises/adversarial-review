@@ -723,6 +723,12 @@ remains read-only. See [ownership observations](data-model/ttm-ownership.md) for
 clock reset, hold deadline and durable delivery semantics. SLOW budgets, existing
 STUCK thresholds, routing and merge gates are unchanged.
 
+The PR progress-stalled health finding (see the STUCK table above) retains its ticket tier.
+Immediate notification does not depend on that tier: the watcher calls
+`pageTtmStuckFlags` for every STUCK kind, including `ownerless`, and emits
+`adversarial_review.pr_progress_stalled`. The alert delivery path presents that
+event as SEV1 and deduplicates delivery per PR/head through the durable outbox.
+
 
 ## Bounded OS observation export (DOG-15)
 

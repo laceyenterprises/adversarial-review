@@ -9,7 +9,7 @@
  */
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 
@@ -18,6 +18,7 @@ import {
   renderReviewPipelinePrometheus,
 } from '../src/review-pipeline-health.mjs';
 import { ensureReviewStateSchema, openReviewStateDb } from '../src/review-state.mjs';
+import { hammerRetryCapFilePath } from '../src/ama/hammer-retry-cap.mjs';
 
 const REPO = 'laceyenterprises/agent-os';
 const NOW = '2026-09-06T12:00:00.000Z';
@@ -326,6 +327,41 @@ test('HOLDOWNER-01: ownerless flags reach the progress-stalled finding with lane
   const snapshot = collectReviewPipelineHealth({ rootDir, hqRoot: rootDir, env: {}, now: () => new Date(NOW) });
   const finding = findingFor(snapshot, 'review:pr_progress_stalled');
   assert.ok(finding);
+  assert.equal(finding.tier, 'ticket', 'the watcher pages STUCK directly, independently of health tier');
   assert.ok(finding.details.flagKinds.includes('ownerless'));
+  assert.equal(finding.details.severity, 'SEV1');
+  assert.equal(finding.details.nextOwner, 'none');
+  assert.match(finding.subject, /^SEV1:/);
   assert.ok(finding.evidence.some(line => /example\/project#1.*hammer-validated-head/.test(line)));
+});
+
+test('corrupt repair ledger stays isolated while fleet health and ownerless diagnostics remain available', async t => {
+  const { observeTtmReviewLane } = await import('../src/ttm-owner.mjs');
+  const { runTtmTrackerTick } = await import('../src/ttm-tracker.mjs');
+  const rootDir = tempRoot();
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  const db = openReviewStateDb(rootDir);
+  ensureReviewStateSchema(db);
+  const ledger = hammerRetryCapFilePath(rootDir, { repo: REPO, prNumber: 9001 });
+  mkdirSync(path.dirname(ledger), { recursive: true });
+  writeFileSync(ledger, '{broken');
+  try {
+    seedDistribution(db, { baseMinutes: 20, perRoundMinutes: 5 });
+    for (const prNumber of [9001, 9002]) {
+      insertPr(db, { prNumber, reviewedAt: iso(60), reviewStatus: 'pending' });
+      db.prepare('UPDATE reviewed_prs SET revision_ref = ? WHERE repo = ? AND pr_number = ?')
+        .run('a'.repeat(40), REPO, prNumber);
+      observeTtmReviewLane(db, { repo: REPO, prNumber, headSha: 'a'.repeat(40),
+        suppressed: prNumber === 9001, reason: 'fixture', observedAt: iso(20) });
+    }
+    runTtmTrackerTick(db, { rootDir, hqRoot: rootDir, now: () => new Date(iso(20)), env: {} });
+  } finally { db.close(); }
+  const snapshot = collectReviewPipelineHealth({ rootDir, hqRoot: rootDir, env: {}, now: () => new Date(NOW) });
+  const corrupt = snapshot.ttm.timelines.find(row => row.prNumber === 9001);
+  const healthy = snapshot.ttm.timelines.find(row => row.prNumber === 9002);
+  assert.equal(corrupt.ownership.owner, null);
+  assert.match(corrupt.ownership.reason, /ownership evidence unreadable/);
+  assert.equal(healthy.ownership.owner, 'review-lane');
+  assert.ok(snapshot.ttm.flags.some(flag => flag.prNumber === 9001 && flag.flagKind === 'ownerless'));
+  assert.equal(readFileSync(ledger, 'utf8'), '{broken', 'observation never rewrites a corrupt ledger');
 });

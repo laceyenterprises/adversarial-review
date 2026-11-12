@@ -3307,7 +3307,7 @@ for (const [name, status, message, chargedCounter] of [
         assert.equal(globalThis.__claimSnapshots.length, 2, 'next retry claimed');
         const nextClaim = globalThis.__claimSnapshots[1];
         assert.equal(nextClaim.review_status, 'reviewing');
-        ${chargedCounter ? `assert.equal(nextClaim.${chargedCounter}, beforeClaim.${chargedCounter} + 1, 'next retry uses bounded CAS');` : ''}
+        ${chargedCounter ? `assert.equal(nextClaim.${chargedCounter}, beforeClaim.${chargedCounter} + ${message.includes('hcp-unavailable') ? 0 : 1}, 'next retry preserves refunded harness spend and the claim CAS');` : ''}
         assert.ok((globalThis.__watcherClaimLoopReviewerSpawns || []).some(s => s.subjectContext.prNumber === 101));
       `,
     });
@@ -3338,9 +3338,9 @@ test('HOLDRELEASE-01: rollback cannot overwrite a replacement session', () => {
       const row = db.prepare('SELECT * FROM reviewed_prs WHERE pr_number = 101').get();
       assert.equal(row.review_status, 'reviewing');
       assert.equal(row.reviewer_session_uuid, 'replacement-session');
-      assert.equal(row.infra_auto_recover_attempts, 2);
-      assert.equal(row.failed_at, null);
-      assert.equal(row.failure_message, null);
+      assert.equal(row.infra_auto_recover_attempts, 0, 'refunded harness fault is retried through ordinary claim CAS');
+      assert.equal(row.failed_at, '2026-05-15T12:01:00Z', 'raw failure evidence survives a replacement claim');
+      assert.match(row.failure_message, /harness-budget-refunded/);
       assert.ok(!(globalThis.__watcherClaimLoopReviewerSpawns || []).some(s => s.subjectContext.prNumber === 101));
     `,
   });
@@ -5311,4 +5311,182 @@ test('LABELREARM-01: discovery arms a fresh exact-head review from an operator-g
       assert.equal(spawns().length, 1, 'second poll must not spawn another reviewer');
     `,
   });
+});
+
+for (const uppercase of [false, true]) test(`pending second repair epoch retains custody over a prior epoch reviewed head (mixed-case: ${uppercase})`, () => {
+  const tmp = mkdtempSync(path.join(tmpdir(), 'watcher-second-repair-'));
+  try {
+    const head = 'b'.repeat(40), rootDir = path.join(tmp, 'repair-root');
+    const repairUrl = fileUrl('src', 'repair-epochs.mjs');
+    const loaderPath = path.join(tmp, 'loader.mjs');
+    const registerPath = path.join(tmp, 'register.mjs');
+    const runnerPath = path.join(tmp, 'runner.mjs');
+    const wrapper = `
+      import * as actual from ${JSON.stringify(`${repairUrl}?actual`)};
+      export * from ${JSON.stringify(`${repairUrl}?actual`)};
+      export function pendingRepairEpoch(_root, identity) {
+        return actual.pendingRepairEpoch(${JSON.stringify(rootDir)}, identity);
+      }
+      export function reconcileRepairOwner(args) {
+        return actual.reconcileRepairOwner({ ...args, rootDir: ${JSON.stringify(rootDir)},
+          readImpl: async () => ({ ok: false }) });
+      }
+      export function repairEpochForHead(_root, identity, head) {
+        return actual.repairEpochForHead(${JSON.stringify(rootDir)}, identity, head);
+      }
+    `;
+    writeFileSync(loaderPath, buildLoaderSource({ subjectHeads: { 101: uppercase ? head.toUpperCase() : head } }).replace(
+      '  return nextLoad(url, context);',
+      `  if (url === ${JSON.stringify(repairUrl)}) {
+        return { format: 'module', shortCircuit: true, source: ${JSON.stringify(wrapper)} };
+      }
+      return nextLoad(url, context);`,
+    ));
+    writeFileSync(registerPath, buildRegisterSource(loaderPath));
+    writeFileSync(runnerPath, buildRunnerSource({
+      prePollSetup: `
+        const { reserveRepairEpoch, bindRepairHead } = await import(${JSON.stringify(`${repairUrl}?actual`)});
+        const identity = { rootDir: ${JSON.stringify(rootDir)},
+          repo: 'laceyenterprises/adversarial-review', prNumber: 101,
+          headSha: 'a'.repeat(40), ownerKey: 'first', cause: 'closure-retry-exhausted' };
+        const first = reserveRepairEpoch(identity).epoch;
+        bindRepairHead({ ...identity, epochId: first.id, headSha: '${head}' });
+        assert.equal(reserveRepairEpoch({ ...identity, headSha: '${head}', ownerKey: 'second' }).ok, true);
+        db.prepare(\`INSERT INTO reviewed_prs (repo, pr_number, reviewed_at, reviewer,
+          pr_state, review_status, reviewer_head_sha, revision_ref, rereview_requested_at)
+          VALUES (?, 101, ?, 'claude', 'open', 'pending', ?, ?, ?)\`).run(
+            identity.repo, new Date().toISOString(), '${head}', '${head}', new Date().toISOString());
+      `,
+      afterFirstPoll: `
+        const verify = () => {
+          assert.ok(!claims.some(claim => claim.prNumber === 101), 'repair builder retains exclusive custody');
+          assert.ok(!(globalThis.__watcherClaimLoopReviewerSpawns || [])
+            .some(spawn => spawn.subjectContext?.prNumber === 101));
+          assert.equal(db.prepare('SELECT review_status FROM reviewed_prs WHERE pr_number=101').get().review_status, 'pending');
+        };
+        verify();
+        await pollOnce(octokit, pollOptions);
+        verify();
+      `,
+    }));
+    const result = spawnSync(process.execPath,
+      ['--no-warnings', '--import', pathToFileURL(registerPath).href, runnerPath],
+      { cwd: REPO_ROOT, encoding: 'utf8', env: fixtureEnv(installGhFixture(tmp)), timeout: 60000 });
+    assert.equal(result.status, 0, `${result.stdout || ''}${result.stderr || ''}`);
+  } finally { rmSync(tmp, { recursive: true, force: true }); }
+});
+
+for (const fault of ['corrupt', 'busy']) {
+  test(`repair/refund ${fault} ledger defers one PR and admits the next in the same tick`, () => {
+    const tmp = mkdtempSync(path.join(tmpdir(), 'watcher-repair-isolation-'));
+    try {
+      const repairUrl = fileUrl('src', 'repair-epochs.mjs');
+      const refundUrl = fileUrl('src', 'review-harness-retry.mjs');
+      const ledgerUrl = fileUrl('src', 'ama', 'hammer-retry-cap.mjs');
+      runHoldReleaseRegression({
+        transformLoader: source => source.replace('  return nextLoad(url, context);', `
+          if (url === ${JSON.stringify(repairUrl)}) return { format: 'module', shortCircuit: true, source: ${JSON.stringify(`
+            import * as actual from ${JSON.stringify(repairUrl + '?actual')};
+            export * from ${JSON.stringify(repairUrl + '?actual')};
+            export function reconcileRepairOwner(args) {
+              return actual.reconcileRepairOwner({ ...args, rootDir: ${JSON.stringify(tmp)} });
+            }
+          `)} };
+          if (url === ${JSON.stringify(refundUrl)}) return { format: 'module', shortCircuit: true, source: ${JSON.stringify(`
+            import { refundReviewHarnessFault as actual } from ${JSON.stringify(refundUrl + '?actual')};
+            export function refundReviewHarnessFault(args) {
+              return actual({ ...args, rootDir: ${JSON.stringify(tmp)} });
+            }
+          `)} };
+          return nextLoad(url, context);
+        `),
+        setup: `
+          const fs = await import('node:fs');
+          const { hammerRetryCapFilePath } = await import(${JSON.stringify(ledgerUrl)});
+          const ledger = hammerRetryCapFilePath(${JSON.stringify(tmp)},
+            { repo: 'laceyenterprises/adversarial-review', prNumber: 101 });
+          fs.mkdirSync((await import('node:path')).dirname(ledger), { recursive: true });
+          if ('${fault}' === 'corrupt') fs.writeFileSync(ledger, '{broken');
+          else {
+            const fsExt = (await import(${JSON.stringify(fileUrl('node_modules', 'fs-ext', 'fs-ext.js'))})).default;
+            const fd = fs.openSync(ledger + '.lock', 'a');
+            fsExt.flockSync(fd, 'exnb');
+            globalThis.__releaseRepairLock = () => { fsExt.flockSync(fd, 'un'); fs.closeSync(fd); };
+          }
+          db.prepare(\`INSERT INTO reviewed_prs(repo,pr_number,reviewed_at,reviewer,pr_state,
+            review_status,review_attempts,infra_auto_recover_attempts,reviewer_head_sha,failed_at,failure_message)
+            VALUES (?,101,?,'claude','open','failed',1,1,'sha-happy-101',?,'[hcp-unavailable] fixture')\`)
+            .run('laceyenterprises/adversarial-review', new Date().toISOString(), new Date().toISOString());
+        `,
+        verify: `
+          globalThis.__releaseRepairLock?.();
+          assert.ok(!claims.some(claim => claim.prNumber === 101));
+          assert.ok(claims.some(claim => claim.prNumber !== 101), 'later subject still claims');
+        `,
+      });
+    } finally { rmSync(tmp, { recursive: true, force: true }); }
+  });
+}
+
+test('repeated harness failures exhaust refunds then reach the ordinary infra cap and alert', () => {
+  const tmp = mkdtempSync(path.join(tmpdir(), 'watcher-refund-cap-'));
+  try {
+    const refundUrl = fileUrl('src', 'review-harness-retry.mjs');
+    const alertUrl = fileUrl('src', 'alert-delivery.mjs');
+    runHoldReleaseRegression({
+      followUpJobsSource: DEFAULT_FOLLOW_UP_JOBS_SOURCE.replaceAll('roundBudget: 1', 'roundBudget: 8')
+        .replaceAll('latestMaxRounds: 1', 'latestMaxRounds: 8'),
+      transformLoader: source => source.replace("return { ok: true, stdout: '', stderr: '' };",
+        "return payload.subjectContext.prNumber === 101 ? { ok: false, failureClass: 'hcp-unavailable', error: 'fixture outage' } : { ok: true, stdout: '', stderr: '' };")
+        .replace('  return nextLoad(url, context);', `
+        if (url === ${JSON.stringify(refundUrl)}) return { format: 'module', shortCircuit: true, source: ${JSON.stringify(`
+          import { refundReviewHarnessFault as actual } from ${JSON.stringify(refundUrl + '?actual')};
+          export function refundReviewHarnessFault(args) {
+            const result = actual({ ...args, rootDir: ${JSON.stringify(tmp)} });
+            // Advance only the receipt clock through the third refund's backoff.
+            return result.wait ? actual({ ...args, row: result.row,
+              rootDir: ${JSON.stringify(tmp)}, now: Date.now() + 3600000 }) : result;
+          }
+        `)} };
+        if (url === ${JSON.stringify(alertUrl)}) return { format: 'module', shortCircuit: true, source: ${JSON.stringify(`
+          export * from ${JSON.stringify(alertUrl + '?actual')};
+          export async function deliverAlert(_body, options) {
+            (globalThis.__refundCapAlerts ||= []).push(options);
+            return { delivered: true };
+          }
+        `)} };
+        return nextLoad(url, context);
+      `),
+      setup: `
+        db.prepare(\`INSERT INTO reviewed_prs(repo,pr_number,reviewed_at,reviewer,pr_state,
+          review_status,review_attempts,infra_auto_recover_attempts,reviewer_head_sha,revision_ref)
+          VALUES (?,101,?,'claude','open','pending',0,0,'sha-happy-101','sha-happy-101')\`)
+          .run('laceyenterprises/adversarial-review', new Date().toISOString());
+      `,
+      verify: `
+        const { REVIEW_HARNESS_REFUND_CAP } = await import(${JSON.stringify(refundUrl + '?actual')});
+        const ledgerApi = await import(${JSON.stringify(fileUrl('src', 'ama', 'hammer-retry-cap.mjs'))});
+        for (let failure = 0; failure < REVIEW_HARNESS_REFUND_CAP + 3; failure++) {
+          db.prepare(\`UPDATE reviewed_prs SET review_status='failed', failed_at=?,
+            failure_message='[hcp-unavailable] fixture', reviewer_session_uuid=NULL,
+            reviewer_lease_expires_at=NULL, reviewer_pgid=NULL WHERE pr_number=101\`)
+            .run(new Date(Date.now() + failure * 1000).toISOString());
+          // Expire refund-only backoff, preserving its count and claim identity.
+          if (failure) ledgerApi.mutateRepairEpochs(${JSON.stringify(tmp)},
+            { repo: 'laceyenterprises/adversarial-review', prNumber: 101 }, ledger => {
+              for (const refund of Object.values(ledger.reviewHarnessRefunds || {})) refund.nextRetryAt = '2000-01-01T00:00:00Z';
+            });
+          await pollOnce(octokit, pollOptions);
+        }
+        const row = db.prepare('SELECT * FROM reviewed_prs WHERE pr_number=101').get();
+        assert.equal(row.infra_auto_recover_attempts, 3);
+        assert.equal(row.review_status, 'failed');
+        assert.ok(globalThis.__refundCapAlerts.some(alert =>
+          alert?.event === 'adversarial_review.cascade_cap_exhausted'));
+        assert.equal(Object.keys(ledgerApi.readHammerRetryCapLedger(${JSON.stringify(tmp)},
+          { repo: 'laceyenterprises/adversarial-review', prNumber: 101 }).reviewHarnessRefunds).length,
+          REVIEW_HARNESS_REFUND_CAP);
+      `,
+    });
+  } finally { rmSync(tmp, { recursive: true, force: true }); }
 });

@@ -826,6 +826,15 @@ uses the daemon path below; remaining findings use the configured fallback.
 The existing durable handoff receipt prevents duplicate builder work and
 concurrent closer admission.
 
+In-place repair custody is reconciled before watcher admission, at most once
+per 30 seconds. Complete terminal retry evidence or proven exact-key absence
+after ten minutes retires an unpublished reservation; unknown evidence retains
+custody. Retirement restores the existing ownerless clock and SEV1 path.
+Reviewer harness refunds are bounded to three per PR across heads; later
+failures retain ordinary infrastructure cap and alert handling. Corrupt or busy
+repair/refund ledgers defer only their PR. See the
+[repair contract](docs/RUNBOOK-ama-closure.md#exhausted-cycles-and-new-builder-heads-exhaustedheadowner-01).
+
 - **Hammer — repair and fallback.** Blocking final findings, conflicts,
   CI-only repair, and findings remaining after the builder fix-all round
   retain the configured hammer/operator behavior. When hammer admission

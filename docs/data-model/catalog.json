@@ -1030,6 +1030,8 @@
     },
     {
       "id": "hammer-retry-cap",
+      "repairEpochs": "Optional two-entry PR repair history; watcher observes ownerObservedAt/ownerState/ownerLaunch at 30-second cadence; terminal retry evidence or exact-key absence after ten minutes sets terminalAt/terminalLaunch under flock; unknown evidence retains custody.",
+      "reviewHarnessRefunds": "PR-wide maximum three claim-identity receipts {id,headSha,failure,reservedAt,nextRetryAt}; ledger failure text capped at 512 characters; refunded review-row failure_message capped at 4096 characters including intact receipt marker; applied receipts retain pacing even if fault text was truncated and are read-only; later failures retain ordinary retry charges and alerts.",
       "selfErrorRefunds": "Optional permanent dispatch-head map of at most three refunded charged launch IDs per head; survives series/head resets and atomically credits series, head and lifetime budgets using exact dispatchCharges refund flags.",
       "operatorApprovalRearms": "optional permanent head-SHA map: pending/consumed state, operator-approval-applied reason, jobKey, stopKey, awaitedInputs, grantedAt; consumedAt/launchRequestId/dispatchKey bind confirmed launch; one extra exhausted-cap admission per head without charge refunds; ledger lock order consumes new charges regardless of timestamp precision; consumed receipt identifies a fresh cap-alert episode",
       "companionWaitCredits": "dispatchCharges may carry companionWaitRefund stopKey/refundedAt; exact pure-wait launch credits share refundedBudgets and unexecutedLaunchRequestIds.",
@@ -1044,7 +1046,7 @@
       "closerDispatchedHeads": "CLOSERPROOF-01: per-series list appended only by the dispatch recorder (reset with dispatchHeads on a fresh series); with dispatchCharges[].headSha it is the only dispatch evidence for the reset guard, because the cap-suppression writer also stamps refused heads into dispatchHeads/lastDispatchedHeadSha/suppressedHeadSha",
       "receiptChargeSemantics": "LAC-2081/RCV-08: exact native attempt key and LRQ charge once across receipt interruptions and head resets; schema 3 retains per-budget partial credits and permanent canonical no-work refund receipts under one PR-scoped flock; new charge timestamps default to current ISO-8601 time when omitted; recovery preserves suppression",
       "relatedSchemaSurfaces": [
-        "src/ama/companion-stop-wait.mjs","src/ama/dead-hammer-rearm.mjs", "src/ama/dispatch-closer.mjs", "src/ama-closure-orchestration.mjs", "src/closer-authored-stale.mjs", "src/ama/operator-hold-refund.mjs"],
+        "src/repair-epochs.mjs", "src/review-harness-retry.mjs", "src/ama/companion-stop-wait.mjs","src/ama/dead-hammer-rearm.mjs", "src/ama/dispatch-closer.mjs", "src/ama-closure-orchestration.mjs", "src/closer-authored-stale.mjs", "src/ama/operator-hold-refund.mjs"],
       "owner": "AMA hammer dispatch retry and redrive caps",
       "headContextFields": { "observedHeadSha": "optional string or null" },
       "headContextRefusalReasons": ["dispatch-head-context-changed", "dispatch-head-context-unavailable"],

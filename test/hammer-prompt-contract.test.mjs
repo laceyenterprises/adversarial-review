@@ -311,7 +311,7 @@ test('every concrete hammer prompt helper call executes against the real helper 
       'hammer-base-head.mjs', 'hammer-controller.mjs', 'guard-forbidden-paths.mjs', 'hammer-edit-plan.mjs',
       'dispute-finding.mjs', 'stacked-base-check.mjs', 'hammer-pr-read.mjs', 'hammer-progress.mjs',
       'hammer-conflict-primary.mjs', 'hammer-predicate-inputs.mjs', 'hammer-claim-head.mjs',
-      'primary-change-context.mjs', 'ama-check.mjs', 'hammer-close.sh']);
+      'primary-change-context.mjs', 'ama-check.mjs', 'hammer-close.sh', 'hammer-conflict-repair.sh']);
     for (const name of names) {
       assert.ok(known.has(name), `add a real-helper fixture for ${name} at prompt line ${line}`);
       seen.add(name);
@@ -326,6 +326,13 @@ test('every concrete hammer prompt helper call executes against the real helper 
       const plan = rendered.match(/"([^"]+\/close-plan\.json)"$/)[1];
       execFileSync(process.execPath, [join(root, 'bin/hammer-close-plan.mjs'), 'check', plan],
         { env: { ...f.env, NODE_OPTIONS: '' }, timeout: 5000, stdio: 'pipe' });
+      executed.add(rendered);
+      continue;
+    }
+    if (names.includes('hammer-conflict-repair.sh')) {
+      // HAMCONFLICTSYNC-01 runs this script against a conflicting synthetic
+      // PR; here the documented argv must name the run's real inputs.sh.
+      assert.equal(rendered, `/bin/bash "${f.dir}/bin/hammer-conflict-repair.sh" "${f.run}/inputs.sh"`);
       executed.add(rendered);
       continue;
     }

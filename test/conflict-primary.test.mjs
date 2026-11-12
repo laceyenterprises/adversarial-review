@@ -191,15 +191,22 @@ test('HAMEMPTYPRIMARY-01: Git errors inside the proof reach the publication diag
 });
 
 test('HAMEMPTYPRIMARY-01: conflict procedure proves preservation before publication', () => {
-  const text = readFileSync(new URL('../templates/hammer-prompt.md', import.meta.url), 'utf8');
+  // HAMCONFLICTSYNC-01: the procedure is the shipped conflict repair, and the
+  // prompt sends the closer back to the close command (publication) after it.
+  const prompt = readFileSync(new URL('../templates/hammer-prompt.md', import.meta.url), 'utf8');
+  const invoke = prompt.indexOf('/bin/hammer-conflict-repair.sh');
+  assert.ok(invoke > 0 && prompt.indexOf('HAM_COMMIT_PUBLICATION_ONLY=1', invoke) > invoke);
+  const text = readFileSync(new URL('../bin/hammer-conflict-repair.sh', import.meta.url), 'utf8');
   const start = text.indexOf('HAM_CONFLICT_SOURCE=$(git rev-parse HEAD)');
   const proof = text.indexOf('/bin/hammer-conflict-primary.mjs', start);
-  const publish = text.indexOf('HAM_COMMIT_PUBLICATION_ONLY=1', start);
-  assert.ok(start > 0 && proof > start && publish > proof);
-  const gate = text.slice(proof, publish);
+  const done = text.indexOf('HAM next: rerun the close command', start);
+  assert.ok(start > 0 && proof > start && done > proof);
+  const gate = text.slice(proof, done);
   assert.match(gate, /conflict-primary-unproven/);
   assert.match(gate, /conflict-primary-timeout/);
   assert.match(gate, /hammer-terminal-audit\.mjs" "\$HAM_CONFLICT_PROOF_REASON"/);
-  assert.match(text.slice(start, proof), /core\.commentChar/);
-  assert.match(text.slice(start, proof), /if \[ "\$HAM_CONFLICT_SOURCE" = "<<REVIEWED_SHA>>" \]/);
+  assert.match(text.slice(0, start), /export "GIT_CONFIG_KEY_\$\{count\}=core\.commentChar"/);
+  assert.match(text.slice(start, proof), /ham_conflict_comment_char; git rebase "origin\/\$BASE_BRANCH"/);
+  assert.match(text.slice(start, proof), /ham_conflict_comment_char; hq generated-conflicts resolve/);
+  assert.match(text.slice(start, proof), /if \[ "\$HAM_CONFLICT_SOURCE" = "\$HAM_REVIEWED_SHA" \]/);
 });

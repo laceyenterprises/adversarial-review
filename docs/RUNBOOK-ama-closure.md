@@ -694,7 +694,11 @@ The executable runner starts through its own Node shebang; `HAM_NODE_BIN` remain
 the wrapped command's runtime. This keeps the runner separate from command
 adapters and preserves their argument and exit-status contracts. Its CLI
 recognizes symlinked deployments by comparing real paths. Persisted inputs
-source `bin/hammer-shell-helpers.sh` for the shared shell functions.
+source `bin/hammer-shell-helpers.sh` for the shared shell functions, including
+the bounded fetch helpers (`ham_bounded_git_sync`) every hammer shell uses
+(HAMCONFLICTSYNC-01). `test/hamconflictsync-01.test.mjs` checks that every
+`ham_*` helper a closer-run prompt block or a sourced phase calls is defined at
+that point, and that each phase's refusal-gate handoff markers are set by its caller.
 Full dispatches require the runner to exist. The standalone
 base-head and rebase-proof fragments retain a nominal alarm for older partial
 deployments; that compatibility path cannot bypass the full-dispatch preflight.
@@ -808,10 +812,20 @@ Expiry does not establish release. Read/validation failures print
 `lease-state-unavailable` and exit nonzero without a state. This command never
 acquires, releases or reclaims a lease and grants no merge authority.
 
-Exit 21 from verify-head or merge enters Appendix D's conflict block: observe
-and release the lease using the owning shell, resolve sources, use the deployed
-committed-generated-files resolver for registered outputs, publish the commit,
-validate outside the lease and re-enter verify-head. For a hand-written JSON map,
+Exit 21 from verify-head or merge enters Appendix D: observe the lease state
+(the close command has already released its own lease), then run the shipped
+`bin/hammer-conflict-repair.sh <run-dir>/inputs.sh` (HAMCONFLICTSYNC-01). It
+sources `inputs.sh` itself, fetches through `ham_bounded_git_sync`, checks out
+the exact fetched head and rebases it onto the live base without squashing
+author commits. A failure before Git creates a rebase directory exits 1
+`conflict-rebase-failed`; correct the reported precondition and rerun without
+`--continue`. When Git leaves a rebase in progress it exits 22
+`conflict-markers-pending`; the closer resolves and stages hand-written sources, then reruns it with
+`--continue`, which runs the deployed committed-generated-files resolver for
+registered outputs, the reviewed-head preservation proof and submodule sync.
+Exit 76 is the retryable `git-credential-refresh-failed`. The closer then reruns
+the close command, which publishes the commit, validates outside the lease and
+re-enters verify-head. For a hand-written JSON map,
 take the union only after proving both sides only added keys; keep distinct-key
 values and ordering, validate JSON/unique keys, and never overwrite conflicting
 same-key values. Rebuild the audit and exact-head predicate before merge.

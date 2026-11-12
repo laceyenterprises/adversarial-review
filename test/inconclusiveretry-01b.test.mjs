@@ -423,7 +423,8 @@ test('conflict-primary: a real primary-line conflict refuses; missing proof evid
       GIT_CEILING_DIRECTORIES: dir } });
   assert.equal(helper.status, 75, helper.stderr);
   assert.match(helper.stderr, /conflict-primary-failed/);
-  const template = readFileSync(new URL('../templates/hammer-prompt.md', import.meta.url), 'utf8');
-  assert.match(template, /\*\) HAM_CONFLICT_PROOF_REASON=conflict-primary-failed;;/);
-  assert.match(template, / 1\) HAM_CONFLICT_PROOF_REASON=conflict-primary-unproven;;/);
+  // HAMCONFLICTSYNC-01: the proof gate lives in the shipped conflict repair.
+  const repair = readFileSync(new URL('../bin/hammer-conflict-repair.sh', import.meta.url), 'utf8');
+  assert.match(repair, /\*\) HAM_CONFLICT_PROOF_REASON=conflict-primary-failed;;/);
+  assert.match(repair, / 1\) HAM_CONFLICT_PROOF_REASON=conflict-primary-unproven;;/);
 });

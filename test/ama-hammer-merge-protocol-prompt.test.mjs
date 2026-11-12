@@ -20,10 +20,17 @@ const REPO_ROOT = resolve(__dirname, '..');
 const HAMMER_TEMPLATE = readFileSync(join(REPO_ROOT, 'templates', 'hammer-prompt.md'), 'utf8');
 // Structural merge-protocol assertions inspect the extracted versioned procedures
 // at their call sites, while the dispatched prompt remains small.
-const HAMMER_PROMPT = HAMMER_TEMPLATE.replace(
+const HAMMER_PROMPT_PHASES = HAMMER_TEMPLATE.replace(
   // HAMCONTROLLERSCRIPT-01: the shipped close command sources each phase.
   /(?:The close command then sources|Under the lease, the close command sources) `(hammer-[a-z-]+)\.sh`[^\n]*\n/g,
   (_, phase) => `\`\`\`bash\n${readFileSync(join(REPO_ROOT, 'bin', `${phase}.sh`), 'utf8')}\`\`\`\n`,
+);
+// HAMCONFLICTSYNC-01: Appendix D invokes the shipped conflict repair; inline it
+// at its call site so the conflict assertions read the procedure that runs.
+const CONFLICT_REPAIR = readFileSync(join(REPO_ROOT, 'bin', 'hammer-conflict-repair.sh'), 'utf8');
+const HAMMER_PROMPT = HAMMER_PROMPT_PHASES.replace(
+  /^\/bin\/bash "<<ROOT_DIR>>\/bin\/hammer-conflict-repair\.sh" "<<RUN_DIR>>\/inputs\.sh"$/m,
+  () => CONFLICT_REPAIR.trimEnd(),
 );
 
 test('HAMPROMPT-01: rendered operating core directs execution, observable state and bounded stopping', () => {
@@ -60,7 +67,7 @@ test('HAMPROMPT-01: rendered operating core directs execution, observable state 
   assert.match(prompt, /take the union of keys/);
   assert.match(prompt, /Different values for the\nsame key/);
   assert.match(prompt, /Validate JSON \(including unique object\nkeys\)/);
-  assert.match(prompt, /Source verify-head again/);
+  assert.match(prompt, /sources verify-head again/);
   assert.ok(Buffer.byteLength(prompt) <= 60 * 1024);
   assert.doesNotMatch(prompt + reference, /<<[A-Z_]+>>|<!-- \/?hammer-reference:/);
   for (const name of ['B1', 'B2', 'B3', 'B4', 'E1']) {
@@ -237,10 +244,12 @@ test('HAMCONTROLLERSCRIPT-01: the hammer prompt closes with one shipped command 
 
 test('LAC-2097 prompt binds outside-lease validation to the saved head and base', () => {
   const flow = HAMMER_TEMPLATE.slice(HAMMER_TEMPLATE.indexOf('If `HAM_NEEDS_REVALIDATION=true`'));
-  assert.match(flow, /before `ham_release_merge_lease --yield local-validation`/);
+  // HAMCONFLICTSYNC-01: the close command performs this; the closer's shell
+  // has no lease helpers, so the prose names no function for it to call.
+  assert.match(flow, /before its lease owner yields \(`--yield local-validation`\)/);
   assert.match(flow, /Only on success with local HEAD unchanged/);
   assert.match(flow, /HAM_LOCALLY_VALIDATED_HEAD[\s\S]*?HAM_LOCALLY_VALIDATED_BASE_SHA/);
-  assert.match(flow, /Source verify-head again[\s\S]*?HAM_NEEDS_REVALIDATION=false/);
+  assert.match(flow, /sources verify-head again[\s\S]*?HAM_NEEDS_REVALIDATION=false/);
   assert.doesNotMatch(HAMMER_TEMPLATE, /Keep the lease held and continue/);
 });
 
@@ -292,9 +301,10 @@ test('HAMHELPERTIMEOUT-01 helpers declare bounded read retries separately from m
   const verify = readFileSync(new URL('../bin/hammer-verify-head.sh', import.meta.url), 'utf8');
   assert.match(HAMMER_TEMPLATE, /hammer-helper-step.mjs" read:report base-head 90 540/);
   assert.match(HAMMER_TEMPLATE, /ham_read\(\) \{ ham_step read:report "\$1" 90 540/);
-  for (const step of ['context', 'review-read', 'primary-change-context', 'conflict-primary']) {
+  for (const step of ['context', 'review-read', 'primary-change-context']) {
     assert.match(HAMMER_TEMPLATE, new RegExp(`ham_read ${step}`));
   }
+  assert.match(CONFLICT_REPAIR, /ham_read conflict-primary /);
   assert.match(merge, /hammer-helper-step.mjs" read primary-change-context 90 540/);
   assert.match(publish, /hammer-helper-step.mjs" read head-context 90 540/);
   assert.match(verify, /hammer-helper-step.mjs" read rebase-result 90 540/);
@@ -782,7 +792,7 @@ test('hammer never moves a submodule pointer: re-syncs checkouts and unstages gi
   );
 
   const conflictBlock = HAMMER_PROMPT.slice(HAMMER_PROMPT.indexOf('## Resolving merge conflicts'));
-  const rebaseAt = conflictBlock.indexOf('if ! git rebase "origin/$BASE_BRANCH"; then');
+  const rebaseAt = conflictBlock.indexOf('git rebase "origin/$BASE_BRANCH" ); then');
   const pushAt = conflictBlock.indexOf('git push --force-with-lease');
   const syncAt = conflictBlock.indexOf('git submodule update --recursive');
   assert.ok(rebaseAt >= 0 && syncAt > rebaseAt && syncAt < pushAt, 'conflict rebase must re-sync submodules before pushing');
@@ -920,8 +930,8 @@ test('LABELGATE-01: hammer can restore review-flagged guarded changes before def
 
 test('GENCONFLICT-01: hammer regenerates committed generated conflicts after source merges', () => {
   const block = HAMMER_PROMPT.slice(HAMMER_PROMPT.indexOf('## Resolving merge conflicts'));
-  const helperAt = block.indexOf('hq generated-conflicts resolve --worktree "$PWD" || exit 1');
-  assert.ok(helperAt > block.indexOf('if ! git rebase "origin/$BASE_BRANCH"; then'));
+  const helperAt = block.indexOf('hq generated-conflicts resolve --worktree "$PWD" )');
+  assert.ok(helperAt > block.indexOf('git rebase "origin/$BASE_BRANCH" ); then'));
   assert.ok(helperAt < block.indexOf('git submodule update --recursive'));
   assert.match(block, /Merge and stage hand-written sources first/);
   assert.match(block, /aborts\s+# and removes this worktree/);

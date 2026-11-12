@@ -2313,6 +2313,18 @@ function schemaV1() {
                     __type: TYPE_INT,
                     __default: 600000,
                   },
+                  // INCONCLUSIVERETRY-01b: an inconclusive closer result is an
+                  // owned retry. Surface it once at this attempt; from then on
+                  // the retry delay doubles from the base up to the max.
+                  closer_inconclusive_retry: {
+                    __type: TYPE_DICT,
+                    __strict: true,
+                    __keys: {
+                      surface_after_attempts: { __type: TYPE_INT, __default: 3, __min: 1 },
+                      backoff_base_ms: { __type: TYPE_INT, __default: 300000, __min: 1000 },
+                      backoff_max_ms: { __type: TYPE_INT, __default: 3600000, __min: 1000 },
+                    },
+                  },
                   eligibility: {
                     __type: TYPE_DICT,
                     __strict: true,
@@ -6286,6 +6298,14 @@ export class AgentOSConfig {
         'roles.adversarial.merge_authority.dispatch_timeout_ms',
         600000,
       ),
+      closerInconclusiveRetry: {
+        surfaceAfterAttempts: this.get(
+          'roles.adversarial.merge_authority.closer_inconclusive_retry.surface_after_attempts', 3),
+        backoffBaseMs: this.get(
+          'roles.adversarial.merge_authority.closer_inconclusive_retry.backoff_base_ms', 300000),
+        backoffMaxMs: this.get(
+          'roles.adversarial.merge_authority.closer_inconclusive_retry.backoff_max_ms', 3600000),
+      },
       eligibility: {
         riskClasses: [...this.get(
           'roles.adversarial.merge_authority.eligibility.risk_classes',

@@ -5171,8 +5171,8 @@ bytes. Unknown historical reasons, mixed/structured world refusals and succeeded
 audits are preserved. This lets a known prior harness fault reach ordinary
 ended-launch reconciliation without rewriting history.
 The dispatcher proves the charged launch ended, then atomically refunds its
-series, head and lifetime charges. Three refunds per head park further harness
-recovery and page once through the existing durable closure-wait receipt.
+series, head and lifetime charges. INCONCLUSIVERETRY-01b replaces the former
+three-refund park with an owned retry; see "Inconclusive closer results" below.
 Head/review changes do not erase a head's refund history; a world refusal still
 wins over a later generic controller failure. This adds no merge authority.
 
@@ -5197,6 +5197,54 @@ Observe 24 hours: no closer ends terminal on a closer-originated reason without
 correction/retry; no PR reaches retry-exhausted on harness faults alone. Retain
 deployed revision, PID start times and natural outcome/refund/page receipts.
 No live receipt is claimed by offline tests.
+
+### Inconclusive closer results (INCONCLUSIVERETRY-01b)
+
+A closer result that cannot conclude is an **owned retry with backoff**. It is
+never a closer failure, never spends closer budget and never parks the PR.
+`src/ama/closer-inconclusive-retry.mjs` holds the one classifier and the one
+owned-retry record shared by both sites below.
+
+| Classified as | Evidence |
+|---|---|
+| inconclusive | HAMSELFERRORS-01 `closer`/`infrastructure` stop origins (for example `dispatch-phase-scripts-missing`, `head-context-failed`, `validation-environment-failed`, `controller-setup-failed`, `*-timeout`); launch failures with no helper run (`spawn_never_registered`, `worker_never_started`, `scratch_missing`, `checkout_failed`, `provision_failed`, `endpoint_bootstrap_failed`, `helper_bootstrap_failed`); `github-unreachable`, UNKNOWN mergeability; `conflict-primary-failed` (the preservation proof could not run) |
+| real | `world` stop origins: findings, failed required tests or validation, policy, attestation and reversal refusals, stale-head and head-change fences, and `conflict-primary-unproven` when the proof shows a primary-line conflict. Unknown reasons also stay real, keeping their existing counted handling. |
+
+**Site 1, ended launch.** The closer's own terminal-stop or last-phase receipt
+decides, and the launch failure class decides when no helper ran. The head must
+be unmoved, so nothing was pushed. A recorded world refusal outranks a launch
+class. An inconclusive outcome:
+
+- refunds its series, head and lifetime charges in full;
+- spends no CLOSERRETRY no-delivery key;
+- records `owner` (`watcher`), `attempt`, `reason`, `nextAttemptAt` and `deadline`
+  in `data/follow-up-jobs/closer-inconclusive-retries/<repo>-pr-<n>.json`.
+
+Attempts below N retry on the next pass. From attempt N the delay doubles from
+the base up to the max, and one notice goes through the existing closure-wait
+page (`class=closer-inconclusive`, event `ama_closer.inconclusive_retry_surfaced`).
+The record keeps the PR owned with its deadline. The former
+`closer-self-error-budget-exhausted` park is gone. When a correction-required
+closer fault ends the run before correction, its diagnostic last-phase receipt
+still names the fault, so a `succeeded` launch that pushed and merged nothing is
+classified rather than counted as an unexplained exit.
+
+**Site 2, `closure-retry-exhausted`.** If every open charge of the current series
+belongs to a launch the owner recorded as inconclusive, the charges are refunded
+and the PR returns to its ordinary path without a page (`needsOperator: false`).
+Otherwise real attempts spent the budget, and it pages once, naming the PR, the
+reason and the recommended next action. That action is: inspect the closer
+audit, then fix the refused condition on a new head or grant an operator
+re-drive. The result carries the watcher owner.
+
+Every retry is an ordinary closer dispatch. Exact-head review, attestation,
+leases, required checks and the shared merge predicate all run again; the
+record grants nothing.
+
+Tunables (Node reader, `roles.adversarial.merge_authority.closer_inconclusive_retry`):
+`surface_after_attempts` (N, default 3), `backoff_base_ms` (default 300000),
+`backoff_max_ms` (default 3600000). Leave them unset until the Python and shell
+loaders mirror the keys (sibling INCONCLUSIVERETRY-01); the defaults apply.
 
 HAMEDITPLAN-05 classifies edit-plan errors in `HAMMER_EDIT_PLAN_ERROR_ORIGINS`.
 Unknown reasons throw; no new reason can silently

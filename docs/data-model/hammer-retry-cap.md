@@ -1,14 +1,15 @@
 # Data Model - Hammer Retry Cap Ledger
 
-`selfErrorRefunds` (optional) maps each dispatch head to up to three charged
-launch IDs refunded for exhausted closer-originated helper/validation/controller
-faults (HAMSELFERRORS-01). The map survives series/head resets. Each refund
+`selfErrorRefunds` (optional) maps each dispatch head to the most recent (up to
+32) charged launch IDs refunded for inconclusive closer outcomes: closer-originated
+helper/validation/controller faults (HAMSELFERRORS-01) and inconclusive ended or
+never-started launches (INCONCLUSIVERETRY-01b). The map survives series/head resets. Each refund
 atomically credits series, target and lifetime counters and `dispatchCharges`'s
 budget flags, and records the launch in `unexecutedLaunchRequestIds` to prevent
 other refund paths from crediting it twice. A missing/mismatched/unproven charge
-never refunds. The third refund parks further harness recovery; the existing
-closure-wait `(head, closer-self-error)` receipt pages once, including after
-restart. This is separate from PR retry exhaustion and grants no merge authority.
+never refunds. Refunds are not capped. The owned-retry record
+([closer-inconclusive-retries](closer-inconclusive-retries.md)) paces retries with
+backoff, and its `(head, closer-inconclusive)` closure-wait receipt pages once. This is separate from PR retry exhaustion and grants no merge authority.
 
 
 `overloadDeferral` is the version 1 Agent OS wire receipt, retained across

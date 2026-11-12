@@ -982,10 +982,12 @@ export function refundUnexecutedHammerDispatch(rootDir, identity, options = {}) 
   return mutateHammerLedger(rootDir, identity, () => refundUnexecutedHammerDispatchUnlocked(rootDir, identity, options));
 }
 
-// HAMSELFERRORS-01: refund only the recorded charged launch, atomically with
-// a durable per-head ceiling. Reaching the ceiling parks harness recovery,
-// rather than charging more failed PR adjudications.
-export const HAMMER_SELF_ERROR_REFUND_LIMIT = 3;
+// HAMSELFERRORS-01: refund only the recorded charged launch, atomically.
+// INCONCLUSIVERETRY-01b: a harness fault never spends PR adjudication budget,
+// however often it repeats. The owned retry record (closer-inconclusive-retry)
+// paces retries with backoff and surfaces them once; this ledger keeps a
+// bounded receipt list per head for idempotency.
+const SELF_ERROR_RECEIPTS_PER_HEAD = 32;
 export function refundCloserSelfError(rootDir, identity, { jobKey, headSha, launchRequestId, now } = {}) {
   return mutateHammerLedger(rootDir, identity, () => {
     const ledger = readHammerRetryCapLedger(rootDir, identity);
@@ -993,16 +995,13 @@ export function refundCloserSelfError(rootDir, identity, { jobKey, headSha, laun
       return { refunded: false, reason: 'identity-mismatch' };
     }
     const launches = ledger.selfErrorRefunds?.[headSha] || [];
-    if (launches.includes(launchRequestId)) return { refunded: false, reason: 'already-refunded',
-      exhausted: launches.length >= HAMMER_SELF_ERROR_REFUND_LIMIT };
-    if (launches.length >= HAMMER_SELF_ERROR_REFUND_LIMIT) return { refunded: false,
-      reason: 'self-error-budget-exhausted', exhausted: true };
+    if (launches.includes(launchRequestId)) return { refunded: false, reason: 'already-refunded' };
     const charge = Object.values(ledger.dispatchCharges || {}).find(value =>
       value.launchRequestId === launchRequestId && value.headSha === headSha && value.jobKey === jobKey);
     if (!charge || Object.values(charge.refundedBudgets || {}).some(Boolean)) {
       return { refunded: false, reason: 'no-unrefunded-charge' };
     }
-    const updated = [...launches, launchRequestId];
+    const updated = [...launches, launchRequestId].slice(-SELF_ERROR_RECEIPTS_PER_HEAD);
     const down = value => Math.max(0, Number(value || 0) - 1);
     const doc = { ...ledger, attemptCount: down(ledger.attemptCount),
       lifetimeAttemptCount: down(ledger.lifetimeAttemptCount),
@@ -1015,8 +1014,7 @@ export function refundCloserSelfError(rootDir, identity, { jobKey, headSha, laun
     creditHammerDispatchBudgets(doc, launchRequestId, { pr: true,
       head: ledger.targetRemediationSha === headSha, lifetime: true });
     writeHammerRetryCapLedger(rootDir, identity, doc);
-    return { refunded: true, reason: 'closer-self-error',
-      exhausted: updated.length >= HAMMER_SELF_ERROR_REFUND_LIMIT };
+    return { refunded: true, reason: 'closer-self-error' };
   });
 }
 

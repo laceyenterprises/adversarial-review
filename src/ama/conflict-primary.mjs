@@ -10,10 +10,13 @@ const hammer = message => {
 // HAMEMPTYPRIMARY-01: conflict-only replay must retain the author boundary.
 // The caller supplies the dispatch head and the fetched branch head separately;
 // a commit trailer is never an anchor. This proof grants no merge authority.
-export async function proveConflictPrimary({ reviewedHead, sourceHead, head, base, git }) {
-  if (![reviewedHead, sourceHead, head, base].every(sha) || sourceHead !== reviewedHead) return null;
+// INCONCLUSIVERETRY-01b: `onRefusal` learns whether a refusal shows a real
+// primary-line conflict (`conflict`) or only missing evidence (`unavailable`).
+export async function proveConflictPrimary({ reviewedHead, sourceHead, head, base, git, onRefusal = () => {} }) {
+  const refuse = kind => { onRefusal(kind); return null; };
+  if (![reviewedHead, sourceHead, head, base].every(sha) || sourceHead !== reviewedHead) return refuse('unavailable');
   const fork = (await git(['merge-base', reviewedHead, base])).trim();
-  if (!sha(fork)) return null;
+  if (!sha(fork)) return refuse('unavailable');
   const series = async (bottom, tip) => {
     const rows = (await git(['rev-list', '--parents', '--reverse', '--topo-order', '--max-count=257', `${bottom}..${tip}`]))
       .trim().split('\n').filter(Boolean).map(row => row.split(/\s+/));
@@ -26,7 +29,7 @@ export async function proveConflictPrimary({ reviewedHead, sourceHead, head, bas
     return rows.map(([commit]) => commit);
   };
   const reviewedCommits = await series(fork, reviewedHead), replayedCommits = await series(base, head);
-  if (!reviewedCommits || !replayedCommits || reviewedCommits.length !== replayedCommits.length) return null;
+  if (!reviewedCommits || !replayedCommits || reviewedCommits.length !== replayedCommits.length) return refuse('conflict');
   const metadata = async (bottom, tip) => {
     const fields = (await git(['log', '--no-decorate', '--no-notes', '--no-show-signature',
       '--format=%H%x00%an%x00%ae%x00%B', '-z', `${bottom}..${tip}`])).split('\0');
@@ -54,10 +57,10 @@ export async function proveConflictPrimary({ reviewedHead, sourceHead, head, bas
     // Rebase preserves author identity and message. In particular, do not
     // turn a reviewed author commit into the first HAM commit on main.
     const before = reviewedMetadata.get(original);
-    if (!before || before !== replayedMetadata.get(replay)) return null;
-    if (i === 0 && hammer(before.split('\0').slice(2).join('\0'))) return null;
+    if (!before || before !== replayedMetadata.get(replay)) return refuse('conflict');
+    if (i === 0 && hammer(before.split('\0').slice(2).join('\0'))) return refuse('conflict');
     const originalPatch = await patch(original);
-    if (!originalPatch || originalPatch !== await patch(replay)) return null;
+    if (!originalPatch || originalPatch !== await patch(replay)) return refuse('conflict');
   }
   return { proof: 'conflict-primary-preserved', reviewedHead, sourceHead, head, base, fork, reviewedCommits, replayedCommits };
 }

@@ -122,6 +122,19 @@ recovered orphan, daemon-bounce and historical body capture all use the same
 finding writer. Apart from factual-dispute admission above, this observation layer does not change posting, review verdicts,
 attestation, dispatch, closure predicates or lifecycle transitions.
 
+Finding projection takes the SQLite write lock before reading each pass with
+an `IMMEDIATE` transaction. Enclosing live body-capture and orphan-recovery
+transactions do the same: a nested transaction is only a savepoint and cannot
+upgrade its parent's deferred snapshot safely. A competing WAL writer therefore
+waits under the connection's busy timeout rather than invalidating a projection
+snapshot. The safe live writer retries a busy failure once after 100 ms, then
+retains the existing warning and review result if projection still fails.
+Remediation-link projection also uses an immediate transaction.
+The programmatic `backfillReviewFindings` options accept `onPass`, called with
+`{ passId, inserted }` after each committed pass. A page retry can accumulate
+these committed inserts even when a later pass fails; replayed inserts report
+zero. Page selection stays outside the per-pass write transactions.
+
 ## Hammer evidence
 
 `review_finding_disputes` retains the existing hammer finding identity, evidence

@@ -1,0 +1,14 @@
+operator_steps:
+  - description: >-
+      After the review-service update and its consuming application's backfill
+      command deploy, the designated operator completes the explicit findings
+      and grades backfill twice while review daemons remain active. Retain
+      page and final receipts, stable finding and grade counts, and a seven-day
+      reviewer report without backfill-required gaps. Follow the consuming
+      application's maintenance runbook; this plan executes no live write
+      automatically on merge.
+    run_as: designated service operator
+    command: /bin/cat docs/data-model/review-findings.md
+catchup:
+  catchup_timeout_s: 1800
+contact_on_failure: operator

@@ -217,7 +217,7 @@ export async function reconcilePostedFailedOrphans({
               return { rowMarkedPosted: result.changes === 1, artifactLinked, passFound: Boolean(pass), followUpPayload };
             }
             return { rowMarkedPosted: false, artifactLinked, passFound: Boolean(pass), followUpPayload };
-          })(),
+          }).immediate(),
           { label: 'reconcile-posted-orphans-row' }
         );
         rowMarkedPosted = applyResult.rowMarkedPosted === true;

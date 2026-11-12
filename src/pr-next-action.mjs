@@ -226,6 +226,7 @@ function launchFacts(launches, head) {
     outcome: lower(closer.outcome) || null,
     retryable: typeof closer.retryable === 'boolean' ? closer.retryable : null,
     attempt: finite(closer.attempt),
+    rootLaunchRef: text(closer.rootLaunchRequestId) || text(closer.launchRequestId) || null,
     launchRef: text(effective?.liveRetryLaunchRequestId) || text(closer.launchRequestId) || null,
     // Every terminal retry must predate the review; a missing terminal time
     // cannot prove freshness. Never substitute requested/updated/observed time.
@@ -249,6 +250,7 @@ function leaseFacts(leases, head) {
     present: true,
     forHead: !text(lease.headSha) || sameHead(lease.headSha, head),
     status,
+    terminalOutcome: lower(lease.terminalOutcome) || null,
     lrqRef: text(lease.lrqId) || null,
     deadlineMs: timeMs(lease.deadlineAt) ?? (atMs !== null && windowMs !== null ? atMs + windowMs : null),
   };
@@ -347,7 +349,11 @@ function supersedeNotBootedCloser(facts, options) {
   const marker = plain(progress?.closerSuperseded);
   const cancelled = launch.owned === false && Boolean(marker) && sameHead(marker.headSha, head)
     && text(marker.launchRequestId) === launch.launchRef;
-  if (!(launch.owned === true && launch.notBooted === true) && !cancelled) return null;
+  // A matching deferred terminal lease records a previously parked closer.
+  // Resuming its launch through requested/admitted does not erase that custody.
+  const resumed = [launch.launchRef, launch.rootLaunchRef].includes(lease.lrqRef)
+    && lease.status === 'terminal' && lease.terminalOutcome === 'deferred';
+  if (!(launch.owned === true && launch.notBooted === true && !resumed) && !cancelled) return null;
   const next = selectRow({ ...facts, launch: SET_ASIDE_LAUNCH,
     lease: lease.status === 'handed-to-review' ? lease : SET_ASIDE_LEASE }, { ...options, closerSetAside: true });
   if (next.row !== 'R15-daemon' || next.action !== 'daemon-merge' || next.reason !== 'clean-exact-head') return null;

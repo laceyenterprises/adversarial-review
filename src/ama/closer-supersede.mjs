@@ -1,8 +1,8 @@
 // DAEMONSUPERSEDE-01: a zero-finding, exact-head clean review supersedes a
 // closer launch that has not booted. The shared decision (`nextAction`) names
-// the launch; this executor re-reads it, cancels it through the audited
-// `hq dispatch cancel` path with a typed reason, confirms the launch is
-// terminal and records the supersession, so the daemon merges under the shared
+// the launch; this executor records durable intent, re-reads it, cancels it
+// through the audited `hq dispatch cancel` path with a typed reason and
+// confirms the launch is terminal, so the daemon merges under the shared
 // lease instead of waiting for a workspace that has nothing left to do.
 //
 // A launch that has booted (leased, starting, running, suspended or parked) is
@@ -60,10 +60,27 @@ export async function supersedeNotBootedCloser({
     try { return await readLaunchImpl({ rootDir, launchRequestId, signal }); }
     catch { return null; }
   };
-  // Fresh read immediately before the cancel: the decision's snapshot may be
+  // Fresh read before recording intent: the decision's snapshot may be
   // older than a launch that has just leased a workspace.
   const before = closerBootState(await read());
   if (before !== 'not-booted') return refused(`closer-${before}`);
+  // Persist the intent before cancellation. A crash or failed terminal-status
+  // write after HQ cancels must not turn this launch into a fresh hammer retry.
+  // The policy still requires terminal launch evidence before using the marker.
+  const at = now();
+  const marker = { launchRequestId, headSha, reviewedHeadSha, reason: CLOSER_SUPERSEDE_REASON,
+    observedStatus: null, supersededAt: at };
+  try {
+    const recorded = updateDispatchRecordImpl(rootDir, { repo, prNumber, headSha: recordHeadSha }, record =>
+      record?.launchRequestId === launchRequestId ? { ...record, supersededByReview: marker } : null);
+    if (recorded?.supersededByReview !== marker) return refused('supersede-record-mismatch');
+  } catch (error) {
+    logger?.warn?.(`[ama-closer] supersede marker write failed for ${repo}#${prNumber}: ${error?.message || error}`);
+    return refused('supersede-marker-write-failed');
+  }
+  // Re-read after the durable write, immediately before cancellation.
+  const ready = closerBootState(await read());
+  if (ready !== 'not-booted') return refused(`closer-${ready}`);
   try {
     await cancelImpl({ hqPath, launchRequestId, reason: CLOSER_SUPERSEDE_REASON, retryDelaysMs,
       hqExecFileImpl: (bin, args, options) => execFileImpl(bin, args, {
@@ -78,16 +95,14 @@ export async function supersedeNotBootedCloser({
   const afterObservation = await read();
   const after = closerBootState(afterObservation);
   if (after !== 'ended') return refused('closer-cancel-unconfirmed', { observed: after });
-  const at = now();
   const observedStatus = String(afterObservation.value.effectiveLaunch?.status || '').toLowerCase() || null;
-  const marker = { launchRequestId, headSha, reviewedHeadSha, reason: CLOSER_SUPERSEDE_REASON,
-    observedStatus, supersededAt: at };
+  const confirmedMarker = { ...marker, observedStatus };
   try {
     updateDispatchRecordImpl(rootDir, { repo, prNumber, headSha: recordHeadSha }, record => record && ({
-      ...record, supersededByReview: marker, lastObservedStatus: observedStatus, lastObservedAt: at,
+      ...record, supersededByReview: confirmedMarker, lastObservedStatus: observedStatus, lastObservedAt: at,
     }));
   } catch (error) {
-    logger?.warn?.(`[ama-closer] supersede marker write failed for ${repo}#${prNumber}: ${error?.message || error}`);
+    logger?.warn?.(`[ama-closer] supersede status write failed for ${repo}#${prNumber}: ${error?.message || error}`);
   }
   try {
     const lease = readLeaseImpl(rootDir, { repo, prNumber, headSha: recordHeadSha });
@@ -100,5 +115,5 @@ export async function supersedeNotBootedCloser({
   }
   logger?.log?.(JSON.stringify({ event: 'ama.closer_superseded', repo, pr: prNumber, headSha,
     launchRequestId, reason: CLOSER_SUPERSEDE_REASON, observedStatus }));
-  return { superseded: true, launchRequestId, observedStatus, marker };
+  return { superseded: true, launchRequestId, observedStatus, marker: confirmedMarker };
 }

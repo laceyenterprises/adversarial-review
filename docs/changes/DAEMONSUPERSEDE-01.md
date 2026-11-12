@@ -15,7 +15,26 @@ non-blocking or demoted findings, both known, on the exact head, with green
 required checks and a MERGEABLE PR. The closure executor then re-reads the
 launch, cancels it with `hq dispatch cancel <launch> --reason
 superseded-by-clean-exact-head-review` and confirms it ended. The daemon then
-merges under the shared lease as before.
+merges under the shared lease as before. Final-round remediation makes the
+supersession intent durable before cancellation, refusing cancellation on marker
+write failure or a missing/replaced dispatch record. A fresh boot-state read
+after persistence retains booted ownership. Terminal-status enrichment remains
+best effort; the original intent prevents hammer retries after deferred merges
+even when enrichment fails.
+
+The review's SHA-casing concern was checked against the reviewed head:
+`sameHead` and the executor both compare case-sensitively. A regression fixture
+confirms mixed-case review SHAs cannot select supersession in either path;
+no SHA policy change is required.
+
+PR-head CI also exposed resumed closer custody and fixture compatibility gaps.
+A matching deferred terminal lease now protects a previously parked closer
+and its retry descendants even when they resume through `requested` or
+`admitted`; the observation projection retains the root launch identity.
+The lifecycle fixture's
+ledger stub exports the new observation reader with unknown evidence. The
+state source projection was reviewed and refreshed; the graph and existing
+smoke promises are unchanged.
 
 Family rule: an owner that has done nothing yet does not outrank a completed
 clean verdict.
@@ -44,6 +63,20 @@ boots in the race reads `pr-merged` at lease admission and closes out as
 - No configuration, CI check, gate, override label or strict-mode change.
 
 ## Verification
+
+Final-round remediation:
+
+- `node test/run-tests.mjs test/launch-request-status.test.mjs test/daemonsupersede-01.test.mjs`:
+  92/92 pass, including failed marker persistence, deferred merge recovery,
+  mixed-case identity refusal, boot races and resumed closer/retry custody.
+- Six neighboring policy, adapter, lifecycle and SMV suites: 546/546 pass.
+  `test/watcher-claim-loop.test.mjs`: 168/168 pass under a 240-second bound
+  after the earlier 60/120-second bounds proved insufficient.
+- `npm run lint` passes with zero errors (149 existing warnings);
+  `npm run typecheck:contracts` and the offline research-finding demo pass.
+- Data-model catalog validation passes (94 entries); `git diff --check` passes.
+
+Original implementation validation:
 
 - `node test/run-tests.mjs test/daemonsupersede-01.test.mjs`: 11/11 pass. The
   file covers an admitted hammer cancelled with the typed reason followed by a

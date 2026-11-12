@@ -1413,13 +1413,22 @@ it re-runs the policy with that launch and its lease set aside. Only the ordinar
 zero non-blocking or demoted findings, both known) may take the PR; every hold,
 stop, cap, safety refusal, live remediator/reviewer, CI and mergeability row
 still wins first. The decision carries `supersede-not-booted-closer:<launch>`.
-Before the daemon merges, the closure executor re-reads the launch, cancels it
+Before the daemon merges, the closure executor re-reads the launch, durably
+records `supersededByReview` intent on its matching dispatch record, rechecks
+that it has not booted, and cancels it
 through `hq dispatch cancel --reason superseded-by-clean-exact-head-review`,
-and confirms it ended. It then records `supersededByReview` on the closer
-dispatch record and settles the closer lease `terminal`/`superseded`. A launch
+and confirms it ended. It then enriches the marker's initially null
+`observedStatus` and settles the closer lease `terminal`/`superseded`. Initial
+marker write failure or a missing/replaced record refuses cancellation and
+lease settlement. Failed terminal-status enrichment retains the durable intent
+so a deferred daemon merge cannot create a hammer retry. A launch
 that has booted (leased, starting, running, suspended or parked), an
 unreadable chain, an unconfirmed cancel or a failed merge predicate keeps the
-closer as owner (`in-flight:<launch>`). The recorded supersession keeps the
+closer as owner (`in-flight:<launch>`). A matching `terminal`/`deferred` lease
+also preserves custody when a previously parked launch or its retry descendants
+resume through `requested` or `admitted`; observation projection retains the
+root launch identity, and scheduling statuses cannot erase boot history.
+The recorded supersession keeps the
 cancelled launch from becoming a fresh hammer retry for that head. A closer
 that boots in the race reads `pr-merged` at lease admission and closes out as
 `already-merged`.

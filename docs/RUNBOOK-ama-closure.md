@@ -897,17 +897,26 @@ immediately through the existing closure-wait path and returns
 A zero-finding exact-head review on a green, mergeable head no longer waits for
 a closer launch that is still `requested` or `admitted` (for example, queued for
 a fresh workspace). The shared decision selects the daemon merge with the
-evidence ref `supersede-not-booted-closer:<launch>`. The executor cancels that
-launch through `hq dispatch cancel <launch> --reason
+evidence ref `supersede-not-booted-closer:<launch>`. The executor first persists
+`supersededByReview` on the matching dispatch record, rechecks that the launch
+has not booted, then cancels it through `hq dispatch cancel <launch> --reason
 superseded-by-clean-exact-head-review`, confirms it is terminal, and then runs
 the ordinary daemon clean merge under the shared lease. Look for the watcher
 event `ama.closer_superseded` and the HQ cancel audit with that reason. The
-closer dispatch record gains `supersededByReview`; its lease ends
-`terminal`/`superseded`.
+closer lease ends `terminal`/`superseded`. The marker starts with
+`observedStatus: null`; terminal confirmation enriches that field. If this
+later write fails, the durable intent still prevents a hammer retry after a
+deferred daemon merge. The marker alone never overrides live or unreadable
+launch evidence. A matching `terminal`/`deferred` lease retains a previously
+parked closer's custody when its launch or retry descendants resume through
+`requested` or `admitted`; observation projection retains the root launch identity.
 
 The closer keeps the PR when it has booted, its launch evidence is unreadable,
 the cancel cannot be confirmed (`closer-supersede-closer-cancel-unconfirmed`)
-or the live merge predicate fails (`closer-supersede-not-eligible`). Those
+or the live merge predicate fails (`closer-supersede-not-eligible`). A marker
+write failure (`closer-supersede-supersede-marker-write-failed`) or a
+missing/replaced dispatch record (`closer-supersede-supersede-record-mismatch`)
+refuses cancellation and lease settlement. Those
 passes still log `ama.closure_blocker reason=in-flight:<launch>`. A finding,
 a head mismatch, a hold label or non-green CI never supersedes a closer.
 

@@ -11,7 +11,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 import { CLOSER_SUPERSEDE_REASON, closerSupersedeOf, nextAction } from '../src/pr-next-action.mjs';
-import { closureOwnerShadowEvidence } from '../src/pr-next-action-consumer.mjs';
+import { closureOwnerShadowEvidence, launchSource } from '../src/pr-next-action-consumer.mjs';
 import { closerBootState, supersedeNotBootedCloser } from '../src/ama/closer-supersede.mjs';
 import { mergeLeaseAdmissionReason } from '../src/ama/merge-lease-admission.mjs';
 import { maybeDispatchAmaClosureFor } from '../src/ama-closure-orchestration.mjs';
@@ -72,6 +72,23 @@ test('a booted or parked closer is never superseded and keeps the merge', () => 
     retryChain: [{ launch_request_id: 'lrq_fixture_retry', status: 'running' }] }));
   assert.equal(retried.row, 'R03-live-owner');
   assert.equal(closerSupersedeOf(retried), null);
+});
+
+test('a deferred closer resuming through requested or admitted retains custody for its own launch', () => {
+  for (const status of ['requested', 'admitted']) {
+    const lease = { status: 'terminal', terminalOutcome: 'deferred' };
+    const resumed = nextAction(snap({ launch: { status }, lease }));
+    assert.equal(resumed.row, 'R03-live-owner', status);
+    assert.equal(closerSupersedeOf(resumed), null);
+    const unrelated = nextAction(snap({ launch: { status }, lease: { ...lease, lrqId: 'lrq_predecessor' } }));
+    assert.equal(unrelated.row, 'R15-daemon', 'an unrelated lease does not invent boot history');
+    const snapshot = snap({ lease });
+    snapshot.observations.launches = launchSource(complete({
+      launchRequestId: LRQ, liveRetryLaunchRequestId: 'lrq_resumed_retry',
+      launch: { status: 'failed' }, retryChain: [{ launch_request_id: 'lrq_resumed_retry', status }],
+    }), { headSha: HEAD }, {});
+    assert.equal(nextAction(snapshot).row, 'R03-live-owner', 'retry projection retains root custody');
+  }
 });
 
 test('any finding, a head mismatch or an unready gate leaves the not-booted closer in charge', () => {
@@ -146,7 +163,11 @@ function executorArgs(statuses, calls) {
     reviewedHeadSha: HEAD, launchRequestId: LRQ, hqRoot: '/nonexistent-fixture-hq', hqPath: 'hq',
     readLaunchImpl: async () => launchObservation(statuses[Math.min(index++, statuses.length - 1)]),
     execFileImpl: async (bin, argv) => { calls.cancel.push(argv); return { stdout: '{"ok":true}' }; },
-    updateDispatchRecordImpl: (rootDir, identity, mutate) => { calls.record.push(mutate({ state: 'dispatched' })); },
+    updateDispatchRecordImpl: (rootDir, identity, mutate) => {
+      const record = mutate({ state: 'dispatched', launchRequestId: LRQ });
+      calls.record.push(record);
+      return record;
+    },
     readLeaseImpl: () => ({ headSha: HEAD, status: 'dispatched', lrqId: LRQ }),
     updateLeaseImpl: lease => { calls.lease.push(lease); },
     retryDelaysMs: [], logger: QUIET, now: () => OBSERVED,
@@ -155,11 +176,13 @@ function executorArgs(statuses, calls) {
 
 test('the executor cancels a not-booted closer with the typed reason and confirms it ended', async () => {
   const calls = { cancel: [], record: [], lease: [] };
-  const result = await supersedeNotBootedCloser(executorArgs(['admitted', 'canceled'], calls));
+  const result = await supersedeNotBootedCloser(executorArgs(['admitted', 'admitted', 'canceled'], calls));
   assert.equal(result.superseded, true);
   assert.deepEqual(calls.cancel, [['dispatch', 'cancel', LRQ, '--reason', 'superseded-by-clean-exact-head-review']]);
   assert.equal(calls.record[0].supersededByReview.launchRequestId, LRQ);
   assert.equal(calls.record[0].supersededByReview.headSha, HEAD);
+  assert.equal(calls.record[0].supersededByReview.observedStatus, null, 'intent precedes cancellation');
+  assert.equal(calls.record[1].supersededByReview.observedStatus, 'canceled');
   assert.equal(calls.lease[0].terminalOutcome, 'superseded');
 });
 
@@ -168,15 +191,53 @@ test('the executor never cancels a closer that booted, and refuses an unconfirme
   assert.equal((await supersedeNotBootedCloser(executorArgs(['running'], booted))).reason, 'closer-booted');
   assert.deepEqual(booted.cancel, []);
   const raced = { cancel: [], record: [], lease: [] };
-  const result = await supersedeNotBootedCloser(executorArgs(['admitted', 'starting'], raced));
+  const result = await supersedeNotBootedCloser(executorArgs(['admitted', 'admitted', 'starting'], raced));
   assert.equal(result.superseded, false);
   assert.equal(result.reason, 'closer-cancel-unconfirmed');
-  assert.deepEqual(raced.record, [], 'no supersede marker without a confirmed terminal launch');
+  assert.equal(raced.record.length, 1, 'only the intent is written before a boot race');
+  assert.equal(raced.record[0].supersededByReview.observedStatus, null);
   assert.deepEqual(raced.lease, []);
+  const beforeCancel = { cancel: [], record: [], lease: [] };
+  const bootRace = await supersedeNotBootedCloser(executorArgs(['admitted', 'starting'], beforeCancel));
+  assert.equal(bootRace.reason, 'closer-booted');
+  assert.deepEqual(beforeCancel.cancel, [], 'recheck boot state after persisting the intent');
+  assert.deepEqual(beforeCancel.lease, []);
+  assert.equal(nextAction(snap({ launch: { status: 'starting' },
+    progress: { closerSuperseded: raced.record[0].supersededByReview } })).row, 'R03-live-owner',
+  'an intent never sets aside a booted closer');
   const mismatch = { cancel: [], record: [], lease: [] };
   assert.equal((await supersedeNotBootedCloser({ ...executorArgs(['admitted'], mismatch), reviewedHeadSha: OLD })).reason,
     'supersede-identity-mismatch');
   assert.deepEqual(mismatch.cancel, []);
+});
+
+test('mixed-case review SHAs are consistently refused by policy and executor', async () => {
+  const decision = nextAction(snap({ reviews: { headSha: HEAD.toUpperCase() } }));
+  assert.equal(decision.row, 'R03-live-owner');
+  assert.equal(closerSupersedeOf(decision), null);
+  const calls = { cancel: [], record: [], lease: [] };
+  const result = await supersedeNotBootedCloser({
+    ...executorArgs(['admitted'], calls), reviewedHeadSha: HEAD.toUpperCase(),
+  });
+  assert.equal(result.reason, 'supersede-identity-mismatch');
+  assert.deepEqual(calls, { cancel: [], record: [], lease: [] });
+});
+
+test('marker persistence failure or a missing/replaced record refuses cancellation and lease settlement', async () => {
+  for (const mode of ['write-error', 'missing-record', 'replaced-record']) {
+    const calls = { cancel: [], record: [], lease: [] };
+    const result = await supersedeNotBootedCloser({
+      ...executorArgs(['admitted'], calls),
+      updateDispatchRecordImpl: (rootDir, identity, mutate) => {
+        if (mode === 'write-error') throw new Error('synthetic I/O failure');
+        const record = mode === 'missing-record' ? null : { launchRequestId: 'lrq_successor' };
+        return mutate(record) || record;
+      },
+    });
+    assert.equal(result.superseded, false, mode);
+    assert.equal(result.reason, mode === 'write-error' ? 'supersede-marker-write-failed' : 'supersede-record-mismatch');
+    assert.deepEqual(calls, { cancel: [], record: [], lease: [] }, mode);
+  }
 });
 
 // ── End to end through the closure orchestration ────────────────────────────
@@ -271,6 +332,41 @@ test('end to end: a running hammer is not superseded and the daemon does not mer
   assert.equal(result.reason, `in-flight:${LRQ}`);
   assert.deepEqual(calls.cancel, []);
   assert.deepEqual(calls.daemon, []);
+});
+
+test('a failed post-cancel status write and deferred merge retain daemon ownership on the next pass', async t => {
+  const rootDir = scratch(t);
+  const identity = seedCloser(rootDir);
+  const state = { status: 'admitted' };
+  mockLedger(t, state);
+  const calls = { cancel: [], daemon: [], hammer: [] };
+  const args = closureArgs(rootDir, { calls, state });
+  args.supersedeNotBootedCloserImpl = options => supersedeNotBootedCloser({
+    ...options, hqPath: 'hq', retryDelaysMs: [],
+    execFileImpl: async (bin, argv) => {
+      assert.equal(readAmaCloserDispatchRecord(rootDir, identity).supersededByReview.launchRequestId, LRQ,
+        'the intent is durable before HQ cancellation');
+      calls.cancel.push(argv);
+      state.status = 'canceled';
+      return { stdout: '{"ok":true}' };
+    },
+    updateDispatchRecordImpl: (root, recordIdentity, mutate) => {
+      if (state.status === 'canceled') throw new Error('synthetic I/O failure');
+      return updateAmaCloserDispatchRecord(root, recordIdentity, mutate);
+    },
+  });
+  args.runDaemonCleanMergeAttemptImpl = async options => {
+    calls.daemon.push(options.sharedNextAction?.decision);
+    return { disposition: 'deferred', reason: 'fixture-lease-busy' };
+  };
+  await maybeDispatchAmaClosureFor(args);
+  assert.equal(calls.daemon.length, 1);
+  assert.equal(readAmaCloserDispatchRecord(rootDir, identity).supersededByReview.observedStatus, null);
+  const second = await maybeDispatchAmaClosureFor(closureArgs(rootDir, { calls, state }));
+  assert.equal(second.reason, 'daemon-merged');
+  assert.equal(calls.daemon.length, 2);
+  assert.equal(calls.cancel.length, 1, 'a restart needs no repeat cancellation');
+  assert.deepEqual(calls.hammer, []);
 });
 
 test('end to end: a review with a finding, or a moved head, never supersedes the admitted hammer', async t => {

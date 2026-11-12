@@ -107,6 +107,7 @@ export function launchSource(observation, lease, cap) {
     row: value.launch, retryChain: value.retryChain ?? undefined, retryChainUnreadable: value.retryChainUnreadable === true,
     retryChainReadState: value.retryChainUnreadable === true ? 'failed' : 'complete',
     launchRequestId: value.liveRetryLaunchRequestId || value.launchRequestId || null, headSha: lease?.headSha ?? null,
+    rootLaunchRequestId: value.launchRequestId || null,
     attempt: value.launch?.attempt ?? value.attempt ?? null,
     outcome: terminalNoMerge ? 'no-merge' : null,
     retryable: terminalNoMerge ? !(cap.retryExhausted || cap.lifetimeExhausted) : null,

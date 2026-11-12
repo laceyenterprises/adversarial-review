@@ -188,6 +188,25 @@ for (const order of [[false, true, false], [true, false, false]]) {
   });
 }
 
+for (const remaining of [100, 0]) {
+  test(`operator safety scopes are never slept or deferred by the floor with ${remaining} remaining (NOMERGEHOLDHANG-01)`, async t => {
+    const rootDir = makeRootDir();
+    t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+    const now = Date.parse('2026-06-06T12:00:00.000Z');
+    const throttle = makeThrottle({ rootDir, nowMs: () => now,
+      sleepImpl: () => { assert.fail('operator safety actions must not sleep until reset'); },
+    });
+    await throttle.recordResponseRateLimit({ resource: 'graphql', remaining, resetAt: now + 3_600_000 });
+    await withGitHubBudgetScope({ operatorSafety: true }, async scope => {
+      assert.equal(await throttle.awaitThrottleIfNeeded('graphql'), false);
+      assert.equal(scope.deferred, false);
+      // A rate limit this operation itself observed still fails fast.
+      await throttle.recordRateLimitedCall('graphql');
+      await assert.rejects(throttle.awaitThrottleIfNeeded('graphql'), { name: 'GitHubBudgetDeferredError' });
+    });
+  });
+}
+
 test('shared-state inheritance and monotonic merge keep the lower remaining budget', async () => {
   const rootDir = makeRootDir();
   try {

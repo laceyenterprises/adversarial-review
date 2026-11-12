@@ -126,6 +126,11 @@ propagate deferred/rate-limited accounting to their parent even when a caller
 swallows the error; urgency remains local to the nested operation. Only
 un-scoped callers share in-process sleep promises; scoped callers never join
 another caller's wait or inherit its deferral decision.
+An `operatorSafety` scope (the no-merge hold and release CLI) is never slept or
+deferred by the floor, in either the async or the synchronous path: it proceeds
+with the call, which GitHub itself refuses fast if the budget is really spent.
+A rate limit observed inside that same scope still defers its next call
+immediately. Its responses are metered as usual (NOMERGEHOLDHANG-01).
 
 Synchronous `meteredExecFileSync` calls use the effective caller environment for
 budget reads, the throttle floor, and the `wait`, `record`, and `limited` bridge

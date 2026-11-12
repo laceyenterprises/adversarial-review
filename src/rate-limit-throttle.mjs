@@ -724,6 +724,11 @@ function createRateLimitThrottle({
     const scope = currentGitHubBudgetScope();
     const limited = scopedGitHubRateLimit(resource, credential, nowMs());
     if (limited) throw new GitHubBudgetDeferredError(limited, { credential });
+    // An operator safety action (a no-merge hold or release) is one call an
+    // operator is waiting on. The polling floor reserves throughput; it must
+    // never starve or silently sleep that call (NOMERGEHOLDHANG-01). GitHub
+    // itself still refuses a truly exhausted call, fast and metered.
+    if (scope?.operatorSafety) return false;
     // Scoped callers must decide independently of another caller's sleep or
     // deferral. Only un-scoped callers share the in-flight wait below.
     if (scope) {

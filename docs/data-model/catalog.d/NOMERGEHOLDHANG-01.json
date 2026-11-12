@@ -1,0 +1,17 @@
+{
+  "version": 1,
+  "entries": [
+    {
+      "id": "no-merge-hold-receipts",
+      "title": "No-Merge Hold Receipts",
+      "path": "docs/data-model/no-merge-hold-receipts.md",
+      "store": "data/operator-mutations/no-merge-holds/<repo>-pr-<n>-<requestedAt>.json",
+      "schemaSurface": "src/no-merge-hold.mjs",
+      "relatedSchemaSurfaces": [
+        "src/rate-limit-throttle.mjs",
+        "src/metered-gh.mjs"
+      ],
+      "owner": "operator no-merge hold CLI"
+    }
+  ]
+}

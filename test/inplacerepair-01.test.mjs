@@ -8,7 +8,7 @@ import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { pathToFileURL } from 'node:url';
 import { reserveRepairEpoch, bindRepairHead, repairCause, pageRepairCap,
-  pendingRepairEpoch, observeRepairOwner, reconcileRepairOwner,
+  pendingRepairEpoch, observeRepairOwner, reconcileRepairOwner, repairEpochForHead,
   REPAIR_PROVISION_DEADLINE_MS } from '../src/repair-epochs.mjs';
 import { admitExhaustedHeadVerdict, isExhaustedHeadVerdictRequested } from '../src/exhausted-head-verdict.mjs';
 import { readHammerRetryCapLedger, recordHammerRetryDispatch, refundCloserSelfError,
@@ -192,6 +192,32 @@ test('repair admission retains closer heads, live review claims and malformed he
   assert.equal(db.prepare('SELECT review_status FROM reviewed_prs').get().review_status, 'reviewing');
 });
 
+for (const storedSha of [old, old.toUpperCase(), 'aA'.repeat(20)]) {
+  test(`repair head identity ignores SHA case stored as ${storedSha.slice(0, 2)}`, async t => {
+    const f = fixture(t);
+    const epoch = reserveRepairEpoch({ ...f, headSha: storedSha }).epoch;
+    for (const headSha of [old, old.toUpperCase(), 'Aa'.repeat(20)]) {
+      assert.equal(bindRepairHead({ ...f, epochId: epoch.id, headSha }), null,
+        'case changes cannot consume the reservation as a new builder head');
+    }
+    const bound = bindRepairHead({ ...f, epochId: epoch.id, headSha: 'bB'.repeat(20) });
+    for (const headSha of [head, head.toUpperCase(), 'Bb'.repeat(20)]) {
+      assert.equal(bindRepairHead({ ...f, epochId: epoch.id, headSha }).boundAt, bound.boundAt);
+      assert.equal(repairEpochForHead(f.rootDir, f, headSha).id, epoch.id);
+      assert.equal((await reconcileRepairOwner({ ...f, headSha, includeReviewedHead: true })).id, epoch.id);
+    }
+    assert.equal(bindRepairHead({ ...f, epochId: epoch.id, headSha: later }), null);
+    assert.equal(repairEpochForHead(f.rootDir, f, later), null);
+
+    const second = reserveRepairEpoch({ ...f, headSha: head.toUpperCase(), ownerKey: 'second' }).epoch;
+    const retired = await reconcileRepairOwner({ ...f, headSha: head, includeReviewedHead: true,
+      now: Date.now() + REPAIR_PROVISION_DEADLINE_MS,
+      readImpl: async () => ({ ok: true, roots: [], absenceProof: {} }) });
+    assert.equal(retired.id, epoch.id, 'retirement falls back to the same head regardless of case');
+    assert.ok(readHammerRetryCapLedger(f.rootDir, f).repairEpochs.find(e => e.id === second.id).terminalAt);
+  });
+}
+
 test('cap pages once with full history across heads and never opens a PR', async t => {
   const f = fixture(t);
   const one = reserveRepairEpoch(f).epoch;
@@ -298,6 +324,25 @@ test('harness refunds have a PR-wide cap and bounded failure evidence', t => {
   const refunds = Object.values(readHammerRetryCapLedger(f.rootDir, f).reviewHarnessRefunds);
   assert.equal(refunds.length, REVIEW_HARNESS_REFUND_CAP);
   assert.ok(refunds.every(refund => refund.failure.length <= 512));
+});
+
+test('harness refund clamps nullable legacy attempt counters to zero once', t => {
+  const f = fixture(t), db = new Database(':memory:');
+  t.after(() => db.close());
+  // Synthetic legacy schema: the production schema already declares NOT NULL.
+  db.exec(`CREATE TABLE reviewed_prs (repo TEXT, pr_number INTEGER, review_status TEXT,
+    failed_at TEXT, failure_message TEXT, reviewer_session_uuid TEXT, reviewer_head_sha TEXT,
+    review_attempts INTEGER, infra_auto_recover_attempts INTEGER)`);
+  db.prepare(`INSERT INTO reviewed_prs VALUES (?,?,'failed','2026-01-01T00:00:00Z',
+    '[hcp-unavailable]','legacy-session',?,NULL,NULL)`).run(repo, prNumber, old);
+  const row = db.prepare('SELECT * FROM reviewed_prs').get();
+  const refunded = refundReviewHarnessFault({ ...f, db, row });
+  assert.equal(refunded.row.review_status, 'pending-upstream');
+  assert.equal(refunded.row.review_attempts, 0);
+  assert.equal(refunded.row.infra_auto_recover_attempts, 0);
+  const replay = refundReviewHarnessFault({ ...f, db, row: refunded.row });
+  assert.equal(replay.row.review_attempts, 0);
+  assert.equal(replay.receipt.id, refunded.receipt.id);
 });
 
 test('watcher reconciliation resolves reviewed heads while pending custody takes precedence', async t => {

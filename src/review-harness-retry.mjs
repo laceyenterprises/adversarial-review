@@ -44,7 +44,7 @@ export function refundReviewHarnessFault({ rootDir, db, row, now = Date.now() })
     const marker = `\n[harness-budget-refunded:${id}]`;
     const message = row.failure_message.slice(0, MAX_REFUNDED_FAILURE_LENGTH - marker.length) + marker;
     db.prepare(`UPDATE reviewed_prs SET review_status='pending-upstream',
-      review_attempts=MAX(0, review_attempts-1),
+      review_attempts=MAX(0, COALESCE(review_attempts,0)-1),
       infra_auto_recover_attempts=MAX(0, COALESCE(infra_auto_recover_attempts,0)-1),
       failure_message=?
       WHERE repo=? AND pr_number=? AND review_status=?

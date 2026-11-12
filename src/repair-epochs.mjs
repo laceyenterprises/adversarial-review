@@ -8,6 +8,8 @@ export const REPAIR_EPOCH_CAP = 2;
 export const REPAIR_PROVISION_DEADLINE_MS = 10 * 60_000;
 export const REPAIR_OWNER_OBSERVE_MS = 30_000;
 const SHA = /^[a-f0-9]{40}$/i;
+const sameHead = (left, right) => typeof left === 'string' && typeof right === 'string'
+  && left.toLowerCase() === right.toLowerCase();
 const EXHAUSTION = new Set(['closure-retry-exhausted', 'closure-lifetime-exhausted',
   'retry-exhausted', 'lifetime-exhausted', 'closer-self-error-budget-exhausted',
   'budget-exhausted-closure', 'system-budget-exhausted-closure',
@@ -40,10 +42,10 @@ export async function reconcileRepairOwner({ rootDir, repo, prNumber, headSha, n
   const epoch = ledger?.repairEpochs?.findLast(entry => !entry.reviewHead && !entry.terminalAt);
   // The watcher can resolve historical admission from this same snapshot.
   if (!epoch) return includeReviewedHead
-    ? ledger?.repairEpochs?.find(entry => entry.reviewHead === headSha) || null : null;
+    ? ledger?.repairEpochs?.find(entry => sameHead(entry.reviewHead, headSha)) || null : null;
   // Publication may finish before this poll observes the new head. Admission
   // must bind that head before terminal worker observation can retire custody.
-  if (headSha && epoch.baseHead !== headSha) return epoch;
+  if (headSha && !sameHead(epoch.baseHead, headSha)) return epoch;
   const age = now - Date.parse(epoch.ownerObservedAt);
   if (age >= 0 && age < REPAIR_OWNER_OBSERVE_MS) return epoch;
   const observed = await observeRepairOwner({ rootDir, epoch, now, readImpl });
@@ -132,8 +134,8 @@ export function repairEpochObservation(rootDir, identity) {
 export function bindRepairHead({ rootDir, repo, prNumber, headSha, epochId, now = new Date().toISOString() }) {
   return mutateRepairEpochs(rootDir, { repo, prNumber }, ledger => {
     const epoch = ledger.repairEpochs?.find(entry => entry.id === epochId);
-    if (!epoch || epoch.terminalAt || epoch.baseHead === headSha || !SHA.test(headSha)
-      || (epoch.reviewHead && epoch.reviewHead !== headSha)) return null;
+    if (!epoch || epoch.terminalAt || sameHead(epoch.baseHead, headSha) || !SHA.test(headSha)
+      || (epoch.reviewHead && !sameHead(epoch.reviewHead, headSha))) return null;
     if (!epoch.reviewHead) {
       epoch.reviewHead = headSha;
       epoch.boundAt = now;
@@ -155,7 +157,7 @@ export function bindRepairHead({ rootDir, repo, prNumber, headSha, epochId, now 
 export function repairEpochForHead(rootDir, identity, headSha) {
   const ledger = readHammerRetryCapLedger(rootDir, identity);
   if (ledger?.__corrupt) throw new Error('repair ledger unreadable');
-  return ledger?.repairEpochs?.find(epoch => epoch.reviewHead === headSha) || null;
+  return ledger?.repairEpochs?.find(epoch => sameHead(epoch.reviewHead, headSha)) || null;
 }
 
 export async function pageRepairCap({ rootDir, repo, prNumber, epochs, observeImpl = observeClosureWait }) {

@@ -168,3 +168,29 @@ merge predicate or smoke promise changes.
 - `git diff --check`: passed.
 - Canonical projections for orchestration, watcher and closer sources already
   match `state-machines.json`; no hash or lifecycle graph edit was needed.
+
+## Defensive head identity and refund counters
+
+### Summary
+
+Repair reconciliation, binding and historical lookup compare both stored and
+incoming commit SHAs case-insensitively. A case-only change cannot consume a
+reservation or prevent terminal-owner retirement. Review harness refunds
+coalesce nullable legacy review-attempt counters to zero before decrementing.
+Regression fixtures reproduced both findings before the fixes.
+
+### Interface changes
+
+None. Stored SHA spelling, persistent shapes, lifecycle states, merge predicates
+and smoke promises are unchanged. The previously recorded companion Agent OS
+SPEC follow-up remains outside this checkout.
+
+### Verification
+
+- `node --test test/inplacerepair-01.test.mjs test/smv.test.mjs`: 50 passed.
+- `node test/run-tests.mjs test/watcher-claim-loop.test.mjs`: 173 passed.
+- `npm run lint`: zero errors, 149 existing warnings.
+- `npm run typecheck:contracts`: passed.
+- `node scripts/validate-data-model-catalog.mjs`: 96 entries validated.
+- `bash demo/research-finding-walkthrough.sh`: three byte-stable deliveries.
+- `git diff --check`: passed. Full-suite validation remains with PR-head CI.

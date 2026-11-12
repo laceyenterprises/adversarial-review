@@ -910,12 +910,13 @@ These waits are fixed by the procedure; do not export or shorten them. A hammer 
 
 The close command then sources `hammer-verify-head.sh`. Wait ≤300s for `HAM_PUSHED_HEAD` to replace `HAM_PUSHED_FROM_HEAD`. Retry transient errors/alarms within that bound; retain cached JSON. Permanent errors/invalid heads stop; third heads take the race path. Acquire the lease, rebase within bounds, validate. Nonzero stops: 20 parked/blocked, 21 conflict. Resolve, revalidate, rerun verify-head.
 
-If `HAM_NEEDS_REVALIDATION=true`, save `HAM_PRODUCED_HEAD`/`HAM_CURRENT_BASE_SHA`
-before `ham_release_merge_lease --yield local-validation`. Run step-2b tests via
-`hammer-validate.mjs` outside the lease. Only on success with local HEAD unchanged,
-set `HAM_LOCALLY_VALIDATED_HEAD`/`HAM_LOCALLY_VALIDATED_BASE_SHA` from that saved pair.
-Source verify-head again to recheck head/base drift; retest within the rebase cap
-if flagged. Publish only with `HAM_NEEDS_REVALIDATION=false`, then continue
+The close command owns revalidation; the closer's shell has no lease helpers.
+If `HAM_NEEDS_REVALIDATION=true`, it saves `HAM_PRODUCED_HEAD`/`HAM_CURRENT_BASE_SHA`
+before its lease owner yields (`--yield local-validation`), then runs step-2b tests via
+`hammer-validate.mjs` outside the lease. Only on success with local HEAD unchanged
+does it set `HAM_LOCALLY_VALIDATED_HEAD`/`HAM_LOCALLY_VALIDATED_BASE_SHA` from that saved pair.
+It sources verify-head again to recheck head/base drift and retests within the rebase cap
+if flagged. It publishes only with `HAM_NEEDS_REVALIDATION=false`, then continues
 exact-head CI/merge. Own rebases never mean `head-changed`.
 
 
@@ -980,69 +981,21 @@ Synthetic example (alphabetical keys):
 {"base": {"seed": 1}, "ours": {"alpha": 2, "seed": 1}, "theirs": {"beta": 3, "seed": 1}, "resolved": {"alpha": 2, "beta": 3, "seed": 1}}
 ```
 
-Run this conflict block. If `git rebase` stops on markers, perform the source
-resolution just described **before** invoking the resolver; then resume at the
-resolver line. Do not execute past unresolved hand-written conflicts.
+Run the shipped conflict repair in this worktree (HAMCONFLICTSYNC-01); it
+sources `inputs.sh` and every helper it calls. Never transcribe its shell:
 
 ```bash
-# BASE_BRANCH was read live.
-HEAD_BRANCH=$(ham_pr --json headRefName --jq '.headRefName')
-ham_bounded_git_sync "$BASE_BRANCH" "$HEAD_BRANCH"
-ham_step mutation:report checkout 90 540 git checkout "$HEAD_BRANCH"
-# HAMEMPTYPRIMARY-01: capture the fetched source before replay. For a
-# conflict-only repair of the reviewed head, retain author messages/identity;
-# never squash or amend the author change into a HAM-classified commit.
-HAM_CONFLICT_SOURCE=$(git rev-parse HEAD) || exit 1
-HAM_CONFLICT_BASE=$(git rev-parse "origin/$BASE_BRANCH") || exit 1
-[ "$HAM_CONFLICT_SOURCE" = "$(git rev-parse "origin/$HEAD_BRANCH")" ] || exit 1
-(
-# Git's default '#' comment marker would strip headings and issue references
-# on rebase --continue. Use the same marker for the rebase and its resolver.
-HAM_GIT_CONFIG_COUNT=${GIT_CONFIG_COUNT:-0}
-export "GIT_CONFIG_KEY_${HAM_GIT_CONFIG_COUNT}=core.commentChar"
-export "GIT_CONFIG_VALUE_${HAM_GIT_CONFIG_COUNT}=;"
-export GIT_CONFIG_COUNT=$((HAM_GIT_CONFIG_COUNT + 1))
-if ! git rebase "origin/$BASE_BRANCH"; then
-  # Merge and stage hand-written sources first, preserving both sides' intent.
-  # Leave registered generated outputs to the shared GENCONFLICT-01 resolver;
-  # never choose one side of STATE-MACHINES.md or hand-edit its conflict markers.
-  # The helper regenerates from merged sources, stages the outputs, and continues
-  # per commit. If any source conflict remains, or generation fails, it aborts
-  # and removes this worktree. Stop and report the emitted reason on failure.
-  hq generated-conflicts resolve --worktree "$PWD" || exit 1
-fi
-) || exit 1
-# Only the conflict-only reviewed-head replay uses this proof. Remediation
-# heads retain their existing full-range findings/preservation validation.
-if [ "$HAM_CONFLICT_SOURCE" = "<<REVIEWED_SHA>>" ]; then
-  ham_read conflict-primary "$HAM_NODE_BIN" "<<ROOT_DIR>>/bin/hammer-conflict-primary.mjs" \
-    "<<REVIEWED_SHA>>" "$HAM_CONFLICT_SOURCE" "$HAM_CONFLICT_BASE" \
-    > "<<RUN_DIR>>/conflict-primary.json" || {
-      HAM_CONFLICT_PROOF_STATUS=$?
-      case $HAM_CONFLICT_PROOF_STATUS in 1) HAM_CONFLICT_PROOF_REASON=conflict-primary-unproven;;
-        124|142) HAM_CONFLICT_PROOF_REASON=conflict-primary-timeout;; *) HAM_CONFLICT_PROOF_REASON=conflict-primary-failed;; esac
-      "${HAM_NODE_BIN:-node}" "<<ROOT_DIR>>/bin/hammer-terminal-audit.mjs" "$HAM_CONFLICT_PROOF_REASON"
-      exit 1
-    }
-fi
-# SUBSYNC-01: the rebase moved gitlinks but not submodule checkouts.
-# This block can run in a fresh shell, so default the cap here: an unset cap makes
-# `[ n -ge "" ]` error out as false and the retry loop would never stop.
-HAM_CONFLICT_SUBMODULE_SYNC_CAP="${HAM_UPDATE_BRANCH_RETRY_CAP:-3}"
-HAM_CONFLICT_SUBMODULE_SYNC_ATTEMPT=1
-while true; do
-  if ham_step mutation submodule-sync 120 720 git submodule update --recursive; then
-    break
-  fi
-  if [ "$HAM_CONFLICT_SUBMODULE_SYNC_ATTEMPT" -ge "$HAM_CONFLICT_SUBMODULE_SYNC_CAP" ]; then
-    echo "HAM hard-blocker: submodule update failed after conflict rebase; refusing force-push with stale submodule checkout" >&2
-    exit 1
-  fi
-  echo "HAM: submodule update failed after conflict rebase; retrying ${HAM_CONFLICT_SUBMODULE_SYNC_ATTEMPT}/${HAM_CONFLICT_SUBMODULE_SYNC_CAP}" >&2
-  sleep $((HAM_CONFLICT_SUBMODULE_SYNC_ATTEMPT * 2))
-  HAM_CONFLICT_SUBMODULE_SYNC_ATTEMPT=$((HAM_CONFLICT_SUBMODULE_SYNC_ATTEMPT + 1))
-done
+/bin/bash "<<ROOT_DIR>>/bin/hammer-conflict-repair.sh" "<<RUN_DIR>>/inputs.sh"
 ```
+
+It fetches, checks out the exact live head, and rebases it onto the live base,
+keeping author commits (never squash or amend them). Exit 22
+`conflict-markers-pending` leaves the rebase stopped: resolve and stage the
+listed hand-written sources as above, never registered outputs, then run it
+again with `--continue` appended; it runs the shared resolver, the
+reviewed-head proof and submodule sync. Never continue past unresolved
+hand-written conflicts. Exit 76 is retryable; other nonzero stops with the
+printed reason.
 
 Rerun the close command: it publishes this commit first
 (`HAM_COMMIT_PUBLICATION_ONLY=1`; rebased/multi-commit history keeps the

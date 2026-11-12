@@ -380,8 +380,11 @@ test('rendered hammer prompt stays under a 60 KiB byte budget', () => {
     templateBody: template, scratchDir: '/fixture/scratch',
   });
   assert.ok(Buffer.byteLength(rendered) <= 60 * 1024, `prompt is ${Buffer.byteLength(rendered)} bytes`);
-  assert.match(rendered, /^ham_step mutation:report checkout 90 540 git checkout "\$HEAD_BRANCH"$/m,
+  // HAMCONFLICTSYNC-01: checkout recovery ships in the conflict repair script.
+  assert.match(rendered, /^\/bin\/bash "\/tmp\/adversarial-review\/bin\/hammer-conflict-repair\.sh" "[^"]+\/inputs\.sh"$/m,
     'the size-bounded prompt must retain checkout recovery');
+  assert.match(readFileSync(join(root, 'bin/hammer-conflict-repair.sh'), 'utf8'),
+    /^  ham_step mutation:report checkout 90 540 git checkout "\$HEAD_BRANCH" \\$/m);
   assert.doesNotMatch(rendered, /<<[A-Z_]+>>/);
 });
 test('hammer and every remediation stage forbid full suites and polling', () => {

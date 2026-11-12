@@ -18,6 +18,7 @@ HAM_CLOSE_STAGE=setup
 ham_close_finish() {
   local status="$1" outcome="${2:-${HAM_PHASE_OUTCOME:-procedure-step-failed}}"
   rm -f "${HAM_VERDICT_FILE:-}" "${HAM_PRIMARY_CHANGE_FILE:-}"
+  HAM_VERDICT_READY_FILE=""
   # The owning shell's cleanup releases a still-held lease on every stop.
   if [ "${HAM_MERGE_LEASE_HELD:-0}" -eq 1 ] && declare -F ham_release_merge_lease >/dev/null; then
     ham_release_merge_lease || true
@@ -156,6 +157,10 @@ ham_close_read primary-change-context "$HAM_CLOSE_ROOT/bin/primary-change-contex
 HAM_VERDICT_FILE=$(mktemp "$HAM_RUN_DIR/ham-verdict.XXXXXX") || ham_close_finish 1
 chmod 600 "$HAM_VERDICT_FILE"
 export HAM_VERDICT_FILE
+# HAMVERDICTREADY-01: hammer-merge.sh merges only when this marker names the
+# verdict file. It stays empty until ama-check has written this run's verdict.
+HAM_VERDICT_READY_FILE=""
+export HAM_VERDICT_READY_FILE
 "$HAM_NODE_BIN" "$HAM_CLOSE_ROOT/bin/ama-check.mjs" \
   --pr "$HAM_RUN_DIR/pr-after.json" \
   --reviews "$HAM_RUN_DIR/reviews.json" \
@@ -171,6 +176,7 @@ export HAM_VERDICT_FILE
   --ham-range "$HAM_RUN_DIR/range.json" \
   --primary-change "$HAM_PRIMARY_CHANGE_FILE" \
   > "$HAM_VERDICT_FILE" || ham_close_finish 1 predicate-build-failed
+HAM_VERDICT_READY_FILE="$HAM_VERDICT_FILE"
 # Kept for diagnosis (Appendix E1); the owned verdict file is removed after merge.
 cp "$HAM_VERDICT_FILE" "$HAM_RUN_DIR/predicate-verdict.json" 2>/dev/null || true
 
@@ -178,4 +184,5 @@ cp "$HAM_VERDICT_FILE" "$HAM_RUN_DIR/predicate-verdict.json" 2>/dev/null || true
 ham_close_phase hammer-merge
 ham_close_merge_status=$HAM_PHASE_STATUS
 rm -f "$HAM_VERDICT_FILE" "$HAM_PRIMARY_CHANGE_FILE"
+HAM_VERDICT_READY_FILE=""
 ham_close_finish "$ham_close_merge_status" "$HAM_PHASE_OUTCOME"

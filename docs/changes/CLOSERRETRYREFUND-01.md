@@ -103,3 +103,15 @@ behind charges that the existing refunds never saw:
     load-flaky clean smoke is red, as on base.
 - `npm run lint` (0 errors), `npm run typecheck:contracts` and
   `bash demo/research-finding-walkthrough.sh` pass.
+
+### Hammer CI repair
+
+The handoff sandbox smoke now expects
+`budget-superseded-by-zero-finding-review` for exhausted retry and lifetime
+budgets, while retaining `stop-superseded-by-exact-head-review` for deterministic
+stops and final no-merge decisions. Both Node 22 and Node 26 CI failures traced
+to this stale expectation. Production interfaces are unchanged by this repair.
+
+Validation: 308 targeted tests passed, including the sandbox smoke, retry refund
+and next-action suites. Lint, contract typechecking and the offline
+research-finding byte-equivalence walkthrough also passed.

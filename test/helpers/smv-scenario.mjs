@@ -956,7 +956,9 @@ if (scenario === 'clean') {
     const decision = nextAction(snapshot);
     assert.equal(decision.actor, 'daemon');
     assert.ok(decision.evidenceRefs.includes(`stop-reason:${reason}`));
-    assert.ok(decision.evidenceRefs.includes('stop-superseded-by-exact-head-review'));
+    const supersessionRef = ['lifetime-exhausted', 'retry-exhausted'].includes(reason)
+      ? 'budget-superseded-by-zero-finding-review' : 'stop-superseded-by-exact-head-review';
+    assert.ok(decision.evidenceRefs.includes(supersessionRef));
     const pending = nextAction(deriveNextActionSnapshot({ base: snapshot,
       observations: { checks: { conclusion: 'PENDING' } } }));
     assert.equal(pending.reason, reason);

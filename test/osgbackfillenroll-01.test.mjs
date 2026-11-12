@@ -9,7 +9,7 @@ import { beginReviewerPass } from '../src/reviewer-pass-tokens.mjs';
 import { updateReviewerPassBodyCapture } from '../src/review-body-capture.mjs';
 import { backfillReviewFindings, persistReviewFindings } from '../src/review-finding-records.mjs';
 import { claimFindingBatches } from '../src/findings-batch.mjs';
-import { captureReadyFindings, summarizeFindingBacklog } from '../src/findings-backlog.mjs';
+import { captureReadyFindings, summarizeFindingBacklog, findingBacklogAlert } from '../src/findings-backlog.mjs';
 
 const repo = 'sample/service', head = 'a'.repeat(40);
 const now = Date.parse('2026-06-10T12:00:00Z'), maxAgeMs = 48 * 3600000;
@@ -94,6 +94,55 @@ test('the window includes its exact boundary and honors configured duration', t 
   assert.deepEqual(claimFindingBatches(db, '2026-06-10', { now, maxAgeMs: maxAgeMs - 1 }), []);
   assert.equal(summarizeFindingBacklog(db, now, { maxAgeMs }).outOfWindow, 0);
   assert.ok(claimFindingBatches(db, '2026-06-10', { now, maxAgeMs }).length);
+});
+
+test('a stalled runner alerts after ordinary merge-time enrollments age out', t => {
+  const { db, pass } = fixture(t, '2026-06-10T00:00:00Z');
+  persistReviewFindings(db, pass.pass_id);
+  db.prepare("UPDATE finding_backlog SET captured_at='2026-06-10T00:00:00Z'").run();
+  assert.equal(findingBacklogAlert(summarizeFindingBacklog(db, now, { maxAgeMs }), maxAgeMs), null);
+  const later = now + maxAgeMs;
+  const health = summarizeFindingBacklog(db, later, { maxAgeMs });
+  assert.equal(health.batchableCount, 0);
+  assert.equal(health.outOfWindow, 1);
+  const alert = findingBacklogAlert(health, maxAgeMs);
+  assert.equal(alert.code, 'review:findings_backlog_overdue');
+  assert.ok(alert.evidence.includes('outOfWindow=1'));
+  assert.match(alert.recommendedAction, /explicit consensus-validated manifest/);
+  assert.deepEqual(claimFindingBatches(db, '2026-06-12', { now: later, maxAgeMs }), []);
+  db.prepare("UPDATE finding_backlog SET outcome='dropped',reason='false-positive: Already resolved'").run();
+  assert.equal(findingBacklogAlert(summarizeFindingBacklog(db, later, { maxAgeMs }), maxAgeMs), null);
+});
+
+test('invalid default windows degrade only backlog health and explicit windows take precedence', t => {
+  const { db, pass } = fixture(t, '2026-06-10T00:00:00Z');
+  persistReviewFindings(db, pass.pass_id);
+  const previous = process.env.ADVERSARIAL_FINDINGS_BACKLOG_MAX_AGE_MS;
+  try {
+    for (const invalid of ['abc', '0', '']) {
+      process.env.ADVERSARIAL_FINDINGS_BACKLOG_MAX_AGE_MS = invalid;
+      assert.equal(summarizeFindingBacklog(null, now).error, 'review-store-unavailable');
+      const health = summarizeFindingBacklog(db, now);
+      assert.equal(health.available, false);
+      assert.match(health.error, /invalid ADVERSARIAL_FINDINGS_BACKLOG_MAX_AGE_MS/);
+      assert.equal(summarizeFindingBacklog(db, now, { maxAgeMs }).available, true);
+    }
+  } finally {
+    if (previous === undefined) delete process.env.ADVERSARIAL_FINDINGS_BACKLOG_MAX_AGE_MS;
+    else process.env.ADVERSARIAL_FINDINGS_BACKLOG_MAX_AGE_MS = previous;
+  }
+});
+
+test('backlog summaries retain pre-requeue schema compatibility', t => {
+  const { db, pass } = fixture(t, '2026-06-10T00:00:00Z');
+  persistReviewFindings(db, pass.pass_id);
+  db.exec('ALTER TABLE finding_batches DROP COLUMN released_at');
+  db.exec('ALTER TABLE finding_backlog DROP COLUMN batch_attempts');
+  const health = summarizeFindingBacklog(db, now, { maxAgeMs });
+  assert.equal(health.available, true, health.error);
+  assert.equal(health.batchableCount, 1);
+  assert.equal(health.outOfWindow, 0);
+  assert.equal(health.progress, null);
 });
 
 test('a manifest explicitly enrolls a historical finding outside the automatic window', t => {

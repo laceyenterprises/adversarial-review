@@ -14,7 +14,7 @@ import { openReviewStateDb, ensureReviewStateSchema } from '../src/review-state.
 import { beginReviewerPass } from '../src/reviewer-pass-tokens.mjs';
 import { updateReviewerPassBodyCapture } from '../src/review-body-capture.mjs';
 
-test.mock.method(Date, 'now', () => Date.parse('2026-01-02T00:00:00Z'));
+const fixtureNow = Date.parse('2026-01-02T00:00:00Z');
 
 const repo = 'sample/service', head = 'a'.repeat(40);
 const body = `## Blocking Issues
@@ -56,12 +56,12 @@ test('batch jobs own advisory-only and mixed feedback, and durably record applie
     await t.test(`mixed=${mixed}, applied=${applied}`, async t => {
       const { rootDir, db, pass } = fixture(t);
       pass(1, mixed ? body + advisory : adviceOnly);
-      assert.deepEqual(claimFindingBatches(db, '2026-01-02'), []);
+      assert.deepEqual(claimFindingBatches(db, '2026-01-02', { now: fixtureNow }), []);
       db.prepare("UPDATE reviewed_prs SET pr_state='closed'").run();
-      assert.deepEqual(claimFindingBatches(db, '2026-01-02'), []);
+      assert.deepEqual(claimFindingBatches(db, '2026-01-02', { now: fixtureNow }), []);
       db.prepare("UPDATE reviewed_prs SET pr_state='merged'").run();
       let prompt;
-      await runFindingBatches({ db, rootDir, env: { HQ_ROOT: rootDir }, day: '2026-01-02',
+      await runFindingBatches({ now: fixtureNow, db, rootDir, env: { HQ_ROOT: rootDir }, day: '2026-01-02',
         execFileImpl: async (_bin, args) => {
           prompt = readFileSync(args[args.indexOf('--prompt') + 1], 'utf8');
           return { stdout: '{"launchRequestId":"fixture-launch"}' };
@@ -97,7 +97,7 @@ test('batch jobs own advisory-only and mixed feedback, and durably record applie
       const dir = join(rootDir, 'data', 'finding-batches', batch.batch_id);
       writeFileSync(join(dir, 'outcomes.json'), JSON.stringify(result));
       let reads = 0;
-      await runFindingBatches({ db, rootDir, env: { HQ_ROOT: rootDir }, resolutionOnly: true,
+      await runFindingBatches({ now: fixtureNow, db, rootDir, env: { HQ_ROOT: rootDir }, resolutionOnly: true,
         fetchPr: async () => { reads++; return { ...pr, state: 'MERGED' }; } });
       assert.equal(reads, applied ? 1 : 0);
       const stored = db.prepare('SELECT completed_at,result_json FROM finding_batches').get();
@@ -105,7 +105,7 @@ test('batch jobs own advisory-only and mixed feedback, and durably record applie
       const grades = db.prepare('SELECT grader_kind,taxonomy_code FROM review_finding_grades').all();
       assert.deepEqual(grades, mixed ? [{ grader_kind: 'batch-remediator', taxonomy_code: 'ind.cannot-reproduce' }] : []);
       assert.deepEqual(JSON.parse(stored.result_json).simplicityNotes, result.simplicityNotes);
-      assert.deepEqual(claimFindingBatches(db, '2026-01-03'), []);
+      assert.deepEqual(claimFindingBatches(db, '2026-01-03', { now: fixtureNow }), []);
       assert.equal(settleFindingBatch(db, batch, result), true);
       assert.equal(db.prepare('SELECT count(*) n FROM review_finding_grades').get().n, mixed ? 1 : 0);
     });
@@ -119,7 +119,7 @@ test('advisory enrollment uses the final posted review, deduplicates, and surviv
   pass(2, adviceOnly.replace(note, 'Reuse `src/result.mjs:formatResult` (~10 lines saved).'));
   pass(3, body); // A later review with no advice supersedes both notes.
   db.prepare("UPDATE reviewed_prs SET pr_state='merged'").run();
-  const [first] = claimFindingBatches(db, '2026-01-02');
+  const [first] = claimFindingBatches(db, '2026-01-02', { now: fixtureNow });
   assert.equal(db.prepare('SELECT count(*) n FROM finding_batch_notes WHERE batch_id=?').get(first.batch_id).n, 0);
   const p = pass(4, adviceOnly);
   const { persistReviewFindings } = await import('../src/review-finding-records.mjs');
@@ -127,17 +127,17 @@ test('advisory enrollment uses the final posted review, deduplicates, and surviv
   const oldPass = db.prepare('SELECT min(pass_id) id FROM reviewer_passes').get().id;
   persistReviewFindings(db, oldPass);
   db.prepare('UPDATE reviewer_passes SET gh_comment_id=NULL WHERE pass_id=?').run(p.pass_id);
-  assert.deepEqual(claimFindingBatches(db, '2026-01-03'), []);
+  assert.deepEqual(claimFindingBatches(db, '2026-01-03', { now: fixtureNow }), []);
   db.prepare("UPDATE reviewer_passes SET gh_comment_id='4' WHERE pass_id=?").run(p.pass_id);
   const other = openReviewStateDb(rootDir);
   try {
-    const [batch] = claimFindingBatches(other, '2026-01-03');
+    const [batch] = claimFindingBatches(other, '2026-01-03', { now: fixtureNow });
     assert.equal(batch.area, '_simplicity');
-    assert.deepEqual(claimFindingBatches(db, '2026-01-03'), []);
+    assert.deepEqual(claimFindingBatches(db, '2026-01-03', { now: fixtureNow }), []);
     persistReviewFindings(db, p.pass_id);
     assert.equal(db.prepare('SELECT count(*) n FROM finding_batch_notes WHERE batch_id=?').get(batch.batch_id).n, 1);
     pass(5, adviceOnly);
-    assert.deepEqual(claimFindingBatches(db, '2026-01-04'), []);
+    assert.deepEqual(claimFindingBatches(db, '2026-01-04', { now: fixtureNow }), []);
   } finally { other.close(); }
 });
 
@@ -146,7 +146,7 @@ test('mixed batches let advisories use cited paths outside the finding area', as
   const { claimFindingBatches, findingBatchPrompt } = await import('../src/findings-batch.mjs');
   pass(1, body.replace('src/result.mjs', 'docs/result.md') + advisory);
   db.prepare("UPDATE reviewed_prs SET pr_state='merged'").run();
-  const [batch] = claimFindingBatches(db, '2026-01-02');
+  const [batch] = claimFindingBatches(db, '2026-01-02', { now: fixtureNow });
   assert.equal(batch.area, 'docs');
   const prompt = findingBatchPrompt(batch, [], 'outcomes.json', [{ simplicityNote: note }]);
   assert.match(prompt, /Work only in area "docs"/);
@@ -162,16 +162,16 @@ test('historical backfill cannot dispatch advice; recent merges and late metadat
   db.prepare("UPDATE reviewed_prs SET pr_state='merged',merged_at='2025-12-31T23:59:59Z'").run();
   backfillReviewFindings(db);
   assert.equal(db.prepare('SELECT dropped_reason FROM finding_batch_notes').get().dropped_reason, 'historical-merge');
-  assert.deepEqual(claimFindingBatches(db, '2026-01-02'), []);
+  assert.deepEqual(claimFindingBatches(db, '2026-01-02', { now: fixtureNow }), []);
   // Unreadable timestamps cannot authorize a worker, and a refresh can repair them.
   for (const mergedAt of [null, 'not-a-timestamp']) {
     db.prepare('UPDATE reviewed_prs SET merged_at=?').run(mergedAt);
-    assert.deepEqual(claimFindingBatches(db, '2026-01-02'), []);
+    assert.deepEqual(claimFindingBatches(db, '2026-01-02', { now: fixtureNow }), []);
     assert.equal(db.prepare('SELECT dropped_reason FROM finding_batch_notes').get().dropped_reason, 'merge-time-unverified');
   }
   db.prepare("UPDATE reviewed_prs SET merged_at='2026-01-02T00:00:00Z'").run();
   backfillReviewFindings(db);
-  assert.equal(claimFindingBatches(db, '2026-01-02').length, 1);
+  assert.equal(claimFindingBatches(db, '2026-01-02', { now: fixtureNow }).length, 1);
 });
 
 test('lifecycle migration retires legacy pending advice once and preserves owned notes', async t => {
@@ -200,7 +200,7 @@ test('lifecycle migration retires legacy pending advice once and preserves owned
   ensureReviewStateSchema(db);
   assert.deepEqual(db.prepare('SELECT pass_id,batch_id,dropped_reason FROM finding_batch_notes ORDER BY pass_id').all(), rows);
   const { claimFindingBatches } = await import('../src/findings-batch.mjs');
-  assert.deepEqual(claimFindingBatches(db, '2026-01-02'), []);
+  assert.deepEqual(claimFindingBatches(db, '2026-01-02', { now: fixtureNow }), []);
 });
 
 test('note dispositions retire closed and superseded reviews, preserving assigned snapshots', async t => {
@@ -215,7 +215,7 @@ test('note dispositions retire closed and superseded reviews, preserving assigne
   db.prepare("UPDATE reviewed_prs SET pr_state='merged'").run();
   assert.equal(db.prepare('SELECT dropped_reason FROM finding_batch_notes WHERE pass_id=?').get(old.pass_id).dropped_reason,
     'superseded-final-review');
-  const [batch] = claimFindingBatches(db, '2026-01-02');
+  const [batch] = claimFindingBatches(db, '2026-01-02', { now: fixtureNow });
   const assigned = db.prepare('SELECT * FROM finding_batch_notes WHERE pass_id=?').get(current.pass_id);
   assert.equal(assigned.batch_id, batch.batch_id);
   db.prepare("UPDATE reviewed_prs SET pr_state='closed'").run();
@@ -238,10 +238,10 @@ test('advisory-only health includes waiting and fenced notes, launch errors and 
   assert.equal(area.waitingForMerge, 1);
   assert.equal(area.oldestAt, '2026-01-01T00:00:01Z');
   db.prepare("UPDATE reviewed_prs SET pr_state='merged'").run();
-  const [batch] = claimFindingBatches(db, '2026-01-02');
-  await runFindingBatches({ db, rootDir, day: '2026-01-02', env: { HQ_ROOT: rootDir },
+  const [batch] = claimFindingBatches(db, '2026-01-02', { now: fixtureNow });
+  await runFindingBatches({ now: fixtureNow, db, rootDir, day: '2026-01-02', env: { HQ_ROOT: rootDir },
     execFileImpl: async () => { throw Error('launch failed'); }, logger: { warn() {} } });
-  [area] = summarizeFindingBacklog(db).areas;
+  [area] = summarizeFindingBacklog(db, fixtureNow).areas;
   assert.equal(area.inBatch, 1);
   assert.equal(area.waitingForMerge, 0);
   assert.equal(area.error, 'batch-dispatch-retryable: launch failed');
@@ -249,9 +249,9 @@ test('advisory-only health includes waiting and fenced notes, launch errors and 
   const result = { batchId: batch.batch_id, findings: [], prNumber: 8, headSha: head,
     simplicityNotes: [{ noteId, simplicityNoteApplied: true, reason: 'Reuse the helper' }] };
   assert.equal(settleFindingBatch(db, batch, result, { state: 'CLOSED', body: `Finding-Batch: ${batch.batch_id}` }), false);
-  assert.equal(summarizeFindingBacklog(db).areas[0].inBatch, 1);
+  assert.equal(summarizeFindingBacklog(db, fixtureNow).areas[0].inBatch, 1);
   settleFindingBatch(db, batch, result, { state: 'MERGED', body: `Finding-Batch: ${batch.batch_id}` });
-  assert.deepEqual(summarizeFindingBacklog(db).areas, []);
+  assert.deepEqual(summarizeFindingBacklog(db, fixtureNow).areas, []);
 });
 
 test('mixed settlement normalizes note whitespace and persists only validated fields', async t => {
@@ -259,7 +259,7 @@ test('mixed settlement normalizes note whitespace and persists only validated fi
   const { claimFindingBatches, settleFindingBatch } = await import('../src/findings-batch.mjs');
   pass(1, body + advisory);
   db.prepare("UPDATE reviewed_prs SET pr_state='merged'").run();
-  const [batch] = claimFindingBatches(db, '2026-01-02');
+  const [batch] = claimFindingBatches(db, '2026-01-02', { now: fixtureNow });
   const { finding_id: findingId } = db.prepare('SELECT finding_id FROM finding_backlog WHERE batch_id=?').get(batch.batch_id);
   const { note_id: noteId } = db.prepare('SELECT note_id FROM finding_batch_notes WHERE batch_id=?').get(batch.batch_id);
   const result = { batchId: batch.batch_id, prNumber: { unvalidated: true }, headSha: 'irrelevant', extra: 'omit me',
@@ -320,11 +320,11 @@ test('FINDINGSBATCH-01 daily claims fence concurrent dispatch and outcomes requi
   pass();
   db.prepare("UPDATE reviewed_prs SET pr_state='merged'").run();
   const { claimFindingBatches, settleFindingBatch, findingBatchPrompt, runFindingBatches, createFindingBatchTicker } = await import('../src/findings-batch.mjs');
-  const [batch] = claimFindingBatches(db, '2026-01-02');
+  const [batch] = claimFindingBatches(db, '2026-01-02', { now: fixtureNow });
   const other = openReviewStateDb(rootDir);
-  try { assert.deepEqual(claimFindingBatches(other, '2026-01-02'), []); }
+  try { assert.deepEqual(claimFindingBatches(other, '2026-01-02', { now: fixtureNow }), []); }
   finally { other.close(); }
-  assert.deepEqual(claimFindingBatches(db, '2026-01-03'), []);
+  assert.deepEqual(claimFindingBatches(db, '2026-01-03', { now: fixtureNow }), []);
   let launches = 0;
   const env = { HQ_ROOT: rootDir, HQ_PARENT_SESSION: 'fixture-session', HQ_PROJECT: 'fixture-project' };
   const execFileImpl = async (bin, args) => {
@@ -335,9 +335,9 @@ test('FINDINGSBATCH-01 daily claims fence concurrent dispatch and outcomes requi
     if (launches === 1) throw Error('lost receipt');
     return { stdout: '{"launchRequestId":"fixture-launch"}' };
   };
-  await runFindingBatches({ db, rootDir, env, day: '2026-01-02', execFileImpl, logger: { warn() {} } });
+  await runFindingBatches({ now: fixtureNow, db, rootDir, env, day: '2026-01-02', execFileImpl, logger: { warn() {} } });
   assert.equal(db.prepare('SELECT launch_id FROM finding_batches').get().launch_id, null);
-  await runFindingBatches({ db, rootDir, env, day: '2026-01-02', execFileImpl });
+  await runFindingBatches({ now: fixtureNow, db, rootDir, env, day: '2026-01-02', execFileImpl });
   const ticker = createFindingBatchTicker({ db, rootDir, env, execFileImpl });
   await ticker.tick(Date.parse('2026-01-02T01:00:00Z'));
   await ticker.tick(Date.parse('2026-01-02T02:00:00Z'));
@@ -365,15 +365,15 @@ test('FINDINGSBATCH-01 daily claims fence concurrent dispatch and outcomes requi
   pass(2, body.replace('Explain the result', 'Explain another result'));
   db.prepare("UPDATE reviewed_prs SET pr_state='open'").run();
   db.prepare("UPDATE reviewed_prs SET pr_state='merged'").run();
-  const [next] = claimFindingBatches(db, '2026-01-02');
-  assert.deepEqual(claimFindingBatches(db, '2026-01-03'), []);
+  const [next] = claimFindingBatches(db, '2026-01-02', { now: fixtureNow });
+  assert.deepEqual(claimFindingBatches(db, '2026-01-03', { now: fixtureNow }), []);
   const findingId = db.prepare('SELECT finding_id FROM finding_backlog WHERE batch_id=?').get(next.batch_id).finding_id;
   // FINDINGSREQUEUE-01: a blank reason returns that finding for re-verification.
   assert.equal(settleFindingBatch(db, next, { batchId: next.batch_id,
     findings: [{ findingId, outcome: 'dropped', reason: '' }] }), true);
   assert.deepEqual(db.prepare('SELECT batch_id,batch_attempts,outcome FROM finding_backlog WHERE finding_id=?').get(findingId),
     { batch_id: null, batch_attempts: 1, outcome: null });
-  const [retry] = claimFindingBatches(db, '2026-01-03');
+  const [retry] = claimFindingBatches(db, '2026-01-03', { now: fixtureNow });
   assert.notEqual(retry.batch_id, next.batch_id);
   settleFindingBatch(db, retry, { batchId: retry.batch_id,
     findings: [{ findingId, outcome: 'dropped', reason: 'not-reproducible: Already described on current main' }] });
@@ -397,7 +397,7 @@ test('FINDINGSBATCH-01 report exposes size and oldest age per area and reports u
   db.prepare("UPDATE finding_backlog SET outcome='dropped',reason='No longer applies'").run();
   assert.deepEqual(main(['backlog', '--db', join(rootDir, 'data', 'reviews.db')]).areas, []);
   db.exec('DROP TRIGGER finding_backlog_on_merge; DROP TRIGGER finding_backlog_late_capture; DROP TRIGGER finding_backlog_late_receipt; DROP TRIGGER finding_backlog_on_close; DROP TABLE finding_backlog');
-  assert.equal(summarizeFindingBacklog(db).available, false);
+  assert.equal(summarizeFindingBacklog(db, fixtureNow).available, false);
 });
 
 test('FINDINGSBATCH-01 default PR reader collects merged evidence through gh and preserves unresolved batches', async t => {
@@ -405,7 +405,7 @@ test('FINDINGSBATCH-01 default PR reader collects merged evidence through gh and
   pass();
   db.prepare("UPDATE reviewed_prs SET pr_state='merged'").run();
   const { claimFindingBatches, runFindingBatches } = await import('../src/findings-batch.mjs');
-  const [batch] = claimFindingBatches(db, '2026-01-02');
+  const [batch] = claimFindingBatches(db, '2026-01-02', { now: fixtureNow });
   const rows = db.prepare('SELECT finding_id FROM finding_backlog WHERE batch_id=?').all(batch.batch_id);
   const dir = join(rootDir, 'data', 'finding-batches', batch.batch_id);
   mkdirSync(dir, { recursive: true });
@@ -571,7 +571,7 @@ async function publicationFixture(t, { advice = false, expectedTimeout = null } 
   const { runFindingBatches } = await import('../src/findings-batch.mjs');
   const env = { HQ_ROOT: f.rootDir };
   const dispatches = [];
-  await runFindingBatches({ ...f, env, day: '2026-01-02', execFileImpl: async (_bin, args, options) => {
+  await runFindingBatches({ now: fixtureNow, ...f, env, day: '2026-01-02', execFileImpl: async (_bin, args, options) => {
     assert.ok(options.timeout >= 900_000);
     if (expectedTimeout !== null) assert.equal(options.timeout, expectedTimeout);
     dispatches.push(args);
@@ -621,7 +621,7 @@ async function publicationFixture(t, { advice = false, expectedTimeout = null } 
   const pr = { number: 81, state: 'OPEN', headRefOid: head, headRefName: status.branch,
     isCrossRepository: false, body: `Finding-Batch: ${batch.batch_id}` };
   return { ...f, batch, outputPath, result, status, dispatches, launches, publication, options, pr,
-    run: overrides => runFindingBatches({ ...options, ...overrides }) };
+    run: overrides => runFindingBatches({ now: fixtureNow, ...options, ...overrides }) };
 }
 
 test('initial and publication dispatch timeouts scale beyond the one-hour default cap under load', async t => {
@@ -917,7 +917,7 @@ test('FINDINGSSHAPE-01 default publication reader uses stubbed commands and reco
   const { runFindingBatches } = await import('../src/findings-batch.mjs');
   const options = { ...f.options };
   delete options.fetchPublication;
-  await runFindingBatches({ ...options, execFileImpl });
+  await runFindingBatches({ now: fixtureNow, ...options, execFileImpl });
   assert.deepEqual(ghCalls, [
     ['pr', 'list', '--repo', repo, '--head', f.status.branch, '--state', 'all', '--limit', '100',
       '--json', 'number,state,mergedAt,body,headRefOid,headRefName,isCrossRepository'],
@@ -925,7 +925,7 @@ test('FINDINGSSHAPE-01 default publication reader uses stubbed commands and reco
   ]);
   for (const state of ['CLOSED', 'MERGED']) {
     f.publication.prs = [{ ...f.pr, state }];
-    await runFindingBatches({ ...options, execFileImpl });
+    await runFindingBatches({ now: fixtureNow, ...options, execFileImpl });
     assert.equal(ghCalls.at(-1)[0], 'pr');
     assert.equal(f.dispatches.length, 2);
     assert.equal(Boolean(f.db.prepare('SELECT completed_at FROM finding_batches').get().completed_at), state === 'MERGED');
@@ -1001,7 +1001,7 @@ test('FINDINGSBATCH-02 covers 1000 findings in capped priority batches without d
     }
   })();
   const { claimFindingBatches } = await import('../src/findings-batch.mjs');
-  const batches = claimFindingBatches(db, '2026-01-02', { batchSize: 37 });
+  const batches = claimFindingBatches(db, '2026-01-02', { now: fixtureNow, batchSize: 37 });
   assert.equal(db.prepare('SELECT count(*) n FROM finding_backlog WHERE batch_id IS NULL').get().n, 0);
   assert.ok(batches.length > 27);
   let previousSeverity = 'high';
@@ -1017,8 +1017,8 @@ test('FINDINGSBATCH-02 covers 1000 findings in capped priority batches without d
   const first = db.prepare(`SELECT json_extract(f.finding_json,'$.severity') AS severity FROM finding_backlog b
     JOIN review_findings f USING(finding_id) WHERE batch_id=?`).all(batches[0].batch_id);
   assert.ok(first.every(r => r.severity === 'high'), 'severity outranks the older low-severity findings');
-  assert.deepEqual(claimFindingBatches(db, '2026-01-02', { batchSize: 37 }), []);
-  assert.deepEqual(claimFindingBatches(db, '2026-01-03', { batchSize: 37 }), []);
+  assert.deepEqual(claimFindingBatches(db, '2026-01-02', { now: fixtureNow, batchSize: 37 }), []);
+  assert.deepEqual(claimFindingBatches(db, '2026-01-03', { now: fixtureNow, batchSize: 37 }), []);
   assert.equal(db.pragma('foreign_key_check').length, 0);
 });
 
@@ -1089,7 +1089,7 @@ test('FINDINGSBATCH-02 health reports finding counts, outcome days, errors and o
   assert.equal(findingBacklogAlert(health, 96 * 3600000), null);
   f.db.prepare("UPDATE finding_backlog SET outcome='dropped',reason='false-positive: Current code already checks the input'").run();
   f.db.prepare("UPDATE finding_backlog SET resolved_at='2026-01-03T00:00:00Z'").run();
-  const settled = summarizeFindingBacklog(f.db);
+  const settled = summarizeFindingBacklog(f.db, fixtureNow);
   assert.equal(settled.openCount, 0);
   assert.equal(settled.oldestOpenAgeMs, 0);
   assert.deepEqual(settled.perDay, [{ day: '2026-01-03', applied: 0, dropped: 1 }]);
@@ -1121,7 +1121,7 @@ test('FINDINGSBATCH-02 operator backfill is explicit, capped and idempotent with
   await assert.rejects(main([]), /required/);
   const args = ['--root', rootDir, '--db', join(rootDir, 'data', 'reviews.db'), '--concurrency', '2', '--batch-size', '1'];
   let calls = 0, active = 0, peak = 0;
-  const dependencies = { env: { HQ_ROOT: rootDir }, execFileImpl: async () => {
+  const dependencies = { now: fixtureNow, env: { HQ_ROOT: rootDir }, execFileImpl: async () => {
     const launch = ++calls;
     peak = Math.max(peak, ++active);
     await new Promise(resolve => setImmediate(resolve));
@@ -1177,6 +1177,15 @@ test('FINDINGSBATCH-02 pipeline health routes the configured backlog age alert w
   const config = resolveReviewPipelineHealthConfig({ ADVERSARIAL_FINDINGS_BACKLOG_MAX_AGE_MS: String(96 * 3600000) });
   assert.equal(evaluateReviewPipelineFindings({ ...snapshot, config }, { observedAt: snapshot.observedAt })
     .some(f => f.code === 'review:findings_backlog_overdue'), false);
+  const configured = collectReviewPipelineHealth({ rootDir, hqRoot: rootDir,
+    env: { HQ_ROOT: rootDir, ADVERSARIAL_FINDINGS_BACKLOG_MAX_AGE_MS: 'abc' },
+    now: () => new Date('2026-01-04T12:00:00Z'),
+    config: { hostChecksEnabled: false, findingsBacklogMaxAgeMs: 96 * 3600000 },
+    execFileSyncImpl: () => { throw Error('external reads prohibited'); }, listOpenPrsSyncImpl: () => [] });
+  assert.equal(configured.nonBlockingBacklog.available, true);
+  assert.equal(configured.nonBlockingBacklog.batchableCount, 1);
+  assert.equal(configured.nonBlockingBacklog.outOfWindow, 0);
+  assert.equal(configured.findings.some(f => f.code === 'review:findings_backlog_overdue'), false);
 });
 
 test('FINDINGSBATCH-02 worker drop artifacts settle every justified vocabulary code', async t => {
@@ -1230,6 +1239,7 @@ test('operator backfill waits for a contending SQLite writer', async t => {
   });
   const { main } = await import('../bin/findings-batch-backfill.mjs');
   await main(['--root', rootDir, '--db', dbPath, '--concurrency', '1'], {
+    now: fixtureNow,
     env: { HQ_ROOT: rootDir },
     execFileImpl: async () => ({ stdout: JSON.stringify({ launchRequestId: 'contended-backfill' }) }),
   });

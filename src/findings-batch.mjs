@@ -84,7 +84,7 @@ export function claimFindingBatches(db, day, { batchSize = 100, manifest = null,
       FROM finding_backlog b JOIN review_findings f USING(finding_id)
       JOIN reviewed_prs r ON r.repo=b.repo AND r.pr_number=b.pr_number
       WHERE b.outcome IS NULL AND b.batch_id IS NULL AND r.pr_state='merged'
-        ${selection === null ? 'AND b.manifest_sha256 IS NULL AND julianday(r.merged_at) >= julianday(@cutoff)' : ''}
+        ${selection === null ? 'AND b.manifest_sha256 IS NULL AND (b.batch_attempts > 0 OR julianday(r.merged_at) >= julianday(@cutoff))' : ''}
       ORDER BY priority,b.captured_at,b.finding_id`).all(selection === null ? { cutoff } : {})
       .filter(row => admitted === null || admitted.has(row.finding_id));
     // Snapshot advisory placement before assignment changes the candidate view.

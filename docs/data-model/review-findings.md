@@ -496,15 +496,17 @@ assigned notes retain the owning batch's area. Missing schema/store reports
 Ready captures superseded by the final merged review are retained as dropped
 with reason `stale-code-changed: Final posted review superseded this finding`; they cannot inflate a later batch.
 Live late posting receipts also enroll findings for already-observed merges.
-Automatic batch claims require a valid source `merged_at` within
+First automatic batch claims require a valid source `merged_at` within
 `ADVERSARIAL_FINDINGS_BACKLOG_MAX_AGE_MS` (default 48 hours) of the current clock;
 the boundary is inclusive. This applies to findings and simplicity advice.
-Unknown merge times fail closed. Skipped findings retain their rows, outcome,
-reason and ownership. Summary `outOfWindow` counts automatic, open, unassigned
-findings with old or unknown merge times; these are excluded from `batchableCount`
-and its oldest timestamp. Already-owned batches remain monitored regardless of
-source age. Explicit manifests bypass the automatic age filter and remain
-separately accounted in `selectedBacklog`.
+Released findings (`batch_attempts > 0`) remain eligible regardless of source
+merge age or timestamp validity, until settlement or third-attempt exhaustion.
+Unknown merge times fail closed for never-claimed work. Skipped findings retain
+their rows, outcome, reason and ownership. Summary `outOfWindow` counts automatic, open, unassigned
+findings with no prior release and old or unknown merge times; these are excluded
+from `batchableCount` and its oldest timestamp. Already-owned batches remain monitored regardless of
+source age, as do released findings awaiting retry. Explicit manifests bypass the
+automatic age filter and remain separately accounted in `selectedBacklog`.
 Ready captures closed without merge are dropped with
 `false-positive: Source PR closed without merge; reviewed changes did not land`;
 if reopened and merged with that same final finding, merge enrollment restores
@@ -543,8 +545,15 @@ unresolved `batchErrors` (released batches excluded), plus the drain view
 error), `retrying` (open after at least one release), `exhausted` (dropped with
 `batch-retry-exhausted:`) and `releasedBatches`. The drain is complete when `open`
 is 0. `review:findings_backlog_overdue` enters the existing
-pipeline-health/Sentinel findings path when oldest open age exceeds
+pipeline-health/Sentinel findings path when the oldest batchable finding exceeds
 `ADVERSARIAL_FINDINGS_BACKLOG_MAX_AGE_MS` (default 172800000, 48 hours).
+It also fires whenever `outOfWindow > 0`, so ordinary merge-time enrollments
+remain visible after a stalled runner misses their first-claim window. Operator
+batch backfill can reclaim released findings regardless of age; never-claimed
+out-of-window findings require an explicit consensus-validated manifest.
+Pipeline health uses its resolved `findingsBacklogMaxAgeMs` for both summary and
+alert thresholds. Invalid direct summary defaults return `available: false`
+without throwing out of the health API.
 This is an operational alert, with no additional merge or CI gate.
 
 After deployment and watcher restart, SRE explicitly runs the one-shot drain:

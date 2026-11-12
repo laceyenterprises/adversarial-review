@@ -14,7 +14,7 @@ import { readRemediationConsensus, validateFindingManifest } from '../src/findin
 import { summarizeFindingBacklog, findingBacklogAlert } from '../src/findings-backlog.mjs';
 import { main } from '../bin/findings-batch-backfill.mjs';
 
-test.mock.method(Date, 'now', () => Date.parse('2026-01-02T00:00:00Z'));
+const fixtureNow = Date.parse('2026-01-02T00:00:00Z');
 
 const repo = 'sample/service', head = 'a'.repeat(40), day = '2026-01-02';
 function fixture(t, advisory = false) {
@@ -76,14 +76,14 @@ test('manifest claims only real pinned findings, enrolls selected blocking findi
   grade(rows[6], 'tp.already-fixed-elsewhere', { graderKind: 'batch-remediator', gradedHeadSha: null });
   grade(rows[7]); // Real but outside the selection.
   const selected = manifest(rows.slice(0, 7));
-  const batches = claimFindingBatches(db, day, { manifest: selected, batchSize: 2 });
+  const batches = claimFindingBatches(db, day, { now: fixtureNow, manifest: selected, batchSize: 2 });
   assert.equal(batches.length, 2);
   assert.ok(batches.every(b => b.manifest_sha256 === selected.sha256));
   assert.equal(db.prepare('SELECT count(*) n FROM finding_batch_notes WHERE batch_id IS NOT NULL').get().n, 0);
   const owned = db.prepare('SELECT finding_id FROM finding_backlog WHERE batch_id IS NOT NULL').all();
   assert.deepEqual(owned.map(r => r.finding_id).sort(), [rows[0], rows[1], rows[6]].map(r => r.finding_id).sort());
-  assert.deepEqual(claimFindingBatches(db, day, { manifest: selected }), []);
-  const defaults = claimFindingBatches(db, day);
+  assert.deepEqual(claimFindingBatches(db, day, { now: fixtureNow, manifest: selected }), []);
+  const defaults = claimFindingBatches(db, day, { now: fixtureNow });
   assert.ok(defaults.length);
   assert.ok(defaults.every(b => b.manifest_sha256 === null));
   assert.equal(db.prepare('SELECT count(*) n FROM finding_batch_notes WHERE batch_id IS NOT NULL').get().n, 1);
@@ -110,13 +110,13 @@ test('manifest validation refuses tampering, missing identities, duplicate IDs a
   ]) {
     const invalid = structuredClone(value);
     modify(invalid);
-    assert.throws(() => claimFindingBatches(db, day, { manifest: invalid }), /manifest/);
+    assert.throws(() => claimFindingBatches(db, day, { now: fixtureNow, manifest: invalid }), /manifest/);
     assert.equal(db.prepare('SELECT count(*) n FROM finding_batches').get().n, 0);
   }
   assert.equal(validateFindingManifest(db, value).size, 1);
-  assert.deepEqual(claimFindingBatches(db, day, { manifest: manifest([]) }), []);
+  assert.deepEqual(claimFindingBatches(db, day, { now: fixtureNow, manifest: manifest([]) }), []);
   db.prepare("UPDATE reviewed_prs SET pr_state='open'").run();
-  assert.deepEqual(claimFindingBatches(db, day, { manifest: value }), []);
+  assert.deepEqual(claimFindingBatches(db, day, { now: fixtureNow, manifest: value }), []);
 });
 
 test('fallback consensus prefers independent reviewed-head evidence and excludes lifecycle, stale and interested observations', t => {
@@ -139,7 +139,7 @@ test('fallback consensus prefers independent reviewed-head evidence and excludes
 test('manifest CLI dispatches and collects only its own batches and retains main applicability instructions', async t => {
   const { db, rows, grade, rootDir } = fixture(t);
   // Leave an unrelated prepared batch pending.
-  const [unrelated] = claimFindingBatches(db, day, { manifest: manifest([rows[2]]),
+  const [unrelated] = claimFindingBatches(db, day, { now: fixtureNow, manifest: manifest([rows[2]]),
     readConsensus: () => ({ label: 'real' }) });
   grade(rows[1]);
   const value = manifest([rows[1]]);
@@ -161,14 +161,14 @@ test('manifest CLI dispatches and collects only its own batches and retains main
   assert.equal(db.prepare('SELECT launch_id FROM finding_batches WHERE batch_id=?').get(unrelated.batch_id).launch_id, null);
   let calls = 0;
   // An empty selection must not launch the default backlog.
-  await runFindingBatches({ db, rootDir, manifest: manifest([]), env: { HQ_ROOT: rootDir },
+  await runFindingBatches({ now: fixtureNow, db, rootDir, manifest: manifest([]), env: { HQ_ROOT: rootDir },
     execFileImpl: async () => { calls++; throw Error('unexpected dispatch'); } });
   assert.equal(calls, 0);
 });
 
 test('settlement records taxonomy grades atomically after PR verification, with no grade for requeued or released findings', t => {
   const { db, rows } = fixture(t);
-  const [batch] = claimFindingBatches(db, day);
+  const [batch] = claimFindingBatches(db, day, { now: fixtureNow });
   const members = db.prepare('SELECT finding_id FROM finding_backlog WHERE batch_id=? ORDER BY finding_id').all(batch.batch_id);
   const reasons = ['stale-code-changed: Function replaced', 'already-fixed-in-23: Merged validation',
     'not-reproducible: Input rejected', 'out-of-scope-with-ticket: TASK-23 tracks repair',
@@ -200,7 +200,7 @@ test('settlement records taxonomy grades atomically after PR verification, with 
   assert.equal(db.prepare('SELECT count(*) n FROM review_finding_grades').get().n, 7);
   assert.equal(backfillFindingGrades(db).inserted, 0);
   assert.equal(db.prepare('SELECT count(*) n FROM review_finding_grades').get().n, 7);
-  const [retry] = claimFindingBatches(db, day);
+  const [retry] = claimFindingBatches(db, day, { now: fixtureNow });
   releaseFindingBatch(db, retry, 'synthetic failure');
   assert.equal(db.prepare('SELECT count(*) n FROM review_finding_grades').get().n, 7);
   assert.equal(db.prepare('SELECT count(*) n FROM finding_backlog WHERE finding_id=?').get(rows[0].finding_id).n, 0);
@@ -208,7 +208,7 @@ test('settlement records taxonomy grades atomically after PR verification, with 
 
 test('consensus reader seam supports authoritative real-only admission', t => {
   const { db, rows } = fixture(t);
-  const [batch] = claimFindingBatches(db, day, { manifest: manifest(rows),
+  const [batch] = claimFindingBatches(db, day, { now: fixtureNow, manifest: manifest(rows),
     readConsensus: (_db, { findingId }) => ({ label: findingId === rows[1].finding_id ? 'real' : 'false' }) });
   assert.deepEqual(db.prepare('SELECT finding_id FROM finding_backlog WHERE batch_id=?').all(batch.batch_id),
     [{ finding_id: rows[1].finding_id }]);
@@ -217,7 +217,7 @@ test('consensus reader seam supports authoritative real-only admission', t => {
 test('multi-finding settlement preserves each finding attempt and lifecycle grade kind', t => {
   const { db, rows } = fixture(t);
   db.prepare('UPDATE finding_backlog SET batch_attempts=1 WHERE finding_id=?').run(rows[1].finding_id);
-  const [batch] = claimFindingBatches(db, day);
+  const [batch] = claimFindingBatches(db, day, { now: fixtureNow });
   const members = db.prepare('SELECT finding_id FROM finding_backlog WHERE batch_id=?').all(batch.batch_id);
   assert.ok(members.length > 1);
   assert.equal(settleFindingBatch(db, batch, { batchId: batch.batch_id,
@@ -238,10 +238,10 @@ test('selected retries keep manifest provenance, advance attempt identity and ne
   const { db, rows, grade } = fixture(t);
   grade(rows[1]);
   const value = manifest([rows[1]]);
-  const [first] = claimFindingBatches(db, day, { manifest: value });
-  assert.deepEqual(claimFindingBatches(db, day, { manifest: manifest([rows[1], rows[2]]) }), []);
+  const [first] = claimFindingBatches(db, day, { now: fixtureNow, manifest: value });
+  assert.deepEqual(claimFindingBatches(db, day, { now: fixtureNow, manifest: manifest([rows[1], rows[2]]) }), []);
   releaseFindingBatch(db, first, 'synthetic preparation failure');
-  const [retry] = claimFindingBatches(db, day, { manifest: value });
+  const [retry] = claimFindingBatches(db, day, { now: fixtureNow, manifest: value });
   assert.notEqual(retry.batch_id, first.batch_id);
   assert.equal(retry.manifest_sha256, value.sha256);
   const result = { batchId: retry.batch_id, findings: [
@@ -251,7 +251,7 @@ test('selected retries keep manifest provenance, advance attempt identity and ne
   const gradeRow = db.prepare("SELECT * FROM review_finding_grades WHERE grader_kind='batch-remediator'").get();
   assert.equal(gradeRow.attempt, 2);
   assert.equal(JSON.parse(gradeRow.evidence_json).manifestSha256, value.sha256);
-  assert.deepEqual(claimFindingBatches(db, day, { manifest: value }), []);
+  assert.deepEqual(claimFindingBatches(db, day, { now: fixtureNow, manifest: value }), []);
 });
 
 
@@ -260,7 +260,7 @@ test('released selections stay out of automatic claims and reclaims re-read cons
   const value = manifest([rows[0], rows[1]]);
   let calls = 0, label = 'real';
   const readConsensus = () => { calls++; assert.equal(db.inTransaction, false); return { label }; };
-  const [batch] = claimFindingBatches(db, day, { manifest: value, readConsensus });
+  const [batch] = claimFindingBatches(db, day, { now: fixtureNow, manifest: value, readConsensus });
   assert.equal(calls, 2);
   releaseFindingBatch(db, batch, 'synthetic release');
   // Recover provenance from the durable release audit, including repeat migration.
@@ -269,16 +269,16 @@ test('released selections stay out of automatic claims and reclaims re-read cons
   ensureReviewStateSchema(db);
   db.prepare("DELETE FROM schema_migrations WHERE id='20261108_findings_selection_scope.sql'").run();
   ensureReviewStateSchema(db);
-  claimFindingBatches(db, day);
+  claimFindingBatches(db, day, { now: fixtureNow });
   assert.equal(db.prepare('SELECT count(*) n FROM finding_backlog WHERE manifest_sha256=? AND batch_id IS NULL').get(value.sha256).n, 2);
-  assert.equal(summarizeFindingBacklog(db).openCount, 7);
-  assert.deepEqual(summarizeFindingBacklog(db).selectedBacklog, [{
+  assert.equal(summarizeFindingBacklog(db, fixtureNow).openCount, 7);
+  assert.deepEqual(summarizeFindingBacklog(db, fixtureNow).selectedBacklog, [{
     manifestSha256: value.sha256, openCount: 2, unbatchedCount: 2, erroredCount: 0, undispatchedCount: 0,
   }]);
   label = 'false';
-  assert.deepEqual(claimFindingBatches(db, day, { manifest: value, readConsensus }), []);
+  assert.deepEqual(claimFindingBatches(db, day, { now: fixtureNow, manifest: value, readConsensus }), []);
   label = 'real';
-  assert.equal(claimFindingBatches(db, day, { manifest: value, readConsensus }).length, 1);
+  assert.equal(claimFindingBatches(db, day, { now: fixtureNow, manifest: value, readConsensus }).length, 1);
 });
 
 test('default runner never dispatches a selected batch after explicit dispatch failure', async t => {
@@ -288,15 +288,15 @@ test('default runner never dispatches a selected batch after explicit dispatch f
   let calls = 0;
   const deps = { db, rootDir, env: { HQ_ROOT: rootDir }, logger: { warn() {} },
     execFileImpl: async () => { calls++; throw Error('synthetic dispatch failure'); } };
-  await runFindingBatches({ ...deps, manifest: value });
+  await runFindingBatches({ now: fixtureNow, ...deps, manifest: value });
   assert.equal(calls, 1);
-  assert.deepEqual(summarizeFindingBacklog(db).selectedBacklog, [{
+  assert.deepEqual(summarizeFindingBacklog(db, fixtureNow).selectedBacklog, [{
     manifestSha256: value.sha256, openCount: 1, unbatchedCount: 0, erroredCount: 1, undispatchedCount: 1,
   }]);
   const selected = db.prepare('SELECT * FROM finding_batches WHERE manifest_sha256=?').get(value.sha256);
-  await runFindingBatches({ ...deps, execFileImpl: async () => ({ stdout: '{"launchRequestId":"default-launch"}' }) });
+  await runFindingBatches({ now: fixtureNow, ...deps, execFileImpl: async () => ({ stdout: '{"launchRequestId":"default-launch"}' }) });
   assert.equal(db.prepare('SELECT launch_id FROM finding_batches WHERE batch_id=?').get(selected.batch_id).launch_id, null);
-  await runFindingBatches({ ...deps, manifest: value });
+  await runFindingBatches({ now: fixtureNow, ...deps, manifest: value });
   assert.equal(calls, 2);
 });
 
@@ -304,11 +304,11 @@ test('selection enrollment excludes superseded bodies and earlier posted passes'
   const { db, rows } = fixture(t);
   db.prepare('UPDATE review_findings SET current_body=0 WHERE finding_id=?').run(rows[0].finding_id);
   const readConsensus = () => ({ label: 'real' });
-  assert.deepEqual(claimFindingBatches(db, day, { manifest: manifest([rows[0]]), readConsensus }), []);
+  assert.deepEqual(claimFindingBatches(db, day, { now: fixtureNow, manifest: manifest([rows[0]]), readConsensus }), []);
   db.prepare('UPDATE review_findings SET current_body=1 WHERE finding_id=?').run(rows[0].finding_id);
   db.exec(`INSERT INTO reviewer_passes (pass_id,repo,pr_number,attempt_number,pass_kind,reviewer_class,head_sha,started_at,body_md,body_captured_at,gh_comment_id,status)
     SELECT 9999,repo,pr_number,2,'rereview',reviewer_class,head_sha,'2026-01-03','new body','2026-01-03','2',status FROM reviewer_passes LIMIT 1`);
-  assert.deepEqual(claimFindingBatches(db, day, { manifest: manifest([rows[0]]), readConsensus }), []);
+  assert.deepEqual(claimFindingBatches(db, day, { now: fixtureNow, manifest: manifest([rows[0]]), readConsensus }), []);
 });
 
 
@@ -354,7 +354,7 @@ test('real RGY-02 producer output pins heads objects and reports heads mismatche
 for (const batchMigrated of [false, true]) {
   test(`backlog health survives missing selection scope (batch migration=${batchMigrated})`, t => {
     const { db } = fixture(t);
-    claimFindingBatches(db, day);
+    claimFindingBatches(db, day, { now: fixtureNow });
     db.exec("UPDATE finding_batches SET error='synthetic failure'");
     db.exec("UPDATE finding_backlog SET captured_at='2026-01-01T00:00:00Z'");
     db.exec('ALTER TABLE finding_backlog DROP COLUMN manifest_sha256');
@@ -373,13 +373,13 @@ for (const batchMigrated of [false, true]) {
 test('scope recovery uses release history only for unowned findings', t => {
   const { db, rows } = fixture(t);
   const value = manifest(rows.slice(1, 4));
-  const [selected] = claimFindingBatches(db, day, { manifest: value, readConsensus: () => ({ label: 'real' }) });
+  const [selected] = claimFindingBatches(db, day, { now: fixtureNow, manifest: value, readConsensus: () => ({ label: 'real' }) });
   releaseFindingBatch(db, selected, 'synthetic release');
   // Model a legacy default owner and a current selected owner alongside an
   // unowned released row. Both have the same older selection release history.
   db.prepare('UPDATE finding_backlog SET manifest_sha256=NULL WHERE finding_id=?').run(rows[1].finding_id);
-  const [defaultBatch] = claimFindingBatches(db, day);
-  const [currentSelection] = claimFindingBatches(db, day, {
+  const [defaultBatch] = claimFindingBatches(db, day, { now: fixtureNow });
+  const [currentSelection] = claimFindingBatches(db, day, { now: fixtureNow,
     manifest: manifest([rows[3]]), readConsensus: () => ({ label: 'real' }),
   });
   db.exec('UPDATE finding_backlog SET manifest_sha256=NULL');

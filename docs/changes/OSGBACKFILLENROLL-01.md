@@ -17,7 +17,13 @@ notes gain `historical_projection` (0/1, default 0). The companion capability
 export allows activation callers to refuse older implementations.
 `claimFindingBatches` accepts `now` and `maxAgeMs`; the runner forwards its clock
 and configured age window. Backlog summaries add `outOfWindow` and exclude
-expired unassigned findings from batchable metrics, preserving owned monitoring.
+expired never-claimed findings from batchable metrics, preserving owned monitoring.
+Released automatic findings remain batchable regardless of source age until
+settlement or third-attempt exhaustion. Health alerts on `outOfWindow > 0` as
+well as overdue batchable work, and uses the health-configured window. Invalid
+direct summary defaults return unavailable evidence. Shared batch fixtures pass
+explicit clocks instead of mocking `Date.now` for whole files. Summaries retain
+pre-requeue-schema compatibility with unavailable retry progress.
 
 ## Verification
 
@@ -46,3 +52,10 @@ Operator steering adds a hard stop on all review-store backfills and projections
 until both this fix and OSGPROJECTLOCK-01 merge and float in both repositories.
 The operator declaration and canonical store instructions carry that prerequisite.
 The companion incident report is classified SEV0; implementation is unchanged.
+
+Final fix-all remediation: targeted batch, graded-selection, retry, historical
+enrollment and hammer-scope suites passed (184 tests across five files). The
+existing publication latency and state/smoke suites passed (44 tests). Lint
+reported zero errors and 149 existing warnings; contract typecheck, the offline
+research demo, 94-entry data-model catalog validation and diff whitespace check
+passed. No full local suite or live review-store operation was run.

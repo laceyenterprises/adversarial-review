@@ -1814,7 +1814,11 @@ counts, oldest open age, applied/dropped by UTC day and batch error counts. Its
 `progress` object (also printed by `node bin/review-findings.mjs backlog --db <db>`)
 tracks the drain: `open` = `unbatched` + `batched` + `stranded`, plus `retrying`,
 `exhausted` and `releasedBatches`. Drained means `open` is 0.
-The existing alert path reports findings older than 48 hours by default.
+The existing alert path reports batchable findings older than 48 hours by default,
+and any never-claimed automatic findings outside the merge-age window.
+Released findings remain eligible for retry regardless of source age until
+settlement or third-attempt exhaustion; selected findings still require their
+explicit manifest. Health summaries use the same configured window as alerts.
 Within 24 hours, SRE retains a receipt showing the open backlog trends down,
 visible applied/dropped daily counts and no evidence-format losses. See the
 [batch lifecycle and recovery contract](docs/data-model/review-findings.md#non-blocking-backlog-findingsbatch-01)

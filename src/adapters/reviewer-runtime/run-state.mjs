@@ -6,6 +6,10 @@ const RUN_STATE_DIR = ['data', 'reviewer-runs'];
 const ACTIVE_RUN_STATES = new Set(['launching', 'spawned', 'heartbeating']);
 const RECOVERABLE_RUN_STATES = new Set(['spawned', 'heartbeating', 'cancelled']);
 const TERMINAL_RUN_STATES = new Set(['completed', 'failed', 'cancelled']);
+// How long a reviewer launch may take from its `launching` claim to a process
+// it can prove. The null-PGID reattach grace and the agy holder pool's stale
+// `launching` reap (AGYSTALELAUNCH-01) share it; callers scale it for load.
+const REVIEWER_LAUNCH_GRACE_MS = 60 * 1000;
 
 function reviewerRunStateDir(rootDir) {
   return join(rootDir, ...RUN_STATE_DIR);
@@ -97,6 +101,29 @@ function settleReviewerRunRecord(rootDir, sessionUuid, {
     state,
     lastHeartbeatAt: settledAt,
   });
+}
+
+// AGYSTALELAUNCH-01: settle a `launching` record whose launch never produced a
+// process the caller could prove, so it stops holding what it claimed. Only
+// the exact record the caller judged (same state, PGID and spawnedAt) is
+// settled: a launch that reached `heartbeating` meanwhile is left alone. The
+// PGID is cleared, because a settled record's PGID is not evidence of anything
+// and a recycled one would otherwise be probed on every later scan; callers log
+// it. Returns `{ reaped, record }`; `record` is null when the file is gone.
+function reapStaleLaunchingReviewerRunRecord(rootDir, judged, {
+  settledAt = new Date().toISOString(),
+} = {}) {
+  const current = readReviewerRunRecord(rootDir, judged?.sessionUuid);
+  if (!current) return { reaped: false, record: null };
+  const judgedPgid = Number.isInteger(judged.pgid) ? judged.pgid : null;
+  if (current.state !== 'launching' || current.pgid !== judgedPgid
+    || (judged.spawnedAt && current.spawnedAt !== String(judged.spawnedAt))) {
+    return { reaped: false, record: current };
+  }
+  return {
+    reaped: true,
+    record: updateReviewerRunRecord(rootDir, current, { state: 'failed', pgid: null, lastHeartbeatAt: settledAt }),
+  };
 }
 
 function readReviewerRunRecord(rootDir, sessionUuid) {
@@ -238,6 +265,8 @@ export {
   RECOVERABLE_RUN_STATES,
   claimReviewerRunRecord,
   pruneReviewerRunRecords,
+  REVIEWER_LAUNCH_GRACE_MS,
+  reapStaleLaunchingReviewerRunRecord,
   readActiveReviewerRunRecords,
   readRecoverableReviewerRunRecords,
   readReviewerRunRecord,

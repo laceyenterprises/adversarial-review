@@ -35,11 +35,15 @@ are never unlinked. Unreadable or malformed records isolate only that holder.
 There is no heartbeat-expiry reclaim. A live watcher PID retains ownership;
 after its exit, strict reviewer-run scans and the existing survivor check must
 prove the holder unused under the lock. Live process groups in terminal as
-well as active holder run records retain occupancy. Only `launching` records
-hold without a PGID; terminal records without one cannot represent a live group.
-Terminal live PGIDs are checked against `spawnedAt`: a proven start-time mismatch
-does not hold occupancy, while unavailable identity evidence retains the hold.
-Unknown evidence holds.
+well as active holder run records retain occupancy. Live PGIDs in every state,
+including `launching`, are checked against `spawnedAt`: a proven start-time
+mismatch does not hold occupancy, while unavailable identity evidence retains
+the hold. Only `launching` records hold without a PGID; terminal records without
+one cannot represent a live group. No `launching` record holds for longer than
+the load-scaled launch grace without a verified leader: past it the pool
+settles the record `failed` and releases the holder, at readiness and at
+watcher startup (AGYSTALELAUNCH-01; see
+[reviewer run records](reviewer-run-records.md#lease-recovery-contract-itp-11)).
 The runtime still writes its launch intent before forking, and rolling readers
 retain both `agyHolderLease` and `agyIdentityLease` run-record fields.
 

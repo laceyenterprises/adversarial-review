@@ -41,11 +41,13 @@ import { homedir, userInfo } from 'node:os';
 import { basename, dirname, isAbsolute, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-import { readReviewerRunRecord, scanActiveReviewerRunRecords } from './adapters/reviewer-runtime/run-state.mjs';
+import {
+  readReviewerRunRecord, reapStaleLaunchingReviewerRunRecord, REVIEWER_LAUNCH_GRACE_MS, scanActiveReviewerRunRecords,
+} from './adapters/reviewer-runtime/run-state.mjs';
 import { checkAgyReviewerAuth } from './agy-reviewer-auth.mjs';
 import { readGeminiQuotaCooldown, readGeminiQuotaCooldownForIdentities } from './gemini-quota-cooldown.mjs';
 import { deliverAlert } from './alert-delivery.mjs';
-import { isPgidAlive, verifyPgidIdentity } from './process-group-identity.mjs';
+import { isPgidAlive, PGID_IDENTITY_TOLERANCE_MS, verifyPgidIdentity } from './process-group-identity.mjs';
 import { resolveGeminiReviewerIdentities, resolveGeminiRuntime, resolveGeminiAntigravityModel, resolveGeminiReviewerTokenPools } from './role-config.mjs';
 import { loadConfigCached, loadGeminiReviewerConfigCached } from './config-loader.mjs';
 import { warnPoolConfigConflict } from './pool-config-conflict.mjs';
@@ -655,6 +657,59 @@ async function defaultCheckHqOwnerAuth({ env }) {
   return checkAgyReviewerAuth({ env: scrubbed, cacheSuccess: false });
 }
 
+// AGYSTALELAUNCH-01: a PGID is not an identity. macOS reuses process group
+// IDs, so a run record's live PGID is that review only when the group leader
+// started with it. `spawnedAt` is stamped before the fork (cli-direct stamps it
+// before its preflight), so the leader may start up to the launch grace after
+// it, and no earlier than `ps`'s rounding tolerance before it. The result is
+// one of:
+//   verified   - the leader is this review; the record holds its identity;
+//   gone       - no live process group; it does not hold;
+//   recycled   - a readable start time proves another process; it does not;
+//   unverified - no PGID yet, or the evidence cannot be read. It holds, and a
+//                `launching` record only until the launch grace runs out.
+// The same rule applies to every state.
+async function adoptedRunLiveness(record, { isPgidAliveImpl, verifyPgidIdentityImpl, launchGraceMs }) {
+  const pgid = record.pgid;
+  if (!Number.isInteger(pgid)) {
+    return record.state === 'launching'
+      ? { result: 'unverified', detail: 'no process group recorded yet' }
+      : { result: 'gone', detail: 'no process group recorded' };
+  }
+  let alive;
+  try {
+    alive = isPgidAliveImpl(pgid);
+  } catch (err) {
+    return { result: 'unverified', detail: `process group ${pgid} probe failed: ${err?.message || err}` };
+  }
+  if (!alive) return { result: 'gone', detail: `process group ${pgid} is gone` };
+  let identity;
+  try {
+    identity = await verifyPgidIdentityImpl(pgid, record.spawnedAt);
+  } catch (err) {
+    return { result: 'unverified', detail: `process group ${pgid} identity probe threw: ${err?.message || err}` };
+  }
+  if (identity?.match) return { result: 'verified', detail: `process group ${pgid} leader started with this review` };
+  // An exited leader with live descendants, or no `ps`, gives no start time.
+  if (!identity?.startedAt) {
+    return { result: 'unverified', detail: `process group ${pgid} identity unreadable: ${identity?.reason || 'no start time'}` };
+  }
+  const startedMs = Date.parse(identity.startedAt);
+  const spawnedMs = Date.parse(record.spawnedAt || '');
+  if (Number.isFinite(startedMs) && Number.isFinite(spawnedMs)
+    && startedMs >= spawnedMs - PGID_IDENTITY_TOLERANCE_MS && startedMs <= spawnedMs + launchGraceMs) {
+    return { result: 'verified', detail: `process group ${pgid} leader started ${identity.startedAt}, within this review's launch` };
+  }
+  return { result: 'recycled', detail: `process group ${pgid} leader started ${identity.startedAt}, not with this review (spawnedAt ${record.spawnedAt || 'unknown'})` };
+}
+
+function formatAgeMs(ms) {
+  if (!Number.isFinite(ms)) return 'unknown';
+  const s = Math.floor(Math.max(0, ms) / 1000);
+  const [d, h, m] = [Math.floor(s / 86_400), Math.floor((s % 86_400) / 3600), Math.floor((s % 3600) / 60)];
+  return d ? `${d}d${h}h` : h ? `${h}h${m}m` : m ? `${m}m${s % 60}s` : `${s}s`;
+}
+
 function createAgyReviewerIdentityPool({
   env = process.env,
   log = console,
@@ -679,6 +734,13 @@ function createAgyReviewerIdentityPool({
   readRunRecordImpl = (sessionUuid) => readReviewerRunRecord(runStateRootDir, sessionUuid),
   isPgidAliveImpl = isPgidAlive,
   verifyPgidIdentityImpl = verifyPgidIdentity,
+  // AGYSTALELAUNCH-01: the longest a `launching` record holds its identity
+  // without a verified process. Null resolves the load-scaled launch grace on
+  // every pass.
+  launchGraceMs = null,
+  reapStaleLaunchingRecordImpl = (record) => reapStaleLaunchingReviewerRunRecord(runStateRootDir, record, {
+    settledAt: new Date(now()).toISOString(),
+  }),
   isLeaseOwnerAliveImpl = agyLeaseOwnerAlive,
   deliverAlertImpl = deliverAlert,
   alertAfterMs = IDENTITY_ALERT_AFTER_MS,
@@ -699,6 +761,7 @@ function createAgyReviewerIdentityPool({
   let noReadySince = null;
   let noReadyAlertedAt = null;
   let unreadableRunRecords = [];
+  const reapFailuresLogged = new Set();
   const notifiedPinnedCopies = new Set();
 
   async function pinnedCopyWarnings(plan) {
@@ -1009,15 +1072,18 @@ function createAgyReviewerIdentityPool({
   // Leases held by reviews this watcher does not hold in memory: the reviewer
   // run records (cli-direct) of reviews still running that carry
   // `subjectContext.agyIdentityLease`. After a watcher bounce those are the
-  // reviews the previous watcher leased. A record whose process group is gone
-  // no longer holds its identity; a `launching` record with no process group
-  // yet still does (the fork may have happened). Null when the records cannot
-  // all be read, which callers treat as "every unleased identity may be busy":
-  // a damaged record may be the one lease that holds an identity, and its
-  // reviewer child can be between extraction and starting agy, where the
-  // survivor check sees nothing. The identities stay out until the record is
-  // repaired or removed.
-  async function leasesFromRunRecords() {
+  // reviews the previous watcher leased. A record holds its identity only
+  // while adoptedRunLiveness cannot rule its process out: a verified leader,
+  // or evidence that cannot be read. A `launching` record (which may have
+  // forked before its PGID was written) gets no more than the launch grace
+  // that way: past it, without a verified leader, it is settled `failed` and
+  // releases its identity, logged once (AGYSTALELAUNCH-01). Null when the
+  // records cannot all be read, which callers treat as "every unleased
+  // identity may be busy": a damaged record may be the one lease that holds an
+  // identity, and its reviewer child can be between extraction and starting
+  // agy, where the survivor check sees nothing. The identities stay out until
+  // the record is repaired or removed. Reaped records are appended to `reaped`.
+  async function leasesFromRunRecords({ reaped = [] } = {}) {
     let records;
     try {
       const scan = readActiveRunRecordsImpl() || [];
@@ -1034,26 +1100,44 @@ function createAgyReviewerIdentityPool({
       log.warn?.(`[agy-identities] cannot read reviewer run records: ${err?.message || err}`);
       return null;
     }
+    const graceMs = Number.isFinite(launchGraceMs) ? launchGraceMs : loadAwareTimeoutMs(REVIEWER_LAUNCH_GRACE_MS);
     const byUser = new Map();
     for (const record of records) {
       const held = record?.subjectContext?.agyHolderLease || record?.subjectContext?.agyIdentityLease;
       if (!held?.user || !held.reviewId) continue;
       if (states.get(held.user)?.lease?.reviewId === held.reviewId) continue;
-      let running;
-      try {
-        running = Number.isInteger(record.pgid) ? isPgidAliveImpl(record.pgid) : record.state === 'launching';
-        if (running && ['completed', 'failed', 'cancelled'].includes(record.state)) {
-          const identity = await verifyPgidIdentityImpl(record.pgid, record.spawnedAt);
-          // A proven recycled leader is not this review. Unreadable identity
-          // evidence (including an exited leader with live descendants) holds.
-          if (!identity.match && identity.startedAt) running = false;
+      const liveness = await adoptedRunLiveness(record, { isPgidAliveImpl, verifyPgidIdentityImpl, launchGraceMs: graceMs });
+      const spawnedMs = Date.parse(record.spawnedAt || '');
+      const ageMs = Number.isFinite(spawnedMs) ? now() - spawnedMs : null;
+      const sessionUuid = String(record.sessionUuid || '');
+      if (record.state === 'launching' && liveness.result !== 'verified' && (ageMs === null || ageMs > graceMs)) {
+        const what = `stale launching reviewer run record ${sessionUuid || 'unknown'} (review ${held.reviewId}, age ${formatAgeMs(ageMs)} > launch grace ${formatAgeMs(graceMs)}, ${liveness.result}: ${liveness.detail})`;
+        let outcome;
+        try {
+          outcome = reapStaleLaunchingRecordImpl(record);
+        } catch (err) {
+          // Unsettled, the record still cannot hold the identity past the
+          // grace; the reap retries on the next pass.
+          if (!reapFailuresLogged.has(sessionUuid)) {
+            reapFailuresLogged.add(sessionUuid);
+            log.warn?.(`[agy-identities] identity=${held.user} cannot settle ${what}: ${err?.message || err}; not holding the identity`);
+          }
+          continue;
         }
-      } catch {
-        running = true;
+        if (outcome?.reaped) {
+          reapFailuresLogged.delete(sessionUuid);
+          reaped.push({ user: held.user, reviewId: String(held.reviewId), sessionUuid, ageMs, pgid: record.pgid ?? null, liveness: liveness.result });
+          log.warn?.(`[agy-identities] identity=${held.user} reaped ${what}; settled failed, identity released`);
+          continue;
+        }
+        // The launch moved on (or the file is gone) since the scan read it;
+        // a still-active record is judged afresh on the next pass.
+        if (!outcome?.record || !['launching', 'spawned', 'heartbeating'].includes(outcome.record.state)) continue;
+      } else if (liveness.result === 'gone' || liveness.result === 'recycled') {
+        continue;
       }
-      if (!running) continue;
       if (!byUser.has(held.user)) byUser.set(held.user, []);
-      byUser.get(held.user).push({ reviewId: String(held.reviewId), sessionUuid: String(record.sessionUuid || '') });
+      byUser.get(held.user).push({ reviewId: String(held.reviewId), sessionUuid, state: record.state, ageMs, pgid: record.pgid ?? null, liveness });
     }
     return byUser;
   }
@@ -1072,7 +1156,8 @@ function createAgyReviewerIdentityPool({
       const known = new Set(state.adopted.map((entry) => entry.reviewId));
       for (const entry of running) {
         if (!known.has(entry.reviewId)) {
-          log.warn?.(`[agy-identities] identity=${state.user} review ${entry.reviewId} (reviewer session ${entry.sessionUuid || 'unknown'}) from a previous watcher still runs; not leased until it ends`);
+          const evidence = entry.liveness ? `, state ${entry.state}, age ${formatAgeMs(entry.ageMs)}, ${entry.liveness.result}: ${entry.liveness.detail}` : '';
+          log.warn?.(`[agy-identities] identity=${state.user} review ${entry.reviewId} (reviewer session ${entry.sessionUuid || 'unknown'}${evidence}) from a previous watcher still runs; not leased until it ends`);
         }
       }
       state.adopted = running;
@@ -1370,6 +1455,16 @@ function createAgyReviewerIdentityPool({
     });
   }
 
+  // AGYSTALELAUNCH-01: the watcher's startup reap. The same read and reap as a
+  // readiness pass, so a restart clears a stale `launching` hold before the
+  // first lease. Returns the records it settled.
+  async function reapStaleLaunchingRecords() {
+    if (!currentPlan().multi) return [];
+    const reaped = [];
+    await leasesFromRunRecords({ reaped });
+    return reaped;
+  }
+
   async function sweepAll() {
     const plan = currentPlan();
     if (!plan.multi) return [];
@@ -1406,6 +1501,7 @@ function createAgyReviewerIdentityPool({
     acquire,
     release,
     sweepAll,
+    reapStaleLaunchingRecords,
     noteGeminiDemand,
     settleProbes: () => Promise.all([...probes.values()]),
     snapshot: () => [...states.values()].map(({ user, hqOwner: owner, ready, reasons, warnings, needsProbe, draining, adopted, lease }) => ({

@@ -55,8 +55,11 @@ export async function warnIfAntigravityReviewerAuthUnavailable({
 
 // CCX-08: the watcher's startup call. Runs the HQ-owner auth preflight above,
 // then each added reviewer identity's workspace-helper `sweep`, which removes
-// scratch copies a crashed watcher or reviewer child leaked. Neither ever
-// blocks startup. With a single identity the sweep is a no-op.
+// scratch copies a crashed watcher or reviewer child leaked, then
+// (AGYSTALELAUNCH-01) the pool's reap of reviewer run records stuck in
+// `launching` past the launch grace, so a restart releases the identities they
+// held. None of them ever blocks startup. With a single identity the sweep is a
+// no-op.
 export async function runAgyReviewerStartupChecks({
   env = process.env,
   log = console,
@@ -70,5 +73,11 @@ export async function runAgyReviewerStartupChecks({
   } catch (err) {
     log.warn?.(`[watcher] WARN agy reviewer identity startup sweep failed: ${err?.message || err}`);
   }
-  return { auth, sweep };
+  let reaped = [];
+  try {
+    reaped = (await identityPool.reapStaleLaunchingRecords?.()) || [];
+  } catch (err) {
+    log.warn?.(`[watcher] WARN agy reviewer stale launching-record startup reap failed: ${err?.message || err}`);
+  }
+  return { auth, sweep, reaped };
 }

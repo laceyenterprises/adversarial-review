@@ -3,7 +3,7 @@
 **Owner:** the watcher's AMA closer (INCONCLUSIVERETRY-01b)
 **Store:** `data/follow-up-jobs/closer-inconclusive-retries/<repo>-pr-<n>.json`
 **Source of truth:** `src/ama/closer-inconclusive-retry.mjs`
-**Runtime surface:** `src/ama/dispatch-closer.mjs`, `src/ama/closure-budget-escalation.mjs`
+**Runtime surface:** `src/ama/dispatch-closer.mjs`, `src/ama/closure-budget-escalation.mjs`, `src/ama/closer-supersede.mjs`
 
 ## Purpose
 
@@ -30,6 +30,7 @@ and when the next ordinary dispatch is due. It grants no authority. See the
       "deadline": "ISO-8601",
       "surfaceAfterAttempts": 3,
       "surfacedAt": "ISO-8601 or null",
+      "reviewServiceRevision": "git:<sha> or null",
       "launches": [{ "launchRequestId": "lrq_...", "reason": "checkout-failed", "at": "ISO-8601" }]
     }
   }
@@ -39,5 +40,14 @@ and when the next ordinary dispatch is due. It grants no authority. See the
 The file keeps the eight most recently attempted heads and 32 launches per head.
 Writes are atomic. Recording is idempotent per launch. An unreadable file reads
 as corrupt and is rebuilt on the next record; at worst that delays a backoff.
-`closure-budget-escalation` reads `launches[].launchRequestId` across heads to
-decide whether a spent series budget was spent only by inconclusive launches.
+`closure-budget-escalation` reads `launches[].launchRequestId` across heads and
+refunds each open series charge whose launch is listed (CLOSERRETRYREFUND-01:
+per charge, not only when every charge is listed). It also records launches it
+proves were closer faults from the AMA audit, and `closer-supersede` records a
+launch the pipeline cancelled before it booted (reason
+`superseded-by-clean-exact-head-review`).
+
+`reviewServiceRevision` (optional, CLOSERRETRYREFUND-01) is the service revision
+that recorded the entry's latest launch. When the running revision differs, the
+dispatch gate releases that head's backoff once. Entries written before this
+field existed carry no revision and are not released.

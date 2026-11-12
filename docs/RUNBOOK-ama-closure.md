@@ -912,8 +912,10 @@ remain in force; closer head churn cannot refund its series. Head changes discar
 builder head awaiting review uses its persisted per-head wait anchor, never an
 older head's posting or final-round timestamp.
 
-A spent closure budget selects a named operator escalation: `closure-retry-exhausted`
-or `closure-lifetime-exhausted`. The existing wait store reserves delivery once
+A spent closure budget first refunds closer-fault charges (see
+[Inconclusive closer results](#inconclusive-closer-results-inconclusiveretry-01b)).
+A budget still spent by real attempts selects a named operator escalation: `closure-retry-exhausted`
+or `closure-lifetime-exhausted`, which is also the pass result reason. The existing wait store reserves delivery once
 per episode and refunds a failed page. Lifetime exhaustion retains its page
 reservation across head changes. A pager failure is logged without rejecting
 the closure pass; deadline and final-round observers still run, and the refunded
@@ -5315,13 +5317,41 @@ closer fault ends the run before correction, its diagnostic last-phase receipt
 still names the fault, so a `succeeded` launch that pushed and merged nothing is
 classified rather than counted as an unexplained exit.
 
-**Site 2, `closure-retry-exhausted`.** If every open charge of the current series
-belongs to a launch the owner recorded as inconclusive, the charges are refunded
-and the PR returns to its ordinary path without a page (`needsOperator: false`).
-Otherwise real attempts spent the budget, and it pages once, naming the PR, the
-reason and the recommended next action. That action is: inspect the closer
-audit, then fix the refused condition on a new head or grant an operator
-re-drive. The result carries the watcher owner.
+**Site 2, `closure-retry-exhausted`.** This is the executor for an R07
+`retry-exhausted`/`lifetime-exhausted` decision (CLOSERRETRYREFUND-01). It
+classifies each open charge of the current series on its own. A charge is a
+fault when its launch is named in the owner's record, or when every stop that
+launch wrote to the AMA audit (at the charge's head or the decision head, so a
+closer that pushed a remediation head first is covered) has `closer` or
+`infrastructure` origin, for example `predicate-verdict-unavailable`. A launch
+the pipeline itself cancelled before it booted (DAEMONSUPERSEDE-01) is recorded
+and refunded at cancellation. Fault charges are refunded once each, by launch
+id, and recorded as owned retries, so the backoff above paces the re-armed
+closer; the pass reports `closure-budget-refunded` without a page
+(`needsOperator: false`). Real charges (any `world` stop, no audit, an
+unreadable audit or an unknown reason) stay spent. When no fault charge is left
+and the budget is still spent, it pages once, naming the PR, the reason and the
+recommended next action, and the pass result reason is the typed terminal state
+`closure-retry-exhausted` (or `closure-lifetime-exhausted`) with
+`closureTerminal: { state, headSha, owner: 'operator', realAttempts,
+recommendedAction }`, never a repeating `closure-decision-mismatch`. That action
+is: inspect the closer audit, then fix the refused condition on a new head or
+grant an operator re-drive. `hq merge-agent rescue --apply` runs this same
+executor, so it refunds fault charges or reports the typed state.
+
+A new review-service revision (`REVIEW_SERVICE_REVISION`, stamped on each owned
+retry entry) releases that head's backoff once: the first closer after the
+fixing deploy runs at once, and the next inconclusive launch paces again under
+the new revision. An entry without a recorded revision is not released.
+
+A spent closer budget is a count of attempts, not a judgement about the head.
+When the exact-head review has zero findings (none blocking, none non-blocking
+or demoted, both known), checks are green and the PR is MERGEABLE, the shared
+decision selects the R15 daemon row whenever the review posted (evidence ref
+`budget-superseded-by-zero-finding-review`). Any finding, an unknown count, a
+stale review head or a daemon accountability refusal on this head keeps the
+budget executor in charge. The daemon still proves every merge predicate,
+including worker identity, under its lease.
 
 Every retry is an ordinary closer dispatch. Exact-head review, attestation,
 leases, required checks and the shared merge predicate all run again; the

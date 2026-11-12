@@ -16,6 +16,8 @@ import { execHqDispatchCancel } from '../merge-agent-hq-exec.mjs';
 import { resolveHqBin } from '../remediation-hq-dispatch.mjs';
 import { readLaunchRequestObservationFromLedgerAsync } from '../session-ledger-read-adapter.mjs';
 import { readAmaCloserLease, updateAmaCloserLease } from './closer-lease.mjs';
+import { recordCloserInconclusiveRetry } from './closer-inconclusive-retry.mjs';
+import { refundCloserSelfError } from './hammer-retry-cap.mjs';
 import { updateAmaCloserDispatchRecord } from './dispatch-closer.mjs';
 
 const execFileAsync = promisify(execFile);
@@ -49,7 +51,8 @@ function refused(reason, extra = {}) {
 export async function supersedeNotBootedCloser({ headSha, reviewedHeadSha, launchRequestId, ...options } = {}) {
   if (!launchRequestId || !headSha || reviewedHeadSha !== headSha) return refused('supersede-identity-mismatch');
   return cancelNotBootedCloser({ ...options, headSha, launchRequestId, reason: CLOSER_SUPERSEDE_REASON,
-    markerField: 'supersededByReview', markerFacts: { reviewedHeadSha }, terminalOutcome: 'superseded' });
+    markerField: 'supersededByReview', markerFacts: { reviewedHeadSha }, terminalOutcome: 'superseded',
+    refundJobKey: reviewedHeadSha });
 }
 
 /**
@@ -72,11 +75,13 @@ export const CLOSER_HEAD_MOVED_REASON = 'superseded-head-moved';
 
 async function cancelNotBootedCloser({
   rootDir, repo, prNumber, headSha, launchRequestId, reason, markerField, markerFacts, terminalOutcome,
+  refundJobKey = null,
   recordHeadSha = headSha, hqRoot = process.env.HQ_ROOT, hqPath = resolveHqBin(process.env),
   readLaunchImpl = readLaunchRequestObservationFromLedgerAsync,
   cancelImpl = execHqDispatchCancel, execFileImpl = execFileAsync,
   updateDispatchRecordImpl = updateAmaCloserDispatchRecord,
   readLeaseImpl = readAmaCloserLease, updateLeaseImpl = updateAmaCloserLease,
+  recordRetryImpl = recordCloserInconclusiveRetry, refundImpl = refundCloserSelfError,
   retryDelaysMs, signal = null, logger = console, now = () => new Date().toISOString(),
 } = {}) {
   const read = async () => {
@@ -137,7 +142,23 @@ async function cancelNotBootedCloser({
   } catch (error) {
     logger?.warn?.(`[ama-closer] supersede lease release failed for ${repo}#${prNumber}: ${error?.message || error}`);
   }
+  // CLOSERRETRYREFUND-01: the pipeline cancelled a launch that never booted,
+  // so it adjudicated nothing. Name it in the owner's retry record (the R07
+  // executor reads that record) and refund its charge now. Both are best effort.
+  // Only the review-supersede path carries a refund job key; the CLOSERHEADPIN-01
+  // head-move path keeps its charge exactly as before.
+  let refund = null;
+  if (refundJobKey) {
+    try {
+      recordRetryImpl(rootDir, { repo, prNumber }, { headSha: recordHeadSha, launchRequestId,
+        reason, now: at });
+      refund = refundImpl(rootDir, { repo, prNumber }, { jobKey: refundJobKey, headSha: recordHeadSha,
+        launchRequestId, now: at });
+    } catch (error) {
+      logger?.warn?.(`[ama-closer] supersede refund failed for ${repo}#${prNumber}: ${error?.message || error}`);
+    }
+  }
   logger?.log?.(JSON.stringify({ event: 'ama.closer_superseded', repo, pr: prNumber, headSha,
-    launchRequestId, reason, observedStatus }));
+    launchRequestId, reason, observedStatus, ...(refundJobKey ? { refunded: refund?.refunded === true } : {}) }));
   return { superseded: true, launchRequestId, observedStatus, marker: confirmedMarker };
 }

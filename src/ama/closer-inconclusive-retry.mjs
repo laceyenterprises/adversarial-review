@@ -17,6 +17,7 @@ import { mkdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 
 import { writeFileAtomic } from '../atomic-write.mjs';
+import { REVIEW_SERVICE_REVISION } from '../review-service-revision.mjs';
 import { hammerStopOrigin } from './hammer-stop-origin.mjs';
 import { isHarnessFault } from '../harness-fault.mjs';
 
@@ -159,6 +160,7 @@ function writeRecord(rootDir, identity, doc) {
  */
 export function recordCloserInconclusiveRetry(rootDir, identity, {
   headSha, launchRequestId, reason, now = new Date().toISOString(), policy = CLOSER_INCONCLUSIVE_RETRY_DEFAULTS,
+  reviewServiceRevision = REVIEW_SERVICE_REVISION,
 } = {}) {
   if (!headSha || !launchRequestId) return { recorded: false, reason: 'identity-missing', entry: null };
   const current = readCloserInconclusiveRetries(rootDir, identity);
@@ -176,6 +178,7 @@ export function recordCloserInconclusiveRetry(rootDir, identity, {
     deadline: nextAttemptAt,
     surfaceAfterAttempts: policy.surfaceAfterAttempts,
     surfacedAt: prior?.surfacedAt || null,
+    reviewServiceRevision: reviewServiceRevision || null,
     launches: [...launches, { launchRequestId, reason, at: now }].slice(-MAX_LAUNCHES),
   };
   writeRecord(rootDir, identity, { ...doc, heads: { ...doc.heads, [headSha]: entry } });
@@ -191,12 +194,22 @@ export function markCloserInconclusiveRetrySurfaced(rootDir, identity, { headSha
   return surfaced;
 }
 
-/** Pure: must the next closer dispatch for this head wait for its backoff? */
-export function evaluateCloserInconclusiveRetryGate(doc, { headSha, now }) {
+/**
+ * Pure: must the next closer dispatch for this head wait for its backoff?
+ * CLOSERRETRYREFUND-01: a new review-service revision is how a closer fault is
+ * fixed, so it releases the backoff once. The next inconclusive launch is
+ * recorded under the new revision and paces normally again.
+ */
+export function evaluateCloserInconclusiveRetryGate(doc, { headSha, now, reviewServiceRevision = REVIEW_SERVICE_REVISION }) {
   const entry = doc?.heads?.[headSha] || null;
   const nowMs = typeof now === 'number' ? now : Date.parse(now);
   const retryAfterMs = entry ? Date.parse(entry.nextAttemptAt) - nowMs : NaN;
-  return { wait: Number.isFinite(retryAfterMs) && retryAfterMs > 0, retryAfterMs: Math.max(0, retryAfterMs || 0), entry };
+  // Both revisions must be known: an unknown one proves no deployment change.
+  const revisionChanged = Boolean(entry?.reviewServiceRevision && reviewServiceRevision
+    && entry.reviewServiceRevision !== reviewServiceRevision);
+  return { wait: !revisionChanged && Number.isFinite(retryAfterMs) && retryAfterMs > 0,
+    retryAfterMs: revisionChanged ? 0 : Math.max(0, retryAfterMs || 0), entry,
+    ...(revisionChanged ? { revisionChanged: true } : {}) };
 }
 
 /** Every launch this PR's owner classified as inconclusive, across heads. */

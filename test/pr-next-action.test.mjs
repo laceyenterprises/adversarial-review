@@ -489,12 +489,17 @@ const TABLE = [
     { pr: { state: 'MERGED' }, progress: { mergeReceipt: { merged: true, path: 'hammer', headSha: HEAD } } }, ['done', 'none', 'merged']],
   ['a deterministic automatic stop keeps a recovery owner', { controls: { stop: { fingerprint: 'fp-1', deterministic: true } } },
     ['hammer', 'closure-recovery', 'automated-stop']],
-  ['an exhausted retry cap on this head keeps a recovery owner', { policy: { hammerCap: { headSha: HEAD, retryExhausted: true } } },
+  // CLOSERRETRYREFUND-01: a cap keeps recovery ownership unless the exact-head review has zero findings.
+  ['an exhausted retry cap on this head keeps a recovery owner', { reviews: { verdict: 'comment-only', nonBlockingFindingCount: 1 }, policy: { hammerCap: { headSha: HEAD, retryExhausted: true } } },
     ['hammer', 'closure-recovery', 'retry-exhausted']],
+  ['an exhausted retry cap does not shadow a zero-finding exact-head review', { policy: { hammerCap: { headSha: HEAD, retryExhausted: true } } },
+    ['daemon-merge', 'daemon', 'clean-exact-head']],
   ['a retry cap exhausted on another head does not stop this head', { policy: { hammerCap: { headSha: OLD, retryExhausted: true } } },
     ['daemon-merge', 'daemon', 'clean-exact-head']],
-  ['an exhausted lifetime cap keeps a recovery owner', { policy: { hammerCap: { lifetimeExhausted: true } } },
+  ['an exhausted lifetime cap keeps a recovery owner', { reviews: { verdict: 'comment-only', nonBlockingFindingCount: 1 }, policy: { hammerCap: { lifetimeExhausted: true } } },
     ['hammer', 'closure-recovery', 'lifetime-exhausted']],
+  ['an exhausted lifetime cap does not shadow a zero-finding exact-head review', { policy: { hammerCap: { lifetimeExhausted: true } } },
+    ['daemon-merge', 'daemon', 'clean-exact-head']],
   ['terminal exit-zero no-merge with retry remaining retries the hammer',
     { leases: { closer: { status: 'dispatched', lrqId: 'lrq-4', headSha: HEAD, updatedAt: ANCHOR } },
       launches: { closer: { status: 'succeeded', headSha: HEAD, outcome: 'no-merge', retryable: true, attempt: 1 } } },
@@ -955,7 +960,7 @@ test('infrastructure wait retains conflict repair ownership', () => {
 });
 
 test('CLOSERSTOPTRANSIENT-01 a transient stop permits retry ownership while existing caps still stop it', () => {
-  const transient = { controls: { stop: { ...STOP, deterministic: false } },
+  const transient = { reviews: { verdict: 'comment-only', nonBlockingFindingCount: 1 }, controls: { stop: { ...STOP, deterministic: false } },
     launches: { closer: { status: 'failed', headSha: HEAD, outcome: 'no-merge', retryable: true, attempt: 1 } } };
   assert.deepEqual(pick(nextAction(snap(transient))), ['hammer', 'hammer', 'retry-no-merge']);
   for (const hammerCap of [{ headSha: HEAD, retryExhausted: true }, { lifetimeExhausted: true }]) {
@@ -1008,7 +1013,7 @@ test('APPROVALREARM-01: a same-head grant restores admission after spent caps an
     { controls: { stop: STOP } }, { controls: { safetyRefusal: { deterministic: true, reason: 'fixture-safety' } } }]) {
     assert.notEqual(nextAction(snap({ ...options, ...extra })).reason, 'operator-approval-applied');
   }
-  const capped = nextAction(snap({ policy: { hammerCap: { headSha: HEAD, retryExhausted: true } } }));
+  const capped = nextAction(snap({ reviews: { verdict: 'comment-only', nonBlockingFindingCount: 1 }, policy: { hammerCap: { headSha: HEAD, retryExhausted: true } } }));
   assert.equal(capped.reason, 'retry-exhausted');
 });
 

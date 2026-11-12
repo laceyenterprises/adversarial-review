@@ -1405,6 +1405,25 @@ predicate, attestation and lease check. Conflicts and CI-only repair retain
 their hammer routes. Blocking reviews retain their existing behavior. Strict
 mode, finding content, head matching, merge authority and leases are unchanged.
 
+DAEMONSUPERSEDE-01: an owner that has done nothing yet does not outrank a
+completed clean verdict. When the shared decision sees a closer launch for the
+exact head that has not booted (`requested` or `admitted`, readable retry chain),
+it re-runs the policy with that launch and its lease set aside. Only the ordinary
+`R15-daemon` `clean-exact-head` row on a zero-finding review (zero blocking and
+zero non-blocking or demoted findings, both known) may take the PR; every hold,
+stop, cap, safety refusal, live remediator/reviewer, CI and mergeability row
+still wins first. The decision carries `supersede-not-booted-closer:<launch>`.
+Before the daemon merges, the closure executor re-reads the launch, cancels it
+through `hq dispatch cancel --reason superseded-by-clean-exact-head-review`,
+and confirms it ended. It then records `supersededByReview` on the closer
+dispatch record and settles the closer lease `terminal`/`superseded`. A launch
+that has booted (leased, starting, running, suspended or parked), an
+unreadable chain, an unconfirmed cancel or a failed merge predicate keeps the
+closer as owner (`in-flight:<launch>`). The recorded supersession keeps the
+cancelled launch from becoming a fresh hammer retry for that head. A closer
+that boots in the race reads `pr-merged` at lease admission and closes out as
+`already-merged`.
+
 Wake transport preserves the existing reserved/requested/failed outcomes.
 Initial delivery starts a fresh admission budget at reservation, even when the
 original decision deadline (retained in the audit) is already overdue.

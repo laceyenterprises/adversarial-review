@@ -892,6 +892,25 @@ including during the successor attempt or on a later background tick, pages
 immediately through the existing closure-wait path and returns
 `closure-decision-mismatch-escalated`. It does not start another successor attempt.
 
+### Not-booted closer supersede (DAEMONSUPERSEDE-01)
+
+A zero-finding exact-head review on a green, mergeable head no longer waits for
+a closer launch that is still `requested` or `admitted` (for example, queued for
+a fresh workspace). The shared decision selects the daemon merge with the
+evidence ref `supersede-not-booted-closer:<launch>`. The executor cancels that
+launch through `hq dispatch cancel <launch> --reason
+superseded-by-clean-exact-head-review`, confirms it is terminal, and then runs
+the ordinary daemon clean merge under the shared lease. Look for the watcher
+event `ama.closer_superseded` and the HQ cancel audit with that reason. The
+closer dispatch record gains `supersededByReview`; its lease ends
+`terminal`/`superseded`.
+
+The closer keeps the PR when it has booted, its launch evidence is unreadable,
+the cancel cannot be confirmed (`closer-supersede-closer-cancel-unconfirmed`)
+or the live merge predicate fails (`closer-supersede-not-eligible`). Those
+passes still log `ama.closure_blocker reason=in-flight:<launch>`. A finding,
+a head mismatch, a hold label or non-green CI never supersedes a closer.
+
 ### Closer crash recovery (CLOSERCRASHRECLAIM-01)
 
 Bootstrap failure retains controller cancellation ownership until its detached

@@ -215,7 +215,10 @@ enroll them. Existing records retain their original marker when replayed; a
 historical replay cannot revoke an existing live capture. Historical projection
 preserves matching advisory snapshots and retires stale unassigned notes. `persistReviewFindings` accepts
 `{ historicalProjection: true }` for historical callers; `backfillReviewFindings`,
-the body-repair backfill and historical link CLI always supply it. A genuine live
+the body-repair backfill and historical link CLI always supply it. The module
+exports `HISTORICAL_PROJECTION_SUPPORTED = true` to declare this boundary to
+companion callers; the explicit OSG backfill refuses to run without it, and
+`test/osgboundaryflag-01.test.mjs` pins the flag with the behaviour. A genuine live
 projection can promote matching historical observations to live and enroll them
 when the source is merged, recovering receipts that arrived before projection.
 Only observations actually promoted from historical to live in this call get

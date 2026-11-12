@@ -4,6 +4,7 @@ import { mkdirSync, mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Worker } from 'node:worker_threads';
+import { fileURLToPath } from 'node:url';
 import Database from 'better-sqlite3';
 import { ensureReviewStateSchema } from '../src/review-state.mjs';
 import { persistReviewFindings, persistReviewFindingsSafe, backfillReviewFindings } from '../src/review-finding-records.mjs';
@@ -57,7 +58,7 @@ function writer(t, path, mode) {
     }
     db.close(); signal(0, 2);
   `, { eval: true, workerData: { path, mode, buffer: flags.buffer,
-    module: import.meta.resolve('better-sqlite3').replace('file://', '') } });
+    module: fileURLToPath(import.meta.resolve('better-sqlite3')) } });
   t.after(() => worker.terminate());
   wait(flags, 0, 1);
   return flags;

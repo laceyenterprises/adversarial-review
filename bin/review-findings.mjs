@@ -9,7 +9,7 @@ import { backfillReviewFindings, linkFindingRemediation, readReviewFindings } fr
 
 // An explicit database is required. There is no implicit production target,
 // provider lookup, history fetch or network operation in this command.
-export function main(argv = process.argv.slice(2)) {
+export function main(argv = process.argv.slice(2), writeProgress = text => process.stderr.write(text)) {
   const [command, ...args] = argv;
   if (!['show', 'backlog', 'backfill', 'link-job'].includes(command)) throw new Error('expected show, backlog, backfill or link-job');
   const options = {};
@@ -36,7 +36,20 @@ export function main(argv = process.argv.slice(2)) {
       return { findings, nextCursor: last ? { afterPassId: last.pass_id, afterOrdinal: last.ordinal } : null };
     }
     ensureReviewStateSchema(db);
-    if (command === 'backfill') return backfillReviewFindings(db, filter);
+    if (command === 'backfill') {
+      const progress = { committedPasses: 0, committedInserted: 0, lastPassId: null };
+      try {
+        return backfillReviewFindings(db, { ...filter, onPass(pass) {
+          progress.committedPasses += 1;
+          progress.committedInserted += pass.inserted;
+          progress.lastPassId = pass.passId;
+          writeProgress(`${JSON.stringify({ event: 'backfill-pass', ...pass, ...progress })}\n`);
+        } });
+      } catch (error) {
+        writeProgress(`${JSON.stringify({ event: 'backfill-failed', ...progress })}\n`);
+        throw error;
+      }
+    }
     if (!options['--job']) throw new Error('--job is required');
     const job = JSON.parse(readFileSync(options['--job'], 'utf8'));
     return linkFindingRemediation(db, { job, workspaceDir: options['--workspace'] ? resolve(options['--workspace']) : null,

@@ -134,6 +134,12 @@ The programmatic `backfillReviewFindings` options accept `onPass`, called with
 `{ passId, inserted }` after each committed pass. A page retry can accumulate
 these committed inserts even when a later pass fails; replayed inserts report
 zero. Page selection stays outside the per-pass write transactions.
+The backfill CLI streams `backfill-pass` JSON receipts to stderr with `passId`,
+`inserted`, cumulative `committedPasses`, `committedInserted` and `lastPassId`.
+If a pass fails, a `backfill-failed` receipt reports those committed totals
+(zero and a null last ID if no pass committed) before the command exits nonzero.
+Stdout retains the final page result on success. Retain both streams when
+backfilling a live database; replay from the prior page cursor is idempotent.
 
 ## Hammer evidence
 

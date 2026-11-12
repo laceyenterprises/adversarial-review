@@ -990,9 +990,21 @@ export async function processReviewSubject(entry, ctx) {
         console.log(staleDriftSkip.message);
         return;
       }
+      // REBASETRAILER-01: one memoized head-producer read per poll. The review
+      // refresh suppression and the gate below both consume this decision.
+      let headCloserCommitSuppressionResolver = null;
+      const resolveHeadCloserCommitSuppression = () => (headCloserCommitSuppressionResolver
+        ||= createHeadCloserCommitSuppressionResolver({
+          repoPath, prNumber, headSha: subject.headSha, execFileImpl: execFileAsync, logger: console,
+        }))();
       async function projectGateStatusSafe(reviewRow) {
         if (!subject.headSha) return null;
         try {
+          // A posted review on an older head: if the closer produced this head,
+          // its refresh is suppressed, so the gate must not wait for a re-review.
+          const closerProducedHead = reviewRow?.review_status === 'posted' && reviewRow.pr_state !== 'merged'
+            && reviewRow.reviewer_head_sha && reviewRow.reviewer_head_sha !== subject.headSha && !subject.terminal
+            ? await resolveHeadCloserCommitSuppression().catch(() => null) : null;
           const operatorApproval = prLabelNames.includes(OPERATOR_APPROVED_LABEL)
             ? await operatorSurface.observeOperatorApproved(
               subject.ref,
@@ -1015,6 +1027,7 @@ export async function processReviewSubject(entry, ctx) {
             operatorApprovalEvent,
             domainId,
             gateProvider: adversarialGateProvider,
+            closerProducedHead,
           });
           // The suffix is load-bearing, not decoration. `success (remediation-stopped)`
           // reads as convergence in a log skim, but it means the pipeline gave up with
@@ -1469,13 +1482,6 @@ export async function processReviewSubject(entry, ctx) {
         }
       }
 
-      const resolveHeadCloserCommitSuppression = createHeadCloserCommitSuppressionResolver({
-        repoPath,
-        prNumber,
-        headSha: subject.headSha,
-        execFileImpl: execFileAsync,
-        logger: console,
-      });
       // Both exhausted-head admission and capped closure use the same snapshot.
       let remediationBudget = null;
       const resolveRemediationBudget = () => {

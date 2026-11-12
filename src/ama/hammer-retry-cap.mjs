@@ -28,6 +28,7 @@ import fsExt from 'fs-ext';
 import { randomUUID } from 'node:crypto';
 import { validNoWorkVerdict } from '../execution-verdict.mjs';
 import { join } from 'node:path';
+import { hammerHeadOwnership } from '../hammer-head-ownership.mjs';
 
 import { writeFileAtomic } from '../atomic-write.mjs';
 import { PR_ROUND_KINDS, readPrRoundLedger, recordPrRound, voidPrRound } from '../pr-round-ledger.mjs';
@@ -1129,10 +1130,17 @@ function closerWasDispatchedForHead(ledger, head) {
 // closer push on the same attested chain never resets. Unknown proof, a proof
 // anchored elsewhere, a head the hammer was dispatched for, a corrupt ledger or
 // nothing spent all leave the ledger unchanged.
-export function resetHammerSeriesForNonCloserHead(rootDir, identity, { jobKey, headSha, headProof, now } = {}) {
+// REBASETRAILER-01: `headProducer` is the shared head-producer classification
+// (`getHeadCloserCommitSuppression`) that also decides the watcher's review
+// refresh. A head that classifier calls closer-produced never resets here, so
+// the refresh and the series cannot disagree about the same head.
+export function resetHammerSeriesForNonCloserHead(rootDir, identity, {
+  jobKey, headSha, headProof, headProducer, now,
+} = {}) {
   const refuse = reason => ({ reset: false, reason });
   const head = normalizeKey(headSha);
   const anchor = normalizeKey(jobKey);
+  if (hammerHeadOwnership(headProducer, headSha)) return refuse('closer-produced-head');
   if (!head || !anchor || !headProof || headProof.proven === true
     || headProof.reason !== 'hammer-app-attestation-missing'
     || headProof.currentHeadHammerAttested !== false

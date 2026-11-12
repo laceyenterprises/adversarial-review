@@ -2411,6 +2411,63 @@ test('NOOWNER-01: a suppressed AMA-recovery re-review on a closer head returns t
   } finally { rmSync(tmp, { recursive: true, force: true }); }
 });
 
+// REBASETRAILER-01: the review refresh and the gate read one head-producer
+// decision. A closer head suppresses the refresh AND tells the gate it needs no
+// re-review; a non-closer rebase of a closer commit refreshes the review.
+function runRebasedCloserHeadScenario(closer) {
+  const tmp = mkdtempSync(path.join(tmpdir(), 'watcher-rebasetrailer-'));
+  try {
+    const loaderPath = path.join(tmp, 'loader.mjs');
+    const registerPath = path.join(tmp, 'register.mjs');
+    const runnerPath = path.join(tmp, 'runner.mjs');
+    const decision = closer ? "{ suppressed: true, reason: 'closer-commit-trailer' }" : '{ suppressed: false, reason: null }';
+    writeFileSync(loaderPath, buildLoaderSource()
+      .replace("return async () => ({ suppressed: false, reason: 'fixture' });", `return async () => (${decision});`)
+      .replace('export async function projectAdversarialGateStatus() {',
+        "export async function projectAdversarialGateStatus(_root, options = {}) { console.log('GATE_INPUT ' + JSON.stringify({ pr: options.prNumber, input: options.closerProducedHead ?? null }));")
+      // Automatic stale-head requests omit db in production; bind to the fixture DB.
+      .replace('return actual.requestReviewRereview(options);',
+        'return actual.requestReviewRereview({ ...options, db: options.db || db });'));
+    writeFileSync(registerPath, buildRegisterSource(loaderPath));
+    writeFileSync(runnerPath, buildRunnerSource({ prePollSetup: `
+      db.prepare(\`INSERT INTO reviewed_prs
+        (repo, pr_number, reviewed_at, reviewer, pr_state, review_status,
+         review_attempts, revision_ref, reviewer_head_sha, posted_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)\`).run(
+        'laceyenterprises/adversarial-review', 101, '2026-11-12T18:10:00Z', 'gemini',
+        'open', 'posted', 1, 'sha-reviewed-101', 'sha-reviewed-101', '2026-11-12T18:10:00Z');
+    ` }));
+    const run = spawnSync(process.execPath, ['--no-warnings', '--import', pathToFileURL(registerPath).href, runnerPath], {
+      cwd: REPO_ROOT, encoding: 'utf8', timeout: 30000,
+      env: fixtureEnv(installGhFixture(tmp)),
+    });
+    const output = `${run.stdout || ''}${run.stderr || ''}`;
+    assert.equal(run.status, 0, output);
+    const line = run.stdout.split(/\r?\n/).find((entry) => entry.startsWith(SUMMARY_MARKER));
+    assert.ok(line, output);
+    const gateInputs = run.stdout.split(/\r?\n/).filter((entry) => entry.startsWith('GATE_INPUT '))
+      .map((entry) => JSON.parse(entry.slice('GATE_INPUT '.length))).filter((entry) => entry.pr === 101)
+      .map((entry) => entry.input);
+    return { output, summary: JSON.parse(line.slice(SUMMARY_MARKER.length)), gateInputs };
+  } finally { rmSync(tmp, { recursive: true, force: true }); }
+}
+
+test('REBASETRAILER-01: a closer head suppresses the refresh and the gate is told it needs no re-review', () => {
+  const { output, summary, gateInputs } = runRebasedCloserHeadScenario(true);
+  assert.match(output, /auto-refresh SUPPRESSED.*#101:.*closer-commit-trailer/);
+  assert.equal(summary.rows['101'].review_status, 'posted', output);
+  assert.ok(gateInputs.length > 0, output);
+  assert.ok(gateInputs.every((input) => input?.suppressed === true && input.reason === 'closer-commit-trailer'), output);
+});
+
+test('REBASETRAILER-01: a non-closer rebase of a closer commit refreshes the review', () => {
+  const { output, summary, gateInputs } = runRebasedCloserHeadScenario(false);
+  assert.doesNotMatch(output, /auto-refresh SUPPRESSED.*#101/);
+  assert.ok(summary.fsrRows.find((row) => row.pr_number === 101)?.rereview_requested_at, output);
+  assert.ok(gateInputs.length > 0, output);
+  assert.ok(gateInputs.every((input) => input?.suppressed !== true), output);
+});
+
 function runDepthDiscoveryScenario({ burst = false, depthEngaged = true, drainOutcome = null, stalePriority = false, ageSpill = false, lateAccountHold = false, rereviewAge = null, primaryClaude = false, accountEvidence = 'ready', pooledAccountStale = null } = {}) {
   const tmp = mkdtempSync(path.join(tmpdir(), 'watcher-depth-discovery-'));
   try {

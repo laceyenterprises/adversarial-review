@@ -103,6 +103,43 @@ for (const faultAtEnd of [false, true]) test(`refunded review messages stay boun
   assert.equal(Object.keys(readHammerRetryCapLedger(f.rootDir, f).reviewHarnessRefunds).length, 3);
 });
 
+test('harness refund backoff aggregates case variants of the same head', t => {
+  const f = fixture(t), db = reviewDb(t);
+  const now = Date.parse('2026-01-01T00:01:00Z');
+  const variants = [old, old.toUpperCase(), 'Aa'.repeat(20)];
+  for (const [index, sha] of variants.entries()) {
+    db.prepare(`UPDATE reviewed_prs SET review_status='failed', failure_message='[hcp-unavailable]',
+      failed_at=?, reviewer_head_sha=?`).run(`failure-${index}`, sha);
+    const result = refundReviewHarnessFault({ ...f, db, row: db.prepare('SELECT * FROM reviewed_prs').get(), now });
+    assert.equal(result.receipt.headSha, sha, 'stored spelling is preserved');
+    assert.equal(result.wait, index === 2, 'the third fault gets backoff across SHA case variants');
+    assert.equal(result.row.review_attempts, 2 - index, 'each distinct fault is credited once');
+  }
+  assert.equal(Object.keys(readHammerRetryCapLedger(f.rootDir, f).reviewHarnessRefunds).length, 3);
+});
+
+test('missing applied harness receipt warns without rewriting or granting another refund', t => {
+  const f = fixture(t), db = reviewDb(t);
+  const warn = t.mock.method(console, 'warn', () => {});
+  db.prepare(`UPDATE reviewed_prs SET review_status='failed', failure_message='[hcp-unavailable]',
+    failed_at='2026-01-01T00:00:00Z'`).run();
+  const refunded = refundReviewHarnessFault({ ...f, db, row: db.prepare('SELECT * FROM reviewed_prs').get() });
+  const path = hammerRetryCapFilePath(f.rootDir, f);
+  const ledger = readHammerRetryCapLedger(f.rootDir, f);
+  delete ledger.reviewHarnessRefunds[refunded.receipt.id];
+  writeFileSync(path, JSON.stringify(ledger));
+  const before = readFileSync(path, 'utf8');
+  const result = refundReviewHarnessFault({ ...f, db, row: refunded.row });
+  assert.deepEqual(result, { row: refunded.row, wait: false, receipt: null });
+  assert.deepEqual(db.prepare('SELECT * FROM reviewed_prs').get(), refunded.row);
+  assert.equal(readFileSync(path, 'utf8'), before, 'the applied-marker path stays read-only');
+  assert.equal(warn.mock.callCount(), 1);
+  const message = warn.mock.calls[0].arguments[0];
+  assert.match(message, /review harness refund receipt missing/);
+  assert.ok(message.includes(`${repo}#${prNumber}`));
+  assert.ok(message.includes(refunded.receipt.id));
+});
+
 for (const cause of ['closure-retry-exhausted', 'closure-lifetime-exhausted',
   'closer-self-error-budget-exhausted', 'budget-exhausted-closure', 'retry-exhausted', 'lifetime-exhausted']) {
   test(`${cause} selects in-place repair without a live owner`, () => {

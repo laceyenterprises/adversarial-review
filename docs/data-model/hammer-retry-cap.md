@@ -34,9 +34,13 @@ review row's failure message is capped at 4096 characters including its intact
 receipt marker. The pass journal retains raw evidence. The marker preserves
 retry pacing even when truncation removes the original fault text.
 Already-applied receipts are read-only,
-without a flock or ledger rewrite. Retry pacing reuses the closer inconclusive
-backoff. Real findings, bare signal exits (142/143), and unqualified timeouts
-are not refunds. An unreadable or busy ledger defers only its PR's admission.
+without a flock or ledger rewrite. A marker whose ledger receipt is missing
+emits a warning identifying the PR and receipt, returns a null receipt without
+waiting, and never credits the failure again. Retry pacing reuses the closer
+inconclusive backoff, counting same-head receipts case-insensitively while
+preserving stored SHA spelling. Real findings, bare signal exits (142/143),
+and unqualified timeouts are not refunds. An unreadable or busy ledger defers
+only its PR's admission.
 
 `selfErrorRefunds` (optional) maps each dispatch head to the most recent (up to
 32) charged launch IDs refunded for inconclusive closer outcomes: closer-originated

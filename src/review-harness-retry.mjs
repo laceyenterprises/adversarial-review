@@ -24,13 +24,19 @@ export function refundReviewHarnessFault({ rootDir, db, row, now = Date.now() })
   if (ledger?.__corrupt) throw new Error('review refund ledger unreadable');
   const prior = ledger?.reviewHarnessRefunds || {};
   // Already-applied receipts only pace the retry; no flock or rewrite.
-  if (applied) return { row, wait: Date.parse(prior[applied]?.nextRetryAt) > now, receipt: prior[applied] };
+  if (applied) {
+    const receipt = prior[applied] || null;
+    if (!receipt) console.warn(`[watcher] review harness refund receipt missing for ${row.repo}#${row.pr_number}: ${applied}`);
+    return { row, wait: Date.parse(receipt?.nextRetryAt) > now, receipt };
+  }
   if (!prior[id] && Object.keys(prior).length >= REVIEW_HARNESS_REFUND_CAP) return { row, wait: false };
   const receipt = prior[id] || mutateRepairEpochs(rootDir, identity, ledger => {
     const refunds = ledger.reviewHarnessRefunds ||= {};
     if (!refunds[id]) {
       if (Object.keys(refunds).length >= REVIEW_HARNESS_REFUND_CAP) return null;
-      const count = Object.values(refunds).filter(refund => refund.headSha === row.reviewer_head_sha).length + 1;
+      const count = Object.values(refunds).filter(refund =>
+        typeof refund.headSha === 'string' && typeof row.reviewer_head_sha === 'string'
+        && refund.headSha.toLowerCase() === row.reviewer_head_sha.toLowerCase()).length + 1;
       refunds[id] = { id, headSha: row.reviewer_head_sha, failure: row.failure_message.slice(0, 512),
         reservedAt: new Date(now).toISOString(),
         nextRetryAt: new Date(now + closerInconclusiveRetryDelayMs(count)).toISOString() };

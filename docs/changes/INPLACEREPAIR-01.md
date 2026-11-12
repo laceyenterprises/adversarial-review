@@ -194,3 +194,28 @@ SPEC follow-up remains outside this checkout.
 - `node scripts/validate-data-model-catalog.mjs`: 96 entries validated.
 - `bash demo/research-finding-walkthrough.sh`: three byte-stable deliveries.
 - `git diff --check`: passed. Full-suite validation remains with PR-head CI.
+
+## Harness refund pacing and missing receipts
+
+### Summary
+
+Same-head review refunds now aggregate case-insensitive SHA variants for
+progressive backoff while preserving stored spelling. An applied receipt marker
+missing from the ledger emits a PR/receipt warning and returns a null receipt
+without waiting, rewriting state or granting duplicate credit.
+
+### Interface changes
+
+Missing applied receipts consistently return `receipt: null`. Persistent shapes,
+refund caps, lifecycle states and merge predicates are unchanged. The canonical
+retry-cap document records the pacing and diagnostic behavior.
+
+### Verification
+
+- Canonical targeted validation of `test/inplacerepair-01.test.mjs`: 41 passed,
+  including mixed-case third-fault backoff and missing-receipt read-only behavior.
+- `npm run lint`: zero errors, 149 existing warnings.
+- `npm run typecheck:contracts`: passed.
+- `node scripts/validate-data-model-catalog.mjs`: 96 entries validated.
+- `bash demo/research-finding-walkthrough.sh`: three byte-stable deliveries.
+- `git diff --check`: passed. Full-suite validation remains with exact-head CI.

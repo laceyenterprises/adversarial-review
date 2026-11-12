@@ -1,4 +1,3 @@
-import { loadAwareTimeoutMs } from './load-aware-timeout.mjs';
 import { execFile } from 'node:child_process';
 import { parseArgs as nodeParseArgs, promisify } from 'node:util';
 import { readFileSync } from 'node:fs';
@@ -28,7 +27,13 @@ import { normalizeOperatorRetriggerReason } from './retrigger-review-reason.mjs'
 import { stopFollowUpJobWithWorkerCancel } from './follow-up-stop.mjs';
 import { cancelActiveReview, reviewerCancelHandle } from './review-cancel.mjs';
 import { isPgidAlive } from './process-group-identity.mjs';
-import { execGhWithRetry } from './gh-cli.mjs';
+import {
+  OperatorGhReadTimeoutError,
+  OPERATOR_GH_READ_MAX_OVERRIDE_MS,
+  resolveOperatorGhReadBudgetMs,
+  runOperatorGhRead,
+} from './operator-gh-read.mjs';
+import { flushDefaultApiCallRecorder } from './api-telemetry.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const DEFAULT_ROOT_DIR = resolve(__dirname, '..');
@@ -38,9 +43,9 @@ const EXIT_REASON_INPUT = 3;
 const EXIT_RUNTIME = 4;
 const ACTIVE_REVIEW_CANCEL_WAIT_MS = 5_000;
 const ACTIVE_REVIEW_CANCEL_POLL_MS = 250;
-const CURRENT_HEAD_LOOKUP_TIMEOUT_MS = 30_000;
 const CURRENT_HEAD_LOOKUP_RETRIES = 2;
 const CURRENT_HEAD_LOOKUP_BACKOFF_MS = 500;
+const HEAD_LOOKUP_TIMEOUT_REASON = 'head-lookup-timeout';
 const execFileAsync = promisify(execFile);
 
 const USAGE = `\
@@ -62,7 +67,9 @@ Optional:
   --idempotency-key <key>        Stable replay key for retry-safe operator calls
   --allow-failed-reset           Permit manual reset of failed / failed-orphan review rows
   --exact-head-now               Safe operator recovery for "review this exact head now"
-  --head-sha <sha>               Explicit head to bind for --exact-head-now (tests/recovery)
+  --head-sha <sha>               Explicit head to bind for --exact-head-now; skips the GitHub head lookup
+  --github-timeout-seconds <N>   Absolute budget for each GitHub read, retries included
+                                 (default: 30s, scaled by host load up to 60s)
   --cancel-active-review         In --exact-head-now mode, cancel an active reviewer before reset
   --allow-active-review-reset    In --exact-head-now mode, force-reset an active reviewer row without cancellation
   --root-dir <path>              Tool root containing data/reviews.db
@@ -75,7 +82,11 @@ Exit codes:
   1 blocked / refused (review row missing, PR closed, active review, failed row without override, or active job)
   2 usage error
   3 reason input error (--reason-file/--reason-stdin unreadable or empty reason)
-  4 runtime error
+  4 runtime error (including failed:head-lookup-timeout when the GitHub head
+    lookup exceeds its budget; pass --head-sha <sha> to skip the lookup)
+
+Every GitHub read prints one [github-read] stderr line when it starts and one
+per retry.
 `;
 
 class UsageError extends Error {}
@@ -100,6 +111,7 @@ function parseArgs(argv) {
         'allow-failed-reset': { type: 'boolean', default: false },
         'exact-head-now': { type: 'boolean', default: false },
         'head-sha': { type: 'string' },
+        'github-timeout-seconds': { type: 'string' },
         'cancel-active-review': { type: 'boolean', default: false },
         'allow-active-review-reset': { type: 'boolean', default: false },
         quiet: { type: 'boolean', default: false },
@@ -147,6 +159,18 @@ function parseArgs(argv) {
   if (parsed.values['head-sha'] !== undefined) {
     parsed.values['head-sha'] = normalizeTargetRevisionRef(parsed.values['head-sha'], '--head-sha');
   }
+  let githubTimeoutMs = null;
+  if (parsed.values['github-timeout-seconds'] !== undefined) {
+    const raw = String(parsed.values['github-timeout-seconds']).trim();
+    const secondsValue = /^\d+(\.\d+)?$/.test(raw) ? Number(raw) : Number.NaN;
+    githubTimeoutMs = Math.ceil(secondsValue * 1000);
+    if (!Number.isFinite(secondsValue) || githubTimeoutMs < 1 || githubTimeoutMs > OPERATOR_GH_READ_MAX_OVERRIDE_MS) {
+      throw new UsageError(
+        `--github-timeout-seconds must be a positive number of seconds up to ${OPERATOR_GH_READ_MAX_OVERRIDE_MS / 1000} `
+        + `(got: ${parsed.values['github-timeout-seconds']})`,
+      );
+    }
+  }
 
   // --exact-head-now is an operator recovery/refresh of the CURRENT head, not a
   // new remediation round — it must NOT silently inflate the convergence budget.
@@ -171,6 +195,7 @@ function parseArgs(argv) {
       ...parsed.values,
       pr,
       bumpBudget,
+      githubTimeoutMs,
     },
     reasonSource: reasonSources[0],
   };
@@ -205,6 +230,9 @@ function normalizeTargetRevisionRef(value, label = 'target revision') {
   return normalized;
 }
 
+// The head lookup is an operator-path GitHub read: one absolute budget covers
+// every attempt and retry, and it reports start/retry on stderr
+// (RETRIGGERLOOKUPHANG-01). A timeout carries reason `head-lookup-timeout`.
 async function fetchCurrentPrHeadSha({
   repo,
   prNumber,
@@ -212,8 +240,15 @@ async function fetchCurrentPrHeadSha({
   sleepImpl,
   retries = CURRENT_HEAD_LOOKUP_RETRIES,
   backoffMs = CURRENT_HEAD_LOOKUP_BACKOFF_MS,
+  budgetMs = resolveOperatorGhReadBudgetMs(),
+  stderr = null,
+  runOperatorGhReadImpl = runOperatorGhRead,
 } = {}) {
-  const { stdout } = await execGhWithRetry({
+  const { stdout } = await runOperatorGhReadImpl({
+    label: `head lookup for ${repo}#${prNumber}`,
+    timeoutReason: HEAD_LOOKUP_TIMEOUT_REASON,
+    budgetMs,
+    stderr,
     execFileImpl,
     args: [
       'pr',
@@ -226,10 +261,9 @@ async function fetchCurrentPrHeadSha({
       '--jq',
       '.headRefOid',
     ],
-    timeoutMs: loadAwareTimeoutMs(CURRENT_HEAD_LOOKUP_TIMEOUT_MS),
     retries,
     backoffMs,
-    sleep: sleepImpl,
+    sleepImpl,
   });
   const headSha = normalizeTargetRevisionRef(stdout, 'GitHub PR headRefOid');
   if (!headSha) {
@@ -497,14 +531,26 @@ async function main(argv, {
   const ts = new Date().toISOString();
   const operator = process.env.HQ_OPERATOR || process.env.USER || 'unknown';
 	let targetRevisionRef = values['head-sha'] || null;
+	let githubBudgetMs;
+	try {
+		githubBudgetMs = resolveOperatorGhReadBudgetMs({ overrideMs: values.githubTimeoutMs });
+	} catch (err) {
+		stderr.write(`error: ${err.message}\n\n${USAGE}`);
+		return EXIT_USAGE;
+	}
+	const fetchHeadArgs = { repo: values.repo, prNumber: values.pr, budgetMs: githubBudgetMs, stderr };
+	const writeHeadLookupTimeout = (err) => {
+		const skip = values['exact-head-now'] ? '--head-sha <sha>' : '--exact-head-now --head-sha <sha>';
+		stderr.write(`failed:${HEAD_LOOKUP_TIMEOUT_REASON}: ${values.repo}#${values.pr} (${err.message})\n`
+			+ `hint: pass ${skip} to skip the lookup, or raise --github-timeout-seconds\n`);
+		return EXIT_RUNTIME;
+	};
 	const resolveExactHeadTargetRevisionRef = async () => {
 		if (!values['exact-head-now'] || targetRevisionRef) return targetRevisionRef;
 		try {
-			targetRevisionRef = await fetchCurrentHeadShaImpl({
-				repo: values.repo,
-				prNumber: values.pr,
-			});
+			targetRevisionRef = await fetchCurrentHeadShaImpl(fetchHeadArgs);
 		} catch (err) {
+			if (err instanceof OperatorGhReadTimeoutError) throw err;
 			throw new Error(`could not resolve current PR head for exact-head review: ${err.message}`);
 		}
 		baseAudit.targetRevisionRef = targetRevisionRef;
@@ -599,17 +645,18 @@ async function main(argv, {
 		try {
 			await resolveExactHeadTargetRevisionRef();
 		} catch (err) {
+			if (err instanceof OperatorGhReadTimeoutError) return writeHeadLookupTimeout(err);
 			stderr.write(`error: ${err.message}\n`);
+			stderr.write('hint: pass --head-sha <sha> to skip the lookup\n');
 			return EXIT_RUNTIME;
 		}
 	}
   if (!targetRevisionRef) {
     try {
-      targetRevisionRef = await fetchCurrentHeadShaImpl({
-        repo: values.repo, prNumber: values.pr,
-      }) || resolveReviewHead(reviewRow);
+      targetRevisionRef = await fetchCurrentHeadShaImpl(fetchHeadArgs) || resolveReviewHead(reviewRow);
       baseAudit.targetRevisionRef = targetRevisionRef;
     } catch (err) {
+      if (err instanceof OperatorGhReadTimeoutError) return writeHeadLookupTimeout(err);
       stderr.write(`error: could not resolve re-review head: ${err.message}\n`);
       return EXIT_RUNTIME;
     }
@@ -947,10 +994,22 @@ export {
 };
 
 if (import.meta.url === `file://${process.argv[1]}`) {
+  // A failed run exits once stderr drains: a GitHub read abandoned at its
+  // budget can leave a metering timer that must not keep the CLI alive.
+  const exitFailed = (code) => {
+    process.exitCode = code;
+    try {
+      flushDefaultApiCallRecorder();
+      process.stderr.write('', () => process.exit(code));
+    } catch {
+      process.exit(code);
+    }
+  };
   main(process.argv.slice(2)).then((code) => {
     process.exitCode = code;
+    if (code !== 0) exitFailed(code);
   }).catch((err) => {
     process.stderr.write(`error: ${err?.message || String(err)}\n`);
-    process.exitCode = EXIT_RUNTIME;
+    exitFailed(EXIT_RUNTIME);
   });
 }

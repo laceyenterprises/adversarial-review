@@ -1700,3 +1700,108 @@ test('default retrigger binds its durable request to the live head rather than t
     } finally { db.close(); }
   } finally { rmSync(rootDir, { recursive: true, force: true }); }
 });
+
+// RETRIGGERLOOKUPHANG-01: the head lookup is bounded by one absolute operator
+// budget, reports progress, and fails with a typed reason and a hint.
+function hungGhExecFile(spawned) {
+  return (_cmd, args, options) => {
+    spawned.push(args);
+    return new Promise((_resolve, reject) => {
+      options.signal?.addEventListener('abort', () => {
+        reject(Object.assign(new Error('Command failed: gh'), { killed: true, signal: 'SIGTERM' }));
+      }, { once: true });
+    });
+  };
+}
+
+test('RETRIGGERLOOKUPHANG-01: a slow gh head lookup exits within the budget with head-lookup-timeout and a hint', async () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'retrigger-lookup-hang-'));
+  try {
+    insertReviewRow(rootDir, { reviewStatus: 'posted', revisionRef: 'head-stale-237' });
+    const readRow = () => {
+      const db = openReviewStateDb(rootDir);
+      try {
+        // The fields a re-arm changes (the read path itself backfills identity columns).
+        return { ...db.prepare(`SELECT review_status, review_attempts, rereview_requested_at, rereview_reason
+          FROM reviewed_prs WHERE repo = ? AND pr_number = ?`).get('laceyenterprises/agent-os', 238) };
+      } finally { db.close(); }
+    };
+    const before = readRow();
+    const spawned = [];
+    const out = makeCaptureStream();
+    const err = makeCaptureStream();
+    const started = Date.now();
+    const rc = await main([
+      '--repo', 'laceyenterprises/agent-os', '--pr', '238',
+      '--reason', 'review this exact pushed head', '--exact-head-now', '--no-bump-budget',
+      '--github-timeout-seconds', '0.3',
+      '--root-dir', rootDir, '--audit-root-dir', rootDir,
+    ], {
+      stdout: out,
+      stderr: err,
+      fetchCurrentHeadShaImpl: (opts) => fetchCurrentPrHeadSha({ ...opts, execFileImpl: hungGhExecFile(spawned) }),
+    });
+    const elapsedMs = Date.now() - started;
+
+    assert.equal(rc, 4);
+    assert.ok(elapsedMs < 5_000, `bounded exit, took ${elapsedMs}ms`);
+    assert.equal(out.text(), '');
+    assert.ok(spawned.length >= 1);
+    const text = err.text();
+    assert.match(text, /^\[github-read\] start head lookup for laceyenterprises\/agent-os#238: `gh pr view` \(budget 0\.3s\)$/m);
+    assert.match(text, /^failed:head-lookup-timeout: laceyenterprises\/agent-os#238 \(head lookup for laceyenterprises\/agent-os#238 did not finish within its 0\.3s budget/m);
+    assert.match(text, /^hint: pass --head-sha <sha> to skip the lookup, or raise --github-timeout-seconds$/m);
+    assert.deepEqual(readRow(), before, 'nothing re-armed');
+  } finally { rmSync(rootDir, { recursive: true, force: true }); }
+});
+
+test('RETRIGGERLOOKUPHANG-01: the default retrigger lookup is bounded and hints the exact-head skip', async () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'retrigger-lookup-hang-default-'));
+  try {
+    insertReviewRow(rootDir, {});
+    const err = makeCaptureStream();
+    const rc = await main([
+      '--repo', 'laceyenterprises/agent-os', '--pr', '238', '--reason', 'refresh',
+      '--no-bump-budget', '--github-timeout-seconds', '0.2', '--root-dir', rootDir,
+    ], {
+      stdout: makeCaptureStream(),
+      stderr: err,
+      fetchCurrentHeadShaImpl: (opts) => fetchCurrentPrHeadSha({ ...opts, execFileImpl: hungGhExecFile([]) }),
+    });
+    assert.equal(rc, 4);
+    assert.match(err.text(), /^failed:head-lookup-timeout: /m);
+    assert.match(err.text(), /^hint: pass --exact-head-now --head-sha <sha> to skip the lookup/m);
+  } finally { rmSync(rootDir, { recursive: true, force: true }); }
+});
+
+test('RETRIGGERLOOKUPHANG-01: --head-sha performs no GitHub lookup', async () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'retrigger-lookup-skip-'));
+  try {
+    insertReviewRow(rootDir, { reviewStatus: 'posted', revisionRef: 'head-stale-237' });
+    let lookups = 0;
+    const err = makeCaptureStream();
+    const out = makeCaptureStream();
+    const rc = await main([
+      '--repo', 'laceyenterprises/agent-os', '--pr', '238', '--reason', 'review this exact pushed head',
+      '--exact-head-now', '--head-sha', 'head-current-238', '--no-bump-budget',
+      '--root-dir', rootDir, '--audit-root-dir', rootDir,
+    ], {
+      stdout: out,
+      stderr: err,
+      fetchCurrentHeadShaImpl: async () => { lookups += 1; throw new Error('lookup must not run'); },
+    });
+    assert.equal(rc, 0, err.text());
+    assert.equal(lookups, 0);
+    assert.doesNotMatch(err.text(), /\[github-read\]/);
+    assert.equal(JSON.parse(out.text()).revisionRef, 'head-current-238');
+  } finally { rmSync(rootDir, { recursive: true, force: true }); }
+});
+
+test('RETRIGGERLOOKUPHANG-01: --github-timeout-seconds must be a positive bounded number', () => {
+  const base = ['--repo', 'o/r', '--pr', '1', '--reason', 'x'];
+  assert.equal(parseArgs([...base, '--github-timeout-seconds', '90']).values.githubTimeoutMs, 90_000);
+  assert.equal(parseArgs(base).values.githubTimeoutMs, null);
+  for (const bad of ['0', '-1', 'abc', '1e3', '3601']) {
+    assert.throws(() => parseArgs([...base, `--github-timeout-seconds=${bad}`]), /--github-timeout-seconds must be/);
+  }
+});

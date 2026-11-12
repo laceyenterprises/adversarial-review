@@ -14,7 +14,7 @@ test('an unavailable audit dependency preserves the wrapped failure status and r
   t.after(() => rmSync(dir, { recursive: true, force: true }));
   mkdirSync(join(dir, 'bin'));
   mkdirSync(join(dir, 'src/ama'), { recursive: true });
-  for (const name of ['hammer-stop-origin.mjs', 'checkout-holder.mjs', 'branch-holder-paths.mjs']) {
+  for (const name of ['hammer-stop-origin.mjs', 'checkout-holder.mjs', 'branch-holder-paths.mjs', 'hammer-shell-helper-command.mjs']) {
     writeFileSync(join(dir, 'src/ama', name), readFileSync(join(root, 'src/ama', name)));
   }
   const helper = join(dir, 'bin/hammer-helper-step.mjs');
@@ -42,13 +42,23 @@ test('helper executable runs through a symlinked deployment with spaces and pres
   const receipt = join(dir, 'receipt');
   const gitCalls = join(dir, 'git-calls');
   writeFileSync(join(dir, 'git'), '#!/bin/sh\necho unexpected >> "$GIT_CALLS"\nexit 1\n', { mode: 0o755 });
-  writeFileSync(wrapped, '#!/bin/sh\nprintf "%s\\n" "$@" > "$RECEIPT"\nprintf \'{"published":true}\\n\'\n', { mode: 0o755 });
+  // HAMCONTROLLERSCRIPT-01: ham_step launches the helper with $HAM_NODE_BIN, so
+  // this runtime is also the helper's interpreter. It hands exactly the
+  // deployment's helper path to real Node; any other argv is the wrapped call.
+  writeFileSync(wrapped, [
+    '#!/bin/sh',
+    'if [ "$1" = "$HAM_ROOT_DIR/bin/hammer-helper-step.mjs" ]; then exec "$REAL_NODE" "$@"; fi',
+    'printf "%s\\n" "$@" > "$RECEIPT"',
+    'printf \'{"published":true}\\n\'',
+    '',
+  ].join('\n'), { mode: 0o755 });
   const result = spawnSync('/bin/bash', ['-euc', `
 ${stepSource.replaceAll('<<ROOT_DIR>>', deployment)}
 ham_step mutation pushed-attestation 90 540 "$HAM_NODE_BIN" "helper path with spaces" "run path with spaces"
 `], {
+    // No Node on PATH: the helper must not depend on its env-node shebang.
     env: { ...process.env, HAM_ROOT_DIR: deployment, HAM_NODE_BIN: wrapped, RECEIPT: receipt,
-      PATH: `${dir}:${process.env.PATH}`, GIT_CALLS: gitCalls },
+      REAL_NODE: process.execPath, PATH: `${dir}:/usr/bin:/bin`, GIT_CALLS: gitCalls },
     encoding: 'utf8', timeout: 15000,
   });
   assert.equal(result.status, 0, result.stderr);

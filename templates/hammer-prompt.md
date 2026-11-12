@@ -1043,8 +1043,9 @@ while true; do
 done
 ```
 
-Rerun the close command: it publishes this commit first (rebased/multi-commit
-history keeps the lease-protected git route).
+Rerun the close command: it publishes this commit first
+(`HAM_COMMIT_PUBLICATION_ONLY=1`; rebased/multi-commit history keeps the
+lease-protected git route).
 
 `conflict-primary-unproven` routes this head to the watcher's builder-tag
 follow-up remediation queue: resolve onto current base, preserve both sides,

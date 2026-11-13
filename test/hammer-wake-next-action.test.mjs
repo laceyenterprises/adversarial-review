@@ -73,7 +73,11 @@ for (const [name, observations, reason, requested] of [
   ['sticky merged receipt', { launches: { closer: terminal }, progress: {
     mergeReceipt: { merged: true, headSha: HEAD, path: 'hammer' } } }, 'merge-receipt-unconfirmed', false],
   ['confirmed merged', { pr: { headSha: HEAD, state: 'MERGED' } }, 'merged', false],
-  ['retry cap', { policy: { autonomousMergeExecutionEnabled: true, hammerCap: { retryExhausted: true, headSha: HEAD } } }, 'retry-exhausted', false],
+  // CLOSERRETRYREFUND-01: a spent cap holds unless the review has zero findings.
+  ['retry cap', { reviews: { ...clean, verdict: 'comment-only', nonBlockingFindingCount: 1 },
+    policy: { autonomousMergeExecutionEnabled: true, hammerCap: { retryExhausted: true, headSha: HEAD } } }, 'retry-exhausted', false],
+  ['retry cap on a zero-finding review', { policy: { autonomousMergeExecutionEnabled: true,
+    hammerCap: { retryExhausted: true, headSha: HEAD } } }, 'clean-exact-head', true],
   ['deterministic refusal precedes DIRTY', { controls: { safetyRefusal: { deterministic: true } },
     pr: { headSha: HEAD, state: 'OPEN', mergeStateStatus: 'DIRTY' } }, 'safety-refusal', false],
   ['drain retains repair intent', { checks: { conclusion: 'FAILURE' }, policy: {

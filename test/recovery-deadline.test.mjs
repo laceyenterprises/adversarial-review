@@ -73,7 +73,9 @@ for (const [name, observations, row, reason] of [
   ['empty diff', { progress: { diffEmpty: true } }, 'R05-structural', 'empty-diff-close'],
   ['safety input', { controls: { safetyRefusal: { deterministic: true, reason: 'synthetic-input' } } }, 'R05-structural', 'safety-refusal'],
   ['automatic stop', { progress: {}, controls: { stop: { deterministic: true } } }, 'R07-stop', 'automated-stop'],
-  ['retry exhaustion', { progress: {}, policy: { autonomousMergeExecutionEnabled: true,
+  // CLOSERRETRYREFUND-01: a spent cap holds unless the review has zero findings.
+  ['retry exhaustion', { progress: {}, reviews: { ...review, verdict: 'comment-only', nonBlockingFindingCount: 1 },
+    policy: { autonomousMergeExecutionEnabled: true,
     hammerCap: { retryExhausted: true, headSha: HEAD } } }, 'R07-stop', 'retry-exhausted'],
   ['final no merge', { progress: {}, launches: { closer: { headSha: HEAD, status: 'succeeded',
     retryChain: [], outcome: 'no-merge', retryable: false } } }, 'R07-stop', 'hammer-final-no-merge'],

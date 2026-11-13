@@ -300,12 +300,19 @@ test('site 2: exhaustion reached only through inconclusive attempts does not exh
 
 test('site 2: real exhaustion surfaces once with PR, reason and next action, and stays owned', async t => {
   const root = scratch(t);
-  const identity = exhaustedLedger(root, ['lrq_real', 'lrq_infra']);
+  // CLOSERRETRYREFUND-01: the fault charge is refunded on its own first; the
+  // two real charges still spend the budget and surface it.
+  const identity = exhaustedLedger(root, ['lrq_real', 'lrq_real_2', 'lrq_infra']);
   recordCloserInconclusiveRetry(root, identity, { headSha: HEAD, launchRequestId: 'lrq_infra',
     reason: 'checkout-failed', now: minutes(0) });
   const pages = [];
   const observeWaitImpl = options => observeClosureWait({ ...options,
     pageImpl: async message => { pages.push(message); } });
+  const refunded = await escalateClosureBudget({ result: { nextAction: R07 }, rootDir: root, ...identity,
+    now: Date.parse(minutes(0)), observeWaitImpl });
+  assert.equal(refunded.needsOperator, false);
+  assert.equal(refunded.inconclusiveExhaustion.reason, 'fault-charges-refunded');
+  assert.equal(refunded.inconclusiveExhaustion.realAttempts, 2);
   for (let tick = 1; tick <= 3; tick++) {
     const result = await escalateClosureBudget({ result: { nextAction: R07 }, rootDir: root, ...identity,
       now: Date.parse(minutes(tick)), observeWaitImpl });
@@ -314,6 +321,8 @@ test('site 2: real exhaustion surfaces once with PR, reason and next action, and
     assert.equal(result.ownedRetry.owner, 'watcher');
     assert.match(result.ownedRetry.recommendedAction, /closer audit/);
     assert.equal(result.inconclusiveExhaustion.reason, 'real-attempts-spent-budget');
+    assert.equal(result.reason, 'closure-retry-exhausted', 'typed terminal state, not a mismatch loop');
+    assert.equal(result.closureTerminal.owner, 'operator');
   }
   assert.equal(pages.length, 1, 'surfaced once');
   assert.match(pages[0], new RegExp(`${REPO} PR ${PR}@${HEAD}`));

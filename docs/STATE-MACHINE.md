@@ -3611,8 +3611,14 @@ Head changes discard previous next-action deadline anchors. A
 builder head awaiting review uses its persisted per-head wait anchor, never an
 older head's posting or final-round timestamp.
 
-A spent closure budget selects a named operator escalation: `closure-retry-exhausted`
-or `closure-lifetime-exhausted`. The existing wait store reserves delivery once
+A spent closure budget first refunds each closer-fault charge (closer or
+infrastructure stop origin in the AMA audit, an owned inconclusive launch, or a
+not-booted closer the pipeline superseded) and re-arms one ordinary closer
+(`closure-budget-refunded`; CLOSERRETRYREFUND-01). A zero-finding exact-head
+review on a green MERGEABLE head is not shadowed by the spent budget: it selects
+the daemon row. A budget still spent by real attempts selects a named operator
+escalation: `closure-retry-exhausted` or `closure-lifetime-exhausted`, published
+as the pass result reason with an operator-owned `closureTerminal`. The existing wait store reserves delivery once
 per episode and refunds a failed page. Lifetime exhaustion retains its page
 reservation across head changes. A pager failure is logged without rejecting
 the closure pass; deadline and final-round observers still run, and the refunded

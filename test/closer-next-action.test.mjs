@@ -44,6 +44,7 @@ function base(observations = {}) {
       leases: { closer: null }, launches: { closer: null },
       policy: { autonomousMergeExecutionEnabled: true, strictMode: true }, ...observations } });
 }
+const withFinding = { ...clean, verdict: 'comment-only', nonBlockingFindingCount: 1 };
 const pair = snapshot => Object.freeze({ snapshot, decision: nextAction(snapshot) });
 const tuple = decision => [decision.action, decision.actor, decision.reason];
 
@@ -419,7 +420,8 @@ test('deterministic safety stop precedes conflicting/red repair and retains reco
   assert.deepEqual(tuple(stopped.decision), ['hammer', 'closure-recovery', 'safety-refusal']);
   assert.equal(stopped.decision.queue.intent, 'reconcile');
   assert.equal(hasHammerDispatchIntent(stopped, identity), false);
-  const capped = pair(base({ policy: { autonomousMergeExecutionEnabled: true,
+  // CLOSERRETRYREFUND-01: a spent cap holds unless the review has zero findings.
+  const capped = pair(base({ reviews: withFinding, policy: { autonomousMergeExecutionEnabled: true,
     hammerCap: { headSha: HEAD, retryExhausted: true } } }));
   assert.equal(closureOwnerFromDecision(capped.decision).actor, 'closure-recovery');
   assert.notEqual(closureOwnerFromDecision(capped.decision).owner, 'operator-hold');
@@ -790,7 +792,8 @@ test('an exhausted wait report alone cannot replace the selected actor', async t
 
 
 test('final hammer cap pages report the selected recovery workflow', async t => {
-  const selected = observeClosureResult(pair(base()), { reason: 'hammer-retry-cap-exhausted' }).decision;
+  const selected = observeClosureResult(pair(base({ reviews: withFinding })),
+    { reason: 'hammer-retry-cap-exhausted' }).decision;
   const pages = [];
   const result = await routeToHammerOwner({ route: 'ci-blocked', rootDir: root(t), repoPath: identity.repo,
     prNumber: identity.prNumber, currentRevisionRef: HEAD, reviewedHeadSha: HEAD, logger: quiet,

@@ -506,7 +506,10 @@ function selectRow(facts, options = {}) {
 
   // R07 stops and R08 terminal retries share one daemon-only supersession path. The recursive
   // selection sets aside hammer history, never refunds it or admits dispatch.
-  const stopped = (row, recordedMs, forHead = true) => {
+  // CLOSERRETRYREFUND-01: a spent closer budget is a count of attempts, not a
+  // judgement about the head. A zero-finding exact-head review therefore
+  // reaches the daemon whenever it posted; the daemon re-proves every gate.
+  const stopped = (row, recordedMs, forHead = true, { budgetOnly = false } = {}) => {
     const notFired = reason => ({ ...row,
       refs: [...(row.refs || []), `supersession-not-fired:${reason}`] });
     if (daemonAfterSupersededStop) return notFired('stop-retained-during-reselection');
@@ -514,13 +517,17 @@ function selectRow(facts, options = {}) {
     if (!review.known) return notFired('review-unknown');
     if (!review.clean) return notFired('review-not-daemon-eligible');
     if (!sameHead(review.reviewedHead, head)) return notFired('review-head-mismatch');
-    if (recordedMs === null) return notFired('stop-time-unknown');
-    if (review.postedMs === null) return notFired('review-time-unknown');
-    if (review.postedMs <= recordedMs) return notFired('review-not-newer');
+    const cleanBudgetOnly = budgetOnly && review.zeroFindings && !review.currentHeadVerdictAbsent;
+    if (!cleanBudgetOnly) {
+      if (recordedMs === null) return notFired('stop-time-unknown');
+      if (review.postedMs === null) return notFired('review-time-unknown');
+      if (review.postedMs <= recordedMs) return notFired('review-not-newer');
+    }
     const next = selectRow(facts, { ...options, daemonAfterSupersededStop: true });
     if (next.action === 'daemon-merge' && next.actor === 'daemon') {
       return { ...next, refs: [...(next.refs || []), ...(row.refs || []),
-        `stop-reason:${row.reason}`, 'stop-superseded-by-exact-head-review'] };
+        `stop-reason:${row.reason}`, cleanBudgetOnly ? 'budget-superseded-by-zero-finding-review'
+          : 'stop-superseded-by-exact-head-review'] };
     }
     return notFired(`reselected:${next.row}:${next.reason}`);
   };
@@ -548,7 +555,7 @@ function selectRow(facts, options = {}) {
     || (cap?.retryExhausted === true && (!text(cap.headSha) || sameHead(cap.headSha, head))))) {
     return stopped({ row: 'R07-stop', action: 'hammer', actor: 'closure-recovery',
       reason: cap.lifetimeExhausted === true ? 'lifetime-exhausted' : 'retry-exhausted', deadlineKind: 'recovery', queue: 'reconcile' },
-    timeMs(cap.recordedAt));
+    timeMs(cap.recordedAt), true, { budgetOnly: true });
   }
   if (!daemonAfterSupersededStop && launchForHead && launch.owned === false && launch.outcome === 'no-merge' && launch.retryable === false) {
     // The hammer's final adjudication on this head; a new head is new work.

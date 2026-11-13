@@ -1,11 +1,37 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
 import { mkdtemp, mkdir, readdir, writeFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { collect } from '../src/merge-lane-inventory.mjs';
 const OPERATOR_HOLD_LABELS = ['no-merge-hold', 'do-not-merge', 'merge-agent-skip'];
+
+test('default inventory reader retains the shared 25 MiB buffer for large PR rollups', async () => {
+  const codeRoot = fileURLToPath(new URL('..', import.meta.url));
+  const execute = promisify(execFile);
+  const titleLength = 2 * 1024 * 1024;
+  let calls = 0;
+  const result = await collect(codeRoot, 'unused-data', {
+    config: { repos: ['example/repo'] }, holdLabels: [], stderr: null,
+    execFileImpl: async (command, args, options) => {
+      calls += 1;
+      assert.equal(command, 'gh');
+      assert.deepEqual(args.slice(0, 4), ['pr', 'list', '--repo', 'example/repo']);
+      assert.equal(options.maxBuffer, 25 * 1024 * 1024);
+      // Exercise a real child above Node's 1 MiB default, without GitHub I/O.
+      return execute(process.execPath, ['-e',
+        `process.stdout.write(JSON.stringify([{ number: 42, title: 'x'.repeat(${titleLength}) }]))`,
+      ], options);
+    },
+  });
+  assert.equal(calls, 1);
+  assert.deepEqual(result.errors, []);
+  assert.equal(result.repositories['example/repo'][0].number, 42);
+  assert.equal(result.repositories['example/repo'][0].title.length, titleLength);
+});
 
 test('default inventory reader bounds a hanging lookup and records the failure', async () => {
   const codeRoot = fileURLToPath(new URL('..', import.meta.url));

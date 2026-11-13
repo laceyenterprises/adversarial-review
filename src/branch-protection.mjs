@@ -25,11 +25,16 @@ function parseRepoSlug(repoPath) {
   return { owner, repo };
 }
 
-function allowlistedGhEnv(env = process.env) {
+function requireGhToken(env) {
   const token = env.GITHUB_TOKEN || env.GH_TOKEN;
   if (!token) {
     throw new Error('GITHUB_TOKEN is required to check branch protection');
   }
+  return token;
+}
+
+function allowlistedGhEnv(env = process.env) {
+  const token = requireGhToken(env);
   return {
     PATH: env.PATH ?? '/usr/bin:/bin',
     HOME: env.HOME ?? '',
@@ -332,13 +337,15 @@ async function fetchAdversarialGateBranchProtection({
   }
   let stdout;
   try {
-    const childEnv = allowlistedGhEnv(env);
+    // Keep the token prerequisite for both readers without building an unused
+    // subprocess environment when the operator reader owns execution.
+    requireGhToken(env);
     const args = ['api', `repos/${owner}/${repo}/branches/${encodeURIComponent(branch)}/protection`];
     ({ stdout } = await (runGhRead ? runGhRead(args) : execGhApiWithTransientRetry(
       execFileImpl,
       args,
       {
-        env: childEnv,
+        env: allowlistedGhEnv(env),
         maxBuffer: 2 * 1024 * 1024,
       },
       retryOptions,

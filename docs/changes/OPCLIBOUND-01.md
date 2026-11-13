@@ -18,6 +18,17 @@ Credential-less bounded reads use the separate `operator-cli` budget identity.
 Explicit tokens retain their token or installation identity. Admission and
 response accounting use the same identity; no stored fields or versions change.
 
+Final comment-only remediation confirms that inventory reads already inherit
+the shared executor's 25 MiB output buffer. A new offline regression checks the
+actual executor option and reads a real child response larger than Node's
+default 1 MiB buffer. No new buffer option is needed.
+
+Branch-protection reads now build an allowlisted environment only for the
+fallback executor. Both paths retain the required-token prerequisite; a
+supplied operator reader owns subprocess environment construction. Tests cover
+that delegation and explicitly count subprocess calls when credentials are
+missing, so caught assertion failures cannot mask an unintended launch.
+
 ## Interface changes
 
 - Pause failures report `ticket-pipeline-pause-timeout` and exit `1`.
@@ -34,6 +45,17 @@ response accounting use the same identity; no stored fields or versions change.
 
 ## Verification
 
+- Final comment-only remediation: `node test/run-tests.mjs
+  test/merge-lane-inventory.test.mjs test/branch-protection.test.mjs
+  test/check-branch-protection-cli.test.mjs test/operator-gh-read.test.mjs`:
+  **47 passed** across four files, offline, under a fixed 120-second bound.
+- Final remediation guards: `npm run lint` **passed** (zero errors, 149
+  existing warnings); `npm run typecheck:contracts` **passed**;
+  `bash demo/research-finding-walkthrough.sh` **passed** with byte-stable
+  transcript deliveries; `git diff --check` **passed**. No full local suite.
+- This checkout had no dependencies installed; the initial targeted run could
+  not load `js-yaml`. Validation used the existing ignored `node_modules`
+  installation from the deployed review-service checkout.
 - Focused offline tests: `node test/run-tests.mjs
   test/operator-gh-read.test.mjs test/ticket-pipeline-pause.test.mjs
   test/check-branch-protection-cli.test.mjs test/merge-lane-inventory.test.mjs`:

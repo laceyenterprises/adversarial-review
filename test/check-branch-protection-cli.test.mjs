@@ -63,10 +63,15 @@ test('the bounded branch-protection reader preserves the required-token check', 
   t.after(() => rmSync(root, { recursive: true, force: true }));
   const configPath = writeConfig(root, { repos: ['example/repo'] });
   const stderr = makeWritable();
+  let calls = 0;
   assert.equal(await main(['--config', configPath], {
     env: {}, stdout: makeWritable(), stderr,
-    execFileImpl: async () => assert.fail('missing credentials must not spawn gh'),
+    execFileImpl: async () => {
+      calls += 1;
+      assert.fail('missing credentials must not spawn gh');
+    },
   }), 1);
+  assert.equal(calls, 0, 'an assertion thrown inside the reader can be caught as a lookup failure');
   assert.match(stderr.toString(), /reason=branch-protection-check-failed/);
 });
 

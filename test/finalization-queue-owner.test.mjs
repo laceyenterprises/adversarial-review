@@ -1,3 +1,5 @@
+import { performance } from 'node:perf_hooks';
+import { FakeClock } from './helpers/load-time-kit.mjs';
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync } from 'node:fs';
@@ -82,6 +84,8 @@ test('repositories and case-sensitive bases remain independent', async t => {
 });
 
 test('HAMLANEWAIT-01: release in another process wakes the bounded native lane waiter', { timeout: 5000 }, async t => {
+  const clock = new FakeClock(t, { wall: Date.now() });
+  t.mock.method(performance, 'now', () => clock.monotonic());
   const f = fixture(t);
   const child = fork(fileURLToPath(new URL('./helpers/queue-claimant.mjs', import.meta.url)),
     [JSON.stringify({ root: f.root, lane, now: time(0), lockOnly: true })], {
@@ -94,10 +98,10 @@ test('HAMLANEWAIT-01: release in another process wakes the bounded native lane w
   assert.equal(adapter.tryLock(lane), null);
   const pending = adapter.waitForLock(lane, { deadline: new Date(Date.now() + 3000).toISOString() });
   // The waiter installs its watch synchronously before returning.
-  const started = performance.now();
+  await clock.advance(1);
   child.send('release');
   const release = await pending;
-  assert.ok(performance.now() - started < 1500, 'release notification must beat the deadline fallback');
+  assert.equal(clock.monotonic(), 1, 'release notification settles without advancing to the deadline');
   assert.equal(typeof release, 'function', 'must acquire from release wake before the deadline');
   try { assert.equal(adapter.tryLock(lane), null); } finally { release(); }
   await exited;

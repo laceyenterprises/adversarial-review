@@ -1,3 +1,4 @@
+import { FakeClock } from './helpers/load-time-kit.mjs';
 import './helpers/load-aware-timeout-fixture.mjs';
 import test, { afterEach } from 'node:test';
 import assert from 'node:assert/strict';
@@ -78,7 +79,6 @@ function baseArgs(overrides = {}) {
 }
 
 const retained = (logs) => logs.filter((m) => /AMA hammer route retained ownership/.test(m));
-const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 test('posted-review rejects malformed attempt identifiers before entering collaborators', async () => {
   let calls = 0;
@@ -512,7 +512,8 @@ test('RVHAND-12: operator can still lower the HAM coexistence deadline during an
   assert.equal(resolveMergeAgentCoexistenceStepDeadlineMs(env), 10_000);
 });
 
-test('timePostedReviewStep: warns while a step is still pending', async () => {
+test('timePostedReviewStep: warns while a step is still pending', async t => {
+  const clock = new FakeClock(t);
   const warnings = [];
   let release;
   const pending = new Promise((resolve) => {
@@ -530,7 +531,9 @@ test('timePostedReviewStep: warns while a step is still pending', async () => {
     10,
   );
 
-  await delay(100);
+  await clock.advance(9);
+  assert.deepEqual(warnings, []);
+  await clock.advance(1);
 
   assert.equal(warnings.length, 1);
   assert.match(warnings[0], /still running/);
@@ -543,7 +546,8 @@ test('timePostedReviewStep: warns while a step is still pending', async () => {
   assert.match(warnings[1], /resolve coexistence took \d+ms/);
 });
 
-test('timePostedReviewStep: does not warn for fast completed steps', async () => {
+test('timePostedReviewStep: does not warn for fast completed steps', async t => {
+  new FakeClock(t);
   const warnings = [];
 
   const result = await timePostedReviewStep(
@@ -558,12 +562,13 @@ test('timePostedReviewStep: does not warn for fast completed steps', async () =>
   assert.deepEqual(warnings, []);
 });
 
-test('timePostedReviewStep: deadline rejects and aborts pending work', async () => {
+test('timePostedReviewStep: deadline rejects and aborts pending work', async t => {
+  const clock = new FakeClock(t);
   const errors = [];
   const warnings = [];
   let sawAbort = false;
 
-  await assert.rejects(
+  const rejection = assert.rejects(
     timePostedReviewStep(
       'resolveMergeAgentCoexistence',
       'laceyenterprises/agent-os#4242',
@@ -582,6 +587,9 @@ test('timePostedReviewStep: deadline rejects and aborts pending work', async () 
     ),
     PostedReviewStepDeadlineError,
   );
+  await clock.flush();
+  await clock.advance(10);
+  await rejection;
 
   assert.equal(sawAbort, true);
   assert.match(errors[0], /posted-review step deadline exceeded/);
@@ -590,13 +598,14 @@ test('timePostedReviewStep: deadline rejects and aborts pending work', async () 
   assert.match(warnings[0], /posted-review step aborted after deadline/);
 });
 
-test('timePostedReviewStep: soft deadline rejects without aborting pending work', async () => {
+test('timePostedReviewStep: soft deadline rejects without aborting pending work', async t => {
+  const clock = new FakeClock(t);
   const errors = [];
   let sawAbort = false;
   let completed = false;
   let release;
 
-  await assert.rejects(
+  const rejection = assert.rejects(
     timePostedReviewStep(
       'resolveMergeAgentCoexistence',
       'laceyenterprises/agent-os#4242',
@@ -619,21 +628,25 @@ test('timePostedReviewStep: soft deadline rejects without aborting pending work'
     ),
     PostedReviewStepDeadlineError,
   );
+  await clock.flush();
+  await clock.advance(10);
+  await rejection;
 
   assert.equal(sawAbort, false, 'soft deadline must not abort the running step');
   assert.match(errors[0], /posted-review step deadline exceeded/);
 
   release();
-  await delay(25);
+  await clock.flush();
   assert.equal(completed, true, 'soft-deadlined work can still settle in the background');
 });
 
-test('timePostedReviewStep: soft-deadlined background failure is logged as an error', async () => {
+test('timePostedReviewStep: soft-deadlined background failure is logged as an error', async t => {
+  const clock = new FakeClock(t);
   const errors = [];
   const warnings = [];
   let rejectLate;
 
-  await assert.rejects(
+  const rejection = assert.rejects(
     timePostedReviewStep(
       'resolveMergeAgentCoexistence',
       'laceyenterprises/agent-os#4242',
@@ -649,9 +662,12 @@ test('timePostedReviewStep: soft-deadlined background failure is logged as an er
     ),
     PostedReviewStepDeadlineError,
   );
+  await clock.flush();
+  await clock.advance(10);
+  await rejection;
 
   rejectLate(new Error('hq dispatch exited 75'));
-  await delay(25);
+  await clock.flush();
 
   assert.equal(warnings.length, 0);
   assert.match(errors[0], /posted-review step deadline exceeded/);
@@ -659,7 +675,8 @@ test('timePostedReviewStep: soft-deadlined background failure is logged as an er
   assert.match(errors.join('\n'), /hq dispatch exited 75/);
 });
 
-test('handlePostedReviewRow: resolveMergeAgentCoexistence deadline is a soft handled outcome', async () => {
+test('handlePostedReviewRow: resolveMergeAgentCoexistence deadline is a soft handled outcome', async t => {
+  const clock = new FakeClock(t);
   const oldDeadline = process.env.ADVERSARIAL_WATCHER_RESOLVE_MERGE_AGENT_COEXISTENCE_DEADLINE_MS;
   process.env.ADVERSARIAL_WATCHER_RESOLVE_MERGE_AGENT_COEXISTENCE_DEADLINE_MS = '10';
   const errors = [];
@@ -679,7 +696,10 @@ test('handlePostedReviewRow: resolveMergeAgentCoexistence deadline is a soft han
   });
 
   try {
-    const result = await handlePostedReviewRow(args);
+    const pending = handlePostedReviewRow(args);
+    await clock.flush();
+    await clock.advance(10);
+    const result = await pending;
 
     assert.equal(sawAbort, false);
     assert.equal(result.handled, true);
@@ -699,7 +719,8 @@ test('handlePostedReviewRow: resolveMergeAgentCoexistence deadline is a soft han
   }
 });
 
-test('RVCOEX-01: resolveMergeAgentCoexistence deadline logs the in-flight operation', async () => {
+test('RVCOEX-01: resolveMergeAgentCoexistence deadline logs the in-flight operation', async t => {
+  const clock = new FakeClock(t);
   const oldDeadline = process.env.ADVERSARIAL_WATCHER_RESOLVE_MERGE_AGENT_COEXISTENCE_DEADLINE_MS;
   process.env.ADVERSARIAL_WATCHER_RESOLVE_MERGE_AGENT_COEXISTENCE_DEADLINE_MS = '10';
   const errors = [];
@@ -716,7 +737,10 @@ test('RVCOEX-01: resolveMergeAgentCoexistence deadline logs the in-flight operat
   });
 
   try {
-    const result = await handlePostedReviewRow(args);
+    const pending = handlePostedReviewRow(args);
+    await clock.flush();
+    await clock.advance(10);
+    const result = await pending;
 
     assert.equal(result.handled, true);
     assert.equal(result.outcome, 'coexistence-deadline');
@@ -731,7 +755,8 @@ test('RVCOEX-01: resolveMergeAgentCoexistence deadline logs the in-flight operat
   }
 });
 
-test('handlePostedReviewRow: HAM coexistence deadline does not abort in-flight launch settlement', async () => {
+test('handlePostedReviewRow: HAM coexistence deadline does not abort in-flight launch settlement', async t => {
+  const clock = new FakeClock(t);
   const oldDeadline = process.env.ADVERSARIAL_WATCHER_RESOLVE_MERGE_AGENT_COEXISTENCE_DEADLINE_MS;
   process.env.ADVERSARIAL_WATCHER_RESOLVE_MERGE_AGENT_COEXISTENCE_DEADLINE_MS = '10';
   const errors = [];
@@ -763,7 +788,10 @@ test('handlePostedReviewRow: HAM coexistence deadline does not abort in-flight l
   });
 
   try {
-    const result = await handlePostedReviewRow(args);
+    const pending = handlePostedReviewRow(args);
+    await clock.flush();
+    await clock.advance(10);
+    const result = await pending;
 
     assert.equal(sawAbort, false);
     assert.equal(result.handled, true);
@@ -775,7 +803,7 @@ test('handlePostedReviewRow: HAM coexistence deadline does not abort in-flight l
     assert.match(errors.join('\n'), /Leaving any in-flight HAM launch to settle/);
 
     release();
-    await delay(25);
+    await clock.flush();
     assert.equal(settled, true);
   } finally {
     if (oldDeadline === undefined) {
@@ -786,7 +814,8 @@ test('handlePostedReviewRow: HAM coexistence deadline does not abort in-flight l
   }
 });
 
-test('handlePostedReviewRow: fetchMergeAgentCandidate deadline returns a named handled outcome', async () => {
+test('handlePostedReviewRow: fetchMergeAgentCandidate deadline returns a named handled outcome', async t => {
+  const clock = new FakeClock(t);
   const oldDeadline = process.env.ADVERSARIAL_WATCHER_RESOLVE_MERGE_AGENT_COEXISTENCE_DEADLINE_MS;
   process.env.ADVERSARIAL_WATCHER_RESOLVE_MERGE_AGENT_COEXISTENCE_DEADLINE_MS = '10';
   const errors = [];
@@ -808,7 +837,10 @@ test('handlePostedReviewRow: fetchMergeAgentCandidate deadline returns a named h
   });
 
   try {
-    const result = await handlePostedReviewRow(args);
+    const pending = handlePostedReviewRow(args);
+    await clock.flush();
+    await clock.advance(10);
+    const result = await pending;
 
     assert.equal(sawAbort, true);
     assert.equal(result.handled, true);

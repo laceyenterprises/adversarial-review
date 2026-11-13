@@ -1,3 +1,4 @@
+import { FakeClock } from './helpers/load-time-kit.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtempSync, readFileSync, statSync, utimesSync, writeFileSync } from 'node:fs';
@@ -11,7 +12,8 @@ import {
 } from '../src/watcher-wake.mjs';
 import { createHandoffRateLimiter } from '../src/handoff-rate-cap.mjs';
 
-test('watcher wake interrupts scheduled wait in under five seconds', async () => {
+test('watcher wake interrupts scheduled wait before its deadline', async t => {
+  const clock = new FakeClock(t, { wall: Date.now() });
   const rootDir = mkdtempSync(path.join(tmpdir(), 'watcher-wake-'));
   const wakeSource = createWatcherWakeSource({
     rootDir,
@@ -20,7 +22,6 @@ test('watcher wake interrupts scheduled wait in under five seconds', async () =>
   });
 
   try {
-    const startedAt = Date.now();
     const waitPromise = wakeSource.wait(300_000);
     setTimeout(() => {
       requestWatcherWake({
@@ -33,21 +34,22 @@ test('watcher wake interrupts scheduled wait in under five seconds', async () =>
       });
     }, 50);
 
+    await clock.advance(100);
     const result = await waitPromise;
-    const elapsedMs = Date.now() - startedAt;
     assert.equal(result.woken, true);
     assert.equal(result.reason, 'wake-file');
     assert.equal(result.payload.reason, 'remediation-to-rereview');
     assert.equal(result.payload.repo, 'laceyenterprises/clio');
     assert.equal(result.payload.pr_number, 7);
-    assert.ok(elapsedMs < 5000, `expected wake under 5s, got ${elapsedMs}ms`);
+    assert.equal(clock.monotonic(), 100);
     assert.equal(watcherWakePath(rootDir), path.join(rootDir, 'data', 'watcher-wake.json'));
   } finally {
     wakeSource.close();
   }
 });
 
-test('watcher wake wait preserves normal timeout path when no wake is written', async () => {
+test('watcher wake wait preserves normal timeout path when no wake is written', async t => {
+  const clock = new FakeClock(t, { wall: Date.now() });
   const rootDir = mkdtempSync(path.join(tmpdir(), 'watcher-wake-'));
   const wakeSource = createWatcherWakeSource({
     rootDir,
@@ -56,7 +58,14 @@ test('watcher wake wait preserves normal timeout path when no wake is written', 
   });
 
   try {
-    const result = await wakeSource.wait(20);
+    const pending = wakeSource.wait(20);
+    await clock.advance(19);
+    let settled = false;
+    pending.then(() => { settled = true; });
+    await clock.flush();
+    assert.equal(settled, false);
+    await clock.advance(1);
+    const result = await pending;
     assert.deepEqual(result, { woken: false, reason: 'timeout' });
   } finally {
     wakeSource.close();
@@ -264,7 +273,8 @@ test('watcher wake dedupes request_id-less payloads by content hash', async () =
   }
 });
 
-test('watcher wake caps one PR head without starving another PR head', async () => {
+test('watcher wake caps one PR head without starving another PR head', async t => {
+  const clock = new FakeClock(t, { wall: Date.now() });
   const rootDir = mkdtempSync(path.join(tmpdir(), 'watcher-wake-'));
   const wakeSource = createWatcherWakeSource({
     rootDir,
@@ -299,7 +309,9 @@ test('watcher wake caps one PR head without starving another PR head', async () 
       headSha: 'head-a',
       requestId: 'storm-a-2',
     });
-    assert.deepEqual(await wakeSource.wait(20), { woken: false, reason: 'timeout' });
+    const capped = wakeSource.wait(20);
+    await clock.advance(20);
+    assert.deepEqual(await capped, { woken: false, reason: 'timeout' });
 
     requestWatcherWake({
       rootDir,
@@ -409,7 +421,8 @@ test('a zero-length wait still observes a pending wake (overrunning poll must no
   }
 });
 
-test('a zero-length wait does not block when there is no pending wake', async () => {
+test('a zero-length wait does not block when there is no pending wake', async t => {
+  const clock = new FakeClock(t, { wall: Date.now() });
   const rootDir = mkdtempSync(path.join(tmpdir(), 'watcher-wake-zero-none-'));
   const wakeSource = createWatcherWakeSource({
     rootDir,
@@ -418,13 +431,11 @@ test('a zero-length wait does not block when there is no pending wake', async ()
   });
 
   try {
-    const startedAt = Date.now();
     const result = await wakeSource.wait(0);
-    const elapsedMs = Date.now() - startedAt;
 
     assert.equal(result.woken, false);
     assert.equal(result.reason, 'timeout');
-    assert.ok(elapsedMs < 1_000, `wait(0) must not block, took ${elapsedMs}ms`);
+    assert.equal(clock.monotonic(), 0);
   } finally {
     wakeSource.close();
   }

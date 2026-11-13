@@ -1,3 +1,4 @@
+import { FakeClock } from './helpers/load-time-kit.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
@@ -724,7 +725,8 @@ test('queued reviewed attestation retry consumes entries by stable queue id afte
   }
 });
 
-test('reviewed attestation queue lock waits asynchronously on contention', async () => {
+test('reviewed attestation queue lock waits asynchronously on contention', async t => {
+  const clock = new FakeClock(t, { wall: Date.now() });
   const rootDir = mkdtempSync(join(tmpdir(), 'reviewed-attestation-lock-wait-'));
   const originalAtomicsWait = Atomics.wait;
   try {
@@ -739,10 +741,12 @@ test('reviewed attestation queue lock waits asynchronously on contention', async
       timerFired = true;
     }, 0);
 
-    await assert.rejects(
+    const rejection = assert.rejects(
       () => acquireReviewedAttestationQueueLock(rootDir, { waitMs: 50, staleMs: 60_000 }),
       /timed out acquiring reviewed attestation queue lock/
     );
+    await clock.advance(50);
+    await rejection;
     assert.equal(timerFired, true);
   } finally {
     Atomics.wait = originalAtomicsWait;

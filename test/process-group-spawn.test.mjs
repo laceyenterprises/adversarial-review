@@ -1,12 +1,30 @@
+import { FakeClock } from './helpers/load-time-kit.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { spawn } from 'node:child_process';
+import childProcess, { spawn } from 'node:child_process';
+import { syncBuiltinESMExports } from 'node:module';
+import { once } from 'node:events';
 import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 
 import { spawnCapturedProcessGroup } from '../src/process-group-spawn.mjs';
 import { classifyReviewerFailure } from '../src/adapters/reviewer-runtime/cli-direct/classification.mjs';
+
+function capturedChild(t) {
+  const spawn = childProcess.spawn;
+  let started;
+  const ready = new Promise(resolve => { started = resolve; });
+  const mock = t.mock.method(childProcess, 'spawn', (...args) => {
+    const child = spawn(...args);
+    child.testSpawned = once(child, 'spawn');
+    started(child);
+    return child;
+  });
+  syncBuiltinESMExports();
+  t.after(() => { mock.mock.restore(); syncBuiltinESMExports(); });
+  return ready;
+}
 
 test('stream events renew the rolling watchdog and reach the progress observer', async () => {
   const chunks = [];
@@ -94,14 +112,15 @@ async function waitFor(assertion, { timeoutMs = 5_000, intervalMs = 25 } = {}) {
   throw lastError || new Error('waitFor timed out');
 }
 
-test('progress watchdog escalates SIGTERM-ignoring children to process-group SIGKILL and preserves stderr', async () => {
-  // Leave enough startup time for the shell to install its TERM trap under load.
+test('progress watchdog escalates SIGTERM-ignoring children to process-group SIGKILL and preserves stderr', async t => {
+  const clock = new FakeClock(t, { wall: Date.now() });
+  // The shell publishes stderr after installing its TERM trap.
   const progressTimeout = 2_000;
   const killGraceMs = 250;
-  const startedAt = Date.now();
+  const childReady = capturedChild(t);
 
-  await assert.rejects(
-    () => spawnCapturedProcessGroup(
+  const rejected = assert.rejects(
+    spawnCapturedProcessGroup(
       'bash',
       ['-c', boundedTermIgnoringShell('echo "auth probe failed: token expired" >&2;')],
       {
@@ -111,18 +130,21 @@ test('progress watchdog escalates SIGTERM-ignoring children to process-group SIG
       }
     ),
     (err) => {
-      const elapsed = Date.now() - startedAt;
       assert.equal(err.progressTimedOut, true);
       assert.equal(err.killed, true);
       assert.equal(err.signal, 'SIGKILL');
-      assert.ok(elapsed < progressTimeout + killGraceMs + 3_000,
-        `elapsed ${elapsed}ms exceeded watchdog escalation budget`);
+      assert.equal(clock.monotonic(), progressTimeout + killGraceMs);
       assert.match(err.message, /no output/);
       assert.match(err.message, /auth probe failed: token expired/);
       assert.match(err.stderr, /auth probe failed: token expired/);
       return true;
     }
   );
+  const child = await childReady;
+  await once(child.stderr, 'data');
+  await clock.advance(progressTimeout);
+  await clock.advance(killGraceMs);
+  await rejected;
 });
 
 test('progress watchdog producer output classifies as reviewer-timeout', async () => {
@@ -500,11 +522,13 @@ test('firstOutputTimeout is retired by the first byte and never re-arms', async 
   assert.match(result.stdout, /\{"ok":true\}/);
 });
 
-test('firstOutputTimeout still kills a child that never writes a byte', async () => {
+test('firstOutputTimeout still kills a child that never writes a byte', async t => {
+  const clock = new FakeClock(t, { wall: Date.now() });
+  const childReady = capturedChild(t);
   const firstOutputTimeout = 300;
   const script = 'setTimeout(() => process.exit(0), 10_000);';
-  await assert.rejects(
-    () => spawnCapturedProcessGroup(process.execPath, ['-e', script], {
+  const rejected = assert.rejects(
+    spawnCapturedProcessGroup(process.execPath, ['-e', script], {
       firstOutputTimeout,
       timeout: 10_000,
     }),
@@ -515,6 +539,12 @@ test('firstOutputTimeout still kills a child that never writes a byte', async ()
       return true;
     },
   );
+  const child = await childReady;
+  await child.testSpawned;
+  await clock.advance(299);
+  assert.equal(child.killed, false);
+  await clock.advance(1);
+  await rejected;
 });
 
 test('a silent non-streaming child succeeds when no first-output deadline is armed', async () => {
@@ -532,10 +562,11 @@ test('a silent non-streaming child succeeds when no first-output deadline is arm
 });
 
 
-test('GEMTIMEOUT-01: IPC plan extends the parent wall timer and still reaps a hung child', async () => {
+test('GEMTIMEOUT-01: IPC plan extends the parent wall timer and still reaps a hung child', async t => {
+  const clock = new FakeClock(t, { wall: Date.now() });
   let reported = false;
-  const startedAt = Date.now();
-  await assert.rejects(spawnCapturedProcessGroup(process.execPath, ['-e',
+  const childReady = capturedChild(t);
+  const rejected = assert.rejects(spawnCapturedProcessGroup(process.execPath, ['-e',
     'process.send({type:"plan"}); setInterval(() => {}, 100);',
   ], { timeout: 2000, progressTimeout: 0, killGraceMs: 0,
     onMessage(message) {
@@ -544,8 +575,17 @@ test('GEMTIMEOUT-01: IPC plan extends the parent wall timer and still reaps a hu
       return 3000;
     },
   }), /timed out after 3000ms/);
+  const child = await childReady;
+  await once(child, 'message');
+  await clock.advance(2999);
+  let settled = false;
+  rejected.then(() => { settled = true; });
+  await clock.flush();
+  assert.equal(settled, false);
+  await clock.advance(1);
+  await rejected;
   assert.equal(reported, true);
-  assert.ok(Date.now() - startedAt >= 2900);
+  assert.equal(clock.monotonic(), 3000);
 });
 
 test('GEMTIMEOUT-01: refused lease extension terminates the child', async () => {

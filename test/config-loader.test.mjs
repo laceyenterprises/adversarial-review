@@ -8,7 +8,7 @@
 
 import { test } from 'node:test';
 import { strict as assert } from 'node:assert';
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync, mkdirSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync, mkdirSync, statSync, utimesSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -5488,15 +5488,13 @@ test('getConfig invalidates cache when top YAML mtime changes', () => {
     `);
     assert.equal(getConfig('roles.reviewer'), 'codex');
 
-    // Sleep enough to guarantee a fresh mtime even on coarse filesystems.
-    // Using a busy-wait to keep the test synchronous.
-    const start = Date.now();
-    while (Date.now() - start < 50) { /* spin */ }
+    const changedAt = new Date(statSync(top).mtimeMs + 2000);
     writeFile(top, `
       version: 1
       roles:
         reviewer: adversarial
     `);
+    utimesSync(top, changedAt, changedAt);
     assert.equal(getConfig('roles.reviewer'), 'adversarial');
   } finally {
     if (originalEnv === undefined) delete process.env.AGENT_OS_CONFIG_PATH;

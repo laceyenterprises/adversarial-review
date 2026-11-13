@@ -1,3 +1,5 @@
+import { performance } from 'node:perf_hooks';
+import { FakeClock } from './helpers/load-time-kit.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createFederationExecutionAdapter } from '../src/adapters/reviewer-runtime/federation-execution/index.mjs';
@@ -133,12 +135,17 @@ test('restart attaches to surviving start permit and never creates another child
   assert.equal(service.active.size, 0);
 });
 
-test('execution timeout is bounded and retains seat while child survives; late spend remains available', async () => {
+test('execution timeout is bounded and retains seat while child survives; late spend remains available', async t => {
+  const clock = new FakeClock(t);
+  t.mock.method(performance, 'now', () => clock.monotonic());
   const service = fixtureService();
   const order = orderFixture();
   order.budget.timeoutMs = 50;
   const fixture = setup({ service, order, supervisor: service.supervisor({ hold: true }) });
-  const result = await fixture.execute();
+  const pending = fixture.execute();
+  await clock.flush();
+  await clock.advance(50);
+  const result = await pending;
   assert.equal(result.status, 'execution-unknown');
   assert.equal(result.seatRetained, true);
   assert.deepEqual(result.usage, usage);
@@ -159,7 +166,9 @@ test('concurrent same-grant retry attaches by start identity and release is idem
   assert.equal(fixture.service.active.size, 0);
 });
 
-test('permit expiry during evidence collection rejects the verdict and retains spend', async () => {
+test('permit expiry during evidence collection rejects the verdict and retains spend', async t => {
+  const clock = new FakeClock(t);
+  t.mock.method(performance, 'now', () => clock.monotonic());
   const service = fixtureService();
   const supervisor = service.supervisor();
   const fixture = setup({ service, supervisor: { ...supervisor, async snapshot(args) {
@@ -168,7 +177,10 @@ test('permit expiry during evidence collection rejects the verdict and retains s
   } }, seatTransport: { ...service.transport, async consume(args) {
     return { ...await service.transport.consume(args), validForMs: 25 };
   } } });
-  const result = await fixture.execute();
+  const pending = fixture.execute();
+  await clock.flush();
+  await clock.advance(40);
+  const result = await pending;
   assert.equal(result.status, 'stale');
   assert.equal(result.review, null);
   assert.deepEqual(result.usage, usage);

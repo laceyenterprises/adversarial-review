@@ -1,3 +1,5 @@
+import { performance } from 'node:perf_hooks';
+import { FakeClock } from './helpers/load-time-kit.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn, spawnSync, execFileSync } from 'node:child_process';
@@ -66,8 +68,31 @@ test('reserved cleanup failure retains private scratch instead of unlinking evid
   assert.equal(readdirSync(dir).filter(name => name.startsWith('ham-validation-')).length, 1);
 });
 
-test('silent CPU work fails on idle, independently of a load-expanded ceiling', async () => {
-  const result = await run('while(true) {}', { timeoutMs: 2160_000, idleMs: 200 });
+test('silent work fails on idle, independently of a load-expanded ceiling', async t => {
+  const clock = new FakeClock(t, { wall: Date.now() });
+  t.mock.method(performance, 'now', () => clock.monotonic());
+  const child = Object.assign(new EventEmitter(), {
+    pid: 42424, exitCode: null, signalCode: null,
+    stdout: new PassThrough(), stderr: new PassThrough(),
+  });
+  const pending = run('synthetic silent work', {
+    timeoutMs: 2160_000, idleMs: 200,
+    spawnImpl: () => child,
+    killImpl: (_pid, signal) => {
+      if (signal === 0) throw Object.assign(new Error('gone'), { code: 'ESRCH' });
+      if (child.signalCode !== null) return;
+      child.signalCode = signal;
+      child.emit('exit', null, signal);
+      child.emit('close');
+    },
+  });
+  await clock.advance(199);
+  let settled = false;
+  pending.then(() => { settled = true; });
+  await clock.flush();
+  assert.equal(settled, false);
+  await clock.advance(1);
+  const result = await pending;
   assert.equal(result.status, 124);
   assert.match(result.err, /no-progress-timeout.*bytes=0/);
 });
@@ -90,7 +115,8 @@ test('failure and signal exit statuses stay failures; missing command fails clos
   assert.equal(status, 127);
 });
 
-test('unreadable cleanup never reports success or holds the lease indefinitely', async () => {
+test('unreadable cleanup never reports success or holds the lease indefinitely', async t => {
+  const clock = new FakeClock(t, { wall: Date.now() });
   const child = Object.assign(new EventEmitter(), {
     pid: 42424, exitCode: null, signalCode: null,
     stdout: new PassThrough(), stderr: new PassThrough(),
@@ -99,8 +125,8 @@ test('unreadable cleanup never reports success or holds the lease indefinitely',
   });
   let err = '';
   const signals = [];
-  const started = performance.now();
-  const status = await runBounded('fixture', [], {
+  t.mock.method(performance, 'now', () => clock.monotonic());
+  const pending = runBounded('fixture', [], {
     timeoutMs: 10_000, idleMs: 50, graceMs: 50,
     spawnImpl: () => child,
     killImpl: (_pid, signal) => {
@@ -109,11 +135,15 @@ test('unreadable cleanup never reports success or holds the lease indefinitely',
     },
     stdout: { write() {} }, stderr: { write(chunk) { err += chunk; } },
   });
+  await clock.advance(50);
+  await clock.advance(50);
+  await clock.advance(1000);
+  const status = await pending;
   assert.equal(status, 125);
   assert.deepEqual(signals, ['SIGTERM', 'SIGKILL']);
   assert.match(err, /cleanup=unconfirmed/);
   assert.ok(child.unreferenced && child.stdout.destroyed && child.stderr.destroyed);
-  assert.ok(performance.now() - started < 3000);
+  assert.equal(clock.monotonic(), 1100);
 });
 
 test('clean descendant exit completes before escalation and preserves the leader failure', async () => {

@@ -1,3 +1,4 @@
+import { FakeClock } from './helpers/load-time-kit.mjs';
 import './helpers/load-aware-timeout-fixture.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
@@ -159,15 +160,22 @@ test('rate limits require and honor Retry-After, including HTTP dates', async t 
   assert.equal(historyReadRetryDelayMs(transportError('Retry-After: 2', { status: 429 }), 0), 2000);
   assert.equal(historyReadRetryDelayMs(transportError('proxy timeout', { status: 404 }), 0), null);
   mockedNow.mock.restore();
+  const clock = new FakeClock(t);
+  let sleeping;
+  const backoffStarted = new Promise(resolve => { sleeping = resolve; });
   let calls = 0;
   const delays = [];
-  const get = createHistoryReader({ env: fakeEnv(), sleep: async ms => { delays.push(ms); await new Promise(resolve => setTimeout(resolve, ms)); },
+  const get = createHistoryReader({ env: fakeEnv(), sleep: async ms => { delays.push(ms); sleeping(); await new Promise(resolve => setTimeout(resolve, ms)); },
     execFileImpl: async () => {
       if (++calls === 1) throw Object.assign(transportError('* Request at fixture\n< HTTP/2.0 403 Forbidden\n< Retry-After: 2\nsecondary rate limit\n* Request took 1ms\ngh: secondary rate limit (HTTP 403)'),
         { stdout: 'HTTP/2.0 403 Forbidden\r\nRetry-After: 2\r\n\r\n' });
       return { stdout: '{}' };
     } });
-  assert.deepEqual(await get(prPath), {});
+  const pending = get(prPath);
+  await backoffStarted;
+  assert.equal(calls, 1);
+  await clock.advance(2000);
+  assert.deepEqual(await pending, {});
   assert.equal(calls, 2);
   assert.deepEqual(delays, [2000]);
 });

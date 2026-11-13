@@ -1,3 +1,4 @@
+import { FakeClock } from './helpers/load-time-kit.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs, { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, readdirSync, statSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs';
@@ -188,6 +189,7 @@ test('verified reversal reads treat malformed and non-object JSON as missing evi
 });
 
 test('timed out caller leaves a single read running, completion persists and next attempt reuses it', async t => {
+  const clock = new FakeClock(t);
   const args = fixture(t);
   let finish;
   let calls = 0;
@@ -195,7 +197,9 @@ test('timed out caller leaves a single read running, completion persists and nex
   await Promise.resolve();
   const second = storedPrimaryChange(args, () => { throw new Error('duplicate read'); });
   assert.match(primaryChangeReadStatus(args), /primary-change read still running, \d+ seconds/);
-  await assert.rejects(Promise.race([pending, new Promise((_, reject) => setTimeout(() => reject(new Error('time limit')), 5))]), /time limit/);
+  const rejection = assert.rejects(Promise.race([pending, new Promise((_, reject) => setTimeout(() => reject(new Error('time limit')), 5))]), /time limit/);
+  await clock.advance(5);
+  await rejection;
   finish(evidence(args));
   await Promise.all([pending, second]);
   assert.equal(primaryChangeReadStatus(args), null);

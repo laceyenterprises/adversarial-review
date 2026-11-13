@@ -1,3 +1,4 @@
+import { FakeClock } from './helpers/load-time-kit.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
@@ -606,7 +607,8 @@ test('fs-ext flock integration: EX-held lock blocks SH|NB in another process and
   }
 });
 
-test('watcher SIGTERM fence wait clears normally when active fence disappears within grace', async () => {
+test('watcher SIGTERM fence wait clears normally when active fence disappears within grace', async t => {
+  const clock = new FakeClock(t, { wall: Date.now() });
   const rootDir = makeRootDir('watcher-fence-grace-');
   try {
     const stateDir = path.join(rootDir, 'data');
@@ -622,19 +624,22 @@ test('watcher SIGTERM fence wait clears normally when active fence disappears wi
       { ...fence.record, repo: 'laceyenterprises/adversarial-review', botTokenEnv: 'GH_CLAUDE_REVIEWER_TOKEN' },
     ]]);
     setTimeout(() => fence.clear(), 100);
-    const result = await waitForActiveReviewerFencesOnSigterm({
+    const pending = waitForActiveReviewerFencesOnSigterm({
       stateDir,
       graceSeconds: 1,
       staleTtlSeconds: 90,
       activeSpawnMap,
     });
+    await clock.advance(250);
+    const result = await pending;
     assert.equal(result.status, 'cleared');
   } finally {
     rmSync(rootDir, { recursive: true, force: true });
   }
 });
 
-test('watcher SIGTERM fence wait queues cleanup after grace expires', async () => {
+test('watcher SIGTERM fence wait queues cleanup after grace expires', async t => {
+  const clock = new FakeClock(t, { wall: Date.now() });
   const rootDir = makeRootDir('watcher-fence-expire-');
   try {
     const stateDir = path.join(rootDir, 'data');
@@ -654,7 +659,7 @@ test('watcher SIGTERM fence wait queues cleanup after grace expires', async () =
       graceSeconds: 1,
       staleTtlSeconds: 90,
       activeSpawnMap,
-      sleepImpl: async () => {},
+      sleepImpl: async ms => { await clock.advance(ms); },
     });
     assert.equal(result.status, 'grace-exceeded');
     assert.equal(listCleanupJobs(stateDir).length, 1);
@@ -664,7 +669,8 @@ test('watcher SIGTERM fence wait queues cleanup after grace expires', async () =
   }
 });
 
-test('watcher SIGTERM preserve mode emits audit without queueing cleanup after grace expires', async () => {
+test('watcher SIGTERM preserve mode emits audit without queueing cleanup after grace expires', async t => {
+  const clock = new FakeClock(t, { wall: Date.now() });
   const rootDir = makeRootDir('watcher-fence-preserve-');
   try {
     const stateDir = path.join(rootDir, 'data');
@@ -685,7 +691,7 @@ test('watcher SIGTERM preserve mode emits audit without queueing cleanup after g
       staleTtlSeconds: 90,
       activeSpawnMap,
       queueCleanupOnGraceExpiry: false,
-      sleepImpl: async () => {},
+      sleepImpl: async ms => { await clock.advance(ms); },
     });
     assert.equal(result.status, 'grace-exceeded');
     assert.equal(listCleanupJobs(stateDir).length, 0);
@@ -731,7 +737,8 @@ test('watcher SIGTERM fence wait treats wall-clock openedAt as stale', async () 
   }
 });
 
-test('watcher SIGTERM stale fence cleanup does not forfeit grace for healthy fences', async () => {
+test('watcher SIGTERM stale fence cleanup does not forfeit grace for healthy fences', async t => {
+  const clock = new FakeClock(t, { wall: Date.now() });
   const rootDir = makeRootDir('watcher-fence-stale-and-healthy-');
   try {
     const stateDir = path.join(rootDir, 'data');
@@ -767,12 +774,14 @@ test('watcher SIGTERM stale fence cleanup does not forfeit grace for healthy fen
       ],
     ]);
     setTimeout(() => healthyFence.clear(), 100);
-    const result = await waitForActiveReviewerFencesOnSigterm({
+    const pending = waitForActiveReviewerFencesOnSigterm({
       stateDir,
       graceSeconds: 1,
       staleTtlSeconds: 90,
       activeSpawnMap,
     });
+    await clock.advance(250);
+    const result = await pending;
     assert.equal(result.status, 'stale');
     const cleanupJobs = listCleanupJobs(stateDir);
     assert.equal(cleanupJobs.length, 1);
@@ -939,7 +948,8 @@ test('removing fence json before unlock prevents concurrent sweep from queueing 
   }
 });
 
-test('processQueuedFenceCleanupJobs drains queued cleanup jobs', async () => {
+test('processQueuedFenceCleanupJobs drains queued cleanup jobs', async t => {
+  const clock = new FakeClock(t, { wall: Date.now() });
   const rootDir = makeRootDir('watcher-fence-cleanup-');
   try {
     const stateDir = path.join(rootDir, 'data');
@@ -959,7 +969,7 @@ test('processQueuedFenceCleanupJobs drains queued cleanup jobs', async () => {
       graceSeconds: 1,
       staleTtlSeconds: 90,
       activeSpawnMap,
-      sleepImpl: async () => {},
+      sleepImpl: async ms => { await clock.advance(ms); },
     });
     const calls = [];
     await withEnv({ GH_CLAUDE_REVIEWER_TOKEN: 'token' }, () => processQueuedFenceCleanupJobs({
@@ -983,7 +993,8 @@ for (const [identity, tokenEnv] of [
   ['grok-reviewer', 'GH_GROK_REVIEWER_TOKEN'],
   ['grok-reviewer-lacey', 'GH_GROK_REVIEWER_TOKEN'],
 ]) {
-  test(`processQueuedFenceCleanupJobs resolves ${identity} to its own token env`, async () => {
+  test(`processQueuedFenceCleanupJobs resolves ${identity} to its own token env`, async t => {
+    const clock = new FakeClock(t, { wall: Date.now() });
     const rootDir = makeRootDir('watcher-fence-token-cleanup-');
     try {
       const stateDir = path.join(rootDir, 'data');
@@ -1003,7 +1014,7 @@ for (const [identity, tokenEnv] of [
         graceSeconds: 1,
         staleTtlSeconds: 90,
         activeSpawnMap,
-        sleepImpl: async () => {},
+        sleepImpl: async ms => { await clock.advance(ms); },
       });
       const calls = [];
       await withEnv({ [tokenEnv]: 'synthetic-token' }, () => processQueuedFenceCleanupJobs({

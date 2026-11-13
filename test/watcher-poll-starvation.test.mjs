@@ -1,3 +1,4 @@
+import { FakeClock } from './helpers/load-time-kit.mjs';
 import './helpers/load-aware-timeout-fixture.mjs';
 // WPS-01 regression suite — new-PR discovery must survive a backlog of PRs the
 // poll loop cannot advance, and a starved loop must page.
@@ -255,14 +256,15 @@ test('WPS-01: a new PR is ingested on the first tick despite a backlog of unadva
   }
 });
 
-test('RVHAND-08: posted-review timeout continues to the rest of the bounded phase', async () => {
+test('RVHAND-08: posted-review timeout continues to the rest of the bounded phase', async t => {
+  const clock = new FakeClock(t, { wall: Date.now() });
   const state = createPostedReviewFairnessState();
   const events = [];
   const errors = [];
   const warnings = [];
   const logs = [];
 
-  const summary = await runPostedReviewHandlersFairly({
+  const pending = runPostedReviewHandlersFairly({
     concurrency: 1,
     handlers: [
       {
@@ -292,6 +294,9 @@ test('RVHAND-08: posted-review timeout continues to the rest of the bounded phas
     },
   });
 
+  await clock.flush();
+  await clock.advance(10);
+  const summary = await pending;
   assert.equal(summary.timedOut, 1);
   assert.equal(summary.ran, 1);
   assert.equal(summary.deferredAfterTimeout, 0);
@@ -404,12 +409,13 @@ test('RVHAND-06: posted-review phase warns when queued handlers make zero progre
   assert.match(warnings.join('\n'), /queued=1 ran=0/);
 });
 
-test('RVHAND-03: per-handler timeout lets slow hammer launch finish without raising the global default', async () => {
+test('RVHAND-03: per-handler timeout lets slow hammer launch finish without raising the global default', async t => {
+  const clock = new FakeClock(t, { wall: Date.now() });
   const state = createPostedReviewFairnessState();
   const events = [];
   const errors = [];
 
-  const summary = await runPostedReviewHandlersFairly({
+  const pending = runPostedReviewHandlersFairly({
     concurrency: 1,
     handlers: [
       {
@@ -443,6 +449,9 @@ test('RVHAND-03: per-handler timeout lets slow hammer launch finish without rais
     },
   });
 
+  await clock.flush();
+  await clock.advance(25);
+  const summary = await pending;
   assert.equal(summary.ran, 2);
   assert.equal(summary.timedOut, 0);
   assert.deepEqual(events, ['slow-handler-finished', 'next-handler-ran']);
@@ -498,7 +507,8 @@ test('RVHAND-05: posted-review phase defers before starting when remaining budge
   assert.match(warnings[0], /remaining=60000ms minimum_start_budget=66000ms/);
 });
 
-test('RVHAND-04: resolveMergeAgentCoexistence soft deadline does not consume the remaining phase budget', async () => {
+test('RVHAND-04: resolveMergeAgentCoexistence soft deadline does not consume the remaining phase budget', async t => {
+  const clock = new FakeClock(t, { wall: Date.now() });
   const oldDeadline = process.env.ADVERSARIAL_WATCHER_RESOLVE_MERGE_AGENT_COEXISTENCE_DEADLINE_MS;
   process.env.ADVERSARIAL_WATCHER_RESOLVE_MERGE_AGENT_COEXISTENCE_DEADLINE_MS = '10';
   const state = createPostedReviewFairnessState();
@@ -523,7 +533,7 @@ test('RVHAND-04: resolveMergeAgentCoexistence soft deadline does not consume the
   };
 
   try {
-    const summary = await runPostedReviewHandlersFairly({
+    const pending = runPostedReviewHandlersFairly({
     concurrency: 1,
       handlers: [
         {
@@ -559,6 +569,9 @@ test('RVHAND-04: resolveMergeAgentCoexistence soft deadline does not consume the
       logger: silentLogger,
     });
 
+    await clock.flush();
+    await clock.advance(10);
+    const summary = await pending;
     assert.equal(firstStepAborted, false);
     assert.equal(summary.timedOut, 0);
     assert.equal(summary.ran, 2);

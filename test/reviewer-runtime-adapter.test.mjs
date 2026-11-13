@@ -1,3 +1,4 @@
+import { FakeClock } from './helpers/load-time-kit.mjs';
 import './helpers/load-aware-timeout-fixture.mjs';
 import './helpers/review-cli-resolver-fixture.mjs';
 import { serviceFixtureExec, writeDummyCodexAuth } from './helpers/codex-service-fixture.mjs';
@@ -1718,9 +1719,12 @@ test('cli-direct preserves cancelled terminal state when onSpawn loses the cance
   }
 });
 
-test('cli-direct escalates terminal onSpawn cancellation before returning', async () => {
+test('cli-direct escalates terminal onSpawn cancellation before returning', async t => {
+  const clock = new FakeClock(t, { wall: Date.now() });
   const rootDir = makeRoot();
   let capturedOptions;
+  let spawned;
+  const ready = new Promise(resolve => { spawned = resolve; });
   let releaseSpawn;
   const killCalls = [];
   let pgidAlive = true;
@@ -1730,7 +1734,7 @@ test('cli-direct escalates terminal onSpawn cancellation before returning', asyn
       preflightImpl: noopPreflight,
       cancelGraceMs: 2,
       cancelPollIntervalMs: 1,
-      sleepImpl: async (ms) => new Promise((resolve) => setTimeout(resolve, Math.min(ms, 1))),
+      sleepImpl: async ms => { await clock.advance(ms); },
       processKillImpl: (pid, signal) => {
         assert.equal(pid, -4245);
         if (signal === 0) {
@@ -1745,7 +1749,7 @@ test('cli-direct escalates terminal onSpawn cancellation before returning', asyn
       },
       spawnCapturedImpl: async (_command, _args, options) => {
         capturedOptions = options;
-        await new Promise((resolve) => { releaseSpawn = resolve; });
+        await new Promise((resolve) => { releaseSpawn = resolve; spawned(); });
         options.onSpawn({ pgid: 4245 });
         return { stdout: 'posted-after-cancel\n', stderr: '' };
       },
@@ -1761,7 +1765,8 @@ test('cli-direct escalates terminal onSpawn cancellation before returning', asyn
       forbiddenFallbacks: ['api-key'],
     };
     const run = adapter.spawnReviewer(req);
-    await waitFor(() => assert.ok(capturedOptions));
+    await ready;
+    assert.ok(capturedOptions);
     const claimed = readReviewerRunRecord(rootDir, req.sessionUuid);
     assert.equal(claimed.state, 'launching');
     updateReviewerRunRecord(rootDir, claimed, {
@@ -1785,9 +1790,12 @@ test('cli-direct escalates terminal onSpawn cancellation before returning', asyn
   }
 });
 
-test('cli-direct fails closed when completed terminal onSpawn cleanup cannot kill the pgid', async () => {
+test('cli-direct fails closed when completed terminal onSpawn cleanup cannot kill the pgid', async t => {
+  const clock = new FakeClock(t, { wall: Date.now() });
   const rootDir = makeRoot();
   let capturedOptions;
+  let spawned;
+  const ready = new Promise(resolve => { spawned = resolve; });
   let releaseSpawn;
   const killCalls = [];
   try {
@@ -1796,7 +1804,7 @@ test('cli-direct fails closed when completed terminal onSpawn cleanup cannot kil
       preflightImpl: noopPreflight,
       cancelGraceMs: 2,
       cancelPollIntervalMs: 1,
-      sleepImpl: async (ms) => new Promise((resolve) => setTimeout(resolve, Math.min(ms, 1))),
+      sleepImpl: async ms => { await clock.advance(ms); },
       processKillImpl: (pid, signal) => {
         assert.equal(pid, -4246);
         if (signal === 0) return true;
@@ -1805,7 +1813,7 @@ test('cli-direct fails closed when completed terminal onSpawn cleanup cannot kil
       },
       spawnCapturedImpl: async (_command, _args, options) => {
         capturedOptions = options;
-        await new Promise((resolve) => { releaseSpawn = resolve; });
+        await new Promise((resolve) => { releaseSpawn = resolve; spawned(); });
         options.onSpawn({ pgid: 4246 });
         return { stdout: 'posted-after-completed\n', stderr: '' };
       },
@@ -1821,7 +1829,8 @@ test('cli-direct fails closed when completed terminal onSpawn cleanup cannot kil
       forbiddenFallbacks: ['api-key'],
     };
     const run = adapter.spawnReviewer(req);
-    await waitFor(() => assert.ok(capturedOptions));
+    await ready;
+    assert.ok(capturedOptions);
     const claimed = readReviewerRunRecord(rootDir, req.sessionUuid);
     assert.equal(claimed.state, 'launching');
     updateReviewerRunRecord(rootDir, claimed, {

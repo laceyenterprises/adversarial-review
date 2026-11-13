@@ -13,7 +13,7 @@ import { main } from '../bin/ar-residue-export.mjs';
 import { countCsvRecords, residueTableRefusal } from '../src/ar-residue.mjs';
 
 const STAMPED = 'operator_reviewer_pass_reset_20260727T062342Z';
-const STAMPED_2 = 'operator_reviewed_prs_backup_20260727T070000Z';
+const STAMPED_2 = 'operator_20260727T0902_review_flow_rearm_reviewed_prs';
 const LIVE_OPERATOR = 'operator_hold_releases';
 const FOSSIL = 'follow-export HAM_RUN_DIR=';
 const NOW = new Date('2026-11-13T01:02:03.000Z');
@@ -64,7 +64,16 @@ function snapshot(dir) {
 }
 
 test('table names: only stamped operator_* tables are residue', () => {
-  assert.equal(residueTableRefusal(STAMPED), null);
+  // The stamp forms the 07-27 hand repairs used: leading, middle and trailing.
+  for (const name of [STAMPED, STAMPED_2, 'operator_20260727T0902_review_flow_rearm_reviewed_prs',
+    'operator_review_flow_repair_20260727T0713_reviewer_passes',
+    'operator_reviewer_pass_stale_archive_20260727T0649_stale_4318']) {
+    assert.equal(residueTableRefusal(name), null, name);
+  }
+  for (const name of ['operator_hold_releases', 'operator_pr_20260727', 'operator_x_20260727T09',
+    'operator_a20260727T0902', 'operator_x-20260727T0902']) {
+    assert.equal(residueTableRefusal(name), 'operator-table-without-repair-stamp', name);
+  }
   assert.equal(residueTableRefusal('reviewer_passes'), 'not-an-operator-table');
   assert.equal(residueTableRefusal(LIVE_OPERATOR), 'operator-table-without-repair-stamp');
   assert.equal(countCsvRecords('a,b\n"x\ny",1\n'), 2);

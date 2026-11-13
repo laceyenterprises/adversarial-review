@@ -8,9 +8,12 @@
 // zero-byte DB files and the fossil directory. Every refusal happens before
 // the first mutation.
 //
-// Only `operator_*` tables carrying a hand-repair stamp
-// (`operator_<what>_<YYYYMMDD>T<HHMMSS>Z`) are residue. `operator_hold_releases`
-// is live (operator-hold-release.mjs) and is refused like any unstamped name.
+// Only `operator_*` tables whose name carries a hand-repair stamp token
+// (`<YYYYMMDD>T<HHMM>[SS][Z]`, anywhere between underscores, as in
+// `operator_20260727T0902_review_flow_rearm_reviewed_prs` or
+// `operator_reviewer_pass_reset_20260727T062342Z`) are residue.
+// `operator_hold_releases` is live (operator-hold-release.mjs) and is refused
+// like any unstamped name.
 
 import { createHash } from 'node:crypto';
 import {
@@ -19,7 +22,8 @@ import {
 import { dirname, join, relative } from 'node:path';
 import Database from 'better-sqlite3';
 
-export const RESIDUE_TABLE_RE = /^operator_[a-z0-9_]+_\d{8}T\d{6}Z$/;
+const OPERATOR_TABLE_RE = /^operator_[A-Za-z0-9_]+$/;
+const REPAIR_STAMP_RE = /(?:^|_)\d{8}T\d{4}(?:\d{2})?Z?(?:_|$)/;
 export const FOSSIL_DIR_NAMES = Object.freeze(['follow-export HAM_RUN_DIR=']);
 const LEGACY_DB_RE = /\.(db|sqlite|sqlite3)$/;
 const MANIFEST = 'manifest.json';
@@ -35,7 +39,9 @@ export class ResidueRefusal extends Error {
 /** Why a table name is not droppable residue, or null when it is. */
 export function residueTableRefusal(name) {
   if (typeof name !== 'string' || !name.startsWith('operator_')) return 'not-an-operator-table';
-  if (!RESIDUE_TABLE_RE.test(name)) return 'operator-table-without-repair-stamp';
+  if (!OPERATOR_TABLE_RE.test(name) || !REPAIR_STAMP_RE.test(name.slice('operator_'.length))) {
+    return 'operator-table-without-repair-stamp';
+  }
   return null;
 }
 

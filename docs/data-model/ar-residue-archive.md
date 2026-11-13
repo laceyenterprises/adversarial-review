@@ -20,8 +20,11 @@ Contents:
   `zeroByteDbFiles[]` (absolute paths) and `fossilDirs[]` with `path`,
   `archive` and `files[]` (`path`, `sha256`, `bytes`).
 
-Only `operator_*` tables whose names end in a hand-repair stamp
-(`_<YYYYMMDD>T<HHMMSS>Z`) are residue. Any other name is refused, including the
+Only `operator_*` tables whose names carry a hand-repair stamp token are
+residue. The token is `<YYYYMMDD>T<HHMM>`, optionally followed by seconds and
+`Z`, and is delimited by underscores. Examples are
+`operator_20260727T0902_review_flow_rearm_reviewed_prs` and
+`operator_reviewer_pass_reset_20260727T062342Z`. Any other name is refused, including the
 live `operator_hold_releases`. Zero-byte DB files are regular `*.db`, `*.sqlite`
 and `*.sqlite3` files of size 0 in the checkout root or `data/`. The live
 `data/reviews.db` is never one of them. The only fossil directory is

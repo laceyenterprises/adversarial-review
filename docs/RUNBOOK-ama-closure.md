@@ -874,6 +874,14 @@ than 40 hexadecimal characters) before opening the review database or reading
 leases. Repair facts count only array-valued closer refund histories; malformed
 entries contribute zero to the informational refunded-spend total.
 
+The helper is a cold composition root: before its first dispatch read (a
+`dispatched` closer lease's launch, or a pending repair epoch's owner) it calls
+`prepareDispatchReadContext`. Only a read terminal launch with no live retry
+releases closer custody; live, transient, timed-out or unproven reads refuse
+`closer-owned-or-unknown`. If preparation fails or leaves reads disabled, it
+refuses `dispatch-read-context-unavailable` with a redacted `detail` and reads
+nothing (REPAIRDISPATCHREAD-01).
+
 Reviewer harness refunds are separate from unlimited inconclusive **closer**
 refunds: only three failed reviewer claims per PR, across all heads, receive
 credit. Later failures keep their charges so ordinary infrastructure cap/alert

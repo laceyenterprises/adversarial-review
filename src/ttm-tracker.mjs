@@ -834,7 +834,7 @@ function syncTtmFlags(db, flags, { observedAt }) {
     }
   });
 
-  tx();
+  tx.immediate();
   return { activated, refreshed, resolved, active: flags.length, eventRows };
 }
 

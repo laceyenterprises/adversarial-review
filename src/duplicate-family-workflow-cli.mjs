@@ -176,7 +176,7 @@ function confirmSelectionAudit(db, familyId, selection) {
     }
     db.prepare('UPDATE duplicate_families SET operator_override_json = ?, updated_at = ? WHERE family_id = ?')
       .run(JSON.stringify({ ...override, selection: { ...current, auditPending: false } }), new Date().toISOString(), familyId);
-  })();
+  }).immediate();
 }
 
 export async function duplicateFamilyWorkflowMain(argv, io = {}) {

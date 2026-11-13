@@ -175,5 +175,5 @@ export function recordLiveShadow({ rootDir, snapshot, legacy, source, repo, prNu
     // Terminal metrics require an observed landing, never a requested hammer.
     observation.dedupeKey = sourceRef;
     return store.append(observation);
-  })();
+  }).immediate();
 }

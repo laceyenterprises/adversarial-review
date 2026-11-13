@@ -1,6 +1,6 @@
 # Reviewer passes
 
-**Source of truth:** `migrations/20260518_reviewer_passes.sql`, `migrations/20260810_reviewer_passes_posted_review_freshness_index.sql`, `src/review-state.mjs`, `src/review-state-statements.mjs`, `src/review-state-db.mjs`, `src/reviewer-route-selection.mjs`, `src/reviewer-pass-tokens.mjs`, `src/reviewer-harness.mjs`, `src/ama/closer-pass-attempt.mjs`, `src/reviewer-pass-reaper.mjs`, `src/reviewer-spawn-settle.mjs`, `src/pollonce-phases.mjs`, `src/daemon-bounce-posted-review.mjs`, `src/orphan-post-reconcile.mjs`, `src/reviewer-reattach.mjs`, and `src/follow-up-jobs.mjs`
+**Source of truth:** `migrations/20260518_reviewer_passes.sql`, `migrations/20260810_reviewer_passes_posted_review_freshness_index.sql`, `src/review-state.mjs`, `src/review-state-statements.mjs`, `src/review-state-db.mjs`, `src/reviewer-route-selection.mjs`, `src/reviewer-pass-tokens.mjs`, `src/reviewer-harness.mjs`, `src/ama/closer-pass-attempt.mjs`, `src/ama/closer-pass-projection.mjs`, `src/reviewer-pass-reaper.mjs`, `src/reviewer-spawn-settle.mjs`, `src/pollonce-phases.mjs`, `src/daemon-bounce-posted-review.mjs`, `src/orphan-post-reconcile.mjs`, `src/reviewer-reattach.mjs`, and `src/follow-up-jobs.mjs`
 
 AGYTELEMETRY-01 counter decoding and reconciliation additionally use
 `src/agy-usage.mjs` as a source of truth.
@@ -289,6 +289,28 @@ to another launch, the pass is recorded at `MAX(attempt_number) + 1` for the
 PR. The closer re-reconciles a terminal launch on every tick until it
 re-dispatches, and before CLOSERREUSE-01 a second recording threw `refusing to
 reuse terminal reviewer_passes row` and failed the closer decision.
+
+Closer-pass `status` is a projection (QWV-04). The authority for whether a
+closer landed is the `lease-terminal` rows of
+[`data/ama-closer-outcomes`](ama-closer-outcomes.md);
+`src/ama/closer-pass-projection.mjs` is the only code that decides a closer
+row's status. A launch with any `succeeded` lease outcome projects to
+`completed`. A launch whose last outcome is `failed-without-merge`,
+`pr-closed-externally` or another refusal projects to `failed`. One whose last
+outcome is `superseded`, `deferred`, `pr-merged-externally` or `retryable-*`,
+or which has no lease-terminal row (for example `handed-to-review`), projects to
+`cancelled`. The projected outcome is kept in `metadata_json.closerOutcome`;
+`metadata_json.terminalStatus` keeps the dispatch's own status as telemetry.
+New closer rows no longer write `metadata_json.merged`, and older rows' values
+are ignored. The row is projected when it is recorded, again when a later tick
+re-reconciles the same launch, and again after every lease-terminal journal
+append for its `launchRequestId`. Token columns are unchanged by projection.
+`node bin/closer-outcome-status.mjs --since 30d` prints the authority's counts
+using the CLI's checkout root by default, independent of the shell's working
+directory; `--root-dir DIR` selects another checkout. It also lists the closer
+rows that disagree with it. The command is read-only;
+`--apply` rewrites those rows, which is how history written before QWV-04 is
+re-projected.
 
 Rows with a non-empty `gh_comment_id` are genuine posted-review artifacts. The
 watcher's review-freshness pager reads those rows through

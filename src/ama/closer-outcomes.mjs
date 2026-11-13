@@ -1,6 +1,7 @@
 import { appendFileSync, mkdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { launchRequestMeaning } from './launch-request-status.mjs';
+import { projectCloserPassAfterOutcome } from './closer-pass-projection.mjs';
 
 // Independent telemetry: a process exit is not evidence of a merge. Keep the
 // launch-terminal observation separate from the authoritative lease outcome.
@@ -62,6 +63,9 @@ export function appendCloserOutcome(rootDir, record, kind, {
       mkdir(dir, { recursive: true });
       append(filePath, row, options);
     }
+    // QWV-04: this journal is the one closer-outcome writer; the launch's
+    // reviewer_passes closer row is re-projected from it (never throws).
+    if (kind === 'lease-terminal') projectCloserPassAfterOutcome(rootDir, observation.launchRequestId, { warn });
     return true;
   } catch {
     // Telemetry failure must not change closure, custody, or paging decisions.

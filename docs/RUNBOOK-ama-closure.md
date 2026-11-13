@@ -184,6 +184,9 @@ in `modules/worker-pool/post-merge-actions/LANEAUTO-01.yaml`.
 
 Terminal launch and lease observations are retained in the
 [append-only closer outcome journal](data-model/ama-closer-outcomes.md).
+Its lease-terminal rows are the one closer-outcome authority (QWV-04).
+`node bin/closer-outcome-status.mjs --since 30d` reports their counts and any
+`reviewer_passes` closer rows that disagree; `--apply` re-projects those rows.
 Consumers must join these observations by launch identity: successful process
 exit alone never proves merge. Journal failures emit a local diagnostic and
 leave existing closure and paging decisions unchanged.
@@ -4172,6 +4175,11 @@ Now:
   same launch makes recording a no-op, and another launch at the attempt is
   recorded at the next free attempt. Any error while recording is logged as
   `closer pass recording failed` and never fails `maybeDispatchAmaCloser`.
+  The row's `status` is not decided here: since QWV-04 it is projected from the
+  `data/ama-closer-outcomes` lease-terminal rows
+  (`src/ama/closer-pass-projection.mjs`). It is re-projected on each later
+  reconcile and after every lease-terminal append, so a launch that lands after
+  its pass was recorded still reads `completed`.
 - **Re-arm.** When a hammer launch is observed `failed`, pushed nothing (the PR
   head is still its dispatch head), and its LRQ failure class is
   `oauth_access_token_revoked`, `adapter_boot_crash`, or

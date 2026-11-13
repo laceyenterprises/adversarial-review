@@ -3835,7 +3835,7 @@ export function summarizeHammerEfficiency(db, { nowMs = Date.now(), windowMs = 3
   if (!db) return { runs: 0, merges: 0, inputTokens: 0, inputTokensPerMerge: null };
   const cutoff = new Date(nowMs - windowMs).toISOString();
   const rows = safeAll(db,
-    `SELECT status, token_input, metadata_json FROM reviewer_passes
+    `SELECT status, token_input FROM reviewer_passes
       WHERE pass_kind = 'closer' AND status IN ('completed', 'failed', 'cancelled')
         AND started_at >= ?
         AND (reviewer_class IN ('hammer', 'hammer-claude')
@@ -3844,8 +3844,8 @@ export function summarizeHammerEfficiency(db, { nowMs = Date.now(), windowMs = 3
   let merges = 0;
   let inputTokens = 0;
   for (const row of rows) {
-    const metadata = parseJson(row.metadata_json, {});
-    if (metadata?.merged === true) merges += 1;
+    // QWV-04: a closer row's status is projected from data/ama-closer-outcomes.
+    if (row.status === 'completed') merges += 1;
     inputTokens += Number(row.token_input) || 0;
   }
   return {

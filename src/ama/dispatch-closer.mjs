@@ -224,6 +224,7 @@ import { isUnsupportedHqPriorityFlagError } from '../merge-agent-hq-exec.mjs';
 import { isHammerWorkerClass } from './hammer-worker-class.mjs';
 import { resolveNodeBin } from '../node-interpreter.mjs';
 import { resolveCloserPassAttempt } from './closer-pass-attempt.mjs';
+import { projectCloserPassAfterOutcome, projectCloserPassStatus } from './closer-pass-projection.mjs';
 import { maybeRearmInfraDeadHammer } from './dead-hammer-rearm.mjs';
 import { CLOSURE_RESUME_FILE, composeClosureResumePrompt, readClosureResume } from './closure-resume.mjs';
 import {
@@ -4109,13 +4110,6 @@ function retainExistingAmaCloserDispatch(existingRecord, workerClass, status) {
   });
 }
 
-function closerReviewerPassStatusForDispatchStatus(status, { merged = false } = {}) {
-  if (merged) return 'completed';
-  const normalized = String(status || '').trim().toLowerCase();
-  if (normalized === 'cancelled' || normalized === 'canceled' || normalized === 'superseded') return 'cancelled';
-  return 'failed';
-}
-
 function usageHasTokenFigure(usage) {
   if (!usage) return false;
   return usage.input !== null && usage.input !== undefined
@@ -4183,7 +4177,6 @@ async function recordAmaCloserReviewerPassTokensOnce({
   prNumber,
   record,
   status,
-  merged = false,
   observedAt,
   ledgerTarget = null,
   ledgerDbPath = null,
@@ -4211,6 +4204,9 @@ async function recordAmaCloserReviewerPassTokensOnce({
       `[ama-closer] closer pass already recorded for ${repo}#${prNumber} attempt=${attemptNumber} `
         + `launchRequestId=${launchRequestId}; not recording it again`,
     );
+    // QWV-04: recorded once, but its status stays a projection of the
+    // closer-outcome journal, so a later `succeeded` lease outcome lands here.
+    projectCloserPassAfterOutcome(rootDir, launchRequestId);
     return null;
   }
   if (closerAttempt.collidedWith) {
@@ -4265,6 +4261,7 @@ async function recordAmaCloserReviewerPassTokensOnce({
     );
   }
   const startedAt = record.dispatchedAt || record.lastAttemptedAt || observedAt || new Date().toISOString();
+  const projected = projectCloserPassStatus(rootDir, { launchRequestId, since: startedAt });
   const endedAt = observedAt || record.lastObservedAt || new Date().toISOString();
   const workerRunId = usage?.workerRunId || record.workerRunId || null;
   const metadata = {
@@ -4274,16 +4271,16 @@ async function recordAmaCloserReviewerPassTokensOnce({
     dispatchId: record.dispatchId || null,
     launchRequestId,
     terminalStatus: status || null,
-    merged,
+    closerOutcome: projected.closerOutcome,
     ...(missingUsage ? { tokenUsageUnavailable: true } : {}),
   };
   return recordCloserReviewerPass(rootDir, {
-    repo, prNumber, attemptNumber, record, usage, workerRunId, startedAt, endedAt, metadata, status, merged,
+    repo, prNumber, attemptNumber, record, usage, workerRunId, startedAt, endedAt, metadata, status: projected.status,
   });
 }
 
 function recordCloserReviewerPass(rootDir, {
-  repo, prNumber, attemptNumber, record, usage, workerRunId, startedAt, endedAt, metadata, status, merged,
+  repo, prNumber, attemptNumber, record, usage, workerRunId, startedAt, endedAt, metadata, status,
 }) {
   beginReviewerPass(rootDir, {
     repo,
@@ -4302,7 +4299,7 @@ function recordCloserReviewerPass(rootDir, {
     prNumber,
     attemptNumber,
     passKind: 'closer',
-    status: closerReviewerPassStatusForDispatchStatus(status, { merged }),
+    status,
     endedAt,
     workerRunId,
     tokenUsage: usage || null,
@@ -5841,7 +5838,7 @@ async function maybeDispatchAmaCloserAttempt({
           logHammerCleanupFailure(cleanup, { logger, repo, prNumber, phase: 'terminal' });
           await recordAmaCloserReviewerPassTokens({
             rootDir, hqRoot, repo, prNumber, record: existingRecord,
-            status: 'failed', merged: false, observedAt: dispatchContext.dispatchedAt,
+            status: 'failed', observedAt: dispatchContext.dispatchedAt,
             ledgerTarget: dispatchContext.ledgerTarget || null,
             ledgerDbPath: dispatchContext.ledgerDbPath || null,
             env: process.env, pollDelaysMs: dispatchContext.closerTokenRollupPollDelaysMs || undefined,
@@ -5996,7 +5993,6 @@ async function maybeDispatchAmaCloserAttempt({
         prNumber,
         record: existingRecord,
         status: existingRecord.lastObservedStatus || 'succeeded',
-        merged: true,
         observedAt: dispatchContext.dispatchedAt,
         ledgerTarget: dispatchContext.ledgerTarget || null,
         ledgerDbPath: dispatchContext.ledgerDbPath || null,
@@ -6198,7 +6194,7 @@ async function maybeDispatchAmaCloserAttempt({
         rootDir, hqRoot, repo, prNumber,
         record: { ...existingRecord, lastObservedStatus: observedStatus,
           lastObservedAt: dispatchContext.dispatchedAt },
-        status: observedStatus, merged: false, observedAt: dispatchContext.dispatchedAt,
+        status: observedStatus, observedAt: dispatchContext.dispatchedAt,
         ledgerTarget: dispatchContext.ledgerTarget || null,
         ledgerDbPath: dispatchContext.ledgerDbPath || null,
         env: process.env,
@@ -6730,7 +6726,6 @@ async function maybeDispatchAmaCloserAttempt({
               lastObservedAt: dispatchContext.dispatchedAt,
             },
             status,
-            merged: true,
             observedAt: dispatchContext.dispatchedAt,
             ledgerTarget: dispatchContext.ledgerTarget || null,
             ledgerDbPath: dispatchContext.ledgerDbPath || null,
@@ -6971,7 +6966,6 @@ async function maybeDispatchAmaCloserAttempt({
         prNumber,
         record: tokenRecord,
         status: existingDispatchStatus || status,
-        merged: releaseUnprovenTerminalHoldMerged,
         observedAt: dispatchContext.dispatchedAt,
         ledgerTarget: dispatchContext.ledgerTarget || null,
         ledgerDbPath: dispatchContext.ledgerDbPath || null,
@@ -7125,7 +7119,6 @@ async function maybeDispatchAmaCloserAttempt({
           lastObservedAt: dispatchContext.dispatchedAt,
         },
         status,
-        merged: false,
         observedAt: dispatchContext.dispatchedAt,
         ledgerTarget: dispatchContext.ledgerTarget || null,
         ledgerDbPath: dispatchContext.ledgerDbPath || null,

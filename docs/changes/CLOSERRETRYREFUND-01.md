@@ -40,7 +40,9 @@ behind charges that the existing refunds never saw:
   A different running revision releases that head's backoff once: the first
   closer after the fixing deploy runs at once.
 - **Supersession is refunded.** `supersedeNotBootedCloser` records the cancelled
-  launch in the owner's record and refunds its charge.
+  launch in the owner's record and refunds its charge. The CLOSERHEADPIN-01
+  `supersedeHeadMovedCloser` path shares the same cancel helper but keeps its
+  charge unchanged and its `ama.closer_superseded` event has no `refunded` field.
 - **Typed terminal state.** If real attempts still spend the budget, the pass
   result reason is `closure-retry-exhausted` or `closure-lifetime-exhausted`.
   The result carries `closureTerminal: { state, headSha, owner: 'operator',
@@ -69,7 +71,7 @@ behind charges that the existing refunds never saw:
   gain an optional `reviewServiceRevision`
   (`docs/data-model/closer-inconclusive-retries.md`).
 - `supersedeNotBootedCloser` accepts `recordRetryImpl` and `refundImpl`, and
-  the `ama.closer_superseded` event gains `refunded`.
+  its `ama.closer_superseded` event gains `refunded`.
 - No configuration key, CI check, gate, ratchet, override label or strict-mode
   change. The state graph, decision rows and SMV declarations are unchanged.
 

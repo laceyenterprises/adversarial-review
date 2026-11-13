@@ -150,6 +150,18 @@ test('a lease-terminal journal append re-projects the launch pass it names', t =
   assert.equal(closerRows(root)[0].status, 'completed');
 });
 
+test('malformed metadata and an unreadable journal never block recording or projection', t => {
+  const root = scratch(t);
+  seedPinnedFailedPasses(root);
+  const db = new Database(join(root, 'data', 'reviews.db'));
+  db.prepare(`UPDATE reviewer_passes SET metadata_json = '{not json' WHERE pr_number = 101`).run();
+  assert.equal(refreshCloserPassStatuses(db, root, { launchRequestId: 'lrq-landed' }).agree, 0);
+  db.close();
+  writeFileSync(join(root, 'data', 'ama-closer-outcomes'), 'not a directory');
+  assert.deepEqual(projectCloserPassStatus(root, { launchRequestId: 'lrq-landed' }),
+    { status: 'cancelled', closerOutcome: null });
+});
+
 test('a lease-terminal append without reviews.db writes only the journal', t => {
   const root = scratch(t);
   assert.equal(appendCloserOutcome(root, { repo: REPO, prNumber: 1, headSha: HEAD, lrqId: 'lrq-x',

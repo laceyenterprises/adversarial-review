@@ -82,10 +82,16 @@ export function readCloserLeaseOutcomes(rootDir, { since = null, launchRequestId
 
 /** The projected status for one launch's closer pass, read at record time. */
 export function projectCloserPassStatus(rootDir, { launchRequestId, since = null } = {}) {
-  const { outcomes } = readCloserLeaseOutcomes(rootDir, {
-    since, launchRequestIds: new Set([String(launchRequestId || '')]),
-  });
-  return projectCloserOutcome(outcomes.get(String(launchRequestId || ''))?.outcomes);
+  try {
+    const { outcomes } = readCloserLeaseOutcomes(rootDir, {
+      since, launchRequestIds: new Set([String(launchRequestId || '')]),
+    });
+    return projectCloserOutcome(outcomes.get(String(launchRequestId || ''))?.outcomes);
+  } catch {
+    // An unreadable journal must not cost the pass its token row; the next
+    // lease-terminal append or `--apply` re-projects it.
+    return projectCloserOutcome([]);
+  }
 }
 
 function parseMetadata(raw) {
@@ -109,11 +115,15 @@ export function refreshCloserPassStatuses(db, rootDir, {
     `SELECT pass_id, status, started_at, metadata_json FROM reviewer_passes
       WHERE pass_kind = 'closer' AND status <> 'running'
         AND (? IS NULL OR started_at >= ?)
-        AND (? IS NULL OR json_extract(metadata_json, '$.launchRequestId') = ?)`,
+        AND (? IS NULL OR CASE WHEN json_valid(metadata_json)
+          THEN json_extract(metadata_json, '$.launchRequestId') END = ?)`,
   ).all(since, since, launchRequestId, launchRequestId);
   const attributed = rows
     .map(row => ({ ...row, metadata: parseMetadata(row.metadata_json) }))
     .filter(row => typeof row.metadata.launchRequestId === 'string' && row.metadata.launchRequestId);
+  if (!attributed.length) {
+    return { closerRows: rows.length, unattributed: rows.length, agree: 0, disagree: [], updated: 0, tornRows: 0 };
+  }
   const earliest = attributed.map(row => row.started_at).filter(Boolean).sort()[0] || since;
   const { outcomes, tornRows } = readCloserLeaseOutcomes(rootDir, {
     since: earliest, launchRequestIds: new Set(attributed.map(row => row.metadata.launchRequestId)),

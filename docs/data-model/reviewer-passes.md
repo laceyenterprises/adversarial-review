@@ -306,7 +306,9 @@ are ignored. The row is projected when it is recorded, again when a later tick
 re-reconciles the same launch, and again after every lease-terminal journal
 append for its `launchRequestId`. Token columns are unchanged by projection.
 `node bin/closer-outcome-status.mjs --since 30d` prints the authority's counts
-and lists the closer rows that disagree with it. The command is read-only;
+using the CLI's checkout root by default, independent of the shell's working
+directory; `--root-dir DIR` selects another checkout. It also lists the closer
+rows that disagree with it. The command is read-only;
 `--apply` rewrites those rows, which is how history written before QWV-04 is
 re-projected.
 

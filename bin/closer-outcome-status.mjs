@@ -5,9 +5,11 @@
 // Read-only by default. --apply rewrites the closer rows that disagree.
 // Prints one JSON object; exits 64 on a usage error.
 import { join, resolve } from 'node:path';
-import { pathToFileURL } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import Database from 'better-sqlite3';
 import { refreshCloserPassStatuses, summarizeCloserOutcomes } from '../src/ama/closer-pass-projection.mjs';
+
+const DEFAULT_ROOT = resolve(fileURLToPath(new URL('..', import.meta.url)));
 
 function parseSince(raw, nowMs) {
   const days = /^(\d+)d$/.exec(raw || '');
@@ -18,7 +20,7 @@ function parseSince(raw, nowMs) {
 }
 
 export function main(args = process.argv.slice(2), { nowMs = Date.now(), print = console.log } = {}) {
-  let rootDir = process.cwd();
+  let rootDir = DEFAULT_ROOT;
   let sinceArg = '30d';
   let apply = false;
   for (let i = 0; i < args.length; i += 1) {

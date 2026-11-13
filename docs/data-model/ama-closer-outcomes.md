@@ -25,6 +25,8 @@ They are the single authoritative closer-outcome store (QWV-04): the
 `reviewer_passes.status` of a closer pass is projected from them by
 `src/ama/closer-pass-projection.mjs`, which re-projects the launch's pass row after each
 lease-terminal append (see [reviewer passes](reviewer-passes.md)).
+The projection reader ignores lease-terminal rows whose `terminalAt` is missing,
+not a string, or not a finite parsed timestamp before sorting by terminal time.
 They retain the authoritative `terminalOutcome`, including `succeeded`,
 `failed-without-merge`, `deferred`, `superseded` and retryable reason codes.
 They do not establish process exit: a lease may release while a launch remains

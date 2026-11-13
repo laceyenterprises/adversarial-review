@@ -52,3 +52,25 @@ unchanged, because removing it would bring back the terminal-row reuse throw.
 Lease writes, closure, merge predicates, paging and the journal schema are
 unchanged. No check, gate or config key is added. Running the export or the
 `--apply` re-projection on the host is the operator step QWV-15.
+
+## Final review remediation
+
+The projection ignores missing, non-string and unparseable terminal timestamps
+before sorting. The status CLI defaults to its own checkout rather than the
+shell's working directory, retaining `--root-dir` overrides. Residue drop accepts
+already-removed tables and files, allowing retries after filesystem failure
+without weakening archive verification or permitting new/changed fossil files.
+The archive format, closer states and deployed smoke promises are unchanged.
+
+## Verification
+
+Targeted offline regression coverage lives in
+`test/qwv-04-closer-projection.test.mjs` and
+`test/qwv-04-ar-residue-export.test.mjs`, including foreign working directories,
+invalid terminal timestamps, partial filesystem failure and cleanup retries.
+`node --test` on those two files passes all 16 tests. `npm run lint` passes
+with zero errors (149 existing warnings); `npm run typecheck:contracts` and
+`node scripts/validate-data-model-catalog.mjs` pass. Full-suite validation is
+delegated to PR-head CI for this final remediation round.
+`bash demo/research-finding-walkthrough.sh` passes with byte-stable deliveries;
+`git diff --check` passes.

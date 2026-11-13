@@ -32,11 +32,18 @@ and `*.sqlite3` files of size 0 in the checkout root or `data/`. The live
 
 Verification re-reads the archive. Each CSV's sha256 and record count must
 match the manifest, and each copied file's sha256 must match. Drop verifies
-again against the live store: a fresh CSV rendering of every table must be
-byte-identical to the export, and the fossil directory must hold exactly the
-exported files. Drop then checks that every listed DB file is still empty. Any
+again against the live store: a fresh CSV rendering of every remaining table must
+be byte-identical to the export, and every remaining fossil file must be exported
+and byte-identical to its archived copy. Drop permits already-absent tables,
+DB files and fossil files/directories so the same `--execute --drop` command
+(with the original archive date) can resume after a partial filesystem failure.
+Standalone `verifyExport` remains strict about missing live tables and fossil
+files unless `allowRemovedResidue` is explicitly enabled, as it is by drop.
+The archive is always verified in full, including copies of removed live files.
+Drop then checks that every remaining listed DB file is still empty. Any
 mismatch refuses before the first `DROP TABLE` or removal. All drops run in one
-transaction.
+transaction with `IF EXISTS`; subsequent filesystem removals can fail independently
+and are safe to retry. No cleanup receipt or manifest schema change is required.
 
 Rollback: create each table from its manifest `sql` and import its CSV. The
 removed DB files were empty. Copy the fossil directory back from `files/`.

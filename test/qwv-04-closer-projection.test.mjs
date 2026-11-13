@@ -3,14 +3,16 @@
 // synthetic, shaped like the journal's recorded rows.
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
+import { copyFileSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { spawnSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import Database from 'better-sqlite3';
 
 import { appendCloserOutcome } from '../src/ama/closer-outcomes.mjs';
 import {
-  CLOSER_OUTCOME_SOURCE, projectCloserOutcome, projectCloserPassStatus, refreshCloserPassStatuses,
+  CLOSER_OUTCOME_SOURCE, projectCloserOutcome, projectCloserPassStatus, readCloserLeaseOutcomes, refreshCloserPassStatuses,
   summarizeCloserOutcomes,
 } from '../src/ama/closer-pass-projection.mjs';
 import { main as closerOutcomeStatus } from '../bin/closer-outcome-status.mjs';
@@ -103,6 +105,31 @@ test('outcome projection: succeeded is sticky; no verdict is cancelled; refusals
   assert.deepEqual(projectCloserOutcome([]), { status: 'cancelled', closerOutcome: null });
 });
 
+test('journal sorting excludes missing, non-string and invalid terminal timestamps', t => {
+  const root = scratch(t);
+  const dir = join(root, CLOSER_OUTCOME_SOURCE);
+  mkdirSync(dir, { recursive: true });
+  const row = { kind: 'lease-terminal', launchRequestId: 'lrq-sort', outcome: 'failed-without-merge' };
+  const rows = [
+    { ...row, terminalAt: '2026-11-10T12:00:00.000Z', outcome: 'deferred' },
+    ...[undefined, null, 0, {}, '', 'not-a-time'].map(terminalAt => ({ ...row, terminalAt, outcome: 'succeeded' })),
+    { ...row, terminalAt: '2026-11-10T11:00:00.000Z' },
+    { ...row, launchRequestId: 'lrq-invalid-only', terminalAt: 'invalid', outcome: 'succeeded' },
+  ];
+  writeFileSync(join(dir, '2026-11-10.jsonl'), rows.map(r => JSON.stringify(r)).join('\n'));
+  const { outcomes } = readCloserLeaseOutcomes(root);
+  assert.deepEqual(outcomes.get('lrq-sort'), {
+    outcomes: ['failed-without-merge', 'deferred'], firstTerminalAt: '2026-11-10T11:00:00.000Z',
+  });
+  assert.equal(outcomes.has('lrq-invalid-only'), false);
+  assert.deepEqual(projectCloserPassStatus(root, { launchRequestId: 'lrq-sort' }),
+    { status: 'cancelled', closerOutcome: 'deferred' });
+  const summary = summarizeCloserOutcomes(root, { since: '2026-11-01T00:00:00.000Z' });
+  assert.equal(summary.launches, 1);
+  assert.equal(summary.cancelled, 1);
+  assert.equal(summary.completed, 0);
+});
+
 test('projection derives the same closer outcomes as the authority on recorded fixtures', t => {
   const root = scratch(t);
   writeJournal(root);
@@ -185,6 +212,29 @@ test('closer-outcome-status reports the authority and is read-only unless --appl
   assert.equal(applied.reviewerPasses.updated, report.reviewerPasses.disagree.length);
   assert.equal(closerOutcomeStatus(['--root-dir', root], { nowMs, print }).reviewerPasses.disagree.length, 0);
   assert.throws(() => closerOutcomeStatus(['--since', 'yesterday'], { nowMs, print }), /--since/);
+});
+
+test('closer-outcome-status defaults to its checkout from a foreign cwd and honors --root-dir', t => {
+  const root = scratch(t);
+  const override = scratch(t);
+  writeJournal(root);
+  seedPinnedFailedPasses(root);
+  seedPinnedFailedPasses(override);
+  // Install the real CLI in a disposable checkout so no production DB is read.
+  mkdirSync(join(root, 'bin'));
+  copyFileSync(new URL('../bin/closer-outcome-status.mjs', import.meta.url), join(root, 'bin', 'status.mjs'));
+  for (const name of ['src', 'node_modules']) {
+    symlinkSync(fileURLToPath(new URL(`../${name}`, import.meta.url)), join(root, name), 'dir');
+  }
+  const invoke = args => {
+    const result = spawnSync(process.execPath,
+      [realpathSync(join(root, 'bin', 'status.mjs')), '--since', '2026-11-01T00:00:00.000Z', ...args],
+      { cwd: override, encoding: 'utf8', timeout: 10000 });
+    assert.equal(result.status, 0, result.stderr);
+    return JSON.parse(result.stdout);
+  };
+  assert.equal(invoke([]).completed, 2, 'uses the CLI checkout, even when cwd has another reviews.db');
+  assert.equal(invoke(['--root-dir', override]).launches, 0, 'explicit override selects the other checkout');
 });
 
 test('no remaining writer of the losing store: closer pass status comes only from the projection', () => {

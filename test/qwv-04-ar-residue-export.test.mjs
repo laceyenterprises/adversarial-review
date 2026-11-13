@@ -2,6 +2,8 @@
 // re-reading, and drops nothing without a verified export.
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import { syncBuiltinESMExports } from 'node:module';
 import {
   existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync,
 } from 'node:fs';
@@ -10,7 +12,7 @@ import { join } from 'node:path';
 import Database from 'better-sqlite3';
 
 import { main } from '../bin/ar-residue-export.mjs';
-import { countCsvRecords, residueTableRefusal } from '../src/ar-residue.mjs';
+import { countCsvRecords, residueTableRefusal, verifyExport } from '../src/ar-residue.mjs';
 
 const STAMPED = 'operator_reviewer_pass_reset_20260727T062342Z';
 const STAMPED_2 = 'operator_20260727T0902_review_flow_rearm_reviewed_prs';
@@ -132,6 +134,54 @@ test('refuses non-operator and live operator tables, and any drop without a veri
   assert.throws(() => main(['--root-dir', fx.arRoot, '--execute'], { env: {}, now: NOW, print: () => {} }),
     /HQ_ROOT/);
   assert.equal(tables(fx.arRoot).length, 4);
+});
+
+test('drop resumes after an I/O failure following committed table drops and partial fossil removal', t => {
+  const fx = fixture(t);
+  const fossil = join(fx.arRoot, 'data', FOSSIL);
+  const firstFile = join(fossil, 'nested', 'controller.json');
+  writeFileSync(join(fossil, 'remaining.json'), '{"remaining":true}\n');
+  assert.equal(run(fx, ['--execute']).verification.verified, true);
+  const realRm = fs.rmSync;
+  const removal = t.mock.method(fs, 'rmSync', (path, options) => {
+    if (path !== fossil) return realRm(path, options);
+    realRm(firstFile);
+    throw Object.assign(new Error('simulated partial removal failure'), { code: 'EACCES' });
+  });
+  syncBuiltinESMExports();
+  try {
+    assert.throws(() => run(fx, ['--execute', '--drop']), /simulated partial removal failure/);
+  } finally {
+    removal.mock.restore();
+    syncBuiltinESMExports();
+  }
+  assert.deepEqual(tables(fx.arRoot), [LIVE_OPERATOR, 'reviewer_passes'].sort());
+  assert.equal(existsSync(firstFile), false);
+  assert.equal(existsSync(join(fossil, 'remaining.json')), true);
+  assert.equal(existsSync(join(fx.arRoot, 'data', 'state.db')), false);
+  assert.throws(() => verifyExport({ archiveDir: fx.archiveDir, arRoot: fx.arRoot }), /table-not-found/);
+  assert.equal(run(fx, ['--execute', '--drop']).verified, true);
+  assert.equal(existsSync(fossil), false);
+  assert.equal(run(fx, ['--execute', '--drop']).verified, true, 'completed cleanup is also safe to repeat');
+});
+
+test('resumed drop still rejects archive tampering and new or changed live fossil files', t => {
+  for (const kind of ['archive', 'changed-file', 'new-file']) {
+    const fx = fixture(t);
+    assert.equal(run(fx, ['--execute']).verification.verified, true);
+    const db = new Database(join(fx.arRoot, 'data', 'reviews.db'));
+    db.exec(`DROP TABLE ${STAMPED}; DROP TABLE ${STAMPED_2}`);
+    db.close();
+    if (kind === 'archive') {
+      writeFileSync(join(fx.archiveDir, `${STAMPED}.csv`), 'tampered\n');
+    } else {
+      const path = kind === 'new-file' ? 'new.json' : join('nested', 'controller.json');
+      writeFileSync(join(fx.arRoot, 'data', FOSSIL, path), 'changed');
+    }
+    const reason = kind === 'archive' ? 'export-sha256-mismatch' : 'fossil-directory-changed-since-export';
+    assert.equal(run(fx, ['--execute', '--drop']).refused, reason);
+    assert.equal(existsSync(join(fx.arRoot, 'data', 'state.db')), true);
+  }
 });
 
 test('drop refuses a tampered export, a changed table, a changed fossil and a non-empty DB', t => {

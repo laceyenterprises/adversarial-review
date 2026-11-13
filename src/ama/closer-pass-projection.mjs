@@ -67,6 +67,7 @@ export function readCloserLeaseOutcomes(rootDir, { since = null, launchRequestId
       try { row = JSON.parse(line); } catch { tornRows += 1; continue; }
       if (row?.kind !== 'lease-terminal' || typeof row.outcome !== 'string'
         || typeof row.launchRequestId !== 'string') continue;
+      if (typeof row.terminalAt !== 'string' || !Number.isFinite(Date.parse(row.terminalAt))) continue;
       if (launchRequestIds && !launchRequestIds.has(row.launchRequestId)) continue;
       rows.push(row);
     }

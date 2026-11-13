@@ -211,9 +211,10 @@ export function exportResidue({ arRoot, archiveDir, tables = null, now = new Dat
 /**
  * Re-read an export. Without `arRoot` it checks the archive against its own
  * manifest; with `arRoot` it also checks the live tables and fossil files
- * still match what was exported, which is what drop requires.
+ * still match what was exported. Drop permits already-removed residue so a
+ * filesystem failure after the table transaction can be retried safely.
  */
-export function verifyExport({ archiveDir, arRoot = null }) {
+export function verifyExport({ archiveDir, arRoot = null, allowRemovedResidue = false }) {
   const manifestPath = join(archiveDir, MANIFEST);
   if (!existsSync(manifestPath)) throw new ResidueRefusal('no-export-manifest', { archiveDir });
   const manifest = JSON.parse(readFileSync(manifestPath, 'utf8'));
@@ -240,7 +241,10 @@ export function verifyExport({ archiveDir, arRoot = null }) {
     try {
       for (const table of manifest.tables) {
         const live = db.prepare(`SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?`).get(table.name);
-        if (!live) throw new ResidueRefusal('table-not-found', { table: table.name });
+        if (!live) {
+          if (allowRemovedResidue) continue;
+          throw new ResidueRefusal('table-not-found', { table: table.name });
+        }
         if (tableCsv(db, table.name).csv !== readFileSync(join(archiveDir, table.csv), 'utf8')) {
           throw new ResidueRefusal('table-changed-since-export', { table: table.name });
         }
@@ -251,8 +255,9 @@ export function verifyExport({ archiveDir, arRoot = null }) {
     for (const dir of manifest.fossilDirs) {
       const live = existsSync(dir.path) ? walkFiles(dir.path).map(file => relative(dir.path, file)) : [];
       const exported = dir.files.map(file => file.path);
-      if (JSON.stringify(live.sort()) !== JSON.stringify([...exported].sort())
-        || dir.files.some(file => sha256File(join(dir.path, file.path)) !== file.sha256)) {
+      const expected = new Map(dir.files.map(file => [file.path, file.sha256]));
+      if ((!allowRemovedResidue && JSON.stringify(live.sort()) !== JSON.stringify([...exported].sort()))
+        || live.some(path => !expected.has(path) || sha256File(join(dir.path, path)) !== expected.get(path))) {
         throw new ResidueRefusal('fossil-directory-changed-since-export', { path: dir.path });
       }
     }
@@ -262,7 +267,7 @@ export function verifyExport({ archiveDir, arRoot = null }) {
 
 /** Drop only what a verified export covers; refuse everything before mutating. */
 export function dropResidue({ arRoot, archiveDir }) {
-  const verification = verifyExport({ archiveDir, arRoot });
+  const verification = verifyExport({ archiveDir, arRoot, allowRemovedResidue: true });
   const manifest = JSON.parse(readFileSync(join(archiveDir, MANIFEST), 'utf8'));
   for (const path of manifest.zeroByteDbFiles) {
     if (path === reviewsDbPath(arRoot)) throw new ResidueRefusal('refusing-live-reviews-db', { path });
@@ -274,7 +279,7 @@ export function dropResidue({ arRoot, archiveDir }) {
   try {
     db.pragma('busy_timeout = 5000');
     db.transaction(() => {
-      for (const table of manifest.tables) db.exec(`DROP TABLE ${quoteIdent(table.name)}`);
+      for (const table of manifest.tables) db.exec(`DROP TABLE IF EXISTS ${quoteIdent(table.name)}`);
     })();
   } finally {
     db.close();

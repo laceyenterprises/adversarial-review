@@ -1747,7 +1747,7 @@ async function collectPrimaryChange(args, {
 // Explicit operator context only. Merge-authority callers use fetchPrimaryChange
 // and never pay for diagnostic snapshots, even when a refused head is reused.
 export async function fetchPrimaryChangeContext(args, {
-  strictNonBlockingRemediation = false, diagnosticTimeoutMs = 15000,
+  strictNonBlockingRemediation = false, diagnosticTimeoutMs = loadAwareTimeoutMs(15000),
   createDiagnosticReaderImpl = createHistoryReader, ...options
 } = {}) {
   const evidence = await fetchPrimaryChange(args, options);

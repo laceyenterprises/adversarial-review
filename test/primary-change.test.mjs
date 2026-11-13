@@ -1,4 +1,5 @@
 import './helpers/load-aware-timeout-fixture.mjs';
+import { mockCloserLoad } from './helpers/closer-load-fixture.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync, mkdtempSync, mkdirSync, writeFileSync, rmSync, existsSync, readdirSync } from 'node:fs';
@@ -1338,6 +1339,24 @@ test('operator diagnostics enforce a wall-clock budget and pass its signal to th
   assert.equal(summary.length, 4096);
   assert.match(summary, /diagnostic time budget exhausted/);
 });
+
+for (const multiplier of [1, 6]) {
+  test(`operator diagnostic default budget scales ${multiplier}x with synthetic load`, async t => {
+    const { args } = await storedRefusal(t);
+    mockCloserLoad(t, multiplier);
+    const timers = [];
+    const realSetTimeout = globalThis.setTimeout;
+    t.mock.method(globalThis, 'setTimeout', (callback, ms, ...values) => {
+      timers.push(ms);
+      return realSetTimeout(callback, ms, ...values);
+    });
+    const evidence = await fetchPrimaryChangeContext(args, {
+      createDiagnosticReaderImpl: () => async () => ({ files: [] }),
+    });
+    assert.equal(checkPrimaryChange(evidence, head).reason, 'primary-change-reverted');
+    assert.equal(timers.at(-1), 15000 * multiplier);
+  });
+}
 
 test('whole-file reversal diagnostics use a file-level label without changing the refusal', () => {
   const evidence = { ...primaryChangeFixture(head), finalFiles: [],

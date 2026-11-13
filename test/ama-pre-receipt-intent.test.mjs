@@ -1,3 +1,4 @@
+import './helpers/load-aware-timeout-fixture.mjs';
 import { readPolicyDispatchRows } from './helpers/dispatch-read-fixture.mjs';
 import { seedCloserIntent, intentExpired } from './helpers/closer-intent-fixture.mjs';
 import test from 'node:test';
@@ -58,6 +59,31 @@ function fixture(t, patch = {}, lease = true) {
       db.prepare('INSERT INTO launch_requests VALUES (@launch_request_id,@idempotency_key,@ticket_ref,@target_repo,@status,@requested_at,@worker_class)').run(row);
     } finally { db.close(); } },
   };
+}
+
+for (const multiplier of [1, 6]) {
+  test(`intent PR read attempt and total budgets scale ${multiplier}x with fake load`, async t => {
+    const f = fixture(t);
+    let elapsed = 0;
+    t.mock.method(performance, 'now', () => elapsed);
+    const timeouts = [];
+    const outcome = await f.reconcile({
+      readPullRequestStateImpl: undefined,
+      loadAwareTimeoutOptions: { enabled: true, maxMultiplier: 6, cpuCount: 4,
+        loadAvg1m: multiplier === 1 ? 0 : 12, cpuBusyPercent: 100 },
+      execFileImpl: async (_command, _args, options) => {
+        timeouts.push(options.timeout);
+        if (timeouts.length === 1) {
+          elapsed += 3500 * multiplier;
+          throw Object.assign(Error('synthetic timeout'), { code: 'ETIMEDOUT' });
+        }
+        return { stdout: JSON.stringify({ state: 'CLOSED' }) };
+      },
+    });
+    assert.equal(outcome.status, 'pr-terminal');
+    assert.deepEqual(timeouts, [3000 * multiplier, 1500 * multiplier],
+      'retry is clipped by the scaled 5000ms total budget');
+  });
 }
 
 for (const phase of ['prepared', 'submitting', 'accepted']) {

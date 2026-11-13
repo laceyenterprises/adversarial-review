@@ -65,7 +65,9 @@ async function readPullRequestState({ repo, prNumber }, options) {
   const { stdout } = await execGhWithRetry({
     args: ['api', `repos/${repo}/pulls/${prNumber}`, '--jq', '{state, merged}'],
     execFileImpl: options.execFileImpl, env: options.env || process.env,
-    signal: options.signal, retries: 1, timeoutMs: 3000, totalTimeoutMs: 5000,
+    signal: options.signal, retries: 1,
+    timeoutMs: loadAwareTimeoutMs(3000, options.loadAwareTimeoutOptions),
+    totalTimeoutMs: loadAwareTimeoutMs(5000, options.loadAwareTimeoutOptions),
   });
   return JSON.parse(stdout);
 }

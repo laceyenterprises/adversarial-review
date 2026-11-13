@@ -5,7 +5,7 @@ import { closeSync, mkdtempSync, openSync, readFileSync, realpathSync, rmSync } 
 import { constants, tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { MAX_TIMER_DELAY_MS } from '../src/load-aware-timeout.mjs';
+import { loadAwareTimeoutMs, MAX_TIMER_DELAY_MS } from '../src/load-aware-timeout.mjs';
 import { isLoadTimeout, OVERLOAD_DEFERRED } from '../src/overload-deferral.mjs';
 import { writeFileAtomic } from '../src/atomic-write.mjs';
 import { HAMMER_CLOSER_FAULTS, closerFaultRecovery } from '../src/ama/hammer-stop-origin.mjs';
@@ -31,7 +31,7 @@ export function helperBudget(nominal, ceiling) {
   try {
     const value = Number(execFileSync(process.execPath,
       [join(here, 'load-aware-timeout.mjs'), String(nominal), String(ceiling)],
-      { encoding: 'utf8', timeout: 5000, stdio: ['ignore', 'pipe', 'inherit'] }));
+      { encoding: 'utf8', timeout: loadAwareTimeoutMs(5000), stdio: ['ignore', 'pipe', 'inherit'] }));
     if (Number.isInteger(value) && value >= nominal && value <= ceiling) return value;
   } catch { /* Sizing failure retains the bounded nominal, never an empty alarm. */ }
   return nominal;

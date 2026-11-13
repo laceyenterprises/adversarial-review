@@ -7,9 +7,9 @@
       "path": "docs/data-model/ama-closer-outcomes.md",
       "store": "data/ama-closer-outcomes/YYYY-MM-DD.jsonl",
       "schemaSurface": "src/ama/closer-outcomes.mjs",
-      "relatedSchemaSurfaces": ["src/ama/dispatch-closer.mjs", "src/ama/closer-lease.mjs"],
+      "relatedSchemaSurfaces": ["src/ama/dispatch-closer.mjs", "src/ama/closer-lease.mjs", "src/ama/closer-pass-projection.mjs"],
       "owner": "AMA closer telemetry",
-      "description": "Append-only terminal launch and terminal lease observations, joined by globally unique launch request identity; process success never implies merge."
+      "description": "Append-only terminal launch and terminal lease observations, joined by globally unique launch request identity; process success never implies merge. QWV-04: lease-terminal rows are the single closer-outcome authority; reviewer_passes closer status is projected from them."
     }
   ]
 }

@@ -1,6 +1,6 @@
 # AMA closer outcome observations
 
-**Source of truth:** `src/ama/closer-outcomes.mjs`
+**Source of truth:** `src/ama/closer-outcomes.mjs` and `src/ama/closer-pass-projection.mjs`
 
 Owner: `src/ama/closer-outcomes.mjs`. Store:
 `data/ama-closer-outcomes/YYYY-MM-DD.jsonl`, append-only, mode 0640.
@@ -21,6 +21,10 @@ Operator-hold terminal statuses `operator_triage_required` and
 `reaped_stuck_requested` are retained verbatim in `launchStatus`.
 
 `lease-terminal` rows come from successful terminal lease writes with an LRQ.
+They are the single authoritative closer-outcome store (QWV-04): the
+`reviewer_passes.status` of a closer pass is projected from them by
+`src/ama/closer-pass-projection.mjs`, which re-projects the launch's pass row after each
+lease-terminal append (see [reviewer passes](reviewer-passes.md)).
 They retain the authoritative `terminalOutcome`, including `succeeded`,
 `failed-without-merge`, `deferred`, `superseded` and retryable reason codes.
 They do not establish process exit: a lease may release while a launch remains

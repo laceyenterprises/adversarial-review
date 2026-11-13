@@ -1,0 +1,159 @@
+// QWV-04: the reviews.db residue export is dry-run by default, verifies by
+// re-reading, and drops nothing without a verified export.
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import {
+  existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync,
+} from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import Database from 'better-sqlite3';
+
+import { main } from '../bin/ar-residue-export.mjs';
+import { countCsvRecords, residueTableRefusal } from '../src/ar-residue.mjs';
+
+const STAMPED = 'operator_reviewer_pass_reset_20260727T062342Z';
+const STAMPED_2 = 'operator_reviewed_prs_backup_20260727T070000Z';
+const LIVE_OPERATOR = 'operator_hold_releases';
+const FOSSIL = 'follow-export HAM_RUN_DIR=';
+const NOW = new Date('2026-11-13T01:02:03.000Z');
+
+function fixture(t) {
+  const base = mkdtempSync(join(tmpdir(), 'qwv04-residue-'));
+  t.after(() => rmSync(base, { recursive: true, force: true }));
+  const arRoot = join(base, 'ar');
+  const hqRoot = join(base, 'hq');
+  mkdirSync(join(arRoot, 'data', FOSSIL, 'nested'), { recursive: true });
+  mkdirSync(hqRoot);
+  const db = new Database(join(arRoot, 'data', 'reviews.db'));
+  db.exec(`CREATE TABLE reviewer_passes (pass_id INTEGER PRIMARY KEY, status TEXT);
+    CREATE TABLE ${LIVE_OPERATOR} (id INTEGER PRIMARY KEY, note TEXT);
+    CREATE TABLE ${STAMPED} (pass_id INTEGER, status TEXT, note TEXT, cost REAL);
+    CREATE TABLE ${STAMPED_2} (id INTEGER, body TEXT);
+    INSERT INTO reviewer_passes VALUES (1, 'failed');
+    INSERT INTO ${LIVE_OPERATOR} VALUES (1, 'live');`);
+  const insert = db.prepare(`INSERT INTO ${STAMPED} VALUES (?, ?, ?, ?)`);
+  insert.run(1, 'failed', 'comma, "quote"\nnewline', 0.25);
+  insert.run(2, 'running', null, null);
+  insert.run(3, '', '', 1);
+  db.prepare(`INSERT INTO ${STAMPED_2} VALUES (?, ?)`).run(7, 'x');
+  db.close();
+  for (const name of ['reviewer-passes.db', 'state.db', 'reviews.sqlite']) writeFileSync(join(arRoot, 'data', name), '');
+  writeFileSync(join(arRoot, 'reviews.db'), '');
+  writeFileSync(join(arRoot, 'data', 'not-a-db.txt'), '');
+  writeFileSync(join(arRoot, 'data', FOSSIL, 'nested', 'controller.json'), '{"quiescent":true}\n');
+  return { arRoot, hqRoot, archiveDir: join(hqRoot, 'archive', 'ar-residue', '2026-11-13') };
+}
+
+function run(fx, args) {
+  return main(['--root-dir', fx.arRoot, '--hq-root', fx.hqRoot, ...args], { env: {}, now: NOW, print: () => {} });
+}
+
+function tables(arRoot) {
+  const db = new Database(join(arRoot, 'data', 'reviews.db'), { readonly: true });
+  try {
+    return db.prepare(`SELECT name FROM sqlite_master WHERE type='table' ORDER BY name`).all().map(r => r.name);
+  } finally {
+    db.close();
+  }
+}
+
+function snapshot(dir) {
+  return readdirSync(dir, { recursive: true }).sort()
+    .map(name => [name, statSync(join(dir, name)).size, statSync(join(dir, name)).mtimeMs]);
+}
+
+test('table names: only stamped operator_* tables are residue', () => {
+  assert.equal(residueTableRefusal(STAMPED), null);
+  assert.equal(residueTableRefusal('reviewer_passes'), 'not-an-operator-table');
+  assert.equal(residueTableRefusal(LIVE_OPERATOR), 'operator-table-without-repair-stamp');
+  assert.equal(countCsvRecords('a,b\n"x\ny",1\n'), 2);
+});
+
+test('dry-run lists tables, zero-byte DBs and the fossil directory and writes nothing', t => {
+  const fx = fixture(t);
+  const before = { ar: snapshot(fx.arRoot), hq: snapshot(fx.hqRoot) };
+  const plan = run(fx, []);
+  assert.equal(plan.mode, 'dry-run');
+  assert.deepEqual(plan.tables, [{ name: STAMPED_2, rowCount: 1 }, { name: STAMPED, rowCount: 3 }]);
+  assert.deepEqual(plan.keptOperatorTables, [LIVE_OPERATOR]);
+  assert.deepEqual(plan.zeroByteDbFiles, [
+    join(fx.arRoot, 'data', 'reviewer-passes.db'), join(fx.arRoot, 'data', 'reviews.sqlite'),
+    join(fx.arRoot, 'data', 'state.db'), join(fx.arRoot, 'reviews.db'),
+  ]);
+  assert.deepEqual(plan.fossilDirs, [{ path: join(fx.arRoot, 'data', FOSSIL),
+    files: [{ path: join('nested', 'controller.json'), bytes: 19 }] }]);
+  assert.deepEqual({ ar: snapshot(fx.arRoot), hq: snapshot(fx.hqRoot) }, before);
+});
+
+test('export writes CSV + manifest, verifies by re-reading, and drop then removes only the verified residue', t => {
+  const fx = fixture(t);
+  const exported = run(fx, ['--execute']);
+  assert.equal(exported.mode, 'export');
+  assert.equal(exported.verification.verified, true);
+  const manifest = JSON.parse(readFileSync(join(fx.archiveDir, 'manifest.json'), 'utf8'));
+  const table = manifest.tables.find(entry => entry.name === STAMPED);
+  assert.equal(table.rowCount, 3);
+  assert.match(table.sha256, /^[0-9a-f]{64}$/);
+  assert.match(table.sql, /^CREATE TABLE operator_reviewer_pass_reset_/);
+  const csv = readFileSync(join(fx.archiveDir, `${STAMPED}.csv`), 'utf8');
+  assert.equal(csv, 'pass_id,status,note,cost\n1,failed,"comma, ""quote""\nnewline",0.25\n2,running,,\n3,"","",1\n');
+  assert.equal(readFileSync(join(fx.archiveDir, 'files', FOSSIL, 'nested', 'controller.json'), 'utf8'),
+    '{"quiescent":true}\n');
+  assert.deepEqual(tables(fx.arRoot), [STAMPED_2, LIVE_OPERATOR, STAMPED, 'reviewer_passes'].sort());
+
+  assert.equal(run(fx, ['--execute']).refused, 'export-directory-not-empty');
+  const dropped = run(fx, ['--execute', '--drop']);
+  assert.equal(dropped.refused, undefined, JSON.stringify(dropped));
+  assert.deepEqual(tables(fx.arRoot), [LIVE_OPERATOR, 'reviewer_passes'].sort());
+  assert.equal(dropped.removedFiles.length, 4);
+  assert.equal(existsSync(join(fx.arRoot, 'data', FOSSIL)), false);
+  assert.equal(existsSync(join(fx.arRoot, 'data', 'not-a-db.txt')), true);
+  assert.equal(existsSync(join(fx.arRoot, 'data', 'reviews.db')), true);
+});
+
+test('refuses non-operator and live operator tables, and any drop without a verified export', t => {
+  const fx = fixture(t);
+  assert.equal(run(fx, ['--table', 'reviewer_passes']).refused, 'not-an-operator-table');
+  assert.equal(run(fx, ['--execute', '--table', LIVE_OPERATOR]).refused, 'operator-table-without-repair-stamp');
+  assert.equal(run(fx, ['--table', 'operator_missing_20260101T000000Z']).refused, 'table-not-found');
+  assert.equal(existsSync(fx.archiveDir), false, 'refused export writes nothing');
+  assert.equal(run(fx, ['--execute', '--drop']).refused, 'no-export-manifest');
+  assert.throws(() => run(fx, ['--drop']), /--drop requires --execute/);
+  assert.throws(() => main(['--root-dir', fx.arRoot, '--execute'], { env: {}, now: NOW, print: () => {} }),
+    /HQ_ROOT/);
+  assert.equal(tables(fx.arRoot).length, 4);
+});
+
+test('drop refuses a tampered export, a changed table, a changed fossil and a non-empty DB', t => {
+  const cases = [
+    ['export-sha256-mismatch', fx => writeFileSync(join(fx.archiveDir, `${STAMPED}.csv`), 'pass_id\n')],
+    ['table-changed-since-export', fx => {
+      const db = new Database(join(fx.arRoot, 'data', 'reviews.db'));
+      db.prepare(`INSERT INTO ${STAMPED} VALUES (4, 'late', NULL, NULL)`).run();
+      db.close();
+    }],
+    ['fossil-directory-changed-since-export', fx => writeFileSync(join(fx.arRoot, 'data', FOSSIL, 'new.json'), '{}')],
+    ['refusing-non-empty-db', fx => writeFileSync(join(fx.arRoot, 'data', 'state.db'), 'SQLite format 3\0')],
+    ['export-row-count-mismatch', fx => {
+      const path = join(fx.archiveDir, 'manifest.json');
+      const manifest = JSON.parse(readFileSync(path, 'utf8'));
+      manifest.tables[0].rowCount += 1;
+      writeFileSync(path, JSON.stringify(manifest));
+    }],
+    ['not-an-operator-table', fx => {
+      const path = join(fx.archiveDir, 'manifest.json');
+      const manifest = JSON.parse(readFileSync(path, 'utf8'));
+      manifest.tables[0].name = 'reviewer_passes';
+      writeFileSync(path, JSON.stringify(manifest));
+    }],
+  ];
+  for (const [reason, tamper] of cases) {
+    const fx = fixture(t);
+    assert.equal(run(fx, ['--execute']).verification.verified, true);
+    tamper(fx);
+    assert.equal(run(fx, ['--execute', '--drop']).refused, reason, reason);
+    assert.equal(tables(fx.arRoot).length, 4, `${reason}: nothing dropped`);
+    assert.equal(existsSync(join(fx.arRoot, 'data', 'reviewer-passes.db')), true, `${reason}: nothing removed`);
+  }
+});

@@ -53,9 +53,21 @@
       "path": "docs/data-model/ama-closer-outcomes.md",
       "store": "data/ama-closer-outcomes/YYYY-MM-DD.jsonl",
       "schemaSurface": "src/ama/closer-outcomes.mjs",
-      "relatedSchemaSurfaces": ["src/ama/dispatch-closer.mjs", "src/ama/closer-lease.mjs"],
+      "relatedSchemaSurfaces": ["src/ama/dispatch-closer.mjs", "src/ama/closer-lease.mjs", "src/ama/closer-pass-projection.mjs"],
       "owner": "AMA closer telemetry",
-      "description": "Append-only terminal launch and terminal lease observations, joined by globally unique launch request identity; process success never implies merge."
+      "description": "Append-only terminal launch and terminal lease observations, joined by globally unique launch request identity; process success never implies merge. QWV-04: lease-terminal rows are the single closer-outcome authority; reviewer_passes closer status is projected from them."
+    },
+    {
+      "id": "ar-residue-archive",
+      "title": "AR residue archive",
+      "path": "docs/data-model/ar-residue-archive.md",
+      "store": "$HQ_ROOT/archive/ar-residue/<UTC date>/",
+      "schemaSurface": "src/ar-residue.mjs",
+      "relatedSchemaSurfaces": [
+        "bin/ar-residue-export.mjs"
+      ],
+      "owner": "operator residue export (QWV-04/QWV-15)",
+      "description": "CSV export plus sha256/row-count manifest of the stamped operator_* hand-repair tables in reviews.db, with the zero-byte legacy DB list and fossil-directory copies; drop refuses without a verified, unchanged export."
     },
     {
       "id": "mes-review-enforcement",
@@ -781,6 +793,7 @@
         "src/orphan-post-reconcile.mjs",
         "src/reviewer-spawn-settle.mjs",
         "src/ama/closer-pass-attempt.mjs",
+        "src/ama/closer-pass-projection.mjs",
         "src/exhausted-head-verdict.mjs"
       ],
       "deliveryHeadWaitFields": ["head_wait_started_at"],

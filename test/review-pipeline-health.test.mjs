@@ -49,7 +49,7 @@ function collectReviewPipelineHealth(options = {}) {
   });
 }
 
-test('hammer efficiency counts only merged closer passes and divides recorded input tokens by merges', () => {
+test('hammer efficiency counts only completed (projected landed) closer passes and divides recorded input tokens by merges', () => {
   const db = new Database(':memory:');
   db.exec(`CREATE TABLE reviewer_passes (
     pass_kind TEXT, reviewer_class TEXT, status TEXT, token_input INTEGER, metadata_json TEXT, started_at TEXT
@@ -58,7 +58,7 @@ test('hammer efficiency counts only merged closer passes and divides recorded in
     'closer', 'hammer', 'failed', 100, '{"merged":false}', '2026-09-27T00:00:00.000Z'
   );
   db.prepare(`INSERT INTO reviewer_passes VALUES (?, ?, ?, ?, ?, ?)`).run(
-    'closer', 'codex', 'completed', 50, '{"merged":true,"workerClass":"hammer"}', '2026-09-27T00:00:00.000Z'
+    'closer', 'codex', 'completed', 50, '{"workerClass":"hammer"}', '2026-09-27T00:00:00.000Z'
   );
   db.prepare(`INSERT INTO reviewer_passes VALUES (?, ?, ?, ?, ?, ?)`).run(
     'closer', 'hammer', 'running', 500, '{"merged":false}', '2026-09-27T00:00:00.000Z'

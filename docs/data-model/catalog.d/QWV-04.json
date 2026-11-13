@@ -1,0 +1,15 @@
+{
+  "version": 1,
+  "entries": [
+    {
+      "id": "ar-residue-archive",
+      "title": "AR residue archive",
+      "path": "docs/data-model/ar-residue-archive.md",
+      "store": "$HQ_ROOT/archive/ar-residue/<UTC date>/",
+      "schemaSurface": "src/ar-residue.mjs",
+      "relatedSchemaSurfaces": ["bin/ar-residue-export.mjs"],
+      "owner": "operator residue export (QWV-04/QWV-15)",
+      "description": "CSV export plus sha256/row-count manifest of the stamped operator_* hand-repair tables in reviews.db, with the zero-byte legacy DB list and fossil-directory copies; drop refuses without a verified, unchanged export."
+    }
+  ]
+}

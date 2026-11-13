@@ -10,8 +10,31 @@ import { readAmaCloserLease, abandonedAmaCloserLeaseOutcome } from '../src/ama/c
 import { readLaunchRequestStatusFromLedgerAsync } from '../src/session-ledger-read-adapter.mjs';
 import { listFollowUpJobsInDir } from '../src/follow-up-jobs.mjs';
 import { launchRequestOwned } from '../src/ama/launch-request-status.mjs';
+import { prepareDispatchReadContext, readDispatchLaunches } from '../src/dispatch-read-client.mjs';
 
-export async function main(args) {
+// REPAIRDISPATCHREAD-01: this cold CLI is a composition root. Dispatch reads
+// stay disabled until it prepares the read context, and an unprepared read
+// returns "unknown" for every launch. Prepare once, lazily, before the first
+// read; a failed preparation is its own refusal, never closer ownership.
+function dispatchReadContext(env, prepare) {
+  let ready;
+  return () => (ready ??= (async () => {
+    let prepared;
+    try { prepared = await prepare({ env }); } catch { prepared = null; }
+    if (!prepared?.ok) return { ok: false, detail: prepared?.detail ?? 'session-bootstrap-failed' };
+    // The read gate is the env switch itself: a context that leaves it off
+    // would make every lookup "dispatch lookup disabled" again.
+    return env.ADVERSARIAL_DISPATCH_READS_ENABLED === '1' ? prepared
+      : { ok: false, detail: 'dispatch-reads-disabled' };
+  })());
+}
+function contextUnavailable(ready) {
+  return { ok: false, reason: 'dispatch-read-context-unavailable', detail: ready.detail };
+}
+
+export async function main(args, {
+  env = process.env, prepareDispatchReadContextImpl = prepareDispatchReadContext,
+} = {}) {
   const [rootDir, repo, prRaw, headSha, ownerKey, conflicting] = args;
   const prNumber = Number(prRaw);
   if (!rootDir || !repo?.includes('/') || !(prNumber > 0) || !ownerKey
@@ -27,6 +50,8 @@ export async function main(args) {
   if (!facts.cause) return { ok: true, epoch: null, reason: 'budget-available' };
   const release = tryAcquireCloserIntentLock(rootDir, { repo, prNumber });
   if (!release) return { ok: false, reason: 'closer-submission-owned' };
+  const readContext = dispatchReadContext(env, prepareDispatchReadContextImpl);
+  const readImpl = (selector, readArgs) => readDispatchLaunches(selector, { ...readArgs, env });
   let result;
   try {
     const queued = ['pending', 'inProgress'].flatMap(status =>
@@ -37,12 +62,20 @@ export async function main(args) {
       return { ok: false, reason: 'closer-submission-owned' };
     }
     if (lease?.lrqId && ['pending', 'dispatched'].includes(lease.status)) {
+      const ready = await readContext();
+      if (!ready.ok) return contextUnavailable(ready);
+      // Only a correctly read terminal launch with no live retry is unowned;
+      // transient, timed-out or unproven reads keep the closer's custody.
       const owned = launchRequestOwned(await readLaunchRequestStatusFromLedgerAsync({
-        rootDir, launchRequestId: lease.lrqId, includeRetryChain: true }));
+        rootDir, env, launchRequestId: lease.lrqId, includeRetryChain: true }));
       if (owned !== false) return { ok: false, reason: 'closer-owned-or-unknown' };
     }
     const pending = facts.epochs.find(epoch => !epoch.reviewHead && !epoch.terminalAt);
-    const terminalOwner = await observeRepairOwner({ rootDir, epoch: pending });
+    if (pending) {
+      const ready = await readContext();
+      if (!ready.ok) return contextUnavailable(ready);
+    }
+    const terminalOwner = await observeRepairOwner({ rootDir, epoch: pending, readImpl });
     result = reserveRepairEpoch({ rootDir, repo, prNumber, headSha, ownerKey,
       cause: facts.cause, terminalOwner });
   } finally { release(); }

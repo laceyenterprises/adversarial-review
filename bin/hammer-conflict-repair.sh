@@ -9,13 +9,21 @@
 # It runs in the PR worktree (the current directory), outside the merge lease,
 # and never reads a terminal or standard input.
 #
-# Without --continue: read the live base/head branches, fetch both, check out
+# Without --continue: read the live base/head branches, fetch both, detach at
 # the exact fetched head, and rebase it onto the fetched base. A clean rebase
 # continues to the proof and submodule sync below. When the rebase stops on
 # conflicts, the script exits 22 (`conflict-markers-pending`) with the rebase
 # still in progress. The closer resolves and stages hand-written sources, then
 # reruns with --continue, which hands the rebase to the shared generated-output
 # resolver (GENCONFLICT-01) and finishes.
+#
+# HAMCONFLICTCUSTODY-01: the PR branch is never checked out by name. This
+# worktree can share its git directory with a builder's linked worktree that
+# still holds the branch, and git refuses a second checkout of it. The repair
+# runs on a detached HEAD and records the captured source in
+# conflict-repair-publish.env; publication pushes HEAD:refs/heads/<branch> with
+# that source as the exact-head lease, so the branch's checkout slot is never
+# needed and a concurrent update of the branch refuses the push.
 #
 # Exit codes: 0 rebased head ready to publish; 22 hand-written conflicts to
 # resolve, then --continue; 76 git-credential-refresh-failed (retryable); any
@@ -54,6 +62,8 @@ for ham_conflict_helper in ham_pr ham_step ham_read ham_bounded_git_sync; do
     || ham_conflict_stop 1 "conflict-repair-helper-missing: $ham_conflict_helper"
 done
 HAM_CONFLICT_STATE="$HAM_RUN_DIR/conflict-repair.env"
+# Read by bin/hammer-api-publish.mjs; binds the repaired head to its source.
+HAM_CONFLICT_PUBLISH="$HAM_RUN_DIR/conflict-repair-publish.env"
 
 # Git's default '#' comment marker would strip headings and issue references
 # on rebase --continue. Use the same marker for the rebase and its resolver.
@@ -79,17 +89,30 @@ if [ "$ham_conflict_continue" -eq 0 ]; then
     [ "$ham_conflict_sync_status" -eq 76 ] && ham_conflict_stop 76 git-credential-refresh-failed
     ham_conflict_stop 1 conflict-sync-failed
   }
-  ham_step mutation:report checkout 90 540 git checkout "$HEAD_BRANCH" \
+  rm -f "$HAM_CONFLICT_PUBLISH" || ham_conflict_stop 1 conflict-state-unwritable
+  git check-ref-format "refs/heads/$HEAD_BRANCH" || ham_conflict_stop 1 conflict-pr-read-failed
+  HAM_CONFLICT_FETCHED=$(git rev-parse --verify "refs/remotes/origin/$HEAD_BRANCH^{commit}") \
+    || ham_conflict_stop 1 conflict-source-unavailable
+  # Never orphan work: this worktree's HEAD must already be part of the PR head.
+  HAM_CONFLICT_LOCAL=$(git rev-parse --verify 'HEAD^{commit}') || ham_conflict_stop 1 conflict-source-unavailable
+  git merge-base --is-ancestor "$HAM_CONFLICT_LOCAL" "$HAM_CONFLICT_FETCHED" \
+    || ham_conflict_stop 1 'conflict-source-not-fetched-head: this worktree has commits the PR head does not'
+  # HAMCONFLICTCUSTODY-01: detach at the fetched head; never take the branch's
+  # checkout slot, which a builder worktree sharing this git dir may hold.
+  ham_step mutation:report checkout 90 540 git checkout --detach "$HAM_CONFLICT_FETCHED" \
     || ham_conflict_stop 1 conflict-checkout-failed
   # HAMEMPTYPRIMARY-01: capture the fetched source before replay. For a
   # conflict-only repair of the reviewed head, retain author messages/identity;
   # never squash or amend the author change into a HAM-classified commit.
   HAM_CONFLICT_SOURCE=$(git rev-parse HEAD) || ham_conflict_stop 1 conflict-source-unavailable
   HAM_CONFLICT_BASE=$(git rev-parse "origin/$BASE_BRANCH") || ham_conflict_stop 1 conflict-base-unavailable
+  HAM_CONFLICT_BRANCH="$HEAD_BRANCH"
   # Exact head: the checkout must be the head just fetched from the PR.
-  [ "$HAM_CONFLICT_SOURCE" = "$(git rev-parse "origin/$HEAD_BRANCH")" ] \
+  [ "$HAM_CONFLICT_SOURCE" = "$HAM_CONFLICT_FETCHED" ] \
+    && [ "$HAM_CONFLICT_SOURCE" = "$(git rev-parse "origin/$HEAD_BRANCH")" ] \
     || ham_conflict_stop 1 conflict-source-not-fetched-head
-  printf 'HAM_CONFLICT_SOURCE=%s\nHAM_CONFLICT_BASE=%s\n' "$HAM_CONFLICT_SOURCE" "$HAM_CONFLICT_BASE" \
+  printf 'HAM_CONFLICT_SOURCE=%s\nHAM_CONFLICT_BASE=%s\nHAM_CONFLICT_BRANCH=%s\n' \
+    "$HAM_CONFLICT_SOURCE" "$HAM_CONFLICT_BASE" "$HAM_CONFLICT_BRANCH" \
     > "$HAM_CONFLICT_STATE" || ham_conflict_stop 1 conflict-state-unwritable
   if ! ( ham_conflict_comment_char; git rebase "origin/$BASE_BRANCH" ); then
     ham_conflict_rebasing || ham_conflict_stop 1 conflict-rebase-failed
@@ -102,8 +125,11 @@ else
   [ -f "$HAM_CONFLICT_STATE" ] || ham_conflict_stop 1 'conflict-state-missing: run without --continue first'
   HAM_CONFLICT_SOURCE=$(sed -n 's/^HAM_CONFLICT_SOURCE=\([0-9a-fA-F]\{40\}\)$/\1/p' "$HAM_CONFLICT_STATE")
   HAM_CONFLICT_BASE=$(sed -n 's/^HAM_CONFLICT_BASE=\([0-9a-fA-F]\{40\}\)$/\1/p' "$HAM_CONFLICT_STATE")
-  [ -n "$HAM_CONFLICT_SOURCE" ] && [ -n "$HAM_CONFLICT_BASE" ] \
-    || ham_conflict_stop 1 'conflict-state-missing: the captured source/base are unreadable'
+  HAM_CONFLICT_BRANCH=$(sed -n 's/^HAM_CONFLICT_BRANCH=//p' "$HAM_CONFLICT_STATE")
+  if [ -z "$HAM_CONFLICT_SOURCE" ] || [ -z "$HAM_CONFLICT_BASE" ] || [ -z "$HAM_CONFLICT_BRANCH" ] \
+    || ! git check-ref-format "refs/heads/$HAM_CONFLICT_BRANCH"; then
+    ham_conflict_stop 1 'conflict-state-missing: the captured source/base/branch are unreadable'
+  fi
   if ham_conflict_rebasing; then
     # Merge and stage hand-written sources first, preserving both sides' intent.
     # Leave registered generated outputs to the shared GENCONFLICT-01 resolver;
@@ -147,6 +173,11 @@ while true; do
   HAM_CONFLICT_SUBMODULE_SYNC_ATTEMPT=$((HAM_CONFLICT_SUBMODULE_SYNC_ATTEMPT + 1))
 done
 rm -f "$HAM_CONFLICT_STATE"
+# The close command publishes HEAD:refs/heads/<branch> only while the branch
+# still names this captured source (the exact-head lease).
+HAM_CONFLICT_HEAD=$(git rev-parse --verify 'HEAD^{commit}') || ham_conflict_stop 1 conflict-rebase-unfinished
+printf 'source=%s\nhead=%s\nbranch=%s\n' "$HAM_CONFLICT_SOURCE" "$HAM_CONFLICT_HEAD" "$HAM_CONFLICT_BRANCH" \
+  > "$HAM_CONFLICT_PUBLISH" || ham_conflict_stop 1 conflict-state-unwritable
 echo "HAM conflict repair: rebased $HAM_CONFLICT_SOURCE onto $HAM_CONFLICT_BASE as $(git rev-parse HEAD)" >&2
 echo 'HAM next: rerun the close command; it publishes this head, then re-enters verify-head.' >&2
 exit 0

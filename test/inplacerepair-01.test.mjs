@@ -10,7 +10,8 @@ import { pathToFileURL } from 'node:url';
 import { reserveRepairEpoch, bindRepairHead, repairCause, pageRepairCap,
   pendingRepairEpoch, observeRepairOwner, reconcileRepairOwner, repairEpochForHead,
   REPAIR_PROVISION_DEADLINE_MS } from '../src/repair-epochs.mjs';
-import { admitExhaustedHeadVerdict, isExhaustedHeadVerdictRequested } from '../src/exhausted-head-verdict.mjs';
+import { admitExhaustedHeadVerdict, isExhaustedHeadVerdictRequested,
+  owesExhaustedHeadVerdict } from '../src/exhausted-head-verdict.mjs';
 import { readHammerRetryCapLedger, recordHammerRetryDispatch, refundCloserSelfError,
   hammerRetryCapFilePath } from '../src/ama/hammer-retry-cap.mjs';
 import { classifyClosureOwnership } from '../src/merge-agent-rescue-classifier.mjs';
@@ -74,17 +75,56 @@ test('verdict admission recognizes mixed-case revision references without admitt
   }
 });
 
-test('repair facts count only array-shaped closer refund receipts', t => {
+test('exhausted verdict obligation compares commit identity regardless of SHA casing', () => {
+  const input = { exhausted: true, headSha: head, reviewedHeadSha: old };
+  for (const reviewedHeadSha of [head, head.toUpperCase(), 'bB'.repeat(20)]) {
+    for (const headSha of [head, head.toUpperCase(), 'Bb'.repeat(20)]) {
+      assert.equal(owesExhaustedHeadVerdict({ ...input, headSha, reviewedHeadSha }), false);
+    }
+  }
+  assert.equal(owesExhaustedHeadVerdict(input), true);
+  assert.equal(owesExhaustedHeadVerdict({ ...input, reviewedHeadSha: old.toUpperCase() }), true);
+  for (const override of [{ exhausted: false }, { closerAuthored: true }, { deliveredReviews: 1 },
+    { headSha: null }, { reviewedHeadSha: null }, { headSha: '' }, { reviewedHeadSha: '' }]) {
+    assert.equal(owesExhaustedHeadVerdict({ ...input, ...override }), false);
+  }
+});
+
+test('repair facts count only refund receipts with both identity fields in informational spend', t => {
   const f = fixture(t), db = reviewDb(t);
   const path = hammerRetryCapFilePath(f.rootDir, f);
   reserveRepairEpoch(f);
   const ledger = readHammerRetryCapLedger(f.rootDir, f);
   ledger.selfErrorRefunds = { [old]: ['launch-one', 'launch-two'], [head]: ['launch-three'],
     nullEntry: null, numberEntry: 3, stringEntry: 'not-launches', objectEntry: { length: 99 } };
+  ledger.reviewHarnessRefunds = {
+    complete: { id: 'receipt-one', headSha: old },
+    idOnly: { id: 'receipt-two' }, headOnly: { headSha: head },
+    nullEntry: null, numberEntry: 3, stringEntry: 'not-a-receipt', arrayEntry: [],
+    objectEntry: {}, invalidFields: { id: 3, headSha: false }, emptyFields: { id: '', headSha: '' },
+    emptyId: { id: '', headSha: old }, emptyHead: { id: 'receipt-three', headSha: '' },
+    invalidId: { id: 3, headSha: old }, invalidHead: { id: 'receipt-four', headSha: false },
+  };
   writeFileSync(path, JSON.stringify(ledger));
   const row = db.prepare('SELECT * FROM reviewed_prs').get();
   const facts = readRepairFacts({ ...f, db, row });
   assert.equal(facts.refundedSpend.closer, 3);
+  assert.equal(facts.refundedSpend.review, 1);
+});
+
+test('already-reviewed heads skip admission callbacks regardless of SHA casing', async () => {
+  const mixed = 'bB'.repeat(20);
+  const fail = () => assert.fail('an already-reviewed head must not probe or mutate admission');
+  for (const reviewed of [head, head.toUpperCase(), mixed]) {
+    for (const requested of [head, head.toUpperCase(), mixed]) {
+      for (const repairEpoch of [null, { id: 'repair-123a-bc', baseHead: old }]) {
+        const row = { reviewer_head_sha: reviewed, revision_ref: old, review_status: 'posted' };
+        assert.equal(await admitExhaustedHeadVerdict({ exhausted: true, headSha: requested, row,
+          repairEpoch, countDelivered: fail, classifyCloser: fail, bindRepair: fail,
+          request: fail, readRow: fail }), row);
+      }
+    }
+  }
 });
 
 for (const faultAtEnd of [false, true]) test(`refunded review messages stay bounded and keep their idempotency receipt (fault at end: ${faultAtEnd})`, t => {

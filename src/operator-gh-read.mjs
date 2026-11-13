@@ -8,6 +8,8 @@
  * Each read prints one stderr line when it starts and one per retry, so a slow
  * call can be told apart from a hang. When the budget runs out, the read fails
  * with an `OperatorGhReadTimeoutError` that carries the caller's typed reason.
+ * Credential-less reads use the operator-cli budget bucket; explicit tokens
+ * retain their normal credential identity.
  *
  * @module operator-gh-read
  */
@@ -17,6 +19,7 @@ import { promisify } from 'node:util';
 
 import { loadAwareTimeoutMs } from './load-aware-timeout.mjs';
 import { execGhWithRetry, isTransientGhError } from './gh-cli.mjs';
+import { withGitHubBudgetScope } from './rate-limit-throttle.mjs';
 
 const execFileAsync = promisify(execFile);
 
@@ -154,7 +157,7 @@ export async function runOperatorGhRead({
   });
   try {
     return await Promise.race([
-      execGhWithRetryImpl({
+      withGitHubBudgetScope({ anonymousCredential: 'operator-cli' }, () => execGhWithRetryImpl({
         execFileImpl: guardedExecFile,
         args,
         ...(env ? { env } : {}),
@@ -176,7 +179,7 @@ export async function runOperatorGhRead({
           return Promise.resolve(slept).finally(() => { phase = 'admission'; });
         },
         log: { warn: (message) => note(`retry ${label}: ${oneLine(message)}`) },
-      }),
+      })),
       bound,
     ]);
   } catch (err) {

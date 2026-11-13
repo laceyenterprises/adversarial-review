@@ -3,8 +3,31 @@ import test from 'node:test';
 import { mkdtemp, mkdir, readdir, writeFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { collect } from '../src/merge-lane-inventory.mjs';
 const OPERATOR_HOLD_LABELS = ['no-merge-hold', 'do-not-merge', 'merge-agent-skip'];
+
+test('default inventory reader bounds a hanging lookup and records the failure', async () => {
+  const codeRoot = fileURLToPath(new URL('..', import.meta.url));
+  const progress = [];
+  let signal;
+  const started = performance.now();
+  const result = await collect(codeRoot, 'unused-data', {
+    config: { repos: ['example/repo'] }, holdLabels: [], budgetMs: 50,
+    stderr: { write: text => progress.push(text) },
+    execFileImpl: async (_command, _args, options) => {
+      signal = options.signal;
+      return new Promise(() => {});
+    },
+  });
+  assert.ok(performance.now() - started < 2_000);
+  assert.equal(signal.aborted, true);
+  assert.deepEqual(result.repositories, {});
+  assert.equal(result.errors.length, 1);
+  assert.equal(result.errors[0].reason, 'merge-lane-inventory-lookup-timeout');
+  assert.match(result.errors[0].error, /did not finish within its/);
+  assert.match(progress.join(''), /\[github-read\] start merge lane inventory lookup/);
+});
 
 test('one PR list invocation per watched repository, actual review hold policy', async () => {
   const calls = [];
@@ -59,14 +82,13 @@ test('boundary reads modules and config from code root with an empty HQ data roo
   await writeFile(join(codeRoot, 'config.json'), JSON.stringify({ repos: ['fixture/repo'] }));
   await writeFile(join(codeRoot, 'src/operator-hold-labels.mjs'),
     "export const OPERATOR_HOLD_LABELS = ['Fixture-Hold'];");
-  await writeFile(join(codeRoot, 'src/metered-gh.mjs'), `
+  await writeFile(join(codeRoot, 'src/operator-gh-read.mjs'), `
     import assert from 'node:assert/strict';
-    export async function meteredExecFile(subject, executable, args, options) {
-      assert.equal(subject, undefined);
-      assert.equal(executable, 'gh');
+    export async function runOperatorGhRead(options) {
+      const { args } = options;
       assert.deepEqual(args.slice(0, 7), ['pr', 'list', '--repo', 'fixture/repo', '--state', 'open', '--limit']);
-      assert.ok(options.timeout >= 60000 && options.timeout <= 360000);
-      assert.equal(options.maxBuffer, 25 * 1024 * 1024);
+      assert.equal(options.timeoutReason, 'merge-lane-inventory-lookup-timeout');
+      assert.equal(options.stderr, process.stderr);
       assert.equal(options.env, process.env);
       return { stdout: JSON.stringify([{ number: 42 }]) };
     }
@@ -87,8 +109,8 @@ test('missing code-root config names its expected path without calling GitHub', 
   const dataRoot = join(root, 'data');
   await mkdir(join(codeRoot, 'src'), { recursive: true });
   await mkdir(dataRoot);
-  await writeFile(join(codeRoot, 'src/metered-gh.mjs'), `
-    export async function meteredExecFile() { throw new Error('GitHub must not be called'); }
+  await writeFile(join(codeRoot, 'src/operator-gh-read.mjs'), `
+    export async function runOperatorGhRead() { throw new Error('GitHub must not be called'); }
   `);
   await writeFile(join(codeRoot, 'src/operator-hold-labels.mjs'),
     'export const OPERATOR_HOLD_LABELS = [];');
@@ -100,7 +122,7 @@ test('missing code reports the named root before reading config or calling GitHu
   const root = await mkdtemp(join(tmpdir(), 'pr-age-missing-code-'));
   t.after(() => rm(root, { recursive: true, force: true }));
   await assert.rejects(collect(root, join(root, 'missing-data')), {
-    message: `review service code root ${root} has no src/metered-gh.mjs`,
+    message: `review service code root ${root} has no src/operator-gh-read.mjs`,
   });
 });
 
@@ -108,8 +130,8 @@ test('missing hold-label module names the file before reading config or calling 
   const root = await mkdtemp(join(tmpdir(), 'pr-age-missing-holds-'));
   t.after(() => rm(root, { recursive: true, force: true }));
   await mkdir(join(root, 'src'));
-  await writeFile(join(root, 'src/metered-gh.mjs'), `
-    export async function meteredExecFile() { throw new Error('GitHub must not be called'); }
+  await writeFile(join(root, 'src/operator-gh-read.mjs'), `
+    export async function runOperatorGhRead() { throw new Error('GitHub must not be called'); }
   `);
   await assert.rejects(collect(root, join(root, 'missing-data')), {
     message: `review service code root ${root} has no src/operator-hold-labels.mjs`,

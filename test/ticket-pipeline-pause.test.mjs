@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { existsSync, mkdtempSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
+import { OperatorGhReadTimeoutError } from '../src/operator-gh-read.mjs';
 import {
   applyTicketPipelinePause,
   ensureRepoPauseRootConfirmed,
@@ -225,4 +226,52 @@ test('setRepoTicketPipelinePause returns path even when resuming an absent pause
 
   assert.equal(result.paused, false);
   assert.equal(result.filePath, repoPausePath(rootDir, 'laceyenterprises/adversarial-review'));
+});
+
+for (const resume of [false, true]) {
+  test(`PR ${resume ? 'resume' : 'pause'} bounds a hanging gh command without replaying the mutation`, async () => {
+    let calls = 0;
+    let signal;
+    const progress = [];
+    const started = performance.now();
+    await assert.rejects(applyTicketPipelinePause({
+      repo: 'example/repo', prNumber: 7, resume, budgetMs: 50, env: {},
+      stderr: { write: text => progress.push(text) },
+      execFileImpl: async (_command, _args, options) => {
+        calls += 1;
+        signal = options.signal;
+        return new Promise(() => {});
+      },
+    }), err => err instanceof OperatorGhReadTimeoutError
+      && err.reason === 'ticket-pipeline-pause-timeout' && err.phase === 'gh');
+    assert.ok(performance.now() - started < 2_000);
+    assert.equal(calls, 1);
+    assert.equal(signal.aborted, true);
+    assert.match(progress.join(''), /\[github-read\] start ticket pipeline pause/);
+  });
+}
+
+test('a label edit timeout prevents the repo half of a combined pause', async () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'pause-timeout-'));
+  let calls = 0;
+  await assert.rejects(applyTicketPipelinePause({
+    rootDir, repo: 'example/repo', prNumber: 7, scope: 'both',
+    budgetMs: 50, env: {}, stderr: null,
+    execFileImpl: async () => {
+      calls += 1;
+      return calls === 1 ? { stdout: '', stderr: '' } : new Promise(() => {});
+    },
+  }), err => err.reason === 'ticket-pipeline-pause-timeout');
+  assert.equal(calls, 2);
+  assert.equal(existsSync(repoPausePath(rootDir, 'example/repo')), false);
+});
+
+test('a transient pause mutation failure is passed through without retrying', async () => {
+  let calls = 0;
+  const cause = Object.assign(new Error('HTTP 502 Bad Gateway'), { stderr: 'HTTP 502 Bad Gateway' });
+  await assert.rejects(applyTicketPipelinePause({
+    repo: 'example/repo', prNumber: 7, env: {}, stderr: null,
+    execFileImpl: async () => { calls += 1; throw cause; },
+  }), err => err === cause);
+  assert.equal(calls, 1);
 });

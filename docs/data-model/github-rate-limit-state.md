@@ -22,6 +22,13 @@ stored. The `default` anonymous credential keeps bare resource keys. CLI token
 selection prefers `GH_TOKEN` over `GITHUB_TOKEN`; Octokit uses the token actually
 selected for its request, including dynamic provider tokens.
 
+Bounded operator reads (`src/operator-gh-read.mjs`) without an environment
+token use `operator-cli/<resource>`, with `credential: "operator-cli"` in
+observations. Their async scope supplies this fallback for both admission and
+response recording. Explicit tokens keep their token or installation identity;
+unscoped credential-less callers keep the legacy `default` keys. The document
+version and bucket fields are unchanged.
+
 `data/api-cache/budget-deficits.json` is the watcher's diagnostic episode map,
 keyed by installation/credential. Entries contain `since` (epoch milliseconds),
 `resetAt` and `alerted`. A low observed balance starts an episode; after more
@@ -56,7 +63,9 @@ anonymous `default` bucket; an authenticated request never waits on that bucket
 or charges it. A low or zero balance for the sending credential still defers
 that request. Ambient `gh` login without an environment token also resolves to
 `default`, because the parent process cannot distinguish it from an anonymous
-request.
+request. Bounded operator reads are the exception: their credential-less
+fallback is `operator-cli`, which isolates ambient CLI login observations from
+the legacy shared anonymous bucket.
 
 Each bucket contains normalized `resource`, non-negative `remaining`, ISO
 `resetAt` and `observedAt`, optional positive `limit` (the bucket's

@@ -311,6 +311,8 @@ async function fetchAdversarialGateBranchProtection({
   execFileImpl = execFileAsync,
   env = process.env,
   retryOptions = {},
+  // Operator entrypoints supply the bounded reader; daemon policy stays here.
+  runGhRead,
 } = {}) {
   const { owner, repo } = parseRepoSlug(repoPath);
   const branch = String(baseBranch || DEFAULT_BASE_BRANCH);
@@ -330,22 +332,24 @@ async function fetchAdversarialGateBranchProtection({
   }
   let stdout;
   try {
-    ({ stdout } = await execGhApiWithTransientRetry(
+    const childEnv = allowlistedGhEnv(env);
+    const args = ['api', `repos/${owner}/${repo}/branches/${encodeURIComponent(branch)}/protection`];
+    ({ stdout } = await (runGhRead ? runGhRead(args) : execGhApiWithTransientRetry(
       execFileImpl,
-      ['api', `repos/${owner}/${repo}/branches/${encodeURIComponent(branch)}/protection`],
+      args,
       {
-        env: allowlistedGhEnv(env),
+        env: childEnv,
         maxBuffer: 2 * 1024 * 1024,
       },
       retryOptions,
-    ));
+    )));
   } catch (err) {
     return {
       repo: repoPath,
       baseBranch: branch,
       context,
       ok: false,
-      reason: classifyGhProtectionError(err),
+      reason: err?.reason || classifyGhProtectionError(err),
       requiredContexts: [],
     };
   }

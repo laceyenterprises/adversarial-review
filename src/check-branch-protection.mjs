@@ -1,4 +1,4 @@
-import { meteredExecFile } from './metered-gh.mjs';
+import { runOperatorGhRead } from './operator-gh-read.mjs';
 import { execFile } from 'node:child_process';
 import { existsSync, mkdirSync, readFileSync, statSync } from 'node:fs';
 import { dirname, relative, resolve } from 'node:path';
@@ -67,30 +67,21 @@ function assertSharedEvidenceOwner(evidenceDir, { processImpl = process } = {}) 
   }
 }
 
-async function listOrgRepos(org, { execFileImpl = execFileAsync, env = process.env } = {}) {
+async function listOrgRepos(org, { runGhRead, env = process.env } = {}) {
   const token = env.GITHUB_TOKEN || env.GH_TOKEN;
   if (!token) throw new Error('GITHUB_TOKEN is required to list org repos');
-  const { stdout } = await meteredExecFile(execFileImpl,
-    'gh',
+  const { stdout } = await runGhRead(
     ['api', `orgs/${org}/repos`, '--paginate', '--jq', '.[].full_name'],
-    {
-      env: {
-        PATH: env.PATH ?? '/usr/bin:/bin',
-        HOME: env.HOME ?? '',
-        GH_TOKEN: token,
-      },
-      maxBuffer: 5 * 1024 * 1024,
-    }
   );
   return String(stdout || '').split('\n').map((line) => line.trim()).filter(Boolean);
 }
 
-async function resolveRepos({ repo, config, execFileImpl, env }) {
+async function resolveRepos({ repo, config, runGhRead, env }) {
   if (repo) return [repo];
   if (Array.isArray(config.repos) && config.repos.length > 0) return config.repos;
   if (config.org) {
     const excluded = new Set(config.excludeRepos || []);
-    return (await listOrgRepos(config.org, { execFileImpl, env }))
+    return (await listOrgRepos(config.org, { runGhRead, env }))
       .filter((repoPath) => {
         const repoName = repoPath.split('/')[1];
         return !excluded.has(repoName) && !excluded.has(repoPath);
@@ -106,7 +97,13 @@ async function main(argv = process.argv.slice(2), {
   env = process.env,
   now = () => new Date().toISOString(),
   processImpl = process,
+  budgetMs,
 } = {}) {
+  const runGhRead = args => runOperatorGhRead({
+    args, execFileImpl, env, stderr, budgetMs,
+    label: 'branch protection lookup',
+    timeoutReason: 'branch-protection-lookup-timeout',
+  });
   const parsed = parseArgs({
     args: argv,
     options: {
@@ -150,7 +147,7 @@ async function main(argv = process.argv.slice(2), {
   const repos = await resolveRepos({
     repo: parsed.values.repo,
     config,
-    execFileImpl,
+    runGhRead,
     env,
   });
   if (repos.length === 0) {
@@ -171,6 +168,7 @@ async function main(argv = process.argv.slice(2), {
       baseBranch,
       execFileImpl,
       env,
+      runGhRead,
     });
     const result = parsed.values.apply
       ? await ensureAdversarialGateRequiredContext({
@@ -230,7 +228,7 @@ if (isMain) {
   main().then((code) => {
     process.exitCode = code;
   }).catch((err) => {
-    console.error(`error: ${err?.message || err}`);
+    console.error(`error: ${err?.reason ? `${err.reason}: ` : ''}${err?.message || err}`);
     process.exitCode = 4;
   });
 }

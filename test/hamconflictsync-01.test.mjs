@@ -392,16 +392,18 @@ test('conflict repair refuses a head that is not the fetched PR head, and --cont
   const early = f.repair('--continue');
   assert.equal(early.status, 1);
   assert.match(early.stderr, /conflict-state-missing/);
-  // The PR head moves after this worktree's branch was checked out.
-  f.git(f.author, 'checkout', '-q', 'author');
-  writeFileSync(join(f.author, 'later.txt'), 'later\n');
-  f.git(f.author, 'add', 'later.txt'); f.git(f.author, 'commit', '-qm', 'Synthetic later author change');
-  f.git(f.author, 'push', '-q', 'origin', 'author');
-  const moved = f.repair();
-  assert.equal(moved.status, 1, moved.stderr);
-  assert.match(moved.stderr, /conflict-source-not-fetched-head/);
-  assert.equal(f.git(f.work, 'rev-parse', 'HEAD'), f.reviewed, 'nothing was rebased');
+  // HAMCONFLICTCUSTODY-01: the repair detaches at the fetched PR head, so a
+  // worktree commit the PR head does not have would be orphaned. Refuse it.
+  writeFileSync(join(f.work, 'local.txt'), 'local\n');
+  f.git(f.work, 'add', 'local.txt'); f.git(f.work, 'commit', '-qm', 'Synthetic unpublished local change');
+  const local = f.git(f.work, 'rev-parse', 'HEAD');
+  const unpublished = f.repair();
+  assert.equal(unpublished.status, 1, unpublished.stderr);
+  assert.match(unpublished.stderr, /conflict-source-not-fetched-head/);
+  assert.equal(f.git(f.work, 'rev-parse', 'HEAD'), local, 'nothing was checked out or rebased');
+  assert.equal(f.git(f.work, 'symbolic-ref', '--short', 'HEAD'), 'author');
   assert.equal(existsSync(join(f.work, '.git/rebase-merge')), false);
+  assert.equal(existsSync(join(f.run, 'conflict-repair-publish.env')), false);
 });
 
 test('conflict repair refuses inputs from another checkout or a missing inputs.sh', t => {

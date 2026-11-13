@@ -815,9 +815,18 @@ acquires, releases or reclaims a lease and grants no merge authority.
 Exit 21 from verify-head or merge enters Appendix D: observe the lease state
 (the close command has already released its own lease), then run the shipped
 `bin/hammer-conflict-repair.sh <run-dir>/inputs.sh` (HAMCONFLICTSYNC-01). It
-sources `inputs.sh` itself, fetches through `ham_bounded_git_sync`, checks out
+sources `inputs.sh` itself, fetches through `ham_bounded_git_sync`, detaches at
 the exact fetched head and rebases it onto the live base without squashing
-author commits. A failure before Git creates a rebase directory exits 1
+author commits. It never checks out the PR branch by name
+(HAMCONFLICTCUSTODY-01): a builder's linked worktree sharing the git directory
+may still hold that branch, and the repair does not need its checkout slot. It
+refuses (`conflict-source-not-fetched-head`) when the worktree's HEAD has
+commits the PR head lacks, rather than orphaning them. On success it writes
+`<run-dir>/conflict-repair-publish.env` (`source`, `head`, `branch`). While the
+local HEAD is that repaired head, publication pushes `HEAD:refs/heads/<branch>`
+with `--force-with-lease=refs/heads/<branch>:<source>`. A branch updated after
+the repair captured its source therefore refuses the push and is never
+overwritten. A failure before Git creates a rebase directory exits 1
 `conflict-rebase-failed`; correct the reported precondition and rerun without
 `--continue`. When Git leaves a rebase in progress it exits 22
 `conflict-markers-pending`; the closer resolves and stages hand-written sources, then reruns it with

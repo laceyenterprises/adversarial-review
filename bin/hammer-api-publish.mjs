@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 import { hammerNetworkCall, hammerLocalGit } from '../src/ama/hammer-api-network.mjs';
 import { hammerPublicationFailureReason, publishHammerTree } from '../src/ama/hammer-api-publish.mjs';
+import { conflictPublishBinding } from '../src/ama/hammer-conflict-binding.mjs';
 const [repo, pr] = process.argv.slice(2);
 const git = (...args) => hammerLocalGit(args);
 const network = hammerNetworkCall;
@@ -10,11 +11,21 @@ let fallback = {};
 let previousHead;
 try {
   if (git('status', '--porcelain').length) throw new Error('local tree has uncommitted changes');
+  // HAMCONFLICTCUSTODY-01: a conflict-repaired detached head publishes to its
+  // recorded branch, leased on the source the repair replayed, not the live head.
+  const conflict = conflictPublishBinding(process.env.HAM_RUN_DIR, () => git('rev-parse', 'HEAD').toString());
+  if (conflict) fallback = { fallbackHead: conflict.source, branch: conflict.branch };
   const number = String(pr).match(/\/pull\/([1-9]\d*)/)?.[1] || pr;
   const live = JSON.parse(await network('gh', ['api', `repos/${repo}/pulls/${number}`]));
   const info = { headRefName: live.head?.ref, headRefOid: live.head?.sha };
   previousHead = info.headRefOid;
-  fallback = { fallbackHead: info.headRefOid, branch: info.headRefName };
+  if (!conflict) fallback = { fallbackHead: info.headRefOid, branch: info.headRefName };
+  else if (info.headRefName !== conflict.branch) {
+    fallback = {};
+    throw new Error('conflict-repaired head was recorded for another branch than the PR head');
+  } else if (info.headRefOid !== conflict.source) {
+    throw new Error('PR head moved after the conflict repair captured its source; the exact-head lease refuses publication');
+  }
   await network('git', ['fetch', 'origin', info.headRefOid]);
   // createCommitOnBranch preserves trees, not local ancestry. A rebased head
   // must use the lease-protected git route so the new base remains an ancestor.

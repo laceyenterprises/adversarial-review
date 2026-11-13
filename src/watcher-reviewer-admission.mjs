@@ -63,7 +63,14 @@ export function createReviewerAdmissionQueue({ candidates = [], logger = console
     // In-flight ownership stays with the existing head lease and claim CAS;
     // a new head (or a recovered expired claim) must remain eligible to queue.
     if (index >= 0) {
-      candidates[index].refundDepthSpill?.('candidate-refreshed');
+      const queued = candidates[index];
+      // A reserved spill owns its route and the controller that charged it.
+      // Keep both across same-head polls, even when the new tick has less
+      // spill budget. Changed/unknown heads still replace the old snapshot.
+      if (candidate.subject?.headSha
+        && candidate.subject.headSha === queued.subject?.headSha
+        && queued.retainDepthSpill?.('candidate-refreshed') === true) return;
+      queued.refundDepthSpill?.('candidate-refreshed');
       candidates[index] = candidate;
     } else {
       candidates.push(candidate);

@@ -62,8 +62,12 @@ own reason, for example `head-dispatch-lease-held`, `claim-race-lost` or
 not move its route back to Gemini. Spill and refund route changes refresh
 cross-model waiver metadata before spawn. A failed drain refunds every candidate
 it did not start, under reason `admission-error`, and restores the preferred
-route of those still queued. A discovery refresh that replaces a queued
-snapshot refunds the old one under `candidate-refreshed`. Started candidates settle their own reservations at spawn or refusal.
+route of those still queued. A discovery refresh of the same known head keeps
+a reserved spill's existing candidate, alternate route and original reservation,
+even if the new tick has less depth budget. New spills use the current tick's
+budget. A changed or unknown head replaces the queued snapshot and refunds the
+old one under `candidate-refreshed`. Started candidates settle their own
+reservations at spawn or refusal.
 The shared drain also refunds a started candidate that returns
 `dispatched: false` or rejects admission. These refunds are idempotent with the
 candidate's own cleanup. No refund or decision line reports "not started" as

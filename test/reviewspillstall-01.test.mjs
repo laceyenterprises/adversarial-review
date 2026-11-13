@@ -21,6 +21,7 @@ import path from 'node:path';
 
 import { createFirstPassSpilloverController } from '../src/review-queue-depth.mjs';
 import { createReviewerDispatchDrain } from '../src/watcher-reviewer-dispatch.mjs';
+import { createReviewerAdmissionQueue } from '../src/watcher-reviewer-admission.mjs';
 
 const REPO = 'sample/project';
 const quiet = { log() {}, warn() {}, error() {} };
@@ -74,6 +75,7 @@ function spillCandidate(ctl, prNumber, {
   let reserved = false;
   return {
     repoPath: REPO, prNumber, reviewerModel: 'gemini', depthPassKind: 'rereview',
+    subject: { headSha: `synthetic-head-${prNumber}` },
     hasPriorPostedReview: true,
     current: { head_wait_started_at: new Date(Date.now() - waitSeconds * 1000).toISOString() },
     admissionBlockReason: () => blockReason,
@@ -120,6 +122,56 @@ function drainFor(queue, ctl, { activeGemini = 1, activeTotal = 3, maxConcurrent
     ...extra,
   });
 }
+
+test('a retained spill survives a poll with no budget and completes on its original alternate class', async () => {
+  const previous = controllerOver(() => 2);
+  const current = controllerOver(() => 0);
+  const admission = createReviewerAdmissionQueue({ logger: quiet });
+  const started = [], refunds = [];
+  const retained = spillCandidate(previous, 51, { alternate: 'codex', started, refunds });
+  admission.enqueue(retained);
+  await drainFor(admission.candidates, previous, {
+    async runQueue(candidates) {
+      await candidates[0].prepareForGeminiSaturation();
+      return { dispatched: 0, deferred: 1, deferredCandidates: candidates,
+        deferredReasons: [{ reason: 'rereview-cap-reserves-first-pass-capacity' }] };
+    },
+  })('initial poll');
+  assert.equal(retained.reviewerModel, 'codex');
+  admission.enqueue(spillCandidate(current, 51, { started, refunds }));
+  assert.deepEqual(admission.candidates, [retained]);
+  assert.deepEqual(refunds, []);
+  assert.equal(previous.granted(), 1);
+  assert.equal(current.granted(), 0);
+
+  await drainFor(admission.candidates, current)('refreshed poll');
+  assert.deepEqual(started, [[51, 'codex']]);
+  assert.deepEqual(admission.candidates, []);
+  assert.equal(previous.refundSpill({ repo: REPO, prNumber: 51 }), false,
+    'completion settles the original reservation');
+});
+
+test('new spills use the current poll budget while a retained spill keeps its previous reservation', async () => {
+  const previous = controllerOver(() => 3);
+  const current = controllerOver(() => 1);
+  const admission = createReviewerAdmissionQueue({ logger: quiet });
+  const started = [], refunds = [];
+  const retained = spillCandidate(previous, 61, { alternate: 'codex', started, refunds });
+  await retained.reevaluateDepthSpill();
+  admission.enqueue(retained);
+  admission.enqueue(spillCandidate(current, 61, { started, refunds }));
+  admission.enqueue(spillCandidate(current, 62, { started, refunds }));
+  admission.enqueue(spillCandidate(current, 63, { started, refunds }));
+
+  await drainFor(admission.candidates, current)('refreshed poll');
+  assert.deepEqual(started, [[61, 'codex'], [62, 'claude']]);
+  assert.deepEqual(admission.candidates.map(candidate => [candidate.prNumber, candidate.reviewerModel]),
+    [[63, 'gemini']]);
+  assert.equal(current.granted(), 1, 'new spills spend only the new tick budget');
+  assert.equal(current.depthPressure('rereview').remaining, 0);
+  assert.deepEqual(refunds, [[63, 'gemini-credential-concurrency-saturated']],
+    'only the unspilled candidate reaches ordinary deferred cleanup');
+});
 
 test('pool 3/8 with the Gemini seat busy starts every awaiting re-review on a non-Gemini class in one drain', async () => {
   const { countOpenPrsAwaitingReview } = await import('../src/review-state-db.mjs');

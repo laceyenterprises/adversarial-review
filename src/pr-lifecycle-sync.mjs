@@ -1,4 +1,5 @@
 import { observeClosureLag } from './ama/closure-lag.mjs';
+import { reconcileTerminalDaemonWaiters } from './ama/terminal-daemon-waiters.mjs';
 // ── PR lifecycle sync: merge-closeout capture + fast-merge close path ─────────
 //
 // ARC-18: extracted from watcher.mjs as leaf helpers — the merged-PR closeout
@@ -299,6 +300,10 @@ export function logLifecycleReconcileSummary(summary, logger = console) {
  * one. Behaviour for a PR that is genuinely still open is unchanged.
  */
 export async function syncPRLifecycle(octokit, operatorSurface, primaryDomainId = null) {
+  await reconcileTerminalDaemonWaiters({
+    rootDir: ROOT,
+    fetchLiveState: (repo, prNumber) => fetchPollingPrState(octokit, ROOT, repo, prNumber),
+  });
   const openRows = stmtGetOpenPRs.all();
   if (openRows.length === 0) {
     // Still attest. "Nothing was open" is a verified-clean mirror, and the

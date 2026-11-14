@@ -1151,7 +1151,14 @@ these boundaries without catching the detached operation in the test harness.
 `daemon-waiter-lifecycle` fixtures also exercise head changes,
 terminal candidates, an unchanged active holder fence and concrete active
 closure ownership across a soft caller deadline. No lifecycle states
-or merge gates change. Runtime recovery requires separate read-only observations
+or merge gates change. Lifecycle polling also reconciles persisted daemon
+reservations independently of open review rows: terminal live evidence must
+match repo/PR/full head/base, and the entire waiter must still match its
+pre-read snapshot under the shared mutation lock. Concurrent refreshes and
+unverified or live PRs survive for later verification. The focused
+`terminal-daemon-waiters` fixtures cover external merges, concurrent refresh,
+live service PID, surviving FIFO order and holder preservation. Existing clean
+smoke promises remain unchanged. Runtime recovery requires separate read-only observations
 after normal deployment; see the [lease runbook](docs/RUNBOOK-ama-closure.md#leasefair-01-fair-merge-lease-service).
 
 When the hammer closes a PR,

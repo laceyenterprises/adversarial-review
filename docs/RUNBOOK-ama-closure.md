@@ -6965,6 +6965,18 @@ next eligible closer acquires under the shared fence. This is separate read-only
 evidence; no queue edits, rescue-PR changes, manual merge bypass or restart are
 part of this fix.
 
+External merges can bypass that candidate evaluator. Lifecycle polling therefore
+reconciles persisted daemon waiters even when there are no open review rows.
+It requires terminal live evidence for the exact repo/PR/head/base and removes
+only the unchanged waiter snapshot under the existing lease mutation lock.
+Concurrent updates, live PRs and unverified evidence retain their requests and
+are reconsidered next poll. No service PID test can substitute for PR evidence;
+no holder release or merge authorization is implied. After ordinary rollout,
+record an organic external merge's exact waiter disappearance, surviving FIFO
+order and next contender progress read-only. Do not force a merge, mutate a
+production queue or restart a daemon to manufacture evidence. See the
+[LAC-2196 evidence](changes/LAC-2196.md).
+
 Progress polling reparses the bounded history only when its file identity or
 metadata changes, including equal-size atomic replacements at the retention
 limit. Timeout evidence also retains holders without lease IDs using their PR,

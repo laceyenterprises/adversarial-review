@@ -29,7 +29,7 @@ import { execFile } from 'node:child_process';
 import { readdirSync, readFileSync, rmSync } from 'node:fs';
 import { hostname } from 'node:os';
 import { join } from 'node:path';
-import { promisify } from 'node:util';
+import { isDeepStrictEqual, promisify } from 'node:util';
 
 import { writeFileAtomic } from '../atomic-write.mjs';
 
@@ -1064,6 +1064,7 @@ function removeMergeLeaseWaiterWithinRepositoryState({
   waiterId,
   updatedAt,
   expectedAcquisition,
+  expectedWaiter,
 } = {}) {
   validateIdentity({ rootDir, repo, base });
   if (!waiterId) return { removed: false, waiters: readMergeLeaseWaiters(rootDir, { repo, base }) };
@@ -1071,6 +1072,7 @@ function removeMergeLeaseWaiterWithinRepositoryState({
     const waitersPath = mergeLeaseWaitersFilePath(rootDir, { repo, base });
     const doc = readWaiterDoc(waitersPath);
     const waiters = doc.waiters.filter((w) => w.waiterId !== waiterId
+      || (expectedWaiter && !isDeepStrictEqual(w, expectedWaiter))
       || (expectedAcquisition && (w.acquisitionPid !== expectedAcquisition.pid
         || w.holderHost !== expectedAcquisition.host)));
     const removed = waiters.length !== doc.waiters.length;
@@ -1078,6 +1080,25 @@ function removeMergeLeaseWaiterWithinRepositoryState({
       writeJsonFile(waitersPath, waiterFileDoc(waiters, updatedAt || isoNow()));
     }
     return { removed, waitersPath, waiters: sortWaiters(waiters) };
+  });
+}
+
+// Snapshot independently of reviewed_prs: a terminal mirror row no longer
+// enters candidate evaluation, and a concurrent refresh must survive until
+// another live-state verification on a later poll.
+export function readDaemonMergeLeaseWaiters({ rootDir } = {}) {
+  return withRepositoryStateRead(rootDir, () => {
+    const dir = join(rootDir, ...LEASE_DIR_SEGMENTS);
+    let names;
+    try { names = readdirSync(dir); }
+    catch (error) { if (error.code === 'ENOENT') return []; throw error; }
+    return names.filter(name => name.endsWith('.waiters.json')).flatMap(name =>
+      readWaiterDoc(join(dir, name)).waiters.filter(w =>
+        w.priority === 'daemon' && /^[^/]+\/[^/]+$/.test(w.repo || '')
+        && typeof w.base === 'string' && w.base.length > 0
+        && Number.isSafeInteger(w.pr) && w.pr > 0 && FULL_SHA_RE.test(w.head || '')
+        && w.waiterId === daemonMergeWaiterId(w.pr, w.head)
+        && mergeLeaseWaitersFilePath(rootDir, { repo: w.repo, base: w.base }) === join(dir, name)));
   });
 }
 

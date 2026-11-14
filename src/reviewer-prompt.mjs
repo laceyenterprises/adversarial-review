@@ -18,6 +18,7 @@ import { buildHardeningReviewContext } from './hardening-ledger-context.mjs';
 import { buildSlimReviewerExtraContext } from './review-mode-selection.mjs';
 import { formatGuardForbiddenPaths } from './guard-forbidden-paths.mjs';
 import { parseDiffEntries } from './reviewer-util.mjs';
+import { formatTenureReviewRange, readTenureReviewRange } from './pr-tenure.mjs';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -121,14 +122,25 @@ async function buildReviewerExtraContext({
   fetchPRContextImpl,
   execFileImpl,
   log = console,
+  readTenureReviewRangeImpl = readTenureReviewRange,
 } = {}) {
+  // The range is daemon-owned metadata, never inferred from PR prose.
+  let tenureContext = '';
+  try {
+    tenureContext = formatTenureReviewRange(readTenureReviewRangeImpl({
+      rootDir, repo, prNumber, headSha: prContext?.headRefOid || prContext?.head?.sha,
+    }));
+  } catch (error) {
+    // Ordinary/standalone reviews may have no local review-state store.
+    log?.warn?.(`[reviewer] tenure remediation range unavailable: ${error.code || 'read-failed'}`);
+  }
   const disputeContext = formatFindingDisputeContext(prContext, readFindingDisputeReservationsImpl({
     rootDir, repo, prNumber, headSha: prContext?.headRefOid || prContext?.head?.sha, logger: log,
   }));
   // RPL-08: slim mode trims context, never the review contract. See
   // buildSlimReviewerExtraContext for what is dropped and why.
   if (reviewModeDecision?.slim) {
-    return formatGuardForbiddenPaths(guardForbiddenPaths) + disputeContext + formatPrIntentContext(prContext?.body) + buildSlimReviewerExtraContext({ repo, prNumber, decision: reviewModeDecision, advisoryFindings, log });
+    return tenureContext + formatGuardForbiddenPaths(guardForbiddenPaths) + disputeContext + formatPrIntentContext(prContext?.body) + buildSlimReviewerExtraContext({ repo, prNumber, decision: reviewModeDecision, advisoryFindings, log });
   }
 
   let extraContext = buildObviousDocsGuidance();
@@ -166,7 +178,7 @@ async function buildReviewerExtraContext({
     log?.error?.(`[reviewer] WARN: failed to build hardening-ledger review context: ${err.message}`);
   }
 
-  return formatGuardForbiddenPaths(guardForbiddenPaths) + extraContext + formatPrIntentContext(prContext?.body) + disputeContext;
+  return tenureContext + formatGuardForbiddenPaths(guardForbiddenPaths) + extraContext + formatPrIntentContext(prContext?.body) + disputeContext;
 }
 
 function buildReviewerPrompt({ promptPrefix, extraContext = '', diff = '' } = {}) {

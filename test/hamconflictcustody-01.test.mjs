@@ -129,6 +129,7 @@ exec git -C "$4" rebase --continue
     REVIEWER: 'synthetic-reviewer', AMA_TRAILERS_SHELL: "''",
   };
   const inputs = template.match(/cat > '<<RUN_DIR>>\/inputs\.sh' <<'HAM_INPUTS'\n([\s\S]*?)\nHAM_INPUTS/)[1]
+    .replaceAll('<<TENURE_INPUTS>>', '')
     .replace(/<<([A-Z_]+)>>/g, (_, key) => bound[key]);
   writeFileSync(join(run, 'inputs.sh'), `${inputs}\n`);
   writeFileSync(join(run, 'base-head'), reviewed);

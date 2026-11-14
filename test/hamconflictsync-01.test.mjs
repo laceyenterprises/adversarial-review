@@ -85,6 +85,7 @@ function realInputs(t, { helpers } = {}) {
   mkdirSync(run);
   const bound = { ...values(rootDir), RUN_DIR: run };
   const inputs = template.match(/cat > '<<RUN_DIR>>\/inputs\.sh' <<'HAM_INPUTS'\n([\s\S]*?)\nHAM_INPUTS/)[1]
+    .replaceAll('<<TENURE_INPUTS>>', '')
     .replace(/<<([A-Z_]+)>>/g, (_, key) => {
       assert.ok(Object.hasOwn(bound, key), `unbound inputs.sh value ${key}`);
       return bound[key];
@@ -324,6 +325,7 @@ exec git -C "$4" rebase --continue
   git(work, 'update-ref', 'refs/remotes/origin/main', `${base}^`);
   const bound = { ...values(root), RUN_DIR: run, REVIEWED_SHA: reviewed, TARGET_REMEDIATION_SHA: reviewed };
   const inputs = template.match(/cat > '<<RUN_DIR>>\/inputs\.sh' <<'HAM_INPUTS'\n([\s\S]*?)\nHAM_INPUTS/)[1]
+    .replaceAll('<<TENURE_INPUTS>>', '')
     .replace(/<<([A-Z_]+)>>/g, (_, key) => bound[key]);
   writeFileSync(join(run, 'inputs.sh'), `${inputs}\n`);
   writeFileSync(join(run, 'base-head'), reviewed);

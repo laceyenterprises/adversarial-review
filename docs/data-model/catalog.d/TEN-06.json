@@ -1,0 +1,24 @@
+{
+  "version": 1,
+  "entries": [
+    {
+      "id": "tenure-remediation-review-provenance",
+      "title": "Tenure remediation review provenance",
+      "path": "docs/data-model/follow-up-jobs.md",
+      "store": "data/follow-up-jobs/",
+      "schemaSurface": "src/follow-up-remediation.mjs",
+      "relatedSchemaSurfaces": [
+        "src/pr-tenure.mjs",
+        "src/remediation-closeout.mjs",
+        "src/remediation-published-head.mjs",
+        "src/review-state.mjs"
+      ],
+      "owner": "follow-up daemon and review watcher",
+      "optionalFields": [
+        "remediationWorker.originTenureId: originating build launch tenure ID",
+        "reviewed_prs.rereview_reason: tenure-independent-review: <previous-reviewed-sha>..<new-sha>"
+      ],
+      "compatibility": "Additive scheduling evidence. Missing tenureId on an available build launch preserves untenured behavior. Existing review reason and fullReviewRequired contracts carry exact-head review intent without a schema migration, budget reset or merge authorization."
+    }
+  ]
+}

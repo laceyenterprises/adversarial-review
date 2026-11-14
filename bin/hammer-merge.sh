@@ -331,6 +331,7 @@ import { classifyCheckRollup, latestCheckRollupItems } from '<<ROOT_DIR>>/src/ch
 import { readFileSync } from 'node:fs';
 import { terminalReviewProofMatches } from '<<ROOT_DIR>>/src/ama/reviewer-authority.mjs';
 import { createReviewCurrencyReader } from '<<ROOT_DIR>>/src/ama/review-currency.mjs';
+import { tenureHeadNeedsReview } from '<<ROOT_DIR>>/src/pr-tenure.mjs';
 
 const repo = '<<REPO>>';
 const prNumber = Number('<<PR_NUMBER>>');
@@ -400,6 +401,10 @@ const eligibility = evaluateMergeEligibility({
   candidateHead: rollup.headSha || rollup.headRefOid || '',
   validatedHead: expectedHead,
 });
+if (tenureHeadNeedsReview('<<TENURE_REVIEW_ARG>>', '<<REVIEWED_SHA>>', expectedHead)) {
+  eligibility.eligible = false;
+  eligibility.reasons.push('tenure-independent-review-required');
+}
 const primaryIntent = primaryChange ? checkPrimaryChange(primaryChange, expectedHead, {
   strictNonBlockingRemediation: cfg?.strictNonBlockingRemediation !== false,
 }) : null;
@@ -570,7 +575,7 @@ ham_validate_ci_retry() {
   "$HAM_NODE_BIN" <<ROOT_DIR>>/bin/ama-check.mjs \
     --pr "<<RUN_DIR>>/pr-after.json" --reviews "<<RUN_DIR>>/reviews.json" \
     --protection "<<RUN_DIR>>/protection.json" --timeline "<<RUN_DIR>>/timeline.json" \
-    --repo <<REPO>> --root-dir <<ROOT_DIR>> --reviewed-sha <<REVIEWED_SHA>> \
+    --repo <<REPO>> --root-dir <<ROOT_DIR>> <<TENURE_REVIEW_ARG>>--reviewed-sha <<REVIEWED_SHA>> \
     --reviewer <<REVIEWER>> --risk-class <<RISK_CLASS>> \
     --ham-terminal-remediation "<<RUN_DIR>>/retry-terminal-remediation.json" \
     --ham-commit "<<RUN_DIR>>/commit.json" --ham-range "<<RUN_DIR>>/range.json" \

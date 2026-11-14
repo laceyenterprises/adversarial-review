@@ -2,6 +2,7 @@
 import { carryHammerWithdrawals, createReviewCurrencyReader, currencyGit } from '../src/ama/review-currency.mjs';
 import { checkCiCost } from '../src/ama/ci-cost.mjs';
 import { fleetStopReason } from '../src/fleet-stop.mjs';
+import { tenureHeadNeedsReview } from '../src/pr-tenure.mjs';
 /**
  * AMA eligibility CLI shim.
  *
@@ -181,6 +182,11 @@ Inputs:
                   satisfies only the head-match gate while all other gates still
                   run against fresh state.
 
+  --tenure-review
+                  dispatch observed a tenured build launch; a changed head
+                  requires independent exact-head review and cannot use HAM
+                  terminal-remediation or rebase review exemptions.
+
 Emits:
   JSON object on stdout: { eligible: bool, reasons: string[], trace: {...} }
 `;
@@ -194,6 +200,7 @@ function parseInputs(argv) {
       protection: { type: 'string' },
       timeline: { type: 'string' },
       'reviewed-sha': { type: 'string' },
+      'tenure-review': { type: 'boolean', default: false },
       reviewer: { type: 'string' },
       'risk-class': { type: 'string' },
       repo: { type: 'string' },
@@ -684,6 +691,12 @@ async function main(argv = process.argv.slice(2)) {
     // `withdrawn-by-hammer` comments must match successful durable admission.
     hammerWithdrawnFindings,
   });
+  if (tenureHeadNeedsReview(args['tenure-review'], args['reviewed-sha'], prMetadata.headSha)) {
+    // Refusal-only input derived from the public build-launch read at
+    // dispatch. It grants no authority and keeps this fixture CLI offline.
+    result.eligible = false;
+    result.reasons.push('tenure-independent-review-required');
+  }
   if (!ciCostGate.ok) {
     result.eligible = false;
     if (!result.reasons.includes(ciCostGate.reason)) result.reasons.push(ciCostGate.reason);

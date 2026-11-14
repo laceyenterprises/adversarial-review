@@ -37,8 +37,11 @@ changes separately with unknown realized propensity. No account twins or
 parallel account policy are introduced.
 
 The hammer retains its logical class for prompts, trailers, authority, rebase,
-lease and merge eligibility. A validated terminal-remediation head keeps the
-existing no-re-review rule. The physical execution class remains one of the
+lease and merge eligibility. An untenured validated terminal-remediation head keeps the
+existing no-re-review rule. For a PR whose build launch has `tenureId`, a changed
+head requires an independent exact-head review outside the author's harness
+family. HAM validation and terminal-remediation markers cannot waive that review.
+The physical execution class remains one of the
 existing privileged hammer roles.
 
 Every active-mode attempt atomically records a UUID-named JSON observation under

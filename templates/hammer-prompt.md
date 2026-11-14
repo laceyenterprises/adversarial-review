@@ -269,7 +269,7 @@ export HAM_RUN_DIR='<<RUN_DIR>>'
 export HAM_ROOT_DIR='<<ROOT_DIR>>' HAM_HQ_ROOT='<<HQ_ROOT>>' HAM_HQ_OWNER='<<HQ_OWNER>>'
 export HAM_AUDIT_PATH='<<AUDIT_PATH>>' HAM_REVIEWER='<<REVIEWER>>'
 export HAM_AMA_TRAILERS=<<AMA_TRAILERS_SHELL>>
-source "<<ROOT_DIR>>/bin/hammer-shell-helpers.sh" || { return 1 2>/dev/null || exit 1; }
+<<TENURE_INPUTS>>source "<<ROOT_DIR>>/bin/hammer-shell-helpers.sh" || { return 1 2>/dev/null || exit 1; }
 ham_step() { /usr/bin/perl -e 'my $n = shift or exit 1; exec $n, @ARGV; die $!' "$HAM_NODE_BIN" "<<ROOT_DIR>>/bin/hammer-helper-step.mjs" "$@"; }
 ham_read() { ham_step read:report "$1" 90 540 "${@:2}"; }
 HAM_INPUTS
@@ -1111,7 +1111,7 @@ HAM_VERDICT_READY_FILE=""
   --timeline "$HAM_RUN_DIR/timeline.json" \
   --repo <<REPO>> \
   --root-dir <<ROOT_DIR>> \
-  --reviewed-sha <<REVIEWED_SHA>> \
+  <<TENURE_REVIEW_ARG>>--reviewed-sha <<REVIEWED_SHA>> \
   --reviewer <<REVIEWER>> \
   --risk-class <<RISK_CLASS>> \
   --ham-terminal-remediation "$HAM_RUN_DIR/terminal-remediation.json" \

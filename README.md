@@ -868,7 +868,20 @@ repair/refund ledgers defer only their PR. See the
   the merge bar of required checks plus changed-surface tests, waits out
   GitHub required checks on the exact post-remediation head within a
   bounded remote-CI window, and merges under its own lease with
-  `--match-head-commit`.
+  `--match-head-commit`. When the PR's stable build launch exposes `tenureId`,
+  a changed head instead requires independent exact-head review before merge.
+  HAM validation and terminal-remediation certificates cannot waive that review.
+  Remediation and closer dispatch retain the PR alias and their existing classes;
+  the closer keeps its merge-authority principal. The review prompt names the
+  remediation range, and routing excludes the originating author and identified
+  same-tenure producer harness families while retaining live-writer custody and
+  existing attempt/cycle caps. An available launch without `tenureId` keeps the
+  existing path. Missing stage IDs and successful unindexed-stage reads retain
+  opener-based review routing; unavailable stage reads defer. Already armed
+  same-head range requests preserve pending/CI admission without writer locks.
+  Optional range-prompt read failures leave reviewer startup available.
+  Existing smoke commands are unchanged; offline fixtures establish
+  source behavior, while natural deployed review/merge evidence remains separate.
 - **Daemon inline merge — clean completion.** When the final review is
   fully clean (zero blocking AND zero non-blocking findings, both
   classifications known), GitHub reports required checks green and the

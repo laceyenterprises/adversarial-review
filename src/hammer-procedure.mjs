@@ -26,6 +26,7 @@ export function splitHammerPrompt(template) {
 }
 
 export function renderHammerProcedure(phase, values) {
+  values = { TENURE_REVIEW_ARG: '', ...values };
   if (!HAMMER_PHASES.includes(phase)) throw new Error(`unknown hammer phase: ${phase}`);
   const path = fileURLToPath(new URL(`../bin/${phase}.sh`, import.meta.url));
   let source = readFileSync(path, 'utf8');
@@ -132,6 +133,7 @@ ham_procedure_floor() {
   const missing = new Set();
   source = source.replace(/<<([A-Z_]+)>>/g, (_match, key) => {
     const value = values[key];
+    if (key === 'TENURE_REVIEW_ARG') return value || '';
     if (value === undefined || value === '') {
       missing.add(key);
       return '';

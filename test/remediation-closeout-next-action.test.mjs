@@ -52,6 +52,24 @@ function fixture(t, finalRound = null) {
   return { rootDir, job, jobPath, snapshot, decide, complete, effects };
 }
 
+test('tenured final-round publication recovery queues exact-head review with its remediation range', t => {
+  const f = fixture(t, 'comment-only');
+  f.job.remediationWorker.originTenureId = 'ten_fixture';
+  writeFileSync(f.jobPath, JSON.stringify(f.job));
+  let request;
+  const result = f.complete({ requestReviewRereviewImpl: args => {
+    request = args;
+    return { triggered: true, status: 'pending' };
+  } });
+  assert.equal(request.targetRevisionRef, HEAD);
+  assert.equal(request.reason, `tenure-independent-review: ${OLD}..${HEAD}`);
+  assert.equal(request.preserveBudgets, true);
+  assert.equal(result.job.reReview.requested, true);
+  assert.equal(result.job.reReview.nextAction.action, 'review');
+  assert.equal(result.job.reReview.suppressed, undefined);
+  assert.doesNotMatch(result.job.commentDelivery.body, /No re-review is queued/);
+});
+
 for (const finalRound of [null, 'comment-only']) {
   for (const state of ['pending', 'green', 'failed', 'runnerless']) {
     test(`recovered final push: ${finalRound || 'blocking'} / ${state}`, t => {

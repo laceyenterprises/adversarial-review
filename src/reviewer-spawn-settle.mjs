@@ -1,4 +1,5 @@
 import { parseReviewerBudgetDeferral, REVIEWER_GITHUB_BUDGET_DEFERRED } from './reviewer-github-budget.mjs';
+import { formatTenureReviewRange, readTenureReviewRange } from './pr-tenure.mjs';
 import { withRepositoryStateCycle } from './repository-state-lock.mjs';
 import { loadAwareTimeoutMs } from './load-aware-timeout.mjs';
 import { ownReviewerSizeFailure } from './reviewer-size-owner.mjs';
@@ -854,6 +855,7 @@ async function spawnReviewerOnceWithAccount({
   freshnessCheckSleepImpl = sleepMs,
   onPostOperationSettled = null,
   readDurablePostedAtImpl = readDurableReviewerPostedAt,
+  readTenureReviewRangeImpl = readTenureReviewRange,
   agyReviewerIdentityPool = getAgyReviewerIdentityPool(),
 }) {
   if (reviewerRefusesBuilder(builderTag, reviewerModel)) {
@@ -1044,9 +1046,15 @@ async function spawnReviewerOnceWithAccount({
       reviewerAttribution = buildReviewerAttribution({ reviewerModel, reviewerAccountReceipt,
         agyHolderLease: agyIdentityLease });
       onReviewerRuntimeStarted();
+      let tenurePrompt = '';
+      try {
+        tenurePrompt = formatTenureReviewRange(readTenureReviewRangeImpl({ rootDir, repo, prNumber, headSha: reviewerHeadSha }));
+      } catch (error) {
+        console.warn(`[watcher] tenure remediation range unavailable for ${repo}#${prNumber}: ${error.code || 'read-failed'}`);
+      }
       const runtimeRequest = {
         model: reviewerModel,
-        prompt: '',
+        prompt: tenurePrompt,
         subjectContext: {
           domainId,
           repo,

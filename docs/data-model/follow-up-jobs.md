@@ -1,5 +1,22 @@
 # Data Model - Follow-Up Remediation Jobs
 
+## Tenure review provenance
+
+An HQ remediator routed from a tenured PR build launch stores optional
+`remediationWorker.originTenureId`. It records the originating build tenure
+observed through the public launch read model. It is scheduling context, not
+proof that the new stage actually bound, and grants no merge authority.
+Missing values preserve the existing job format and closeout behavior.
+
+When such a worker publishes a different head, closeout uses the existing
+`fullReviewRequired` observation, including on the comment-only final round.
+The review request uses
+`tenure-independent-review: <previous-reviewed-sha>..<published-sha>` as its
+reason. Existing `reReview` fields describe the independent review and its
+owner; no terminal no-re-review marker is applied. Attempts and remediation
+rounds are not reset. The watcher independently re-reads the build launch, so
+older jobs without this optional field cannot waive the tenure review rule.
+
 ## Credential broker deferral and publication refund
 
 Broker-backed remediation probes the publisher's configured `OAUTH_BROKER_URL`

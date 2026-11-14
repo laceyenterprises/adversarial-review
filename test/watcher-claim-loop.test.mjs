@@ -14,6 +14,83 @@ import { spawnSync } from 'node:child_process';
 const REPO_ROOT = path.resolve(new URL('..', import.meta.url).pathname);
 const SUMMARY_MARKER = '@@WATCHER_CLAIM_LOOP_SUMMARY@@';
 
+test('TEN-06: a moved tenured head reaches one independent exact-head claim with its remediation range', () => {
+  const tmp = mkdtempSync(path.join(tmpdir(), 'watcher-tenure-'));
+  try {
+    const head = 'b'.repeat(40), previous = 'a'.repeat(40);
+    const tenureUrl = fileUrl('src', 'pr-tenure.mjs');
+    const wrapper = `
+      export * from ${JSON.stringify(`${tenureUrl}?actual`)};
+      export async function readPrTenure({ prNumber }) {
+        globalThis.__tenureReads ||= {};
+        globalThis.__tenureReads[prNumber] = (globalThis.__tenureReads[prNumber] || 0) + 1;
+        return prNumber === 101 ? { tenureId: 'ten_fixture', workerClass: 'codex',
+          remediationWorkerClass: 'remediator-codex' } : null;
+      }
+    `;
+    let loader = buildLoaderSource({ subjectHeads: { 101: head } });
+    const originalRepo = loader.match(/const REPO = '([^']+)'/)[1];
+    const synthetic = text => text.replaceAll(originalRepo, 'example/widget')
+      .replaceAll(`name: '${originalRepo.split('/')[1]}'`, "name: 'widget'");
+    loader = synthetic(loader).replace('  return nextLoad(url, context);',
+      `  if (url === ${JSON.stringify(tenureUrl)}) {
+        return { format: 'module', shortCircuit: true, source: ${JSON.stringify(wrapper)} };
+      }
+      if (url === ${JSON.stringify(fileUrl('src', 'watcher.mjs'))}) {
+        const loaded = await nextLoad(url, context);
+        return { ...loaded, source: loaded.source.toString().replace(
+          "const config = JSON.parse(readFileSync(join(ROOT, 'config.json'), 'utf8'));",
+          "const config = JSON.parse(readFileSync(join(ROOT, 'config.json'), 'utf8')); config.org = 'example';"
+        ) };
+      }
+      return nextLoad(url, context);`);
+    loader = loader.replace(
+      "export function createHeadCloserCommitSuppressionResolver() { return async () => ({ suppressed: false, reason: 'fixture' }); }",
+      "export function createHeadCloserCommitSuppressionResolver(options) { return async () => { const tenure = await options.readPrTenureImpl(); globalThis.__suppressionTenures ||= {}; globalThis.__suppressionTenures[options.prNumber] = tenure; return { suppressed: false, reason: 'fixture' }; }; }");
+    const loaderPath = path.join(tmp, 'loader.mjs');
+    const registerPath = path.join(tmp, 'register.mjs');
+    const runnerPath = path.join(tmp, 'runner.mjs');
+    writeFileSync(loaderPath, loader);
+    writeFileSync(registerPath, buildRegisterSource(loaderPath));
+    writeFileSync(runnerPath, synthetic(buildRunnerSource({
+      freshHeads: { 101: head },
+      prePollSetup: `
+        db.prepare(\`INSERT INTO reviewed_prs
+          (repo, pr_number, reviewed_at, reviewer, pr_state, review_status,
+           review_attempts, reviewer_head_sha, revision_ref)
+          VALUES ('example/widget', 101, ?, 'claude', 'open', 'posted', 1, ?, ?)\`)
+          .run(new Date().toISOString(), '${previous}', '${previous}');
+      `,
+      postSeedSetup: `
+        db.prepare(\`UPDATE reviewed_prs SET pr_state = 'open', review_status = 'posted',
+          reviewer_head_sha = ?, revision_ref = ? WHERE pr_number = 102\`)
+          .run('${previous}', '${previous}');
+      `,
+      afterFirstPoll: `
+        const ownClaims = claims.filter(claim => claim.prNumber === 101);
+        assert.equal(ownClaims.length, 1);
+        const spawns = (globalThis.__watcherClaimLoopReviewerSpawns || [])
+          .filter(spawn => spawn.subjectContext?.prNumber === 101);
+        assert.equal(spawns.length, 1);
+        assert.equal(spawns[0].model, 'claude');
+        assert.equal(spawns[0].subjectContext.reviewerHeadSha, '${head}');
+        assert.equal(db.prepare('SELECT rereview_reason FROM reviewed_prs WHERE pr_number=101')
+          .get().rereview_reason, 'tenure-independent-review: ${previous}..${head}');
+        assert.equal(globalThis.__tenureReads[101], 1);
+        assert.equal(globalThis.__tenureReads[102], 1, 'reuse the memoized untenured result in suppression');
+        assert.equal(globalThis.__suppressionTenures[102], null);
+      `,
+    })));
+    const env = fixtureEnv(installGhFixture(tmp));
+    const gh = path.join(tmp, 'gh');
+    writeFileSync(gh, synthetic(readFileSync(gh, 'utf8')));
+    const result = spawnSync(process.execPath,
+      ['--no-warnings', '--import', pathToFileURL(registerPath).href, runnerPath],
+      { cwd: REPO_ROOT, encoding: 'utf8', env, timeout: 60000 });
+    assert.equal(result.status, 0, `${result.stdout || ''}${result.stderr || ''}`);
+  } finally { rmSync(tmp, { recursive: true, force: true }); }
+});
+
 // Flush completed synchronous fixtures before the validation idle deadline.
 test.beforeEach(() => setImmediate());
 
@@ -447,6 +524,7 @@ function buildRunnerSource({
   expectPollError = false,
   freshHeads = {},
   prePollSetup = '',
+  postSeedSetup = '',
   afterFirstPoll = '',
   healthProbeSetup = '',
 } = {}) {
@@ -497,6 +575,7 @@ try {
       0
     );
   }
+  ${postSeedSetup}
 
   const octokit = {
     paginate: async (_fn, params) => {

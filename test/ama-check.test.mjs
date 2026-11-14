@@ -268,6 +268,7 @@ function runAmaCheck(tmp, {
   primaryChangeEvidence = undefined,
   rebaseAssessment = null,
   reviewCycleExhausted = null,
+  tenureReview = false,
   rootDir = null,
   env = {},
 }) {
@@ -275,6 +276,7 @@ function runAmaCheck(tmp, {
   if (timeline !== null) writeJson(paths.timeline, timeline);
   const configPath = writeConfig(tmp, { branchProtectionRequired, strictNonBlockingRemediation });
   const extraArgs = [];
+  if (tenureReview) extraArgs.push('--tenure-review');
   if (primaryChangeEvidence !== null) {
     paths.primaryChange = join(tmp, 'primary-change.json');
     const primary = primaryChangeEvidence || (hamTerminalRemediation
@@ -598,7 +600,7 @@ test('ama-check validates HAM terminal remediation only with HAM head provenance
         commit: { oid: HEAD_SHA },
       },
     ];
-    const passing = runAmaCheck(tmp, {
+    const passingArgs = {
       branchProtectionRequired: true,
       protectionBody,
       prPatch: {
@@ -613,10 +615,16 @@ test('ama-check validates HAM terminal remediation only with HAM head provenance
       hamTerminalRemediation: hamTerminalEvidence(),
       reviewCycleExhausted: true,
       rootDir,
-    });
+    };
+    const passing = runAmaCheck(tmp, passingArgs);
     assert.equal(passing.status, 0, passing.stderr);
     const passingVerdict = JSON.parse(passing.stdout);
     assert.equal(passingVerdict.eligible, true, JSON.stringify(passingVerdict, null, 2));
+    const tenured = runAmaCheck(tmp, { ...passingArgs, tenureReview: true });
+    assert.equal(tenured.status, 0, tenured.stderr);
+    const tenureVerdict = JSON.parse(tenured.stdout);
+    assert.equal(tenureVerdict.eligible, false);
+    assert.ok(tenureVerdict.reasons.includes('tenure-independent-review-required'));
     assert.equal(
       passingVerdict.trace.hamTerminalRemediation.marker,
       'ham_terminal_remediation_validated',

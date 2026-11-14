@@ -39,7 +39,7 @@ import { captureLocalReviewerUsage } from './reviewer-pass-tokens.mjs';
 import { createReviewerProgressRecorder, persistHostedReviewerExecution, persistSingleReviewDecision } from './reviewer-execution-pass.mjs';
 import { normalizeReviewerFamily } from './reviewer-family.mjs';
 import { apiStatusFromError, recordApiCall } from './api-telemetry.mjs';
-import { awaitThrottleIfNeeded, githubCredential } from './rate-limit-throttle.mjs';
+import { awaitThrottleIfNeeded, githubCredential, isGitHubRateLimitError } from './rate-limit-throttle.mjs';
 import { resolveGitHubAppBotLogin } from './github-app-identity.mjs';
 import {
   classifyFollowUpCriticality,
@@ -1361,8 +1361,7 @@ function isRetryableGhTransportError(err, { allowAuthRefresh = false, preWriteSa
     || detail.includes('timed out')
     || detail.includes('temporary failure')
     || detail.includes('temporarily unavailable')
-    || detail.includes('rate limit')
-    || detail.includes('secondary rate limit')
+    || isGitHubRateLimitError(err)
     || detail.includes('500 internal server error')
     || detail.includes('502 bad gateway')
     || detail.includes('503 service unavailable')

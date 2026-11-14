@@ -465,7 +465,7 @@ test('long throttle waits publish and clear a sidecar status file', async () => 
       }
     }, { timeoutMs: 5_000 });
     assert.equal(sidecar.resource, DEFAULT_RESOURCE);
-    assert.equal(sidecar.throttledUntil, '2026-06-06T12:05:00.000Z');
+    assert.equal(sidecar.throttledUntil, '2026-06-06T12:02:00.000Z');
 
     releaseSleep();
     await pending;
@@ -542,13 +542,13 @@ test('headerless rate limits initialize and renew an expired resource window ato
   await Promise.all([a.recordRateLimitedCall('GraphQL'), b.recordRateLimitedCall('graphql')]);
   let state = await b.readSharedState();
   assert.equal(state.graphql.rateLimitedCalls, 2);
-  assert.equal(state.graphql.remaining, 0);
-  assert.equal(state.graphql.resetAt, new Date(now + 60_000).toISOString());
+  assert.equal(state.graphql.remaining, null);
+  assert.equal(state.graphql.secondaryUntil, new Date(now + 120_000).toISOString());
   assert.equal(state.core, undefined);
   await withGitHubBudgetScope({}, async () => {
     await assert.rejects(a.awaitThrottleIfNeeded('graphql'), { name: 'GitHubBudgetDeferredError' });
   });
-  now += 60_000;
+  now += 120_000;
   await b.recordRateLimitedCall('graphql');
   state = await a.readSharedState();
   assert.equal(state.graphql.rateLimitedCalls, 1);
@@ -560,7 +560,6 @@ test('headerless rate limits initialize and renew an expired resource window ato
 });
 
 for (const [description, observation, expectedLimit] of [
-  ['headerless failure', null, 60],
   ['failure with a reset but no limit', { remaining: 0, resetAt: '2026-01-01T00:02:00Z' }, 60],
   ['failure with a new limit', { remaining: 0, resetAt: '2026-01-01T00:02:00Z', limit: 120 }, 120],
 ]) {
@@ -709,4 +708,18 @@ test('long wait cannot confirm a different credential and defers instead of slee
   await throttle.recordResponseRateLimit({ resource: 'core', remaining: 0, observedAt: now,
     resetAt: now + 3600_000, credential: 'synthetic-other-identity' });
   await assert.rejects(throttle.awaitThrottleIfNeeded('core', 'synthetic-other-identity'), { name: 'GitHubBudgetDeferredError' });
+});
+
+ test('a headerless structured secondary failure preserves the previous primary bucket', async t => {
+  const rootDir = makeRootDir();
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  const now = Date.parse('2026-01-01T00:00:00Z');
+  const writer = makeThrottle({ rootDir, nowMs: () => now });
+  await writer.recordResponseRateLimit({ remaining: 58, limit: 60, resetAt: now + 1800_000 });
+  await writer.recordRateLimitedCall('core');
+  const state = (await writer.readSharedState()).core;
+  assert.equal(state.remaining, 58);
+  assert.equal(state.limit, 60);
+  assert.equal(state.secondaryUntil, new Date(now + 60_000).toISOString());
+  assert.equal(state.resetAt, new Date(now + 1800_000).toISOString());
 });

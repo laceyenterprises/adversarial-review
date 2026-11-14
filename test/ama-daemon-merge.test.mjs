@@ -299,8 +299,9 @@ test('classifyDaemonMergeError mirrors the hammer classifier order', () => {
   assert.equal(classifyDaemonMergeError('connection reset by peer'), 'retryable');
   assert.equal(classifyDaemonMergeError('connection closed by peer'), 'retryable');
   assert.equal(classifyDaemonMergeError('HTTP 503 service unavailable'), 'retryable');
-  assert.equal(classifyDaemonMergeError('HTTP 403 Rate Limit Exceeded'), 'retryable');
-  assert.equal(classifyDaemonMergeError('secondary rate limit; Retry-After: 30'), 'retryable');
+  assert.equal(classifyDaemonMergeError('HTTP 403 Rate Limit Exceeded'), 'permanent');
+  assert.equal(classifyDaemonMergeError('secondary rate limit; Retry-After: 30'), 'unclassified');
+  assert.equal(classifyDaemonMergeError({ status: 429 }), 'retryable');
   assert.equal(classifyDaemonMergeError('pull request was closed'), 'permanent');
   assert.equal(classifyDaemonMergeError('spawn gh EIO'), 'retryable');
   assert.equal(classifyDaemonMergeError('Input/output error'), 'retryable');

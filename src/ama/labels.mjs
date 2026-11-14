@@ -1,3 +1,4 @@
+import { isGitHubRateLimitError } from '../rate-limit-throttle.mjs';
 import { meteredExecFile } from '../metered-gh.mjs';
 /**
  * AMA-05 — operator labels + auto-initializer.
@@ -54,7 +55,7 @@ function errorText(err) {
 
 function isTransientGhError(err) {
   const text = errorText(err).toLowerCase();
-  return [
+  return isGitHubRateLimitError(err) || [
     'timeout',
     'timed out',
     'temporarily unavailable',
@@ -65,7 +66,6 @@ function isTransientGhError(err) {
     'eai_again',
     'enotfound',
     'tls handshake',
-    'http 429',
     'http 500',
     'http 502',
     'http 503',
@@ -73,7 +73,6 @@ function isTransientGhError(err) {
     'bad gateway',
     'service unavailable',
     'gateway timeout',
-    'rate limit',
   ].some((needle) => text.includes(needle));
 }
 

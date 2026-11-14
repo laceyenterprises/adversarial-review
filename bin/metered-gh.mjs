@@ -4,7 +4,7 @@ import { readFileSync } from 'node:fs';
 import { constants } from 'node:os';
 import { meteredExecFile } from '../src/metered-gh.mjs';
 import { reportHammerProgress } from '../src/ama/hammer-progress.mjs';
-import { awaitThrottleIfNeeded, recordResponseRateLimit, recordRateLimitedCall } from '../src/rate-limit-throttle.mjs';
+import { awaitThrottleIfNeeded, recordResponseRateLimit, recordRateLimitedCall, withGitHubBudgetScope } from '../src/rate-limit-throttle.mjs';
 
 function isPrMerge(argv) {
   // Skip repository options without mistaking option values or another
@@ -20,13 +20,23 @@ function isPrMerge(argv) {
 }
 
 const [action, ...args] = process.argv.slice(2);
-if (action === 'wait' || action === 'record' || action === 'limited') {
+if (action === 'wait' || action === 'record' || action === 'limited' || action === 'admit') {
   const payload = JSON.parse(readFileSync(0, 'utf8'));
+  const recorded = [];
   for (const item of payload) {
-    if (action === 'wait') await awaitThrottleIfNeeded(item.resource || item, item.credential);
+    if (action === 'admit') {
+      try {
+        await withGitHubBudgetScope({}, () => awaitThrottleIfNeeded(item.resource, item.credential));
+        process.stdout.write(JSON.stringify({ deferred: false }));
+      } catch (err) {
+        if (!err.budgetDeferred) throw err;
+        process.stdout.write(JSON.stringify({ deferred: true, observation: err.observation }));
+      }
+    } else if (action === 'wait') await awaitThrottleIfNeeded(item.resource || item, item.credential);
     else if (action === 'limited') await recordRateLimitedCall(item.resource || item, item.credential);
-    else await recordResponseRateLimit(item);
+    else recorded.push(await recordResponseRateLimit(item));
   }
+  if (action === 'record') process.stdout.write(JSON.stringify(recorded));
 } else if (action === 'exec' || action === 'exec-hammer' || action === 'exec-git') {
   let terminationSignal;
   let terminationTimer;

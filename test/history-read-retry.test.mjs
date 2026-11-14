@@ -155,9 +155,9 @@ test('backoff scales with corroborated host load and metadata reads recover', as
 
 test('rate limits require and honor Retry-After, including HTTP dates', async t => {
   const mockedNow = t.mock.method(Date, 'now', () => Date.parse('2026-01-01T00:00:00Z'));
-  assert.equal(historyReadRetryDelayMs(transportError('HTTP 403: secondary rate limit\nRetry-After: 2'), 0), 2000);
-  assert.equal(historyReadRetryDelayMs(transportError('HTTP 429: too many requests\nRetry-After: Thu, 01 Jan 2026 00:00:03 GMT'), 0), 3000);
-  assert.equal(historyReadRetryDelayMs(transportError('Retry-After: 2', { status: 429 }), 0), 2000);
+  assert.equal(historyReadRetryDelayMs(transportError('content', { status: 403, response: { headers: { 'retry-after': '2' } } }), 0), 2000);
+  assert.equal(historyReadRetryDelayMs(transportError('content', { status: 429, response: { headers: { 'retry-after': 'Thu, 01 Jan 2026 00:00:03 GMT' } } }), 0), 3000);
+  assert.equal(historyReadRetryDelayMs(transportError('content', { status: 429, response: { headers: { 'retry-after': '2' } } }), 0), 2000);
   assert.equal(historyReadRetryDelayMs(transportError('proxy timeout', { status: 404 }), 0), null);
   mockedNow.mock.restore();
   const clock = new FakeClock(t);
@@ -228,7 +228,7 @@ test('Retry-After beyond the context budget fails immediately with the original 
   let calls = 0;
   const get = createHistoryReader({ env: fakeEnv(), contextTimeoutMs: 1000,
     sleep: async () => assert.fail('cannot spend the whole budget sleeping'),
-    execFileImpl: async () => { calls++; throw transportError('HTTP 503 Service Unavailable\nRetry-After: 120'); } });
+    execFileImpl: async () => { calls++; throw transportError('HTTP 503 Service Unavailable\nRetry-After: 120', { status: 503, response: { headers: { 'retry-after': '120' } } }); } });
   await assert.rejects(get(prPath), /Retry-After: 120/);
   assert.equal(calls, 1);
 });

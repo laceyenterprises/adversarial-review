@@ -1,5 +1,6 @@
 import { loadAwareTimeoutMs } from './load-aware-timeout.mjs';
 import { meteredExecFile } from './metered-gh.mjs';
+import { isGitHubRateLimitError } from './rate-limit-throttle.mjs';
 // Fast-merge GitHub I/O layer.
 //
 // Self-contained GitHub read/transport primitives for the fast-merge gate:
@@ -49,6 +50,7 @@ function execFileFromGhClient(ghClient) {
 }
 
 function isRetryableGhTransportError(err) {
+  if (isGitHubRateLimitError(err)) return true;
   if (isExecTimeout(err)) return true;
   const detail = [
     err?.code,
@@ -61,8 +63,6 @@ function isRetryableGhTransportError(err) {
     || detail.includes('timed out')
     || detail.includes('temporary failure')
     || detail.includes('temporarily unavailable')
-    || detail.includes('rate limit')
-    || detail.includes('secondary rate limit')
     || detail.includes('502 bad gateway')
     || detail.includes('503 service unavailable')
     || detail.includes('504 gateway timeout');

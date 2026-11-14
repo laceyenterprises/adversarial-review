@@ -6,7 +6,7 @@ import {
   getCachedEtag,
   putCachedEtag,
 } from './etag-cache.mjs';
-import { awaitThrottleIfNeeded, recordResponseRateLimit, extractRateLimitObservation, isGitHubRateLimitError, githubCredential, recordRateLimitedCall } from './rate-limit-throttle.mjs';
+import { awaitThrottleIfNeeded, recordResponseRateLimit, extractRateLimitObservation, isGitHubRateLimitError, rateLimitErrorObservation, githubCredential, recordRateLimitedCall } from './rate-limit-throttle.mjs';
 
 const require = createRequire(import.meta.url);
 
@@ -135,7 +135,7 @@ async function fetchConditionalRestPage({
     return response;
   } catch (err) {
     if (isGitHubRateLimitError(err) && !err.budgetDeferred) {
-      err.observation = await recordRateLimitedCall('core', credential, { ...extractRateLimitObservation(err?.response?.headers, { rateLimited: true }), requestCategory: category });
+      err.observation = await recordRateLimitedCall('core', credential, rateLimitErrorObservation(err, { requestCategory: category }));
     }
     await recordResponseRateLimit({
       ...extractRateLimitObservation(err?.response?.headers), requestCategory: category,
@@ -240,9 +240,9 @@ function createWatcherOctokit({
       if (err?.status) recordApiCall({ category: 'github_request', status: err.status,
         extra: { credential, resource, requestCategory: githubRequestCategory(options.url), unit: 'http_response', budgetExempt: err.status === 304 } });
       const limited = isGitHubRateLimitError(err);
-      const observation = extractRateLimitObservation(err?.response?.headers, { resource, rateLimited: limited });
-      if (limited && !err.budgetDeferred) err.observation = await recordRateLimitedCall(resource, credential, { ...observation, requestCategory: githubRequestCategory(options.url) });
-      else if (observation) await recordResponseRateLimit({ ...observation, credential, requestCategory: githubRequestCategory(options.url) });
+      const observation = limited ? rateLimitErrorObservation(err, { resource, requestCategory: githubRequestCategory(options.url) }) : extractRateLimitObservation(err?.response?.headers, { resource });
+      if (limited && !err.budgetDeferred) err.observation = await recordRateLimitedCall(resource, credential, observation);
+      else if (observation) await recordResponseRateLimit({ ...observation, credential });
       throw err;
     }
   });

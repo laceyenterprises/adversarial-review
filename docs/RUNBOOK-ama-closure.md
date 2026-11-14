@@ -491,8 +491,13 @@ branch protection, timeline and commit) are read by the deployed
 closure-gate read (those inputs, `hammer-context.mjs`, and the Git credential
 mint) shares `src/ama/closure-gate-read.mjs`: transient failures (timeout,
 5xx, connection errors, rate limits, a credential mint that timed out or failed
-to run) retry in place with the same `LAUNCH_READ_BACKOFF_MS` spacing inside a
-nominal 120-second closure budget, scaled once by `loadAwareTimeoutMs`.
+to run) retry in place with `LAUNCH_READ_BACKOFF_MS` spacing inside a nominal
+120-second closure budget, scaled once by `loadAwareTimeoutMs`. Structured
+GitHub rate limits honor their recorded deadline or retry-after, otherwise
+60 seconds; a wait that cannot fit returns an exhausted read without an early
+retry. Rate-limit prose has no classification authority. Shared admission
+confirms proposed holds above two minutes against `/rate_limit` with the
+sending credential; contradictory live readings correct stored false zero.
 Definitive answers (401/403, a moved head, malformed
 output) refuse at once and write a final `terminal-stop` progress receipt.
 A protection 404 "Branch not found" is
@@ -5166,8 +5171,10 @@ subprocess uses 5 seconds. Each nominal budget is scaled once, retaining its
 base at zero load. An explicitly supplied effective diagnostic budget is
 honored without rescaling.
 
-Secondary rate limits require a valid `Retry-After` header; the reader includes
-response headers and waits at least that long. Reads, retry waits and local
+Secondary rate limits require structured HTTP response evidence. The reader
+honors `Retry-After`; without it a documented secondary response waits at least
+60 seconds, with exponential backoff capped at five minutes. CLI stdout,
+exception prose and PR content cannot establish a rate limit. Reads, retry waits and local
 diffs share a nominal 90-second wall-clock context budget, scaled once through
 `loadAwareTimeoutMs` (540 seconds at the default 6× maximum); attempts use only the
 remaining time, and a retry whose delay cannot fit fails with the original error.

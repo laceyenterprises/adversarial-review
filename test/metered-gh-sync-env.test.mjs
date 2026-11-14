@@ -5,7 +5,7 @@ import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'no
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { meteredExecFileSync } from '../src/metered-gh.mjs';
-import { GitHubBudgetDeferredError, withGitHubBudgetScope } from '../src/rate-limit-throttle.mjs';
+import { GitHubBudgetDeferredError, withGitHubBudgetScope, githubCredential } from '../src/rate-limit-throttle.mjs';
 
 function fixture(t) {
   const dir = mkdtempSync(join(tmpdir(), 'metered-sync-env-'));
@@ -51,10 +51,16 @@ process.exit(${limited ? 1 : 0});
 `, { mode: 0o755 });
     const executor = scenario === 'injected-result' ? () => ({ stdout: '{}', stderr, status: 0 }) : execFileSync;
     const run = () => meteredExecFileSync(executor, 'gh', ['api', 'repos/fixture/repo'], { env, encoding: 'utf8', timeout: 2000 });
-    if (limited) assert.throws(run, error => error.rateLimited === true);
+    if (limited) assert.throws(run, error => scenario === 'headerless-error' ? !error.rateLimited : error.rateLimited === true && Date.parse(error.observation.resetAt) - Date.now() <= 60_000);
     else assert.equal(scenario === 'injected-result' ? run().stdout : run(), '{}');
+    if (scenario === 'headerless-error') {
+      assert.equal(existsSync(explicit), false, 'unstructured prose must not create a budget');
+      assert.equal(existsSync(ambient), false);
+      return;
+    }
     const bucket = JSON.parse(readFileSync(explicit, 'utf8')).buckets.core;
-    assert.equal(bucket.remaining, limited ? 0 : 4900);
+    assert.equal(bucket.remaining, 4900);
+    if (limited) assert.ok(Date.parse(bucket.secondaryUntil) - Date.now() <= 60_000);
     assert.equal(bucket.rateLimitedCalls || 0, limited ? 1 : 0);
     assert.equal(existsSync(ambient), false, 'record and limited bridges must not write ambient state');
   });
@@ -102,4 +108,33 @@ test('synchronous wait bridge waits for the caller budget reset', t => {
     return '{}';
   }, 'gh', ['api', 'repos/fixture/repo'], { env }), '{}');
   assert.equal(JSON.parse(readFileSync(ambient, 'utf8')).buckets.core.remaining, 4900);
+});
+
+
+test('synchronous long false zero is corrected by the live-probe bridge before deferral', async t => {
+  const { dir, explicit, env } = fixture(t);
+  env.GH_TOKEN = 'synthetic-sync-confirm';
+  const credential = githubCredential({ env });
+  const reset = Math.ceil(Date.now() / 1000) + 3600;
+  writeFileSync(explicit, JSON.stringify({ version: 2, buckets: { [`${credential}/core`]: {
+    resource: 'core', credential, remaining: 0, limit: 5400,
+    resetAt: new Date(reset * 1000).toISOString(), observedAt: new Date().toISOString(),
+  } } }));
+  const preload = join(dir, 'probe.mjs');
+  const receipt = join(dir, 'probe.json');
+  writeFileSync(preload, `import { writeFileSync } from 'node:fs';
+    globalThis.fetch = async (url) => {
+      if (url !== 'https://api.github.com/rate_limit') throw new Error('unexpected probe');
+      writeFileSync(${JSON.stringify(receipt)}, JSON.stringify({ endpoint: '/rate_limit' }));
+      return new Response(JSON.stringify({ resources: { core: { remaining: 5032, limit: 5400, reset: ${reset} } } }));
+    };`);
+  env.NODE_OPTIONS = `--import=${preload}`;
+  let calls = 0;
+  await withGitHubBudgetScope({}, async scope => {
+    assert.equal(meteredExecFileSync(() => { calls++; return '{}'; }, 'gh', ['api', 'repos/fixture/repo'], { env }), '{}');
+    assert.equal(scope.deferred, false);
+  });
+  assert.equal(calls, 1);
+  assert.equal(JSON.parse(readFileSync(explicit, 'utf8')).buckets[`${credential}/core`].remaining, 5032);
+  assert.deepEqual(JSON.parse(readFileSync(receipt, 'utf8')), { endpoint: '/rate_limit' });
 });

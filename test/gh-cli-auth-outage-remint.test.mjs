@@ -480,4 +480,45 @@ process.exit(1);
   }), err => err.stderr === 'gh: rate limit exceeded\n' && !err.message.includes('fixture-private-body'));
   const state = JSON.parse(readFileSync(join(dir, 'state.json'), 'utf8'));
   assert.equal(state.buckets.graphql.rateLimitedCalls, 1);
+  assert.equal(state.buckets.graphql.remaining, 4900);
+  assert.ok(Date.parse(state.buckets.graphql.secondaryUntil) - Date.now() <= 60_000);
+});
+
+test('reviewer 401 recovery mints only its selected role and never the watcher role', async t => {
+  const { mkdtempSync, writeFileSync, rmSync } = await import('node:fs');
+  const { tmpdir } = await import('node:os');
+  const { join } = await import('node:path');
+  const { pinReviewerGhIdentity } = await import('../src/reviewer-context-auth.mjs');
+  const dir = mkdtempSync(join(tmpdir(), 'reviewer-role-'));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const secret = join(dir, 'secret');
+  writeFileSync(secret, 'synthetic-broker-secret');
+  const env = {
+    GH_GEMINI_REVIEWER_TOKEN: 'synthetic-rejected', GEMINI_REVIEWER_AUTH_VIA_BROKER: 'true',
+    WATCHER_GH_AUTH_VIA_BROKER: 'true', WATCHER_GH_BROKER_ROLE: 'merge-agent',
+    OAUTH_BROKER_URL: 'http://broker.fixture', OAUTH_BROKER_URL_FALLBACK: 'http://broker.fixture',
+    OAUTH_BROKER_SHARED_SECRET_FILE: secret,
+    OAUTH_BROKER_GEMINI_REVIEWER_PROVIDER: 'github-app-gemini-reviewer',
+    OAUTH_BROKER_GEMINI_REVIEWER_EXPECTED_APP_ID: '123',
+    OAUTH_BROKER_GEMINI_REVIEWER_EXPECTED_INSTALLATION_ID: '456',
+  };
+  pinReviewerGhIdentity(env, 'GH_GEMINI_REVIEWER_TOKEN');
+  const mints = [];
+  t.mock.method(globalThis, 'fetch', async url => {
+    mints.push(url);
+    return { ok: true, json: async () => ({ access_token: 'synthetic-fresh',
+      provider: 'github-app-gemini-reviewer', expires_at: new Date(Date.now() + 3600_000).toISOString(),
+      metadata: { app_id: '123', installation_id: '456' } }) };
+  });
+  let calls = 0;
+  await execGhWithRetry({ args: ['pr', 'diff', '1'], env, log: SILENT_LOG,
+    execFileImpl: async (_command, _args, options) => {
+      calls++;
+      if (calls === 1) throw ghError(BAD_CREDENTIALS);
+      assert.equal(options.env.GH_TOKEN, 'synthetic-fresh');
+      return { stdout: 'synthetic diff', stderr: '' };
+    } });
+  assert.equal(calls, 2);
+  assert.deepEqual(mints, ['http://broker.fixture/token?provider=github-app-gemini-reviewer&force=1']);
+  assert.equal(env.GITHUB_REVIEWER_TOKEN_ENV, 'GH_GEMINI_REVIEWER_TOKEN');
 });

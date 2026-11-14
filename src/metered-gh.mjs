@@ -7,12 +7,12 @@ import { observeSynchronousChild } from './watcher-latency.mjs';
 import { execFile, execFileSync, spawnSync } from 'node:child_process';
 import { promisify } from 'node:util';
 import { fileURLToPath } from 'node:url';
-import { githubRequestCategory, recordApiCall } from './api-telemetry.mjs';
+import { githubRequestCategory, recordApiCall, resolveDefaultApiCallRootDir } from './api-telemetry.mjs';
 import {
   awaitThrottleIfNeeded, extractRateLimitObservation, recordResponseRateLimit,
   readGitHubBudgetBucketsSync, resolveThrottleFloor, markGitHubRateLimited,
   recordRateLimitedCall, currentGitHubBudgetScope, GitHubBudgetDeferredError,
-  githubCredential, githubBudgetKey, scopedGitHubRateLimit, githubBudgetBelowFloor, githubBudgetFloor,
+  classifyGitHubRateLimit, isGitHubRateLimitError, githubCredential, githubBudgetKey, scopedGitHubRateLimit, githubBudgetBelowFloor, githubBudgetFloor,
 } from './rate-limit-throttle.mjs';
 
 const execFileAsync = promisify(execFile);
@@ -55,9 +55,8 @@ function parseGhDebug(stderr, resource = 'core') {
   let inRequest = false;
   let diagnosticTail = [];
   let headers = {};
-  let rateLimited = false;
-  let forbidden = false;
-  let limitMessage = false;
+  let responseBody = [];
+  let inHeaders = false;
   let lastResponseRateLimit = null;
   let requestResource = resource;
   let requestCategory = 'other';
@@ -67,16 +66,21 @@ function parseGhDebug(stderr, resource = 'core') {
     // response's reset hint until stdout/error classification is available.
     if (inRequest || Object.keys(headers).length) {
       lastResponseResource = headers['x-ratelimit-resource'] || requestResource;
-      lastResponseRateLimit = extractRateLimitObservation(headers, { resource: requestResource, rateLimited: true });
+      lastResponseRateLimit = extractRateLimitObservation(headers, { resource: requestResource, rateLimited: true, status: httpStatus, requestCategory });
     }
-    const observation = extractRateLimitObservation(headers, { resource: requestResource, rateLimited: rateLimited || (forbidden && limitMessage) });
+    let data;
+    try { data = JSON.parse(responseBody.join('\n')); } catch { /* Non-JSON bodies carry no error signal. */ }
+    const kind = classifyGitHubRateLimit({ status: httpStatus, headers, data })
+      || (requestResource === 'graphql' && Array.isArray(data?.errors)
+        && data.errors.some(error => error?.type === 'RATE_LIMITED') ? 'secondary' : null);
+    const observation = extractRateLimitObservation(headers, { resource: requestResource,
+      rateLimited: Boolean(kind), kind, status: httpStatus, requestCategory });
     if (httpStatus !== null) requests.push({ status: httpStatus, resource: headers['x-ratelimit-resource'] || requestResource, requestCategory });
-    if (observation) observations.push({ ...observation, requestCategory, rateLimited: rateLimited || (forbidden && (observation.remaining === 0 || limitMessage)) });
+    if (observation) observations.push({ ...observation, rateLimited: Boolean(kind) });
     headers = {};
     httpStatus = null;
-    rateLimited = false;
-    forbidden = false;
-    limitMessage = false;
+    responseBody = [];
+    inHeaders = false;
   }
   for (const line of String(stderr || '').split(/\r?\n/)) {
     if (/^\* Request at /.test(line)) {
@@ -93,12 +97,11 @@ function parseGhDebug(stderr, resource = 'core') {
       requestCategory = githubRequestCategory(requestUrl[1]);
     }
     const header = line.match(/^< (x-ratelimit-[\w-]+|retry-after):\s*(.*)$/i);
-    const statusLine = line.match(/^< HTTP\/\S+ (\d{3})\b/);
-    if (statusLine) httpStatus = Number(statusLine[1]);
-    if (header) headers[header[1].toLowerCase()] = header[2];
-    if (/^< HTTP\/\S+ 429\b/.test(line)) rateLimited = true;
-    if (/^< HTTP\/\S+ 403\b/.test(line)) forbidden = true;
-    if (inRequest && /rate limit|too many requests/i.test(line)) limitMessage = true;
+    const statusLine = httpStatus === null && inRequest ? line.match(/^< HTTP\/\S+ (\d{3})\b/) : null;
+    if (statusLine) { httpStatus = Number(statusLine[1]); inHeaders = true; }
+    if (inHeaders && line.trim() === '') inHeaders = false;
+    if (header && inHeaders) headers[header[1].toLowerCase()] = header[2];
+    if (httpStatus !== null && !inHeaders && !/^[*<>] /.test(line)) responseBody.push(line);
     if (/^\* Request took /.test(line)) {
       flush();
       diagnosticTail = [];
@@ -129,13 +132,13 @@ function recordRequests(parsed, credential) {
 }
 
 function isRateLimitedError(err) {
-  const detail = [err?.message, err?.stderr, err?.stdout, err?.response?.data?.message].join('\n');
-  return err?.rateLimited === true || err?.status === 429 || /rate limit|too many requests|HTTP\s+429/i.test(detail);
+  return isGitHubRateLimitError(err);
 }
 
 function debugOptions(options = {}) {
   const env = { ...(options.env || process.env), GH_DEBUG: 'api' };
-  for (const key of ['GHO_RATE_LIMIT_SHARED_STATE_PATH', 'GHO_RATE_LIMIT_THROTTLE_FLOOR']) {
+  for (const key of ['GHO_RATE_LIMIT_SHARED_STATE_PATH', 'GHO_RATE_LIMIT_THROTTLE_FLOOR',
+    'GHO_API_CALL_LOG_ROOT_DIR', 'GHO_API_CALL_LOG_DISABLE', 'GHO_API_CONSUMER']) {
     if (options.env?.[key] === undefined && process.env[key] !== undefined) env[key] = process.env[key];
   }
   // Debug headers need a child-env copy; token sessions must retain the source
@@ -146,19 +149,12 @@ function debugOptions(options = {}) {
 function responseRateLimited(result, parsed, failed) {
   // Successful PR bodies can discuss rate limits. Only actual API errors and
   // failed commands contribute to the resource failure count.
-  let graphqlLimited = false;
-  try {
-    const text = String(result?.stdout || '').replace(/^HTTP\/[\s\S]*?\r?\n\r?\n/, '');
-    const payload = JSON.parse(text);
-    graphqlLimited = Array.isArray(payload.errors) && payload.errors.some(error =>
-      error.type === 'RATE_LIMITED' || /rate limit|too many requests/i.test(error.message || ''));
-  } catch { /* High-level commands need not produce JSON. */ }
   const limited = parsed.observations.some(observation => observation.rateLimited)
-    || graphqlLimited || (failed && isRateLimitedError(result));
+    || (failed && isRateLimitedError(result));
   if (limited && !parsed.observations.some(observation => observation.rateLimited) && parsed.lastResponseRateLimit) {
     const hint = parsed.lastResponseRateLimit;
     const last = parsed.observations.at(-1);
-    if (last?.resource === hint.resource && last.resetAt === hint.resetAt) last.rateLimited = true;
+    if (last?.resource === hint.resource && last.resetAt === hint.resetAt) Object.assign(last, hint, { rateLimited: true });
     else parsed.observations.push({ ...hint, rateLimited: true });
   }
   if (result?.message && result.stderr) result.message = result.message.replace(String(result.stderr), parsed.stderr);
@@ -166,7 +162,10 @@ function responseRateLimited(result, parsed, failed) {
     result.stderr = Buffer.isBuffer(result.stderr) ? Buffer.from(parsed.stderr) : parsed.stderr;
     if (Array.isArray(result.output)) result.output[2] = result.stderr;
   }
-  if (limited) result.rateLimited = true;
+  if (limited) {
+    result.rateLimited = true;
+    result.githubRateLimitKind = parsed.observations.findLast(item => item.rateLimited)?.kind || 'secondary';
+  }
   return limited;
 }
 
@@ -174,14 +173,13 @@ async function finish(result, { failed = false, resource = 'core', credential = 
   const parsed = parseGhDebug(result?.stderr, resource);
   recordRequests(parsed, credential);
   const limited = responseRateLimited(result, parsed, failed);
-  for (const observation of parsed.observations) await recordResponseRateLimit({ ...observation, credential });
-  if (limited) {
-    const observation = parsed.observations.findLast(item => item.rateLimited);
-    // GraphQL errors can name a different pool from the command's fallback.
-    result.observation = observation
-      ? markGitHubRateLimited(observation.resource, credential, observation)
-      : await recordRateLimitedCall(parsed.lastResponseResource, credential);
+  let recordedLimit;
+  for (const observation of parsed.observations) {
+    const recorded = await recordResponseRateLimit({ ...observation, credential });
+    if (observation.rateLimited) recordedLimit = recorded;
   }
+  if (limited) result.observation = recordedLimit || await recordRateLimitedCall(parsed.lastResponseResource, credential,
+    extractRateLimitObservation({}, { resource: parsed.lastResponseResource, rateLimited: true }));
   return result;
 }
 
@@ -215,6 +213,8 @@ function meteredExecFile(execFileImpl = execFileAsync, command, args, options = 
 }
 
 function bridgeCall(action, payload, env) {
+  const logRoot = resolveDefaultApiCallRootDir({ ...process.env, ...env });
+  env = { ...env, ...(logRoot ? { GHO_API_CALL_LOG_ROOT_DIR: logRoot } : { GHO_API_CALL_LOG_DISABLE: '1' }) };
   return execFileSync(process.execPath, [bridge, action], {
     input: JSON.stringify(payload), encoding: 'utf8', env,
     maxBuffer: 1024 * 1024,
@@ -225,11 +225,14 @@ function finishSync(result, { failed = false, resource = 'core', env, credential
   const parsed = parseGhDebug(result?.stderr, resource);
   recordRequests(parsed, credential);
   const limited = responseRateLimited(result, parsed, failed || Number(result?.status) > 0);
-  if (parsed.observations.length) bridgeCall('record', parsed.observations.map(item => ({ ...item, credential })), env);
+  const recorded = parsed.observations.length
+    ? JSON.parse(bridgeCall('record', parsed.observations.map(item => ({ ...item, credential })), env)) : [];
   if (limited) {
-    const observation = parsed.observations.findLast(item => item.rateLimited);
+    const index = parsed.observations.findLastIndex(item => item.rateLimited);
+    const observation = index >= 0 ? recorded[index] : JSON.parse(bridgeCall('record', [{
+      ...extractRateLimitObservation({}, { resource: parsed.lastResponseResource, rateLimited: true }), credential,
+    }], env))[0];
     result.observation = markGitHubRateLimited(observation?.resource || parsed.lastResponseResource, credential, observation || {});
-    if (!observation) bridgeCall('limited', [{ resource: parsed.lastResponseResource, credential }], env);
   }
   return result;
 }
@@ -258,7 +261,7 @@ function executeGhSync(execFileImpl, command, args, activeOptions, session) {
   let credential = githubCredential({ env });
   let waited = false;
   for (const res of ghResources(args)) {
-    const bucket = buckets[githubBudgetKey(res, credential)];
+    let bucket = buckets[githubBudgetKey(res, credential)];
     const limited = scopedGitHubRateLimit(res, credential);
     if (limited) {
       const error = new GitHubBudgetDeferredError(limited, { credential });
@@ -267,8 +270,13 @@ function executeGhSync(execFileImpl, command, args, activeOptions, session) {
     }
     if (scope?.operatorSafety) continue; // Never starved by the floor (NOMERGEHOLDHANG-01).
     // The floor is capped by the bucket's observed limit (WATCHERANONBUCKET-01).
-    if (githubBudgetBelowFloor(bucket, resolveThrottleFloor(env)) && Date.parse(bucket.resetAt) > Date.now()) {
-      if (scope?.urgent && bucket.remaining > 0) continue;
+    if (githubBudgetBelowFloor(bucket, resolveThrottleFloor(env)) && Math.max(Date.parse(bucket.resetAt), Date.parse(bucket.secondaryUntil || '') || 0) > Date.now()) {
+      if (scope?.urgent && bucket.remaining > 0 && !(Date.parse(bucket.secondaryUntil || '') > Date.now())) continue;
+      if (scope && Math.max(bucket.remaining != null && bucket.remaining < githubBudgetFloor(bucket, resolveThrottleFloor(env)) ? Date.parse(bucket.resetAt) : 0, Date.parse(bucket.secondaryUntil || '') || 0) - Date.now() > 120_000) {
+        const checked = JSON.parse(bridgeCall('admit', [{ resource: res, credential }], env));
+        if (!checked.deferred) continue;
+        bucket = checked.observation;
+      }
       if (scope) {
         scope.deferred = true;
         const error = new GitHubBudgetDeferredError(bucket, { credential, floor: githubBudgetFloor(bucket, resolveThrottleFloor(env)) });

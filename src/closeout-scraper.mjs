@@ -1,3 +1,4 @@
+import { isGitHubRateLimitError } from './rate-limit-throttle.mjs';
 import { loadAwareTimeoutMs } from './load-aware-timeout.mjs';
 import { meteredExecFile } from './metered-gh.mjs';
 import { execFile } from 'node:child_process';
@@ -127,14 +128,15 @@ function isRetryableSqliteError(err) {
 function isRetryableGhError(err) {
   const code = String(err?.code || '').toUpperCase();
   const message = String(err?.message || '').toLowerCase();
-  return err?.killed === true
+  return isGitHubRateLimitError(err)
+    || err?.killed === true
     || code === 'ETIMEDOUT'
     || code === 'ECONNRESET'
     || code === 'EAI_AGAIN'
     || code === 'ENOTFOUND'
     || code === 'EGHSTDERR'
     || code === 'EGHPARSE'
-    || /timed out|timeout|socket hang up|temporary failure|502|503|504|rate limit/i.test(message);
+    || /timed out|timeout|socket hang up|temporary failure|502|503|504/i.test(message);
 }
 
 async function withRetry(task, {

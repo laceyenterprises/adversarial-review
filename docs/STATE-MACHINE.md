@@ -2213,6 +2213,13 @@ ownership. Other FIFO waiters and the
 holder fence are unchanged. The clean smoke covers empty-lane progress after a
 hold with a live watcher PID; dedicated fixtures also cover head changes and
 cleanup while a holder remains. No states or merge-authority edges are added.
+Lifecycle reconciliation additionally scans persisted daemon reservations before
+its empty-open-row return. A terminal live read matching repo/PR/full head/base
+permits removal only if the entire waiter snapshot still matches under the
+shared mutation lock. Concurrent refreshes and uncertain evidence survive for
+the next poll independently of the review mirror. This covers external merges
+that never re-enter the posted-review evaluator; no holder or merge predicate
+changes.
 The closer releases before its first remote-CI wait, including UNKNOWN/read
 retry waits, and reacquires before merge. At that boundary and before each click,
 CLEAN and known non-strict MERGEABLE BEHIND heads retain their exact checks,

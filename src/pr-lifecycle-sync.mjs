@@ -1,4 +1,5 @@
 import { observeClosureLag } from './ama/closure-lag.mjs';
+import { reconcileTerminalDaemonWaiters } from './ama/terminal-daemon-waiters.mjs';
 // ── PR lifecycle sync: merge-closeout capture + fast-merge close path ─────────
 //
 // ARC-18: extracted from watcher.mjs as leaf helpers — the merged-PR closeout
@@ -299,6 +300,20 @@ export function logLifecycleReconcileSummary(summary, logger = console) {
  * one. Behaviour for a PR that is genuinely still open is unchanged.
  */
 export async function syncPRLifecycle(octokit, operatorSurface, primaryDomainId = null) {
+  // Share authenticated reads (including failures) within this pass only.
+  // A new poll must revalidate rather than reuse an earlier poll's snapshot.
+  const liveByPr = new Map();
+  const fetchLiveState = (repo, prNumber) => {
+    const key = `${repo}#${prNumber}`;
+    if (!liveByPr.has(key)) {
+      liveByPr.set(key, fetchPollingPrState(octokit, ROOT, repo, prNumber));
+    }
+    return liveByPr.get(key);
+  };
+  await reconcileTerminalDaemonWaiters({
+    rootDir: ROOT,
+    fetchLiveState,
+  });
   const openRows = stmtGetOpenPRs.all();
   if (openRows.length === 0) {
     // Still attest. "Nothing was open" is a verified-clean mirror, and the
@@ -325,7 +340,7 @@ export async function syncPRLifecycle(octokit, operatorSurface, primaryDomainId 
     rows: openRows,
     source: 'lifecycle-sync',
     fetchLiveState: async (repo, prNumber) => {
-      const freshState = await fetchPollingPrState(octokit, ROOT, repo, prNumber);
+      const freshState = await fetchLiveState(repo, prNumber);
       try { await observeClosureLag({ rootDir: ROOT, repo, prNumber,
         headSha: freshState.headRefOid,
         merged: freshState.merged === true || String(freshState.state).toUpperCase() === 'MERGED',

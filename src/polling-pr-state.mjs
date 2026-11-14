@@ -16,6 +16,7 @@ export async function fetchPollingPrState(octokit, rootDir, repo, prNumber) {
   return {
     state: pr.merged_at ? 'MERGED' : pr.state.toUpperCase(),
     headRefOid: pr.head.sha, mergedAt: pr.merged_at || null,
+    baseRefName: pr.base?.ref || null,
     closedAt: pr.closed_at || null, author: pr.user?.login ? { login: pr.user.login } : null,
     labels: pr.labels,
   };

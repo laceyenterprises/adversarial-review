@@ -81,6 +81,17 @@ requests and holder fences remain intact.
 Cleanup requires a resolved head; an absent head leaves existing reservations
 intact while the caller's attempt handles the unresolved candidate.
 
+Lifecycle polling also scans daemon waiter files independently of open review
+rows. An authenticated terminal PR read must match the waiter's repository,
+PR, full head and base before cleanup. The canonical removal API accepts an
+optional `expectedWaiter` snapshot and compares the entire row under the same
+per-base mutation lock. A refresh or replacement during the remote read survives
+and is verified again on a later poll, even if the review mirror is already
+terminal. Live, incomplete, mismatched and unreadable evidence preserves the
+request. Ordinary CLI waiters, other daemon requests, holders, FIFO arrival,
+required checks and merge authority are unchanged. No durable fields or
+migration are added.
+
 LEASEFAIR-04 makes both ordinary holder release and retryable-abort release
 request one watcher wake when the first surviving waiter is a daemon. The wake
 carries that waiter's PR and exact head, and uses the existing consumer's per-head

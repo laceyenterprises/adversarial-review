@@ -158,7 +158,27 @@ retains the corresponding remediation `Worker-Class`. The worker generates
 finding-covered primary-line reversals and records final branch-push completion
 to emit that attestation. Missing, conflicting or unreadable evidence refuses
 authorization. Terminal and archived jobs can prove historical ownership but
-cannot claim live custody. No field, status or durable queue schema is added.
+cannot claim live custody. LANEREVERSAL-01 adds no field or lifecycle status.
+
+FFACUSTODY-01 adds optional HQ worker descriptor fields
+`requiresProducedAttestation: true`, `hqOwnerUser`, `custodyRepo` (registered
+short repository name), and `custodyBranch` for newly dispatched final-fix-all
+jobs. `dispatchMode` and `remediationPlan.dispatchPath` are `hq`.
+`launchRequestId` is the returned HQ LRQ, never the reply storage key.
+`workspaceDir` may remain null while provisioning is pending. Before workspace
+inspection at reconciliation, its real canonical HQ slot and `workspace.json`
+must match the recorded launch, worker class, owner, ticket, repo, branch and
+branch-push completion shape. Missing identity is refused, never reconstructed.
+Workspace validation uses the worker's explicit `hqRoot` when present, otherwise
+the reconciliation caller's `HQ_ROOT`, on both persisted and status-probed paths.
+A queued status with no workspace is refused by the workspace parser without
+rewriting the worker descriptor; a later provisioned response can be resolved.
+Direct dispatch uses the stable key `ffa-<sha256(jobId)>` across enqueue
+response loss and prompt regeneration. A settled worker retry uses its previous
+LRQ from `remediationPlan.retryHistory[].worker.launchRequestId` as a hash salt
+to admit the next attempt. The receipt's actual class wins over a newly proposed
+route when reusing an existing launch. Historical local descriptors are not
+converted into HQ identity; their owner must use the normal recovery path.
 
 At the final review-round cap, a latest exact-head Comment-only review with
 known zero blocking findings and remaining non-blocking or demoted findings

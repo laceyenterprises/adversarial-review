@@ -19,7 +19,10 @@
         "triggerType": "final-round-review",
         "review": "full",
         "maxRounds": 1,
-        "deduplication": "repo/pr/source head/reason across active, terminal and archived receipts; publication head falls back after re-review"
+        "deduplication": "repo/pr/source head/reason across active, terminal and archived receipts; publication head falls back after re-review",
+        "launchCustody": "HQ-only dispatch with stable ffa-<sha256(jobId)> idempotency key; workspaceDir may be null until provision completes",
+        "workerCustodyFields": ["requiresProducedAttestation", "hqOwnerUser", "custodyRepo", "custodyBranch"],
+        "workspaceBinding": "canonical HQ slot and manifest match launchRequestId, workerClass, ownerUser, ticketRef, repo, branch and branch-push shape; missing or mismatched identity refuses"
       }
     }
   ]

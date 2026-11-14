@@ -1423,6 +1423,12 @@ trailers retain the shared finding admissibility, strictness, ancestry and
 region/content proof. Terminal/archived receipts preserve historical authority,
 not live ownership. Both closer and daemon enforce this contract; a clean
 re-review alone grants no reversal authority.
+Final fix-all dispatch is HQ-only, including native mode and local health
+failover. Stable work-order keys retain the same launch after enqueue response
+loss. Reconciliation refuses a missing or mismatched canonical HQ workspace
+manifest. SRE observes the next natural HQ launch and produced completion
+receipt matching its durable job; existing historical owners remain responsible
+for recovery.
 
 At the final review-round cap, a latest exact-head Comment-only review with
 known zero blocking findings and remaining non-blocking or demoted findings

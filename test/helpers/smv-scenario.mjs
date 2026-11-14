@@ -644,6 +644,12 @@ if (scenario === 'clean') {
   assert.equal(store.lastClosure.nextAction.actor, 'remediator');
   assert.equal(fixAll.job.remediationPlan.maxRounds, 1);
   assert.equal(fixAll.job.finalRound, undefined);
+  const { resolveRemediationRuntimeMode } = await import('../../src/remediation-dispatch-mode.mjs');
+  const { createRemediationRuntime } = await import('../../src/follow-up-remediation.mjs');
+  assert.equal(resolveRemediationRuntimeMode(fixAll.job,
+    { healthRouter: { getMode: () => 'local' }, env: {} }), 'os');
+  await assert.rejects(createRemediationRuntime().run({ mode: 'local', mesJob: fixAll.job }),
+    /requires HQ launch custody/);
   const completedFixAll = join(rootDir, 'data', 'follow-up-jobs', 'completed', `${fixAll.job.jobId}.json`);
   mkdirSync(dirname(completedFixAll), { recursive: true });
   writeFollowUpJob(fixAll.jobPath, { ...fixAll.job, status: 'completed' });

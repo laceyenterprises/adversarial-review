@@ -119,11 +119,13 @@ function stickyRemediationDispatchPath(job) {
   return null;
 }
 
-// The config-only dispatch-path view: sticky decision, else the env-configured
+// The config-only dispatch-path view: final-fix-all requires HQ custody;
+// otherwise sticky decision, else the env-configured
 // default. Production dispatch now routes through `resolveRemediationRuntimeMode`
 // (which layers the health router over exactly this fallback); this remains the
 // stable query for "what path would config alone pick for this job".
 function resolveRemediationDispatchPathForJob(job, env = process.env) {
+  if (job?.closureHandoff?.reason === 'final-fix-all') return 'hq';
   return stickyRemediationDispatchPath(job)
     ?? (_isAgentOsRemediationMode(env) ? 'hq' : 'bare');
 }
@@ -136,6 +138,9 @@ function resolveRemediationDispatchPathForJob(job, env = process.env) {
 // selection falls back to the config-derived path, preserving pre-router
 // dispatch-path (and thus round/budget) parity with v1.
 function resolveRemediationRuntimeMode(job, { healthRouter = null, env = process.env } = {}) {
+  // This lane needs a real HQ launch, provisioned workspace and signer.
+  // A reply storage key in a local checkout is never a launch identity.
+  if (job?.closureHandoff?.reason === 'final-fix-all') return 'os';
   const sticky = stickyRemediationDispatchPath(job);
   if (sticky) return sticky === 'hq' ? 'os' : 'local';
   if (healthRouter && typeof healthRouter.getMode === 'function') {

@@ -830,6 +830,12 @@ one builder fix-all round and a full re-review. Its zero-finding re-review
 uses the daemon path below; remaining findings use the configured fallback.
 The existing durable handoff receipt prevents duplicate builder work and
 concurrent closer admission.
+Final fix-all always uses an HQ-provisioned branch-push worker, including
+during local failover. Its recorded launch must match the canonical workspace
+and exact-head produced attestation; missing identity requires recovery by the
+existing owner. Offline custody fixtures cover crash/retry and wrong-workspace
+refusal. After normal deployment, SRE observes a natural final-fix-all launch,
+completion receipt and matching produced attestation before declaring recovery.
 
 In-place repair custody is reconciled before watcher admission, at most once
 per 30 seconds. Complete terminal retry evidence or proven exact-key absence

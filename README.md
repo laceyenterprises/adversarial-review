@@ -4802,6 +4802,16 @@ An empty keyed receipt for a recorded launch additionally requires its exact
 ledger launch and retry descendants to be present and terminal.
 Missing or unreadable exact-launch evidence holds custody. Overdue holds and
 retryable dispatch failures report `needs-operator`.
+An unresolved blocked decision also retains its batch beyond the timeout.
+Before dispatching a publisher for prepared work blocked on publication, the
+collector uses the supported decision supersession API to verify pushed retained
+work and release its branch without an answer or continuation. It stores the
+bound release receipt in the batch row and rechecks keyed launch custody.
+A completed handoff may replace a spent pre-handoff intent once after its old
+deadline and grace; the new intent preserves the old submission and retains
+the ordinary single retry. It cannot renew its own spent retry. Existing
+automated smoke commands are unchanged; after both components deploy, observe
+the next natural handoff and publisher receipts read-only.
 Each pass logs open findings and stuck batch reasons/counts/oldest ages.
 The batch idempotency key, publication fence and settlement evidence remain
 authoritative. Tests use synthetic dispatch receipts.

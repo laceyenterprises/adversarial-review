@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import Database from 'better-sqlite3';
 import { mkdtempSync, rmSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import os, { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { ensureReviewStateSchema } from '../src/review-state.mjs';
 import { reapRunningPassTimeouts } from '../src/reviewer-pass-reaper.mjs';
@@ -107,6 +107,38 @@ test('posted artifact settlement reserves the writer before reading its claim', 
   assert.equal(db.prepare('SELECT status FROM reviewer_passes').get().status, 'completed');
   verify();
 });
+
+for (const infraAttempts of [0, 3]) {
+  test(`timed-out pass settlement reserves the writer before reading its claim (${infraAttempts} recoveries)`, t => {
+    const { db, writer, rootDir } = fixture(t);
+    t.mock.method(os, 'loadavg', () => [0, 0, 0]);
+    ensureReviewStateSchema(db);
+    db.prepare(`INSERT INTO reviewed_prs (repo, pr_number, reviewed_at, reviewer,
+      review_status, reviewer_session_uuid, reviewer_started_at, reviewer_head_sha,
+      infra_auto_recover_attempts)
+      VALUES (?, 1, ?, 'claude', 'reviewing', 'synthetic-session', ?, 'head-1', ?)`)
+      .run(repo, at, at, infraAttempts);
+    db.prepare(`INSERT INTO reviewer_passes (repo, pr_number, attempt_number,
+      reviewer_class, reviewer_model, pass_kind, started_at, status, head_sha, metadata_json)
+      VALUES (?, 1, 1, 'claude', 'claude', 'first-pass', ?, 'running', 'head-1',
+        '{"reviewerSessionUuid":"synthetic-session"}')`).run(repo, at);
+    const verify = contendAfterRead(db, writer, /SELECT review_status, reviewer_session_uuid/);
+    const errors = [];
+    const result = reapRunningPassTimeouts({ db, rootDir,
+      now: () => new Date('2026-01-01T02:00:00.000Z'),
+      isReviewerAlive: () => false,
+      log: { log() {}, warn() {}, error: (...args) => errors.push(args) },
+      recordReviewLatencyEventImpl: () => {} });
+    assert.deepEqual(errors, []);
+    assert.equal(result.reaped, 1);
+    assert.equal(result.reviewClaimsReleased, infraAttempts === 0 ? 1 : 0);
+    assert.equal(result.reviewClaimsFailed, infraAttempts === 3 ? 1 : 0);
+    assert.equal(db.prepare('SELECT review_status FROM reviewed_prs').get().review_status,
+      infraAttempts === 0 ? 'pending-upstream' : 'failed');
+    assert.equal(db.prepare('SELECT status FROM reviewer_passes').get().status, 'failed');
+    verify();
+  });
+}
 
 test('duplicate family upsert reserves the writer before reading existing state', t => {
   const { db, writer } = fixture(t);

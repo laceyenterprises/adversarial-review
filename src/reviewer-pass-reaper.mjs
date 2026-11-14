@@ -619,7 +619,7 @@ function reapRunningPassTimeouts({
         failureReason,
         timeoutThresholdSeconds: effectiveThresholdSeconds,
       };
-      const result = settleTimedOutPass({
+      const result = settleTimedOutPass.immediate({
         row,
         endedAt,
         metadataJson: JSON.stringify(metadata),

@@ -808,7 +808,7 @@ function createRateLimitThrottle({
             if (confirmed) {
               await recordRateLimit({ ...confirmed, requestCategory: 'rate_limit',
                 rawRateLimitHeaders: resources.rawRateLimitHeaders });
-              current = (await readSharedState())[key] || null;
+              current = mergeObservationMaps(inMemoryObservations, await readSharedState(), nowMs())[key] || null;
               if (!githubBudgetBelowFloor(current, configuredFloor)) return false;
             }
           } catch {

@@ -6,6 +6,7 @@ const PREFIX = '[reviewer-github-budget-deferred] ';
 
 // Optional enrichment may catch a failed read. It must still prevent a model
 // pass after admission has refused any of its required GitHub budgets.
+// An optional second argument supplies { env } for the sending credential.
 export function runReviewerPreModel(prepare) {
   return withGitHubBudgetScope({}, async scope => {
     try {
@@ -13,8 +14,9 @@ export function runReviewerPreModel(prepare) {
       if (scope.budgetDeferral) throw scope.budgetDeferral;
       // The final successful read can itself spend the last unit. Do not pay
       // for a model pass that already lacks the budget needed to deliver it.
-      const credential = githubCredential();
-      for (const resource of ['core', 'graphql']) await awaitThrottleIfNeeded(resource, credential);
+      const options = arguments[1] || {};
+      const credential = githubCredential(options);
+      for (const resource of ['core', 'graphql']) await awaitThrottleIfNeeded(resource, credential, options);
       return prepared;
     } catch (error) {
       const deferral = scope.budgetDeferral || error;

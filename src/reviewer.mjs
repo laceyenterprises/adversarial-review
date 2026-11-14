@@ -2518,27 +2518,13 @@ const __test__ = {
 };
 
 export {
-  CLAUDE_CLI,
-  CODEX_CLI,
-  GEMINI_CLI,
-  AGY_CLI,
-  assertClaudeOAuth,
-  assertCodexOAuth,
-  sanitizeCodexReviewPayload,
-  buildReviewerPromptPrefix,
-  spawnCaptured,
-  resolveReviewerTimeoutMs,
-  isFinalReviewRound,
-  detectSpecTouchViolations,
-  pinReviewerGhIdentity,
-  resolveReviewerSubprocessCwd,
-  clearPendingReviewsForSelf,
-  postGitHubReviewWithCapture,
-  ADVERSARIAL_PROMPT,
-  ADVERSARIAL_PROMPT_FINAL_ROUND_ADDENDUM,
-  REVIEWER_DOMAIN_ID,
-  REVIEWER_PROMPT_SET,
-  __test__,
+  CLAUDE_CLI, CODEX_CLI, GEMINI_CLI, AGY_CLI,
+  assertClaudeOAuth, assertCodexOAuth, sanitizeCodexReviewPayload,
+  buildReviewerPromptPrefix, spawnCaptured, resolveReviewerTimeoutMs,
+  isFinalReviewRound, detectSpecTouchViolations, pinReviewerGhIdentity,
+  resolveReviewerSubprocessCwd, clearPendingReviewsForSelf, postGitHubReviewWithCapture,
+  ADVERSARIAL_PROMPT, ADVERSARIAL_PROMPT_FINAL_ROUND_ADDENDUM,
+  REVIEWER_DOMAIN_ID, REVIEWER_PROMPT_SET, __test__,
 };
 
 if (process.argv[1] === fileURLToPath(import.meta.url)) {

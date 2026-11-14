@@ -138,6 +138,7 @@ test('REVPOSTSTALL-01 regression: a completed review stuck in a non-settling pre
   const sleepEntered = new Promise((resolve) => { enterSleep = resolve; });
   const throttle = createRateLimitThrottle({
     env: {}, logger: log, sharedStatePath: statePath,
+    confirmBudgetImpl: async () => null,
     sleepImpl: () => { enterSleep(); return new Promise(() => {}); },
     recordApiCallImpl: (call) => throttleTelemetry.push(call),
   });
@@ -148,8 +149,9 @@ test('REVPOSTSTALL-01 regression: a completed review stuck in a non-settling pre
   // Wait for the real sleep seam after its asynchronous state read and status
   // write. Event-loop turns are not an I/O completion guarantee (Node 22 CI).
   await sleepEntered;
-  assert.equal(throttleTelemetry[0]?.category, 'rate_limit_throttle_seconds', 'the real governor entered its sleep');
-  assert.equal(throttleTelemetry[0].extra.remaining_at_activation, 59);
+  const sleepTelemetry = throttleTelemetry.find(call => call.category === 'rate_limit_throttle_seconds');
+  assert.ok(sleepTelemetry, 'the real governor entered its sleep');
+  assert.equal(sleepTelemetry.extra.remaining_at_activation, 59);
   // The governor publishes its sleep as `<state>.throttled.json`, the same
   // operator-visible evidence the deployed witness left.
   assert.equal(JSON.parse(readFileSync(`${statePath}.throttled.json`, 'utf8')).remaining, 59);

@@ -18,6 +18,10 @@ the PR against every eligible reviewer until the exponential backoff window
 expires. Model-specific fields exist only to inform routing decisions about a
 particular reviewer model once the PR-level hold is clear.
 
+A `github-budget-deferred` outcome missing its typed receipt logs a diagnostic,
+uses the existing `reviewer-stalled` backoff, and releases only the matching
+claim; it cannot schedule an unverified reset.
+
 Pre-model `github-budget-deferred` is a scheduling exception: `nextRetryAfter`
 is the exact GitHub bucket reset, and `lastFailureModel` identifies the deferred
 reviewer. Settlement preserves counters and releases the matching claim to

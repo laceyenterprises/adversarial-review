@@ -1599,11 +1599,23 @@ function settleReviewerAttempt({
   reviewerModel = result.effectiveReviewerModel || reviewerModel;
   if (!result.ok && result.failureClass === REVIEWER_GITHUB_BUDGET_DEFERRED) {
     const receipt = parseReviewerBudgetDeferral([result.error, result.stderr, result.stderrTail].filter(Boolean).join('\n'));
-    if (!receipt) throw new Error('GitHub budget deferral missing its typed receipt');
     const current = statements.getReviewRow?.get(repoPath, prNumber);
     if (statements.getReviewRow && (!current || current.review_status !== 'reviewing'
       || current.reviewer_session_uuid !== reviewerSessionUuid)) {
       return { posted: false, reason: 'budget-deferral-claim-mismatch' };
+    }
+    if (!receipt) {
+      log.error?.('[watcher] GitHub budget deferral missing its typed receipt; releasing claim');
+      try {
+        recordCascadeFailure(rootDir, { repo: repoPath, prNumber, failedAt: failureAt,
+          failureClass: 'reviewer-stalled', reviewerModel,
+          failureReason: 'budget-deferral-malformed-receipt' });
+      } catch { log.warn('[watcher] malformed budget deferral backoff persistence failed'); }
+      withSqliteBusyRetrySync(
+        () => statements.releaseReviewerClaim.run(reviewerSessionUuid, repoPath, prNumber),
+        { label: `reviewer-budget-malformed-release:${repoPath}#${prNumber}`, log },
+      );
+      return { posted: false, reason: 'budget-deferral-malformed-receipt' };
     }
     // Persist the not-before before releasing the claim, so the next poll cannot
     // race into the same exhausted credential. The outer spawn owner releases

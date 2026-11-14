@@ -136,3 +136,21 @@ test('the last successful pre-model read exhausting core still prevents the mode
     return { context: 'last read succeeded' };
   }), { name: 'GitHubBudgetDeferredError' });
 });
+
+for (const resource of ['core', 'graphql']) test(`last-read guard uses explicit sending env for ${resource}`, async t => {
+  const root = mkdtempSync(join(tmpdir(), 'review-explicit-env-'));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const previous = process.env.GHO_RATE_LIMIT_SHARED_STATE_PATH;
+  process.env.GHO_RATE_LIMIT_SHARED_STATE_PATH = join(root, 'state.json');
+  t.after(() => {
+    if (previous === undefined) delete process.env.GHO_RATE_LIMIT_SHARED_STATE_PATH;
+    else process.env.GHO_RATE_LIMIT_SHARED_STATE_PATH = previous;
+  });
+  const env = { GH_TOKEN: `synthetic-explicit-${resource}` };
+  const credential = githubCredential({ env });
+  await assert.rejects(runReviewerPreModel(async () => {
+    await recordResponseRateLimit({ remaining: 0, limit: 5000, resource,
+      resetAt: Date.now() + 3600_000, observedAt: Date.now(), credential });
+  }, { env }), error => error instanceof GitHubBudgetDeferredError
+    && error.credential === credential && error.reviewerPreModelBudgetDeferred === true);
+});

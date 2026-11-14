@@ -1153,3 +1153,26 @@ test('late budget deferral preserves a replacement claim and its scheduling', as
   assert.equal(result.reason, 'budget-deferral-claim-mismatch');
   assert.equal(readCascadeState(rootDir, { repo: 'example/project', prNumber: 7 }), null);
 });
+
+for (const replacement of [false, true]) test(`malformed budget receipt releases only its own claim (replacement=${replacement})`, async t => {
+  const { readCascadeState } = await import('../src/reviewer-cascade.mjs');
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'malformed-budget-settlement-'));
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  const diagnostics = [], releases = [];
+  const result = settleReviewerAttempt({ rootDir, repoPath: 'example/project', prNumber: 7,
+    result: { ok: false, failureClass: 'github-budget-deferred', stderrTail: 'truncated receipt' },
+    reviewerSessionUuid: 'original-session', reviewerModel: 'gemini',
+    log: { error: message => diagnostics.push(message), warn() {} },
+    statements: {
+      getReviewRow: { get: () => ({ review_status: 'reviewing',
+        reviewer_session_uuid: replacement ? 'replacement-session' : 'original-session' }) },
+      releaseReviewerClaim: { run: (...args) => { releases.push(args); return { changes: 1 }; } },
+    } });
+  assert.equal(result.posted, false);
+  assert.equal(result.reason, replacement ? 'budget-deferral-claim-mismatch' : 'budget-deferral-malformed-receipt');
+  assert.deepEqual(releases, replacement ? [] : [['original-session', 'example/project', 7]]);
+  assert.equal(diagnostics.length, replacement ? 0 : 1);
+  const cascade = readCascadeState(rootDir, { repo: 'example/project', prNumber: 7 });
+  if (replacement) assert.equal(cascade, null);
+  else assert.ok(Date.parse(cascade.nextRetryAfter) > Date.parse(cascade.lastFailureAt));
+});

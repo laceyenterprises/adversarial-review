@@ -48,3 +48,23 @@ netguard `PATH`, bounded to 600 seconds through the worker-validation wrapper.
 `npm run lint` and `npm run typecheck:contracts` pass; ESLint fixes/checks also
 cover the changed source and test files. The full suite and walkthrough are
 omitted under the ticket's explicit touched-test-only constraint.
+
+## HAM remediation
+
+The trailing pre-model budget check accepts an optional second argument with
+`{ env }` for the sending credential. A malformed deferral receipt logs a
+diagnostic, backs off, and releases only the matching claim rather than throwing.
+Quota confirmation explicitly merges local and shared observations; the shared
+reader already performs this merge, retaining its existing behavior.
+
+CI fixtures export the new cascade seam, isolate long-wait confirmation from
+external transport, select sleep telemetry by category, and keep the owner-store
+status fixture within a short wait. The reviewer export list is compacted without
+changing exports to satisfy the existing decomposition limit.
+
+HAM verification: the changed-surface selection passed 2,009 tests before two
+new test-only errors were corrected. The final settlement and watcher claim-loop
+run passed all 207 tests. Lint (zero errors), contract typechecking, and the
+research walkthrough passed. The additional ARC10 local selection reported
+`local-battery-skipped-github-required-gate-authoritative`; exact-head GitHub
+required checks remain mandatory.

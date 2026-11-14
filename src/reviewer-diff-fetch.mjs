@@ -300,6 +300,7 @@ async function fetchPRDiffFromFilesApi(repo, prNumber, headSha, {
           });
           patches[index] = synthesizeAddedFilePatch(file, raw);
         } catch (err) {
+          if (err?.budgetDeferred) throw err;
           log.warn?.(`[reviewer] WARN: PR files API raw blob fetch failed for ${repo}#${prNumber} ${filename}: ${err?.message || err}; adding metadata-only diff entry`);
           patches[index] = `${diffHeaderForFile(file).join('\n')}\n`;
         }

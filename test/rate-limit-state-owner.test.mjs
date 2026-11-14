@@ -200,7 +200,7 @@ test('a peer un-scoped throttle status file stays beside its own store', async t
       seen.push([existsSync(`${peerStore}.throttled.json`), existsSync(`${statePath}.throttled.json`)]);
     },
   });
-  await peer.recordResponseRateLimit(healthy(3));
+  await peer.recordResponseRateLimit({ ...healthy(3), resetAt: new Date(NOW + 30_000).toISOString() });
   assert.equal(await peer.awaitThrottleIfNeeded('core', CREDENTIAL), true);
   assert.deepEqual(seen, [[true, false]]);
   assert.equal(existsSync(`${peerStore}.throttled.json`), false);

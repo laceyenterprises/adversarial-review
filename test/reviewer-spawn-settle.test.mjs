@@ -1060,3 +1060,119 @@ test('SEATIDLE-03: durable post timestamp and released process reservation prece
     rmSync(rootDir, { recursive: true, force: true });
   }
 });
+
+test('budget-deferred reviewer releases claim and credential slot before accounting finishes', async t => {
+  const { reviewerBudgetDeferralReceipt } = await import('../src/reviewer-github-budget.mjs');
+  const { GitHubBudgetDeferredError } = await import('../src/rate-limit-throttle.mjs');
+  const { readCascadeState, shouldBackoffReviewerSpawn } = await import('../src/reviewer-cascade.mjs');
+  const { runBoundedReviewerDispatchQueue } = await import('../src/watcher-reviewer-pool.mjs');
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'budget-settle-'));
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  const db = openReviewStateDb(rootDir);
+  ensureReviewStateSchema(db);
+  t.after(() => db.close());
+  db.prepare(`INSERT INTO reviewed_prs (repo, pr_number, reviewed_at, reviewer,
+    review_status, reviewer_session_uuid, reviewer_head_sha, reviewer_pgid,
+    reviewer_lease_expires_at, review_attempts, infra_auto_recover_attempts)
+    VALUES ('example/project', 7, '2026-01-01', 'gemini', 'reviewing', 'budget-session', 'current',
+      123, '2026-06-06T13:00:00Z', 2, 3)`).run();
+  const resetAt = new Date(Date.now() + 3600_000).toISOString();
+  const receipt = reviewerBudgetDeferralReceipt(new GitHubBudgetDeferredError({
+    resource: 'core', remaining: 0, resetAt, credential: 'synthetic-credential',
+  }));
+  const events = [];
+  let finishAccounting;
+  const accounting = new Promise(resolve => { finishAccounting = resolve; });
+  let firstRun;
+  const summary = await runBoundedReviewerDispatchQueue([
+    { repoPath: 'example/project', prNumber: 7, reviewerModel: 'gemini',
+      async run() {
+        firstRun = spawnReviewer({
+          rootDir, repo: 'example/project', prNumber: 7, reviewerModel: 'gemini',
+          reviewerHeadSha: 'current', reviewerSessionUuid: 'budget-session', reviewAttemptNumber: 3,
+          readReviewerQuotaDecisionImpl: async () => ({ available: true, state: 'fixture', provider: 'google' }),
+          reviewerRuntimeAdapterOverride: { async spawnReviewer() {
+            return { ok: false, failureClass: 'github-budget-deferred', stderrTail: receipt };
+          } },
+          beginReviewerPassImpl() {},
+          completeReviewerPassImpl: async (_root, pass) => {
+            assert.equal(pass.status, 'cancelled');
+            assert.equal(pass.metadata.failureClass, 'github-budget-deferred');
+            await accounting; events.push('accounted');
+          },
+          readBestReviewerEvidenceTokenUsageImpl: async () => null,
+          postGitHubReviewWithCaptureImpl: async () => assert.fail('deferral cannot post'),
+          onPostOperationSettled: result => {
+            const settlement = settleReviewerAttempt({ rootDir, repoPath: 'example/project', prNumber: 7,
+              result, reviewerSessionUuid: 'budget-session', reviewerModel: 'gemini',
+              statements: { releaseReviewerClaim: prepareReleaseReviewerClaim(db) } });
+            assert.equal(settlement.posted, false, 'no post-success handoff');
+            assert.equal(activeReviewerSpawns.size, 0);
+            events.push('released');
+            this.admissionReleaseCapacity();
+          },
+        });
+        return firstRun;
+      } },
+    { repoPath: 'example/project', prNumber: 8, reviewerModel: 'gemini', async run() {
+      events.push('next-review');
+      this.admissionReleaseCapacity();
+    } },
+  ], { maxConcurrent: 2, geminiCredentialConcurrency: 1, splitPostReviewSettlement: true,
+    logger: { log() {}, warn() {}, error() {} } });
+  assert.equal(summary.dispatched, 2);
+  assert.deepEqual(events, ['released', 'next-review']);
+  const row = db.prepare('SELECT * FROM reviewed_prs WHERE pr_number=7').get();
+  assert.equal(row.review_status, 'pending');
+  for (const field of ['reviewer_session_uuid', 'reviewer_pgid', 'reviewer_head_sha', 'reviewer_lease_expires_at']) {
+    assert.equal(row[field], null, field);
+  }
+  assert.equal(row.review_attempts, 2);
+  assert.equal(row.infra_auto_recover_attempts, 3);
+  assert.equal(readCascadeState(rootDir, { repo: 'example/project', prNumber: 7 }).nextRetryAfter, resetAt);
+  assert.equal(shouldBackoffReviewerSpawn(rootDir, { repo: 'example/project', prNumber: 7, reviewerModel: 'gemini' }).shouldBackoff, true);
+  finishAccounting();
+  await firstRun;
+  assert.deepEqual(events, ['released', 'next-review', 'accounted']);
+});
+
+test('late budget deferral preserves a replacement claim and its scheduling', async t => {
+  const { readCascadeState } = await import('../src/reviewer-cascade.mjs');
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'budget-replaced-'));
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  const result = settleReviewerAttempt({ rootDir, repoPath: 'example/project', prNumber: 7,
+    reviewerSessionUuid: 'old-session', reviewerModel: 'gemini',
+    result: { ok: false, failureClass: 'github-budget-deferred', stderrTail:
+      '[reviewer-github-budget-deferred] ' + JSON.stringify({ resource: 'core', credential: 'synthetic-credential',
+        remaining: 0, resetAt: new Date(Date.now() + 3600_000).toISOString() }) },
+    statements: {
+      getReviewRow: { get: () => ({ review_status: 'reviewing', reviewer_session_uuid: 'replacement-session' }) },
+      releaseReviewerClaim: { run: () => assert.fail('replacement claim must remain intact') },
+    } });
+  assert.equal(result.posted, false);
+  assert.equal(result.reason, 'budget-deferral-claim-mismatch');
+  assert.equal(readCascadeState(rootDir, { repo: 'example/project', prNumber: 7 }), null);
+});
+
+for (const replacement of [false, true]) test(`malformed budget receipt releases only its own claim (replacement=${replacement})`, async t => {
+  const { readCascadeState } = await import('../src/reviewer-cascade.mjs');
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'malformed-budget-settlement-'));
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  const diagnostics = [], releases = [];
+  const result = settleReviewerAttempt({ rootDir, repoPath: 'example/project', prNumber: 7,
+    result: { ok: false, failureClass: 'github-budget-deferred', stderrTail: 'truncated receipt' },
+    reviewerSessionUuid: 'original-session', reviewerModel: 'gemini',
+    log: { error: message => diagnostics.push(message), warn() {} },
+    statements: {
+      getReviewRow: { get: () => ({ review_status: 'reviewing',
+        reviewer_session_uuid: replacement ? 'replacement-session' : 'original-session' }) },
+      releaseReviewerClaim: { run: (...args) => { releases.push(args); return { changes: 1 }; } },
+    } });
+  assert.equal(result.posted, false);
+  assert.equal(result.reason, replacement ? 'budget-deferral-claim-mismatch' : 'budget-deferral-malformed-receipt');
+  assert.deepEqual(releases, replacement ? [] : [['original-session', 'example/project', 7]]);
+  assert.equal(diagnostics.length, replacement ? 0 : 1);
+  const cascade = readCascadeState(rootDir, { repo: 'example/project', prNumber: 7 });
+  if (replacement) assert.equal(cascade, null);
+  else assert.ok(Date.parse(cascade.nextRetryAfter) > Date.parse(cascade.lastFailureAt));
+});

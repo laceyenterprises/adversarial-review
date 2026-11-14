@@ -9,7 +9,7 @@
       "schemaSurface": "src/reviewer-cascade.mjs",
       "relatedSchemaSurfaces": ["src/reviewer-spawn-settle.mjs", "src/review-pipeline-health.mjs"],
       "owner": "reviewer transient-failure backoff and route selection",
-      "compatibility": "Additive cli-resolution-transient failure-class vocabulary in existing breakdown maps; no new durable status. Existing five-consecutive-transient threshold gates pending-upstream; earlier resolution failures release to pending without charging attempts. Existing backoff gates both states. No credential-outage state is written for resolution failure."
+      "compatibility": "Additive cli-resolution-transient failure-class vocabulary in existing breakdown maps; no new durable status. Existing five-consecutive-transient threshold gates pending-upstream; earlier resolution failures release to pending without charging attempts. Existing backoff gates both states. No credential-outage state is written for resolution failure. Pre-model github-budget-deferred uses existing lastFailureModel/lastFailureAt/nextRetryAfter fields without incrementing counters. Its exact-reset hold applies only to the deferred model; existing routing may select another model before reset."
     }
   ]
 }

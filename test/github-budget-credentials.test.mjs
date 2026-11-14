@@ -37,7 +37,8 @@ for (const sync of [false, true]) test(`GHSCOPE-01: ${sync ? 'sync' : 'async'} g
   const old = process.env.GHO_RATE_LIMIT_SHARED_STATE_PATH;
   process.env.GHO_RATE_LIMIT_SHARED_STATE_PATH = statePath;
   t.after(() => { if (old === undefined) delete process.env.GHO_RATE_LIMIT_SHARED_STATE_PATH; else process.env.GHO_RATE_LIMIT_SHARED_STATE_PATH = old; });
-  const envA = { GH_TOKEN: 'synthetic-token-a', GHO_RATE_LIMIT_SHARED_STATE_PATH: statePath };
+  const envA = { GH_TOKEN: 'synthetic-token-a', GHO_RATE_LIMIT_SHARED_STATE_PATH: statePath,
+    GHO_API_CALL_LOG_DISABLE: '1' };
   const envB = { ...envA, GH_TOKEN: 'synthetic-token-b' };
   const reset = Math.ceil(Date.now() / 1000) + 120;
   let calls = 0;

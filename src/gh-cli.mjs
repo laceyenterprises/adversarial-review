@@ -240,6 +240,7 @@ async function execGhWithRetry({
       );
     } catch (err) {
       lastErr = err;
+      if (err?.budgetDeferred) throw err;
       if (err.hammerAuthHandled) throw err;
       if (isGhAuthFailure(err)) {
         if (authRemintAttempted) {

@@ -450,7 +450,11 @@ Quota-triggered worker-class fallback also enforces family refusal without a
 same-family last resort; it holds when no eligible reviewer is available. A
 `[claude-code]` PR uses Gemini during a Codex outage when Gemini is eligible and
 available; if Gemini is also grounded or disabled, review dispatch holds until
-an eligible cross-model reviewer recovers. Fallback is stateless and
+an eligible cross-model reviewer recovers. Pre-model GitHub budget exhaustion
+exits with a typed deferral, releases the claim and credential slot, and queues
+the same reviewer for the bucket reset
+without charging an attempt. An alternate selected by these existing fallback
+rules can run before that reset. Fallback is stateless and
 per attempt, so it auto-reverts the moment the provider recovers — there is
 nothing to un-pin. Every failure of the quota read (missing `hq`, non-zero exit,
 timeout, unparseable JSON, absent verdict) fails open to the configured
@@ -3228,7 +3232,7 @@ stateDiagram-v2
     s2 --> s10: review-row.26 PR already merged
     [*] --> s11: review-row.27 authorized bypass
     s11 --> s0: review-row.28 authorization withdrawn or head moved
-    s2 --> s0: review-row.29 stale head, missing reviewed head or lost claim match; no charge
+    s2 --> s0: review-row.29 stale head, missing reviewed head, lost claim match or pre-model GitHub budget deferral; no charge
     s4 --> s0: review-row.30 repair empty reviewed head at matching live revision once; no charge
     s5 --> s0: review-row.31 recovered post cannot settle its reviewed head; no charge
     s6 --> s0: review-row.32 recovered post cannot match its claim; no charge

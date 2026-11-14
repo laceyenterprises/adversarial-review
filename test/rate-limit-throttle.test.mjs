@@ -35,6 +35,7 @@ function makeThrottle({
   sleepImpl,
   logger = console,
   recordApiCallImpl = () => {},
+  confirmBudgetImpl = async () => null,
 } = {}) {
   return createRateLimitThrottle({
     env: {
@@ -45,6 +46,7 @@ function makeThrottle({
     sleepImpl,
     logger,
     recordApiCallImpl,
+    confirmBudgetImpl,
   });
 }
 
@@ -610,4 +612,101 @@ test('reading an unobserved budget leaves the state directory absent', async () 
   } finally {
     rmSync(rootDir, { recursive: true, force: true });
   }
+});
+
+test('long wait confirms a stale primary zero, persists recovery and never sleeps', async t => {
+  const rootDir = makeRootDir();
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  let now = Date.parse('2026-06-06T12:00:00Z');
+  const rows = [], sleeps = [];
+  let confirmations = 0;
+  const throttle = makeThrottle({ rootDir, nowMs: () => now,
+    sleepImpl: async ms => sleeps.push(ms), recordApiCallImpl: row => rows.push(row),
+    confirmBudgetImpl: async () => {
+      confirmations++;
+      return { core: { remaining: 4500, limit: 5000, reset: (now + 3600_000) / 1000 } };
+    } });
+  await throttle.recordResponseRateLimit({ remaining: 0, limit: 5000, resource: 'core',
+    resetAt: now + 3600_000, observedAt: now });
+  now += 1000;
+  assert.equal(await throttle.awaitThrottleIfNeeded(), false);
+  assert.equal(await throttle.awaitThrottleIfNeeded(), false);
+  assert.equal(confirmations, 1);
+  assert.deepEqual(sleeps, []);
+  assert.equal((await throttle.readSharedState()).core.remaining, 4500);
+  const otherProcess = makeThrottle({ rootDir, nowMs: () => now });
+  assert.equal((await otherProcess.readSharedState()).core.remaining, 4500);
+  assert.equal(rows.some(row => row.category === 'rate_limit_throttle_seconds'), false);
+});
+
+for (const outcome of ['exhausted', 'failed', 'secondary']) test(`long wait retains ${outcome} evidence after confirmation`, async t => {
+  const rootDir = makeRootDir();
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  let now = Date.parse('2026-06-06T12:00:00Z');
+  const reset = now + 3600_000, sleeps = [];
+  let confirmations = 0;
+  const throttle = makeThrottle({ rootDir, nowMs: () => now,
+    sleepImpl: async ms => { sleeps.push(ms); now += ms; },
+    confirmBudgetImpl: async () => {
+      confirmations++;
+      if (outcome === 'failed') throw new Error('synthetic transport unavailable');
+      return { core: { remaining: outcome === 'secondary' ? 4500 : 0, limit: 5000, reset: reset / 1000 } };
+    } });
+  await throttle.recordResponseRateLimit({ remaining: 0, resource: 'core', limit: 5000,
+    resetAt: reset, observedAt: now, rateLimited: outcome === 'secondary' });
+  now += 1000;
+  assert.equal(await throttle.awaitThrottleIfNeeded(), true);
+  assert.equal(confirmations, 1);
+  assert.deepEqual(sleeps, [3599_000]);
+});
+
+test('zero observation logs only raw quota headers, request category and consumer', async t => {
+  const { extractRateLimitObservation } = await import('../src/rate-limit-throttle.mjs');
+  const rootDir = makeRootDir();
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  const now = Date.parse('2026-06-06T12:00:00Z'), rows = [];
+  const throttle = makeThrottle({ rootDir, nowMs: () => now, recordApiCallImpl: row => rows.push(row) });
+  const headers = { 'x-ratelimit-limit': '5000', 'x-ratelimit-remaining': '0',
+    'x-ratelimit-used': '5000', 'x-ratelimit-reset': String((now + 3600_000) / 1000),
+    'x-ratelimit-resource': 'core' };
+  await withGitHubBudgetScope({ consumer: 'synthetic-reviewer' }, () => throttle.recordResponseRateLimit({
+    ...extractRateLimitObservation({ ...headers, authorization: 'never-log-this' }, { observedAt: now }),
+    requestCategory: 'pr_state', credential: 'synthetic-credential',
+  }));
+  assert.equal(rows.length, 1);
+  assert.deepEqual(rows[0].extra.rawRateLimitHeaders, headers);
+  assert.equal(rows[0].extra.requestCategory, 'pr_state');
+  assert.equal(rows[0].extra.consumer, 'synthetic-reviewer');
+  assert.equal(JSON.stringify(rows).includes('never-log-this'), false);
+});
+
+test('free confirmation endpoint uses the selected environment and retains only quota headers', async t => {
+  const { rateLimitConfirmation } = await import('../src/rate-limit-throttle.mjs');
+  const { writeFileSync } = await import('node:fs');
+  const rootDir = makeRootDir();
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  const reset = Math.floor((Date.now() + 3600_000) / 1000);
+  const headers = { 'x-ratelimit-limit': '5000', 'x-ratelimit-remaining': '0',
+    'x-ratelimit-used': '5000', 'x-ratelimit-reset': String(reset), 'x-ratelimit-resource': 'core' };
+  writeFileSync(path.join(rootDir, 'gh'), `#!${process.execPath}
+    if (process.argv.slice(2).join(' ') !== 'api --method GET --include rate_limit') process.exit(2);
+    if (process.env.GH_TOKEN !== 'synthetic-token' || process.env.GH_DEBUG !== '') process.exit(3);
+    process.stdout.write(${JSON.stringify('HTTP/2.0 200 OK\r\n' + Object.entries(headers).map(([k,v]) => `${k}: ${v}`).join('\r\n') + '\r\nAuthorization: never-retain\r\n\r\n' + JSON.stringify({ resources: { core: { limit: 5000, remaining: 0, reset } } }))});
+  `, { mode: 0o700 });
+  const live = await rateLimitConfirmation.read({ PATH: rootDir, GH_TOKEN: 'synthetic-token', GH_DEBUG: 'api' });
+  assert.equal(live.core.remaining, 0);
+  assert.deepEqual(live.rawRateLimitHeaders, headers);
+  assert.equal(JSON.stringify(live).includes('never-retain'), false);
+});
+
+test('long wait cannot confirm a different credential and defers instead of sleeping', async t => {
+  const rootDir = makeRootDir();
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  const now = Date.parse('2026-06-06T12:00:00Z');
+  const throttle = makeThrottle({ rootDir, nowMs: () => now,
+    sleepImpl: async () => assert.fail('unconfirmed credential cannot sleep'),
+    confirmBudgetImpl: async () => assert.fail('must not send a different identity') });
+  await throttle.recordResponseRateLimit({ resource: 'core', remaining: 0, observedAt: now,
+    resetAt: now + 3600_000, credential: 'synthetic-other-identity' });
+  await assert.rejects(throttle.awaitThrottleIfNeeded('core', 'synthetic-other-identity'), { name: 'GitHubBudgetDeferredError' });
 });

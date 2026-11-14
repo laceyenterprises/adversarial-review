@@ -98,6 +98,7 @@ async function fetchConditionalRestPage({
   try {
     let response = await runRequest(requestParams);
     await recordResponseRateLimit({
+      ...extractRateLimitObservation(response?.headers), requestCategory: category,
       credential,
       remaining: getResponseHeader(response?.headers, 'x-ratelimit-remaining'),
       limit: getResponseHeader(response?.headers, 'x-ratelimit-limit'),
@@ -134,9 +135,10 @@ async function fetchConditionalRestPage({
     return response;
   } catch (err) {
     if (isGitHubRateLimitError(err) && !err.budgetDeferred) {
-      err.observation = await recordRateLimitedCall('core', credential, extractRateLimitObservation(err?.response?.headers, { rateLimited: true }));
+      err.observation = await recordRateLimitedCall('core', credential, { ...extractRateLimitObservation(err?.response?.headers, { rateLimited: true }), requestCategory: category });
     }
     await recordResponseRateLimit({
+      ...extractRateLimitObservation(err?.response?.headers), requestCategory: category,
       credential,
       remaining: getResponseHeader(err?.response?.headers, 'x-ratelimit-remaining'),
       limit: getResponseHeader(err?.response?.headers, 'x-ratelimit-limit'),
@@ -232,15 +234,15 @@ function createWatcherOctokit({
       recordApiCall({ category: 'github_request', status: response.status,
         extra: { credential, resource, requestCategory: githubRequestCategory(options.url), unit: 'http_response', budgetExempt: response.status === 304 } });
       const observation = extractRateLimitObservation(response.headers, { resource });
-      if (observation) await recordResponseRateLimit({ ...observation, credential });
+      if (observation) await recordResponseRateLimit({ ...observation, credential, requestCategory: githubRequestCategory(options.url) });
       return response;
     } catch (err) {
       if (err?.status) recordApiCall({ category: 'github_request', status: err.status,
         extra: { credential, resource, requestCategory: githubRequestCategory(options.url), unit: 'http_response', budgetExempt: err.status === 304 } });
       const limited = isGitHubRateLimitError(err);
       const observation = extractRateLimitObservation(err?.response?.headers, { resource, rateLimited: limited });
-      if (limited && !err.budgetDeferred) err.observation = await recordRateLimitedCall(resource, credential, observation);
-      else if (observation) await recordResponseRateLimit({ ...observation, credential });
+      if (limited && !err.budgetDeferred) err.observation = await recordRateLimitedCall(resource, credential, { ...observation, requestCategory: githubRequestCategory(options.url) });
+      else if (observation) await recordResponseRateLimit({ ...observation, credential, requestCategory: githubRequestCategory(options.url) });
       throw err;
     }
   });

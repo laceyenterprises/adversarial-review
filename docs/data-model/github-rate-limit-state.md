@@ -41,7 +41,8 @@ installation with its resource balances.
 
 `data/api-call-log/<UTC-date>.jsonl` additionally records `consumer` on logical
 attempts and separate `github_request` rows with `unit: http_response`,
-`requestCategory`, credential, resource, status and `budgetExempt` for 304.
+`requestCategory`, credential, resource, status and `budgetExempt` for 304
+responses and the free `/rate_limit` confirmation request.
 These additive rows count actual metered CLI/Octokit responses; logical
 attempts and GraphQL points are distinct units. Older missing consumer fields
 mean unattributed. Child adapters inherit `GHO_API_CONSUMER` for correlation.
@@ -49,6 +50,13 @@ Broker verification also emits `unit: credential_binding` rows associating a
 token digest with its validated `app`/`installation`, so a combined report can
 group child env-token requests with the parent's installation. Bindings are
 metadata, not HTTP requests or logical attempts.
+
+A zero observation additionally emits `unit: budget_exhaustion` with consumer,
+request category, credential/resource and only the raw `x-ratelimit-limit`,
+`remaining`, `used`, `reset` and `resource` headers (`null` when unavailable).
+Confirmation emits `unit: budget_confirmation` with its outcome and normalized
+balance/reset. These are diagnostic events; do not count them as consumed core
+requests. No authorization headers or response bodies enter these rows.
 
 Every admission preflight and every header observation names the credential
 that sends the request (LAC-2075). This includes the outer telemetry wrappers
@@ -69,7 +77,8 @@ the legacy shared anonymous bucket.
 
 Each bucket contains normalized `resource`, non-negative `remaining`, ISO
 `resetAt` and `observedAt`, optional positive `limit` (the bucket's
-`x-ratelimit-limit`), optional positive `rateLimitedCalls`, optional
+`x-ratelimit-limit`), optional ISO `confirmedAt` (the start of a successful
+free `/rate_limit` confirmation), optional positive `rateLimitedCalls`, optional
 `credential` (omitted for `default`) and optional `credentialSelector` (the
 adapter's broker role). When two observations share a reset window, the merged
 bucket keeps the newer known `limit`. The counter belongs to that credential/resource reset
@@ -86,7 +95,14 @@ remaining count and increment rate-limited counters under the lock.
 An active zero-balance limit whose reset GitHub reported (a `Retry-After` or a
 reset header) takes precedence over positive primary-quota observations
 regardless of their reset ordering; healthy responses cannot clear that hold
-before expiry. A zero-balance window created without any reset evidence carries
+before expiry. A direct `/rate_limit` confirmation is an exception for older
+primary evidence: a newer `confirmedAt` replaces it, durably across readers.
+Evidence with `rateLimitedCalls` retains its hold because primary budget does
+not disprove a secondary limit. Unscoped waits over two minutes first query
+`GET /rate_limit` with the sending credential, bounded to 15 seconds. Failed
+or unreadable confirmation retains the existing hold; a mismatched credential
+defers instead of sleeping without confirmation.
+A zero-balance window created without any reset evidence carries
 `resetUnknown: true` (the conservative default below); its reset is a guess, so
 a newer healthy observation for the same credential and resource replaces it.
 When both observations have zero balance, the later

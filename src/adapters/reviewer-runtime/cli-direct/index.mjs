@@ -707,7 +707,7 @@ function createCliDirectReviewerRuntimeAdapter({
       record = updateReviewerRunRecord(rootDir, record, {
         state: terminalSpawnTerminationError
           ? 'failed'
-          : (cancelled || ['daemon-bounce', 'reviewer-stalled'].includes(failureClass) ? 'cancelled' : 'failed'),
+          : (cancelled || ['daemon-bounce', 'reviewer-stalled', 'github-budget-deferred'].includes(failureClass) ? 'cancelled' : 'failed'),
         lastHeartbeatAt: now(),
       });
       activeRun.record = record;

@@ -389,7 +389,9 @@ function preserveInvalidResumeWorkspace({ workspaceDir, workspaceRootDir = dirna
 }
 
 async function inspectWorkspaceForRetry({ workspaceDir, workspaceRootDir, jobId, expectedRepo, retryHistory, execFileImpl, log }) {
-  const resumeEligible = retryHistory.at(-1)?.retryMetadata?.code === 'worker-killed-resume'
+  const retry = retryHistory.at(-1)?.retryMetadata;
+  const resumeEligible = (retry?.code === 'worker-killed-resume'
+    || (retry?.code === 'credential-refresh-unavailable' && retry.resumeWorkspace === true))
     && Boolean(retryHistory.at(-1)?.worker?.workspaceDir);
   const workspaceState = await inspectWorkspaceState({ workspaceDir, expectedRepo, allowDirty: resumeEligible, execFileImpl });
   if (resumeEligible && workspaceState.reason === 'missing') {

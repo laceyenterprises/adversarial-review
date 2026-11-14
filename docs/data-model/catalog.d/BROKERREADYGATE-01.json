@@ -1,0 +1,25 @@
+{
+  "version": 1,
+  "entries": [
+    {
+      "id": "follow-up-credential-broker",
+      "title": "Credential broker remediation deferral and infrastructure failure",
+      "path": "docs/data-model/follow-up-jobs.md",
+      "store": "data/follow-up-jobs/",
+      "schemaSurface": "src/remediation-credential-broker.mjs",
+      "relatedSchemaSurfaces": [
+        "src/remediation-round-accounting.mjs",
+        "src/remediation-publication.mjs",
+        "bin/remediation-publish.mjs",
+        "src/follow-up-remediation.mjs",
+        "src/remediation-git-pr-io.mjs"
+      ],
+      "owner": "follow-up daemon",
+      "optionalFields": [
+        "credentialBrokerDeferral: { reason: credential-broker-unready, attempts, observedAt, retryAfter }",
+        "remediationPlan.retryHistory[].retryMetadata: { code: credential-refresh-unavailable, state: infrastructure-failed, reason, startHead, endHead, localCommit, workspaceDir, resumeWorkspace }"
+      ],
+      "compatibility": "Additive optional evidence using existing pending retry and retryAfter contracts. Broker deferrals and proven credential-only outages do not charge remediation rounds. Other infrastructure refund caps and publication failures retain their existing semantics."
+    }
+  ]
+}

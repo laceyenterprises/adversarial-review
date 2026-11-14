@@ -208,6 +208,7 @@ test('consumeNextFollowUpJob exports the canonical reply env, pre-creates the HQ
 
     let capturedEnv;
     const result = await consumeNextFollowUpJob({
+      credentialBrokerReadyImpl: async () => ({ ready: true }),
     execFileSyncImpl: serviceFixtureExec,
     guardStackedBaseImpl: async () => null,
       rootDir,

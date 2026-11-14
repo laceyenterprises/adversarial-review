@@ -7,6 +7,8 @@ import { accessSync, constants } from 'node:fs';
 import { delimiter, resolve } from 'node:path';
 import { fetchPRBranchMetadata, runWorkspaceNetworkCommandWithTransientRetry } from './remediation-git-pr-io.mjs';
 import { checkRemediationPublication } from './remediation-publication-checks.mjs';
+import { credentialBrokerReady, credentialRefreshUnavailable, credentialRefreshNeedsBrokerEvidence,
+  CREDENTIAL_REFRESH_UNAVAILABLE } from './remediation-credential-broker.mjs';
 
 const execFileAsync = promisify(execFile);
 const SHA = /^[a-f0-9]{40}$/i;
@@ -24,7 +26,7 @@ function defaultPushCommand(env) {
 
 export async function publishRemediation({ workspaceDir = process.cwd(), baseBranch, previousHead,
   branch, repo, prNumber, expectedRemoteSha = previousHead, execFileImpl = execFileAsync,
-  pushCommand, env = process.env } = {}) {
+  pushCommand, env = process.env, credentialBrokerReadyImpl = credentialBrokerReady } = {}) {
   const unproven = () => Object.assign(new Error('Remediation publication requires the previous head, PR branch and exact remote lease.'), { code: 'remediation-publication-unproven' });
   if (typeof baseBranch !== 'string' || !baseBranch.trim()
     || !SHA.test(previousHead || '') || !SHA.test(expectedRemoteSha || '')) throw unproven();
@@ -69,9 +71,20 @@ export async function publishRemediation({ workspaceDir = process.cwd(), baseBra
   }
   // Pin the inspected commit as well as the expected old remote head. Neither
   // a concurrent local checkout nor a competing branch push can swap the result.
-  await execFileImpl(pushCommand ?? defaultPushCommand(env), ['-C', workspaceDir, 'push',
-    `--force-with-lease=refs/heads/${branch}:${expectedRemoteSha}`, 'origin', `${candidate}:refs/heads/${branch}`],
-  { env, timeout: loadAwareTimeoutMs(120_000), maxBuffer: 4 * 1024 * 1024 });
+  const credentialUnavailable = () => Object.assign(
+    new Error('Credential broker refresh unavailable; local commit retained for publication recovery.'),
+    { code: CREDENTIAL_REFRESH_UNAVAILABLE, candidate, previousHead });
+  try {
+    await execFileImpl(pushCommand ?? defaultPushCommand(env), ['-C', workspaceDir, 'push',
+      `--force-with-lease=refs/heads/${branch}:${expectedRemoteSha}`, 'origin', `${candidate}:refs/heads/${branch}`],
+    { env, timeout: loadAwareTimeoutMs(120_000), maxBuffer: 4 * 1024 * 1024 });
+  } catch (error) {
+    if (credentialRefreshUnavailable(error)
+      || (credentialRefreshNeedsBrokerEvidence(error) && !(await credentialBrokerReadyImpl({ env })).ready)) {
+      throw credentialUnavailable();
+    }
+    throw error;
+  }
   const receipt = await recordWorkspaceRewrite({ git, branch,
     oldHead: expectedRemoteSha, newHead: candidate, actor: 'review-service:remediation', env });
   return { published: true, headSha: candidate, previousHead, ...receipt };

@@ -1427,7 +1427,9 @@ test('prepareWorkspaceForJob clones missing repos and checks out the PR branch',
   assert.ok(sameRepoCheckout, 'expected a git checkout call');
 });
 
-test('prepareWorkspaceForJob resumes a lost worker with local commits and a dirty diff', async () => {
+for (const retryMetadata of [{ code: 'worker-killed-resume' },
+  { code: 'credential-refresh-unavailable', reason: 'credential-refresh-unavailable', resumeWorkspace: true }]) {
+test(`prepareWorkspaceForJob resumes preserved commits and dirty diff (${retryMetadata.code})`, async () => {
   const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-resume-'));
   const base = makeJob();
   const workspaceDir = path.join(rootDir, 'data', 'follow-up-jobs', 'workspaces', base.jobId);
@@ -1439,7 +1441,7 @@ test('prepareWorkspaceForJob resumes a lost worker with local commits and a dirt
       ...base,
       remediationPlan: {
         ...base.remediationPlan,
-        retryHistory: [{ worker: { workspaceDir, processId: 12345 }, retryMetadata: { code: 'worker-killed-resume' } }],
+        retryHistory: [{ worker: { workspaceDir, processId: 12345 }, retryMetadata }],
       },
     },
     env: {},
@@ -1461,6 +1463,7 @@ test('prepareWorkspaceForJob resumes a lost worker with local commits and a dirt
   assert.equal(calls.some((call) => call.includes('checkout') || call.includes('clone')), false);
   assert.equal(calls.some((call) => call.includes('merge-base')), true);
 });
+}
 
 test('prepareWorkspaceForJob re-clones a missing workspace on an ordinary stale-heartbeat retry', async () => {
   const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-retry-'));
@@ -2347,6 +2350,8 @@ test('workflow merge-agent broker outage requeues instead of spawning or termina
   try {
     const result = await withOAuthTestEnv(rootDir, () => consumeFollowUpJobsUntilCapacity({
     guardStackedBaseImpl: async () => null,
+      // Isolate the workflow-token failure after broker readiness admitted the job.
+      credentialBrokerReadyImpl: async () => ({ ready: true }),
       rootDir,
       maxConcurrent: 1,
       promptTemplate: 'You are a remediation worker.',
@@ -6288,6 +6293,56 @@ function drainerTestOptions(rootDir, spawnCalls, overrides = {}) {
     },
     ...overrides,
   };
+}
+
+for (const readyAtSpawn of [true, false]) {
+test(`credential broker readiness is rechecked at spawn (ready: ${readyAtSpawn})`, async () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'broker-ready-spawn-'));
+  try {
+    const created = createPendingRemediationJob(rootDir, { repo: 'fixture/repo', prNumber: 1, linearTicketId: null });
+    writeFollowUpJob(created.jobPath, { ...created.job, credentialBrokerDeferral: {
+      reason: 'credential-broker-unready', attempts: 3,
+      observedAt: '2026-04-21T10:00:00.000Z', retryAfter: '2026-04-21T10:00:40.000Z',
+    } });
+    const calls = [];
+    let probes = 0;
+    const result = await withOAuthTestEnv(rootDir, () => consumeNextFollowUpJob(drainerTestOptions(rootDir, calls, {
+      credentialBrokerReadyImpl: async () => { probes++; return { ready: probes === 1 || readyAtSpawn }; },
+    })));
+    assert.equal(result.consumed, readyAtSpawn);
+    assert.equal(calls.length, readyAtSpawn ? 1 : 0);
+    assert.equal(probes, 2);
+    assert.equal(result.job.remediationPlan.currentRound, readyAtSpawn ? 1 : 0);
+    if (!readyAtSpawn) {
+      assert.equal(result.reason, 'credential-broker-unready');
+      assert.equal(result.job.credentialBrokerDeferral.attempts, 4);
+      assert.equal(result.job.remediationPlan.retryAfter, '2026-04-21T10:31:20.000Z');
+    } else {
+      assert.equal(result.job.credentialBrokerDeferral, undefined);
+    }
+    assert.deepEqual(readFollowUpJob(result.jobPath).credentialBrokerDeferral, result.job.credentialBrokerDeferral);
+  } finally { rmSync(rootDir, { recursive: true, force: true }); }
+});
+}
+
+for (const consume of [consumeNextFollowUpJob, consumeFollowUpJobsUntilCapacity]) {
+test(`credential broker OAuth fixture stays offline by default (${consume.name})`, async t => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'broker-offline-fixture-'));
+  const previous = process.env.OAUTH_BROKER_URL;
+  t.after(() => {
+    if (previous === undefined) delete process.env.OAUTH_BROKER_URL;
+    else process.env.OAUTH_BROKER_URL = previous;
+    rmSync(rootDir, { recursive: true, force: true });
+  });
+  process.env.OAUTH_BROKER_URL = 'http://broker.invalid';
+  let fetches = 0;
+  t.mock.method(globalThis, 'fetch', async () => { fetches++; throw new Error('fixture must stay offline'); });
+  createPendingRemediationJob(rootDir, { repo: 'fixture/repo', prNumber: 1, linearTicketId: null });
+  const calls = [];
+  await withOAuthTestEnv(rootDir, () => consume(drainerTestOptions(rootDir, calls)));
+  assert.equal(fetches, 0);
+  assert.equal(calls.length, 1);
+});
 }
 
 test('a slow workspace does not hold another remediation spawn at the concurrency cap', async () => {
@@ -13399,9 +13454,15 @@ function createRemediationRuntime(options) {
 }
 
 function consumeNextFollowUpJob(options) {
-  return consumeNextFollowUpJobActual({ execFileSyncImpl: serviceFixtureExec, ...options });
+  return consumeNextFollowUpJobActual({
+    credentialBrokerReadyImpl: async () => ({ ready: true }),
+    execFileSyncImpl: serviceFixtureExec, ...options,
+  });
 }
 
 function consumeFollowUpJobsUntilCapacity(options) {
-  return consumeFollowUpJobsUntilCapacityActual({ execFileSyncImpl: serviceFixtureExec, ...options });
+  return consumeFollowUpJobsUntilCapacityActual({
+    credentialBrokerReadyImpl: async () => ({ ready: true }),
+    execFileSyncImpl: serviceFixtureExec, ...options,
+  });
 }

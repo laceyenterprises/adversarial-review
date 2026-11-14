@@ -963,7 +963,14 @@ section 7 account or hardware step blocks this slice. Gate changes require the
 normal cross-model convergence loop; do not admin-merge this change.
 
 Ended unpublished or failed remediation rounds re-enter the existing follow-up
-queue while their ordinary round budget remains. Watcher recovery requeues locally without network publication or worker
+queue while their ordinary round budget remains. Broker-backed remediation waits
+for the publisher broker's bounded `/readyz` probe before preparation and dispatch;
+`credential-broker-unready` keeps the pending job and round with backoff. A proven
+credential-only publication outage returns the round to pending without a charge,
+records the saved commit as `infrastructure-failed`, and resumes preserved local
+work after readiness recovers. See the
+[accounting contract](docs/data-model/follow-up-jobs.md#credential-broker-deferral-and-publication-refund).
+Watcher recovery requeues locally without network publication or worker
 credentials, preserving retained work, spent rounds and backoff without
 operator override. Explicit worker-authenticated recovery can first verify
 and publish a checkout owned by the current uid. A terminal execution attempt at its round
@@ -3228,7 +3235,7 @@ stateDiagram-v2
     s1 --> s3: follow-up-job.07 worker failure
     s1 --> s4: follow-up-job.08 lifecycle, budget, subject-refused before spawn or committed-unpublished stop
     s1 --> s5: follow-up-job.09 operator cancellation
-    s1 --> s0: follow-up-job.10 transient retry, unpublished infrastructure-only CI recovery or orchestration-mode refusal hold without round charge
+    s1 --> s0: follow-up-job.10 transient retry, credential-broker readiness deferral or proven credential-only publication failure, unpublished infrastructure-only CI recovery or orchestration-mode refusal hold without round charge
     s2 --> s0: follow-up-job.11 next round unless comment-only final hammer handoff
     s3 --> s0: follow-up-job.12 explicit retrigger, all-infrastructure CI stop with successful current-head replacement checks, or ended execution failure with remaining ordinary round budget and no live owner; automatic recovery preserves spent rounds and backoff
     s4 --> s0: follow-up-job.13 allowlisted explicit retrigger or live satisfied required-label event with unchanged round cap; branch-unresolved resets lookup attempts; all-infrastructure CI stops except max-rounds recover on successful current-head replacements; ended unpublished/no-progress/execution stops automatically requeue once per head/spent round within ordinary budget, preserving retained work; explicit worker-authenticated recovery may attempt publication first; STRICTSETTLED-01 settled-clean release recovery remains once per PR head

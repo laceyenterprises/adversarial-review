@@ -1,5 +1,42 @@
 # Data Model - Follow-Up Remediation Jobs
 
+## Credential broker deferral and publication refund
+
+Broker-backed remediation probes the publisher's configured `OAUTH_BROKER_URL`
+at `/readyz`, with a two-second timeout, before preparation and again before
+dispatch. Only HTTP 200 admits work. An unready broker returns a never-spawned
+claim to `pending` under the same job ID and filename, restores its round and
+preserves an explicit operator override. The optional `credentialBrokerDeferral`
+object contains `reason: credential-broker-unready`, `attempts`, `observedAt`
+and `retryAfter`. Attempts saturate at six; delays start at ten seconds and
+double to a five-minute maximum. `remediationPlan.retryAfter` enforces the hold.
+The deferral is cleared after a successful probe. Plain Git installations
+without broker configuration retain their existing admission behavior.
+
+The guarded publisher classifies explicit broker credential-refresh failures as
+`remediation-credential-refresh-unavailable`. Its existing
+`<replyPath>.publication-failure.json` artifact retains `code`, `localCommit`,
+`previousHead`, `refusedAt` and the credential-free message.
+An ambiguous bounded credential-refresh failure requires an additional unready
+broker probe after the failed push before receiving this classification.
+
+An exited round with that current-attempt artifact and a validated reply can
+return to pending without a round or transient-retry charge. Settlement requires
+equal known authoritative start/end heads, an artifact timestamp at or after
+spawn, a different saved commit, no lifecycle stop, no unresolved findings or
+pushback, no independent recorded failure or cancellation, and only operational
+blockers carrying that exact code. Missing or ambiguous evidence stays charged.
+The retry history stores `retryMetadata.code: credential-refresh-unavailable`,
+`state: infrastructure-failed`, `reason`, both heads, `localCommit`,
+`workspaceDir` and `resumeWorkspace`, plus the existing worker descriptor.
+The next attempt waits thirty seconds and passes broker admission again.
+Local workspaces use the existing preserved-commit resume path; HQ workspace
+details remain available for recovery in retry history.
+
+These positively proven broker outages do not spend the separate bounded
+infrastructure-refund allowance described below. Lease mismatches and other
+publication, validation, review or CI failures retain ordinary accounting.
+
 ## Nonblocking cap terminal result
 
 A claim refused by the consecutive nonblocking cap retains `status: stopped`

@@ -1,8 +1,11 @@
 // Remediation round accounting and durable infrastructure outcomes (REMREFUND-01).
 import { join } from 'node:path';
+import { statSync, readFileSync } from 'node:fs';
+import { codexToolHostLogEvidence, readDispatchCodexToolHostEvidence } from './codex-tool-host-failure.mjs';
 import { withFollowUpJobLock } from './follow-up-job-write.mjs';
 import { readFollowUpJob, writeFollowUpJob, summarizePRRemediationLedger, requeueInProgressFollowUpJobForRetry } from './follow-up-jobs.mjs';
-import { infrastructureRefundReason, localWorkerErrorOutcome } from './remediation-infrastructure-refund.mjs';
+import { infrastructureRefundReason, localWorkerErrorOutcome, recordedInfrastructureReason } from './remediation-infrastructure-refund.mjs';
+import { credentialPublicationRefund } from './remediation-credential-broker.mjs';
 
 export function logRoundBudgetDecision(log, {
   riskClass,
@@ -27,7 +30,26 @@ export function logRoundBudgetDecision(log, {
 export async function settleInfrastructureRemediationRound({
   rootDir, job, jobPath, worker, liveness, lifecycle, lifecycleStop, completedAt,
   postOutcomeComment, postCommentImpl, now, log,
+  publicationFailure = null, publicationReply = null,
+  isHqWorker = worker?.dispatchMode === 'hq', resolvePathsImpl = null,
 }) {
+  // Keep infrastructure evidence collection with refund accounting. Contained
+  // paths still come from the reconciler's canonical artifact-path validator.
+  if (!isHqWorker && liveness.state === 'exited' && worker.model === 'codex') {
+    try {
+      const logPath = resolvePathsImpl?.().logPath;
+      if (logPath && statSync(logPath).size <= 8 * 1024 * 1024) {
+        const evidence = codexToolHostLogEvidence(readFileSync(logPath, 'utf8'));
+        if (evidence) worker.recordedOutcome = { ...worker.recordedOutcome, toolHostEvidence: evidence };
+      }
+    } catch { /* Missing/oversized/unreadable evidence stays charged. */ }
+  }
+  if (isHqWorker && liveness.state === 'exited' && liveness.dispatchStatus?.status === 'failed'
+    && ['codex', 'remediator-codex', 'remediator-codex-corp'].includes(worker.workerClass || worker.model)
+    && !recordedInfrastructureReason(liveness.dispatchStatus)) {
+    const evidence = await readDispatchCodexToolHostEvidence(worker);
+    if (evidence) liveness.dispatchStatus = { ...liveness.dispatchStatus, toolHostEvidence: evidence };
+  }
   const round = job.remediationPlan?.rounds?.find((entry) => entry.round === job.remediationPlan.currentRound);
   const liveHead = lifecycle?.source === 'live' ? lifecycle.headSha : null;
   let refund;
@@ -43,12 +65,16 @@ export async function settleInfrastructureRemediationRound({
         retry.round === current.remediationPlan.currentRound && retry.retryMetadata?.code === 'infrastructure-refund');
       const recordedOutcome = current.remediationWorker?.recordedOutcome;
       if (recordedOutcome) worker.recordedOutcome = { ...worker.recordedOutcome, ...recordedOutcome };
-      let refundReason = liveness.state === 'exited' && !lifecycleStop && !alreadyRetriedRound
+      const credentialReason = liveness.state === 'exited' && !lifecycleStop
+        && liveHead && liveHead === currentStartHead
+        ? credentialPublicationRefund({ failure: publicationFailure, worker: current.remediationWorker, job: current,
+          outcome: liveness.dispatchStatus || worker.recordedOutcome, reply: publicationReply }) : null;
+      let refundReason = credentialReason || (liveness.state === 'exited' && !lifecycleStop && !alreadyRetriedRound
         ? infrastructureRefundReason({
           outcome: liveness.dispatchStatus || worker.recordedOutcome,
           startHead: currentStartHead, endHead: liveHead, refunds: 0,
-        }) : null;
-      if (refundReason) {
+        }) : null);
+      if (refundReason && !credentialReason) {
         refundReason = infrastructureRefundReason({
           outcome: liveness.dispatchStatus || worker.recordedOutcome,
           startHead: currentStartHead, endHead: liveHead,
@@ -75,9 +101,13 @@ export async function settleInfrastructureRemediationRound({
       const requeued = requeueInProgressFollowUpJobForRetry({
         rootDir, jobPath, requeuedAt: completedAt,
         retryReason: `not charged: ${refundReason}`,
-        retryAfterOverride: completedAt, allowDirectWorkerRetry: true, chargeRetryBudget: false,
+        retryAfterOverride: credentialReason ? new Date(Date.parse(completedAt) + 30_000).toISOString() : completedAt,
+        allowDirectWorkerRetry: true, chargeRetryBudget: false,
         retryMetadata: {
-          code: 'infrastructure-refund', reason: refundReason, startHead: currentStartHead, endHead: liveHead,
+          code: credentialReason ? 'credential-refresh-unavailable' : 'infrastructure-refund',
+          reason: refundReason, startHead: currentStartHead, endHead: liveHead,
+          ...(credentialReason ? { state: 'infrastructure-failed', localCommit: publicationFailure.localCommit,
+            workspaceDir: worker.workspaceDir, resumeWorkspace: worker.dispatchMode !== 'hq' } : {}),
           workerClass: worker.workerClass || worker.model,
           harnessSpecific: refundReason === 'codex-tool-host-unavailable'
             || (refundReason === 'boot-failed' && worker.dispatchMode !== 'hq'),

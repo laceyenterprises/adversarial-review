@@ -354,6 +354,19 @@ wire-only evidence and preserve explicit false values.
 
 ## Infrastructure refunds (REMREFUND-01)
 
+Broker-backed workers first wait for the publisher broker's `/readyz` endpoint.
+An unready broker produces `credential-broker-unready` on the pending job with
+backoff from ten seconds to five minutes; no worker starts and no round is spent.
+A current publisher artifact reporting
+`remediation-credential-refresh-unavailable`, an unchanged authoritative PR head
+and a validated reply with no other failure permit a budget-neutral retry after
+thirty seconds. The reply must put that exact code on its operational blocker.
+The attempt is retained as `infrastructure-failed` with the saved local commit
+and workspace in retry history. Local retries resume preserved work.
+This broker-specific outcome does not use the bounded allowance below.
+Lease mismatches, unresolved findings, independent CI failures, cancellation,
+stale artifacts and unknown head evidence do not qualify.
+
 An exited remediation worker can retry its charged round once when an
 independent recorded infrastructure reason accompanies a known unchanged live
 PR head: `codex-tool-host-unavailable`, `publish-blocked`, `boot-failed` or

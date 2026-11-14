@@ -2,7 +2,6 @@ import { hqRemediationWorkerClass } from './remediation-worker-class.mjs';
 import { prepareRemediationBuilder, readRemediationBuilderEvidence, stopRecoveredBuilderRemediator } from './remediation-builder-authorship.mjs';
 import { cleanupServiceCodexAuth } from './codex-service-home.mjs';
 import { withRepositoryStateCycle } from './repository-state-lock.mjs';
-import { codexToolHostLogEvidence, readDispatchCodexToolHostEvidence } from './codex-tool-host-failure.mjs';
 import { ensureWorkerRegistryReady, resolveRemediationModel } from './adapters/agent-runtime/local/remediation.mjs';
 import { prepareWorkerObservationSession } from './dispatch-read-client.mjs';
 import { readHostIdentitySync } from './dispatch-files-client.mjs';
@@ -20,10 +19,11 @@ import { resolveInitialRemediatorRouting, DEFAULT_REMEDIATION_WORKER_CLASS, defa
 import { completeLiveWorkerPublishedHead, completeKnownWorkerPublish, findWorkerPublishedHead, buildRereviewResult } from './remediation-published-head.mjs';
 import { filterGitHubBody } from './github-outbound-body.mjs';
 import { logRoundBudgetDecision, settleInfrastructureRemediationRound, recordLocalRemediationOutcome } from './remediation-round-accounting.mjs';
+import { deferForCredentialBroker, credentialBrokerReady } from './remediation-credential-broker.mjs';
 import { recordedInfrastructureReason, localWorkerErrorOutcome } from './remediation-infrastructure-refund.mjs';
 import { preserveUnsafeWorkspaceMetadata } from './workspace-identity.mjs';
 import { execFile } from 'node:child_process';
-import { existsSync, lstatSync, statSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, lstatSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { userInfo } from 'node:os';
 import { dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -1481,11 +1481,13 @@ async function reconcileFollowUpJobWithinRepositoryCycle({
   if (!isHqWorker && liveness.state === 'exited') cleanupServiceCodexAuth(worker);
   // A publication refusal wins over reply text, no-progress handling and
   // published-head recovery. It cannot authorize a re-review or empty close.
+  let publicationFailure = null;
+  let publicationReply = null;
   if (liveness.state !== 'active') {
-    let publicationFailure;
     try {
       const checkedPaths = buildReconciliationPaths(rootDir, job);
       publicationFailure = JSON.parse(readFileSync(`${checkedPaths.replyPath}.publication-failure.json`, 'utf8'));
+      publicationReply = readRemediationReplyArtifact(checkedPaths.replyPath, { expectedJob: job });
     } catch { /* No validated refusal artifact for this round. */ }
     if (publicationFailure?.code === 'remediation-empties-pr-diff'
       && publicationFailure.previousHead === job.revisionRef) {
@@ -1624,26 +1626,10 @@ async function reconcileFollowUpJobWithinRepositoryCycle({
   // Capture recovery evidence before ordinary exit accounting observes a changed head.
   const workerPublishedHead = lifecycle?.source === 'live' && lifecycle.prState === 'open' ? findWorkerPublishedHead({ rootDir, job, headSha: lifecycle.headSha }) : null;
   const completedAt = now();
-  // Local CLI failures do not have an HQ failure classifier. Inspect only the
-  // validated, complete worker log before no-progress/reply accounting.
-  if (!isHqWorker && liveness.state === 'exited' && worker.model === 'codex') {
-    try {
-      const checkedPaths = buildReconciliationPaths(rootDir, job);
-      const logPath = checkedPaths.logPath;
-      if (logPath && statSync(logPath).size <= 8 * 1024 * 1024) {
-        const evidence = codexToolHostLogEvidence(readFileSync(logPath, 'utf8'));
-        if (evidence) worker.recordedOutcome = { ...worker.recordedOutcome, toolHostEvidence: evidence };
-      }
-    } catch { /* Missing/oversized/unreadable evidence stays charged. */ }
-  }
-  if (isHqWorker && liveness.state === 'exited' && liveness.dispatchStatus?.status === 'failed'
-    && ['codex', 'remediator-codex', 'remediator-codex-corp'].includes(worker.workerClass || worker.model)
-    && !recordedInfrastructureReason(liveness.dispatchStatus)) {
-    const evidence = await readDispatchCodexToolHostEvidence(worker);
-    if (evidence) liveness.dispatchStatus = { ...liveness.dispatchStatus, toolHostEvidence: evidence };
-  }
   const refund = await settleInfrastructureRemediationRound({
     rootDir, job, jobPath, worker, liveness, lifecycle, lifecycleStop, completedAt,
+    publicationFailure, publicationReply,
+    isHqWorker, resolvePathsImpl: () => buildReconciliationPaths(rootDir, job),
     postOutcomeComment: postReconcileOutcomeCommentSafe, postCommentImpl, now, log,
   });
   if (refund) return refund;
@@ -3132,6 +3118,7 @@ async function consumeNextFollowUpJobWithinRepositoryCycle({
   healthRouter = null,
   readBuilderEvidenceImpl = readRemediationBuilderEvidence,
   livePrOwnerLookupImpl = null, // REMEDIATIONOWNER-01: composition roots wire the HQ lookup.
+  credentialBrokerReadyImpl = credentialBrokerReady,
   topPath, loaderImpl,
   log = console,
 } = {}) {
@@ -3300,6 +3287,13 @@ async function consumeNextFollowUpJobWithinRepositoryCycle({
   const preparationStartedMs = Date.now(); let envPreparationMs = 0; let workspacePreparationMs = 0;
 
   try {
+    const brokerDeferral = await deferForCredentialBroker({ rootDir, claimed, env: jobEnv, now,
+      delayedPendingPaths, probeImpl: credentialBrokerReadyImpl });
+    if (brokerDeferral) return brokerDeferral;
+    if (claimed.job.credentialBrokerDeferral) {
+      delete claimed.job.credentialBrokerDeferral;
+      writeFollowUpJob(claimed.jobPath, claimed.job);
+    }
     const authorship = await prepareRemediationBuilder({ rootDir, job: claimed.job,
       jobPath: claimed.jobPath, execFileImpl, now, log, delayedPendingPaths,
       readEvidenceImpl: readBuilderEvidenceImpl });
@@ -3624,6 +3618,9 @@ async function consumeNextFollowUpJobWithinRepositoryCycle({
     // REMCONFLICT-01: read live mergeability at dispatch time (src/remediation-conflicted-base.mjs).
     const conflictedBase = hqDispatchEnabled && conflictedBaseGateImpl ? await conflictedBaseGateImpl({ rootDir, job: claimed.job, jobPath: claimed.jobPath, env: jobEnv, execFileImpl, now, log, stopJobImpl: (stop) => stopConsumedJobWithComment({ ...stop, postCommentImpl, now, log }) }) : null;
     if (conflictedBase?.result) return conflictedBase.result;
+    const brokerAtSpawn = await deferForCredentialBroker({ rootDir, claimed, env: jobEnv, now,
+      delayedPendingPaths, probeImpl: credentialBrokerReadyImpl });
+    if (brokerAtSpawn) return brokerAtSpawn;
     const ownerAtSpawn = await deferClaimedJobForLivePrOwner({ rootDir, claimed, lookupImpl: livePrOwnerLookupImpl, now, delayedPendingPaths, log }); // REMEDIATIONOWNER-01: re-ask HQ at spawn
     if (ownerAtSpawn) return ownerAtSpawn;
 
@@ -3920,6 +3917,7 @@ async function consumeFollowUpJobsUntilCapacityWithinRepositoryCycle({
   guardStackedBaseImpl = guardStackedBase,
   deliverAlertImpl = deliverAlert,
   healthRouter = null, livePrOwnerLookupImpl = null,
+  credentialBrokerReadyImpl = credentialBrokerReady,
   log = console,
 } = {}) {
   const concurrencyCap = normalizeMaxConcurrentFollowUpJobs(maxConcurrent);
@@ -3970,6 +3968,7 @@ async function consumeFollowUpJobsUntilCapacityWithinRepositoryCycle({
         quotaHoldRevalidator,
         resolveRemediationWorkerClassImpl,
         ensureWorkerRegistryReadyImpl,
+        credentialBrokerReadyImpl,
         mintClaudeCodeRemediationTokenImpl,
         conflictedBaseGateImpl,
         guardStackedBaseImpl,

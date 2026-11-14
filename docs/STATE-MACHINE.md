@@ -1196,6 +1196,17 @@ data/follow-up-jobs/
 
 Directory = state.
 
+Broker-backed remediation uses the existing `in-progress` to `pending`
+transition when a bounded publisher-broker `/readyz` probe is unready.
+`credential-broker-unready` retains the job and round with exponential
+`retryAfter`. An exited credential-only publication failure can use that same
+transition without a round charge when a current publisher artifact, validated
+blocked reply and unchanged authoritative head prove the outage. Retry history
+records `credential-refresh-unavailable`, `infrastructure-failed` and the saved
+commit/workspace; local retries resume preserved work. Independent failures,
+lease rejection, cancellation, lifecycle stops and unknown evidence retain
+ordinary accounting. Existing ownership gates still precede dispatch.
+
 Grok subject refusals before spawn or after an assignment handoff transition
 from `in-progress` to `stopped` with `subject-refused`, a never-spawned worker
 and an operator-owned correction/retrigger action. They create no quota hold

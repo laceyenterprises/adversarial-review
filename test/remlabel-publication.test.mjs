@@ -212,6 +212,100 @@ test('an explicit publisher push command failure never bypasses the selected com
   assert.equal(pushes, 1);
 });
 
+for (const leaseMismatch of [false, true]) {
+  test(`broker refresh failure retains the saved commit; lease rejection stays distinct (${leaseMismatch})`, async t => {
+    const f = fixture(t);
+    writeFileSync(join(f.work, 'feature.txt'), 'corrected feature\n');
+    f.git('add', 'feature.txt'); f.git('commit', '-m', 'Fix sample feature');
+    const candidate = f.git('rev-parse', 'HEAD');
+    let pushes = 0;
+    const stderr = 'broker mode: transient broker failure exhausted retries for http://broker.invalid (curl_rc=7, HTTP 000)\n'
+      + 'worker GitHub push credential is unusable and could not be refreshed (expired).\n'
+      + "fatal: could not read Username for 'https://example.invalid': terminal prompts disabled"
+      + (leaseMismatch ? '\n! [rejected] topic -> topic (stale info)' : '');
+    await assert.rejects(publishRemediation({ ...f.publish,
+      execFileImpl: async (command, args, options) => {
+        if (args.includes('push')) {
+          pushes++;
+          throw Object.assign(new Error('push failed'), { code: 1, stderr });
+        }
+        return execAsync(command, args, options);
+      } }), { code: leaseMismatch ? 1 : 'remediation-credential-refresh-unavailable' });
+    assert.equal(pushes, 1);
+    assert.equal(f.git('rev-parse', 'HEAD'), candidate);
+    assert.equal(f.git('ls-remote', 'origin', 'refs/heads/topic').split('\t')[0], f.previousHead);
+  });
+}
+
+for (const brokerReady of [false, true]) {
+test(`bounded refresh failure needs broker outage evidence (ready: ${brokerReady})`, async t => {
+  const f = fixture(t);
+  writeFileSync(join(f.work, 'feature.txt'), 'corrected feature\n');
+  f.git('add', 'feature.txt'); f.git('commit', '-m', 'Fix sample feature');
+  await assert.rejects(publishRemediation({ ...f.publish,
+    credentialBrokerReadyImpl: async () => ({ ready: brokerReady }),
+    execFileImpl: async (command, args, options) => {
+      if (args.includes('push')) throw Object.assign(new Error('refresh failed'), {
+        code: 75,
+        stderr: 'entitled GitHub re-mint unavailable: remint_transient_exhausted; refusing credential fallback',
+      });
+      return execAsync(command, args, options);
+    } }), { code: brokerReady ? 75 : 'remediation-credential-refresh-unavailable' });
+});
+}
+
+test('publisher artifact and validated blocked reply refund the round through reconcile', async t => {
+  const f = fixture(t);
+  const rootDir = mkdtempSync(join(tmpdir(), 'broker-publication-reconcile-'));
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  const prior = Object.fromEntries(['HQ_ROOT', 'AGENT_OS_DEPLOY_CHECKOUT', 'ADV_REPLIES_ROOT', 'ADVERSARIAL_REMEDIATION_WORKSPACE_ROOT']
+    .map(key => [key, process.env[key]]));
+  process.env.HQ_ROOT = rootDir;
+  process.env.AGENT_OS_DEPLOY_CHECKOUT = join(rootDir, 'deploy-checkout');
+  process.env.ADV_REPLIES_ROOT = join(rootDir, 'replies');
+  process.env.ADVERSARIAL_REMEDIATION_WORKSPACE_ROOT = join(f.work, '..');
+  t.after(() => { for (const [key, value] of Object.entries(prior)) {
+    if (value === undefined) delete process.env[key]; else process.env[key] = value;
+  } });
+  createFollowUpJob({ rootDir, repo: 'fixture/repo', prNumber: 1, revisionRef: f.previousHead,
+    branch: 'topic', baseBranch: 'main', reviewBody: 'Fix the feature.', reviewerModel: 'claude',
+    reviewPostedAt: '2026-01-01T00:00:00Z', critical: true });
+  const claimed = claimNextFollowUpJob({ rootDir, claimedAt: '2026-01-01T00:01:00Z' });
+  const replyPath = join(rootDir, 'dispatch', 'remediation-replies', claimed.job.jobId, 'remediation-reply.json');
+  mkdirSync(join(replyPath, '..'), { recursive: true });
+  const shim = join(rootDir, 'fake-publisher');
+  writeFileSync(shim, '#!/bin/sh\n'
+    + "echo 'entitled GitHub re-mint unavailable: broker_unavailable; refusing credential fallback' >&2\nexit 75\n",
+  { mode: 0o755 });
+  writeFileSync(join(f.work, 'feature.txt'), 'corrected feature\n');
+  f.git('add', 'feature.txt'); f.git('commit', '-m', 'Fix sample feature');
+  const savedCommit = f.git('rev-parse', 'HEAD');
+  await assert.rejects(execAsync(process.execPath, [new URL('../bin/remediation-publish.mjs', import.meta.url).pathname,
+    '--base-branch', 'main', '--branch', 'topic', '--previous-head', f.previousHead,
+    '--failure-path', `${replyPath}.publication-failure.json`, '--push-command', shim],
+  { cwd: f.work, env }), error => /remediation-credential-refresh-unavailable/u.test(error.stderr));
+  writeFileSync(replyPath, JSON.stringify({ kind: 'adversarial-review-remediation-reply', schemaVersion: 1,
+    jobId: claimed.job.jobId, repo: claimed.job.repo, prNumber: claimed.job.prNumber,
+    outcome: 'blocked', summary: 'Feature repaired; credential broker unavailable for publication.',
+    validation: ['Offline feature validation passed.'], addressed: [], pushback: [], blockers: [],
+    operationalBlockers: [{ code: 'remediation-credential-refresh-unavailable', finding: 'Credential refresh unavailable.',
+      reasoning: 'Publication needs the credential broker to recover.', commitSha: savedCommit }],
+    reReview: { requested: false, reason: null } }));
+  const spawned = markFollowUpJobSpawned({ rootDir, jobPath: claimed.jobPath, spawnedAt: '2026-01-01T00:01:01Z',
+    worker: { processId: 12345, model: 'claude-code', workspaceDir: f.work, replyPath } });
+  const result = await reconcileFollowUpJob({ rootDir, ...spawned,
+    isWorkerRunning: () => false,
+    resolvePRLifecycleImpl: async () => ({ source: 'live', prState: 'open', headSha: f.previousHead }),
+    postCommentImpl: async () => ({ posted: false, error: 'offline fixture' }),
+    log: { log() {}, warn() {}, error() {} } });
+  assert.equal(result.action, 'requeued', JSON.stringify({ reason: result.reason, failure: result.job?.failure }));
+  assert.equal(result.reason, 'credential-refresh-unavailable');
+  assert.equal(result.job.remediationPlan.currentRound, 0);
+  assert.equal(result.job.remediationPlan.retryHistory.at(-1).retryMetadata.localCommit, savedCommit);
+  assert.equal(f.git('cat-file', '-t', savedCommit), 'commit');
+  assert.equal(f.git('ls-remote', 'origin', 'refs/heads/topic').split('\t')[0], f.previousHead);
+});
+
 for (const succeeds of [true, false]) {
   test(`publication retries transient fetch failures at most three times (recovers: ${succeeds})`, async t => {
     const f = fixture(t);

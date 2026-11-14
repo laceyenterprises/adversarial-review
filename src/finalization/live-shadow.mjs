@@ -12,6 +12,7 @@ import { isDaemonMergeReviewAllowed } from '../ama/daemon-merge.mjs';
 import { normalizeV1Action } from './shadow-actions.mjs';
 import { resolve } from 'node:path';
 import { finalizationOwner } from './live-owner.mjs';
+import { readFinalRemediatorHead } from './exact-head-review.mjs';
 
 // One canonical app root per daemon. Bound the cache to one handle and converge
 // each schema once per connection, including caller-owned test/store handles.
@@ -134,7 +135,12 @@ export function recordLiveShadow({ rootDir, snapshot, legacy, source, repo, prNu
       if (legacy?.action === 'done' && legacy.reason === 'closed') v1Action.kind = 'close';
     }
     let error = false;
+    let finalRemediatorHead = null;
     try {
+      const reviews = complete(snapshot, 'reviews');
+      if (rootDir && !(reviews?.headSha === snapshot.head && reviews.verdict)) finalRemediatorHead = readFinalRemediatorHead({
+        rootDir, repo, prNumber, headSha: snapshot.head,
+      });
       const previous = ledger.read(subject);
       const latestRevision = previous.filter(e => e.type === 'revision_advanced').at(-1);
       if (latestRevision && Date.parse(snapshot.observedAt) < Date.parse(latestRevision.at)) {
@@ -154,7 +160,7 @@ export function recordLiveShadow({ rootDir, snapshot, legacy, source, repo, prNu
     } catch { error = true; }
     const observedPolicy = complete(snapshot, 'policy');
     const observation = shadowObserveFromStore({ subject, observedAt: snapshot.observedAt, v1Action,
-      ownerSnapshot: snapshot,
+      ownerSnapshot: { ...snapshot, finalRemediatorHead },
       policy: { ...policy, autonomousExecutionDisabled: policy?.autonomousExecutionDisabled === true
         || observedPolicy?.autonomousMergeExecutionEnabled === false
         || isOperatorHeld(complete(snapshot, 'pr')?.labels) },

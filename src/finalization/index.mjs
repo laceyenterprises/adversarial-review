@@ -132,6 +132,7 @@ export {
 } from './execution-surfaces.mjs';
 
 export { createFinalizationExecutor } from './executor.mjs';
+export { createExactHeadReviewSurface } from './exact-head-review.mjs';
 
 // Repository/base queue foundation (MGQ-01). No runtime route is installed.
 export {

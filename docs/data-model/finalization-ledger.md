@@ -752,6 +752,16 @@ idempotency key. The `workflow` projection retains these facts across heads:
 | `page_delivered` | One acknowledged page per durable episode through the existing alert outbox. Queued/failed delivery retries the same key. |
 | `evidence_refreshed` | A sourced compatible producer generation resolves unknown safety semantics; ordinary review/check facts cannot erase unknown facts. |
 
+Exact-head review requests reuse `operation_requested` with action
+`request-reexact-review` and subject-scoped operation ID
+`final-remediator-review:<head>`. `operation_observed` with outcome `completed`
+means the local queue accepted the request, not that a reviewer finished; its
+result retains request ID, head and intent state. The existing
+`explicit_review_intents` table owns queue deduplication, consumption and
+head-change cancellation. No round debit or new table is introduced.
+Shadow stores the would-request decision, operation ID and publication evidence
+reference in `v2Decision` without creating either a live operation or an intent.
+
 `projectWorkflow` derives owner, next action, deadline, overdue milliseconds,
 reason, evidence, generation, code/policy version, freshness and page acknowledgement
 from the same folded decision. Merged subjects retain a delivery owner. Explicit

@@ -1053,6 +1053,8 @@ export interface EligibilityDecision {
   };
   owner?: { kind: 'workflow' | 'agent'; id: string; head: string; verified?: boolean; status?: string };
   nextAction?: string;
+  /** Stable subject-scoped operation identity, including exact-head review requests. */
+  operationId?: string;
   codeVersion?: string;
   loadEvidence?: { loadAvg1m?: number; cpuCount?: number; cpuBusyPercent?: number | null };
   episode?: string;

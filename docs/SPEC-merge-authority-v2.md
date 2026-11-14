@@ -128,11 +128,19 @@ the concrete typed vocabulary and adapter changes.
 
 Strict mode remains on: address every blocking and non-blocking finding. Normal
 convergence consumes a valid final re-review at the current head. Exhaustion
-uses final remediation with schema-validated coverage of every outstanding
-finding, followed by landing without another re-review requirement. An ack,
+uses the final hammer with schema-validated coverage of every outstanding
+finding, followed by landing without another re-review requirement for that
+hammer head. A final-round remediator push is different: when its spent budget
+suppresses automatic re-review and there is no verdict at that head, v2 requests
+one strict exact-head review through the existing explicit-request API, without
+bumping or refunding the budget. The durable repo/PR/head receipt deduplicates
+ticks and other request paths; head movement cancels pending intent. Shadow
+records `request-reexact-review` without issuing it; live execution waits for
+the verdict before resuming normal eligibility. An ack,
 comment-only final round, process success or CI green alone proves neither
-coverage nor merge. A completed comment-only final round follows the same
-closure path without restarting review. Coverage impossible to establish selects
+coverage nor merge. A completed comment-only remediator round with a proven
+unreviewed final push follows the same exact-head request rule. Coverage
+impossible to establish selects
 owned recovery and a page; it does not permit merging unaddressed findings.
 Autonomous exhaustion never emits rejection; `close` requires authenticated
 operator direction. Explicit operator holds and the kill switch remain binding.

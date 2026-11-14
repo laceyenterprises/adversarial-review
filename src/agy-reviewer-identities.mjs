@@ -1,3 +1,4 @@
+import { isReviewCliResolutionFailure } from './review-cli-resolver.mjs';
 import { loadAwareTimeoutMs } from './load-aware-timeout.mjs';
 import { resolveHqRoot } from './hq-root.mjs';
 // ITP-11: agy logins are execution holders for gemini-reviewer. CCX-08
@@ -1522,6 +1523,7 @@ function createAgyReviewerIdentityPool({
 // Provider blips do not justify an auth probe. Quota failures use their
 // identity-scoped durable cooldown instead of readiness isolation.
 const NON_ISOLATING_FAILURE_CLASSES = new Set([
+  'cli-resolution-transient',
   'cancelled',
   'reviewer-stalled',
   'reviewer-timeout',
@@ -1598,6 +1600,12 @@ async function runWithAgyReviewerIdentity({
     failed = !result?.ok && !NON_ISOLATING_FAILURE_CLASSES.has(result?.failureClass);
     reason = result?.failureClass || '';
     return result;
+  } catch (error) {
+    if (isReviewCliResolutionFailure(error)) {
+      failed = false;
+      reason = 'cli-resolution-transient';
+    }
+    throw error;
   } finally {
     await pool.release(lease, { failed, reason });
   }

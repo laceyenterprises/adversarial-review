@@ -55,6 +55,14 @@ without charging review attempts or adding a delivery status. The settlement log
 includes repo, PR and reason. Backoff write failures warn while claim release
 still runs.
 
+`cli-resolution-transient` is preserved in `lastFailureClass` and both failure
+breakdown maps. It represents executable-resolution infrastructure failure,
+independent of OAuth. Below the existing five-consecutive-transient threshold,
+settlement releases the matching reviewer claim to `pending` without charging
+attempts; the durable backoff still gates the next claim. At the threshold it
+uses ordinary bounded `pending-upstream` infrastructure recovery. This class
+never writes reviewer credential-outage state or isolates the reviewer seat.
+
 ## Mixed-State Semantics
 
 - Old files may contain only `consecutiveCascadeFailures`. On the next failure,

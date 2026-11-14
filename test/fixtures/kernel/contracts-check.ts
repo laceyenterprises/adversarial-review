@@ -13,6 +13,9 @@ import type {
   RemediationBudgetPlan,
   ReviewPipeline,
   ReviewerRuntimeAdapter,
+  ReviewerRunResult,
+  RemediatorRunResult,
+  AgentFailureClass,
   RemediationCommitMetadata,
   RemediationReply,
   RunResult,
@@ -46,6 +49,12 @@ const shadowReportEvidence: NonNullable<ShadowReportModel['divergences'][number]
 const reportedPattern: ShadowPatternDisposition | null | undefined = shadowReportEvidence.patternDisposition;
 const legacyShadowEvidence: ShadowReportModel['divergences'][number]['evidence'] = { disposition: null };
 void [reportedPattern, legacyShadowEvidence];
+const resolutionFailureClasses: [
+  ReviewerRunResult['failureClass'],
+  RemediatorRunResult['failureClass'],
+  AgentFailureClass,
+] = ['cli-resolution-transient', 'cli-resolution-transient', 'cli-resolution-transient'];
+void resolutionFailureClasses;
 
 const editPlanDiagnostic: HammerReviewEvidenceDiagnostic = 'review-head-mismatch';
 const editPlanRefusal: HammerReviewEvidenceRefusal = {

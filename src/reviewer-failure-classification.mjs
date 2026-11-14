@@ -22,6 +22,7 @@ export const INFRA_RECOVERABLE_FAILURE_CLASSES = Object.freeze([
   REVIEWER_EMPTY_OUTPUT_FAILURE_CLASS,
   'reviewer-output',
   'oauth-broken',
+  'cli-resolution-transient',
   TOKEN_REFRESH_PENDING_FAILURE_CLASS,
   ATTESTATION_SIGN_FAILED_FAILURE_CLASS,
   HCP_UNAVAILABLE_FAILURE_CLASS,
@@ -64,9 +65,10 @@ function storedRowFailureSignal(reviewRow) {
 function reviewerFailureClassFromStoredRow(reviewRow) {
   const rawMessage = storedRowFailureSignal(reviewRow);
   const message = rawMessage.toLowerCase();
+  if (message.includes('review cli resolution unavailable for ')) return 'cli-resolution-transient';
   if (message.includes('[reviewer-configuration-error]')) return 'reviewer-configuration-error';
   const tagMatch = message.match(
-    /^\[(reviewer-prompt-too-large|reviewer-chunk-budget-exceeded|reviewer-configuration-error|reviewer-model-unresolved|reviewer-model-unavailable|reviewer-timeout|launchctl-bootstrap|cascade|quota-exhausted|provider-overloaded|reviewer-empty-output|reviewer-output|oauth-broken|token-refresh-pending|attestation-sign-failed|hcp-unavailable|infra-runtime-missing-library|agy-identity-unavailable|dispatch-failed|adapter_spawn_timeout|daemon-bounce)\]/
+    /^\[(reviewer-prompt-too-large|reviewer-chunk-budget-exceeded|reviewer-configuration-error|reviewer-model-unresolved|reviewer-model-unavailable|reviewer-timeout|launchctl-bootstrap|cascade|quota-exhausted|provider-overloaded|reviewer-empty-output|reviewer-output|cli-resolution-transient|oauth-broken|token-refresh-pending|attestation-sign-failed|hcp-unavailable|infra-runtime-missing-library|agy-identity-unavailable|dispatch-failed|adapter_spawn_timeout|daemon-bounce)\]/
   );
   if (tagMatch) return tagMatch[1];
   const legacyClass = classifyReviewerFailure(rawMessage, null);
@@ -78,6 +80,7 @@ function reviewerFailureClassFromStoredRow(reviewRow) {
     || legacyClass === 'reviewer-timeout'
     || legacyClass === 'launchctl-bootstrap'
     || legacyClass === 'oauth-broken'
+    || legacyClass === 'cli-resolution-transient'
     || legacyClass === QUOTA_EXHAUSTED_FAILURE_CLASS
     || legacyClass === PROVIDER_OVERLOADED_FAILURE_CLASS
     || legacyClass === REVIEWER_EMPTY_OUTPUT_FAILURE_CLASS

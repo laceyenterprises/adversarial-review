@@ -1,3 +1,4 @@
+import { reviewerFailureClassFromStoredRow } from './reviewer-failure-classification.mjs';
 import { loadAwareTimeoutMs } from './load-aware-timeout.mjs';
 import { join } from 'node:path';
 import { existsSync } from 'node:fs';
@@ -186,20 +187,8 @@ function routerSignal(rootDir) {
   };
 }
 
-function attributionSignal(rootDir, { now = () => new Date() } = {}) {
-  const dbPath = join(rootDir, 'data', 'reviews.db');
-  if (!existsSync(dbPath)) {
-    return {
-      id: 'attribution',
-      label: 'attribution round-trip',
-      ok: false,
-      detail: 'reviews.db missing',
-    };
-  }
-
-  let db;
+function attributionSignal(db, { now }) {
   try {
-    db = new Database(dbPath, { readonly: true });
     const hasEndedAt = hasColumn(db, 'reviewer_passes', 'ended_at');
     const since = hasEndedAt
       ? new Date(now().getTime() - ATTRIBUTION_MAX_AGE_MS).toISOString()
@@ -230,8 +219,52 @@ function attributionSignal(rootDir, { now = () => new Date() } = {}) {
       ok: false,
       detail: `db error: ${err.message || String(err)}`,
     };
+  }
+}
+
+// Informational only: reviewer failures do not add a readiness signal or gate.
+function reviewerFailureCounts(db, { now }) {
+  try {
+    const since = new Date(now().getTime() - ATTRIBUTION_MAX_AGE_MS).toISOString();
+    const rows = db.prepare(`SELECT metadata_json FROM reviewer_passes
+      WHERE status = 'failed' AND ended_at >= ?`).all(since);
+    const counts = { 'cli-resolution-transient': 0, 'oauth-broken': 0 };
+    for (const row of rows) {
+      const failureClass = reviewerFailureClassFromStoredRow(row);
+      if (Object.hasOwn(counts, failureClass)) counts[failureClass] += 1;
+    }
+    return { status: 'available', counts };
+  } catch {
+    return { status: 'unavailable', counts: null };
+  }
+}
+
+function readReviewDatabaseStatus(rootDir, { now }) {
+  const dbPath = join(rootDir, 'data', 'reviews.db');
+  const unavailable = {
+    attribution: {
+      id: 'attribution',
+      label: 'attribution round-trip',
+      ok: false,
+      detail: 'reviews.db missing',
+    },
+    reviewerFailures24h: { status: 'unavailable', counts: null },
+  };
+  if (!existsSync(dbPath)) return unavailable;
+  let db;
+  try {
+    db = new Database(dbPath, { readonly: true });
+    return {
+      attribution: attributionSignal(db, { now }),
+      reviewerFailures24h: reviewerFailureCounts(db, { now }),
+    };
+  } catch (err) {
+    return {
+      ...unavailable,
+      attribution: { ...unavailable.attribution, detail: `db error: ${err.message || String(err)}` },
+    };
   } finally {
-    if (db) db.close();
+    db?.close();
   }
 }
 
@@ -263,7 +296,7 @@ export async function buildReadyzStatus(rootDir, {
   const endpoint = await endpointSignal(url);
   const router = routerSignal(rootDir);
   const smoke = settleSmokeSignal(rootDir, { now });
-  const attribution = attributionSignal(rootDir, { now });
+  const { attribution, reviewerFailures24h } = readReviewDatabaseStatus(rootDir, { now });
   const { appRegistration, signal: appRegistrationSignalModel } = appRegistrationSignal(
     rootDir,
     appRegistrationOptions,
@@ -274,6 +307,7 @@ export async function buildReadyzStatus(rootDir, {
 
   return {
     overallReady: failingSignals.length === 0,
+    reviewerFailures24h,
     failingSignals,
     app_registration: appRegistration,
     signals,
@@ -287,6 +321,13 @@ export function renderReadyzStatus(model) {
     const statusText = signal.ok ? 'GREEN' : 'NOT READY';
     const dots = '.'.repeat(Math.max(1, 50 - signal.label.length));
     text += `  ${signal.label}  ${dots}  ${statusText}  (${signal.detail})\n`;
+  }
+
+  if (model.reviewerFailures24h?.status === 'available') {
+    const counts = model.reviewerFailures24h.counts;
+    text += `Reviewer failures (24h): cli-resolution-transient=${counts['cli-resolution-transient']} oauth-broken=${counts['oauth-broken']}\n`;
+  } else {
+    text += 'Reviewer failures (24h): unavailable\n';
   }
 
   if (model.overallReady) {

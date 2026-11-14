@@ -124,6 +124,7 @@ import {
   clearReviewerCredentialOutage,
   formatTransientFailureBreakdown,
   recordCascadeFailure,
+  CASCADE_FAILURE_CAP,
   recordReviewerCredentialFailure,
   recordTokenRefreshHold,
   shouldPauseReviewerModel,
@@ -1745,6 +1746,7 @@ function settleReviewerAttempt({
     'reviewer-model-unresolved',
     'cascade',
     'oauth-broken',
+    'cli-resolution-transient',
     'reviewer-timeout',
     'launchctl-bootstrap',
     'daemon-bounce',
@@ -1767,6 +1769,7 @@ function settleReviewerAttempt({
     [REVIEWER_EMPTY_OUTPUT_FAILURE_CLASS]: 'Reviewer runtime returned empty output before posting; watcher backoff engaged.',
     [INFRA_RUNTIME_MISSING_LIBRARY_FAILURE_CLASS]: 'Reviewer process died in dyld: the host runtime is missing a shared library (Homebrew upgrade?); watcher backoff engaged. Run `hq doctor dylib-drift`.',
     'quota-exhausted': 'Reviewer hit a hard provider usage cap; holding until the cap window clears (HRR graceful degradation).',
+    'cli-resolution-transient': 'Review CLI resolution unavailable; infrastructure retry backoff engaged.',
     'oauth-broken': 'Reviewer OAuth credentials are unavailable; watcher backoff engaged until credentials recover.',
     [TOKEN_REFRESH_PENDING_FAILURE_CLASS]: 'Claude reviewer token refresh is pending; held until the next token rotation.',
     'reviewer-timeout': 'Reviewer command timed out before posting; watcher backoff engaged.',
@@ -1888,6 +1891,12 @@ function settleReviewerAttempt({
       throw new Error('settleReviewerAttempt requires statements.getReviewRow.get for transient infra cap enforcement');
     }
     const currentRow = statements.getReviewRow.get(repoPath, prNumber);
+    if (failureClass === 'cli-resolution-transient'
+      && (!currentRow || currentRow.review_status !== 'reviewing'
+        || currentRow.reviewer_head_sha !== reviewerHeadSha
+        || (currentRow.reviewer_session_uuid ?? null) !== reviewerSessionUuid)) {
+      return { posted: false, reason: 'cli-resolution-claim-mismatch' };
+    }
     if (failureClass === 'reviewer-prompt-too-large'
       && (!currentRow || currentRow.review_status !== 'reviewing'
         || currentRow.reviewer_head_sha !== reviewerHeadSha
@@ -1906,6 +1915,17 @@ function settleReviewerAttempt({
       reviewerBuildId: REVIEWER_BUILD_ID,
       row: currentRow,
     });
+    // No reviewer ran and no credential failed. Keep the claim retryable on
+    // this lane until the existing consecutive-transient threshold is reached.
+    if (failureClass === 'cli-resolution-transient'
+      && cascadeState.consecutiveTransientFailures < CASCADE_FAILURE_CAP) {
+      withSqliteBusyRetrySync(
+        () => statements.releaseReviewerClaim.run(reviewerSessionUuid, repoPath, prNumber),
+        { label: `reviewer-resolution-release:${repoPath}#${prNumber}`, log },
+      );
+      log.warn(`[watcher] Reviewer ${failureClass} on #${prNumber}; consecutiveTransient=${cascadeState.consecutiveTransientFailures}; retry after ${cascadeState.backoffMinutes}m without charging recovery`);
+      return;
+    }
     if (infraRecoverAttempts >= INFRA_AUTO_RECOVER_CAP) {
       const repeatExhaustion = infraRecoverAttempts > INFRA_AUTO_RECOVER_CAP;
       const exhaustionLabel = repeatExhaustion

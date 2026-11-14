@@ -290,6 +290,7 @@ function normalizeTransientFailureClass(failureClass) {
     value === 'reviewer-model-unresolved' ||
     value === 'cascade' ||
     value === 'oauth-broken' ||
+    value === 'cli-resolution-transient' ||
     value === 'reviewer-timeout' ||
     value === 'launchctl-bootstrap' ||
     value === 'quota-exhausted' ||

@@ -148,7 +148,7 @@ export function createDefaultArgusReviewDeps({
           const diagnostic = [err?.message, err?.stderr].filter(Boolean).join('\n');
           reason = classifyReviewerFailure(diagnostic, null, err?.code, err);
           failed = err.code !== 'registry-unavailable'
-            && !['quota-exhausted', AGY_IDENTITY_UNAVAILABLE_FAILURE_CLASS].includes(reason);
+            && !['quota-exhausted', 'cli-resolution-transient', AGY_IDENTITY_UNAVAILABLE_FAILURE_CLASS].includes(reason);
           if (reason === 'quota-exhausted') {
             const signal = parseReviewerQuotaExhaustion({ error: err, nowMs: nowMs() });
             signal.resetAt ||= resolveQuotaResetIso(diagnostic, { nowMs: nowMs() });

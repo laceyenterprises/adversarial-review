@@ -928,6 +928,14 @@ new PR
   retains its failure classification. If the session release misses, the
   no-charge fallback requires a `reviewing` row on the stale head with no session
   UUID. A replacement session, including one on the same head, is never released.
+- A `cli-resolution-transient` failure means executable resolution failed before
+  the reviewer ran. Resolution itself retries once with load-aware deadlines.
+  Settlement records the existing PR-level cascade backoff and releases the
+  matching session to `pending` without charging review or infra recovery
+  attempts while `consecutiveTransientFailures < CASCADE_FAILURE_CAP` (five).
+  At that threshold it uses the existing bounded `pending-upstream` recovery.
+  It never isolates the identity or records a credential outage; route selection
+  does not select an auth fallback for it. Health reports its own failure class.
 - Fresh transient reviewer failures (`cascade`, PR-local `oauth-broken`,
   `provider-overloaded`, `reviewer-timeout`, `launchctl-bootstrap`,
   `daemon-bounce`, `agy-identity-unavailable`, where no agy reviewer identity

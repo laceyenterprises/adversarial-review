@@ -559,3 +559,101 @@ test('readyz app registration signal fails when adversarial-review resolves from
     rmSync(rootDir, { recursive: true, force: true });
   }
 });
+
+test('readyz shares one read-only connection for attribution and failure counts', async () => {
+  const rootDir = makeRoot();
+  const restoreFetch = withFetch(healthyEndpointPayload());
+  const originalPrepare = Database.prototype.prepare;
+  const originalClose = Database.prototype.close;
+  const readers = new Set();
+  const closed = [];
+  try {
+    const now = new Date();
+    seedHealthyRuntime(rootDir);
+    const db = new Database(join(rootDir, 'data', 'reviews.db'));
+    db.exec('ALTER TABLE reviewer_passes ADD COLUMN ended_at TEXT');
+    db.prepare('UPDATE reviewer_passes SET ended_at = ?').run(now.toISOString());
+    const insert = db.prepare('INSERT INTO reviewer_passes (worker_run_id, status, metadata_json, ended_at) VALUES (NULL, ?, ?, ?)');
+    for (const failureClass of ['cli-resolution-transient', 'cli-resolution-transient', 'oauth-broken']) {
+      insert.run('failed', JSON.stringify({ failureClass }), now.toISOString());
+    }
+    insert.run('failed', JSON.stringify({ failureClass: 'cli-resolution-transient' }), '2000-01-01T00:00:00Z');
+    insert.run('completed', JSON.stringify({ failureClass: 'cli-resolution-transient' }), now.toISOString());
+    insert.run('failed', '{synthetic malformed', now.toISOString());
+    db.close();
+    Database.prototype.prepare = function trackedPrepare(sql, ...args) {
+      readers.add(this);
+      assert.equal(this.readonly, true);
+      return originalPrepare.call(this, sql, ...args);
+    };
+    Database.prototype.close = function trackedClose(...args) {
+      closed.push(this);
+      return originalClose.apply(this, args);
+    };
+    const model = await buildReadyzStatus(rootDir, { ...registeredAppRegistrationOptions(), now: () => now });
+    assert.equal(readers.size, 1);
+    assert.deepEqual(closed, [...readers]);
+    assert.equal(closed[0].open, false);
+    assert.equal(model.overallReady, true);
+    assert.deepEqual(model.failingSignals, []);
+    assert.deepEqual(model.reviewerFailures24h, { status: 'available', counts: { 'cli-resolution-transient': 2, 'oauth-broken': 1 } });
+    assert.match(renderReadyzStatus(model), /Reviewer failures \(24h\): cli-resolution-transient=2 oauth-broken=1/);
+  } finally {
+    Database.prototype.prepare = originalPrepare;
+    Database.prototype.close = originalClose;
+    restoreFetch();
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
+test('readyz still counts failures when attribution querying fails and closes the connection', async () => {
+  const rootDir = makeRoot();
+  const restoreFetch = withFetch(healthyEndpointPayload());
+  const originalPrepare = Database.prototype.prepare;
+  let reader;
+  try {
+    const now = new Date();
+    createPassDb(rootDir, { endedAt: now.toISOString() });
+    Database.prototype.prepare = function failAttribution(sql, ...args) {
+      reader = this;
+      if (String(sql).includes('json_valid(metadata_json)')) {
+        throw new Error('synthetic attribution query failure');
+      }
+      return originalPrepare.call(this, sql, ...args);
+    };
+    const model = await buildReadyzStatus(rootDir, { ...registeredAppRegistrationOptions(), now: () => now });
+    assert.equal(model.signals.find((signal) => signal.id === 'attribution').detail,
+      'db error: synthetic attribution query failure');
+    assert.deepEqual(model.reviewerFailures24h, {
+      status: 'available', counts: { 'cli-resolution-transient': 0, 'oauth-broken': 0 },
+    });
+    assert.equal(reader.open, false);
+  } finally {
+    Database.prototype.prepare = originalPrepare;
+    restoreFetch();
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
+test('readyz reports missing or corrupt history as unavailable and supports legacy attribution', async () => {
+  const rootDir = makeRoot();
+  const restoreFetch = withFetch(healthyEndpointPayload());
+  try {
+    for (const state of ['missing', 'corrupt', 'legacy']) {
+      if (state === 'corrupt') writeFileSync(join(rootDir, 'data', 'reviews.db'), 'synthetic invalid database');
+      if (state === 'legacy') {
+        rmSync(join(rootDir, 'data', 'reviews.db'));
+        createPassDb(rootDir);
+      }
+      const model = await buildReadyzStatus(rootDir, registeredAppRegistrationOptions());
+      const attribution = model.signals.find((signal) => signal.id === 'attribution');
+      assert.deepEqual(model.reviewerFailures24h, { status: 'unavailable', counts: null });
+      assert.equal(attribution.ok, state === 'legacy');
+      if (state === 'missing') assert.equal(attribution.detail, 'reviews.db missing');
+      if (state === 'corrupt') assert.match(attribution.detail, /^db error:/);
+    }
+  } finally {
+    restoreFetch();
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});

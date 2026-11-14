@@ -154,7 +154,7 @@ for (const { name, outcome, reason = '', failed = false } of [
   })),
   { name: 'pre-review error', outcome: { kind: 'retry', error: 'live PR read failed' } },
   { name: 'empty attempts', outcome: { kind: 'retry', error: 'reviewer execution failed', modelAttempts: [] } },
-  ...['quota-exhausted', 'agy-identity-unavailable', 'reviewer-execution-failed'].map((failureClass) => ({
+  ...['quota-exhausted', 'cli-resolution-transient', 'agy-identity-unavailable', 'reviewer-execution-failed'].map((failureClass) => ({
     name: `Gemini ${failureClass} before a Codex failure`,
     outcome: { kind: 'retry', error: 'codex: reviewer execution failed', modelAttempts: [
       { model: 'gemini', failureClass }, { model: 'codex', failureClass: 'reviewer-execution-failed' },
@@ -441,4 +441,18 @@ test('the drain uses an absolute known reset even when it is under a minute away
   drain.tick();
   await drain.drain();
   assert.equal(findArgusJob(rootDir, JOB).job.drain.notBefore, resetAt);
+}));
+
+test('Argus executable-resolution failure leaves the leased identity ready', () => withPool(async ({ rootDir, pool }) => {
+  const deps = productionDeps({ rootDir, pool, runner: async () => {
+    throw Object.assign(new Error('review CLI resolution unavailable for agy'), {
+      name: 'ReviewCliResolutionError', binaryResolution: { status: 'unknown' },
+    });
+  } });
+  await assert.rejects(deps.runReviewerModel({ model: 'gemini', prompt: 'synthetic', cwd: rootDir, diff: '' }),
+    { name: 'ReviewCliResolutionError' });
+  const state = pool.snapshot().find(entry => entry.user === 'reviewer-b');
+  assert.equal(state.leased, false);
+  assert.equal(state.ready, true);
+  assert.equal(state.needsProbe, false);
 }));

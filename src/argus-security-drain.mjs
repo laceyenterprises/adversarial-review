@@ -206,7 +206,7 @@ export async function runArgusReviewChild({
     // A job-level error can belong to another model or precede all model calls.
     // Only a recorded Gemini failure can penalize the held Gemini identity.
     reason = geminiFailure?.failureClass || '';
-    failed = Boolean(reason && !['quota-exhausted', 'agy-identity-unavailable'].includes(reason));
+    failed = Boolean(reason && !['quota-exhausted', 'cli-resolution-transient', 'agy-identity-unavailable'].includes(reason));
     return outcome;
   } finally {
     try {

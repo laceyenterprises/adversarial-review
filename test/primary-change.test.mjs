@@ -1,3 +1,4 @@
+import { FakeClock } from './helpers/load-time-kit.mjs';
 import './helpers/load-aware-timeout-fixture.mjs';
 import { mockCloserLoad } from './helpers/closer-load-fixture.mjs';
 import test from 'node:test';
@@ -1316,15 +1317,20 @@ test('operator diagnostics reject capped snapshots instead of attributing a disa
 test('operator diagnostics enforce a wall-clock budget and pass its signal to the reader', async t => {
   const { args } = await storedRefusal(t);
   let signal, reads = 0;
-  const start = Date.now();
-  const evidence = await fetchPrimaryChangeContext(args, { diagnosticTimeoutMs: 20,
+  const clock = new FakeClock(t);
+  let readStarted;
+  const ready = new Promise(resolve => { readStarted = resolve; });
+  const pending = fetchPrimaryChangeContext(args, { diagnosticTimeoutMs: 20,
     createDiagnosticReaderImpl: options => {
       signal = options.signal;
-      return () => { reads++; return new Promise(() => {}); };
+      return () => { reads++; readStarted(); return new Promise(() => {}); };
     } });
+  await ready;
+  await clock.advance(20);
+  const evidence = await pending;
   assert.equal(signal.aborted, true);
   assert.equal(reads, 1, 'no reads after deadline');
-  assert.ok(Date.now() - start < 2000);
+  assert.equal(clock.monotonic(), 20);
   assert.match(evidence.revertedRegionDiagnostics[0].error, /time budget exhausted/);
   const refusal = checkPrimaryChange(evidence, head);
   assert.equal(refusal.reason, 'primary-change-reverted');

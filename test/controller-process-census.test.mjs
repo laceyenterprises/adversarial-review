@@ -1,3 +1,4 @@
+import { FakeClock } from './helpers/load-time-kit.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync, spawn, spawnSync } from 'node:child_process';
@@ -192,7 +193,8 @@ test('round census keeps one helper and re-reads the kernel on every request', a
   assert.deepEqual(spawned[0].kills, ['SIGKILL']);
 });
 
-test('round census fails closed on every unreadable answer and replaces the helper', async () => {
+test('round census fails closed on every unreadable answer and replaces the helper', async t => {
+  const clock = new FakeClock(t, { wall: Date.now() });
   const cases = [
     ['refusal', (helper) => helper.stdout.write('{"error":"EPERM"}\n'), 'EPERM', 'EPERM'],
     ['not json', (helper) => helper.stdout.write('not json\n'), 'EMALFORMED', 'EMALFORMED'],
@@ -212,7 +214,10 @@ test('round census fails closed on every unreadable answer and replaces the help
       else helper.stdout.write('{"ok":[{"pid":42,"birth":"123.000001"}]}\n');
     });
     const census = createControllerCensus({ spawnImpl, timeoutMs: 50 });
-    await assert.rejects(census.group(42), error => error.code === code && unavailable(detail).test(error.message), label);
+    const rejected = assert.rejects(census.group(42), error => error.code === code && unavailable(detail).test(error.message), label);
+    await clock.flush();
+    if (label === 'silence') await clock.advance(1050);
+    await rejected;
     // The failed helper is retired; the next tick starts a fresh one.
     if (label !== 'helper exit') assert.deepEqual(spawned[0].kills, ['SIGKILL'], label);
     assert.deepEqual(await census.group(42), [{ pid: 42, birth: '123.000001' }], label);
@@ -221,7 +226,8 @@ test('round census fails closed on every unreadable answer and replaces the help
   }
 });
 
-test('round census retires a helper that exits or errors while idle between ticks', async () => {
+test('round census retires a helper that exits or errors while idle between ticks', async t => {
+  const clock = new FakeClock(t, { wall: Date.now() });
   for (const [label, die] of [
     ['idle exit', helper => { helper.exitCode = 1; helper.emit('exit', 1, null); }],
     ['idle error', helper => helper.emit('error', Object.assign(new Error('fixture EPIPE'), { code: 'EPIPE' }))],
@@ -231,9 +237,8 @@ test('round census retires a helper that exits or errors while idle between tick
     const census = createControllerCensus({ spawnImpl, timeoutMs: 5000 });
     assert.deepEqual(await census.group(42), [], label);
     die(spawned[0]);
-    const started = Date.now();
     assert.deepEqual(await census.group(42), [], label);
-    assert.ok(Date.now() - started < 1000, label);
+    assert.equal(clock.monotonic(), 0, 'replacement helper answers before any deadline');
     assert.equal(spawned.length, 2, label);
     assert.deepEqual(spawned[1].requests, ['group 42'], label);
     census.close();

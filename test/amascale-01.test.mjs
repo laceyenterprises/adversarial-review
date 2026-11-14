@@ -1,3 +1,4 @@
+import { FakeClock } from './helpers/load-time-kit.mjs';
 import './helpers/load-aware-timeout-fixture.mjs';
 import { alertPresentationForDoc } from '../src/alert-delivery.mjs';
 import test from 'node:test';
@@ -5,7 +6,9 @@ import assert from 'node:assert/strict';
 import { closeSync, mkdtempSync, openSync, readFileSync, statSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import fsExt from 'fs-ext';
 import { readFile } from 'node:fs/promises';
-import { setTimeout as delay } from 'node:timers/promises';
+import timersPromises from 'node:timers/promises';
+import { syncBuiltinESMExports } from 'node:module';
+const nativeDelay = timersPromises.setTimeout;
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { effectiveCloserCap, launchHoldsCloserCapacity } from '../src/ama/closure-capacity.mjs';
@@ -145,6 +148,16 @@ test('closure-lag pages present the SEV1 and name the blocking PR and reason', (
 });
 
 test('contended lag lock leaves timers and IO responsive and times out safely', { timeout: 5000 }, async (t) => {
+  const clock = new FakeClock(t, { wall: Date.now() });
+  let sleeping;
+  const ready = new Promise(resolve => { sleeping = resolve; });
+  const delay = timersPromises.setTimeout;
+  const sleepMock = t.mock.method(timersPromises, 'setTimeout', (...args) => {
+    sleeping();
+    return delay(...args);
+  });
+  syncBuiltinESMExports();
+  t.after(() => { sleepMock.mock.restore(); t.mock.timers.reset(); timersPromises.setTimeout = nativeDelay; syncBuiltinESMExports(); });
   const previous = process.env.AMA_CLOSURE_LAG_LOCK_WAIT_MS;
   let observeWithShortWait;
   try {
@@ -165,9 +178,11 @@ test('contended lag lock leaves timers and IO responsive and times out safely', 
     let settled = false;
     observation.then(() => { settled = true; }, () => { settled = true; });
     const rejection = assert.rejects(observation, (error) => ['EAGAIN', 'EWOULDBLOCK'].includes(error.code));
-    await delay(50);
+    await ready;
+    await clock.advance(50);
     assert.equal(settled, false);
     assert.equal(await readFile(join(dir, 'state.json'), 'utf8'), before);
+    await clock.advance(1000);
     await rejection;
   } finally { fsExt.flockSync(fd, 'un'); closeSync(fd); }
   assert.equal(await observeCloserBacklog({ rootDir, repo: 'test/repo', prNumber: 2 }), 2);
@@ -186,6 +201,16 @@ test('parse failures quarantine bad state and recover the census', async (t) => 
 });
 
 test('lag lock tolerates contention beyond the former one-second budget', { timeout: 15000 }, async (t) => {
+  const clock = new FakeClock(t, { wall: Date.now() });
+  let sleeping;
+  const ready = new Promise(resolve => { sleeping = resolve; });
+  const delay = timersPromises.setTimeout;
+  const sleepMock = t.mock.method(timersPromises, 'setTimeout', (...args) => {
+    sleeping();
+    return delay(...args);
+  });
+  syncBuiltinESMExports();
+  t.after(() => { sleepMock.mock.restore(); t.mock.timers.reset(); timersPromises.setTimeout = nativeDelay; syncBuiltinESMExports(); });
   const rootDir = root(t);
   await observeCloserBacklog({ rootDir, repo: 'test/repo', prNumber: 1 });
   const fd = openSync(join(rootDir, 'data', 'ama-closure-lag', 'state.lock'), 'a');
@@ -195,8 +220,10 @@ test('lag lock tolerates contention beyond the former one-second budget', { time
     const result = assert.doesNotReject(observation);
     // Observe early assertion failures while the lock remains held; await below still fails.
     result.catch(() => {});
-    await delay(1100);
+    await ready;
+    clock.wall += 1100;
     fsExt.flockSync(fd, 'un');
+    await clock.advance(25, { wallMs: 0 });
     await result;
     assert.equal(await observation, 2);
   } finally { closeSync(fd); }

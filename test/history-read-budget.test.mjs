@@ -244,10 +244,13 @@ test('native budget composites do not accumulate parent listeners across repeate
   }
 });
 
-test('budget composites clean up after timeout and propagate parent cancellation', { timeout: 2000 }, async () => {
+test('budget composites clean up after timeout and propagate parent cancellation', { timeout: 2000 }, async t => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
   const controller = new AbortController();
-  await assert.rejects(withHistoryReadBudget(never, { signal: controller.signal, timeoutMs: 10 }),
+  const rejected = assert.rejects(withHistoryReadBudget(never, { signal: controller.signal, timeoutMs: 10 }),
     { code: 'HISTORY_READ_TIMEOUT' });
+  t.mock.timers.tick(10);
+  await rejected;
   assert.equal(controller.signal.aborted, false);
   assert.equal(getEventListeners(controller.signal, 'abort').length, 0);
   const reason = new Error('caller cancelled');

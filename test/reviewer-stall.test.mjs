@@ -1,3 +1,4 @@
+import { FakeClock } from './helpers/load-time-kit.mjs';
 import './helpers/load-aware-timeout-fixture.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
@@ -64,16 +65,22 @@ test('REVIEWSTALL-01: both load-aware budgets scale once and respect the call ce
 for (const fileBacked of [false, true]) {
   for (const output of [false, true]) {
     test(`REVIEWSTALL-01: ${fileBacked ? 'file' : 'pipe'} reviewer ${output ? 'goes silent' : 'never emits'}`, async t => {
+      const clock = new FakeClock(t);
+      let started, progressed;
+      const ready = new Promise(resolve => { started = resolve; });
+      const progress = new Promise(resolve => { progressed = resolve; });
       const root = mkdtempSync(join(tmpdir(), 'stall-fixture-'));
       t.after(() => rmSync(root, { recursive: true, force: true }));
       const receipts = [];
       const firstOutputTimeout = 500;
       const progressTimeout = 700;
       const start = Date.now();
-      await assert.rejects(spawnCapturedProcessGroup(process.execPath, ['-e',
-        `${output ? 'process.stdout.write("progress\\n");' : ''}setInterval(() => {}, 1000);`,
+      const rejected = assert.rejects(spawnCapturedProcessGroup(process.execPath, ['-e',
+        `${output ? 'process.stdout.write("progress\\n");' : ''}process.send({ready:true}); setInterval(() => {}, 1000);`,
       ], {
         timeout: 5000, firstOutputTimeout, progressTimeout, killGraceMs: 30,
+        onMessage: () => { started(); },
+        onStdoutData: () => { progressed(); },
         stallReviewer: { model: 'fixture-model', runtime: 'fixture-runtime', identity: 'fixture-seat' },
         onStall: receipt => receipts.push(receipt),
         ...(fileBacked ? { stdoutPath: join(root, 'stdout'), stderrPath: join(root, 'stderr') } : {}),
@@ -82,7 +89,13 @@ for (const fileBacked of [false, true]) {
         assert.equal(classifyReviewerFailure(err.message), 'reviewer-stalled');
         return true;
       });
-      assert.ok(Date.now() - start < 4000, 'settles before the outer ceiling');
+      await ready;
+      if (output && !fileBacked) await progress;
+      if (output && fileBacked) await clock.advance(125); // Observe the completed file write.
+      await clock.advance(output ? progressTimeout : firstOutputTimeout);
+      await clock.advance(30);
+      await rejected;
+      assert.ok(clock.monotonic() < 5000, 'settles before the outer ceiling');
       assert.equal(receipts.length, 1);
       const receipt = receipts[0];
       assert.equal(receipt.reason, output ? 'no-progress' : 'first-output');
@@ -93,8 +106,8 @@ for (const fileBacked of [false, true]) {
       assert.equal(receipt.firstOutputAt === null, !output);
       assert.ok(Date.parse(receipt.startedAt) >= start);
       assert.ok(Date.parse(receipt.lastProgressAt) >= Date.parse(receipt.startedAt));
-      assert.ok(Date.parse(receipt.stalledAt) - Date.parse(output ? receipt.lastProgressAt : receipt.startedAt)
-        >= (output ? progressTimeout : firstOutputTimeout) - 5);
+      assert.equal(Date.parse(receipt.stalledAt) - Date.parse(output ? receipt.lastProgressAt : receipt.startedAt),
+        output ? progressTimeout : firstOutputTimeout);
     });
   }
 }

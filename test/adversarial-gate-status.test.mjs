@@ -1,3 +1,4 @@
+import { FakeClock } from './helpers/load-time-kit.mjs';
 import './helpers/load-aware-timeout-fixture.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
@@ -2386,11 +2387,14 @@ test('RVCOEX-01: resolveMergeAgentCoexistenceForWatcher propagates live review r
   assert.match(warnings.join('\n'), /operation=live-review-reconcile timeout_ms=10/);
 });
 
-test('RVCOEX-01: resolveMergeAgentCoexistenceForWatcher does not abort hammer dispatch on operation timeout', async () => {
+test('RVCOEX-01: resolveMergeAgentCoexistenceForWatcher does not abort hammer dispatch on operation timeout', async t => {
+  const clock = new FakeClock(t, { wall: Date.now() });
   const warnings = [];
   const parentController = new AbortController();
   let sawAbort = false;
-  const decision = await resolveMergeAgentCoexistenceForWatcher({
+  let dispatchStarted;
+  const ready = new Promise(resolve => { dispatchStarted = resolve; });
+  const pending = resolveMergeAgentCoexistenceForWatcher({
     reviewStateRow: makeReviewRow({
       last_verdict: 'Comment only',
       risk_class: 'low',
@@ -2456,6 +2460,7 @@ test('RVCOEX-01: resolveMergeAgentCoexistenceForWatcher does not abort hammer di
         completedRemediationRevisionRefs: ['abc123'],
       }),
       maybeDispatchAmaCloserImpl: ({ signal }) => new Promise((resolve, reject) => {
+        dispatchStarted();
         signal.addEventListener('abort', () => {
           sawAbort = true;
           reject(signal.reason);
@@ -2465,6 +2470,9 @@ test('RVCOEX-01: resolveMergeAgentCoexistenceForWatcher does not abort hammer di
     }),
   });
 
+  await ready;
+  await clock.advance(25);
+  const decision = await pending;
   assert.equal(sawAbort, false, 'HAM dispatch must outlive the short coexistence operation timeout');
   assert.equal(decision.outcome, 'ama-dispatched');
   assert.equal(decision.amaClosureResult.dispatched, true);
@@ -2664,8 +2672,8 @@ test('HOM-04 final_to_hammer=false leaves same-poll final Request-changes path u
   assert.equal(called, false);
 });
 
-test('HOM-04 exhausted final rereview calls posted-review AMA route inline within 5s', async () => {
-  const started = Date.now();
+test('HOM-04 exhausted final rereview calls posted-review AMA route inline before its deadline', async t => {
+  const clock = new FakeClock(t, { wall: Date.now() });
   const calls = [];
   const telemetry = [];
   const result = await maybeInlineFinalHammerAfterReview({
@@ -2705,7 +2713,6 @@ test('HOM-04 exhausted final rereview calls posted-review AMA route inline withi
     },
     logger: { log() {}, warn() {}, error() {} },
   });
-  const elapsedMs = Date.now() - started;
 
   assert.equal(result.handled, true);
   assert.equal(calls.length, 1);
@@ -2715,7 +2722,7 @@ test('HOM-04 exhausted final rereview calls posted-review AMA route inline withi
   assert.equal(telemetry[0].event, HANDOFF_EVENTS.fired);
   assert.equal(telemetry[1].event, HANDOFF_EVENTS.latency);
   assert.equal(telemetry[0].at, telemetry[1].at);
-  assert.ok(elapsedMs < 5000, `inline dispatch took ${elapsedMs}ms`);
+  assert.equal(clock.monotonic(), 0, 'inline dispatch needs no timer advancement');
 });
 
 test('HOM-04 inline final hammer handoff failure is retryable on later posted-review polls', async () => {

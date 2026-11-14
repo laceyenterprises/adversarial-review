@@ -1,3 +1,4 @@
+import { FakeClock } from './helpers/load-time-kit.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
@@ -43,12 +44,12 @@ test('budget is load-aware but never exceeds the absolute cap; an override repla
   assert.throws(() => resolveOperatorGhReadBudgetMs({ overrideMs: 0 }), RangeError);
 });
 
-test('a gh child that never exits is killed at the budget with the typed reason', async () => {
+test('a gh child that never exits is killed at the budget with the typed reason', async t => {
+  const clock = new FakeClock(t);
   const stderr = capture();
   const seen = [];
   let childSignal;
-  const started = Date.now();
-  await assert.rejects(
+  const rejected = assert.rejects(
     runOperatorGhRead({
       args: ['pr', 'view', '7', '--repo', 'example/repo'],
       label: 'head lookup for example/repo#7',
@@ -70,14 +71,18 @@ test('a gh child that never exits is killed at the budget with the typed reason'
       return true;
     },
   );
-  assert.ok(Date.now() - started < 2_000);
+
+  await clock.flush();
+  await clock.advance(150);
+  await rejected;
   assert.equal(childSignal.aborted, true, 'the gh child is signalled');
   assert.deepEqual(seen, [{ totalTimeoutMs: 150, timeoutMs: 75 }]);
   assert.equal(stderr.text(), '[github-read] start head lookup for example/repo#7: `gh pr view` (budget 0.2s)\n');
 });
 
-test('a wait that never reaches gh (metering admission) is bounded too', async () => {
-  await assert.rejects(
+test('a wait that never reaches gh (metering admission) is bounded too', async t => {
+  const clock = new FakeClock(t);
+  const rejected = assert.rejects(
     runOperatorGhRead({
       args: ['pr', 'view'],
       label: 'head lookup',
@@ -88,6 +93,10 @@ test('a wait that never reaches gh (metering admission) is bounded too', async (
     (err) => err.reason === 'head-lookup-timeout' && err.phase === 'admission' && err.attempts === 0
       && /waiting for GitHub metering\/budget admission before spawning `gh pr view`/.test(err.message),
   );
+
+  await clock.flush();
+  await clock.advance(100);
+  await rejected;
 });
 
 test('a killed gh attempt retains the execution phase when it rejects', async () => {
@@ -112,8 +121,9 @@ test('a killed gh attempt retains the execution phase when it rejects', async ()
   );
 });
 
-test('a successful gh response followed by stalled metering retains the record phase', async () => {
-  await assert.rejects(
+test('a successful gh response followed by stalled metering retains the record phase', async t => {
+  const clock = new FakeClock(t);
+  const rejected = assert.rejects(
     runOperatorGhRead({
       args: ['pr', 'view'],
       label: 'head lookup',
@@ -133,6 +143,10 @@ test('a successful gh response followed by stalled metering retains the record p
       return true;
     },
   );
+
+  await clock.flush();
+  await clock.advance(100);
+  await rejected;
 });
 
 test('retries are reported on stderr and share the one budget', async () => {

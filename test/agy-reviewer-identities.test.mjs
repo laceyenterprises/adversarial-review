@@ -1726,7 +1726,8 @@ test('CCX-08: a helper capture settles when a descendant it cannot signal keeps 
   }
 });
 
-test('CCX-08: a helper capture settles after its timeout even when nothing it started can be killed', async () => {
+test('CCX-08: a helper capture settles after its timeout even when nothing it started can be killed', async t => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
   // A sudo the HQ owner cannot signal: no exit, no close, kill is a no-op.
   const spawnImpl = () => {
     const child = new EventEmitter();
@@ -1738,17 +1739,15 @@ test('CCX-08: a helper capture settles after its timeout even when nothing it st
     child.stdout.write('partial\n');
     return child;
   };
-  const started = Date.now();
-  // The capture's own timers are unref'd (a real child's handles keep the
-  // loop alive); the fake has none, so hold the loop open while it runs.
-  const keepAlive = setInterval(() => {}, 1_000);
-  let result;
-  try {
-    result = await runBoundedProcess('/usr/bin/sudo', [], { spawnImpl, timeoutMs: 50, killGraceMs: 50, drainMs: 50 });
-  } finally {
-    clearInterval(keepAlive);
-  }
-  assert.ok(Date.now() - started < 5_000);
+  const pending = runBoundedProcess('/usr/bin/sudo', [], { spawnImpl, timeoutMs: 50, killGraceMs: 50, drainMs: 50 });
+  let settled = false;
+  pending.then(() => { settled = true; });
+  t.mock.timers.tick(50);
+  t.mock.timers.tick(99);
+  await Promise.resolve();
+  assert.equal(settled, false, 'capture stays pending until kill grace and pipe drain expire');
+  t.mock.timers.tick(1);
+  const result = await pending;
   assert.equal(result.timedOut, true);
   assert.equal(result.pipeHeld, true);
   assert.equal(result.code, null);

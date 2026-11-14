@@ -1,3 +1,4 @@
+import { FakeClock } from './helpers/load-time-kit.mjs';
 import './helpers/load-aware-timeout-fixture.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
@@ -159,20 +160,23 @@ const neverResolvingMeter = () => new Promise(() => {});
 
 for (const resume of [false, true]) {
   const mode = resume ? 'release' : 'hold';
-  test(`a ${mode} whose meter wait never resolves exits non-zero within the bound and receipts applied=false`, { timeout: 10_000 }, async () => {
+  test(`a ${mode} whose meter wait never resolves exits non-zero within the bound and receipts applied=false`, { timeout: 10_000 }, async t => {
+    const clock = new FakeClock(t, { wall: Date.now() });
     const rootDir = mkdtempSync(path.join(tmpdir(), 'no-merge-hold-'));
     const spawned = [];
     const { lines, io } = cliHarness();
-    const started = Date.now();
-    const code = await runNoMergeHoldCli(['--repo', REPO, '--pr', String(PR), ...(resume ? ['--resume'] : []), 'synthetic hold'], {
+    const pending = runNoMergeHoldCli(['--repo', REPO, '--pr', String(PR), ...(resume ? ['--resume'] : []), 'synthetic hold'], {
       ...io,
       rootDir,
       timeoutMs: 150,
       meteredExecFileImpl: neverResolvingMeter,
       execFileImpl: async (cmd, args) => { spawned.push(args); return { stdout: '', stderr: '' }; },
     });
+    await clock.flush();
+    await clock.advance(150);
+    const code = await pending;
     assert.equal(code, 1);
-    assert.ok(Date.now() - started < 5_000, 'the bound, not the meter, ends the attempt');
+    assert.equal(clock.monotonic(), 150);
     assert.deepEqual(spawned, []);
     assert.deepEqual(lines.log, []);
     assert.equal(lines.error.length, 1, 'one clear failure line');
@@ -252,16 +256,20 @@ for (const resume of [false, true]) {
   });
 }
 
-test('a gh call that never exits is named in the failure line and its receipt', { timeout: 10_000 }, async () => {
+test('a gh call that never exits is named in the failure line and its receipt', { timeout: 10_000 }, async t => {
+  const clock = new FakeClock(t, { wall: Date.now() });
   const rootDir = mkdtempSync(path.join(tmpdir(), 'no-merge-hold-'));
   let signal;
   const { lines, io } = cliHarness();
-  const code = await runNoMergeHoldCli(['--repo', REPO, '--pr', String(PR), '--resume'], {
+  const pending = runNoMergeHoldCli(['--repo', REPO, '--pr', String(PR), '--resume'], {
     ...io,
     rootDir,
     timeoutMs: 150,
     execFileImpl: (cmd, args, options) => { signal = options.signal; return new Promise(() => {}); },
   });
+  await clock.flush();
+  await clock.advance(150);
+  const code = await pending;
   assert.equal(code, 1);
   assert.match(lines.error[0], /timed out after 150ms waiting for `gh pr edit` to exit/);
   assert.equal(signal.aborted, true, 'the hung gh child is signalled');
@@ -269,11 +277,12 @@ test('a gh call that never exits is named in the failure line and its receipt', 
   assert.match(lines.error[0], /applied=unknown/);
 });
 
-test('a meter that resolves after the deadline never spawns gh', { timeout: 10_000 }, async () => {
+test('a meter that resolves after the deadline never spawns gh', { timeout: 10_000 }, async t => {
+  const clock = new FakeClock(t, { wall: Date.now() });
   const rootDir = mkdtempSync(path.join(tmpdir(), 'no-merge-hold-'));
   const spawned = [];
   let late;
-  await assert.rejects(applyNoMergeHold({
+  const rejection = assert.rejects(applyNoMergeHold({
     rootDir,
     repo: REPO,
     prNumber: PR,
@@ -286,6 +295,10 @@ test('a meter that resolves after the deadline never spawns gh', { timeout: 10_0
     },
     execFileImpl: async (cmd, args) => { spawned.push(args); return { stdout: '', stderr: '' }; },
   }), { code: 'ETIMEDOUT', phase: 'admission' });
+  await clock.flush();
+  await clock.advance(50);
+  await rejection;
+  await clock.advance(150);
   const refused = await late;
   assert.equal(refused?.noMergeHoldTimeout, true);
   assert.deepEqual(spawned, []);
@@ -332,16 +345,20 @@ test('a receipt write failure after the label landed reports applied=true, never
   assert.match(lines.error[0], /label change applied, but its receipt could not be written applied=true receipt-write-failed=/);
 });
 
-test('a failed attempt whose receipt cannot be written still says applied=false', async () => {
+test('a failed attempt whose receipt cannot be written still says applied=false', async t => {
+  const clock = new FakeClock(t, { wall: Date.now() });
   const rootDir = mkdtempSync(path.join(tmpdir(), 'no-merge-hold-'));
   writeFileSync(path.join(rootDir, 'data'), 'not a directory');
   const { lines, io } = cliHarness();
-  const code = await runNoMergeHoldCli(['--repo', REPO, '--pr', String(PR), '--resume'], {
+  const pending = runNoMergeHoldCli(['--repo', REPO, '--pr', String(PR), '--resume'], {
     ...io,
     rootDir,
     timeoutMs: 50,
     meteredExecFileImpl: neverResolvingMeter,
   });
+  await clock.flush();
+  await clock.advance(50);
+  const code = await pending;
   assert.equal(code, 1);
   assert.match(lines.error[0], /waiting for GitHub metering\/budget admission before spawning `gh pr edit` applied=false receipt-write-failed=/);
 });
@@ -367,13 +384,14 @@ test('synchronous entitled refresh is bounded by the attempt deadline and never 
   assert.equal(onlyReceipt(rootDir).applied, false);
 });
 
-test('synchronous admission that overruns the deadline cannot spawn before the timer runs', async () => {
+test('synchronous admission that overruns the deadline cannot spawn before the timer runs', async t => {
+  const clock = new FakeClock(t, { wall: Date.now() });
   const rootDir = mkdtempSync(path.join(tmpdir(), 'no-merge-hold-'));
   let spawned = false;
   await assert.rejects(applyNoMergeHold({
     rootDir, repo: REPO, prNumber: PR, resume: true, timeoutMs: 25,
     meteredExecFileImpl: (exec, cmd, args, options) => {
-      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 75);
+      clock.wall += 75; // Synchronous admission overruns before timers can run.
       return exec(cmd, args, options);
     },
     execFileImpl: async () => { spawned = true; return { stdout: '', stderr: '' }; },
@@ -383,11 +401,12 @@ test('synchronous admission that overruns the deadline cannot spawn before the t
 });
 
 for (const resume of [false, true]) for (const stalled of [false, true]) {
-  test(`successful ${resume ? 'release' : 'hold'} retains applied=true when response recording ${stalled ? 'stalls' : 'fails'}`, async () => {
+  test(`successful ${resume ? 'release' : 'hold'} retains applied=true when response recording ${stalled ? 'stalls' : 'fails'}`, async t => {
+    const clock = new FakeClock(t, { wall: Date.now() });
     const rootDir = mkdtempSync(path.join(tmpdir(), 'no-merge-hold-'));
     const { lines, io } = cliHarness();
     let edits = 0;
-    const code = await runNoMergeHoldCli(['--repo', REPO, '--pr', String(PR), ...(resume ? ['--resume'] : [])], {
+    const pending = runNoMergeHoldCli(['--repo', REPO, '--pr', String(PR), ...(resume ? ['--resume'] : [])], {
       ...io, rootDir, timeoutMs: 100,
       meteredExecFileImpl: async (exec, cmd, args, options) => {
         const result = await exec(cmd, args, options);
@@ -400,6 +419,9 @@ for (const resume of [false, true]) for (const stalled of [false, true]) {
         return { stdout: '', stderr: '' };
       },
     });
+    await clock.flush();
+    await clock.advance(100);
+    const code = await pending;
     assert.equal(code, 1);
     assert.equal(edits, 1);
     assert.match(lines.error[0], /applied=true receipt=/);
@@ -410,10 +432,11 @@ for (const resume of [false, true]) for (const stalled of [false, true]) {
   });
 }
 
-test('successful label creation with stalled recording does not imply the PR hold was applied', async () => {
+test('successful label creation with stalled recording does not imply the PR hold was applied', async t => {
+  const clock = new FakeClock(t, { wall: Date.now() });
   const rootDir = mkdtempSync(path.join(tmpdir(), 'no-merge-hold-'));
   const calls = [];
-  await assert.rejects(applyNoMergeHold({
+  const rejection = assert.rejects(applyNoMergeHold({
     rootDir, repo: REPO, prNumber: PR, timeoutMs: 100,
     meteredExecFileImpl: async (exec, cmd, args, options) => {
       await exec(cmd, args, options);
@@ -421,6 +444,9 @@ test('successful label creation with stalled recording does not imply the PR hol
     },
     execFileImpl: async (_cmd, args) => { calls.push(args[0]); return { stdout: '', stderr: '' }; },
   }), { code: 'ETIMEDOUT', phase: 'record' });
+  await clock.flush();
+  await clock.advance(100);
+  await rejection;
   assert.deepEqual(calls, ['label']);
   assert.equal(onlyReceipt(rootDir).applied, false);
 });

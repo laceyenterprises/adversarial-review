@@ -50,6 +50,7 @@ test('idle-host preload synchronizes the named OS loadavg binding', () => {
 
 test('slack lock acquisition retains its initial budget when host load drops', async t => {
   busyHost(t);
+  t.mock.timers.enable({ apis: ['setTimeout'] });
   const rootDir = mkdtempSync(join(os.tmpdir(), 'slack-load-'));
   t.after(() => rmSync(rootDir, { recursive: true, force: true }));
   const lockPath = join(rootDir, '.slack-thread-transcripts', 'subject.md', 'slack-thread.jsonl.lock');
@@ -72,8 +73,8 @@ test('slack lock acquisition retains its initial budget when host load drops', a
   assert.equal(attempts, 1);
   clock = 6_000; // Past nominal 5s, but within the granted 30s.
   t.mock.method(os, 'loadavg', () => { attempts++; return [0, 0, 0]; });
-  await new Promise(resolve => setTimeout(resolve, 60));
   unlinkSync(lockPath);
+  t.mock.timers.tick(60);
   await pending;
   assert.equal(failure, undefined);
   assert.equal(attempts, 1, 'a retry must not resize its deadline');

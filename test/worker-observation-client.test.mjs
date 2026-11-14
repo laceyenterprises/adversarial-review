@@ -1,3 +1,4 @@
+import { FakeClock } from './helpers/load-time-kit.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {readLatestWorkerRunStatusFromLedger, readLatestWorkerRunStatusFromLedgerAsync,
@@ -247,6 +248,7 @@ test('changing page and concurrent caller budgets reuse registration and keep in
 });
 
 test('a warm session physically aborts a shorter HTTP request and evicts failed session evidence', async t => {
+  const clock = new FakeClock(t);
   let registrations = 0, hang = false, physicalAbort;
   const aborted = new Promise(resolve => { physicalAbort = resolve; });
   t.mock.method(globalThis,'fetch',async (url,options) => {
@@ -266,15 +268,20 @@ test('a warm session physically aborts a shorter HTTP request and evicts failed 
     connectOptions:{endpoint_url:'https://synthetic.invalid/physical-abort',bootstrap_token:'synthetic'}};
   assert.equal((await readWorkerObservation(selector,{...args,timeoutMs:8000})).ok,true);
   hang = true;
-  const start = performance.now();
-  assert.equal((await readWorkerObservation(selector,{...args,timeoutMs:80})).ok,false);
-  // Wait only for the SDK request's abort, with a hard test deadline. The
-  // cached 8s timeout would fail this assertion despite caller settlement.
-  let timer;
-  try { await Promise.race([aborted,new Promise((_,reject) => {
-    timer = setTimeout(() => reject(new Error('physical HTTP did not abort')),500);
-  })]); } finally { clearTimeout(timer); }
-  assert.ok(performance.now()-start < 1000);
+  const pending = readWorkerObservation(selector,{...args,timeoutMs:80});
+  await clock.flush();
+  await clock.advance(79);
+  let settled = false;
+  pending.then(() => { settled = true; });
+  await clock.flush();
+  assert.equal(settled, false);
+  await clock.advance(1);
+  assert.equal((await pending).ok,false);
+  // The SDK transport must abort with the same caller budget.
+  let physicallyAborted = false;
+  aborted.then(() => { physicallyAborted = true; });
+  await clock.flush();
+  assert.equal(physicallyAborted, true);
   assert.equal(registrations,1);
   hang = false;
   assert.equal((await readWorkerObservation(selector,args)).ok,true);

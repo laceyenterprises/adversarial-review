@@ -14,7 +14,6 @@ import { blockingFindingIdentity } from '../src/ama/hammer-adjudication.mjs';
 import * as records from '../src/review-finding-records.mjs';
 import { backfillFindingGrades } from '../src/review-finding-grades.mjs';
 import { createBackfillWritePacer, parseWriteDutyCycle } from '../src/backfill-write-pacer.mjs';
-import { sleepSync } from '../src/sqlite-busy-retry.mjs';
 
 const { backfillReviewFindings, persistReviewFindings } = records;
 const repo = 'sample/service', head = 'a'.repeat(40);
@@ -122,10 +121,13 @@ test('capability flag tells the companion backfill command that pacing is availa
 test('a live writer with a short busy timeout keeps committing while the backfill projects new and captured passes', t => {
   const { db, path, ids } = corpus(t, { passes: 120, findings: 40 });
   const writer = liveWriter(t, path);
-  // The production pacer, with its yield extended by one live-writer turn. The
-  // turn runs while the backfill is paused in its yield; the pacer still sleeps
-  // its full computed yield afterwards, so its duty-cycle accounting is real.
-  const pacer = createBackfillWritePacer({ sleep: ms => { writer.turn(); sleepSync(ms); } });
+  // Each acknowledged writer turn occurs outside the backfill transaction.
+  // Account for a synthetic 1ms write and its requested yield without sleeping.
+  let now = 0;
+  const pacer = createBackfillWritePacer({
+    now: () => now++,
+    sleep: ms => { writer.turn(); now += ms; },
+  });
   const fresh = backfillReviewFindings(db, { limit: 5000, pacer });
   const replay = backfillReviewFindings(db, { limit: 5000 });
   const { ok, busy, turns } = writer.stop();

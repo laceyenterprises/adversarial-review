@@ -1,3 +1,4 @@
+import { performance } from 'node:perf_hooks';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import fsExt from 'fs-ext';
@@ -243,35 +244,43 @@ test('legacy shell wrapper preserves command, arguments, output and exit code wh
 });
 
 test('HAMLANEWAIT-01: legacy merge wakes on another operation release within its original deadline', { timeout: 5000 }, async t => {
+  const startedAt = Date.now();
+  t.mock.timers.enable({ apis: ['Date', 'setTimeout'], now: startedAt });
+  t.mock.method(performance, 'now', () => Date.now() - startedAt);
   const f = fixture(t);
   const adapter = resolveQueueOwnerAdapter(f.store);
   let release = adapter.tryLock(lane);
   t.after(() => release?.());
   let called = false;
-  const started = performance.now();
   const pending = runLegacyLaneWrite({ rootDir: f.rootDir, ...lane, command: 'synthetic-merge', argv: [],
     deadline: new Date(Date.now() + 3000).toISOString(), readConfig: () => ({}),
     exec: async (_c, _a, { timeout }) => { called = true; assert.ok(timeout > 0 && timeout < 3000); return { stdout: 'merged' }; } });
   // Watch registration is synchronous; yield a native event-loop turn before release.
   await new Promise(resolve => setImmediate(resolve));
   assert.equal(called, false);
+  t.mock.timers.tick(1);
   release();
   release = null;
   assert.equal((await pending).stdout, 'merged');
   assert.equal(called, true);
-  assert.ok(performance.now() - started < 1500, 'release wake must precede the polling fallback');
+  assert.equal(Date.now() - startedAt, 1, 'release wake settles without advancing to the deadline');
 });
 
 test('HAMLANEWAIT-01: deadline exhaustion is lane-busy with no merge or durable writer intent', { timeout: 5000 }, async t => {
+  const startedAt = Date.now();
+  t.mock.timers.enable({ apis: ['Date', 'setTimeout'], now: startedAt });
+  t.mock.method(performance, 'now', () => Date.now() - startedAt);
   const f = fixture(t), adapter = resolveQueueOwnerAdapter(f.store);
   const release = adapter.tryLock(lane);
   try {
-    const result = await runLegacyLaneWrite({ rootDir: f.rootDir, ...lane,
+    const pending = runLegacyLaneWrite({ rootDir: f.rootDir, ...lane,
       deadline: new Date(Date.now() + 80).toISOString(), readConfig: () => ({}),
       exec: () => assert.fail('busy lane cannot issue a merge') });
+    t.mock.timers.tick(80);
+    const result = await pending;
     assert.equal(result.reason, 'owner-operation-in-flight');
     assert.equal(result.outcome, 'lane-busy');
-    assert.ok(result.waitedMs >= 60 && result.waitedMs < 2000);
+    assert.equal(result.waitedMs, 80);
     assert.deepEqual(f.routing.read(lane).legacyWriters, []);
   } finally { release(); }
   assert.equal((await runLegacyLaneWrite({ rootDir: f.rootDir, ...lane, readConfig: () => ({}),
@@ -333,7 +342,17 @@ test('HAMLANEWAIT-01: waking rechecks lane transfer and never invokes the old le
   assert.equal(f.routing.read(lane).route.executor, 'queue-v2');
 });
 
-test('HAMLANEWAIT-01: native watcher wake rechecks the route after a pending wait', { timeout: 15000 }, async t => {
+test('HAMLANEWAIT-01: watcher wake rechecks the route after a pending wait', { timeout: 15000 }, async t => {
+  const startedAt = Date.now();
+  t.mock.timers.enable({ apis: ['Date', 'setTimeout'], now: startedAt });
+  t.mock.method(performance, 'now', () => Date.now() - startedAt);
+  let wake;
+  const watchMock = t.mock.method(fs, 'watch', (_path, listener) => {
+    wake = listener;
+    return { on() {}, close() {} };
+  });
+  syncBuiltinESMExports();
+  t.after(() => { watchMock.mock.restore(); t.mock.timers.reset(); syncBuiltinESMExports(); });
   const f = fixture(t), adapter = resolveQueueOwnerAdapter(f.store);
   assert.equal((await transfer(f, queue)).ok, true);
   let release = adapter.tryLock(lane);
@@ -354,23 +373,22 @@ test('HAMLANEWAIT-01: native watcher wake rechecks the route after a pending wai
           release();
           release = null;
           releasedAfterRecheck = true;
+          wake();
         });
       }
       throw error;
     }
   });
-  const started = performance.now();
   const result = await runLegacyLaneWrite({ rootDir: f.rootDir, ...lane, readConfig: () => ({}),
     deadline: new Date(Date.now() + 10000).toISOString(),
     exec: () => assert.fail('watcher wake must fence the stale legacy route') });
-  const elapsedMs = performance.now() - started;
   assert.equal(result.reason, 'lane-transfer-required',
-    `native wake result: ${JSON.stringify({ reason: result.reason, outcome: result.outcome,
+    `watcher wake result: ${JSON.stringify({ reason: result.reason, outcome: result.outcome,
       waitedMs: result.waitedMs, refusals, releasedAfterRecheck, wakeAcquisitions })}`);
   assert.ok(refusals >= 2, 'the subscription recheck must also encounter contention');
   assert.equal(releasedAfterRecheck, true);
-  assert.equal(wakeAcquisitions, 1, 'must acquire after the synchronous recheck via the native wake');
-  assert.ok(elapsedMs < 8000, `native wake must finish well before the 10s deadline; elapsedMs=${elapsedMs}`);
+  assert.equal(wakeAcquisitions, 1, 'must acquire after the synchronous recheck via the watcher wake');
+  assert.equal(Date.now() - startedAt, 0, 'wake rechecks the route before the deadline');
   assert.equal(result.outcome, undefined);
   assert.deepEqual(f.routing.read(lane).legacyWriters, []);
   assert.equal(f.routing.read(lane).route.executor, 'queue-v2');

@@ -1,3 +1,4 @@
+import { FakeClock } from './helpers/load-time-kit.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { copyFileSync, symlinkSync, mkdirSync, mkdtempSync, rmSync } from 'node:fs';
@@ -347,7 +348,8 @@ test('two packaged SDK 503s retain unreadable ownership with no third attempt', 
     {status:'terminal',terminalOutcome:'deferred',lrqId:'root'}, {launchStatusProbe:probe}), false);
 });
 
-test('retry delay cannot extend a caller deadline or start work after abort', async () => {
+test('retry delay cannot extend a caller deadline or start work after abort', async t => {
+  const clock = new FakeClock(t);
   for (const abort of [false, true]) {
     const controller = new AbortController();
     let calls = 0;
@@ -356,10 +358,13 @@ test('retry delay cannot extend a caller deadline or start work after abort', as
       if (abort) controller.abort();
       throw new Error('app-contract 503: Service Unavailable');
     }};
-    const result = await readDispatchLaunches({launch_request_ids:['root']},
+    const pending = readDispatchLaunches({launch_request_ids:['root']},
       {dispatchSession,timeoutMs:10,signal:controller.signal});
+    await clock.flush();
+    await clock.advance(10);
+    const result = await pending;
     assert.equal(result.ok, false);
-    await new Promise(resolve => setTimeout(resolve, 70));
+    await clock.advance(70);
     assert.equal(calls, 1);
   }
 });

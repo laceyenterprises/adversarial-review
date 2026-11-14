@@ -1,3 +1,4 @@
+import { FakeClock } from './helpers/load-time-kit.mjs';
 import './helpers/review-cli-resolver-fixture.mjs';
 import './helpers/registry-session-fixture.mjs';
 // MES-06: the review service records one shadow MES decision per review pass
@@ -211,7 +212,8 @@ test('review: the reported actual execution equals the resolver output, which is
   }
 });
 
-test('review: CLI absent, timeout or garbage output leaves the execution unchanged', async () => {
+test('review: CLI absent, timeout or garbage output leaves the execution unchanged', async t => {
+  const clock = new FakeClock(t, { wall: Date.now() });
   const expected = resolveReviewerExecution('codex', { env: {}, log: quiet });
   const outcomes = [Object.assign(new Error('spawn hq ENOENT'), { code: 'ENOENT' }), 'hang', { stdout: 'not json' },
     { stdout: JSON.stringify({ schemaVersion: 2 }) }, { stdout: JSON.stringify(decision({ apply: true,
@@ -219,12 +221,13 @@ test('review: CLI absent, timeout or garbage output leaves the execution unchang
   for (const outcome of outcomes) {
     const warnings = [];
     const exec = fakeExec([outcome]);
-    const startedMs = Date.now();
-    const actual = await resolveReviewerExecutionAsync('codex', { env: {}, ensureWorkerRegistryReadyImpl: async () => true,
+    const pending = resolveReviewerExecutionAsync('codex', { env: {}, ensureWorkerRegistryReadyImpl: async () => true,
       log: { ...quiet, warn: message => warnings.push(message) },
       mes: { repo: 'o/r', prNumber: 1, headSha: HEAD, diff: '', restrictedPatterns: [], execFileImpl: exec.impl, timeoutMs: 200 } });
+    await clock.flush();
+    await clock.advance(200);
+    const actual = await pending;
     assert.deepEqual(actual, expected, 'shadow never changes the chosen execution, even when the CLI says apply');
-    assert.ok(Date.now() - startedMs < 2_000);
     if (outcome?.stdout?.includes('"recorded":true')) continue;
     assert.equal(warnings.length, 1);
     assert.match(warnings[0], /^\[mes-shadow\] review decision not recorded reason=(cli-absent|timeout|garbage-output); execution unchanged$/);

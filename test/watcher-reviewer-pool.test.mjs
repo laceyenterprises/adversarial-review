@@ -1,3 +1,4 @@
+import { FakeClock } from './helpers/load-time-kit.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
@@ -281,7 +282,8 @@ test('split admission preserves dispatch failure circuit before release', async 
   assert.deepEqual(events, ['start:1']);
 });
 
-test('split admission re-enters single-wave drain when admission releases within grace', async () => {
+test('split admission re-enters single-wave drain when admission releases within grace', async t => {
+  const clock = new FakeClock(t);
   const events = [];
   let finishSettlement;
   const settlementHold = new Promise((resolve) => { finishSettlement = resolve; });
@@ -300,24 +302,29 @@ test('split admission re-enters single-wave drain when admission releases within
     }),
   ];
 
-  const summary = await runBoundedReviewerDispatchQueue(tasks, {
+  const pending = runBoundedReviewerDispatchQueue(tasks, {
     maxConcurrent: 1,
     singleWave: true,
-    // The release is asynchronous; allow scheduling slack under fleet contention.
+    // Admission releases at 5ms, inside this virtual grace window.
     singleWaveSettleGraceMs: 500,
     splitPostReviewSettlement: true,
     logger: { error() {}, log() {} },
   });
 
+  await clock.flush();
+  await clock.advance(5);
+  await clock.advance(500);
+  const summary = await pending;
   assert.equal(summary.dispatched, 2);
   assert.equal(summary.deferred, 0);
   assert.deepEqual(events, ['model:1', 'post-durable:1', 'model:2']);
   finishSettlement();
-  await new Promise((resolve) => setTimeout(resolve, 0));
+  await clock.flush();
   assert.deepEqual(events, ['model:1', 'post-durable:1', 'model:2', 'settled:1']);
 });
 
-test('split admission single-wave drain detaches before late admission release', async () => {
+test('split admission single-wave drain detaches before late admission release', async t => {
+  const clock = new FakeClock(t, { wall: Date.now() });
   const events = [];
   let releaseAdmission;
   let finishSettlement;
@@ -326,8 +333,7 @@ test('split admission single-wave drain detaches before late admission release',
 
   let timeoutId;
   try {
-    const startedAt = performance.now();
-    const summary = await Promise.race([
+    const pending = Promise.race([
       runBoundedReviewerDispatchQueue([
         candidate(1, async function run() {
           events.push('model:1');
@@ -352,7 +358,9 @@ test('split admission single-wave drain detaches before late admission release',
         timeoutId = setTimeout(() => reject(new Error('single-wave drain did not detach')), 5_000);
       }),
     ]);
-    assert.ok(performance.now() - startedAt < 1_000, 'single-wave drain should detach promptly');
+    await clock.flush();
+    await clock.advance(25);
+    const summary = await pending;
     assert.equal(summary.dispatched, 0);
     assert.equal(summary.deferred, 1);
     assert.deepEqual(summary.deferredCandidates.map((item) => item.prNumber), [2]);
@@ -361,7 +369,7 @@ test('split admission single-wave drain detaches before late admission release',
     clearTimeout(timeoutId);
     releaseAdmission();
     finishSettlement();
-    await new Promise((resolve) => setTimeout(resolve, 0));
+    await clock.flush();
   }
 
   assert.deepEqual(events, ['model:1', 'post-durable:1', 'settled:1']);
@@ -1078,7 +1086,8 @@ test('reviewer lane floor is not satisfied by a skipped rereview admission', asy
   assert.deepEqual(events, ['skip:10', 'rereview:11', 'first-pass:90']);
 });
 
-test('reviewer lane floor ignores skipped rereview admissions during a single launch wave', async () => {
+test('reviewer lane floor ignores skipped rereview admissions during a single launch wave', async t => {
+  const clock = new FakeClock(t, { wall: Date.now() });
   const events = [];
   const laneState = createReviewerLaneState({ firstPassBurstLimit: 2, minShare: 0.25 });
   let releaseWork;
@@ -1095,7 +1104,7 @@ test('reviewer lane floor ignores skipped rereview admissions during a single la
 
   let timeoutId;
   try {
-    const summary = await Promise.race([runBoundedReviewerDispatchQueue([
+    const pending = Promise.race([runBoundedReviewerDispatchQueue([
       firstPass(90),
       firstPass(91),
       candidate(10, async () => {
@@ -1123,6 +1132,9 @@ test('reviewer lane floor ignores skipped rereview admissions during a single la
       timeoutId = setTimeout(() => reject(new Error('single-wave launch did not detach')), 5_000);
     })]);
 
+    await clock.flush();
+    await clock.advance(0);
+    const summary = await pending;
     assert.equal(summary.dispatched, 0);
     assert.equal(summary.maxObservedConcurrency, 4);
     assert.deepEqual(events, [

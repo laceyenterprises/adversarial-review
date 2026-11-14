@@ -1,3 +1,4 @@
+import './helpers/rate-limit-state-isolation.mjs';
 // HAMCONFLICTCUSTODY-01: conflict repair never needs the PR branch's checkout slot.
 //
 // The hammer worktree can share its git directory with a builder's linked
@@ -37,6 +38,7 @@ log() { printf '%s\\n' "$*" >> "$FIXTURE_LOG"; }
 path="$1"; shift
 case "$(basename "$path")" in
   hammer-helper-step.mjs) shift 4; exec "$@" ;;
+  hammer-owned-publication.mjs) shift 4; log "$*"; exec "$@" ;;
   metered-gh.mjs) [ "$1" = exec-git ] || exit 97; shift; log "git $*"; exec git "$@" ;;
   hammer-pr-read.mjs)
     case " $* " in

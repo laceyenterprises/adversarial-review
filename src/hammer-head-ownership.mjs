@@ -2,7 +2,7 @@
 // verdict or certifies CI, findings remediation, or permission to merge.
 export function hammerHeadOwnership(suppression, headSha) {
   if (!headSha || suppression?.suppressed !== true
-    || !['hammer-validated-head', 'closer-commit-trailer'].includes(suppression.reason)
+    || !['hammer-validated-head', 'closer-commit-trailer', 'active-closer-published-head', 'active-closer-merge-lease'].includes(suppression.reason)
     || (suppression.headSha && suppression.headSha !== headSha)) return null;
   return { headSha, reason: suppression.reason };
 }

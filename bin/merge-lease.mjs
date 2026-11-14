@@ -9,6 +9,7 @@
  *   75  retryable timeout/contention/runtime failure
  */
 
+import { retireHammerPublication } from '../src/ama/hammer-publication-ownership.mjs';
 import { randomUUID } from 'node:crypto';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { execFile } from 'node:child_process';
@@ -770,6 +771,7 @@ async function runRelease(argv, deps) {
       await deps.sleep(Math.min(DEFAULT_SLEEP_MS, Math.max(1, deadlineMs - deps.nowMs())));
       continue;
     }
+    if (result.released && values.merged) retireHammerPublication(rootDir, { repo, prNumber: pr });
     jsonLine(deps.stdout, {
       released: result.released,
       key: deriveLeaseKey({ repo, base }).key,

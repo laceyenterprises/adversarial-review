@@ -381,12 +381,14 @@ if [ "${HAM_COMMIT_PUBLICATION_ONLY:-0}" = "1" ]; then
     HAM_API_FALLBACK_HEAD=$(printf '%s' "$HAM_API_PUBLISH_RESULT" | jq -r '.fallbackHead // empty')
     HAM_API_FALLBACK_BRANCH=$(printf '%s' "$HAM_API_PUBLISH_RESULT" | jq -r '.branch // empty')
     if [ -n "$HAM_API_FALLBACK_HEAD" ] && [ -n "$HAM_API_FALLBACK_BRANCH" ]; then
-      ham_git push origin "HEAD:refs/heads/$HAM_API_FALLBACK_BRANCH" --force-with-lease="refs/heads/$HAM_API_FALLBACK_BRANCH:$HAM_API_FALLBACK_HEAD" || {
+      "$HAM_NODE_BIN" "<<ROOT_DIR>>/bin/hammer-owned-publication.mjs" "<<REPO>>" "<<PR_NUMBER>>" head "$(git rev-parse HEAD)" git push origin "HEAD:refs/heads/$HAM_API_FALLBACK_BRANCH" --force-with-lease="refs/heads/$HAM_API_FALLBACK_BRANCH:$HAM_API_FALLBACK_HEAD" || {
+        if [ "$?" -eq 76 ]; then HAM_PHASE_OUTCOME=git-credential-refresh-failed; fi
         if declare -F ham_release_merge_lease > /dev/null; then ham_release_merge_lease; fi
         return 1
       }
     else
-      ham_git push --force-with-lease || {
+      "$HAM_NODE_BIN" "<<ROOT_DIR>>/bin/hammer-owned-publication.mjs" "<<REPO>>" "<<PR_NUMBER>>" head "$(git rev-parse HEAD)" git push --force-with-lease || {
+        if [ "$?" -eq 76 ]; then HAM_PHASE_OUTCOME=git-credential-refresh-failed; fi
         if declare -F ham_release_merge_lease > /dev/null; then ham_release_merge_lease; fi
         return 1
       }

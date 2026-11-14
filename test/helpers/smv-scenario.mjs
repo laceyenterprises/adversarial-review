@@ -1124,7 +1124,36 @@ if (scenario === 'clean') {
   assert.equal(existsSync(cursorTrees[0]), true);
   assert.equal(existsSync(cursorTrees[2]), false);
   assert.deepEqual(visits.slice(0, 3), ['synthetic-cursor-0', 'synthetic-cursor-1', 'synthetic-cursor-2']);
-  evidence = { hammers, finalFixAllQueuedBeforeHammer: true, finalFixAllTerminalFallback: true, cleanBranchHoldSettled: true, unchangedHeadHasNoPublicationDebt: true, nullHeadConfirmed: true, unknownBranchRetryRecovered: true, terminalScratchRemoved: true, drainingScratchRetained: true, privatePytestTemp: true, agedCwdTimeoutReclaimed: true, scratchCursorResumed: true, scratchLedgerClockIndependent: true, drainResumedNextPass: true, drainCountersUnchanged: true, drainHintExpiredWithoutCloser: true, legacyDrainHintRetired: true, hammerRangeValidated: true, noHammerReviewRequest: true, claimPreserved: true, reviewedHeadRecorded: true,
+  const { withHammerPublication, activeHammerPublication, retireHammerPublication } = await import('../../src/ama/hammer-publication-ownership.mjs');
+  const { requestCloserSuccessor, settleCloserSuccessor } = await import('../../src/ama/closer-successor.mjs');
+  const custodyHead = 'd'.repeat(40), custodyNow = '2030-01-01T00:00:00.000Z';
+  const custody = { rootDir, repo: 'fixture/custody', prNumber: 71, headSha: custodyHead, now: custodyNow };
+  const controllerPath = join(rootDir, 'synthetic-publication-controller.json');
+  writeFileSync(controllerPath, JSON.stringify({ state: 'running', controllerPid: process.pid,
+    startedAt: custodyNow, token: 'synthetic' }));
+  const custodyProbe = () => activeHammerPublication({ ...custody, now: Date.parse(custodyNow), isAlive: () => true });
+  await withHammerPublication({ ...custody, env: { HAM_CONTROLLER_RECORD: controllerPath,
+    HAM_CONTROLLER_PID: String(process.pid), HAM_CONTROLLER_TOKEN: 'synthetic' } }, async () => {
+    assert.equal(custodyProbe().reason, 'closer-publication-in-progress');
+    return { head: custodyHead };
+  });
+  assert.equal(custodyProbe().reason, 'active-closer-published-head');
+  retireHammerPublication(rootDir, custody);
+  assert.equal(custodyProbe(), null);
+  let successors = 0, ownerlessAlerts = 0;
+  const successorInput = { ...custody, reviewBody: 'Synthetic refusing finding', source: 'closer-ended-without-merge' };
+  const successorHandoff = async () => { successors++; return { remediation: { jobId: 'synthetic-successor' } }; };
+  for (let pass = 0; pass < 2; pass++) {
+    requestCloserSuccessor(successorInput);
+    assert.equal((await settleCloserSuccessor({ ...successorInput, handoffImpl: successorHandoff })).status, 'successor-enrolled');
+  }
+  assert.equal(successors, 1);
+  const refusedInput = { ...successorInput, headSha: 'e'.repeat(40) };
+  requestCloserSuccessor(refusedInput);
+  assert.equal((await settleCloserSuccessor({ ...refusedInput, enabled: false,
+    observeWaitImpl: async () => { ownerlessAlerts++; } })).status, 'ownerless-closer-no-merge');
+  assert.equal(ownerlessAlerts, 1);
+  evidence = { trailerlessPublicationDeferred: true, mergedPublicationRetired: true, successorEnrolledOnce: true, refusedSuccessorAlerted: true, hammers, finalFixAllQueuedBeforeHammer: true, finalFixAllTerminalFallback: true, cleanBranchHoldSettled: true, unchangedHeadHasNoPublicationDebt: true, nullHeadConfirmed: true, unknownBranchRetryRecovered: true, terminalScratchRemoved: true, drainingScratchRetained: true, privatePytestTemp: true, agedCwdTimeoutReclaimed: true, scratchCursorResumed: true, scratchLedgerClockIndependent: true, drainResumedNextPass: true, drainCountersUnchanged: true, drainHintExpiredWithoutCloser: true, legacyDrainHintRetired: true, hammerRangeValidated: true, noHammerReviewRequest: true, claimPreserved: true, reviewedHeadRecorded: true,
     headlessPostRequeuedOnce: true, terminalRetryable: true, terminalCapacityFreed: true, terminalNoMergeReclaimedSamePass: true,
     autoMergeHeld: true, autoMergeBoundReleased: true, unreadableCapacityReserved: true,
     wakeRearmed: true, expiredWakeRearmed: true, missingHeadAlertDeduplicated: true,

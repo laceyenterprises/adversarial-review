@@ -1,3 +1,4 @@
+import './helpers/rate-limit-state-isolation.mjs';
 process.env.NODE_OPTIONS = `${process.env.NODE_OPTIONS || ''} --import=${new URL('./helpers/dispatch-files-preload.mjs', import.meta.url).href}`;
 import { installDispatchFileProducerFixture } from './helpers/dispatch-files-fixture.mjs';
 installDispatchFileProducerFixture();
@@ -244,13 +245,14 @@ test('API fallback push rejection releases the lease under set -e for both push 
   t.after(() => rmSync(dir, { recursive: true, force: true }));
   writeFileSync(join(dir, 'publisher'), `#!/bin/sh
 case "$1" in
+  */hammer-owned-publication.mjs) shift 5; exec "$@" ;;
   */metered-gh.mjs) exec "$REAL_NODE" "$@" ;;
   */hammer-progress.mjs) printf '%s\\n' "$2 $3" >> "$PROGRESS_ARGS_FILE" ;;
   */hammer-pushed-attestation.mjs) printf '%s\\n' "$*" > "$ATTESTATION_ARGS_FILE"; echo '{}' ;;
   *) printf '%s\\n' "$PUBLISH_RESULT" ;;
 esac
 `, { mode: 0o755 });
-  writeFileSync(join(dir, 'git'), '#!/bin/sh\nprintf "%s\\n" "$*" > "$PUSH_ARGS_FILE"\nexit 1\n', { mode: 0o755 });
+  writeFileSync(join(dir, 'git'), '#!/bin/sh\nif [ "$1" = rev-parse ]; then printf "%040d\\n" 0; exit 0; fi\nprintf "%s\\n" "$*" > "$PUSH_ARGS_FILE"\nexit 1\n', { mode: 0o755 });
   const source = readFileSync(join(root, 'bin/hammer-publish.sh'), 'utf8')
     .replaceAll('<<RUN_DIR>>', dir).replaceAll('<<ROOT_DIR>>', root).replaceAll('<<REPO>>', 'fixture/repo').replaceAll('<<PR_URL>>', '1')
     .replaceAll('<<HQ_ROOT>>', dir).replaceAll('<<REVIEWED_SHA>>', 'a'.repeat(40)).replaceAll('<<PR_NUMBER>>', '1');

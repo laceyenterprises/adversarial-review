@@ -1,0 +1,58 @@
+{
+  "version": 1,
+  "entries": [
+    {
+      "id": "hammer-publication-ownership",
+      "title": "Hammer Publication Ownership",
+      "path": "docs/data-model/hammer-publication-ownership.md",
+      "store": "data/hammer-publication-ownership/*.json",
+      "schemaSurface": "src/ama/hammer-publication-ownership.mjs",
+      "relatedSchemaSurfaces": [
+        "bin/hammer-owned-publication.mjs",
+        "bin/hammer-api-publish.mjs",
+        "bin/merge-lease.mjs",
+        "src/head-closer-commit-suppression.mjs",
+        "src/pollonce-phases.mjs"
+      ],
+      "owner": "hammer publication controller"
+    },
+    {
+      "id": "closer-successors",
+      "title": "Closer Successor Custody",
+      "path": "docs/data-model/closer-successors.md",
+      "store": "data/closer-successors/*.json",
+      "schemaSurface": "src/ama/closer-successor.mjs",
+      "relatedSchemaSurfaces": [
+        "src/ama/dispatch-closer.mjs",
+        "src/ama-closure-orchestration.mjs",
+        "src/follow-up-jobs.mjs"
+      ],
+      "owner": "AMA closure orchestration"
+    },
+    {
+      "id": "ama-closure-waits",
+      "title": "AMA Closure Waits",
+      "path": "docs/data-model/ama-closure-waits.md",
+      "store": "data/ama-closure-waits/*.db",
+      "schemaSurface": "src/ama/closure-wait.mjs",
+      "relatedSchemaSurfaces": [
+        "src/ama/closer-successor.mjs"
+      ],
+      "owner": "AMA closure orchestration",
+      "waitClass": "closer-successor"
+    },
+    {
+      "id": "nonblocking-final-cap-result",
+      "title": "Nonblocking Cap Terminal Result",
+      "path": "docs/data-model/follow-up-jobs.md",
+      "store": "data/follow-up-jobs/stopped/*.json",
+      "schemaSurface": "src/follow-up-jobs.mjs",
+      "relatedSchemaSurfaces": [
+        "src/ama/closer-successor.mjs"
+      ],
+      "owner": "follow-up remediation queue",
+      "optionalField": "finalCapResult",
+      "successorState": "successor-pending or ownerless-closer-no-merge; enrollment precedes terminal move"
+    }
+  ]
+}

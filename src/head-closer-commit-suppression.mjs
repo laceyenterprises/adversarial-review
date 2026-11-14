@@ -1,3 +1,4 @@
+import { activeHammerPublication, publicationRoot } from './ama/hammer-publication-ownership.mjs';
 import { loadAwareTimeoutMs } from './load-aware-timeout.mjs';
 import { createHistoryReader } from './ama/history-reader.mjs';
 import { exactHammerValidation } from './ama/hammer-head-validation.mjs';
@@ -558,6 +559,8 @@ export async function getHeadCloserCommitSuppression({
   prNumber,
   headSha,
   hqRoot = process.env.HQ_ROOT,
+  rootDir = publicationRoot,
+  activeHammerPublicationImpl = activeHammerPublication,
   execFileImpl = execFileAsync,
   execGhWithRetryImpl = execGhWithRetry,
   fetchVerifiedCommitFromLocalGitImpl = fetchVerifiedCommitFromLocalGit,
@@ -569,6 +572,8 @@ export async function getHeadCloserCommitSuppression({
 } = {}) {
   const sha = String(headSha || '').trim();
   if (!repoPath || !sha) return { suppressed: false, reason: null };
+  const active = activeHammerPublicationImpl({ rootDir, repo: repoPath, prNumber, headSha: sha });
+  if (active) return active;
   // Daemon-robust: the terminal-closer identity is carried in the commit message
   // (`Closed-By: hammer` trailer), which local git reads without gh auth. The remote
   // probe below is the fallback for the rare case the commit is absent from the local

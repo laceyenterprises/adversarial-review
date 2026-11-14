@@ -3170,6 +3170,11 @@ export async function processReviewSubject(entry, ctx) {
             `[watcher] reviewer spawn SUPPRESSED for ${repoPath}#${prNumber}: ` +
               `${closerSpawnSuppression.reason} on head ${String(subject.headSha || '').slice(0, 12) || 'unknown'}`
           );
+          // A publication probe has not established ownership of this head.
+          // Keep automatic requests pending so an unrelated push is reviewed
+          // once the remote mutation has been reconciled.
+          if (['closer-publication-in-progress', 'closer-publication-unconfirmed']
+            .includes(closerSpawnSuppression.reason)) return;
           // Standing policy: a terminal closer head is never re-reviewed, and a
           // trailer-only closer head is already merge-covered by
           // non_reviewable_head_delta — restore the verdict instead of parking.

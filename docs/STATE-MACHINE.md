@@ -1415,6 +1415,25 @@ Legacy durable jobs created before `baseBranch` was persisted are hydrated from 
 
 ## MSM two-path merge authority (current)
 
+Automatic review defers an exact head owned by a live closer publication or
+merge lease, including rebased worker commits without closer trailers. Publication
+intent and exact mutation results are serialized with reviewer ownership reads;
+a concurrent publication probe defers until its result is available. These are
+scheduling reasons, not review or merge authority. Explicit operator re-review
+remains available; unrelated pushes receive normal review.
+
+An exhausted closer that confirms an open PR without merging enrolls a durable
+PR/head successor request carrying the predicate's refusing review. The ordinary
+pre-claim remediation cap uses the same request. The watcher admits at most one
+existing final-fix-all work order for that head, or records and alerts
+`ownerless-closer-no-merge` through closure-wait alerting. Disabled or refused
+handoffs cannot silently terminate custody. See
+[successor records](data-model/closer-successors.md) and
+[publication ownership](data-model/hammer-publication-ownership.md).
+Exits before completing the close retain their existing bounded retry/refund
+executor and cap alert; confirmed no-merge decisions and `no_work_done` take
+the successor path after terminal cleanup and accounting.
+
 The builder final-fix-all lane may authorize primary-line reversals only with
 its durable PR/source-head job owner and exact-commit produced attestation
 matching that owner's launch and worker class. Worker-generated

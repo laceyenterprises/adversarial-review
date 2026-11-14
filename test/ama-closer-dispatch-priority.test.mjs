@@ -2797,6 +2797,7 @@ for (const scenario of ['audit', 'no audit', 'auto-merge armed', 'expired auto-m
         if (scenario.endsWith('fallback')) input.readPullRequestStateImpl = () => null;
       } else live.autoMergeRequest = null;
     }
+    if (scenario === 'audit') input.dispatchContext.refusingReviewBody = 'Synthetic refusing review.';
     let result = await maybeDispatchAmaCloser(input);
     if (scenario.endsWith('fallback')) {
       assert.equal(result.reason, 'stale-dispatched-lease-terminalized');
@@ -2805,6 +2806,12 @@ for (const scenario of ['audit', 'no audit', 'auto-merge armed', 'expired auto-m
     }
     if (scenario.startsWith('expired auto-merge')) {
       assert.equal(events.filter(event => event.event === 'ama_closer.auto_merge_hold_released').length, 1);
+    }
+    if (scenario === 'audit') {
+      assert.equal(result.reason, 'ownerless-closer-no-merge');
+      assert.equal(result.successor.headSha, HEAD);
+      assert.equal(deps.calls.filter(c => c.args[0] === 'dispatch').length, 0);
+      return;
     }
     assert.equal(result.dispatched, true, JSON.stringify(result));
     assert.equal(result.launchRequestId, 'lrq_hammer_1');
@@ -3916,7 +3923,7 @@ test('CLOSERPENDINGDEAD-01: one poll re-takes a dead intent through ordinary dis
 });
 
 for (const finalHammer of [false, true]) {
-  test(`LVR-02 producer no_work_done records failure and preserves refund policy (final=${finalHammer})`, async t => {
+  test(`LVR-02 producer no_work_done records failure and hands exhausted work to one successor (final=${finalHammer})`, async t => {
     const rootDir = mkdtempSync(join(tmpdir(), 'no-work-done-'));
     t.after(() => rmSync(rootDir, { recursive: true, force: true }));
     const currentHead = 'b'.repeat(40);
@@ -3943,19 +3950,27 @@ for (const finalHammer of [false, true]) {
     const exec = deps.execFileImpl;
     deps.execFileImpl = (cmd, argv, options) => argv[0] === 'dispatch' && argv[1] === 'status'
       ? Promise.resolve({ stdout: JSON.stringify({ status: 'failed' }) }) : exec(cmd, argv, options);
+    const successorCalls = [];
     const result = await maybeDispatchAmaCloser({ ...args, ...deps,
+      settleCloserSuccessorImpl: async input => {
+        successorCalls.push(input);
+        return { status: 'successor-enrolled', successorJobId: 'synthetic-successor' };
+      },
       readLaunchRequestStatusImpl: () => ({ ok: true, row: { status: 'failed', failure_class: 'no_work_done' } }),
       readPullRequestStateImpl: () => ({ state: 'OPEN', headRefOid: currentHead }),
       fetchPullRequestRollupImpl: async () => ({ state: 'OPEN', headSha: currentHead, comments: [] }),
     });
-    assert.equal(result.dispatched, true, JSON.stringify(result));
+    assert.equal(result.dispatched, false, JSON.stringify(result));
+    assert.equal(result.reason, 'successor-enrolled');
+    assert.equal(successorCalls.length, 1);
+    assert.equal(successorCalls[0].headSha, currentHead);
     const record = readAmaCloserDispatchRecord(rootDir, identity);
     assert.equal(record.lastObservedStatus, 'failed');
     assert.equal(record.failure, 'no_work_done', JSON.stringify(record));
     assert.match(record.failureReason, /open PR and no terminal audit/);
     const ledger = readHammerRetryCapLedger(rootDir, identity);
-    assert.equal(ledger.lifetimeAttemptCount, 2);
-    assert.equal(ledger.attemptCount, finalHammer ? 2 : 1);
+    assert.equal(ledger.lifetimeAttemptCount, 1);
+    assert.equal(ledger.attemptCount, finalHammer ? 1 : 0);
   });
 }
 

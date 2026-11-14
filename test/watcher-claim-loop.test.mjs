@@ -2369,15 +2369,17 @@ for (const exact of [true, false]) test(`REMORPHAN exact-head recovery ${exact ?
 // "Retrying PR ... previous status=pending" and "reviewer spawn SUPPRESSED ...
 // closer-commit-trailer" and returned, so nothing owned the PR. One tick now
 // declines the request back to the posted review, where the closer owns it.
-test('NOOWNER-01: a suppressed AMA-recovery re-review on a closer head returns the row to posted instead of looping', () => {
+for (const reason of ['closer-commit-trailer', 'active-closer-published-head', 'active-closer-merge-lease',
+  'closer-publication-in-progress', 'closer-publication-unconfirmed']) test(`automatic closer suppression preserves request custody (${reason})`, () => {
+  const probeDeferred = reason.startsWith('closer-publication-');
   const tmp = mkdtempSync(path.join(tmpdir(), 'watcher-noowner-closer-head-'));
   try {
     const loaderPath = path.join(tmp, 'loader.mjs');
     const registerPath = path.join(tmp, 'register.mjs');
     const runnerPath = path.join(tmp, 'runner.mjs');
     writeFileSync(loaderPath, buildLoaderSource()
-      .replace("return async () => ({ suppressed: false, reason: 'fixture' });", "return async () => ({ suppressed: true, reason: 'closer-commit-trailer' });")
-      .replace("export async function getHeadCloserCommitSuppressionWithBoundedRetry() { return { suppressed: false, reason: 'fixture' }; }", "export async function getHeadCloserCommitSuppressionWithBoundedRetry() { return { suppressed: true, reason: 'closer-commit-trailer' }; }"));
+      .replace("return async () => ({ suppressed: false, reason: 'fixture' });", `return async () => ({ suppressed: true, reason: '${reason}' });`)
+      .replace("export async function getHeadCloserCommitSuppressionWithBoundedRetry() { return { suppressed: false, reason: 'fixture' }; }", `export async function getHeadCloserCommitSuppressionWithBoundedRetry() { return { suppressed: true, reason: '${reason}' }; }`));
     writeFileSync(registerPath, buildRegisterSource(loaderPath));
     writeFileSync(runnerPath, buildRunnerSource({ prePollSetup: `
       db.prepare(\`INSERT INTO reviewer_passes
@@ -2404,10 +2406,12 @@ test('NOOWNER-01: a suppressed AMA-recovery re-review on a closer head returns t
     const line = run.stdout.split(/\r?\n/).find((entry) => entry.startsWith(SUMMARY_MARKER));
     assert.ok(line, output);
     const summary = JSON.parse(line.slice(SUMMARY_MARKER.length));
-    assert.match(output, /auto-refresh SUPPRESSED.*#101:.*closer-commit-trailer/);
+    assert.ok(output.includes(reason), output);
     assert.equal(summary.reviewerSpawns.some((spawn) => spawn.subjectContext?.reviewerHeadSha === 'sha-happy-101'), false, output);
-    assert.equal(summary.rows['101'].review_status, 'posted', output);
-    assert.equal(summary.rows['101'].reviewer_head_sha, 'sha-reviewed-101', output);
+    assert.equal(summary.rows['101'].review_status, probeDeferred ? 'pending' : 'posted', output);
+    if (probeDeferred) assert.equal(summary.fsrRows.find(row => row.pr_number === 101).rereview_reason,
+      'AMA automated recovery: stale-review-head', output);
+    else assert.equal(summary.rows['101'].reviewer_head_sha, 'sha-reviewed-101', output);
   } finally { rmSync(tmp, { recursive: true, force: true }); }
 });
 
@@ -4934,7 +4938,7 @@ for (const [status, reason] of [['pending', 'hammer-validated-head'], ['posted',
               ? [${JSON.stringify('## Verdict\nComment only')}] : [],
             proveCloserAuthoredStaleHeadImpl: async () => ({ proven: false,
               reviewedHead: 'reviewed-fixture', currentHead: 'sha-happy-101' }),
-            resolveHeadCloserCommitSuppressionImpl: async () => ({ suppressed: true, reason: ${JSON.stringify(reason)} }),
+            resolveHeadCloserCommitSuppressionImpl: async () => ({ suppressed: true, reason: '${reason}' }),
             fetchHeadCloserVerifiedCommitImpl: async () => null,
             resolveHamTerminalRemediationEvidenceImpl: async () => null,
             headHasValidatedHamTerminalRemediationImpl: () => false,

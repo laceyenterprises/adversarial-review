@@ -50,16 +50,20 @@ owns the stop, the terminal move also writes optional `finalCapResult`:
 `reason: nonblocking-final-cap`, `jobId`, `repo`, `prNumber`, `reviewedHeadSha`
 (nullable), `recordedAt`, `successorDispatched: false`, `blockingFindings` and
 `nonBlockingFindings` (the shared parsers' count/state pairs), and human-readable
-`nextAction`. Claim and consume results expose that same object. The stop reason
-also names the operator action and absence of a dispatched successor.
+`nextAction`, plus `successorState` describing enrollment or missing-head ownerlessness.
+Claim and consume results expose that same object. The stop reason
+also names successor enrollment and the operator fallback. A parallel
+head-scoped successor receipt enrolls the exhausted job in the existing
+final-fix-all/closure path; refusal is an alertable typed ownerless state. See
+[closer successor custody](closer-successors.md).
 
 This is terminal evidence, not a closure receipt or permission to merge.
 Unknown findings remain unknown. Despite its historical name,
 `reviewedHeadSha` is the job's `revisionRef` at stop time, which may be null or replaced during requeue; it is not verified
 review provenance. Rescue must re-read the live head, findings, CI, conflicts and ownership.
 Settled-clean reviews, remaining budget, explicit override admission and live
-closer custody retain their existing paths. No new store, lifecycle status,
-automatic wake, remediation round or re-review is introduced.
+closer custody retain their existing paths. Enrollment itself spends no
+remediation round and grants no re-review or merge authority.
 
 The result describes only its originating cap stop. Operator requeue,
 infrastructure-CI release and worker admission clear it; later stops clear it

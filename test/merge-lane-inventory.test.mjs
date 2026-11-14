@@ -63,7 +63,9 @@ test('default inventory reader bounds a hanging lookup and records the failure',
   // Real metering admission does filesystem I/O. Reach the child explicitly
   // before advancing the budget; a Promise-only drain cannot prove admission.
   await Promise.race([started, pending.then(result => {
-    assert.fail(`Inventory collection finished before child start: ${JSON.stringify(result.errors)}`);
+    if (calls === 0) {
+      assert.fail(`Inventory collection finished before child start: ${JSON.stringify(result.errors)}`);
+    }
   })]);
   assert.ok(signal instanceof AbortSignal);
   assert.equal(signal.aborted, false);

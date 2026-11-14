@@ -1,3 +1,4 @@
+import { resolveReviewerAbsoluteCeilingMs } from './reviewer-timeout-model.mjs';
 // ARP-02 first-pass reviewer lease + recovery, graduated to ON by default.
 // A watcher bounce mid-review — continuous under CI/CD-driven main-catchup
 // deploys — leaves the reviewed_prs row 'reviewing'. On restart the reconciler
@@ -36,13 +37,14 @@ function computeReviewerLeaseExpiryAt(startedAt, timeoutMs) {
   if (!Number.isFinite(startedAtMs) || !Number.isFinite(boundedTimeoutMs) || boundedTimeoutMs <= 0) {
     return null;
   }
-  return new Date(startedAtMs + Math.floor(boundedTimeoutMs)).toISOString();
+  return new Date(startedAtMs + Math.min(Math.floor(boundedTimeoutMs), resolveReviewerAbsoluteCeilingMs())).toISOString();
 }
 
 // Extend only the session that built the plan. A delayed child must never
 // change a replacement claim or a terminal review row.
 function extendReviewerLeaseForPlan(db, { repo, prNumber, sessionUuid, timeoutMs }) {
   if (!Number.isSafeInteger(timeoutMs) || timeoutMs <= 0) throw new TypeError('Invalid reviewer timeout');
+  timeoutMs = Math.min(timeoutMs, resolveReviewerAbsoluteCeilingMs());
   const row = db.prepare(`SELECT reviewer_started_at, reviewer_timeout_ms FROM reviewed_prs
     WHERE repo = ? AND pr_number = ? AND reviewer_session_uuid = ?
       AND review_status = 'reviewing' AND COALESCE(pr_state, 'open') = 'open'`).get(repo, prNumber, sessionUuid);
@@ -64,7 +66,8 @@ function reviewerLeaseExpiryForRow(row, {
   if (row?.reviewer_lease_expires_at) {
     const persistedExpiryMs = Date.parse(String(row.reviewer_lease_expires_at));
     if (Number.isFinite(persistedExpiryMs)) {
-      return new Date(persistedExpiryMs).toISOString();
+      const cap = computeReviewerLeaseExpiryAt(row?.reviewer_started_at || row?.last_attempted_at, resolveReviewerAbsoluteCeilingMs());
+      return new Date(cap ? Math.min(persistedExpiryMs, Date.parse(cap)) : persistedExpiryMs).toISOString();
     }
   }
 

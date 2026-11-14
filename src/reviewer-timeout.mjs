@@ -1,3 +1,4 @@
+import { DEFAULT_CEILING_MAX_SECONDS, resolveReviewerAbsoluteCeilingMs } from './reviewer-timeout-model.mjs';
 import { loadAwareTimeoutMs, timerDelayMs } from './load-aware-timeout.mjs';
 // Legacy reviewer timeout, still used for non-streaming paths. Streamed Claude
 // and Codex reviews use the idle watchdog and scaled ceiling in
@@ -20,12 +21,12 @@ const AGY_PRINT_TIMEOUT_SUBPROCESS_SLACK_MS = 30 * 1000;
 const AGY_CHUNK_TIMEOUT_SLACK_MS = 2 * 60 * 1000;
 // Fixed aggregate envelope, including chunk and process slack. Load can grow
 // requested call budgets, but never this ceiling.
-const AGY_CHUNK_TIMEOUT_CAP_MS = 6 * 60 * 60 * 1000;
+const AGY_CHUNK_TIMEOUT_CAP_MS = DEFAULT_CEILING_MAX_SECONDS * 1000;
 // Covers snapshot/context preparation and posting outside the chunk loop.
 const REVIEWER_PROCESS_SLACK_MS = 5 * 60 * 1000;
 
 function resolveAgyChunkTimeoutCapMs(env = process.env) {
-  return timerDelayMs(_resolvePositiveInt(env.ADVERSARIAL_REVIEW_AGY_CHUNK_TIMEOUT_CAP_MS, AGY_CHUNK_TIMEOUT_CAP_MS));
+  return Math.min(resolveReviewerAbsoluteCeilingMs(env), timerDelayMs(_resolvePositiveInt(env.ADVERSARIAL_REVIEW_AGY_CHUNK_TIMEOUT_CAP_MS, AGY_CHUNK_TIMEOUT_CAP_MS)));
 }
 
 function resolveAgyChunkTimeoutPlan({ chunkCount, promptBytes = null, env = process.env } = {}) {
@@ -77,8 +78,14 @@ function resolveNominalReviewerTimeoutMs(env = process.env, options = {}) {
   return _resolvePositiveInt(cfgValue, DEFAULT_REVIEWER_TIMEOUT_MS);
 }
 
+// The generic scaler preserves oversized nominals. Clamp its result LAST.
+function scaleReviewerTimeoutMs(nominal, env, options) {
+  const ceiling = resolveReviewerAbsoluteCeilingMs(env, options);
+  return Math.min(ceiling, loadAwareTimeoutMs(nominal, { maxMs: ceiling }));
+}
+
 function resolveReviewerTimeoutMs(env = process.env, options = {}) {
-  return loadAwareTimeoutMs(resolveNominalReviewerTimeoutMs(env, options), { maxMs: Infinity });
+  return scaleReviewerTimeoutMs(resolveNominalReviewerTimeoutMs(env, options), env, options);
 }
 
 function resolveProgressTimeoutMs(env = process.env, options = {}) {
@@ -89,7 +96,8 @@ function resolveProgressTimeoutMs(env = process.env, options = {}) {
     loaderImpl: options.loaderImpl,
     contextKey: 'reviewer.no_progress_timeout_ms',
   }).get('reviewer.no_progress_timeout_ms', DEFAULT_PROGRESS_TIMEOUT_MS);
-  return loadAwareTimeoutMs(_resolvePositiveInt(cfgValue, DEFAULT_PROGRESS_TIMEOUT_MS), { maxMs: Infinity });
+  const nominal = _resolvePositiveInt(cfgValue, DEFAULT_PROGRESS_TIMEOUT_MS);
+  return Math.min(nominal, resolveReviewerAbsoluteCeilingMs(env, options));
 }
 
 function resolveFirstOutputTimeoutMs(env = process.env, options = {}) {
@@ -105,7 +113,7 @@ function resolveFirstOutputTimeoutMs(env = process.env, options = {}) {
   const parsed = Number(cfgValue);
   if (Number.isFinite(parsed) && parsed === 0) return 0;
   const baseMs = _resolvePositiveInt(cfgValue, DEFAULT_FIRST_OUTPUT_TIMEOUT_MS);
-  return baseMs > 0 ? loadAwareTimeoutMs(baseMs, { maxMs: Infinity }) : 0;
+  return baseMs > 0 ? scaleReviewerTimeoutMs(baseMs, env, options) : 0;
 }
 
 function resolveAgyPrintTimeoutMs(env = process.env, options = {}) {
@@ -116,7 +124,7 @@ function resolveAgyPrintTimeoutMs(env = process.env, options = {}) {
     loaderImpl: options.loaderImpl,
     contextKey: 'reviewer.gemini.antigravity.print_timeout_ms',
   }).get('reviewer.gemini.antigravity.print_timeout_ms', DEFAULT_AGY_PRINT_TIMEOUT_MS);
-  return loadAwareTimeoutMs(_resolvePositiveInt(cfgValue, DEFAULT_AGY_PRINT_TIMEOUT_MS), { maxMs: Infinity });
+  return scaleReviewerTimeoutMs(_resolvePositiveInt(cfgValue, DEFAULT_AGY_PRINT_TIMEOUT_MS), env, options);
 }
 
 function resolveAgyReviewerSubprocessTimeoutMs(env = process.env, options = {}) {
@@ -124,10 +132,10 @@ function resolveAgyReviewerSubprocessTimeoutMs(env = process.env, options = {}) 
   const printTimeoutMs = options.printTimeoutMs ?? resolveAgyPrintTimeoutMs(env, options);
   // These inputs are already scaled. Slack can exceed the platform limit even
   // when each input fits, so clamp the composition without scaling it again.
-  return timerDelayMs(Math.max(
+  return timerDelayMs(Math.min(resolveReviewerAbsoluteCeilingMs(env, options), Math.max(
     _resolvePositiveInt(reviewerTimeoutMs, DEFAULT_REVIEWER_TIMEOUT_MS),
     _resolvePositiveInt(printTimeoutMs, DEFAULT_AGY_PRINT_TIMEOUT_MS) + AGY_PRINT_TIMEOUT_SUBPROCESS_SLACK_MS,
-  ));
+  )));
 }
 
 export {

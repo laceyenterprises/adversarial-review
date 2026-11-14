@@ -116,7 +116,7 @@ import {
   buildAgyReviewerPromptPrefix,
 } from './reviewer-prompt.mjs';
 import { parseCodexJsonTokenUsage } from './reviewer-model-detection.mjs';
-import { countChangedLines, resolveReviewerCeilingSeconds } from './reviewer-timeout-model.mjs';
+import { countChangedLines, resolveReviewerAbsoluteCeilingMs, resolveReviewerCeilingSeconds } from './reviewer-timeout-model.mjs';
 import { resolveClaudeLaunchctlUidFromConfig } from './claude-launchctl-uid.mjs';
 import { recordReviewMesShadow } from './mes-shadow-hook.mjs';
 
@@ -145,6 +145,7 @@ async function spawnWithInput(command, args, {
   input = '',
   timeout = 0,
   progressTimeout = resolveProgressTimeoutMs(env),
+  progressOnStdoutOnly = false,
   killGraceMs,
   maxBuffer = 10 * 1024 * 1024,
   signal,
@@ -164,8 +165,9 @@ async function spawnWithInput(command, args, {
     env,
     cwd,
     input,
-    timeout,
+    timeout: Math.min(timeout > 0 ? timeout : resolveReviewerAbsoluteCeilingMs(env), resolveReviewerAbsoluteCeilingMs(env)),
     progressTimeout,
+    progressOnStdoutOnly,
     killGraceMs,
     maxBuffer,
     signal,
@@ -186,6 +188,7 @@ async function spawnCaptured(command, args, {
   cwd,
   timeout = 0,
   progressTimeout = resolveProgressTimeoutMs(env),
+  progressOnStdoutOnly = false,
   killGraceMs,
   maxBuffer = 10 * 1024 * 1024,
   signal,
@@ -200,6 +203,7 @@ async function spawnCaptured(command, args, {
     input: '',
     timeout,
     progressTimeout,
+    progressOnStdoutOnly,
     killGraceMs,
     maxBuffer,
     signal,
@@ -879,7 +883,7 @@ async function reviewWithClaude(diff, extraContext = '', {
         input: prompt,
         cwd: reviewerSubprocessCwd,
         timeout: reviewerTimeoutMs,
-        ...reviewerStallOptions(reviewerTimeoutMs, { model: reviewerExecution.model, runtime: 'claude' }),
+        ...reviewerStallOptions(reviewerTimeoutMs, { model: reviewerExecution.model, runtime: 'claude' }, { env: subprocessEnv }),
         progressOnStdoutOnly: true,
         onStdoutData: noteStreamEvents,
         stdoutCapture: 'tail',
@@ -1256,7 +1260,8 @@ async function spawnCodexReview({
         env: { ...scrubOAuthFallbackEnv(env).env, CODEX_HOME: home.codexHome, CODEX_AUTH_PATH: home.authPath },
         cwd,
         timeout,
-        ...reviewerStallOptions(timeout, { model, runtime: 'codex' }),
+        ...reviewerStallOptions(timeout, { model, runtime: 'codex' }, { env }),
+        progressOnStdoutOnly: true,
         maxBuffer,
         ...(onStdoutData ? { onStdoutData } : {}),
       },
@@ -1384,7 +1389,7 @@ async function reviewWithCodex(diff, extraContext = '', {
             model: codexExecOverrides.model,
             reasoningEffort,
             timeoutMs: resolveReviewerTimeoutMs(env),
-            idleTimeoutMs: Math.max(resolveProgressTimeoutMs(env), 3 * 60 * 1000),
+            idleTimeoutMs: Math.min(resolveReviewerAbsoluteCeilingMs(env), resolveProgressTimeoutMs(env)),
           });
           return { ...recovered, execution: { ...reviewerPromptProvenance(prompt, { reviewKind, promptStage, promptOverride: promptOverride !== null }), harness: reviewerExecutionHarness('codex'), model: codexExecOverrides.model, modelSource: codexExecOverrides.modelSource, effort: reasoningEffort, effortSource } };
         } catch (fallbackErr) {
@@ -2687,7 +2692,7 @@ async function spawnGeminiReview({
       cwd,
       input: prompt,
       timeout,
-      ...reviewerStallOptions(timeout, { model, runtime: 'gemini' }),
+      ...reviewerStallOptions(timeout, { model, runtime: 'gemini' }, { env }),
       signal,
       maxBuffer,
     },
@@ -2748,7 +2753,7 @@ async function spawnAgyReview({
           // Prompt is delivered on argv (see buildAgyReviewArgs); stdin is closed.
           input: '',
           timeout: remainingMs,
-          ...reviewerStallOptions(remainingMs, { model, runtime: 'antigravity' }),
+          ...reviewerStallOptions(remainingMs, { model, runtime: 'antigravity' }, { env }),
           signal: childSignal,
           killGraceMs: 0,
           maxBuffer,
@@ -2965,8 +2970,8 @@ async function reviewWithGemini(diff, extraContext = '', {
     }
   }
 
-  const callTimeoutMs = timeoutMs ?? (runtime === 'antigravity'
-    ? resolveAgyReviewerSubprocessTimeoutMs(reviewEnv) : resolveReviewerTimeoutMs(reviewEnv));
+  const callTimeoutMs = Math.min(resolveReviewerAbsoluteCeilingMs(reviewEnv), timeoutMs ?? (runtime === 'antigravity'
+    ? resolveAgyReviewerSubprocessTimeoutMs(reviewEnv) : resolveReviewerTimeoutMs(reviewEnv)));
   const callController = new AbortController();
   const callTimeoutError = Object.assign(new Error(`Command timed out after ${callTimeoutMs}ms`), { timedOut: true });
   const callTimer = setTimeout(() => callController.abort(callTimeoutError), callTimeoutMs);

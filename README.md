@@ -1530,6 +1530,20 @@ do not send the terminal size alert. Chunked reviews sum available provider
 usage (marked partial when some chunks omit usage), and rejected Codex chunks
 use the same forensic writer as single-shot reviews.
 
+Reviewer claims and process deadlines share `reviewer.ceiling_max_seconds`
+(default 10800 seconds, three hours; environment alias
+`AGENT_OS_REVIEWER_CEILING_MAX_SECONDS`). This absolute envelope applies after
+load scaling and after composing chunk, fallback and posting budgets. Larger
+explicit requests cannot bypass it. Persisted older claims are bounded from
+their original start when selected and reconciled. Model progress watchdogs
+retain their first-output and rolling output/event evidence; their load-scaled
+patience cannot exceed `reviewer.no_progress_timeout_ms` (default 15 minutes)
+or the absolute envelope. Diagnostic stderr does not reset model progress, including file-backed
+capture; OAuth fallback and proxy idle timers obey the same bounds. Stalls use the existing session-fenced retry release, while typed
+`github-budget-deferred` receipts retain their reset hold and budget-neutral
+claim release. Reattach still verifies identity, exit and late posted reviews
+before releasing an overdue live orphan.
+
 GEMTIMEOUT-01: a Gemini claim starts with one load-scaled call budget plus
 five minutes for preparation and posting (25 minutes at idle defaults). Once
 its chunk plan exists, local IPC extends the parent's process timer and the
@@ -1547,7 +1561,8 @@ and the allocated deadline in diagnostics. An envelope unable to fit even one
 millisecond per chunk plus both slacks still refuses with exit 77 and a sized
 `minimumCapMs`; source/prompt sizing must be corrected within existing limits.
 Both process deadlines are bounded by the
-unscaled chunk cap (six hours by default) and Node's timer limit. Deadlines stay
+smaller of the unscaled chunk cap and shared absolute reviewer ceiling
+(three hours by default), and Node's timer limit. Deadlines stay
 anchored to process start: preparation consumes the same five-minute reserve
 as posting, so four minutes of preparation leaves about one minute for posting
 when chunks exhaust the plan. Stale or terminal claims cannot be extended.

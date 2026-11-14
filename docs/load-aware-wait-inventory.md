@@ -360,8 +360,8 @@ polls. Age comparisons and persisted expiry values do not arm a timer.
 
 | Original site | Reaches a timer? | Scaling and disposition |
 | --- | --- | --- |
-| `reviewer-harness.mjs:2269` — fallback lock `waitMs` | No; lock deadline comparison, fixed short retry sleeps | Once; centrally clamped |
-| `argus-security-verdict.mjs:265` — stall deadline | No; elapsed-age comparison | Once; centrally clamped |
+| `reviewer-harness.mjs:2269` — fallback lock `waitMs` | No; lock deadline comparison, fixed short retry sleeps | Once; reviewer deadlines are clamped last to the shared absolute ceiling |
+| `argus-security-verdict.mjs:265` — stall deadline | No; elapsed-age comparison | Independent configured no-progress bound; never load-inflated |
 | `reviewer-timeout.mjs:28` — chunk cap | Yes, through accepted chunk plan and process deadline | Requested call scales once; unscaled cap bounds equal chunk shares after chunk/process slack (LAC-2100); infeasible positive allocations refuse |
 | `reviewer-timeout.mjs:64` — reviewer timeout | Yes; subprocess, wall-clock and poll watchdog budgets | Once; centrally clamped, poll no longer re-scales |
 | `reviewer-timeout.mjs:75` — progress timeout | Yes; subprocess idle timer | Once; centrally clamped |
@@ -389,13 +389,13 @@ polls. Age comparisons and persisted expiry values do not arm a timer.
 | `follow-up-remediation.mjs:283` — default CI settle window | No; persisted expiry timestamp | Once; centrally clamped |
 | `follow-up-remediation.mjs:288` — configured CI settle window | No; persisted expiry timestamp | Once; centrally clamped |
 | `agy-reviewer-identities.mjs:653` — identity lease wait | No; deadline comparison, fixed lease-poll sleeps | Once; centrally clamped |
-| `claude-reviewer-token-proxy.mjs:248` — upstream idle timeout | Yes; HTTP request `setTimeout` | Once; centrally clamped |
+| `claude-reviewer-token-proxy.mjs:248` — upstream idle timeout | Yes; HTTP request `setTimeout` | Once; independently bounded by the configured reviewer no-progress window |
 | `ama-hammer-background-dispatch.mjs:285` — launch bound fallback | No; elapsed-age/status comparison | Once; supplied effective dispatch budget replaces this default |
 | `argus-backlog-retirement.mjs:141` — claim lease TTL | No; persisted claim expiry | Once; centrally clamped |
-| `adapters/reviewer-runtime/agent-runtime/index.mjs:395` — default review wall budget | Yes; runtime SDK request timeout | Once; supplied effective request budget replaces this default |
+| `adapters/reviewer-runtime/agent-runtime/index.mjs:395` — default review wall budget | Yes; runtime SDK request timeout | Once; reviewer request budgets are clamped last to the shared absolute ceiling |
 | `finalization/executor.mjs:95` — finalization lease TTL | No; persisted lease expiry | Once; centrally clamped |
-| `argus-security-drain.mjs:71` — per-model ceiling | Yes; summed into child subprocess timeout | Once from nominal config ceiling; fallback sum plus slack now clamped |
-| `argus-security-drain.mjs:72` — child timeout floor | Yes; child subprocess timeout | Once; maximum of floor and scaled model sum now clamped |
+| `argus-security-drain.mjs:71` — per-model ceiling | Yes; summed into child subprocess timeout | Once from nominal config ceiling; fallback sum plus slack clamped last to the shared absolute reviewer ceiling |
+| `argus-security-drain.mjs:72` — child timeout floor | Yes; child subprocess timeout | Once; maximum of floor and scaled model sum clamped last to the shared absolute reviewer ceiling |
 | `watcher-poll-guard.mjs:110` — poll deadline | Yes; watchdog `setTimeout` | Removed second scaling; effective inputs composed once, capped at 24 hours |
 
 The sibling `maxSeconds: Infinity` sites were also checked: streamed reviewer

@@ -1,3 +1,4 @@
+import './helpers/load-aware-timeout-fixture.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import Database from 'better-sqlite3';
@@ -729,6 +730,48 @@ test('kills and requeues an overdue orphan to pending when lease recovery is ena
     db,
     octokit: makeOctokit([]),
     now: new Date('2026-05-11T05:45:00.000Z'),
+    log,
+    probeSession: () => {
+      probeCount += 1;
+      return probeCount < 2
+        ? { alive: true, matched: true }
+        : { alive: false, matched: false };
+    },
+    killProcessGroup: (pgid, signal) => killed.push({ pgid, signal }),
+    fetchHeadSha: async () => HEAD_SHA,
+    onTerminalDeadSession: async (event) => settled.push(event),
+    leaseRecoveryEnabled: true,
+    reviewerDeadlineMs: 20 * 60 * 1000,
+    sleep: async () => {},
+  });
+
+  const row = readRow(db);
+  assert.equal(row.review_status, 'pending');
+  assert.equal(row.review_attempts, 3);
+  assert.deepEqual(killed, [{ pgid: 9001, signal: 'SIGTERM' }]);
+  assert.deepEqual(
+    settled.map(({ state, reason }) => ({ state, reason })),
+    [{ state: 'cancelled', reason: 'deadline-exceeded' }]
+  );
+  assert.match(row.failure_message, /^\[reviewer-timeout\]/);
+  assert.match(log.lines.join('\n'), /reviewer_reattach_deadline_requeued/);
+}, { timeout: 10_000 });
+
+test('REVIEWERLEASECAP-02: reattach reclaims a historical 14-hour lease at the shared ceiling', async () => {
+  const db = setupDb();
+  seedReviewing(db, {
+    reviewerTimeoutMs: 14 * 60 * 60 * 1000,
+    reviewerLeaseExpiresAt: '2026-05-11T19:10:00.000Z',
+  });
+  const killed = [];
+  const log = makeLog();
+  const settled = [];
+  let probeCount = 0;
+
+  await reconcileReviewerSessions({
+    db,
+    octokit: makeOctokit([]),
+    now: new Date('2026-05-11T08:11:00.000Z'),
     log,
     probeSession: () => {
       probeCount += 1;

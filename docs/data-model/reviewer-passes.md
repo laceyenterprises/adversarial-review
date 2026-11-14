@@ -387,9 +387,13 @@ The `metadata_json` object keeps two different identifiers separate:
 
 The reaper skips sessions still settling in the watcher and live process groups.
 It gives a completed run record five minutes to settle after its terminal
-heartbeat. Streamed idle reaping starts after 1.5 times the configured idle
+heartbeat. Model watchdogs bound load-scaled patience by the configured
+`reviewer.no_progress_timeout_ms` (default 15 minutes) and shared absolute
+ceiling; only model evidence resets streamed progress. Diagnostic stderr cannot
+renew it. Typed budget deferrals release through their reset-hold outcome.
+Streamed idle reaping starts after 1.5 times the configured idle
 timeout plus 30 seconds; ceiling reaping starts ten minutes after the scaled
-ceiling. These rules protect posting, throttling, and fallback phases that do
+ceiling (now absolutely bounded after scaling). These rules protect posting, throttling, and fallback phases that do
 not emit model stream events. A matching review claim is released only when the
 reaper can safely settle the pass.
 

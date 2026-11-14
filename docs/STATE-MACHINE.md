@@ -876,6 +876,15 @@ new PR
   The existing max-wait environment overrides
   can set either bound to zero to disable it.
 - `malformed` is intentionally sticky.
+- Reviewer claim and process deadlines apply `reviewer.ceiling_max_seconds`
+  (default three hours) after load scaling and budget composition. Historical
+  oversized claims are bounded from their original start during selection and
+  reattach. No-progress watchdogs use model output/stream evidence, bounded by
+  `reviewer.no_progress_timeout_ms` (default 15 minutes) and the same ceiling;
+  streamed diagnostic stderr does not extend model patience. Existing
+  `reviewer-stalled` session-fenced release and typed `github-budget-deferred`
+  reset holds remain budget-neutral. Process identity, confirmed drain, posted
+  review recovery and retry caps retain their authority.
 - GEMTIMEOUT-01: Gemini claims persist a single-call process timeout plus
   preparation/posting slack. A validated chunk plan extends only the matching
   active, open session's timeout and lease, before its parent timer is extended.

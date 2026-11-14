@@ -9,7 +9,7 @@ import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 import { promisify } from 'node:util';
 import { resolveReviewerTimeoutMs, resolveGeminiReviewerProcessTimeoutMs, resolveAgyChunkTimeoutCapMs } from '../../../reviewer-timeout.mjs';
-import { resolveReviewerCeilingSeconds, usesStreamedReviewerCeiling } from '../../../reviewer-timeout-model.mjs';
+import { resolveReviewerAbsoluteCeilingMs, resolveReviewerCeilingSeconds, usesStreamedReviewerCeiling } from '../../../reviewer-timeout-model.mjs';
 import { spawnCapturedProcessGroup } from '../../../process-group-spawn.mjs';
 import { resolveNodeBin } from '../../../node-interpreter.mjs';
 import { isPgidAlive, verifyPgidIdentity } from '../../../process-group-identity.mjs';
@@ -533,13 +533,13 @@ function createCliDirectReviewerRuntimeAdapter({
         [reviewerProcessPath, JSON.stringify(reviewerArgs)],
         {
           env: reviewerEnv,
-          timeout: usesStreamedReviewerCeiling(req.model)
+          timeout: Math.min(resolveReviewerAbsoluteCeilingMs(reviewerEnv), usesStreamedReviewerCeiling(req.model)
             ? Math.max(req.timeoutMs || 0, resolveReviewerCeilingSeconds({
               changedLines: Number.MAX_SAFE_INTEGER, env: reviewerEnv,
             }) * 1000)
             : isGeminiModel(req.model)
               ? geminiTimeoutMs
-              : req.timeoutMs || resolveReviewerTimeoutMs(reviewerEnv),
+              : req.timeoutMs || resolveReviewerTimeoutMs(reviewerEnv)),
           ...(isGeminiModel(req.model) ? { onMessage: message => {
             if (message?.type !== 'gemini-chunk-plan') return;
             const plan = message.plan;

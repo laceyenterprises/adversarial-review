@@ -1,4 +1,5 @@
 import { isGitHubRateLimitError } from './rate-limit-throttle.mjs';
+import { resolveReviewerAbsoluteCeilingMs } from './reviewer-timeout-model.mjs';
 import { persistReviewerAttributionForSession } from './reviewer-attribution.mjs';
 import { normalizeBuilderClass, normalizeReviewerModel, reviewerRefusesBuilder } from './adapters/subject/github-pr/routing.mjs';
 import { loadAwareTimeoutMs } from './load-aware-timeout.mjs';
@@ -153,9 +154,9 @@ function resolveNullPgidLaunchGraceMs(value) {
 }
 
 function reviewerRunTimeoutMs(row, fallbackMs) {
-  return parsePositiveInteger(row?.reviewer_timeout_ms)
+  return Math.min(resolveReviewerAbsoluteCeilingMs(), parsePositiveInteger(row?.reviewer_timeout_ms)
     || parsePositiveInteger(fallbackMs)
-    || resolveReviewerTimeoutMs();
+    || resolveReviewerTimeoutMs());
 }
 
 function errorText(err) {
@@ -556,7 +557,7 @@ function reviewerLeaseExpiryAt(startedAt, timeoutMs) {
   const startedAtMs = parseTime(startedAt);
   const timeout = parsePositiveInteger(timeoutMs);
   if (startedAtMs === null || timeout === null) return null;
-  return new Date(startedAtMs + timeout).toISOString();
+  return new Date(startedAtMs + Math.min(timeout, resolveReviewerAbsoluteCeilingMs())).toISOString();
 }
 
 async function reconcileReviewerSessions({
@@ -734,8 +735,10 @@ async function reconcileReviewerSessions({
       // reviewer through its lease, but do not let a permanent GitHub failure
       // pin the scarce credential slot forever after that lease expires.
       const startedAtMs = parseTime(row.reviewer_started_at) ?? parseTime(row.last_attempted_at);
-      const leaseExpiresAtMs = parseTime(row.reviewer_lease_expires_at)
-        ?? (startedAtMs === null ? null : startedAtMs + reviewerRunTimeoutMs(row, reviewerDeadlineMs));
+      const boundedExpiryMs = startedAtMs === null ? null : startedAtMs + reviewerRunTimeoutMs(row, reviewerDeadlineMs);
+      const persistedExpiryMs = parseTime(row.reviewer_lease_expires_at);
+      const leaseExpiresAtMs = boundedExpiryMs === null ? persistedExpiryMs
+        : Math.min(persistedExpiryMs ?? boundedExpiryMs, boundedExpiryMs);
       if (leaseExpiresAtMs === null || now.getTime() < leaseExpiresAtMs) continue;
 
       let pgid = parsePositiveInteger(row.reviewer_pgid);
@@ -1274,7 +1277,9 @@ async function reconcileReviewerSessions({
       // process is confirmed dead and GitHub is reprobed with no late review.
       // Any ambiguity falls back to sticky/manual recovery.
       const orphanAgeMs = now.getTime() - parseTime(row.reviewer_started_at);
-      const launchTimeoutMs = parsePositiveInteger(row.reviewer_timeout_ms);
+      const persistedTimeoutMs = parsePositiveInteger(row.reviewer_timeout_ms);
+      const launchTimeoutMs = persistedTimeoutMs === null ? null
+        : Math.min(persistedTimeoutMs, resolveReviewerAbsoluteCeilingMs());
       if (launchTimeoutMs === null && Number.isFinite(orphanAgeMs) && orphanAgeMs > reviewerDeadlineMs) {
         markStickyOrphan({
           statements,

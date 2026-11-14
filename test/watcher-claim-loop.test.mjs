@@ -597,8 +597,13 @@ globalThis.fetch = async (...args) => {
 };
 function readRows(db) {
   const rows = db.prepare(
-    'SELECT repo, pr_number, domain_id, subject_external_id, revision_ref, review_status, reviewer_head_sha, codex_broker_provider FROM reviewed_prs ORDER BY pr_number'
+    'SELECT repo, pr_number, domain_id, subject_external_id, revision_ref, review_status, reviewer_head_sha, codex_broker_provider, reviewer_timeout_ms FROM reviewed_prs ORDER BY pr_number'
   ).all();
+  for (const row of rows) {
+    if (row.review_status === 'reviewing' && row.reviewer_timeout_ms != null) {
+      assert.ok(row.reviewer_timeout_ms <= 10_800_000, 'REVIEWERLEASECAP-02: claim is bounded after scaling');
+    }
+  }
   return Object.fromEntries(rows.map((row) => [String(row.pr_number), row]));
 }
 

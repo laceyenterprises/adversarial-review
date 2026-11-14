@@ -395,11 +395,12 @@ function spawnCapturedProcessGroup(command, args, options = {}) {
           requestKill(`maxBuffer exceeded (${maxBuffer} bytes; saw ${exceeded} bytes)`);
           return;
         }
-        if (stdoutSize !== lastStdoutSize || stderrSize !== lastStderrSize) {
+        const stdoutProgress = stdoutSize !== lastStdoutSize;
+        if (stdoutProgress || stderrSize !== lastStderrSize) {
           lastStdoutSize = stdoutSize;
           lastStderrSize = stderrSize;
           noteFirstOutput();
-          armProgressTimer();
+          if (stdoutProgress || !progressOnStdoutOnly) armProgressTimer();
         }
       }, intervalMs);
     }

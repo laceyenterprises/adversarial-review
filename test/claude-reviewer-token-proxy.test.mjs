@@ -1,3 +1,6 @@
+import './helpers/load-aware-timeout-fixture.mjs';
+import { resolveProgressTimeoutMs } from '../src/reviewer-timeout.mjs';
+import { ClientRequest } from 'node:http';
 import './helpers/registry-session-fixture.mjs';
 import { installDispatchFileProducerFixture } from './helpers/dispatch-files-fixture.mjs';
 installDispatchFileProducerFixture();
@@ -584,4 +587,17 @@ test('corporate reviewer spawn, proactive renewal and rejection renewal keep the
     await proxy?.close();
     await upstream.close();
   }
+});
+
+test('REVIEWERLEASECAP-02: token proxy upstream idle timer is independently bounded', async t => {
+  const delays = [];
+  const original = ClientRequest.prototype.setTimeout;
+  t.mock.method(ClientRequest.prototype, 'setTimeout', function(ms, callback) {
+    delays.push(ms);
+    return original.call(this, ms, callback);
+  });
+  await withProxy({ proxy: { upstreamIdleTimeoutMs: 100_000_000 } }, async ({ proxy }) => {
+    assert.equal((await post(proxy.baseUrl)).status, 200);
+  });
+  assert.deepEqual(delays, [resolveProgressTimeoutMs()]);
 });

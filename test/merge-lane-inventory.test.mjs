@@ -42,6 +42,7 @@ test('default inventory reader bounds a hanging lookup and records the failure',
   let calls = 0;
   let childStarted;
   const started = new Promise(resolve => { childStarted = resolve; });
+  let child;
   let settled = false;
   const pending = collect(codeRoot, 'unused-data', {
     config: { repos: ['example/repo'] }, holdLabels: [], budgetMs: 50,
@@ -49,13 +50,21 @@ test('default inventory reader bounds a hanging lookup and records the failure',
     execFileImpl: async (_command, _args, options) => {
       calls += 1;
       signal = options.signal;
+      signal.throwIfAborted();
+      child = new Promise((_, reject) => {
+        signal.addEventListener('abort', () => {
+          reject(new DOMException('Mock child aborted', 'AbortError'));
+        }, { once: true });
+      });
       childStarted();
-      return new Promise(() => {});
+      return child;
     },
   }).then(result => { settled = true; return result; });
   // Real metering admission does filesystem I/O. Reach the child explicitly
   // before advancing the budget; a Promise-only drain cannot prove admission.
-  await started;
+  await Promise.race([started, pending.then(result => {
+    assert.fail(`Inventory collection finished before child start: ${JSON.stringify(result.errors)}`);
+  })]);
   assert.ok(signal instanceof AbortSignal);
   assert.equal(signal.aborted, false);
   await clock.advance(49);
@@ -65,6 +74,7 @@ test('default inventory reader bounds a hanging lookup and records the failure',
   const result = await pending;
   assert.equal(calls, 1);
   assert.equal(signal.aborted, true);
+  await assert.rejects(child, { name: 'AbortError' });
   assert.deepEqual(result.repositories, {});
   assert.equal(result.errors.length, 1);
   assert.equal(result.errors[0].reason, 'merge-lane-inventory-lookup-timeout');

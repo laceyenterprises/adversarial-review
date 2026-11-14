@@ -827,6 +827,7 @@
         "src/exhausted-head-verdict.mjs"
       ],
       "deliveryHeadWaitFields": ["head_wait_started_at"],
+      "failureDiagnosticsIndex": { "name": "idx_reviewer_passes_status_ended_at", "columns": ["status", "ended_at"], "createdBy": "src/review-state.mjs" },
       "verdictConsistencyFields": ["verdict_inconsistent"],
       "reviewerExecutionModelSources": ["env-pin", "registry", "committed-seed", "runtime-display-token"],
       "reviewerExecutionHarnesses": ["claude-code", "codex", "antigravity", "gemini-cli"],

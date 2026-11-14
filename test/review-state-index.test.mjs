@@ -1,8 +1,8 @@
-// Run with: node --test src/review-state-index.test.mjs
+// Run with: node --test test/review-state-index.test.mjs
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import Database from 'better-sqlite3';
-import { ensureReviewStateSchema } from './review-state.mjs';
+import { ensureReviewStateSchema } from '../src/review-state.mjs';
 
 for (const legacy of [false, true]) {
   test(`readyz failure query uses a bounded index on ${legacy ? 'legacy' : 'fresh'} databases`, (t) => {

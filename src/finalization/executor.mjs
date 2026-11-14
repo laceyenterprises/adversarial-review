@@ -34,6 +34,9 @@ import { fold } from './ledger-fold.mjs';
 import { eligible } from './eligibility.mjs';
 import { readQueueEvidence } from './queue-read.mjs';
 import { createWorkflowEffects } from './workflow-effects.mjs';
+import { createExactHeadReviewSurface } from './exact-head-review.mjs';
+import { finalizationOwner } from './live-owner.mjs';
+import { isOperatorHeld } from '../operator-hold-labels.mjs';
 import { escalated, finalized, halted, closed, remediationDispatched, resolveSubjectKey } from './ledger-events.mjs';
 import {
   resolveMergeSurface,
@@ -78,6 +81,8 @@ function outcome(subjectKey, decision, { status, action, observedAt, reason, det
  *   mergeFallback?: object | null,
  *   identitySurface?: object | null,
  *   remediationSurface?: { dispatch(args): Promise<any> } | null,
+ *   rootDir?: string | null,
+ *   reviewSurface?: { inspect(args): any, request(args): any } | null,
  *   closeSurface?: { close(args): Promise<any> } | null,
  *   liveSurface?: { read(args): Promise<any> } | null,
  *   mergeMethod?: string,
@@ -95,6 +100,8 @@ export function createFinalizationExecutor({
   mergeFallback = null,
   identitySurface = null,
   remediationSurface = null,
+  rootDir = null,
+  reviewSurface = rootDir ? createExactHeadReviewSurface({ rootDir }) : null,
   closeSurface = null,
   liveSurface = null,
   recoverySurface = null,
@@ -171,6 +178,42 @@ export function createFinalizationExecutor({
       const result = await effects.deliver(subjectKey, decision, observedAt);
       return outcome(subjectKey, decision, { status: result.ok ? 'executed' : 'deferred',
         action: 'deliver', reason: result.reason, observedAt });
+    }
+    if (decision.nextAction === 'request-reexact-review') {
+      if (killSwitchOn()) return recordKillSwitchEscalation(subject, decision, state, observedAt);
+      if (!reviewSurface?.request) return outcome(subjectKey, decision, {
+        status: 'deferred', action: decision.nextAction, observedAt, reason: 'review capability unavailable',
+      });
+      // Check both authorities immediately before local queue issuance. A head
+      // move during inspection/lease acquisition must never queue the old head.
+      // Recovery still gets a bounded read after verdict patience has expired.
+      const live = await bounded(request => liveSurface.read(request), { subjectKey, revisionRef: rev, observedAt }, decision);
+      const current = fold(ledgerStore.read(subject));
+      const reviews = live?.ownerSnapshot?.observations?.reviews;
+      const verdictArrived = reviews?.state === 'complete'
+        && reviews.value?.headSha === rev && reviews.value?.verdict;
+      const ownerArrived = finalizationOwner(live?.ownerSnapshot, observedAt).live
+        || isOperatorHeld(live?.ownerSnapshot?.observations?.pr?.value?.labels);
+      if (live?.state !== 'open' || live.head !== rev || !live.sourceRef
+        || verdictArrived || ownerArrived || current.eventCount !== state.eventCount) return outcome(subjectKey, decision, {
+        status: 'deferred', action: 're-decide', observedAt, reason: 'world moved before review request',
+      });
+      if (killSwitchOn()) return recordKillSwitchEscalation(subject, decision, state, observedAt);
+      const operationId = decision.operationId;
+      effects.emit(subjectKey, observedAt, 'operation_requested', {
+        operationId, action: decision.nextAction, revisionRef: rev,
+      });
+      const result = await reviewSurface.request({ subjectKey, revisionRef: rev, observedAt,
+        idempotencyKey: operationId });
+      const accepted = result?.triggered === true || result?.status === 'already-pending'
+        || result?.explicitReviewIntent?.state === 'consumed';
+      if (accepted) effects.emit(subjectKey, observedAt, 'operation_observed', {
+        operationId, outcome: 'completed', result: {
+          requestId: operationId, headSha: rev, state: result?.explicitReviewIntent?.state ?? 'pending',
+        },
+      });
+      return outcome(subjectKey, decision, { status: accepted ? 'executed' : 'deferred',
+        action: decision.nextAction, observedAt, reason: result?.reason });
     }
     const recoveryActions = ['recover-custody', 'reconcile-custody', 'recover-primary',
       'conflict-rebase', 'merge-main', 'reconcile-dispatch', 'reconcile-effects', 'recover-coverage', 'refresh-evidence'];
@@ -473,10 +516,16 @@ export function createFinalizationExecutor({
     }
 
     const ownerSnapshot = live?.ownerSnapshot;
+    let finalRemediatorHead = null;
     try {
       const leasedEvents = ledgerStore.read(subject);
       let leasedState = fold(leasedEvents);
-      let decision = eligible(leasedState, policy, { observedAt, load, ownerSnapshot });
+      if (reviewSurface?.inspect && !(leasedState.revisions?.[leasedState.currentRevision]?.verdicts ?? []).length) {
+        finalRemediatorHead = await reviewSurface.inspect({
+          subjectKey, revisionRef: leasedState.currentRevision,
+        });
+      }
+      let decision = eligible(leasedState, policy, { observedAt, load, ownerSnapshot, finalRemediatorHead });
       if (!leasedState.workflow.anchors[decision.episode] && decision.anchorAt) {
         effects.emit(subjectKey, observedAt, 'decision_anchored', {
           episode: decision.episode, anchorAt: decision.anchorAt, nominalMs: decision.nominalMs,
@@ -484,7 +533,7 @@ export function createFinalizationExecutor({
           codeVersion: decision.codeVersion, loadEvidence: decision.loadEvidence,
         });
         leasedState = fold(ledgerStore.read(subject));
-        decision = eligible(leasedState, policy, { observedAt, load, ownerSnapshot });
+        decision = eligible(leasedState, policy, { observedAt, load, ownerSnapshot, finalRemediatorHead });
       }
       // decide → execute back-to-back under the lease; tick passes the
       // post-acquire folded state so execute() does not perform a third fold.
@@ -495,7 +544,7 @@ export function createFinalizationExecutor({
         foldedState: leasedState, token: executionToken,
       });
     } catch (error) {
-      return outcome(subjectKey, eligible(state, policy, { observedAt, load, ownerSnapshot }), {
+      return outcome(subjectKey, eligible(state, policy, { observedAt, load, ownerSnapshot, finalRemediatorHead }), {
         status: 'deferred', action: 'refresh-evidence', observedAt, reason: 'leased evidence unavailable', detail: error.message,
       });
     } finally {

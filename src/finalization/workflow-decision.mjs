@@ -1,5 +1,7 @@
 import { loadAwareTimeoutMs } from '../load-aware-timeout.mjs';
 import { finalizationOwner } from './live-owner.mjs';
+import { isFinalRemediatorHead, exactHeadReviewRequestId } from './exact-head-review-proof.mjs';
+import { isOperatorHeld } from '../operator-hold-labels.mjs';
 
 export function workflowEpisode(state, policy) {
   const pending = state.remediation.dispatched.find(d => d.revisionRef === state.currentRevision
@@ -91,7 +93,10 @@ export function workflowDecision(state, policy, observation, core) {
   }
   const killed = Object.values(w?.kills ?? {}).find(kill => !['absent', 'completed', 'merged'].includes(w.operations[kill.operationId]?.observation?.outcome));
   if (killed) return blocked('reconcile-effects', 'worker kill requires effect reconciliation', { operationId: killed.operationId });
-  const unresolved = Object.values(w?.operations ?? {}).find(op => !op.observation);
+  // Exact-head queue requests can safely replay their durable receipt. Old-head
+  // requests are cancelled by the watcher's explicit-intent lifecycle reader.
+  const unresolved = Object.values(w?.operations ?? {}).find(op => !op.observation
+    && op.intent.action !== 'request-reexact-review');
   if (unresolved) return blocked('reconcile-effects', 'operation effect requires readback', { operationId: unresolved.intent.operationId });
   if (w?.provenance && (w.provenance.revisionRef !== head || w.primaryUnknown || w.provenance.primaryChange !== 'preserved')) {
     return blocked('recover-primary', 'primary-change evidence unknown');
@@ -103,6 +108,20 @@ export function workflowDecision(state, policy, observation, core) {
     if (w.mergeability.mergeability !== 'MERGEABLE') return blocked('refresh-evidence', 'mergeability unknown');
   }
   if (pending) return blocked('reconcile-dispatch', 'remediation admission or completion pending', { operationId: pending.operationId });
+  const proof = observation.finalRemediatorHead ?? observation.ownerSnapshot?.finalRemediatorHead;
+  const snapshotReviews = observation.ownerSnapshot?.observations?.reviews;
+  const currentSnapshotVerdict = snapshotReviews?.state === 'complete'
+    && snapshotReviews.value?.headSha === head && snapshotReviews.value?.verdict;
+  if (!(state.revisions?.[head]?.verdicts ?? []).length && !currentSnapshotVerdict
+    && !isOperatorHeld(observation.ownerSnapshot?.observations?.pr?.value?.labels)
+    && isFinalRemediatorHead(proof, state.subjectKey, head)) {
+    const operationId = exactHeadReviewRequestId(head);
+    const requested = w?.operations[operationId]?.observation?.outcome === 'completed';
+    return blocked(requested ? 'monitor-review' : 'request-reexact-review',
+      requested ? 'awaiting verdict for requested final remediator head'
+        : 'final remediator head requires strict exact-head review',
+      { operationId, evidence: [...base.evidence, proof.sourceRef] });
+  }
   if (core.kind === 'halt') return blocked('recover-coverage', 'failed final remediation requires recovery');
   if (core.kind === 'finalize-now' && !w?.provenance) {
     return blocked('recover-primary', 'primary-change provenance unavailable');

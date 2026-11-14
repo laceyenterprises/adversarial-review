@@ -72,6 +72,34 @@ If a leased ledger read or execution fails, the deferred `refresh-evidence`
 outcome retains that snapshot when recomputing its diagnostic decision, so a
 known live owner remains a `wait` with `liveOwner` evidence.
 
+For a completed remediator's independently recorded final push, v2 requests an
+exact-head review when the job's round budget is spent, automatic re-review was
+suppressed, and the head has no verdict. Hammer handoff workers, unproven pushes,
+other heads and heads with verdicts retain their existing paths. Shadow reads
+the local publication proof and stores `wait` / `request-reexact-review` with its
+source reference; it never queues a review.
+
+Compose the live subject executor with the app `rootDir` (which supplies
+`createExactHeadReviewSurface`) or inject that surface as `reviewSurface`.
+Its `inspect` reads the same completed-job proof used by shadow. Before issuing,
+the leased executor refreshes authoritative lifecycle/head, verdict and owner
+evidence and checks the ledger generation. The authoritative refresh includes
+the decided revision and clips its read budget to the remaining workflow episode
+time, with the shared one-millisecond minimum for recovery after expiry.
+The surface rechecks publication proof and atomically preserves any newly
+posted verdict at that head before
+calling `requestReviewRereview` with a head-bound explicit receipt,
+preserved budgets and the existing exact-head recovery reason. It neither
+bumps nor refunds rounds. Unavailable composition stays owned and deferred.
+
+The stable request ID is `final-remediator-review:<head>` within repo/PR
+identity. Existing explicit-intent transactions coalesce requests from other
+paths and retain replay receipts across restart and lost acknowledgements.
+After acceptance the workflow selects `monitor-review`; an exact-head verdict
+resumes normal eligibility. The existing watcher cancels pending intents on
+head change or PR termination before admission. Shadow writes never reserve a
+live request, so shadow-to-live transfer cannot spend the request prematurely.
+
 The existing autonomous execution brake intercepts dispatch, conflict/custody
 mutation, landing, close and PMA mutation. Observation/status continues. Explicit
 operator holds require authenticated release; head/code changes do not waive them.

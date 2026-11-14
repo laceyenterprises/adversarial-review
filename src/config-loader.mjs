@@ -2519,6 +2519,12 @@ function schemaV1() {
         __type: TYPE_DICT,
         __strict: true,
         __keys: {
+          tenure: {
+            __type: TYPE_DICT, __strict: true,
+            __keys: {
+              enabled: { __type: TYPE_BOOL, __default: false },
+            },
+          },
           overload_deferral: {
             __type: TYPE_DICT, __strict: true,
             __keys: {
@@ -4054,6 +4060,10 @@ export const ENV_ALIASES = {
   'reviewer.review_population_retry.backoff_seconds': {
     canonical: 'AGENT_OS_REVIEWER_REVIEW_POPULATION_RETRY_BACKOFF_SECONDS',
     aliases: [['ADVERSARIAL_REVIEW_POPULATION_RETRY_BACKOFF_SECONDS', identity]],
+  },
+  'worker_pool.tenure.enabled': {
+    canonical: 'AGENT_OS_WORKER_POOL_TENURE_ENABLED',
+    aliases: [],
   },
   'worker_pool.worker_process_niceness': {
     canonical: 'AGENT_OS_WORKER_POOL_WORKER_PROCESS_NICENESS',

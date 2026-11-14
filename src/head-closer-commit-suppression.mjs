@@ -572,6 +572,7 @@ export async function getHeadCloserCommitSuppression({
   statImpl = stat,
   env = process.env,
   readPrTenureImpl = readPrTenure,
+  onTenureReadError = error => logger?.warn?.(`[watcher] tenure suppression lookup unavailable for ${repoPath}#${prNumber}: ${error?.message || error}`),
 } = {}) {
   const sha = String(headSha || '').trim();
   if (!repoPath || !sha) return { suppressed: false, reason: null };
@@ -580,7 +581,7 @@ export async function getHeadCloserCommitSuppression({
   try {
     prTenure = await readPrTenureImpl({ repo: repoPath, prNumber, rootDir, env });
   } catch (error) {
-    logger?.warn?.(`[watcher] tenure suppression lookup unavailable for ${repoPath}#${prNumber}: ${error?.message || error}`);
+    onTenureReadError(error);
     // Unknown tenure cannot certify a closer exemption. Leave the head
     // reviewable without falling through to the untenured suppression path.
     return active ? { suppressed: true, reason: 'closer-publication-unconfirmed', headSha: sha }

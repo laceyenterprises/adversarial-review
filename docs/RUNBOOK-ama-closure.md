@@ -6570,12 +6570,20 @@ Pending CI alone is work-complete; unprobed withheld-head CI is recorded as
 
 HAM finding authority is scoped per reviewer family on the same reviewed head. An authoritative review from any family on a newer descendant head supersedes older-head citations. Finding disputes use the same freshness rule; the hammer's withdrawal is final and requests no re-review. The hammer prompt includes the effective strict non-blocking policy; ama-check and the in-lease gate resolve module config and code-pr domain policy with the same precedence as daemon closure.
 
-For a PR whose stable build launch exposes `tenureId`, remediation that changes
+Watcher tenure review routing requires effective `worker_pool.tenure.enabled: true`
+through the existing module/top-level/local/env config cascade; absent defaults
+to false. `AGENT_OS_WORKER_POOL_TENURE_ENABLED` is the corresponding env projection.
+Disabled routing performs no tenure lookup or tenure-specific queue write.
+When enabled, for a PR whose stable build launch exposes `tenureId`, remediation that changes
 the reviewed head requires an independent exact-head review outside the author's
 harness family. `HAM-Validated-Head` and `HAM-Terminal-Remediation-Head` do not
 waive this requirement. The watcher also applies it before a completion receipt
 arrives, so every changed head of a tenured PR remains reviewable. An unavailable
-build or stage launch read defers scheduling; an available build launch without `tenureId` uses the
+build or stage launch read skips only tenure-specific queueing in that poll:
+ordinary review dispatch, re-review handling and closure evaluation continue.
+The watcher warns once per PR/head per process with the read reason.
+The unknown result is retained in suppression, so it cannot certify a closer
+exemption as if tenure were absent. An available build launch without `tenureId` uses the
 existing untenured behavior.
 When an exact-head completion identifies another stage of the same tenure,
 the reviewer also excludes that stage's harness family using the existing

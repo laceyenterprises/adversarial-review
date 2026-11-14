@@ -1,7 +1,9 @@
 import './helpers/rate-limit-state-isolation.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync, readFileSync } from 'node:fs';
+import { mkdtempSync, rmSync, readFileSync, writeFileSync } from 'node:fs';
+import { loadConfig } from '../src/config-loader.mjs';
+import { loadRoleConfig } from '../src/role-config.mjs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { readPrTenure, tenureReviewReason, tenureReviewRange, tenureReviewerAllowed,
@@ -17,6 +19,31 @@ import { renderHammerProcedure } from '../src/hammer-procedure.mjs';
 import { isDaemonMergeReviewAllowed } from '../src/ama/daemon-merge.mjs';
 
 const repo = 'example/widget';
+const tenureEnabledEnv = { AGENT_OS_WORKER_POOL_TENURE_ENABLED: 'true' };
+test('TENUREGATE-01: disabled shared tenure reader never reads opener, launch or head provenance', async () => {
+  const forbidden = async () => assert.fail('disabled tenure cannot read dispatch evidence');
+  assert.equal(await readPrTenure({ repo, prNumber: 7, headSha,
+    env: { AGENT_OS_WORKER_POOL_TENURE_ENABLED: 'false',
+      ADVERSARIAL_DISPATCH_READS_ENABLED: '1', ADVERSARIAL_WORKER_OBSERVATIONS_ENABLED: '1' },
+    readBuildIdentityImpl: forbidden, readLaunchesImpl: forbidden, readHeadProvenanceImpl: forbidden }), null);
+});
+test('TENUREGATE-01: tenure enabled uses the existing module/top/env config cascade and defaults off', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'tenure-config-'));
+  try {
+    const topPath = join(dir, 'top.yaml'), modulePath = join(dir, 'module.yaml');
+    writeFileSync(topPath, 'version: 1\n');
+    writeFileSync(modulePath, '{}\n');
+    const read = (env = {}) => loadRoleConfig({ topPath, modulePaths: [modulePath], env, loaderImpl: loadConfig })
+      .get('worker_pool.tenure.enabled');
+    assert.equal(read(), false);
+    writeFileSync(modulePath, 'worker_pool:\n  tenure:\n    enabled: true\n    scope: ticket\n');
+    assert.equal(read(), true);
+    writeFileSync(topPath, 'version: 1\nworker_pool:\n  tenure:\n    enabled: false\n');
+    assert.equal(read(), false);
+    assert.equal(read({ AGENT_OS_WORKER_POOL_TENURE_ENABLED: 'true' }), true);
+    assert.throws(() => read({ AGENT_OS_WORKER_POOL_TENURE_ENABLED: 'invalid' }), { name: 'AgentOSConfigError' });
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
 const previousHead = 'a'.repeat(40), headSha = 'b'.repeat(40), otherHead = 'c'.repeat(40);
 const at = '2026-01-01T00:00:00.000Z';
 const tenure = { tenureId: 'ten_fixture', workerClass: 'codex', launchRequestId: 'lrq_build' };
@@ -29,7 +56,7 @@ function root(t) {
 
 for (const tenureId of [undefined, null, '', 'ten_fixture']) {
   test(`build launch tenure routing: ${String(tenureId)}`, async () => {
-    const result = await readPrTenure({ repo, prNumber: 7, env: {},
+    const result = await readPrTenure({ repo, prNumber: 7, env: tenureEnabledEnv,
       readBuildIdentityImpl: async args => {
         assert.equal(args.headSha, undefined, 'stable opener survives remediation head movement');
         return { ok: true, rows: [{ launch_request_id: 'lrq_build', worker_class: 'codex' }] };
@@ -44,16 +71,16 @@ for (const tenureId of [undefined, null, '', 'ten_fixture']) {
 }
 
 test('unavailable launch evidence cannot establish untenured behavior', async () => {
-  await assert.rejects(readPrTenure({ repo, prNumber: 7, env: {},
+  await assert.rejects(readPrTenure({ repo, prNumber: 7, env: tenureEnabledEnv,
     readBuildIdentityImpl: async () => ({ ok: true, rows: [{ launch_request_id: 'lrq_build' }] }),
     readLaunchesImpl: async () => ({ ok: false }) }), /tenure-build-launch-unavailable/);
-  assert.equal(await readPrTenure({ repo, prNumber: 7, env: {} }), null, 'standalone stays offline');
+  assert.equal(await readPrTenure({ repo, prNumber: 7, env: tenureEnabledEnv }), null, 'standalone stays offline');
 });
 
 for (const launchId of [undefined, null, '', 'lrq_unindexed']) {
   test(`incomplete stage launch preserves opener review routing (${String(launchId)})`, async () => {
     const calls = [];
-    const result = await readPrTenure({ repo, prNumber: 7, headSha, env: {},
+    const result = await readPrTenure({ repo, prNumber: 7, headSha, env: tenureEnabledEnv,
       readBuildIdentityImpl: async () => ({ ok: true, rows: [{ launch_request_id: 'lrq_build' }] }),
       readHeadProvenanceImpl: async () => ({ ok: true, rows: [
         { head_sha: headSha, launch_request_id: launchId, worker_class: 'hammer-claude' },
@@ -72,7 +99,7 @@ for (const launchId of [undefined, null, '', 'lrq_unindexed']) {
 }
 
 test('unreadable stage launch and mismatched head evidence still defer routing', async () => {
-  const options = { repo, prNumber: 7, headSha, env: {},
+  const options = { repo, prNumber: 7, headSha, env: tenureEnabledEnv,
     readBuildIdentityImpl: async () => ({ ok: true, rows: [{ launch_request_id: 'lrq_build' }] }),
     readHeadProvenanceImpl: async () => ({ ok: true, rows: [{ head_sha: headSha, launch_request_id: 'lrq_stage' }] }),
     readLaunchesImpl: async selector => selector.launch_request_ids[0] === 'lrq_build'
@@ -86,7 +113,7 @@ test('unreadable stage launch and mismatched head evidence still defer routing',
 });
 
 for (const sameTenure of [true, false]) test(`exact-head producer family binds to the PR tenure (same=${sameTenure})`, async () => {
-  const result = await readPrTenure({ repo, prNumber: 7, headSha, env: {},
+  const result = await readPrTenure({ repo, prNumber: 7, headSha, env: tenureEnabledEnv,
     readBuildIdentityImpl: async args => {
       assert.equal(args.headSha, undefined);
       return { ok: true, rows: [{ launch_request_id: 'lrq_build', worker_class: 'codex' }] };
@@ -176,13 +203,16 @@ test('transient tenure lookup failure leaves suppression unresolved without prob
 });
 
 test('transient tenure lookup failure preserves active writer custody without certifying its head', async () => {
+  const errors = [];
   const result = await getHeadCloserCommitSuppression({ repoPath: repo, prNumber: 7, headSha,
     readPrTenureImpl: async () => { throw new Error('dispatch-unavailable'); },
-    logger: quiet,
+    logger: { warn: () => assert.fail('caller owns tenure warning deduplication') },
+    onTenureReadError: error => errors.push(error.message),
     activeHammerPublicationImpl: () => ({ suppressed: true, reason: 'active-closer-merge-lease', headSha }),
     fetchVerifiedCommitFromLocalGitImpl: () => assert.fail('unknown tenure cannot certify a head'),
   });
   assert.deepEqual(result, { suppressed: true, reason: 'closer-publication-unconfirmed', headSha });
+  assert.deepEqual(errors, ['dispatch-unavailable']);
 });
 for (const status of ['pending', 'pending-upstream', 'ci-blocked']) {
   test(`already queued tenure request is read-only while another writer holds reviews.db (${status})`, t => {

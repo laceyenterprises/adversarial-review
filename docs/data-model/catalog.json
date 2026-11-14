@@ -729,9 +729,19 @@
       "path": "docs/data-model/finalization-shadow.md",
       "store": "data/reviews.db",
       "schemaSurface": "migrations/20260718_finalization_shadow.sql",
+      "relatedSchemaSurfaces": [
+        "src/finalization/shadow-store.mjs",
+        "src/finalization/shadow-pattern.mjs",
+        "migrations/20261113_finalization_shadow_patterns.sql"
+      ],
       "owner": "ARC-16 Merge Authority v2 shadow mode",
       "liveCoverage": "Optional live provenance is persisted with comparison pairs; SQL and fallback coverage exclude non-organic live and queue rows.",
-      "queueExtension": "migrations/20261028_finalization_queue_shadow.sql; optional payload dedupeKey and queue evidence; atomic unique pairs, bidirectional operator dispositions and lifecycle metric denominators"
+      "queueExtension": "migrations/20261028_finalization_queue_shadow.sql; optional payload dedupeKey and queue evidence; atomic unique pairs, bidirectional operator dispositions and lifecycle metric denominators",
+      "patternExtension": "MLRDISPO-01: finalization_shadow_patterns stores exact versioned key, kind, principal, note, ticket reference, evidence sample IDs, creation, exclusive expiry and one-way audited revocation. One unrevoked record per key; no observation backfill.",
+      "optionalFields": [
+        "finalization_shadow.payload_json.patternKey: exact versioned key or null",
+        "finalization_shadow.payload_json.patternDisposition: captured pattern ID and immutable audit snapshot; individual overrides retain precedence"
+      ]
     },
     {
       "id": "finalization-executor-lease",

@@ -16,6 +16,8 @@ import type {
   RemediationCommitMetadata,
   RemediationReply,
   RunResult,
+  ShadowPatternDisposition,
+  ShadowReportModel,
   Stage,
   StageState,
   SubjectChannelAdapter,
@@ -28,6 +30,22 @@ import type {
   HammerReviewEvidenceDiagnostic,
   HammerReviewEvidenceRefusal,
 } from '../../../src/ama/hammer-edit-plan-contracts.js';
+
+const shadowReportEvidence: NonNullable<ShadowReportModel['divergences'][number]['evidence']> = {
+  v1SourceRef: null,
+  queue: null,
+  live: { source: 'synthetic' },
+  disposition: null,
+  patternDisposition: {
+    id: 1, key: 'synthetic-pattern', kind: 'equivalent',
+    principal: 'synthetic-reviewer', note: 'Synthetic evidence reviewed.',
+    ticketRef: null, evidenceSampleIds: [1], createdAt: '2026-01-01T00:01:00.000Z',
+    expiresAt: null, revocation: null,
+  },
+};
+const reportedPattern: ShadowPatternDisposition | null | undefined = shadowReportEvidence.patternDisposition;
+const legacyShadowEvidence: ShadowReportModel['divergences'][number]['evidence'] = { disposition: null };
+void [reportedPattern, legacyShadowEvidence];
 
 const editPlanDiagnostic: HammerReviewEvidenceDiagnostic = 'review-head-mismatch';
 const editPlanRefusal: HammerReviewEvidenceRefusal = {

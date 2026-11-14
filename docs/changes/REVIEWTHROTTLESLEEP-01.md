@@ -68,3 +68,8 @@ run passed all 207 tests. Lint (zero errors), contract typechecking, and the
 research walkthrough passed. The additional ARC10 local selection reported
 `local-battery-skipped-github-required-gate-authoritative`; exact-head GitHub
 required checks remain mandatory.
+
+The close controller's 80-file selection passed 2,192 tests (two pre-existing
+skips), then correctly rejected checkout telemetry writes. Two synchronous
+GitHub fixtures now explicitly disable unrelated API logging in their minimal
+child environments; production telemetry and telemetry assertions remain intact.

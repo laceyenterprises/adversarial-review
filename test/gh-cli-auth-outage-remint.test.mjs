@@ -418,7 +418,7 @@ for (const resource of ['core', 'graphql']) {
 process.stderr.write('fixture diagnostic\\n');
 `, { mode: 0o755 });
   const result = await meteredExecFile(promisify(execFile), 'gh', ['pr', 'view', '1'], {
-    env: { PATH: `${dir}:${process.env.PATH}` }, encoding: 'utf8', timeout: 2000,
+    env: { PATH: `${dir}:${process.env.PATH}`, GHO_API_CALL_LOG_DISABLE: '1' }, encoding: 'utf8', timeout: 2000,
   });
   assert.equal(result.stdout, 'fixture stdout');
   assert.equal(result.stderr, 'fixture diagnostic\n');
@@ -476,7 +476,7 @@ process.stderr.write('* Request at fixture\\n< HTTP/2.0 429 Too Many Requests\\n
 process.exit(1);
 `, { mode: 0o755 });
   assert.throws(() => meteredExecFileSync(execFileSync, 'gh', ['api', 'graphql'], {
-    env: { PATH: `${dir}:${process.env.PATH}` }, encoding: 'utf8', timeout: 2000,
+    env: { PATH: `${dir}:${process.env.PATH}`, GHO_API_CALL_LOG_DISABLE: '1' }, encoding: 'utf8', timeout: 2000,
   }), err => err.stderr === 'gh: rate limit exceeded\n' && !err.message.includes('fixture-private-body'));
   const state = JSON.parse(readFileSync(join(dir, 'state.json'), 'utf8'));
   assert.equal(state.buckets.graphql.rateLimitedCalls, 1);

@@ -55,14 +55,22 @@ None. Product code and CI configuration are unchanged.
 
 ## Verification
 
-- All 30 converted files passed five runs each on Node 22.22.3 using
-  `node test/run-tests.mjs` with the converted file paths. Test commands used
-  the network guard and process-group validation wrapper, each bounded to
-  at most 600 seconds.
+- Remediation verification on 2026-11-14: all 30 converted files passed one
+  run on Node 22.22.3 using `node test/run-tests.mjs` with the converted file
+  paths (1,383 tests passed; zero failures). The command used the network guard
+  and process-group validation wrapper, bounded to 600 seconds. This replaces
+  the earlier five-run claim with evidence reproduced in this round.
+- The reviewed head `b1980a79b5fa6b7de2bc810aee5b045d3a40c95d`
+  already imports `fs` and `syncBuiltinESMExports` in
+  `test/finalization-queue-routing.test.mjs:5-6`, and `utimesSync` in
+  `test/handoff-wake.test.mjs:6`. Both files passed in the run above; no import
+  correction was needed.
 - `npm run lint`: passed (zero errors; existing warnings).
-- ESLint over all converted files: passed (zero errors; existing warnings).
 - `npm run typecheck:contracts`: passed.
-- `node scripts/audit-cdm-rederivation.mjs --strict --format json`: passed.
 - `bash demo/research-finding-walkthrough.sh`: passed with byte-stable output.
-- `npm test`: incomplete; the full 864-file selection exceeded the
-  600-second command limit. This is not a full-suite pass.
+- Earlier implementation verification (not repeated in this remediation):
+  ESLint over all converted files and
+  `node scripts/audit-cdm-rederivation.mjs --strict --format json` were recorded
+  as passed. `npm test` was incomplete: the full 864-file selection exceeded
+  the 600-second command limit. This is not a full-suite pass; full-suite
+  validation remains with PR-head CI.

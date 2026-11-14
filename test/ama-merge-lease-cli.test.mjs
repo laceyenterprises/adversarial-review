@@ -1,10 +1,14 @@
 import './helpers/load-aware-timeout-fixture.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import fsExt from 'fs-ext';
 import {
+  closeSync,
   existsSync,
   mkdirSync,
   mkdtempSync,
+  openSync,
+  readFileSync,
   rmSync,
   renameSync,
   statSync,
@@ -15,9 +19,10 @@ import {
 import { EventEmitter } from 'node:events';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { hostname, tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 
 import { defaultPidAliveFn, main as mergeLeaseMain } from '../bin/merge-lease.mjs';
+import { hammerPublicationPath } from '../src/ama/hammer-publication-ownership.mjs';
 import { formatHamGateAttemptCapClosingStatus } from '../src/ama/dispatch-closer.mjs';
 import {
   acquireMergeLease,
@@ -621,6 +626,48 @@ test('merge-lease release with matching lease id releases holder', async () => {
     rmSync(rootDir, { recursive: true, force: true });
   }
 });
+
+for (const publication of ['absent', 'ready', 'busy', 'unreadable']) {
+  test(`merge-lease release --merged emits success with ${publication} publication custody`, async t => {
+    const rootDir = freshRoot();
+    t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+    const held = acquireFixture(rootDir, { holderPr: 301 });
+    const path = hammerPublicationPath(rootDir, { repo: REPO, prNumber: 301 });
+    const otherPath = hammerPublicationPath(rootDir, { repo: REPO, prNumber: 302 });
+    mkdirSync(dirname(path), { recursive: true });
+    const record = { schemaVersion: 1, repo: REPO, prNumber: 301, heads: ['a'.repeat(40)] };
+    if (publication !== 'absent') writeFileSync(path, publication === 'unreadable' ? '{' : JSON.stringify(record));
+    writeFileSync(otherPath, JSON.stringify({ ...record, prNumber: 302 }));
+    let fd;
+    try {
+      if (publication === 'busy') {
+        fd = openSync(`${path}.lock`, 'a');
+        fsExt.flockSync(fd, 'shnb');
+      }
+      const { code, io } = await runCli(rootDir, ['release', '--repo', REPO, '--base', BASE,
+        '--pr', '301', '--lease-id', held.lease.leaseId, '--merged']);
+      assert.equal(code, 0);
+      assert.equal(jsonOutput(io).released, true);
+      assert.equal(jsonOutput(io).existingLease, null);
+      assert.equal(existsSync(held.leasePath), false);
+      assert.deepEqual(JSON.parse(readFileSync(otherPath, 'utf8')), { ...record, prNumber: 302 });
+      if (publication === 'ready') {
+        assert.deepEqual(JSON.parse(readFileSync(path, 'utf8')), { ...record, closed: true, heads: [] });
+      } else if (publication === 'busy') {
+        assert.deepEqual(JSON.parse(readFileSync(path, 'utf8')), record, 'the held publication is never overwritten');
+        assert.match(io.stderrText, /warning: hammer publication retirement failed: hammer-publication-busy/);
+      } else if (publication === 'unreadable') {
+        assert.equal(readFileSync(path, 'utf8'), '{');
+        assert.match(io.stderrText, /warning: hammer publication retirement failed:/);
+      } else {
+        assert.equal(existsSync(path), false);
+      }
+      if (['absent', 'ready'].includes(publication)) assert.equal(io.stderrText, '');
+    } finally {
+      if (fd !== undefined) closeSync(fd);
+    }
+  });
+}
 
 test('merge-lease release retryable-abort refunds matching gate attempt', async () => {
   const rootDir = freshRoot();

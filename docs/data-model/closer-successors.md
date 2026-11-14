@@ -6,6 +6,10 @@ persistent flock inode. Records use schemaVersion 1 and retain repo, prNumber,
 headSha, source, requestedAt, the refusing reviewBody and refusingReasons.
 Before enrollment, a newer refusing review refreshes that input under the
 receipt lock and records reviewObservedAt without resetting custody.
+If the receipt disappears before the locked read, a request recreates its
+`successor-pending` record under the lock. Settlement returns the same pending
+deferral as lock contention, without dispatch or a refusal alert, when its
+locked read finds no receipt.
 
 `requestCloserSuccessor` atomically enrolls once per PR/head, including after
 terminal settlement. An exhausted closer with a confirmed open PR and no merge,

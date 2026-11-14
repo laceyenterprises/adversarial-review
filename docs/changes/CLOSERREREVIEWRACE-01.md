@@ -24,8 +24,9 @@ Publication scheduling reasons are `active-closer-published-head`,
 `active-closer-merge-lease`, `closer-publication-in-progress` and
 `closer-publication-unconfirmed`. The last two are probe deferrals and confer
 no head ownership or merge authority. API publication, server rebases and the
-Git fallback share the publication barrier. Merged lease release ends custody
-immediately; controller exit/death and the bounded receipt lifetime also end it.
+Git fallback share the publication barrier. Merged lease release attempts to end
+custody immediately; retirement errors warn without failing the settled release.
+Controller exit/death and the bounded receipt lifetime also end custody.
 Probe deferrals keep automatic requests pending; only exact closer ownership
 restores the posted review for closure.
 
@@ -34,6 +35,8 @@ fragment: hammer publication ownership and closer successor custody.
 Successor states are `successor-pending`, `successor-enrolled` and
 `ownerless-closer-no-merge`. Refusals use the existing closure-wait alert surface
 with wait class `closer-successor`; no new config, CI check or override exists.
+Requests recreate a receipt removed before its locked read. Settlement of a
+missing receipt returns without dispatch or alert. Store schemas are unchanged.
 
 ## Race window
 
@@ -51,6 +54,25 @@ record. Ambiguous mutation outcomes retain a typed probe deferral until the
 controller ends. These records never certify findings or authorize merge.
 
 ## Verification
+
+Final comment-only remediation adds offline regressions for receipt removal
+before request/settlement locked reads and merged CLI release with absent,
+ready, locked and unreadable publication receipts. `runRelease` already declares
+and validates `pr` at the reviewed head; the CLI fixtures pin the alleged
+ReferenceError path without changing that valid identifier.
+
+Final-round results:
+
+- `node test/run-tests.mjs test/closerrereviewrace-01.test.mjs test/ama-merge-lease-cli.test.mjs`:
+  all 80 tests passed; the new cases reproduced four failures before the fixes.
+- `node test/run-tests.mjs test/smv.test.mjs`: all 11 tests passed, including
+  the disposable smoke, after reviewing the guards and refreshing the successor
+  source projection. The lifecycle graph is unchanged.
+- `npm run lint`: zero errors (149 existing warnings).
+- `npm run typecheck:contracts` and `bash demo/research-finding-walkthrough.sh`:
+  passed.
+- `node scripts/validate-data-model-catalog.mjs`: validated 98 entries.
+- `git diff --check`: passed. Full-suite validation is deferred to PR-head CI.
 
 Validation uses synthetic offline fixtures and bounded worker validation
 commands requesting 600 seconds, with the prescribed netguard environment on

@@ -2185,7 +2185,12 @@ lease outcome and one mismatch diagnostic; existing smoke promises are unchanged
 
 [state-machines.json](state-machines.json) declares owned lifecycle objects
 and related operational verification records, including launch custody
-freshness and queue maintenance holds. Receipt-less closer custody probes the
+freshness and queue maintenance holds. Successor requests recreate receipts
+lost before the locked read; settlement of an absent receipt defers without
+dispatch or alert. Merged lease release warns on publication retirement failure
+while preserving its successful result; retained publication custody remains
+subject to controller liveness and its six-hour lifetime.
+Receipt-less closer custody probes the
 predecessor lease's stored worker ID, including its attempt suffix, and preserves
 that lease on live or unknown evidence so later ticks inspect the same slot.
 Custody ingestion requires an existing,

@@ -22,9 +22,13 @@ Probe deferrals leave queued automatic requests pending; they never record a
 permanent closer-head re-review decline.
 
 `active-closer-published-head` requires a matching running controller registration,
-a live controller PID and a receipt younger than six hours. Controller exit or
-confirmed merged lease release ends this custody; `merge-lease release --merged`
-marks the record closed and empties heads. An exact live closer merge lease also
+a live controller PID and a receipt younger than six hours. Controller exit
+ends this custody; `merge-lease release --merged` marks the record closed and
+empties heads when retirement succeeds. Retirement failure, including lock
+contention, emits a warning without changing the successful lease release or
+its JSON output. A retained record remains subject to the existing controller
+liveness and six-hour lifetime checks; the CLI does not retry the merge or
+lease release for this cleanup failure. An exact live closer merge lease also
 provides `active-closer-merge-lease`; a daemon lease does not. These reasons are
 scheduling evidence only, never a verdict, validation certificate or merge
 permission. Explicit operator re-review keeps its existing bypass.

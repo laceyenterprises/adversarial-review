@@ -771,7 +771,12 @@ async function runRelease(argv, deps) {
       await deps.sleep(Math.min(DEFAULT_SLEEP_MS, Math.max(1, deadlineMs - deps.nowMs())));
       continue;
     }
-    if (result.released && values.merged) retireHammerPublication(rootDir, { repo, prNumber: pr });
+    if (result.released && values.merged) {
+      // The lease is already settled. Publication cleanup cannot undo release;
+      // retained custody still expires with its controller or receipt lifetime.
+      try { retireHammerPublication(rootDir, { repo, prNumber: pr }); }
+      catch (error) { deps.stderr.write(`warning: hammer publication retirement failed: ${String(error?.message || error)}\n`); }
+    }
     jsonLine(deps.stdout, {
       released: result.released,
       key: deriveLeaseKey({ repo, base }).key,

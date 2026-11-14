@@ -34,6 +34,11 @@ export function requestCloserSuccessor({ rootDir, repo, prNumber, headSha, revie
   }
   try {
     const current = readCloserSuccessor(rootDir, identity);
+    // Cleanup may remove the receipt before we acquire its persistent lock.
+    if (!current) {
+      writeFileAtomic(path, `${JSON.stringify(record)}\n`);
+      return record;
+    }
     // A pre-claim cap can precede a later refusing predicate on the same head.
     // Refresh its input without resetting custody or enrolling another job.
     if (current.status !== 'successor-enrolled' && String(reviewBody || '').trim()
@@ -58,6 +63,7 @@ export async function settleCloserSuccessor({ rootDir, repo, prNumber, headSha, 
   catch (error) { closeSync(fd); if (['EAGAIN', 'EWOULDBLOCK'].includes(error.code)) return { status: 'successor-pending' }; throw error; }
   try {
     let record = readCloserSuccessor(rootDir, identity);
+    if (!record) return { status: 'successor-pending' };
     if (record.status === 'successor-enrolled') return record;
     let result;
     try {

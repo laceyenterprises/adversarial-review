@@ -1,13 +1,14 @@
 import './helpers/rate-limit-state-isolation.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import fsExt from 'fs-ext';
 import { mkdtempSync, readFileSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { withHammerPublication, activeHammerPublication, retireHammerPublication, settleHammerRebasePublication, hammerPublicationPath } from '../src/ama/hammer-publication-ownership.mjs';
 import { getHeadCloserCommitSuppression } from '../src/head-closer-commit-suppression.mjs';
 import { hammerHeadOwnership } from '../src/hammer-head-ownership.mjs';
-import { requestCloserSuccessor, settleCloserSuccessor, readCloserSuccessor } from '../src/ama/closer-successor.mjs';
+import { requestCloserSuccessor, settleCloserSuccessor, readCloserSuccessor, closerSuccessorPath } from '../src/ama/closer-successor.mjs';
 import { acquireMergeLease, releaseMergeLease } from '../src/ama/merge-lease.mjs';
 
 const NOW = '2030-01-01T00:00:00.000Z';
@@ -107,6 +108,45 @@ test('exhausted no-merge enrolls exactly one successor with the refusing review'
   assert.equal(first.status, 'successor-enrolled');
   assert.equal(second.successorJobId, first.successorJobId);
   assert.equal(enrollments, 1);
+});
+
+test('a successor request recreates a receipt removed before the locked read', t => {
+  const f = fixture(t);
+  const input = { ...f, headSha: HEAD, reviewBody: 'Current refusing findings.',
+    refusingReasons: ['findings-present'], source: 'follow-up-pre-claim-cap' };
+  const flockSync = fsExt.flockSync;
+  let removed = false;
+  const lock = t.mock.method(fsExt, 'flockSync', (fd, mode) => {
+    flockSync(fd, mode);
+    rmSync(closerSuccessorPath(f.rootDir, input));
+    removed = true;
+  });
+  const record = requestCloserSuccessor(input);
+  lock.mock.restore();
+  assert.equal(removed, true);
+  assert.equal(record.status, 'successor-pending');
+  assert.equal(record.reviewBody, input.reviewBody);
+  assert.deepEqual(record.refusingReasons, input.refusingReasons);
+  assert.equal(record.requestedAt, NOW);
+  assert.deepEqual(readCloserSuccessor(f.rootDir, input), record);
+});
+
+test('successor settlement defers if its receipt disappears before the locked read', async t => {
+  const f = fixture(t);
+  const input = { ...f, headSha: HEAD, reviewBody: 'Current refusing findings.', source: 'follow-up-pre-claim-cap' };
+  requestCloserSuccessor(input);
+  const flockSync = fsExt.flockSync;
+  const lock = t.mock.method(fsExt, 'flockSync', (fd, mode) => {
+    flockSync(fd, mode);
+    rmSync(closerSuccessorPath(f.rootDir, input));
+  });
+  const result = await settleCloserSuccessor({ ...input,
+    handoffImpl: async () => assert.fail('an absent receipt cannot dispatch'),
+    observeWaitImpl: async () => assert.fail('an absent receipt cannot publish a refusal') });
+  lock.mock.restore();
+  assert.deepEqual(result, { status: 'successor-pending' });
+  assert.equal(readCloserSuccessor(f.rootDir, input), null);
+  assert.equal(requestCloserSuccessor(input).status, 'successor-pending', 'the receipt lock was released');
 });
 
 for (const disabled of [false, true]) test(`successor ${disabled ? 'disabled' : 'refused'} records typed ownerless state and alerts`, async t => {

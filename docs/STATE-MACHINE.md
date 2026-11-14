@@ -1422,6 +1422,10 @@ a concurrent publication probe defers until its result is available. These are
 scheduling reasons, not review or merge authority. Explicit operator re-review
 remains available; unrelated pushes receive normal review.
 
+Merged lease release preserves its successful result if publication retirement
+fails, warning on stderr. Retained publication custody still requires a live
+running controller and expires after six hours.
+
 An exhausted closer that confirms an open PR without merging enrolls a durable
 PR/head successor request carrying the predicate's refusing review. The ordinary
 pre-claim remediation cap uses the same request. The watcher admits at most one
@@ -1433,6 +1437,8 @@ handoffs cannot silently terminate custody. See
 Exits before completing the close retain their existing bounded retry/refund
 executor and cap alert; confirmed no-merge decisions and `no_work_done` take
 the successor path after terminal cleanup and accounting.
+If a receipt disappears before the locked read, requests recreate
+`successor-pending`; settlement returns without dispatch or a refusal alert.
 
 The builder final-fix-all lane may authorize primary-line reversals only with
 its durable PR/source-head job owner and exact-commit produced attestation

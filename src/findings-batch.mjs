@@ -452,12 +452,26 @@ async function publishFindingBatch({ db, batch, result, dir, outputPath, env, ro
       };
       let handoff = batch.decision_publication_json && parseHandoff(batch.decision_publication_json);
       if (!handoff) {
-        const { stdout } = await execFileImpl(env.HQ_BIN || 'hq',
-          ['decision', 'supersede-publication', batch.launch_id,
-            '--batch-id', batch.batch_id, '--repo', batch.repo, '--branch', branch, '--head', result.headSha,
-            '--root', resolveHqRoot(env)],
-          { env, timeout: 240_000, maxBuffer: 1024 * 1024 });
-        handoff = parseHandoff(stdout);
+        try {
+          const { stdout } = await execFileImpl(env.HQ_BIN || 'hq',
+            ['decision', 'supersede-publication', batch.launch_id,
+              '--batch-id', batch.batch_id, '--repo', batch.repo, '--branch', branch, '--head', result.headSha,
+              '--root', resolveHqRoot(env)],
+            { env, timeout: 240_000, maxBuffer: 1024 * 1024 });
+          handoff = parseHandoff(stdout);
+        } catch (error) {
+          const stderr = String(error.stderr || '');
+          const diagnostic = stderr.split(/\r?\n/).find(line => line.includes('[hq] error:'))
+            || stderr.trim() || error.message;
+          if (!/decision-publication/.test(diagnostic)) {
+            // Keep the hold discriminator ahead of untyped diagnostics, even
+            // when the CLI crashed after canceling its source launch.
+            throw Object.assign(Error('batch-decision-publication-failed', { cause: error }), {
+              stderr: `[hq] error: batch-decision-publication-failed: ${error.message}\n${stderr}`,
+            });
+          }
+          throw error;
+        }
       }
       if (!handoff || handoff.state !== 'superseded' || handoff.branchReleased !== true
         || Object.entries(binding).some(([key, value]) => handoff[key] !== value)) {
@@ -465,6 +479,7 @@ async function publishFindingBatch({ db, batch, result, dir, outputPath, env, ro
       }
       db.prepare('UPDATE finding_batches SET decision_publication_json=? WHERE batch_id=?')
         .run(JSON.stringify(handoff), batch.batch_id);
+      batch.decision_publication_json = JSON.stringify(handoff);
       handoffBinding = binding;
       // The lifecycle call can take time. An old ambiguous dispatch may have
       // become visible while it ran; do not submit over that new custody.

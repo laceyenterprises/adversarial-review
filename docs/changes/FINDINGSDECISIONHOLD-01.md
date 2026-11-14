@@ -17,6 +17,10 @@ one watcher log record per failure includes the redacted full stderr.
 The verified handoff can replace a spent pre-handoff intent once after its
 ambiguity deadline, preserving its history and the ordinary bounded retry.
 Keyed custody is checked again after the lifecycle call.
+HAM remediation synchronizes the in-memory handoff receipt and tags untyped
+lifecycle failures so canceled sources retain unresolved publication custody.
+The closure read-budget test accounts for the new migration sentinel separately
+from its unchanged operational query budget.
 
 ## Verification
 
@@ -31,5 +35,12 @@ the prescribed netguard environment:
   direct-snapshot blocked custody with no outcomes beyond the age limit.
 - `npm run lint`: zero errors (149 existing warnings).
 - `npm run typecheck:contracts`: passed.
+
+HAM validation: the canonical changed-surface runner passed 270 tests across
+six files, including canceled-source crash retention, in-memory receipt
+consistency, and the corrected closure migration read budget. ESLint passed
+with zero errors (149 existing warnings); contract typecheck and the offline
+byte-equivalence demo passed. The full suite remains the exact-head remote
+CI gate, as required by the HAM procedure.
 
 No production repair, service operation or CI check was added.

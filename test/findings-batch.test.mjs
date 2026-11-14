@@ -637,8 +637,27 @@ test('FINDINGSDECISIONHOLD-01 supersedes the blocked decision before dispatch an
   Object.assign(f.status, { status: 'blocked_needs_decision', succeeded: false });
   f.launches[0].status = 'blocked_needs_decision';
   const order = [];
+  let activeBatch;
+  const prepare = f.db.prepare.bind(f.db);
+  t.mock.method(f.db, 'prepare', sql => {
+    const statement = prepare(sql);
+    if (sql === 'SELECT * FROM finding_batches WHERE completed_at IS NULL AND released_at IS NULL ORDER BY rowid') {
+      const all = statement.all.bind(statement);
+      t.mock.method(statement, 'all', (...args) => {
+        const rows = all(...args);
+        activeBatch = rows[0];
+        return rows;
+      });
+    }
+    return statement;
+  });
   await f.run({ execFileImpl: async (bin, args, options) => {
     order.push(args.slice(0, 2).join(' '));
+    if (args[0] === 'dispatch' && args[1] !== 'status') {
+      const persisted = prepare('SELECT decision_publication_json FROM finding_batches').get();
+      assert.equal(activeBatch.decision_publication_json, persisted.decision_publication_json);
+      assert.equal(JSON.parse(activeBatch.decision_publication_json).branchReleased, true);
+    }
     return f.options.execFileImpl(bin, args, options);
   } });
   assert.deepEqual(order, ['dispatch status', 'decision supersede-publication', 'dispatch --priority']);
@@ -656,6 +675,24 @@ test('FINDINGSDECISIONHOLD-01 a succeeded source never closes a decision', async
   await f.run();
   assert.equal(f.dispatches.length, 2);
   assert.equal(f.handoffs.length, 0);
+});
+
+test('FINDINGSDECISIONHOLD-01 untyped lifecycle failures retain aged canceled source custody', async t => {
+  for (const stderr of [undefined, 'unexpected runtime crash']) await t.test(String(stderr), async t => {
+    const f = await publicationFixture(t);
+    Object.assign(f.status, { status: 'canceled', succeeded: false });
+    f.launches[0].status = 'canceled';
+    await f.run({ now: fixtureNow + 86400001, execFileImpl: async (bin, args, options) => {
+      if (args[0] !== 'decision') return f.options.execFileImpl(bin, args, options);
+      throw Object.assign(Error('process terminated'), { stderr });
+    } });
+    const row = f.db.prepare('SELECT error,released_at FROM finding_batches').get();
+    assert.match(row.error, /batch-decision-publication-failed/);
+    assert.equal(row.released_at, null);
+    assert.equal(f.dispatches.length, 1);
+    assert.equal(f.db.prepare('SELECT count(*) AS n FROM finding_backlog WHERE batch_id=?')
+      .get(f.batch.batch_id).n, f.result.findings.length);
+  });
 });
 
 test('FINDINGSDECISIONHOLD-01 recovers a lifecycle handoff whose batch receipt was lost', async t => {

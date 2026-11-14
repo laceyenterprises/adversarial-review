@@ -514,6 +514,10 @@ within the existing 300-character error bound; one watcher log record per
 failure retains the redacted full stderr. An unresolved blocked decision keeps
 its batch even beyond the ordinary age limit and reports
 `batch-decision-custody-retained` for operator attention.
+Untyped lifecycle failures carry `batch-decision-publication-failed` so an
+already canceled source also retains its batch as
+`batch-decision-publication-unresolved`. A verified receipt updates both the
+stored row and the in-memory batch before subsequent publication steps.
 Both phases retain the batch ID, ticket and `findings-batch-<batch-id>` idempotency
 key; the dispatcher contract is unchanged. A PR-shaped launch without PR evidence
 still fails. The collector queries the existing launch-ledger adapter by that key,

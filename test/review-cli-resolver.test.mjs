@@ -273,8 +273,10 @@ for (const asyncMode of [false, true]) {
   test(`${asyncMode ? 'async' : 'sync'} resolver retries once with a load-aware deadline`, async (t) => {
     const f = fixture(t);
     for (const recover of [true, false]) {
+      f.events.length = 0;
       const timeouts = [], nominal = [];
       const execute = (_command, _args, options) => {
+        assert.deepEqual(f.events, [], 'no terminal resolution event before retry exhaustion or success');
         timeouts.push(options.timeout);
         if (timeouts.length === 1 || !recover) throw Object.assign(new Error('synthetic timeout'), { code: 'ETIMEDOUT' });
         return JSON.stringify(f.response);
@@ -289,6 +291,8 @@ for (const asyncMode of [false, true]) {
       else await assert.rejects(run(), (err) => err.failureClass === 'cli-resolution-transient' && err.binaryResolution.reason === 'ETIMEDOUT');
       assert.deepEqual(timeouts, [30000, 30000]);
       assert.deepEqual(nominal, [10000, 10000]);
+      assert.equal(f.events.length, 1);
+      assert.equal(f.events[0].status, recover ? 'resolved' : 'unknown');
     }
   });
 }

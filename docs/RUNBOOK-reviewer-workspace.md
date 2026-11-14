@@ -26,7 +26,9 @@ before helpers or execution. Discovery translates unknown resolution into
 returns its existing preflight failure result without spawning a reviewer.
 
 Both synchronous and asynchronous clients retry resolution once, sizing each
-nominal ten-second attempt through the shared load-aware timeout helper. Protocol
+nominal ten-second attempt through the shared load-aware timeout helper. The
+first failed attempt emits no terminal resolution event; only retry exhaustion
+logs an unknown outcome. A recovered retry logs only its resolved outcome. Protocol
 v1 field validation remains mandatory. Pretty-printed JSON remains supported;
 line-oriented output permits one valid protocol response alongside empty lines,
 non-JSON banners or non-object JSON chatter (numbers, booleans, strings, null
@@ -54,7 +56,9 @@ Before any helper or exec, `[review-cli-resolution]` logs the validated
 immutable `realPath`, `version`, `binarySha256` and UTC `timestamp`. Service/worker
 logs retain that pre-exec JSON even when auth, catalog preparation or spawn
 fails. Unknown events retain the CLI, timestamp and bounded reason; arbitrary
-resolver output is not logged. These records are version-scoped observations,
+resolver output is not logged. Failure classification reads the latest resolution
+event even when a worker or timestamp prefix precedes its marker, so a resolved
+outcome supersedes an earlier unknown outcome. These records are version-scoped observations,
 not a successful tool-event receipt. No review database schema or durable status additions. Exported legacy `*_CLI` constants identify registry names only; runtime
 selection happens at the execution boundary.
 

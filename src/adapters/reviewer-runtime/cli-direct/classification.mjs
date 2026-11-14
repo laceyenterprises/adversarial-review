@@ -71,10 +71,13 @@ function classifyReviewerFailure(stderr, exitCode, errorCode = null, details = {
   const lower = text.toLowerCase();
   // A failed first resolver attempt may be followed by a successful retry.
   // Only the latest resolution observation can describe the eventual failure.
-  const resolutionLines = text.split(/\r?\n/).filter(line => line.startsWith('[review-cli-resolution] '));
+  const resolutionTag = '[review-cli-resolution] ';
+  const resolutionLines = text.split(/\r?\n/)
+    .filter(line => line.includes(resolutionTag))
+    .map(line => line.slice(line.indexOf(resolutionTag) + resolutionTag.length));
   let resolutionUnknown = false;
   try {
-    resolutionUnknown = JSON.parse(resolutionLines.at(-1)?.slice('[review-cli-resolution] '.length))?.status === 'unknown';
+    resolutionUnknown = JSON.parse(resolutionLines.at(-1))?.status === 'unknown';
   } catch { /* no complete resolution observation */ }
   if (isReviewCliResolutionFailure(details)
     || /review CLI resolution unavailable for |\[cli-resolution-transient\]/i.test(text)

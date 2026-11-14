@@ -23,6 +23,12 @@ read-only readyz database handle while preserving independent query failures.
 The suggested `(status, ended_at)` index remains a follow-up schema migration;
 this remediation does not change persistent storage or lifecycle/smoke promises.
 
+Final fix-all remediation recognizes resolution markers after worker/timestamp
+prefixes while retaining the latest-outcome rule. Both resolver clients emit
+unknown error events only after retry exhaustion, avoiding false failure logs
+when the immediate retry succeeds. The index remains the explicitly requested
+follow-up migration under the remediation work order's scope rule.
+
 See the [synthetic SEV2 report](../postmortems/SEV2-REVIEWCLIJSON-01-review-cli-resolution-false-auth-isolation.md)
 and the corrected [resolver runbook](../RUNBOOK-reviewer-workspace.md).
 No reviewer model, concurrency limit, strictness, merge rule or CI gate changes.
@@ -44,6 +50,17 @@ same diagnostics. Unavailable history is not represented as zero failures.
 only; additional objects still fail closed.
 
 ## Verification
+
+Final fix-all validation (bounded foreground commands after rebasing onto current
+`origin/main` and preserving both independent contract fixture cases):
+
+- `npm test -- review-cli-resolver.test.mjs reviewclijson-01.test.mjs classification-routing-tier-unavailable.test.mjs runtime-readyz.test.mjs runtime-status-cli.test.mjs`:
+  all 75 tests passed across five files. New regressions failed before the fix
+  and verify prefixed latest-outcome parsing and one terminal event across retries.
+- `npm run lint`: passed with zero errors (149 existing warnings).
+- `npm run typecheck:contracts`: passed.
+- `bash demo/research-finding-walkthrough.sh`: passed, three byte-stable deliveries.
+- `git diff --check`: passed. No full local suite was run.
 
 Final comment-only remediation validation (bounded foreground commands):
 

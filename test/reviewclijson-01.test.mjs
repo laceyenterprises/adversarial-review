@@ -26,6 +26,17 @@ test('resolver evidence beats auth text while genuine reviewer auth remains oaut
   assert.equal(infraRecoverableFailureClass({ failure_message: '[oauth-broken] review CLI resolution unavailable for gemini' }), 'cli-resolution-transient');
 });
 
+test('prefixed resolver observations retain latest-outcome classification', () => {
+  const unknown = '[review-cli-resolution] {"status":"unknown"}';
+  const resolved = '[review-cli-resolution] {"status":"resolved"}';
+  for (const prefix of ['[worker-1] ', '2026-11-14T06:28:34Z ERROR ']) {
+    assert.equal(classifyReviewerFailure(`${prefix}${unknown}`, 1), 'cli-resolution-transient');
+    assert.equal(classifyReviewerFailure(`${prefix}${unknown}\r\n${prefix}${resolved}\r\nOAuth token invalid`, 1), 'oauth-broken');
+    assert.equal(classifyReviewerFailure(`${prefix}${resolved}\n${prefix}${unknown}\nOAuth token invalid`, 1), 'cli-resolution-transient');
+    assert.equal(classifyReviewerFailure(`${prefix}[review-cli-resolution] {broken\nOAuth token invalid`, 1), 'oauth-broken');
+  }
+});
+
 test('invalid JSON releases the same seat, backs off, and only parks at the consecutive threshold', async t => {
   const rootDir = mkdtempSync(join(tmpdir(), 'reviewclijson-'));
   t.after(() => rmSync(rootDir, { recursive: true, force: true }));

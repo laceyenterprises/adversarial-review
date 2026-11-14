@@ -34,8 +34,7 @@ export function resolveReviewCli(cli, {
       result = parseResolution(cli, raw);
       break;
     } catch (cause) {
-      const failure = resolutionFailure(cli, cause, { log, now });
-      if (attempt === 1) throw failure;
+      if (attempt === 1) throw resolutionFailure(cli, cause, { log, now });
     }
   }
   return recordResolution(cli, result, { log, now });
@@ -138,8 +137,7 @@ export async function resolveReviewCliAsync(cli, {
       result = parseResolution(cli, stdout);
       break;
     } catch (cause) {
-      const failure = resolutionFailure(cli, cause, { log, now });
-      if (attempt === 1) throw failure;
+      if (attempt === 1) throw resolutionFailure(cli, cause, { log, now });
     }
   }
   return recordResolution(cli, result, { log, now });

@@ -323,6 +323,11 @@ reset while avoiding freshness scans over non-posted pass history.
 burst lease's scoped cost sum. Its query uses raw ISO and SQLite timestamp
 ranges so the index can be used without applying string functions to every row.
 
+`idx_reviewer_passes_status_ended_at` on `(status, ended_at)` bounds readyz
+failure diagnostics to the requested status and completion-time window.
+Schema convergence creates it idempotently after backfilling legacy columns,
+including `ended_at`, for both fresh and existing databases.
+
 ## Posted-review settlement split
 
 By default, a successful watcher review completes the `reviewer_passes` row

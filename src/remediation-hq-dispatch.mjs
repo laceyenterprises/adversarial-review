@@ -31,13 +31,13 @@ const execFileAsync = promisify(execFile);
 
 // A local remediation checkout (even one with a copied manifest) cannot stand
 // in for the provisioned worker that owns this dispatch.
-export function assertRemediationWorkspaceCustody(workspaceDir, worker) {
+export function assertRemediationWorkspaceCustody(workspaceDir, worker, env = process.env) {
   if (!worker?.requiresProducedAttestation) return workspaceDir;
   try {
     const workspace = realpathSync(workspaceDir);
     const slot = dirname(workspace);
     const manifest = JSON.parse(readFileSync(join(slot, 'workspace.json'), 'utf8'));
-    const root = realpathSync(worker.hqRoot);
+    const root = realpathSync(worker.hqRoot || resolveHqRoot(env));
     if (!manifest.workerId || /[/\\]/.test(manifest.workerId)
       || realpathSync(join(root, 'workers', manifest.workerId)) !== slot
       || realpathSync(manifest.hqRoot) !== root
@@ -199,7 +199,7 @@ async function resolveHqWorkerWorkspace({
 } = {}) {
   const persistedWorkspaceDir = normalizeHqWorkspaceDir(worker?.workspaceDir);
   if (persistedWorkspaceDir && existsSync(join(persistedWorkspaceDir, '.git'))) {
-    return assertRemediationWorkspaceCustody(persistedWorkspaceDir, worker);
+    return assertRemediationWorkspaceCustody(persistedWorkspaceDir, worker, env);
   }
   const dispatchId = String(worker?.dispatchId || '').trim();
   const hqRoot = worker?.hqRoot || resolveHqRoot(env, { requireExists: false });
@@ -226,7 +226,7 @@ async function resolveHqWorkerWorkspace({
     maxBuffer: 5 * 1024 * 1024,
   });
   return assertRemediationWorkspaceCustody(
-    parseHqDispatchStatusOutput(stdout, args, parseHqDispatchWorkspaceStatus, logger).workspaceDir, worker);
+    parseHqDispatchStatusOutput(stdout, args, parseHqDispatchWorkspaceStatus, logger).workspaceDir, worker, env);
 }
 
 function isHqCancelRetryable(err) {

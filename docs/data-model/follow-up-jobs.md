@@ -169,6 +169,10 @@ jobs. `dispatchMode` and `remediationPlan.dispatchPath` are `hq`.
 inspection at reconciliation, its real canonical HQ slot and `workspace.json`
 must match the recorded launch, worker class, owner, ticket, repo, branch and
 branch-push completion shape. Missing identity is refused, never reconstructed.
+Workspace validation uses the worker's explicit `hqRoot` when present, otherwise
+the reconciliation caller's `HQ_ROOT`, on both persisted and status-probed paths.
+A queued status with no workspace is refused by the workspace parser without
+rewriting the worker descriptor; a later provisioned response can be resolved.
 Direct dispatch uses the stable key `ffa-<sha256(jobId)>` across enqueue
 response loss and prompt regeneration. A settled worker retry uses its previous
 LRQ from `remediationPlan.retryHistory[].worker.launchRequestId` as a hash salt

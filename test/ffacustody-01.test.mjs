@@ -7,7 +7,7 @@ import { createHash } from 'node:crypto';
 import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir, userInfo } from 'node:os';
 import { join } from 'node:path';
-import { resolveRemediationRuntimeMode } from '../src/remediation-dispatch-mode.mjs';
+import { resolveRemediationDispatchPathForJob, resolveRemediationRuntimeMode } from '../src/remediation-dispatch-mode.mjs';
 import { createRemediationRuntime, dispatchRemediationViaHq } from '../src/follow-up-remediation.mjs';
 import { resolveHqWorkerWorkspace } from '../src/remediation-hq-dispatch.mjs';
 
@@ -18,6 +18,8 @@ test('incident #10762/#10780: native and degraded routing cannot launch fix-all 
   for (const remediationPlan of [undefined, { dispatchPath: 'bare' }, { dispatchPath: 'hq' }]) {
     assert.equal(resolveRemediationRuntimeMode({ ...job, remediationPlan },
       { healthRouter: localRouter, env: {} }), 'os');
+    assert.equal(resolveRemediationDispatchPathForJob({ ...job, remediationPlan },
+      { AGENT_OS_ROLES_ADVERSARIAL_ORCHESTRATION_MODE: 'native' }), 'hq');
   }
   assert.equal(resolveRemediationRuntimeMode({}, { healthRouter: localRouter, env: {} }), 'local');
   let spawned = false;
@@ -46,8 +48,52 @@ function fixture(t) {
   const request = { hqRoot: root, workerClass: 'codex', repo: 'fixture/repo', prNumber: 7,
     branch: manifest.branch, jobId: job.jobId, promptPath: join(root, 'prompt.md'),
     replyPath: join(root, 'reply.json'), requiresProducedAttestation: true, env };
-  return { root, workspace, path, manifest, save, request };
+  const worker = { requiresProducedAttestation: true, dispatchId: 'dispatch_fixture',
+    launchRequestId: manifest.launchRequestId, workerClass: manifest.workerClass,
+    hqOwnerUser: manifest.ownerUser, ticketRef: manifest.ticketRef,
+    custodyRepo: manifest.repo, custodyBranch: manifest.branch, workspaceDir: null };
+  return { root, workspace, path, manifest, save, request, worker };
 }
+
+test('workspace custody uses the caller HQ root when the persisted descriptor omits it', async t => {
+  const f = fixture(t);
+  const execFileImpl = async (_command, args, options) => {
+    assert.equal(args[args.indexOf('--root') + 1], f.root);
+    assert.equal(options.env.HQ_ROOT, f.root);
+    return { stdout: JSON.stringify({ status: 'succeeded', workspacePath: f.workspace }) };
+  };
+  for (const workspaceDir of [null, f.workspace]) {
+    const worker = { ...f.worker, workspaceDir };
+    const original = structuredClone(worker);
+    assert.equal(await resolveHqWorkerWorkspace({ worker, env: f.request.env, execFileImpl }),
+      realpathSync(f.workspace));
+    assert.deepEqual(worker, original, 'root fallback does not rewrite durable worker identity');
+    assert.equal(await resolveHqWorkerWorkspace({
+      worker: { ...worker, hqRoot: f.root }, env: { HQ_ROOT: tmpdir() }, execFileImpl,
+    }), realpathSync(f.workspace), 'an explicit root takes precedence');
+  }
+  await assert.rejects(resolveHqWorkerWorkspace({
+    worker: { ...f.worker, workspaceDir: f.workspace, hqRoot: tmpdir() }, env: f.request.env,
+  }), /custody unavailable or mismatched/, 'ambient fallback cannot mask an explicit foreign root');
+  await assert.rejects(resolveHqWorkerWorkspace({
+    worker: { ...f.worker, workspaceDir: f.workspace }, env: {},
+  }), /custody unavailable or mismatched/, 'missing root evidence remains a refusal');
+});
+
+test('queued provisioning without a workspace refuses inspection and preserves worker state', async t => {
+  const f = fixture(t);
+  const worker = { ...f.worker, hqRoot: f.root };
+  const original = structuredClone(worker);
+  await assert.rejects(resolveHqWorkerWorkspace({
+    worker, env: f.request.env,
+    execFileImpl: async () => ({ stdout: JSON.stringify({ status: 'queued', workspacePath: null }) }),
+  }), /hq dispatch status payload missing workspaceDir\/workspacePath\/worktreePath/);
+  assert.deepEqual(worker, original);
+  assert.equal(await resolveHqWorkerWorkspace({
+    worker, env: f.request.env,
+    execFileImpl: async () => ({ stdout: JSON.stringify({ status: 'succeeded', workspacePath: f.workspace }) }),
+  }), realpathSync(f.workspace), 'a later provisioned workspace still resolves');
+});
 
 test('crash after HQ enqueue retries the same work order and persists the actual launch, without waiting for provision', async t => {
   const f = fixture(t);

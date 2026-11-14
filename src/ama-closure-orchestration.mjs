@@ -2863,6 +2863,7 @@ async function dispatchAmaClosureFor({
   const dispatchContext = {
     orphanRecovery,
     automatedRecovery,
+    // cdm-allowlist: Pass through the canonical settled gate snapshot as successor input; no verdict or eligibility is re-derived.
     refusingReviewBody: gateSnapshot.settledReview?.reviewBody,
     daemonFailureReasons: Array.isArray(daemonCleanMerge?.reasons)
       ? daemonCleanMerge.reasons

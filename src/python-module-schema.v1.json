@@ -76,6 +76,13 @@
   },
   "worker_pool": {
     "__keys": {
+      "closer_handoff": {
+        "__type": "dict",
+        "__strict": true,
+        "__keys": {
+          "enabled": {"__type": "bool", "__default": true}
+        }
+      },
       "scope": {
         "__type": "dict",
         "__strict": true,

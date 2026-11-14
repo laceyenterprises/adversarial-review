@@ -386,6 +386,10 @@ function ensureReviewStateSchema(db) {
     CREATE INDEX IF NOT EXISTS idx_reviewer_passes_observation
       ON reviewer_passes(repo COLLATE NOCASE, pr_number, status, pass_id DESC);
 
+    -- Bound readyz failure diagnostics to the requested status/time window.
+    CREATE INDEX IF NOT EXISTS idx_reviewer_passes_status_ended_at
+      ON reviewer_passes(status, ended_at);
+
     CREATE INDEX IF NOT EXISTS idx_pr_merge_closeouts_observation
       ON pr_merge_closeouts(repo COLLATE NOCASE, pr_number);
 

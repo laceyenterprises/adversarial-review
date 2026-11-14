@@ -21,9 +21,30 @@ Async reviewer launches, OAuth probes and cli-direct discovery await nonblocking
 resolver subprocesses. Legacy synchronous path exports and local remediation
 spawn contracts retain bounded synchronous resolution. Both clients validate and log the same protocol evidence
 before helpers or execution. Discovery translates unknown resolution into
-`CliDirectPreflightError` with `failureClass: oauth-broken` and the CLI's
+`CliDirectPreflightError` with `failureClass: cli-resolution-transient` and the CLI's
 `<name>-path` layer, retaining resolver evidence on the cause; the runtime adapter
 returns its existing preflight failure result without spawning a reviewer.
+
+Both synchronous and asynchronous clients retry resolution once, sizing each
+nominal ten-second attempt through the shared load-aware timeout helper. Protocol
+v1 field validation remains mandatory. Pretty-printed JSON remains supported;
+line-oriented output permits one valid protocol response alongside empty lines
+or non-JSON banners. Multiple JSON values, including two valid responses, are
+refused. Invalid JSON records only stdout byte length, line count and whether a
+single line validated as protocol v1, never the raw stdout.
+
+Resolution failures do not isolate reviewer identities or contribute to
+credential-outage accounting. The watcher records `cli-resolution-transient`
+backoff (initially one minute), releases the claim to `pending` without charging
+review or infrastructure recovery attempts below the existing five-consecutive
+transient threshold, then uses bounded `pending-upstream` infrastructure
+recovery. A successful review clears the backoff. Genuine reviewer OAuth
+failures retain their authentication classification. Pipeline health/readyz and
+Prometheus expose the resolution class separately from authentication failures.
+Runtime readyz adds informational `reviewerFailures24h` with separate
+`cli-resolution-transient` and `oauth-broken` counts from failed reviewer passes.
+Missing/unreadable history is reported as unavailable, not zero. These counts
+are diagnostics only and do not change readiness signals or `overallReady`.
 
 Before any helper or exec, `[review-cli-resolution]` logs the validated
 `schemaVersion`, registry `cli`, `consumer`, `status`, `source`, `selectedPath`,
@@ -31,8 +52,7 @@ immutable `realPath`, `version`, `binarySha256` and UTC `timestamp`. Service/wor
 logs retain that pre-exec JSON even when auth, catalog preparation or spawn
 fails. Unknown events retain the CLI, timestamp and bounded reason; arbitrary
 resolver output is not logged. These records are version-scoped observations,
-not a successful tool-event receipt. No review database shape or lifecycle state
-changes. Exported legacy `*_CLI` constants identify registry names only; runtime
+not a successful tool-event receipt. No review database schema or durable status additions. Exported legacy `*_CLI` constants identify registry names only; runtime
 selection happens at the execution boundary.
 
 Codex auth and model-catalog preparation use the same `realPath` as exec,

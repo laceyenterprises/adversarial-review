@@ -6525,3 +6525,31 @@ for (const schema of ['missing-table', 'missing-labels']) {
     });
   }
 }
+
+test('CLI resolution transients have separate health counts from OAuth failures', t => {
+  const rootDir = tempRoot();
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  openDb(rootDir).close();
+  for (const [prNumber, failureClass, diagnostic] of [
+    [1, 'cli-resolution-transient', 'review CLI resolution unavailable for gemini'],
+    [2, 'oauth-broken', 'OAuth token invalid'],
+  ]) {
+    insertReviewerPass(rootDir, { repo: 'example/project', prNumber, status: 'failed',
+      metadata: { failureClass },
+    });
+    insertReviewRow(rootDir, { repo: 'example/project', prNumber, reviewStatus: 'pending',
+      failureMessage: `[${failureClass}] ${diagnostic}`, failedAt: '2026-05-25T17:58:00.000Z' });
+    const stateDir = path.join(rootDir, 'data', 'cascade-state');
+    mkdirSync(stateDir, { recursive: true });
+    writeFileSync(path.join(stateDir, `${encodeURIComponent('example/project')}__${prNumber}.json`), JSON.stringify({
+      consecutiveTransientFailures: 1, transientFailureBreakdown: { [failureClass]: 1 },
+      lastFailureClass: failureClass, lastFailureAt: '2026-05-25T17:58:00.000Z', nextRetryAfter: '2026-05-25T18:05:00.000Z',
+    }));
+  }
+  const snapshot = collectReviewPipelineHealth({ rootDir, now: () => new Date(NOW) });
+  assert.equal(snapshot.reviewerDegradation.byClass.find(row => row.failureClass === 'cli-resolution-transient')?.active, 1);
+  assert.equal(snapshot.reviewerDegradation.byClass.find(row => row.failureClass === 'oauth-broken')?.active, 1);
+  const output = renderReviewPipelinePrometheus(snapshot);
+  assert.match(output, /^review_pipeline_reviewer_degradation_active\{failure_class="cli-resolution-transient",state="transient-backoff"\} 1$/m);
+  assert.match(output, /^review_pipeline_reviewer_attempts_total\{status="failed",failure_class="cli-resolution-transient",pass_kind="first-pass"\} 1$/m);
+});

@@ -1,0 +1,11 @@
+operator_steps:
+  - description: >-
+      Normal submodule float and adversarial-watcher restart load the resolver
+      classification change. Observe organic cli-resolution-transient retries
+      and separate health counts as described in post-merge-verify.json
+      reviewCliResolution. This source PR authorizes no worker live changes.
+    run_as: service owner
+    command: >-
+      Follow the normal deployment and watcher service-owner procedures in
+      docs/RUNBOOK-reviewer-workspace.md and docs/RUNBOOK-ama-closure.md.
+actions: []

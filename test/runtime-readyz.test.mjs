@@ -559,3 +559,31 @@ test('readyz app registration signal fails when adversarial-review resolves from
     rmSync(rootDir, { recursive: true, force: true });
   }
 });
+
+test('readyz reports resolution and OAuth failures separately without changing readiness', async () => {
+  const rootDir = makeRoot();
+  const restoreFetch = withFetch(healthyEndpointPayload());
+  try {
+    const now = new Date();
+    seedHealthyRuntime(rootDir);
+    const db = new Database(join(rootDir, 'data', 'reviews.db'));
+    db.exec('ALTER TABLE reviewer_passes ADD COLUMN ended_at TEXT');
+    db.prepare('UPDATE reviewer_passes SET ended_at = ?').run(now.toISOString());
+    const insert = db.prepare('INSERT INTO reviewer_passes (worker_run_id, status, metadata_json, ended_at) VALUES (NULL, ?, ?, ?)');
+    for (const failureClass of ['cli-resolution-transient', 'cli-resolution-transient', 'oauth-broken']) {
+      insert.run('failed', JSON.stringify({ failureClass }), now.toISOString());
+    }
+    insert.run('failed', JSON.stringify({ failureClass: 'cli-resolution-transient' }), '2000-01-01T00:00:00Z');
+    insert.run('completed', JSON.stringify({ failureClass: 'cli-resolution-transient' }), now.toISOString());
+    insert.run('failed', '{synthetic malformed', now.toISOString());
+    db.close();
+    const model = await buildReadyzStatus(rootDir, { ...registeredAppRegistrationOptions(), now: () => now });
+    assert.equal(model.overallReady, true);
+    assert.deepEqual(model.failingSignals, []);
+    assert.deepEqual(model.reviewerFailures24h, { status: 'available', counts: { 'cli-resolution-transient': 2, 'oauth-broken': 1 } });
+    assert.match(renderReadyzStatus(model), /Reviewer failures \(24h\): cli-resolution-transient=2 oauth-broken=1/);
+  } finally {
+    restoreFetch();
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});

@@ -230,7 +230,7 @@ test('discovery translates resolver failures into typed path preflight errors be
         execFileImpl: async () => { probes += 1; },
       }), (err) => {
         assert.ok(err instanceof CliDirectPreflightError);
-        assert.equal(err.failureClass, 'oauth-broken');
+        assert.equal(err.failureClass, 'cli-resolution-transient');
         assert.equal(err.layer, `${model}-path`);
         assert.equal(err.cause.binaryResolution.status, 'unknown');
         return true;
@@ -239,3 +239,54 @@ test('discovery translates resolver failures into typed path preflight errors be
     }
   }
 });
+
+for (const asyncMode of [false, true]) {
+  test(`${asyncMode ? 'async' : 'sync'} resolver accepts chatter, refuses ambiguity, and redacts diagnostics`, async (t) => {
+    const f = fixture(t);
+    const protocol = JSON.stringify(f.response);
+    const run = (stdout) => {
+      const options = { log: f.log,
+        execFileSyncImpl: () => stdout,
+        execFileImpl: async () => ({ stdout }),
+      };
+      return asyncMode ? resolveReviewCliAsync('codex', options) : Promise.resolve().then(() => resolveReviewCli('codex', options));
+    };
+    assert.equal((await run(`synthetic private banner\n${protocol}\n`)).status, 'resolved');
+    assert.equal((await run(JSON.stringify(f.response, null, 2))).status, 'resolved');
+    for (const stdout of [`${protocol}\n${protocol}\n`, `synthetic private banner\n{broken`, `${protocol}\n${JSON.stringify({ ...f.response, schemaVersion: 2 })}`]) {
+      await assert.rejects(run(stdout), (err) => {
+        assert.equal(err.failureClass, 'cli-resolution-transient');
+        assert.equal(err.binaryResolution.reason, 'invalid-json');
+        assert.deepEqual(err.binaryResolution.diagnostic, {
+          stdoutBytes: Buffer.byteLength(stdout), stdoutLineCount: stdout.split(/\r?\n/).length,
+          hasProtocolV1Line: stdout.includes(protocol),
+        });
+        return true;
+      });
+    }
+    assert.ok(!JSON.stringify(f.events).includes('synthetic private banner'));
+    assert.ok(!JSON.stringify(f.events).includes('{broken'));
+  });
+
+  test(`${asyncMode ? 'async' : 'sync'} resolver retries once with a load-aware deadline`, async (t) => {
+    const f = fixture(t);
+    for (const recover of [true, false]) {
+      const timeouts = [], nominal = [];
+      const execute = (_command, _args, options) => {
+        timeouts.push(options.timeout);
+        if (timeouts.length === 1 || !recover) throw Object.assign(new Error('synthetic timeout'), { code: 'ETIMEDOUT' });
+        return JSON.stringify(f.response);
+      };
+      const options = { log: f.log, timeoutMs: 10000,
+        loadAwareTimeoutMsImpl: (ms) => { nominal.push(ms); return ms * 3; },
+        execFileSyncImpl: execute,
+        execFileImpl: async (...args) => ({ stdout: execute(...args) }),
+      };
+      const run = () => asyncMode ? resolveReviewCliAsync('codex', options) : Promise.resolve().then(() => resolveReviewCli('codex', options));
+      if (recover) assert.equal((await run()).status, 'resolved');
+      else await assert.rejects(run(), (err) => err.failureClass === 'cli-resolution-transient' && err.binaryResolution.reason === 'ETIMEDOUT');
+      assert.deepEqual(timeouts, [30000, 30000]);
+      assert.deepEqual(nominal, [10000, 10000]);
+    }
+  });
+}

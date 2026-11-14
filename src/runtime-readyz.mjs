@@ -1,3 +1,4 @@
+import { reviewerFailureClassFromStoredRow } from './reviewer-failure-classification.mjs';
 import { loadAwareTimeoutMs } from './load-aware-timeout.mjs';
 import { join } from 'node:path';
 import { existsSync } from 'node:fs';
@@ -235,6 +236,29 @@ function attributionSignal(rootDir, { now = () => new Date() } = {}) {
   }
 }
 
+// Informational only: reviewer failures do not add a readiness signal or gate.
+function reviewerFailureCounts(rootDir, { now }) {
+  const dbPath = join(rootDir, 'data', 'reviews.db');
+  if (!existsSync(dbPath)) return { status: 'unavailable', counts: null };
+  let db;
+  try {
+    db = new Database(dbPath, { readonly: true });
+    const since = new Date(now().getTime() - ATTRIBUTION_MAX_AGE_MS).toISOString();
+    const rows = db.prepare(`SELECT metadata_json FROM reviewer_passes
+      WHERE status = 'failed' AND ended_at >= ?`).all(since);
+    const counts = { 'cli-resolution-transient': 0, 'oauth-broken': 0 };
+    for (const row of rows) {
+      const failureClass = reviewerFailureClassFromStoredRow(row);
+      if (Object.hasOwn(counts, failureClass)) counts[failureClass] += 1;
+    }
+    return { status: 'available', counts };
+  } catch {
+    return { status: 'unavailable', counts: null };
+  } finally {
+    db?.close();
+  }
+}
+
 function appRegistrationSignal(rootDir, appRegistrationOptions = {}) {
   const resolvedAppRegistrationOptions = {
     topPath: join(rootDir, '..', '..', 'config.yaml'),
@@ -274,6 +298,7 @@ export async function buildReadyzStatus(rootDir, {
 
   return {
     overallReady: failingSignals.length === 0,
+    reviewerFailures24h: reviewerFailureCounts(rootDir, { now }),
     failingSignals,
     app_registration: appRegistration,
     signals,
@@ -287,6 +312,13 @@ export function renderReadyzStatus(model) {
     const statusText = signal.ok ? 'GREEN' : 'NOT READY';
     const dots = '.'.repeat(Math.max(1, 50 - signal.label.length));
     text += `  ${signal.label}  ${dots}  ${statusText}  (${signal.detail})\n`;
+  }
+
+  if (model.reviewerFailures24h?.status === 'available') {
+    const counts = model.reviewerFailures24h.counts;
+    text += `Reviewer failures (24h): cli-resolution-transient=${counts['cli-resolution-transient']} oauth-broken=${counts['oauth-broken']}\n`;
+  } else {
+    text += 'Reviewer failures (24h): unavailable\n';
   }
 
   if (model.overallReady) {

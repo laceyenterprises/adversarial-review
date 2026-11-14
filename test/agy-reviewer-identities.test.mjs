@@ -1047,7 +1047,7 @@ test('CCX-08: a failed review isolates only its identity, and a passing readines
     assert.match(log.lines.join('\n'), new RegExp(`identity=${REVIEWER_A} re-admitted`));
 
     // A cancelled review, or a provider-wide failure, says nothing about the identity.
-    for (const failureClass of ['cancelled', 'cascade', 'provider-overloaded', 'quota-exhausted', 'reviewer-stalled']) {
+    for (const failureClass of ['cancelled', 'cascade', 'provider-overloaded', 'quota-exhausted', 'reviewer-stalled', 'cli-resolution-transient']) {
       await runWithAgyReviewerIdentity({ reviewerModel: 'gemini', adapter, pool, log }, async () => ({ ok: false, failureClass }));
       assert.equal(pool.readyCount(), 3, failureClass);
       assert.equal(pool.snapshot().every((state) => !state.leased), true, failureClass);

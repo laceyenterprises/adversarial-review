@@ -1260,6 +1260,7 @@ function classifyFailure(value) {
   const raw = String(value || '').toLowerCase();
   const text = stripNonDiagnosticBanners(raw);
   if (!text.trim()) return 'unknown';
+  if (text.includes('cli-resolution-transient') || text.includes('review cli resolution unavailable for ')) return 'cli-resolution-transient';
   // A reviewer that died in dyld never ran; its host runtime lost a shared
   // library. Bucket it apart from `runtime`/`unknown` so a Homebrew-upgrade
   // outage reads as one host fault on the dashboard (NODEPIN-01).

@@ -1,3 +1,4 @@
+import { CLI_RESOLUTION_TRANSIENT_FAILURE_CLASS, isReviewCliResolutionFailure } from '../../../review-cli-resolver.mjs';
 import { buildReviewerAttribution, validateReviewerAttribution } from '../../../reviewer-attribution.mjs';
 import { loadAwareTimeoutMs } from '../../../load-aware-timeout.mjs';
 import { prepareCorporateCodexReviewerAuth } from '../../../codex-per-worker-auth.mjs';
@@ -83,6 +84,7 @@ function stdoutLooksLikeFailureSignal(value) {
 }
 
 function reviewerSignalAwareFailureClass(err, classificationText, exitCode, details = {}) {
+  if (isReviewCliResolutionFailure(err)) return CLI_RESOLUTION_TRANSIENT_FAILURE_CLASS;
   if (err?.reviewerStalled || String(classificationText).includes('[reviewer-stalled]')) return 'reviewer-stalled';
   const stdoutTail = tailText(err?.stdout || '');
   const stderrTail = tailText(err?.stderr || '');
@@ -460,7 +462,9 @@ function createCliDirectReviewerRuntimeAdapter({
       corporateAuth?.cleanup();
       const detail = [err.message, err.stdout, err.stderr].filter(Boolean).join('\n').trim();
       const classificationText = [err?.message, err?.stderr].filter(Boolean).join('\n').trim();
-      const failureClass = err?.failureClass || reviewerSignalAwareFailureClass(err, classificationText, null);
+      const failureClass = isReviewCliResolutionFailure(err)
+        ? CLI_RESOLUTION_TRANSIENT_FAILURE_CLASS
+        : err?.failureClass || reviewerSignalAwareFailureClass(err, classificationText, null);
       return emptyResult({
         ok: false,
         spawnedAt,

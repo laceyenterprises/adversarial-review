@@ -1,3 +1,4 @@
+import { CLI_RESOLUTION_TRANSIENT_FAILURE_CLASS, isReviewCliResolutionFailure } from '../../../review-cli-resolver.mjs';
 import { PROGRESS_TIMEOUT_REASON_PREFIX } from '../../../reviewer-timeout-reason.mjs';
 import { REVIEWER_PROMPT_TOO_LARGE_EXIT_CODE, REVIEWER_CHUNK_BUDGET_EXCEEDED_EXIT_CODE, REPOSITORY_STATE_BUSY_EXIT_CODE } from '../../../reviewer-outcomes.mjs';
 import { hasProviderCapacitySignal } from '../../../provider-capacity-signal.mjs';
@@ -68,6 +69,16 @@ function classifyReviewerFailure(stderr, exitCode, errorCode = null, details = {
   // identifies stale-head churn; an ordinary temporary failure keeps its class.
   const text = String(stderr || '');
   const lower = text.toLowerCase();
+  // A failed first resolver attempt may be followed by a successful retry.
+  // Only the latest resolution observation can describe the eventual failure.
+  const resolutionLines = text.split(/\r?\n/).filter(line => line.startsWith('[review-cli-resolution] '));
+  let resolutionUnknown = false;
+  try {
+    resolutionUnknown = JSON.parse(resolutionLines.at(-1)?.slice('[review-cli-resolution] '.length))?.status === 'unknown';
+  } catch { /* no complete resolution observation */ }
+  if (isReviewCliResolutionFailure(details)
+    || /review CLI resolution unavailable for |\[cli-resolution-transient\]/i.test(text)
+    || resolutionUnknown) return CLI_RESOLUTION_TRANSIENT_FAILURE_CLASS;
   if (details?.reviewerStalled === true || text.includes('[reviewer-stalled]')) return 'reviewer-stalled';
   if (exitCode === REPOSITORY_STATE_BUSY_EXIT_CODE && /(?:^|\n)\[repository-state-busy\]/.test(lower)) {
     return 'repository-state-busy';

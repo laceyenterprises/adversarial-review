@@ -63,6 +63,42 @@ function indexNames(db, tableName) {
   return db.prepare(`PRAGMA index_list(${tableName})`).all().map((row) => row.name);
 }
 
+test('readyz failure history uses a status/time range index on fresh and upgraded databases', (t) => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'readyz-index-'));
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  const db = openReviewStateDb(rootDir);
+  t.after(() => db.close());
+  const query = `SELECT metadata_json FROM reviewer_passes
+    WHERE status = 'failed' AND ended_at >= ?`;
+  const since = '2026-11-13T00:00:00.000Z';
+  const plan = () => db.prepare(`EXPLAIN QUERY PLAN ${query}`).all(since)
+    .map(row => row.detail).join('\n');
+  const assertIndexed = () => {
+    assert.match(plan(), /SEARCH reviewer_passes USING INDEX idx_reviewer_passes_status_ended_at \(status=\? AND ended_at>\?\)/);
+  };
+
+  ensureReviewStateSchema(db);
+  assertIndexed();
+  db.exec('DROP INDEX idx_reviewer_passes_status_ended_at');
+  const insert = db.prepare(`INSERT INTO reviewer_passes
+    (repo, pr_number, attempt_number, reviewer_class, pass_kind, started_at, ended_at, status, metadata_json)
+    VALUES ('example/repo', ?, 1, 'codex', 'first-pass', '2026-11-01', ?, ?, ?)`);
+  insert.run(1, '2026-11-12T23:59:59.999Z', 'failed', '{"failureClass":"oauth-broken"}');
+  insert.run(2, since, 'failed', '{"failureClass":"cli-resolution-transient"}');
+  insert.run(3, since, 'completed', '{}');
+  insert.run(4, null, 'failed', '{}');
+  assert.match(plan(), /SCAN reviewer_passes/);
+  const before = db.prepare('SELECT * FROM reviewer_passes ORDER BY pass_id').all();
+
+  ensureReviewStateSchema(db);
+  ensureReviewStateSchema(db);
+  assertIndexed();
+  assert.deepEqual(db.prepare(query).all(since), [
+    { metadata_json: '{"failureClass":"cli-resolution-transient"}' },
+  ]);
+  assert.deepEqual(db.prepare('SELECT * FROM reviewer_passes ORDER BY pass_id').all(), before);
+});
+
 test('openReviewStateDb applies a busy timeout and shared schema adds reviewer handle columns', () => {
   const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
   const db = openReviewStateDb(rootDir);

@@ -1431,7 +1431,12 @@ review instead of accepting HAM terminal-remediation certificates, closer
 ownership, or carried review evidence as a no-re-review exemption. This also
 covers publication before a stage completion receipt becomes visible.
 The request records `previous reviewed head..current head` and preserves
-attempt counters. The normal claim CAS, live-writer admission, CI admission,
+attempt counters. An armed pending, pending-upstream or CI-blocked request at
+the same head and range is read-only and retains its admission state.
+Missing completion launch IDs and successful unindexed-stage reads retain
+opener-based review routing; unavailable stage reads still defer, and only an
+identified same-tenure stage adds its harness family exclusion.
+The normal claim CAS, live-writer admission, CI admission,
 review-cycle cap and strict merge policy remain in force. Exhaustion cannot
 turn a missing independent review into merge authority.
 

@@ -22,6 +22,8 @@ test('TEN-06: a moved tenured head reaches one independent exact-head claim with
     const wrapper = `
       export * from ${JSON.stringify(`${tenureUrl}?actual`)};
       export async function readPrTenure({ prNumber }) {
+        globalThis.__tenureReads ||= {};
+        globalThis.__tenureReads[prNumber] = (globalThis.__tenureReads[prNumber] || 0) + 1;
         return prNumber === 101 ? { tenureId: 'ten_fixture', workerClass: 'codex',
           remediationWorkerClass: 'remediator-codex' } : null;
       }
@@ -42,6 +44,9 @@ test('TEN-06: a moved tenured head reaches one independent exact-head claim with
         ) };
       }
       return nextLoad(url, context);`);
+    loader = loader.replace(
+      "export function createHeadCloserCommitSuppressionResolver() { return async () => ({ suppressed: false, reason: 'fixture' }); }",
+      "export function createHeadCloserCommitSuppressionResolver(options) { return async () => { const tenure = await options.readPrTenureImpl(); globalThis.__suppressionTenures ||= {}; globalThis.__suppressionTenures[options.prNumber] = tenure; return { suppressed: false, reason: 'fixture' }; }; }");
     const loaderPath = path.join(tmp, 'loader.mjs');
     const registerPath = path.join(tmp, 'register.mjs');
     const runnerPath = path.join(tmp, 'runner.mjs');
@@ -56,6 +61,11 @@ test('TEN-06: a moved tenured head reaches one independent exact-head claim with
           VALUES ('example/widget', 101, ?, 'claude', 'open', 'posted', 1, ?, ?)\`)
           .run(new Date().toISOString(), '${previous}', '${previous}');
       `,
+      postSeedSetup: `
+        db.prepare(\`UPDATE reviewed_prs SET pr_state = 'open', review_status = 'posted',
+          reviewer_head_sha = ?, revision_ref = ? WHERE pr_number = 102\`)
+          .run('${previous}', '${previous}');
+      `,
       afterFirstPoll: `
         const ownClaims = claims.filter(claim => claim.prNumber === 101);
         assert.equal(ownClaims.length, 1);
@@ -66,6 +76,9 @@ test('TEN-06: a moved tenured head reaches one independent exact-head claim with
         assert.equal(spawns[0].subjectContext.reviewerHeadSha, '${head}');
         assert.equal(db.prepare('SELECT rereview_reason FROM reviewed_prs WHERE pr_number=101')
           .get().rereview_reason, 'tenure-independent-review: ${previous}..${head}');
+        assert.equal(globalThis.__tenureReads[101], 1);
+        assert.equal(globalThis.__tenureReads[102], 1, 'reuse the memoized untenured result in suppression');
+        assert.equal(globalThis.__suppressionTenures[102], null);
       `,
     })));
     const env = fixtureEnv(installGhFixture(tmp));
@@ -511,6 +524,7 @@ function buildRunnerSource({
   expectPollError = false,
   freshHeads = {},
   prePollSetup = '',
+  postSeedSetup = '',
   afterFirstPoll = '',
   healthProbeSetup = '',
 } = {}) {
@@ -561,6 +575,7 @@ try {
       0
     );
   }
+  ${postSeedSetup}
 
   const octokit = {
     paginate: async (_fn, params) => {

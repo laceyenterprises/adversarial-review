@@ -25,6 +25,40 @@ function currentHead(headRefOid) {
   return async () => ({ state: 'open', mergedAt: null, closedAt: null, headRefOid });
 }
 
+for (const code of ['available', 'SQLITE_BUSY', 'SQLITE_LOCKED', 'TYPE_ERROR']) {
+  test(`reviewer runtime retains range context when available and tolerates read failures (${code})`, async t => {
+    const rootDir = mkdtempSync(path.join(tmpdir(), 'spawn-tenure-range-'));
+    t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+    const requests = [];
+    let reads = 0;
+    const result = await spawnReviewer({
+      rootDir, repo: 'example/project', prNumber: 7, reviewerModel: 'gemini',
+      reviewerHeadSha: 'b'.repeat(40), reviewerSessionUuid: `tenure-range-${code}`,
+      readReviewerQuotaDecisionImpl: async () => ({ available: true, state: 'fixture', provider: 'google' }),
+      readTenureReviewRangeImpl: () => {
+        reads++;
+        if (code === 'available') return { previousHead: 'a'.repeat(40), headSha: 'b'.repeat(40) };
+        throw code === 'TYPE_ERROR' ? new TypeError('invalid rootDir')
+          : Object.assign(new Error('database is locked'), { code });
+      },
+      reviewerRuntimeAdapterOverride: {
+        async spawnReviewer(request) {
+          requests.push(request);
+          return { ok: true, reviewBody: 'fixture review', reviewBodyDelivery: 'adapter' };
+        },
+      },
+      beginReviewerPassImpl() {}, completeReviewerPassImpl() {},
+      readBestReviewerEvidenceTokenUsageImpl: async () => null,
+    });
+    assert.equal(reads, 1);
+    assert.equal(result.ok, true);
+    assert.equal(requests.length, 1);
+    if (code === 'available') assert.ok(requests[0].prompt.includes(`Remediation range: ${'a'.repeat(40)}..${'b'.repeat(40)}`));
+    else assert.equal(requests[0].prompt, '');
+    assert.equal(requests[0].subjectContext.reviewerHeadSha, 'b'.repeat(40));
+  });
+}
+
 test('caller-post inconsistency gets one same-head reconciliation and stays blocking on repetition', async t => {
   const rootDir = mkdtempSync(path.join(tmpdir(), 'spawn-verdict-reconcile-'));
   t.after(() => rmSync(rootDir, { recursive: true, force: true }));

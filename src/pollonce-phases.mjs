@@ -112,7 +112,7 @@ import {
   reviewWorkerClassFallback,
 } from './review-worker-class-fallback.mjs';
 import { geminiRemediatedReviewerExclusions } from './gemini-remediated-head.mjs';
-import { readPrTenure, tenureReviewRange, queueTenureReview, tenureReviewerAllowed } from './pr-tenure.mjs';
+import { readPrTenure, tenureReviewRange, tenureReviewReason, queueTenureReview, tenureReviewerAllowed } from './pr-tenure.mjs';
 import { packTokensForSubject } from './reviewer-burst-lease.mjs';
 import {
   fetchReviewsForHeadForDedup,
@@ -1005,7 +1005,10 @@ export async function processReviewSubject(entry, ctx) {
             && tenureReviewRange(existing.rereview_reason, subject.headSha)?.previousHead)
             || existing.reviewer_head_sha || latestReviewedHeadSha({ db, repoPath, prNumber });
           tenureReviewRequired = Boolean(prTenure && previousHead && previousHead !== subject.headSha);
-          if (tenureReviewRequired && ['posted', 'pending', 'pending-upstream', 'ci-blocked'].includes(existing.review_status)) {
+          const alreadyQueued = existing.revision_ref === subject.headSha
+            && existing.rereview_reason === tenureReviewReason(previousHead, subject.headSha);
+          if (tenureReviewRequired && ['posted', 'pending', 'pending-upstream', 'ci-blocked'].includes(existing.review_status)
+            && (existing.review_status === 'posted' || !alreadyQueued)) {
             queueTenureReview({ db, repo: repoPath, prNumber, previousHead, headSha: subject.headSha,
               request: args => requestReviewRereview({ rootDir: ROOT, db, ...args }) });
             existing = stmtGetReviewRow.get(repoPath, prNumber);
@@ -1019,7 +1022,7 @@ export async function processReviewSubject(entry, ctx) {
       const resolveHeadCloserCommitSuppression = () => (headCloserCommitSuppressionResolver
         ||= createHeadCloserCommitSuppressionResolver({
           repoPath, prNumber, headSha: subject.headSha, execFileImpl: execFileAsync, logger: console,
-          ...(prTenure ? { readPrTenureImpl: async () => prTenure } : {}),
+          readPrTenureImpl: async () => prTenure,
         }))();
       async function projectGateStatusSafe(reviewRow) {
         if (!subject.headSha) return null;

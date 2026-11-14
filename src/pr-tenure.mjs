@@ -43,11 +43,14 @@ export async function readPrTenure({ repo, prNumber, env = process.env,
     }
     const completion = producer?.ok && producer.rows?.[0];
     if (completion && completion.head_sha !== headSha) throw new Error('tenure-head-provenance-mismatch');
-    if (completion?.head_sha === headSha && completion.launch_request_id !== opener.launch_request_id) {
+    if (completion?.head_sha === headSha && completion.launch_request_id
+      && completion.launch_request_id !== opener.launch_request_id) {
       const stages = await readLaunchesImpl({ launch_request_ids: [completion.launch_request_id] }, { ...options, env });
+      if (!stages?.ok) throw new Error('tenure-stage-launch-unavailable');
       const stage = stages?.ok && stages.rows?.find(row => row.launch_request_id === completion.launch_request_id);
-      if (!stage) throw new Error('tenure-stage-launch-unavailable');
-      if (stage.tenureId === tenure.tenureId) tenure.remediationWorkerClass = stage.worker_class || completion.worker_class;
+      // A successful read may precede the stage launch being indexed. The
+      // stable opener still requires review; add the stage family once bound.
+      if (stage?.tenureId === tenure.tenureId) tenure.remediationWorkerClass = stage.worker_class || completion.worker_class;
     }
   }
   return tenure;
@@ -100,12 +103,19 @@ export function readTenureReviewRange({ rootDir, repo, prNumber, headSha }) {
 export function queueTenureReview({ db, request, repo, prNumber, previousHead, headSha }) {
   const reason = tenureReviewReason(previousHead, headSha);
   if (!reason) return null;
-  if (!db.inTransaction) return db.transaction(() =>
-    queueTenureReview({ db, request, repo, prNumber, previousHead, headSha })).immediate();
   const current = db.prepare('SELECT * FROM reviewed_prs WHERE repo = ? AND pr_number = ?').get(repo, prNumber);
+  // Check before taking the writer lock, and again inside it for real changes.
+  // CI/upstream admission owns an already armed request and its timestamps.
+  if (current?.pr_state === 'open'
+    && ['pending', 'pending-upstream', 'ci-blocked'].includes(current.review_status)
+    && current.revision_ref === headSha && current.rereview_reason === reason) {
+    return { triggered: false, reason: 'exact-head-already-pending', reviewRow: current };
+  }
   if (current?.review_status === 'posted' && current.reviewer_head_sha === headSha) {
     return { triggered: false, reason: 'exact-head-already-reviewed', reviewRow: current };
   }
+  if (!db.inTransaction) return db.transaction(() =>
+    queueTenureReview({ db, request, repo, prNumber, previousHead, headSha })).immediate();
   const result = request({ repo, prNumber, targetRevisionRef: headSha, reason,
     preserveBudgets: true, inTransaction: true });
   // A pending row is already armed. Attach the range without resetting its

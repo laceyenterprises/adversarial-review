@@ -575,8 +575,17 @@ export async function getHeadCloserCommitSuppression({
 } = {}) {
   const sha = String(headSha || '').trim();
   if (!repoPath || !sha) return { suppressed: false, reason: null };
-  const prTenure = await readPrTenureImpl({ repo: repoPath, prNumber, rootDir, env });
   const active = activeHammerPublicationImpl({ rootDir, repo: repoPath, prNumber, headSha: sha });
+  let prTenure;
+  try {
+    prTenure = await readPrTenureImpl({ repo: repoPath, prNumber, rootDir, env });
+  } catch (error) {
+    logger?.warn?.(`[watcher] tenure suppression lookup unavailable for ${repoPath}#${prNumber}: ${error?.message || error}`);
+    // Unknown tenure cannot certify a closer exemption. Leave the head
+    // reviewable without falling through to the untenured suppression path.
+    return active ? { suppressed: true, reason: 'closer-publication-unconfirmed', headSha: sha }
+      : { suppressed: false, reason: 'tenure-unavailable', headSha: sha };
+  }
   if (prTenure) {
     // Retain live-writer custody as a wait, never as a terminal head proof.
     return active ? { suppressed: true, reason: 'closer-publication-unconfirmed', headSha: sha }

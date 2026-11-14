@@ -19,6 +19,21 @@ HAM certificates and closer ownership cannot waive that review.
 - Missing `tenureId` preserves the existing routing and suppression paths.
   No reviewer models, strictness, merge principals, CI gates or live settings change.
 
+## Final comment remediation
+
+- Reuse the watcher's cached tenure absence in closer suppression. Independent
+  lookup failures warn and retain live-writer custody, otherwise leaving the
+  head reviewable without accepting a closer certificate.
+- Treat a missing completion launch ID or a successful unindexed-stage lookup
+  as opener-only routing. Unreadable launch evidence still defers; a bound stage
+  still excludes its harness family.
+- Skip already armed same-head/range requests before opening a write transaction,
+  retaining pending, upstream and CI admission states, timestamps and budgets.
+- Warn and omit optional tenure range context on reviewer startup read failures.
+  Preserve the exact review head and include range context when available.
+- Correct the closure runbook, state notes, README contract and existing
+  state/smoke declarations. Persistent field shapes and smoke commands do not change.
+
 ## Verification
 
 Validation commands used the managed worker validator with requested 600-second
@@ -48,3 +63,23 @@ bounds; test commands used the prescribed netguard environment.
   600-second budget; its load-aware execution reached the test runner's own
   900-second limit, which stopped and cleaned up the suite. Partial output
   included the same legacy OAuth fixture failures. No full-suite pass is claimed.
+
+## Final remediation verification
+
+Commands ran through `bin/run-bounded.sh`, with 60–300 second limits.
+Legacy fixtures used `ADVERSARIAL_DISPATCH_READS_ENABLED=0` and
+`ADVERSARIAL_WORKER_OBSERVATIONS_ENABLED=0`; tenure cases inject their own
+readers. The initial inherited live-read flag caused fixture failures. The
+extended watcher fixture's duplicate seed was corrected before its final run.
+
+- `node test/run-tests.mjs test/watcher-claim-loop.test.mjs`: 181 passed.
+- `node test/run-tests.mjs test/watcher-claim-loop.test.mjs test/ten-06.test.mjs test/head-closer-local-git-daemon-robust.test.mjs`:
+  tenure (28) and closer (30) passed; the watcher seed failure was then fixed
+  and the whole watcher file passed separately as listed above.
+- `node test/run-tests.mjs test/reviewer-spawn-settle.test.mjs`: 26 passed.
+- `npm run lint` and final ESLint on the four changed source files:
+  zero errors; existing warnings remain.
+- `npm run typecheck:contracts`, `node scripts/validate-data-model-catalog.mjs`
+  (98 entries), `bash demo/research-finding-walkthrough.sh`, state/smoke JSON
+  parsing and `git diff --check`: passed.
+- No full local test suite was run in this remediation round.

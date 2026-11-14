@@ -50,6 +50,41 @@ test('unavailable launch evidence cannot establish untenured behavior', async ()
   assert.equal(await readPrTenure({ repo, prNumber: 7, env: {} }), null, 'standalone stays offline');
 });
 
+for (const launchId of [undefined, null, '', 'lrq_unindexed']) {
+  test(`incomplete stage launch preserves opener review routing (${String(launchId)})`, async () => {
+    const calls = [];
+    const result = await readPrTenure({ repo, prNumber: 7, headSha, env: {},
+      readBuildIdentityImpl: async () => ({ ok: true, rows: [{ launch_request_id: 'lrq_build' }] }),
+      readHeadProvenanceImpl: async () => ({ ok: true, rows: [
+        { head_sha: headSha, launch_request_id: launchId, worker_class: 'hammer-claude' },
+      ] }),
+      readLaunchesImpl: async selector => {
+        calls.push(selector);
+        return { ok: true, rows: selector.launch_request_ids[0] === 'lrq_build'
+          ? [{ launch_request_id: 'lrq_build', tenureId: tenure.tenureId, worker_class: 'codex' }] : [] };
+      },
+    });
+    assert.deepEqual(result, tenure);
+    assert.equal(calls.length, launchId ? 2 : 1, 'never query an absent launch ID');
+    assert.equal(tenureReviewerAllowed(result, 'codex'), false);
+    assert.equal(tenureHeadNeedsReview(Boolean(result), previousHead, headSha), true);
+  });
+}
+
+test('unreadable stage launch and mismatched head evidence still defer routing', async () => {
+  const options = { repo, prNumber: 7, headSha, env: {},
+    readBuildIdentityImpl: async () => ({ ok: true, rows: [{ launch_request_id: 'lrq_build' }] }),
+    readHeadProvenanceImpl: async () => ({ ok: true, rows: [{ head_sha: headSha, launch_request_id: 'lrq_stage' }] }),
+    readLaunchesImpl: async selector => selector.launch_request_ids[0] === 'lrq_build'
+      ? { ok: true, rows: [{ launch_request_id: 'lrq_build', tenureId: tenure.tenureId }] }
+      : { ok: false, reason: 'transport-unavailable' },
+  };
+  await assert.rejects(readPrTenure(options), /tenure-stage-launch-unavailable/);
+  await assert.rejects(readPrTenure({ ...options,
+    readHeadProvenanceImpl: async () => ({ ok: true, rows: [{ head_sha: otherHead }] }),
+  }), /tenure-head-provenance-mismatch/);
+});
+
 for (const sameTenure of [true, false]) test(`exact-head producer family binds to the PR tenure (same=${sameTenure})`, async () => {
   const result = await readPrTenure({ repo, prNumber: 7, headSha, env: {},
     readBuildIdentityImpl: async args => {
@@ -127,6 +162,52 @@ test('untenured suppression returns the original publication result byte-for-byt
   assert.equal(await getHeadCloserCommitSuppression({ repoPath: repo, prNumber: 7, headSha,
     readPrTenureImpl: async () => null, activeHammerPublicationImpl: () => original }), original);
 });
+
+test('transient tenure lookup failure leaves suppression unresolved without probing certificates', async () => {
+  const warnings = [];
+  const result = await getHeadCloserCommitSuppression({ repoPath: repo, prNumber: 7, headSha,
+    readPrTenureImpl: async () => { throw new Error('dispatch-unavailable'); },
+    logger: { warn: message => warnings.push(message) },
+    activeHammerPublicationImpl: () => null,
+    fetchVerifiedCommitFromLocalGitImpl: () => assert.fail('unknown tenure cannot certify a head'),
+  });
+  assert.deepEqual(result, { suppressed: false, reason: 'tenure-unavailable', headSha });
+  assert.match(warnings[0], /dispatch-unavailable/);
+});
+
+test('transient tenure lookup failure preserves active writer custody without certifying its head', async () => {
+  const result = await getHeadCloserCommitSuppression({ repoPath: repo, prNumber: 7, headSha,
+    readPrTenureImpl: async () => { throw new Error('dispatch-unavailable'); },
+    logger: quiet,
+    activeHammerPublicationImpl: () => ({ suppressed: true, reason: 'active-closer-merge-lease', headSha }),
+    fetchVerifiedCommitFromLocalGitImpl: () => assert.fail('unknown tenure cannot certify a head'),
+  });
+  assert.deepEqual(result, { suppressed: true, reason: 'closer-publication-unconfirmed', headSha });
+});
+for (const status of ['pending', 'pending-upstream', 'ci-blocked']) {
+  test(`already queued tenure request is read-only while another writer holds reviews.db (${status})`, t => {
+    const rootDir = root(t), db = openReviewStateDb(rootDir);
+    t.after(() => db.close());
+    ensureReviewStateSchema(db);
+    db.pragma('busy_timeout = 1');
+    db.prepare(`INSERT INTO reviewed_prs
+      (repo, pr_number, reviewed_at, reviewer, review_status, revision_ref, rereview_reason, review_attempts)
+      VALUES (?, 7, ?, 'gemini', ?, ?, ?, 4)`)
+      .run(repo, at, status, headSha, tenureReviewReason(previousHead, headSha));
+    const before = db.prepare('SELECT * FROM reviewed_prs').get();
+    const writer = openReviewStateDb(rootDir);
+    try {
+      writer.exec('BEGIN IMMEDIATE');
+      const result = queueTenureReview({ db, repo, prNumber: 7, previousHead, headSha,
+        request: () => assert.fail('already queued request must not be reset') });
+      assert.equal(result.reason, 'exact-head-already-pending');
+      assert.deepEqual(db.prepare('SELECT * FROM reviewed_prs').get(), before);
+    } finally {
+      if (writer.inTransaction) writer.exec('ROLLBACK');
+      writer.close();
+    }
+  });
+}
 
 test('exact-head request persists remediation range, preserves budgets and never resets a live claim', t => {
   const rootDir = root(t), db = openReviewStateDb(rootDir);

@@ -855,6 +855,7 @@ async function spawnReviewerOnceWithAccount({
   freshnessCheckSleepImpl = sleepMs,
   onPostOperationSettled = null,
   readDurablePostedAtImpl = readDurableReviewerPostedAt,
+  readTenureReviewRangeImpl = readTenureReviewRange,
   agyReviewerIdentityPool = getAgyReviewerIdentityPool(),
 }) {
   if (reviewerRefusesBuilder(builderTag, reviewerModel)) {
@@ -1045,9 +1046,15 @@ async function spawnReviewerOnceWithAccount({
       reviewerAttribution = buildReviewerAttribution({ reviewerModel, reviewerAccountReceipt,
         agyHolderLease: agyIdentityLease });
       onReviewerRuntimeStarted();
+      let tenurePrompt = '';
+      try {
+        tenurePrompt = formatTenureReviewRange(readTenureReviewRangeImpl({ rootDir, repo, prNumber, headSha: reviewerHeadSha }));
+      } catch (error) {
+        console.warn(`[watcher] tenure remediation range unavailable for ${repo}#${prNumber}: ${error.code || 'read-failed'}`);
+      }
       const runtimeRequest = {
         model: reviewerModel,
-        prompt: formatTenureReviewRange(readTenureReviewRange({ rootDir, repo, prNumber, headSha: reviewerHeadSha })),
+        prompt: tenurePrompt,
         subjectContext: {
           domainId,
           repo,

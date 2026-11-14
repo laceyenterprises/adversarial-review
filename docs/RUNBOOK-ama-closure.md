@@ -6575,11 +6575,14 @@ the reviewed head requires an independent exact-head review outside the author's
 harness family. `HAM-Validated-Head` and `HAM-Terminal-Remediation-Head` do not
 waive this requirement. The watcher also applies it before a completion receipt
 arrives, so every changed head of a tenured PR remains reviewable. An unavailable
-launch read defers scheduling; an available launch without `tenureId` uses the
+build or stage launch read defers scheduling; an available build launch without `tenureId` uses the
 existing untenured behavior.
 When an exact-head completion identifies another stage of the same tenure,
 the reviewer also excludes that stage's harness family using the existing
-reviews-next-round family predicate. Live publisher custody remains a scheduling
+reviews-next-round family predicate. A completion without a launch ID, or a
+successful stage lookup with no matching indexed launch, retains opener-based
+review routing without adding a stage family. A later poll can bind the stage
+once its launch is visible. Live publisher custody remains a scheduling
 wait until the writer releases it; it never certifies the tenured head.
 
 Tenured remediator dispatches use the native HQ lane because the app translator
@@ -6596,6 +6599,14 @@ The durable review request's `rereview_reason` contains
 `tenure-independent-review: <previous-reviewed-sha>..<new-sha>`. Both full and
 slim review prompts include that range. A later head cannot consume its range,
 and a completed exact-head review is not reset by a stale closure request.
+An already armed request at the same head and range retains its pending,
+pending-upstream or CI-blocked admission state without a writer transaction.
+Suppression reuses the poll's tenure result, including absence; an independent
+suppression lookup failure retains live-writer custody, otherwise leaving the
+head unsuppressed instead of rejecting the resolver or certifying an untenured
+exemption. Range-prompt read errors
+warn and omit that optional context without aborting reviewer startup; the
+exact review head and family admission remain enforced.
 
 
 ### Orphan watchdog evidence boundaries

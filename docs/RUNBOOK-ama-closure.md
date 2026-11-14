@@ -5349,6 +5349,14 @@ this repository runs selected touched/direct-importer tests through
 each test directory, including shared test helpers. Legacy command-style callers
 derive changed paths from Git; unavailable Git comparison evidence uses the same
 canonical-setup fallback below. Never synthesize pytest/PYTHONPATH.
+For repositories with `pnpm-lock.yaml`, the selector reads pnpm script commands
+from local pull-request workflows and runs them in workflow order with the exact
+`packageManager` pnpm version, supplied by `npm exec --package=pnpm@<version>`.
+That includes format, lint and test scripts referenced by those workflows.
+It does not execute workflow setup/install steps. Unsupported shell expressions,
+workflow environment/matrix or working-directory context, missing pins and absent
+script selections fail explicitly in the existing targeted-validation phase.
+pnpm selection/executable failures do not use the skipped-battery fallback.
 A missing repository-owned Python package is an environment fault. Unavailable
 canonical setup records `local-battery-skipped-github-required-gate-authoritative`
 and no local pass, then proceeds to fresh verify-head and the exact-head required

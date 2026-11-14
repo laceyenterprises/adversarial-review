@@ -12,6 +12,7 @@ import { execFileSync } from 'node:child_process';
 import { readRunClosureResume } from '../src/ama/closure-resume.mjs';
 import { canonicalHammerValidation, ownPackageImportFault, repositoryPythonPackages } from '../src/ama/hammer-canonical-validation.mjs';
 import { recordHammerPhase } from '../src/ama/hammer-outcome.mjs';
+import { ValidationSelectionError } from '../src/ama/pnpm-validation.mjs';
 
 // CLOSERGATES-01: a closure-resume launch validated nothing new. While the
 // checkout is still the receipt's validated head, that launch's evidence
@@ -65,7 +66,12 @@ if (!valid || args.shift() !== '--' || !args.length) {
         runner = canonicalHammerValidation(process.cwd(), paths);
       }
       catch (error) {
-        if (error instanceof TypeError) {
+        if (error instanceof ValidationSelectionError) {
+          console.error(error.message);
+          recordHammerPhase('targeted-validation-failed');
+          process.exitCode = 1;
+          valid = false;
+        } else if (error instanceof TypeError) {
           console.error(usage);
           process.exitCode = 64;
           valid = false;
@@ -78,7 +84,7 @@ if (!valid || args.shift() !== '--' || !args.length) {
     if (valid) {
       let output = '', packageImportFault = false;
       let packages = new Set();
-      try { if (canonical) packages = repositoryPythonPackages(process.cwd()); }
+      try { if (canonical && !runner?.required) packages = repositoryPythonPackages(process.cwd()); }
       catch { runner = null; }
       const observeOutput = chunk => {
         output += String(chunk);
@@ -88,7 +94,7 @@ if (!valid || args.shift() !== '--' || !args.length) {
       process.exitCode = runner ? await runBounded(runner.command, runner.args,
         { env, timeoutMs: loadAwareTimeoutSeconds(nominalSeconds) * 1000, idleMs: LEASE_VALIDATION_IDLE_MS,
           observeOutput }) : 127;
-      const environmentFault = canonical && (!runner || [76, 78, 127].includes(process.exitCode)
+      const environmentFault = canonical && !runner?.required && (!runner || [76, 78, 127].includes(process.exitCode)
         || (process.exitCode !== 0 && process.exitCode < 124
           && packageImportFault));
       if (environmentFault) {

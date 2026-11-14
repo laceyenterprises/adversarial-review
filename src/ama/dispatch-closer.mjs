@@ -6394,7 +6394,7 @@ async function maybeDispatchAmaCloserAttempt({
           // Legacy infrastructure/exit audits without review input retain the
           // bounded retry/cap-alert executor. Production predicate refusals
           // carry the current refusing review into the final-fix-all work order.
-          hammerShouldHandoff = (reportedNoWork && !existingDispatchHeadAdvanced) || (noMergeAuditForCurrentHead === true
+          hammerShouldHandoff = reportedNoWork || (noMergeAuditForCurrentHead === true
             && Boolean(String(dispatchContext.refusingReviewBody || '').trim()));
           const noMergeOutcome = hammerOutcome.outcome;
           const exitedWithoutClose = noMergeOutcome === HAMMER_EXITED_WITHOUT_CLOSE;
@@ -6423,6 +6423,12 @@ async function maybeDispatchAmaCloserAttempt({
           }));
           const noMergeDetails = hammerNoMergeDetails({ hqRoot, launchRequestId: existingRecord.launchRequestId,
             runId: existingRecord.workerRunId, raw: hammerOutcome.reason || noMergeOutcome });
+          // An external head advance does not turn an infrastructure retry
+          // into a closer refusal on the new head.
+          if (existingDispatchHeadAdvanced && classifyCloserOutcome({
+            reason: noMergeDetails.lastPhase,
+            failureClass: prefetchedLaunchRequestProbe?.row?.failure_class,
+          }).kind === 'inconclusive') hammerShouldHandoff = false;
           // INCONCLUSIVERETRY-01b: the closer's own terminal-stop/last-phase
           // receipt or the launch failure decides. An unmoved head that could
           // not conclude is refunded in full; a real or unknown stop keeps the

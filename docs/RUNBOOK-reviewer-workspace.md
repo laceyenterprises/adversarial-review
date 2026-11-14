@@ -28,8 +28,9 @@ returns its existing preflight failure result without spawning a reviewer.
 Both synchronous and asynchronous clients retry resolution once, sizing each
 nominal ten-second attempt through the shared load-aware timeout helper. Protocol
 v1 field validation remains mandatory. Pretty-printed JSON remains supported;
-line-oriented output permits one valid protocol response alongside empty lines
-or non-JSON banners. Multiple JSON values, including two valid responses, are
+line-oriented output permits one valid protocol response alongside empty lines,
+non-JSON banners or non-object JSON chatter (numbers, booleans, strings, null
+and arrays). Multiple JSON objects, including two valid responses, are
 refused. Invalid JSON records only stdout byte length, line count and whether a
 single line validated as protocol v1, never the raw stdout.
 
@@ -45,6 +46,8 @@ Runtime readyz adds informational `reviewerFailures24h` with separate
 `cli-resolution-transient` and `oauth-broken` counts from failed reviewer passes.
 Missing/unreadable history is reported as unavailable, not zero. These counts
 are diagnostics only and do not change readiness signals or `overallReady`.
+Attribution and failure counts share one read-only database connection per
+readyz invocation; query failures remain independently reported.
 
 Before any helper or exec, `[review-cli-resolution]` logs the validated
 `schemaVersion`, registry `cli`, `consumer`, `status`, `source`, `selectedPath`,

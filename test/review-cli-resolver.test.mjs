@@ -253,7 +253,9 @@ for (const asyncMode of [false, true]) {
     };
     assert.equal((await run(`synthetic private banner\n${protocol}\n`)).status, 'resolved');
     assert.equal((await run(JSON.stringify(f.response, null, 2))).status, 'resolved');
-    for (const stdout of [`${protocol}\n${protocol}\n`, `synthetic private banner\n{broken`, `${protocol}\n${JSON.stringify({ ...f.response, schemaVersion: 2 })}`]) {
+    const chatter = '200\nfalse\ntrue\nnull\n"synthetic private banner"\n[]\n[1,2]';
+    assert.equal((await run(`${chatter}\n${protocol}\n${chatter}\n`)).realPath, f.binary);
+    for (const stdout of [`${protocol}\n${protocol}\n`, `synthetic private banner\n{broken`, `${protocol}\n${JSON.stringify({ ...f.response, schemaVersion: 2 })}`, `${protocol}\n{}`, chatter]) {
       await assert.rejects(run(stdout), (err) => {
         assert.equal(err.failureClass, 'cli-resolution-transient');
         assert.equal(err.binaryResolution.reason, 'invalid-json');

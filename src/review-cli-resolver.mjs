@@ -55,7 +55,7 @@ function validateResolution(cli, result) {
 }
 
 // Preserve pretty-printed protocol output. For line-oriented output, tolerate
-// non-JSON CLI banners, but never choose between two JSON responses.
+// CLI banners and non-object JSON chatter, but never choose between two objects.
 function parseResolution(cli, raw) {
   const stdout = String(raw);
   try {
@@ -69,6 +69,7 @@ function parseResolution(cli, raw) {
       if (!line.trim()) continue;
       try {
         const value = JSON.parse(line);
+        if (typeof value !== 'object' || value === null || Array.isArray(value)) continue;
         objects.push(value);
         try { validateResolution(cli, value); protocolLineCount += 1; } catch { /* invalid protocol */ }
       } catch { /* non-JSON CLI chatter */ }

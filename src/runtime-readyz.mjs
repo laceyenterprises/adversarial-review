@@ -187,20 +187,8 @@ function routerSignal(rootDir) {
   };
 }
 
-function attributionSignal(rootDir, { now = () => new Date() } = {}) {
-  const dbPath = join(rootDir, 'data', 'reviews.db');
-  if (!existsSync(dbPath)) {
-    return {
-      id: 'attribution',
-      label: 'attribution round-trip',
-      ok: false,
-      detail: 'reviews.db missing',
-    };
-  }
-
-  let db;
+function attributionSignal(db, { now }) {
   try {
-    db = new Database(dbPath, { readonly: true });
     const hasEndedAt = hasColumn(db, 'reviewer_passes', 'ended_at');
     const since = hasEndedAt
       ? new Date(now().getTime() - ATTRIBUTION_MAX_AGE_MS).toISOString()
@@ -231,18 +219,12 @@ function attributionSignal(rootDir, { now = () => new Date() } = {}) {
       ok: false,
       detail: `db error: ${err.message || String(err)}`,
     };
-  } finally {
-    if (db) db.close();
   }
 }
 
 // Informational only: reviewer failures do not add a readiness signal or gate.
-function reviewerFailureCounts(rootDir, { now }) {
-  const dbPath = join(rootDir, 'data', 'reviews.db');
-  if (!existsSync(dbPath)) return { status: 'unavailable', counts: null };
-  let db;
+function reviewerFailureCounts(db, { now }) {
   try {
-    db = new Database(dbPath, { readonly: true });
     const since = new Date(now().getTime() - ATTRIBUTION_MAX_AGE_MS).toISOString();
     const rows = db.prepare(`SELECT metadata_json FROM reviewer_passes
       WHERE status = 'failed' AND ended_at >= ?`).all(since);
@@ -254,6 +236,33 @@ function reviewerFailureCounts(rootDir, { now }) {
     return { status: 'available', counts };
   } catch {
     return { status: 'unavailable', counts: null };
+  }
+}
+
+function readReviewDatabaseStatus(rootDir, { now }) {
+  const dbPath = join(rootDir, 'data', 'reviews.db');
+  const unavailable = {
+    attribution: {
+      id: 'attribution',
+      label: 'attribution round-trip',
+      ok: false,
+      detail: 'reviews.db missing',
+    },
+    reviewerFailures24h: { status: 'unavailable', counts: null },
+  };
+  if (!existsSync(dbPath)) return unavailable;
+  let db;
+  try {
+    db = new Database(dbPath, { readonly: true });
+    return {
+      attribution: attributionSignal(db, { now }),
+      reviewerFailures24h: reviewerFailureCounts(db, { now }),
+    };
+  } catch (err) {
+    return {
+      ...unavailable,
+      attribution: { ...unavailable.attribution, detail: `db error: ${err.message || String(err)}` },
+    };
   } finally {
     db?.close();
   }
@@ -287,7 +296,7 @@ export async function buildReadyzStatus(rootDir, {
   const endpoint = await endpointSignal(url);
   const router = routerSignal(rootDir);
   const smoke = settleSmokeSignal(rootDir, { now });
-  const attribution = attributionSignal(rootDir, { now });
+  const { attribution, reviewerFailures24h } = readReviewDatabaseStatus(rootDir, { now });
   const { appRegistration, signal: appRegistrationSignalModel } = appRegistrationSignal(
     rootDir,
     appRegistrationOptions,
@@ -298,7 +307,7 @@ export async function buildReadyzStatus(rootDir, {
 
   return {
     overallReady: failingSignals.length === 0,
-    reviewerFailures24h: reviewerFailureCounts(rootDir, { now }),
+    reviewerFailures24h,
     failingSignals,
     app_registration: appRegistration,
     signals,

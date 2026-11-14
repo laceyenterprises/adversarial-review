@@ -17,6 +17,12 @@ contain only byte length, line count and protocol-line presence. Pipeline
 health retains the new class; runtime readyz reports separate informational
 24-hour resolution/OAuth counts without adding a readiness gate.
 
+Final comment-only remediation synchronizes the exported failure-class types,
+ignores non-object JSON chatter around a single protocol object, and shares one
+read-only readyz database handle while preserving independent query failures.
+The suggested `(status, ended_at)` index remains a follow-up schema migration;
+this remediation does not change persistent storage or lifecycle/smoke promises.
+
 See the [synthetic SEV2 report](../postmortems/SEV2-REVIEWCLIJSON-01-review-cli-resolution-false-auth-isolation.md)
 and the corrected [resolver runbook](../RUNBOOK-reviewer-workspace.md).
 No reviewer model, concurrency limit, strictness, merge rule or CI gate changes.
@@ -33,8 +39,24 @@ exported for shared classification. Resolver fixture options accept an injected
 failure class without a schema migration. Runtime readyz JSON adds
 `reviewerFailures24h` with availability and separate counts; text renders the
 same diagnostics. Unavailable history is not represented as zero failures.
+`ReviewerFailureClass` (and its reviewer, remediator and agent consumers) includes
+`cli-resolution-transient`. Line-oriented resolver ambiguity counts JSON objects
+only; additional objects still fail closed.
 
 ## Verification
+
+Final comment-only remediation validation (bounded foreground commands):
+
+- `npm test -- review-cli-resolver.test.mjs runtime-readyz.test.mjs runtime-status-cli.test.mjs`:
+  48 tests passed across three files, including primitive chatter, object ambiguity,
+  one read-only handle, independent query errors, and missing/corrupt/legacy history.
+- `npm run lint`: passed with zero errors (149 existing warnings).
+- `npm run typecheck:contracts`: passed, including resolution failures in reviewer,
+  remediator and agent result contracts.
+- `bash demo/research-finding-walkthrough.sh`: passed, three byte-stable deliveries.
+- `git diff --check`: passed. No full local suite was run in this final round.
+
+Earlier validation:
 
 All test commands use the repository runner, the prescribed netguard environment
 and a 600-second process-group budget through `cwp_dispatch.worker_validation`.

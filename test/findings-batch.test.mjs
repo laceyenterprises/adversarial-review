@@ -1,4 +1,5 @@
 import './helpers/dispatch-read-fixture.mjs';
+import './helpers/load-aware-timeout-fixture.mjs';
 import test from 'node:test';
 import { spawn } from 'node:child_process';
 import childProcess from 'node:child_process';
@@ -564,7 +565,7 @@ test('FINDINGSBATCH-01 hourly settlement clears mixed outcomes without claiming 
   assert.equal(launches, 2);
 });
 
-async function publicationFixture(t, { advice = false, expectedTimeout = null } = {}) {
+async function publicationFixture(t, { advice = false, expectedTimeout = null, expectedReadTimeout = 30_000 } = {}) {
   const f = fixture(t);
   f.pass(1, advice ? adviceOnly : body);
   f.db.prepare("UPDATE reviewed_prs SET pr_state='merged'").run();
@@ -602,13 +603,15 @@ async function publicationFixture(t, { advice = false, expectedTimeout = null } 
     },
     readLaunches: async args => {
       assert.equal(args.idempotencyKey, key);
-      assert.equal(args.timeoutMs, 15_000);
+      // The release helper retains its separate 15-second read contract.
+      assert.ok(args.timeoutMs === 15_000 || args.timeoutMs === expectedReadTimeout);
       return { ok: true, rows: launches };
     },
     execFileImpl: async (bin, args, options) => {
       assert.equal(bin, 'hq');
       if (args[1] === 'status') {
         assert.deepEqual(args, ['dispatch', 'status', batch.launch_id, '--json', '--root', f.rootDir]);
+        assert.equal(options.timeout, expectedReadTimeout);
         return { stdout: JSON.stringify(status) };
       }
       if (args[0] === 'decision') {
@@ -832,7 +835,7 @@ test('FINDINGSDECISIONHOLD-01 refuses unpushed work and retains the cause and fu
     'age does not discard unresolved decision custody');
 });
 
-test('initial and publication dispatch timeouts scale beyond the one-hour default cap under load', async t => {
+test('FINDINGSSTATUSTIMEOUT-01 publication probes use read-scale bounds while dispatch retains provisioning time', async t => {
   t.mock.method(os, 'platform', () => 'linux');
   const cores = os.cpus().length;
   t.mock.method(os, 'loadavg', () => [cores * 3, cores * 3, cores * 3]);
@@ -848,10 +851,81 @@ test('initial and publication dispatch timeouts scale beyond the one-hour defaul
     syncBuiltinESMExports();
     resetLoadAwareTimeoutCachesForTesting();
   });
-  const f = await publicationFixture(t, { expectedTimeout: 5_400_000 });
+  const f = await publicationFixture(t, { expectedTimeout: 5_400_000, expectedReadTimeout: 180_000 });
   assert.equal(f.dispatches.length, 1);
+  // Model elapsed child/transport time without waiting on wall-clock sleeps.
+  // Either old 15-second probe bound rejects before publication.
+  const elapsedMs = 20_000;
+  let statusReads = 0, keyedReads = 0;
+  await f.run({
+    execFileImpl: async (bin, args, options) => {
+      if (args[1] === 'status') {
+        statusReads++;
+        assert.ok(elapsedMs < options.timeout);
+      }
+      return f.options.execFileImpl(bin, args, options);
+    },
+    readLaunches: async args => {
+      keyedReads++;
+      assert.ok(elapsedMs < args.timeoutMs);
+      return f.options.readLaunches(args);
+    },
+  });
+  assert.equal(statusReads, 1);
+  assert.equal(keyedReads, 1);
+  assert.equal(f.dispatches.length, 2, 'publisher provisioning retains its uncapped load scaling');
+  assert.equal(f.db.prepare('SELECT error FROM finding_batches').get().error, null);
+});
+
+test('FINDINGSSTATUSTIMEOUT-01 terminated publication probes record their cause and retry without release', async t => {
+  for (const boundary of ['status', 'ledger']) {
+    for (const failure of [
+      { killed: true, signal: 'SIGTERM' },
+      { killed: true },
+      { timedOut: true },
+      { code: 'ETIMEDOUT' },
+      { signal: 'SIGKILL' },
+      { code: 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER', killed: true, signal: 'SIGTERM' },
+      { code: 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER' },
+    ]) await t.test(`${boundary}: ${JSON.stringify(failure)}`, async t => {
+      const f = await publicationFixture(t);
+      const logs = [];
+      const fail = async () => {
+        throw Object.assign(Error(`Command failed: ${'synthetic command '.repeat(30)}`), failure,
+          { stderr: `[hq] error: ${'synthetic diagnostic '.repeat(30)}` });
+      };
+      await f.run({ logger: { warn: message => logs.push(message) },
+        ...(boundary === 'status' ? { execFileImpl: fail } : { readLaunches: fail }) });
+      const row = f.db.prepare('SELECT error,released_at,completed_at,batch_attempts FROM finding_batches').get();
+      const operation = boundary === 'status' ? 'hq dispatch status' : 'keyed launch probe';
+      const expected = failure.code === 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER'
+        ? `${operation} output exceeded limit${failure.signal ? ` (signal ${failure.signal})` : ''}`
+        : failure.signal === 'SIGKILL' ? `${operation} terminated (signal SIGKILL)`
+          : `${operation} timed out after 30000 ms${failure.signal ? ` (signal ${failure.signal})` : ''}`;
+      assert.equal(row.error, expected);
+      assert.equal(row.released_at, null);
+      assert.equal(row.completed_at, null);
+      assert.equal(row.batch_attempts, 0);
+      assert.ok(logs[0].slice(0, 300).includes(expected));
+      assert.equal(f.dispatches.length, 1);
+      await f.run();
+      assert.equal(f.dispatches.length, 2, 'next pass retries publication with the same batch');
+      assert.equal(f.db.prepare('SELECT error FROM finding_batches').get().error, null);
+    });
+  }
+});
+
+test('FINDINGSSTATUSTIMEOUT-01 typed keyed read timeout remains visible and retryable', async t => {
+  const f = await publicationFixture(t);
+  const logs = [];
+  await f.run({ logger: { warn: message => logs.push(message) },
+    readLaunches: async () => ({ ok: false, reason: 'dispatch-read-unavailable', timedOut: true }) });
+  const row = f.db.prepare('SELECT error,released_at FROM finding_batches').get();
+  assert.equal(row.error, 'keyed launch probe timed out after 30000 ms');
+  assert.equal(row.released_at, null);
+  assert.ok(logs[0].includes(row.error));
   await f.run();
-  assert.equal(f.dispatches.length, 2, 'publication uses the same uncapped load scaling');
+  assert.equal(f.dispatches.length, 2);
 });
 
 async function nativePublicationFixture(t) {

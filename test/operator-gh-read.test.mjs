@@ -82,21 +82,34 @@ test('a gh child that never exits is killed at the budget with the typed reason'
 
 test('a wait that never reaches gh (metering admission) is bounded too', async t => {
   const clock = new FakeClock(t);
+  let admissionSignal;
+  let calls = 0;
+  let settled = false;
   const rejected = assert.rejects(
     runOperatorGhRead({
       args: ['pr', 'view'],
       label: 'head lookup',
       timeoutReason: 'head-lookup-timeout',
       budgetMs: 100,
-      execGhWithRetryImpl: () => new Promise(() => {}),
-    }),
+      execGhWithRetryImpl: ({ signal }) => {
+        admissionSignal = signal;
+        return new Promise(() => {});
+      },
+      execFileImpl: () => { calls += 1; assert.fail('admission must not spawn gh'); },
+    }).finally(() => { settled = true; }),
     (err) => err.reason === 'head-lookup-timeout' && err.phase === 'admission' && err.attempts === 0
       && /waiting for GitHub metering\/budget admission before spawning `gh pr view`/.test(err.message),
   );
 
   await clock.flush();
-  await clock.advance(100);
+  assert.ok(admissionSignal instanceof AbortSignal);
+  await clock.advance(99);
+  assert.equal(settled, false);
+  assert.equal(admissionSignal.aborted, false);
+  await clock.advance(1);
   await rejected;
+  assert.equal(admissionSignal.aborted, true);
+  assert.equal(calls, 0);
 });
 
 test('a killed gh attempt retains the execution phase when it rejects', async () => {

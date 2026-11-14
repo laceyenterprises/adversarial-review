@@ -83,3 +83,24 @@ extended watcher fixture's duplicate seed was corrected before its final run.
   (98 entries), `bash demo/research-finding-walkthrough.sh`, state/smoke JSON
   parsing and `git diff --check`: passed.
 - No full local test suite was run in this remediation round.
+
+## HAM closeout repairs
+
+Rebased onto current main while preserving both reviewer startup imports. Reused
+all four existing final-comment fixes. Refreshed the watcher state projection
+following review of the tenure pending-request and admission guards; lifecycle
+states and graph edges remain unchanged. Updated existing offline gate fixtures
+to supply the tenure imports/placeholders and recognize the rendered helper
+source line. Extracted required HQ session/project reads into the existing
+remediation dispatch helper, preserving validation order, trimming and errors;
+the remediation module remains below its existing size ceiling. The offline test
+runner also discards inherited live dispatch/observation switches; tenure fixtures
+continue to opt in explicitly.
+
+Verification: lint (zero errors), contract typecheck, data-model catalog (98
+entries), and the offline research walkthrough passed. Targeted canonical
+validation covers tenure, watcher claims, reviewer startup, closer suppression,
+state projection, HAM credentials, late-review race protection, module boundaries,
+and HQ dispatch: 420 tests passed across ten files. Initial live-read fixture failures
+were resolved by runner environment isolation; the late-review fixture import was
+corrected before its passing run. Exact-head GitHub CI remains the full-suite merge authority.

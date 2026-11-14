@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
   cancelHqDispatch,
+  readHqRemediationDispatchContext,
   isHqCancelRetryable,
 } from '../src/remediation-hq-dispatch.mjs';
 
@@ -85,4 +86,11 @@ test('cancelHqDispatch stops immediately on non-retryable failures', async () =>
 test('isHqCancelRetryable treats child-process timeout codes as transient', () => {
   assert.equal(isHqCancelRetryable({ code: 'ETIMEDOUT', message: 'child process failed' }), true);
   assert.equal(isHqCancelRetryable({ code: 1, stderr: 'fatal: permission denied' }), false);
+});
+
+test('HQ remediation context preserves required values and validation order', () => {
+  assert.deepEqual(readHqRemediationDispatchContext({ HQ_PARENT_SESSION: ' parent ', HQ_PROJECT: ' project ' }),
+    { parentSession: 'parent', project: 'project' });
+  assert.throws(() => readHqRemediationDispatchContext({}), /HQ_PARENT_SESSION must be set when HQ remediation dispatch is enabled/);
+  assert.throws(() => readHqRemediationDispatchContext({ HQ_PARENT_SESSION: 'parent' }), /HQ_PROJECT must be set when HQ remediation dispatch is enabled/);
 });

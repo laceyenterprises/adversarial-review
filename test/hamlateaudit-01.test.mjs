@@ -143,6 +143,8 @@ test('rendered final GitHub gate fetches reviews and rejects the race after an e
       const code = `
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
+import { tenureHeadNeedsReview } from ${JSON.stringify(new URL('src/pr-tenure.mjs', root).href)};
+import { latestReviewedHeadSha } from ${JSON.stringify(new URL('src/ci-blocked-hammer.mjs', root).href)};
 import { terminalReviewProofMatches } from ${JSON.stringify(new URL('src/ama/reviewer-authority.mjs', root).href)};
 import { createReviewCurrencyReader } from ${JSON.stringify(new URL('src/ama/review-currency.mjs', root).href)};
 import { evaluateMergeEligibility } from ${JSON.stringify(new URL('src/ama/merge-eligibility.mjs', root).href)};
@@ -163,7 +165,7 @@ const createHistoryReader = () => async path => {
 const loadEffectiveMergeAuthorityConfig = () => ({});
 const fetchPrimaryChange = async () => (${JSON.stringify(primaryChangeFixture(HEAD))});
 const checkPrimaryChange = () => ({ ok: true });
-${gateCode.replace(/^import .*;\n/gm, '').replaceAll('<<REPO>>', 'example/repo').replaceAll('<<PR_NUMBER>>', '54')}`;
+${gateCode.replace(/^import .*;\n/gm, '').replaceAll('<<REPO>>', 'example/repo').replaceAll('<<PR_NUMBER>>', '54').replaceAll('<<TENURE_REVIEW_ARG>>', '').replaceAll('<<REVIEWED_SHA>>', OLD)}`;
       const result = spawnSync(process.execPath, ['--input-type=module'], {
         input: code, encoding: 'utf8', timeout: 15000,
         env: { ...process.env, POST_REMEDIATION_SHA: HEAD, HAM_REVIEW_PROOF_REQUIRED: '1',

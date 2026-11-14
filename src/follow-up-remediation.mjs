@@ -210,6 +210,7 @@ import { requeueForWorkspaceResume, resumeLostRemediationWorker } from './remedi
 import { claimWithLivePrOwnerGate, createLivePrOwnerLookup, deferClaimedJobForLivePrOwner } from './remediation-live-pr-owner.mjs';
 import {
   appendHqRemediationDispatchOptions,
+  readHqRemediationDispatchContext,
   assertHqDispatchOwnerMatches,
   requireHqDispatchEnvValue,
   cancelHqDispatch,
@@ -549,16 +550,7 @@ async function dispatchRemediationViaHq({
   }
   const hqOwnerUser = requiresProducedAttestation
     ? assertHqDispatchOwnerMatches({ ...env, HQ_ROOT: hqRoot }) : null;
-  const parentSession = requireHqDispatchEnvValue(
-    env,
-    'HQ_PARENT_SESSION',
-    'HQ_PARENT_SESSION must be set when HQ remediation dispatch is enabled'
-  );
-  const project = requireHqDispatchEnvValue(
-    env,
-    'HQ_PROJECT',
-    'HQ_PROJECT must be set when HQ remediation dispatch is enabled'
-  );
+  const { parentSession, project } = readHqRemediationDispatchContext(env);
   const ticketRef = String(jobId || launchRequestId || `PR-${prNumber}`).trim();
   const requestId = String(jobId || launchRequestId || ticketRef).trim();
   const appMode = resolveAdversarialReviewAppMode(env);

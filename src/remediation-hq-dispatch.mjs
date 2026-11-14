@@ -328,6 +328,15 @@ export function requireHqDispatchEnvValue(env, key, message) {
   return value;
 }
 
+export function readHqRemediationDispatchContext(env) {
+  return {
+    parentSession: requireHqDispatchEnvValue(env, 'HQ_PARENT_SESSION',
+      'HQ_PARENT_SESSION must be set when HQ remediation dispatch is enabled'),
+    project: requireHqDispatchEnvValue(env, 'HQ_PROJECT',
+      'HQ_PROJECT must be set when HQ remediation dispatch is enabled'),
+  };
+}
+
 function readHqConfigOwnerUser(hqRoot, env = process.env) {
   const ownerUser = readHostIdentitySync({hqRoot, env}).ownerUser;
   if (!ownerUser) throw new Error('host identity unavailable');

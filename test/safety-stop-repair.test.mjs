@@ -1,3 +1,5 @@
+import './helpers/load-aware-timeout-fixture.mjs';
+import { mockCloserLoad } from './helpers/closer-load-fixture.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
@@ -44,14 +46,29 @@ function setup(t) {
       fetchPrimaryChangeImpl: async ({ headSha }) => revertedEvidence(headSha),
       env: { HQ_ROOT: rootDir }, fleetStopImpl: () => null, workerClassImpl: () => 'codex',
       probeOwnershipImpl: async () => ({ owned: false, uncertain: false }),
-      execFileImpl: async (command, args) => {
-        commands.push({ command, args });
+      execFileImpl: async (command, args, options) => {
+        commands.push({ command, args, options });
         if (command === 'gh') return { stdout: JSON.stringify({ state: 'OPEN', headRefOid: HEAD,
           headRefName: 'fixture/repair', isDraft: false, labels: [] }) };
         return { stdout: JSON.stringify({ launchRequestId: 'repair-07', status: 'queued' }) };
       } },
   };
   return { options, refusal, commands, pages, advance: () => { now += 31 * 60_000; } };
+}
+
+for (const multiplier of [1, 6]) {
+  test(`repair read and dispatch budgets scale ${multiplier}x with synthetic load`, async t => {
+    const f = setup(t);
+    mockCloserLoad(t, multiplier);
+    // Keep elapsed-time clipping deterministic for the total read budget.
+    t.mock.method(performance, 'now', () => 0);
+    const result = await dispatchSafetyStopRepair({
+      ...f.options, ...f.options.repairOptions, refusal: f.refusal,
+      dispatchKey: 'synthetic-repair', jobKey: HEAD,
+    });
+    assert.equal(result.dispatched, true);
+    assert.deepEqual(f.commands.map(call => call.options.timeout), [15000 * multiplier, 60000 * multiplier]);
+  });
 }
 
 test('R05 recorded repair dispatches one scoped PR update, then pages exhaustion once', async t => {

@@ -15,6 +15,7 @@ import { readHammerRetryCapLedger, reserveHammerRepairDispatch } from './hammer-
 import { fetchPrimaryChange } from './primary-change.mjs';
 import { createHistoryReader } from './history-reader.mjs';
 import { primaryChangeRepairEvidence } from './primary-change-repair.mjs';
+import { loadAwareTimeoutMs } from '../load-aware-timeout.mjs';
 
 const execFileAsync = promisify(execFile);
 
@@ -40,9 +41,10 @@ export async function dispatchSafetyStopRepair({ rootDir, repo, prNumber, headSh
   if (stop) return defer(stop);
   let stdout;
   try {
+    const timeoutMs = loadAwareTimeoutMs(15_000);
     ({ stdout } = await execGhWithRetry({ execFileImpl, args: ['pr', 'view', String(prNumber), '--repo', repo,
-      '--json', 'state,headRefOid,headRefName,isDraft,labels'], env, signal, timeoutMs: 15_000,
-      retries: 0, totalTimeoutMs: 15_000 }));
+      '--json', 'state,headRefOid,headRefName,isDraft,labels'], env, signal, timeoutMs,
+      retries: 0, totalTimeoutMs: timeoutMs }));
   } catch (error) {
     if (signal?.aborted) throw error;
     if (isTransientGhError(error)) return defer('live-pr-read-transient');
@@ -111,7 +113,7 @@ export async function dispatchSafetyStopRepair({ rootDir, repo, prNumber, headSh
     project: 'adversarial-merge-authority', hqRoot: resolveHqRoot(env) });
   args.push('--idempotency-key', dispatchKey, '--fleet-retry-policy', 'origin-owned');
   const response = await execFileImpl(env.HQ_BIN || 'hq', args,
-    { env, signal, timeout: 60_000, maxBuffer: 5 * 1024 * 1024 });
+    { env, signal, timeout: loadAwareTimeoutMs(60_000), maxBuffer: 5 * 1024 * 1024 });
   const receipt = readDispatchReceipt(parseDispatchJsonOutput(response.stdout));
   if (!receipt.launchRequestId) throw new Error(receipt.identityDiagnostic);
   return { dispatched: true, launchRequestId: receipt.launchRequestId, promptPath };

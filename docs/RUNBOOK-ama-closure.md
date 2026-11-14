@@ -5112,6 +5112,16 @@ primary-change GitHub evidence through `createHistoryReader` and `execGhWithRetr
 Transport failures (including DNS, connection, proxy and TLS errors), timeouts
 and HTTP 5xx receive at most three attempts. The nominal 500/1000ms backoff and
 15-second per-attempt timeout scale through `src/load-aware-timeout.mjs`.
+
+Closer diagnostics, repair and publication use that same load-aware policy:
+the operator region-diagnostic budget has a nominal 15-second base; safety-stop
+repair uses 15 seconds for its live PR read and 60 seconds for dispatch;
+pre-receipt PR reads use 3 seconds per attempt within a 5-second total budget;
+pushed-attestation API calls use 15 seconds; and the helper's timeout-sizing
+subprocess uses 5 seconds. Each nominal budget is scaled once, retaining its
+base at zero load. An explicitly supplied effective diagnostic budget is
+honored without rescaling.
+
 Secondary rate limits require a valid `Retry-After` header; the reader includes
 response headers and waits at least that long. Reads, retry waits and local
 diffs share a nominal 90-second wall-clock context budget, scaled once through

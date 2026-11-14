@@ -1,3 +1,4 @@
+import { readCloserSuccessor, requestCloserSuccessor, settleCloserSuccessor } from './ama/closer-successor.mjs';
 import { repairEpochObservation } from './repair-epochs.mjs';
 import { handoffFinalFixAll } from './ama/final-fix-all.mjs';
 import { parseKnownPrefix } from './adapters/subject/github-pr/title-tagging.mjs';
@@ -1073,6 +1074,14 @@ async function dispatchAmaClosureFor({
     AMA_REUSABLE_PROOF_OPERATIONS.has(operation)
       ? runAmaProofOperation(getProofScope(), operation, fn, options)
       : runTimedCoexistenceOperation(operation, fn, options);
+  const unavailableSuccessor = async () => {
+    const headSha = candidate?.headSha || currentRevisionRef;
+    if (String(candidate?.prState || reviewStateRow?.pr_state).toLowerCase() !== 'open'
+      || !readCloserSuccessor(rootDir, { repo: repoPath, prNumber, headSha })) return null;
+    return settleCloserSuccessor({ rootDir, repo: repoPath, prNumber, headSha, enabled: false,
+      now: new Date(now()).toISOString(),
+      observeWaitImpl: args => observeClosureWaitImpl(args) });
+  };
   let cfg;
   let loadedConfig;
   let orchestrationMode;
@@ -1100,6 +1109,9 @@ async function dispatchAmaClosureFor({
     // CFG load failure isn't an AMA problem; let the existing
     // merge-agent path handle the tick.
     logger?.warn?.(`[watcher] AMA cfg load failed: ${err?.message || err}`);
+    const successor = await unavailableSuccessor();
+    if (successor) return withAmaDispatchMetadata({ dispatched: false, skipMergeAgent: true,
+      reason: successor.status, successor }, { amaEnabled: false });
     return withAmaDispatchMetadata(
       { dispatched: false, reason: 'cfg-load-failed' },
       { amaEnabled: false },
@@ -1107,6 +1119,9 @@ async function dispatchAmaClosureFor({
   }
 
   if (!cfg?.enabled) {
+    const successor = await unavailableSuccessor();
+    if (successor) return withAmaDispatchMetadata({ dispatched: false, skipMergeAgent: true,
+      reason: successor.status, successor }, { amaEnabled: false });
     amaDispatchCloser.retireAmaCloserDrainHint(rootDir, {
       repo: repoPath, prNumber, headSha: candidate?.headSha || currentRevisionRef || reviewStateRow?.revision_ref,
     }, { logger });
@@ -1953,6 +1968,20 @@ async function dispatchAmaClosureFor({
       ...(shared.snapshot.observations.progress?.value ?? shared.snapshot.observations.progress),
       primaryChange: { ...primary, headSha: currentPrHeadSha },
     } }, passSnapshot);
+  }
+  const pendingSuccessor = readCloserSuccessor(rootDir, { repo: repoPath, prNumber, headSha: currentPrHeadSha });
+  if (pendingSuccessor && pendingSuccessor.status !== 'successor-enrolled' && prMetadata.isOpen) {
+    requestCloserSuccessor({ rootDir, repo: repoPath, prNumber, headSha: currentPrHeadSha,
+      source: pendingSuccessor.source, reviewBody: gateSnapshot.settledReview?.reviewBody,
+      refusingReasons: pendingSuccessor.refusingReasons, now: new Date(now()).toISOString() });
+    const successor = await settleCloserSuccessor({ rootDir, repo: repoPath, prNumber, headSha: currentPrHeadSha,
+      enabled: autonomousMergeExecutionEnabled, admitted: !prMetadata.isDraft
+        && shared.decision.action === 'hammer' && shared.decision.reason !== 'automated-stop'
+        && !['R05-structural', 'R10-conflict'].includes(shared.decision.row),
+      now: new Date(now()).toISOString(), riskClass: reviewState.riskClass,
+      handoffImpl: handoffFinalFixAllImpl, observeWaitImpl: observeWait });
+    return withAmaDispatchMetadata({ dispatched: false, skipMergeAgent: true,
+      reason: successor.status, successor, nextAction: shared.decision }, { amaEnabled: true });
   }
   if (shared.decision.reason === 'repair-in-place-owned') {
     return bindClosureNextAction(withAmaDispatchMetadata({ dispatched: false, skipMergeAgent: true,
@@ -2834,6 +2863,8 @@ async function dispatchAmaClosureFor({
   const dispatchContext = {
     orphanRecovery,
     automatedRecovery,
+    // Dispatch consumes the canonical settled review, including successor input.
+    settledReview: gateSnapshot.settledReview,
     daemonFailureReasons: Array.isArray(daemonCleanMerge?.reasons)
       ? daemonCleanMerge.reasons
       : [daemonCleanMerge?.reason].filter(Boolean),

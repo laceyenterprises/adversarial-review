@@ -134,6 +134,7 @@ case "$1" in
     # mapping; the remaining cases focus on phase ordering at lower cost.
     if [ "\${FIXTURE_REAL_HELPER:-0}" = 1 ]; then exec "$REAL_NODE" "$@"; fi
     shift 5; exec "$@" ;;
+  */hammer-owned-publication.mjs) shift 5; exec "$@" ;;
   */metered-gh.mjs) if [ "$2" = exec-git ]; then shift 2; exec git "$@"; fi; shift 2; exec gh "$@" ;;
   */hammer-pr-read.mjs) shift 3; exec gh pr view "$@" ;;
   */legacy-lane-write.mjs) shift; exec "$REAL_NODE" "$FIXTURE_HELPER" legacy "$@" ;;

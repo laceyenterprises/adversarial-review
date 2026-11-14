@@ -33,7 +33,7 @@ export function stateProjection(source) {
 export function checkMap(map, readSource, graphHash) {
   assert.equal(map.version, 1);
   assert.equal(digest(JSON.stringify(map.objects)), graphHash, 'independently reviewed graph changed');
-  assert.equal(new Set(map.objects.map(o => o.id)).size, 7);
+  assert.equal(new Set(map.objects.map(o => o.id)).size, 8);
   for (const object of map.objects) {
     assert.ok(object.owner && object.codeSources.length);
     const states = new Set(object.states.map(s => s.name));

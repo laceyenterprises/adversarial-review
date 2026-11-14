@@ -1,3 +1,4 @@
+import './helpers/rate-limit-state-isolation.mjs';
 import { renderHammerProcedure } from '../src/hammer-procedure.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
@@ -69,7 +70,11 @@ if (command === 'gh') {
 }
 `, { mode: 0o755 });
   }
-  const fixtureEnv = { ...process.env, PATH: `${root}:${process.env.PATH}` };
+  const controllerPath = join(root, 'controller.json');
+  writeFileSync(controllerPath, JSON.stringify({ state: 'running', controllerPid: process.pid,
+    startedAt: '2030-01-01T00:00:00.000Z', token: 'synthetic' }));
+  const fixtureEnv = { ...process.env, PATH: `${root}:${process.env.PATH}`,
+    HAM_ROOT_DIR: root, HAM_CONTROLLER_RECORD: controllerPath, HAM_CONTROLLER_PID: String(process.pid), HAM_CONTROLLER_TOKEN: 'synthetic' };
   for (const name of [
     'GH_TOKEN', 'GITHUB_TOKEN', 'HAMMER_LACEY_GH_TOKEN', 'MERGE_AGENT_GH_TOKEN',
     'HAMMER_LACEY_GH_TOKEN_EXPIRES_AT', 'MERGE_AGENT_GH_TOKEN_EXPIRES_AT',
@@ -202,7 +207,10 @@ if (process.argv[2] !== 'api' || !process.argv[3].endsWith('/pulls/1')) process.
 console.log(JSON.stringify({ head: { ref: 'worker', sha: ${JSON.stringify(remoteHead)} } }));
 `, { mode: 0o755 });
   const result = JSON.parse((await exec(process.execPath, [cli, 'fixture/repo', '1'], {
-    cwd: work, env: { ...process.env, PATH: `${bin}:${process.env.PATH}` }, timeout: 20000,
+    cwd: work, env: { ...process.env, PATH: `${bin}:${process.env.PATH}`,
+      HAMMER_LACEY_GH_TOKEN: 'synthetic-token', HAMMER_LACEY_GH_TOKEN_EXPIRES_AT: '',
+      MERGE_AGENT_GH_TOKEN_EXPIRES_AT: '', HAMMER_LACEY_GH_TOKEN_REFRESH_COMMAND: '',
+      HQ_ENTITLEMENT_GH_TOKEN_REFRESH_COMMAND: '' }, timeout: 20000,
   })).stdout);
   assert.equal(result.route, 're-review');
   assert.match(result.reason, /does not descend/);
@@ -385,7 +393,11 @@ fi
 `, { mode: 0o755 });
     const config = join(root, 'global.yaml');
     writeFileSync(config, 'version: 1\nroles:\n  adversarial:\n    merge_authority:\n      enabled: true\n      eligibility:\n        risk_classes: [low]\n      branch_protection:\n        required: true\n');
+    const publicationController = join(root, 'publication-controller.json');
+    writeFileSync(publicationController, JSON.stringify({ state: 'running', controllerPid: process.pid,
+      startedAt: '2030-01-01T00:00:00.000Z', token: 'synthetic' }));
     const env = { ...process.env, PATH: `${bin}:${process.env.PATH}`, TMPDIR: root,
+      HAM_CONTROLLER_RECORD: publicationController, HAM_CONTROLLER_PID: String(process.pid), HAM_CONTROLLER_TOKEN: 'synthetic',
       AGENT_OS_CONFIG_PATH: config, GHO_RATE_LIMIT_SHARED_STATE_PATH: join(root, 'budget.json'),
       GH_TOKEN: 'synthetic-ambient-worker', HAMMER_LACEY_GH_TOKEN: 'synthetic-expired-hammer',
       HAMMER_LACEY_GH_TOKEN_REFRESH_COMMAND: 'printf synthetic-token',

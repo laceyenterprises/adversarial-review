@@ -2185,7 +2185,12 @@ lease outcome and one mismatch diagnostic; existing smoke promises are unchanged
 
 [state-machines.json](state-machines.json) declares owned lifecycle objects
 and related operational verification records, including launch custody
-freshness and queue maintenance holds. Receipt-less closer custody probes the
+freshness and queue maintenance holds. Successor requests recreate receipts
+lost before the locked read; settlement of an absent receipt defers without
+dispatch or alert. Merged lease release warns on publication retirement failure
+while preserving its successful result; retained publication custody remains
+subject to controller liveness and its six-hour lifetime.
+Receipt-less closer custody probes the
 predecessor lease's stored worker ID, including its attempt suffix, and preserves
 that lease on live or unknown evidence so later ticks inspect the same slot.
 Custody ingestion requires an existing,
@@ -2839,7 +2844,7 @@ with `closure-recovery-ownership-unresolved` more than one recovery cycle past
 its deadline; a persistent ledger outage remains an explicit unresolved incident.
 No worker live action is authorized.
 
-<a id="smv-handoff"></a>**smv-handoff:** Ended unpublished remediation requeues within its unchanged round budget; spent rounds select hammer without an operator override. Final-round non-blocking findings enqueue one builder fix-all job before any hammer. A terminal no-progress receipt permits the existing hammer fallback; publication/full-review/clean-daemon coverage is pinned by the focused lane fixtures. Expired wake admission verifies a deterministic replacement, replacement dedupe and a named missing-head refusal with one durable alert. OWNERUNREADABLE-02 verifies snapshot-only resolution of terminal lease/receipt placeholders, live retry ownership, failed/partial read fences and one deduplicated hammer wake. After ordinary deployment SRE checks that no terminal ledger launch remains in an R04 retry-chain-unreadable skip more than one wake past its deadline (SEVDOCS-335). HAMRESUMEOWED-01 verifies pending-to-green hammer resume and idempotent audit settlement. Outstanding exact-head receipts receive closure priority each poll without an unrelated wake; red/head movement settle the debt for normal handling. Existing merge gates, leases and caps remain mandatory. After deployment SRE observes the next natural pending-CI stop merging its green recorded head without manual action; offline smoke alone does not establish this live receipt. OWNERUNREADABLE-01 verifies terminal ownership recovery after its anchored deadline selects hammer without re-review while unreadable retry evidence remains fenced. Focused offline fixtures also cover one-read placeholder replacement, bounded backoff, transient recovery, live retries and outage recovery. After deployment SRE observes the next natural R04 case exit within its budget and merge; no worker live operation is authorized. NXA-07 also verifies exact-head validated terminal HAM proof crossing retry selection into pending, failed or green CI gates; mismatched proof retains hammer retry ownership. NXA-07 verifies the common adapter matrix and retains lease/retry settlement; NXA-06 verifies daemon CI changes, operator-approved retry exhaustion selecting R08 hammer repair, live hammer ownership and remote-unconfirmed receipt recovery through the shared decision. NXA-05 verifies that drain/capacity observations
+<a id="smv-handoff"></a>**smv-handoff:** Trailerless closer publication defers automatic review under a publication barrier; confirmed merged release retires custody. Exhausted no-merge and ordinary pre-claim caps enroll a head-scoped successor once, or persist a typed ownerless refusal and alert through the existing closure-wait surface. The sandbox smoke verifies publication deferral, retirement, idempotent enrollment and refusal alerting. Ended unpublished remediation requeues within its unchanged round budget; spent rounds select hammer without an operator override. Final-round non-blocking findings enqueue one builder fix-all job before any hammer. A terminal no-progress receipt permits the existing hammer fallback; publication/full-review/clean-daemon coverage is pinned by the focused lane fixtures. Expired wake admission verifies a deterministic replacement, replacement dedupe and a named missing-head refusal with one durable alert. OWNERUNREADABLE-02 verifies snapshot-only resolution of terminal lease/receipt placeholders, live retry ownership, failed/partial read fences and one deduplicated hammer wake. After ordinary deployment SRE checks that no terminal ledger launch remains in an R04 retry-chain-unreadable skip more than one wake past its deadline (SEVDOCS-335). HAMRESUMEOWED-01 verifies pending-to-green hammer resume and idempotent audit settlement. Outstanding exact-head receipts receive closure priority each poll without an unrelated wake; red/head movement settle the debt for normal handling. Existing merge gates, leases and caps remain mandatory. After deployment SRE observes the next natural pending-CI stop merging its green recorded head without manual action; offline smoke alone does not establish this live receipt. OWNERUNREADABLE-01 verifies terminal ownership recovery after its anchored deadline selects hammer without re-review while unreadable retry evidence remains fenced. Focused offline fixtures also cover one-read placeholder replacement, bounded backoff, transient recovery, live retries and outage recovery. After deployment SRE observes the next natural R04 case exit within its budget and merge; no worker live operation is authorized. NXA-07 also verifies exact-head validated terminal HAM proof crossing retry selection into pending, failed or green CI gates; mismatched proof retains hammer retry ownership. NXA-07 verifies the common adapter matrix and retains lease/retry settlement; NXA-06 verifies daemon CI changes, operator-approved retry exhaustion selecting R08 hammer repair, live hammer ownership and remote-unconfirmed receipt recovery through the shared decision. NXA-05 verifies that drain/capacity observations
 retain hammer intent and its deadline, and current deterministic automatic stops retain
 closure-recovery ownership. STOPSTALE-01 / STOPSTALE-02 verify that all four
 R07 variants (deterministic stop, retry cap, lifetime cap and final no-merge)
@@ -3444,6 +3449,23 @@ stateDiagram-v2
     s10 --> [*]
     s11 --> [*]
     s12 --> [*]
+```
+
+### closer-successor
+
+Head-scoped exhausted closer and pre-claim-cap successor custody; never merge authority.
+
+```mermaid
+stateDiagram-v2
+    state "successor-pending" as s0
+    state "successor-enrolled" as s1
+    state "ownerless-closer-no-merge" as s2
+    [*] --> s0: closer-successor.01 exhausted no-merge or pre-claim cap atomically enrolls head
+    s0 --> s1: closer-successor.02 existing final-fix-all confirms one remediation job
+    s0 --> s2: closer-successor.03 disabled, refused or failed handoff records typed state and alerts
+    s2 --> s1: closer-successor.04 later admitted handoff confirms custody without duplicate source-head work
+    s1 --> [*]
+    s2 --> [*]
 ```
 
 <!-- smv:diagrams:end -->

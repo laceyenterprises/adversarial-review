@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { withHammerPublication } from '../src/ama/hammer-publication-ownership.mjs';
 import { hammerNetworkCall, hammerLocalGit } from '../src/ama/hammer-api-network.mjs';
 import { hammerPublicationFailureReason, publishHammerTree } from '../src/ama/hammer-api-publish.mjs';
 import { conflictPublishBinding } from '../src/ama/hammer-conflict-binding.mjs';
@@ -51,8 +52,8 @@ try {
   const changes = [...new Set([...before.keys(), ...after.keys()])].filter(path => before.get(path)?.oid !== after.get(path)?.oid || before.get(path)?.mode !== after.get(path)?.mode)
     .map(path => ({ path, oldMode: before.get(path)?.mode, mode: after.get(path)?.mode,
       contents: after.get(path)?.mode === '100644' ? git('cat-file', 'blob', after.get(path).oid).toString('base64') : undefined }));
-  const result = await publishHammerTree({ repo, branch: info.headRefName, expectedHead: info.headRefOid,
-    localTree: git('rev-parse', 'HEAD^{tree}').toString().trim(), message: git('log', '-1', '--format=%B').toString().trim(), changes, api });
+  const result = await withHammerPublication({ repo, prNumber: number, previousHead: info.headRefOid }, () => publishHammerTree({ repo, branch: info.headRefName, expectedHead: info.headRefOid,
+    localTree: git('rev-parse', 'HEAD^{tree}').toString().trim(), message: git('log', '-1', '--format=%B').toString().trim(), changes, api }));
   fallback = { fallbackHead: result.head || result.fallbackHead || info.headRefOid, branch: info.headRefName,
     // Preserve the verified publication even if subsequent fetch/reset fails.
     ...(result.route === 'published' ? { pushedHead: result.head } : {}) };

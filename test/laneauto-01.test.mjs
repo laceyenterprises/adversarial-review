@@ -1,4 +1,5 @@
 import './helpers/rate-limit-state-isolation.mjs';
+import { requestCloserSuccessor, readCloserSuccessor } from '../src/ama/closer-successor.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtempSync, mkdirSync, rmSync, renameSync, writeFileSync } from 'node:fs';
@@ -244,4 +245,43 @@ test('remediation queued during live metadata reads wins the handoff', async t =
     } });
   assert.equal(result.reason, 'final-fix-all-existing-owner');
   assert.equal(listFollowUpJobsInDir(f.rootDir, 'pending').length, 1);
+});
+
+
+test('exhausted pre-claim successor request reaches one real final-fix-all job through watcher orchestration', async t => {
+  const f = fixture(t);
+  requestCloserSuccessor({ ...f.identity, reviewBody: BODY, source: 'follow-up-pre-claim-cap',
+    refusingReasons: ['remediation-rounds-exhausted'] });
+  const first = await maybeDispatchAmaClosureFor(f.args);
+  assert.equal(first.reason, 'successor-enrolled', JSON.stringify(first));
+  assert.equal(listFollowUpJobsInDir(f.rootDir, 'pending').length, 1);
+  await maybeDispatchAmaClosureFor(f.args);
+  assert.equal(listFollowUpJobsInDir(f.rootDir, 'pending').length, 1);
+  assert.equal(readCloserSuccessor(f.rootDir, f.identity).status, 'successor-enrolled');
+  assert.deepEqual(f.effects, [], 'no competing closer or daemon merge');
+});
+
+test('watcher persists and alerts a refused successor instead of losing the pre-claim cap handoff', async t => {
+  const f = fixture(t), alerts = [];
+  requestCloserSuccessor({ ...f.identity, reviewBody: BODY, source: 'follow-up-pre-claim-cap' });
+  f.args.handoffFinalFixAllImpl = async () => ({ action: 'fallback' });
+  f.args.observeClosureWaitImpl = async input => { alerts.push(input); return {}; };
+  const result = await maybeDispatchAmaClosureFor(f.args);
+  assert.equal(result.reason, 'ownerless-closer-no-merge');
+  assert.equal(readCloserSuccessor(f.rootDir, f.identity).status, 'ownerless-closer-no-merge');
+  assert.equal(alerts.some(input => input.waitClass === 'closer-successor' && input.immediate), true);
+  assert.deepEqual(f.effects, []);
+});
+
+
+test('disabled AMA still records and alerts a pending cap successor refusal', async t => {
+  const f = fixture(t), alerts = [];
+  requestCloserSuccessor({ ...f.identity, reviewBody: BODY, source: 'follow-up-pre-claim-cap' });
+  f.args.loadConfigImpl = () => ({ getMergeAuthorityConfig: () => ({ enabled: false }) });
+  f.args.observeClosureWaitImpl = async input => { alerts.push(input); return {}; };
+  const result = await maybeDispatchAmaClosureFor(f.args);
+  assert.equal(result.reason, 'ownerless-closer-no-merge');
+  assert.equal(readCloserSuccessor(f.rootDir, f.identity).reason, 'successor-path-disabled');
+  assert.equal(alerts.length, 1);
+  assert.deepEqual(f.effects, []);
 });

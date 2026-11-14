@@ -1,3 +1,4 @@
+import { requestCloserSuccessor, settleCloserSuccessor } from './closer-successor.mjs';
 import { samePrHammerHolderWorktreePaths } from './branch-holder-paths.mjs';
 export { samePrHammerHolderWorktreePaths } from './branch-holder-paths.mjs';
 import { isZeroOutputRefusal, escalateZeroOutputRefusal } from './zero-output-refusal.mjs';
@@ -4870,6 +4871,7 @@ async function maybeDispatchAmaCloserAttempt({
   fetchPrimaryChangeImpl = fetchPrimaryChange,
   resolveHamTerminalRemediationEvidenceImpl = null,
   deliverAlertImpl = deliverAlert,
+  settleCloserSuccessorImpl = settleCloserSuccessor,
   evaluateHammerStopHoldImpl = evaluateHammerStopHold,
   guardStackedBaseImpl = guardStackedBase,
   emitProtectivePredecessorFindingImpl = null,
@@ -6101,6 +6103,8 @@ async function maybeDispatchAmaCloserAttempt({
     let releaseUnprovenTerminalHoldMerged = false;
     let advancedTerminalDispatchSuperseded = false;
     let hammerEndedWithoutMerge = false;
+    let hammerEndedHead = null;
+    let hammerShouldHandoff = false;
     // CLOSERRETRY-01: failure class of a hammer that ended with the PR still open.
     let hammerNoDeliveryClass = null;
     // INCONCLUSIVERETRY-01b: an ended launch that could not conclude.
@@ -6148,6 +6152,15 @@ async function maybeDispatchAmaCloserAttempt({
     // A durable closing decision outranks the process exit (including failure
     // after posting it) and certified parks. Unknown evidence holds the launch;
     // only a readable absence of a decision permits normal retry admission.
+    const handoffEndedCloser = async headSha => {
+      requestCloserSuccessor({ rootDir, repo, prNumber, headSha,
+        reviewBody: dispatchContext.settledReview?.reviewBody, refusingReasons: verdict.reasons,
+        source: 'closer-ended-without-merge', now: dispatchContext.dispatchedAt });
+      return settleCloserSuccessorImpl({ rootDir, repo, prNumber, headSha,
+        enabled: cfg.autonomousMergeExecutionEnabled !== false, admitted: verdict.repairAdmission?.ok === true,
+        riskClass: reviewState.riskClass, now: dispatchContext.dispatchedAt,
+        observeWaitImpl: args => observeClosureWait({ ...args, pageImpl: deliverAlertImpl }) });
+    };
     const reconcileCapFinalDecision = async (observedStatus) => {
       if (hammerOwnerRoute === null
         || !(AMA_CLOSER_TERMINAL_HOLD_STATUSES.has(observedStatus)
@@ -6205,6 +6218,12 @@ async function maybeDispatchAmaCloserAttempt({
         repo, prNumber, headSha: existingRecordLeaseIdentity.headSha,
         launchRequestId: existingRecord.launchRequestId, hammerOwnerRoute,
       }, { level: 'warn' });
+      if (reviewState?.reviewCycleExhausted === true) {
+        const successor = await handoffEndedCloser(livePr.headRefOid || targetRemediationSha);
+        return noAmaDispatch({ dispatched: false, skipMergeAgent: true,
+          reason: HAMMER_OWNER_ROUTES[hammerOwnerRoute].noMergeReason, needsOperator: successor?.status !== 'successor-enrolled',
+          launchRequestId: existingRecord.launchRequestId, successor });
+      }
       return noAmaDispatch({
         dispatched: false, skipMergeAgent: true,
         reason: HAMMER_OWNER_ROUTES[hammerOwnerRoute].noMergeReason,
@@ -6371,6 +6390,12 @@ async function maybeDispatchAmaCloserAttempt({
           // head advance as supersession hid the failed closure attempt and
           // bypassed the bounded hammer retry/alert path (HAMSYNC-01).
           hammerEndedWithoutMerge = true;
+          hammerEndedHead = terminalLivePr.headRefOid || targetRemediationSha;
+          // Legacy infrastructure/exit audits without review input retain the
+          // bounded retry/cap-alert executor. Production predicate refusals
+          // carry the current refusing review into the final-fix-all work order.
+          hammerShouldHandoff = reportedNoWork || (noMergeAuditForCurrentHead === true
+            && Boolean(String(dispatchContext.settledReview?.reviewBody || '').trim()));
           const noMergeOutcome = hammerOutcome.outcome;
           const exitedWithoutClose = noMergeOutcome === HAMMER_EXITED_WITHOUT_CLOSE;
           finalHammerRetryReason = noMergeOutcome;
@@ -6398,6 +6423,12 @@ async function maybeDispatchAmaCloserAttempt({
           }));
           const noMergeDetails = hammerNoMergeDetails({ hqRoot, launchRequestId: existingRecord.launchRequestId,
             runId: existingRecord.workerRunId, raw: hammerOutcome.reason || noMergeOutcome });
+          // An external head advance does not turn an infrastructure retry
+          // into a closer refusal on the new head.
+          if (existingDispatchHeadAdvanced && classifyCloserOutcome({
+            reason: noMergeDetails.lastPhase,
+            failureClass: prefetchedLaunchRequestProbe?.row?.failure_class,
+          }).kind === 'inconclusive') hammerShouldHandoff = false;
           // INCONCLUSIVERETRY-01b: the closer's own terminal-stop/last-phase
           // receipt or the launch failure decides. An unmoved head that could
           // not conclude is refunded in full; a real or unknown stop keeps the
@@ -7230,6 +7261,11 @@ async function maybeDispatchAmaCloserAttempt({
           // A missed record only leaves the older per-head bounds in charge.
           logger?.warn?.(`[ama-closer] no-delivery attempt record failed for ${repo}#${prNumber}: ${error?.message || error}`);
         }
+      }
+      if (hammerEndedWithoutMerge && hammerShouldHandoff && !inconclusiveOutcome && reviewState?.reviewCycleExhausted === true) {
+        const successor = await handoffEndedCloser(hammerEndedHead);
+        return noAmaDispatch({ dispatched: false, skipMergeAgent: true,
+          reason: successor?.status || 'ownerless-closer-no-merge', successor });
       }
       if (inconclusiveOutcome) {
         const backoff = await ownInconclusiveCloserRetry({ rootDir, repo, prNumber,

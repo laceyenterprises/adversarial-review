@@ -1,3 +1,4 @@
+import './helpers/rate-limit-state-isolation.mjs';
 import { deriveNextActionSnapshot, nextAction } from '../src/pr-next-action.mjs';
 // CYCLECAPHAM-01 (SEV1): a PR at the review cycle cap goes to the hammer for a
 // final decision, not to the operator. Operator decisions, 2026-10-10:
@@ -593,7 +594,7 @@ for (const decision of ['absent', 'wrong-head', 'untrusted', 'unreadable']) {
   });
 }
 
-test('off the cap route, the same no-merge outcome keeps the ordinary bounded retry (HAMBG-02 unchanged)', async (t) => {
+test('exhausted no-merge hands off even outside the review-cycle cap route', async (t) => {
   _resetHammerRetryCapAlertDebounceForTests();
   const rootDir = tempRoot(t, 'cyclecapham-no-merge-scope-');
   await seedFinishedCapHammer(rootDir);
@@ -601,12 +602,16 @@ test('off the cap route, the same no-merge outcome keeps the ordinary bounded re
   const args = closerArgs(rootDir, { reviewCycleCapReached: false, dispatchedAt: '2026-10-10T05:05:00Z' });
   const result = await maybeDispatchAmaCloser({
     ...args,
-    // The #7334 shape: a self-certified stale head, outside the cap route.
-    dispatchContext: { ...args.dispatchContext, allowStaleReviewHeadHammerResume: true },
+    // A self-certified stale head still needs successor custody.
+    dispatchContext: { ...args.dispatchContext, allowStaleReviewHeadHammerResume: true,
+      settledReview: { reviewBody: '## Blocking issues\n- None.\n## Non-blocking issues\n- [P2] Preserve the original error.\n## Verdict\nComment only' } },
     ...deps,
   });
-  assert.equal(result.dispatched, true, JSON.stringify(result));
-  assert.equal(result.launchRequestId, LRQ_SECOND);
+  assert.equal(result.dispatched, false, JSON.stringify(result));
+  assert.equal(result.reason, 'ownerless-closer-no-merge');
+  assert.equal(result.successor.headSha, REMEDIATED_HEAD);
+  assert.match(result.successor.reviewBody, /Preserve the original error/);
+  assert.equal(deps.launches.length, 0);
   assert.deepEqual(deps.statusProbes, [LRQ_FIRST]);
 });
 

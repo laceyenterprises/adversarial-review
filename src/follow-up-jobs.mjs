@@ -1,3 +1,4 @@
+import { requestCloserSuccessor } from './ama/closer-successor.mjs';
 import { addCiRegressionFinding } from './ci-regression-finding.mjs';
 import { isEndedRemediationRound } from './remediation-round-recovery.mjs';
 import { infrastructureOnlyFailures, recordedCiFailures, CI_INFRASTRUCTURE_STOP_REASONS } from './ci-infrastructure.mjs';
@@ -2755,6 +2756,14 @@ function claimNextFollowUpJob({
         nonBlockingFindings: classifyNonBlockingFindings(job.reviewBody),
         nextAction: 'Operator: run canonical rescue after re-reading the live head, findings, CI, conflict state and reviewer/worker/closer ownership. A conflict requires the hammer route. This cap stop does not authorize merge, another remediation round or re-review.',
       } : null;
+      // Enroll before the terminal move: a crash after stopping must not
+      // strand the PR between its cap receipt and successor custody.
+      if (!singleReviewFinal && job.closureHandoff?.reason !== 'final-fix-all') {
+        const successor = requestCloserSuccessor({ rootDir, repo: job.repo, prNumber: job.prNumber,
+          headSha: job.revisionRef, reviewBody: job.reviewBody, source: 'follow-up-pre-claim-cap',
+          refusingReasons: ['remediation-rounds-exhausted'], now: claimedAt });
+        if (finalCapResult) finalCapResult.successorState = successor?.status || 'ownerless-closer-no-merge';
+      }
       let stopped = null;
       try {
         stopped = markStoppedImpl({
@@ -2767,7 +2776,7 @@ function claimNextFollowUpJob({
           stopReason: singleReviewFinal
             ? `single-review: super-small PR; the first review was the final round (${job.singleReview.basis || 'super-small'}); handing to the hammer without remediation.`
             : nonBlockingCapReached
-            ? `Reached non-blocking remediation rounds (${job.nonBlockingRoundsBefore}/${job.nonBlockingMaxRounds}) before claim. No successor dispatched. ${finalCapResult.nextAction}`
+            ? `Reached non-blocking remediation rounds (${job.nonBlockingRoundsBefore}/${job.nonBlockingMaxRounds}) before claim. Successor enrollment requested; refusal requires an ownerless alert. ${finalCapResult.nextAction}`
             : `Reached max remediation rounds (${currentRound}/${maxRounds}) before claim.${prRound?.liftTo
               ? ` PR round ledger: ${formatPrRoundLedgerSummary(prRound.summary)}.` : ''}`,
           jobUpdates: { finalCapResult },

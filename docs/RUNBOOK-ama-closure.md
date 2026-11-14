@@ -1,5 +1,33 @@
 ## Lease liveness and terminal closeout
 
+Automatic review defers an exact head owned by a live closer publication or
+merge lease, including rebased worker commits without closer trailers. Publication
+intent and exact mutation results are serialized with reviewer ownership reads;
+a concurrent publication probe defers until its result is available. These are
+scheduling reasons, not review or merge authority. Explicit operator re-review
+remains available; unrelated pushes receive normal review.
+
+Merged lease release attempts publication retirement after settling the lease.
+Retirement errors, including publication-lock contention, warn on stderr while
+preserving the successful release JSON. Retained publication custody still
+requires a live running controller and expires after six hours.
+
+An exhausted closer that confirms an open PR without merging enrolls a durable
+PR/head successor request carrying the predicate's refusing review. Orchestration
+passes the canonical `settledReview` snapshot to closer dispatch; dispatch reads
+its review body for successor custody without re-deriving review eligibility. The ordinary
+pre-claim remediation cap uses the same request. The watcher admits at most one
+existing final-fix-all work order for that head, or records and alerts
+`ownerless-closer-no-merge` through closure-wait alerting. Disabled or refused
+handoffs cannot silently terminate custody. See
+[successor records](data-model/closer-successors.md) and
+[publication ownership](data-model/hammer-publication-ownership.md).
+Exits before completing the close retain their existing bounded retry/refund
+executor and cap alert; confirmed no-merge decisions and `no_work_done` take
+the successor path after terminal cleanup and accounting.
+If a successor receipt disappears before its locked read, requesting custody
+recreates the pending receipt; settlement defers without dispatch or alert.
+
 Every watcher pass observes merge-lane holders and a bounded batch of closer
 leases through the existing fenced reclaimers; age-based pruning retains its
 normal interval. Closer observation selects at most 250 directory entries and

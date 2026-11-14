@@ -1,3 +1,5 @@
+import './helpers/rate-limit-state-isolation.mjs';
+import { readCloserSuccessor } from '../src/ama/closer-successor.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
@@ -61,7 +63,11 @@ test('FINALCAPHANDOFF-01: 1/1 before claim returns and persists actionable termi
   assert.deepEqual(durable.remediationPlan.rounds, job.remediationPlan.rounds);
   assert.equal(durable.reReview, job.reReview ?? null, 'no extra re-review');
   assert.equal(durable.closureHandoff, undefined, 'does not invent a dispatch receipt');
-  assert.match(durable.remediationPlan.stop.reason, /No successor dispatched.*Operator:/);
+  assert.match(durable.remediationPlan.stop.reason, /Successor enrollment requested/);
+  const successor = readCloserSuccessor(rootDir, { repo: job.repo, prNumber: job.prNumber, headSha: HEAD });
+  assert.equal(successor.status, 'successor-pending');
+  assert.equal(successor.reviewBody, BODY);
+  assert.equal(successor.source, 'follow-up-pre-claim-cap');
   const bytes = readFileSync(result.jobPath, 'utf8');
   const nextJob = createFollowUpJob({ rootDir, repo: 'fixture/project', prNumber: 43,
     branch: 'fixture/next', reviewerModel: 'gemini', revisionRef: HEAD,

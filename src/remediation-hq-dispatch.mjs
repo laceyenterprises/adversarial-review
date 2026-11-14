@@ -21,6 +21,9 @@ import { readDispatchStatus } from './producer-contracts/launch-status.mjs';
 // also exists in the monolith, per the established remediation-git-pr-io.mjs /
 // fast-merge-processing.mjs precedent.
 
+import { readHostIdentitySync } from './dispatch-files-client.mjs';
+import { createHash } from 'node:crypto';
+import { userInfo } from 'node:os';
 import { execFile } from 'node:child_process';
 import { existsSync, readFileSync, realpathSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
@@ -312,3 +315,52 @@ export {
   isHqCancelRetryable,
   cancelHqDispatch,
 };
+
+function currentUsername(env = process.env) {
+  return env.USER || env.LOGNAME || userInfo().username;
+}
+
+export function requireHqDispatchEnvValue(env, key, message) {
+  const value = String(env?.[key] || '').trim();
+  if (!value) {
+    throw new Error(message);
+  }
+  return value;
+}
+
+function readHqConfigOwnerUser(hqRoot, env = process.env) {
+  const ownerUser = readHostIdentitySync({hqRoot, env}).ownerUser;
+  if (!ownerUser) throw new Error('host identity unavailable');
+  return ownerUser;
+}
+
+export function assertHqDispatchOwnerMatches(env = process.env) {
+  const hqRoot = resolveHqRoot(env, { requireExists: true });
+  const ownerUser = readHqConfigOwnerUser(hqRoot, env);
+  const actualUser = currentUsername(env);
+  if (ownerUser !== actualUser) {
+    throw new Error(
+      `HQ owner mismatch: follow-up remediation is running as '${actualUser}' but HQ ownerUser is '${ownerUser}'.`
+    );
+  }
+  return ownerUser;
+}
+
+// Keep dispatch identity and CLI option construction beside the HQ transport.
+export function appendHqRemediationDispatchOptions(args, {
+  requiresProducedAttestation, requestId, priorLaunchRequestId, modelResolution,
+}) {
+  // The explicit key survives prompt regeneration and a daemon crash after
+  // enqueue but before markFollowUpJobSpawned persists the returned LRQ.
+  if (requiresProducedAttestation) {
+    // Only a durably settled worker retry advances the attempt. Pre-spawn
+    // reclaims and prompt rewrites keep the original key after a launcher crash.
+    const attempt = priorLaunchRequestId ? `${requestId}\0${priorLaunchRequestId}` : requestId;
+    args.push('--idempotency-key', `ffa-${createHash('sha256').update(attempt).digest('hex')}`);
+  }
+  if (modelResolution?.resolvedModel) args.push('--model', modelResolution.resolvedModel);
+  const reasoningLevel = modelResolution?.resolvedReasoningLevel;
+  if (typeof reasoningLevel === 'string' && reasoningLevel.trim() && reasoningLevel !== 'default') {
+    args.push('--reasoning-level', reasoningLevel);
+  }
+}

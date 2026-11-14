@@ -4,7 +4,6 @@ import { cleanupServiceCodexAuth } from './codex-service-home.mjs';
 import { withRepositoryStateCycle } from './repository-state-lock.mjs';
 import { ensureWorkerRegistryReady, resolveRemediationModel } from './adapters/agent-runtime/local/remediation.mjs';
 import { prepareWorkerObservationSession } from './dispatch-read-client.mjs';
-import { readHostIdentitySync } from './dispatch-files-client.mjs';
 import { recoverInfrastructureChecks } from './ci-recovery.mjs';
 import { holdRemediationForCiInfrastructure, resumeCiInfrastructureRound, deferCiInfrastructureProbe, clearCiInfrastructureWait } from './remediation-ci-infrastructure.mjs';
 import { resolveOsgRemediatorRoute } from './osg-remediator.mjs';
@@ -23,7 +22,6 @@ import { deferForCredentialBroker, credentialBrokerReady } from './remediation-c
 import { recordedInfrastructureReason, localWorkerErrorOutcome } from './remediation-infrastructure-refund.mjs';
 import { preserveUnsafeWorkspaceMetadata } from './workspace-identity.mjs';
 import { execFile } from 'node:child_process';
-import { createHash } from 'node:crypto';
 import { existsSync, lstatSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { userInfo } from 'node:os';
 import { dirname, isAbsolute, join, relative, resolve } from 'node:path';
@@ -210,6 +208,9 @@ import { inspectRemediationCiRegression } from './remediation-ci-regression.mjs'
 import { requeueForWorkspaceResume, resumeLostRemediationWorker } from './remediation-worker-resume.mjs';
 import { claimWithLivePrOwnerGate, createLivePrOwnerLookup, deferClaimedJobForLivePrOwner } from './remediation-live-pr-owner.mjs';
 import {
+  appendHqRemediationDispatchOptions,
+  assertHqDispatchOwnerMatches,
+  requireHqDispatchEnvValue,
   cancelHqDispatch,
   classifyHqDispatchFailure,
   normalizeHqWorkspaceDir,
@@ -305,36 +306,6 @@ class StartupContractError extends Error {
     this.resolvedValue = resolvedValue;
     this.startupEvidence = startupEvidence;
   }
-}
-
-function currentUsername(env = process.env) {
-  return env.USER || env.LOGNAME || userInfo().username;
-}
-
-function requireHqDispatchEnvValue(env, key, message) {
-  const value = String(env?.[key] || '').trim();
-  if (!value) {
-    throw new Error(message);
-  }
-  return value;
-}
-
-function readHqConfigOwnerUser(hqRoot, env = process.env) {
-  const ownerUser = readHostIdentitySync({hqRoot, env}).ownerUser;
-  if (!ownerUser) throw new Error('host identity unavailable');
-  return ownerUser;
-}
-
-function assertHqDispatchOwnerMatches(env = process.env) {
-  const hqRoot = resolveHqRoot(env, { requireExists: true });
-  const ownerUser = readHqConfigOwnerUser(hqRoot, env);
-  const actualUser = currentUsername(env);
-  if (ownerUser !== actualUser) {
-    throw new Error(
-      `HQ owner mismatch: follow-up remediation is running as '${actualUser}' but HQ ownerUser is '${ownerUser}'.`
-    );
-  }
-  return ownerUser;
 }
 
 // ── Worker-class dispatcher ────────────────────────────────────────────────
@@ -605,19 +576,9 @@ async function dispatchRemediationViaHq({
   const legacyHqArgs = buildLegacyHqRemediationDispatchArgs({
     ticketRef, workerClass, repo, prNumber, branch, promptPath, parentSession, project, hqRoot, allowConflictedBase,
   });
-  // The explicit key survives prompt regeneration and a daemon crash after
-  // enqueue but before markFollowUpJobSpawned persists the returned LRQ.
-  if (requiresProducedAttestation) {
-    // Only a durably settled worker retry advances the attempt. Pre-spawn
-    // reclaims and prompt rewrites keep the original key after a launcher crash.
-    const attempt = priorLaunchRequestId ? `${requestId}\0${priorLaunchRequestId}` : requestId;
-    legacyHqArgs.push('--idempotency-key', `ffa-${createHash('sha256').update(attempt).digest('hex')}`);
-  }
-  if (modelResolution?.resolvedModel) legacyHqArgs.push('--model', modelResolution.resolvedModel);
-  const reasoningLevel = modelResolution?.resolvedReasoningLevel;
-  if (typeof reasoningLevel === 'string' && reasoningLevel.trim() && reasoningLevel !== 'default') {
-    legacyHqArgs.push('--reasoning-level', reasoningLevel);
-  }
+  appendHqRemediationDispatchOptions(legacyHqArgs, {
+    requiresProducedAttestation, requestId, priorLaunchRequestId, modelResolution,
+  });
   const ticket = useAppContract
     ? await (async () => {
         const connect = await loadAppSdkConnect();

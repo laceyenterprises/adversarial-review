@@ -787,6 +787,15 @@ Before enabling GitHub-native merge or auto-merge for this repo, require `agent-
 
 The watcher now checks that protection on a cached interval and logs `branch-protection-warning` for any watched repo/base branch where the required context is absent, unreadable, or configured with an invalid `ADV_GATE_STATUS_CONTEXT`. Run `npm run check-branch-protection` for an operator-side audit; pass `-- --repo <owner/repo>` or `-- --base <branch>` to narrow the probe. `-- --json` emits a machine-readable summary, persists one JSON record per non-OK repo under `data/branch-protection-audits/` by default, and exits `1` when any watched repo still lacks the gate. `-- --apply` adds the missing required-status-check context in place only for repos where branch protection was readable and the gate was the only missing piece; 403/404/unreadable repos stay fail-closed and keep their audit record.
 
+Operator-side repository discovery and branch-protection reads use the bounded
+GitHub read helper: a 30-second nominal budget, scaled by host load up to
+60 seconds, covers metering, subprocess execution, retries and backoff. Each
+read prints `[github-read]` progress to stderr, including in `--json` mode
+(stdout remains JSON). Exhaustion reports `branch-protection-lookup-timeout`;
+repository discovery failures exit `4`, and per-repository failures remain
+non-OK audit results (exit `1`). The daemon keeps its existing cached probe
+policy.
+
 When the audit record says `reason=branch-protection-forbidden`, rerun the add-context step with a repo-admin credential instead of waiving the gate:
 
 ```bash
@@ -856,6 +865,20 @@ Use this path when checking whether the docs still match live watcher behavior:
 Watcher-owned same-head re-dispatch is bounded and status-scoped. Autonomous retries are allowed only when the prior LRQ is terminal `failed`, `superseded`, or authoritative `not-found`, and the per-head `watcherReDispatchCount` budget in the dispatch record is still below the bound. `cancelled` / `canceled` do not auto-relaunch; that remains operator intent and requires a scoped `merge-agent-requested` label. The `not-found` classification is safe only when the watcher definitely passed `--as-owner <hq owner>` to `hq dispatch status`; if `.hq/config.json` is unreadable, malformed, or missing `ownerUser`, the watcher logs the degraded state, treats the status as unknown, and preserves duplicate-dispatch protection instead of guessing that the LRQ is gone.
 
 `ticket-pipeline-paused` is the PR-level Linear-ticket pipeline pause. Apply it with `npm run ticket-pipeline:pause -- --repo <owner/repo> --pr <n> "<reason>"`. The command creates the GitHub repository label if needed, applies it to the PR, and the watcher/reviewer skip Linear state changes and critical-flag comments while the label is present. Remove it with the same command plus `--resume`; release is idempotent if the label was already absent. For repo-wide outages, use `npm run ticket-pipeline:pause -- --repo <owner/repo> --scope repo --confirm-live-root "<reason>"`. The durable pause file resolves to `ADVERSARIAL_TICKET_PIPELINE_ROOT` when set, otherwise `HQ_ROOT/adversarial-review` when `HQ_ROOT` is set, otherwise the selected checkout root (overrideable with `--root <path>`). The live Linear triage adapter persists its resolved pause root to `data/ticket-pipeline-pauses/daemon-root-status.json`; repo-scope writes compare against that status and refuse if the operator shell resolves a different pause root. Corrupt repo-pause records fail closed and also write an alert receipt under `data/ticket-pipeline-pauses/alerts/` so the stall is visible outside a single log line.
+
+Each GitHub command in `ticket-pipeline:pause` uses the same bounded operator
+read path, including the lookups inside label creation and PR editing. It
+prints `[github-read]` progress, uses a 30-second nominal budget scaled up to
+60 seconds, and exits `1` with `ticket-pipeline-pause-timeout` on exhaustion.
+These mutations are not retried after transient failures; a timed-out command
+may already have applied remotely. A failed PR step stops a combined PR/repo
+pause before the repo file is changed.
+
+The merge-lane inventory collector also uses this helper for repository and PR
+reads; timeout entries carry `reason=merge-lane-inventory-lookup-timeout`.
+Credential-less calls through the helper use the separate `operator-cli`
+budget identity instead of the legacy `default` bucket. Explicit tokens retain
+their normal token or installation budget identity.
 
 LAC-2092: the Linear adapter leaves incident acceptance to the incident owner.
 Live Linear labels `incident`, `sev`, or `sev0` through `sev4` (also `sev-3`

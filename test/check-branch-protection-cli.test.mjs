@@ -6,6 +6,7 @@ import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { main } from '../src/check-branch-protection.mjs';
+import { OperatorGhReadTimeoutError } from '../src/operator-gh-read.mjs';
 
 const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 
@@ -26,6 +27,53 @@ function writeConfig(tmp, config) {
   writeFileSync(configPath, `${JSON.stringify(config, null, 2)}\n`);
   return configPath;
 }
+
+for (const discovery of [false, true]) {
+  test(`hanging ${discovery ? 'org discovery' : 'protection lookup'} is bounded and reports its timeout reason`, async t => {
+    const root = mkdtempSync(join(tmpdir(), 'protection-timeout-'));
+    t.after(() => rmSync(root, { recursive: true, force: true }));
+    const configPath = writeConfig(root, discovery ? { org: 'example' } : { repos: ['example/repo'] });
+    const stdout = makeWritable();
+    const stderr = makeWritable();
+    let signal;
+    const started = performance.now();
+    const running = main(['--config', configPath], {
+      stdout, stderr, budgetMs: 50,
+      env: { GH_TOKEN: 'synthetic-protection-token' },
+      execFileImpl: async (_command, _args, options) => {
+        signal = options.signal;
+        return new Promise(() => {});
+      },
+    });
+    if (discovery) {
+      await assert.rejects(running, err => err instanceof OperatorGhReadTimeoutError
+        && err.reason === 'branch-protection-lookup-timeout');
+    } else {
+      assert.equal(await running, 1);
+      assert.match(stderr.toString(), /reason=branch-protection-lookup-timeout/);
+    }
+    assert.ok(performance.now() - started < 2_000);
+    assert.equal(signal.aborted, true);
+    assert.match(stderr.toString(), /\[github-read\] start branch protection lookup/);
+  });
+}
+
+test('the bounded branch-protection reader preserves the required-token check', async t => {
+  const root = mkdtempSync(join(tmpdir(), 'protection-auth-'));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const configPath = writeConfig(root, { repos: ['example/repo'] });
+  const stderr = makeWritable();
+  let calls = 0;
+  assert.equal(await main(['--config', configPath], {
+    env: {}, stdout: makeWritable(), stderr,
+    execFileImpl: async () => {
+      calls += 1;
+      assert.fail('missing credentials must not spawn gh');
+    },
+  }), 1);
+  assert.equal(calls, 0, 'an assertion thrown inside the reader can be caught as a lookup failure');
+  assert.match(stderr.toString(), /reason=branch-protection-check-failed/);
+});
 
 test('--json emits machine-readable results and persists missing/forbidden evidence', async () => {
   const tmp = mkdtempSync(join(tmpdir(), 'branch-protection-cli-'));
@@ -69,7 +117,9 @@ test('--json emits machine-readable results and persists missing/forbidden evide
     );
 
     assert.equal(code, 1);
-    assert.equal(stderr.toString(), '');
+    const progress = stderr.toString().trim().split('\n');
+    assert.equal(progress.length, 3);
+    assert.ok(progress.every(line => line.startsWith('[github-read] start branch protection lookup:')));
     const payload = JSON.parse(stdout.toString());
     assert.equal(payload.schemaVersion, 1);
     assert.equal(payload.generatedAt, '2026-08-01T12:00:00.000Z');

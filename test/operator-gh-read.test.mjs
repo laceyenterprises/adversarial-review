@@ -1,5 +1,13 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import {
+  githubCredential, currentGitHubBudgetScope, recordResponseRateLimit, readGitHubBudgetBucketsSync,
+} from '../src/rate-limit-throttle.mjs';
 
 import {
   OPERATOR_GH_READ_MAX_BUDGET_MS,
@@ -164,4 +172,71 @@ test('a real GitHub failure is passed through, not relabelled as a timeout', asy
     }),
     (err) => !(err instanceof OperatorGhReadTimeoutError) && /no pull requests found/.test(err.message),
   );
+});
+
+test('a hanging fake gh process exits with the typed timeout inside the absolute budget', async () => {
+  const execute = promisify(execFile);
+  const started = performance.now();
+  let signal;
+  await assert.rejects(runOperatorGhRead({
+    args: ['pr', 'view', '7'],
+    label: 'synthetic lookup',
+    timeoutReason: 'synthetic-lookup-timeout',
+    budgetMs: 200,
+    retries: 0,
+    env: {},
+    execFileImpl: (_command, _args, options) => {
+      signal = options.signal;
+      return execute(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], options);
+    },
+  }), err => err instanceof OperatorGhReadTimeoutError && err.reason === 'synthetic-lookup-timeout');
+  assert.ok(performance.now() - started < 2_000);
+  assert.equal(signal.aborted, true);
+});
+
+test('credential-less operator reads have an isolated budget identity; tokens retain theirs', async t => {
+  const root = mkdtempSync(join(tmpdir(), 'operator-budget-'));
+  const previousPath = process.env.GHO_RATE_LIMIT_SHARED_STATE_PATH;
+  process.env.GHO_RATE_LIMIT_SHARED_STATE_PATH = join(root, 'budget.json');
+  t.after(() => {
+    if (previousPath === undefined) delete process.env.GHO_RATE_LIMIT_SHARED_STATE_PATH;
+    else process.env.GHO_RATE_LIMIT_SHARED_STATE_PATH = previousPath;
+    rmSync(root, { recursive: true, force: true });
+  });
+  for (const resource of ['core', 'graphql']) {
+    await recordResponseRateLimit({
+      resource, credential: 'default', remaining: 0, limit: 60,
+      resetAt: new Date(Date.now() + 60_000).toISOString(),
+    });
+  }
+  const unscoped = githubCredential({ env: {} });
+  assert.equal(unscoped, 'default');
+  const tokenEnv = { GH_TOKEN: 'synthetic-operator-token' };
+  const authenticated = githubCredential({ env: tokenEnv });
+  await Promise.all([{}, tokenEnv].map(env => runOperatorGhRead({
+    args: ['api', 'user'],
+    label: 'synthetic lookup',
+    timeoutReason: 'synthetic-lookup-timeout',
+    env,
+    execFileImpl: async (_command, _args, options) => {
+      assert.ok(currentGitHubBudgetScope());
+      assert.equal(githubCredential({ env: options.env }), env.GH_TOKEN ? authenticated : 'operator-cli');
+      await Promise.resolve();
+      assert.equal(githubCredential({ env: options.env }), env.GH_TOKEN ? authenticated : 'operator-cli');
+      return { stdout: '{}', stderr: [
+        '* Request at synthetic',
+        '< HTTP/2.0 200',
+        '< x-ratelimit-resource: core',
+        '< x-ratelimit-limit: 60',
+        '< x-ratelimit-remaining: 59',
+        `< x-ratelimit-reset: ${Math.floor(Date.now() / 1000) + 60}`,
+        '* Request took 1ms',
+      ].join('\n') };
+    },
+  })));
+  assert.equal(currentGitHubBudgetScope(), undefined);
+  assert.equal(githubCredential({ env: {} }), unscoped);
+  const buckets = readGitHubBudgetBucketsSync();
+  assert.equal(buckets.core.remaining, 0, 'operator telemetry does not overwrite the default bucket');
+  assert.equal(buckets['operator-cli/core'].remaining, 59);
 });

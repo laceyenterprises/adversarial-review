@@ -60,6 +60,27 @@ test('fetchAdversarialGateBranchProtection succeeds when required context is pre
   assert.deepEqual(Object.keys(calls[0].options.env).sort(), ['GH_TOKEN', 'HOME', 'PATH', 'GH_DEBUG', ...['GHO_RATE_LIMIT_SHARED_STATE_PATH', 'GHO_RATE_LIMIT_THROTTLE_FLOOR'].filter(key => process.env[key] !== undefined)].sort());
 });
 
+test('a supplied branch-protection reader owns the subprocess environment', async () => {
+  const env = { GH_TOKEN: 'synthetic-protection-token' };
+  for (const key of ['HOME', 'PATH']) {
+    Object.defineProperty(env, key, {
+      get() { assert.fail(`the fetcher must not build a subprocess environment: ${key}`); },
+    });
+  }
+  const calls = [];
+  const result = await fetchAdversarialGateBranchProtection({
+    repoPath: 'example/repo',
+    env,
+    runGhRead: async (...args) => {
+      calls.push(args);
+      return { stdout: JSON.stringify({ required_status_checks: { contexts: [ADVERSARIAL_GATE_CONTEXT] } }) };
+    },
+    execFileImpl: async () => assert.fail('the fallback executor must not run'),
+  });
+  assert.equal(result.ok, true);
+  assert.deepEqual(calls, [[['api', 'repos/example/repo/branches/main/protection']]]);
+});
+
 test('fetchAdversarialGateBranchProtection retries transient gh failures before succeeding', async () => {
   let calls = 0;
   const result = await fetchAdversarialGateBranchProtection({

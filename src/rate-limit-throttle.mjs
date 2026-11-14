@@ -90,7 +90,9 @@ function registerGitHubInstallationToken(token, appId, installationId, { env = p
 // Tokens never enter state or logs. A digest isolates credentials without
 // depending on which environment-variable alias supplied the token.
 function githubCredential({ env = process.env, token = env.GH_TOKEN || env.GITHUB_TOKEN } = {}) {
-  if (!token) return 'default';
+  // Operator reads without an explicit token must not inherit the daemon's
+  // legacy default bucket. Explicit tokens still use their verified identity.
+  if (!token) return currentGitHubBudgetScope()?.anonymousCredential || 'default';
   const digest = createHash('sha256').update(String(token)).digest('hex').slice(0, 24);
   const registered = installationCredentials.get(digest);
   if (registered) return registered;

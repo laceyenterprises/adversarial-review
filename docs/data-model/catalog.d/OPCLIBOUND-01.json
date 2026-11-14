@@ -1,0 +1,39 @@
+{
+  "version": 1,
+  "entries": [
+    {
+      "id": "github-rate-limit-state",
+      "title": "GitHub Rate Limit State",
+      "path": "docs/data-model/github-rate-limit-state.md",
+      "store": "data/api-cache/rate-limit-state.json; <selected-store>.bindings/<digest>.json; data/api-cache/budget-deficits.json; data/api-call-log/<UTC-date>.jsonl",
+      "schemaSurface": "src/rate-limit-throttle.mjs",
+      "storeVersion": 2,
+      "bucketKey": "githubBudgetKey(resource, credential): installation-<app-id>-<installation-id>/<resource> for positively identified installation tokens matching both configured broker pins, resolved in-process or through unexpired owner-checked bindings in the selected store, token-<sha256-prefix-24>/<resource> otherwise, adapter:<selector>/<resource> for unbound adapter auth, operator-cli/<resource> for bounded operator reads without an environment token, or bare resource for legacy unscoped default callers",
+      "bindingStore": "Broker-verified { digest, credential, expiresAt } files: expiry capped at one hour or earlier token expiry, prune expired digest files on write (not crashed-writer temporary files), atomic 0600 files in 0700 directories; same owner-scoped store plan with caller path then process path fallback, without inheriting tokens; reject foreign owners and observed symlinks on read, assuming a trusted parent against concurrent directory replacement; successful reads revalidate each lookup, misses cache one second per resolved path/digest; unavailable bindings retain token isolation",
+      "optionalBucketFields": [
+        "credential",
+        "credentialSelector",
+        "limit",
+        "rateLimitedCalls"
+      ],
+      "ownerScopedStore": "GHSTATEOWNER-01: a caller that does not own the shared store (file owner, or directory owner before the file exists) uses <store without .json>.uid-<uid>.json with its own .lock and .throttled.json; it never writes the shared store, and no writer renames over a store it could not read",
+      "relatedSchemaSurfaces": [
+        "src/github-budget-bindings.mjs",
+        "src/metered-gh.mjs",
+        "bin/metered-gh.mjs",
+        "src/runtime-status.mjs",
+        "src/github-api.mjs",
+        "src/github-adapter-client.mjs",
+        "src/adapters/subject/github-pr/index.mjs",
+        "src/conditional-request.mjs",
+        "src/watcher-github-budget.mjs",
+        "src/github-budget-monitor.mjs",
+        "src/api-telemetry.mjs",
+        "src/operator-gh-read.mjs"
+      ],
+      "compatibility": "Additive installation keys share verified token rotations; PAT fallbacks and unverified credentials remain token-keyed. Legacy resource-keyed documents remain anonymous. Deficit episodes persist across restarts; HTTP responses and credential bindings are distinct from logical attempts.",
+      "owner": "shared GitHub request throttle",
+      "operatorCredentialScope": "src/operator-gh-read.mjs supplies the operator-cli fallback for credential-less admission and response recording. Explicit tokens retain their normal identity. No document-version or bucket-field changes."
+    }
+  ]
+}

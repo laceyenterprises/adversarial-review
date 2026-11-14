@@ -1,4 +1,4 @@
-import { meteredExecFile } from './metered-gh.mjs';
+import { runOperatorGhRead } from './operator-gh-read.mjs';
 import { execFile } from 'node:child_process';
 import { existsSync, rmSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
@@ -135,12 +135,25 @@ function ensureRepoPauseRootConfirmed({
 }
 
 function isAbsentLabelRemovalError(err) {
+  if (err?.reason === 'ticket-pipeline-pause-timeout') return false;
   const text = [err?.message, err?.stderr, err?.stdout].filter(Boolean).join('\n').toLowerCase();
   return /not found|does not exist|http 422|could not remove|unable to remove|label.*not.*found/.test(text);
 }
 
-async function ensureTicketPipelinePauseLabel({ repo, execFileImpl = execFileAsync } = {}) {
-  await meteredExecFile(execFileImpl, 'gh', [
+// High-level gh mutations also perform lookups. Bound the whole command, but
+// never replay a mutation whose remote outcome may be unknown.
+function runPauseGh(args, { execFileImpl, budgetMs, stderr, env }) {
+  return runOperatorGhRead({
+    args, execFileImpl, budgetMs, stderr, env, retries: 0,
+    label: 'ticket pipeline pause',
+    timeoutReason: 'ticket-pipeline-pause-timeout',
+  });
+}
+
+async function ensureTicketPipelinePauseLabel({
+  repo, execFileImpl = execFileAsync, budgetMs, stderr = process.stderr, env = process.env,
+} = {}) {
+  await runPauseGh([
     'label',
     'create',
     TICKET_PIPELINE_PAUSED_LABEL,
@@ -151,7 +164,7 @@ async function ensureTicketPipelinePauseLabel({ repo, execFileImpl = execFileAsy
     '--color',
     'f9d0c4',
     '--force',
-  ]);
+  ], { execFileImpl, budgetMs, stderr, env });
 }
 
 async function setPRTicketPipelinePause({
@@ -159,12 +172,15 @@ async function setPRTicketPipelinePause({
   prNumber,
   paused,
   execFileImpl = execFileAsync,
+  budgetMs,
+  stderr = process.stderr,
+  env = process.env,
 } = {}) {
   if (paused) {
-    await ensureTicketPipelinePauseLabel({ repo, execFileImpl });
+    await ensureTicketPipelinePauseLabel({ repo, execFileImpl, budgetMs, stderr, env });
   }
   try {
-    await meteredExecFile(execFileImpl, 'gh', [
+    await runPauseGh([
       'pr',
       'edit',
       String(prNumber),
@@ -172,7 +188,7 @@ async function setPRTicketPipelinePause({
       repo,
       paused ? '--add-label' : '--remove-label',
       TICKET_PIPELINE_PAUSED_LABEL,
-    ]);
+    ], { execFileImpl, budgetMs, stderr, env });
   } catch (err) {
     if (!paused && isAbsentLabelRemovalError(err)) return;
     throw err;
@@ -219,6 +235,8 @@ async function applyTicketPipelinePause({
   requestedAt = new Date().toISOString(),
   requestedBy = process.env.USER || process.env.LOGNAME || 'operator',
   execFileImpl = execFileAsync,
+  budgetMs,
+  stderr = process.stderr,
   env = process.env,
 } = {}) {
   const paused = !resume;
@@ -238,6 +256,9 @@ async function applyTicketPipelinePause({
       prNumber,
       paused,
       execFileImpl,
+      budgetMs,
+      stderr,
+      env,
     });
     result.prLabelUpdated = true;
   }
@@ -278,7 +299,7 @@ async function main() {
       ` label=${result.label}`
     );
   } catch (err) {
-    console.error(`[ticket-pipeline-pause] Failed: ${err.message}`);
+    console.error(`[ticket-pipeline-pause] Failed: ${err.reason ? `${err.reason}: ` : ''}${err.message}`);
     process.exit(1);
   }
 }

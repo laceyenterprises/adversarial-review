@@ -565,7 +565,7 @@ test('FINDINGSBATCH-01 hourly settlement clears mixed outcomes without claiming 
   assert.equal(launches, 2);
 });
 
-async function publicationFixture(t, { advice = false, expectedTimeout = null } = {}) {
+async function publicationFixture(t, { advice = false, expectedTimeout = null, expectedReadTimeout = 30_000 } = {}) {
   const f = fixture(t);
   f.pass(1, advice ? adviceOnly : body);
   f.db.prepare("UPDATE reviewed_prs SET pr_state='merged'").run();
@@ -604,16 +604,14 @@ async function publicationFixture(t, { advice = false, expectedTimeout = null } 
     readLaunches: async args => {
       assert.equal(args.idempotencyKey, key);
       // The release helper retains its separate 15-second read contract.
-      assert.ok(args.timeoutMs === 15_000 || args.timeoutMs >= 900_000);
-      if (expectedTimeout !== null && args.timeoutMs !== 15_000) assert.equal(args.timeoutMs, expectedTimeout);
+      assert.ok(args.timeoutMs === 15_000 || args.timeoutMs === expectedReadTimeout);
       return { ok: true, rows: launches };
     },
     execFileImpl: async (bin, args, options) => {
       assert.equal(bin, 'hq');
       if (args[1] === 'status') {
         assert.deepEqual(args, ['dispatch', 'status', batch.launch_id, '--json', '--root', f.rootDir]);
-        assert.ok(options.timeout >= 900_000);
-        if (expectedTimeout !== null) assert.equal(options.timeout, expectedTimeout);
+        assert.equal(options.timeout, expectedReadTimeout);
         return { stdout: JSON.stringify(status) };
       }
       if (args[0] === 'decision') {
@@ -837,7 +835,7 @@ test('FINDINGSDECISIONHOLD-01 refuses unpushed work and retains the cause and fu
     'age does not discard unresolved decision custody');
 });
 
-test('FINDINGSSTATUSTIMEOUT-01 dispatch and publication probes share load-aware bounds beyond the one-hour cap', async t => {
+test('FINDINGSSTATUSTIMEOUT-01 publication probes use read-scale bounds while dispatch retains provisioning time', async t => {
   t.mock.method(os, 'platform', () => 'linux');
   const cores = os.cpus().length;
   t.mock.method(os, 'loadavg', () => [cores * 3, cores * 3, cores * 3]);
@@ -853,7 +851,7 @@ test('FINDINGSSTATUSTIMEOUT-01 dispatch and publication probes share load-aware 
     syncBuiltinESMExports();
     resetLoadAwareTimeoutCachesForTesting();
   });
-  const f = await publicationFixture(t, { expectedTimeout: 5_400_000 });
+  const f = await publicationFixture(t, { expectedTimeout: 5_400_000, expectedReadTimeout: 180_000 });
   assert.equal(f.dispatches.length, 1);
   // Model elapsed child/transport time without waiting on wall-clock sleeps.
   // Either old 15-second probe bound rejects before publication.
@@ -875,7 +873,7 @@ test('FINDINGSSTATUSTIMEOUT-01 dispatch and publication probes share load-aware 
   });
   assert.equal(statusReads, 1);
   assert.equal(keyedReads, 1);
-  assert.equal(f.dispatches.length, 2, 'publication uses the same uncapped load scaling');
+  assert.equal(f.dispatches.length, 2, 'publisher provisioning retains its uncapped load scaling');
   assert.equal(f.db.prepare('SELECT error FROM finding_batches').get().error, null);
 });
 
@@ -887,6 +885,8 @@ test('FINDINGSSTATUSTIMEOUT-01 terminated publication probes record their cause 
       { timedOut: true },
       { code: 'ETIMEDOUT' },
       { signal: 'SIGKILL' },
+      { code: 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER', killed: true, signal: 'SIGTERM' },
+      { code: 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER' },
     ]) await t.test(`${boundary}: ${JSON.stringify(failure)}`, async t => {
       const f = await publicationFixture(t);
       const logs = [];
@@ -898,8 +898,10 @@ test('FINDINGSSTATUSTIMEOUT-01 terminated publication probes record their cause 
         ...(boundary === 'status' ? { execFileImpl: fail } : { readLaunches: fail }) });
       const row = f.db.prepare('SELECT error,released_at,completed_at,batch_attempts FROM finding_batches').get();
       const operation = boundary === 'status' ? 'hq dispatch status' : 'keyed launch probe';
-      const expected = failure.signal === 'SIGKILL' ? `${operation} terminated (signal SIGKILL)`
-        : `${operation} timed out after 900000 ms${failure.signal ? ` (signal ${failure.signal})` : ''}`;
+      const expected = failure.code === 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER'
+        ? `${operation} output exceeded limit${failure.signal ? ` (signal ${failure.signal})` : ''}`
+        : failure.signal === 'SIGKILL' ? `${operation} terminated (signal SIGKILL)`
+          : `${operation} timed out after 30000 ms${failure.signal ? ` (signal ${failure.signal})` : ''}`;
       assert.equal(row.error, expected);
       assert.equal(row.released_at, null);
       assert.equal(row.completed_at, null);
@@ -919,7 +921,7 @@ test('FINDINGSSTATUSTIMEOUT-01 typed keyed read timeout remains visible and retr
   await f.run({ logger: { warn: message => logs.push(message) },
     readLaunches: async () => ({ ok: false, reason: 'dispatch-read-unavailable', timedOut: true }) });
   const row = f.db.prepare('SELECT error,released_at FROM finding_batches').get();
-  assert.equal(row.error, 'keyed launch probe timed out after 900000 ms');
+  assert.equal(row.error, 'keyed launch probe timed out after 30000 ms');
   assert.equal(row.released_at, null);
   assert.ok(logs[0].includes(row.error));
   await f.run();

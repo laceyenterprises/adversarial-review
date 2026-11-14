@@ -29,10 +29,14 @@ const execFileAsync = promisify(execFile);
 // Leave room for the provisioner's own watchdog/rollback, and scale once for
 // host load without the helper's shorter default ceiling.
 const dispatchTimeoutMs = () => loadAwareTimeoutMs(900_000, { maxMs: Infinity });
+// Read-only publication probes use the same nominal as hammer launch reads.
+const publicationReadTimeoutMs = () => loadAwareTimeoutMs(30_000);
 
 function publicationProbeError(error, operation, timeoutMs, fallback = error.message) {
-  const timedOut = error.killed || error.timedOut || ['ETIMEDOUT', 'ERR_SCRIPT_EXECUTION_TIMEOUT'].includes(error.code);
-  const detail = timedOut ? `${operation} timed out after ${timeoutMs} ms`
+  const outputExceeded = error.code === 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER';
+  const timedOut = error.killed || error.timedOut || error.code === 'ETIMEDOUT';
+  const detail = outputExceeded ? `${operation} output exceeded limit`
+    : timedOut ? `${operation} timed out after ${timeoutMs} ms`
     : error.signal ? `${operation} terminated` : null;
   return Object.assign(Error(detail || fallback, { cause: error }), {
     stderr: error.stderr,
@@ -381,8 +385,8 @@ async function publishFindingBatch({ db, batch, result, dir, outputPath, env, ro
   try {
     try { fsExt.flockSync(fd, 'exnb'); }
     catch (error) { if (['EAGAIN', 'EWOULDBLOCK'].includes(error.code)) return; throw error; }
-    // Size once using the same configured load policy as publisher dispatch.
-    const probeTimeoutMs = dispatchTimeoutMs();
+    // Size once for reads; provisioning retains its separate dispatch budget.
+    const probeTimeoutMs = publicationReadTimeoutMs();
     let stdout;
     try {
       ({ stdout } = await execFileImpl(env.HQ_BIN || 'hq',

@@ -8168,11 +8168,21 @@ normal-priority remediation worker per repository/area, using existing classes
 and the existing `hq dispatch` transport. No cron, CI gate or config key is added. Hourly settlement-only passes collect worker outcomes and
 observe batch PR merges without claiming new batches or dispatching workers.
 Dropped findings retain no result PR reference.
-Publication's `hq dispatch status` and keyed launch probes use the same
-load-aware timeout policy as publisher dispatch: a 900,000 ms nominal bound
-scaled once through the existing `adversarial.reviewer.load_aware` settings.
-Timeout and signal failures name the probe, effective timeout when applicable,
-and signal in the bounded batch error and watcher log. These read failures retry
+Publication's `hq dispatch status` and keyed launch probes use a 30,000 ms
+read nominal, scaled once through the existing `adversarial.reviewer.load_aware`
+settings (180,000 ms at 6×, 600,000 ms at the configurable 20× maximum).
+Publisher provisioning retains its separate 900,000 ms nominal budget.
+The ticker fences overlapping passes until all batch workers finish: a hung
+probe delays the entire pass and subsequent hourly settlement, including other
+repositories. One publication can incur up to three sequential read bounds,
+the 240,000 ms decision handoff, and one dispatch bound, plus GitHub reads and
+other batch work. At 6×, those probe/handoff/dispatch budgets total 103 minutes;
+at 20×, they total 334 minutes. These are per-publication budgets, not a whole-pass
+deadline; workers run with bounded parallelism and may process multiple batches.
+Timeout, signal and output-limit failures name the probe and cause in the
+bounded batch error and watcher log. Timeout diagnostics include the effective
+bound; output-limit kills are reported as `output exceeded limit`, even when
+the child was killed. These read failures retry
 on later collection passes without spending preparation attempts; the existing
 stale-release and launch-custody rules still apply.
 Collection reads `state,mergedAt,body,headRefOid` with `gh pr view` through the

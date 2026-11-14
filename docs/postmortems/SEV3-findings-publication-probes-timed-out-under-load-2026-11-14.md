@@ -46,13 +46,15 @@ and decision-handoff repairs could not help while these reads failed first.
 
 ## Correction and safety
 
-Both publication probes now receive one effective bound from the same
-`dispatchTimeoutMs()` helper as publisher dispatch. The existing
+Both publication probes now receive one effective read-scale bound with a
+30,000 ms nominal, matching hammer launch reads. Publisher dispatch retains its
+900,000 ms provisioning nominal. The existing
 `adversarial.reviewer.load_aware` configuration controls scaling; there is no
 new configuration key. Each probe receives the computed bound unchanged.
 
 Killed or timed-out probes record the operation and effective timeout first;
-signalled probes include the signal. Signal-only termination is described as
+signalled probes include the signal. Output-limit failures are classified before
+kills and reported as `output exceeded limit`. Signal-only termination is described as
 termination rather than asserted to be a timeout. The diagnostic takes
 precedence over command echoes and stderr before existing redaction and
 300-character truncation. Typed timeout results from the keyed read adapter
@@ -74,7 +76,7 @@ checks and making unreadable prerequisites explicit.
 
 Synthetic tests model 20-second status and keyed reads under a known load-scaled
 bound and verify that publication proceeds. They exercise killed children,
-explicit timeouts, timeout codes, signal-only termination and typed keyed read
+explicit timeouts, timeout codes, output-limit kills, signal-only termination and typed keyed read
 timeouts, checking bounded row/log diagnostics, unspent attempts, retained
 outcomes and successful retry on the next pass. Existing PUBLISHINTENTSTRAND-01
 and FINDINGSDECISIONHOLD-01 cases run in the same touched test file.
@@ -83,5 +85,8 @@ See the [change note](../changes/FINDINGSSTATUSTIMEOUT-01.md) for observed resul
 After normal deployment, the runtime owner can observe the next organic
 collection pass for an eligible batch and retain evidence of successful reads,
 publisher receipt and eventual normal PR review. Longer read bounds also delay
-hang detection under load. This source repair performs no restart or backlog
+hang detection under load. A hung probe holds the entire findings pass and
+subsequent hourly settlement until all workers finish; per-publication waits
+can accumulate three read bounds, the decision handoff and dispatch, plus
+GitHub reads. See the closure runbook for scaled budgets. This source repair performs no restart or backlog
 recovery and does not claim production recovery.

@@ -660,7 +660,7 @@ function extractRateLimitObservation(headers, { observedAt = Date.now(), resourc
 
 // Bypass our own throttle for this budget-exempt probe. Bind to the exact
 // credential used for admission, never a freshly minted or ambient identity.
-async function confirmLiveBudget({ credential, resource, env }) {
+async function confirmLiveBudget({ credential, resource, env = process.env }) {
   const token = confirmationTokens.get(credential)
     || (githubCredential({ env }) === credential ? env.GH_TOKEN || env.GITHUB_TOKEN : null);
   if (!token) throw Object.assign(new Error('confirmation credential unavailable'), { code: 'confirmation-credential-unavailable' });
@@ -976,7 +976,7 @@ function createRateLimitThrottle({
     recordResponseRateLimit,
     recordRateLimitedCall,
     readSharedState,
-    readConfirmedBudget: (resource, credential) => confirmedAdmission(resource, credential, githubBudgetKey(resource, credential), resolveThrottleFloor(env, logger)),
+    readConfirmedBudget: (resource, credential, requestEnv = env) => confirmedAdmission(resource, credential, githubBudgetKey(resource, credential), resolveThrottleFloor(env, logger), requestEnv),
     readBudgetStoreEvidence,
     resolveSharedStatePath: () => resolveSharedStatePathNow(),
     resolveThrottleFloor: () => resolveThrottleFloor(env, logger),

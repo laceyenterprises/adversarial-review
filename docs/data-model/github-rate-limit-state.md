@@ -104,7 +104,7 @@ Daemon merge wrappers preserve typed `githubRateLimitKind`/`budgetDeferred`
 metadata when reducing execution failures. The metered CLI emits the exact
 stderr protocol line `github-rate-limit: primary|secondary|deferred` only for
 transport-proven limits or admission deferrals. Hammer shell classifiers and
-closer dispatch accept that protocol before generic HTTP 403 rejection; it
+daemon merge and closer dispatch accept that protocol before generic HTTP 403 rejection; it
 does not create a new shared quota observation. HQ launch failures that contain
 only prose need typed evidence from their producing transport; arbitrary
 stdout or exception text remains insufficient.

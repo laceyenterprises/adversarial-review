@@ -5,6 +5,7 @@ import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { readUnthrottledGitHubRateLimit } from '../src/metered-gh.mjs';
+import { createRateLimitThrottle, githubCredential } from '../src/rate-limit-throttle.mjs';
 
 for (const [routing, endpoint] of [
   [{}, 'rate_limit'],
@@ -37,3 +38,27 @@ for (const [routing, endpoint] of [
       && err.response.headers['x-ratelimit-remaining'] === '4000');
   });
 }
+
+test('confirmed budget read passes its configured environment to the live probe', async t => {
+  const dir = mkdtempSync(join(tmpdir(), 'confirmation-budget-'));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const now = Date.now();
+  const reset = Math.ceil((now + 3600_000) / 1000);
+  writeFileSync(join(dir, 'gh'), `#!${process.execPath}
+    const assert = require('node:assert/strict');
+    assert.equal(process.env.GH_TOKEN, 'fixture-budget-token');
+    assert.equal(process.env.HTTPS_PROXY, 'http://proxy.example:8080');
+    assert.equal(process.env.GH_HOST, 'enterprise.example');
+    process.stdout.write('HTTP/2.0 200\\r\\n\\r\\n' + JSON.stringify({ resources: {
+      core: { remaining: 4500, limit: 5000, reset: ${reset} }
+    } }));
+  `, { mode: 0o700 });
+  const env = { PATH: dir, GH_TOKEN: 'fixture-budget-token',
+    HTTPS_PROXY: 'http://proxy.example:8080', GH_HOST: 'enterprise.example',
+    GHO_RATE_LIMIT_SHARED_STATE_PATH: join(dir, 'state.json') };
+  const credential = githubCredential({ env });
+  const throttle = createRateLimitThrottle({ env });
+  await throttle.recordResponseRateLimit({ resource: 'core', credential, remaining: 0,
+    limit: 5000, resetAt: reset * 1000, observedAt: now });
+  assert.equal((await throttle.readConfirmedBudget('core', credential)).remaining, 4500);
+});

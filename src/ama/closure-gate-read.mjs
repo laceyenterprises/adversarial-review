@@ -91,7 +91,7 @@ export function readClosureGateSync(read, {
     const limited = isGitHubRateLimitError(failure);
     const observation = rateLimitErrorObservation(failure) || failure?.observation;
     const deadline = observation?.secondaryUntil || observation?.resetAt;
-    const untilMs = Date.parse(deadline) - Date.now();
+    const untilMs = Date.parse(deadline) - clock.now();
     const delay = limited ? (Number.isFinite(untilMs) ? Math.max(0, untilMs) : 60_000) : launchReadBackoffMs(attempts);
     if (limited && delay >= remaining) return { ok: false, kind: 'exhausted', detail, attempts, notFoundContradicted };
     clock.sleep(Math.min(delay, remaining));

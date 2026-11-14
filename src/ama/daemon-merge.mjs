@@ -222,7 +222,7 @@ export function classifyDaemonMergeError(text) {
   // ham_merge_error_already_merged
   if (/already merged/i.test(haystack)) return 'already-merged';
   // ham_merge_error_retryable: throttling must win before generic HTTP 403.
-  if (isGitHubRateLimitError(text)) return 'retryable';
+  if (/^github-rate-limit: (primary|secondary|deferred)$/m.test(haystack) || isGitHubRateLimitError(text)) return 'retryable';
   // ham_merge_error_permanent
   if (
     /match-head-commit|head.*(mismatch|changed|does not match)|not authorized|permission|authentication|forbidden|HTTP 401|HTTP 403|branch protection|ruleset|required check|status checks? (not|have not)|not mergeable|merge conflict|pull request.*closed|closed pull request|pr is closed|state:?\s*closed|pull request.*not open|draft/i.test(

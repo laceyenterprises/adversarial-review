@@ -296,6 +296,11 @@ test('classifyDaemonMergeError mirrors the hammer classifier order', () => {
   assert.equal(classifyDaemonMergeError('branch protection rules not satisfied'), 'permanent');
   assert.equal(classifyDaemonMergeError('required check has not succeeded'), 'permanent');
   assert.equal(classifyDaemonMergeError('HTTP 403 forbidden'), 'permanent');
+  for (const kind of ['primary', 'secondary', 'deferred']) {
+    assert.equal(classifyDaemonMergeError(`HTTP 403 forbidden\ngithub-rate-limit: ${kind}\n`), 'retryable');
+    assert.equal(classifyDaemonMergeError({ stderr: `HTTP 403 forbidden\ngithub-rate-limit: ${kind}\n` }), 'retryable');
+  }
+  assert.equal(classifyDaemonMergeError('HTTP 403 forbidden\ngithub-rate-limit: unknown\n'), 'permanent');
   assert.equal(classifyDaemonMergeError('connection reset by peer'), 'retryable');
   assert.equal(classifyDaemonMergeError('connection closed by peer'), 'retryable');
   assert.equal(classifyDaemonMergeError('HTTP 503 service unavailable'), 'retryable');

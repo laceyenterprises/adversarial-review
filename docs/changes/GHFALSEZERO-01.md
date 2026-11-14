@@ -26,6 +26,12 @@ the companion; this round documents that follow-up rather than restoring
 substring-based quota classification. Existing lifecycle states and smoke
 promises are unchanged.
 
+Follow-up remediation makes the daemon merge classifier accept the reserved
+metered CLI stderr line before generic HTTP 403 rejection. Live budget reads
+pass the configured environment into confirmation, preserving the selected
+credential and enterprise/proxy routing after a watcher restart. Closure gate
+cooldown math uses its injected clock.
+
 ## Interface changes
 
 Version-2 buckets add `secondaryUntil` and `secondaryAttempts`; `remaining` may

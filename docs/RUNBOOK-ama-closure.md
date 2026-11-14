@@ -5173,7 +5173,7 @@ honored without rescaling.
 
 Daemon merge execution preserves typed limit metadata across catch/result
 wrappers. The metered subprocess serializes proven throttles as the exact stderr
-line `github-rate-limit: primary|secondary|deferred`; hammer and closer dispatch
+line `github-rate-limit: primary|secondary|deferred`; hammer, daemon merge and closer dispatch
 recognize it before generic HTTP 403 rejection. This protocol grants retry
 classification, not a new quota observation or a merge waiver. HQ-only prose
 needs typed evidence from its producing transport; it cannot establish a hold.

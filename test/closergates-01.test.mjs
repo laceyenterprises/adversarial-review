@@ -382,3 +382,16 @@ test('GHFALSEZERO-01: structured secondary cooldown cannot be shortened to fit a
   assert.equal(result.kind, 'exhausted');
   assert.equal(attempts, 1);
 });
+
+test('closure gate cooldown uses the injected clock', () => {
+  let now = 0;
+  const sleeps = [];
+  let attempts = 0;
+  const result = readClosureGateSync(() => {
+    if (++attempts === 1) throw { budgetDeferred: true,
+      observation: { resetAt: new Date(5_000).toISOString() } };
+    return 'ready';
+  }, { budgetMs: 10_000, clock: { now: () => now, sleep: ms => { sleeps.push(ms); now += ms; } } });
+  assert.equal(result.value, 'ready');
+  assert.deepEqual(sleeps, [5_000]);
+});

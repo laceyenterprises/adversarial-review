@@ -234,6 +234,7 @@ test('a refusal at every stage stops without merge and releases a held lease', a
     [{ FIXTURE_VERIFY_EXIT: '21' }, 21, 'rebase-conflict', 'hammer-verify-head', true],
     [{ FIXTURE_MERGE_REFUSE: '1' }, 20, 'predicate-not-eligible', 'hammer-merge', true],
     [{ FIXTURE_NEEDS_REVALIDATION: '1', FIXTURE_VALIDATE_EXIT: '1' }, 1, 'targeted-validation-failed', 'local-validation', true],
+    [{ FIXTURE_NEEDS_REVALIDATION: '1', FIXTURE_VALIDATE_EXIT: '78' }, 78, 'validation-environment-failed', 'local-validation', true],
   ]) {
     const f = hammerFixture(t);
     const result = await f.close(extra);

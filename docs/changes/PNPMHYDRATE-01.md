@@ -8,11 +8,15 @@ workflow order under the exact pnpm version in `packageManager`, supplied throug
 the existing npm toolchain. Formatting, lint and tests therefore run when those
 workflows require them, including for documentation-only changes.
 
-Unsupported workflow shell/context syntax or a missing version pin raises a
-typed selection error and fails the existing targeted validation phase. Missing
-tools and execution failures for this selected runner cannot become a successful
-skipped local battery. Existing Agent OS and adversarial-review selectors retain
-their behavior; there is no additional CI gate or successor mechanism.
+Missing or floating version pins raise a typed selection error and fail targeted
+validation. Unmodelled workflow shapes use the exact-head GitHub fallback;
+gated jobs and steps are excluded. Version pins are enforced, but optional
+packageManager integrity suffixes are not verified. Selected batteries default
+to a load-scaled 1800-second nominal budget, with explicit CLI overrides honored.
+A private scratch startup receipt separates npm provisioning from script failures:
+startup failures retry once within the same budget, then return the existing
+non-counted `validation-environment-failed` closer outcome. Script failures remain
+real failures and are never retried. No CI gate or successor mechanism is added.
 
 Offline synthetic tests verify selection, pin refusal, formatter failure and
 missing-tool behavior without installing packages. The companion agent-os change
@@ -21,13 +25,17 @@ owns provisioning, readiness and the SEV1 report.
 ## Interface changes
 
 The canonical selector can return a required pnpm workflow runner.
-`ValidationSelectionError` reports unsupported/missing pnpm selection inputs;
-the CLI uses the existing `targeted-validation-failed` phase.
+`ValidationSelectionError` reports missing/floating pins as real failures;
+`UnsupportedPnpmWorkflowError` selects the existing skipped-battery fallback.
+The runner supplies a nominal timeout and startup receipt requirement. Exit 78
+is reserved for tool startup failure at the canonical CLI/controller boundary;
+repository script exit 78 becomes 1.
 
 ## Verification
 
-Individual offline test files: `node --test test/pnpmhydrate-01.test.mjs`
-(7 passed) and `node --test test/hamselferrors-01.test.mjs` (11 passed).
-Both ran through bounded worker validation with NETGUARD and a 600-second budget.
-`npm run lint`: zero errors; `npm run typecheck:contracts`: passed;
-`bash demo/research-finding-walkthrough.sh`: three byte-stable fixture deliveries.
+Bounded targeted validation passed for `test/pnpmhydrate-01.test.mjs`,
+`test/hamcontrollerscript-01.test.mjs`, `test/hamselferrors-01.test.mjs` and
+`test/run-bounded.test.mjs`. Tests use local npm/pnpm stubs, never registry access.
+`npm run lint`: zero errors (existing warnings); `npm run typecheck:contracts`:
+passed; `bash demo/research-finding-walkthrough.sh`: three byte-stable deliveries.
+`git diff --check` and controller shell syntax passed. No full local suite ran.

@@ -2590,7 +2590,12 @@ Key control points:
   receipts; ended charged launches receive three bounded refunds per head before
   harness recovery parks and pages once. Review/head/CI/policy/GitHub facts keep
   stop authority. Canonical runner environment failures claim no local pass and
-  leave the exact-head GitHub required gate authoritative. Every correction
+  leave the exact-head GitHub required gate authoritative. Unsupported pnpm
+  workflows use this fallback; gated jobs/steps are excluded. Missing/floating
+  pins and started script failures retain world authority. Exhausted pnpm startup
+  retries return `validation-environment-failed` through existing non-counted
+  closer recovery, without a skipped pass. Lifecycle values and smoke promises
+  are unchanged. Every correction
   rechecks ordinary authority and ownership; no mutation is blindly replayed.
   HAMEDITPLAN-05 classifies every edit-plan error by origin. Plan JSON syntax,
   non-object/array shape, malformed head, citation, edit-kind and location mistakes

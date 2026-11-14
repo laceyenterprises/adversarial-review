@@ -88,7 +88,8 @@ test('canonical pnpm validation never converts missing tools into a successful s
   const env = stub(t, root, 'npm', 'exit 127');
   const result = spawnSync(process.execPath, [validate, '--canonical', '--', 'README.md'],
     { cwd: root, env, encoding: 'utf8', timeout: 20000 });
-  assert.equal(result.status, 127, result.stderr);
+  assert.equal(result.status, 78, result.stderr);
+  assert.match(result.stderr, /validation-environment-failed/);
   assert.doesNotMatch(result.stderr, /local-battery-skipped/);
 });
 
@@ -101,4 +102,104 @@ test('invalid pnpm selection exits nonzero without invoking an install', t => {
   assert.match(result.stderr, /pnpm-validation-selection-failed/);
   assert.doesNotMatch(result.stderr, /local-battery-skipped/);
   assert.equal(existsSync(join(root, 'calls')), false);
+});
+
+function workflow(root, text) {
+  writeFileSync(join(root, '.github/workflows/ci.yaml'), text);
+}
+
+for (const [name, text] of Object.entries({
+  'workflow env': 'env: {CI: true}\non: [pull_request]\njobs: {checks: {steps: [{run: pnpm test}]}}',
+  'job env': 'on: [pull_request]\njobs: {checks: {env: {CI: true}, steps: [{run: pnpm test}]}}',
+  'step env': 'on: [pull_request]\njobs: {checks: {steps: [{env: {CI: true}, run: pnpm test}]}}',
+  matrix: 'on: [pull_request]\njobs: {checks: {strategy: {matrix: {node: [22, 24]}}, steps: [{run: pnpm test}]}}',
+  'working-directory': 'on: [pull_request]\njobs: {checks: {steps: [{working-directory: app, run: pnpm test}]}}',
+  'non-PR trigger': 'on: [push]\njobs: {checks: {steps: [{run: pnpm test}]}}',
+  'reusable job': 'on: [pull_request]\njobs: {checks: {uses: org/repo/.github/workflows/ci.yml@main}}',
+})) {
+  test(`unsupported ${name} uses the exact-head GitHub fallback without provisioning`, t => {
+    const root = fixture(t);
+    workflow(root, text);
+    const env = stub(t, root, 'npm', 'echo forbidden > calls; exit 1');
+    const result = spawnSync(process.execPath, [validate, '--canonical', '--', 'README.md'],
+      { cwd: root, env, encoding: 'utf8', timeout: 20000 });
+    assert.equal(result.status, 0, result.stderr);
+    assert.match(result.stderr, /pnpm-validation-unsupported/);
+    assert.match(result.stderr, /local-battery-skipped-github-required-gate-authoritative/);
+    assert.equal(existsSync(join(root, 'calls')), false);
+  });
+}
+
+for (const run of ['echo "STORE_PATH=$(pnpm store path)" >> $GITHUB_ENV',
+  'pnpm exec playwright install', 'pnpm -r test', 'pnpm --filter x lint']) {
+  test(`unmodelled command falls back without a world failure: ${run}`, t => {
+    const root = fixture(t, { run });
+    const result = spawnSync(process.execPath, [validate, '--canonical', '--', 'README.md'],
+      { cwd: root, encoding: 'utf8', timeout: 20000 });
+    assert.equal(result.status, 0, result.stderr);
+    assert.match(result.stderr, /local-battery-skipped/);
+  });
+}
+
+test('job and step conditions exclude push-only and gated scripts', t => {
+  const root = fixture(t);
+  workflow(root, `on: [push, pull_request]
+jobs:
+  release:
+    if: github.event_name == 'push'
+    steps:
+      - run: pnpm lint
+  checks:
+    steps:
+      - if: github.event_name == 'push'
+        run: pnpm format:check
+      - run: pnpm test
+`);
+  const runner = canonicalHammerValidation(root, ['README.md']);
+  assert.deepEqual(JSON.parse(runner.args[6]), [['test']]);
+  assert.equal(runner.nominalSeconds, 1800);
+});
+
+test('npm startup failure retries once and exits as an environment fault, offline', t => {
+  const root = fixture(t);
+  const env = stub(t, root, 'npm', 'echo startup >> calls; exit 1');
+  const result = spawnSync(process.execPath, [validate, '--canonical', '--', 'README.md'],
+    { cwd: root, env, encoding: 'utf8', timeout: 20000 });
+  assert.equal(result.status, 78, result.stderr);
+  assert.match(result.stderr, /validation-environment-failed/);
+  assert.doesNotMatch(result.stderr, /local-battery-skipped/);
+  assert.equal(readFileSync(join(root, 'calls'), 'utf8'), 'startup\nstartup\n');
+});
+
+for (const code of [1, 78, 127]) {
+  test(`repository script exit ${code} remains a real failure without retry`, t => {
+    const root = fixture(t);
+    stub(t, root, 'pnpm', `echo script >> calls; exit ${code}`);
+    const env = stub(t, root, 'npm', 'shift 4; exec "$@"');
+    const result = spawnSync(process.execPath, [validate, '--canonical', '--', 'README.md'],
+      { cwd: root, env, encoding: 'utf8', timeout: 20000 });
+    assert.equal(result.status, code === 78 ? 1 : code, result.stderr);
+    assert.doesNotMatch(result.stderr, /validation-environment-failed|local-battery-skipped/);
+    assert.equal(readFileSync(join(root, 'calls'), 'utf8'), 'script\n');
+  });
+}
+
+test('integrity suffixes select the documented version-only pin', t => {
+  const runner = canonicalHammerValidation(fixture(t, { pin: 'pnpm@10.11.0+sha512.abcdef' }), ['README.md']);
+  assert.equal(runner.args[2], '--package=pnpm@10.11.0');
+});
+
+test('pnpm default timeout is larger and explicit nominal overrides remain authoritative', t => {
+  const root = fixture(t);
+  const env = stub(t, root, 'npm', 'exit 1');
+  for (const [args, timeout] of [[[], 1800000], [['--nominal-timeout', '10'], 10000]]) {
+    const result = spawnSync(process.execPath, [validate, '--canonical', ...args, '--', 'README.md'],
+      { cwd: root, env, encoding: 'utf8', timeout: 20000 });
+    assert.equal(result.status, 78, result.stderr);
+    // CLI children read real host load (1x..6x, capped at one hour).
+    // Deadline accounting can consume a millisecond before the first spawn.
+    const absolute = Number(/started absolute=(\d+)ms/.exec(result.stderr)?.[1]);
+    assert.ok(absolute <= Math.min(timeout * 6, 3600000)
+      && absolute >= timeout - 1000, result.stderr);
+  }
 });

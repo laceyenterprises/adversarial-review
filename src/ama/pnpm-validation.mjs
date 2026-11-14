@@ -4,6 +4,7 @@ import { fileURLToPath } from 'node:url';
 import { load } from 'js-yaml';
 
 export class ValidationSelectionError extends Error {}
+export class UnsupportedPnpmWorkflowError extends ValidationSelectionError {}
 
 // Read local PR workflows conservatively. No GitHub reads, shell evaluation,
 // installs, or guessed script names belong in command selection.
@@ -17,10 +18,10 @@ export function pnpmValidation(root, pkg) {
 }
 
 function selectPnpmValidation(root, pkg) {
-  const refuse = detail => { throw new ValidationSelectionError(`pnpm-validation-selection-failed: ${detail}`); };
+  const refuse = detail => { throw new UnsupportedPnpmWorkflowError(`pnpm-validation-unsupported: ${detail}`); };
   const pin = typeof pkg?.packageManager === 'string'
     && /^pnpm@(\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?)(?:\+sha(?:224|256|384|512)\.[0-9a-fA-F]+)?$/.exec(pkg.packageManager);
-  if (!pin) refuse('packageManager must pin pnpm@x.y.z');
+  if (!pin) throw new ValidationSelectionError('pnpm-validation-selection-failed: packageManager must pin pnpm@x.y.z');
   const directory = join(root, '.github/workflows');
   const commands = [];
   for (const file of existsSync(directory) ? readdirSync(directory).sort() : []) {
@@ -32,8 +33,9 @@ function selectPnpmValidation(root, pkg) {
     if (!(triggers === 'pull_request' || (Array.isArray(triggers) ? triggers.includes('pull_request')
       : triggers && Object.hasOwn(triggers, 'pull_request')))) continue;
     for (const job of Object.values(workflow.jobs || {})) {
+      if (Object.hasOwn(job, 'if')) continue;
       for (const step of job.steps || []) {
-        if (typeof step.run !== 'string') continue;
+        if (Object.hasOwn(step, 'if') || typeof step.run !== 'string') continue;
         for (const line of step.run.split('\n').map(value => value.trim())) {
           if (!/^pnpm(?:\s|$)/.test(line)) {
             if (/\bpnpm(?:\s|$)/.test(line) && !/^(?:#|corepack\s)/.test(line)) {
@@ -62,5 +64,7 @@ function selectPnpmValidation(root, pkg) {
     args: ['exec', '--yes', `--package=pnpm@${pin[1]}`, '--', 'node',
       fileURLToPath(new URL('../../bin/validate-pnpm-scripts.mjs', import.meta.url)), JSON.stringify(commands)],
     required: true,
+    startupReceipt: true,
+    nominalSeconds: 1800,
   };
 }

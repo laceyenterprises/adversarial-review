@@ -40,6 +40,13 @@ test(`TENUREGATE-01: ${mode} tenure routing preserves review dispatch and closur
       `  if (url === ${JSON.stringify(tenureUrl)}) {
         return { format: 'module', shortCircuit: true, source: ${JSON.stringify(wrapper)} };
       }
+      if (url === ${JSON.stringify(fileUrl('src', 'pollonce-phases.mjs'))}) {
+        const loaded = await nextLoad(url, context);
+        return { ...loaded, source: loaded.source.toString().replace(
+          'const tenureRoutingWarnings = createLogChangeGate',
+          'const tenureRoutingWarnings = globalThis.__tenureRoutingWarnings = createLogChangeGate'
+        ) };
+      }
       if (url === ${JSON.stringify(fileUrl('src', 'posted-review-row.mjs'))}) {
         return { format: 'module', shortCircuit: true, source:
           ${JSON.stringify(`export * from ${JSON.stringify(`${fileUrl('src', 'posted-review-row.mjs')}?actual`)}; export async function handlePostedReviewRow({ prNumber }) { globalThis.__closureEvaluations ||= []; globalThis.__closureEvaluations.push(prNumber); return { outcome: 'fixture-closure-evaluated' }; }`)} };
@@ -54,7 +61,7 @@ test(`TENUREGATE-01: ${mode} tenure routing preserves review dispatch and closur
       return nextLoad(url, context);`);
     loader = loader.replace(
       "export function createHeadCloserCommitSuppressionResolver() { return async () => ({ suppressed: false, reason: 'fixture' }); }",
-      "export function createHeadCloserCommitSuppressionResolver(options) { return async () => { let tenure; try { tenure = await options.readPrTenureImpl(); } catch (error) { options.onTenureReadError(error); globalThis.__unknownTenure = true; return { suppressed: false, reason: 'tenure-unavailable' }; } globalThis.__suppressionTenures ||= {}; globalThis.__suppressionTenures[options.prNumber] = tenure; return { suppressed: false, reason: 'fixture' }; }; }");
+      "export function createHeadCloserCommitSuppressionResolver(options) { return async () => { let tenure; try { tenure = await options.readPrTenureImpl(); } catch (error) { globalThis.__tenureWarningCallback = options.onTenureReadError; options.onTenureReadError(error); globalThis.__unknownTenure = true; return { suppressed: false, reason: 'tenure-unavailable' }; } globalThis.__suppressionTenures ||= {}; globalThis.__suppressionTenures[options.prNumber] = tenure; return { suppressed: false, reason: 'fixture' }; }; }");
     const loaderPath = path.join(tmp, 'loader.mjs');
     const registerPath = path.join(tmp, 'register.mjs');
     const runnerPath = path.join(tmp, 'runner.mjs');
@@ -106,6 +113,19 @@ test(`TENUREGATE-01: ${mode} tenure routing preserves review dispatch and closur
         assert.ok(globalThis.__closureEvaluations.includes(102), 'posted head reaches closure evaluation');
         await pollOnce(octokit, pollOptions);
         assert.equal(tenureWarnings.length, ${mode === 'unavailable' ? 2 : 0}, 'same-head failures do not repeat warnings');
+        if (${JSON.stringify(mode)} === 'unavailable') {
+          const gate = globalThis.__tenureRoutingWarnings;
+          for (let i = 0; i < 4096; i++) gate.note('eviction-fixture-' + i, 'unavailable');
+          assert.equal(gate.size(), 4096, 'warning history is bounded after overflow');
+          const warn = globalThis.__tenureWarningCallback;
+          warn('tenure-suppression-read-unavailable');
+          assert.equal(tenureWarnings.length, 3, 'an evicted PR/head warns again');
+          assert.ok(tenureWarnings[2].endsWith('tenure-suppression-read-unavailable'),
+            'non-Error payload retains diagnostic context');
+          warn({ message: 'another read error' });
+          assert.equal(tenureWarnings.length, 3, 'a retained PR/head suppresses repeats');
+          assert.equal(gate.size(), 4096);
+        }
       `,
     })));
     const env = fixtureEnv(installGhFixture(tmp));

@@ -302,6 +302,7 @@ import {
   reviewerSafetyPassKind,
 } from './watcher-reviewer-pool.mjs';
 import { watcherWakeMatchesSubject } from './watcher-wake.mjs';
+import { createLogChangeGate } from './log-change-gate.mjs';
 
 const DEFAULT_REVIEWER_MODEL_FALLBACK_ALERT_WINDOW_MS = 10 * 60 * 1000;
 const DEFAULT_REVIEWER_MODEL_FALLBACK_ALERT_THRESHOLD = 5;
@@ -310,7 +311,8 @@ const reviewerModelFallbackAlertState = {
   lastAlertMs: null,
 };
 // Process-local diagnostics only; retry the read on every enabled poll.
-const tenureRoutingWarnings = new Set();
+// Evicted PR/head keys may warn again; retain at most 4096 recently used keys.
+const tenureRoutingWarnings = createLogChangeGate({ maxEntries: 4096 });
 
 function resolvePositiveIntegerEnv(env, name, fallback) {
   const parsed = Number(env?.[name]);
@@ -1002,9 +1004,8 @@ export async function processReviewSubject(entry, ctx) {
       let tenureReviewRequired = false;
       const warnTenureReadError = error => {
         const key = `${repoPath}#${prNumber}@${subject.headSha}`;
-        if (tenureRoutingWarnings.has(key)) return;
-        tenureRoutingWarnings.add(key);
-        console.warn(`[watcher] tenure review routing unavailable for ${key}; continuing ordinary handlers: ${error.message}`);
+        if (!tenureRoutingWarnings.note(key, 'unavailable').changed) return;
+        console.warn(`[watcher] tenure review routing unavailable for ${key}; continuing ordinary handlers: ${error?.message || error}`);
       };
       if (effectiveDomainId === CODE_PR_DOMAIN_ID && existing && !subject.terminal
         && loadRoleConfig().get('worker_pool.tenure.enabled', false) === true) {

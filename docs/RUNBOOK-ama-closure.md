@@ -6581,7 +6581,8 @@ waive this requirement. The watcher also applies it before a completion receipt
 arrives, so every changed head of a tenured PR remains reviewable. An unavailable
 build or stage launch read skips only tenure-specific queueing in that poll:
 ordinary review dispatch, re-review handling and closure evaluation continue.
-The watcher warns once per PR/head per process with the read reason.
+The watcher warns per PR/head with the read reason using a process-local
+4096-entry LRU cache; evicted keys may warn again.
 The unknown result is retained in suppression, so it cannot certify a closer
 exemption as if tenure were absent. An available build launch without `tenureId` uses the
 existing untenured behavior.

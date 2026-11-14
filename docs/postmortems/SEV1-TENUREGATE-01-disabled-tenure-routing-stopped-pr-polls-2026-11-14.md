@@ -36,8 +36,9 @@ The Python and shell readers already expose the key; no companion change is need
 
 The watcher and shared reader honor the switch, including closure/remediation
 consumers. Disabled routing performs no tenure reads or tenure-specific queueing.
-Enabled lookup failures warn once per repository/PR/head per watcher process,
-skip the tenure step and continue ordinary handlers. Suppression receives the
+Enabled lookup failures warn per repository/PR/head through a process-local
+4096-entry LRU cache (evicted keys may warn again), skip the tenure step and
+continue ordinary handlers. Suppression receives the
 cached failure, preserving unknown tenure and active-writer custody without
 certifying a closer exemption. Successful tenured reads retain the existing
 independent exact-head review request, family exclusions and claim CAS.

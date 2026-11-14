@@ -880,7 +880,8 @@ repair/refund ledgers defer only their PR. See the
   existing attempt/cycle caps. An available launch without `tenureId` keeps the
   existing path. Missing stage IDs and successful unindexed-stage reads retain
   opener-based review routing. Unavailable tenure reads skip tenure queueing and
-  warn once per PR/head per process while ordinary review and closure continue;
+  warn per PR/head using a process-local 4096-entry LRU cache (evicted keys may
+  warn again) while ordinary review and closure continue;
   unknown tenure cannot certify a closer exemption. Already armed
   same-head range requests preserve pending/CI admission without writer locks.
   Optional range-prompt read failures leave reviewer startup available.

@@ -1426,7 +1426,8 @@ Watcher tenure review routing runs only when the effective
 `worker_pool.tenure.enabled` is true (absent defaults to false). Disabled
 routing performs no tenure reads. A failed enabled read skips tenure-specific
 queueing for that poll and continues ordinary review and closure handlers,
-warning once per PR/head per process. The failed result remains unknown in
+warning per PR/head through a process-local 4096-entry LRU cache; evicted keys
+may warn again. The failed result remains unknown in
 closer suppression; it cannot certify an untenured exemption.
 AMA reads the stable PR opener's launch through the public dispatch read model.
 A missing `tenureId` retains the untenured path. Tenured remediator dispatches

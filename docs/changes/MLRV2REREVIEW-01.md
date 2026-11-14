@@ -16,6 +16,9 @@ Shadow records would-request decisions without queueing. Existing watcher
 lifecycle reconciliation cancels pending requests after head movement.
 The queue transaction preserves a verdict posted during the final refresh,
 and expired verdict patience still permits a bounded recovery read.
+The authoritative pre-request refresh now includes the decided revision and
+uses the shared deadline clipping, including its one-millisecond recovery
+minimum after expiry.
 
 ## Verification
 
@@ -38,3 +41,18 @@ and expired verdict patience.
 Test commands used the requested `NETGUARD_LOG`/`PATH` prefix and the validation
 wrapper with `--timeout-seconds 600`. The requested netguard directory was
 unavailable in this environment; tests used the repository's offline fixtures.
+
+Final comment-only remediation validation:
+
+- `node --test test/finalization-exact-head-review.test.mjs test/finalization-executor.test.mjs`:
+  passed (20 exact-head cases and 31 executor cases), including revision metadata,
+  a 100 ms remaining episode budget and the expired-deadline recovery minimum.
+- `npm run lint`: passed with zero errors (149 existing warnings).
+- `npm run typecheck:contracts`: passed.
+- `bash demo/research-finding-walkthrough.sh`: passed with byte-stable deliveries.
+- `git diff --check`: passed.
+
+Commands ran through `bash bin/run-bounded.sh --timeout 60 --` using the existing
+installed dependency tree. The full local test suite was not run in this round;
+PR-head CI remains the full-suite merge gate. No store shape, lifecycle states
+or smoke promises changed.

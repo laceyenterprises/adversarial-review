@@ -104,7 +104,29 @@ test('head movement before issuance discards the old request', async t => {
   assert.equal(f.intents().length, 0);
 });
 
-test('expired verdict patience still permits a bounded recovery refresh and request', async t => {
+test('authoritative review refresh includes the revision and remaining episode budget', async t => {
+  const f = fixture(t);
+  const reads = [];
+  const executor = f.build({
+    policy: { checksPatienceMs: 1000, verdictPatienceMs: 1000, attestationPatienceMs: 1000 },
+    liveSurface: { read: async request => {
+      reads.push(request);
+      return { state: 'open', head, sourceRef: 'fixture:live' };
+    } },
+  });
+  const result = await executor.tick(subject, { observedAt: at(900), load });
+  assert.equal(result.action, 'request-reexact-review');
+  assert.equal(result.status, 'executed');
+  assert.equal(result.decision.deadline, at(1000));
+  assert.equal(f.requests.length, 1);
+  assert.equal(reads.length, 2);
+  assert.deepEqual(reads[1].subjectKey, subject);
+  assert.equal(reads[1].revisionRef, head);
+  assert.equal(reads[1].observedAt, at(900));
+  assert.equal(reads[1].timeoutMs, 100);
+});
+
+test('expired verdict patience still permits a minimal bounded recovery refresh and request', async t => {
   const f = fixture(t);
   const budgets = [];
   const executor = f.build({ liveSurface: { read: async ({ timeoutMs }) => {
@@ -116,7 +138,8 @@ test('expired verdict patience still permits a bounded recovery refresh and requ
   assert.equal(result.status, 'executed');
   assert.equal(f.requests.length, 1);
   assert.equal(budgets.length, 2);
-  assert.ok(budgets.every(ms => ms > 1 && ms <= 30000));
+  assert.ok(budgets[0] > 1 && budgets[0] <= 30000);
+  assert.equal(budgets[1], 1);
 });
 
 test('a verdict arriving in the authoritative refresh prevents a stale request', async t => {

@@ -83,8 +83,11 @@ Compose the live subject executor with the app `rootDir` (which supplies
 `createExactHeadReviewSurface`) or inject that surface as `reviewSurface`.
 Its `inspect` reads the same completed-job proof used by shadow. Before issuing,
 the leased executor refreshes authoritative lifecycle/head, verdict and owner
-evidence and checks the ledger generation. The surface rechecks publication
-proof and atomically preserves any newly posted verdict at that head before
+evidence and checks the ledger generation. The authoritative refresh includes
+the decided revision and clips its read budget to the remaining workflow episode
+time, with the shared one-millisecond minimum for recovery after expiry.
+The surface rechecks publication proof and atomically preserves any newly
+posted verdict at that head before
 calling `requestReviewRereview` with a head-bound explicit receipt,
 preserved budgets and the existing exact-head recovery reason. It neither
 bumps nor refunds rounds. Unavailable composition stays owned and deferred.

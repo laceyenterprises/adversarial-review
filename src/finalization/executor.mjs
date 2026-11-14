@@ -187,7 +187,7 @@ export function createFinalizationExecutor({
       // Check both authorities immediately before local queue issuance. A head
       // move during inspection/lease acquisition must never queue the old head.
       // Recovery still gets a bounded read after verdict patience has expired.
-      const live = await bounded(request => liveSurface.read(request), { subjectKey, observedAt });
+      const live = await bounded(request => liveSurface.read(request), { subjectKey, revisionRef: rev, observedAt }, decision);
       const current = fold(ledgerStore.read(subject));
       const reviews = live?.ownerSnapshot?.observations?.reviews;
       const verdictArrived = reviews?.state === 'complete'

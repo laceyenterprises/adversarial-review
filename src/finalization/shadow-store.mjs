@@ -231,6 +231,11 @@ export function openFinalizationShadowStore({ rootDir, db, busyTimeoutMs } = {})
 
   const selectById = database.prepare('SELECT * FROM finalization_shadow WHERE id = ?');
   const selectByKey = database.prepare("SELECT * FROM finalization_shadow WHERE json_extract(payload_json,'$.dedupeKey')=?");
+  const selectActivePattern = database.prepare(`
+    SELECT * FROM finalization_shadow_patterns WHERE pattern_key = ?
+      AND revocation_json IS NULL AND julianday(created_at) <= julianday(?)
+      AND (expires_at IS NULL OR julianday(expires_at) > julianday(?))
+  `);
 
   return {
     db: database,
@@ -281,10 +286,7 @@ export function openFinalizationShadowStore({ rootDir, db, busyTimeoutMs } = {})
       return database.transaction(() => {
         const patternKey = shadowPatternKey(observation);
         const pattern = patternKey && observation.classification.relation === 'diverge' && !observation.foldError
-          ? database.prepare(`SELECT * FROM finalization_shadow_patterns WHERE pattern_key = ?
-              AND revocation_json IS NULL AND julianday(created_at) <= julianday(?)
-              AND (expires_at IS NULL OR julianday(expires_at) > julianday(?))`)
-            .get(patternKey, observation.observedAt, observation.observedAt) : null;
+          ? selectActivePattern.get(patternKey, observation.observedAt, observation.observedAt) : null;
         // Only this store can attach a pattern reference; caller payloads cannot.
         const stored = { ...observation, patternDisposition: pattern ? patternRow(pattern) : null };
         const result = insert.run(observationToColumns(stored));

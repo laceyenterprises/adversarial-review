@@ -1190,7 +1190,13 @@ export interface ShadowReportModel {
     disposition: 'resolved' | 'open';
     overridden: boolean;
     tag: string;
-    evidence?: JsonObject;
+    evidence?: {
+      v1SourceRef?: string | null;
+      queue?: JsonObject | null;
+      live?: JsonObject | null;
+      disposition?: ShadowDispositionOverride | null;
+      patternDisposition?: ShadowPatternDisposition | null;
+    };
   }[];
   organicHeadMoves: number;
   exhaustionCloses: number;

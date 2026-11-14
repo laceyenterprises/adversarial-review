@@ -52,7 +52,7 @@ Table: `finalization_shadow`
   store refuses cross-user opens before SQLite can create or modify WAL files.
 - The schema source of truth is
   `migrations/20260718_finalization_shadow.sql`; keep this document and
-  `docs/data-model/catalog.d/` fragments current with persistent-shape changes.
+  `docs/data-model/catalog.json` current with persistent-shape changes.
 
 ## Queue observations (MGQ-07)
 

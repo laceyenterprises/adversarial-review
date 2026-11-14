@@ -111,8 +111,8 @@ test('audit, evidence, linked defect ticket and expiry validation fail closed', 
 test('report counts pattern, individual and open dispositions per exact pattern', t => {
   const store = fixture(t);
   const sample = store.append(observation());
-  store.addPattern(record(sample));
-  store.append(observation(2));
+  const pattern = store.addPattern(record(sample));
+  const matched = store.append(observation(2));
   const individual = store.append(observation(3));
   store.annotate(individual.id, { ...audit(4), disposition: 'resolved', direction: 'benign' });
   const other = store.append(observation(4, { v2Decision: { kind: 'wait', reason: 'checks patience expired' } }));
@@ -125,6 +125,8 @@ test('report counts pattern, individual and open dispositions per exact pattern'
   assert.equal(model.promotionGate.openDivergences, 2);
   assert.match(renderShadowReport(model), /by_pattern=1 by_individual_override=1 open=1/);
   assert.equal(model.divergences.find(d => d.id === individual.id).overridden, true);
+  assert.deepEqual(model.divergences.find(d => d.id === matched.id).evidence.patternDisposition, pattern);
+  assert.equal(model.divergences.find(d => d.id === sample.id).evidence.patternDisposition, null);
 });
 
 test('CLI add/list/revoke records principal verbatim and lists read-only', t => {

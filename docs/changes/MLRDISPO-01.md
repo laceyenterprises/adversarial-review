@@ -16,7 +16,32 @@ An additive SQLite migration stores pattern records. Shadow payloads capture
 the matching record and reports expose counts per pattern and disposition source.
 See the canonical shadow data model and divergence triage guide for details.
 
+Final comment-only remediation prepares the active-pattern lookup once per store,
+types report evidence including the captured `patternDisposition`, and registers
+the pattern table and payload additions in `docs/data-model/catalog.json`.
+The temporary catalog fragment is removed. Report fixtures cover populated and
+null pattern evidence; the contract fixture covers typed access and older evidence
+without a pattern. The closure SQL profile accounts separately for the new
+migration's six sentinel reads, preserving its existing non-migration read budget.
+No lifecycle state or smoke promise changes.
+
 ## Verification
+
+Final comment-only remediation on fresh `origin/main`:
+
+- Targeted sandbox/preload run of the shadow pattern, store, report, recorder,
+  live and queue suites plus `watcher-closure-latency`: 133 passed, zero failures.
+  The initial run reproduced CI's `120 !== 114` closure profile failure; after
+  separating the pattern migration's six sentinel reads, the fixture passed.
+- `npm run lint`: zero errors (149 existing warnings).
+- `npm run typecheck:contracts`: passed, including typed pattern evidence access
+  and compatibility with evidence that omits the pattern.
+- `node scripts/validate-data-model-catalog.mjs`: 97 entries validated.
+- `bash demo/research-finding-walkthrough.sh`: passed, three byte-stable deliveries.
+- `git diff --check`: passed. Full-suite validation remains with PR-head CI;
+  no full local suite was run in this remediation round.
+
+Earlier implementation validation:
 
 - Focused `node --test` run across all nine test files exercising the edited
   surfaces: 120 passed, zero failures, bounded to 600 seconds with the requested

@@ -491,14 +491,29 @@ still fails. The collector queries the existing launch-ledger adapter by that ke
 including terminal rows, before submission. Any publisher receipt fences another
 publisher, even after failure or a lost response. A per-batch file lock serializes
 collectors, and atomic `publish-intent.json` records `batchId`, `branch`,
-`idempotencyKey`, and `sourceLaunchId` before submission. An ambiguous transport
-failure with no visible receipt retains that intent and reports
-`batch-publish-receipt-pending`; it never guesses that enqueue failed. Retain the
+`idempotencyKey`, `sourceLaunchId`, ISO `submittedAt`, `dispatchTimeoutMs` (the
+actual load-scaled timeout used), and `resubmissionCount` (initially zero) before
+submission. An ambiguous transport failure with no visible receipt retains that
+intent and reports `batch-publish-receipt-pending` through the submission deadline
+plus `ADVERSARIAL_FINDINGS_BATCH_PUBLISH_RECEIPT_GRACE_MS` (default 10 minutes;
+positive integer milliseconds, injectable as `publishReceiptGraceMs` in runner
+options). Only strictly after that bound, with readable keyed evidence containing
+the decision launch, no publisher row, and every keyed row terminal, the collector
+atomically replaces the intent under the same lock and resubmits once on the same
+branch, ticket and key. The replacement has `resubmissionCount: 1` and `resubmitOf`
+containing the prior submission's `submittedAt` and `dispatchTimeoutMs`. It is
+durable before dispatch, so even another failed submission cannot earn a third.
+Legacy intents without `submittedAt` use file mtime; a missing timeout uses the
+current load-scaled dispatch bound. Malformed or mismatched intent evidence holds.
+Any publisher row retains the existing receipt recovery/terminal failure behavior;
+unreadable probes report `batch-publish-receipt-unavailable`, and live or unknown
+keyed custody never permits resubmission. A second absence stays pending until
+the existing bounded stale release. Retain the
 intent, `publish.lock` inode, and `publish-prompt.md` beside the outcomes artifact.
 These are collector recovery artifacts; the outcome schema and SQLite schema do
-not change. Failed or uncertain publication requires repairing the existing
-launch/intent after proving its state, rather than resetting the batch ID/key or
-starting a fresh branch. Once every keyed launch has ended, the
+not change. Uncertain publication outside that one proven-absence retry requires
+repairing the existing launch/intent after proving its state, rather than
+resetting the batch ID/key or starting a fresh branch. Once every keyed launch has ended, the
 FINDINGSREQUEUE-01 release path above returns the findings to the queue instead.
 
 The publisher reuses the pushed branch and checks for an existing PR again,

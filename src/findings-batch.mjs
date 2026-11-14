@@ -62,6 +62,7 @@ export function findingBatchOptions(env = process.env) {
     intervalMs: positive('ADVERSARIAL_FINDINGS_BATCH_INTERVAL_MS', 3600000),
     maxAgeMs: findingBacklogMaxAgeMs(env),
     timeoutMs: positive('ADVERSARIAL_FINDINGS_BATCH_TIMEOUT_MS', 24 * 3600000),
+    publishReceiptGraceMs: positive('ADVERSARIAL_FINDINGS_BATCH_PUBLISH_RECEIPT_GRACE_MS', 10 * 60000),
   };
 }
 
@@ -358,7 +359,7 @@ group-readable permissions (0664). Do not commit the artifact. If publication fa
 }
 
 async function publishFindingBatch({ db, batch, result, dir, outputPath, env, rootDir,
-  execFileImpl, fetchPublication, fetchPr, readLaunches, logger }) {
+  execFileImpl, fetchPublication, fetchPr, readLaunches, logger, now, publishReceiptGraceMs }) {
   validateBatchOutcomes(db, batch, result);
   if (!batch.launch_id) throw Error('batch-launch-receipt-missing');
   if (!/^[a-f0-9]{40}$/i.test(result.headSha || '')) throw Error('batch-push-evidence-missing');
@@ -384,9 +385,12 @@ async function publishFindingBatch({ db, batch, result, dir, outputPath, env, ro
     const branch = status.branch;
     if (typeof branch !== 'string' || !branch.trim() || branch.startsWith('-')) throw Error('batch-branch-missing');
     const key = `findings-batch-${batch.batch_id}`;
-    const probe = await readLaunches({ env, rootDir, hqRoot: resolveHqRoot(env),
-      idempotencyKey: key, timeoutMs: 15_000 });
-    if (!probe.ok || !Array.isArray(probe.rows) || !probe.rows.length) throw Error('batch-publish-receipt-unavailable');
+    let probe;
+    try {
+      probe = await readLaunches({ env, rootDir, hqRoot: resolveHqRoot(env),
+        idempotencyKey: key, timeoutMs: 15_000 });
+    } catch { throw Error('batch-publish-receipt-unavailable'); }
+    if (!probe?.ok || !Array.isArray(probe.rows) || !probe.rows.length) throw Error('batch-publish-receipt-unavailable');
     if (probe.rows.some(row => row.idempotency_key !== key || row.ticket_ref !== `FINDINGS-${batch.batch_id}`
       || ![batch.repo, batch.repo.split('/').at(-1)].includes(row.target_repo)
       || typeof row.launch_request_id !== 'string' || !row.launch_request_id)) throw Error('batch-publish-receipt-mismatch');
@@ -422,23 +426,50 @@ async function publishFindingBatch({ db, batch, result, dir, outputPath, env, ro
       db.prepare('UPDATE finding_batches SET error=NULL WHERE batch_id=?').run(batch.batch_id);
       return;
     }
+    // The status CLI cannot override live or unknown keyed ledger custody.
+    const meanings = probe.rows.map(row => readLaunchRequestStatus(row.status));
+    if (meanings.some(meaning => meaning.diagnostic)) throw Error('batch-publish-status-unavailable');
+    if (meanings.some(meaning => !meaning.terminal)) throw Error('batch-publish-receipt-pending');
     const promptPath = join(dir, 'publish-prompt.md');
     writeFileSync(promptPath, findingBatchPublishPrompt(batch, outputPath, branch));
-    // A transport timeout can leave a submitter enqueuing after our ledger read.
-    // Retain intent before submission, so an ambiguous failure never resubmits.
-    // A later pass recovers the receipt above, even if it is already terminal.
+    // Retain intent before submission. An ambiguous failure waits beyond its
+    // bounded submission deadline plus grace before one absent-receipt retry.
+    // A later pass recovers any publisher row above, including terminal rows.
     const intentPath = join(dir, 'publish-intent.json');
+    const submissionTimeoutMs = dispatchTimeoutMs();
+    const submissionTime = now();
+    const intent = { batchId: batch.batch_id, branch, idempotencyKey: key,
+      sourceLaunchId: batch.launch_id, submittedAt: new Date(submissionTime).toISOString(),
+      dispatchTimeoutMs: submissionTimeoutMs, resubmissionCount: 0 };
     try {
-      writeFileAtomic(intentPath, JSON.stringify({ batchId: batch.batch_id, branch,
-        idempotencyKey: key, sourceLaunchId: batch.launch_id }), { overwrite: false, mode: 0o664 });
+      writeFileAtomic(intentPath, JSON.stringify(intent), { overwrite: false, mode: 0o664 });
     } catch (error) {
-      if (error.code === 'EEXIST') throw Error('batch-publish-receipt-pending');
-      throw error;
+      if (error.code !== 'EEXIST') throw error;
+      let previous, submittedAt, previousTimeoutMs;
+      try {
+        previous = JSON.parse(readFileSync(intentPath, 'utf8'));
+        submittedAt = previous.submittedAt === undefined
+          ? statSync(intentPath).mtimeMs : Date.parse(previous.submittedAt);
+        previousTimeoutMs = previous.dispatchTimeoutMs === undefined ? submissionTimeoutMs : previous.dispatchTimeoutMs;
+      } catch { throw Error('batch-publish-receipt-pending'); }
+      // Unknown/corrupt intent evidence cannot authorize a replacement.
+      if (previous.batchId !== batch.batch_id || previous.branch !== branch
+        || previous.idempotencyKey !== key || previous.sourceLaunchId !== batch.launch_id
+        || !Number.isFinite(submittedAt) || !Number.isSafeInteger(previousTimeoutMs) || previousTimeoutMs < 1
+        || (previous.resubmissionCount === undefined ? 0 : previous.resubmissionCount) !== 0
+        || submissionTime <= submittedAt + previousTimeoutMs + publishReceiptGraceMs) {
+        throw Error('batch-publish-receipt-pending');
+      }
+      // Still under publish.lock: persist the spent retry before dispatch, so
+      // crashes and lost receipts cannot grant another submission.
+      intent.resubmissionCount = 1;
+      intent.resubmitOf = { submittedAt: new Date(submittedAt).toISOString(), dispatchTimeoutMs: previousTimeoutMs };
+      writeFileAtomic(intentPath, JSON.stringify(intent), { mode: 0o664 });
     }
     const args = findingBatchDispatchArgs({ batch, promptPath, branch, env,
       workerClass: pickRemediationWorkerClass({ repo: batch.repo }, { env }) });
     const receipt = readDispatchReceipt(parseDispatchJsonOutput((await execFileImpl(env.HQ_BIN || 'hq', args,
-      { env, timeout: dispatchTimeoutMs(), maxBuffer: 1024 * 1024 })).stdout));
+      { env, timeout: submissionTimeoutMs, maxBuffer: 1024 * 1024 })).stdout));
     if (!receipt.launchRequestId) throw Error(receipt.identityDiagnostic);
     if (receipt.launchRequestId === batch.launch_id) throw Error('batch-publish-reused-decision-launch');
     db.prepare('UPDATE finding_batches SET error=NULL WHERE batch_id=?').run(batch.batch_id);
@@ -524,8 +555,14 @@ export async function runFindingBatches({ db, rootDir, env = process.env, day = 
   readLaunches = readLaunchRequestByIdempotencyKeyAsync, logger = console, resolutionOnly = false,
   readLaunchSnapshot = readLaunchRequestSnapshotFromLedgerAsync,
   batchSize = findingBatchOptions(env).batchSize, concurrency = 1, now = Date.now(),
+  publishReceiptGraceMs = findingBatchOptions(env).publishReceiptGraceMs,
   timeoutMs = findingBatchOptions(env).timeoutMs, manifest = null, readConsensus = readRemediationConsensus }) {
   if (!Number.isSafeInteger(concurrency) || concurrency < 1) throw Error('invalid concurrency');
+  if (!Number.isSafeInteger(publishReceiptGraceMs) || publishReceiptGraceMs < 1) throw Error('invalid publishReceiptGraceMs');
+  // Preserve the caller's injected clock origin, but date each submission when
+  // it actually happens: earlier batches and evidence probes can take minutes.
+  const startedAt = Date.now();
+  const publicationNow = () => now + Math.max(0, Date.now() - startedAt);
   if (resolutionOnly && manifest !== null) validateFindingManifest(db, manifest);
   if (!resolutionOnly) claimFindingBatches(db, day, { batchSize, manifest, readConsensus, now, maxAgeMs: findingBatchOptions(env).maxAgeMs });
   const queue = db.prepare('SELECT * FROM finding_batches WHERE completed_at IS NULL AND released_at IS NULL ORDER BY rowid').all()
@@ -579,7 +616,7 @@ export async function runFindingBatches({ db, rootDir, env = process.env, day = 
         const applied = hasAppliedOutcome(result) && validateBatchOutcomes(db, batch, result).applied;
         if (applied && result.prNumber == null) {
           await publishFindingBatch({ db, batch, result, dir, outputPath, env, rootDir,
-            execFileImpl, fetchPublication, fetchPr, readLaunches, logger });
+            execFileImpl, fetchPublication, fetchPr, readLaunches, logger, now: publicationNow, publishReceiptGraceMs });
           return;
         }
         const pr = applied && Number.isSafeInteger(result.prNumber)

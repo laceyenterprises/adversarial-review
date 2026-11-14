@@ -1838,7 +1838,13 @@ remote tested-head or marked-PR evidence. No workspace field is required. Histor
 owner adjudication under the [bounded recovery procedure](docs/follow-up-runbook.md#findings-batch-publication-custody-findingsbatchcustody-01). Explicit
 failed pushes or failed preparation still refuse publication. Durable batch IDs,
 launch receipts, a per-batch lock and submission intent fence duplicate workers
-and publishers. Existing failed batches stay visible for same-launch repair.
+and publishers. With no publisher row and all keyed launches terminal, an intent
+past its recorded dispatch timeout plus a 10-minute grace permits one atomic,
+same-key publisher resubmission. Configure the positive grace in milliseconds with
+`ADVERSARIAL_FINDINGS_BATCH_PUBLISH_RECEIPT_GRACE_MS`; legacy intents use file mtime.
+Unreadable evidence and live launches hold custody; any publisher receipt fences
+resubmission. A second absence retains the existing stale release/requeue path.
+Existing failed publishers stay visible for same-launch repair.
 Simplicity advisories keep their final-review enrollment and validated outcome
 rules, sharing the cap and marked result PR with findings. Failed initial dispatch
 subprocesses retain the same batch/key for retry, even after the batch timeout,

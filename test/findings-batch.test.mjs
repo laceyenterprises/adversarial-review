@@ -7,7 +7,7 @@ import { syncBuiltinESMExports } from 'node:module';
 import { resetLoadAwareTimeoutCachesForTesting } from '../src/load-aware-timeout.mjs';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { openReviewStateDb, ensureReviewStateSchema } from '../src/review-state.mjs';
@@ -853,6 +853,189 @@ test('FINDINGSSHAPE-01 lost publisher receipts and terminal launches never dispa
   });
 });
 
+async function strandedPublicationFixture(t) {
+  t.mock.method(Date, 'now', () => fixtureNow);
+  const f = await publicationFixture(t);
+  const intentPath = join(f.rootDir, 'data', 'finding-batches', f.batch.batch_id, 'publish-intent.json');
+  const readIntent = () => JSON.parse(readFileSync(intentPath, 'utf8'));
+  const absentDispatch = async (bin, args, options) => {
+    if (args[1] === 'status') return f.options.execFileImpl(bin, args, options);
+    f.dispatches.push(args);
+    assert.equal(readIntent().dispatchTimeoutMs, options.timeout);
+    throw Error('synthetic submission did not enqueue');
+  };
+  await f.run({ execFileImpl: absentDispatch });
+  const intent = readIntent();
+  assert.equal(intent.submittedAt, new Date(fixtureNow).toISOString());
+  assert.equal(intent.resubmissionCount, 0);
+  return { ...f, intentPath, intent, readIntent, absentDispatch,
+    deadline: fixtureNow + intent.dispatchTimeoutMs + 600000 };
+}
+
+test('PUBLISHINTENTSTRAND-01 absent receipt resubmits once after the recorded deadline on the original branch/key/ticket', async t => {
+  const f = await strandedPublicationFixture(t);
+  await f.run({ now: f.deadline });
+  assert.equal(f.dispatches.length, 2, 'deadline boundary remains pending');
+  await f.run({ now: f.deadline + 1 });
+  assert.equal(f.dispatches.length, 3);
+  const updated = f.readIntent();
+  assert.equal(updated.resubmissionCount, 1);
+  assert.equal(updated.submittedAt, new Date(f.deadline + 1).toISOString());
+  assert.deepEqual(updated.resubmitOf, {
+    submittedAt: f.intent.submittedAt, dispatchTimeoutMs: f.intent.dispatchTimeoutMs,
+  });
+  for (const flag of ['--branch', '--idempotency-key', '--ticket']) {
+    assert.equal(f.dispatches[2][f.dispatches[2].indexOf(flag) + 1],
+      f.dispatches[1][f.dispatches[1].indexOf(flag) + 1]);
+  }
+  assert.equal(statSync(f.intentPath).mode & 0o777, 0o664 & ~process.umask());
+  assert.equal(f.db.prepare('SELECT error FROM finding_batches').get().error, null);
+  await f.run({ now: f.deadline + 2 });
+  assert.equal(f.dispatches.length, 3, 'a recovered live publisher fences further dispatch');
+});
+
+test('PUBLISHINTENTSTRAND-01 second absence spends no third submission and retains stale requeue accounting', async t => {
+  const f = await strandedPublicationFixture(t);
+  await f.run({ now: f.deadline + 1, execFileImpl: f.absentDispatch });
+  assert.equal(f.readIntent().resubmissionCount, 1, 'retry is durable even when submission throws');
+  const bytes = readFileSync(f.intentPath, 'utf8');
+  const later = f.deadline + 2 + f.readIntent().dispatchTimeoutMs + 600000;
+  await f.run({ now: later, execFileImpl: f.absentDispatch });
+  assert.equal(f.dispatches.length, 3);
+  assert.equal(f.db.prepare('SELECT error FROM finding_batches').get().error, 'batch-publish-receipt-pending');
+  await f.run({ now: Math.max(later, fixtureNow + 86400001), execFileImpl: f.absentDispatch });
+  assert.equal(f.dispatches.length, 3);
+  assert.equal(readFileSync(f.intentPath, 'utf8'), bytes);
+  assert.deepEqual(f.db.prepare('SELECT released_at IS NOT NULL AS released,release_reason FROM finding_batches').get(),
+    { released: 1, release_reason: 'batch-publish-receipt-pending' });
+  assert.deepEqual(f.db.prepare('SELECT batch_id,batch_attempts,outcome FROM finding_backlog').get(),
+    { batch_id: null, batch_attempts: 1, outcome: null });
+  assert.equal(f.db.prepare('SELECT count(*) AS n FROM finding_batch_releases').get().n, 1);
+});
+
+for (const status of ['running', 'succeeded', 'failed']) {
+  test(`PUBLISHINTENTSTRAND-01 a late ${status} publisher recovers the receipt without resubmission`, async t => {
+    const f = await strandedPublicationFixture(t);
+    f.launches.push({ ...f.launches[0], launch_request_id: 'synthetic-publisher', status });
+    await f.run({ now: f.deadline + 1 });
+    assert.equal(f.dispatches.length, 2);
+    assert.deepEqual(f.readIntent(), f.intent);
+    assert.equal(f.db.prepare('SELECT error FROM finding_batches').get().error,
+      status === 'running' ? null : `batch-publish-ended-without-pr: ${status}`);
+  });
+}
+
+for (const probe of [{ ok: false }, { ok: true, rows: [] }]) {
+  test(`PUBLISHINTENTSTRAND-01 unreadable or missing keyed custody holds intent (${JSON.stringify(probe)})`, async t => {
+    const f = await strandedPublicationFixture(t);
+    await f.run({ now: f.deadline + 1, readLaunches: async () => probe });
+    assert.equal(f.dispatches.length, 2);
+    assert.deepEqual(f.readIntent(), f.intent);
+    assert.equal(f.db.prepare('SELECT error FROM finding_batches').get().error, 'batch-publish-receipt-unavailable');
+  });
+}
+
+test('PUBLISHINTENTSTRAND-01 a thrown ledger probe remains receipt-unavailable', async t => {
+  const f = await strandedPublicationFixture(t);
+  await f.run({ now: f.deadline + 1, readLaunches: async () => { throw Error('synthetic unavailable'); } });
+  assert.equal(f.dispatches.length, 2);
+  assert.deepEqual(f.readIntent(), f.intent);
+  assert.equal(f.db.prepare('SELECT error FROM finding_batches').get().error, 'batch-publish-receipt-unavailable');
+});
+
+test('PUBLISHINTENTSTRAND-01 concurrent collectors spend the absent-receipt retry once', async t => {
+  const f = await strandedPublicationFixture(t);
+  let unblock, entered;
+  const ready = new Promise(resolve => { entered = resolve; });
+  const held = f.run({ now: f.deadline + 1, fetchPublication: async () => {
+    entered();
+    await new Promise(resolve => { unblock = resolve; });
+    return f.publication;
+  } });
+  await ready;
+  try {
+    await f.run({ now: f.deadline + 1 });
+    assert.equal(f.dispatches.length, 2);
+  } finally { unblock(); }
+  await held;
+  assert.equal(f.dispatches.length, 3);
+  assert.equal(f.readIntent().resubmissionCount, 1);
+});
+
+for (const patch of [
+  { submittedAt: 'invalid' }, { dispatchTimeoutMs: -1 }, { dispatchTimeoutMs: null },
+  { resubmissionCount: null }, { resubmissionCount: 2 }, { branch: 'other/branch' },
+]) {
+  test(`PUBLISHINTENTSTRAND-01 uncertain intent evidence holds (${JSON.stringify(patch)})`, async t => {
+    const f = await strandedPublicationFixture(t);
+    writeFileSync(f.intentPath, JSON.stringify({ ...f.intent, ...patch }));
+    await f.run({ now: f.deadline + 1 });
+    assert.equal(f.dispatches.length, 2);
+    assert.equal(f.db.prepare('SELECT error FROM finding_batches').get().error, 'batch-publish-receipt-pending');
+  });
+}
+
+for (const status of ['running', 'unknown-status']) {
+  test(`PUBLISHINTENTSTRAND-01 ${status} keyed decision custody prevents resubmission despite terminal CLI status`, async t => {
+    const f = await strandedPublicationFixture(t);
+    f.launches[0].status = status;
+    await f.run({ now: f.deadline + 1 });
+    assert.equal(f.dispatches.length, 2);
+    assert.deepEqual(f.readIntent(), f.intent);
+    assert.equal(f.db.prepare('SELECT released_at FROM finding_batches').get().released_at, null);
+  });
+}
+
+test('PUBLISHINTENTSTRAND-01 configurable grace keeps an absent receipt pending until it expires', async t => {
+  const f = await strandedPublicationFixture(t);
+  const { findingBatchOptions } = await import('../src/findings-batch.mjs');
+  assert.equal(findingBatchOptions({}).publishReceiptGraceMs, 600000);
+  const env = { ...f.options.env, ADVERSARIAL_FINDINGS_BATCH_PUBLISH_RECEIPT_GRACE_MS: '1200000' };
+  assert.equal(findingBatchOptions(env).publishReceiptGraceMs, 1200000);
+  assert.throws(() => findingBatchOptions({ ADVERSARIAL_FINDINGS_BATCH_PUBLISH_RECEIPT_GRACE_MS: '0' }));
+  await f.run({ env, now: f.deadline + 1 });
+  assert.equal(f.dispatches.length, 2);
+  assert.equal(f.db.prepare('SELECT error FROM finding_batches').get().error, 'batch-publish-receipt-pending');
+  await f.run({ env, now: f.deadline + 600001 });
+  assert.equal(f.dispatches.length, 3);
+});
+
+test('PUBLISHINTENTSTRAND-01 legacy intent uses mtime and current dispatch bound before one retry', async t => {
+  const f = await strandedPublicationFixture(t);
+  const legacy = { ...f.intent };
+  delete legacy.submittedAt;
+  delete legacy.dispatchTimeoutMs;
+  delete legacy.resubmissionCount;
+  writeFileSync(f.intentPath, JSON.stringify(legacy));
+  utimesSync(f.intentPath, new Date(fixtureNow), new Date(fixtureNow));
+  await f.run({ now: fixtureNow + 1 });
+  assert.equal(f.dispatches.length, 2, 'legacy intent inside grace is retained');
+  await f.run({ now: f.deadline + 1 });
+  assert.equal(f.dispatches.length, 3);
+  assert.equal(f.readIntent().resubmitOf.submittedAt, new Date(fixtureNow).toISOString());
+});
+
+test('PUBLISHINTENTSTRAND-01 the persisted timeout defines the old deadline independently of current load', async t => {
+  const f = await strandedPublicationFixture(t);
+  writeFileSync(f.intentPath, JSON.stringify({ ...f.intent, dispatchTimeoutMs: 1000 }));
+  await f.run({ now: fixtureNow + 601001 });
+  assert.equal(f.dispatches.length, 3);
+  assert.equal(f.readIntent().resubmitOf.dispatchTimeoutMs, 1000);
+});
+
+test('PUBLISHINTENTSTRAND-01 submission time includes time spent awaiting publication evidence', async t => {
+  const f = await publicationFixture(t);
+  let clock = fixtureNow;
+  t.mock.method(Date, 'now', () => clock);
+  await f.run({ fetchPublication: async () => {
+    clock += 300000;
+    return f.publication;
+  } });
+  const intent = JSON.parse(readFileSync(join(f.rootDir, 'data', 'finding-batches',
+    f.batch.batch_id, 'publish-intent.json'), 'utf8'));
+  assert.equal(intent.submittedAt, new Date(fixtureNow + 300000).toISOString());
+});
+
 test('FINDINGSSHAPE-01 publication holds on invalid manifests, live preparation and uncertain evidence', async t => {
   const cases = [
     ['foreign manifest', f => { f.result.batchId = 'foreign'; }],
@@ -973,7 +1156,8 @@ test('FINDINGSSHAPE-01 unreadable command or ledger evidence preserves unresolve
     const overrides = boundary === 'status' ? { execFileImpl: fail }
       : boundary === 'branch/PR' ? { fetchPublication: fail } : { readLaunches: fail };
     await f.run(overrides);
-    assert.equal(f.db.prepare('SELECT error FROM finding_batches').get().error, 'fixture evidence unavailable');
+    assert.equal(f.db.prepare('SELECT error FROM finding_batches').get().error,
+      boundary === 'ledger' ? 'batch-publish-receipt-unavailable' : 'fixture evidence unavailable');
     assert.equal(f.db.prepare('SELECT outcome FROM finding_backlog').get().outcome, null);
     assert.equal(f.dispatches.length, 1);
     await f.run();

@@ -2265,16 +2265,23 @@ offline fixture is not evidence that historical findings are resolved.
 5. After the fix is deployed normally, let the existing hourly collector process
    eligible artifacts. Do not invoke the whole-queue `resolutionOnly` API as a
    single-batch command: it scans every unresolved batch. An existing publisher
-   receipt fences another publisher even if failed; ambiguous submission intent
-   remains fenced. There is no supported automatic intent reset or failed-launch
-   replacement here. For missing evidence, failed publisher or ambiguous intent,
+   receipt fences another publisher even if failed. PUBLISHINTENTSTRAND-01 permits
+   one collector-owned resubmission only when no publisher row exists, all keyed
+   rows are terminal, and the intent's submission timeout plus grace has elapsed.
+   The default grace is 10 minutes, configured by the positive millisecond env
+   `ADVERSARIAL_FINDINGS_BATCH_PUBLISH_RECEIPT_GRACE_MS`. Legacy intents use mtime
+   and the current dispatch timeout. The atomic replacement records the previous
+   submission and spends the sole retry before dispatch. Do not reset the intent:
+   a second absence follows the existing stale release. Live or unreadable keyed
+   custody stays fenced. For missing evidence, failed publisher or other ambiguous intent,
    the exact next action is for the dispatch/review runtime owner to reconcile
    that existing LRQ/intent from authoritative acceptance and PR evidence and
    propose a separately reviewed, batch-scoped repair. Retain custody meanwhile
    unless the collector independently establishes the bounded release conditions
    in the [batch data model](data-model/review-findings.md#releasing-batches-whose-launch-ended-findingsrequeue-01).
    Errored never-launched batches age from their claim day; failed dispatches
-   stop after three submissions. After timeout an empty keyed receipt additionally
+   stop after three returned invalid receipts; transport failures retain the key
+   without spending that cap. After timeout an empty keyed receipt additionally
    requires terminal/absent evidence for the recorded launch and retries.
    Unreadable or unproven absence holds and reports `needs-operator`; inspect
    the public read authorization/availability without clearing receipt fences.

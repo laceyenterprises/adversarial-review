@@ -3290,10 +3290,6 @@ async function consumeNextFollowUpJobWithinRepositoryCycle({
     const brokerDeferral = await deferForCredentialBroker({ rootDir, claimed, env: jobEnv, now,
       delayedPendingPaths, probeImpl: credentialBrokerReadyImpl });
     if (brokerDeferral) return brokerDeferral;
-    if (claimed.job.credentialBrokerDeferral) {
-      delete claimed.job.credentialBrokerDeferral;
-      writeFollowUpJob(claimed.jobPath, claimed.job);
-    }
     const authorship = await prepareRemediationBuilder({ rootDir, job: claimed.job,
       jobPath: claimed.jobPath, execFileImpl, now, log, delayedPendingPaths,
       readEvidenceImpl: readBuilderEvidenceImpl });
@@ -3623,6 +3619,10 @@ async function consumeNextFollowUpJobWithinRepositoryCycle({
     if (brokerAtSpawn) return brokerAtSpawn;
     const ownerAtSpawn = await deferClaimedJobForLivePrOwner({ rootDir, claimed, lookupImpl: livePrOwnerLookupImpl, now, delayedPendingPaths, log }); // REMEDIATIONOWNER-01: re-ask HQ at spawn
     if (ownerAtSpawn) return ownerAtSpawn;
+    if (claimed.job.credentialBrokerDeferral) {
+      delete claimed.job.credentialBrokerDeferral;
+      writeFollowUpJob(claimed.jobPath, claimed.job);
+    }
 
     // ARC-08: the health-routed AgentRuntime handles OS or local dispatch and
     // returns the worker descriptor. The subject adapter owns git workspace prep.

@@ -76,10 +76,13 @@ export function credentialPublicationRefund({ failure, worker, job, outcome, rep
     || !(Date.parse(failure.refusedAt) >= Date.parse(worker.spawnedAt))
     || reply?.outcome !== 'blocked' || reply.blockers?.length
     || reply.pushback?.length
+    || !reply.operationalBlockers?.some(entry => entry.code === CREDENTIAL_REFRESH_UNAVAILABLE)
     || reply.operationalBlockers?.some(entry => entry.code !== CREDENTIAL_REFRESH_UNAVAILABLE)) return null;
   const failures = [outcome?.failureReason, outcome?.failure_reason, outcome?.failureClass, outcome?.failure_class,
     outcome?.failureCode, outcome?.failure_code].filter(Boolean);
-  if (failures.some(reason => reason !== CREDENTIAL_REFRESH_UNAVAILABLE)) return null;
+  // Supervisors describe the failed process, not the publisher's root cause.
+  // Only these generic wrappers may accompany the proven credential outage.
+  if (failures.some(reason => ![CREDENTIAL_REFRESH_UNAVAILABLE, 'task_failed', 'worker_error'].includes(reason))) return null;
   if (outcome?.signal || [137, 143].includes(outcome?.exitCode ?? outcome?.exit_code)
     || ['cancelled', 'canceled', 'superseded'].includes(outcome?.status)) return null;
   return 'credential-refresh-unavailable';

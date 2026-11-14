@@ -965,10 +965,13 @@ normal cross-model convergence loop; do not admin-merge this change.
 Ended unpublished or failed remediation rounds re-enter the existing follow-up
 queue while their ordinary round budget remains. Broker-backed remediation waits
 for the publisher broker's bounded `/readyz` probe before preparation and dispatch;
-`credential-broker-unready` keeps the pending job and round with backoff. A proven
+`credential-broker-unready` keeps the pending job and round with backoff, retaining
+attempt history through preparation until spawn admission. A proven
 credential-only publication outage returns the round to pending without a charge,
 records the saved commit as `infrastructure-failed`, and resumes preserved local
-work after readiness recovers. See the
+work after readiness recovers. The reply must include a credential-outage
+operational blocker and no other blocker; generic supervisor `task_failed` and
+`worker_error` reasons alone do not disqualify that proven outage. See the
 [accounting contract](docs/data-model/follow-up-jobs.md#credential-broker-deferral-and-publication-refund).
 Watcher recovery requeues locally without network publication or worker
 credentials, preserving retained work, spent rounds and backoff without

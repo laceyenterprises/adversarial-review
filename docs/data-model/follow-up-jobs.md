@@ -10,7 +10,8 @@ preserves an explicit operator override. The optional `credentialBrokerDeferral`
 object contains `reason: credential-broker-unready`, `attempts`, `observedAt`
 and `retryAfter`. Attempts saturate at six; delays start at ten seconds and
 double to a five-minute maximum. `remediationPlan.retryAfter` enforces the hold.
-The deferral is cleared after a successful probe. Plain Git installations
+The deferral survives preparation and is cleared only after spawn admission,
+so an unready spawn-time probe advances the existing attempt count. Plain Git installations
 without broker configuration retain their existing admission behavior.
 
 The guarded publisher classifies explicit broker credential-refresh failures as
@@ -25,7 +26,10 @@ return to pending without a round or transient-retry charge. Settlement requires
 equal known authoritative start/end heads, an artifact timestamp at or after
 spawn, a different saved commit, no lifecycle stop, no unresolved findings or
 pushback, no independent recorded failure or cancellation, and only operational
-blockers carrying that exact code. Missing or ambiguous evidence stays charged.
+blockers carrying that exact code, with at least one such blocker required.
+Generic supervisor reasons `task_failed` and `worker_error` may accompany the
+proven outage; any other recorded failure reason still prevents this refund.
+Missing or ambiguous evidence stays charged.
 The retry history stores `retryMetadata.code: credential-refresh-unavailable`,
 `state: infrastructure-failed`, `reason`, both heads, `localCommit`,
 `workspaceDir` and `resumeWorkspace`, plus the existing worker descriptor.
@@ -385,7 +389,7 @@ replay. Factual-dispute admission is the explicit closure exception described be
 
 **Owner:** follow-up remediation queue
 **Store:** `data/follow-up-jobs/{pending,in-progress,completed,failed,stopped}/*.json`, `data/follow-up-jobs/single-review-voids/*.json`, `data/follow-up-jobs/missing-label-events/*.json`, `data/follow-up-jobs/live-pr-owner-scan-cursor.json`
-**Source of truth:** `src/remediation-builder-authorship.mjs`, `src/follow-up-jobs.mjs`, `src/follow-up-branch.mjs`, `src/remediation-unpublished.mjs`, `src/review-mode-selection.mjs`, `src/follow-up-remediation.mjs`, `src/follow-up-retrigger-review-label.mjs`, `src/remediation-quota-hold.mjs`, `src/remediation-claimed-requeue.mjs`, `src/remediation-worker-class-fallback.mjs`, `src/worker-token-pool.mjs`, `src/remediation-round-accounting.mjs`, `src/remediation-infrastructure-refund.mjs`, `src/github-auth-recovery.mjs`, `src/remediation-published-head.mjs`, `src/remediation-closeout.mjs`, `src/remediation-job-ownership.mjs`, `src/remediation-live-pr-owner.mjs`
+**Source of truth:** `src/remediation-builder-authorship.mjs`, `src/follow-up-jobs.mjs`, `src/follow-up-branch.mjs`, `src/remediation-unpublished.mjs`, `src/review-mode-selection.mjs`, `src/follow-up-remediation.mjs`, `src/follow-up-retrigger-review-label.mjs`, `src/remediation-quota-hold.mjs`, `src/remediation-claimed-requeue.mjs`, `src/remediation-worker-class-fallback.mjs`, `src/worker-token-pool.mjs`, `src/remediation-round-accounting.mjs`, `src/remediation-infrastructure-refund.mjs`, `src/remediation-credential-broker.mjs`, `src/github-auth-recovery.mjs`, `src/remediation-published-head.mjs`, `src/remediation-closeout.mjs`, `src/remediation-job-ownership.mjs`, `src/remediation-live-pr-owner.mjs`
 **Runtime surface:** `src/comment-only-final-round.mjs`, `src/comment-only-final-round-completion.mjs`, `src/ama-closure-orchestration.mjs`, `src/adapters/comms/github-pr-comments/comment-delivery.mjs`, `src/reviewer-ci-admission.mjs`
 
 ## Simplicity advisory (REVIEWSIMPLE-01)

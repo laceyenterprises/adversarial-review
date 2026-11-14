@@ -153,13 +153,44 @@ test('stale artifacts, other blockers, cancellation and independent failures sta
   for (const override of [{ failure: { ...args.failure, refusedAt: '2025-01-01' } },
     { failure: { ...args.failure, previousHead: localCommit } }, { reply: null },
     { reply: { ...args.reply, blockers: ['unresolved finding'] } },
+    { reply: { ...args.reply, operationalBlockers: undefined } },
+    { reply: { ...args.reply, operationalBlockers: [] } },
     { reply: { ...args.reply, operationalBlockers: [{ code: 'ci-failed' }] } },
+    { reply: { ...args.reply, operationalBlockers: [{ code: CREDENTIAL_REFRESH_UNAVAILABLE }, { code: 'ci-failed' }] } },
     { reply: { ...args.reply, outcome: 'completed' } },
-    { outcome: { failureReason: 'lease-mismatch' } }, { outcome: { signal: 'SIGTERM' } },
+    { outcome: { failureReason: 'lease-mismatch' } },
+    { outcome: { failureReason: 'task_failed', failureCode: 'stale-info' } },
+    { outcome: { failureClass: 'worker_error', failure_reason: 'ci-failed' } },
+    { outcome: { failureReason: 'unknown' } }, { outcome: { signal: 'SIGTERM' } },
     { outcome: { status: 'cancelled' } }]) {
     assert.equal(credentialPublicationRefund({ ...args, ...override }), null);
   }
 });
+
+for (const mode of ['hq', 'local']) {
+  test(`generic ${mode} supervisor failures permit a proven credential-only refund`, async t => {
+    const { rootDir } = fixture(t);
+    const claimed = claimNextFollowUpJob({ rootDir, claimedAt: at });
+    const outcome = mode === 'hq'
+      ? { status: 'failed', failureReason: 'task_failed', failure_class: 'worker_error', exit_code: 1 }
+      : { failureClass: 'worker_error', failure_reason: 'task_failed', exitCode: 1 };
+    const spawned = markFollowUpJobSpawned({ rootDir, jobPath: claimed.jobPath, spawnedAt: at,
+      worker: { processId: 1234, model: 'codex', workspaceDir: rootDir,
+        ...(mode === 'local' ? { recordedOutcome: outcome } : {}) } });
+    const result = await settleInfrastructureRemediationRound({ rootDir, ...spawned,
+      worker: spawned.job.remediationWorker,
+      liveness: { state: 'exited', ...(mode === 'hq' ? { dispatchStatus: outcome } : {}) },
+      lifecycle: { source: 'live', headSha: head }, completedAt: later,
+      publicationFailure: { code: CREDENTIAL_REFRESH_UNAVAILABLE, previousHead: head, localCommit, refusedAt: later },
+      publicationReply: { outcome: 'blocked', blockers: [], pushback: [],
+        operationalBlockers: [{ code: CREDENTIAL_REFRESH_UNAVAILABLE }] },
+      now: () => later, log, postOutcomeComment: async () => {} });
+    assert.equal(result.action, 'requeued');
+    assert.equal(result.reason, 'credential-refresh-unavailable');
+    assert.equal(result.job.remediationPlan.currentRound, 0);
+    assert.equal(result.job.remediationPlan.retryHistory.at(-1).retryMetadata.localCommit, localCommit);
+  });
+}
 
 test('repeated proven broker outages keep the round and separate infrastructure allowance', async t => {
   const { rootDir } = fixture(t);

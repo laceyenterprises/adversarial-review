@@ -6299,7 +6299,11 @@ for (const readyAtSpawn of [true, false]) {
 test(`credential broker readiness is rechecked at spawn (ready: ${readyAtSpawn})`, async () => {
   const rootDir = mkdtempSync(path.join(tmpdir(), 'broker-ready-spawn-'));
   try {
-    createPendingRemediationJob(rootDir, { repo: 'fixture/repo', prNumber: 1, linearTicketId: null });
+    const created = createPendingRemediationJob(rootDir, { repo: 'fixture/repo', prNumber: 1, linearTicketId: null });
+    writeFollowUpJob(created.jobPath, { ...created.job, credentialBrokerDeferral: {
+      reason: 'credential-broker-unready', attempts: 3,
+      observedAt: '2026-04-21T10:00:00.000Z', retryAfter: '2026-04-21T10:00:40.000Z',
+    } });
     const calls = [];
     let probes = 0;
     const result = await withOAuthTestEnv(rootDir, () => consumeNextFollowUpJob(drainerTestOptions(rootDir, calls, {
@@ -6309,8 +6313,35 @@ test(`credential broker readiness is rechecked at spawn (ready: ${readyAtSpawn})
     assert.equal(calls.length, readyAtSpawn ? 1 : 0);
     assert.equal(probes, 2);
     assert.equal(result.job.remediationPlan.currentRound, readyAtSpawn ? 1 : 0);
-    if (!readyAtSpawn) assert.equal(result.reason, 'credential-broker-unready');
+    if (!readyAtSpawn) {
+      assert.equal(result.reason, 'credential-broker-unready');
+      assert.equal(result.job.credentialBrokerDeferral.attempts, 4);
+      assert.equal(result.job.remediationPlan.retryAfter, '2026-04-21T10:31:20.000Z');
+    } else {
+      assert.equal(result.job.credentialBrokerDeferral, undefined);
+    }
+    assert.deepEqual(readFollowUpJob(result.jobPath).credentialBrokerDeferral, result.job.credentialBrokerDeferral);
   } finally { rmSync(rootDir, { recursive: true, force: true }); }
+});
+}
+
+for (const consume of [consumeNextFollowUpJob, consumeFollowUpJobsUntilCapacity]) {
+test(`credential broker OAuth fixture stays offline by default (${consume.name})`, async t => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'broker-offline-fixture-'));
+  const previous = process.env.OAUTH_BROKER_URL;
+  t.after(() => {
+    if (previous === undefined) delete process.env.OAUTH_BROKER_URL;
+    else process.env.OAUTH_BROKER_URL = previous;
+    rmSync(rootDir, { recursive: true, force: true });
+  });
+  process.env.OAUTH_BROKER_URL = 'http://broker.invalid';
+  let fetches = 0;
+  t.mock.method(globalThis, 'fetch', async () => { fetches++; throw new Error('fixture must stay offline'); });
+  createPendingRemediationJob(rootDir, { repo: 'fixture/repo', prNumber: 1, linearTicketId: null });
+  const calls = [];
+  await withOAuthTestEnv(rootDir, () => consume(drainerTestOptions(rootDir, calls)));
+  assert.equal(fetches, 0);
+  assert.equal(calls.length, 1);
 });
 }
 
@@ -13423,9 +13454,15 @@ function createRemediationRuntime(options) {
 }
 
 function consumeNextFollowUpJob(options) {
-  return consumeNextFollowUpJobActual({ execFileSyncImpl: serviceFixtureExec, ...options });
+  return consumeNextFollowUpJobActual({
+    credentialBrokerReadyImpl: async () => ({ ready: true }),
+    execFileSyncImpl: serviceFixtureExec, ...options,
+  });
 }
 
 function consumeFollowUpJobsUntilCapacity(options) {
-  return consumeFollowUpJobsUntilCapacityActual({ execFileSyncImpl: serviceFixtureExec, ...options });
+  return consumeFollowUpJobsUntilCapacityActual({
+    credentialBrokerReadyImpl: async () => ({ ready: true }),
+    execFileSyncImpl: serviceFixtureExec, ...options,
+  });
 }

@@ -30,6 +30,17 @@ const execFileAsync = promisify(execFile);
 // host load without the helper's shorter default ceiling.
 const dispatchTimeoutMs = () => loadAwareTimeoutMs(900_000, { maxMs: Infinity });
 
+function publicationProbeError(error, operation, timeoutMs, fallback = error.message) {
+  const timedOut = error.killed || error.timedOut || ['ETIMEDOUT', 'ERR_SCRIPT_EXECUTION_TIMEOUT'].includes(error.code);
+  const detail = timedOut ? `${operation} timed out after ${timeoutMs} ms`
+    : error.signal ? `${operation} terminated` : null;
+  return Object.assign(Error(detail || fallback, { cause: error }), {
+    stderr: error.stderr,
+    // Keep termination evidence ahead of stderr/command echoes in the row and log.
+    probeFailureDetail: detail ? `${detail}${error.signal ? ` (signal ${error.signal})` : ''}` : null,
+  });
+}
+
 async function fetchFindingBatchPr(repo, prNumber, { execFileImpl, env, logger }) {
   const { stdout } = await execGhWithRetry({ execFileImpl, env, log: logger,
     args: ['pr', 'view', String(prNumber), '--repo', repo, '--json', 'state,mergedAt,body,headRefOid'],
@@ -370,9 +381,14 @@ async function publishFindingBatch({ db, batch, result, dir, outputPath, env, ro
   try {
     try { fsExt.flockSync(fd, 'exnb'); }
     catch (error) { if (['EAGAIN', 'EWOULDBLOCK'].includes(error.code)) return; throw error; }
-    const { stdout } = await execFileImpl(env.HQ_BIN || 'hq',
-      ['dispatch', 'status', batch.launch_id, '--json', '--root', resolveHqRoot(env)],
-      { env, timeout: 15_000, maxBuffer: 1024 * 1024 });
+    // Size once using the same configured load policy as publisher dispatch.
+    const probeTimeoutMs = dispatchTimeoutMs();
+    let stdout;
+    try {
+      ({ stdout } = await execFileImpl(env.HQ_BIN || 'hq',
+        ['dispatch', 'status', batch.launch_id, '--json', '--root', resolveHqRoot(env)],
+        { env, timeout: probeTimeoutMs, maxBuffer: 1024 * 1024 }));
+    } catch (error) { throw publicationProbeError(error, 'hq dispatch status', probeTimeoutMs); }
     const status = parseHqDispatchStatus(stdout, { normalize: false });
     if (readDispatchReceipt(status).launchRequestId !== batch.launch_id) throw Error('batch-launch-evidence-mismatch');
     const workspaceRepo = typeof status.repo === 'string' && isAbsolute(status.repo);
@@ -393,8 +409,13 @@ async function publishFindingBatch({ db, batch, result, dir, outputPath, env, ro
       let probe;
       try {
         probe = await readLaunches({ env, rootDir, hqRoot: resolveHqRoot(env),
-          idempotencyKey: key, timeoutMs: 15_000 });
-      } catch { throw Error('batch-publish-receipt-unavailable'); }
+          idempotencyKey: key, timeoutMs: probeTimeoutMs });
+      } catch (error) {
+        throw publicationProbeError(error, 'keyed launch probe', probeTimeoutMs, 'batch-publish-receipt-unavailable');
+      }
+      if (!probe?.ok && (probe?.timedOut || probe?.killed || probe?.signal)) {
+        throw publicationProbeError(probe, 'keyed launch probe', probeTimeoutMs, 'batch-publish-receipt-unavailable');
+      }
       if (!probe?.ok || !Array.isArray(probe.rows) || !probe.rows.length) throw Error('batch-publish-receipt-unavailable');
       if (probe.rows.some(row => row.idempotency_key !== key || row.ticket_ref !== `FINDINGS-${batch.batch_id}`
         || ![batch.repo, batch.repo.split('/').at(-1)].includes(row.target_repo)
@@ -730,7 +751,7 @@ export async function runFindingBatches({ db, rootDir, env = process.env, day = 
       // Prefer the actual dispatcher refusal over execFile's command echo.
       // Redact before truncation so a long credential is never cut into a leak.
       const stderr = String(error.stderr || '');
-      const cause = stderr.split(/\r?\n/).find(line => line.includes('[hq] error:'))
+      const cause = error.probeFailureDetail || stderr.split(/\r?\n/).find(line => line.includes('[hq] error:'))
         || stderr.trim() || error.message;
       const detail = redactPublicSafeText(String(cause), 300).replace(/\s+/g, ' ').trim();
       const reason = dispatching

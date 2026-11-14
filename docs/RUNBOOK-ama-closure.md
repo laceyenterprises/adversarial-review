@@ -8168,6 +8168,13 @@ normal-priority remediation worker per repository/area, using existing classes
 and the existing `hq dispatch` transport. No cron, CI gate or config key is added. Hourly settlement-only passes collect worker outcomes and
 observe batch PR merges without claiming new batches or dispatching workers.
 Dropped findings retain no result PR reference.
+Publication's `hq dispatch status` and keyed launch probes use the same
+load-aware timeout policy as publisher dispatch: a 900,000 ms nominal bound
+scaled once through the existing `adversarial.reviewer.load_aware` settings.
+Timeout and signal failures name the probe, effective timeout when applicable,
+and signal in the bounded batch error and watcher log. These read failures retry
+on later collection passes without spending preparation attempts; the existing
+stale-release and launch-custody rules still apply.
 Collection reads `state,mergedAt,body,headRefOid` with `gh pr view` through the
 retrying GitHub transport. Applied findings require a merged batch PR with its
 exact batch ID on a marker line; whitespace, bold and HTML-comment wrappers

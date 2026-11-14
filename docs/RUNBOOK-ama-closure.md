@@ -123,6 +123,19 @@ ordinary pending-liveness grace; the PR closer-intent lock serializes enqueue
 with closer admission, including rescue. Live closer or remediation custody
 prevents a second owner.
 
+Final fix-all requires HQ dispatch even in native orchestration or local
+health-router failover. The launcher checks the HQ owner and submits the PR,
+branch and a stable work-order idempotency key through `hq dispatch`. A retry
+after enqueue reuses that key; the dispatch receipt is persisted without
+waiting for workspace provisioning. HQ owns creation of the workspace manifest,
+launch identity and signer. Ordinary remediation retains local failover.
+At reconciliation, the final-fix-all workspace must be the canonical HQ worker
+slot with a manifest matching the recorded launch, worker class, owner, ticket,
+repository, branch and branch-push completion shape. Missing or mismatched
+custody refuses reconciliation; never copy or reconstruct a manifest to recover
+an older local final-fix-all job. Existing owners require their normal recovery
+path, rather than a competing launch.
+
 A receipt deduplicates the source head even after terminal settlement or
 archival. Its published head must receive a fresh full review; this round
 never uses the suppressed final-push shortcut. If that review still has

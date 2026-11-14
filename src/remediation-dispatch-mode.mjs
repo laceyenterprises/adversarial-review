@@ -136,6 +136,9 @@ function resolveRemediationDispatchPathForJob(job, env = process.env) {
 // selection falls back to the config-derived path, preserving pre-router
 // dispatch-path (and thus round/budget) parity with v1.
 function resolveRemediationRuntimeMode(job, { healthRouter = null, env = process.env } = {}) {
+  // This lane needs a real HQ launch, provisioned workspace and signer.
+  // A reply storage key in a local checkout is never a launch identity.
+  if (job?.closureHandoff?.reason === 'final-fix-all') return 'os';
   const sticky = stickyRemediationDispatchPath(job);
   if (sticky) return sticky === 'hq' ? 'os' : 'local';
   if (healthRouter && typeof healthRouter.getMode === 'function') {

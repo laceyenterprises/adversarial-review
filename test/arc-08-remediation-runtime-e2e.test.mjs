@@ -13,6 +13,7 @@ installDispatchFileProducerFixture();
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
@@ -128,7 +129,9 @@ test('router local mode routes consume through the local self-spawn runtime', as
 
 // ── os runtime e2e (router forces os; hq dispatch stubbed) ─────────────────
 
-test('router os mode routes consume through the os hq-dispatch runtime', async () => {
+for (const finalFixAll of [false, true]) test(finalFixAll
+  ? 'final-fix-all consume bypasses local failover and persists HQ custody'
+  : 'router os mode routes consume through the os hq-dispatch runtime', async () => {
   const rootDir = mkdtempSync(path.join(tmpdir(), 'arc08-os-'));
   const hqRoot = path.join(rootDir, 'agent-os-hq');
   mkdirSync(path.join(hqRoot, '.hq'), { recursive: true });
@@ -170,6 +173,8 @@ test('router os mode routes consume through the os hq-dispatch runtime', async (
       reviewBody: '## Summary\nFix the dispatch path.\n\n## Verdict\nRequest changes',
       reviewPostedAt: '2026-07-01T08:00:00.000Z',
       critical: true,
+      ...(finalFixAll ? { closureHandoff: { reason: 'final-fix-all',
+        headSha: 'a'.repeat(40), review: 'full' } } : {}),
     });
 
     const result = await consumeNextFollowUpJob({
@@ -178,7 +183,7 @@ test('router os mode routes consume through the os hq-dispatch runtime', async (
       rootDir,
       promptTemplate: 'You are a remediation worker.',
       now: () => '2026-07-01T10:00:00.000Z',
-      healthRouter: ROUTER_OS,
+      healthRouter: finalFixAll ? ROUTER_LOCAL : ROUTER_OS,
       resolvePRLifecycleImpl: async () => null,
       execFileImpl: async (command, args) => {
         if (command === 'gh' && args[0] === 'api' && /\/pulls\//.test(args[1])) {
@@ -191,6 +196,7 @@ test('router os mode routes consume through the os hq-dispatch runtime', async (
           };
         }
         if ((command === 'hq' || command === fixtureHq) && args[0] === 'dispatch' && args[1] === 'status') {
+          assert.equal(finalFixAll, false, 'persist a fix-all receipt before workspace provision');
           return {
             stdout: JSON.stringify({
               status: 'queued',
@@ -200,10 +206,16 @@ test('router os mode routes consume through the os hq-dispatch runtime', async (
           };
         }
         if ((command === 'hq' || command === fixtureHq) && args[0] === 'dispatch') {
+          if (finalFixAll) {
+            assert.equal(args[args.indexOf('--idempotency-key') + 1],
+              `ffa-${createHash('sha256').update(created.jobId).digest('hex')}`);
+            assert.equal(args[args.indexOf('--branch') + 1], 'fixture/remediation');
+          }
           return {
             stdout: JSON.stringify({
               launchRequestId: 'lrq_arc08',
               dispatchId: 'dispatch_arc08',
+              workerClass: 'codex',
             }),
             stderr: '',
           };
@@ -222,6 +234,11 @@ test('router os mode routes consume through the os hq-dispatch runtime', async (
     assert.equal(worker.dispatchId, 'dispatch_arc08');
     assert.equal(worker.requestId, created.jobId);
     assert.equal(result.job.remediationPlan.dispatchPath, 'hq');
+    if (finalFixAll) {
+      assert.equal(worker.requiresProducedAttestation, true);
+      assert.equal(worker.hqOwnerUser, process.env.USER || process.env.LOGNAME);
+      assert.equal(worker.workspaceDir, null);
+    }
   } finally {
     restoreEnv(previous);
   }

@@ -23,6 +23,7 @@ import { deferForCredentialBroker, credentialBrokerReady } from './remediation-c
 import { recordedInfrastructureReason, localWorkerErrorOutcome } from './remediation-infrastructure-refund.mjs';
 import { preserveUnsafeWorkspaceMetadata } from './workspace-identity.mjs';
 import { execFile } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { existsSync, lstatSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { userInfo } from 'node:os';
 import { dirname, isAbsolute, join, relative, resolve } from 'node:path';
@@ -318,15 +319,15 @@ function requireHqDispatchEnvValue(env, key, message) {
   return value;
 }
 
-function readHqConfigOwnerUser(hqRoot) {
-  const ownerUser = readHostIdentitySync({hqRoot}).ownerUser;
+function readHqConfigOwnerUser(hqRoot, env = process.env) {
+  const ownerUser = readHostIdentitySync({hqRoot, env}).ownerUser;
   if (!ownerUser) throw new Error('host identity unavailable');
   return ownerUser;
 }
 
 function assertHqDispatchOwnerMatches(env = process.env) {
   const hqRoot = resolveHqRoot(env, { requireExists: true });
-  const ownerUser = readHqConfigOwnerUser(hqRoot);
+  const ownerUser = readHqConfigOwnerUser(hqRoot, env);
   const actualUser = currentUsername(env);
   if (ownerUser !== actualUser) {
     throw new Error(
@@ -404,9 +405,16 @@ function createRemediationRuntime({
 } = {}) {
   async function run(request = {}) {
     const mode = request.mode;
+    const requiresProducedAttestation = request.mesJob?.closureHandoff?.reason === 'final-fix-all';
+    if (requiresProducedAttestation && mode !== 'os') {
+      throw new Error('final-fix-all requires HQ launch custody; local spawn refused');
+    }
     const workerClass = normalizeRemediationWorkerClass(request.role?.workerClass) || request.role?.workerClass;
     if (mode === 'os') {
       const worker = await dispatchRemediationViaHq({
+        requiresProducedAttestation,
+        priorLaunchRequestId: [...(request.mesJob?.remediationPlan?.retryHistory || [])]
+          .reverse().find(retry => retry.worker?.launchRequestId)?.worker.launchRequestId || null,
         hqRoot: resolveHqRoot(env, { requireExists: true }),
         workerClass,
         repo: request.repo,
@@ -557,10 +565,17 @@ async function dispatchRemediationViaHq({
   modelResolution = null,
   requiresWorkflowPush = false,
   allowConflictedBase = false,
+  requiresProducedAttestation = false,
+  priorLaunchRequestId = null,
   execFileImpl = execFileAsync,
   env = process.env,
   now = () => new Date().toISOString(),
 } = {}) {
+  if (requiresProducedAttestation && (!jobId || !branch)) {
+    throw new Error('final-fix-all HQ dispatch requires jobId and branch');
+  }
+  const hqOwnerUser = requiresProducedAttestation
+    ? assertHqDispatchOwnerMatches({ ...env, HQ_ROOT: hqRoot }) : null;
   const parentSession = requireHqDispatchEnvValue(
     env,
     'HQ_PARENT_SESSION',
@@ -579,15 +594,25 @@ async function dispatchRemediationViaHq({
   // explicitly pinned non-blocking Codex rounds so the override takes effect.
   // It also forwards neither --pr/--branch nor --allow-conflicted-base, so a
   // CONFLICTING PR's round takes the direct transport too (REMCONFLICT-01).
-  const useAppContract = appMode === 'agent-os' && !modelResolution && !allowConflictedBase;
+  const useAppContract = appMode === 'agent-os' && !modelResolution && !allowConflictedBase
+    && !requiresProducedAttestation;
   const hqBin = resolveHqBin(env);
   const dispatchEnv = { ...env };
+  dispatchEnv.HQ_ROOT = hqRoot;
   const workflowPushBrokerEvidence = requiresWorkflowPush
     ? applyMergeAgentBrokerEnv(dispatchEnv, env, { workerClass, requiresWorkflowPush })
     : null;
   const legacyHqArgs = buildLegacyHqRemediationDispatchArgs({
     ticketRef, workerClass, repo, prNumber, branch, promptPath, parentSession, project, hqRoot, allowConflictedBase,
   });
+  // The explicit key survives prompt regeneration and a daemon crash after
+  // enqueue but before markFollowUpJobSpawned persists the returned LRQ.
+  if (requiresProducedAttestation) {
+    // Only a durably settled worker retry advances the attempt. Pre-spawn
+    // reclaims and prompt rewrites keep the original key after a launcher crash.
+    const attempt = priorLaunchRequestId ? `${requestId}\0${priorLaunchRequestId}` : requestId;
+    legacyHqArgs.push('--idempotency-key', `ffa-${createHash('sha256').update(attempt).digest('hex')}`);
+  }
   if (modelResolution?.resolvedModel) legacyHqArgs.push('--model', modelResolution.resolvedModel);
   const reasoningLevel = modelResolution?.resolvedReasoningLevel;
   if (typeof reasoningLevel === 'string' && reasoningLevel.trim() && reasoningLevel !== 'default') {
@@ -658,12 +683,18 @@ async function dispatchRemediationViaHq({
   if (!dispatchId) {
     throw new Error('app-sdk dispatch ticket missing dispatch_id');
   }
+  const actualWorkerClass = requiresProducedAttestation
+    ? String(ticket.workerClass || ticket.worker_class || '').trim()
+    : hqRemediationWorkerClass(workerClass);
+  if (requiresProducedAttestation && !normalizeRemediationWorkerClass(actualWorkerClass)) {
+    throw new Error('final-fix-all HQ dispatch ticket missing valid workerClass');
+  }
   const ticketWorkspaceDir = normalizeHqWorkspaceDir(ticket?.workspace_dir || ticket?.workspaceDir);
   // In agent-os mode the workspace is intentionally left unresolved at dispatch
   // (the App Contract ticket carries no workspace_dir) and is re-resolved later
   // at reconcile via `hq dispatch status <dispatchId>`. This non-obvious
   // dependency is load-bearing for branch-contamination audits.
-  const workspaceDir = useAppContract
+  const workspaceDir = useAppContract || requiresProducedAttestation
     ? ticketWorkspaceDir
     : await resolveHqWorkerWorkspace({
         worker: {
@@ -674,9 +705,9 @@ async function dispatchRemediationViaHq({
         env,
       });
   return {
-    model: normalizeRemediationWorkerClass(workerClass) || workerClass,
-    ...(modelResolution || {}),
-    workerClass: hqRemediationWorkerClass(workerClass),
+    model: normalizeRemediationWorkerClass(actualWorkerClass) || actualWorkerClass,
+    ...(actualWorkerClass === hqRemediationWorkerClass(workerClass) ? modelResolution || {} : {}),
+    workerClass: actualWorkerClass,
     state: 'spawned',
     spawnedAt: now(),
     promptPath,
@@ -685,6 +716,8 @@ async function dispatchRemediationViaHq({
     replyPath,
     dispatchMode: 'hq',
     completionShape: 'branch-push',
+    ...(requiresProducedAttestation ? { requiresProducedAttestation: true, hqOwnerUser,
+      custodyRepo: normalizeHqDispatchRepo(repo), custodyBranch: branch } : {}),
     requiresWorkflowPush: Boolean(requiresWorkflowPush),
     workflowPushBroker: workflowPushBrokerEvidence,
     launchRequestId: launchRequestIdValue,
@@ -1984,7 +2017,7 @@ async function reconcileFollowUpJobWithinRepositoryCycle({
         if (worker?.dispatchMode === 'hq') {
           const topicWorkspaceDir = parseHqWorkerWorkspaceFromPayload(liveness?.dispatchStatus || {});
           try {
-            auditWorkspaceDir = topicWorkspaceDir || await resolveHqWorkerWorkspace({
+            auditWorkspaceDir = (!worker.requiresProducedAttestation && topicWorkspaceDir) || await resolveHqWorkerWorkspace({
               worker,
               execFileImpl,
             }) || paths.workspaceDir;
@@ -3326,6 +3359,11 @@ async function consumeNextFollowUpJobWithinRepositoryCycle({
     const laneRuntimeMode = remediationLaneRuntimeMode(workerClass, runtimeMode, { env: jobEnv });
     const accountBoundHandoff = !remediatorRouting.pooled && laneRuntimeMode !== runtimeMode;
     const remediationMode = remediatorRouting.pooled ? 'os' : laneRuntimeMode;
+    if (claimed.job.closureHandoff?.reason === 'final-fix-all') {
+      assertHqDispatchOwnerMatches(jobEnv);
+      jobEnv.HQ_PARENT_SESSION ||= 'session:adversarial-review:watcher';
+      jobEnv.HQ_PROJECT ||= 'pr-merge-orchestration';
+    }
     if (accountBoundHandoff) applyHqDispatchHandoffEnv(jobEnv, { workerClass, runtimeMode, log });
     const remediationDispatchPath = remediationMode === 'os' ? 'hq' : 'bare';
     if (remediationMode === 'os') {

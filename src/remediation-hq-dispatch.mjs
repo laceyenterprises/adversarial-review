@@ -22,12 +22,39 @@ import { readDispatchStatus } from './producer-contracts/launch-status.mjs';
 // fast-merge-processing.mjs precedent.
 
 import { execFile } from 'node:child_process';
-import { existsSync } from 'node:fs';
-import { join, resolve } from 'node:path';
+import { existsSync, readFileSync, realpathSync } from 'node:fs';
+import { dirname, join, resolve } from 'node:path';
 import { promisify } from 'node:util';
 import { resolveHqRoot } from './remediation-reply-paths.mjs';
 
 const execFileAsync = promisify(execFile);
+
+// A local remediation checkout (even one with a copied manifest) cannot stand
+// in for the provisioned worker that owns this dispatch.
+export function assertRemediationWorkspaceCustody(workspaceDir, worker) {
+  if (!worker?.requiresProducedAttestation) return workspaceDir;
+  try {
+    const workspace = realpathSync(workspaceDir);
+    const slot = dirname(workspace);
+    const manifest = JSON.parse(readFileSync(join(slot, 'workspace.json'), 'utf8'));
+    const root = realpathSync(worker.hqRoot);
+    if (!manifest.workerId || /[/\\]/.test(manifest.workerId)
+      || realpathSync(join(root, 'workers', manifest.workerId)) !== slot
+      || realpathSync(manifest.hqRoot) !== root
+      || realpathSync(manifest.worktreePath) !== workspace
+      || manifest.launchRequestId !== worker.launchRequestId
+      || manifest.workerClass !== worker.workerClass
+      || manifest.ownerUser !== worker.hqOwnerUser
+      || manifest.ticketRef !== worker.ticketRef
+      || manifest.repo !== worker.custodyRepo
+      || manifest.branch !== worker.custodyBranch
+      || manifest.expectedCompletionShape !== 'branch-push'
+      || !existsSync(join(workspace, '.git'))) throw new Error('binding mismatch');
+    return workspace;
+  } catch (cause) {
+    throw new Error('final-fix-all HQ workspace custody unavailable or mismatched', { cause });
+  }
+}
 
 const HQ_CANCEL_RETRY_DELAYS_MS = [250, 500];
 const TRANSIENT_HQ_DISPATCH_CODES = new Set([
@@ -172,11 +199,14 @@ async function resolveHqWorkerWorkspace({
 } = {}) {
   const persistedWorkspaceDir = normalizeHqWorkspaceDir(worker?.workspaceDir);
   if (persistedWorkspaceDir && existsSync(join(persistedWorkspaceDir, '.git'))) {
-    return persistedWorkspaceDir;
+    return assertRemediationWorkspaceCustody(persistedWorkspaceDir, worker);
   }
   const dispatchId = String(worker?.dispatchId || '').trim();
   const hqRoot = worker?.hqRoot || resolveHqRoot(env, { requireExists: false });
   if (!dispatchId || !hqRoot) {
+    if (worker?.requiresProducedAttestation) {
+      throw new Error('final-fix-all HQ workspace custody unavailable: missing dispatch handle');
+    }
     return null;
   }
   const hqBin = resolveHqBin(env);
@@ -195,7 +225,8 @@ async function resolveHqWorkerWorkspace({
     },
     maxBuffer: 5 * 1024 * 1024,
   });
-  return parseHqDispatchStatusOutput(stdout, args, parseHqDispatchWorkspaceStatus, logger).workspaceDir;
+  return assertRemediationWorkspaceCustody(
+    parseHqDispatchStatusOutput(stdout, args, parseHqDispatchWorkspaceStatus, logger).workspaceDir, worker);
 }
 
 function isHqCancelRetryable(err) {

@@ -138,6 +138,35 @@ test('unavailable confirmation bounds a self-imposed hold to two minutes', async
   await withGitHubBudgetScope({}, () => assert.rejects(f.throttle.awaitThrottleIfNeeded(), e => Date.parse(e.observation.resetAt) - f.now() === 120_000));
 });
 
+for (const resource of ['core', 'graphql']) test(`a structured secondary refusal of /rate_limit honors Retry-After while confirming ${resource}`, async t => {
+  const env = { GH_TOKEN: 'fixture-confirmation-identity' };
+  const f = fixture(t, { env });
+  const credential = githubCredential({ env });
+  let probes = 0;
+  t.mock.method(globalThis, 'fetch', async url => {
+    assert.match(url, /\/rate_limit$/);
+    probes++;
+    return { ok: false, status: 403, headers: {
+      'x-ratelimit-remaining': '4000', 'x-ratelimit-reset': String(Math.ceil(f.now() / 1000) + 3600),
+      'x-ratelimit-resource': 'core', 'retry-after': '300',
+    }, json: async () => ({ message: 'You have exceeded a secondary rate limit.' }) };
+  });
+  await f.throttle.recordResponseRateLimit({ resource, credential,
+    remaining: 0, resetAt: f.now() + 3600_000, observedAt: f.now() });
+  await withGitHubBudgetScope({}, () => assert.rejects(f.throttle.awaitThrottleIfNeeded(resource, credential),
+    err => err.budgetDeferred && Date.parse(err.observation.resetAt) - f.now() === 300_000));
+  assert.equal(probes, 1);
+  const state = await f.throttle.readSharedState();
+  assert.equal(state[`${credential}/core`].remaining, 4000);
+  if (resource === 'graphql') assert.equal(state[`${credential}/graphql`].remaining, 0,
+    'core response headers cannot supply GraphQL primary capacity');
+  const limited = f.telemetry.find(row => row.category === 'github_rate_limit').extra;
+  assert.equal(limited.status, 403);
+  assert.equal(limited.requestCategory, 'rate_limit_probe');
+  assert.equal(limited.headers['retry-after'], '300');
+  assert.equal(f.telemetry.find(row => row.category === 'github_budget_confirmation').extra.recorded.remaining, 0);
+});
+
 test('HTTP debug bodies discussing rate limits cannot classify a 404, 500 or permission 403', () => {
   for (const status of [404, 500, 403]) {
     const parsed = parseGhDebug(`* Request at fixture\n< HTTP/2.0 ${status}\n< X-Ratelimit-Remaining: 4000\n< X-Ratelimit-Reset: 4102444800\n\n{"message":"rate limit","body":"too many requests"}\n* Request took 1ms\n`);

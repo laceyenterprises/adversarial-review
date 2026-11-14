@@ -1,3 +1,4 @@
+import './helpers/load-aware-timeout-fixture.mjs';
 import { proveCloserAuthoredStaleHead } from '../src/closer-authored-stale.mjs';
 /* Watcher auto-refreshes stale posted reviews when PR HEAD has moved.
  *
@@ -1798,7 +1799,7 @@ test('closer identity rate limit defers retries instead of spending an exhausted
     fetchVerifiedCommitFromLocalGitImpl: async () => null,
     execFileImpl: async () => {
       calls++;
-      throw Object.assign(new Error('secondary rate limit'), { stderr: 'secondary rate limit' });
+      throw Object.assign(new Error('secondary rate limit'), { stderr: '* Request at fixture\n< HTTP/2.0 429\n* Request took 1ms\n' });
     },
     retryBackoffMs: [1], sleepImpl: async () => {}, logger: { warn() {} },
   }), { budgetDeferred: true });

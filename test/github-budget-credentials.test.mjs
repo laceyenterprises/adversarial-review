@@ -1,3 +1,4 @@
+import './helpers/load-aware-timeout-fixture.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
@@ -40,7 +41,7 @@ for (const sync of [false, true]) test(`GHSCOPE-01: ${sync ? 'sync' : 'async'} g
   const envA = { GH_TOKEN: 'synthetic-token-a', GHO_RATE_LIMIT_SHARED_STATE_PATH: statePath,
     GHO_API_CALL_LOG_DISABLE: '1' };
   const envB = { ...envA, GH_TOKEN: 'synthetic-token-b' };
-  const reset = Math.ceil(Date.now() / 1000) + 120;
+  const reset = Math.ceil(Date.now() / 1000) + 119;
   let calls = 0;
   function execute(_command, _args) {
     calls++;
@@ -86,14 +87,14 @@ test('GHSCOPE-01: unknown reset uses the bounded default even after a healthy ob
   const reader = createRateLimitThrottle({ sharedStatePath: join(root, 'budget.json'), nowMs: () => now });
   await withGitHubBudgetScope({ urgent: true }, async () => {
     await assert.rejects(reader.awaitThrottleIfNeeded('graphql', 'credential-a'), error =>
-      error.observation.remaining === 0 && Date.parse(error.observation.resetAt) === now + 60_000);
+      error.observation.remaining === 4900 && Date.parse(error.observation.resetAt) === now + 60_000);
   });
-  const resetAt = now + 60_000;
+  const primaryResetAt = now + 3600_000;
   now += 10_000;
   const repeated = await throttle.recordRateLimitedCall('graphql', 'credential-a');
-  assert.equal(Date.parse(repeated.resetAt), resetAt, 'an already exhausted window is reused by the scope');
+  assert.equal(Date.parse(repeated.resetAt), now + 120_000, 'consecutive secondary observations advance the backoff');
   const state = await reader.readSharedState();
-  assert.equal(Date.parse(state['credential-a/graphql'].resetAt), resetAt);
+  assert.equal(Date.parse(state['credential-a/graphql'].resetAt), primaryResetAt);
   assert.equal(state['credential-a/graphql'].rateLimitedCalls, 2);
 });
 
@@ -107,14 +108,15 @@ for (const viaResponse of [false, true]) test(`secondary limits override healthy
   const healthy = { resource: 'graphql', credential: 'credential-a', remaining: 4900, resetAt: now + 3600_000 };
   await writer.recordResponseRateLimit(healthy);
   await reader.readSharedState(); // A long-lived reader has cached the healthy quota.
-  const observation = { ...healthy, resetAt: now + 120_000 };
+  const observation = { ...healthy, retryAfterMs: 120_000 };
   if (viaResponse) await writer.recordResponseRateLimit({ ...observation, rateLimited: true });
   else await writer.recordRateLimitedCall('graphql', 'credential-a', observation);
   await writer.recordResponseRateLimit(healthy); // A late healthy response cannot clear the hold.
   const state = JSON.parse(readFileSync(sharedStatePath, 'utf8'));
   const bucket = state.buckets['credential-a/graphql'];
-  assert.equal(bucket.remaining, 0);
-  assert.equal(Date.parse(bucket.resetAt), now + 120_000);
+  assert.equal(bucket.remaining, 4900);
+  assert.equal(Date.parse(bucket.resetAt), now + 3600_000);
+  assert.equal(Date.parse(bucket.secondaryUntil), now + 120_000);
   assert.equal(bucket.rateLimitedCalls, 1);
   await withGitHubBudgetScope({ urgent: true }, async () => {
     await assert.rejects(reader.awaitThrottleIfNeeded('graphql', 'credential-a'), { budgetDeferred: true });
@@ -130,41 +132,41 @@ for (const viaResponse of [false, true]) test(`secondary limits override healthy
   });
 });
 
-test('secondary-limit extraction overrides positive primary headers and uses Retry-After', () => {
+test('secondary-limit extraction preserves positive primary headers and uses Retry-After', () => {
   const observation = extractRateLimitObservation({
     'x-ratelimit-remaining': '4900', 'x-ratelimit-reset': '1792062000', 'retry-after': '120',
   }, { observedAt: '2026-10-15T10:00:00Z', rateLimited: true });
-  assert.equal(observation.remaining, 0);
-  assert.equal(observation.resetAt, '2026-10-15T10:02:00.000Z');
+  assert.equal(observation.remaining, 4900);
+  assert.equal(observation.resetAt, new Date(1792062000 * 1000).toISOString());
+  assert.equal(observation.secondaryUntil, '2026-10-15T10:02:00.000Z');
 });
 
-test('a guessed (headerless) window yields to a newer healthy observation; a reported reset does not', async t => {
+test('positive primary observations preserve secondary holds until cooldown, then resume', async t => {
   const root = fixture(t);
   const sharedStatePath = join(root, 'budget.json');
-  const now = Date.now();
+  let now = Date.now();
   const writer = createRateLimitThrottle({ sharedStatePath, nowMs: () => now });
   const healthy = resource => ({ resource, credential: 'credential-a', remaining: 4900, resetAt: now + 3600_000 });
   const buckets = () => JSON.parse(readFileSync(sharedStatePath, 'utf8')).buckets;
   await writer.recordResponseRateLimit(healthy('graphql'));
-  await writer.recordRateLimitedCall('graphql', 'credential-a'); // no headers: the reset is a guess
-  await writer.recordRateLimitedCall('core', 'credential-a', { resetAt: now + 120_000 }); // reported reset
-  assert.equal(buckets()['credential-a/graphql'].remaining, 0, 'an older healthy reading cannot clear a newer guess');
-  assert.equal(buckets()['credential-a/graphql'].resetUnknown, true);
-  assert.equal(buckets()['credential-a/core'].resetUnknown, undefined);
+  await writer.recordRateLimitedCall('graphql', 'credential-a');
+  await writer.recordRateLimitedCall('core', 'credential-a', { resetAt: now + 120_000 });
+  assert.equal(buckets()['credential-a/graphql'].remaining, 4900);
+  assert.equal(buckets()['credential-a/core'].remaining, null);
   await writer.recordResponseRateLimit(healthy('graphql'));
   await writer.recordResponseRateLimit(healthy('core'));
-  assert.equal(buckets()['credential-a/graphql'].remaining, 4900);
-  assert.equal(buckets()['credential-a/graphql'].resetUnknown, undefined);
-  assert.equal(buckets()['credential-a/core'].remaining, 0);
   const reader = createRateLimitThrottle({ sharedStatePath, nowMs: () => now });
   await withGitHubBudgetScope({ urgent: true }, async () => {
-    assert.equal(await reader.awaitThrottleIfNeeded('graphql', 'credential-a'), false);
-    await assert.rejects(reader.awaitThrottleIfNeeded('core', 'credential-a'), { budgetDeferred: true });
+    for (const resource of ['core', 'graphql']) {
+      await assert.rejects(reader.awaitThrottleIfNeeded(resource, 'credential-a'), { budgetDeferred: true });
+      assert.equal(buckets()[`credential-a/${resource}`].remaining, 4900);
+    }
   });
-  // A headerless failure inside a reported window keeps the reported reset.
-  await writer.recordRateLimitedCall('core', 'credential-a');
-  assert.equal(Date.parse(buckets()['credential-a/core'].resetAt), now + 120_000);
-  assert.equal(buckets()['credential-a/core'].resetUnknown, undefined);
+  now += 60_000;
+  await withGitHubBudgetScope({}, async () => {
+    assert.equal(await reader.awaitThrottleIfNeeded('graphql', 'credential-a'), false);
+    assert.equal(await reader.awaitThrottleIfNeeded('core', 'credential-a'), false);
+  });
 });
 
 test('runtime status resolves active credential aliases and retains other observed budgets', async t => {
@@ -183,7 +185,7 @@ test('runtime status resolves active credential aliases and retains other observ
   assert.equal(status.core.credential, credential);
   assert.equal(status.core.credentialSelector, 'watcher');
   assert.deepEqual(status.core, status[`${credential}/core`]);
-  assert.equal(status.graphql.remaining, 0);
+  assert.equal(status.graphql.remaining, null);
   assert.equal(status.graphql.rateLimitedCalls, 1);
   assert.equal(Date.parse(status.graphql.resetAt), now + 60_000);
   assert.equal(status['credential-b/graphql'].remaining, 4000);
@@ -254,7 +256,7 @@ for (const retryAfter of [null, '120']) test(`GHSCOPE-01: a mixed command keeps 
   await withGitHubBudgetScope({}, async () => {
     await assert.rejects(meteredExecFile(async () => {
       throw Object.assign(new Error('GraphQL: API rate limit exceeded'), {
-        stderr: `* Request at fixture\n< HTTP/2.0 200 OK\n< X-Ratelimit-Resource: core\n< X-Ratelimit-Remaining: 4900\n< X-Ratelimit-Reset: 4102444800\n* Request took 1ms\n* Request at fixture\n< HTTP/2.0 200 OK\n${retryAfter ? `< Retry-After: ${retryAfter}\n` : ''}* Request took 1ms\n`,
+        stderr: `* Request at fixture\n< HTTP/2.0 200 OK\n< X-Ratelimit-Resource: core\n< X-Ratelimit-Remaining: 4900\n< X-Ratelimit-Reset: 4102444800\n* Request took 1ms\n* Request at fixture\n< HTTP/2.0 200 OK\n${retryAfter ? `< Retry-After: ${retryAfter}\n` : ''}\n{"errors":[{"type":"RATE_LIMITED"}]}\n* Request took 1ms\n`,
       });
     }, 'gh', ['pr', 'view', '7'], { env }), /rate limit/);
     await meteredExecFile(async () => { calls++; return { stdout: '{}', stderr: '' }; }, 'gh', ['api', 'repos/example/alpha'], { env });

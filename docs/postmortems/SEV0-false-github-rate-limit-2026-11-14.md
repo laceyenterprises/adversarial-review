@@ -132,6 +132,9 @@ are logged. An unavailable probe bounds that admission hold to two minutes,
 then requires another admission decision. A primary probe cannot clear a real
 secondary hold. The synchronous bridge and watcher discovery shortcut use the
 same admission confirmation.
+If the probe itself returns structured quota evidence, admission honors that
+response's primary reset or secondary Retry-After and logs its headers. Its
+core response headers cannot be mistaken for GraphQL primary capacity.
 
 Reviewer identity is pinned through `GITHUB_REVIEWER_TOKEN_ENV`. A 401 refresh
 uses that selected reviewer's broker role and refuses identity drift; it cannot
@@ -177,14 +180,15 @@ from shared scheduling decisions.
 | AO `cwp_dispatch/incident_monitor.py:59` | Former `rate limit`/`too many requests` | Source retry, no shared budget; CLI output reachable | Typed rate marker only |
 | AO `runtime/github-auth/bin/gh`, `modules/worker-pool/lib/hq-github.sh` | No independent prose quota classifier | Auth wrapper / delegates adapter | Audited; no duplicate quota writer |
 | AR `src/ama/stacked-base.mjs:35`, `src/pr-terminal-reconcile.mjs:133`; AO `modules/agent-observability/runtime/scripts/close-pipeline-health-exporter.mjs:155`; AO `cwp_dispatch/{teardown_pr_check,pr_lifecycle,session_resume_proof_diagnostics}.py` | `rate limit`, `429`, `abuse` diagnostic labels | Display/attribution only; output reachable | No budget/latch decision; retained as diagnostics |
-| AR `src/quota-exhaustion.mjs:24`, `src/adapters/reviewer-runtime/cli-direct/{index,classification}.mjs:79` | `hit your usage limit`, `weekly limit`, `out of credits`, `resource_exhausted`, `quota exceeded` | Reviewer failure/quota fallback; combined model/tool output can reach classifiers despite some event filtering | Follow-up PROVIDERSIGNAL-01 |
+| AR `src/quota-exhaustion.mjs:24`, `src/adapters/reviewer-runtime/cli-direct/index.mjs:79`, `classification.mjs:112` | `hit your usage limit`, `weekly limit`, `out of credits`, `resource_exhausted`, `quota exceeded` | Reviewer failure/quota fallback; combined model/tool output can reach classifiers despite some event filtering | Follow-up PROVIDERSIGNAL-01 |
 | AR `src/reviewer-harness.mjs:2405,3088` | `429`, `resource_exhausted`, `quota`, `rate limit` over concatenated exception/stdout/stderr | Gemini credential cooldown and reviewer availability; untrusted model/tool content reachable | PROVIDERSIGNAL-01 |
-| AR `src/reviewer-quota-signal.mjs:28,227`, `src/review-pipeline-health.mjs:1280`, `src/reviewer-spawn-settle.mjs:492`, `src/argus-reviewer-failures.mjs`, `src/ama/dead-hammer-rearm.mjs:37` | Quota/reset prose, usage cap, account limit, 429 marker | Settlement, reviewer fallback/rearm and health classification; reachability depends on upstream diagnostic filtering | PROVIDERSIGNAL-01 |
+| AR `src/reviewer-quota-signal.mjs:28,227`, `src/review-pipeline-health.mjs:1280`, `src/reviewer-spawn-settle.mjs:492`, `src/argus-reviewer-failures.mjs:35`, `src/ama/dead-hammer-rearm.mjs:37` | Quota/reset prose, usage cap, account limit, 429 marker | Settlement, reviewer fallback/rearm and health classification; reachability depends on upstream diagnostic filtering | PROVIDERSIGNAL-01 |
 | AO `modules/worker-pool/lib/python/cwp_dispatch/worker_killed_cause.py:60,69,126,583,1051`, `quota_recovery.py:329` | `insufficient_quota`, `quota_exceeded`, `429`, `RateLimitError`, usage-cap text | Provider/auth-path holds and worker suspension; output tails and assistant error context reachable; some attribution paths disable prose | PROVIDERSIGNAL-02 |
 | AO `platform/session-ledger/src/session_ledger/worker_rate_limit_failure.py:22,83` | Complete `Request rejected (429)…account…rate limit` | Broker-OAuth provider hold; typed terminal/synthetic events preferred, but plain final line/stderr fallback remains reachable | PROVIDERSIGNAL-02 |
 | AO `platform/session-ledger/src/session_ledger/worker_exit_cause.py:257`; AO `cwp_dispatch/{worker_outcome,provider_errors}.py:56,323` | 429/rate-limit labels, usage-limit and quota substrings | Worker outcome/error attribution feeding recovery; raw output reachable | PROVIDERSIGNAL-02 |
 | AO `cwp_quota_probe/{prober,observation}.py:147,23`, `cwp_dispatch/provider_errors.py:41`, `cwp_quota_probe/gemini_quota.py:146`, `cwp_quota_probe/hard_stop.py:43` (under worker-pool Python) | Probe quota/429 signatures; `RESOURCE_EXHAUSTED`+429+reset | Provider/auth-path shared holds; fixed diagnostic probes reduce PR-content reachability, worker-derived Gemini observations reintroduce it; hard_stop consumes metadata | PROVIDERSIGNAL-02 |
 | AO `cwp_dispatch/grok_adapter.py:280`, `grok_quota.py:241` | Exact terminal typed `errors` list + failing exit, auth kind and source-backed copy | Account/model cooldown | Structured terminal provenance already required; preserve negative tool-output tests in PROVIDERSIGNAL-02 audit |
+| AO `modules/agent-runtime/modelclient/client.go:384`, `modules/agent-runtime/runtime/executor.go:148` | HTTP status 429 → typed ErrRateLimit | Per-route/provider cooldown; model text is not the rate-limit authority | Already structured; retained |
 | AO `modules/worker-pool/lib/python/cwp_dispatch/op_adapter.py:363,1215`; `scripts/lib/op-resolve-with-rate-limit-backoff.{mjs,sh}:46,132`, `modules/worker-pool/lib/hq-common-secrets.sh:319` | `too many requests`, `rate limit`, bare 429; wrapper markers | Shared 1Password service-account circuit and secret resolution; direct `op read` errors are provider-side, `op run` child stderr can be untrusted | SECRETQUOTASIGNAL-01 |
 | AO `modules/model-routing-budget-control/runtime/scripts/litellm-drift-watch.mjs:453,1062,1175,1244,1292` | 429/rate/usage-limit prose in spend-log and metric evidence | Per-alias fallback-alert suppression, not routing quota; provider messages and model labels reachable | PROVIDERSIGNAL-02 must include this telemetry consumer |
 | AR `src/codex-per-worker-auth.mjs:71`, `src/remediation-quota-evidence.mjs:5`; AO `cwp_dispatch/model_proxy_recovery.py:47`, `platform/app-sdk/python/src/agent_os_app_sdk/host.py:553` | HTTP 429/prose markers, terminal account rejection | Auth recovery, remediation holds and broker error attribution; tool/model output reachability varies by source | PROVIDERSIGNAL-01 / PROVIDERSIGNAL-02 |
@@ -195,7 +199,9 @@ Paths abbreviated as `cwp_dispatch`, `cwp_helm` and `cwp_quota_probe` in the
 last rows are below `modules/worker-pool/lib/python/`.
 Inventory method: recursive source searches for rate/quota/exhaustion patterns,
 then inspection of producers and consumers to distinguish display labels,
-bounded local retry, structured quota state and shared holds. Tests, generated
+bounded local retry, structured quota state and shared holds. A supplemental
+Go/JavaScript/TypeScript/Rust search checked typed runtime cooldowns and display
+consumers; no additional GitHub prose budget writer was found there. Tests, generated
 inventories and vendored dependencies were excluded from implementation hits.
 No claim is made that provider text matching is safe simply because it is narrow.
 

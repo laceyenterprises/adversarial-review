@@ -109,6 +109,10 @@ sending credential's budget through a bounded, throttle-exempt `GET /rate_limit`
 `github_budget_confirmation` logs the stored and live readings. Contradictory
 live primary readings correct false zero or a stale balance below the floor;
 secondary holds remain independent.
+If the probe itself returns a structured rate limit, its raw response evidence
+is logged and its primary reset or secondary Retry-After is honored. Probe
+response headers describe core quota even when the requested confirmation was
+for GraphQL; they cannot supply GraphQL capacity.
 Unavailable confirmation limits that admission hold to two minutes before a
 new decision. This applies to async admission, the sync bridge and the watcher
 whole-poll shortcut. Reviewer 401 refresh retains its pinned reviewer role via

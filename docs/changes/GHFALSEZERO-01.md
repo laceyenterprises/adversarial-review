@@ -33,13 +33,17 @@ NETGUARD_LOG=<isolated-log> PATH=<netguard-bin>:$PATH \
   --repo-root . --timeout-seconds 600 --command node --test test/<file>
 ```
 
-Passing scoped files: `ghfalsezero-01` (17), `rate-limit-throttle` (27),
+Passing scoped files: `ghfalsezero-01` (19), `rate-limit-throttle` (27),
 `gh-cli-auth-outage-remint` (17), `reviewer-context-auth` (28),
 `metered-gh-cli` (18), `metered-gh-sync-env` (8), `etag-cache` (13),
 `watcher-github-budget` (4), `branch-protection` (18),
 `ama-closer-transient-classification` (36), `ama-daemon-merge` (103),
 `closergates-01` (14), `history-read-retry` (27),
-`watcher-claim-loop` (180), `duplicate-content` (5).
+`watcher-claim-loop` (180), `duplicate-content` (5),
+`github-budget-credentials` (16), `watcher-auto-refresh-stale-posted-review` (47),
+`ama-hammer-background-dispatch` (148), `msm-04-single-route` (25).
+Confirmation-probe refusals retain their structured cooldown and core resource
+attribution; fixtures cover both core and GraphQL admission.
 Shellcheck: no new warning-or-higher findings versus origin/main in the four
 changed hammer scripts (existing counts 38/19/0/27).
 `npm run lint`: zero errors (existing warnings). `npm run typecheck:contracts`: passed.

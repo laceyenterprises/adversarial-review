@@ -669,7 +669,13 @@ async function confirmLiveBudget({ credential, resource, env }) {
     headers: { Accept: 'application/vnd.github+json', ...(token ? { Authorization: `Bearer ${token}` } : {}) },
     signal: AbortSignal.timeout(5000),
   });
-  if (!response.ok) throw new Error('confirmation response unavailable');
+  if (!response.ok) {
+    let data;
+    try { data = await response.json(); } catch { /* Status and headers still carry evidence. */ }
+    throw Object.assign(new Error('confirmation response unavailable'), {
+      status: response.status, response: { status: response.status, headers: response.headers, data },
+    });
+  }
   const budget = (await response.json())?.resources?.[resource];
   return budget ? { resource, remaining: budget.remaining, limit: budget.limit, resetAt: budget.reset,
     observedAt: new Date().toISOString() } : null;
@@ -827,7 +833,7 @@ function createRateLimitThrottle({
     return recordRateLimit(observation);
   }
 
-  async function recordRateLimitedCall(resource, credential = 'default', observation = null) {
+  async function recordRateLimitedCall(resource, credential = 'default', observation = null, confirmedPrimary = false) {
     // An outer conditional/adapter wrapper may observe the same exception.
     // It must not turn one secondary response into another backoff attempt.
     if (observation?.recorded === true && observation.credential === credential) {
@@ -835,7 +841,7 @@ function createRateLimitThrottle({
     }
     observation = { ...(observation || { observedAt: nowMs() }),
       kind: observation?.kind || (observation?.remaining === 0 ? 'primary' : 'secondary') };
-    const recorded = await recordRateLimit({ ...observation, resource, credential, rateLimited: true }, true);
+    const recorded = await recordRateLimit({ ...observation, resource, credential, rateLimited: true }, true, confirmedPrimary);
     return recorded ? markGitHubRateLimited(resource, credential, { ...recorded,
       recorded: true, kind: observation.kind, evidence: observation.evidence, retryAfterMs: observation.retryAfterMs,
       resetAt: observation.kind === 'secondary' ? recorded.secondaryUntil : recorded.resetAt }) : null;
@@ -847,10 +853,27 @@ function createRateLimitThrottle({
     const primaryLow = current.remaining != null && current.remaining < githubBudgetFloor(current, floor);
     const until = Math.max(primaryLow ? Date.parse(current.resetAt) : 0, Date.parse(current.secondaryUntil || '') || 0);
     if (until - nowMs() <= 120_000) return { ...current, resetAt: new Date(until).toISOString() };
+    const recorded = current;
     let live = null;
-    try { live = sanitizeObservation(await confirmBudgetImpl({ credential, resource, env }), nowMs()); } catch { /* bounded retry below */ }
+    let failure = null;
+    let confirmedFailureUntil = 0;
+    try { live = sanitizeObservation(await confirmBudgetImpl({ credential, resource, env }), nowMs()); }
+    catch (err) {
+      const observation = rateLimitErrorObservation(err, { resource: 'core', observedAt: nowMs(),
+        requestCategory: 'rate_limit_probe', consumer: env.GHO_API_CONSUMER || env.GITHUB_REVIEWER_TOKEN_ENV || 'adversarial-review' });
+      if (observation) {
+        // The HTTP probe itself consumes the header's resource (normally core),
+        // even when its successful JSON would have confirmed GraphQL quota.
+        const failedResource = observation.resource || resource;
+        const limited = await recordRateLimitedCall(failedResource, credential, observation, observation.remaining != null);
+        current = (await readSharedState())[key] || current;
+        failure = { kind: observation.kind, resource: failedResource, ...observation.evidence };
+        confirmedFailureUntil = observation.kind === 'secondary' ? Date.parse(limited?.secondaryUntil || '')
+          : failedResource === resource ? Date.parse(limited?.resetAt || '') : 0;
+      }
+    }
     recordApiCallImpl?.({ category: 'github_budget_confirmation', extra: { credential, resource,
-      recorded: current, live, consumer: 'adversarial-review' } });
+      recorded, live, ...(failure ? { failure } : {}), consumer: 'adversarial-review' } });
     if (live) {
       await recordRateLimit({ ...live, credential }, false, true);
       current = (await readSharedState())[key];
@@ -861,7 +884,11 @@ function createRateLimitThrottle({
       return { ...current, resetAt: new Date(confirmedUntil).toISOString() };
     }
     // Unknown live evidence cannot justify an hour-long self-imposed hold.
-    return { ...current, resetAt: new Date(nowMs() + 120_000).toISOString() };
+    // A structured quota refusal from the probe is fresh evidence: retain its
+    // primary reset or explicit secondary cooldown, including long Retry-After.
+    const fallbackUntil = confirmedFailureUntil > nowMs() ? confirmedFailureUntil : nowMs() + 120_000;
+    return { ...current, resetAt: new Date(Math.max(fallbackUntil,
+      Date.parse(current.secondaryUntil || '') || 0)).toISOString() };
   }
 
   async function awaitThrottleIfNeeded(resource = DEFAULT_RESOURCE, credential = 'default', { env: requestEnv = env } = {}) {

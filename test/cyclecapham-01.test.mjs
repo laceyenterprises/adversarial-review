@@ -604,12 +604,13 @@ test('exhausted no-merge hands off even outside the review-cycle cap route', asy
     ...args,
     // A self-certified stale head still needs successor custody.
     dispatchContext: { ...args.dispatchContext, allowStaleReviewHeadHammerResume: true,
-      refusingReviewBody: '## Blocking issues\n- None.\n## Non-blocking issues\n- [P2] Preserve the original error.\n## Verdict\nComment only' },
+      settledReview: { reviewBody: '## Blocking issues\n- None.\n## Non-blocking issues\n- [P2] Preserve the original error.\n## Verdict\nComment only' } },
     ...deps,
   });
   assert.equal(result.dispatched, false, JSON.stringify(result));
   assert.equal(result.reason, 'ownerless-closer-no-merge');
   assert.equal(result.successor.headSha, REMEDIATED_HEAD);
+  assert.match(result.successor.reviewBody, /Preserve the original error/);
   assert.equal(deps.launches.length, 0);
   assert.deepEqual(deps.statusProbes, [LRQ_FIRST]);
 });

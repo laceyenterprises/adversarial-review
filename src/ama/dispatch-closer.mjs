@@ -6154,7 +6154,7 @@ async function maybeDispatchAmaCloserAttempt({
     // only a readable absence of a decision permits normal retry admission.
     const handoffEndedCloser = async headSha => {
       requestCloserSuccessor({ rootDir, repo, prNumber, headSha,
-        reviewBody: dispatchContext.refusingReviewBody, refusingReasons: verdict.reasons,
+        reviewBody: dispatchContext.settledReview?.reviewBody, refusingReasons: verdict.reasons,
         source: 'closer-ended-without-merge', now: dispatchContext.dispatchedAt });
       return settleCloserSuccessorImpl({ rootDir, repo, prNumber, headSha,
         enabled: cfg.autonomousMergeExecutionEnabled !== false, admitted: verdict.repairAdmission?.ok === true,
@@ -6395,7 +6395,7 @@ async function maybeDispatchAmaCloserAttempt({
           // bounded retry/cap-alert executor. Production predicate refusals
           // carry the current refusing review into the final-fix-all work order.
           hammerShouldHandoff = reportedNoWork || (noMergeAuditForCurrentHead === true
-            && Boolean(String(dispatchContext.refusingReviewBody || '').trim()));
+            && Boolean(String(dispatchContext.settledReview?.reviewBody || '').trim()));
           const noMergeOutcome = hammerOutcome.outcome;
           const exitedWithoutClose = noMergeOutcome === HAMMER_EXITED_WITHOUT_CLOSE;
           finalHammerRetryReason = noMergeOutcome;

@@ -2797,7 +2797,7 @@ for (const scenario of ['audit', 'no audit', 'auto-merge armed', 'expired auto-m
         if (scenario.endsWith('fallback')) input.readPullRequestStateImpl = () => null;
       } else live.autoMergeRequest = null;
     }
-    if (scenario === 'audit') input.dispatchContext.refusingReviewBody = 'Synthetic refusing review.';
+    if (scenario === 'audit') input.dispatchContext.settledReview = { reviewBody: 'Synthetic refusing review.' };
     let result = await maybeDispatchAmaCloser(input);
     if (scenario.endsWith('fallback')) {
       assert.equal(result.reason, 'stale-dispatched-lease-terminalized');

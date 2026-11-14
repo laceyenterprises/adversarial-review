@@ -94,3 +94,17 @@ test commands.
   repository runner's fixed 900-second limit. Its observed watcher fixture
   failures were corrected, and the full 180-case watcher file then passed.
   No full-suite pass is claimed.
+
+## HAM CI repair
+
+Closer dispatch now consumes `dispatchContext.settledReview`, preserving the
+canonical snapshot through orchestration instead of projecting its review body
+in the orchestration decision scope. Successor enrollment still receives the
+same refusing review. No external interface or persistent schema changes.
+The CDM audit reports zero findings without an allowlist exemption.
+Targeted validation covers the CDM guard, successor custody, merged lease
+release and closer dispatch regressions; exact-head CI remains authoritative.
+
+HAM canonical changed-surface validation passed all 4,505 tests in 106 files.
+Lint passed with zero errors (149 existing warnings), contract typechecking and
+the offline byte-equivalence demo passed, and all 98 catalog entries validated.

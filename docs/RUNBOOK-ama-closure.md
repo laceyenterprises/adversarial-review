@@ -13,7 +13,9 @@ preserving the successful release JSON. Retained publication custody still
 requires a live running controller and expires after six hours.
 
 An exhausted closer that confirms an open PR without merging enrolls a durable
-PR/head successor request carrying the predicate's refusing review. The ordinary
+PR/head successor request carrying the predicate's refusing review. Orchestration
+passes the canonical `settledReview` snapshot to closer dispatch; dispatch reads
+its review body for successor custody without re-deriving review eligibility. The ordinary
 pre-claim remediation cap uses the same request. The watcher admits at most one
 existing final-fix-all work order for that head, or records and alerts
 `ownerless-closer-no-merge` through closure-wait alerting. Disabled or refused

@@ -251,3 +251,14 @@ test('CNS bounded dispatch policy parses with shadow defaults and rejects author
     }
   });
 });
+
+test('closer workspace handoff switch defaults on and accepts an explicit off switch', () => {
+  withTop((topPath) => {
+    assert.equal(loadConfig({ topPath, env: {} }).get('worker_pool.closer_handoff.enabled'), true);
+    writeFileSync(topPath, 'version: 1\nworker_pool:\n  closer_handoff:\n    enabled: false\n');
+    assert.equal(loadConfig({ topPath, env: {} }).get('worker_pool.closer_handoff.enabled'), false);
+    assert.throws(() => validateSchema({ version: 1, worker_pool: {
+      closer_handoff: { enabled: 'yes' },
+    } }), { name: 'AgentOSConfigError', key: 'worker_pool.closer_handoff.enabled' });
+  });
+});

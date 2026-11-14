@@ -1071,7 +1071,11 @@ charged launch is refunded and owned by the watcher with backoff
 (INCONCLUSIVERETRY-01b): it never parks, and from attempt N it is surfaced once
 without spending PR adjudication budget. Canonical local runner
 setup failures leave the exact-head GitHub required gate authoritative and claim
-no local pass. Review, head, CI, policy and GitHub facts retain stop authority;
+no local pass. Unsupported pnpm workflows use this fallback. Missing/floating
+pnpm pins and started script failures remain real failures; exhausted npm startup
+retries use the existing non-counted `validation-environment-failed` closer
+recovery. Existing lifecycle values and smoke promises are unchanged.
+Review, head, CI, policy and GitHub facts retain stop authority;
 strict mode, attestation, reversal checks, leases and merge predicates remain
 mandatory. See the [closure runbook](docs/RUNBOOK-ama-closure.md).
 

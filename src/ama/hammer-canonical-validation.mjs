@@ -1,5 +1,6 @@
 import { existsSync, readFileSync, readdirSync } from 'node:fs';
 import { join, basename, posix } from 'node:path';
+import { pnpmValidation } from './pnpm-validation.mjs';
 
 // Resolve repository-owned runners, never synthesize pytest or PYTHONPATH.
 export function canonicalHammerValidation(root, changedFiles, { node = process.execPath } = {}) {
@@ -13,6 +14,8 @@ export function canonicalHammerValidation(root, changedFiles, { node = process.e
   }
   let pkg;
   try { pkg = JSON.parse(readFileSync(join(root, 'package.json'), 'utf8')); } catch { /* Unsupported runner. */ }
+  const pnpm = pnpmValidation(root, pkg);
+  if (pnpm) return pnpm;
   if (pkg?.name !== 'adversarial-review') return null;
   const tests = ['test', 'test/adapters'].flatMap(dir => existsSync(join(root, dir))
     ? readdirSync(join(root, dir)).filter(file => file.endsWith('.test.mjs')).map(file => `${dir}/${file}`) : []);

@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { existsSync } from 'node:fs';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
@@ -12,6 +13,7 @@ import { execFileSync } from 'node:child_process';
 import { readRunClosureResume } from '../src/ama/closure-resume.mjs';
 import { canonicalHammerValidation, ownPackageImportFault, repositoryPythonPackages } from '../src/ama/hammer-canonical-validation.mjs';
 import { recordHammerPhase } from '../src/ama/hammer-outcome.mjs';
+import { ValidationSelectionError, UnsupportedPnpmWorkflowError } from '../src/ama/pnpm-validation.mjs';
 
 // CLOSERGATES-01: a closure-resume launch validated nothing new. While the
 // checkout is still the receipt's validated head, that launch's evidence
@@ -29,12 +31,14 @@ const usage = 'usage: hammer-validate.mjs --canonical [--nominal-timeout 1..3600
 let pytest = false;
 let canonical = /\/(?:agent-os|adversarial-review)$/.test(process.env.HAM_REPO || '');
 let nominalSeconds = 360;
+let explicitTimeout = false;
 let valid = true;
 while (args.length && args[0] !== '--') {
   const flag = args.shift();
   if (flag === '--pytest') pytest = true;
   else if (flag === '--canonical') canonical = true;
   else if (flag === '--nominal-timeout') {
+    explicitTimeout = true;
     const raw = args.shift();
     nominalSeconds = Number(raw);
     if (!/^[1-9][0-9]*$/.test(raw || '') || !Number.isSafeInteger(nominalSeconds) || nominalSeconds > 3600) valid = false;
@@ -65,7 +69,14 @@ if (!valid || args.shift() !== '--' || !args.length) {
         runner = canonicalHammerValidation(process.cwd(), paths);
       }
       catch (error) {
-        if (error instanceof TypeError) {
+        if (error instanceof UnsupportedPnpmWorkflowError) {
+          console.error(error.message);
+        } else if (error instanceof ValidationSelectionError) {
+          console.error(error.message);
+          recordHammerPhase('targeted-validation-failed');
+          process.exitCode = 1;
+          valid = false;
+        } else if (error instanceof TypeError) {
           console.error(usage);
           process.exitCode = 64;
           valid = false;
@@ -78,17 +89,35 @@ if (!valid || args.shift() !== '--' || !args.length) {
     if (valid) {
       let output = '', packageImportFault = false;
       let packages = new Set();
-      try { if (canonical) packages = repositoryPythonPackages(process.cwd()); }
+      try { if (canonical && !runner?.required) packages = repositoryPythonPackages(process.cwd()); }
       catch { runner = null; }
       const observeOutput = chunk => {
         output += String(chunk);
         packageImportFault ||= ownPackageImportFault(output, packages);
         output = output.slice(-8192);
       };
-      process.exitCode = runner ? await runBounded(runner.command, runner.args,
-        { env, timeoutMs: loadAwareTimeoutSeconds(nominalSeconds) * 1000, idleMs: LEASE_VALIDATION_IDLE_MS,
-          observeOutput }) : 127;
-      const environmentFault = canonical && (!runner || [76, 78, 127].includes(process.exitCode)
+      const startedFile = join(scratch, 'pnpm-started');
+      const timeoutMs = loadAwareTimeoutSeconds(explicitTimeout ? nominalSeconds
+        : runner?.nominalSeconds || nominalSeconds) * 1000;
+      const deadline = Date.now() + timeoutMs;
+      // A missing startup receipt distinguishes npm/tool provisioning from a
+      // repository script failure. Retry startup once within the same budget.
+      for (let attempt = 0; attempt < 2; attempt++) {
+        process.exitCode = runner ? await runBounded(runner.command, runner.args,
+          { env: runner.startupReceipt ? { ...env, HAM_PNPM_VALIDATION_STARTED_FILE: startedFile } : env,
+            timeoutMs: Math.max(1, deadline - Date.now()), idleMs: LEASE_VALIDATION_IDLE_MS,
+            observeOutput }) : 127;
+        if (!runner?.startupReceipt || existsSync(startedFile) || process.exitCode === 0
+          || process.exitCode >= 124 || Date.now() >= deadline) break;
+      }
+      const startupFault = runner?.startupReceipt && !existsSync(startedFile)
+        && ![124, 125, 130, 143].includes(process.exitCode);
+      if (startupFault) {
+        console.error('hammer-validate: validation-environment-failed; pnpm runner did not start.');
+        recordHammerPhase('validation-environment-failed');
+        process.exitCode = 78;
+      }
+      const environmentFault = canonical && !runner?.required && (!runner || [76, 78, 127].includes(process.exitCode)
         || (process.exitCode !== 0 && process.exitCode < 124
           && packageImportFault));
       if (environmentFault) {
@@ -97,7 +126,7 @@ if (!valid || args.shift() !== '--' || !args.length) {
         process.exitCode = 0;
       }
       // Timeouts, cleanup uncertainty, signals and spawn failures are unknown.
-      if (!environmentFault && process.env.HQ_WORKER_RUN_ID && process.exitCode >= 0 && process.exitCode < 124) {
+      if (!environmentFault && !startupFault && process.env.HQ_WORKER_RUN_ID && process.exitCode >= 0 && process.exitCode < 124) {
         reportHammerProgress(process.exitCode === 0 ? 'validation-passed' : 'validation-failed');
       }
     }

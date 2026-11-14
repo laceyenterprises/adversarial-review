@@ -116,7 +116,13 @@ while :; do
   HAM_PHASE_OUTCOME=targeted-validation-failed
   if [ "${#ham_close_files[@]}" -gt 0 ]; then
     "$HAM_NODE_BIN" "$HAM_CLOSE_ROOT/bin/hammer-validate.mjs" --canonical -- "${ham_close_files[@]}" \
-      || ham_close_finish $? targeted-validation-failed
+      || {
+        ham_close_validation_exit=$?
+        if [ "$ham_close_validation_exit" -eq 78 ]; then
+          ham_close_finish 78 validation-environment-failed
+        fi
+        ham_close_finish "$ham_close_validation_exit" targeted-validation-failed
+      }
   fi
   [ "$(git rev-parse HEAD)" = "$ham_close_saved_head" ] || ham_close_finish 20 head-changed
   export HAM_LOCALLY_VALIDATED_HEAD="$ham_close_saved_head"

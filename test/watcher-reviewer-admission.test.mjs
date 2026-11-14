@@ -130,6 +130,37 @@ test('SEATIDLE-01: queue refresh preserves FIFO and an empty handoff waits for d
   assert.deepEqual(f.starts, [201, 202]);
 });
 
+for (const headSha of ['new-head', undefined]) {
+  test(`a spill reservation is refunded when refresh cannot reuse its head (${headSha})`, () => {
+    const admission = createReviewerAdmissionQueue({ logger: quiet });
+    const refunds = [];
+    const queued = {
+      repoPath: 'example/review-fixture', prNumber: 201,
+      subject: { headSha: 'old-head' }, run() {},
+      retainDepthSpill() { assert.fail('a different or unknown head cannot retain the spill'); },
+      refundDepthSpill(reason) { refunds.push(reason); },
+    };
+    admission.enqueue(queued);
+    const refreshed = { ...queued, subject: { headSha } };
+    admission.enqueue(refreshed);
+    assert.deepEqual(admission.candidates, [refreshed]);
+    assert.deepEqual(refunds, ['candidate-refreshed']);
+  });
+}
+
+test('a same-head refresh replaces a candidate whose spill reservation has ended', () => {
+  const admission = createReviewerAdmissionQueue({ logger: quiet });
+  const queued = {
+    repoPath: 'example/review-fixture', prNumber: 201,
+    subject: { headSha: 'same-head' }, run() {},
+    retainDepthSpill() { return false; },
+  };
+  admission.enqueue(queued);
+  const refreshed = { ...queued };
+  admission.enqueue(refreshed);
+  assert.deepEqual(admission.candidates, [refreshed]);
+});
+
 test('SEATIDLE-01: a refused candidate does not log a successful capacity handoff', async t => {
   const f = fixture(t);
   f.admission.enqueue({

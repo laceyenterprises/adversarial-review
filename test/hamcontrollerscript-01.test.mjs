@@ -135,6 +135,7 @@ return 0
     AUDIT_PATH: join(run, 'audit.json'), REVIEWER: 'codex', AMA_TRAILERS_SHELL: "''" };
   // The real inputs.sh body from Appendix A, rendered with synthetic values.
   const inputs = template.match(/cat > '<<RUN_DIR>>\/inputs\.sh' <<'HAM_INPUTS'\n([\s\S]*?)\nHAM_INPUTS/)[1]
+    .replaceAll('<<TENURE_INPUTS>>', '')
     .replace(/<<([A-Z_]+)>>/g, (_, key) => values[key]);
   writeFileSync(join(run, 'inputs.sh'), `${inputs}\n`);
   writeFileSync(join(run, 'base-head'), shas.reviewed);

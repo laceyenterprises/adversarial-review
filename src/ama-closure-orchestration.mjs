@@ -1,3 +1,5 @@
+import { readPrTenure, queueTenureReview } from './pr-tenure.mjs';
+import { openReviewStateDb, requestReviewRereview } from './review-state.mjs';
 import { readCloserSuccessor, requestCloserSuccessor, settleCloserSuccessor } from './ama/closer-successor.mjs';
 import { repairEpochObservation } from './repair-epochs.mjs';
 import { handoffFinalFixAll } from './ama/final-fix-all.mjs';
@@ -1064,6 +1066,28 @@ async function dispatchAmaClosureFor({
   const snapshotObservedAt = Date.parse(passSnapshot?.observedAt || '');
   const closureLagObservedAt = Number.isFinite(snapshotObservedAt) ? snapshotObservedAt : now();
   throwIfAborted(signal);
+  const tenureHead = candidate?.headSha || currentRevisionRef;
+  if (domainId === 'code-pr' && String(candidate?.prState || reviewStateRow?.pr_state).toLowerCase() === 'open'
+    && reviewStateRow?.reviewer_head_sha
+    && tenureHead && tenureHead !== reviewStateRow.reviewer_head_sha) {
+    try {
+      if (await readPrTenure({ repo: repoPath, prNumber, rootDir, env, signal })) {
+        const db = reviewStateDb || openReviewStateDb(rootDir);
+        try {
+          queueTenureReview({ db, repo: repoPath, prNumber,
+            previousHead: reviewStateRow.reviewer_head_sha, headSha: tenureHead,
+            request: args => requestReviewRereview({ rootDir, db, ...args }) });
+        } finally { if (!reviewStateDb) db.close(); }
+        return withAmaDispatchMetadata({ dispatched: false, skipMergeAgent: true,
+          reason: 'tenure-independent-review-required', exactHeadReview: true,
+          headSha: tenureHead }, { amaEnabled: true });
+      }
+    } catch (error) {
+      logger?.warn?.(`[watcher] Tenure review evidence unavailable: ${error.message}`);
+      return withAmaDispatchMetadata({ dispatched: false, skipMergeAgent: true,
+        reason: 'tenure-evidence-unavailable', recoveryWait: true }, { amaEnabled: true });
+    }
+  }
   let proofScope;
   // Ordinary current-head evaluations must not evict useful proofs by filling
   // the bounded cache with scopes that never perform a proof read.

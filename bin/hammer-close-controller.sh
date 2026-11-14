@@ -167,7 +167,10 @@ export HAM_VERDICT_FILE
 # verdict file. It stays empty until ama-check has written this run's verdict.
 HAM_VERDICT_READY_FILE=""
 export HAM_VERDICT_READY_FILE
+ham_tenure_review_args=()
+if [ "${HAM_TENURE_REVIEW_REQUIRED:-0}" = 1 ]; then ham_tenure_review_args=(--tenure-review); fi
 "$HAM_NODE_BIN" "$HAM_CLOSE_ROOT/bin/ama-check.mjs" \
+  "${ham_tenure_review_args[@]}" \
   --pr "$HAM_RUN_DIR/pr-after.json" \
   --reviews "$HAM_RUN_DIR/reviews.json" \
   --protection "$HAM_RUN_DIR/protection.json" \

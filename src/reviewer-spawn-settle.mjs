@@ -1,4 +1,5 @@
 import { parseReviewerBudgetDeferral, REVIEWER_GITHUB_BUDGET_DEFERRED } from './reviewer-github-budget.mjs';
+import { formatTenureReviewRange, readTenureReviewRange } from './pr-tenure.mjs';
 import { withRepositoryStateCycle } from './repository-state-lock.mjs';
 import { loadAwareTimeoutMs } from './load-aware-timeout.mjs';
 import { ownReviewerSizeFailure } from './reviewer-size-owner.mjs';
@@ -1046,7 +1047,7 @@ async function spawnReviewerOnceWithAccount({
       onReviewerRuntimeStarted();
       const runtimeRequest = {
         model: reviewerModel,
-        prompt: '',
+        prompt: formatTenureReviewRange(readTenureReviewRange({ rootDir, repo, prNumber, headSha: reviewerHeadSha })),
         subjectContext: {
           domainId,
           repo,

@@ -147,6 +147,7 @@ exec ${shellQuote(realGit)} "$@"
     TARGET_REMEDIATION_SHA: head, HQ_OWNER: 'synthetic-owner', REVIEWER: 'codex',
     RISK_CLASS: 'low', MERGE_METHOD: 'squash', AUDIT_PATH: join(run, 'audit.json'),
     AMA_TRAILERS_SHELL: "''", STRICT_NON_BLOCKING_REMEDIATION: 'true',
+    TENURE_INPUTS: '', TENURE_REVIEW_ARG: '',
   };
   const metavariables = {
     'numeric-review-id': '1', 'plan.json': join(run, 'plan.json'),

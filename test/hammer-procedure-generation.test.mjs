@@ -276,6 +276,7 @@ test('HAMNODEBIN-01: persisted resume inputs restore the runtime and honor the l
   writeFileSync(join(dir, 'base-head'), 'a'.repeat(40));
   const script = join(dir, 'inputs.sh');
   writeFileSync(script, inputs.replaceAll('<<ROOT_DIR>>', root).replaceAll('<<RUN_DIR>>', dir)
+    .replaceAll('<<TENURE_INPUTS>>', '')
     .replaceAll(/<<[A-Z_]+>>/g, 'fixture'));
   const result = spawnSync('/bin/bash', ['-euc', `source "$1"
 unset HAM_NODE_BIN

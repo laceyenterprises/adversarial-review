@@ -112,6 +112,7 @@ import {
   reviewWorkerClassFallback,
 } from './review-worker-class-fallback.mjs';
 import { geminiRemediatedReviewerExclusions } from './gemini-remediated-head.mjs';
+import { readPrTenure, tenureReviewRange, queueTenureReview, tenureReviewerAllowed } from './pr-tenure.mjs';
 import { packTokensForSubject } from './reviewer-burst-lease.mjs';
 import {
   fetchReviewsForHeadForDedup,
@@ -994,10 +995,31 @@ export async function processReviewSubject(entry, ctx) {
       }
       // REBASETRAILER-01: one memoized head-producer read per poll. The review
       // refresh suppression and the gate below both consume this decision.
+      let prTenure = null;
+      let tenureReviewRequired = false;
+      if (effectiveDomainId === CODE_PR_DOMAIN_ID && existing && !subject.terminal) {
+        try {
+          prTenure = await (ctx.readPrTenure || readPrTenure)({
+            repo: repoPath, prNumber, headSha: subject.headSha, rootDir: ROOT });
+          const previousHead = (existing.review_status !== 'posted'
+            && tenureReviewRange(existing.rereview_reason, subject.headSha)?.previousHead)
+            || existing.reviewer_head_sha || latestReviewedHeadSha({ db, repoPath, prNumber });
+          tenureReviewRequired = Boolean(prTenure && previousHead && previousHead !== subject.headSha);
+          if (tenureReviewRequired && ['posted', 'pending', 'pending-upstream', 'ci-blocked'].includes(existing.review_status)) {
+            queueTenureReview({ db, repo: repoPath, prNumber, previousHead, headSha: subject.headSha,
+              request: args => requestReviewRereview({ rootDir: ROOT, db, ...args }) });
+            existing = stmtGetReviewRow.get(repoPath, prNumber);
+          }
+        } catch (error) {
+          console.warn(`[watcher] tenure review routing deferred for ${repoPath}#${prNumber}: ${error.message}`);
+          return;
+        }
+      }
       let headCloserCommitSuppressionResolver = null;
       const resolveHeadCloserCommitSuppression = () => (headCloserCommitSuppressionResolver
         ||= createHeadCloserCommitSuppressionResolver({
           repoPath, prNumber, headSha: subject.headSha, execFileImpl: execFileAsync, logger: console,
+          ...(prTenure ? { readPrTenureImpl: async () => prTenure } : {}),
         }))();
       async function projectGateStatusSafe(reviewRow) {
         if (!subject.headSha) return null;
@@ -1559,7 +1581,8 @@ export async function processReviewSubject(entry, ctx) {
       });
       // CYCLECAPHAM-01: a capped PR goes to the hammer for final adjudication on
       // every tick, instead of waiting on an operator label.
-      const routeReviewCycleCapToHammer = (row) => maybeRouteReviewCycleCapToHammer({
+      const routeReviewCycleCapToHammer = (row) => tenureReviewRequired
+        ? Promise.resolve({ handled: false }) : maybeRouteReviewCycleCapToHammer({
         rootDir: ROOT,
         db,
         repoPath,
@@ -1605,7 +1628,7 @@ export async function processReviewSubject(entry, ctx) {
       // That suppression is state-aware rather than raw-label-based so stale
       // labels and `awaiting-rereview` handoffs still re-arm review.
       let cappedClosure = false;
-      if (!explicitIntentForHead() && effectiveDomainId === CODE_PR_DOMAIN_ID && existing?.reviewer_head_sha !== subject.headSha && !transferredHeadReview && !exhaustedHeadVerdict) {
+      if (!tenureReviewRequired && !explicitIntentForHead() && effectiveDomainId === CODE_PR_DOMAIN_ID && existing?.reviewer_head_sha !== subject.headSha && !transferredHeadReview && !exhaustedHeadVerdict) {
         const { effectiveRoundBudget } = resolveRemediationBudget();
         cappedClosure = routeCappedReviewToClosure({ db, stmtGetReviewRow, repo: repoPath,
           prNumber, headSha: subject.headSha, row: existing,
@@ -1626,7 +1649,7 @@ export async function processReviewSubject(entry, ctx) {
       // Reconcile certain budget refusals before CI admission, retry logging or
       // scheduling. The posted handler re-evaluates the shared next action from
       // live evidence on every pass, including expired/satisfied observer waits.
-      if (effectiveDomainId === CODE_PR_DOMAIN_ID && !subject.terminal
+      if (!tenureReviewRequired && effectiveDomainId === CODE_PR_DOMAIN_ID && !subject.terminal
         && ['pending', 'pending-upstream', 'ci-blocked'].includes(existing?.review_status)
         && !explicitIntentForHead() && !isExactHeadReviewRecoveryRequested(existing)
         && !isFleetSelfRepairTrailerOnlyRereviewReason(existing?.rereview_reason)
@@ -1644,7 +1667,7 @@ export async function processReviewSubject(entry, ctx) {
       // Restore queued rows too: an earlier stale-head refresh may already
       // have parked this head behind the final-push reviewer suppression.
       let finalRoundCloserOwned = false;
-      if (effectiveDomainId === CODE_PR_DOMAIN_ID && existing && !subject.terminal
+      if (!tenureReviewRequired && effectiveDomainId === CODE_PR_DOMAIN_ID && existing && !subject.terminal
         && ['posted', 'pending', 'pending-upstream', 'ci-blocked'].includes(existing.review_status)
         && !explicitIntentForHead() && !isExactHeadReviewRecoveryRequested(existing)
         && !isOrphanHeadReviewRequested(existing, subject.headSha) && !transferredHeadReview && !exhaustedHeadVerdict) {
@@ -2003,7 +2026,11 @@ export async function processReviewSubject(entry, ctx) {
       let baseRoute = routeSubject(subject, {
         domainId,
         geminiReviewerMode: 'off',
-        excludedReviewerModels: geminiRemediatedReviewerExclusions({ rootDir: ROOT, repo: repoPath, prNumber }),
+        excludedReviewerModels: [...new Set([
+          ...geminiRemediatedReviewerExclusions({ rootDir: ROOT, repo: repoPath, prNumber }),
+          ...(tenureReviewRequired ? ['codex', 'claude', 'gemini', 'grok']
+            .filter(model => !tenureReviewerAllowed(prTenure, model)) : []),
+        ])],
       });
       // CFG-02 round-1 review B3 fix (2026-05-30): routeSubject can now
       // return a tagged `configBroken: true` sentinel when a runtime
@@ -3127,7 +3154,7 @@ export async function processReviewSubject(entry, ctx) {
         reviewStatus: existing?.review_status || 'pending',
         reviewAttempts: existing?.review_attempts || 0,
       });
-      if (roundBudgetDecision.skip && !handoffReviewAdmission) {
+      if (roundBudgetDecision.skip && !handoffReviewAdmission && !tenureReviewRequired) {
         return;
       }
 
@@ -3160,7 +3187,7 @@ export async function processReviewSubject(entry, ctx) {
       };
 
       if (!explicitIntentForHead() && !isExplicitOperatorReviewRetrigger(existing) && !isOrphanHeadReviewRequested(existing, subject.headSha)
-        && !handoffReviewAdmission) {
+        && !handoffReviewAdmission && !tenureReviewRequired) {
         // The HAM head suppresses reviewers, not reconciliation of its owner.
         // The cap route still passes through the closer's eligibility/lease gates.
         if ((await routeReviewCycleCapToHammer(current)).handled) return;
@@ -3268,7 +3295,9 @@ export async function processReviewSubject(entry, ctx) {
         const body = buildReviewCycleCapEscalationComment({
           cap: cycleCapConfig.cap,
           recentVerdicts,
-        });
+        }) + (tenureReviewRequired
+          ? '\n\nThis tenured remediation head still requires independent exact-head review. The cycle cap pauses automatic review; HAM validation cannot authorize merging this unreviewed head.'
+          : '');
         if (!cycleCapDecision.alreadyEscalated) {
           try {
             await postReviewCycleCapEscalation(octokit, {
@@ -3322,7 +3351,9 @@ export async function processReviewSubject(entry, ctx) {
         if (!alreadyCapPaused) {
           stmtMarkReviewCycleCapPaused.run(
             escalatedAt,
-            `[review-cycle-cap] ${cycleCapConfig.cap} successive review/remediation cycles without converging; routed to the hammer for final adjudication (no further review cycle); operator overrides: operator-approved, merge-agent-requested, ${PAUSED_FOR_REDESIGN_LABEL}`,
+            tenureReviewRequired
+              ? `[review-cycle-cap] ${cycleCapConfig.cap} successive review/remediation cycles without converging; automatic review paused; independent exact-head review remains required for this tenured remediation head`
+              : `[review-cycle-cap] ${cycleCapConfig.cap} successive review/remediation cycles without converging; routed to the hammer for final adjudication (no further review cycle); operator overrides: operator-approved, merge-agent-requested, ${PAUSED_FOR_REDESIGN_LABEL}`,
             repoPath,
             prNumber,
           );
@@ -3464,6 +3495,17 @@ export async function processReviewSubject(entry, ctx) {
         },
         async run() {
           preflightConsumed = true;
+          // Check the final route after quota/depth/account fallbacks, before
+          // claiming the row or spawning any reviewer.
+          if (tenureReviewRequired && !tenureReviewerAllowed(prTenure, route.reviewerModel)) {
+            this.refundDepthSpill('tenure-author-family');
+            return { dispatched: false, reason: 'tenure-author-family' };
+          }
+          if (tenureReviewRequired && (await resolveHeadCloserCommitSuppression())?.suppressed) {
+            this.retainWakeForCapacity();
+            this.refundDepthSpill('tenure-live-writer');
+            return { dispatched: false, reason: 'tenure-live-writer' };
+          }
           if (reviewerHandoffPending(repoPath, prNumber)) {
             this.retainWakeForCapacity();
             this.refundDepthSpill('inline-final-hammer-pending');
@@ -4266,6 +4308,9 @@ export async function processReviewSubject(entry, ctx) {
                 }),
                 onGeminiQuotaFallback: ({ reviewerModel, codexBrokerProvider, reviewerSessionUuid: nextSessionUuid, quotaBlocked }) => {
                   if (quotaBlocked) throw new Error('Gemini fallback route is quota blocked');
+                  if (tenureReviewRequired && !tenureReviewerAllowed(prTenure, reviewerModel)) {
+                    throw new Error('tenure-author-family');
+                  }
                   transferGeminiFallbackSession(db, {
                     repo: repoPath, prNumber, previousSessionUuid: reviewerSessionUuid,
                     reviewerSessionUuid: nextSessionUuid, reviewerModel, codexBrokerProvider,
@@ -4352,6 +4397,9 @@ export async function processReviewSubject(entry, ctx) {
               };
               const pipelineEnabled = isPipelineEnabled(domainAdapterSet.domainConfig);
               if (spawnReviewerArgs.reviewerArm) spawnReviewerArgs.onReviewerArmFallback = (fallback) => {
+                if (tenureReviewRequired && !tenureReviewerAllowed(prTenure, fallback.reviewerModel)) {
+                  throw new Error('tenure-author-family');
+                }
                 // Arm admission fails before runtime start: retain the same
                 // session and do not touch Gemini quota/probe reservations.
                 transferReviewerFallbackSession(db, {

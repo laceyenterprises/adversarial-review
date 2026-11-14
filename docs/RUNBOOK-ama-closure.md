@@ -3477,14 +3477,15 @@ terminal validation, then request the re-review.
 
 The eligible hammer wake recognizes that same recorded `workerPushedHeadSha`
 for the reviewed head: `stale-head` alone does not suppress its wake after CI
-turns green. Every other snapshot miss is retained. The closeout comment names
-the hammer as the next owner, and no re-review is queued for this head. An
+turns green. Every other snapshot miss is retained. For an untenured PR, the closeout comment names
+the hammer as the next owner, and no re-review is queued for this head. A tenured
+changed head instead queues independent exact-head review with its remediation range. An
 unrelated push remains `stale-head`; a round without a push keeps the ordinary
 current-head wake rule. Verify after deployment that the next suppressed
 comment-only worker push wakes and reaches the hammer on the first green-CI
 watcher pass, without a manual re-review request.
 
-CLOSERDEADLOCK-01: the watcher explicitly keeps completed comment-only
+CLOSERDEADLOCK-01: for untenured PRs, the watcher explicitly keeps completed comment-only
 final-round push heads in the posted closer lane, suppressing stale-review
 auto-refresh before reviewer admission. It matches the current head against
 `findFinalRemediationPushJob` and requires a completed comment-only final round.
@@ -4076,7 +4077,7 @@ showed the old behaviour: "operator attention required", then about 10h at
   in `review_cycle_verdicts` pins the original reviewed head independently of
   admission resets that clear `reviewer_head_sha`; the live head remains the
   remediation target, never substituted as reviewed evidence.
-- The closer treats the PR as a final-hammer close and admits the unreviewed
+- For an untenured PR, the closer treats the PR as a final-hammer close and admits the unreviewed
   head of the last remediation push. It does not admit it while a remediation
   job still owns the reviewed head. The hammer prompt gains a
   "CYCLECAPHAM-01 — review cycle cap: you are the final adjudicator" section.
@@ -4084,6 +4085,8 @@ showed the old behaviour: "operator attention required", then about 10h at
   `withdrawn-by-hammer` with exact-head evidence (the HAMFINAL-01 record shape),
   and merges under its lease with validated HAM evidence. Otherwise it posts
   `HAM closing status — no merge.` with its reasons. It requests no re-review.
+  Tenured changed heads retain independent review admission; a hard cycle cap
+  cannot turn their missing review into merge authorization.
 - A recorded no-merge decision on this route is final. Unlike the HAMBG-02 table
   above, the closer returns `review-cycle-cap-hammer-final-no-merge`
   (`needsOperator: true`) and launches no retry hammer. An exit without a close
@@ -6566,6 +6569,33 @@ Pending CI alone is work-complete; unprobed withheld-head CI is recorded as
 `reported-pending`. The proven-head CI wait remains unchanged.
 
 HAM finding authority is scoped per reviewer family on the same reviewed head. An authoritative review from any family on a newer descendant head supersedes older-head citations. Finding disputes use the same freshness rule; the hammer's withdrawal is final and requests no re-review. The hammer prompt includes the effective strict non-blocking policy; ama-check and the in-lease gate resolve module config and code-pr domain policy with the same precedence as daemon closure.
+
+For a PR whose stable build launch exposes `tenureId`, remediation that changes
+the reviewed head requires an independent exact-head review outside the author's
+harness family. `HAM-Validated-Head` and `HAM-Terminal-Remediation-Head` do not
+waive this requirement. The watcher also applies it before a completion receipt
+arrives, so every changed head of a tenured PR remains reviewable. An unavailable
+launch read defers scheduling; an available launch without `tenureId` uses the
+existing untenured behavior.
+When an exact-head completion identifies another stage of the same tenure,
+the reviewer also excludes that stage's harness family using the existing
+reviews-next-round family predicate. Live publisher custody remains a scheduling
+wait until the writer releases it; it never certifies the tenured head.
+
+Tenured remediator dispatches use the native HQ lane because the app translator
+does not forward the PR alias. Both remediator and closer native commands carry
+`--pr`; agent-os owns binding and stage eligibility. No worker class or credential
+principal changes. Closer inputs carry `HAM_TENURE_REVIEW_REQUIRED=1`, and
+`ama-check --tenure-review` is a refusal-only input for changed heads. The
+in-lease check repeats the same requirement after any CI repair or rebase.
+These inputs never authorize a merge. `strict_mode`, required checks, leases,
+and the existing review-cycle cap still apply. If the cycle cap pauses the
+independent review, the PR remains unmergeable through the HAM exemption.
+
+The durable review request's `rereview_reason` contains
+`tenure-independent-review: <previous-reviewed-sha>..<new-sha>`. Both full and
+slim review prompts include that range. A later head cannot consume its range,
+and a completed exact-head review is not reset by a stale closure request.
 
 
 ### Orphan watchdog evidence boundaries

@@ -10,6 +10,7 @@ import { loadConfigCached } from './config-loader.mjs';
 import { loadDomainConfig } from './domain-config.mjs';
 import { resolveMergeAuthorityConfigFromDomain } from './domain-policy.mjs';
 import { join } from 'node:path';
+import { tenureReviewReason } from './pr-tenure.mjs';
 
 export function remediationCloseout({ rootDir, job, headSha, workerPushedHeadSha = null,
   lifecycle = null, ciGate = null, completedAt, snapshot = null }) {
@@ -21,9 +22,11 @@ export function remediationCloseout({ rootDir, job, headSha, workerPushedHeadSha
   const head = headSha || lifecycle?.headSha || job.revisionRef;
   const workerPublishedHead = Boolean(workerPushedHeadSha && head)
     && String(workerPushedHeadSha).toLowerCase() === String(head).toLowerCase();
-  const fullReviewRequired = ['conflict-primary-unproven', 'final-fix-all'].includes(job.closureHandoff?.reason)
+  const tenureRange = job.remediationWorker?.originTenureId && workerPublishedHead
+    ? tenureReviewReason(job.revisionRef, head) : null;
+  const fullReviewRequired = Boolean(tenureRange) || (['conflict-primary-unproven', 'final-fix-all'].includes(job.closureHandoff?.reason)
     && job.closureHandoff.review === 'full' && workerPublishedHead
-    && String(head).toLowerCase() !== String(job.revisionRef).toLowerCase();
+    && String(head).toLowerCase() !== String(job.revisionRef).toLowerCase());
   let leases = snapshot?.observations?.leases;
   if (!leases) {
     try { leases = { closer: readAmaCloserLease(rootDir, { repo: job.repo, prNumber: job.prNumber, headSha: head }) }; }
@@ -106,10 +109,11 @@ export function remediationCloseout({ rootDir, job, headSha, workerPushedHeadSha
       // evidence. An unreadable descendant stays unknown in the shared table.
     } });
   const decision = nextAction(derived);
-  return Object.freeze({ snapshot: derived, decision });
+  return Object.freeze({ snapshot: derived, decision, ...(tenureRange ? { tenureReviewRange: tenureRange } : {}) });
 }
 
 export function closeoutRereview(shared, reason = null) {
+  reason = shared.tenureReviewRange || reason;
   const decision = shared.decision;
   // Register durable admission intent before completing a non-final job. The
   // watcher, rather than the terminal queue record, observes CI settlement:

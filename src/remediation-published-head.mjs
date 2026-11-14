@@ -139,9 +139,10 @@ export function completeWorkerPublishedHead({
         } else {
           const outcome = requestReviewRereviewImpl({ rootDir, repo: job.repo, prNumber: job.prNumber,
             explicitReviewRequest: { requestId: `remediation:${job.jobId}:${round.round}`, actor: 'remediation-watch' },
-            requestedAt: completedAt, reason: reply?.reReview?.reason || null, targetRevisionRef: headSha });
+            requestedAt: completedAt, reason: reReview.reason, targetRevisionRef: headSha,
+            ...(shared.tenureReviewRange ? { preserveBudgets: true } : {}) });
           if (!outcome?.triggered && outcome?.status !== 'already-pending') shared = refusedCloseout(shared, outcome);
-          reReview = { ...buildRereviewResult({ requested: true, reason: reply?.reReview?.reason || null,
+          reReview = { ...buildRereviewResult({ requested: true, reason: reReview.reason,
             outcome: { ...outcome, requestedAt: completedAt } }), nextAction: shared.decision };
           if (outcome?.triggered || outcome?.status === 'already-pending') {
             const wake = requestRereviewWakeImpl({ rootDir, repo: job.repo, prNumber: job.prNumber,

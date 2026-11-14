@@ -1,3 +1,4 @@
+import { readPrTenure } from './pr-tenure.mjs';
 import { queueAdmissionCallback } from './finalization/queue-closer.mjs';
 import { routeFinalizationWriter } from './finalization/queue-routing-boundary.mjs';
 import { captureReadyFindings } from './findings-backlog.mjs';
@@ -457,6 +458,15 @@ async function runDaemonCleanMergeAttemptInner({
   const base = candidate?.baseBranch;
   const validatedHead = docsFastPath?.headSha || gateSnapshot?.reviewedHeadSha || reviewState?.headSha || null;
   const NOT_TAKEN = (reason, extra = {}) => ({ disposition: DAEMON_MERGE_DISPOSITION.NOT_TAKEN, reason, ...extra });
+  try {
+    if (await readPrTenure({ repo: repoPath, prNumber, rootDir, env })
+      && (candidate?.headSha !== reviewState?.headSha
+        || !isDaemonMergeReviewAllowed(reviewState, { strictMode: cfg?.strictMode !== false }))) {
+      return NOT_TAKEN('tenure-independent-review-required', { exactHeadReview: true });
+    }
+  } catch {
+    return NOT_TAKEN('tenure-evidence-unavailable');
+  }
   const stopHold = () => {
     const reason = fleetStopReason({ env });
     return reason ? { disposition: DAEMON_MERGE_DISPOSITION.DEFERRED, reason,

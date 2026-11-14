@@ -1390,7 +1390,8 @@ function requestReviewRereview({
           // a legitimate fresh review and must not inherit the poisoned attempt
           // budget from the previous commit. Key this on the revision move, not
           // on which release statement happened to leave reviewer handle fields.
-          ...(pendingRevisionRefMoved ? ['review_attempts = 0', 'last_attempted_at = NULL'] : []),
+          // A tenure review explicitly retains its bounded PR-wide budgets.
+          ...(pendingRevisionRefMoved && !preserveBudgets ? ['review_attempts = 0', 'last_attempted_at = NULL'] : []),
           'posted_at = NULL',
           'failed_at = NULL',
           'failure_message = NULL',
@@ -1401,10 +1402,12 @@ function requestReviewRereview({
           'reviewer_timeout_ms = NULL',
           'reviewer_lease_expires_at = NULL',
           'quota_reset_at_utc = NULL',
-          'infra_auto_recover_attempts = 0',
-          'review_population_retry_attempts = 0',
-          'review_population_retry_last_at = NULL',
-          'review_population_retry_head_sha = NULL',
+          ...(!preserveBudgets ? [
+            'infra_auto_recover_attempts = 0',
+            'review_population_retry_attempts = 0',
+            'review_population_retry_last_at = NULL',
+            'review_population_retry_head_sha = NULL',
+          ] : []),
         ];
         const pendingParams = [];
         // REVIEWAGE-02: a moved head starts a new admission wait. Same-head

@@ -12,6 +12,7 @@ import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { renderHammerProcedure } from '../src/hammer-procedure.mjs';
 import { loadAwareTimeoutMs } from '../src/load-aware-timeout.mjs';
+import { composeCloserPrompt } from '../src/ama/dispatch-closer.mjs';
 
 const root = resolve(import.meta.dirname, '..');
 const template = readFileSync(join(root, 'templates/hammer-prompt.md'), 'utf8');
@@ -79,6 +80,7 @@ case "$(basename "$path")" in
   primary-change-context.mjs) echo '{}' ;;
   ama-check.mjs)
     log "ama-check marker=\${HAM_VERDICT_READY_FILE:-empty}"
+    case " $* " in *' --tenure-review '*) log tenure-review-required ;; esac
     case "\${FIXTURE_AMA_CHECK:-eligible}" in
       fail) echo 'synthetic predicate build failure' >&2; exit 1 ;;
       stale) verdict_head=$(printf '%040d' 0) ;;
@@ -101,7 +103,7 @@ case "$(basename "$path")" in
 esac
 `;
 
-function closeFixture(t) {
+function closeFixture(t, { tenured = false } = {}) {
   const dir = mkdtempSync(join(tmpdir(), 'hamverdictready-'));
   t.after(() => rmSync(dir, { recursive: true, force: true }));
   const run = join(dir, 'run');
@@ -116,7 +118,13 @@ function closeFixture(t) {
     PR_URL: 'https://github.com/fixture/repo/pull/42', REVIEWED_SHA: head, TARGET_REMEDIATION_SHA: head,
     RISK_CLASS: 'low', MERGE_METHOD: 'squash', HQ_OWNER: 'fixture', AUDIT_PATH: join(run, 'audit.json'),
     REVIEWER: 'synthetic-reviewer', AMA_TRAILERS_SHELL: "''" };
-  const inputs = template.match(/cat > '<<RUN_DIR>>\/inputs\.sh' <<'HAM_INPUTS'\n([\s\S]*?)\nHAM_INPUTS/)[1]
+  const prompt = composeCloserPrompt({ templateBody: template, rootDir: root, scratchDir: run,
+    hqRoot: dir, repo: values.REPO, prNumber: 42, prUrl: values.PR_URL,
+    reviewedSha: head, targetRemediationSha: head, riskClass: 'low',
+    mergeMethod: 'squash', hqOwnerUser: 'fixture', auditPath: values.AUDIT_PATH,
+    reviewer: 'synthetic-reviewer', amaTrailers: '',
+    tenureId: tenured ? 'ten_fixture' : null });
+  const inputs = prompt.match(/cat > '[^']+\/inputs\.sh' <<'HAM_INPUTS'\n([\s\S]*?)\nHAM_INPUTS/)[1]
     .replace(/<<([A-Z_]+)>>/g, (_, key) => values[key]);
   writeFileSync(join(run, 'inputs.sh'), `${inputs}\n`);
   writeFileSync(join(run, 'base-head'), head);
@@ -167,6 +175,14 @@ return 0
 }
 
 const mergeCalls = events => events.filter(event => event.startsWith('merge-call '));
+
+test('tenured dispatch inputs reach the shipped controller predicate for an unchanged reviewed head', async t => {
+  const f = closeFixture(t, { tenured: true });
+  const result = await f.close();
+  assert.equal(result.status, 0, `${result.stderr}\n${result.stdout}`);
+  assert.ok(f.events().includes('tenure-review-required'));
+  assert.equal(mergeCalls(f.events()).length, 1, 'unchanged reviewed head retains the existing merge path');
+});
 
 test('an eligible exact-head verdict built by the shipped controller passes the ownership gate and reaches the merge call', async t => {
   const f = closeFixture(t);

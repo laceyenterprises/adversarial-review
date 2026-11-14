@@ -1421,12 +1421,27 @@ Legacy durable jobs created before `baseBranch` was persisted are hydrated from 
 
 ## MSM two-path merge authority (current)
 
+Worker tenure changes scheduling and review provenance, not merge authority.
+AMA reads the stable PR opener's launch through the public dispatch read model.
+A missing `tenureId` retains the untenured path. Tenured remediator dispatches
+use the native HQ transport with the PR alias; closer dispatches already carry
+that alias and retain their configured merge-authority class and principal.
+After a tenured PR's reviewed head changes, AMA queues independent exact-head
+review instead of accepting HAM terminal-remediation certificates, closer
+ownership, or carried review evidence as a no-re-review exemption. This also
+covers publication before a stage completion receipt becomes visible.
+The request records `previous reviewed head..current head` and preserves
+attempt counters. The normal claim CAS, live-writer admission, CI admission,
+review-cycle cap and strict merge policy remain in force. Exhaustion cannot
+turn a missing independent review into merge authority.
+
 Automatic review defers an exact head owned by a live closer publication or
 merge lease, including rebased worker commits without closer trailers. Publication
 intent and exact mutation results are serialized with reviewer ownership reads;
 a concurrent publication probe defers until its result is available. These are
 scheduling reasons, not review or merge authority. Explicit operator re-review
-remains available; unrelated pushes receive normal review.
+remains available; unrelated pushes receive normal review. The tenure rule above
+takes precedence over this automatic review suppression.
 
 Merged lease release preserves its successful result if publication retirement
 fails, warning on stderr. Retained publication custody still requires a live

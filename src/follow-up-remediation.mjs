@@ -1,4 +1,5 @@
 import { hqRemediationWorkerClass } from './remediation-worker-class.mjs';
+import { readPrTenure } from './pr-tenure.mjs';
 import { prepareRemediationBuilder, readRemediationBuilderEvidence, stopRecoveredBuilderRemediator } from './remediation-builder-authorship.mjs';
 import { cleanupServiceCodexAuth } from './codex-service-home.mjs';
 import { withRepositoryStateCycle } from './repository-state-lock.mjs';
@@ -541,6 +542,7 @@ async function dispatchRemediationViaHq({
   execFileImpl = execFileAsync,
   env = process.env,
   now = () => new Date().toISOString(),
+  readPrTenureImpl = readPrTenure,
 } = {}) {
   if (requiresProducedAttestation && (!jobId || !branch)) {
     throw new Error('final-fix-all HQ dispatch requires jobId and branch');
@@ -565,7 +567,10 @@ async function dispatchRemediationViaHq({
   // explicitly pinned non-blocking Codex rounds so the override takes effect.
   // It also forwards neither --pr/--branch nor --allow-conflicted-base, so a
   // CONFLICTING PR's round takes the direct transport too (REMCONFLICT-01).
-  const useAppContract = appMode === 'agent-os' && !modelResolution && !allowConflictedBase
+  const prTenure = await readPrTenureImpl({ repo, prNumber, env });
+  // The released app dispatch translator does not forward the PR alias.
+  // Tenured stages use the existing native lane, retaining their role class.
+  const useAppContract = !prTenure && appMode === 'agent-os' && !modelResolution && !allowConflictedBase
     && !requiresProducedAttestation;
   const hqBin = resolveHqBin(env);
   const dispatchEnv = { ...env };
@@ -669,6 +674,7 @@ async function dispatchRemediationViaHq({
     model: normalizeRemediationWorkerClass(actualWorkerClass) || actualWorkerClass,
     ...(actualWorkerClass === hqRemediationWorkerClass(workerClass) ? modelResolution || {} : {}),
     workerClass: actualWorkerClass,
+    ...(prTenure ? { originTenureId: prTenure.tenureId } : {}),
     state: 'spawned',
     spawnedAt: now(),
     promptPath,
@@ -2363,8 +2369,9 @@ async function reconcileFollowUpJobWithinRepositoryCycle({
         if (rereview.requested) {
           const outcome = requestReviewRereviewImpl({ rootDir, repo: job.repo, prNumber: job.prNumber,
             explicitReviewRequest: { requestId: `remediation:${job.jobId}:${job.remediationPlan.currentRound}`, actor: 'remediation-watch' },
-            requestedAt: completedAt, reason: reply.reReview.reason, targetRevisionRef: closeout.decision.head });
-          rereview = { ...buildRereviewResult({ requested: true, reason: reply.reReview.reason,
+            requestedAt: completedAt, reason: rereview.reason, targetRevisionRef: closeout.decision.head,
+            ...(closeout.tenureReviewRange ? { preserveBudgets: true } : {}) });
+          rereview = { ...buildRereviewResult({ requested: true, reason: rereview.reason,
             outcome: { ...outcome, requestedAt: completedAt } }), nextAction: closeout.decision };
         }
       } else if (!evidenceOnlyCompletion) {
@@ -2449,7 +2456,8 @@ async function reconcileFollowUpJobWithinRepositoryCycle({
       if (rereview.requested) {
         const outcome = requestReviewRereviewImpl({ rootDir, repo: job.repo, prNumber: job.prNumber,
           explicitReviewRequest: { requestId: `remediation:${job.jobId}:${job.remediationPlan.currentRound}`, actor: 'remediation-watch' },
-          requestedAt: completedAt, reason: rereview.reason, targetRevisionRef: closeout.decision.head });
+          requestedAt: completedAt, reason: rereview.reason, targetRevisionRef: closeout.decision.head,
+          ...(closeout.tenureReviewRange ? { preserveBudgets: true } : {}) });
         rereview = { ...buildRereviewResult({ requested: true, reason: rereview.reason,
           outcome: { ...outcome, requestedAt: completedAt } }), nextAction: closeout.decision };
       }

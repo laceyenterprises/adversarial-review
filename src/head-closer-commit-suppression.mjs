@@ -1,4 +1,5 @@
 import { activeHammerPublication, publicationRoot } from './ama/hammer-publication-ownership.mjs';
+import { readPrTenure } from './pr-tenure.mjs';
 import { loadAwareTimeoutMs } from './load-aware-timeout.mjs';
 import { createHistoryReader } from './ama/history-reader.mjs';
 import { exactHammerValidation } from './ama/hammer-head-validation.mjs';
@@ -569,10 +570,18 @@ export async function getHeadCloserCommitSuppression({
   sleepImpl = (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
   getuidImpl = process.getuid,
   statImpl = stat,
+  env = process.env,
+  readPrTenureImpl = readPrTenure,
 } = {}) {
   const sha = String(headSha || '').trim();
   if (!repoPath || !sha) return { suppressed: false, reason: null };
+  const prTenure = await readPrTenureImpl({ repo: repoPath, prNumber, rootDir, env });
   const active = activeHammerPublicationImpl({ rootDir, repo: repoPath, prNumber, headSha: sha });
+  if (prTenure) {
+    // Retain live-writer custody as a wait, never as a terminal head proof.
+    return active ? { suppressed: true, reason: 'closer-publication-unconfirmed', headSha: sha }
+      : { suppressed: false, reason: 'tenure-independent-review-required', headSha: sha };
+  }
   if (active) return active;
   // Daemon-robust: the terminal-closer identity is carried in the commit message
   // (`Closed-By: hammer` trailer), which local git reads without gh auth. The remote

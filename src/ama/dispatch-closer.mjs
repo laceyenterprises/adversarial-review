@@ -1,3 +1,4 @@
+import { readPrTenure } from '../pr-tenure.mjs';
 import { requestCloserSuccessor, settleCloserSuccessor } from './closer-successor.mjs';
 import { samePrHammerHolderWorktreePaths } from './branch-holder-paths.mjs';
 export { samePrHammerHolderWorktreePaths } from './branch-holder-paths.mjs';
@@ -4381,8 +4382,11 @@ function closerTemplateValues({
   amaTrailers,
   reviewCycleExhausted = false,
   strictNonBlockingRemediation = true,
+  tenureId = null,
 }) {
   return {
+    TENURE_REVIEW_ARG: tenureId ? '--tenure-review ' : '',
+    TENURE_INPUTS: tenureId ? 'export HAM_TENURE_REVIEW_REQUIRED=1\n' : '',
     OPERATOR_LABEL_GATES: OPERATOR_LABEL_GATES.map(g => `- ${g.checks.join(" / ")}: ${g.label}`).join("\n"),
     PR_URL: prUrl,
     REPO: repo,
@@ -4410,7 +4414,10 @@ function closerTemplateValues({
 }
 
 export function composeCloserPrompt(inputs) {
-  return substituteTemplate(splitHammerPrompt(inputs.templateBody).prompt, closerTemplateValues(inputs));
+  const tenureContext = inputs.tenureId
+    ? 'This PR has worker tenure. If this stage changes the reviewed head, publish the remediation and exit for an independent exact-head review. For this PR, this rule overrides every no-re-review instruction in the procedure and appendices. HAM validation cannot waive that review. Keep your merge-authority class and principal; merge only after an independent review of the current head.\n\n'
+    : '';
+  return tenureContext + substituteTemplate(splitHammerPrompt(inputs.templateBody).prompt, closerTemplateValues(inputs));
 }
 
 export function composeCloserReference(inputs) {
@@ -4602,11 +4609,13 @@ export async function resolveHamTerminalRemediationEvidence({
   logger = console,
   env = process.env,
   signal,
+  readPrTenureImpl = readPrTenure,
 } = {}) {
   throwIfAborted(signal);
   const reviewedHead = String(reviewState?.headSha || '');
   const currentHead = String(prMetadata?.headSha || '');
   if (!reviewedHead || !currentHead || reviewedHead === currentHead) return null;
+  if (await readPrTenureImpl({ repo: repoPath, prNumber, rootDir, env, signal })) return null;
   void closerCommitSuppression;
   // HAMFINAL-02: a no-diff hammer validates a fleet head without adding a commit.
 
@@ -5449,7 +5458,15 @@ async function maybeDispatchAmaCloserAttempt({
     auditRef,
     closedBy: undefined,
   });
+  let prTenure;
+  try {
+    prTenure = await readPrTenure({ repo, prNumber, rootDir, env, signal });
+  } catch {
+    return noAmaDispatch({ dispatched: false, skipMergeAgent: true, recoveryWait: true,
+      retryable: true, preservePredecessorArtifacts: true, reason: 'tenure-evidence-unavailable' });
+  }
   const promptInputs = {
+    tenureId: prTenure?.tenureId,
     prUrl: dispatchContext.prUrl,
     repo,
     prNumber,

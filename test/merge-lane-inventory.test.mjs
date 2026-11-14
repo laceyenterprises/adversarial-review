@@ -7,6 +7,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { collect } from '../src/merge-lane-inventory.mjs';
+import { FakeClock } from './helpers/load-time-kit.mjs';
 const OPERATOR_HOLD_LABELS = ['no-merge-hold', 'do-not-merge', 'merge-agent-skip'];
 
 test('default inventory reader retains the shared 25 MiB buffer for large PR rollups', async () => {
@@ -33,25 +34,53 @@ test('default inventory reader retains the shared 25 MiB buffer for large PR rol
   assert.equal(result.repositories['example/repo'][0].title.length, titleLength);
 });
 
-test('default inventory reader bounds a hanging lookup and records the failure', async () => {
+test('default inventory reader bounds a hanging lookup and records the failure', async t => {
+  const clock = new FakeClock(t);
   const codeRoot = fileURLToPath(new URL('..', import.meta.url));
   const progress = [];
   let signal;
-  const started = performance.now();
-  const result = await collect(codeRoot, 'unused-data', {
+  let calls = 0;
+  let childStarted;
+  const started = new Promise(resolve => { childStarted = resolve; });
+  let child;
+  let settled = false;
+  const pending = collect(codeRoot, 'unused-data', {
     config: { repos: ['example/repo'] }, holdLabels: [], budgetMs: 50,
     stderr: { write: text => progress.push(text) },
     execFileImpl: async (_command, _args, options) => {
+      calls += 1;
       signal = options.signal;
-      return new Promise(() => {});
+      signal.throwIfAborted();
+      child = new Promise((_, reject) => {
+        signal.addEventListener('abort', () => {
+          reject(new DOMException('Mock child aborted', 'AbortError'));
+        }, { once: true });
+      });
+      childStarted();
+      return child;
     },
-  });
-  assert.ok(performance.now() - started < 2_000);
+  }).then(result => { settled = true; return result; });
+  // Real metering admission does filesystem I/O. Reach the child explicitly
+  // before advancing the budget; a Promise-only drain cannot prove admission.
+  await Promise.race([started, pending.then(result => {
+    if (calls === 0) {
+      assert.fail(`Inventory collection finished before child start: ${JSON.stringify(result.errors)}`);
+    }
+  })]);
+  assert.ok(signal instanceof AbortSignal);
+  assert.equal(signal.aborted, false);
+  await clock.advance(49);
+  assert.equal(settled, false);
+  assert.equal(signal.aborted, false);
+  await clock.advance(1);
+  const result = await pending;
+  assert.equal(calls, 1);
   assert.equal(signal.aborted, true);
+  await assert.rejects(child, { name: 'AbortError' });
   assert.deepEqual(result.repositories, {});
   assert.equal(result.errors.length, 1);
   assert.equal(result.errors[0].reason, 'merge-lane-inventory-lookup-timeout');
-  assert.match(result.errors[0].error, /did not finish within its/);
+  assert.match(result.errors[0].error, /waiting for `gh pr list` to exit; 1 attempt/);
   assert.match(progress.join(''), /\[github-read\] start merge lane inventory lookup/);
 });
 

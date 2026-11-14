@@ -29,6 +29,7 @@ export const rateLimitConfirmation = {
     return readUnthrottledGitHubRateLimit(env);
   },
 };
+const SECONDARY_HISTORY_MS = 15 * 60_000;
 // Keep the default instance's clock injectable too, so stubbed transports can
 // exercise reset expiry and backoff without waiting on wall time.
 export const rateLimitClock = {
@@ -301,7 +302,16 @@ function sanitizeObservation(observation, nowMs = Date.now()) {
   const normalized = normalizeObservation(observation);
   if (!normalized) return null;
   const resetAtMs = Math.max(observationResetAtMs(normalized), Date.parse(normalized.secondaryUntil || '') || 0);
-  if (!Number.isFinite(resetAtMs) || resetAtMs <= nowMs) return null;
+  if (!Number.isFinite(resetAtMs) || resetAtMs <= nowMs) {
+    // Keep bounded retry history after a cooldown expires. This is not quota
+    // evidence and cannot defer admission; it lets the next failed retry use
+    // the next exponential step even when no primary headers were supplied.
+    if (normalized.secondaryAttempts > 0
+      && nowMs - Date.parse(normalized.secondaryUntil || '') < SECONDARY_HISTORY_MS) {
+      return { ...normalized, remaining: null };
+    }
+    return null;
+  }
   return normalized;
 }
 
@@ -758,12 +768,13 @@ function createRateLimitThrottle({
       const current = read.buckets;
       if (rateLimitedOnly && observation.kind === 'secondary') {
         const previous = current[githubBudgetKey(observation.resource, observation.credential)];
-        const attempts = (Date.parse(previous?.secondaryUntil || '') > nowMs() ? previous.secondaryAttempts || 0 : 0) + 1;
+        const recent = nowMs() - Date.parse(previous?.secondaryUntil || '') < SECONDARY_HISTORY_MS;
+        const attempts = (recent ? previous.secondaryAttempts || 0 : 0) + 1;
         const delayMs = observation.retryAfterMs ?? Math.min(300_000, 60_000 * 2 ** Math.min(attempts - 1, 3));
         normalized = normalizeObservation({ ...previous, ...observation,
           remaining: observation.remaining ?? previous?.remaining,
           secondaryUntil: nowMs() + delayMs, secondaryAttempts: attempts,
-          resetAt: observation.resetAt || previous?.resetAt || nowMs() + delayMs,
+          resetAt: observation.resetAt || (previous?.remaining != null ? previous.resetAt : null) || nowMs() + delayMs,
           observedAt: nowMs() });
       }
       if (!normalized) return null;
@@ -771,7 +782,9 @@ function createRateLimitThrottle({
       if (!normalized.limit && prior?.limit) normalized.limit = prior.limit;
       const key = githubBudgetKey(normalized.resource, normalized.credential);
       const previous = current[key];
-      const count = (previous?.resetAt === normalized.resetAt ? previous.rateLimitedCalls || 0 : 0)
+      const secondarySeries = observation.kind === 'secondary'
+        && nowMs() - Date.parse(previous?.secondaryUntil || '') < SECONDARY_HISTORY_MS;
+      const count = (secondarySeries || previous?.resetAt === normalized.resetAt ? previous?.rateLimitedCalls || 0 : 0)
         + (observation.rateLimited === true ? 1 : 0);
       const incoming = count > 0 ? { ...normalized, rateLimitedCalls: count } : normalized;
       if (rateLimitedOnly) recordApiCallImpl?.({ category: 'github_rate_limit', status: observation.evidence?.status,

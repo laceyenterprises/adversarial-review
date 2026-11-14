@@ -91,6 +91,9 @@ secondary observation never manufactures primary zero. It preserves known
 primary remaining/limit/reset when its response omits them, and retains an
 independent backoff across ordinary primary observations. Retry-after is honored;
 without it secondary retries use 60/120/240 seconds, capped at 300 seconds.
+Expired secondary observations retain non-admitting retry history for fifteen
+minutes so an actual retry after cooldown advances the exponential step.
+Expired primary capacity in that history is unknown (`remaining: null`).
 A primary 403 with remaining zero uses the primary reset header.
 
 Only structured API response evidence establishes a rate limit: status 429,

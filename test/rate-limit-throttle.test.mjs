@@ -530,7 +530,8 @@ test('GHBUDGET-01: rate-limited counters are shared, atomic and scoped to a reso
   await a.recordResponseRateLimit({ ...observation, resetAt: now + 60_000 });
   state = await b.readSharedState();
   assert.equal(state.graphql.rateLimitedCalls || 0, 0);
-  assert.equal(state.core, undefined);
+  assert.equal(state.core.remaining, null);
+  assert.equal(await a.awaitThrottleIfNeeded('core'), false, 'expired secondary history never blocks admission');
 });
 
 test('headerless rate limits initialize and renew an expired resource window atomically', async t => {
@@ -551,8 +552,9 @@ test('headerless rate limits initialize and renew an expired resource window ato
   now += 120_000;
   await b.recordRateLimitedCall('graphql');
   state = await a.readSharedState();
-  assert.equal(state.graphql.rateLimitedCalls, 1);
-  assert.equal(state.graphql.resetAt, new Date(now + 60_000).toISOString());
+  assert.equal(state.graphql.rateLimitedCalls, 3);
+  assert.equal(state.graphql.secondaryAttempts, 3);
+  assert.equal(state.graphql.resetAt, new Date(now + 240_000).toISOString());
   const persisted = JSON.parse(readFileSync(a.resolveSharedStatePath(), 'utf8'));
   assert.deepEqual(persisted.buckets.graphql, state.graphql);
   await a.recordRateLimitedCall();

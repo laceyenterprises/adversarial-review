@@ -75,7 +75,14 @@ test('secondary limits without retry-after use minute-scale exponential backoff 
     const bucket = (await f.throttle.readSharedState())['reviewer/core'];
     assert.equal(bucket.remaining, null);
     assert.equal(Date.parse(bucket.secondaryUntil) - f.now(), delay);
+    f.advance(delay);
+    assert.equal(await f.throttle.awaitThrottleIfNeeded('core', 'reviewer'), false);
   }
+  await f.throttle.recordResponseRateLimit({ resource: 'core', credential: 'reviewer',
+    remaining: 5000, resetAt: f.now() + 3600_000, observedAt: f.now() });
+  const resumed = await f.throttle.recordRateLimitedCall('core', 'reviewer', observation);
+  assert.equal(resumed.secondaryAttempts, 1, 'a settled primary response ends the consecutive failure series');
+  assert.equal(Date.parse(resumed.secondaryUntil) - f.now(), 60_000);
 });
 
 test('nested wrappers record one secondary response only once', async t => {

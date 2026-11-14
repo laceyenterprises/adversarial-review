@@ -152,6 +152,7 @@ Only apply findings that are still applicable on current origin/main. A prior re
 Prepare valid findings together on this batch's branch for one PR through normal review.
 This launch is decision-only: commit and push tested fixes, but leave PR publication to the review service's
 follow-up pr-shaped launch on the same pushed branch. Do not run hq pr open in this launch or merge anything.
+Once the tested push and outcomes file are complete, end successfully; publication needs no decision or continuation.
 The follow-up opens the one PR with the exact marker Finding-Batch: ${batch.batch_id} in its body.
 If all findings are dropped and no advisory is applied, complete with the outcomes file and no PR or push.
 Do not change host state or configuration.
@@ -381,20 +382,27 @@ async function publishFindingBatch({ db, batch, result, dir, outputPath, env, ro
     if (!meaning.terminal) return;
     // A publication-blocked decision launch may have pushed successfully.
     // Other terminal failures cannot authorize a publisher.
-    if (meaning.diagnostics.length || (!meaning.succeeded && !meaning.blockedNeedsDecision)) throw Error('batch-preparation-failed');
+    // A canceled source can be the supported handoff after a collector crash.
+    // Only the exact lifecycle receipt below can authorize that recovery.
+    const handoffCandidate = meaning.blockedNeedsDecision || status.status === 'canceled';
+    if (meaning.diagnostics.length || (!meaning.succeeded && !handoffCandidate)) throw Error('batch-preparation-failed');
     const branch = status.branch;
     if (typeof branch !== 'string' || !branch.trim() || branch.startsWith('-')) throw Error('batch-branch-missing');
     const key = `findings-batch-${batch.batch_id}`;
-    let probe;
-    try {
-      probe = await readLaunches({ env, rootDir, hqRoot: resolveHqRoot(env),
-        idempotencyKey: key, timeoutMs: 15_000 });
-    } catch { throw Error('batch-publish-receipt-unavailable'); }
-    if (!probe?.ok || !Array.isArray(probe.rows) || !probe.rows.length) throw Error('batch-publish-receipt-unavailable');
-    if (probe.rows.some(row => row.idempotency_key !== key || row.ticket_ref !== `FINDINGS-${batch.batch_id}`
-      || ![batch.repo, batch.repo.split('/').at(-1)].includes(row.target_repo)
-      || typeof row.launch_request_id !== 'string' || !row.launch_request_id)) throw Error('batch-publish-receipt-mismatch');
-    if (!probe.rows.some(row => row.launch_request_id === batch.launch_id)) throw Error('batch-launch-evidence-mismatch');
+    const probeLaunches = async () => {
+      let probe;
+      try {
+        probe = await readLaunches({ env, rootDir, hqRoot: resolveHqRoot(env),
+          idempotencyKey: key, timeoutMs: 15_000 });
+      } catch { throw Error('batch-publish-receipt-unavailable'); }
+      if (!probe?.ok || !Array.isArray(probe.rows) || !probe.rows.length) throw Error('batch-publish-receipt-unavailable');
+      if (probe.rows.some(row => row.idempotency_key !== key || row.ticket_ref !== `FINDINGS-${batch.batch_id}`
+        || ![batch.repo, batch.repo.split('/').at(-1)].includes(row.target_repo)
+        || typeof row.launch_request_id !== 'string' || !row.launch_request_id)) throw Error('batch-publish-receipt-mismatch');
+      if (!probe.rows.some(row => row.launch_request_id === batch.launch_id)) throw Error('batch-launch-evidence-mismatch');
+      return probe;
+    };
+    const probe = await probeLaunches();
     // Native absolute repo/workspace paths are display metadata, not repository
     // authority. The public launch projection intentionally omits worktree paths.
     // The exact LRQ plus keyed repository/ticket checks above and the independent
@@ -418,18 +426,52 @@ async function publishFindingBatch({ db, batch, result, dir, outputPath, env, ro
     if (publication.headSha !== result.headSha) throw Error('batch-push-evidence-mismatch');
     // A failed publisher retains its fence too. Recovery repairs that launch;
     // it must not blindly create another publisher after a terminal failure.
-    const publisher = probe.rows.find(row => row.launch_request_id !== batch.launch_id);
-    if (publisher) {
-      const meaning = readLaunchRequestStatus(publisher.status);
-      if (meaning.diagnostic) throw Error('batch-publish-status-unavailable');
-      if (meaning.terminal) throw Error(`batch-publish-ended-without-pr: ${publisher.status}`);
-      db.prepare('UPDATE finding_batches SET error=NULL WHERE batch_id=?').run(batch.batch_id);
-      return;
+    const publisherExists = (probe, deferTerminal = false) => {
+      const publisher = probe.rows.find(row => row.launch_request_id !== batch.launch_id);
+      if (publisher) {
+        const meaning = readLaunchRequestStatus(publisher.status);
+        if (meaning.diagnostic) throw Error('batch-publish-status-unavailable');
+        if (meaning.terminal && !deferTerminal) throw Error(`batch-publish-ended-without-pr: ${publisher.status}`);
+        db.prepare('UPDATE finding_batches SET error=NULL WHERE batch_id=?').run(batch.batch_id);
+        return true;
+      }
+      // The status CLI cannot override live or unknown keyed ledger custody.
+      const meanings = probe.rows.map(row => readLaunchRequestStatus(row.status));
+      if (meanings.some(meaning => meaning.diagnostic)) throw Error('batch-publish-status-unavailable');
+      if (meanings.some(meaning => !meaning.terminal)) throw Error('batch-publish-receipt-pending');
+      return false;
+    };
+    if (publisherExists(probe)) return;
+    let handoffBinding = null;
+    if (handoffCandidate) {
+      const binding = { sourceLaunchId: batch.launch_id, batchId: batch.batch_id,
+        repo: batch.repo, branch, headSha: result.headSha };
+      const parseHandoff = text => {
+        try { return JSON.parse(text); }
+        catch { throw Error('batch-decision-publication-receipt-invalid'); }
+      };
+      let handoff = batch.decision_publication_json && parseHandoff(batch.decision_publication_json);
+      if (!handoff) {
+        const { stdout } = await execFileImpl(env.HQ_BIN || 'hq',
+          ['decision', 'supersede-publication', batch.launch_id,
+            '--batch-id', batch.batch_id, '--repo', batch.repo, '--branch', branch, '--head', result.headSha,
+            '--root', resolveHqRoot(env)],
+          { env, timeout: 240_000, maxBuffer: 1024 * 1024 });
+        handoff = parseHandoff(stdout);
+      }
+      if (!handoff || handoff.state !== 'superseded' || handoff.branchReleased !== true
+        || Object.entries(binding).some(([key, value]) => handoff[key] !== value)) {
+        throw Error('batch-decision-publication-receipt-mismatch');
+      }
+      db.prepare('UPDATE finding_batches SET decision_publication_json=? WHERE batch_id=?')
+        .run(JSON.stringify(handoff), batch.batch_id);
+      handoffBinding = binding;
+      // The lifecycle call can take time. An old ambiguous dispatch may have
+      // become visible while it ran; do not submit over that new custody.
+      // A newly visible terminal publisher may also have opened its PR after
+      // our earlier remote probe. Defer to the next pass's fresh PR lookup.
+      if (publisherExists(await probeLaunches(), true)) return;
     }
-    // The status CLI cannot override live or unknown keyed ledger custody.
-    const meanings = probe.rows.map(row => readLaunchRequestStatus(row.status));
-    if (meanings.some(meaning => meaning.diagnostic)) throw Error('batch-publish-status-unavailable');
-    if (meanings.some(meaning => !meaning.terminal)) throw Error('batch-publish-receipt-pending');
     const promptPath = join(dir, 'publish-prompt.md');
     writeFileSync(promptPath, findingBatchPublishPrompt(batch, outputPath, branch));
     // Retain intent before submission. An ambiguous failure waits beyond its
@@ -440,7 +482,8 @@ async function publishFindingBatch({ db, batch, result, dir, outputPath, env, ro
     const submissionTime = now();
     const intent = { batchId: batch.batch_id, branch, idempotencyKey: key,
       sourceLaunchId: batch.launch_id, submittedAt: new Date(submissionTime).toISOString(),
-      dispatchTimeoutMs: submissionTimeoutMs, resubmissionCount: 0 };
+      dispatchTimeoutMs: submissionTimeoutMs, resubmissionCount: 0,
+      ...(handoffBinding ? { decisionPublication: handoffBinding } : {}) };
     try {
       writeFileAtomic(intentPath, JSON.stringify(intent), { overwrite: false, mode: 0o664 });
     } catch (error) {
@@ -452,18 +495,31 @@ async function publishFindingBatch({ db, batch, result, dir, outputPath, env, ro
           ? statSync(intentPath).mtimeMs : Date.parse(previous.submittedAt);
         previousTimeoutMs = previous.dispatchTimeoutMs === undefined ? submissionTimeoutMs : previous.dispatchTimeoutMs;
       } catch { throw Error('batch-publish-receipt-pending'); }
+      // Resolving the retained decision is new, durable causal evidence. Once
+      // the old ambiguity window closes it permits one publication epoch even
+      // if the pre-handoff branch refusal spent the old intent's retry.
+      const handoffEpoch = handoffBinding && previous.decisionPublication === undefined;
+      const previousCount = previous.resubmissionCount === undefined ? 0 : previous.resubmissionCount;
+      const sameHandoff = previous.decisionPublication
+        && Object.entries(handoffBinding || {}).every(([key, value]) => previous.decisionPublication[key] === value);
       // Unknown/corrupt intent evidence cannot authorize a replacement.
       if (previous.batchId !== batch.batch_id || previous.branch !== branch
         || previous.idempotencyKey !== key || previous.sourceLaunchId !== batch.launch_id
         || !Number.isFinite(submittedAt) || !Number.isSafeInteger(previousTimeoutMs) || previousTimeoutMs < 1
-        || (previous.resubmissionCount === undefined ? 0 : previous.resubmissionCount) !== 0
+        || (handoffEpoch ? ![0, 1].includes(previousCount) : previousCount !== 0)
+        || (previous.decisionPublication !== undefined && (!handoffBinding || !sameHandoff))
         || submissionTime <= submittedAt + previousTimeoutMs + publishReceiptGraceMs) {
         throw Error('batch-publish-receipt-pending');
       }
       // Still under publish.lock: persist the spent retry before dispatch, so
       // crashes and lost receipts cannot grant another submission.
-      intent.resubmissionCount = 1;
-      intent.resubmitOf = { submittedAt: new Date(submittedAt).toISOString(), dispatchTimeoutMs: previousTimeoutMs };
+      const previousSubmission = { submittedAt: new Date(submittedAt).toISOString(), dispatchTimeoutMs: previousTimeoutMs };
+      if (handoffEpoch) intent.handoffOf = { ...previousSubmission, resubmissionCount: previousCount };
+      else {
+        intent.resubmissionCount = 1;
+        intent.resubmitOf = previousSubmission;
+        if (previous.handoffOf) intent.handoffOf = previous.handoffOf;
+      }
       writeFileAtomic(intentPath, JSON.stringify(intent), { mode: 0o664 });
     }
     const args = findingBatchDispatchArgs({ batch, promptPath, branch, env,
@@ -522,6 +578,9 @@ async function releaseEndedFindingBatch({ db, batchId, hasOutcomes, env, rootDir
   const stale = batchAgeMs(batch, now) > timeoutMs && Boolean(batch.error || !hasOutcomes);
   if (!stale && !dispatchExhausted && !(batch.launch_id && batch.error && ENDED_LAUNCH_RELEASE_ERRORS.test(batch.error))) return null;
   const hold = reason => stale || dispatchExhausted ? { needsOperator: reason } : null;
+  // A partially recorded lifecycle handoff may already have canceled the
+  // source. Its typed refusal/receipt mismatch still retains publication work.
+  if (/decision-publication/.test(batch.error || '')) return hold('batch-decision-publication-unresolved');
   const key = `findings-batch-${batch.batch_id}`;
   const options = { env, rootDir, hqRoot: resolveHqRoot(env), timeoutMs: 15_000 };
   let probe;
@@ -531,6 +590,13 @@ async function releaseEndedFindingBatch({ db, batchId, hasOutcomes, env, rootDir
   if (probe.rows.some(row => row?.idempotency_key !== key)) return hold('batch-keyed-launch-probe-mismatch');
   if (probe.rows.some(row => !readLaunchRequestStatus(row.status).status)) return hold('batch-launch-status-unreadable');
   if (probe.rows.some(row => !readLaunchRequestStatus(row.status).terminal)) return null;
+  if (probe.rows.some(row => row.status === 'blocked_needs_decision')) {
+    return hold('batch-decision-custody-retained');
+  }
+  if (batch.decision_publication_json && hasOutcomes
+    && !probe.rows.some(row => row.launch_request_id !== batch.launch_id)) {
+    return hold('batch-publication-handoff-retained');
+  }
   // Empty keyed receipts do not refute the launch we already own. Read that
   // exact ledger identity (and retry descendants), never the status CLI cache.
   if (batch.launch_id && !probe.rows.some(row => row.launch_request_id === batch.launch_id)) {
@@ -544,6 +610,9 @@ async function releaseEndedFindingBatch({ db, batchId, hasOutcomes, env, rootDir
     }
     if (snapshot.rows.some(row => !readLaunchRequestStatus(row?.status).status)) return hold('batch-launch-status-unreadable');
     if (snapshot.rows.some(row => !readLaunchRequestStatus(row.status).terminal)) return null;
+    if (snapshot.rows.some(row => row.status === 'blocked_needs_decision')) {
+      return hold('batch-decision-custody-retained');
+    }
   }
   const reason = dispatchExhausted ? `batch-dispatch-attempts-exhausted: ${batch.error || 'batch-dispatch-failed'}`
     : batch.error || 'batch-launch-ended-without-outcomes';
@@ -645,16 +714,21 @@ export async function runFindingBatches({ db, rootDir, env = process.env, day = 
     } catch (error) {
       // Prefer the actual dispatcher refusal over execFile's command echo.
       // Redact before truncation so a long credential is never cut into a leak.
-      const detail = redactPublicSafeText(String(dispatching ? error.stderr || error.message : error.message), 300)
-        .replace(/\s+/g, ' ').trim();
+      const stderr = String(error.stderr || '');
+      const cause = stderr.split(/\r?\n/).find(line => line.includes('[hq] error:'))
+        || stderr.trim() || error.message;
+      const detail = redactPublicSafeText(String(cause), 300).replace(/\s+/g, ' ').trim();
       const reason = dispatching
-        ? `batch-dispatch-${dispatchReturned ? 'receipt-invalid' : 'retryable'}: ${detail}` : detail;
+        ? `batch-dispatch-${dispatchReturned ? 'receipt-invalid' : 'retryable'}: ${detail}`.slice(0, 300) : detail;
       // Only a returned, invalid receipt spends the bounded dispatch budget.
       // Timeouts, transport failures and admission refusals retain the same
       // batch/key and preserve any earlier invalid-receipt charges.
       db.prepare('UPDATE finding_batches SET error=?,batch_attempts=batch_attempts+? WHERE batch_id=?')
         .run(reason, dispatchReturned ? 1 : 0, batch.batch_id);
-      logger.warn?.(`[findings-batch] ${batch.repo}/${batch.area}: ${reason}`);
+      // One log record per failure carries all captured stderr. Redact before
+      // storage/logging; the bounded row keeps the actual cause at its front.
+      logger.warn?.(`[findings-batch] ${batch.repo}/${batch.area}: ${reason}`
+        + (stderr ? `\nstderr:\n${redactPublicSafeText(stderr, Infinity)}` : ''));
     }
     try {
       await release(batch, hasOutcomes);

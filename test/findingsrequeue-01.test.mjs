@@ -43,8 +43,8 @@ function fixture(t, titles = ['First result', 'Second result', 'Third result']) 
   const env = { HQ_ROOT: rootDir };
   const dispatches = [];
   const launches = new Map(); // idempotency key -> ledger rows
-  const status = { repo, branch: 'synthetic/findings', status: 'blocked_needs_decision', terminal: true,
-    succeeded: false, milestones: { branch_pushed: { status: 'failed' } } };
+  const status = { repo, branch: 'synthetic/findings', status: 'succeeded', terminal: true,
+    succeeded: true, milestones: { branch_pushed: { status: 'failed' } } };
   const publication = { prs: [], headSha: null };
   const reads = { publication: 0 };
   const execFileImpl = async (_bin, args) => {
@@ -69,7 +69,7 @@ function fixture(t, titles = ['First result', 'Second result', 'Third result']) 
   const run = overrides => runFindingBatches({ now: fixtureNow, ...options, ...overrides });
   const batches = () => db.prepare('SELECT * FROM finding_batches ORDER BY rowid').all();
   const backlog = () => db.prepare('SELECT finding_id,batch_id,batch_attempts,outcome,reason FROM finding_backlog ORDER BY finding_id').all();
-  const endLaunches = (value = 'blocked_needs_decision') => {
+  const endLaunches = (value = 'succeeded') => {
     for (const rows of launches.values()) for (const row of rows) row.status = value;
   };
   const writeOutcomes = (batch, findings, extra = {}) => writeFileSync(
@@ -150,6 +150,24 @@ test('a batch with any live keyed launch, or unreadable launch evidence, is unto
     await f.run({ resolutionOnly: true, now: fixtureNow + 3 * DAY,
       readLaunches: async () => ({ ok: false, reason: 'synthetic-unavailable' }) });
     assert.equal(f.batches()[0].released_at, null);
+  });
+});
+
+test('FINDINGSDECISIONHOLD-01 unresolved decision custody survives age release with no outcomes', async t => {
+  for (const snapshotOnly of [false, true]) await t.test(String(snapshotOnly), async t => {
+    const f = fixture(t);
+    await f.run({ day: '2026-01-02' });
+    f.endLaunches('blocked_needs_decision');
+    const rows = [...f.launches.values()].flat();
+    if (snapshotOnly) f.launches.clear();
+    const logs = [];
+    await f.run({ resolutionOnly: true, now: fixtureNow + 3 * DAY,
+      logger: { warn: message => logs.push(message) },
+      ...(snapshotOnly ? { readLaunchSnapshot: async () => ({ ok: true, rows }) } : {}) });
+    assert.equal(f.batches()[0].released_at, null);
+    assert.ok(f.backlog().every(row => row.batch_id && row.batch_attempts === 0));
+    assert.equal(f.db.prepare('SELECT count(*) n FROM finding_batch_releases').get().n, 0);
+    assert.ok(logs.some(message => message.includes('batch-decision-custody-retained')));
   });
 });
 

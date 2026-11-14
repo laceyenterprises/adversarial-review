@@ -483,8 +483,37 @@ unmarked, or ambiguous PR evidence retains the batch fence. This also recovers a
 PR opened before its worker could rewrite the outcome artifact, even after its
 branch was deleted or normal review rebased the head.
 
-With no existing PR, a matching remote branch SHA
-permit one follow-up `--completion-shape pr --branch <existing-branch>` launch.
+With no existing PR, a matching remote branch SHA permits one follow-up
+`--completion-shape pr --branch <existing-branch>` launch. If preparation ended
+`blocked_needs_decision`, the collector first calls
+`hq decision supersede-publication` with the exact source launch, batch,
+repository, branch and tested head. The supported API refuses saved answers,
+continuations, live processes and unpushed work; it supersedes the decision
+without an answer, closes blocked launch/run capacity, and releases the retained
+branch under the existing locks and Git fence. Only a receipt with
+`state=superseded` and `branchReleased=true`, matching every binding field,
+permits publisher submission. `finding_batches.decision_publication_json`
+retains that receipt. A source canceled by an interrupted handoff is accepted
+only through this same API/audit recovery. A succeeded preparation follows the
+ordinary path without closing a decision. The preparation prompt ends
+successfully after its tested push and complete outcomes artifact.
+
+The collector re-reads keyed launch custody after the lifecycle call. A verified
+handoff adds its exact binding as `publish-intent.json.decisionPublication`.
+After the previous intent's submission deadline and grace, an intent without
+that field may be replaced once even if its pre-handoff retry was spent.
+`handoffOf` preserves the prior `submittedAt`, `dispatchTimeoutMs` and
+`resubmissionCount`; the new publication epoch starts at zero and retains the
+ordinary single proven-absence retry. An intent already carrying the handoff
+binding cannot renew its retry this way. Unknown bindings, live/late publisher
+receipts and unreadable evidence retain custody. Successful handoff work with
+no publisher remains retained beyond the age limit.
+
+Publication failures store the actual `[hq] error:` cause (or stderr fallback)
+within the existing 300-character error bound; one watcher log record per
+failure retains the redacted full stderr. An unresolved blocked decision keeps
+its batch even beyond the ordinary age limit and reports
+`batch-decision-custody-retained` for operator attention.
 Both phases retain the batch ID, ticket and `findings-batch-<batch-id>` idempotency
 key; the dispatcher contract is unchanged. A PR-shaped launch without PR evidence
 still fails. The collector queries the existing launch-ledger adapter by that key,
@@ -510,8 +539,9 @@ unreadable probes report `batch-publish-receipt-unavailable`, and live or unknow
 keyed custody never permits resubmission. A second absence stays pending until
 the existing bounded stale release. Retain the
 intent, `publish.lock` inode, and `publish-prompt.md` beside the outcomes artifact.
-These are collector recovery artifacts; the outcome schema and SQLite schema do
-not change. Uncertain publication outside that one proven-absence retry requires
+These are collector recovery artifacts; the outcome schema is unchanged.
+The nullable handoff receipt column is added by
+`migrations/20261114_findings_decision_publication.sql`. Uncertain publication outside that one proven-absence retry requires
 repairing the existing launch/intent after proving its state, rather than
 resetting the batch ID/key or starting a fresh branch. Once every keyed launch has ended, the
 FINDINGSREQUEUE-01 release path above returns the findings to the queue instead.

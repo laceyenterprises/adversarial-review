@@ -586,13 +586,14 @@ async function publicationFixture(t, { advice = false, expectedTimeout = null } 
       .map(n => ({ noteId: n.note_id, simplicityNoteApplied: true, reason: 'Removed duplicate helper' })) };
   writeFileSync(outputPath, JSON.stringify(result));
   const status = { launchRequestId: batch.launch_id, repo, branch: 'fixture/findings',
-    status: 'blocked_needs_decision', terminal: true, succeeded: false,
+    status: 'succeeded', terminal: true, succeeded: true,
     milestones: { branch_pushed: { status: 'done' } } };
   const key = `findings-batch-${batch.batch_id}`;
   const launch = { launch_request_id: batch.launch_id, idempotency_key: key,
-    ticket_ref: `FINDINGS-${batch.batch_id}`, target_repo: repo, status: 'blocked_needs_decision' };
+    ticket_ref: `FINDINGS-${batch.batch_id}`, target_repo: repo, status: 'succeeded' };
   const launches = [launch];
   const publication = { prs: [], headSha: head };
+  const handoffs = [];
   const options = { ...f, env, resolutionOnly: true, logger: { warn() {} },
     fetchPublication: async (_repo, branch) => {
       assert.equal(_repo, repo);
@@ -610,6 +611,13 @@ async function publicationFixture(t, { advice = false, expectedTimeout = null } 
         assert.deepEqual(args, ['dispatch', 'status', batch.launch_id, '--json', '--root', f.rootDir]);
         return { stdout: JSON.stringify(status) };
       }
+      if (args[0] === 'decision') {
+        handoffs.push(args);
+        Object.assign(status, { status: 'canceled', succeeded: false });
+        launch.status = 'canceled';
+        return { stdout: JSON.stringify({ sourceLaunchId: batch.launch_id, batchId: batch.batch_id,
+          repo, branch: status.branch, headSha: head, state: 'superseded', branchReleased: true }) };
+      }
       // Model provisioning that takes 496 seconds without a real wall-clock
       // wait. Both submissions must survive the former fixed 60-second kill.
       assert.ok(options.timeout >= 900_000);
@@ -620,9 +628,172 @@ async function publicationFixture(t, { advice = false, expectedTimeout = null } 
     } };
   const pr = { number: 81, state: 'OPEN', headRefOid: head, headRefName: status.branch,
     isCrossRepository: false, body: `Finding-Batch: ${batch.batch_id}` };
-  return { ...f, batch, outputPath, result, status, dispatches, launches, publication, options, pr,
+  return { ...f, batch, outputPath, result, status, dispatches, handoffs, launches, publication, options, pr,
     run: overrides => runFindingBatches({ now: fixtureNow, ...options, ...overrides }) };
 }
+
+test('FINDINGSDECISIONHOLD-01 supersedes the blocked decision before dispatch and records one handoff', async t => {
+  const f = await publicationFixture(t);
+  Object.assign(f.status, { status: 'blocked_needs_decision', succeeded: false });
+  f.launches[0].status = 'blocked_needs_decision';
+  const order = [];
+  await f.run({ execFileImpl: async (bin, args, options) => {
+    order.push(args.slice(0, 2).join(' '));
+    return f.options.execFileImpl(bin, args, options);
+  } });
+  assert.deepEqual(order, ['dispatch status', 'decision supersede-publication', 'dispatch --priority']);
+  assert.equal(f.dispatches.length, 2);
+  const receipt = JSON.parse(f.db.prepare('SELECT decision_publication_json FROM finding_batches').get().decision_publication_json);
+  assert.equal(receipt.branchReleased, true);
+  assert.equal(receipt.headSha, head);
+  await f.run();
+  assert.equal(f.handoffs.length, 1);
+  assert.equal(f.dispatches.length, 2);
+});
+
+test('FINDINGSDECISIONHOLD-01 a succeeded source never closes a decision', async t => {
+  const f = await publicationFixture(t);
+  await f.run();
+  assert.equal(f.dispatches.length, 2);
+  assert.equal(f.handoffs.length, 0);
+});
+
+test('FINDINGSDECISIONHOLD-01 recovers a lifecycle handoff whose batch receipt was lost', async t => {
+  const f = await publicationFixture(t);
+  Object.assign(f.status, { status: 'canceled', succeeded: false });
+  f.launches[0].status = 'canceled';
+  await f.run();
+  assert.equal(f.handoffs.length, 1, 'the supported API must validate its prior audit');
+  assert.equal(f.dispatches.length, 2);
+  assert.ok(f.db.prepare('SELECT decision_publication_json FROM finding_batches').get().decision_publication_json);
+});
+
+test('FINDINGSDECISIONHOLD-01 a mismatched lifecycle receipt cannot authorize publication', async t => {
+  const f = await publicationFixture(t);
+  Object.assign(f.status, { status: 'blocked_needs_decision', succeeded: false });
+  await f.run({ execFileImpl: async (bin, args, options) => {
+    const response = await f.options.execFileImpl(bin, args, options);
+    return args[0] === 'decision'
+      ? { stdout: JSON.stringify({ ...JSON.parse(response.stdout), headSha: 'c'.repeat(40) }) } : response;
+  } });
+  assert.equal(f.dispatches.length, 1);
+  assert.equal(f.db.prepare('SELECT error FROM finding_batches').get().error, 'batch-decision-publication-receipt-mismatch');
+});
+
+test('FINDINGSDECISIONHOLD-01 malformed lifecycle responses retain the canceled source and work', async t => {
+  for (const stdout of ['null', '{invalid']) await t.test(stdout, async t => {
+    const f = await publicationFixture(t);
+    Object.assign(f.status, { status: 'canceled', succeeded: false });
+    f.launches[0].status = 'canceled';
+    await f.run({ now: fixtureNow + 86400001, execFileImpl: async (bin, args, options) =>
+      args[0] === 'decision' ? { stdout } : f.options.execFileImpl(bin, args, options) });
+    const row = f.db.prepare('SELECT error,released_at FROM finding_batches').get();
+    assert.match(row.error, /^batch-decision-publication-receipt-(invalid|mismatch)$/);
+    assert.equal(row.released_at, null);
+    assert.equal(f.dispatches.length, 1);
+  });
+});
+
+test('FINDINGSDECISIONHOLD-01 a verified handoff renews a spent pre-handoff intent once', async t => {
+  const f = await publicationFixture(t);
+  Object.assign(f.status, { status: 'blocked_needs_decision', succeeded: false });
+  f.launches[0].status = 'blocked_needs_decision';
+  const intentPath = join(f.rootDir, 'data', 'finding-batches', f.batch.batch_id, 'publish-intent.json');
+  const prior = { batchId: f.batch.batch_id, branch: f.status.branch,
+    idempotencyKey: `findings-batch-${f.batch.batch_id}`, sourceLaunchId: f.batch.launch_id,
+    submittedAt: new Date(fixtureNow - 3600000).toISOString(), dispatchTimeoutMs: 900000, resubmissionCount: 1 };
+  writeFileSync(intentPath, JSON.stringify(prior));
+  await f.run();
+  assert.equal(f.dispatches.length, 2);
+  const intent = JSON.parse(readFileSync(intentPath, 'utf8'));
+  assert.equal(intent.decisionPublication.headSha, head);
+  assert.equal(intent.handoffOf.resubmissionCount, 1);
+  assert.equal(intent.resubmissionCount, 0);
+  await f.run();
+  assert.equal(f.handoffs.length, 1);
+  assert.equal(f.dispatches.length, 2);
+});
+
+test('FINDINGSDECISIONHOLD-01 handoff cannot bypass the old ambiguity deadline or a late publisher', async t => {
+  for (const latePublisher of [null, 'running', 'succeeded', 'failed']) await t.test(String(latePublisher), async t => {
+    const f = await publicationFixture(t);
+    Object.assign(f.status, { status: 'blocked_needs_decision', succeeded: false });
+    f.launches[0].status = 'blocked_needs_decision';
+    const intentPath = join(f.rootDir, 'data', 'finding-batches', f.batch.batch_id, 'publish-intent.json');
+    writeFileSync(intentPath, JSON.stringify({ batchId: f.batch.batch_id, branch: f.status.branch,
+      idempotencyKey: `findings-batch-${f.batch.batch_id}`, sourceLaunchId: f.batch.launch_id,
+      submittedAt: new Date(fixtureNow).toISOString(), dispatchTimeoutMs: 900000, resubmissionCount: 1 }));
+    await f.run({ execFileImpl: async (bin, args, options) => {
+      const response = await f.options.execFileImpl(bin, args, options);
+      if (latePublisher && args[0] === 'decision') {
+        f.launches.push({ ...f.launches[0], launch_request_id: 'fixture-late-publisher', status: latePublisher });
+      }
+      return response;
+    } });
+    assert.equal(f.dispatches.length, 1);
+    assert.equal(f.handoffs.length, 1);
+    assert.equal(f.db.prepare('SELECT error FROM finding_batches').get().error,
+      latePublisher ? null : 'batch-publish-receipt-pending');
+    assert.equal(JSON.parse(readFileSync(intentPath, 'utf8')).resubmissionCount, 1);
+    if (latePublisher) {
+      f.publication.prs = [f.pr];
+      await f.run();
+      assert.equal(f.dispatches.length, 1, 'fresh PR recovery never submits another publisher');
+      assert.equal(f.db.prepare('SELECT error FROM finding_batches').get().error, null);
+    }
+  });
+});
+
+test('FINDINGSDECISIONHOLD-01 the publication handoff cannot renew its own spent retry', async t => {
+  const f = await publicationFixture(t);
+  Object.assign(f.status, { status: 'blocked_needs_decision', succeeded: false });
+  f.launches[0].status = 'blocked_needs_decision';
+  let submissions = 0;
+  const execFileImpl = async (bin, args, options) => {
+    if (args[0] === 'dispatch' && args[1] !== 'status') {
+      submissions++;
+      throw Error('fixture dispatch receipt unavailable');
+    }
+    return f.options.execFileImpl(bin, args, options);
+  };
+  const intentPath = join(f.rootDir, 'data', 'finding-batches', f.batch.batch_id, 'publish-intent.json');
+  await f.run({ execFileImpl });
+  let intent = JSON.parse(readFileSync(intentPath, 'utf8'));
+  const afterDeadline = () => Date.parse(intent.submittedAt) + intent.dispatchTimeoutMs + 600001;
+  await f.run({ execFileImpl, now: afterDeadline() });
+  intent = JSON.parse(readFileSync(intentPath, 'utf8'));
+  assert.equal(intent.resubmissionCount, 1);
+  await f.run({ execFileImpl, now: afterDeadline() });
+  assert.equal(submissions, 2);
+  assert.equal(f.handoffs.length, 1);
+  assert.equal(f.db.prepare('SELECT error FROM finding_batches').get().error, 'batch-publish-receipt-pending');
+});
+
+test('FINDINGSDECISIONHOLD-01 refuses unpushed work and retains the cause and full diagnostic once', async t => {
+  const f = await publicationFixture(t);
+  Object.assign(f.status, { status: 'blocked_needs_decision', succeeded: false });
+  f.launches[0].status = 'blocked_needs_decision';
+  const logs = [];
+  const cause = '[hq] error: decision-publication-unpushed-work: retained HEAD differs from tested head';
+  const stderr = `${'diagnostic context '.repeat(40)}\n${cause}\nfull diagnostic tail`;
+  await f.run({ logger: { warn: message => logs.push(message) }, execFileImpl: async (bin, args, options) => {
+    if (args[0] !== 'decision') return f.options.execFileImpl(bin, args, options);
+    throw Object.assign(Error(`Command failed: ${'hq dispatch '.repeat(40)}`), { stderr });
+  } });
+  const row = f.db.prepare('SELECT error,decision_publication_json,released_at FROM finding_batches').get();
+  assert.equal(row.error, cause);
+  assert.ok(row.error.length <= 300);
+  assert.equal(row.decision_publication_json, null);
+  assert.equal(row.released_at, null);
+  assert.equal(f.dispatches.length, 1);
+  assert.equal(logs.filter(message => message.includes('full diagnostic tail')).length, 1);
+  await f.run({ now: fixtureNow + 86400001, execFileImpl: async (bin, args, options) => {
+    if (args[0] !== 'decision') return f.options.execFileImpl(bin, args, options);
+    throw Object.assign(Error('handoff refused'), { stderr: cause });
+  } });
+  assert.equal(f.db.prepare('SELECT released_at FROM finding_batches').get().released_at, null,
+    'age does not discard unresolved decision custody');
+});
 
 test('initial and publication dispatch timeouts scale beyond the one-hour default cap under load', async t => {
   t.mock.method(os, 'platform', () => 'linux');

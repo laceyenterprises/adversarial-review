@@ -1,3 +1,4 @@
+import { parseReviewerBudgetDeferral, REVIEWER_GITHUB_BUDGET_DEFERRED } from './reviewer-github-budget.mjs';
 import { withRepositoryStateCycle } from './repository-state-lock.mjs';
 import { loadAwareTimeoutMs } from './load-aware-timeout.mjs';
 import { ownReviewerSizeFailure } from './reviewer-size-owner.mjs';
@@ -124,6 +125,7 @@ import {
   clearReviewerCredentialOutage,
   formatTransientFailureBreakdown,
   recordCascadeFailure,
+  recordReviewerBudgetDeferral,
   CASCADE_FAILURE_CAP,
   recordReviewerCredentialFailure,
   recordTokenRefreshHold,
@@ -1343,7 +1345,7 @@ async function spawnReviewerOnceWithAccount({
             passKind,
             reviewerClass: normalizedReviewerClass,
             reviewerModel,
-            status: result.ok ? 'completed' : (['cancelled', 'reviewer-stalled'].includes(result.failureClass) ? 'cancelled' : 'failed'),
+            status: result.ok ? 'completed' : (['cancelled', 'reviewer-stalled', 'github-budget-deferred'].includes(result.failureClass) ? 'cancelled' : 'failed'),
             startedAt,
             endedAt,
             tokenUsage,
@@ -1374,7 +1376,7 @@ async function spawnReviewerOnceWithAccount({
         prNumber,
         attemptNumber: reviewDbAttemptNumber ?? reviewAttemptNumber ?? 0,
         passKind,
-        status: result.ok ? 'completed' : (['cancelled', 'reviewer-stalled'].includes(result.failureClass) ? 'cancelled' : 'failed'),
+        status: result.ok ? 'completed' : (['cancelled', 'reviewer-stalled', 'github-budget-deferred'].includes(result.failureClass) ? 'cancelled' : 'failed'),
         endedAt,
         tokenUsage,
         tokenSource: tokenUsage?.source || 'unknown',
@@ -1595,6 +1597,25 @@ function settleReviewerAttempt({
   markReviewHeartbeat = () => {},
 }) {
   reviewerModel = result.effectiveReviewerModel || reviewerModel;
+  if (!result.ok && result.failureClass === REVIEWER_GITHUB_BUDGET_DEFERRED) {
+    const receipt = parseReviewerBudgetDeferral([result.error, result.stderr, result.stderrTail].filter(Boolean).join('\n'));
+    if (!receipt) throw new Error('GitHub budget deferral missing its typed receipt');
+    const current = statements.getReviewRow?.get(repoPath, prNumber);
+    if (statements.getReviewRow && (!current || current.review_status !== 'reviewing'
+      || current.reviewer_session_uuid !== reviewerSessionUuid)) {
+      return { posted: false, reason: 'budget-deferral-claim-mismatch' };
+    }
+    // Persist the not-before before releasing the claim, so the next poll cannot
+    // race into the same exhausted credential. The outer spawn owner releases
+    // credential capacity at its existing onPostOperationSettled boundary.
+    recordReviewerBudgetDeferral(rootDir, { repo: repoPath, prNumber, reviewerModel,
+      resetAt: receipt.resetAt, failedAt: failureAt });
+    withSqliteBusyRetrySync(
+      () => statements.releaseReviewerClaim.run(reviewerSessionUuid, repoPath, prNumber),
+      { label: `reviewer-budget-release:${repoPath}#${prNumber}`, log },
+    );
+    return { posted: false, reason: REVIEWER_GITHUB_BUDGET_DEFERRED };
+  }
   if (!result.ok && result.failureClass === 'reviewer-stalled') {
     // Stall says nothing about the PR. Keep its existing owner and scheduling,
     // release only this claim, and charge neither review nor recovery budgets.

@@ -1,3 +1,4 @@
+import { normalizeReviewerModel } from './adapters/subject/github-pr/routing.mjs';
 /**
  * Per-PR transient-failure ("cascade") backoff state for reviewer spawns.
  *
@@ -593,12 +594,31 @@ function hasOperatorDecisionRequiredAlerted(rootDir, {
   return state.operatorDecisionAlertedHeadSha === (headSha || null);
 }
 
-function shouldBackoffReviewerSpawn(rootDir, { repo, prNumber, now = new Date().toISOString() }) {
+// GitHub admission is a scheduling deferral, not a provider failure. Preserve
+// counters and use the exact bucket reset, without charging either retry budget.
+function recordReviewerBudgetDeferral(rootDir, { repo, prNumber, reviewerModel, resetAt, failedAt }) {
+  const previous = readCascadeState(rootDir, { repo, prNumber }) || {};
+  return writeCascadeState(rootDir, { repo, prNumber }, {
+    ...previous, lastFailureClass: 'github-budget-deferred', lastFailureAt: failedAt,
+    lastFailureReason: `GitHub budget deferred until ${resetAt}`,
+    lastFailureModel: normalizeReviewerModel(reviewerModel) || null, nextRetryAfter: resetAt,
+  });
+}
+
+function shouldBackoffReviewerSpawn(rootDir, { repo, prNumber, reviewerModel = null, now = new Date().toISOString() }) {
   const state = readCascadeState(rootDir, { repo, prNumber });
   if (!state?.nextRetryAfter) {
     return { shouldBackoff: false, state: null };
   }
 
+  // The existing routing policy may select a healthy alternate. A deferred
+  // preferred reviewer must not hold that alternate until its own reset.
+  const selectedModel = normalizeReviewerModel(reviewerModel);
+  const deferredModel = normalizeReviewerModel(state.lastFailureModel);
+  if (state.lastFailureClass === 'github-budget-deferred' && selectedModel
+    && deferredModel && selectedModel !== deferredModel) {
+    return { shouldBackoff: false, state };
+  }
   const nowMs = Date.parse(now);
   const nextRetryMs = Date.parse(state.nextRetryAfter);
   if (!Number.isFinite(nowMs) || !Number.isFinite(nextRetryMs)) {
@@ -630,6 +650,7 @@ export {
   readCascadeState,
   readReviewerCredentialOutage,
   recordCascadeFailure,
+  recordReviewerBudgetDeferral,
   recordReviewerCredentialFailure,
   recordTokenRefreshHold,
   releaseReviewerCredentialProbe,

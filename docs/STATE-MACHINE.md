@@ -670,6 +670,12 @@ claim. The detached dispatch tracker owns the capacity-freed signal: the
 reviewer admission settles, the pool releases its credential count, and the
 tracker removes the dispatch reservation before either direct admission or the durable
 discovery wake runs. Scheduler timing is not a release barrier. This also
+covers pre-model `github-budget-deferred` exits: the matching claim returns to
+`pending`, session/PGID/lease are cleared, and no review or infrastructure retry
+attempt is charged. The existing cascade `nextRetryAfter` records the bucket
+reset. A different model selected by existing exhausted-provider fallback rules
+may run before that reset; the preferred route is unchanged. No model pass or
+successful-post handoff occurs on deferral. This also
 covers candidates that return before spawning, allowing the next waiting
 candidate to proceed without another discovery poll. Pre-spawn refusals wake
 only the retained queue, without requesting another discovery poll. Capacity

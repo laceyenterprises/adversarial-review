@@ -106,7 +106,7 @@ function buildLoaderSource({
   const cascadeSource = cascadeRootDir ? `
     import * as actual from ${JSON.stringify(`${cascadeUrl}?actual`)};
     export * from ${JSON.stringify(`${cascadeUrl}?actual`)};
-    ${['readCascadeState', 'recordCascadeFailure', 'clearCascadeState', 'shouldBackoffReviewerSpawn',
+    ${['readCascadeState', 'recordCascadeFailure', 'recordReviewerBudgetDeferral', 'clearCascadeState', 'shouldBackoffReviewerSpawn',
       'markCascadeCapExhaustedAlerted', 'markOperatorDecisionRequiredAlerted'].map(name =>
       `export function ${name}(_root, args) { return actual.${name}(${JSON.stringify(cascadeRootDir)}, args); }`).join('\n')}
   ` : null;
@@ -377,7 +377,7 @@ export async function load(url, context, nextLoad) {
     'fixture:follow-up-merge-agent': ${JSON.stringify(followUpMergeAgentSource)},
     'fixture:follow-up-retrigger-label': "export const RETRIGGER_REMEDIATION_LABEL = 'retrigger-remediation'; export async function retryPendingRetriggerAckComments() { return { attempted: 0, posted: 0 }; } export async function reportStalledRetriggerOutcomes() { return { checked: 0, spawned: 0, reported: 0 }; } export async function tryRetriggerRemediationFromLabel() { return { outcome: 'noop' }; }",
     'fixture:operator-retrigger-helpers': "export function findLatestFollowUpJob() { return null; }",
-    'fixture:reviewer-cascade': "export const CASCADE_FAILURE_CAP = 3; export function classifyReviewerFailure() { return 'unknown'; } export function clearCascadeState() {} export function clearReviewerCredentialOutage() { return null; } export function formatTransientFailureBreakdown() { return ''; } export function hasOperatorDecisionRequiredAlerted() { return false; } export function isReviewerSubprocessTimeout() { return false; } export function markCascadeCapExhaustedAlerted() { return { marked: true, state: {} }; } export function markOperatorDecisionRequiredAlerted() { return { marked: true, state: {} }; } export function readCascadeState() { return null; } export function recordCascadeFailure() { return { consecutiveTransientFailures: 1, transientFailureBreakdown: {}, backoffMinutes: 1 }; } export function recordReviewerCredentialFailure() { return { active: false }; } export function recordTokenRefreshHold() { return { tokenRefreshHold: {} }; } export function shouldBackoffReviewerSpawn() { return { shouldBackoff: false }; } export function releaseReviewerCredentialProbe() { return false; } export function shouldPauseReviewerModel() { return { paused: false }; }",
+    'fixture:reviewer-cascade': "export const CASCADE_FAILURE_CAP = 3; export function classifyReviewerFailure() { return 'unknown'; } export function clearCascadeState() {} export function clearReviewerCredentialOutage() { return null; } export function formatTransientFailureBreakdown() { return ''; } export function hasOperatorDecisionRequiredAlerted() { return false; } export function isReviewerSubprocessTimeout() { return false; } export function markCascadeCapExhaustedAlerted() { return { marked: true, state: {} }; } export function markOperatorDecisionRequiredAlerted() { return { marked: true, state: {} }; } export function readCascadeState() { return null; } export function recordReviewerBudgetDeferral() {} export function recordCascadeFailure() { return { consecutiveTransientFailures: 1, transientFailureBreakdown: {}, backoffMinutes: 1 }; } export function recordReviewerCredentialFailure() { return { active: false }; } export function recordTokenRefreshHold() { return { tokenRefreshHold: {} }; } export function shouldBackoffReviewerSpawn() { return { shouldBackoff: false }; } export function releaseReviewerCredentialProbe() { return false; } export function shouldPauseReviewerModel() { return { paused: false }; }",
     'fixture:reviewer-reattach': "export function makeReviewPostedProbe() { return async () => null; } export function reviewerBotLogin(reviewer) { return reviewer ? 'codex-reviewer-lacey' : null; } export function probeReviewerSession() { return { alive: false, matched: false }; } export async function reconcileReviewerSessions() { return { reconciled: 0, skipped: 0 }; }",
     'fixture:reviewer-timeout': "export const REVIEWER_PROCESS_SLACK_MS = 300000; export function resolveNominalReviewerTimeoutMs() { return 300000; } export function resolveReviewerTimeoutMs() { return 300000; } export function resolveProgressTimeoutMs() { return 300000; } export function resolveAgyReviewerSubprocessTimeoutMs() { return 300000; } export function resolveGeminiReviewerProcessTimeoutMs() { return 300000; } export function resolveAgyPrintTimeoutMs() { return 1140000; }",
     'fixture:reviewer-broker-refresh': "globalThis.__watcherClaimLoopBrokerRefreshes = 0; export async function refreshReviewerBrokerTokens() { globalThis.__watcherClaimLoopBrokerRefreshes += 1; return { refreshed: 0, failed: 0, skipped: 3 }; } export async function refreshWatcherGithubToken() { return { refreshed: false, reason: 'fixture' }; } export function resolveWatcherGhBrokerRole() { return 'merge-agent'; }",
@@ -5492,5 +5492,56 @@ test('repeated harness failures exhaust refunds then reach the ordinary infra ca
           REVIEW_HARNESS_REFUND_CAP);
       `,
     });
+  } finally { rmSync(tmp, { recursive: true, force: true }); }
+});
+
+test('budget-deferred runtime returns its claim to pending and the next poll honors reset', () => {
+  const tmp = mkdtempSync(path.join(tmpdir(), 'watcher-budget-deferral-'));
+  try {
+    const loaderPath = path.join(tmp, 'loader.mjs'), registerPath = path.join(tmp, 'register.mjs');
+    const runnerPath = path.join(tmp, 'runner.mjs');
+    const resetAt = new Date(Date.now() + 3600_000).toISOString();
+    const receipt = '[reviewer-github-budget-deferred] ' + JSON.stringify({ resource: 'core',
+      remaining: 0, resetAt, credential: 'synthetic-credential' });
+    const runtimeSource = `
+      globalThis.__watcherClaimLoopReviewerSpawns = [];
+      export function createReviewerRuntimeAdapterForDomain() { return {
+        async spawnReviewer(payload) {
+          globalThis.__watcherClaimLoopReviewerSpawns.push(payload);
+          if (globalThis.__watcherClaimLoopReviewerSpawns.length > 1) return { ok: true, stdout: '', stderr: '' };
+          return { ok: false, failureClass: 'github-budget-deferred', stderrTail: ${JSON.stringify(receipt)} };
+        }, cancel: async () => {}, reattach: async () => ({})
+      }; }
+      export function createReviewerRuntimeAdapterByName() { return createReviewerRuntimeAdapterForDomain(); }
+      export function loadDomainConfig() { return {}; }
+      export async function recoverReviewerRunRecords() { return { recovered: 0, failed: 0 }; }
+    `;
+    writeFileSync(loaderPath, buildLoaderSource({ reviewerRuntimeSource: runtimeSource,
+      cascadeRootDir: tmp, discoveryHookSource: 'return [subjects[0].ref];' }));
+    writeFileSync(registerPath, buildRegisterSource(loaderPath));
+    writeFileSync(runnerPath, buildRunnerSource({ afterFirstPoll: `
+      const row = db.prepare('SELECT * FROM reviewed_prs WHERE pr_number=101').get();
+      assert.equal(row.review_status, 'pending');
+      assert.equal(row.reviewer_session_uuid, null);
+      assert.equal(row.reviewer_pgid, null);
+      assert.equal(row.reviewer_lease_expires_at, null);
+      assert.equal(row.review_attempts, 0);
+      assert.equal(row.infra_auto_recover_attempts, 0);
+      const { readCascadeState } = await import(${JSON.stringify(fileUrl('src', 'reviewer-cascade.mjs'))});
+      assert.equal(readCascadeState('', { repo: row.repo, prNumber: 101 }).nextRetryAfter, ${JSON.stringify(resetAt)});
+      await pollOnce(octokit, pollOptions);
+      assert.equal(globalThis.__watcherClaimLoopReviewerSpawns.length, 1, 'no same-credential retry before reset');
+      const { recordReviewerBudgetDeferral } = await import(${JSON.stringify(fileUrl('src', 'reviewer-cascade.mjs'))});
+      recordReviewerBudgetDeferral('', { repo: row.repo, prNumber: 101, reviewerModel: row.reviewer,
+        resetAt: new Date(Date.now() - 1000).toISOString(), failedAt: new Date().toISOString() });
+      await pollOnce(octokit, pollOptions);
+      assert.equal(globalThis.__watcherClaimLoopReviewerSpawns.length, 2, 'same preferred reviewer retries after reset');
+      assert.equal(db.prepare('SELECT review_status FROM reviewed_prs WHERE pr_number=101').get().review_status, 'posted');
+    ` }));
+    const result = spawnSync(process.execPath, ['--no-warnings', '--import', pathToFileURL(registerPath).href, runnerPath], {
+      cwd: REPO_ROOT, encoding: 'utf8', timeout: 30_000,
+      env: fixtureEnv({ ...installGhFixture(tmp), ADVERSARIAL_REVIEW_STATE_DIR: tmp }),
+    });
+    assert.equal(result.status, 0, `${result.stdout || ''}${result.stderr || ''}`);
   } finally { rmSync(tmp, { recursive: true, force: true }); }
 });

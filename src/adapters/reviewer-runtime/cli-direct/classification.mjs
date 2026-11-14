@@ -1,3 +1,4 @@
+import { parseReviewerBudgetDeferral, REVIEWER_GITHUB_BUDGET_DEFERRED_EXIT_CODE, REVIEWER_GITHUB_BUDGET_DEFERRED } from '../../../reviewer-github-budget.mjs';
 import { CLI_RESOLUTION_TRANSIENT_FAILURE_CLASS, isReviewCliResolutionFailure } from '../../../review-cli-resolver.mjs';
 import { PROGRESS_TIMEOUT_REASON_PREFIX } from '../../../reviewer-timeout-reason.mjs';
 import { REVIEWER_PROMPT_TOO_LARGE_EXIT_CODE, REVIEWER_CHUNK_BUDGET_EXCEEDED_EXIT_CODE, REPOSITORY_STATE_BUSY_EXIT_CODE } from '../../../reviewer-outcomes.mjs';
@@ -69,6 +70,7 @@ function classifyReviewerFailure(stderr, exitCode, errorCode = null, details = {
   // identifies stale-head churn; an ordinary temporary failure keeps its class.
   const text = String(stderr || '');
   const lower = text.toLowerCase();
+  if (exitCode === REVIEWER_GITHUB_BUDGET_DEFERRED_EXIT_CODE && parseReviewerBudgetDeferral(text)) return REVIEWER_GITHUB_BUDGET_DEFERRED;
   // A failed first resolver attempt may be followed by a successful retry.
   // Only the latest resolution observation can describe the eventual failure.
   const resolutionTag = '[review-cli-resolution] ';

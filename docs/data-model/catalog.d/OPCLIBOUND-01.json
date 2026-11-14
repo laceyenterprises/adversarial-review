@@ -14,7 +14,8 @@
         "credential",
         "credentialSelector",
         "limit",
-        "rateLimitedCalls"
+        "rateLimitedCalls",
+        "confirmedAt"
       ],
       "ownerScopedStore": "GHSTATEOWNER-01: a caller that does not own the shared store (file owner, or directory owner before the file exists) uses <store without .json>.uid-<uid>.json with its own .lock and .throttled.json; it never writes the shared store, and no writer renames over a store it could not read",
       "relatedSchemaSurfaces": [
@@ -31,7 +32,7 @@
         "src/api-telemetry.mjs",
         "src/operator-gh-read.mjs"
       ],
-      "compatibility": "Additive installation keys share verified token rotations; PAT fallbacks and unverified credentials remain token-keyed. Legacy resource-keyed documents remain anonymous. Deficit episodes persist across restarts; HTTP responses and credential bindings are distinct from logical attempts.",
+      "compatibility": "Additive installation keys share verified token rotations; PAT fallbacks and unverified credentials remain token-keyed. Legacy resource-keyed documents remain anonymous. Deficit episodes persist across restarts; HTTP responses and credential bindings are distinct from logical attempts. A newer confirmedAt from the free rate_limit endpoint can replace older primary evidence; actual rateLimitedCalls holds retain precedence. Quota headers are logged only in budget_exhaustion telemetry, not in bucket state.",
       "owner": "shared GitHub request throttle",
       "operatorCredentialScope": "src/operator-gh-read.mjs supplies the operator-cli fallback for credential-less admission and response recording. Explicit tokens retain their normal identity. No document-version or bucket-field changes."
     }

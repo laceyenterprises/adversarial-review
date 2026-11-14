@@ -18,6 +18,14 @@ the PR against every eligible reviewer until the exponential backoff window
 expires. Model-specific fields exist only to inform routing decisions about a
 particular reviewer model once the PR-level hold is clear.
 
+Pre-model `github-budget-deferred` is a scheduling exception: `nextRetryAfter`
+is the exact GitHub bucket reset, and `lastFailureModel` identifies the deferred
+reviewer. Settlement preserves counters and releases the matching claim to
+`pending`; pass accounting uses `cancelled`, and this typed cancellation spends
+neither the review budget nor the hard attempt ceiling. That hold applies to the same model only; an alternate selected by
+the existing exhausted-provider fallback rules can run before the reset. This
+exception does not choose a reviewer or reinterpret provider availability.
+
 ## Files
 
 Directory: `data/cascade-state/`

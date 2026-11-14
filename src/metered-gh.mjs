@@ -18,6 +18,29 @@ import {
 const execFileAsync = promisify(execFile);
 const bridge = fileURLToPath(new URL('../bin/metered-gh.mjs', import.meta.url));
 
+// Fixed free endpoint only: this must bypass admission to avoid recursively
+// waiting on the same exhausted bucket. All raw gh execution stays in this seam.
+export async function readUnthrottledGitHubRateLimit(env) {
+  const { stdout } = await execFileAsync('gh', ['api', '--method', 'GET', '--include', 'rate_limit'], {
+    env: { ...env, GH_DEBUG: '' }, timeout: 15_000, maxBuffer: 1024 * 1024,
+  });
+  const text = String(stdout);
+  const boundary = text.search(/\r?\n\r?\n/);
+  if (!text.startsWith('HTTP/') || boundary < 0) throw new Error('Missing rate_limit response headers');
+  const headerText = text.slice(0, boundary);
+  const bodyText = text.slice(boundary).replace(/^\r?\n\r?\n/, '');
+  const headers = Object.fromEntries(headerText.split(/\r?\n/).slice(1).map(line => {
+    const colon = line.indexOf(':');
+    return [line.slice(0, colon).trim().toLowerCase(), line.slice(colon + 1).trim()];
+  }));
+  recordApiCall({ category: 'github_request', status: 200, extra: {
+    credential: githubCredential({ env }), resource: 'core', requestCategory: 'rate_limit',
+    unit: 'http_response', budgetExempt: true,
+  } });
+  return { ...JSON.parse(bodyText).resources,
+    rawRateLimitHeaders: extractRateLimitObservation(headers)?.rawRateLimitHeaders };
+}
+
 function ghResources(args) {
   if (args[0] === 'api') return [args.includes('graphql') ? 'graphql' : 'core'];
   // High-level commands can mix REST with GraphQL. Wait for both pools.
@@ -48,7 +71,7 @@ function parseGhDebug(stderr, resource = 'core') {
     }
     const observation = extractRateLimitObservation(headers, { resource: requestResource, rateLimited: rateLimited || (forbidden && limitMessage) });
     if (httpStatus !== null) requests.push({ status: httpStatus, resource: headers['x-ratelimit-resource'] || requestResource, requestCategory });
-    if (observation) observations.push({ ...observation, rateLimited: rateLimited || (forbidden && (observation.remaining === 0 || limitMessage)) });
+    if (observation) observations.push({ ...observation, requestCategory, rateLimited: rateLimited || (forbidden && (observation.remaining === 0 || limitMessage)) });
     headers = {};
     httpStatus = null;
     rateLimited = false;
@@ -177,7 +200,7 @@ function meteredExecFile(execFileImpl = execFileAsync, command, args, options = 
     let credential = githubCredential({ env: active.env || process.env });
     const resource = args[0] === 'api' ? ghResources(args)[0] : 'graphql';
     let waited = false;
-    for (const res of ghResources(args)) waited = await awaitThrottleIfNeeded(res, credential) || waited;
+    for (const res of ghResources(args)) waited = await awaitThrottleIfNeeded(res, credential, { env: active.env || process.env }) || waited;
     if (waited && session.managed) {
       active = session.prepare();
       credential = githubCredential({ env: active.env });
@@ -237,14 +260,20 @@ function executeGhSync(execFileImpl, command, args, activeOptions, session) {
   for (const res of ghResources(args)) {
     const bucket = buckets[githubBudgetKey(res, credential)];
     const limited = scopedGitHubRateLimit(res, credential);
-    if (limited) throw new GitHubBudgetDeferredError(limited, { credential });
+    if (limited) {
+      const error = new GitHubBudgetDeferredError(limited, { credential });
+      if (scope) scope.budgetDeferral = error;
+      throw error;
+    }
     if (scope?.operatorSafety) continue; // Never starved by the floor (NOMERGEHOLDHANG-01).
     // The floor is capped by the bucket's observed limit (WATCHERANONBUCKET-01).
     if (githubBudgetBelowFloor(bucket, resolveThrottleFloor(env)) && Date.parse(bucket.resetAt) > Date.now()) {
       if (scope?.urgent && bucket.remaining > 0) continue;
       if (scope) {
         scope.deferred = true;
-        throw new GitHubBudgetDeferredError(bucket, { credential, floor: githubBudgetFloor(bucket, resolveThrottleFloor(env)) });
+        const error = new GitHubBudgetDeferredError(bucket, { credential, floor: githubBudgetFloor(bucket, resolveThrottleFloor(env)) });
+        scope.budgetDeferral = error;
+        throw error;
       }
       bridgeCall('wait', [{ resource: res, credential }], env);
       waited = true;

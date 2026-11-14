@@ -2799,6 +2799,7 @@ export async function processReviewSubject(entry, ctx) {
       const cascadeGate = shouldBackoffReviewerSpawn(ROOT, {
         repo: repoPath,
         prNumber,
+        reviewerModel: route.reviewerModel,
       });
       if (cascadeGate.shouldBackoff) {
         markWatcherSpawnDecision({

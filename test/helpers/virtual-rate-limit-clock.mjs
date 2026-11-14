@@ -3,7 +3,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { setImmediate } from 'node:timers/promises';
-import { rateLimitClock } from '../../src/rate-limit-throttle.mjs';
+import { rateLimitClock, rateLimitConfirmation } from '../../src/rate-limit-throttle.mjs';
 
 // Advance through the real throttle policy, including reset expiry, without
 // spending a minute on synthetic rate-limit replies. Keep time monotonic so
@@ -21,6 +21,7 @@ beforeEach(t => {
     else process.env.GHO_RATE_LIMIT_SHARED_STATE_PATH = previousPath;
     rmSync(dir, { recursive: true, force: true });
   });
+  t.mock.method(rateLimitConfirmation, 'read', async () => null);
   t.mock.method(rateLimitClock, 'now', () => now);
   t.mock.method(rateLimitClock, 'sleep', async ms => {
     await setImmediate(); // Allow lock holders and their real file I/O to run.

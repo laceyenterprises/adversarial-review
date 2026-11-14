@@ -1479,3 +1479,25 @@ test('AFH-04: decision surface is null-safe for a config-broken or absent route'
   assert.equal(describeAfhReviewerFallback(null), null);
   assert.equal(describeAfhReviewerFallback({ applied: false }), null);
 });
+
+test('budget-deferred pass permits the existing exhausted preferred reviewer fallback before reset', async t => {
+  const { recordReviewerBudgetDeferral, shouldBackoffReviewerSpawn } = await import('../src/reviewer-cascade.mjs');
+  const rootDir = mkdtempSync(join(tmpdir(), 'budget-fallback-'));
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  const identity = { repo: 'example/project', prNumber: 7 };
+  const now = new Date().toISOString(), resetAt = new Date(Date.now() + 3600_000).toISOString();
+  recordReviewerBudgetDeferral(rootDir, { ...identity, reviewerModel: 'gemini', resetAt, failedAt: now });
+  const baseRoute = effectiveRouteFor('claude-code', 'always-on');
+  assert.equal(baseRoute.reviewerModel, 'gemini');
+  const route = applyAfhReviewerFallback({ builderClass: 'claude-code', baseRoute,
+    grounding: groundingFor({ openai: OK, anthropic: OK, google: { state: 'exhausted', grounded: false } }),
+    geminiReviewerMode: 'always-on' });
+  assert.equal(route.reviewerModel, 'codex');
+  assert.match(route.afhReviewerFallback.reason, /primary-hard-grounded:exhausted/);
+  assert.equal(shouldBackoffReviewerSpawn(rootDir, { ...identity, reviewerModel: route.reviewerModel, now }).shouldBackoff, false);
+  assert.equal(shouldBackoffReviewerSpawn(rootDir, { ...identity, reviewerModel: 'gemini', now }).shouldBackoff, true);
+  const recoveredRoute = applyAfhReviewerFallback({ builderClass: 'claude-code', baseRoute,
+    grounding: ALL_OK(), geminiReviewerMode: 'always-on' });
+  assert.equal(recoveredRoute.reviewerModel, 'gemini', 'preference stays unchanged');
+  assert.equal(shouldBackoffReviewerSpawn(rootDir, { ...identity, reviewerModel: 'gemini', now: resetAt }).shouldBackoff, false);
+});

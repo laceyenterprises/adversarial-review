@@ -20,6 +20,15 @@ const LOCK_RETRY_MS = 50;
 const LOCK_TIMEOUT_MS = 30_000;
 const DEFAULT_RESOURCE = 'core';
 const UNKNOWN_RATE_LIMIT_RESET_MS = 60_000;
+const LONG_THROTTLE_MS = 120_000;
+// This request deliberately bypasses throttle admission. /rate_limit is free;
+// admitting it against the bucket it verifies would recurse into the same wait.
+export const rateLimitConfirmation = {
+  async read(env) {
+    const { readUnthrottledGitHubRateLimit } = await import('./metered-gh.mjs');
+    return readUnthrottledGitHubRateLimit(env);
+  },
+};
 // Keep the default instance's clock injectable too, so stubbed transports can
 // exercise reset expiry and backoff without waiting on wall time.
 export const rateLimitClock = {
@@ -236,6 +245,7 @@ function normalizeObservation(observation = null) {
     ...(Number.isInteger(observation.rateLimitedCalls) && observation.rateLimitedCalls > 0
       ? { rateLimitedCalls: observation.rateLimitedCalls } : {}),
     ...(observation.resetUnknown === true && normalizedRemaining === 0 ? { resetUnknown: true } : {}),
+    ...(normalizeTimestamp(observation.confirmedAt) ? { confirmedAt: normalizeTimestamp(observation.confirmedAt) } : {}),
   };
 }
 
@@ -262,6 +272,10 @@ function mergeResourceObservations(current, incoming, nowMs = Date.now()) {
   const right = sanitizeObservation(incoming, nowMs);
   if (!left) return right;
   if (!right) return left;
+  // A direct /rate_limit reading can correct older primary-quota evidence,
+  // but never an actual rate-limit response (which may be secondary).
+  if (!left.rateLimitedCalls && Date.parse(right.confirmedAt) > observationObservedAtMs(left)) return right;
+  if (!right.rateLimitedCalls && Date.parse(left.confirmedAt) > observationObservedAtMs(right)) return left;
   // An active exhaustion/secondary-limit window must survive healthy primary
   // quota observations, even when the primary quota resets later. A window
   // whose reset was only guessed (a headerless failure) is the exception: a
@@ -279,6 +293,8 @@ function mergeResourceObservations(current, incoming, nowMs = Date.now()) {
   return {
     ...(Math.max(left.rateLimitedCalls || 0, right.rateLimitedCalls || 0) > 0
       ? { rateLimitedCalls: Math.max(left.rateLimitedCalls || 0, right.rateLimitedCalls || 0) } : {}),
+    ...([left.confirmedAt, right.confirmedAt].filter(Boolean).sort().at(-1)
+      ? { confirmedAt: [left.confirmedAt, right.confirmedAt].filter(Boolean).sort().at(-1) } : {}),
     resource: left.resource,
     ...(left.credential ? { credential: left.credential } : {}),
     ...(right.credentialSelector || left.credentialSelector ? { credentialSelector: right.credentialSelector || left.credentialSelector } : {}),
@@ -579,13 +595,16 @@ function extractRateLimitObservation(headers, { observedAt = new Date().toISOStr
   const retryAfter = lookup('retry-after');
   const retryReset = retryAfter == null ? null : /^\d+(?:\.\d+)?$/.test(String(retryAfter).trim())
     ? Date.parse(observedAt) + Number(retryAfter) * 1000 : normalizeTimestamp(retryAfter);
-  return normalizeObservation({
+  const observation = normalizeObservation({
     resource: lookup('x-ratelimit-resource') || resource,
     remaining: rateLimited ? 0 : lookup('x-ratelimit-remaining'),
     limit: lookup('x-ratelimit-limit'),
     resetAt: (rateLimited && retryReset) || lookup('x-ratelimit-reset') || retryReset,
     observedAt,
   });
+  return observation ? { ...observation, rawRateLimitHeaders: Object.fromEntries(
+    ['limit', 'remaining', 'used', 'reset', 'resource'].map(name =>
+      [`x-ratelimit-${name}`, lookup(`x-ratelimit-${name}`) ?? null])) } : null;
 }
 
 function createRateLimitThrottle({
@@ -604,6 +623,7 @@ function createRateLimitThrottle({
   statImpl = stat,
   getuidImpl = defaultGetuid,
   storeStatImpl = statImpl,
+  confirmBudgetImpl = activeEnv => rateLimitConfirmation.read(activeEnv),
 } = {}) {
   const nowMs = injectedNowMs === undefined ? () => rateLimitClock.now() : injectedNowMs;
   const sleepImpl = injectedSleepImpl === undefined ? ms => rateLimitClock.sleep(ms) : injectedSleepImpl;
@@ -655,6 +675,14 @@ function createRateLimitThrottle({
   async function recordRateLimit(observation, rateLimitedOnly = false) {
     rateLimitedOnly ||= observation?.rateLimited === true;
     if (rateLimitedOnly) observation = { ...observation, remaining: 0 };
+    if (observation?.remaining != null && Number(observation.remaining) === 0) recordApiCallImpl?.({
+      category: 'other', status: 'exhausted',
+      extra: { unit: 'budget_exhaustion', credential: observation.credential || 'default',
+        resource: observation.resource || DEFAULT_RESOURCE,
+        requestCategory: observation.requestCategory || 'other',
+        consumer: currentGitHubBudgetScope()?.consumer,
+        rawRateLimitHeaders: observation.rawRateLimitHeaders || null },
+    });
     let normalized = sanitizeObservation(observation, nowMs());
     if (!rateLimitedOnly && !normalized) return null;
     // Only the caller's own store is locked and written (GHSTATEOWNER-01).
@@ -720,12 +748,16 @@ function createRateLimitThrottle({
     return markGitHubRateLimited(resource, credential, recorded);
   }
 
-  async function awaitThrottleIfNeeded(resource = DEFAULT_RESOURCE, credential = 'default') {
+  async function awaitThrottleIfNeeded(resource = DEFAULT_RESOURCE, credential = 'default', { env: requestEnv = env } = {}) {
     const normalizedResource = normalizeResource(resource);
     const key = githubBudgetKey(resource, credential);
     const scope = currentGitHubBudgetScope();
     const limited = scopedGitHubRateLimit(resource, credential, nowMs());
-    if (limited) throw new GitHubBudgetDeferredError(limited, { credential });
+    if (limited) {
+      const error = new GitHubBudgetDeferredError(limited, { credential });
+      if (scope) scope.budgetDeferral = error;
+      throw error;
+    }
     // An operator safety action (a no-merge hold or release) is one call an
     // operator is waiting on. The polling floor reserves throughput; it must
     // never starve or silently sleep that call (NOMERGEHOLDHANG-01). GitHub
@@ -743,7 +775,9 @@ function createRateLimitThrottle({
       // serve any request, urgent or otherwise.
       if (scope.urgent && current.remaining > 0) return false;
       scope.deferred = true;
-      throw new GitHubBudgetDeferredError(current, { credential, floor: githubBudgetFloor(current, floor) });
+      const error = new GitHubBudgetDeferredError(current, { credential, floor: githubBudgetFloor(current, floor) });
+      scope.budgetDeferral = error;
+      throw error;
     }
     if (activeThrottlePromises.has(key)) {
       return activeThrottlePromises.get(key);
@@ -752,8 +786,37 @@ function createRateLimitThrottle({
       try {
         const configuredFloor = resolveThrottleFloor(env, logger);
         const currentObservations = mergeObservationMaps(inMemoryObservations, await readSharedState(), nowMs());
-        const current = currentObservations[key] || null;
+        let current = currentObservations[key] || null;
         if (!githubBudgetBelowFloor(current, configuredFloor)) return false;
+        if (observationResetAtMs(current) - nowMs() > LONG_THROTTLE_MS) {
+          // Never confirm a named bucket with a different token or ambient login.
+          // Without the sending identity, defer rather than make an unverified long wait.
+          if (githubCredential({ env: requestEnv }) !== credential) {
+            throw new GitHubBudgetDeferredError(current, { credential });
+          }
+          try {
+            const confirmedAt = nowMs();
+            const resources = await confirmBudgetImpl(requestEnv);
+            const live = resources?.[normalizedResource];
+            const confirmed = Number.isInteger(live?.remaining) && live.remaining >= 0
+              ? sanitizeObservation({ resource: normalizedResource, credential,
+                remaining: live.remaining, limit: live.limit, resetAt: live.reset,
+                observedAt: nowMs(), confirmedAt }, nowMs()) : null;
+            recordApiCallImpl?.({ category: 'other', status: confirmed ? 'confirmed' : 'unknown',
+              extra: { unit: 'budget_confirmation', credential, resource: normalizedResource,
+                remaining: confirmed?.remaining ?? null, resetAt: confirmed?.resetAt ?? null } });
+            if (confirmed) {
+              await recordRateLimit({ ...confirmed, requestCategory: 'rate_limit',
+                rawRateLimitHeaders: resources.rawRateLimitHeaders });
+              current = (await readSharedState())[key] || null;
+              if (!githubBudgetBelowFloor(current, configuredFloor)) return false;
+            }
+          } catch {
+            // Failed confirmation never proves recovery. Keep the observed hold.
+            recordApiCallImpl?.({ category: 'other', status: 'failed',
+              extra: { unit: 'budget_confirmation', credential, resource: normalizedResource } });
+          }
+        }
         const floor = githubBudgetFloor(current, configuredFloor);
         const waitMs = Math.max(0, observationResetAtMs(current) - nowMs());
         // The status file sits beside the caller's own store.
@@ -824,8 +887,8 @@ function createRateLimitThrottle({
 
 const defaultThrottle = createRateLimitThrottle();
 
-function awaitThrottleIfNeeded(resource, credential) {
-  return defaultThrottle.awaitThrottleIfNeeded(resource, credential);
+function awaitThrottleIfNeeded(resource, credential, options) {
+  return defaultThrottle.awaitThrottleIfNeeded(resource, credential, options);
 }
 
 function recordResponseRateLimit(observation) {

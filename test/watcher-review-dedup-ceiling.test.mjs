@@ -550,3 +550,24 @@ test('one delivered head and three undelivered completions spend exactly one and
     assert.equal(countReviewCeilingUnits({ db, repoPath, prNumber: 2 }), 3);
   } finally { db.close(); rmSync(rootDir, { recursive: true, force: true }); }
 });
+
+test('pre-model budget deferrals spend neither landed-review nor attempt ceiling', () => {
+  const rootDir = makeTempRoot();
+  try {
+    const db = openReviewStateDb(rootDir);
+    ensureReviewStateSchema(db);
+    for (let attempt = 1; attempt <= 8; attempt++) {
+      insertPass(db, { repoPath: 'example/project', prNumber: 7, attemptNumber: attempt,
+        passKind: 'first-pass', headSha: 'current', status: 'cancelled',
+        metadata: { failureClass: 'github-budget-deferred' } });
+    }
+    const args = { db, rootDir, repoPath: 'example/project', prNumber: 7, headSha: 'current' };
+    assert.equal(countReviewCeilingAttempts(args), 0);
+    assert.equal(countReviewCeilingUnits(args), 0);
+    insertPass(db, { repoPath: args.repoPath, prNumber: 7, attemptNumber: 9,
+      passKind: 'first-pass', headSha: 'current', status: 'cancelled', metadata: { failureClass: 'cancelled' } });
+    assert.equal(countReviewCeilingAttempts(args), 1, 'ordinary cancellation retains the existing fuse');
+    db.prepare("UPDATE reviewer_passes SET status='failed' WHERE attempt_number=1").run();
+    assert.equal(countReviewCeilingAttempts(args), 2, 'an actual failed pass retains the existing fuse');
+  } finally { rmSync(rootDir, { recursive: true, force: true }); }
+});

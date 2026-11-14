@@ -137,6 +137,7 @@ import {
   buildGhErrorDetail,
 } from './reviewer-util.mjs';
 import { createReviewSizeRecovery, discloseReviewManifest } from './reviewer-large-diff.mjs';
+import { runReviewerPreModel, reviewerBudgetDeferralReceipt, REVIEWER_GITHUB_BUDGET_DEFERRED_EXIT_CODE } from './reviewer-github-budget.mjs';
 import { fetchPRDiff, fetchPRDiffFromFilesApi } from './reviewer-diff-fetch.mjs';
 import { resolvePrOwnReviewDiff } from './reviewer-own-diff.mjs';
 import { groundBlockingFindingsAtHead, persistReviewGroundingMetadata } from './review-head-grounding.mjs';
@@ -1892,84 +1893,92 @@ async function main() {
     }
   }
 
-  let prContext;
-  try {
-    prContext = await fetchPRContext(repo, prNumber, { botTokenEnv });
-  } catch (err) {
-    console.error(`[reviewer] Failed to fetch required PR context for ${repo}#${prNumber}: ${err.message}`);
-    process.exit(1);
-  }
+  const { prContext, diff, reviewedPackLockhash, reviewDiffScope, reviewModeDecision, extraContext, guardForbiddenPaths, emptyDiff } = await runReviewerPreModel(async () => {
+    let prContext;
+    try {
+      prContext = await fetchPRContext(repo, prNumber, { botTokenEnv });
+    } catch (err) {
+      if (err?.budgetDeferred) throw err;
+      console.error(`[reviewer] Failed to fetch required PR context for ${repo}#${prNumber}: ${err.message}`);
+      throw err;
+    }
 
-  // 1. Fetch diff
-  let diff;
-  let reviewedPackLockhash = null;
-  try {
-    console.error(`[reviewer] DEBUG: fetching diff for ${repo}#${prNumber}...`);
-    const diffBytes = await fetchPRDiff(repo, prNumber, reviewerHeadSha);
-    diff = diffBytes.toString('utf8');
-    console.error(`[reviewer] DEBUG: fetched diff (${diffBytes.byteLength} bytes)`);
-  } catch (err) {
-    console.error(`[reviewer] Failed to fetch diff for ${repo}#${prNumber}:`, err.message);
-    process.exit(1);
-  }
+    // 1. Fetch diff
+    let diff;
+    let reviewedPackLockhash = null;
+    try {
+      console.error(`[reviewer] DEBUG: fetching diff for ${repo}#${prNumber}...`);
+      const diffBytes = await fetchPRDiff(repo, prNumber, reviewerHeadSha);
+      diff = diffBytes.toString('utf8');
+      console.error(`[reviewer] DEBUG: fetched diff (${diffBytes.byteLength} bytes)`);
+    } catch (err) {
+      if (err?.budgetDeferred) throw err;
+      console.error(`[reviewer] Failed to fetch diff for ${repo}#${prNumber}:`, err.message);
+      throw err;
+    }
 
-  if (!diff.trim()) {
+    if (!diff.trim()) return { prContext, diff, emptyDiff: true };
+    // REVIEWCHUNK-01: a stale stored base inflates `gh pr diff`; review merge-base(head, base tip)...head.
+    const { diff: ownDiff, scope: reviewDiffScope } = await resolvePrOwnReviewDiff({ repo, prNumber, headSha: reviewerHeadSha, baseRef: prContext?.baseRefName, prDiff: diff, log: console });
+    diff = ownDiff;
+
+    try {
+      reviewedPackLockhash = await resolveReviewedPackLockhash({
+        repo,
+        headSha: reviewerHeadSha,
+        diffText: diff,
+        log: console,
+      });
+    } catch (err) {
+      if (err?.budgetDeferred) throw err;
+      console.error(`[reviewer] Failed to compute pack lockhash for ${repo}#${prNumber}: ${err.message}`);
+      if (isPackLockhashInputError(err)) {
+        console.error(`[reviewer] Continuing without pack lockhash for malformed pack PR ${repo}#${prNumber}`);
+      } else {
+        throw err;
+      }
+    }
+
+    // RPL-08: classify from the diff already in hand — no extra GitHub round trip
+    // on the review hot path, or the lane would spend the latency it saves.
+    const reviewModeDecision = selectReviewMode({
+      rootDir: ROOT, repo, prNumber, diff, labels,
+      author: prContext?.author || null,
+      headSha: reviewerHeadSha || null,
+      attemptNumber: Number.isFinite(Number(reviewDbAttemptNumber))
+        ? Number(reviewDbAttemptNumber)
+        : Number(reviewAttemptNumber),
+      reviewerModel,
+      promptStage: reviewerPromptStage,
+      stageContext: { reviewAttemptNumber, maxRemediationRounds },
+      logStructuredEventImpl: logStructuredEvent,
+      log: console,
+    });
+
+    persistSingleReviewDecision({ rootDir: ROOT, repo, prNumber, attemptNumber: Number(reviewDbAttemptNumber ?? reviewAttemptNumber), reviewerClass: reviewerModel, passKind, headSha: reviewerHeadSha, singleReview: reviewModeDecision.singleReview });
+
+    const guardForbiddenPaths = await loadGuardForbiddenPaths({
+      repo, baseRef: prContext?.baseRefOid || prContext?.baseRefName, log: console,
+    });
+    const extraContext = await buildReviewerExtraContext({
+      repo,
+      prNumber,
+      prContext,
+      diff,
+      advisoryFindings,
+      guardForbiddenPaths,
+      reviewModeDecision,
+      repoRoot: join(ROOT, '..', '..'),
+      log: console,
+    });
+
+    return { prContext, diff, reviewedPackLockhash, reviewDiffScope, reviewModeDecision, extraContext, guardForbiddenPaths };
+  });
+
+  if (emptyDiff) {
     console.log(`[reviewer] Empty diff for ${repo}#${prNumber} — nothing to review`);
     process.exit(0);
   }
-  // REVIEWCHUNK-01: a stale stored base inflates `gh pr diff`; review merge-base(head, base tip)...head.
-  const { diff: ownDiff, scope: reviewDiffScope } = await resolvePrOwnReviewDiff({ repo, prNumber, headSha: reviewerHeadSha, baseRef: prContext?.baseRefName, prDiff: diff, log: console });
-  diff = ownDiff;
-
-  try {
-    reviewedPackLockhash = await resolveReviewedPackLockhash({
-      repo,
-      headSha: reviewerHeadSha,
-      diffText: diff,
-      log: console,
-    });
-  } catch (err) {
-    console.error(`[reviewer] Failed to compute pack lockhash for ${repo}#${prNumber}: ${err.message}`);
-    if (isPackLockhashInputError(err)) {
-      console.error(`[reviewer] Continuing without pack lockhash for malformed pack PR ${repo}#${prNumber}`);
-    } else {
-      process.exit(1);
-    }
-  }
-
-  // RPL-08: classify from the diff already in hand — no extra GitHub round trip
-  // on the review hot path, or the lane would spend the latency it saves.
-  const reviewModeDecision = selectReviewMode({
-    rootDir: ROOT, repo, prNumber, diff, labels,
-    author: prContext?.author || null,
-    headSha: reviewerHeadSha || null,
-    attemptNumber: Number.isFinite(Number(reviewDbAttemptNumber))
-      ? Number(reviewDbAttemptNumber)
-      : Number(reviewAttemptNumber),
-    reviewerModel,
-    promptStage: reviewerPromptStage,
-    stageContext: { reviewAttemptNumber, maxRemediationRounds },
-    logStructuredEventImpl: logStructuredEvent,
-    log: console,
-  });
-
-  persistSingleReviewDecision({ rootDir: ROOT, repo, prNumber, attemptNumber: Number(reviewDbAttemptNumber ?? reviewAttemptNumber), reviewerClass: reviewerModel, passKind, headSha: reviewerHeadSha, singleReview: reviewModeDecision.singleReview });
-
-  const guardForbiddenPaths = await loadGuardForbiddenPaths({
-    repo, baseRef: prContext?.baseRefOid || prContext?.baseRefName, log: console,
-  });
-  const extraContext = await buildReviewerExtraContext({
-    repo,
-    prNumber,
-    prContext,
-    diff,
-    advisoryFindings,
-    guardForbiddenPaths,
-    reviewModeDecision,
-    repoRoot: join(ROOT, '..', '..'),
-    log: console,
-  });
-
   const reviewKind = selectReviewerRubric(diff);
   // 2. Run adversarial review (OAuth only — no API key fallback)
   let effectiveModel = reviewerModel;
@@ -2534,6 +2543,10 @@ export {
 
 if (process.argv[1] === fileURLToPath(import.meta.url)) {
   withRepositoryStateCycle(ROOT, main).catch((err) => {
+    if (err?.reviewerPreModelBudgetDeferred) {
+      console.error(reviewerBudgetDeferralReceipt(err));
+      process.exit(REVIEWER_GITHUB_BUDGET_DEFERRED_EXIT_CODE);
+    }
     if (err.code === 'REPOSITORY_STATE_BUSY') {
       console.warn(`[repository-state-busy] ${err.message}`);
       process.exit(REPOSITORY_STATE_BUSY_EXIT_CODE);

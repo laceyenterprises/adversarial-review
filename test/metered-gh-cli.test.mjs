@@ -111,3 +111,33 @@ setTimeout(() => process.exit(99), 4000);
     assert.throws(() => process.kill(pid, 0), { code: 'ESRCH' });
   });
 }
+
+test('CLI zero response attributes its raw quota headers without retaining debug secrets', async t => {
+  const { readdirSync } = await import('node:fs');
+  const reset = Math.floor((Date.now() + 3600_000) / 1000);
+  const headers = { 'x-ratelimit-limit': '5000', 'x-ratelimit-remaining': '0',
+    'x-ratelimit-used': '5000', 'x-ratelimit-reset': String(reset), 'x-ratelimit-resource': 'core' };
+  const trace = '* Request at synthetic\n* Request to https://api.github.com/repos/example/project/pulls/7\n'
+    + '< HTTP/2.0 200 OK\n' + Object.entries(headers).map(([key, value]) => `< ${key}: ${value}`).join('\n')
+    + '\n< Authorization: never-retain\n* Request took synthetic\n';
+  const env = fixture(t, `process.stdout.write('{}'); process.stderr.write(${JSON.stringify(trace)});`);
+  env.GHO_API_CALL_LOG_ROOT_DIR = env.PATH;
+  env.GHO_API_CONSUMER = 'synthetic-reviewer';
+  delete env.NODE_TEST_CONTEXT;
+  delete env.NODE_ENV;
+  delete env.GHO_API_CALL_LOG_DISABLE;
+  const result = spawnSync(process.execPath, [helper, 'exec', 'api', 'repos/example/project/pulls/7'], {
+    env, encoding: 'utf8', timeout: 5000,
+  });
+  assert.equal(result.status, 0, result.stderr);
+  const logDir = join(env.PATH, 'data', 'api-call-log');
+  const rows = readdirSync(logDir).filter(name => name.endsWith('.jsonl')).flatMap(name =>
+    readFileSync(join(logDir, name), 'utf8').trim().split('\n').map(line => JSON.parse(line)));
+  const exhaustion = rows.find(row => row.unit === 'budget_exhaustion');
+  assert.ok(exhaustion);
+  assert.equal(exhaustion.consumer, 'synthetic-reviewer');
+  assert.equal(exhaustion.requestCategory, 'pr_state');
+  assert.deepEqual(exhaustion.rawRateLimitHeaders, headers);
+  assert.equal(JSON.stringify(rows).includes('never-retain'), false);
+  assert.equal(result.stderr.includes('never-retain'), false);
+});

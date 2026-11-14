@@ -1125,6 +1125,19 @@ export interface ShadowDispositionOverride {
   at: IsoTimestamp;
 }
 
+export interface ShadowPatternDisposition {
+  id: number;
+  key: string;
+  kind: 'equivalent' | 'v2-defect' | 'policy';
+  principal: string;
+  note: string;
+  ticketRef: string | null;
+  evidenceSampleIds: number[];
+  createdAt: IsoTimestamp;
+  expiresAt: IsoTimestamp | null;
+  revocation: { principal: string; note: string; at: IsoTimestamp } | null;
+}
+
 /** One recorded shadow tick: the `(v1 action, v2 decision)` pair + its triage. */
 export interface ShadowObservation {
   id?: number;
@@ -1141,6 +1154,8 @@ export interface ShadowObservation {
   sawHeadMove: boolean;
   sawExhaustion: boolean;
   dispositionOverride?: ShadowDispositionOverride | null;
+  patternKey?: string | null;
+  patternDisposition?: ShadowPatternDisposition | null;
   /** Queue pair identity excludes poll time; the store enforces uniqueness. */
   dedupeKey?: string;
   /** Extensible observation evidence, never an executable decision or owner. */
@@ -1158,6 +1173,7 @@ export interface ShadowReportModel {
   shadowed: number;
   agree: number;
   diverge: number;
+  patterns?: { key: string | null; total: number; byPattern: number; byIndividualOverride: number; open: number; byClassifier: number }[];
   divergences: {
     id: number | null;
     subjectExternalId: string;

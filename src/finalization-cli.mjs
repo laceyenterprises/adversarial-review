@@ -1,12 +1,14 @@
 // `adversarial-review finalization shadow-report` (ARC-16, SPEC §1 Win 3). A
-// read-only surface over the recorded shadow observations (`finalization_shadow`
+// reporting surface over the recorded shadow observations (`finalization_shadow`
 // in the app store): it folds the recorded `(v1 action, v2 decision)` pairs into
 // the divergence report and the operator promotion verdict. It NEVER mutates
-// state and NEVER acts on a decision — shadow mode is log-only.
+// execution state and NEVER acts on a decision — shadow mode is log-only.
+// shadow-pattern is a separate, explicit telemetry-triage write surface.
 //
 // The window and the "now" the report ages against are the CLI's only clock
 // reads; the model builder (`shadow-report.mjs`) is pure and takes both as data.
 
+import { shadowPatternMain, PATTERN_USAGE } from './finalization/shadow-pattern-cli.mjs';
 import { openQueueStatus, renderQueueStatus } from './finalization/queue-status.mjs';
 import { queueProbeMain } from './finalization/queue-probe.mjs';
 import { fileURLToPath } from 'node:url';
@@ -16,7 +18,7 @@ import { buildShadowReport, renderShadowReport } from './finalization/shadow-rep
 
 const USAGE = `\
 Usage:
-  adversarial-review finalization shadow-report [--days <7>] [--root <dir>] [--json]
+${PATTERN_USAGE}  adversarial-review finalization shadow-report [--days <7>] [--root <dir>] [--json]
   adversarial-review finalization queue status --repo OWNER/REPO --base REF [--root DIR] [--config FILE] [--json]
   adversarial-review finalization queue receipt --repo OWNER/REPO --pr N [--base REF] [--root DIR] [--config FILE] [--json]
   adversarial-review finalization queue probe --capability routing|canary|cutover --json [--root DIR] [--config FILE]
@@ -54,6 +56,7 @@ function finalizationMain(argv, io = {}) {
   const openStore = io.openStore || openReadOnlyFinalizationShadowStore;
   const [subcommand, ...rest] = argv;
 
+  if (subcommand === 'shadow-pattern') return shadowPatternMain(rest, io);
   if (subcommand === 'queue') return queueMain(rest, io);
 
   if (subcommand === '--help' || subcommand === '-h' || subcommand === undefined) {

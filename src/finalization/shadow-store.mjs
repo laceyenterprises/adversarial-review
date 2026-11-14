@@ -9,15 +9,16 @@ import { loadAwareTimeoutMs } from '../load-aware-timeout.mjs';
 // the classifier proposes, a human may override).
 //
 // Mirrors the ledger-store seam: in-memory DB for tests, native better-sqlite3
-// in production, schema convergence that matches the 20260718 migration exactly.
+// in production, schema convergence for the base and additive shadow migrations.
 
 import Database from 'better-sqlite3';
+import { shadowPatternKey } from './shadow-pattern.mjs';
 import { existsSync, mkdirSync, statSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 
 const DEFAULT_BUSY_TIMEOUT_MS = 5_000;
 
-/** Idempotent schema convergence — mirrors the 20260718 migration exactly. */
+/** Idempotent schema convergence — base observations and additive migrations. */
 export function ensureFinalizationShadowSchema(db) {
   db.exec(`
     CREATE TABLE IF NOT EXISTS finalization_shadow (
@@ -47,6 +48,7 @@ export function ensureFinalizationShadowSchema(db) {
       ON finalization_shadow(domain_id, subject_external_id, id);
   `);
   db.exec(readFileSync(new URL('../../migrations/20261028_finalization_queue_shadow.sql', import.meta.url), 'utf8'));
+  db.exec(readFileSync(new URL('../../migrations/20261113_finalization_shadow_patterns.sql', import.meta.url), 'utf8'));
 }
 
 function openDb(rootDir, { busyTimeoutMs = loadAwareTimeoutMs(DEFAULT_BUSY_TIMEOUT_MS) } = {}) {
@@ -98,6 +100,8 @@ function observationToColumns(obs) {
       v1Action: obs.v1Action,
       v2Decision: obs.v2Decision,
       classification: obs.classification,
+      patternKey: shadowPatternKey(obs),
+      ...(obs.patternDisposition ? { patternDisposition: obs.patternDisposition } : {}),
       ...(obs.dedupeKey ? { dedupeKey: obs.dedupeKey } : {}),
       ...(obs.live ? { live: obs.live } : {}),
       ...(obs.queue ? { queue: obs.queue, dedupeKey: obs.dedupeKey } : {}),
@@ -138,10 +142,31 @@ export function rowToObservation(row) {
     sawHeadMove: row.saw_head_move === 1,
     sawExhaustion: row.saw_exhaustion === 1,
     dispositionOverride: override,
+    patternKey: shadowPatternKey({ v1Action: payload.v1Action, v2Decision: payload.v2Decision }),
+    ...(payload.patternDisposition ? { patternDisposition: payload.patternDisposition } : {}),
     ...(payload.dedupeKey ? { dedupeKey: payload.dedupeKey } : {}),
     ...(payload.live ? { live: payload.live } : {}),
     ...(payload.queue ? { queue: payload.queue, dedupeKey: payload.dedupeKey } : {}),
   };
+}
+
+function validTimestamp(value) {
+  return typeof value === 'string'
+    && /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,3})?(?:Z|[+-]\d{2}:\d{2})$/.test(value)
+    && Number.isFinite(Date.parse(value));
+}
+
+function validateAudit(record) {
+  if (typeof record?.principal !== 'string' || !record.principal.trim()
+    || typeof record.note !== 'string' || !record.note.trim()
+    || !validTimestamp(record.at)) throw new TypeError('principal, note and valid at timestamp required');
+}
+
+function patternRow(row) {
+  return { id: row.id, key: row.pattern_key, kind: row.kind, principal: row.principal,
+    note: row.note, ticketRef: row.ticket_ref, evidenceSampleIds: JSON.parse(row.evidence_sample_ids_json),
+    createdAt: row.created_at, expiresAt: row.expires_at,
+    revocation: row.revocation_json ? JSON.parse(row.revocation_json) : null };
 }
 
 /**
@@ -210,15 +235,62 @@ export function openFinalizationShadowStore({ rootDir, db, busyTimeoutMs } = {})
   return {
     db: database,
 
+    listPatterns() {
+      return database.prepare('SELECT * FROM finalization_shadow_patterns ORDER BY id').all().map(patternRow);
+    },
+    addPattern(record) {
+      validateAudit(record);
+      if (!['equivalent', 'v2-defect', 'policy'].includes(record.kind)) throw new TypeError('invalid pattern disposition kind');
+      if (record.kind === 'v2-defect' && !/^(?:[A-Z][A-Z0-9]*-\d+|https:\/\/\S+)$/.test(record.ticketRef ?? '')) {
+        throw new TypeError('v2-defect requires a linked ticket reference');
+      }
+      if (record.expiresAt != null && (!validTimestamp(record.expiresAt)
+        || Date.parse(record.expiresAt) <= Date.parse(record.at))) throw new TypeError('expiry must follow creation');
+      if (!Array.isArray(record.evidenceSampleIds) || !record.evidenceSampleIds.length
+        || record.evidenceSampleIds.some(id => !Number.isSafeInteger(id) || id <= 0)) throw new TypeError('evidence sample ids required');
+      return database.transaction(() => {
+        for (const id of record.evidenceSampleIds) {
+          const row = selectById.get(id);
+          const sample = row && rowToObservation(row);
+          if (!sample || sample.foldError || sample.classification.relation !== 'diverge'
+            || !record.key || shadowPatternKey(sample) !== record.key
+            || !validTimestamp(sample.observedAt) || Date.parse(sample.observedAt) > Date.parse(record.at)) throw new TypeError('evidence must match an eligible divergence pattern');
+        }
+        const result = database.prepare(`INSERT INTO finalization_shadow_patterns
+          (pattern_key,kind,principal,note,ticket_ref,evidence_sample_ids_json,created_at,expires_at)
+          VALUES (?,?,?,?,?,?,?,?)`).run(record.key, record.kind, record.principal, record.note,
+          record.ticketRef ?? null, JSON.stringify(record.evidenceSampleIds), record.at, record.expiresAt ?? null);
+        return patternRow(database.prepare('SELECT * FROM finalization_shadow_patterns WHERE id=?').get(result.lastInsertRowid));
+      }).immediate();
+    },
+    revokePattern(id, audit) {
+      validateAudit(audit);
+      const result = database.prepare(`UPDATE finalization_shadow_patterns SET revocation_json=?
+        WHERE id=? AND revocation_json IS NULL AND julianday(created_at) <= julianday(?)`)
+        .run(JSON.stringify(audit), id, audit.at);
+      if (!result.changes) throw new Error('pattern missing, already revoked, or revocation predates creation');
+      return patternRow(database.prepare('SELECT * FROM finalization_shadow_patterns WHERE id=?').get(id));
+    },
+
     /**
      * Append one shadow observation. Returns the stored record with its `id`.
      * @param {import('../kernel/contracts.js').ShadowObservation} observation
      */
     append(observation) {
       if (observation.queue && !observation.dedupeKey) throw new TypeError('queue shadow requires a dedupe key');
-      const result = insert.run(observationToColumns(observation));
-      if (!result.changes && observation.dedupeKey) return rowToObservation(selectByKey.get(observation.dedupeKey));
-      return { ...observation, id: Number(result.lastInsertRowid) };
+      return database.transaction(() => {
+        const patternKey = shadowPatternKey(observation);
+        const pattern = patternKey && observation.classification.relation === 'diverge' && !observation.foldError
+          ? database.prepare(`SELECT * FROM finalization_shadow_patterns WHERE pattern_key = ?
+              AND revocation_json IS NULL AND julianday(created_at) <= julianday(?)
+              AND (expires_at IS NULL OR julianday(expires_at) > julianday(?))`)
+            .get(patternKey, observation.observedAt, observation.observedAt) : null;
+        // Only this store can attach a pattern reference; caller payloads cannot.
+        const stored = { ...observation, patternDisposition: pattern ? patternRow(pattern) : null };
+        const result = insert.run(observationToColumns(stored));
+        if (!result.changes && observation.dedupeKey) return rowToObservation(selectByKey.get(observation.dedupeKey));
+        return rowToObservation(selectById.get(Number(result.lastInsertRowid)));
+      }).immediate();
     },
 
     /**
@@ -333,6 +405,10 @@ export function openReadOnlyFinalizationShadowStore({ rootDir, db, busyTimeoutMs
 
   return {
     db: database,
+    listPatterns() {
+      if (!database.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='finalization_shadow_patterns'").get()) return [];
+      return database.prepare('SELECT * FROM finalization_shadow_patterns ORDER BY id').all().map(patternRow);
+    },
     read({ from, to } = {}) {
       let rows;
       if (from != null && to != null) {

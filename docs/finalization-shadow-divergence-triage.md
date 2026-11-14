@@ -112,6 +112,42 @@ Use `disposition: 'open'` to **re-open** a divergence the classifier
 auto-resolved if you disagree with the attribution — that is the bidirectional
 escape hatch, and it re-blocks the gate.
 
+## Pattern dispositions
+
+For repeated exact patterns, use `finalization shadow-pattern` as the canonical
+data-directory owner. `shadow-report --json` exposes `patterns[].key` and
+observation IDs; inspect the evidence before copying a key. Example with only
+synthetic values (replace the key and IDs with reviewed observations):
+
+```sh
+node src/cli.mjs finalization shadow-pattern list --root <tool-root>
+node src/cli.mjs finalization shadow-pattern add --root <tool-root> \
+  --key '["shadow-pattern-v1","remediate","remediate:live-owner","wait","no verdict at current revision"]' \
+  --kind equivalent --principal synthetic-reviewer \
+  --note 'Synthetic evidence demonstrates equivalent ownership handling.' --evidence 123,124
+node src/cli.mjs finalization shadow-pattern revoke --root <tool-root> \
+  --id 1 --principal synthetic-reviewer --note 'Pattern needs renewed investigation.'
+```
+
+Commands emit JSON. `add` requires `--key`, `--kind`, `--principal`, `--note`
+and comma-separated `--evidence` observation IDs. Kinds are `equivalent`,
+`v2-defect` (requires `--ticket EXAMPLE-42` or an HTTPS link), and `policy`.
+Optional `--expires-at` sets an exclusive ISO expiry. Principals are required,
+nonblank and preserved verbatim. Each sample must match the key exactly and
+must be a non-error divergence. The key vocabulary and durable audit shape are
+specified in [the store schema](data-model/finalization-shadow.md#exact-pattern-dispositions-mlrdispo-01).
+Unkeyable rows require individual triage; there is no wildcard disposition.
+
+Only new matching appends capture a pattern disposition. Earlier samples and
+historical open divergences still require individual overrides. The original
+classifier proposal is retained. Revocation stops future application and keeps
+past decisions and the full record; to replace an expired or revoked policy,
+revoke the old record if needed and add a new one. Individual overrides always
+win, including reopening a pattern-resolved row. The report counts pattern,
+individual, classifier and open outcomes separately. A `v2-defect` disposition
+records an acknowledged defect with its ticket; it is not proof of a fix.
+Fold/evidence errors retain their individual-triage requirement.
+
 ## The promotion gate (§5.3)
 
 `node src/cli.mjs finalization shadow-report --days 7` prints the verdict.
@@ -150,7 +186,8 @@ retain their original event time and observation id. Repeated same-head polls
 cannot advance the revision anchor. Translation/read/fold failures record
 `escalate`; persistence failures emit a local diagnostic and remain missing
 evidence. Live snapshot divergences preserve the existing taxonomy as a proposed
-classification and stay open for bidirectional triage. A held or proposed daemon
+classification and start open for bidirectional triage unless an active exact
+pattern disposition applies. A held or proposed daemon
 merge is a wait; a live hammer is not a new dispatch. Missing immutable
 primary-change provenance remains a v2 recovery wait.
 
@@ -182,8 +219,8 @@ merge producer identity as `identity-unresolved`, and a mismatched or missing
 publication receipt as `publication-unverified`. Checks remain green in the
 recorded evidence; these reasons identify the separate final-eligibility gate.
 
-A queue difference is always initially open, including a familiar checks or
-head-move signature. Inspect `divergences[].evidence.queue`, the v1 provenance,
+A queue difference starts open unless a reviewed exact pattern disposition
+applies, including for a familiar checks or head-move signature. Inspect `divergences[].evidence.queue`, the v1 provenance,
 required-set version, proof/identity references and lifecycle before attributing
 it. Queue prediction can be wrong as well as v1. Annotate through the same
 runtime-owner store API above, additionally specifying `direction: 'v1-defect'`

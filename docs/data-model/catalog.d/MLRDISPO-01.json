@@ -1,0 +1,14 @@
+{
+  "domains": [{
+    "title": "Finalization shadow pattern dispositions",
+    "path": "docs/data-model/finalization-shadow.md",
+    "store": "data/reviews.db",
+    "schemaSurface": "src/finalization/shadow-store.mjs",
+    "relatedSchemaSurfaces": ["src/finalization/shadow-pattern.mjs", "migrations/20261113_finalization_shadow_patterns.sql"],
+    "owner": "Merge Authority v2",
+    "optionalFields": [
+      "finalization_shadow.payload_json: patternKey and captured patternDisposition audit with immutable record reference",
+      "finalization_shadow_patterns: exact key, kind, principal, note, ticket reference, evidence sample ids, creation, expiry and one-way revocation"
+    ]
+  }]
+}

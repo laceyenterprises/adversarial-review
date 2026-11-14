@@ -2,7 +2,7 @@
 
 **Owner:** ARC-16 Merge Authority v2 shadow mode
 **Store:** `data/reviews.db`
-**Source of truth:** `migrations/20260718_finalization_shadow.sql`
+**Source of truth:** `migrations/20260718_finalization_shadow.sql` and additive shadow migrations
 **Runtime surface:** `src/finalization/shadow-store.mjs`
 
 ## Purpose
@@ -45,14 +45,14 @@ Table: `finalization_shadow`
 
 ## Operational Contract
 
-- The daemon appends observations; the only update is an explicit human
-  disposition override.
+- The daemon appends observations. Human triage writes individual overrides or
+  pattern records and audited revocations; existing observations are not backfilled.
 - Reports open the existing database read-only with SQLite `query_only = 1`.
 - Overrides must run as the canonical daemon/data-directory owner. The writable
   store refuses cross-user opens before SQLite can create or modify WAL files.
 - The schema source of truth is
   `migrations/20260718_finalization_shadow.sql`; keep this document and
-  `docs/data-model/catalog.json` current with persistent-shape changes.
+  `docs/data-model/catalog.d/` fragments current with persistent-shape changes.
 
 ## Queue observations (MGQ-07)
 
@@ -126,3 +126,55 @@ Live-owner waits also retain this projection as `v2Decision.liveOwner`.
 Terminal/refused, absent and expired owners remain distinguishable from an
 unexpired owner. No SQL column or migration is added; older payloads can omit
 these optional fields. This evidence does not change triage dispositions.
+
+## Exact pattern dispositions (MLRDISPO-01)
+
+`migrations/20261113_finalization_shadow_patterns.sql` adds
+`finalization_shadow_patterns`. The versioned key is the JSON array
+`["shadow-pattern-v1", v1Action.kind, v1DetailClass, v2Decision.kind, v2ReasonClass]`.
+Classes are exact strings in `src/finalization/shadow-pattern.mjs`: recognized
+static detail/reason text is preserved verbatim, and absent v1 detail is `null`.
+No subject, head, source reference, timestamp, round, stage or deadline enters
+the key. There is no trimming, substring matching, regex family or wildcard.
+Unrecognized/dynamic text (including fold error messages and principal lists)
+is unkeyable and cannot receive a pattern disposition. Adding classes requires
+an explicit code change; unknown text never shares an auto-applicable fallback.
+The report groups such rows under an explicitly unkeyable bucket.
+
+| Column | Type | Contract |
+|---|---|---|
+| `id` | INTEGER PRIMARY KEY AUTOINCREMENT | Stable pattern record reference. |
+| `pattern_key` | TEXT NOT NULL | Exact versioned key above. |
+| `kind` | TEXT NOT NULL | `equivalent`, `v2-defect`, or `policy`. |
+| `principal` | TEXT NOT NULL | Required nonblank principal, recorded verbatim. |
+| `note` | TEXT NOT NULL | Required nonblank evidence rationale. |
+| `ticket_ref` | TEXT nullable | Required for `v2-defect`: ticket ID or HTTPS reference. |
+| `evidence_sample_ids_json` | TEXT NOT NULL | Nonempty observation ID array; each must be a matching, non-error divergence no later than creation. |
+| `created_at` | TEXT NOT NULL | Explicit creation timestamp. |
+| `expires_at` | TEXT nullable | Exclusive expiry, strictly after creation. |
+| `revocation_json` | TEXT nullable | One-way `{ principal, note, at }` revocation; never deletes history. |
+
+A partial unique index permits only one unrevoked record per exact key.
+Revoke an expired record before adding its replacement. Revocation requires its
+own principal/note/time, cannot predate creation, and cannot be overwritten.
+
+Append and active-record lookup share a transaction. A non-error divergence
+with a matching record, created no later than its observation time and not yet
+expired or revoked, captures `payload_json.patternDisposition`: the pattern ID
+and audit snapshot. `payload_json.patternKey` stores the key (or `null`). Caller
+supplied pattern references are discarded. No record means no pattern override.
+Expiry uses supplied observation time; revocation is effective immediately for
+all future appends, including delayed observations. Duplicate keys return the
+original observation and original disposition. Revocation/expiry never changes
+past captured decisions. Evidence samples themselves remain unchanged.
+
+Individual overrides take precedence, including an explicit `open` override.
+Otherwise a captured pattern resolves the divergence, while preserving the
+original classifier proposal and the pattern kind/ticket. Fold errors cannot be
+auto-dispositioned; their separate promotion blocker still requires an individual
+override. Pattern disposition acknowledges triage; it does not repair a defect
+or authorize execution or promotion. Reports add `patterns` counts for each key:
+`byPattern`, `byIndividualOverride`, `open`, `byClassifier`, and `total` within
+the display window. Historical promotion checks use the same effective decision.
+Reporting and pattern listing are read-only; listing an older schema returns an
+empty pattern history without migration.

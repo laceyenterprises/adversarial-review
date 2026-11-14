@@ -12,6 +12,7 @@
 // an observation (recorded in the store) supersedes the classifier's proposal —
 // the bidirectional discipline: the classifier proposes, a human disposes.
 
+import { shadowPatternKey } from './shadow-pattern.mjs';
 import { buildQueueShadowMetrics } from './queue-shadow-metrics.mjs';
 const MS_PER_DAY = 24 * 60 * 60 * 1000;
 
@@ -20,10 +21,21 @@ const MS_PER_DAY = 24 * 60 * 60 * 1000;
  * @typedef {import('../kernel/contracts.js').ShadowReportModel} ShadowReportModel
  */
 
+function hasAppliedPattern(observation) {
+  const record = observation?.patternDisposition;
+  const key = shadowPatternKey(observation ?? {});
+  return key !== null && observation?.classification?.relation === 'diverge' && !observation.foldError
+    && Number.isSafeInteger(record?.id) && record.id > 0 && record.key === key
+    && ['equivalent', 'v2-defect', 'policy'].includes(record.kind)
+    && typeof record.principal === 'string' && Boolean(record.principal.trim())
+    && typeof record.note === 'string' && Boolean(record.note.trim());
+}
+
 /** The disposition in force: a human override supersedes the classifier proposal. */
 export function effectiveDisposition(observation) {
   const override = observation?.dispositionOverride?.disposition;
   if (['resolved', 'open'].includes(override)) return override;
+  if (hasAppliedPattern(observation)) return 'resolved';
   if (!['agree', 'diverge'].includes(observation?.classification?.relation)) return 'open';
   return observation?.classification?.disposition === 'resolved' ? 'resolved' : 'open';
 }
@@ -83,6 +95,9 @@ function dispositionTag(observation) {
   const cls = { ...observation.classification, ...(observation.dispositionOverride?.direction
     ? { direction: observation.dispositionOverride.direction } : {}) };
   const overridden = observation.dispositionOverride != null;
+  if (!overridden && hasAppliedPattern(observation)) {
+    return `pattern #${observation.patternDisposition.id}: ${observation.patternDisposition.kind}`;
+  }
   const eff = effectiveDisposition(observation);
   let base;
   if (eff === 'open') {
@@ -154,10 +169,19 @@ export function buildShadowReport({ observations, now, windowDays = 7, coverage 
   let agree = 0;
   let diverge = 0;
   const divergences = [];
+  const patterns = new Map();
   for (const o of windowed) {
     if (o.classification?.relation !== 'agree') {
       diverge += 1;
       const eff = effectiveDisposition(o);
+      const key = shadowPatternKey(o);
+      const counts = patterns.get(key) ?? { key, total: 0, byPattern: 0, byIndividualOverride: 0, open: 0, byClassifier: 0 };
+      counts.total++;
+      if (eff === 'open') counts.open++;
+      else if (o.dispositionOverride) counts.byIndividualOverride++;
+      else if (hasAppliedPattern(o)) counts.byPattern++;
+      else counts.byClassifier++;
+      patterns.set(key, counts);
       divergences.push({
         id: o.id ?? null,
         subjectExternalId: o.subjectKey?.subjectExternalId ?? '',
@@ -175,7 +199,7 @@ export function buildShadowReport({ observations, now, windowDays = 7, coverage 
         overridden: o.dispositionOverride != null,
         tag: dispositionTag(o),
         evidence: { v1SourceRef: o.v1Action?.sourceRef ?? null, queue: o.queue ?? null, live: o.live ?? null,
-          disposition: o.dispositionOverride ?? null },
+          disposition: o.dispositionOverride ?? null, patternDisposition: o.patternDisposition ?? null },
       });
     } else {
       agree += 1;
@@ -222,6 +246,7 @@ export function buildShadowReport({ observations, now, windowDays = 7, coverage 
     agree,
     diverge,
     divergences,
+    patterns: [...patterns.values()],
     organicHeadMoves,
     exhaustionCloses,
     coverage: { earliestObservedAt, coverageDays, enoughDays },
@@ -275,5 +300,9 @@ export function renderShadowReport(model) {
   } else {
     lines.push(`verdict: NOT promotable (${model.blockers.join('; ')})`);
   }
+  for (const pattern of model.patterns ?? []) {
+    lines.push(`pattern ${pattern.key ?? 'unkeyable (requires individual triage)'}: total=${pattern.total} by_pattern=${pattern.byPattern} by_individual_override=${pattern.byIndividualOverride} open=${pattern.open} by_classifier=${pattern.byClassifier}`);
+  }
+
   return lines.join('\n');
 }

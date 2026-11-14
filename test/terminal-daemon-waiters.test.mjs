@@ -4,13 +4,16 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { hostname, tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { runInNewContext } from 'node:vm';
+import { parse } from 'acorn';
 import {
   acquireMergeLease, daemonMergeWaiterId, mergeLeaseFilePath, readMergeLeaseWaiters,
-  releaseMergeLease, upsertMergeLeaseWaiter,
+  readDaemonMergeLeaseWaiters, releaseMergeLease, upsertMergeLeaseWaiter,
 } from '../src/ama/merge-lease.mjs';
 import { reconcileTerminalDaemonWaiters } from '../src/ama/terminal-daemon-waiters.mjs';
 import { cancelCloserForTerminalPr } from '../src/ama/closer-terminal-cancel.mjs';
 import { fetchPollingPrState } from '../src/polling-pr-state.mjs';
+import { reconcileTerminalPrState } from '../src/pr-terminal-reconcile.mjs';
 
 const head = '1402fdffb8d4d9bdd12ce3701eba60dbeecb78e3';
 const otherHead = 'b'.repeat(40);
@@ -124,3 +127,56 @@ test('poll lifecycle scans waiters before the empty open-row return', () => {
   assert.ok(body.indexOf('await reconcileTerminalDaemonWaiters(') >= 0);
   assert.ok(body.indexOf('await reconcileTerminalDaemonWaiters(') < body.indexOf('if (openRows.length === 0)'));
 });
+
+test('daemon waiter reader rejects missing, blank and non-string roots explicitly', () => {
+  assert.throws(() => readDaemonMergeLeaseWaiters(), {
+    message: 'merge lease: rootDir must be a non-empty string',
+  });
+  for (const rootDir of [undefined, null, '', ' ', 42, {}]) {
+    assert.throws(() => readDaemonMergeLeaseWaiters({ rootDir }), {
+      message: 'merge lease: rootDir must be a non-empty string',
+    });
+  }
+});
+
+for (const failFirstRead of [false, true]) {
+  test(`lifecycle shares ${failFirstRead ? 'failed' : 'open'} waiter reads and revalidates next poll`, async t => {
+    const { lane, original, next, sibling } = fixture(t);
+    const calls = new Map();
+    const observed = [];
+    let fail = failFirstRead;
+    // Execute the production orchestration function with isolated storage and
+    // injected I/O; both reconcilers and waiter CAS remain the real code.
+    const source = readFileSync(new URL('../src/pr-lifecycle-sync.mjs', import.meta.url), 'utf8');
+    const declaration = parse(source, { ecmaVersion: 'latest', sourceType: 'module' }).body
+      .find(node => node.declaration?.id?.name === 'syncPRLifecycle').declaration;
+    const sync = runInNewContext(`(${source.slice(declaration.start, declaration.end)})`, {
+      ROOT: lane.rootDir,
+      stmtGetOpenPRs: { all: () => [10793, 42].map(pr_number => ({ repo: lane.repo, pr_number })) },
+      fetchPollingPrState: async (_octokit, rootDir, repo, prNumber) => {
+        assert.equal(rootDir, lane.rootDir);
+        const key = `${repo}#${prNumber}`;
+        calls.set(key, (calls.get(key) || 0) + 1);
+        if (fail && prNumber === 10793) throw new Error('offline unavailable');
+        return { ...live, state: 'OPEN', mergedAt: null, labels: [] };
+      },
+      reconcileTerminalDaemonWaiters,
+      reconcileTerminalPrState,
+      observeClosureLag: async state => observed.push(state.prNumber),
+      persistReconcileAttestation() {},
+      logLifecycleReconcileSummary() {},
+      console: { warn() {} },
+    });
+    const first = await sync({}, {});
+    assert.equal(first.stillOpen, failFirstRead ? 1 : 2);
+    assert.equal(first.unresolvedCount, failFirstRead ? 1 : 0);
+    for (const pr of [10793, 10794, 42]) assert.equal(calls.get(`${lane.repo}#${pr}`), 1);
+    assert.deepEqual(observed, failFirstRead ? [42] : [10793, 42]);
+    fail = false;
+    const second = await sync({}, {});
+    assert.equal(second.stillOpen, 2);
+    assert.equal(second.unresolvedCount, 0);
+    for (const pr of [10793, 10794, 42]) assert.equal(calls.get(`${lane.repo}#${pr}`), 2);
+    assert.deepEqual(readMergeLeaseWaiters(lane.rootDir, lane), [original, next, sibling]);
+  });
+}

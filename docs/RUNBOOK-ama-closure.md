@@ -6967,6 +6967,8 @@ part of this fix.
 
 External merges can bypass that candidate evaluator. Lifecycle polling therefore
 reconciles persisted daemon waiters even when there are no open review rows.
+Waiter and open-row reconciliation share each PR's authenticated state read
+within that poll, including failed reads; the next poll revalidates it.
 It requires terminal live evidence for the exact repo/PR/head/base and removes
 only the unchanged waiter snapshot under the existing lease mutation lock.
 Concurrent updates, live PRs and unverified evidence retain their requests and

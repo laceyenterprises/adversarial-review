@@ -1087,6 +1087,9 @@ function removeMergeLeaseWaiterWithinRepositoryState({
 // enters candidate evaluation, and a concurrent refresh must survive until
 // another live-state verification on a later poll.
 export function readDaemonMergeLeaseWaiters({ rootDir } = {}) {
+  if (typeof rootDir !== 'string' || !rootDir.trim()) {
+    throw new Error('merge lease: rootDir must be a non-empty string');
+  }
   return withRepositoryStateRead(rootDir, () => {
     const dir = join(rootDir, ...LEASE_DIR_SEGMENTS);
     let names;

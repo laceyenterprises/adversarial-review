@@ -6394,7 +6394,7 @@ async function maybeDispatchAmaCloserAttempt({
           // Legacy infrastructure/exit audits without review input retain the
           // bounded retry/cap-alert executor. Production predicate refusals
           // carry the current refusing review into the final-fix-all work order.
-          hammerShouldHandoff = reportedNoWork || (noMergeAuditForCurrentHead === true
+          hammerShouldHandoff = (reportedNoWork && !existingDispatchHeadAdvanced) || (noMergeAuditForCurrentHead === true
             && Boolean(String(dispatchContext.refusingReviewBody || '').trim()));
           const noMergeOutcome = hammerOutcome.outcome;
           const exitedWithoutClose = noMergeOutcome === HAMMER_EXITED_WITHOUT_CLOSE;
@@ -7151,11 +7151,6 @@ async function maybeDispatchAmaCloserAttempt({
         pollDelaysMs: dispatchContext.closerTokenRollupPollDelaysMs || undefined,
         logger,
       });
-      if (hammerEndedWithoutMerge && hammerShouldHandoff && !inconclusiveOutcome && reviewState?.reviewCycleExhausted === true) {
-        const successor = await handoffEndedCloser(hammerEndedHead);
-        return noAmaDispatch({ dispatched: false, skipMergeAgent: true,
-          reason: successor?.status || 'ownerless-closer-no-merge', successor });
-      }
       // CLOSERREUSE-01: a hammer that died of an infrastructure cause and
       // pushed nothing gets its dispatch refunded, so the retry cap below
       // re-arms it within the series' budget (see dead-hammer-rearm.mjs).
@@ -7260,6 +7255,11 @@ async function maybeDispatchAmaCloserAttempt({
           // A missed record only leaves the older per-head bounds in charge.
           logger?.warn?.(`[ama-closer] no-delivery attempt record failed for ${repo}#${prNumber}: ${error?.message || error}`);
         }
+      }
+      if (hammerEndedWithoutMerge && hammerShouldHandoff && !inconclusiveOutcome && reviewState?.reviewCycleExhausted === true) {
+        const successor = await handoffEndedCloser(hammerEndedHead);
+        return noAmaDispatch({ dispatched: false, skipMergeAgent: true,
+          reason: successor?.status || 'ownerless-closer-no-merge', successor });
       }
       if (inconclusiveOutcome) {
         const backoff = await ownInconclusiveCloserRetry({ rootDir, repo, prNumber,

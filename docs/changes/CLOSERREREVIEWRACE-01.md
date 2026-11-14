@@ -64,6 +64,10 @@ test commands.
   claim-loop cases, 332 closer dispatch cases, 281 retry-cap cases, 125
   ownerless/retry cases, publication CLI/shell fixtures, final-cap handoff,
   final-fix-all lane, review-cycle cap and state-machine smoke suites.
+- An additional affected-module run completed 9,603 tests: 9,598 passed,
+  three skipped and two retry-accounting regressions failed. Both were fixed;
+  the complete 14-case retry regression file then passed. A separate watcher
+  consumer batch passed all 555 tests.
 - `npm test` was run offline with all test files selected. It reached the
   repository runner's fixed 900-second limit. Its observed watcher fixture
   failures were corrected, and the full 180-case watcher file then passed.

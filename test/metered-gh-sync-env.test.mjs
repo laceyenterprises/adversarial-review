@@ -5,7 +5,7 @@ import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'no
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { meteredExecFileSync } from '../src/metered-gh.mjs';
-import { GitHubBudgetDeferredError, withGitHubBudgetScope, githubCredential } from '../src/rate-limit-throttle.mjs';
+import { GitHubBudgetDeferredError, withGitHubBudgetScope, githubCredential, markGitHubRateLimited } from '../src/rate-limit-throttle.mjs';
 
 function fixture(t) {
   const dir = mkdtempSync(join(tmpdir(), 'metered-sync-env-'));
@@ -120,15 +120,13 @@ test('synchronous long false zero is corrected by the live-probe bridge before d
     resource: 'core', credential, remaining: 0, limit: 5400,
     resetAt: new Date(reset * 1000).toISOString(), observedAt: new Date().toISOString(),
   } } }));
-  const preload = join(dir, 'probe.mjs');
   const receipt = join(dir, 'probe.json');
-  writeFileSync(preload, `import { writeFileSync } from 'node:fs';
-    globalThis.fetch = async (url) => {
-      if (url !== 'https://api.github.com/rate_limit') throw new Error('unexpected probe');
-      writeFileSync(${JSON.stringify(receipt)}, JSON.stringify({ endpoint: '/rate_limit' }));
-      return new Response(JSON.stringify({ resources: { core: { remaining: 5032, limit: 5400, reset: ${reset} } } }));
-    };`);
-  env.NODE_OPTIONS = `--import=${preload}`;
+  writeFileSync(join(dir, 'gh'), `#!${process.execPath}
+    const args = process.argv.slice(2);
+    if (args.at(-1) !== 'rate_limit') process.exit(2);
+    require('node:fs').writeFileSync(${JSON.stringify(receipt)}, JSON.stringify({ endpoint: '/rate_limit' }));
+    process.stdout.write('HTTP/2.0 200 OK\\r\\nX-Ratelimit-Remaining: 5032\\r\\n\\r\\n' + JSON.stringify({ resources: { core: { remaining: 5032, limit: 5400, reset: ${reset} } } }));
+  `, { mode: 0o700 });
   let calls = 0;
   await withGitHubBudgetScope({}, async scope => {
     assert.equal(meteredExecFileSync(() => { calls++; return '{}'; }, 'gh', ['api', 'repos/fixture/repo'], { env }), '{}');
@@ -137,4 +135,16 @@ test('synchronous long false zero is corrected by the live-probe bridge before d
   assert.equal(calls, 1);
   assert.equal(JSON.parse(readFileSync(explicit, 'utf8')).buckets[`${credential}/core`].remaining, 5032);
   assert.deepEqual(JSON.parse(readFileSync(receipt, 'utf8')), { endpoint: '/rate_limit' });
+});
+
+for (const disk of ['missing', 'healthy']) test(`a long scoped rate limit defers sync execution with ${disk} disk evidence`, async t => {
+  const { explicit, env } = fixture(t);
+  if (disk === 'healthy') writeBudget(explicit, 4900);
+  await withGitHubBudgetScope({}, async scope => {
+    markGitHubRateLimited('core', 'default', { resource: 'core', remaining: 0,
+      resetAt: new Date(Date.now() + 3600_000).toISOString() });
+    assert.throws(() => meteredExecFileSync(() => assert.fail('known hold must never spawn gh'),
+      'gh', ['api', 'repos/fixture/repo'], { env }), GitHubBudgetDeferredError);
+    assert.equal(scope.budgetDeferral.budgetDeferred, true);
+  });
 });

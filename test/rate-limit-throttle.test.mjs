@@ -381,6 +381,7 @@ test('recordResponseRateLimit skips shared-state writes when the observation is 
     let openCalls = 0;
     const throttle = createRateLimitThrottle({
       env: { GHO_RATE_LIMIT_SHARED_STATE_PATH: statePath },
+      confirmBudgetImpl: async () => null,
       nowMs: () => Date.parse('2026-06-06T12:00:00.000Z'),
       sleepImpl: async () => {},
       openImpl: async (...args) => {
@@ -411,6 +412,7 @@ test('lock release does not depend on rereading owner metadata', async () => {
     const rmCalls = [];
     const throttle = createRateLimitThrottle({
       env: { GHO_RATE_LIMIT_SHARED_STATE_PATH: statePath },
+      confirmBudgetImpl: async () => null,
       nowMs: () => Date.parse('2026-06-06T12:00:00.000Z'),
       sleepImpl: async () => {},
       readFileImpl: async (targetPath) => {
@@ -441,6 +443,7 @@ test('long throttle waits publish and clear a sidecar status file', async () => 
     const statePath = path.join(rootDir, 'data', 'api-cache', 'rate-limit-state.json');
     const throttle = createRateLimitThrottle({
       env: { GHO_RATE_LIMIT_SHARED_STATE_PATH: statePath },
+      confirmBudgetImpl: async () => null,
       nowMs: () => Date.parse('2026-06-06T12:00:00.000Z'),
       sleepImpl: () => new Promise((resolve) => {
         releaseSleep = resolve;
@@ -625,7 +628,7 @@ test('long wait confirms a stale primary zero, persists recovery and never sleep
     sleepImpl: async ms => sleeps.push(ms), recordApiCallImpl: row => rows.push(row),
     confirmBudgetImpl: async () => {
       confirmations++;
-      return { core: { remaining: 4500, limit: 5000, reset: (now + 3600_000) / 1000 } };
+      return { remaining: 4500, limit: 5000, resetAt: now + 3600_000, observedAt: now };
     } });
   await throttle.recordResponseRateLimit({ remaining: 0, limit: 5000, resource: 'core',
     resetAt: now + 3600_000, observedAt: now });
@@ -651,14 +654,15 @@ for (const outcome of ['exhausted', 'failed', 'secondary']) test(`long wait reta
     confirmBudgetImpl: async () => {
       confirmations++;
       if (outcome === 'failed') throw new Error('synthetic transport unavailable');
-      return { core: { remaining: outcome === 'secondary' ? 4500 : 0, limit: 5000, reset: reset / 1000 } };
+      return { remaining: outcome === 'secondary' ? 4500 : 0, limit: 5000, resetAt: reset, observedAt: now };
     } });
   await throttle.recordResponseRateLimit({ remaining: 0, resource: 'core', limit: 5000,
-    resetAt: reset, observedAt: now, rateLimited: outcome === 'secondary' });
+    resetAt: reset, observedAt: now, rateLimited: outcome === 'secondary',
+    ...(outcome === 'secondary' ? { kind: 'secondary', retryAfterMs: 3600_000 } : {}) });
   now += 1000;
   assert.equal(await throttle.awaitThrottleIfNeeded(), true);
   assert.equal(confirmations, 1);
-  assert.deepEqual(sleeps, [3599_000]);
+  assert.deepEqual(sleeps, [outcome === 'failed' ? 120_000 : 3599_000]);
 });
 
 test('zero observation logs only raw quota headers, request category and consumer', async t => {
@@ -690,7 +694,7 @@ test('free confirmation endpoint uses the selected environment and retains only 
   const headers = { 'x-ratelimit-limit': '5000', 'x-ratelimit-remaining': '0',
     'x-ratelimit-used': '5000', 'x-ratelimit-reset': String(reset), 'x-ratelimit-resource': 'core' };
   writeFileSync(path.join(rootDir, 'gh'), `#!${process.execPath}
-    if (process.argv.slice(2).join(' ') !== 'api --method GET --include rate_limit') process.exit(2);
+    if (process.argv.slice(2).join(' ') !== 'api --method GET --include -H User-Agent: adversarial-review rate_limit') process.exit(2);
     if (process.env.GH_TOKEN !== 'synthetic-token' || process.env.GH_DEBUG !== '') process.exit(3);
     process.stdout.write(${JSON.stringify('HTTP/2.0 200 OK\r\n' + Object.entries(headers).map(([k,v]) => `${k}: ${v}`).join('\r\n') + '\r\nAuthorization: never-retain\r\n\r\n' + JSON.stringify({ resources: { core: { limit: 5000, remaining: 0, reset } } }))});
   `, { mode: 0o700 });
@@ -704,15 +708,14 @@ test('long wait cannot confirm a different credential and defers instead of slee
   const rootDir = makeRootDir();
   t.after(() => rmSync(rootDir, { recursive: true, force: true }));
   const now = Date.parse('2026-06-06T12:00:00Z');
-  const throttle = makeThrottle({ rootDir, nowMs: () => now,
-    sleepImpl: async () => assert.fail('unconfirmed credential cannot sleep'),
-    confirmBudgetImpl: async () => assert.fail('must not send a different identity') });
+  const throttle = createRateLimitThrottle({ sharedStatePath: path.join(rootDir, 'state.json'), env: {}, nowMs: () => now,
+    recordApiCallImpl: () => {}, sleepImpl: async () => assert.fail('unconfirmed credential cannot sleep') });
   await throttle.recordResponseRateLimit({ resource: 'core', remaining: 0, observedAt: now,
     resetAt: now + 3600_000, credential: 'synthetic-other-identity' });
   await assert.rejects(throttle.awaitThrottleIfNeeded('core', 'synthetic-other-identity'), { name: 'GitHubBudgetDeferredError' });
 });
 
- test('a headerless structured secondary failure preserves the previous primary bucket', async t => {
+test('a headerless structured secondary failure preserves the previous primary bucket', async t => {
   const rootDir = makeRootDir();
   t.after(() => rmSync(rootDir, { recursive: true, force: true }));
   const now = Date.parse('2026-01-01T00:00:00Z');

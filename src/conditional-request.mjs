@@ -136,8 +136,7 @@ async function fetchConditionalRestPage({
   } catch (err) {
     if (isGitHubRateLimitError(err) && !err.budgetDeferred) {
       err.observation = await recordRateLimitedCall('core', credential, rateLimitErrorObservation(err, { requestCategory: category }));
-    }
-    await recordResponseRateLimit({
+    } else await recordResponseRateLimit({
       ...extractRateLimitObservation(err?.response?.headers), requestCategory: category,
       credential,
       remaining: getResponseHeader(err?.response?.headers, 'x-ratelimit-remaining'),

@@ -824,3 +824,12 @@ for (const outcome of ['preserved', 'clean-preserved', 'admission-refused', 'rev
     assert.equal(readAmaCloserLease(rootDir, { repo: inputs.dispatchContext.repo, prNumber: 1234, headSha }), null);
   });
 }
+
+test('closer dispatch accepts the metered transport protocol without interpreting prose', () => {
+  for (const kind of ['primary', 'secondary', 'deferred']) {
+    assert.equal(isTransientHqDispatchError({ code: 1,
+      stderr: `gh: HTTP 403 forbidden\ngithub-rate-limit: ${kind}\n` }), true);
+    assert.equal(isTransientHqDispatchError({ code: 1,
+      stdout: `github-rate-limit: ${kind}\n` }), false);
+  }
+});

@@ -141,3 +141,25 @@ test('CLI zero response attributes its raw quota headers without retaining debug
   assert.equal(JSON.stringify(rows).includes('never-retain'), false);
   assert.equal(result.stderr.includes('never-retain'), false);
 });
+
+for (const [status, kind] of [[403, 'primary'], [429, 'secondary'], [404, null]]) {
+  test(`hammer CLI carries only structured ${status} evidence into shell retry classification`, t => {
+    const transcript = `* Request at fixture\n< HTTP/2.0 ${status}\n< X-Ratelimit-Remaining: ${kind === 'primary' ? 0 : 4000}\n< X-Ratelimit-Reset: 4102444800\n\n{}\n* Request took 1ms\ngh: HTTP ${status} rate limit exceeded\n`;
+    const env = fixture(t, `process.stderr.write(${JSON.stringify(transcript)}); process.exit(1);`);
+    const result = spawnSync(process.execPath, [helper, 'exec-hammer', 'pr', 'merge', '42'],
+      { env, encoding: 'utf8', timeout: 5000 });
+    assert.equal(result.status, 1, result.stderr);
+    if (kind) assert.match(result.stderr, new RegExp(`^github-rate-limit: ${kind}$`, 'm'));
+    else assert.doesNotMatch(result.stderr, /^github-rate-limit:/m);
+    const diagnostic = join(env.PATH, 'merge.stderr');
+    writeFileSync(diagnostic, result.stderr);
+    const source = readFileSync(new URL('../bin/hammer-merge.sh', import.meta.url), 'utf8');
+    const functions = source.slice(source.indexOf('ham_merge_error_retryable() {'),
+      source.indexOf('# A live holder is never preempted'));
+    const classify = spawnSync('/bin/bash', ['-c', `${functions}
+      if ham_merge_error_retryable "$1"; then echo retryable; fi
+      if ham_merge_error_permanent "$1"; then echo permanent; fi
+    `, 'fixture', diagnostic], { encoding: 'utf8' });
+    assert.equal(classify.stdout.trim(), kind ? 'retryable' : '');
+  });
+}

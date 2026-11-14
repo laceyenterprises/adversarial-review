@@ -21,23 +21,37 @@ const bridge = fileURLToPath(new URL('../bin/metered-gh.mjs', import.meta.url));
 // Fixed free endpoint only: this must bypass admission to avoid recursively
 // waiting on the same exhausted bucket. All raw gh execution stays in this seam.
 export async function readUnthrottledGitHubRateLimit(env) {
-  const { stdout } = await execFileAsync('gh', ['api', '--method', 'GET', '--include', 'rate_limit'], {
-    env: { ...env, GH_DEBUG: '' }, timeout: 15_000, maxBuffer: 1024 * 1024,
-  });
-  const text = String(stdout);
+  const baseUrl = env.GITHUB_API_URL || env.GH_API_URL
+    || (env.GH_HOST && env.GH_HOST !== 'github.com' ? `https://${env.GH_HOST}/api/v3` : null);
+  const endpoint = baseUrl ? `${baseUrl.replace(/\/$/, '')}/rate_limit` : 'rate_limit';
+  let result;
+  let failure;
+  try {
+    result = await execFileAsync('gh', ['api', '--method', 'GET', '--include',
+      '-H', 'User-Agent: adversarial-review', endpoint], {
+      env: { ...env, GH_DEBUG: '' }, timeout: 15_000, maxBuffer: 1024 * 1024,
+    });
+  } catch (err) { result = err; failure = err; }
+  const text = String(result.stdout || '');
   const boundary = text.search(/\r?\n\r?\n/);
-  if (!text.startsWith('HTTP/') || boundary < 0) throw new Error('Missing rate_limit response headers');
+  if (!text.startsWith('HTTP/') || boundary < 0) throw failure || new Error('Missing rate_limit response headers');
   const headerText = text.slice(0, boundary);
   const bodyText = text.slice(boundary).replace(/^\r?\n\r?\n/, '');
+  const status = Number(headerText.match(/^HTTP\/\S+\s+(\d{3})/)?.[1]);
   const headers = Object.fromEntries(headerText.split(/\r?\n/).slice(1).map(line => {
     const colon = line.indexOf(':');
     return [line.slice(0, colon).trim().toLowerCase(), line.slice(colon + 1).trim()];
   }));
-  recordApiCall({ category: 'github_request', status: 200, extra: {
+  recordApiCall({ category: 'github_request', status, extra: {
     credential: githubCredential({ env }), resource: 'core', requestCategory: 'rate_limit',
     unit: 'http_response', budgetExempt: true,
   } });
-  return { ...JSON.parse(bodyText).resources,
+  let data;
+  try { data = JSON.parse(bodyText); } catch { /* Headers still prove rate limits. */ }
+  if (failure || !Number.isInteger(status) || status < 200 || status >= 300) throw Object.assign(new Error('confirmation response unavailable'), {
+    status, response: { status, headers, data },
+  });
+  return { ...data?.resources,
     rawRateLimitHeaders: extractRateLimitObservation(headers)?.rawRateLimitHeaders };
 }
 
@@ -76,7 +90,7 @@ function parseGhDebug(stderr, resource = 'core') {
     const observation = extractRateLimitObservation(headers, { resource: requestResource,
       rateLimited: Boolean(kind), kind, status: httpStatus, requestCategory });
     if (httpStatus !== null) requests.push({ status: httpStatus, resource: headers['x-ratelimit-resource'] || requestResource, requestCategory });
-    if (observation) observations.push({ ...observation, rateLimited: Boolean(kind) });
+    if (observation) observations.push({ ...observation, requestCategory, rateLimited: Boolean(kind) });
     headers = {};
     httpStatus = null;
     responseBody = [];

@@ -537,7 +537,11 @@ and PR publication do not establish live adoption. No service restart, grant
 change or synthetic live run is part of this change.
 
 GitHub lifecycle polling revalidates PRs with REST ETags. Closer reads may
-use positive reserve capacity while routine polling defers. See the
+use positive reserve capacity while routine polling defers. Typed rate-limit
+evidence survives daemon and hammer subprocess boundaries; long cached holds
+confirm with the sending token through the proxy-aware `gh` transport.
+Scope-local failures defer even when disk state is absent or healthy. Existing
+lifecycle states, merge authority and smoke commands are unchanged. See the
 [GitHub rate-limit state contract](docs/data-model/github-rate-limit-state.md)
 for cache validity, credential attribution, and deficit alerts.
 

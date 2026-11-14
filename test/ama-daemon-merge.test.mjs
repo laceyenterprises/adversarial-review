@@ -1659,3 +1659,13 @@ for (const outcome of ['merged', 'already-merged', 'live-merged']) {
     assert.equal(state.samples[0].lagMs, 1000);
   });
 }
+
+for (const kind of ['primary', 'secondary', 'deferred']) test(`daemon retains ${kind} evidence when merge execution throws`, async () => {
+  const err = Object.assign(new Error('HTTP 403 forbidden'), kind === 'deferred'
+    ? { budgetDeferred: true } : { githubRateLimitKind: kind });
+  const harness = makeHarness({ mergeResults: [err, { exitCode: 0 }] });
+  const result = await attemptDaemonCleanMerge(baseArgs(harness));
+  assert.equal(result.merged, true);
+  assert.equal(harness.calls.merge, 2);
+  assert.equal(harness.calls.sleeps.length, 1);
+});

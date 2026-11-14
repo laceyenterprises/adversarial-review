@@ -1094,7 +1094,7 @@ test('watcher fails closed on permanent HAM stale-head resume proof errors', asy
   }
 });
 
-test('daemon gh merge subprocess is bounded by the shared timeout', async () => {
+for (const limitKind of [null, 'primary', 'secondary', 'deferred']) test(`daemon gh merge subprocess preserves timeout and ${limitKind || 'success'} evidence`, async () => {
   const rootDir = tempRoot();
   let capturedOptions = null;
   let capturedAttemptArgs = null;
@@ -1131,10 +1131,16 @@ test('daemon gh merge subprocess is bounded by the shared timeout', async () => 
       },
       reviewStateRow: { reviewer: 'codex' },
       currentPrHeadSha: 'head-live',
+      // Exercise the result-reduction seam without recording synthetic quota
+      // failures into this file's shared transport state.
+      ...(limitKind ? { execGhWithRetryImpl: ({ execFileImpl, args, timeoutMs }) =>
+        execFileImpl('gh', args, { timeout: timeoutMs }) } : {}),
       execFileImpl: async (_command, _args, options) => {
         capturedOptions = options;
         assert.equal(_args[_args.indexOf('--body') + 1], 'Fix: PR #7732');
         assert.equal(_args[_args.indexOf('--subject') + 1], 'Fix PR #7732 regression (#300)');
+        if (limitKind) throw Object.assign(new Error('HTTP 403 forbidden'), limitKind === 'deferred'
+          ? { budgetDeferred: true } : { githubRateLimitKind: limitKind });
         return { stdout: '', stderr: '' };
       },
       fetchRollupImpl: async () => ({
@@ -1184,7 +1190,9 @@ test('daemon gh merge subprocess is bounded by the shared timeout', async () => 
       env: { HQ_ROOT: '/tmp/hq' },
     });
 
-    assert.equal(result.exitCode, 0);
+    assert.equal(result.exitCode, limitKind ? 1 : 0);
+    if (limitKind === 'deferred') assert.equal(result.budgetDeferred, true);
+    else if (limitKind) assert.equal(result.githubRateLimitKind, limitKind);
     assert.equal(capturedOptions.timeout, DAEMON_MERGE_SUBPROCESS_TIMEOUT_MS);
     assert.deepEqual(capturedAttemptArgs.flags, {
       autonomousMergeExecutionEnabled: true,

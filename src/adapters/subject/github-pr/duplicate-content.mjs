@@ -3,7 +3,7 @@ import { isGitHubRateLimitError } from '../../../rate-limit-throttle.mjs';
 
 function transientReadError(err) {
   const status = Number(err?.status || err?.response?.status);
-  return isGitHubRateLimitError(err) || status >= 500
+  return status >= 500
     || /ECONNRESET|ETIMEDOUT|EAI_AGAIN|ENETUNREACH|UND_ERR_(?:CONNECT_TIMEOUT|SOCKET)/.test(err?.code || err?.cause?.code || '')
     || (!status && /fetch failed|TLS|socket hang up|timeout/i.test(err?.message || ''));
 }

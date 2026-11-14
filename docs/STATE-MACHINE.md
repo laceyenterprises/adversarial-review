@@ -1447,6 +1447,12 @@ The normal claim CAS, live-writer admission, CI admission,
 review-cycle cap and strict merge policy remain in force. Exhaustion cannot
 turn a missing independent review into merge authority.
 
+Typed GitHub limit evidence survives daemon merge exceptions and the metered
+CLI stderr protocol into the existing retryable merge/dispatch paths. Generic
+403 refusals remain permanent; prose alone cannot prove throttling. A known
+scoped failure defers before synchronous execution regardless of disk state.
+Lifecycle values, retry caps, lease rules and smoke promises are unchanged.
+
 Automatic review defers an exact head owned by a live closer publication or
 merge lease, including rebased worker commits without closer trailers. Publication
 intent and exact mutation results are serialized with reviewer ownership reads;

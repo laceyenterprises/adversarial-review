@@ -5171,6 +5171,16 @@ subprocess uses 5 seconds. Each nominal budget is scaled once, retaining its
 base at zero load. An explicitly supplied effective diagnostic budget is
 honored without rescaling.
 
+Daemon merge execution preserves typed limit metadata across catch/result
+wrappers. The metered subprocess serializes proven throttles as the exact stderr
+line `github-rate-limit: primary|secondary|deferred`; hammer and closer dispatch
+recognize it before generic HTTP 403 rejection. This protocol grants retry
+classification, not a new quota observation or a merge waiver. HQ-only prose
+needs typed evidence from its producing transport; it cannot establish a hold.
+Long cached-budget confirmation uses the exact sending token through the
+unthrottled `gh` seam, with a User-Agent and inherited proxy routing. See the
+[rate-limit transport contract](data-model/github-rate-limit-state.md).
+
 Secondary rate limits require structured HTTP response evidence. The reader
 honors `Retry-After`; without it a documented secondary response waits at least
 60 seconds, with exponential backoff capped at five minutes. CLI stdout,

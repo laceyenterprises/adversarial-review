@@ -20,7 +20,6 @@ const LOCK_RETRY_MS = 50;
 const LOCK_TIMEOUT_MS = 30_000;
 const DEFAULT_RESOURCE = 'core';
 const UNKNOWN_RATE_LIMIT_RESET_MS = 60_000;
-const LONG_THROTTLE_MS = 120_000;
 // This request deliberately bypasses throttle admission. /rate_limit is free;
 // admitting it against the bucket it verifies would recurse into the same wait.
 export const rateLimitConfirmation = {
@@ -664,19 +663,11 @@ function extractRateLimitObservation(headers, { observedAt = Date.now(), resourc
 async function confirmLiveBudget({ credential, resource, env }) {
   const token = confirmationTokens.get(credential)
     || (githubCredential({ env }) === credential ? env.GH_TOKEN || env.GITHUB_TOKEN : null);
-  if (!token) throw new Error('confirmation credential unavailable');
-  const response = await fetch(`${env.GH_API_URL || 'https://api.github.com'}/rate_limit`, {
-    headers: { Accept: 'application/vnd.github+json', ...(token ? { Authorization: `Bearer ${token}` } : {}) },
-    signal: AbortSignal.timeout(5000),
-  });
-  if (!response.ok) {
-    let data;
-    try { data = await response.json(); } catch { /* Status and headers still carry evidence. */ }
-    throw Object.assign(new Error('confirmation response unavailable'), {
-      status: response.status, response: { status: response.status, headers: response.headers, data },
-    });
-  }
-  const budget = (await response.json())?.resources?.[resource];
+  if (!token) throw Object.assign(new Error('confirmation credential unavailable'), { code: 'confirmation-credential-unavailable' });
+  // gh owns proxy routing, enterprise transport and the required User-Agent.
+  const budgets = await rateLimitConfirmation.read({ ...env, GH_TOKEN: token,
+    GITHUB_TOKEN: token, GH_ENTERPRISE_TOKEN: token, GITHUB_ENTERPRISE_TOKEN: token });
+  const budget = budgets?.[resource];
   return budget ? { resource, remaining: budget.remaining, limit: budget.limit, resetAt: budget.reset,
     observedAt: new Date().toISOString() } : null;
 }
@@ -847,7 +838,7 @@ function createRateLimitThrottle({
       resetAt: observation.kind === 'secondary' ? recorded.secondaryUntil : recorded.resetAt }) : null;
   }
 
-  async function confirmedAdmission(resource, credential, key, floor) {
+  async function confirmedAdmission(resource, credential, key, floor, requestEnv) {
     let current = (await readSharedState())[key] || null;
     if (!githubBudgetBelowFloor(current, floor, nowMs())) return current;
     const primaryLow = current.remaining != null && current.remaining < githubBudgetFloor(current, floor);
@@ -857,8 +848,10 @@ function createRateLimitThrottle({
     let live = null;
     let failure = null;
     let confirmedFailureUntil = 0;
-    try { live = sanitizeObservation(await confirmBudgetImpl({ credential, resource, env }), nowMs()); }
+    try { live = sanitizeObservation(await confirmBudgetImpl({ credential, resource, env: requestEnv }), nowMs()); }
     catch (err) {
+      if (err?.code === 'confirmation-credential-unavailable') throw new GitHubBudgetDeferredError(
+        { ...current, resetAt: new Date(nowMs() + 120_000).toISOString() }, { credential });
       const observation = rateLimitErrorObservation(err, { resource: 'core', observedAt: nowMs(),
         requestCategory: 'rate_limit_probe', consumer: env.GHO_API_CONSUMER || env.GITHUB_REVIEWER_TOKEN_ENV || 'adversarial-review' });
       if (observation) {
@@ -910,7 +903,7 @@ function createRateLimitThrottle({
     // deferral. Only un-scoped callers share the in-flight wait below.
     if (scope) {
       const floor = resolveThrottleFloor(env, logger);
-      const current = await confirmedAdmission(resource, credential, key, floor);
+      const current = await confirmedAdmission(resource, credential, key, floor, requestEnv);
       // An unknown bucket admits: unknown is not low.
       if (!githubBudgetBelowFloor(current, floor, nowMs())) return false;
       // Reserve remaining capacity for an already-ready close; zero cannot
@@ -927,7 +920,7 @@ function createRateLimitThrottle({
     const activePromise = (async () => {
       try {
         const configuredFloor = resolveThrottleFloor(env, logger);
-        const current = await confirmedAdmission(resource, credential, key, configuredFloor);
+        const current = await confirmedAdmission(resource, credential, key, configuredFloor, requestEnv);
         if (!githubBudgetBelowFloor(current, configuredFloor, nowMs())) return false;
         const floor = githubBudgetFloor(current, configuredFloor);
         const waitMs = Math.max(0, observationResetAtMs(current) - nowMs());

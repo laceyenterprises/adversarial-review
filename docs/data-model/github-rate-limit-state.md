@@ -76,7 +76,7 @@ fallback is `operator-cli`, which isolates ambient CLI login observations from
 the legacy shared anonymous bucket.
 
 Each bucket contains normalized `resource`, ISO `resetAt` and `observedAt`,
-optional positive `limit`, optional `rateLimitedCalls`, `credential` and
+optional positive `limit`, optional legacy `confirmedAt`, `rateLimitedCalls`, `credential` and
 `credentialSelector`. `remaining` is a non-negative measured primary balance,
 or `null` when a trusted secondary event supplies no primary measurement.
 `secondaryUntil` is an independent ISO backoff deadline; `secondaryAttempts`
@@ -100,12 +100,26 @@ Only structured API response evidence establishes a rate limit: status 429,
 403 plus remaining zero, or 403/429 plus retry-after or a documented GitHub API
 error body. A GraphQL response may supply its typed `RATE_LIMITED` error.
 Free exception messages, stdout, stderr prose and PR content have no authority.
+Daemon merge wrappers preserve typed `githubRateLimitKind`/`budgetDeferred`
+metadata when reducing execution failures. The metered CLI emits the exact
+stderr protocol line `github-rate-limit: primary|secondary|deferred` only for
+transport-proven limits or admission deferrals. Hammer shell classifiers and
+closer dispatch accept that protocol before generic HTTP 403 rejection; it
+does not create a new shared quota observation. HQ launch failures that contain
+only prose need typed evidence from their producing transport; arbitrary
+stdout or exception text remains insufficient.
 Private CLI HTTP transcripts are reduced to status and six allowed headers,
 then discarded. The `github_rate_limit` API-log row records status, category,
 consumer, kind and raw limit/remaining/used/reset/resource/retry-after values.
 
-Before admission sleeps or defers longer than two minutes, it confirms the
-sending credential's budget through a bounded, throttle-exempt `GET /rate_limit`.
+Before a new admission hold based on cached observations exceeds two minutes,
+it confirms the sending credential's budget through a throttle-exempt
+`gh api --method GET --include` request to `/rate_limit` (15-second bound).
+The endpoint uses `GITHUB_API_URL`, then `GH_API_URL`, then an Enterprise
+`GH_HOST` with `/api/v3`, otherwise GitHub.com. The CLI inherits proxy settings
+and sends `User-Agent: adversarial-review`. All token aliases, including
+Enterprise aliases, bind to the exact admission token; an unavailable token
+defers for at most two minutes without using ambient credentials.
 `github_budget_confirmation` logs the stored and live readings. Contradictory
 live primary readings correct false zero or a stale balance below the floor;
 secondary holds remain independent.
@@ -148,7 +162,9 @@ sleeping until reset. Nested closer scopes
 propagate deferred/rate-limited accounting to their parent even when a caller
 swallows the error; urgency remains local to the nested operation. Only
 un-scoped callers share in-process sleep promises; scoped callers never join
-another caller's wait or inherit its deferral decision.
+another caller's wait or inherit its deferral decision. A rate limit already
+observed in the same scope defers immediately at its recorded deadline, even
+when that deadline exceeds two minutes and the disk bucket is absent or healthy.
 An `operatorSafety` scope (the no-merge hold and release CLI) is never slept or
 deferred by the floor, in either the async or the synchronous path: it proceeds
 with the call, which GitHub itself refuses fast if the budget is really spent.

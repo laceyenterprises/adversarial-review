@@ -34,11 +34,11 @@
         "src/api-telemetry.mjs",
         "src/operator-gh-read.mjs"
       ],
-      "compatibility": "Additive installation keys share verified token rotations; PAT fallbacks and unverified credentials remain token-keyed. Legacy resource-keyed documents remain anonymous. Deficit episodes persist across restarts; HTTP responses and credential bindings are distinct from logical attempts. A newer confirmedAt from the free rate_limit endpoint can replace older primary evidence; actual rateLimitedCalls holds retain precedence. Quota headers are logged only in budget_exhaustion telemetry, not in bucket state.",
+      "compatibility": "Additive installation keys share verified token rotations; PAT fallbacks and unverified credentials remain token-keyed. Legacy resource-keyed documents remain anonymous. Legacy confirmedAt remains readable. Fresh primary evidence can correct zero; independent secondaryUntil holds survive confirmation. Quota headers remain diagnostic telemetry, never bucket state.",
       "owner": "shared GitHub request throttle",
       "operatorCredentialScope": "src/operator-gh-read.mjs supplies the operator-cli fallback for credential-less admission and response recording. Explicit tokens retain their normal identity. No document-version or bucket-field changes.",
       "remainingContract": "Measured non-negative primary balance or null when trusted secondary evidence has no primary measurement; secondary observations never manufacture zero.",
-      "admissionConfirmation": "GHFALSEZERO-01: proposed holds above two minutes confirm with the exact credential via GET /rate_limit; contradictory readings correct false zero, unavailable confirmation bounds the next admission hold to two minutes."
+      "admissionConfirmation": "GHFALSEZERO-01: proposed holds above two minutes confirm with the exact credential via GET /rate_limit; contradictory readings correct false zero, unavailable confirmation bounds the next admission hold to two minutes. The exempt gh transport uses GITHUB_API_URL, GH_API_URL or GH_HOST, inherits proxy routing and sends User-Agent; known scope-local failures defer independently of disk evidence."
     }
   ]
 }

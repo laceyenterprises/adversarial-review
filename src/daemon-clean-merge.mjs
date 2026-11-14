@@ -6,7 +6,7 @@ import { observeDaemonGate, observeDaemonResult } from './ama/closure-next-actio
 import { readDocsFastPath } from './docs-only.mjs';
 import { emitDocsFastPathAttestation } from './reviewed-attestation.mjs';
 import { loadAwareTimeoutMs } from './load-aware-timeout.mjs';
-import { isGitHubRateLimitError } from './rate-limit-throttle.mjs';
+import { isGitHubRateLimitError, rateLimitErrorObservation } from './rate-limit-throttle.mjs';
 import { guardStackedBase } from './ama/stacked-base.mjs';
 import { resolveHqRoot } from './hq-root.mjs';
 import { filterGitHubBody } from './github-outbound-body.mjs';
@@ -202,7 +202,6 @@ function resolveRollupRequiredChecks(rollup) {
 // ── MSM-04: daemon-or-hammer merge route ─────────────────────────────────────
 
 function isTransientAmaLiveReviewLookupError(err) {
-  if (isGitHubRateLimitError(err)) return true;
   const haystack = [
     err?.code,
     err?.name,
@@ -1281,6 +1280,8 @@ async function runDaemonCleanMergeAttemptInner({
         const hold = transportHold || stopHold();
         if (hold) return { exitCode: 1, stderr: hold.reason, closureHold: hold };
         return {
+          githubRateLimitKind: err?.githubRateLimitKind || rateLimitErrorObservation(err)?.kind,
+          budgetDeferred: err?.budgetDeferred === true,
           exitCode: Number.isInteger(err?.code) ? err.code : 1,
           stdout: String(err?.stdout || ''),
           stderr: String(err?.stderr || err?.message || ''),

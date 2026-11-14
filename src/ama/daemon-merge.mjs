@@ -1,4 +1,4 @@
-import { isGitHubRateLimitError } from '../rate-limit-throttle.mjs';
+import { isGitHubRateLimitError, rateLimitErrorObservation } from '../rate-limit-throttle.mjs';
 import { observeClosureLag } from './closure-lag.mjs';
 import { attestationRecordErrorDetails } from '../attestation-record-error.mjs';
 import { loadAwareTimeoutMs } from '../load-aware-timeout.mjs';
@@ -1024,7 +1024,8 @@ async function attemptDaemonCleanMergeInner({
     try {
       mergeRes = await runMergeImpl({ repo, prNumber, head: validatedHead, mergeMethod, base, body: commitBody.text, subject: commitBody.subject });
     } catch (err) {
-      mergeRes = { exitCode: 1, stdout: '', stderr: String(err?.stderr || err?.message || err) };
+      mergeRes = { exitCode: 1, stdout: '', stderr: String(err?.stderr || err?.message || err),
+        githubRateLimitKind: err?.githubRateLimitKind || rateLimitErrorObservation(err)?.kind, budgetDeferred: err?.budgetDeferred === true };
     }
     if (Number(mergeRes?.exitCode) === 0) {
       merged = true;

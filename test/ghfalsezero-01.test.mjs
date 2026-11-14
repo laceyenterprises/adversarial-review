@@ -5,7 +5,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createRateLimitThrottle, isGitHubRateLimitError, rateLimitErrorObservation,
-  withGitHubBudgetScope, githubCredential, extractRateLimitObservation } from '../src/rate-limit-throttle.mjs';
+  withGitHubBudgetScope, githubCredential, extractRateLimitObservation, rateLimitConfirmation } from '../src/rate-limit-throttle.mjs';
 import { meteredExecFile, parseGhDebug } from '../src/metered-gh.mjs';
 import { createWatcherOctokit, fetchConditionalRestPage } from '../src/conditional-request.mjs';
 
@@ -143,13 +143,14 @@ for (const resource of ['core', 'graphql']) test(`a structured secondary refusal
   const f = fixture(t, { env });
   const credential = githubCredential({ env });
   let probes = 0;
-  t.mock.method(globalThis, 'fetch', async url => {
-    assert.match(url, /\/rate_limit$/);
+  t.mock.method(rateLimitConfirmation, 'read', async probeEnv => {
+    assert.equal(probeEnv.GH_TOKEN, env.GH_TOKEN);
+    assert.equal(probeEnv.GH_ENTERPRISE_TOKEN, env.GH_TOKEN);
     probes++;
-    return { ok: false, status: 403, headers: {
+    throw { status: 403, response: { status: 403, headers: {
       'x-ratelimit-remaining': '4000', 'x-ratelimit-reset': String(Math.ceil(f.now() / 1000) + 3600),
       'x-ratelimit-resource': 'core', 'retry-after': '300',
-    }, json: async () => ({ message: 'You have exceeded a secondary rate limit.' }) };
+    }, data: { message: 'You have exceeded a secondary rate limit.' } } };
   });
   await f.throttle.recordResponseRateLimit({ resource, credential,
     remaining: 0, resetAt: f.now() + 3600_000, observedAt: f.now() });

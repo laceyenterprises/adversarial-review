@@ -4,7 +4,7 @@ import { readFileSync } from 'node:fs';
 import { constants } from 'node:os';
 import { meteredExecFile } from '../src/metered-gh.mjs';
 import { reportHammerProgress } from '../src/ama/hammer-progress.mjs';
-import { awaitThrottleIfNeeded, recordResponseRateLimit, recordRateLimitedCall, withGitHubBudgetScope } from '../src/rate-limit-throttle.mjs';
+import { awaitThrottleIfNeeded, recordResponseRateLimit, recordRateLimitedCall, withGitHubBudgetScope, isGitHubRateLimitError, rateLimitErrorObservation } from '../src/rate-limit-throttle.mjs';
 
 function isPrMerge(argv) {
   // Skip repository options without mistaking option values or another
@@ -71,6 +71,10 @@ if (action === 'wait' || action === 'record' || action === 'limited' || action =
   } catch (err) {
     process.stdout.write(err.stdout || '');
     process.stderr.write(err.stderr || err.message || '');
+    if (isGitHubRateLimitError(err)) {
+      // Only transport evidence emits this protocol line; command prose cannot.
+      process.stderr.write(`\ngithub-rate-limit: ${err.githubRateLimitKind || rateLimitErrorObservation(err)?.kind || 'deferred'}\n`);
+    }
     const signalNumber = constants.signals[terminationSignal || err.signal];
     process.exitCode = signalNumber ? 128 + signalNumber : Number.isInteger(err.code) ? err.code : Number.isInteger(err.status) ? err.status : 1;
   }

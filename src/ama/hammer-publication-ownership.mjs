@@ -29,6 +29,7 @@ function lock(rootDir, identity, mode) {
 // Intent is durable before publication; it confers no validation authority.
 export async function withHammerPublication({ env = process.env, rootDir = env.ADVERSARIAL_REVIEW_STATE_DIR ? dirname(env.ADVERSARIAL_REVIEW_STATE_DIR) : env.HAM_ROOT_DIR || publicationRoot, repo, prNumber,
   headSha = null, previousHead = null, now = new Date().toISOString() }, publish) {
+  if (headSha !== null && !sha(headSha)) throw new Error('hammer-publication-head-unavailable');
   const controller = read(env.HAM_CONTROLLER_RECORD);
   if (controller?.state !== 'running' || !Number.isInteger(controller.controllerPid) || controller.controllerPid <= 1
     || controller.controllerPid !== Number(env.HAM_CONTROLLER_PID)

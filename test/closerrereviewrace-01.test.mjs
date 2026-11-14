@@ -25,6 +25,14 @@ function fixture(t) {
 }
 const probe = f => activeHammerPublication({ ...f, headSha: HEAD, now: Date.parse(NOW), isAlive: () => true });
 
+test('an unavailable local Git head refuses publication before any remote mutation', async t => {
+  const f = fixture(t);
+  for (const headSha of ['', 'not-a-head']) {
+    await assert.rejects(withHammerPublication({ ...f, headSha },
+      async () => assert.fail('must establish the local head before publishing')), /hammer-publication-head-unavailable/);
+  }
+});
+
 test('publication intent precedes a trailerless git push and suppresses only its exact head', async t => {
   const f = fixture(t);
   await withHammerPublication({ ...f, headSha: HEAD }, async () => {

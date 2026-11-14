@@ -60,7 +60,7 @@ test commands.
 - `npm run typecheck:contracts`: passed.
 - `bash demo/research-finding-walkthrough.sh`: passed.
 - `shellcheck -S error` on both rendered modified shell phases: passed.
-- Scoped `node --test` runs passed: the 14 ticket regressions, 180 watcher
+- Scoped `node --test` runs passed: the 15 ticket regressions, 180 watcher
   claim-loop cases, 332 closer dispatch cases, 281 retry-cap cases, 125
   ownerless/retry cases, publication CLI/shell fixtures, final-cap handoff,
   final-fix-all lane, review-cycle cap and state-machine smoke suites.

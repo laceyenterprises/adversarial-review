@@ -893,7 +893,7 @@ export function upsertDuplicateFamilies(db, families, {
     }
     return changed;
   });
-  return tx();
+  return tx.immediate();
 }
 
 export function reconcileDuplicateFamiliesForRepo(db, subjectEntries, options = {}) {

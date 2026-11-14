@@ -484,7 +484,7 @@ function reapRunningPassTimeouts({
           recoveryReason: POSTED_REVIEW_ARTIFACT_RECOVERY_REASON,
           recoveredAt: new Date().toISOString(),
         };
-        const result = settlePostedArtifactPass({
+        const result = settlePostedArtifactPass.immediate({
           row,
           endedAt,
           metadataJson: JSON.stringify(metadata),
@@ -619,7 +619,7 @@ function reapRunningPassTimeouts({
         failureReason,
         timeoutThresholdSeconds: effectiveThresholdSeconds,
       };
-      const result = settleTimedOutPass({
+      const result = settleTimedOutPass.immediate({
         row,
         endedAt,
         metadataJson: JSON.stringify(metadata),

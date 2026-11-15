@@ -31,26 +31,26 @@ function resolveReviewerLeaseRecoveryEnabled({
   );
 }
 
-function computeReviewerLeaseExpiryAt(startedAt, timeoutMs) {
+function computeReviewerLeaseExpiryAt(startedAt, timeoutMs, { env = process.env } = {}) {
   const startedAtMs = Date.parse(String(startedAt || ''));
   const boundedTimeoutMs = Number(timeoutMs);
   if (!Number.isFinite(startedAtMs) || !Number.isFinite(boundedTimeoutMs) || boundedTimeoutMs <= 0) {
     return null;
   }
-  return new Date(startedAtMs + Math.min(Math.floor(boundedTimeoutMs), resolveReviewerAbsoluteCeilingMs())).toISOString();
+  return new Date(startedAtMs + Math.min(Math.floor(boundedTimeoutMs), resolveReviewerAbsoluteCeilingMs(env))).toISOString();
 }
 
 // Extend only the session that built the plan. A delayed child must never
 // change a replacement claim or a terminal review row.
-function extendReviewerLeaseForPlan(db, { repo, prNumber, sessionUuid, timeoutMs }) {
+function extendReviewerLeaseForPlan(db, { repo, prNumber, sessionUuid, timeoutMs, env = process.env }) {
   if (!Number.isSafeInteger(timeoutMs) || timeoutMs <= 0) throw new TypeError('Invalid reviewer timeout');
-  timeoutMs = Math.min(timeoutMs, resolveReviewerAbsoluteCeilingMs());
+  timeoutMs = Math.min(timeoutMs, resolveReviewerAbsoluteCeilingMs(env));
   const row = db.prepare(`SELECT reviewer_started_at, reviewer_timeout_ms FROM reviewed_prs
     WHERE repo = ? AND pr_number = ? AND reviewer_session_uuid = ?
       AND review_status = 'reviewing' AND COALESCE(pr_state, 'open') = 'open'`).get(repo, prNumber, sessionUuid);
   if (!row) return false;
   if (row.reviewer_timeout_ms >= timeoutMs) return true;
-  const expiry = computeReviewerLeaseExpiryAt(row.reviewer_started_at, timeoutMs);
+  const expiry = computeReviewerLeaseExpiryAt(row.reviewer_started_at, timeoutMs, { env });
   if (!expiry) throw new Error('Missing reviewer start time for chunk plan');
   return db.prepare(`UPDATE reviewed_prs SET reviewer_timeout_ms = ?, reviewer_lease_expires_at = ?
     WHERE repo = ? AND pr_number = ? AND reviewer_session_uuid = ?
@@ -62,11 +62,12 @@ function extendReviewerLeaseForPlan(db, { repo, prNumber, sessionUuid, timeoutMs
 
 function reviewerLeaseExpiryForRow(row, {
   reviewerTimeoutMs = null,
+  env = process.env,
 } = {}) {
   if (row?.reviewer_lease_expires_at) {
     const persistedExpiryMs = Date.parse(String(row.reviewer_lease_expires_at));
     if (Number.isFinite(persistedExpiryMs)) {
-      const cap = computeReviewerLeaseExpiryAt(row?.reviewer_started_at || row?.last_attempted_at, resolveReviewerAbsoluteCeilingMs());
+      const cap = computeReviewerLeaseExpiryAt(row?.reviewer_started_at || row?.last_attempted_at, resolveReviewerAbsoluteCeilingMs(env), { env });
       return new Date(cap ? Math.min(persistedExpiryMs, Date.parse(cap)) : persistedExpiryMs).toISOString();
     }
   }
@@ -81,7 +82,8 @@ function reviewerLeaseExpiryForRow(row, {
 
   return computeReviewerLeaseExpiryAt(
     row?.reviewer_started_at || row?.last_attempted_at || null,
-    effectiveTimeoutMs
+    effectiveTimeoutMs,
+    { env }
   );
 }
 

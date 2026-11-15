@@ -884,7 +884,11 @@ new PR
   No-progress watchdogs use model output/stream evidence, bounded by
   `reviewer.no_progress_timeout_ms` (default 15 minutes) and the same ceiling;
   diagnostic stderr neither satisfies first-output detection nor extends model
-  patience when stdout-only progress is enabled, including file-backed capture. Existing
+  patience when stdout-only progress is enabled, including file-backed capture.
+  Claude/Codex and agy stream-json select stdout-only evidence; native Gemini
+  JSON and agy plain-print retain stderr progress. Streamed model budgets reserve
+  five minutes inside the wrapper/claim envelope for posting. Lease and reattach
+  helpers accept scoped `env` records, defaulting to `process.env`. Existing
   `reviewer-stalled` session-fenced release and typed `github-budget-deferred`
   reset holds remain budget-neutral. Process identity, confirmed drain, posted
   review recovery and retry caps retain their authority.

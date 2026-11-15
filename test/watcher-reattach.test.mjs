@@ -400,13 +400,15 @@ test('closed reviewer remains live when GitHub state cannot be verified', async 
   assert.deepEqual(killed, []);
 });
 
-for (const [label, overrides, now, expired] of [
+for (const [label, overrides, now, expired, env] of [
   ['persisted two-hour lease without timeout', { reviewerLeaseExpiresAt: '2026-05-11T07:10:00.000Z' }, '2026-05-11T06:10:00.000Z', false],
   ['persisted lease with shorter recorded timeout', { reviewerLeaseExpiresAt: '2026-05-11T07:10:00.000Z', reviewerTimeoutMs: 20 * 60_000 }, '2026-05-11T06:10:00.000Z', false],
   ['persisted lease at expiry', { reviewerLeaseExpiresAt: '2026-05-11T07:10:00.000Z' }, '2026-05-11T07:10:00.000Z', true],
   ['oversized lease before ceiling', { reviewerLeaseExpiresAt: '2026-05-11T19:10:00.000Z' }, '2026-05-11T08:09:59.000Z', false],
   ['oversized lease at ceiling', { reviewerLeaseExpiresAt: '2026-05-11T19:10:00.000Z' }, '2026-05-11T08:10:00.000Z', true],
   ['missing lease uses fallback', {}, '2026-05-11T05:30:00.000Z', true],
+  ['scoped shorter ceiling', { reviewerLeaseExpiresAt: '2026-05-11T07:10:00.000Z' }, '2026-05-11T06:10:00.000Z', true, { AGENT_OS_REVIEWER_CEILING_MAX_SECONDS: '3600' }],
+  ['scoped longer ceiling', { reviewerLeaseExpiresAt: '2026-05-11T09:10:00.000Z' }, '2026-05-11T08:10:00.000Z', false, { AGENT_OS_REVIEWER_CEILING_MAX_SECONDS: '14400' }],
 ]) {
   test(`unverified closed reviewer respects ${label}`, async () => {
     const db = setupDb();
@@ -416,6 +418,7 @@ for (const [label, overrides, now, expired] of [
       db,
       octokit: makeOctokit([]),
       now: new Date(now),
+      env,
       log: makeLog(),
       reviewerDeadlineMs: 20 * 60_000,
       fetchLivePrState: async () => { throw new Error('GitHub unavailable'); },

@@ -390,7 +390,9 @@ It gives a completed run record five minutes to settle after its terminal
 heartbeat. Model watchdogs bound load-scaled patience by the configured
 `reviewer.no_progress_timeout_ms` (default 15 minutes) and shared absolute
 ceiling; only model evidence resets streamed progress. Diagnostic stderr cannot
-renew it. Typed budget deferrals release through their reset-hold outcome.
+renew it. Native Gemini JSON and agy plain-print instead accept stderr progress
+while waiting for their completed answer. Streamed model budgets reserve five
+minutes inside the wrapper/claim ceiling for posting. Typed budget deferrals release through their reset-hold outcome.
 Streamed idle reaping starts after 1.5 times the configured idle
 timeout plus 30 seconds; ceiling reaping starts ten minutes after the scaled
 ceiling (now absolutely bounded after scaling). These rules protect posting, throttling, and fallback phases that do

@@ -441,8 +441,10 @@ function spawnCapturedProcessGroup(command, args, options = {}) {
 
     child.stderr?.on('data', (data) => {
       if (settled) return;
-      noteFirstOutput();
-      if (!progressOnStdoutOnly) armProgressTimer();
+      if (!progressOnStdoutOnly) {
+        noteFirstOutput();
+        armProgressTimer();
+      }
       const next = appendChecked(stderr, stderrBytes, data);
       if (next !== null) {
         stderr = next.text;

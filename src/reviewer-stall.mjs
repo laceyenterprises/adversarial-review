@@ -11,6 +11,7 @@ const NO_PROGRESS_NOMINAL_MS = 180_000;
 export function reviewerStallOptions(ceilingMs, reviewer, {
   loadAwareTimeoutMsImpl = loadAwareTimeoutMs,
   env = process.env,
+  progressOnStdoutOnly = true,
 } = {}) {
   const ceiling = Math.min(timerDelayMs(ceilingMs), resolveReviewerAbsoluteCeilingMs(env), resolveProgressTimeoutMs(env));
   const budget = nominal => Math.min(ceiling,
@@ -19,7 +20,7 @@ export function reviewerStallOptions(ceilingMs, reviewer, {
     firstOutputTimeout: budget(FIRST_OUTPUT_NOMINAL_MS),
     progressTimeout: budget(NO_PROGRESS_NOMINAL_MS),
     stallReviewer: reviewer,
-    progressOnStdoutOnly: true,
+    progressOnStdoutOnly,
   };
 }
 

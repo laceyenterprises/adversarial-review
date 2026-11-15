@@ -1544,10 +1544,16 @@ patience cannot exceed `reviewer.no_progress_timeout_ms` (default 15 minutes)
 or the absolute envelope. With stdout-only progress enabled, diagnostic stderr
 neither satisfies first-output detection nor resets rolling model progress,
 including file-backed capture; OAuth fallback and proxy idle timers obey the
-same bounds. The proxy and OAuth transport accept an optional `env` record,
+same bounds. Stdout-only evidence is selected for Claude/Codex and agy
+stream-json. Native Gemini JSON and agy plain-print accept stderr progress
+because their answer arrives on stdout at completion. Streamed model generation
+reserves five minutes inside the absolute wrapper/claim ceiling for posting.
+The proxy and OAuth transport accept an optional `env` record,
 forwarded by their harness callers, for both default sizing and final clamping;
 omitting it uses `process.env`. The agent-runtime adapter resolves the absolute
 ceiling from `domainConfig.env` when supplied, otherwise `process.env`.
+Lease creation/extension/read helpers and reattach also accept optional `env`
+records and default to `process.env`.
 Stalls use the existing session-fenced retry release, while typed
 `github-budget-deferred` receipts retain their reset hold and budget-neutral
 claim release. Reattach still verifies identity, exit and late posted reviews
@@ -1561,7 +1567,12 @@ The load multiplier applies only to each requested call budget; neither composed
 nor the aggregate cap are scaled again. LAC-2100 bounds each chunk to the smaller
 of that requested budget and `floor((cap - 120000 - 300000) / chunks)` ms,
 reserving two minutes of chunk slack and five minutes of process slack. Shares
-are static; a fast chunk does not increase a later chunk's allocation. Explicit
+are static; a fast chunk does not increase a later chunk's allocation. The
+three-hour default replaces the former six-hour chunk cap: the observed six-chunk
+fixture receives 1,730,000 ms per chunk instead of 3,530,000 ms.
+`ADVERSARIAL_REVIEW_AGY_CHUNK_TIMEOUT_CAP_MS` can only lower the absolute envelope.
+Raising `reviewer.ceiling_max_seconds` also raises the streamed sizing formula's
+maximum, so it affects both families. Explicit
 call allocations also clamp agy's print timeout to the smaller of its configured
 value and the allocation minus 30 seconds, with a one-second CLI floor. Below
 31 seconds the call abort timer remains authoritative. Preparation and retries

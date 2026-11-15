@@ -160,7 +160,9 @@ expiry from the original start without rewriting its record. Reattach applies
 the same absolute bound before its identity/exit/posting reconciliation.
 When GitHub PR state cannot be verified, a valid persisted lease expiry takes
 precedence over the recorded or nominal timeout; those timeouts are fallbacks
-only when a valid expiry is absent. The store shape is unchanged.
+only when a valid expiry is absent. Lease creation, plan extension and reads,
+and reattach accept optional scoped `env` records (default `process.env`) for
+the shared ceiling. The store shape is unchanged.
 Model stalls retain the existing typed receipt and session-fenced claim release;
 GitHub budget-deferral receipts retain their reset hold rather than becoming
 no-progress failures.

@@ -104,3 +104,27 @@ explicit requests, shorter requests and harness forwarding. Scoped ESLint
 Contract typecheck, offline walkthrough demo, data-model catalog validation
 (98 entries), and `git diff --check` passed. Full-suite validation remains
 with PR-head CI.
+
+## HAM final-review remediation
+
+Made progress evidence caller-selected: Claude/Codex and agy stream-json use
+stdout only; native Gemini JSON and agy plain-print retain stderr progress,
+including the pinned identity path. Pipe and file-backed stderr now follow the
+same first-output policy. Streamed generation reserves five minutes inside the
+absolute wrapper/claim envelope for posting. Lease creation, plan extension,
+reads and reattach accept scoped `env` records (default `process.env`).
+
+The default aggregate Gemini chunk cap fell from six hours to three hours;
+the observed six-chunk fixture receives 1,730,000 ms rather than 3,530,000 ms
+per chunk. The chunk-cap environment override can only lower the absolute
+ceiling. Raising `reviewer.ceiling_max_seconds` raises both the absolute
+envelope and the streamed formula maximum. Refreshed the Phase 0 merge status
+and post-rebase validation count in the incident report.
+
+HAM validation: `hammer-validate.mjs --canonical -- <changed runtime and test
+files>` passed 57 selected files, 1,617 tests, zero failures. This includes
+watcher claim-loop/reattach and the new silent-stdout, first-output, reserve and
+scoped-lease regressions. `npm run lint` passed (zero errors, 149 existing
+warnings), `npm run typecheck:contracts`, the offline byte-equivalence demo,
+data-model catalog validation (98 entries), and `git diff --check` passed.
+Full-suite validation remains with exact-head GitHub CI.

@@ -51,6 +51,7 @@ import { CODEX_REVIEWER_DEFAULT_EFFORT, reviewWithCodexOAuthResponses } from './
 import {
   AGY_PRINT_TIMEOUT_SUBPROCESS_SLACK_MS,
   resolveAgyPrintTimeoutMs,
+  resolveStreamedReviewerModelTimeoutMs,
   resolveAgyChunkTimeoutPlan,
   resolveAgyReviewerSubprocessTimeoutMs,
   resolveProgressTimeoutMs,
@@ -116,7 +117,7 @@ import {
   buildAgyReviewerPromptPrefix,
 } from './reviewer-prompt.mjs';
 import { parseCodexJsonTokenUsage } from './reviewer-model-detection.mjs';
-import { countChangedLines, resolveReviewerAbsoluteCeilingMs, resolveReviewerCeilingSeconds } from './reviewer-timeout-model.mjs';
+import { countChangedLines, resolveReviewerAbsoluteCeilingMs } from './reviewer-timeout-model.mjs';
 import { resolveClaudeLaunchctlUidFromConfig } from './claude-launchctl-uid.mjs';
 import { recordReviewMesShadow } from './mes-shadow-hook.mjs';
 
@@ -815,9 +816,9 @@ async function reviewWithClaude(diff, extraContext = '', {
   // wall-clock budget. Without this a silent first attempt plus a fresh full
   // timeout could exceed the budget the recovery paths reason about.
   const changedLines = countChangedLines(diff);
-  const resolvedReviewerTimeoutMs = resolveReviewerCeilingSeconds({
+  const resolvedReviewerTimeoutMs = resolveStreamedReviewerModelTimeoutMs({
     changedLines, effort: reviewerExecution.effort, env: subprocessEnv,
-  }) * 1000;
+  });
   const reviewerBudgetDeadlineMs = reviewerDeadlineMs ?? (claudeStartedAtMs + resolvedReviewerTimeoutMs);
   const reviewerTimeoutMs = Math.max(
     1_000,
@@ -1364,7 +1365,7 @@ async function reviewWithCodex(diff, extraContext = '', {
         persistSession: Boolean(perWorkerAuth),
         env: subprocessEnv,
         cwd: reviewerSubprocessCwd,
-        timeout: resolveReviewerCeilingSeconds({ changedLines, effort, env: subprocessEnv }) * 1000,
+        timeout: resolveStreamedReviewerModelTimeoutMs({ changedLines, effort, env: subprocessEnv }),
         maxBuffer: 10 * 1024 * 1024,
         onStdoutData: () => onProgress?.({ changedLines, effort }),
       });
@@ -2693,7 +2694,7 @@ async function spawnGeminiReview({
       cwd,
       input: prompt,
       timeout,
-      ...reviewerStallOptions(timeout, { model, runtime: 'gemini' }, { env }),
+      ...reviewerStallOptions(timeout, { model, runtime: 'gemini' }, { env, progressOnStdoutOnly: false }),
       signal,
       maxBuffer,
     },
@@ -2743,7 +2744,7 @@ async function spawnAgyReview({
       if (remainingMs <= 0) throw new Error('Antigravity agy subprocess timeout');
       const agyArgs = argsFor(streamJson);
       if (identity) {
-        return spawnAgyIdentityReview({ identity, model, agyArgs, timeout: remainingMs, signal: childSignal, maxBuffer, spawnWithInputImpl });
+        return spawnAgyIdentityReview({ identity, model, agyArgs, timeout: remainingMs, signal: childSignal, maxBuffer, spawnWithInputImpl, env, streamJson });
       }
       return spawnWithInputImpl(
         agyCli,
@@ -2754,7 +2755,7 @@ async function spawnAgyReview({
           // Prompt is delivered on argv (see buildAgyReviewArgs); stdin is closed.
           input: '',
           timeout: remainingMs,
-          ...reviewerStallOptions(remainingMs, { model, runtime: 'antigravity' }, { env }),
+          ...reviewerStallOptions(remainingMs, { model, runtime: 'antigravity' }, { env, progressOnStdoutOnly: streamJson }),
           signal: childSignal,
           killGraceMs: 0,
           maxBuffer,
@@ -2820,7 +2821,7 @@ function readCapturedFile(path, maxBytes) {
 // and `settleAfterKillMs` settles even if sudo itself outlives the kill. What
 // survives is the watcher's to handle: the identity is not leased again while
 // any process still runs as that user.
-async function spawnAgyIdentityReview({ identity, model, agyArgs, timeout, signal, maxBuffer, spawnWithInputImpl }) {
+async function spawnAgyIdentityReview({ identity, model, agyArgs, timeout, signal, maxBuffer, spawnWithInputImpl, env, streamJson }) {
   const printIndex = agyArgs.indexOf('--print');
   const prompt = agyArgs[printIndex + 1];
   const safeArgs = [...agyArgs];
@@ -2845,7 +2846,7 @@ async function spawnAgyIdentityReview({ identity, model, agyArgs, timeout, signa
       stdoutPath,
       stderrPath,
       settleAfterKillMs: AGY_IDENTITY_SETTLE_AFTER_KILL_MS,
-      ...reviewerStallOptions(timeout, { model, runtime: 'antigravity', identity: identity.user }),
+      ...reviewerStallOptions(timeout, { model, runtime: 'antigravity', identity: identity.user }, { env, progressOnStdoutOnly: streamJson }),
       // sudo relays SIGTERM to the pinned agy command but cannot relay SIGKILL;
       // give it a moment to forward the TERM before the group is killed.
       killGraceMs: AGY_IDENTITY_KILL_GRACE_MS,
@@ -4004,6 +4005,7 @@ const __test__ = {
   resolveAgyCliPath,
   resolveAgyOversizedReviewRoute,
   resolveAgyPrintTimeoutMs,
+  resolveStreamedReviewerModelTimeoutMs,
   resolveAgyChunkTimeoutPlan,
   resolveAgyReviewerSubprocessTimeoutMs,
   resolveClaudeAuthProbeTimeoutMs,

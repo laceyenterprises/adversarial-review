@@ -547,15 +547,14 @@ test('firstOutputTimeout still kills a child that never writes a byte', async t 
   await rejected;
 });
 
-for (const progressOnStdoutOnly of [true, false]) {
-  test(`file-backed diagnostic stderr respects first-output policy (stdoutOnly=${progressOnStdoutOnly})`, async t => {
+for (const fileBacked of [true, false]) for (const progressOnStdoutOnly of [true, false]) {
+  test(`${fileBacked ? 'file-backed' : 'pipe'} diagnostic stderr respects first-output policy (stdoutOnly=${progressOnStdoutOnly})`, async t => {
     const dir = mkdtempSync(path.join(tmpdir(), 'first-output-policy-'));
     t.after(() => rmSync(dir, { recursive: true, force: true }));
     const result = spawnCapturedProcessGroup(process.execPath, ['-e',
       'console.error("diagnostic"); setInterval(() => console.error("diagnostic"), 20); setTimeout(() => process.exit(0), 1500);',
     ], {
-      stdoutPath: path.join(dir, 'stdout'),
-      stderrPath: path.join(dir, 'stderr'),
+      ...(fileBacked ? { stdoutPath: path.join(dir, 'stdout'), stderrPath: path.join(dir, 'stderr') } : {}),
       progressOnStdoutOnly,
       firstOutputTimeout: 1000,
       progressTimeout: 3000,
@@ -571,7 +570,7 @@ for (const progressOnStdoutOnly of [true, false]) {
     } else {
       assert.equal((await result).code, 0);
     }
-    assert.match(readFileSync(path.join(dir, 'stderr'), 'utf8'), /diagnostic/);
+    if (fileBacked) assert.match(readFileSync(path.join(dir, 'stderr'), 'utf8'), /diagnostic/);
   });
 }
 

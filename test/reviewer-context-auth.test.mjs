@@ -24,7 +24,7 @@ const payload = (body = 'required context', hasNextPage = false) => ({
 function fixture(t, selected = BROKER_REVIEWER_ROLES[2], overrides = {}) {
   const upper = selected.role.replaceAll('-', '_').toUpperCase();
   const values = {
-    GH_TOKEN: 'fixture-operator', GITHUB_TOKEN: 'fixture-merge-agent',
+    GH_TOKEN: 'fixture-operator', GITHUB_TOKEN: 'fixture-merge-agent', GITHUB_REVIEWER_TOKEN_ENV: undefined,
     WATCHER_GH_AUTH_VIA_BROKER: 'true', WATCHER_GH_BROKER_ROLE: 'merge-agent',
     OAUTH_BROKER_URL: 'http://broker.fixture', OAUTH_BROKER_URL_FALLBACK: 'http://broker.fixture',
     OAUTH_BROKER_SHARED_SECRET_FILE: '/fixture/secret',

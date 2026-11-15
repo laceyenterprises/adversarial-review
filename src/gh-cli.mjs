@@ -1,5 +1,6 @@
 import { loadAwareTimeoutMs } from './load-aware-timeout.mjs';
 import { meteredExecFile } from './metered-gh.mjs';
+import { isGitHubRateLimitError } from './rate-limit-throttle.mjs';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { setTimeout as delay } from 'node:timers/promises';
@@ -17,6 +18,7 @@ function buildAllowlistedGhEnv(env = process.env) {
     HOME: env.HOME ?? '',
   };
   for (const key of [
+    'GITHUB_REVIEWER_TOKEN_ENV',
     'USER',
     'LOGNAME',
     'TMPDIR',
@@ -75,8 +77,8 @@ function isTransientGhError(err) {
   if (/TLS handshake/i.test(stderr)) return true;
   if (/connection reset|socket hang up|unexpected EOF|network is unreachable/i.test(stderr)) return true;
   if (/HTTP\s+5\d\d/i.test(stderr)) return true;
-  if (/HTTP\s+429/i.test(stderr)) return true;
-  if (/rate limit|secondary rate limit|too many requests|resource unavailable/i.test(stderr)) return true;
+  if (isGitHubRateLimitError(err)) return true;
+  if (/resource unavailable/i.test(stderr)) return true;
   return false;
 }
 
@@ -165,7 +167,21 @@ function isGhAuthFailure(err) {
 // actually landed -- retrying with the same rejected token is pointless, so a
 // broker that is disabled or down short-circuits straight to the outage error.
 async function defaultRefreshGhAuth({ env, log }) {
-  const { refreshWatcherGithubToken } = await import('./reviewer-broker-refresh.mjs');
+  const { refreshWatcherGithubToken, resolveReviewerAppToken, BROKER_REVIEWER_ROLES } = await import('./reviewer-broker-refresh.mjs');
+  const selected = env.GITHUB_REVIEWER_TOKEN_ENV;
+  if (selected) {
+    const role = BROKER_REVIEWER_ROLES.find(entry => entry.envVar === selected);
+    if (!role || env[role.flag] !== 'true') return { failed: 'selected-reviewer-broker-unavailable' };
+    const refreshed = await resolveReviewerAppToken(selected, { env: { ...env }, force: true });
+    if (refreshed.envVar !== selected || !refreshed.token || refreshed.token === env[selected]
+      || refreshed.expiresAtMs == null || refreshed.expiresAtMs <= Date.now()) {
+      return { failed: 'selected-reviewer-token-unavailable' };
+    }
+    env[selected] = refreshed.token;
+    env.GH_TOKEN = refreshed.token;
+    env.GITHUB_TOKEN = refreshed.token;
+    return { refreshed: true, role: role.role };
+  }
   return refreshWatcherGithubToken({ env, log, force: true });
 }
 

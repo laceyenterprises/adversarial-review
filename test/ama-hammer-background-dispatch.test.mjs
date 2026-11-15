@@ -1550,7 +1550,7 @@ for (const largeEvidenceOnly of [false, true]) {
       },
       fetchLatestHeadReviewBodiesImpl: async (_repo, _pr, head) => head === 'reviewed' ? [args.reviewStateRow.review_body] : [],
       fetchCurrentPrStateImpl: async () => {
-        if (++counters.reads === 1 && !largeEvidenceOnly) throw new Error('HTTP 429 rate limited');
+        if (++counters.reads === 1 && !largeEvidenceOnly) throw Object.assign(new Error('synthetic secondary cooldown'), { status: 429, response: { headers: { 'retry-after': '1' } } });
         return { state: 'OPEN', headSha: 'current', isDraft: false, mergeable: 'MERGEABLE' };
       },
       maybeDispatchAmaCloserImpl: async payload => {

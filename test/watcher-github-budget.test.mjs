@@ -9,7 +9,7 @@ import { withGitHubBudgetScope } from '../src/rate-limit-throttle.mjs';
 for (const names of [['hold', 'do-not-merge', 'operator-approved', 'retrigger-review', 'retrigger-remediation'], []]) {
   test(`low-budget poll passes label names to posted-row controls and objects to gate projection: ${names}`, async t => {
     const rootDir = mkdtempSync(join(tmpdir(), 'watcher-budget-labels-'));
-    const keys = ['PATH', 'GHO_RATE_LIMIT_SHARED_STATE_PATH', 'GHO_RATE_LIMIT_THROTTLE_FLOOR'];
+    const keys = ['PATH', 'GHO_RATE_LIMIT_SHARED_STATE_PATH', 'GHO_RATE_LIMIT_THROTTLE_FLOOR', 'HAMMER_LACEY_GH_TOKEN', 'HAMMER_LACEY_GH_TOKEN_EXPIRES_AT', 'GH_TOKEN', 'GITHUB_TOKEN'];
     const previous = keys.map(key => process.env[key]);
     t.after(() => {
       keys.forEach((key, i) => {
@@ -18,6 +18,10 @@ for (const names of [['hold', 'do-not-merge', 'operator-approved', 'retrigger-re
       });
       rmSync(rootDir, { recursive: true, force: true });
     });
+    process.env.HAMMER_LACEY_GH_TOKEN = 'synthetic-hammer-token';
+    process.env.HAMMER_LACEY_GH_TOKEN_EXPIRES_AT = new Date(Date.now() + 3600_000).toISOString();
+    delete process.env.GH_TOKEN;
+    delete process.env.GITHUB_TOKEN;
     const head = 'a'.repeat(40);
     const budgetPath = join(rootDir, 'budget.json');
     process.env.PATH = `${rootDir}:${process.env.PATH}`;
@@ -35,7 +39,7 @@ for (const names of [['hold', 'do-not-merge', 'operator-approved', 'retrigger-re
 import assert from 'node:assert/strict';
 // QCP-08: reads ask for headers (-i) so a later poll can send If-None-Match.
 assert.deepEqual(process.argv.slice(2), ['api', 'repos/fixture/repo/pulls/42', '-i']);
-console.log(${JSON.stringify(JSON.stringify({ state: 'open', head: { sha: head }, labels }))});
+console.log('HTTP/2.0 200 OK\\n\\n' + ${JSON.stringify(JSON.stringify({ state: 'open', head: { sha: head }, labels }))});
 `, { mode: 0o755 });
     const row = { repo: 'fixture/repo', pr_number: 42, reviewer_head_sha: head, review_status: 'posted' };
     let handled = 0, projected = 0;

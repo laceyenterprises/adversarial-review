@@ -1,3 +1,4 @@
+import { isGitHubRateLimitError } from './rate-limit-throttle.mjs';
 import { meteredExecFile } from './metered-gh.mjs';
 import { execFile } from 'node:child_process';
 import { rmSync } from 'node:fs';
@@ -66,7 +67,7 @@ function isTransientGhProtectionError(err) {
     err?.stdout,
     err?.message,
   ].map((value) => String(value || '')).join('\n');
-  return /(?:TLS handshake|timed? out|timeout|ETIMEDOUT|ECONNRESET|ECONNREFUSED|ECONNABORTED|EAI_AGAIN|EHOSTUNREACH|ENETUNREACH|EIO|temporary failure|network is unreachable|socket hang up|rate limit|secondary rate limit|HTTP(?:\/[0-9.]+)?[ /]+50[0234]|bad gateway|service unavailable|gateway timeout|server error)/i.test(text);
+  return isGitHubRateLimitError(err) || /(?:TLS handshake|timed? out|timeout|ETIMEDOUT|ECONNRESET|ECONNREFUSED|ECONNABORTED|EAI_AGAIN|EHOSTUNREACH|ENETUNREACH|EIO|temporary failure|network is unreachable|socket hang up|HTTP(?:\/[0-9.]+)?[ /]+50[0234]|bad gateway|service unavailable|gateway timeout|server error)/i.test(text);
 }
 
 function sleep(ms) {

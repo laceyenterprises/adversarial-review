@@ -1,3 +1,4 @@
+import { isGitHubRateLimitError, rateLimitErrorObservation } from '../rate-limit-throttle.mjs';
 // CLOSERGATES-01: one retry policy for the mandatory reads a closing hammer
 // makes after its expensive work (credential refresh, PR context, branch
 // protection, required checks, mergeability, predicate inputs). A transient
@@ -31,7 +32,7 @@ const TRANSIENT = new RegExp([
   'timed? out', 'timeout', 'ETIMEDOUT', 'ECONNRESET', 'ECONNREFUSED', 'ECONNABORTED', 'EPIPE',
   'EAI_AGAIN', 'ENOTFOUND', 'socket hang up', 'connection (reset|refused|aborted|closed)',
   'temporary failure', 'network is unreachable', 'TLS handshake', 'unexpected EOF',
-  'rate limit', 'secondary rate limit', 'abuse detection', 'bad gateway', 'service unavailable',
+  'bad gateway', 'service unavailable',
   'gateway timeout', 'server error',
   // The per-call credential mint timed out or its command failed (hammer-token).
   'entitled token refresh failed \\((timeout or signal|command error)\\)',
@@ -45,7 +46,8 @@ const NOT_FOUND = /\bnot found\b[^\n]*\b404\b|\bHTTP\s*404\b|"status"\s*:\s*"?40
 // anything else is definitive: identity, permission and malformed answers
 // refuse at once, as they always have.
 export function classifyClosureGateFailure(detail) {
-  const text = String(detail ?? '');
+  if (isGitHubRateLimitError(detail)) return 'transient';
+  const text = closureGateFailureDetail(detail);
   if (TRANSIENT.test(text)) return 'transient';
   if (NOT_FOUND.test(text)) return 'not-found';
   return 'definitive';
@@ -72,10 +74,10 @@ export function readClosureGateSync(read, {
   const begun = clock.now();
   let notFoundContradicted = false;
   for (let attempts = 1; ; attempts += 1) {
-    let detail;
+    let detail, failure;
     try { return { ok: true, value: read(attempts), attempts }; }
-    catch (error) { detail = closureGateFailureDetail(error); }
-    let kind = classify(detail);
+    catch (error) { failure = error; detail = closureGateFailureDetail(error); }
+    let kind = isGitHubRateLimitError(failure) ? 'transient' : classify(detail);
     if (kind === 'not-found') {
       let confirmed;
       try { confirmed = confirmNotFound ? confirmNotFound(detail) : true; } catch { confirmed = null; }
@@ -86,6 +88,12 @@ export function readClosureGateSync(read, {
     if (kind !== 'transient') return { ok: false, kind: 'definitive', detail, attempts, notFoundContradicted };
     const remaining = begun + budgetMs - clock.now();
     if (!(remaining > 0)) return { ok: false, kind: 'exhausted', detail, attempts, notFoundContradicted };
-    clock.sleep(Math.min(launchReadBackoffMs(attempts), remaining));
+    const limited = isGitHubRateLimitError(failure);
+    const observation = rateLimitErrorObservation(failure) || failure?.observation;
+    const deadline = observation?.secondaryUntil || observation?.resetAt;
+    const untilMs = Date.parse(deadline) - clock.now();
+    const delay = limited ? (Number.isFinite(untilMs) ? Math.max(0, untilMs) : 60_000) : launchReadBackoffMs(attempts);
+    if (limited && delay >= remaining) return { ok: false, kind: 'exhausted', detail, attempts, notFoundContradicted };
+    clock.sleep(Math.min(delay, remaining));
   }
 }

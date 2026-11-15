@@ -4,6 +4,26 @@ import { collectDuplicateContent } from '../src/adapters/subject/github-pr/dupli
 
 const args = { owner: 'owner', repo: 'repo', prNumber: 1, headSha: 'head' };
 
+test('GHFALSEZERO-01: permission failure mentioning a secondary limit never retries', async () => {
+  let attempts = 0;
+  const error = Object.assign(new Error('secondary rate limit'), { status: 403 });
+  await assert.rejects(collectDuplicateContent({ ...args, octokit: { rest: { pulls: {
+    listFiles: async () => { attempts++; throw error; },
+  } } } }), e => e === error);
+  assert.equal(attempts, 1);
+});
+
+test('GHFALSEZERO-01: a structured limit returns to the owner without early retry', async () => {
+  let attempts = 0;
+  const error = Object.assign(new Error('secondary'), {
+    status: 403, response: { headers: { 'retry-after': '60', 'x-ratelimit-remaining': '4000' } },
+  });
+  await assert.rejects(collectDuplicateContent({ ...args, octokit: { rest: { pulls: {
+    listFiles: async () => { attempts++; throw error; },
+  } } } }), e => e === error);
+  assert.equal(attempts, 1);
+});
+
 test('3000-file cap returns unavailable content instead of partial corroboration', async () => {
   const pages = [];
   const result = await collectDuplicateContent({ ...args, octokit: { rest: { pulls: {

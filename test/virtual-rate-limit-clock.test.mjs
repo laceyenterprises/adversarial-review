@@ -47,6 +47,7 @@ test('virtual sleeps yield while concurrent rate-limit writers retain their obse
     'real lock contention must not advance the virtual budget clock');
   const buckets = readGitHubBudgetBucketsSync();
   for (let i = 0; i < 8; i++) {
-    assert.equal(buckets[githubBudgetKey('core', `contended-${i}`)].remaining, 0);
+    assert.equal(buckets[githubBudgetKey('core', `contended-${i}`)].remaining, null);
+    assert.ok(buckets[githubBudgetKey('core', `contended-${i}`)].secondaryUntil);
   }
 });

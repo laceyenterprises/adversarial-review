@@ -19,7 +19,9 @@ for (const swallowed of [false, true]) test(`pre-model diff exhaustion defers be
     process.env[key] = value;
     t.after(() => { if (previous === undefined) delete process.env[key]; else process.env[key] = previous; });
   }
-  const resetAt = new Date(Date.now() + 3600_000).toISOString();
+  // This fixture tests immediate pre-model deferral; long cached holds are
+  // confirmed separately by the rate-limit transport fixtures.
+  const resetAt = new Date(Date.now() + 60_000).toISOString();
   await recordResponseRateLimit({ remaining: 0, limit: 5000, resource: 'core', resetAt,
     credential: githubCredential(), observedAt: new Date().toISOString() });
   let modelCalls = 0;
@@ -66,7 +68,9 @@ for (const phase of ['context', 'diff']) test(`reviewer CLI exits 79 before a mo
   const sourceUrl = name => new URL(`../src/${name}`, import.meta.url).href;
   const registryUrl = sourceUrl('adapters/agent-runtime/local/remediation.mjs');
   const harnessUrl = sourceUrl('reviewer-harness.mjs'), contextUrl = sourceUrl('reviewer-context-auth.mjs');
-  const resetAt = new Date(Date.now() + 3600_000).toISOString();
+  // This fixture tests immediate pre-model deferral; long cached holds are
+  // confirmed separately by the rate-limit transport fixtures.
+  const resetAt = new Date(Date.now() + 60_000).toISOString();
   const sources = {
     'fixture:budget-registry': `export * from ${JSON.stringify(registryUrl + '?actual')};
       export async function ensureWorkerRegistryReady() {}`,

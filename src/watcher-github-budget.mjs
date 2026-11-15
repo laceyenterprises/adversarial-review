@@ -1,7 +1,7 @@
 import * as adversarialGateRecords from './adversarial-gate-status.mjs';
 import { fetchHammerPr } from './hammer-pr-read.mjs';
 import { monitorGitHubBudgets } from './github-budget-monitor.mjs';
-import { resolveThrottleFloor, withGitHubBudgetScope, isGitHubRateLimitError, readGitHubBudgetState, currentGitHubBudgetScope, githubCredential, githubBudgetKey, githubBudgetBelowFloor } from './rate-limit-throttle.mjs';
+import { resolveThrottleFloor, withGitHubBudgetScope, isGitHubRateLimitError, readGitHubBudgetState, readConfirmedGitHubBudget, currentGitHubBudgetScope, githubCredential, githubBudgetKey, githubBudgetBelowFloor } from './rate-limit-throttle.mjs';
 
 // Scheduling only. A durable success is a priority hint; serve must refresh the
 // live head, state and all existing merge predicates before taking action.
@@ -46,6 +46,8 @@ async function runLowBudgetWatcherPoll({ db, activeRepos, rootDir, domainId, exe
     allBudgets[githubBudgetKey(resource, credential)]]));
   // This shortcut skips the entire discovery phase. A single depleted pool (or
   // another credential) cannot justify skipping reads that still have capacity.
+  if (Object.values(budgets).some(bucket => !githubBudgetBelowFloor(bucket, resolveThrottleFloor()))) return false;
+  for (const resource of ['core', 'graphql']) budgets[resource] = await readConfirmedGitHubBudget(resource, credential);
   if (Object.values(budgets).some(bucket => !githubBudgetBelowFloor(bucket, resolveThrottleFloor()))) return false;
   const rows = db.prepare("SELECT * FROM reviewed_prs WHERE pr_state = 'open' AND review_status = 'posted'").all()
     .filter(row => activeRepos.includes(row.repo));

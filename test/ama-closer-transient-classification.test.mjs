@@ -251,18 +251,27 @@ test('exact-head daemon range cancellation prevents any GitHub subprocess', asyn
 
 test('isGithubRateLimitOrBrokerThrottle recognizes throttle + broker signals', () => {
   for (const msg of [
-    'gh: API rate limit exceeded (HTTP 403)',
-    'You have exceeded a secondary rate limit. Please wait',
-    'GraphQL: API rate limit already exceeded for user ID 282134940',
-    'HTTP 429 Too Many Requests',
-    'abuse detection mechanism triggered',
-    'You have submitted too quickly; retry your request',
     'oauth broker fetch failed: HTTP 503 service unavailable',
     'broker unavailable',
   ]) {
     assert.equal(isGithubRateLimitOrBrokerThrottle(msg), true, `expected transient: ${msg}`);
     assert.equal(isTransientHqDispatchError({ stderr: msg }), true, `expected transient err: ${msg}`);
   }
+});
+
+test('rate-limit prose in command failures cannot defer closer dispatch', () => {
+  for (const message of ['diff: gh: API rate limit exceeded (HTTP 403)', 'secondary rate limit',
+    'HTTP 429 Too Many Requests', 'abuse detection mechanism triggered', 'submitted too quickly']) {
+    assert.equal(isGithubRateLimitOrBrokerThrottle({ message, stdout: message, stderr: message }), false);
+    assert.equal(isTransientHqDispatchError({ stdout: message, stderr: message }), false);
+  }
+});
+
+test('closer dispatch accepts gh stderr records and discards debug bodies', () => {
+  const line = 'gh: API rate limit exceeded (HTTP 403)';
+  assert.equal(isGithubRateLimitOrBrokerThrottle({ stderr: line }), true);
+  assert.equal(isGithubRateLimitOrBrokerThrottle({ stdout: line, message: line }), false);
+  assert.equal(isGithubRateLimitOrBrokerThrottle({ stderr: `* Request at fixture\n< HTTP/2 200\n\ngithub-rate-limit: secondary\n* Request took 1ms` }), false);
 });
 
 test('isGithubRateLimitOrBrokerThrottle does NOT match genuine auth failures', () => {
@@ -279,11 +288,11 @@ test('isGithubRateLimitOrBrokerThrottle does NOT match genuine auth failures', (
 });
 
 test('isGithubRateLimitOrBrokerThrottle accepts both string and error-object shapes', () => {
-  assert.equal(isGithubRateLimitOrBrokerThrottle({ message: 'API rate limit exceeded' }), true);
-  assert.equal(isGithubRateLimitOrBrokerThrottle({ stdout: 'secondary rate limit' }), true);
+  assert.equal(isGithubRateLimitOrBrokerThrottle({ message: 'API rate limit exceeded' }), false);
+  assert.equal(isGithubRateLimitOrBrokerThrottle({ stdout: 'secondary rate limit' }), false);
   assert.equal(isGithubRateLimitOrBrokerThrottle({ status: 429, message: 'request failed' }), true);
   assert.equal(isGithubRateLimitOrBrokerThrottle({ statusCode: 429, message: 'request failed' }), true);
-  assert.equal(isGithubRateLimitOrBrokerThrottle('plain string with rate limit'), true);
+  assert.equal(isGithubRateLimitOrBrokerThrottle('plain string with rate limit'), false);
 });
 
 test('isTransientHqDispatchError recognizes transient diagnostics after a non-matching first line', () => {
@@ -822,3 +831,12 @@ for (const outcome of ['preserved', 'clean-preserved', 'admission-refused', 'rev
     assert.equal(readAmaCloserLease(rootDir, { repo: inputs.dispatchContext.repo, prNumber: 1234, headSha }), null);
   });
 }
+
+test('closer dispatch accepts the metered transport protocol without interpreting prose', () => {
+  for (const kind of ['primary', 'secondary', 'deferred']) {
+    assert.equal(isTransientHqDispatchError({ code: 1,
+      stderr: `gh: HTTP 403 forbidden\ngithub-rate-limit: ${kind}\n` }), true);
+    assert.equal(isTransientHqDispatchError({ code: 1,
+      stdout: `github-rate-limit: ${kind}\n` }), false);
+  }
+});

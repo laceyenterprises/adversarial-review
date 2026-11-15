@@ -23,6 +23,7 @@ const execFileAsync = promisify(execFile);
 function pinReviewerGhIdentity(env, botTokenEnv) {
   const token = env && botTokenEnv ? env[botTokenEnv] : undefined;
   if (typeof token === 'string' && token.length > 0) {
+    env.GITHUB_REVIEWER_TOKEN_ENV = botTokenEnv;
     env.GH_TOKEN = token;
     env.GITHUB_TOKEN = token;
     return { pinned: true, botTokenEnv };

@@ -429,7 +429,7 @@ for (const recover of [false, true]) {
           return { stdout: `${HEAD}\trefs/heads/synthetic/topic\n` };
         }
         // A separate transient launch failure must not retain a recovered fork's clock.
-        if (recover) throw Object.assign(new Error('synthetic broker throttle 429'), { code: 1 });
+        if (recover) throw Object.assign(new Error('synthetic broker throttle'), { code: 1, status: 429 });
         return deps.execFileImpl(cmd, commandArgs);
       },
     };

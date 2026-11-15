@@ -75,50 +75,71 @@ request. Bounded operator reads are the exception: their credential-less
 fallback is `operator-cli`, which isolates ambient CLI login observations from
 the legacy shared anonymous bucket.
 
-Each bucket contains normalized `resource`, non-negative `remaining`, ISO
-`resetAt` and `observedAt`, optional positive `limit` (the bucket's
-`x-ratelimit-limit`), optional ISO `confirmedAt` (the start of a successful
-free `/rate_limit` confirmation), optional positive `rateLimitedCalls`, optional
-`credential` (omitted for `default`) and optional `credentialSelector` (the
-adapter's broker role). When two observations share a reset window, the merged
-bucket keeps the newer known `limit`. The counter belongs to that credential/resource reset
-window; a new window starts a new counter. Expired observations are discarded on
-reads. Version 1 resource-keyed and legacy single-observation documents remain
-readable as anonymous observations; they do not throttle authenticated budgets.
-When a healthy bucket transitions to zero remaining, a failure without a quota
-limit retains the active observation's known `limit`, including when the failure
-uses a different or guessed reset. A limit supplied by the failure takes precedence.
+Each bucket contains normalized `resource`, ISO `resetAt` and `observedAt`,
+optional positive `limit`, optional legacy `confirmedAt`, `rateLimitedCalls`, `credential` and
+`credentialSelector`. `remaining` is a non-negative measured primary balance,
+or `null` when a trusted secondary event supplies no primary measurement.
+`secondaryUntil` is an independent ISO backoff deadline; `secondaryAttempts`
+counts consecutive secondary observations during an active backoff. These are
+additive version-2 fields; legacy numeric observations remain readable.
+Expired observations are discarded once both deadlines have passed.
 
 Writes hold the adjacent `.lock` directory, sync a temporary file and rename it
-over the store. Concurrent responses for the same window retain the lowest
-remaining count and increment rate-limited counters under the lock.
-An active zero-balance limit whose reset GitHub reported (a `Retry-After` or a
-reset header) takes precedence over positive primary-quota observations
-regardless of their reset ordering; healthy responses cannot clear that hold
-before expiry. A direct `/rate_limit` confirmation is an exception for older
-primary evidence: a newer `confirmedAt` replaces it, durably across readers.
-Evidence with `rateLimitedCalls` retains its hold because primary budget does
-not disprove a secondary limit. Unscoped waits over two minutes first query
-`GET /rate_limit` with the sending credential, bounded to 15 seconds. Failed
-or unreadable confirmation retains the existing hold; a mismatched credential
-defers instead of sleeping without confirmation.
-A zero-balance window created without any reset evidence carries
-`resetUnknown: true` (the conservative default below); its reset is a guess, so
-a newer healthy observation for the same credential and resource replaces it.
-When both observations have zero balance, the later
-reset wins. Rate-limited responses force `remaining: 0` even if GitHub reports
-positive primary capacity, and a usable `Retry-After` selects the secondary-limit
-reset ahead of the primary reset header.
+over the store. Concurrent observations in a primary window retain the lowest
+positive balance; a newer measured positive balance corrects a zero. A
+secondary observation never manufactures primary zero. It preserves known
+primary remaining/limit/reset when its response omits them, and retains an
+independent backoff across ordinary primary observations. Retry-after is honored;
+without it secondary retries use 60/120/240 seconds, capped at 300 seconds.
+Expired secondary observations retain non-admitting retry history for fifteen
+minutes so an actual retry after cooldown advances the exponential step.
+Expired primary capacity in that history is unknown (`remaining: null`).
+A primary 403 with remaining zero uses the primary reset header.
 
-When a rate-limited call provides no usable response headers,
-`recordRateLimitedCall` reuses the active window only when its balance is already
-zero, and increments its counter. If that window is healthy, absent or expired,
-it creates an observation with
-`remaining: 0`, `observedAt` equal to the local clock and a conservative reset
-60 seconds later. This fallback is local backpressure evidence, not a measured
-GitHub reset. Concurrent first failures reuse the window under the same lock.
-Other credential/resource buckets remain independent. The recorded reset is also
-returned to the caller's scope so local admission and persisted readers agree.
+Only structured API response evidence establishes a rate limit: status 429,
+403 plus remaining zero, or 403/429 plus retry-after or a documented GitHub API
+error body. Anchored gh stderr error records (documented rate-limit messages,
+`HTTP 403: <rate-limit message> (<url>)`, or HTTP 429 Too Many Requests)
+also establish a limit, with unknown primary balance unless headers measure it.
+Free exception messages, stdout, content-echoing stderr and PR content have no
+authority. CLI debug bodies are discarded without classification; only their
+response status and allowed headers are used. Buffer-overflow execution failures
+cannot establish quota evidence.
+Daemon merge wrappers preserve typed `githubRateLimitKind`/`budgetDeferred`
+metadata when reducing execution failures. The metered CLI emits the exact
+stderr protocol line `github-rate-limit: primary|secondary|deferred` only for
+transport-proven limits or admission deferrals. Hammer shell classifiers and
+daemon merge and closer dispatch accept that protocol before generic HTTP 403 rejection; it
+does not create a new shared quota observation. HQ launch failures that contain
+only prose need typed evidence from their producing transport; arbitrary
+stdout or exception text remains insufficient.
+Private CLI HTTP transcripts are reduced to status and six allowed headers,
+then discarded. The `github_rate_limit` API-log row records status, category,
+consumer, kind and raw limit/remaining/used/reset/resource/retry-after values.
+
+Before a new admission hold based on cached observations exceeds two minutes,
+it confirms the sending credential's budget through a throttle-exempt
+`gh api --method GET --include` request to `/rate_limit` (15-second bound).
+The endpoint uses `GITHUB_API_URL`, then `GH_API_URL`, then an Enterprise
+`GH_HOST` with `/api/v3`, otherwise GitHub.com. The CLI inherits proxy settings
+and sends `User-Agent: adversarial-review`. All token aliases, including
+Enterprise aliases, bind to the exact admission token; anonymous `default`
+confirmation stays anonymous. An unavailable token for a named credential
+defers for at most two minutes without using ambient credentials.
+`github_budget_confirmation` logs the stored and live readings. Contradictory
+live primary readings correct false zero or a stale balance below the floor;
+secondary holds remain independent.
+Fresh response observations replace zero balances in the recording process and
+its durable store. Merging cached snapshots from peer stores remains conservative;
+a peer's positive snapshot cannot erase a shared zero.
+If the probe itself returns a structured rate limit, its raw response evidence
+is logged and its primary reset or secondary Retry-After is honored. Probe
+response headers describe core quota even when the requested confirmation was
+for GraphQL; they cannot supply GraphQL capacity.
+Unavailable confirmation limits that admission hold to two minutes before a
+new decision. This applies to async admission, the sync bridge and the watcher
+whole-poll shortcut. Reviewer 401 refresh retains its pinned reviewer role via
+`GITHUB_REVIEWER_TOKEN_ENV`; it cannot select the watcher role.
 
 `readGitHubBudgetStatus` reports all observed compound keys. Its conventional
 `core` and `graphql` fields select the active credential from the supplied runtime
@@ -150,7 +171,9 @@ sleeping until reset. Nested closer scopes
 propagate deferred/rate-limited accounting to their parent even when a caller
 swallows the error; urgency remains local to the nested operation. Only
 un-scoped callers share in-process sleep promises; scoped callers never join
-another caller's wait or inherit its deferral decision.
+another caller's wait or inherit its deferral decision. A rate limit already
+observed in the same scope defers immediately at its recorded deadline, even
+when that deadline exceeds two minutes and the disk bucket is absent or healthy.
 An `operatorSafety` scope (the no-merge hold and release CLI) is never slept or
 deferred by the floor, in either the async or the synchronous path: it proceeds
 with the call, which GitHub itself refuses fast if the budget is really spent.
@@ -158,7 +181,7 @@ A rate limit observed inside that same scope still defers its next call
 immediately. Its responses are metered as usual (NOMERGEHOLDHANG-01).
 
 Synchronous `meteredExecFileSync` calls use the effective caller environment for
-budget reads, the throttle floor, and the `wait`, `record`, and `limited` bridge
+budget reads, the throttle floor, and the `wait`, `record`, `admit`, and `limited` bridge
 processes. Explicit `options.env` budget settings take precedence; missing budget
 settings inherit from `process.env`. An isolated caller's observations therefore
 stay in its selected store, including failures without rate-limit headers.

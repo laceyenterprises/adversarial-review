@@ -1,7 +1,7 @@
 import { loadAwareTimeoutMs, MAX_TIMER_DELAY_MS } from './load-aware-timeout.mjs';
 import { readAdapterReceipt } from './producer-contracts/publication-receipt.mjs';
 import { AsyncLocalStorage } from 'node:async_hooks';
-import { awaitThrottleIfNeeded, githubCredential, isGitHubRateLimitError, recordRateLimitedCall, extractRateLimitObservation, currentGitHubBudgetScope, markGitHubRateLimited } from './rate-limit-throttle.mjs';
+import { awaitThrottleIfNeeded, githubCredential, isGitHubRateLimitError, rateLimitErrorObservation, recordRateLimitedCall, currentGitHubBudgetScope, markGitHubRateLimited } from './rate-limit-throttle.mjs';
 import { filterGitHubBody } from './github-outbound-body.mjs';
 import { recordMergeActionBestEffort } from './ama/merge-action-receipt.mjs';
 import { execGhWithRetry, isTransientGhError } from './gh-cli.mjs';
@@ -565,11 +565,16 @@ async function executeLabelAdapter(execFileImpl, adapterBin, args, options) {
   try {
     const result = await execFileImpl(adapterBin, args, options);
     const payload = parseAdapterJson(result.stdout, 'pull-request-label');
-    if (payload.ok === false) throw Object.assign(new Error(`${payload.message || 'GitHub label mutation failed'}; ${readAdapterReceipt(payload).diagnostics.join('; ')}`), { stdout: result.stdout });
+    if (payload.ok === false) throw Object.assign(new Error(`${payload.message || 'GitHub label mutation failed'}; ${readAdapterReceipt(payload).diagnostics.join('; ')}`), { stdout: result.stdout,
+      ...(payload.failureClass === 'rate_limit' ? { githubRateLimitKind: 'secondary' } : {}) });
     return result;
   } catch (err) {
+    try {
+      const payload = JSON.parse(String(err.stdout || ''));
+      if (payload?.ok === false && payload.failureClass === 'rate_limit') err.githubRateLimitKind = 'secondary';
+    } catch { /* Unstructured adapter diagnostics carry no rate authority. */ }
     if (isGitHubRateLimitError(err) && !err.budgetDeferred) {
-      const observation = extractRateLimitObservation(err.response?.headers, { resource: 'graphql', rateLimited: true });
+      const observation = rateLimitErrorObservation(err, { resource: 'graphql', requestCategory: 'labels' });
       err.rateLimited = true;
       err.observation = scope
         ? await recordRateLimitedCall('graphql', credential, { ...observation, credentialSelector: selector })

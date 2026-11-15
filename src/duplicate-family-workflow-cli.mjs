@@ -1,4 +1,5 @@
 import { loadAwareTimeoutMs } from './load-aware-timeout.mjs';
+import { isGitHubRateLimitError } from './rate-limit-throttle.mjs';
 import { meteredExecFile } from './metered-gh.mjs';
 import { filterGitHubBody } from './github-outbound-body.mjs';
 import { execFile as execFileCallback } from 'node:child_process';
@@ -96,6 +97,7 @@ async function postSelectionComment({ repo, prNumber, selection, execFileImpl })
 }
 
 function isTransientSubprocessError(err) {
+  if (isGitHubRateLimitError(err)) return true;
   const code = String(err?.code || err?.cause?.code || '').toUpperCase();
   if (['EAGAIN', 'EBUSY', 'ECONNRESET', 'EHOSTUNREACH', 'EIO', 'ENETDOWN', 'ENETRESET', 'ENETUNREACH', 'ETIMEDOUT'].includes(code)) {
     return true;
@@ -117,9 +119,6 @@ function isTransientSubprocessError(err) {
     'early eof',
     'rpc failed',
     'remote end hung up unexpectedly',
-    'http 429',
-    'rate limit',
-    'secondary rate limit',
     'http 500',
     'http 502',
     'http 503',

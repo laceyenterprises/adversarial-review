@@ -1,3 +1,4 @@
+import { isGitHubRateLimitError } from './rate-limit-throttle.mjs';
 import { persistReviewerAttributionForSession } from './reviewer-attribution.mjs';
 import { normalizeBuilderClass, normalizeReviewerModel, reviewerRefusesBuilder } from './adapters/subject/github-pr/routing.mjs';
 import { loadAwareTimeoutMs } from './load-aware-timeout.mjs';
@@ -180,7 +181,7 @@ function isTransientGithubProbeError(err) {
     return true;
   }
 
-  return /timed?\s*out|timeout|socket hang up|connection (?:reset|refused|aborted|timed out)|temporary failure|temporarily unavailable|network is unreachable|try again|rate limit|secondary rate limit|too many requests|bad gateway|service unavailable|gateway timeout|server error|http[ /]5\d\d/i.test(errorText(err));
+  return isGitHubRateLimitError(err) || /timed?\s*out|timeout|socket hang up|connection (?:reset|refused|aborted|timed out)|temporary failure|temporarily unavailable|network is unreachable|try again|bad gateway|service unavailable|gateway timeout|server error|http[ /]5\d\d/i.test(errorText(err));
 }
 
 function probePgidAlive(pgid) {

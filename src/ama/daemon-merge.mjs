@@ -1,3 +1,4 @@
+import { isGitHubRateLimitError, rateLimitErrorObservation } from '../rate-limit-throttle.mjs';
 import { observeClosureLag } from './closure-lag.mjs';
 import { attestationRecordErrorDetails } from '../attestation-record-error.mjs';
 import { loadAwareTimeoutMs } from '../load-aware-timeout.mjs';
@@ -217,11 +218,11 @@ function normalizeFindingCount(value) {
  * @returns {'already-merged'|'permanent'|'retryable'|'unclassified'}
  */
 export function classifyDaemonMergeError(text) {
-  const haystack = String(text || '');
+  const haystack = typeof text === 'string' ? text : [text?.stderr, text?.stdout, text?.message].filter(Boolean).join('\n');
   // ham_merge_error_already_merged
   if (/already merged/i.test(haystack)) return 'already-merged';
   // ham_merge_error_retryable: throttling must win before generic HTTP 403.
-  if (/rate limit|secondary rate limit|Retry-After/i.test(haystack)) return 'retryable';
+  if (isGitHubRateLimitError(typeof text === 'string' ? { stderr: text } : text)) return 'retryable';
   // ham_merge_error_permanent
   if (
     /match-head-commit|head.*(mismatch|changed|does not match)|not authorized|permission|authentication|forbidden|HTTP 401|HTTP 403|branch protection|ruleset|required check|status checks? (not|have not)|not mergeable|merge conflict|pull request.*closed|closed pull request|pr is closed|state:?\s*closed|pull request.*not open|draft/i.test(
@@ -1023,7 +1024,8 @@ async function attemptDaemonCleanMergeInner({
     try {
       mergeRes = await runMergeImpl({ repo, prNumber, head: validatedHead, mergeMethod, base, body: commitBody.text, subject: commitBody.subject });
     } catch (err) {
-      mergeRes = { exitCode: 1, stdout: '', stderr: String(err?.stderr || err?.message || err) };
+      mergeRes = { exitCode: 1, stdout: '', stderr: String(err?.stderr || err?.message || err),
+        githubRateLimitKind: err?.githubRateLimitKind || rateLimitErrorObservation(err)?.kind, budgetDeferred: err?.budgetDeferred === true };
     }
     if (Number(mergeRes?.exitCode) === 0) {
       merged = true;
@@ -1037,7 +1039,7 @@ async function attemptDaemonCleanMergeInner({
         closureHold: mergeRes.closureHold };
       break;
     }
-    const cls = classifyDaemonMergeError(`${mergeRes?.stderr || ''}\n${mergeRes?.stdout || ''}`);
+    const cls = classifyDaemonMergeError(mergeRes);
     if (cls === 'already-merged') {
       merged = true;
       break;

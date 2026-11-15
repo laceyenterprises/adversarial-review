@@ -3639,7 +3639,7 @@ for (const failure of ['timeout', 'error', 'null', 'rate-limit']) {
         assert.equal(gate.evaluate(handler, { recordSkip: false }).reason, 'decision-changed');
         if (failure === 'rate-limit') {
           const result = await runPostedReviewHandlersFairly({ handlers: [{ ...handler, run: async () => {
-            throw Object.assign(new Error('API rate limit exceeded'), { status: 403 });
+            throw Object.assign(new Error('API rate limit exceeded'), { status: 403, response: { headers: { 'x-ratelimit-remaining': '0' } } });
           } }], laneGate: gate, budgetMs: 1000, handlerTimeoutMs: 100, minimumHandlerStartBudgetMs: 1,
           laneStarvationFloor: 0, logger: silentLogger });
           assert.equal(result.failed, 1);

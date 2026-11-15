@@ -903,7 +903,7 @@ case "$1" in
   */bin/hammer-pr-read.mjs)
     if [ "$HAM_TEST_SCENARIO" = 'budget deferral' ] && [ "$(cat "$TMPDIR/polls")" = 1 ]; then
       echo 2 > "$TMPDIR/polls"
-      echo 'GitHub rate limit budget deferred' >&2
+      echo 'github-rate-limit: deferred' >&2
       exit 1
     fi ;;
 esac

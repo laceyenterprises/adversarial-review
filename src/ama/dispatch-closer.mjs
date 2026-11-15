@@ -1,4 +1,5 @@
 import { readPrTenure } from '../pr-tenure.mjs';
+import { isGitHubRateLimitError } from '../rate-limit-throttle.mjs';
 import { requestCloserSuccessor, settleCloserSuccessor } from './closer-successor.mjs';
 import { samePrHammerHolderWorktreePaths } from './branch-holder-paths.mjs';
 export { samePrHammerHolderWorktreePaths } from './branch-holder-paths.mjs';
@@ -2829,33 +2830,13 @@ function withProvisionTimeoutCappedAtDispatch(env, dispatchTimeoutMs) {
   };
 }
 
-// GitHub primary/secondary rate-limit + HTTP 429 + OAuth-broker 503 signals.
-// These are TRANSIENT: the bot token is valid and authorized — the request was
-// merely throttled (or the broker that mints the token is briefly unavailable).
-// GitHub returns the *primary* rate limit as HTTP 403, so a naive 403/exit-65
-// check misreads a throttle as a terminal auth failure and permanently grounds
-// the AMA closer, so autonomous merges never run (observed during the macOS
-// upgrade + os-restart storm that exhausted merge-agent-lacey's rate limit).
-//
-// This mirrors the rate-limit clauses of `_TRANSIENT_GH_ERROR_RE` in
-// cwp_dispatch/dag_reconcile.py and `hq_entitlement_gh_identity_error_is_rate_limit`
-// in modules/worker-pool/lib/hq-gh.sh so classification is consistent across
-// the worker-pool entitlement path and this dispatch path.
+// GitHub throttles require transport evidence; broker outage retries remain bounded.
 export function isGithubRateLimitOrBrokerThrottle(errOrText) {
+  if (isGitHubRateLimitError(errOrText)) return true;
   const detail = errDetailText(errOrText);
   if (!detail) return false;
-  return detail.includes('rate limit')
-    || detail.includes('rate-limit')
-    || detail.includes('ratelimit')
-    || detail.includes('secondary rate')
-    || detail.includes('abuse detection')
-    || detail.includes('submitted too quickly')
-    || detail.includes('retry your request')
-    || detail.includes('too many requests')
-    || detail.includes('http 429')
-    || /\b(?:status|statuscode|status_code|code)\s*[:=]?\s*429\b/.test(detail)
-    // OAuth-broker unavailability while it fetches/refreshes the bot token.
-    || detail.includes('http 503')
+  // OAuth-broker unavailability while it fetches/refreshes the bot token.
+  return detail.includes('http 503')
     || detail.includes('broker fetch')
     || detail.includes('broker unavailable')
     || detail.includes('service unavailable');

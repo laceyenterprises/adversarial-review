@@ -296,11 +296,20 @@ test('classifyDaemonMergeError mirrors the hammer classifier order', () => {
   assert.equal(classifyDaemonMergeError('branch protection rules not satisfied'), 'permanent');
   assert.equal(classifyDaemonMergeError('required check has not succeeded'), 'permanent');
   assert.equal(classifyDaemonMergeError('HTTP 403 forbidden'), 'permanent');
+  for (const kind of ['primary', 'secondary', 'deferred']) {
+    assert.equal(classifyDaemonMergeError(`HTTP 403 forbidden\ngithub-rate-limit: ${kind}\n`), 'retryable');
+    assert.equal(classifyDaemonMergeError({ stderr: `HTTP 403 forbidden\ngithub-rate-limit: ${kind}\n` }), 'retryable');
+  }
+  assert.equal(classifyDaemonMergeError('HTTP 403 forbidden\ngithub-rate-limit: unknown\n'), 'permanent');
+  assert.equal(classifyDaemonMergeError({ stderr: 'gh: HTTP 403: API rate limit exceeded (https://api.github.com/graphql)' }), 'retryable');
+  assert.equal(classifyDaemonMergeError({ stdout: 'github-rate-limit: secondary' }), 'unclassified');
+  assert.equal(classifyDaemonMergeError({ stderr: '* Request at fixture\n< HTTP/2 200\n\ngithub-rate-limit: secondary\n* Request took 1ms' }), 'unclassified');
   assert.equal(classifyDaemonMergeError('connection reset by peer'), 'retryable');
   assert.equal(classifyDaemonMergeError('connection closed by peer'), 'retryable');
   assert.equal(classifyDaemonMergeError('HTTP 503 service unavailable'), 'retryable');
-  assert.equal(classifyDaemonMergeError('HTTP 403 Rate Limit Exceeded'), 'retryable');
-  assert.equal(classifyDaemonMergeError('secondary rate limit; Retry-After: 30'), 'retryable');
+  assert.equal(classifyDaemonMergeError('HTTP 403 Rate Limit Exceeded'), 'permanent');
+  assert.equal(classifyDaemonMergeError('secondary rate limit; Retry-After: 30'), 'unclassified');
+  assert.equal(classifyDaemonMergeError({ status: 429 }), 'retryable');
   assert.equal(classifyDaemonMergeError('pull request was closed'), 'permanent');
   assert.equal(classifyDaemonMergeError('spawn gh EIO'), 'retryable');
   assert.equal(classifyDaemonMergeError('Input/output error'), 'retryable');
@@ -1658,3 +1667,13 @@ for (const outcome of ['merged', 'already-merged', 'live-merged']) {
     assert.equal(state.samples[0].lagMs, 1000);
   });
 }
+
+for (const kind of ['primary', 'secondary', 'deferred']) test(`daemon retains ${kind} evidence when merge execution throws`, async () => {
+  const err = Object.assign(new Error('HTTP 403 forbidden'), kind === 'deferred'
+    ? { budgetDeferred: true } : { githubRateLimitKind: kind });
+  const harness = makeHarness({ mergeResults: [err, { exitCode: 0 }] });
+  const result = await attemptDaemonCleanMerge(baseArgs(harness));
+  assert.equal(result.merged, true);
+  assert.equal(harness.calls.merge, 2);
+  assert.equal(harness.calls.sleeps.length, 1);
+});

@@ -39,7 +39,7 @@ import { captureLocalReviewerUsage } from './reviewer-pass-tokens.mjs';
 import { createReviewerProgressRecorder, persistHostedReviewerExecution, persistSingleReviewDecision } from './reviewer-execution-pass.mjs';
 import { normalizeReviewerFamily } from './reviewer-family.mjs';
 import { apiStatusFromError, recordApiCall } from './api-telemetry.mjs';
-import { awaitThrottleIfNeeded, githubCredential } from './rate-limit-throttle.mjs';
+import { awaitThrottleIfNeeded, githubCredential, isGitHubRateLimitError } from './rate-limit-throttle.mjs';
 import { resolveGitHubAppBotLogin } from './github-app-identity.mjs';
 import {
   classifyFollowUpCriticality,
@@ -1347,6 +1347,9 @@ function isReviewerPostAuthFailure(err, { preWriteSaw401 = false } = {}) {
 }
 
 function isRetryableGhTransportError(err, { allowAuthRefresh = false, preWriteSaw401 = false } = {}) {
+  // Admission refused before the write ran; there is no ambiguous write to
+  // reconcile and no transport retry can spend this credential's budget.
+  if (err?.budgetDeferred) return false;
   const detail = buildGhErrorDetail(err);
   const status = Number(err?.status || err?.response?.status || 0);
   if (allowAuthRefresh && isReviewerPostAuthFailure(err, { preWriteSaw401 })) {
@@ -1361,8 +1364,7 @@ function isRetryableGhTransportError(err, { allowAuthRefresh = false, preWriteSa
     || detail.includes('timed out')
     || detail.includes('temporary failure')
     || detail.includes('temporarily unavailable')
-    || detail.includes('rate limit')
-    || detail.includes('secondary rate limit')
+    || isGitHubRateLimitError(err)
     || detail.includes('500 internal server error')
     || detail.includes('502 bad gateway')
     || detail.includes('503 service unavailable')

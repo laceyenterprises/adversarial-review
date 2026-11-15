@@ -1,3 +1,4 @@
+import { isGitHubRateLimitError } from './rate-limit-throttle.mjs';
 import { filterGitHubBody } from './github-outbound-body.mjs';
 import {
   PAUSED_FOR_REDESIGN_LABEL,
@@ -43,8 +44,7 @@ function isRetryableReviewCycleCapCommentError(err) {
     || detail.includes('timed out')
     || detail.includes('temporary failure')
     || detail.includes('temporarily unavailable')
-    || detail.includes('rate limit')
-    || detail.includes('secondary rate limit')
+    || isGitHubRateLimitError(err)
     || detail.includes('bad gateway')
     || detail.includes('service unavailable')
     || detail.includes('gateway timeout');

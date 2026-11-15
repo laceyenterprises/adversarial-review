@@ -18,7 +18,7 @@ ham_pr() { "$HAM_NODE_BIN" "${HAM_ROOT_DIR}/bin/hammer-pr-read.mjs" "$HAM_REPO" 
 # phase all sync through these definitions; verify-head keeps a rendered copy
 # that test/hamconflictsync-01.test.mjs pins byte-equal to this one.
 ham_update_branch_transient() {
-  sed '/^\[load-aware-timeout\]/d' "$1" | grep -Eiq 'Something went wrong while executing your query|"type"[[:space:]]*:[[:space:]]*"INTERNAL"|HTTP[^[:space:]]*[[:space:]]+5[0-9][0-9]|"status"[[:space:]]*:[[:space:]]*5[0-9][0-9]|timeout|timed out|TLS|connection reset|connection refused|temporar(y|ily)|try again|rate limit|secondary rate limit|HTTP 5[0-9][0-9]|502|503|504|service unavailable|gateway'
+  sed '/^\[load-aware-timeout\]/d' "$1" | grep -Eiq '^github-rate-limit: (primary|secondary|deferred)$|Something went wrong while executing your query|"type"[[:space:]]*:[[:space:]]*"INTERNAL"|HTTP[^[:space:]]*[[:space:]]+5[0-9][0-9]|"status"[[:space:]]*:[[:space:]]*5[0-9][0-9]|timeout|timed out|TLS|connection reset|connection refused|temporar(y|ily)|try again|HTTP 5[0-9][0-9]|502|503|504|service unavailable|gateway'
 }
 
 ham_is_full_sha() {

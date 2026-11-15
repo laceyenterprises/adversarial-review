@@ -1,3 +1,4 @@
+import { isGitHubRateLimitError } from './rate-limit-throttle.mjs';
 import { loadAwareTimeoutMs } from './load-aware-timeout.mjs';
 import { meteredExecFile } from './metered-gh.mjs';
 // Workflow-file push-capability preflight for remediation.
@@ -127,7 +128,7 @@ function workflowPushErrorText(err) {
 function isTransientWorkflowPushPreflightError(err) {
   const detail = workflowPushErrorText(err).toLowerCase();
   if (!detail) return true;
-  return /timed?\s*out|timeout|abort(?:ed|error)|socket hang up|eio\b|etimedout|econnreset|econnrefused|econnaborted|enotfound|eai_again|temporary failure|temporarily unavailable|network is unreachable|try again|tls handshake|rate limit|secondary rate limit|too many requests|bad gateway|service unavailable|gateway timeout|server error|http[ /]5\d\d|(^|[^0-9])5(?:00|02|03|04)([^0-9]|$)/i.test(detail);
+  return isGitHubRateLimitError(err) || /timed?\s*out|timeout|abort(?:ed|error)|socket hang up|eio\b|etimedout|econnreset|econnrefused|econnaborted|enotfound|eai_again|temporary failure|temporarily unavailable|network is unreachable|try again|tls handshake|bad gateway|service unavailable|gateway timeout|server error|http[ /]5\d\d|(^|[^0-9])5(?:00|02|03|04)([^0-9]|$)/i.test(detail);
 }
 
 async function execWorkflowPushPreflightGh({

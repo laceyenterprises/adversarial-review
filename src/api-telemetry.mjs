@@ -20,6 +20,8 @@ const LOG_FILE_MODE = 0o640;
 const MS_PER_DAY = 24 * 60 * 60 * 1000;
 const CATEGORY_ORDER = Object.freeze([
   'github_request',
+  'github_rate_limit',
+  'github_budget_confirmation',
   'cache_hit_diff_fetch',
   'conditional_304',
   'diff_fetch',

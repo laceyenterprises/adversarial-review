@@ -81,11 +81,13 @@ test('CLOSERGATES-01: a gate read that fails twice transiently, then succeeds, f
 });
 
 test('CLOSERGATES-01: the shared read policy classifies transient, not-found and definitive failures', () => {
-  for (const detail of ['gh: Bad Gateway (HTTP 502)', 'HTTP 503', 'connect ECONNRESET', 'API rate limit exceeded',
+  for (const detail of ['gh: Bad Gateway (HTTP 502)', 'HTTP 503', 'connect ECONNRESET',
     'GitHub credential rejected or unavailable; entitled token refresh failed (timeout or signal)',
     'GitHub credential rejected or unavailable; entitled token refresh failed (command error)']) {
     assert.equal(classifyClosureGateFailure(detail), 'transient', detail);
   }
+  assert.equal(classifyClosureGateFailure({ status: 429 }), 'transient');
+  assert.equal(classifyClosureGateFailure('API rate limit exceeded'), 'definitive');
   assert.equal(classifyClosureGateFailure('gh: Branch not found (HTTP 404)'), 'not-found');
   for (const detail of ['gh: Bad credentials (HTTP 401)', 'gh: Resource not accessible by integration (HTTP 403)',
     'GitHub credential rejected or unavailable; entitled token refresh failed (empty or invalid output)']) {
@@ -368,4 +370,28 @@ test('CLOSERGATES-01: the shared read never reads past its budget', () => {
   const result = readClosureGateSync(() => { throw httpError('HTTP 503'); }, { clock, budgetMs: 10_000 });
   assert.equal(result.kind, 'exhausted');
   assert.deepEqual(clock.sleeps, [2_000, 5_000, 3_000]);
+});
+
+
+test('GHFALSEZERO-01: structured secondary cooldown cannot be shortened to fit a closure budget', () => {
+  let attempts = 0;
+  const result = readClosureGateSync(() => {
+    attempts++;
+    throw { status: 403, response: { headers: { 'x-ratelimit-remaining': '4000', 'retry-after': '60' } } };
+  }, { budgetMs: 10_000, clock: { now: () => 0, sleep: () => assert.fail('cannot retry early') } });
+  assert.equal(result.kind, 'exhausted');
+  assert.equal(attempts, 1);
+});
+
+test('closure gate cooldown uses the injected clock', () => {
+  let now = 0;
+  const sleeps = [];
+  let attempts = 0;
+  const result = readClosureGateSync(() => {
+    if (++attempts === 1) throw { budgetDeferred: true,
+      observation: { resetAt: new Date(5_000).toISOString() } };
+    return 'ready';
+  }, { budgetMs: 10_000, clock: { now: () => now, sleep: ms => { sleeps.push(ms); now += ms; } } });
+  assert.equal(result.value, 'ready');
+  assert.deepEqual(sleeps, [5_000]);
 });

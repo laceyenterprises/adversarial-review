@@ -1,3 +1,4 @@
+import { isGitHubRateLimitError, rateLimitErrorObservation } from '../rate-limit-throttle.mjs';
 import { loadAwareTimeoutMs, timerDelayMs } from '../load-aware-timeout.mjs';
 
 export const HISTORY_READ_ERROR_LIMIT = 2000;
@@ -68,11 +69,13 @@ export function historyReadRetryDelayMs(error, attempt) {
   if (error?.code === 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER' || error?.code === 'ENOBUFS') return null;
   const detail = [error?.stderr, error?.stdout, typeof error === 'string' ? error : error?.message].filter(Boolean).join('\n');
   const status = /\bHTTP(?:\/\d(?:\.\d)?)?\s+(\d{3})\b|"status"\s*:\s*(\d{3})/i.exec(detail);
-  const code = Number(status?.[1] || status?.[2] || error?.response?.status || error?.status);
-  const retryAfter = /\bretry-after\s*:\s*([^\r\n]+)/i.exec(detail)?.[1].trim();
-  const retryAfterMs = retryAfter === undefined ? NaN : /^\d+(?:\.\d+)?$/.test(retryAfter)
-    ? Number(retryAfter) * 1000 : Date.parse(retryAfter) - Date.now();
-  const rateLimit = code === 429 || code === 403 && /secondary rate limit|rate limit|too many requests/i.test(detail);
+  const code = Number(error?.response?.status ?? error?.status ?? status?.[1] ?? status?.[2]);
+  const rateLimit = isGitHubRateLimitError(error);
+  const rawRetryAfter = error?.response?.headers?.['retry-after'];
+  const observation = rateLimitErrorObservation(error);
+  const deadline = observation?.secondaryUntil || observation?.resetAt;
+  const retryAfterMs = deadline ? Date.parse(deadline) - Date.now()
+    : rawRetryAfter != null ? (/^\d+(?:\.\d+)?$/.test(String(rawRetryAfter)) ? Number(rawRetryAfter) * 1000 : Date.parse(rawRetryAfter) - Date.now()) : rateLimit ? 60_000 : NaN;
   if (code >= 400 && code < 500 && !(rateLimit && Number.isFinite(retryAfterMs))) return null;
   const transport = /^(?:EIO|ETIMEDOUT|ECONNRESET|ECONNREFUSED|ECONNABORTED|EPIPE|EAI_AGAIN|ENOTFOUND|ENETUNREACH|EHOSTUNREACH|EPROTO|ERR_TLS_\w+|CERT_\w+|UNABLE_TO_\w+|DEPTH_ZERO_SELF_SIGNED_CERT)$/.test(String(error?.code || ''))
     || error?.killed === true && ['SIGTERM', 'SIGKILL'].includes(error.signal)

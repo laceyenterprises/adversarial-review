@@ -186,6 +186,11 @@ processes. Explicit `options.env` budget settings take precedence; missing budge
 settings inherit from `process.env`. An isolated caller's observations therefore
 stay in its selected store, including failures without rate-limit headers.
 
+The `wait`, `record`, `admit`, and `limited` bridge actions require JSON arrays;
+`admit` additionally requires exactly one item because its caller consumes one
+result object. Unsupported payload shapes exit with status 1, one diagnostic
+line on stderr and no stdout, before budget processing or state writes.
+
 The `bin/metered-gh.mjs exec` bridge preserves ordinary command exit codes.
 Signal failures use the shell status `128 + signal number`. If the bridge
 receives SIGTERM or SIGINT, it kills the active child with SIGKILL but reports

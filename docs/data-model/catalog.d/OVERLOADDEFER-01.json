@@ -3,6 +3,7 @@
   "entries": [
     {
       "id": "ama-audit",
+      "unregisteredStopOriginalReason": "attempts[].originalReason: optional validated input retained when an unknown runtime stop becomes stop-reason-unregistered; reasonDetail also retains it",
       "reviewProvenanceFields": {
         "reviewedHead": "reviewed SHA; historical null bootstrap provenance is diagnostic only",
         "reviewSha": "reviewed SHA or historical null; an audit anchor alone is not review evidence"

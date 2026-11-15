@@ -180,11 +180,14 @@ test('rate limits require and honor Retry-After, including HTTP dates', async t 
   assert.deepEqual(delays, [2000]);
 });
 
-test('exhausted shared quota defers CLI history reads instead of sleeping past the budget', async () => {
+test('exhausted shared quota defers CLI history reads instead of sleeping past the budget', async t => {
+  // Quota persistence may outlast a real one-second deadline under CI load.
+  // Keep time fixed so this tests admission deferral rather than host speed.
+  const clock = new FakeClock(t);
   const env = fakeEnv();
   await recordResponseRateLimit({ resource: 'core', credential: githubCredential({ env }), remaining: 0,
     resetAt: Date.now() + 3600_000 });
-  const get = createHistoryReader({ env, contextTimeoutMs: 1000,
+  const get = createHistoryReader({ env, contextTimeoutMs: 1000, nowMs: () => clock.monotonic(),
     execFileImpl: async () => assert.fail('exhausted quota must not execute'),
     sleep: async () => assert.fail('exhausted quota must not retry') });
   await assert.rejects(get(prPath), /budget deferred until/);

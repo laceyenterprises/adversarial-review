@@ -352,6 +352,13 @@ window expires, `wake-expiry-cap-reached` pages through the existing
 deduplicated closure-wait path. Wakes only request
 watcher attention; the closer's normal caps, leases and merge gates still apply.
 
+`hammer_wake.outcome=requested` acknowledges watcher delivery, not an HQ
+launch. Confirm custody from the subsequent closure result and launch receipt.
+An expired discovery message saying “continuing the walk so the closer owns
+it” likewise confirms continuation, not ownership. If no launch is established,
+report ownership as unconfirmed and retain the later closure/refusal evidence;
+do not infer a dispatch-side refusal from the wake alone.
+
 Without a reviewed SHA, new AMA dispatch returns `ama-reviewed-head-unavailable`
 when a current head is known, or `ama-head-unavailable` when neither is known.
 Existing live, pending, parked and unreadable closer custody is reconciled first.

@@ -19,7 +19,7 @@ test('REVIEWERLEASECAP-01: default streamed ceiling produces a 14-hour claim', t
   // Full CPU corroboration: multiplier = 1 + (load/core - 1) * 2.5.
   const multiplier = 14 / 3;
   t.mock.method(os, 'loadavg', () => [
-    os.cpus().length * (1 + (multiplier - 1) / 2.5), 0, 0,
+    (os.cpus().length || 1) * (1 + (multiplier - 1) / 2.5), 0, 0,
   ]);
   const { max } = resolveReviewerCeilingConfig();
   assert.equal(max, 10_800);

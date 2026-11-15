@@ -7,6 +7,8 @@ ceiling before load scaling, permitting 18-hour leases at the default multiplier
 Added synthetic 14-hour and 18-hour reproductions and a
 [SEV2 report](../postmortems/SEV2-REVIEWERLEASECAP-01-long-streamed-reviewer-leases.md)
 with attribution limits and recommendations.
+The synthetic load mock uses a one-core fallback when CPU topology is unavailable,
+matching the shared load-time test helper.
 
 ## Interface changes
 
@@ -24,3 +26,6 @@ Under `cwp_dispatch.worker_validation`, with a 600-second command bound:
 
 Only the added test file was run, as required by the ticket's scoped validation
 constraint. No runtime files changed.
+
+HAM remediation: `hammer-validate.mjs --canonical -- test/reviewerleasecap-01.test.mjs docs/changes/REVIEWERLEASECAP-01.md`
+passed both diagnostic tests after the CPU-count fallback fix.

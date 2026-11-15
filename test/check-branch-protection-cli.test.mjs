@@ -6,7 +6,7 @@ import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { main } from '../src/check-branch-protection.mjs';
-import { OperatorGhReadTimeoutError } from '../src/operator-gh-read.mjs';
+import { OperatorGhReadTimeoutError, runOperatorGhRead } from '../src/operator-gh-read.mjs';
 
 const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 
@@ -53,8 +53,60 @@ for (const discovery of [false, true]) {
       assert.match(stderr.toString(), /reason=branch-protection-lookup-timeout/);
     }
     assert.ok(performance.now() - started < 2_000);
-    assert.equal(signal.aborted, true);
+    // Admission can consume the whole budget before the guarded spawn.
+    if (signal) assert.equal(signal.aborted, true);
     assert.match(stderr.toString(), /\[github-read\] start branch protection lookup/);
+  });
+}
+
+for (const spawnFirst of [false, true]) {
+  test(`branch-protection timeout ${spawnFirst ? 'after' : 'before'} spawn preserves abort propagation`, async t => {
+    t.mock.timers.enable({ apis: ['setTimeout'] });
+    const { promise: ready, resolve: markReady } = Promise.withResolvers();
+    const { promise: admission, resolve: releaseAdmission } = Promise.withResolvers();
+    let childSignal;
+    let admissionSignal;
+    let setup;
+    const rejected = assert.rejects(runOperatorGhRead({
+      args: ['api', 'repos/example/repo/branches/main/protection'],
+      label: 'branch protection lookup',
+      timeoutReason: 'branch-protection-lookup-timeout',
+      budgetMs: 50,
+      execGhWithRetryImpl: ({ execFileImpl, signal }) => {
+        admissionSignal = signal;
+        // Hold pre-spawn setup past the deadline without relying on host speed.
+        setup = (async () => {
+          if (!spawnFirst) {
+            markReady();
+            await admission;
+          }
+          return execFileImpl('gh', [], {});
+        })();
+        return setup;
+      },
+      execFileImpl: (_command, _args, options) => {
+        childSignal = options.signal;
+        markReady();
+        return new Promise(() => {});
+      },
+    }), err => err instanceof OperatorGhReadTimeoutError
+      && err.reason === 'branch-protection-lookup-timeout'
+      && err.phase === (spawnFirst ? 'gh' : 'admission')
+      && err.attempts === (spawnFirst ? 1 : 0));
+
+    await ready;
+    assert.equal(admissionSignal.aborted, false);
+    if (spawnFirst) assert.equal(childSignal.aborted, false);
+    t.mock.timers.tick(50);
+    await rejected;
+    assert.equal(admissionSignal.aborted, true);
+    if (spawnFirst) {
+      assert.equal(childSignal.aborted, true);
+    } else {
+      releaseAdmission();
+      await assert.rejects(setup, OperatorGhReadTimeoutError);
+      assert.equal(childSignal, undefined, 'expired admission must never spawn gh');
+    }
   });
 }
 

@@ -1,0 +1,40 @@
+{
+  "version": 1,
+  "entries": [
+    {
+      "id": "watcher-no-progress-lane",
+      "title": "Watcher No-progress Lane",
+      "path": "docs/data-model/watcher-no-progress-lane.md",
+      "store": "data/watcher-no-progress-lane/",
+      "schemaSurface": "src/watcher-no-progress-lane.mjs",
+      "relatedSchemaSurfaces": [
+        "src/posted-review-row.mjs",
+        "src/operator-label-wake.mjs",
+        "src/ama/closure-next-action.mjs",
+        "src/review-pipeline-health.mjs"
+      ],
+      "optionalOwnershipFields": [
+        "nextAction"
+      ],
+      "owner": "watcher posted-review dispatch fairness",
+      "optionalCadenceFields": [
+        "lastRunAt"
+      ],
+      "optionalGenerationFields": [
+        "watcherGeneration",
+        "generationResets",
+        "generationHistory"
+      ],
+      "generationResetContract": "NOPROGRESSRESET-01: changed watcher build or effective config resets scheduling debt at startup; preserve prior counters in the last ten generationHistory entries and cumulative generationResets; retain operator alert debounce; log and preserve old backoff on reset I/O faults",
+      "incompleteWalkDecisionContract": "Absorb current-head stored decline changes and charge the decision-reset cap without clearing scheduling debt; resource-limited observations leave no-progress counters and lastRunAt unchanged",
+      "lastRunAtContract": "Explicit null means no recorded walk; only absent legacy fields fall back to updatedAt",
+      "evidenceStopRecheckMs": 300000,
+      "drainHintTtlMs": 300000,
+      "drainDebtPolicy": "preserve existing debt; expired hints resume normal accounting independently of closer",
+      "optionalCiWaitFields": [
+        "ciWaitAdmittedSignal"
+      ],
+      "ciWaitAdmissionContract": "CIWAITLANE-01: a current-head nextAction wait-for-CI by actor ci keeps ordinary slow-lane backoff (it is not a hammer route); in plain slow-lane backoff one bounded candidate read may admit one walk when the wait's blocker cleared, and ciWaitAdmittedSignal records that signal so it cannot admit again on the same head"
+    }
+  ]
+}

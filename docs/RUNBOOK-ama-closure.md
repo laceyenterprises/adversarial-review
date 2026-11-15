@@ -2896,7 +2896,15 @@ knob. Priority probes share the phase budget and use at most thirty seconds
 lane-due settled approved or comment-only reviews on the current head with green
 CI and no pending remediation ahead of ordinary handlers. The no-progress lane
 is previewed without advancing skip counters before any readiness probe;
-handlers still in backoff incur no readiness GitHub read. Merge readiness is an
+handlers still in backoff incur no readiness GitHub read, with one exception
+(CIWAITLANE-01): a settled PR in plain slow-lane backoff whose lane ledger
+records `wait-for-CI` by actor `ci` for the current head gets the same bounded
+candidate read. When that read shows the wait's blocker cleared (checks no
+longer pending, or mergeability computed for `mergeability-unknown`), the
+scheduler admits one walk for that observed signal and the handler reuses the
+read. Pending CI stays deferred, and the same cleared signal cannot admit twice
+on one head. A recorded CI wait is not a hammer route, so it keeps ordinary
+backoff rather than walking every tick. Merge readiness is otherwise an
 ordering hint only and cannot bypass lane backoff. The scheduler accounts for
 skips once per tick, and explicit wakes and the idle-lane floor retain their
 existing admission rules. Budget-deferred

@@ -50,6 +50,7 @@ Required fields:
 | `generationHistory` | array, optional | Last ten startup resets, retaining the prior generation, lane, no-progress/skip/decision-reset counters, first no-progress timestamp and reset timestamp. |
 | `hammerRouteActive` | boolean, optional | Final-review hammer ownership keeps this head active regardless of unchanged review state. A subsequent operator hold clears it. |
 | `nextAction` | object, optional | NXA-05 selected shared decision for this head, including action, actor, reason, deadline, evidence references, key and queue intent. Automatic stops and cap/deadline reports retain recovery ownership. Explicit operator hold alone selects the operator lane when this field is supplied. CLOSURERECOVERYEXEC-01: the pipeline-health `expiredNextActions` snapshot reads this field (read-only) and reports a non-`refresh` deadline that has passed, with its age. |
+| `ciWaitAdmittedSignal` | string, optional | CIWAITLANE-01: the cleared CI signal (checks conclusion and mergeability, as a JSON pair) that last admitted a demoted current-head CI wait. The same signal cannot admit that head again. Walks on the same head keep it; a new head drops it. |
 | `progressClass` | string | `self-resolving` or `operator-decision-required`. |
 | `noProgressTicks` | number | Consecutive walked ticks with the same fingerprint. |
 | `skippedTicks` | number | Deferred ticks counted toward the current backoff window. |
@@ -86,6 +87,14 @@ Optional `stalledEvent` field:
 
 - The lane only changes how often a PR is re-walked; it never changes review,
   remediation, or merge eligibility decisions.
+- CIWAITLANE-01: a current-head `nextAction` of `wait-for-CI` by actor `ci`
+  is self-resolving and not a hammer route, so it keeps ordinary slow-lane
+  backoff. In plain slow-lane backoff, the posted-review readiness probe makes
+  one bounded candidate read for that PR. If the read shows the wait's blocker
+  has cleared (checks no longer pending, or mergeability computed for
+  `mergeability-unknown`), the scheduler admits one walk and records
+  `ciWaitAdmittedSignal`. Pending CI stays deferred. Overdue waits remain with
+  OWNERDEADLINE-01 deadline recovery, which reads this `nextAction`.
 - An unresolved, unpaged hammer evidence stop uses a five-minute interval
   anchored to `lastRunAt`, even in the active lane. Skipped polls cannot move
   that deadline. The scheduler's wake priority and idle starvation floor

@@ -16,6 +16,7 @@ import {
 import {
   DEFAULT_REVIEWER_LEASE_RECOVERY_MAX_ATTEMPTS,
   resolveReviewerLeaseRecoveryEnabled,
+  reviewerLeaseExpiryForRow,
 } from './reviewer-lease.mjs';
 import { resolveReviewerTimeoutMs } from './reviewer-timeout.mjs';
 import { recordReviewLatencyEvent } from './review-latency-event-writer.mjs';
@@ -734,11 +735,9 @@ async function reconcileReviewerSessions({
       // An unreadable PR cannot be safely classified as terminal. Keep a live
       // reviewer through its lease, but do not let a permanent GitHub failure
       // pin the scarce credential slot forever after that lease expires.
-      const startedAtMs = parseTime(row.reviewer_started_at) ?? parseTime(row.last_attempted_at);
-      const boundedExpiryMs = startedAtMs === null ? null : startedAtMs + reviewerRunTimeoutMs(row, reviewerDeadlineMs);
-      const persistedExpiryMs = parseTime(row.reviewer_lease_expires_at);
-      const leaseExpiresAtMs = boundedExpiryMs === null ? persistedExpiryMs
-        : Math.min(persistedExpiryMs ?? boundedExpiryMs, boundedExpiryMs);
+      const leaseExpiresAtMs = parseTime(reviewerLeaseExpiryForRow(row, {
+        reviewerTimeoutMs: reviewerRunTimeoutMs(row, reviewerDeadlineMs),
+      }));
       if (leaseExpiresAtMs === null || now.getTime() < leaseExpiresAtMs) continue;
 
       let pgid = parsePositiveInteger(row.reviewer_pgid);

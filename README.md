@@ -1535,11 +1535,16 @@ Reviewer claims and process deadlines share `reviewer.ceiling_max_seconds`
 `AGENT_OS_REVIEWER_CEILING_MAX_SECONDS`). This absolute envelope applies after
 load scaling and after composing chunk, fallback and posting budgets. Larger
 explicit requests cannot bypass it. Persisted older claims are bounded from
-their original start when selected and reconciled. Model progress watchdogs
+their original start when selected and reconciled. When GitHub PR state is
+unavailable, reattach preserves a valid persisted lease within that ceiling,
+using the recorded or nominal timeout only when no valid expiry was persisted.
+Model progress watchdogs
 retain their first-output and rolling output/event evidence; their load-scaled
 patience cannot exceed `reviewer.no_progress_timeout_ms` (default 15 minutes)
-or the absolute envelope. Diagnostic stderr does not reset model progress, including file-backed
-capture; OAuth fallback and proxy idle timers obey the same bounds. Stalls use the existing session-fenced retry release, while typed
+or the absolute envelope. With stdout-only progress enabled, diagnostic stderr
+neither satisfies first-output detection nor resets rolling model progress,
+including file-backed capture; OAuth fallback and proxy idle timers obey the
+same bounds. Stalls use the existing session-fenced retry release, while typed
 `github-budget-deferred` receipts retain their reset hold and budget-neutral
 claim release. Reattach still verifies identity, exit and late posted reviews
 before releasing an overdue live orphan.

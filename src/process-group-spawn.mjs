@@ -399,8 +399,10 @@ function spawnCapturedProcessGroup(command, args, options = {}) {
         if (stdoutProgress || stderrSize !== lastStderrSize) {
           lastStdoutSize = stdoutSize;
           lastStderrSize = stderrSize;
-          noteFirstOutput();
-          if (stdoutProgress || !progressOnStdoutOnly) armProgressTimer();
+          if (stdoutProgress || !progressOnStdoutOnly) {
+            noteFirstOutput();
+            armProgressTimer();
+          }
         }
       }, intervalMs);
     }

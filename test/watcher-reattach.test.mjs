@@ -400,6 +400,33 @@ test('closed reviewer remains live when GitHub state cannot be verified', async 
   assert.deepEqual(killed, []);
 });
 
+for (const [label, overrides, now, expired] of [
+  ['persisted two-hour lease without timeout', { reviewerLeaseExpiresAt: '2026-05-11T07:10:00.000Z' }, '2026-05-11T06:10:00.000Z', false],
+  ['persisted lease with shorter recorded timeout', { reviewerLeaseExpiresAt: '2026-05-11T07:10:00.000Z', reviewerTimeoutMs: 20 * 60_000 }, '2026-05-11T06:10:00.000Z', false],
+  ['persisted lease at expiry', { reviewerLeaseExpiresAt: '2026-05-11T07:10:00.000Z' }, '2026-05-11T07:10:00.000Z', true],
+  ['oversized lease before ceiling', { reviewerLeaseExpiresAt: '2026-05-11T19:10:00.000Z' }, '2026-05-11T08:09:59.000Z', false],
+  ['oversized lease at ceiling', { reviewerLeaseExpiresAt: '2026-05-11T19:10:00.000Z' }, '2026-05-11T08:10:00.000Z', true],
+  ['missing lease uses fallback', {}, '2026-05-11T05:30:00.000Z', true],
+]) {
+  test(`unverified closed reviewer respects ${label}`, async () => {
+    const db = setupDb();
+    seedReviewing(db, { prState: 'closed', closedAt: FAILURE_AT, ...overrides });
+    const killed = [];
+    await reconcileReviewerSessions({
+      db,
+      octokit: makeOctokit([]),
+      now: new Date(now),
+      log: makeLog(),
+      reviewerDeadlineMs: 20 * 60_000,
+      fetchLivePrState: async () => { throw new Error('GitHub unavailable'); },
+      probeSession: () => ({ alive: true, matched: true }),
+      killProcessGroup: (pgid, signal) => { killed.push({ pgid, signal }); return true; },
+    });
+    assert.equal(readRow(db).review_status, expired ? 'failed-orphan' : 'reviewing');
+    assert.deepEqual(killed, expired ? [{ pgid: 9001, signal: 'SIGKILL' }] : []);
+  });
+}
+
 for (const [label, fetchLivePrState] of [
   ['GitHub state fetch fails', async () => { throw new Error('GitHub unavailable'); }],
   ['GitHub state is unknown', async () => ({ state: 'UNKNOWN' })],

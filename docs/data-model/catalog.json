@@ -1443,6 +1443,7 @@
     },
     {
       "id": "reviewer-run-records",
+      "leaseExpiryPrecedence": "When GitHub PR state is unverified, reattach preserves valid persisted claim expiries up to the absolute ceiling from the original start; recorded and nominal timeouts supply only a missing-expiry fallback. Store shape unchanged.",
       "title": "Reviewer Run Records",
       "path": "docs/data-model/reviewer-run-records.md",
       "store": "data/reviewer-runs/<sessionUuid>.json",

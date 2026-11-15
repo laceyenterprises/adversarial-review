@@ -879,9 +879,12 @@ new PR
 - Reviewer claim and process deadlines apply `reviewer.ceiling_max_seconds`
   (default three hours) after load scaling and budget composition. Historical
   oversized claims are bounded from their original start during selection and
-  reattach. No-progress watchdogs use model output/stream evidence, bounded by
+  reattach. When GitHub PR state is unverified, a valid persisted lease within
+  that ceiling takes precedence over the recorded or nominal timeout.
+  No-progress watchdogs use model output/stream evidence, bounded by
   `reviewer.no_progress_timeout_ms` (default 15 minutes) and the same ceiling;
-  streamed diagnostic stderr does not extend model patience. Existing
+  diagnostic stderr neither satisfies first-output detection nor extends model
+  patience when stdout-only progress is enabled, including file-backed capture. Existing
   `reviewer-stalled` session-fenced release and typed `github-budget-deferred`
   reset holds remain budget-neutral. Process identity, confirmed drain, posted
   review recovery and retry caps retain their authority.

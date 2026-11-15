@@ -21,6 +21,25 @@ import { createCliDirectReviewerRuntimeAdapter } from '../src/adapters/reviewer-
 
 const hour = 3600_000;
 
+for (const [label, options, expectedMs] of [
+  ['omitted', {}, 1000],
+  ['zero', { timeout: 0 }, 1000],
+  ['negative', { timeout: -1 }, 1000],
+  ['oversized', { timeout: 14 * hour }, 1000],
+  ['shorter', { timeout: 200 }, 200],
+]) {
+  test(`spawnCaptured inherits the shared ceiling with a ${label} timeout`, async () => {
+    await assert.rejects(harness.spawnCaptured(process.execPath, ['-e',
+      'setInterval(() => {}, 100);',
+    ], {
+      env: { ...process.env, AGENT_OS_REVIEWER_CEILING_MAX_SECONDS: '1' },
+      progressTimeout: 0,
+      killGraceMs: 0,
+      ...options,
+    }), new RegExp(`timed out after ${expectedMs}ms`));
+  });
+}
+
 test('all timeout families clamp oversized nominals after scaling using the existing CFG key', t => {
   underMaxLoad(t);
   const env = { AGENT_OS_REVIEWER_CEILING_MAX_SECONDS: '14400',

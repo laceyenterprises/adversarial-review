@@ -59,7 +59,10 @@ Anonymous default buckets retain their admission behavior. Urgent closer reads
 use positive reserve capacity without an unnecessary probe, and unavailable
 confirmation propagates deferral accounting to the enclosing scope. A review
 write refused before execution propagates its budget deferral without ambiguous
-write reconciliation. Existing recovery reasons and bounded shell retries keep
+write reconciliation. The sync confirmation fixture pins a synthetic API URL
+and verifies its full endpoint: preserving the environment also preserves the
+GITHUB_API_URL supplied by Actions, rather than the former stripped environment.
+Existing recovery reasons and bounded shell retries keep
 their retry treatment. Fixtures now use structured signals and preserve
 secondary cooldowns independently of primary recovery.
 

@@ -114,6 +114,9 @@ test('synchronous wait bridge waits for the caller budget reset', t => {
 test('synchronous long false zero is corrected by the live-probe bridge before deferral', async t => {
   const { dir, explicit, env } = fixture(t);
   env.GH_TOKEN = 'synthetic-sync-confirm';
+  // Confirmation now preserves routing environment, including Actions'
+  // GITHUB_API_URL. Pin and verify a synthetic endpoint on every host.
+  env.GITHUB_API_URL = 'https://api.example.test';
   const credential = githubCredential({ env });
   const reset = Math.ceil(Date.now() / 1000) + 3600;
   writeFileSync(explicit, JSON.stringify({ version: 2, buckets: { [`${credential}/core`]: {
@@ -123,7 +126,7 @@ test('synchronous long false zero is corrected by the live-probe bridge before d
   const receipt = join(dir, 'probe.json');
   writeFileSync(join(dir, 'gh'), `#!${process.execPath}
     const args = process.argv.slice(2);
-    if (args.at(-1) !== 'rate_limit') process.exit(2);
+    if (args.at(-1) !== 'https://api.example.test/rate_limit') process.exit(2);
     require('node:fs').writeFileSync(${JSON.stringify(receipt)}, JSON.stringify({ endpoint: '/rate_limit' }));
     process.stdout.write('HTTP/2.0 200 OK\\r\\nX-Ratelimit-Remaining: 5032\\r\\n\\r\\n' + JSON.stringify({ resources: { core: { remaining: 5032, limit: 5400, reset: ${reset} } } }));
   `, { mode: 0o700 });

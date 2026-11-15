@@ -49,7 +49,7 @@ export function reviewerArmOwner(value, { env = process.env, timeoutMs = loadAwa
       clearTimeout(timer);
       try {
         if (failure) throw Error(failure);
-        if (code !== 0) throw Error(/ModuleNotFoundError|No module named/.test(stderr)
+        if (code !== 0) throw Error(/ModuleNotFoundError|ImportError|No module named/.test(stderr)
           ? 'error-owner-import' : 'error-owner-exit');
         resolve(JSON.parse(output));
       } catch (error) { reject(Error(OWNER_ERRORS.has(error.message) ? error.message : 'error-owner-invalid-json')); }

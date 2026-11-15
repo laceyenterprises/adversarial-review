@@ -1,9 +1,9 @@
 import { existsSync } from 'node:fs';
 import { isAbsolute, join, delimiter } from 'node:path';
-import { getConfig } from './config-loader.mjs';
+import { loadConfigCached } from './config-loader.mjs';
 
 /** Reuse the deploy-root contract and HQ's explicit source-package layout. */
-export function resolveAgentOsPython({ env = process.env, root = env.AGENT_OS_DEPLOY_CHECKOUT || getConfig('roots.deploy') } = {}) {
+export function resolveAgentOsPython({ env = process.env, root = env.AGENT_OS_DEPLOY_CHECKOUT || loadConfigCached({ env }).get('roots.deploy') } = {}) {
   if (!root || !isAbsolute(root)) throw Error('error-owner-spawn');
   const runtime = join(root, 'runtime', 'python', 'bin', 'python3');
   const python = env.HQ_PYTHON3 || env.AGENT_OS_PY || (existsSync(runtime) ? runtime : 'python3');

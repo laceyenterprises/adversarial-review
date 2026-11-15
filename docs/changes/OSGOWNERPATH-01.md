@@ -14,6 +14,9 @@ The owner uses existing deployment and load-aware configuration; no schema keys
 are added. Its five-second nominal timeout scales up to 30 seconds. Failure
 reasons distinguish spawn, import, timeout, exit and invalid JSON. Raw stderr
 remains private. The README documents the launch and timeout contract.
+The deployment configuration fallback honors the supplied environment's
+`AGENT_OS_CONFIG_PATH` rather than ambient process configuration. Import failure
+classification also covers Python `ImportError` symbol resolution failures.
 
 ## Verification
 
@@ -24,3 +27,12 @@ remains private. The README documents the launch and timeout contract.
 - `npm run typecheck:contracts`: passed.
 - Full suite and walkthrough demo omitted under this ticket's scoped-test
   restriction.
+
+Final comment-only remediation validation:
+
+- `bash bin/run-bounded.sh --timeout 60 --tail-bytes 6000 -- node --test test/osg-reviewer-arm.test.mjs`:
+  14 passed, including isolated configuration paths and missing-symbol imports
+  with private diagnostics and default routing preserved in apply/shadow.
+- `npm run lint`: passed, zero errors and 149 existing warnings.
+- `npm run typecheck:contracts`: passed.
+- `git diff --check`: passed.

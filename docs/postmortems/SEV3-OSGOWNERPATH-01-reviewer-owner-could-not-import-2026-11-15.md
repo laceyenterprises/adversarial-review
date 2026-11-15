@@ -34,7 +34,8 @@ could exceed the old 1.5-second deadline.
 ## Correction and budget
 
 `src/agent-os-python.mjs` shares an explicit launch resolver. Deployment selection
-reuses `AGENT_OS_DEPLOY_CHECKOUT` / `roots.deploy`, as used by
+reuses `AGENT_OS_DEPLOY_CHECKOUT` / `roots.deploy` within the supplied execution
+environment, including its `AGENT_OS_CONFIG_PATH`, as used by
 `src/dag-autowalk-on-merge.mjs`. Explicit source-package paths follow the working
 HQ Python launcher pattern and the local explicit-path invocation pattern in
 `src/argus-dependency-evidence.mjs`. The package roots include dispatch, config/core,
@@ -53,8 +54,8 @@ An explicitly supplied transport timeout is bounded to 1–30,000 milliseconds;
 non-finite overrides use the ceiling.
 
 Spawn, module import, timeout, other exit and invalid JSON have distinct stable
-tokens. A bounded private stderr tail is used only to classify module-not-found
-signatures; it is never logged or returned. Every failure preserves the default
+tokens. A bounded private stderr tail is used only to classify missing-module
+and `ImportError` signatures; it is never logged or returned. Every failure preserves the default
 route. Output remains bounded.
 
 ## Sibling audit
@@ -71,15 +72,17 @@ module-path resolvers or companion repository changes. Merge order: this PR only
 
 ## Verification and limits
 
-`test/osg-reviewer-arm.test.mjs` passes 13 tests, including real subprocesses
+`test/osg-reviewer-arm.test.mjs` passes 14 tests after final remediation, including real subprocesses
 against disposable synthetic packages. Coverage includes resolved interpreter
-precedence, explicit package roots, ignored ambient paths, missing-module,
+precedence, environment-scoped configuration fallback, explicit package roots,
+ignored ambient paths, missing-module and missing-symbol imports,
 timeout, exit, spawn and invalid-JSON reasons, private diagnostics, default-route
 preservation in apply/shadow, and a successful owner slower than 1.5 seconds.
 Existing arm-selection and routing cases in that file remain green.
 
 Tests run individually through the bounded worker-validation runner with a
-600-second deadline and netguard. No live owner, ledger, review database,
+600-second deadline and netguard in the initial round; the final targeted suite
+passed through `bin/run-bounded.sh` with a 60-second deadline. No live owner, ledger, review database,
 daemon or service definition was exercised or changed. Live trial recovery
 is not claimed by these offline fixtures.
 

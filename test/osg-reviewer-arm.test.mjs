@@ -41,9 +41,29 @@ test('resolved runtime and explicit package roots import a synthetic owner witho
   assert.deepEqual(await reviewerArmOwner({ mode: 'shadow' }, { env: fixture.env }), { reason: 'shadow' });
 });
 
+test('deployment config fallback honors each supplied environment without changing process.env', async t => {
+  const ambientConfigPath = process.env.AGENT_OS_CONFIG_PATH;
+  const ambientDeployRoot = process.env.AGENT_OS_DEPLOY_CHECKOUT;
+  for (let i = 0; i < 2; i++) {
+    const fixture = ownerFixture(t, 'print(\'{"reason":"shadow"}\')');
+    const configPath = join(fixture.root, 'config.yaml');
+    writeFileSync(configPath, JSON.stringify({ version: 1, roots: { deploy: fixture.root } }));
+    const { AGENT_OS_DEPLOY_CHECKOUT: _root, ...env } = fixture.env;
+    env.AGENT_OS_CONFIG_PATH = configPath;
+    const launch = resolveAgentOsPython({ env });
+    assert.equal(launch.cwd, fixture.root);
+    assert.equal(launch.python, join(fixture.root, 'runtime/python/bin/python3'));
+    assert.equal(launch.env.AGENT_OS_CONFIG_PATH, configPath);
+    assert.deepEqual(await reviewerArmOwner({}, { env }), { reason: 'shadow' });
+  }
+  assert.equal(process.env.AGENT_OS_CONFIG_PATH, ambientConfigPath);
+  assert.equal(process.env.AGENT_OS_DEPLOY_CHECKOUT, ambientDeployRoot);
+});
+
 test('owner transport failures have stable private reasons and preserve default routing in apply and shadow', async t => {
   for (const [reason, source, patch] of [
     ['error-owner-import', null, {}],
+    ['error-owner-import', 'from cwp_dispatch import synthetic_private_diagnostic', {}],
     ['error-owner-timeout', 'import time\ntime.sleep(60)', { timeoutMs: 100 }],
     ['error-owner-invalid-json', 'print("invalid")', {}],
     ['error-owner-exit', 'import sys\nsys.stderr.write("synthetic private diagnostic")\nsys.exit(2)', {}],
@@ -61,6 +81,7 @@ test('owner transport failures have stable private reasons and preserve default 
         config: { mode }, owner, log: { info: line => lines.push(line) } }), current);
       assert.ok(lines.some(line => line.endsWith(`reason=${reason}`)));
       assert.ok(lines.every(line => !line.includes('synthetic private diagnostic')));
+      assert.ok(lines.every(line => !line.includes('synthetic_private_diagnostic')));
     }
   }
 });

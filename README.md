@@ -4029,13 +4029,16 @@ unavailable owner or missing classification returns the default. The whole owner
 process uses a 5-second nominal budget, scaled by the existing
 `adversarial.reviewer.load_aware` policy up to an absolute 30-second ceiling;
 it never installs dependencies or migrates a ledger. The deployment is resolved
-from `AGENT_OS_DEPLOY_CHECKOUT` or `roots.deploy`. The interpreter is
+from `AGENT_OS_DEPLOY_CHECKOUT` or `roots.deploy`, reading configuration through
+the supplied execution environment (including `AGENT_OS_CONFIG_PATH`). The interpreter is
 `HQ_PYTHON3`, then `AGENT_OS_PY`, then the deployment's `runtime/python/bin/python3`
 when present, then `python3`. Explicit deployment package roots replace ambient
 `PYTHONPATH`, and the child runs in that deployment. Spawn, import, timeout,
 exit and invalid-JSON failures log distinct stable `error-owner-*` tokens without
 stderr and retain the default route. All modes ship off; host flips
 belong to the configuration writer's operating runbook.
+Import classification includes missing modules and Python `ImportError` symbol
+resolution failures.
 
 The initial executable surface is native Codex/Claude under `cli-direct`, with
 declared ITP accounts. Other runtimes, open-model arms and unmeasured accounts

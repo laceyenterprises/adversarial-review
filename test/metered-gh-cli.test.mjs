@@ -17,6 +17,7 @@ function fixture(t, script) {
     ...process.env,
     PATH: dir,
     GHO_RATE_LIMIT_SHARED_STATE_PATH: join(dir, 'budget.json'),
+    GHO_API_CALL_LOG_DISABLE: '1',
   };
   for (const key of ['GH_TOKEN', 'GITHUB_TOKEN', 'HAMMER_LACEY_GH_TOKEN',
     'MERGE_AGENT_GH_TOKEN', 'HAMMER_LACEY_GH_TOKEN_REFRESH_COMMAND',
@@ -36,7 +37,7 @@ test('admit emits one parseable result for a singleton payload', t => {
   assert.deepEqual(JSON.parse(result.stdout), { deferred: false });
 });
 
-for (const payload of [[], [{ resource: 'core' }, { resource: 'graphql' }], {}, null]) {
+for (const payload of [[], [{ resource: 'core' }, { resource: 'graphql' }], 'core', {}, null]) {
   test(`admit rejects unsupported payload ${JSON.stringify(payload)} without output`, t => {
     const env = fixture(t, null);
     const result = spawnSync(process.execPath, [helper, 'admit'], {
@@ -46,8 +47,25 @@ for (const payload of [[], [{ resource: 'core' }, { resource: 'graphql' }], {}, 
     assert.equal(result.status, 1);
     assert.equal(result.stdout, '');
     assert.match(result.stderr, /admit requires exactly one payload item/);
+    assert.equal(result.stderr, 'admit requires exactly one payload item\n');
     assert.equal(existsSync(env.GHO_RATE_LIMIT_SHARED_STATE_PATH), false);
   });
+}
+
+for (const action of ['wait', 'limited', 'record']) {
+  for (const payload of ['core', {}, null]) {
+    test(`${action} rejects non-array payload ${JSON.stringify(payload)} before processing`, t => {
+      const env = fixture(t, null);
+      const result = spawnSync(process.execPath, [helper, action], {
+        env, input: JSON.stringify(payload), encoding: 'utf8', timeout: 5000,
+      });
+      assert.equal(result.error, undefined);
+      assert.equal(result.status, 1);
+      assert.equal(result.stdout, '');
+      assert.equal(result.stderr, `${action} requires an array payload\n`);
+      assert.equal(existsSync(env.GHO_RATE_LIMIT_SHARED_STATE_PATH), false);
+    });
+  }
 }
 
 for (const code of [0, 7]) {

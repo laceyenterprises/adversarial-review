@@ -22,26 +22,28 @@ function isPrMerge(argv) {
 const [action, ...args] = process.argv.slice(2);
 if (action === 'wait' || action === 'record' || action === 'limited' || action === 'admit') {
   const payload = JSON.parse(readFileSync(0, 'utf8'));
-  // The synchronous caller consumes one result object, not a result array.
-  // Reject unsupported batches before admitting anything or emitting output.
-  if (action === 'admit' && (!Array.isArray(payload) || payload.length !== 1)) {
-    throw new TypeError('admit requires exactly one payload item');
+  // Every bridge action takes an array. Admission returns one result object,
+  // so reject unsupported batches before processing anything or emitting output.
+  if (!Array.isArray(payload) || (action === 'admit' && payload.length !== 1)) {
+    process.stderr.write(`${action} requires ${action === 'admit' ? 'exactly one payload item' : 'an array payload'}\n`);
+    process.exitCode = 1;
+  } else {
+    const recorded = [];
+    for (const item of payload) {
+      if (action === 'admit') {
+        try {
+          await withGitHubBudgetScope({}, () => awaitThrottleIfNeeded(item.resource, item.credential));
+          process.stdout.write(JSON.stringify({ deferred: false }));
+        } catch (err) {
+          if (!err.budgetDeferred) throw err;
+          process.stdout.write(JSON.stringify({ deferred: true, observation: err.observation }));
+        }
+      } else if (action === 'wait') await awaitThrottleIfNeeded(item.resource || item, item.credential);
+      else if (action === 'limited') await recordRateLimitedCall(item.resource || item, item.credential);
+      else recorded.push(await recordResponseRateLimit(item));
+    }
+    if (action === 'record') process.stdout.write(JSON.stringify(recorded));
   }
-  const recorded = [];
-  for (const item of payload) {
-    if (action === 'admit') {
-      try {
-        await withGitHubBudgetScope({}, () => awaitThrottleIfNeeded(item.resource, item.credential));
-        process.stdout.write(JSON.stringify({ deferred: false }));
-      } catch (err) {
-        if (!err.budgetDeferred) throw err;
-        process.stdout.write(JSON.stringify({ deferred: true, observation: err.observation }));
-      }
-    } else if (action === 'wait') await awaitThrottleIfNeeded(item.resource || item, item.credential);
-    else if (action === 'limited') await recordRateLimitedCall(item.resource || item, item.credential);
-    else recorded.push(await recordResponseRateLimit(item));
-  }
-  if (action === 'record') process.stdout.write(JSON.stringify(recorded));
 } else if (action === 'exec' || action === 'exec-hammer' || action === 'exec-git') {
   let terminationSignal;
   let terminationTimer;

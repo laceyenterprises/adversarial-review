@@ -237,6 +237,7 @@ function createTokenSource({ initialToken, initialExpiresAt, remint, now, logger
 }
 
 export async function startClaudeReviewerTokenProxy({
+  env = process.env,
   initialToken,
   initialExpiresAt = null,
   remint,
@@ -246,9 +247,9 @@ export async function startClaudeReviewerTokenProxy({
   proactiveRefreshLeadMs = DEFAULT_PROACTIVE_REFRESH_LEAD_MS,
   remintCooldownMs = DEFAULT_REMINT_COOLDOWN_MS,
   maxRequestBodyBytes = DEFAULT_MAX_REQUEST_BODY_BYTES,
-  upstreamIdleTimeoutMs = loadAwareTimeoutMs(DEFAULT_UPSTREAM_IDLE_TIMEOUT_MS, { maxMs: resolveProgressTimeoutMs() }),
+  upstreamIdleTimeoutMs = loadAwareTimeoutMs(DEFAULT_UPSTREAM_IDLE_TIMEOUT_MS, { maxMs: resolveProgressTimeoutMs(env) }),
 } = {}) {
-  upstreamIdleTimeoutMs = Math.min(upstreamIdleTimeoutMs, resolveProgressTimeoutMs());
+  upstreamIdleTimeoutMs = Math.min(upstreamIdleTimeoutMs, resolveProgressTimeoutMs(env));
   if (!String(initialToken || '').trim()) throw new Error('claude reviewer token proxy needs the spawn-time bearer');
   if (typeof remint !== 'function') throw new Error('claude reviewer token proxy needs a broker re-read function');
   const upstreamUrl = assertAllowedUpstream(upstream);
@@ -437,6 +438,7 @@ export async function startClaudeReviewerTokenProxyForAuth({
   if (!initialToken) return null;
   try {
     return await startImpl({
+      env,
       initialToken,
       initialExpiresAt: auth.expiresAt || null,
       remint: auth.remint,

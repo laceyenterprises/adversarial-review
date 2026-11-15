@@ -394,7 +394,7 @@ function toAgentRequest(req, { kind, rootDir = null, domainConfig = null }) {
     : reviewIdempotencyKey(req, { roleId });
   const promptSet = String(req.promptSet || ctx.promptSet || domainId);
   const promptStage = kind === 'remediator' ? remediatorPromptStage(ctx) : reviewPromptStage(ctx);
-  const absoluteMs = resolveReviewerAbsoluteCeilingMs();
+  const absoluteMs = resolveReviewerAbsoluteCeilingMs(domainConfig?.env || process.env);
   const requestedMs = req.timeoutMs ?? loadAwareTimeoutMs(DEFAULT_REVIEW_BUDGET.maxWallMs, { maxMs: kind === 'reviewer' ? absoluteMs : Infinity });
   const timeoutMs = kind === 'reviewer' ? Math.min(requestedMs, absoluteMs) : requestedMs;
   return {

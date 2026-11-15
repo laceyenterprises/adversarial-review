@@ -24,6 +24,13 @@ regression coverage verifies omitted, zero, negative, oversized and shorter
 explicit timeouts without duplicating that policy.
 No new config key, state, CI check, label or review-strictness change.
 
+Final fix-all remediation threads optional `env` records through the token proxy,
+OAuth Responses transport and standalone SSE reader, including their harness
+callers. Both default sizing and final timeout clamping use that record; omitted
+records retain `process.env`. The agent-runtime adapter resolves its reviewer
+ceiling from `domainConfig.env`, falling back to `process.env`. The canonical
+README documents these interfaces. No persistent shape or lifecycle changes.
+
 ## Verification
 
 Each touched test file ran separately under `cwp_dispatch.worker_validation
@@ -86,3 +93,14 @@ Watcher claim-loop: 185 passed; reattach: 92 passed.
 `--fix` made no changes, `npm run typecheck:contracts` passed, and
 `bash demo/research-finding-walkthrough.sh` passed. State declaration comparison
 confirmed every main entry is preserved. `git diff --check` passed.
+
+Final fix-all validation after a fresh main rebase and clean patch-equivalence
+audit: the four scoped files `claude-reviewer-token-proxy`,
+`codex-oauth-responses`, `agent-runtime-reviewer-adapter` and `efforttune-02`
+passed under `cwp_dispatch.worker_validation` with a 210-second bound.
+Coverage includes scoped bounds above and below ambient defaults, default and
+explicit requests, shorter requests and harness forwarding. Scoped ESLint
+`--fix` passed; `npm run lint` passed (zero errors, 149 existing warnings).
+Contract typecheck, offline walkthrough demo, data-model catalog validation
+(98 entries), and `git diff --check` passed. Full-suite validation remains
+with PR-head CI.

@@ -1544,7 +1544,11 @@ patience cannot exceed `reviewer.no_progress_timeout_ms` (default 15 minutes)
 or the absolute envelope. With stdout-only progress enabled, diagnostic stderr
 neither satisfies first-output detection nor resets rolling model progress,
 including file-backed capture; OAuth fallback and proxy idle timers obey the
-same bounds. Stalls use the existing session-fenced retry release, while typed
+same bounds. The proxy and OAuth transport accept an optional `env` record,
+forwarded by their harness callers, for both default sizing and final clamping;
+omitting it uses `process.env`. The agent-runtime adapter resolves the absolute
+ceiling from `domainConfig.env` when supplied, otherwise `process.env`.
+Stalls use the existing session-fenced retry release, while typed
 `github-budget-deferred` receipts retain their reset hold and budget-neutral
 claim release. Reattach still verifies identity, exit and late posted reviews
 before releasing an overdue live orphan.

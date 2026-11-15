@@ -1385,6 +1385,7 @@ async function reviewWithCodex(diff, extraContext = '', {
             .find((override) => override.key === 'model_reasoning_effort')?.value || CODEX_REVIEWER_DEFAULT_EFFORT;
           const effortSource = codexExecOverrides.reasoningEffort ? codexExecOverrides.effortSource : 'transport-default';
           const recovered = await reviewWithCodexOAuthResponsesImpl(prompt, {
+            env,
             authPath: effectiveAuthPath,
             model: codexExecOverrides.model,
             reasoningEffort,

@@ -351,9 +351,11 @@ test('startClaudeReviewerTokenProxyForAuth starts only for a broker auth that ca
     auth: { ...brokerAuth, remint: undefined }, env: {}, startImpl, logger: quietLogger,
   }), null);
   assert.equal(started.length, 0);
-  const proxy = await startClaudeReviewerTokenProxyForAuth({ auth: brokerAuth, env: {}, startImpl, logger: quietLogger });
+  const env = { ADVERSARIAL_REVIEWER_PROGRESS_TIMEOUT_MS: '2500' };
+  const proxy = await startClaudeReviewerTokenProxyForAuth({ auth: brokerAuth, env, startImpl, logger: quietLogger });
   assert.equal(proxy.baseUrl, 'http://127.0.0.1:1');
   assert.equal(started[0].initialToken, 'grant-a');
+  assert.equal(started[0].env, env);
   // A listener that cannot start falls back to the direct handoff.
   assert.equal(await startClaudeReviewerTokenProxyForAuth({
     auth: brokerAuth,
@@ -601,3 +603,24 @@ test('REVIEWERLEASECAP-02: token proxy upstream idle timer is independently boun
   });
   assert.deepEqual(delays, [resolveProgressTimeoutMs()]);
 });
+
+for (const [name, env, requested, expected] of [
+  ['scoped default', { ADVERSARIAL_REVIEWER_PROGRESS_TIMEOUT_MS: '2500' }, undefined, 2500],
+  ['scoped clamp', { ADVERSARIAL_REVIEWER_PROGRESS_TIMEOUT_MS: '2500' }, 100_000_000, 2500],
+  ['shorter request', { ADVERSARIAL_REVIEWER_PROGRESS_TIMEOUT_MS: '2500' }, 1500, 1500],
+  ['scoped absolute ceiling', { AGENT_OS_REVIEWER_CEILING_MAX_SECONDS: '1' }, undefined, 1000],
+  ['larger scoped bound', { ADVERSARIAL_REVIEWER_PROGRESS_TIMEOUT_MS: '1200000' }, 100_000_000, 1_200_000],
+]) {
+  test(`token proxy idle timer honors caller env: ${name}`, async t => {
+    const delays = [];
+    const original = ClientRequest.prototype.setTimeout;
+    t.mock.method(ClientRequest.prototype, 'setTimeout', function(ms, callback) {
+      delays.push(ms);
+      return original.call(this, ms, callback);
+    });
+    await withProxy({ proxy: { env, upstreamIdleTimeoutMs: requested } }, async ({ proxy }) => {
+      assert.equal((await post(proxy.baseUrl)).status, 200);
+    });
+    assert.deepEqual(delays, [expected]);
+  });
+}

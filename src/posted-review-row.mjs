@@ -88,8 +88,12 @@ import { rereviewWakeBacklog, sweepRereviewWakeQueue } from './rereview-wake.mjs
 import { expiredNextActionDeadline, formatExpiredNextActionDeadline } from './next-action-deadline.mjs';
 import { ensureReviewStateSchema, openReviewStateDb } from './review-state.mjs';
 import {
+  ciWaitNextActionFor,
+  evaluateCiWaitAdmission,
   evaluateNoProgressLane,
   handlerDecisionFingerprint,
+  isCiWaitNextAction,
+  recordCiWaitAdmission,
   decisionFingerprintWithDaemonDecline,
   markNoProgressStalledEventEmitted,
   maybeFireOperatorDecisionRequiredAlert,
@@ -896,8 +900,9 @@ async function handlePostedReviewRowWithinReadCache({
         );
       }
       return { handled: true, outcome: 'ama-pending', urgent: coexistenceDecision.urgent === true,
+        // CIWAITLANE-01: the CI wait must reach the lane ledger as the selected action.
         ...(operatorHoldReason || remediationMissing || amaClosureResult?.reason === 'deferred-by-drain'
-          || leaseWaitMessage
+          || leaseWaitMessage || isCiWaitNextAction(amaClosureResult?.nextAction)
           ? { amaClosureResult } : {}),
         ...(operatorHoldReason ? { operatorHoldReason } : {}),
         ...(gateProjection?.decision?.operatorDecisionRequired === true
@@ -1072,6 +1077,17 @@ async function handlePostedReviewRowWithinReadCache({
 
 // ── Poll loop: once-per-tick post-review adoption + maintenance phase ─────────
 
+// CIWAITLANE-01: the blocker a recorded CI wait named has cleared on this read.
+// Returns the observed signal, or null while the wait still holds.
+export function clearedCiWaitSignal(action, value) {
+  const checks = summarizeChecksConclusion(value?.statusCheckRollup);
+  const mergeable = String(value?.mergeable || '').toUpperCase();
+  const cleared = action?.reason === 'mergeability-unknown'
+    ? Boolean(mergeable) && mergeable !== 'UNKNOWN'
+    : checks !== null && checks !== 'PENDING';
+  return cleared ? JSON.stringify([checks, mergeable]) : null;
+}
+
 // Probe only lane-due, locally settled current-head reviews. The bounded probe wave
 // avoids serial GitHub reads before the scheduler can prioritize ready work.
 // Probe faults affect ordering only; the normal handler retries its own reads.
@@ -1093,7 +1109,11 @@ export async function preparePostedReviewHandlers(handlers, {
       try {
         // Preview without advancing the ledger: the scheduler owns the one
         // skip/run accounting decision, including wakes and the idle floor.
-        if (laneGate?.evaluate?.(handler, { recordSkip: false })?.run === false) continue;
+        const preview = laneGate?.evaluate?.(handler, { recordSkip: false });
+        // CIWAITLANE-01: a demoted CI wait gets this one bounded read, not a walk.
+        const ciWait = preview?.run === false && preview.reason === 'slow-lane-backoff'
+          ? preview.ciWaitAction : null;
+        if (preview?.run === false && !ciWait) continue;
         const row = readReviewRow(handler);
         if (row?.review_status !== 'posted' || !handler.headSha || row.reviewer_head_sha !== handler.headSha) continue;
         const settled = resolveSettled(rootDir, { repo: handler.repoPath, prNumber: handler.prNumber,
@@ -1103,8 +1123,10 @@ export async function preparePostedReviewHandlers(handlers, {
           ({ signal }) => fetchSnapshot(handler.repoPath, handler.prNumber, { execFileImpl, signal }),
           undefined, { deadlineMs: Math.max(1, Math.min(loadAwareTimeoutMs(10_000), deadlineAt - now())) });
         if (value?.headRefOid !== handler.headSha) continue;
+        const ciWaitSignal = ciWait ? clearedCiWaitSignal(ciWait, value) : null;
+        if (ciWait && !ciWaitSignal) continue;
         const candidate = { value, fetchedAt: now(), repoPath: handler.repoPath, prNumber: handler.prNumber };
-        prepared[index] = { ...handler, mergeReady: String(value.state).toUpperCase() === 'OPEN' && !value.mergedAt
+        prepared[index] = { ...handler, ...(ciWaitSignal ? { ciWaitSignal } : {}), mergeReady: String(value.state).toUpperCase() === 'OPEN' && !value.mergedAt
             && summarizeChecksConclusion(value.statusCheckRollup) === 'SUCCESS',
           run: () => handler.run({ preparedCandidate: candidate }) };
       } catch (error) {
@@ -1226,6 +1248,14 @@ export function createNoProgressLaneGate({
         decision = { ...decision, lane: 'active', due: true,
           reason: handler.budgetExhaustedCloserOwned ? 'budget-exhausted-closure-owed' : 'final-round-closure-owed', backoffTicks: 0 };
       }
+      // CIWAITLANE-01: only plain slow-lane backoff yields to a settled CI wait.
+      const ciWait = decision.reason === 'slow-lane-backoff' ? evaluateCiWaitAdmission(ledger,
+        { headSha: handler.headSha, ciSignal: handler.ciWaitSignal }) : null;
+      if (ciWait) {
+        decision = { ...decision, due: true, reason: ciWait.reason };
+        if (recordSkip) recordCiWaitAdmission(rootDir, identity, { headSha: handler.headSha,
+          ciSignal: ciWait.ciSignal, now: observedAt, logger });
+      }
       if (!decision.due && recordSkip) {
         recordNoProgressLaneSkip(rootDir, identity, {
           headSha: handler.headSha || null,
@@ -1235,7 +1265,9 @@ export function createNoProgressLaneGate({
       }
       noteNextActionLegacyLater({ source: 'no-progress-lane', subjectKey: `${handler.repoPath}#${handler.prNumber}`,
         head: handler.headSha, legacy: () => fromLegacyNoProgressLane(decision) });
-      return { run: decision.due, ...decision };
+      return { run: decision.due, ...decision,
+        ...(!decision.due && decision.reason === 'slow-lane-backoff'
+          ? { ciWaitAction: ciWaitNextActionFor(ledger, handler.headSha) } : {}) };
     },
     async record(handler, { timedOut = false, error = null, value = null, laneAdmission = null } = {}) {
       // Without a head there is no series to key on; skip the row read too.

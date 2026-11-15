@@ -374,6 +374,38 @@ export function decisionFingerprintWithDaemonDecline(fingerprint, reason) {
   } catch { return null; }
 }
 
+// CIWAITLANE-01. A CI wait has no actor the watcher must re-poll every tick, so
+// it keeps the normal slow-lane backoff. A bounded pre-scheduling CI read that
+// sees the wait's blocker cleared ends that backoff early, once per signal. An
+// overdue wait stays with OWNERDEADLINE-01's deadline recovery, which reads this
+// ledger's nextAction before admission.
+export function isCiWaitNextAction(action) {
+  return action?.action === 'wait-for-CI' && action?.actor === 'ci';
+}
+
+export function ciWaitNextActionFor(ledger, headSha) {
+  const head = normalizeHead(headSha)?.toLowerCase();
+  const action = ledger?.nextAction;
+  return head && normalizeHead(ledger?.headSha)?.toLowerCase() === head
+    && normalizeHead(action?.head)?.toLowerCase() === head && isCiWaitNextAction(action)
+    ? action : null;
+}
+
+export function evaluateCiWaitAdmission(ledger, { headSha = null, ciSignal = null } = {}) {
+  if (!ciWaitNextActionFor(ledger, headSha)) return null;
+  return typeof ciSignal === 'string' && ciSignal && ciSignal !== ledger.ciWaitAdmittedSignal
+    ? { reason: 'ci-wait-settled', ciSignal } : null;
+}
+
+// Remember the cleared signal that bought a walk, so one unchanged signal can
+// never admit a demoted PR on every tick.
+export function recordCiWaitAdmission(rootDir, identity, { headSha, ciSignal, now = null, logger = console } = {}) {
+  const existing = readNoProgressLane(rootDir, identity, { logger });
+  if (!ciWaitNextActionFor(existing, headSha) || typeof ciSignal !== 'string') return null;
+  return writeLedger(rootDir, identity, { ...existing, ciWaitAdmittedSignal: ciSignal,
+    updatedAt: now || existing.updatedAt || null });
+}
+
 export function readNoProgressLane(rootDir, identity, { logger = console } = {}) {
   const filePath = noProgressLaneFilePath(rootDir, identity);
   let raw;
@@ -753,7 +785,8 @@ export function evaluateNoProgressLane(ledger, {
   const noProgressTicks = normalizeCount(ledger.noProgressTicks);
   const selected = ledger.nextAction?.head === head ? ledger.nextAction : null;
   if (selected && selected.actor !== 'remediator'
-    ? !['operator-hold', 'done'].includes(selected.action) : ledger.hammerRouteActive === true) {
+    ? !isCiWaitNextAction(selected) && !['operator-hold', 'done'].includes(selected.action)
+    : ledger.hammerRouteActive === true) {
     return { ...base, noProgressTicks, reason: 'hammer-route-active' };
   }
   if (!selected && !hasOwn(ledger, 'progressClass')) {
@@ -879,7 +912,7 @@ export function recordNoProgressLaneRun(rootDir, identity, {
     if (selected.actor !== 'remediator') {
       progressClass = selected.action === 'operator-hold'
         ? PROGRESS_CLASS_OPERATOR_DECISION_REQUIRED : PROGRESS_CLASS_SELF_RESOLVING;
-      hammerRouteActive = !['operator-hold', 'done'].includes(selected.action);
+      hammerRouteActive = !isCiWaitNextAction(selected) && !['operator-hold', 'done'].includes(selected.action);
     }
     if (selected.queue?.deferredBy === 'drain') escalate = false;
   }
@@ -1016,6 +1049,8 @@ export function recordNoProgressLaneRun(rootDir, identity, {
     ...(priorStalledEvent ? { stalledEvent: priorStalledEvent } : {}),
     ...(priorPromotedFrom ? { promotedFrom: priorPromotedFrom } : {}),
     ...(priorPromotionHistory.length > 0 ? { promotionHistory: priorPromotionHistory } : {}),
+    ...(sameHead && typeof existing?.ciWaitAdmittedSignal === 'string'
+      ? { ciWaitAdmittedSignal: existing.ciWaitAdmittedSignal } : {}),
     lastRunAt: now || null,
     updatedAt: now || null,
   });

@@ -41,6 +41,15 @@ export const HAMMER_INFRASTRUCTURE_OUTCOMES = new Set([
   'merge-confirmation-read-failed-after-merge-accepted',
   'publish-head-read-failed',
   'publish-identity-read-failed',
+  // STOPREASONREG-01: observation, transport and helper deadlines may recover.
+  'conflict-pr-read-failed',
+  'conflict-source-unavailable',
+  'conflict-base-unavailable',
+  'checkout-timeout',
+  'live-head-read-failed',
+  'pr-mergeability-unknown',
+  'withdrawn-review-dismissal-failed',
+  'terminal-review-evidence-unavailable',
 ]);
 
 export const HAMMER_EDIT_PLAN_ERROR_ORIGINS = Object.freeze({
@@ -101,17 +110,8 @@ export const HAMMER_STOP_ORIGINS = Object.freeze({
   'commit-body-decode-failed': 'closer',
   'commit-subject-decode-failed': 'closer',
   'commit-rewrites-decode-failed': 'closer',
-  // Observation, transport and helper deadlines may recover on a later run.
-  'conflict-pr-read-failed': 'infrastructure',
-  'conflict-source-unavailable': 'infrastructure',
-  'conflict-base-unavailable': 'infrastructure',
-  'checkout-timeout': 'infrastructure',
-  'live-head-read-failed': 'infrastructure',
-  'pr-mergeability-unknown': 'infrastructure',
-  'withdrawn-review-dismissal-failed': 'infrastructure',
   'local-validation-failed': 'world',
   'review-changed-since-validation': 'world',
-  'terminal-review-evidence-unavailable': 'infrastructure',
   'already-merged': 'world',
   'parked': 'world',
   'ci-infrastructure': 'world',

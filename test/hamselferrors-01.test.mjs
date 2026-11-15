@@ -6,7 +6,7 @@ import { existsSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, 
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
-import { HAMMER_STOP_ORIGINS, hammerStopOrigin, closerFaultRecovery } from '../src/ama/hammer-stop-origin.mjs';
+import { HAMMER_INFRASTRUCTURE_OUTCOMES, HAMMER_STOP_ORIGINS, hammerStopOrigin, closerFaultRecovery } from '../src/ama/hammer-stop-origin.mjs';
 import { recordHammerEarlyFailure, CloserCorrectionRequired } from '../src/ama/hammer-terminal-audit.mjs';
 import { runHelperStep } from '../bin/hammer-helper-step.mjs';
 import { recordHammerRetryDispatch, refundCloserSelfError, readHammerRetryCapLedger,
@@ -36,6 +36,17 @@ test('every registered stop reason has a pinned origin; new reasons require an e
       origin === 'world' ? 'failed-without-merge' : 'deferred', reason);
   }
   for (const reason of ['new-stop', '__proto__', 'toString']) assert.throws(() => hammerStopOrigin(reason), /Unregistered/);
+});
+
+test('new infrastructure stop reasons agree across Set and origin lookups', () => {
+  for (const reason of [
+    'conflict-pr-read-failed', 'conflict-source-unavailable', 'conflict-base-unavailable',
+    'checkout-timeout', 'live-head-read-failed', 'pr-mergeability-unknown',
+    'withdrawn-review-dismissal-failed', 'terminal-review-evidence-unavailable',
+  ]) {
+    assert.equal(HAMMER_INFRASTRUCTURE_OUTCOMES.has(reason), true, reason);
+    assert.equal(hammerStopOrigin(reason), 'infrastructure', reason);
+  }
 });
 
 // Read the shipped procedure, scripts, and typed JS stop sinks. In particular,

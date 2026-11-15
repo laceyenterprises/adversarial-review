@@ -509,6 +509,7 @@
     },
     {
       "id": "ama-audit",
+      "unregisteredStopOriginalReason": "attempts[].originalReason: optional unregistered reason preserved without normalization after failure-code syntax checking when a runtime stop becomes stop-reason-unregistered; reasonDetail also retains it",
       "stopOriginFields": ["stopOrigin", "attempts[].stopOrigin"],
       "stopOriginValues": ["closer", "world", "infrastructure"],
       "stopReasonDetailField": "attempts[].reasonDetail: optional original colon-suffixed diagnostic when routing normalizes the registered reason code",

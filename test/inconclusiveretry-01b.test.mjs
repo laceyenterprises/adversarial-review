@@ -41,7 +41,7 @@ const INCONCLUSIVE = [
   { reason: 'head-context-failed' },
   { reason: 'head-context-timeout' },
   { reason: 'validation-environment-failed' },
-  { reason: 'checkout-failed' },
+  { reason: 'checkout-timeout' },
   { reason: 'github-unreachable' },
   { reason: 'pr-mergeability-unknown' },
   { reason: 'github-gate-read-failed' },
@@ -54,7 +54,7 @@ const INCONCLUSIVE = [
 const REAL = [
   'blocking-findings-present', 'findings-unresolved', 'targeted-validation-failed', 'validation-failed',
   'github-gate-red', 'reversal-not-authorized', 'ham-commit-identity-unlinked', 'review-evidence-invalid',
-  'stale-review-head', 'head-changed', 'merge-refused',
+  'stale-review-head', 'head-changed', 'merge-refused', 'checkout-failed',
 ];
 
 test('classifier: every inconclusive reason code is an owned retry, every real refusal stays real', () => {
@@ -78,14 +78,14 @@ test('owned retry record: owner, attempt, next time, reason; backoff from N; ide
   const now = '2026-11-01T00:00:00.000Z';
   for (let attempt = 1; attempt <= 3; attempt++) {
     const owned = recordCloserInconclusiveRetry(root, identity, { headSha: HEAD, launchRequestId: `lrq_s-${attempt}`,
-      reason: 'checkout-failed', now, policy });
+      reason: 'checkout-timeout', now, policy });
     assert.equal(owned.recorded, true);
     assert.equal(owned.entry.owner, 'watcher');
     assert.equal(owned.entry.attempt, attempt);
-    assert.equal(owned.entry.reason, 'checkout-failed');
+    assert.equal(owned.entry.reason, 'checkout-timeout');
     assert.equal(owned.entry.deadline, owned.entry.nextAttemptAt);
     assert.equal(recordCloserInconclusiveRetry(root, identity, { headSha: HEAD, launchRequestId: `lrq_s-${attempt}`,
-      reason: 'checkout-failed', now, policy }).reason, 'already-recorded');
+      reason: 'checkout-timeout', now, policy }).reason, 'already-recorded');
   }
   const doc = readCloserInconclusiveRetries(root, identity);
   assert.equal(evaluateCloserInconclusiveRetryGate(doc, { headSha: HEAD, now }).retryAfterMs, 120_000);
@@ -234,7 +234,7 @@ test('site 1: a real refusal stays counted and takes no owned retry', async t =>
 
 test('site 1: an owned retry is an ordinary dispatch that re-evaluates the live head and closes nothing by itself', async t => {
   const root = scratch(t);
-  const { state, deps, endCurrent } = harness(root, 'checkout-failed');
+  const { state, deps, endCurrent } = harness(root, 'checkout-timeout');
   const run = (at, overrides) => maybeDispatchAmaCloser({ ...dispatchArgs(root, at, overrides), ...deps });
   assert.equal((await run(minutes(0))).dispatched, true);
   for (let attempt = 1; attempt <= 3; attempt++) { endCurrent(); await run(minutes(attempt * 10)); }
@@ -269,7 +269,7 @@ test('exhaustion refunds use the current time when called without now', t => {
   const root = scratch(t);
   const identity = exhaustedLedger(root, ['lrq_default_time']);
   recordCloserInconclusiveRetry(root, identity, { headSha: HEAD, launchRequestId: 'lrq_default_time',
-    reason: 'checkout-failed', now: minutes(0) });
+    reason: 'checkout-timeout', now: minutes(0) });
   const before = Date.now();
   const result = refundInconclusiveExhaustion({ rootDir: root, ...identity });
   const after = Date.now();
@@ -304,7 +304,7 @@ test('site 2: real exhaustion surfaces once with PR, reason and next action, and
   // two real charges still spend the budget and surface it.
   const identity = exhaustedLedger(root, ['lrq_real', 'lrq_real_2', 'lrq_infra']);
   recordCloserInconclusiveRetry(root, identity, { headSha: HEAD, launchRequestId: 'lrq_infra',
-    reason: 'checkout-failed', now: minutes(0) });
+    reason: 'checkout-timeout', now: minutes(0) });
   const pages = [];
   const observeWaitImpl = options => observeClosureWait({ ...options,
     pageImpl: async message => { pages.push(message); } });
@@ -336,7 +336,7 @@ test('site 2: an open charge with no owner record is real; a refund helper error
   const identity = exhaustedLedger(root, ['lrq_x']);
   assert.equal(refundInconclusiveExhaustion({ rootDir: root, ...identity, now: Date.parse(minutes(1)) }).reason,
     'real-attempts-spent-budget');
-  recordCloserInconclusiveRetry(root, identity, { headSha: HEAD, launchRequestId: 'lrq_x', reason: 'checkout-failed', now: minutes(0) });
+  recordCloserInconclusiveRetry(root, identity, { headSha: HEAD, launchRequestId: 'lrq_x', reason: 'checkout-timeout', now: minutes(0) });
   const busy = refundInconclusiveExhaustion({ rootDir: root, ...identity, now: Date.parse(minutes(1)),
     refundImpl: () => { throw Object.assign(new Error('busy'), { code: 'EBUSY' }); } });
   assert.equal(busy.reason, 'refund-incomplete');

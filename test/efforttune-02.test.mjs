@@ -140,6 +140,7 @@ test('OAuth recovery without resolved effort records the medium transport defaul
   const authRoot = mkdtempSync(join(tmpdir(), 'efforttune-auth-'));
   t.after(() => rmSync(authRoot, { recursive: true, force: true }));
   withProcessEnv(t, { ...f.env, AGENT_OS_CODEX_PER_WORKER_AUTH: '0', CODEX_BROKER_PROVIDER: 'codex',
+    ADVERSARIAL_REVIEWER_PROGRESS_TIMEOUT_MS: '2500',
     CODEX_REVIEWER_AUTH_PROVIDER: '', CODEX_HOME: '', CODEX_AUTH_PATH: writeDummyCodexAuth(join(authRoot, 'auth.json')) });
   assert.equal(await ensureWorkerRegistryReady(), true);
   assert.equal(harness.resolveCodexExecOverrides({ log: quiet }).reasoningEffort, null);
@@ -151,9 +152,11 @@ test('OAuth recovery without resolved effort records the medium transport defaul
       assert.equal(configOverrides.some(item => item.key === 'model_reasoning_effort'), false);
       throw Object.assign(new Error('synthetic no progress'), { progressTimedOut: true });
     },
-    reviewWithCodexOAuthResponsesImpl: async (_prompt, { reasoningEffort }) => {
+    reviewWithCodexOAuthResponsesImpl: async (_prompt, { reasoningEffort, env: recoveryEnv }) => {
       recoveryCalls += 1;
       assert.equal(reasoningEffort, 'medium');
+      assert.notEqual(recoveryEnv, process.env);
+      assert.equal(recoveryEnv.ADVERSARIAL_REVIEWER_PROGRESS_TIMEOUT_MS, '2500');
       return { reviewText: review, tokenUsage: null };
     },
   });

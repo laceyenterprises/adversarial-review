@@ -1,3 +1,5 @@
+import { resolveProgressTimeoutMs } from './reviewer-timeout.mjs';
+import { resolveReviewerAbsoluteCeilingMs } from './reviewer-timeout-model.mjs';
 import { loadAwareTimeoutMs } from './load-aware-timeout.mjs';
 // OAuth-only emergency transport for Codex reviews.
 //
@@ -109,8 +111,10 @@ function parseSseEvent(rawEvent) {
 
 async function consumeCodexOAuthSse(response, {
   controller,
-  idleTimeoutMs = loadAwareTimeoutMs(DEFAULT_DIRECT_IDLE_TIMEOUT_MS),
+  env = process.env,
+  idleTimeoutMs = loadAwareTimeoutMs(DEFAULT_DIRECT_IDLE_TIMEOUT_MS, { maxMs: resolveProgressTimeoutMs(env) }),
 } = {}) {
+  idleTimeoutMs = Math.min(idleTimeoutMs, resolveProgressTimeoutMs(env));
   if (!response?.body?.getReader) {
     throw new Error('Codex OAuth fallback response body is not stream-readable');
   }
@@ -168,15 +172,17 @@ async function consumeCodexOAuthSse(response, {
 }
 
 async function reviewWithCodexOAuthResponses(prompt, {
+  env = process.env,
   authPath,
   model,
   reasoningEffort = CODEX_REVIEWER_DEFAULT_EFFORT,
   endpoint = DEFAULT_CODEX_RESPONSES_URL,
   fetchImpl = globalThis.fetch,
-  timeoutMs = loadAwareTimeoutMs(DEFAULT_DIRECT_TIMEOUT_MS, { maxMs: Infinity }),
-  idleTimeoutMs = loadAwareTimeoutMs(DEFAULT_DIRECT_IDLE_TIMEOUT_MS),
+  timeoutMs = loadAwareTimeoutMs(DEFAULT_DIRECT_TIMEOUT_MS, { maxMs: resolveReviewerAbsoluteCeilingMs(env) }),
+  idleTimeoutMs = loadAwareTimeoutMs(DEFAULT_DIRECT_IDLE_TIMEOUT_MS, { maxMs: resolveProgressTimeoutMs(env) }),
   readFileImpl = readFileSync,
 } = {}) {
+  timeoutMs = Math.min(timeoutMs, resolveReviewerAbsoluteCeilingMs(env));
   if (!authPath) throw new Error('Codex OAuth fallback requires authPath');
   if (!model) throw new Error('Codex OAuth fallback requires an explicit model');
   if (typeof fetchImpl !== 'function') throw new Error('Codex OAuth fallback requires fetch');
@@ -204,7 +210,7 @@ async function reviewWithCodexOAuthResponses(prompt, {
         `Codex OAuth fallback HTTP ${response?.status ?? 'unknown'}${detail ? `: ${detail.slice(0, 300)}` : ''}`
       );
     }
-    const result = await consumeCodexOAuthSse(response, { controller, idleTimeoutMs });
+    const result = await consumeCodexOAuthSse(response, { controller, idleTimeoutMs, env });
     if (!String(result.reviewText || '').trim()) {
       throw new Error('Codex OAuth fallback returned empty output');
     }

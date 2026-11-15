@@ -1,8 +1,12 @@
+import './helpers/load-aware-timeout-fixture.mjs';
+import { resolveProgressTimeoutMs } from '../src/reviewer-timeout.mjs';
+import { resolveReviewerAbsoluteCeilingMs } from '../src/reviewer-timeout-model.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
 import {
   codexOAuthRequestBody,
+  consumeCodexOAuthSse,
   readCodexOAuthCredential,
   reviewWithCodexOAuthResponses,
 } from '../src/codex-oauth-responses.mjs';
@@ -104,3 +108,58 @@ test('native no-progress recovery is OAuth-only and never hijacks custom provide
   assert.equal(reviewerHarnessTest.shouldRecoverCodexWithOAuth({ progressTimedOut: true }, 'litellm'), false);
   assert.equal(reviewerHarnessTest.shouldRecoverCodexWithOAuth(new Error('ordinary failure'), null), false);
 });
+
+test('REVIEWERLEASECAP-02: OAuth wall and idle timers cannot exceed shared bounds', async t => {
+  const delays = [];
+  const original = globalThis.setTimeout;
+  t.mock.method(globalThis, 'setTimeout', (fn, ms, ...args) => {
+    delays.push(ms);
+    return original(fn, ms, ...args);
+  });
+  await reviewWithCodexOAuthResponses('synthetic prompt', {
+    authPath: '/synthetic/auth.json', model: 'synthetic-model',
+    timeoutMs: 100_000_000, idleTimeoutMs: 100_000_000,
+    readFileImpl: () => JSON.stringify({ tokens: { access_token: fakeJwt({}) } }),
+    fetchImpl: async () => sseResponse([{ type: 'response.output_text.delta', delta: 'Synthetic review' }]),
+  });
+  assert.equal(delays[0], resolveReviewerAbsoluteCeilingMs());
+  assert.ok(delays.slice(1).length > 0);
+  assert.ok(delays.slice(1).every(ms => ms <= resolveProgressTimeoutMs()));
+});
+
+for (const [name, env, options, wallMs, idleMs] of [
+  ['scoped defaults', { AGENT_OS_REVIEWER_CEILING_MAX_SECONDS: '60', ADVERSARIAL_REVIEWER_PROGRESS_TIMEOUT_MS: '2500' },
+    {}, 60_000, 2500],
+  ['scoped clamps', { AGENT_OS_REVIEWER_CEILING_MAX_SECONDS: '60', ADVERSARIAL_REVIEWER_PROGRESS_TIMEOUT_MS: '2500' },
+    { timeoutMs: 100_000_000, idleTimeoutMs: 100_000_000 }, 60_000, 2500],
+  ['shorter requests', { AGENT_OS_REVIEWER_CEILING_MAX_SECONDS: '60', ADVERSARIAL_REVIEWER_PROGRESS_TIMEOUT_MS: '2500' },
+    { timeoutMs: 1000, idleTimeoutMs: 500 }, 1000, 500],
+  ['larger scoped bounds', { AGENT_OS_REVIEWER_CEILING_MAX_SECONDS: '14400', ADVERSARIAL_REVIEWER_PROGRESS_TIMEOUT_MS: '1200000' },
+    { timeoutMs: 100_000_000, idleTimeoutMs: 100_000_000 }, 14_400_000, 1_200_000],
+]) {
+  test(`OAuth transport and standalone SSE reader honor caller env: ${name}`, async t => {
+    const delays = [];
+    const original = globalThis.setTimeout;
+    t.mock.method(globalThis, 'setTimeout', (fn, ms, ...args) => {
+      delays.push(ms);
+      return original(fn, ms, ...args);
+    });
+    const response = () => sseResponse([{ type: 'response.output_text.delta', delta: 'Synthetic review' }]);
+    const result = await reviewWithCodexOAuthResponses('synthetic prompt', {
+      env,
+      authPath: '/synthetic/auth.json',
+      model: 'synthetic-model',
+      readFileImpl: () => JSON.stringify({ tokens: { access_token: fakeJwt({}) } }),
+      fetchImpl: async () => response(),
+      ...options,
+    });
+    assert.equal(result.reviewText, 'Synthetic review');
+    assert.equal(delays.shift(), wallMs);
+    assert.ok(delays.length > 0);
+    assert.ok(delays.every(ms => ms === idleMs));
+    delays.length = 0;
+    await consumeCodexOAuthSse(response(), { env, controller: new AbortController(), ...options });
+    assert.ok(delays.length > 0);
+    assert.ok(delays.every(ms => ms === idleMs));
+  });
+}

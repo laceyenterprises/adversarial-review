@@ -73,9 +73,9 @@ test('LAC-2100: observed six-chunk allocation fits without inflating the aggrega
   assert.equal(plan.requestedPerChunkTimeoutMs, 5228727);
   assert.equal(plan.requiredMs, 31492362, 'retain the original unbounded sizing diagnostic');
   assert.equal(plan.promptBytes, 694487);
-  assert.equal(plan.capMs, 21600000);
-  assert.equal(plan.perChunkTimeoutMs, 3530000);
-  assert.equal(plan.timeoutMs, 21300000);
+  assert.equal(plan.capMs, 10800000);
+  assert.equal(plan.perChunkTimeoutMs, 1730000);
+  assert.equal(plan.timeoutMs, 10500000);
   assert.equal(timeouts.resolveGeminiReviewerProcessTimeoutMs({}, { plan }), plan.capMs);
 });
 
@@ -101,7 +101,7 @@ test('LAC-2100: observed prompt size and delivery budget run all six bounded Gem
     env, maxBytes: route.maxBytes, promptBytes: route.promptBytes,
     onChunkPlan: value => { plan = value; },
     reviewWithGeminiImpl: async (_diff, _context, options) => {
-      assert.equal(options.timeoutMs, 3530000);
+      assert.equal(options.timeoutMs, 1730000);
       assert.equal(options.signal.aborted, false);
       calls += 1;
       const promptDigest = createHash('sha256').update(`${_diff}${_context}`).digest('hex');
@@ -142,8 +142,8 @@ test('LAC-2100: finite integer budgets at timer saturation and the minimum feasi
   };
   for (const chunkCount of [1, 6, 18]) {
     const plan = timeouts.resolveAgyChunkTimeoutPlan({ chunkCount, env: huge });
-    assert.equal(plan.capMs, MAX_TIMER_DELAY_MS);
-    assert.equal(plan.requestedPerChunkTimeoutMs, MAX_TIMER_DELAY_MS);
+    assert.equal(plan.capMs, timeouts.AGY_CHUNK_TIMEOUT_CAP_MS);
+    assert.equal(plan.requestedPerChunkTimeoutMs, timeouts.AGY_CHUNK_TIMEOUT_CAP_MS);
     for (const key of ['perChunkTimeoutMs', 'timeoutMs', 'capMs', 'requiredMs']) {
       assert.ok(Number.isSafeInteger(plan[key]) && plan[key] > 0, key);
     }
@@ -319,13 +319,14 @@ test('CHUNKTIME-01: the plan timer aborts a late chunk without rerunning earlier
   assert.equal(calls, 2);
 });
 
-test('CHUNKTIME-01: Argus outer deadline covers its sequential model fallback plan', async () => {
+test('REVIEWERLEASECAP-02: Argus sequential fallbacks share the absolute ceiling', async () => {
   const { resolveArgusReviewChildTimeoutMs } = await import('../src/argus-security-drain.mjs');
   const { resolveReviewerCeilingConfig } = await import('../src/reviewer-timeout-model.mjs');
   const env = { ADVERSARIAL_ARGUS_REVIEWER_MODELS: 'claude,gemini,codex' };
   const required = 2 * resolveReviewerCeilingConfig(env).max * 1000
     + timeouts.resolveAgyReviewerSubprocessTimeoutMs(env);
-  assert.ok(resolveArgusReviewChildTimeoutMs(env) >= required);
+  assert.ok(required > resolveArgusReviewChildTimeoutMs(env));
+  assert.equal(resolveArgusReviewChildTimeoutMs(env), resolveReviewerCeilingConfig(env).max * 1000);
 });
 
 test('CHUNKTIME-01: native Gemini retries share one call budget', async (t) => {

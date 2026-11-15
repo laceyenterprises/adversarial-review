@@ -1,4 +1,5 @@
 import { isGitHubRateLimitError } from './rate-limit-throttle.mjs';
+import { resolveReviewerAbsoluteCeilingMs } from './reviewer-timeout-model.mjs';
 import { persistReviewerAttributionForSession } from './reviewer-attribution.mjs';
 import { normalizeBuilderClass, normalizeReviewerModel, reviewerRefusesBuilder } from './adapters/subject/github-pr/routing.mjs';
 import { loadAwareTimeoutMs } from './load-aware-timeout.mjs';
@@ -15,6 +16,7 @@ import {
 import {
   DEFAULT_REVIEWER_LEASE_RECOVERY_MAX_ATTEMPTS,
   resolveReviewerLeaseRecoveryEnabled,
+  reviewerLeaseExpiryForRow,
 } from './reviewer-lease.mjs';
 import { resolveReviewerTimeoutMs } from './reviewer-timeout.mjs';
 import { recordReviewLatencyEvent } from './review-latency-event-writer.mjs';
@@ -152,10 +154,10 @@ function resolveNullPgidLaunchGraceMs(value) {
   return parsePositiveInteger(value) || DEFAULT_NULL_PGID_LAUNCH_GRACE_MS;
 }
 
-function reviewerRunTimeoutMs(row, fallbackMs) {
-  return parsePositiveInteger(row?.reviewer_timeout_ms)
+function reviewerRunTimeoutMs(row, fallbackMs, env = process.env) {
+  return Math.min(resolveReviewerAbsoluteCeilingMs(env), parsePositiveInteger(row?.reviewer_timeout_ms)
     || parsePositiveInteger(fallbackMs)
-    || resolveReviewerTimeoutMs();
+    || resolveReviewerTimeoutMs(env));
 }
 
 function errorText(err) {
@@ -543,20 +545,21 @@ function nullPgidGuardWindowMs({
   runRecord,
   nullPgidGraceMs,
   reviewerDeadlineMs,
+  env = process.env,
 } = {}) {
   const state = String(runRecord?.state || '').trim();
   if (TERMINAL_RUN_STATES.has(state)) return 0;
   if (!runRecord && parseTime(row?.reviewer_started_at) === null) {
     return nullPgidGraceMs;
   }
-  return reviewerRunTimeoutMs(row, reviewerDeadlineMs);
+  return reviewerRunTimeoutMs(row, reviewerDeadlineMs, env);
 }
 
-function reviewerLeaseExpiryAt(startedAt, timeoutMs) {
+function reviewerLeaseExpiryAt(startedAt, timeoutMs, env = process.env) {
   const startedAtMs = parseTime(startedAt);
   const timeout = parsePositiveInteger(timeoutMs);
   if (startedAtMs === null || timeout === null) return null;
-  return new Date(startedAtMs + timeout).toISOString();
+  return new Date(startedAtMs + Math.min(timeout, resolveReviewerAbsoluteCeilingMs(env))).toISOString();
 }
 
 async function reconcileReviewerSessions({
@@ -580,8 +583,9 @@ async function reconcileReviewerSessions({
   shouldReconcileRow = () => true,
   onTerminalDeadSession = async () => {},
   maxRows = Number.POSITIVE_INFINITY,
-  reviewerDeadlineMs = resolveReviewerTimeoutMs(),
-  leaseRecoveryEnabled = resolveReviewerLeaseRecoveryEnabled(),
+  env = process.env,
+  reviewerDeadlineMs = resolveReviewerTimeoutMs(env),
+  leaseRecoveryEnabled = resolveReviewerLeaseRecoveryEnabled({ env }),
   leaseRecoveryMaxAttempts = DEFAULT_REVIEWER_LEASE_RECOVERY_MAX_ATTEMPTS,
   nullPgidLaunchGraceMs = DEFAULT_NULL_PGID_LAUNCH_GRACE_MS,
   sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
@@ -733,9 +737,10 @@ async function reconcileReviewerSessions({
       // An unreadable PR cannot be safely classified as terminal. Keep a live
       // reviewer through its lease, but do not let a permanent GitHub failure
       // pin the scarce credential slot forever after that lease expires.
-      const startedAtMs = parseTime(row.reviewer_started_at) ?? parseTime(row.last_attempted_at);
-      const leaseExpiresAtMs = parseTime(row.reviewer_lease_expires_at)
-        ?? (startedAtMs === null ? null : startedAtMs + reviewerRunTimeoutMs(row, reviewerDeadlineMs));
+      const leaseExpiresAtMs = parseTime(reviewerLeaseExpiryForRow(row, {
+        reviewerTimeoutMs: reviewerRunTimeoutMs(row, reviewerDeadlineMs, env),
+        env,
+      }));
       if (leaseExpiresAtMs === null || now.getTime() < leaseExpiresAtMs) continue;
 
       let pgid = parsePositiveInteger(row.reviewer_pgid);
@@ -843,7 +848,7 @@ async function reconcileReviewerSessions({
       }
       if (adoption) {
         const startedAt = adoption.spawnedAt || row.reviewer_started_at || row.last_attempted_at || failureAt;
-        const leaseExpiresAt = reviewerLeaseExpiryAt(startedAt, row.reviewer_timeout_ms);
+        const leaseExpiresAt = reviewerLeaseExpiryAt(startedAt, row.reviewer_timeout_ms, env);
         statements.adoptRunStatePgid.run(
           adoption.pgid,
           startedAt,
@@ -881,6 +886,7 @@ async function reconcileReviewerSessions({
           runRecord,
           nullPgidGraceMs,
           reviewerDeadlineMs,
+          env,
         });
         if (
           claimedAtMs !== null &&
@@ -1274,7 +1280,9 @@ async function reconcileReviewerSessions({
       // process is confirmed dead and GitHub is reprobed with no late review.
       // Any ambiguity falls back to sticky/manual recovery.
       const orphanAgeMs = now.getTime() - parseTime(row.reviewer_started_at);
-      const launchTimeoutMs = parsePositiveInteger(row.reviewer_timeout_ms);
+      const persistedTimeoutMs = parsePositiveInteger(row.reviewer_timeout_ms);
+      const launchTimeoutMs = persistedTimeoutMs === null ? null
+        : Math.min(persistedTimeoutMs, resolveReviewerAbsoluteCeilingMs(env));
       if (launchTimeoutMs === null && Number.isFinite(orphanAgeMs) && orphanAgeMs > reviewerDeadlineMs) {
         markStickyOrphan({
           statements,

@@ -1,3 +1,4 @@
+import { resolveReviewerAbsoluteCeilingMs } from '../../../reviewer-timeout-model.mjs';
 import { loadAwareTimeoutMs } from '../../../load-aware-timeout.mjs';
 import { createHealthRouter } from '../../agent-runtime/router/index.mjs';
 import { createLocalAgentRuntime, deriveSessionUuid } from '../../agent-runtime/local/index.mjs';
@@ -393,7 +394,9 @@ function toAgentRequest(req, { kind, rootDir = null, domainConfig = null }) {
     : reviewIdempotencyKey(req, { roleId });
   const promptSet = String(req.promptSet || ctx.promptSet || domainId);
   const promptStage = kind === 'remediator' ? remediatorPromptStage(ctx) : reviewPromptStage(ctx);
-  const timeoutMs = req.timeoutMs ?? loadAwareTimeoutMs(DEFAULT_REVIEW_BUDGET.maxWallMs, { maxMs: Infinity });
+  const absoluteMs = resolveReviewerAbsoluteCeilingMs(domainConfig?.env || process.env);
+  const requestedMs = req.timeoutMs ?? loadAwareTimeoutMs(DEFAULT_REVIEW_BUDGET.maxWallMs, { maxMs: kind === 'reviewer' ? absoluteMs : Infinity });
+  const timeoutMs = kind === 'reviewer' ? Math.min(requestedMs, absoluteMs) : requestedMs;
   return {
     role: {
       id: roleId,

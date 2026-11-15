@@ -6,6 +6,7 @@ import { REVIEWER_CHUNK_BUDGET_EXCEEDED_EXIT_CODE } from '../src/reviewer-outcom
 import { dispatchReviewerModel } from '../src/reviewer-harness.mjs';
 import { MAX_TIMER_DELAY_MS } from '../src/load-aware-timeout.mjs';
 import { resolveAgyChunkTimeoutPlan, resolveGeminiReviewerProcessTimeoutMs } from '../src/reviewer-timeout.mjs';
+import { resolveReviewerAbsoluteCeilingMs } from '../src/reviewer-timeout-model.mjs';
 import { underMaxLoad } from './helpers/load-time-kit.mjs';
 
 function fakeClock() {
@@ -170,8 +171,8 @@ test('GEMTIMEOUT-01: plan extension reports the same bounded budget to the paren
   const plan = { chunkCount: 12, perChunkTimeoutMs: 20 * 60_000, timeoutMs: 4 * 60 * 60_000 };
   wiring.extendForPlan(plan);
   assert.deepEqual(plans, [plan]);
-  assert.equal(armed.deadlineAt, startedAt + plan.timeoutMs + 300_000);
+  assert.equal(armed.deadlineAt, startedAt + resolveReviewerAbsoluteCeilingMs());
   wiring.extendForPlan({ chunkCount: 18, perChunkTimeoutMs: 20 * 60_000, timeoutMs: 6 * 60 * 60_000 });
-  assert.equal(armed.deadlineAt, startedAt + 6 * 60 * 60_000);
+  assert.equal(armed.deadlineAt, startedAt + resolveReviewerAbsoluteCeilingMs());
   wiring.dispose();
 });

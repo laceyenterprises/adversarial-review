@@ -547,6 +547,33 @@ test('firstOutputTimeout still kills a child that never writes a byte', async t 
   await rejected;
 });
 
+for (const fileBacked of [true, false]) for (const progressOnStdoutOnly of [true, false]) {
+  test(`${fileBacked ? 'file-backed' : 'pipe'} diagnostic stderr respects first-output policy (stdoutOnly=${progressOnStdoutOnly})`, async t => {
+    const dir = mkdtempSync(path.join(tmpdir(), 'first-output-policy-'));
+    t.after(() => rmSync(dir, { recursive: true, force: true }));
+    const result = spawnCapturedProcessGroup(process.execPath, ['-e',
+      'console.error("diagnostic"); setInterval(() => console.error("diagnostic"), 20); setTimeout(() => process.exit(0), 1500);',
+    ], {
+      ...(fileBacked ? { stdoutPath: path.join(dir, 'stdout'), stderrPath: path.join(dir, 'stderr') } : {}),
+      progressOnStdoutOnly,
+      firstOutputTimeout: 1000,
+      progressTimeout: 3000,
+      timeout: 5000,
+      killGraceMs: 0,
+    });
+    if (progressOnStdoutOnly) {
+      await assert.rejects(result, err => {
+        assert.equal(err.firstOutputTimedOut, true);
+        assert.equal(err.progressTimedOut, false);
+        return true;
+      });
+    } else {
+      assert.equal((await result).code, 0);
+    }
+    if (fileBacked) assert.match(readFileSync(path.join(dir, 'stderr'), 'utf8'), /diagnostic/);
+  });
+}
+
 test('a silent non-streaming child succeeds when no first-output deadline is armed', async () => {
   // This is the shipped claude reviewer shape: zero bytes for the whole turn,
   // then one JSON document at the end. With first_output_timeout_ms defaulting

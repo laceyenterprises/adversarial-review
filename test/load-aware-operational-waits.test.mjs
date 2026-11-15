@@ -180,18 +180,18 @@ test('background launch uses its already-sized execution boundary exactly once',
   assert.match(f.pages[0], /still running after 30 minutes/);
 });
 
-test('reviewer budgets scale once, including the derived multi-chunk budget', t => {
+test('reviewer budgets scale once within the absolute ceiling; progress stays unscaled', t => {
   busyHost(t);
   assert.equal(resolveReviewerTimeoutMs({}), 20 * 60_000 * 6);
-  assert.equal(resolveProgressTimeoutMs({}), 15 * 60_000 * 6);
+  assert.equal(resolveProgressTimeoutMs({}), 15 * 60_000);
   assert.equal(resolveAgyPrintTimeoutMs({}), 19 * 60_000 * 6);
   assert.equal(resolveFirstOutputTimeoutMs({}), 0);
-  assert.equal(resolveReviewerIdleTimeoutSeconds({}), 600 * 6);
+  assert.equal(resolveReviewerIdleTimeoutSeconds({}), 600);
   assert.equal(resolveReviewerCeilingSeconds({ changedLines: 0, env: {} }), 1800 * 6);
   const plan = resolveAgyChunkTimeoutPlan({ chunkCount: 2, env: {} });
-  assert.equal(plan.perChunkTimeoutMs, 20 * 60_000 * 6);
+  assert.equal(plan.perChunkTimeoutMs, (3 * 60 * 60_000 - 300_000 - 120_000) / 2);
   assert.equal(plan.timeoutMs, plan.perChunkTimeoutMs * 2 + 120_000);
-  assert.equal(plan.capMs, 6 * 60 * 60_000, 'the refusal cap stays unscaled (GEMTIMEOUT-01)');
+  assert.equal(plan.capMs, 3 * 60 * 60_000, 'the shared absolute ceiling stays unscaled');
 });
 
 test('closer dispatch, readiness probes, ownerless and pending lease bounds scale', t => {

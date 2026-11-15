@@ -153,5 +153,16 @@ session UUID while the row remains `reviewing` and its PR remains open, then
 extends its wall timer. Lease expiry remains `reviewer_started_at +
 reviewer_timeout_ms`; a repeated plan cannot renew it relative to the current
 time. Per-call budgets already include load scaling; process composition and the
-six-hour default refusal cap do not scale again. The process deadline is clamped
-to that unscaled cap and the platform timer limit.
+chunk refusal cap do not scale again. The process deadline is clamped
+last to `reviewer.ceiling_max_seconds` (default three hours), the chunk cap
+and the platform timer limit. Reading a historical oversized claim bounds its
+expiry from the original start without rewriting its record. Reattach applies
+the same absolute bound before its identity/exit/posting reconciliation.
+When GitHub PR state cannot be verified, a valid persisted lease expiry takes
+precedence over the recorded or nominal timeout; those timeouts are fallbacks
+only when a valid expiry is absent. Lease creation, plan extension and reads,
+and reattach accept optional scoped `env` records (default `process.env`) for
+the shared ceiling. The store shape is unchanged.
+Model stalls retain the existing typed receipt and session-fenced claim release;
+GitHub budget-deferral receipts retain their reset hold rather than becoming
+no-progress failures.

@@ -1,4 +1,4 @@
-import { loadAwareTimeoutSeconds } from './load-aware-timeout.mjs';
+import { loadAwareTimeoutSeconds, timerDelayMs } from './load-aware-timeout.mjs';
 import { loadRoleConfig } from './role-config.mjs';
 
 const DEFAULT_IDLE_TIMEOUT_SECONDS = 600;
@@ -16,8 +16,14 @@ function configSeconds(key, fallback, env = process.env, options = {}) {
   return Number.isInteger(value) && value > 0 ? value : fallback;
 }
 
+// Existing CFG key is now an absolute envelope, shared by every runtime.
+function resolveReviewerAbsoluteCeilingMs(env = process.env, options = {}) {
+  return timerDelayMs(configSeconds('reviewer.ceiling_max_seconds', DEFAULT_CEILING_MAX_SECONDS, env, options) * 1000);
+}
+
 function resolveReviewerIdleTimeoutSeconds(env = process.env, options = {}) {
-  return loadAwareTimeoutSeconds(configSeconds('reviewer.idle_timeout_seconds', DEFAULT_IDLE_TIMEOUT_SECONDS, env, options), { maxSeconds: Infinity });
+  const nominal = configSeconds('reviewer.idle_timeout_seconds', DEFAULT_IDLE_TIMEOUT_SECONDS, env, options);
+  return Math.min(nominal, resolveReviewerAbsoluteCeilingMs(env, options) / 1000);
 }
 
 function resolveReviewerCeilingConfig(env = process.env, options = {}) {
@@ -32,7 +38,10 @@ function calculateReviewerCeilingSeconds({ changedLines = 0, effort = 'high', ba
 }
 
 function resolveReviewerCeilingSeconds({ changedLines = 0, effort = 'high', env = process.env, options = {} } = {}) {
-  return loadAwareTimeoutSeconds(calculateReviewerCeilingSeconds({ changedLines, effort, ...resolveReviewerCeilingConfig(env, options) }), { maxSeconds: Infinity });
+  const ceiling = resolveReviewerAbsoluteCeilingMs(env, options) / 1000;
+  return Math.min(ceiling, loadAwareTimeoutSeconds(calculateReviewerCeilingSeconds({
+    changedLines, effort, ...resolveReviewerCeilingConfig(env, options),
+  }), { maxSeconds: ceiling }));
 }
 
 function countChangedLines(diff) {
@@ -42,6 +51,7 @@ function countChangedLines(diff) {
 }
 
 export {
+  resolveReviewerAbsoluteCeilingMs,
   DEFAULT_IDLE_TIMEOUT_SECONDS,
   DEFAULT_CEILING_BASE_SECONDS,
   DEFAULT_CEILING_MAX_SECONDS,

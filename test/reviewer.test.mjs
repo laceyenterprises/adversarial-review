@@ -3366,6 +3366,7 @@ test(`Codex review invocation uses snapshot cwd and argv with catalog available=
         timeout: 12_345,
         firstOutputTimeout: 12_345,
         progressTimeout: 12_345,
+        progressOnStdoutOnly: true,
         stallReviewer: { model: 'gpt-5.4', runtime: 'codex' },
         maxBuffer: 999,
       },

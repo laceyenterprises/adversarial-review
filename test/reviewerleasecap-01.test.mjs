@@ -12,9 +12,8 @@ import {
   isReviewerLeaseExpired,
 } from '../src/reviewer-lease.mjs';
 
-// Diagnostic reproductions of the documented policy, not acceptance tests for
-// a repaired cap. A future policy repair should deliberately update these.
-test('REVIEWERLEASECAP-01: default streamed ceiling produces a 14-hour claim', t => {
+// Phase 0 reproduction retained as acceptance evidence for the repaired cap.
+test('REVIEWERLEASECAP-01: 14-hour streamed reproduction is capped after scaling', t => {
   underMaxLoad(t);
   // Full CPU corroboration: multiplier = 1 + (load/core - 1) * 2.5.
   const multiplier = 14 / 3;
@@ -27,7 +26,7 @@ test('REVIEWERLEASECAP-01: default streamed ceiling produces a 14-hour claim', t
   const timeoutMs = resolveReviewerCeilingSeconds({
     changedLines: Number.MAX_SAFE_INTEGER,
   }) * 1000;
-  assert.equal(timeoutMs, 14 * 60 * 60 * 1000);
+  assert.equal(timeoutMs, max * 1000);
   assert.ok(resolveReviewerTimeoutMs() <= 2 * 60 * 60 * 1000,
     'the legacy 20-minute resolver does not explain the streamed lease');
   const startedAt = '2026-01-01T00:00:00.000Z';
@@ -36,14 +35,14 @@ test('REVIEWERLEASECAP-01: default streamed ceiling produces a 14-hour claim', t
     reviewer_timeout_ms: timeoutMs,
     reviewer_lease_expires_at: computeReviewerLeaseExpiryAt(startedAt, timeoutMs),
   };
-  assert.equal(row.reviewer_lease_expires_at, '2026-01-01T14:00:00.000Z');
+  assert.equal(row.reviewer_lease_expires_at, '2026-01-01T03:00:00.000Z');
   assert.equal(isReviewerLeaseExpired(row, new Date('2026-01-01T01:00:00Z')), false);
-  assert.equal(isReviewerLeaseExpired(row, new Date('2026-01-01T14:00:00Z')), true);
+  assert.equal(isReviewerLeaseExpired(row, new Date('2026-01-01T03:00:00Z')), true);
 });
 
-test('REVIEWERLEASECAP-01: default streamed maximum scales to 18 hours', t => {
+test('REVIEWERLEASECAP-01: maximum load cannot grow the absolute ceiling', t => {
   underMaxLoad(t);
   assert.equal(resolveReviewerCeilingSeconds({
     changedLines: Number.MAX_SAFE_INTEGER,
-  }), 18 * 60 * 60);
+  }), 3 * 60 * 60);
 });

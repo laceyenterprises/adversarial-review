@@ -787,6 +787,24 @@ test('agent-runtime reviewer request falls back to a non-empty app-contract prom
   assert.match(agentRequest.subjectContent.representation, /Subject: laceyenterprises\/demo#42/);
 });
 
+test('agent-runtime reviewer bounds explicit and default budgets with the domain env', () => {
+  for (const ceilingSeconds of [60, 14_400]) {
+    const domainConfig = { env: { AGENT_OS_REVIEWER_CEILING_MAX_SECONDS: String(ceilingSeconds) } };
+    for (const timeoutMs of [undefined, 100_000_000, 1000]) {
+      const request = toAgentRequest(reviewerReq({ timeoutMs }), { kind: 'reviewer', domainConfig });
+      if (timeoutMs !== undefined) {
+        assert.equal(request.timeoutMs, Math.min(timeoutMs, ceilingSeconds * 1000));
+      } else {
+        assert.ok(request.timeoutMs > 0 && request.timeoutMs <= ceilingSeconds * 1000);
+        if (ceilingSeconds === 60) assert.equal(request.timeoutMs, 60_000);
+      }
+      assert.equal(request.budget.maxWallMs, request.timeoutMs);
+    }
+    const remediator = toAgentRequest(reviewerReq({ timeoutMs: 100_000_000 }), { kind: 'remediator', domainConfig });
+    assert.equal(remediator.timeoutMs, 100_000_000);
+  }
+});
+
 test('agent-runtime reviewer idempotency keys include flat request revisions', () => {
   const base = {
     model: 'claude-code',

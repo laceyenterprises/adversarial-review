@@ -1,3 +1,4 @@
+import './helpers/load-aware-timeout-fixture.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
@@ -20,7 +21,7 @@ import {
   resolveReviewerTimeoutMs,
 } from '../src/reviewer-timeout.mjs';
 import { AgentOSConfigError } from '../src/config-loader.mjs';
-import { usesStreamedReviewerCeiling } from '../src/reviewer-timeout-model.mjs';
+import { resolveReviewerAbsoluteCeilingMs, usesStreamedReviewerCeiling } from '../src/reviewer-timeout-model.mjs';
 import { MAX_TIMER_DELAY_MS } from '../src/load-aware-timeout.mjs';
 
 test('WATCHERTIMER-01: scaled reviewer budgets plus slack stay timer-safe at saturation', () => {
@@ -29,15 +30,15 @@ test('WATCHERTIMER-01: scaled reviewer budgets plus slack stay timer-safe at sat
     ADVERSARIAL_REVIEW_GEMINI_ANTIGRAVITY_PRINT_TIMEOUT_MS: String(MAX_TIMER_DELAY_MS),
     ADVERSARIAL_REVIEW_AGY_CHUNK_TIMEOUT_CAP_MS: String(Number.MAX_SAFE_INTEGER),
   };
-  assert.equal(resolveReviewerTimeoutMs(env), MAX_TIMER_DELAY_MS);
+  assert.equal(resolveReviewerTimeoutMs(env), resolveReviewerAbsoluteCeilingMs(env));
   assert.equal(resolveAgyReviewerSubprocessTimeoutMs(env, {
     reviewerTimeoutMs: MAX_TIMER_DELAY_MS, printTimeoutMs: MAX_TIMER_DELAY_MS,
-  }), MAX_TIMER_DELAY_MS);
-  assert.equal(resolveGeminiReviewerProcessTimeoutMs(env), MAX_TIMER_DELAY_MS);
+  }), resolveReviewerAbsoluteCeilingMs(env));
+  assert.equal(resolveGeminiReviewerProcessTimeoutMs(env), resolveReviewerAbsoluteCeilingMs(env));
   const plan = resolveAgyChunkTimeoutPlan({ chunkCount: 1, env });
-  assert.equal(plan.capMs, MAX_TIMER_DELAY_MS);
+  assert.equal(plan.capMs, resolveReviewerAbsoluteCeilingMs(env));
   assert.ok(plan.requiredMs > plan.capMs);
-  assert.equal(resolveGeminiReviewerProcessTimeoutMs(env, { plan }), MAX_TIMER_DELAY_MS);
+  assert.equal(resolveGeminiReviewerProcessTimeoutMs(env, { plan }), resolveReviewerAbsoluteCeilingMs(env));
 });
 
 test('streamed reviewer model predicate is shared across lease and subprocess budgets', () => {

@@ -136,3 +136,12 @@ test('REVIEWSTALL-01: a progressing reviewer still meets the outer ceiling', asy
   });
   assert.deepEqual(receipts, []);
 });
+
+// The model timeout and the independent silence window are separate bounds.
+test('REVIEWERLEASECAP-02: progressing reviews retain their wall budget under maximum load', () => {
+  const options = reviewerStallOptions(10_800_000, { model: 'synthetic' }, {
+    loadAwareTimeoutMsImpl: nominal => nominal * 6,
+  });
+  assert.equal(options.progressTimeout, 900_000);
+  assert.equal(options.firstOutputTimeout, 720_000);
+});

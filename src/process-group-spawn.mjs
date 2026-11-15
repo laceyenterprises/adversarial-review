@@ -395,11 +395,14 @@ function spawnCapturedProcessGroup(command, args, options = {}) {
           requestKill(`maxBuffer exceeded (${maxBuffer} bytes; saw ${exceeded} bytes)`);
           return;
         }
-        if (stdoutSize !== lastStdoutSize || stderrSize !== lastStderrSize) {
+        const stdoutProgress = stdoutSize !== lastStdoutSize;
+        if (stdoutProgress || stderrSize !== lastStderrSize) {
           lastStdoutSize = stdoutSize;
           lastStderrSize = stderrSize;
-          noteFirstOutput();
-          armProgressTimer();
+          if (stdoutProgress || !progressOnStdoutOnly) {
+            noteFirstOutput();
+            armProgressTimer();
+          }
         }
       }, intervalMs);
     }
@@ -438,8 +441,10 @@ function spawnCapturedProcessGroup(command, args, options = {}) {
 
     child.stderr?.on('data', (data) => {
       if (settled) return;
-      noteFirstOutput();
-      if (!progressOnStdoutOnly) armProgressTimer();
+      if (!progressOnStdoutOnly) {
+        noteFirstOutput();
+        armProgressTimer();
+      }
       const next = appendChecked(stderr, stderrBytes, data);
       if (next !== null) {
         stderr = next.text;

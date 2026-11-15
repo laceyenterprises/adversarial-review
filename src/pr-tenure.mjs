@@ -3,6 +3,7 @@ import { readDispatchLaunches, readWorkerObservation, prepareDispatchReadContext
 import { isCrossModelReviewWaived, normalizeBuilderClass, normalizeReviewerModel } from './adapters/subject/github-pr/routing.mjs';
 import Database from 'better-sqlite3';
 import { join } from 'node:path';
+import { loadRoleConfig } from './role-config.mjs';
 
 const PREFIX = 'tenure-independent-review:';
 const SHA = '[a-f0-9]{40}';
@@ -14,6 +15,8 @@ export async function readPrTenure({ repo, prNumber, env = process.env,
   readBuildIdentityImpl = readDaemonBuildIdentity, readLaunchesImpl = readDispatchLaunches,
   headSha = null, readHeadProvenanceImpl = readWorkerObservation,
   ...options } = {}) {
+  // Closure/remediation consumers share the same fleet switch as the watcher.
+  if (loadRoleConfig({ env }).get('worker_pool.tenure.enabled', false) !== true) return null;
   if (readBuildIdentityImpl === readDaemonBuildIdentity
     && env.ADVERSARIAL_DISPATCH_READS_ENABLED !== '1'
     && env.ADVERSARIAL_WORKER_OBSERVATIONS_ENABLED !== '1') return null;

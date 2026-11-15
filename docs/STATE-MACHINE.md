@@ -1422,6 +1422,13 @@ Legacy durable jobs created before `baseBranch` was persisted are hydrated from 
 ## MSM two-path merge authority (current)
 
 Worker tenure changes scheduling and review provenance, not merge authority.
+Watcher tenure review routing runs only when the effective
+`worker_pool.tenure.enabled` is true (absent defaults to false). Disabled
+routing performs no tenure reads. A failed enabled read skips tenure-specific
+queueing for that poll and continues ordinary review and closure handlers,
+warning per PR/head through a process-local 4096-entry LRU cache; evicted keys
+may warn again. The failed result remains unknown in
+closer suppression; it cannot certify an untenured exemption.
 AMA reads the stable PR opener's launch through the public dispatch read model.
 A missing `tenureId` retains the untenured path. Tenured remediator dispatches
 use the native HQ transport with the PR alias; closer dispatches already carry
@@ -1434,7 +1441,7 @@ The request records `previous reviewed head..current head` and preserves
 attempt counters. An armed pending, pending-upstream or CI-blocked request at
 the same head and range is read-only and retains its admission state.
 Missing completion launch IDs and successful unindexed-stage reads retain
-opener-based review routing; unavailable stage reads still defer, and only an
+opener-based review routing; unavailable stage reads skip tenure queueing, and only an
 identified same-tenure stage adds its harness family exclusion.
 The normal claim CAS, live-writer admission, CI admission,
 review-cycle cap and strict merge policy remain in force. Exhaustion cannot

@@ -287,7 +287,7 @@ import { restoreHammerOwnedReview, declineSuppressedAmaRecoveryRereview } from '
 import { handOffRetriggerWithoutJob } from './retrigger-no-job-handoff.mjs';
 import { resolveReviewerTimeoutMs, resolveGeminiReviewerProcessTimeoutMs } from './reviewer-timeout.mjs';
 import { resolveReviewerCeilingSeconds, usesStreamedReviewerCeiling } from './reviewer-timeout-model.mjs';
-import { resolveReviewPopulationRetryConfig } from './role-config.mjs';
+import { loadRoleConfig, resolveReviewPopulationRetryConfig } from './role-config.mjs';
 import { shouldSkipReviewerForStaleDrift } from './stale-drift.mjs';
 import { getStalePostedReviewAutoRereviewSuppression } from './stale-posted-review-rereview.mjs';
 import { carryStalePostedReviewForward } from './review-carry-forward.mjs';
@@ -302,6 +302,7 @@ import {
   reviewerSafetyPassKind,
 } from './watcher-reviewer-pool.mjs';
 import { watcherWakeMatchesSubject } from './watcher-wake.mjs';
+import { createLogChangeGate } from './log-change-gate.mjs';
 
 const DEFAULT_REVIEWER_MODEL_FALLBACK_ALERT_WINDOW_MS = 10 * 60 * 1000;
 const DEFAULT_REVIEWER_MODEL_FALLBACK_ALERT_THRESHOLD = 5;
@@ -309,6 +310,9 @@ const reviewerModelFallbackAlertState = {
   events: [],
   lastAlertMs: null,
 };
+// Process-local diagnostics only; retry the read on every enabled poll.
+// Evicted PR/head keys may warn again; retain at most 4096 recently used keys.
+const tenureRoutingWarnings = createLogChangeGate({ maxEntries: 4096 });
 
 function resolvePositiveIntegerEnv(env, name, fallback) {
   const parsed = Number(env?.[name]);
@@ -996,8 +1000,15 @@ export async function processReviewSubject(entry, ctx) {
       // REBASETRAILER-01: one memoized head-producer read per poll. The review
       // refresh suppression and the gate below both consume this decision.
       let prTenure = null;
+      let prTenureReadError = null;
       let tenureReviewRequired = false;
-      if (effectiveDomainId === CODE_PR_DOMAIN_ID && existing && !subject.terminal) {
+      const warnTenureReadError = error => {
+        const key = `${repoPath}#${prNumber}@${subject.headSha}`;
+        if (!tenureRoutingWarnings.note(key, 'unavailable').changed) return;
+        console.warn(`[watcher] tenure review routing unavailable for ${key}; continuing ordinary handlers: ${error?.message || error}`);
+      };
+      if (effectiveDomainId === CODE_PR_DOMAIN_ID && existing && !subject.terminal
+        && loadRoleConfig().get('worker_pool.tenure.enabled', false) === true) {
         try {
           prTenure = await (ctx.readPrTenure || readPrTenure)({
             repo: repoPath, prNumber, headSha: subject.headSha, rootDir: ROOT });
@@ -1014,15 +1025,20 @@ export async function processReviewSubject(entry, ctx) {
             existing = stmtGetReviewRow.get(repoPath, prNumber);
           }
         } catch (error) {
-          console.warn(`[watcher] tenure review routing deferred for ${repoPath}#${prNumber}: ${error.message}`);
-          return;
+          prTenureReadError = error instanceof Error ? error : new Error(String(error));
+          tenureReviewRequired = false;
+          warnTenureReadError(prTenureReadError);
         }
       }
       let headCloserCommitSuppressionResolver = null;
       const resolveHeadCloserCommitSuppression = () => (headCloserCommitSuppressionResolver
         ||= createHeadCloserCommitSuppressionResolver({
           repoPath, prNumber, headSha: subject.headSha, execFileImpl: execFileAsync, logger: console,
-          readPrTenureImpl: async () => prTenure,
+          readPrTenureImpl: async () => {
+            if (prTenureReadError) throw prTenureReadError;
+            return prTenure;
+          },
+          onTenureReadError: warnTenureReadError,
         }))();
       async function projectGateStatusSafe(reviewRow) {
         if (!subject.headSha) return null;

@@ -112,12 +112,15 @@ This is a process action, not a new product gate or implementation in this repo.
 
 ## Fix and operational contract
 
-Only response status, the six allowed rate headers, and parsed GitHub API error
-envelopes can classify a limit. Status 429 is a limit; status 403 requires a
+Response status, the six allowed rate headers, parsed GitHub API error
+envelopes and gh's anchored stderr error records can classify a limit.
+Status 429 is a limit; status 403 requires a
 zero remaining header, retry-after, or a documented GitHub API error. CLI debug
 HTTP envelopes are buffered privately and discarded after constructing metadata;
-stdout, stderr prose and exception messages never establish a limit. A GraphQL
-`RATE_LIMITED` type is accepted only in a parsed GraphQL HTTP response body.
+stdout, content-echoing stderr and exception messages never establish a limit.
+Debug bodies are discarded without classification. gh's own documented
+rate-limit error line and the metered stderr protocol are accepted; absent
+primary headers they establish only secondary backoff with unknown balance.
 
 Primary zero observations retain the primary reset. Secondary observations
 preserve the measured primary balance and carry `secondaryUntil` and

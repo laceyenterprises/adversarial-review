@@ -134,7 +134,7 @@ for (const [name, error, readError] of [
       execFileImpl: async () => {
         // Quota failures need a bounded reset hint for the metered transport.
         if (name === 'rate limited' || name === 'too many requests') {
-          failure.stderr = `< HTTP/2 ${name === 'rate limited' ? 403 : 429}\n< x-ratelimit-remaining: 0\n< x-ratelimit-reset: ${Math.ceil(Date.now() / 1000) + 1}\n${error.stderr}`;
+          failure.stderr = `* Request at fixture\n< HTTP/2 ${name === 'rate limited' ? 403 : 429}\n< x-ratelimit-remaining: 0\n< x-ratelimit-reset: ${Math.ceil(Date.now() / 1000) + 1}\n\n* Request took 1ms\n${error.stderr}`;
         }
         throw failure;
       },

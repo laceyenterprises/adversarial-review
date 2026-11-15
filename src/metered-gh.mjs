@@ -69,7 +69,6 @@ function parseGhDebug(stderr, resource = 'core') {
   let inRequest = false;
   let diagnosticTail = [];
   let headers = {};
-  let responseBody = [];
   let inHeaders = false;
   let lastResponseRateLimit = null;
   let requestResource = resource;
@@ -82,18 +81,13 @@ function parseGhDebug(stderr, resource = 'core') {
       lastResponseResource = headers['x-ratelimit-resource'] || requestResource;
       lastResponseRateLimit = extractRateLimitObservation(headers, { resource: requestResource, rateLimited: true, status: httpStatus, requestCategory });
     }
-    let data;
-    try { data = JSON.parse(responseBody.join('\n')); } catch { /* Non-JSON bodies carry no error signal. */ }
-    const kind = classifyGitHubRateLimit({ status: httpStatus, headers, data })
-      || (requestResource === 'graphql' && Array.isArray(data?.errors)
-        && data.errors.some(error => error?.type === 'RATE_LIMITED') ? 'secondary' : null);
+    const kind = classifyGitHubRateLimit({ status: httpStatus, headers });
     const observation = extractRateLimitObservation(headers, { resource: requestResource,
       rateLimited: Boolean(kind), kind, status: httpStatus, requestCategory });
     if (httpStatus !== null) requests.push({ status: httpStatus, resource: headers['x-ratelimit-resource'] || requestResource, requestCategory });
     if (observation) observations.push({ ...observation, requestCategory, rateLimited: Boolean(kind) });
     headers = {};
     httpStatus = null;
-    responseBody = [];
     inHeaders = false;
   }
   for (const line of String(stderr || '').split(/\r?\n/)) {
@@ -115,7 +109,6 @@ function parseGhDebug(stderr, resource = 'core') {
     if (statusLine) { httpStatus = Number(statusLine[1]); inHeaders = true; }
     if (inHeaders && line.trim() === '') inHeaders = false;
     if (header && inHeaders) headers[header[1].toLowerCase()] = header[2];
-    if (httpStatus !== null && !inHeaders && !/^[*<>] /.test(line)) responseBody.push(line);
     if (/^\* Request took /.test(line)) {
       flush();
       diagnosticTail = [];
@@ -164,7 +157,7 @@ function responseRateLimited(result, parsed, failed) {
   // Successful PR bodies can discuss rate limits. Only actual API errors and
   // failed commands contribute to the resource failure count.
   const limited = parsed.observations.some(observation => observation.rateLimited)
-    || (failed && isRateLimitedError(result));
+    || (failed && isRateLimitedError({ ...result, stderr: parsed.stderr }));
   if (limited && !parsed.observations.some(observation => observation.rateLimited) && parsed.lastResponseRateLimit) {
     const hint = parsed.lastResponseRateLimit;
     const last = parsed.observations.at(-1);
@@ -184,6 +177,7 @@ function responseRateLimited(result, parsed, failed) {
 }
 
 async function finish(result, { failed = false, resource = 'core', credential = 'default' } = {}) {
+  if (result?.code === 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER' || result?.code === 'ENOBUFS') return result;
   const parsed = parseGhDebug(result?.stderr, resource);
   recordRequests(parsed, credential);
   const limited = responseRateLimited(result, parsed, failed);
@@ -236,6 +230,7 @@ function bridgeCall(action, payload, env) {
 }
 
 function finishSync(result, { failed = false, resource = 'core', env, credential = githubCredential({ env }) } = {}) {
+  if (result?.code === 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER' || result?.code === 'ENOBUFS') return result;
   const parsed = parseGhDebug(result?.stderr, resource);
   recordRequests(parsed, credential);
   const limited = responseRateLimited(result, parsed, failed || Number(result?.status) > 0);

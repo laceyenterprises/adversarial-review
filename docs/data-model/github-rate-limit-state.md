@@ -98,8 +98,13 @@ A primary 403 with remaining zero uses the primary reset header.
 
 Only structured API response evidence establishes a rate limit: status 429,
 403 plus remaining zero, or 403/429 plus retry-after or a documented GitHub API
-error body. A GraphQL response may supply its typed `RATE_LIMITED` error.
-Free exception messages, stdout, stderr prose and PR content have no authority.
+error body. Anchored gh stderr error records (documented rate-limit messages,
+`HTTP 403: <rate-limit message> (<url>)`, or HTTP 429 Too Many Requests)
+also establish a limit, with unknown primary balance unless headers measure it.
+Free exception messages, stdout, content-echoing stderr and PR content have no
+authority. CLI debug bodies are discarded without classification; only their
+response status and allowed headers are used. Buffer-overflow execution failures
+cannot establish quota evidence.
 Daemon merge wrappers preserve typed `githubRateLimitKind`/`budgetDeferred`
 metadata when reducing execution failures. The metered CLI emits the exact
 stderr protocol line `github-rate-limit: primary|secondary|deferred` only for
@@ -118,11 +123,15 @@ it confirms the sending credential's budget through a throttle-exempt
 The endpoint uses `GITHUB_API_URL`, then `GH_API_URL`, then an Enterprise
 `GH_HOST` with `/api/v3`, otherwise GitHub.com. The CLI inherits proxy settings
 and sends `User-Agent: adversarial-review`. All token aliases, including
-Enterprise aliases, bind to the exact admission token; an unavailable token
+Enterprise aliases, bind to the exact admission token; anonymous `default`
+confirmation stays anonymous. An unavailable token for a named credential
 defers for at most two minutes without using ambient credentials.
 `github_budget_confirmation` logs the stored and live readings. Contradictory
 live primary readings correct false zero or a stale balance below the floor;
 secondary holds remain independent.
+Fresh response observations replace zero balances in the recording process and
+its durable store. Merging cached snapshots from peer stores remains conservative;
+a peer's positive snapshot cannot erase a shared zero.
 If the probe itself returns a structured rate limit, its raw response evidence
 is logged and its primary reset or secondary Retry-After is honored. Probe
 response headers describe core quota even when the requested confirmation was

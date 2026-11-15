@@ -38,7 +38,7 @@
       "owner": "shared GitHub request throttle",
       "operatorCredentialScope": "src/operator-gh-read.mjs supplies the operator-cli fallback for credential-less admission and response recording. Explicit tokens retain their normal identity. No document-version or bucket-field changes.",
       "remainingContract": "Measured non-negative primary balance or null when trusted secondary evidence has no primary measurement; secondary observations never manufacture zero.",
-      "admissionConfirmation": "GHFALSEZERO-01: proposed holds above two minutes confirm with the exact credential via GET /rate_limit; contradictory readings correct false zero, unavailable confirmation bounds the next admission hold to two minutes. The exempt gh transport uses GITHUB_API_URL, GH_API_URL or GH_HOST, inherits proxy routing and sends User-Agent; known scope-local failures defer independently of disk evidence."
+      "admissionConfirmation": "GHFALSEZERO-01: proposed holds above two minutes confirm with the exact credential via GET /rate_limit; contradictory readings correct false zero, unavailable confirmation bounds the next admission hold to two minutes. The exempt gh transport uses GITHUB_API_URL, GH_API_URL or GH_HOST, inherits proxy routing and sends User-Agent; known scope-local failures defer independently of disk evidence. Anchored gh stderr error records are accepted without trusting stdout, content echoes or debug bodies; maxBuffer failures never classify. Anonymous default confirmation stays anonymous. Fresh responses replace zero in memory and disk; peer snapshot merges stay conservative."
     }
   ]
 }

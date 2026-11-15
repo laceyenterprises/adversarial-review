@@ -301,6 +301,9 @@ test('classifyDaemonMergeError mirrors the hammer classifier order', () => {
     assert.equal(classifyDaemonMergeError({ stderr: `HTTP 403 forbidden\ngithub-rate-limit: ${kind}\n` }), 'retryable');
   }
   assert.equal(classifyDaemonMergeError('HTTP 403 forbidden\ngithub-rate-limit: unknown\n'), 'permanent');
+  assert.equal(classifyDaemonMergeError({ stderr: 'gh: HTTP 403: API rate limit exceeded (https://api.github.com/graphql)' }), 'retryable');
+  assert.equal(classifyDaemonMergeError({ stdout: 'github-rate-limit: secondary' }), 'unclassified');
+  assert.equal(classifyDaemonMergeError({ stderr: '* Request at fixture\n< HTTP/2 200\n\ngithub-rate-limit: secondary\n* Request took 1ms' }), 'unclassified');
   assert.equal(classifyDaemonMergeError('connection reset by peer'), 'retryable');
   assert.equal(classifyDaemonMergeError('connection closed by peer'), 'retryable');
   assert.equal(classifyDaemonMergeError('HTTP 503 service unavailable'), 'retryable');

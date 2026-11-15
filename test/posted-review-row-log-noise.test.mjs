@@ -1306,7 +1306,9 @@ test('GHBUDGET-01: caught rate-limited reads never count as no progress or emit 
   const { createNoProgressLaneGate } = await import('../src/posted-review-row.mjs');
   const { readNoProgressLane } = await import('../src/watcher-no-progress-lane.mjs');
   const { meteredExecFile } = await import('../src/metered-gh.mjs');
-  const { recordResponseRateLimit } = await import('../src/rate-limit-throttle.mjs');
+  const { recordResponseRateLimit, rateLimitClock } = await import('../src/rate-limit-throttle.mjs');
+  let now = Date.now();
+  t.mock.method(rateLimitClock, 'now', () => now);
   const rootDir = mkdtempSync(join(tmpdir(), 'rate-limit-progress-'));
   tempRoots.add(rootDir);
   const previousStatePath = process.env.GHO_RATE_LIMIT_SHARED_STATE_PATH;
@@ -1328,17 +1330,18 @@ test('GHBUDGET-01: caught rate-limited reads never count as no progress or emit 
   for (let tick = 0; tick < 4; tick++) {
     handler.run = async () => {
       try {
-        await meteredExecFile(async () => { const err = new Error('API rate limit already exceeded'); err.stderr = err.message; throw err; }, 'gh', ['api', 'repos/fixture/repo/pulls/42']);
+        await meteredExecFile(async () => { const err = new Error('API rate limit already exceeded'); err.stderr = 'gh: API rate limit exceeded (HTTP 403)'; throw err; }, 'gh', ['api', 'repos/fixture/repo/pulls/42']);
       } catch { /* Production handlers can handle read failures internally. */ }
       return { handled: true };
     };
     await run();
     assert.equal(readNoProgressLane(rootDir, identity).noProgressTicks, baseline.noProgressTicks);
   }
-  // Headerless failures now persist an exhausted resource window. Model its
-  // recovery before expecting another API call to make ordinary progress.
+  // Primary recovery cannot clear a secondary cooldown. Let that hold expire
+  // before expecting another API call to make ordinary progress.
+  now += 60_001;
   await recordResponseRateLimit({ resource: 'core', remaining: 5000, limit: 5000,
-    resetAt: new Date(Date.now() + 60_000).toISOString() });
+    observedAt: now, resetAt: new Date(now + 60_000).toISOString() });
   let recoveredReads = 0;
   handler.run = async () => {
     await meteredExecFile(async () => { recoveredReads++; return { stdout: '{}', stderr: '' }; }, 'gh', ['api', 'repos/fixture/repo/pulls/42']);

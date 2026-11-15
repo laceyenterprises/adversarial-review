@@ -1347,6 +1347,9 @@ function isReviewerPostAuthFailure(err, { preWriteSaw401 = false } = {}) {
 }
 
 function isRetryableGhTransportError(err, { allowAuthRefresh = false, preWriteSaw401 = false } = {}) {
+  // Admission refused before the write ran; there is no ambiguous write to
+  // reconcile and no transport retry can spend this credential's budget.
+  if (err?.budgetDeferred) return false;
   const detail = buildGhErrorDetail(err);
   const status = Number(err?.status || err?.response?.status || 0);
   if (allowAuthRefresh && isReviewerPostAuthFailure(err, { preWriteSaw401 })) {

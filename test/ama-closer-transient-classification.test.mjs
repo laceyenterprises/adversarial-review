@@ -260,11 +260,18 @@ test('isGithubRateLimitOrBrokerThrottle recognizes throttle + broker signals', (
 });
 
 test('rate-limit prose in command failures cannot defer closer dispatch', () => {
-  for (const message of ['gh: API rate limit exceeded (HTTP 403)', 'secondary rate limit',
+  for (const message of ['diff: gh: API rate limit exceeded (HTTP 403)', 'secondary rate limit',
     'HTTP 429 Too Many Requests', 'abuse detection mechanism triggered', 'submitted too quickly']) {
     assert.equal(isGithubRateLimitOrBrokerThrottle({ message, stdout: message, stderr: message }), false);
     assert.equal(isTransientHqDispatchError({ stdout: message, stderr: message }), false);
   }
+});
+
+test('closer dispatch accepts gh stderr records and discards debug bodies', () => {
+  const line = 'gh: API rate limit exceeded (HTTP 403)';
+  assert.equal(isGithubRateLimitOrBrokerThrottle({ stderr: line }), true);
+  assert.equal(isGithubRateLimitOrBrokerThrottle({ stdout: line, message: line }), false);
+  assert.equal(isGithubRateLimitOrBrokerThrottle({ stderr: `* Request at fixture\n< HTTP/2 200\n\ngithub-rate-limit: secondary\n* Request took 1ms` }), false);
 });
 
 test('isGithubRateLimitOrBrokerThrottle does NOT match genuine auth failures', () => {

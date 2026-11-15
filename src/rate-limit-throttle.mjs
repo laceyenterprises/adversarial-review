@@ -7,6 +7,7 @@ import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { recordApiCall } from './api-telemetry.mjs';
 import { readBudgetBinding, writeBudgetBinding } from './github-budget-bindings.mjs';
+import { ghStderrRateLimitKind } from './gh-error-line.mjs';
 
 const DEFAULT_THROTTLE_FLOOR = 200;
 // A floor may never exceed what a bucket can hold. The anonymous quota (limit
@@ -152,8 +153,8 @@ function responseHeader(headers, name) {
   return entry?.[1] ?? null;
 }
 
-// Only an API response envelope is evidence. Process diagnostics and PR/model
-// content are deliberately absent, including Error.message and stdout/stderr.
+// API envelopes and gh's anchored stderr records are evidence. Arbitrary
+// diagnostics, Error.message, stdout and PR/model content are absent.
 function classifyGitHubRateLimit({ status, headers, data } = {}) {
   status = Number(status);
   if (status !== 403 && status !== 429) return null;
@@ -165,15 +166,18 @@ function classifyGitHubRateLimit({ status, headers, data } = {}) {
 }
 
 function isGitHubRateLimitError(err) {
+  if (err?.code === 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER' || err?.code === 'ENOBUFS') return false;
   return err?.budgetDeferred === true || Boolean(err?.githubRateLimitKind)
+    || Boolean(ghStderrRateLimitKind(err))
     || Boolean(classifyGitHubRateLimit({ status: err?.response?.status ?? err?.status ?? err?.statusCode,
       headers: err?.response?.headers, data: err?.response?.data }));
 }
 
 function rateLimitErrorObservation(err, options = {}) {
+  if (err?.code === 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER' || err?.code === 'ENOBUFS') return null;
   const kind = err?.githubRateLimitKind || classifyGitHubRateLimit({
     status: err?.response?.status ?? err?.status ?? err?.statusCode, headers: err?.response?.headers, data: err?.response?.data,
-  });
+  }) || ghStderrRateLimitKind(err);
   if (!kind) return null;
   if (err?.observation) return { ...err.observation, kind, rateLimited: true };
   return extractRateLimitObservation(err?.response?.headers || {}, {
@@ -331,9 +335,6 @@ function mergeResourceObservations(current, incoming, nowMs = Date.now()) {
     remaining: left.remaining, resetAt: left.resetAt, ...(left.limit ? { limit: left.limit } : {}),
   } : {}), ...secondary };
   if (left.remaining == null) return { ...right, ...secondary };
-  if ((left.remaining === 0 && right.remaining > 0) || (right.remaining === 0 && left.remaining > 0)) {
-    return { ...(observationObservedAtMs(right) >= observationObservedAtMs(left) ? right : left), ...secondary };
-  }
   const leftResetAtMs = observationResetAtMs(left);
   const rightResetAtMs = observationResetAtMs(right);
   if (rightResetAtMs > leftResetAtMs) return { ...right, ...secondary };
@@ -663,7 +664,7 @@ function extractRateLimitObservation(headers, { observedAt = Date.now(), resourc
 async function confirmLiveBudget({ credential, resource, env = process.env }) {
   const token = confirmationTokens.get(credential)
     || (githubCredential({ env }) === credential ? env.GH_TOKEN || env.GITHUB_TOKEN : null);
-  if (!token) throw Object.assign(new Error('confirmation credential unavailable'), { code: 'confirmation-credential-unavailable' });
+  if (!token && credential !== 'default') throw Object.assign(new Error('confirmation credential unavailable'), { code: 'confirmation-credential-unavailable' });
   // gh owns proxy routing, enterprise transport and the required User-Agent.
   const budgets = await rateLimitConfirmation.read({ ...env, GH_TOKEN: token,
     GITHUB_TOKEN: token, GH_ENTERPRISE_TOKEN: token, GITHUB_ENTERPRISE_TOKEN: token });
@@ -792,7 +793,8 @@ function createRateLimitThrottle({
       // The exempt endpoint is authoritative for primary quota, including a
       // stale positive balance below the polling floor. Ordinary response
       // merging remains conservative about concurrent positive observations.
-      const replacesPrimary = confirmedPrimary
+      const replacesPrimary = (confirmedPrimary || (previous?.remaining === 0 && incoming.remaining > 0)
+        || (incoming.remaining === 0 && previous?.remaining > 0))
         && (!previous || observationObservedAtMs(incoming) >= observationObservedAtMs(previous));
       if (replacesPrimary) merged[key] = { ...merged[key], ...incoming };
       if (
@@ -825,6 +827,7 @@ function createRateLimitThrottle({
   }
 
   async function recordRateLimitedCall(resource, credential = 'default', observation = null, confirmedPrimary = false) {
+    resource = observation?.resource || resource;
     // An outer conditional/adapter wrapper may observe the same exception.
     // It must not turn one secondary response into another backoff attempt.
     if (observation?.recorded === true && observation.credential === credential) {
@@ -841,6 +844,8 @@ function createRateLimitThrottle({
   async function confirmedAdmission(resource, credential, key, floor, requestEnv) {
     let current = (await readSharedState())[key] || null;
     if (!githubBudgetBelowFloor(current, floor, nowMs())) return current;
+    if (currentGitHubBudgetScope()?.urgent && current.remaining > 0
+      && !(Date.parse(current.secondaryUntil || '') > nowMs())) return current;
     const primaryLow = current.remaining != null && current.remaining < githubBudgetFloor(current, floor);
     const until = Math.max(primaryLow ? Date.parse(current.resetAt) : 0, Date.parse(current.secondaryUntil || '') || 0);
     if (until - nowMs() <= 120_000) return { ...current, resetAt: new Date(until).toISOString() };
@@ -850,8 +855,13 @@ function createRateLimitThrottle({
     let confirmedFailureUntil = 0;
     try { live = sanitizeObservation(await confirmBudgetImpl({ credential, resource, env: requestEnv }), nowMs()); }
     catch (err) {
-      if (err?.code === 'confirmation-credential-unavailable') throw new GitHubBudgetDeferredError(
-        { ...current, resetAt: new Date(nowMs() + 120_000).toISOString() }, { credential });
+      if (err?.code === 'confirmation-credential-unavailable') {
+        const error = new GitHubBudgetDeferredError({ ...current,
+          resetAt: new Date(Math.max(nowMs() + 120_000, Date.parse(current.secondaryUntil || '') || 0)).toISOString() }, { credential });
+        const scope = currentGitHubBudgetScope();
+        if (scope) { scope.deferred = true; scope.budgetDeferral = error; }
+        throw error;
+      }
       const observation = rateLimitErrorObservation(err, { resource: 'core', observedAt: nowMs(),
         requestCategory: 'rate_limit_probe', consumer: env.GHO_API_CONSUMER || env.GITHUB_REVIEWER_TOKEN_ENV || 'adversarial-review' });
       if (observation) {

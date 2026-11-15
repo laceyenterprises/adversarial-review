@@ -2835,8 +2835,6 @@ export function isGithubRateLimitOrBrokerThrottle(errOrText) {
   if (isGitHubRateLimitError(errOrText)) return true;
   const detail = errDetailText(errOrText);
   if (!detail) return false;
-  // The metered subprocess serializes typed evidence before discarding HTTP data.
-  if (/^github-rate-limit: (primary|secondary|deferred)$/m.test(String(errOrText?.stderr || errOrText))) return true;
   // OAuth-broker unavailability while it fetches/refreshes the bot token.
   return detail.includes('http 503')
     || detail.includes('broker fetch')

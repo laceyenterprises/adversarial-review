@@ -227,7 +227,7 @@ export function isOrphanRecoveryWait(result) {
   return result?.recoveryWait === true || [
     'ama-coexistence-operation-timeout', 'ama-closer-dispatch-backgrounded',
     'operator-label-classification-pending', 'AMA_COEXISTENCE_OPERATION_TIMEOUT',
-    'stacked-base-read-failed',
+    'stacked-base-read-failed', 'rate-limited-read',
   ].includes(reason) || transientHarnessHold || result?.code === 'AMA_COEXISTENCE_OPERATION_TIMEOUT' || result?.status === 429 || result?.statusCode === 429
     || isGitHubRateLimitError(result);
 }

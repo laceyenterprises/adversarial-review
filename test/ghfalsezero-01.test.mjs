@@ -47,6 +47,43 @@ test('status and parsed API error evidence classify; arbitrary diagnostics do no
   assert.equal(isGitHubRateLimitError({ status: 403, response: { headers: { 'x-ratelimit-remaining': '0' } } }), true);
 });
 
+test('gh stderr error records classify without trusting content or debug bodies', () => {
+  for (const stderr of [
+    'gh: HTTP 403: API rate limit exceeded (https://api.github.com/repos/example/widget)',
+    'HTTP 429: Too Many Requests (https://api.github.com/graphql)',
+    'gh: You have exceeded a secondary rate limit. (HTTP 403)',
+    'GraphQL: API rate limit exceeded for fixture. (rateLimit)',
+    'GraphQL: API rate limit exceeded for user ID 123. (rateLimit)',
+    'github-rate-limit: deferred',
+  ]) {
+    assert.equal(isGitHubRateLimitError({ stderr }), true, stderr);
+    assert.equal(rateLimitErrorObservation({ stderr }).remaining, null);
+    assert.equal(isGitHubRateLimitError({ stdout: stderr, message: stderr }), false);
+    assert.equal(isGitHubRateLimitError({ stderr: `diff: ${stderr}` }), false);
+    assert.equal(isGitHubRateLimitError({ stderr: `* Request at fixture\n< HTTP/2 200\n\n${stderr}\n* Request took 1ms` }), false);
+  }
+});
+
+test('execFile maxBuffer rejection with huge content never establishes quota evidence', async t => {
+  const f = fixture(t);
+  const previous = process.env.GHO_RATE_LIMIT_SHARED_STATE_PATH;
+  process.env.GHO_RATE_LIMIT_SHARED_STATE_PATH = join(f.dir, 'overflow.json');
+  t.after(() => {
+    if (previous === undefined) delete process.env.GHO_RATE_LIMIT_SHARED_STATE_PATH;
+    else process.env.GHO_RATE_LIMIT_SHARED_STATE_PATH = previous;
+  });
+  const error = Object.assign(new RangeError('stdout maxBuffer length exceeded'), {
+    code: 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER',
+    stdout: '+ API rate limit exceeded\n'.repeat(100_000),
+    stderr: '* Request at fixture\n< HTTP/2 429\n< retry-after: 60\n\n* Request took 1ms\nAPI rate limit exceeded',
+  });
+  assert.equal(isGitHubRateLimitError(error), false);
+  assert.equal(rateLimitErrorObservation(error), null);
+  await assert.rejects(meteredExecFile(async () => { throw error; }, 'gh', ['pr', 'diff', '1'], { env: {} }), e => e === error);
+  assert.equal(error.rateLimited, undefined);
+  assert.deepEqual(await f.throttle.readSharedState(), {});
+});
+
 test('secondary 403 keeps 4000 primary requests and holds only for retry-after', async t => {
   const f = fixture(t);
   const observation = rateLimitErrorObservation({ status: 403, response: { headers: {

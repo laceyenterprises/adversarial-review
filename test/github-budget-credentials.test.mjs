@@ -256,7 +256,7 @@ for (const retryAfter of [null, '120']) test(`GHSCOPE-01: a mixed command keeps 
   await withGitHubBudgetScope({}, async () => {
     await assert.rejects(meteredExecFile(async () => {
       throw Object.assign(new Error('GraphQL: API rate limit exceeded'), {
-        stderr: `* Request at fixture\n< HTTP/2.0 200 OK\n< X-Ratelimit-Resource: core\n< X-Ratelimit-Remaining: 4900\n< X-Ratelimit-Reset: 4102444800\n* Request took 1ms\n* Request at fixture\n< HTTP/2.0 200 OK\n${retryAfter ? `< Retry-After: ${retryAfter}\n` : ''}\n{"errors":[{"type":"RATE_LIMITED"}]}\n* Request took 1ms\n`,
+        stderr: `* Request at fixture\n< HTTP/2.0 200 OK\n< X-Ratelimit-Resource: core\n< X-Ratelimit-Remaining: 4900\n< X-Ratelimit-Reset: 4102444800\n* Request took 1ms\n* Request at fixture\n< HTTP/2.0 200 OK\n${retryAfter ? `< Retry-After: ${retryAfter}\n` : ''}\n{"errors":[{"type":"RATE_LIMITED"}]}\n* Request took 1ms\nGraphQL: API rate limit exceeded\n`,
       });
     }, 'gh', ['pr', 'view', '7'], { env }), /rate limit/);
     await meteredExecFile(async () => { calls++; return { stdout: '{}', stderr: '' }; }, 'gh', ['api', 'repos/example/alpha'], { env });

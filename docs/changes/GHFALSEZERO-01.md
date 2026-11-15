@@ -6,7 +6,7 @@ GitHub rate limits require structured response evidence. Secondary observations
 preserve primary remaining and hold a separate minute-scale backoff. Long
 admission holds confirm through the exact credential's `/rate_limit`; false
 zeros are corrected. Reviewer 401 refresh retains the selected reviewer role.
-Sibling GitHub classifiers and hammer helpers no longer accept rate-limit prose.
+Sibling GitHub classifiers accept only structured evidence or anchored gh stderr records; hammer helpers consume the reserved transport protocol.
 
 The [SEV0 report](../postmortems/SEV0-false-github-rate-limit-2026-11-14.md)
 includes the incident timeline, incorrect initial diagnosis, command-path
@@ -41,46 +41,52 @@ evidence. The sync bridge adds `admit` and returns recorded observations.
 `GITHUB_REVIEWER_TOKEN_ENV` pins selected reviewer refresh identity.
 Canonical [store contract](../data-model/github-rate-limit-state.md) is updated.
 
+## PR update
+
+Rebased onto main at `9fbeab377`, preserving REVIEWTHROTTLESLEEP-01 typed
+pre-model deferral, FINDINGSSTATUSTIMEOUT-01 load-aware probes and TENUREGATE-01
+opt-in tenure reads with ordinary poll continuation on read failure.
+
+Both blocking review findings are covered: daemon merge accepts the metered
+stderr protocol, and confirmed budget reads pass the configured environment
+into a probe whose environment defaults to `process.env`. gh's anchored stderr
+error records also establish limits. Debug bodies, stdout, content echoes and
+maxBuffer failures cannot establish quota evidence.
+
+Fresh response evidence replaces zero in memory and disk; peer-store snapshot
+merging stays conservative. Header resource attribution wins over caller hints.
+Anonymous default buckets retain their admission behavior. Urgent closer reads
+use positive reserve capacity without an unnecessary probe, and unavailable
+confirmation propagates deferral accounting to the enclosing scope. A review
+write refused before execution propagates its budget deferral without ambiguous
+write reconciliation. Existing recovery reasons and bounded shell retries keep
+their retry treatment. Fixtures now use structured signals and preserve
+secondary cooldowns independently of primary recovery.
+
 ## Verification
 
-Tests run one file at a time under netguard, each bounded to 600 seconds:
+Each selected test file runs individually, bounded to 600 seconds, under:
 
 ```sh
-NETGUARD_LOG=<isolated-log> PATH=<netguard-bin>:$PATH \
+NETGUARD_LOG=<isolated-log> PATH=/Users/Shared/evalbench/work/netguard/bin:$PATH \
   PYTHONPATH=<worker-pool-python> python3 -m cwp_dispatch.worker_validation \
-  --repo-root . --timeout-seconds 600 --command node --test test/<file>
+  --repo-root . --timeout-seconds 600 --command \
+  node --import ./test/helpers/rate-limit-state-isolation.mjs --test test/<file>
 ```
 
-Passing scoped files: `ghfalsezero-01` (19), `rate-limit-throttle` (27),
-`gh-cli-auth-outage-remint` (17), `reviewer-context-auth` (28),
-`metered-gh-cli` (18), `metered-gh-sync-env` (8), `etag-cache` (13),
-`watcher-github-budget` (4), `branch-protection` (18),
-`ama-closer-transient-classification` (36), `ama-daemon-merge` (103),
-`closergates-01` (14), `history-read-retry` (27),
-`watcher-claim-loop` (180), `duplicate-content` (5),
-`github-budget-credentials` (16), `watcher-auto-refresh-stale-posted-review` (47),
-`ama-hammer-background-dispatch` (148), `msm-04-single-route` (25).
-Confirmation-probe refusals retain their structured cooldown and core resource
-attribution; fixtures cover both core and GraphQL admission.
-Shellcheck: no new warning-or-higher findings versus origin/main in the four
-changed hammer scripts (existing counts 38/19/0/27).
-`npm run lint`: zero errors (existing warnings). `npm run typecheck:contracts`: passed.
-Full suites and the demo were not run, following this ticket's scoped-test constraint.
+The isolation preload delegates each file to the repository sandbox, preserving
+synthetic state, offline executors and child-leak checking. The full local suite
+is omitted under this ticket's explicit instruction; GitHub CI owns that run.
 
-Final remediation verification uses the checked-in `bin/run-bounded.sh` and
-`node test/run-tests.mjs <explicit test files>` to isolate synthetic state.
-The focused rate-limit, CLI, conditional-cache and daemon unit group passed
-175 tests across four files. Confirmation fixtures cover GitHub.com, Enterprise,
-API URL precedence, proxy-environment inheritance, User-Agent and structured
-403 refusal evidence. Sync fixtures cover known long holds with missing and
-healthy disk buckets. Shell syntax passed; shellcheck remains at 38 existing
-warning-or-higher findings with zero additions. Catalog validation passed
-98 entries and contract typechecking passed. The full local suite remains
-omitted under the remediation scope rule; PR-head CI owns it.
+All 1,621 tests passed across 37 individually invoked files, including every
+file reported failing by the supplied CI run and every changed test file.
+The watcher claim-loop passed 185 tests; tenure routing passed 30 tests.
+The PR update comment lists the selected files.
 
-The remaining focused group passed 81 tests across five files. Watcher claim-loop,
-watcher daemon wiring and SMV checks passed 320 tests; reviewer budget fixtures
-passed all eight after narrowing their immediate-deferral window to one minute
-(long-hold confirmation has dedicated coverage). Total: 584 passing targeted
-tests across 13 files. `npm run lint` passed with zero errors and 149 existing
-warnings; `git diff --check` passed. State source projections remain unchanged.
+`npm run lint` passed with zero errors (149 existing warnings),
+`npm run typecheck:contracts` passed, and
+`bash demo/research-finding-walkthrough.sh` passed with byte-stable deliveries.
+Shell syntax passed; shellcheck warning-or-higher findings match origin/main
+exactly in the four changed hammer scripts (39/19/27/0; no additions).
+SMV source projections passed unchanged; the generated data-model catalog is
+left to main automation, with the canonical fragment updated here.

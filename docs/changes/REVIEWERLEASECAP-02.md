@@ -6,7 +6,8 @@ Clamp reviewer claims and process budgets after load scaling and composition;
 bound evidence-based no-progress reclaim independently. Preserve session fencing,
 late-review recovery and typed GitHub budget-deferral reset holds. See the
 [SEV2 fix report](../postmortems/SEV2-REVIEWERLEASECAP-02-absolute-reviewer-lease-ceiling.md).
-Phase 0 PR #1883 remains open; this branch is based on `origin/main`.
+Phase 0 REVIEWERLEASECAP-01 is merged; its former oversized-lease
+reproductions now assert the repaired absolute ceiling.
 
 ## Interface changes
 
@@ -59,3 +60,29 @@ Final comment-only remediation:
 
 No persistent shape, lifecycle value, smoke promise or post-deploy verification
 step changed. No generated state index exists in this checkout.
+
+## PR #1885 rebase repair
+
+Rebased onto main including TENUREGATE-01, GHFALSEZERO-01 and the
+REVIEWERLEASECAP-01 report. Resolved reattach imports by retaining both the
+structured rate-limit classifier and absolute ceiling. Preserved main's tenure
+gating and rate-limit state declarations alongside the lease contract, and
+converted the Phase 0 reproductions to repaired-cap assertions. Retained the
+prior persisted-expiry and file-backed first-output remediation.
+
+Updated four stale regression fixtures to expect the shared three-hour ceiling,
+unscaled silence bounds and stdout-only model progress. Removed the prior
+hand-edited generated catalog field; canonical data-model documentation remains
+in place. No runtime policy beyond the reviewed lease change was introduced.
+
+Repair validation: 18 files, 779 tests passed. Each file ran individually
+with `python3 -m cwp_dispatch.worker_validation --repo-root .
+--timeout-seconds 600 --command node --test <file>` under the required netguard
+PATH and per-file `NETGUARD_LOG` in `/tmp/reviewerleasecap-validation/`.
+This includes all PR-touched test files, the four corrected regression files,
+`reviewer-github-budget`, `rate-limit-throttle`, `ghfalsezero-01` and `ten-06`.
+Watcher claim-loop: 185 passed; reattach: 92 passed.
+`npm run lint` passed (zero errors, 149 existing warnings), scoped ESLint
+`--fix` made no changes, `npm run typecheck:contracts` passed, and
+`bash demo/research-finding-walkthrough.sh` passed. State declaration comparison
+confirmed every main entry is preserved. `git diff --check` passed.

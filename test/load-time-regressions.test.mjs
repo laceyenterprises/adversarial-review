@@ -84,8 +84,8 @@ for (const maxMultiplier of [6, 20]) {
     assert.ok(resolveGeminiReviewerProcessTimeoutMs({}, { plan: saturated }) <= capMs);
     assert.ok(capMs - resolveGeminiReviewerProcessTimeoutMs({}, { plan: saturated }) < saturated.chunkCount);
     const huge = { ADVERSARIAL_REVIEW_AGY_CHUNK_TIMEOUT_CAP_MS: String(MAX_TIMER_DELAY_MS + 1000) };
-    assert.equal(resolveAgyChunkTimeoutCapMs(huge), MAX_TIMER_DELAY_MS);
-    assert.equal(resolveGeminiReviewerProcessTimeoutMs(huge, { plan: { timeoutMs: MAX_TIMER_DELAY_MS } }), MAX_TIMER_DELAY_MS);
+    assert.equal(resolveAgyChunkTimeoutCapMs(huge), capMs);
+    assert.equal(resolveGeminiReviewerProcessTimeoutMs(huge, { plan: { timeoutMs: MAX_TIMER_DELAY_MS } }), capMs);
   });
 
   test(`LEASEFAIR-04: daemon reservation survives the effective poll at maximum load x${maxMultiplier}`, async t => {

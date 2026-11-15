@@ -8,6 +8,9 @@ import { setTimeout as delay } from 'node:timers/promises';
 import { promisify } from 'node:util';
 
 const flock = promisify(fsExt.flock);
+// Live reads per observation, and how often an already-paged wait is re-read.
+export const LIVE_READS_PER_PASS = 10;
+export const PAGED_RECHECK_MS = 15 * 60 * 1000;
 // Allow sixteen serialized fsync writers headroom on a loaded runner.
 const configuredLockWaitMs = Number(process.env.AMA_CLOSURE_LAG_LOCK_WAIT_MS);
 const LOCK_WAIT_MS = Number.isFinite(configuredLockWaitMs) && configuredLockWaitMs > 0
@@ -110,7 +113,7 @@ async function fetchLiveState(repo, prNumber) {
   return fetchPullRequestHeadAndState(repo, prNumber, { withLabels: false });
 }
 
-function markTerminal(state, key, { repo, prNumber, headSha, merged, mergedAt, now }, events) {
+function markTerminal(state, key, { repo, prNumber, headSha, merged, mergedAt, now, discovered = false }, events) {
   const pr = state.prs[key];
   if (merged && pr.eligibleAt != null && !pr.terminal) {
     const parsed = Date.parse(mergedAt);
@@ -118,7 +121,9 @@ function markTerminal(state, key, { repo, prNumber, headSha, merged, mergedAt, n
     const lagMs = Math.max(0, end - pr.eligibleAt);
     events.push({ event: 'ama.closure_lag', repo, pr: prNumber, headSha: pr.headSha,
       eligible_at: new Date(pr.eligibleAt).toISOString(), merged_at: new Date(end).toISOString(), lag_ms: lagMs });
-    state.samples.push({ at: now, lagMs, pr: key, reason: pr.reason });
+    // A live read can discover an arbitrarily old merge; date that sample by its
+    // completion so it cannot hold the rolling 24-hour p95 above the SLO.
+    state.samples.push({ at: discovered ? Math.min(end, now) : now, lagMs, pr: key, reason: pr.reason });
   }
   pr.headSha = headSha || pr.headSha;
   pr.terminal = true;
@@ -192,11 +197,19 @@ export async function observeClosureLag({ rootDir, repo, prNumber, headSha, elig
     }
     pr.reason ??= 'merge-pending';
     if (merged || closed) markTerminal(state, key, { repo, prNumber, headSha, merged, mergedAt, now }, events);
-    // Only undelivered per-PR breaches need a live read. Keep network IO out of
-    // the file lock, then fence each result against the original wait/head.
+    // Undelivered per-PR breaches need a live read before paging. Paged waits
+    // are re-read too (throttled) so a merge the watcher never reported still
+    // turns terminal; paging decides re-paging, not whether the PR is open.
+    // Bounded per pass, least recently read and oldest first. Keep network IO
+    // out of the file lock, then fence each result against the original wait/head.
+    const paged = (key) => state.breaches[`pr:${key}`]?.paged === true;
     const candidates = Object.entries(state.prs)
       .filter(([key, value]) => !value.terminal && value.eligibleAt != null
-        && now - value.eligibleAt > 3600000 && !state.breaches[`pr:${key}`]?.paged)
+        && now - value.eligibleAt > 3600000 && (!paged(key)
+          || value.liveCheckedAt == null || now - value.liveCheckedAt >= PAGED_RECHECK_MS))
+      .sort(([a, x], [b, y]) => paged(a) - paged(b)
+        || (x.liveCheckedAt ?? 0) - (y.liveCheckedAt ?? 0) || x.eligibleAt - y.eligibleAt)
+      .slice(0, LIVE_READS_PER_PASS)
       .map(([key, value]) => ({ key, headSha: value.headSha, eligibleAt: value.eligibleAt }));
     return candidates.length ? { candidates } : summarizeLag(state, { now, sloMs }, events);
   }, logger);
@@ -210,6 +223,7 @@ export async function observeClosureLag({ rootDir, repo, prNumber, headSha, elig
         const live = await fetchLiveStateImpl(target.repo, target.prNumber);
         observations.push({ ...candidate, ...target, live });
       } catch (error) {
+        observations.push({ ...candidate, ...target, unreadable: true });
         // An unreadable PR is still pending for diagnostic paging; never silently
         // discard a genuine breach because GitHub is unavailable.
         logger?.warn?.(`AMA closure-lag live state check failed for ${candidate.key}: ${error.message}`);
@@ -217,14 +231,17 @@ export async function observeClosureLag({ rootDir, repo, prNumber, headSha, elig
     }
     result = await locked(rootDir, (state) => {
       for (const observation of observations) {
-        const { key, headSha, eligibleAt, live } = observation;
+        const { key, headSha, eligibleAt, live, unreadable } = observation;
         const pr = state.prs[key];
         if (!pr || pr.terminal || pr.headSha !== headSha || pr.eligibleAt !== eligibleAt) continue;
+        // A failed read is an attempt (it rotates the queue) but stays pending.
+        pr.liveCheckedAt = now;
+        if (unreadable) continue;
         const liveState = String(live?.state || live?.prState || '').trim().toUpperCase();
         const merged = live?.merged === true || liveState === 'MERGED';
         if (merged || liveState === 'CLOSED') {
           markTerminal(state, key, { ...observation, headSha: live?.headRefOid || live?.headSha || headSha,
-            merged, mergedAt: live?.mergedAt, now }, events);
+            merged, mergedAt: live?.mergedAt, now, discovered: true }, events);
         }
       }
       return summarizeLag(state, { now, sloMs }, events, candidates);

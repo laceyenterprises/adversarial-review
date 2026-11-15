@@ -9,8 +9,8 @@ deduplicated SEV1 pages. It grants no merge authority and never releases leases.
 
 | Field | Shape | Contract |
 |---|---|---|
-| `prs` | object keyed by `repo#PR` | Each entry may contain `closerSeenAt`, `deferredAt`, `eligibleAt`, `headSha`, `reason`, `terminal`, and `terminalAt`. Timestamps are epoch milliseconds. |
-| `samples` | array | Completion observations `{ at, lagMs, pr, reason }` used in rolling p95 lag. |
+| `prs` | object keyed by `repo#PR` | Each entry may contain `closerSeenAt`, `deferredAt`, `eligibleAt`, `headSha`, `liveCheckedAt`, `reason`, `terminal`, and `terminalAt`. Timestamps are epoch milliseconds. `liveCheckedAt` is the last live-state read attempt for the current wait. |
+| `samples` | array | Completion observations `{ at, lagMs, pr, reason }` used in rolling p95 lag. `at` is the observation time; for a merge discovered by the observer's live read it is the merge time, capped at the observation time, so a late reconciliation of an old merge falls outside the 24-hour window. |
 | `breaches` | object keyed by `p95` or `pr:repo#PR` | Each value contains an immutable breach `event` and a `paged` boolean. Successful delivery sets `paged`; failures leave it false for retry. |
 | `sloMs` | optional number | Last supplied p95 SLO, defaulting to 1800000 milliseconds when absent. |
 
@@ -55,7 +55,14 @@ callers supply the snapshot's observation time rather than its delivery time.
 The optional scheduling field `deferredAt` requires no migration.
 
 Before creating or retrying an undelivered per-PR breach, the observer reads
-that PR's live state once through an injectable reader. Merged or closed PRs
+that PR's live state once through an injectable reader. Waits whose per-PR
+breach already paged are also re-read, at most once per `PAGED_RECHECK_MS`
+(15 minutes) each, because paging decides re-paging, not whether the PR is
+still open. Each observation reads at most `LIVE_READS_PER_PASS` (10) PRs:
+undelivered breaches first, then least recently read, then oldest
+`eligibleAt`. Every attempt, including a failed read, records `liveCheckedAt`
+on the still-matching wait; a failed or ambiguous read never marks it terminal.
+Only waits read in this observation may open a new per-PR breach. Merged or closed PRs
 become terminal and their per-PR pages are suppressed, even when lifecycle sync
 no longer lists them. A merge supplies its live `mergedAt` to the existing
 completion sample calculation. The read runs outside the file lock; its result

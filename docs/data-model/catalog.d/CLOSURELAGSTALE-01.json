@@ -1,0 +1,9 @@
+{
+  "version": 1,
+  "entries": [
+    {
+      "id": "ama-closure-lag",
+      "pagedRecheckContract": "Waits whose per-PR breach already paged are re-read live at most once per PAGED_RECHECK_MS (15 minutes); each observation reads at most LIVE_READS_PER_PASS (10) PRs, undelivered breaches first, then least recently read (prs[].liveCheckedAt), then oldest eligibleAt. Failed or ambiguous reads stay pending. Samples for merges discovered by that live read are dated by merge time, capped at observation time."
+    }
+  ]
+}

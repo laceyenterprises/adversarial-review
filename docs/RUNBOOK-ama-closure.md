@@ -6398,8 +6398,10 @@ post-merge receipt verification. Terminal diagnostic entries survive stale
 eligibility and backlog observations; reopening requires a newer OPEN
 observation at a different known head. Before emitting or retrying an
 undelivered per-PR breach, the monitor reads that PR live once, independently of
-lifecycle sync's open-row list. Merged or closed state settles the entry and
-suppresses its page. Reads occur outside the state lock and cannot overwrite a
+lifecycle sync's open-row list. Already-paged waits are re-read at most every
+15 minutes, at most 10 reads per observation, so a PR that paged and then merged
+outside an observed walk still leaves the queue-depth gauge and the p95.
+Merged or closed state settles the entry and suppresses its page. Reads occur outside the state lock and cannot overwrite a
 concurrently changed wait/head. Unreadable state logs a warning and retains
 ordinary paging. There are no new configuration keys or SLO changes. A rolling
 24-hour p95 includes completed lags and pending eligible waits. Exceeding the configured SLO or any eligible wait over 60 minutes creates

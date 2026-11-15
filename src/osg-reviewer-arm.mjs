@@ -1,6 +1,8 @@
 /** Optional per-subject proposals; routing, accounts and verdict authority remain with their owners. */
 import { spawn } from 'node:child_process';
 import { getConfig } from './config-loader.mjs';
+import { resolveAgentOsPython } from './agent-os-python.mjs';
+import { loadAwareTimeoutMs } from './load-aware-timeout.mjs';
 import { applyEffectiveReviewerRoute, REVIEWER_ROUTE_BY_MODEL, reviewerRefusesBuilder } from './adapters/subject/github-pr/routing.mjs';
 
 function recordReason(log, reason, repoPath, prNumber) {
@@ -21,24 +23,36 @@ export function reviewerArmExecution(route) {
   return arm?.harness === route?.reviewerModel ? { reviewerArm: arm } : {};
 }
 
-export function reviewerArmOwner(value, { env = process.env, timeoutMs = 1500 } = {}) {
+const OWNER_ERRORS = new Set(['error-owner-spawn', 'error-owner-import', 'error-owner-timeout',
+  'error-owner-exit', 'error-owner-invalid-json']);
+
+export function reviewerArmOwner(value, { env = process.env, timeoutMs = loadAwareTimeoutMs(5000, { maxMs: 30000 }) } = {}) {
   return new Promise((resolve, reject) => {
-    const child = spawn(env.HQ_PYTHON3 || env.AGENT_OS_PY || 'python3', ['-B', '-m', 'cwp_dispatch.osg_reviewer'],
-      { env, stdio: ['pipe', 'pipe', 'ignore'] });
+    let launch;
+    try { launch = resolveAgentOsPython({ env }); } catch { reject(Error('error-owner-spawn')); return; }
+    const child = spawn(launch.python, ['-B', '-m', 'cwp_dispatch.osg_reviewer'],
+      { env: launch.env, cwd: launch.cwd, stdio: ['pipe', 'pipe', 'pipe'] });
     let output = '';
-    const timer = setTimeout(() => child.kill('SIGKILL'), timeoutMs);
-    child.on('error', error => { clearTimeout(timer); reject(error); });
+    let stderr = '';
+    let failure;
+    const timer = setTimeout(() => { failure = 'error-owner-timeout'; child.kill('SIGKILL'); },
+      Number.isFinite(timeoutMs) ? Math.max(1, Math.min(30000, timeoutMs)) : 30000);
+    child.on('error', () => { clearTimeout(timer); reject(Error('error-owner-spawn')); });
     child.stdin.on('error', () => {});
+    // Retain only bounded private evidence to classify an import failure.
+    child.stderr.on('data', chunk => { stderr = (stderr + chunk).slice(-8192); });
     child.stdout.on('data', chunk => {
       output += chunk;
-      if (output.length > 131072) child.kill('SIGKILL');
+      if (output.length > 131072) { failure = 'error-owner-invalid-json'; output = ''; child.kill('SIGKILL'); }
     });
     child.on('close', code => {
       clearTimeout(timer);
       try {
-        if (code !== 0) throw Error('owner unavailable');
+        if (failure) throw Error(failure);
+        if (code !== 0) throw Error(/ModuleNotFoundError|No module named/.test(stderr)
+          ? 'error-owner-import' : 'error-owner-exit');
         resolve(JSON.parse(output));
-      } catch { reject(Error('owner unavailable')); }
+      } catch (error) { reject(Error(OWNER_ERRORS.has(error.message) ? error.message : 'error-owner-invalid-json')); }
     });
     child.stdin.end(JSON.stringify(value));
   });
@@ -72,8 +86,8 @@ export async function applyReviewerArm({ baseRoute, domainId, repoPath, prNumber
       return baseRoute;
     }
     return { ...baseRoute, ...REVIEWER_ROUTE_BY_MODEL[arm.harness], reviewerArm: { ...arm }, reviewerArmDefaultRoute: currentRoute };
-  } catch {
-    recordReason(log, 'error-owner-unavailable', repoPath, prNumber);
+  } catch (error) {
+    recordReason(log, OWNER_ERRORS.has(error?.message) ? error.message : 'error-owner-unavailable', repoPath, prNumber);
     return baseRoute;
   }
 }

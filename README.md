@@ -4021,13 +4021,20 @@ cross-family and Gemini integrity guards still run; title routing, posting,
 verdicts, signed reviewed attestations and merge authority retain their owners.
 
 The bounded, secret-free stdio request invokes `cwp_dispatch.osg_reviewer` from
-the installed Agent OS Python environment, retaining the full `owner/repo` identity
+the configured Agent OS deployment, retaining the full `owner/repo` identity
 and resolving the incumbent against the domain route table. That owner reads the canonical arm
 contract, policy and budget, exact publication provenance and classified stratum,
 and persists one immutable assignment per ticket before returning an arm. An
 unavailable owner or missing classification returns the default. The whole owner
-process has a 1.5 second ceiling; it never installs dependencies or migrates a
-ledger. Only stable fallback tokens are logged. All modes ship off; host flips
+process uses a 5-second nominal budget, scaled by the existing
+`adversarial.reviewer.load_aware` policy up to an absolute 30-second ceiling;
+it never installs dependencies or migrates a ledger. The deployment is resolved
+from `AGENT_OS_DEPLOY_CHECKOUT` or `roots.deploy`. The interpreter is
+`HQ_PYTHON3`, then `AGENT_OS_PY`, then the deployment's `runtime/python/bin/python3`
+when present, then `python3`. Explicit deployment package roots replace ambient
+`PYTHONPATH`, and the child runs in that deployment. Spawn, import, timeout,
+exit and invalid-JSON failures log distinct stable `error-owner-*` tokens without
+stderr and retain the default route. All modes ship off; host flips
 belong to the configuration writer's operating runbook.
 
 The initial executable surface is native Codex/Claude under `cli-direct`, with

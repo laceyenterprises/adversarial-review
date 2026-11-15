@@ -14,7 +14,7 @@ an API drain nor abuse. No live state was changed while implementing this fix.
 
 | Time | Observation |
 | --- | --- |
-| 18:40:07 | Two first-pass reviews start. One diff contains “rate limit” four times; the other contains none. |
+| 18:40:07 | Two first-pass reviews start. The first zero below predates the large PR’s first diff fetch in call-log ordering; attribution to that PR is disputed. |
 | 18:40:11–12 | The reviewer core bucket is recorded as 0/5,400, reset 19:40:02. Both reviewers sleep about 3,589 seconds inside the unscoped throttle, holding both credential slots; two more reviews are deferred. |
 | 19:40:02 | Reviewers wake and encounter expired-token 401s. Retained logs show refresh choosing the watcher's role. |
 | 19:40:05.9 | A reviewer core request returns 404. The retained HTTP row categorizes it as `other`. |
@@ -22,6 +22,12 @@ an API drain nor abuse. No live state was changed while implementing this fix.
 | 19:50:46 | SRE removes the forced-zero entry under its lock, retaining a backup, and restarts the watcher. |
 | 19:51:43 | The first real response reads 5,032/5,400, reset 20:32:17. The earlier zero was manufactured locally. |
 | 19:54 | SRE terminates the orphaned sleeping reviewer, whose row was already failed-orphan, to prevent another stale write on waking. |
+| 21:19–~21:23 | A reviewer’s 401 re-mint selects the watcher’s role; another overflow falsely zeroes the shared credential. Polling resumes after the stalled reviewer is ended and the watcher restarted. |
+
+The two shared-watcher-credential outage windows were **19:40–19:50Z** and
+**21:19–approximately 21:23Z**. Zeros at 20:22Z, 21:32Z, 22:21Z and 01:46Z
+(the last on November 15) affected reviewer-only tokens and stalled individual
+reviews; they were not additional shared-watcher outages.
 
 Daily logs contain roughly 1,200–5,600 core calls per hour across **all**
 credentials; that aggregate does not establish exhaustion of this installation.
@@ -43,34 +49,39 @@ from reviewer slots to discovery and closure across repositories. Processes
 trusted the stored zero without checking the live budget before an hour-long
 sleep or deferral.
 
-### Command reconstruction and remaining evidence gap
+### Command reconstruction and proven trigger
 
-Retained reviewer run stderr stops at “fetching diff” and subsequently shows a
-401 refresh with the watcher role. The command is `gh pr diff <synthetic-pr>
---repo fixture/repo`, called by `fetchPRDiff` through `execGhWithRetry` and the
-metered CLI wrapper. The non-phrase review later logs a completed 12,475-byte
-diff; the phrase-bearing review never logs completion. Neither retained run
-logs a “diff too large” warning or entry into the PR-files fallback. The outer
-logical `diff_fetch` row appears only when this nested call returns, so it does
-not retain the error that caused the nested throttle sleep.
+Later evidence closes the trigger gap: one product-repository PR’s `gh pr diff`
+was approximately 14.7 MB. Two generated pages each embed a roughly 3.6 MB JSON
+line; a small correction rewrites both lines, including their old and new copies
+in the diff. This exceeded the reviewer’s 10 MB `maxBuffer`. `execFile` rejected
+with `stdout maxBuffer length exceeded`, carrying the first 10 MB of the diff
+in `err.stdout`. Study prose there contains “rate limits” and “rate-limited”.
+The old regex treated that content as quota evidence and forced the credential
+to zero until the primary reset. The files-API fallback was aftermath, not the
+trigger; the nearby 404 alone did not establish this causal chain.
 
-The initial failed response/output at 18:40:11 and the offending output at
-19:40:06 were **not retained**. The physical HTTP rows lack per-command or PR
-correlation. Consequently the nearby 19:40:05.9 404 cannot conclusively be
-assigned as the triggering failure, nor can an exact matched output fragment
-be recovered. “rate limit” is the proven unsafe trigger and is present in one
-input diff; attributing that specific fragment to the lost exception would go
-beyond the evidence. This remains an incident evidence gap, not a claim that
-the exact original exception was recovered.
+A peer-session falsification probe on the then-deployed source confirmed that
+`isRateLimitedError({message: 'stdout maxBuffer length exceeded', stdout:
+<first 10 MB of the diff>})` returned TRUE, while a plain control diff returned
+FALSE. After deployment of the fix, the same overflow probe returned FALSE;
+a real 403 with `x-ratelimit-remaining: 0` still returned TRUE. This reconstruction
+does not claim recovery of the original lost exception.
 
-The synthetic regression runs the real `fetchPRDiff` call path with a failed
-`gh pr diff`, status-text 404 and a content-bearing stdout diff containing
-“rate limit”. The previous classifier matched that stdout and the recorder
-forced zero; the corrected path leaves the bucket untouched, does not retry,
-and does not enter the files fallback. Separate 500, 401, conditional-request
-and Octokit-hook cases cover the sibling paths. New structured observation and
-confirmation rows retain the evidence needed to distinguish future cases
-without retaining PR content.
+The 18:40Z zero predates this PR’s first diff fetch in call-log ordering. Its
+cause remains disputed or separate, possibly a burst of 403s. The initial
+attribution to this PR was inference, not an established overflow event.
+
+The original synthetic regression covers a failed `gh pr diff` with status-text
+404 and content-bearing stdout. The merged follow-up adds the distinct case
+`execFile maxBuffer rejection with huge content never establishes quota evidence`
+in `test/ghfalsezero-01.test.mjs`: the classifier and recorder leave the bucket
+untouched on an overflow carrying rate-limit prose. Separate 500, 401,
+conditional-request and Octokit-hook cases cover sibling paths. Structured
+observation and confirmation rows retain metadata without retaining PR content.
+
+See **BENCHSEV-110 (agent-os docs)**, the
+[bench-side report of the same trigger](https://github.com/laceyenterprises/agent-os/blob/main/docs/postmortems/SEV2-a-generated-diff-that-quoted-rate-limits-was-read-as-a-github-rate-limit-and-stalled-a-review-for-hours-2026-11-14.md).
 
 ## Diagnostic history, including the incorrect initial diagnosis
 
@@ -109,6 +120,12 @@ contradiction makes the task diagnosis-only: reproduce or falsify first, stop
 with a report if falsified, and write code after confirmation. Briefs state an
 expected change size; exceeding twice that size requires stopping and reporting.
 This is a process action, not a new product gate or implementation in this repo.
+
+Later reconstruction corrected two further claims: the files-API fallback
+was aftermath of the overflowing diff fetch, not the trigger; and attributing
+the 18:40Z zero to that PR was inference contradicted by call-log ordering.
+The confirmed overflow trigger and two shared-credential outage windows above
+supersede those earlier attributions without assigning a proven cause to 18:40Z.
 
 ## Fix and operational contract
 

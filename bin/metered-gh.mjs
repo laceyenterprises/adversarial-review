@@ -22,6 +22,11 @@ function isPrMerge(argv) {
 const [action, ...args] = process.argv.slice(2);
 if (action === 'wait' || action === 'record' || action === 'limited' || action === 'admit') {
   const payload = JSON.parse(readFileSync(0, 'utf8'));
+  // The synchronous caller consumes one result object, not a result array.
+  // Reject unsupported batches before admitting anything or emitting output.
+  if (action === 'admit' && (!Array.isArray(payload) || payload.length !== 1)) {
+    throw new TypeError('admit requires exactly one payload item');
+  }
   const recorded = [];
   for (const item of payload) {
     if (action === 'admit') {

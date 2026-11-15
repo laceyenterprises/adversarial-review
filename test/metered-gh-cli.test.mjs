@@ -26,6 +26,30 @@ function fixture(t, script) {
   return env;
 }
 
+test('admit emits one parseable result for a singleton payload', t => {
+  const env = fixture(t, null);
+  const result = spawnSync(process.execPath, [helper, 'admit'], {
+    env, input: JSON.stringify([{ resource: 'core' }]), encoding: 'utf8', timeout: 5000,
+  });
+  assert.equal(result.error, undefined);
+  assert.equal(result.status, 0, result.stderr);
+  assert.deepEqual(JSON.parse(result.stdout), { deferred: false });
+});
+
+for (const payload of [[], [{ resource: 'core' }, { resource: 'graphql' }], {}, null]) {
+  test(`admit rejects unsupported payload ${JSON.stringify(payload)} without output`, t => {
+    const env = fixture(t, null);
+    const result = spawnSync(process.execPath, [helper, 'admit'], {
+      env, input: JSON.stringify(payload), encoding: 'utf8', timeout: 5000,
+    });
+    assert.equal(result.error, undefined);
+    assert.equal(result.status, 1);
+    assert.equal(result.stdout, '');
+    assert.match(result.stderr, /admit requires exactly one payload item/);
+    assert.equal(existsSync(env.GHO_RATE_LIMIT_SHARED_STATE_PATH), false);
+  });
+}
+
 for (const code of [0, 7]) {
   test(`exec helper preserves ordinary exit code ${code} and output`, t => {
     const env = fixture(t, `process.stdout.write('fixture output'); process.stderr.write('fixture diagnostic'); process.exit(${code});`);

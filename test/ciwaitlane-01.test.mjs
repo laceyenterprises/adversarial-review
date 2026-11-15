@@ -2,13 +2,15 @@
 // even after the no-progress lane demoted it while it waited on CI.
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync } from 'node:fs';
+import fs, { mkdtempSync, rmSync } from 'node:fs';
+import { syncBuiltinESMExports } from 'node:module';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createNoProgressLaneGate, handlePostedReviewRow, preparePostedReviewHandlers }
   from '../src/posted-review-row.mjs';
 import { createPostedReviewFairnessState, runPostedReviewHandlersFairly } from '../src/watcher-poll-fairness.mjs';
-import { evaluateNoProgressLane, readNoProgressLane } from '../src/watcher-no-progress-lane.mjs';
+import { ciWaitNextActionFor, evaluateNoProgressLane, noProgressLaneFilePath, readNoProgressLane }
+  from '../src/watcher-no-progress-lane.mjs';
 
 const headSha = 'c'.repeat(40);
 const repoPath = 'example/project';
@@ -55,6 +57,50 @@ async function demoteWhileWaitingOnCi(rootDir, gate) {
   }
   return outcome;
 }
+
+test('CIWAITLANE-01 CI wait head matching normalizes every SHA and rejects other heads', () => {
+  const mixedHead = 'cC'.repeat(20);
+  for (const inputHead of [headSha, headSha.toUpperCase(), mixedHead]) {
+    for (const ledgerHead of [headSha, headSha.toUpperCase(), mixedHead]) {
+      for (const actionHead of [headSha, headSha.toUpperCase(), mixedHead]) {
+        const action = { ...ciWait(), head: actionHead };
+        assert.equal(ciWaitNextActionFor({ headSha: ledgerHead, nextAction: action }, inputHead), action);
+      }
+    }
+  }
+  const ledger = { headSha, nextAction: ciWait() };
+  assert.equal(ciWaitNextActionFor(ledger, 'd'.repeat(40)), null);
+  assert.equal(ciWaitNextActionFor({ ...ledger, headSha: 'd'.repeat(40) }, headSha), null);
+  assert.equal(ciWaitNextActionFor({ ...ledger, nextAction: { ...ciWait(), head: 'd'.repeat(40) } }, headSha), null);
+  assert.equal(ciWaitNextActionFor({ ...ledger, nextAction: { ...ciWait(), head: null } }, headSha), null);
+  assert.equal(ciWaitNextActionFor({ ...ledger, nextAction: { ...ciWait(), actor: 'hammer' } }, headSha), null);
+});
+
+test('CIWAITLANE-01 backoff readiness preview reads its ledger once without recording a skip', async (t) => {
+  const { rootDir, gate } = fixture(t);
+  await demoteWhileWaitingOnCi(rootDir, gate);
+  const ledgerPath = noProgressLaneFilePath(rootDir, identity);
+  const originalRead = fs.readFileSync;
+  const before = originalRead(ledgerPath, 'utf8');
+  let ledgerReads = 0;
+  let candidateReads = 0;
+  t.mock.method(fs, 'readFileSync', (path, ...args) => {
+    if (path === ledgerPath) ledgerReads++;
+    return originalRead(path, ...args);
+  });
+  syncBuiltinESMExports();
+  t.after(() => { t.mock.restoreAll(); syncBuiltinESMExports(); });
+  await preparePostedReviewHandlers([{ repoPath, prNumber, headSha, run: async () => {} }],
+    { rootDir, logger: quiet, laneGate: gate, readReviewRow: () => row,
+      resolveSettled: () => ({ verdict: 'approved', remediationPending: false }),
+      fetchSnapshot: async () => {
+        candidateReads++;
+        return { headRefOid: headSha, state: 'OPEN', mergeable: 'MERGEABLE', statusCheckRollup: pendingRollup };
+      } });
+  assert.equal(candidateReads, 1, 'the recorded CI wait still receives its readiness probe');
+  assert.equal(ledgerReads, 1, 'the probe reuses the ledger loaded during preview evaluation');
+  assert.equal(originalRead(ledgerPath, 'utf8'), before, 'preview leaves the ledger untouched');
+});
 
 test('CIWAITLANE-01 the ama-pending CI wait reaches the lane ledger as its next action', async (t) => {
   const { rootDir, gate } = fixture(t);

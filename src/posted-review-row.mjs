@@ -1112,7 +1112,7 @@ export async function preparePostedReviewHandlers(handlers, {
         const preview = laneGate?.evaluate?.(handler, { recordSkip: false });
         // CIWAITLANE-01: a demoted CI wait gets this one bounded read, not a walk.
         const ciWait = preview?.run === false && preview.reason === 'slow-lane-backoff'
-          ? laneGate.ciWaitAction?.(handler) : null;
+          ? preview.ciWaitAction : null;
         if (preview?.run === false && !ciWait) continue;
         const row = readReviewRow(handler);
         if (row?.review_status !== 'posted' || !handler.headSha || row.reviewer_head_sha !== handler.headSha) continue;
@@ -1194,10 +1194,6 @@ export function createNoProgressLaneGate({
     // Resource failures do not charge no-progress ticks, but must consume the
     // local evidence that bypassed backoff for this walk.
     observeDecision,
-    ciWaitAction(handler) {
-      return ciWaitNextActionFor(readNoProgressLane(rootDir,
-        { repo: handler.repoPath, prNumber: handler.prNumber }, { logger }), handler.headSha);
-    },
     evaluate(handler, { recordSkip = true } = {}) {
       const identity = { repo: handler.repoPath, prNumber: handler.prNumber };
       const ledger = readNoProgressLane(rootDir, identity, { logger });
@@ -1269,7 +1265,9 @@ export function createNoProgressLaneGate({
       }
       noteNextActionLegacyLater({ source: 'no-progress-lane', subjectKey: `${handler.repoPath}#${handler.prNumber}`,
         head: handler.headSha, legacy: () => fromLegacyNoProgressLane(decision) });
-      return { run: decision.due, ...decision };
+      return { run: decision.due, ...decision,
+        ...(!decision.due && decision.reason === 'slow-lane-backoff'
+          ? { ciWaitAction: ciWaitNextActionFor(ledger, handler.headSha) } : {}) };
     },
     async record(handler, { timedOut = false, error = null, value = null, laneAdmission = null } = {}) {
       // Without a head there is no series to key on; skip the row read too.

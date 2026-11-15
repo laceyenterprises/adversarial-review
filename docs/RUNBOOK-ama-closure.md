@@ -2899,7 +2899,9 @@ is previewed without advancing skip counters before any readiness probe;
 handlers still in backoff incur no readiness GitHub read, with one exception
 (CIWAITLANE-01): a settled PR in plain slow-lane backoff whose lane ledger
 records `wait-for-CI` by actor `ci` for the current head gets the same bounded
-candidate read. When that read shows the wait's blocker cleared (checks no
+candidate read. The preview decision carries that action from its existing
+ledger read; both ledger and action heads are compared case-insensitively.
+When that read shows the wait's blocker cleared (checks no
 longer pending, or mergeability computed for `mergeability-unknown`), the
 scheduler admits one walk for that observed signal and the handler reuses the
 read. Pending CI stays deferred, and the same cleared signal cannot admit twice

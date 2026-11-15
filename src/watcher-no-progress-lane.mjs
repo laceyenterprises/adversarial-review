@@ -384,9 +384,10 @@ export function isCiWaitNextAction(action) {
 }
 
 export function ciWaitNextActionFor(ledger, headSha) {
-  const head = normalizeHead(headSha);
+  const head = normalizeHead(headSha)?.toLowerCase();
   const action = ledger?.nextAction;
-  return head && normalizeHead(ledger?.headSha) === head && action?.head === head && isCiWaitNextAction(action)
+  return head && normalizeHead(ledger?.headSha)?.toLowerCase() === head
+    && normalizeHead(action?.head)?.toLowerCase() === head && isCiWaitNextAction(action)
     ? action : null;
 }
 

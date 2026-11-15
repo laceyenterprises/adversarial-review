@@ -40,7 +40,8 @@ Fixes:
 - New `watcher-no-progress-lane.mjs` exports: `isCiWaitNextAction`,
   `ciWaitNextActionFor`, `evaluateCiWaitAdmission`, `recordCiWaitAdmission`.
   New `posted-review-row.mjs` export: `clearedCiWaitSignal`. The lane gate has
-  a new `ciWaitAction(handler)` method.
+  a `ciWaitAction` field on plain-backoff evaluation decisions, resolved from
+  the already-read ledger so readiness preview does not read it twice.
 - The closure runbook's posted-review scheduling paragraph now describes the
   one probe exception.
 
@@ -57,3 +58,18 @@ decision-reset cap and drain handling are unchanged.
   load-flaky SMV clean sandbox smoke, which passed alone (11/11).
 - `npm run lint`: 0 errors. `npm run typecheck:contracts`: passed.
   `bash demo/research-finding-walkthrough.sh`: passed.
+
+Final comment-only remediation normalizes `nextAction.head` consistently with
+the requested and ledger heads. Regression coverage checks lowercase, uppercase
+and mixed-case combinations, rejects different heads, and counts one ledger
+read per readiness preview while verifying that preview does not mutate it.
+
+- `node test/run-tests.mjs test/ciwaitlane-01.test.mjs test/watcher-poll-starvation.test.mjs test/posted-review-row-log-noise.test.mjs test/smv.test.mjs`:
+  184/184 passed offline under the bounded runner.
+- Final remediation lint: 0 errors (149 existing warnings); contract typecheck,
+  offline research walkthrough and `git diff --check` passed. State projection
+  unchanged; no lifecycle, storage-shape or smoke promise change.
+- The additional claim-loop validation reached its 120-second bound without an
+  assertion failure. A filtered invocation was re-executed unfiltered by the
+  isolation helper and reached its 45-second bound. Claim/dispatch code is
+  unchanged; full-suite validation remains with PR-head CI.

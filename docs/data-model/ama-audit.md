@@ -9,7 +9,13 @@ ended matching charged launch before any bounded refund; this projection grants
 no merge or lease authority. New early-exit attempts record `stopOrigin`
 (`closer`, `world` or `infrastructure`); creation metadata also records the
 initial origin. Colon-suffixed diagnostic details remain in the optional
-`attempts[].reasonDetail`; routing uses the registered reason code.
+`attempts[].reasonDetail`; routing uses the registered reason code. Unknown runtime stops retain
+`reason=stop-reason-unregistered` and `stopOrigin=closer`, with the unregistered
+reason preserved in optional `attempts[].originalReason` as well as `reasonDetail`.
+`recordHammerEarlyFailure` checks failure-code syntax (`^[a-z][a-z0-9:-]*$`)
+before recording; it preserves the accepted value without normalization.
+Registered conflict-resolver failures are world-origin terminal failures,
+not closer deferrals. Historical audit bytes are not rewritten.
 
 A helper load timeout records `outcome=deferred`, `reason=overload-deferred`
 and `overloadEvidence` (phase, deadline seconds, scaled budget seconds,

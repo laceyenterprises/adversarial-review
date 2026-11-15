@@ -6,7 +6,7 @@ import { existsSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, 
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
-import { HAMMER_STOP_ORIGINS, hammerStopOrigin, closerFaultRecovery } from '../src/ama/hammer-stop-origin.mjs';
+import { HAMMER_INFRASTRUCTURE_OUTCOMES, HAMMER_STOP_ORIGINS, hammerStopOrigin, closerFaultRecovery } from '../src/ama/hammer-stop-origin.mjs';
 import { recordHammerEarlyFailure, CloserCorrectionRequired } from '../src/ama/hammer-terminal-audit.mjs';
 import { runHelperStep } from '../bin/hammer-helper-step.mjs';
 import { recordHammerRetryDispatch, refundCloserSelfError, readHammerRetryCapLedger,
@@ -36,20 +36,90 @@ test('every registered stop reason has a pinned origin; new reasons require an e
       origin === 'world' ? 'failed-without-merge' : 'deferred', reason);
   }
   for (const reason of ['new-stop', '__proto__', 'toString']) assert.throws(() => hammerStopOrigin(reason), /Unregistered/);
-  // Pin all concrete stop emissions in the phase/helper entrypoints. Successes
-  // are not stops; dynamic predicate reasons retain their predicate wrapper.
+});
+
+test('new infrastructure stop reasons agree across Set and origin lookups', () => {
+  for (const reason of [
+    'conflict-pr-read-failed', 'conflict-source-unavailable', 'conflict-base-unavailable',
+    'checkout-timeout', 'live-head-read-failed', 'pr-mergeability-unknown',
+    'withdrawn-review-dismissal-failed', 'terminal-review-evidence-unavailable',
+  ]) {
+    assert.equal(HAMMER_INFRASTRUCTURE_OUTCOMES.has(reason), true, reason);
+    assert.equal(hammerStopOrigin(reason), 'infrastructure', reason);
+  }
+});
+
+// Read the shipped procedure, scripts, and typed JS stop sinks. In particular,
+// conflict repair prints reasons through ham_conflict_stop, not assignments.
+function emittedStops(source) {
+  source = source.replace(/^\s*(?:#|\/\/).*$/gm, '');
+  const reasons = new Set();
+  for (const pattern of [
+    /HAM_PHASE_OUTCOME=["']?([a-z][a-z0-9-]+)/g,
+    /(?:reportHammerEarlyFailure|recordHammerEarlyFailure|refuseEnvironment|closerHelperError|worldFactError)\(['"`]([a-z][a-z0-9-]+)/g,
+    /phaseOutcome:\s*['"]([a-z][a-z0-9-]+)/g,
+    /ham_(?:conflict_stop|close_finish)\s+(?:[0-9]+|\$\?)[ \t]+["']?([a-z][a-z0-9-]+)/g,
+    /ham_append_terminal_audit\s+[a-z-]+\s+["']?([a-z][a-z0-9-]+)/g,
+    /ham_commit_message_abort\s+([a-z][a-z0-9-]+)/g,
+    /HAM_CONFLICT_PROOF_REASON=([a-z][a-z0-9-]+)/g,
+  ]) for (const match of source.matchAll(pattern)) reasons.add(match[1]);
+  // The helper wrapper constructs <step>-failed and <step>-timeout. The
+  // terminal helper also normalizes stale successes to <procedure-step>-failed.
+  for (const match of source.matchAll(/ham_read[ \t]+([a-z][a-z0-9-]+)[ \t]+["'$]|ham_step\s+(?:read|mutation)(?::report)?\s+([a-z][a-z0-9-]+)/g)) {
+    for (const suffix of ['failed', 'timeout']) reasons.add(`${match[1] || match[2]}-${suffix}`);
+  }
+  for (const match of source.matchAll(/HAM_PROCEDURE_STEP=([a-z][a-z0-9-]+)/g)) reasons.add(`${match[1]}-failed`);
+  return reasons;
+}
+
+test('shipped phase, stop-helper, controller and procedure emissions all have registered origins', () => {
+  const paths = ['templates/hammer-prompt.md', 'src/hammer-procedure.mjs',
+    ...readdirSync(new URL('../bin', import.meta.url)).filter(name => name.startsWith('hammer-') || name === 'dispute-finding.mjs').map(name => `bin/${name}`),
+    ...readdirSync(new URL('../src/ama', import.meta.url)).filter(name => name.endsWith('.mjs')).map(name => `src/ama/${name}`)];
   const successes = new Set(['published', 'verified', 'ci-settled', 'ci-wait-not-needed']);
-  for (const file of readdirSync(new URL('../bin', import.meta.url)).filter(file => file.startsWith('hammer-'))) {
-    const source = readFileSync(new URL(`../bin/${file}`, import.meta.url), 'utf8');
-    const emitted = [...source.matchAll(/HAM_PHASE_OUTCOME=["']?([a-z][a-z0-9-]+)|reportHammerEarlyFailure\(['"]([a-z][a-z0-9-]+)/g)];
-    for (const match of emitted) if (!successes.has(match[1] || match[2])) {
-      assert.doesNotThrow(() => hammerStopOrigin(match[1] || match[2]), file);
+  const emitted = new Set(), missing = [];
+  for (const path of paths) {
+    const source = readFileSync(new URL(`../${path}`, import.meta.url), 'utf8');
+    const reasons = emittedStops(source);
+    // hammer-merge reads terminalReviewProof.reason directly from this producer.
+    if (path === 'src/ama/reviewer-authority.mjs') {
+      for (const match of source.matchAll(/reason:\s*'([a-z][a-z0-9-]+)'/g)) reasons.add(match[1]);
+    }
+    for (const reason of reasons) {
+      emitted.add(reason);
+      if (!successes.has(reason) && !Object.hasOwn(HAMMER_STOP_ORIGINS, reason)) missing.push(`${path}: ${reason}`);
     }
   }
-  const controller = readFileSync(new URL('../src/ama/hammer-controller.mjs', import.meta.url), 'utf8');
-  for (const match of controller.matchAll(/(?:refuseEnvironment|reportHammerEarlyFailure)\(['"]([a-z][a-z0-9-]+)/g)) {
-    assert.doesNotThrow(() => hammerStopOrigin(match[1]), match[1]);
-  }
+  assert.ok(emitted.has('conflict-resolver-failed'), 'must inspect the conflict stop helper');
+  assert.ok(emitted.has('checkout-failed'), 'must expand helper step outcomes');
+  assert.ok(emitted.has('review-changed-since-validation'), 'must inspect forwarded review-proof reasons');
+  assert.ok(emitted.has('audit-not-published'), 'must inspect terminal audit calls');
+  assert.deepEqual(missing, []);
+});
+
+test('conflict resolver failure is a terminal world fact, never a retryable closer fault', t => {
+  const root = scratch(t);
+  const env = { HAM_RUN_DIR: root, HAM_HQ_ROOT: root, HAM_REPO: 'synthetic/repo',
+    HAM_PR_NUMBER: '1', HAM_REVIEWED_SHA: head };
+  assert.equal(hammerStopOrigin('conflict-resolver-failed'), 'world');
+  recordHammerEarlyFailure('conflict-resolver-failed', { env, final: true });
+  const attempt = readAmaAuditEntry(root, env.HAM_REPO, 1, head).attempts.at(-1);
+  assert.equal(attempt.reason, 'conflict-resolver-failed');
+  assert.equal(attempt.stopOrigin, 'world');
+  assert.equal(attempt.outcome, 'failed-without-merge');
+  assert.equal(existsSync(join(root, 'self-error-corrections.json')), false);
+});
+
+test('unknown runtime stop keeps its original reason in the durable audit', t => {
+  const root = scratch(t);
+  const env = { HAM_HQ_ROOT: root, HAM_REPO: 'synthetic/repo', HAM_PR_NUMBER: '1', HAM_REVIEWED_SHA: head };
+  recordHammerEarlyFailure('synthetic-unknown-stop:diagnostic', { env, final: true });
+  const attempt = readAmaAuditEntry(root, env.HAM_REPO, 1, head).attempts.at(-1);
+  assert.equal(attempt.reason, 'stop-reason-unregistered');
+  assert.equal(attempt.originalReason, 'synthetic-unknown-stop:diagnostic');
+  assert.equal(attempt.reasonDetail, attempt.originalReason);
+  assert.equal(attempt.stopOrigin, 'closer');
+  assert.equal(attempt.outcome, 'deferred');
 });
 
 test('final closer fault requires correction once, then defers without terminal-stop credit', t => {

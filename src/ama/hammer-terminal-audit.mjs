@@ -71,8 +71,9 @@ export function recordHammerEarlyFailure(reason, { env = process.env, headSha, f
   }
   const originalReason = reason;
   let origin;
+  let unregistered = false;
   try { origin = hammerStopOrigin(reason); }
-  catch { reason = 'stop-reason-unregistered'; origin = 'closer'; }
+  catch { reason = 'stop-reason-unregistered'; origin = 'closer'; unregistered = true; }
   const parts = reason.split(':');
   reason = origin === 'closer' && parts[0] === 'review-evidence-invalid' ? parts[1] : parts[0];
   const identity = {
@@ -139,6 +140,7 @@ export function recordHammerEarlyFailure(reason, { env = process.env, headSha, f
     ...identity,
     attempt: hammerPhaseAttempt({ outcome: 'failed-without-merge', reason, stopOrigin: origin, launchRequestId,
       ...(originalReason !== reason ? { reasonDetail: originalReason } : {}),
+      ...(unregistered ? { originalReason } : {}),
       attemptPhase: 'hammer-early-exit', ...(overloadEvidence ? { overloadEvidence } : {}) }),
     metadata: { closureAuthority: 'ham-terminal-remediation', stopOrigin: origin },
   });

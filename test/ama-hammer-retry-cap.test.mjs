@@ -3884,7 +3884,7 @@ for (const parkKind of ['merge-lease-timeout', 'required-checks-pending', 'pr-me
         }),
       });
       const backoff = await run('2026-07-06T12:02:00Z', ADVANCED_HEAD, 'UNKNOWN');
-      assert.equal(backoff.reason, leaseWaitExhausted && parkKind !== 'lane-busy'
+      assert.equal(backoff.reason, (leaseWaitExhausted && parkKind !== 'lane-busy') || parkKind === 'pr-mergeability-unknown'
         ? (pendingCi ? 'checks-pending' : 'mergeability-unknown')
         : 'hammer-deferral-backoff');
       assert.equal(backoff.recoveryWait, true);
@@ -3897,8 +3897,18 @@ for (const parkKind of ['merge-lease-timeout', 'required-checks-pending', 'pr-me
       const moved = await run('2026-07-06T12:06:00Z', 'f'.repeat(40));
       assert.notEqual(moved.reason, 'current-head-hammer-terminal-remediation-merged');
       assert.equal(merges, 0);
-      assert.equal((await run('2026-07-06T12:07:00Z')).reason, 'current-head-hammer-terminal-remediation-merged');
-      assert.equal(merges, 1);
+      const resumed = await run('2026-07-06T12:07:00Z');
+      if (parkKind === 'pr-mergeability-unknown') {
+        // Registered infrastructure reads return to the shared daemon route;
+        // contention parks retain this dispatcher's inline resume path.
+        assert.equal(resumed.reason, 'carried-clean-head');
+        assert.equal(resumed.nextActionShared.decision.action, 'daemon-merge');
+        assert.equal(resumed.nextActionShared.decision.actor, 'daemon');
+        assert.equal(merges, 0);
+      } else {
+        assert.equal(resumed.reason, 'current-head-hammer-terminal-remediation-merged');
+        assert.equal(merges, 1);
+      }
     });
   }
 }

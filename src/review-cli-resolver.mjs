@@ -5,6 +5,20 @@ import { loadAwareTimeoutMs } from './load-aware-timeout.mjs';
 
 export const CLI_RESOLUTION_TRANSIENT_FAILURE_CLASS = 'cli-resolution-transient';
 
+export function reviewCliForModel(model) {
+  return String(model).startsWith('claude') ? 'claude' : model;
+}
+
+export function reviewCliResolverHealthy(model, {
+  resolveImpl = resolveReviewCli, env = process.env, log = console,
+} = {}) {
+  try {
+    return resolveImpl(reviewCliForModel(model), { env, log })?.status === 'resolved';
+  } catch {
+    return false;
+  }
+}
+
 export function isReviewCliResolutionFailure(error) {
   return error?.binaryResolution?.status === 'unknown'
     || error?.name === 'ReviewCliResolutionError'

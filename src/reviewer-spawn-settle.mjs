@@ -2,6 +2,7 @@ import { parseReviewerBudgetDeferral, REVIEWER_GITHUB_BUDGET_DEFERRED } from './
 import { formatTenureReviewRange, readTenureReviewRange } from './pr-tenure.mjs';
 import { withRepositoryStateCycle } from './repository-state-lock.mjs';
 import { loadAwareTimeoutMs } from './load-aware-timeout.mjs';
+import { reviewCliResolverHealthy } from './review-cli-resolver.mjs';
 import { ownReviewerSizeFailure } from './reviewer-size-owner.mjs';
 import { readHostObservationSync } from './dispatch-files-client.mjs';
 import { execFile as execQuotaFile } from 'node:child_process';
@@ -126,6 +127,7 @@ import {
   clearReviewerCredentialOutage,
   formatTransientFailureBreakdown,
   recordCascadeFailure,
+  readCascadeState,
   recordReviewerBudgetDeferral,
   CASCADE_FAILURE_CAP,
   recordReviewerCredentialFailure,
@@ -1577,6 +1579,7 @@ function settleReviewerAttempt({
   failureAt = new Date().toISOString(),
   maxRemediationRounds,
   reviewerModel = null,
+  resolverHealthyImpl = reviewCliResolverHealthy,
   leaseRecoveryEnabled = REVIEWER_LEASE_RECOVERY_ENABLED,
   statements = {
     markPosted: stmtMarkPosted,
@@ -1945,6 +1948,11 @@ function settleReviewerAttempt({
       return { posted: false, reason: 'size-retry-claim-mismatch' };
     }
     const infraRecoverAttempts = Number(currentRow?.infra_auto_recover_attempts || 0);
+    const resolutionRecovery = failureClass === 'cli-resolution-transient';
+    const previousFailures = readCascadeState(rootDir, { repo: repoPath, prNumber })?.consecutiveTransientFailures || 0;
+    const resolverHealthy = resolutionRecovery
+      && (previousFailures >= CASCADE_FAILURE_CAP - 1 || infraRecoverAttempts >= INFRA_AUTO_RECOVER_CAP)
+      && resolverHealthyImpl(reviewerModel || currentRow?.reviewer, { env: env || process.env, log });
     const cascadeState = recordCascadeFailure(rootDir, {
       repo: repoPath,
       prNumber,
@@ -1955,11 +1963,12 @@ function settleReviewerAttempt({
       headSha: reviewerHeadSha || currentRow?.reviewer_head_sha,
       reviewerBuildId: REVIEWER_BUILD_ID,
       row: currentRow,
+      resolverHealthy,
     });
     // No reviewer ran and no credential failed. Keep the claim retryable on
     // this lane until the existing consecutive-transient threshold is reached.
     if (failureClass === 'cli-resolution-transient'
-      && cascadeState.consecutiveTransientFailures < CASCADE_FAILURE_CAP) {
+      && (resolverHealthy || cascadeState.consecutiveTransientFailures < CASCADE_FAILURE_CAP)) {
       withSqliteBusyRetrySync(
         () => statements.releaseReviewerClaim.run(reviewerSessionUuid, repoPath, prNumber),
         { label: `reviewer-resolution-release:${repoPath}#${prNumber}`, log },

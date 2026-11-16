@@ -1,4 +1,5 @@
 import { normalizeReviewerModel } from './adapters/subject/github-pr/routing.mjs';
+import { loadAwareTimeoutMs } from './load-aware-timeout.mjs';
 /**
  * Per-PR transient-failure ("cascade") backoff state for reviewer spawns.
  *
@@ -332,6 +333,8 @@ function recordCascadeFailure(rootDir, {
   headSha = null,
   reviewerBuildId = REVIEWER_BUILD_ID,
   row = null,
+  resolverHealthy = false,
+  loadAwareTimeoutMsImpl = loadAwareTimeoutMs,
 } = {}) {
   const previous = readCascadeState(rootDir, { repo, prNumber });
   // SCHEMA SHIM — do not remove while any data/cascade-state/*.json written
@@ -342,11 +345,18 @@ function recordCascadeFailure(rootDir, {
   // watcher upgrade continues an in-progress backoff instead of resetting the
   // counter to 0 mid-outage (which would collapse the backoff back to 1m and
   // hammer the still-down provider).
-  const previousCount = Number(
+  let previousCount = Number(
     previous?.consecutiveTransientFailures ?? previous?.consecutiveCascadeFailures ?? 0
   );
-  const consecutiveTransientFailures = Math.min(previousCount + 1, CASCADE_FAILURE_CAP);
-  const backoffMinutes = resolveCascadeBackoffMinutes(consecutiveTransientFailures);
+  if (failureClass === 'cli-resolution-transient'
+    && (previous?.lastFailureClass !== failureClass
+      || (typeof failedAt === 'number' ? failedAt : Date.parse(failedAt))
+        - Date.parse(previous?.lastFailureAt) > 60 * 60_000)) previousCount = 0;
+  const consecutiveTransientFailures = failureClass === 'cli-resolution-transient' && resolverHealthy
+    ? 0 : Math.min(previousCount + 1, CASCADE_FAILURE_CAP);
+  const nominalBackoffMinutes = resolveCascadeBackoffMinutes(consecutiveTransientFailures);
+  const backoffMinutes = failureClass === 'cli-resolution-transient'
+    ? loadAwareTimeoutMsImpl(nominalBackoffMinutes * 60_000) / 60_000 : nominalBackoffMinutes;
   // Accept BOTH shapes of failure timestamp. Callers in this repo pass a
   // canonical ISO string, but epoch milliseconds is the conventional JS
   // timestamp, and `Date.parse(1755000000000)` stringifies its argument first

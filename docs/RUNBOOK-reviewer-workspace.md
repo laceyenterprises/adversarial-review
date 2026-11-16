@@ -40,8 +40,13 @@ Resolution failures do not isolate reviewer identities or contribute to
 credential-outage accounting. The watcher records `cli-resolution-transient`
 backoff (initially one minute), releases the claim to `pending` without charging
 review or infrastructure recovery attempts below the existing five-consecutive
-transient threshold, then uses bounded `pending-upstream` infrastructure
-recovery. A successful review clears the backoff. Genuine reviewer OAuth
+transient threshold. At the threshold and before cap exhaustion, a fresh
+healthy resolver probe resets the streak and re-queues without charging
+either budget. Failed probes retain bounded `pending-upstream` recovery.
+Resolution backoff scales with host load; a different failure class or a gap
+over one hour resets the streak. Legacy failed rows are also probed after
+backoff, before cap handling or a charged recovery claim. Healthy probes
+re-queue only the exact observed row. A successful review clears the backoff. Genuine reviewer OAuth
 failures retain their authentication classification. Pipeline health/readyz and
 Prometheus expose the resolution class separately from authentication failures.
 Runtime readyz adds informational `reviewerFailures24h` with separate

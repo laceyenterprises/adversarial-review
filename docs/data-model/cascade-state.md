@@ -42,7 +42,7 @@ Directory: `data/cascade-state/`
 
 | Field | Shape | Contract |
 |---|---|---|
-| `consecutiveTransientFailures` | number | PR-level consecutive transient failure count, clamped at the cascade failure cap. This drives the `1, 2, 4, 8, 15` minute backoff schedule. |
+| `consecutiveTransientFailures` | number | PR-level consecutive transient failure count, clamped at the cascade failure cap. This drives the `1, 2, 4, 8, 15` minute backoff schedule. For CLI resolution, a fresh healthy probe resets it to zero; a changed failure class or a gap over one hour starts a fresh streak. Resolution backoff additionally scales with host load. |
 | `consecutiveCascadeFailures` | number | Legacy cascade-only count. Readers fold it into new counters when old state is encountered; new writes use `consecutiveTransientFailures`. |
 | `transientFailureBreakdown` | object from failure class to count | PR-level, reviewer-agnostic failure totals. These counts explain the PR-level hold and remain flat across all reviewer models. |
 | `transientFailureBreakdownByModel` | object from normalized model name to failure-class counts | Model-specific failure totals used only for model-specific routing and fallback decisions. These counts must not replace the flat PR-level hold counters. |
@@ -71,8 +71,11 @@ still runs.
 breakdown maps. It represents executable-resolution infrastructure failure,
 independent of OAuth. Below the existing five-consecutive-transient threshold,
 settlement releases the matching reviewer claim to `pending` without charging
-attempts; the durable backoff still gates the next claim. At the threshold it
-uses ordinary bounded `pending-upstream` infrastructure recovery. This class
+attempts; the durable backoff still gates the next claim. At the threshold or
+before terminal cap handling, a fresh healthy resolver probe resets the streak
+and releases the matching claim without charging either budget. Failed probes
+retain ordinary bounded `pending-upstream` infrastructure recovery. A healthy
+probe of a legacy failed row re-queues only the exact observed failure. This class
 never writes reviewer credential-outage state or isolates the reviewer seat.
 
 ## Mixed-State Semantics

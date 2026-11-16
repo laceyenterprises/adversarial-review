@@ -5,6 +5,7 @@ import { observeTtmReviewLane } from './ttm-owner.mjs';
 import { maybeRunDocsFastPath } from './docs-fast-path.mjs';
 import { applyReviewerArm, applyReviewerArmEffectiveRoute, reviewerArmExecution } from './osg-reviewer-arm.mjs';
 import { loadAwareTimeoutMs } from './load-aware-timeout.mjs';
+import { recoverHealthyReviewCli } from './review-cli-recovery.mjs';
 import { codexReviewerAccountForGrounding, readCorporateCodexQuotaCooldown } from './codex-account-routing.mjs';
 import { createReviewerPreflight, reviewerHandoffPending, waitForReviewerHandoff, startReviewerHandoff } from './reviewer-admission-lifecycle.mjs';
 import { reviewerCredentialKey, selectClaudeAccountLaneFromSnapshot, readCorporateClaudeQuotaCooldown } from './claude-account-routing.mjs';
@@ -3044,6 +3045,8 @@ export async function processReviewSubject(entry, ctx) {
         }
       }
       const infraRecoveryAttempts = Number(current?.infra_auto_recover_attempts || 0);
+      if (infraRecoveryClass === 'cli-resolution-transient'
+        && await recoverHealthyReviewCli({ db, rootDir: ROOT, row: current })) return;
       // TOKDZ-01: a token-refresh refusal is a hold, never a strand. Rows that
       // reached the cap under the pre-hold accounting stay recoverable.
       const tokenRefreshRecovery = infraRecoveryClass === 'token-refresh-pending';

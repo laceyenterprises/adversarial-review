@@ -74,6 +74,7 @@ test('invalid JSON releases the same seat, backs off, and only parks at the cons
     });
     const failureAt = `2026-01-01T00:${String(i).padStart(2, '0')}:00.000Z`;
     settleReviewerAttempt({ rootDir, repoPath: repo, prNumber, result,
+      resolverHealthyImpl: () => false,
       reviewerSessionUuid: session, reviewerHeadSha: 'synthetic-head', reviewerModel: 'gemini', failureAt, statements, log: quiet });
     const row = statements.getReviewRow.get(repo, prNumber);
     assert.equal(row.review_attempts, 0);

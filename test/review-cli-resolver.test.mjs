@@ -39,7 +39,7 @@ writeFileSync(${JSON.stringify(requestFile)}, JSON.stringify({
 }));
 const doc = JSON.parse(readFileSync(${JSON.stringify(responseFile)}, 'utf8'));
 if (doc.mode === 'timeout') setInterval(() => {}, 1000);
-else if (doc.mode === 'error') { console.error('synthetic selection invalid'); process.exit(3); }
+else if (doc.mode === 'error') { console.error('synthetic selection invalid'); process.exit(doc.exitCode || 3); }
 else if (doc.mode === 'invalid-json') console.log('{broken');
 else console.log(JSON.stringify({...doc, cli: args[3]}));
 `, { mode: 0o700 });
@@ -64,6 +64,13 @@ test('protocol uses argv and delegates managed, explicit override and review fal
     assert.equal(f.events.at(-1).binarySha256, f.response.binarySha256);
     assert.ok(Number.isFinite(Date.parse(result.timestamp)));
   }
+});
+
+test('async resolver reason one records child exit one rather than a timeout', async t => {
+  const f = fixture(t);
+  f.set({ mode: 'error', exitCode: 1 });
+  await assert.rejects(resolveReviewCliAsync('codex', { env: f.env, log: f.log }),
+    error => error.binaryResolution.reason === 1 && error.cause.code === 1 && !error.cause.killed);
 });
 
 test('rejects every invalid required protocol field without a legacy retry', (t) => {

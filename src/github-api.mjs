@@ -1916,7 +1916,7 @@ async function fetchPullRequestHeadAndState(repo, prNumber, {
     // Adapter is optional during the migration window; fall back to the current
     // GraphQL/REST path and keep that path's established safety behavior.
   }
-  if (isGraphqlRollupDisabled()) {
+  const readRest = async () => {
     const startedAt = Date.now();
     try {
       const result = await fetchLegacyHeadAndState(execFileImpl, repo, normalizedPrNumber, { withLabels });
@@ -1938,37 +1938,45 @@ async function fetchPullRequestHeadAndState(repo, prNumber, {
       });
       throw err;
     }
-  }
+  };
+  if (isGraphqlRollupDisabled()) return readRest();
 
-  const payload = await runGraphqlWithTelemetry(execFileImpl, withLabels ? GRAPHQL_PR_HEAD_STATE_QUERY : GRAPHQL_PR_HEAD_ONLY_QUERY, {
-      owner,
-      repo: repoName,
-      prNumber: normalizedPrNumber,
-    }, {
-      repo,
-      prNumber: normalizedPrNumber,
-      category: 'pr_head_state',
-      recordApiCallImpl,
+  try {
+    const payload = await runGraphqlWithTelemetry(execFileImpl, withLabels ? GRAPHQL_PR_HEAD_STATE_QUERY : GRAPHQL_PR_HEAD_ONLY_QUERY, {
+        owner,
+        repo: repoName,
+        prNumber: normalizedPrNumber,
+      }, {
+        repo,
+        prNumber: normalizedPrNumber,
+        category: 'pr_head_state',
+        recordApiCallImpl,
+      });
+    const pr = extractGraphqlPr(payload);
+    const labels = withLabels ? normalizeLabels(pr?.labels) : [];
+    if (withLabels && pr?.labels?.pageInfo?.hasNextPage) {
+      appendGraphqlItemsPreservingTruncation(labels, await fetchGraphqlLabelPages(repo, normalizedPrNumber, {
+        execFileImpl,
+        startAfter: pr?.labels?.pageInfo?.endCursor || null,
+        recordApiCallImpl,
+        telemetryCategory: 'pr_head_state',
+      }), 'labels');
+    }
+    return normalizeHeadAndStateShape({
+      state: pr?.state,
+      mergedAt: pr?.mergedAt,
+      closedAt: pr?.closedAt,
+      headRefOid: pr?.headRefOid,
+      author: pr?.author,
+      labels,
+      truncatedConnections: labels.graphqlTruncated ? labels.graphqlTruncatedConnections : [],
     });
-  const pr = extractGraphqlPr(payload);
-  const labels = withLabels ? normalizeLabels(pr?.labels) : [];
-  if (withLabels && pr?.labels?.pageInfo?.hasNextPage) {
-    appendGraphqlItemsPreservingTruncation(labels, await fetchGraphqlLabelPages(repo, normalizedPrNumber, {
-      execFileImpl,
-      startAfter: pr?.labels?.pageInfo?.endCursor || null,
-      recordApiCallImpl,
-      telemetryCategory: 'pr_head_state',
-    }), 'labels');
+  } catch {
+    // LAC-2206: a failed posting-time GraphQL read must not erase a live
+    // approval when REST can still read the current head and all labels.
+    // Never reuse dispatch/context labels; a failed REST read still throws.
+    return readRest();
   }
-  return normalizeHeadAndStateShape({
-    state: pr?.state,
-    mergedAt: pr?.mergedAt,
-    closedAt: pr?.closedAt,
-    headRefOid: pr?.headRefOid,
-    author: pr?.author,
-    labels,
-    truncatedConnections: labels.graphqlTruncated ? labels.graphqlTruncatedConnections : [],
-  });
 }
 
 async function fetchPullRequestRollup(repo, prNumber, {

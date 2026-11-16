@@ -1,0 +1,36 @@
+[
+  {
+    "author": {
+      "login": "codex-worker-lacey"
+    },
+    "commit": {
+      "message": "docs: AMFRETRIAGE-01 reconcile tool observations against agent-manifest SPEC\n\nWorker-Class: codex"
+    },
+    "committer": {
+      "login": "the-hammer-lacey[bot]"
+    },
+    "parents": [
+      {
+        "sha": "d9f952c5512804940ce3ee44ddbbe48c034dad05"
+      }
+    ],
+    "sha": "d41c80eb9cb2649b5cf109fe8e1368ef785aac90"
+  },
+  {
+    "author": {
+      "login": "the-hammer-lacey[bot]"
+    },
+    "commit": {
+      "message": "HAM remediate final AMF evidence review findings\n\nWorker-Class: hammer\nWorker-Ticket: HAM\nReviewed-Head: a30457bdc18d16eb2824bda8561f9cc7718fe058\nClosed-By: hammer (adversarial-pipe-mode)\nRemediated-Findings: 4 addressed (0 blocking, 4 non-blocking)\nReversal-Authorized-By: PRR_kwDOR6Em7c8AAAABYJFqoA finding=1 kind=non-blocking\nReversal-Authorized-By: PRR_kwDOR6Em7c8AAAABYJFqoA finding=3 kind=non-blocking\nReversal-Authorized-By: PRR_kwDOR6Em7c8AAAABYJFqoA finding=4 kind=non-blocking\n; Conflicts:\n;\tdocs/RUNBOOK-codex-invocation-contracts.md"
+    },
+    "committer": {
+      "login": "the-hammer-lacey[bot]"
+    },
+    "parents": [
+      {
+        "sha": "d41c80eb9cb2649b5cf109fe8e1368ef785aac90"
+      }
+    ],
+    "sha": "79a15c6ea614f37fa2e65ab5616a88b2a6f82b12"
+  }
+]

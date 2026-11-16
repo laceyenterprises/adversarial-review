@@ -199,6 +199,15 @@ to record exact-commit produced evidence, confirms the attestation receipt,
 and adds no further commits. Missing evidence remains an operational blocker.
 These trailers are never operator-authored waivers.
 
+LAC-2202: the shared trailer reader recognizes a terminal Git conflict suffix
+with `# Conflicts:` or `; Conflicts:`, blank/comment-only lines and at least one
+same-marker tab-indented path. It reads the preceding trailers with the usual
+duplicate-identity rejection. Arbitrary trailing prose remains unsupported.
+Recovered provenance selects the actual first hammer parent in current history;
+it does not prove preservation or authorize a reversal. Truly untagged work
+still requires the trusted launch within builder history and otherwise defers
+as unknown. A rebased launch SHA alone supplies no replacement baseline.
+
 Both closer eligibility and daemon merge consume this shared preservation
 proof. Citation currency, ancestry, parent-state content, whole-region coverage
 and immutable original-reversal proofs still apply after a rebase. Lane proofs

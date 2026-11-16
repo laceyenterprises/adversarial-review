@@ -78,7 +78,11 @@ Each completed history read is an atomic JSON record named
 | 4 | Live merge-base SHA |
 | 5 | Review-response SHA-256 digest (`reviewKey`), or `null` |
 | 6 | Trusted dispatcher launch head (`launchHead`), or `null` |
-| 7 | History proof cache identity version: `reversalproof-v7` |
+| 7 | History proof cache identity version: `reversalproof-v8` |
+
+LAC-2202 advances the identity to v8 to recompute histories collected before
+standard Git conflict-footer trailer recovery. Unknown and unreadable histories
+remain uncached; no live cache purge is required.
 
 LANEREVERSAL-01 invalidates older cache entries that did not classify lane
 remediation commits as closure work. Transient lane history carries

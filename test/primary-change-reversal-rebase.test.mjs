@@ -235,6 +235,20 @@ test('REVERSALPROV-01: a worker-rebased HAM reversal keeps its immutable origina
   assert.equal(checkPrimaryChange(evidence, head).reason, 'primary-change-reverted');
 });
 
+test('LAC-2202: conflict-footer recovery retains immutable reversal proof and content guards', async () => {
+  const footer = '\n; Conflicts:\n;\n;\tsrc/a.mjs';
+  const append = commit => ({ ...commit, commit: { ...commit.commit, message: commit.commit.message + footer } });
+  const { evidence, result } = await recommittedReversal({ original: true, transform: (path, response) =>
+    path.endsWith(`/commits/${head}`) ? append(response)
+      : path.endsWith(`${base}...${head}`) ? { ...response,
+        commits: response.commits.map(commit => commit.sha === head ? append(commit) : commit) } : response });
+  assert.equal(result.ok, true);
+  assert.equal(evidence.reversalAuthorizations[0].originalAuthorization.commit.sha, sha('d'));
+  evidence.reversalAuthorizations[0].commit.files[0].patch =
+    evidence.reversalAuthorizations[0].commit.files[0].patch.replace('+start()', '+unrelated()');
+  assert.equal(checkPrimaryChange(evidence, head).reason, 'primary-change-reverted');
+});
+
 test('REVERSALPROV-01: different removed/added lines, trailers or original identities refuse rebase proof', async () => {
   for (const options of [
     { originalAdded: '-different_generated_line()' },

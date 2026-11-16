@@ -5280,12 +5280,8 @@ function validateDictPresentKeysOnly(
     }
   }
   const allowed = schema.__keys || {};
-  for (const [key, child] of Object.entries(allowed)) {
-    if (child.__required && !Object.hasOwn(doc, key)) {
-      const full = keyPath ? `${keyPath}.${key}` : key;
-      throw new AgentOSConfigError(`${full}: required key is missing`, { key: full, source });
-    }
-  }
+  // Layers may supply only part of a declaration. Completeness belongs to
+  // the single-document and final merged-config semantic validators.
   const extraSchema = schema.__extra_keys_schema || null;
   const strict = schema.__strict !== false;
 
@@ -5412,6 +5408,7 @@ function validateDictPresentKeysOnly(
 }
 
 function validatePublicHygiene(policy = {}) {
+  policy ??= {};
   const refuse = field => { throw new AgentOSConfigError(
     `worker_pool.public_hygiene.${field}: invalid public hygiene policy; repair host configuration`,
     { key: `worker_pool.public_hygiene.${field}` },
@@ -6473,6 +6470,7 @@ function loadConfigImpl({
     'oauth.identity_token_pools',
     'worker_pool.dispatch.codex_exec_timeout_by_worker_class',
     'worker_pool.dispatch.codex_exec_stall_timeout_by_worker_class',
+    'worker_pool.public_hygiene.identities',
   ]) {
     setLeaf(merged, dotted, {});
     (trace[dotted] = trace[dotted] || []).push({
@@ -6762,7 +6760,8 @@ function isEmptyDoc(doc) {
 // `getConfig` and `loadConfigCached` share a per-call-shape cache that
 // invalidates when ANY watched file's mtime / inode changes. "Watched" =
 // the top-level path + its `*.local.yaml` sibling + each module path in
-// the call + each module's `*.local.yaml` sibling.
+// the call + each module's `*.local.yaml` sibling + the profile overlay
+// + the resolved public-hygiene denylist, when configured.
 //
 // Env-var rotations are part of the cache key for declared CFG aliases
 // (canonical + legacy names in ENV_ALIASES), so per-call env overlays
@@ -6790,7 +6789,7 @@ function isEmptyDoc(doc) {
 // fires in long-running test processes and pathological misuse.
 //
 // Cost note: every `loadConfigCached` / `getConfig` call re-stats the
-// watched files (2 + 2·N syscalls) even on cache hits — net win vs.
+// watched files even on cache hits — net win vs.
 // a full YAML parse, but not free. Don't call in tight inner loops
 // outside the documented per-tick / per-job hot paths.
 const _CACHE_MAX_SLOTS = 16;
@@ -6799,7 +6798,7 @@ const _configCache = new Map();
 const _configSignatures = new Map();
 const _signatureFileCache = new Map();
 
-function _watchedPathsForCall({ topPath, modulePaths, env }) {
+function _watchedPathsForCall({ topPath, modulePaths, env, cachedConfig }) {
   const envView = env || process.env;
   const resolvedTop = topPath || envView.AGENT_OS_CONFIG_PATH || DEFAULT_TOP_LEVEL_PATH;
   const watched = [resolvedTop];
@@ -6814,6 +6813,10 @@ function _watchedPathsForCall({ topPath, modulePaths, env }) {
     const moduleLocal = localSibling(modulePath);
     if (moduleLocal) watched.push(moduleLocal);
   }
+  // Resolve dependencies from the validated cascade, including local/module
+  // overrides. The shared signature digest cache keeps hot reads at stat-cost.
+  const denylistPath = cachedConfig?.get('worker_pool.public_hygiene.denylist_path');
+  if (denylistPath) watched.push(denylistPath);
   return watched;
 }
 
@@ -6836,8 +6839,11 @@ function _contentDigestForPath(path, st, { forceHash = false, nowMs = Date.now()
   return digest;
 }
 
-function _currentSignature({ topPath, modulePaths, env }, options = {}) {
-  const watched = _watchedPathsForCall({ topPath, modulePaths, env });
+function _currentSignature({ topPath, modulePaths, env, cachedConfig }, options = {}) {
+  return _signatureForPaths(_watchedPathsForCall({ topPath, modulePaths, env, cachedConfig }), options);
+}
+
+function _signatureForPaths(watched, options = {}) {
   const parts = [];
   for (const path of watched) {
     try {
@@ -6919,8 +6925,15 @@ function _evictCacheLruIfNeeded() {
 
 function _ensureFreshConfig({ topPath, modulePaths, env, legacyGeminiReviewer = false } = {}) {
   const cacheKey = _cacheKeyFor({ topPath, modulePaths, env, legacyGeminiReviewer });
-  const sig = _currentSignature({ topPath, modulePaths, env });
   const cached = _configCache.get(cacheKey);
+  // Retain the pre-load YAML signature: an edit during parsing must trigger
+  // another load, not stamp old values with the edited file's signature.
+  const inputSignature = _currentSignature({ topPath, modulePaths, env });
+  const signatureForConfig = config => {
+    const path = config?.get('worker_pool.public_hygiene.denylist_path');
+    return path ? `${inputSignature}::${_signatureForPaths([path])}` : inputSignature;
+  };
+  const sig = signatureForConfig(cached);
   if (cached === undefined || _configSignatures.get(cacheKey) !== sig) {
     // Runtime-tolerant load: daemons must not crash when ANOTHER module adds
     // a key to the shared top-level config.yaml (2026-07-17 watcher outage:
@@ -6931,11 +6944,10 @@ function _ensureFreshConfig({ topPath, modulePaths, env, legacyGeminiReviewer = 
     // retain strict validation. Runtime additionally records dropped paths.
     const fresh = loadConfigImpl({ topPath, modulePaths, env, tolerateCheckedInUnknown: true, legacyGeminiReviewer });
     _configCache.set(cacheKey, fresh);
-    _configSignatures.set(cacheKey, sig);
+    _configSignatures.set(cacheKey, signatureForConfig(fresh));
     _evictCacheLruIfNeeded();
     return fresh;
   }
-  validatePublicHygiene(cached.get('worker_pool.public_hygiene'));
   _touchCacheLru(cacheKey);
   return cached;
 }
@@ -6973,7 +6985,7 @@ export function resetConfigCache() {
 export function configSignatureStatus({ topPath, modulePaths, env } = {}) {
   const cacheKey = _cacheKeyFor({ topPath, modulePaths, env });
   const diskSignature = _currentSignature(
-    { topPath, modulePaths, env },
+    { topPath, modulePaths, env, cachedConfig: _configCache.get(cacheKey) },
     { forceHash: true }
   );
   const loadedSignature = _configSignatures.get(cacheKey) ?? null;

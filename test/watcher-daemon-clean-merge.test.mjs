@@ -4507,3 +4507,53 @@ test('FINDINGSBATCH-01 strict-off closure uses the settled body digest and real 
   assert.equal(merges, 1);
   assert.ok(gateReads >= 2, 'real executor rechecks live gates under the lease');
 });
+
+test('RDXMERGEOFF-02: repository merge-off audits once and dispatches neither merge path', async () => {
+  const rootDir = tempRoot();
+  try {
+    const audits = [];
+    const repoPath = 'HOST/Example-Org/Example-Repo';
+    const result = await maybeDispatchAmaClosureFor({ ...baseArgs(rootDir), repoPath,
+      loadConfigImpl: () => ({ ...loadAmaEnabledConfig(), getMergeAuthorityConfig: () => ({
+        ...loadAmaEnabledConfig().getMergeAuthorityConfig(), disabledRepositories: ['example-org/example-repo'],
+      }) }),
+      runDaemonCleanMergeAttemptImpl: async () => assert.fail('daemon merge'),
+      maybeDispatchAmaCloserImpl: async () => assert.fail('closer dispatch'),
+      writeAutonomousMergeDisabledAuditImpl: entry => { audits.push(entry); return { written: true }; },
+      env: { HQ_ROOT: rootDir },
+    });
+    assert.equal(result.skipMergeAgent, true);
+    assert.equal(result.dispatched, false);
+    assert.equal(result.reason, 'merge-disabled-for-repository');
+    assert.equal(result.amaEnabled, true);
+    assert.equal(audits.length, 1);
+    assert.equal(audits[0].reason, 'merge-disabled-for-repository');
+    assert.equal(audits[0].repoPath, repoPath);
+    assert.equal(audits[0].flagState.autonomousMergeExecutionEnabled, false);
+  } finally { rmSync(rootDir, { recursive: true, force: true }); }
+});
+
+test('RDXMERGEOFF-02: unlisted closure result and merge policy are byte-identical', async () => {
+  const rootDir = tempRoot();
+  try {
+    const inputs = [];
+    const run = disabledRepositories => maybeDispatchAmaClosureFor({ ...baseArgs(rootDir),
+      repoPath: 'home-org/other-repo',
+      loadConfigImpl: () => ({ ...loadAmaEnabledConfig(), getMergeAuthorityConfig: () => ({
+        ...loadAmaEnabledConfig().getMergeAuthorityConfig(), disabledRepositories,
+      }) }),
+      runDaemonCleanMergeAttemptImpl: async args => {
+        inputs.push({ flags: args.flags, reviewState: args.reviewState, repoPath: args.repoPath });
+        return { disposition: DAEMON_MERGE_DISPOSITION.MERGED, merged: true, reason: 'synthetic-merged' };
+      },
+      maybeDispatchAmaCloserImpl: async () => assert.fail('closer dispatch'),
+      writeAutonomousMergeDisabledAuditImpl: () => assert.fail('disabled audit'),
+      env: { HQ_ROOT: rootDir },
+    });
+    const before = await run([]);
+    const after = await run(['example-org/example-repo']);
+    assert.equal(JSON.stringify(after), JSON.stringify(before));
+    assert.equal(JSON.stringify(inputs[1]), JSON.stringify(inputs[0]));
+    assert.equal(inputs.length, 2);
+  } finally { rmSync(rootDir, { recursive: true, force: true }); }
+});

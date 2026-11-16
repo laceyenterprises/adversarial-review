@@ -6536,6 +6536,7 @@ async function maybeDispatchAmaCloserAttempt({
           }, () => routeFinalizationWriter({ rootDir, cfg,
             lane: { repository: repo, base: baseBranch }, kind: 'closer', subject: { prNumber, head: mergeHead },
             queue: queueAdmissionCallback({ rootDir, prNumber, head: mergeHead, admit: dispatchContext.queueAdmission }), legacy: () => attemptDaemonCleanMergeImpl({
+            disabledRepositories: cfg?.disabledRepositories,
             rootDir,
             receiptProducerClass: 'closer-hammer',
             getNextAction: () => sharedNextAction.decision,

@@ -28,6 +28,7 @@ import { loadAwareTimeoutMs, hostCpuBusyPercent } from '../load-aware-timeout.mj
 // Escalations retain recovery ownership and retry unacknowledged delivery.
 
 import { randomUUID } from 'node:crypto';
+import { loadConfigCached } from '../config-loader.mjs';
 import { hostname, loadavg, availableParallelism } from 'node:os';
 
 import { fold } from './ledger-fold.mjs';
@@ -86,6 +87,7 @@ function outcome(subjectKey, decision, { status, action, observedAt, reason, det
  *   closeSurface?: { close(args): Promise<any> } | null,
  *   liveSurface?: { read(args): Promise<any> } | null,
  *   mergeMethod?: string,
+ *   disabledRepositories?: string[],
  *   holder?: string,
  *   leaseTtlMs?: number,
  *   generateLeaseId?: () => string,
@@ -108,6 +110,7 @@ export function createFinalizationExecutor({
   deliverySurface = null,
   pageSurface = null,
   mergeMethod = 'squash',
+  disabledRepositories = loadConfigCached().getMergeAuthorityConfig().disabledRepositories,
   // Required for merge execution, including legacy-default cached config.
   laneRouting = null,
   holder,
@@ -136,7 +139,7 @@ export function createFinalizationExecutor({
   const mergeSurface = resolveMergeSurface({
     adjudicateSurface,
     localFallback: mergeFallback,
-    githubAdapter: createGithubAdapterMergeSurface({ mergeMethod }),
+    githubAdapter: createGithubAdapterMergeSurface({ mergeMethod, disabledRepositories }),
   });
 
   const killSwitchOn = () => normalizedPolicy(policy).autonomousExecutionDisabled === true;

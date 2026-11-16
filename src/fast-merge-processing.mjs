@@ -1,3 +1,5 @@
+import { isMergeDisabledForRepository, MERGE_DISABLED_FOR_REPOSITORY } from './merge-disabled-repositories.mjs';
+import { loadConfigCached } from './config-loader.mjs';
 import { readHostIdentitySync } from './dispatch-files-client.mjs';
 import { loadAwareTimeoutMs } from './load-aware-timeout.mjs';
 import { meteredExecFile } from './metered-gh.mjs';
@@ -983,6 +985,7 @@ async function fetchAndSummarizeFastMergeChecks({ ghClient, repo, prNumber, logg
 }
 
 async function processFastMergePR({
+  disabledRepositories = [],
   db,
   ghClient = execFileAsync,
   rootDir = process.cwd(),
@@ -995,6 +998,14 @@ async function processFastMergePR({
   mergeCapabilityEnforcement = resolveMergeCapabilityEnforcementFromEnv(env),
   mergeCredentialClass = null,
 } = {}) {
+  if (isMergeDisabledForRepository(disabledRepositories, repo)) {
+    updateFastMergeTerminalState(db, { state: FAST_MERGE_BLOCKED_STATE, repo, prNumber,
+      failureMessage: MERGE_DISABLED_FOR_REPOSITORY });
+    await writeFastMergeAudit({ db, rootDir, auditWriter, logger,
+      entry: buildFastMergeCloseAuditEntry({ action: 'blocked', repo, prNumber, authorizedHeadSha,
+        failureReason: MERGE_DISABLED_FOR_REPOSITORY, refusalReason: MERGE_DISABLED_FOR_REPOSITORY }) });
+    return { status: 'blocked', reason: MERGE_DISABLED_FOR_REPOSITORY };
+  }
   let exactHeadSha = authorizedHeadSha;
   const firstView = await fetchFastMergePrView({ ghClient, repo, prNumber });
   if (firstView.state === 'MERGED' || firstView.mergedAt) {
@@ -1536,6 +1547,7 @@ async function processFastMergePR({
 }
 
 async function pollFastMergeQueue({
+  loadConfigImpl = loadConfigCached,
   db,
   ghClient = execFileAsync,
   rootDir = process.cwd(),
@@ -1572,11 +1584,13 @@ async function pollFastMergeQueue({
     requeued_label_removed: 0,
     skipped_still_pending: 0,
   };
+  const disabledRepositories = loadConfigImpl().getMergeAuthorityConfig().disabledRepositories ?? [];
   let terminalProgress = 0;
   for (const row of rows) {
     summary.processed += 1;
     try {
       const result = await processFastMergePR({
+        disabledRepositories,
         db,
         ghClient,
         rootDir,

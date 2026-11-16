@@ -1,3 +1,4 @@
+import { isMergeDisabledForRepository, MERGE_DISABLED_FOR_REPOSITORY } from '../merge-disabled-repositories.mjs';
 // Merge Authority v2 executor surfaces (ARC-17; docs/SPEC-merge-authority-v2.md
 // §4). The executor performs mutating actions through injected SEAMS, never by
 // reaching directly for an adapter:
@@ -35,9 +36,10 @@ export function parseCodePrSubject(subjectExternalId) {
  * refuses a merge whose head moved, so a stale-revision merge is structurally
  * impossible to issue even if a re-fold guard is somehow bypassed.
  *
- * @param {{ mergeMethod?: string, execFileImpl?: Function, env?: NodeJS.ProcessEnv, rootDir?: string }} [config]
+ * @param {{ disabledRepositories?: string[], mergeMethod?: string, execFileImpl?: Function, env?: NodeJS.ProcessEnv, rootDir?: string }} [config]
  */
 export function createGithubAdapterMergeSurface({
+  disabledRepositories = [],
   mergeMethod: defaultMergeMethod = 'squash',
   execFileImpl = execFileAsync,
   env = process.env,
@@ -52,6 +54,9 @@ export function createGithubAdapterMergeSurface({
       const parsed = parseCodePrSubject(subjectExternalId);
       if (!parsed) {
         return { ok: false, reason: 'unsupported-subject', detail: `not a code-pr subject: ${subjectExternalId}` };
+      }
+      if (isMergeDisabledForRepository(disabledRepositories, parsed.repo)) {
+        return { ok: false, reason: MERGE_DISABLED_FOR_REPOSITORY };
       }
       if (!revisionRef) {
         return { ok: false, reason: 'no-revision', detail: 'refusing merge without a decided revision' };

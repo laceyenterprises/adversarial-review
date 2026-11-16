@@ -44,6 +44,7 @@ import { dirname, basename, join } from 'node:path';
 import { homedir } from 'node:os';
 import { isDeepStrictEqual } from 'node:util';
 import * as yaml from 'js-yaml';
+import { normalizeDisabledRepositories } from './merge-disabled-repositories.mjs';
 import { normalizeLaneRoutes } from './config-lane-routes.mjs';
 import { extendModuleSchema, freezeSchema } from './config-module-schema.mjs';
 import { MAX_WORKER_EXEC_TIMEOUT_SECONDS } from './worker-execution-limits.mjs';
@@ -2171,6 +2172,7 @@ function schemaV1() {
                 __type: TYPE_DICT,
                 __strict: true,
                 __keys: {
+                  disabled_repositories: { __type: TYPE_LIST, __default: [], __disabledRepositories: true },
                   lane_routes: { __type: TYPE_LIST, __default: [], __laneRoutes: true,
                     __item: { __type: TYPE_DICT, __strict: true, __keys: {
                       repository: { __type: TYPE_STRING }, base: { __type: TYPE_STRING },
@@ -5129,6 +5131,10 @@ function checkLeaf(value, schema, keyPath, source, tolerateUnknown = false) {
         { key: keyPath, expected: 'list', got: value, source },
       );
     }
+    if (schema.__disabledRepositories) {
+      try { return normalizeDisabledRepositories(value); }
+      catch (error) { throw new AgentOSConfigError(`${keyPath}: ${error.message}`, { key: keyPath, source }); }
+    }
     if (schema.__laneRoutes) {
       try { return normalizeLaneRoutes(value); }
       catch (error) { throw new AgentOSConfigError(`${keyPath}: ${error.message}`, { key: keyPath, source }); }
@@ -6283,6 +6289,7 @@ export class AgentOSConfig {
     );
     const noCiRepositories = this.get('roles.adversarial.merge_authority.no_ci_repositories', []);
     return {
+      disabledRepositories: normalizeDisabledRepositories(this.get('roles.adversarial.merge_authority.disabled_repositories', [])),
       laneRoutes: normalizeLaneRoutes(this.get('roles.adversarial.merge_authority.lane_routes', [])),
       noCiRepositories: Array.isArray(noCiRepositories) ? [...noCiRepositories] : [],
       enabled: this.get('roles.adversarial.merge_authority.enabled', false),

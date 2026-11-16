@@ -1,3 +1,4 @@
+import { applyRepositoryMergeOff, MERGE_DISABLED_FOR_REPOSITORY } from './merge-disabled-repositories.mjs';
 import { readPrTenure, queueTenureReview } from './pr-tenure.mjs';
 import { openReviewStateDb, requestReviewRereview } from './review-state.mjs';
 import { readCloserSuccessor, requestCloserSuccessor, settleCloserSuccessor } from './ama/closer-successor.mjs';
@@ -720,6 +721,7 @@ function withAmaDispatchMetadata(result, { amaEnabled }) {
 }
 
 export function writeAutonomousMergeDisabledAudit({
+  reason = 'autonomous-merge-execution-disabled',
   hqRoot,
   repoPath,
   prNumber,
@@ -752,7 +754,7 @@ export function writeAutonomousMergeDisabledAudit({
         outcome: 'failed-without-merge',
         path: normalizedPath,
         attemptPhase: 'autonomous-merge-disabled',
-        reason: 'autonomous-merge-execution-disabled',
+        reason,
         eligibilityReasons: normalizedReasons,
         preMergeReasons: normalizedReasons,
         flagState: normalizedFlagState,
@@ -766,7 +768,7 @@ export function writeAutonomousMergeDisabledAudit({
       },
       now,
     });
-    return { written: true, reason: 'autonomous-merge-execution-disabled' };
+    return { written: true, reason };
   } catch (err) {
     logger?.warn?.(
       `[watcher] autonomous merge disabled audit failed for ${repoPath}#${prNumber}@${headSha}: ` +
@@ -1124,6 +1126,7 @@ async function dispatchAmaClosureFor({
       defaultBuilder: loadedConfig.get?.('roles.build_pack_default_worker_class', 'codex') ?? 'codex',
       amaCloserMaxConcurrentLaunches: loadedConfig.get?.('watcher.ama_closer_max_concurrent_launches', 3) ?? 3,
     };
+    cfg = applyRepositoryMergeOff(cfg, repoPath);
     orchestrationMode = resolveOrchestrationMode({
       loadedConfig,
       logger,
@@ -2092,11 +2095,13 @@ async function dispatchAmaClosureFor({
       ? currentPrHeadSha : reviewState.headSha,
   });
   if (!autonomousMergeExecutionEnabled) {
+    const reason = cfg.mergeDisabledForRepository ? MERGE_DISABLED_FOR_REPOSITORY : 'autonomous-merge-execution-disabled';
     amaDispatchCloser.retireAmaCloserDrainHint(rootDir, {
       repo: repoPath, prNumber, headSha: currentPrHeadSha || reviewState?.headSha,
     }, { logger });
     const hqRoot = resolveHqRoot(env);
     const disabledAudit = writeAutonomousMergeDisabledAuditImpl({
+      ...(cfg.mergeDisabledForRepository ? { reason } : {}),
       hqRoot,
       repoPath,
       prNumber,
@@ -2109,7 +2114,7 @@ async function dispatchAmaClosureFor({
       logger,
     });
     logger?.warn?.(
-      `[watcher] autonomous merge execution disabled for ${repoPath}#${prNumber}` +
+      `[watcher] ${cfg.mergeDisabledForRepository ? 'merge disabled for this repository' : 'autonomous merge execution disabled'} for ${repoPath}#${prNumber}` +
         `@${String(reviewState.headSha || '').slice(0, 12)}; ` +
         `would_path=${wouldUseDaemonPath ? 'daemon-merge' : 'hammer-merge'} ` +
         `audit=${disabledAudit?.written ? 'written' : disabledAudit?.reason || 'not-written'}`,
@@ -2118,7 +2123,7 @@ async function dispatchAmaClosureFor({
       {
         dispatched: false,
         skipMergeAgent: true,
-        reason: 'autonomous-merge-execution-disabled',
+        reason,
         autonomousMergeDisabled: {
           path: wouldUseDaemonPath ? 'daemon-merge' : 'hammer-merge',
           eligibilityReasons: disabledEligibility.reasons,

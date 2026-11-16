@@ -56,7 +56,7 @@ export function parseCommitTrailerValues(message) {
   // Git records rebase conflicts after the trailers using its comment
   // character. Accept only the complete standard suffix, including at least
   // one tab-indented path. Never skip arbitrary prose or comment blocks.
-  const conflict = lines.findIndex(line => /^([#;]) Conflicts:$/.test(line));
+  const conflict = lines.findLastIndex(line => /^([#;]) Conflicts:$/.test(line));
   if (conflict > 0) {
     const marker = lines[conflict][0];
     const suffix = lines.slice(conflict + 1);

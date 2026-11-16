@@ -21,6 +21,12 @@ for (const marker of [';', '#']) {
         commit: { message: original + '\n' + extra + footer } }), false);
     }
   });
+  test(`LAC-2202 ignores an earlier ${marker} conflict heading in commit body`, () => {
+    const original = message.slice(0, message.indexOf('; Conflicts:')).trimEnd();
+    const described = `Repair\n\nEarlier notes quoted this header:\n${marker} Conflicts:\nThe old conflict was resolved.\n\n${original}`;
+    const footer = `\n${marker} Conflicts:\n${marker}\tresolved/file.mjs\n`;
+    assert.deepEqual(parseCommitTrailerValues(described + footer), parseCommitTrailerValues(original));
+  });
 }
 
 for (const suffix of ['\nordinary prose', '\n; Conflicts:\n;\n',

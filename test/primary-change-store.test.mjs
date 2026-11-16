@@ -149,8 +149,7 @@ test('pre-deploy reversal refusals recompute once at an unchanged head and revie
   assert.equal(JSON.parse(readFileSync(currentPath, 'utf8')).key.at(-1), 'reversalproof-v8');
   const catalog = JSON.parse(readFileSync(new URL('../docs/data-model/catalog.json', import.meta.url), 'utf8'));
   const entry = catalog.entries.find(entry => entry.id === 'primary-change-history');
-  const fragment = JSON.parse(readFileSync(new URL('../docs/data-model/catalog.d/LAC-2202.json', import.meta.url), 'utf8'));
-  assert.equal(fragment.entries.find(entry => entry.id === 'primary-change-history').identityVersion, 'reversalproof-v8');
+  assert.equal(entry.identityVersion, 'reversalproof-v8');
   assert.ok(entry.optionalHistoryFields.includes('laneReversalHistory'));
   assert.match(entry.laneReversalProof, /laneOwner and laneIdentity/);
 });

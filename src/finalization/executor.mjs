@@ -28,6 +28,8 @@ import { loadAwareTimeoutMs, hostCpuBusyPercent } from '../load-aware-timeout.mj
 // Escalations retain recovery ownership and retry unacknowledged delivery.
 
 import { randomUUID } from 'node:crypto';
+import { loadConfigCached } from '../config-loader.mjs';
+import { isMergeDisabledForRepository, MERGE_DISABLED_FOR_REPOSITORY } from '../merge-disabled-repositories.mjs';
 import { hostname, loadavg, availableParallelism } from 'node:os';
 
 import { fold } from './ledger-fold.mjs';
@@ -42,6 +44,7 @@ import {
   resolveMergeSurface,
   checkIdentityAttestation,
   createGithubAdapterMergeSurface,
+  parseCodePrSubject,
 } from './execution-surfaces.mjs';
 
 // The kill switch intercepts exactly the mutating decisions (finalize-now /
@@ -86,6 +89,7 @@ function outcome(subjectKey, decision, { status, action, observedAt, reason, det
  *   closeSurface?: { close(args): Promise<any> } | null,
  *   liveSurface?: { read(args): Promise<any> } | null,
  *   mergeMethod?: string,
+ *   disabledRepositories?: string[],
  *   holder?: string,
  *   leaseTtlMs?: number,
  *   generateLeaseId?: () => string,
@@ -108,6 +112,7 @@ export function createFinalizationExecutor({
   deliverySurface = null,
   pageSurface = null,
   mergeMethod = 'squash',
+  disabledRepositories = loadConfigCached().getMergeAuthorityConfig().disabledRepositories,
   // Required for merge execution, including legacy-default cached config.
   laneRouting = null,
   holder,
@@ -136,7 +141,7 @@ export function createFinalizationExecutor({
   const mergeSurface = resolveMergeSurface({
     adjudicateSurface,
     localFallback: mergeFallback,
-    githubAdapter: createGithubAdapterMergeSurface({ mergeMethod }),
+    githubAdapter: createGithubAdapterMergeSurface({ mergeMethod, disabledRepositories }),
   });
 
   const killSwitchOn = () => normalizedPolicy(policy).autonomousExecutionDisabled === true;
@@ -227,6 +232,12 @@ export function createFinalizationExecutor({
     switch (decision.kind) {
       case 'finalize-now': {
         if (killSwitchOn()) return recordKillSwitchEscalation(subject, decision, state, observedAt);
+        const parsed = subjectKey.domainId === 'code-pr' ? parseCodePrSubject(subjectKey.subjectExternalId) : null;
+        if (parsed && isMergeDisabledForRepository(disabledRepositories, parsed.repo)) {
+          return outcome(subjectKey, decision, {
+            status: 'deferred', action: 'merge', observedAt, reason: MERGE_DISABLED_FOR_REPOSITORY,
+          });
+        }
         // Identity/attestation read-through (ARC-22), fail-closed.
         const idv = await checkIdentityAttestation(identitySurface && { check: ctx => bounded(
           request => identitySurface.check(request), { ...ctx, observedAt }, decision) }, { subjectKey, revisionRef: rev, decision });

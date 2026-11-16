@@ -1455,3 +1455,32 @@ test('fast-merge defers a missing PR title and preserves its retryable row', asy
   assert.equal(mergeCalls(gh).length, 0);
   assert.equal(row(db, 802).pr_state, 'fast_merge_skipped');
 });
+
+
+test('RDXMERGEOFF-02: repository refusal leaves the queue once and preserves other repository progress', async t => {
+  const db = makeDb();
+  t.after(() => db.close());
+  const disabledRepo = 'example-org/example-repo';
+  const otherRepo = 'home-org/other-repo';
+  seedFastMerge(db, 17, { repo: disabledRepo, reviewedAt: '2030-01-01T00:00:00.000Z' });
+  seedFastMerge(db, 18, { repo: otherRepo, reviewedAt: '2030-01-01T00:00:01.000Z' });
+  const audits = [];
+  const gh = makeGhStub({ checks: [pendingChecks()] });
+  const args = { db, ghClient: gh, perPollCap: 1,
+    loadConfigImpl: () => ({ getMergeAuthorityConfig: () => ({ disabledRepositories: [disabledRepo] }) }),
+    auditWriter: entry => audits.push(entry) };
+  const first = await pollFastMergeQueue(args);
+  assert.equal(first.blocked, 1);
+  assert.equal(gh.calls.length, 0);
+  assert.equal(row(db, 17, disabledRepo).pr_state, 'fast_merge_blocked');
+  assert.equal(row(db, 17, disabledRepo).failure_message, 'merge-disabled-for-repository');
+  assert.equal(audits.length, 1);
+  assert.equal(audits[0].refusal_reason, 'merge-disabled-for-repository');
+  const second = await pollFastMergeQueue(args);
+  assert.equal(second.processed, 1);
+  assert.equal(second.skipped_still_pending, 1);
+  assert.equal(row(db, 18, otherRepo).pr_state, 'fast_merge_skipped');
+  assert.equal(audits.length, 1, 'the refused row cannot repeat its audit or consume the next poll cap');
+  assert.ok(gh.calls.some(call => call.args.includes(otherRepo)));
+  assert.equal(gh.calls.some(call => call.args.includes(disabledRepo)), false);
+});

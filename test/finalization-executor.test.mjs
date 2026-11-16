@@ -1,6 +1,10 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import Database from 'better-sqlite3';
+import { mkdtempSync, writeFileSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { resetConfigCache } from '../src/config-loader.mjs';
 import { openFinalizationLedgerStore } from '../src/finalization/ledger-store.mjs';
 import { openFinalizationExecutorLeaseStore } from '../src/finalization/executor-lease-store.mjs';
 import { createFinalizationExecutor } from '../src/finalization/executor.mjs';
@@ -375,4 +379,81 @@ test('failed page delivery retries with one stable episode key and persists ackn
   assert.equal(keys.length, 2);
   assert.equal(new Set(keys).size, 1);
   assert.equal(Object.keys(h.state().workflow.pages).length, 1);
+});
+
+test('RDXMERGEOFF-02: executor passes repository merge-off to its default adapter surface', async t => {
+  const h = harness(t, { adjudicateSurface: null, disabledRepositories: ['EXAMPLE/PROJECT'] });
+  const result = await h.tick(100);
+  assert.equal(result.reason, 'merge-disabled-for-repository');
+  assert.equal(h.calls.length, 0);
+  assert.equal(h.state().workflow.merge, null);
+});
+
+for (const surface of ['adjudicateSurface', 'mergeFallback']) {
+  test(`repository merge-off fences injected ${surface} before lane routing`, async t => {
+    let calls = 0;
+    const h = harness(t, {
+      disabledRepositories: ['EXAMPLE/PROJECT'],
+      adjudicateSurface: null,
+      [surface]: { merge: async () => { calls++; return { ok: true }; } },
+      laneRouting: { run: () => assert.fail('listed repository must not enter a merge lane') },
+    });
+    for (const n of [100, 200]) {
+      const result = await h.tick(n);
+      assert.equal(result.status, 'deferred');
+      assert.equal(result.reason, 'merge-disabled-for-repository');
+    }
+    assert.equal(calls, 0);
+    assert.equal(h.state().workflow.merge, null);
+    assert.equal(h.state().workflow.escalation, null);
+    assert.deepEqual(h.state().workflow.operations, {});
+  });
+
+  test(`unlisted repository can merge through injected ${surface}`, async t => {
+    let calls = 0;
+    const h = harness(t, {
+      disabledRepositories: ['example/other-project'],
+      adjudicateSurface: null,
+      [surface]: { merge: async () => { calls++; return { ok: true }; } },
+    });
+    assert.equal((await h.tick(100)).status, 'executed');
+    assert.equal(calls, 1);
+  });
+}
+
+test('repository merge-off still permits a remediation dispatch', async t => {
+  let calls = 0;
+  const h = harness(t, {
+    disabledRepositories: ['example/project'],
+    remediationSurface: { dispatch: async () => {
+      calls++;
+      return { admitted: true, launchId: 'fixture-launch', admittedAt: at(200) };
+    } },
+  });
+  h.append('verdict_recorded', { revisionRef: 'head-A', verdictKind: 'request-changes',
+    stageId: 'review', role: 'independent' }, 1);
+  assert.equal((await h.tick(200)).action, 'dispatch-remediation');
+  assert.equal(calls, 1);
+  assert.equal(h.calls.length, 0);
+});
+
+test('RDXMERGEOFF-02: default executor reads the repository list through the cached loader', async t => {
+  const dir = mkdtempSync(join(tmpdir(), 'executor-merge-off-'));
+  const previous = process.env.AGENT_OS_CONFIG_PATH;
+  t.after(() => {
+    if (previous === undefined) delete process.env.AGENT_OS_CONFIG_PATH;
+    else process.env.AGENT_OS_CONFIG_PATH = previous;
+    resetConfigCache();
+    rmSync(dir, { recursive: true, force: true });
+  });
+  const topPath = join(dir, 'config.yaml');
+  writeFileSync(topPath, JSON.stringify({ version: 1, roles: { adversarial: {
+    merge_authority: { disabled_repositories: ['example/project'] },
+  } } }));
+  process.env.AGENT_OS_CONFIG_PATH = topPath;
+  resetConfigCache();
+  const h = harness(t, { adjudicateSurface: null });
+  const result = await h.tick(100);
+  assert.equal(result.reason, 'merge-disabled-for-repository');
+  assert.equal(h.state().workflow.merge, null);
 });

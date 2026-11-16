@@ -1,3 +1,4 @@
+import { isMergeDisabledForRepository, MERGE_DISABLED_FOR_REPOSITORY } from '../merge-disabled-repositories.mjs';
 import { isGitHubRateLimitError, rateLimitErrorObservation } from '../rate-limit-throttle.mjs';
 import { observeClosureLag } from './closure-lag.mjs';
 import { attestationRecordErrorDetails } from '../attestation-record-error.mjs';
@@ -346,6 +347,7 @@ function priorDaemonPermanentFailure({ readAuditImpl, hqRoot, repo, prNumber, va
  * @param {boolean=} [args.branchProtectionRequired]
  * @param {string=} [args.requiredGateContext]
  * @param {string[]=} [args.branchProtectionRequiredContexts]
+ * @param {string[]} [args.disabledRepositories] Repositories excluded from autonomous merge.
  * @param {string[]} [args.noCiRepositories] Operator-declared repositories without CI.
  * @param {string} [args.mergeMethod]    `squash` (default) | `merge`.
  * @param {string} args.hqRoot          HQ root for the audit doc.
@@ -391,6 +393,7 @@ async function attemptDaemonCleanMergeInner({
   branchProtectionRequiredContexts = [],
   requiredCheckContexts = [],
   noCiRepositories = [],
+  disabledRepositories = [],
   mergeMethod = 'squash',
   flags = {},
   mergeCapabilityEnforcement = flags.mergeCapabilityEnforcement || 'observe',
@@ -435,6 +438,18 @@ async function attemptDaemonCleanMergeInner({
     auditWritten: false,
     ...extra,
   });
+
+  if (isMergeDisabledForRepository(disabledRepositories, repo)) {
+    let auditWritten = false;
+    try {
+      writeAuditImpl({ hqRoot, repo, prNumber, headSha: validatedHead,
+        attempt: { outcome: 'failed-without-merge', path: DAEMON_MERGE_CLOSURE_AUTHORITY,
+          attemptPhase: 'repository-merge-disabled', reason: MERGE_DISABLED_FOR_REPOSITORY,
+          validatedHead }, now: now() });
+      auditWritten = true;
+    } catch (error) { logger?.warn?.(`[daemon-merge] repository merge disabled audit failed: ${error.message}`); }
+    return notTaken(MERGE_DISABLED_FOR_REPOSITORY, { permanent: true, auditWritten });
+  }
 
   const protectiveDeclaration = resolveProtectivePredecessorDeclaration({
     prBody,

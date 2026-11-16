@@ -1677,3 +1677,49 @@ for (const kind of ['primary', 'secondary', 'deferred']) test(`daemon retains ${
   assert.equal(harness.calls.merge, 2);
   assert.equal(harness.calls.sleeps.length, 1);
 });
+
+test('RDXMERGEOFF-02: listed repository records one refusal before gate reads or leases', async () => {
+  for (const repo of ['example-org/example-repo', 'Example-Org/Example-Repo',
+    'HOST/Example-Org/Example-Repo', 'https://github.com/example-org/example-repo.git']) {
+    const harness = makeHarness();
+    const result = await attemptDaemonCleanMerge(baseArgs(harness, { repo,
+      disabledRepositories: ['EXAMPLE-ORG/EXAMPLE-REPO'] }));
+    assert.equal(result.disposition, DAEMON_MERGE_DISPOSITION.NOT_TAKEN);
+    assert.equal(result.reason, 'merge-disabled-for-repository');
+    assert.equal(result.permanent, true);
+    assert.equal(result.merged, false);
+    assert.equal(result.auditWritten, true);
+    assert.equal(harness.calls.merge, 0);
+    assert.equal(harness.calls.fetchLiveGate, 0);
+    assert.equal(harness.calls.acquire, 0);
+    assert.equal(harness.calls.release, 0);
+    assert.equal(harness.calls.auditWrites.length, 1);
+    assert.equal(harness.calls.auditAppends.length, 0);
+    assert.deepEqual(harness.calls.auditWrites[0].attempt, {
+      outcome: 'failed-without-merge', path: DAEMON_MERGE_CLOSURE_AUTHORITY,
+      attemptPhase: 'repository-merge-disabled', reason: 'merge-disabled-for-repository', validatedHead: HEAD,
+    });
+  }
+});
+
+test('RDXMERGEOFF-02: an unreadable refusal audit cannot permit a daemon merge', async () => {
+  const harness = makeHarness();
+  const result = await attemptDaemonCleanMerge(baseArgs(harness, { repo: 'example-org/example-repo',
+    disabledRepositories: ['example-org/example-repo'], writeAuditImpl: () => { throw new Error('synthetic failure'); } }));
+  assert.equal(result.reason, 'merge-disabled-for-repository');
+  assert.equal(result.auditWritten, false);
+  assert.equal(result.permanent, true);
+  assert.equal(harness.calls.merge, 0);
+  assert.equal(harness.calls.acquire, 0);
+});
+
+test('RDXMERGEOFF-02: unlisted daemon result and audit attempts are byte-identical', async () => {
+  const without = makeHarness(), unlisted = makeHarness();
+  const deterministic = { repo: 'home-org/other-repo', now: () => '2030-01-01T00:00:00.000Z' };
+  const before = await attemptDaemonCleanMerge(baseArgs(without, deterministic));
+  const after = await attemptDaemonCleanMerge(baseArgs(unlisted, { ...deterministic,
+    disabledRepositories: ['example-org/example-repo'] }));
+  assert.equal(before.merged, true);
+  assert.equal(JSON.stringify(after), JSON.stringify(before));
+  assert.equal(JSON.stringify(unlisted.calls), JSON.stringify(without.calls));
+});

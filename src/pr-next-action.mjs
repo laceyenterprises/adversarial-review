@@ -383,6 +383,10 @@ function selectRow(facts, options = {}) {
       queue: 'none', refs: [`label:${explicitHold.name}:${explicitHold.actorKind || 'provenance-unknown'}`] };
   }
   if (pr.draft) return { row: 'R02-hold', action: 'operator-hold', actor: 'operator', reason: 'draft', deadlineKind: null, queue: 'none' };
+  if (policy?.mergeDisabledForRepository === true) {
+    return { row: 'R02-hold', action: 'operator-hold', actor: 'operator', reason: 'merge-disabled-for-repository',
+      deadlineKind: null, queue: 'none' };
+  }
   if (policy?.autonomousMergeExecutionEnabled === false) {
     return { row: 'R02-hold', action: 'operator-hold', actor: 'operator', reason: 'merge-execution-disabled',
       deadlineKind: null, queue: 'none' };

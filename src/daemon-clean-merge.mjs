@@ -1014,6 +1014,7 @@ async function runDaemonCleanMergeAttemptInner({
   };
   reportGateSnapshot(initialGate);
   const daemonResult = await attemptDaemonCleanMergeImpl({
+    disabledRepositories: cfg?.disabledRepositories,
     rootDir,
     getNextAction,
     onGateEvidenceImpl: reportGateSnapshot,

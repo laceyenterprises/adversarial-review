@@ -983,6 +983,18 @@ operator intervention. To roll back only background hammer dispatch, return
 `watcher.ama_hammer_dispatch_mode` to `inline` or unset the environment
 override; unknown or unreadable values fail safe to inline.
 
+For a repository-specific merge hold, the config-only
+`roles.adversarial.merge_authority.disabled_repositories` list defaults to `[]`
+and accepts unique `owner/name` strings compared lowercased. A listed repository
+receives `merge-disabled-for-repository`: closure dispatch and autonomous merge
+execution stop while reviews and remediation rounds continue. Operators merge
+these PRs manually. Watcher coexistence retains the R02 hold as `await-operator`;
+the finalization executor refuses merge before lane routing for all surfaces,
+including injected adjudicate and local fallback surfaces. Both the watcher and
+parent worker reader must recognize the key; verify
+`getMergeAuthorityConfig().disabledRepositories` before relying on it. See
+[Merge off for one repository](docs/RUNBOOK-ama-closure.md#merge-off-for-one-repository).
+
 RDR-02 adds the ledger-independent stop used by `rdr stop --reason` and
 `hq halt --confirm --reason`. Both merge consumers read
 `<HQ_ROOT>/control/halt/active.json` and `merge-kill.json` through

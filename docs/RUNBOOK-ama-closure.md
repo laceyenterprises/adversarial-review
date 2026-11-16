@@ -3908,6 +3908,12 @@ follow-up jobs retain their stop code and round count, including at the cap:
 the fresh review determines subsequent work rather than requeueing an old gated
 review body. The fresh reviewer reads live labels again; historical findings
 are never erased by label presence.
+If the posting-time GraphQL head/label read fails, the head/state helper retries
+through REST, reading the current PR head and paginating current issue labels.
+Neither dispatch labels nor pre-review context can authorize a live-pack waiver.
+If REST also fails, the review keeps enforce mode with no waiver. Merge preflight
+independently reads REST inputs and refuses a change in head or labels during its
+evaluation; a successful preflight does not rewrite an already-posted review.
 After ordinary deployment, SRE observes the next natural label application on
 an already-reviewed gate-held PR scheduling review within one watcher cycle,
 without a head change or rescue. This live receipt remains pending; no worker

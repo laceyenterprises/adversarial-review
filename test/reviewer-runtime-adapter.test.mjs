@@ -2515,7 +2515,7 @@ test('cli-direct preflight failures are oauth-broken and prevent reviewer spawn'
   }
 });
 
-test('cli-direct returns cli-resolution-transient when the installed CLI resolver is missing', async () => {
+test('cli-direct returns reviewer-configuration-error when the installed CLI resolver is missing', async () => {
   const rootDir = makeRoot();
   try {
     for (const model of ['claude', 'codex', 'gemini']) {
@@ -2531,11 +2531,11 @@ test('cli-direct returns cli-resolution-transient when the installed CLI resolve
       });
       const result = await adapter.spawnReviewer({
         model, sessionUuid: `missing-cli-${model}`, prompt: '',
-        subjectContext: { domainId: 'code-pr', repo: 'lacey/repo', prNumber: 3 },
+        subjectContext: { domainId: 'code-pr', repo: 'example/project', prNumber: 3 },
         forbiddenFallbacks: ['api-key'],
       });
       assert.equal(result.ok, false);
-      assert.equal(result.failureClass, 'cli-resolution-transient');
+      assert.equal(result.failureClass, 'reviewer-configuration-error');
       assert.match(result.stderrTail, new RegExp(`review CLI resolution unavailable for ${model}`));
       assert.equal(spawnCount, 0);
     }

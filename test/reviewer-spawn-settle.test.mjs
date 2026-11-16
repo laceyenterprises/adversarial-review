@@ -1210,3 +1210,24 @@ for (const replacement of [false, true]) test(`malformed budget receipt releases
   if (replacement) assert.equal(cascade, null);
   else assert.ok(Date.parse(cascade.nextRetryAfter) > Date.parse(cascade.lastFailureAt));
 });
+
+test('resolver configuration failure immediately queues a reviewer-stopped alert for Claude', async t => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'reviewclipath-alert-'));
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  const alerts = [];
+  const result = await spawnReviewer({
+    rootDir, repo: 'example/project', prNumber: 7, reviewerModel: 'claude',
+    reviewerHeadSha: 'b'.repeat(40), reviewerSessionUuid: 'synthetic-config-alert',
+    readReviewerQuotaDecisionImpl: async () => ({ available: true, state: 'fixture', provider: 'anthropic' }),
+    reviewerRuntimeAdapterOverride: { async spawnReviewer() {
+      return { ok: false, failureClass: 'reviewer-configuration-error', error: '[reviewer-configuration-error] review CLI resolution unavailable for claude' };
+    } },
+    beginReviewerPassImpl() {}, completeReviewerPassImpl() {},
+    readBestReviewerEvidenceTokenUsageImpl: async () => null,
+    deliverAlertImpl: async (message, options) => { alerts.push({ message, options }); return { id: 'synthetic-alert' }; },
+  });
+  assert.equal(result.failureClass, 'reviewer-configuration-error');
+  assert.equal(alerts.length, 1);
+  assert.match(alerts[0].message, /STOPPED.*configuration repair/);
+  assert.equal(alerts[0].options.event, 'reviewer.configuration_error');
+});

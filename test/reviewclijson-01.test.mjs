@@ -132,3 +132,49 @@ test('cli-direct preflight retains resolution infrastructure evidence before spa
   });
   assert.equal(result.failureClass, 'cli-resolution-transient');
 });
+
+test('resolver configuration errors survive typed, serialized, stored and preflight classification', async t => {
+  const error = Object.assign(new Error('[reviewer-configuration-error] review CLI resolution unavailable for claude'), {
+    failureClass: 'reviewer-configuration-error', binaryResolution: { status: 'unknown', failureClass: 'reviewer-configuration-error', reason: 'ENOENT' },
+  });
+  for (const text of [error.message, `[review-cli-resolution] ${JSON.stringify(error.binaryResolution)}`]) {
+    assert.equal(classifyReviewerFailure(text, 1), 'reviewer-configuration-error');
+    assert.equal(infraRecoverableFailureClass({ failure_message: text }), null);
+  }
+  assert.equal(classifyReviewerFailure('', 1, null, error), 'reviewer-configuration-error');
+  const rootDir = mkdtempSync(join(tmpdir(), 'reviewclipath-runtime-'));
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  const adapter = createCliDirectReviewerRuntimeAdapter({ rootDir, logger: quiet,
+    preflightImpl: async () => { throw Object.assign(new Error(error.message), { cause: error, failureClass: error.failureClass }); },
+    spawnCapturedImpl: async () => assert.fail('configuration failure must stop before reviewer spawn'),
+  });
+  const result = await adapter.spawnReviewer({ model: 'claude', prompt: 'synthetic',
+    sessionUuid: 'synthetic-config-preflight', timeoutMs: 100,
+    subjectContext: { domainId: 'code-pr', repo: 'example/project', prNumber: 7 }, forbiddenFallbacks: ['api-key'],
+  });
+  assert.equal(result.failureClass, 'reviewer-configuration-error');
+  const failures = [];
+  await settleReviewerAttempt({ rootDir, repoPath: 'example/project', prNumber: 7, result,
+    statements: { markFailed: { run: (...args) => failures.push(args) } }, log: quiet,
+  });
+  assert.equal(failures.length, 1);
+  assert.match(failures[0][1], /^\[reviewer-configuration-error\]/);
+});
+
+test('returned and thrown resolver configuration failures preserve healthy identities', async () => {
+  for (const throws of [false, true]) {
+    const releases = [];
+    const error = Object.assign(new Error('[reviewer-configuration-error] synthetic resolver failure'), {
+      failureClass: 'reviewer-configuration-error', binaryResolution: { status: 'unknown' },
+    });
+    const run = () => runWithAgyReviewerIdentity({ reviewerModel: 'gemini',
+      adapter: { describe: () => ({ capabilities: { agyReviewerIdentity: true } }) },
+      pool: { plan: () => ({ multi: true }),
+        acquire: async () => ({ user: 'synthetic-seat', reviewId: 'synthetic-review' }),
+        release: async (_lease, outcome) => releases.push(outcome),
+      },
+    }, async () => { if (throws) throw error; return { ok: false, failureClass: error.failureClass }; });
+    if (throws) await assert.rejects(run(), error); else await run();
+    assert.deepEqual(releases, [{ failed: false, reason: 'reviewer-configuration-error' }]);
+  }
+});

@@ -950,8 +950,11 @@ new PR
   retains its failure classification. If the session release misses, the
   no-charge fallback requires a `reviewing` row on the stale head with no session
   UUID. A replacement session, including one on the same head, is never released.
-- A `cli-resolution-transient` failure means executable resolution failed before
-  the reviewer ran. Resolution itself retries once with load-aware deadlines.
+- Resolver command lookup/spawn failures (including ENOENT and EACCES) use
+  `reviewer-configuration-error`: terminal `failed`, no transient retry, and an
+  immediate configuration alert through the existing alert bus.
+- A `cli-resolution-transient` failure means executable resolution timed out,
+  exited nonzero, or returned invalid protocol before the reviewer ran. Resolution itself retries once with load-aware deadlines.
   Settlement records the existing PR-level cascade backoff and releases the
   matching session to `pending` without charging review or infra recovery
   attempts while `consecutiveTransientFailures < CASCADE_FAILURE_CAP` (five).

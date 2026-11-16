@@ -230,7 +230,7 @@ test('discovery translates resolver failures into typed path preflight errors be
         execFileImpl: async () => { probes += 1; },
       }), (err) => {
         assert.ok(err instanceof CliDirectPreflightError);
-        assert.equal(err.failureClass, 'cli-resolution-transient');
+        assert.equal(err.failureClass, mode === 'missing-hq' ? 'reviewer-configuration-error' : 'cli-resolution-transient');
         assert.equal(err.layer, `${model}-path`);
         assert.equal(err.cause.binaryResolution.status, 'unknown');
         return true;
@@ -245,7 +245,7 @@ for (const asyncMode of [false, true]) {
     const f = fixture(t);
     const protocol = JSON.stringify(f.response);
     const run = (stdout) => {
-      const options = { log: f.log,
+      const options = { env: f.env, log: f.log,
         execFileSyncImpl: () => stdout,
         execFileImpl: async () => ({ stdout }),
       };
@@ -281,7 +281,7 @@ for (const asyncMode of [false, true]) {
         if (timeouts.length === 1 || !recover) throw Object.assign(new Error('synthetic timeout'), { code: 'ETIMEDOUT' });
         return JSON.stringify(f.response);
       };
-      const options = { log: f.log, timeoutMs: 10000,
+      const options = { env: f.env, log: f.log, timeoutMs: 10000,
         loadAwareTimeoutMsImpl: (ms) => { nominal.push(ms); return ms * 3; },
         execFileSyncImpl: execute,
         execFileImpl: async (...args) => ({ stdout: execute(...args) }),
@@ -293,6 +293,53 @@ for (const asyncMode of [false, true]) {
       assert.deepEqual(nominal, [10000, 10000]);
       assert.equal(f.events.length, 1);
       assert.equal(f.events[0].status, recover ? 'resolved' : 'unknown');
+    }
+  });
+}
+
+for (const asyncMode of [false, true]) {
+  test(`${asyncMode ? 'async' : 'sync'} resolver uses service PATH and HQ_BIN independently of restricted reviewer PATH`, async t => {
+    const f = fixture(t);
+    const saved = { PATH: process.env.PATH, HQ_BIN: process.env.HQ_BIN };
+    t.after(() => {
+      for (const [key, value] of Object.entries(saved)) {
+        if (value === undefined) delete process.env[key]; else process.env[key] = value;
+      }
+    });
+    symlinkSync(f.hq, join(f.root, 'hq'));
+    process.env.PATH = f.root;
+    delete process.env.HQ_BIN;
+    const run = (env, extra = {}) => {
+      const options = { env, log: f.log, ...extra };
+      return asyncMode ? resolveReviewCliAsync('claude', options) : Promise.resolve().then(() => resolveReviewCli('claude', options));
+    };
+    const restricted = { PATH: '/synthetic/restricted', HOME: f.root };
+    for (const override of [undefined, f.hq, 'hq']) {
+      if (override) process.env.HQ_BIN = override; else delete process.env.HQ_BIN;
+      assert.equal((await run(restricted)).realPath, f.binary);
+      assert.equal(JSON.parse(readFileSync(f.requestFile, 'utf8')).path, restricted.PATH);
+    }
+    process.env.HQ_BIN = '/synthetic/absent';
+    assert.equal((await run({ ...restricted, HQ_BIN: f.hq })).realPath, f.binary, 'caller override wins');
+    delete process.env.HQ_BIN;
+    let invoked = 0;
+    const execute = command => { invoked++; assert.equal(command, join(f.root, 'hq')); return JSON.stringify({ ...f.response, cli: 'claude' }); };
+    await run(restricted, { execFileSyncImpl: execute, execFileImpl: async command => ({ stdout: execute(command) }) });
+    assert.equal(invoked, 1);
+    process.env.PATH = '/synthetic/absent';
+    // Caller PATH contains a real hq but must never supply the resolver command.
+    await assert.rejects(run({ ...restricted, PATH: f.root }), err => {
+      assert.equal(err.failureClass, 'reviewer-configuration-error');
+      assert.equal(err.binaryResolution.reason, 'ENOENT');
+      return true;
+    });
+    for (const code of ['ENOENT', 'EACCES', 'ENOEXEC']) {
+      let attempts = 0;
+      const execute = () => { attempts++; throw Object.assign(new Error('synthetic spawn failure'), { code }); };
+      await assert.rejects(run({ ...restricted, HQ_BIN: f.hq }, {
+        execFileSyncImpl: execute, execFileImpl: async () => execute(),
+      }), err => err.failureClass === 'reviewer-configuration-error');
+      assert.equal(attempts, 1, 'spawn failures do not enter transient retry');
     }
   });
 }

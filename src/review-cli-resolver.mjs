@@ -1,6 +1,7 @@
 import { execFile, execFileSync } from 'node:child_process';
 import { promisify } from 'node:util';
-import { isAbsolute } from 'node:path';
+import { delimiter, isAbsolute, resolve } from 'node:path';
+import { accessSync, constants, statSync } from 'node:fs';
 import { loadAwareTimeoutMs } from './load-aware-timeout.mjs';
 
 export const CLI_RESOLUTION_TRANSIENT_FAILURE_CLASS = 'cli-resolution-transient';
@@ -9,6 +10,20 @@ export function isReviewCliResolutionFailure(error) {
   return error?.binaryResolution?.status === 'unknown'
     || error?.name === 'ReviewCliResolutionError'
     || error?.cause?.binaryResolution?.status === 'unknown';
+}
+
+// Resolve the control command against the service environment, never reviewer PATH.
+function resolverCommand(env) {
+  const command = env.HQ_BIN || process.env.HQ_BIN || 'hq';
+  if (isAbsolute(command) || command.includes('/')) return resolve(command);
+  for (const directory of (process.env.PATH || '').split(delimiter)) {
+    const candidate = resolve(directory, command);
+    try {
+      accessSync(candidate, constants.X_OK);
+      if (statSync(candidate).isFile()) return candidate;
+    } catch { /* try the next service PATH entry */ }
+  }
+  throw Object.assign(new Error('resolver command unavailable on service PATH'), { code: 'ENOENT' });
 }
 
 // HUP-05 owns override, managed-current and review legacy fallback policy.
@@ -21,11 +36,10 @@ export function resolveReviewCli(cli, {
   log = console,
   now = () => new Date().toISOString(),
 } = {}) {
-  const command = env.HQ_BIN || process.env.HQ_BIN || 'hq';
   let result;
   for (let attempt = 0; attempt < 2; attempt += 1) {
     try {
-      const raw = execFileSyncImpl(command, [
+      const raw = execFileSyncImpl(resolverCommand(env), [
         'cli', 'resolve', '--cli', cli, '--consumer', 'review', '--json',
       ], {
         env, encoding: 'utf8', timeout: loadAwareTimeoutMsImpl(timeoutMs), killSignal: 'SIGKILL',
@@ -34,7 +48,7 @@ export function resolveReviewCli(cli, {
       result = parseResolution(cli, raw);
       break;
     } catch (cause) {
-      if (attempt === 1) throw resolutionFailure(cli, cause, { log, now });
+      if (attempt === 1 || resolverSpawnFailed(cause)) throw resolutionFailure(cli, cause, { log, now });
     }
   }
   return recordResolution(cli, result, { log, now });
@@ -84,17 +98,22 @@ function parseResolution(cli, raw) {
   }
 }
 
+function resolverSpawnFailed(cause) {
+  return typeof cause?.code === 'string' && /^E(?!RR_)/.test(cause.code) && cause.code !== 'ETIMEDOUT';
+}
+
 function resolutionFailure(cli, cause, { log, now }) {
+  const failureClass = resolverSpawnFailed(cause) ? 'reviewer-configuration-error' : CLI_RESOLUTION_TRANSIENT_FAILURE_CLASS;
   // Do not echo arbitrary resolver output (or JSON parser excerpts) into logs.
   const evidence = Object.freeze({
-    cli, consumer: 'review', status: 'unknown', timestamp: now(),
+    cli, consumer: 'review', status: 'unknown', timestamp: now(), failureClass,
     reason: cause?.code || (cause instanceof SyntaxError ? 'invalid-json' : 'resolver-error'),
     ...(cause?.resolutionDiagnostic ? { diagnostic: cause.resolutionDiagnostic } : {}),
   });
   log.error?.(`[review-cli-resolution] ${JSON.stringify(evidence)}`);
-  return Object.assign(new Error(`review CLI resolution unavailable for ${cli}`, { cause }), {
+  return Object.assign(new Error(`${failureClass === 'reviewer-configuration-error' ? '[reviewer-configuration-error] ' : ''}review CLI resolution unavailable for ${cli}`, { cause }), {
     name: 'ReviewCliResolutionError',
-    failureClass: CLI_RESOLUTION_TRANSIENT_FAILURE_CLASS,
+    failureClass,
     binaryResolution: evidence,
   });
 }
@@ -124,11 +143,10 @@ export async function resolveReviewCliAsync(cli, {
   log = console,
   now = () => new Date().toISOString(),
 } = {}) {
-  const command = env.HQ_BIN || process.env.HQ_BIN || 'hq';
   let result;
   for (let attempt = 0; attempt < 2; attempt += 1) {
     try {
-      const { stdout } = await execFileImpl(command, [
+      const { stdout } = await execFileImpl(resolverCommand(env), [
         'cli', 'resolve', '--cli', cli, '--consumer', 'review', '--json',
       ], {
         env, encoding: 'utf8', timeout: loadAwareTimeoutMsImpl(timeoutMs), killSignal: 'SIGKILL',
@@ -137,7 +155,7 @@ export async function resolveReviewCliAsync(cli, {
       result = parseResolution(cli, stdout);
       break;
     } catch (cause) {
-      if (attempt === 1) throw resolutionFailure(cli, cause, { log, now });
+      if (attempt === 1 || resolverSpawnFailed(cause)) throw resolutionFailure(cli, cause, { log, now });
     }
   }
   return recordResolution(cli, result, { log, now });

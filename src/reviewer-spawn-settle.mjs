@@ -562,7 +562,18 @@ function configuredHqOwner(pool) {
 }
 
 async function spawnReviewer(args = {}) {
-  return withRepositoryStateCycle(args.rootDir || ROOT, () => spawnReviewerWithinRepositoryCycle(args));
+  const result = await withRepositoryStateCycle(args.rootDir || ROOT, () => spawnReviewerWithinRepositoryCycle(args));
+  if (!result.ok && result.failureClass === 'reviewer-configuration-error') {
+    try {
+      await (args.deliverAlertImpl || deliverAlert)(
+        `Adversarial reviewer STOPPED — configuration repair required: ${result.error || result.stderrTail || result.failureClass}`,
+        { event: 'reviewer.configuration_error', payload: { failureClass: result.failureClass }, env: args.env || process.env },
+      );
+    } catch (error) {
+      console.warn(`[watcher] Failed to queue reviewer configuration alert: ${error.message}`);
+    }
+  }
+  return result;
 }
 
 async function spawnReviewerWithinRepositoryCycle(args) {

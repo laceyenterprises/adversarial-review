@@ -84,7 +84,8 @@ function stdoutLooksLikeFailureSignal(value) {
 }
 
 function reviewerSignalAwareFailureClass(err, classificationText, exitCode, details = {}) {
-  if (isReviewCliResolutionFailure(err)) return CLI_RESOLUTION_TRANSIENT_FAILURE_CLASS;
+  if (isReviewCliResolutionFailure(err)) return (err.failureClass === 'reviewer-configuration-error' || err.cause?.failureClass === 'reviewer-configuration-error')
+    ? 'reviewer-configuration-error' : CLI_RESOLUTION_TRANSIENT_FAILURE_CLASS;
   if (err?.reviewerStalled || String(classificationText).includes('[reviewer-stalled]')) return 'reviewer-stalled';
   const stdoutTail = tailText(err?.stdout || '');
   const stderrTail = tailText(err?.stderr || '');
@@ -463,7 +464,7 @@ function createCliDirectReviewerRuntimeAdapter({
       const detail = [err.message, err.stdout, err.stderr].filter(Boolean).join('\n').trim();
       const classificationText = [err?.message, err?.stderr].filter(Boolean).join('\n').trim();
       const failureClass = isReviewCliResolutionFailure(err)
-        ? CLI_RESOLUTION_TRANSIENT_FAILURE_CLASS
+        ? reviewerSignalAwareFailureClass(err, classificationText, null)
         : err?.failureClass || reviewerSignalAwareFailureClass(err, classificationText, null);
       return emptyResult({
         ok: false,

@@ -14,18 +14,28 @@ There is no local binary precedence or resolver-error fallback. The producer's
 review profile owns existing explicit environment overrides, managed current,
 and caller legacy fallbacks; an absent managed installation permits fallback
 only when the producer returns it. Invalid explicit or managed selections refuse
-launch. Missing hq, malformed/incomplete JSON, nonzero exit or the bounded
+launch. The resolver selects caller `HQ_BIN`, then service `HQ_BIN`, otherwise
+`hq` on the service process PATH, and invokes an absolute path. Bare override
+names also use service PATH; reviewer PATH is never used for this lookup. The
+resolver subprocess still receives the reviewer environment.
+Missing hq, malformed/incomplete JSON, nonzero exit or the bounded
 10-second resolver timeout produce `status: unknown`, never managed health.
 
 Async reviewer launches, OAuth probes and cli-direct discovery await nonblocking
 resolver subprocesses. Legacy synchronous path exports and local remediation
 spawn contracts retain bounded synchronous resolution. Both clients validate and log the same protocol evidence
 before helpers or execution. Discovery translates unknown resolution into
-`CliDirectPreflightError` with `failureClass: cli-resolution-transient` and the CLI's
+`CliDirectPreflightError` with the resolver failure class and the CLI's
 `<name>-path` layer, retaining resolver evidence on the cause; the runtime adapter
 returns its existing preflight failure result without spawning a reviewer.
 
-Both synchronous and asynchronous clients retry resolution once, sizing each
+Command lookup and spawn errors (such as ENOENT or EACCES) immediately produce
+`reviewer-configuration-error`, terminal settlement, and a reviewer-stopped
+configuration alert through the existing alert bus. They require configuration
+repair and never enter transient retry/backoff. Timeouts, nonzero resolver exits
+and invalid protocol responses retain `cli-resolution-transient`.
+
+For transient failures, synchronous and asynchronous clients retry resolution once, sizing each
 nominal ten-second attempt through the shared load-aware timeout helper. The
 first failed attempt emits no terminal resolution event; only retry exhaustion
 logs an unknown outcome. A recovered retry logs only its resolved outcome. Protocol
@@ -37,7 +47,7 @@ refused. Invalid JSON records only stdout byte length, line count and whether a
 single line validated as protocol v1, never the raw stdout.
 
 Resolution failures do not isolate reviewer identities or contribute to
-credential-outage accounting. The watcher records `cli-resolution-transient`
+credential-outage accounting. For transient resolution failures, the watcher records `cli-resolution-transient`
 backoff (initially one minute), releases the claim to `pending` without charging
 review or infrastructure recovery attempts below the existing five-consecutive
 transient threshold, then uses bounded `pending-upstream` infrastructure

@@ -1524,6 +1524,7 @@ function createAgyReviewerIdentityPool({
 // identity-scoped durable cooldown instead of readiness isolation.
 const NON_ISOLATING_FAILURE_CLASSES = new Set([
   'cli-resolution-transient',
+  'reviewer-configuration-error',
   'cancelled',
   'reviewer-stalled',
   'reviewer-timeout',
@@ -1603,7 +1604,7 @@ async function runWithAgyReviewerIdentity({
   } catch (error) {
     if (isReviewCliResolutionFailure(error)) {
       failed = false;
-      reason = 'cli-resolution-transient';
+      reason = error.failureClass || error.cause?.failureClass || 'cli-resolution-transient';
     }
     throw error;
   } finally {

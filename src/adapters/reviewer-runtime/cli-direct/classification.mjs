@@ -77,10 +77,14 @@ function classifyReviewerFailure(stderr, exitCode, errorCode = null, details = {
   const resolutionLines = text.split(/\r?\n/)
     .filter(line => line.includes(resolutionTag))
     .map(line => line.slice(line.indexOf(resolutionTag) + resolutionTag.length));
-  let resolutionUnknown = false;
+  let resolutionUnknown = false, resolutionFailureClass;
   try {
-    resolutionUnknown = JSON.parse(resolutionLines.at(-1))?.status === 'unknown';
+    const observation = JSON.parse(resolutionLines.at(-1));
+    resolutionUnknown = observation?.status === 'unknown';
+    if (resolutionUnknown) resolutionFailureClass = observation.failureClass;
   } catch { /* no complete resolution observation */ }
+  if (lower.includes('[reviewer-configuration-error]') || details?.failureClass === 'reviewer-configuration-error'
+    || details?.cause?.failureClass === 'reviewer-configuration-error' || resolutionFailureClass === 'reviewer-configuration-error') return 'reviewer-configuration-error';
   if (isReviewCliResolutionFailure(details)
     || /review CLI resolution unavailable for |\[cli-resolution-transient\]/i.test(text)
     || resolutionUnknown) return CLI_RESOLUTION_TRANSIENT_FAILURE_CLASS;

@@ -25,6 +25,15 @@ before helpers or execution. Discovery translates unknown resolution into
 `<name>-path` layer, retaining resolver evidence on the cause; the runtime adapter
 returns its existing preflight failure result without spawning a reviewer.
 
+Protocol v1 optionally includes `launcher: { path, sha256, routeKey }`.
+Both clients select that path for execution only after checking an absolute
+path, a regular executable file without a final symlink, and a matching SHA-256
+of the opened file at the launch boundary. The only accepted route keys are
+`CLAUDE_CLI` and `CLAUDE_CODE_CLI_PATH`. Invalid launcher evidence fails closed
+as `reviewer-configuration-error`, including through discovery and subprocess
+failure classification; it never falls back to the underlying binary.
+Without a launcher, execution continues to use `realPath`.
+
 Both synchronous and asynchronous clients retry resolution once, sizing each
 nominal ten-second attempt through the shared load-aware timeout helper. The
 first failed attempt emits no terminal resolution event; only retry exhaustion
@@ -54,6 +63,8 @@ readyz invocation; query failures remain independently reported.
 Before any helper or exec, `[review-cli-resolution]` logs the validated
 `schemaVersion`, registry `cli`, `consumer`, `status`, `source`, `selectedPath`,
 immutable `realPath`, `version`, `binarySha256` and UTC `timestamp`. Service/worker
+logs also retain the optional validated `launcher`; the binary fields always
+describe the underlying CLI, even when execution uses a launcher. Service/worker
 logs retain that pre-exec JSON even when auth, catalog preparation or spawn
 fails. Unknown events retain the CLI, timestamp and bounded reason; arbitrary
 resolver output is not logged. Failure classification reads the latest resolution
@@ -62,7 +73,7 @@ outcome supersedes an earlier unknown outcome. These records are version-scoped 
 not a successful tool-event receipt. No review database schema or durable status additions. Exported legacy `*_CLI` constants identify registry names only; runtime
 selection happens at the execution boundary.
 
-Codex auth and model-catalog preparation use the same `realPath` as exec,
+Codex auth and model-catalog preparation use the same selected execution path as exec,
 including after a managed-current or Homebrew symlink changes. A subsequent
 launch resolves afresh. Catalog fallback remains governed by CODEXHOMEISO-02;
 it never selects another executable. Added agy holders still use their existing

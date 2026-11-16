@@ -2,10 +2,11 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { resolveReviewCli, resolveReviewCliAsync } from '../src/review-cli-resolver.mjs';
+import { resolveReviewCli, resolveReviewCliAsync, resolveReviewCliPath, resolveReviewCliPathAsync } from '../src/review-cli-resolver.mjs';
+import { classifyReviewerFailure } from '../src/adapters/reviewer-runtime/cli-direct/classification.mjs';
 import { checkAgyReviewerAuth } from '../src/agy-reviewer-auth.mjs';
 import { __test__ as reviewer } from '../src/reviewer-harness.mjs';
 import {
@@ -47,6 +48,107 @@ else console.log(JSON.stringify({...doc, cli: args[3]}));
   const log = { error: (line) => events.push(JSON.parse(line.slice(line.indexOf('{')))) };
   return { root, hq, binary, selected, response, requestFile, events, log, set, env: { HQ_BIN: hq, PATH: '/synthetic/bin' } };
 }
+
+function launcherFixture(f) {
+  const path = join(f.root, 'metered-launcher');
+  writeFileSync(path, '#!/bin/sh\nprintf \'synthetic metered event\\n\'\n', { mode: 0o700 });
+  return { path, sha256: createHash('sha256').update(readFileSync(path)).digest('hex'), routeKey: 'CLAUDE_CLI' };
+}
+
+for (const asyncMode of [false, true]) {
+  test(`${asyncMode ? 'async' : 'sync'} path helper executes launcher and retains underlying binary evidence`, async (t) => {
+    const f = fixture(t);
+    const savedError = console.error;
+    console.error = f.log.error;
+    t.after(() => { console.error = savedError; });
+    for (const launcher of [undefined, launcherFixture(f)]) {
+      for (const routeKey of ['CLAUDE_CLI', 'CLAUDE_CODE_CLI_PATH']) {
+        f.set({ ...f.response, ...(launcher ? { launcher: { ...launcher, routeKey } } : {}) });
+        const path = await (asyncMode ? resolveReviewCliPathAsync('claude', f.env) : resolveReviewCliPath('claude', f.env));
+        assert.equal(path, launcher?.path ?? f.binary);
+        assert.equal(execFileSync(path, [], { encoding: 'utf8' }),
+          launcher ? 'synthetic metered event\n' : 'synthetic tool event v1\n');
+        const event = f.events.at(-1);
+        assert.equal(event.realPath, f.binary);
+        assert.equal(event.version, f.response.version);
+        assert.equal(event.binarySha256, f.response.binarySha256);
+        assert.equal(event.launcher?.routeKey, launcher ? routeKey : undefined);
+      }
+    }
+  });
+
+  test(`${asyncMode ? 'async' : 'sync'} launcher validation fails closed as configuration before helpers or spawn`, async (t) => {
+    const f = fixture(t);
+    const launcher = launcherFixture(f);
+    const link = join(f.root, 'launcher-link');
+    symlinkSync(launcher.path, link);
+    const nonExecutable = join(f.root, 'not-executable');
+    writeFileSync(nonExecutable, readFileSync(launcher.path), { mode: 0o600 });
+    chmodSync(nonExecutable, 0o600);
+    const invalid = [
+      null, [], {}, { ...launcher, path: 'relative' },
+      { ...launcher, path: `${launcher.path}\n` },
+      { ...launcher, path: link }, { ...launcher, path: f.root },
+      { ...launcher, path: nonExecutable }, { ...launcher, path: join(f.root, 'missing') },
+      { ...launcher, sha256: '0'.repeat(64) }, { ...launcher, sha256: 'invalid' },
+      { ...launcher, routeKey: 'UNKNOWN_CLI' },
+    ];
+    // A valid receipt becomes invalid if its file changes before launch.
+    writeFileSync(launcher.path, '#!/bin/sh\nexit 99\n');
+    invalid.push(launcher);
+    const savedError = console.error;
+    console.error = f.log.error;
+    t.after(() => { console.error = savedError; });
+    for (const value of invalid) {
+      f.set({ ...f.response, launcher: value });
+      const run = () => asyncMode ? resolveReviewCliPathAsync('claude', f.env)
+        : Promise.resolve().then(() => resolveReviewCliPath('claude', f.env));
+      await assert.rejects(run(), (err) => {
+        assert.equal(err.failureClass, 'reviewer-configuration-error');
+        assert.equal(err.binaryResolution.status, 'unknown');
+        assert.equal(classifyReviewerFailure('OAuth token invalid', 1, null, err), 'reviewer-configuration-error');
+        return true;
+      });
+      assert.equal(classifyReviewerFailure(`[review-cli-resolution] ${JSON.stringify(f.events.at(-1))}`, 1),
+        'reviewer-configuration-error');
+      let probes = 0;
+      if (asyncMode) await assert.rejects(probeReviewerCliOAuth({
+        model: 'claude', env: f.env, execFileImpl: async () => { probes += 1; },
+      }), (err) => err instanceof CliDirectPreflightError && err.failureClass === 'reviewer-configuration-error');
+      await assert.rejects(reviewer.spawnClaude([], {
+        env: f.env, platform: 'linux', execFileImpl: async () => { probes += 1; },
+      }), (err) => err.failureClass === 'reviewer-configuration-error');
+      assert.equal(probes, 0);
+    }
+  });
+}
+
+test('Claude direct and launchctl spawn execute launcher while logging underlying binary evidence', async (t) => {
+  const f = fixture(t);
+  const launcher = launcherFixture(f);
+  const savedError = console.error;
+  console.error = f.log.error;
+  t.after(() => { console.error = savedError; });
+  for (const platform of ['linux', 'darwin']) {
+    for (const selectedLauncher of [undefined, launcher]) {
+      f.set({ ...f.response, ...(selectedLauncher ? { launcher } : {}) });
+      const calls = [];
+      await reviewer.spawnClaude(['auth', 'status'], {
+        env: f.env, platform, uid: 501,
+        execFileImpl: async (command, args) => { calls.push({ command, args }); return { stdout: '' }; },
+      });
+      const path = selectedLauncher?.path ?? f.binary;
+      assert.equal(calls.length, 1);
+      if (platform === 'darwin') {
+        assert.equal(calls[0].command, '/bin/launchctl');
+        assert.deepEqual(calls[0].args.slice(-3), [path, 'auth', 'status']);
+      } else assert.deepEqual(calls[0], { command: path, args: ['auth', 'status'] });
+      assert.equal(f.events.at(-1).realPath, f.binary);
+      assert.equal(f.events.at(-1).version, f.response.version);
+      assert.equal(f.events.at(-1).binarySha256, f.response.binarySha256);
+    }
+  }
+});
 
 test('protocol uses argv and delegates managed, explicit override and review fallback to hq', (t) => {
   const f = fixture(t);

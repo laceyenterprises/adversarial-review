@@ -84,3 +84,16 @@ separate discovery's home org from authentication routing.
 `npm run typecheck:contracts`, `bash demo/research-finding-walkthrough.sh`
 (three byte-stable deliveries), and `git diff --check` passed. No full local
 suite was run; PR-head CI remains the full-suite merge gate.
+
+## Hammer CI fixture repair
+
+The remaining Node 22 and Node 26 failures were in fast-merge and
+reviewer-timeout watcher fixtures. Their loaders now supply the synthetic home
+organization for repository discovery independently of the runner's no-org auth
+configuration. Existing polling, closure and retry assertions remain intact;
+production routing and merge authority interfaces are unchanged.
+
+Verification: canonical targeted validation passed all 280 tests across the two
+repaired watcher suites, owner-token and routing-isolation suites, dynamic
+Octokit auth and watcher claim-loop suites. Lint, contract typechecking and the
+offline research walkthrough passed. The full suite runs only in exact-head CI.

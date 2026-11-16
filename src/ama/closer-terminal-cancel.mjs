@@ -2,7 +2,7 @@ import { accessSync, constants, readdirSync, readFileSync, rmSync, mkdirSync } f
 import { isAbsolute, join, dirname } from 'node:path';
 import { promisify } from 'node:util';
 import { execFile } from 'node:child_process';
-import { amaCloserPendingLeaseExpiryMs, deleteAmaCloserLease, findLiveAmaCloserLease, updateAmaCloserLease } from './closer-lease.mjs';
+import { amaCloserPendingLeaseExpiryMs, deleteAmaCloserLease, findLiveAmaCloserLease, readAmaCloserLease, updateAmaCloserLease } from './closer-lease.mjs';
 import { readAmaCloserDispatchRecord, updateAmaCloserDispatchRecord } from './dispatch-closer.mjs';
 import { writeFileAtomic } from '../atomic-write.mjs';
 import { deliverAlert } from '../alert-delivery.mjs';
@@ -37,6 +37,11 @@ function matchingDispatchRecord(rootDir, repo, prNumber, lease, headSha) {
   return null;
 }
 
+function closerLaunchId(lease, dispatch) {
+  if (lease?.lrqId && lease.lrqId !== 'unknown') return lease.lrqId;
+  return dispatch?.record?.launchRequestId || lease?.lrqId;
+}
+
 /** Persist the close obligation before the PR leaves the open-row scan. */
 export function queueCloserCancelForClosedPr({ rootDir, repo, prNumber, now = new Date().toISOString() }) {
   let held;
@@ -47,7 +52,11 @@ export function queueCloserCancelForClosedPr({ rootDir, repo, prNumber, now = ne
   let existing;
   try { existing = JSON.parse(readFileSync(path, 'utf8')); } catch (err) { if (err?.code !== 'ENOENT') throw err; }
   if (existing && (existing.state !== 'exhausted' || existing.targetHeadSha === held.headSha)) return existing;
-  const record = { schemaVersion: 1, repo, prNumber, targetHeadSha: held.headSha, queuedAt: now, attempts: 0, lastAttemptAt: null, state: 'pending' };
+  const dispatch = held.lease && matchingDispatchRecord(rootDir, repo, prNumber, held.lease, held.headSha);
+  const launchRequestId = closerLaunchId(held.lease, dispatch);
+  const record = { schemaVersion: 1, repo, prNumber, targetHeadSha: held.headSha,
+    launchRequestId: launchRequestId && launchRequestId !== 'unknown' ? launchRequestId : null,
+    queuedAt: now, attempts: 0, lastAttemptAt: null, state: 'pending' };
   mkdirSync(dirname(path), { recursive: true });
   writeFileAtomic(path, `${JSON.stringify(record, null, 2)}\n`);
   return record;
@@ -97,7 +106,11 @@ export async function retryPendingCloserCancels({ rootDir, now = new Date().toIS
     if (record.state !== 'pending' || (record.lastAttemptAt && Date.parse(now) - Date.parse(record.lastAttemptAt) < retryMs)) continue;
     attempted += 1;
     let result;
-    try { result = await cancelImpl({ rootDir, repo: record.repo, prNumber: record.prNumber, transition: 'closed', now, logger, retryDelaysMs: [] }); }
+    try {
+      result = await cancelImpl({ rootDir, repo: record.repo, prNumber: record.prNumber,
+        transition: 'closed', targetHeadSha: record.targetHeadSha,
+        targetLaunchRequestId: record.launchRequestId, now, logger, retryDelaysMs: [] });
+    }
     catch (err) { result = { reason: 'cancel-unavailable', error: err }; }
     if (result.reason === 'launch-pending') {
       record.lastAttemptAt = now;
@@ -141,16 +154,26 @@ function cancelStatus(response) {
 
 /** Settle a live closer when GitHub's live PR state becomes terminal. */
 export async function cancelCloserForTerminalPr({
-  rootDir, repo, prNumber, transition, live,
+  rootDir, repo, prNumber, transition, live, targetHeadSha, targetLaunchRequestId,
   hqPath = resolveHqBin(process.env), hqRoot = process.env.HQ_ROOT,
   readAuditImpl = readAmaAuditEntry,
   execFileImpl = execFileAsync, accessImpl = accessSync,
   retryDelaysMs, logger = console, now = new Date().toISOString(),
 } = {}) {
-  const held = findLiveAmaCloserLease(rootDir, { repo, prNumber });
-  if (!held) return { cancelled: false, reason: 'no-live-closer' };
-  const { lease, headSha } = held;
-  const dispatch = matchingDispatchRecord(rootDir, repo, prNumber, lease, headSha);
+  const active = findLiveAmaCloserLease(rootDir, { repo, prNumber });
+  const held = active && (!targetHeadSha || dispatchHeads(active.lease, active.headSha).includes(targetHeadSha))
+    ? active : null;
+  if (!held && !(transition === 'closed' && targetHeadSha)) {
+    return { cancelled: false, reason: 'no-live-closer' };
+  }
+  const headSha = held?.headSha ?? targetHeadSha;
+  const identity = { repo, prNumber, headSha };
+  // The follow-up reaper can retire the local lease before HQ acknowledges the
+  // cancel. Legacy obligations recover the launch from the recorded head only.
+  const lease = held?.lease ?? readAmaCloserLease(rootDir, identity);
+  const exactDispatch = lease ? null : readAmaCloserDispatchRecord(rootDir, identity);
+  const dispatch = lease ? matchingDispatchRecord(rootDir, repo, prNumber, lease, headSha)
+    : exactDispatch && { record: exactDispatch, headSha };
 
   if (transition === 'merged') {
     const mergedHead = String(live?.headRefOid || '');
@@ -177,11 +200,12 @@ export async function cancelCloserForTerminalPr({
   }
   if (transition !== 'closed') return { cancelled: false, reason: 'not-terminal' };
 
-  const launchRequestId = lease.lrqId && lease.lrqId !== 'unknown'
-    ? lease.lrqId : dispatch?.record?.launchRequestId || lease.lrqId;
-  const pendingAgeMs = Date.parse(now) - Date.parse(lease.acquiredAt || lease.updatedAt);
+  const observedLaunchId = closerLaunchId(lease, dispatch);
+  const launchRequestId = targetLaunchRequestId || observedLaunchId;
+  if (!held && !launchRequestId) return { cancelled: false, reason: 'no-live-closer' };
+  const pendingAgeMs = lease ? Date.parse(now) - Date.parse(lease.acquiredAt || lease.updatedAt) : 0;
   let observedStatus = null;
-  if (!launchRequestId && lease.status === 'pending' && pendingAgeMs >= amaCloserPendingLeaseExpiryMs(lease.dispatchTimeoutMs)) {
+  if (!launchRequestId && lease?.status === 'pending' && pendingAgeMs >= amaCloserPendingLeaseExpiryMs(lease?.dispatchTimeoutMs)) {
     deleteAmaCloserLease(rootDir, { repo, prNumber, headSha });
     return { cancelled: false, outcome: 'pr-closed-externally', reason: 'orphaned-pending-lease-deleted' };
   } else if (!launchRequestId) {
@@ -194,7 +218,7 @@ export async function cancelCloserForTerminalPr({
       if (isAbsolute(hqPath)) accessImpl(hqPath, constants.X_OK);
       const resolvedRoot = hqRoot || resolveHqRoot(process.env);
       const response = await execHqDispatchCancel({
-        hqPath, launchRequestId,
+        hqPath, launchRequestId, reason: 'obsolete-closer-pr-closed',
         hqExecFileImpl: (bin, args, options) => execFileImpl(bin, args, {
           ...options, timeout: HQ_CANCEL_TIMEOUT_MS,
         }),
@@ -205,10 +229,12 @@ export async function cancelCloserForTerminalPr({
       try { parsed = response?.stdout ? JSON.parse(String(response.stdout)) : null; } catch { /* Plain text success. */ }
       if (parsed?.ok === false && /unknown dispatch_id/i.test(String(parsed.reason || ''))) {
         observedStatus = 'not-found';
-      } else if (parsed?.ok === false && !cancelStatus(response)) {
-        throw new Error(`HQ cancel refused: ${parsed.reason || 'unknown reason'}`);
+      } else {
+        observedStatus = cancelStatus(response);
+        if (!observedStatus) {
+          throw new Error(`HQ cancel has no terminal confirmation: ${parsed?.reason || parsed?.currentStatus || 'unknown'}`);
+        }
       }
-      observedStatus ||= cancelStatus(response) || 'cancelled';
     } catch (err) {
       // Only HQ's response can prove terminal state. An ENOENT from access or
       // exec means the binary is missing, not that the dispatch was cancelled.
@@ -221,11 +247,15 @@ export async function cancelCloserForTerminalPr({
       logger.log?.(`[ama-closer] ${repo}#${prNumber} lrq=${launchRequestId} already terminal at HQ`);
     }
   }
-  if (dispatch) updateAmaCloserDispatchRecord(rootDir, { repo, prNumber, headSha: dispatch.headSha }, (record) => record && ({
-    ...record, outcome: 'no-merge:pr-closed-externally',
-    lastObservedStatus: observedStatus, lastObservedAt: now,
-  }));
-  updateAmaCloserLease({ rootDir, repo, prNumber, headSha, status: 'terminal', terminalOutcome: 'pr-closed-externally', now });
-  logger.log?.(`[ama-closer] ${repo}#${prNumber} pr-closed-externally; cancelled lrq=${launchRequestId || 'none'}`);
-  return { cancelled: observedStatus === 'cancelled', outcome: 'pr-closed-externally' };
+  if (dispatch) updateAmaCloserDispatchRecord(rootDir, { repo, prNumber, headSha: dispatch.headSha }, (record) => {
+    if (!record || (record.launchRequestId && record.launchRequestId !== launchRequestId)) return record;
+    return { ...record, outcome: 'no-merge:pr-closed-externally',
+      lastObservedStatus: observedStatus, lastObservedAt: now };
+  });
+  if (held && observedLaunchId === launchRequestId) {
+    updateAmaCloserLease({ rootDir, ...identity, expectedLease: lease,
+      status: 'terminal', terminalOutcome: 'pr-closed-externally', now });
+  }
+  logger.log?.(`[ama-closer] ${repo}#${prNumber} pr-closed-externally; HQ status=${observedStatus} lrq=${launchRequestId}`);
+  return { cancelled: ['cancelled', 'canceled'].includes(observedStatus), outcome: 'pr-closed-externally' };
 }

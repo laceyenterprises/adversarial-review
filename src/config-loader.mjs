@@ -2519,6 +2519,20 @@ function schemaV1() {
         __type: TYPE_DICT,
         __strict: true,
         __keys: {
+          public_hygiene: {
+            __type: TYPE_DICT, __strict: true, __strict_always: true,
+            __keys: {
+              repos: { __type: TYPE_LIST, __item: { __type: TYPE_STRING }, __default: [] },
+              identities: {
+                __type: TYPE_DICT, __strict: false, __strict_always: true, __default: {},
+                __extra_keys_schema: {
+                  __type: TYPE_DICT, __strict: true, __strict_always: true,
+                  __keys: { name: { __type: TYPE_STRING, __required: true }, email: { __type: TYPE_STRING, __required: true } },
+                },
+              },
+              denylist_path: { __type: TYPE_STRING },
+            },
+          },
           tenure: {
             __type: TYPE_DICT, __strict: true,
             __keys: {
@@ -5266,6 +5280,12 @@ function validateDictPresentKeysOnly(
     }
   }
   const allowed = schema.__keys || {};
+  for (const [key, child] of Object.entries(allowed)) {
+    if (child.__required && !Object.hasOwn(doc, key)) {
+      const full = keyPath ? `${keyPath}.${key}` : key;
+      throw new AgentOSConfigError(`${full}: required key is missing`, { key: full, source });
+    }
+  }
   const extraSchema = schema.__extra_keys_schema || null;
   const strict = schema.__strict !== false;
 
@@ -5391,10 +5411,38 @@ function validateDictPresentKeysOnly(
   return out;
 }
 
+function validatePublicHygiene(policy = {}) {
+  const refuse = field => { throw new AgentOSConfigError(
+    `worker_pool.public_hygiene.${field}: invalid public hygiene policy; repair host configuration`,
+    { key: `worker_pool.public_hygiene.${field}` },
+  ); };
+  policy.repos ??= [];
+  policy.identities ??= {};
+  const repos = policy.repos;
+  if (!Array.isArray(repos) || repos.some(repo => typeof repo !== 'string'
+    || !/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(repo)
+    || repo.endsWith('.git') || repo.split('/').some(part => ['.', '..'].includes(part)))) refuse('repos');
+  const identities = policy.identities ?? {};
+  for (const [workerClass, identity] of Object.entries(identities)) {
+    if (!/^[a-z0-9][a-z0-9-]*$/.test(workerClass) || !identity
+      || Object.keys(identity).sort().join(',') !== 'email,name'
+      || Object.values(identity).some(value => typeof value !== 'string' || !value.trim() || /[|\r\n\0]/.test(value))) refuse('identities');
+  }
+  if (repos.length || Object.hasOwn(policy, 'denylist_path')) {
+    const path = policy.denylist_path;
+    if (typeof path !== 'string' || !path.startsWith('/') || /[\r\n\0]/.test(path)) refuse('denylist_path');
+    try {
+      if (!statSync(path).isFile()) refuse('denylist_path');
+      new TextDecoder('utf-8', { fatal: true }).decode(readFileSync(path));
+    } catch { refuse('denylist_path'); }
+  }
+}
+
 export function validateSchema(doc, options = {}) {
   const validated = validateSchemaLayer(doc, options);
   validateOAuthDeclarations(validated.oauth ?? {}, null, options.source);
   validateSearch(validated.services?.hcp?.search);
+  validatePublicHygiene(validated.worker_pool?.public_hygiene);
   return validated;
 }
 
@@ -6641,6 +6689,7 @@ function loadConfigImpl({
   if (!legacyGeminiReviewer || !undeclaredGemini) validateOAuthDeclarations(merged.oauth, trace);
   validateOsgShape(merged.osg);
   validateSearch(merged.services?.hcp?.search);
+  validatePublicHygiene(merged.worker_pool?.public_hygiene);
 
   const sources = {};
   for (const [key, entries] of Object.entries(trace)) {
@@ -6886,6 +6935,7 @@ function _ensureFreshConfig({ topPath, modulePaths, env, legacyGeminiReviewer = 
     _evictCacheLruIfNeeded();
     return fresh;
   }
+  validatePublicHygiene(cached.get('worker_pool.public_hygiene'));
   _touchCacheLru(cacheKey);
   return cached;
 }

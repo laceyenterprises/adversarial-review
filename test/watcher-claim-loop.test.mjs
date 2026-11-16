@@ -10,9 +10,76 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { spawnSync } from 'node:child_process';
+import { hammerRetryCapFilePath } from '../src/ama/hammer-retry-cap.mjs';
 
 const REPO_ROOT = path.resolve(new URL('..', import.meta.url).pathname);
 const SUMMARY_MARKER = '@@WATCHER_CLAIM_LOOP_SUMMARY@@';
+
+test('GROKREVIEWMODE-01 Gemini spawn retry preserves row quota fallback before AFH', () => {
+  const tmp = mkdtempSync(path.join(tmpdir(), 'watcher-grok-quota-retry-'));
+  try {
+    const loaderPath = path.join(tmp, 'loader.mjs');
+    const registerPath = path.join(tmp, 'register.mjs');
+    const runnerPath = path.join(tmp, 'runner.mjs');
+    const configPath = path.join(tmp, 'config.yaml');
+    writeFileSync(configPath, 'version: 1\ngrok:\n  enabled: true\n  reviewer:\n    enabled: true\n    mode: fallback\nreviewer:\n  gemini:\n    mode: always-on\n');
+    const loader = buildLoaderSource({
+      reviewerRuntimeSource: `
+        globalThis.__watcherClaimLoopReviewerSpawns = [];
+        export function createReviewerRuntimeAdapterForDomain() {
+          return { spawnReviewer: async payload => {
+            globalThis.__watcherClaimLoopReviewerSpawns.push(payload);
+            return payload.model === 'gemini'
+              ? { ok: false, failureClass: 'quota-exhausted', error: 'Synthetic Gemini quota cap' }
+              : { ok: true, stdout: '', stderr: '' };
+          }, cancel: async () => {}, reattach: async () => ({}) };
+        }
+        export function createReviewerRuntimeAdapterByName() { return createReviewerRuntimeAdapterForDomain(); }
+        export function loadDomainConfig() { return {}; }
+        export async function recoverReviewerRunRecords() { return { recovered: 0, failed: 0 }; }
+      `,
+    });
+    writeFileSync(loaderPath, loader);
+    writeFileSync(registerPath, buildRegisterSource(loaderPath));
+    writeFileSync(runnerPath, buildRunnerSource({
+      prePollSetup: `
+        // Exhaust the separate PR-wide harness refund allowance so the quota
+        // row remains failed and exercises routing's primary-hold bypass.
+        const { mutateRepairEpochs } = await import(${JSON.stringify(fileUrl('src', 'ama', 'hammer-retry-cap.mjs'))});
+        mutateRepairEpochs(${JSON.stringify(REPO_ROOT)}, { repo: 'laceyenterprises/adversarial-review', prNumber: 101 },
+          ledger => { ledger.reviewHarnessRefunds = { a: {}, b: {}, c: {} }; });
+        db.prepare(\`INSERT INTO reviewed_prs
+          (repo, pr_number, reviewed_at, reviewer, pr_state, review_status,
+           reviewer_head_sha, revision_ref, failed_at, failure_message)
+          VALUES ('laceyenterprises/adversarial-review', 101, '2026-10-10',
+            'claude', 'open', 'failed', 'sha-happy-101', 'sha-happy-101', ?,
+            '[quota-exhausted] usage limit')\`).run(new Date().toISOString());
+      `,
+      postSeedSetup: `
+        db.prepare(\`UPDATE reviewed_prs SET review_status = 'posted',
+          reviewer_head_sha = 'sha-happy-102', revision_ref = 'sha-happy-102'
+          WHERE pr_number = 102\`).run();
+      `,
+      afterFirstPoll: `
+        const spawns = globalThis.__watcherClaimLoopReviewerSpawns.filter(
+          payload => payload.subjectContext.prNumber === 101);
+        assert.deepEqual(spawns.map(payload => payload.model), ['gemini', 'grok'],
+          'Gemini quota failure must retry on Grok despite healthy primary provider grounding');
+        assert.equal(db.prepare('SELECT reviewer FROM reviewed_prs WHERE pr_number = 101').get().reviewer, 'grok');
+      `,
+    }));
+    const result = spawnSync(process.execPath,
+      ['--no-warnings', '--import', pathToFileURL(registerPath).href, runnerPath], {
+        cwd: REPO_ROOT, encoding: 'utf8', timeout: 60000,
+        env: fixtureEnv({ ...installGhFixture(tmp), AGENT_OS_CONFIG_PATH: configPath,
+          GH_GEMINI_REVIEWER_TOKEN: 'fixture-gemini', GH_GROK_REVIEWER_TOKEN: 'fixture-grok' }),
+      });
+    assert.equal(result.status, 0, `${result.stdout || ''}${result.stderr || ''}`);
+  } finally {
+    rmSync(hammerRetryCapFilePath(REPO_ROOT, { repo: 'laceyenterprises/adversarial-review', prNumber: 101 }), { force: true });
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
 
 for (const mode of ['tenured', 'disabled', 'absent', 'unavailable']) {
 test(`TENUREGATE-01: ${mode} tenure routing preserves review dispatch and closure`, () => {

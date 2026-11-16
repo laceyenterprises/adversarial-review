@@ -320,6 +320,50 @@ test('GMW-02 roster formatting + gemini note reflects the mode', () => {
   assert.match(formatReviewerRoster(reviewerRoster({ mode: 'off' })), /\(off: not selected, GMW\)/);
 });
 
+test('GROKREVIEWMODE-01 roster matches routing across both mode knobs and Grok enablement', () => {
+  for (const enabled of [false, true]) {
+    const loaderImpl = () => ({ get: (key, fallback) =>
+      ['grok.enabled', 'grok.reviewer.enabled'].includes(key) ? enabled : fallback });
+    for (const mode of ['off', 'fallback', 'always-on']) {
+      for (const grokMode of ['off', 'fallback', 'always-on']) {
+        const options = { env: {}, loaderImpl, mode, grokMode };
+        const roster = reviewerRoster(options);
+        const grok = roster.find(row => row.reviewerModel === 'grok');
+        assert.ok(grok);
+        assert.equal(grok.eligibleBuilderClasses.includes('grok'), false);
+        assert.equal(grok.eligibleBuilderClasses.includes('codex'), enabled);
+        for (const builderClass of ['codex', 'claude-code', 'clio-agent', 'gemini', 'pi', 'opencode', 'grok', 'hermes']) {
+          const actual = routeSubject({ builderClass }, { env: {}, loaderImpl,
+            geminiReviewerMode: mode, grokReviewerMode: grokMode }).reviewerModel;
+          const defaults = roster.filter(row => row.defaultBuilderClasses.includes(builderClass));
+          assert.deepEqual(defaults.map(row => row.reviewerModel), [actual]);
+        }
+        assert.match(formatReviewerRoster(roster), /grok\s+-> default:/);
+      }
+    }
+  }
+});
+
+test('GROKREVIEWMODE-01 roster CLI reports enabled Grok routes in text and JSON', () => {
+  for (const argv of [[], ['--json']]) {
+    let out = '';
+    const rc = reviewerRosterMain(argv, {
+      stdout: { write: s => { out += s; } },
+      stderr: { write: () => {} },
+    }, { env: {}, loaderImpl: () => ({ get: (key, fallback) =>
+      ['grok.enabled', 'grok.reviewer.enabled'].includes(key) ? true
+        : key === 'grok.reviewer.mode' ? 'always-on' : fallback }) });
+    assert.equal(rc, 0);
+    if (argv.length) {
+      const parsed = JSON.parse(out);
+      assert.equal(parsed.grokMode, 'always-on');
+      assert.ok(parsed.roster.find(row => row.reviewerModel === 'grok').defaultBuilderClasses.includes('codex'));
+    } else {
+      assert.match(out, /grok\s+-> default: \[codex,/);
+    }
+  }
+});
+
 test('GMW-02 reviewer-roster CLI prints the roster and resolved mode', () => {
   let out = '';
   const rc = reviewerRosterMain([], {

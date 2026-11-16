@@ -370,3 +370,25 @@ test('GROKREVIEWMODE-01 pure Grok layer refuses an invalid existing Grok route i
     }
   }
 });
+
+test('GROKREVIEWMODE-01 always-on Grok bypasses only the replaced primary quota hold', async () => {
+  const { routeSubject } = await import('../src/adapters/subject/github-pr/routing.mjs');
+  const loaderImpl = () => ({ get: (key, fallback) =>
+    ['grok.enabled', 'grok.reviewer.enabled'].includes(key) ? true : fallback });
+  for (const [builderClass, replaced] of [['codex', 'claude'], ['claude-code', 'codex']]) {
+    const route = routeSubject({ builderClass }, { env: {}, loaderImpl,
+      geminiReviewerMode: 'off', grokReviewerMode: 'always-on' });
+    assert.deepEqual(route.grokReviewerSelection, { mode: 'always-on',
+      replacedReviewerModel: replaced, reason: 'always-on-base-route' });
+    assert.equal(shouldBypassPrimaryReviewerQuotaHold(route, { reviewer: replaced }), true);
+    assert.equal(shouldBypassPrimaryReviewerQuotaHold(route, { reviewer: 'grok' }), false);
+    assert.equal(shouldBypassPrimaryReviewerQuotaHold(route, { reviewer: 'gemini' }), false);
+    assert.equal(shouldBypassPrimaryReviewerQuotaHold({ ...route, botTokenEnv: 'wrong' },
+      { reviewer: replaced }), false);
+  }
+  const pinned = routeSubject({ builderClass: 'codex' }, { env: {},
+    loaderImpl: () => ({ get: (key, fallback) => key === 'roles.reviewer'
+      ? 'grok' : loaderImpl().get(key, fallback) }), geminiReviewerMode: 'off' });
+  assert.equal(pinned.grokReviewerSelection, undefined);
+  assert.equal(shouldBypassPrimaryReviewerQuotaHold(pinned, { reviewer: 'claude' }), false);
+});

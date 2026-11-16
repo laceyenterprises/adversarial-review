@@ -239,3 +239,21 @@ test('GROKREVIEWMODE-01 caller-supplied modes govern the base and fallback layer
     if (mode === 'fallback') assert.equal(result.grokReviewerSelection.mode, mode);
   }
 });
+
+test('GROKREVIEWMODE-01 quota fallback retains exclusions through both subject entrypoints', () => {
+  const loaderImpl = () => ({ get: (key, fallback) =>
+    ['grok.enabled', 'grok.reviewer.enabled'].includes(key) ? true : fallback });
+  for (const excluded of ['grok', 'grok-api', 'grok-reviewer']) {
+    const options = { env, loaderImpl, grokReviewerMode: 'fallback',
+      grokPrimaryReviewerQuotaCapped: true, geminiReviewerMode: 'off',
+      excludedReviewerModels: [excluded] };
+    for (const result of [
+      routeSubject({ builderClass: 'codex' }, options),
+      routePR('[codex] Synthetic change', null, options),
+    ]) {
+      assert.equal(result.reviewerModel, 'claude');
+      assert.deepEqual(result.excludedReviewerModels, [excluded]);
+      assert.equal(result.grokReviewerSelection, undefined);
+    }
+  }
+});

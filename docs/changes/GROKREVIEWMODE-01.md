@@ -14,7 +14,32 @@ Gemini; AFH offers Grok after Gemini only with known grounding. Selection logs
 include mode, source and replaced model; the roster exposes the Grok mode.
 The shared parity fixture pairs with GROKREVIEWMODECFG-01 in the OS repository.
 
+Final Comment-only remediation applies the same Grok row-quota layer to Gemini
+spawn retries before AFH, carries the replaced reviewer on always-on base
+selection, and permits bypass only for that reviewer's quota hold. Roster text
+and JSON now include Grok and compute defaults through the production routing
+pipeline with both mode knobs and lane enablement. Existing missing-route and
+exclusion guards were confirmed at the reviewed head and covered explicitly;
+they did not require production changes. Existing lifecycle states, persistent
+store shapes and deployed smoke promises remain unchanged.
+
 ## Verification
+
+Final Comment-only remediation:
+
+- Four targeted routing/AFH/roster/selection files: 118 tests passed using
+  `node test/run-tests.mjs` with explicit file arguments.
+- `node test/run-tests.mjs test/watcher-claim-loop.test.mjs`: all 186 tests
+  passed, including the new Gemini-to-Grok quota retry and durable claim transfer.
+- `node test/run-tests.mjs test/smv.test.mjs`: all 11 tests passed, including
+  the existing disposable-Git smoke. The producer state projection and
+  generated README diagrams remain byte-identical.
+- `npm run lint`: zero errors (149 existing warnings);
+  `npm run typecheck:contracts`: passed;
+  `bash demo/research-finding-walkthrough.sh`: passed, byte-stable deliveries.
+- No full-suite run in this final round; PR-head CI owns that validation.
+
+Original implementation validation:
 
 - The 124 test files referencing the changed routing/config modules and CLI passed
   under `node --test --test-concurrency=2` with the existing

@@ -1502,6 +1502,16 @@ test('budget-deferred pass permits the existing exhausted preferred reviewer fal
   assert.equal(shouldBackoffReviewerSpawn(rootDir, { ...identity, reviewerModel: 'gemini', now: resetAt }).shouldBackoff, false);
 });
 
+test('GROKREVIEWMODE-01 AFH accepts absent routes in every Grok mode', () => {
+  for (const grokReviewerMode of ['off', 'fallback', 'always-on']) {
+    for (const routeOptions of [{}, { baseRoute: null }]) {
+      const result = afhReviewerFallbackDecision({ grokReviewerMode, ...routeOptions });
+      assert.equal(result.applied, false);
+      assert.equal(result.reason, 'no-route');
+    }
+  }
+});
+
 test('GROKREVIEWMODE-01 AFH orders verified Grok capacity before last resort', () => {
   const loaderImpl = () => ({ get: (key, fallback) =>
     ['grok.enabled', 'grok.reviewer.enabled'].includes(key) ? true : fallback });

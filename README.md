@@ -442,6 +442,13 @@ the cross-model primary, Gemini, Grok, then the last resort; Grok requires known
 xai grounding evidence. The companion OS schema change must land before a host
 sets this key.
 
+The Gemini spawn-quota retry route also applies Grok row fallback before
+provider grounding, using the existing row's quota evidence for the primary it
+would replace. Always-on Grok records that replaced primary and can bypass its
+quota hold; a row already attributed to Grok retains its hold. The
+`reviewer-roster` text and JSON output use both reviewer modes and the Grok lane
+enablement switches, including a Grok row with its default routes and eligibility.
+
 `reviewer.gemini.mode=always-on` then routes Codex,
 Claude Code, and Clio first-pass reviews to Gemini by default through the same
 effective route helper used by the watcher and operator surfaces. Gemini never reviews Gemini-built

@@ -60,7 +60,7 @@ function reviewerRosterMain(argv, io = {}, configOptions = io.config || {}) {
     return 1;
   }
   const grokMode = resolveGrokReviewerMode({ ...configOptions, env });
-  const roster = reviewerRoster({ mode });
+  const roster = reviewerRoster({ ...configOptions, env, mode, grokMode });
   if (json) {
     stdout.write(`${JSON.stringify({ mode, grokMode, roster }, null, 2)}\n`);
   } else {

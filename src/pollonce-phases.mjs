@@ -4337,9 +4337,17 @@ export async function processReviewSubject(entry, ctx) {
                   subject,
                   baseRoute: applyAfhReviewerRouteForAttempt({
                     subject,
-                    baseRoute: applyEffectiveReviewerRoute({
-                      builderClass: baseRoute.builderClass, baseRoute, mode: 'off',
-                      primaryReviewerQuotaCapped: false, routeTable: baseRoute.routeTable,
+                    baseRoute: applyGrokReviewerRoute({
+                      builderClass: baseRoute.builderClass,
+                      baseRoute: applyEffectiveReviewerRoute({
+                        builderClass: baseRoute.builderClass, baseRoute, mode: 'off',
+                        primaryReviewerQuotaCapped: false, routeTable: baseRoute.routeTable,
+                      }),
+                      mode: domainId === 'code-pr' ? grokReviewerMode : 'off',
+                      primaryReviewerQuotaCapped: primaryReviewerQuotaCappedForRow(existing, {
+                        expectedReviewerModel: baseRoute.reviewerModel,
+                      }),
+                      routeTable: baseRoute.routeTable,
                     }),
                     grounding: afhGrounding, geminiReviewerMode: 'off', grokReviewerMode, routeTable: baseRoute.routeTable,
                   }).route,

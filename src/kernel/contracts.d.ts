@@ -1126,6 +1126,10 @@ export interface ShadowDispositionOverride {
   note?: string;
   principal?: string;
   at: IsoTimestamp;
+  source?: 'pattern-apply-existing';
+  pattern?: Pick<ShadowPatternDisposition, 'id' | 'key' | 'kind' | 'principal' | 'note' | 'ticketRef' | 'createdAt'>;
+  revocation?: { principal: string; note: string; at: IsoTimestamp };
+  supersedes?: ShadowDispositionOverride;
 }
 
 export interface ShadowPatternDisposition {
@@ -1176,7 +1180,7 @@ export interface ShadowReportModel {
   shadowed: number;
   agree: number;
   diverge: number;
-  patterns?: { key: string | null; total: number; byPattern: number; byIndividualOverride: number; open: number; byClassifier: number }[];
+  patterns?: { key: string | null; total: number; byPattern: number; byPatternExisting?: number; byIndividualOverride: number; open: number; byClassifier: number }[];
   divergences: {
     id: number | null;
     subjectExternalId: string;

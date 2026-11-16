@@ -182,7 +182,8 @@ supplied pattern references are discarded. No record means no pattern override.
 Expiry uses supplied observation time; revocation is effective immediately for
 all future appends, including delayed observations. Duplicate keys return the
 original observation and original disposition. Revocation/expiry never changes
-past captured decisions. Evidence samples themselves remain unchanged.
+past captured decisions. Evidence samples remain unchanged unless explicitly
+applied to with `apply-existing`.
 
 Individual overrides take precedence, including an explicit `open` override.
 Otherwise a captured pattern resolves the divergence, while preserving the
@@ -190,7 +191,35 @@ original classifier proposal and the pattern kind/ticket. Fold errors cannot be
 auto-dispositioned; their separate promotion blocker still requires an individual
 override. Pattern disposition acknowledges triage; it does not repair a defect
 or authorize execution or promotion. Reports add `patterns` counts for each key:
-`byPattern`, `byIndividualOverride`, `open`, `byClassifier`, and `total` within
+`byPattern`, `byPatternExisting`, `byIndividualOverride`, `open`, `byClassifier`, and `total` within
 the display window. Historical promotion checks use the same effective decision.
 Reporting and pattern listing are read-only; listing an older schema returns an
 empty pattern history without migration.
+
+
+`apply-existing` adds no schema. It recomputes exact keys at read time and writes
+`disposition_override_json` for open, non-error divergences without captures or
+other overrides. Only a revoked apply-existing override may be superseded.
+The pattern must be active at application time; observation time must precede
+its exclusive expiry. Dry-run uses a read-only store. Apply fixes the initial
+maximum row ID, rechecks eligibility and pattern activity inside each IMMEDIATE
+transaction, writes at most 500 rows per transaction, and yields between batches.
+An interrupted apply can be rerun; current overrides for that pattern count as
+`alreadyApplied`. Skipped counts describe matching-key rows only, with precedence
+fold error, override, captured, not open, then observation expiry.
+
+The override has `{ disposition: 'resolved', direction, principal, note, at,
+source: 'pattern-apply-existing', pattern: { id, key, kind, principal, note,
+ticketRef, createdAt }, supersedes? }`. Outer principal/time identify the applier;
+pattern principal/time identify the reviewer and creation. Direction is `benign`
+for equivalent/policy, `v2-suspect` for v2-defect. The note is
+`pattern #<id> (<kind>) applied to existing divergence: <pattern note>`.
+`supersedes` retains the entire prior revoked override when replacing one.
+
+Revocation and reopening share one IMMEDIATE transaction. Each current override
+from that pattern becomes `{ ...override, disposition: 'open', revocation:
+{ principal, note, at } }`. Nothing is deleted. Human replacements, other patterns
+and append-time captures remain unchanged. Expiry alone does not reopen overrides.
+Reports count resolved apply-existing overrides in `byPatternExisting`, with tag
+`pattern #<id>: <kind> (existing)`; effective disposition and promotion arithmetic
+are unchanged. Fold errors and unkeyable rows still require individual triage.

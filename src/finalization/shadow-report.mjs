@@ -92,6 +92,10 @@ function compactV2(decision) {
 }
 
 function dispositionTag(observation) {
+  const override = observation.dispositionOverride;
+  if (override?.source === 'pattern-apply-existing' && override.pattern && effectiveDisposition(observation) === 'resolved') {
+    return `pattern #${override.pattern.id}: ${override.pattern.kind} (existing)`;
+  }
   const cls = { ...observation.classification, ...(observation.dispositionOverride?.direction
     ? { direction: observation.dispositionOverride.direction } : {}) };
   const overridden = observation.dispositionOverride != null;
@@ -175,9 +179,10 @@ export function buildShadowReport({ observations, now, windowDays = 7, coverage 
       diverge += 1;
       const eff = effectiveDisposition(o);
       const key = shadowPatternKey(o);
-      const counts = patterns.get(key) ?? { key, total: 0, byPattern: 0, byIndividualOverride: 0, open: 0, byClassifier: 0 };
+      const counts = patterns.get(key) ?? { key, total: 0, byPattern: 0, byPatternExisting: 0, byIndividualOverride: 0, open: 0, byClassifier: 0 };
       counts.total++;
       if (eff === 'open') counts.open++;
+      else if (o.dispositionOverride?.source === 'pattern-apply-existing') counts.byPatternExisting++;
       else if (o.dispositionOverride) counts.byIndividualOverride++;
       else if (hasAppliedPattern(o)) counts.byPattern++;
       else counts.byClassifier++;
@@ -301,7 +306,7 @@ export function renderShadowReport(model) {
     lines.push(`verdict: NOT promotable (${model.blockers.join('; ')})`);
   }
   for (const pattern of model.patterns ?? []) {
-    lines.push(`pattern ${pattern.key ?? 'unkeyable (requires individual triage)'}: total=${pattern.total} by_pattern=${pattern.byPattern} by_individual_override=${pattern.byIndividualOverride} open=${pattern.open} by_classifier=${pattern.byClassifier}`);
+    lines.push(`pattern ${pattern.key ?? 'unkeyable (requires individual triage)'}: total=${pattern.total} by_pattern=${pattern.byPattern} by_individual_override=${pattern.byIndividualOverride} open=${pattern.open} by_classifier=${pattern.byClassifier} by_pattern_existing=${pattern.byPatternExisting}`);
   }
 
   return lines.join('\n');

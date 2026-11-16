@@ -13,6 +13,8 @@ import { loadAwareTimeoutMs } from '../load-aware-timeout.mjs';
 
 import Database from 'better-sqlite3';
 import { shadowPatternKey } from './shadow-pattern.mjs';
+import { effectiveDisposition } from './shadow-report.mjs';
+import { setImmediate } from 'node:timers/promises';
 import { existsSync, mkdirSync, statSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 
@@ -169,6 +171,52 @@ function patternRow(row) {
     revocation: row.revocation_json ? JSON.parse(row.revocation_json) : null };
 }
 
+function activeApplicationPattern(database, id, at) {
+  if (!validTimestamp(at)) throw new TypeError('valid application timestamp required');
+  const row = database.prepare('SELECT * FROM finalization_shadow_patterns WHERE id=?').get(id);
+  if (!row || row.revocation_json || Date.parse(row.created_at) > Date.parse(at)
+    || (row.expires_at && Date.parse(row.expires_at) <= Date.parse(at))) {
+    throw new Error('pattern missing, revoked, expired, or not yet created');
+  }
+  return patternRow(row);
+}
+
+function applicationResult(pattern) {
+  return { patternId: pattern.id, key: pattern.key, kind: pattern.kind, matched: 0, alreadyApplied: 0,
+    skipped: { foldError: 0, override: 0, captured: 0, notOpen: 0, expired: 0 }, sampleIds: [] };
+}
+
+function applicationEligibility(raw, pattern) {
+  const row = rowToObservation(raw), override = row.dispositionOverride;
+  if (shadowPatternKey(row) !== pattern.key) return null;
+  if (raw.fold_error || raw.divergence_class === 'fold-error' || row.classification.class === 'fold-error') return 'foldError';
+  if (raw.disposition_override_json && !(override?.source === 'pattern-apply-existing' && override.revocation)) {
+    return override?.source === 'pattern-apply-existing' && override.pattern?.id === pattern.id
+      && !override.revocation ? 'alreadyApplied' : 'override';
+  }
+  if (row.patternDisposition) return 'captured';
+  if (raw.relation !== 'diverge' || row.classification.relation !== 'diverge'
+    || effectiveDisposition(row) !== 'open') return 'notOpen';
+  if (pattern.expiresAt && !(Date.parse(row.observedAt) < Date.parse(pattern.expiresAt))) return 'expired';
+  return 'matched';
+}
+
+function countApplication(result, raw, pattern) {
+  const reason = applicationEligibility(raw, pattern);
+  if (reason === 'matched' || reason === 'alreadyApplied') result[reason]++;
+  else if (reason) result.skipped[reason]++;
+  if (reason === 'matched' && result.sampleIds.length < 10) result.sampleIds.push(raw.id);
+  return reason === 'matched';
+}
+
+function planPatternApplication(database, id, { at } = {}) {
+  const pattern = activeApplicationPattern(database, id, at), result = applicationResult(pattern);
+  for (const raw of database.prepare('SELECT * FROM finalization_shadow ORDER BY id').iterate()) {
+    countApplication(result, raw, pattern);
+  }
+  return result;
+}
+
 /**
  * Open a shadow observation store. Pass `{ db }` (e.g. an in-memory database)
  * for tests, or `{ rootDir }` to open `data/reviews.db`. When it opens its own
@@ -243,6 +291,39 @@ export function openFinalizationShadowStore({ rootDir, db, busyTimeoutMs } = {})
     listPatterns() {
       return database.prepare('SELECT * FROM finalization_shadow_patterns ORDER BY id').all().map(patternRow);
     },
+    planPatternApplication(id, options) {
+      return planPatternApplication(database, id, options);
+    },
+    async applyPatternToExisting(id, { principal, at, apply = false } = {}) {
+      if (!apply) return planPatternApplication(database, id, { at });
+      validateAudit({ principal, at, note: 'apply-existing' });
+      const pattern = activeApplicationPattern(database, id, at), result = { ...applicationResult(pattern), written: 0 };
+      const lastId = database.prepare('SELECT COALESCE(MAX(id),0) AS id FROM finalization_shadow').get().id;
+      const selectBatch = database.prepare('SELECT * FROM finalization_shadow WHERE id>? AND id<=? ORDER BY id LIMIT 500');
+      let cursor = 0;
+      while (cursor < lastId) {
+        database.transaction(() => {
+          activeApplicationPattern(database, id, at);
+          for (const raw of selectBatch.all(cursor, lastId)) {
+            cursor = raw.id;
+            if (!countApplication(result, raw, pattern)) continue;
+            const prior = rowToObservation(raw).dispositionOverride;
+            const { id: patternId, key, kind, principal: reviewer, note, ticketRef, createdAt } = pattern;
+            const override = { disposition: 'resolved', direction: kind === 'v2-defect' ? 'v2-suspect' : 'benign',
+              principal, note: `pattern #${id} (${kind}) applied to existing divergence: ${note}`, at,
+              source: 'pattern-apply-existing',
+              pattern: { id: patternId, key, kind, principal: reviewer, note, ticketRef, createdAt },
+              ...(prior ? { supersedes: prior } : {}) };
+            updateOverride.run({ id: raw.id, override: JSON.stringify(override) });
+            result.written++;
+          }
+          // Concurrent deletion must not leave the cursor spinning.
+          if (!database.prepare('SELECT 1 FROM finalization_shadow WHERE id>? AND id<=?').get(cursor, lastId)) cursor = lastId;
+        }).immediate();
+        if (cursor < lastId) await setImmediate();
+      }
+      return result;
+    },
     addPattern(record) {
       validateAudit(record);
       if (!['equivalent', 'v2-defect', 'policy'].includes(record.kind)) throw new TypeError('invalid pattern disposition kind');
@@ -270,11 +351,18 @@ export function openFinalizationShadowStore({ rootDir, db, busyTimeoutMs } = {})
     },
     revokePattern(id, audit) {
       validateAudit(audit);
-      const result = database.prepare(`UPDATE finalization_shadow_patterns SET revocation_json=?
-        WHERE id=? AND revocation_json IS NULL AND julianday(created_at) <= julianday(?)`)
-        .run(JSON.stringify(audit), id, audit.at);
-      if (!result.changes) throw new Error('pattern missing, already revoked, or revocation predates creation');
-      return patternRow(database.prepare('SELECT * FROM finalization_shadow_patterns WHERE id=?').get(id));
+      return database.transaction(() => {
+        const result = database.prepare(`UPDATE finalization_shadow_patterns SET revocation_json=?
+          WHERE id=? AND revocation_json IS NULL AND julianday(created_at) <= julianday(?)`)
+          .run(JSON.stringify(audit), id, audit.at);
+        if (!result.changes) throw new Error('pattern missing, already revoked, or revocation predates creation');
+        database.prepare(`UPDATE finalization_shadow SET disposition_override_json =
+          json_set(disposition_override_json, '$.disposition', 'open', '$.revocation', json(?))
+          WHERE CASE WHEN json_valid(disposition_override_json) THEN json_extract(disposition_override_json, '$.source') END = 'pattern-apply-existing'
+            AND json_extract(disposition_override_json, '$.pattern.id') = ?
+            AND json_extract(disposition_override_json, '$.revocation') IS NULL`).run(JSON.stringify(audit), id);
+        return patternRow(database.prepare('SELECT * FROM finalization_shadow_patterns WHERE id=?').get(id));
+      }).immediate();
     },
 
     /**
@@ -407,6 +495,9 @@ export function openReadOnlyFinalizationShadowStore({ rootDir, db, busyTimeoutMs
 
   return {
     db: database,
+    planPatternApplication(id, options) {
+      return planPatternApplication(database, id, options);
+    },
     listPatterns() {
       if (!database.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='finalization_shadow_patterns'").get()) return [];
       return database.prepare('SELECT * FROM finalization_shadow_patterns ORDER BY id').all().map(patternRow);

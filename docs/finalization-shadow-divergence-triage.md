@@ -138,12 +138,23 @@ must be a non-error divergence. The key vocabulary and durable audit shape are
 specified in [the store schema](data-model/finalization-shadow.md#exact-pattern-dispositions-mlrdispo-01).
 Unkeyable rows require individual triage; there is no wildcard disposition.
 
-Only new matching appends capture a pattern disposition. Earlier samples and
-historical open divergences still require individual overrides. The original
-classifier proposal is retained. Revocation stops future application and keeps
-past decisions and the full record; to replace an expired or revoked policy,
+Only new matching appends capture a pattern disposition. For historical open
+rows, dry-run the reviewed pattern first, then apply as the data-directory owner:
+
+```sh
+node src/cli.mjs finalization shadow-pattern apply-existing --root <tool-root> --id 1 --dry-run
+node src/cli.mjs finalization shadow-pattern apply-existing --root <tool-root> \
+  --id 1 --apply --principal synthetic-applier
+```
+
+Dry-run is the default and opens the store read-only. JSON reports matched,
+already-applied and skipped counts plus up to ten sample IDs; apply adds `written`.
+Each eligible row receives an individual audited override referencing the reviewer
+and pattern. Rerunning is safe. Revoke the pattern to reopen these overrides
+atomically, retaining their full audit and revocation. Human replacements survive
+revocation, as do append-time captures. To replace an expired or revoked policy,
 revoke the old record if needed and add a new one. Individual overrides always
-win, including reopening a pattern-resolved row. The report counts pattern,
+win, including reopening a pattern-resolved row. The report counts captured patterns, patterns applied to existing rows,
 individual, classifier and open outcomes separately. A `v2-defect` disposition
 records an acknowledged defect with its ticket; it is not proof of a fix.
 Fold/evidence errors retain their individual-triage requirement.

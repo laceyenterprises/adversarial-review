@@ -109,7 +109,7 @@ function finalizationMain(argv, io = {}) {
 }
 
 if (process.argv[1] === fileURLToPath(import.meta.url)) {
-  process.exitCode = finalizationMain(process.argv.slice(2));
+  process.exitCode = await finalizationMain(process.argv.slice(2));
 }
 
 export { finalizationMain };

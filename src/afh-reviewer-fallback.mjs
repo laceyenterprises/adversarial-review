@@ -29,7 +29,8 @@ import { personalClaudeReviewerFloor } from './reviewer-reserve-floor.mjs';
 //      makes a grounded gemini fall BACK to a healthy codex rather than forward
 //      to claude,
 //   3. gemini,
-//   4. claude — last resort.
+//   4. grok — when its mode and lane flags permit, with known grounding,
+//   5. claude — last resort.
 //
 // The first candidate that is neither hard-grounded (`GROUNDED_PROVIDER_STATES`)
 // nor AFH-02 soft-grounded wins. On macOS the Claude reviewer also needs the
@@ -60,6 +61,7 @@ import { personalClaudeReviewerFloor } from './reviewer-reserve-floor.mjs';
 // provider row looks healthy — and it is recorded as `last-resort` in the audit
 // stamp so an operator can see the diversity loss.
 
+import { resolveGrokReviewerMode } from './role-config.mjs';
 import { execFile } from 'node:child_process';
 import { dirname, resolve } from 'node:path';
 import { promisify } from 'node:util';
@@ -842,12 +844,13 @@ function sameWriterReviewerModelForBuilder(builderClass) {
   return null;
 }
 
-function orderedFallbackCandidates({ currentModel, crossModelPrimaryModel, builderClass }) {
+function orderedFallbackCandidates({ currentModel, crossModelPrimaryModel, builderClass, grokReviewerMode }) {
   const ordered = [];
   const sameWriterLastResort = sameWriterReviewerModelForBuilder(builderClass);
   for (const candidate of [
     crossModelPrimaryModel,
     'gemini',
+    ...(['fallback', 'always-on'].includes(grokReviewerMode) ? ['grok'] : []),
     AFH_LAST_RESORT_REVIEWER_MODEL,
     sameWriterLastResort,
   ]) {
@@ -873,6 +876,7 @@ export function afhReviewerFallbackDecision({
   baseRoute = null,
   grounding = null,
   geminiReviewerMode = null,
+  grokReviewerMode,
   routeTable = ROUTE_BY_BUILDER_CLASS,
   env = process.env,
   loaderImpl,
@@ -932,6 +936,7 @@ export function afhReviewerFallbackDecision({
     currentModel,
     crossModelPrimaryModel,
     builderClass: normalizedBuilder,
+    grokReviewerMode: grokReviewerMode ?? resolveGrokReviewerMode(refusalOptions),
   });
   for (const candidate of candidates) {
     if (candidate === 'gemini') {
@@ -946,6 +951,11 @@ export function afhReviewerFallbackDecision({
         continue;
       }
     }
+    if (candidate === 'grok' && (baseRoute.excludedReviewerModels || [])
+      .some(model => normalizeReviewerModel(model) === 'grok')) {
+      considered.push({ reviewerModel: candidate, selected: false, reason: 'grok-excluded' });
+      continue;
+    }
     if (reviewerRefusesBuilder(normalizedBuilder, candidate, refusalOptions)) {
       considered.push({ reviewerModel: candidate, selected: false, reason: `${normalizeReviewerModel(candidate)}-builder-integrity-guard` });
       continue;
@@ -956,6 +966,10 @@ export function afhReviewerFallbackDecision({
       continue;
     }
     const status = reviewerModelGrounding(grounding, candidate);
+    if (candidate === 'grok' && !status.known) {
+      considered.push({ reviewerModel: candidate, selected: false, reason: 'grok-grounding-unknown' });
+      continue;
+    }
     if (status.accountHold) {
       considered.push({ reviewerModel: candidate, selected: false, reason: `${normalizeReviewerModel(candidate)}-account-hold` });
       continue;

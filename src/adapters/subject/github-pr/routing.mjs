@@ -12,6 +12,7 @@ import { builderClassFromTitle, tagFromBuilderClass } from './title-tagging.mjs'
 import {
   resolveDefaultReviewer as resolveDefaultReviewerFromConfig,
   resolveGeminiRuntime,
+  resolveGrokReviewerMode,
   resolveGeminiReviewerMode as resolveGeminiReviewerModeFromConfig,
 } from '../../../role-config.mjs';
 import { AgentOSConfigError, loadConfigCached } from '../../../config-loader.mjs';
@@ -436,6 +437,28 @@ function applyGeminiReviewerRoute({
   };
 }
 
+// Layer per-row Grok capacity after Gemini; mode and quota signal are supplied.
+function applyGrokReviewerRoute({ builderClass, baseRoute, mode,
+  primaryReviewerQuotaCapped = false, env = process.env, loaderImpl = loadConfigCached,
+  topPath, modulePaths, routeTable = ROUTE_BY_BUILDER_CLASS,
+} = {}) {
+  if (!baseRoute || baseRoute.configBroken) return baseRoute;
+  const builder = builderClass || baseRoute.builderClass;
+  const refused = reviewerRefusesBuilder(builder, 'grok', { env, loaderImpl, topPath, modulePaths });
+  const excluded = routeExcludesReviewer(baseRoute, 'grok');
+  if (baseRoute.reviewerModel === 'grok' && (refused || excluded)) {
+    const crossModel = routeTable[normalizeBuilderClass(builder, routeTable)];
+    if (!crossModel || reviewerRefusesBuilder(builder, crossModel.reviewerModel, { env, loaderImpl, topPath, modulePaths })) return null;
+    return { ...baseRoute, ...crossModel };
+  }
+  if (baseRoute.operatorPinnedReviewer
+    || baseRoute.reviewerModel === 'grok' || mode !== 'fallback'
+    || !primaryReviewerQuotaCapped || excluded || refused) return baseRoute;
+  return { ...baseRoute, ...REVIEWER_ROUTE_BY_MODEL.grok,
+    grokReviewerSelection: { mode, replacedReviewerModel: baseRoute.reviewerModel,
+      reason: 'primary-reviewer-quota-capped' } };
+}
+
 function applyEffectiveReviewerRoute(options = {}) {
   return applyGeminiReviewerRoute(options);
 }
@@ -540,6 +563,7 @@ function baseRouteForSubject(builderClass, {
   loaderImpl,
   routeTable = ROUTE_BY_BUILDER_CLASS,
   domainId = 'code-pr',
+  grokReviewerMode,
   excludedReviewerModels = [],
 } = {}) {
   let route;
@@ -549,6 +573,7 @@ function baseRouteForSubject(builderClass, {
     operatorPinnedReviewer = Boolean(pinnedRoute);
     route = pinnedRoute || routeTable[builderClass];
     if (domainId === 'code-pr' && !pinnedRoute
+      && (grokReviewerMode ?? resolveGrokReviewerMode({ env, loaderImpl, topPath, modulePaths })) === 'always-on'
       && !routeExcludesReviewer({ excludedReviewerModels }, 'grok')
       && !reviewerRefusesBuilder(builderClass, 'grok', {
       env, ...(loaderImpl ? { loaderImpl } : {}), topPath, modulePaths,
@@ -592,6 +617,8 @@ function routeSubject(subject, {
   modulePaths,
   loaderImpl,
   geminiReviewerMode,
+  grokReviewerMode,
+  grokPrimaryReviewerQuotaCapped = false,
   primaryReviewerQuotaCapped = false,
   applyGeminiReviewerMode = true,
   excludedReviewerModels = [],
@@ -610,7 +637,7 @@ function routeSubject(subject, {
   });
   const builderClass = normalizeBuilderClass(subject?.builderClass, routeTable);
   if (!builderClass) return null;
-  const baseRoute = baseRouteForSubject(builderClass, { env, topPath, modulePaths, loaderImpl, routeTable, domainId, excludedReviewerModels });
+  const baseRoute = baseRouteForSubject(builderClass, { env, topPath, modulePaths, loaderImpl, routeTable, domainId, grokReviewerMode, excludedReviewerModels });
   if (baseRoute?.configBroken || !applyGeminiReviewerMode) return baseRoute;
   try {
     const mode = resolveGeminiReviewerModeForRoute({
@@ -620,7 +647,7 @@ function routeSubject(subject, {
       loaderImpl,
       geminiReviewerMode,
     });
-    return applyEffectiveReviewerRoute({
+    const geminiRoute = applyEffectiveReviewerRoute({
       builderClass,
       baseRoute,
       mode,
@@ -628,6 +655,11 @@ function routeSubject(subject, {
       routeTable,
       env, loaderImpl, topPath, modulePaths,
     });
+    return domainId === 'code-pr' ? applyGrokReviewerRoute({ builderClass, baseRoute: geminiRoute,
+      mode: grokReviewerMode ?? resolveGrokReviewerMode({ env, loaderImpl, topPath, modulePaths }),
+      primaryReviewerQuotaCapped: grokPrimaryReviewerQuotaCapped,
+      env, loaderImpl, topPath, modulePaths, routeTable,
+    }) : geminiRoute;
   } catch (err) {
     if (err && err.name === 'AgentOSConfigError') {
       return configBrokenRoute(builderClass, err);
@@ -684,6 +716,7 @@ function routePR(prTitle, subject = null, options = {}) {
     tag: route.tag,
     reviewerModel: route.reviewerModel,
     botTokenEnv: route.botTokenEnv,
+    ...(route.grokReviewerSelection ? { grokReviewerSelection: route.grokReviewerSelection } : {}),
     ...(route.geminiReviewerSelection ? { geminiReviewerSelection: route.geminiReviewerSelection } : {}),
     ...(route.geminiIntegrityGuard ? { geminiIntegrityGuard: route.geminiIntegrityGuard } : {}),
     ...(route.reviewerReassignment ? { reviewerReassignment: route.reviewerReassignment } : {}),
@@ -711,6 +744,7 @@ export {
   applyEffectiveReviewerRoute,
   applyGeminiIntegrityGuard,
   applyGeminiReviewerRoute,
+  applyGrokReviewerRoute,
   describeCrossModelReviewWaiver,
   defaultReviewerRouteFromEnv,
   formatReviewerRoster,

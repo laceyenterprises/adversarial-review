@@ -430,7 +430,19 @@ under load. Operators can deliberately pin the first-pass reviewer with
 the Gemini default layer except for the Gemini-on-Gemini hard guard. When unset,
 the base opposite-agent route is Codex PRs to Claude, Claude Code PRs to Codex,
 Clio PRs to Claude because Clio dispatches Codex-family writers, and
-Gemini-family PRs to Codex. `reviewer.gemini.mode=always-on` then routes Codex,
+Gemini-family PRs to Codex. `grok.reviewer.mode` controls the enabled Grok reviewer
+lane: `off` leaves automatic routes alone, `fallback` covers a quota-capped
+reviewer after the Gemini layer or a grounded provider, and `always-on` retains
+the previous Grok base-route replacement. Its default is `always-on`; both
+`grok.enabled` and `grok.reviewer.enabled` still default to false and must be
+true. The environment override is `AGENT_OS_GROK_REVIEWER_MODE`. Invalid modes
+fail closed. Explicit reviewer pins outrank automatic selection, and the
+same-family and per-head exclusion guards always apply. Provider fallback tries
+the cross-model primary, Gemini, Grok, then the last resort; Grok requires known
+xai grounding evidence. The companion OS schema change must land before a host
+sets this key.
+
+`reviewer.gemini.mode=always-on` then routes Codex,
 Claude Code, and Clio first-pass reviews to Gemini by default through the same
 effective route helper used by the watcher and operator surfaces. Gemini never reviews Gemini-built
 PRs; those stay on Codex even under a Gemini pin. Invalid override values fail
@@ -443,7 +455,8 @@ When a provider is *grounded* — a hard 429/`exhausted` probe state, or the AFH
 soft-grounding verdict (`afhGrounding` on `hq fleet quota status --json`, which
 catches a flapping provider the hard gate misses) — the assigned reviewer cannot
 spawn at all, so `src/afh-reviewer-fallback.mjs` walks an ordered fallback:
-current reviewer → the per-tag cross-model primary → Gemini → Claude, skipping
+current reviewer → the per-tag cross-model primary → Gemini → Grok (when its
+mode and lane flags permit) → Claude, skipping
 candidates that would violate the builder-family refusal. Both Claude accounts
 are refused for Claude-family builds, including last-resort fallback.
 Quota-triggered worker-class fallback also enforces family refusal without a

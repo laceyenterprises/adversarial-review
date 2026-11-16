@@ -85,6 +85,7 @@ test('GRK-09: Node grok schema matches the parity snapshot', () => {
   for (const [dotted, spec] of Object.entries(CONTRACT.schema)) {
     const leaf = schemaLeaf(schema, dotted);
     assert.equal(leaf.__type, spec.type, dotted);
+    assert.deepEqual(leaf.__enum, spec.enum, dotted);
     assert.equal(leaf.__default ?? null, spec.default, dotted);
     assert.equal(Boolean(leaf.__nullable), Boolean(spec.nullable), dotted);
     assert.equal(leaf.__pattern, spec.pattern, dotted);

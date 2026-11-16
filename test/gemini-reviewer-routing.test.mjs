@@ -329,6 +329,7 @@ test('GMW-02 reviewer-roster CLI prints the roster and resolved mode', () => {
   }, HERMETIC);
   assert.equal(rc, 0);
   assert.match(out, /reviewer\.gemini\.mode=/);
+  assert.match(out, /grok\.reviewer\.mode=always-on/);
   assert.match(out, /gemini\s+-> default: \[\]; eligible: \[codex, claude-code, clio-agent\]/);
 });
 
@@ -342,6 +343,7 @@ test('GMW-02 reviewer-roster CLI --json emits structured roster', () => {
   assert.equal(rc, 0);
   const parsed = JSON.parse(out);
   assert.equal(parsed.mode, 'off');
+  assert.equal(parsed.grokMode, 'always-on');
   const gemini = parsed.roster.find((r) => r.reviewerModel === 'gemini');
   assert.deepEqual(gemini.defaultBuilderClasses, []);
   assert.deepEqual(gemini.eligibleBuilderClasses, ['codex', 'claude-code', 'clio-agent']);

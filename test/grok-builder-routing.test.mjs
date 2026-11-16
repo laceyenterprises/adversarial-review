@@ -191,3 +191,51 @@ test('exhausted Codex remediation filters Grok fallbacks before selecting Claude
     if (available) assert.equal(result.workerClass, 'remediator-claude');
   }
 });
+
+test('GROKREVIEWMODE-01 modes preserve default routes and guard every selection', () => {
+  for (const mode of ['off', 'fallback', 'always-on', undefined]) {
+    for (const enabled of [false, true]) {
+      const loaderImpl = () => ({ get: (key, fallback) =>
+        key === 'grok.reviewer.mode' ? mode ?? fallback
+          : ['grok.enabled', 'grok.reviewer.enabled'].includes(key) ? enabled : fallback });
+      for (const builderClass of ['codex', 'claude-code', 'clio-agent', 'gemini', 'pi', 'opencode', 'grok', 'hermes']) {
+        for (const capped of [false, true]) {
+          const result = routeSubject({ builderClass }, { env, loaderImpl,
+            geminiReviewerMode: 'off', grokPrimaryReviewerQuotaCapped: capped });
+          const expected = enabled && builderClass !== 'grok'
+            && (mode === undefined || mode === 'always-on' || mode === 'fallback' && capped) ? 'grok'
+            : ['codex', 'clio-agent'].includes(builderClass) ? 'claude' : 'codex';
+          assert.equal(result.reviewerModel, expected, `${mode}/${enabled}/${builderClass}/${capped}`);
+          if (expected === 'grok' && mode === 'fallback') assert.deepEqual(result.grokReviewerSelection,
+            { mode, replacedReviewerModel: ['codex', 'clio-agent'].includes(builderClass) ? 'claude' : 'codex',
+              reason: 'primary-reviewer-quota-capped' });
+        }
+      }
+      const pinnedLoader = () => ({ get: (key, fallback) => key === 'roles.reviewer'
+        ? 'claude' : loaderImpl().get(key, fallback) });
+      assert.equal(routeSubject({ builderClass: 'codex' }, { env, loaderImpl: pinnedLoader,
+        grokPrimaryReviewerQuotaCapped: true, geminiReviewerMode: 'off' }).reviewerModel, 'claude');
+      if (enabled) {
+        const grokPinLoader = () => ({ get: (key, fallback) => key === 'roles.reviewer'
+          ? 'grok' : loaderImpl().get(key, fallback) });
+        assert.equal(routeSubject({ builderClass: 'codex' }, { env, loaderImpl: grokPinLoader,
+          geminiReviewerMode: 'always-on', grokPrimaryReviewerQuotaCapped: true }).reviewerModel, 'grok');
+      }
+      const excluded = routePR('[codex] Synthetic change', null, { env, loaderImpl,
+        geminiReviewerMode: 'off', grokPrimaryReviewerQuotaCapped: true, excludedReviewerModels: ['grok-api'] });
+      assert.equal(excluded.reviewerModel, 'claude');
+    }
+  }
+});
+
+
+test('GROKREVIEWMODE-01 caller-supplied modes govern the base and fallback layers together', () => {
+  const loaderImpl = () => ({ get: (key, fallback) =>
+    ['grok.enabled', 'grok.reviewer.enabled'].includes(key) ? true : fallback });
+  for (const mode of ['off', 'fallback', 'always-on']) {
+    const result = routePR('[codex] Synthetic change', null, { env, loaderImpl,
+      grokReviewerMode: mode, geminiReviewerMode: 'off', grokPrimaryReviewerQuotaCapped: true });
+    assert.equal(result.reviewerModel, mode === 'off' ? 'claude' : 'grok');
+    if (mode === 'fallback') assert.equal(result.grokReviewerSelection.mode, mode);
+  }
+});

@@ -46,6 +46,7 @@ export const GROK_ENV_KEYS = Object.freeze([
   'cli_path',
   'first_output_timeout_seconds',
   'stall_timeout_seconds',
+  'reviewer.mode',
   ...GROK_LANE_FLAGS.map((lane) => `${lane}.enabled`),
 ]);
 
@@ -58,10 +59,15 @@ export function grokEnvAliases() {
 }
 
 export function grokSchema() {
-  const lane = () => ({
+  const lane = (name) => ({
     __type: 'dict',
     __strict: true,
-    __keys: { enabled: { __type: 'bool', __default: false } },
+    __keys: {
+      enabled: { __type: 'bool', __default: false },
+      ...(name === 'reviewer' ? { mode: {
+        __type: 'string', __default: 'always-on', __enum: ['off', 'fallback', 'always-on'],
+      } } : {}),
+    },
   });
   return {
     __type: 'dict',
@@ -94,7 +100,7 @@ export function grokSchema() {
         __min: GROK_STALL_TIMEOUT_MIN,
         __max: GROK_STALL_TIMEOUT_MAX,
       },
-      ...Object.fromEntries(GROK_LANE_FLAGS.map((name) => [name, lane()])),
+      ...Object.fromEntries(GROK_LANE_FLAGS.map((name) => [name, lane(name)])),
     },
   };
 }

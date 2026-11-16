@@ -333,3 +333,40 @@ test('GMW-02 watcher: selectReviewerRouteForAttempt passes a gemini route throug
   assert.equal(selected.reviewerModel, 'gemini');
   assert.equal(selected.botTokenEnv, 'GH_GEMINI_REVIEWER_TOKEN');
 });
+
+test('GROKREVIEWMODE-01 Grok fallback replaces the reviewer after the Gemini layer', async () => {
+  const { applyGrokReviewerRoute } = await import('../src/adapters/subject/github-pr/routing.mjs');
+  const loaderImpl = () => ({ get: (key, fallback) =>
+    ['grok.enabled', 'grok.reviewer.enabled'].includes(key) ? true : fallback });
+  const row = { review_status: 'failed', reviewer: 'gemini',
+    failure_message: '[quota-exhausted] usage limit', failed_at: new Date().toISOString() };
+  const geminiRoute = applyGeminiReviewerRoute({ builderClass: 'codex', mode: 'always-on',
+    baseRoute: { builderClass: 'codex', reviewerModel: 'claude' }, loaderImpl });
+  const selected = applyGrokReviewerRoute({ builderClass: 'codex', baseRoute: geminiRoute,
+    mode: 'fallback', loaderImpl,
+    primaryReviewerQuotaCapped: primaryReviewerQuotaCappedForRow(row, { expectedReviewerModel: geminiRoute.reviewerModel }) });
+  assert.equal(selected.reviewerModel, 'grok');
+  assert.equal(selected.grokReviewerSelection.replacedReviewerModel, 'gemini');
+  assert.equal(shouldBypassPrimaryReviewerQuotaHold(selected, row), true);
+  assert.equal(shouldBypassPrimaryReviewerQuotaHold(selected, { ...row, reviewer: 'claude' }), false);
+  assert.equal(shouldBypassPrimaryReviewerQuotaHold({ ...selected, grokReviewerSelection: null }, row), false);
+  assert.equal(applyGrokReviewerRoute({ baseRoute: geminiRoute, mode: 'fallback', loaderImpl,
+    primaryReviewerQuotaCapped: false }), geminiRoute);
+  const phases = readFileSync(new URL('../src/pollonce-phases.mjs', import.meta.url), 'utf8');
+  assert.match(phases, /expectedReviewerModel: geminiBaseRoute.reviewerModel/);
+  assert.match(phases, /mode-source=\$\{grokModeResolution.source\}/);
+});
+
+
+test('GROKREVIEWMODE-01 pure Grok layer refuses an invalid existing Grok route in every mode', async () => {
+  const { applyGrokReviewerRoute } = await import('../src/adapters/subject/github-pr/routing.mjs');
+  for (const mode of ['off', 'fallback', 'always-on']) {
+    for (const [master, lane] of [[true, true], [true, false], [false, true]]) {
+      const loaderImpl = () => ({ get: (key, fallback) => key === 'grok.enabled' ? master
+        : key === 'grok.reviewer.enabled' ? lane : fallback });
+      const result = applyGrokReviewerRoute({ builderClass: 'grok', mode, loaderImpl,
+        baseRoute: { reviewerModel: 'grok', operatorPinnedReviewer: true }, primaryReviewerQuotaCapped: true });
+      assert.equal(result.reviewerModel, 'codex');
+    }
+  }
+});

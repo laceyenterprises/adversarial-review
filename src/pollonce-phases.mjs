@@ -1,3 +1,5 @@
+import { resolveGrokReviewerModeWithSource } from './role-config.mjs';
+import { applyGrokReviewerRoute } from './adapters/subject/github-pr/routing.mjs';
 import { observeOperatorLabelReviewWake } from './operator-label-review-wake.mjs';
 import { readHammerRetryCapLedger, evaluateHammerRetryCap } from './ama/hammer-retry-cap.mjs';
 import { repositoryObservationCache } from './repository-state-cache.mjs';
@@ -2169,7 +2171,7 @@ export async function processReviewSubject(entry, ctx) {
         primaryReviewerQuotaCapped: geminiReviewerMode === 'fallback'
           && primaryReviewerQuotaCappedForRow(existing, { expectedReviewerModel: baseRoute.reviewerModel }),
       });
-      const geminiBaseRoute = applyReviewerArmEffectiveRoute({
+      let geminiBaseRoute = applyReviewerArmEffectiveRoute({
         builderClass: baseRoute.builderClass,
         baseRoute,
         mode: geminiReviewerMode,
@@ -2201,6 +2203,23 @@ export async function processReviewSubject(entry, ctx) {
             `fell back to reviewer=${geminiBaseRoute.geminiIntegrityGuard.fellBackTo}`
         );
       }
+      const grokModeResolution = resolveGrokReviewerModeWithSource({ env: process.env });
+      const grokReviewerMode = grokModeResolution.mode;
+      if (domainId === 'code-pr') geminiBaseRoute = applyGrokReviewerRoute({
+        builderClass: baseRoute.builderClass, baseRoute: geminiBaseRoute, mode: grokReviewerMode,
+        primaryReviewerQuotaCapped: primaryReviewerQuotaCappedForRow(existing, {
+          expectedReviewerModel: geminiBaseRoute.reviewerModel,
+        }),
+      });
+      if (grokModeResolution.error) console.error(
+        `[watcher] grok reviewer-mode resolve failed; fail-closed to off: ${grokModeResolution.error.message}`
+      );
+      if (geminiBaseRoute.grokReviewerSelection) console.log(
+        `[watcher] reviewer-selection ${repoPath}#${prNumber} → grok ` +
+        `(${geminiBaseRoute.grokReviewerSelection.reason}; mode=${grokReviewerMode}; ` +
+        `mode-source=${grokModeResolution.source}; ` +
+        `replaced reviewer=${geminiBaseRoute.grokReviewerSelection.replacedReviewerModel})`
+      );
       // AFH-04 — ordered reviewer fallback (codex → gemini → claude LAST RESORT)
       // on the AFH-02 soft/hard provider-grounding signal. The read is memoized
       // per tick and fail-open: an unavailable/unreadable `hq fleet quota status
@@ -2276,6 +2295,7 @@ export async function processReviewSubject(entry, ctx) {
         baseRoute: geminiBaseRoute,
         grounding: afhGrounding,
         geminiReviewerMode,
+        grokReviewerMode,
         routeTable: baseRoute.routeTable,
       });
       const afhBaseRoute = afhSelection.route;
@@ -3029,8 +3049,9 @@ export async function processReviewSubject(entry, ctx) {
           if (shouldBypassPrimaryReviewerQuotaHold(route, preRoutingUpdateRow)) {
             console.log(
               `[watcher] Bypassing quota hold for ${repoPath}#${prNumber}: ` +
-                `reviewer.gemini.mode=${route.geminiReviewerSelection?.mode || geminiReviewerMode} ` +
-                `selected gemini while replaced reviewer is capped`
+                `reviewer=${route.reviewerModel} ` +
+                `mode=${route.grokReviewerSelection?.mode || route.geminiReviewerSelection?.mode || geminiReviewerMode} ` +
+                `selected while replaced reviewer is capped`
             );
           } else {
             console.log(
@@ -4320,7 +4341,7 @@ export async function processReviewSubject(entry, ctx) {
                       builderClass: baseRoute.builderClass, baseRoute, mode: 'off',
                       primaryReviewerQuotaCapped: false, routeTable: baseRoute.routeTable,
                     }),
-                    grounding: afhGrounding, geminiReviewerMode: 'off', routeTable: baseRoute.routeTable,
+                    grounding: afhGrounding, geminiReviewerMode: 'off', grokReviewerMode, routeTable: baseRoute.routeTable,
                   }).route,
                   rootDir: ROOT, repoPath, prNumber, currentRow: existing,
                   headSha: reviewerHeadSha, afhGrounding, emitCacheEvent,

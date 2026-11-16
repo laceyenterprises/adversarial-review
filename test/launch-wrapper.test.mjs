@@ -234,6 +234,7 @@ async function runMaintainerWatcherLauncher(scriptName, {
     );
   }
 	  const reviewerBrokerHelperBody = '#!/bin/zsh\n'
+        + 'seed_grok_reviewer_token() { return 0; }\n'
 	      + 'reviewer_broker_mode_enabled() {\n'
 	      + '  local role_upper flag_name flag_value\n'
 	      + '  role_upper="$(printf "%s" "$1" | tr "[:lower:]-" "[:upper:]_")"\n'

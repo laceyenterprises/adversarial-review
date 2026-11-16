@@ -83,6 +83,26 @@ reviewer_broker_mode_enabled() {
     [[ "$flag_value" == "true" ]]
 }
 
+# Broker-only optional lane: a failed seed must not stop either daemon or
+# preserve a stale inherited credential. The Node helper uses the CFG reader.
+seed_grok_reviewer_token() {
+    local watcher_dir="${1:-.}"
+    unset GH_GROK_REVIEWER_TOKEN
+    if ! node "$watcher_dir/bin/grok-reviewer-lane-enabled.mjs"; then
+        echo "[reviewer-broker] grok-reviewer-lane-disabled; skipping Grok token seed" >&2
+        return 0
+    fi
+    if reviewer_broker_mode_enabled grok-reviewer; then
+        if ! resolve_reviewer_token_via_broker GH_GROK_REVIEWER_TOKEN grok-reviewer; then
+            unset GH_GROK_REVIEWER_TOKEN
+            echo "[reviewer-broker] WARN: GH_GROK_REVIEWER_TOKEN not resolved; continuing without Grok posting authority" >&2
+        fi
+    else
+        echo "[reviewer-broker] WARN: Grok reviewer broker mode disabled; continuing without Grok posting authority" >&2
+    fi
+    return 0
+}
+
 # Fetch + verify + export. Returns 0 on success, 1 on any failure.
 # Stdout: nothing. Stderr: structured diagnostics on failure.
 resolve_reviewer_token_via_broker() {

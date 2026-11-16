@@ -220,6 +220,16 @@ _tick_op_read_reviewer_pat() {
   fi
 }
 
+# Optional Grok reviewer authority is broker-only and never blocks startup.
+: "${GROK_REVIEWER_AUTH_VIA_BROKER:=true}"
+export GROK_REVIEWER_AUTH_VIA_BROKER
+if declare -f seed_grok_reviewer_token >/dev/null 2>&1; then
+  seed_grok_reviewer_token "$WATCHER_DIR"
+else
+  unset GH_GROK_REVIEWER_TOKEN
+  echo "[follow-up-tick] WARN: Grok reviewer broker helper unavailable; continuing without Grok posting authority" >&2
+fi
+
 if declare -f reviewer_broker_mode_enabled >/dev/null 2>&1 && \
    reviewer_broker_mode_enabled "claude-reviewer"; then
   if ! resolve_reviewer_token_via_broker GH_CLAUDE_REVIEWER_TOKEN claude-reviewer; then

@@ -6,10 +6,12 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+
+import { grokReviewerLaneEnabled } from '../src/grok-reviewer-lane.mjs';
 
 const __dirname = fileURLToPath(new URL('.', import.meta.url));
 const HELPER = join(__dirname, '..', 'scripts', 'lib', 'reviewer-broker.sh');
@@ -307,4 +309,147 @@ test('follow-up-tick script sources the broker helper + gates op-read on the fla
     /_tick_op_read_reviewer_pat 'op:\/\/Cliovault\/GEMINI_REVIEWER_GH_TOKEN\/token'/,
     'follow-up-tick must preserve the gemini-reviewer op-read fallback (field: token, GMW-06)',
   );
+});
+
+test('Grok lane CFG predicate requires both switches and refuses unreadable config', () => {
+  for (const master of [false, true]) {
+    for (const reviewer of [false, true]) {
+      assert.equal(grokReviewerLaneEnabled({
+        loaderImpl: () => ({ get: (key) => key === 'grok.enabled' ? master : reviewer }),
+      }), master && reviewer);
+    }
+  }
+  assert.equal(grokReviewerLaneEnabled({ loaderImpl: () => { throw new Error('synthetic CFG failure'); } }), false);
+});
+
+test('all launcher Grok seed paths obey CFG and continue on broker failure', () => {
+  const root = mkdtempSync(join(tmpdir(), 'grok-seed-'));
+  try {
+    const bin = join(root, 'bin');
+    mkdirSync(bin);
+    const config = join(root, 'config.yaml');
+    const secret = join(root, 'secret');
+    const calls = join(root, 'calls');
+    writeFileSync(secret, 'synthetic-secret');
+    writeExecutable(join(bin, 'curl'), `#!/bin/bash
+response_file=""
+while [[ "$#" -gt 0 ]]; do
+  if [[ "$1" == "-o" ]]; then shift; response_file="$1"; fi
+  shift
+done
+printf 'called\\n' >>"$TEST_CALLS"
+if [[ "$TEST_FAIL" == true ]]; then printf '403'; exit 22; fi
+printf '%s' '{"access_token":"synthetic-grok-token","provider":"github-app-grok-reviewer","metadata":{}}' >"$response_file"
+printf '200'
+`);
+    writeExecutable(join(bin, 'jq'), `#!/usr/bin/env node
+const fs = require('node:fs');
+const doc = JSON.parse(fs.readFileSync(0, 'utf8'));
+const key = process.argv[3].split(' // ')[0].slice(1);
+console.log(key.split('.').reduce((value, part) => value?.[part], doc) ?? '');
+`);
+    for (const name of ['adversarial-watcher-start.sh', 'adversarial-watcher-start-placey.sh', 'adversarial-follow-up-tick.sh']) {
+      const script = readFileSync(join(SCRIPTS_DIR, name), 'utf8');
+      // Execute the exact startup statements, with the real shared shell helper
+      // and Node CFG reader; only the broker transport is replaced.
+      const defaults = script.split('\n').filter((line) => line.startsWith(': "${GROK_REVIEWER_AUTH_VIA_BROKER:=')).join('\n');
+      const exports = script.split('\n').filter((line) => line.startsWith('export ') && line.includes('GROK_REVIEWER_AUTH_VIA_BROKER')).join('\n');
+      const seed = script.split('\n').map((line) => line.trim())
+        .filter((line) => line === 'seed_grok_reviewer_token "$WATCHER_DIR"').join('\n');
+      assert.ok(defaults && exports && seed, name);
+      for (const [master, reviewer, fail] of [[false, true, false], [true, false, false], [true, true, false], [true, true, true]]) {
+        writeFileSync(config, JSON.stringify({ version: 1, grok: { enabled: master, reviewer: { enabled: reviewer } } }));
+        rmSync(calls, { force: true });
+        for (const shell of ['/bin/bash', ...(ZSH_AVAILABLE ? [ZSH_PATH] : [])]) {
+          const out = execFileSync(shell, ['-c', `set -eu
+exec 2>&1
+source "$TEST_HELPER"
+${defaults}
+${exports}
+${seed}
+node -e 'console.log(JSON.stringify({continued:true,token:process.env.GH_GROK_REVIEWER_TOKEN,flag:process.env.GROK_REVIEWER_AUTH_VIA_BROKER}))'
+`], {
+            encoding: 'utf8',
+            env: {
+              ...process.env,
+              PATH: `${bin}:${process.env.PATH}`,
+              AGENT_OS_CONFIG_PATH: config, AGENT_OS_CFG_MODULES: '',
+              AGENT_OS_GROK_ENABLED: String(master), AGENT_OS_GROK_REVIEWER_ENABLED: String(reviewer),
+              GROK_REVIEWER_AUTH_VIA_BROKER: '',
+              GH_GROK_REVIEWER_TOKEN: 'synthetic-inherited-token',
+              WATCHER_DIR: join(SCRIPTS_DIR, '..'), TEST_HELPER: HELPER,
+              TEST_CALLS: calls, TEST_FAIL: String(fail),
+              OAUTH_BROKER_SHARED_SECRET_FILE: secret,
+              OAUTH_BROKER_GROK_REVIEWER_PROVIDER: 'github-app-grok-reviewer',
+              OAUTH_BROKER_GROK_REVIEWER_EXPECTED_APP_ID: '',
+              OAUTH_BROKER_GROK_REVIEWER_EXPECTED_INSTALLATION_ID: '',
+            },
+            stdio: ['pipe', 'pipe', 'pipe'],
+          });
+          const result = JSON.parse(out.trim().split('\n').at(-1));
+          assert.equal(result.continued, true);
+          assert.equal(result.flag, 'true');
+          if (!master || !reviewer) {
+            assert.equal(existsSync(calls), false);
+            assert.equal(out.split('grok-reviewer-lane-disabled').length - 1, 1);
+            assert.equal(result.token, undefined);
+          } else {
+            assert.equal(existsSync(calls), true);
+            if (fail) assert.match(out, /WARN: GH_GROK_REVIEWER_TOKEN not resolved/);
+            assert.equal(result.token, fail ? undefined : 'synthetic-grok-token');
+          }
+        }
+      }
+    }
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('Grok startup seed defaults missing or empty watcher directory to the current checkout', () => {
+  const root = mkdtempSync(join(tmpdir(), 'grok-seed-directory-'));
+  try {
+    const config = join(root, 'config.yaml');
+    writeFileSync(config, JSON.stringify({ version: 1, grok: { enabled: true, reviewer: { enabled: true } } }));
+    for (const shell of ['/bin/bash', ...(ZSH_AVAILABLE ? [ZSH_PATH] : [])]) {
+      for (const invocation of ['seed_grok_reviewer_token', 'seed_grok_reviewer_token ""']) {
+        const out = execFileSync(shell, ['-c', `set -eu
+source "$TEST_HELPER"
+resolve_reviewer_token_via_broker() {
+  export GH_GROK_REVIEWER_TOKEN=synthetic-seeded-token
+}
+${invocation}
+node -e 'console.log(process.env.GH_GROK_REVIEWER_TOKEN)'
+`], {
+          cwd: join(SCRIPTS_DIR, '..'),
+          encoding: 'utf8',
+          env: {
+            ...process.env,
+            TEST_HELPER: HELPER,
+            AGENT_OS_CONFIG_PATH: config, AGENT_OS_CFG_MODULES: '',
+            AGENT_OS_GROK_ENABLED: 'true', AGENT_OS_GROK_REVIEWER_ENABLED: 'true',
+            GROK_REVIEWER_AUTH_VIA_BROKER: 'true',
+            GH_GROK_REVIEWER_TOKEN: 'synthetic-inherited-token',
+          },
+        });
+        assert.equal(out.trim(), 'synthetic-seeded-token', `${shell}: ${invocation}`);
+      }
+    }
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('follow-up startup continues without the optional Grok broker helper', () => {
+  const script = readFileSync(join(SCRIPTS_DIR, 'adversarial-follow-up-tick.sh'), 'utf8');
+  const block = script.match(/if declare -f seed_grok_reviewer_token[\s\S]*?\nfi/)[0];
+  const out = runHelperShell(`set -eu
+exec 2>&1
+unset -f seed_grok_reviewer_token
+${block}
+echo "continued token=\${GH_GROK_REVIEWER_TOKEN-unset}"`, {
+    GH_GROK_REVIEWER_TOKEN: 'synthetic-inherited-token',
+  });
+  assert.match(out, /WARN: Grok reviewer broker helper unavailable/);
+  assert.match(out, /continued token=unset/);
 });

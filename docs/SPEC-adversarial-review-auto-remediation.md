@@ -1186,6 +1186,21 @@ daemon is restarted. To close that gap both long-lived processes
 `process.env[botTokenEnv]` so subsequently-spawned reviewer/remediation workers
 and in-process comment delivery inherit it.
 
+The Grok reviewer is broker-only. Both watcher launchers and the follow-up
+launcher default and export `GROK_REVIEWER_AUTH_VIA_BROKER=true`; they seed
+`GH_GROK_REVIEWER_TOKEN` only when CFG reports both `grok.enabled` and
+`grok.reviewer.enabled` as true. Startup clears any inherited Grok token before
+checking the lane switches. Disabled lanes leave it unset and log a skip without
+contacting the broker. The shared seed helper uses the current directory when
+its watcher directory argument is omitted or empty. A failed Grok seed warns,
+leaves the token unset, and continues startup without a PAT fallback. The provider defaults to
+`github-app-grok-reviewer`; `OAUTH_BROKER_GROK_REVIEWER_PROVIDER` and the
+optional expected App/installation ID pins follow the shared broker contract.
+Runtime refresh uses the same lane predicate, reports
+`grok-reviewer-lane-disabled` when off, and logs that skip once per process.
+Grok broker failures preserve the held token and do not interrupt refreshes
+for the other reviewer roles.
+
 The watcher runs the refresh at the start of each `pollOnce`. The follow-up
 daemon runs the same refresh as its first tick step, before `consume` can spawn a
 remediation worker that snapshots `process.env` and before `retry-comments` can

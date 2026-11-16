@@ -516,6 +516,7 @@ export type ReviewerFailureClass =
   | 'infra-runtime-missing-library'
   | 'agy-identity-unavailable'
   | 'local-admission-refused'
+  | 'reviewer-configuration-error'
   | 'cli-resolution-transient'
   | 'bug'
   | 'unknown';

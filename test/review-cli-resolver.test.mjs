@@ -333,13 +333,61 @@ for (const asyncMode of [false, true]) {
       assert.equal(err.binaryResolution.reason, 'ENOENT');
       return true;
     });
-    for (const code of ['ENOENT', 'EACCES', 'ENOEXEC']) {
+    for (const code of ['ENOENT', 'EACCES', 'ENOEXEC', 'ENOTDIR', 'ELOOP']) {
       let attempts = 0;
       const execute = () => { attempts++; throw Object.assign(new Error('synthetic spawn failure'), { code }); };
       await assert.rejects(run({ ...restricted, HQ_BIN: f.hq }, {
         execFileSyncImpl: execute, execFileImpl: async () => execute(),
       }), err => err.failureClass === 'reviewer-configuration-error');
       assert.equal(attempts, 1, 'spawn failures do not enter transient retry');
+    }
+  });
+}
+
+for (const asyncMode of [false, true]) {
+  test(`${asyncMode ? 'async' : 'sync'} resource-pressure spawn failures retry and remain transient`, async t => {
+    const f = fixture(t);
+    for (const code of ['EAGAIN', 'EMFILE', 'ENFILE', 'ENOMEM', 'EIO', 'EBUSY']) {
+      for (const recover of [false, true]) {
+        let attempts = 0;
+        const execute = () => {
+          attempts++;
+          if (attempts === 1 || !recover) throw Object.assign(new Error('synthetic resource pressure'), { code });
+          return JSON.stringify(f.response);
+        };
+        const options = { env: f.env, log: f.log, execFileSyncImpl: execute,
+          execFileImpl: async () => ({ stdout: execute() }) };
+        const run = () => asyncMode ? resolveReviewCliAsync('codex', options)
+          : Promise.resolve().then(() => resolveReviewCli('codex', options));
+        if (recover) assert.equal((await run()).status, 'resolved');
+        else await assert.rejects(run(), err => err.failureClass === 'cli-resolution-transient'
+          && err.binaryResolution.reason === code);
+        assert.equal(attempts, 2);
+      }
+    }
+  });
+}
+
+for (const asyncMode of [false, true]) {
+  test(`${asyncMode ? 'async' : 'sync'} resolver retries resource-pressure spawn errors`, async t => {
+    const f = fixture(t);
+    for (const code of ['EAGAIN', 'EMFILE', 'ENFILE', 'ENOMEM', 'EIO', 'EBUSY']) {
+      for (const recover of [false, true]) {
+        let attempts = 0;
+        const execute = () => {
+          attempts++;
+          if (attempts === 1 || !recover) throw Object.assign(new Error('synthetic resource pressure'), { code });
+          return JSON.stringify(f.response);
+        };
+        const options = { env: f.env, log: f.log, execFileSyncImpl: execute,
+          execFileImpl: async () => ({ stdout: execute() }) };
+        const run = () => asyncMode ? resolveReviewCliAsync('codex', options)
+          : Promise.resolve().then(() => resolveReviewCli('codex', options));
+        if (recover) assert.equal((await run()).status, 'resolved');
+        else await assert.rejects(run(), err => err.failureClass === 'cli-resolution-transient'
+          && err.binaryResolution.reason === code);
+        assert.equal(attempts, 2, `${code} retries once`);
+      }
     }
   });
 }

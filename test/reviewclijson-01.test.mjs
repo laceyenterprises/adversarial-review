@@ -155,7 +155,7 @@ test('resolver configuration errors survive typed, serialized, stored and prefli
   assert.equal(result.failureClass, 'reviewer-configuration-error');
   const failures = [];
   await settleReviewerAttempt({ rootDir, repoPath: 'example/project', prNumber: 7, result,
-    statements: { markFailed: { run: (...args) => failures.push(args) } }, log: quiet,
+    statements: { markSizeFailed: { run: (...args) => failures.push(args) } }, log: quiet,
   });
   assert.equal(failures.length, 1);
   assert.match(failures[0][1], /^\[reviewer-configuration-error\]/);

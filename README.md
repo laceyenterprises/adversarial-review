@@ -83,8 +83,13 @@ HUP-05N: reviewer, cli-direct discovery and local remediation CLI selection use
 the installed `hq cli resolve --cli <name> --consumer review --json` protocol.
 `HQ_BIN` selects the installed command. HUP-05 centrally owns explicit override,
 managed-current and review legacy fallback precedence (`claude` is the registry
-key for Claude Code). Unknown resolver outcomes prevent launch and receive one
-load-aware retry. Exhausted resolution uses `cli-resolution-transient`: no seat
+key for Claude Code). Unknown resolver outcomes prevent launch. Deterministic command lookup/spawn
+errors (ENOENT, EACCES, ENOEXEC, ENOTDIR and ELOOP) settle only the matching
+reviewing head/session as terminal `failed` with `reviewer-configuration-error`
+and a `reviewer.configuration_error` alert; operators repair and explicitly
+retrigger affected PRs. Timeouts, nonzero exits, protocol failures and other
+spawn errors receive one load-aware retry. Exhausted transient resolution uses
+`cli-resolution-transient`: no seat
 isolation or credential-outage accounting, PR-level backoff, and claim release
 to `pending` below the five-consecutive-transient threshold before bounded
 `pending-upstream` recovery. Invalid JSON diagnostics contain only byte/line

@@ -29,11 +29,26 @@ before helpers or execution. Discovery translates unknown resolution into
 `<name>-path` layer, retaining resolver evidence on the cause; the runtime adapter
 returns its existing preflight failure result without spawning a reviewer.
 
-Command lookup and spawn errors (such as ENOENT or EACCES) immediately produce
+Deterministic command lookup/spawn errors (ENOENT, EACCES, ENOEXEC, ENOTDIR
+and ELOOP) immediately produce
 `reviewer-configuration-error`, terminal settlement, and a reviewer-stopped
-configuration alert through the existing alert bus. They require configuration
+configuration alert (`reviewer.configuration_error`) through the existing alert bus.
+Terminal settlement requires the dispatched head/session and a `reviewing` row;
+a replacement claim is never overwritten. They require configuration
 repair and never enter transient retry/backoff. Timeouts, nonzero resolver exits
-and invalid protocol responses retain `cli-resolution-transient`.
+and invalid protocol responses, plus other spawn errors (including EAGAIN,
+EMFILE, ENFILE, ENOMEM, EIO and EBUSY), retain `cli-resolution-transient`.
+
+After repairing the installed command, operators can reset each affected failed
+row with `node src/retrigger-review.mjs --repo <owner/repo> --pr <number>
+--reason "Resolver command repaired" --allow-failed-reset --no-bump-budget`
+from the deployed checkout. This records explicit re-review intent without
+increasing the remediation budget; command restoration alone does not reset
+terminal rows. Configuration alerts currently fire per failing PR, so a brief
+command absence may require several explicit resets. During deployment verify
+`HQ_BIN` points to the installed executable or the watcher's actual launchd
+service PATH resolves `hq`; an interactive shell's PATH is not proof. Host
+service configuration and live recovery remain deployment-owner verification.
 
 For transient failures, synchronous and asynchronous clients retry resolution once, sizing each
 nominal ten-second attempt through the shared load-aware timeout helper. The

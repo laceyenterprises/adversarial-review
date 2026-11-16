@@ -99,7 +99,8 @@ function parseResolution(cli, raw) {
 }
 
 function resolverSpawnFailed(cause) {
-  return typeof cause?.code === 'string' && /^E(?!RR_)/.test(cause.code) && cause.code !== 'ETIMEDOUT';
+  // Only deterministic command configuration failures bypass bounded retry.
+  return ['ENOENT', 'EACCES', 'ENOEXEC', 'ENOTDIR', 'ELOOP'].includes(cause?.code);
 }
 
 function resolutionFailure(cli, cause, { log, now }) {
@@ -111,7 +112,7 @@ function resolutionFailure(cli, cause, { log, now }) {
     ...(cause?.resolutionDiagnostic ? { diagnostic: cause.resolutionDiagnostic } : {}),
   });
   log.error?.(`[review-cli-resolution] ${JSON.stringify(evidence)}`);
-  return Object.assign(new Error(`${failureClass === 'reviewer-configuration-error' ? '[reviewer-configuration-error] ' : ''}review CLI resolution unavailable for ${cli}`, { cause }), {
+  return Object.assign(new Error(`review CLI resolution unavailable for ${cli}`, { cause }), {
     name: 'ReviewCliResolutionError',
     failureClass,
     binaryResolution: evidence,

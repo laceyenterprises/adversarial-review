@@ -950,11 +950,15 @@ new PR
   retains its failure classification. If the session release misses, the
   no-charge fallback requires a `reviewing` row on the stale head with no session
   UUID. A replacement session, including one on the same head, is never released.
-- Resolver command lookup/spawn failures (including ENOENT and EACCES) use
+- Deterministic resolver command lookup/spawn failures (ENOENT, EACCES,
+  ENOEXEC, ENOTDIR and ELOOP) use
   `reviewer-configuration-error`: terminal `failed`, no transient retry, and an
-  immediate configuration alert through the existing alert bus.
+  immediate `reviewer.configuration_error` alert through the existing alert bus.
+  Only the dispatched head/session in `reviewing` can settle terminally; a
+  replacement claim is never overwritten.
 - A `cli-resolution-transient` failure means executable resolution timed out,
-  exited nonzero, or returned invalid protocol before the reviewer ran. Resolution itself retries once with load-aware deadlines.
+  exited nonzero, returned invalid protocol, or hit another spawn error
+  (including EAGAIN, EMFILE, ENFILE, ENOMEM, EIO and EBUSY) before the reviewer ran. Resolution itself retries once with load-aware deadlines.
   Settlement records the existing PR-level cascade backoff and releases the
   matching session to `pending` without charging review or infra recovery
   attempts while `consecutiveTransientFailures < CASCADE_FAILURE_CAP` (five).

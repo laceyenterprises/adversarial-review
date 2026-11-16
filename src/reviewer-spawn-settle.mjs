@@ -1843,10 +1843,13 @@ function settleReviewerAttempt({
   if (failureClass === 'reviewer-model-unavailable' || failureClass === 'reviewer-configuration-error') {
     // Immediate fallback was already tried by spawnReviewer. A deterministic
     // refusal left here needs configuration repair, not another poll-time spawn.
-    withSqliteBusyRetrySync(
-      () => statements.markFailed.run(failureAt, classifiedMessage, repoPath, prNumber),
+    const marked = withSqliteBusyRetrySync(
+      () => failureClass === 'reviewer-configuration-error'
+        ? statements.markSizeFailed.run(failureAt, classifiedMessage, repoPath, prNumber, reviewerHeadSha, reviewerSessionUuid)
+        : statements.markFailed.run(failureAt, classifiedMessage, repoPath, prNumber),
       { label: `reviewer-model-terminal:${repoPath}#${prNumber}`, log },
     );
+    if (marked?.changes === 0) return { posted: false, reason: 'configuration-error-claim-mismatch' };
     log.warn(`[watcher] Terminal reviewer model refusal on ${repoPath} PR ${prNumber}: ${failureMessage}`);
     return;
   }

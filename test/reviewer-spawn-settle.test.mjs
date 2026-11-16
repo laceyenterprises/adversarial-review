@@ -3,7 +3,7 @@ import './helpers/dispatch-files-preload.mjs';
 import {spawnReviewer} from './helpers/reviewer-quota-fixture.mjs';
 import './helpers/worker-observation-fixture.mjs';
 import { openReviewStateDb, ensureReviewStateSchema } from '../src/review-state.mjs';
-import { prepareReleaseReviewerClaim } from '../src/review-state-statements.mjs';
+import { prepareMarkSizeFailed, prepareReleaseReviewerClaim } from '../src/review-state-statements.mjs';
 import { settleReviewerAttempt, spawnReviewer as productionSpawnReviewer,
   readReviewerQuotaDecision } from '../src/reviewer-spawn-settle.mjs';
 import test from 'node:test';
@@ -1231,3 +1231,32 @@ test('resolver configuration failure immediately queues a reviewer-stopped alert
   assert.match(alerts[0].message, /STOPPED.*configuration repair/);
   assert.equal(alerts[0].options.event, 'reviewer.configuration_error');
 });
+
+for (const mismatch of [null, 'head', 'session', 'status']) {
+  test(`configuration failure only settles its dispatched claim (mismatch=${mismatch})`, t => {
+    const rootDir = mkdtempSync(path.join(tmpdir(), 'configuration-settle-'));
+    t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+    const db = openReviewStateDb(rootDir);
+    ensureReviewStateSchema(db);
+    t.after(() => db.close());
+    db.prepare(`INSERT INTO reviewed_prs (repo, pr_number, reviewed_at, reviewer,
+      review_status, reviewer_session_uuid, reviewer_head_sha, review_attempts)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?)`).run('example/project', 7, '2026-01-01', 'claude',
+        mismatch === 'status' ? 'pending' : 'reviewing',
+        mismatch === 'session' ? 'replacement' : 'original', mismatch === 'head' ? 'new-head' : 'head', 2);
+    const before = db.prepare('SELECT * FROM reviewed_prs').get();
+    const result = settleReviewerAttempt({ rootDir, repoPath: 'example/project', prNumber: 7,
+      reviewerHeadSha: 'head', reviewerSessionUuid: 'original', log: { warn() {} },
+      result: { ok: false, failureClass: 'reviewer-configuration-error', error: 'review CLI resolution unavailable for claude' },
+      statements: { markSizeFailed: prepareMarkSizeFailed(db), markFailed: { run: () => assert.fail('unguarded settlement') } } });
+    const after = db.prepare('SELECT * FROM reviewed_prs').get();
+    if (mismatch) {
+      assert.equal(result.reason, 'configuration-error-claim-mismatch');
+      assert.deepEqual(after, before);
+    } else {
+      assert.equal(after.review_status, 'failed');
+      assert.equal(after.review_attempts, 3);
+      assert.equal(after.failure_message, '[reviewer-configuration-error] review CLI resolution unavailable for claude');
+    }
+  });
+}

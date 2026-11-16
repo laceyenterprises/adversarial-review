@@ -222,3 +222,11 @@ test('unrelated helper/network failures do not get folded into cascade', () => {
     'unknown'
   );
 });
+
+test('configuration text retains stalled and state-busy precedence; typed evidence is authoritative', () => {
+  const tag = '[reviewer-configuration-error]';
+  assert.equal(classifyReviewerFailure(`[reviewer-stalled] prior diagnostic ${tag}`, 1), 'reviewer-stalled');
+  assert.equal(classifyReviewerFailure(`[repository-state-busy] prior diagnostic ${tag}`, 78), 'repository-state-busy');
+  assert.equal(classifyReviewerFailure(tag, 1), 'reviewer-configuration-error');
+  assert.equal(classifyReviewerFailure('[reviewer-stalled]', 1, null, { failureClass: 'reviewer-configuration-error' }), 'reviewer-configuration-error');
+});

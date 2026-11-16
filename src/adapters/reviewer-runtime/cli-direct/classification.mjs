@@ -83,16 +83,15 @@ function classifyReviewerFailure(stderr, exitCode, errorCode = null, details = {
     resolutionUnknown = observation?.status === 'unknown';
     if (resolutionUnknown) resolutionFailureClass = observation.failureClass;
   } catch { /* no complete resolution observation */ }
-  if (lower.includes('[reviewer-configuration-error]') || details?.failureClass === 'reviewer-configuration-error'
+  if (details?.failureClass === 'reviewer-configuration-error'
     || details?.cause?.failureClass === 'reviewer-configuration-error' || resolutionFailureClass === 'reviewer-configuration-error') return 'reviewer-configuration-error';
-  if (isReviewCliResolutionFailure(details)
-    || /review CLI resolution unavailable for |\[cli-resolution-transient\]/i.test(text)
-    || resolutionUnknown) return CLI_RESOLUTION_TRANSIENT_FAILURE_CLASS;
+  if (isReviewCliResolutionFailure(details) || resolutionUnknown) return CLI_RESOLUTION_TRANSIENT_FAILURE_CLASS;
   if (details?.reviewerStalled === true || text.includes('[reviewer-stalled]')) return 'reviewer-stalled';
   if (exitCode === REPOSITORY_STATE_BUSY_EXIT_CODE && /(?:^|\n)\[repository-state-busy\]/.test(lower)) {
     return 'repository-state-busy';
   }
   if (lower.includes('[reviewer-configuration-error]')) return 'reviewer-configuration-error';
+  if (/review CLI resolution unavailable for |\[cli-resolution-transient\]/i.test(text)) return CLI_RESOLUTION_TRANSIENT_FAILURE_CLASS;
   if (lower.includes('[reviewer-model-unresolved]')) return 'reviewer-model-unresolved';
   // Exit 77 is also sysexits EX_NOPERM, and this classifier also reads exit codes
   // from other CLIs; only the reviewer's own marker identifies the budget refusal.

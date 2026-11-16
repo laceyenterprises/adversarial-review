@@ -1501,3 +1501,52 @@ test('budget-deferred pass permits the existing exhausted preferred reviewer fal
   assert.equal(recoveredRoute.reviewerModel, 'gemini', 'preference stays unchanged');
   assert.equal(shouldBackoffReviewerSpawn(rootDir, { ...identity, reviewerModel: 'gemini', now: resetAt }).shouldBackoff, false);
 });
+
+test('GROKREVIEWMODE-01 AFH accepts absent routes in every Grok mode', () => {
+  for (const grokReviewerMode of ['off', 'fallback', 'always-on']) {
+    for (const routeOptions of [{}, { baseRoute: null }]) {
+      const result = afhReviewerFallbackDecision({ grokReviewerMode, ...routeOptions });
+      assert.equal(result.applied, false);
+      assert.equal(result.reason, 'no-route');
+    }
+  }
+});
+
+test('GROKREVIEWMODE-01 AFH orders verified Grok capacity before last resort', () => {
+  const loaderImpl = () => ({ get: (key, fallback) =>
+    ['grok.enabled', 'grok.reviewer.enabled'].includes(key) ? true : fallback });
+  const exhausted = { state: 'exhausted', grounded: true };
+  const options = { builderClass: 'claude-code',
+    baseRoute: { builderClass: 'claude-code', reviewerModel: 'codex' },
+    geminiReviewerMode: 'fallback', grokReviewerMode: 'fallback', loaderImpl };
+  const decide = spec => afhReviewerFallbackDecision({ ...options, grounding: groundingFor(spec) });
+  assert.equal(decide({ openai: exhausted, google: OK, xai: OK, anthropic: OK }).to, 'gemini');
+  const selected = decide({ openai: exhausted, google: exhausted, xai: OK, anthropic: OK });
+  assert.equal(selected.to, 'grok');
+  assert.deepEqual(selected.considered.map(x => x.reviewerModel), ['gemini', 'grok']);
+  const primaryFirst = afhReviewerFallbackDecision({ ...options,
+    baseRoute: { ...options.baseRoute, reviewerModel: 'gemini' },
+    grounding: groundingFor({ openai: OK, google: exhausted, xai: OK, anthropic: OK }) });
+  assert.equal(primaryFirst.to, 'codex');
+  assert.notEqual(decide({ openai: exhausted, google: exhausted, xai: exhausted, anthropic: OK }).to, 'grok');
+  const unknown = decide({ openai: exhausted, google: exhausted, anthropic: OK });
+  assert.equal(unknown.to, null);
+  assert.deepEqual(unknown.considered.map(x => x.reviewerModel), ['gemini', 'grok', 'claude']);
+  assert.equal(unknown.considered.find(x => x.reviewerModel === 'grok').reason, 'grok-grounding-unknown');
+  for (const mode of ['off', 'fallback', 'always-on']) {
+    const grounding = groundingFor({ openai: exhausted, google: exhausted, xai: OK, anthropic: OK });
+    const result = afhReviewerFallbackDecision({ ...options, grounding, grokReviewerMode: mode });
+    assert.equal(result.to, mode === 'off' ? null : 'grok');
+    for (const flags of [{ 'grok.enabled': false }, { 'grok.reviewer.enabled': false }]) {
+      const disabled = () => ({ get: (key, fallback) => key in flags ? flags[key] : loaderImpl().get(key, fallback) });
+      assert.notEqual(afhReviewerFallbackDecision({ ...options, grounding,
+        grokReviewerMode: mode, loaderImpl: disabled }).to, 'grok');
+    }
+    assert.notEqual(afhReviewerFallbackDecision({ ...options, grounding, grokReviewerMode: mode,
+      builderClass: 'grok' }).to, 'grok');
+    assert.equal(afhReviewerFallbackDecision({ ...options, grounding, grokReviewerMode: mode,
+      baseRoute: { ...options.baseRoute, operatorPinnedReviewer: true } }).applied, false);
+    assert.notEqual(afhReviewerFallbackDecision({ ...options, grounding, grokReviewerMode: mode,
+      baseRoute: { ...options.baseRoute, excludedReviewerModels: ['grok'] } }).to, 'grok');
+  }
+});

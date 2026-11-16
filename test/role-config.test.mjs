@@ -598,3 +598,20 @@ test('CFGDRIFT-01 gemini mode source trace reports cli overrides as cli', () => 
   assert.equal(resolved.sourceDetail, 'cli');
   assert.equal(resolved.path, null);
 });
+
+test('GROKREVIEWMODE-01 mode default, env source and invalid fail-closed resolution', async t => {
+  const { resolveGrokReviewerMode, resolveGrokReviewerModeWithSource } = await import('../src/role-config.mjs');
+  const dir = makeTmp();
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const topPath = join(dir, 'config.yaml');
+  const options = { topPath, modulePaths: [], env: {}, loaderImpl: loadConfig };
+  writeYaml(topPath, 'version: 1\n');
+  assert.equal(resolveGrokReviewerMode(options), 'always-on');
+  const resolved = resolveGrokReviewerModeWithSource({ ...options,
+    env: { AGENT_OS_GROK_REVIEWER_MODE: 'fallback' } });
+  assert.equal(resolved.mode, 'fallback');
+  assert.equal(resolved.source, 'env');
+  writeYaml(topPath, 'version: 1\ngrok:\n  reviewer:\n    mode: sometimes\n');
+  assert.equal(resolveGrokReviewerMode(options), 'off');
+  assert.equal(resolveGrokReviewerModeWithSource(options).error.name, 'AgentOSConfigError');
+});

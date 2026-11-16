@@ -987,6 +987,11 @@ new PR
   claim is attempted: the watcher prefers
   `quota_reset_at_utc`, falls back to parsing the tagged `failure_message`, then
   falls back to a fixed window anchored to `failed_at` / `last_attempted_at`.
+  Automatic Grok fallback and always-on base selection may bypass this hold
+  only for a row attributed to the recorded replaced primary; a Grok-attributed
+  failure retains its hold. Gemini spawn-quota retries apply the same row-quota
+  Grok layer before AFH provider grounding. Both paths retain reviewer
+  exclusions, family refusal, operator pins and the existing claim CAS.
   `oauth-broken` also maintains a model-scoped outage file under
   `data/reviewer-credential-outages/` after failures hit the distinct-PR
   threshold. That preflight hold parks further spawns for the affected model

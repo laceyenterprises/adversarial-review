@@ -10,7 +10,7 @@ import { main as tokensMain } from './tokens-cli.mjs';
 import { runtimeMain } from './runtime-status-cli.mjs';
 import { finalizationMain } from './finalization-cli.mjs';
 import { reviewerRoster, formatReviewerRoster } from './adapters/subject/github-pr/routing.mjs';
-import { resolveGeminiReviewerMode } from './role-config.mjs';
+import { resolveGeminiReviewerMode, resolveGrokReviewerMode } from './role-config.mjs';
 import { loadConfigCached } from './config-loader.mjs';
 import {
   collectHandoffStatus,
@@ -59,11 +59,13 @@ function reviewerRosterMain(argv, io = {}, configOptions = io.config || {}) {
     stderr.write(`error: could not resolve reviewer.gemini.mode: ${err?.message || err}\n`);
     return 1;
   }
-  const roster = reviewerRoster({ mode });
+  const grokMode = resolveGrokReviewerMode({ ...configOptions, env });
+  const roster = reviewerRoster({ ...configOptions, env, mode, grokMode });
   if (json) {
-    stdout.write(`${JSON.stringify({ mode, roster }, null, 2)}\n`);
+    stdout.write(`${JSON.stringify({ mode, grokMode, roster }, null, 2)}\n`);
   } else {
     stdout.write(`reviewer route roster (reviewer.gemini.mode=${mode}):\n`);
+    stdout.write(`grok.reviewer.mode=${grokMode}\n`);
     stdout.write(`${formatReviewerRoster(roster)}\n`);
   }
   return 0;

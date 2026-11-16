@@ -302,6 +302,13 @@ export function shouldBypassPrimaryReviewerQuotaHold(route, row = null) {
   if (route?.reviewerModel === 'codex' && route.codexBrokerProvider && !route.codexAccountHold) {
     return (row?.codex_broker_provider || 'codex') !== route.codexBrokerProvider;
   }
+  if (route?.reviewerModel === 'grok') {
+    const selection = route.grokReviewerSelection;
+    return route.botTokenEnv === 'GH_GROK_REVIEWER_TOKEN'
+      && ((selection?.mode === 'fallback' && selection.reason === 'primary-reviewer-quota-capped')
+        || (selection?.mode === 'always-on' && selection.reason === 'always-on-base-route'))
+      && (!row || rowReviewerMatches(row, selection.replacedReviewerModel));
+  }
   if (row && !rowReviewerMatches(row, route?.geminiReviewerSelection?.replacedReviewerModel)) {
     return false;
   }
@@ -421,6 +428,7 @@ export function applyAfhReviewerRouteForAttempt({
   baseRoute,
   grounding = null,
   geminiReviewerMode = null,
+  grokReviewerMode,
   routeTable = baseRoute?.routeTable,
 } = {}) {
   const decision = afhReviewerFallbackDecision({
@@ -428,6 +436,7 @@ export function applyAfhReviewerRouteForAttempt({
     baseRoute,
     grounding,
     geminiReviewerMode,
+    grokReviewerMode,
     ...(routeTable ? { routeTable } : {}),
   });
   return { decision, route: applyAfhReviewerFallbackDecision(baseRoute, decision) };

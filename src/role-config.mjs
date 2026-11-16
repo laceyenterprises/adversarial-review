@@ -415,6 +415,31 @@ export function resolveGeminiReviewerModeWithSource({
   };
 }
 
+// Grok preserves its original opt-in lane behavior unless a mode is configured.
+export function resolveGrokReviewerMode(options = {}) {
+  return resolveGrokReviewerModeWithSource(options).mode;
+}
+
+export function resolveGrokReviewerModeWithSource({
+  env = process.env, topPath, modulePaths, loaderImpl,
+} = {}) {
+  const topPathResolved = resolvedRoleTopPath({ env, topPath });
+  try {
+    const cfg = loadRoleConfig({ env, topPath: topPathResolved, modulePaths, loaderImpl,
+      contextKey: 'grok.reviewer.mode' });
+    const value = cfg.get('grok.reviewer.mode', 'always-on');
+    const mode = ['off', 'fallback', 'always-on'].includes(value) ? value : 'off';
+    const trace = cfg.resolutionTrace?.('grok.reviewer.mode') || [];
+    const winning = trace.at(-1) || { source: 'code-default', value, path: null };
+    return { mode, source: sourceKind(winning.source), sourceDetail: winning.source,
+      rawValue: winning.value, path: winning.path, topPath: topPathResolved };
+  } catch (error) {
+    if (!(error instanceof AgentOSConfigError)) throw error;
+    return { mode: 'off', source: 'default', sourceDetail: 'fail-closed', error,
+      rawValue: null, topPath: topPathResolved };
+  }
+}
+
 export function resolveReviewPopulationRetryConfig({
   env = process.env,
   topPath,

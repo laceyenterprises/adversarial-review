@@ -44,6 +44,15 @@
     "grok.native_resume.enabled": {
       "type": "bool",
       "default": false
+    },
+    "grok.reviewer.mode": {
+      "type": "string",
+      "default": "always-on",
+      "enum": [
+        "off",
+        "fallback",
+        "always-on"
+      ]
     }
   },
   "envAliases": {
@@ -55,7 +64,8 @@
     "grok.reviewer.enabled": "AGENT_OS_GROK_REVIEWER_ENABLED",
     "grok.remediator.enabled": "AGENT_OS_GROK_REMEDIATOR_ENABLED",
     "grok.hammer.enabled": "AGENT_OS_GROK_HAMMER_ENABLED",
-    "grok.native_resume.enabled": "AGENT_OS_GROK_NATIVE_RESUME_ENABLED"
+    "grok.native_resume.enabled": "AGENT_OS_GROK_NATIVE_RESUME_ENABLED",
+    "grok.reviewer.mode": "AGENT_OS_GROK_REVIEWER_MODE"
   },
   "rolePinLanes": {
     "roles.reviewer": {
@@ -81,7 +91,8 @@
         "grok.reviewer.enabled": false,
         "grok.remediator.enabled": false,
         "grok.hammer.enabled": false,
-        "grok.native_resume.enabled": false
+        "grok.native_resume.enabled": false,
+        "grok.reviewer.mode": "always-on"
       }
     },
     {
@@ -253,6 +264,18 @@
       "name": "closer-pending-v2-even-with-all-flags-on",
       "top": "version: 1\ngrok:\n  enabled: true\n  hammer:\n    enabled: true\nroles:\n  merge_agent_worker_class: hammer-grok\n",
       "errorKey": "roles.merge_agent_worker_class"
+    },
+    {
+      "name": "reviewer-mode-fallback",
+      "top": "version: 1\ngrok:\n  reviewer:\n    mode: fallback\n",
+      "expect": {
+        "grok.reviewer.mode": "fallback"
+      }
+    },
+    {
+      "name": "reviewer-mode-invalid",
+      "top": "version: 1\ngrok:\n  reviewer:\n    mode: sometimes\n",
+      "errorKey": "grok.reviewer.mode"
     }
   ]
 }

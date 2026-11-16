@@ -55,6 +55,26 @@ unallowlisted root keys, or nested keys.
 
 ## `worker_pool` partial Node mirror
 
+### Public hygiene declarations and cache freshness
+
+`worker_pool.public_hygiene` accepts `repos` (default `[]`), `identities`
+(default `{}` with `code-default` provenance) and an optional absolute
+`denylist_path`. Each identity maps a worker class to exactly `name` and `email`.
+Layers may override individual identity fields; complete identity records are
+required by the final merged-config validator and by standalone `validateSchema`.
+Unknown policy fields and explicit null mappings remain invalid.
+
+A configured denylist must be a readable UTF-8 regular file, and nonempty
+`repos` requires that path. Cached loaders watch the path resolved from all
+layers alongside the YAML inputs. Metadata changes, removal or a changed
+content digest invalidate the cached config and rerun policy validation.
+Unchanged cache hits reuse digests without reading or decoding the denylist;
+the existing one-second digest TTL periodically rehashes watched files.
+`configSignatureStatus` force-hashes the same dependencies for drift diagnostics.
+Scanner rule semantics remain owned by the canonical scanner.
+
+### Other worker-pool declarations
+
 The adversarial-review Node loader treats `worker_pool` as a known partial
 schema root, not as a foreign top-level local section. Python remains canonical
 for the worker-pool schema, but the Node loader mirrors checked-in cross-reader

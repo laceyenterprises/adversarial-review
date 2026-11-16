@@ -55,6 +55,7 @@ const readSecret = () => 'broker-shared-secret';
 const silentLog = { warn: () => {} };
 
 test('Grok lane off skips its broker role and logs once per process', async () => {
+  _resetReviewerTokenRefreshClockForTest();
   const warnings = [];
   const opts = {
     env: { GROK_REVIEWER_AUTH_VIA_BROKER: 'true' },
@@ -68,6 +69,26 @@ test('Grok lane off skips its broker role and logs once per process', async () =
       && entry.reason === 'grok-reviewer-lane-disabled'));
   }
   assert.equal(warnings.filter((message) => message.includes('grok-reviewer-lane-disabled')).length, 1);
+});
+
+test('test reset restores disabled-lane and disabled-broker warnings without changing tick deduplication', async () => {
+  for (let episode = 0; episode < 2; episode += 1) {
+    _resetReviewerTokenRefreshClockForTest();
+    const warnings = [];
+    const opts = {
+      env: {},
+      laneEnabledImpl: () => false,
+      log: { warn: (message) => warnings.push(message) },
+      fetchImpl: async () => { assert.fail('disabled roles must not fetch'); },
+    };
+    await refreshReviewerBrokerTokens(opts);
+    await refreshReviewerBrokerTokens(opts);
+    assert.equal(warnings.filter((message) => message.includes('grok-reviewer-lane-disabled')).length, 1);
+    for (const { role, flag } of BROKER_REVIEWER_ROLES) {
+      if (role === 'grok-reviewer') continue;
+      assert.equal(warnings.filter((message) => message.includes(flag)).length, 1, role);
+    }
+  }
 });
 
 test('Grok lane on refreshes and renews its token; failures preserve other reviewer refreshes', async () => {
@@ -1072,7 +1093,10 @@ test('REVTOKENFLOOR-01: under a high load multiplier a fresh 60-minute token is 
   const env = makeEnv();
   const t0 = 20_000_000;
   const warnings = [];
-  const log = { warn: (message) => warnings.push(message) };
+  // Other roles emit their own disabled warnings after each test reset.
+  const log = { warn: (message) => {
+    if (message.includes('GH_CLAUDE_REVIEWER_TOKEN')) warnings.push(message);
+  } };
   let curNow = t0;
   let calls = 0;
   const mint = freshHourToken('ghs_fresh_hour');
@@ -1275,7 +1299,9 @@ test('REVTOKENFLOOR-01: under normal load the floor and schedule are unchanged',
   const mint = freshHourToken('ghs_fresh_hour');
   const fetchImpl = async () => { calls += 1; return mint(curNow); };
   const opts = {
-    env, fetchImpl, readFileImpl: readSecret, log: { warn: (m) => warnings.push(m) }, reviewerRunTimeoutMs: NORMAL_LOAD_RUN_MS,
+    env, fetchImpl, readFileImpl: readSecret, log: { warn: (message) => {
+      if (message.includes('GH_CLAUDE_REVIEWER_TOKEN')) warnings.push(message);
+    } }, reviewerRunTimeoutMs: NORMAL_LOAD_RUN_MS,
   };
   const floorMs = NORMAL_LOAD_RUN_MS + REVIEWER_TOKEN_POST_SLACK_MS;
 

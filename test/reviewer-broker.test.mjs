@@ -392,13 +392,47 @@ node -e 'console.log(JSON.stringify({continued:true,token:process.env.GH_GROK_RE
           if (!master || !reviewer) {
             assert.equal(existsSync(calls), false);
             assert.equal(out.split('grok-reviewer-lane-disabled').length - 1, 1);
-            assert.equal(result.token, 'synthetic-inherited-token');
+            assert.equal(result.token, undefined);
           } else {
             assert.equal(existsSync(calls), true);
             if (fail) assert.match(out, /WARN: GH_GROK_REVIEWER_TOKEN not resolved/);
             assert.equal(result.token, fail ? undefined : 'synthetic-grok-token');
           }
         }
+      }
+    }
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('Grok startup seed defaults missing or empty watcher directory to the current checkout', () => {
+  const root = mkdtempSync(join(tmpdir(), 'grok-seed-directory-'));
+  try {
+    const config = join(root, 'config.yaml');
+    writeFileSync(config, JSON.stringify({ version: 1, grok: { enabled: true, reviewer: { enabled: true } } }));
+    for (const shell of ['/bin/bash', ...(ZSH_AVAILABLE ? [ZSH_PATH] : [])]) {
+      for (const invocation of ['seed_grok_reviewer_token', 'seed_grok_reviewer_token ""']) {
+        const out = execFileSync(shell, ['-c', `set -eu
+source "$TEST_HELPER"
+resolve_reviewer_token_via_broker() {
+  export GH_GROK_REVIEWER_TOKEN=synthetic-seeded-token
+}
+${invocation}
+node -e 'console.log(process.env.GH_GROK_REVIEWER_TOKEN)'
+`], {
+          cwd: join(SCRIPTS_DIR, '..'),
+          encoding: 'utf8',
+          env: {
+            ...process.env,
+            TEST_HELPER: HELPER,
+            AGENT_OS_CONFIG_PATH: config, AGENT_OS_CFG_MODULES: '',
+            AGENT_OS_GROK_ENABLED: 'true', AGENT_OS_GROK_REVIEWER_ENABLED: 'true',
+            GROK_REVIEWER_AUTH_VIA_BROKER: 'true',
+            GH_GROK_REVIEWER_TOKEN: 'synthetic-inherited-token',
+          },
+        });
+        assert.equal(out.trim(), 'synthetic-seeded-token', `${shell}: ${invocation}`);
       }
     }
   } finally {

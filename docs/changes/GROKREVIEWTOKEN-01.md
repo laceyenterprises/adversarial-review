@@ -5,6 +5,9 @@
 Seed and refresh the Grok reviewer's GitHub App token through the OAuth broker
 when both Grok lane switches are enabled. Disabled lanes skip broker requests;
 Grok startup failure warns and continues without posting authority.
+Final remediation clears inherited tokens even when the lane is disabled,
+defaults omitted/empty seed directories to the current checkout, and resets
+refresh warning deduplication state between tests.
 
 ## Interface changes
 
@@ -36,3 +39,15 @@ All test commands ran offline through the bounded worker validation runner.
   `ci-old-reply` fixture. Its checkout guard also detected a rate-limit binding
   written by an overlapping direct test run. The claim-loop suite was rerun
   without overlapping tests and passed; the full suite is not claimed green.
+
+Final comment-only remediation validation after rebasing onto current main:
+
+- `node --test --test-concurrency=1 test/reviewer-broker.test.mjs test/reviewer-broker-refresh.test.mjs`:
+  passed, including Bash/zsh inherited-token cleanup, missing/empty directory
+  fallback, and warning reset/deduplication regressions.
+- `npm run lint`: passed with zero errors and 149 existing warnings.
+- `npm run typecheck:contracts` and
+  `bash demo/research-finding-walkthrough.sh`: passed.
+- `shellcheck scripts/lib/reviewer-broker.sh`, `bash -n scripts/lib/reviewer-broker.sh`,
+  `zsh -n scripts/lib/reviewer-broker.sh`, and `git diff --check`: passed.
+- Full-suite execution is deferred to PR-head CI for this final round.

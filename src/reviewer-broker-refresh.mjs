@@ -141,6 +141,8 @@ const warnedLaneDisabled = new Set();
 const warnedHandoffShortfall = new Set();
 export function _resetReviewerTokenRefreshClockForTest() {
   refreshClock.clear();
+  warnedBrokerModeDisabled.clear();
+  warnedLaneDisabled.clear();
   warnedHandoffShortfall.clear();
 }
 

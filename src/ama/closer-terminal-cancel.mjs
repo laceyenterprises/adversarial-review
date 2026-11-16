@@ -203,9 +203,9 @@ export async function cancelCloserForTerminalPr({
   const observedLaunchId = closerLaunchId(lease, dispatch);
   const launchRequestId = targetLaunchRequestId || observedLaunchId;
   if (!held && !launchRequestId) return { cancelled: false, reason: 'no-live-closer' };
-  const pendingAgeMs = Date.parse(now) - Date.parse(lease?.acquiredAt || lease?.updatedAt);
+  const pendingAgeMs = lease ? Date.parse(now) - Date.parse(lease.acquiredAt || lease.updatedAt) : 0;
   let observedStatus = null;
-  if (!launchRequestId && lease.status === 'pending' && pendingAgeMs >= amaCloserPendingLeaseExpiryMs(lease.dispatchTimeoutMs)) {
+  if (!launchRequestId && lease?.status === 'pending' && pendingAgeMs >= amaCloserPendingLeaseExpiryMs(lease?.dispatchTimeoutMs)) {
     deleteAmaCloserLease(rootDir, { repo, prNumber, headSha });
     return { cancelled: false, outcome: 'pr-closed-externally', reason: 'orphaned-pending-lease-deleted' };
   } else if (!launchRequestId) {

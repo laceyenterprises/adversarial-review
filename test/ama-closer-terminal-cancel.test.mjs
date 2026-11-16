@@ -373,6 +373,30 @@ test('closed-PR cancel retries the original HQ launch after the reaper retires i
   assert.equal(readAmaCloserLease(rootDir, identity).terminalOutcome, 'pr-closed-externally');
 });
 
+test('a queued launch ID cancels at HQ after the local lease is deleted', async (t) => {
+  const { rootDir, identity } = fixture(t);
+  queueCloserCancelForClosedPr({ rootDir, repo: identity.repo, prNumber: identity.prNumber });
+  rmSync(join(rootDir, 'data', 'ama-closer-leases', 'o__r-pr-7-abc.json'));
+  assert.equal(readAmaCloserLease(rootDir, identity), null);
+  let calls = 0;
+  await retryPendingCloserCancels({
+    rootDir,
+    liveStateImpl: async () => ({ state: 'CLOSED', headRefOid: identity.headSha }),
+    cancelImpl: (args) => cancelCloserForTerminalPr({
+      ...args, hqPath: 'hq', hqRoot: rootDir,
+      execFileImpl: async (_bin, argv) => {
+        calls += 1;
+        assert.deepEqual(argv, ['dispatch', 'cancel', 'lrq_7', '--reason', 'obsolete-closer-pr-closed']);
+        return { stdout: '{"ok":true,"currentStatus":"canceled"}' };
+      },
+      logger: { log() {} },
+    }),
+  });
+  assert.equal(calls, 1);
+  assert.equal(existsSync(join(rootDir, 'data', 'ama-closer-cancels', 'o__r-pr-7.json')), false);
+  assert.equal(readAmaCloserLease(rootDir, identity), null);
+});
+
 test('a queued launch ID fences a same-head replacement', async (t) => {
   const { rootDir, identity, dispatchPath } = fixture(t);
   const queued = queueCloserCancelForClosedPr({ rootDir, repo: identity.repo, prNumber: identity.prNumber });

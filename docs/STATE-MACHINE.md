@@ -955,13 +955,16 @@ new PR
   Settlement records the existing PR-level cascade backoff and releases the
   matching session to `pending` without charging review or infra recovery
   attempts while `consecutiveTransientFailures < CASCADE_FAILURE_CAP` (five).
-  At that threshold, or before terminal cap handling, a fresh resolver probe
-  releases a healthy resolver claim without charging either budget and resets
-  the resolution streak. Failed probes retain bounded `pending-upstream`
-  recovery. Resolution backoff uses the shared load-aware multiplier; a
-  changed failure class or a gap over one hour starts a fresh streak.
-  Legacy terminal resolution rows receive a fresh probe after backoff; a
-  healthy result re-queues the exact observed row without changing its budgets.
+  Settlement performs no resolver probe: it records the failure and applies
+  ordinary bounded escalation at the five-failure threshold. After durable
+  backoff, the poll path asynchronously probes every terminal or
+  pending-upstream resolution row before cap handling or a charged recovery
+  claim. A healthy probe re-queues only the exact observed row, resets the
+  streak and schedules the initial load-aware hold without incrementing failure
+  breakdowns or overwriting the last failure evidence. A failed probe schedules
+  another load-aware hold without counting a new reviewer failure. Resolution
+  backoff scales with host load; a changed failure class or a gap over one hour
+  starts a fresh streak.
   It never isolates the identity or records a credential outage; route selection
   does not select an auth fallback for it. Health reports its own failure class.
 - Fresh transient reviewer failures (`cascade`, PR-local `oauth-broken`,

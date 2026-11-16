@@ -71,11 +71,16 @@ still runs.
 breakdown maps. It represents executable-resolution infrastructure failure,
 independent of OAuth. Below the existing five-consecutive-transient threshold,
 settlement releases the matching reviewer claim to `pending` without charging
-attempts; the durable backoff still gates the next claim. At the threshold or
-before terminal cap handling, a fresh healthy resolver probe resets the streak
-and releases the matching claim without charging either budget. Failed probes
-retain ordinary bounded `pending-upstream` infrastructure recovery. A healthy
-probe of a legacy failed row re-queues only the exact observed failure. This class
+attempts; the durable backoff still gates the next claim. Settlement performs no
+resolver probe: it records the failure and applies ordinary bounded escalation
+at the five-failure threshold. After durable backoff, the poll path
+asynchronously probes every terminal or pending-upstream resolution row before
+cap handling or a charged recovery claim. A healthy probe re-queues only the
+exact observed row, resets the streak and schedules the initial load-aware hold
+without incrementing failure breakdowns or overwriting the last failure
+evidence. A failed probe schedules another load-aware hold without counting a
+new reviewer failure. Resolution backoff scales with host load; a changed
+failure class or a gap over one hour starts a fresh streak. This class
 never writes reviewer credential-outage state or isolates the reviewer seat.
 
 ## Mixed-State Semantics

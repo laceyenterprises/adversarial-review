@@ -30,3 +30,30 @@ per-command timeout), using synthetic offline fixtures:
 The ticket requested scoped tests; the whole test suite was not run manually.
 The initial memory search returned no records; the follow-up search after
 Phase 0 timed out, so local runbooks supplied the remaining evidence.
+
+## Review remediation
+
+Settlement performs no resolver probe: it records the failure and applies
+ordinary bounded escalation at the five-failure threshold. After durable
+backoff, the poll path asynchronously probes every terminal or pending-upstream
+resolution row before cap handling or a charged recovery claim. A healthy probe
+re-queues only the exact observed row, resets the streak and schedules the
+initial load-aware hold without incrementing failure breakdowns or overwriting
+the last failure evidence. A failed probe schedules another load-aware hold
+without counting a new reviewer failure. Resolution backoff scales with host
+load; a changed failure class or a gap over one hour starts a fresh streak.
+
+Targeted recovery, resolver, cascade and claim-loop fixtures verify settlement,
+accounting preservation and failed-probe scheduling. The reviewer's environment
+divergence concern remains unconfirmed; per-spawn environment parity is not
+changed in this patch.
+
+Remediation checks: `npm test -- review-cli-recovery.test.mjs` passed all seven
+cases; lint (zero errors), contract typechecking, data-model catalog validation
+(98 entries), the byte-equivalence demo and `git diff --check` passed. Missing
+locked dependencies were installed with `npm ci`; stale cascade module stubs
+were updated for the dedicated probe writer. The first watcher fixture run
+reached its 240-second deadline without assertion failures and was rerun with
+the documented 900-second allowance.
+
+`npm test -- watcher-claim-loop.test.mjs watcher-fast-merge.test.mjs github-api.test.mjs watcher-reviewer-timeout-handoff.test.mjs`: 317 passed, zero failed.

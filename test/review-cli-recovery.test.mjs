@@ -36,9 +36,15 @@ test('exit code one is distinct from a timeout diagnostic', async () => {
 
 test('healthy re-probe re-queues at an exhausted cap without charging either budget', async t => {
   const f = fixture(t);
+  const before = recordCascadeFailure(f.rootDir, { repo: 'example/project', prNumber: 7,
+    failureClass: 'cli-resolution-transient', failureReason: 'original failure', reviewerModel: 'gemini' });
   assert.equal(await recoverHealthyReviewCli({ ...f, row: f.get(), log: quiet,
     resolveImpl: async cli => { assert.equal(cli, 'gemini'); return { status: 'resolved' }; },
   }), true);
+  const after = readCascadeState(f.rootDir, { repo: 'example/project', prNumber: 7 });
+  for (const key of ['transientFailureBreakdown', 'transientFailureBreakdownByModel', 'lastFailureClass', 'lastFailureReason', 'lastFailureAt']) {
+    assert.deepEqual(after[key], before[key], key);
+  }
   assert.equal(f.get().review_status, 'pending');
   assert.equal(f.get().infra_auto_recover_attempts, 4);
   assert.equal(f.get().review_attempts, 0);
@@ -52,6 +58,9 @@ test('failed probe retains terminal evidence; stale healthy probe cannot replace
     resolveImpl: async () => { throw new Error('synthetic persistent failure'); },
   }), false);
   assert.deepEqual(f.get(), row);
+  const hold = readCascadeState(f.rootDir, { repo: row.repo, prNumber: row.pr_number });
+  assert.ok(Date.parse(hold.nextRetryAfter) > Date.now());
+  assert.equal(hold.transientFailureBreakdown, undefined);
   await recoverHealthyReviewCli({ ...f, row, log: quiet, resolveImpl: async () => {
     f.db.prepare("UPDATE reviewed_prs SET review_status = 'reviewing', reviewer_session_uuid = 'replacement'").run();
     return { status: 'resolved' };
@@ -60,8 +69,18 @@ test('failed probe retains terminal evidence; stale healthy probe cannot replace
   assert.equal(f.get().review_status, 'reviewing');
 });
 
-for (const [healthy, attempts] of [[false, 0], [true, 4], [false, 4]]) {
-  test(`settlement at threshold with resolver healthy=${healthy}, budget=${attempts}`, t => {
+test('stale failed probe cannot delay a replacement claim', async t => {
+  const f = fixture(t);
+  const row = f.get();
+  await recoverHealthyReviewCli({ ...f, row, log: quiet, resolveImpl: async () => {
+    f.db.prepare("UPDATE reviewed_prs SET review_status = 'reviewing', reviewer_session_uuid = 'replacement'").run();
+    throw new Error('synthetic late failure');
+  } });
+  assert.equal(readCascadeState(f.rootDir, { repo: row.repo, prNumber: row.pr_number }), null);
+});
+
+for (const attempts of [0, 4]) {
+  test(`settlement at threshold does not probe synchronously, budget=${attempts}`, t => {
     const f = fixture(t, attempts);
     const failureAt = new Date().toISOString();
     for (let i = 1; i < CASCADE_FAILURE_CAP; i++) recordCascadeFailure(f.rootDir, {
@@ -72,7 +91,7 @@ for (const [healthy, attempts] of [[false, 0], [true, 4], [false, 4]]) {
     settleReviewerAttempt({ rootDir: f.rootDir, repoPath: 'example/project', prNumber: 7,
       reviewerModel: 'gemini', reviewerHeadSha: 'synthetic-head', reviewerSessionUuid: 'current', failureAt,
       result: { ok: false, failureClass: 'cli-resolution-transient', error: 'synthetic timeout under load' }, log: quiet,
-      resolverHealthyImpl: () => { probes++; return healthy; },
+      resolverHealthyImpl: () => { probes++; return true; },
       statements: {
         getReviewRow: { get: f.get }, releaseReviewerClaim: prepareReleaseReviewerClaim(f.db),
         markPendingUpstream: f.db.prepare(`UPDATE reviewed_prs SET review_status = 'pending-upstream', failed_at = ?,
@@ -81,8 +100,8 @@ for (const [healthy, attempts] of [[false, 0], [true, 4], [false, 4]]) {
           failure_message = ? WHERE repo = ? AND pr_number = ?`),
       },
     });
-    assert.equal(probes, 1);
-    assert.equal(f.get().review_status, healthy ? 'pending' : attempts >= 3 ? 'failed' : 'pending-upstream');
+    assert.equal(probes, 0);
+    assert.equal(f.get().review_status, attempts >= 3 ? 'failed' : 'pending-upstream');
     assert.equal(f.get().infra_auto_recover_attempts, attempts || 1);
     assert.equal(f.get().review_attempts, 0);
   });

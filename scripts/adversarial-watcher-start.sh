@@ -500,7 +500,8 @@ export ADVERSARIAL_WATCHER_POSTED_REVIEW_HANDLER_TIMEOUT_MS
 : "${CLAUDE_REVIEWER_AUTH_VIA_BROKER:=true}"
 : "${CODEX_REVIEWER_AUTH_VIA_BROKER:=true}"
 : "${GEMINI_REVIEWER_AUTH_VIA_BROKER:=true}"
-export CLAUDE_REVIEWER_AUTH_VIA_BROKER CODEX_REVIEWER_AUTH_VIA_BROKER GEMINI_REVIEWER_AUTH_VIA_BROKER
+: "${GROK_REVIEWER_AUTH_VIA_BROKER:=true}"
+export CLAUDE_REVIEWER_AUTH_VIA_BROKER CODEX_REVIEWER_AUTH_VIA_BROKER GEMINI_REVIEWER_AUTH_VIA_BROKER GROK_REVIEWER_AUTH_VIA_BROKER
 
 broker_fail_closed_exit() {
   local flag_name="$1"
@@ -532,6 +533,9 @@ _try_resolve_reviewer_pat() {
   fi
   return 1
 }
+
+# Optional Grok reviewer authority never blocks startup.
+seed_grok_reviewer_token "$WATCHER_DIR"
 
 if reviewer_broker_mode_enabled "claude-reviewer"; then
   if ! resolve_reviewer_token_via_broker GH_CLAUDE_REVIEWER_TOKEN claude-reviewer; then

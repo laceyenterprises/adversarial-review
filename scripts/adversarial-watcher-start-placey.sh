@@ -237,6 +237,11 @@ resolve_and_export_required_op_secret LINEAR_API_KEY 'op://mem423y7ewrymvxv4ibh3
 
 # Reviewer tokens via broker (default-off, fails closed in broker mode).
 # See scripts/lib/reviewer-broker.sh for the full contract.
+# Optional Grok reviewer authority is broker-only and never blocks startup.
+: "${GROK_REVIEWER_AUTH_VIA_BROKER:=true}"
+export GROK_REVIEWER_AUTH_VIA_BROKER
+seed_grok_reviewer_token "$WATCHER_DIR"
+
 if reviewer_broker_mode_enabled "claude-reviewer"; then
   if ! resolve_reviewer_token_via_broker GH_CLAUDE_REVIEWER_TOKEN claude-reviewer; then
     echo "[adversarial-watcher] ERROR: CLAUDE_REVIEWER_AUTH_VIA_BROKER=true but broker fetch failed; refusing to fall back to op-read PAT path. Unset the flag to roll back." >&2

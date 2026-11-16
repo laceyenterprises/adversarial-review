@@ -1,5 +1,6 @@
 import { loadAwareTimeoutMs } from './load-aware-timeout.mjs';
 import { registerGitHubInstallationToken } from './rate-limit-throttle.mjs';
+import { grokReviewerLaneEnabled } from './grok-reviewer-lane.mjs';
 // reviewer-broker-refresh.mjs — keep the long-lived watcher's reviewer-bot
 // GitHub App installation tokens fresh.
 //
@@ -80,6 +81,7 @@ export const BROKER_REVIEWER_ROLES = Object.freeze([
   { role: 'claude-reviewer', envVar: 'GH_CLAUDE_REVIEWER_TOKEN', flag: 'CLAUDE_REVIEWER_AUTH_VIA_BROKER' },
   { role: 'codex-reviewer', envVar: 'GH_CODEX_REVIEWER_TOKEN', flag: 'CODEX_REVIEWER_AUTH_VIA_BROKER' },
   { role: 'gemini-reviewer', envVar: 'GH_GEMINI_REVIEWER_TOKEN', flag: 'GEMINI_REVIEWER_AUTH_VIA_BROKER' },
+  { role: 'grok-reviewer', envVar: 'GH_GROK_REVIEWER_TOKEN', flag: 'GROK_REVIEWER_AUTH_VIA_BROKER' },
 ]);
 
 const REVIEWER_ROLE_BY_IDENTITY = Object.freeze({
@@ -92,6 +94,10 @@ const REVIEWER_ROLE_BY_IDENTITY = Object.freeze({
   GH_CLAUDE_REVIEWER_TOKEN: 'claude-reviewer',
   GH_CODEX_REVIEWER_TOKEN: 'codex-reviewer',
   GH_GEMINI_REVIEWER_TOKEN: 'gemini-reviewer',
+  'grok-reviewer': 'grok-reviewer',
+  'grok-reviewer-lacey': 'grok-reviewer',
+  'lacey-grok-reviewer': 'grok-reviewer',
+  GH_GROK_REVIEWER_TOKEN: 'grok-reviewer',
 });
 
 function roleUpper(role) {
@@ -129,6 +135,7 @@ const refreshClock = new Map();
 // Roles already warned about broker-mode-disabled, so the warning is loud once
 // per process instead of once per tick.
 const warnedBrokerModeDisabled = new Set();
+const warnedLaneDisabled = new Set();
 // envVars whose installed token is shorter than a load-scaled reviewer run.
 // Logged once per episode; the entry clears when a token covers the run again.
 const warnedHandoffShortfall = new Set();
@@ -422,6 +429,7 @@ export async function resolveReviewerAppToken(identity, {
 // and leave the prior token in place.
 export async function refreshReviewerBrokerTokens({
   env = process.env,
+  laneEnabledImpl = grokReviewerLaneEnabled,
   now = Date.now(),
   fetchImpl = globalThis.fetch,
   readFileImpl = readFileSync,
@@ -448,6 +456,14 @@ export async function refreshReviewerBrokerTokens({
     failureRetryMs ?? resolvePositiveMsEnv(env.REVIEWER_TOKEN_FAILURE_RETRY_MS, REVIEWER_TOKEN_FAILURE_RETRY_MS);
   const summary = { refreshed: [], skipped: [], failed: [], handoffSafe: [] };
   for (const { role, envVar, flag } of BROKER_REVIEWER_ROLES) {
+    if (role === 'grok-reviewer' && !laneEnabledImpl({ env })) {
+      summary.skipped.push({ role, reason: 'grok-reviewer-lane-disabled' });
+      if (!warnedLaneDisabled.has(role)) {
+        warnedLaneDisabled.add(role);
+        log?.warn?.('[reviewer-broker-refresh] grok-reviewer-lane-disabled; skipping Grok token refresh');
+      }
+      continue;
+    }
     const configFingerprint = brokerConfigFingerprint(brokerConfigForRole({ role, env, flag }));
     if (String(env[flag] || '').trim() !== 'true') {
       summary.skipped.push({ role, reason: 'broker-mode-disabled' });

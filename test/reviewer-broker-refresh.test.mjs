@@ -54,6 +54,74 @@ function brokerOk(provider, accessToken, { expiresAt = null, metadata = {} } = {
 const readSecret = () => 'broker-shared-secret';
 const silentLog = { warn: () => {} };
 
+test('Grok lane off skips its broker role and logs once per process', async () => {
+  const warnings = [];
+  const opts = {
+    env: { GROK_REVIEWER_AUTH_VIA_BROKER: 'true' },
+    laneEnabledImpl: () => false,
+    log: { warn: (message) => warnings.push(message) },
+    fetchImpl: async () => { assert.fail('disabled lane must not fetch'); },
+  };
+  for (let tick = 0; tick < 2; tick += 1) {
+    const summary = await refreshReviewerBrokerTokens(opts);
+    assert.ok(summary.skipped.some((entry) => entry.role === 'grok-reviewer'
+      && entry.reason === 'grok-reviewer-lane-disabled'));
+  }
+  assert.equal(warnings.filter((message) => message.includes('grok-reviewer-lane-disabled')).length, 1);
+});
+
+test('Grok lane on refreshes and renews its token; failures preserve other reviewer refreshes', async () => {
+  for (const fail of [false, true]) {
+    _resetReviewerTokenRefreshClockForTest();
+    const env = { OAUTH_BROKER_SHARED_SECRET_FILE: SECRET_FILE };
+    for (const { flag } of BROKER_REVIEWER_ROLES) env[flag] = 'true';
+    const providers = [];
+    let generation = 0;
+    const opts = {
+      env, laneEnabledImpl: () => true, readFileImpl: readSecret, log: silentLog,
+      minTokenLifetimeMs: 1,
+      fetchImpl: async (url) => {
+        const provider = new URL(url).searchParams.get('provider');
+        providers.push(provider);
+        if (fail && provider === 'github-app-grok-reviewer') {
+          return { ok: false, status: 403 };
+        }
+        return brokerOk(provider, `synthetic-${provider}-${generation}`, {
+          expiresAt: new Date((generation + 1) * HOUR_MS).toISOString(),
+        });
+      },
+    };
+    const first = await refreshReviewerBrokerTokens({ ...opts, now: 0 });
+    assert.equal(first.refreshed.length, fail ? 3 : 4);
+    assert.deepEqual(first.failed.map((entry) => entry.role), fail ? ['grok-reviewer'] : []);
+    assert.equal(providers.filter((provider) => provider === 'github-app-grok-reviewer').length, 1);
+    for (const role of ['CLAUDE', 'CODEX', 'GEMINI']) {
+      assert.ok(env[`GH_${role}_REVIEWER_TOKEN`]);
+    }
+    if (fail) assert.equal(env.GH_GROK_REVIEWER_TOKEN, undefined);
+    else {
+      generation = 1;
+      await refreshReviewerBrokerTokens({ ...opts, now: HOUR_MS });
+      assert.equal(env.GH_GROK_REVIEWER_TOKEN, 'synthetic-github-app-grok-reviewer-1');
+    }
+  }
+});
+
+test('Grok reviewer identity aliases resolve to the broker role', async () => {
+  for (const identity of ['grok-reviewer', 'grok-reviewer-lacey', 'lacey-grok-reviewer', 'GH_GROK_REVIEWER_TOKEN']) {
+    const env = { OAUTH_BROKER_SHARED_SECRET_FILE: SECRET_FILE };
+    const result = await resolveReviewerAppToken(identity, {
+      env, readFileImpl: readSecret,
+      fetchImpl: async (url) => {
+        assert.equal(new URL(url).searchParams.get('provider'), 'github-app-grok-reviewer');
+        return brokerOk('github-app-grok-reviewer', 'synthetic-grok-token');
+      },
+    });
+    assert.equal(result.role, 'grok-reviewer');
+    assert.equal(env.GH_GROK_REVIEWER_TOKEN, 'synthetic-grok-token');
+  }
+});
+
 test('watcher broker binds only positively identified installation tokens with both matching pins', async () => {
   for (const [source, pinned, bound] of [
     ['github_pat_fallback', true, false],
@@ -796,9 +864,9 @@ test('an invalid env knob falls back to the built-in default (does not disable t
   assert.equal(env.GH_CLAUDE_REVIEWER_TOKEN, 'ghs_25m'); // accepted under the fallback default
 });
 
-test('role table covers the three reviewer families', () => {
+test('role table covers the four reviewer families', () => {
   const roles = BROKER_REVIEWER_ROLES.map((r) => r.role).sort();
-  assert.deepEqual(roles, ['claude-reviewer', 'codex-reviewer', 'gemini-reviewer']);
+  assert.deepEqual(roles, ['claude-reviewer', 'codex-reviewer', 'gemini-reviewer', 'grok-reviewer']);
 });
 
 test('gemini-reviewer role registers the canonical GH_GEMINI_REVIEWER_TOKEN env var and flag', () => {

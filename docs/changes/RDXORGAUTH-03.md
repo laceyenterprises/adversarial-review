@@ -55,3 +55,32 @@ with two files at a time, each command bounded to 600 seconds.
 
 The full `npm test` suite was not run, as requested. No SQL, dependency, CI,
 host configuration, registration or merge-authority changes were made.
+
+## Final comment-only remediation
+
+Await asynchronous auth providers in the Octokit before-hook fallback, preserve
+merge adapter auth arguments for every owner, normalize owner remint failures
+through the existing CLI auth-outage error, exclude bare non-repository API
+namespaces from routing, and accept case-insensitive broker owner echoes while
+retaining App and installation verification. Replace the routing-disable
+preload with a real per-worker no-org configuration for legacy test transports.
+
+The service-role concern is accounted for without trusting ambient startup
+seeds: production `refreshWatcherGithubToken` calls the broker fetch that records
+the returned token's role before polling. An offline regression exercises that
+actual refresh, then routed Octokit, adapter and CLI requests without manually
+registering the refreshed token. Canonical standup and incident documentation
+now describe this boundary and owner casing. No persistent store, lifecycle,
+merge eligibility or smoke promise changes.
+
+Validation: the three directly affected regression files passed (39 tests).
+The remaining 17 targeted transport, broker, claim-loop, runner and previously
+failing PR-CI fixture files also passed after fixture repairs (501 distinct
+targeted tests in total). CLI fixtures preserve symlink module identity and
+supply their own config and runtime inputs; claim-loop fixtures explicitly
+separate discovery's home org from authentication routing.
+
+`npm run lint` passed with zero errors and 149 existing warnings;
+`npm run typecheck:contracts`, `bash demo/research-finding-walkthrough.sh`
+(three byte-stable deliveries), and `git diff --check` passed. No full local
+suite was run; PR-head CI remains the full-suite merge gate.

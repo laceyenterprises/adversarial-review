@@ -4,7 +4,7 @@ import assert from 'node:assert/strict';
 import { Octokit } from '@octokit/rest';
 import { createGithubOwnerTokenSelector, githubOwnerTokens, githubTargetOwner,
   githubTokenForTarget, githubTokenRole, githubEnvForTarget, recordGithubToken } from '../src/github-owner-token.mjs';
-import { fetchReviewerTokenFromBroker, resolveReviewerAppToken } from '../src/reviewer-broker-refresh.mjs';
+import { fetchReviewerTokenFromBroker, resolveReviewerAppToken, refreshWatcherGithubToken } from '../src/reviewer-broker-refresh.mjs';
 import { createWatcherOctokit } from '../src/conditional-request.mjs';
 import { meteredExecFile, meteredExecFileSync } from '../src/metered-gh.mjs';
 import { execGhWithRetry } from '../src/gh-cli.mjs';
@@ -82,6 +82,14 @@ test('broker rejects missing/wrong owner echo, wrong owner pin, wrong App/provid
   }
 });
 
+test('broker accepts canonical owner casing while retaining installation pins', async () => {
+  const body = response({ metadata: { ...response().metadata, owner: 'Other-Org' } });
+  assert.equal((await fetchReviewerTokenFromBroker(brokerOptions(body).options)).token, 'owner-token');
+  await assert.rejects(fetchReviewerTokenFromBroker(brokerOptions({
+    ...body, metadata: { ...body.metadata, installation_id: '9999' },
+  }).options), /installation_id/);
+});
+
 test('home broker URL, pins, token and resolveReviewerAppToken environment stay identical', async () => {
   const env = { ...brokerEnv };
   const body = response({ access_token: 'home-token', metadata: { app_id: '1001', installation_id: '1001' } });
@@ -103,10 +111,22 @@ test('owner parsing uses repository targets, including GraphQL repo variables, n
     ['api', 'repos/Other-Org/x/pulls/1'], ['pr', 'view', 'https://github.com/Other-Org/x/pull/1'],
     ['api', 'graphql', '-f', 'owner=Other-Org', '-f', 'repo=x']]) assert.equal(githubTargetOwner(target), 'other-org');
   for (const target of [undefined, '/graphql', '/orgs/home-org/repos', 'https://api.github.com/orgs/home-org/repos',
+    'orgs/other-org/repos', 'users/octocat/repos', 'gists/public', 'graphql', 'teams/1/repos',
+    'licenses/mit', 'emojis', 'meta', 'rate_limit',
     ['pr', 'view', '1', '--body', 'Other-Org/x'], ['pr', 'comment', '1', '--body', 'https://github.com/Other-Org/x'],
     ['pr', 'view', '--label', 'repos/Other-Org/x'],
     ['pr', 'comment', '1', '-b', 'https://github.com/Other-Org/x'], ['pr', 'view', '-l', 'repos/Other-Org/x'], ['api', 'graphql', '-f', 'branch=Other-Org/x'],
     { body: 'Other-Org/x', labels: ['Other-Org/x'] }]) assert.equal(githubTargetOwner(target), null);
+  assert.equal(githubTargetOwner('/repos/users/x'), 'users');
+  assert.equal(githubTargetOwner('https://github.com/orgs/x'), 'orgs');
+});
+
+test('relative non-repository API routes preserve the home token without minting', async () => {
+  const { calls } = install();
+  for (const target of ['orgs/other-org/repos', 'users/octocat/repos', 'gists/public']) {
+    assert.equal(await githubTokenForTarget({ token: 'home-token', target }), 'home-token');
+  }
+  assert.equal(calls.length, 0);
 });
 
 test('home, unknown and no-org selections preserve token and exact environment with no mint', async () => {
@@ -145,6 +165,40 @@ test('roles follow minted tokens or reviewer envs, never a service startup seed 
   const { selector } = install({ readHomeOwner: () => { throw new Error('unreadable'); } });
   await assert.rejects(selector.select({ token: 'pat', target: 'other-org/x' }), outage);
   assert.equal(await selector.select({ token: 'pat', target: '/graphql' }), 'pat');
+});
+
+test('production watcher refresh registers service roles before routed Octokit, adapter and CLI calls', async () => {
+  const env = { ...brokerEnv, GH_TOKEN: 'unregistered-startup-seed', GITHUB_TOKEN: 'unregistered-startup-seed',
+    GHO_API_CALL_LOG_DISABLE: '1', GHO_RATE_LIMIT_SHARED_STATE_PATH: process.env.GHO_RATE_LIMIT_SHARED_STATE_PATH,
+    WATCHER_GH_AUTH_VIA_BROKER: 'true', WATCHER_GH_BROKER_ROLE: 'merge-agent',
+    OAUTH_BROKER_MERGE_AGENT_EXPECTED_APP_ID: '1001', OAUTH_BROKER_MERGE_AGENT_EXPECTED_INSTALLATION_ID: '1001',
+    GHA_ADAPTER_BIN: 'fixture-adapter' };
+  assert.equal(githubTokenRole(env.GITHUB_TOKEN, env), undefined);
+  const result = await refreshWatcherGithubToken({ env, force: true, log: quiet,
+    readFileImpl: () => 'synthetic-secret', fetchImpl: async () => ok(response({
+      provider: 'github-app-merge-agent', access_token: 'production-refreshed-service',
+      metadata: { app_id: '1001', installation_id: '1001' },
+    })) });
+  assert.equal(result.refreshed, true);
+  assert.equal(githubTokenRole(env.GITHUB_TOKEN, env), 'merge-agent');
+  let requests = 0;
+  const client = createWatcherOctokit({
+    authProvider: options => githubTokenForTarget({ token: env.GITHUB_TOKEN, target: options, env }),
+    octokitFactory: options => new Octokit({ ...options, request: { fetch: async (_url, options) => {
+      assert.equal(options.headers.authorization, 'token merge-agent@other-org-1');
+      requests++;
+      return new Response('{}', { status: 200, headers: { 'content-type': 'application/json' } });
+    } } }),
+  });
+  await client.request('GET /repos/other-org/x/pulls');
+  const execFileImpl = async (_cmd, _args, options) => {
+    assert.equal(options.env.GH_TOKEN, 'merge-agent@other-org-1');
+    requests++;
+    return { stdout: '{"ok":true}', stderr: '' };
+  };
+  await adapter.runGitHubAdapter('pull-request', { repo: 'other-org/x', prNumber: 1 }, { execFileImpl, env });
+  await execGhWithRetry({ env, args: ['pr', 'view', '1', '-R', 'other-org/x'], execFileImpl, log: quiet });
+  assert.equal(requests, 3);
 });
 
 test('Octokit pins owner token in request hook and preserves home/org requests', async () => {
@@ -216,6 +270,40 @@ test('gh auth rejection invalidates and existing one-shot retry forces a fresh o
   });
   assert.deepEqual(tokens, ['merge-agent@other-org-1', 'merge-agent@other-org-2']);
   assert.equal(calls[1].force, true); assert.equal(env.GH_TOKEN, 'home-service');
+});
+
+test('gh owner remint failure retains structured authentication outage diagnostics', async () => {
+  let mints = 0, executions = 0;
+  install({ mint: async () => {
+    if (++mints > 1) throw new Error('broker unreachable');
+    return { token: 'owner-rejected', expiresAtMs: Date.now() + 3600_000 };
+  } });
+  await assert.rejects(execGhWithRetry({
+    env: serviceEnv(), args: ['pr', 'view', '1', '-R', 'other-org/x'], log: quiet,
+    execFileImpl: async () => {
+      executions++;
+      throw Object.assign(new Error('Bad credentials (HTTP 401)'), { stderr: 'HTTP 401' });
+    },
+  }), err => {
+    assert.equal(err.name, 'GithubAuthOutageError');
+    assert.equal(err.failureClass, 'github-auth-outage');
+    assert.equal(err.remintAttempted, false);
+    assert.match(err.remintDetail, /re-mint threw:.*github-owner-token-unavailable/);
+    assert.match(err.cause.message, /Bad credentials/);
+    return true;
+  });
+  assert.equal(executions, 1);
+  assert.equal(mints, 2);
+});
+
+test('merge writes preserve adapter auth arguments for both home and routed repositories', () => {
+  for (const repo of ['home-org/x', 'other-org/x']) {
+    const args = adapter.makeAdapterWriteArgs('pull-request-merge', { repo, prNumber: 1 },
+      { ...serviceEnv(), WATCHER_GH_AUTH_VIA_BROKER: 'true' });
+    assert.ok(!args.includes('--auth'));
+    assert.ok(!args.includes('--auth-mode'));
+    assert.ok(!args.includes('--pat-env'));
+  }
 });
 
 test('adapter reviewer write and service read use owner env, refuse absent tokens and preserve home', async () => {

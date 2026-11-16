@@ -17,12 +17,16 @@ allowlist to edit.
 The home owner is the lowercased `org` in `config.json`, read once per process.
 Without an `org`, owner routing is disabled. Home-owner and unknown-owner
 requests keep their existing URLs, pins, environment contents and tokens.
+Non-repository API routes, including bare `orgs/<org>/repos`,
+`users/<login>/repos` and `gists/public`, do not select repository authority.
+Use explicit `repos/<owner>/<repo>` API paths or GitHub repository URLs when
+an owner name matches an API namespace.
 
 A second org needs the corresponding GitHub App installation in the broker's
 owner map, managed outside this repository. Optionally configure
 `OAUTH_BROKER_<ROLE>_EXPECTED_INSTALLATIONS` in the host environment as
 comma-separated `owner:installation_id` pins. Store no deployment values here.
-Owner responses must echo the requested owner, match the App pin and any
+Owner responses must echo the requested owner (case-insensitively), match the App pin and any
 configured owner installation pin, and must never be PAT fallbacks. The home
 installation pin does not apply to an owner response.
 
@@ -38,6 +42,15 @@ token. No home token or PAT is sent instead. Adapter broker mode for a routed
 owner is refused until that separate transport supports owner routing; the
 adapter's environment-token mode uses the selected owner token. Managed hammer
 sessions and remediation git credentials remain separate follow-up work.
+Merge adapter commands retain their existing auth arguments and ambient-attempt
+plus `gh --admin` fallback; service auth arguments are not injected for merges.
+
+Before polling, the watcher's broker refresh records the minted service token's
+role (default `merge-agent`, or `WATCHER_GH_BROKER_ROLE`). That provenance
+authorizes subsequent owner mints. The shell startup seed alone has no Node
+provenance; if refresh fails, it cannot acquire cross-org authority simply by
+matching `GITHUB_TOKEN` or `GH_TOKEN`. Home traffic retains the existing
+fail-safe refresh behavior.
 
 ## 2. Initialize the canonical labels — REQUIRED, not cosmetic
 

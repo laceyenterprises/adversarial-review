@@ -457,8 +457,8 @@ function appendReviewerAuthAdapterArgs(args, reviewerLogin, env = {}, repo) {
 // `gh --admin` fallback path untouched.
 function appendMergeAgentServiceAuthAdapterArgs(args, kind, params = {}, env = {}) {
   if (params.reviewerLogin) return args;
+  if (kind === 'pull-request-merge') return args;
   const routed = githubOwnerTokens.routedOwner(params.repo);
-  if (kind === 'pull-request-merge' && !routed) return args;
   if (!routed && String(env?.WATCHER_GH_AUTH_VIA_BROKER || '').trim().toLowerCase() !== 'true') return args;
   const hasServiceToken = Boolean(
     String(env?.GITHUB_TOKEN || '').trim() || String(env?.GH_TOKEN || '').trim()

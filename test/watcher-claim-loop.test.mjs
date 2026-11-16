@@ -14,6 +14,17 @@ import { hammerRetryCapFilePath } from '../src/ama/hammer-retry-cap.mjs';
 
 const REPO_ROOT = path.resolve(new URL('..', import.meta.url).pathname);
 const SUMMARY_MARKER = '@@WATCHER_CLAIM_LOOP_SUMMARY@@';
+// Claim-loop discovery needs a home org; auth routing is a separate fixture
+// seam below. The runner owns this config copy, never the checkout's file.
+assert.ok(REPO_ROOT.startsWith(process.env.ADVERSARIAL_REVIEW_TEST_SANDBOX_ROOT + path.sep));
+const claimConfigPath = path.join(REPO_ROOT, 'config.json');
+writeFileSync(claimConfigPath, JSON.stringify({
+  ...JSON.parse(readFileSync(claimConfigPath, 'utf8')), org: 'laceyenterprises',
+}));
+const ownerRoutingFixtureSource = `
+import { githubOwnerTokens, createGithubOwnerTokenSelector } from ${JSON.stringify(new URL('../src/github-owner-token.mjs', import.meta.url).href)};
+Object.assign(githubOwnerTokens, createGithubOwnerTokenSelector({ readHomeOwner: () => null }));
+`;
 
 test('GROKREVIEWMODE-01 Gemini spawn retry preserves row quota fallback before AFH', () => {
   const tmp = mkdtempSync(path.join(tmpdir(), 'watcher-grok-quota-retry-'));
@@ -578,7 +589,7 @@ export async function load(url, context, nextLoad) {
     'fixture:reviewer-cascade': "export const CASCADE_FAILURE_CAP = 3; export function classifyReviewerFailure() { return 'unknown'; } export function clearCascadeState() {} export function clearReviewerCredentialOutage() { return null; } export function formatTransientFailureBreakdown() { return ''; } export function hasOperatorDecisionRequiredAlerted() { return false; } export function isReviewerSubprocessTimeout() { return false; } export function markCascadeCapExhaustedAlerted() { return { marked: true, state: {} }; } export function markOperatorDecisionRequiredAlerted() { return { marked: true, state: {} }; } export function readCascadeState() { return null; } export function recordReviewerBudgetDeferral() {} export function recordCascadeFailure() { return { consecutiveTransientFailures: 1, transientFailureBreakdown: {}, backoffMinutes: 1 }; } export function recordReviewerCredentialFailure() { return { active: false }; } export function recordTokenRefreshHold() { return { tokenRefreshHold: {} }; } export function shouldBackoffReviewerSpawn() { return { shouldBackoff: false }; } export function releaseReviewerCredentialProbe() { return false; } export function shouldPauseReviewerModel() { return { paused: false }; }",
     'fixture:reviewer-reattach': "export function makeReviewPostedProbe() { return async () => null; } export function reviewerBotLogin(reviewer) { return reviewer ? 'codex-reviewer-lacey' : null; } export function probeReviewerSession() { return { alive: false, matched: false }; } export async function reconcileReviewerSessions() { return { reconciled: 0, skipped: 0 }; }",
     'fixture:reviewer-timeout': "export const REVIEWER_PROCESS_SLACK_MS = 300000; export function resolveNominalReviewerTimeoutMs() { return 300000; } export function resolveReviewerTimeoutMs() { return 300000; } export function resolveProgressTimeoutMs() { return 300000; } export function resolveAgyReviewerSubprocessTimeoutMs() { return 300000; } export function resolveGeminiReviewerProcessTimeoutMs() { return 300000; } export function resolveAgyPrintTimeoutMs() { return 1140000; }",
-    'fixture:reviewer-broker-refresh': "globalThis.__watcherClaimLoopBrokerRefreshes = 0; export async function refreshReviewerBrokerTokens() { globalThis.__watcherClaimLoopBrokerRefreshes += 1; return { refreshed: 0, failed: 0, skipped: 3 }; } export async function refreshWatcherGithubToken() { return { refreshed: false, reason: 'fixture' }; } export function resolveWatcherGhBrokerRole() { return 'merge-agent'; }",
+    'fixture:reviewer-broker-refresh': "globalThis.__watcherClaimLoopBrokerRefreshes = 0; export const BROKER_REVIEWER_ROLES = []; export const REVIEWER_TOKEN_REFRESH_SKEW_MS = 300000; export const REVIEWER_TOKEN_FALLBACK_TTL_MS = 1200000; export async function fetchReviewerTokenFromBroker() { throw new Error('unexpected broker mint in claim-loop fixture'); } export async function refreshReviewerBrokerTokens() { globalThis.__watcherClaimLoopBrokerRefreshes += 1; return { refreshed: 0, failed: 0, skipped: 3 }; } export async function refreshWatcherGithubToken() { return { refreshed: false, reason: 'fixture' }; } export function resolveWatcherGhBrokerRole() { return 'merge-agent'; }",
     'fixture:stale-drift': "export function shouldSkipReviewerForStaleDrift() { return null; }",
     'fixture:watcher-fail-loud': "export async function signalMalformedTitleFailure() { throw new Error('unexpected malformed-title path'); }",
     'fixture:watcher-memory-pressure': "export async function checkReviewerMemoryAdmission() { return { admit: true, reason: null, sample: { pressureLevel: 'nominal', availableMb: 999999, swapUsedPct: 0 }, projectedHeadroomMb: 999999, availableMb: 999999, swapUsedPct: 0, estimatedReviewerRssMb: 0, reservedMb: 0 }; } export function peakReviewerMemoryMbFor() { return 0; } export async function readMemoryPressureSample() { return { pressureLevel: 'nominal', availableMb: 999999, swapUsedPct: 0 }; }",
@@ -652,6 +663,7 @@ function buildRunnerSource({
   const watcherUrl = fileUrl('src', 'watcher.mjs');
   return `
 import assert from 'node:assert/strict';
+${ownerRoutingFixtureSource}
 
 const githubCalls = [];
 const githubWrites = [];
@@ -807,6 +819,7 @@ function buildSameHeadRepeatRunnerSource() {
   const watcherUrl = fileUrl('src', 'watcher.mjs');
   return `
 import assert from 'node:assert/strict';
+${ownerRoutingFixtureSource}
 
 const githubCalls = [];
 globalThis.fetch = async (...args) => {
@@ -996,6 +1009,7 @@ function buildRefreshRunnerSource() {
   const watcherUrl = fileUrl('src', 'watcher.mjs');
   return `
 import assert from 'node:assert/strict';
+${ownerRoutingFixtureSource}
 import { mkdirSync, mkdtempSync, rmSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';

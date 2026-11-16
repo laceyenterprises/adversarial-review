@@ -204,10 +204,10 @@ function createWatcherOctokit({
   // therefore constructs an unauthenticated client and injects the live token in
   // the request hook.
   if (hasDynamicAuth && octokit?.hook?.before) {
-    octokit.hook.before('request', (options) => {
+    octokit.hook.before('request', async (options) => {
       let token;
       try {
-        token = requestTokens.has(options) ? requestTokens.get(options) : authProvider(options);
+        token = requestTokens.has(options) ? requestTokens.get(options) : await authProvider(options);
       } catch (err) {
         if (err?.authOutage) throw err;
         token = null;

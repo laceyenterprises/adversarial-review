@@ -10,11 +10,11 @@ function makeFakeOctokit() {
   return {
     constructedAuth: null,
     hook: { before: (event, fn) => { if (event === 'request') beforeHandler = fn; } },
-    runRequest(options) { if (beforeHandler) beforeHandler(options); return options; },
+    async runRequest(options) { if (beforeHandler) await beforeHandler(options); return options; },
   };
 }
 
-test('createWatcherOctokit: authProvider refreshes the Authorization header per request (live token)', () => {
+test('createWatcherOctokit: authProvider refreshes the Authorization header per request (live token)', async () => {
   const fake = makeFakeOctokit();
   let liveToken = 'ghs_TOKEN_V1';
   const octokit = createWatcherOctokit({
@@ -24,11 +24,11 @@ test('createWatcherOctokit: authProvider refreshes the Authorization header per 
   });
   assert.equal(fake.constructedAuth, undefined, 'dynamic mode must not snapshot constructor auth');
   // First request uses the live token, not the construct-time snapshot.
-  let opts = octokit.runRequest({ headers: {} });
+  let opts = await octokit.runRequest({ headers: {} });
   assert.equal(opts.headers.authorization, 'token ghs_TOKEN_V1');
   // After a broker rotation, the SAME long-lived octokit picks up the new token.
   liveToken = 'ghs_TOKEN_V2_ROTATED';
-  opts = octokit.runRequest({ headers: {} });
+  opts = await octokit.runRequest({ headers: {} });
   assert.equal(opts.headers.authorization, 'token ghs_TOKEN_V2_ROTATED');
 });
 
@@ -60,19 +60,35 @@ test('createWatcherOctokit: real Octokit request pipeline sends the refreshed to
   assert.equal(observedAuthorization, 'token ghs_ROTATED');
 });
 
-test('createWatcherOctokit: without authProvider, no hook is installed (back-compat)', () => {
+test('before hook without wrap awaits async auth and preserves authentication outages', async () => {
+  const fake = makeFakeOctokit();
+  let failure;
+  const octokit = createWatcherOctokit({
+    octokitFactory: () => fake,
+    authProvider: async () => {
+      if (failure) throw failure;
+      return 'async-owner-token';
+    },
+  });
+  const options = await octokit.runRequest({ headers: {} });
+  assert.equal(options.headers.authorization, 'token async-owner-token');
+  failure = Object.assign(new Error('owner auth unavailable'), { authOutage: true });
+  await assert.rejects(octokit.runRequest({ headers: {} }), err => err === failure);
+});
+
+test('createWatcherOctokit: without authProvider, no hook is installed (back-compat)', async () => {
   const fake = makeFakeOctokit();
   createWatcherOctokit({ auth: 'ghs_X', octokitFactory: () => fake });
-  const opts = fake.runRequest({ headers: {} });
+  const opts = await fake.runRequest({ headers: {} });
   assert.equal(opts.headers.authorization, undefined, 'no dynamic hook when authProvider omitted');
 });
 
-test('createWatcherOctokit: fail-open when authProvider yields nothing (keeps existing request auth)', () => {
+test('createWatcherOctokit: fail-open when authProvider yields nothing (keeps existing request auth)', async () => {
   const fake = makeFakeOctokit();
   const octokit = createWatcherOctokit({
     auth: 'ghs_CONSTRUCT', octokitFactory: () => fake, authProvider: () => '',
   });
-  const opts = octokit.runRequest({ headers: { authorization: 'token ghs_CONSTRUCT' } });
+  const opts = await octokit.runRequest({ headers: { authorization: 'token ghs_CONSTRUCT' } });
   // Empty provider -> don't overwrite any request auth already in place.
   assert.equal(opts.headers.authorization, 'token ghs_CONSTRUCT');
 });

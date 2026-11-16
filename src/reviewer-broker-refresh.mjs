@@ -318,7 +318,7 @@ async function fetchReviewerTokenFromBrokerUrl({
         { transient: false },
       );
     }
-    if (owner && body?.metadata?.owner !== owner) {
+    if (owner && String(body?.metadata?.owner || '').toLowerCase() !== owner) {
       throw new BrokerTokenFetchError('broker owner echo mismatch', { transient: false });
     }
     const actualAppId = body?.metadata?.app_id != null ? String(body.metadata.app_id) : '';

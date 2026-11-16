@@ -49,6 +49,9 @@ export function githubTargetOwner(target) {
     return target.owner ? normalizeOwner(target.owner) : githubTargetOwner(target.url);
   }
   if (/^https:\/\/api\.github\.com\/(?!repos\/)/i.test(String(target || ''))) return null;
+  // Bare API namespaces are routes too. Explicit /repos and GitHub web URLs
+  // still allow repositories whose owner happens to match a namespace.
+  if (/^\/?(?:orgs|users|gists|graphql|teams|licenses|emojis|meta|rate_limit)(?:[/?#]|$)/i.test(String(target || ''))) return null;
   const value = String(target || '').replace(/^https:\/\/(?:api\.)?github\.com\//i, '')
     .replace(/^\/?repos\//, '').replace(/^\//, '');
   const match = value.match(/^([a-z\d-]+)\/[^/\s?#]+(?:[/?#]|$)/i);

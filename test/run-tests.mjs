@@ -25,10 +25,17 @@ function makeWorkerRoot(index) {
   mkdirSync(path.join(sandboxRoot, `t${index}`));
   mkdirSync(path.join(root, 'compile-cache'));
   for (const entry of readdirSync(repoRoot, { withFileTypes: true })) {
-    if (['data', '.git', 'tmp', 'compile-cache'].includes(entry.name)) continue;
+    if (['data', '.git', 'tmp', 'compile-cache', 'config.json'].includes(entry.name)) continue;
     symlinkSync(path.join(repoRoot, entry.name), path.join(root, entry.name),
       entry.isDirectory() ? 'dir' : 'file');
   }
+  // Legacy transports use arbitrary fixture owners. Give each worker and its
+  // CLI descendants a real no-org config instead of propagating a module
+  // override through NODE_OPTIONS. Routing tests supply their own home owner.
+  const configPath = path.join(repoRoot, 'config.json');
+  const config = existsSync(configPath) ? JSON.parse(readFileSync(configPath, 'utf8')) : {};
+  delete config.org;
+  writeFileSync(path.join(root, 'config.json'), JSON.stringify(config));
   return root;
 }
 
@@ -159,7 +166,7 @@ try {
     reportPath: process.env.AR_TEST_TIMINGS ? path.resolve(process.env.AR_TEST_TIMINGS) : undefined,
     nodeArgs: [
       '--preserve-symlinks', '--preserve-symlinks-main',
-      ...['child-leak-guard', 'rate-limit-state-isolation', 'load-aware-timeout-fixture', 'temp-sandbox-guard', 'github-owner-routing-off-fixture']
+      ...['child-leak-guard', 'rate-limit-state-isolation', 'load-aware-timeout-fixture', 'temp-sandbox-guard']
         .flatMap((name) => ['--import', path.join('test', 'helpers', `${name}.mjs`)]),
     ],
   }));

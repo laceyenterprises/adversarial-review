@@ -43,9 +43,12 @@ One shared selector reads the home owner once, derives repository owners from
 request targets and lazily caches tokens by role and owner with single-flight
 mints and expiry skew. Node-minted tokens carry role provenance; inherited
 reviewer tokens are recognized by their selected environment variable. Unknown
-service credentials cannot acquire cross-org authority.
+service credentials cannot acquire cross-org authority. The watcher's pre-poll
+Node broker refresh records its service token role before routed requests;
+matching an unverified shell startup seed to an ambient token variable does not
+authorize owner minting.
 
-Routed broker requests append the owner and require its exact metadata echo,
+Routed broker requests append the owner and require its case-insensitive metadata echo,
 the configured App pin and any owner installation pin. PAT fallbacks are
 refused. Installation budget bindings require both pins. Owner tokens stay out
 of process-wide home environments and refresh clocks. Authentication failures
@@ -60,7 +63,8 @@ environment credentials refuse routed broker mode until its upstream contract
 supports owners.
 
 Offline tests use synthetic owners, IDs, broker responses and executors. Legacy
-transport fixtures run explicitly without a home org, including CLI descendants;
+transport fixtures use a per-worker configuration without a home org, including
+CLI descendants, rather than an inherited `NODE_OPTIONS` routing override;
 a separate routed suite supplies synthetic home and other orgs. No live token,
 configuration change, restart, registration or merge is part of the repair.
 

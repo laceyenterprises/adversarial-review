@@ -271,7 +271,8 @@ async function execGhWithRetry({
         authRemintAttempted = true;
         const remint = err.ownerTokenRejected
           ? await githubTokenForTarget({ token: env.GITHUB_TOKEN || env.GH_TOKEN, env, target: args })
-            .then(() => ({ reminted: true, detail: 'owner token refreshed' }))
+            .then(() => ({ reminted: true, detail: 'owner token refreshed' }),
+              err => ({ reminted: false, detail: `re-mint threw: ${err?.message || err}` }))
           : await remintGhAuth({ refreshGhAuthImpl, env, log });
         if (!remint.reminted) {
           throw asGithubAuthOutageError(err, args, {

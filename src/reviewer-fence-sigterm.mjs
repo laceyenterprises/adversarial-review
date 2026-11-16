@@ -173,6 +173,7 @@ async function processQueuedFenceCleanupJobs({
         repo: job.repo,
         prNumber: job.pr,
         token: process.env[tokenEnv],
+        tokenEnv,
         log,
       });
       deleteCleanupJob(jobPath);

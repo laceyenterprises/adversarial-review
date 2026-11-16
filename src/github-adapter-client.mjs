@@ -1,3 +1,4 @@
+import { githubEnvForTarget, githubTokenRole, githubOwnerTokens, GithubOwnerTokenUnavailableError, invalidateGithubOwnerTokenOnAuthFailure } from './github-owner-token.mjs';
 import { loadAwareTimeoutMs, MAX_TIMER_DELAY_MS } from './load-aware-timeout.mjs';
 import { readAdapterReceipt } from './producer-contracts/publication-receipt.mjs';
 import { AsyncLocalStorage } from 'node:async_hooks';
@@ -60,6 +61,7 @@ const ADAPTER_MAX_BUFFER = 25 * 1024 * 1024;
 const ADAPTER_TIMEOUT_MS = 30_000;
 
 const REVIEWER_ADAPTER_AUTH_BY_ROLE = Object.freeze({
+  'grok-reviewer': { selector: 'grok-reviewer', tokenEnv: 'GH_GROK_REVIEWER_TOKEN' },
   'claude-reviewer': {
     selector: 'claude-reviewer',
     tokenEnv: 'GH_CLAUDE_REVIEWER_TOKEN',
@@ -246,7 +248,7 @@ function parseAdapterJson(stdout, kind) {
   }
 }
 
-function buildAdapterEnv(env = process.env) {
+function buildAdapterEnv(env = process.env, repo) {
   const adapterEnv = { GHO_API_CONSUMER: env.GHO_API_CONSUMER
     || basename(process.argv[1] || 'unknown', '.mjs') };
   for (const key of [
@@ -310,6 +312,7 @@ function buildAdapterEnv(env = process.env) {
   ]) {
     if (env[key] !== undefined) adapterEnv[key] = env[key];
   }
+  if (githubOwnerTokens.routedOwner(repo) && env.GH_GROK_REVIEWER_TOKEN !== undefined) adapterEnv.GH_GROK_REVIEWER_TOKEN = env.GH_GROK_REVIEWER_TOKEN;
   if (!adapterEnv.GH_TOKEN && adapterEnv.GITHUB_TOKEN) {
     adapterEnv.GH_TOKEN = adapterEnv.GITHUB_TOKEN;
   }
@@ -350,6 +353,7 @@ function makeAdapterArgs(kind, params = {}, env = {}) {
   }
   // Head/reviewer filters, label inclusion and limits are caller-side options;
   // these subcommands do not accept the unified write seam's flags.
+  if (params.reviewerLogin && githubOwnerTokens.routedOwner(params.repo)) appendReviewerAuthAdapterArgs(args, params.reviewerLogin, env, params.repo);
   appendMergeAgentServiceAuthAdapterArgs(args, kind, params, env);
   return args;
 }
@@ -365,7 +369,8 @@ function reviewerRoleEnvPrefix(role) {
 // the env-token path. The adapter mints a fresh App installation token from
 // the OAuth broker, so this does NOT depend on a reviewer env-token being
 // pre-resolved into the process env.
-function reviewerBrokerAuthArgs(role, profile, login, env = {}) {
+function reviewerBrokerAuthArgs(role, profile, login, env = {}, repo) {
+  if (githubOwnerTokens.routedOwner(repo)) throw new GithubOwnerTokenUnavailableError();
   const prefix = reviewerRoleEnvPrefix(role);
   if (String(env?.[`${prefix}_AUTH_VIA_BROKER`] || '').trim().toLowerCase() !== 'true') {
     return null;
@@ -393,11 +398,11 @@ function reviewerBrokerAuthArgs(role, profile, login, env = {}) {
   ];
 }
 
-function appendReviewerAuthAdapterArgs(args, reviewerLogin, env = {}) {
+function appendReviewerAuthAdapterArgs(args, reviewerLogin, env = {}, repo) {
   const normalized = String(reviewerLogin || '').trim().toLowerCase();
   const role = reviewerRoleFromLogin(normalized);
   const profile = REVIEWER_ADAPTER_AUTH_BY_ROLE[role];
-  if (!profile) return args;
+  if (!profile || (role === 'grok-reviewer' && !githubOwnerTokens.routedOwner(repo))) return args;
   // Prefer the already-resolved reviewer env-token (the ACTIVE reviewer
   // class' token, refreshed into env by reviewer-token-refresh). But a
   // remediation reply worker may be a class that is NOT the active reviewer
@@ -410,7 +415,7 @@ function appendReviewerAuthAdapterArgs(args, reviewerLogin, env = {}) {
   // ambient gh auth (the clio-airlock operator identity).
   const envTokenPresent = Boolean(String(env?.[profile.tokenEnv] || '').trim());
   if (!envTokenPresent) {
-    const brokerArgs = reviewerBrokerAuthArgs(role, profile, normalized, env);
+    const brokerArgs = reviewerBrokerAuthArgs(role, profile, normalized, env, repo);
     if (brokerArgs) {
       args.push(...brokerArgs);
       return args;
@@ -453,12 +458,15 @@ function appendReviewerAuthAdapterArgs(args, reviewerLogin, env = {}) {
 function appendMergeAgentServiceAuthAdapterArgs(args, kind, params = {}, env = {}) {
   if (params.reviewerLogin) return args;
   if (kind === 'pull-request-merge') return args;
-  if (String(env?.WATCHER_GH_AUTH_VIA_BROKER || '').trim().toLowerCase() !== 'true') return args;
+  const routed = githubOwnerTokens.routedOwner(params.repo);
+  if (!routed && String(env?.WATCHER_GH_AUTH_VIA_BROKER || '').trim().toLowerCase() !== 'true') return args;
   const hasServiceToken = Boolean(
     String(env?.GITHUB_TOKEN || '').trim() || String(env?.GH_TOKEN || '').trim()
   );
   if (!hasServiceToken) return args;
-  const selector = String(env?.WATCHER_GH_BROKER_ROLE || '').trim() || 'merge-agent';
+  const selector = routed ? githubTokenRole(env.GITHUB_TOKEN || env.GH_TOKEN, env)
+    : String(env?.WATCHER_GH_BROKER_ROLE || '').trim() || 'merge-agent';
+  if (routed && !selector) throw new GithubOwnerTokenUnavailableError();
   args.push('--auth', selector, '--auth-mode', 'env-token', '--pat-env', 'GITHUB_TOKEN', '--pat-env', 'GH_TOKEN');
   return args;
 }
@@ -472,7 +480,7 @@ function makeAdapterWriteArgs(kind, params = {}, env = {}) {
   if (params.description !== undefined) args.push('--description', String(params.description));
   if (params.action !== undefined) args.push('--action', String(params.action));
   if (params.reviewerLogin) args.push('--reviewer-login', String(params.reviewerLogin));
-  appendReviewerAuthAdapterArgs(args, params.reviewerLogin, env);
+  appendReviewerAuthAdapterArgs(args, params.reviewerLogin, env, params.repo);
   if (params.matchHeadCommit !== undefined) args.push('--match-head-commit', String(params.matchHeadCommit));
   if (params.mergeMethod !== undefined) args.push('--merge-method', String(params.mergeMethod));
   if (params.deleteBranch !== undefined) args.push(params.deleteBranch ? '--delete-branch' : '--no-delete-branch');
@@ -491,6 +499,11 @@ async function runGitHubAdapter(kind, params = {}, {
   }
   const adapterBin = resolveGitHubAdapterBin({ env, rootDir });
   if (!adapterBin) return null;
+  if (githubOwnerTokens.routedOwner(params.repo)) {
+    const profile = params.reviewerLogin && REVIEWER_ADAPTER_AUTH_BY_ROLE[reviewerRoleFromLogin(params.reviewerLogin)];
+    if (params.reviewerLogin && !profile) throw new GithubOwnerTokenUnavailableError();
+    env = await githubEnvForTarget(env, params.repo, { tokenEnv: profile?.tokenEnv, token: profile ? env[profile.tokenEnv] : env.GITHUB_TOKEN || env.GH_TOKEN });
+  }
   const tick = adapterReadTick.getStore();
   const unsupported = tick?.open ? tick.unsupported.get(adapterBin) : null;
   if (unsupported?.has(ADAPTER_READ_COMMANDS[kind] ?? kind)) return null;
@@ -498,13 +511,14 @@ async function runGitHubAdapter(kind, params = {}, {
     const { stdout } = await execFileImpl(adapterBin, makeAdapterArgs(kind, params, env), {
       maxBuffer: ADAPTER_MAX_BUFFER,
       timeout: loadAwareTimeoutMs(ADAPTER_TIMEOUT_MS),
-      env: buildAdapterEnv(env),
+      env: buildAdapterEnv(env, params.repo),
     });
     const payload = parseAdapterJson(stdout, kind);
     if (payload?.ok === false) throw Object.assign(new Error(`${payload.message || 'GitHub adapter read failed'}; ${readAdapterReceipt(payload).diagnostics.join('; ')}`), { stdout });
     if (payload?.complete === false) throw new Error('GitHub adapter read is incomplete; agent_os_github_adapter.ResultEnvelope: $.complete=false');
     return payload;
   } catch (error) {
+    invalidateGithubOwnerTokenOnAuthFailure(error, env.GH_TOKEN || env.GITHUB_TOKEN);
     const capability = unsupportedReadCapability(error, kind);
     if (tick?.open && capability) {
       let unavailable = tick.unsupported.get(adapterBin);
@@ -550,8 +564,8 @@ function githubAdapterCredential(args, env = {}) {
 }
 
 // Reads bind no reviewer identity: only the watcher's broker service token.
-function githubAdapterReadCredential(env = process.env) {
-  return githubAdapterCredential(appendMergeAgentServiceAuthAdapterArgs([], 'read', {}, env), buildAdapterEnv(env)).credential;
+function githubAdapterReadCredential(env = process.env, repo) {
+  return githubAdapterCredential(appendMergeAgentServiceAuthAdapterArgs([], 'read', { repo }, env), buildAdapterEnv(env, repo)).credential;
 }
 
 // The label adapter queries GraphQL before mutation. Its subprocess does not
@@ -595,13 +609,18 @@ async function writeGitHubAdapter(kind, params = {}, {
   }
   const adapterBin = resolveGitHubAdapterBin({ env, rootDir });
   if (!adapterBin) return null;
+  if (githubOwnerTokens.routedOwner(params.repo)) {
+    const profile = params.reviewerLogin && REVIEWER_ADAPTER_AUTH_BY_ROLE[reviewerRoleFromLogin(params.reviewerLogin)];
+    if (params.reviewerLogin && !profile) throw new GithubOwnerTokenUnavailableError();
+    env = await githubEnvForTarget(env, params.repo, { tokenEnv: profile?.tokenEnv, token: profile ? env[profile.tokenEnv] : env.GITHUB_TOKEN || env.GH_TOKEN });
+  }
   const execute = kind === 'pull-request-label' ? executeLabelAdapter : (impl, bin, args, options) => impl(bin, args, options);
   const { stdout } = await execute(execFileImpl, adapterBin, makeAdapterWriteArgs(kind, params, env), {
     maxBuffer: ADAPTER_MAX_BUFFER,
     // Callers with a persisted deadline pass an already-scaled, clipped budget.
     timeout: Number.isFinite(timeoutMs) && timeoutMs > 0 ? Math.min(timeoutMs, MAX_TIMER_DELAY_MS) : loadAwareTimeoutMs(ADAPTER_TIMEOUT_MS),
-    env: buildAdapterEnv(env),
-  });
+    env: buildAdapterEnv(env, params.repo),
+  }).catch(error => { invalidateGithubOwnerTokenOnAuthFailure(error, env.GH_TOKEN || env.GITHUB_TOKEN); throw error; });
   const receipt = readAdapterReceipt(parseAdapterJson(stdout, kind));
   return {
     ran: true,

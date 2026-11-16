@@ -12,6 +12,46 @@ in the watcher log line `[watcher] Org repos refreshed — watching N repos: …
 (or its per-repo `branch-protection-warning` lines). There is no static repo
 allowlist to edit.
 
+## Repositories outside the home org
+
+The home owner is the lowercased `org` in `config.json`, read once per process.
+Without an `org`, owner routing is disabled. Home-owner and unknown-owner
+requests keep their existing URLs, pins, environment contents and tokens.
+Non-repository API routes, including bare `orgs/<org>/repos`,
+`users/<login>/repos` and `gists/public`, do not select repository authority.
+Use explicit `repos/<owner>/<repo>` API paths or GitHub repository URLs when
+an owner name matches an API namespace.
+
+A second org needs the corresponding GitHub App installation in the broker's
+owner map, managed outside this repository. Optionally configure
+`OAUTH_BROKER_<ROLE>_EXPECTED_INSTALLATIONS` in the host environment as
+comma-separated `owner:installation_id` pins. Store no deployment values here.
+Owner responses must echo the requested owner (case-insensitively), match the App pin and any
+configured owner installation pin, and must never be PAT fallbacks. The home
+installation pin does not apply to an owner response.
+
+Enroll the repository in the watched set through the existing repository
+registration process; this is what starts automatic review traffic and owner
+routing for it. Org discovery alone covers the home org. This change does not
+register repositories or change merge authority or merge gates.
+
+`github-owner-token-unavailable` is a GitHub authentication outage for that
+request: its role is unknown, routing configuration could not be read, the
+broker mint or verification failed, or a synchronous caller has no cached owner
+token. No home token or PAT is sent instead. Adapter broker mode for a routed
+owner is refused until that separate transport supports owner routing; the
+adapter's environment-token mode uses the selected owner token. Managed hammer
+sessions and remediation git credentials remain separate follow-up work.
+Merge adapter commands retain their existing auth arguments and ambient-attempt
+plus `gh --admin` fallback; service auth arguments are not injected for merges.
+
+Before polling, the watcher's broker refresh records the minted service token's
+role (default `merge-agent`, or `WATCHER_GH_BROKER_ROLE`). That provenance
+authorizes subsequent owner mints. The shell startup seed alone has no Node
+provenance; if refresh fails, it cannot acquire cross-org authority simply by
+matching `GITHUB_TOKEN` or `GH_TOKEN`. Home traffic retains the existing
+fail-safe refresh behavior.
+
 ## 2. Initialize the canonical labels — REQUIRED, not cosmetic
 
 The pipeline **applies and reads** GitHub labels mid-flow — most importantly

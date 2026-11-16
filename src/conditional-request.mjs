@@ -1,3 +1,4 @@
+import { githubOwnerTokens } from './github-owner-token.mjs';
 import { createRequire } from 'node:module';
 
 import { apiStatusFromError, githubRequestCategory, recordApiCall } from './api-telemetry.mjs';
@@ -203,11 +204,12 @@ function createWatcherOctokit({
   // therefore constructs an unauthenticated client and injects the live token in
   // the request hook.
   if (hasDynamicAuth && octokit?.hook?.before) {
-    octokit.hook.before('request', (options) => {
+    octokit.hook.before('request', async (options) => {
       let token;
       try {
-        token = requestTokens.has(options) ? requestTokens.get(options) : authProvider();
-      } catch {
+        token = requestTokens.has(options) ? requestTokens.get(options) : await authProvider(options);
+      } catch (err) {
+        if (err?.authOutage) throw err;
         token = null;
       }
       if (token) {
@@ -220,7 +222,7 @@ function createWatcherOctokit({
     const resource = String(options.url || '').includes('/graphql') ? 'graphql' : 'core';
     let token = auth;
     if (hasDynamicAuth) {
-      try { token = authProvider(); } catch { token = null; }
+      try { token = await authProvider(options); } catch (err) { if (err?.authOutage) throw err; token = null; }
       // Pin the token for both admission and the before hook. A refresh during
       // the asynchronous budget read must not charge one credential for another.
       requestTokens.set(options, token);
@@ -236,6 +238,7 @@ function createWatcherOctokit({
       if (observation) await recordResponseRateLimit({ ...observation, credential, requestCategory: githubRequestCategory(options.url) });
       return response;
     } catch (err) {
+      if (err?.status === 401) githubOwnerTokens.invalidate(token);
       if (err?.status) recordApiCall({ category: 'github_request', status: err.status,
         extra: { credential, resource, requestCategory: githubRequestCategory(options.url), unit: 'http_response', budgetExempt: err.status === 304 } });
       const limited = isGitHubRateLimitError(err);

@@ -1,3 +1,5 @@
+import { githubTargetOwner, githubOwnerTokens, recordGithubToken, GithubOwnerTokenUnavailableError } from './github-owner-token.mjs';
+import { fetchReviewerTokenFromBroker } from './reviewer-broker-refresh.mjs';
 import { isGitHubRateLimitError } from './rate-limit-throttle.mjs';
 import { loadAwareTimeoutMs } from './load-aware-timeout.mjs';
 import { meteredExecFile } from './metered-gh.mjs';
@@ -398,11 +400,18 @@ function resolveWorkflowPushBrokerUrl(env = process.env) {
 }
 
 async function mintMergeAgentWorkflowPushToken({
+  owner = null,
   env = process.env,
   fetchImpl = globalThis.fetch,
   readFileImpl = readFileSync,
   timeoutMs = loadAwareTimeoutMs(WORKFLOW_PUSH_ESCALATION_TIMEOUT_MS),
 } = {}) {
+  if (owner && githubOwnerTokens.routedOwner(`${owner}/target`)) {
+    try {
+      const { token } = await fetchReviewerTokenFromBroker({ role: 'merge-agent', owner, env: { ...env, OAUTH_BROKER_MERGE_AGENT_PROVIDER: MERGE_AGENT_BROKER_PROVIDER }, fetchImpl, readFileImpl, timeoutMs });
+      return { token, provider: MERGE_AGENT_BROKER_PROVIDER, identity: MERGE_AGENT_WORKFLOW_PUSH_IDENTITY, permissions: MERGE_AGENT_WORKFLOW_PUSH_PERMISSIONS };
+    } catch (err) { throw new GithubOwnerTokenUnavailableError(err); }
+  }
   if (typeof fetchImpl !== 'function') {
     throw new Error('fetch implementation unavailable');
   }
@@ -433,6 +442,7 @@ async function mintMergeAgentWorkflowPushToken({
     if (String(body?.provider || '') !== MERGE_AGENT_BROKER_PROVIDER) {
       throw new Error(`response.provider='${body?.provider ?? ''}' != expected '${MERGE_AGENT_BROKER_PROVIDER}'`);
     }
+    recordGithubToken(token, { role: 'merge-agent', owner: null });
     return {
       token,
       provider: MERGE_AGENT_BROKER_PROVIDER,
@@ -451,6 +461,7 @@ function applyMergeAgentWorkflowPushTokenEnv(env, token) {
 }
 
 async function tryEscalateWorkflowPushCapability({
+  owner,
   env,
   execFileImpl,
   log,
@@ -462,7 +473,7 @@ async function tryEscalateWorkflowPushCapability({
     let token = null;
     for (let attempt = 0; attempt <= retryDelaysMs.length; attempt += 1) {
       try {
-        token = await mintMergeAgentWorkflowPushToken({ env, fetchImpl, readFileImpl });
+        token = await mintMergeAgentWorkflowPushToken({ owner, env, fetchImpl, readFileImpl });
         break;
       } catch (err) {
         const transient = isTransientWorkflowPushPreflightError(err);
@@ -695,6 +706,7 @@ async function assertWorkflowPushCapabilityForJob({
 
   if (isWorkflowPushEscalationEnabled(env)) {
     const escalated = await tryEscalateWorkflowPushCapability({
+      owner: githubTargetOwner(job.repo),
       env,
       execFileImpl,
       log,

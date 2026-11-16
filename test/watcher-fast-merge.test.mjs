@@ -78,6 +78,14 @@ export async function resolve(specifier, context, nextResolve) {
 }
 
 export async function load(url, context, nextLoad) {
+  // Discovery needs a home org independently of the no-org auth fixture.
+  if (url === ${JSON.stringify(fileUrl('src', 'watcher.mjs'))}) {
+    const loaded = await nextLoad(url, context);
+    return { ...loaded, source: loaded.source.toString().replace(
+      "const config = JSON.parse(readFileSync(join(ROOT, 'config.json'), 'utf8'));",
+      "const config = JSON.parse(readFileSync(join(ROOT, 'config.json'), 'utf8')); config.org = 'laceyenterprises';"
+    ) };
+  }
   // Rescue scheduling has its own injected-executor suite. Keep these watcher
   // fixtures isolated from its real subprocess/config dependency graph.
   if (url === 'fixture:overload-rescue-retry') {

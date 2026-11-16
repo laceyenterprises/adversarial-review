@@ -98,6 +98,7 @@ for (const scenario of ['withdrawn', 'standing', 'dismissal refused']) {
     const dir = f.rootDir, bin = join(dir, 'fixture-bin'); mkdirSync(bin);
     // The CI harness preserves symlinks; bin imports resolve through this fixture.
     for (const entry of ['bin', 'src', 'node_modules', 'domains', 'migrations', 'templates', 'config.yaml', 'package.json', 'package-lock.json']) symlinkSync(join(root, entry), join(dir, entry));
+    writeFileSync(join(dir, 'config.json'), '{}\n');
     const stateFile = join(dir, 'github.json');
     if (scenario === 'standing') f.reviews[0].body = body.replace('False finding', 'Standing finding');
     writeFileSync(stateFile, JSON.stringify({ reviews: f.reviews, comments: f.comments, events: [] }));

@@ -37,7 +37,10 @@ function fixture(t) {
   for (const path of [run, checkout, fakeBin]) mkdirSync(path);
   mkdirSync(join(checkout, 'scripts/ci-mirror'), { recursive: true });
   writeFileSync(join(checkout, 'scripts/ci-mirror/run-ci-mirror.py'), '# Synthetic canonical runner transport fixture\n');
-  for (const name of ['bin', 'src', 'domains']) symlinkSync(join(root, name), join(dir, name), 'dir');
+  for (const name of ['bin', 'src', 'domains', 'node_modules', 'templates', 'migrations', 'test', 'package.json', 'package-lock.json']) {
+    symlinkSync(join(root, name), join(dir, name));
+  }
+  writeFileSync(join(dir, 'config.json'), '{}\n');
   writeFileSync(join(dir, 'config.yaml'), '{}\n');
   writeFileSync(join(dir, 'root-config.yaml'), 'version: 1\n');
   const env = {
@@ -58,7 +61,7 @@ function fixture(t) {
     GHO_RATE_LIMIT_SHARED_STATE_PATH: join(run, 'budget.json'),
     // Guarded CLIs compare import.meta.url with argv[1]. Keep their fixture
     // entrypoint path intact so the real main executes through bin/ symlinks.
-    NODE_OPTIONS: `--preserve-symlinks-main --import=${preload}`,
+    NODE_OPTIONS: `--preserve-symlinks --preserve-symlinks-main --import=${join(dir, 'test/fixtures/hammer-prompt-clock.mjs')}`,
     // Preserve external netguard evidence when this test is invoked by a worker.
     ...(process.env.NETGUARD_LOG ? { NETGUARD_LOG: process.env.NETGUARD_LOG } : {}),
   };

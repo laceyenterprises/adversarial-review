@@ -1,3 +1,4 @@
+import { githubEnvForTarget, invalidateGithubOwnerTokenOnAuthFailure } from './github-owner-token.mjs';
 import { withHammerGit, withHammerGitSync, withHammerToken, withHammerTokenSync } from './hammer-token.mjs';
 import { readAdmissionChecks } from './watcher-admission-read-cache.mjs';
 import { observeSynchronousChild } from './watcher-latency.mjs';
@@ -200,8 +201,14 @@ function meteredExecFile(execFileImpl = execFileAsync, command, args, options = 
   }
   // Resolve refresh-only entitlements before cache keys or budget identities.
   // Retry the whole metered attempt so a renewed credential owns its telemetry.
-  return withHammerToken((active, session) => readAdmissionChecks(execFileImpl, command, args, active,
-    () => executeGh(active, session)), debugOptions(options));
+  const prepared = debugOptions(options);
+  return withHammerToken(async (active, session) => {
+    if (!session.managed) {
+      const env = await githubEnvForTarget(prepared.credentialEnv, args, { token: active.env.GH_TOKEN || active.env.GITHUB_TOKEN });
+      if (env !== prepared.credentialEnv) active = { ...active, env: { ...active.env, GH_TOKEN: env.GH_TOKEN, GITHUB_TOKEN: env.GITHUB_TOKEN }, credentialEnv: env };
+    }
+    return readAdmissionChecks(execFileImpl, command, args, active, () => executeGh(active, session));
+  }, prepared);
   async function executeGh(active, session) {
     let credential = githubCredential({ env: active.env || process.env });
     const resource = args[0] === 'api' ? ghResources(args)[0] : 'graphql';
@@ -214,6 +221,7 @@ function meteredExecFile(execFileImpl = execFileAsync, command, args, options = 
     try {
       return await finish(await execFileImpl(command, args, active), { credential, resource });
     } catch (err) {
+      if (!session.managed && invalidateGithubOwnerTokenOnAuthFailure(err, active.env.GH_TOKEN || active.env.GITHUB_TOKEN)) err.ownerTokenRejected = true;
       await finish(err, { failed: true, credential, resource });
       throw err;
     }
@@ -257,10 +265,15 @@ function executeFileSync(execFileImpl, command, args, options = {}) {
     }
     return execFileImpl(command, args, options);
   }
-  return withHammerTokenSync((active, session) => executeGhSync(execFileImpl, command, args, active, session), debugOptions(options));
+  const prepared = debugOptions(options);
+  return withHammerTokenSync((active, session) => executeGhSync(execFileImpl, command, args, active, session, prepared.credentialEnv), prepared);
 }
 
-function executeGhSync(execFileImpl, command, args, activeOptions, session) {
+function executeGhSync(execFileImpl, command, args, activeOptions, session, credentialEnv) {
+  if (!session.managed) {
+    const env = githubEnvForTarget(credentialEnv, args, { sync: true, token: activeOptions.env.GH_TOKEN || activeOptions.env.GITHUB_TOKEN });
+    if (env !== credentialEnv) activeOptions = { ...activeOptions, env: { ...activeOptions.env, GH_TOKEN: env.GH_TOKEN, GITHUB_TOKEN: env.GITHUB_TOKEN }, credentialEnv: env };
+  }
   let { env } = activeOptions;
   const resource = args[0] === 'api' ? ghResources(args)[0] : 'graphql';
   // Owner-aware (GHSTATEOWNER-01): the caller's own store plus a readable
@@ -314,9 +327,13 @@ function executeGhSync(execFileImpl, command, args, activeOptions, session) {
       return finishSync(result, { env, resource }).stdout;
     }
     const result = execFileImpl(command, args, activeOptions);
-    if (result && typeof result === 'object' && 'status' in result) finishSync(result, { env, resource });
+    if (result && typeof result === 'object' && 'status' in result) {
+      if (!session.managed && result.status !== 0) invalidateGithubOwnerTokenOnAuthFailure(result, env.GH_TOKEN || env.GITHUB_TOKEN);
+      finishSync(result, { env, resource });
+    }
     return result;
   } catch (err) {
+    if (!session.managed) invalidateGithubOwnerTokenOnAuthFailure(err, env.GH_TOKEN || env.GITHUB_TOKEN);
     finishSync(err, { failed: true, resource, env });
     throw err;
   }

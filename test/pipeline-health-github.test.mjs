@@ -138,10 +138,12 @@ print('[]')
 `, { mode: 0o700 });
     const script = new URL('../src/adapters/health/github-read.py', import.meta.url).pathname;
     const { readFileSync } = await import('node:fs');
+    // Python resolves the bridge's physical checkout; exercise its home owner
+    // here rather than asking synthetic adapter auth to mint an owner token.
     for (const kind of ['list', 'checks', 'state']) {
       rmSync(join(root, 'attempts'), { force: true });
       const output = execFileSync('python3', [script, '--adapter-bin', join(root, 'adapter', 'bin', 'github-adapter'),
-        '--kind', kind, '--number', '1', '--repo', 'org/repo', '--role', 'merge-agent',
+        '--kind', kind, '--number', '1', '--repo', 'laceyenterprises/repo', '--role', 'merge-agent',
         '--provider', 'github-app-merge-agent', '--app-id', '123', '--installation-id', '456'],
       { encoding: 'utf8', timeout: 20_000, env: { GHO_RATE_LIMIT_SHARED_STATE_PATH: join(root, 'rate-limit-state.json'), PATH: `${root}:${process.env.PATH}`, GH_TOKEN: 'ambient',
         GITHUB_TOKEN: 'ambient', FIXTURE_GH_TRANSIENT: '1' } });
@@ -154,7 +156,7 @@ print('[]')
     // Only this fixture's child is probed: an outer timeout must not escape gh.
     assert.throws(() => execFileSync('python3', [script,
       '--adapter-bin', join(root, 'adapter', 'bin', 'github-adapter'),
-      '--kind', 'checks', '--number', '999', '--repo', 'org/repo', '--role', 'merge-agent',
+      '--kind', 'checks', '--number', '999', '--repo', 'laceyenterprises/repo', '--role', 'merge-agent',
       '--provider', 'github-app-merge-agent', '--app-id', '123', '--installation-id', '456'],
     { timeout: 3000, env: { GHO_RATE_LIMIT_SHARED_STATE_PATH: join(root, 'rate-limit-state.json'), PATH: `${root}:${process.env.PATH}` }, stdio: ['ignore', 'pipe', 'pipe'] }));
     const childPid = Number(readFileSync(join(root, 'child.pid'), 'utf8'));

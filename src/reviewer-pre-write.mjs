@@ -1,3 +1,4 @@
+import { githubTokenForTarget, githubOwnerTokens, invalidateGithubOwnerTokenOnAuthFailure } from './github-owner-token.mjs';
 const GITHUB_API_ROOT = 'https://api.github.com';
 const REVIEWER_USER_AGENT = 'adversarial-review-reviewer';
 
@@ -34,6 +35,7 @@ async function probeSelfLogin({
     const userRes = await fetchImpl(`${GITHUB_API_ROOT}/user`, {
       headers: buildHeaders(token),
     });
+    if (userRes.status === 401) githubOwnerTokens.invalidate(token);
     if (!userRes.ok) {
       log.warn?.(
         `[reviewer-pre-write] self-login probe returned HTTP ${userRes.status}` +
@@ -44,6 +46,7 @@ async function probeSelfLogin({
     const userJson = await userRes.json();
     return String(userJson?.login || '').trim() || null;
   } catch (err) {
+    invalidateGithubOwnerTokenOnAuthFailure(err, token);
     log.warn?.(`[reviewer-pre-write] self-login probe failed: ${err?.message || err}`);
     return null;
   }
@@ -74,6 +77,7 @@ async function listPullRequestReviews({
       `${GITHUB_API_ROOT}/repos/${owner}/${repoName}/pulls/${prNumber}/reviews`,
       { headers: buildHeaders(token) }
     );
+    if (listRes.status === 401) githubOwnerTokens.invalidate(token);
     if (!listRes.ok) {
       log.warn?.(`[reviewer-pre-write] review list returned HTTP ${listRes.status}`);
       return [];
@@ -81,6 +85,7 @@ async function listPullRequestReviews({
     const payload = await listRes.json();
     return Array.isArray(payload) ? payload : [];
   } catch (err) {
+    invalidateGithubOwnerTokenOnAuthFailure(err, token);
     log.warn?.(`[reviewer-pre-write] review list failed: ${err?.message || err}`);
     return [];
   }
@@ -104,6 +109,7 @@ async function deletePendingReview({
         headers: buildHeaders(token),
       }
     );
+    if (delRes.status === 401) githubOwnerTokens.invalidate(token);
     if (!delRes.ok) {
       log.warn?.(`[reviewer-pre-write] failed to clear pending review ${reviewId}: HTTP ${delRes.status}`);
       return false;
@@ -111,6 +117,7 @@ async function deletePendingReview({
     log.log?.(`[reviewer-pre-write] cleared pending review ${reviewId} on ${repo}#${prNumber}`);
     return true;
   } catch (err) {
+    invalidateGithubOwnerTokenOnAuthFailure(err, token);
     log.warn?.(`[reviewer-pre-write] failed to clear pending review ${reviewId}: ${err?.message || err}`);
     return false;
   }
@@ -127,10 +134,13 @@ async function clearPendingReviewsForSelf({
   repo,
   prNumber,
   token,
+  tokenEnv,
+  env = process.env,
   selfLogin: knownSelfLogin = null,
   fetchImpl = globalThis.fetch,
   log = console,
 } = {}) {
+  token = await githubTokenForTarget({ token, tokenEnv, env, target: repo });
   if (!token) return { cleared: 0, listed: 0 };
   const { owner, repoName } = splitRepo(repo);
   if (!owner || !repoName) return { cleared: 0, listed: 0 };
@@ -160,6 +170,8 @@ async function reconcilePendingReviewsForSelf({
   repo,
   prNumber,
   token,
+  tokenEnv,
+  env = process.env,
   currentHeadSha,
   respawnAgeSeconds,
   selfLogin: knownSelfLogin = null,
@@ -167,6 +179,7 @@ async function reconcilePendingReviewsForSelf({
   fetchImpl = globalThis.fetch,
   log = console,
 } = {}) {
+  token = await githubTokenForTarget({ token, tokenEnv, env, target: repo });
   if (!token) {
     return {
       listed: 0,

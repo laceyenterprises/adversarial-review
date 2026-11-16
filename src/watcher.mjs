@@ -1,3 +1,4 @@
+import { githubTokenForTarget } from './github-owner-token.mjs';
 import { createRepositoryRefresher } from './watcher-repository-discovery.mjs';
 import { ensureWorkerRegistryReady } from './adapters/agent-runtime/local/remediation.mjs';
 import { prepareDispatchReadContext } from './dispatch-read-client.mjs';
@@ -704,6 +705,7 @@ async function reconcilePendingDraftsBeforeSpawn({
     repo: repoPath,
     prNumber,
     token,
+    tokenEnv: botTokenEnv,
     selfLogin: resolvedSelfLogin,
     currentHeadSha,
     respawnAgeSeconds,
@@ -1682,7 +1684,7 @@ async function main() {
     // Read the live token per request so the long-lived poll octokit picks up
     // each broker refresh (App installation tokens expire ~1h) instead of
     // 401-ing on a stale snapshot. See refreshWatcherGithubToken.
-    authProvider: () => process.env.GITHUB_TOKEN,
+    authProvider: options => githubTokenForTarget({ token: process.env.GITHUB_TOKEN, target: options }),
   });
   const intervalMs = config.pollIntervalMs ?? WATCHER_POLL_INTERVAL_MS;
   overloadRescueRetry = createOverloadRescueRetry({ rootDir: ROOT });

@@ -1,3 +1,4 @@
+import { githubTokenForTarget } from './github-owner-token.mjs';
 import { withRepositoryStateCycle } from './repository-state-lock.mjs';
 import { canonicalRepositoryArguments } from './repository-names.mjs';
 import { ensureWorkerRegistryReady } from './adapters/agent-runtime/local/remediation.mjs';
@@ -1465,10 +1466,11 @@ async function postGitHubReview(repo, prNumber, reviewBody, botTokenEnv, execFil
         const preWriteLog = createReviewerPreWriteLogProxy(log);
         // App tokens cannot use GET /user, so pass the known GitHub bot login.
         await prepareReviewWrite({
-          repo, prNumber, token, selfLogin: appSelfLogin, fetchImpl: opts.fetchImpl, log: preWriteLog.log,
+          repo, prNumber, token, tokenEnv: botTokenEnv, env: sourceEnv, selfLogin: appSelfLogin, fetchImpl: opts.fetchImpl, log: preWriteLog.log,
         });
         let adapterEnv = null;
         try {
+          token = await githubTokenForTarget({ token, tokenEnv: botTokenEnv, env: sourceEnv, target: repo });
           await awaitThrottleIfNeeded('core', githubCredential({ token })); // the posting bot token's budget, never anonymous (LAC-2075)
           opts.onBeforeReviewWrite?.(); // REVPOSTSTALL-01: from here the post path owns the outcome.
           adapterEnv = {

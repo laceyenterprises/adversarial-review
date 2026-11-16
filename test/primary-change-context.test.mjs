@@ -74,7 +74,7 @@ process.stdout.write(entry.raw ?? JSON.stringify(data));
     // This deliberately minimal environment does not inherit the runner's
     // state isolation. Bind the metered CLI's shared state to this fixture too.
     env: { PATH: root + ':/usr/bin:/bin', HOME: root, TMPDIR: root, GH_CONFIG_DIR: root, HAM_ROOT_DIR: root,
-      NODE_OPTIONS: `--import=${join(root, 'load.mjs')}`, AGENT_OS_CONFIG_PATH: join(root, 'top.yaml'),
+      NODE_OPTIONS: `--preserve-symlinks --preserve-symlinks-main --import=${join(root, 'load.mjs')}`, AGENT_OS_CONFIG_PATH: join(root, 'top.yaml'),
       GHO_RATE_LIMIT_SHARED_STATE_PATH: join(root, 'rate-limit-state.json') },
   });
   assert.ifError(result.error);

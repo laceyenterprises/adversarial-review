@@ -52,7 +52,20 @@ export function isHamWorkerTicket(value) {
 // absorbed, and line 0 (the subject) is never consumed even when it happens to
 // look like `Word: text`.
 export function parseCommitTrailerValues(message) {
-  const lines = String(message || '').replace(/\r\n/g, '\n').split('\n');
+  let lines = String(message || '').replace(/\r\n/g, '\n').split('\n');
+  // Git records rebase conflicts after the trailers using its comment
+  // character. Accept only the complete standard suffix, including at least
+  // one tab-indented path. Never skip arbitrary prose or comment blocks.
+  const conflict = lines.findLastIndex(line => /^([#;]) Conflicts:$/.test(line));
+  if (conflict > 0) {
+    const marker = lines[conflict][0];
+    const suffix = lines.slice(conflict + 1);
+    if (suffix.some(line => line.startsWith(`${marker}\t`) && line.length > 2)
+      && suffix.every(line => !line.trim() || line.trim() === marker
+        || line.startsWith(`${marker}\t`) && line.length > 2)) {
+      lines = lines.slice(0, conflict);
+    }
+  }
   const trailers = {};
   for (let index = lines.length - 1; index >= 1; index -= 1) {
     const line = lines[index].trim();

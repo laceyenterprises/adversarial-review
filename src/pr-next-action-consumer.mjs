@@ -42,7 +42,8 @@ export function fromLegacyClosureOwner(legacy) {
   if (owner === 'hammer') return of('hammer', 'hammer', reason === 'dispatched' || reason === 'ama-dispatched' ? 'live-owner'
     : LEGACY_HAMMER_REASONS[reason] || reason || 'hammer');
   if (owner === 'conflict-rebase') return of('hammer', 'hammer', 'conflict-rebase');
-  if (owner === 'review') return of('review', 'reviewer', reason.startsWith('handed-to-review') ? 'handed-to-review' : 'exact-head-review');
+  if (owner === 'review') return of('review', 'reviewer', reason.startsWith('handed-to-review') ? 'handed-to-review'
+    : reason === 'exact-head-review' ? reason : 'unmapped-legacy-review');
   if (owner === 'remediation') return of('remediate', 'remediator', 'review-findings');
   if (owner === 'follow-up-drain') return of('remediate', 'remediator', 'clean-review-drain');
   if (owner === 'close') return of('hammer', 'closure-recovery', 'empty-diff-close');
@@ -51,10 +52,11 @@ export function fromLegacyClosureOwner(legacy) {
     if (reason === 'pending-mergeability') return of('wait-for-CI', 'ci', 'mergeability-unknown');
     if (reason.startsWith('in-flight') || reason.startsWith('dispatch-status-')) return of('hammer', 'hammer', 'live-owner');
     if (reason.startsWith('handed-to-review')) return of('review', 'reviewer', 'handed-to-review');
-    return of('wait-for-CI', 'watcher', 'snapshot-refresh');
+    return of('wait-for-CI', 'watcher', 'unmapped-legacy-wait');
   }
   if (owner === 'page') return of('operator-hold', 'operator', LEGACY_PAGE_REASONS[reason] || reason || 'page');
-  return of('wait-for-CI', 'watcher', 'snapshot-refresh');
+  // Keep unknown inputs out of exact shadow-pattern classes.
+  return of('wait-for-CI', 'watcher', 'unmapped-legacy-owner');
 }
 
 // Posted-review handler outcomes (coexistence and its early returns). Outcomes
@@ -65,7 +67,8 @@ export function fromLegacyPostedReviewOutcome(result, { includeClosureOwner = tr
   const of = (action, actor, reason) => Object.freeze({ action, actor, reason, legacyOwner: text(result.outcome) || 'posted-review',
     legacyReason: text(result.reason) || text(result.terminalReason) || null });
   if (result.prTerminal === true || result.outcome === 'pr-terminal') {
-    return of('done', 'none', ['merged', 'closed'].includes(result.terminalReason) ? result.terminalReason : 'terminal-observed');
+    return of('done', 'none', ['merged', 'closed'].includes(result.terminalReason) ? result.terminalReason
+      : result.terminalReason == null ? 'terminal-observed' : 'unmapped-legacy-terminal');
   }
   if (result.outcome === 'operator-skip-label') return of('operator-hold', 'operator', 'hold-label');
   if (result.outcome === 'await-operator') return of('operator-hold', 'operator', 'needs-operator');

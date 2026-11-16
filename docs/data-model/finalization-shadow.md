@@ -141,6 +141,22 @@ is unkeyable and cannot receive a pattern disposition. Adding classes requires
 an explicit code change; unknown text never shares an auto-applicable fallback.
 The report groups such rows under an explicitly unkeyable bucket.
 
+MLRKEYVOCAB-01 extends the exact vocabulary to the fixed producer classes below;
+the complete literal lists live in `shadow-pattern.mjs`. Reports re-key history
+at read time, so older rows with a stored `patternKey: null` can immediately
+appear in keyed buckets and serve as matching evidence for `addPattern`.
+This does not backfill dispositions. Append-time capture uses the vocabulary
+loaded by the watcher after its normal post-merge reload. Fold errors remain
+ineligible even when their reason and detail are recognized.
+
+| Producer file | Recognized classes |
+|---|---|
+| `src/finalization/eligibility.mjs` | Existing fixed revision, verdict, checks, attestation, finding and remediation reasons. |
+| `src/finalization/workflow-decision.mjs` | Fixed merge/delivery, disabled execution, unknown evidence, custody/progress, effect reconciliation, primary-change, conflict, mergeability, remediation admission/recovery and final-head review reasons, including the default terminal recovery reason `automated stop requires relevant evidence`. The live-owner template admits exactly `hammer` and `remediator`, the closed actor set in `src/finalization/live-owner.mjs`. |
+| `src/pr-next-action.mjs` | Fixed `done`, `operator-hold`, `hammer`, `remediate`, `review`, `daemon-merge` and `wait-for-CI` action/reason pairs: terminal/hold, ownership, structural repair, retry/cap, checks, final push, findings, review admission and snapshot refresh rows. Builder handoffs admit exactly `remediate:conflict-primary-unproven` and `remediate:final-fix-all`. |
+| `src/pr-next-action-consumer.mjs` | Fixed legacy closure mappings and posted-review outcomes, including `operator-hold:needs-operator`, mapped page reasons, `done:closed`, `done:merged`, `done:terminal-observed` (only when the terminal reason is absent or null), `daemon-merge:merged-this-pass` and `remediate:clean-review-drain`; also the fixed no-progress operator-decision outcome. Unmapped owners, wait/review reasons and explicit terminal reasons use distinct `unmapped-legacy-*` reasons that are not allowlisted. |
+| `src/finalization/live-shadow.mjs` | Builds the exact `action:reason` detail from the above producers; existing `hammer:dispatched` remains recognized. Hammer/page pass-through reasons are keyed only when the resulting detail equals an allowlisted literal. No `observe:unknown` or dynamic `operator-label-required:*` detail is admitted. |
+
 | Column | Type | Contract |
 |---|---|---|
 | `id` | INTEGER PRIMARY KEY AUTOINCREMENT | Stable pattern record reference. |

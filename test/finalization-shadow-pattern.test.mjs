@@ -9,6 +9,9 @@ import { shadowPatternKey } from '../src/finalization/shadow-pattern.mjs';
 import { openFinalizationShadowStore, openReadOnlyFinalizationShadowStore } from '../src/finalization/shadow-store.mjs';
 import { buildShadowReport, effectiveDisposition, renderShadowReport } from '../src/finalization/shadow-report.mjs';
 import { finalizationMain } from '../src/finalization-cli.mjs';
+import { fromLegacyClosureOwner, fromLegacyPostedReviewOutcome } from '../src/pr-next-action-consumer.mjs';
+import { liveV1Action } from '../src/finalization/live-shadow.mjs';
+import { workflowDecision } from '../src/finalization/workflow-decision.mjs';
 
 const at = n => new Date(Date.UTC(2026, 0, 1, 0, n)).toISOString();
 const observation = (n = 0, changes = {}) => ({
@@ -22,6 +25,43 @@ const observation = (n = 0, changes = {}) => ({
 });
 const audit = n => ({ at: at(n), principal: '  synthetic-reviewer  ', note: 'Synthetic evidence reviewed.' });
 const record = sample => ({ ...audit(1), key: shadowPatternKey(sample), kind: 'equivalent', evidenceSampleIds: [sample.id] });
+const workflowReasons = [
+  'live-owner: hammer holds an unexpired lease', 'live-owner: remediator holds an unexpired lease',
+  'conflict requires owned repair', 'mergeability unknown',
+  'final remediator head requires strict exact-head review',
+  'merge and delivery verified', 'merged; post-merge activation pending', 'autonomous execution disabled',
+  'unknown safety-relevant event', 'terminal launch retains dirty workspace',
+  'workspace release requires exact holder evidence', 'launch observation expired',
+  'verified launch in progress', 'launch requires verified progress',
+  'worker kill requires effect reconciliation', 'operation effect requires readback',
+  'primary-change evidence unknown', 'remediation admission or completion pending',
+  'awaiting verdict for requested final remediator head',
+  'failed final remediation requires recovery', 'primary-change provenance unavailable',
+  'automated stop requires relevant evidence',
+];
+const fixedDetails = [
+  'done:merged', 'hammer:ci-red-clean-verdict', 'hammer:lifetime-exhausted',
+  'hammer:ownership-unreadable', 'hammer:primary-change-repair', 'hammer:retry-exhausted',
+  'hammer:retry-no-merge', 'hammer:safety-refusal', 'hammer:suppressed-final-push',
+  'operator-hold:needs-operator', 'remediate:conflict-primary-unproven', 'remediate:final-fix-all',
+  'wait-for-CI:checks-pending', 'wait-for-CI:snapshot-refresh',
+  'done:closed', 'operator-hold:hold-label', 'operator-hold:draft', 'operator-hold:merge-execution-disabled',
+  'remediate:repair-in-place-owned', 'hammer:lease-expired', 'hammer:empty-diff-close',
+  'hammer:primary-change-unreadable', 'hammer:merge-receipt-unconfirmed', 'daemon-merge:merge-receipt-unconfirmed',
+  'hammer:automated-stop', 'hammer:conflict-rebase', 'hammer:operator-approval-applied',
+  'hammer:hammer-final-no-merge', 'hammer:required-checks-resume', 'hammer:ci-runnerless',
+  'hammer:daemon-failed-closed', 'hammer:review-ceiling', 'hammer:hammer-owned-head',
+  'daemon-merge:carried-clean-head', 'review:attestation-invalid', 'review:exact-head-review',
+  'review:handed-to-review', 'review:stale-verdict', 'wait-for-CI:pr-unknown', 'wait-for-CI:policy-unknown',
+  'wait-for-CI:structural-restriction-pending', 'wait-for-CI:ci-infrastructure',
+  'wait-for-CI:ci-infrastructure-evidence-pending', 'wait-for-CI:checks-unknown',
+  'wait-for-CI:mergeability-unknown', 'wait-for-CI:rounds-unknown', 'wait-for-CI:reviews-unknown',
+  'wait-for-CI:verdict-unknown', 'wait-for-CI:attestation-unknown', 'wait-for-CI:snapshot-malformed',
+  'daemon-merge:merged-this-pass', 'remediate:clean-review-drain', 'operator-hold:retry-exhausted',
+  'operator-hold:lifetime-exhausted', 'operator-hold:primary-change-repair', 'operator-hold:lease-expired',
+  'operator-hold:checks-pending', 'operator-hold:review-findings-final',
+  'operator-hold:operator-decision-required', 'done:terminal-observed',
+];
 function fixture(t) {
   const db = new Database(':memory:');
   t.after(() => db.close());
@@ -68,6 +108,121 @@ test('matching future observations capture a disposition; unmatched and failures
   assert.equal(effectiveDisposition(store.read().find(o => o.id === match.id)), 'open');
   store.annotate(sample.id, { ...audit(3), disposition: 'resolved', direction: 'benign' });
   assert.equal(effectiveDisposition(store.read().find(o => o.id === sample.id)), 'resolved');
+});
+
+test('fixed producer reasons and details key exactly; dynamic and whitespace variants do not', () => {
+  for (const reason of workflowReasons) {
+    assert.notEqual(shadowPatternKey(observation(0, { v2Decision: { kind: 'wait', reason } })), null, reason);
+    assert.equal(shadowPatternKey(observation(0, { v2Decision: { kind: 'wait', reason: `${reason} ` } })), null);
+  }
+  for (const detail of fixedDetails) {
+    assert.notEqual(shadowPatternKey(observation(0, { v1Action: { kind: 'wait', detail } })), null, detail);
+    assert.equal(shadowPatternKey(observation(0, { v1Action: { kind: 'wait', detail: `${detail} ` } })), null);
+  }
+  for (const reason of [
+    'live-owner: reviewer holds an unexpired lease', 'shadow ledger unavailable (synthetic failure)',
+    'kill switch: wait intercepted (autonomous execution disabled)', 'awaiting attestations from: synthetic',
+  ]) assert.equal(shadowPatternKey(observation(0, { v2Decision: { kind: 'wait', reason } })), null);
+  for (const detail of ['operator-hold:operator-label-required:example-label', 'observe:unknown',
+    'hammer:synthetic-raw-reason', 'operator-hold:synthetic-raw-reason']) {
+    assert.equal(shadowPatternKey(observation(0, { v1Action: { kind: 'wait', detail } })), null);
+  }
+});
+
+test('unmapped legacy inputs remain open even with reviewed patterns for the former fallbacks', t => {
+  const store = fixture(t);
+  const cases = [
+    [fromLegacyClosureOwner({ owner: 'unmapped' }), 'wait-for-CI:snapshot-refresh'],
+    [fromLegacyClosureOwner({ owner: 'repair-worker', reason: 'repair epoch X' }), 'wait-for-CI:snapshot-refresh'],
+    [fromLegacyClosureOwner(null), 'wait-for-CI:snapshot-refresh'],
+    [fromLegacyClosureOwner({ owner: 'wait', reason: 'unknown wait' }), 'wait-for-CI:snapshot-refresh'],
+    [fromLegacyClosureOwner({ owner: 'wait' }), 'wait-for-CI:snapshot-refresh'],
+    [fromLegacyClosureOwner({ owner: 'review', reason: 'unknown review' }), 'review:exact-head-review'],
+    [fromLegacyClosureOwner({ owner: 'review' }), 'review:exact-head-review'],
+    [fromLegacyPostedReviewOutcome({ prTerminal: true, terminalReason: 'unknown terminal' }), 'done:terminal-observed'],
+    [fromLegacyPostedReviewOutcome({ outcome: 'pr-terminal', terminalReason: '' }), 'done:terminal-observed'],
+  ];
+  for (const detail of new Set(cases.map(([, detail]) => detail))) {
+    const sample = store.append(observation(0, { v1Action: { kind: 'wait', detail } }));
+    store.addPattern(record(sample));
+  }
+  for (const [legacy] of cases) {
+    const v1Action = liveV1Action(legacy, 'synthetic-adapter');
+    const input = observation(2, { v1Action });
+    assert.equal(shadowPatternKey(input), null, v1Action.detail);
+    const saved = store.append(input);
+    assert.equal(saved.patternDisposition, undefined);
+    assert.equal(effectiveDisposition(saved), 'open');
+  }
+});
+
+test('known legacy mappings and exact pass-through literals stay keyable', () => {
+  const cases = [
+    [fromLegacyClosureOwner({ owner: 'review', reason: 'exact-head-review' }), 'review:exact-head-review'],
+    [fromLegacyClosureOwner({ owner: 'review', reason: 'handed-to-review:synthetic-head' }), 'review:handed-to-review'],
+    [fromLegacyClosureOwner({ owner: 'wait', reason: 'pending-required-checks' }), 'wait-for-CI:checks-pending'],
+    [fromLegacyClosureOwner({ owner: 'page', reason: 'needs-operator' }), 'operator-hold:needs-operator'],
+    [fromLegacyClosureOwner({ owner: 'hammer', reason: 'ci-red-final' }), 'hammer:ci-red-final'],
+    [fromLegacyPostedReviewOutcome({ prTerminal: true }), 'done:terminal-observed'],
+    [fromLegacyPostedReviewOutcome({ prTerminal: true, terminalReason: 'closed' }), 'done:closed'],
+    [fromLegacyPostedReviewOutcome({ prTerminal: true, terminalReason: 'merged' }), 'done:merged'],
+  ];
+  for (const [legacy, detail] of cases) {
+    const v1Action = liveV1Action(legacy, 'synthetic-adapter');
+    assert.equal(v1Action.detail, detail);
+    assert.notEqual(shadowPatternKey(observation(0, { v1Action })), null, detail);
+  }
+});
+
+test('workflow default terminal recovery reason produces a keyable observation', () => {
+  const v2Decision = workflowDecision({
+    subjectKey: { domainId: 'code-pr', subjectExternalId: 'example/project#1' },
+    currentRevision: 'synthetic-head', lastEventAt: at(0),
+    remediation: { dispatched: [], concluded: [] }, operatorOverrides: [],
+    terminal: { kind: 'halted' },
+  }, { checksPatienceMs: 1000, verdictPatienceMs: 1000, attestationPatienceMs: 1000,
+    deadlineCeilingMs: 1000, policyVersion: 1, codeVersion: 'synthetic' }, { observedAt: at(0) }, {});
+  assert.equal(v2Decision.reason, 'automated stop requires relevant evidence');
+  assert.equal(v2Decision.nextAction, 'recover-coverage');
+  assert.notEqual(shadowPatternKey(observation(0, { v2Decision })), null);
+});
+
+test('expanded vocabulary re-keys old evidence and reports without backfilling dispositions', t => {
+  const store = fixture(t);
+  const sample = store.append(observation(0, {
+    v1Action: { kind: 'halt', detail: 'operator-hold:needs-operator' },
+    v2Decision: { kind: 'wait', reason: workflowReasons[0] },
+  }));
+  // Simulate the payload written before this vocabulary was recognized.
+  const payload = JSON.parse(store.db.prepare('SELECT payload_json FROM finalization_shadow WHERE id=?').get(sample.id).payload_json);
+  payload.patternKey = null;
+  store.db.prepare('UPDATE finalization_shadow SET payload_json=? WHERE id=?').run(JSON.stringify(payload), sample.id);
+  const historical = store.read()[0];
+  const pattern = store.addPattern(record(historical));
+  assert.equal(effectiveDisposition(historical), 'open');
+  const match = store.append({ ...historical, observedAt: at(2) });
+  assert.equal(match.patternDisposition.id, pattern.id);
+  const error = store.append({ ...historical, observedAt: at(3), foldError: true });
+  assert.equal(error.patternDisposition, undefined);
+  assert.equal(effectiveDisposition(error), 'open');
+  assert.throws(() => store.addPattern({ ...record(error), ...audit(4) }), /eligible divergence/);
+  const model = buildShadowReport({ observations: [historical, match], now: at(10) });
+  assert.deepEqual(model.patterns, [
+    { key: shadowPatternKey(historical), total: 2, byPattern: 1, byIndividualOverride: 0, open: 1, byClassifier: 0 },
+  ]);
+  assert.equal(JSON.parse(store.db.prepare('SELECT payload_json FROM finalization_shadow WHERE id=?').get(sample.id).payload_json).patternKey, null);
+});
+
+test('report groups each newly recognized producer class under its exact key', () => {
+  const samples = [
+    ...workflowReasons.map(reason => observation(0, { v2Decision: { kind: 'wait', reason } })),
+    ...fixedDetails.map(detail => observation(0, { v1Action: { kind: 'wait', detail } })),
+  ];
+  const model = buildShadowReport({ observations: samples, now: at(10) });
+  assert.equal(model.patterns.length, samples.length);
+  assert.equal(model.patterns.some(p => p.key === null), false);
+  assert.equal(model.patterns.reduce((n, p) => n + p.total, 0), samples.length);
+  assert.equal(model.openDivergences, samples.length);
 });
 
 test('revocation and expiry stop future application, retain history and preserve deduped decisions', t => {

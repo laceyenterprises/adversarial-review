@@ -1,10 +1,13 @@
 // Config-only repository fence for autonomous merge decisions and writes.
 export const MERGE_DISABLED_FOR_REPOSITORY = 'merge-disabled-for-repository';
 
+const normalizedLists = new WeakSet();
+
 export function normalizeDisabledRepositories(list) {
   if (!Array.isArray(list)) throw new TypeError('disabled_repositories requires a list');
+  if (normalizedLists.has(list)) return list;
   const seen = new Set();
-  return list.map(item => {
+  const normalized = list.map(item => {
     if (typeof item !== 'string' || item.trim() !== item || !/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(item)) {
       throw new TypeError('disabled_repositories items must be owner/name strings');
     }
@@ -13,6 +16,9 @@ export function normalizeDisabledRepositories(list) {
     seen.add(repo);
     return repo;
   });
+  // Only immutable validation results can safely skip later validation.
+  normalizedLists.add(normalized);
+  return Object.freeze(normalized);
 }
 
 export function isMergeDisabledForRepository(cfgOrList, repo) {
@@ -20,7 +26,7 @@ export function isMergeDisabledForRepository(cfgOrList, repo) {
   if (!list.length || typeof repo !== 'string' || repo.trim() !== repo) return false;
   const match = /^(?:https:\/\/github\.com\/|[A-Za-z0-9_.-]+\/)?([A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+)$/i.exec(repo);
   if (!match) return false;
-  const name = /^https:\/\//i.test(repo) ? match[1].replace(/\.git$/i, '') : match[1];
+  const name = match[1].replace(/\.git$/i, '');
   return list.includes(name.toLowerCase());
 }
 

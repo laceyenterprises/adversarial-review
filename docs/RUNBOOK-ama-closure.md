@@ -568,13 +568,20 @@ of `owner/name` strings (default `[]`); names compare lowercased and duplicates
 are rejected. For example, `example-org/example-repo` disables autonomous merge
 for that repository while reviews and remediation rounds still run. Closure
 planning writes a fail-closed `merge-disabled-for-repository` audit and skips
-closer dispatch; daemon, fast-merge and queue adapter execution also refuse the
-merge. Fast-merge moves the row to its existing blocked state so it cannot
-repeat the audit or consume later poll caps. The operator merges these PRs by
-hand. Unlisted repositories keep their existing behavior. This value works only after both the review watcher and the
-parent platform's worker preflight reader recognize the key; verify the watcher
-reader by reading back `getMergeAuthorityConfig().disabledRepositories`. The key
-has no environment alias. Nothing changes until a repository is listed.
+closer dispatch; the public closure result retains its R02 operator hold, so
+watcher coexistence returns `await-operator` without automated recovery.
+Daemon, fast-merge and finalization execution also refuse the merge. The
+finalization executor checks before lane routing and before any injected
+adjudicate surface, local fallback or default GitHub adapter can merge.
+Plain, host-prefixed and GitHub HTTPS references accept a trailing `.git`.
+Loader-normalized lists are immutable and reused by repository queries; raw
+lists still receive validation. Fast-merge moves the row to its existing blocked
+state so it cannot repeat the audit or consume later poll caps. The operator
+merges these PRs by hand. Unlisted repositories keep their existing behavior.
+This value works only after both the review watcher and the parent platform's
+worker preflight reader recognize the key; verify the watcher reader by reading
+back `getMergeAuthorityConfig().disabledRepositories`. The key has no environment
+alias. Nothing changes until a repository is listed.
 
 ## Change notes
 

@@ -389,6 +389,54 @@ test('RDXMERGEOFF-02: executor passes repository merge-off to its default adapte
   assert.equal(h.state().workflow.merge, null);
 });
 
+for (const surface of ['adjudicateSurface', 'mergeFallback']) {
+  test(`repository merge-off fences injected ${surface} before lane routing`, async t => {
+    let calls = 0;
+    const h = harness(t, {
+      disabledRepositories: ['EXAMPLE/PROJECT'],
+      adjudicateSurface: null,
+      [surface]: { merge: async () => { calls++; return { ok: true }; } },
+      laneRouting: { run: () => assert.fail('listed repository must not enter a merge lane') },
+    });
+    for (const n of [100, 200]) {
+      const result = await h.tick(n);
+      assert.equal(result.status, 'deferred');
+      assert.equal(result.reason, 'merge-disabled-for-repository');
+    }
+    assert.equal(calls, 0);
+    assert.equal(h.state().workflow.merge, null);
+    assert.equal(h.state().workflow.escalation, null);
+    assert.deepEqual(h.state().workflow.operations, {});
+  });
+
+  test(`unlisted repository can merge through injected ${surface}`, async t => {
+    let calls = 0;
+    const h = harness(t, {
+      disabledRepositories: ['example/other-project'],
+      adjudicateSurface: null,
+      [surface]: { merge: async () => { calls++; return { ok: true }; } },
+    });
+    assert.equal((await h.tick(100)).status, 'executed');
+    assert.equal(calls, 1);
+  });
+}
+
+test('repository merge-off still permits a remediation dispatch', async t => {
+  let calls = 0;
+  const h = harness(t, {
+    disabledRepositories: ['example/project'],
+    remediationSurface: { dispatch: async () => {
+      calls++;
+      return { admitted: true, launchId: 'fixture-launch', admittedAt: at(200) };
+    } },
+  });
+  h.append('verdict_recorded', { revisionRef: 'head-A', verdictKind: 'request-changes',
+    stageId: 'review', role: 'independent' }, 1);
+  assert.equal((await h.tick(200)).action, 'dispatch-remediation');
+  assert.equal(calls, 1);
+  assert.equal(h.calls.length, 0);
+});
+
 test('RDXMERGEOFF-02: default executor reads the repository list through the cached loader', async t => {
   const dir = mkdtempSync(join(tmpdir(), 'executor-merge-off-'));
   const previous = process.env.AGENT_OS_CONFIG_PATH;

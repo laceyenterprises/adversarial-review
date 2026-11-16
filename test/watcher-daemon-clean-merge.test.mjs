@@ -4530,6 +4530,17 @@ test('RDXMERGEOFF-02: repository merge-off audits once and dispatches neither me
     assert.equal(audits[0].reason, 'merge-disabled-for-repository');
     assert.equal(audits[0].repoPath, repoPath);
     assert.equal(audits[0].flagState.autonomousMergeExecutionEnabled, false);
+    assert.equal(result.nextAction.row, 'R02-hold');
+    assert.equal(result.nextAction.action, 'operator-hold');
+    assert.equal(result.nextAction.reason, 'merge-disabled-for-repository');
+    const coexistence = await resolveMergeAgentCoexistenceForWatcher({
+      ...baseArgs(rootDir), repoPath,
+      maybeDispatchAmaClosureForImpl: async () => result,
+      recoverAmaAutomationImpl: async () => assert.fail('repository hold must not enter recovery'),
+      recoverOrphanImpl: async () => assert.fail('repository hold must not enter orphan recovery'),
+    });
+    assert.equal(coexistence.outcome, 'await-operator');
+    assert.equal(coexistence.amaClosureResult.nextAction, result.nextAction);
   } finally { rmSync(rootDir, { recursive: true, force: true }); }
 });
 

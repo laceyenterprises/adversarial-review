@@ -2814,8 +2814,11 @@ Key control points:
   `roles.adversarial.merge_authority.disabled_repositories` list (default `[]`)
   selects the existing disabled-merge branch and R02 operator hold for listed
   repositories with reason `merge-disabled-for-repository`. Closure dispatch,
-  daemon, fast-merge and queue adapter merges refuse; review and remediation
-  paths remain unchanged. Names compare lowercased; duplicates are rejected.
+  daemon, fast-merge and all finalization merge surfaces refuse, including
+  injected adjudicate and local fallback surfaces before lane routing. The
+  public closure result preserves R02 through watcher coexistence, which returns
+  `await-operator` without automated recovery. Review and remediation paths
+  remain unchanged. Names compare lowercased; duplicates are rejected.
   Operators merge these PRs manually after both config readers support the key.
 - **No re-hammer loop.** A stale head does not spawn a second hammer chain;
   the daemon records `stale-head` as permanent for that validated head and

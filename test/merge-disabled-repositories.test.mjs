@@ -14,6 +14,7 @@ import { deriveNextActionSnapshot, nextAction } from '../src/pr-next-action.mjs'
 
 const listed = ['Example-Org/Example-Repo'];
 const forms = ['example-org/example-repo', 'EXAMPLE-ORG/EXAMPLE-REPO',
+  'example-org/example-repo.git', 'HOST/Example-Org/Example-Repo.git',
   'HOST/Example-Org/Example-Repo', 'https://github.com/Example-Org/Example-Repo',
   'HTTPS://GITHUB.COM/EXAMPLE-ORG/EXAMPLE-REPO.GIT'];
 
@@ -24,6 +25,21 @@ test('repository merge-off normalization validates complete names and rejects fo
     ['Owner/Name', 'owner/name']]) {
     assert.throws(() => normalizeDisabledRepositories(value), TypeError);
   }
+});
+
+test('validated repository lists are reused across repeated query paths', () => {
+  const normalized = normalizeDisabledRepositories(listed);
+  assert.equal(normalizeDisabledRepositories(normalized), normalized);
+  assert.throws(() => normalized.push('other/repo'), TypeError);
+  for (const repo of forms) {
+    assert.equal(isMergeDisabledForRepository(normalized, repo), true);
+    assert.equal(isMergeDisabledForRepository({ disabledRepositories: normalized }, repo), true);
+  }
+  assert.throws(() => isMergeDisabledForRepository(['Owner/Name', 'owner/name'], forms[0]), TypeError);
+  const raw = ['owner/name'];
+  assert.equal(isMergeDisabledForRepository(raw, 'owner/name'), true);
+  raw.push('OWNER/NAME');
+  assert.throws(() => isMergeDisabledForRepository(raw, 'owner/name'), TypeError);
 });
 
 test('repository merge-off matches each supported repo form and leaves other inputs unchanged', () => {
@@ -101,7 +117,7 @@ test('queue merge surface refuses listed repositories before any adapter invocat
   let calls = 0;
   const surface = createGithubAdapterMergeSurface({ disabledRepositories: listed,
     execFileImpl: async () => { calls++; assert.fail('adapter call'); } });
-  for (const repo of forms.slice(0, 3)) {
+  for (const repo of forms) {
     const result = await surface.merge({ subjectExternalId: `${repo}#17`, revisionRef: 'synthetic-head' });
     assert.deepEqual(result, { ok: false, reason: REASON });
   }

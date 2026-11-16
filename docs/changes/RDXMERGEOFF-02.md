@@ -12,14 +12,22 @@ merge. No repository is listed by this change.
 - `roles.adversarial.merge_authority.disabled_repositories` defaults to `[]`.
   Entries must be complete `owner/name` strings; normalization lowercases them
   and rejects duplicates. There is no environment alias.
-- `getMergeAuthorityConfig().disabledRepositories` exposes the normalized list.
+- `getMergeAuthorityConfig().disabledRepositories` exposes an immutable normalized
+  list, reused without revalidation by query paths. Raw inputs remain validated.
   Closure orchestration applies the repository override without changing
   `enabled`; next-action policy selects an operator hold for this reason.
-- Daemon merge, fast-merge processing and the queue GitHub adapter surface accept
+- Daemon merge, fast-merge processing and the finalization executor accept
   `disabledRepositories` and refuse listed repositories before merge writes.
   Daemon refusal precedes leases and records one failed attempt; fast-merge uses
   its existing blocked state and audit, preventing repeated audits and poll-cap
   starvation. Factories propagate the list from configuration.
+  Finalization refuses before lane routing and all injected/default merge
+  surfaces, while remediation dispatch stays available. Plain, host-prefixed
+  and GitHub HTTPS references consistently strip a trailing `.git`.
+- The public closure wrapper already preserves the R02 decision; the final
+  comment-only remediation adds an integration assertion proving that watcher
+  coexistence returns `await-operator` without automated recovery. No closure
+  production-code change was necessary for that finding.
 - Shared eligibility, lane routing, worker scripts and review paths are unchanged.
   Both the watcher reader and the parent platform's worker reader must recognize
   the key before configuration can rely on it; see the
@@ -48,3 +56,21 @@ Eleven existing assertions across these six files also fail with unchanged
 `npm run typecheck:contracts`, the SMV contract/sandbox suite and
 `bash demo/research-finding-walkthrough.sh` passed. The full `npm test` command
 was intentionally excluded in favor of the ticket's scoped validation contract.
+
+### Final comment-only remediation
+
+The bounded seven-file `node test/run-tests.mjs` run passed all 413 tests:
+`merge-disabled-repositories`, `finalization-executor`,
+`finalization-execution-surfaces`, `watcher-claim-loop`, `ama-daemon-merge`,
+`follow-up-merge-agent-fast-merge` and `smv` (all under `test/*.test.mjs`).
+An earlier three-file run passed 179 tests, including all 130
+`watcher-daemon-clean-merge` tests and the public R02/coexistence regression.
+The initial expanded run exceeded its 60-second bound; the same selected
+checks passed with a 240-second bound.
+
+`npm run lint` passed with zero errors (149 existing warnings),
+`npm run typecheck:contracts`, `bash demo/research-finding-walkthrough.sh`
+and `git diff --check` passed. No full local suite was run; required PR-head
+CI remains the merge gate. No persistent store shape or state-graph change
+was introduced. The governing runbook, README and state/smoke declarations
+describe the executor fence and verified existing R02 handoff.

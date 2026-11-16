@@ -61,7 +61,7 @@ export function parseCommitTrailerValues(message) {
     const marker = lines[conflict][0];
     const suffix = lines.slice(conflict + 1);
     if (suffix.some(line => line.startsWith(`${marker}\t`) && line.length > 2)
-      && suffix.every(line => !line.trim() || line === marker
+      && suffix.every(line => !line.trim() || line.trim() === marker
         || line.startsWith(`${marker}\t`) && line.length > 2)) {
       lines = lines.slice(0, conflict);
     }

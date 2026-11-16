@@ -27,10 +27,24 @@ for (const marker of [';', '#']) {
     const footer = `\n${marker} Conflicts:\n${marker}\tresolved/file.mjs\n`;
     assert.deepEqual(parseCommitTrailerValues(described + footer), parseCommitTrailerValues(original));
   });
+  for (const whitespace of [' ', '\t', ' \t ']) {
+    test(`LAC-2202 accepts ${marker} comment-only footer lines with trailing ${JSON.stringify(whitespace)}`, () => {
+      const original = message.slice(0, message.indexOf('; Conflicts:')).trimEnd();
+      const footer = `\n${marker} Conflicts:\n${marker}${whitespace}\n${marker}\tdocs/guide.md\n${marker}${whitespace}\n`;
+      assert.deepEqual(parseCommitTrailerValues(original + footer), parseCommitTrailerValues(original));
+      assert.equal(hamCommitIdentityMatches({ ...commits[1], commit: { message: original + footer } }), true);
+      assert.equal(hamCommitIdentityMatches({ ...commits[1],
+        commit: { message: original + '\nWorker-Class: codex' + footer } }), false);
+    });
+  }
 }
 
 for (const suffix of ['\nordinary prose', '\n; Conflicts:\n;\n',
   '\n; Conflicts:\n;\tdocs/guide.md\nuntrusted prose',
+  '\n; Conflicts:\n;\tdocs/guide.md\n; untrusted prose ',
+  '\n# Conflicts:\n#\tdocs/guide.md\n# untrusted prose ',
+  '\n; Conflicts:\n;\tdocs/guide.md\n# ',
+  '\n# Conflicts:\n#\tdocs/guide.md\n; ',
   '\n; Conflicts:\n#\tdocs/guide.md', '\n; Other:\n;\tdocs/guide.md']) {
   test(`LAC-2202 arbitrary trailing text does not recover provenance: ${JSON.stringify(suffix)}`, () => {
     assert.deepEqual(parseCommitTrailers('Repair\n\nWorker-Class: hammer' + suffix), {});

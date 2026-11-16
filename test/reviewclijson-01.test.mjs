@@ -66,7 +66,7 @@ test('invalid JSON releases the same seat, backs off, and only parks at the cons
     }, async identity => {
       assert.equal(identity.user, 'synthetic-seat');
       try {
-        resolveReviewCli('gemini', { execFileSyncImpl: () => '{synthetic malformed', log: quiet });
+        resolveReviewCli('gemini', { env: { ...process.env, HQ_BIN: process.execPath }, execFileSyncImpl: () => '{synthetic malformed', log: quiet });
         assert.fail('malformed JSON must refuse resolution');
       } catch (err) {
         return { ok: false, failureClass: classifyReviewerFailure(err.message, 1, null, err), error: err.message };
@@ -96,7 +96,7 @@ test('a thrown typed resolver error also releases a healthy identity', async () 
       acquire: async () => ({ user: 'synthetic-seat', reviewId: 'synthetic-review' }),
       release: async (_lease, outcome) => releases.push(outcome),
     },
-  }, async () => resolveReviewCli('gemini', { execFileSyncImpl: () => '{synthetic malformed', log: quiet })),
+  }, async () => resolveReviewCli('gemini', { env: { ...process.env, HQ_BIN: process.execPath }, execFileSyncImpl: () => '{synthetic malformed', log: quiet })),
   { name: 'ReviewCliResolutionError' });
   assert.deepEqual(releases, [{ failed: false, reason: 'cli-resolution-transient' }]);
 });

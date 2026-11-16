@@ -42,3 +42,15 @@ All commands ran through the bounded worker validation wrapper.
 - `git diff --check`: passed. Full local suite intentionally not run in remediation.
 - Live launchd PATH and natural terminal-alert/retrigger recovery remain deployment
   verification; the runbook names both checks and the supported reset command.
+
+### PR 1895 CI repair
+
+- Node 22 and Node 26 PR-head CI each reported three failures in
+  `host-observation-refusal.test.mjs` and `reviewclijson-01.test.mjs`.
+  The terminal settlement fixture now supplies the guarded statement, and
+  malformed-protocol fixtures supply an explicit resolver command so they test
+  protocol handling without depending on the CI runner's PATH.
+- `npm test -- host-observation-refusal.test.mjs reviewclijson-01.test.mjs review-cli-resolver.test.mjs reviewer-spawn-settle.test.mjs`:
+  71 passed, zero failed (bounded runner).
+- `npm run lint`: zero errors, 149 existing warnings; `npm run typecheck:contracts`,
+  `bash demo/research-finding-walkthrough.sh`, and `git diff --check`: passed.

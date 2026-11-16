@@ -144,7 +144,7 @@ test('entitlement refusal stays terminal through subprocess classification, sett
     failureAt: '2026-01-01T00:00:00Z', log: {warn() {}},
     result: {ok: false, failureClass, error: refusal.message},
     statements: {
-      markFailed: {run: (...args) => calls.push(args)},
+      markSizeFailed: {run: (...args) => calls.push(args)},
       markPendingUpstream: {run: () => assert.fail('configuration faults must not retry')},
       markCascadeFailed: {run: () => assert.fail('configuration faults must not spend infra recovery')},
     }});

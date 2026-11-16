@@ -336,3 +336,63 @@ test('pending launch without an id does not exhaust before its lease expiry', as
   });
   assert.equal(readAmaCloserLease(rootDir, identity), null);
 });
+
+test('closed-PR cancel retries the original HQ launch after the reaper retires its lease', async (t) => {
+  const { rootDir, identity, dispatchPath } = fixture(t);
+  const queuePath = join(rootDir, 'data', 'ama-closer-cancels', 'o__r-pr-7.json');
+  queueCloserCancelForClosedPr({ rootDir, repo: identity.repo, prNumber: identity.prNumber });
+  updateAmaCloserLease({ rootDir, ...identity, status: 'terminal',
+    terminalOutcome: 'pr-closed-externally' });
+  writeFileSync(dispatchPath, JSON.stringify({ ...identity, launchRequestId: 'lrq_7',
+    lastObservedStatus: 'failed-without-merge', reapedByFollowUpReaper: true }));
+  const launched = [];
+  const options = {
+    rootDir, retryMs: 0,
+    liveStateImpl: async () => ({ state: 'CLOSED', headRefOid: identity.headSha }),
+    cancelImpl: (args) => cancelCloserForTerminalPr({
+      ...args, hqPath: 'hq', hqRoot: rootDir,
+      execFileImpl: async (_bin, argv) => {
+        launched.push(argv[2]);
+        return { stdout: JSON.stringify(launched.length === 1
+          ? { ok: true, currentStatus: 'admitted', cancelApplied: false }
+          : { ok: true, currentStatus: 'canceled', cancelApplied: true }) };
+      },
+    }),
+    logger: { warn() {}, log() {} },
+  };
+
+  await retryPendingCloserCancels(options);
+  assert.deepEqual(launched, ['lrq_7']);
+  assert.equal(JSON.parse(readFileSync(queuePath, 'utf8')).state, 'pending');
+  assert.equal(JSON.parse(readFileSync(dispatchPath, 'utf8')).lastObservedStatus, 'failed-without-merge');
+
+  await retryPendingCloserCancels(options);
+  assert.deepEqual(launched, ['lrq_7', 'lrq_7']);
+  assert.equal(existsSync(queuePath), false);
+  assert.equal(JSON.parse(readFileSync(dispatchPath, 'utf8')).lastObservedStatus, 'canceled');
+  assert.equal(readAmaCloserLease(rootDir, identity).terminalOutcome, 'pr-closed-externally');
+});
+
+test('a queued launch ID fences a same-head replacement', async (t) => {
+  const { rootDir, identity, dispatchPath } = fixture(t);
+  const queued = queueCloserCancelForClosedPr({ rootDir, repo: identity.repo, prNumber: identity.prNumber });
+  assert.equal(queued.launchRequestId, 'lrq_7');
+  updateAmaCloserLease({ rootDir, ...identity, status: 'dispatched', lrqId: 'lrq_replacement' });
+  writeFileSync(dispatchPath, JSON.stringify({ ...identity, launchRequestId: 'lrq_replacement',
+    lastObservedStatus: 'running' }));
+  await retryPendingCloserCancels({
+    rootDir,
+    liveStateImpl: async () => ({ state: 'CLOSED', headRefOid: identity.headSha }),
+    cancelImpl: (args) => cancelCloserForTerminalPr({
+      ...args, hqPath: 'hq', hqRoot: rootDir,
+      execFileImpl: async (_bin, argv) => {
+        assert.deepEqual(argv, ['dispatch', 'cancel', 'lrq_7', '--reason', 'obsolete-closer-pr-closed']);
+        return { stdout: '{"ok":true,"currentStatus":"canceled"}' };
+      },
+    }),
+    logger: { log() {} },
+  });
+  assert.equal(readAmaCloserLease(rootDir, identity).lrqId, 'lrq_replacement');
+  assert.equal(readAmaCloserLease(rootDir, identity).status, 'dispatched');
+  assert.equal(JSON.parse(readFileSync(dispatchPath, 'utf8')).lastObservedStatus, 'running');
+});

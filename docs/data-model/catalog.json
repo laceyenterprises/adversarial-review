@@ -1297,7 +1297,8 @@
       "store": "data/ama-closer-cancels/",
       "schemaSurface": "src/ama/closer-terminal-cancel.mjs",
       "relatedSchemaSurfaces": ["src/pr-lifecycle-sync.mjs", "src/posted-review-row.mjs"],
-      "owner": "AMA lifecycle settlement"
+      "owner": "AMA lifecycle settlement",
+      "cancelEvidence": "The optional launchRequestId pins the observed HQ launch across local lease retirement. Legacy obligations use their original head. Nonterminal HQ responses retain the obligation and replacement launches retain their custody."
     },
     {
       "id": "runtime-settle-smoke",

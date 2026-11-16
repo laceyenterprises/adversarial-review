@@ -13,10 +13,15 @@ mirror marks the PR closed. The queue survives watcher restarts and lets the
 terminal mark proceed without an HQ subprocess in its critical path.
 
 Each `<repo-slug>-pr-<number>.json` record has `schemaVersion: 1`, `repo`,
-`prNumber`, `targetHeadSha`, `queuedAt`, `attempts`, `lastAttemptAt`, and `state`. `targetHeadSha` identifies the lease observed when the obligation was queued; an exhausted record is replaced if a later close has a different live lease head. On a failed
-attempt, `lastError` stores a bounded diagnostic. `state` is `pending` until
-HQ cancellation or definitive no-worker evidence settles the lease; the
-record is then deleted. After five failed attempts, `state` becomes
+`prNumber`, `targetHeadSha`, `queuedAt`, `attempts`, `lastAttemptAt`, and `state`.
+`targetHeadSha` identifies the lease that was observed at close. When known,
+`launchRequestId` pins the specific HQ launch. Absent or null launch IDs use
+the lease or dispatch record for that head, including a lease retired by the
+reaper. An exhausted record is replaced if a later close has a different live
+lease head. On a failed attempt, `lastError` stores a bounded diagnostic.
+`state` stays `pending` while HQ reports a nonterminal launch. Terminal HQ
+evidence or definitive no-worker evidence settles the obligation, and the
+record is then deleted. A replacement lease or dispatch retains its custody. After five failed attempts, `state` becomes
 `exhausted`, the record is retained for operator inspection, and an alert is
 queued. The `alerted` flag records successful alert queueing; a failed alert
 write is retried on a later tick. The watcher drains at most three obligations per tick and spaces

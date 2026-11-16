@@ -1,0 +1,12 @@
+{
+  "version": 1,
+  "entries": [{
+    "id": "finalization-shadow-pattern-existing-overrides",
+    "title": "Shadow pattern application to existing divergences",
+    "path": "docs/data-model/finalization-shadow.md",
+    "store": "<runtime rootDir>/data/reviews.db",
+    "schemaSurface": "src/finalization/shadow-store.mjs",
+    "relatedSchemaSurfaces": ["src/kernel/contracts.d.ts"],
+    "audit": "Individual pattern-apply-existing overrides retain reviewer, applier, timestamps and superseded overrides; atomic revocation reopens current overrides without deleting history. No schema migration."
+  }]
+}

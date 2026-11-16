@@ -208,7 +208,7 @@ test('expanded vocabulary re-keys old evidence and reports without backfilling d
   assert.throws(() => store.addPattern({ ...record(error), ...audit(4) }), /eligible divergence/);
   const model = buildShadowReport({ observations: [historical, match], now: at(10) });
   assert.deepEqual(model.patterns, [
-    { key: shadowPatternKey(historical), total: 2, byPattern: 1, byIndividualOverride: 0, open: 1, byClassifier: 0 },
+    { key: shadowPatternKey(historical), total: 2, byPattern: 1, byPatternExisting: 0, byIndividualOverride: 0, open: 1, byClassifier: 0 },
   ]);
   assert.equal(JSON.parse(store.db.prepare('SELECT payload_json FROM finalization_shadow WHERE id=?').get(sample.id).payload_json).patternKey, null);
 });
@@ -273,8 +273,8 @@ test('report counts pattern, individual and open dispositions per exact pattern'
   const other = store.append(observation(4, { v2Decision: { kind: 'wait', reason: 'checks patience expired' } }));
   const model = buildShadowReport({ observations: store.read(), now: at(10) });
   assert.deepEqual(model.patterns, [
-    { key: shadowPatternKey(sample), total: 3, byPattern: 1, byIndividualOverride: 1, open: 1, byClassifier: 0 },
-    { key: shadowPatternKey(other), total: 1, byPattern: 0, byIndividualOverride: 0, open: 1, byClassifier: 0 },
+    { key: shadowPatternKey(sample), total: 3, byPattern: 1, byPatternExisting: 0, byIndividualOverride: 1, open: 1, byClassifier: 0 },
+    { key: shadowPatternKey(other), total: 1, byPattern: 0, byPatternExisting: 0, byIndividualOverride: 0, open: 1, byClassifier: 0 },
   ]);
   assert.equal(model.openDivergences, 2);
   assert.equal(model.promotionGate.openDivergences, 2);

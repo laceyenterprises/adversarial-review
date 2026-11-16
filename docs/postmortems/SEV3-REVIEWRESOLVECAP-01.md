@@ -29,24 +29,29 @@ stranded behind historical failures and cap evidence.
 
 ## Correction
 
-Resolution backoff now scales with host load. At the consecutive threshold or
-an exhausted infrastructure budget, settlement re-probes the resolver. A healthy
-result releases the matching session without charging either budget and resets
-the resolution streak. Five consecutive failures, separated by gaps no greater
-than one hour, still enter bounded infrastructure recovery when the fresh probe
-fails. A changed failure class or longer gap starts a fresh streak.
+Settlement performs no resolver probe: it records failures and applies
+ordinary bounded escalation at the five-failure threshold. After durable
+backoff, poll-time probes run only below the infrastructure cap. Each
+repository discovery pass shares one watcher-context result per CLI. A healthy
+probe re-queues the exact observed open row and clears all claim columns; it
+preserves the failure streak and budgets. A failed probe schedules a
+load-aware hold and ends processing for that row in the same tick. Both
+observations preserve failure breakdowns and reasons. At the infrastructure
+cap, probes are bypassed so existing cap alerts and scheduled recovery remain
+authoritative. Resolution backoff scales with host load; a changed failure
+class or a gap over one hour beyond the scheduled nextRetryAfter starts a
+fresh streak. Watcher probes are advisory: they do not reproduce
+credential-staged spawn environments or Gemini antigravity selection. Only a
+successful review clears failure history.
 
-After durable backoff, failed-row recovery also probes before cap handling or
-charging another attempt. A healthy result re-queues only the observed row using
-its status, failure, head and session as compare-and-swap evidence. Historical
-budget counters remain intact. Failed probes preserve bounded recovery and
-terminal evidence. Identity isolation, credentials, and merge rules are unchanged.
+Identity isolation, credentials and merge rules are unchanged.
 
 ## Verification and recovery
 
 Synthetic offline tests cover exit-one versus timeout diagnostics, timeout retry
 under simulated load, scaled backoff, persistent failure escalation, healthy
-re-probes at the threshold and cap, and stale probes racing a replacement claim.
+poll-time probes below the cap, preserved failure streaks, shared failed probes,
+claim cleanup, closed-PR refusal and stale probes racing a replacement claim.
 See the ticket change note for executed checks. Source tests establish behavior,
 not deployed recovery. This change performs no live database edits, re-triggers,
 watcher changes, or incident notifications. Normal deployment activates the fix.

@@ -90,7 +90,9 @@ to `pending` below the five-consecutive-transient threshold before bounded
 `pending-upstream` recovery. Settlement records failures without probing; after
 backoff, async poll-time probes can re-queue healthy terminal resolution rows.
 Probe observations preserve failure counts and reasons and schedule their next
-hold. Invalid JSON diagnostics contain only byte/line
+hold. Below the infrastructure cap, repository discovery shares one probe per
+CLI and stops processing a failed probe for that tick. At the cap, probes are
+bypassed so the existing operator alert and recovery path remain authoritative. Invalid JSON diagnostics contain only byte/line
 counts and a protocol-line presence flag. Each resolution
 logs path, version and digest before execution; Codex auth, direct-tools catalog
 and exec share the returned immutable path. See the

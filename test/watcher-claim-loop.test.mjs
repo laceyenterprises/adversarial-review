@@ -5683,3 +5683,64 @@ test('budget-deferred runtime returns its claim to pending and the next poll hon
     assert.equal(result.status, 0, `${result.stdout || ''}${result.stderr || ''}`);
   } finally { rmSync(tmp, { recursive: true, force: true }); }
 });
+
+test('CLI resolution at the infra cap alerts even when watcher probes would be healthy', () => {
+  const recoveryUrl = fileUrl('src', 'review-cli-recovery.mjs');
+  const alertUrl = fileUrl('src', 'alert-delivery.mjs');
+  runHoldReleaseRegression({
+    followUpJobsSource: DEFAULT_FOLLOW_UP_JOBS_SOURCE.replaceAll('roundBudget: 1', 'roundBudget: 8')
+      .replaceAll('latestMaxRounds: 1', 'latestMaxRounds: 8'),
+    transformLoader: source => source.replace('  return nextLoad(url, context);', `
+      if (url === ${JSON.stringify(recoveryUrl)}) return { format: 'module', shortCircuit: true, source:
+        'export async function recoverHealthyReviewCli() { throw new Error("capped row must bypass probe"); }' };
+      if (url === ${JSON.stringify(alertUrl)}) return { format: 'module', shortCircuit: true, source: ${JSON.stringify(`
+        export * from ${JSON.stringify(alertUrl + '?actual')};
+        export async function deliverAlert(_body, options) {
+          (globalThis.__cliCapAlerts ||= []).push(options);
+          return { delivered: true };
+        }
+      `)} };
+      return nextLoad(url, context);
+    `),
+    setup: `
+      db.prepare(\`INSERT INTO reviewed_prs(repo,pr_number,reviewed_at,reviewer,pr_state,
+        review_status,review_attempts,infra_auto_recover_attempts,reviewer_head_sha,revision_ref,
+        failed_at,failure_message) VALUES (?,101,?,'claude','open','failed',0,3,
+        'sha-happy-101','sha-happy-101',?,'[cli-resolution-transient] persistent spawn failure')\`)
+        .run('laceyenterprises/adversarial-review', new Date().toISOString(), new Date().toISOString());
+    `,
+    verify: `
+      assert.ok(globalThis.__cliCapAlerts.some(alert =>
+        alert.event === 'adversarial_review.cascade_cap_exhausted'));
+      assert.equal(db.prepare('SELECT review_status FROM reviewed_prs WHERE pr_number=101').get().review_status, 'failed');
+      assert.ok(!claims.some(claim => claim.prNumber === 101));
+    `,
+  });
+});
+
+test('failed CLI probe ends the tick without a charged recovery claim', () => {
+  const recoveryUrl = fileUrl('src', 'review-cli-recovery.mjs');
+  runHoldReleaseRegression({
+    followUpJobsSource: DEFAULT_FOLLOW_UP_JOBS_SOURCE.replaceAll('roundBudget: 1', 'roundBudget: 8')
+      .replaceAll('latestMaxRounds: 1', 'latestMaxRounds: 8'),
+    transformLoader: source => source.replace('  return nextLoad(url, context);', `
+      if (url === ${JSON.stringify(recoveryUrl)}) return { format: 'module', shortCircuit: true, source:
+        'export async function recoverHealthyReviewCli() { globalThis.__cliFailedProbes = (globalThis.__cliFailedProbes || 0) + 1; return false; }' };
+      return nextLoad(url, context);
+    `),
+    setup: `
+      db.prepare(\`INSERT INTO reviewed_prs(repo,pr_number,reviewed_at,reviewer,pr_state,
+        review_status,review_attempts,infra_auto_recover_attempts,reviewer_head_sha,revision_ref,
+        failed_at,failure_message) VALUES (?,101,?,'claude','open','failed',0,1,
+        'sha-happy-101','sha-happy-101',?,'[cli-resolution-transient] resolver outage')\`)
+        .run('laceyenterprises/adversarial-review', new Date().toISOString(), new Date().toISOString());
+    `,
+    verify: `
+      assert.equal(globalThis.__cliFailedProbes, 1);
+      const row = db.prepare('SELECT * FROM reviewed_prs WHERE pr_number=101').get();
+      assert.equal(row.infra_auto_recover_attempts, 1);
+      assert.equal(row.review_status, 'failed');
+      assert.ok(!claims.some(claim => claim.prNumber === 101));
+    `,
+  });
+});

@@ -1461,6 +1461,7 @@ async function pollOnceWithinBudget(
     await reconcileDuplicateFamilyLabels({ db, octokit, repoPath, logger: console, census: duplicateFamilyCensus, cfg: loadConfigCached({ env: process.env }).getMergeAuthorityConfig() });
     holdSubjects.push(...subjectEntries.map(entry => ({ repoPath, prNumber: entry.prNumber,
       headSha: entry.subject?.headSha, reviewedSha: entry.current?.reviewer_head_sha, holdMetadata: entry.subject })));
+    reviewContext.reviewCliProbeCache = new Map();
     for (const subjectEntry of subjectEntries) {
       await processReviewSubject(subjectEntry, { ...reviewContext });
       watcherHeartbeat?.markPollProgress?.();

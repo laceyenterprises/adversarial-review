@@ -42,7 +42,7 @@ Directory: `data/cascade-state/`
 
 | Field | Shape | Contract |
 |---|---|---|
-| `consecutiveTransientFailures` | number | PR-level consecutive transient failure count, clamped at the cascade failure cap. This drives the `1, 2, 4, 8, 15` minute backoff schedule. For CLI resolution, a fresh healthy probe resets it to zero; a changed failure class or a gap over one hour starts a fresh streak. Resolution backoff additionally scales with host load. |
+| `consecutiveTransientFailures` | number | PR-level consecutive transient failure count, clamped at the cascade failure cap. This drives the `1, 2, 4, 8, 15` minute backoff schedule. For CLI resolution, probes preserve the streak; a changed failure class or a gap over one hour beyond the scheduled `nextRetryAfter` starts a fresh streak. Resolution backoff additionally scales with host load. |
 | `consecutiveCascadeFailures` | number | Legacy cascade-only count. Readers fold it into new counters when old state is encountered; new writes use `consecutiveTransientFailures`. |
 | `transientFailureBreakdown` | object from failure class to count | PR-level, reviewer-agnostic failure totals. These counts explain the PR-level hold and remain flat across all reviewer models. |
 | `transientFailureBreakdownByModel` | object from normalized model name to failure-class counts | Model-specific failure totals used only for model-specific routing and fallback decisions. These counts must not replace the flat PR-level hold counters. |
@@ -71,16 +71,20 @@ still runs.
 breakdown maps. It represents executable-resolution infrastructure failure,
 independent of OAuth. Below the existing five-consecutive-transient threshold,
 settlement releases the matching reviewer claim to `pending` without charging
-attempts; the durable backoff still gates the next claim. Settlement performs no
-resolver probe: it records the failure and applies ordinary bounded escalation
-at the five-failure threshold. After durable backoff, the poll path
-asynchronously probes every terminal or pending-upstream resolution row before
-cap handling or a charged recovery claim. A healthy probe re-queues only the
-exact observed row, resets the streak and schedules the initial load-aware hold
-without incrementing failure breakdowns or overwriting the last failure
-evidence. A failed probe schedules another load-aware hold without counting a
-new reviewer failure. Resolution backoff scales with host load; a changed
-failure class or a gap over one hour starts a fresh streak. This class
+attempts; the durable backoff still gates the next claim. Settlement performs
+no resolver probe: it records failures and applies ordinary bounded escalation
+at the five-failure threshold. After durable backoff, poll-time probes run
+only below the infrastructure cap. Each repository discovery pass shares one
+watcher-context result per CLI. A healthy probe re-queues the exact observed
+open row and clears all claim columns; it preserves the failure streak and
+budgets. A failed probe schedules a load-aware hold and ends processing for
+that row in the same tick. Both observations preserve failure breakdowns and
+reasons. At the infrastructure cap, probes are bypassed so existing cap alerts
+and scheduled recovery remain authoritative. Resolution backoff scales with
+host load; a changed failure class or a gap over one hour beyond the scheduled
+nextRetryAfter starts a fresh streak. Watcher probes are advisory: they do not
+reproduce credential-staged spawn environments or Gemini antigravity
+selection. Only a successful review clears failure history. This class
 never writes reviewer credential-outage state or isolates the reviewer seat.
 
 ## Mixed-State Semantics

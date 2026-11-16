@@ -350,7 +350,7 @@ function recordCascadeFailure(rootDir, {
   if (failureClass === 'cli-resolution-transient'
     && (previous?.lastFailureClass !== failureClass
       || (typeof failedAt === 'number' ? failedAt : Date.parse(failedAt))
-        - Date.parse(previous?.lastFailureAt) > 60 * 60_000)) previousCount = 0;
+        - Date.parse(previous?.nextRetryAfter ?? previous?.lastFailureAt) > 60 * 60_000)) previousCount = 0;
   const consecutiveTransientFailures = Math.min(previousCount + 1, CASCADE_FAILURE_CAP);
   const nominalBackoffMinutes = resolveCascadeBackoffMinutes(consecutiveTransientFailures);
   const backoffMinutes = failureClass === 'cli-resolution-transient'
@@ -499,16 +499,15 @@ function recordCascadeFailure(rootDir, {
 }
 
 // A resolver observation is not a failed reviewer attempt. Preserve diagnostic
-// counters/reasons and only update the streak and the next probe/claim hold.
+// counters, streak and reasons; only update the next probe/claim hold.
 function recordReviewCliProbe(rootDir, {
-  repo, prNumber, healthy, nowMs = Date.now(), loadAwareTimeoutMsImpl = loadAwareTimeoutMs,
+  repo, prNumber, nowMs = Date.now(), loadAwareTimeoutMsImpl = loadAwareTimeoutMs,
 }) {
   const previous = readCascadeState(rootDir, { repo, prNumber }) || {};
-  const count = healthy ? 0 : Number(previous.consecutiveTransientFailures ?? previous.consecutiveCascadeFailures ?? 0);
+  const count = Number(previous.consecutiveTransientFailures ?? previous.consecutiveCascadeFailures ?? 0);
   const backoffMinutes = loadAwareTimeoutMsImpl(resolveCascadeBackoffMinutes(count) * 60_000) / 60_000;
   return writeCascadeState(rootDir, { repo, prNumber }, {
     ...previous,
-    ...(healthy ? { consecutiveTransientFailures: 0 } : {}),
     backoffMinutes,
     nextRetryAfter: new Date(nowMs + backoffMinutes * 60_000).toISOString(),
   });

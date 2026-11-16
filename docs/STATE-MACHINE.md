@@ -955,16 +955,20 @@ new PR
   Settlement records the existing PR-level cascade backoff and releases the
   matching session to `pending` without charging review or infra recovery
   attempts while `consecutiveTransientFailures < CASCADE_FAILURE_CAP` (five).
-  Settlement performs no resolver probe: it records the failure and applies
+  Settlement performs no resolver probe: it records failures and applies
   ordinary bounded escalation at the five-failure threshold. After durable
-  backoff, the poll path asynchronously probes every terminal or
-  pending-upstream resolution row before cap handling or a charged recovery
-  claim. A healthy probe re-queues only the exact observed row, resets the
-  streak and schedules the initial load-aware hold without incrementing failure
-  breakdowns or overwriting the last failure evidence. A failed probe schedules
-  another load-aware hold without counting a new reviewer failure. Resolution
-  backoff scales with host load; a changed failure class or a gap over one hour
-  starts a fresh streak.
+  backoff, poll-time probes run only below the infrastructure cap. Each
+  repository discovery pass shares one watcher-context result per CLI. A
+  healthy probe re-queues the exact observed open row and clears all claim
+  columns; it preserves the failure streak and budgets. A failed probe
+  schedules a load-aware hold and ends processing for that row in the same
+  tick. Both observations preserve failure breakdowns and reasons. At the
+  infrastructure cap, probes are bypassed so existing cap alerts and scheduled
+  recovery remain authoritative. Resolution backoff scales with host load; a
+  changed failure class or a gap over one hour beyond the scheduled
+  nextRetryAfter starts a fresh streak. Watcher probes are advisory: they do
+  not reproduce credential-staged spawn environments or Gemini antigravity
+  selection. Only a successful review clears failure history.
   It never isolates the identity or records a credential outage; route selection
   does not select an auth fallback for it. Health reports its own failure class.
 - Fresh transient reviewer failures (`cascade`, PR-local `oauth-broken`,

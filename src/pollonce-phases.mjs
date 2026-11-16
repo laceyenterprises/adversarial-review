@@ -742,6 +742,7 @@ export async function processReviewSubject(entry, ctx) {
     mergeAgentCandidateBranchProtectionCache = null,
     reviewerFleetQuotaStatusCache,
     reviewerMemoryReservationState,
+    reviewCliProbeCache,
     reviewerMemoryAdmissionSampleForTick,
     getRoutingTierReadinessForTick,
     getHcpHealthzForTick = checkHcpHealthz,
@@ -3045,8 +3046,12 @@ export async function processReviewSubject(entry, ctx) {
         }
       }
       const infraRecoveryAttempts = Number(current?.infra_auto_recover_attempts || 0);
-      if (infraRecoveryClass === 'cli-resolution-transient'
-        && await recoverHealthyReviewCli({ db, rootDir: ROOT, row: current })) return;
+      // Health observations cannot waive the infra cap. A failed probe owns
+      // this tick's hold too; do not dispatch from the pre-probe retry decision.
+      if (infraRecoveryClass === 'cli-resolution-transient' && infraRecoveryAttempts < INFRA_AUTO_RECOVER_CAP) {
+        await recoverHealthyReviewCli({ db, rootDir: ROOT, row: current, probeCache: reviewCliProbeCache });
+        return;
+      }
       // TOKDZ-01: a token-refresh refusal is a hold, never a strand. Rows that
       // reached the cap under the pre-hold accounting stay recoverable.
       const tokenRefreshRecovery = infraRecoveryClass === 'token-refresh-pending';

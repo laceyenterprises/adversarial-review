@@ -40,16 +40,21 @@ Resolution failures do not isolate reviewer identities or contribute to
 credential-outage accounting. The watcher records `cli-resolution-transient`
 backoff (initially one minute), releases the claim to `pending` without charging
 review or infrastructure recovery attempts below the existing five-consecutive
-transient threshold. Settlement performs no resolver probe: it records the
-failure and applies ordinary bounded escalation at the five-failure threshold.
-After durable backoff, the poll path asynchronously probes every terminal or
-pending-upstream resolution row before cap handling or a charged recovery claim.
-A healthy probe re-queues only the exact observed row, resets the streak and
-schedules the initial load-aware hold without incrementing failure breakdowns or
-overwriting the last failure evidence. A failed probe schedules another
-load-aware hold without counting a new reviewer failure. Resolution backoff
-scales with host load; a changed failure class or a gap over one hour starts a
-fresh streak. A successful review clears the backoff. Genuine reviewer OAuth
+transient threshold. Settlement performs no resolver probe: it records
+failures and applies ordinary bounded escalation at the five-failure
+threshold. After durable backoff, poll-time probes run only below the
+infrastructure cap. Each repository discovery pass shares one watcher-context
+result per CLI. A healthy probe re-queues the exact observed open row and
+clears all claim columns; it preserves the failure streak and budgets. A
+failed probe schedules a load-aware hold and ends processing for that row in
+the same tick. Both observations preserve failure breakdowns and reasons. At
+the infrastructure cap, probes are bypassed so existing cap alerts and
+scheduled recovery remain authoritative. Resolution backoff scales with host
+load; a changed failure class or a gap over one hour beyond the scheduled
+nextRetryAfter starts a fresh streak. Watcher probes are advisory: they do not
+reproduce credential-staged spawn environments or Gemini antigravity
+selection. Only a successful review clears failure history. A successful
+review clears the backoff. Genuine reviewer OAuth
 failures retain their authentication classification. Pipeline health/readyz and
 Prometheus expose the resolution class separately from authentication failures.
 Runtime readyz adds informational `reviewerFailures24h` with separate

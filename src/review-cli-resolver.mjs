@@ -1,9 +1,39 @@
 import { execFile, execFileSync } from 'node:child_process';
 import { promisify } from 'node:util';
 import { isAbsolute } from 'node:path';
+import { accessSync, closeSync, constants, fstatSync, openSync, readFileSync } from 'node:fs';
+import { createHash } from 'node:crypto';
 import { loadAwareTimeoutMs } from './load-aware-timeout.mjs';
 
 export const CLI_RESOLUTION_TRANSIENT_FAILURE_CLASS = 'cli-resolution-transient';
+export const CLI_LAUNCHER_CONFIGURATION_FAILURE_CLASS = 'reviewer-configuration-error';
+
+// Protocol route identifiers, shared with the producer's reviewer launchers.
+const REVIEWER_ROUTE_KEYS = ['CLAUDE_CLI', 'CLAUDE_CODE_CLI_PATH'];
+
+function validateLauncher(launcher) {
+  let fd;
+  try {
+    if (!launcher || typeof launcher !== 'object' || Array.isArray(launcher)
+      || typeof launcher.path !== 'string' || !isAbsolute(launcher.path)
+      || launcher.path.length > 4096 || /[\u0000-\u001f\u007f]/u.test(launcher.path)
+      || typeof launcher.sha256 !== 'string' || !/^[a-f0-9]{64}$/i.test(launcher.sha256)
+      || !REVIEWER_ROUTE_KEYS.includes(launcher.routeKey)) throw new Error('invalid launcher');
+    // Refuse links and hash the opened regular file, never a symlink target.
+    fd = openSync(launcher.path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+    const before = fstatSync(fd);
+    if (!before.isFile()) throw new Error('invalid launcher file');
+    accessSync(launcher.path, constants.X_OK);
+    const digest = createHash('sha256').update(readFileSync(fd)).digest('hex');
+    const after = fstatSync(fd);
+    if (before.size !== after.size || before.mtimeMs !== after.mtimeMs
+      || before.ctimeMs !== after.ctimeMs) throw new Error('launcher file modified concurrently');
+    if (digest !== launcher.sha256.toLowerCase()) throw new Error('launcher digest mismatch');
+    return Object.freeze({ path: launcher.path, sha256: launcher.sha256, routeKey: launcher.routeKey });
+  } finally {
+    if (fd !== undefined) closeSync(fd);
+  }
+}
 
 export function isReviewCliResolutionFailure(error) {
   return error?.binaryResolution?.status === 'unknown'
@@ -84,26 +114,36 @@ function parseResolution(cli, raw) {
   }
 }
 
-function resolutionFailure(cli, cause, { log, now }) {
+function resolutionFailure(cli, cause, { log, now }, configuration = false) {
   // Do not echo arbitrary resolver output (or JSON parser excerpts) into logs.
   const evidence = Object.freeze({
     cli, consumer: 'review', status: 'unknown', timestamp: now(),
     reason: cause?.code || (cause instanceof SyntaxError ? 'invalid-json' : 'resolver-error'),
+    ...(configuration ? { failureClass: CLI_LAUNCHER_CONFIGURATION_FAILURE_CLASS } : {}),
     ...(cause?.resolutionDiagnostic ? { diagnostic: cause.resolutionDiagnostic } : {}),
   });
   log.error?.(`[review-cli-resolution] ${JSON.stringify(evidence)}`);
-  return Object.assign(new Error(`review CLI resolution unavailable for ${cli}`, { cause }), {
+  const message = configuration
+    ? `[${CLI_LAUNCHER_CONFIGURATION_FAILURE_CLASS}] invalid review CLI launcher for ${cli}`
+    : `review CLI resolution unavailable for ${cli}`;
+  return Object.assign(new Error(message, { cause }), {
     name: 'ReviewCliResolutionError',
-    failureClass: CLI_RESOLUTION_TRANSIENT_FAILURE_CLASS,
+    failureClass: configuration ? CLI_LAUNCHER_CONFIGURATION_FAILURE_CLASS : CLI_RESOLUTION_TRANSIENT_FAILURE_CLASS,
     binaryResolution: evidence,
   });
 }
 
 function recordResolution(cli, result, { log, now }) {
+  let launcher;
+  if (Object.hasOwn(result, 'launcher') && result.launcher != null) {
+    try { launcher = validateLauncher(result.launcher); }
+    catch (cause) { throw resolutionFailure(cli, cause, { log, now }, true); }
+  }
   const evidence = Object.freeze({
     schemaVersion: 1, cli, consumer: 'review', status: 'resolved',
     source: result.source, selectedPath: result.selectedPath, realPath: result.realPath,
     version: result.version, binarySha256: result.binarySha256, timestamp: now(),
+    ...(launcher ? { launcher } : {}),
   });
   // Written before auth/helpers/exec; service logs retain this even if exec fails.
   log.error?.(`[review-cli-resolution] ${JSON.stringify(evidence)}`);
@@ -111,7 +151,8 @@ function recordResolution(cli, result, { log, now }) {
 }
 
 export function resolveReviewCliPath(cli, env = process.env) {
-  return resolveReviewCli(cli, { env }).realPath;
+  const result = resolveReviewCli(cli, { env });
+  return result.launcher?.path ?? result.realPath;
 }
 
 const execFileAsync = promisify(execFile);
@@ -144,5 +185,6 @@ export async function resolveReviewCliAsync(cli, {
 }
 
 export async function resolveReviewCliPathAsync(cli, env = process.env) {
-  return (await resolveReviewCliAsync(cli, { env })).realPath;
+  const result = await resolveReviewCliAsync(cli, { env });
+  return result.launcher?.path ?? result.realPath;
 }

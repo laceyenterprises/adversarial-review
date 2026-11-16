@@ -36,7 +36,7 @@ async function resolveCliBinary({ binaryName, env = process.env } = {}) {
     return await resolveReviewCliPathAsync(binaryName, env);
   } catch (cause) {
     throw new CliDirectPreflightError(cause.message, {
-      failureClass: CLI_RESOLUTION_TRANSIENT_FAILURE_CLASS,
+      failureClass: cause.failureClass || CLI_RESOLUTION_TRANSIENT_FAILURE_CLASS,
       layer: `${binaryName}-path`, cause,
     });
   }

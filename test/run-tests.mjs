@@ -159,7 +159,7 @@ try {
     reportPath: process.env.AR_TEST_TIMINGS ? path.resolve(process.env.AR_TEST_TIMINGS) : undefined,
     nodeArgs: [
       '--preserve-symlinks', '--preserve-symlinks-main',
-      ...['child-leak-guard', 'rate-limit-state-isolation', 'load-aware-timeout-fixture', 'temp-sandbox-guard']
+      ...['child-leak-guard', 'rate-limit-state-isolation', 'load-aware-timeout-fixture', 'temp-sandbox-guard', 'github-owner-routing-off-fixture']
         .flatMap((name) => ['--import', path.join('test', 'helpers', `${name}.mjs`)]),
     ],
   }));

@@ -1,3 +1,5 @@
+import { hammerTokenSession } from './hammer-token.mjs';
+import { githubEnvForTarget, githubOwnerTokens } from './github-owner-token.mjs';
 import { loadAwareTimeoutMs } from './load-aware-timeout.mjs';
 import { meteredExecFile } from './metered-gh.mjs';
 import { execFile } from 'node:child_process';
@@ -794,8 +796,10 @@ async function execGhJson(execFileImpl, args) {
     // token refresh, so the observed credential is re-read from the sent env.
     let credential = githubCredential({ env: buildGhEnv() });
     try {
+      const routed = !hammerTokenSession({ env: process.env }).managed && githubOwnerTokens.routedOwner(args);
+      if (routed) credential = githubCredential({ env: await githubEnvForTarget(process.env, args) });
       await awaitThrottleIfNeeded(throttleResource, credential);
-      const ghEnv = buildGhEnv();
+      const ghEnv = buildGhEnv(routed ? await githubEnvForTarget(process.env, args) : process.env);
       credential = githubCredential({ env: ghEnv });
       const effectiveArgs = headerAware ? ['api', '-i', ...args.slice(1)] : args;
       const { stdout } = await meteredExecFile(execFileImpl, 'gh', effectiveArgs, {
@@ -879,7 +883,8 @@ async function runAdapterReadWithTelemetry(category, {
   if (!adapterAvailable) return null;
   const startedAt = Date.now();
   try {
-    await awaitThrottleIfNeeded('core', githubAdapterReadCredential(env));
+    const credentialEnv = githubOwnerTokens.routedOwner(repo) ? await githubEnvForTarget(env, repo, { token: env.GITHUB_TOKEN || env.GH_TOKEN }) : env;
+    await awaitThrottleIfNeeded('core', githubAdapterReadCredential(credentialEnv, repo));
     const result = await action();
     if (result !== null && result !== undefined) {
       recordApiCallImpl?.({

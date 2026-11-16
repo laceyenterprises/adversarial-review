@@ -1,3 +1,4 @@
+import { githubTokenForTarget } from './github-owner-token.mjs';
 import { loadAwareTimeoutMs } from './load-aware-timeout.mjs';
 import { meteredExecFile } from './metered-gh.mjs';
 import { isGitHubRateLimitError } from './rate-limit-throttle.mjs';
@@ -268,7 +269,10 @@ async function execGhWithRetry({
           });
         }
         authRemintAttempted = true;
-        const remint = await remintGhAuth({ refreshGhAuthImpl, env, log });
+        const remint = err.ownerTokenRejected
+          ? await githubTokenForTarget({ token: env.GITHUB_TOKEN || env.GH_TOKEN, env, target: args })
+            .then(() => ({ reminted: true, detail: 'owner token refreshed' }))
+          : await remintGhAuth({ refreshGhAuthImpl, env, log });
         if (!remint.reminted) {
           throw asGithubAuthOutageError(err, args, {
             remintAttempted: false,

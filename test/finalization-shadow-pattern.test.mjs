@@ -329,36 +329,62 @@ test('pattern listing on the previous schema is read-only and migration preserve
 
 test('concurrent matching appends serialize pattern lookup and retain one deduped decision', { timeout: 15000 }, async t => {
   const rootDir = mkdtempSync(join(tmpdir(), 'shadow-pattern-race-'));
-  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
-  const store = openFinalizationShadowStore({ rootDir });
-  t.after(() => store.close());
+  const workers = [];
+  let store;
+  t.after(async () => {
+    // Force shutdown only when a failed test leaves a worker alive.
+    await Promise.allSettled(workers.filter(worker => worker.threadId !== -1)
+      .map(worker => worker.terminate()));
+    try {
+      store?.close();
+    } finally {
+      rmSync(rootDir, { recursive: true, force: true });
+    }
+  });
+  store = openFinalizationShadowStore({ rootDir });
   const sample = store.append(observation());
   const pattern = store.addPattern(record(sample));
   const gate = new SharedArrayBuffer(4);
-  const workers = Array.from({ length: 2 }, () => new Worker(`
-    const { parentPort, workerData } = require('node:worker_threads');
-    (async () => {
-      const { openFinalizationShadowStore } = await import(workerData.moduleUrl);
-      const store = openFinalizationShadowStore({ rootDir: workerData.rootDir });
-      parentPort.postMessage({ ready: true });
-      Atomics.wait(new Int32Array(workerData.gate), 0, 0);
-      const observation = store.append(workerData.observation);
-      store.close();
-      parentPort.postMessage({ observation });
-    })().catch(error => { throw error; });
-  `, { eval: true, workerData: { moduleUrl: new URL('../src/finalization/shadow-store.mjs', import.meta.url).href,
-    rootDir, gate, observation: observation(2, { dedupeKey: 'synthetic-concurrent-pair' }) } }));
-  t.after(async () => { await Promise.all(workers.map(w => w.terminate())); });
+  for (let index = 0; index < 2; index += 1) {
+    workers.push(new Worker(`
+      const { parentPort, workerData } = require('node:worker_threads');
+      (async () => {
+        const { openFinalizationShadowStore } = await import(workerData.moduleUrl);
+        const store = openFinalizationShadowStore({ rootDir: workerData.rootDir });
+        let observation;
+        try {
+          parentPort.postMessage({ ready: true });
+          Atomics.wait(new Int32Array(workerData.gate), 0, 0);
+          observation = store.append(workerData.observation);
+        } finally {
+          store.close();
+        }
+        parentPort.postMessage({ observation });
+        parentPort.close();
+      })().catch(error => { throw error; });
+    `, { eval: true, workerData: { moduleUrl: new URL('../src/finalization/shadow-store.mjs', import.meta.url).href,
+      rootDir, gate, observation: observation(2, { dedupeKey: 'synthetic-concurrent-pair' }) } }));
+  }
   let ready = 0;
   const results = await Promise.all(workers.map(worker => new Promise((resolve, reject) => {
-    worker.on('error', reject);
+    let observation;
+    worker.once('error', reject);
+    worker.once('exit', code => {
+      if (code !== 0 || observation === undefined) {
+        reject(new Error(`SQLite worker exited with code ${code} before confirming its append`));
+        return;
+      }
+      resolve(observation);
+    });
     worker.on('message', message => {
       if (message.ready) {
         if (++ready === workers.length) {
           Atomics.store(new Int32Array(gate), 0, 1);
           Atomics.notify(new Int32Array(gate), 0);
         }
-      } else resolve(message.observation);
+      } else {
+        observation = message.observation;
+      }
     });
   })));
   assert.equal(results[0].id, results[1].id);

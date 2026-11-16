@@ -908,12 +908,12 @@ test('legacy closure owners adapt to owned workflows faithfully', () => {
     [{ owner: 'wait', reason: 'in-flight:lrq-1' }, ['hammer', 'hammer', 'live-owner']],
     [{ owner: 'wait', reason: 'dispatch-status-waiting-approval' }, ['hammer', 'hammer', 'live-owner']],
     [{ owner: 'wait', reason: `handed-to-review:${HEAD}` }, ['review', 'reviewer', 'handed-to-review']],
-    [{ owner: 'wait', reason: 'primary-change-pending' }, ['wait-for-CI', 'watcher', 'snapshot-refresh']],
+    [{ owner: 'wait', reason: 'primary-change-pending' }, ['wait-for-CI', 'watcher', 'unmapped-legacy-wait']],
     [{ owner: 'page', reason: 'hammer-retry-cap' }, ['operator-hold', 'operator', 'retry-exhausted']],
     [{ owner: 'page', reason: 'primary-change-needs-operator' }, ['operator-hold', 'operator', 'primary-change-repair']],
     [{ owner: 'page', reason: 'synthetic-new-reason' }, ['operator-hold', 'operator', 'synthetic-new-reason']],
-    [{ owner: 'unheard-of' }, ['wait-for-CI', 'watcher', 'snapshot-refresh']],
-    [null, ['wait-for-CI', 'watcher', 'snapshot-refresh']],
+    [{ owner: 'unheard-of' }, ['wait-for-CI', 'watcher', 'unmapped-legacy-owner']],
+    [null, ['wait-for-CI', 'watcher', 'unmapped-legacy-owner']],
   ];
   for (const [legacy, expected] of cases) assert.deepEqual(pick(fromLegacyClosureOwner(legacy)), expected, JSON.stringify(legacy));
   assert.equal(fromLegacyClosureOwner({ owner: 'page', reason: 'hammer-retry-cap' }).legacyReason, 'hammer-retry-cap');

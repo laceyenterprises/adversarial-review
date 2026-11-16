@@ -9,6 +9,9 @@ import { shadowPatternKey } from '../src/finalization/shadow-pattern.mjs';
 import { openFinalizationShadowStore, openReadOnlyFinalizationShadowStore } from '../src/finalization/shadow-store.mjs';
 import { buildShadowReport, effectiveDisposition, renderShadowReport } from '../src/finalization/shadow-report.mjs';
 import { finalizationMain } from '../src/finalization-cli.mjs';
+import { fromLegacyClosureOwner, fromLegacyPostedReviewOutcome } from '../src/pr-next-action-consumer.mjs';
+import { liveV1Action } from '../src/finalization/live-shadow.mjs';
+import { workflowDecision } from '../src/finalization/workflow-decision.mjs';
 
 const at = n => new Date(Date.UTC(2026, 0, 1, 0, n)).toISOString();
 const observation = (n = 0, changes = {}) => ({
@@ -34,6 +37,7 @@ const workflowReasons = [
   'primary-change evidence unknown', 'remediation admission or completion pending',
   'awaiting verdict for requested final remediator head',
   'failed final remediation requires recovery', 'primary-change provenance unavailable',
+  'automated stop requires relevant evidence',
 ];
 const fixedDetails = [
   'done:merged', 'hammer:ci-red-clean-verdict', 'hammer:lifetime-exhausted',
@@ -123,6 +127,64 @@ test('fixed producer reasons and details key exactly; dynamic and whitespace var
     'hammer:synthetic-raw-reason', 'operator-hold:synthetic-raw-reason']) {
     assert.equal(shadowPatternKey(observation(0, { v1Action: { kind: 'wait', detail } })), null);
   }
+});
+
+test('unmapped legacy inputs remain open even with reviewed patterns for the former fallbacks', t => {
+  const store = fixture(t);
+  const cases = [
+    [fromLegacyClosureOwner({ owner: 'unmapped' }), 'wait-for-CI:snapshot-refresh'],
+    [fromLegacyClosureOwner({ owner: 'repair-worker', reason: 'repair epoch X' }), 'wait-for-CI:snapshot-refresh'],
+    [fromLegacyClosureOwner(null), 'wait-for-CI:snapshot-refresh'],
+    [fromLegacyClosureOwner({ owner: 'wait', reason: 'unknown wait' }), 'wait-for-CI:snapshot-refresh'],
+    [fromLegacyClosureOwner({ owner: 'wait' }), 'wait-for-CI:snapshot-refresh'],
+    [fromLegacyClosureOwner({ owner: 'review', reason: 'unknown review' }), 'review:exact-head-review'],
+    [fromLegacyClosureOwner({ owner: 'review' }), 'review:exact-head-review'],
+    [fromLegacyPostedReviewOutcome({ prTerminal: true, terminalReason: 'unknown terminal' }), 'done:terminal-observed'],
+    [fromLegacyPostedReviewOutcome({ outcome: 'pr-terminal', terminalReason: '' }), 'done:terminal-observed'],
+  ];
+  for (const detail of new Set(cases.map(([, detail]) => detail))) {
+    const sample = store.append(observation(0, { v1Action: { kind: 'wait', detail } }));
+    store.addPattern(record(sample));
+  }
+  for (const [legacy] of cases) {
+    const v1Action = liveV1Action(legacy, 'synthetic-adapter');
+    const input = observation(2, { v1Action });
+    assert.equal(shadowPatternKey(input), null, v1Action.detail);
+    const saved = store.append(input);
+    assert.equal(saved.patternDisposition, undefined);
+    assert.equal(effectiveDisposition(saved), 'open');
+  }
+});
+
+test('known legacy mappings and exact pass-through literals stay keyable', () => {
+  const cases = [
+    [fromLegacyClosureOwner({ owner: 'review', reason: 'exact-head-review' }), 'review:exact-head-review'],
+    [fromLegacyClosureOwner({ owner: 'review', reason: 'handed-to-review:synthetic-head' }), 'review:handed-to-review'],
+    [fromLegacyClosureOwner({ owner: 'wait', reason: 'pending-required-checks' }), 'wait-for-CI:checks-pending'],
+    [fromLegacyClosureOwner({ owner: 'page', reason: 'needs-operator' }), 'operator-hold:needs-operator'],
+    [fromLegacyClosureOwner({ owner: 'hammer', reason: 'ci-red-final' }), 'hammer:ci-red-final'],
+    [fromLegacyPostedReviewOutcome({ prTerminal: true }), 'done:terminal-observed'],
+    [fromLegacyPostedReviewOutcome({ prTerminal: true, terminalReason: 'closed' }), 'done:closed'],
+    [fromLegacyPostedReviewOutcome({ prTerminal: true, terminalReason: 'merged' }), 'done:merged'],
+  ];
+  for (const [legacy, detail] of cases) {
+    const v1Action = liveV1Action(legacy, 'synthetic-adapter');
+    assert.equal(v1Action.detail, detail);
+    assert.notEqual(shadowPatternKey(observation(0, { v1Action })), null, detail);
+  }
+});
+
+test('workflow default terminal recovery reason produces a keyable observation', () => {
+  const v2Decision = workflowDecision({
+    subjectKey: { domainId: 'code-pr', subjectExternalId: 'example/project#1' },
+    currentRevision: 'synthetic-head', lastEventAt: at(0),
+    remediation: { dispatched: [], concluded: [] }, operatorOverrides: [],
+    terminal: { kind: 'halted' },
+  }, { checksPatienceMs: 1000, verdictPatienceMs: 1000, attestationPatienceMs: 1000,
+    deadlineCeilingMs: 1000, policyVersion: 1, codeVersion: 'synthetic' }, { observedAt: at(0) }, {});
+  assert.equal(v2Decision.reason, 'automated stop requires relevant evidence');
+  assert.equal(v2Decision.nextAction, 'recover-coverage');
+  assert.notEqual(shadowPatternKey(observation(0, { v2Decision })), null);
 });
 
 test('expanded vocabulary re-keys old evidence and reports without backfilling dispositions', t => {

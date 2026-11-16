@@ -58,6 +58,7 @@ const REASONS = new Set([
   'remediation admission or completion pending', 'awaiting verdict for requested final remediator head',
   'final remediator head requires strict exact-head review',
   'failed final remediation requires recovery', 'primary-change provenance unavailable',
+  'automated stop requires relevant evidence',
 ]);
 
 export function shadowPatternKey(observation) {

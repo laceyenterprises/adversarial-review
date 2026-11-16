@@ -26,9 +26,9 @@ function validateLauncher(launcher) {
     accessSync(launcher.path, constants.X_OK);
     const digest = createHash('sha256').update(readFileSync(fd)).digest('hex');
     const after = fstatSync(fd);
-    if (digest !== launcher.sha256.toLowerCase()
-      || before.size !== after.size || before.mtimeMs !== after.mtimeMs
-      || before.ctimeMs !== after.ctimeMs) throw new Error('launcher digest mismatch');
+    if (before.size !== after.size || before.mtimeMs !== after.mtimeMs
+      || before.ctimeMs !== after.ctimeMs) throw new Error('launcher file modified concurrently');
+    if (digest !== launcher.sha256.toLowerCase()) throw new Error('launcher digest mismatch');
     return Object.freeze({ path: launcher.path, sha256: launcher.sha256, routeKey: launcher.routeKey });
   } finally {
     if (fd !== undefined) closeSync(fd);
@@ -135,7 +135,7 @@ function resolutionFailure(cli, cause, { log, now }, configuration = false) {
 
 function recordResolution(cli, result, { log, now }) {
   let launcher;
-  if (Object.hasOwn(result, 'launcher')) {
+  if (Object.hasOwn(result, 'launcher') && result.launcher != null) {
     try { launcher = validateLauncher(result.launcher); }
     catch (cause) { throw resolutionFailure(cli, cause, { log, now }, true); }
   }

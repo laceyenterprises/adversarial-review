@@ -32,7 +32,10 @@ of the opened file at the launch boundary. The only accepted route keys are
 `CLAUDE_CLI` and `CLAUDE_CODE_CLI_PATH`. Invalid launcher evidence fails closed
 as `reviewer-configuration-error`, including through discovery and subprocess
 failure classification; it never falls back to the underlying binary.
-Without a launcher, execution continues to use `realPath`.
+An omitted or explicitly null launcher uses `realPath`. Other malformed values
+remain configuration errors. Changes to size, modification time or change time
+during the file read fail closed with `launcher file modified concurrently`,
+distinct from `launcher digest mismatch` for a stable file with the wrong hash.
 
 Both synchronous and asynchronous clients retry resolution once, sizing each
 nominal ten-second attempt through the shared load-aware timeout helper. The

@@ -2,7 +2,9 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
+import fs from 'node:fs';
 import { chmodSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs';
+import { syncBuiltinESMExports } from 'node:module';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { resolveReviewCli, resolveReviewCliAsync, resolveReviewCliPath, resolveReviewCliPathAsync } from '../src/review-cli-resolver.mjs';
@@ -61,9 +63,9 @@ for (const asyncMode of [false, true]) {
     const savedError = console.error;
     console.error = f.log.error;
     t.after(() => { console.error = savedError; });
-    for (const launcher of [undefined, launcherFixture(f)]) {
+    for (const launcher of [undefined, null, launcherFixture(f)]) {
       for (const routeKey of ['CLAUDE_CLI', 'CLAUDE_CODE_CLI_PATH']) {
-        f.set({ ...f.response, ...(launcher ? { launcher: { ...launcher, routeKey } } : {}) });
+        f.set({ ...f.response, launcher: launcher ? { ...launcher, routeKey } : launcher });
         const path = await (asyncMode ? resolveReviewCliPathAsync('claude', f.env) : resolveReviewCliPath('claude', f.env));
         assert.equal(path, launcher?.path ?? f.binary);
         assert.equal(execFileSync(path, [], { encoding: 'utf8' }),
@@ -73,6 +75,7 @@ for (const asyncMode of [false, true]) {
         assert.equal(event.version, f.response.version);
         assert.equal(event.binarySha256, f.response.binarySha256);
         assert.equal(event.launcher?.routeKey, launcher ? routeKey : undefined);
+        assert.equal(Object.hasOwn(event, 'launcher'), Boolean(launcher));
       }
     }
   });
@@ -86,7 +89,7 @@ for (const asyncMode of [false, true]) {
     writeFileSync(nonExecutable, readFileSync(launcher.path), { mode: 0o600 });
     chmodSync(nonExecutable, 0o600);
     const invalid = [
-      null, [], {}, { ...launcher, path: 'relative' },
+      false, 0, '', [], {}, { ...launcher, path: 'relative' },
       { ...launcher, path: `${launcher.path}\n` },
       { ...launcher, path: link }, { ...launcher, path: f.root },
       { ...launcher, path: nonExecutable }, { ...launcher, path: join(f.root, 'missing') },
@@ -106,6 +109,7 @@ for (const asyncMode of [false, true]) {
       await assert.rejects(run(), (err) => {
         assert.equal(err.failureClass, 'reviewer-configuration-error');
         assert.equal(err.binaryResolution.status, 'unknown');
+        if (value.sha256 === '0'.repeat(64)) assert.equal(err.cause.message, 'launcher digest mismatch');
         assert.equal(classifyReviewerFailure('OAuth token invalid', 1, null, err), 'reviewer-configuration-error');
         return true;
       });
@@ -120,6 +124,41 @@ for (const asyncMode of [false, true]) {
       }), (err) => err.failureClass === 'reviewer-configuration-error');
       assert.equal(probes, 0);
     }
+  });
+
+  test(`${asyncMode ? 'async' : 'sync'} launcher metadata drift has a distinct fail-closed diagnostic`, async (t) => {
+    const f = fixture(t);
+    const launcher = launcherFixture(f);
+    const originalFstat = fs.fstatSync;
+    let calls = 0;
+    let changedField;
+    t.mock.method(fs, 'fstatSync', (...args) => {
+      const stat = originalFstat(...args);
+      calls += 1;
+      return calls % 2 === 0 ? { ...stat, [changedField]: stat[changedField] + 1 } : stat;
+    });
+    syncBuiltinESMExports();
+    t.after(() => { t.mock.restoreAll(); syncBuiltinESMExports(); });
+    for (const field of ['size', 'mtimeMs', 'ctimeMs']) {
+      changedField = field;
+      for (const sha256 of [launcher.sha256, '0'.repeat(64)]) {
+        const stdout = JSON.stringify({ ...f.response, launcher: { ...launcher, sha256 } });
+        const options = {
+          log: f.log,
+          execFileSyncImpl: () => stdout,
+          execFileImpl: async () => ({ stdout }),
+        };
+        const run = () => asyncMode ? resolveReviewCliAsync('codex', options)
+          : Promise.resolve().then(() => resolveReviewCli('codex', options));
+        await assert.rejects(run(), (err) => {
+          assert.equal(err.cause.message, 'launcher file modified concurrently');
+          assert.equal(err.failureClass, 'reviewer-configuration-error');
+          assert.equal(err.binaryResolution.status, 'unknown');
+          return true;
+        });
+      }
+    }
+    assert.equal(calls, 12);
   });
 }
 

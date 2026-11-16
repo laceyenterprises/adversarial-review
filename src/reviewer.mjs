@@ -97,6 +97,7 @@ import { assertReviewerReply } from './kernel/review-reply.mjs';
 import { suppressFinalRoundFollowUp } from './comment-only-final-round.mjs';
 import { createLinearTriageAdapter } from './adapters/operator/linear-triage/index.mjs';
 import { getConfig } from './config-loader.mjs';
+import { assertPublicSafeReview, isPublicHygieneRepo } from './public-hygiene.mjs';
 import { parseCodexJsonTokenUsage } from './reviewer-model-detection.mjs';
 import {
   fetchPullRequestHeadAndState,
@@ -1440,6 +1441,9 @@ async function postGitHubReview(repo, prNumber, reviewBody, botTokenEnv, execFil
   let refreshedAfterAuthFailure = false;
 
   reviewBody = filterGitHubBody(reviewBody, { repo, reviewerHeadSha: opts.reviewerHeadSha, rootDir: opts.rootDir || ROOT, env: sourceEnv });
+  await assertPublicSafeReview({
+    ...opts.hygieneOptions, repo, prNumber, reviewBody, log,
+  });
   const stateDir = resolveAdversarialReviewStateDir(opts.rootDir || ROOT, sourceEnv);
   let reviewerFence = null;
   try {
@@ -2298,6 +2302,7 @@ async function main() {
     labels: verdictModeResolution.labels, reviewerHeadSha, log: console,
   })), guardForbiddenPaths, { log: console });
   const fullComment = filterGitHubBody(buildReviewCommentBody({
+    publicHygiene: isPublicHygieneRepo(repo),
     reviewerMetadata,
     verdictMode,
     execution: reviewerExecution,
@@ -2342,7 +2347,7 @@ async function main() {
   });
 
   try {
-    console.error(`[reviewer] DEBUG: posting GitHub review body length=${fullComment.length}; preview=${previewText(fullComment, 300)}`);
+    console.error(`[reviewer] posting GitHub review body length=${fullComment.length}`);
     // Match beginReviewerPass's launch-attempt key. The ledger round advances
     // only on completion, so retry attempts can differ.
     const captureAttemptNumber = Number.isFinite(Number(reviewDbAttemptNumber))

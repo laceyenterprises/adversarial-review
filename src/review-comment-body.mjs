@@ -89,8 +89,18 @@ function buildReviewCommentBody({
   waiverAuditBlock = '',
   reviewModeAuditBlock = '',
   reviewText,
+  publicHygiene = false,
 }) {
-  const text = String(reviewText || '');
+  let text = String(reviewText || '');
+  if (publicHygiene) {
+    if (startsWithReviewCommentHeader(text)) {
+      text = text.trimStart().replace(/^[^\r\n]*(?:\r?\n|$)\s*/, '');
+    }
+    return buildReviewCommentHeader({
+      reviewerMetadata: { displayName: 'Code reviewer', reviewerIdentity: 'automated' },
+      verdictMode,
+    }) + text;
+  }
   // Blockquote lines only, never headings: the verdict and blocking-finding
   // parsers key on `## Verdict` / `## Blocking issues`, and a heading inserted
   // above them has broken parsing before (adversarial-review#521).

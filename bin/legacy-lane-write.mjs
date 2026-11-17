@@ -1,10 +1,10 @@
 #!/usr/bin/env node
 import { fileURLToPath } from 'node:url';
-import { runLegacyLaneWrite } from '../src/finalization/legacy-lane-write.mjs';
+import { runLegacyLaneWrite, validLegacyRunTimeoutMs } from '../src/finalization/legacy-lane-write.mjs';
 
 export async function legacyLaneWriteMain(argv, { stdout = process.stdout, stderr = process.stderr, run = runLegacyLaneWrite } = {}) {
   const options = {};
-  const keys = { '--root': 'rootDir', '--repo': 'repository', '--base': 'base', '--deadline-ms': 'deadline' };
+  const keys = { '--root': 'rootDir', '--repo': 'repository', '--base': 'base', '--deadline-ms': 'deadline', '--timeout-ms': 'timeoutMs' };
   let i = 0;
   for (; i < argv.length && argv[i] !== '--'; i += 2) {
     if (!keys[argv[i]] || !argv[i + 1]) return 64;
@@ -16,12 +16,17 @@ export async function legacyLaneWriteMain(argv, { stdout = process.stdout, stder
     if (!Number.isSafeInteger(ms) || !Number.isFinite(new Date(ms).getTime())) return 64;
     options.deadline = new Date(ms).toISOString();
   }
+  if (options.timeoutMs !== undefined) {
+    options.timeoutMs = /^[0-9]+$/.test(options.timeoutMs) ? Number(options.timeoutMs) : NaN;
+    if (!validLegacyRunTimeoutMs(options.timeoutMs)) return 64;
+  }
   try {
     const commandArgs = argv.slice(i + 2);
     const headIndex = commandArgs.indexOf('--match-head-commit');
     const result = await run({ ...options, subject: { target: commandArgs.find(arg => /^https:\/\/[^/]+\/[^/]+\/[^/]+\/pull\/[0-9]+$/.test(arg)) ?? null,
       head: headIndex >= 0 ? commandArgs[headIndex + 1] ?? null : null }, command: argv[i + 1], argv: argv.slice(i + 2) });
     if (result?.ok === false) {
+      stdout.write(result.stdout || ''); stderr.write(result.stderr || '');
       stderr.write(`legacy lane write refused: ${result.reason}${result.reason === 'owner-operation-in-flight' && result.outcome === 'lane-busy' ? `; lane-busy; waited ${result.waitedMs ?? 0}ms` : ''}\n`);
       return 75;
     }

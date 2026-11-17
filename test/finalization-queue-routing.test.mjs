@@ -182,7 +182,8 @@ test('new waits scale nominal input once, clip remaining deadline, cap high load
   const other = { ...lane, base: 'other' };
   await runLegacyLaneWrite({ rootDir: f.rootDir, ...other, command: 'fake', argv: [], readConfig: () => ({}), now: at,
     deadline: '2026-10-25T00:00:03Z', load: high, exec: async (_c, _a, o) => { observed = o.timeout; return {}; } });
-  assert.equal(observed, 3000);
+  // LEGACYEXECCAP-01: the run budget is its own load-scaled value, not the remaining lane wait.
+  assert.equal(observed, 600_000);
   assert.equal(queueWaitMs(30_000, { ceilingMs: 60_000, load: high }), 60_000);
   assert.ok(queueWaitMs(Number.MAX_VALUE, { ceilingMs: Number.MAX_VALUE, load: high }) <= 2 ** 31 - 1);
   await assert.rejects(runLegacyLaneWrite({ rootDir: f.rootDir, ...other, readConfig: () => ({}), now: at, deadline: at }), /deadline/);
@@ -254,7 +255,7 @@ test('HAMLANEWAIT-01: legacy merge wakes on another operation release within its
   let called = false;
   const pending = runLegacyLaneWrite({ rootDir: f.rootDir, ...lane, command: 'synthetic-merge', argv: [],
     deadline: new Date(Date.now() + 3000).toISOString(), readConfig: () => ({}),
-    exec: async (_c, _a, { timeout }) => { called = true; assert.ok(timeout > 0 && timeout < 3000); return { stdout: 'merged' }; } });
+    exec: async (_c, _a, { timeout }) => { called = true; assert.ok(timeout >= 240_000); return { stdout: 'merged' }; } });
   // Watch registration is synchronous; yield a native event-loop turn before release.
   await new Promise(resolve => setImmediate(resolve));
   assert.equal(called, false);
@@ -440,10 +441,10 @@ test('transfer never settles an ambiguous successful push before materialized pu
   assert.equal(f.store.readEntry('ambiguous').phase, 'returned-to-closer');
 });
 
-test('shell patience is clipped at execution after config/store work, with no second scaling', async t => {
+test('shell lane wait is clipped at execution after config/store work; the run budget is independent of it', async t => {
   const f = fixture(t); let clock = at, timeout;
   await runLegacyLaneWrite({ rootDir: f.rootDir, ...lane, command: 'fake', argv: [], now: () => clock,
-    deadline: '2026-10-25T00:00:10Z', readConfig: () => { clock = '2026-10-25T00:00:09Z'; return {}; },
+    deadline: '2026-10-25T00:00:10Z', load: { loadAvg1m: 0, cpuCount: 1 }, readConfig: () => { clock = '2026-10-25T00:00:09Z'; return {}; },
     exec: async (_c, _a, options) => { timeout = options.timeout; return {}; } });
-  assert.equal(timeout, 1000);
+  assert.equal(timeout, 240_000);
 });

@@ -851,6 +851,7 @@ async function spawnReviewerOnceWithAccount({
   ensureWorkerRegistryReadyImpl = ensureWorkerRegistryReady,
   beginReviewerPassImpl = beginReviewerPass,
   completeReviewerPassImpl = completeReviewerPass,
+  settleReviewerPassOutcomeImpl = completeReviewerPass,
   fetchPullRequestHeadAndStateImpl = fetchPullRequestHeadAndState,
   freshnessCheckSleepImpl = sleepMs,
   onPostOperationSettled = null,
@@ -1225,6 +1226,39 @@ async function spawnReviewerOnceWithAccount({
         console.warn(`[watcher] durable post timestamp unavailable for ${repo}#${prNumber}: ${error.message}`);
       }
     }
+    // Persist the runtime/post outcome before handing off the delivery claim or
+    // awaiting session-ledger reads. A bounce or stalled lookup must not leave
+    // a failed primary running beside a later fallback's posted review.
+    let runtimeTokenUsage = null;
+    try {
+      runtimeTokenUsage = tagTokenUsage(result.tokenUsage, 'guardrail');
+    } catch (error) {
+      console.warn(`[watcher] reviewer runtime token normalization failed for ${repo}#${prNumber}: ${error.message}`);
+    }
+    const runtimeWorkerRunId = result.tokenUsage?.workerRunId || null;
+    await withSqliteBusyRetry(() => settleReviewerPassOutcomeImpl(rootDir, {
+      repo, prNumber, attemptNumber: reviewDbAttemptNumber ?? reviewAttemptNumber ?? 0,
+      passKind, expectedHeadSha: reviewerHeadSha || undefined,
+      tokenUsage: runtimeTokenUsage,
+      tokenSource: runtimeTokenUsage?.source || null,
+      workerRunId: runtimeWorkerRunId,
+      status: result.ok ? 'completed'
+        : (['cancelled', 'reviewer-stalled', 'github-budget-deferred'].includes(result.failureClass) ? 'cancelled' : 'failed'),
+      metadata: {
+        reviewerSessionUuid,
+        failureClass: result.failureClass || null,
+        failureMessage: result.ok ? null : (result.error || result.stderr || result.stderrTail || null),
+        launchRequestId: result.launchRequestId || null,
+        workerRunAttribution: {
+          state: runtimeWorkerRunId ? 'resolved' : result.launchRequestId ? 'pending' : 'not-applicable',
+          launchRequestId: result.launchRequestId || null,
+          workerRunId: runtimeWorkerRunId,
+          lookupAttempts: 0,
+          lastError: runtimeWorkerRunId ? null : 'accounting-not-yet-settled',
+          retryable: Boolean(result.launchRequestId && !runtimeWorkerRunId),
+        },
+      },
+    }), { label: `reviewer-pass-outcome:${repo}#${prNumber}`, log: console });
     // The runtime (including its identity lease) has finished. Accounting below
     // must not keep a dead process counted by the next admission drain.
     activeReviewerSpawns.delete(reviewerSpawnToken);

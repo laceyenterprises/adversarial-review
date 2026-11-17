@@ -366,6 +366,7 @@ function completeReviewerPass(rootDir, {
   tokenUsage = null,
   tokenSource = null,
   metadata = {},
+  expectedHeadSha = undefined,
   // Test/caller override for the pricing table used to derive cost-USD when the
   // capture source carried token counts but no dollar cost. Left undefined in
   // production so the module-level lazily-loaded table is used.
@@ -376,145 +377,167 @@ function completeReviewerPass(rootDir, {
   const db = openReviewStateDb(rootDir);
   try {
     ensureReviewStateSchema(db);
-    const existing = db.prepare(
-      `SELECT metadata_json, reviewer_model, reviewer_class, token_input, token_output,
-              token_cache_read, token_cache_write, token_reasoning, token_tool_context,
-              token_total, token_cost_usd, token_source
-         FROM reviewer_passes
-        WHERE repo = ? AND pr_number = ? AND attempt_number = ? AND pass_kind = ?`
-    ).get(key.repo, key.prNumber, key.attemptNumber, key.passKind);
-    const existingMeta = parseMetadataJson(existing?.metadata_json);
-    // Cost-USD provenance. An authoritative ledger cost (usage.costUSD present)
-    // is always recorded. When usage carries counts but no dollar cost, keep the
-    // token/cost bundle atomic: reprice previously-derived or empty costs, but do
-    // not mix lower-fidelity counts into rows with authoritative or legacy costs.
-    let derivedCost = null;
-    let tokenCostSource;
-    let tokenCostEstimated;
-    const shouldWriteTokenUsage = Boolean(usage) && (
-      usage.costUSD != null
-      || existing?.token_cost_usd == null
-      || existingMeta.tokenCostSource === 'derived-pricing'
-    );
-    if (shouldWriteTokenUsage) {
-      if (usage.costUSD != null) {
-        tokenCostSource = 'ledger-authoritative';
-        tokenCostEstimated = false;
-      } else {
-        const table = pricingTable !== undefined ? pricingTable : defaultReviewerPricingTable();
-        const derived = deriveReviewerTokenCost({
-          usage,
-          model: usage.source === 'agy-measured' ? usage.model
-            : existing?.reviewer_model || existing?.reviewer_class,
-          pricingTable: table,
-        });
-        if (derived != null && !(usage.source === 'agy-measured' && derived.estimated)) {
-          derivedCost = derived.costUSD;
-          tokenCostSource = 'derived-pricing';
-          tokenCostEstimated = derived.estimated;
+    return db.transaction(() => {
+      const existing = db.prepare(
+        `SELECT status, ended_at, head_sha, gh_comment_id, metadata_json, reviewer_model, reviewer_class, token_input, token_output,
+                token_cache_read, token_cache_write, token_reasoning, token_tool_context,
+                token_total, token_cost_usd, token_source
+           FROM reviewer_passes
+          WHERE repo = ? AND pr_number = ? AND attempt_number = ? AND pass_kind = ?`
+      ).get(key.repo, key.prNumber, key.attemptNumber, key.passKind);
+      const existingMeta = parseMetadataJson(existing?.metadata_json);
+      if (!existing) return null;
+      // Late accounting must not attribute an old session's usage to a new owner.
+      if ((metadata.reviewerSessionUuid && existingMeta.reviewerSessionUuid
+        && metadata.reviewerSessionUuid !== existingMeta.reviewerSessionUuid)
+        || (expectedHeadSha !== undefined && existing.head_sha !== expectedHeadSha)) {
+        return selectReviewerPassByKey(db, key);
+      }
+      // Outcome is durable before accounting. Replays enrich tokens and metadata,
+      // but cannot turn a terminal pass back into running or erase posted success.
+      const requestedStatus = normalizePassStatus(status);
+      const nextStatus = existing.gh_comment_id && ['first-pass', 'rereview'].includes(key.passKind) ? 'completed'
+        : existing.status === 'running' ? requestedStatus : existing.status;
+      const nextEndedAt = existing.ended_at || endedAt;
+      if (nextStatus !== requestedStatus) {
+        metadata = { ...metadata };
+        for (const field of ['failureClass', 'failureReason', 'failureMessage', 'failureDetail', 'error']) {
+          if (nextStatus === 'completed') delete existingMeta[field];
+          delete metadata[field];
         }
       }
-    }
-    const tokenMetadata = usage?.usageTag
-      ? {
-          tokenUsageTag: usage.usageTag,
-          ...(usage.guardrail !== undefined
-            ? { tokenUsageGuardrail: usage.guardrail }
-            : {}),
+      // Cost-USD provenance. An authoritative ledger cost (usage.costUSD present)
+      // is always recorded. When usage carries counts but no dollar cost, keep the
+      // token/cost bundle atomic: reprice previously-derived or empty costs, but do
+      // not mix lower-fidelity counts into rows with authoritative or legacy costs.
+      let derivedCost = null;
+      let tokenCostSource;
+      let tokenCostEstimated;
+      const shouldWriteTokenUsage = Boolean(usage) && (
+        usage.costUSD != null
+        || existing?.token_cost_usd == null
+        || existingMeta.tokenCostSource === 'derived-pricing'
+      );
+      if (shouldWriteTokenUsage) {
+        if (usage.costUSD != null) {
+          tokenCostSource = 'ledger-authoritative';
+          tokenCostEstimated = false;
+        } else {
+          const table = pricingTable !== undefined ? pricingTable : defaultReviewerPricingTable();
+          const derived = deriveReviewerTokenCost({
+            usage,
+            model: usage.source === 'agy-measured' ? usage.model
+              : existing?.reviewer_model || existing?.reviewer_class,
+            pricingTable: table,
+          });
+          if (derived != null && !(usage.source === 'agy-measured' && derived.estimated)) {
+            derivedCost = derived.costUSD;
+            tokenCostSource = 'derived-pricing';
+            tokenCostEstimated = derived.estimated;
+          }
         }
-      : {};
-    if (usage?.partial) tokenMetadata.tokenUsageState = 'partial';
-    if (usage?.source === 'agy-measured') {
-      tokenMetadata.agyConversationId = usage.agyConversationId;
-      tokenMetadata.agySessionTotal = usage.agySessionTotal;
-      tokenMetadata.agyRequestTotal = usage.agyRequestTotal;
-      tokenMetadata.agyUsageMismatch = usage.agyUsageMismatch;
-    }
-    const mergedMetadata = {
-      ...existingMeta,
-      ...tokenMetadata,
-      ...(tokenCostSource ? { tokenCostSource } : {}),
-      ...(tokenCostEstimated !== undefined ? { tokenCostEstimated } : {}),
-      ...metadata,
-    };
-    if (shouldWriteTokenUsage) {
-      if (!usage.usageTag) {
-        delete mergedMetadata.tokenUsageTag;
-        delete mergedMetadata.tokenUsageGuardrail;
       }
-      if (!tokenCostSource) {
-        delete mergedMetadata.tokenCostSource;
-        delete mergedMetadata.tokenCostEstimated;
+      const tokenMetadata = usage?.usageTag
+        ? {
+            tokenUsageTag: usage.usageTag,
+            ...(usage.guardrail !== undefined
+              ? { tokenUsageGuardrail: usage.guardrail }
+              : {}),
+          }
+        : {};
+      if (usage?.partial) tokenMetadata.tokenUsageState = 'partial';
+      if (usage?.source === 'agy-measured') {
+        tokenMetadata.agyConversationId = usage.agyConversationId;
+        tokenMetadata.agySessionTotal = usage.agySessionTotal;
+        tokenMetadata.agyRequestTotal = usage.agyRequestTotal;
+        tokenMetadata.agyUsageMismatch = usage.agyUsageMismatch;
       }
-    }
-    const writeTokenUsage = shouldWriteTokenUsage ? 1 : 0;
-    const tokenCostUSD = usage?.costUSD ?? derivedCost ?? null;
-    const nextTokenSource = tokenSource || usage?.source || null;
-    const snapshots = Array.isArray(tokenUsage?.rateLimits) ? tokenUsage.rateLimits : [];
-    db.prepare(
-      `UPDATE reviewer_passes
-          SET ended_at = ?,
-              status = ?,
-              reviewer_model = COALESCE(?, reviewer_model),
-              worker_run_id = COALESCE(?, worker_run_id),
-              token_input = CASE WHEN ? THEN ? ELSE token_input END,
-              token_output = CASE WHEN ? THEN ? ELSE token_output END,
-              token_cache_read = CASE WHEN ? THEN ? ELSE token_cache_read END,
-              token_cache_write = CASE WHEN ? THEN ? ELSE token_cache_write END,
-              token_reasoning = CASE WHEN ? THEN ? ELSE token_reasoning END,
-              token_tool_context = CASE WHEN ? THEN ? ELSE token_tool_context END,
-              token_total = CASE WHEN ? THEN ? ELSE token_total END,
-              token_cost_usd = CASE WHEN ? THEN ? ELSE token_cost_usd END,
-              token_source = CASE WHEN ? THEN ? ELSE token_source END,
-              metadata_json = ?
-        WHERE repo = ? AND pr_number = ? AND attempt_number = ? AND pass_kind = ?`
-    ).run(
-      endedAt,
-      normalizePassStatus(status),
-      normalizeReviewerModel(existingMeta.reviewerExecution?.model ? null : usage?.model),
-      workerRunId || null,
-      writeTokenUsage,
-      usage?.input ?? null,
-      writeTokenUsage,
-      usage?.output ?? null,
-      writeTokenUsage,
-      usage?.cacheRead ?? null,
-      writeTokenUsage,
-      usage?.cacheWrite ?? null,
-      writeTokenUsage,
-      usage?.reasoning ?? null,
-      writeTokenUsage,
-      usage?.toolContext ?? null,
-      writeTokenUsage,
-      usage?.total ?? null,
-      writeTokenUsage,
-      tokenCostUSD,
-      writeTokenUsage,
-      nextTokenSource,
-      metadataJson(mergedMetadata),
-      key.repo,
-      key.prNumber,
-      key.attemptNumber,
-      key.passKind
-    );
-    const pass = selectReviewerPassByKey(db, key);
-    for (const snapshot of snapshots) {
-      if (!snapshot || typeof snapshot !== 'object') continue;
-      try {
-        db.prepare(`INSERT OR IGNORE INTO reviewer_rate_limit_snapshots
-          (pass_id, observed_at, limit_id, model, window_kind, used_percent, window_minutes, resets_at, plan_type, rate_limit_reached_type)
-          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(
-          pass.pass_id, snapshot.observedAt || endedAt, snapshot.limitId || null,
-          snapshot.model || usage?.model || pass.reviewer_model,
-          snapshot.windowKind || null,
-          coerceNonNegativeFloat(snapshot.usedPercent), coerceNonNegativeInt(snapshot.windowMinutes),
-          snapshot.resetsAt || null, snapshot.planType || null, snapshot.rateLimitReachedType || null
-        );
-      } catch {
-        // Quota telemetry is best effort; the pass terminal write already succeeded.
+      const mergedMetadata = {
+        ...existingMeta,
+        ...tokenMetadata,
+        ...(tokenCostSource ? { tokenCostSource } : {}),
+        ...(tokenCostEstimated !== undefined ? { tokenCostEstimated } : {}),
+        ...metadata,
+      };
+      if (shouldWriteTokenUsage) {
+        if (!usage.usageTag) {
+          delete mergedMetadata.tokenUsageTag;
+          delete mergedMetadata.tokenUsageGuardrail;
+        }
+        if (!tokenCostSource) {
+          delete mergedMetadata.tokenCostSource;
+          delete mergedMetadata.tokenCostEstimated;
+        }
       }
-    }
-    return pass;
+      const writeTokenUsage = shouldWriteTokenUsage ? 1 : 0;
+      const tokenCostUSD = usage?.costUSD ?? derivedCost ?? null;
+      const nextTokenSource = tokenSource || usage?.source || null;
+      const snapshots = Array.isArray(tokenUsage?.rateLimits) ? tokenUsage.rateLimits : [];
+      db.prepare(
+        `UPDATE reviewer_passes
+            SET ended_at = ?,
+                status = ?,
+                reviewer_model = COALESCE(?, reviewer_model),
+                worker_run_id = COALESCE(?, worker_run_id),
+                token_input = CASE WHEN ? THEN ? ELSE token_input END,
+                token_output = CASE WHEN ? THEN ? ELSE token_output END,
+                token_cache_read = CASE WHEN ? THEN ? ELSE token_cache_read END,
+                token_cache_write = CASE WHEN ? THEN ? ELSE token_cache_write END,
+                token_reasoning = CASE WHEN ? THEN ? ELSE token_reasoning END,
+                token_tool_context = CASE WHEN ? THEN ? ELSE token_tool_context END,
+                token_total = CASE WHEN ? THEN ? ELSE token_total END,
+                token_cost_usd = CASE WHEN ? THEN ? ELSE token_cost_usd END,
+                token_source = CASE WHEN ? THEN ? ELSE token_source END,
+                metadata_json = ?
+          WHERE repo = ? AND pr_number = ? AND attempt_number = ? AND pass_kind = ?`
+      ).run(
+        nextEndedAt,
+        nextStatus,
+        normalizeReviewerModel(existingMeta.reviewerExecution?.model ? null : usage?.model),
+        workerRunId || null,
+        writeTokenUsage,
+        usage?.input ?? null,
+        writeTokenUsage,
+        usage?.output ?? null,
+        writeTokenUsage,
+        usage?.cacheRead ?? null,
+        writeTokenUsage,
+        usage?.cacheWrite ?? null,
+        writeTokenUsage,
+        usage?.reasoning ?? null,
+        writeTokenUsage,
+        usage?.toolContext ?? null,
+        writeTokenUsage,
+        usage?.total ?? null,
+        writeTokenUsage,
+        tokenCostUSD,
+        writeTokenUsage,
+        nextTokenSource,
+        metadataJson(mergedMetadata),
+        key.repo,
+        key.prNumber,
+        key.attemptNumber,
+        key.passKind
+      );
+      const pass = selectReviewerPassByKey(db, key);
+      for (const snapshot of snapshots) {
+        if (!snapshot || typeof snapshot !== 'object') continue;
+        try {
+          db.prepare(`INSERT OR IGNORE INTO reviewer_rate_limit_snapshots
+            (pass_id, observed_at, limit_id, model, window_kind, used_percent, window_minutes, resets_at, plan_type, rate_limit_reached_type)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(
+            pass.pass_id, snapshot.observedAt || nextEndedAt, snapshot.limitId || null,
+            snapshot.model || usage?.model || pass.reviewer_model,
+            snapshot.windowKind || null,
+            coerceNonNegativeFloat(snapshot.usedPercent), coerceNonNegativeInt(snapshot.windowMinutes),
+            snapshot.resetsAt || null, snapshot.planType || null, snapshot.rateLimitReachedType || null
+          );
+        } catch {
+          // Quota telemetry is best effort; the pass terminal write already succeeded.
+        }
+      }
+      return pass;
+    }).immediate();
   } finally {
     closeOwnedReviewDb(db);
   }

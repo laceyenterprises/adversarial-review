@@ -1709,6 +1709,22 @@ records the evidence/admission truth table and public export fixture refresh.
 
 ## State machines and smoke verification (SMV v1)
 
+Reviewer pass outcomes become terminal before delivery handoff and asynchronous
+token accounting. Late accounting enriches the same session atomically while
+retaining its terminal outcome, end time and final review evidence. Primary and
+fallback passes keep distinct ledger attempts and artifacts. Reaper transactions
+recheck pass state before charging delivery or recovery budgets; existing
+reattach recovery handles interruption before delivery settles and retains live
+owners. Offline coverage is in `test/reviewer-pass-settlement.test.mjs`. Existing
+smoke commands are unchanged; passive deployment acceptance is declared in
+`post-merge-verify.json`.
+
+Absent runtime head inputs omit the optional pass-completion head fence.
+Posted-success recovery removes persisted and incoming failure metadata; timeout
+recovery preserves attribution added after its scan. The spawn's outer `finally`
+reclaims in-memory and persisted spawn records even if outcome and error
+settlement both throw. Focused offline fixtures cover these boundaries.
+
 Watcher startup reaps stale `launching` agy holder records regardless of the
 current identity/runtime plan, including undeclared owner-only pools and runtimes
 that no longer lease agy holders. This uses the existing `launching → failed`

@@ -353,7 +353,21 @@ function reapRunningPassTimeouts({
         AND gh_comment_id <> ''`
   );
 
+  const getPassForSettlement = db.prepare(
+    'SELECT status, ended_at, started_at, head_sha, metadata_json FROM reviewer_passes WHERE pass_id = ?'
+  );
+  const matchesRunningSnapshot = (pass, row) => pass?.status === 'running'
+    && pass.ended_at === null && pass.started_at === row.started_at && pass.head_sha === row.head_sha
+    && reviewerSessionUuidFromPass(pass) === reviewerSessionUuidFromPass(row);
   const settlePostedArtifactPass = db.transaction(({ row, endedAt, metadataJson }) => {
+    const pass = getPassForSettlement.get(row.pass_id);
+    if (!matchesRunningSnapshot(pass, row)) {
+      return { passChanged: false, reviewChanged: false };
+    }
+    const recovery = parseMetadataJson(metadataJson);
+    metadataJson = JSON.stringify({ ...parseMetadataJson(pass.metadata_json),
+      recoveryClass: recovery.recoveryClass, recoveryReason: recovery.recoveryReason,
+      recoveredAt: recovery.recoveredAt });
     const current = getReviewRow.get(row.repo, row.pr_number);
     let reviewChanged = false;
     if (current?.review_status === 'reviewing') {
@@ -413,6 +427,12 @@ function reapRunningPassTimeouts({
   });
 
   const settleTimedOutPass = db.transaction(({ row, endedAt, metadataJson, failureMessage, capFailureMessage }) => {
+    const pass = getPassForSettlement.get(row.pass_id);
+    if (!matchesRunningSnapshot(pass, row)) {
+      return { passChanged: false, reviewChanged: false };
+    }
+    // Only timeout fields come from the scan; retain attribution added since it.
+    metadataJson = JSON.stringify({ ...parseMetadataJson(pass.metadata_json), ...parseMetadataJson(metadataJson) });
     const current = getReviewRow.get(row.repo, row.pr_number);
     if (current?.review_status === 'reviewing') {
       const infraAttempts = Number(current.infra_auto_recover_attempts || 0);
@@ -614,7 +634,6 @@ function reapRunningPassTimeouts({
         capExhausted: true,
       });
       const metadata = {
-        ...passMetadata,
         failureClass: RUNNING_PASS_TIMEOUT_FAILURE_CLASS,
         failureReason,
         timeoutThresholdSeconds: effectiveThresholdSeconds,

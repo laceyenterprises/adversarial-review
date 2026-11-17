@@ -25,6 +25,19 @@ closer review attempt. Its primary identity is `(repo, pr_number,
 attempt_number, pass_kind)`. `worker_run_id` links a dispatched reviewer to the
 session-ledger `worker_runs.run_id` when that attribution is available.
 
+Runtime/post settlement writes a terminal pass outcome and available runtime
+token counters before delivery handoff or asynchronous token lookup. Missing
+usage remains null; malformed counters cannot prevent outcome settlement.
+Failed primaries therefore remain failed beside
+later fallback passes even if accounting is interrupted. A real launch ID is
+recorded with pending worker-run attribution before lookup. Late accounting
+merges metadata and tokens in an immediate transaction, preserving the first
+terminal end time and outcome; a first-pass/rereview with its own GitHub artifact
+retains completed status. Session and optional exact-head fences refuse usage
+from another owner. Reaper recovery rechecks running status inside its transaction
+before changing delivery or budgets, so a stale snapshot cannot settle twice.
+No artifact is transferred between primary and fallback passes.
+
 First-pass and rereview body capture also projects blocking and non-blocking
 findings into [review finding records](review-findings.md). These observations
 retain source pass attribution and link stored replies, overlapping commits and
@@ -251,6 +264,8 @@ remain unchanged.
 `window_minutes`, `resets_at`, `plan_type`, and
 `rate_limit_reached_type`. Completion inserts available observations with
 `INSERT OR IGNORE` under `UNIQUE(pass_id, observed_at, limit_id, window_kind)`.
+An observation without a provider timestamp uses the stable terminal end time,
+so early capture and replayed accounting deduplicate the same quota observation.
 SQLite considers NULLs distinct for this key, so observations with a missing
 `limit_id` or `window_kind` are not deduplicated by that constraint.
 

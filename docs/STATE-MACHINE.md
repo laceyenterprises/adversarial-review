@@ -2951,6 +2951,13 @@ Reviewer settle retries transient ledger contention before leaving attribution
 `launchRequestId`; reattach-only rows are never eligible. The full field and
 repair contract is catalogued in `docs/data-model/reviewer-passes.md`.
 
+The runtime/post outcome becomes terminal before delivery handoff and token
+lookup. Accounting subsequently enriches that terminal pass atomically without
+changing its end time or replacing its outcome. Failed primaries and later
+fallback passes retain separate ledger attempts, sessions and review artifacts.
+Reaper recovery checks the current pass state inside the delivery transaction;
+an already terminal pass cannot charge delivery or recovery budgets again.
+
 The review poster treats a captured body for the same repo, PR, reviewed head,
 reviewer model, and pass kind as its durable post checkpoint. If reviewed-
 attestation signing or recording fails after that checkpoint, a watcher retry

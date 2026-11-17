@@ -1,0 +1,15 @@
+{
+  "version": 1,
+  "entries": [
+    {
+      "id": "reviewer-pass-outcome-before-accounting",
+      "title": "Reviewer pass outcome and accounting settlement",
+      "path": "docs/data-model/reviewer-passes.md",
+      "store": "data/reviews.db.reviewer_passes",
+      "schemaSurface": "src/reviewer-pass-tokens.mjs",
+      "relatedSchemaSurfaces": ["src/reviewer-spawn-settle.mjs", "src/reviewer-pass-reaper.mjs"],
+      "owner": "reviewer settlement",
+      "compatibility": "No schema or status additions. Runtime/post outcome is terminal before asynchronous accounting. Later accounting atomically enriches the same session, retaining terminal outcome and end time. Reaper checks current pass state before delivery changes."
+    }
+  ]
+}

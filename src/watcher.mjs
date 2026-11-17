@@ -1,5 +1,6 @@
 import { githubTokenForTarget } from './github-owner-token.mjs';
 import { createRepositoryRefresher } from './watcher-repository-discovery.mjs';
+import { ownerScopedOrgClient } from './watcher-additional-org-client.mjs';
 import { ensureWorkerRegistryReady } from './adapters/agent-runtime/local/remediation.mjs';
 import { prepareDispatchReadContext } from './dispatch-read-client.mjs';
 import { shutdownAmaHammerBackgroundQueue } from './ama-hammer-background-dispatch.mjs';
@@ -1096,7 +1097,8 @@ const adversarialGateBranchProtectionChecker = createBranchProtectionChecker({
 
 const refreshRepositories = createRepositoryRefresher({ config, db, rootDir: ROOT,
   additionalStateDir: ADVERSARIAL_REVIEW_STATE_DIR, recordApiCall, apiStatusFromResult,
-  apiStatusFromError, deliverAlert: defaultDeliverAlert });
+  apiStatusFromError, deliverAlert: defaultDeliverAlert, clientForOrg: ownerScopedOrgClient,
+  additionalOrgs: () => loadConfigCached({ env: process.env }).getAdditionalWatchedOrgs() });
 async function refreshOrgRepos(octokit) {
   activeRepos = await refreshRepositories(octokit, activeRepos);
 }

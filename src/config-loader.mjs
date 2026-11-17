@@ -1758,6 +1758,17 @@ function schemaV1() {
             __default: null,
             __nullable: true,
           },
+          // WATCHMULTIORG-01: extra orgs whose repositories the review watcher
+          // discovers, host-local only (committed default: none).
+          additional_orgs: {
+            __type: TYPE_LIST,
+            __default: [],
+            __item: {
+              __type: TYPE_STRING,
+              __pattern: '^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})$',
+              __pattern_description: 'a GitHub org login',
+            },
+          },
           // Compatibility for configs written before OSR-05 settled on the
           // `org_email_domain` name.
           workspace_email_domain: {
@@ -6393,6 +6404,10 @@ export class AgentOSConfig {
 
   getOrchestrationMode() {
     return this.get('roles.adversarial.orchestration_mode');
+  }
+
+  getAdditionalWatchedOrgs() {
+    return [...this.get('github.additional_orgs', [])];
   }
 
   getHandoffConfig() {

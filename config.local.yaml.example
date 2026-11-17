@@ -1,6 +1,14 @@
 # Local operator overrides for adversarial-review.
 # Copy relevant keys into config.local.yaml; this example is not loaded.
 
+# Review additional GitHub orgs. The watcher always lists the org in config.json;
+# each login named here is listed too, using that org's owner-scoped client (an
+# org without one is skipped with one log line). excludeRepos applies across
+# all orgs. Merge enablement stays a separate per-repository decision.
+# github:
+#   additional_orgs:
+#     - example-second-org
+
 adversarial:
   reviewer:
     load_aware:

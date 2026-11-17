@@ -3,6 +3,7 @@ import { canonicalRepositoryName, ensureRepositoryIdentitySchema, observeReposit
 // Discovery owns its refresh clock; identity conflicts quarantine only their repo.
 export function createRepositoryRefresher({ config, db, rootDir, additionalStateDir,
   recordApiCall, apiStatusFromResult, apiStatusFromError, deliverAlert,
+  additionalOrgs = () => [], clientForOrg = () => null,
   now = Date.now, logger = console }) {
   let nextRefreshAt = 0;
   let hasSuccessfulListing = false;
@@ -18,6 +19,105 @@ export function createRepositoryRefresher({ config, db, rootDir, additionalState
   const isExcluded = name => excluded.has(name.toLowerCase())
     || excluded.has(name.split('/').at(-1).toLowerCase());
 
+  async function listOrg(octokit, org) {
+    const params = { org, type: 'all', per_page: 100 };
+    const repoLabel = `${org}/*`;
+    const all = [];
+    if (typeof octokit.paginate?.iterator === 'function') {
+      for await (const response of octokit.paginate.iterator(octokit.rest.repos.listForOrg, params)) {
+        recordApiCall({ category: 'other', repo: repoLabel, status: apiStatusFromResult(response), durationMs: null });
+        all.push(...(response?.data || []));
+      }
+    } else {
+      const startedAt = Date.now();
+      const repos = await octokit.paginate(octokit.rest.repos.listForOrg, params);
+      recordApiCall({ category: 'other', repo: repoLabel, status: 200, durationMs: Date.now() - startedAt });
+      for (const repo of repos) all.push(repo);
+    }
+    return all;
+  }
+
+  // Observes one org's listing; identity conflicts quarantine only their repository.
+  async function observeListing(watched) {
+    const observations = observeRepositoryListing({ db, rootDir,
+      additionalStateDir, repositories: watched, logger });
+    const conflicts = observations.filter(row => row.conflict);
+    const quarantined = new Set(conflicts.map(row => row.fullName.toLowerCase()));
+    try {
+      db.transaction(() => {
+        const remove = db.prepare('DELETE FROM repository_discovery_quarantine WHERE full_name=?');
+        const insert = db.prepare('INSERT INTO repository_discovery_quarantine VALUES (?)');
+        for (const observation of observations) {
+          remove.run(observation.fullName);
+          if (observation.conflict) insert.run(observation.fullName);
+        }
+      }).immediate();
+    } catch (error) {
+      logger.warn(`[watcher] Repository quarantine persistence failed; using in-memory conflicts for this listing: ${error.message}`);
+    }
+    for (const conflict of conflicts) {
+      await deliverAlert(`Repository identity conflict: ${conflict.fullName}; intake quarantined for this repository. ${conflict.reason}`, {
+        source: 'adversarial-repository-identity', severity: 'SEV2',
+        dedupKey: `repository-identity-conflict:${conflict.repositoryId}:${conflict.fullName}`,
+      }).catch(error => logger.warn(`[watcher] Repository conflict notice deferred: ${error.message}`));
+    }
+    return quarantined;
+  }
+
+  // Historical ambiguity also fences names before discovery persists a quarantine.
+  const fencedNames = () => new Set(db.prepare(`SELECT full_name FROM repository_discovery_quarantine
+    UNION SELECT full_name FROM repository_name_history
+    GROUP BY full_name HAVING count(DISTINCT repository_id) > 1`).all()
+    .map(row => row.full_name.toLowerCase()));
+  const knownNames = org => db.prepare('SELECT full_name FROM repository_identities ORDER BY full_name').all()
+    .map(row => row.full_name).filter(name => name.split('/')[0].toLowerCase() === org.toLowerCase());
+
+  // Additional orgs are isolated: each lists with its own owner-scoped client and
+  // keeps its own previous set, so one org's failure never shrinks another's.
+  const orgSets = new Map(), orgClients = new Map(), unavailableLogged = new Set();
+  function additionalClient(org) {
+    if (orgClients.has(org)) return orgClients.get(org);
+    let client = null, reason = 'no owner-scoped client';
+    try { client = clientForOrg(org); } catch (error) { reason = error.message; }
+    if (client) orgClients.set(org, client);
+    else if (!unavailableLogged.has(org)) {
+      unavailableLogged.add(org);
+      logger.warn(`[watcher] Additional org ${org} skipped: owner-scoped GitHub client unavailable (${reason}).`);
+    }
+    return client;
+  }
+  async function refreshAdditionalOrg(org) {
+    const previous = orgSets.get(org);
+    const client = additionalClient(org);
+    if (!client) return previous ?? [];
+    try {
+      const all = await listOrg(client, org);
+      const watched = all.map(r => ({ ...r, full_name: r.full_name || `${org}/${r.name}` }))
+        .filter(r => !r.archived && !isExcluded(r.full_name));
+      const quarantined = await observeListing(watched);
+      const names = watched.map(r => r.full_name).filter(name => !quarantined.has(name.toLowerCase()));
+      logger.log(`[watcher] Additional org ${org} refreshed — watching ${names.length} repos: ${names.join(', ')}`);
+      return names;
+    } catch (err) {
+      recordApiCall({ category: 'other', repo: `${org}/*`, status: apiStatusFromError(err), durationMs: null });
+      logger.error(`[watcher] Failed to list additional org repos for ${org}:`, err.message);
+      if (previous) return previous;
+      const fenced = fencedNames();
+      return knownNames(org).filter(name => !isExcluded(name) && !fenced.has(name.toLowerCase()));
+    }
+  }
+  async function withAdditionalOrgs(repos, due) {
+    let configured = [...orgSets.keys()]; // an unreadable config keeps the known orgs rather than failing the default org
+    try { configured = additionalOrgs(); } catch (error) { logger.warn(`[watcher] Additional orgs unreadable; keeping known orgs: ${error.message}`); }
+    const orgs = [...new Set(configured.map(org => org.toLowerCase()))].filter(org => org !== config.org.toLowerCase());
+    if (!orgs.length && !orgSets.size) return repos;
+    const contributed = new Set([...orgSets.values()].flat().map(name => name.toLowerCase()));
+    const pinned = new Set((config.repos || []).map(name => canonicalRepositoryName(db, name).toLowerCase()));
+    const merged = repos.filter(name => !contributed.has(name.toLowerCase()) || pinned.has(name.toLowerCase()));
+    for (const org of orgs) if (due) orgSets.set(org, await refreshAdditionalOrg(org));
+    return [...new Set([...merged, ...orgs.flatMap(org => orgSets.get(org) ?? [])])];
+  }
+
   async function refresh(octokit, currentRepos) {
     let activeRepos = currentRepos;
     if (!config.org) return [...new Set(activeRepos.map(name => canonicalRepositoryName(db, name)))]
@@ -28,63 +128,15 @@ export function createRepositoryRefresher({ config, db, rootDir, additionalState
     if (startedAt < nextRefreshAt) return activeRepos;
 
     const repoLabel = config.org ? `${config.org}/*` : null;
-    const params = {
-      org: config.org,
-      type: 'all',
-      per_page: 100,
-    };
-
     nextRefreshAt = startedAt + refreshInterval;
     let listingComplete = false;
     try {
-      const all = [];
-      if (typeof octokit.paginate?.iterator === 'function') {
-        for await (const response of octokit.paginate.iterator(octokit.rest.repos.listForOrg, params)) {
-          recordApiCall({
-            category: 'other',
-            repo: repoLabel,
-            status: apiStatusFromResult(response),
-            durationMs: null,
-          });
-          all.push(...(response?.data || []));
-        }
-      } else {
-        const startedAt = Date.now();
-        const repos = await octokit.paginate(octokit.rest.repos.listForOrg, params);
-        recordApiCall({
-          category: 'other',
-          repo: repoLabel,
-          status: 200,
-          durationMs: Date.now() - startedAt,
-        });
-        for (const repo of repos) all.push(repo);
-      }
+      const all = await listOrg(octokit, config.org);
 
       listingComplete = true;
       const watched = all.map(r => ({ ...r, full_name: r.full_name || `${config.org}/${r.name}` }))
         .filter(r => !r.archived && !isExcluded(r.full_name));
-      const observations = observeRepositoryListing({ db, rootDir,
-        additionalStateDir, repositories: watched, logger });
-      const conflicts = observations.filter(row => row.conflict);
-      const quarantined = new Set(conflicts.map(row => row.fullName.toLowerCase()));
-      try {
-        db.transaction(() => {
-          const remove = db.prepare('DELETE FROM repository_discovery_quarantine WHERE full_name=?');
-          const insert = db.prepare('INSERT INTO repository_discovery_quarantine VALUES (?)');
-          for (const observation of observations) {
-            remove.run(observation.fullName);
-            if (observation.conflict) insert.run(observation.fullName);
-          }
-        }).immediate();
-      } catch (error) {
-        logger.warn(`[watcher] Repository quarantine persistence failed; using in-memory conflicts for this listing: ${error.message}`);
-      }
-      for (const conflict of conflicts) {
-        await deliverAlert(`Repository identity conflict: ${conflict.fullName}; intake quarantined for this repository. ${conflict.reason}`, {
-          source: 'adversarial-repository-identity', severity: 'SEV2',
-          dedupKey: `repository-identity-conflict:${conflict.repositoryId}:${conflict.fullName}`,
-        }).catch(error => logger.warn(`[watcher] Repository conflict notice deferred: ${error.message}`));
-      }
+      const quarantined = await observeListing(watched);
       const discoveredRepos = watched.map(r => r.full_name);
       activeRepos = [...new Set([...(config.repos || []).map(name => canonicalRepositoryName(db, name)), ...discoveredRepos])]
         .filter(name => !isExcluded(name) && !quarantined.has(name.toLowerCase()));
@@ -114,13 +166,8 @@ export function createRepositoryRefresher({ config, db, rootDir, additionalState
         nextRefreshAt = Math.min(startedAt + backoff, deferredUntil > startedAt ? deferredUntil : Infinity);
         // Historical ambiguity also fences names on the first deployment,
         // before discovery has had a chance to persist a quarantine.
-        const quarantined = new Set(db.prepare(`SELECT full_name FROM repository_discovery_quarantine
-          UNION SELECT full_name FROM repository_name_history
-          GROUP BY full_name HAVING count(DISTINCT repository_id) > 1`).all()
-          .map(row => row.full_name.toLowerCase()));
-        const known = db.prepare('SELECT full_name FROM repository_identities ORDER BY full_name').all()
-          .map(row => row.full_name)
-          .filter(name => name.split('/')[0].toLowerCase() === config.org.toLowerCase());
+        const quarantined = fencedNames();
+        const known = knownNames(config.org);
         const candidates = [...new Set([...(config.repos || []).map(name => canonicalRepositoryName(db, name)), ...known])];
         for (const name of candidates.filter(name => !isExcluded(name) && quarantined.has(name.toLowerCase()))) {
           logger.warn(`[watcher] Startup fallback omitted candidate repository ${name}: persisted quarantine or ambiguous ownership history; an authoritative safe listing is required.`);
@@ -135,7 +182,9 @@ export function createRepositoryRefresher({ config, db, rootDir, additionalState
   }
 
   return async function refreshOrgRepos(octokit, currentRepos) {
-    const activeRepos = await refresh(octokit, currentRepos);
+    const due = now() >= nextRefreshAt;
+    let activeRepos = await refresh(octokit, currentRepos);
+    if (config.org) activeRepos = await withAdditionalOrgs(activeRepos, due);
     if (activeRepos.length) {
       emptySince = null;
       emptyAlertSent = false;

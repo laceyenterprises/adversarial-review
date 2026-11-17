@@ -36,11 +36,15 @@ Repositories in `worker_pool.public_hygiene.repos` use a public-safe prompt
 addendum and a generic posted header without operational attribution, audit
 links or identifiers. Extra operational prompt context is omitted. Configure
 this list through the existing configuration loader; repository names are never
-embedded in the reviewer.
+embedded in the reviewer. The reviewer matches names case-insensitively and
+trims surrounding whitespace at the matching boundary; configured names must
+still pass the loader's strict repository-name validation.
 
 Immediately before writing a review, the pipeline invokes
 `hq hygiene scan --repo <owner/name> --text-file <temporary-file> --json` on the
 complete filtered body. Only a successful `clean` result permits posting.
+The subprocess has a 130-second timeout and a 1 MiB buffer per output stream;
+exceeding either bound holds posting.
 Hits, missing scanners, malformed responses and configuration failures hold
 posting and raise the existing operator alert. The structured
 `reviewer.public_hygiene_hold` event records a class and numeric line/rule

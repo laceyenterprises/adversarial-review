@@ -20,7 +20,7 @@ export function isPublicHygieneRepo(repo, getConfigImpl = getConfig) {
   if (!Array.isArray(repos) || repos.some(value => typeof value !== 'string')) {
     throw new Error('Invalid public-hygiene repository configuration');
   }
-  return repos.some(value => value.toLowerCase() === String(repo).toLowerCase());
+  return repos.some(value => value.trim().toLowerCase() === String(repo).trim().toLowerCase());
 }
 
 // Accept only numeric locations and known classes; never persist CLI output or
@@ -53,7 +53,7 @@ export async function assertPublicSafeReview({
     try {
       output = await execFileImpl('hq', [
         'hygiene', 'scan', '--repo', repo, '--text-file', textFile, '--json',
-      ], { timeout: 130_000, maxBuffer: 64 * 1024, encoding: 'utf8' });
+      ], { timeout: 130_000, maxBuffer: 1024 * 1024, encoding: 'utf8' });
     } catch (error) {
       exitCode = error.code;
       output = { stdout: error.stdout };

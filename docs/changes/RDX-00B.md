@@ -7,6 +7,9 @@ and generic template, omitting operational extra context and attribution blocks.
 The final filtered text is scanned before any review-write preparation, including
 when retrying a captured body. A hit or unavailable scanner refuses posting,
 records a redacted structured hold and raises the existing pipeline alert.
+Final comment-only remediation raises scanner output headroom to 1 MiB per
+stream and trims surrounding whitespace during case-insensitive repository
+matching. Loader validation remains strict.
 
 ## Interface changes
 
@@ -26,3 +29,15 @@ their existing prompt, template and posting behavior.
 All validation commands ran through the bounded validation runner. Scanner
 fixtures contain synthetic values only; no live reviews or review database
 were accessed.
+
+Final remediation verification:
+
+- The same seven-file scoped runner passed all 331 tests, including a real
+  offline subprocess emitting more than 64 KiB on each output stream and
+  whitespace/case matching regressions. The command used
+  `env -u CLAUDE_CLI_PATH -u CLAUDE_CODE_CLI_PATH -u CLAUDE_CLI` to remove
+  inherited host CLI overrides that caused three unrelated fixture mismatches.
+- `npm run lint` passed with zero errors and 149 existing warnings.
+- `npm run typecheck:contracts` and
+  `bash demo/research-finding-walkthrough.sh` passed.
+- `git diff --check` passed. The full suite is reserved for PR-head CI.

@@ -1,5 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -12,6 +14,28 @@ import { __test__ } from '../src/reviewer.mjs';
 const repo = 'example-org/example-repo';
 const marked = () => [repo];
 const unmarked = () => [];
+
+test('repository matching normalizes surrounding whitespace and case on both sides', () => {
+  for (const configured of [repo, ` \t${repo.toUpperCase()}\n`]) {
+    for (const input of [repo, ` \t${repo.toUpperCase()}\n`]) {
+      assert.equal(isPublicHygieneRepo(input, () => [configured]), true);
+    }
+    assert.equal(isPublicHygieneRepo('example-org/other-repo', () => [configured]), false);
+  }
+});
+
+test('clean scanner output tolerates more than 64 KiB on both stdout and stderr', async () => {
+  const run = promisify(execFile);
+  await assertPublicSafeReview({
+    repo, prNumber: 1, reviewBody: 'Code review',
+    getConfigImpl: () => [` ${repo.toUpperCase()} `],
+    execFileImpl: async (_command, _args, options) => run(process.execPath, ['-e', `
+      process.stderr.write('Synthetic diagnostic\\n'.repeat(8192));
+      process.stdout.write(' '.repeat(128 * 1024) + '{"status":"clean"}');
+    `], options),
+    deliverAlertImpl: async () => assert.fail('must not alert'),
+  });
+});
 
 test('strict and runtime config readers retain deployed hygiene configuration', async () => {
   const directory = await mkdtemp(join(tmpdir(), 'hygiene-config-'));

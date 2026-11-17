@@ -170,7 +170,8 @@ const ENUM_ROLES_REMEDIATOR_FALLBACK = ['claude-code', 'codex', 'gemini', 'remed
 // the merge-agent app identity); allowed here so the budget-exhausted final pass
 // can dispatch it. See worker-pool hq_resolve_worker_identity (merge-agent-lacey).
 const ENUM_ROLES_MERGE_AGENT_WORKER_CLASS = ['merge-agent', 'codex', 'claude-code', 'hammer', 'hammer-claude', 'hammer-grok'];
-const ENUM_ROLES_BUILD_PACK_DEFAULT_WORKER_CLASS = ['plan', 'codex', 'codex-corp', 'claude-code'];
+// Mirrors _ENUM_ROLES_BUILD_PACK_DEFAULT_WORKER_CLASS in the Python schema (same members, same order).
+const ENUM_ROLES_BUILD_PACK_DEFAULT_WORKER_CLASS = ['plan', 'codex', 'codex-corp', 'claude-code', 'claude-code-corp'];
 export const ENUM_ROLES_ADVERSARIAL_ORCHESTRATION_MODE = ['native', 'agentos'];
 export const ENUM_ROLES_ADVERSARIAL_OPERATOR_LABEL_ACTOR_ENFORCEMENT = ['observe', 'enforce'];
 export const ENUM_ROLES_ADVERSARIAL_MERGE_CAPABILITY_ENFORCEMENT = ['observe', 'enforce'];

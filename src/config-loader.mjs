@@ -1765,7 +1765,7 @@ function schemaV1() {
             __default: [],
             __item: {
               __type: TYPE_STRING,
-              __pattern: '^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})$',
+              __pattern: '^[A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?$',
               __pattern_description: 'a GitHub org login',
             },
           },

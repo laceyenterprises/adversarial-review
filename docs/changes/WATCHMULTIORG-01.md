@@ -12,7 +12,8 @@ listed on the existing refresh clock through that org's owner-scoped client
 (`src/watcher-additional-org-client.mjs`), never the home client. Results merge
 with the home org as `owner/name` and `excludeRepos` applies across all orgs.
 Isolation is per org: a failed listing keeps that org's previous set, a missing
-owner-scoped client or unavailable owner token skips that org with one log line,
+owner-scoped client or unavailable owner token skips that org with one log line
+per outage (a successful listing resets warning suppression),
 and identity quarantine is
 per repository. The client uses the watcher's configured broker role and requires
 a home token and broker secret configuration. A successfully read configuration
@@ -29,10 +30,14 @@ scope. API calls carry a per-org `<org>/*` label.
 - Merge-authority behavior is unchanged: merge enablement stays per repository.
 - The key must also be accepted by the other strict readers of the shared
   config file before a host sets it (see the PR description).
+- Additional org logins must be 1–39 characters, start and end with an
+  alphanumeric character, and otherwise contain only alphanumerics or hyphens.
 
 ## Verification
 
-- `node --test test/watcher-additional-org-discovery.test.mjs test/watcher-repository-discovery.test.mjs`: 35 passed.
+- `node --test test/watcher-additional-org-discovery.test.mjs test/watcher-repository-discovery.test.mjs test/watcher-claim-loop.test.mjs`:
+  40 passed, including failure/recovery/failure warning coverage and org-login
+  boundary validation added for PR #1912 remediation.
 - Scoped config, watcher, owner-token and decomposition-gate suites: all pass
   except tests that also fail on an unmodified checkout when run concurrently
   (they pass in isolation); `test/watcher-claim-loop.test.mjs` passes.

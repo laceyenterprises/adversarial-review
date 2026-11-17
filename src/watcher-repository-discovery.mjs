@@ -97,6 +97,7 @@ export function createRepositoryRefresher({ config, db, rootDir, additionalState
       const quarantined = await observeListing(watched);
       const names = watched.map(r => r.full_name).filter(name => !quarantined.has(name.toLowerCase()));
       logger.log(`[watcher] Additional org ${org} refreshed — watching ${names.length} repos: ${names.join(', ')}`);
+      unavailableLogged.delete(org);
       return names;
     } catch (err) {
       if (err?.code === 'github-owner-token-unavailable') {

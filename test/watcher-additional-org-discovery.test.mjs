@@ -137,6 +137,30 @@ test('quarantine is per org: a conflicted repository leaves other orgs untouched
     .map(r => r.full_name), ['example-second-org/taken']);
 });
 
+test('owner token outages warn again after a successful recovery', async t => {
+  const f = fixture(t);
+  f.listings.set('example-org', [repo(1, 'example-org/alpha')]);
+  f.listings.set('example-second-org', [repo(2, 'example-second-org/beta')]);
+  const outage = Object.assign(new Error('owner token unavailable'),
+    { code: 'github-owner-token-unavailable' });
+  f.failures.set('example-second-org', outage);
+  let repos = await f.refresh([]);
+  assert.equal(f.warnings.filter(line => line.includes('example-second-org skipped')).length, 1);
+
+  f.failures.delete('example-second-org');
+  f.advance(61 * minute);
+  repos = await f.refresh(repos);
+  assert.deepEqual(repos, ['example-org/alpha', 'example-second-org/beta']);
+
+  f.failures.set('example-second-org', outage);
+  for (let attempt = 0; attempt < 2; attempt++) {
+    f.advance(61 * minute);
+    repos = await f.refresh(repos);
+    assert.deepEqual(repos, ['example-org/alpha', 'example-second-org/beta']);
+    assert.equal(f.warnings.filter(line => line.includes('example-second-org skipped')).length, 2);
+  }
+});
+
 test('the additional org lists through its own client, never the default client', async t => {
   const f = fixture(t);
   f.listings.set('example-org', [repo(1, 'example-org/alpha')]);
@@ -229,7 +253,11 @@ test('additional_orgs is an optional host-local key validated as org logins', t 
   assert.deepEqual(loadConfig({ topPath, env: {} }).getAdditionalWatchedOrgs(), []);
   writeFileSync(localPath, 'version: 1\ngithub:\n  additional_orgs:\n    - example-second-org\n');
   assert.deepEqual(loadConfig({ topPath, env: {} }).getAdditionalWatchedOrgs(), ['example-second-org']);
-  for (const bad of ['-leading-dash', 'has space', 'owner/repo', '']) {
+  for (const valid of ['a', 'a1', 'example-second-org', 'a'.repeat(39)]) {
+    writeFileSync(localPath, `version: 1\ngithub:\n  additional_orgs:\n    - ${JSON.stringify(valid)}\n`);
+    assert.deepEqual(loadConfig({ topPath, env: {} }).getAdditionalWatchedOrgs(), [valid]);
+  }
+  for (const bad of ['-leading-dash', 'example-org-', '-', 'a'.repeat(40), 'has space', 'owner/repo', '']) {
     writeFileSync(localPath, `version: 1\ngithub:\n  additional_orgs:\n    - ${JSON.stringify(bad)}\n`);
     assert.throws(() => loadConfig({ topPath, env: {} }), /github\.additional_orgs\[0\]/, bad);
   }

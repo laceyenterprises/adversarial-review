@@ -17,8 +17,11 @@ per outage (a successful listing resets warning suppression),
 and identity quarantine is
 per repository. The client uses the watcher's configured broker role and requires
 a home token and broker secret configuration. A successfully read configuration
-removes orgs no longer listed; a later read failure keeps only the last valid
-scope. API calls carry a per-org `<org>/*` label.
+removes orgs no longer listed, including their cached clients and outage warning
+suppression; a later read failure keeps only the last valid scope. Startup
+fallback warns for each non-excluded additional-org candidate omitted by persisted
+quarantine or ambiguous ownership history, matching the home-org diagnostic.
+API calls carry a per-org `<org>/*` label.
 
 ## Interface changes
 
@@ -35,6 +38,16 @@ scope. API calls carry a per-org `<org>/*` label.
 
 ## Verification
 
+- Final PR #1912 remediation: `node --test
+  test/watcher-additional-org-discovery.test.mjs
+  test/watcher-repository-discovery.test.mjs` passes all 41 tests. New regressions
+  failed before the fix and pass after it: removing/reconfiguring an org creates
+  a fresh client and warning, while startup fallback warns for quarantine and
+  ambiguous history without warning for excluded names.
+- Final remediation guards pass: `npm run lint` (0 errors), `npm run
+  typecheck:contracts`, `bash demo/research-finding-walkthrough.sh`,
+  `node scripts/validate-data-model-catalog.mjs` (98 entries), and
+  `git diff --check`. The full local suite was intentionally left to PR-head CI.
 - `node --test test/watcher-additional-org-discovery.test.mjs test/watcher-repository-discovery.test.mjs test/watcher-claim-loop.test.mjs`:
   40 passed, including failure/recovery/failure warning coverage and org-login
   boundary validation added for PR #1912 remediation.

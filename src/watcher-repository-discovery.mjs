@@ -111,7 +111,11 @@ export function createRepositoryRefresher({ config, db, rootDir, additionalState
       logger.error(`[watcher] Failed to list additional org repos for ${org}:`, err.message);
       if (previous) return previous;
       const fenced = fencedNames();
-      return knownNames(org).filter(name => !isExcluded(name) && !fenced.has(name.toLowerCase()));
+      const candidates = knownNames(org);
+      for (const name of candidates.filter(name => !isExcluded(name) && fenced.has(name.toLowerCase()))) {
+        logger.warn(`[watcher] Startup fallback omitted candidate repository ${name}: persisted quarantine or ambiguous ownership history; an authoritative safe listing is required.`);
+      }
+      return candidates.filter(name => !isExcluded(name) && !fenced.has(name.toLowerCase()));
     }
   }
   async function withAdditionalOrgs(repos, due) {
@@ -121,7 +125,11 @@ export function createRepositoryRefresher({ config, db, rootDir, additionalState
     const orgs = [...new Set(configured.map(org => org.toLowerCase()))].filter(org => org !== config.org.toLowerCase());
     if (!orgs.length && !orgSets.size) return repos;
     const contributed = new Set([...orgSets.values()].flat().map(name => name.toLowerCase()));
-    if (configRead) for (const org of orgSets.keys()) if (!orgs.includes(org)) orgSets.delete(org);
+    if (configRead) for (const org of orgSets.keys()) if (!orgs.includes(org)) {
+      orgSets.delete(org);
+      orgClients.delete(org);
+      unavailableLogged.delete(org);
+    }
     const pinned = new Set((config.repos || []).map(name => canonicalRepositoryName(db, name).toLowerCase()));
     const merged = repos.filter(name => !contributed.has(name.toLowerCase()) || pinned.has(name.toLowerCase()));
     for (const org of orgs) if (due) orgSets.set(org, await refreshAdditionalOrg(org));

@@ -59,12 +59,14 @@ uses the watcher's broker role
 and requires a home token and broker secret configuration. Each organization
 keeps its own previous set. A listing failure keeps that set; before the first
 listing, it restores durable `repository_identities` names for that owner under
-the same quarantine and history fences. A failure never changes another
+the same quarantine and history fences, warning for each non-excluded candidate
+omitted by either fence. A failure never changes another
 organization's set. Quarantine stays per repository name. `excludeRepos` applies
 across all organizations, and watched names stay `owner/name`. A successful
 configuration read removes
-organizations absent from its list; an unreadable configuration retains only
-the last successfully configured scope.
+organizations absent from its list and clears their cached clients and outage
+warning suppression; reconfiguration creates a fresh client. An unreadable
+configuration retains only the last successfully configured scope.
 
 `repository_discovery_quarantine` in `data/reviews.db` contains `full_name`
 (case-insensitive text primary key). Discovery creates it additively and stores

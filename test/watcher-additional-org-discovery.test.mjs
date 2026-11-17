@@ -99,6 +99,24 @@ test('a startup additional-org failure restores that org from durable identities
   assert.deepEqual(await f.refresh([]), ['example-org/alpha', 'example-second-org/durable']);
 });
 
+test('startup additional-org fallback warns for fenced candidates but not excluded names', async t => {
+  const f = fixture(t, { config: { excludeRepos: ['hidden'] } });
+  f.seed([repo(7, 'example-second-org/durable'), repo(8, 'example-second-org/quarantined'),
+    repo(9, 'example-second-org/ambiguous'), repo(10, 'example-second-org/hidden')]);
+  f.db.prepare('INSERT INTO repository_discovery_quarantine VALUES (?)').run('EXAMPLE-SECOND-ORG/QUARANTINED');
+  f.db.prepare('INSERT INTO repository_discovery_quarantine VALUES (?)').run('example-second-org/hidden');
+  f.db.prepare('INSERT INTO repository_name_history VALUES (?, ?, ?)')
+    .run('11', 'EXAMPLE-SECOND-ORG/AMBIGUOUS', new Date().toISOString());
+  f.listings.set('example-org', [repo(1, 'example-org/alpha')]);
+  f.failures.set('example-second-org', new Error('Synthetic second-org failure'));
+
+  assert.deepEqual(await f.refresh([]), ['example-org/alpha', 'example-second-org/durable']);
+  assert.deepEqual(f.warnings.filter(line => line.includes('Startup fallback omitted')), [
+    '[watcher] Startup fallback omitted candidate repository example-second-org/ambiguous: persisted quarantine or ambiguous ownership history; an authoritative safe listing is required.',
+    '[watcher] Startup fallback omitted candidate repository example-second-org/quarantined: persisted quarantine or ambiguous ownership history; an authoritative safe listing is required.',
+  ]);
+});
+
 test('a missing owner-scoped client skips that org with one log line and lists the rest', async t => {
   const f = fixture(t, { additionalOrgs: ['example-second-org', 'example-third-org'],
     clients: { 'example-third-org': null } });
@@ -213,6 +231,35 @@ test('a removed additional org stays removed after a later config read error', a
   time += 61 * minute;
   repos = await refresher(f.home, repos);
   assert.deepEqual(repos, ['example-org/alpha']);
+});
+
+test('removing an additional org evicts its client and outage warning before reconfiguration', async t => {
+  const configured = ['example-second-org'], clients = {};
+  const f = fixture(t, { additionalOrgs: configured, clients });
+  clients['example-second-org'] = fakeClient('old', f.listings, f.failures, f.seen);
+  f.listings.set('example-org', [repo(1, 'example-org/alpha')]);
+  f.failures.set('example-second-org', Object.assign(new Error('owner token unavailable'),
+    { code: 'github-owner-token-unavailable' }));
+  let repos = await f.refresh([]);
+  assert.equal(f.warnings.filter(line => line.includes('example-second-org skipped')).length, 1);
+  configured.length = 0;
+  f.advance(61 * minute);
+  repos = await f.refresh(repos);
+  assert.deepEqual(repos, ['example-org/alpha']);
+
+  clients['example-second-org'] = fakeClient('new', f.listings, f.failures, f.seen);
+  configured.push('example-second-org');
+  f.advance(61 * minute);
+  repos = await f.refresh(repos);
+  assert.deepEqual(repos, ['example-org/alpha']);
+  assert.deepEqual(f.clientCalls, ['example-second-org', 'example-second-org']);
+  assert.equal(f.seen.at(-1).client, 'new');
+  assert.equal(f.warnings.filter(line => line.includes('example-second-org skipped')).length, 2);
+
+  f.failures.delete('example-second-org');
+  f.listings.set('example-second-org', [repo(2, 'example-second-org/beta')]);
+  f.advance(61 * minute);
+  assert.deepEqual(await f.refresh(repos), ['example-org/alpha', 'example-second-org/beta']);
 });
 
 test('ownerScopedOrgClient authenticates with the org token and declines unrouted orgs', async () => {

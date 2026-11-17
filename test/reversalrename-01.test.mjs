@@ -17,25 +17,34 @@ const reviewBody = file => `## Blocking issues\n- None.\n## Non-blocking issues\
 // shape: 'rename' (renamed with an edited line), 'split' (removed + added),
 // 'delete', 'edit' (in-place edit, no path change).
 function fixture(t, { shape = 'rename', cite = true, citedFile = 'a/x.yaml', reviewer = 'lacey-claude-reviewer[bot]',
-  reviewedHead = PRIMARY, later = false, author = 'hammer-worker' } = {}) {
+  reviewedHead = PRIMARY, later = false, author = 'hammer-worker', destination = 'a/y.yaml',
+  replacement = 'partial', additionalFiles = [] } = {}) {
   const rootDir = mkdtempSync(join(tmpdir(), 'reversal-rename-'));
   t.after(() => rmSync(rootDir, { recursive: true, force: true }));
   const patchOf = (removed, kept) => `@@ -1,3 +1,${kept.length} @@\n${removed.map(line => `-${line}`).join('\n')}${kept.length ? '\n' : ''}${kept.map(line => `+${line}`).join('\n')}`;
-  const edited = ['name: renamed', ...LINES.slice(1)];
+  const edited = { partial: ['name: renamed', ...LINES.slice(1)], identical: LINES,
+    complete: ['name: replaced', 'kind: replacement', 'owner: other-team'] }[replacement];
+  const blob = replacement === 'identical' ? added.sha : '2'.repeat(40);
+  const renamePatch = replacement === 'partial'
+    ? '@@ -1,3 +1,3 @@\n-name: sample\n+name: renamed\n kind: widget\n owner: team'
+    : replacement === 'identical' ? undefined : patchOf(LINES, edited);
+  const changedLines = { partial: 1, identical: 0, complete: 3 }[replacement];
   const commitFiles = {
-    rename: [{ filename: 'a/y.yaml', previous_filename: 'a/x.yaml', status: 'renamed', sha: '2'.repeat(40),
-      additions: 1, deletions: 1, patch: '@@ -1,3 +1,3 @@\n-name: sample\n+name: renamed\n kind: widget\n owner: team' }],
+    rename: [{ filename: destination, previous_filename: 'a/x.yaml', status: 'renamed', sha: blob,
+      additions: changedLines, deletions: changedLines, patch: renamePatch }],
     split: [{ filename: 'a/x.yaml', status: 'removed', sha: '1'.repeat(40), additions: 0, deletions: 3,
-      patch: patchOf(LINES, []) }, { filename: 'a/y.yaml', status: 'added', sha: '2'.repeat(40), additions: 3, deletions: 0,
+      patch: patchOf(LINES, []) }, { filename: destination, status: 'added', sha: blob, additions: 3, deletions: 0,
       patch: `@@ -0,0 +1,3 @@\n${edited.map(line => `+${line}`).join('\n')}` }],
     delete: [{ filename: 'a/x.yaml', status: 'removed', sha: '1'.repeat(40), additions: 0, deletions: 3, patch: patchOf(LINES, []) }],
     edit: [{ filename: 'a/x.yaml', status: 'modified', sha: '2'.repeat(40), additions: 1, deletions: 3,
       patch: '@@ -1,3 +1 @@\n-name: sample\n-kind: widget\n-owner: team\n+name: renamed' }],
   }[shape];
-  const finalFiles = { rename: [{ ...commitFiles[0], previous_filename: undefined, status: 'added', additions: 3,
+  const finalFiles = { rename: [{ ...commitFiles[0], previous_filename: undefined, status: 'added', additions: 3, deletions: 0,
     patch: `@@ -0,0 +1,3 @@\n${edited.map(line => `+${line}`).join('\n')}` }],
   split: [commitFiles[1]], delete: [], edit: [{ ...added, sha: '2'.repeat(40), additions: 1,
     patch: '@@ -0,0 +1 @@\n+name: renamed' }] }[shape];
+  commitFiles.push(...additionalFiles);
+  finalFiles.push(...additionalFiles);
   const trailers = `Worker-Class: hammer\nWorker-Ticket: HAM\nReviewed-Head: ${reviewedHead}\n`
     + (cite ? 'Reversal-Authorized-By: PRR_fixture finding=1 kind=non-blocking' : '');
   const commit = (sha, parent, message, files, login) => ({ sha, parents: [{ sha: parent }],
@@ -118,13 +127,48 @@ test('REVERSALRENAME-01: a non-authoritative reviewer, mismatched Reviewed-Head 
   }
 });
 
-test('REVERSALRENAME-01: a cited rename into a test path is refused', async t => {
-  const f = fixture(t, { shape: 'rename' });
-  const evidence = await f.collect();
-  evidence.reversalAuthorizations[0].commit.files[0].filename = 'test/y.yaml';
-  const result = check(evidence, f.head);
-  assert.equal(result.reason, 'primary-change-reverted');
-  assert.deepEqual(rejectedReasons(result), ['hammer-patch-does-not-touch-region']);
+test('REVERSALRENAME-01: a cited rename into a test path is refused before removal coverage', async t => {
+  for (const replacement of ['complete', 'partial', 'identical']) {
+    const f = fixture(t, { destination: 'test/y.yaml', replacement });
+    const evidence = await f.collect();
+    assert.equal(evidence.reversalAuthorizations[0].commit.files[0].filename, 'test/y.yaml');
+    assert.equal(evidence.finalFiles[0].filename, 'test/y.yaml');
+    const result = check(evidence, f.head);
+    assert.equal(result.reason, 'primary-change-reverted', replacement);
+    assert.equal(result.missingEvidence.accepted, 0, replacement);
+    assert.deepEqual(rejectedReasons(result), ['production-to-test-rename'], replacement);
+  }
+});
+
+test('REVERSALRENAME-01: a cited identical removed-plus-added move cannot cross into tests', async t => {
+  for (const destination of ['a/y.yaml', 'test/y.yaml']) {
+    const f = fixture(t, { shape: 'split', replacement: 'identical', destination });
+    const evidence = await f.collect();
+    assert.equal(evidence.reversalAuthorizations[0].commit.files[1].filename, destination);
+    assert.equal(evidence.finalFiles[0].filename, destination);
+    const result = check(evidence, f.head);
+    if (destination === 'a/y.yaml') assert.equal(result.ok, true, JSON.stringify(result));
+    else {
+      assert.equal(result.reason, 'primary-change-reverted');
+      assert.equal(result.missingEvidence.accepted, 0);
+      assert.deepEqual(rejectedReasons(result), ['production-to-test-rename']);
+    }
+  }
+});
+
+test('REVERSALRENAME-01: a cited production rename can replace every protected line', async t => {
+  const f = fixture(t, { replacement: 'complete' });
+  const result = check(await f.collect(), f.head);
+  assert.equal(result.ok, true, JSON.stringify(result));
+});
+
+test('REVERSALRENAME-01: an unrelated added test does not prevent a cited deletion', async t => {
+  const f = fixture(t, { shape: 'delete', additionalFiles: [{
+    filename: 'test/deletion.test.mjs', status: 'added', sha: '3'.repeat(40), additions: 1, deletions: 0,
+    patch: '@@ -0,0 +1 @@\n+// Verify the obsolete configuration is absent.',
+  }] });
+  const result = check(await f.collect(), f.head);
+  assert.equal(result.ok, true, JSON.stringify(result));
 });
 
 test('REVERSALRENAME-01: the citation still authorizes when a later trailer-less hammer commit follows it', async t => {

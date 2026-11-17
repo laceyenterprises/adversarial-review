@@ -38,6 +38,15 @@ Three defects combined:
   instead of returning silently.
 - A trailer-less hammer commit on top of the citing commit does not void the
   citation: the collector's closure is every commit after the primary head.
+- Final comment-only remediation makes production-to-test moves an explicit
+  `production-to-test-rename` refusal before removal coverage. It also recognizes
+  a removed source and added test destination with identical valid blob SHAs.
+  Complete replacement coverage cannot waive this boundary.
+
+## Interface changes
+
+No public API or persistent record shape changes. Refused citations use the
+existing rejection-reason field; the closure runbook documents the boundary.
 
 ## Verification
 
@@ -46,3 +55,16 @@ Three defects combined:
 in-place edit, optionally under a later hammer commit). It reproduced the
 refusal before the change. The existing primary-change, reversal-rebase and
 lane-reversal suites pass; `npm run lint` and `npm run typecheck:contracts` are clean.
+
+Final-round regression fixtures use consistent commit and final test destinations.
+Both the complete-replacement rename and identical removed-plus-added move
+reproduced acceptance before the fix. After remediation:
+
+- `node test/run-tests.mjs test/reversalrename-01.test.mjs test/primary-change.test.mjs test/primary-change-lines.test.mjs test/primary-change-reversal-rebase.test.mjs test/lanereversal-01.test.mjs`:
+  260 tests passed across five files, including the production rename and
+  cited deletion with an unrelated added test.
+- `npm run lint`: zero errors (149 existing warnings).
+- `npm run typecheck:contracts`: passed.
+- `bash demo/research-finding-walkthrough.sh`: passed with three byte-stable deliveries.
+- `git diff --check`: passed. The full local suite was not run; PR-head CI
+  remains the full-suite merge gate.

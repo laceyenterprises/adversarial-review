@@ -529,6 +529,15 @@ function reversalAuthorized(evidence, path, region, cache, strictNonBlockingReme
           }
         }
         const parent = projectRegion(parentFiles, path, region, cache);
+        // Refuse production-to-test moves before removal coverage: a rename
+        // may remove every protected line. A removed+added identical blob is
+        // the other supported representation of a move.
+        const removedSource = commit.files.find(file => file.filename === parent.filename && file.status === 'removed');
+        if (!isTestPath(parent.filename) && commit.files.some(file => isTestPath(file.filename)
+          && (file.status === 'renamed' && file.previous_filename === parent.filename
+            || file.status === 'added' && SHA.test(file.sha || '') && file.sha === removedSource?.sha))) {
+          return reject('production-to-test-rename');
+        }
         const segment = protectedSegment(parentFiles, path, region, cache);
         if (!segment) return reject('hammer-patch-does-not-touch-region');
         const added = segment.addedLines ??= segment.lines.filter(line => line.startsWith('+')).map(line => line.slice(1));
@@ -554,10 +563,8 @@ function reversalAuthorized(evidence, path, region, cache, strictNonBlockingReme
         // Do not re-scan it for every unit after this commit has covered it.
         // REVERSALRENAME-01: a rename entry lists only the edited lines, but
         // the old path of an added file no longer holds any of its content.
-        // A rename into a test path never counts.
         const renamedAway = parentFiles.some(file => file.filename === parent.filename && file.status === 'added')
-          && commit.files.some(file => file.status === 'renamed' && file.previous_filename === parent.filename
-            && (!isTestPath(file.filename) || isTestPath(parent.filename)));
+          && commit.files.some(file => file.status === 'renamed' && file.previous_filename === parent.filename);
         if (!renamedAway && !coverage.has(protectedLines)) {
           const { segments } = patchSegments(commit.files, parent.filename, cache);
           const overlapping = segments.filter(entry => entry.old <= parent.end

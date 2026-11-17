@@ -4805,7 +4805,12 @@ findings are allowed. Reviewers must still flag inversions or neutralizations of
 the tested primary-change behavior. Renaming production code into a test path
 does not preserve its protected baseline, even with identical bytes and a
 trusted hammer rename proof. Both rename-proof destinations and the final
-diff's renamed paths enforce this production-to-test boundary. Chained renames
+diff's renamed paths enforce this production-to-test boundary. Finding-based
+reversal authorization also refuses a production-to-test rename before checking
+removal coverage, including a rename patch that replaces every protected line.
+A removed source plus an added test destination with the same valid blob SHA
+is likewise refused as a move; an unrelated test addition does not turn a
+cited deletion into a rename. Chained renames
 from a builder-renamed path may collect the same identical-blob hammer proof
 when both the intermediate path is absent and the merge-base name remains
 removed or renamed; restoring the merge-base name does not qualify.

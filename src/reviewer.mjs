@@ -97,6 +97,7 @@ import { assertReviewerReply } from './kernel/review-reply.mjs';
 import { suppressFinalRoundFollowUp } from './comment-only-final-round.mjs';
 import { createLinearTriageAdapter } from './adapters/operator/linear-triage/index.mjs';
 import { getConfig } from './config-loader.mjs';
+import { assertPublicSafeReview, isPublicHygieneRepo } from './public-hygiene.mjs';
 import { parseCodexJsonTokenUsage } from './reviewer-model-detection.mjs';
 import {
   fetchPullRequestHeadAndState,
@@ -1390,26 +1391,6 @@ function createReviewerPreWriteLogProxy(log = console) {
   };
 }
 
-// GitHub's GraphQL `addPullRequestReview` mutation refuses to create a second
-// pending review per (user, PR) tuple. If a previous reviewer subprocess was
-// SIGTERM'd between `gh pr review --comment` initiating the review and the
-// body submission completing, GitHub may have already accepted the review
-// CREATION but not the body submission — leaving a PENDING review draft
-// scoped to the bot, invisible to other accounts via the standard reviews
-// list. Every subsequent reviewer attempt then dies with:
-//
-//   GraphQL: User can only have one pending review per pull request (addPullRequestReview)
-//
-// The watcher's failure classifier returns `failure-class=unknown` (no pattern
-// match), so it schedules another retry, which fails the same way. Indefinite
-// loop, never recovers without operator manual DELETE.
-//
-// Bot-self-housekeeping: before each post, list the bot's own reviews on the
-// PR via the REST API (which DOES surface our own pending drafts), and DELETE
-// any with state=PENDING. The bot is the only writer of its own reviews, so
-// this is race-free against itself. Best-effort: if the list/delete calls
-// fail, log and continue — the post may still succeed, and a failure here is
-// strictly less bad than the leak it's trying to prevent.
 async function postGitHubReview(repo, prNumber, reviewBody, botTokenEnv, execFileImpl = execFileAsync, opts = {}) {
   const sourceEnv = opts.env || process.env;
   const reviewerHeadSha = String(opts.reviewerHeadSha || '').trim() || null;
@@ -1440,6 +1421,9 @@ async function postGitHubReview(repo, prNumber, reviewBody, botTokenEnv, execFil
   let refreshedAfterAuthFailure = false;
 
   reviewBody = filterGitHubBody(reviewBody, { repo, reviewerHeadSha: opts.reviewerHeadSha, rootDir: opts.rootDir || ROOT, env: sourceEnv });
+  await assertPublicSafeReview({
+    ...opts.hygieneOptions, repo, prNumber, reviewBody, log,
+  });
   const stateDir = resolveAdversarialReviewStateDir(opts.rootDir || ROOT, sourceEnv);
   let reviewerFence = null;
   try {
@@ -2298,6 +2282,7 @@ async function main() {
     labels: verdictModeResolution.labels, reviewerHeadSha, log: console,
   })), guardForbiddenPaths, { log: console });
   const fullComment = filterGitHubBody(buildReviewCommentBody({
+    publicHygiene: isPublicHygieneRepo(repo),
     reviewerMetadata,
     verdictMode,
     execution: reviewerExecution,
@@ -2342,7 +2327,7 @@ async function main() {
   });
 
   try {
-    console.error(`[reviewer] DEBUG: posting GitHub review body length=${fullComment.length}; preview=${previewText(fullComment, 300)}`);
+    console.error(`[reviewer] posting GitHub review body length=${fullComment.length}`);
     // Match beginReviewerPass's launch-attempt key. The ledger round advances
     // only on completion, so retry attempts can differ.
     const captureAttemptNumber = Number.isFinite(Number(reviewDbAttemptNumber))

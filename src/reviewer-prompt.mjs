@@ -7,6 +7,7 @@
 // only how the adversarial prompt, stage selection, and diff framing are built.
 
 import { createHash } from 'node:crypto';
+import { isPublicHygieneRepo, PUBLIC_SAFE_REVIEW_ADDENDUM } from './public-hygiene.mjs';
 import { readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -123,7 +124,11 @@ async function buildReviewerExtraContext({
   execFileImpl,
   log = console,
   readTenureReviewRangeImpl = readTenureReviewRange,
+  getConfigImpl,
 } = {}) {
+  if (isPublicHygieneRepo(repo, getConfigImpl)) {
+    return PUBLIC_SAFE_REVIEW_ADDENDUM + formatGuardForbiddenPaths(guardForbiddenPaths);
+  }
   // The range is daemon-owned metadata, never inferred from PR prose.
   let tenureContext = '';
   try {

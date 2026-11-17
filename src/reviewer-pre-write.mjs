@@ -1,4 +1,25 @@
 import { githubTokenForTarget, githubOwnerTokens, invalidateGithubOwnerTokenOnAuthFailure } from './github-owner-token.mjs';
+
+// GitHub's GraphQL `addPullRequestReview` mutation refuses to create a second
+// pending review per (user, PR) tuple. If a previous reviewer subprocess was
+// SIGTERM'd between `gh pr review --comment` initiating the review and the
+// body submission completing, GitHub may have already accepted the review
+// CREATION but not the body submission — leaving a PENDING review draft
+// scoped to the bot, invisible to other accounts via the standard reviews
+// list. Every subsequent reviewer attempt then dies with:
+//
+//   GraphQL: User can only have one pending review per pull request (addPullRequestReview)
+//
+// The watcher's failure classifier returns `failure-class=unknown` (no pattern
+// match), so it schedules another retry, which fails the same way. Indefinite
+// loop, never recovers without operator manual DELETE.
+//
+// Bot-self-housekeeping: before each post, list the bot's own reviews on the
+// PR via the REST API (which DOES surface our own pending drafts), and DELETE
+// any with state=PENDING. The bot is the only writer of its own reviews, so
+// this is race-free against itself. Best-effort: if the list/delete calls
+// fail, log and continue — the post may still succeed, and a failure here is
+// strictly less bad than the leak it's trying to prevent.
 const GITHUB_API_ROOT = 'https://api.github.com';
 const REVIEWER_USER_AGENT = 'adversarial-review-reviewer';
 

@@ -29,3 +29,25 @@ bash scripts/install-githooks.sh
 ```
 
 The hook runs ESLint on staged `.mjs` / `.js` files under `src/`.
+
+## Public-hygiene reviews
+
+Repositories in `worker_pool.public_hygiene.repos` use a public-safe prompt
+addendum and a generic posted header without operational attribution, audit
+links or identifiers. Extra operational prompt context is omitted. Configure
+this list through the existing configuration loader; repository names are never
+embedded in the reviewer. The reviewer matches names case-insensitively and
+trims surrounding whitespace at the matching boundary; configured names must
+still pass the loader's strict repository-name validation.
+
+Immediately before writing a review, the pipeline invokes
+`hq hygiene scan --repo <owner/name> --text-file <temporary-file> --json` on the
+complete filtered body. Only a successful `clean` result permits posting.
+The subprocess has a 130-second timeout and a 1 MiB buffer per output stream;
+exceeding either bound holds posting.
+Hits, missing scanners, malformed responses and configuration failures hold
+posting and raise the existing operator alert. The structured
+`reviewer.public_hygiene_hold` event records a class and numeric line/rule
+locations without matched values. Repair the text, private scanner configuration
+or CLI availability and retry the review. Temporary text files are private and
+removed after scanning. Unmarked repositories retain their existing behavior.

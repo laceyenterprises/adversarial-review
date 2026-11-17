@@ -10,7 +10,8 @@ const dispatchClasses = ['codex', 'codex-corp', 'claude-code', 'merge-agent', 'r
 // Only leaves already mirrored by this reader: failure-recovery roles and
 // worker_pool.merge_agent sub-roles remain owned by the host's loaders.
 const leaves = [
-  ['roles.build_pack_default_worker_class', ['plan', 'codex', 'codex-corp', 'claude-code'], 'codex'],
+  // Same members and order as the Python allowlist for this key.
+  ['roles.build_pack_default_worker_class', ['plan', 'codex', 'codex-corp', 'claude-code', 'claude-code-corp'], 'codex'],
   ['worker_pool.post_merge_actions.rca_worker_class', dispatchClasses, 'codex'],
   ...[
     'coding', 'research', 'drafting', 'analysis', 'other', 'merge',
@@ -86,3 +87,14 @@ for (const [key, allowed, defaultClass] of leaves) {
     });
   }
 }
+
+test('roles.build_pack_default_worker_class accepts claude-code-corp from local YAML in strict and runtime loaders', t => {
+  const key = 'roles.build_pack_default_worker_class';
+  const { topPath, localPath } = fixture(t);
+  writeFileSync(localPath, yamlFor(key, 'claude-code-corp'));
+  for (const load of [loadConfig, loadConfigRuntime]) {
+    const cfg = load({ topPath, env: {} });
+    assert.equal(cfg.get(key), 'claude-code-corp');
+    assert.equal(cfg.resolutionTrace(key).at(-1).source, `local:${localPath}`);
+  }
+});

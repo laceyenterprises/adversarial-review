@@ -13,10 +13,10 @@ const DEFAULT_MAX_BUFFER = 64 * 1024 * 1024;
 const PIPE_DRAIN_MS = 2000;
 
 export function runCommandKeepingOutput(command, argv, { timeout, killSignal = 'SIGTERM', killGraceMs = DEFAULT_KILL_GRACE_MS,
-  maxBuffer = DEFAULT_MAX_BUFFER } = {}) {
+  maxBuffer = DEFAULT_MAX_BUFFER, env } = {}) {
   return new Promise((resolve, reject) => {
     const chunks = { stdout: [], stderr: [] }, size = { stdout: 0, stderr: 0 };
-    const child = spawn(command, argv);
+    const child = spawn(command, argv, { env });
     const timers = [];
     let timedOut = false, overflow = false, spawnError = null, done = false;
     let exitResult = null, pipeDrainTimer = null;

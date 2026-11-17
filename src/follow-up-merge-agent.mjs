@@ -5,6 +5,7 @@ import { observeClosureWait } from './ama/closure-wait.mjs';
 import { readDispatchStatus } from './producer-contracts/launch-status.mjs';
 import { parseHqDispatchStatusOutput } from './hq-dispatch-status-output.mjs';
 import { loadAwareTimeoutMs } from './load-aware-timeout.mjs';
+import { runCommandKeepingOutput, DEFAULT_KILL_GRACE_MS } from './run-command-keeping-output.mjs';
 import { readDispatchReceipt, parseDispatchJsonOutput } from './producer-contracts/dispatch-receipt.mjs';
 import { observeSynchronousChild } from './watcher-latency.mjs';
 import { logCodexWorkerDispatch } from './codex-account-routing.mjs';
@@ -140,6 +141,19 @@ import {
 import { collectStuckMergeAgentCandidateHeads } from './merge-agent-stuck-scan-candidates.mjs';
 import { isRecordedDispatchAtLeastStuckMinAge } from './merge-agent-stuck-age.mjs';
 const execFileAsync = promisify(execFile);
+
+// The dispatcher runs through the shared runner (SIGTERM, grace, SIGKILL, pipes
+// held open) so a timeout keeps the child's output. Expiry becomes an error that
+// names the budget and carries stdout/stderr; code ETIMEDOUT, killed and the
+// "timed out" message keep it classified transient (isExecTimeout).
+async function runHqDispatchKeepingOutput(command, argv, options) {
+  const result = await runCommandKeepingOutput(command, argv, options);
+  if (!result.timedOut) return result;
+  throw Object.assign(new Error(`hq dispatch timed out after ${result.timeoutMs} ms`), {
+    code: 'ETIMEDOUT', killed: true, signal: options.killSignal,
+    stdout: result.stdout, stderr: result.stderr,
+  });
+}
 const MERGE_AGENT_DISPATCH_SCHEMA_VERSION = 1;
 const MERGE_AGENT_LIFECYCLE_CLEANUP_SCHEMA_VERSION = 1;
 const OPERATOR_SKIP_LABELS = new Set(OPERATOR_HOLD_LABELS);
@@ -2057,6 +2071,8 @@ async function dispatchMergeAgentForPRWithinRepositoryCycle({
   observeClosureWaitImpl = observeClosureWait,
   resolveMergeAgentHarnessImpl = resolveMergeAgentDispatchHarness,
   dispatchRetryDelaysMs = HQ_DISPATCH_TRANSIENT_RETRY_DELAYS_MS,
+  dispatchKillGraceMs = DEFAULT_KILL_GRACE_MS,
+  dispatchTimeoutMsOverride = null,
   logger = console,
   env = process.env,
   // AMA-06N: when the AMA-coexistence decision selects
@@ -2673,14 +2689,17 @@ async function dispatchMergeAgentForPRWithinRepositoryCycle({
   ];
   let activeArgs = argsWithPriority;
   let transientRetryIndex = 0;
-  const dispatchTimeoutMs = resolveHqDispatchTimeoutMs(dispatchEnv);
+  const dispatchTimeoutMs = dispatchTimeoutMsOverride ?? resolveHqDispatchTimeoutMs(dispatchEnv);
+  // An injected execFileImpl stays authoritative; the default uses the shared runner.
+  const runDispatch = execFileImpl === execFileAsync ? runHqDispatchKeepingOutput : execFileImpl;
   for (;;) {
     try {
-      execResult = await execFileImpl(resolvedHqPath, activeArgs, {
+      execResult = await runDispatch(resolvedHqPath, activeArgs, {
         env: dispatchEnv,
         maxBuffer: 5 * 1024 * 1024,
         timeout: dispatchTimeoutMs,
         killSignal: 'SIGTERM',
+        killGraceMs: dispatchKillGraceMs,
       });
       break;
     } catch (err) {

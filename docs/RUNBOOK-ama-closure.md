@@ -4810,6 +4810,18 @@ from a builder-renamed path may collect the same identical-blob hammer proof
 when both the intermediate path is absent and the merge-base name remains
 removed or renamed; restoring the merge-base name does not qualify.
 
+An added text file may also move with finding-authorized edits (LAC-2212).
+This proof requires a trusted HAM commit whose sole parent is the reviewed
+primary head, an admissible cited finding explicitly recommending
+`Rename <source> to <destination>`, and source-line coverage for every edited
+patch segment. The primary, reviewed and HAM-parent source entries must match.
+Applying the complete HAM patch to that source must reproduce the complete
+final added destination, whose blob must match the HAM destination. Production
+destinations under test paths, existing destination collisions, opaque patches,
+rebased or chained edited moves do not qualify. Other paths retain their
+ordinary preservation checks. Comment-only findings still require strict
+non-blocking remediation mode. This proof changes no live merge gate.
+
 ### Mechanical migration renumbers (MIGRENUMBERDERIVED-01)
 
 The shared primary-change collector recognizes an author-added Python migration

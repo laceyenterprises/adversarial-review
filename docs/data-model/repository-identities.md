@@ -51,13 +51,18 @@ Partial paginated listings never replace scope.
 ### Additional organizations (WATCHMULTIORG-01)
 
 The host-local list `github.additional_orgs` (empty by default; set only in
-`config.local.yaml`) adds organizations to discovery. Each is listed on the same
-refresh clock as the home organization, through that organization's
+`config.local.yaml`) adds organizations to discovery. A newly configured organization
+gets an initial discovery attempt on the next poll, even before the home refresh
+deadline. Subsequent attempts, including retries after an initial failure or
+unavailable client, use the same refresh clock as the home organization.
+Each listing uses that organization's
 owner-scoped GitHub client, never the home client. An organization with no such
 client or an unavailable owner token is skipped with one log line. The client
 uses the watcher's broker role
 and requires a home token (`GITHUB_TOKEN`, falling back to `GH_TOKEN`) and broker
-secret configuration. Each organization
+secret configuration. Every authentication reads the current home-token
+environment values, so cached clients follow credential rotation and fail
+closed if both home-token variables become unavailable. Each organization
 keeps its own previous set. A listing failure keeps that set; before the first
 listing, it restores durable `repository_identities` names for that owner under
 the same quarantine and history fences, warning for each non-excluded candidate

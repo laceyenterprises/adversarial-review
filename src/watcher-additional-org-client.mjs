@@ -8,9 +8,8 @@ import { resolveWatcherGhBrokerRole } from './reviewer-broker-refresh.mjs';
 // (for example the home org itself), so discovery can skip it.
 export function ownerScopedOrgClient(org, { tokens = githubOwnerTokens, create = createWatcherOctokit, env = process.env } = {}) {
   if (!tokens.routedOwner({ owner: org })) return null;
-  const token = env.GITHUB_TOKEN || env.GH_TOKEN;
-  if (!token || !env.OAUTH_BROKER_SHARED_SECRET_FILE) return null;
+  if (!(env.GITHUB_TOKEN || env.GH_TOKEN) || !env.OAUTH_BROKER_SHARED_SECRET_FILE) return null;
   return create({ authProvider: () => tokens.select({
-    token, env, role: resolveWatcherGhBrokerRole(env), target: { owner: org },
+    token: env.GITHUB_TOKEN || env.GH_TOKEN, env, role: resolveWatcherGhBrokerRole(env), target: { owner: org },
   }) });
 }

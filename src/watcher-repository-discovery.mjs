@@ -137,7 +137,7 @@ export function createRepositoryRefresher({ config, db, rootDir, additionalState
     }
     const pinned = new Set((config.repos || []).map(name => canonicalRepositoryName(db, name).toLowerCase()));
     const merged = repos.filter(name => !contributed.has(name.toLowerCase()) || pinned.has(name.toLowerCase()));
-    for (const org of orgs) if (due) orgSets.set(org, await refreshAdditionalOrg(org));
+    for (const org of orgs) if (due || !orgSets.has(org)) orgSets.set(org, await refreshAdditionalOrg(org));
     return [...new Set([...merged, ...orgs.flatMap(org => orgSets.get(org) ?? [])])];
   }
 

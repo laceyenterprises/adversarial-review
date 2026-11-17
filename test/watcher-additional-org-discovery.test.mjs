@@ -60,6 +60,38 @@ test('the default org and an additional org merge as owner/name', async t => {
   assert.ok(f.apiCalls.some(c => c.repo === 'example-second-org/*') && f.apiCalls.some(c => c.repo === 'example-org/*'));
 });
 
+test('newly configured orgs discover immediately while recurring attempts keep the shared interval', async t => {
+  for (const outcome of ['success', 'listing failure', 'unavailable client']) await t.test(outcome, async t => {
+    const configured = [], clients = {};
+    const f = fixture(t, { additionalOrgs: configured, clients });
+    clients['example-second-org'] = outcome === 'unavailable client' ? null
+      : fakeClient('second', f.listings, f.failures, f.seen);
+    f.listings.set('example-org', [repo(1, 'example-org/alpha')]);
+    f.listings.set('example-second-org', [repo(2, 'example-second-org/beta')]);
+    let repos = await f.refresh([]);
+    configured.push('example-second-org');
+    if (outcome === 'listing failure') f.failures.set('example-second-org', new Error('Synthetic listing failure'));
+    f.advance(minute);
+    repos = await f.refresh(repos);
+    assert.deepEqual(repos, outcome === 'success'
+      ? ['example-org/alpha', 'example-second-org/beta'] : ['example-org/alpha']);
+    assert.deepEqual(f.clientCalls, ['example-second-org']);
+    assert.deepEqual(f.seen, outcome === 'unavailable client'
+      ? [{ client: 'home', org: 'example-org' }]
+      : [{ client: 'home', org: 'example-org' }, { client: 'second', org: 'example-second-org' }]);
+    f.failures.clear();
+    clients['example-second-org'] = fakeClient('second', f.listings, f.failures, f.seen);
+    const attempts = f.seen.length;
+    f.advance(minute);
+    assert.deepEqual(await f.refresh(repos), repos);
+    assert.equal(f.seen.length, attempts, 'initial failure or unavailability must not trigger per-poll retries');
+    assert.deepEqual(f.clientCalls, ['example-second-org']);
+    f.advance(58 * minute);
+    assert.deepEqual(await f.refresh(repos), ['example-org/alpha', 'example-second-org/beta']);
+    assert.equal(f.seen.length, attempts + 2, 'the home refresh deadline still governs recurring listings');
+  });
+});
+
 test('excludeRepos applies across orgs by full and short name', async t => {
   const f = fixture(t, { config: { excludeRepos: ['example-second-org/hidden', 'skip'] } });
   f.listings.set('example-org', [repo(1, 'example-org/alpha'), repo(2, 'example-org/skip')]);
@@ -338,6 +370,30 @@ test('ownerScopedOrgClient accepts GH_TOKEN with the watcher role and real owner
   assert.equal(await created[0].authProvider(), 'second-org-token');
   assert.deepEqual(minted.map(({ role, owner }) => ({ role, owner })),
     [{ role: 'watcher-app', owner: 'example-second-org' }]);
+});
+
+test('cached owner-scoped clients read current home credentials on every authentication', async () => {
+  const selected = [];
+  const tokens = createGithubOwnerTokenSelector({ readHomeOwner: () => 'example-org',
+    mint: async () => ({ token: 'second-org-token' }) });
+  const select = tokens.select;
+  tokens.select = options => { selected.push(options.token); return select(options); };
+  const env = { GITHUB_TOKEN: 'initial-home-token', GH_TOKEN: 'initial-fallback-token',
+    OAUTH_BROKER_SHARED_SECRET_FILE: 'fixture-secret' };
+  const client = ownerScopedOrgClient('example-second-org', { tokens, env, create: options => options });
+  assert.equal(await client.authProvider(), 'second-org-token');
+  env.GITHUB_TOKEN = 'rotated-home-token';
+  assert.equal(await client.authProvider(), 'second-org-token');
+  assert.deepEqual(selected, ['initial-home-token', 'rotated-home-token']);
+  delete env.GITHUB_TOKEN;
+  env.GH_TOKEN = 'rotated-fallback-token';
+  assert.equal(await client.authProvider(), 'second-org-token');
+  assert.equal(selected.at(-1), 'rotated-fallback-token');
+  delete env.GH_TOKEN;
+  await assert.rejects(async () => client.authProvider(), { code: 'github-owner-token-unavailable' });
+  env.GITHUB_TOKEN = 'recovered-home-token';
+  assert.equal(await client.authProvider(), 'second-org-token');
+  assert.equal(selected.at(-1), 'recovered-home-token');
 });
 
 test('additional_orgs is an optional host-local key validated as org logins', t => {

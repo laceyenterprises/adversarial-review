@@ -8,7 +8,8 @@ host-local configuration. Discovery previously listed exactly one org
 
 `github.additional_orgs` (a list of org logins, validated by the config loader,
 committed default empty, set only in `config.local.yaml`) adds orgs. Each is
-listed on the existing refresh clock through that org's owner-scoped client
+given an initial discovery attempt on the next poll after configuration, with
+subsequent attempts on the existing refresh clock through that org's owner-scoped client
 (`src/watcher-additional-org-client.mjs`), never the home client. Results merge
 with the home org as `owner/name` and `excludeRepos` applies across all orgs.
 Isolation is per org: a failed listing keeps that org's previous set, a missing
@@ -26,7 +27,8 @@ Additional-org repository-state lock contention propagates after the home
 organization's first successful reconciliation, deferring discovery on the same
 terms as the home path. Local observation failures retain fallback scope and
 log reconciliation errors without recording failed GitHub API calls. Home
-credentials accept `GITHUB_TOKEN` with `GH_TOKEN` as the fallback.
+credentials accept `GITHUB_TOKEN` with `GH_TOKEN` as the fallback, read on
+every authentication so cached clients follow rotation and credential removal.
 
 ## Interface changes
 
@@ -43,6 +45,17 @@ credentials accept `GITHUB_TOKEN` with `GH_TOKEN` as the fallback.
 
 ## Verification
 
+- PR #1912 credential-rotation and dynamic-configuration remediation: bounded
+  `node --test test/watcher-additional-org-discovery.test.mjs
+  test/watcher-repository-discovery.test.mjs test/github-owner-token.test.mjs`
+  passes all 51 tests. New regressions failed before the fix and pass afterward:
+  cached clients use rotated credentials, fail closed on removal and recover;
+  newly configured orgs discover immediately, with later attempts still using
+  the shared deadline after success, listing failure or client unavailability.
+  `npm run lint` (0 errors, 149 existing warnings), scoped ESLint, contract
+  typechecking, the offline research demo, data-model catalog validation
+  (98 entries), and `git diff --check` pass. Full-suite validation remains
+  with PR-head CI.
 - Latest PR #1912 remediation: bounded `node --test
   test/watcher-additional-org-discovery.test.mjs
   test/watcher-repository-discovery.test.mjs test/github-owner-token.test.mjs`

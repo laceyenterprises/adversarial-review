@@ -50,6 +50,24 @@ Partial paginated listings never replace scope.
 
 ### Additional organizations (WATCHMULTIORG-01)
 
+Deployment order matters because the host configuration is shared by three
+strict-schema loaders. Before adding `github.additional_orgs` to any host's
+`config.local.yaml`, deploy support for the key in the Agent OS superproject's
+Python loader (`platform/agent-os-config/`) and shell loader
+(`modules/worker-pool/lib/agent-os-config-loader.sh`), as well as this Node
+loader. The matching schema is an optional list of GitHub organization logins,
+defaulting to `[]`; each login is 1–39 ASCII alphanumeric or hyphen characters,
+with an alphanumeric first and last character.
+
+Validate the intended configuration through all three deployed loaders before
+setting the key on a fleet host. Deploying this repository alone does not
+establish Python/shell compatibility; their schema updates and validation are
+an Agent OS superproject follow-up. Until that prerequisite is verified, leave
+the key absent from host configuration, including when no additional
+organizations are desired: an explicit `additional_orgs: []` still fails an
+older strict schema. If enablement causes a shared-loader rejection, remove
+the key from the local override and validate all readers again before retrying.
+
 The host-local list `github.additional_orgs` (empty by default; set only in
 `config.local.yaml`) adds organizations to discovery. A newly configured organization
 gets an initial discovery attempt on the next poll, even before the home refresh

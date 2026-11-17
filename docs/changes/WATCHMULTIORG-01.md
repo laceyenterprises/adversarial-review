@@ -30,6 +30,14 @@ log reconciliation errors without recording failed GitHub API calls. Home
 credentials accept `GITHUB_TOKEN` with `GH_TOKEN` as the fallback, read on
 every authentication so cached clients follow rotation and credential removal.
 
+PR #1912 deployment-order remediation documents the shared-loader prerequisite
+beside the example key and in the canonical discovery contract. Operators must
+deploy and validate Python, shell and Node schema support before setting
+`github.additional_orgs`, and leave the key absent until then (even an explicit
+empty list is unsafe for an older strict reader). Python/shell schema changes
+and their validation remain a follow-up in the Agent OS superproject, outside
+this repository; no host configuration is enabled by this patch.
+
 ## Interface changes
 
 - New optional config key `github.additional_orgs` (documented in
@@ -45,6 +53,17 @@ every authentication so cached clients follow rotation and credential removal.
 
 ## Verification
 
+- PR #1912 deployment-order documentation remediation: after rebasing onto
+  freshly fetched main, bounded `node --test
+  test/watcher-additional-org-discovery.test.mjs
+  test/watcher-repository-discovery.test.mjs test/github-owner-token.test.mjs`
+  passes all 51 tests, including optional-key validation and empty defaults.
+  `npm run lint` passes with 0 errors and 149 existing warnings;
+  `npm run typecheck:contracts`, `bash demo/research-finding-walkthrough.sh`,
+  `node scripts/validate-data-model-catalog.mjs` (98 entries), and
+  `git diff --check` pass. The Python validation harness is unavailable in this
+  environment, so commands used the checked-in bounded runner. Full-suite
+  validation remains with PR-head CI.
 - PR #1912 credential-rotation and dynamic-configuration remediation: bounded
   `node --test test/watcher-additional-org-discovery.test.mjs
   test/watcher-repository-discovery.test.mjs test/github-owner-token.test.mjs`

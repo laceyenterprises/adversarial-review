@@ -849,6 +849,11 @@
         "transcriptMaxBytes": 8388608
       },
       "reviewerSettlementFailureMessage": { "successfulPass": null, "unsuccessfulPassPriority": ["error", "stderr", "stderrTail"] },
+      "reviewerSettlementMetadata": {
+        "postedSuccessOverridesFailure": "Remove failureClass, failureReason, failureMessage, failureDetail and error from persisted and incoming metadata.",
+        "timeoutMerge": "Merge timeout fields into transaction-current metadata, preserving attribution added after the scan.",
+        "runtimeExpectedHead": "Omitted, null or empty runtime head omits the optional fence; non-empty heads require equality."
+      },
       "compatibility": "REVIEWPROV-01: missing execution harness stamps unknown, never a model family. Antigravity suffix effort accepts only low, medium, high or xhigh; release qualifiers remain null. Existing fields, nullability and lifecycle are unchanged.",
       "owner": "reviewer spawn, settle, and token attribution"
     },

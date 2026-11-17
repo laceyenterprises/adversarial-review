@@ -402,6 +402,7 @@ function completeReviewerPass(rootDir, {
       if (nextStatus !== requestedStatus) {
         metadata = { ...metadata };
         for (const field of ['failureClass', 'failureReason', 'failureMessage', 'failureDetail', 'error']) {
+          if (nextStatus === 'completed') delete existingMeta[field];
           delete metadata[field];
         }
       }

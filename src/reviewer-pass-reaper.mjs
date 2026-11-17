@@ -431,6 +431,8 @@ function reapRunningPassTimeouts({
     if (!matchesRunningSnapshot(pass, row)) {
       return { passChanged: false, reviewChanged: false };
     }
+    // Only timeout fields come from the scan; retain attribution added since it.
+    metadataJson = JSON.stringify({ ...parseMetadataJson(pass.metadata_json), ...parseMetadataJson(metadataJson) });
     const current = getReviewRow.get(row.repo, row.pr_number);
     if (current?.review_status === 'reviewing') {
       const infraAttempts = Number(current.infra_auto_recover_attempts || 0);
@@ -632,7 +634,6 @@ function reapRunningPassTimeouts({
         capExhausted: true,
       });
       const metadata = {
-        ...passMetadata,
         failureClass: RUNNING_PASS_TIMEOUT_FAILURE_CLASS,
         failureReason,
         timeoutThresholdSeconds: effectiveThresholdSeconds,

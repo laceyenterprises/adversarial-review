@@ -36,7 +36,14 @@ terminal end time and outcome; a first-pass/rereview with its own GitHub artifac
 retains completed status. Session and optional exact-head fences refuse usage
 from another owner. Reaper recovery rechecks running status inside its transaction
 before changing delivery or budgets, so a stale snapshot cannot settle twice.
-No artifact is transferred between primary and fallback passes.
+No artifact is transferred between primary and fallback passes. Omitted, null
+or empty runtime head inputs omit the optional completion fence; a supplied
+non-empty head still requires equality. When posted success overrides a failed
+settlement request, failure keys (`failureClass`, `failureReason`,
+`failureMessage`, `failureDetail`, `error`) are removed from both persisted and
+incoming metadata. Timeout settlement merges only its timeout fields into the
+current transaction's metadata, preserving launch/session attribution and
+accounting evidence added after the reaper scan.
 
 First-pass and rereview body capture also projects blocking and non-blocking
 findings into [review finding records](review-findings.md). These observations

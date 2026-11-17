@@ -12,6 +12,8 @@ import { beginReviewerPass, completeReviewerPass } from '../src/reviewer-pass-to
 import { reapRunningPassTimeouts } from '../src/reviewer-pass-reaper.mjs';
 import { transferReviewerFallbackSession } from '../src/reviewer-fallback-session.mjs';
 import { reconcileReviewerSessions } from '../src/reviewer-reattach.mjs';
+import { activeReviewerSpawns, inFlightReviewerSessions } from '../src/reviewer-session-registry.mjs';
+import { loadSpawnRecords } from '../src/reviewer-fence.mjs';
 
 const repo = 'fixture/settlement';
 const head = 'a'.repeat(40);
@@ -25,6 +27,137 @@ function fixture(t) {
     reviewer_session_uuid, reviewer_head_sha, review_attempts, infra_auto_recover_attempts)
     VALUES (?, 1, '2026-11-17', 'gemini', 'reviewing', 'primary', ?, 2, 3)`).run(repo, head);
   return { rootDir, db };
+}
+
+for (const reviewerHeadSha of [undefined, null, '']) {
+  test(`absent reviewer head (${String(reviewerHeadSha)}) does not fence an existing pass head`, async t => {
+    const { rootDir, db } = fixture(t);
+    let earlySettlementChecked = false;
+    await spawnReviewer({
+      rootDir, repo, prNumber: 1, reviewerModel: 'gemini', reviewerSessionUuid: 'primary',
+      reviewerHeadSha, reviewAttemptNumber: 1, reviewDbAttemptNumber: 1, passKind: 'first-pass',
+      reviewerRuntimeAdapterOverride: { async spawnReviewer() {
+        db.prepare('UPDATE reviewer_passes SET head_sha = ?').run(head);
+        return { ok: false, failureClass: 'cli-resolution-transient' };
+      } },
+      onPostOperationSettled() {
+        const pass = db.prepare('SELECT * FROM reviewer_passes').get();
+        assert.equal(pass.status, 'failed');
+        assert.ok(pass.ended_at);
+        assert.equal(pass.head_sha, head);
+        earlySettlementChecked = true;
+      },
+      readBestReviewerEvidenceTokenUsageImpl() {
+        assert.equal(earlySettlementChecked, true, 'outcome must settle before accounting');
+        return null;
+      },
+      ledgerLookupSleepImpl: async () => {},
+    });
+    assert.equal(earlySettlementChecked, true);
+  });
+}
+
+for (const recoveryStatus of ['failed', 'completed']) {
+  test(`posted recovery removes persisted failure metadata from a ${recoveryStatus} pass`, t => {
+    const { rootDir, db } = fixture(t);
+    const key = { repo, prNumber: 1, attemptNumber: 1, passKind: 'first-pass' };
+    const failures = { failureClass: 'old-class', failureReason: 'old-reason',
+      failureMessage: 'old-message', failureDetail: 'old-detail', error: 'old-error' };
+    beginReviewerPass(rootDir, { ...key, reviewerClass: 'gemini', headSha: head,
+      metadata: { reviewerSessionUuid: 'primary', launchRequestId: 'launch', ...failures } });
+    db.prepare('UPDATE reviewer_passes SET status = ?, gh_comment_id = ?').run(recoveryStatus, 'posted-review');
+    const pass = completeReviewerPass(rootDir, { ...key, status: 'failed',
+      metadata: { reviewerSessionUuid: 'primary', ...failures } });
+    assert.equal(pass.status, 'completed');
+    const metadata = JSON.parse(pass.metadata_json);
+    assert.equal(metadata.launchRequestId, 'launch');
+    assert.equal(metadata.reviewerSessionUuid, 'primary');
+    for (const field of Object.keys(failures)) assert.equal(Object.hasOwn(metadata, field), false, field);
+  });
+}
+
+for (const status of ['failed', 'cancelled']) {
+  test(`late success accounting retains ${status} outcome and its failure evidence without a posted artifact`, t => {
+    const { rootDir } = fixture(t);
+    const key = { repo, prNumber: 1, attemptNumber: 1, passKind: 'first-pass' };
+    beginReviewerPass(rootDir, { ...key, reviewerClass: 'gemini', headSha: head });
+    const original = completeReviewerPass(rootDir, { ...key, status,
+      metadata: { failureClass: 'original-failure', failureDetail: 'original-detail' } });
+    const late = completeReviewerPass(rootDir, { ...key, status: 'completed',
+      tokenUsage: { input: 9 }, metadata: { failureClass: null, failureDetail: null } });
+    assert.equal(late.status, status);
+    assert.equal(late.ended_at, original.ended_at);
+    assert.equal(late.token_input, 9);
+    assert.equal(JSON.parse(late.metadata_json).failureClass, 'original-failure');
+    assert.equal(JSON.parse(late.metadata_json).failureDetail, 'original-detail');
+  });
+}
+
+test('timeout settlement preserves attribution updated after the reaper scan', t => {
+  const { rootDir, db } = fixture(t);
+  const key = { repo, prNumber: 1, attemptNumber: 1, passKind: 'first-pass' };
+  beginReviewerPass(rootDir, { ...key, reviewerClass: 'gemini', headSha: head,
+    startedAt: '2026-11-17T18:00:00Z',
+    metadata: { reviewerSessionUuid: 'primary', launchRequestId: 'launch',
+      workerRunAttribution: { state: 'pending' } } });
+  let interleaved = false;
+  const result = reapRunningPassTimeouts({ db, rootDir, log: quiet, isReviewerAlive: () => false, now() {
+    if (!interleaved) {
+      interleaved = true;
+      const row = db.prepare('SELECT metadata_json FROM reviewer_passes').get();
+      db.prepare('UPDATE reviewer_passes SET metadata_json = ?').run(JSON.stringify({
+        ...JSON.parse(row.metadata_json), accountingEvidence: 'concurrent',
+        workerRunAttribution: { state: 'resolved', workerRunId: 'worker' },
+      }));
+    }
+    return new Date('2026-11-17T20:00:00Z');
+  } });
+  assert.equal(result.reaped, 1);
+  const pass = db.prepare('SELECT * FROM reviewer_passes').get();
+  assert.equal(pass.status, 'failed');
+  const metadata = JSON.parse(pass.metadata_json);
+  assert.equal(metadata.reviewerSessionUuid, 'primary');
+  assert.equal(metadata.launchRequestId, 'launch');
+  assert.equal(metadata.accountingEvidence, 'concurrent');
+  assert.deepEqual(metadata.workerRunAttribution, { state: 'resolved', workerRunId: 'worker' });
+  assert.equal(metadata.failureClass, 'reviewer-timeout');
+  assert.equal(metadata.failureReason, 'reviewer-dead');
+  assert.equal(metadata.timeoutThresholdSeconds, 3600);
+  assert.equal(db.prepare('SELECT infra_auto_recover_attempts FROM reviewed_prs').get().infra_auto_recover_attempts, 3,
+    'timeout settlement cannot increment recovery attempts beyond the existing cap');
+});
+
+for (const fallbackSettlementThrows of [false, true]) {
+  test(`settlement failure releases spawn records even when error settlement ${fallbackSettlementThrows ? 'throws' : 'succeeds'}`, async t => {
+    const { rootDir } = fixture(t);
+    const settlementError = new Error('synthetic settlement I/O failure');
+    let spawnToken;
+    let errorSettlementReached = false;
+    await assert.rejects(spawnReviewer({
+      rootDir, repo, prNumber: 1, reviewerModel: 'gemini', reviewerSessionUuid: 'primary',
+      reviewerHeadSha: head, reviewAttemptNumber: 1, reviewDbAttemptNumber: 1, passKind: 'first-pass',
+      reviewerRuntimeAdapterOverride: { async spawnReviewer() {
+        return { ok: false, failureClass: 'cli-resolution-transient' };
+      } },
+      settleReviewerPassOutcomeImpl() {
+        const record = [...activeReviewerSpawns.values()].find(row => row.reviewerSessionUuid === 'primary');
+        assert.ok(record);
+        spawnToken = record.spawnToken;
+        assert.ok(loadSpawnRecords(process.env.ADVERSARIAL_REVIEW_STATE_DIR)[spawnToken]);
+        throw settlementError;
+      },
+      completeReviewerPassImpl(root, payload) {
+        errorSettlementReached = true;
+        if (fallbackSettlementThrows) throw new Error('synthetic error settlement I/O failure');
+        return completeReviewerPass(root, payload);
+      },
+      readBestReviewerEvidenceTokenUsageImpl: async () => assert.fail('accounting cannot run after settlement throws'),
+    }), error => error === settlementError);
+    assert.equal(errorSettlementReached, true);
+    assert.equal(activeReviewerSpawns.has(spawnToken), false);
+    assert.equal(inFlightReviewerSessions.has('primary'), false);
+    assert.equal(Object.hasOwn(loadSpawnRecords(process.env.ADVERSARIAL_REVIEW_STATE_DIR), spawnToken), false);
+  });
 }
 
 for (const ok of [true, false]) test(`outcome is durable before interrupted ${ok ? 'post' : 'primary failure'} accounting`, async t => {

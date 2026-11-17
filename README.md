@@ -1719,6 +1719,12 @@ owners. Offline coverage is in `test/reviewer-pass-settlement.test.mjs`. Existin
 smoke commands are unchanged; passive deployment acceptance is declared in
 `post-merge-verify.json`.
 
+Absent runtime head inputs omit the optional pass-completion head fence.
+Posted-success recovery removes persisted and incoming failure metadata; timeout
+recovery preserves attribution added after its scan. The spawn's outer `finally`
+reclaims in-memory and persisted spawn records even if outcome and error
+settlement both throw. Focused offline fixtures cover these boundaries.
+
 Watcher startup reaps stale `launching` agy holder records regardless of the
 current identity/runtime plan, including undeclared owner-only pools and runtimes
 that no longer lease agy holders. This uses the existing `launching → failed`

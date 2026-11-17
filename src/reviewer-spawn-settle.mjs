@@ -1238,7 +1238,7 @@ async function spawnReviewerOnceWithAccount({
     const runtimeWorkerRunId = result.tokenUsage?.workerRunId || null;
     await withSqliteBusyRetry(() => settleReviewerPassOutcomeImpl(rootDir, {
       repo, prNumber, attemptNumber: reviewDbAttemptNumber ?? reviewAttemptNumber ?? 0,
-      passKind, expectedHeadSha: reviewerHeadSha || null,
+      passKind, expectedHeadSha: reviewerHeadSha || undefined,
       tokenUsage: runtimeTokenUsage,
       tokenSource: runtimeTokenUsage?.source || null,
       workerRunId: runtimeWorkerRunId,

@@ -97,3 +97,26 @@ test('OVERLOADDEFER-01c: overload threshold mirrors Python and shell CFG', () =>
     }
   });
 });
+
+test('LXS-02: Python-owned app_relay configuration is ignored in every shared layer', () => {
+  // Pin a realistic nested-array payload, beyond generic unknown-root coverage.
+  const relay = { apps: [{ app_id: 'example', base_url: 'https://example.invalid',
+    credential_ref: 'op://vault/relay/token', app_contract_credential_ref: 'op://vault/app/bootstrap',
+    max_running: 2, poll_seconds: 5, progress_seconds: 5, heartbeat_seconds: 30 }] };
+  assert.deepEqual(validateSchema({ version: 1, app_relay: relay }), { version: 1 });
+  withConfig(({ topPath, localPath }) => {
+    const baselines = new Map([loadConfig, loadConfigRuntime].map(loader => [
+      loader, loader({ topPath, env: {} }),
+    ]));
+    writeFileSync(topPath, `version: 1\napp_relay: ${JSON.stringify(relay)}\n`);
+    for (const version of ['', 'version: 1\n']) {
+      writeFileSync(localPath, `${version}app_relay: ${JSON.stringify(relay)}\n`);
+      for (const loader of [loadConfig, loadConfigRuntime]) {
+        const cfg = loader({ topPath, env: {} });
+        assert.deepEqual(cfg.values, baselines.get(loader).values);
+        assert.equal(cfg.get('app_relay'), null);
+        assert.equal(cfg.get('app_relay.apps'), null);
+      }
+    }
+  });
+});

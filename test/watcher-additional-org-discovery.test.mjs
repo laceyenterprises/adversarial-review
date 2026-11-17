@@ -111,6 +111,19 @@ test('a missing owner-scoped client skips that org with one log line and lists t
   assert.deepEqual(f.seen.filter(s => s.org !== 'example-org'), []);
 });
 
+test('an unavailable owner installation warns once without repeated listing errors', async t => {
+  const f = fixture(t);
+  f.listings.set('example-org', [repo(1, 'example-org/alpha')]);
+  f.failures.set('example-second-org', Object.assign(new Error('owner token unavailable'),
+    { code: 'github-owner-token-unavailable' }));
+  let repos = await f.refresh([]);
+  f.advance(61 * minute);
+  repos = await f.refresh(repos);
+  assert.deepEqual(repos, ['example-org/alpha']);
+  assert.equal(f.warnings.filter(line => line.includes('example-second-org skipped')).length, 1);
+  assert.equal(f.apiCalls.filter(call => call.repo === 'example-second-org/*').length, 0);
+});
+
 test('quarantine is per org: a conflicted repository leaves other orgs untouched', async t => {
   const f = fixture(t);
   f.seed([repo(10, 'example-second-org/taken')]);

@@ -99,6 +99,13 @@ export function createRepositoryRefresher({ config, db, rootDir, additionalState
       logger.log(`[watcher] Additional org ${org} refreshed — watching ${names.length} repos: ${names.join(', ')}`);
       return names;
     } catch (err) {
+      if (err?.code === 'github-owner-token-unavailable') {
+        if (!unavailableLogged.has(org)) {
+          unavailableLogged.add(org);
+          logger.warn(`[watcher] Additional org ${org} skipped: owner-scoped GitHub client unavailable (${err.message}).`);
+        }
+        return previous ?? [];
+      }
       recordApiCall({ category: 'other', repo: `${org}/*`, status: apiStatusFromError(err), durationMs: null });
       logger.error(`[watcher] Failed to list additional org repos for ${org}:`, err.message);
       if (previous) return previous;

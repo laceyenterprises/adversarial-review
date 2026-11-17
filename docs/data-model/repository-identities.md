@@ -54,7 +54,8 @@ The host-local list `github.additional_orgs` (empty by default; set only in
 `config.local.yaml`) adds organizations to discovery. Each is listed on the same
 refresh clock as the home organization, through that organization's
 owner-scoped GitHub client, never the home client. An organization with no such
-client is skipped with one log line. The client uses the watcher's broker role
+client or an unavailable owner token is skipped with one log line. The client
+uses the watcher's broker role
 and requires a home token and broker secret configuration. Each organization
 keeps its own previous set. A listing failure keeps that set; before the first
 listing, it restores durable `repository_identities` names for that owner under

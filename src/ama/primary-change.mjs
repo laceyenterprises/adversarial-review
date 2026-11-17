@@ -425,7 +425,7 @@ function firstSupersedingReview(review, reviews) {
   });
 }
 
-function reversalAuthorized(evidence, path, region, cache, strictNonBlockingRemediation, restoringDeletion = false) {
+function reversalAuthorized(evidence, path, region, cache, strictNonBlockingRemediation, restoringDeletion = false, renameUnit = null) {
   return (evidence.reversalAuthorizations || []).some((authorization) => {
     let citation;
     const reject = (reason) => {
@@ -473,6 +473,30 @@ function reversalAuthorized(evidence, path, region, cache, strictNonBlockingReme
         const admissible = checkReversalFinding(parsedReview, kind, Number(cite[2]), strictNonBlockingRemediation);
         if (!admissible.ok) return reject(admissible.reason);
         const { locations } = admissible;
+        if (renameUnit) {
+          // This narrow structural proof uses exact, direct-parent coordinates.
+          // Rebase/previously verified line waivers do not authorize a move.
+          if (rebased || authorization.originalAuthorization || authorization.verifiedRegions
+            || review.commit_id !== evidence.primaryHead || commit.parents?.length !== 1
+            || commit.parents[0].sha !== evidence.primaryHead
+            || authorization.mergeBase !== evidence.mergeBase
+            || !evidence.diagnosticCommitRange?.some(entry => entry.sha === commit.sha)) return false;
+          const source = evidence.primaryFiles.find(file => file.filename === path);
+          if (![reviewedFiles, parentFiles].every(files => files?.some(file =>
+            isDeepStrictEqual(file, source)))) return false;
+          const moved = commit.files?.find(file => file.filename === renameUnit.destination);
+          if (!isDeepStrictEqual(moved, renameUnit.file)) return false;
+          const escape = text => text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+          const request = new RegExp(`\\b[Rr][Ee][Nn][Aa][Mm][Ee]\\s+(?:\`${escape(path)}\`|${escape(path)}(?=\\s))\\s+[Tt][Oo]\\s+(?:\`${escape(moved.filename)}\`|${escape(moved.filename)}(?=[\\s;,]|$|\\.(?:\\s|$)))`);
+          if (!request.test(admissible.finding.recommendedFix || '')
+            || !locations.some(location => location.path === path && location.ranges.some(cited =>
+              cited.start <= renameUnit.start && cited.end >= renameUnit.end))) {
+            return reject('not-covered-by-cited-finding');
+          }
+          if (!cache.has('verifiedReversals')) cache.set('verifiedReversals', new Set());
+          cache.get('verifiedReversals').add(`${commit.sha}:${cite[1]}:${cite[2]}:${kind}`);
+          return true;
+        }
         // REVERSALPARENT-01: an immutable original reversal pins its actual
         // parent, including repairs between the review and that parent. Map
         // to that state first; recursion below checks the original finding.
@@ -571,6 +595,60 @@ function reversalAuthorized(evidence, path, region, cache, strictNonBlockingReme
       });
     } catch (error) { return reject(error.message); }
   });
+}
+
+// An edited move cannot use the identical-blob shortcut. Reconstruct the whole
+// added file from its trusted parent and HAM patch, then pin it to the final
+// added destination. Every edit and the move itself must be finding-authorized.
+// Existing files, chained moves and rebases retain their ordinary fail-closed
+// behavior; their coordinate/path ancestry needs a separate structural proof.
+function findingAuthorizedAddedRename(evidence, source, cache, strictNonBlockingRemediation) {
+  if (source?.status !== 'added' || source.previous_filename || !SHA.test(source.sha || '')
+    || !primaryPathAbsent(source, evidence.finalFiles)) return false;
+  try {
+    const sourceSegments = patchSegments([source], source.filename, cache).segments;
+    if (sourceSegments.length !== 1 || sourceSegments[0].old !== 1 || sourceSegments[0].oldEnd !== 1
+      || sourceSegments[0].next !== 1 || source.deletions !== 0) return false;
+    const original = sourceSegments[0].lines.map(line => line.slice(1));
+    return (evidence.reversalAuthorizations || []).some(authorization => {
+      const commit = authorization.commit;
+      const moves = commit?.files?.filter(file => file.previous_filename === source.filename && file.status === 'renamed') || [];
+      if (moves.length !== 1) return false;
+      const moved = moves[0];
+      if (isTestPath(moved.filename) || moved.filename === source.filename || !SHA.test(moved.sha || '')
+        || evidence.primaryFiles.some(file => file.filename === moved.filename || file.previous_filename === moved.filename)) return false;
+      const final = evidence.finalFiles.filter(file => file.filename === moved.filename);
+      if (final.length !== 1 || final[0].status !== 'added' || final[0].sha !== moved.sha) return false;
+      const segments = patchSegments(commit.files, source.filename, cache).segments;
+      const result = [...original];
+      let offset = 0;
+      const units = [];
+      for (const segment of segments) {
+        const removed = segment.lines.filter(line => line.startsWith('-')).map(line => line.slice(1));
+        const added = segment.lines.filter(line => line.startsWith('+')).map(line => line.slice(1));
+        const index = segment.old - 1 + offset;
+        if (index < 0 || index > result.length
+          || !isDeepStrictEqual(result.slice(index, index + removed.length), removed)) return false;
+        result.splice(index, removed.length, ...added);
+        offset += added.length - removed.length;
+        // EOF insertions have no original line at their coordinate. Require
+        // coverage of the last original line, while keeping other bounds exact.
+        const start = segment.old === segment.oldEnd && segment.old === original.length + 1
+          ? original.length : segment.old;
+        units.push({ start, end: Math.max(start, segment.oldEnd - 1) });
+      }
+      if (units.some(unit => unit.start < 1 || unit.end > original.length)) return false;
+      const finalSegments = patchSegments(final, moved.filename, cache).segments;
+      if (finalSegments.length !== 1 || finalSegments[0].old !== 1 || finalSegments[0].oldEnd !== 1
+        || finalSegments[0].next !== 1 || final[0].deletions !== 0
+        || !isDeepStrictEqual(finalSegments[0].lines.map(line => line.slice(1)), result)) return false;
+      // A pure move still needs an explicit request on a real source line.
+      if (!units.length) units.push({ start: 1, end: 1 });
+      return units.every(unit => reversalAuthorized({ ...evidence, reversalAuthorizations: [authorization] },
+        source.filename, null, cache, strictNonBlockingRemediation, false,
+        { ...unit, destination: moved.filename, file: moved }));
+    });
+  } catch { return false; }
 }
 
 function deadCodeSource(evidence, path, ref) {
@@ -905,6 +983,7 @@ function evaluatePrimaryChange(evidence, headSha, { strictNonBlockingRemediation
       }
       const file = evidence.primaryFiles.find(entry => (entry.previous_filename || entry.filename) === path);
       if (identicalHammerRename(evidence, file)) continue;
+      if (findingAuthorizedAddedRename(evidence, file, authorizationCache, strictNonBlockingRemediation)) continue;
       if ((change.renamed && actual?.filename === path)
         || (change.status === 'added' && actual && !actual.opaque && actual.regions.length === 0) || (!actual
         && !(change.regions.length > 0 && !change.opaque && !change.renamed

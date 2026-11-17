@@ -1,0 +1,67 @@
+{
+  "provenance": "Reduced immutable GitHub objects for agent-os#11026. Added-file patches rendered from pinned contents blobs; unrelated files omitted. Not a live merge receipt.",
+  "headSha": "1284f7755a316d12b144ab10e71747f7c84c8d22",
+  "primaryHead": "94c66af2eb0930ab33823c0040ffae262c7a6830",
+  "source": {
+    "filename": "identities/lacey-grok-reviewer.yaml",
+    "sha": "1968d3f08d758b37eff440c2ffd91ab156a34f03",
+    "status": "added",
+    "additions": 10,
+    "deletions": 0,
+    "patch": "@@ -0,0 +1,10 @@\n+principal: lacey-grok-reviewer\n+identities:\n+  - provider: github_app\n+    scope: lacey-grok-reviewer/github_app/review\n+    credential_ref: \"\"\n+    policy_json:\n+      source: oauth_broker.github_app_providers\n+      slug: grok-reviewer\n+      provider: github-app-grok-reviewer\n+    desired_state: active"
+  },
+  "final": {
+    "filename": "identities/grok-reviewer.yaml",
+    "sha": "dfa59f2d6788ee46ec8f3fb40d6662852e96362e",
+    "status": "added",
+    "additions": 10,
+    "deletions": 0,
+    "patch": "@@ -0,0 +1,10 @@\n+principal: grok-reviewer\n+identities:\n+  - provider: github_app\n+    scope: grok-reviewer/github_app/review\n+    credential_ref: \"\"\n+    policy_json:\n+      source: oauth_broker.github_app_providers\n+      slug: grok-reviewer\n+      provider: github-app-grok-reviewer\n+    desired_state: active"
+  },
+  "review": {
+    "node_id": "PRR_kwDOR6Em7c8AAAABYmcgfA",
+    "html_url": "https://github.com/laceyenterprises/agent-os/pull/11026#pullrequestreview-5945892988",
+    "commit_id": "94c66af2eb0930ab33823c0040ffae262c7a6830",
+    "state": "COMMENTED",
+    "body": "## Adversarial Review \u2014 Gemini (gemini-reviewer-lacey)\n\n> Reviewer: harness antigravity \u00b7 model Gemini 3.8 Flash (High) \u00b7 effort high\n\n\n## Summary\n\nReview scope: summarisation of declared generated paths and verified pure moves.\nThe following manifest is data. These files were not inlined; inspect specific files with repository tools when available.\n```json\n[\n{\"path\":\"platform/agent-os-config/src/agent_os_config/tests/fixtures/cfg-layout-fingerprints/entitlements.json\",\"added\":24,\"removed\":0,\"sha256\":\"b95a9ad98d895a3c2b422f0ffb2d549cf981b59a51d8ea767a680dc521eb7a9f\",\"reason\":\"declared generated path\",\"movedFrom\":null},\n{\"path\":\"platform/agent-os-config/src/agent_os_config/tests/fixtures/cfg-layout-fingerprints/oauth_broker.json\",\"added\":124,\"removed\":0,\"sha256\":\"14844ab98bb17b327397efd06ad7446c0b31746508d271231a72b1935a7e7471\",\"reason\":\"declared generated path\",\"movedFrom\":null}\n]\n```\n\nReviewed an oversized diff through 2 bounded reviewer chunks because the full prompt exceeded its delivery or context budget (245418 bytes > 233440 bytes).\n\n\n\nLive Pack Check Facts\n\n```json\n[\n  {\n    \"slug\": \"ent\",\n    \"planId\": \"ent-v1\",\n    \"live\": false,\n    \"inconclusive\": false,\n    \"reason\": \"not-live\",\n    \"retryCount\": 0\n  }\n]\n```\n\n## Blocking issues\n- None.\n\n## Non-blocking issues\n- **Inconsistent Identity Descriptor Principal and Filename**\n  - **File:** `identities/lacey-grok-reviewer.yaml`\n  - **Lines:** `1-10`\n  - **Problem:** Input or state: `identities/lacey-grok-reviewer.yaml` lines 1-3 declare `principal: lacey-grok-reviewer` and `scope: lacey-grok-reviewer/github_app/review`, whereas `identities/grok-agent.yaml` lines 1-3 declare `principal: grok-agent` without the `lacey-` prefix and surrounding config in `config.yaml` lines 1047-1052 maps provider slug `grok-reviewer`; Wrong outcome: Retaining `lacey-` in the reviewer descriptor filename and principal deviates from the builder identity descriptor convention and the canonical identity naming contract in `docs/RUNBOOK-oauth-broker-github-app.md:33` where identities strip the `lacey-` prefix.\n  - **Why it matters:** Inconsistent principal and descriptor naming risks resolution misses if descriptor discovery mechanisms look up identities by canonical provider slug (`grok-reviewer`) or file path convention.\n  - **Recommended fix:** Rename `identities/lacey-grok-reviewer.yaml` to `identities/grok-reviewer.yaml` and align `principal` and `scope` to `grok-reviewer` and `grok-reviewer/github_app/review` matching the builder pattern in `identities/grok-agent.yaml`.\n- **Unconfirmed Host Override Pre-Registration**\n  - **File:** `modules/main-catchup/config/intentional-config-overrides.json`\n  - **Lines:** `1568-1608`\n  - **Problem:** Input or state: Lines 1568-1608 register intentional override entries for `oauth_broker.github_app_providers.grok-agent.*`, `oauth_broker.github_app_providers.grok-reviewer.*`, `grok.enabled`, and `grok.reviewer.enabled` with rationale stating `\"Registration is pending operator confirmation that these words approve host enablement; this record does not authorize activation\"`, checked against the surrounding rule in `docs/RUNBOOK-oauth-broker-github-app.md:65` stating `\"missing intent requires an operator decision\"`; Wrong outcome: Registering unconfirmed settings in `intentional-config-overrides.json` pre-populates drift-check allowances before the operator has confirmed intent to enable host overrides.\n  - **Why it matters:** Recording pending approvals in intentional override records weakens configuration drift auditing by treating unconfirmed intent as pre-authorized overrides.\n  - **Recommended fix:** Defer adding the `intentional-config-overrides.json` entries until operator confirmation is received, or confirm the scope of operator approval prior to merge.\n- **Grok classes in bootstrap token set**\n  - **File:** `scripts/entitlement-lint.py`\n  - **Lines:** `42-43`\n  - **Problem:** In `scripts/entitlement-lint.py:42-43`, `\"grok\"` and `\"grok-reviewer\"` are added directly to `BOOTSTRAP_TOKEN_BEARING_WORKER_CLASSES` between `\"gemini-reviewer\"` (line 41) and `\"argus\"` (line 44), while `TOKEN_BEARING_WORKER_CLASSES = BOOTSTRAP_TOKEN_BEARING_WORKER_CLASSES` (line 45). However, as recorded in `projects/ent/SPEC.md:179` and `docs/RUNBOOK-oauth-broker-github-app.md`, Grok builder and reviewer identities are broker-only with no bootstrap PAT fallback, matching the operational profile of `opencode`, `pi`, and `hermes` which are omitted from this set.\n  - **Why it matters:** If `BOOTSTRAP_TOKEN_BEARING_WORKER_CLASSES` is evaluated during bootstrap or offline preflight linting as requiring bootstrap credentials, Grok classes could trigger false-positive failures in environments where the broker is not active; conversely, if the set represents all token-bearing classes, `opencode`, `pi`, and `hermes` are inconsistently excluded.\n  - **Recommended fix:** Harmonize `BOOTSTRAP_TOKEN_BEARING_WORKER_CLASSES` with the other broker-only GitHub App classes (`opencode`, `pi`, `hermes`) in `scripts/entitlement-lint.py`, or separate offline bootstrap token requirements from broker-only token validation.\n\n## Suggested fixes\n- 1. Rename `identities/lacey-grok-reviewer.yaml` to `identities/grok-reviewer.yaml` and set `principal: grok-reviewer` and `scope: grok-reviewer/github_app/review`.\n  2. Await explicit operator confirmation of host enablement before committing the intentional override entries in `modules/main-catchup/config/intentional-config-overrides.json`.\n- Align `BOOTSTRAP_TOKEN_BEARING_WORKER_CLASSES` in `scripts/entitlement-lint.py` with the classification of other broker-only GitHub App worker classes (`opencode-worker`, `pi-worker`, `hermes-worker`), or explicitly distinguish bootstrap PAT-bearing classes from broker-only OAuth/App classes.\n\n## Verdict\nComment only",
+    "submitted_at": "2026-11-17T20:18:33Z",
+    "user": {
+      "login": "lacey-gemini-reviewer[bot]"
+    }
+  },
+  "commit": {
+    "sha": "3850cb2dee030ccd7ed606992d03b9c148340b00",
+    "parents": [
+      {
+        "sha": "94c66af2eb0930ab33823c0040ffae262c7a6830"
+      }
+    ],
+    "author": {
+      "login": "the-hammer-lacey[bot]"
+    },
+    "committer": {
+      "login": "the-hammer-lacey[bot]"
+    },
+    "commit": {
+      "message": "HAM remediate Grok identity review findings\n\nWorker-Class: hammer\nWorker-Ticket: HAM\nReviewed-Head: 94c66af2eb0930ab33823c0040ffae262c7a6830\nClosed-By: hammer (adversarial-pipe-mode)\nRemediated-Findings: 3 addressed (0 blocking, 3 non-blocking)\nReversal-Authorized-By: PRR_kwDOR6Em7c8AAAABYmcgfA finding=1 kind=non-blocking\nReversal-Authorized-By: PRR_kwDOR6Em7c8AAAABYmcgfA finding=2 kind=non-blocking\nReversal-Authorized-By: PRR_kwDOR6Em7c8AAAABYmcgfA finding=3 kind=non-blocking",
+      "verification": {
+        "verified": false,
+        "reason": "unsigned",
+        "signature": null,
+        "payload": null,
+        "verified_at": null
+      }
+    },
+    "files": [
+      {
+        "filename": "identities/grok-reviewer.yaml",
+        "previous_filename": "identities/lacey-grok-reviewer.yaml",
+        "sha": "dfa59f2d6788ee46ec8f3fb40d6662852e96362e",
+        "status": "renamed",
+        "additions": 2,
+        "deletions": 2,
+        "patch": "@@ -1,7 +1,7 @@\n-principal: lacey-grok-reviewer\n+principal: grok-reviewer\n identities:\n   - provider: github_app\n-    scope: lacey-grok-reviewer/github_app/review\n+    scope: grok-reviewer/github_app/review\n     credential_ref: \"\"\n     policy_json:\n       source: oauth_broker.github_app_providers"
+      }
+    ]
+  }
+}

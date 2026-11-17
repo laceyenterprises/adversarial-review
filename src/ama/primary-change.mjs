@@ -430,9 +430,11 @@ function reversalAuthorized(evidence, path, region, cache, strictNonBlockingReme
     let citation;
     const reject = (reason) => {
       if (!cache.has('rejectedReversals')) cache.set('rejectedReversals', new Map());
-      if (citation) {
-        const entry = { commit: authorization.commit.sha, review: citation[1], finding: Number(citation[2]),
-          kind: citation[3] || 'blocking', reason };
+      // REVERSALRENAME-01: a refusal before a citation is chosen names every
+      // citation on the commit rather than recording nothing.
+      for (const cite of citation ? [citation] : reversalCitations(authorization.commit?.commit?.message || '')) {
+        const entry = { commit: authorization.commit.sha, review: cite[1], finding: Number(cite[2]),
+          kind: cite[3] || 'blocking', reason };
         cache.get('rejectedReversals').set(JSON.stringify(entry), entry);
       }
       return false;
@@ -452,12 +454,16 @@ function reversalAuthorized(evidence, path, region, cache, strictNonBlockingReme
         || (rebased && !commit.author?.login && commit.reversalAppAttested !== true))) || !SHA.test(commit.sha || '') || !SHA.test(review.commit_id || '')
         || !['CHANGES_REQUESTED', 'COMMENTED', 'DISMISSED', 'APPROVED'].includes(review.state)
         || !['request-changes', 'approved', 'comment-only'].includes(parsedReview.verdict)
-        || !amaAllAuthoritativeReviewerLogins().includes(String(review.user?.login || '').replace(/\[bot\]$/, ''))) return false;
+        || !amaAllAuthoritativeReviewerLogins().includes(String(review.user?.login || '').replace(/\[bot\]$/, ''))) {
+        return reject('citation-provenance-or-reviewer-not-authoritative');
+      }
       if (!cache.has(commit)) cache.set(commit, {
         trailers: parseCommitTrailers(commit.commit.message), citations: reversalCitations(commit.commit.message),
       });
       const { trailers, citations } = cache.get(commit);
-      if ((!lane && !isHamWorkerTicket(trailers['worker-ticket'])) || trailers['reviewed-head'] !== review.commit_id) return false;
+      if ((!lane && !isHamWorkerTicket(trailers['worker-ticket'])) || trailers['reviewed-head'] !== review.commit_id) {
+        return reject('worker-ticket-or-reviewed-head-mismatch');
+      }
       return citations.some((cite) => {
         if (lane && !cite[3]) return false;
         if (![review.node_id, review.html_url].filter(Boolean).includes(cite[1])) return false;
@@ -547,6 +553,15 @@ function reversalAuthorized(evidence, path, region, cache, strictNonBlockingReme
           }
         }
         const parent = projectRegion(parentFiles, path, region, cache);
+        // Refuse production-to-test moves before removal coverage: a rename
+        // may remove every protected line. A removed+added identical blob is
+        // the other supported representation of a move.
+        const removedSource = commit.files.find(file => file.filename === parent.filename && file.status === 'removed');
+        if (!isTestPath(parent.filename) && commit.files.some(file => isTestPath(file.filename)
+          && (file.status === 'renamed' && file.previous_filename === parent.filename
+            || file.status === 'added' && SHA.test(file.sha || '') && file.sha === removedSource?.sha))) {
+          return reject('production-to-test-rename');
+        }
         const segment = protectedSegment(parentFiles, path, region, cache);
         if (!segment) return reject('hammer-patch-does-not-touch-region');
         const added = segment.addedLines ??= segment.lines.filter(line => line.startsWith('+')).map(line => line.slice(1));
@@ -570,7 +585,11 @@ function reversalAuthorized(evidence, path, region, cache, strictNonBlockingReme
         const coverage = coverageByCommit.get(coverageKey);
         // Unequal replacements share one full-span multiset across base units.
         // Do not re-scan it for every unit after this commit has covered it.
-        if (!coverage.has(protectedLines)) {
+        // REVERSALRENAME-01: a rename entry lists only the edited lines, but
+        // the old path of an added file no longer holds any of its content.
+        const renamedAway = parentFiles.some(file => file.filename === parent.filename && file.status === 'added')
+          && commit.files.some(file => file.status === 'renamed' && file.previous_filename === parent.filename);
+        if (!renamedAway && !coverage.has(protectedLines)) {
           const { segments } = patchSegments(commit.files, parent.filename, cache);
           const overlapping = segments.filter(entry => entry.old <= parent.end
             && Math.max(entry.old, entry.oldEnd - 1) >= parent.start);
@@ -857,10 +876,31 @@ function refusedRegions(primary, final, authorized) {
 
 // REVERSALREBASE-01: a refusal names the one piece of evidence it lacks, and
 // every trailer citation the collector found but could not verify.
-function missingReversalEvidence(evidence, path, missing, cache, regions) {
+function missingReversalEvidence(evidence, path, missing, cache, regions, diagnosticCache = new Map()) {
   const rejected = [...(evidence.rejectedReversalAuthorizations || []),
-    ...(cache.get('rejectedReversals')?.values() || [])].slice(0, 10);
+    ...(cache.get('rejectedReversals')?.values() || [])];
+  // The diagnostic pass evaluates units the verdict pass never reached; its
+  // reason is shown only for a citation nothing else already explains.
+  const cited = (entry, other) => entry.commit === other.commit && entry.review === other.review
+    && entry.finding === other.finding && entry.kind === other.kind;
+  for (const entry of diagnosticCache.get('rejectedReversals')?.values() || []) {
+    if (!rejected.some(other => cited(entry, other))) rejected.push(entry);
+  }
   const accepted = cache.get('verifiedReversals')?.size || 0;
+  // REVERSALRENAME-01: a citation the collector kept but nothing applied to
+  // this refusal is still listed, never an unexplained "0 accepted, 0 rejected".
+  for (const authorization of evidence.reversalAuthorizations || []) {
+    for (const cite of reversalCitations(authorization.commit?.commit?.message || '')) {
+      const kind = cite[3] || 'blocking';
+      if ([cache, diagnosticCache].some(entry => entry.get('verifiedReversals')?.has(
+        `${authorization.commit.sha}:${cite[1]}:${cite[2]}:${kind}`))
+        || rejected.some(entry => cited(entry, { commit: authorization.commit.sha, review: cite[1],
+          finding: Number(cite[2]), kind }))) continue;
+      rejected.push({ commit: authorization.commit.sha, review: cite[1], finding: Number(cite[2]), kind,
+        reason: 'not-applied-to-reverted-region' });
+    }
+  }
+  rejected.splice(10);
   const diagnosticTimeout = evidence.revertedRegionDiagnostics?.some(entry => entry.path === path
     && entry.error?.includes('diagnostic time budget exhausted'));
   let summary = missing === 'reversal-authorization'
@@ -967,7 +1007,7 @@ function evaluatePrimaryChange(evidence, headSha, { strictNonBlockingRemediation
         ...(evidence.migrationRenumberDiagnostics?.length ? { migrationRenumberDiagnostics: evidence.migrationRenumberDiagnostics } : {}),
         testRegionsChanged: testChanges, missingEvidence: missingReversalEvidence(evidence, path, missing, authorizationCache,
           refusedRegions(primary.get(path), final.get(path), (unit, restoringDeletion) =>
-            authorized(path, unit, diagnosticCache, restoringDeletion))) };
+            authorized(path, unit, diagnosticCache, restoringDeletion)), diagnosticCache) };
     };
     for (const [path, change] of primary) {
       if (diagnosticSkipPaths.has(path)) continue;
@@ -987,7 +1027,6 @@ function evaluatePrimaryChange(evidence, headSha, { strictNonBlockingRemediation
       if ((change.renamed && actual?.filename === path)
         || (change.status === 'added' && actual && !actual.opaque && actual.regions.length === 0) || (!actual
         && !(change.regions.length > 0 && !change.opaque && !change.renamed
-          && (change.status !== 'added' || change.removed.size > 0)
           && change.regions.every((region) => regionUnits(region).every((unit) => authorized(path, unit, authorizationCache)))))) {
         return reverted(path, change.renamed ? 'rename-preservation' : change.opaque ? 'opaque-file-preservation' : 'reversal-authorization');
       }

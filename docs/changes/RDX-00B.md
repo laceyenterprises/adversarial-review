@@ -41,3 +41,18 @@ Final remediation verification:
 - `npm run typecheck:contracts` and
   `bash demo/research-finding-walkthrough.sh` passed.
 - `git diff --check` passed. The full suite is reserved for PR-head CI.
+
+Hammer closure verification:
+
+- Both final non-blocking findings were already addressed on the dispatched
+  remediation head: 1 MiB scanner buffers and trimmed repository matching.
+- CI exposed the existing ARC-10 size limit: `reviewer.mjs` had 2553 lines
+  against a 2550-line ceiling. Moved the pending-review housekeeping explanation
+  beside its implementation in `reviewer-pre-write.mjs`, preserving its text
+  and runtime behavior without changing the limit.
+- Canonical changed-surface validation selected 44 test files: 917 passed,
+  two existing skips, zero failures, including the ARC-10 regression gate.
+- `npm run lint` passed (zero errors, 149 existing warnings),
+  `npm run typecheck:contracts` passed, and
+  `bash demo/research-finding-walkthrough.sh` passed offline.
+- Full-suite validation remains the exact-head GitHub CI gate.

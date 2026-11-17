@@ -1,6 +1,20 @@
 # Local operator overrides for adversarial-review.
 # Copy relevant keys into config.local.yaml; this example is not loaded.
 
+# Review additional GitHub orgs. The watcher always lists the org in config.json;
+# each login named here is listed too, using that org's owner-scoped client (an
+# org without one is skipped with one log line). excludeRepos applies across
+# all orgs. Merge enablement stays a separate per-repository decision.
+# Deployment prerequisite: first deploy github.additional_orgs schema support in
+# the Agent OS Python loader (platform/agent-os-config/) and shell loader
+# (modules/worker-pool/lib/agent-os-config-loader.sh). Validate the intended local
+# configuration with all three loaders before enabling this key on a host.
+# Until then, leave the key absent: even an explicit empty list is an unknown
+# key to an older strict loader. See docs/data-model/repository-identities.md.
+# github:
+#   additional_orgs:
+#     - example-second-org
+
 adversarial:
   reviewer:
     load_aware:

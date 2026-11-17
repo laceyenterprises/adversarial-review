@@ -48,6 +48,55 @@ the next complete successful listing replaces the fallback, excluding archived
 repositories as usual.
 Partial paginated listings never replace scope.
 
+### Additional organizations (WATCHMULTIORG-01)
+
+Deployment order matters because the host configuration is shared by three
+strict-schema loaders. Before adding `github.additional_orgs` to any host's
+`config.local.yaml`, deploy support for the key in the Agent OS superproject's
+Python loader (`platform/agent-os-config/`) and shell loader
+(`modules/worker-pool/lib/agent-os-config-loader.sh`), as well as this Node
+loader. The matching schema is an optional list of GitHub organization logins,
+defaulting to `[]`; each login is 1–39 ASCII alphanumeric or hyphen characters,
+with an alphanumeric first and last character.
+
+Validate the intended configuration through all three deployed loaders before
+setting the key on a fleet host. Deploying this repository alone does not
+establish Python/shell compatibility; their schema updates and validation are
+an Agent OS superproject follow-up. Until that prerequisite is verified, leave
+the key absent from host configuration, including when no additional
+organizations are desired: an explicit `additional_orgs: []` still fails an
+older strict schema. If enablement causes a shared-loader rejection, remove
+the key from the local override and validate all readers again before retrying.
+
+The host-local list `github.additional_orgs` (empty by default; set only in
+`config.local.yaml`) adds organizations to discovery. A newly configured organization
+gets an initial discovery attempt on the next poll, even before the home refresh
+deadline. Subsequent attempts, including retries after an initial failure or
+unavailable client, use the same refresh clock as the home organization.
+Each listing uses that organization's
+owner-scoped GitHub client, never the home client. An organization with no such
+client or an unavailable owner token is skipped with one log line. The client
+uses the watcher's broker role
+and requires a home token (`GITHUB_TOKEN`, falling back to `GH_TOKEN`) and broker
+secret configuration. Every authentication reads the current home-token
+environment values, so cached clients follow credential rotation and fail
+closed if both home-token variables become unavailable. Each organization
+keeps its own previous set. A listing failure keeps that set; before the first
+listing, it restores durable `repository_identities` names for that owner under
+the same quarantine and history fences, warning for each non-excluded candidate
+omitted by either fence. A failure never changes another
+organization's set. Quarantine stays per repository name. `excludeRepos` applies
+across all organizations, and watched names stay `owner/name`. A successful
+configuration read removes
+organizations absent from its list and clears their cached clients and outage
+warning suppression; reconfiguration creates a fresh client. An unreadable
+configuration retains only the last successfully configured scope.
+Once the home organization has reconciled successfully, repository-state lock
+contention during an additional organization's observation propagates to defer
+the discovery cycle, consuming the ordinary refresh interval. Local observation
+failures are logged as reconciliation errors; only listing failures record
+failed GitHub API calls.
+
 `repository_discovery_quarantine` in `data/reviews.db` contains `full_name`
 (case-insensitive text primary key). Discovery creates it additively and stores
 identity conflicts from completed observations in one immediate transaction.

@@ -8625,13 +8625,31 @@ is not an assertion that such a consumer is running.
 HAMLANEWAIT-01 bounds the legacy shell writer's lane-lock wait by the caller's
 absolute deadline (`--deadline-ms`; the closer computes a fresh now + 60 seconds
 at the merge attempt, after CI and merge-lease waits). Direct library callers
-retain the existing 60-second default when no deadline is supplied. The merge subprocess receives only the remaining budget.
+retain the existing 60-second default when no deadline is supplied. The deadline
+bounds only the lock/route wait and refuses an already-spent budget; the wrapped
+command's own run budget is separate (LEGACYEXECCAP-01, below).
 A watch on the persistent lock inode, registered before the acquisition recheck,
 wakes on release; release updates its timestamp after closing the lock
 descriptor. Directory watches can omit these attribute-only changes to a child.
 Every wake retries the same exclusive lock and rechecks the
 durable route before issuing. There is no polling sleep or added config key.
 Watch/notification failures retain the deadline as the bounded fallback.
+
+LEGACYEXECCAP-01: the wrapped command runs on its own budget once the lock is
+held: `loadAwareTimeoutMs(240000, { maxMs: 600000 })`, below a typical 300 s
+caller budget so this writer's expiry fires first. `--timeout-ms <n>` on
+`bin/legacy-lane-write.mjs` and `bin/legacy-pr-write.mjs` (option `timeoutMs` on
+`runLegacyLaneWrite`/`runLegacyPrWrite`) overrides it with a positive integer up
+to 3600000; anything else exits 64. On expiry the writer sends SIGTERM, waits a
+10 s grace for the child to exit and flush, then SIGKILLs it, and reads output
+until close (`src/run-command-keeping-output.mjs`; execFile's own timeout closes
+the pipes first, losing output and turning a Python child's exit into 120).
+If descendants retain the pipes, the runner allows a further 2 s to drain after
+both expiry and direct-child exit have occurred, in either order, then closes
+the pipes and settles with captured output. Each stream permits up to and
+including 64 MiB; only received bytes beyond that limit trigger a buffer error.
+The result is `legacy writer command timed out after <ms> ms` with the captured
+stdout/stderr; the bin prints that output then one reason line and exits 75.
 
 If contention lasts through that deadline, the wrapper exits 75 with
 `owner-operation-in-flight; lane-busy; waited Nms`. Only exit 75 with this refusal

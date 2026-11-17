@@ -34,6 +34,7 @@ import {
 } from './ama/hammer-retry-cap.mjs';
 import { resolveSharedNextAction } from './pr-next-action-shadow.mjs';
 import { createHistoryReader } from './ama/history-reader.mjs';
+import { isDurableIdentityAbsence } from './ama/daemon-decline.mjs';
 import { hammerDispatchMismatch, bindClosureNextAction, readClosureNextAction, observeClosureOwnership, closureOwnerFromDecision, hasClosureRecoveryIntent, hasHammerDispatchIntent, observeClosureResult, observeDaemonGate as reviseDaemonGate, observeDaemonResult, revalidateClosurePr, resolveClosureNextAction, reviseClosureNextAction } from './ama/closure-next-action.mjs';
 import { probeOrphanOwnership } from './ama/orphan-watchdog.mjs';
 import { observeClosureWait } from './ama/closure-wait.mjs';
@@ -699,6 +700,12 @@ function formatAmaResultReasons(result) {
 // pass with no actor. Live launches, waits, drain and capacity keep their own
 // owners, and an outcome that already escalated keeps its own page.
 export const DAEMON_FAILED_CLOSED_HAMMER_REFUSED = 'daemon-failed-closed-hammer-refused';
+// INTERACTIVEPRIDENTITY-02 (SEV2): a clean exact head whose PR has no build
+// identity at all (an interactive session that has not run `hq pr sign`) cannot
+// be repaired by a closer. Dispatching one only cycled daemon -> hammer ->
+// supersede -> daemon. Park once with the single operator action instead.
+export const DAEMON_IDENTITY_ABSENT_PARKED = 'daemon-identity-absent-parked';
+export const IDENTITY_ABSENT_OPERATOR_ACTION = 'sign the PR with `hq pr sign` (pr-sign skill) or hand-merge it';
 function isDaemonHandoffRefusal(result) {
   if (!result || result.dispatched === true || result.backgroundDispatch || result.needsOperator === true) return false;
   return result.safetyRefusal === true || result.decisionMismatch?.resolvedAction === 'daemon-merge'
@@ -2771,6 +2778,28 @@ async function dispatchAmaClosureFor({
     const hammerRemediableFallback = hasHammerDispatchIntent(shared, {
       repo: repoPath, prNumber, headSha: currentPrHeadSha,
     });
+    if (hammerRemediableFallback && shared.decision.reason === 'daemon-failed-closed'
+      && isDurableIdentityAbsence(daemonCleanMerge)) {
+      // The park re-evaluates every pass: the daemon runs again, so a new
+      // attestation merges and a new head is new work. No closer is dispatched.
+      const closureBlocker = `${DAEMON_IDENTITY_ABSENT_PARKED}: no build identity or interactive attestation `
+        + `for head ${daemonHeadShort}; operator action: ${IDENTITY_ABSENT_OPERATOR_ACTION}`;
+      recordDaemonMergePark({ rootDir, repo: repoPath, prNumber, headSha: currentPrHeadSha || null,
+        reason: DAEMON_IDENTITY_ABSENT_PARKED });
+      let boundedWait = null;
+      try {
+        boundedWait = await observeWait({ rootDir, repo: repoPath, prNumber, headSha: currentPrHeadSha, env,
+          immediate: true, waitClass: DAEMON_IDENTITY_ABSENT_PARKED, reason: closureBlocker });
+      } catch (error) {
+        logger?.warn?.(`[watcher] ${DAEMON_IDENTITY_ABSENT_PARKED} page delivery failed for ${repoPath}#${prNumber}: ${error.message}`);
+      }
+      logger?.warn?.(`[watcher] AMA ${closureBlocker} for ${repoPath}#${prNumber}; no closer dispatched`);
+      if (closureOwnerSink) closureOwnerSink.value = { owner: 'page', reason: DAEMON_IDENTITY_ABSENT_PARKED };
+      return withAmaDispatchMetadata({ dispatched: false, skipMergeAgent: true,
+        reason: DAEMON_IDENTITY_ABSENT_PARKED, namedReason: DAEMON_IDENTITY_ABSENT_PARKED, closureBlocker,
+        needsOperator: true, daemonCleanMerge, ...(boundedWait ? { boundedWait } : {}),
+        retryAfterMs: boundedWait?.retryAfterMs || 30_000 }, { amaEnabled: true });
+    }
     if (hammerRemediableFallback) {
       // FAILCLOSEDHAMMER-01: a daemon-only accountability refusal on a clean
       // exact head is the hammer's close; a hammer refusal of it escalates below.

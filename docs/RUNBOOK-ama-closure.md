@@ -4814,7 +4814,11 @@ An added text file may also move with finding-authorized edits (LAC-2212).
 This proof requires a trusted HAM commit whose sole parent is the reviewed
 primary head, an admissible cited finding explicitly recommending
 `Rename <source> to <destination>`, and source-line coverage for every edited
-patch segment. The primary, reviewed and HAM-parent source entries must match.
+patch segment. Paths may be backtick-quoted or unquoted; an unquoted destination
+may end in a sentence period followed by whitespace or end of text, without
+matching a longer extension. An insertion immediately after EOF requires cited
+coverage of the last original source line. The primary, reviewed and HAM-parent
+source entries must match.
 Applying the complete HAM patch to that source must reproduce the complete
 final added destination, whose blob must match the HAM destination. Production
 destinations under test paths, existing destination collisions, opaque patches,

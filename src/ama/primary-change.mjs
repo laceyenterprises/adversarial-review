@@ -487,7 +487,7 @@ function reversalAuthorized(evidence, path, region, cache, strictNonBlockingReme
           const moved = commit.files?.find(file => file.filename === renameUnit.destination);
           if (!isDeepStrictEqual(moved, renameUnit.file)) return false;
           const escape = text => text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-          const request = new RegExp(`\\b[Rr][Ee][Nn][Aa][Mm][Ee]\\s+(?:\`${escape(path)}\`|${escape(path)}(?=\\s))\\s+[Tt][Oo]\\s+(?:\`${escape(moved.filename)}\`|${escape(moved.filename)}(?=[\\s;,]|$))`);
+          const request = new RegExp(`\\b[Rr][Ee][Nn][Aa][Mm][Ee]\\s+(?:\`${escape(path)}\`|${escape(path)}(?=\\s))\\s+[Tt][Oo]\\s+(?:\`${escape(moved.filename)}\`|${escape(moved.filename)}(?=[\\s;,]|$|\\.(?:\\s|$)))`);
           if (!request.test(admissible.finding.recommendedFix || '')
             || !locations.some(location => location.path === path && location.ranges.some(cited =>
               cited.start <= renameUnit.start && cited.end >= renameUnit.end))) {
@@ -631,7 +631,11 @@ function findingAuthorizedAddedRename(evidence, source, cache, strictNonBlocking
           || !isDeepStrictEqual(result.slice(index, index + removed.length), removed)) return false;
         result.splice(index, removed.length, ...added);
         offset += added.length - removed.length;
-        units.push({ start: segment.old, end: Math.max(segment.old, segment.oldEnd - 1) });
+        // EOF insertions have no original line at their coordinate. Require
+        // coverage of the last original line, while keeping other bounds exact.
+        const start = segment.old === segment.oldEnd && segment.old === original.length + 1
+          ? original.length : segment.old;
+        units.push({ start, end: Math.max(start, segment.oldEnd - 1) });
       }
       if (units.some(unit => unit.start < 1 || unit.end > original.length)) return false;
       const finalSegments = patchSegments(final, moved.filename, cache).segments;

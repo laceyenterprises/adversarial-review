@@ -26,6 +26,70 @@ test('LAC-2212: immutable finding authorizes the edited identity rename despite 
   assert.equal(checkPrimaryChange(evidence, evidence.headSha).reason, 'primary-change-reverted');
 });
 
+for (const suffix of ['', '.', '. Continue with the identity repair.', '; align the principal', ', then align the principal']) {
+  test(`LAC-2212: accepts unquoted rename destination followed by ${JSON.stringify(suffix)}`, () => {
+    const evidence = fixture();
+    auth(evidence).review.body = auth(evidence).review.body.replace(
+      /  - \*\*Recommended fix:\*\* Rename[^\n]+/,
+      `  - **Recommended fix:** Rename ${evidence.primaryFiles[0].filename} to ${evidence.finalFiles[0].filename}${suffix}`);
+    assert.equal(check(evidence).ok, true);
+  });
+}
+
+for (const suffix of ['.backup', '.backup.', '/backup']) {
+  test(`LAC-2212: refuses unquoted destination extension ${JSON.stringify(suffix)}`, () => {
+    const evidence = fixture();
+    auth(evidence).review.body = auth(evidence).review.body.replace(
+      /  - \*\*Recommended fix:\*\* Rename[^\n]+/,
+      `  - **Recommended fix:** Rename ${evidence.primaryFiles[0].filename} to ${evidence.finalFiles[0].filename}${suffix}`);
+    assert.equal(check(evidence).ok, false);
+  });
+}
+
+function appendToRename(evidence, { context = false, appendOnly = false } = {}) {
+  const moved = auth(evidence).commit.files[0];
+  if (appendOnly) {
+    moved.patch = '';
+    moved.additions = moved.deletions = 0;
+    evidence.finalFiles[0].patch = evidence.primaryFiles[0].patch;
+  }
+  const hunk = context ? '@@ -10 +10,3 @@\n     desired_state: active' : '@@ -10,0 +11,2 @@';
+  moved.patch += `${moved.patch ? '\n' : ''}${hunk}\n+# reviewed appendix\n+enabled: true`;
+  moved.additions += 2;
+  const final = evidence.finalFiles[0];
+  final.patch = final.patch.replace('+1,10', '+1,12') + '\n+# reviewed appendix\n+enabled: true';
+  final.additions += 2;
+}
+
+for (const context of [false, true]) {
+  test(`LAC-2212: authorizes EOF append with ${context ? 'trailing' : 'zero'} context`, () => {
+    const evidence = fixture();
+    appendToRename(evidence, { context });
+    assert.equal(check(evidence).ok, true);
+  });
+}
+
+test('LAC-2212: an append-only rename can cite the last original line', () => {
+  const evidence = fixture();
+  appendToRename(evidence, { appendOnly: true });
+  auth(evidence).review.body = auth(evidence).review.body.replace('**Lines:** `1-10`', '**Lines:** `10-10`');
+  assert.equal(check(evidence).ok, true);
+});
+
+test('LAC-2212: EOF append requires finding coverage of the last original line', () => {
+  const evidence = fixture();
+  appendToRename(evidence);
+  auth(evidence).review.body = auth(evidence).review.body.replace('**Lines:** `1-10`', '**Lines:** `1-9`');
+  assert.equal(check(evidence).ok, false);
+});
+
+test('LAC-2212: insertion past EOF cannot use the EOF anchor', () => {
+  const evidence = fixture();
+  appendToRename(evidence);
+  auth(evidence).commit.files[0].patch = auth(evidence).commit.files[0].patch.replace('-10,0 +11,2', '-11,0 +12,2');
+  assert.equal(check(evidence).ok, false);
+});
+
 test('LAC-2212: offline collector retains the immutable rename authorization', async () => {
   const e = fixture();
   const { commit, review } = auth(e);

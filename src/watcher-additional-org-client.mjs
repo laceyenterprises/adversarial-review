@@ -1,5 +1,6 @@
 import { createWatcherOctokit } from './conditional-request.mjs';
 import { githubOwnerTokens } from './github-owner-token.mjs';
+import { resolveWatcherGhBrokerRole } from './reviewer-broker-refresh.mjs';
 
 // Owner-scoped client for an additional watched org: every request, including
 // pagination, authenticates with that org's installation token, never the home
@@ -7,5 +8,8 @@ import { githubOwnerTokens } from './github-owner-token.mjs';
 // (for example the home org itself), so discovery can skip it.
 export function ownerScopedOrgClient(org, { tokens = githubOwnerTokens, create = createWatcherOctokit, env = process.env } = {}) {
   if (!tokens.routedOwner({ owner: org })) return null;
-  return create({ authProvider: () => tokens.select({ token: env.GITHUB_TOKEN, target: { owner: org } }) });
+  if (!env.GITHUB_TOKEN || !env.OAUTH_BROKER_SHARED_SECRET_FILE) return null;
+  return create({ authProvider: () => tokens.select({
+    token: env.GITHUB_TOKEN, env, role: resolveWatcherGhBrokerRole(env), target: { owner: org },
+  }) });
 }

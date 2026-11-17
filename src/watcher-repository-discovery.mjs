@@ -108,10 +108,12 @@ export function createRepositoryRefresher({ config, db, rootDir, additionalState
   }
   async function withAdditionalOrgs(repos, due) {
     let configured = [...orgSets.keys()]; // an unreadable config keeps the known orgs rather than failing the default org
-    try { configured = additionalOrgs(); } catch (error) { logger.warn(`[watcher] Additional orgs unreadable; keeping known orgs: ${error.message}`); }
+    let configRead = false;
+    try { configured = additionalOrgs(); configRead = true; } catch (error) { logger.warn(`[watcher] Additional orgs unreadable; keeping known orgs: ${error.message}`); }
     const orgs = [...new Set(configured.map(org => org.toLowerCase()))].filter(org => org !== config.org.toLowerCase());
     if (!orgs.length && !orgSets.size) return repos;
     const contributed = new Set([...orgSets.values()].flat().map(name => name.toLowerCase()));
+    if (configRead) for (const org of orgSets.keys()) if (!orgs.includes(org)) orgSets.delete(org);
     const pinned = new Set((config.repos || []).map(name => canonicalRepositoryName(db, name).toLowerCase()));
     const merged = repos.filter(name => !contributed.has(name.toLowerCase()) || pinned.has(name.toLowerCase()));
     for (const org of orgs) if (due) orgSets.set(org, await refreshAdditionalOrg(org));

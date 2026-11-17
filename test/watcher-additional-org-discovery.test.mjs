@@ -6,6 +6,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createRepositoryRefresher } from '../src/watcher-repository-discovery.mjs';
 import { ownerScopedOrgClient } from '../src/watcher-additional-org-client.mjs';
+import { createGithubOwnerTokenSelector } from '../src/github-owner-token.mjs';
 import { observeRepositoryListing } from '../src/repository-identity.mjs';
 import { loadConfig } from '../src/config-loader.mjs';
 
@@ -78,7 +79,7 @@ test('an additional-org failure keeps the default org and that org\'s previous s
   assert.ok(f.apiCalls.some(c => c.repo === 'example-second-org/*' && c.status === 503));
 });
 
-test('a default-org failure does not shrink or refresh the additional org', async t => {
+test('a default-org failure keeps prior default repos while refreshing additional orgs', async t => {
   const f = fixture(t);
   f.listings.set('example-org', [repo(1, 'example-org/alpha')]);
   f.listings.set('example-second-org', [repo(2, 'example-second-org/beta')]);
@@ -153,16 +154,57 @@ test('an unreadable additional-org config keeps the known orgs and the default l
   assert.ok(warnings.some(line => line.includes('Additional orgs unreadable')));
 });
 
+test('a removed additional org stays removed after a later config read error', async t => {
+  let configured = ['example-second-org'], broken = false;
+  let time = Date.parse('2026-01-01T00:00:00Z');
+  const f = fixture(t);
+  f.listings.set('example-org', [repo(1, 'example-org/alpha')]);
+  f.listings.set('example-second-org', [repo(2, 'example-second-org/beta')]);
+  // Use the same refresher across all three reads to exercise its retained scope.
+  const refresher = createRepositoryRefresher({ config: { org: 'example-org' }, db: f.db, rootDir: f.rootDir,
+    now: () => time, logger: { log() {}, warn() {}, error() {} }, recordApiCall() {},
+    apiStatusFromResult: () => 200, apiStatusFromError: () => 503, deliverAlert: async () => {},
+    additionalOrgs: () => { if (broken) throw new Error('Synthetic config failure'); return configured; },
+    clientForOrg: () => fakeClient('second', f.listings, new Map(), f.seen) });
+  let repos = await refresher(f.home, []);
+  assert.deepEqual(repos, ['example-org/alpha', 'example-second-org/beta']);
+  configured = [];
+  time += 61 * minute;
+  repos = await refresher(f.home, repos);
+  assert.deepEqual(repos, ['example-org/alpha']);
+  broken = true;
+  time += 61 * minute;
+  repos = await refresher(f.home, repos);
+  assert.deepEqual(repos, ['example-org/alpha']);
+});
+
 test('ownerScopedOrgClient authenticates with the org token and declines unrouted orgs', async () => {
   const selected = [], created = [];
   const tokens = { routedOwner: target => (target.owner === 'example-second-org' ? 'example-second-org' : null),
     select: async options => { selected.push(options); return 'second-org-token'; } };
   const create = options => { created.push(options); return { created: true }; };
   assert.equal(ownerScopedOrgClient('example-org', { tokens, create, env: {} }), null);
-  const client = ownerScopedOrgClient('example-second-org', { tokens, create, env: { GITHUB_TOKEN: 'home-token' } });
+  const env = { GITHUB_TOKEN: 'home-token', OAUTH_BROKER_SHARED_SECRET_FILE: 'fixture-secret' };
+  const client = ownerScopedOrgClient('example-second-org', { tokens, create, env });
   assert.deepEqual(client, { created: true });
   assert.equal(await created[0].authProvider({ url: '/orgs/example-second-org/repos' }), 'second-org-token');
-  assert.deepEqual(selected, [{ token: 'home-token', target: { owner: 'example-second-org' } }]);
+  assert.deepEqual(selected, [{ token: 'home-token', env, role: 'merge-agent', target: { owner: 'example-second-org' } }]);
+});
+
+test('ownerScopedOrgClient uses the watcher broker role with the real owner token selector', async () => {
+  const minted = [], created = [];
+  const tokens = createGithubOwnerTokenSelector({ readHomeOwner: () => 'example-org',
+    mint: async options => { minted.push(options); return { token: 'second-org-token' }; } });
+  const create = options => { created.push(options); return { created: true }; };
+  const env = { GITHUB_TOKEN: 'home-token', OAUTH_BROKER_SHARED_SECRET_FILE: 'fixture-secret',
+    WATCHER_GH_BROKER_ROLE: 'watcher-app' };
+  assert.equal(ownerScopedOrgClient('example-second-org', { tokens, create, env: {} }), null);
+  assert.equal(ownerScopedOrgClient('example-second-org', { tokens, create,
+    env: { GITHUB_TOKEN: 'home-token' } }), null);
+  assert.deepEqual(ownerScopedOrgClient('example-second-org', { tokens, create, env }), { created: true });
+  assert.equal(await created[0].authProvider(), 'second-org-token');
+  assert.deepEqual(minted.map(({ role, owner }) => ({ role, owner })),
+    [{ role: 'watcher-app', owner: 'example-second-org' }]);
 });
 
 test('additional_orgs is an optional host-local key validated as org logins', t => {

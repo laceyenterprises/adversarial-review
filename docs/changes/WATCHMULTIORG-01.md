@@ -13,7 +13,10 @@ listed on the existing refresh clock through that org's owner-scoped client
 with the home org as `owner/name` and `excludeRepos` applies across all orgs.
 Isolation is per org: a failed listing keeps that org's previous set, a missing
 owner-scoped client skips that org with one log line, and identity quarantine is
-per repository. API calls carry a per-org `<org>/*` label.
+per repository. The client uses the watcher's configured broker role and requires
+a home token and broker secret configuration. A successfully read configuration
+removes orgs no longer listed; a later read failure keeps only the last valid
+scope. API calls carry a per-org `<org>/*` label.
 
 ## Interface changes
 

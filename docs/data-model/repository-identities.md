@@ -54,12 +54,16 @@ The host-local list `github.additional_orgs` (empty by default; set only in
 `config.local.yaml`) adds organizations to discovery. Each is listed on the same
 refresh clock as the home organization, through that organization's
 owner-scoped GitHub client, never the home client. An organization with no such
-client is skipped with one log line. Each organization keeps its own previous
-set: a listing failure keeps that set (or, before any listing, restores durable
-`repository_identities` names for that owner under the same quarantine and
-history fences) and never changes another organization's set. Quarantine stays
-per repository name. `excludeRepos` applies across all organizations, and
-watched names stay `owner/name`.
+client is skipped with one log line. The client uses the watcher's broker role
+and requires a home token and broker secret configuration. Each organization
+keeps its own previous set. A listing failure keeps that set; before the first
+listing, it restores durable `repository_identities` names for that owner under
+the same quarantine and history fences. A failure never changes another
+organization's set. Quarantine stays per repository name. `excludeRepos` applies
+across all organizations, and watched names stay `owner/name`. A successful
+configuration read removes
+organizations absent from its list; an unreadable configuration retains only
+the last successfully configured scope.
 
 `repository_discovery_quarantine` in `data/reviews.db` contains `full_name`
 (case-insensitive text primary key). Discovery creates it additively and stores

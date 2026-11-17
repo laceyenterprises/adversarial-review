@@ -2,7 +2,7 @@
 import './helpers/rate-limit-state-isolation.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { chmodSync, existsSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 
@@ -23,8 +23,14 @@ function fakeHq(dir, body) {
   return file;
 }
 
-async function dispatch(hqPath, extra = {}) {
-  const rootDir = mkdtempSync(path.join(tmpdir(), 'followupexeccap-root-'));
+function scratchDir(t, prefix = 'followupexeccap-') {
+  const dir = mkdtempSync(path.join(tmpdir(), prefix));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  return dir;
+}
+
+async function dispatch(t, hqPath, extra = {}) {
+  const rootDir = scratchDir(t, 'followupexeccap-root-');
   return dispatchMergeAgentForPR({
     agentOsDetectImpl: () => ({ present: true, source: 'test' }),
     prepareOriginalWorkerImpl: async () => ({ decision: 'proceed' }),
@@ -63,20 +69,23 @@ async function dispatch(hqPath, extra = {}) {
 
 const OK_JSON = '{"dispatchId":"disp_real","lrq":"lrq_real"}';
 
-test('a dispatcher timeout keeps the child partial stderr and names the budget', async () => {
-  const dir = mkdtempSync(path.join(tmpdir(), 'followupexeccap-'));
+test('a dispatcher timeout keeps the child partial stderr and names the budget', async (t) => {
+  const dir = scratchDir(t);
   const hq = fakeHq(dir, `process.stderr.write('provisioning workspace step 3\\n'); setInterval(() => {}, 1000);`);
-  const error = await dispatch(hq, { dispatchTimeoutMsOverride: 400, dispatchKillGraceMs: 2000, dispatchRetryDelaysMs: [] })
+  const error = await dispatch(t, hq, { dispatchTimeoutMsOverride: 400, dispatchKillGraceMs: 2000, dispatchRetryDelaysMs: [] })
     .then(() => null, err => err);
   assert.ok(error, 'dispatch must fail');
   assert.match(error.message, /hq dispatch failed \(exit code ETIMEDOUT\): hq dispatch timed out after 400 ms/);
   assert.match(error.message, /provisioning workspace step 3/);
   assert.match(error.stderr, /provisioning workspace step 3/);
   assert.equal(error.code, 'ETIMEDOUT');
+  assert.equal(error.cause.killed, true);
+  assert.equal(error.cause.signal, 'SIGTERM');
+  assert.equal(error.cause.cmd, hq);
 });
 
-test('a dispatcher that ignores SIGTERM is SIGKILLed after the grace', async () => {
-  const dir = mkdtempSync(path.join(tmpdir(), 'followupexeccap-'));
+test('a dispatcher that ignores SIGTERM is SIGKILLed after the grace', async (t) => {
+  const dir = scratchDir(t);
   const pidFile = path.join(dir, 'pid');
   const hq = fakeHq(dir, `
     process.on('SIGTERM', () => {});
@@ -84,7 +93,7 @@ test('a dispatcher that ignores SIGTERM is SIGKILLed after the grace', async () 
     process.stderr.write('ignoring term\\n');
     setInterval(() => {}, 1000);`);
   const startedAt = Date.now();
-  const error = await dispatch(hq, { dispatchTimeoutMsOverride: 300, dispatchKillGraceMs: 300, dispatchRetryDelaysMs: [] })
+  const error = await dispatch(t, hq, { dispatchTimeoutMsOverride: 300, dispatchKillGraceMs: 300, dispatchRetryDelaysMs: [] })
     .then(() => null, err => err);
   assert.ok(error);
   assert.match(error.message, /timed out after 300 ms/);
@@ -94,8 +103,8 @@ test('a dispatcher that ignores SIGTERM is SIGKILLed after the grace', async () 
   assert.throws(() => process.kill(pid, 0), { code: 'ESRCH' }, 'the child must be gone');
 });
 
-test('a timed-out dispatch is still transient: the retry loop re-runs it', async () => {
-  const dir = mkdtempSync(path.join(tmpdir(), 'followupexeccap-'));
+test('a timed-out dispatch is still transient: the retry loop re-runs it', async (t) => {
+  const dir = scratchDir(t);
   const counter = path.join(dir, 'count');
   const hq = fakeHq(dir, `
     const fs = require('node:fs');
@@ -103,14 +112,14 @@ test('a timed-out dispatch is still transient: the retry loop re-runs it', async
     fs.writeFileSync(${JSON.stringify(counter)}, String(n + 1));
     if (n === 0) { process.stderr.write('slow start\\n'); setInterval(() => {}, 1000); }
     else process.stdout.write(${JSON.stringify(OK_JSON)});`);
-  const result = await dispatch(hq, { dispatchTimeoutMsOverride: 400, dispatchKillGraceMs: 2000, dispatchRetryDelaysMs: [0] });
+  const result = await dispatch(t, hq, { dispatchTimeoutMsOverride: 400, dispatchKillGraceMs: 2000, dispatchRetryDelaysMs: [0] });
   assert.equal(result.decision, 'dispatch');
   assert.equal(result.launchRequestId, 'lrq_real');
   assert.equal(readFileSync(counter, 'utf8'), '2');
 });
 
-test('success is unchanged and the child receives the dispatch env and args', async () => {
-  const dir = mkdtempSync(path.join(tmpdir(), 'followupexeccap-'));
+test('success is unchanged and the child receives the dispatch env and args', async (t) => {
+  const dir = scratchDir(t);
   const seen = path.join(dir, 'seen.json');
   const hq = fakeHq(dir, `
     require('node:fs').writeFileSync(${JSON.stringify(seen)}, JSON.stringify({
@@ -119,7 +128,7 @@ test('success is unchanged and the child receives the dispatch env and args', as
       project: process.env.MERGE_AGENT_HQ_PROJECT,
     }));
     process.stdout.write(${JSON.stringify(OK_JSON)});`);
-  const result = await dispatch(hq);
+  const result = await dispatch(t, hq);
   assert.equal(result.decision, 'dispatch');
   assert.equal(result.launchRequestId, 'lrq_real');
   const call = JSON.parse(readFileSync(seen, 'utf8'));
@@ -129,15 +138,15 @@ test('success is unchanged and the child receives the dispatch env and args', as
   assert.equal(call.project, 'merge-project');
 });
 
-test('a non-zero exit surfaces code, stdout and stderr and is not retried', async () => {
-  const dir = mkdtempSync(path.join(tmpdir(), 'followupexeccap-'));
+test('a non-zero exit surfaces code, stdout and stderr and is not retried', async (t) => {
+  const dir = scratchDir(t);
   const counter = path.join(dir, 'count');
   const hq = fakeHq(dir, `
     require('node:fs').appendFileSync(${JSON.stringify(counter)}, 'x');
     process.stdout.write('partial stdout\\n');
     process.stderr.write('hq: error: unknown project merge-project\\n');
     process.exit(2);`);
-  const error = await dispatch(hq, { dispatchRetryDelaysMs: [0, 0] }).then(() => null, err => err);
+  const error = await dispatch(t, hq, { dispatchRetryDelaysMs: [0, 0] }).then(() => null, err => err);
   assert.ok(error);
   assert.equal(error.code, 2);
   assert.match(error.stderr, /unknown project merge-project/);
@@ -147,8 +156,8 @@ test('a non-zero exit surfaces code, stdout and stderr and is not retried', asyn
   assert.ok(existsSync(counter));
 });
 
-test('the priority-flag fallback still re-runs without --priority', async () => {
-  const dir = mkdtempSync(path.join(tmpdir(), 'followupexeccap-'));
+test('the priority-flag fallback still re-runs without --priority', async (t) => {
+  const dir = scratchDir(t);
   const calls = path.join(dir, 'calls');
   const hq = fakeHq(dir, `
     const args = process.argv.slice(2);
@@ -158,7 +167,7 @@ test('the priority-flag fallback still re-runs without --priority', async () => 
       process.exit(2);
     }
     process.stdout.write(${JSON.stringify(OK_JSON)});`);
-  const result = await dispatch(hq, { dispatchRetryDelaysMs: [] });
+  const result = await dispatch(t, hq, { dispatchRetryDelaysMs: [] });
   assert.equal(result.decision, 'dispatch');
   assert.equal(readFileSync(calls, 'utf8'), 'PN');
 });

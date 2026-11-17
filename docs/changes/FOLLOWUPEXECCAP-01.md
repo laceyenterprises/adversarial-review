@@ -19,7 +19,8 @@ load-aware) and `maxBuffer` (5 MiB) are unchanged.
 - Non-zero exit: the same `err.code` (exit status), `err.stdout` and `err.stderr`;
   `err.message` is `Command failed: <command>` plus stderr.
 - Expiry: an error with message `hq dispatch timed out after <ms> ms`, `code`
-  `ETIMEDOUT`, `killed: true`, `signal: SIGTERM`, and the captured stdout/stderr.
+  `ETIMEDOUT`, `killed: true`, `signal: SIGTERM` (also when the runner's default
+  signal is used), `cmd` naming the executable, and the captured stdout/stderr.
   `formatExecFailure` appends that stderr/stdout to the surfaced error.
 - Classification is unchanged: a timeout is a transient error (`isExecTimeout`
   matches on `ETIMEDOUT`/`killed`/"timed out"), so the existing transient retry loop
@@ -44,3 +45,15 @@ fallback are unchanged. The follow-up merge-agent suites,
 `run-command-keeping-output`, `legacy-lane-write-run-budget` and
 `cfg-promotion-watcher-knobs` pass. `npm run lint` has 0 errors; `npm run
 typecheck:contracts` is clean.
+
+Final comment-only remediation adds assertions for the timeout cause's
+`killed`, `signal` and `cmd` properties. Every scratch directory in
+`test/followupexeccap-01.test.mjs`, including dispatch roots, now has a per-test
+cleanup hook that runs on success or failure.
+
+Final-round verification: `node test/run-tests.mjs
+test/followupexeccap-01.test.mjs test/follow-up-merge-agent.test.mjs
+test/run-command-keeping-output.test.mjs test/cfg-promotion-watcher-knobs.test.mjs`
+passed (291 passed, one skipped). `npm run lint` passed with zero errors,
+`npm run typecheck:contracts`, `bash demo/research-finding-walkthrough.sh` and
+`git diff --check` passed. The full suite is reserved for PR-head CI.

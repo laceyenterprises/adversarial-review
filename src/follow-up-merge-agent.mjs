@@ -150,7 +150,7 @@ async function runHqDispatchKeepingOutput(command, argv, options) {
   const result = await runCommandKeepingOutput(command, argv, options);
   if (!result.timedOut) return result;
   throw Object.assign(new Error(`hq dispatch timed out after ${result.timeoutMs} ms`), {
-    code: 'ETIMEDOUT', killed: true, signal: options.killSignal,
+    code: 'ETIMEDOUT', killed: true, signal: options?.killSignal ?? 'SIGTERM', cmd: command,
     stdout: result.stdout, stderr: result.stderr,
   });
 }

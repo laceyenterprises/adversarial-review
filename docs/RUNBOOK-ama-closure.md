@@ -8643,8 +8643,12 @@ caller budget so this writer's expiry fires first. `--timeout-ms <n>` on
 to 3600000; anything else exits 64. On expiry the writer sends SIGTERM, waits a
 10 s grace for the child to exit and flush, then SIGKILLs it, and reads output
 until close (`src/run-command-keeping-output.mjs`; execFile's own timeout closes
-the pipes first, losing output and turning a Python child's exit into 120). The
-result is `legacy writer command timed out after <ms> ms` with the captured
+the pipes first, losing output and turning a Python child's exit into 120).
+If descendants retain the pipes, the runner allows a further 2 s to drain after
+both expiry and direct-child exit have occurred, in either order, then closes
+the pipes and settles with captured output. Each stream permits up to and
+including 64 MiB; only received bytes beyond that limit trigger a buffer error.
+The result is `legacy writer command timed out after <ms> ms` with the captured
 stdout/stderr; the bin prints that output then one reason line and exits 75.
 
 If contention lasts through that deadline, the wrapper exits 75 with

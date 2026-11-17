@@ -19,6 +19,7 @@ export function runCommandKeepingOutput(command, argv, { timeout, killSignal = '
     const child = spawn(command, argv);
     const timers = [];
     let timedOut = false, overflow = false, spawnError = null, done = false;
+    let exitResult = null, pipeDrainTimer = null;
     const finish = (code, signal) => {
       if (done) return;
       done = true; timers.forEach(clearTimeout);
@@ -29,21 +30,33 @@ export function runCommandKeepingOutput(command, argv, { timeout, killSignal = '
       reject(Object.assign(new Error(message), { cmd: command, signal, killed: overflow, stdout, stderr,
         code: spawnError?.code ?? (overflow ? 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER' : code) }));
     };
+    const drainPipes = () => {
+      if (!timedOut || !exitResult || pipeDrainTimer !== null) return;
+      pipeDrainTimer = setTimeout(() => {
+        child.stdout.destroy(); child.stderr.destroy(); finish(exitResult.code, exitResult.signal);
+      }, PIPE_DRAIN_MS);
+      timers.push(pipeDrainTimer);
+    };
     for (const name of ['stdout', 'stderr']) child[name].on('data', chunk => {
-      if (size[name] >= maxBuffer) return;
-      chunks[name].push(size[name] + chunk.length > maxBuffer ? chunk.subarray(0, maxBuffer - size[name]) : chunk);
+      const remaining = maxBuffer - size[name];
+      if (remaining > 0) chunks[name].push(chunk.length > remaining ? chunk.subarray(0, remaining) : chunk);
       size[name] += chunk.length;
-      if (size[name] >= maxBuffer && !overflow) { overflow = true; child.kill(killSignal); }
+      if (size[name] > maxBuffer && !overflow) { overflow = true; child.kill(killSignal); }
     });
     child.on('error', error => { spawnError = error; if (child.pid === undefined) finish(null, null); });
     child.on('close', finish);
     // A grandchild may hold the pipes open past the direct child's death.
     child.on('exit', (code, signal) => {
-      if (timedOut) timers.push(setTimeout(() => { child.stdout.destroy(); child.stderr.destroy(); finish(code, signal); }, PIPE_DRAIN_MS));
+      exitResult = { code, signal };
+      drainPipes();
     });
     if (timeout > 0) timers.push(setTimeout(() => {
-      timedOut = true; child.kill(killSignal);
-      timers.push(setTimeout(() => child.kill('SIGKILL'), killGraceMs));
+      timedOut = true;
+      if (exitResult) drainPipes();
+      else {
+        child.kill(killSignal);
+        timers.push(setTimeout(() => child.kill('SIGKILL'), killGraceMs));
+      }
     }, timeout));
   });
 }

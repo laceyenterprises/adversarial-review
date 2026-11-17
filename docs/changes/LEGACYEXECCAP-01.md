@@ -17,6 +17,12 @@ deadline still bounds only the wait and still refuses with
 returns `{ ok: false, reason: 'legacy writer command timed out after <ms> ms' }`
 with the captured stdout/stderr.
 
+Final comment-only remediation bounds inherited-pipe cleanup when the direct
+child exits before the deadline as well as after it. Once expiry and exit have
+both occurred, pipes drain for at most a further 2 s. The buffer allowance is
+inclusive: exactly `maxBuffer` bytes per stream succeeds; an additional byte
+fails, including when it arrives in a later chunk.
+
 ## Interface changes
 
 - `--timeout-ms <n>` on `bin/legacy-lane-write.mjs` and `bin/legacy-pr-write.mjs`;
@@ -37,3 +43,14 @@ with the captured stdout/stderr.
 `hammertrim-contract`, `hammer-controller`: all pass. `withdrawn-review-dismissal`
 has 3 failures that are identical on the unmodified base. `npm run lint` has
 0 errors; `npm run typecheck:contracts` is clean.
+
+Final remediation adds `test/run-command-keeping-output.test.mjs` with real
+subprocess regressions for both exit/expiry orderings, exact-limit output on
+both streams, and overflow in one write or a later chunk on either stream.
+`node --test test/run-command-keeping-output.test.mjs
+test/legacy-lane-write-run-budget.test.mjs test/finalization-queue-routing.test.mjs
+test/finalization-legacy-actor.test.mjs test/finalization-cli-timeout-stderr.test.mjs`
+passes all 43 tests. `npm run lint` passes with 0 errors (149 existing warnings);
+`npm run typecheck:contracts` passes. Full-suite validation remains owned by
+PR-head CI for this round. `bash demo/research-finding-walkthrough.sh` and
+`git diff --check` pass.

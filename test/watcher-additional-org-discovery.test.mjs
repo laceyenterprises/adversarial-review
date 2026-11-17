@@ -8,6 +8,8 @@ import { createRepositoryRefresher } from '../src/watcher-repository-discovery.m
 import { ownerScopedOrgClient } from '../src/watcher-additional-org-client.mjs';
 import { createGithubOwnerTokenSelector } from '../src/github-owner-token.mjs';
 import { observeRepositoryListing } from '../src/repository-identity.mjs';
+import { acquireRepositoryStateOwner } from '../src/repository-state-lock.mjs';
+import { ensureReviewStateSchema } from '../src/review-state.mjs';
 import { loadConfig } from '../src/config-loader.mjs';
 
 const minute = 60_000;
@@ -77,6 +79,52 @@ test('an additional-org failure keeps the default org and that org\'s previous s
   repos = await f.refresh(repos);
   assert.deepEqual(repos, ['example-org/alpha', 'example-org/gamma', 'example-second-org/beta']);
   assert.ok(f.apiCalls.some(c => c.repo === 'example-second-org/*' && c.status === 503));
+});
+
+test('additional-org rename lock contention defers discovery and consumes the full interval', async t => {
+  const f = fixture(t);
+  ensureReviewStateSchema(f.db);
+  f.listings.set('example-org', [repo(1, 'example-org/alpha')]);
+  f.listings.set('example-second-org', [repo(2, 'example-second-org/old')]);
+  const repos = await f.refresh([]);
+  f.advance(61 * minute);
+  f.listings.set('example-second-org', [repo(2, 'example-second-org/new')]);
+  const release = acquireRepositoryStateOwner(f.rootDir);
+  try {
+    await assert.rejects(f.refresh(repos), { code: 'REPOSITORY_STATE_BUSY' });
+    assert.deepEqual(f.apiCalls.map(call => call.status), [200, 200, 200, 200]);
+    assert.equal(f.db.prepare('SELECT full_name FROM repository_identities WHERE repository_id=?')
+      .get('2').full_name, 'example-second-org/old');
+  } finally { release(); }
+  f.advance(2 * minute);
+  assert.deepEqual(await f.refresh(repos), repos);
+  assert.equal(f.seen.length, 4, 'contention still consumes the ordinary refresh interval');
+  f.advance(59 * minute);
+  assert.deepEqual(await f.refresh(repos), ['example-org/alpha', 'example-second-org/new']);
+});
+
+test('additional-org local observation failures do not record failed GitHub API calls', async t => {
+  for (const priorSuccess of [false, true]) await t.test(`prior listing: ${priorSuccess}`, async t => {
+    const clients = {};
+    const f = fixture(t, { clients });
+    const client = fakeClient('second', f.listings, f.failures, f.seen);
+    clients['example-second-org'] = client;
+    f.listings.set('example-org', [repo(1, 'example-org/alpha')]);
+    f.listings.set('example-second-org', [repo(2, 'example-second-org/beta')]);
+    f.seed([repo(2, 'example-second-org/beta')]);
+    const repos = priorSuccess ? await f.refresh([]) : [];
+    if (priorSuccess) f.advance(61 * minute);
+    const paginate = client.paginate;
+    client.paginate = async (...args) => {
+      const result = await paginate(...args);
+      // Fail the local identity read only after the remote listing succeeds.
+      t.mock.method(f.db, 'prepare', () => { throw new Error('Synthetic SQLite read failure'); }, { times: 1 });
+      return result;
+    };
+    assert.deepEqual(await f.refresh(repos), ['example-org/alpha', 'example-second-org/beta']);
+    assert.ok(f.apiCalls.some(call => call.repo === 'example-second-org/*' && call.status === 200));
+    assert.ok(f.apiCalls.every(call => call.status === 200), 'local errors must not become remote failures');
+  });
 });
 
 test('a default-org failure keeps prior default repos while refreshing additional orgs', async t => {
@@ -268,23 +316,24 @@ test('ownerScopedOrgClient authenticates with the org token and declines unroute
     select: async options => { selected.push(options); return 'second-org-token'; } };
   const create = options => { created.push(options); return { created: true }; };
   assert.equal(ownerScopedOrgClient('example-org', { tokens, create, env: {} }), null);
-  const env = { GITHUB_TOKEN: 'home-token', OAUTH_BROKER_SHARED_SECRET_FILE: 'fixture-secret' };
+  const env = { GITHUB_TOKEN: 'home-token', GH_TOKEN: 'fallback-token',
+    OAUTH_BROKER_SHARED_SECRET_FILE: 'fixture-secret' };
   const client = ownerScopedOrgClient('example-second-org', { tokens, create, env });
   assert.deepEqual(client, { created: true });
   assert.equal(await created[0].authProvider({ url: '/orgs/example-second-org/repos' }), 'second-org-token');
   assert.deepEqual(selected, [{ token: 'home-token', env, role: 'merge-agent', target: { owner: 'example-second-org' } }]);
 });
 
-test('ownerScopedOrgClient uses the watcher broker role with the real owner token selector', async () => {
+test('ownerScopedOrgClient accepts GH_TOKEN with the watcher role and real owner token selector', async () => {
   const minted = [], created = [];
   const tokens = createGithubOwnerTokenSelector({ readHomeOwner: () => 'example-org',
     mint: async options => { minted.push(options); return { token: 'second-org-token' }; } });
   const create = options => { created.push(options); return { created: true }; };
-  const env = { GITHUB_TOKEN: 'home-token', OAUTH_BROKER_SHARED_SECRET_FILE: 'fixture-secret',
+  const env = { GH_TOKEN: 'home-token', OAUTH_BROKER_SHARED_SECRET_FILE: 'fixture-secret',
     WATCHER_GH_BROKER_ROLE: 'watcher-app' };
   assert.equal(ownerScopedOrgClient('example-second-org', { tokens, create, env: {} }), null);
   assert.equal(ownerScopedOrgClient('example-second-org', { tokens, create,
-    env: { GITHUB_TOKEN: 'home-token' } }), null);
+    env: { GH_TOKEN: 'home-token' } }), null);
   assert.deepEqual(ownerScopedOrgClient('example-second-org', { tokens, create, env }), { created: true });
   assert.equal(await created[0].authProvider(), 'second-org-token');
   assert.deepEqual(minted.map(({ role, owner }) => ({ role, owner })),

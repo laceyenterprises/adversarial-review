@@ -90,8 +90,10 @@ export function createRepositoryRefresher({ config, db, rootDir, additionalState
     const previous = orgSets.get(org);
     const client = additionalClient(org);
     if (!client) return previous ?? [];
+    let listingComplete = false;
     try {
       const all = await listOrg(client, org);
+      listingComplete = true;
       const watched = all.map(r => ({ ...r, full_name: r.full_name || `${org}/${r.name}` }))
         .filter(r => !r.archived && !isExcluded(r.full_name));
       const quarantined = await observeListing(watched);
@@ -100,6 +102,7 @@ export function createRepositoryRefresher({ config, db, rootDir, additionalState
       unavailableLogged.delete(org);
       return names;
     } catch (err) {
+      if (err.code === 'REPOSITORY_STATE_BUSY' && hasSuccessfulListing) throw err;
       if (err?.code === 'github-owner-token-unavailable') {
         if (!unavailableLogged.has(org)) {
           unavailableLogged.add(org);
@@ -107,8 +110,10 @@ export function createRepositoryRefresher({ config, db, rootDir, additionalState
         }
         return previous ?? [];
       }
-      recordApiCall({ category: 'other', repo: `${org}/*`, status: apiStatusFromError(err), durationMs: null });
-      logger.error(`[watcher] Failed to list additional org repos for ${org}:`, err.message);
+      if (!listingComplete) {
+        recordApiCall({ category: 'other', repo: `${org}/*`, status: apiStatusFromError(err), durationMs: null });
+      }
+      logger.error(`[watcher] Failed to ${listingComplete ? 'reconcile' : 'list'} additional org repos for ${org}:`, err.message);
       if (previous) return previous;
       const fenced = fencedNames();
       const candidates = knownNames(org);

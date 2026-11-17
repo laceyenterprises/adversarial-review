@@ -56,7 +56,8 @@ refresh clock as the home organization, through that organization's
 owner-scoped GitHub client, never the home client. An organization with no such
 client or an unavailable owner token is skipped with one log line. The client
 uses the watcher's broker role
-and requires a home token and broker secret configuration. Each organization
+and requires a home token (`GITHUB_TOKEN`, falling back to `GH_TOKEN`) and broker
+secret configuration. Each organization
 keeps its own previous set. A listing failure keeps that set; before the first
 listing, it restores durable `repository_identities` names for that owner under
 the same quarantine and history fences, warning for each non-excluded candidate
@@ -67,6 +68,11 @@ configuration read removes
 organizations absent from its list and clears their cached clients and outage
 warning suppression; reconfiguration creates a fresh client. An unreadable
 configuration retains only the last successfully configured scope.
+Once the home organization has reconciled successfully, repository-state lock
+contention during an additional organization's observation propagates to defer
+the discovery cycle, consuming the ordinary refresh interval. Local observation
+failures are logged as reconciliation errors; only listing failures record
+failed GitHub API calls.
 
 `repository_discovery_quarantine` in `data/reviews.db` contains `full_name`
 (case-insensitive text primary key). Discovery creates it additively and stores

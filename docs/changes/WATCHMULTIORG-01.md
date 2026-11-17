@@ -22,6 +22,11 @@ suppression; a later read failure keeps only the last valid scope. Startup
 fallback warns for each non-excluded additional-org candidate omitted by persisted
 quarantine or ambiguous ownership history, matching the home-org diagnostic.
 API calls carry a per-org `<org>/*` label.
+Additional-org repository-state lock contention propagates after the home
+organization's first successful reconciliation, deferring discovery on the same
+terms as the home path. Local observation failures retain fallback scope and
+log reconciliation errors without recording failed GitHub API calls. Home
+credentials accept `GITHUB_TOKEN` with `GH_TOKEN` as the fallback.
 
 ## Interface changes
 
@@ -38,6 +43,15 @@ API calls carry a per-org `<org>/*` label.
 
 ## Verification
 
+- Latest PR #1912 remediation: bounded `node --test
+  test/watcher-additional-org-discovery.test.mjs
+  test/watcher-repository-discovery.test.mjs test/github-owner-token.test.mjs`
+  passes all 46 tests. Regressions reproduce additional-org lock swallowing,
+  local-error API misattribution (with and without a prior listing), and
+  missing `GH_TOKEN` support before the fix. Tests also cover unchanged
+  refresh cadence, recovery after releasing the lock, and `GITHUB_TOKEN`
+  precedence. Lint, contract typechecking, the offline research demo,
+  data-model catalog validation (98 entries), and `git diff --check` pass.
 - Final PR #1912 remediation: `node --test
   test/watcher-additional-org-discovery.test.mjs
   test/watcher-repository-discovery.test.mjs` passes all 41 tests. New regressions

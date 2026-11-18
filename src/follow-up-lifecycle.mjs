@@ -18,17 +18,14 @@ async function wasWorkerHead(execFileImpl, workspaceDir, sha) {
   }
   if (tips.includes(sha)) return true;
   if (entries.length >= 129) throw new Error('worker HEAD history exceeds probe budget');
-  for (const tip of tips) {
-    const timeout = Math.floor(deadline - performance.now());
-    if (timeout <= 0) throw new Error('worker HEAD history probe timed out');
-    try {
-      await execFileImpl('git', ['-C', workspaceDir, 'merge-base', '--is-ancestor', sha, tip], { timeout });
-      return true;
-    } catch (error) {
-      if (error.code !== 1) throw error;
-    }
-  }
-  return false;
+  const timeout = Math.floor(deadline - performance.now());
+  if (timeout <= 0) throw new Error('worker HEAD history probe timed out');
+  // Exclude the union of all historical tips in one graph traversal. If sha
+  // itself is excluded, it was reachable from at least one worker HEAD.
+  const { stdout: remaining } = await execFileImpl('git',
+    ['-C', workspaceDir, 'rev-list', '--max-count=1', sha, '--not', ...tips],
+    { timeout, maxBuffer: 1024 * 1024 });
+  return !String(remaining || '').trim();
 }
 
 async function resolveJobPRLifecycleSafe({

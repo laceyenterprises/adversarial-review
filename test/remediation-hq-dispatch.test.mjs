@@ -83,6 +83,28 @@ test('cancelHqDispatch stops immediately on non-retryable failures', async () =>
   assert.equal(calls.length, 1);
 });
 
+test('cancelHqDispatch accepts banner-wrapped receipts while refusing pending or malformed evidence', async () => {
+  for (const [payload, confirmed] of [
+    ['{"ok":true,"cancelApplied":true}', true],
+    ['{"ok":true,"cancelApplied":true,"requestedAction":"cancel"}', false],
+    ['{"ok":false,"cancelApplied":true}', false],
+    ['{"ok":true}', false],
+    ['{"ok":true,"cancelApplied":true', false],
+    ['null', false],
+  ]) {
+    const stdout = `HQ diagnostic before receipt\n${payload}\nHQ diagnostic after receipt\n`;
+    const result = await cancelHqDispatch({
+      worker: { dispatchId: 'dispatch_wrapped', hqRoot: '/tmp/hq-root' },
+      env: {},
+      execFileImpl: async () => ({ stdout }),
+    });
+    assert.equal(result.cancelled, confirmed, payload);
+    assert.equal(result.stdout, stdout.trim(), 'retain the original transport evidence');
+    assert.equal(result.attempts, 1);
+    if (!confirmed) assert.equal(result.error, 'hq-cancellation-not-confirmed');
+  }
+});
+
 test('isHqCancelRetryable treats child-process timeout codes as transient', () => {
   assert.equal(isHqCancelRetryable({ code: 'ETIMEDOUT', message: 'child process failed' }), true);
   assert.equal(isHqCancelRetryable({ code: 1, stderr: 'fatal: permission denied' }), false);

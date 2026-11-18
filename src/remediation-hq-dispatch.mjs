@@ -278,7 +278,7 @@ async function cancelHqDispatch({
         maxBuffer: 5 * 1024 * 1024,
       });
       let receipt;
-      try { receipt = JSON.parse(result?.stdout || ''); } catch { /* No termination proof. */ }
+      try { receipt = parseHqJsonObject(result?.stdout, 'hq dispatch cancel'); } catch { /* No termination proof. */ }
       const confirmed = receipt?.ok === true && receipt?.cancelApplied === true
         && receipt?.requestedAction !== 'cancel';
       return {

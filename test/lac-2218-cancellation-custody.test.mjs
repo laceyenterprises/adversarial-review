@@ -120,6 +120,40 @@ test('LAC-2218 external absent/fetched heads cancel; exact owner attestations pr
     { state: 'exited' }), null);
 });
 
+test('LAC-2218 checks 128 reflog tips with one graph query and retains ancestors of replaced tips', async t => {
+  const repo = repository(t);
+  const tree = repo.git('rev-parse', 'HEAD^{tree}');
+  const published = repo.git('commit-tree', tree, '-p', repo.reviewed, '-m', 'published ancestor');
+  const tips = Array.from({ length: 128 }, (_, i) =>
+    repo.git('commit-tree', tree, '-p', i === 127 ? published : repo.reviewed, '-m', `tip ${i}`));
+  const external = repo.git('commit-tree', tree, '-p', repo.reviewed, '-m', 'external');
+  for (const head of [external, published]) {
+    const graphCalls = [];
+    const stop = await decision(repo, head, (bin, args, options) => {
+      if (bin !== 'git') return Promise.resolve({ stdout: '[]' });
+      if (args.includes('reflog')) return Promise.resolve({ stdout: tips.join('\n') });
+      if (args.includes('rev-list') || (args.includes('merge-base') && args.at(-1) !== 'HEAD')) {
+        graphCalls.push({ args, options });
+      }
+      return exec(bin, args, options);
+    });
+    assert.equal(stop?.stopCode ?? null, head === external ? 'stale-review-head' : null);
+    assert.equal(graphCalls.length, 1, 'the full reflog must use a single graph traversal');
+    assert.ok(graphCalls[0].options.timeout > 0 && graphCalls[0].options.timeout <= 5000);
+  }
+});
+
+test('LAC-2218 failed batched history query retains custody', async t => {
+  const repo = repository(t);
+  const tree = repo.git('rev-parse', 'HEAD^{tree}');
+  const external = repo.git('commit-tree', tree, '-p', repo.reviewed, '-m', 'external');
+  const stop = await decision(repo, external, (bin, args, options) => {
+    if (args.includes('rev-list')) throw Object.assign(new Error('history query timed out'), { code: 'ETIMEDOUT' });
+    return bin === 'git' ? exec(bin, args, options) : Promise.resolve({ stdout: '[]' });
+  });
+  assert.equal(stop, null);
+});
+
 test('LAC-2218 an accepted asynchronous cancel intent does not certify worker termination', async () => {
   const result = await cancelHqDispatch({ worker, env: {}, execFileImpl: async () => ({
     stdout: JSON.stringify({ ok: true, cancelApplied: false, requestedAction: 'cancel', currentStatus: 'running' }),

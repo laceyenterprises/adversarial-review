@@ -10716,6 +10716,7 @@ test('reconcileFollowUpJob cancels an active worker when a fetched external head
     execFileImpl: async (command, args) => {
       if (args.includes('rev-parse')) return { stdout: 'diverged-head\n' };
       if (args.includes('reflog')) return { stdout: `${'a'.repeat(40)}\n` };
+      if (args.includes('rev-list')) return { stdout: 'diverged-head\n' };
       throw Object.assign(new Error('not an ancestor'), { code: 1 });
     },
   });
@@ -13520,6 +13521,29 @@ test('LAC-2218 refused HQ lifecycle cancellation retains custody, then terminal 
   assert.equal(comments, 0);
 });
 
+
+test('LAC-2218 cancellation hold supports default clock and optional loggers', t => {
+  for (const log of [undefined, null, {}]) {
+    const rootDir = mkdtempSync(path.join(tmpdir(), 'lac-2218-hold-defaults-'));
+    t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+    const { claimed } = makeQueuedJob(rootDir, { prNumber: 2218 });
+    const spawned = markFollowUpJobSpawned({ jobPath: claimed.jobPath, spawnedAt: '2026-04-21T10:01:00.000Z',
+      worker: { model: 'codex', dispatchMode: 'hq', dispatchId: 'lrq_fixture_defaults', state: 'spawned' } });
+    const before = Date.now();
+    const held = retainFollowUpJobAfterCancelFailure({ rootDir, job: spawned.job, jobPath: spawned.jobPath,
+      worker: spawned.job.remediationWorker, cancellation: { cancelled: false }, action: 'stale-review-head',
+      ...(log === undefined ? {} : { log }) });
+    const after = Date.now();
+    assert.equal(held.action, 'active');
+    const current = readFollowUpJob(spawned.jobPath);
+    assert.equal(current.status, 'in_progress');
+    assert.equal(current.remediationWorker.state, 'spawned');
+    assert.equal(current.remediationWorker.cancellation.cancelled, false);
+    const attemptedAt = current.remediationWorker.cancellationHold.attemptedAt;
+    assert.equal(attemptedAt, new Date(attemptedAt).toISOString());
+    assert.ok(Date.parse(attemptedAt) >= before && Date.parse(attemptedAt) <= after);
+  }
+});
 
 test('LAC-2218 cancellation receipt commit rechecks current custody and preserves concurrent observations', t => {
   for (const change of ['progress', 'owner', 'terminal']) {

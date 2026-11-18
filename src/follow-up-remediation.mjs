@@ -1298,7 +1298,10 @@ async function postRemediationCommentWithCapture({
 
 // Cancellation failure is not evidence that execution ended. Keep the same
 // in-progress owner eligible for status/reply reconciliation on the next tick.
-export function retainFollowUpJobAfterCancelFailure({ rootDir, job, jobPath, worker, cancellation, action, now, log }) {
+export function retainFollowUpJobAfterCancelFailure({
+  rootDir, job, jobPath, worker, cancellation, action,
+  now = () => new Date().toISOString(), log = console,
+}) {
   return withFollowUpJobLock(join(rootDir, 'data', 'follow-up-jobs'), () => {
     let current;
     try { current = readFollowUpJob(jobPath); } catch (error) {
@@ -1314,7 +1317,7 @@ export function retainFollowUpJobAfterCancelFailure({ rootDir, job, jobPath, wor
     const retained = { ...current, remediationWorker: { ...current.remediationWorker, cancellation,
       cancellationHold: { action, reason, attemptedAt: now() } } };
     writeFollowUpJob(jobPath, retained);
-    log.warn?.(`[follow-up-remediation] cancellation custody retained job=${job.jobId} reason=${reason}`);
+    log?.warn?.(`[follow-up-remediation] cancellation custody retained job=${job.jobId} reason=${reason}`);
     return { action: 'active', reason, job: retained, jobPath };
   });
 }

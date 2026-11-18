@@ -138,6 +138,8 @@ test('old partial schema is explicit, empty is observable and missing DB is unav
     db.exec('CREATE TABLE reviewed_prs(repo TEXT, pr_number INTEGER)');
     assert.deepEqual(read({ kind: 'reviews' }).items, []);
     db.exec("INSERT INTO reviewed_prs VALUES ('example/repo',1)");
+    assert.throws(() => read({ kind: 'reviews', since: '2026-11-18T00:00:00Z' }),
+      { message: 'review time schema unavailable' });
     const partial = read({ kind: 'reviews' });
     assert.ok(partial.missing_fields.includes('review_status'));
     assert.ok(partial.missing_fields.includes('reviewer_passes.repo'));

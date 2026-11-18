@@ -205,7 +205,7 @@ function meteredExecFile(execFileImpl = execFileAsync, command, args, options = 
   return withHammerToken(async (active, session) => {
     if (!session.managed) {
       const env = await githubEnvForTarget(prepared.credentialEnv, args, { token: active.env.GH_TOKEN || active.env.GITHUB_TOKEN });
-      if (env !== prepared.credentialEnv) active = { ...active, env: { ...active.env, GH_TOKEN: env.GH_TOKEN, GITHUB_TOKEN: env.GITHUB_TOKEN }, credentialEnv: env };
+      if (env !== prepared.credentialEnv) active = { ...active, env: { ...active.env, GH_TOKEN: env.GH_TOKEN, GITHUB_TOKEN: env.GITHUB_TOKEN } };
     }
     return readAdmissionChecks(execFileImpl, command, args, active, () => executeGh(active, session));
   }, prepared);
@@ -272,7 +272,7 @@ function executeFileSync(execFileImpl, command, args, options = {}) {
 function executeGhSync(execFileImpl, command, args, activeOptions, session, credentialEnv) {
   if (!session.managed) {
     const env = githubEnvForTarget(credentialEnv, args, { sync: true, token: activeOptions.env.GH_TOKEN || activeOptions.env.GITHUB_TOKEN });
-    if (env !== credentialEnv) activeOptions = { ...activeOptions, env: { ...activeOptions.env, GH_TOKEN: env.GH_TOKEN, GITHUB_TOKEN: env.GITHUB_TOKEN }, credentialEnv: env };
+    if (env !== credentialEnv) activeOptions = { ...activeOptions, env: { ...activeOptions.env, GH_TOKEN: env.GH_TOKEN, GITHUB_TOKEN: env.GITHUB_TOKEN } };
   }
   let { env } = activeOptions;
   const resource = args[0] === 'api' ? ghResources(args)[0] : 'graphql';

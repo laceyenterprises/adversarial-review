@@ -225,7 +225,7 @@ test('gh targets route child and budget credential env, home env remains unchang
     await meteredExecFile(async (_cmd, _args, options) => {
       assert.equal(options.env.GH_TOKEN, 'merge-agent@other-org-1');
       assert.equal(options.env.GITHUB_TOKEN, options.env.GH_TOKEN);
-      assert.equal(options.credentialEnv.GH_TOKEN, options.env.GH_TOKEN);
+      assert.equal('credentialEnv' in options, false, 'executors never receive the credential map');
       return { stdout: '{}', stderr: '' };
     }, 'gh', args, { env });
   }
@@ -244,7 +244,7 @@ test('gh refuses unknown roles and sync cache misses; sync uses warmed cache onl
   await githubTokenForTarget({ token: env.GH_TOKEN, env, target: args });
   meteredExecFileSync((_cmd, _args, options) => {
     assert.equal(options.env.GH_TOKEN, 'merge-agent@other-org-1');
-    assert.equal(options.credentialEnv.GH_TOKEN, options.env.GH_TOKEN);
+    assert.equal('credentialEnv' in options, false, 'executors never receive the credential map');
     return '{}';
   }, 'gh', args, { env });
 });

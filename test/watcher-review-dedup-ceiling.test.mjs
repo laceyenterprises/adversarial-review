@@ -82,6 +82,40 @@ function insertPass(
   );
 }
 
+test('LAC-2214: seven pre-launch CLI failures cannot block the first delivered review', () => {
+  const rootDir = makeTempRoot(), db = openReviewStateDb(rootDir);
+  try {
+    ensureReviewStateSchema(db);
+    const repoPath = 'fixture/project', prNumber = 7, headSha = 'current';
+    for (let attemptNumber = 1; attemptNumber <= 7; attemptNumber++) {
+      insertPass(db, { repoPath, prNumber, attemptNumber, passKind: 'first-pass', headSha,
+        status: 'failed', metadata: attemptNumber % 2
+          ? { failureClass: 'cli-resolution-transient' }
+          : { failure_class: 'cli-resolution-transient' } });
+    }
+    const args = { db, rootDir, repoPath, prNumber, headSha, fallbackReviewAttempts: 99 };
+    for (const head of [headSha, null]) {
+      assert.equal(countReviewCeilingAttempts({ ...args, headSha: head }), 0);
+      assert.equal(countReviewCeilingUnits({ ...args, headSha: head }), 0);
+    }
+    // A route change does not erase real attempts: Gemini must still spend the
+    // independent fuse once it runs, even if stale metadata names CLI resolution.
+    for (const [attemptNumber, status, metadata] of [
+      [1, 'running', { failureClass: 'cli-resolution-transient' }],
+      [2, 'failed', { failureClass: 'reviewer-configuration-error' }],
+      [3, 'failed', { failureClass: 'reviewer-timeout' }],
+      [4, 'cancelled', { failureClass: 'cli-resolution-transient' }],
+      [5, 'completed', {}],
+    ]) insertPass(db, { repoPath, prNumber, attemptNumber, passKind: 'rereview',
+      headSha, status, metadata });
+    assert.equal(countReviewCeilingAttempts(args), 5, 'real attempts retain the five-attempt fuse');
+    assert.equal(countReviewCeilingAttempts({ ...args, headSha: 'new-head' }), 0);
+  } finally {
+    db.close();
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
 test('duplicate completed reviews of one head count as a single distinct head', () => {
   const rootDir = makeTempRoot();
   try {

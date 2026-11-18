@@ -243,6 +243,9 @@ export function countReviewCeilingAttempts({
         'dispatch-failed',
         'launchctl-bootstrap',
         'oauth-broken',
+        // Executable resolution fails before a reviewer can run. Its durable
+        // cascade deadline owns retry pacing, just as for credential outages.
+        'cli-resolution-transient',
       ]);
       return rows.reduce((count, row) => {
         // A stalled provider call is cancelled without spending a retry. Keep

@@ -124,6 +124,43 @@ test('budgeting prioritizes changed head paths without making omitted paths nega
   assert.doesNotMatch(context, /"aaa\/unrelated.mjs"/);
 });
 
+test('inventory stops serializing paths when fewer than three bytes remain', async t => {
+  const stdout = JSON.stringify({
+    truncated: false,
+    tree: ['a', 'bb', 'ccc'].map(path => ({ path, type: 'blob' })),
+  });
+  const stringify = JSON.stringify;
+  const serialized = [];
+  t.mock.method(JSON, 'stringify', value => {
+    if (typeof value === 'string') serialized.push(value);
+    return stringify(value);
+  });
+  for (const remaining of [0, 1, 2]) {
+    serialized.length = 0;
+    const context = await loadReviewerFileInventory({
+      repo: incident.repo, headSha, maxBytes: 4 + remaining,
+      execGhWithRetryImpl: async () => ({ stdout }),
+    });
+    assert.deepEqual(serialized, ['a']);
+    assert.match(context, /partial; present paths/);
+    assert.match(context, /Omission does not prove absence/);
+    assert.ok(context.endsWith('"a"\n'));
+  }
+});
+
+test('inventory still fits shorter paths after skipping a path that exceeds the remaining budget', async () => {
+  const context = await loadReviewerFileInventory({
+    repo: incident.repo, headSha, maxBytes: 5,
+    execGhWithRetryImpl: async () => ({ stdout: JSON.stringify({
+      truncated: false,
+      tree: ['aaaa', 'bb'].map(path => ({ path, type: 'blob' })),
+    }) }),
+  });
+  assert.match(context, /partial; present paths/);
+  assert.ok(context.endsWith('"bb"\n'));
+  assert.doesNotMatch(context, /"aaaa"/);
+});
+
 test('full, slim and public context assembly retain the same immutable inventory', async () => {
   for (const mode of ['full', 'slim', 'public']) {
     const context = await buildReviewerExtraContext({

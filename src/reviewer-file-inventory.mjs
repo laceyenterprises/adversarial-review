@@ -35,6 +35,7 @@ export async function loadReviewerFileInventory({
     const lines = [];
     let bytes = 0;
     for (const path of paths) {
+      if (maxBytes - bytes < 3) break; // Even an empty JSON string plus newline cannot fit.
       const line = JSON.stringify(path);
       if (bytes + Buffer.byteLength(line) + 1 > maxBytes) continue;
       lines.push(line);

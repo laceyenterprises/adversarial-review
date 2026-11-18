@@ -109,7 +109,17 @@ Without hammer commits, those two fields are sufficient. With hammer commits,
 history includes `primaryHead`, `mergeBase`, `primaryFiles`, `finalFiles`,
 `completeFileLists` and `testRegionsChanged`. It may include `builderBoundary`,
 `reversalAuthorizations`, `rejectedReversalAuthorizations`, `renameProofs` and
-`primaryPathChanges`. The returned history may also carry `renameProofReadFailed`,
+`primaryPathChanges`. After main integration, optional `comparisonMergeBase`
+records the final head's merge base with the live base (key position 4), while
+`mergeBase` remains the protected author head's merge base. `primaryFiles` and
+`finalFiles` both use the protected `mergeBase` coordinates. Collection verifies
+that the protected base is an ancestor of `comparisonMergeBase`, the author
+head is an ancestor of the final head, and the projected final comparison
+resolves exactly to `mergeBase`. Cache reuse and publication compare
+`comparisonMergeBase` (or `mergeBase` when absent) to key position 4.
+Unknown/refused projections remain uncached; old unknown results were already
+uncached, so no cache purge or identity-version change is required.
+The returned history may also carry `renameProofReadFailed`,
 which prevents disk publication as described below. The identity version forces
 one recomputation of older records, including cached original-reversal refusals
 and proofs from before context-tolerant, structure-preserving reversal matching

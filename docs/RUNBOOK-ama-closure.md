@@ -4796,8 +4796,15 @@ history. A launch without a commit anchors nothing; builder and remediation
 worker pushes before that commit belong to the protected author change. A login alone is insufficient: an untagged identity-matching push must follow a trusted recorded hammer launch whose target descends from the builder boundary. The boundary is the opening build-completion identity head (`rowHeadSha`), or the earliest authoritative GitHub review head for callers without that ledger identity. The current produced-head attestation is not a builder boundary. A hammer-authored trailer cannot alter either source. Commits at or before the launch target remain primary. Explicit
 `Closed-By: hammer (adversarial-pipe-mode)`, and legacy worker-class trailers
 identify hammer commits independently of login. A hammer-authored `Reviewed-Head` trailer cannot select an older author
-head. Both primary and final diffs are compared against the current PR base,
-using the same merge base so rebased upstream changes are excluded. Hammer closure detection
+head. The primary diff resolves its merge base against the current PR base.
+Both trees are evaluated in that protected merge base's coordinates. When
+main integration advances the final comparison's merge base, collection first
+proves the protected base is its ancestor and the protected author head is an
+ancestor of the final head, then rereads the final diff from the protected base.
+Missing or unrelated bases, lost author ancestry, and incomplete projections
+remain refusals. The PR-range history still selects the first hammer; upstream
+hammer commits brought in from main cannot replace the author boundary.
+Hammer closure detection
 uses the terminal commit trailer block. Finding-based reversal authorization additionally
 uses `hamCommitIdentityMatches` with the trusted HAM login set
 (`hamAuditCommentAuthorMatches`): reject any linked non-HAM author or committer;

@@ -148,7 +148,7 @@ async function storedPrimaryChangeWithinRepositoryState(args, compute) {
       && record.history?.headSha === args.headSha
       && (!record.history.builderBoundary || !args.builderHead || record.history.builderBoundary === args.builderHead)
       && [true, false].includes(record.history.hasHammerCommits)
-      && (!record.history.hasHammerCommits || record.history.mergeBase === args.mergeBase)) return record.history;
+      && (!record.history.hasHammerCommits || (record.history.comparisonMergeBase || record.history.mergeBase) === args.mergeBase)) return record.history;
   } catch { /* Missing/corrupt evidence is recomputed, never accepted. */ }
   if (running.has(path)) {
     const history = await running.get(path).promise;
@@ -160,7 +160,7 @@ async function storedPrimaryChangeWithinRepositoryState(args, compute) {
   const entry = { args, startedAt: Date.now() };
   entry.promise = Promise.resolve().then(compute).then(history => {
     if (history.laneReversalHistory !== true && [true, false].includes(history.hasHammerCommits) && !history.readFailed && !history.headMismatch && !history.renameProofReadFailed
-      && (!history.hasHammerCommits || history.mergeBase === args.mergeBase)) {
+      && (!history.hasHammerCommits || (history.comparisonMergeBase || history.mergeBase) === args.mergeBase)) {
       assertStoreOwner(args.rootDir, path);
       mkdirSync(directory(args.rootDir), { recursive: true });
       const temporary = `${path}.${randomUUID()}.tmp`;

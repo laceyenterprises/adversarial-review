@@ -54,6 +54,21 @@ function fixture(t) {
 }
 const evidence = args => ({ headSha: args.headSha, hasHammerCommits: true, mergeBase: args.mergeBase, primaryFiles: [], finalFiles: [] });
 
+test('projected history reuses only the exact live comparison base while retaining protected coordinates', async t => {
+  const args = fixture(t);
+  let computes = 0;
+  const compute = async () => {
+    computes++;
+    return { ...evidence(args), mergeBase: 'd'.repeat(40), comparisonMergeBase: args.mergeBase };
+  };
+  const projected = await storedPrimaryChange(args, compute);
+  assert.deepEqual(await storedPrimaryChange(args, () => assert.fail('must reuse projected history')), projected);
+  assert.equal(projected.mergeBase, 'd'.repeat(40));
+  assert.equal(computes, 1);
+  await storedPrimaryChange({ ...args, mergeBase: 'e'.repeat(40) }, compute);
+  assert.equal(computes, 2, 'a different live comparison base must recompute');
+});
+
 function mockFs(t, name, implementation) {
   t.mock.method(fs, name, implementation);
   syncBuiltinESMExports();

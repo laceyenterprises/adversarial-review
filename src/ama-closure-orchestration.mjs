@@ -2658,9 +2658,16 @@ async function dispatchAmaClosureFor({
     logger?.log?.(`[watcher] AMA closer ${closerSupersede.launchRequestId} superseded by the clean exact-head `
       + `review for ${repoPath}#${prNumber}@${String(currentPrHeadSha || '').slice(0, 12)}; daemon merges`);
   }
+  // ORPHANDAEMONMERGE-01: ownerless recovery proved no live closer (OWNERPROOF/
+  // DAEMONSUPERSEDE fences), so when the re-derived decision is itself the clean
+  // exact-head daemon merge, recovery is the sole owner and runs the ordinary
+  // daemon attempt with every gate. Hammer/remediate/wait decisions are unchanged.
+  const ownerlessDaemonMerge = orphanRecovery?.ownerProof === true
+    && shared.decision.action === 'daemon-merge' && shared.decision.actor === 'daemon';
+  const hammerOnlyRecovery = orphanRecovery?.ownerProof && !ownerlessDaemonMerge;
   const daemonCleanMerge = !daemonSelected
     ? { disposition: DAEMON_MERGE_DISPOSITION.NOT_TAKEN, reason: shared.decision.reason }
-    : orphanRecovery?.ownerProof
+    : hammerOnlyRecovery
     ? { disposition: DAEMON_MERGE_DISPOSITION.NOT_TAKEN, reason: 'ownerless-hammer-recovery' }
     : priorDaemonCleanMerge && priorDaemonCleanMerge.disposition !== DAEMON_MERGE_DISPOSITION.DEFERRED
     ? priorDaemonCleanMerge : await runCoexistenceOperation(
@@ -2706,11 +2713,11 @@ async function dispatchAmaClosureFor({
   throwIfAborted(signal);
   // Adopt the adapter's generation before folding returned live facts. The
   // result may carry a gate newer than its last onGateSnapshot callback.
-  if (daemonSelected && !orphanRecovery?.ownerProof && daemonCleanMerge?.nextActionShared) {
+  if (daemonSelected && !hammerOnlyRecovery && daemonCleanMerge?.nextActionShared) {
     shared = daemonCleanMerge.nextActionShared;
   }
   if (daemonCleanMerge?.liveGate) observeDaemonGate(daemonCleanMerge.liveGate);
-  if (daemonSelected && !orphanRecovery?.ownerProof) {
+  if (daemonSelected && !hammerOnlyRecovery) {
     shared = observeDaemonResult(shared, daemonCleanMerge, passSnapshot);
   }
   if (closureOwnerSink) closureOwnerSink.shared = shared;
@@ -2745,7 +2752,7 @@ async function dispatchAmaClosureFor({
   }
 
   let daemonFailedClosedHandoff = false;
-  if (!orphanRecovery?.ownerProof && daemonCleanMerge?.disposition && daemonCleanMerge.disposition !== DAEMON_MERGE_DISPOSITION.NOT_TAKEN) {
+  if (!hammerOnlyRecovery && daemonCleanMerge?.disposition && daemonCleanMerge.disposition !== DAEMON_MERGE_DISPOSITION.NOT_TAKEN) {
     const daemonHeadShort = String(gateSnapshot?.reviewedHeadSha || '').slice(0, 12);
     logger?.log?.(
       `[watcher] AMA daemon clean-merge ${daemonCleanMerge.disposition} for ${repoPath}#${prNumber}` +

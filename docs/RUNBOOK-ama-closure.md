@@ -6007,6 +6007,16 @@ and falls back to filesystem review evidence without migrating the store. Genuin
 quota exhaustion and unknown holds, other refusals, exceptions and missing
 receipts still consume the attempt. The next ownerless observation pages with
 both durable outcomes' reasons in the message and payload, once delivery succeeds.
+ORPHANDAEMONMERGE-01: when the re-derived shared decision is the clean exact-head
+`daemon-merge` by `daemon`, the proven-ownerless pass runs the ordinary daemon
+clean-merge attempt with every live gate (head re-read, settled exact-head review,
+green checks, mergeable, merge authority, `strict_mode`, identity) and the same
+audit and lease; the `ownerless-hammer-recovery` skip now applies only to hammer,
+remediate and wait decisions. A landed merge settles `pr-terminal` and pages nothing.
+A fail-closed daemon merge spends its attempt. An undispatched pass whose settled
+decision is a daemon merge is never refunded as a wait, even when flagged
+`recoveryWait`; only the recognized waits above refund. Repeated empty passes
+therefore reach `recovery-attempts-exhausted` and page once.
 Pending/failed review rows visit this watchdog before ordinary retry admission;
 posted rows visit it through closure orchestration. A daemon merge completed on
 this tick settles as terminal before the watchdog, even if the earlier PR read

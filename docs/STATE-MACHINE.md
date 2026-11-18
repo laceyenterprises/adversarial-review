@@ -1442,6 +1442,14 @@ Legacy durable jobs created before `baseBranch` was persisted are hydrated from 
 
 ## MSM two-path merge authority (current)
 
+Durable identity absence at a merge-ready exact head retains page ownership
+with `daemon-identity-absent-parked` and no closer dispatch. The diagnostic reason
+is written once per pass so its observation streak remains intact. Present but
+unverified produced attestations return `invalid-produced-head-attestation` and
+retain the fail-closed hammer handoff. The reviewed orchestration source
+projection is refreshed; lifecycle states and existing smoke commands are
+unchanged. See the [identity contract](RUNBOOK-ama-closure.md#worker-identity-unresolved-on-daemon-clean-merge).
+
 Worker tenure changes scheduling and review provenance, not merge authority.
 Watcher tenure review routing runs only when the effective
 `worker_pool.tenure.enabled` is true (absent defaults to false). Disabled

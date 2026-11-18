@@ -3814,6 +3814,25 @@ a head-scoped `operator-approved`/`merge-agent-requested` label. On a head that
 is not merge-ready (red or pending checks, conflict, findings, stale review) the
 decline remains a safety refusal and the guidance below applies.
 
+INTERACTIVEPRIDENTITY-02 (SEV2): the hand-off above applies only when the identity
+read found a build identity that is incomplete. When the read succeeded and found
+none (gate `worker-observation-inconclusive`, or `missing-produced-head-attestation`
+under head-attestation consumption), as for an interactive session's PR that has
+not run `hq pr sign`, no closer can create the identity. AMA parks the PR under the
+named reason `daemon-identity-absent-parked`, pages once per head, dispatches no
+closer, and the park record's remedy names the action: sign with `hq pr sign`
+(pr-sign skill) or hand-merge. The daemon re-checks each pass, so a new
+attestation merges the PR and a new head is new work. A transient read
+(`identity-read-transient`) keeps its bounded retry and is never parked; malformed,
+denied or unknown identity evidence keeps the hand-off above.
+An exact-head produced row that is present but not verified (`valid !== true`)
+returns `invalid-produced-head-attestation` when no verified row can resolve
+identity. It retains the fail-closed hammer hand-off rather than the missing
+identity sign/hand-merge remedy. Rows for other heads do not establish a
+verification failure at the current head. Each identity-absent parked pass
+records its final reason once, preserving `firstObservedAt` and incrementing
+`observationCount`.
+
 The daemon resolves attributable identity through an existing valid produced
 head attestation or the public SDK's default PR provenance selector (the single
 latest authorized, non-superseded `pr_opened` record). A head-independent retry

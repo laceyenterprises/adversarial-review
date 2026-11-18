@@ -27,3 +27,23 @@ export function isTransientDaemonDecline(execution) {
   return ['not-eligible', 'gate-not-eligible'].includes(execution.reason)
     && details.length > 0 && details.every(reason => TRANSIENT_DETAILS.has(reason));
 }
+
+// INTERACTIVEPRIDENTITY-02: the identity read succeeded and found NO build
+// identity for the PR (an authorized provenance read that returned no rows, or
+// no produced head attestation at this exact head). That is a durable
+// absence, not a transient read: no closer can create the missing identity, so
+// it is never hammer-remediable. A failed or timed-out read is transient above.
+// Rows that exist but are malformed, ambiguous, denied or unknown stay on their
+// existing fail-closed path, and a worker launch on the same branch that does
+// not prove the opener means the opener may be hidden, not absent.
+const DURABLE_IDENTITY_ABSENCE_REASONS = new Set([
+  'worker-observation-inconclusive', 'missing-produced-head-attestation',
+]);
+
+export function isDurableIdentityAbsence(execution) {
+  if (!execution || execution.reason !== 'worker-identity-unresolved') return false;
+  const details = execution.reasons;
+  if (!Array.isArray(details) || !details.length || isTransientDaemonDecline(execution)) return false;
+  return details.every(reason => DURABLE_IDENTITY_ABSENCE_REASONS.has(reason))
+    && execution.workerIdentity?.launchProvenanceReason !== 'branch-provenance-does-not-prove-pr-opener';
+}

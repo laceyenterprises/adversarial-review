@@ -47,6 +47,11 @@ const PARK_REMEDIES = Object.freeze(Object.assign(Object.create(null), {
     + '<owner/repo> --head-sha <head> --branch <branch>`. Otherwise apply a '
     + 'head-scoped operator merge label so it closes under an operator-accountable '
     + 'lease. Do NOT relax the identity gate.',
+  'daemon-identity-absent-parked':
+    'The PR has no build identity: no `pr_opened` row and no valid interactive '
+    + 'attestation at this exact head, so no closer can help. Sign it with `hq pr sign` '
+    + '(pr-sign skill) or hand-merge. The daemon re-checks every pass and merges once '
+    + 'the attestation appears; a new head is new work. Do NOT relax the identity gate.',
   'daemon-failed-closed-hammer-refused':
     'The daemon failed closed on its own accountability gate and the hammer refused '
     + 'the clean exact-head hand-off. Read the closure blocker for the hammer reason, '

@@ -43,6 +43,11 @@ Directory: `data/daemon-merge-parks/`
   not break the merge path being observed.
 - A repeat park with the same `reason` preserves `firstObservedAt`, updates
   `lastObservedAt`, and increments `observationCount`.
+- Durable identity absence on a merge-ready exact head records
+  `daemon-identity-absent-parked` once per watcher pass, without first recording
+  `worker-identity-unresolved`. Its remedy is `hq pr sign` or hand-merge.
+  Present but unverified exact-head attestations retain the fail-closed handoff
+  and do not receive this absence remedy.
 - A park with a different `reason` restarts the record because the old reason is
   no longer the current merge blocker.
 - The daemon clears the record after a clean daemon merge succeeds.

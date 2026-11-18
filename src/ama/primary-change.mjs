@@ -1024,6 +1024,12 @@ function evaluatePrimaryChange(evidence, headSha, { strictNonBlockingRemediation
       const file = evidence.primaryFiles.find(entry => (entry.previous_filename || entry.filename) === path);
       if (identicalHammerRename(evidence, file)) continue;
       if (findingAuthorizedAddedRename(evidence, file, authorizationCache, strictNonBlockingRemediation)) continue;
+      // A rejected move proof cannot become permission to delete its source.
+      // Genuine deletions retain ordinary finding coverage below.
+      if (!actual && (evidence.reversalAuthorizations || []).some(({ commit }) =>
+        commit?.files?.some(entry => entry.status === 'renamed' && entry.previous_filename === path))) {
+        return reverted(path, 'rename-preservation');
+      }
       if ((change.renamed && actual?.filename === path)
         || (change.status === 'added' && actual && !actual.opaque && actual.regions.length === 0) || (!actual
         && !(change.regions.length > 0 && !change.opaque && !change.renamed

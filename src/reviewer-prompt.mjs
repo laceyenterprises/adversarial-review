@@ -20,6 +20,7 @@ import { buildSlimReviewerExtraContext } from './review-mode-selection.mjs';
 import { formatGuardForbiddenPaths } from './guard-forbidden-paths.mjs';
 import { parseDiffEntries } from './reviewer-util.mjs';
 import { formatTenureReviewRange, readTenureReviewRange } from './pr-tenure.mjs';
+import { FILE_GROUNDING_GUIDANCE } from './reviewer-file-inventory.mjs';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -111,9 +112,11 @@ async function buildReviewerExtraContext({
   repo,
   prNumber,
   prContext = null,
+  reviewedHeadSha = null,
   diff = '',
   advisoryFindings = [],
   guardForbiddenPaths = [],
+  fileInventoryContext = '',
   reviewModeDecision = null,
   repoRoot = join(ROOT, '..', '..'),
   rootDir = ROOT,
@@ -126,8 +129,11 @@ async function buildReviewerExtraContext({
   readTenureReviewRangeImpl = readTenureReviewRange,
   getConfigImpl,
 } = {}) {
+  // PR metadata can advance while a queued exact-head review is running.
+  // Linked document reads and head-scoped context must use the reviewed head.
+  if (reviewedHeadSha) prContext = { ...prContext, headRefOid: reviewedHeadSha };
   if (isPublicHygieneRepo(repo, getConfigImpl)) {
-    return PUBLIC_SAFE_REVIEW_ADDENDUM + formatGuardForbiddenPaths(guardForbiddenPaths);
+    return PUBLIC_SAFE_REVIEW_ADDENDUM + formatGuardForbiddenPaths(guardForbiddenPaths) + fileInventoryContext;
   }
   // The range is daemon-owned metadata, never inferred from PR prose.
   let tenureContext = '';
@@ -145,7 +151,7 @@ async function buildReviewerExtraContext({
   // RPL-08: slim mode trims context, never the review contract. See
   // buildSlimReviewerExtraContext for what is dropped and why.
   if (reviewModeDecision?.slim) {
-    return tenureContext + formatGuardForbiddenPaths(guardForbiddenPaths) + disputeContext + formatPrIntentContext(prContext?.body) + buildSlimReviewerExtraContext({ repo, prNumber, decision: reviewModeDecision, advisoryFindings, log });
+    return tenureContext + formatGuardForbiddenPaths(guardForbiddenPaths) + disputeContext + formatPrIntentContext(prContext?.body) + buildSlimReviewerExtraContext({ repo, prNumber, decision: reviewModeDecision, advisoryFindings, log }) + fileInventoryContext;
   }
 
   let extraContext = buildObviousDocsGuidance();
@@ -183,11 +189,11 @@ async function buildReviewerExtraContext({
     log?.error?.(`[reviewer] WARN: failed to build hardening-ledger review context: ${err.message}`);
   }
 
-  return tenureContext + formatGuardForbiddenPaths(guardForbiddenPaths) + extraContext + formatPrIntentContext(prContext?.body) + disputeContext;
+  return tenureContext + formatGuardForbiddenPaths(guardForbiddenPaths) + extraContext + formatPrIntentContext(prContext?.body) + disputeContext + fileInventoryContext;
 }
 
 function buildReviewerPrompt({ promptPrefix, extraContext = '', diff = '' } = {}) {
-  return `${promptPrefix || ''}${extraContext}\n\n---\n\nHere is the PR diff to review:\n\n\`\`\`diff\n${diff}\`\`\``;
+  return `${promptPrefix || ''}${extraContext}${FILE_GROUNDING_GUIDANCE}\n\n---\n\nHere is the PR diff to review:\n\n\`\`\`diff\n${diff}\`\`\``;
 }
 
 function buildPromptForReviewerModel(reviewerModel, diff, extraContext = '', {

@@ -876,6 +876,17 @@ new PR
   The existing max-wait environment overrides
   can set either bound to zero to disable it.
 - `malformed` is intentionally sticky.
+- Review prompts carry repository grounding guidance at every stage, including
+  bounded final reviews. Production PR review context includes positive path
+  evidence fetched from the requested immutable head's Git tree, once per pass
+  and repeated in every chunk. The inventory reserves at most 16 KiB for path
+  lines, prioritizes changed paths, and explicitly marks incomplete coverage;
+  unavailable evidence or omissions from partial inventories never establish
+  absence. Absence findings require
+  exact-head tree or verified-checkout evidence. PR scope prose and rename
+  records cannot establish global absence, and app validator contracts must be
+  read from the app at that head. These are evidence requirements, not changed
+  severity thresholds or a postprocessing waiver for findings.
 - Reviewer claim and process deadlines apply `reviewer.ceiling_max_seconds`
   (default three hours) after load scaling and budget composition. Historical
   oversized claims are bounded from their original start during selection and

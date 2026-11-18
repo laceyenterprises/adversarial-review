@@ -75,6 +75,12 @@ test('chunk planning and dispatch retain whole-PR rubric even for ARR-only chunk
     for (const mixed of [false, true]) {
       const diff = patch(`${arr}.md`, `${arr}.md`, '+Synthetic evidence\n'.repeat(3000))
         + (mixed ? patch('src/example.mjs') : patch(`${arr}.json`));
+      // This fixture pins routing across chunks, not the size of the shared
+      // safety instructions. Keep the diff allowance stable as those grow.
+      const maxBytes = Buffer.byteLength(buildPromptForReviewerModel(reviewerModel, '', '', {
+        reviewKind: mixed ? 'code-pr' : 'architecture-review',
+        runtime: reviewerModel === 'gemini' ? 'antigravity' : 'cli',
+      })) + 6000;
       let calls = 0;
       let arrOnlyChunk = false;
       const run = async (chunk, context, options) => {
@@ -82,11 +88,11 @@ test('chunk planning and dispatch retain whole-PR rubric even for ARR-only chunk
         arrOnlyChunk ||= selectReviewerRubric(chunk) === 'architecture-review';
         assert.equal(options.reviewKind, mixed ? 'code-pr' : 'architecture-review');
         const prompt = buildPromptForReviewerModel(reviewerModel, chunk, context, { ...options, runtime: reviewerModel === 'gemini' ? 'antigravity' : 'cli' });
-        assert.ok(Buffer.byteLength(prompt) <= 30000);
+        assert.ok(Buffer.byteLength(prompt) <= maxBytes);
         assert.equal(prompt.includes('Architecture rubric (blocking classes)'), !mixed);
         return { reviewText: clean, rawReviewText: clean, needsSanitize: false };
       };
-      await reviewAgyOversizedInChunks(diff, '', { reviewerModel, maxBytes: 30000, maxChunks: 20, dispatchReviewerModelImpl: (_model, ...args) => run(...args), reviewWithGeminiImpl: run });
+      await reviewAgyOversizedInChunks(diff, '', { reviewerModel, maxBytes, maxChunks: 20, dispatchReviewerModelImpl: (_model, ...args) => run(...args), reviewWithGeminiImpl: run });
       assert.ok(calls > 1);
       assert.ok(arrOnlyChunk);
     }

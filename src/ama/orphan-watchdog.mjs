@@ -232,6 +232,15 @@ export function isOrphanRecoveryWait(result) {
     || isGitHubRateLimitError(result);
 }
 
+// ORPHANDAEMONMERGE-01: an undispatched pass whose settled decision is a clean
+// daemon merge is a recovery that did nothing, not a wait. Only a recognized
+// wait reason (timeout, 429, quota read) may still refund it.
+function isSettledMergeNoLaunch(result) {
+  const resolved = result?.decisionMismatch?.resolvedAction || result?.nextActionShared?.decision?.action;
+  return result?.dispatched !== true && resolved === 'daemon-merge'
+    && !isOrphanRecoveryWait({ ...result, recoveryWait: false });
+}
+
 function attemptSummary(retry) {
   const reason = text(retry?.reason);
   const holdReason = retry?.holdReason || (reason.startsWith('harness-hold:') ? reason.slice('harness-hold:'.length) : null);
@@ -449,7 +458,7 @@ async function recoverOrphanWithStore({ rootDir, repo, prNumber, headSha, candid
       retry = { ...attempt, code: error.code, status: error.status || error.statusCode };
       if (signal?.aborted) throw error;
     } finally {
-      if (isOrphanRecoveryWait(retry || attempt)) {
+      if (isOrphanRecoveryWait(retry || attempt) && !isSettledMergeNoLaunch(retry || attempt)) {
         outcomes.pop();
         db.prepare('UPDATE heads SET attempts=attempts-1, outcomes=?, evidence=? WHERE head=?')
           .run(JSON.stringify(outcomes), JSON.stringify(attempt), headSha);
@@ -462,6 +471,9 @@ async function recoverOrphanWithStore({ rootDir, repo, prNumber, headSha, candid
       return { ...pending, amaClosureResult: { ...pending.amaClosureResult, reviewRequest: retry } };
     }
     if (retry?.dispatched) return { outcome: 'ama-dispatched', amaClosureResult: retry };
+    // A recovery daemon merge is a completed close, never a refused dispatch.
+    if (retry?.reason === 'daemon-merged') return retry.daemonCleanMerge?.remoteMergedConfirmed === true
+      ? { outcome: 'pr-terminal', terminalReason: 'merged', amaClosureResult: retry } : pending;
     if (recoveryExpired) return await pageTransition(`dispatch-refused:${text(retry?.reason || 'no-receipt')}`);
     return pending;
   } finally { try { db?.close(); } finally { fsImpl.closeSync(fd); } }

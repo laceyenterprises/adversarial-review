@@ -274,6 +274,8 @@ Exits non-zero if any kernel or adapter invariant fails. The same
 contracts the demo exercises are the contracts the production
 GitHub-PR pipeline depends on.
 
+Active follow-up remediation keeps its execution owner when cancellation fails or remains pending. Own published heads survive history rewrites while attestation is unavailable; cancellation identity and custody are documented in the [follow-up lifecycle contract](docs/follow-up-runbook.md#6-bounded-stop-conditions). These custody checks do not authorize completion, rereview or merge.
+
 The full unit + adapter test suite runs the same way:
 
 ```bash
@@ -3394,6 +3396,7 @@ stateDiagram-v2
     s1 --> s1: follow-up-job.19 infrastructure-only CI without retained publication work: bounded wait; moved/terminal head clears wait under lock
     s4 --> s2: follow-up-job.20 committed-unpublished live publication proven: ordinary completion/re-review without another worker; strict final-round reply validation restores hammer ownership; preserve spent rounds
     s4 --> s4: follow-up-job.21 committed-unpublished live publication proven but ordinary round budget exhausted; clear publication debt and escalate max-rounds without another round
+    s1 --> s1: follow-up-job.22 lifecycle cancellation refused, failed or pending: retain spawned execution custody, latest receipt and cancellationHold; reconcile authoritative status/reply next tick
     s2 --> [*]
     s3 --> [*]
     s4 --> [*]

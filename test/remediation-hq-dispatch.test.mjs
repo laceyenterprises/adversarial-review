@@ -31,13 +31,13 @@ test('cancelHqDispatch retries transient shell failures before succeeding', asyn
       calls.push({ command, args, options });
       const nextError = errors.shift();
       if (nextError) throw nextError;
-      return { stdout: 'cancelled\n', stderr: '' };
+      return { stdout: '{"ok":true,"cancelApplied":true}\n', stderr: '' };
     },
   });
 
   assert.equal(result.cancelled, true);
   assert.equal(result.attempts, 3);
-  assert.equal(result.stdout, 'cancelled');
+  assert.equal(JSON.parse(result.stdout).cancelApplied, true);
   assert.deepEqual(sleeps, [5, 9]);
   assert.deepEqual(
     calls.map((call) => [call.command, call.args, call.options.env.HQ_ROOT]),
@@ -81,6 +81,28 @@ test('cancelHqDispatch stops immediately on non-retryable failures', async () =>
   assert.match(result.error, /hq cancel refused/);
   assert.deepEqual(sleeps, []);
   assert.equal(calls.length, 1);
+});
+
+test('cancelHqDispatch accepts banner-wrapped receipts while refusing pending or malformed evidence', async () => {
+  for (const [payload, confirmed] of [
+    ['{"ok":true,"cancelApplied":true}', true],
+    ['{"ok":true,"cancelApplied":true,"requestedAction":"cancel"}', false],
+    ['{"ok":false,"cancelApplied":true}', false],
+    ['{"ok":true}', false],
+    ['{"ok":true,"cancelApplied":true', false],
+    ['null', false],
+  ]) {
+    const stdout = `HQ diagnostic before receipt\n${payload}\nHQ diagnostic after receipt\n`;
+    const result = await cancelHqDispatch({
+      worker: { dispatchId: 'dispatch_wrapped', hqRoot: '/tmp/hq-root' },
+      env: {},
+      execFileImpl: async () => ({ stdout }),
+    });
+    assert.equal(result.cancelled, confirmed, payload);
+    assert.equal(result.stdout, stdout.trim(), 'retain the original transport evidence');
+    assert.equal(result.attempts, 1);
+    if (!confirmed) assert.equal(result.error, 'hq-cancellation-not-confirmed');
+  }
 });
 
 test('isHqCancelRetryable treats child-process timeout codes as transient', () => {

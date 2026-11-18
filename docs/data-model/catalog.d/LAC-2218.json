@@ -1,0 +1,16 @@
+{
+  "version": 1,
+  "entries": [
+    {
+      "id": "follow-up-cancellation-custody",
+      "title": "Follow-up cancellation custody",
+      "path": "docs/data-model/follow-up-jobs.md",
+      "store": "data/follow-up-jobs/in-progress/*.json",
+      "schemaSurface": "src/follow-up-remediation.mjs",
+      "relatedSchemaSurfaces": ["src/remediation-hq-dispatch.mjs", "src/follow-up-lifecycle.mjs"],
+      "owner": "follow-up daemon",
+      "optionalFields": ["remediationWorker.cancellationHold: { action, reason, attemptedAt }"],
+      "compatibility": "Additive latest unsuccessful cancellation receipt; retains in_progress/spawned custody without terminal failure or comment. Older records need no migration; a later terminal record may retain the last attempt as history. Existing hqParentSession supplies accepted caller attribution without changing HQ owner authorization. No historical incident record mutation."
+    }
+  ]
+}

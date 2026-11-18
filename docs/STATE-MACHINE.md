@@ -2614,7 +2614,11 @@ Key control points:
   newer base touches files changed by this PR. Only the hammer's documented
   no-strict up-to-date lane may merge a `BEHIND` head after those guards pass.
 - **Primary-change gate (HAMINTENT-02 / LAC-1833).** Both paths preserve changed
-  regions from the protected author baseline against the current PR base.
+  regions in the protected author baseline's merge-base coordinates, resolved
+  against the current PR base. Main integration may advance the final head's
+  comparison base: collection proves protected-base and author-head ancestry
+  before projecting the final tree onto the protected common base. Missing
+  ancestry or an incomplete/mismatched projection retains the existing refusal.
   DERIVEDBLOCK-01 treats a declared generated block interior as preserved when
   its unchanged merge-base application-manifest declaration regenerates the exact
   final-head block in a bounded, network-denied scratch worktree. Marker lines,

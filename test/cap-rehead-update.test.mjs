@@ -49,6 +49,7 @@ function repository(t) {
         const [from, to] = path.split('/compare/')[1].split('...');
         const range = commits(from, to);
         return { commits: range, total_commits: range.length, files: [],
+          status: from === to ? 'identical' : git('merge-base', from, to) === from ? 'ahead' : 'diverged',
           merge_base_commit: { sha: git('merge-base', from, to) } };
       }
       throw new Error(`Unexpected offline read: ${path}`);
@@ -82,7 +83,7 @@ test('hammer history, including a later builder tip, selects squash using existi
   assert.equal(await capReheadUpdateMode(f.args(f.originalBase, tip)), 'squash');
 });
 
-test('merge-main strands primary evidence; one builder squash preserves the tree and clears it', async t => {
+test('merge-main retains hammer evidence; one builder squash preserves the tree and clears it', async t => {
   const f = repository(t);
   const hammer = f.commitFile('repair.txt', 'repair\n',
     'Synthetic repair\n\nWorker-Class: hammer\nWorker-Ticket: HAM\nClosed-By: hammer (adversarial-pipe-mode)');
@@ -93,10 +94,11 @@ test('merge-main strands primary evidence; one builder squash preserves the tree
   const merged = f.git('rev-parse', 'HEAD');
   assert.equal(f.git('merge-base', currentMain, f.builder), f.originalBase);
   assert.equal(f.git('merge-base', currentMain, merged), currentMain);
-  const stranded = await fetchPrimaryChange(f.args(currentMain, merged), options);
-  assert.equal(stranded.hasHammerCommits, null);
-  assert.equal(stranded.reason, 'primary and final merge bases are missing or differ');
-  assert.equal(checkPrimaryChange(stranded, merged).reason, 'primary-change-unknown');
+  const integrated = await fetchPrimaryChange(f.args(currentMain, merged), options);
+  assert.equal(integrated.hasHammerCommits, true);
+  assert.equal(integrated.primaryHead, f.builder);
+  assert.equal(integrated.mergeBase, f.originalBase);
+  assert.equal(integrated.comparisonMergeBase, currentMain);
   assert.equal(await capReheadUpdateMode(f.args(currentMain, merged)), 'squash');
 
   f.git('reset', '--hard', currentMain);

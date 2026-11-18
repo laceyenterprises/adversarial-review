@@ -1444,9 +1444,27 @@ async function fetchPrimaryChangeHistory({ repo, prNumber, headSha, get, rootDir
     // rebased author commits. A hammer-authored trailer cannot narrow it.
     const primaryHead = first.parents[0].sha;
     const primary = await read(`repos/${repo}/compare/${pr.base.sha}...${primaryHead}`);
-    const final = history;
+    let final = history;
     const mergeBase = primary.merge_base_commit?.sha;
-    if (!SHA.test(mergeBase || '') || final.merge_base_commit?.sha !== mergeBase) return unknown('primary and final merge bases are missing or differ');
+    const comparisonMergeBase = history.merge_base_commit?.sha;
+    if (!SHA.test(mergeBase || '') || !SHA.test(comparisonMergeBase || '')) {
+      return unknown('primary or final merge base is missing');
+    }
+    if (comparisonMergeBase !== mergeBase) {
+      // Integrating main advances the PR comparison base, but cannot move the
+      // protected author boundary. Prove both ancestry edges before reading
+      // the final tree in the author's original merge-base coordinates.
+      const baseAncestry = await metadata(`repos/${repo}/compare/${mergeBase}...${comparisonMergeBase}`);
+      const authorAncestry = await metadata(`repos/${repo}/compare/${primaryHead}...${headSha}`);
+      if (!['ahead', 'identical'].includes(baseAncestry.status)
+        || baseAncestry.merge_base_commit?.sha !== mergeBase
+        || !['ahead', 'identical'].includes(authorAncestry.status)
+        || authorAncestry.merge_base_commit?.sha !== primaryHead) {
+        return unknown('base integration is outside protected author ancestry');
+      }
+      final = await read(`repos/${repo}/compare/${mergeBase}...${headSha}`);
+      if (final.merge_base_commit?.sha !== mergeBase) return unknown('projected final merge base differs');
+    }
     const renameProofs = [];
     const primaryPathChanges = [];
     let renameProofReadFailed = false;
@@ -1649,6 +1667,7 @@ async function fetchPrimaryChangeHistory({ repo, prNumber, headSha, get, rootDir
       testChanges = testRegionsChanged(primaryChanges, finalChanges);
     } catch { /* Retain raw evidence; the evaluator fails closed on unsupported patches. */ }
     return { headSha, hasHammerCommits: true, primaryHead, mergeBase, ...laneHistory,
+      ...(comparisonMergeBase !== mergeBase ? { comparisonMergeBase } : {}),
       ...(pr.base.ref ? { baseSha: pr.base.sha, baseRef: pr.base.ref } : {}),
       ...(builderBoundary ? { builderBoundary } : {}),
       // Retain the trusted range for rename proof and refusal attribution.

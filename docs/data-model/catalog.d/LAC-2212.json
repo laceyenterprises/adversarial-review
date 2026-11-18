@@ -1,0 +1,22 @@
+{
+  "version": 1,
+  "entries": [
+    {
+      "id": "primary-change-history",
+      "title": "Primary Change History",
+      "path": "docs/data-model/primary-change-history.md",
+      "store": "<runtime rootDir>/data/primary-change-history/",
+      "schemaSurface": "src/ama/primary-change-store.mjs",
+      "relatedSchemaSurfaces": [
+        "src/ama/history-reader.mjs",
+        "src/ama/primary-change.mjs"
+      ],
+      "owner": "AMA canonical daemon data owner",
+      "comparisonCoordinates": {
+        "mergeBase": "Protected author comparison base for primaryFiles and finalFiles",
+        "comparisonMergeBase": "Optional final/live-base merge base after verified main integration; binds completed history to key position 4",
+        "authority": "Requires protected-base ancestry, author-head ancestry and exact projected merge base; does not authorize a reversal"
+      }
+    }
+  ]
+}

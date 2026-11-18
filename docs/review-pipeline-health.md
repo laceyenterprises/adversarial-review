@@ -746,7 +746,10 @@ columns produce NULL values; missing pass identity columns suppress the join.
 Both are listed in `missing_fields`. A confirmed absent store is
 `review_store`, distinct from an unreadable dependency. Pages are limited to
 100, offsets to 10000, with exact repository filtering before pagination.
-Only `passes` accepts `since` and `ended_since`; malformed or unsupported
+Both `passes` and `reviews` accept `since`, filtering `started_at` and
+`reviewed_at` respectively with an inclusive timestamp cutoff. Only `passes`
+accepts `ended_since`. A `since` cutoff requires its timestamp column; an absent
+column fails as `review time schema unavailable`. Malformed or unsupported
 selectors fail as `invalid review selector` before the store is opened.
 A complete page conveys neither global absence nor mutation authority.
 

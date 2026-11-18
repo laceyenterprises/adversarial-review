@@ -3,6 +3,7 @@ import { readPrTenure } from './pr-tenure.mjs';
 import { prepareRemediationBuilder, readRemediationBuilderEvidence, stopRecoveredBuilderRemediator } from './remediation-builder-authorship.mjs';
 import { cleanupServiceCodexAuth } from './codex-service-home.mjs';
 import { withRepositoryStateCycle } from './repository-state-lock.mjs';
+import { withFollowUpJobLock } from './follow-up-job-write.mjs';
 import { ensureWorkerRegistryReady, resolveRemediationModel } from './adapters/agent-runtime/local/remediation.mjs';
 import { prepareWorkerObservationSession } from './dispatch-read-client.mjs';
 import { recoverInfrastructureChecks } from './ci-recovery.mjs';
@@ -1295,75 +1296,27 @@ async function postRemediationCommentWithCapture({
   return result;
 }
 
-// Resolve the live PR lifecycle for a job, swallowing any errors so the
-// merge gate degrades to "proceed with existing behavior" instead of
-// halting the whole pipeline when GitHub or the SQLite mirror is down.
-// Logs at error level so the visibility regression isn't silent — ops
-// can still tell the difference between "merge gate didn't fire" and
-// "merge gate couldn't fire because the lookup failed".
-async function failFollowUpJobForHqCancel({
-  rootDir,
-  job,
-  jobPath,
-  worker,
-  workerState,
-  failedAt,
-  cancellation,
-  action,
-  postCommentImpl,
-  now,
-  log,
-}) {
-  const failure = {
-    code: worker?.dispatchMode === 'hq' ? 'hq-dispatch-cancel-failed' : 'worker-cancellation-failed',
-    message: [worker?.dispatchMode === 'hq' ? `Failed to cancel HQ remediation dispatch ${worker?.dispatchId || '(missing dispatchId)'} before moving the job to ${action}.`
-      : `Failed to signal remediation worker pgid ${worker?.processGroupId ?? worker?.processId ?? '(unknown)'} before moving the job to ${action}.`,
-      cancellation?.error || 'hq dispatch cancel failed',
-    ].join('\n'),
-  };
-  const { commentDelivery } = buildReconcileCommentDelivery({
-    job,
-    worker,
-    action: 'failed',
-    failure,
-    now,
+// Cancellation failure is not evidence that execution ended. Keep the same
+// in-progress owner eligible for status/reply reconciliation on the next tick.
+export function retainFollowUpJobAfterCancelFailure({ rootDir, job, jobPath, worker, cancellation, action, now, log }) {
+  return withFollowUpJobLock(join(rootDir, 'data', 'follow-up-jobs'), () => {
+    let current;
+    try { current = readFollowUpJob(jobPath); } catch (error) {
+      if (error.code !== 'ENOENT') throw error;
+      return { action: 'skipped', reason: 'cancellation-custody-changed', job, jobPath };
+    }
+    if (current.status !== 'in_progress' || current.remediationWorker?.state !== 'spawned'
+      || ['dispatchMode', 'dispatchId', 'launchRequestId', 'processId', 'spawnedAt']
+        .some(key => current.remediationWorker?.[key] !== worker?.[key])) {
+      return { action: 'skipped', reason: 'cancellation-custody-changed', job: current, jobPath };
+    }
+    const reason = worker?.dispatchMode === 'hq' ? 'hq-dispatch-cancel-failed' : 'worker-cancellation-failed';
+    const retained = { ...current, remediationWorker: { ...current.remediationWorker, cancellation,
+      cancellationHold: { action, reason, attemptedAt: now() } } };
+    writeFollowUpJob(jobPath, retained);
+    log.warn?.(`[follow-up-remediation] cancellation custody retained job=${job.jobId} reason=${reason}`);
+    return { action: 'active', reason, job: retained, jobPath };
   });
-  const failed = markFollowUpJobFailed({
-    rootDir,
-    jobPath,
-    failedAt,
-    failureCode: failure.code,
-    error: new Error(failure.message),
-    remediationWorker: {
-      ...workerState,
-      state: 'failed',
-      cancellation,
-    },
-    failure: {
-      hqDispatchCancel: cancellation,
-    },
-    commentDelivery,
-  });
-
-  await postReconcileOutcomeCommentSafe({
-    rootDir,
-    jobPath: failed.jobPath,
-    job: failed.job,
-    worker,
-    action: 'failed',
-    failure,
-    postCommentImpl,
-    alreadyTerminal: failed.alreadyTerminal,
-    now,
-    log,
-  });
-
-  return {
-    action: 'failed',
-    reason: failure.code,
-    job: failed.job,
-    jobPath: failed.jobPath,
-  };
 }
 
 async function reconcileFollowUpJob(args = {}) {
@@ -1531,16 +1484,13 @@ async function reconcileFollowUpJobWithinRepositoryCycle({
         execFileImpl,
       });
       if (!cancellation.cancelled) {
-        return failFollowUpJobForHqCancel({
+        return retainFollowUpJobAfterCancelFailure({
           rootDir,
           job,
           jobPath,
           worker,
-          workerState,
-          failedAt: lifecycleStoppedAt,
           cancellation,
           action: lifecycleStop.stopCode,
-          postCommentImpl,
           now,
           log,
         });
@@ -1554,9 +1504,8 @@ async function reconcileFollowUpJobWithinRepositoryCycle({
         execFileImpl,
       });
       if (!cancellationSettlesStop(cancellation)) {
-        log.warn?.(`[follow-up-remediation] lifecycle cancellation failed job=${job.jobId} reason=${cancellation.error}`);
-        return failFollowUpJobForHqCancel({ rootDir, job, jobPath, worker, workerState, failedAt: lifecycleStoppedAt,
-          cancellation, action: lifecycleStop.stopCode, postCommentImpl, now, log }); }
+        return retainFollowUpJobAfterCancelFailure({ rootDir, job, jobPath, worker,
+          cancellation, action: lifecycleStop.stopCode, now, log }); }
       workerState.cancellation = cancellation;
     }
     if (['stale-review-head', 'stale-drift'].includes(lifecycleStop.stopCode)) {
@@ -1647,6 +1596,10 @@ async function reconcileFollowUpJobWithinRepositoryCycle({
         worker,
         execFileImpl,
       });
+      if (!cancellation.cancelled) {
+        return retainFollowUpJobAfterCancelFailure({ rootDir, job, jobPath, worker, cancellation,
+          action: 'manual-inspection-required', now, log });
+      }
       workerState.cancellation = cancellation;
       failureMetadata.hqDispatchCancel = cancellation;
     }

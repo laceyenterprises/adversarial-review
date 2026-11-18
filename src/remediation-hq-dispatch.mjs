@@ -269,11 +269,21 @@ async function cancelHqDispatch({
         env: {
           ...env,
           HQ_ROOT: hqRoot,
+          // The accepted launch saved its submitting session. Reconciliation
+          // may run in a different process from submission; do not lose that
+          // caller at this boundary or invent an operator/owner identity.
+          ...(!String(env.HQ_PARENT_SESSION || '').trim() && worker?.hqParentSession
+            ? { HQ_PARENT_SESSION: worker.hqParentSession } : {}),
         },
         maxBuffer: 5 * 1024 * 1024,
       });
+      let receipt;
+      try { receipt = JSON.parse(result?.stdout || ''); } catch { /* No termination proof. */ }
+      const confirmed = receipt?.ok === true && receipt?.cancelApplied === true
+        && receipt?.requestedAction !== 'cancel';
       return {
-        cancelled: true,
+        cancelled: confirmed,
+        ...(!confirmed ? { error: 'hq-cancellation-not-confirmed', retryable: false } : {}),
         attempts: attempt + 1,
         exitCode: 0,
         stdout: String(result?.stdout || '').trim() || null,

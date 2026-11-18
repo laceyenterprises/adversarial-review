@@ -31,13 +31,13 @@ test('cancelHqDispatch retries transient shell failures before succeeding', asyn
       calls.push({ command, args, options });
       const nextError = errors.shift();
       if (nextError) throw nextError;
-      return { stdout: 'cancelled\n', stderr: '' };
+      return { stdout: '{"ok":true,"cancelApplied":true}\n', stderr: '' };
     },
   });
 
   assert.equal(result.cancelled, true);
   assert.equal(result.attempts, 3);
-  assert.equal(result.stdout, 'cancelled');
+  assert.equal(JSON.parse(result.stdout).cancelApplied, true);
   assert.deepEqual(sleeps, [5, 9]);
   assert.deepEqual(
     calls.map((call) => [call.command, call.args, call.options.env.HQ_ROOT]),

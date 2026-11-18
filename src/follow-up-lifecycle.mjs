@@ -2,6 +2,34 @@ import { staleDriftStopDecision } from './stale-drift.mjs';
 import { existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { getReviewRow, openReviewStateDb } from './review-state.mjs';
+import { resolveDaemonWorkerIdentityFromHeadAttestation, readHeadAttestationChainForPr } from './daemon-worker-identity.mjs';
+
+// HEAD is mutable during a native rebase/amend. A previously published head
+// remains in HEAD's reflog even before its produced attestation is visible.
+// Remote-tracking reflogs are deliberately excluded: a fetch is not custody.
+async function wasWorkerHead(execFileImpl, workspaceDir, sha) {
+  const deadline = performance.now() + 5000;
+  const { stdout } = await execFileImpl('git', ['-C', workspaceDir, 'reflog', 'show', '--max-count=129', '--format=%H', 'HEAD'],
+    { timeout: 5000, maxBuffer: 1024 * 1024 });
+  const entries = String(stdout || '').trim().split(/\s+/u);
+  const tips = [...new Set(entries)];
+  if (!tips.length || tips.some(tip => !/^[a-f0-9]{40}$/iu.test(tip))) {
+    throw new Error('worker HEAD history unavailable');
+  }
+  if (tips.includes(sha)) return true;
+  if (entries.length >= 129) throw new Error('worker HEAD history exceeds probe budget');
+  for (const tip of tips) {
+    const timeout = Math.floor(deadline - performance.now());
+    if (timeout <= 0) throw new Error('worker HEAD history probe timed out');
+    try {
+      await execFileImpl('git', ['-C', workspaceDir, 'merge-base', '--is-ancestor', sha, tip], { timeout });
+      return true;
+    } catch (error) {
+      if (error.code !== 1) throw error;
+    }
+  }
+  return false;
+}
 
 async function resolveJobPRLifecycleSafe({
   rootDir,
@@ -152,12 +180,26 @@ async function activeRemediationStopDecision({
         } catch (err) {
           // Exit 1 proves non-ancestry; command errors leave ownership unknown.
           if (err?.code !== 1) stop = null;
+          else if (await wasWorkerHead(execFileImpl, workspaceDir, lifecycle.headSha)) stop = null;
         }
       }
     } catch {
       // An unreadable workspace cannot prove external supersession.
       stop = null;
     }
+  }
+  if (stop?.stopCode === 'stale-review-head' && job?.remediationWorker?.dispatchMode === 'hq') {
+    const worker = job.remediationWorker;
+    const identity = await resolveDaemonWorkerIdentityFromHeadAttestation({
+      repo: job.repo, prNumber: job.prNumber, currentHeadSha: lifecycle.headSha,
+      hqRoot: worker.hqRoot, rootDir,
+      readHeadAttestationChainForPrImpl: options => readHeadAttestationChainForPr({
+        ...options, execFileImpl, logger: { warn() {} },
+      }),
+    });
+    if ((identity.ok && identity.launchRequestId === worker.launchRequestId
+      && identity.workerClass === worker.workerClass)
+      || identity.reason === 'head-attestation-chain-read-failed') stop = null;
   }
   const currentRound = Number(job?.remediationPlan?.currentRound || 0);
   const maxRounds = Number(job?.remediationPlan?.maxRounds || 0);

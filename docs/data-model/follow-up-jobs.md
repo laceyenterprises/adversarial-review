@@ -1343,3 +1343,31 @@ environment. The watcher's `ama.closure_blocker` line for
 `remediation-job-missing` carries `remediationHold: { lane, reason, capSource,
 holdUntil, modeRefusals? }` read from the latest held job's last
 `remediator-fallback-resolution` retry entry; it adds no new stored field.
+
+
+## Cancellation custody (LAC-2218)
+
+Accepted HQ dispatch descriptors already persist `hqParentSession`. Cancellation
+uses that established caller when the monitor lacks `HQ_PARENT_SESSION`, without
+changing HQ actor precedence or owner authorization. No identity credential is
+stored or minted by this change.
+
+On an unsuccessful lifecycle cancellation, `remediationWorker.cancellation`
+retains the latest transport receipt and additive `cancellationHold` records
+`{ action, reason, attemptedAt }`. Reasons are `hq-dispatch-cancel-failed` or
+`worker-cancellation-failed`; `action` is the intended lifecycle stop code or
+`manual-inspection-required`, and `attemptedAt` is UTC. Status stays
+`in_progress`, worker state stays `spawned`, the same job path and round remain,
+and no terminal failure/comment or successor is created. HQ's exit-zero pending
+cancel intent and missing/malformed receipts are also unsuccessful termination evidence.
+The hold writer locks and re-reads current status and worker identity: it preserves
+newer observations and never recreates a moved terminal job or updates a changed owner. Later authoritative
+terminal status/reply reconciliation settles normally; the last hold can remain
+as diagnostic history in a terminal record. Older records without this optional
+field need no migration. Original failed incident records are never rewritten.
+
+HEAD history and exact produced-attestation reads are transient custody evidence,
+not durable publication or completion proof. Remote-tracking reflogs cannot
+supply own-work evidence. Missing/unreadable workspace/history and unavailable
+HQ attestation reads retain the existing worker. Existing completion, rereview,
+round budgets and merge predicates still apply independently.

@@ -43,6 +43,7 @@ import {
   digestWorkerFinalMessage,
   dispatchRemediationViaHq,
   handleRemediationTelemetryEvent,
+  retainFollowUpJobAfterCancelFailure,
   installWorkerProvenanceHook,
   auditWorkspaceForContamination,
   isDrainQueueIdle,
@@ -306,6 +307,7 @@ import {
   createFollowUpJob as createJob,
   getFollowUpJobDir,
   markFollowUpJobSpawned,
+  markFollowUpJobStopped,
   readFollowUpJob,
   summarizePRRemediationLedger,
   writeFollowUpJob,
@@ -7854,7 +7856,7 @@ test('reconcileFollowUpJob reaps over-cap HQ remediators when dispatch status is
         throw err;
       }
       if (args[1] === 'cancel') {
-        return { stdout: 'cancelled', stderr: '' };
+        return { stdout: '{"ok":true,"cancelApplied":true}', stderr: '' };
       }
       throw new Error(`unexpected hq call: ${args.join(' ')}`);
     },
@@ -10607,7 +10609,7 @@ test('reconcileFollowUpJob cancels an active HQ dispatch before stopping on PR l
         return { stdout: JSON.stringify({ status: 'running', health: 'healthy' }), stderr: '' };
       }
       if (command === process.env.HQ_BIN && args[0] === 'dispatch' && args[1] === 'cancel') {
-        return { stdout: JSON.stringify({ status: 'cancelled' }), stderr: '' };
+        return { stdout: JSON.stringify({ ok: true, cancelApplied: true, currentStatus: 'canceled' }), stderr: '' };
       }
       throw new Error(`unexpected command: ${command} ${args.join(' ')}`);
     },
@@ -10713,6 +10715,7 @@ test('reconcileFollowUpJob cancels an active worker when a fetched external head
     prNumber: 81, headSha: 'diverged-head',
     execFileImpl: async (command, args) => {
       if (args.includes('rev-parse')) return { stdout: 'diverged-head\n' };
+      if (args.includes('reflog')) return { stdout: `${'a'.repeat(40)}\n` };
       throw Object.assign(new Error('not an ancestor'), { code: 1 });
     },
   });
@@ -10750,11 +10753,12 @@ test('reconcileFollowUpJob stops the job when the PID cannot be confirmed as our
   assert.equal(result.job.remediationPlan.stop.code, 'stale-review-head');
 });
 
-test('reconcileFollowUpJob fails, never wedges active, when signalling a live worker fails', async (t) => {
+test('reconcileFollowUpJob retains custody when signalling a live worker fails', async (t) => {
   const result = await reconcileExternalHeadWithCancel(t, 92, { signalled: false, error: 'kill-failed' });
-  assert.notEqual(result.action, 'active');
-  assert.equal(result.job.status, 'failed');
-  assert.equal(result.job.failure?.code ?? result.job.remediationPlan?.failure?.code, 'worker-cancellation-failed');
+  assert.equal(result.action, 'active');
+  assert.equal(result.job.status, 'in_progress');
+  assert.equal(result.job.remediationWorker.state, 'spawned');
+  assert.equal(result.job.remediationWorker.cancellationHold.reason, 'worker-cancellation-failed');
 });
 
 test('reconcileFollowUpJob keeps an active worker when git cannot read its workspace', async (t) => {
@@ -13466,3 +13470,88 @@ function consumeFollowUpJobsUntilCapacity(options) {
     execFileSyncImpl: serviceFixtureExec, ...options,
   });
 }
+
+test('LAC-2218 refused HQ lifecycle cancellation retains custody, then terminal status settles without cancel or false failure comment', async t => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'lac-2218-custody-'));
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  const hqRoot = path.join(rootDir, 'hq');
+  const { claimed } = makeQueuedJob(rootDir, { prNumber: 2218, revisionRef: 'reviewed-head' });
+  const spawned = markFollowUpJobSpawned({ jobPath: claimed.jobPath, spawnedAt: '2026-04-21T10:01:00.000Z',
+    worker: { model: 'codex', dispatchMode: 'hq', dispatchId: 'lrq_fixture_2218',
+      launchRequestId: 'lrq_fixture_2218', hqRoot, state: 'spawned', hqParentSession: 'session:fixture:owner' } });
+  let cancels = 0;
+  let comments = 0;
+  let terminal = false;
+  let runtimeCap = false;
+  const reconcile = (job, jobPath) => withHqRootEnv(hqRoot, () => reconcileFollowUpJob({ rootDir, job, jobPath,
+    now: () => runtimeCap ? '2026-04-21T18:15:00.000Z' : '2026-04-21T10:15:00.000Z',
+    resolvePRLifecycleImpl: async () => ({ source: 'live', prState: runtimeCap ? 'open' : 'closed', headSha: 'reviewed-head' }),
+    postCommentImpl: async () => { comments += 1; return { posted: true }; },
+    log: { warn() {}, log() {}, error() {} },
+    execFileImpl: async (_bin, args) => {
+      if (args[1] === 'status') return { stdout: JSON.stringify({ status: terminal ? 'succeeded' : 'running' }) };
+      if (args[1] === 'cancel') {
+        cancels += 1;
+        throw Object.assign(new Error('owner refusal'), { code: 1, stdout: '{"ok":false}' });
+      }
+      throw new Error('unexpected child invocation');
+    },
+  }));
+  const held = await reconcile(spawned.job, spawned.jobPath);
+  assert.equal(held.action, 'active');
+  assert.equal(held.job.status, 'in_progress');
+  assert.equal(held.job.remediationWorker.state, 'spawned');
+  assert.equal(held.job.remediationWorker.cancellation.cancelled, false);
+  assert.equal(held.job.remediationWorker.cancellationHold.reason, 'hq-dispatch-cancel-failed');
+  assert.equal(existsSync(held.jobPath), true);
+  assert.equal(comments, 0);
+  runtimeCap = true;
+  const capped = await reconcile(held.job, held.jobPath);
+  assert.equal(capped.action, 'active');
+  assert.equal(capped.job.remediationWorker.state, 'spawned');
+  assert.equal(capped.job.remediationWorker.cancellationHold.action, 'manual-inspection-required');
+  assert.equal(comments, 0);
+  runtimeCap = false;
+  terminal = true;
+  const stopped = await reconcile(held.job, held.jobPath);
+  assert.equal(stopped.action, 'stopped');
+  assert.equal(stopped.job.remediationPlan.stop.code, 'operator-closed-pr');
+  assert.equal(cancels, 2);
+  assert.equal(comments, 0);
+});
+
+
+test('LAC-2218 cancellation receipt commit rechecks current custody and preserves concurrent observations', t => {
+  for (const change of ['progress', 'owner', 'terminal']) {
+    for (let run = 0; run < 5; run += 1) {
+      const rootDir = mkdtempSync(path.join(tmpdir(), 'lac-2218-cas-'));
+      t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+      const { claimed } = makeQueuedJob(rootDir, { prNumber: 2218 });
+      const spawned = markFollowUpJobSpawned({ jobPath: claimed.jobPath, spawnedAt: '2026-04-21T10:01:00.000Z',
+        worker: { model: 'codex', dispatchMode: 'hq', dispatchId: 'lrq_fixture_cas', launchRequestId: 'lrq_fixture_cas', state: 'spawned' } });
+      const worker = spawned.job.remediationWorker;
+      // Controlled interleaving: cancellation used the snapshot above; another
+      // writer commits progress, changes the owner or terminalizes before its
+      // unsuccessful receipt can be recorded.
+      if (change === 'terminal') {
+        markFollowUpJobStopped({ rootDir, jobPath: spawned.jobPath, stoppedAt: '2026-04-21T10:10:00.000Z',
+          sourceStatus: 'in_progress', stopCode: 'operator-stop', stopReason: 'fixture competing terminal writer',
+          commentDeliveryExemption: 'interrupted-without-reconciled-reply' });
+      } else {
+        writeFollowUpJob(spawned.jobPath, { ...spawned.job, concurrentObservation: run,
+          remediationWorker: { ...worker, hqLaunch: { status: 'running', observedAt: '2026-04-21T10:11:00.000Z' },
+            ...(change === 'owner' ? { dispatchId: 'lrq_new_owner' } : {}) } });
+      }
+      const held = retainFollowUpJobAfterCancelFailure({ rootDir, job: spawned.job, jobPath: spawned.jobPath, worker,
+        cancellation: { cancelled: false }, action: 'stale-review-head', now: () => '2026-04-21T10:12:00.000Z', log: { warn() {} } });
+      assert.equal(held.action, change === 'progress' ? 'active' : 'skipped');
+      if (change === 'terminal') assert.equal(existsSync(spawned.jobPath), false, 'must not resurrect terminalized job');
+      else {
+        const current = readFollowUpJob(spawned.jobPath);
+        assert.equal(current.concurrentObservation, run);
+        assert.equal(current.remediationWorker.hqLaunch.observedAt, '2026-04-21T10:11:00.000Z');
+        assert.equal(current.remediationWorker.cancellation?.cancelled, change === 'progress' ? false : undefined);
+      }
+    }
+  }
+});

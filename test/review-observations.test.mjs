@@ -117,7 +117,7 @@ test('real producer schema: scoped pages, latest completed pass, nullable closeo
     assert.equal(read({ kind: 'passes', since: '2030-01-01T00:00:00Z' }).items.length, 0);
     assert.throws(() => read({ kind: 'passes', sql: 'select 1' }), /selector/); // negative fixture
     for (const selector of [undefined, null, { kind: 'passes', ended_since: 123 },
-      { kind: 'passes', ended_since: 'bad date' }, { kind: 'reviews', since: '2026-10-01T00:00:00Z' },
+      { kind: 'passes', ended_since: 'bad date' }, { kind: 'reviews', since: 'bad date' },
       { kind: 'reviews', ended_since: '2026-10-01T00:00:00Z' }]) {
       assert.throws(() => read(selector), { message: 'invalid review selector' });
     }
@@ -176,6 +176,42 @@ test('table-less stores are unavailable; a real table retains exact column drift
       CREATE TABLE pr_merge_closeouts(repo TEXT, pr_number INTEGER,
         closeout_body_md TEXT, closeout_posted_at TEXT)`);
     assert.deepEqual(read('reviews').missing_fields, ['posted_at']);
+  } finally {
+    db.close();
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
+test('reviews since cutoff bounds a store larger than the reader page cap', () => {
+  const rootDir = mkdtempSync(join(tmpdir(), 'review-since-'));
+  mkdirSync(join(rootDir, 'data'));
+  const db = new Database(join(rootDir, 'data/reviews.db'));
+  try {
+    ensureReviewStateSchema(db);
+    const insert = db.prepare(`INSERT INTO reviewed_prs(repo, pr_number, review_status, pr_state, reviewed_at, reviewer)
+      VALUES (?, ?, 'posted', 'open', ?, 'fixture')`);
+    // 10,150 rows exceed the reader's 101 pages x 100 rows; the last 7 are recent.
+    db.exec('BEGIN');
+    for (let number = 1; number <= 10_150; number += 1) {
+      insert.run('Example/Repo', number, number > 10_143 ? `2026-11-18T0${number - 10_144}:00:00+00:00` : '2026-01-01T00:00:00Z');
+    }
+    db.exec('COMMIT');
+    const read = selector => readReviewObservations({ rootDir, selector, repositories: ['example/repo'] });
+    const pages = selector => {
+      const items = [];
+      let offset = 0;
+      for (let page = 0; page < 101; page += 1) {
+        const reading = read({ ...selector, limit: 100, offset });
+        items.push(...reading.items);
+        if (reading.complete) return items;
+        offset = reading.next_offset;
+      }
+      return null;
+    };
+    assert.equal(pages({ kind: 'reviews' }), null, 'unbounded read cannot finish inside the page cap');
+    const recent = pages({ kind: 'reviews', since: '2026-11-18T00:00:00Z' });
+    assert.deepEqual(recent.map(row => row.pr_number), [10150, 10149, 10148, 10147, 10146, 10145, 10144]);
+    assert.equal(pages({ kind: 'reviews', since: '2026-11-18T05:30:00Z' }).length, 1);
   } finally {
     db.close();
     rmSync(rootDir, { recursive: true, force: true });

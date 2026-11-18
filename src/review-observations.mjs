@@ -15,7 +15,7 @@ export function readReviewObservations({ rootDir, selector, repositories }) {
   const { kind, since, ended_since: endedSince, limit = 100, offset = 0 } = selector;
   if (!Object.hasOwn(FIELDS, kind) || Object.keys(selector).some(key => !['kind', 'since', 'ended_since', 'limit', 'offset'].includes(key)) ||
       !Number.isInteger(limit) || limit < 1 || limit > 100 || !Number.isInteger(offset) || offset < 0 || offset > 10000 ||
-      (kind === 'reviews' && (since !== undefined || endedSince !== undefined)) ||
+      (kind === 'reviews' && endedSince !== undefined) ||
       (since !== undefined && (typeof since !== 'string' || !Number.isFinite(Date.parse(since)))) ||
       (endedSince !== undefined && (typeof endedSince !== 'string' || !Number.isFinite(Date.parse(endedSince))))) throw new Error('invalid review selector');
   if (!Array.isArray(repositories) || !repositories.length || repositories.length > 100 ||
@@ -40,9 +40,11 @@ export function readReviewObservations({ rootDir, selector, repositories }) {
     const args = repositories.map(repo => repo.toLowerCase());
     let where = `lower(repo) IN (${args.map(() => '?').join(',')})`;
     if (since !== undefined) {
-      if (kind !== 'passes' || !cols.has('started_at')) throw new Error('review time schema unavailable');
+      // A review row's age is its last review time; a pass's is its start time.
+      const sinceColumn = kind === 'passes' ? 'started_at' : 'reviewed_at';
+      if (!cols.has(sinceColumn)) throw new Error('review time schema unavailable');
       // Date arithmetic accepts both producer Z timestamps and old offset timestamps.
-      where += ' AND julianday(started_at) >= julianday(?)';
+      where += ` AND julianday(${sinceColumn}) >= julianday(?)`;
       args.push(since);
     }
     if (endedSince !== undefined) {

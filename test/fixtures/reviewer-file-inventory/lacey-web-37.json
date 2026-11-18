@@ -1,0 +1,39 @@
+{
+  "repo": "laceyenterprises/lacey-web",
+  "pr": 37,
+  "reviewId": "PRR_kwDOVWXd688AAAABYqTkJg",
+  "submittedAt": "2026-11-18T02:27:51Z",
+  "headSha": "f1adad0fd248d9ae7cf0dd40fc7d4cf7a4adde8c",
+  "treeEntryCount": 806,
+  "treeTruncated": false,
+  "presentEntries": [
+    {
+      "path": "src/migrations/20261118_013000_studio_widgets.json",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "bdb98fe854c4c50f5866188a811ead38ba45c3e8"
+    },
+    {
+      "path": "src/migrations/20261118_013000_studio_widgets.ts",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "d900a8e6b646b2a0d9682c2e68bbdcb191f9b3c2"
+    },
+    {
+      "path": "src/widgets/kit/source-check.mjs",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "95c1311e52e054656dfa2310e77ce84ec192608f"
+    }
+  ],
+  "validatorBlobSha": "9f7e03dec391403420c5f3c110a2f53a53343760",
+  "validatorExcerpts": [
+    "const snapshot = \"src/migrations/20261118_013000_studio_widgets.json\";",
+    "  writeFileSync(catalogPath, `${JSON.stringify(catalog, null, 2)}\\n`);",
+    "  assert.deepEqual(JSON.parse(readFileSync(catalogPath, \"utf8\")), catalog);"
+  ],
+  "reviewExcerpts": [
+    "- **Problem:** The component imports `requiredChecks` from `\"../../../widgets/kit/source-check.mjs\"`, but `source-check.mjs` is not present in the repository or declared in the PR scope expansions (which only adds `src/widgets/kit/check.mjs`).",
+    "- Remove `docs/data-model/catalog.json` from the PR diff to preserve the sharded catalog contract and avoid merge contention."
+  ]
+}

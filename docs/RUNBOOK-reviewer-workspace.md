@@ -202,6 +202,21 @@ requires no config flip or new smoke command. See the
 
 Each one-shot `reviewer.mjs` process gives its model a read-only `git archive` snapshot of the repository's current default checkout HEAD. The PR diff is supplied separately. This snapshot is **not** the PR head or necessarily its merge base. The prompt names it accordingly.
 
+Production review context separately includes a file inventory fetched from the
+requested full commit SHA through the Git trees API. Linked-document reads and
+head-scoped context use that requested review head even if PR metadata advances.
+The inventory prioritizes changed
+paths within a 16 KiB path-line budget and repeats the same evidence in every
+chunk. Capped, API-truncated, submodule-containing or unavailable inventories
+cannot establish absence by omission. A complete inventory supports literal
+path membership checks; it does not prove file contents or validator policy.
+Missing files in the default-checkout snapshot, partial diffs, rename records,
+and historical PR scope prose cannot prove PR-head absence. Reviewers must
+verify absence and app validator contracts at the exact reviewed head before
+reporting them, while retaining independently actionable findings. The offline
+fixture and separate deployment acceptance procedure are recorded in
+[`changes/LAC-2215.md`](changes/LAC-2215.md).
+
 `prepareReviewerSnapshot` rejects a symbolic link that resolves outside that snapshot. Such a link is in the **base checkout**, so the reviewer queues an operator alert, exits with an infrastructure error, and posts no verdict about the PR. Repair the base checkout through its normal PR and deploy path, then retrigger the review. Do not ask the PR author to remove a link they did not introduce. Archive failures and validation failures also leave the PR without a synthetic review.
 
 Reviewer snapshots and workspace audits use `ADVERSARIAL_REVIEW_WORKSPACE_STATE_DIR` when set. If the normal `ADVERSARIAL_REVIEW_STATE_DIR` is already outside the source checkout, they use it. Otherwise they use `$HQ_ROOT/adversarial-review/reviewer-workspace`, falling back to `~/.agent-os/adversarial-review/reviewer-workspace` when `HQ_ROOT` is unset. The review ledger and fence state keep their existing location. The reviewer refuses a workspace state directory inside the source checkout.

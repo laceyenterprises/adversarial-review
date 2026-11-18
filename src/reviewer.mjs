@@ -75,6 +75,7 @@ import {
 import { isPackLockhashInputError, resolveReviewedPackLockhash } from './pack-lockhash.mjs';
 import { resolveReviewerAppToken } from './reviewer-broker-refresh.mjs';
 import { fetchPRContext, pinReviewerGhIdentity, refreshReviewerTokensForSideCalls } from './reviewer-context-auth.mjs';
+import { loadReviewerFileInventory } from './reviewer-file-inventory.mjs';
 import { preflightGeminiReviewerToken } from './gemini-reviewer-preflight.mjs';
 import { clearPendingReviewsForSelf } from './reviewer-pre-write.mjs';
 import {
@@ -1949,6 +1950,8 @@ async function main() {
       repo, baseRef: prContext?.baseRefOid || prContext?.baseRefName, log: console,
     });
     const extraContext = await buildReviewerExtraContext({
+      fileInventoryContext: await loadReviewerFileInventory({ repo, headSha: reviewerHeadSha, diff }),
+      reviewedHeadSha: reviewerHeadSha,
       repo,
       prNumber,
       prContext,

@@ -958,6 +958,12 @@ new PR
   At that threshold it uses the existing bounded `pending-upstream` recovery.
   It never isolates the identity or records a credential outage; route selection
   does not select an auth fallback for it. Health reports its own failure class.
+  Failed pass-journal entries with this class also spend no hard review-attempt
+  ceiling units: the durable cascade deadline owns retry pacing (1, 2, 4, 8,
+  then 15 minutes). Otherwise a recovered CLI or newly selected reviewer could
+  win the claim and immediately release it at a fuse spent before any reviewer
+  ran. Running, completed, cancelled and ordinary failed passes retain their
+  existing ceiling accounting.
 - Fresh transient reviewer failures (`cascade`, PR-local `oauth-broken`,
   `provider-overloaded`, `reviewer-timeout`, `launchctl-bootstrap`,
   `daemon-bounce`, `agy-identity-unavailable`, where no agy reviewer identity

@@ -71,3 +71,18 @@ key, check or label is added or relaxed; `strict_mode` is untouched.
   ama-hammer-background-dispatch, ama-closer-dispatch-priority, watcher-claim-loop.
 - `hamclose-replay` has 2 failures that are identical on the base source.
 - `npm run lint`: 0 errors. `npm run typecheck:contracts`: clean.
+
+### HAM CI repair
+
+Reviewed the orchestration state projection against the merge base. The only
+projected change is the existing `owner: page` branch guard changing from
+`!orphanRecovery?.ownerProof` to `!hammerOnlyRecovery`, so ownerless daemon
+recovery retains the ordinary identity-absence parking path. The 24 projected
+state/owner records, lifecycle states, graph edges and smoke promises remain
+unchanged. Refreshed the orchestration source digest in `state-machines.json`;
+the independent graph snapshot and drift/mutation assertions remain intact.
+
+HAM validation: canonical changed-surface runner passed 2,198 tests across 51
+files, including SMV and orchestration producer checks. Lint passed with zero
+errors; contract typechecking and the offline research-finding walkthrough
+passed. Full-suite authority remains the exact-head GitHub Node 22/26 jobs.

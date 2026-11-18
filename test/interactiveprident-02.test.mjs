@@ -76,6 +76,7 @@ test('INTERACTIVEPRIDENTITY-02: only a read that found no identity is a durable 
   for (const reasons of [
     ['identity-read-transient'], ['head-attestation-chain-read-failed'], ['build-completion-read-failed'],
     ['worker-observation-unavailable'], ['worker-observation-scope-denied'],
+    ['invalid-produced-head-attestation'],
     ['missing-launch-request-id'], ['missing-worker-class'], ['unconfirmed-pr-opener-provenance'],
     ['missing-build-completion-signal'], ['synthetic-unknown-reason'],
     ['worker-observation-inconclusive', 'identity-read-transient'], [],
@@ -90,6 +91,8 @@ test('INTERACTIVEPRIDENTITY-02: only a read that found no identity is a durable 
 test('INTERACTIVEPRIDENTITY-02: a durable identity absence parks once with the named action and dispatches no closer', async t => {
   const { rootDir, state, pass } = harness(t, ABSENT);
   const first = await pass();
+  const [firstPark] = readDaemonMergeParks({ rootDir });
+  assert.equal(firstPark.observationCount, 1);
   const second = await pass();
   assert.equal(state.closerCalls, 0, 'no hammer is admitted');
   for (const result of [first, second]) {
@@ -107,6 +110,8 @@ test('INTERACTIVEPRIDENTITY-02: a durable identity absence parks once with the n
   assert.deepEqual([first.boundedWait.notify, second.boundedWait.notify], [true, false], 'one page per head');
   const [park] = readDaemonMergeParks({ rootDir });
   assert.equal(park.reason, DAEMON_IDENTITY_ABSENT_PARKED);
+  assert.equal(park.firstObservedAt, firstPark.firstObservedAt);
+  assert.equal(park.observationCount, 2, 'each watcher pass records the stable reason once');
   assert.match(park.remedy, /hq pr sign/);
 });
 
@@ -141,7 +146,7 @@ test('INTERACTIVEPRIDENTITY-02: a malformed or denied identity keeps its existin
   }
 });
 
-test('INTERACTIVEPRIDENTITY-02: the real resolver separates absence, transient failure and a forged attestation', async () => {
+test('INTERACTIVEPRIDENTITY-02: the real resolver separates absence, transient failure and a forged attestation', async t => {
   const base = { repo: 'acme/repo', prNumber: 300, currentHeadSha: 'head-live', currentBranch: 'feature/synthetic',
     logger: null };
   const absent = await resolveDaemonWorkerIdentityForPr({ ...base,
@@ -159,9 +164,23 @@ test('INTERACTIVEPRIDENTITY-02: the real resolver separates absence, transient f
   const attest = rows => resolveDaemonWorkerIdentityForPr({ ...base, consumeHeadAttestations: true,
     readHeadAttestationChainForPrImpl: async () => rows,
     readBuildCompletionSignalForPrImpl: async () => { throw new Error('pr_opened is not consulted'); } });
-  const forged = await attest([{ ...row, valid: false }]);
-  assert.equal(forged.ok, false, 'an unverifiable attestation never resolves an identity');
+  for (const valid of [false, undefined, null]) {
+    const forged = await attest([{ ...row, valid }]);
+    assert.equal(forged.ok, false, 'an unverifiable attestation never resolves an identity');
+    assert.equal(forged.reason, 'invalid-produced-head-attestation');
+    assert.equal(isDurableIdentityAbsence(failure(forged.reason)), false);
+    const { rootDir, state, pass } = harness(t, failure(forged.reason));
+    assert.notEqual((await pass()).namedReason, DAEMON_IDENTITY_ABSENT_PARKED);
+    assert.equal(state.closerCalls, 1, 'verification failures retain the fail-closed hammer handoff');
+    assert.deepEqual(readDaemonMergeParks({ rootDir }), []);
+  }
+  assert.equal((await attest([])).reason, 'missing-produced-head-attestation');
   const wrongHead = await attest([{ ...row, valid: true, head_sha: 'other-head' }]);
   assert.equal(wrongHead.ok, false, 'an attestation for another head never resolves an identity');
+  assert.equal(wrongHead.reason, 'missing-produced-head-attestation');
+  assert.equal((await attest([{ ...row, valid: false, head_sha: 'other-head' }])).reason,
+    'missing-produced-head-attestation', 'unverified rows for other heads do not imply a current-head failure');
   assert.equal((await attest([{ ...row, valid: true }])).ok, true, 'a valid exact-head attestation resolves');
+  assert.equal((await attest([{ ...row, valid: false }, { ...row, valid: true }])).ok, true,
+    'an independently verified exact-head row still resolves identity');
 });

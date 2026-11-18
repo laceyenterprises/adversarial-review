@@ -120,10 +120,10 @@ export async function resolveDaemonWorkerIdentityForPr({
     //     catch), so the --json chain subprocess exits non-zero. It also covers
     //     a locked/broken ledger read. This is the class that zeroed autonomous
     //     merge fleet-wide on 2026-07-15 when the key went unprovisioned.
-    //   * `missing-produced-head-attestation` / `missing-launch-request-id` /
-    //     `missing-worker-class` — the chain READ fine but has no valid produced
-    //     row at head (a worker that genuinely did not attest, an attacker
-    //     suppressing one, or a signing-key MISMATCH that fails verification).
+    //   * `missing-produced-head-attestation` / `invalid-produced-head-attestation` /
+    //     `missing-launch-request-id` / `missing-worker-class` — the chain READ
+    //     fine but has no usable produced row at head (a worker that did not
+    //     attest, an attacker suppressing one, or a signing-key MISMATCH).
     //     That is the security signal LHA exists to enforce; degrading here would
     //     defeat the crypto, so we FAIL CLOSED (return the not-ok as before).
     // Attestation is a HEAD-BINDING enhancement layered on the pr_opened ledger
@@ -318,12 +318,13 @@ export async function resolveDaemonWorkerIdentityFromHeadAttestation({
       error: String(err?.message || err),
     };
   }
-  const produced = (Array.isArray(rows) ? rows : [])
+  const producedAtHead = (Array.isArray(rows) ? rows : [])
     .filter((row) => (
       row?.kind === 'produced'
-      && row?.valid === true
       && String(row?.head_sha || row?.headSha || '').trim() === currentHead
-    ))
+    ));
+  const produced = producedAtHead
+    .filter((row) => row?.valid === true)
     .sort((a, b) => {
       const left = String(a?.ts || '');
       const right = String(b?.ts || '');
@@ -331,7 +332,9 @@ export async function resolveDaemonWorkerIdentityFromHeadAttestation({
     })
     .at(-1);
   if (!produced) {
-    return { ok: false, reason: 'missing-produced-head-attestation' };
+    // An unverified row is evidence of a refusal, not a missing attestation.
+    return { ok: false, reason: producedAtHead.length
+      ? 'invalid-produced-head-attestation' : 'missing-produced-head-attestation' };
   }
   const payload = produced.payload && typeof produced.payload === 'object' ? produced.payload : {};
   const launchRequestId = String(

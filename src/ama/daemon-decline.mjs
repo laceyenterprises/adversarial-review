@@ -30,7 +30,7 @@ export function isTransientDaemonDecline(execution) {
 
 // INTERACTIVEPRIDENTITY-02: the identity read succeeded and found NO build
 // identity for the PR (an authorized provenance read that returned no rows, or
-// no valid produced head attestation at this exact head). That is a durable
+// no produced head attestation at this exact head). That is a durable
 // absence, not a transient read: no closer can create the missing identity, so
 // it is never hammer-remediable. A failed or timed-out read is transient above.
 // Rows that exist but are malformed, ambiguous, denied or unknown stay on their

@@ -1709,6 +1709,13 @@ records the evidence/admission truth table and public export fixture refresh.
 
 ## State machines and smoke verification (SMV v1)
 
+Merge-ready exact heads with durable identity absence retain page ownership
+under `daemon-identity-absent-parked` and record one stable park observation per
+pass. Unverified exact-head attestations retain the fail-closed hammer handoff.
+Focused offline coverage is in `test/interactiveprident-02.test.mjs`; the reviewed
+orchestration projection is refreshed without changing the lifecycle graph or
+existing smoke commands.
+
 Reviewer pass outcomes become terminal before delivery handoff and asynchronous
 token accounting. Late accounting enriches the same session atomically while
 retaining its terminal outcome, end time and final review evidence. Primary and

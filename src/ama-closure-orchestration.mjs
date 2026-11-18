@@ -2753,6 +2753,14 @@ async function dispatchAmaClosureFor({
         (daemonCleanMerge.attempts ? ` (attempts=${daemonCleanMerge.attempts})` : ''),
     );
 
+    // The common decision owns handoff after live execution observations.
+    // Safety refusals and unreadable evidence cannot be repair shortcuts.
+    const hammerRemediableFallback = hasHammerDispatchIntent(shared, {
+      repo: repoPath, prNumber, headSha: currentPrHeadSha,
+    });
+    const identityAbsentPark = hammerRemediableFallback && shared.decision.reason === 'daemon-failed-closed'
+      && isDurableIdentityAbsence(daemonCleanMerge);
+
     // Persist the park reason so `review-pipeline-health` can name it. Without
     // this the reason lives only in watcher stdout, and a parked PR surfaces as
     // a generic `terminal_but_unmerged` that lists candidate causes instead of
@@ -2764,7 +2772,9 @@ async function dispatchAmaClosureFor({
       catch (error) { logger?.warn?.(`AMA closure-lag observation failed: ${error.message}`); }
       clearDaemonMergePark({ rootDir, repo: repoPath, prNumber });
       clearDaemonRouteDisagreement(rootDir, { repo: repoPath, prNumber });
-    } else {
+    } else if (!identityAbsentPark) {
+      // Identity absence records its final reason below; an intermediate
+      // reason here would reset the observation streak twice on every pass.
       recordDaemonMergePark({
         rootDir,
         repo: repoPath,
@@ -2773,13 +2783,7 @@ async function dispatchAmaClosureFor({
         reason: daemonCleanMerge.reason || 'failed-closed',
       });
     }
-    // The common decision owns handoff after live execution observations.
-    // Safety refusals and unreadable evidence cannot be repair shortcuts.
-    const hammerRemediableFallback = hasHammerDispatchIntent(shared, {
-      repo: repoPath, prNumber, headSha: currentPrHeadSha,
-    });
-    if (hammerRemediableFallback && shared.decision.reason === 'daemon-failed-closed'
-      && isDurableIdentityAbsence(daemonCleanMerge)) {
+    if (identityAbsentPark) {
       // The park re-evaluates every pass: the daemon runs again, so a new
       // attestation merges and a new head is new work. No closer is dispatched.
       const closureBlocker = `${DAEMON_IDENTITY_ABSENT_PARKED}: no build identity or interactive attestation `

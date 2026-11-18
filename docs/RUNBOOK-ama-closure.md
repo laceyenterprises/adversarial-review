@@ -3825,6 +3825,13 @@ closer, and the park record's remedy names the action: sign with `hq pr sign`
 attestation merges the PR and a new head is new work. A transient read
 (`identity-read-transient`) keeps its bounded retry and is never parked; malformed,
 denied or unknown identity evidence keeps the hand-off above.
+An exact-head produced row that is present but not verified (`valid !== true`)
+returns `invalid-produced-head-attestation` when no verified row can resolve
+identity. It retains the fail-closed hammer hand-off rather than the missing
+identity sign/hand-merge remedy. Rows for other heads do not establish a
+verification failure at the current head. Each identity-absent parked pass
+records its final reason once, preserving `firstObservedAt` and incrementing
+`observationCount`.
 
 The daemon resolves attributable identity through an existing valid produced
 head attestation or the public SDK's default PR provenance selector (the single

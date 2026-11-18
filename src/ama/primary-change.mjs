@@ -503,6 +503,15 @@ function reversalAuthorized(evidence, path, region, cache, strictNonBlockingReme
           cache.get('verifiedReversals').add(`${commit.sha}:${cite[1]}:${cite[2]}:${kind}`);
           return true;
         }
+        // A path-scoped move recommendation cannot also waive deletion of
+        // its source after its structural proof fails. Legacy unqualified
+        // whole-file findings retain their existing deletion authority.
+        const pathScopedMove = /`[^`\n]+`|(?:[\w.-]+\/)+[\w.-]+|\b[\w-]+\.[\w-]+\b/.test(
+          admissible.finding.recommendedFix || '');
+        if (pathScopedMove && commit.files?.some(file =>
+          file.status === 'renamed' && file.previous_filename === path)) {
+          return reject('rename-structural-proof-required');
+        }
         // REVERSALPARENT-01: an immutable original reversal pins its actual
         // parent, including repairs between the review and that parent. Map
         // to that state first; recursion below checks the original finding.
@@ -1024,12 +1033,6 @@ function evaluatePrimaryChange(evidence, headSha, { strictNonBlockingRemediation
       const file = evidence.primaryFiles.find(entry => (entry.previous_filename || entry.filename) === path);
       if (identicalHammerRename(evidence, file)) continue;
       if (findingAuthorizedAddedRename(evidence, file, authorizationCache, strictNonBlockingRemediation)) continue;
-      // A rejected move proof cannot become permission to delete its source.
-      // Genuine deletions retain ordinary finding coverage below.
-      if (!actual && (evidence.reversalAuthorizations || []).some(({ commit }) =>
-        commit?.files?.some(entry => entry.status === 'renamed' && entry.previous_filename === path))) {
-        return reverted(path, 'rename-preservation');
-      }
       if ((change.renamed && actual?.filename === path)
         || (change.status === 'added' && actual && !actual.opaque && actual.regions.length === 0) || (!actual
         && !(change.regions.length > 0 && !change.opaque && !change.renamed

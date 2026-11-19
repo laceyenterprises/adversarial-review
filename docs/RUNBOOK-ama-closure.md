@@ -5300,6 +5300,36 @@ commits, generator failures, duplicate/missing markers and byte mismatches retai
 the existing refusal. This supplies evidence to the existing primary-change
 predicate and adds no CI check, status, override label or host config key.
 
+<a id="agent-os-catalog-field-placement-lac-2229"></a>
+
+**Agent OS catalog field placement (LAC-2229).** The shared primary-change collector can prove a top-level string field moved
+within `laceyenterprises/agent-os`'s `docs/data-model/catalog.json`. The
+GENCONFLICT registry identifies that projection and the catalog README
+specifies its ordering. The collector applies that repository and layout
+directly, without taking proof policy from the PR.
+
+The protected patch must add the field as one standalone line at an insertion
+anchor the gate would otherwise refuse. The key and its
+`catalog.d/fields/<key>.json` fragment must be new relative to the protected
+merge base. Both heads must have the identical single-key fragment and the
+same string value in the projection. The final projection must move the field
+into the assembler's identity order, using the exact merge-base
+`legacy-order.json` at both heads. The catalogs, order file and fragment must
+round-trip in the assembler's wire format, which rejects duplicate keys even
+inside other values. All files used as evidence must be ordinary Git data
+files. The proof covers only that zero-width base-coordinate insertion.
+Existing line checks still evaluate every other protected unit, including
+domain edits and array entries.
+
+Daemon and hammer collection use their authenticated history reader to walk the
+immutable Git trees and verify the blob hashes. A head can therefore be proved
+even when an external publisher's objects have yet to reach the worker clone.
+Diagnostics that explicitly pass `localRepository` read the equivalent
+immutable objects from that local clone. The proof is bounded, binds the
+protected head, final head and merge base, and is recomputed outside the history
+cache. No generator executes for this proof. If the move cannot be proved, the
+existing preservation and finding authorization checks still determine the result.
+
 PCCSLOW-01: daemon, hammer snapshot and full-context CLI share atomic history
 records under `data/primary-change-history`, keyed by repository, PR, base SHA,
 head SHA, merge base, reviews and dispatcher provenance, with builder-boundary

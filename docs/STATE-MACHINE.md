@@ -1757,6 +1757,12 @@ unmatched renames retain the existing reversal refusal. Proofs are transient
 and recomputed outside the history cache; lifecycle states and merge gates are
 unchanged. See the [renumber contract](RUNBOOK-ama-closure.md#mechanical-migration-renumbers-migrenumberderived-01).
 
+LAC-2229 allows one refused insertion to be proved by the immutable Agent OS
+catalog and field-fragment snapshots. A standalone new top-level string field
+must retain its exact identity and value at the final head and move into the
+documented identity order. The shared predicate still evaluates every other
+primary-change unit. See the [catalog field proof](RUNBOOK-ama-closure.md#agent-os-catalog-field-placement-lac-2229).
+
 HOSTIDCACHE-01: uncached host-owner reads share one bounded retry budget and
 cache only success for the process lifetime. Transient timeout, spawn failure
 or unavailability returns a retryable closer defer, preserving the selected

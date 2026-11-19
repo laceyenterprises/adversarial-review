@@ -22,6 +22,7 @@ import { isRemediationCommit, readLaneReversalOwners, laneReversalOwner,
   laneReversalIdentityMatches, readLaneReversalIdentity } from './lane-reversal.mjs';
 import { proveDerivedArtifacts, proveGeneratedBlocks } from './derived-artifacts.mjs';
 import { proveMigrationRenumbers, verifiedMigrationRenumbers } from './migration-renumber.mjs';
+import { CATALOG_PATH, CATALOG_REPO, proveCatalogFieldMove } from './catalog-field-move.mjs';
 import { classifyOccurrence, deadCodeLanguage, dynamicHazard, parseDeadCodeDeclaration, symbolOccurrences } from './dead-code-symbols.mjs';
 // HAMINTENT-01: trusted GitHub history, never the hammer's claimed intent.
 const SHA = /^[0-9a-f]{40}$/i;
@@ -988,11 +989,14 @@ function evaluatePrimaryChange(evidence, headSha, { strictNonBlockingRemediation
         && (!proof.primaryHead || proof.primaryHead === evidence.primaryHead)
         && Number.isSafeInteger(proof.start) && Number.isSafeInteger(proof.end)
         && proof.start > 0 && proof.end >= proof.start);
-      const derived = unit => blocks.some(block => unit.start >= block.start && unit.end <= block.end);
+      const derived = (unit, region) => blocks.some(block => unit.start >= block.start && unit.end <= block.end
+        && (block.insertionLine === undefined || (path === CATALOG_PATH && block.primaryHead === evidence.primaryHead
+          && unit.start === unit.end && !region.removedLines.length
+          && region.addedLines.length === 1 && region.addedLines[0] === block.insertionLine)));
       change.removed = new Map();
       for (const region of change.regions) {
-        region.preservationUnits = regionUnits(region).filter(unit => !derived(unit));
-        region.removedLines = region.removedLines.filter(line => !derived({ start: line.position, end: line.position + 1 }));
+        region.preservationUnits = regionUnits(region).filter(unit => !derived(unit, region));
+        region.removedLines = region.removedLines.filter(line => !derived({ start: line.position, end: line.position + 1 }, region));
         for (const { text } of region.removedLines) change.removed.set(text, (change.removed.get(text) || 0) + 1);
       }
       change.derivedOnly = blocks.length > 0 && change.regions.every(region => regionUnits(region).length === 0);
@@ -1804,7 +1808,7 @@ export async function fetchPrimaryChange(args, options = {}) {
       }
       const read = method => (...values) => withHistoryReadBudget(() => method(...values), { signal, timeoutMs });
       const get = Object.assign(read(source), { persistPrimaryChange: source.persistPrimaryChange });
-      for (const method of ['metadata', 'commitVerification', 'commitHistory']) {
+      for (const method of ['metadata', 'commitVerification', 'commitHistory', 'regularDataFile']) {
         if (source[method]) get[method] = read(source[method].bind(source));
       }
       return collectPrimaryChange({ ...args, get, signal }, options);
@@ -1869,7 +1873,20 @@ async function collectPrimaryChange(args, {
   for (let attempt = 0; attempt < (result.primaryFiles?.length || 0); attempt++) {
     const refusal = checkPrimaryChange(result, args.headSha, { strictNonBlockingRemediation: true });
     if (refusal.reason !== 'primary-change-reverted') break;
-    const proofs = await proveGeneratedBlocksImpl({ ...args, rootDir: primaryChangeRoot(args) }, result, refusal);
+    const proofArgs = { ...args, rootDir: primaryChangeRoot(args) };
+    let catalogProof;
+    if (args.repo === CATALOG_REPO && refusal.path === CATALOG_PATH
+      && refusal.missingEvidence?.evidence === 'reversal-authorization') {
+      const { file, segments } = patchSegments(result.primaryFiles, CATALOG_PATH, new Map());
+      const final = result.finalFiles.find(entry => entry.filename === CATALOG_PATH);
+      if (file?.status === 'modified' && !file.previous_filename && final?.status === 'modified'
+        && !final.previous_filename && typeof final.patch === 'string') {
+        const candidates = segments.filter(segment => segment.old === segment.oldEnd && segment.lines.length === 1
+          && refusal.missingEvidence.regions.some(unit => unit.start === segment.old && unit.end === segment.old));
+        if (candidates.length === 1) catalogProof = await proveCatalogFieldMove(proofArgs, result, candidates[0]);
+      }
+    }
+    const proofs = catalogProof ? [catalogProof] : await proveGeneratedBlocksImpl(proofArgs, result, refusal);
     args.signal.throwIfAborted();
     if (!proofs.length) break;
     const previous = result.generatedBlockProofs || [];

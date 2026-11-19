@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, watch } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { checkPrimaryChange, fetchPrimaryChange } from '../src/ama/primary-change.mjs';
@@ -93,6 +93,79 @@ async function prove(f, runGeneratorImpl = offlineGenerator) {
   const generatedBlockProofs = await proveGeneratedBlocks(f.args, f.evidence, refusal, { runGeneratorImpl });
   return { ...f.evidence, generatedBlockProofs };
 }
+
+function interceptGit(t, body) {
+  const git = execFileSync('/bin/sh', ['-c', 'command -v git'], { encoding: 'utf8' }).trim();
+  const tools = mkdtempSync(join(tmpdir(), 'derived-git-fixture-'));
+  t.after(() => rmSync(tools, { recursive: true, force: true }));
+  const quote = value => `'${value.replaceAll("'", "'\\''")}'`;
+  writeFileSync(join(tools, 'git'), `#!/bin/sh\n${body(quote, tools)}\nexec ${quote(git)} "$@"\n`, { mode: 0o755 });
+  const path = process.env.PATH;
+  process.env.PATH = `${tools}:${path}`;
+  t.after(() => { process.env.PATH = path; });
+  return tools;
+}
+
+test('LAC-2224: ineligible Agent OS paths need no bulk checkout', async t => {
+  const tools = interceptGit(t, (quote, tools) => `
+for arg do
+  case "$arg" in
+    fetch|worktree) printf '%s\\n' "$arg" >> ${quote(join(tools, 'bulk'))}; exit 124 ;;
+  esac
+done`);
+  const bulk = join(tools, 'bulk');
+  const fixtures = [
+    fixture(t, { generatorHeader: '{"description": "Ledger SQL baseline"}',
+      outputPath: 'scripts/ledger-sql-baseline.json' }),
+    fixture(t, { generatorHeader: '{"version": 1, "objects": []}',
+      outputPath: 'platform/app-sdk/state-machines.json' }),
+  ];
+  const warnings = t.mock.method(console, 'warn', () => {});
+  // A status-124 fixture models the failing bulk operation without a
+  // wall-clock sleep or any dependency on host load.
+  let generatorCalls = 0;
+  for (const f of fixtures) {
+    f.args.repo = 'laceyenterprises/agent-os';
+    const result = await prove(f, () => { generatorCalls++; });
+    assert.deepEqual(result.generatedBlockProofs, []);
+    assert.equal(checkPrimaryChange(result, f.args.headSha).reason, 'primary-change-reverted');
+    assert.match(warnings.mock.calls.at(-1).arguments[0], /"reason":"manifest-absent"/);
+  }
+  assert.equal(generatorCalls, 0);
+  assert.throws(() => readFileSync(bulk), { code: 'ENOENT' });
+  // Once the proof is eligible, checkout failure remains observable and
+  // leaves the source refusal in force.
+  const eligible = fixture(t);
+  const failed = await prove(eligible, () => { generatorCalls++; });
+  assert.deepEqual(failed.generatedBlockProofs, []);
+  assert.equal(checkPrimaryChange(failed, eligible.args.headSha).reason, 'primary-change-reverted');
+  assert.match(warnings.mock.calls.at(-1).arguments[0], /"reason":"checkout-failed"/);
+  assert.equal(readFileSync(bulk, 'utf8'), 'fetch\n');
+  assert.equal(generatorCalls, 0);
+});
+
+test('LAC-2224: cancellation during checkout rejects the proof and removes scratch', { timeout: 10000 }, async t => {
+  const f = fixture(t);
+  const controller = new AbortController();
+  f.args.signal = controller.signal;
+  const cancelled = new Error('cancel fixture');
+  const tools = interceptGit(t, (quote, tools) => `
+for arg do
+  if [ "$arg" = worktree ]; then
+    /bin/sleep 60 &
+    printf '%s' "$PWD" > ${quote(join(tools, 'starting'))}
+    /bin/mv ${quote(join(tools, 'starting'))} ${quote(join(tools, 'ready'))}
+    wait
+    exit 1
+  fi
+done`);
+  const watcher = watch(tools, (_, file) => { if (file === 'ready') controller.abort(cancelled); });
+  t.after(() => { watcher.close(); controller.abort(cancelled); });
+  let generatorCalls = 0;
+  await assert.rejects(prove(f, () => { generatorCalls++; }), error => error === cancelled);
+  assert.equal(generatorCalls, 0);
+  assert.throws(() => readFileSync(readFileSync(join(tools, 'ready'), 'utf8')), { code: 'ENOENT' });
+});
 
 test('GENERATEDPRIMARY-01: stale whole-file count regenerates from final sources without a manifest', async t => {
   for (const options of [{}, { finalNewline: false, addedRow: true }, { baseHeader: 'An older generated header' }]) {

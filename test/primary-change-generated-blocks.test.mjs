@@ -371,8 +371,9 @@ test('missing or incomplete local clone references fail closed without a network
   const identity = { ...f.args, mergeBase: f.evidence.mergeBase, rootDir: undefined };
   await assert.rejects(withDerivedCheckout({ ...identity, localRepository: undefined },
     () => assert.fail('missing source must not run operation')), /requires a local clone reference/);
-  await assert.rejects(withDerivedCheckout({ ...identity, headSha: 'f'.repeat(40) },
-    () => assert.fail('missing commit must not run operation')), error => {
+  const missingHead = 'f'.repeat(40);
+  await assert.rejects(withDerivedCheckout({ ...identity, headSha: missingHead },
+    ({ show }) => show(missingHead, 'package.json', { optional: true })), error => {
     assert.ok(!error.message.includes('https://github.com/'));
     assert.ok(error.message.includes(realpathSync(f.root)));
     return true;

@@ -5166,15 +5166,16 @@ suppresses skip warnings from other candidates. Missing or non-directory working
 directories fail at the generator stage. A failed candidate never supplies
 preservation evidence.
 
-On a region refusal, shared primary-change collection creates an independent
-scratch Git worktree at the exact head, using `localRepository`, the domain's
-`remediationCloneReferences[repo]`, or a matching `rootDir` checkout. The local
-clone must contain both immutable commits. Both manifests are read from this local
-object store; proof retries issue no GitHub manifest requests, including when
-the merge base has no generated declarations. Missing/unreadable references or
-commits retain the refusal; there is no public HTTPS or ambient-auth fallback.
-Each generator runs from a fresh head checkout with the declared block interior
-cleared. It must
+On a region refusal, shared primary-change collection reads exact regular-file
+Git blobs from `localRepository`, the domain's `remediationCloneReferences[repo]`,
+or a `rootDir` checkout whose raw GitHub origin matches the subject. It checks
+the artifact, declarations and eligible regions before fetching or checking out
+a tree. Proof retries issue no GitHub manifest requests. Missing or unreadable
+references and objects retain the refusal. Git cannot lazily fetch missing
+objects, and proof collection has no remote fallback.
+An eligible generator runs from a fresh scratch checkout at the exact head with
+the declared block interior cleared. The checked-out artifact must match its
+Git blob before generation. The generator must
 recreate the final-head block bytes exactly, so a no-op or hand-edited output
 cannot supply proof. Verified base-coordinate interiors are excluded from author
 line preservation; these match the old-side coordinates of primary diff units,
@@ -5213,9 +5214,10 @@ history cache; no reversal authorization or merge check changes.
 
 GENERATEDPRIMARY-02: the code-pr domain registers agent-os's provision-managed
 worker base in the existing `remediationCloneReferences` map. Provisioned worker
-worktrees share that object store, including their PR heads; proofs fetch only
-immutable identities locally into scratch. Missing root `package.json` means no
-block declarations, while a completed whole-file proof needs no manifest.
+worktrees share that object store, including their PR heads. Only eligible proofs
+fetch immutable identities locally into scratch. Missing root `package.json`
+means no block declarations, while a whole-file proof can establish eligibility
+without a manifest.
 When no proof succeeds, failed or skipped candidates emit one `[derived-content]`
 warning per repository/PR/head/path per proof attempt through the existing log channel.
 The warning names a fixed failure stage/reason and the subject; subprocess
@@ -5230,8 +5232,9 @@ scratch ancestors for runtime startup, without granting reads of other descendan
 Linux creates every scratch mount ancestor in parent-first order, including
 nested custom temporary directories, and exposes only
 the dynamic loader cache from `/etc`, rather than host configuration. Each
-generator has a ten-second process-group deadline; each checkout/proof attempt has
-a thirty-second deadline. No dependency installation
+generator has a ten-second process-group deadline. The nominal proof deadline is
+thirty seconds and checkout commands have a nominal fifteen-second cap. Proof
+cancellation ends checkout process groups before scratch cleanup. No dependency installation
 or network access is available to generators. Missing sandbox support, unavailable
 commits, generator failures, duplicate/missing markers and byte mismatches retain
 the existing refusal. This supplies evidence to the existing primary-change

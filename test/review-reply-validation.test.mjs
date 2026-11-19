@@ -11,6 +11,7 @@ import {
   ReviewerReplyRejectedError,
   assertReviewerReply,
   extractTemplatePlaceholders,
+  normalizeReviewerReply,
   reviewTemplatePlaceholders,
   validateReviewerReply,
 } from '../src/kernel/review-reply.mjs';
@@ -342,10 +343,12 @@ for (const [name, invalidReply, reason] of [
       error = err;
     }
     assert.ok(error instanceof ReviewerReplyRejectedError, `expected a rejection, got ${error?.message}`);
-    assert.equal(calls, 2, 'the merge stops at the first rejected chunk');
-    assert.deepEqual(rejected.map((value) => value.chunkIndex), [2]);
-    assert.equal(rejected[0].rawReviewText, invalidReply);
-    assert.ok(rejected[0].rejectionReason.includes(reason));
+    assert.equal(calls, 3, 'only the rejected chunk is tried again');
+    assert.deepEqual(rejected.map(({ chunkIndex, chunkAttempt }) => [chunkIndex, chunkAttempt]), [[2, 1], [2, 2]]);
+    for (const dump of rejected) {
+      assert.equal(dump.rawReviewText, invalidReply);
+      assert.ok(dump.rejectionReason.includes(reason));
+    }
 
     // The reviewer process prints the message and exits; the watcher classifies
     // that stderr onto the bounded reviewer-output retry.
@@ -522,7 +525,76 @@ test('REVIEWVALID-01: a valid raw chunk cannot authorize an invalid posting body
     }),
     onRejectedCodexOutput: (evidence) => rejected.push(evidence),
   }), ReviewerReplyRejectedError);
-  assert.equal(rejected.length, 1);
-  assert.match(rejected[0].rejectionReason, /no Verdict section/);
-  assert.equal(rejected[0].chunkIndex, 1);
+  assert.deepEqual(rejected.map(({ chunkIndex, chunkAttempt }) => [chunkIndex, chunkAttempt]), [[1, 1], [1, 2]]);
+  for (const dump of rejected) assert.match(dump.rejectionReason, /no Verdict section/);
+});
+
+test('REVIEWPREAMBLE-01: strip only bounded prose before a complete valid review', () => {
+  const prefix = 'I checked the café fixture.\r\n\r\n';
+  assert.deepEqual(normalizeReviewerReply(prefix + VALID_REPLY), { text: VALID_REPLY, droppedPreamble: prefix });
+  for (const prose of ['x'.repeat(400), 'First line.\nSecond line.\nThird line.']) {
+    assert.equal(normalizeReviewerReply(`${prose}\n${VALID_REPLY}`).text, VALID_REPLY);
+  }
+  for (const prose of [
+    '# Heading', 'Heading\n=======', 'Narration with ``` in it.',
+    '~~~text\nExample\n~~~', 'I checked <Title>.', 'The verdict is coming.',
+    'I would **request changes** here.', 'It was approved earlier.',
+    'x'.repeat(401), 'One.\nTwo.\nThree.\nFour.',
+  ]) {
+    const raw = `${prose}\n${VALID_REPLY}`;
+    assert.deepEqual(normalizeReviewerReply(raw), { text: raw, droppedPreamble: '' });
+    assert.ok(validateReviewerReply(raw).reasons.includes('text before the first required heading'));
+  }
+  for (const body of [TEMPLATE_ECHO_REPLY, VALID_REPLY.replace('## Suggested fixes', '## Extra'),
+    `${VALID_REPLY}\n\nTrailing remarks.`]) {
+    const raw = prefix + body;
+    assert.equal(normalizeReviewerReply(raw).text, raw);
+    assert.equal(validateReviewerReply(raw).ok, false);
+  }
+});
+
+test('REVIEWPREAMBLE-01: Claude selects a complete prefaced reply over later narration', () => {
+  const reply = `I checked the fixture.\n\n${VALID_REPLY}`;
+  const stream = [
+    { type: 'assistant', message: { content: [{ type: 'text', text: reply }] } },
+    { type: 'result', result: 'The synthetic background check finished.' },
+  ].map(event => JSON.stringify(event)).join('\n');
+  const parsed = harness.parseClaudeJsonOutput(stream);
+  assert.equal(parsed.reviewText, reply, 'preserve the original for the publication audit');
+});
+
+test('REVIEWPREAMBLE-01: only the rejected chunk is retried and completed findings survive', async t => {
+  const diff = 'diff --git a/sample.mjs b/sample.mjs\n--- a/sample.mjs\n+++ b/sample.mjs\n@@ -0,0 +1,9000 @@\n'
+    + '+synthetic content\n'.repeat(9000);
+  const prefix = 'I checked the café fixture.\n';
+  const log = t.mock.method(console, 'info', () => {});
+  const calls = [];
+  const rejected = [];
+  const result = await reviewAgyOversizedInChunks(diff, '', {
+    env: {
+      AGENT_OS_REVIEWER_TIMEOUT_MS: '1000',
+      AGENT_OS_REVIEWER_GEMINI_ANTIGRAVITY_PRINT_TIMEOUT_MS: '1000',
+    },
+    maxBytes: 60000,
+    onRejectedCodexOutput: async (dump) => rejected.push(dump),
+    reviewWithGeminiImpl: async (chunk, context, options) => {
+      calls.push({ chunk, context, options });
+      const index = Number(/chunk (\d+) of \d+/i.exec(context)?.[1]);
+      const reviewText = VALID_REPLY.replace('Retry loop never terminates', `Finding from chunk ${index}`);
+      return { reviewText: calls.length === 2 ? TEMPLATE_ECHO_REPLY : (calls.length === 3 ? prefix : '') + reviewText,
+        tokenUsage: { input: 5, output: 2, total: 7 } };
+    },
+  });
+  assert.ok(result.chunks.length > 2);
+  assert.equal(calls.length, result.chunks.length + 1);
+  assert.deepEqual(calls[1], calls[2]);
+  assert.equal(new Set(calls.map(({ context }) => context)).size, result.chunks.length);
+  assert.deepEqual(rejected.map(({ chunkIndex, chunkAttempt }) => [chunkIndex, chunkAttempt]), [[2, 1]]);
+  assert.equal(result.tokenUsage.total, 7 * calls.length);
+  for (let index = 1; index <= result.chunks.length; index += 1) {
+    assert.ok(result.reviewText.includes(`Finding from chunk ${index}`));
+  }
+  assert.ok(!result.reviewText.includes(prefix));
+  assert.deepEqual(log.mock.calls.map(({ arguments: args }) => args),
+    [[`[reviewer] chunk=2 droppedPreambleBytes=${Buffer.byteLength(prefix)}`]]);
 });

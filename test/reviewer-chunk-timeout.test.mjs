@@ -319,6 +319,28 @@ test('CHUNKTIME-01: the plan timer aborts a late chunk without rerunning earlier
   assert.equal(calls, 2);
 });
 
+test('REVIEWPREAMBLE-01: a rejected chunk cannot retry after the shared deadline', async t => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  let plan;
+  let calls = 0;
+  const dumps = [];
+  await assert.rejects(reviewAgyOversizedInChunks(diff, '', {
+    env: {}, maxBytes: 60000,
+    onChunkPlan: value => { plan = value; },
+    reviewWithGeminiImpl: async () => {
+      calls += 1;
+      return { reviewText: 'An incomplete synthetic reply.' };
+    },
+    onRejectedCodexOutput: dump => {
+      dumps.push(dump);
+      t.mock.timers.tick(plan.timeoutMs);
+    },
+  }), /Command timed out after .*chunks=/);
+  assert.equal(calls, 1);
+  assert.equal(dumps.length, 1);
+  assert.match(dumps[0].rejectionReason, /no required heading/);
+});
+
 test('REVIEWERLEASECAP-02: Argus sequential fallbacks share the absolute ceiling', async () => {
   const { resolveArgusReviewChildTimeoutMs } = await import('../src/argus-security-drain.mjs');
   const { resolveReviewerCeilingConfig } = await import('../src/reviewer-timeout-model.mjs');

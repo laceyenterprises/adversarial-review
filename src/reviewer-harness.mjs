@@ -68,7 +68,7 @@ import {
   sanitizeReviewPayloadBestEffort,
   sanitizeCodexReviewPayload,
 } from './kernel/verdict.mjs';
-import { assertReviewerReply, validateReviewerReply } from './kernel/review-reply.mjs';
+import { assertReviewerReply, normalizeReviewerReply, validateReviewerReply } from './kernel/review-reply.mjs';
 import { parseReviewFindings } from './kernel/review-findings.mjs';
 import { INCONSISTENT_VERDICT_MARKER, verdictSection } from './kernel/verdict-consistency.mjs';
 import { OAUTH_ENV_STRIP_LIST, scrubOAuthFallbackEnv } from './secret-source/env.mjs';
@@ -999,7 +999,7 @@ function createClaudeReplySelector() {
         text = blocks.map((block) => block.text).join('');
         candidateCount += 1;
       } else return;
-      if (typeof text === 'string' && validateReviewerReply(text).ok) {
+      if (typeof text === 'string' && validateReviewerReply(normalizeReviewerReply(text).text).ok) {
         newestValid = { text, index: candidateCount, type: event.type || 'result' };
       }
     },
@@ -3812,9 +3812,9 @@ async function reviewAgyOversizedInChunks(diff, extraContext, {
   const chunkUsages = [];
   const promptDigests = [];
   let execution = null;
+  let mesArm = null;
   try {
     for (let index = 0; index < split.chunks.length; index += 1) {
-      chunkSignal.throwIfAborted();
       const chunk = split.chunks[index];
       const baseChunkContext = `${extraContext}${agyOversizedChunkContextSuffix(index + 1, split.chunks.length)}${chunkLegend}`;
       const splitRecord = splitRecordByChunk.get(chunk);
@@ -3824,40 +3824,43 @@ async function reviewAgyOversizedInChunks(diff, extraContext, {
         : baseChunkContext;
       // MES-09: one decision per pass; retain the selected pair across chunks.
       // The context carries the whole pass diff, so signals never see one chunk.
-      const mesOption = mes && index === 0 ? { mes }
-        : mes && execution?.modelSource === 'mes' ? { reviewerArm: { harness: reviewerModel,
-          model: execution.model, effort: execution.effort } } : {};
-      const result = reviewerModel === 'gemini'
-        ? await reviewWithGeminiImpl(chunk.diff, chunkContext, { promptStage, reviewKind, reviewerSubprocessCwd, signal: chunkSignal, timeoutMs: timeoutPlan.perChunkTimeoutMs, ...mesOption })
-        : await dispatchReviewerModelImpl(reviewerModel, chunk.diff, chunkContext, { promptStage, reviewKind, reviewerSubprocessCwd, ...mesOption });
-      if (result.needsSanitize) {
+      for (let attempt = 1; attempt <= 2; attempt += 1) {
+        chunkSignal.throwIfAborted();
+        const mesOption = mesArm ? { reviewerArm: mesArm } : mes && index === 0 && attempt === 1 ? { mes } : {};
+        const result = reviewerModel === 'gemini'
+          ? await reviewWithGeminiImpl(chunk.diff, chunkContext, { promptStage, reviewKind, reviewerSubprocessCwd, signal: chunkSignal, timeoutMs: timeoutPlan.perChunkTimeoutMs, ...mesOption })
+          : await dispatchReviewerModelImpl(reviewerModel, chunk.diff, chunkContext, { promptStage, reviewKind, reviewerSubprocessCwd, ...mesOption });
+        if (mes && result.execution?.modelSource === 'mes') {
+          mesArm = { harness: reviewerModel, model: result.execution.model, effort: result.execution.effort };
+        }
+        chunkUsages.push(normalizeTokenUsage(result.tokenUsage));
+        const raw = result.rawReviewText ?? result.reviewText;
+        const { text, droppedPreamble } = normalizeReviewerReply(raw);
+        let reviewText;
+        let rejectedText = raw;
         try {
-          result.reviewText = sanitizeCodexReviewPayload(result.rawReviewText);
+          reviewText = result.needsSanitize ? sanitizeCodexReviewPayload(text) : result.reviewText;
+          if (droppedPreamble && reviewText === raw) reviewText = sanitizeReviewPayloadBestEffort(text);
+          // REVIEWVALID-01: validate both the raw reply and the posting body.
+          assertReviewerReply(text, { allowVerdictInconsistency: true });
+          rejectedText = reviewText;
+          assertReviewerReply(reviewText, { allowVerdictInconsistency: true });
         } catch (error) {
           try {
-            await onRejectedCodexOutput?.({ rawReviewText: result.rawReviewText,
-              rejectionReason: error.message, chunkIndex: index + 1 });
+            await onRejectedCodexOutput?.({ rawReviewText: rejectedText,
+              rejectionReason: error.message, chunkIndex: index + 1, chunkAttempt: attempt });
           } catch (persistError) {
-            console.error(`[reviewer] WARN: failed to persist rejected codex chunk output: ${persistError.message}`);
+            console.error(`[reviewer] WARN: failed to persist rejected reviewer chunk output: ${persistError.message}`);
           }
-          throw error;
+          if (attempt === 2) throw error;
+          continue;
         }
+        if (droppedPreamble) console.info(`[reviewer] chunk=${index + 1} droppedPreambleBytes=${Buffer.byteLength(droppedPreamble)}`);
+        execution ||= result.execution || null;
+        if (result.execution?.promptDigest) promptDigests.push(result.execution.promptDigest);
+        chunkReviews.push({ index: index + 1, promptBytes: chunk.promptBytes, reviewText });
+        break;
       }
-      // REVIEWVALID-01: one template-echo chunk must not reach the merged review.
-      assertReviewerReply(result.rawReviewText ?? result.reviewText, {
-        allowVerdictInconsistency: true,
-        onRejected: (rejected) => onRejectedCodexOutput?.({ ...rejected, chunkIndex: index + 1 }) });
-      assertReviewerReply(result.reviewText, {
-        allowVerdictInconsistency: true,
-        onRejected: (rejected) => onRejectedCodexOutput?.({ ...rejected, chunkIndex: index + 1 }) });
-      chunkUsages.push(normalizeTokenUsage(result.tokenUsage));
-      execution ||= result.execution || null;
-      if (result.execution?.promptDigest) promptDigests.push(result.execution.promptDigest);
-      chunkReviews.push({
-        index: index + 1,
-        promptBytes: chunk.promptBytes,
-        reviewText: result.reviewText,
-      });
     }
   } catch (error) {
     if (controller.signal.aborted) throw deadlineError;

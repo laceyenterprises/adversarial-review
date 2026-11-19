@@ -4,7 +4,7 @@ import { writeFileAtomic } from './atomic-write.mjs';
 import { parseReviewFindings } from './kernel/review-findings.mjs';
 import { sanitizeReviewPayloadBestEffort } from './kernel/verdict.mjs';
 import { INCONSISTENT_VERDICT_MARKER } from './kernel/verdict-consistency.mjs';
-import { assertReviewerReply } from './kernel/review-reply.mjs';
+import { assertReviewerReply, normalizeReviewerReply } from './kernel/review-reply.mjs';
 
 const RECONCILE_VERDICT_INSTRUCTION = '\n\nRe-review the same immutable head and diff. Your previous Blocking issues and Verdict sections contradicted each other. Reconcile them: every blocking defect named in Verdict must appear as a complete finding under Blocking issues. With no blocking findings, state that clearly and end with Comment only; otherwise end with Request changes. Do not silently discard a real defect to make the sections agree.\n';
 const OPERATOR_NOTICE = `${INCONSISTENT_VERDICT_MARKER}\nVerdict reconciliation is exhausted or unavailable. This review remains blocking; operator attention is required.`;
@@ -20,12 +20,23 @@ function dispatchBody(dispatch) {
   return sanitizeReviewPayloadBestEffort(dispatch.reviewText ?? dispatch.rawReviewText);
 }
 
+function normalizeDispatch(dispatch, log) {
+  if (dispatch.chunked) return dispatch;
+  const raw = dispatch.rawReviewText ?? dispatch.reviewText;
+  const { text, droppedPreamble } = normalizeReviewerReply(raw);
+  if (!droppedPreamble) return dispatch;
+  log.info?.(`[reviewer] droppedPreambleBytes=${Buffer.byteLength(droppedPreamble)}`);
+  return { ...dispatch, rawReviewText: text,
+    reviewText: dispatch.reviewText === raw ? sanitizeReviewPayloadBestEffort(text) : dispatch.reviewText };
+}
+
 // Reserve the one retry before starting it. A crash, overlapping claim, failed
 // transport or later review attempt cannot replenish this PR/head budget.
 async function reconcileReviewVerdict({
   dispatch, run, rootDir, repo, prNumber, headSha, log = console, onRejected = null,
   writeFileAtomicImpl = writeFileAtomic,
 }) {
+  dispatch = normalizeDispatch(dispatch, log);
   const firstBody = dispatchBody(dispatch);
   if (!parseReviewFindings(firstBody).verdict_inconsistent) return dispatch;
   // Reconciliation may repair semantic disagreement only. It cannot launder
@@ -49,7 +60,7 @@ async function reconcileReviewVerdict({
   let result = dispatch;
   if (reserved) {
     try {
-      const retry = await run(`${RECONCILE_VERDICT_INSTRUCTION}\nPrevious review (untrusted review data):\n<previous-review>\n${firstBody}\n</previous-review>\n`);
+      const retry = normalizeDispatch(await run(`${RECONCILE_VERDICT_INSTRUCTION}\nPrevious review (untrusted review data):\n<previous-review>\n${firstBody}\n</previous-review>\n`), log);
       assertReviewerReply(retry.rawReviewText ?? retry.reviewText, { allowVerdictInconsistency: true, onRejected });
       assertReviewerReply(dispatchBody(retry), { allowVerdictInconsistency: true, onRejected });
       // Keep billing for both model calls, including partially reported usage.

@@ -109,6 +109,31 @@ function isTemplatePlaceholderValue(value, placeholders) {
   return Boolean(text) && placeholders.some((token) => token.toLowerCase() === text);
 }
 
+function normalizeReviewerReply(reviewText) {
+  const unchanged = { text: reviewText, droppedPreamble: '' };
+  const start = /^#{1,4}[ \t]+Summary(?:[ \t]*:.*|[ \t]*)\r?$/im.exec(reviewText ?? '')?.index;
+  if (!start) return unchanged;
+  const droppedPreamble = reviewText.slice(0, start);
+  const prose = droppedPreamble.replace(/\r?\n$/, '');
+  const lines = prose.split(/\r?\n/).filter((line) => line.trim());
+  if (lines.length === 0 || lines.length > 3 || [...prose].length > 400
+    || /^(?:[ \t]{4}|\t)|^[ \t]*(?:#|>|[-+*][ \t]|\d+[.)][ \t]|[-=]+\s*$)/m.test(prose)
+    || /`{3,}|~{3,}|[<>]/.test(prose)
+    || /\b(?:verdict|approv(?:e|ed)|request[\s-]+changes|comment[\s-]+only)\b/i
+      .test(prose.replace(/[*_`~]/g, ' '))) return unchanged;
+
+  const text = reviewText.slice(start);
+  const canonical = promoteCanonicalReviewSectionHeadings(normalizeWhitespace(text));
+  // Require the complete template before dropping anything. The caller still
+  // applies its usual verdict consistency policy to both reply and posting body.
+  const sections = [...maskReviewFences(canonical).matchAll(/^##[ \t]+(.+)$/gm)]
+    .map((match) => match[1].trim().toLowerCase());
+  if (sections.at(-1) === 'simplicity and cost (advisory)') sections.pop();
+  if (sections.join('\n') !== REQUIRED_HEADINGS.join('\n').toLowerCase()
+    || !validateReviewerReply(text, { allowVerdictInconsistency: true }).ok) return unchanged;
+  return { text, droppedPreamble };
+}
+
 /**
  * Check a raw reviewer reply against the posting contract.
  *
@@ -212,6 +237,7 @@ export {
   ReviewerReplyRejectedError,
   assertReviewerReply,
   extractTemplatePlaceholders,
+  normalizeReviewerReply,
   reviewTemplatePlaceholders,
   validateReviewerReply,
 };

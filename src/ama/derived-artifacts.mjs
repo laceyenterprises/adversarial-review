@@ -425,49 +425,75 @@ export async function runDerivedGenerator({ scratch, cwd, command, signal, timeo
 export async function withDerivedCheckout({ repo, rootDir, headSha, mergeBase, primaryHead, signal, localRepository }, operation) {
   if (!BLOCK_SHA.test(headSha) || !BLOCK_SHA.test(mergeBase) || (primaryHead && !BLOCK_SHA.test(primaryHead))
     || !/^[\w.-]+\/[\w.-]+$/.test(repo)) throw new Error('invalid derived checkout identity');
+  signal?.throwIfAborted();
   const scratch = await mkdtemp(join(tmpdir(), 'primary-derived-'));
-  const git = (...args) => exec('git', ['-c', 'core.hooksPath=/dev/null', '-c', 'core.fsmonitor=false', ...args],
-    { cwd: scratch, encoding: 'utf8', timeout: loadAwareTimeoutMs(15000), maxBuffer: LIMIT, signal,
-      env: { ...process.env, GIT_TERMINAL_PROMPT: '0' } });
+  const flags = ['--no-lazy-fetch', '--no-replace-objects', '--literal-pathspecs',
+    '-c', 'core.hooksPath=/dev/null', '-c', 'core.fsmonitor=false'];
+  const env = { PATH: process.env.PATH, HOME: scratch, GIT_CONFIG_GLOBAL: '/dev/null',
+    GIT_CONFIG_NOSYSTEM: '1', GIT_TERMINAL_PROMPT: '0', GIT_ALLOW_PROTOCOL: 'file', LC_ALL: 'C' };
+  const options = () => ({ cwd: scratch, timeout: loadAwareTimeoutMs(15000), maxBuffer: LIMIT, signal, env });
+  const readGit = (...args) => {
+    signal?.throwIfAborted();
+    return exec('git', [...flags, ...args], { ...options(), encoding: 'buffer' }).then(result => result.stdout);
+  };
+  const git = async (...args) => {
+    // Keep checkout-only process dependencies out of eligibility reads.
+    const { spawnCapturedProcessGroup } = await import('../process-group-spawn.mjs');
+    signal?.throwIfAborted();
+    return spawnCapturedProcessGroup('git', [...flags, ...args], {
+      ...options(), progressTimeout: 0, killGraceMs: 0, reapGroupOnExit: true,
+    });
+  };
   try {
-    await git('init', '--bare', '-q', 'objects.git');
     let source = localRepository;
     if (!source && rootDir) {
       try { source = loadDomainConfig(rootDir, 'code-pr')?.remediationCloneReferences?.[repo]; } catch { /* Optional reference. */ }
       if (!source) {
         try {
-          const origin = await exec('git', ['-C', rootDir, 'remote', 'get-url', 'origin'], { encoding: 'utf8', timeout: loadAwareTimeoutMs(5000), signal });
-          if (origin.stdout.trim().replace(/\.git$/, '').endsWith(`/${repo}`)
-            || origin.stdout.trim().replace(/\.git$/, '').endsWith(`:${repo}`)) source = rootDir;
+          const origins = (await readGit('-C', rootDir, 'config', '--local', '--get-all', 'remote.origin.url')).toString('utf8');
+          if (origins.split(/\r?\n/).some(origin => {
+            const owningRepo = /^(?:git@github\.com:|ssh:\/\/git@github\.com\/|https:\/\/github\.com\/)([\w.-]+\/[\w.-]+)$/i
+              .exec(origin.trim().replace(/\.git$/, ''))?.[1];
+            return owningRepo?.toLowerCase() === repo.toLowerCase();
+          })) source = rootDir;
         } catch { /* No local checkout for this subject. */ }
       }
     }
+    signal?.throwIfAborted();
     // Proof collection is optional and must not depend on ambient GitHub auth.
     // The daemon/operator supplies a local clone containing both immutable refs.
     if (!source) throw Object.assign(new Error('derived checkout requires a local clone reference'),
       { code: 'DERIVED_CLONE_REFERENCE_MISSING' });
     source = await realpath(source);
     if (!(await lstat(source)).isDirectory()) throw new Error('derived clone reference is not a directory');
-    await git('--git-dir=objects.git', 'fetch', '--no-tags', '--depth=1', source, headSha, mergeBase);
     const tree = join(scratch, 'head');
-    await git('--git-dir=objects.git', 'worktree', 'add', '--detach', tree, headSha);
-    const refs = new Set([headSha, mergeBase]);
+    const refs = new Set([headSha, mergeBase, primaryHead].filter(Boolean));
     const show = async (ref, path, { optional = false } = {}) => {
-      // Blocks need only head/base. Fetch the third identity locally only when a
-      // whole-file header actually needs its protected-primary declaration.
-      if (ref === primaryHead && !refs.has(ref)) {
-        await git('--git-dir=objects.git', 'fetch', '--no-tags', '--depth=1', source, ref);
-        refs.add(ref);
+      if (!refs.has(ref) || !safePath(path)) throw new Error('invalid derived object identity');
+      const entry = await readGit('-C', source, 'ls-tree', '--full-tree', '-z', `${ref}^{commit}`, '--', path);
+      if (optional && !entry.length) return null;
+      const [, oid, name] = /^100(?:644|755) blob ([0-9a-f]{40})\t([^\0]+)\0$/.exec(entry.toString('utf8')) || [];
+      if (name !== path) throw new Error('derived input is missing or is not a regular Git blob');
+      const bytes = await readGit('-C', source, 'cat-file', 'blob', oid);
+      const text = bytes.toString('utf8');
+      if (!Buffer.from(text).equals(bytes)) throw new Error('unsupported artifact text');
+      return text;
+    };
+    let materialized = false;
+    const checkout = async () => {
+      if (materialized) {
+        await git('-C', tree, 'reset', '--hard', headSha);
+        await git('-C', tree, 'clean', '-fdx');
+        return;
       }
-      // Absence is distinct from an unreadable object or a failed Git command.
-      if (optional && !(await git('--git-dir=objects.git', 'ls-tree', '-r', '--name-only', '-z', ref, '--', path)).stdout) return null;
-      return (await git('--git-dir=objects.git', 'show', `${ref}:${path}`)).stdout;
+      await git('init', '--bare', '-q', 'objects.git');
+      const checkoutRefs = new Set([headSha, mergeBase]);
+      await git('--git-dir=objects.git', 'fetch', '--quiet', '--no-auto-maintenance', '--no-tags', '--depth=1',
+        source, ...checkoutRefs);
+      await git('--git-dir=objects.git', 'worktree', 'add', '--quiet', '--detach', tree, headSha);
+      materialized = true;
     };
-    const reset = async () => {
-      await git('-C', tree, 'reset', '--hard', headSha);
-      await git('-C', tree, 'clean', '-fdx');
-    };
-    return await operation({ tree, scratch, show, reset });
+    return await operation({ tree, scratch, show, checkout });
   } finally { await rm(scratch, { recursive: true, force: true }); }
 }
 
@@ -481,41 +507,44 @@ export async function proveGeneratedBlocks(args, evidence, refusal, {
   let reason, stage = 'checkout';
   const skipped = value => { reason ||= value; };
   const proofs = [];
+  let completed = false;
   try {
     const signal = AbortSignal.any([...(args.signal ? [args.signal] : []), AbortSignal.timeout(loadAwareTimeoutMs(30000))]);
-    return await checkoutImpl({ ...args, signal, headSha: evidence.headSha, mergeBase: evidence.mergeBase,
-      primaryHead: evidence.primaryHead }, async ({ tree, scratch, show, reset }) => {
+    const result = await checkoutImpl({ ...args, signal, headSha: evidence.headSha, mergeBase: evidence.mergeBase,
+      primaryHead: evidence.primaryHead }, async ({ tree, scratch, show, checkout }) => {
       // Whole-file headers are trusted at the protected author boundary, not at
       // the merge base. Only output is exempt; generator sources remain primary.
-      let wholeHeader;
       stage = 'whole-file-read';
+      const before = Buffer.from(await show(evidence.headSha, refusal.path));
+      const wholeHeader = declaredGeneratedFile(before);
       try {
-        const before = await regularFile(tree, refusal.path);
-        wholeHeader = declaredGeneratedFile(before);
         if (wholeHeader) {
           stage = 'whole-file-declaration';
           const primaryHeader = declaredGeneratedFile(Buffer.from(await show(evidence.primaryHead, refusal.path)));
           if (primaryHeader?.line === wholeHeader.line && primaryHeader.index === wholeHeader.index) {
             const base = Buffer.from(await show(evidence.mergeBase, refusal.path));
-            await reset();
+            stage = 'checkout';
+            await checkout();
+            if (!before.equals(await regularFile(tree, refusal.path))) throw Object.assign(
+              new Error('checkout differs from head blob'), { code: 'DERIVED_CHECKOUT_BLOB_MISMATCH' });
             await rm(join(tree, refusal.path));
             stage = 'whole-file-generator';
             await runGeneratorImpl({ scratch, cwd: relative(scratch, tree), command: wholeHeader.command, signal });
             stage = 'whole-file-output';
             const after = await regularFile(tree, refusal.path);
+            signal.throwIfAborted();
             if (before.equals(after)) return [{ path: refusal.path, start: 1,
               end: base.toString('utf8').split('\n').length + (base.at(-1) === 10 ? 0 : 1),
               headSha: evidence.headSha, mergeBase: evidence.mergeBase, primaryHead: evidence.primaryHead }];
             skipped('whole-file-byte-mismatch');
           } else skipped('whole-file-declaration-mismatch');
         }
-      } catch {
-        skipped(`${stage}-failed`);
+      } catch (error) {
+        skipped(error.code === 'DERIVED_CHECKOUT_BLOB_MISMATCH' ? 'checkout-blob-mismatch' : `${stage}-failed`);
         signal.throwIfAborted();
       }
       stage = 'manifest';
-      await reset();
-      // Immutable manifests come from the same local object store as artifacts.
+      // Read both declarations and candidate bytes before a bulk Git operation.
       // Missing manifests mean no block declarations, including non-Node repos.
       const baseText = await show(evidence.mergeBase, 'package.json', { optional: true });
       if (baseText === null) { skipped('manifest-absent'); return []; }
@@ -536,11 +565,13 @@ export async function proveGeneratedBlocks(args, evidence, refusal, {
           if (!regions.some(region => region.start >= base.start && region.end <= base.end)) {
             skipped('block-region-outside-declaration'); continue;
           }
-          await reset();
           // Refuse renames/deletions, missing markers and output that only survives
           // because the generator leaves its input untouched. Preserve the markers.
-          const before = await regularFile(tree, refusal.path);
           const block = generatedBlock(before, declaration);
+          stage = 'checkout';
+          await checkout();
+          if (!before.equals(await regularFile(tree, refusal.path))) throw Object.assign(
+            new Error('checkout differs from head blob'), { code: 'DERIVED_CHECKOUT_BLOB_MISMATCH' });
           await writeFile(join(tree, refusal.path), Buffer.concat([
             before.subarray(0, block.startOffset), before.subarray(block.endOffset),
           ]));
@@ -548,6 +579,7 @@ export async function proveGeneratedBlocks(args, evidence, refusal, {
           await runGeneratorImpl({ scratch, cwd: relative(scratch, join(tree, declaration.cwd)), command: declaration.command, signal });
           stage = 'block-output';
           const after = await regularFile(tree, refusal.path);
+          signal.throwIfAborted();
           const regenerated = generatedBlock(after, declaration);
           // A generator owns only its interior. In particular it must retain
           // paragraph boundaries outside the markers, byte for byte.
@@ -558,23 +590,24 @@ export async function proveGeneratedBlocks(args, evidence, refusal, {
             && outside(before, block).equals(outside(after, regenerated))) proofs.push({ path: refusal.path,
             start: base.start, end: base.end, headSha: evidence.headSha, mergeBase: evidence.mergeBase });
           else skipped('block-byte-mismatch');
-          // Each declaration starts from the same final-head artifact.
-          await writeFile(join(tree, refusal.path), before);
-        } catch {
-          skipped(`${stage}-failed`);
+        } catch (error) {
+          skipped(error.code === 'DERIVED_CHECKOUT_BLOB_MISMATCH' ? 'checkout-blob-mismatch' : `${stage}-failed`);
           signal.throwIfAborted();
           // A failed candidate must not discard proofs from other declarations.
         }
       }
       return proofs;
     });
+    signal.throwIfAborted();
+    completed = result.length > 0;
+    return result;
   } catch (error) {
     skipped(error.code === 'DERIVED_CLONE_REFERENCE_MISSING' ? 'clone-reference-missing' : `${stage}-failed`);
     args.signal?.throwIfAborted();
     // Optional proof failure must retain the independently computed refusal.
     return [];
   } finally {
-    if (reason && !proofs.length) console.warn('[derived-content] proof skipped: ' + JSON.stringify({
+    if (reason && !completed) console.warn('[derived-content] proof skipped: ' + JSON.stringify({
       repo: String(args.repo).replace(/[\x00-\x1f\x7f]/g, '?').slice(0, 200),
       prNumber: Number.isSafeInteger(Number(args.prNumber)) ? Number(args.prNumber) : null,
       headSha: BLOCK_SHA.test(evidence.headSha || '') ? evidence.headSha : null,

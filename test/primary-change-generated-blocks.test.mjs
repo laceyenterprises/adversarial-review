@@ -17,7 +17,7 @@ function fixture(t, { handEdit = false, outside = false, failure = false, noop =
   headDeclaration = false, reorderDeclaration = false, markerEdit = false, finalShift = false,
   authorShift = 0, repairedInventory = false, generatorCwd = '.', emptyBase = false, noDeclarations = false, authorMarkerEdit = false,
   additionalDeclarations = [], declarationLast = false, paragraphBoundary = false,
-  prosePrefix = '', baseRow = 'Base row', tail = 'Tail' } = {}) {
+  prosePrefix = '', baseRow = 'Base row', tail = 'Tail', attributes } = {}) {
   const root = mkdtempSync(join(tmpdir(), 'derived-block-fixture-'));
   t.after(() => rmSync(root, { recursive: true, force: true }));
   const git = (...args) => execFileSync('git', args, { cwd: root, encoding: 'utf8', timeout: 5000,
@@ -31,6 +31,10 @@ function fixture(t, { handEdit = false, outside = false, failure = false, noop =
   const entry = { ...declaration, cwd: generatorCwd,
     command: [process.execPath, generatorCwd === '.' ? 'render.mjs' : '../render.mjs'] };
   git('init', '-q');
+  if (attributes) {
+    writeFileSync(join(root, '.gitattributes'), attributes);
+    git('add', '.gitattributes');
+  }
   mkdirSync(join(root, 'docs'));
   const entries = declarationLast ? [...additionalDeclarations, entry] : [entry, ...additionalDeclarations];
   writeFileSync(join(root, 'package.json'), JSON.stringify(noDeclarations ? {} : { generatedArtifacts: entries }));
@@ -109,6 +113,18 @@ async function prove(f, options = {}) {
   });
   return { ...f.evidence, generatedBlockProofs };
 }
+
+test('attribute-converted block checkout reports a byte mismatch and retains refusal', async t => {
+  const warning = t.mock.method(console, 'warn', () => {});
+  const f = fixture(t, { attributes: 'docs/guide.md text eol=crlf\n' });
+  let generatorCalls = 0;
+  const result = await prove(f, { runGeneratorImpl: () => { generatorCalls++; } });
+  assert.deepEqual(result.generatedBlockProofs, []);
+  assert.equal(checkPrimaryChange(result, f.args.headSha).reason, 'primary-change-reverted');
+  assert.equal(generatorCalls, 0);
+  assert.equal(warning.mock.callCount(), 1);
+  assert.match(warning.mock.calls[0].arguments[0], /"reason":"checkout-blob-mismatch"/);
+});
 
 test('regenerated author rows are preserved, including a file absent from the final diff', async t => {
   const f = fixture(t);
@@ -366,13 +382,86 @@ test('optional checkout reads resolve nested files and distinguish absent paths 
   });
 });
 
+test('missing candidate markers skip checkout with a block-read diagnostic', async t => {
+  const f = fixture(t, { markerEdit: true });
+  const warnings = [];
+  t.mock.method(console, 'warn', message => warnings.push(message));
+  let checkouts = 0, generatorRuns = 0;
+  const proofs = await proveGeneratedBlocks(f.args, f.evidence, {
+    path: 'docs/guide.md', missingEvidence: { evidence: 'reversal-authorization', regions: [{ start: 3, end: 3 }] },
+  }, {
+    checkoutImpl: (args, operation) => withDerivedCheckout(args, context => operation({
+      ...context, checkout: async options => { checkouts++; return context.checkout(options); },
+    })),
+    runGeneratorImpl: () => { generatorRuns++; },
+  });
+  assert.deepEqual(proofs, []);
+  assert.equal(checkouts, 0);
+  assert.equal(generatorRuns, 0);
+  assert.equal(warnings.length, 1);
+  assert.equal(JSON.parse(warnings[0].split('proof skipped: ')[1]).reason, 'block-read-failed');
+});
+
+test('missing base and regenerated markers retain the refusal', async t => {
+  const f = fixture(t);
+  const warnings = [];
+  t.mock.method(console, 'warn', message => warnings.push(message));
+  const refusal = {
+    path: 'docs/guide.md', missingEvidence: { evidence: 'reversal-authorization', regions: [{ start: 3, end: 3 }] },
+  };
+  let checkouts = 0;
+  const missingBase = await proveGeneratedBlocks(f.args, f.evidence, refusal, {
+    checkoutImpl: (args, operation) => withDerivedCheckout(args, context => operation({
+      ...context,
+      show: async (ref, path, options) => {
+        const text = await context.show(ref, path, options);
+        return ref === f.evidence.mergeBase && path === refusal.path ? text.replace(start, 'missing start') : text;
+      },
+      checkout: async options => { checkouts++; return context.checkout(options); },
+    })),
+  });
+  assert.deepEqual(missingBase, []);
+  assert.equal(checkouts, 0);
+  const missingOutput = await proveGeneratedBlocks(f.args, f.evidence, refusal, {
+    runGeneratorImpl: async args => {
+      await offlineGenerator(args);
+      const path = join(args.scratch, args.cwd, refusal.path);
+      writeFileSync(path, readFileSync(path, 'utf8').replace(end, 'missing end'));
+    },
+  });
+  assert.deepEqual(missingOutput, []);
+  assert.deepEqual(warnings.map(message => JSON.parse(message.split('proof skipped: ')[1]).reason),
+    ['block-read-failed', 'block-output-failed']);
+});
+
+test('checkout with an omitted primary head fetches defined refs only', async t => {
+  const f = fixture(t);
+  await withDerivedCheckout({ ...f.args, mergeBase: f.evidence.mergeBase }, async ({ checkout, tree }) => {
+    await checkout();
+    assert.equal(readFileSync(join(tree, 'docs/guide.md'), 'utf8').includes('Base row'), true);
+  });
+});
+
+test('a matching URL among multiple local origins identifies the repository', async t => {
+  const f = fixture(t);
+  execFileSync('git', ['config', '--local', '--add', 'remote.origin.url', 'https://github.com/other/repository.git'],
+    { cwd: f.root });
+  execFileSync('git', ['config', '--local', '--add', 'remote.origin.url', 'git@github.com:fixture/repository.git'],
+    { cwd: f.root });
+  await withDerivedCheckout({ ...f.args, localRepository: undefined, rootDir: f.root,
+    mergeBase: f.evidence.mergeBase }, async ({ show }) => {
+    assert.equal((await show(f.evidence.headSha, 'docs/guide.md')).includes('Base row'), true);
+  });
+});
+
 test('missing or incomplete local clone references fail closed without a network fallback', async t => {
   const f = fixture(t);
   const identity = { ...f.args, mergeBase: f.evidence.mergeBase, rootDir: undefined };
   await assert.rejects(withDerivedCheckout({ ...identity, localRepository: undefined },
     () => assert.fail('missing source must not run operation')), /requires a local clone reference/);
-  await assert.rejects(withDerivedCheckout({ ...identity, headSha: 'f'.repeat(40) },
-    () => assert.fail('missing commit must not run operation')), error => {
+  const missingHead = 'f'.repeat(40);
+  await assert.rejects(withDerivedCheckout({ ...identity, headSha: missingHead },
+    ({ show }) => show(missingHead, 'package.json', { optional: true })), error => {
     assert.ok(!error.message.includes('https://github.com/'));
     assert.ok(error.message.includes(realpathSync(f.root)));
     return true;

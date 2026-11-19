@@ -131,6 +131,7 @@ def main():
                     return result
             row.pop("jobs")
             row.update(status="run", reason="ci-evidence-unavailable")
+            result = None
         if result is None:
             persist()
             result = original_run(check, *positional, **keywords)

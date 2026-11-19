@@ -8,7 +8,7 @@ import { join } from 'node:path';
 import { promisify } from 'node:util';
 import { meteredExecFile } from './metered-gh.mjs';
 import { writeFileAtomic } from './atomic-write.mjs';
-import { withCloserGitHubBudget } from './rate-limit-throttle.mjs';
+import { withCloserGitHubBudget, withGitHubBudgetScope } from './rate-limit-throttle.mjs';
 
 // Conditional reads (ETag, 304). A 304 returns the body stored with the exact
 // ETag that was sent; GitHub does not charge it to the primary rate limit. A
@@ -84,7 +84,7 @@ function retireStaleHead(cache, head) {
 }
 
 async function withHammerPrReader(repo, prNumber, {
-  read = null, env = process.env, execImpl = null, signal, credentialDeadlineMs,
+  read = null, env = process.env, execImpl = null, signal, credentialDeadlineMs, optional = false,
 }, use) {
   if (!/^[^/\s]+\/[^/\s]+$/.test(repo) || !/^[1-9]\d*$/.test(String(prNumber))) {
     throw new TypeError('Invalid GitHub PR reference');
@@ -93,7 +93,8 @@ async function withHammerPrReader(repo, prNumber, {
   const get = read || conditionalReader(cache, execImpl || (args => meteredExecFile(promisify(execFile), 'gh', args,
     { hammerToken: true, timeout: loadAwareTimeoutMs(30_000), killSignal: 'SIGKILL', maxBuffer: 10 * 1024 * 1024,
       env, signal, credentialDeadlineMs })));
-  try { return await withCloserGitHubBudget(() => use(get, cache)); }
+  const withBudget = optional ? fn => withGitHubBudgetScope({ urgent: false }, fn) : withCloserGitHubBudget;
+  try { return await withBudget(() => use(get, cache)); }
   finally { if (cache?.dirty) cache.save(); }
 }
 
@@ -102,10 +103,10 @@ function fetchHammerPr(repo, prNumber, { withChecks = true, withReviews = false,
     (get, cache) => readHammerPr(repo, prNumber, { withChecks, withReviews, get, cache }));
 }
 
-async function* hammerCheckPages(get, repo, head, kind = 'check-runs', requireComplete = false) {
+async function* hammerCheckPages(get, repo, head, kind = 'check-runs', requireComplete = false, filter = 'all') {
   let total, seen = 0;
   for (let page = 1; ; page += 1) {
-    const payload = await get(`repos/${repo}/commits/${head}/${kind}?per_page=100&page=${page}${kind === 'check-runs' ? '&filter=all' : ''}`);
+    const payload = await get(`repos/${repo}/commits/${head}/${kind}?per_page=100&page=${page}${kind === 'check-runs' ? `&filter=${filter}` : ''}`);
     const rows = kind === 'check-runs' ? payload.check_runs : payload;
     if (!Array.isArray(rows)) throw new Error('Invalid check response');
     if (requireComplete) {
@@ -122,7 +123,7 @@ async function* hammerCheckPages(get, repo, head, kind = 'check-runs', requireCo
 }
 
 function fetchHammerValidationEvidence(repo, prNumber, head, use, options = {}) {
-  return withHammerPrReader(repo, prNumber, options, async (get, cache) => {
+  return withHammerPrReader(repo, prNumber, { ...options, optional: true }, async (get, cache) => {
     const read = path => {
       options.signal?.throwIfAborted();
       return get(path);
@@ -130,7 +131,7 @@ function fetchHammerValidationEvidence(repo, prNumber, head, use, options = {}) 
     const live = await read(`repos/${repo}/pulls/${prNumber}`);
     if (cache) retireStaleHead(cache, live.head?.sha ?? null);
     if (live.head?.sha !== head) return null;
-    return use(read, () => hammerCheckPages(read, repo, head, 'check-runs', true));
+    return use(read, () => hammerCheckPages(read, repo, head, 'check-runs', true, 'latest'), live.base?.sha);
   });
 }
 

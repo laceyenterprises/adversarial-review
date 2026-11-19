@@ -7260,11 +7260,20 @@ checks that require the local environment. Workflow-level `mirrored_by` lists
 alone are insufficient because a workflow can succeed with individual work
 skipped.
 
-The closer compares the loaded manifest with the GitHub copy at the exact
-validation head. Each listed job needs a completed `success` check run for
-that SHA. Missing, ambiguous, skipped, or unreadable evidence keeps the
-selected check local. GitHub reads use the same metered transport and ETag
-cache as the closer's PR reads. The private per-attempt receipt records local
+The closer requires byte-identical manifest copies in the checkout, at the exact
+validation head, and at the live PR's pinned base SHA. New or changed manifests,
+including edits to `ci_jobs` or `local_only`, stay local until they land on the
+base branch. Each listed job needs a completed `success` check run for
+that head SHA. Coverage reads request `filter=latest` so a successful retry
+supersedes its earlier attempt; duplicate names remaining in that response
+stay ambiguous. Missing, ambiguous, skipped, or unreadable evidence keeps the
+selected check local. An unconfirmed mirror skip probe also executes the original
+check locally and records its actual result.
+
+GitHub reads use the same metered transport and ETag cache as the closer's PR
+reads, in a non-urgent scope. They cannot consume the reserve below the polling
+floor: a budget deferral runs checks locally with reason `ci-budget-deferred`.
+The private per-attempt receipt records local
 results and `ci-covered` checks with their job names and run IDs.
 `close-result.json` includes those receipts under `localValidation` for both
 completed and stopped closes.

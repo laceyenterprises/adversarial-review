@@ -6,6 +6,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn, execFileSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
@@ -203,7 +204,7 @@ test('a local commit the PR lacks is published before verify-head; revalidation 
   assert.ok(firstVerify < yielded && yielded < validated && validated < secondVerify, events.join('\n'));
 });
 
-function mirrorFixture(t, { entries, runs, manifestFailure, checkFailure, partialChecks, localFailure, remoteDrift } = {}) {
+function mirrorFixture(t, { entries, runs, manifestFailure, checkFailure, partialChecks, localFailure, remoteDrift, baseDrift, baseFailure, subcontext, duplicateGlobs } = {}) {
   const f = hammerFixture(t);
   const dir = join(f.checkout, 'scripts/ci-mirror');
   const path = 'scripts/ci-mirror/checks.json';
@@ -212,57 +213,35 @@ function mirrorFixture(t, { entries, runs, manifestFailure, checkFailure, partia
   const manifest = { 'path-glob': { 'src/**': commands },
     'always-on-workflow-coverage': { 'fixture.yml': { mirrored_by: commands.map(check => check.name) } },
     'ratchet-placement': { 'local-only': { 'scripts/host-check.py': 'Requires local state' } } };
+  if (duplicateGlobs) manifest['path-glob']['src/*.mjs'] = commands;
   writeFileSync(join(f.checkout, path), JSON.stringify(manifest));
-  writeFileSync(join(dir, 'run-ci-mirror.py'), `import json
-import os
-from dataclasses import dataclass, replace
-from pathlib import Path
-
-@dataclass(frozen=True)
-class Check:
-    name: str
-    command: str
-    cwd: str | None = None
-    skip_reason: str = ""
-
-@dataclass
-class CheckResult:
-    status: str
-    reason: str = ""
-
-def load_manifest(path):
-    return [Check(row["name"], row["command"])
-            for row in json.loads(path.read_text())["path-glob"]["src/**"]]
-
-def run_check(check):
-    if check.skip_reason:
-        return CheckResult("skipped", check.skip_reason)
-    with open(os.environ["FIXTURE_LOCAL_CHECKS"], "a") as log:
-        print(check.command, file=log)
-    if check.name == os.environ.get("FIXTURE_LOCAL_FAILURE"):
-        return CheckResult("inconclusive", "synthetic timeout")
-    return CheckResult("pass")
-
-def main(args):
-    assert args == ["--", "src/example.mjs"]
-    results = [run_check(replace(check)) for check in load_manifest(Path("${path}"))]
-    return 75 if any(r.status == "inconclusive" for r in results) else 0
-
-if __name__ == "__main__":
-    raise SystemExit(main(__import__("sys").argv[1:]))
-`);
+  const subpath = 'scripts/ci-mirror/checks.adversarial-review.json';
+  const submanifest = { 'path-glob': { 'src/**': [
+    { name: 'sub-covered', command: 'fixture-command sub-covered', ci_jobs: ['build'] },
+    { name: 'sub-local', command: 'fixture-command sub-local' },
+  ] } };
+  if (subcontext) writeFileSync(join(f.checkout, subpath), JSON.stringify(submanifest));
+  writeFileSync(join(dir, 'run-ci-mirror.py'), readFileSync(join(root, 'test/fixtures/ci-mirror-contract.py')));
   const git = (...args) => execFileSync('git', args, { cwd: f.checkout, encoding: 'utf8',
     env: { ...process.env, GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_NOSYSTEM: '1' } }).trim();
   git('add', '--', 'scripts/ci-mirror');
   git('-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid', 'commit', '--no-verify', '-qm', 'Synthetic mirror');
   const head = git('rev-parse', 'HEAD');
+  const base = f.shas.head;
+  const content = (path, data) => ({ type: 'file', path, encoding: 'base64',
+    content: Buffer.from(JSON.stringify(data)).toString('base64') });
   const responses = {
-    'repos/fixture/repo/pulls/42': { head: { sha: head } },
+    'repos/fixture/repo/pulls/42': { head: { sha: head }, base: { sha: base } },
     [`repos/fixture/repo/contents/${path}?ref=${head}`]: manifestFailure ? null : {
       type: 'file', path, encoding: 'base64',
       content: Buffer.from(JSON.stringify(remoteDrift ? {} : manifest)).toString('base64'),
     },
-    [`repos/fixture/repo/commits/${head}/check-runs?per_page=100&page=1&filter=all`]: checkFailure || {
+    [`repos/fixture/repo/contents/${path}?ref=${base}`]: baseFailure ? null : content(path, baseDrift || manifest),
+    ...(subcontext ? {
+      [`repos/fixture/repo/contents/${subpath}?ref=${head}`]: content(subpath, submanifest),
+      [`repos/fixture/repo/contents/${subpath}?ref=${base}`]: content(subpath, submanifest),
+    } : {}),
+    [`repos/fixture/repo/commits/${head}/check-runs?per_page=100&page=1&filter=latest`]: checkFailure || {
       total_count: (runs || []).length + (partialChecks ? 1 : 0),
       check_runs: (runs || []).map(([name, overrides], index) => ({
         name, head_sha: head, status: 'completed', conclusion: 'success', app: { slug: 'github-actions' },
@@ -292,13 +271,20 @@ console.log('HTTP/2.0 200 OK\\nETag: "fixture"\\n\\n' + JSON.stringify(response)
   const run = extra => f.close({
     PATH: `${f.bin}:${process.env.PATH}`, FIXTURE_LIVE_HEAD: head,
     FIXTURE_NEEDS_REVALIDATION: '1', FIXTURE_REAL_VALIDATE: '1', FIXTURE_LOCAL_CHECKS: localChecks,
-    FIXTURE_LOCAL_FAILURE: localFailure,
+    FIXTURE_LOCAL_FAILURE: localFailure, FIXTURE_SUBCONTEXT: subcontext ? '1' : undefined,
     MERGE_AGENT_GH_TOKEN: 'synthetic-offline-token', MERGE_AGENT_GH_TOKEN_EXPIRES_AT: '2099-01-01T00:00:00Z',
     GHO_API_CALL_LOG_DISABLE: '1', GHO_RATE_LIMIT_SHARED_STATE_PATH: join(f.dir, 'quota.json'),
     ...extra,
   });
   const read = path => existsSync(path) ? readFileSync(path, 'utf8').trim().split('\n') : [];
   return { head, run, calls: () => read(calls).map(line => JSON.parse(line)),
+    lowBudget() {
+      const credential = `token-${createHash('sha256').update('synthetic-offline-token').digest('hex').slice(0, 24)}`;
+      writeFileSync(join(f.dir, 'quota.json'), JSON.stringify({ [`${credential}/core`]: {
+        credential, resource: 'core', remaining: 100, limit: 5000,
+        resetAt: new Date(Date.now() + 60_000).toISOString(), observedAt: Date.now(),
+      } }));
+    },
     local: () => read(localChecks), events: f.events,
     earlyAuditExists: () => existsSync(amaAuditFilePath(f.dir, 'fixture/repo', 42, f.shas.reviewed)) };
 }
@@ -332,9 +318,9 @@ test('the close skips only explicitly mapped, successful exact-head mirror check
     ['run', 'local-only'], ['run', 'ci-job-missing'], ['run', 'ci-job-ambiguous'],
     ['run', 'ci-job-identity-unverified'], ['run', 'local-only'],
   ]);
-  assert.equal(f.calls().length, 3);
+  assert.equal(f.calls().length, 4);
   assert.equal((await f.run()).status, 0);
-  assert.ok(f.calls().slice(3).every(call => call.includes('If-None-Match: "fixture"')));
+  assert.ok(f.calls().slice(4).every(call => call.includes('If-None-Match: "fixture"')));
 });
 
 test('a repository with workflow-level coverage alone runs the selected battery without coverage requests', async t => {
@@ -346,10 +332,69 @@ test('a repository with workflow-level coverage alone runs the selected battery 
   assert.equal(result.closeResult.localValidation[0].checks[0].reason, 'no-ci-mapping');
 });
 
+test('a non-matching skip probe executes the check locally and reports its actual failure', async t => {
+  const f = mirrorFixture(t, { entries: [['verify', { ci_jobs: ['build'] }]],
+    runs: [['build']], localFailure: 'verify' });
+  const result = await f.run({ FIXTURE_SKIP_REASON: 'prefixed: ci-covered' });
+  assert.equal(result.status, 75, result.stderr);
+  assert.deepEqual(f.local(), ['fixture-command verify']);
+  assert.deepEqual(result.closeResult.localValidation[0].checks, [{
+    name: 'verify', cwd: null, status: 'failed', reason: 'ci-evidence-unavailable',
+    result: 'inconclusive', localReason: 'synthetic timeout',
+  }]);
+});
+
+test('upstream signatures retain evidence across duplicate selection and submodule contexts', async t => {
+  const f = mirrorFixture(t, { entries: [['covered', { ci_jobs: ['build'] }]],
+    runs: [['build']], subcontext: true, duplicateGlobs: true });
+  const result = await f.run();
+  assert.equal(result.status, 0, result.stderr);
+  assert.deepEqual(f.local(), ['fixture-command sub-local']);
+  assert.deepEqual(result.closeResult.localValidation[0].checks.map(({ name, cwd, status }) => ({ name, cwd, status })), [
+    { name: 'covered', cwd: null, status: 'ci-covered' },
+    { name: 'sub-covered', cwd: 'tools/adversarial-review', status: 'ci-covered' },
+    { name: 'sub-local', cwd: 'tools/adversarial-review', status: 'run' },
+  ]);
+});
+
+test('a module-level mirror refusal preserves the environment failure without claiming coverage', async t => {
+  const f = mirrorFixture(t, { entries: [['covered', { ci_jobs: ['build'] }]], runs: [['build']] });
+  const result = await f.run({ FIXTURE_IMPORT_EXIT: '76' });
+  assert.equal(result.status, 0, result.stderr);
+  assert.deepEqual(f.local(), []);
+  assert.deepEqual(result.closeResult.localValidation[0].checks.map(row => [row.status, row.reason, row.exitStatus]), [
+    ['failed', 'canonical-runner-environment-unavailable', 76],
+  ]);
+});
+
+test('coverage reads preserve the reserved budget and fall back locally below the polling floor', async t => {
+  const f = mirrorFixture(t, { entries: [['verify', { ci_jobs: ['build'] }]], runs: [['build']] });
+  f.lowBudget();
+  const result = await f.run();
+  assert.equal(result.status, 0, result.stderr);
+  assert.deepEqual(f.calls(), []);
+  assert.deepEqual(f.local(), ['fixture-command verify']);
+  assert.equal(result.closeResult.localValidation[0].checks[0].reason, 'ci-budget-deferred');
+});
+
+test('PR changes to local-only markers or CI mappings cannot grant coverage', async t => {
+  for (const fields of [{ local_only: true, ci_jobs: ['build'] }, { ci_jobs: ['trusted'] }]) {
+    const f = mirrorFixture(t, { entries: [['verify', { ci_jobs: ['build'] }]], runs: [['build']],
+      baseDrift: { 'path-glob': { 'src/**': [{ name: 'verify', command: 'fixture-command verify', ...fields }] } } });
+    const result = await f.run();
+    assert.equal(result.status, 0, result.stderr);
+    assert.deepEqual(f.local(), ['fixture-command verify']);
+    assert.equal(result.closeResult.localValidation[0].checks[0].reason, 'manifest-base-mismatch');
+    assert.ok(f.calls().every(call => !call[1].includes('/check-runs')));
+  }
+});
+
 test('unreadable evidence, changed manifests and the off switch retain local validation and its failure outcome', async t => {
   const scenarios = [
     [{ manifestFailure: true }, {}, 'manifest-read-failed'],
     [{ remoteDrift: true }, {}, 'manifest-head-mismatch'],
+    [{ baseDrift: {} }, {}, 'manifest-base-mismatch'],
+    [{ baseFailure: true }, {}, 'manifest-read-failed'],
     [{ checkFailure: true }, {}, 'ci-check-read-failed'],
     [{ checkFailure: 'unauthorized' }, {}, 'ci-check-read-failed'],
     [{ partialChecks: true }, {}, 'ci-check-read-failed'],

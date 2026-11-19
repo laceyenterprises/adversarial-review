@@ -7,6 +7,16 @@ const mirrorDir = 'scripts/ci-mirror';
 const manifestName = /^checks(?:\.[\w-]+)?\.json$/;
 const manifestLimit = 1024 * 1024;
 
+async function manifestBytes(get, repo, path, ref) {
+  const remote = await get(`repos/${repo}/contents/${path}?ref=${ref}`);
+  if (remote.type !== 'file' || remote.path !== path || remote.encoding !== 'base64'
+    || typeof remote.content !== 'string') throw new Error('Invalid manifest response');
+  const encoded = remote.content.replace(/\r?\n/g, '');
+  const decoded = Buffer.from(encoded, 'base64');
+  if (decoded.toString('base64') !== encoded) throw new Error('Invalid manifest encoding');
+  return decoded;
+}
+
 function declarations(bytes) {
   const manifest = JSON.parse(bytes);
   const globs = manifest['path-glob'];
@@ -76,21 +86,21 @@ export async function hammerValidationCoverage({ root, repo, prNumber, head, ena
   if (hasMapping) {
     const timeoutMs = 20_000;
     try {
-      const evidence = await fetchHammerValidationEvidence(repo, prNumber, head, async (get, pages) => {
+      const evidence = await fetchHammerValidationEvidence(repo, prNumber, head, async (get, pages, base) => {
+        if (!/^[a-f\d]{40}$/.test(base || '')) throw new Error('Invalid base SHA');
         let verifiedMapping = false;
         for (const [path, manifest] of manifests) {
           if (![...manifest.checks.values()].some(check => check.jobs)) continue;
           try {
-            const remote = await get(`repos/${repo}/contents/${path}?ref=${head}`);
-            if (remote.type !== 'file' || remote.path !== path || remote.encoding !== 'base64'
-              || typeof remote.content !== 'string') throw new Error('Invalid manifest response');
-            const encoded = remote.content.replace(/\r?\n/g, '');
-            const decoded = Buffer.from(encoded, 'base64');
-            if (decoded.toString('base64') !== encoded) throw new Error('Invalid manifest encoding');
+            const decoded = await manifestBytes(get, repo, path, head);
             if (!manifest.bytes.equals(decoded)) {
               manifest.reason = 'manifest-head-mismatch';
+            } else if (!decoded.equals(await manifestBytes(get, repo, path, base))) {
+              manifest.reason = 'manifest-base-mismatch';
             } else verifiedMapping = true;
-          } catch { manifest.reason = 'manifest-read-failed'; }
+          } catch (error) {
+            manifest.reason = error?.budgetDeferred ? 'ci-budget-deferred' : 'manifest-read-failed';
+          }
         }
         if (verifiedMapping) {
           const checks = [];
@@ -101,7 +111,7 @@ export async function hammerValidationCoverage({ root, repo, prNumber, head, ena
       }, { env, signal: AbortSignal.timeout(timeoutMs), credentialDeadlineMs: Date.now() + timeoutMs });
       if (evidence === null) checkReadFailure = 'live-head-mismatch';
       else rows = evidence;
-    } catch { checkReadFailure = 'ci-check-read-failed'; }
+    } catch (error) { checkReadFailure = error?.budgetDeferred ? 'ci-budget-deferred' : 'ci-check-read-failed'; }
   }
 
   return {

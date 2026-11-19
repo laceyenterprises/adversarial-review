@@ -42,8 +42,10 @@ requires the existing scan-before-exact-key lookup: adopt the matching admitted
 launch or release proven absent submission under the owner fence. Merge-lane
 inspection reports liveness without mutation; acquisition and reaper observation
 reclaim dead local holders through the existing fenced stale-reclaim writer. Unknown local identity retains custody; age is a foreign-host fallback.
-After confirmed merge, settle both leases and the closing audit before scratch
-cleanup. An ended controller's confirmed-merged closeout is local recovery,
+After confirmed merge, settle both leases and record the merge audit. Scratch
+retirement and worker teardown can race delivery of the GitHub closing comment.
+The launch's closing-comment command reads durable evidence outside scratch.
+An ended controller's confirmed-merged lease closeout is local recovery,
 without another PR-bound dispatch or operator decision.
 Each new closer intent uses a distinct worker ID containing PR, head and a
 random attempt suffix. Terminal launch/retry-chain evidence releases closure
@@ -3762,11 +3764,28 @@ prompt-driven worker behavior, not predicate gates — the audit comment and the
    reviews. Remediators and the hammer update only owners the change actually
    affects as part of landing it. Owners with no declarations yet need not add
    them in an unrelated PR; at most leave a non-blocking note.
-4. **Post a closing comment.** On a confirmed merge the hammer posts a
-   `✅ Closed by Hammer` comment with the merged SHA, merge method, remediated
-   finding counts, the failing tests it fixed, doc-currency work or skipped
-   superproject-doc obligations, and the rebase-attempt count. The terminal
-   remediation audit-comment path resolves the post-remediation PR head and
+4. **Post a closing comment.** After the close controller drains successfully,
+   the launcher runs `node bin/hammer-closing-comment.mjs OWNER/REPO PR HQ_ROOT`.
+   Delivery failure preserves the controller's result and exit status. The
+   same native launch can rerun the helper from a fresh shell to recover.
+   It requires the run's `hammer-progress/<run-id>/outcome.json` to prove its own
+   merge, a matching launch-bound successful AMA audit attempt with passing
+   exact-head gate and predicate evidence, fresh GitHub confirmation of the PR,
+   head, merge SHA and timestamp, and readable evidence that the PR no longer
+   holds its base-lane merge lease. It uses the entitled hammer identity.
+   The `✅ Closed by Hammer` comment reports the recorded merge method, validation
+   status, remediated findings, test fixes and rebase count. Doc-currency comes
+   from the authenticated exact-head pre-merge audit when available. Optional
+   details without evidence are marked `unrecorded`.
+
+   Concurrent deliveries from the same run serialize on the merge receipt.
+   A retry rereads all comment pages and checks for a hammer-authored marker for
+   the exact head and merge SHA or an identifiable legacy closing comment.
+   An unknown write result permits a later lookup, with no automatic POST retry.
+   Missing or inconsistent evidence leaves delivery unconfirmed. The helper
+   only posts the comment and has no lease release or merge operation.
+
+   The pre-merge terminal-remediation audit-comment path resolves the post-remediation PR head and
    checks for an existing same-head audit comment with bounded transient retries;
    unresolved lookup failures fail closed instead of posting duplicate audit
    evidence. The parser still expects the hammer to list changed file paths for

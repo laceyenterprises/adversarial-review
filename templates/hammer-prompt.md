@@ -10,6 +10,9 @@ merge with HAM provenance; the machine gate is mandatory.
 Run phase scripts as instructed; follow exit codes and stderr.
 Never inspect their source. If unclear, stop with printed reason.
 
+After a merge or when the close command may have merged, go directly to
+mandate 7's closing-comment command before any scratch check.
+
 Before PR reads/edits, check existence only. Missing scripts require fresh
 AMA dispatch/lease; never reconstruct:
 
@@ -23,8 +26,8 @@ fi
 ```
 
 Initialize `inputs.sh` once per Appendix A before edits. Guard and source it
-in every shell/resume to resolve/export `HAM_NODE_BIN`. Never replace missing
-inputs after edits.
+in every pre-merge shell/resume to resolve/export `HAM_NODE_BIN`. Never replace
+missing inputs after edits.
 
 ```bash
 test -f "<<RUN_DIR>>/inputs.sh" || {
@@ -50,7 +53,8 @@ After failure, follow only the explicit conflict/deferred paths below.
    exits 21 before absent-CI waits), revalidates, publishes the audit, waits
    for exact-head CI, runs Appendix E's predicate and merges. Its result
    `stage` names the phase in the table below.
-4. **After merge:** confirm the live merged head and finish Appendix E's closing audit.
+4. **After merge:** check closing-comment delivery and recover with mandate 7
+   if needed.
 
 ### Phase → exit code → next action
 
@@ -58,12 +62,12 @@ The close command's `close-result.json` `stage` is the phase; `status` is its ex
 
 | Phase | Exit code | Next action |
 | --- | --- | --- |
-| any | 0 | Outcome `merged`: confirm the exact validated head merged and finish closing audit (Appendix E). |
+| any | 0 | `HAM closing comment` with `posted` or `already-posted` completes closeout. A missing or unconfirmed delivery goes to mandate 7, even if scratch disappeared. |
 | verify-head | 20 | Stop with the printed named outcome. Preserve parked/deferred audits and retry semantics (Appendix B, mandate 0b); `already-merged` goes to confirmed closeout, never remediation. `ci-infrastructure` stops without HQ decision. |
 | verify-head / merge | 21 | Run **Appendix D — Resolving merge conflicts**, starting with its lease-state query/release block. Repair, commit, then rerun the close command. |
 | publish | nonzero | Stop; preserve pushed-head provenance and the named failure. No merge or source re-review. |
 | local-validation | nonzero | Failed tests: repair, commit and rerun the close command, or release for another hammer pass. |
-| merge | 20 / 75 / other nonzero | Stop with printed outcome. Preserve retryable deferrals such as `lane-busy`; if merge may have been accepted, reconcile authoritative live state, never retry mutation blindly (Appendix E). |
+| merge | 20 / 75 / other nonzero | Stop with printed outcome. Preserve retryable deferrals such as `lane-busy`; if merge may have been accepted, run mandate 7 to reconcile the closing comment. Never retry the merge blindly. |
 | other | nonzero | Stop with the printed reason; 75 is a retryable deferral. Release/audit via the stop conditions below. |
 
 ### Observe lease state
@@ -807,13 +811,22 @@ gates. A permanent history failure ends the run with its classified reason.
    `gh pr merge --match-head-commit <validated-post-remediation-sha>`, and only
    while holding the merge lease. No merge is allowed without the lease. Release
    the lease after the merge is confirmed or on any hard-block/terminal outcome.
-7. **Post a CLOSING comment after the merge confirms.** Re-read GitHub to prove
-   the validated head merged, then post once on PR <<PR_URL>>. Include
-   `Hammer route: verified validated head`, lease held/released, base SHA rebased
-   onto, exact-head remote CI result, merged SHA, merge method, remediated counts
-   (blocking / non-blocking), failing tests fixed to keep `main` green (or
-   "suite already green"), and `Closed-By: hammer (adversarial-pipe-mode)`.
-   This audit is required after every successful autonomous merge.
+7. **Recover an unconfirmed closing comment.** The close launcher attempts
+   delivery after its controller drains. If delivery remains unconfirmed, run
+   this directly in the same native launch. It reads the durable merge proof and
+   audit, checks live GitHub and the merge lane, then posts the recorded facts.
+   It can run even when `inputs.sh`, `close-result.json`, or the scratch directory
+   disappeared.
+
+   ```bash
+   source "<<ROOT_DIR>>/bin/hammer-node-runtime.sh" || exit 1
+   "$HAM_NODE_BIN" "<<ROOT_DIR>>/bin/hammer-closing-comment.mjs" "<<REPO>>" "<<PR_NUMBER>>" "<<HQ_ROOT>>"
+   ```
+
+   `posted` and `already-posted` complete closeout. On unconfirmed delivery,
+   rerun only this command once. When proof is missing or inconsistent, report
+   the printed reason. Do not reconstruct inputs, rerun the close command, or
+   write a closing comment from memory.
 
 ## Appendix C — Commit, publish and revalidate
 

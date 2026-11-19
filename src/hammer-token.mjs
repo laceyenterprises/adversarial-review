@@ -93,7 +93,8 @@ function warnProactiveFailure(outcome) {
 // phase may resume after an arbitrarily long CI wait. A failed proactive
 // refresh keeps a held token; only the refresh after a rejection must succeed.
 function tokenContext(options) {
-  const { credentialEnv = options.env || process.env, hammerToken = false, ...childOptions } = options;
+  const { credentialEnv = options.env || process.env, hammerToken = false,
+    reportAuthFailure = reportHammerEarlyFailure, ...childOptions } = options;
   delete childOptions.credentialDeadlineMs;
   const variable = ENTITLED_VARS.find(key => credentialEnv[key] || credentialEnv[`${key}_REFRESH_COMMAND`])
     || ['GH_TOKEN', 'GITHUB_TOKEN'].find(key => credentialEnv[key]);
@@ -102,7 +103,7 @@ function tokenContext(options) {
   const entitled = ENTITLED_VARS.some(key => credentialEnv[key] || credentialEnv[`${key}_REFRESH_COMMAND`]);
   const managed = Boolean(hammerToken || (credentialEnv.HAM_ROOT_DIR && entitled))
     && (entitled || Boolean(command));
-  return { credentialEnv, childOptions, variable, command, managed };
+  return { credentialEnv, childOptions, variable, command, managed, reportAuthFailure };
 }
 
 // Scope Git's credential helper to this child, preserving other inline config.
@@ -154,7 +155,7 @@ export function withHammerGitSync(execute, options) {
 }
 
 export function hammerTokenSession(options = {}) {
-  const { credentialEnv, childOptions, variable, command, managed } = tokenContext(options);
+  const { credentialEnv, childOptions, variable, command, managed, reportAuthFailure } = tokenContext(options);
   const launchToken = variable && credentialEnv[variable];
   const launchExpiry = variable && credentialEnv[`${variable}_EXPIRES_AT`];
   const cached = refreshedCredentials.get(credentialEnv);
@@ -269,7 +270,7 @@ export function hammerTokenSession(options = {}) {
         if (!command) throw failure('unavailable (no launch refresh command)');
         return refreshWithRetry()?.token;
       } catch (error) {
-        reportHammerEarlyFailure(GIT_CREDENTIAL_REFRESH_FAILED, { env: credentialEnv });
+        reportAuthFailure(GIT_CREDENTIAL_REFRESH_FAILED, { env: credentialEnv });
         const refused = new Error(GIT_CREDENTIAL_REFRESH_FAILED);
         const refusal = definitiveRefreshRefusal(error);
         if (refusal) refused.refreshRefusal = refusal;
@@ -303,13 +304,13 @@ export function hammerTokenSession(options = {}) {
       if (forced) {
         forced = false;
         try { refresh(refreshTimeout()); } catch (error) {
-          reportHammerEarlyFailure(mintFailureReason(error), { env: credentialEnv });
+          reportAuthFailure(mintFailureReason(error), { env: credentialEnv });
           throw error;
         }
       } else if (!held || !expiresLater(expiresAt)) {
         try { refresh(refreshTimeout()); } catch (error) {
           if (!held || definitiveRefreshRefusal(error)) {
-            reportHammerEarlyFailure(mintFailureReason(error), { env: credentialEnv });
+            reportAuthFailure(mintFailureReason(error), { env: credentialEnv });
             throw error;
           }
           warnProactiveFailure(error.refreshOutcome);
@@ -321,7 +322,7 @@ export function hammerTokenSession(options = {}) {
       if (!managed) throw error;
       if (!credentialRejected(error)) throw redact(error);
       if (retried || !command) {
-        reportHammerEarlyFailure('credential-refresh-failed', { env: credentialEnv });
+        reportAuthFailure('credential-refresh-failed', { env: credentialEnv });
         throw failure(retried ? 'succeeded, but GitHub rejected the retried call' : 'unavailable (no launch refresh command)');
       }
       retried = true;

@@ -315,7 +315,8 @@ test('every concrete hammer prompt helper call executes against the real helper 
       'hammer-base-head.mjs', 'hammer-controller.mjs', 'guard-forbidden-paths.mjs', 'hammer-edit-plan.mjs',
       'dispute-finding.mjs', 'stacked-base-check.mjs', 'hammer-pr-read.mjs', 'hammer-progress.mjs',
       'hammer-conflict-primary.mjs', 'hammer-predicate-inputs.mjs', 'hammer-claim-head.mjs',
-      'primary-change-context.mjs', 'ama-check.mjs', 'hammer-close.sh', 'hammer-conflict-repair.sh']);
+      'primary-change-context.mjs', 'ama-check.mjs', 'hammer-close.sh', 'hammer-conflict-repair.sh',
+      'hammer-closing-comment.mjs']);
     for (const name of names) {
       assert.ok(known.has(name), `add a real-helper fixture for ${name} at prompt line ${line}`);
       seen.add(name);
@@ -363,6 +364,13 @@ test('every concrete hammer prompt helper call executes against the real helper 
         const result = await f.execute(invocation, overrides);
         const detail = `prompt line ${line}: ${command}\n${result.stderr}\n${result.stdout}`;
         assert.equal(result.error, undefined, detail);
+        if (names.includes('hammer-closing-comment.mjs')) {
+          // Before the fixture has merged, the real recovery command must stop
+          // at the missing durable outcome, before any GitHub operation.
+          assert.equal(result.status, 1, detail);
+          assert.match(result.stderr, /^hammer-closing-comment: merge-proof-unavailable\n$/, detail);
+          return;
+        }
         assert.doesNotMatch(result.stderr, /usage:|ENOENT|command not found|unknown (?:argument|option)/i, detail);
         assert.doesNotMatch(result.stdout, /"(?:reason|reasonCode)"\s*:\s*"[^"]*-invalid"/, detail);
         assert.equal(result.status, 0, detail);

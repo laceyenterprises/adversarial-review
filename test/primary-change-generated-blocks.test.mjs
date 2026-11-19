@@ -366,6 +366,78 @@ test('optional checkout reads resolve nested files and distinguish absent paths 
   });
 });
 
+test('missing candidate markers skip checkout with a block-read diagnostic', async t => {
+  const f = fixture(t, { markerEdit: true });
+  const warnings = [];
+  t.mock.method(console, 'warn', message => warnings.push(message));
+  let checkouts = 0, generatorRuns = 0;
+  const proofs = await proveGeneratedBlocks(f.args, f.evidence, {
+    path: 'docs/guide.md', missingEvidence: { evidence: 'reversal-authorization', regions: [{ start: 3, end: 3 }] },
+  }, {
+    checkoutImpl: (args, operation) => withDerivedCheckout(args, context => operation({
+      ...context, checkout: async options => { checkouts++; return context.checkout(options); },
+    })),
+    runGeneratorImpl: () => { generatorRuns++; },
+  });
+  assert.deepEqual(proofs, []);
+  assert.equal(checkouts, 0);
+  assert.equal(generatorRuns, 0);
+  assert.equal(warnings.length, 1);
+  assert.equal(JSON.parse(warnings[0].split('proof skipped: ')[1]).reason, 'block-read-failed');
+});
+
+test('missing base and regenerated markers retain the refusal', async t => {
+  const f = fixture(t);
+  const warnings = [];
+  t.mock.method(console, 'warn', message => warnings.push(message));
+  const refusal = {
+    path: 'docs/guide.md', missingEvidence: { evidence: 'reversal-authorization', regions: [{ start: 3, end: 3 }] },
+  };
+  let checkouts = 0;
+  const missingBase = await proveGeneratedBlocks(f.args, f.evidence, refusal, {
+    checkoutImpl: (args, operation) => withDerivedCheckout(args, context => operation({
+      ...context,
+      show: async (ref, path, options) => {
+        const text = await context.show(ref, path, options);
+        return ref === f.evidence.mergeBase && path === refusal.path ? text.replace(start, 'missing start') : text;
+      },
+      checkout: async options => { checkouts++; return context.checkout(options); },
+    })),
+  });
+  assert.deepEqual(missingBase, []);
+  assert.equal(checkouts, 0);
+  const missingOutput = await proveGeneratedBlocks(f.args, f.evidence, refusal, {
+    runGeneratorImpl: async args => {
+      await offlineGenerator(args);
+      const path = join(args.scratch, args.cwd, refusal.path);
+      writeFileSync(path, readFileSync(path, 'utf8').replace(end, 'missing end'));
+    },
+  });
+  assert.deepEqual(missingOutput, []);
+  assert.deepEqual(warnings.map(message => JSON.parse(message.split('proof skipped: ')[1]).reason),
+    ['block-read-failed', 'block-output-failed']);
+});
+
+test('checkout with an omitted primary head fetches defined refs only', async t => {
+  const f = fixture(t);
+  await withDerivedCheckout({ ...f.args, mergeBase: f.evidence.mergeBase }, async ({ checkout, tree }) => {
+    await checkout({ includePrimary: true });
+    assert.equal(readFileSync(join(tree, 'docs/guide.md'), 'utf8').includes('Base row'), true);
+  });
+});
+
+test('a matching URL among multiple local origins identifies the repository', async t => {
+  const f = fixture(t);
+  execFileSync('git', ['config', '--local', '--add', 'remote.origin.url', 'https://github.com/other/repository.git'],
+    { cwd: f.root });
+  execFileSync('git', ['config', '--local', '--add', 'remote.origin.url', 'git@github.com:fixture/repository.git'],
+    { cwd: f.root });
+  await withDerivedCheckout({ ...f.args, localRepository: undefined, rootDir: f.root,
+    mergeBase: f.evidence.mergeBase }, async ({ show }) => {
+    assert.equal((await show(f.evidence.headSha, 'docs/guide.md')).includes('Base row'), true);
+  });
+});
+
 test('missing or incomplete local clone references fail closed without a network fallback', async t => {
   const f = fixture(t);
   const identity = { ...f.args, mergeBase: f.evidence.mergeBase, rootDir: undefined };

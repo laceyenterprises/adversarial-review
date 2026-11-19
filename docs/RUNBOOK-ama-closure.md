@@ -5160,6 +5160,8 @@ modified text files qualify; additions, deletions, renames and opaque files keep
 their existing rules.
 Each matching declaration is evaluated independently: missing or ambiguous markers
 and generator failures skip that candidate without discarding other proofs.
+Missing markers raise a block read or output failure before any candidate checkout
+when found in the base or final-head blob.
 If no declaration supplies a proof, skipped candidates emit one bounded diagnostic
 naming the artifact path and a fixed failure stage/reason. A successful proof
 suppresses skip warnings from other candidates. Missing or non-directory working
@@ -5168,7 +5170,8 @@ preservation evidence.
 
 On a region refusal, shared primary-change collection reads exact regular-file
 Git blobs from `localRepository`, the domain's `remediationCloneReferences[repo]`,
-or a `rootDir` checkout whose raw GitHub origin matches the subject. It checks
+or a `rootDir` checkout with at least one locally configured GitHub origin URL
+matching the subject. It checks
 the artifact, declarations and eligible regions before fetching or checking out
 a tree. Proof retries issue no GitHub manifest requests. Missing or unreadable
 references and objects retain the refusal. Git cannot lazily fetch missing

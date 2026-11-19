@@ -450,10 +450,12 @@ export async function withDerivedCheckout({ repo, rootDir, headSha, mergeBase, p
       try { source = loadDomainConfig(rootDir, 'code-pr')?.remediationCloneReferences?.[repo]; } catch { /* Optional reference. */ }
       if (!source) {
         try {
-          const origin = (await readGit('-C', rootDir, 'config', '--local', '--get-all', 'remote.origin.url')).toString('utf8').trim();
-          const owningRepo = /^(?:git@github\.com:|ssh:\/\/git@github\.com\/|https:\/\/github\.com\/)([\w.-]+\/[\w.-]+)$/i
-            .exec(origin.replace(/\.git$/, ''))?.[1];
-          if (owningRepo?.toLowerCase() === repo.toLowerCase()) source = rootDir;
+          const origins = (await readGit('-C', rootDir, 'config', '--local', '--get-all', 'remote.origin.url')).toString('utf8');
+          if (origins.split(/\r?\n/).some(origin => {
+            const owningRepo = /^(?:git@github\.com:|ssh:\/\/git@github\.com\/|https:\/\/github\.com\/)([\w.-]+\/[\w.-]+)$/i
+              .exec(origin.trim().replace(/\.git$/, ''))?.[1];
+            return owningRepo?.toLowerCase() === repo.toLowerCase();
+          })) source = rootDir;
         } catch { /* No local checkout for this subject. */ }
       }
     }
@@ -485,7 +487,7 @@ export async function withDerivedCheckout({ repo, rootDir, headSha, mergeBase, p
         return;
       }
       await git('init', '--bare', '-q', 'objects.git');
-      const checkoutRefs = new Set([headSha, mergeBase, ...(includePrimary ? [primaryHead] : [])]);
+      const checkoutRefs = new Set([headSha, mergeBase, ...(includePrimary ? [primaryHead] : [])].filter(Boolean));
       await git('--git-dir=objects.git', 'fetch', '--quiet', '--no-auto-maintenance', '--no-tags', '--depth=1',
         source, ...checkoutRefs);
       await git('--git-dir=objects.git', 'worktree', 'add', '--quiet', '--detach', tree, headSha);

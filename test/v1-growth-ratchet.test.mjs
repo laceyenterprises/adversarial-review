@@ -31,12 +31,24 @@ test('V1RATCHET-01: counts net non-test hunk lines per first matching subsystem'
 });
 
 test('V1RATCHET-01: only a fix that grows a pack-owned subsystem is asked for the matching deletion', () => {
-  assert.ok(isFixTitle('[codex] (fix) X-01: thing') && isFixTitle('fix: thing') && !isFixTitle('[codex] (feat) X-01: fixture'));
+  for (const title of [
+    '[codex] (fix) X-01: thing',
+    'fix: thing',
+    '[codex] fix: resolve null pointer in auth middleware (LAC-17)',
+    '[claude-code] fix(ama): close lease on error',
+    '[clio-agent] hotfix: repair merge',
+    '[codex] bugfix(api): repair request',
+  ]) assert.equal(isFixTitle(title), true, title);
+  for (const title of ['[codex] (feat) X-01: fixture', '[codex] feat: fix auth', '[codex] fixture: update']) {
+    assert.equal(isFixTitle(title), false, title);
+  }
   const fix = formatV1GrowthContext({ diff: DIFF, repo: REPO, title: '[codex] (fix) X-01: y', ratchet: RATCHET });
   assert.match(fix, /## V1 growth \(audited, not gated\)/);
   assert.match(fix, /`owned-v1` \(owned by pack PAK\): \+7\/-2, net \+5/);
   assert.match(fix, /`unowned-v1` \(no owning pack\): \+1\/-5, net -4/);
   assert.match(fix, /owned-v1 \+5 for PAK.*matching deletion.*PAK ticket.*never a finding and never a verdict change/s);
+  const taggedFix = formatV1GrowthContext({ diff: DIFF, repo: REPO, title: '[claude-code] fix(ama): close lease on error', ratchet: RATCHET });
+  assert.match(taggedFix, /matching deletion/);
   const feat = formatV1GrowthContext({ diff: DIFF, repo: REPO, title: '(feat) y', ratchet: RATCHET });
   assert.match(feat, /net \+5/);
   assert.doesNotMatch(feat, /matching deletion/);

@@ -38,7 +38,9 @@ export function measureV1Growth(diff, repo, ratchet) {
 }
 
 export function isFixTitle(title) {
-  return /\((?:fix|bugfix|hotfix)\)|^\s*(?:fix|hotfix)\b/i.test(String(title || ''));
+  const untagged = String(title || '').replace(/^\s*(?:\[[^\]\r\n]+\]\s*)+/, '');
+  return /\((?:fix|bugfix|hotfix)\)/i.test(untagged)
+    || /^\s*(?:fix|bugfix|hotfix)(?:\([^)\r\n]+\))?(?=\s|:|$)/i.test(untagged);
 }
 
 export function formatV1GrowthContext({ diff, repo, title, ratchet }) {

@@ -4,11 +4,12 @@
 
 The reviewer simplicity check gains the V1 growth ratchet that the 2026-11-11
 architecture review (§10.1) and the 2026-11-18 audit (§8 item 7) proposed.
-It is audited, not gated. Each code-pr review now carries a short
+It is audited, not gated. The reviewer prompt's extra context carries a short
 `## V1 growth (audited, not gated)` section with net non-test lines per frozen
-V1 subsystem. When a fix grows a subsystem that a pack owns, the reviewer's
-optional `## Simplicity and cost (advisory)` section asks for the matching
-deletion or for the fix to move into that pack's ticket.
+V1 subsystem; that section is not posted in the GitHub review. When a fix grows
+a subsystem that a pack owns, the prompt asks the reviewer to use the optional
+`## Simplicity and cost (advisory)` section in the posted review to request a
+matching deletion or a move into that pack's ticket.
 
 ## Interface changes
 
@@ -26,3 +27,7 @@ deletion or for the fix to move into that pack's ticket.
 `node test/run-tests.mjs` ran on the new test and every test file that touches
 the reviewer prompt, the domain config or the simplicity guidance: 67 files,
 1,853 passed, 0 failed.
+
+Remediation: `node --test test/v1-growth-ratchet.test.mjs` passed (3 tests);
+`npm run lint` passed (0 errors), `npm run typecheck:contracts` passed, and
+`git diff --check` passed.

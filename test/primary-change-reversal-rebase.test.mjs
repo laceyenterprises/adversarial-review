@@ -1303,6 +1303,38 @@ test('REVERSALPARENT-01: captured refusals retain their independent proof fences
   }
 });
 
+test('LAC-2221: a rebased builder plus intervening remediation is a different reviewed-parent patch', () => {
+  const { evidence, path } = JSON.parse(readFileSync(
+    new URL('./fixtures/reversalparent/agent-os-11134.json', import.meta.url), 'utf8'));
+  const check = () => checkPrimaryChange(evidence, evidence.headSha, { strictNonBlockingRemediation: true });
+  const refusal = check();
+  assert.equal(refusal.reason, 'primary-change-reverted');
+  assert.equal(refusal.path, path);
+  assert.deepEqual(refusal.missingEvidence.regions, [{ start: 27, end: 28 }]);
+  assert.equal(refusal.missingEvidence.accepted, 0);
+  assert.deepEqual(refusal.missingEvidence.rejected, [2, 3].map(finding => ({
+    commit: evidence.headSha, review: 'PRR_kwDOR6Em7c8AAAABY_Rxjg', finding,
+    kind: 'non-blocking', reason: 'reviewed-parent-patch-differs',
+  })));
+
+  // Isolate the hydration path to check the citation and content independently.
+  // This projection omits the real document delta and cannot prove closure.
+  const [authorization] = evidence.reversalAuthorizations;
+  evidence.primaryFiles = evidence.primaryFiles.filter(file => file.filename === path);
+  evidence.finalFiles = evidence.finalFiles.filter(file => file.filename === path);
+  authorization.parentFiles = evidence.primaryFiles;
+  assert.equal(check().ok, true);
+  assert.equal(checkPrimaryChange(evidence, evidence.headSha).ok, false);
+
+  // Finding 3 is about the README and cannot cover the hydration reversal.
+  authorization.commit.commit.message = authorization.commit.commit.message
+    .replace(/^Reversal-Authorized-By: .* finding=2 kind=non-blocking\n/m, '');
+  const uncovered = check();
+  assert.equal(uncovered.reason, 'primary-change-reverted');
+  assert.deepEqual(uncovered.missingEvidence.rejected.map(({ finding, reason }) => [finding, reason]),
+    [[3, 'not-covered-by-cited-finding']]);
+});
+
 test('REVAUTHVERIFY-01: current non-blocking finding authorizes reversal of an earlier hammer edit', async () => {
   const { evidence, result } = await collect(earlierHammerOptions());
   assert.equal(result.ok, true);

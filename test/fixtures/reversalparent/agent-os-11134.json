@@ -1,0 +1,112 @@
+{
+  "path": "modules/main-catchup/lib/python/main_catchup/paddock_runtime_hydration.py",
+  "evidence": {
+    "headSha": "915cba0a3a66fd003d120859f176e2f51f9baf96",
+    "hasHammerCommits": true,
+    "mergeBase": "3d160b97e222c4c23922abbc331f57bb04734627",
+    "primaryHead": "b9f4b1cadf399dd07902df78823fc7715b357d63",
+    "primaryFiles": [
+      {
+        "filename": "modules/main-catchup/lib/python/main_catchup/paddock_runtime_hydration.py",
+        "status": "modified",
+        "additions": 1,
+        "deletions": 2,
+        "patch": "@@ -24,8 +24,7 @@\n TREE = dh.HydratedTree(TREE_NAME, HOST_ROOT, ())\n INPUTS = (\n     HOST_ROOT,\n-    \"platform/app-sdk/python/pyproject.toml\",\n-    \"platform/app-sdk/python/releases\",\n+    \"platform/app-sdk/python\",\n     \"tools/paddock\",\n )\n INSTALLER = f\"{HOST_ROOT}/scripts/install_runtime.py\""
+      },
+      {
+        "filename": "docs/data-model/18-peripheral-service-stores.md",
+        "status": "modified",
+        "additions": 9,
+        "deletions": 3,
+        "patch": "@@ -5392,19 +5392,25 @@ review pipeline while the private harness manifest remains ARF-owned state.\n \n `runtime_home()/.agent-os/paddock-runtime` (or the configured\n `PADDOCK_RUNTIME_ROOT`) belongs to the registered gym runtime account.\n-`modules/paddock-host/scripts/install_runtime.py` is its only installer writer.\n+Source of truth: `modules/paddock-host/scripts/install_runtime.py` is its only\n+installer writer.\n An exclusive `.install.lock` serializes builds and pointer publication. Each\n `releases/<agent-os-commit>-<paddock-gitlink-commit>/runtime.json` records:\n \n | Field | Meaning |\n |---|---|\n | `agentOsCommit` | Exact archived Agent OS host adapter revision |\n | `agentpaddockCommit` | Exact public Paddock gitlink from that revision |\n+| `sdk` | Object identifying the SDK built from the reviewed Agent OS source |\n+| `sdk.sourceCommit` | Full Agent OS source commit; equals `agentOsCommit` |\n+| `sdk.version` | Declared version from the archived SDK's `pyproject.toml` |\n+| `sdk.requirement` | Exact `agent-os-app-sdk==<version> --hash=sha256:<digest>` requirement for the built SDK wheel |\n | `python` | Selected managed host interpreter; other fleet dependencies remain there |\n \n The release retains built wheels, exact generated SHA-256 `requirements.txt`,\n-installed distributions under `lib/python`, the hashed SDK and the public\n-corpus/generators. It contains no credential or barrier-approval record.\n+the matching SDK-only `requirements-sdk.txt`, installed distributions under\n+`lib/python`, the hashed SDK and the public corpus/generators. It contains no\n+credential or barrier-approval record.\n A private temporary build directory is renamed only after import-only smoke\n passes, then a relative `current` symlink is atomically replaced. Failure leaves\n the prior pointer unchanged. Fresh launchers resolve the pointer once; existing"
+      }
+    ],
+    "finalFiles": [
+      {
+        "filename": "modules/main-catchup/lib/python/main_catchup/paddock_runtime_hydration.py",
+        "status": "modified",
+        "additions": 1,
+        "deletions": 1,
+        "patch": "@@ -25,7 +25,7 @@\n INPUTS = (\n     HOST_ROOT,\n     \"platform/app-sdk/python/pyproject.toml\",\n-    \"platform/app-sdk/python/releases\",\n+    \"platform/app-sdk/python/src\",\n     \"tools/paddock\",\n )\n INSTALLER = f\"{HOST_ROOT}/scripts/install_runtime.py\""
+      },
+      {
+        "filename": "docs/data-model/18-peripheral-service-stores.md",
+        "status": "modified",
+        "additions": 9,
+        "deletions": 3,
+        "patch": "@@ -5392,19 +5392,25 @@ review pipeline while the private harness manifest remains ARF-owned state.\n \n `runtime_home()/.agent-os/paddock-runtime` (or the configured\n `PADDOCK_RUNTIME_ROOT`) belongs to the registered gym runtime account.\n-`modules/paddock-host/scripts/install_runtime.py` is its only installer writer.\n+Source of truth: `modules/paddock-host/scripts/install_runtime.py` is its only\n+installer writer.\n An exclusive `.install.lock` serializes builds and pointer publication. Each\n `releases/<agent-os-commit>-<paddock-gitlink-commit>/runtime.json` records:\n \n | Field | Meaning |\n |---|---|\n | `agentOsCommit` | Exact archived Agent OS host adapter revision |\n | `agentpaddockCommit` | Exact public Paddock gitlink from that revision |\n+| `sdk` | Object identifying the SDK built from the reviewed Agent OS source |\n+| `sdk.sourceCommit` | Full Agent OS source commit; equals `agentOsCommit` |\n+| `sdk.version` | Declared version from the archived SDK's `pyproject.toml` |\n+| `sdk.requirement` | Exact `agent-os-app-sdk==<version> --hash=sha256:<digest>` requirement for the built SDK wheel |\n | `python` | Selected managed host interpreter; other fleet dependencies remain there |\n \n The release retains built wheels, exact generated SHA-256 `requirements.txt`,\n-installed distributions under `lib/python`, the hashed SDK and the public\n-corpus/generators. It contains no credential or barrier-approval record.\n+the matching SDK-only `requirements-sdk.txt`, installed distributions under\n+`lib/python`, the hashed SDK and the public corpus/generators. It contains no\n+credential or barrier-approval record.\n A private temporary build directory is renamed only after import-only smoke\n passes, then a relative `current` symlink is atomically replaced. Failure leaves\n the prior pointer unchanged. Fresh launchers resolve the pointer once; existing"
+      }
+    ],
+    "reversalAuthorizations": [
+      {
+        "rebased": true,
+        "mergeBase": "3d160b97e222c4c23922abbc331f57bb04734627",
+        "commit": {
+          "sha": "915cba0a3a66fd003d120859f176e2f51f9baf96",
+          "author": {
+            "login": "the-hammer-lacey[bot]"
+          },
+          "committer": {
+            "login": "web-flow"
+          },
+          "parents": [
+            {
+              "sha": "b9f4b1cadf399dd07902df78823fc7715b357d63"
+            }
+          ],
+          "commit": {
+            "message": "HAM preserve SDK ancestry and narrow runtime build inputs\n\n\nWorker-Class: hammer\nWorker-Ticket: HAM\nReviewed-Head: 2c6a8daf10fe714a544997fef1189e0c393381d5\nClosed-By: hammer (adversarial-pipe-mode)\nRemediated-Findings: 7 addressed (0 blocking, 7 non-blocking)\nReversal-Authorized-By: PRR_kwDOR6Em7c8AAAABY_Rxjg finding=2 kind=non-blocking\nReversal-Authorized-By: PRR_kwDOR6Em7c8AAAABY_Rxjg finding=3 kind=non-blocking",
+            "verification": {
+              "verified": true,
+              "reason": "valid"
+            }
+          },
+          "files": [
+            {
+              "filename": "modules/main-catchup/lib/python/main_catchup/paddock_runtime_hydration.py",
+              "status": "modified",
+              "additions": 2,
+              "deletions": 1,
+              "patch": "@@ -24,7 +24,8 @@\n TREE = dh.HydratedTree(TREE_NAME, HOST_ROOT, ())\n INPUTS = (\n     HOST_ROOT,\n-    \"platform/app-sdk/python\",\n+    \"platform/app-sdk/python/pyproject.toml\",\n+    \"platform/app-sdk/python/src\",\n     \"tools/paddock\",\n )\n INSTALLER = f\"{HOST_ROOT}/scripts/install_runtime.py\""
+            }
+          ]
+        },
+        "review": {
+          "node_id": "PRR_kwDOR6Em7c8AAAABY_Rxjg",
+          "commit_id": "2c6a8daf10fe714a544997fef1189e0c393381d5",
+          "state": "CHANGES_REQUESTED",
+          "html_url": "https://github.com/laceyenterprises/agent-os/pull/11134#pullrequestreview-5971931534",
+          "user": {
+            "login": "lacey-claude-reviewer[bot]"
+          },
+          "body": "## Blocking issues\n- None.\n\n## Non-blocking issues\n\n- **Same-version older commit can silently revert SDK fixes**\n  - **File:** `modules/paddock-host/scripts/install_runtime.py`\n  - **Lines:** `86-92`; `141`\n\n- **SDK tests and release wheels now trigger runtime rebuilds**\n  - **File:** `modules/main-catchup/lib/python/main_catchup/paddock_runtime_hydration.py`\n  - **Lines:** `25-30`\n\n- **Stale 0.16.6 baseline text left beside the new contract**\n  - **File:** `modules/paddock-host/README.md`\n  - **Lines:** `138-139`; `969-969`\n\n## Verdict\nComment only\n"
+        },
+        "reviewedFiles": [
+          {
+            "filename": "modules/main-catchup/lib/python/main_catchup/paddock_runtime_hydration.py",
+            "status": "modified",
+            "additions": 1,
+            "deletions": 2,
+            "patch": "@@ -24,8 +24,7 @@\n TREE = dh.HydratedTree(TREE_NAME, HOST_ROOT, ())\n INPUTS = (\n     HOST_ROOT,\n-    \"platform/app-sdk/python/pyproject.toml\",\n-    \"platform/app-sdk/python/releases\",\n+    \"platform/app-sdk/python\",\n     \"tools/paddock\",\n )\n INSTALLER = f\"{HOST_ROOT}/scripts/install_runtime.py\""
+          }
+        ],
+        "parentFiles": [
+          {
+            "filename": "modules/main-catchup/lib/python/main_catchup/paddock_runtime_hydration.py",
+            "status": "modified",
+            "additions": 1,
+            "deletions": 2,
+            "patch": "@@ -24,8 +24,7 @@\n TREE = dh.HydratedTree(TREE_NAME, HOST_ROOT, ())\n INPUTS = (\n     HOST_ROOT,\n-    \"platform/app-sdk/python/pyproject.toml\",\n-    \"platform/app-sdk/python/releases\",\n+    \"platform/app-sdk/python\",\n     \"tools/paddock\",\n )\n INSTALLER = f\"{HOST_ROOT}/scripts/install_runtime.py\""
+          },
+          {
+            "filename": "docs/data-model/18-peripheral-service-stores.md",
+            "status": "modified",
+            "additions": 9,
+            "deletions": 3,
+            "patch": "@@ -5392,19 +5392,25 @@ review pipeline while the private harness manifest remains ARF-owned state.\n \n `runtime_home()/.agent-os/paddock-runtime` (or the configured\n `PADDOCK_RUNTIME_ROOT`) belongs to the registered gym runtime account.\n-`modules/paddock-host/scripts/install_runtime.py` is its only installer writer.\n+Source of truth: `modules/paddock-host/scripts/install_runtime.py` is its only\n+installer writer.\n An exclusive `.install.lock` serializes builds and pointer publication. Each\n `releases/<agent-os-commit>-<paddock-gitlink-commit>/runtime.json` records:\n \n | Field | Meaning |\n |---|---|\n | `agentOsCommit` | Exact archived Agent OS host adapter revision |\n | `agentpaddockCommit` | Exact public Paddock gitlink from that revision |\n+| `sdk` | Object identifying the SDK built from the reviewed Agent OS source |\n+| `sdk.sourceCommit` | Full Agent OS source commit; equals `agentOsCommit` |\n+| `sdk.version` | Declared version from the archived SDK's `pyproject.toml` |\n+| `sdk.requirement` | Exact `agent-os-app-sdk==<version> --hash=sha256:<digest>` requirement for the built SDK wheel |\n | `python` | Selected managed host interpreter; other fleet dependencies remain there |\n \n The release retains built wheels, exact generated SHA-256 `requirements.txt`,\n-installed distributions under `lib/python`, the hashed SDK and the public\n-corpus/generators. It contains no credential or barrier-approval record.\n+the matching SDK-only `requirements-sdk.txt`, installed distributions under\n+`lib/python`, the hashed SDK and the public corpus/generators. It contains no\n+credential or barrier-approval record.\n A private temporary build directory is renamed only after import-only smoke\n passes, then a relative `current` symlink is atomically replaced. Failure leaves\n the prior pointer unchanged. Fresh launchers resolve the pointer once; existing"
+          }
+        ]
+      }
+    ]
+  }
+}

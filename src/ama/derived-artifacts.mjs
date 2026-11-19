@@ -7,7 +7,6 @@ import { cp, mkdtemp, mkdir, writeFile, readFile, rm, realpath, lstat, utimes } 
 import { tmpdir } from 'node:os';
 import { dirname, join, relative, resolve, isAbsolute } from 'node:path';
 import { loadDomainConfig } from '../domain-config.mjs';
-import { spawnCapturedProcessGroup } from '../process-group-spawn.mjs';
 import { trustedArtifactRecipe } from './derived-artifact-receipt.mjs';
 
 const SHA = /^[0-9a-f]{40}$/;
@@ -437,7 +436,9 @@ export async function withDerivedCheckout({ repo, rootDir, headSha, mergeBase, p
     signal?.throwIfAborted();
     return exec('git', [...flags, ...args], { ...options(), encoding: 'buffer' }).then(result => result.stdout);
   };
-  const git = (...args) => {
+  const git = async (...args) => {
+    // Keep checkout-only process dependencies out of eligibility reads.
+    const { spawnCapturedProcessGroup } = await import('../process-group-spawn.mjs');
     signal?.throwIfAborted();
     return spawnCapturedProcessGroup('git', [...flags, ...args], {
       ...options(), progressTimeout: 0, killGraceMs: 0, reapGroupOnExit: true,

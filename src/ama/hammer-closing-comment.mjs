@@ -88,7 +88,13 @@ async function readGitHub(github, args, sleep) {
     try { return await github(args); }
     catch (error) {
       if (backoffMs === null || error?.budgetDeferred || error?.hammerAuthHandled || !isTransientGhError(error)) {
-        throw new Error('github-closeout-read-unavailable');
+        const detail = [error?.message, error?.stderr].join('\n');
+        const cause = error?.hammerAuthHandled ? 'auth' : error?.budgetDeferred ? 'budget'
+          : isTransientGhError(error) ? 'transient-exhausted'
+            : /\bHTTP\s+(401|403)\b|bad credentials|requires authentication/i.test(detail) ? 'auth'
+              : /\bHTTP\s+404\b/i.test(detail) ? 'not-found' : 'other';
+        // Preserve an actionable category without exposing subprocess output or credentials.
+        throw new Error(`github-closeout-read-unavailable:${cause}`);
       }
       await sleep(backoffMs);
     }
@@ -102,9 +108,10 @@ function confirmDelivery(directory, proof, repo, prNumber, commentId, outcome) {
       schemaVersion: 1, launchRequestId, runId, repo, prNumber, headSha, mergeCommitSha, commentId,
     }), { mode: 0o600 });
   } catch {
-    throw new Error('closing-comment-delivery-record-unavailable');
+    return { outcome, headSha, mergeCommitSha, commentId, recorded: false,
+      warning: 'closing-comment-delivery-record-unavailable' };
   }
-  return { outcome, headSha, mergeCommitSha };
+  return { outcome, headSha, mergeCommitSha, commentId, recorded: true };
 }
 
 // There is one writer per run and merge. A retry always rereads GitHub first,
@@ -155,10 +162,8 @@ export async function deliverHammerClosingComment({ repo, prNumber, hqRoot, root
     if (existing) {
       return confirmDelivery(directory, proof, repo, prNumber, existing.id, 'already-posted');
     }
-    const identity = await readGitHub(github, ['api', 'graphql', '-f', 'query={ viewer { login } }'], sleep);
-    if (!exactHammerCommentAuthorMatches(identity?.data?.viewer?.login)) {
-      throw new Error('closing-comment-author-unconfirmed');
-    }
+    // The CLI requires a managed hammer token for every call; installation
+    // tokens need no GraphQL viewer probe. Confirm the actual POST author below.
     const body = filterGitHubBody(closingBody({ marker, attempt, proof, comments }), {
       repo, reviewerHeadSha: proof.headSha, rootDir,
     });

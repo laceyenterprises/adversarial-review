@@ -1,7 +1,8 @@
+import './helpers/load-aware-timeout-fixture.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -52,7 +53,6 @@ function fixture(t) {
     calls.push(args);
     if (args[1] === `repos/${repo}/pulls/${prNumber}`) return live;
     if (args[1] === '--paginate') return [comments];
-    if (args[1] === 'graphql') return { data: { viewer: author } };
     if (args[2] === 'POST') {
       const comment = { id: comments.length + 1, user: author, body: args.at(-1).slice(5) };
       comments.push(comment);
@@ -159,8 +159,6 @@ test('unknown GitHub state, lease or comment lookup leaves delivery unconfirmed'
   await assert.rejects(f.deliver({ inspectLease: () => null }), /lease-release-unconfirmed/);
   await assert.rejects(f.deliver({ github: async args => args[1] === '--paginate' ? { partial: [] } : f.github(args) }),
     /closing-comments-unreadable/);
-  await assert.rejects(f.deliver({ github: async args => args[1] === 'graphql' ? {} : f.github(args) }),
-    /closing-comment-author-unconfirmed/);
   assert.equal(f.calls.some(args => args[2] === 'POST'), false);
   assert.equal(existsSync(f.deliveryPath), false);
 });
@@ -199,9 +197,12 @@ test('the owner lane cannot authorize or suppress a closing comment', async t =>
   const f = fixture(t);
   const owner = { login: 'clio-airlock' };
   f.comments.push({ id: 1, user: owner, body: closingMarker });
-  await assert.rejects(f.deliver({ github: args => args[1] === 'graphql'
-    ? { data: { viewer: owner } } : f.github(args) }), /closing-comment-author-unconfirmed/);
-  assert.equal(f.calls.some(args => args[2] === 'POST'), false);
+  await assert.rejects(f.deliver({ github: async args => {
+    const response = await f.github(args);
+    if (args[2] === 'POST') response.user = owner;
+    return response;
+  } }), /closing-comment-delivery-unconfirmed/);
+  assert.equal(existsSync(f.deliveryPath), false);
   assert.equal((await f.deliver()).outcome, 'posted');
 });
 
@@ -228,8 +229,8 @@ test('each GitHub read can retry a transient failure with backoff', async t => {
     sleep: ms => waits.push(ms),
   });
   assert.equal(result.outcome, 'posted');
-  assert.deepEqual([...readAttempts.values()], [2, 2, 2]);
-  assert.deepEqual(waits, [1_000, 1_000, 1_000]);
+  assert.deepEqual([...readAttempts.values()], [2, 2]);
+  assert.deepEqual(waits, [1_000, 1_000]);
 });
 
 test('exhausted reads preserve pending evidence for post-launch recovery', async t => {
@@ -264,4 +265,75 @@ test('concurrent delivery for the same receipt cannot post twice', async t => {
   } finally { resume(); }
   assert.equal((await first).outcome, 'posted');
   assert.equal(f.calls.filter(args => args[2] === 'POST').length, 1);
+});
+
+for (const [error, cause, reads] of [
+  [Object.assign(new Error('secret diagnostic'), { hammerAuthHandled: true }), 'auth', 1],
+  [Object.assign(new Error('secret diagnostic'), { budgetDeferred: true }), 'budget', 1],
+  [new Error('Bad credentials (HTTP 401): secret diagnostic'), 'auth', 1],
+  [new Error('Not Found (HTTP 404): secret diagnostic'), 'not-found', 1],
+  [new Error('TLS handshake timeout: secret diagnostic'), 'transient-exhausted', 3],
+  [Object.assign(new Error('secret diagnostic'), {
+    stderr: 'gh: API rate limit exceeded (HTTP 403)\nsecret diagnostic',
+  }), 'transient-exhausted', 3],
+  [new Error('secret diagnostic'), 'other', 1],
+]) {
+  test(`read failure exposes only the ${cause} category`, async t => {
+    const f = fixture(t);
+    let attempts = 0;
+    await assert.rejects(f.deliver({
+      github: async () => { attempts += 1; throw error; }, sleep: () => {},
+    }), { message: `github-closeout-read-unavailable:${cause}` });
+    assert.equal(attempts, reads);
+  });
+}
+
+test('confirmed delivery survives record failure and retries without another POST', async t => {
+  const f = fixture(t);
+  mkdirSync(f.deliveryPath); // A deterministic atomic-rename failure, even as root.
+  for (const outcome of ['posted', 'already-posted']) {
+    assert.deepEqual(await f.deliver(), {
+      outcome, headSha, mergeCommitSha, commentId: 1, recorded: false,
+      warning: 'closing-comment-delivery-record-unavailable',
+    });
+  }
+  assert.equal(f.calls.filter(args => args[2] === 'POST').length, 1);
+  rmSync(f.deliveryPath, { recursive: true });
+  assert.equal((await f.deliver()).recorded, true);
+  assert.equal(JSON.parse(readFileSync(f.deliveryPath, 'utf8')).commentId, 1);
+});
+
+test('CLI requires a managed token and reports confirmed delivery despite a record failure', t => {
+  const f = fixture(t);
+  mkdirSync(f.deliveryPath);
+  writeFileSync(join(f.rootDir, 'gh'), `#!${process.execPath}
+const assert = require('node:assert/strict');
+assert.equal(process.env.GH_TOKEN, 'synthetic-hammer-token');
+const args = process.argv.slice(2);
+let response;
+if (args[1] === ${JSON.stringify(`repos/${repo}/pulls/${prNumber}`)}) response = ${JSON.stringify(f.live)};
+else if (args[1] === '--paginate') response = [[]];
+else if (args[2] === 'POST') response = { id: 7, user: ${JSON.stringify(author)}, body: args.at(-1).slice(5) };
+else throw new Error('unexpected request');
+console.log(JSON.stringify(response));
+`, { mode: 0o700 });
+  const env = Object.fromEntries(Object.entries(process.env).filter(([key]) =>
+    !/^(GH_|GITHUB_|HAMMER_LACEY_GH_TOKEN|MERGE_AGENT_GH_TOKEN|HQ_ENTITLEMENT_GH_TOKEN)/.test(key)));
+  Object.assign(env, f.params.env, { PATH: f.rootDir,
+    GHO_RATE_LIMIT_SHARED_STATE_PATH: join(f.rootDir, 'budget.json') });
+  const command = fileURLToPath(new URL('../bin/hammer-closing-comment.mjs', import.meta.url));
+  const run = () => spawnSync(process.execPath, [command, repo, String(prNumber), f.rootDir], {
+    env, encoding: 'utf8', timeout: 10_000,
+  });
+  const unmanaged = run();
+  assert.equal(unmanaged.status, 1, unmanaged.stderr);
+  assert.match(unmanaged.stderr, /github-closeout-read-unavailable:auth/);
+  env.MERGE_AGENT_GH_TOKEN = 'synthetic-hammer-token';
+  const managed = run();
+  assert.equal(managed.status, 0, managed.stderr);
+  assert.match(managed.stderr, /confirmed comment 7; closing-comment-delivery-record-unavailable/);
+  assert.deepEqual(JSON.parse(managed.stdout), {
+    outcome: 'posted', headSha, mergeCommitSha, commentId: 7, recorded: false,
+    warning: 'closing-comment-delivery-record-unavailable',
+  });
 });

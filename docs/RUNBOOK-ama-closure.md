@@ -3771,16 +3771,21 @@ prompt-driven worker behavior, not predicate gates — the audit comment and the
    merge, a matching launch-bound successful AMA audit attempt with passing
    exact-head gate and predicate evidence, fresh GitHub confirmation of the PR,
    head, merge SHA and timestamp, and readable evidence that the PR no longer
-   holds its base-lane merge lease. It uses the entitled hammer identity.
+   holds its base-lane merge lease. Every GitHub call requires a managed entitled
+   hammer token; delivery checks the POST response's exact-HAM author. It does
+   not require a GraphQL `viewer` probe for installation tokens.
    The `✅ Closed by Hammer` comment reports the recorded merge method, validation
    status, remediated findings, test fixes and rebase count. Doc-currency comes
    from the authenticated exact-head pre-merge audit when available. Optional
    details without evidence are marked `unrecorded`.
 
-   A verified merge receipt without `closing-comment-delivered.json` is pending
-   delivery evidence. After the launch ends, a runtime owner can reconcile it
+   A verified merge receipt without `closing-comment-delivered.json` needs
+   reconciliation; the comment may already exist if the diagnostic write failed.
+   After the launch ends, a runtime owner can reconcile it
    from an entitled hammer environment with access to the same HQ root and
-   merge lane. Use the original launch and run IDs from the receipt.
+   merge lane. Run recovery as the OS user who owns the receipt directory, so
+   its file permissions allow the delivery record to be written. Use the original
+   launch and run IDs from the receipt.
 
    ```bash
    node bin/hammer-closing-comment.mjs OWNER/REPO PR HQ_ROOT --recover LAUNCH_ID RUN_ID
@@ -3792,9 +3797,17 @@ prompt-driven worker behavior, not predicate gates — the audit comment and the
    exact head/merge marker or a legacy closing comment citing the full merge SHA
    or a standalone 7–12 character prefix. Posting and deduplication both require
    the same author rule as exact-head HAM validation. Transient GitHub reads get
-   up to two retries with backoff. An uncertain POST leaves the receipt pending
+   up to two retries with backoff. Final read failures report
+   `github-closeout-read-unavailable:<cause>` on stderr: `auth` requires credential
+   repair, `budget` or `transient-exhausted` suggests a later retry, `not-found`
+   requires checking the target/access, and `other` requires investigation.
+   Raw subprocess diagnostics are not included. An uncertain POST leaves the receipt pending
    for a later invocation to reconcile from GitHub. A confirmed GitHub comment
-   ID is recorded in `closing-comment-delivered.json`.
+   ID is recorded in `closing-comment-delivered.json`. If only that diagnostic
+   write fails, the command succeeds with the confirmed `outcome`, `commentId`,
+   `recorded: false` and a `closing-comment-delivery-record-unavailable` warning
+   on stderr. This is confirmed delivery, not an operator escalation for an
+   unconfirmed comment; a later recovery can repair the record without reposting.
 
    If an ambiguous merge response is followed by `already-merged`, or the
    confirmation read fails after GitHub accepts a merge, the run can lack an

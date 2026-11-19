@@ -23,7 +23,9 @@ try {
     throw new Error('usage: hammer-closing-comment.mjs OWNER/REPO PR HQ_ROOT [--recover LAUNCH_ID RUN_ID]');
   }
   const github = async args => {
-    if (!hammerTokenSession(ghOptions).managed) throw new Error('closing-comment-author-unconfirmed');
+    if (!hammerTokenSession(ghOptions).managed) {
+      throw Object.assign(new Error('closing-comment-author-unconfirmed'), { hammerAuthHandled: true });
+    }
     const { stdout } = await meteredExecFile(execute, 'gh', args, {
       ...ghOptions, retryAuthFailure: args[2] !== 'POST',
     });
@@ -32,6 +34,7 @@ try {
   const result = await withGitHubBudgetScope({}, () => deliverHammerClosingComment({
     repo, prNumber: Number(pr), hqRoot, rootDir, env, recovery,
   }, { github }));
+  if (result.warning) console.error(`hammer-closing-comment: confirmed comment ${result.commentId}; ${result.warning}`);
   console.log(JSON.stringify(result));
 } catch (error) {
   console.error(`hammer-closing-comment: ${error.message}`);

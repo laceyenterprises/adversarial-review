@@ -88,7 +88,7 @@ receipt before refusing startup.
 
 The immutable `outcome.json` written by `src/ama/hammer-outcome.mjs` for a
 verified own merge also identifies a pending closing comment. The pending
-comment is confirmed when `src/ama/hammer-closing-comment.mjs` atomically
+comment is confirmed by GitHub; `src/ama/hammer-closing-comment.mjs` then atomically
 writes `closing-comment-delivered.json` in the same run directory. It records
 either an existing authenticated comment or a confirmed GitHub POST response.
 
@@ -102,4 +102,8 @@ either an existing authenticated comment or a confirmed GitHub POST response.
 
 The merge receipt lock protects the mode-`0600` delivery record. The record is
 diagnostic. Recovery checks the original merge receipt, launch-bound audit, live
-GitHub state, merge lane and authenticated comments each time.
+GitHub state, merge lane and authenticated comments each time. A failed record
+write preserves confirmed delivery: the command returns the outcome and comment
+ID with `recorded: false` and a warning. A missing record therefore requires
+reconciliation rather than proving the comment is absent. Recovery runs as the
+OS user owning the receipt directory. The stored version 1 fields are unchanged.

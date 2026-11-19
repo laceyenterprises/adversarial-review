@@ -9,7 +9,7 @@ import { fileURLToPath } from 'node:url';
 
 const commands = ['gh', 'git', 'hq', 'psql', 'node'];
 
-test('watcher polls reuse child histograms and bound external memory across passes', async t => {
+test('watcher polls reuse child histograms across passes', async t => {
   const sandbox = process.env.ADVERSARIAL_REVIEW_TEST_SANDBOX_ROOT;
   assert.ok(sandbox && fileURLToPath(import.meta.url).startsWith(sandbox + sep),
     'run through test/run-tests.mjs for an isolated watcher database');
@@ -50,10 +50,12 @@ test('watcher polls reuse child histograms and bound external memory across pass
     for (const sample of samples.filter(({ pass }) => pass === 1 || pass % 30 === 0)) {
       t.diagnostic(JSON.stringify(sample));
     }
+    // Allocation count is the regression guard: native histogram RSS growth
+    // does not appear in external or arrayBuffers.
     assert.ok(samples.every(sample => sample.allocations === 2 * commands.length),
       'each command keeps one spawn and one wall histogram across all passes');
-    // external already includes arrayBuffers. Bound the requested combined
-    // indicator conservatively after warmup and keep RSS for diagnosis.
+    // This bound is only a sanity check. external already includes arrayBuffers.
+    // Bound the combined indicator after warmup and keep RSS for diagnosis.
     const externalTotals = samples.slice(30).map(({ external, arrayBuffers }) => external + arrayBuffers);
     assert.ok(Math.max(...externalTotals) - Math.min(...externalTotals) < 16 * 1024 * 1024,
       'post-warmup external + arrayBuffers spread must stay below 16 MiB');

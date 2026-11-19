@@ -791,6 +791,7 @@
   "test/watcher-pending-failure-claim.test.mjs": 21987,
   "test/watcher-poll-guard.test.mjs": 5553,
   "test/watcher-poll-interval.test.mjs": 858,
+  "test/watcher-poll-memory.test.mjs": 44119,
   "test/watcher-poll-starvation.test.mjs": 55101,
   "test/watcher-quota-reset-capture.test.mjs": 67501,
   "test/watcher-reattach.test.mjs": 13387,

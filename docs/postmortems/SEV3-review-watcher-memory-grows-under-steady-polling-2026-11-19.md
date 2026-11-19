@@ -3,6 +3,12 @@
 Ticket: ARWATCHERRSS-01. Severity: SEV3 (resource-leak watch, nothing broken).
 Outcome: **(b) no JS-heap growth reproduces. No code change.**
 
+Follow-up: [ARWATCHERRSS-02](SEV3-watcher-native-histogram-allocation-ARWATCHERRSS-02.md)
+isolates native latency-histogram allocation churn in a controlled child-event
+replay and fixes it by reusing histograms. This report's plateau is limited to
+its fixture; it did not measure histogram allocations or establish which
+command events reached the monitor.
+
 ## What was observed
 
 A host leak sampler read one long-running watcher process hourly. Resident

@@ -3,7 +3,9 @@
 import { channel } from 'node:diagnostics_channel';
 import { basename } from 'node:path';
 import { createHistogram, monitorEventLoopDelay, performance } from 'node:perf_hooks';
+import { debuglog } from 'node:util';
 
+const debugPollMemory = debuglog('adversarial-watcher-memory');
 const commands = new Set(['gh', 'git', 'hq', 'psql', 'node']);
 let activeObserver = null;
 const milliseconds = histogram => histogram.count ? {
@@ -11,6 +13,13 @@ const milliseconds = histogram => histogram.count ? {
   p99_ms: histogram.percentile(99) / 1e6,
 } : { p50_ms: 0, p99_ms: 0 };
 const record = (histogram, elapsedMs) => histogram.record(Math.max(1, Math.round(elapsedMs * 1e6)));
+
+export function sampleWatcherPollMemory() {
+  if (debugPollMemory.enabled) {
+    const { rss, heapUsed, external, arrayBuffers } = process.memoryUsage();
+    debugPollMemory('poll memory rss=%d heapUsed=%d external=%d arrayBuffers=%d', rss, heapUsed, external, arrayBuffers);
+  }
+}
 
 export function observeSynchronousChild(command, run) {
   const started = performance.now();

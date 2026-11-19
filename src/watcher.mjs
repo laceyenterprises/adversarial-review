@@ -11,14 +11,14 @@ import { evaluateCloserHoldsForPoll } from './ama/closer-hold-records.mjs';
 import { WATCHER_POLL_INTERVAL_MS } from './watcher-poll-interval.mjs';
 import { withGitHubAdapterReadTick } from './github-adapter-client.mjs';
 import { withClosureEvaluationReadCache } from './closure-evaluation-cache.mjs';
-import { createWatcherLatencyMonitor } from './watcher-latency.mjs';
+import { createWatcherLatencyMonitor, sampleWatcherPollMemory } from './watcher-latency.mjs';
 import { runLowBudgetWatcherPoll } from './watcher-github-budget.mjs';
 import { withGitHubBudgetScope } from './rate-limit-throttle.mjs';
 import { sweepPrimaryChangeStore } from './ama/primary-change-store.mjs';
 import { createHammerScratchSweepTicker } from './ama/hammer-scratch-sweep.mjs';
 // Polls GitHub for new agent-built PRs and spawns reviewer agents.
 import { execFile } from 'node:child_process';
-import { debuglog, promisify } from 'node:util';
+import { promisify } from 'node:util';
 import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { basename, dirname, join } from 'node:path';
@@ -448,7 +448,6 @@ import {
   probeRoutingTierReadiness,
 } from './routing-tier-readiness.mjs';
 const execFileAsync = promisify(execFile);
-const debugPollMemory = debuglog('adversarial-watcher-memory');
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const ROOT = join(__dirname, '..');
 
@@ -1171,12 +1170,7 @@ async function pollOnce(octokit, options = {}) {
     }
     watcherLatencyMonitor ??= createWatcherLatencyMonitor();
     return await withRepositoryStateCycle(ROOT, () => withHoldRecordPoll(() => watcherLatencyMonitor.poll(() => withGitHubAdapterReadTick(() => withClosureEvaluationReadCache(() => withGitHubBudgetScope({}, () => pollOnceWithinBudget(octokit, options, admission)))))));
-  } finally {
-    if (debugPollMemory.enabled) {
-      const { rss, heapUsed, external, arrayBuffers } = process.memoryUsage();
-      debugPollMemory('poll memory rss=%d heapUsed=%d external=%d arrayBuffers=%d', rss, heapUsed, external, arrayBuffers);
-    }
-  }
+  } finally { sampleWatcherPollMemory(); }
 }
 
 async function pollOnceWithinBudget(

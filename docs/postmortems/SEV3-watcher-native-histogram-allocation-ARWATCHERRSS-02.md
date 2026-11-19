@@ -1,7 +1,12 @@
 # SEV3 review watcher resident memory growth
 
-ARWATCHERRSS-02 follows an investigation that found no sustained JavaScript heap
-growth. Resident memory grew across samples after a watcher restart. The
+ARWATCHERRSS-02 follows the [ARWATCHERRSS-01 investigation](SEV3-review-watcher-memory-grows-under-steady-polling-2026-11-19.md),
+whose 2,000-poll replay found no sustained JavaScript heap growth and RSS
+plateauing at 219–223 MB from poll 600 onward. That replay did not count native
+histogram allocations or record which command events reached the latency
+monitor, so its plateau does not rule out the allocation churn isolated below;
+the exact reason the earlier fixture missed the effect remains unverified.
+Resident memory grew across samples after a watcher restart. The
 allocator summary pointed to native malloc. This report uses synthetic data
 for all measurements. The full rate of growth in service remains unattributed.
 
@@ -58,9 +63,10 @@ children stays absent from the summary. `NODE_DEBUG=adversarial-watcher-memory`
 enables one memory sample in bytes at the end of each settled `pollOnce`,
 including failures. The default path skips sampling.
 
-The regression test runs 180 real polls through the isolated fixture, verifies
-the histogram allocation count stays at ten and bounds the post-warmup spread
-of `external + arrayBuffers` to 16 MiB. A debug run emitted 180 lines and
+The regression test runs 180 real polls through the isolated fixture. Its
+regression guard verifies the histogram allocation count stays at ten; the
+16 MiB post-warmup bound on `external + arrayBuffers` is only a sanity check
+and cannot detect this native RSS regression. A debug run emitted 180 lines and
 measured a 1.32 MiB spread across passes 31 through 180. RSS at pass 180
 was 206.2 MiB. The test records RSS for diagnosis because allocator behavior
 and GC timing affect it. Confirmation at the service's cadence and workload

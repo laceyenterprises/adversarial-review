@@ -7255,6 +7255,37 @@ Run optional changed-surface validation outside the lease. Save the produced
 head and captured current base before `ham_release_merge_lease --yield local-validation`;
 run the registered validator, then only on success with the same local HEAD set
 `HAM_LOCALLY_VALIDATED_HEAD` and `HAM_LOCALLY_VALIDATED_BASE_SHA` to that saved pair.
+The closer's CI-mirror deduplication is on by default. Set
+`HAM_LOCAL_VALIDATION_CI_DEDUP=0` in the closer environment to run the entire
+selected local battery without consulting GitHub for coverage. On supported
+CI mirrors, a `path-glob` entry in `scripts/ci-mirror/checks*.json` can declare
+`"ci_jobs": ["build", "lint"]` alongside its `name` and `command`. Use the
+visible GitHub Actions check-run names and give each mapped job a unique name
+within the repository. Declare a mapping only when successful completion of
+every named job guarantees the equivalent check ran, including the relevant
+file scope for commands that take changed paths. Set `"local_only": true` for
+checks that require the local environment. Workflow-level `mirrored_by` lists
+alone are insufficient because a workflow can succeed with individual work
+skipped.
+
+The closer requires byte-identical manifest copies in the checkout, at the exact
+validation head, and at the live PR's pinned base SHA. New or changed manifests,
+including edits to `ci_jobs` or `local_only`, stay local until they land on the
+base branch. Each listed job needs a completed `success` check run for
+that head SHA. Coverage reads request `filter=latest` so a successful retry
+supersedes its earlier attempt; duplicate names remaining in that response
+stay ambiguous. Missing, ambiguous, skipped, or unreadable evidence keeps the
+selected check local. An unconfirmed mirror skip probe also executes the original
+check locally and records its actual result.
+
+GitHub reads use the same metered transport and ETag cache as the closer's PR
+reads, in a non-urgent scope. They cannot consume the reserve below the polling
+floor: a budget deferral runs checks locally with reason `ci-budget-deferred`.
+The private per-attempt receipt records local
+results and `ci-covered` checks with their job names and run IDs.
+`close-result.json` includes those receipts under `localValidation` for both
+completed and stopped closes.
+
 Source verify-head before publishing the audit. BASEFETCH-01 captures the live
 base through a private temporary ref instead of mutable `FETCH_HEAD`; see the
 [change note](#basefetch-01--verify-head-base-capture-and-diagnostics) for fetch

@@ -50,14 +50,21 @@ quota and HCP probes are reused.
 
 Each poll emits `poll latency summary` with event-loop p50/p99 milliseconds and
 per-command child counts, spawn-readiness p50/p99 and child wall p50/p99 for gh,
-git, hq and psql. Spawn readiness includes native spawn time and the wait until
+git, hq, psql and node. Spawn readiness includes native spawn time and the wait until
 Node delivers the spawn event. Wall time ends at close, including stdio drain;
 it is not pure subprocess CPU time. Counts distinguish starts and completions,
 so a child spanning polls completes in a later summary. Active child identities
 and their start timestamps survive histogram resets; `in_flight` reports the
 number still running per command, including polls with no new starts or closes.
+The monitor reuses one spawn and one wall histogram per command, resetting
+samples after each poll.
 Synchronous CLI probes have wall samples only. No argv, environment, credentials or full binary paths
 are emitted. Existing `idle_ms` handoff logs remain.
+
+Set `NODE_DEBUG=adversarial-watcher-memory` to log `rss`, `heapUsed`,
+`external` and `arrayBuffers` in bytes at the end of each settled poll.
+Node's `external` already includes `arrayBuffers`. RSS also reflects native
+allocations outside both counters, including the latency histograms.
 
 The regression harness runs concurrent posted handlers with 180 seconds of fake
 child latency and observes capacity-freed admission at 0ms idle. A real slow fake

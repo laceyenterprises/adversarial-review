@@ -169,3 +169,22 @@ Existing private-scratch cleanup owns eventual removal. Controller SIGKILL,
 loss of its host, or intentional group escape still needs canonical HQ teardown;
 this PR does not certify HQ's synchronous cancel acknowledgement as quiescence.
 Any HQ-level acknowledgement change belongs in a separate Agent OS follow-up.
+
+## Local validation receipt
+
+The closing controller starts a private `local-validation.*` receipt for each
+outside-lease validation attempt. It embeds the receipts from that invocation
+in `close-result.json` under `localValidation`. An empty array means the
+controller has no receipt for that invocation.
+
+| Field | Meaning |
+|---|---|
+| `schemaVersion` | `1` |
+| `head` | Full commit SHA captured before the local validation stage |
+| `status` | Effective validator exit code once the helper finishes |
+| `checks` | Ordered records with check name, status and reason, plus local result or exit status when available |
+| `checks[].jobs` | For `ci-covered`, each declared job's name and GitHub Actions run ID |
+
+Per-check statuses are `run`, `ci-covered`, `failed` and `not-run`. Runners
+without per-check reporting produce a battery-level record. The controller
+uses these receipts for diagnosis.

@@ -5,7 +5,8 @@ import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSyn
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { fetchHammerPr, writeHammerFullReviews } from '../src/hammer-pr-read.mjs';
+import { fetchHammerPr, fetchHammerValidationEvidence, writeHammerFullReviews } from '../src/hammer-pr-read.mjs';
+import { currentGitHubBudgetScope, withCloserGitHubBudget } from '../src/rate-limit-throttle.mjs';
 import { classifyCheckRollup } from '../src/checks-summary.mjs';
 import { renderHammerProcedure } from '../src/hammer-procedure.mjs';
 import { parseReviewFindings } from '../src/kernel/review-findings.mjs';
@@ -20,6 +21,31 @@ const cliEnv = { ...process.env, HAMMER_LACEY_GH_TOKEN: 'synthetic-offline-token
 // The CLI starts multiple Node processes; allow bounded startup headroom when
 // the offline suite runs concurrently on a shared CI runner.
 const cliTimeout = 30_000;
+
+test('coverage reads use latest attempts outside the closer reserve and pass the pinned base', async () => {
+  const paths = [];
+  const base = 'b'.repeat(40);
+  await withCloserGitHubBudget(async () => {
+    assert.equal(currentGitHubBudgetScope().urgent, true);
+    const rows = await fetchHammerValidationEvidence('fixture/repo', 42, head, async (get, pages, liveBase) => {
+      assert.equal(liveBase, base);
+      const rows = [];
+      for await (const page of pages()) rows.push(...page);
+      return rows;
+    }, { read: async path => {
+      assert.equal(currentGitHubBudgetScope().urgent, false);
+      paths.push(path);
+      if (path.includes('/pulls/')) return { ...pr, base: { sha: base } };
+      assert.ok(path.endsWith('&filter=latest'));
+      // The endpoint returns the successful retry; filter=all would include
+      // the superseded failed attempt with the same name.
+      return { total_count: 1, check_runs: [{ name: 'build', conclusion: 'success' }] };
+    } });
+    assert.deepEqual(rows, [{ name: 'build', conclusion: 'success' }]);
+    assert.equal(currentGitHubBudgetScope().urgent, true);
+  });
+  assert.equal(paths.length, 2);
+});
 
 test('canonical full-review read preserves paginated bodies, findings and commit associations in the run file', async t => {
   const dir = mkdtempSync(join(tmpdir(), 'hammer-full-review-'));

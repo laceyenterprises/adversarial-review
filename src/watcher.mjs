@@ -11,7 +11,7 @@ import { evaluateCloserHoldsForPoll } from './ama/closer-hold-records.mjs';
 import { WATCHER_POLL_INTERVAL_MS } from './watcher-poll-interval.mjs';
 import { withGitHubAdapterReadTick } from './github-adapter-client.mjs';
 import { withClosureEvaluationReadCache } from './closure-evaluation-cache.mjs';
-import { createWatcherLatencyMonitor } from './watcher-latency.mjs';
+import { createWatcherLatencyMonitor, sampleWatcherPollMemory } from './watcher-latency.mjs';
 import { runLowBudgetWatcherPoll } from './watcher-github-budget.mjs';
 import { withGitHubBudgetScope } from './rate-limit-throttle.mjs';
 import { sweepPrimaryChangeStore } from './ama/primary-change-store.mjs';
@@ -1147,28 +1147,30 @@ function prepareReviewerAdmissionForPoll() {
 }
 
 async function pollOnce(octokit, options = {}) {
-  await refreshWatcherAuthenticationForTick({ log: console });
-  recoverRepositoryObservations({ db, rootDir: ROOT, additionalStateDir: ADVERSARIAL_REVIEW_STATE_DIR });
-  const admission = await withRepositoryStateCycle(ROOT, async () => {
-    resetRoleConfigCache();
-    const prepared = prepareReviewerAdmissionForPoll();
-    const { drainReviewerDispatchCandidates } = prepared;
-    await drainReviewerDispatchCandidates('poll-start retained candidates');
-    return prepared;
-  });
-  await withGitHubBudgetScope({}, () => refreshOrgRepos(octokit));
-  activeRepos = [...new Set(activeRepos.map(name => canonicalRepositoryName(db, name)))];
-  const generation = db.prepare('SELECT count(*) AS n FROM repository_rename_audit').get().n;
-  if (generation !== repositoryGeneration) {
-    // Candidates capture closures with repo-specific policy and adapter caches.
-    // Durable pending rows refill them under the new identity on this tick.
-    reviewerDispatchCandidates.splice(0);
-    reviewerRefillContexts.clear();
-    startupReviewerAdmissionPending = true;
-    repositoryGeneration = generation;
-  }
-  watcherLatencyMonitor ??= createWatcherLatencyMonitor();
-  return withRepositoryStateCycle(ROOT, () => withHoldRecordPoll(() => watcherLatencyMonitor.poll(() => withGitHubAdapterReadTick(() => withClosureEvaluationReadCache(() => withGitHubBudgetScope({}, () => pollOnceWithinBudget(octokit, options, admission)))))));
+  try {
+    await refreshWatcherAuthenticationForTick({ log: console });
+    recoverRepositoryObservations({ db, rootDir: ROOT, additionalStateDir: ADVERSARIAL_REVIEW_STATE_DIR });
+    const admission = await withRepositoryStateCycle(ROOT, async () => {
+      resetRoleConfigCache();
+      const prepared = prepareReviewerAdmissionForPoll();
+      const { drainReviewerDispatchCandidates } = prepared;
+      await drainReviewerDispatchCandidates('poll-start retained candidates');
+      return prepared;
+    });
+    await withGitHubBudgetScope({}, () => refreshOrgRepos(octokit));
+    activeRepos = [...new Set(activeRepos.map(name => canonicalRepositoryName(db, name)))];
+    const generation = db.prepare('SELECT count(*) AS n FROM repository_rename_audit').get().n;
+    if (generation !== repositoryGeneration) {
+      // Candidates capture closures with repo-specific policy and adapter caches.
+      // Durable pending rows refill them under the new identity on this tick.
+      reviewerDispatchCandidates.splice(0);
+      reviewerRefillContexts.clear();
+      startupReviewerAdmissionPending = true;
+      repositoryGeneration = generation;
+    }
+    watcherLatencyMonitor ??= createWatcherLatencyMonitor();
+    return await withRepositoryStateCycle(ROOT, () => withHoldRecordPoll(() => watcherLatencyMonitor.poll(() => withGitHubAdapterReadTick(() => withClosureEvaluationReadCache(() => withGitHubBudgetScope({}, () => pollOnceWithinBudget(octokit, options, admission)))))));
+  } finally { sampleWatcherPollMemory(); }
 }
 
 async function pollOnceWithinBudget(

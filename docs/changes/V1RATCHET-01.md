@@ -19,14 +19,6 @@ matching deletion or a move into that pack's ticket.
 - `src/v1-growth-ratchet.mjs` measures and formats the section.
   `buildReviewerExtraContext` adds it in full and slim modes, but not in
   public-hygiene mode.
-  Measurement and formatting are asynchronous: cross-subsystem renames read
-  destination contents at the immutable reviewed head and reconstruct the source
-  line count from the hunk delta. Copies retain their source. Same-subsystem
-  renames use only hunk changes. Test paths use the existing slim classifier,
-  with the existing `fixtures/` exclusion retained. A missing head, failed read
-  or non-text content reports unknown growth and retains the optional advisory
-  ask instead of reporting zero. These reads have an injectable fixture seam;
-  they introduce no persistent state or lifecycle/smoke change.
   Measurement and formatting are asynchronous. Test paths use the shared
   `isTestPath` classifier (including `.spec.*`, `spec/`, `specs/`, `testdata/`
   and `__fixtures__/`), with `fixtures/` also excluded.

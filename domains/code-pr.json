@@ -13,6 +13,16 @@
     "provider": "github-commit-status"
   },
   "promptSet": "code-pr",
+  "v1GrowthRatchet": {
+    "note": "V1RATCHET-01: audited, not gated. Reviewers report net non-test lines per V1 subsystem and ask a fix that grows a pack-owned one for the matching deletion. First matching subsystem wins; paths and owners are tunables.",
+    "subsystems": [
+      { "id": "merge-authority-v1", "repo": "laceyenterprises/adversarial-review", "pack": "MLR", "paths": ["src/ama/", "src/follow-up-", "src/pollonce-phases.mjs"] },
+      { "id": "cwp-dispatch", "repo": "laceyenterprises/agent-os", "pack": "LDP", "paths": ["modules/worker-pool/lib/python/cwp_dispatch/"] },
+      { "id": "ojo-scheduling", "repo": "laceyenterprises/agent-os", "pack": "LDP", "paths": ["platform/os-job-orchestrator/"] },
+      { "id": "worker-pool", "repo": "laceyenterprises/agent-os", "pack": null, "paths": ["modules/worker-pool/"] },
+      { "id": "credential-brokers", "repo": "laceyenterprises/agent-os", "pack": null, "paths": ["modules/model-routing-budget-control/runtime/oauth-provider/", "platform/mcp-auth-broker/"] }
+    ]
+  },
   "remediationCloneReferences": {
     "laceyenterprises/agent-os": "/Users/airlock/agent-os-hq/worker-base/agent-os",
     "laceyenterprises/adversarial-review": "/Users/airlock/agent-os-hq/adversarial-review/clone-references/adversarial-review.git",

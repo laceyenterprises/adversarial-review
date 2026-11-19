@@ -400,8 +400,8 @@ test('research-finding domain config mirrors code-pr domain shape', () => {
 
   // ARC-13 adds an (off-by-default) `pipeline` block to the code-pr domain that
   // the single-stage research-finding domain does not carry; the two configs
-  // are otherwise structurally identical.
-  const codePrKeys = Object.keys(codePr).filter((key) => key !== 'pipeline').sort();
+  // are otherwise structurally identical. V1RATCHET-01 is code-pr only.
+  const codePrKeys = Object.keys(codePr).filter((key) => key !== 'pipeline' && key !== 'v1GrowthRatchet').sort();
   assert.deepEqual(Object.keys(researchFinding).sort(), codePrKeys);
   assert.equal(researchFinding.id, 'research-finding');
   assert.equal(researchFinding.subjectChannel, 'markdown-file');

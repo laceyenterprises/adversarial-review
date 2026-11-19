@@ -46,7 +46,7 @@ test('code-pr-security domain config mirrors the code-pr shape and reuses github
   // ARC-13 adds an (off-by-default) `pipeline` block to the code-pr domain that
   // the single-stage security domain does not carry; the two configs are
   // otherwise structurally identical.
-  const codePrKeys = Object.keys(codePr).filter((key) => key !== 'pipeline').sort();
+  const codePrKeys = Object.keys(codePr).filter((key) => key !== 'pipeline' && key !== 'v1GrowthRatchet').sort();
   assert.deepEqual(Object.keys(security).sort(), codePrKeys);
   assert.equal(security.id, DOMAIN_ID);
   // Reuses the github-pr subject/comms adapters and the github-pr operator surface.

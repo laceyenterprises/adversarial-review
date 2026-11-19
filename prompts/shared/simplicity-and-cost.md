@@ -1,6 +1,6 @@
 ## Optional simplicity advice
 
-Only when warranted, append one final section, `## Simplicity and cost (advisory)`, after Verdict. Reserve it for pure simplicity: fewer lines or reuse of an existing function. Write it ONLY if the change adds a mechanism, layer, flag or wrapper beside an existing one that could be repaired instead, or adds more than about 300 net lines of non-test code without justification in the PR body. Runtime-cost defects do not belong here; report them as findings under the runtime-cost rule.
+Only when warranted, append one final section, `## Simplicity and cost (advisory)`, after Verdict. Reserve it for pure simplicity: fewer lines or reuse of an existing function. Write it ONLY if the change adds a mechanism, layer, flag or wrapper beside an existing one that could be repaired instead, adds more than about 300 net lines of non-test code without justification in the PR body, or a `## V1 growth (audited, not gated)` section above asks for a matching deletion. Runtime-cost defects do not belong here; report them as findings under the runtime-cost rule.
 
 Name ONE concrete simpler alternative: an existing function or file to reuse, or code to delete. Include a rough estimate of lines saved. Keep the section to about six lines at most. Otherwise omit it entirely, with no boilerplate.
 

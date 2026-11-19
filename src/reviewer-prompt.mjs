@@ -21,6 +21,7 @@ import { formatGuardForbiddenPaths } from './guard-forbidden-paths.mjs';
 import { parseDiffEntries } from './reviewer-util.mjs';
 import { formatTenureReviewRange, readTenureReviewRange } from './pr-tenure.mjs';
 import { FILE_GROUNDING_GUIDANCE } from './reviewer-file-inventory.mjs';
+import { formatV1GrowthContext } from './v1-growth-ratchet.mjs';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -32,9 +33,10 @@ const ROOT = join(__dirname, '..');
 // fallback to code-pr. ARR-only diffs select a different reviewer rubric within
 // this same domain; identity, routing, remediation and verdict contracts stay put.
 const REVIEWER_DOMAIN_ID = 'code-pr';
+const REVIEWER_DOMAIN_CONFIG = loadDomainConfig(ROOT, REVIEWER_DOMAIN_ID);
 const REVIEWER_PROMPT_SET = resolvePromptSet({
   rootDir: ROOT,
-  domainConfig: loadDomainConfig(ROOT, REVIEWER_DOMAIN_ID),
+  domainConfig: REVIEWER_DOMAIN_CONFIG,
   domainId: REVIEWER_DOMAIN_ID,
 });
 const ADVERSARIAL_PROMPT = loadStagePrompt({
@@ -128,6 +130,8 @@ async function buildReviewerExtraContext({
   log = console,
   readTenureReviewRangeImpl = readTenureReviewRange,
   getConfigImpl,
+  v1GrowthRatchet = REVIEWER_DOMAIN_CONFIG?.v1GrowthRatchet,
+  fetchV1GrowthFileAtRefImpl,
 } = {}) {
   // PR metadata can advance while a queued exact-head review is running.
   // Linked document reads and head-scoped context must use the reviewed head.
@@ -145,13 +149,17 @@ async function buildReviewerExtraContext({
     // Ordinary/standalone reviews may have no local review-state store.
     log?.warn?.(`[reviewer] tenure remediation range unavailable: ${error.code || 'read-failed'}`);
   }
+  // V1RATCHET-01: audit-only growth report; never alters findings or verdict.
+  const v1GrowthContext = await formatV1GrowthContext({ diff, repo, title: prContext?.title, ratchet: v1GrowthRatchet,
+    headSha: prContext?.headRefOid || prContext?.head?.sha, fetchFileAtRefImpl: fetchV1GrowthFileAtRefImpl });
+  if (v1GrowthContext) log?.error?.(`[reviewer] V1RATCHET: ${v1GrowthContext.split('\n').filter((line) => line.startsWith('- ')).join(' ')}`);
   const disputeContext = formatFindingDisputeContext(prContext, readFindingDisputeReservationsImpl({
     rootDir, repo, prNumber, headSha: prContext?.headRefOid || prContext?.head?.sha, logger: log,
   }));
   // RPL-08: slim mode trims context, never the review contract. See
   // buildSlimReviewerExtraContext for what is dropped and why.
   if (reviewModeDecision?.slim) {
-    return tenureContext + formatGuardForbiddenPaths(guardForbiddenPaths) + disputeContext + formatPrIntentContext(prContext?.body) + buildSlimReviewerExtraContext({ repo, prNumber, decision: reviewModeDecision, advisoryFindings, log }) + fileInventoryContext;
+    return tenureContext + formatGuardForbiddenPaths(guardForbiddenPaths) + disputeContext + formatPrIntentContext(prContext?.body) + v1GrowthContext + buildSlimReviewerExtraContext({ repo, prNumber, decision: reviewModeDecision, advisoryFindings, log }) + fileInventoryContext;
   }
 
   let extraContext = buildObviousDocsGuidance();
@@ -189,7 +197,7 @@ async function buildReviewerExtraContext({
     log?.error?.(`[reviewer] WARN: failed to build hardening-ledger review context: ${err.message}`);
   }
 
-  return tenureContext + formatGuardForbiddenPaths(guardForbiddenPaths) + extraContext + formatPrIntentContext(prContext?.body) + disputeContext + fileInventoryContext;
+  return tenureContext + formatGuardForbiddenPaths(guardForbiddenPaths) + extraContext + formatPrIntentContext(prContext?.body) + v1GrowthContext + disputeContext + fileInventoryContext;
 }
 
 function buildReviewerPrompt({ promptPrefix, extraContext = '', diff = '' } = {}) {

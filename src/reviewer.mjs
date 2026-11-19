@@ -1053,7 +1053,7 @@ async function reconcileLocalReviewShadow({
 // 50 KB per file so a runaway codex output can't fill the disk.
 const REJECTED_CODEX_OUTPUT_CAP_BYTES = 50 * 1024;
 
-function persistRejectedCodexOutput({ repo, prNumber, rejectionReason, rawReviewText }) {
+function persistRejectedCodexOutput({ repo, prNumber, rejectionReason, rawReviewText, chunkIndex, chunkAttempt }) {
   // Resolve the persistence directory relative to this module so the
   // path is stable whether the watcher is running from a worktree or
   // from the deploy checkout.
@@ -1069,7 +1069,8 @@ function persistRejectedCodexOutput({ repo, prNumber, rejectionReason, rawReview
     .replace(/[^A-Za-z0-9._-]+/g, '_')
     .slice(0, 80);
   const ts = new Date().toISOString().replace(/[:.]/g, '-');
-  const fileName = `${safeRepo}__pr-${prNumber}__${ts}.md`;
+  const chunkSuffix = chunkIndex ? `__chunk-${chunkIndex}-attempt-${chunkAttempt}` : '';
+  const fileName = `${safeRepo}__pr-${prNumber}__${ts}${chunkSuffix}.md`;
   const filePath = join(rootDir, fileName);
   const header = [
     `<!-- LAC-545 forensic dump of codex output that sanitizeCodexReviewPayload rejected -->`,

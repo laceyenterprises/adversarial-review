@@ -122,10 +122,13 @@ test('rejected Codex chunks preserve raw output and the original sanitizer failu
       },
     }), (error) => {
       assert.equal(reviewerExecutionFailureExitCode(error), 1);
-      assert.equal(rejected.length, 1);
-      assert.equal(rejected[0].rawReviewText, rawReviewText);
-      assert.equal(rejected[0].rejectionReason, error.message);
-      assert.equal(rejected[0].chunkIndex, 1);
+      assert.equal(rejected.length, 2);
+      for (const [index, item] of rejected.entries()) {
+        assert.equal(item.rawReviewText, rawReviewText);
+        assert.equal(item.rejectionReason, error.message);
+        assert.equal(item.chunkIndex, 1);
+        assert.equal(item.chunkAttempt, index + 1);
+      }
       return true;
     });
   }

@@ -656,7 +656,11 @@ A reply that echoes the output template is not a review either
 checks the raw reply of every direct reviewer model and every oversized-diff
 chunk. Hosted `agent-os-hq` artifacts first shed their model preamble and an
 optional whole-reply Markdown fence. Validation still precedes lossy section
-trimming, so normalization cannot hide duplicate sections or trailing text. The
+trimming. Direct reviews and individual chunks can drop up to three non-empty
+lines of plain prose totaling at most 400 characters immediately before
+`## Summary` when all five required sections are present in order and pass
+validation. Headings, fences, placeholders and verdict terms disqualify the
+preamble. The reviewer logs only `droppedPreambleBytes` for a removed preamble. The
 final posting body is validated too. Validation, sanitization and finding parsing
 share fence handling: headings and finding cards inside examples are not review
 sections or actionable findings, and examples remain intact in the posted body.
@@ -676,8 +680,10 @@ It rejects a reply if:
   findings alone do not satisfy this rule. `Comment only` and `Approved`
   remain valid with no findings.
 
-A rejected reply exits with a `[reviewer-output]` tag. The watcher retries it
-on the bounded `reviewer-output` path and records the reason in
+A chunk rejected for its output is retried once with the same prompt and
+timeout plan. Earlier chunks are kept, and each rejection has its own forensic
+dump. A rejection that reaches the watcher carries a `[reviewer-output]` tag.
+The watcher retries it on the bounded `reviewer-output` path and records the reason in
 `failure_message`. It is never posted and never stored as a verdict. As
 defence in depth, `parseReviewFindings` uses the same corroboration rule: a
 section with at least two whole-value known placeholders in one finding card

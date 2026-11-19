@@ -230,6 +230,21 @@ test('consistent reviews do not reserve or request a re-review', async t => {
   }
 });
 
+test('single-pass reviews and verdict retries normalize and audit prose before the reply', async t => {
+  const prefix = 'I checked the café fixture.\n\n';
+  const recorded = [];
+  const options = { ...fixture(t), log: { info: value => recorded.push(value) } };
+  const first = await reconcileReviewVerdict({ ...options,
+    dispatch: dispatch(prefix + clean), run: () => assert.fail('no reconciliation required') });
+  assert.equal(first.rawReviewText, clean);
+  assert.equal(first.reviewText, clean);
+  const second = await reconcileReviewVerdict({ ...options,
+    dispatch: dispatch(prefix + contradictory), run: async () => dispatch(prefix + clean) });
+  assert.equal(second.rawReviewText, clean);
+  assert.equal(second.reviewText, clean);
+  assert.deepEqual(recorded, Array(3).fill(`[reviewer] droppedPreambleBytes=${Buffer.byteLength(prefix)}`));
+});
+
 test('chunk aggregation preserves contradictory evidence for one whole-review reconciliation', async () => {
   const merged = mergeChunkedAgyReviews([{ reviewText: contradictory }, { reviewText: clean }]);
   assert.equal(normalizeEffectiveReviewVerdict(merged), 'request-changes');

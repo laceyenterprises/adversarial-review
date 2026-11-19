@@ -88,3 +88,39 @@ Ordinary reviewed deployment and subsequent gate evaluation own recovery.
 The offline fixture uses real commit metadata with synthetic patches and an
 isolated launch record; it does not certify the incident's full final tree or
 independent reversal authorizations.
+
+## Recurrence on Agent OS #11143
+
+The deployed checkout at `38e32ad6` has #1906 (`c494b0c7`) in its ancestry.
+The recorded diagnostic and a fresh read through the native history reader
+both report `primary-change-unknown` at `72250e9c`. The native collector
+selects the earliest receipt in the persisted PR-scoped dispatch records.
+
+| History point | Git object |
+| --- | --- |
+| Initial authoritative Gemini review (CLI builder-boundary fallback) | `2367f0151fe85433badb86001d30f6487618bafc` |
+| Earliest persisted HAM dispatch, at 12:03:40 UTC | `f4c06bc7927dfa7b532a3592e21cca8a6bfb8e79` |
+| First HAM publication, parented by that launch, with no conflict footer | `63cd3e5c5e7cdd28a156b33d700f7e0b75441ee0` |
+| Same HAM subject and trailers at the next recorded launch head, after one conflict footer | `13b93672938ff6a89ebe970612951c43784edd2f` |
+| Builder remediation and actual first HAM parent in the latest comparison | `19aa526cb45eab79ec61a96a86e90bbe1536c77c` |
+| First HAM commit in the latest comparison, after two conflict footers | `89dfa3f394682d6a85d1cf448586b7a184932398` |
+| Incident head | `72250e9cd3026fe33f56626786743bbff6e3900c` |
+
+The historical dispatch is diverged from the CLI builder boundary and absent
+from the latest comparison. Both later dispatch receipts also refer to earlier
+heads. The first current HAM commit has a linked HAM author and committer and
+still carries the original `Worker-Class`, `Worker-Ticket`, `Reviewed-Head`
+and `Closed-By` trailers. The last rebase appended a second footer for
+`projects/worker-pool/SPEC.md`; removing only the last footer left the first
+blocking trailer parsing. Using a later launch would not recover that evidence
+and would risk moving the protected boundary past earlier closure work.
+
+On the same live inputs, the updated native classification returns
+`hasHammerCommits: true`. The full native CLI replay, with scratch-only state
+and copies of the actual launch receipts, selects `19aa526c`, reads 29 primary
+paths, and returns `ok: true` from the strict primary-change predicate. The
+offline comparison fixture also tests refusal for a missing primary patch
+and when the first HAM commit lacks supported metadata. Subsequent recovery
+requires reviewed source rollout and the ordinary exact-head closure checks.
+The scoped HCP memory retry timed out. This investigation used the prior RCA,
+the closure runbook and the native GitHub and dispatch evidence above.

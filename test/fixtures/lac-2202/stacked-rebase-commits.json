@@ -1,0 +1,85 @@
+[
+  {
+    "author": {
+      "login": "codex-worker-lacey"
+    },
+    "commit": {
+      "message": "LDP-07 Dirty queue and walker in shadow (load-plane@689f61cacb09)\n\nWorker-Class: codex\n\n; Conflicts:\n;\tmodules/worker-pool/lib/agent-os-config-loader.sh\n;\tplatform/session-ledger/src/session_ledger/alembic_postgres_revisions/r339.py\n;\tplatform/session-ledger/tests/test_alembic_migrations.py\n\n; Conflicts:\n;\tplatform/os-job-orchestrator/test/deployment-profiles.test.mjs\n\n; Conflicts:\n;\tmodules/worker-pool/README.md"
+    },
+    "committer": {
+      "login": "the-hammer-lacey[bot]"
+    },
+    "parents": [
+      {
+        "sha": "b7df294fd2426c621fb1e4b506bcb55354ee88b5"
+      }
+    ],
+    "sha": "0973fe5dec75ea84ca1729d6615cf62f49eb97ba"
+  },
+  {
+    "author": null,
+    "commit": {
+      "message": "fix(worker-pool): back off failed shadow observations and batch acknowledgements\n\nWorker-Class: codex-remediation\nWorker-Job-Id: laceyenterprises__agent-os-pr-11143-2026-11-19T11-40-18-358Z\nWorker-Run-At: 2026-11-19T11:48:43Z"
+    },
+    "committer": {
+      "login": "the-hammer-lacey[bot]"
+    },
+    "parents": [
+      {
+        "sha": "0973fe5dec75ea84ca1729d6615cf62f49eb97ba"
+      }
+    ],
+    "sha": "19aa526cb45eab79ec61a96a86e90bbe1536c77c"
+  },
+  {
+    "author": {
+      "login": "the-hammer-lacey[bot]"
+    },
+    "commit": {
+      "message": "HAM document read-only DAG readiness inspection contract\n\nWorker-Class: hammer\nWorker-Ticket: HAM\nReviewed-Head: 2367f0151fe85433badb86001d30f6487618bafc\nClosed-By: hammer (adversarial-pipe-mode)\nRemediated-Findings: 6 addressed (0 blocking, 6 non-blocking)\n\n; Conflicts:\n;\tprojects/worker-pool/SPEC.md\n\n; Conflicts:\n;\tprojects/worker-pool/SPEC.md"
+    },
+    "committer": {
+      "login": "the-hammer-lacey[bot]"
+    },
+    "parents": [
+      {
+        "sha": "19aa526cb45eab79ec61a96a86e90bbe1536c77c"
+      }
+    ],
+    "sha": "89dfa3f394682d6a85d1cf448586b7a184932398"
+  },
+  {
+    "author": {
+      "login": "the-hammer-lacey[bot]"
+    },
+    "commit": {
+      "message": "HAM align dirty queue migration references after rebase\n\nWorker-Class: hammer\nWorker-Ticket: HAM\nReviewed-Head: 2367f0151fe85433badb86001d30f6487618bafc\nClosed-By: hammer (adversarial-pipe-mode)\nRemediated-Findings: 6 addressed (0 blocking, 6 non-blocking)"
+    },
+    "committer": {
+      "login": "the-hammer-lacey[bot]"
+    },
+    "parents": [
+      {
+        "sha": "89dfa3f394682d6a85d1cf448586b7a184932398"
+      }
+    ],
+    "sha": "065d37a4b796ab9f8fe4c5aa1418556dce600fd1"
+  },
+  {
+    "author": {
+      "login": "the-hammer-lacey[bot]"
+    },
+    "commit": {
+      "message": "HAM correct migration reference after conflict integration\n\nWorker-Class: hammer\nWorker-Ticket: HAM\nReviewed-Head: 2367f0151fe85433badb86001d30f6487618bafc\nClosed-By: hammer (adversarial-pipe-mode)\nRemediated-Findings: 6 addressed (0 blocking, 6 non-blocking)"
+    },
+    "committer": {
+      "login": "the-hammer-lacey[bot]"
+    },
+    "parents": [
+      {
+        "sha": "065d37a4b796ab9f8fe4c5aa1418556dce600fd1"
+      }
+    ],
+    "sha": "72250e9cd3026fe33f56626786743bbff6e3900c"
+  }
+]

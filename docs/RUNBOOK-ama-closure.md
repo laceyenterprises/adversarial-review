@@ -199,10 +199,11 @@ to record exact-commit produced evidence, confirms the attestation receipt,
 and adds no further commits. Missing evidence remains an operational blocker.
 These trailers are never operator-authored waivers.
 
-LAC-2202: the shared trailer reader recognizes a terminal Git conflict suffix
-with `# Conflicts:` or `; Conflicts:`, blank/comment-only lines and at least one
-same-marker tab-indented path. It reads the preceding trailers with the usual
-duplicate-identity rejection. Arbitrary trailing prose remains unsupported.
+LAC-2202: the shared trailer reader recognizes consecutive terminal Git
+conflict footers left by repeated rebases. Each `# Conflicts:` or `; Conflicts:`
+section requires at least one same-marker tab-indented path and allows
+blank/comment-only lines. The reader stops at malformed sections or arbitrary
+prose and applies the usual duplicate-identity rejection to recovered trailers.
 Recovered provenance selects the actual first hammer parent in current history;
 it does not prove preservation or authorize a reversal. Truly untagged work
 still requires the trusted launch within builder history and otherwise defers

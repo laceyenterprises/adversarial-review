@@ -1459,6 +1459,13 @@ Legacy durable jobs created before `baseBranch` was persisted are hydrated from 
 
 ## MSM two-path merge authority (current)
 
+During the hammer's outside-lease local validation, a selected CI-mirror
+check can reuse successful GitHub Actions job evidence from the same head
+when the repository explicitly maps the command to those jobs. The closer
+runs uncovered checks through the existing validator and records the local
+and CI-covered results before the normal merge gates. See the
+[closure runbook](RUNBOOK-ama-closure.md#leasefair-01-fair-merge-lease-service).
+
 Durable identity absence at a merge-ready exact head retains page ownership
 with `daemon-identity-absent-parked` and no closer dispatch. The diagnostic reason
 is written once per pass so its observation streak remains intact. Present but

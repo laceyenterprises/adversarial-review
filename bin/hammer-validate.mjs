@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { existsSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
@@ -14,6 +14,65 @@ import { readRunClosureResume } from '../src/ama/closure-resume.mjs';
 import { canonicalHammerValidation, ownPackageImportFault, repositoryPythonPackages } from '../src/ama/hammer-canonical-validation.mjs';
 import { recordHammerPhase } from '../src/ama/hammer-outcome.mjs';
 import { ValidationSelectionError, UnsupportedPnpmWorkflowError } from '../src/ama/pnpm-validation.mjs';
+import { writeFileAtomic } from '../src/atomic-write.mjs';
+
+const closeReceipt = process.env.HAM_CLOSE_VALIDATION_RECEIPT;
+const expectedHead = process.env.HAM_CLOSE_VALIDATION_HEAD;
+const receipt = { schemaVersion: 1, head: expectedHead, checks: [] };
+
+function writeValidationReceipt(value) {
+  try { writeFileAtomic(closeReceipt, JSON.stringify(value), { mode: 0o600 }); return true; }
+  catch { console.error('hammer-validate: local validation receipt unavailable'); return false; }
+}
+
+async function withCiCoverage(runner, scratch) {
+  const enabled = process.env.HAM_LOCAL_VALIDATION_CI_DEDUP !== '0';
+  let head;
+  if (enabled) {
+    try {
+      const local = execFileSync('git', ['rev-parse', 'HEAD'], {
+        encoding: 'utf8', timeout: 5000, stdio: ['ignore', 'pipe', 'ignore'],
+      }).trim();
+      if (local === expectedHead) head = local;
+    } catch { /* The original local validator still runs. */ }
+  }
+  try {
+    const { hammerValidationCoverage } = await import('../src/ama/hammer-validation-coverage.mjs');
+    const plan = await hammerValidationCoverage({
+      root: process.cwd(), repo: process.env.HAM_REPO, prNumber: process.env.HAM_PR_NUMBER, head, enabled,
+      // This optional probe reports unavailable coverage through validation.
+      // Keep credential failures provisional, like a managed helper attempt.
+      env: { ...process.env, HAM_HELPER_FAILURE_FILE: join(scratch, 'coverage-auth-failure') },
+    });
+    const planFile = join(scratch, 'ci-coverage.json');
+    writeFileAtomic(planFile, JSON.stringify(plan), { mode: 0o600 });
+    return { ...runner, args: [fileURLToPath(new URL('./hammer-ci-mirror-validation.py', import.meta.url)),
+      planFile, closeReceipt, ...runner.args] };
+  } catch { return runner; }
+}
+
+function finishValidationReceipt(runner, runnerExit, fallbackReason) {
+  let observed = receipt;
+  try { observed = JSON.parse(readFileSync(closeReceipt, 'utf8')); } catch { /* Keep the initial receipt. */ }
+  const status = process.exitCode;
+  if (!observed.checks.length && (!observed.perCheck || runnerExit !== 0)) {
+    observed.checks.push({
+      name: runner?.args[0] === 'scripts/ci-mirror/run-ci-mirror.py' ? 'CI mirror' : 'canonical validator',
+      status: runnerExit === 0 ? 'run' : 'failed',
+      reason: fallbackReason || (runner ? 'no-per-check-evidence' : 'validation-runner-unavailable'),
+      ...(runnerExit === undefined ? {} : { exitStatus: runnerExit }),
+    });
+  }
+  delete observed.perCheck;
+  // A timeout can kill the mirror before its last check records a result.
+  for (const check of observed.checks) {
+    if (check.status === 'run' && !check.result && runnerExit !== 0) {
+      check.status = 'failed';
+      check.exitStatus = runnerExit;
+    }
+  }
+  writeValidationReceipt({ ...observed, status });
+}
 
 // CLOSERGATES-01: a closure-resume launch validated nothing new. While the
 // checkout is still the receipt's validated head, that launch's evidence
@@ -53,11 +112,12 @@ if (!valid || args.shift() !== '--' || !args.length) {
   console.error(`hammer-validate: closure resume: head ${receipt.validatedHead} was validated by launch ${receipt.launchRequestId || 'unknown'}; reusing that evidence, not re-running validation.`);
 } else {
   const scratch = await mkdtemp(join(tmpdir(), 'ham-validation-'));
+  let runner, runnerExit, fallbackReason;
+  const audit = closeReceipt && writeValidationReceipt(receipt);
   try {
     reportRemediationCommit();
     const env = !canonical && pytest ? pytestValidationEnvironment(process.env, scratch,
       join(dirname(fileURLToPath(import.meta.url)), 'pytest')) : process.env;
-    let runner;
     if (canonical) {
       // Older callers passed commands. Always derive changed paths from Git in
       // that compatibility case instead of executing a hand-built validator.
@@ -97,6 +157,8 @@ if (!valid || args.shift() !== '--' || !args.length) {
         output = output.slice(-8192);
       };
       const startedFile = join(scratch, 'pnpm-started');
+      const execution = audit && runner?.args[0] === 'scripts/ci-mirror/run-ci-mirror.py'
+        ? await withCiCoverage(runner, scratch) : runner;
       const timeoutMs = loadAwareTimeoutSeconds(explicitTimeout ? nominalSeconds
         : runner?.nominalSeconds || nominalSeconds) * 1000;
       const deadline = Date.now() + timeoutMs;
@@ -104,13 +166,14 @@ if (!valid || args.shift() !== '--' || !args.length) {
       // repository script failure. Retry startup once within the same budget.
       for (let attempt = 0; attempt < 2; attempt++) {
         const remainingMs = Math.max(1, deadline - Date.now());
-        process.exitCode = runner ? await runBounded(runner.command, runner.args,
+        process.exitCode = execution ? await runBounded(execution.command, execution.args,
           { env: runner.startupReceipt ? { ...env, HAM_PNPM_VALIDATION_STARTED_FILE: startedFile } : env,
             timeoutMs: remainingMs, idleMs: leaseValidationIdleMs(remainingMs),
             observeOutput }) : 127;
         if (!runner?.startupReceipt || existsSync(startedFile) || process.exitCode === 0
           || process.exitCode >= 124 || Date.now() >= deadline) break;
       }
+      runnerExit = process.exitCode;
       const startupFault = runner?.startupReceipt && !existsSync(startedFile)
         && ![124, 125, 130, 143].includes(process.exitCode);
       if (startupFault) {
@@ -122,6 +185,7 @@ if (!valid || args.shift() !== '--' || !args.length) {
         || (process.exitCode !== 0 && process.exitCode < 124
           && packageImportFault));
       if (environmentFault) {
+        fallbackReason = 'canonical-runner-environment-unavailable';
         console.error('hammer-validate: local-battery-skipped-github-required-gate-authoritative; canonical runner environment unavailable. Re-enter verify-head and require exact-head GitHub required checks; no local validation pass is claimed.');
         recordHammerPhase('local-battery-skipped-github-required-gate-authoritative');
         process.exitCode = 0;
@@ -132,6 +196,7 @@ if (!valid || args.shift() !== '--' || !args.length) {
       }
     }
   } finally {
+    if (audit) finishValidationReceipt(runner, runnerExit, fallbackReason);
     if (process.exitCode === undefined || process.exitCode === 125) {
       console.error(`hammer-validate: scratch retained for canonical cleanup: ${scratch}`);
     } else {

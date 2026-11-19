@@ -10,6 +10,17 @@
         "censusFailure: latest failed series { requests, attempts, elapsedMs, lastErrno }, retained after recovery",
         "reasonDetail: census exhaustion { reason, requests, attempts, elapsedMs, lastErrno }, frozen when the stop begins"
       ]
+    },
+    {
+      "title": "Hammer local validation receipts",
+      "path": "docs/data-model/hammer-controllers.md",
+      "store": "<HAM_RUN_DIR>/local-validation.* and <HAM_RUN_DIR>/close-result.json",
+      "schemaSurface": "bin/hammer-validate.mjs",
+      "owner": "Versioned closer controller",
+      "optionalFields": [
+        "close-result.localValidation: validation receipts from one closing invocation",
+        "checks[].jobs: GitHub Actions job names and run IDs for a ci-covered check"
+      ]
     }
   ]
 }

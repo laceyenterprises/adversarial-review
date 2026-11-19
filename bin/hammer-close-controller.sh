@@ -14,6 +14,7 @@ exec 0</dev/null
 HAM_CLOSE_ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P) || exit 1
 HAM_CLOSE_PLAN=${1:-}
 HAM_CLOSE_STAGE=setup
+ham_close_validation_receipts=()
 
 ham_close_finish() {
   local status="$1" outcome="${2:-${HAM_PHASE_OUTCOME:-procedure-step-failed}}"
@@ -23,11 +24,14 @@ ham_close_finish() {
   if [ "${HAM_MERGE_LEASE_HELD:-0}" -eq 1 ] && declare -F ham_release_merge_lease >/dev/null; then
     ham_release_merge_lease || true
   fi
-  jq -n --argjson status "$status" --arg outcome "$outcome" --arg stage "$HAM_CLOSE_STAGE" \
+  local validation
+  validation=$(jq -sc '.' "${ham_close_validation_receipts[@]}" </dev/null 2>/dev/null) || validation='[]'
+  printf '%s\n' "$validation" | jq --argjson status "$status" --arg outcome "$outcome" --arg stage "$HAM_CLOSE_STAGE" \
     --arg head "${POST_REMEDIATION_SHA:-}" --arg leaseHeld "${HAM_MERGE_LEASE_HELD:-0}" \
     --arg note "${HAM_NO_MERGE_NOTE:-}" \
     '{schemaVersion: 1, status: $status, outcome: $outcome, stage: $stage,
-      postRemediationSha: $head, leaseHeld: ($leaseHeld == "1"), noMergeNote: $note}' \
+      postRemediationSha: $head, leaseHeld: ($leaseHeld == "1"), noMergeNote: $note,
+      localValidation: .}' \
     > "$HAM_RUN_DIR/close-result.json" 2>/dev/null || true
   printf '\nHAM close: stage=%s status=%s outcome=%s\n' "$HAM_CLOSE_STAGE" "$status" "$outcome" >&2
   exit "$status"
@@ -115,14 +119,22 @@ while :; do
   export HAM_PROCEDURE_STEP=local-validation
   HAM_PHASE_OUTCOME=targeted-validation-failed
   if [ "${#ham_close_files[@]}" -gt 0 ]; then
-    "$HAM_NODE_BIN" "$HAM_CLOSE_ROOT/bin/hammer-validate.mjs" --canonical -- "${ham_close_files[@]}" \
-      || {
-        ham_close_validation_exit=$?
-        if [ "$ham_close_validation_exit" -eq 78 ]; then
-          ham_close_finish 78 validation-environment-failed
-        fi
-        ham_close_finish "$ham_close_validation_exit" targeted-validation-failed
-      }
+    ham_close_validation_receipt=$(mktemp "$HAM_RUN_DIR/local-validation.XXXXXX") \
+      || ham_close_validation_receipt=
+    ham_close_validation_exit=0
+    HAM_CLOSE_VALIDATION_HEAD="$ham_close_saved_head" HAM_CLOSE_VALIDATION_RECEIPT="$ham_close_validation_receipt" \
+      "$HAM_NODE_BIN" "$HAM_CLOSE_ROOT/bin/hammer-validate.mjs" --canonical -- "${ham_close_files[@]}" \
+      || ham_close_validation_exit=$?
+    if [ -s "$ham_close_validation_receipt" ]; then
+      ham_close_validation_receipts+=("$ham_close_validation_receipt")
+    elif [ -n "$ham_close_validation_receipt" ]; then
+      rm -f "$ham_close_validation_receipt"
+    fi
+    if [ "$ham_close_validation_exit" -eq 78 ]; then
+      ham_close_finish 78 validation-environment-failed
+    elif [ "$ham_close_validation_exit" -ne 0 ]; then
+      ham_close_finish "$ham_close_validation_exit" targeted-validation-failed
+    fi
   fi
   [ "$(git rev-parse HEAD)" = "$ham_close_saved_head" ] || ham_close_finish 20 head-changed
   export HAM_LOCALLY_VALIDATED_HEAD="$ham_close_saved_head"

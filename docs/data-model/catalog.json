@@ -398,7 +398,7 @@
       "schemaSurface": "src/ama/primary-change-store.mjs",
       "relatedSchemaSurfaces": ["src/ama/primary-change.mjs", "src/ama/migration-renumber.mjs", "src/ama/history-reader.mjs", "bin/primary-change-context.mjs", "src/watcher.mjs", "src/ama/lane-reversal.mjs"],
       "owner": "AMA canonical daemon data owner",
-      "identityVersion": "reversalproof-v8",
+      "identityVersion": "reversalproof-v9",
       "partialReadProgress": {
         "directory": "progress-<sha256(key)>/",
         "key": [

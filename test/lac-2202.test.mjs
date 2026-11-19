@@ -113,6 +113,13 @@ test('LAC-2202 consecutive conflict footers preserve trailer rules', () => {
   }
 });
 
+test('LAC-2202 trailers between conflict footers exclude earlier trailer claims', () => {
+  const original = message.slice(0, message.indexOf('; Conflicts:')).trimEnd();
+  const interFooter = original + '\n\n# Conflicts:\n#\ta\n\nWorker-Class: codex\n\n; Conflicts:\n;\tb';
+  assert.deepEqual(parseCommitTrailerValues(interFooter), { 'worker-class': ['codex'] });
+  assert.deepEqual(parseCommitTrailers(interFooter), { 'worker-class': 'codex' });
+});
+
 for (const variant of ['preserved', 'reverted', 'untagged', 'malformed-earlier-footer']) {
   test(`LAC-2202 PR 11143 continuation history: ${variant}`, async t => {
     const rootDir = mkdtempSync(join(tmpdir(), 'lac-2202-continuation-'));

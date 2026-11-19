@@ -166,6 +166,7 @@ test('pre-deploy history recomputes once at an unchanged head and review key', a
   assert.equal(fragment.entries.find(entry => entry.id === 'primary-change-history').identityVersion, version);
   const catalog = JSON.parse(readFileSync(new URL('../docs/data-model/catalog.json', import.meta.url), 'utf8'));
   const entry = catalog.entries.find(entry => entry.id === 'primary-change-history');
+  assert.equal(entry.identityVersion, version);
   assert.ok(entry.optionalHistoryFields.includes('laneReversalHistory'));
   assert.match(entry.laneReversalProof, /laneOwner and laneIdentity/);
 });

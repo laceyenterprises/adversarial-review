@@ -131,6 +131,7 @@ async function buildReviewerExtraContext({
   readTenureReviewRangeImpl = readTenureReviewRange,
   getConfigImpl,
   v1GrowthRatchet = REVIEWER_DOMAIN_CONFIG?.v1GrowthRatchet,
+  fetchV1GrowthFileAtRefImpl,
 } = {}) {
   // PR metadata can advance while a queued exact-head review is running.
   // Linked document reads and head-scoped context must use the reviewed head.
@@ -149,7 +150,8 @@ async function buildReviewerExtraContext({
     log?.warn?.(`[reviewer] tenure remediation range unavailable: ${error.code || 'read-failed'}`);
   }
   // V1RATCHET-01: audit-only growth report; never alters findings or verdict.
-  const v1GrowthContext = formatV1GrowthContext({ diff, repo, title: prContext?.title, ratchet: v1GrowthRatchet });
+  const v1GrowthContext = await formatV1GrowthContext({ diff, repo, title: prContext?.title, ratchet: v1GrowthRatchet,
+    headSha: prContext?.headRefOid || prContext?.head?.sha, fetchFileAtRefImpl: fetchV1GrowthFileAtRefImpl });
   if (v1GrowthContext) log?.error?.(`[reviewer] V1RATCHET: ${v1GrowthContext.split('\n').filter((line) => line.startsWith('- ')).join(' ')}`);
   const disputeContext = formatFindingDisputeContext(prContext, readFindingDisputeReservationsImpl({
     rootDir, repo, prNumber, headSha: prContext?.headRefOid || prContext?.head?.sha, logger: log,

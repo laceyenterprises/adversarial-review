@@ -52,22 +52,21 @@ export function isHamWorkerTicket(value) {
 // absorbed, and line 0 (the subject) is never consumed even when it happens to
 // look like `Word: text`.
 export function parseCommitTrailerValues(message) {
-  let lines = String(message || '').replace(/\r\n/g, '\n').split('\n');
-  // Git records rebase conflicts after the trailers using its comment
-  // character. Accept only the complete standard suffix, including at least
-  // one tab-indented path. Never skip arbitrary prose or comment blocks.
-  const conflict = lines.findLastIndex(line => /^([#;]) Conflicts:$/.test(line));
-  if (conflict > 0) {
-    const marker = lines[conflict][0];
-    const suffix = lines.slice(conflict + 1);
-    if (suffix.some(line => line.startsWith(`${marker}\t`) && line.length > 2)
-      && suffix.every(line => !line.trim() || line.trim() === marker
-        || line.startsWith(`${marker}\t`) && line.length > 2)) {
-      lines = lines.slice(0, conflict);
-    }
+  const lines = String(message || '').replace(/\r\n/g, '\n').split('\n');
+  // Each conflict rebase can append another complete footer. Peel consecutive
+  // terminal sections only, validating each against its own comment marker.
+  let end = lines.length;
+  for (let index = lines.length - 1; index >= 1; index -= 1) {
+    const header = /^([#;]) Conflicts:$/.exec(lines[index]);
+    if (!header) continue;
+    const [, marker] = header;
+    const suffix = lines.slice(index + 1, end);
+    const isPath = line => line.startsWith(`${marker}\t`) && line.length > 2;
+    if (!suffix.some(isPath) || !suffix.every(line => !line.trim() || line.trim() === marker || isPath(line))) break;
+    end = index;
   }
   const trailers = {};
-  for (let index = lines.length - 1; index >= 1; index -= 1) {
+  for (let index = end - 1; index >= 1; index -= 1) {
     const line = lines[index].trim();
     if (!line) continue;
     const match = /^([A-Za-z][A-Za-z0-9-]*):[ \t]*(.+)$/.exec(line);

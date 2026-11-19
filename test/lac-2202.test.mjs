@@ -94,3 +94,84 @@ for (const variant of ['preserved', 'reverted', 'untagged', 'malformed-footer'])
     if (variant === 'reverted') assert.equal(verdict.reason, 'primary-change-reverted');
   });
 }
+
+const stackedCommits = JSON.parse(readFileSync(new URL('./fixtures/lac-2202/stacked-rebase-commits.json', import.meta.url)));
+const launchHead = 'f4c06bc7927dfa7b532a3592e21cca8a6bfb8e79';
+const reviewedHead = '2367f0151fe85433badb86001d30f6487618bafc';
+
+test('LAC-2202 consecutive conflict footers preserve trailer rules', () => {
+  const original = message.slice(0, message.indexOf('; Conflicts:')).trimEnd();
+  const lastFooter = '\n\n; Conflicts:\n; \n;\tsecond.md';
+  const stack = '\n\n# Conflicts:\n#\tfirst.md' + lastFooter;
+  assert.deepEqual(parseCommitTrailerValues(original + stack), parseCommitTrailerValues(original));
+  assert.equal(parseCommitTrailerValues(original + stack)['reversal-authorized-by'].length, 3);
+  assert.equal(hamCommitIdentityMatches({ ...commits[1],
+    commit: { message: original + '\nWorker-Class: codex' + stack } }), false);
+  for (const firstFooter of ['# Conflicts:\n# ', '# Conflicts:\n;\tfirst.md',
+    '# Conflicts:\n#\tfirst.md\n# arbitrary prose', '# Conflicts:\n#\tfirst.md\nordinary prose']) {
+    assert.deepEqual(parseCommitTrailers(original + '\n\n' + firstFooter + lastFooter), {});
+  }
+});
+
+for (const variant of ['preserved', 'reverted', 'untagged', 'malformed-earlier-footer']) {
+  test(`LAC-2202 PR 11143 continuation history: ${variant}`, async t => {
+    const rootDir = mkdtempSync(join(tmpdir(), 'lac-2202-continuation-'));
+    t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+    const repo = 'laceyenterprises/agent-os', prNumber = 11143;
+    const current = structuredClone(stackedCommits);
+    const firstHammer = current[2];
+    if (variant === 'untagged') firstHammer.commit.message = 'Untagged repair';
+    if (variant === 'malformed-earlier-footer') {
+      firstHammer.commit.message = firstHammer.commit.message.replace(';\tprojects/worker-pool/SPEC.md', '; arbitrary prose');
+    }
+    const headSha = current.at(-1).sha;
+    const base = current[0].parents[0].sha;
+    const primaryHead = current[1].sha;
+    const directory = join(rootDir, 'data/follow-up-jobs/ama-closer-dispatches');
+    mkdirSync(directory, { recursive: true });
+    writeFileSync(join(directory, `laceyenterprises__agent-os-pr-11143-${launchHead}.json`), JSON.stringify({
+      repo, prNumber, workerClass: 'hammer', dispatchedAt: '2026-11-19T12:03:40Z', targetRemediationSha: launchHead,
+    }));
+    const files = [{ filename: 'src/primary.mjs', status: 'modified', additions: 1, deletions: 1,
+      patch: '@@ -1 +1 @@\n-before\n+Builder remediation' }];
+    const compare = (from, to) => `repos/${repo}/compare/${from}...${to}`;
+    const historyPath = compare(base, headSha);
+    const history = { commits: current, total_commits: current.length, merge_base_commit: { sha: base } };
+    const get = async path => {
+      if (path.endsWith(`/pulls/${prNumber}`)) return { head: { sha: headSha }, base: { sha: base } };
+      if (path.endsWith('/reviews?per_page=100')) return [
+        { user: { login: 'lacey-gemini-reviewer[bot]' }, commit_id: reviewedHead, submitted_at: '2026-11-19T11:40:08Z' },
+      ];
+      if (path === historyPath) return { ...history, files: variant === 'reverted' ? [] : files };
+      if (path === compare(base, primaryHead)) return { merge_base_commit: { sha: base }, files };
+      throw new Error(`Unexpected fixture read: ${path}`);
+    };
+    get.commitHistory = async path => {
+      assert.equal(path, historyPath);
+      return history;
+    };
+    let launchAncestryRead = false;
+    get.metadata = async path => {
+      assert.equal(path, compare(reviewedHead, launchHead));
+      launchAncestryRead = true;
+      return { status: 'diverged' };
+    };
+    const result = await fetchPrimaryChange({ repo, prNumber, headSha, rootDir, get }, {
+      fetchCiCostImpl: async () => ({ headSha, ok: true }),
+    });
+    const verdict = checkPrimaryChange(result, headSha);
+    if (['untagged', 'malformed-earlier-footer'].includes(variant)) {
+      assert.equal(launchAncestryRead, true);
+      assert.equal(result.hasHammerCommits, null);
+      assert.equal(result.reason, 'untagged hammer launch is outside builder history');
+      assert.equal(verdict.reason, 'primary-change-unknown');
+      return;
+    }
+    assert.equal(result.primaryHead, primaryHead);
+    assert.equal(launchAncestryRead, false);
+    assert.equal(result.hasHammerCommits, true);
+    assert.equal(result.reversalAuthorizations?.length || 0, 0);
+    assert.equal(verdict.ok, variant === 'preserved');
+    if (variant === 'reverted') assert.equal(verdict.reason, 'primary-change-reverted');
+  });
+}

@@ -18,7 +18,7 @@ import { sweepPrimaryChangeStore } from './ama/primary-change-store.mjs';
 import { createHammerScratchSweepTicker } from './ama/hammer-scratch-sweep.mjs';
 // Polls GitHub for new agent-built PRs and spawns reviewer agents.
 import { execFile } from 'node:child_process';
-import { promisify } from 'node:util';
+import { debuglog, promisify } from 'node:util';
 import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { basename, dirname, join } from 'node:path';
@@ -448,6 +448,7 @@ import {
   probeRoutingTierReadiness,
 } from './routing-tier-readiness.mjs';
 const execFileAsync = promisify(execFile);
+const debugPollMemory = debuglog('adversarial-watcher-memory');
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const ROOT = join(__dirname, '..');
 
@@ -1147,28 +1148,35 @@ function prepareReviewerAdmissionForPoll() {
 }
 
 async function pollOnce(octokit, options = {}) {
-  await refreshWatcherAuthenticationForTick({ log: console });
-  recoverRepositoryObservations({ db, rootDir: ROOT, additionalStateDir: ADVERSARIAL_REVIEW_STATE_DIR });
-  const admission = await withRepositoryStateCycle(ROOT, async () => {
-    resetRoleConfigCache();
-    const prepared = prepareReviewerAdmissionForPoll();
-    const { drainReviewerDispatchCandidates } = prepared;
-    await drainReviewerDispatchCandidates('poll-start retained candidates');
-    return prepared;
-  });
-  await withGitHubBudgetScope({}, () => refreshOrgRepos(octokit));
-  activeRepos = [...new Set(activeRepos.map(name => canonicalRepositoryName(db, name)))];
-  const generation = db.prepare('SELECT count(*) AS n FROM repository_rename_audit').get().n;
-  if (generation !== repositoryGeneration) {
-    // Candidates capture closures with repo-specific policy and adapter caches.
-    // Durable pending rows refill them under the new identity on this tick.
-    reviewerDispatchCandidates.splice(0);
-    reviewerRefillContexts.clear();
-    startupReviewerAdmissionPending = true;
-    repositoryGeneration = generation;
+  try {
+    await refreshWatcherAuthenticationForTick({ log: console });
+    recoverRepositoryObservations({ db, rootDir: ROOT, additionalStateDir: ADVERSARIAL_REVIEW_STATE_DIR });
+    const admission = await withRepositoryStateCycle(ROOT, async () => {
+      resetRoleConfigCache();
+      const prepared = prepareReviewerAdmissionForPoll();
+      const { drainReviewerDispatchCandidates } = prepared;
+      await drainReviewerDispatchCandidates('poll-start retained candidates');
+      return prepared;
+    });
+    await withGitHubBudgetScope({}, () => refreshOrgRepos(octokit));
+    activeRepos = [...new Set(activeRepos.map(name => canonicalRepositoryName(db, name)))];
+    const generation = db.prepare('SELECT count(*) AS n FROM repository_rename_audit').get().n;
+    if (generation !== repositoryGeneration) {
+      // Candidates capture closures with repo-specific policy and adapter caches.
+      // Durable pending rows refill them under the new identity on this tick.
+      reviewerDispatchCandidates.splice(0);
+      reviewerRefillContexts.clear();
+      startupReviewerAdmissionPending = true;
+      repositoryGeneration = generation;
+    }
+    watcherLatencyMonitor ??= createWatcherLatencyMonitor();
+    return await withRepositoryStateCycle(ROOT, () => withHoldRecordPoll(() => watcherLatencyMonitor.poll(() => withGitHubAdapterReadTick(() => withClosureEvaluationReadCache(() => withGitHubBudgetScope({}, () => pollOnceWithinBudget(octokit, options, admission)))))));
+  } finally {
+    if (debugPollMemory.enabled) {
+      const { rss, heapUsed, external, arrayBuffers } = process.memoryUsage();
+      debugPollMemory('poll memory rss=%d heapUsed=%d external=%d arrayBuffers=%d', rss, heapUsed, external, arrayBuffers);
+    }
   }
-  watcherLatencyMonitor ??= createWatcherLatencyMonitor();
-  return withRepositoryStateCycle(ROOT, () => withHoldRecordPoll(() => watcherLatencyMonitor.poll(() => withGitHubAdapterReadTick(() => withClosureEvaluationReadCache(() => withGitHubBudgetScope({}, () => pollOnceWithinBudget(octokit, options, admission)))))));
 }
 
 async function pollOnceWithinBudget(

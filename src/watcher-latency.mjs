@@ -51,18 +51,25 @@ export function createWatcherLatencyMonitor({ logger = console, histogram = moni
         activeCounts.set(name, (activeCounts.get(name) || 0) + 1);
       }
       for (const [command, entry] of children) {
+        const inFlightCount = activeCounts.get(command) || 0;
+        if (!entry.count && !entry.completed && !inFlightCount) continue;
         summary.children[command] = { count: entry.count, completed: entry.completed,
-          in_flight: activeCounts.get(command) || 0,
+          in_flight: inFlightCount,
           spawn: milliseconds(entry.spawn), wall: milliseconds(entry.wall) };
+        // Reuse the native histogram storage across polls.
+        entry.count = 0;
+        entry.completed = 0;
+        entry.spawn.reset();
+        entry.wall.reset();
       }
       logger.log(`[watcher] poll latency summary ${JSON.stringify(summary)}`);
-      children.clear();
       histogram.reset();
       return summary;
     },
     stop() {
       channel('child_process').unsubscribe(onChild);
       inFlight.clear();
+      children.clear();
       histogram.disable();
       if (activeObserver === observer) activeObserver = null;
     },

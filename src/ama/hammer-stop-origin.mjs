@@ -236,6 +236,7 @@ export const HAMMER_STOP_ORIGINS = Object.freeze({
 
 export function hammerStopOrigin(reason) {
   const [code, diagnostic] = String(reason || '').split(':');
+  if (code === 'history-read-failed' && diagnostic === 'permanent') return 'world';
   if (code === 'review-evidence-invalid'
     && HAMMER_EDIT_PLAN_ERROR_ORIGINS[diagnostic] === 'plan') return 'closer';
   if (!Object.hasOwn(HAMMER_STOP_ORIGINS, code)) throw new TypeError(`Unregistered hammer stop reason: ${code}`);

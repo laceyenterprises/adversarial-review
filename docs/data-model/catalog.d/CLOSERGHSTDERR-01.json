@@ -1,0 +1,9 @@
+{
+  "version": 1,
+  "entries": [
+    {
+      "id": "ama-audit",
+      "historyReadStop": "attempts[].reason carries the classified history-read-failed code. Optional historyReadError retains bounded redacted detail, and optional historyReadAttempts counts gh child invocations."
+    }
+  ]
+}

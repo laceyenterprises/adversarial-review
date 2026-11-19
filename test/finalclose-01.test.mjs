@@ -19,6 +19,7 @@ import { fetchHammerHeadRange } from '../src/ama/hammer-head-validation.mjs';
 import { spawnSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { renderHammerProcedure } from '../src/hammer-procedure.mjs';
+import { classifyCloserOutcome } from '../src/ama/closer-inconclusive-retry.mjs';
 const repo = 'fixture/repo', prNumber = 41, headSha = 'a'.repeat(40);
 const started = '2026-01-01T00:00:00Z', observed = '2026-01-01T00:10:00Z';
 function fixture(t, { charged = 1, ledgerStatus = 'succeeded', reportedStatus = 'starting' } = {}) {
@@ -693,20 +694,29 @@ test('FINALCLOSE-01 provenance read abort writes its terminal audit and releases
     RUN_DIR: runDir, REPO: repo, PR_NUMBER: String(prNumber), REVIEWED_SHA: reviewed,
     TARGET_REMEDIATION_SHA: headSha, PR_URL: `https://github.com/${repo}/pull/${prNumber}`,
     REVIEWER: 'synthetic-reviewer', RISK_CLASS: 'low', MERGE_METHOD: 'squash' }));
-  const result = spawnSync('bash', ['-c', `
+  for (const [reason, detail, attempts, retryable] of [
+    ['history-read-failed', 'synthetic compare API timeout', undefined, true],
+    ['history-read-failed:transient:http-502', 'history read failed: history-read-failed:transient:http-502 attempts=5 fixture', 5, true],
+    ['history-read-failed:permanent:http-404', 'history read failed: history-read-failed:permanent:http-404 attempts=1 fixture', 1, false],
+  ]) {
+    const result = spawnSync('bash', ['-c', `
     HAM_MERGE_LEASE_HELD=1 HAM_MERGE_LEASE_ID=fixture HAM_NODE_BIN="$1"
     HAM_VERDICT_FILE="$2/absent.json" POST_REMEDIATION_SHA="$3"
-    HAM_HISTORY_READ_ERROR='synthetic compare API timeout'
+    HAM_HISTORY_READ_ERROR="$5"
     ham_release_merge_lease() { echo released; }
     ham_mark_merge_lease_retryable_abort() { echo "retryable:$1"; }
     source "$4" --history-read-abort
-  `, 'fixture', process.execPath, runDir, headSha, procedure], { encoding: 'utf8', timeout: 10000 });
-  assert.equal(result.status, 1, result.stderr);
-  assert.match(result.stdout, /retryable:history-read-failed\nreleased/);
-  const attempt = JSON.parse(readFileSync(captured));
-  assert.equal(attempt.reason, 'history-read-failed');
-  assert.equal(attempt.historyReadError, 'synthetic compare API timeout');
-  assert.deepEqual(readdirSync(runDir), [], 'history-read abort removes all merge scratch files');
+    `, 'fixture', process.execPath, runDir, headSha, procedure, detail], { encoding: 'utf8', timeout: 10000 });
+    assert.equal(result.status, 1, result.stderr);
+    assert.match(result.stdout, /released/);
+    assert.equal(result.stdout.includes('retryable:history-read-failed'), retryable);
+    const attempt = JSON.parse(readFileSync(captured));
+    assert.equal(attempt.reason, reason);
+    assert.equal(attempt.historyReadError, detail);
+    assert.equal(attempt.historyReadAttempts, attempts);
+    assert.equal(classifyCloserOutcome({ reason }).kind, retryable ? 'inconclusive' : 'real');
+    assert.deepEqual(readdirSync(runDir), [], 'history-read abort removes all merge scratch files');
+  }
 });
 
 test('FINALCLOSE-01 dispatch-only closer admits a stale final head and does not resolve merge evidence', async t => {

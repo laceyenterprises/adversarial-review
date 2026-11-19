@@ -8,6 +8,7 @@ import { syncBuiltinESMExports } from 'node:module';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { createHistoryReader } from '../src/ama/history-reader.mjs';
+import { execHistoryFile } from '../src/ama/history-child.mjs';
 import { fetchPrimaryChange, checkPrimaryChange } from '../src/ama/primary-change.mjs';
 import { readHammerStopForHead } from '../src/ama/hammer-stop-hold.mjs';
 import { HISTORY_READ_ERROR_LIMIT, historyReadRetryDelayMs } from '../src/ama/history-read-policy.mjs';
@@ -18,6 +19,57 @@ const prPath = 'repos/fixture/repo/pulls/42';
 let credential = 0;
 const fakeEnv = () => ({ GH_TOKEN: `synthetic-history-${++credential}` });
 const transportError = (stderr, extra = {}) => Object.assign(new Error('Command failed: gh api fixture'), { stderr, ...extra });
+
+const blobPath = `repos/fixture/repo/git/blobs/${head}`;
+const fakeGh = (stdout, stderr, status) => execHistoryFile(process.execPath, ['-e', `
+  process.stdout.write(process.argv[1]);
+  process.stderr.write(process.argv[2]);
+  process.exitCode = Number(process.argv[3]);
+`, stdout, stderr, String(status)]);
+
+test('object reads recover after the original retry allowance', async () => {
+  const delays = [];
+  let calls = 0;
+  const get = createHistoryReader({ env: fakeEnv(), sleep: async ms => { delays.push(ms); },
+    execFileImpl: () => ++calls <= 3
+      ? fakeGh('HTTP/2.0 502 Bad Gateway\r\n\r\n', '', 1)
+      : fakeGh('HTTP/2.0 200 OK\r\n\r\n{"size":0}', '', 0) });
+  assert.deepEqual(await get(blobPath), { size: 0 });
+  assert.deepEqual(delays, [500, 1000, 2000]);
+  assert.equal(calls, 4);
+});
+
+test('a secondary rate limit honors Retry-After from the included headers', async () => {
+  const delays = [];
+  let calls = 0;
+  const get = createHistoryReader({ env: fakeEnv(), sleep: async ms => { delays.push(ms); },
+    execFileImpl: () => ++calls === 1
+      ? fakeGh('HTTP/2.0 403 Forbidden\r\nRetry-After: 7\r\n\r\n', 'gh: secondary rate limit (HTTP 403)', 1)
+      : fakeGh('HTTP/2.0 200 OK\r\n\r\n{"size":0}', '', 0) });
+  assert.deepEqual(await get(blobPath), { size: 0 });
+  assert.deepEqual(delays, [7000]);
+  assert.equal(calls, 2);
+});
+
+test('an object 404 stops after one attempt and preserves only a redacted stderr tail and HTTP status', async () => {
+  const secrets = ['ghp_syntheticToken0000', 'github_pat_syntheticToken0000', 'fixtureBearer0000'];
+  let calls = 0;
+  const get = createHistoryReader({ env: fakeEnv(), sleep: async () => assert.fail('unexpected retry'),
+    execFileImpl: () => {
+      calls++;
+      return fakeGh('HTTP/2.0 404 Not Found\r\n\r\nfixture response body', `${'padding '.repeat(400)}
+gh: proxy timeout ${secrets[0]} ${secrets[1]} Bearer ${secrets[2]}\n`, 1);
+    } });
+  await assert.rejects(get(blobPath), error => {
+    assert.match(error.message, /history-read-failed:permanent:http-404 attempts=1/);
+    assert.match(error.message, /HTTP\/2.0 404 Not Found/);
+    assert.match(error.message, /proxy timeout \[REDACTED_GITHUB_TOKEN\] \[REDACTED_GITHUB_TOKEN\] Bearer \[REDACTED\]$/);
+    assert.equal(error.message.length, HISTORY_READ_ERROR_LIMIT);
+    for (const secret of [...secrets, 'fixture response body']) assert.ok(!error.message.includes(secret));
+    return true;
+  });
+  assert.equal(calls, 1);
+});
 
 test('a retried blob read produces exactly the same complete evidence as first-try success', async t => {
   const collect = async retry => {
@@ -111,7 +163,7 @@ for (const code of ['ERR_CHILD_PROCESS_STDIO_MAXBUFFER', 'ENOBUFS']) {
       sleep: async () => assert.fail('output overflow must not retry'),
       execFileImpl: async () => { calls++; throw cause; } });
     await assert.rejects(get(prPath), error => {
-      assert.equal(error.cause, cause);
+      assert.equal(error.code, cause.code);
       assert.match(error.message, /output limit \d+ bytes exceeded/);
       return true;
     });
@@ -159,6 +211,8 @@ test('rate limits require and honor Retry-After, including HTTP dates', async t 
   assert.equal(historyReadRetryDelayMs(transportError('content', { status: 429, response: { headers: { 'retry-after': 'Thu, 01 Jan 2026 00:00:03 GMT' } } }), 0), 3000);
   assert.equal(historyReadRetryDelayMs(transportError('content', { status: 429, response: { headers: { 'retry-after': '2' } } }), 0), 2000);
   assert.equal(historyReadRetryDelayMs(transportError('proxy timeout', { status: 404 }), 0), null);
+  assert.equal(historyReadRetryDelayMs(transportError('proxy timeout', { stdout: 'HTTP/2.0 404 Not Found\r\nRetry-After: 2\r\n\r\n',
+    githubRateLimitKind: 'secondary' }), 0), null);
   mockedNow.mock.restore();
   const clock = new FakeClock(t);
   let sleeping;
@@ -237,9 +291,9 @@ test('Retry-After beyond the context budget fails immediately with the original 
 });
 
 test('long stderr and closing status retain the cause beyond 300 characters, up to 2000', async () => {
-  const cause = `${'synthetic request detail '.repeat(30)}egress-proxy: upstream connect failed`;
+  const cause = `${'synthetic request detail '.repeat(130)}egress-proxy: upstream connect failed`;
   const get = createHistoryReader({ env: fakeEnv(), sleep: async () => {},
-    execFileImpl: async () => { throw transportError(`${cause}\n${'x'.repeat(3000)}`); } });
+    execFileImpl: async () => { throw transportError(cause); } });
   const evidence = await fetchPrimaryChange({ repo: 'fixture/repo', prNumber: 42, headSha: head, get });
   assert.equal(evidence.reason.length, HISTORY_READ_ERROR_LIMIT);
   assert.match(evidence.reason, /egress-proxy: upstream connect failed/);

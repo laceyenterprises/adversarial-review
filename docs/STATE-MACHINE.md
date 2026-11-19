@@ -1459,6 +1459,10 @@ Legacy durable jobs created before `baseBranch` was persisted are hydrated from 
 
 ## MSM two-path merge authority (current)
 
+An exhausted transient history read carries its class into the closer stop
+receipt and the watcher's inconclusive retry. A permanent history read
+failure produces a counted stop. Both retain the fail-closed history gate.
+
 Durable identity absence at a merge-ready exact head retains page ownership
 with `daemon-identity-absent-parked` and no closer dispatch. The diagnostic reason
 is written once per pass so its observation streak remains intact. Present but

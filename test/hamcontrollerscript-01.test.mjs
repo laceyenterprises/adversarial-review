@@ -86,7 +86,9 @@ case "$(basename "$path")" in
     fi
     exit "\${FIXTURE_VALIDATE_EXIT:-0}" ;;
   hammer-predicate-inputs.mjs) log predicate-inputs ;;
-  primary-change-context.mjs) echo '{}' ;;
+  primary-change-context.mjs)
+    if [ -n "\${FIXTURE_HISTORY_ERROR:-}" ]; then printf '%s\\n' "$FIXTURE_HISTORY_ERROR"; exit 1; fi
+    echo '{}' ;;
   ama-check.mjs) log "ama-check reviewed=$(printf '%s' "$*" | sed -n 's/.*--reviewed-sha \\([0-9a-f]*\\).*/\\1/p')"; echo '{"eligible":true}' ;;
   hammer-terminal-audit.mjs) log "terminal-audit $*" ;;
   *) exec ${shellQuote(process.execPath)} "$path" "$@" ;;
@@ -122,6 +124,11 @@ return 0
   writeFileSync(join(run, 'hammer-merge.sh'), `${phasePrelude}
 if [ "\${1:-}" = --wait-ci ]; then log "wait-ci held=$HAM_MERGE_LEASE_HELD"; HAM_PHASE_OUTCOME=ci-wait-not-needed; return 0; fi
 [ "\${HAM_MERGE_LEASE_HELD:-0}" = 1 ] || { HAM_PHASE_OUTCOME=merge-lease-not-held; return 1; }
+if [ "\${1:-}" = --history-read-abort ]; then
+  log "history-read-abort $HAM_HISTORY_READ_ERROR"; HAM_PHASE_OUTCOME=history-read-failed:transient:http-502
+  ham_release_merge_lease
+  return 1
+fi
 log "merge-phase held=1 verdict=$(cat "$HAM_VERDICT_FILE")"
 if [ -n "\${FIXTURE_MERGE_REFUSE:-}" ]; then HAM_PHASE_OUTCOME=predicate-not-eligible; ham_release_merge_lease; return 20; fi
 log "gh pr merge --squash --match-head-commit $POST_REMEDIATION_SHA"
@@ -249,6 +256,17 @@ test('a refusal at every stage stops without merge and releases a held lease', a
     assert.equal(events.filter(event => event === 'acquire').length,
       events.filter(event => event.startsWith('release ')).length, 'every acquisition is released once');
   }
+});
+
+test('the close passes failed history evidence to the abort audit before deleting it', async t => {
+  const f = hammerFixture(t);
+  const reason = 'history read failed: history-read-failed:transient:http-502 attempts=5 fixture';
+  const result = await f.close({ FIXTURE_HISTORY_ERROR: JSON.stringify({ historyReadFailed: true, reason }) });
+  assert.equal(result.status, 1, result.stderr);
+  assert.equal(result.closeResult.outcome, 'history-read-failed:transient:http-502');
+  assert.ok(f.events().includes(`history-read-abort ${reason}`));
+  assert.ok(!f.events().some(event => event.startsWith('ama-check') || event.startsWith('gh pr merge')));
+  assert.equal(f.events().filter(event => event.startsWith('release ')).length, 1);
 });
 
 test('the close refuses before any controller or lease when inputs or plan data are missing', async t => {

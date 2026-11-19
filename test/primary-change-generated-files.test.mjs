@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, watch } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { checkPrimaryChange, fetchPrimaryChange } from '../src/ama/primary-change.mjs';
@@ -12,7 +12,7 @@ const path = 'docs/states.md';
 
 function fixture(t, { generatorHeader = header, finalHeader = generatorHeader, primaryHeader = generatorHeader, baseHeader = generatorHeader,
   handEdit = false, revertSource = false, finalNewline = true, addedRow = false, manifest,
-  outputPath = path, generatorPath = 'render.mjs' } = {}) {
+  outputPath = path, generatorPath = 'render.mjs', attributes } = {}) {
   const root = mkdtempSync(join(tmpdir(), 'derived-file-fixture-'));
   t.after(() => rmSync(root, { recursive: true, force: true }));
   const git = (...args) => execFileSync('git', args, { cwd: root, encoding: 'utf8', timeout: 5000,
@@ -21,6 +21,10 @@ function fixture(t, { generatorHeader = header, finalHeader = generatorHeader, p
       GIT_COMMITTER_NAME: 'Fixture Builder', GIT_COMMITTER_EMAIL: 'builder@example.invalid' } }).trimEnd();
   const output = (count, declaration) => `${declaration}\n| States | Edges |\n| sample | ${count} |${finalNewline ? '\n' : ''}`;
   git('init', '-q');
+  if (attributes) {
+    writeFileSync(join(root, '.gitattributes'), attributes);
+    git('add', '.gitattributes');
+  }
   mkdirSync(dirname(join(root, outputPath)), { recursive: true });
   mkdirSync(dirname(join(root, generatorPath)), { recursive: true });
   writeFileSync(join(root, 'definitions.txt'), '40\nbase transition');
@@ -159,12 +163,49 @@ for arg do
     exit 1
   fi
 done`);
-  const watcher = watch(tools, (_, file) => { if (file === 'ready') controller.abort(cancelled); });
-  t.after(() => { watcher.close(); controller.abort(cancelled); });
+  let readyObserved = false;
+  const deadline = setTimeout(() => controller.abort(new Error('checkout ready file not observed within 3 seconds')), 3000);
+  const poll = setInterval(() => {
+    if (existsSync(join(tools, 'ready'))) {
+      readyObserved = true;
+      clearInterval(poll);
+      clearTimeout(deadline);
+      controller.abort(cancelled);
+    }
+  }, 20);
+  t.after(() => { clearInterval(poll); clearTimeout(deadline); controller.abort(cancelled); });
   let generatorCalls = 0;
-  await assert.rejects(prove(f, () => { generatorCalls++; }), error => error === cancelled);
+  await assert.rejects(prove(f, () => { generatorCalls++; }), error => {
+    assert.equal(readyObserved, true, 'checkout must publish readiness before the bounded deadline');
+    return error === cancelled;
+  });
   assert.equal(generatorCalls, 0);
   assert.throws(() => readFileSync(readFileSync(join(tools, 'ready'), 'utf8')), { code: 'ENOENT' });
+});
+
+test('whole-file proof reads primary blobs without fetching the primary head into scratch', async t => {
+  const f = fixture(t);
+  const tools = interceptGit(t, (quote, tools) => `
+for arg do
+  if [ "$arg" = fetch ]; then printf '%s\\n' "$@" > ${quote(join(tools, 'fetch-args'))}; fi
+done`);
+  const result = await prove(f);
+  assert.equal(checkPrimaryChange(result, f.args.headSha).ok, true);
+  const args = readFileSync(join(tools, 'fetch-args'), 'utf8').split('\n');
+  assert.ok(args.includes(f.evidence.headSha));
+  assert.ok(args.includes(f.evidence.mergeBase));
+  assert.equal(args.includes(f.evidence.primaryHead), false);
+});
+
+test('attribute-converted whole-file checkout reports a byte mismatch and retains refusal', async t => {
+  const verify = skipDiagnostic(t);
+  const f = fixture(t, { attributes: `${path} text eol=crlf\n` });
+  let generatorCalls = 0;
+  const result = await prove(f, () => { generatorCalls++; });
+  assert.deepEqual(result.generatedBlockProofs, []);
+  assert.equal(checkPrimaryChange(result, f.args.headSha).reason, 'primary-change-reverted');
+  assert.equal(generatorCalls, 0);
+  verify(f, 'checkout-blob-mismatch');
 });
 
 test('GENERATEDPRIMARY-01: stale whole-file count regenerates from final sources without a manifest', async t => {

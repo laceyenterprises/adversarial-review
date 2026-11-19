@@ -17,7 +17,7 @@ function fixture(t, { handEdit = false, outside = false, failure = false, noop =
   headDeclaration = false, reorderDeclaration = false, markerEdit = false, finalShift = false,
   authorShift = 0, repairedInventory = false, generatorCwd = '.', emptyBase = false, noDeclarations = false, authorMarkerEdit = false,
   additionalDeclarations = [], declarationLast = false, paragraphBoundary = false,
-  prosePrefix = '', baseRow = 'Base row', tail = 'Tail' } = {}) {
+  prosePrefix = '', baseRow = 'Base row', tail = 'Tail', attributes } = {}) {
   const root = mkdtempSync(join(tmpdir(), 'derived-block-fixture-'));
   t.after(() => rmSync(root, { recursive: true, force: true }));
   const git = (...args) => execFileSync('git', args, { cwd: root, encoding: 'utf8', timeout: 5000,
@@ -31,6 +31,10 @@ function fixture(t, { handEdit = false, outside = false, failure = false, noop =
   const entry = { ...declaration, cwd: generatorCwd,
     command: [process.execPath, generatorCwd === '.' ? 'render.mjs' : '../render.mjs'] };
   git('init', '-q');
+  if (attributes) {
+    writeFileSync(join(root, '.gitattributes'), attributes);
+    git('add', '.gitattributes');
+  }
   mkdirSync(join(root, 'docs'));
   const entries = declarationLast ? [...additionalDeclarations, entry] : [entry, ...additionalDeclarations];
   writeFileSync(join(root, 'package.json'), JSON.stringify(noDeclarations ? {} : { generatedArtifacts: entries }));
@@ -109,6 +113,18 @@ async function prove(f, options = {}) {
   });
   return { ...f.evidence, generatedBlockProofs };
 }
+
+test('attribute-converted block checkout reports a byte mismatch and retains refusal', async t => {
+  const warning = t.mock.method(console, 'warn', () => {});
+  const f = fixture(t, { attributes: 'docs/guide.md text eol=crlf\n' });
+  let generatorCalls = 0;
+  const result = await prove(f, { runGeneratorImpl: () => { generatorCalls++; } });
+  assert.deepEqual(result.generatedBlockProofs, []);
+  assert.equal(checkPrimaryChange(result, f.args.headSha).reason, 'primary-change-reverted');
+  assert.equal(generatorCalls, 0);
+  assert.equal(warning.mock.callCount(), 1);
+  assert.match(warning.mock.calls[0].arguments[0], /"reason":"checkout-blob-mismatch"/);
+});
 
 test('regenerated author rows are preserved, including a file absent from the final diff', async t => {
   const f = fixture(t);
@@ -421,7 +437,7 @@ test('missing base and regenerated markers retain the refusal', async t => {
 test('checkout with an omitted primary head fetches defined refs only', async t => {
   const f = fixture(t);
   await withDerivedCheckout({ ...f.args, mergeBase: f.evidence.mergeBase }, async ({ checkout, tree }) => {
-    await checkout({ includePrimary: true });
+    await checkout();
     assert.equal(readFileSync(join(tree, 'docs/guide.md'), 'utf8').includes('Base row'), true);
   });
 });

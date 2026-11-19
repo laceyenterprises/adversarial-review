@@ -480,14 +480,14 @@ export async function withDerivedCheckout({ repo, rootDir, headSha, mergeBase, p
       return text;
     };
     let materialized = false;
-    const checkout = async ({ includePrimary = false } = {}) => {
+    const checkout = async () => {
       if (materialized) {
         await git('-C', tree, 'reset', '--hard', headSha);
         await git('-C', tree, 'clean', '-fdx');
         return;
       }
       await git('init', '--bare', '-q', 'objects.git');
-      const checkoutRefs = new Set([headSha, mergeBase, ...(includePrimary ? [primaryHead] : [])].filter(Boolean));
+      const checkoutRefs = new Set([headSha, mergeBase]);
       await git('--git-dir=objects.git', 'fetch', '--quiet', '--no-auto-maintenance', '--no-tags', '--depth=1',
         source, ...checkoutRefs);
       await git('--git-dir=objects.git', 'worktree', 'add', '--quiet', '--detach', tree, headSha);
@@ -524,8 +524,9 @@ export async function proveGeneratedBlocks(args, evidence, refusal, {
           if (primaryHeader?.line === wholeHeader.line && primaryHeader.index === wholeHeader.index) {
             const base = Buffer.from(await show(evidence.mergeBase, refusal.path));
             stage = 'checkout';
-            await checkout({ includePrimary: true });
-            if (!before.equals(await regularFile(tree, refusal.path))) throw new Error('checkout differs from head blob');
+            await checkout();
+            if (!before.equals(await regularFile(tree, refusal.path))) throw Object.assign(
+              new Error('checkout differs from head blob'), { code: 'DERIVED_CHECKOUT_BLOB_MISMATCH' });
             await rm(join(tree, refusal.path));
             stage = 'whole-file-generator';
             await runGeneratorImpl({ scratch, cwd: relative(scratch, tree), command: wholeHeader.command, signal });
@@ -538,8 +539,8 @@ export async function proveGeneratedBlocks(args, evidence, refusal, {
             skipped('whole-file-byte-mismatch');
           } else skipped('whole-file-declaration-mismatch');
         }
-      } catch {
-        skipped(`${stage}-failed`);
+      } catch (error) {
+        skipped(error.code === 'DERIVED_CHECKOUT_BLOB_MISMATCH' ? 'checkout-blob-mismatch' : `${stage}-failed`);
         signal.throwIfAborted();
       }
       stage = 'manifest';
@@ -569,7 +570,8 @@ export async function proveGeneratedBlocks(args, evidence, refusal, {
           const block = generatedBlock(before, declaration);
           stage = 'checkout';
           await checkout();
-          if (!before.equals(await regularFile(tree, refusal.path))) throw new Error('checkout differs from head blob');
+          if (!before.equals(await regularFile(tree, refusal.path))) throw Object.assign(
+            new Error('checkout differs from head blob'), { code: 'DERIVED_CHECKOUT_BLOB_MISMATCH' });
           await writeFile(join(tree, refusal.path), Buffer.concat([
             before.subarray(0, block.startOffset), before.subarray(block.endOffset),
           ]));
@@ -588,8 +590,8 @@ export async function proveGeneratedBlocks(args, evidence, refusal, {
             && outside(before, block).equals(outside(after, regenerated))) proofs.push({ path: refusal.path,
             start: base.start, end: base.end, headSha: evidence.headSha, mergeBase: evidence.mergeBase });
           else skipped('block-byte-mismatch');
-        } catch {
-          skipped(`${stage}-failed`);
+        } catch (error) {
+          skipped(error.code === 'DERIVED_CHECKOUT_BLOB_MISMATCH' ? 'checkout-blob-mismatch' : `${stage}-failed`);
           signal.throwIfAborted();
           // A failed candidate must not discard proofs from other declarations.
         }

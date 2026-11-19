@@ -5160,8 +5160,8 @@ modified text files qualify; additions, deletions, renames and opaque files keep
 their existing rules.
 Each matching declaration is evaluated independently: missing or ambiguous markers
 and generator failures skip that candidate without discarding other proofs.
-Missing markers raise a block read or output failure before any candidate checkout
-when found in the base or final-head blob.
+Missing base or final-head markers raise a block read failure before checkout;
+missing regenerated markers raise an output failure after checkout and generation.
 If no declaration supplies a proof, skipped candidates emit one bounded diagnostic
 naming the artifact path and a fixed failure stage/reason. A successful proof
 suppresses skip warnings from other candidates. Missing or non-directory working
@@ -5171,14 +5171,23 @@ preservation evidence.
 On a region refusal, shared primary-change collection reads exact regular-file
 Git blobs from `localRepository`, the domain's `remediationCloneReferences[repo]`,
 or a `rootDir` checkout with at least one locally configured GitHub origin URL
-matching the subject. It checks
+matching the subject. The fallback accepts only `git@github.com:OWNER/REPO`,
+`ssh://git@github.com/OWNER/REPO` and `https://github.com/OWNER/REPO`, each with an
+optional `.git` suffix and case-insensitive host and owner/repo matching. SSH host
+aliases, explicit ports, HTTPS credentials and trailing slashes do not match;
+use a registered `remediationCloneReferences[repo]` for those local clones. It checks
 the artifact, declarations and eligible regions before fetching or checking out
 a tree. Proof retries issue no GitHub manifest requests. Missing or unreadable
 references and objects retain the refusal. Git cannot lazily fetch missing
 objects, and proof collection has no remote fallback.
 An eligible generator runs from a fresh scratch checkout at the exact head with
-the declared block interior cleared. The checked-out artifact must match its
-Git blob before generation. The generator must
+the declared block interior cleared. Scratch fetches only the head and merge base;
+primary-head blob reads use the local source directly. The checked-out artifact
+must match its Git blob before generation. Checkout attribute conversions such as
+`eol=crlf`, `ident` or `working-tree-encoding` that change the candidate bytes retain
+the refusal with `checkout-blob-mismatch`; a materialization failure still reports
+`checkout-failed`. This byte requirement applies to both block and whole-file
+proofs. The generator must
 recreate the final-head block bytes exactly, so a no-op or hand-edited output
 cannot supply proof. Verified base-coordinate interiors are excluded from author
 line preservation; these match the old-side coordinates of primary diff units,

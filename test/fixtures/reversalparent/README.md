@@ -1,4 +1,6 @@
-# LAC-2134 refusal projections
+# Reviewed-parent refusal projections
+
+## LAC-2134
 
 Captured 2026-11-08. These fixtures retain the affected path's primary/final
 patches, authorization and original authorization, cited review, identity
@@ -24,3 +26,13 @@ are still re-evaluated.
 See [the investigation](../../../docs/investigations/LAC-2134.md) for immutable
 review/commit references, reproduction endpoints, separate dispositions and
 the distinction between a mapping defect and missing authorization.
+
+## LAC-2221
+
+`agent-os-11134.json` retains the hydration path from the reviewed, primary,
+published and HAM-commit patches. It also retains one real intervening
+data-model delta in the primary and published snapshots to witness the
+whole-parent mismatch. The review excerpt keeps findings 1–3 in their
+original order with their File and Lines fields. The fixture exercises the
+evaluator only. The [RCA](../../../docs/postmortems/LAC-2221-reviewed-parent-refusal.md)
+records the full comparison and the limits of the path-isolated control.

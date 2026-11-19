@@ -133,7 +133,11 @@ step.
 Capture two V8 heap snapshots from a production-shaped process far enough
 apart to span the rise (for example with `--heapsnapshot-signal`, run by an
 operator on a non-live replica), then diff them by constructor with the
-method above. A rise confined to compiled code or to `heapTotal` with a flat
-`heapUsed` confirms allocator behaviour. Growth in Map, Set, array or string
-bytes would name the structure to bound. No new CI check, gate or restart job
-is proposed.
+method above. Growth in compiled code is live heap growth and should be
+attributed to the retaining code paths. Rising `heapTotal` with flat `heapUsed`
+is a clue consistent with allocator retention, but does not rule out growing
+native allocations. Correlate the snapshots with RSS, external-memory and native
+allocation measurements over the same interval, and attribute the growing memory
+before concluding that it is allocator retention. Growth in Map, Set, array or
+string bytes identifies candidates whose retaining paths should be investigated
+before choosing a bound. No new CI check, gate or restart job is proposed.

@@ -13,6 +13,9 @@ test changes. The measurements, the module-level structure review and the
 limits are in
 `docs/postmortems/SEV3-review-watcher-memory-grows-under-steady-polling-2026-11-19.md`.
 
+The follow-up treats memory patterns as diagnostic clues and requires attribution
+of growing compiled-code or native memory before concluding allocator retention.
+
 ## Interface changes
 
 None.
@@ -23,3 +26,7 @@ None.
   heap-snapshot runs at 0, 500, 1,000 and 2,000 polls diffed by constructor.
   Results are tabulated in the report.
 - Docs-only change: no source or test files are touched.
+- HAM remediation: `git diff --check` passed. Canonical `hammer-validate.mjs
+  --canonical` for both changed docs reported
+  `local-battery-skipped-github-required-gate-authoritative`; no local test pass
+  is claimed. Exact-head GitHub checks remain the merge authority.

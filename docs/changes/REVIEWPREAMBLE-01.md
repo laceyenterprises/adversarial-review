@@ -14,6 +14,12 @@ validation failures that reach it under the existing reviewer-output policy.
 
 ## Verification
 
+- HAM CI repair: the oversized-delivery regression now verifies raw output,
+  sanitizer errors and attempt numbering for both rejected chunk attempts,
+  including when forensic storage fails.
+- HAM canonical changed-surface validation passed: 67 files, 1,494 passing
+  tests, two skipped, zero failures. Lint, contract typechecking and the
+  byte-equivalence demo also passed.
 - `npm test -- test/review-reply-validation.test.mjs test/reviewer-verdict-recovery.test.mjs test/reviewer-chunk-timeout.test.mjs`
   passed all 71 tests under NetGuard.
 - `npm run lint` passed with zero errors and 149 warnings.

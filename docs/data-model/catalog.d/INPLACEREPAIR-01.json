@@ -12,6 +12,7 @@
         "src/review-harness-retry.mjs",
         "src/exhausted-head-verdict.mjs",
         "bin/repair-in-place.mjs",
+        "src/repair-follow-up-claim.mjs",
         "src/pr-next-action.mjs",
         "src/ama/closure-next-action.mjs",
         "src/ttm-owner.mjs"

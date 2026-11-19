@@ -1,0 +1,75 @@
+--- a/modules/worker-pool/lib/python/cwp_dispatch/pr_repair.py
++++ b/modules/worker-pool/lib/python/cwp_dispatch/pr_repair.py
+@@ -1,6 +1,7 @@
+ """Reserve one review episode before provisioning an exhausted PR update."""
+
+ import json
++import os
+ from pathlib import Path
+ from types import SimpleNamespace
+ import subprocess
+@@ -108,20 +109,22 @@
+             return unavailable(f"worker ownership lookup failed: {exc}")
+         if active is not None:
+             raise SystemExit("[hq] existing worker owns this PR")
++    argv = [
++        "node",
++        str(helper),
++        str(root),
++        context.repo_slug,
++        str(context.pr_number),
++        context.head_sha,
++        owner_key,
++        str(conflicting).lower(),
++    ]
++    if isinstance(dispatch_ticket, str) and dispatch_ticket:
++        # The native hq wrappers exec this Python process. Its parent is the
++        # claimant for a direct daemon dispatch, rather than a CLI-supplied PID.
++        argv.extend((dispatch_ticket, str(os.getppid())))
+     try:
+-        result = run(
+-            [
+-                "node",
+-                str(helper),
+-                str(root),
+-                context.repo_slug,
+-                str(context.pr_number),
+-                context.head_sha,
+-                owner_key,
+-                str(conflicting).lower(),
+-            ],
+-            timeout=120,
+-        )
++        result = run(argv, timeout=120)
+         response = json.loads(result.stdout.strip().splitlines()[-1])
+         if not isinstance(response, dict) or not isinstance(response.get("ok"), bool):
+             raise ValueError("invalid companion response")
+--- a/modules/worker-pool/test/test_in_place_repair.py
++++ b/modules/worker-pool/test/test_in_place_repair.py
+@@ -84,6 +84,26 @@
+     )
+     with pytest.raises(SystemExit, match=reason):
+         reserve_pr_repair(context, "key", root=tmp_path, dispatch_ticket="claimed-successor")
++
++
++@pytest.mark.parametrize("dispatch_ticket", [None, "example__widgets-pr-17-fixture"])
++def test_agent_os_forwards_explicit_ticket_with_its_actual_parent_pid(tmp_path, dispatch_ticket):
++    helper = tmp_path / "bin/repair-in-place.mjs"
++    helper.parent.mkdir()
++    helper.touch()
++    context = SimpleNamespace(repo_slug="example/widgets", pr_number=17, head_sha=HEAD)
++    run = mock.Mock(return_value=subprocess.CompletedProcess([], 0, '{"ok":true,"epoch":null}', ""))
++    with mock.patch("cwp_dispatch.pr_repair.os.getppid", return_value=642):
++        assert (
++            reserve_pr_repair(
++                context, "key", root=tmp_path, dispatch_ticket=dispatch_ticket, run=run
++            )
++            is None
++        )
++    argv = ["node", str(helper), str(tmp_path), "example/widgets", "17", HEAD, "key", "false"]
++    if dispatch_ticket:
++        argv.extend((dispatch_ticket, "642"))
++    run.assert_called_once_with(argv, timeout=120)
+
+
+ @pytest.mark.parametrize("required", [False, True])

@@ -998,6 +998,16 @@ than 40 hexadecimal characters) before opening the review database or reading
 leases. Repair facts count only array-valued closer refund histories; malformed
 entries contribute zero to the informational refunded-spend total.
 
+Native follow-up dispatch can carry its existing claim into repair reservation
+using the explicit `--ticket <jobId>` and the dispatch process's observed parent
+PID. Under the PR's closer intent lock, the helper verifies the sole active job
+is an HQ pre-spawn claim in `in-progress` for that ticket, live launcher,
+repository, PR, and full head. It rechecks the claim after awaited ownership
+reads. Pending, competing, unreadable, and mismatched claims retain custody.
+The closer lease and repair-epoch owner and cap checks still apply. Reusing a
+dispatch key for a different epoch base head refuses `repair-head-mismatch`.
+See the rollout and mixed-version behavior in [LAC-2228](changes/LAC-2228.md).
+
 The helper is a cold composition root: before its first dispatch read (a
 `dispatched` closer lease's launch, or a pending repair epoch's owner) it calls
 `prepareDispatchReadContext`. Only a read terminal launch with no live retry

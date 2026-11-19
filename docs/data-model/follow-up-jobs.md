@@ -569,6 +569,15 @@ ownership store. The remaining window is HQ's to close: a launch HQ admits after
 the spawn-time lookup, or an `hq dispatch --pr` that cannot see a running local
 worker. The agent-os side records that inverse check as its residual risk.
 
+For a native HQ submission that needs an in-place repair epoch, the helper reads
+the raw `in-progress` job and its claimed round. The filename and `jobId` must
+match the explicit dispatch ticket, both `claimedBy` records must name the
+dispatch process's live parent PID, and `revisionRef` and `startHeadSha` must
+match the full dispatch head. The claim must still be at `worker-spawn` on the
+HQ dispatch path, with no worker attached and no competing job for the PR in
+either active bucket. This handoff reads existing fields and leaves the job in
+daemon custody. See the [repair runbook](../RUNBOOK-ama-closure.md#exhausted-cycles-and-new-builder-heads-exhaustedheadowner-01).
+
 ## Branch and publication contract (REMEDBRANCH-01)
 
 Every reviewer runtime carries the subject's PR head `branch` and title-prefix

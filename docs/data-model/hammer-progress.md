@@ -83,3 +83,23 @@ Controller startup follows the same distinction: exhausted launch-environment
 reads and missing legacy dispatch metadata write deferred audits without a
 `terminal-stop`; malformed activation and foreign launch identity emit a final
 receipt before refusing startup.
+
+## Closing comment delivery
+
+The immutable `outcome.json` written by `src/ama/hammer-outcome.mjs` for a
+verified own merge also identifies a pending closing comment. The pending
+comment is confirmed when `src/ama/hammer-closing-comment.mjs` atomically
+writes `closing-comment-delivered.json` in the same run directory. It records
+either an existing authenticated comment or a confirmed GitHub POST response.
+
+| Field | Type | Meaning |
+|---|---|---|
+| `schemaVersion` | integer | `1` |
+| `launchRequestId`, `runId` | string | Original merge receipt identity |
+| `repo`, `prNumber` | string, integer | GitHub PR target |
+| `headSha`, `mergeCommitSha` | string | Exact validated head and confirmed merge SHA |
+| `commentId` | integer | Confirmed GitHub comment ID |
+
+The merge receipt lock protects the mode-`0600` delivery record. The record is
+diagnostic. Recovery checks the original merge receipt, launch-bound audit, live
+GitHub state, merge lane and authenticated comments each time.

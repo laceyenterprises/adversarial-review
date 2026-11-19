@@ -94,7 +94,7 @@ function warnProactiveFailure(outcome) {
 // refresh keeps a held token; only the refresh after a rejection must succeed.
 function tokenContext(options) {
   const { credentialEnv = options.env || process.env, hammerToken = false,
-    reportAuthFailure = reportHammerEarlyFailure, ...childOptions } = options;
+    reportAuthFailure = reportHammerEarlyFailure, retryAuthFailure = true, ...childOptions } = options;
   delete childOptions.credentialDeadlineMs;
   const variable = ENTITLED_VARS.find(key => credentialEnv[key] || credentialEnv[`${key}_REFRESH_COMMAND`])
     || ['GH_TOKEN', 'GITHUB_TOKEN'].find(key => credentialEnv[key]);
@@ -103,7 +103,7 @@ function tokenContext(options) {
   const entitled = ENTITLED_VARS.some(key => credentialEnv[key] || credentialEnv[`${key}_REFRESH_COMMAND`]);
   const managed = Boolean(hammerToken || (credentialEnv.HAM_ROOT_DIR && entitled))
     && (entitled || Boolean(command));
-  return { credentialEnv, childOptions, variable, command, managed, reportAuthFailure };
+  return { credentialEnv, childOptions, variable, command, managed, reportAuthFailure, retryAuthFailure };
 }
 
 // Scope Git's credential helper to this child, preserving other inline config.
@@ -155,7 +155,7 @@ export function withHammerGitSync(execute, options) {
 }
 
 export function hammerTokenSession(options = {}) {
-  const { credentialEnv, childOptions, variable, command, managed, reportAuthFailure } = tokenContext(options);
+  const { credentialEnv, childOptions, variable, command, managed, reportAuthFailure, retryAuthFailure } = tokenContext(options);
   const launchToken = variable && credentialEnv[variable];
   const launchExpiry = variable && credentialEnv[`${variable}_EXPIRES_AT`];
   const cached = refreshedCredentials.get(credentialEnv);
@@ -320,6 +320,7 @@ export function hammerTokenSession(options = {}) {
     },
     retry(error) {
       if (!managed) throw error;
+      if (!retryAuthFailure) throw redact(error);
       if (!credentialRejected(error)) throw redact(error);
       if (retried || !command) {
         reportAuthFailure('credential-refresh-failed', { env: credentialEnv });

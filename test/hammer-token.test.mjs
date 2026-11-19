@@ -41,6 +41,20 @@ process.stdout.write(${JSON.stringify(recordedFixture('github-token-refresh'))})
 }
 const rejected = () => Object.assign(new Error('gh: Bad credentials (HTTP 401)'), { stderr: 'Bad credentials', code: 1 });
 
+test('a metered hammer write can decline auth replay and still redact errors', async t => {
+  const f = fixture(t);
+  let calls = 0;
+  await assert.rejects(meteredExecFile(async (_command, _args, options) => {
+    calls += 1;
+    assert.equal(options.env.GH_TOKEN, fresh);
+    throw Object.assign(rejected(), { stdout: fresh });
+  }, 'gh', ['api', '--method', 'POST', 'fixture'], {
+    env: f.env, hammerToken: true, retryAuthFailure: false,
+  }), { code: 1, stdout: '[redacted]' });
+  assert.equal(calls, 1);
+  assert.equal(f.count(), 1);
+});
+
 function checkRecordedRefresh(t, output) {
   assertProducerContract('github-token-refresh', () => {
     const f = fixture(t);

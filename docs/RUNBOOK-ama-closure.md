@@ -3766,8 +3766,7 @@ prompt-driven worker behavior, not predicate gates — the audit comment and the
    them in an unrelated PR; at most leave a non-blocking note.
 4. **Post a closing comment.** After the close controller drains successfully,
    the launcher runs `node bin/hammer-closing-comment.mjs OWNER/REPO PR HQ_ROOT`.
-   Delivery failure preserves the controller's result and exit status. The
-   same native launch can rerun the helper from a fresh shell to recover.
+   Delivery failure preserves the controller's result and exit status.
    It requires the run's `hammer-progress/<run-id>/outcome.json` to prove its own
    merge, a matching launch-bound successful AMA audit attempt with passing
    exact-head gate and predicate evidence, fresh GitHub confirmation of the PR,
@@ -3778,12 +3777,29 @@ prompt-driven worker behavior, not predicate gates — the audit comment and the
    from the authenticated exact-head pre-merge audit when available. Optional
    details without evidence are marked `unrecorded`.
 
-   Concurrent deliveries from the same run serialize on the merge receipt.
-   A retry rereads all comment pages and checks for a hammer-authored marker for
-   the exact head and merge SHA or an identifiable legacy closing comment.
-   An unknown write result permits a later lookup, with no automatic POST retry.
-   Missing or inconsistent evidence leaves delivery unconfirmed. The helper
-   only posts the comment and has no lease release or merge operation.
+   A verified merge receipt without `closing-comment-delivered.json` is pending
+   delivery evidence. After the launch ends, a runtime owner can reconcile it
+   from an entitled hammer environment with access to the same HQ root and
+   merge lane. Use the original launch and run IDs from the receipt.
+
+   ```bash
+   node bin/hammer-closing-comment.mjs OWNER/REPO PR HQ_ROOT --recover LAUNCH_ID RUN_ID
+   ```
+
+   An overlapping delivery fails fast with
+   `closing-comment-delivery-lock-unavailable`. Try again after the other
+   invocation ends. Each invocation rereads all comment pages and checks for an
+   exact head/merge marker or a legacy closing comment citing the full merge SHA
+   or a standalone 7–12 character prefix. Posting and deduplication both require
+   the same author rule as exact-head HAM validation. Transient GitHub reads get
+   up to two retries with backoff. An uncertain POST leaves the receipt pending
+   for a later invocation to reconcile from GitHub. A confirmed GitHub comment
+   ID is recorded in `closing-comment-delivered.json`.
+
+   If an ambiguous merge response is followed by `already-merged`, or the
+   confirmation read fails after GitHub accepts a merge, the run can lack an
+   own-merge receipt. Those outcomes need operator follow-up. Comment recovery
+   requires the verified own-merge receipt and matching successful audit.
 
    The pre-merge terminal-remediation audit-comment path resolves the post-remediation PR head and
    checks for an existing same-head audit comment with bounded transient retries;

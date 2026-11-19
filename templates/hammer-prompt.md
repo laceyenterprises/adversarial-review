@@ -63,11 +63,11 @@ The close command's `close-result.json` `stage` is the phase; `status` is its ex
 | Phase | Exit code | Next action |
 | --- | --- | --- |
 | any | 0 | `HAM closing comment` with `posted` or `already-posted` completes closeout. A missing or unconfirmed delivery goes to mandate 7, even if scratch disappeared. |
-| verify-head | 20 | Stop with the printed named outcome. Preserve parked/deferred audits and retry semantics (Appendix B, mandate 0b); `already-merged` goes to confirmed closeout, never remediation. `ci-infrastructure` stops without HQ decision. |
+| verify-head | 20 | Stop with the printed named outcome. Preserve parked/deferred audits and retry semantics (Appendix B, mandate 0b). Report `already-merged` for operator follow-up. `ci-infrastructure` stops without HQ decision. |
 | verify-head / merge | 21 | Run **Appendix D — Resolving merge conflicts**, starting with its lease-state query/release block. Repair, commit, then rerun the close command. |
 | publish | nonzero | Stop; preserve pushed-head provenance and the named failure. No merge or source re-review. |
 | local-validation | nonzero | Failed tests: repair, commit and rerun the close command, or release for another hammer pass. |
-| merge | 20 / 75 / other nonzero | Stop with printed outcome. Preserve retryable deferrals such as `lane-busy`; if merge may have been accepted, run mandate 7 to reconcile the closing comment. Never retry the merge blindly. |
+| merge | 20 / 75 / other nonzero | Stop with the printed outcome. Preserve retryable deferrals such as `lane-busy`. Report a possibly accepted merge without a verified own-merge receipt for operator follow-up. |
 | other | nonzero | Stop with the printed reason; 75 is a retryable deferral. Release/audit via the stop conditions below. |
 
 ### Observe lease state
@@ -823,10 +823,11 @@ gates. A permanent history failure ends the run with its classified reason.
    "$HAM_NODE_BIN" "<<ROOT_DIR>>/bin/hammer-closing-comment.mjs" "<<REPO>>" "<<PR_NUMBER>>" "<<HQ_ROOT>>"
    ```
 
-   `posted` and `already-posted` complete closeout. On unconfirmed delivery,
-   rerun only this command once. When proof is missing or inconsistent, report
-   the printed reason. Do not reconstruct inputs, rerun the close command, or
-   write a closing comment from memory.
+   `posted` and `already-posted` confirm closeout. The command retries transient
+   GitHub reads. If delivery remains unconfirmed, report the PR, launch ID, run
+   ID and printed reason for operator follow-up. The durable run receipt makes
+   later comment recovery possible when it proves an own merge. Treat an absent
+   or inconsistent receipt as a proof gap and leave the closing comment unposted.
 
 ## Appendix C — Commit, publish and revalidate
 

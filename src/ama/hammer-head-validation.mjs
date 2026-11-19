@@ -23,13 +23,17 @@ export function fleetCommitIdentityMatches(commit, fleetLogins = DEFAULT_FLEET_L
     && trusted.has(login(commit?.author));
 }
 
+export function exactHammerCommentAuthorMatches(author) {
+  return login(author) !== 'clio-airlock' && hamAuditCommentAuthorMatches(author);
+}
+
 export function exactHammerValidation(comment, headSha) {
   const author = comment?.author?.login || comment?.author || comment?.user?.login;
   const heads = String(comment?.body || '').split(/\r?\n/).map(line => line.trim())
     .filter(line => line.startsWith('HAM-Validated-Head:'));
   const terminalHeads = String(comment?.body || '').split(/\r?\n/).map(line => line.trim())
     .filter(line => line.startsWith('HAM-Terminal-Remediation-Head:'));
-  return Boolean(headSha && login(author) !== 'clio-airlock' && hamAuditCommentAuthorMatches(author)
+  return Boolean(headSha && exactHammerCommentAuthorMatches(author)
     && heads.length === 1 && heads[0] === `HAM-Validated-Head: ${headSha}`
     && (terminalHeads.length === 0 || (terminalHeads.length === 1
       && terminalHeads[0] === `HAM-Terminal-Remediation-Head: ${headSha}`)));
@@ -39,7 +43,7 @@ export function exactHammerValidation(comment, headSha) {
 // and builder-authored copies of the same trailers confer no authority.
 export function hammerProvenanceEdge(comment) {
   const author = comment?.author?.login || comment?.author || comment?.user?.login;
-  if (login(author) === 'clio-airlock' || !hamAuditCommentAuthorMatches(author)) return null;
+  if (!exactHammerCommentAuthorMatches(author)) return null;
   const lines = String(comment?.body || '').split(/\r?\n/).map(line => line.trim());
   const values = key => lines.filter(line => line.startsWith(`${key}:`))
     .map(line => line.slice(key.length + 1).trim());

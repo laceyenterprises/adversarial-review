@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -27,6 +27,7 @@ function fixture(t) {
   const params = { repo, prNumber, rootDir, hqRoot: rootDir, env };
   const identity = { repo, prNumber, headSha };
   const outcomePath = join(rootDir, 'dispatch', launchRequestId, 'hammer-progress', runId, 'outcome.json');
+  const deliveryPath = join(rootDir, 'dispatch', launchRequestId, 'hammer-progress', runId, 'closing-comment-delivered.json');
   const live = { number: prNumber, state: 'closed', merged: true, head: { sha: headSha },
     merge_commit_sha: mergeCommitSha, merged_at: mergedAt, base: { ref: 'main' } };
   const attempt = { launchRequestId, outcome: 'succeeded', reason: 'merged', attemptPhase: 'hammer-gh-pr-merge',
@@ -60,7 +61,7 @@ function fixture(t) {
     assert.fail(`Unexpected GitHub request ${args}`);
   };
   const deliver = overrides => deliverHammerClosingComment(params, { github, ...overrides });
-  return { rootDir, params, identity, outcomePath, live, auditPath, writeAudit, writeProof, comments, calls, github, deliver };
+  return { rootDir, params, identity, outcomePath, deliveryPath, live, auditPath, writeAudit, writeProof, comments, calls, github, deliver };
 }
 
 test('successful dispatch scratch retirement removes inputs before final comment delivery', async t => {
@@ -84,6 +85,9 @@ test('successful dispatch scratch retirement removes inputs before final comment
       'Doc-currency: updated; fixture runbook', `HAM-Validated-Head: ${headSha}`].join('\n') });
 
   assert.equal((await f.deliver()).outcome, 'posted');
+  assert.deepEqual(JSON.parse(readFileSync(f.deliveryPath, 'utf8')), {
+    schemaVersion: 1, repo, prNumber, launchRequestId, runId, headSha, mergeCommitSha, commentId: 3,
+  });
   assert.equal((await f.deliver()).outcome, 'already-posted');
   assert.equal(f.calls.filter(args => args[2] === 'POST').length, 1);
   assert.match(f.comments[2].body, /Exact-head GitHub gate and HAM predicate: passed \(remote-ci-green\)/);
@@ -147,7 +151,10 @@ for (const [description, alter, error] of [
 
 test('unknown GitHub state, lease or comment lookup leaves delivery unconfirmed', async t => {
   const f = fixture(t);
-  await assert.rejects(f.deliver({ github: async () => { throw new Error('offline'); } }), /offline/);
+  await assert.rejects(f.deliver({
+    github: async () => { throw new Error('offline'); },
+    sleep: () => assert.fail('permanent read failure should not retry'),
+  }), /github-closeout-read-unavailable/);
   await assert.rejects(f.deliver({ inspectLease: () => ({ holder: { holderPr: prNumber } }) }), /lease-release-unconfirmed/);
   await assert.rejects(f.deliver({ inspectLease: () => null }), /lease-release-unconfirmed/);
   await assert.rejects(f.deliver({ github: async args => args[1] === '--paginate' ? { partial: [] } : f.github(args) }),
@@ -155,24 +162,96 @@ test('unknown GitHub state, lease or comment lookup leaves delivery unconfirmed'
   await assert.rejects(f.deliver({ github: async args => args[1] === 'graphql' ? {} : f.github(args) }),
     /closing-comment-author-unconfirmed/);
   assert.equal(f.calls.some(args => args[2] === 'POST'), false);
+  assert.equal(existsSync(f.deliveryPath), false);
 });
 
 test('an ambiguous POST is reconciled by lookup before any replay', async t => {
   const f = fixture(t);
   await assert.rejects(f.deliver({ github: async args => {
     const result = await f.github(args);
-    if (args[2] === 'POST') throw new Error('response lost after write');
+    if (args[2] === 'POST') throw new Error('TLS handshake timeout after write');
     return result;
-  } }), /response lost after write/);
+  } }), /closing-comment-delivery-unconfirmed/);
+  assert.equal(existsSync(f.deliveryPath), false);
   assert.equal((await f.deliver()).outcome, 'already-posted');
+  assert.equal(existsSync(f.deliveryPath), true);
   assert.equal(f.calls.filter(args => args[2] === 'POST').length, 1);
 });
 
-test('a legacy hammer closing comment for the same merge satisfies delivery', async t => {
+for (const [legacySha, outcome] of [
+  [mergeCommitSha, 'already-posted'],
+  [mergeCommitSha.slice(0, 7), 'already-posted'],
+  [mergeCommitSha.slice(0, 12).toUpperCase(), 'already-posted'],
+  [mergeCommitSha.slice(0, 13), 'posted'],
+  [`x${mergeCommitSha.slice(0, 7)}`, 'posted'],
+  [`${mergeCommitSha.slice(0, 7)}x`, 'posted'],
+  ['c'.repeat(7), 'posted'],
+]) {
+  test(`legacy merge SHA token ${legacySha} yields ${outcome}`, async t => {
+    const f = fixture(t);
+    f.comments.push({ id: 1, user: author, body: `## ✅ Closed by Hammer\n\nMerged SHA: \`${legacySha}\`\n\nClosed-By: hammer (adversarial-pipe-mode)` });
+    assert.equal((await f.deliver()).outcome, outcome);
+    assert.equal(f.calls.some(args => args[2] === 'POST'), outcome === 'posted');
+  });
+}
+
+test('the owner lane cannot authorize or suppress a closing comment', async t => {
   const f = fixture(t);
-  f.comments.push({ id: 1, user: author, body: `## ✅ Closed by Hammer\n\nMerged SHA: \`${mergeCommitSha}\`\n\nClosed-By: hammer (adversarial-pipe-mode)` });
-  assert.equal((await f.deliver()).outcome, 'already-posted');
+  const owner = { login: 'clio-airlock' };
+  f.comments.push({ id: 1, user: owner, body: closingMarker });
+  await assert.rejects(f.deliver({ github: args => args[1] === 'graphql'
+    ? { data: { viewer: owner } } : f.github(args) }), /closing-comment-author-unconfirmed/);
   assert.equal(f.calls.some(args => args[2] === 'POST'), false);
+  assert.equal((await f.deliver()).outcome, 'posted');
+});
+
+test('the outgoing closing comment filters recorded local paths', async t => {
+  const f = fixture(t);
+  f.writeAudit({ failingTestsFixed: `details at ${join(f.rootDir, 'validation.log')}` });
+  await f.deliver();
+  assert.match(f.comments[0].body, /Failing tests fixed: details at <local>\/validation\.log/);
+  assert.equal(f.comments[0].body.includes(f.rootDir), false);
+});
+
+test('each GitHub read can retry a transient failure with backoff', async t => {
+  const f = fixture(t);
+  const readAttempts = new Map();
+  const waits = [];
+  const result = await f.deliver({
+    github: async args => {
+      if (args[2] === 'POST') return f.github(args);
+      const prior = readAttempts.get(args[1]) || 0;
+      readAttempts.set(args[1], prior + 1);
+      if (prior === 0) throw new Error('TLS handshake timeout');
+      return f.github(args);
+    },
+    sleep: ms => waits.push(ms),
+  });
+  assert.equal(result.outcome, 'posted');
+  assert.deepEqual([...readAttempts.values()], [2, 2, 2]);
+  assert.deepEqual(waits, [1_000, 1_000, 1_000]);
+});
+
+test('exhausted reads preserve pending evidence for post-launch recovery', async t => {
+  const f = fixture(t);
+  const waits = [];
+  let reads = 0;
+  await assert.rejects(f.deliver({
+    github: async () => {
+      reads += 1;
+      throw Object.assign(new Error('timed out'), { killed: true, signal: 'SIGKILL' });
+    },
+    sleep: ms => waits.push(ms),
+  }), /github-closeout-read-unavailable/);
+  assert.equal(reads, 3);
+  assert.deepEqual(waits, [1_000, 2_000]);
+  assert.equal(existsSync(f.outcomePath), true);
+  assert.equal(existsSync(f.deliveryPath), false);
+
+  const recover = recovery => deliverHammerClosingComment({ ...f.params, env: {}, recovery }, { github: f.github });
+  await assert.rejects(recover({ launchRequestId, runId: 'wrun_other' }), /merge-proof-unavailable/);
+  assert.equal((await recover({ launchRequestId, runId })).outcome, 'posted');
+  assert.equal(existsSync(f.deliveryPath), true);
 });
 
 test('concurrent delivery for the same receipt cannot post twice', async t => {

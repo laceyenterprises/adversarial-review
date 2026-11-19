@@ -1527,8 +1527,10 @@ running controller and expires after six hours.
 
 The GitHub closing comment follows confirmed merge and lease release. It can be
 delivered after scratch retirement using the native launch/run merge receipt, the
-matching successful AMA attempt and a fresh GitHub read. An unconfirmed comment
-leaves the merge terminal and grants no new closure authority.
+matching successful AMA attempt and fresh GitHub reads. The merge receipt is
+pending delivery evidence until the helper records a confirmed GitHub comment ID.
+An entitled recovery invocation can use the original launch and run IDs after
+worker exit. The merge remains terminal throughout comment recovery.
 
 An exhausted closer that confirms an open PR without merging enrolls a durable
 PR/head successor request carrying the predicate's refusing review. The ordinary

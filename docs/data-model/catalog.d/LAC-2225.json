@@ -1,0 +1,15 @@
+{
+  "version": 1,
+  "entries": [
+    {
+      "id": "hammer-closing-comment-delivery",
+      "title": "Hammer closing comment delivery",
+      "path": "docs/data-model/hammer-progress.md",
+      "store": "<HQ root>/dispatch/<launchRequestId>/hammer-progress/<runId>/{outcome,closing-comment-delivered}.json",
+      "schemaSurface": "src/ama/hammer-closing-comment.mjs",
+      "relatedSchemaSurfaces": ["src/ama/hammer-outcome.mjs", "bin/hammer-closing-comment.mjs"],
+      "owner": "Hammer closing comment helper",
+      "fields": ["schemaVersion", "launchRequestId", "runId", "repo", "prNumber", "headSha", "mergeCommitSha", "commentId"]
+    }
+  ]
+}

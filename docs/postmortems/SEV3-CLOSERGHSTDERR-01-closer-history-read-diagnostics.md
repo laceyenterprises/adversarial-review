@@ -23,8 +23,10 @@ Both failure responses have the same process exit code.
 The reader now uses the included response status and retry timing, retains
 a redacted stderr tail, and allows transient object reads up to five
 attempts within the shared deadline. The closer records the class and
-number of attempts. An exhausted 502 reaches the watcher's inconclusive
-retry path. A 404 stops on its first read and remains a counted failure.
+number of attempts. An exhausted 502 records the registered `history-read-failed`
+reason, retains its class in `reasonDetail`, and reaches the watcher's
+inconclusive retry path through a deferred audit. A 404 stops on its first
+read and remains a counted failure.
 
 Offline fixtures cover recovery on the fourth request, a secondary rate
 limit with `Retry-After`, permanent failure, redaction, stop audit fields,

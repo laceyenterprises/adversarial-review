@@ -169,7 +169,11 @@ export async function runHelperStep({ mode, step, nominal, ceiling, command, arg
       stderr(`HAM helper failure reason=${reason}\n`);
       // 20 = semantic stop; 21 = repairable conflict or plan correction.
       // Their owners select the outcome; typed closer faults were handled above.
-      if (reportsFailure && ![20, 21].includes(result.code)) await report(reason, { env });
+      let historyReadFailed = false;
+      if (step === 'primary-change-context') {
+        try { historyReadFailed = JSON.parse(output).historyReadFailed === true; } catch { /* The helper reports an unreadable result. */ }
+      }
+      if (reportsFailure && !historyReadFailed && ![20, 21].includes(result.code)) await report(reason, { env });
       return result.code;
     } finally {
       rmSync(directory, { recursive: true, force: true });

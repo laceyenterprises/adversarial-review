@@ -8,13 +8,21 @@ stop without transport retries. See the [SEV3 report](../postmortems/SEV3-CLOSER
 
 ## Interface changes
 
-Closer stop reasons carry the history failure class and HTTP status when
-available. The audit records the redacted `historyReadError` and optional
-`historyReadAttempts`. The watcher's inconclusive retry handles transient
-stops, and permanent stops retain counted failure handling.
+Transient closer audits use registered `reason=history-read-failed` and carry
+the history failure class in `reasonDetail`. Permanent stops retain their
+classified reason and counted failure handling. The audit records the
+redacted `historyReadError` and optional `historyReadAttempts`. The watcher's
+inconclusive retry handles transient stops. Non-history primary-change
+helper failures retain a terminal audit.
 
 ## Verification
 
-- `npm test -- test/history-read-retry.test.mjs test/finalclose-01.test.mjs test/hamcontrollerscript-01.test.mjs` passed 121 tests under netguard.
-- `npm run lint` passed with zero errors. `npm run typecheck:contracts` passed.
-- `bash demo/research-finding-walkthrough.sh` passed with three byte-stable transcript deliveries.
+- `node --test test/finalclose-01.test.mjs` passed 78 tests, including the
+  production audit CLI fixture. The combined focused run passed controller
+  and history-read suites; the final-close fixture was corrected and rerun.
+- `node --test test/verifyheadtransient-01.test.mjs` passed 154 tests, including
+  classified early-failure audit coverage.
+- `npm run lint` passed with zero errors; `npm run typecheck:contracts` and
+  `node scripts/validate-data-model-catalog.mjs` passed.
+- `bash demo/research-finding-walkthrough.sh` passed with three byte-stable
+  transcript deliveries.

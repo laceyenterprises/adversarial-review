@@ -634,8 +634,8 @@ export async function evaluateHammerStopHold({
     return stop ? { action: 'release', hammerStop: stop, changed } : { action: 'none' };
   }
   if (!stop) return { action: 'none' };
-  // FINALCLOSE-01: transport evidence cannot become an input-change hold. The
-  // launched hammer owns a fresh read; ordinary series/lifetime caps own retries.
+  // FINALCLOSE-01: retryable transport evidence cannot become an input-change
+  // hold. Permanent history refusals use the ordinary counted stop policy.
   if ((stop.predicate === 'history-read-failed' || stop.predicate.startsWith('history-read-failed:transient:')) && !stop.refusal) {
     const changed = ['history-read-retry'];
     persist({ stopKey: stop.stopKey, releasedAt: now, releasedBy: changed, paged: false });

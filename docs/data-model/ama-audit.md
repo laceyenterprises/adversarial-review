@@ -9,8 +9,10 @@ ended matching charged launch before any bounded refund; this projection grants
 no merge or lease authority. New early-exit attempts record `stopOrigin`
 (`closer`, `world` or `infrastructure`); creation metadata also records the
 initial origin. Colon-suffixed diagnostics usually remain in the optional
-`attempts[].reasonDetail`. Classified history stops retain their suffix in
-`attempts[].reason` for routing. Unknown runtime stops retain
+`attempts[].reasonDetail`. Transient classified history stops use registered
+`reason=history-read-failed` and retain their class in `reasonDetail`.
+Permanent classified stops retain their suffix in `reason` for counted world
+routing. Unknown runtime stops retain
 `reason=stop-reason-unregistered` and `stopOrigin=closer`, with the unregistered
 reason preserved in optional `attempts[].originalReason` as well as `reasonDetail`.
 `recordHammerEarlyFailure` checks failure-code syntax (`^[a-z][a-z0-9:-]*$`)
@@ -70,7 +72,7 @@ at mode `0640`.
 | `attempts[].reviewServiceRevision` | string or null | HOLDGATEVERSION-01: loaded review-service checkout commit (`git:<sha>`) or packaged version (`package:<version>`), captured by the audit writer unless supplied by the producer. Missing legacy provenance remains unknown. Deterministic stop holds retain this decision baseline across deployment. |
 | `attempts[].gatePredicateVersion` | optional string | Producer-supplied predicate version, retained by deterministic hold readers alongside the service revision. |
 | `attempts[].outcome` | string | `in_progress`, `deferred`, `superseded`, `succeeded`, or `failed-without-merge`. Other attempt fields carry caller evidence, including `closingStatus` for gate-cap parks. |
-| `attempts[].reason`, `attempts[].historyReadError`, `attempts[].historyReadAttempts` | optional string, string, non-negative integer | A classified closer history stop carries `history-read-failed:<class>:<detail>` in `reason`. `historyReadError` retains the bounded, redacted diagnostic. `historyReadAttempts` counts child invocations when available. |
+| `attempts[].reason`, `attempts[].reasonDetail`, `attempts[].historyReadError`, `attempts[].historyReadAttempts` | optional string, string, string, non-negative integer | Transient classified stops use registered `reason=history-read-failed` with `history-read-failed:transient:<detail>` in `reasonDetail`, yielding an uncounted `deferred` audit. Permanent stops retain `history-read-failed:permanent:<detail>` in `reason` and a counted audit. `historyReadError` retains the bounded, redacted diagnostic; `historyReadAttempts` counts child invocations when available. |
 | `attempts[].waited_s` | optional number or null | Merge-lease timeout elapsed seconds from the lease CLI; missing or null duration evidence is recorded as JSON `null` so the deferred audit remains valid. |
 | `attempts[].configured_s` | optional number | Procedure-enforced merge-lease wait budget in seconds for a timeout attempt. |
 | `attempts[].pendingAttestation` | optional object | Hammer audit-delivery failure after a successful range proof: `baseHead` (last reviewed SHA), `validatedHead` (document head), `identity` (`login`, numeric `databaseId`), and `validationSummary` (`rangeVerified: true`, non-negative `total`, `blocking`, `nonBlocking` counts). Fixed fields only; no secrets, stderr or arbitrary bodies. |

@@ -11,7 +11,7 @@ import { createHistoryReader } from '../src/ama/history-reader.mjs';
 import { execHistoryFile } from '../src/ama/history-child.mjs';
 import { fetchPrimaryChange, checkPrimaryChange } from '../src/ama/primary-change.mjs';
 import { readHammerStopForHead } from '../src/ama/hammer-stop-hold.mjs';
-import { HISTORY_READ_ERROR_LIMIT, historyReadRetryDelayMs } from '../src/ama/history-read-policy.mjs';
+import { HISTORY_READ_ERROR_LIMIT, historyReadRetryDelayMs, historyReadStopReason } from '../src/ama/history-read-policy.mjs';
 import { githubCredential, recordResponseRateLimit } from '../src/rate-limit-throttle.mjs';
 
 const base = 'a'.repeat(40), primary = 'b'.repeat(40), head = 'c'.repeat(40);
@@ -26,6 +26,12 @@ const fakeGh = (stdout, stderr, status) => execHistoryFile(process.execPath, ['-
   process.stderr.write(process.argv[2]);
   process.exitCode = Number(process.argv[3]);
 `, stdout, stderr, String(status)]);
+
+test('installation-token auth outage remains transient even when its cause is HTTP 401', () => {
+  const error = Object.assign(new Error('github auth outage'), { failureClass: 'github-auth-outage',
+    cause: Object.assign(new Error('HTTP 401'), { status: 401 }) });
+  assert.equal(historyReadStopReason(error), 'history-read-failed:transient:auth-outage');
+});
 
 test('object reads recover after the original retry allowance', async () => {
   const delays = [];

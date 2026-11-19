@@ -158,7 +158,7 @@ export HAM_PROCEDURE_STEP=predicate
 HAM_PHASE_OUTCOME=predicate-build-failed
 HAM_PRIMARY_CHANGE_FILE=$(mktemp "$HAM_RUN_DIR/ham-primary-change.XXXXXX") || ham_close_finish 1
 chmod 600 "$HAM_PRIMARY_CHANGE_FILE"
-"$HAM_NODE_BIN" "$HAM_CLOSE_ROOT/bin/hammer-helper-step.mjs" read primary-change-context 90 540 \
+"$HAM_NODE_BIN" "$HAM_CLOSE_ROOT/bin/hammer-helper-step.mjs" read:report primary-change-context 90 540 \
   "$HAM_NODE_BIN" "$HAM_CLOSE_ROOT/bin/primary-change-context.mjs" "$HAM_REPO" "$HAM_PR_NUMBER" "$POST_REMEDIATION_SHA" \
   > "$HAM_PRIMARY_CHANGE_FILE" || {
     ham_history_status=$?

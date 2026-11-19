@@ -1,7 +1,7 @@
 import './helpers/load-aware-timeout-fixture.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, readdirSync, rmSync } from 'node:fs';
+import { mkdtempSync, readdirSync, rmSync, symlinkSync } from 'node:fs';
 import { hostname, tmpdir, userInfo } from 'node:os';
 import { join } from 'node:path';
 import { maybeDispatchAmaCloser, updateAmaCloserDispatchRecord, amaCloserDispatchFilePath, _resetHammerRetryCapAlertDebounceForTests } from '../src/ama/dispatch-closer.mjs';
@@ -13,7 +13,7 @@ import { observeClosureWait } from '../src/ama/closure-wait.mjs';
 import { createAmaHammerBackgroundQueue, DEFAULT_AMA_HAMMER_BACKGROUND_BOUND_MS } from '../src/ama-hammer-background-dispatch.mjs';
 import { probeOrphanOwnership } from '../src/ama/orphan-watchdog.mjs';
 import { openReviewStateDb, ensureReviewStateSchema, requestReviewRereview } from '../src/review-state.mjs';
-import { writeAmaAuditEntry } from '../src/ama/audit.mjs';
+import { writeAmaAuditEntry, readAmaAuditEntry } from '../src/ama/audit.mjs';
 import { evaluateHammerStopHold, readHammerStopForHead } from '../src/ama/hammer-stop-hold.mjs';
 import { fetchHammerHeadRange } from '../src/ama/hammer-head-validation.mjs';
 import { spawnSync } from 'node:child_process';
@@ -660,6 +660,18 @@ test('FINALCLOSE-01 a history-read-failed final hammer retries under the existin
   assert.equal(readHammerRetryCapLedger(f.rootDir, { repo, prNumber }).attemptCount, 2);
 });
 
+test('FINALCLOSE-01 permanent history evidence retains a counted stop', async t => {
+  const rootDir = finalRound(t);
+  const result = await evaluateHammerStopHold({ rootDir, hqRoot: rootDir, repo, prNumber, headSha,
+    prMetadata: { headSha }, now: observed,
+    readAuditImpl: () => ({ attempts: [{ head: headSha, path: 'hammer', outcome: 'failed-without-merge',
+      reason: 'history-read-failed:permanent:http-404', startedAt: started }] }),
+    fetchPrimaryChangeImpl: async () => ({ headSha, hasHammerCommits: false }),
+    deliverAlertImpl: async () => ({ ok: true }) });
+  assert.notEqual(result.changed?.[0], 'history-read-retry');
+  assert.notEqual(result.action, 'release');
+});
+
 test('FINALCLOSE-01 transient history failure releases without an evidence read or a stop-hold page', async t => {
   const rootDir = finalRound(t);
   const result = await evaluateHammerStopHold({ rootDir, hqRoot: rootDir, repo, prNumber, headSha,
@@ -685,9 +697,9 @@ test('FINALCLOSE-01 provenance read abort writes its terminal audit and releases
   const rootDir = finalRound(t), bin = join(rootDir, 'bin'), runDir = join(rootDir, 'run');
   mkdirSync(bin); mkdirSync(runDir);
   writeFileSync(join(bin, 'hammer-node-runtime.sh'), readFileSync(new URL('../bin/hammer-node-runtime.sh', import.meta.url)));
-  const captured = join(rootDir, 'captured.json');
-  writeFileSync(join(bin, 'ama-audit.mjs'), `import {readFileSync,writeFileSync} from 'node:fs';
-    const args=process.argv.slice(2); writeFileSync(${JSON.stringify(captured)},readFileSync(args[args.indexOf('--attempt-json')+1]));`);
+  symlinkSync(new URL('../bin/ama-audit.mjs', import.meta.url), join(bin, 'ama-audit.mjs'));
+  symlinkSync(new URL('../src', import.meta.url), join(rootDir, 'src'));
+  symlinkSync(new URL('../node_modules', import.meta.url), join(rootDir, 'node_modules'));
   writeFileSync(join(bin, 'merge-action-receipt.mjs'), '');
   const procedure = join(rootDir, 'merge.sh');
   writeFileSync(procedure, renderHammerProcedure('hammer-merge', { ROOT_DIR: rootDir, HQ_ROOT: rootDir,
@@ -696,7 +708,7 @@ test('FINALCLOSE-01 provenance read abort writes its terminal audit and releases
     REVIEWER: 'synthetic-reviewer', RISK_CLASS: 'low', MERGE_METHOD: 'squash' }));
   for (const [reason, detail, attempts, retryable] of [
     ['history-read-failed', 'synthetic compare API timeout', undefined, true],
-    ['history-read-failed:transient:http-502', 'history read failed: history-read-failed:transient:http-502 attempts=5 fixture', 5, true],
+    ['history-read-failed', 'history read failed: history-read-failed:transient:http-502 attempts=5 fixture', 5, true],
     ['history-read-failed:permanent:http-404', 'history read failed: history-read-failed:permanent:http-404 attempts=1 fixture', 1, false],
   ]) {
     const result = spawnSync('bash', ['-c', `
@@ -710,8 +722,13 @@ test('FINALCLOSE-01 provenance read abort writes its terminal audit and releases
     assert.equal(result.status, 1, result.stderr);
     assert.match(result.stdout, /released/);
     assert.equal(result.stdout.includes('retryable:history-read-failed'), retryable);
-    const attempt = JSON.parse(readFileSync(captured));
+    const doc = readAmaAuditEntry(rootDir, repo, prNumber, headSha);
+    assert.ok(doc, result.stderr);
+    const attempt = doc.attempts.at(-1);
     assert.equal(attempt.reason, reason);
+    assert.equal(attempt.outcome, retryable ? 'deferred' : 'failed-without-merge');
+    assert.equal(doc.status, retryable ? 'deferred' : 'failed-without-merge');
+    if (detail.includes('transient:')) assert.equal(attempt.reasonDetail, 'history-read-failed:transient:http-502');
     assert.equal(attempt.historyReadError, detail);
     assert.equal(attempt.historyReadAttempts, attempts);
     assert.equal(classifyCloserOutcome({ reason }).kind, retryable ? 'inconclusive' : 'real');

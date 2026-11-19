@@ -509,6 +509,7 @@
     },
     {
       "id": "ama-audit",
+      "historyReadStop": "Transient classified history stops store reason=history-read-failed, reasonDetail=history-read-failed:transient:<detail>, and outcome=deferred. Permanent classified stops retain the suffixed reason and a counted failed-without-merge outcome.",
       "unregisteredStopOriginalReason": "attempts[].originalReason: optional unregistered reason preserved without normalization after failure-code syntax checking when a runtime stop becomes stop-reason-unregistered; reasonDetail also retains it",
       "stopOriginFields": ["stopOrigin", "attempts[].stopOrigin"],
       "stopOriginValues": ["closer", "world", "infrastructure"],

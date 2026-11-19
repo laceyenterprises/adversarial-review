@@ -74,10 +74,12 @@ export function historyReadErrorDetail(error, limit = HISTORY_READ_ERROR_LIMIT) 
 export function historyReadStopReason(error) {
   const source = error?.failureClass === 'github-auth-outage' ? error.cause || error : error;
   const { code } = historyHttpResponse(source);
-  const transient = source?.code === 'HISTORY_READ_TIMEOUT'
+  const transient = error?.failureClass === 'github-auth-outage'
+    || source?.code === 'HISTORY_READ_TIMEOUT'
     || (!(source instanceof SyntaxError) && historyReadRetryDelayMs(source, 0) !== null);
   const kind = transient ? 'transient' : 'permanent';
-  const detail = Number.isInteger(code) ? `http-${code}` : transient ? 'transport' : 'unclassified';
+  const detail = error?.failureClass === 'github-auth-outage' ? 'auth-outage'
+    : Number.isInteger(code) ? `http-${code}` : transient ? 'transport' : 'unclassified';
   return `history-read-failed:${kind}:${detail}`;
 }
 

@@ -82,6 +82,7 @@ ham_append_terminal_audit() {
     --argjson requiredChecksWaitedSeconds "${HAM_REQUIRED_CHECKS_WAITED_SECONDS:-0}" \
     --arg outcome "$ham_audit_outcome" \
     --arg reason "$ham_audit_reason" \
+    --arg reasonDetail "${3:-}" \
     --arg historyReadError "${HAM_HISTORY_READ_ERROR:-}" \
     --arg reviewedHead "<<REVIEWED_SHA>>" \
     --arg validatedHead "$POST_REMEDIATION_SHA" \
@@ -125,7 +126,8 @@ ham_append_terminal_audit() {
       resumeHead: (if $reason == "required-checks-pending" then $validatedHead else null end),
       eligibilityTrace: $eligibilityTrace,
       githubGate: $githubGate
-    } + (if $reason | startswith("history-read-failed:") then
+    } + (if $reasonDetail != "" then {reasonDetail: $reasonDetail} else {} end)
+      + (if $historyReadError | startswith("history read failed: history-read-failed:") then
       ($historyReadError | capture("^history read failed: [^ ]+ attempts=(?<count>[0-9]+) ")
         | {historyReadAttempts: (.count | tonumber)}) // {}
     else {} end)' > "$ham_audit_attempt_json"
@@ -150,12 +152,15 @@ ham_append_terminal_audit() {
 }
 
 ham_audit_history_read_abort() {
-  local reason
-  reason=$(jq -nr --arg detail "${HAM_HISTORY_READ_ERROR:-}" \
+  local classified reason
+  classified=$(jq -nr --arg detail "${HAM_HISTORY_READ_ERROR:-}" \
     '$detail | match("^history read failed: (history-read-failed:(transient|permanent):[a-z0-9-]+) ")?.captures[0].string')
-  reason="${reason:-history-read-failed}"
-  ham_append_terminal_audit failed-without-merge "$reason" || true
+  reason="${classified:-history-read-failed}"
   case "$reason" in
+    history-read-failed:transient:*) reason=history-read-failed ;;
+  esac
+  ham_append_terminal_audit failed-without-merge "$reason" "$classified" || true
+  case "$classified" in
     history-read-failed:permanent:*) ;;
     *) ham_mark_merge_lease_retryable_abort history-read-failed ;;
   esac
@@ -192,6 +197,7 @@ if ! jq -e --arg head "$POST_REMEDIATION_SHA" \
   echo "HAM hard-blocker: predicate is not eligible for the validated head" >&2
   if jq -e '.reasons | index("history-read-failed") != null' "$HAM_VERDICT_FILE" >/dev/null 2>&1; then
     cat "$HAM_VERDICT_FILE" >&2
+    HAM_HISTORY_READ_ERROR=$(jq -r '.trace.primaryChange.detail // empty' "$HAM_VERDICT_FILE")
     ham_audit_history_read_abort
   elif jq -e '.reasons | index("primary-change-unknown") != null' "$HAM_VERDICT_FILE" >/dev/null 2>&1; then
     cat "$HAM_VERDICT_FILE" >&2

@@ -70,7 +70,13 @@ log() { printf '%s\\n' "$*" >> "$FIXTURE_LOG"; }
 [ -t 0 ] && { log 'stdin-is-a-tty'; exit 90; }
 path="$1"; shift
 case "$(basename "$path")" in
-  hammer-helper-step.mjs) shift 4; exec "$@" ;;
+  hammer-helper-step.mjs)
+    mode="$1"; step="$2"; shift 4
+    "$@"; status=$?
+    if [ "$mode" = read:report ] && [ "$step" = primary-change-context ] && [ -n "\${FIXTURE_PRIMARY_ERROR:-}" ]; then
+      log "terminal-audit primary-change-context-failed"
+    fi
+    exit "$status" ;;
   hammer-pr-read.mjs) log "pr-read $*"; printf '{"headRefOid":"%s"}\\n' "$FIXTURE_LIVE_HEAD" ;;
   hammer-controller.mjs)
     case "$1" in
@@ -87,6 +93,7 @@ case "$(basename "$path")" in
     exit "\${FIXTURE_VALIDATE_EXIT:-0}" ;;
   hammer-predicate-inputs.mjs) log predicate-inputs ;;
   primary-change-context.mjs)
+    if [ -n "\${FIXTURE_PRIMARY_ERROR:-}" ]; then exit 1; fi
     if [ -n "\${FIXTURE_HISTORY_ERROR:-}" ]; then printf '%s\\n' "$FIXTURE_HISTORY_ERROR"; exit 1; fi
     echo '{}' ;;
   ama-check.mjs) log "ama-check reviewed=$(printf '%s' "$*" | sed -n 's/.*--reviewed-sha \\([0-9a-f]*\\).*/\\1/p')"; echo '{"eligible":true}' ;;
@@ -267,6 +274,30 @@ test('the close passes failed history evidence to the abort audit before deletin
   assert.ok(f.events().includes(`history-read-abort ${reason}`));
   assert.ok(!f.events().some(event => event.startsWith('ama-check') || event.startsWith('gh pr merge')));
   assert.equal(f.events().filter(event => event.startsWith('release ')).length, 1);
+});
+
+test('primary-change failure without history evidence retains a terminal audit', async t => {
+  const f = hammerFixture(t);
+  const result = await f.close({ FIXTURE_PRIMARY_ERROR: '1' });
+  assert.equal(result.status, 1, result.stderr);
+  assert.equal(result.closeResult.outcome, 'primary-change-context-failed');
+  assert.ok(f.events().includes('terminal-audit primary-change-context-failed'));
+});
+
+test('primary-change helper reports missing evidence but leaves classified history to the controller', async () => {
+  for (const [output, expectedReports] of [
+    ['', ['primary-change-context-failed']],
+    [JSON.stringify({ historyReadFailed: true, reason: 'history read failed: history-read-failed:transient:http-502 attempts=5 fixture' }), []],
+  ]) {
+    const reports = [];
+    const status = await runHelperStep({ mode: 'read:report', step: 'primary-change-context',
+      nominal: 5, ceiling: 5, command: process.execPath,
+      args: ['-e', 'process.stdout.write(process.argv[1]); process.exitCode = 1', output] }, {
+      budget: () => 5, report: reason => { reports.push(reason); }, stderr: () => {}, stdout: () => {},
+    });
+    assert.equal(status, 1);
+    assert.deepEqual(reports, expectedReports);
+  }
 });
 
 test('the close refuses before any controller or lease when inputs or plan data are missing', async t => {

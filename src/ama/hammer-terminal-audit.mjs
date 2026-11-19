@@ -75,7 +75,7 @@ export function recordHammerEarlyFailure(reason, { env = process.env, headSha, f
   try { origin = hammerStopOrigin(reason); }
   catch { reason = 'stop-reason-unregistered'; origin = 'closer'; unregistered = true; }
   const parts = reason.split(':');
-  if (parts[0] !== 'history-read-failed') {
+  if (parts[0] !== 'history-read-failed' || parts[1] === 'transient') {
     reason = origin === 'closer' && parts[0] === 'review-evidence-invalid' ? parts[1] : parts[0];
   }
   const identity = {

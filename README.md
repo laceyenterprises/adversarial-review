@@ -1711,6 +1711,14 @@ records the evidence/admission truth table and public export fixture refresh.
 
 ## State machines and smoke verification (SMV v1)
 
+Classified transient closer history stops record `history-read-failed` with
+the class in audit `reasonDetail`; the audit is `deferred` and enters the
+watcher's existing inconclusive retry. Permanent history stops remain counted.
+Non-history primary-change helper failures retain a terminal failure audit.
+Focused offline coverage runs the audit CLI and controller fixtures in
+`test/finalclose-01.test.mjs` and `test/hamcontrollerscript-01.test.mjs`.
+Existing smoke commands are unchanged.
+
 Merge-ready exact heads with durable identity absence retain page ownership
 under `daemon-identity-absent-parked` and record one stable park observation per
 pass. Unverified exact-head attestations retain the fail-closed hammer handoff.

@@ -3,7 +3,7 @@
   "entries": [
     {
       "id": "ama-audit",
-      "historyReadStop": "attempts[].reason carries the classified history-read-failed code. Optional historyReadError retains bounded redacted detail, and optional historyReadAttempts counts gh child invocations."
+      "historyReadStop": "Transient history stops store registered reason=history-read-failed with classification in reasonDetail and deferred outcome. Permanent stops retain the suffixed reason and counted outcome. Optional historyReadError and historyReadAttempts retain bounded diagnostic and child count."
     }
   ]
 }

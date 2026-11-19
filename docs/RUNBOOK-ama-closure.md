@@ -4718,10 +4718,16 @@ is explicitly bounded at 25 MiB and exceeding that limit is a named read error.
 A failed history read returns `historyReadFailed: true` with its diagnostic.
 The dedicated helper exits nonzero and the close controller carries that
 diagnostic into the hammer stop. Transient stops such as
-`history-read-failed:transient:http-502` reach the watcher's inconclusive retry
-path. Permanent stops such as `history-read-failed:permanent:http-404` end the
-run as counted failures. Legacy unclassified `history-read-failed` stops
-retain their existing routing. Missing evidence never authorizes a reversal.
+`history-read-failed:transient:http-502` record the registered
+`reason=history-read-failed`, retain the class in `reasonDetail`, and reach the
+watcher's inconclusive retry path through an uncounted deferred audit.
+Installation-token auth outages use `transient:auth-outage` even with HTTP 401.
+Permanent stops such as `history-read-failed:permanent:http-404` retain their
+classified reason, produce counted failures, and follow the ordinary stop-hold
+policy. Legacy unclassified `history-read-failed` stops retain their existing
+routing. Primary-change helper failures without structured history evidence
+record a terminal failure audit before the controller exits. Missing evidence
+never authorizes a reversal.
 
 **Required guard authority (GUARDREVERT-01).** A required repository check may
 authorize returning only the paths it explicitly forbids in pull requests to

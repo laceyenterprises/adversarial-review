@@ -111,7 +111,7 @@ test('synchronous deadline exhaustion retains its code through the history error
     nowMs: () => ++samples <= 2 ? 0 : 50,
     execGhWithRetryImpl: async () => { reads++; return { stdout: '{}' }; } });
   await assert.rejects(get(prPath), error => {
-    assert.match(error.message, /history read failed: repos\/fixture\/repo\/pulls\/42/);
+    assert.match(error.message, /history read failed: history-read-failed:transient:transport attempts=0 repos\/fixture\/repo\/pulls\/42/);
     assert.equal(error.code, 'HISTORY_READ_TIMEOUT');
     assert.equal(error.cause.code, 'HISTORY_READ_TIMEOUT');
     return true;

@@ -54,7 +54,7 @@ test('spawn ENOBUFS reports explicit failed read with error and output limit, ne
   assert.equal(answer.reason, 'history-read-failed');
   assert.match(answer.detail, /ENOBUFS/);
   assert.match(answer.detail, /output limit 26214400 bytes exceeded/);
-  assert.equal(answer.detail, `history read failed: repos/${repo}/pulls/1 (output limit 26214400 bytes exceeded): spawnSync gh ENOBUFS`);
+  assert.equal(answer.detail, `history read failed: history-read-failed:permanent:unclassified attempts=0 repos/${repo}/pulls/1 (output limit 26214400 bytes exceeded): spawnSync gh ENOBUFS`);
 });
 
 test('tree evidence diffs file/submodule transitions and preserves standalone gitlinks', async () => {

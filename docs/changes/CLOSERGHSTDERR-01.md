@@ -17,6 +17,10 @@ helper failures retain a terminal audit.
 
 ## Verification
 
+- The CI repair keeps classified history text in the Bash abort path, preserves
+  the wrapped read's `cause`, and retains leading and trailing bounded transport
+  diagnostic. Focused tests cover the real audit CLI and the three diagnostic
+  assertions that failed in Node 22 and Node 26 CI.
 - `node --test test/finalclose-01.test.mjs` passed 78 tests, including the
   production audit CLI fixture. The combined focused run passed controller
   and history-read suites; the final-close fixture was corrected and rerun.

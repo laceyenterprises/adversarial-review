@@ -85,7 +85,7 @@ export function createHistoryReader(options = {}) {
         ? ` (output limit ${GH_LOOKUP_MAX_BUFFER} bytes exceeded)` : '';
       const stopReason = historyReadStopReason(cause);
       const prefix = `${historyReadErrorDetail(`history read failed: ${stopReason} attempts=${attempts} ${path}${limit}:`, 500)} `;
-      throw Object.assign(new Error(prefix + historyReadErrorDetail(cause, HISTORY_READ_ERROR_LIMIT - prefix.length)), {
+      throw Object.assign(new Error(prefix + historyReadErrorDetail(cause, HISTORY_READ_ERROR_LIMIT - prefix.length), { cause }), {
         primaryChangeReadFailed: true, code: cause?.code, stopReason,
       });
     }

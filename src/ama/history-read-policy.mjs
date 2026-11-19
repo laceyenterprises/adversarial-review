@@ -68,7 +68,10 @@ export function historyReadErrorDetail(error, limit = HISTORY_READ_ERROR_LIMIT) 
     .filter(Boolean).map(redact).join('\n');
   if (!stderr) return prefix.slice(0, limit);
   const summary = prefix.slice(0, Math.floor(limit / 2));
-  return `${summary}\n${redact(stderr).slice(-(limit - summary.length - 1))}`;
+  const diagnostic = redact(stderr);
+  const room = limit - summary.length - 1;
+  return `${summary}\n${diagnostic.length <= room ? diagnostic
+    : diagnostic.slice(0, Math.ceil(room / 2)) + diagnostic.slice(-Math.floor(room / 2))}`;
 }
 
 export function historyReadStopReason(error) {

@@ -153,8 +153,9 @@ ham_append_terminal_audit() {
 
 ham_audit_history_read_abort() {
   local classified reason
-  classified=$(jq -nr --arg detail "${HAM_HISTORY_READ_ERROR:-}" \
-    '$detail | match("^history read failed: (history-read-failed:(transient|permanent):[a-z0-9-]+) ")?.captures[0].string')
+  if [[ ${HAM_HISTORY_READ_ERROR:-} =~ ^history\ read\ failed:\ (history-read-failed:(transient|permanent):[a-z0-9-]+)\  ]]; then
+    classified="${BASH_REMATCH[1]}"
+  fi
   reason="${classified:-history-read-failed}"
   case "$reason" in
     history-read-failed:transient:*) reason=history-read-failed ;;

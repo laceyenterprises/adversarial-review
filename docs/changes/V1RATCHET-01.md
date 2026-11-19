@@ -56,3 +56,19 @@ binding in full/slim prompt context.
 `npm run typecheck:contracts` passed,
 `bash demo/research-finding-walkthrough.sh` passed, and `git diff --check` passed.
 The full suite is left to PR-head CI.
+
+## Final finding dispositions
+
+- **Spec test files counted as production**: resolved by using the shared
+  `isTestPath` classifier. Regression coverage excludes `.spec.mjs` under
+  `src/ama/` and the other supported test and fixture path forms.
+- **Renames bypass subsystem growth accounting — insufficient blocking evidence**:
+  resolved by measuring full destination contents at the reviewed head for
+  cross-boundary moves. The offline Git regression verifies a 200-line rename
+  in both directions and a rename with edits; same-subsystem moves keep their
+  existing delta accounting.
+
+HAM validation of both dispositions: the canonical changed-surface runner
+(`hammer-validate.mjs --canonical --` with the reviewed-to-head files) passed
+284 tests in 17 files. Lint passed with zero errors, contract typechecking
+passed, and the offline research-finding walkthrough passed.

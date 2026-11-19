@@ -349,10 +349,12 @@ hunk summaries and PR-body `statedIntent`.
 is outside merge execution only. Context never waives blocking findings.
 Missing/unsupported evidence: stop before remediation, report `primaryChange.reason`.
 For `history-read-failed` / `historyReadFailed: true`, audit `noExecution: true`
-and full bounded `historyReadError` (up to 2,000 characters including stderr),
-also in closing status; do not shorten to 300 characters. Release the lease,
-abort retryably under the per-PR cap (two per series, lifetime six); never park
-or retain a stop hold. Otherwise audit `deferred`, `primary-change-unknown`.
+and the full bounded `historyReadError` (up to 2,000 characters including stderr)
+in the closing status. Carry the classified reason from `primaryChange.reason`
+into the stop code. Release the lease. A transient history stop goes to the
+watcher's inconclusive retry. A permanent history stop is counted as a failure.
+An unclassified history stop uses the existing per-PR retry cap.
+For structural unknown evidence, audit `deferred`, `primary-change-unknown`.
 Never replace the original author head.
 
 The syntactic preservation gate covers production/config only. Test paths
@@ -518,8 +520,9 @@ A predicate refusal `primary-change-reverted` requires
 no-merge closing status quoting the gate's missing-evidence line. Repair the branch or recover the evidence; a scoped
 operator `merge-agent-requested` can dispatch the recovery lane, without waiving
 this predicate. A proven reversal does not automatically dispatch another hammer.
-`primary-change-unknown`, `primary-change-read-failed` and `history-read-failed` defer: evidence is
-recomputed on the next pipeline tick, and ordinary gates must pass before redispatch.
+`primary-change-unknown`, `primary-change-read-failed` and transient history
+failures defer. The next evaluation recomputes evidence and applies the ordinary
+gates. A permanent history failure ends the run with its classified reason.
 
 ## Mandate
 

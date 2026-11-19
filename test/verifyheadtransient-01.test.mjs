@@ -66,6 +66,21 @@ for (const reason of HAMMER_RETRYABLE_READ_OUTCOMES) {
   });
 }
 
+test('CLOSERGHSTDERR-01 early history failures preserve the class without charging transients', t => {
+  for (const [classified, outcome] of [
+    ['history-read-failed:transient:http-502', 'deferred'],
+    ['history-read-failed:permanent:http-404', 'failed-without-merge'],
+  ]) {
+    const rootDir = fixture(t);
+    recordHammerEarlyFailure(classified, { env: { HAM_HQ_ROOT: rootDir,
+      HAM_REPO: identity.repo, HAM_PR_NUMBER: '42', HAM_TARGET_REMEDIATION_SHA: head } });
+    const attempt = readAmaAuditEntry(rootDir, identity.repo, 42, head).attempts.at(-1);
+    assert.equal(attempt.outcome, outcome);
+    assert.equal(attempt.reason, outcome === 'deferred' ? 'history-read-failed' : classified);
+    if (outcome === 'deferred') assert.equal(attempt.reasonDetail, classified);
+  }
+});
+
 for (const reason of ['github-gate-red', 'predicate-not-eligible', 'rebase-conflict',
   'head-changed', 'controller-cancelled', 'controller-owner-lost',
   'protective-predecessor-open', 'protective-predecessor-state-unreadable']) {

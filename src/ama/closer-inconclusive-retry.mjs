@@ -75,7 +75,8 @@ export function classifyCloserOutcome({ reason = null, failureClass = null } = {
   if (raw) {
     try {
       const origin = hammerStopOrigin(raw);
-      return { kind: origin === 'world' ? 'real' : 'inconclusive', reason: code(raw), origin };
+      return { kind: origin === 'world' ? 'real' : 'inconclusive',
+        reason: /^history-read-failed:(?:transient|permanent):[a-z0-9-]+$/.test(raw) ? raw : code(raw), origin };
     } catch { /* Not a registered stop reason. */ }
     if (isHarnessFault(raw)) {
       return { kind: 'inconclusive', reason: code(raw), origin: 'infrastructure' };

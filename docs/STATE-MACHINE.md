@@ -1459,6 +1459,13 @@ Legacy durable jobs created before `baseBranch` was persisted are hydrated from 
 
 ## MSM two-path merge authority (current)
 
+An exhausted transient history read retains its class in audit `reasonDetail`
+and uses registered `history-read-failed` for an uncounted deferral and the
+watcher's inconclusive retry. A permanent history read failure produces a
+counted stop with its classified reason and ordinary stop hold. Both retain
+the fail-closed history gate. Non-history primary-change helper failures
+still record a terminal failure audit.
+
 During the hammer's outside-lease local validation, a selected CI-mirror
 check can reuse successful GitHub Actions job evidence from the same head
 when the repository explicitly maps the command to those jobs. The closer

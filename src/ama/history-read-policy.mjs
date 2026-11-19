@@ -1,5 +1,6 @@
 import { isGitHubRateLimitError, rateLimitErrorObservation } from '../rate-limit-throttle.mjs';
 import { loadAwareTimeoutMs, timerDelayMs } from '../load-aware-timeout.mjs';
+import { redactPathlikeText, redactSensitiveText } from '../adapters/comms/github-pr-comments/redaction.mjs';
 
 export const HISTORY_READ_ERROR_LIMIT = 2000;
 export const HISTORY_CONTEXT_TIMEOUT_MS = 90_000;
@@ -47,17 +48,49 @@ export async function withHistoryReadBudget(operation, {
   }
 }
 
-// gh normally includes stderr in message; injected executors and wrappers may
-// keep it separately. Preserve it once, including the cause after a long URL.
-export function historyReadErrorDetail(error) {
-  let message = String(error?.message || error);
-  const stderr = String(error?.stderr || '');
-  if (stderr && !message.includes(stderr)) message += `\n${stderr}`;
-  return message.slice(0, HISTORY_READ_ERROR_LIMIT);
+function historyHttpResponse(error) {
+  const stdout = String(error?.stdout || '');
+  const line = /^HTTP\/[\d.]+ [1-5]\d\d[^\r\n]*/.exec(stdout)?.[0];
+  const headers = line && stdout.slice(line.length).split(/\r?\n\r?\n/, 1)[0];
+  const retryAfter = /(?:^|\n)Retry-After:[ \t]*([^\r\n]+)/i.exec(headers || '')?.[1].trim();
+  const status = /\bHTTP(?:\/\d+(?:\.\d+)?)?\s+(\d{3})\b|"status"\s*:\s*(\d{3})/i.exec(
+    line || error?.stderr || error?.message || String(error));
+  return { line, retryAfter, code: Number(error?.response?.status ?? error?.status ?? status?.[1] ?? status?.[2]) };
+}
+
+export function historyReadErrorDetail(error, limit = HISTORY_READ_ERROR_LIMIT) {
+  const source = error?.failureClass === 'github-auth-outage' ? error.cause || error : error;
+  const redact = text => redactPathlikeText(redactSensitiveText(text)).replace(/\bgithub_pat_\w+/g, '[REDACTED_GITHUB_TOKEN]');
+  const stderr = String(source?.stderr || '').trim();
+  const message = String(source?.message || source);
+  const { line, retryAfter } = historyHttpResponse(source);
+  const prefix = [line, retryAfter && `Retry-After: ${retryAfter}`, stderr ? message.replace(stderr, '').trim() : message]
+    .filter(Boolean).map(redact).join('\n');
+  if (!stderr) return prefix.slice(0, limit);
+  const summary = prefix.slice(0, Math.floor(limit / 2));
+  const diagnostic = redact(stderr);
+  const room = limit - summary.length - 1;
+  return `${summary}\n${diagnostic.length <= room ? diagnostic
+    : diagnostic.slice(0, Math.ceil(room / 2)) + diagnostic.slice(-Math.floor(room / 2))}`;
+}
+
+export function historyReadStopReason(error) {
+  const source = error?.failureClass === 'github-auth-outage' ? error.cause || error : error;
+  const { code } = historyHttpResponse(source);
+  const transient = error?.failureClass === 'github-auth-outage'
+    || source?.code === 'HISTORY_READ_TIMEOUT'
+    || (!(source instanceof SyntaxError) && historyReadRetryDelayMs(source, 0) !== null);
+  const kind = transient ? 'transient' : 'permanent';
+  const detail = error?.failureClass === 'github-auth-outage' ? 'auth-outage'
+    : Number.isInteger(code) ? `http-${code}` : transient ? 'transport' : 'unclassified';
+  return `history-read-failed:${kind}:${detail}`;
 }
 
 export function historyReadFailureReason(error) {
   const detail = historyReadErrorDetail(error);
+  if (error?.code === 'HISTORY_READ_TIMEOUT' && !detail.startsWith('history read failed:')) {
+    return `history read failed: history-read-failed:transient:timeout ${detail}`;
+  }
   return historyReadErrorDetail(detail.startsWith('history read failed:') ? detail : `history read failed: ${detail}`);
 }
 
@@ -68,15 +101,14 @@ export function historyReadRetryDelayMs(error, attempt) {
   // Output overflow can also set killed/SIGTERM; repeating the read cannot fit it.
   if (error?.code === 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER' || error?.code === 'ENOBUFS') return null;
   const detail = [error?.stderr, error?.stdout, typeof error === 'string' ? error : error?.message].filter(Boolean).join('\n');
-  const status = /\bHTTP(?:\/\d(?:\.\d)?)?\s+(\d{3})\b|"status"\s*:\s*(\d{3})/i.exec(detail);
-  const code = Number(error?.response?.status ?? error?.status ?? status?.[1] ?? status?.[2]);
-  const rateLimit = isGitHubRateLimitError(error);
-  const rawRetryAfter = error?.response?.headers?.['retry-after'];
+  const { code, retryAfter } = historyHttpResponse(error);
+  const rateLimit = isGitHubRateLimitError(error) || code === 429 || (code === 403 && retryAfter != null);
+  const rawRetryAfter = retryAfter ?? error?.response?.headers?.['retry-after'];
   const observation = rateLimitErrorObservation(error);
   const deadline = observation?.secondaryUntil || observation?.resetAt;
-  const retryAfterMs = deadline ? Date.parse(deadline) - Date.now()
-    : rawRetryAfter != null ? (/^\d+(?:\.\d+)?$/.test(String(rawRetryAfter)) ? Number(rawRetryAfter) * 1000 : Date.parse(rawRetryAfter) - Date.now()) : rateLimit ? 60_000 : NaN;
-  if (code >= 400 && code < 500 && !(rateLimit && Number.isFinite(retryAfterMs))) return null;
+  const retryAfterMs = rawRetryAfter != null ? (/^\d+(?:\.\d+)?$/.test(String(rawRetryAfter)) ? Number(rawRetryAfter) * 1000 : Date.parse(rawRetryAfter) - Date.now())
+    : deadline ? Date.parse(deadline) - Date.now() : rateLimit ? 60_000 : NaN;
+  if (code >= 400 && code < 500 && !([403, 429].includes(code) && rateLimit && Number.isFinite(retryAfterMs))) return null;
   const transport = /^(?:EIO|ETIMEDOUT|ECONNRESET|ECONNREFUSED|ECONNABORTED|EPIPE|EAI_AGAIN|ENOTFOUND|ENETUNREACH|EHOSTUNREACH|EPROTO|ERR_TLS_\w+|CERT_\w+|UNABLE_TO_\w+|DEPTH_ZERO_SELF_SIGNED_CERT)$/.test(String(error?.code || ''))
     || error?.killed === true && ['SIGTERM', 'SIGKILL'].includes(error.signal)
     || /\b(?:timeout|timed out|context deadline exceeded|TLS|SSL|x509|DNS|no such host|temporary failure in name resolution|connection (?:reset|refused|closed|aborted)|socket hang up|EOF|broken pipe|network (?:error|is unreachable|is down)|dial tcp|proxyconnect|proxy|upstream connect failed|ECONNRESET|ECONNREFUSED|ETIMEDOUT|EAI_AGAIN|ENOTFOUND)\b/i.test(detail)

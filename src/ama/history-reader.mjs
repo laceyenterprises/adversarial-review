@@ -6,7 +6,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createHash } from 'node:crypto';
 import { execGhWithRetry, GH_LOOKUP_MAX_BUFFER } from '../gh-cli.mjs';
-import { HISTORY_CONTEXT_TIMEOUT_MS, historyReadErrorDetail, historyReadRetryDelayMs, historyReadTimeoutError, withHistoryReadBudget } from './history-read-policy.mjs';
+import { HISTORY_CONTEXT_TIMEOUT_MS, HISTORY_READ_ERROR_LIMIT, historyReadErrorDetail, historyReadRetryDelayMs, historyReadStopReason, historyReadTimeoutError, withHistoryReadBudget } from './history-read-policy.mjs';
 import { currentGitHubBudgetScope, withGitHubBudgetScope } from '../rate-limit-throttle.mjs';
 import { discardHistoryProgress, storedHistoryRead } from './primary-change-store.mjs';
 
@@ -21,7 +21,7 @@ export function createHistoryReader(options = {}) {
     contextTimeoutMs = loadAwareTimeoutMs(HISTORY_CONTEXT_TIMEOUT_MS), nowMs = () => performance.now(),
     progress, ...ghOptions } = options;
   const executorIdentity = ghOptions.execFileImpl || execHistoryFile;
-  ghOptions.execFileImpl = historyChildExecutor(executorIdentity);
+  const execFile = historyChildExecutor(executorIdentity);
   const controller = new AbortController();
   ghOptions.signal = ghOptions.signal ? AbortSignal.any([ghOptions.signal, controller.signal]) : controller.signal;
   let deadline;
@@ -55,6 +55,7 @@ export function createHistoryReader(options = {}) {
     return immutableSnapshotValue(value);
   };
   const json = async (path, jq = '.') => {
+    let attempts = 0;
     try {
       // Only object-addressed evidence is immutable. Keep PR metadata, refs,
       // reviews and cost/label provenance live even on the same PR head.
@@ -62,10 +63,12 @@ export function createHistoryReader(options = {}) {
         || /\/compare\/[0-9a-f]{40}\.\.\.[0-9a-f]{40}(?:\?|$)/i.test(path);
       const execute = async () => {
         const run = () => execGhWithRetryImpl({ ...ghOptions,
+          execFileImpl: (...args) => { attempts++; return execFile(...args); },
           // Include response headers so failed rate-limit reads retain the
           // server's Retry-After; strip headers before parsing successful JSON.
           args: ['api', path, '--jq', jq, '--include'], timeoutMs: loadAwareTimeoutMs(15000),
-          retries: 2, retryDelayMs: historyReadRetryDelayMs, totalTimeoutMs: remainingMs(), nowMs });
+          retries: /\/(?:git\/(?:trees|blobs|commits)|commits)\//.test(path) ? 4 : 2,
+          retryDelayMs: historyReadRetryDelayMs, totalTimeoutMs: remainingMs(), nowMs });
         // CLI reads must defer an exhausted shared quota instead of entering an
         // unbounded throttle sleep. Daemon callers retain their existing scope.
         const { stdout } = await bounded(() => currentGitHubBudgetScope() ? run() : withGitHubBudgetScope({}, run));
@@ -78,12 +81,13 @@ export function createHistoryReader(options = {}) {
           execute, executorIdentity, ghOptions.signal))
         : execute());
     } catch (cause) {
-      const limit = cause.code === 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER' || cause.code === 'ENOBUFS'
+      const limit = cause?.code === 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER' || cause?.code === 'ENOBUFS'
         ? ` (output limit ${GH_LOOKUP_MAX_BUFFER} bytes exceeded)` : '';
-      const error = new Error(historyReadErrorDetail(`history read failed: ${path}${limit}: ${historyReadErrorDetail(cause)}`), { cause });
-      if (cause.code === 'HISTORY_READ_TIMEOUT') error.code = cause.code;
-      error.primaryChangeReadFailed = true;
-      throw error;
+      const stopReason = historyReadStopReason(cause);
+      const prefix = `${historyReadErrorDetail(`history read failed: ${stopReason} attempts=${attempts} ${path}${limit}:`, 500)} `;
+      throw Object.assign(new Error(prefix + historyReadErrorDetail(cause, HISTORY_READ_ERROR_LIMIT - prefix.length), { cause }), {
+        primaryChangeReadFailed: true, code: cause?.code, stopReason,
+      });
     }
   };
   const cached = (path, jq) => {
@@ -118,12 +122,10 @@ export function createHistoryReader(options = {}) {
         // may still succeed after transport retries or output overflow, but
         // cancellation, the shared deadline and malformed JSON stay terminal.
         remainingMs();
-        const cause = error.cause || error;
-        if (cause instanceof SyntaxError || cause.code === 'HISTORY_READ_TIMEOUT'
-          || cause.name === 'AbortError' || cause.code === 'ABORT_ERR'
-          || !(cause.code === 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER' || cause.code === 'ENOBUFS'
-            || historyReadRetryDelayMs(cause, 0) !== null)) throw error;
-        console.warn(`history recursive tree ${ref}: falling back to walker: ${historyReadErrorDetail(cause)}`);
+        if (error.code === 'HISTORY_READ_TIMEOUT'
+          || !(error.code === 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER' || error.code === 'ENOBUFS'
+            || error.stopReason?.startsWith('history-read-failed:transient:'))) throw error;
+        console.warn(`history recursive tree ${ref}: falling back to walker: ${historyReadErrorDetail(error)}`);
         return null;
       }
       if (data.truncated === true) return null;

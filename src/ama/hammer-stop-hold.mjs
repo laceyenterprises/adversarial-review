@@ -411,7 +411,7 @@ export function readHammerStopForHead({
     deterministic: Boolean(refusal),
     gateRevision: { serviceRevision: attempt?.reviewServiceRevision || null,
       predicateVersion: attempt?.gatePredicateVersion || null },
-    closingStatus: oneLine(attempt?.closingStatus, attempt?.reason === 'history-read-failed' ? HISTORY_READ_ERROR_LIMIT : TEXT_LIMIT),
+    closingStatus: oneLine(attempt?.closingStatus, attempt?.reason?.split(':')[0] === 'history-read-failed' ? HISTORY_READ_ERROR_LIMIT : TEXT_LIMIT),
     ...(attempt?.historyReadError || attempt?.githubGate?.primaryChangeReason
       ? { historyReadError: oneLine(attempt.historyReadError || attempt.githubGate.primaryChangeReason, HISTORY_READ_ERROR_LIMIT) } : {}),
     next: oneLine(attempt?.next),
@@ -634,9 +634,9 @@ export async function evaluateHammerStopHold({
     return stop ? { action: 'release', hammerStop: stop, changed } : { action: 'none' };
   }
   if (!stop) return { action: 'none' };
-  // FINALCLOSE-01: transport evidence cannot become an input-change hold. The
-  // launched hammer owns a fresh read; ordinary series/lifetime caps own retries.
-  if (stop.predicate === 'history-read-failed' && !stop.refusal) {
+  // FINALCLOSE-01: retryable transport evidence cannot become an input-change
+  // hold. Permanent history refusals use the ordinary counted stop policy.
+  if ((stop.predicate === 'history-read-failed' || stop.predicate.startsWith('history-read-failed:transient:')) && !stop.refusal) {
     const changed = ['history-read-retry'];
     persist({ stopKey: stop.stopKey, releasedAt: now, releasedBy: changed, paged: false });
     return { action: 'release', hammerStop: stop, changed };

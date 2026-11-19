@@ -82,6 +82,7 @@ ham_append_terminal_audit() {
     --argjson requiredChecksWaitedSeconds "${HAM_REQUIRED_CHECKS_WAITED_SECONDS:-0}" \
     --arg outcome "$ham_audit_outcome" \
     --arg reason "$ham_audit_reason" \
+    --arg reasonDetail "${3:-}" \
     --arg historyReadError "${HAM_HISTORY_READ_ERROR:-}" \
     --arg reviewedHead "<<REVIEWED_SHA>>" \
     --arg validatedHead "$POST_REMEDIATION_SHA" \
@@ -125,7 +126,11 @@ ham_append_terminal_audit() {
       resumeHead: (if $reason == "required-checks-pending" then $validatedHead else null end),
       eligibilityTrace: $eligibilityTrace,
       githubGate: $githubGate
-    }' > "$ham_audit_attempt_json"
+    } + (if $reasonDetail != "" then {reasonDetail: $reasonDetail} else {} end)
+      + (if $historyReadError | startswith("history read failed: history-read-failed:") then
+      ($historyReadError | capture("^history read failed: [^ ]+ attempts=(?<count>[0-9]+) ")
+        | {historyReadAttempts: (.count | tonumber)}) // {}
+    else {} end)' > "$ham_audit_attempt_json"
   "$HAM_NODE_BIN" <<ROOT_DIR>>/bin/ama-audit.mjs append \
     --hq-root <<HQ_ROOT>> \
     --root-dir <<ROOT_DIR>> --lease-head <<TARGET_REMEDIATION_SHA>> \
@@ -146,11 +151,26 @@ ham_append_terminal_audit() {
   return "$ham_audit_append_exit"
 }
 
+ham_audit_history_read_abort() {
+  local classified reason
+  if [[ ${HAM_HISTORY_READ_ERROR:-} =~ ^history\ read\ failed:\ (history-read-failed:(transient|permanent):[a-z0-9-]+)\  ]]; then
+    classified="${BASH_REMATCH[1]}"
+  fi
+  reason="${classified:-history-read-failed}"
+  case "$reason" in
+    history-read-failed:transient:*) reason=history-read-failed ;;
+  esac
+  ham_append_terminal_audit failed-without-merge "$reason" "$classified" || true
+  case "$classified" in
+    history-read-failed:permanent:*) ;;
+    *) ham_mark_merge_lease_retryable_abort history-read-failed ;;
+  esac
+}
+
 # FINALCLOSE-01: context/provenance reads can fail before merge admission.
 if [ "${1:-}" = --history-read-abort ]; then
-  ham_append_terminal_audit failed-without-merge history-read-failed || true
+  ham_audit_history_read_abort
   rm -f "$HAM_MERGE_STDOUT" "$HAM_MERGE_STDERR" "$HAM_GATE_JSON" "$HAM_POST_MERGE_JSON" "$HAM_POST_MERGE_STDERR"
-  ham_mark_merge_lease_retryable_abort history-read-failed
   ham_release_merge_lease
   return 1
 fi
@@ -178,8 +198,8 @@ if ! jq -e --arg head "$POST_REMEDIATION_SHA" \
   echo "HAM hard-blocker: predicate is not eligible for the validated head" >&2
   if jq -e '.reasons | index("history-read-failed") != null' "$HAM_VERDICT_FILE" >/dev/null 2>&1; then
     cat "$HAM_VERDICT_FILE" >&2
-    ham_append_terminal_audit failed-without-merge history-read-failed || true
-    ham_mark_merge_lease_retryable_abort history-read-failed
+    HAM_HISTORY_READ_ERROR=$(jq -r '.trace.primaryChange.detail // empty' "$HAM_VERDICT_FILE")
+    ham_audit_history_read_abort
   elif jq -e '.reasons | index("primary-change-unknown") != null' "$HAM_VERDICT_FILE" >/dev/null 2>&1; then
     cat "$HAM_VERDICT_FILE" >&2
     ham_append_terminal_audit deferred primary-change-unknown || true
@@ -668,9 +688,9 @@ while :; do
   if [ -n "$HAM_PRIMARY_REFUSAL" ]; then
     HAM_REMOTE_CI_STATUS="$HAM_PRIMARY_REFUSAL"
     if [ "$HAM_PRIMARY_REFUSAL" = history-read-failed ]; then
-      echo "HAM history-read-failed: $(jq -r ' .primaryChangeReason // "unnamed read error"' "$HAM_GATE_JSON")" >&2
-      ham_append_terminal_audit failed-without-merge history-read-failed || true
-      ham_mark_merge_lease_retryable_abort history-read-failed
+      HAM_HISTORY_READ_ERROR=$(jq -r '.primaryChangeReason // "unnamed read error"' "$HAM_GATE_JSON")
+      echo "HAM history-read-failed: $HAM_HISTORY_READ_ERROR" >&2
+      ham_audit_history_read_abort
     elif [ "$HAM_PRIMARY_REFUSAL" = primary-change-unknown ]; then
       echo "HAM primary-change evidence unknown; defer for evidence recovery" >&2
       cat "$HAM_GATE_JSON" >&2

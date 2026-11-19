@@ -4715,13 +4715,19 @@ between two submodule pointers retains patchless gitlink evidence. Read errors
 carry one `history read failed:` prefix, including when the reader already
 supplied it. Each child output
 is explicitly bounded at 25 MiB and exceeding that limit is a named read error.
-Any failed history read returns `historyReadFailed: true` with the underlying
-error, the dedicated helper exits non-zero, and the hammer records
-`history-read-failed` and its underlying error in a retryable terminal audit.
-Preflight stops may carry `noExecution: true`, but these read failures remain
-charged to the hammer retry cap. They do not retain an input-change hold;
-cap exhaustion and thirty-minute final-round stalls share one page receipt.
-Missing evidence never authorizes a reversal.
+A failed history read returns `historyReadFailed: true` with its diagnostic.
+The dedicated helper exits nonzero and the close controller carries that
+diagnostic into the hammer stop. Transient stops such as
+`history-read-failed:transient:http-502` record the registered
+`reason=history-read-failed`, retain the class in `reasonDetail`, and reach the
+watcher's inconclusive retry path through an uncounted deferred audit.
+Installation-token auth outages use `transient:auth-outage` even with HTTP 401.
+Permanent stops such as `history-read-failed:permanent:http-404` retain their
+classified reason, produce counted failures, and follow the ordinary stop-hold
+policy. Legacy unclassified `history-read-failed` stops retain their existing
+routing. Primary-change helper failures without structured history evidence
+record a terminal failure audit before the controller exits. Missing evidence
+never authorizes a reversal.
 
 **Required guard authority (GUARDREVERT-01).** A required repository check may
 authorize returning only the paths it explicitly forbids in pull requests to
@@ -5388,10 +5394,12 @@ Cancellation reaches metadata, subtree, blob, retry and local proof work.
 Production history CLI/diff children run in an isolated process group, killed
 with SIGKILL on timeout/cancellation so wrapper descendants cannot retain pipes.
 Diff workers settle before their scratch directory is removed; late injected
-reader results cannot continue collection. History errors
-retain underlying command stderr up to 2,000 characters in full evidence, the
-bounded snapshot reason, audit `historyReadError` and closing-status summaries.
-These internal read retries do not change the per-PR hammer retry cap.
+reader results cannot continue collection. Object reads can make up to five
+attempts on transient errors within the remaining history deadline, with a
+load-aware 15-second cap per attempt and backoff that honors `Retry-After`.
+The reader retains the HTTP status line and a redacted stderr tail within its
+2,000-character diagnostic. The hammer records it in `historyReadError` with
+`historyReadAttempts` when the child attempt count is available.
 
 A blocking finding may authorize a specific reversal. A non-blocking finding may
 also authorize one only when the effective `strict_non_blocking_remediation` policy

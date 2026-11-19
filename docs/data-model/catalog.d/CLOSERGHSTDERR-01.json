@@ -1,0 +1,9 @@
+{
+  "version": 1,
+  "entries": [
+    {
+      "id": "ama-audit",
+      "historyReadStop": "Transient history stops store registered reason=history-read-failed with classification in reasonDetail and deferred outcome. Permanent stops retain the suffixed reason and counted outcome. Optional historyReadError and historyReadAttempts retain bounded diagnostic and child count."
+    }
+  ]
+}

@@ -170,8 +170,16 @@ export HAM_PROCEDURE_STEP=predicate
 HAM_PHASE_OUTCOME=predicate-build-failed
 HAM_PRIMARY_CHANGE_FILE=$(mktemp "$HAM_RUN_DIR/ham-primary-change.XXXXXX") || ham_close_finish 1
 chmod 600 "$HAM_PRIMARY_CHANGE_FILE"
-ham_close_read primary-change-context "$HAM_CLOSE_ROOT/bin/primary-change-context.mjs" "$HAM_REPO" "$HAM_PR_NUMBER" "$POST_REMEDIATION_SHA" \
-  > "$HAM_PRIMARY_CHANGE_FILE" || ham_close_finish $? primary-change-context-failed
+"$HAM_NODE_BIN" "$HAM_CLOSE_ROOT/bin/hammer-helper-step.mjs" read:report primary-change-context 90 540 \
+  "$HAM_NODE_BIN" "$HAM_CLOSE_ROOT/bin/primary-change-context.mjs" "$HAM_REPO" "$HAM_PR_NUMBER" "$POST_REMEDIATION_SHA" \
+  > "$HAM_PRIMARY_CHANGE_FILE" || {
+    ham_history_status=$?
+    if HAM_HISTORY_READ_ERROR=$(jq -er 'select(.historyReadFailed == true) | .reason | strings' "$HAM_PRIMARY_CHANGE_FILE"); then
+      ham_close_phase hammer-merge --history-read-abort
+      ham_close_finish "$ham_history_status" "$HAM_PHASE_OUTCOME"
+    fi
+    ham_close_finish "$ham_history_status" primary-change-context-failed
+  }
 HAM_VERDICT_FILE=$(mktemp "$HAM_RUN_DIR/ham-verdict.XXXXXX") || ham_close_finish 1
 chmod 600 "$HAM_VERDICT_FILE"
 export HAM_VERDICT_FILE

@@ -14,8 +14,8 @@
 # continues to the proof and submodule sync below. When the rebase stops on
 # conflicts, the script exits 22 (`conflict-markers-pending`) with the rebase
 # still in progress. The closer resolves and stages hand-written sources, then
-# reruns with --continue, which hands the rebase to the shared generated-output
-# resolver (GENCONFLICT-01) and finishes.
+# reruns with --continue, which selects the applicable installed policy and
+# finishes the replay or hands back the next source conflict.
 #
 # HAMCONFLICTCUSTODY-01: the PR branch is never checked out by name. This
 # worktree can share its git directory with a builder's linked worktree that
@@ -132,13 +132,18 @@ else
   fi
   if ham_conflict_rebasing; then
     # Merge and stage hand-written sources first, preserving both sides' intent.
-    # Leave registered generated outputs to the shared GENCONFLICT-01 resolver;
-    # never choose one side of STATE-MACHINES.md or hand-edit its conflict markers.
-    # The helper regenerates from merged sources, stages the outputs, and continues
-    # per commit. If any source conflict remains, or generation fails, it aborts
-    # and removes this worktree. Stop and report the emitted reason on failure.
-    ( ham_conflict_comment_char; hq generated-conflicts resolve --worktree "$PWD" ) \
-      || ham_conflict_stop 1 conflict-resolver-failed
+    # The installed resolver owns generated outputs for its own repository.
+    HAM_CONFLICT_PYTHON="${HQ_PYTHON3:-${AGENT_OS_PY:-${AGENT_OS_DEPLOY_CHECKOUT:+$AGENT_OS_DEPLOY_CHECKOUT/runtime/python/bin/python3}}}"
+    [ -n "$HAM_CONFLICT_PYTHON" ] \
+      || ham_conflict_stop 1 'conflict-resolver-failed: configure HQ_PYTHON3, AGENT_OS_PY or the deploy runtime Python (>= 3.11)'
+    ham_conflict_policy_args=()
+    [ -z "${HAM_HQ_ROOT:-}" ] || ham_conflict_policy_args=(--trusted-root "$HAM_HQ_ROOT")
+    ( ham_conflict_comment_char
+      "$HAM_CONFLICT_PYTHON" -IB "$HAM_CONFLICT_ROOT/bin/hammer-conflict-resume.py" "$HAM_REPO" "$PWD" "${ham_conflict_policy_args[@]}"
+    ) || {
+      [ "$?" -eq 22 ] && ham_conflict_stop 22 conflict-markers-pending
+      ham_conflict_stop 1 conflict-resolver-failed
+    }
   fi
   ham_conflict_rebasing && ham_conflict_stop 1 conflict-rebase-unfinished
   git merge-base --is-ancestor "$HAM_CONFLICT_BASE" HEAD || ham_conflict_stop 1 conflict-rebase-unfinished

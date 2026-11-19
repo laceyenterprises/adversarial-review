@@ -994,11 +994,14 @@ sources `inputs.sh` and every helper it calls. Never transcribe its shell:
 It fetches, checks out the exact live head, and rebases it onto the live base,
 keeping author commits (never squash or amend them). Exit 22
 `conflict-markers-pending` leaves the rebase stopped: resolve and stage the
-listed hand-written sources as above, never registered outputs, then run it
-again with `--continue` appended; it runs the shared resolver, the
-reviewed-head proof and submodule sync. Never continue past unresolved
-hand-written conflicts. Exit 76 is retryable; other nonzero stops with the
-printed reason.
+listed hand-written sources as above, leaving outputs registered for this
+repository to the shared resolver. Run it again with `--continue` appended.
+A readable registry owned by another repository supplies no generators.
+Continue only after explicitly staging the source resolutions. Exit 22 can
+also request source work on a later replayed commit. If registry ownership
+cannot be established, stop with the reported refusal and retain the staged
+work. A completed replay runs the reviewed-head proof and submodule sync.
+Exit 76 is retryable. Other nonzero exits stop with the printed reason.
 
 Rerun the close command: it publishes this commit first
 (`HAM_COMMIT_PUBLICATION_ONLY=1`; rebased/multi-commit history keeps the

@@ -275,18 +275,37 @@ case "$(basename "$path")" in
 esac
 `;
 
-function conflictFixture(t, { conflict = true } = {}) {
+function conflictFixture(t, { conflict = true, owner = 'fixture/foreign', generatedPath = 'unrelated.txt' } = {}) {
   const dir = mkdtempSync(join(tmpdir(), 'hamconflictsync-pr-'));
   t.after(() => rmSync(dir, { recursive: true, force: true }));
   const fakeBin = join(dir, 'fake-bin');
   const run = join(dir, 'run');
   const work = join(dir, 'work');
+  const clone = join(dir, 'clone');
   const author = join(dir, 'author');
+  const install = join(dir, 'installed');
+  const policy = join(install, 'modules/worker-pool/lib/python/cwp_dispatch');
+  const config = join(install, 'modules/worker-pool/config');
   mkdirSync(fakeBin); mkdirSync(run, { mode: 0o700 });
+  mkdirSync(policy, { recursive: true });
+  mkdirSync(config, { recursive: true });
+  const registry = join(config, 'committed-generated-files.json');
+  writeFileSync(registry, JSON.stringify({
+    version: 1, repository: owner,
+    files: [{ path: generatedPath, argv: ['{python}', 'generate.py'], inputs: ['author-part.txt'], evidence: 'fixture' }],
+  }));
+  writeFileSync(join(policy, 'generated_conflicts.py'), read('test/helpers/generated-conflict-policy-fixture.py'));
+  const generator = `from pathlib import Path
+import os
+with Path(os.environ["FIXTURE_LOG"]).open("a") as events:
+    events.write("generator ran\\n")
+Path("example.txt").write_text("one\\n" + Path("author-part.txt").read_text() + Path("base-part.txt").read_text())
+`;
+  writeFileSync(join(install, 'generate.py'), generator);
   writeFileSync(join(dir, 'gitconfig'), '');
   const log = join(dir, 'events.log');
   const env = {
-    PATH: `${fakeBin}:/usr/bin:/bin`, HOME: dir, TMPDIR: run, FIXTURE_LOG: log,
+    PATH: `${fakeBin}:/usr/bin:/bin`, HOME: dir, TMPDIR: run, FIXTURE_LOG: log, AGENT_OS_DEPLOY_CHECKOUT: install,
     GIT_CONFIG_GLOBAL: join(dir, 'gitconfig'), GIT_CONFIG_NOSYSTEM: '1', GIT_TERMINAL_PROMPT: '0', GIT_EDITOR: 'true',
     GIT_AUTHOR_NAME: 'Fixture Author', GIT_AUTHOR_EMAIL: 'author@example.invalid',
     GIT_COMMITTER_NAME: 'Fixture Author', GIT_COMMITTER_EMAIL: 'author@example.invalid',
@@ -294,36 +313,45 @@ function conflictFixture(t, { conflict = true } = {}) {
   const realGit = execFileSync('/bin/sh', ['-c', 'command -v git'], { encoding: 'utf8' }).trim();
   writeFileSync(join(fakeBin, 'git'), `#!/bin/sh\nexec ${shellQuote(realGit)} "$@"\n`, { mode: 0o755 });
   writeFileSync(join(fakeBin, 'node'), fakeNode(process.execPath), { mode: 0o755 });
-  // The shared GENCONFLICT-01 resolver belongs to another repository; with no
-  // registered outputs it continues the rebase under the caller's comment char.
-  writeFileSync(join(fakeBin, 'hq'), `#!/bin/bash
-printf 'hq %s commentChar=%s\\n' "$*" "$(git config core.commentChar)" >> "$FIXTURE_LOG"
-[ "$1 $2 $3" = "generated-conflicts resolve --worktree" ] || exit 97
-exec git -C "$4" rebase --continue
+  const python = execFileSync('/bin/sh', ['-c', 'command -v python3'], { encoding: 'utf8' }).trim();
+  env.HQ_PYTHON3 = join(fakeBin, 'python3');
+  writeFileSync(env.HQ_PYTHON3, `#!/bin/sh
+printf 'resume %s\\n' "$*" >> "$FIXTURE_LOG"
+exec ${shellQuote(python)} "$@"
 `, { mode: 0o755 });
   const git = (cwd, ...args) => execFileSync('git', args, { cwd, env, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
   git(dir, 'init', '-q', '--bare', '-b', 'main', 'origin.git');
   const origin = join(dir, 'origin.git');
   git(dir, 'clone', '-q', origin, 'author');
   writeFileSync(join(author, 'example.txt'), 'one\ntwo\nthree\n');
-  git(author, 'add', 'example.txt'); git(author, 'commit', '-qm', 'Synthetic base');
+  if (generatedPath === 'example.txt') {
+    writeFileSync(join(author, 'generate.py'), generator);
+    writeFileSync(join(author, 'author-part.txt'), 'two\n');
+    writeFileSync(join(author, 'base-part.txt'), 'three\n');
+  }
+  git(author, 'add', '.'); git(author, 'commit', '-qm', 'Synthetic base');
   git(author, 'push', '-q', 'origin', 'main');
   git(author, 'checkout', '-qb', 'author');
   if (conflict) writeFileSync(join(author, 'example.txt'), 'one\ntwo author\nthree\n');
   else writeFileSync(join(author, 'author.txt'), 'author\n');
+  if (generatedPath === 'example.txt') writeFileSync(join(author, 'author-part.txt'), 'two author\n');
   git(author, 'add', '.');
   git(author, 'commit', '-qm', 'Synthetic author change\n\n# Heading kept by the rebase');
   git(author, 'push', '-q', 'origin', 'author');
   const reviewed = git(author, 'rev-parse', 'HEAD');
   git(author, 'checkout', '-q', 'main');
   writeFileSync(join(author, 'example.txt'), 'one\ntwo\nthree upstream\n');
+  if (generatedPath === 'example.txt') writeFileSync(join(author, 'base-part.txt'), 'three upstream\n');
   git(author, 'commit', '-qam', 'Synthetic upstream change');
   git(author, 'push', '-q', 'origin', 'main');
   const base = git(author, 'rev-parse', 'HEAD');
-  // The hammer worktree: on the PR branch at the reviewed head, base stale.
-  git(dir, 'clone', '-q', '-b', 'author', origin, 'work');
+  // Use a linked worktree and a canonical raw origin. Transport stays local.
+  git(dir, 'clone', '-q', origin, 'clone');
+  git(clone, 'remote', 'set-url', 'origin', 'git@github.com:fixture/repo.git');
+  git(clone, 'config', `url.${origin}.insteadOf`, 'git@github.com:fixture/repo.git');
+  git(clone, 'worktree', 'add', '-qb', 'author', work, reviewed);
   git(work, 'update-ref', 'refs/remotes/origin/main', `${base}^`);
-  const bound = { ...values(root), RUN_DIR: run, REVIEWED_SHA: reviewed, TARGET_REMEDIATION_SHA: reviewed };
+  const bound = { ...values(root), HQ_ROOT: install, RUN_DIR: run, REVIEWED_SHA: reviewed, TARGET_REMEDIATION_SHA: reviewed };
   const inputs = template.match(/cat > '<<RUN_DIR>>\/inputs\.sh' <<'HAM_INPUTS'\n([\s\S]*?)\nHAM_INPUTS/)[1]
     .replaceAll('<<TENURE_INPUTS>>', '')
     .replace(/<<([A-Z_]+)>>/g, (_, key) => bound[key]);
@@ -336,10 +364,15 @@ exec git -C "$4" rebase --continue
     cwd: work, encoding: 'utf8', timeout: 60_000, env: { ...env, HAM_NODE_BIN: join(fakeBin, 'node') },
   });
   const events = () => (existsSync(log) ? readFileSync(log, 'utf8') : '');
-  return { dir, run, work, author, origin, reviewed, base, git, repair, events };
+  return { dir, run, work, author, origin, reviewed, base, git, repair, events, registry, env, install, policy, python };
 }
 
-test('a conflicting synthetic PR is rebased by the shipped conflict repair, preserving the author change', t => {
+function stageSource(f) {
+  writeFileSync(join(f.work, 'example.txt'), 'one\ntwo author\nthree upstream\n');
+  f.git(f.work, 'add', 'example.txt');
+}
+
+test('a path outside a readable foreign registry resumes after explicit source repair', t => {
   const f = conflictFixture(t);
   const first = f.repair();
   assert.equal(first.status, 22, first.stderr);
@@ -349,11 +382,10 @@ test('a conflicting synthetic PR is rebased by the shipped conflict repair, pres
   assert.doesNotMatch(first.stderr, /command not found/);
   // The closer's source resolution: keep both sides, then stage.
   assert.match(readFileSync(join(f.work, 'example.txt'), 'utf8'), /<<<<<<< /);
-  writeFileSync(join(f.work, 'example.txt'), 'one\ntwo author\nthree upstream\n');
-  f.git(f.work, 'add', 'example.txt');
+  stageSource(f);
   const second = f.repair('--continue');
   assert.equal(second.status, 0, second.stderr);
-  assert.match(f.events(), /^hq generated-conflicts resolve --worktree \S+ commentChar=;$/m);
+  assert.doesNotMatch(f.events(), /^generator ran$/m);
   const head = f.git(f.work, 'rev-parse', 'HEAD');
   assert.notEqual(head, f.reviewed);
   assert.equal(f.git(f.work, 'rev-parse', 'HEAD^'), f.base, 'rebased onto the live base');
@@ -366,12 +398,194 @@ test('a conflicting synthetic PR is rebased by the shipped conflict repair, pres
   assert.match(second.stderr, /rerun the close command/);
 });
 
+test('a same-name foreign output needs explicit source repair and never runs the generator', t => {
+  const f = conflictFixture(t, { generatedPath: 'example.txt' });
+  assert.equal(f.repair().status, 22);
+  const unresolved = f.repair('--continue');
+  assert.equal(unresolved.status, 22, unresolved.stderr);
+  assert.match(unresolved.stderr, /stage the resolved source paths.*example\.txt/);
+  assert.match(f.git(f.work, 'diff', '--name-only', '--diff-filter=U'), /example\.txt/);
+  assert.equal(existsSync(join(f.run, 'conflict-repair-publish.env')), false);
+  stageSource(f);
+  const resolved = f.repair('--continue');
+  assert.equal(resolved.status, 0, resolved.stderr);
+  assert.doesNotMatch(f.events(), /^generator ran$/m);
+});
+
+for (const interpreter of ['HQ_PYTHON3', 'AGENT_OS_PY', 'deploy runtime']) {
+  test(`source continuation selects ${interpreter} before PATH Python`, t => {
+    const f = conflictFixture(t);
+    assert.equal(f.repair().status, 22);
+    stageSource(f);
+    const selected = f.env.HQ_PYTHON3;
+    // A bare PATH lookup must never be used, even when it would be executable.
+    const pathBin = join(f.dir, 'path-bin');
+    mkdirSync(pathBin);
+    writeFileSync(join(pathBin, 'python3'), '#!/bin/sh\nexit 97\n', { mode: 0o755 });
+    f.env.PATH = `${pathBin}:${f.env.PATH}`;
+    f.env.AGENT_OS_PY = '/missing/lower-priority-python';
+    if (interpreter !== 'HQ_PYTHON3') {
+      delete f.env.HQ_PYTHON3;
+      if (interpreter === 'AGENT_OS_PY') f.env.AGENT_OS_PY = selected;
+      else {
+        delete f.env.AGENT_OS_PY;
+        mkdirSync(join(f.install, 'runtime/python/bin'), { recursive: true });
+        symlinkSync(selected, join(f.install, 'runtime/python/bin/python3'));
+      }
+    }
+    const result = f.repair('--continue');
+    assert.equal(result.status, 0, result.stderr);
+    assert.match(f.events(), /^resume -IB .* --trusted-root /m);
+  });
+}
+
+test('source continuation refuses to fall back to PATH when no interpreter is configured', t => {
+  const f = conflictFixture(t);
+  assert.equal(f.repair().status, 22);
+  stageSource(f);
+  delete f.env.HQ_PYTHON3;
+  delete f.env.AGENT_OS_PY;
+  delete f.env.AGENT_OS_DEPLOY_CHECKOUT;
+  const result = f.repair('--continue');
+  assert.equal(result.status, 1, result.stderr);
+  assert.match(result.stderr, /configure HQ_PYTHON3, AGENT_OS_PY/);
+  assert.equal(f.git(f.work, 'status', '--porcelain'), 'M  example.txt');
+  assert.equal(f.git(f.work, 'rev-parse', 'REBASE_HEAD'), f.reviewed);
+});
+
+test('the helper refuses Python below 3.11 before loading installed policy', () => {
+  const python = execFileSync('/bin/sh', ['-c', 'command -v python3'], { encoding: 'utf8' }).trim();
+  const result = spawnSync(python, ['-IB', '-c', `
+import runpy, sys
+sys.version_info = (3, 9, 6)
+runpy.run_path(sys.argv[1], run_name="__main__")
+`, join(root, 'bin/hammer-conflict-resume.py')], { encoding: 'utf8', timeout: 10_000 });
+  assert.equal(result.status, 1, result.stderr);
+  assert.match(result.stderr, /Python >= 3\.11 is required/);
+  assert.doesNotMatch(result.stderr, /Traceback/);
+});
+
+for (const catalogError of ['comparison', 'ownership']) {
+  test(`alias catalog failure during ${catalogError} retains the source handoff`, t => {
+    const f = conflictFixture(t);
+    assert.equal(f.repair().status, 22);
+    stageSource(f);
+    if (catalogError === 'comparison') f.git(f.work, 'remote', 'set-url', 'origin', 'git@github.com:fixture/alias.git');
+    f.env.FIXTURE_CATALOG_ERROR = catalogError;
+    const result = f.repair('--continue');
+    assert.equal(result.status, 22, result.stderr);
+    assert.match(result.stderr, /Repair the alias catalog/);
+    assert.equal(f.git(f.work, 'status', '--porcelain'), 'M  example.txt');
+    assert.equal(f.git(f.work, 'rev-parse', 'REBASE_HEAD'), f.reviewed);
+    assert.equal(existsSync(join(f.run, 'conflict-repair-publish.env')), false);
+  });
+}
+
+test('HAM_HQ_ROOT policy wins over a different deploy checkout', t => {
+  const f = conflictFixture(t);
+  assert.equal(f.repair().status, 22);
+  stageSource(f);
+  f.env.AGENT_OS_DEPLOY_CHECKOUT = join(f.dir, 'missing-deployment');
+  const result = f.repair('--continue');
+  assert.equal(result.status, 0, result.stderr);
+});
+
+test('an explicit unavailable HAM_HQ_ROOT never falls back to the deploy policy', t => {
+  const f = conflictFixture(t);
+  assert.equal(f.repair().status, 22);
+  stageSource(f);
+  const inputs = join(f.run, 'inputs.sh');
+  writeFileSync(inputs, readFileSync(inputs, 'utf8').replaceAll(f.install, join(f.dir, 'missing-policy')));
+  const result = f.repair('--continue');
+  assert.equal(result.status, 1, result.stderr);
+  assert.equal(f.git(f.work, 'status', '--porcelain'), 'M  example.txt');
+  assert.equal(f.git(f.work, 'rev-parse', 'REBASE_HEAD'), f.reviewed);
+});
+
+// Opt-in host compatibility probe. Ordinary offline runs never import host code.
+test('installed GENCONFLICT call signatures accept the conflict-resume adapter', t => {
+  const installed = process.env.HAM_CONFLICT_POLICY_CONTRACT_ROOT;
+  if (!installed || !existsSync(join(installed, 'modules/worker-pool/lib/python/cwp_dispatch/generated_conflicts.py'))) {
+    t.skip('no installed checkout selected with HAM_CONFLICT_POLICY_CONTRACT_ROOT');
+    return;
+  }
+  const python = process.env.HQ_PYTHON3 || process.env.AGENT_OS_PY || join(installed, 'runtime/python/bin/python3');
+  const result = spawnSync(python, ['-IB', '-c', `
+import inspect, runpy, sys
+from pathlib import Path
+helper = runpy.run_path(sys.argv[1])
+_, policy = helper["load_policy"](Path("/nonexistent/worker"), Path(sys.argv[2]))
+calls = {
+    "_linked_tree": ((Path("/worker"),), {}),
+    "_repository_identity": ((Path("/owner"),), {"run": None}),
+    "github_slug": (("fixture/repo",), {}),
+    "same_repository": (("fixture/repo", "fixture/alias"), {}),
+    "load_registry": ((), {}),
+    "_owned_entries": (({}, "fixture/repo"), {}),
+    "conflict_paths": ((Path("/worker"),), {"run": None}),
+    "_continue": ((Path("/worker"),), {"run": None, "env": None}),
+    "resolve_rebase": ((Path("/worker"),), {
+        "repo_root": Path("/owner"), "run": None, "trusted_root": Path(sys.argv[2]),
+        "preserve_source_conflicts": True, "repository": "fixture/repo"}),
+    "run_process_group": ((["git"],), {"cwd": Path("/worker"), "env": None, "timeout": 600}),
+    "termination_cleanup": ((), {}),
+}
+for name, (args, kwargs) in calls.items():
+    assert hasattr(policy, name), name
+    inspect.signature(getattr(policy, name)).bind(*args, **kwargs)
+assert issubclass(policy.GeneratedConflictError, Exception)
+assert issubclass(policy.CatalogError, Exception)
+print("installed GENCONFLICT signatures match")
+`, join(root, 'bin/hammer-conflict-resume.py'), installed], { encoding: 'utf8', timeout: 20_000 });
+  assert.equal(result.status, 0, result.error?.message || result.stderr);
+  assert.match(result.stdout, /installed GENCONFLICT signatures match/);
+});
+
+test('source continuation retains the rebase when the staged file still contains markers', t => {
+  const f = conflictFixture(t);
+  assert.equal(f.repair().status, 22);
+  f.git(f.work, 'add', 'example.txt');
+  const resumed = f.repair('--continue');
+  assert.equal(resumed.status, 22, resumed.stderr);
+  assert.match(resumed.stderr, /resolved_diff_check_failed/);
+  assert.equal(f.git(f.work, 'rev-parse', 'REBASE_HEAD'), f.reviewed);
+  assert.equal(existsSync(join(f.run, 'conflict-repair-publish.env')), false);
+});
+
+for (const policy of ['missing', 'invalid JSON', 'unknown owner', 'unknown worktree origin']) {
+  test(`staged source work is retained when policy ownership is unavailable (${policy})`, t => {
+    const f = conflictFixture(t);
+    assert.equal(f.repair().status, 22);
+    stageSource(f);
+    if (policy === 'missing') rmSync(f.registry);
+    if (policy === 'invalid JSON') writeFileSync(f.registry, '{');
+    if (policy === 'unknown owner') writeFileSync(f.registry, '{"version":1,"repository":"","files":[]}');
+    if (policy === 'unknown worktree origin') f.git(f.work, 'remote', 'set-url', 'origin', f.origin);
+    const resumed = f.repair('--continue');
+    assert.equal(resumed.status, 1, resumed.stderr);
+    assert.match(resumed.stderr, /conflict-resolver-failed/);
+    assert.equal(f.git(f.work, 'status', '--porcelain'), 'M  example.txt');
+    assert.equal(f.git(f.work, 'rev-parse', 'REBASE_HEAD'), f.reviewed);
+    assert.equal(existsSync(join(f.run, 'conflict-repair-publish.env')), false);
+  });
+}
+
+test('an installed same-repository policy regenerates the conflicted output from merged inputs', t => {
+  const f = conflictFixture(t, { owner: 'fixture/repo', generatedPath: 'example.txt' });
+  assert.equal(f.repair().status, 22);
+  const resumed = f.repair('--continue');
+  assert.equal(resumed.status, 0, resumed.stderr);
+  assert.match(f.events(), /^generator ran$/m);
+  assert.equal(f.git(f.work, 'show', 'HEAD:example.txt'), 'one\ntwo author\nthree upstream');
+  assert.equal(JSON.parse(readFileSync(join(f.run, 'conflict-primary.json'), 'utf8')).proof, 'conflict-primary-preserved');
+});
+
 test('a clean replay finishes in one invocation with the reviewed-head proof', t => {
   const f = conflictFixture(t, { conflict: false });
   const result = f.repair();
   assert.equal(result.status, 0, result.stderr);
   assert.equal(f.git(f.work, 'rev-parse', 'HEAD^'), f.base);
-  assert.doesNotMatch(f.events(), /^hq /m, 'no resolver for a clean replay');
+  assert.doesNotMatch(f.events(), /^resume /m, 'no resolver for a clean replay');
   assert.equal(JSON.parse(readFileSync(join(f.run, 'conflict-primary.json'), 'utf8')).proof, 'conflict-primary-preserved');
 });
 
@@ -384,9 +598,9 @@ test('a rebase precondition failure reports failure without requesting conflict 
   assert.doesNotMatch(result.stderr, /conflict-markers-pending|merge and stage|rerun with --continue/);
   assert.equal(f.git(f.work, 'rev-parse', 'HEAD'), f.reviewed, 'no author commit was changed');
   assert.equal(f.git(f.work, 'diff', '--name-only', '--diff-filter=U'), '');
-  assert.equal(existsSync(join(f.work, '.git/rebase-merge')), false);
-  assert.equal(existsSync(join(f.work, '.git/rebase-apply')), false);
-  assert.doesNotMatch(f.events(), /^hq |terminal-audit/m);
+  assert.equal(existsSync(f.git(f.work, 'rev-parse', '--git-path', 'rebase-merge')), false);
+  assert.equal(existsSync(f.git(f.work, 'rev-parse', '--git-path', 'rebase-apply')), false);
+  assert.doesNotMatch(f.events(), /^resume |terminal-audit/m);
 });
 
 test('conflict repair refuses a head that is not the fetched PR head, and --continue without a capture', t => {
@@ -404,7 +618,7 @@ test('conflict repair refuses a head that is not the fetched PR head, and --cont
   assert.match(unpublished.stderr, /conflict-source-not-fetched-head/);
   assert.equal(f.git(f.work, 'rev-parse', 'HEAD'), local, 'nothing was checked out or rebased');
   assert.equal(f.git(f.work, 'symbolic-ref', '--short', 'HEAD'), 'author');
-  assert.equal(existsSync(join(f.work, '.git/rebase-merge')), false);
+  assert.equal(existsSync(f.git(f.work, 'rev-parse', '--git-path', 'rebase-merge')), false);
   assert.equal(existsSync(join(f.run, 'conflict-repair-publish.env')), false);
 });
 

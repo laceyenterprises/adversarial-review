@@ -207,6 +207,6 @@ test('HAMEMPTYPRIMARY-01: conflict procedure proves preservation before publicat
   assert.match(gate, /hammer-terminal-audit\.mjs" "\$HAM_CONFLICT_PROOF_REASON"/);
   assert.match(text.slice(0, start), /export "GIT_CONFIG_KEY_\$\{count\}=core\.commentChar"/);
   assert.match(text.slice(start, proof), /ham_conflict_comment_char; git rebase "origin\/\$BASE_BRANCH"/);
-  assert.match(text.slice(start, proof), /ham_conflict_comment_char; hq generated-conflicts resolve/);
+  assert.match(text.slice(start, proof), /ham_conflict_comment_char\n\s+.*hammer-conflict-resume\.py/);
   assert.match(text.slice(start, proof), /if \[ "\$HAM_CONFLICT_SOURCE" = "\$HAM_REVIEWED_SHA" \]/);
 });

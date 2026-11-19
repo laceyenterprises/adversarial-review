@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { runBounded } from '../src/ama/bounded-command.mjs';
-import { LEASE_VALIDATION_IDLE_MS, pytestValidationEnvironment } from '../src/ama/lease-validation.mjs';
+import { leaseValidationIdleMs, pytestValidationEnvironment } from '../src/ama/lease-validation.mjs';
 import { loadAwareTimeoutSeconds } from '../src/load-aware-timeout.mjs';
 
 import { reportHammerProgress, reportRemediationCommit } from '../src/ama/hammer-progress.mjs';
@@ -103,9 +103,10 @@ if (!valid || args.shift() !== '--' || !args.length) {
       // A missing startup receipt distinguishes npm/tool provisioning from a
       // repository script failure. Retry startup once within the same budget.
       for (let attempt = 0; attempt < 2; attempt++) {
+        const remainingMs = Math.max(1, deadline - Date.now());
         process.exitCode = runner ? await runBounded(runner.command, runner.args,
           { env: runner.startupReceipt ? { ...env, HAM_PNPM_VALIDATION_STARTED_FILE: startedFile } : env,
-            timeoutMs: Math.max(1, deadline - Date.now()), idleMs: LEASE_VALIDATION_IDLE_MS,
+            timeoutMs: remainingMs, idleMs: leaseValidationIdleMs(remainingMs),
             observeOutput }) : 127;
         if (!runner?.startupReceipt || existsSync(startedFile) || process.exitCode === 0
           || process.exitCode >= 124 || Date.now() >= deadline) break;

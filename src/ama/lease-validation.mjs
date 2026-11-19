@@ -1,6 +1,16 @@
 import { delimiter, join } from 'node:path';
+import { loadAwareTimeoutMs } from '../load-aware-timeout.mjs';
 
+// Unloaded base of the no-output limit; see leaseValidationIdleMs.
 export const LEASE_VALIDATION_IDLE_MS = 120_000;
+
+// A quiet check on a busy host stays silent longer, so the no-progress limit
+// scales with load exactly like the absolute deadline beside it. It stays
+// strictly below the remaining deadline, so a real hang still ends first.
+export function leaseValidationIdleMs(remainingMs, loadOptions = {}) {
+  return Math.max(1, Math.min(loadAwareTimeoutMs(LEASE_VALIDATION_IDLE_MS, loadOptions),
+    Math.floor(remainingMs) - 1));
+}
 
 // Remove live runtime routing, never explicit disposable test-DB opt-ins.
 // The repository's real fixtures still decide which tests require Postgres.

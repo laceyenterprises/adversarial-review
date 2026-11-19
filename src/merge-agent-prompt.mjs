@@ -332,8 +332,8 @@ function buildMergeAgentPrompt(job, { trigger = null } = {}) {
         lines.push(
           'First write the validation commands as data to "$HAM_RUN_DIR/close-commands.json".'
           + ' Each entry runs as `hammer-validate.mjs [--pytest] -- <args>`'
-          + ' (pytest: test paths; otherwise the command argv), with its unscaled'
-          + ' 120s no-output bound and load-scaled ceiling:'
+          + ' (pytest: test paths; otherwise the command argv), with its'
+          + ' load-scaled no-output bound and ceiling:'
         );
         lines.push('```json');
         lines.push('{"validations": [{"pytest": true, "args": ["tests/test_example.py"]}]}');

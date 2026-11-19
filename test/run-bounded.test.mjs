@@ -27,7 +27,7 @@ test('legacy lease-owning prompt requires the same bounded validation helper and
     { trigger: FINAL_PASS_ON_BUDGET_EXHAUSTED_TRIGGER });
   // HAMCONTROLLERSCRIPT-01: validation commands are data run by the shipped controller.
   assert.ok(prompt.includes('`hammer-validate.mjs [--pytest] -- <args>`'));
-  assert.ok(prompt.includes('unscaled 120s no-output bound'));
+  assert.ok(prompt.includes('load-scaled no-output bound'));
   assert.ok(prompt.includes('Its EXIT trap releases the lease on every path after acquisition'));
   const script = readFileSync(new URL('../bin/merge-agent-close-controller.sh', import.meta.url), 'utf8');
   assert.ok(script.includes('any timeout,\n# cancellation or failure exits nonzero through the lease-release trap')
@@ -55,7 +55,9 @@ test('lease validator permits a project nominal budget but refuses malformed or 
   const result = spawnSync(process.execPath, ['bin/hammer-validate.mjs', '--nominal-timeout', '10',
     '--', process.execPath, '-e', 'process.exit(0)'], { encoding: 'utf8', timeout: 20_000 });
   assert.equal(result.status, 0, result.stderr);
-  assert.match(result.stderr, /idle=120000ms/);
+  // HAMVALIDATEIDLE-01: the idle limit is load-scaled and stays below the deadline.
+  const [, absolute, idle] = result.stderr.match(/started absolute=(\d+)ms idle=(\d+)ms/);
+  assert.ok(Number(idle) < Number(absolute), result.stderr);
 });
 
 test('reserved cleanup failure retains private scratch instead of unlinking evidence', t => {

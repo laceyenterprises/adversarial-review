@@ -916,9 +916,17 @@ the repair captured its source therefore refuses the push and is never
 overwritten. A failure before Git creates a rebase directory exits 1
 `conflict-rebase-failed`; correct the reported precondition and rerun without
 `--continue`. When Git leaves a rebase in progress it exits 22
-`conflict-markers-pending`; the closer resolves and stages hand-written sources, then reruns it with
-`--continue`, which runs the deployed committed-generated-files resolver for
-registered outputs, the reviewed-head preservation proof and submodule sync.
+`conflict-markers-pending`. The closer resolves and stages hand-written
+sources, then reruns with `--continue`. The caller verifies the worktree's
+repository against the PR and uses the installed GENCONFLICT ownership
+classifier. For an applicable registry, the shared resolver regenerates
+registered outputs from merged inputs with trusted-code checks. A readable
+foreign registry supplies no generators, even when a path name matches.
+The shared marker-checked Git continuation uses the staged source resolutions
+and returns exit 22 if a source conflict remains or a later commit stops on
+one. Missing or unreadable ownership refuses continuation and leaves the
+staged work in place. A completed replay runs the reviewed-head preservation
+proof and submodule sync.
 Exit 76 is the retryable `git-credential-refresh-failed`. The closer then reruns
 the close command, which publishes the commit, validates outside the lease and
 re-enters verify-head. For a hand-written JSON map,

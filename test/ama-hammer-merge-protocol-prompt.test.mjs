@@ -930,11 +930,11 @@ test('LABELGATE-01: hammer can restore review-flagged guarded changes before def
 
 test('GENCONFLICT-01: hammer regenerates committed generated conflicts after source merges', () => {
   const block = HAMMER_PROMPT.slice(HAMMER_PROMPT.indexOf('## Resolving merge conflicts'));
-  const helperAt = block.indexOf('hq generated-conflicts resolve --worktree "$PWD" )');
+  const helperAt = block.indexOf('/bin/hammer-conflict-resume.py');
   assert.ok(helperAt > block.indexOf('git rebase "origin/$BASE_BRANCH" ); then'));
   assert.ok(helperAt < block.indexOf('git submodule update --recursive'));
-  assert.match(block, /Merge and stage hand-written sources first/);
-  assert.match(block, /aborts\s+# and removes this worktree/);
+  assert.match(block, /resolver owns generated outputs for its own repository/);
+  assert.match(block, /ham_conflict_stop 22 conflict-markers-pending/);
   assert.doesNotMatch(block, /git add <resolved files> && git rebase --continue/);
 });
 

@@ -84,9 +84,10 @@ function custodyFixture(t) {
   writeFileSync(join(fakeBin, 'git'), `#!/bin/sh\nexec ${shellQuote(realGit)} "$@"\n`, { mode: 0o755 });
   writeFileSync(join(fakeBin, 'node'), fakeNode(process.execPath), { mode: 0o755 });
   writeFileSync(join(fakeBin, 'gh'), fakeGh, { mode: 0o755 });
-  writeFileSync(join(fakeBin, 'hq'), `#!/bin/bash
-printf 'hq %s\\n' "$*" >> "$FIXTURE_LOG"
-[ "$1 $2 $3" = "generated-conflicts resolve --worktree" ] || exit 97
+  env.HQ_PYTHON3 = join(fakeBin, 'python3');
+  writeFileSync(env.HQ_PYTHON3, `#!/bin/bash
+printf 'resume %s\\n' "$*" >> "$FIXTURE_LOG"
+[ "$(basename "$2")" = "hammer-conflict-resume.py" ] || exit 97
 exec git -C "$4" rebase --continue
 `, { mode: 0o755 });
   const git = (cwd, ...args) => execFileSync('git', args, { cwd, env, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
@@ -194,7 +195,7 @@ test('a builder worktree holding the PR branch does not block conflict repair, w
   assert.equal(JSON.parse(readFileSync(join(f.run, 'conflict-primary.json'), 'utf8')).proof, 'conflict-primary-preserved');
   assert.equal(readFileSync(join(f.run, CONFLICT_PUBLISH_FILE), 'utf8'),
     `source=${f.reviewed}\nhead=${repaired}\nbranch=feature\n`);
-  assert.match(f.events(), /^hq generated-conflicts resolve --worktree /m);
+  assert.match(f.events(), /^resume .*hammer-conflict-resume\.py /m);
   builderUntouched(f);
 
   const published = f.publish();

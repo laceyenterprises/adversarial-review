@@ -290,7 +290,10 @@ function conflictFixture(t, { conflict = true, owner = 'fixture/foreign', genera
   mkdirSync(policy, { recursive: true });
   mkdirSync(config, { recursive: true });
   const registry = join(config, 'committed-generated-files.json');
-  writeFileSync(registry, JSON.stringify({ repository: owner, paths: [generatedPath] }));
+  writeFileSync(registry, JSON.stringify({
+    version: 1, repository: owner,
+    files: [{ path: generatedPath, argv: ['{python}', 'generate.py'], inputs: ['author-part.txt'], evidence: 'fixture' }],
+  }));
   writeFileSync(join(policy, 'generated_conflicts.py'), read('test/helpers/generated-conflict-policy-fixture.py'));
   const generator = `from pathlib import Path
 import os
@@ -348,7 +351,7 @@ exec ${shellQuote(python)} "$@"
   git(clone, 'config', `url.${origin}.insteadOf`, 'git@github.com:fixture/repo.git');
   git(clone, 'worktree', 'add', '-qb', 'author', work, reviewed);
   git(work, 'update-ref', 'refs/remotes/origin/main', `${base}^`);
-  const bound = { ...values(root), RUN_DIR: run, REVIEWED_SHA: reviewed, TARGET_REMEDIATION_SHA: reviewed };
+  const bound = { ...values(root), HQ_ROOT: install, RUN_DIR: run, REVIEWED_SHA: reviewed, TARGET_REMEDIATION_SHA: reviewed };
   const inputs = template.match(/cat > '<<RUN_DIR>>\/inputs\.sh' <<'HAM_INPUTS'\n([\s\S]*?)\nHAM_INPUTS/)[1]
     .replaceAll('<<TENURE_INPUTS>>', '')
     .replace(/<<([A-Z_]+)>>/g, (_, key) => bound[key]);
@@ -361,7 +364,7 @@ exec ${shellQuote(python)} "$@"
     cwd: work, encoding: 'utf8', timeout: 60_000, env: { ...env, HAM_NODE_BIN: join(fakeBin, 'node') },
   });
   const events = () => (existsSync(log) ? readFileSync(log, 'utf8') : '');
-  return { dir, run, work, author, origin, reviewed, base, git, repair, events, registry };
+  return { dir, run, work, author, origin, reviewed, base, git, repair, events, registry, env, install, policy, python };
 }
 
 function stageSource(f) {
@@ -409,6 +412,135 @@ test('a same-name foreign output needs explicit source repair and never runs the
   assert.doesNotMatch(f.events(), /^generator ran$/m);
 });
 
+for (const interpreter of ['HQ_PYTHON3', 'AGENT_OS_PY', 'deploy runtime']) {
+  test(`source continuation selects ${interpreter} before PATH Python`, t => {
+    const f = conflictFixture(t);
+    assert.equal(f.repair().status, 22);
+    stageSource(f);
+    const selected = f.env.HQ_PYTHON3;
+    // A bare PATH lookup must never be used, even when it would be executable.
+    const pathBin = join(f.dir, 'path-bin');
+    mkdirSync(pathBin);
+    writeFileSync(join(pathBin, 'python3'), '#!/bin/sh\nexit 97\n', { mode: 0o755 });
+    f.env.PATH = `${pathBin}:${f.env.PATH}`;
+    f.env.AGENT_OS_PY = '/missing/lower-priority-python';
+    if (interpreter !== 'HQ_PYTHON3') {
+      delete f.env.HQ_PYTHON3;
+      if (interpreter === 'AGENT_OS_PY') f.env.AGENT_OS_PY = selected;
+      else {
+        delete f.env.AGENT_OS_PY;
+        mkdirSync(join(f.install, 'runtime/python/bin'), { recursive: true });
+        symlinkSync(selected, join(f.install, 'runtime/python/bin/python3'));
+      }
+    }
+    const result = f.repair('--continue');
+    assert.equal(result.status, 0, result.stderr);
+    assert.match(f.events(), /^resume -IB .* --trusted-root /m);
+  });
+}
+
+test('source continuation refuses to fall back to PATH when no interpreter is configured', t => {
+  const f = conflictFixture(t);
+  assert.equal(f.repair().status, 22);
+  stageSource(f);
+  delete f.env.HQ_PYTHON3;
+  delete f.env.AGENT_OS_PY;
+  delete f.env.AGENT_OS_DEPLOY_CHECKOUT;
+  const result = f.repair('--continue');
+  assert.equal(result.status, 1, result.stderr);
+  assert.match(result.stderr, /configure HQ_PYTHON3, AGENT_OS_PY/);
+  assert.equal(f.git(f.work, 'status', '--porcelain'), 'M  example.txt');
+  assert.equal(f.git(f.work, 'rev-parse', 'REBASE_HEAD'), f.reviewed);
+});
+
+test('the helper refuses Python below 3.11 before loading installed policy', () => {
+  const python = execFileSync('/bin/sh', ['-c', 'command -v python3'], { encoding: 'utf8' }).trim();
+  const result = spawnSync(python, ['-IB', '-c', `
+import runpy, sys
+sys.version_info = (3, 9, 6)
+runpy.run_path(sys.argv[1], run_name="__main__")
+`, join(root, 'bin/hammer-conflict-resume.py')], { encoding: 'utf8', timeout: 10_000 });
+  assert.equal(result.status, 1, result.stderr);
+  assert.match(result.stderr, /Python >= 3\.11 is required/);
+  assert.doesNotMatch(result.stderr, /Traceback/);
+});
+
+for (const catalogError of ['comparison', 'ownership']) {
+  test(`alias catalog failure during ${catalogError} retains the source handoff`, t => {
+    const f = conflictFixture(t);
+    assert.equal(f.repair().status, 22);
+    stageSource(f);
+    if (catalogError === 'comparison') f.git(f.work, 'remote', 'set-url', 'origin', 'git@github.com:fixture/alias.git');
+    f.env.FIXTURE_CATALOG_ERROR = catalogError;
+    const result = f.repair('--continue');
+    assert.equal(result.status, 22, result.stderr);
+    assert.match(result.stderr, /Repair the alias catalog/);
+    assert.equal(f.git(f.work, 'status', '--porcelain'), 'M  example.txt');
+    assert.equal(f.git(f.work, 'rev-parse', 'REBASE_HEAD'), f.reviewed);
+    assert.equal(existsSync(join(f.run, 'conflict-repair-publish.env')), false);
+  });
+}
+
+test('HAM_HQ_ROOT policy wins over a different deploy checkout', t => {
+  const f = conflictFixture(t);
+  assert.equal(f.repair().status, 22);
+  stageSource(f);
+  f.env.AGENT_OS_DEPLOY_CHECKOUT = join(f.dir, 'missing-deployment');
+  const result = f.repair('--continue');
+  assert.equal(result.status, 0, result.stderr);
+});
+
+test('an explicit unavailable HAM_HQ_ROOT never falls back to the deploy policy', t => {
+  const f = conflictFixture(t);
+  assert.equal(f.repair().status, 22);
+  stageSource(f);
+  const inputs = join(f.run, 'inputs.sh');
+  writeFileSync(inputs, readFileSync(inputs, 'utf8').replaceAll(f.install, join(f.dir, 'missing-policy')));
+  const result = f.repair('--continue');
+  assert.equal(result.status, 1, result.stderr);
+  assert.equal(f.git(f.work, 'status', '--porcelain'), 'M  example.txt');
+  assert.equal(f.git(f.work, 'rev-parse', 'REBASE_HEAD'), f.reviewed);
+});
+
+// Opt-in host compatibility probe. Ordinary offline runs never import host code.
+test('installed GENCONFLICT call signatures accept the conflict-resume adapter', t => {
+  const installed = process.env.HAM_CONFLICT_POLICY_CONTRACT_ROOT;
+  if (!installed || !existsSync(join(installed, 'modules/worker-pool/lib/python/cwp_dispatch/generated_conflicts.py'))) {
+    t.skip('no installed checkout selected with HAM_CONFLICT_POLICY_CONTRACT_ROOT');
+    return;
+  }
+  const python = process.env.HQ_PYTHON3 || process.env.AGENT_OS_PY || join(installed, 'runtime/python/bin/python3');
+  const result = spawnSync(python, ['-IB', '-c', `
+import inspect, runpy, sys
+from pathlib import Path
+helper = runpy.run_path(sys.argv[1])
+_, policy = helper["load_policy"](Path("/nonexistent/worker"), Path(sys.argv[2]))
+calls = {
+    "_linked_tree": ((Path("/worker"),), {}),
+    "_repository_identity": ((Path("/owner"),), {"run": None}),
+    "github_slug": (("fixture/repo",), {}),
+    "same_repository": (("fixture/repo", "fixture/alias"), {}),
+    "load_registry": ((), {}),
+    "_owned_entries": (({}, "fixture/repo"), {}),
+    "conflict_paths": ((Path("/worker"),), {"run": None}),
+    "_continue": ((Path("/worker"),), {"run": None, "env": None}),
+    "resolve_rebase": ((Path("/worker"),), {
+        "repo_root": Path("/owner"), "run": None, "trusted_root": Path(sys.argv[2]),
+        "preserve_source_conflicts": True, "repository": "fixture/repo"}),
+    "run_process_group": ((["git"],), {"cwd": Path("/worker"), "env": None, "timeout": 600}),
+    "termination_cleanup": ((), {}),
+}
+for name, (args, kwargs) in calls.items():
+    assert hasattr(policy, name), name
+    inspect.signature(getattr(policy, name)).bind(*args, **kwargs)
+assert issubclass(policy.GeneratedConflictError, Exception)
+assert issubclass(policy.CatalogError, Exception)
+print("installed GENCONFLICT signatures match")
+`, join(root, 'bin/hammer-conflict-resume.py'), installed], { encoding: 'utf8', timeout: 20_000 });
+  assert.equal(result.status, 0, result.error?.message || result.stderr);
+  assert.match(result.stdout, /installed GENCONFLICT signatures match/);
+});
+
 test('source continuation retains the rebase when the staged file still contains markers', t => {
   const f = conflictFixture(t);
   assert.equal(f.repair().status, 22);
@@ -427,7 +559,7 @@ for (const policy of ['missing', 'invalid JSON', 'unknown owner', 'unknown workt
     stageSource(f);
     if (policy === 'missing') rmSync(f.registry);
     if (policy === 'invalid JSON') writeFileSync(f.registry, '{');
-    if (policy === 'unknown owner') writeFileSync(f.registry, '{"repository":"","paths":["example.txt"]}');
+    if (policy === 'unknown owner') writeFileSync(f.registry, '{"version":1,"repository":"","files":[]}');
     if (policy === 'unknown worktree origin') f.git(f.work, 'remote', 'set-url', 'origin', f.origin);
     const resumed = f.repair('--continue');
     assert.equal(resumed.status, 1, resumed.stderr);

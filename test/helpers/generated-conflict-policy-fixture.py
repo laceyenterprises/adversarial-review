@@ -1,4 +1,11 @@
-"""Offline stand-in for the installed GENCONFLICT policy boundary."""
+"""Offline stand-in for the installed GENCONFLICT policy boundary.
+
+Models the version-1 registry's entry dictionaries and catalog-error handoffs.
+Intentionally omits full alias-catalog parsing, registry validation, generator
+trust/inputs/evidence checks, owner process custody and complete marker scanning.
+The opt-in installed-policy signature test in hamconflictsync-01.test.mjs checks
+the cross-repository call surface; this fixture tests the caller's control flow.
+"""
 
 from contextlib import nullcontext
 import json
@@ -17,6 +24,10 @@ class GeneratedConflictError(RuntimeError):
     def __init__(self, reason, message):
         super().__init__(message)
         self.reason = reason
+
+
+class CatalogError(RuntimeError):
+    pass
 
 
 def run_process_group(argv, *, cwd, env=None, timeout=30):
@@ -48,6 +59,8 @@ def github_slug(value):
 
 
 def same_repository(left, right):
+    if os.environ.get("FIXTURE_CATALOG_ERROR") == "comparison":
+        raise CatalogError("Alias catalog is unreadable")
     return left.casefold() == right.casefold()
 
 
@@ -62,17 +75,26 @@ def _repository_identity(repo_root, *, run):
 
 def load_registry():
     registry = json.loads(REGISTRY_PATH.read_text())
+    if registry["version"] != 1:
+        raise ValueError("Unsupported committed generated files registry")
     owner = registry["repository"]
     if not github_slug(owner):
         raise ValueError("Registry owner is unknown")
-    return {path: owner for path in registry["paths"]}
+    return {
+        entry["path"]: {**entry, "repository": owner} for entry in registry["files"]
+    }
 
 
 def _owned_entries(entries, repository):
+    if os.environ.get("FIXTURE_CATALOG_ERROR") == "ownership":
+        raise GeneratedConflictError(
+            "unresolved_source_conflict",
+            "Repository identity unavailable. Repair the alias catalog, then rerun.",
+        )
     return {
-        path: owner
-        for path, owner in entries.items()
-        if same_repository(owner, repository)
+        path: entry
+        for path, entry in entries.items()
+        if same_repository(entry["repository"], repository)
     }
 
 

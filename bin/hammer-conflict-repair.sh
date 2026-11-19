@@ -133,8 +133,13 @@ else
   if ham_conflict_rebasing; then
     # Merge and stage hand-written sources first, preserving both sides' intent.
     # The installed resolver owns generated outputs for its own repository.
+    HAM_CONFLICT_PYTHON="${HQ_PYTHON3:-${AGENT_OS_PY:-${AGENT_OS_DEPLOY_CHECKOUT:+$AGENT_OS_DEPLOY_CHECKOUT/runtime/python/bin/python3}}}"
+    [ -n "$HAM_CONFLICT_PYTHON" ] \
+      || ham_conflict_stop 1 'conflict-resolver-failed: configure HQ_PYTHON3, AGENT_OS_PY or the deploy runtime Python (>= 3.11)'
+    ham_conflict_policy_args=()
+    [ -z "${HAM_HQ_ROOT:-}" ] || ham_conflict_policy_args=(--trusted-root "$HAM_HQ_ROOT")
     ( ham_conflict_comment_char
-      "${HQ_PYTHON3:-python3}" -IB "$HAM_CONFLICT_ROOT/bin/hammer-conflict-resume.py" "$HAM_REPO" "$PWD"
+      "$HAM_CONFLICT_PYTHON" -IB "$HAM_CONFLICT_ROOT/bin/hammer-conflict-resume.py" "$HAM_REPO" "$PWD" "${ham_conflict_policy_args[@]}"
     ) || {
       [ "$?" -eq 22 ] && ham_conflict_stop 22 conflict-markers-pending
       ham_conflict_stop 1 conflict-resolver-failed

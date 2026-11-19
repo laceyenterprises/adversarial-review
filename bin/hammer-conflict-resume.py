@@ -1,5 +1,6 @@
 """Select installed generated policy or continue an explicitly staged source repair."""
 
+import argparse
 import os
 from pathlib import Path
 import shlex
@@ -12,10 +13,11 @@ import tempfile
 POLICY = Path("modules/worker-pool/lib/python/cwp_dispatch/generated_conflicts.py")
 
 
-def load_policy(worktree):
+def load_policy(worktree, trusted_root=None):
     # The helper runs with Python isolation. Resolve only from the configured
-    # deployment or this helper's installed superproject.
-    configured = os.environ.get("AGENT_OS_DEPLOY_CHECKOUT")
+    # root shared with reviewed-rebase verification, the configured deployment,
+    # or this helper's installed superproject. An explicit root never falls back.
+    configured = trusted_root or os.environ.get("AGENT_OS_DEPLOY_CHECKOUT")
     roots = [Path(configured)] if configured else Path(__file__).resolve().parents
     for root in roots:
         root = root.resolve(strict=True)
@@ -43,8 +45,8 @@ def source_pending(paths):
     return 22
 
 
-def resume(repo, worktree):
-    trusted_root, policy = load_policy(worktree.resolve(strict=True))
+def resume(repo, worktree, trusted_root=None):
+    trusted_root, policy = load_policy(worktree.resolve(strict=True), trusted_root)
 
     def run(argv, *, env=None, **kwargs):
         if argv[0] != "git" or argv[-1] not in {"--continue", "--skip"}:
@@ -69,25 +71,25 @@ def resume(repo, worktree):
             return policy.run_process_group(argv, env=env, **kwargs)
 
     with policy.termination_cleanup():
-        owning_checkout = policy._linked_tree(worktree)
-        repository = policy._repository_identity(owning_checkout, run=run)
-        if (
-            not repository
-            or not policy.github_slug(repo)
-            or not (
-                repository.casefold() == repo.casefold()
-                or policy.same_repository(repository, repo)
-            )
-        ):
-            raise ValueError(
-                "Conflict worktree repository identity is unknown or differs from the PR"
-            )
-        registry = policy.load_registry()
-        if not registry:
-            raise ValueError("Installed generated-file registry ownership is unknown")
-
-        owned = policy._owned_entries(registry, repository)
         try:
+            owning_checkout = policy._linked_tree(worktree)
+            repository = policy._repository_identity(owning_checkout, run=run)
+            if (
+                not repository
+                or not policy.github_slug(repo)
+                or not (
+                    repository.casefold() == repo.casefold()
+                    or policy.same_repository(repository, repo)
+                )
+            ):
+                raise ValueError(
+                    "Conflict worktree repository identity is unknown or differs from the PR"
+                )
+            registry = policy.load_registry()
+            if not registry:
+                raise ValueError("Installed generated-file registry ownership is unknown")
+
+            owned = policy._owned_entries(registry, repository)
             if owned:
                 policy.resolve_rebase(
                     worktree,
@@ -122,17 +124,33 @@ def resume(repo, worktree):
             }:
                 return 22
             return 1
+        except policy.CatalogError as exc:
+            print(
+                f"Repository identity unavailable: {exc}. Repair the alias catalog, "
+                "then rerun with --continue.",
+                file=sys.stderr,
+            )
+            return 22
 
 
 if __name__ == "__main__":
+    if sys.version_info < (3, 11):
+        print("Conflict continuation refused: Python >= 3.11 is required", file=sys.stderr)
+        sys.exit(1)
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("repository")
+    parser.add_argument("worktree", type=Path)
+    parser.add_argument("--trusted-root", type=Path)
+    args = parser.parse_args()
     try:
-        sys.exit(resume(sys.argv[1], Path(sys.argv[2])))
+        sys.exit(resume(args.repository, args.worktree, args.trusted_root))
     except (
         OSError,
         ValueError,
         KeyError,
         TypeError,
         ImportError,
+        AttributeError,
         RuntimeError,
         subprocess.SubprocessError,
     ) as exc:

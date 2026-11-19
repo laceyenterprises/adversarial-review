@@ -924,9 +924,26 @@ registered outputs from merged inputs with trusted-code checks. A readable
 foreign registry supplies no generators, even when a path name matches.
 The shared marker-checked Git continuation uses the staged source resolutions
 and returns exit 22 if a source conflict remains or a later commit stops on
-one. Missing or unreadable ownership refuses continuation and leaves the
-staged work in place. A completed replay runs the reviewed-head preservation
-proof and submodule sync.
+one. Alias-catalog failures during identity comparison or registry ownership
+classification also return exit 22: repair the catalog and rerun `--continue`;
+staged work stays in place. Missing or unreadable registry ownership otherwise
+refuses continuation and leaves the staged work in place.
+The continuation interpreter is selected from `HQ_PYTHON3`, then `AGENT_OS_PY`,
+then `$AGENT_OS_DEPLOY_CHECKOUT/runtime/python/bin/python3`; there is no bare
+PATH Python fallback. The helper refuses Python below 3.11 before importing
+policy. It reads policy from `--trusted-root "$HAM_HQ_ROOT"`, matching the
+reviewed-rebase verifier. Only when that argument is absent does it use
+`AGENT_OS_DEPLOY_CHECKOUT` or discover its own ancestor installation; an explicit
+unavailable root refuses continuation without falling back.
+A completed replay runs the reviewed-head preservation proof and submodule sync.
+
+The continuation currently adapts private installed GENCONFLICT functions.
+Its offline fixture models caller control flow and the version-1 registry entry
+shape, not the complete generator/custody implementation. An optional local
+compatibility probe checks the installed call signatures without changing CI:
+`HAM_CONFLICT_POLICY_CONTRACT_ROOT=<installed-agent-os> HQ_PYTHON3=<python-3.11+> node --test test/hamconflictsync-01.test.mjs`.
+Without that explicit root the host probe is skipped and tests remain offline.
+A public staged-rebase entry point remains a companion Agent OS follow-up.
 Exit 76 is the retryable `git-credential-refresh-failed`. The closer then reruns
 the close command, which publishes the commit, validates outside the lease and
 re-enters verify-head. For a hand-written JSON map,

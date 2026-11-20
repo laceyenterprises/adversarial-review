@@ -98,7 +98,9 @@ export async function selectRemediationReadRoute({ repo, reviewerModel, env = pr
 
 // Use the worker-pool's existing class/provider/pin lookup. It can prepare
 // home defaults when a pin is absent, so require the routed owner and both pins
-// before handing any configuration to the owner-aware broker client.
+// before handing any configuration to the owner-aware broker client. The shell
+// only reports the prepared values; the checks run in JS, because errexit does
+// not fire on a false \`[[ ]]\` in every bash the hosts ship.
 const READ_PUSH_CONFIG = `set -euo pipefail
 source "$1"
 _hq_token_broker_auth_enabled "$2"
@@ -106,8 +108,7 @@ _hq_prepare_token_broker_env "$2"
 prefix="$(_hq_token_broker_env_prefix "$2")"
 owner="\${prefix}_OWNER"; pin="\${prefix}_OWNER_EXPECTED_INSTALLATION_ID"
 app="\${prefix}_EXPECTED_APP_ID"; provider="\${prefix}_PROVIDER"
-[[ "\${!owner:-}" == "$HQ_GITHUB_TARGET_OWNER" && "\${!pin:-}" =~ ^[0-9]+$ && "\${!app:-}" =~ ^[0-9]+$ ]]
-printf '%s\\n' "\${!provider}" "\${!app}" "\${!pin}" "$OAUTH_BROKER_SHARED_SECRET_FILE"
+printf '%s\\n' "\${!owner:-}" "\${!provider:-}" "\${!app:-}" "\${!pin:-}" "\${OAUTH_BROKER_SHARED_SECRET_FILE:-}"
 `;
 
 export async function selectRemediationPushRoute({ repo, workerClass, requiresWorkflowPush = false,
@@ -132,8 +133,9 @@ export async function selectRemediationPushRoute({ repo, workerClass, requiresWo
     });
     config = String(stdout || '').trimEnd().split('\n');
   } catch { throw hold('owner route config unavailable'); }
-  const [provider, app, installation, secretFile] = config;
-  if (provider !== selected.provider || !/^\d+$/.test(app) || !/^\d+$/.test(installation) || !secretFile) {
+  const [routedOwner, provider, app, installation, secretFile] = config;
+  if (routedOwner !== owner || provider !== selected.provider || !/^\d+$/.test(app) || !/^\d+$/.test(installation)
+    || !secretFile) {
     throw hold('owner route config incomplete or mismatched');
   }
   let minted;

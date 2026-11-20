@@ -38,7 +38,7 @@ test('declared follow-up reader preserves legacy source-token revocation', async
   assert.equal(await tokens.select({ ...legacy, token: 'current-source-token' }), 'alternate-read-token');
 });
 
-function fixture(t, { refuse = false, ownerPin = '22' } = {}) {
+function fixture(t, { refuse = false, ownerPin = '22', routeOwner = '${HQ_GITHUB_TARGET_OWNER}' } = {}) {
   const rootDir = mkdtempSync(join(tmpdir(), 'remediation-owner-'));
   t.after(() => rmSync(rootDir, { recursive: true, force: true }));
   const env = { PATH: process.env.PATH, GH_TOKEN: 'home-default', GITHUB_TOKEN: 'home-default',
@@ -62,7 +62,7 @@ _hq_prepare_token_broker_env() {
     MERGE_AGENT_GH_TOKEN) TEST_PROVIDER=github-app-merge-agent ;;
     *) return 1 ;;
   esac
-  TEST_OWNER="\${HQ_GITHUB_TARGET_OWNER}"
+  TEST_OWNER="${routeOwner}"
   TEST_OWNER_EXPECTED_INSTALLATION_ID='${ownerPin}'
   TEST_EXPECTED_APP_ID=11
   OAUTH_BROKER_SHARED_SECRET_FILE=/nonexistent-fixture-bearer
@@ -166,6 +166,7 @@ test('Git resolves the authorization header only for the exact GitHub repository
 // digest with no permissions map) holds as missing permission evidence.
 const PUSH_HOLD_REASONS = {
   'missing-pin': 'owner route config incomplete or mismatched',
+  'home-route': 'owner route config incomplete or mismatched',
   refused: 'mint refused (HTTP 403)',
   'wrong-owner': 'owner mismatch',
   unrouted: 'unrouted (no owner echo)',
@@ -177,7 +178,8 @@ const PUSH_HOLD_REASONS = {
 
 for (const mode of ['ordinary', 'workflow', ...Object.keys(PUSH_HOLD_REASONS)]) {
   test(`publication preserves the exact ${mode} capability and lease`, async t => {
-    const { rootDir, env, tokens } = fixture(t, { ownerPin: mode === 'missing-pin' ? '' : '22' });
+    const { rootDir, env, tokens } = fixture(t, { ownerPin: mode === 'missing-pin' ? '' : '22',
+      ...(mode === 'home-route' && { routeOwner: 'home-org' }) });
     const workflow = ['workflow', 'no-workflows'].includes(mode);
     const provider = workflow ? 'github-app-merge-agent' : 'github-app-codex-agent';
     const pushes = [], brokerRequests = [];
@@ -224,7 +226,7 @@ for (const mode of ['ordinary', 'workflow', ...Object.keys(PUSH_HOLD_REASONS)]) 
       assert.doesNotMatch(JSON.stringify({ message: error.message, reason: error.reason }), /alternate-publisher|fake-bearer/);
       assert.equal(pushes.length, 0);
     }
-    assert.deepEqual(brokerRequests, mode === 'missing-pin' ? [] :
+    assert.deepEqual(brokerRequests, ['missing-pin', 'home-route'].includes(mode) ? [] :
       [`http://broker.invalid/token?provider=${provider}&owner=alternate-org`]);
   });
 }

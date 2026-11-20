@@ -813,3 +813,87 @@ test('canonical next action and health retain the reserved repair owner across s
     observations: { ...base.observations, pr: { state: 'OPEN', headSha: old, isDraft: true } } }));
   assert.equal(held.action, 'operator-hold');
 });
+
+test('final rescue: terminal invalid publication escalates without retiring or granting review', async t => {
+  const { resolveTtmOwner } = await import('../src/ttm-owner.mjs');
+  for (const reason of ['missing-launch-request-id', 'missing-worker-class',
+    'invalid-produced-head-attestation', 'head-attestation-chain-read-failed']) {
+    const f = { ...fixture(t), now: '2026-01-01T00:00:00Z' };
+    const epoch = reserveRepairEpoch(f).epoch;
+    const pages = [];
+    const { observeClosureWait } = await import('../src/ama/closure-wait.mjs');
+    const observeWait = args => observeClosureWait({ ...args, pageImpl: async () => pages.push(args) });
+    const options = { ...f, headSha: head, readImpl: async () => launchRead(epoch, 'failed'),
+      readPublisher: async () => ({ ok: false, reason }), observeWait };
+    const at = Date.parse(f.now) + 1000;
+    await reconcileRepairOwner({ ...options, now: at });
+    const held = await reconcileRepairOwner({ ...options, now: at + REPAIR_ABSENCE_ESCALATE_MS + 1 });
+    assert.equal(held.terminalAt, undefined);
+    assert.equal(held.reviewHead, null);
+    assert.equal(held.publicationHead, undefined);
+    assert.equal(resolveTtmOwner({ repairEpoch: held }).owner, 'operator', reason);
+    const { nextAction, deriveNextActionSnapshot } = await import('../src/pr-next-action.mjs');
+    const action = nextAction(deriveNextActionSnapshot({ subjectKey: `${repo}#${prNumber}`, head,
+      observedAt: new Date(at + REPAIR_ABSENCE_ESCALATE_MS + 1).toISOString(),
+      observations: { pr: { state: 'OPEN', headSha: head, labels: [] },
+        policy: { autonomousMergeExecutionEnabled: true }, progress: { repairEpoch: held } } }));
+    assert.equal(action.actor, 'operator');
+    assert.equal(action.reason, 'repair-publication-unproven');
+    assert.equal(pages.length, 1);
+    assert.equal(pages[0].waitClass, 'repair-publication-unproven');
+    await reconcileRepairOwner({ ...options, now: at + REPAIR_ABSENCE_ESCALATE_MS + 32_000 });
+    assert.equal(pages.length, 1, 'operator page must be durable and deduplicated');
+  }
+});
+
+test('final rescue: live negative publisher cache expires and invalidates on owner or head changes', async t => {
+  const f = { ...fixture(t), now: '2026-01-01T00:00:00Z' };
+  const epoch = reserveRepairEpoch(f).epoch;
+  let ownerState = 'running', reads = 0, publisherReads = 0;
+  const options = { ...f, headSha: head,
+    readImpl: async () => { reads++; return launchRead(epoch, ownerState); },
+    readPublisher: async () => { publisherReads++; return { ok: false, reason: 'missing-produced-head-attestation' }; } };
+  const at = Date.parse(f.now) + 1000;
+  await reconcileRepairOwner({ ...options, now: at });
+  await reconcileRepairOwner({ ...options, now: at + 31_000 });
+  assert.equal(reads, 4, 'dispatch ownership must remain freshly observed');
+  assert.equal(publisherReads, 1, 'same live missing publisher should be cached');
+  await reconcileRepairOwner({ ...options, now: at + 121_000 });
+  assert.equal(publisherReads, 2, 'a negative result cannot hide later publication forever');
+  await reconcileRepairOwner({ ...options, headSha: later, now: at + 152_000 });
+  assert.equal(publisherReads, 3, 'new head invalidates the cache');
+  ownerState = 'failed';
+  assert.equal(await reconcileRepairOwner({ ...options, headSha: later, now: at + 183_000 }), null);
+  assert.equal(publisherReads, 4, 'terminal owner must force a fresh publisher read');
+});
+
+test('final rescue: timestamp-only successor interleavings preserve identity fences', async t => {
+  let admitted = 0;
+  for (let trial = 0; trial < 20; trial++) {
+    const f = fixture(t);
+    reserveRepairEpoch(f);
+    const file = hammerRetryCapFilePath(f.rootDir, f);
+    const data = JSON.parse(readFileSync(file, 'utf8'));
+    Object.assign(data.repairEpochs[0], { ownerLaunch: 'fixture-launch', ownerState: 'terminal',
+      ownerObservedAt: '2026-01-01T00:00:00Z' });
+    writeFileSync(file, JSON.stringify(data));
+    const snapshot = pendingRepairEpoch(f.rootDir, f);
+    data.repairEpochs[0].ownerObservedAt = '2026-01-01T00:01:00Z';
+    writeFileSync(file, JSON.stringify(data));
+    const successor = reserveRepairEpoch({ ...f, ownerKey: 'next', ownerSnapshot: snapshot,
+      terminalOwner: { ...snapshot, ownerState: 'terminal', ownerLaunch: 'fixture-launch' } });
+    admitted += successor.ok === true;
+  }
+  assert.equal(admitted, 20, 'all 20 timestamp-only interleavings must admit the proven successor');
+  for (const change of [{ ownerLaunch: 'another-launch' }, { publicationHead: head },
+    { ownerState: 'live' }]) {
+    const f = fixture(t), snapshot = reserveRepairEpoch(f).epoch;
+    const file = hammerRetryCapFilePath(f.rootDir, f);
+    const data = JSON.parse(readFileSync(file, 'utf8'));
+    Object.assign(data.repairEpochs[0], change);
+    writeFileSync(file, JSON.stringify(data));
+    const successor = reserveRepairEpoch({ ...f, ownerKey: 'next', ownerSnapshot: snapshot,
+      terminalOwner: { ...snapshot, ownerState: 'terminal', ownerLaunch: 'fixture-launch' } });
+    assert.equal(successor.ok, false, JSON.stringify(change));
+  }
+});

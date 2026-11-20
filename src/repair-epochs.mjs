@@ -10,12 +10,23 @@ import { readHeadAttestationChainForPr, resolveDaemonWorkerIdentityFromHeadAttes
 export const REPAIR_EPOCH_CAP = 2;
 export const REPAIR_OWNER_OBSERVE_MS = 30_000;
 export const REPAIR_ABSENCE_ESCALATE_MS = 10 * 60_000;
+const PUBLISHER_MISSING_CACHE_MS = 2 * 60_000;
 const SHA = /^[a-f0-9]{40}$/i;
 const REPO = /^[^/\s]+\/[^/\s]+$/;
 const validProject = value => typeof value === 'string' && value.length > 0
   && value.length <= 256 && !/\s/.test(value);
 const sameIdentity = (left, right) => typeof left === 'string' && typeof right === 'string'
   && left.toLowerCase() === right.toLowerCase();
+function sameReservationSnapshot(left, right) {
+  // A timestamp refresh does not change a terminal proof's reservation. Keep
+  // every identity, owner state, publication and spend field in this CAS.
+  const withoutObservationTime = epoch => {
+    const value = { ...epoch };
+    delete value.ownerObservedAt;
+    return value;
+  };
+  return isDeepStrictEqual(withoutObservationTime(left), withoutObservationTime(right));
+}
 const readRepairPublisher = ({ execFileImpl, ...args }) => resolveDaemonWorkerIdentityFromHeadAttestation({
   ...args, readHeadAttestationChainForPrImpl: options => readHeadAttestationChainForPr({
     ...options, execFileImpl, retryDelaysMs: [], timeoutMs: 8000,
@@ -81,10 +92,22 @@ export async function reconcileRepairOwner({ rootDir, repo, prNumber, headSha, n
   if (sameIdentity(epoch.publicationHead, headSha)
     || (age >= 0 && age < REPAIR_OWNER_OBSERVE_MS)) return epoch;
   const observed = await observeRepairOwner({ rootDir, repo, epoch, readImpl });
-  let publicationHead, publicationLaunch, foreignHead = false;
+  let publicationHead, publicationLaunch, publisherObservation, foreignHead = false;
   if (!atBase && typeof headSha === 'string' && SHA.test(headSha)
     && observed.ownerState !== 'unknown' && observed.retryLaunches) {
-    const publisher = await readPublisher({ rootDir, hqRoot, execFileImpl, repo, prNumber, currentHeadSha: headSha.toLowerCase() });
+    const previous = epoch.publisherObservation;
+    const samePublisher = sameIdentity(previous?.headSha, headSha)
+      && previous.ownerLaunch === observed.ownerLaunch
+      && previous.ownerState === observed.ownerState
+      && isDeepStrictEqual(previous.retryLaunches, observed.retryLaunches);
+    const cacheAge = now - Date.parse(previous?.observedAt);
+    // Ownership is always read above. Missing publication is only cached for
+    // a live unchanged owner/head/retry chain, and expires even if it stays live.
+    const cachedMissing = samePublisher && observed.ownerState === 'live'
+      && previous.reason === 'missing-produced-head-attestation'
+      && cacheAge >= 0 && cacheAge < PUBLISHER_MISSING_CACHE_MS;
+    const publisher = cachedMissing ? { ok: false, reason: previous.reason }
+      : await readPublisher({ rootDir, hqRoot, execFileImpl, repo, prNumber, currentHeadSha: headSha.toLowerCase() });
     if (publisher?.ok && sameIdentity(publisher.rowHeadSha, headSha)
       && [observed.ownerLaunch, ...observed.retryLaunches].includes(publisher.launchRequestId)) {
       publicationHead = headSha;
@@ -92,6 +115,20 @@ export async function reconcileRepairOwner({ rootDir, repo, prNumber, headSha, n
     }
     foreignHead = !publicationHead && (publisher?.ok === true
       || publisher?.reason === 'missing-produced-head-attestation');
+    if ((!publicationHead && !foreignHead) || cachedMissing
+      || observed.ownerState === 'live' && publisher?.reason === 'missing-produced-head-attestation') {
+      publisherObservation = cachedMissing ? previous : {
+        headSha: headSha.toLowerCase(), ownerLaunch: observed.ownerLaunch,
+        ownerState: observed.ownerState, retryLaunches: observed.retryLaunches,
+        reason: publisher?.reason || 'publisher-evidence-unavailable',
+        firstObservedAt: samePublisher ? previous.firstObservedAt : new Date(now).toISOString(),
+        observedAt: new Date(now).toISOString(),
+        observations: (samePublisher ? previous.observations || 0 : 0) + 1,
+      };
+      publisherObservation.operatorRequired = observed.ownerState === 'terminal'
+        && publisherObservation.observations >= 2
+        && now - Date.parse(publisherObservation.firstObservedAt) >= REPAIR_ABSENCE_ESCALATE_MS;
+    }
   }
   const reconciled = mutateRepairEpochs(rootDir, { repo, prNumber }, ledger => {
     const current = ledger.repairEpochs?.findLast(entry => !entry.reviewHead && !entry.terminalAt);
@@ -118,12 +155,20 @@ export async function reconcileRepairOwner({ rootDir, repo, prNumber, headSha, n
       current.publicationHead = publicationHead;
       current.publicationLaunch = publicationLaunch;
     }
+    if (publisherObservation) current.publisherObservation = publisherObservation;
+    else if (publicationHead || observed.ownerState === 'live') delete current.publisherObservation;
     return current;
   });
   if (reconciled?.ownerState === 'absent-unfenced') {
     await observeWait({ rootDir, repo, prNumber, headSha: `${reconciled.baseHead}:${reconciled.id}`,
       waitClass: 'repair-absent-unfenced', immediate: true, now,
       reason: `Repair reservation ${reconciled.id} has repeated dispatch absence without an enqueue fence; operator must inspect the submitter and key before releasing custody.` });
+  }
+  if (reconciled?.publisherObservation?.operatorRequired) {
+    await observeWait({ rootDir, repo, prNumber,
+      headSha: `${reconciled.publisherObservation.headSha}:${reconciled.id}`,
+      waitClass: 'repair-publication-unproven', immediate: true, now,
+      reason: `Terminal repair ${reconciled.id} has unproven publication identity; operator must inspect the attestation before releasing custody.` });
   }
   return reconciled || (includeReviewedHead ? repairEpochForHead(rootDir, { repo, prNumber }, headSha) : null);
 }
@@ -159,7 +204,7 @@ export function reserveRepairEpoch({ rootDir, repo, prNumber, headSha, ownerKey,
     const ended = terminalOwner?.ownerState === 'terminal' && terminalOwner.ownerLaunch
       && sameIdentity(headSha, terminalOwner.baseHead)
       && epochs.find(epoch => epoch.id === terminalOwner.id && epoch.ownerKey === terminalOwner.ownerKey
-        && !epoch.reviewHead && !epoch.terminalAt && isDeepStrictEqual(epoch, ownerSnapshot));
+        && !epoch.reviewHead && !epoch.terminalAt && sameReservationSnapshot(epoch, ownerSnapshot));
     if (ended) {
       ended.terminalAt = now;
       ended.terminalLaunch = terminalOwner.ownerLaunch;

@@ -27,6 +27,10 @@ export function resolveTtmOwner({ labels = [], review = {}, closers = [], holds 
       return { owner: 'operator', reason: `repair epoch ${repairEpoch.id} lacks an enqueue fence`,
         repairEpoch: repairEpoch.id };
     }
+    if (repairEpoch.publisherObservation?.operatorRequired) {
+      return { owner: 'operator', reason: `repair epoch ${repairEpoch.id} has unproven publication identity`,
+        repairEpoch: repairEpoch.id };
+    }
     return { owner: 'repair-worker', reason: `repair epoch ${repairEpoch.id}`, repairEpoch: repairEpoch.id };
   }
   const activeHold = holds.find(hold => RELEASE_CONDITIONS.has(hold.releaseCondition) && Number.isFinite(time(hold.deadline))

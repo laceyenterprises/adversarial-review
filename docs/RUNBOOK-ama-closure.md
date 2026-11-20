@@ -1014,6 +1014,24 @@ is opened. After both dispatch and review-service versions load, the runtime
 owner must retain an original-branch merge receipt and a 24-hour observation
 without replacement PRs used to escape budgets.
 
+A terminal owner at a moved head whose publication remains invalid or lacks
+launch/class identity retains the safety fence. After two observations and ten
+minutes from the first matching terminal publication observation,
+`publisherObservation.operatorRequired` projects operator custody in next-action
+and TTM and sends a deduplicated `repair-publication-unproven` SEV1 page. The
+observation records head, owner launch, owner state, retry launches, reason,
+first/last observation times and count. An invalid attestation is never treated
+as verified foreign publication or granted review admission.
+
+For a live owner, a negative missing-attestation result is cached for at most two
+minutes for the same head, owner launch/state and retry chain. Dispatch owner
+reads still run at the normal cadence; a changed identity/state/head/chain or
+expiry forces a fresh publisher read. Verified publication keeps its existing
+durable proof. Successor reservation CAS ignores only `ownerObservedAt`; owner
+identity/state, publication, review/terminal state and spend fields still fence
+concurrent changes. Watcher observation updates retain their full snapshot CAS
+so a late observation cannot overwrite a newer one.
+
 `bin/repair-in-place.mjs` rejects missing or malformed heads (anything other
 than 40 hexadecimal characters) before opening the review database or reading
 leases. Repair facts count only array-valued closer refund histories; malformed

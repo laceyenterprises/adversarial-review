@@ -420,6 +420,11 @@ function selectRow(facts, options = {}) {
         reason: 'repair-absent-unfenced', deadlineKind: null, queue: 'none',
         refs: [`repair-epoch:${progress.repairEpoch.id}`] };
     }
+    if (progress.repairEpoch.publisherObservation?.operatorRequired) {
+      return { row: 'R02-hold', action: 'operator-hold', actor: 'operator',
+        reason: 'repair-publication-unproven', deadlineKind: null, queue: 'none',
+        refs: [`repair-epoch:${progress.repairEpoch.id}`] };
+    }
     return { row: 'R03-live-owner', action: 'remediate', actor: 'remediator',
       reason: 'repair-in-place-owned', deadlineKind: 'liveDispatched', queue: 'owned',
       refs: [`repair-epoch:${progress.repairEpoch.id}`] };

@@ -6787,6 +6787,11 @@ listens for new events during the poll, with a 15-second fallback. It refreshes
 the PR head and uses the posted-review handler, which applies the existing
 review, strict-mode, ownership and launch admission checks. The regular poll
 also covers completions whose priority event could not be written.
+The atomic completion writer creates the queue directory before publication.
+Events for unmanaged repositories or absent PRs are removed without dispatch.
+Malformed JSON is moved unchanged to `data/remediation-closer-queue/dead-letter/`
+with a warning naming the file; it remains there for manual inspection and does
+not retry after restart. Filesystem errors and retryable decisions still defer.
 
 The watcher gives each coexistence step at most 45 seconds before deferring
 the caller. Work already in progress retains its attempt fence until it

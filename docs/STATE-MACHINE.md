@@ -1,3 +1,9 @@
+Remediation closer priority hints terminate without dispatch for unmanaged
+repositories or missing PRs. Malformed JSON moves unchanged to the queue's
+`dead-letter/` directory and remains excluded after restart. Filesystem and
+decision errors retain the existing retry path; review-row and closer lifecycle
+states, merge gates and smoke commands are unchanged.
+
 FINDINGSSTUCK-01 remediation retains never-launched batches across subprocess
 transport, timeout and admission failures, irrespective of claim age. Each retry
 uses the same batch/key without charging a finding attempt. Legacy ambiguous

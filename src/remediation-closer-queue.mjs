@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { mkdirSync, readdirSync, readFileSync, rmSync, watch } from 'node:fs';
+import { mkdirSync, readdirSync, readFileSync, renameSync, rmSync, watch } from 'node:fs';
 import { join } from 'node:path';
 import { writeFileAtomic } from './atomic-write.mjs';
 
@@ -28,7 +28,17 @@ export function startRemediationCloserDrain({ rootDir, decide, runBatch = run =>
       const path = join(dir, name);
       retryAt.set(name, Date.now() + RETRY_MS);
       try {
-        const event = JSON.parse(readFileSync(path, 'utf8'));
+        const contents = readFileSync(path, 'utf8');
+        let event;
+        try { event = JSON.parse(contents); }
+        catch {
+          const deadLetterDir = join(dir, 'dead-letter');
+          mkdirSync(deadLetterDir, { recursive: true });
+          renameSync(path, join(deadLetterDir, name));
+          retryAt.delete(name);
+          logger.warn?.(`[watcher] malformed remediation completion quarantined (dead-letter/${name})`);
+          return;
+        }
         const retry = event.reviewRequested ? null : await decide(event);
         if (retry === false || (Number.isFinite(retry) && retry > 0)) {
           retryAt.set(name, Date.now() + Math.max(RETRY_MS, retry || 0));

@@ -1841,11 +1841,11 @@ async function main() {
   const decideRemediationCloser = ({ repo, prNumber, headSha }) =>
     withGitHubBudgetScope({}, () => timePostedReviewStep('remediation-closer', `${repo}#${prNumber}`, console, async ({ signal }) => {
       const repoPath = canonicalRepositoryName(db, repo);
-      if (!activeRepos.includes(repoPath)) return false;
+      if (!activeRepos.includes(repoPath)) return;
       const existing = stmtGetReviewRow.get(repoPath, prNumber);
       if (existing?.review_status !== 'posted') return;
       const pr = await fetchHammerPr(repoPath, prNumber, { withChecks: false, optional: true, signal });
-      if (pr.state !== 'OPEN' || pr.isDraft || !pr.headRefOid || (headSha && headSha !== pr.headRefOid)) return;
+      if (!pr || pr.state !== 'OPEN' || pr.isDraft || !pr.headRefOid || (headSha && headSha !== pr.headRefOid)) return;
       await waitForReviewerHandoff(repoPath, prNumber);
       signal.throwIfAborted();
       const domainId = existing.domain_id || WATCHER_PRIMARY_DOMAIN_ID;

@@ -386,7 +386,8 @@ export function createHistoryReader(options = {}) {
       if (index === parts.length - 1 && entry.type === 'blob' && entry.mode === '100644') {
         const bytes = await blob(repo, entry);
         const actual = createHash('sha1').update(`blob ${bytes.length}\0`).update(bytes).digest('hex');
-        if (actual !== entry.sha) throw new Error('immutable data blob hash mismatch');
+        if (actual !== entry.sha) throw Object.assign(new Error('immutable data blob hash mismatch'),
+          { primaryChangeReadFailed: true });
         return bytes.toString('utf8');
       }
       if (entry.type !== 'tree' || entry.mode !== '040000') break;

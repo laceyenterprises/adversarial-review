@@ -5319,16 +5319,31 @@ round-trip in the assembler's wire format, which rejects duplicate keys even
 inside other values. All files used as evidence must be ordinary Git data
 files. The proof covers only that zero-width base-coordinate insertion.
 Existing line checks still evaluate every other protected unit, including
-domain edits and array entries.
+domain edits and array entries. The collector requires exactly one refused
+single-line insertion candidate in the catalog. If two or more such candidates
+remain, it attempts no catalog field proof; the ordinary preservation and
+authorization checks apply to all of them.
 
 Daemon and hammer collection use their authenticated history reader to walk the
 immutable Git trees and verify the blob hashes. A head can therefore be proved
 even when an external publisher's objects have yet to reach the worker clone.
-Diagnostics that explicitly pass `localRepository` read the equivalent
-immutable objects from that local clone. The proof is bounded, binds the
-protected head, final head and merge base, and is recomputed outside the history
-cache. No generator executes for this proof. If the move cannot be proved, the
-existing preservation and finding authorization checks still determine the result.
+Diagnostics use that same reader; there is no separate local-clone reader.
+The proof binds the protected head, final head and merge base, and is recomputed
+outside the history cache. Each qualifying evaluation can require up to 15
+non-recursive tree reads and eight blob reads before immutable reader cache reuse,
+including three complete catalogs. Blob responses are base64 encoded through
+`gh` under the history reader's `GH_LOOKUP_MAX_BUFFER` (25 MiB) output bound and
+the collector's shared read deadline. This cost can recur on each closer,
+daemon or hammer evaluation while another merge gate holds the PR.
+No generator executes for this proof.
+
+A failed proof emits one bounded `[catalog-field-move] proof skipped` warning
+with a fixed reason such as `fragment-mismatch`, `order-changed`,
+`not-identity-order` or `noncanonical-json`; it includes sanitised PR identity,
+never raw catalog content or exception text. History read, auth, transient
+transport, invalid-history and cancellation errors propagate to the shared
+history-read failure path instead of becoming a reversal refusal. Other proof
+failures retain the existing preservation and finding authorization checks.
 
 PCCSLOW-01: daemon, hammer snapshot and full-context CLI share atomic history
 records under `data/primary-change-history`, keyed by repository, PR, base SHA,

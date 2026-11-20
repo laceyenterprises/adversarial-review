@@ -21,6 +21,12 @@ a launch-ID selector, retry traversal, malformed/unbound proof, transport failur
 producer retains ownership. The producer's negative fact is point-in-time;
 existing submission/deadline rules and native fences still decide settlement.
 
+In-place repair reservations can use the paired selector when their original
+dispatch project was recorded at reservation. A repair reserves before enqueue,
+so even a canonical exact-key absence proof leaves it pending. At the base head,
+release requires a positively identified terminal launch with complete retry
+evidence. See [the repair runbook](RUNBOOK-ama-closure.md#exhausted-cycles-and-new-builder-heads-exhaustedheadowner-01).
+
 Public SDK 0.8.0, 0.9.0 and 0.10.0 transports forward the JSON envelope unchanged.
 `readDispatchLookupResult` still validates the base envelope; the consumer
 validates this additive optional evidence. No SDK source, types, dependency,

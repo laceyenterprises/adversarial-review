@@ -5637,10 +5637,11 @@ test('LABELREARM-01: discovery arms a fresh exact-head review from an operator-g
   });
 });
 
-for (const uppercase of [false, true]) test(`pending second repair epoch retains custody over a prior epoch reviewed head (mixed-case: ${uppercase})`, () => {
+for (const mode of ['pending', 'pending-uppercase', 'foreign', 'publication']) test(`repair watcher custody at prior reviewed head: ${mode}`, () => {
+  const uppercase = mode === 'pending-uppercase' || mode === 'publication';
   const tmp = mkdtempSync(path.join(tmpdir(), 'watcher-second-repair-'));
   try {
-    const head = 'b'.repeat(40), rootDir = path.join(tmp, 'repair-root');
+    const head = 'b'.repeat(40), subjectHead = ['foreign', 'publication'].includes(mode) ? 'c'.repeat(40) : head, rootDir = path.join(tmp, 'repair-root');
     const repairUrl = fileUrl('src', 'repair-epochs.mjs');
     const loaderPath = path.join(tmp, 'loader.mjs');
     const registerPath = path.join(tmp, 'register.mjs');
@@ -5653,13 +5654,21 @@ for (const uppercase of [false, true]) test(`pending second repair epoch retains
       }
       export function reconcileRepairOwner(args) {
         return actual.reconcileRepairOwner({ ...args, rootDir: ${JSON.stringify(rootDir)},
-          readImpl: async () => ({ ok: false }) });
+          readImpl: async () => ${['foreign', 'publication'].includes(mode) ? `({ ok: true, roots: ['repair-launch'], rows: [{ launch_request_id: 'repair-launch',
+            idempotency_key: 'second', identity_ambiguous: false, target_repo: args.repo,
+            head_sha: '${head}', status: 'failed' }], retryEdges: [] })` : '({ ok: false })'},
+          readPublisher: async () => ${mode === 'publication'
+            ? `({ ok: true, rowHeadSha: '${subjectHead}', launchRequestId: 'repair-launch' })`
+            : `({ ok: false, reason: 'missing-produced-head-attestation' })`} });
+      }
+      export function bindRepairHead(args) {
+        return actual.bindRepairHead({ ...args, rootDir: ${JSON.stringify(rootDir)} });
       }
       export function repairEpochForHead(_root, identity, head) {
         return actual.repairEpochForHead(${JSON.stringify(rootDir)}, identity, head);
       }
     `;
-    writeFileSync(loaderPath, buildLoaderSource({ subjectHeads: { 101: uppercase ? head.toUpperCase() : head } }).replace(
+    writeFileSync(loaderPath, buildLoaderSource({ subjectHeads: { 101: uppercase ? subjectHead.toUpperCase() : subjectHead } }).replace(
       '  return nextLoad(url, context);',
       `  if (url === ${JSON.stringify(repairUrl)}) {
         return { format: 'module', shortCircuit: true, source: ${JSON.stringify(wrapper)} };
@@ -5668,6 +5677,7 @@ for (const uppercase of [false, true]) test(`pending second repair epoch retains
     ));
     writeFileSync(registerPath, buildRegisterSource(loaderPath));
     writeFileSync(runnerPath, buildRunnerSource({
+      freshHeads: { 101: uppercase ? subjectHead.toUpperCase() : subjectHead },
       prePollSetup: `
         const { reserveRepairEpoch, bindRepairHead } = await import(${JSON.stringify(`${repairUrl}?actual`)});
         const identity = { rootDir: ${JSON.stringify(rootDir)},
@@ -5679,14 +5689,14 @@ for (const uppercase of [false, true]) test(`pending second repair epoch retains
         db.prepare(\`INSERT INTO reviewed_prs (repo, pr_number, reviewed_at, reviewer,
           pr_state, review_status, reviewer_head_sha, revision_ref, rereview_requested_at)
           VALUES (?, 101, ?, 'claude', 'open', 'pending', ?, ?, ?)\`).run(
-            identity.repo, new Date().toISOString(), '${head}', '${head}', new Date().toISOString());
+            identity.repo, new Date().toISOString(), '${subjectHead}', '${subjectHead}', new Date().toISOString());
       `,
       afterFirstPoll: `
         const verify = () => {
-          assert.ok(!claims.some(claim => claim.prNumber === 101), 'repair builder retains exclusive custody');
-          assert.ok(!(globalThis.__watcherClaimLoopReviewerSpawns || [])
-            .some(spawn => spawn.subjectContext?.prNumber === 101));
-          assert.equal(db.prepare('SELECT review_status FROM reviewed_prs WHERE pr_number=101').get().review_status, 'pending');
+          assert.equal(claims.some(claim => claim.prNumber === 101), ${['foreign', 'publication'].includes(mode)}, 'custody releases or admits verified publication');
+          assert.equal((globalThis.__watcherClaimLoopReviewerSpawns || [])
+            .some(spawn => spawn.subjectContext?.prNumber === 101), ${['foreign', 'publication'].includes(mode)});
+          if (${mode === 'pending' || mode === 'pending-uppercase'}) assert.equal(db.prepare('SELECT review_status FROM reviewed_prs WHERE pr_number=101').get().review_status, 'pending');
         };
         verify();
         await pollOnce(octokit, pollOptions);

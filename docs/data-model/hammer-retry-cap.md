@@ -4,8 +4,11 @@
 Each reservation records `id`, dispatch idempotency `ownerKey`, `baseHead`,
 exhaustion `cause`, `reservedAt`, `priorSpend` (series/head/lifetime counters),
 `refundedSpend` and nullable `reviewHead`. It shares the existing retry-ledger
-flock and closer intent lock with dispatch. A changed builder head binds once,
-recording `boundAt` and starting new series/head/lifetime episode counters.
+flock and closer intent lock with dispatch. When the dispatch caller supplies a
+canonical `dispatchProjectRef`, the reservation records it for its lifetime.
+An existing reservation keeps its original scope on replay. A changed builder
+head with a verified publication by the reservation launch or its retry binds
+once, recording `boundAt` and starting new series/head/lifetime episode counters.
 Confirmed `dispatchCharges` remain intact. The review-request reason
 `system-repair-epoch:<id>:<head>` records admission; request/claim CAS and the
 delivered-pass journal prevent duplicate review. Live/unknown reservations
@@ -14,15 +17,52 @@ Native follow-up custody can satisfy the reservation's queue check only through
 the existing [pre-spawn claim](follow-up-jobs.md#live-pr-owner-admission-snapshot-remediationowner-01).
 Before admission, the watcher observes a pending
 reservation at most once per 30 seconds, recording `ownerObservedAt`,
-`ownerState` (`live`, `unknown`, or `terminal`) and nullable `ownerLaunch`.
-Complete terminal launch/retry evidence retires custody with `terminalAt`
-and `terminalLaunch`. A successful exact-key absence proof can also retire
-an unlaunched reservation ten minutes after `reservedAt`. Early absence,
-unproven absence and unreadable evidence retain custody. Retirement compares
-the epoch ID/key under the ledger flock and cannot retire a bound head.
+`ownerState` (`live`, `unknown`, `absent`, `absent-unfenced`, or `terminal`)
+and nullable `ownerLaunch`. Canonical exact-key absence increments
+`absentObservations`; an unknown or positive read clears it. After two
+consecutive absence proofs and ten minutes from `reservedAt`, the watcher
+sets `absent-unfenced`, retains the reservation, projects operator-required
+custody in next-action/TTM, and sends a deduplicated SEV1 page. The operator
+must inspect the submitter and key before releasing custody.
+Complete terminal launch/retry evidence at the reservation base head retires
+custody with `terminalAt`, `terminalLaunch` and `terminalReason: owner-terminal-at-base`.
+At a moved head, a successful missing-produced-attestation or foreign-publisher
+read plus a terminal owner chain retires with `terminalReason:
+foreign-head-after-terminal`, without binding or resetting counters. Unreadable
+or invalid attestation evidence retains custody. Verified `publicationHead` and
+`publicationLaunch` persist under the same snapshot check and flock, remaining
+available across skipped admission ticks; head matching ignores case. The keyed
+row and retry root must agree with the reservation key. Explicit ambiguity or
+conflicting repository/head identity refuses ownership. Null repository and
+absent head are non-contradicting; a repository basename is accepted for the
+qualified reservation repository. A scoped keyed read
+sends the stored project and the ledger repository to the existing producer.
+Legacy reservations use the unscoped key. Point-in-time absence and unreadable
+evidence retain custody; only canonical exact-key absence counts toward
+escalation. A delayed pre-enqueue submitter can
+still launch after a point-in-time absence read. Retirement compares the full
+observed reservation under the ledger flock and cannot retire a bound head.
 Retired reservations no longer appear in next-action or TTM ownership, allowing
 the existing ownerless clock/page and bounded successor.
 The existing closure-wait store deduplicates the final cap page across heads.
+
+A terminal owner at a moved head whose publication remains invalid or lacks
+launch/class identity retains the safety fence. After two observations and ten
+minutes from the first matching terminal publication observation,
+`publisherObservation.operatorRequired` projects operator custody in next-action
+and TTM and sends a deduplicated `repair-publication-unproven` SEV1 page. The
+observation records head, owner launch, owner state, retry launches, reason,
+first/last observation times and count. An invalid attestation is never treated
+as verified foreign publication or granted review admission.
+
+For a live owner, a negative missing-attestation result is cached for at most two
+minutes for the same head, owner launch/state and retry chain. Dispatch owner
+reads still run at the normal cadence; a changed identity/state/head/chain or
+expiry forces a fresh publisher read. Verified publication keeps its existing
+durable proof. Successor reservation CAS ignores only `ownerObservedAt`; owner
+identity/state, publication, review/terminal state and spend fields still fence
+concurrent changes. Watcher observation updates retain their full snapshot CAS
+so a late observation cannot overwrite a newer one.
 
 `reviewHarnessRefunds` maps the SHA-256 identity of a failed reviewer claim to
 `{id, headSha, failure, reservedAt, nextRetryAt}`. The identity includes failed

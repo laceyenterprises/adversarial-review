@@ -1559,10 +1559,10 @@ export async function processReviewSubject(entry, ctx) {
           return;
         }
       }
-      // The reserved builder owns this unchanged head through provisioning and
-      // publication; ordinary review/remediation must not mint another owner.
+      // A reservation owns the PR through publication. On a moved head, only
+      // a publication attested by its launch or retry can start the repair review.
       if (repairEpoch && !repairEpoch.reviewHead
-        && repairEpoch.baseHead.toLowerCase() === subject.headSha?.toLowerCase()) return;
+        && (!repairEpoch.publicationHead || repairEpoch.publicationHead.toLowerCase() !== subject.headSha?.toLowerCase())) return;
       if (effectiveDomainId === CODE_PR_DOMAIN_ID && (existing?.reviewer_head_sha || repairEpoch)
         && existing?.reviewer_head_sha !== subject.headSha && !subject.terminal
         && !isExhaustedHeadVerdictRequested(existing, subject.headSha)

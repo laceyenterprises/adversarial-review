@@ -8,13 +8,16 @@
 Each terminal size failure creates `<key>.json`, where `key` is the SHA-256
 of `JSON.stringify([repo, prNumber, headSha])`. An atomic exclusive write
 reserves one PR-update identity before dispatch. `<key>.md` is the
-builder's brief, passed through the existing `hq dispatch --pr` path with
+builder's brief, passed through `hq dispatch --pr` with deferred provisioning,
 branch-push completion and push outcome. The deterministic dispatch key is
 `shrink-diff-<key>`; transport failure or a lost acknowledgement retains the
-reservation and is reported in the existing oversized-review alert. The transport
-retries transient timeout, I/O, spawn/connection, TLS and busy failures up to three
-times with 100/200 ms backoff and the same key (19 seconds per call, under one
-minute total). A receipt refusal or non-transient transport error is not retried.
+reservation and is reported in the existing oversized-review alert. Each
+attempt uses the shared load-aware `follow_up.hq_dispatch_subprocess_timeout_ms`
+budget (90 seconds before scaling by default). Fast transient transport errors
+allow up to three attempts with 100/200 ms backoff and the same key. A killed
+or budget-exhausted attempt, receipt refusal or non-transient error ends the pass.
+Subprocess errors include the exit code, signal, killed flag, elapsed milliseconds,
+and up to 2,048 characters from the end of each output stream.
 There is no later-pass automatic resubmission; exhausted uncertainty remains
 reserved for operator reconciliation.
 

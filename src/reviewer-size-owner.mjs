@@ -9,6 +9,8 @@ import { buildLegacyHqRemediationDispatchArgs } from './remediation-dispatch-mod
 import { normalizeTag } from './adapters/subject/github-pr/title-tagging.mjs';
 import { parseDispatchJsonOutput, readDispatchReceipt } from './producer-contracts/dispatch-receipt.mjs';
 import { resolveHqRoot } from './hq-root.mjs';
+import { resolveHqDispatchTimeoutMs } from './hq-dispatch-timeout.mjs';
+import { formatExecFailure } from './merge-agent-hq-exec.mjs';
 import { alertClioOversizedAgyFailure } from './reviewer-alerts.mjs';
 import { parseDiffEntries } from './reviewer-util.mjs';
 
@@ -53,19 +55,23 @@ export async function dispatchReviewerSizeUpdate({ repo, prNumber, workerClass, 
     project: 'adversarial-merge-authority',
     parentSession: env.HQ_PARENT_SESSION || 'session:unknown:reviewer-size',
   });
-  args.push('--idempotency-key', dispatchKey, '--fleet-retry-policy', 'origin-owned');
+  args.push('--defer-provision', '--idempotency-key', dispatchKey, '--fleet-retry-policy', 'origin-owned');
+  const timeout = resolveHqDispatchTimeoutMs(env);
   let response;
-  // Keep the original one-minute transport budget, including bounded backoff.
   // HQ's idempotency key reconciles an acknowledgement lost after submission.
   for (let attempt = 0; attempt < 3; attempt++) {
+    const startedAt = performance.now();
     try {
       response = await execFileImpl(env.HQ_BIN || 'hq', args,
-        { env, timeout: 19_000, maxBuffer: 5 * 1024 * 1024 });
+        { env, timeout, maxBuffer: 5 * 1024 * 1024 });
       break;
     } catch (error) {
+      const elapsedMs = performance.now() - startedAt;
       const transient = ['ETIMEDOUT', 'EIO', 'EBUSY', 'ENOENT', 'ECONNRESET', 'ECONNREFUSED', 'EAI_AGAIN'].includes(error.code)
-        || error.killed === true || /timed? ?out|TLS|SQLITE_BUSY|database is locked|socket hang up/i.test(error.message);
-      if (!transient || attempt === 2) throw error;
+        || /timed? ?out|TLS|SQLITE_BUSY|database is locked|socket hang up/i.test(error.message);
+      if (error.killed === true || elapsedMs >= timeout || !transient || attempt === 2) {
+        throw formatExecFailure('hq dispatch', error, { elapsedMs });
+      }
       await sleepImpl(100 * (attempt + 1));
     }
   }

@@ -270,8 +270,13 @@ receipt and size evidence accompany the existing oversized alert. Lost
 acknowledgements retain the reservation; new heads use ordinary review
 admission but share a two-reservation PR lifetime ceiling (legacy and unconfirmed
 records included). Exhaustion records `shrink-diff-ceiling-exhausted` and alerts.
-Transient HQ failures retry up to three times with one key within one minute;
-definite refusals return immediately and no later-pass resubmission is added.
+Shrink-diff dispatch defers workspace provisioning until after HQ admission.
+Each attempt uses the shared load-aware `follow_up.hq_dispatch_subprocess_timeout_ms`
+budget (90 seconds before scaling by default). Fast transient failures can use
+up to three attempts with one key. A killed or budget-exhausted attempt and a
+definite refusal settle immediately, with no later-pass resubmission. Subprocess
+failures record the exit code, signal, killed flag, elapsed milliseconds and
+bounded output tails in the dispatch record and watcher warning.
 Size evidence prints last with bounded, explicitly untrusted paths; HQ reads
 its dispatch stderr into head-bound result facts. Direct invocations still alert,
 and same-head claim mismatches log without changing a replacement row. Reviewer

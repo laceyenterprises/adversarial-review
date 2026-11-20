@@ -11,7 +11,8 @@
 # semantics are unchanged: the blocking merge lease is acquired for this
 # shell's pid and released by the EXIT trap on every path after acquisition;
 # protective predecessors and the CI-cost check refuse merge; the merge is
-# `--match-head-commit` on the validated head and never `--admin`.
+# `--match-head-commit` on the validated head and never `--admin`, with the
+# sanitized subject/body from bin/merge-commit-body.mjs (MERGEAGENTBODY-01).
 set -euo pipefail
 exec 0</dev/null
 
@@ -23,6 +24,7 @@ CONTROLLER_HELPER="$MERGE_CLOSE_ROOT/bin/hammer-controller.mjs"
 MERGE_LEASE_HELPER="$MERGE_CLOSE_ROOT/bin/merge-lease.mjs"
 VALIDATION_HELPER="$MERGE_CLOSE_ROOT/bin/hammer-validate.mjs"
 CI_COST_CHECKER="$MERGE_CLOSE_ROOT/bin/ci-cost-check.mjs"
+MERGE_COMMIT_BODY_HELPER="$MERGE_CLOSE_ROOT/bin/merge-commit-body.mjs"
 
 merge_close_usage() {
   echo 'usage: merge-agent-close-controller.sh --repo OWNER/REPO --base BRANCH --pr N --commands FILE' >&2
@@ -50,13 +52,14 @@ MERGE_VALIDATIONS=$("$MERGE_NODE" "$MERGE_CLOSE_ROOT/bin/close-commands.mjs" "$M
 MERGE_PR_STATE_JSON=$(mktemp "$HAM_RUN_DIR/merge-pr-state.XXXXXX")
 MERGE_LEASE_JSON="$HAM_RUN_DIR/merge-lease-acquire.json"
 MERGE_REVALIDATION_JSON=$(mktemp "$HAM_RUN_DIR/merge-revalidation.XXXXXX")
+MERGE_PR_MESSAGE_JSON=$(mktemp "$HAM_RUN_DIR/merge-pr-message.XXXXXX")
 MERGE_LEASE_ID=""
 cleanup_merge_lease() {
   status=$?
   if [ -n "${MERGE_LEASE_ID:-}" ] && [ "${HAM_CONTROLLER_CANCELLED:-0}" -eq 0 ] && "$MERGE_NODE" "$CONTROLLER_HELPER" assert-owner; then
     "$MERGE_NODE" "$MERGE_LEASE_HELPER" release --repo "$MERGE_REPO" --base "$MERGE_BASE" --pr "$MERGE_PR" --lease-id "$MERGE_LEASE_ID" || true
   fi
-  rm -f "$MERGE_REVALIDATION_JSON" "$MERGE_PR_STATE_JSON"
+  rm -f "$MERGE_REVALIDATION_JSON" "$MERGE_PR_STATE_JSON" "$MERGE_PR_MESSAGE_JSON"
   exit "$status"
 }
 trap cleanup_merge_lease EXIT
@@ -160,4 +163,34 @@ EOF_PROTECTIVE_PREDECESSORS
 fi
 
 "$MERGE_NODE" "$CI_COST_CHECKER" "$MERGE_REPO" "$MERGE_PR" "$POST_REMEDIATION_SHA"
-gh pr merge "$MERGE_PR" --repo "$MERGE_REPO" --squash --auto --match-head-commit "$POST_REMEDIATION_SHA"
+
+# MERGEAGENTBODY-01: pass an explicit sanitized subject and body, as every other
+# merge path does. Without them GitHub builds the squash message from the PR
+# body, and a closing keyword written there as a cross-link ("Fixes #N") can
+# close unrelated open work. Any read, sanitization or decode failure refuses
+# the merge through the lease-release trap; there is no unsanitized fallback.
+if ! gh pr view "$MERGE_PR" --repo "$MERGE_REPO" --json title,body > "$MERGE_PR_MESSAGE_JSON"; then
+  echo 'merge close: commit-title-read-failed; refusing merge' >&2
+  exit 75
+fi
+MERGE_PR_TITLE=$(jq -r '.title // ""' "$MERGE_PR_MESSAGE_JSON")
+if [ -z "${MERGE_PR_TITLE//[[:space:]]/}" ]; then
+  echo 'merge close: merge-title-missing; refusing merge' >&2
+  exit 75
+fi
+if ! HAM_COMMIT_BODY_JSON=$(jq -j '.body // ""' "$MERGE_PR_MESSAGE_JSON" |
+  HAM_PR_TITLE="$MERGE_PR_TITLE" HAM_AMA_TRAILERS='Closed-By: merge-agent' \
+    "$MERGE_NODE" "$MERGE_COMMIT_BODY_HELPER" "$MERGE_REPO" "$MERGE_PR" "$POST_REMEDIATION_SHA"); then
+  echo 'merge close: commit-body-sanitization-failed; refusing merge' >&2
+  exit 64
+fi
+HAM_COMMIT_SUBJECT=$(printf '%s' "$HAM_COMMIT_BODY_JSON" | jq -er '.subject | strings | select(length > 0)') || {
+  echo 'merge close: commit-subject-decode-failed; refusing merge' >&2
+  exit 64
+}
+HAM_COMMIT_BODY=$(printf '%s' "$HAM_COMMIT_BODY_JSON" | jq -er '.text | strings') || {
+  echo 'merge close: commit-body-decode-failed; refusing merge' >&2
+  exit 64
+}
+gh pr merge "$MERGE_PR" --repo "$MERGE_REPO" --squash --auto --match-head-commit "$POST_REMEDIATION_SHA" \
+  --subject "$HAM_COMMIT_SUBJECT" --body "$HAM_COMMIT_BODY"

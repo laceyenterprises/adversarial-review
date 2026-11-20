@@ -690,7 +690,8 @@ test('ham_gh, ham_git and ham_pr resolve to deployed executables with a minimal 
 // ------------------------------------------------------------ merge-agent close
 
 function mergeFixture(t, { commands, predecessors = '', ciCostExit = 0, leaseExit = 0, validateExit = 0,
-  afterController = false, movedSource = false } = {}) {
+  afterController = false, movedSource = false, prTitle = 'Synthetic change', prBody = 'Synthetic body',
+  messageReadExit = 0 } = {}) {
   const dir = scratch(t, 'hamcontrollerscript-merge-');
   const checkout = join(dir, 'checkout');
   const bin = join(dir, 'fake-bin');
@@ -719,8 +720,13 @@ case "$(basename "$path")" in
 esac
 `, { mode: 0o755 });
   writeFileSync(join(bin, 'gh'), `#!/bin/bash
-printf 'gh %s\\n' "$*" >> "$FIXTURE_LOG"
+args="$*"
+printf 'gh %s\\n' "\${args//$'\\n'/\\\\n}" >> "$FIXTURE_LOG"
+if [ "$1 $2" = 'pr merge' ]; then printf '%s\\0' "$@" > "$FIXTURE_LOG.merge-argv"; fi
 case "$*" in
+  "pr view 42 --repo fixture/repo --json title,body")
+    [ "$FIXTURE_MESSAGE_READ_EXIT" = 0 ] || exit "$FIXTURE_MESSAGE_READ_EXIT"
+    printf '%s\\n' "$FIXTURE_MESSAGE_JSON" ;;
   "pr view 42 --repo fixture/repo --json headRefName,headRefOid,body") echo '{"headRefName":"feature","headRefOid":"${source}","body":""}' ;;
   "pr view 42 --repo fixture/repo --json body --jq"*) printf '%s\\n' "$FIXTURE_PREDECESSORS" ;;
   "pr view 7 --repo fixture/repo --json state --jq"*) echo OPEN ;;
@@ -740,7 +746,9 @@ exec ${shellQuote(realGit)} "$@"
   const env = { PATH: `${bin}:/usr/bin:/bin`, HOME: dir, HAM_NODE_BIN: join(bin, 'node'), HAM_RUN_DIR: run,
     FIXTURE_LOG: log, FIXTURE_BASE: shas.reviewed, FIXTURE_PREDECESSORS: predecessors,
     FIXTURE_CI_COST_EXIT: String(ciCostExit), FIXTURE_LEASE_EXIT: String(leaseExit),
-    FIXTURE_VALIDATE_EXIT: String(validateExit), GIT_CONFIG_GLOBAL: '/dev/null' };
+    FIXTURE_VALIDATE_EXIT: String(validateExit), GIT_CONFIG_GLOBAL: '/dev/null',
+    FIXTURE_MESSAGE_JSON: JSON.stringify({ title: prTitle, body: prBody }),
+    FIXTURE_MESSAGE_READ_EXIT: String(messageReadExit) };
   let script = join(root, 'bin/merge-agent-close-controller.sh');
   if (afterController) {
     const deployedBin = join(dir, 'deployed', 'bin');
@@ -755,7 +763,9 @@ exec ${shellQuote(realGit)} "$@"
   const close = () => runDetached(script,
     ['--repo', 'fixture/repo', '--base', 'main', '--pr', '42', '--commands', join(run, 'close-commands.json')], env, checkout);
   const events = () => (existsSync(log) ? readFileSync(log, 'utf8').trim().split('\n') : []);
-  return { checkout, shas, close, events };
+  const mergeArgv = () => (existsSync(`${log}.merge-argv`)
+    ? readFileSync(`${log}.merge-argv`, 'utf8').split('\0').slice(0, -1) : null);
+  return { checkout, shas, close, events, mergeArgv, env };
 }
 
 test('the standalone publisher releases the merge lease when its local input cannot contain the PR head', async t => {
@@ -778,11 +788,55 @@ test('the shipped merge-agent controller merges only with --match-head-commit on
   assert.ok(at('hq generated-conflicts rebase') < at('validate --pytest -- tests/test_example.py'));
   assert.ok(at('validate') < at(`git push --force-with-lease=refs/heads/feature:${f.shas.head} origin ${f.shas.head}:refs/heads/feature`));
   assert.ok(at('git push') < at('ci-cost'));
-  const merge = events.find(event => event.startsWith('gh pr merge'));
-  assert.equal(merge, `gh pr merge 42 --repo fixture/repo --squash --auto --match-head-commit ${f.shas.head}`);
+  assert.deepEqual(f.mergeArgv(), ['pr', 'merge', '42', '--repo', 'fixture/repo', '--squash', '--auto',
+    '--match-head-commit', f.shas.head, '--subject', 'Synthetic change (#42)',
+    '--body', 'Synthetic body\n\nClosed-By: merge-agent']);
+  assert.ok(at('ci-cost') < at('gh pr view 42 --repo fixture/repo --json title,body'));
+  assert.ok(at('gh pr view 42 --repo fixture/repo --json title,body') < at('gh pr merge'));
   assert.ok(at('gh pr merge') < at('lease-release'));
   assert.match(events.find(event => event.startsWith('lease-release')), /--lease-id ml_fixture/);
   assert.match(events.find(event => event.startsWith('lease-acquire')), new RegExp(`--head ${f.shas.head} .*--owner-pid [1-9]`));
+});
+
+// MERGEAGENTBODY-01: the fallback controller's squash message is the shared
+// sanitizer's output, never GitHub's default built from the raw PR body.
+test('the merge-agent controller neutralizes closing keywords exactly as the hammer merge helper does', async t => {
+  const prTitle = 'Fix #9: synthetic title';
+  const prBody = 'Synthetic change.\n\nFixes #123\ncloses acme/other#5\nResolves https://github.com/fixture/repo/issues/77\nCloses #42';
+  const f = mergeFixture(t, { prTitle, prBody });
+  const result = await f.close();
+  assert.equal(result.status, 0, result.stderr);
+  const argv = f.mergeArgv();
+  assert.ok(argv, f.events().join('\n'));
+  const subject = argv[argv.indexOf('--subject') + 1];
+  const body = argv[argv.indexOf('--body') + 1];
+  // Same helper, same input, as bin/hammer-merge.sh pipes it; only the trailer differs by closer.
+  const hammer = execFileSync(process.execPath, [join(root, 'bin/merge-commit-body.mjs'), 'fixture/repo', '42', f.shas.head], {
+    input: prBody, encoding: 'utf8', env: { ...f.env, PATH: process.env.PATH, HAM_PR_TITLE: prTitle, HAM_AMA_TRAILERS: 'Closed-By: hammer' },
+  });
+  const expected = JSON.parse(hammer);
+  assert.equal(subject, expected.subject);
+  assert.equal(body, expected.text.replace(/Closed-By: hammer$/, 'Closed-By: merge-agent'));
+  assert.equal(subject, 'Fix PR #9: synthetic title (#42)');
+  assert.match(body, /^Fixes PR #123$/m);
+  assert.match(body, /^closes PR acme\/other#5$/m);
+  assert.match(body, /^Resolves PR https:\/\/github\.com\/fixture\/repo\/issues\/77$/m);
+  assert.match(body, /^Closes #42$/m, 'a reference to this PR stays a closing reference');
+  assert.doesNotMatch(body, /^Fixes #123$/m);
+  assert.ok(argv.includes('--match-head-commit') && !argv.includes('--admin'));
+});
+
+test('the merge-agent controller refuses to merge without a readable non-empty title and releases the lease', async t => {
+  for (const options of [{ prTitle: '  ' }, { messageReadExit: 1 }]) {
+    const f = mergeFixture(t, options);
+    const result = await f.close();
+    const events = f.events();
+    assert.equal(result.status, 75, `${JSON.stringify(options)}\n${result.stderr}`);
+    assert.match(result.stderr, options.prTitle ? /merge-title-missing/ : /commit-title-read-failed/);
+    assert.equal(f.mergeArgv(), null, JSON.stringify(options));
+    assert.ok(!events.some(event => event.startsWith('gh pr merge')), JSON.stringify(options));
+    assert.ok(events.some(event => event.startsWith('lease-release')), JSON.stringify(options));
+  }
 });
 
 test('the shipped merge-agent controller refuses on blockers and releases the lease on every path after acquisition', async t => {

@@ -2,6 +2,7 @@ import { readFileSync, unlinkSync } from 'node:fs';
 import { join } from 'node:path';
 import { performance } from 'node:perf_hooks';
 import { assertCanonicalOwner } from './adapters/agent-runtime/append-only-owner.mjs';
+import { buildSafePollOnce } from './watcher-poll-guard.mjs';
 import { writeFileAtomic } from './atomic-write.mjs';
 
 const DEFAULT_WATCHER_STALL_EXIT_CODE = 75;
@@ -529,3 +530,66 @@ export {
   DEFAULT_WATCHER_POLL_STARVATION_MS,
   DEFAULT_WATCHER_POLL_STARVATION_CHECKS,
 };
+
+// Own heartbeat poll bookkeeping and maintenance ordering beside the watchdog.
+export function createHeartbeatPollRunner({
+  remediationCloser, pollStarvation, watcherHeartbeat, stallWatchdog,
+  scheduleAlertDrain, readAlertSinkHealth, staleStateReaperTicker,
+  hammerScratchSweepTicker, pollOnceOptions, watcherWakeSource,
+}) {
+  // Self-scheduling loop. Awaiting safePollOnce before sleeping
+  // guarantees no two polls overlap, so the previous overlap-skip
+  // scheme is no longer needed. Cadence is fixed-rate: the next
+  // start is `lastStart + intervalMs`, and the loop sleeps only the
+  // remaining delay (clamped at zero). This preserves the operator-
+  // expected meaning of `pollIntervalMs` — a 4m poll on a 5m
+  // interval is still ~5m start-to-start, not 9m. The watchdog
+  // deadline inside safePollOnce protects against a single hung
+  // poll wedging the loop forever — on timeout, exitForPollDeadline
+  // aborts in-flight reviewer subprocesses and calls process.exit
+  // so launchd KeepAlive respawns a clean process.
+  const safePollOnce = buildSafePollOnce({ ...pollOnceOptions, deadlineMs: () => pollStarvation.deadlineMs });
+  let lastAlertSinkDegradedFingerprint = null;
+  return async function runHeartbeatPoll(source, pollOptions = undefined) {
+    const pollStartedAtMs = Date.now(); let pollResult = null;
+    pollStarvation.refresh();
+    watcherHeartbeat.markPoll({ source });
+    stallWatchdog.beginPoll();
+    try {
+      await remediationCloser.drain();
+      // Every tick sweeps the principal-owned queue, including startup recovery.
+      scheduleAlertDrain();
+      try {
+        const sinkHealth = readAlertSinkHealth();
+        const degradedFingerprint = sinkHealth.ready ? null : JSON.stringify({
+          pendingCount: sinkHealth.pendingCount,
+          inflightCount: sinkHealth.inflightCount,
+          quarantineCount: sinkHealth.quarantineCount,
+          quarantineEventCounts: sinkHealth.quarantineEventCounts,
+          deadLetterCount: sinkHealth.deadLetterCount,
+          lastFailureReason: sinkHealth.lastFailureReason,
+        });
+        if (degradedFingerprint && degradedFingerprint !== lastAlertSinkDegradedFingerprint) {
+          console.error(
+            `[watcher] alert delivery sink degraded: ${degradedFingerprint}`
+          );
+        } else if (!degradedFingerprint && lastAlertSinkDegradedFingerprint) {
+          console.log('[watcher] alert delivery sink recovered');
+        }
+        lastAlertSinkDegradedFingerprint = degradedFingerprint;
+      } catch (error) {
+        console.error(`[watcher] alert delivery sink health unavailable: ${error?.message || error}`);
+      }
+      await staleStateReaperTicker.tick();
+      watcherHeartbeat?.markPollProgress?.();
+      await hammerScratchSweepTicker.tick();
+      watcherHeartbeat?.markPollProgress?.();
+      pollResult = await safePollOnce(source, { ...(pollOptions || {}), consumeWakePayload: () => watcherWakeSource.consumeCurrent() });
+      watcherHeartbeat.markPollCompleted({ source, ok: Boolean(pollResult?.ok), timed_out: Boolean(pollResult?.timedOut), error: pollResult?.error ? String(pollResult.error?.message || pollResult.error) : null });
+      return pollResult;
+    } finally {
+      stallWatchdog.endPoll();
+      console.log(`[watcher] poll-cycle timing source="${source}" ok=${Boolean(pollResult?.ok)} timed_out=${Boolean(pollResult?.timedOut)} duration_ms=${Date.now() - pollStartedAtMs}`);
+    }
+  };
+}

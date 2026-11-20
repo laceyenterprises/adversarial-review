@@ -341,9 +341,12 @@ test('pollOnce keeps dag autowalk-on-merge retry as a single poll-level pass', (
   assert.notEqual(pollStart, -1);
   const pollSource = watcherSrc.slice(pollStart, watcherSrc.indexOf('async function main(', pollStart));
   assert.ok(
-    pollSource.includes('await runQueuedReviewAdoptionPhase({'),
+    pollSource.includes('await withWatcherClosureStatus(() => runQueuedReviewAdoptionPhase({'),
     'pollOnce should delegate the queued post-review phase once per tick'
   );
+
+  assert.equal(pollSource.match(/await withWatcherClosureStatus\(\(\) => runQueuedReviewAdoptionPhase\(\{/g)?.length, 1,
+    'the batch callback must run the close/maintenance phase once per poll');
 
   const phaseSource = sliceTopLevelFn(phaseSrc, 'async function runQueuedReviewAdoptionPhase(');
   const syncIndex = phaseSource.indexOf('await syncPRLifecycleImpl(octokit, operatorSurface, primaryDomainId);');

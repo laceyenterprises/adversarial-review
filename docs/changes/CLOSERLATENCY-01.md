@@ -38,3 +38,20 @@ and are excluded from retries, including after watcher restart.
   and follow-up job files. `npm run lint`, `npm run typecheck:contracts` and
   `bash demo/research-finding-walkthrough.sh` passed.
 - See the [SEV1 report](../postmortems/SEV1-remediation-completion-waited-for-closer-dispatch.md).
+
+## HAM CI remediation
+
+Poll bookkeeping and the poll deadline wrapper now live in the existing
+`watcher-heartbeat.mjs` owner, preserving priority drain, alert maintenance,
+stale-state reaping, scratch sweeping and discovery order on every tick.
+The watcher remains below its existing decomposition ceiling. Offline watcher
+fixtures execute the closure-status batch callback, and timeout expectations
+retain the fixed 45-second caller cap even on a busy host; nominal handler
+budgets and cadence are unchanged. Regression assertions follow the batching
+seam and the extracted heartbeat owner.
+
+Interface changes: the internal `createHeartbeatPollRunner` factory accepts
+the existing services and poll options; no external or persisted contract changes.
+
+Verification: targeted canonical HAM validation, lint, contract typecheck and
+the research-finding walkthrough are recorded in the HAM audit.

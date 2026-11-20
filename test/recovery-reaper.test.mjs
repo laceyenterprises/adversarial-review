@@ -1334,7 +1334,8 @@ function extractFunctionBody(source, signature) {
 test('watcher drives the stale-state reaper from the poll path, not only from startup', () => {
   const watcher = sourceWithoutComments('../src/watcher.mjs');
 
-  const pollBody = extractFunctionBody(watcher, 'async function runHeartbeatPoll(');
+  const pollBody = extractFunctionBody(sourceWithoutComments('../src/watcher-heartbeat.mjs'), 'async function runHeartbeatPoll(');
+  assert.match(watcher, /createHeartbeatPollRunner\(\{[\s\S]*?staleStateReaperTicker/);
   assert.match(
     pollBody,
     /staleStateReaperTicker\.tick\(/,

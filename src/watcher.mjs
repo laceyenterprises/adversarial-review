@@ -118,7 +118,6 @@ import {
   legacyLabelEventFromControlResult,
 } from './adapters/operator/github-pr-label-controls/index.mjs';
 import {
-  buildSafePollOnce,
   computeWorkloadAwarePollDeadlineMs,
   DEFAULT_POLL_DEADLINE_FLOOR_MS,
   MAX_POLL_DEADLINE_MS,
@@ -373,6 +372,7 @@ import { reconcileReviewerCommandFailedBeforeRetry } from './reviewer-command-fa
 import { shouldSkipReviewerForStaleDrift } from './stale-drift.mjs';
 import { createWatcherHealthProbe } from './health-probe.mjs';
 import {
+  createHeartbeatPollRunner,
   createWatcherHeartbeat,
   createWatcherStallWatchdog,
   resolveWatcherHeartbeatOwnerGuardRoot,
@@ -1819,24 +1819,6 @@ async function main() {
   });
   stallWatchdog.start();
 
-  // Self-scheduling loop. Awaiting safePollOnce before sleeping
-  // guarantees no two polls overlap, so the previous overlap-skip
-  // scheme is no longer needed. Cadence is fixed-rate: the next
-  // start is `lastStart + intervalMs`, and the loop sleeps only the
-  // remaining delay (clamped at zero). This preserves the operator-
-  // expected meaning of `pollIntervalMs` — a 4m poll on a 5m
-  // interval is still ~5m start-to-start, not 9m. The watchdog
-  // deadline inside safePollOnce protects against a single hung
-  // poll wedging the loop forever — on timeout, exitForPollDeadline
-  // aborts in-flight reviewer subprocesses and calls process.exit
-  // so launchd KeepAlive respawns a clean process.
-  const safePollOnce = buildSafePollOnce({
-    pollOnceImpl: pollOnce,
-    octokit,
-    errorHandler: handlePollError,
-    onTimeout: exitForPollDeadline,
-    deadlineMs: () => pollStarvation.deadlineMs,
-  });
   const watcherWakeSource = createWatcherWakeSource({ rootDir: ROOT, logger: console, consumeExistingOnStart: true });
   const decideRemediationCloser = ({ repo, prNumber, headSha }) =>
     withGitHubBudgetScope({}, () => timePostedReviewStep('remediation-closer', `${repo}#${prNumber}`, console, async ({ signal }) => {
@@ -1874,49 +1856,12 @@ async function main() {
     }, undefined, { deadlineMs: 90_000 }));
   const remediationCloser = startRemediationCloserDrain({ rootDir: ROOT, decide: decideRemediationCloser,
     runBatch: run => withGitHubAdapterReadTick(() => withWatcherClosureStatus(run)) });
-  let lastAlertSinkDegradedFingerprint = null;
-  async function runHeartbeatPoll(source, pollOptions = undefined) {
-    const pollStartedAtMs = Date.now(); let pollResult = null;
-    pollStarvation.refresh();
-    watcherHeartbeat.markPoll({ source });
-    stallWatchdog.beginPoll();
-    try {
-      await remediationCloser.drain();
-      // Every tick sweeps the principal-owned queue, including startup recovery.
-      scheduleAlertDrain();
-      try {
-        const sinkHealth = readAlertSinkHealth();
-        const degradedFingerprint = sinkHealth.ready ? null : JSON.stringify({
-          pendingCount: sinkHealth.pendingCount,
-          inflightCount: sinkHealth.inflightCount,
-          quarantineCount: sinkHealth.quarantineCount,
-          quarantineEventCounts: sinkHealth.quarantineEventCounts,
-          deadLetterCount: sinkHealth.deadLetterCount,
-          lastFailureReason: sinkHealth.lastFailureReason,
-        });
-        if (degradedFingerprint && degradedFingerprint !== lastAlertSinkDegradedFingerprint) {
-          console.error(
-            `[watcher] alert delivery sink degraded: ${degradedFingerprint}`
-          );
-        } else if (!degradedFingerprint && lastAlertSinkDegradedFingerprint) {
-          console.log('[watcher] alert delivery sink recovered');
-        }
-        lastAlertSinkDegradedFingerprint = degradedFingerprint;
-      } catch (error) {
-        console.error(`[watcher] alert delivery sink health unavailable: ${error?.message || error}`);
-      }
-      await staleStateReaperTicker.tick();
-      watcherHeartbeat?.markPollProgress?.();
-      await hammerScratchSweepTicker.tick();
-      watcherHeartbeat?.markPollProgress?.();
-      pollResult = await safePollOnce(source, { ...(pollOptions || {}), consumeWakePayload: () => watcherWakeSource.consumeCurrent() });
-      watcherHeartbeat.markPollCompleted({ source, ok: Boolean(pollResult?.ok), timed_out: Boolean(pollResult?.timedOut), error: pollResult?.error ? String(pollResult.error?.message || pollResult.error) : null });
-      return pollResult;
-    } finally {
-      stallWatchdog.endPoll();
-      console.log(`[watcher] poll-cycle timing source="${source}" ok=${Boolean(pollResult?.ok)} timed_out=${Boolean(pollResult?.timedOut)} duration_ms=${Date.now() - pollStartedAtMs}`);
-    }
-  }
+  const runHeartbeatPoll = createHeartbeatPollRunner({
+    remediationCloser, pollStarvation, watcherHeartbeat, stallWatchdog,
+    scheduleAlertDrain, readAlertSinkHealth, staleStateReaperTicker,
+    hammerScratchSweepTicker, watcherWakeSource,
+    pollOnceOptions: { pollOnceImpl: pollOnce, octokit, errorHandler: handlePollError, onTimeout: exitForPollDeadline },
+  });
 
   const { createFindingBatchTicker } = await import('./findings-batch.mjs');
   const findingBatchTicker = createFindingBatchTicker({ db, rootDir: ROOT });

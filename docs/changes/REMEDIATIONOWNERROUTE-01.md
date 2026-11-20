@@ -5,8 +5,10 @@
 Second-owner remediation publication holds now name the check that failed.
 The remediation-publication broker mint was already owner-routed. The live
 cause is that the broker does not return a token permission map, so the
-`contents:write` check cannot pass. See the
-[SEV2 report](../postmortems/SEV2-REMEDIATIONOWNERROUTE-01-second-owner-remediation-could-not-publish-2026-11-20.md).
+`contents:write` check cannot pass. The companion agent-os broker change under
+the same ticket echoes GitHub's granted `permissions` map in installation-token
+metadata, which unblocks the check without weakening it. The SEV2 report lives
+with that change.
 
 ## Interface changes
 

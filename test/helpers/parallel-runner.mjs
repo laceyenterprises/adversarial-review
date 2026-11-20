@@ -26,7 +26,11 @@ function reportFileProgress(event, phase) {
   const file = fileNames.get(event.file);
   // Only the native file events describe independent worker completion. TAP
   // for individual cases is delivered in scheduled order and can lag behind.
-  if (file && event.name === event.file) process.send?.({ file, phase });
+  // An orphan can finish its workers without progress IPC. The callback also
+  // handles a disconnect racing the connected check without an uncaught error.
+  if (file && event.name === event.file && process.connected) {
+    process.send({ file, phase }, () => {});
+  }
 }
 
 async function* phases() {

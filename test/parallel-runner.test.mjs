@@ -98,10 +98,19 @@ test('suite timeout names the unchanged 900-second cap and removes the running s
   const hook = path.join(root, 'deadline.mjs');
   writeFileSync(hook, `
     import { existsSync } from 'node:fs';
+    import { ChildProcess } from 'node:child_process';
+    const emit = ChildProcess.prototype.emit;
+    let active = false;
+    ChildProcess.prototype.emit = function (event, ...args) {
+      const result = emit.call(this, event, ...args);
+      // Observe only after the runner's message handler has recorded the file.
+      if (event === 'message' && args[0].phase === 'started') active = true;
+      return result;
+    };
     const schedule = globalThis.setTimeout;
     globalThis.setTimeout = (callback, ms, ...args) => {
       if (ms !== 900_000) return schedule(callback, ms, ...args);
-      const check = () => existsSync(${JSON.stringify(ready)}) ? callback(...args) : schedule(check, 10);
+      const check = () => active && existsSync(${JSON.stringify(ready)}) ? callback(...args) : schedule(check, 10);
       return schedule(check, 10);
     };
   `);
@@ -116,6 +125,93 @@ test('suite timeout names the unchanged 900-second cap and removes the running s
   assert.match(child.stderr, /Test suite timed out after 900 seconds/);
   assert.match(child.stderr, /0 files waiting to start\. Active test files: test\/hq-root-runner-probe\.test\.mjs\./);
   assert.equal(readdirSync(root).some((file) => file.startsWith('art-')), false);
+});
+
+test('deadline tracking removes an out-of-order completed file and counts only queued files', t => {
+  const root = mkdtempSync(path.join(tmpdir(), 'runner-completion-'));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const repo = path.dirname(import.meta.dirname);
+  mkdirSync(path.join(root, 'test', 'fixtures'), { recursive: true });
+  mkdirSync(path.join(root, 'test', 'adapters'));
+  writeFileSync(path.join(root, 'package.json'), '{"type":"module"}');
+  writeFileSync(path.join(root, 'test', 'run-tests.mjs'), readFileSync(path.join(repo, 'test/run-tests.mjs')));
+  for (const name of ['src', 'node_modules', 'test/helpers']) {
+    symlinkSync(path.join(repo, name), path.join(root, name), 'dir');
+  }
+  const held = 'test/a-held.test.mjs', finished = 'test/b-finished.test.mjs';
+  writeFileSync(path.join(root, held), `
+    import test from 'node:test';
+    test('held until the deadline', () => new Promise(resolve => setTimeout(resolve, 60_000)));
+  `);
+  writeFileSync(path.join(root, finished), "import test from 'node:test'; test('finished first', () => {});");
+  writeFileSync(path.join(root, 'test/fixtures/suite-durations.json'), '{}');
+  const hook = path.join(root, 'deadline.mjs');
+  writeFileSync(hook, `
+    import { ChildProcess } from 'node:child_process';
+    const emit = ChildProcess.prototype.emit;
+    const active = new Set(), completed = new Set();
+    ChildProcess.prototype.emit = function (event, ...args) {
+      const result = emit.call(this, event, ...args);
+      if (event === 'message') {
+        const { file, phase } = args[0];
+        if (phase === 'started') active.add(file);
+        if (phase === 'completed') { active.delete(file); completed.add(file); }
+      }
+      return result;
+    };
+    const schedule = globalThis.setTimeout;
+    globalThis.setTimeout = (callback, ms, ...args) => {
+      if (ms !== 900_000) return schedule(callback, ms, ...args);
+      const check = () => active.has(${JSON.stringify(held)}) && completed.has(${JSON.stringify(finished)})
+        ? callback(...args) : schedule(check, 10);
+      return schedule(check, 10);
+    };
+  `);
+  const env = { ...process.env, ADVERSARIAL_REVIEW_TEST_TEMP_BASE: root };
+  delete env.NODE_TEST_CONTEXT;
+  const child = spawnSync(process.execPath, ['--import', hook, path.join(root, 'test/run-tests.mjs')], {
+    cwd: root, encoding: 'utf8', env, timeout: 20_000,
+  });
+  assert.equal(child.error, undefined, child.stdout + child.stderr);
+  assert.equal(child.status, 1, child.stdout + child.stderr);
+  assert.match(child.stderr, /Test suite timed out after 900 seconds/);
+  assert.match(child.stderr, /0 files waiting to start\. Active test files: test\/a-held\.test\.mjs\./);
+  assert.doesNotMatch(child.stderr, /Active test files: [^\n]*b-finished/);
+  assert.equal(readdirSync(root).some(file => file.startsWith('art-')), false);
+});
+
+test('coordinator finishes native workers after its parent disconnects IPC', t => {
+  const root = mkdtempSync(path.join(tmpdir(), 'runner-disconnect-'));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const release = path.join(root, 'disconnected');
+  const file = 'fixture.mjs', fixture = path.join(root, file);
+  writeFileSync(fixture, `
+    import assert from 'node:assert/strict';
+    import { existsSync } from 'node:fs';
+    import { setTimeout as delay } from 'node:timers/promises';
+    for (let i = 0; i < 500 && !existsSync(${JSON.stringify(release)}); i++) await delay(10);
+    assert.ok(existsSync(${JSON.stringify(release)}), 'parent disconnected before worker completes');
+  `);
+  const config = path.join(root, 'config.json'), reportPath = path.join(root, 'report.json');
+  writeFileSync(config, JSON.stringify({ files: [file], paths: { [file]: fixture },
+    logDir: root, nodeArgs: [], parallelFiles: [file], concurrency: 1, reportPath }));
+  const launcher = path.join(root, 'launcher.mjs');
+  writeFileSync(launcher, `
+    import { fork } from 'node:child_process';
+    import { writeFileSync } from 'node:fs';
+    const child = fork(${JSON.stringify(helper)}, [${JSON.stringify(config)}], {
+      stdio: ['ignore', 'inherit', 'inherit', 'ipc'],
+    });
+    child.once('message', () => child.disconnect());
+    child.once('disconnect', () => writeFileSync(${JSON.stringify(release)}, ''));
+    child.once('close', code => { process.exitCode = code ?? 1; });
+  `);
+  const env = { ...process.env };
+  delete env.NODE_TEST_CONTEXT;
+  const child = spawnSync(process.execPath, [launcher], { env, encoding: 'utf8', timeout: 20_000 });
+  assert.equal(child.status, 0, child.stdout + child.stderr);
+  assert.doesNotMatch(child.stderr, /ERR_IPC_CHANNEL_CLOSED|Unhandled 'error'/);
+  assert.equal(JSON.parse(readFileSync(reportPath, 'utf8')).files[0].status, 0);
 });
 
 test('native scheduling overlaps files within the configured worker bound', (t) => {

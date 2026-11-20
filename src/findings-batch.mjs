@@ -78,6 +78,10 @@ export function findingBatchOptions(env = process.env) {
     maxAgeMs: findingBacklogMaxAgeMs(env),
     timeoutMs: positive('ADVERSARIAL_FINDINGS_BATCH_TIMEOUT_MS', 24 * 3600000),
     publishReceiptGraceMs: positive('ADVERSARIAL_FINDINGS_BATCH_PUBLISH_RECEIPT_GRACE_MS', 10 * 60000),
+    // Live collector submissions in flight per pass. Every claimed batch is
+    // submitted each pass; this bounds the pass's wall-clock (dispatch
+    // provisions before returning), so a slow pass cannot outrun the cadence.
+    concurrency: positive('ADVERSARIAL_FINDINGS_BATCH_CONCURRENCY', 2),
   };
 }
 
@@ -809,6 +813,7 @@ export function createFindingBatchTicker(options) {
     try {
       const resolutionOnly = now < next;
       const { completed } = await runFindingBatches({ ...options, resolutionOnly, now,
+        concurrency: options.concurrency ?? findingBatchOptions(options.env).concurrency,
         day: new Date(now).toISOString().slice(0, 10) });
       if (completed) {
         if (!resolutionOnly) next = now + (options.intervalMs ?? findingBatchOptions(options.env).intervalMs);

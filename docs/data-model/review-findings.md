@@ -438,6 +438,11 @@ The watcher claims and collects hourly by default, checking deadlines after its
 ordinary poll. `ADVERSARIAL_FINDINGS_BATCH_INTERVAL_MS` and
 `ADVERSARIAL_FINDINGS_BATCH_SIZE` configure cadence and cap (defaults 3600000
 and 100); programmatic callers can supply `intervalMs` and `batchSize`.
+`ADVERSARIAL_FINDINGS_BATCH_CONCURRENCY` (positive integer, default 2) bounds the
+live collector's concurrent `hq dispatch` submissions. Each pass submits every
+claimed batch; dispatch provisions before it returns, so this bounds the pass's
+wall-clock, not the number of batches. HQ normal-priority admission still owns
+running worker capacity, and an invalid value refuses the pass before any claim.
 There is no dedicated findings-batch slot in the shared strict CFG schema, nor a
 previous named daily key: the old cadence and cap were literals. These local
 runtime settings follow the existing pipeline-health environment convention;
@@ -640,7 +645,10 @@ unverified already-fixed PR still holds the batch. Empty finding/advisory
 manifests fail instead of completing. Advisory-only applied/declined manifests remain supported.
 
 Health also exposes finding-only `openCount`, `unbatchedCount`, `oldestOpenAt`,
-`oldestOpenAgeMs`, `perDay` (applied/dropped by UTC resolution date), and aggregated
+`oldestOpenAgeMs`, `perDay` (applied/dropped by UTC resolution date), `rates`
+(`capturedLastHour`, `resolvedLastHour`, `batchesCompletedLastHour`, and
+`netLastHour` = captured − resolved; a positive net means capture is outpacing
+the drain), and aggregated
 unresolved `batchErrors` (released batches excluded), plus the drain view
 `progress`: `open` (= `unbatched` + `batched` + `stranded`), `unbatched`, `batched`
 (in an unsettled batch with no error), `stranded` (in an unsettled batch with an

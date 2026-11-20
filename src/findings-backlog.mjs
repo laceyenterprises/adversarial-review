@@ -106,6 +106,15 @@ export function summarizeFindingBacklog(db, now = Date.now(), { maxAgeMs } = {})
       sum(outcome='applied') AS applied,sum(outcome='dropped') AS dropped
       FROM finding_backlog WHERE ${backlogScope}outcome IS NOT NULL AND resolved_at IS NOT NULL
       GROUP BY day ORDER BY day DESC`).all();
+    // Last-hour drain trend: capture above resolution means the backlog is
+    // growing even while batches complete.
+    const rates = db.prepare(`SELECT
+      (SELECT count(*) FROM finding_backlog WHERE ${backlogScope}julianday(captured_at) > julianday(@since)) AS capturedLastHour,
+      (SELECT count(*) FROM finding_backlog WHERE ${backlogScope}outcome IS NOT NULL
+        AND julianday(resolved_at) > julianday(@since)) AS resolvedLastHour,
+      (SELECT count(*) FROM finding_batches WHERE ${batchScope}julianday(completed_at) > julianday(@since)) AS batchesCompletedLastHour`)
+      .get({ since: new Date(now - 3600000).toISOString() });
+    rates.netLastHour = rates.capturedLastHour - rates.resolvedLastHour;
     const batchErrors = db.prepare(`SELECT error,count(*) AS count FROM finding_batches
       WHERE ${batchScope}completed_at IS NULL ${requeue ? 'AND released_at IS NULL' : ''} AND error IS NOT NULL GROUP BY error ORDER BY error`).all();
     // Drain progress: open = unbatched + batched + stranded. Stranded findings
@@ -134,7 +143,7 @@ export function summarizeFindingBacklog(db, now = Date.now(), { maxAgeMs } = {})
     return { available: true, areas, ...open, ...batchable, ...excluded, unbatchedCount: open.unbatchedCount || 0,
       oldestOpenAgeMs: open.oldestOpenAt ? Math.max(0, now - Date.parse(open.oldestOpenAt)) : 0,
       oldestBatchableAgeMs: batchable.oldestBatchableAt ? Math.max(0, now - Date.parse(batchable.oldestBatchableAt)) : 0,
-      perDay, batchErrors, progress, selectedBacklog };
+      perDay, rates, batchErrors, progress, selectedBacklog };
   } catch (error) { return { available: false, error: error.message, areas: null }; }
 }
 

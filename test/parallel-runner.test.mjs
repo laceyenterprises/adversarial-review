@@ -24,12 +24,19 @@ test('local parallelism uses half the available cores up to four, or an override
   assert.equal(workerCount(3, { CI: '1' }, 2), 3);
 });
 
-test('suite deadline scales with worker count without reducing the eight-worker budget', () => {
-  for (const [workers, seconds] of [[0, 7200], [1, 7200], [2, 3600], [4, 1800], [8, 900], [16, 900]]) {
-    assert.equal(suiteTimeoutMs(workers), seconds * 1000);
+test('suite deadline scales with the configured limit only when parallel files queue', () => {
+  for (const [limit, seconds] of [[1, 7200], [2, 3600], [4, 1800], [8, 900], [16, 900]]) {
+    const env = { AR_TEST_CONCURRENCY: String(limit) };
+    assert.equal(suiteTimeoutMs(100, env, 16), seconds * 1000);
+    for (const files of [0, 1, limit]) {
+      assert.equal(suiteTimeoutMs(files, env, 16), 900_000);
+    }
   }
-  assert.equal(suiteTimeoutMs(workerCount(100, {}, 16)), 1_800_000);
-  assert.equal(suiteTimeoutMs(workerCount(100, { CI: 'true' }, 16)), 900_000);
+  assert.equal(suiteTimeoutMs(100, {}, 16), 1_800_000);
+  assert.equal(suiteTimeoutMs(4, {}, 16), 900_000);
+  for (const files of [0, 1, 2, 8, 100]) {
+    assert.equal(suiteTimeoutMs(files, { CI: 'true', AR_TEST_CONCURRENCY: '1' }, 2), 900_000);
+  }
 });
 
 test('fixture commits, push and fetch skip auto-maintenance in a fresh home', t => {
@@ -140,7 +147,7 @@ for (const failure of [false, true]) test(`real parallel processes report every 
   assert.ok(report.wallMs > 0);
 });
 
-test('suite timeout names the worker-scaled cap and removes the running sandbox', (t) => {
+for (const [files, ci, seconds] of [[1, 'false', 900], [2, 'false', 7200], [1, 'true', 900], [2, 'true', 900]]) test(`suite timeout bounds ${files} files with CI=${ci} and removes the running sandbox`, (t) => {
   const root = mkdtempSync(path.join(tmpdir(), 'runner-deadline-'));
   t.after(() => rmSync(root, { recursive: true, force: true }));
   const ready = path.join(root, 'ready');
@@ -149,20 +156,21 @@ test('suite timeout names the worker-scaled cap and removes the running sandbox'
     import { existsSync } from 'node:fs';
     const schedule = globalThis.setTimeout;
     globalThis.setTimeout = (callback, ms, ...args) => {
-      if (ms !== 7_200_000) return schedule(callback, ms, ...args);
+      if (ms !== ${seconds * 1000}) return schedule(callback, ms, ...args);
       const check = () => existsSync(${JSON.stringify(ready)}) ? callback(...args) : schedule(check, 10);
       return schedule(check, 10);
     };
   `);
   const env = { ...process.env, ADVERSARIAL_REVIEW_TEST_TEMP_BASE: root,
-    HQ_ROOT_FIXTURE_HOLD: ready, HQ_ROOT_FIXTURE_FAIL: '0', CI: 'false', AR_TEST_CONCURRENCY: '1' };
+    HQ_ROOT_FIXTURE_HOLD: ready, HQ_ROOT_FIXTURE_FAIL: '0', CI: ci, AR_TEST_CONCURRENCY: '1' };
   delete env.NODE_TEST_CONTEXT;
   const child = spawnSync(process.execPath, ['--import', hook,
-    path.join(import.meta.dirname, 'run-tests.mjs'), 'hq-root-runner-probe.test.mjs'], {
+    path.join(import.meta.dirname, 'run-tests.mjs'), 'hq-root-runner-probe.test.mjs',
+    ...(files > 1 ? ['hq-root.test.mjs'] : [])], {
     encoding: 'utf8', env, timeout: 30_000,
   });
   assert.equal(child.status, 1, child.stdout + child.stderr);
-  assert.match(child.stderr, /Test suite timed out after 7200 seconds/);
+  assert.match(child.stderr, new RegExp(`Test suite timed out after ${seconds} seconds`));
   assert.equal(readdirSync(root).some((file) => file.startsWith('art-')), false);
 });
 

@@ -159,7 +159,7 @@ try {
   const files = [...serialFiles, ...parallelFiles];
   const paths = Object.fromEntries(files.map((file, index) => [file, path.join(makeWorkerRoot(index), file)]));
   const concurrency = workerCount(parallelFiles.length);
-  const deadlineMs = suiteTimeoutMs(concurrency);
+  const deadlineMs = suiteTimeoutMs(parallelFiles.length);
   const logDir = path.join(sandboxRoot, 'logs');
   mkdirSync(logDir);
   const configPath = path.join(sandboxRoot, 'parallel-config.json');

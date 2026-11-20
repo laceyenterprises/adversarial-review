@@ -296,8 +296,10 @@ directory. The runner supplies Git settings that disable automatic maintenance
 and garbage collection for fixture commits, fetches and pushes even with a fresh
 home. Push receivers own their server-side configuration. Helpers that replace
 Git command configuration own their settings and may replace this suppression. Repeated CLI fixtures use private compile caches.
-The suite deadline is `900 * 8 / max(1, min(8, workers))` seconds: 1800 seconds
-with four workers and 900 with eight. Failures name the file and return a
+The suite deadline stays at 900 seconds when the selected parallel files fit
+within the configured worker limit. Otherwise it is
+`900 * 8 / min(8, limit)` seconds: 1800 seconds with a four-worker limit and
+900 with eight. Failures name the file and return a
 nonzero status. Generic bounded validation wrappers preserve command arguments;
 `AR_TEST_CONCURRENCY` applies only to this repository’s runner.
 Set `AR_TEST_TIMINGS=/absolute/path.json` to

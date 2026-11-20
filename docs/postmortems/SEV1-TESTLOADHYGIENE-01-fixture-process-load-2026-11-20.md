@@ -60,7 +60,9 @@ Local validation now defaults to half the available logical CPUs, rounded
 down and clamped to one through four. `AR_TEST_CONCURRENCY` overrides the
 limit within this repository’s runner. Generic bounded validators preserve
 their caller’s arguments, including downstream repositories’ Node concurrency.
-The suite deadline scales as `900 * 8 / max(1, min(8, workers))` seconds.
+The suite deadline stays at 900 seconds when the selected parallel files fit
+within the configured worker limit. Otherwise it scales as
+`900 * 8 / min(8, limit)` seconds.
 Tests exercise the default, override, scaled deadline and CI's existing worker
 count. CI retains the same suite selection and scheduling. A measured local
 full-suite wall time remains unavailable; remediation runs targeted tests only.

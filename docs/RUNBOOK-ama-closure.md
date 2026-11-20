@@ -5745,8 +5745,12 @@ identifies a candidate. The verifier still reads the candidate commit's patch
 and the required reviewed and parent snapshots and checks provenance and finding
 coverage before approving a reversal. Missing or inconsistent commit pages
 remain history-read failures.
-For roots with
-directories, HAMHISTORYTHROUGHPUT-02 first requests SHA-addressed recursive trees.
+For roots with directories, HAMHISTORYTHROUGHPUT-02 first requests a recursive
+tree. For an exact input SHA, the reader uses the Git tree object's SHA from
+the nonrecursive response when available. Different commits that share a tree
+can then reuse one recursive response within the reader's existing cache scope.
+The reader still fetches and validates each commit's root independently.
+Older progress checkpoints without the tree SHA use the original request ref.
 A complete snapshot must explicitly report `truncated: false`, match the separately
 read root entries, have unique valid paths and ancestors, and reproduce every
 descendant Git tree SHA from its complete direct children (including modes).
@@ -5776,9 +5780,10 @@ tree entries, whereas the walker scales with changed subtrees. The shared closur
 cache retains at most 16 MiB across reads; several multi-megabyte snapshots can
 evict other PRs' immutable evidence during the same tick. Output overflow selects
 the walker but does not prevent the cost of the initial attempt. No new size cap
-is introduced under the v1 freeze. The validation fixture covers 53 changed paths;
-large-repository latency and cache reuse are unmeasured, so request-count savings
-are not a repository-size-independent performance guarantee.
+is introduced under the v1 freeze. The offline 205-commit, 353-path fixtures
+each save one request when two of the three roots share a tree. Live latency
+and the frequency of shared trees depend on the repository and review history.
+See [LAC-2286 measurements](changes/LAC-2286.md).
 This reduces request volume without changing the load-scaled history budget, quota policy,
 live provenance reads, reversal authorization or cancellation ownership.
 

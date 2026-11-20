@@ -980,15 +980,18 @@ test('validator timeout cancels the whole registered round without an audit', { 
 });
 
 async function checkCanonicalStops(t, modes) {
-  const results = await Promise.all(modes.map(async mode => {
+  const results = [];
+  // Exercise each real census separately so fixture load does not consume
+  // another controller's validation budget before its check has started.
+  for (const mode of modes) {
     const f = fixture(t, `
       cd "$HAM_RUN_DIR/checkout"
       export HAM_CLOSE_VALIDATION_HEAD=${head} HAM_CLOSE_VALIDATION_RECEIPT="$HAM_RUN_DIR/validation.json"
       export HAM_LOCAL_VALIDATION_CI_DEDUP=0 TMPDIR="$HAM_RUN_DIR/scratch"
-      export FIXTURE_CHECK_TIMEOUT=${mode === 'inner' ? 4 : 15}
-      "${process.execPath}" --import "$HAM_RUN_DIR/load.mjs" "${root}/bin/hammer-validate.mjs" --canonical --nominal-timeout ${mode === 'outer' ? 5 : 20} -- check.py
+      export FIXTURE_CHECK_TIMEOUT=${mode === 'inner' ? 1 : 8}
+      "${process.execPath}" --import "$HAM_RUN_DIR/load.mjs" "${root}/bin/hammer-validate.mjs" --canonical --nominal-timeout ${mode === 'outer' ? 3 : 10} -- check.py
       printf forbidden > "$HAM_RUN_DIR/audit"
-    `, { realCensus: true, timeoutMs: 30000 });
+    `, { realCensus: true, timeoutMs: 12000 });
     const checkout = join(f.dir, 'checkout');
     const ready = join(f.dir, 'check-ready');
     const validationPath = join(f.dir, 'validation.json');
@@ -1009,7 +1012,7 @@ signal.signal(signal.SIGTERM, signal.SIG_IGN)
 child_ready = Path(os.environ["HAM_RUN_DIR"]) / "descendant-ready"
 child = subprocess.Popen([sys.executable, "-c",
     "import signal,sys,time; from pathlib import Path; "
-    "signal.signal(signal.SIGTERM, signal.SIG_IGN); Path(sys.argv[1]).touch(); time.sleep(12)",
+    "signal.signal(signal.SIGTERM, signal.SIG_IGN); Path(sys.argv[1]).touch(); time.sleep(6)",
     str(child_ready)],
     stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 while not child_ready.exists() and child.poll() is None:
@@ -1020,13 +1023,13 @@ path = Path(os.environ["HAM_RUN_DIR"]) / "check-ready"
 temporary = path.with_suffix(".tmp")
 temporary.write_text(json.dumps({"pid": os.getpid(), "pgid": os.getpgrp(), "child": child.pid}))
 temporary.replace(path)
-time.sleep(12)
+time.sleep(6)
 child.wait()
 `);
     const p = f.start();
-    const check = await until(() => existsSync(ready) && JSON.parse(readFileSync(ready, 'utf8')), 20000);
+    const check = await until(() => existsSync(ready) && JSON.parse(readFileSync(ready, 'utf8')), 7000);
     if (mode === 'cancel') {
-      await until(() => readLog(readReceipt().checks[1]) === 'unfinished-diagnostic\n', 20000);
+      await until(() => readLog(readReceipt().checks[1]) === 'unfinished-diagnostic\n', 7000);
       f.cancel();
     }
     const [status] = await p.closed;
@@ -1045,9 +1048,9 @@ child.wait()
       audit: existsSync(join(f.dir, 'audit')),
     };
     // Even the unpatched fixture's escaped processes have a finite lifetime.
-    if (outcome.survivors.length) await until(() => controllerGroupSnapshot(check.pgid).length === 0, 15000);
-    return outcome;
-  }));
+    if (outcome.survivors.length) await until(() => controllerGroupSnapshot(check.pgid).length === 0, 8000);
+    results.push(outcome);
+  }
   const bad = results.filter(result => result.status !== 143
     || result.reason !== (result.mode === 'cancel' ? 'launch-ended' : 'validation-stopped')
     || !result.drained || !result.killed || !result.released
@@ -1058,10 +1061,10 @@ child.wait()
   assert.equal(bad.length, 0, JSON.stringify(bad));
 }
 
-test('concurrent canonical budget stops retain check evidence and drain the registered group', { timeout: 45000 },
+test('sequential canonical budget stops retain check evidence and drain the registered group', { timeout: 25000 },
   t => checkCanonicalStops(t, ['outer', 'outer', 'outer']));
 test('mirror check deadline and launch-status cancellation retain check evidence and drain the registered group',
-  { timeout: 45000 }, t => checkCanonicalStops(t, ['inner', 'cancel']));
+  { timeout: 15000 }, t => checkCanonicalStops(t, ['inner', 'cancel']));
 
 test('standalone canonical diagnostics are bounded and a recorded check failure stays red', t => {
   const dir = mkdtempSync(join(tmpdir(), 'ham-mirror-output-'));
@@ -1101,6 +1104,39 @@ print("passing diagnostic")
   assert.deepEqual(readdirSync(dir).filter(name => /^ham-validation-/.test(name)),
     [dirname(evidencePath).slice(dir.length + 1)]);
 });
+
+for (const callerReceipt of [false, true]) {
+  test(`own-package import failure stays red with per-check receipts (${callerReceipt ? 'closer' : 'standalone'})`, t => {
+    const dir = mkdtempSync(join(tmpdir(), 'ham-mirror-import-'));
+    t.after(() => rmSync(dir, { recursive: true, force: true }));
+    const scripts = join(dir, 'scripts/ci-mirror');
+    mkdirSync(scripts, { recursive: true });
+    mkdirSync(join(dir, 'fixture_pkg'));
+    writeFileSync(join(dir, 'fixture_pkg/__init__.py'), '');
+    writeFileSync(join(scripts, 'run-ci-mirror.py'),
+      readFileSync(join(root, 'test/fixtures/ci-mirror-budget.py'), 'utf8')
+        .replace('        Check("budget check", "exec python3 check.py wait"),\n', ''));
+    writeFileSync(join(dir, 'check.py'),
+      `raise ModuleNotFoundError("No module named 'fixture_pkg'")\n`);
+    const env = { ...process.env, TMPDIR: dir, HAM_RUN_DIR: dir, HAM_HQ_ROOT: dir,
+      HAM_LOCAL_VALIDATION_CI_DEDUP: '0' };
+    for (const key of ['HAM_CLOSE_VALIDATION_RECEIPT', 'HAM_CONTROLLER_RECORD', 'HQ_WORKER_RUN_ID']) delete env[key];
+    if (callerReceipt) env.HAM_CLOSE_VALIDATION_RECEIPT = join(dir, 'validation.json');
+    const result = spawnSync(process.execPath, [join(root, 'bin/hammer-validate.mjs'), '--canonical', '--', 'check.py'],
+      { cwd: dir, env, encoding: 'utf8', timeout: 5000 });
+    assert.ifError(result.error);
+    assert.equal(result.status, 42, result.stderr);
+    assert.doesNotMatch(result.stderr, /local-battery-skipped-github-required-gate-authoritative/);
+    const path = env.HAM_CLOSE_VALIDATION_RECEIPT || result.stderr.match(/CI mirror evidence: (.+)/)?.[1];
+    assert.ok(path, result.stderr);
+    const validation = JSON.parse(readFileSync(path, 'utf8'));
+    assert.equal(validation.status, 42);
+    assert.equal(validation.checks.length, 1);
+    assert.equal(validation.checks[0].result, 'fail');
+    assert.match(readFileSync(validation.checks[0].diagnostics[0].path, 'utf8'),
+      /ModuleNotFoundError: No module named 'fixture_pkg'/);
+  });
+}
 
 test('two successful validators confirm descendant drain and allow exact-head continuation', { timeout: 12000 }, async t => {
   const f = fixture(t, `

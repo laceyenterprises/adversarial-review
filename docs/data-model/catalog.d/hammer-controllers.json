@@ -14,7 +14,7 @@
     {
       "title": "Hammer local validation receipts",
       "path": "docs/data-model/hammer-controllers.md",
-      "store": "<HAM_RUN_DIR>/local-validation.* and <HAM_RUN_DIR>/close-result.json",
+      "store": "<HAM_RUN_DIR>/local-validation.*, adjacent *.check-*.log and <HAM_RUN_DIR>/close-result.json; standalone <HAM_RUN_DIR or system tmp>/ham-validation-evidence-*/local-validation.json and adjacent *.check-*.log",
       "schemaSurface": "bin/hammer-validate.mjs",
       "owner": "Versioned closer controller",
       "optionalFields": [

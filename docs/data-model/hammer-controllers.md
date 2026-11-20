@@ -172,6 +172,12 @@ Any HQ-level acknowledgement change belongs in a separate Agent OS follow-up.
 
 ## Local validation receipt
 
+**Source of truth:** `bin/hammer-validate.mjs` and `bin/hammer-ci-mirror-validation.py`
+**Store:** `<HAM_RUN_DIR>/local-validation.*`, adjacent
+`*.check-*.log`, and `<HAM_RUN_DIR>/close-result.json`; standalone evidence
+uses `<HAM_RUN_DIR or system tmp>/ham-validation-evidence-*/local-validation.json`
+and adjacent `*.check-*.log`.
+
 The closing controller starts a private `local-validation.*` receipt for each
 outside-lease validation attempt. It embeds the receipts from that invocation
 in `close-result.json` under `localValidation`. An empty array means the
@@ -199,3 +205,12 @@ original receipt if no `close-result.json` was written. Completed passing
 checks drop their logs. Standalone canonical mirror runs without a caller
 receipt print the path to a private evidence directory separate from their
 disposable validation scratch.
+
+Retention belongs to the caller/run-directory owner. Passing checks delete their
+command logs immediately. Failed or interrupted diagnostic files remain with
+their receipt until diagnosis is complete; after confirmed process drain and
+collection of needed incident evidence, remove the receipt/log pairs with their
+private run directory. A standalone caller removes the printed
+`ham-validation-evidence-*` directory under the same conditions. There is no
+automatic expiry or aggregate byte cap; each command can retain 4 MiB. Do not
+delete files while process drain is unconfirmed.

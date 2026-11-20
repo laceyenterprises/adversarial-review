@@ -2,6 +2,7 @@
 
 import ast
 import hashlib
+import inspect
 import json
 import locale
 import os
@@ -22,6 +23,24 @@ PROGRESS_INTERVAL = 15
 
 class CheckDeadline(BaseException):
     """Leave the battery immediately so its outer owner can drain the group."""
+
+
+def compatible_shell_runner(runner):
+    """Only replace the known combined-output, keyword-only runner contract."""
+    try:
+        parameters = list(inspect.signature(runner).parameters.values())
+    except (TypeError, ValueError):
+        return False
+    return (
+        [parameter.name for parameter in parameters]
+        == ["command", "cwd", "env", "timeout"]
+        and [parameter.kind for parameter in parameters]
+        == [inspect.Parameter.POSITIONAL_OR_KEYWORD]
+        + [inspect.Parameter.KEYWORD_ONLY] * 3
+        and all(
+            parameter.default is inspect.Parameter.empty for parameter in parameters
+        )
+    )
 
 
 def run_attached(command, *, cwd, env, timeout, capture):
@@ -174,6 +193,9 @@ def main():
             for check in checks
         ]
 
+    # Supported mirrors run checks sequentially and let CheckDeadline escape.
+    # Their runner combines stderr into stdout (CompletedProcess.stderr is None).
+    # A concurrent runner needs separate receipt context before it is supported.
     active = None
 
     def open_diagnostic(row):
@@ -297,8 +319,15 @@ def main():
     persist()
     mirror.load_manifest = load_manifest
     mirror.run_check = run_check
-    if callable(getattr(mirror, "run_shell_command", None)):
+    shell_runner = getattr(mirror, "run_shell_command", None)
+    if callable(shell_runner) and compatible_shell_runner(shell_runner):
         mirror.run_shell_command = run_shell_command
+    elif callable(shell_runner):
+        print(
+            "hammer CI mirror: unsupported shell runner signature; keeping original runner",
+            file=sys.stderr,
+            flush=True,
+        )
     try:
         return mirror.main(args)
     except CheckDeadline:

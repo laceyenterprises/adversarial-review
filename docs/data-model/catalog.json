@@ -256,6 +256,16 @@
       "owner": "versioned closer controller"
     },
     {
+      "id": "hammer-local-validation",
+      "title": "Hammer local validation receipts",
+      "path": "docs/data-model/hammer-controllers.md",
+      "store": "<HAM_RUN_DIR>/local-validation.*, adjacent *.check-*.log and <HAM_RUN_DIR>/close-result.json; standalone <HAM_RUN_DIR or system tmp>/ham-validation-evidence-*/local-validation.json and adjacent *.check-*.log",
+      "schemaSurface": "bin/hammer-validate.mjs",
+      "relatedSchemaSurfaces": ["bin/hammer-ci-mirror-validation.py"],
+      "owner": "Versioned closer controller; standalone caller",
+      "retention": "Passing command logs are deleted immediately. Caller retains failed/interrupted evidence through diagnosis and removes it only after confirmed process drain and evidence collection. No automatic expiry or aggregate cap; 4 MiB per command."
+    },
+    {
       "id": "next-action-shadow",
       "title": "Next Action Shadow Observations",
       "path": "docs/data-model/next-action-shadow.md",

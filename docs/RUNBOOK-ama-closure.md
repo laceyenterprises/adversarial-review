@@ -5750,7 +5750,13 @@ closer fault), never a skipped pass. Timeouts and uncertain cleanup retain their
 existing unknown outcomes. Once started, script failures remain real validation
 failures without retry; script exit 78 is normalized to 1 to reserve that code
 for environment faults. No registry or install operation runs in offline tests.
-A missing repository-owned Python package is an environment fault. Unavailable
+A missing repository-owned Python package can be an environment fault.
+LAC-2093 narrows that fallback for CI mirrors: an explicit mirror exit 42 or
+any per-check receipt with `result: fail` takes precedence over import-fault
+output and environment exit codes. Even a battery whose only failed check
+reports an own-package `ModuleNotFoundError` remains red (`validation-failed`);
+inspect its retained diagnostic and repair the environment before retrying.
+Without explicit failed-check evidence, unavailable
 canonical setup records `local-battery-skipped-github-required-gate-authoritative`
 and no local pass, then proceeds to fresh verify-head and the exact-head required
 GitHub checks. Genuine test failures require repair. No strict-mode, predicate,
@@ -7506,7 +7512,14 @@ head and captured current base before `ham_release_merge_lease --yield local-val
 run the registered validator, then only on success with the same local HEAD set
 `HAM_LOCALLY_VALIDATED_HEAD` and `HAM_LOCALLY_VALIDATED_BASE_SHA` to that saved pair.
 On supported Agent OS mirrors, the selected commands inherit the registered
-process group. A command deadline stops the battery and requests controller
+process group. The wrapper replaces `run_shell_command` only for the known
+`(command, *, cwd, env, timeout)` signature with no parameter defaults (annotations
+are allowed). Other signatures retain the original runner with a warning;
+attached command capture and per-command deadline handling are then unavailable.
+The supported mirror runs checks sequentially, combines stderr into stdout
+(`CompletedProcess.stderr` is `None`), and does not catch `BaseException` around
+checks. A concurrent mirror needs a separate receipt context before support.
+A command deadline stops the battery and requests controller
 cleanup, as do the outer validator deadlines. `cleanup=controller-owned`
 means the validator requested teardown. Use the matching controller
 registration and its final `drained` and `leaseCleanup` fields to confirm it.
@@ -7516,6 +7529,15 @@ diagnostics point to private files beside the receipt. They retain command
 output as it arrives, up to 4 MiB per command. A pending entry carries the
 captured prefix when the battery stopped during that command. Treat these
 files as private logs. See [receipt fields](data-model/hammer-controllers.md#local-validation-receipt).
+Retention is caller-owned: passing checks delete their command logs immediately;
+failed or interrupted logs remain with their receipt until diagnosis is complete.
+After confirmed process drain and collection of needed incident evidence, the
+run-directory owner removes those receipt/log pairs with the private run directory.
+Standalone invokers must remove the printed `ham-validation-evidence-*` directory
+under `HAM_RUN_DIR` (or the system temporary directory) after diagnosis and confirmed
+drain. There is no automatic expiry or aggregate byte cap: the 4 MiB limit is per
+command, so retained failing batteries can consume substantially more. Never
+remove evidence while cleanup is unconfirmed.
 The closer's CI-mirror deduplication is on by default. Set
 `HAM_LOCAL_VALIDATION_CI_DEDUP=0` in the closer environment to run the entire
 selected local battery without consulting GitHub for coverage. On supported

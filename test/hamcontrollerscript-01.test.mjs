@@ -691,7 +691,7 @@ test('ham_gh, ham_git and ham_pr resolve to deployed executables with a minimal 
 
 function mergeFixture(t, { commands, predecessors = '', ciCostExit = 0, leaseExit = 0, validateExit = 0,
   afterController = false, movedSource = false, prTitle = 'Synthetic change', prBody = 'Synthetic body',
-  messageReadExit = 0 } = {}) {
+  messageReadExit = 0, messageJson, sanitizerExit = 0, sanitizerOutput } = {}) {
   const dir = scratch(t, 'hamcontrollerscript-merge-');
   const checkout = join(dir, 'checkout');
   const bin = join(dir, 'fake-bin');
@@ -716,6 +716,13 @@ case "$(basename "$path")" in
     esac ;;
   hammer-validate.mjs) log "validate $*"; exit "$FIXTURE_VALIDATE_EXIT" ;;
   ci-cost-check.mjs) log "ci-cost $*"; exit "$FIXTURE_CI_COST_EXIT" ;;
+  merge-commit-body.mjs)
+    log sanitizer
+    [ "$FIXTURE_SANITIZER_EXIT" = 0 ] || exit "$FIXTURE_SANITIZER_EXIT"
+    if [ "\${FIXTURE_SANITIZER_OUTPUT+x}" = x ]; then
+      printf '%s' "$FIXTURE_SANITIZER_OUTPUT"; exit 0
+    fi
+    exec ${shellQuote(process.execPath)} "$path" "$@" ;;
   *) exec ${shellQuote(process.execPath)} "$path" "$@" ;;
 esac
 `, { mode: 0o755 });
@@ -747,8 +754,9 @@ exec ${shellQuote(realGit)} "$@"
     FIXTURE_LOG: log, FIXTURE_BASE: shas.reviewed, FIXTURE_PREDECESSORS: predecessors,
     FIXTURE_CI_COST_EXIT: String(ciCostExit), FIXTURE_LEASE_EXIT: String(leaseExit),
     FIXTURE_VALIDATE_EXIT: String(validateExit), GIT_CONFIG_GLOBAL: '/dev/null',
-    FIXTURE_MESSAGE_JSON: JSON.stringify({ title: prTitle, body: prBody }),
-    FIXTURE_MESSAGE_READ_EXIT: String(messageReadExit) };
+    FIXTURE_MESSAGE_JSON: messageJson ?? JSON.stringify({ title: prTitle, body: prBody }),
+    FIXTURE_MESSAGE_READ_EXIT: String(messageReadExit), FIXTURE_SANITIZER_EXIT: String(sanitizerExit),
+    ...(sanitizerOutput === undefined ? {} : { FIXTURE_SANITIZER_OUTPUT: sanitizerOutput }) };
   let script = join(root, 'bin/merge-agent-close-controller.sh');
   if (afterController) {
     const deployedBin = join(dir, 'deployed', 'bin');
@@ -827,7 +835,8 @@ test('the merge-agent controller neutralizes closing keywords exactly as the ham
 });
 
 test('the merge-agent controller refuses to merge without a readable non-empty title and releases the lease', async t => {
-  for (const options of [{ prTitle: '  ' }, { messageReadExit: 1 }]) {
+  for (const options of [{ prTitle: '  ' }, { messageReadExit: 1 },
+    { messageJson: 'not JSON' }, { messageJson: '{"title":42,"body":""}' }]) {
     const f = mergeFixture(t, options);
     const result = await f.close();
     const events = f.events();
@@ -835,7 +844,32 @@ test('the merge-agent controller refuses to merge without a readable non-empty t
     assert.match(result.stderr, options.prTitle ? /merge-title-missing/ : /commit-title-read-failed/);
     assert.equal(f.mergeArgv(), null, JSON.stringify(options));
     assert.ok(!events.some(event => event.startsWith('gh pr merge')), JSON.stringify(options));
-    assert.ok(events.some(event => event.startsWith('lease-release')), JSON.stringify(options));
+    assert.equal(events.filter(event => event.startsWith('lease-release')).length, 1, JSON.stringify(options));
+    assert.ok(!events.includes('sanitizer'), 'unreadable titles must stop before sanitization');
+  }
+});
+
+test('the merge-agent controller escalates sanitizer and decoder failures and releases the lease once', async t => {
+  for (const [options, reason] of [
+    [{ sanitizerExit: 1 }, 'commit-body-sanitization-failed'],
+    [{ sanitizerOutput: 'not JSON' }, 'commit-subject-decode-failed'],
+    [{ sanitizerOutput: '{"text":"body"}' }, 'commit-subject-decode-failed'],
+    [{ sanitizerOutput: '{"subject":42,"text":"body"}' }, 'commit-subject-decode-failed'],
+    [{ sanitizerOutput: '{"subject":"title"}' }, 'commit-body-decode-failed'],
+    [{ sanitizerOutput: '{"subject":"title","text":42}' }, 'commit-body-decode-failed'],
+  ]) {
+    const f = mergeFixture(t, options);
+    const result = await f.close();
+    const events = f.events();
+    assert.equal(result.status, 64, `${JSON.stringify(options)}\n${result.stderr}`);
+    assert.ok(result.stderr.includes(`merge close: ${reason}; refusing merge`), result.stderr);
+    assert.equal(f.mergeArgv(), null, JSON.stringify(options));
+    assert.ok(!events.some(event => event.startsWith('gh pr merge')), JSON.stringify(options));
+    assert.equal(events.filter(event => event === 'sanitizer').length, 1);
+    assert.equal(events.filter(event => event.startsWith('lease-acquire')).length, 1);
+    assert.equal(events.filter(event => event.startsWith('lease-release')).length, 1);
+    assert.match(events.find(event => event.startsWith('lease-release')), /--lease-id ml_fixture/);
+    assert.ok(events.indexOf('sanitizer') < events.findIndex(event => event.startsWith('lease-release')));
   }
 });
 

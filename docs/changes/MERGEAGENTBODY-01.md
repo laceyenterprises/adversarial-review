@@ -21,6 +21,9 @@ and `--auto` are unchanged, and `--admin` is still never used.
   EXIT trap: unreadable title/body or an empty title exits 75 (retry later);
   a sanitizer or JSON decode failure exits 64 (escalate). There is no fallback
   to GitHub's default message.
+- Final remediation guards title extraction: malformed PR-message JSON and
+  non-string titles follow `commit-title-read-failed` with exit 75 instead of
+  leaking jq's exit status under errexit.
 - Merge commits from this path carry `Closed-By: merge-agent`.
 - `docs/RUNBOOK-ama-closure.md` merge-message section corrected in place: the
   merge-agent controller is no longer listed as remaining scope.
@@ -33,6 +36,16 @@ and `--auto` are unchanged, and `--admin` is still never used.
   to the hammer helper's output (only the closer trailer differs), while a
   reference to the PR itself stays intact. Empty-title and failed-read cases
   refuse the merge and release the lease.
+- Final-round fixtures cover malformed PR-message JSON/non-string titles (75),
+  sanitizer failure, malformed helper JSON, missing/non-string subjects and
+  missing/non-string bodies (64). Each refusal checks its diagnostic, omits
+  `gh pr merge` and releases the acquired lease exactly once.
+- Final remediation validation: nine targeted controller/command/prompt tests
+  pass with `node --test --test-name-pattern='merge-agent|standalone publisher|refused CI cost|close commands|neither closer' test/hamcontrollerscript-01.test.mjs`.
+  `npm run lint` passes with zero errors (147 existing warnings),
+  `npm run typecheck:contracts`, ShellCheck, shell/Node syntax checks and
+  `git diff --check` pass. A broader run of this test file reached its
+  60-second bound before the selected controller cases; no full suite was run.
 - Every suite that references the controller or `merge-commit-body.mjs` (12
   files, `node --test --test-concurrency=2`): 320 tests, 316 pass. The 4
   failures (one in `lvr-no-op-outcomes`, three in `withdrawn-review-dismissal`)

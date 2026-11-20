@@ -173,7 +173,10 @@ if ! gh pr view "$MERGE_PR" --repo "$MERGE_REPO" --json title,body > "$MERGE_PR_
   echo 'merge close: commit-title-read-failed; refusing merge' >&2
   exit 75
 fi
-MERGE_PR_TITLE=$(jq -r '.title // ""' "$MERGE_PR_MESSAGE_JSON")
+if ! MERGE_PR_TITLE=$(jq -er '.title // "" | strings' "$MERGE_PR_MESSAGE_JSON" 2>/dev/null); then
+  echo 'merge close: commit-title-read-failed; refusing merge' >&2
+  exit 75
+fi
 if [ -z "${MERGE_PR_TITLE//[[:space:]]/}" ]; then
   echo 'merge close: merge-title-missing; refusing merge' >&2
   exit 75

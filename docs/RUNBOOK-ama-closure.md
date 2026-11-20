@@ -2054,6 +2054,12 @@ Sanitizer exits 64 (invalid arguments) and 78 (missing canonical trailers) also
 write a terminal audit, release the lease and return 20 without retryable abort.
 Each merge phase clears rewrite evidence before any refusal.
 
+The merge-agent fallback controller releases its lease through its EXIT trap
+on every message refusal. Failed title/body reads, malformed PR-message JSON,
+non-string titles and empty titles exit 75 (retry later). Sanitizer failures
+or invalid decoded subjects/bodies exit 64 (escalate); none falls back to
+GitHub's default merge message.
+
 Activation checklist:
 
 1. Pause hammer dispatch and drain hammers dispatched with the older prompt before

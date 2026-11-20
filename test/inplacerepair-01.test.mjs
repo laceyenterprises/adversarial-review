@@ -580,11 +580,19 @@ test('repair observation bounds cadence and retains live, early absent and unrea
   }
 });
 
-test('repeated overdue dispatch absence pages once and projects operator custody', async t => {
-  const f = { ...fixture(t), now: '2026-01-01T00:00:00Z' };
+for (const scoped of [false, true]) test(`repeated overdue ${scoped ? 'scoped' : 'legacy unscoped'} dispatch absence pages once and projects operator custody`, async t => {
+  const f = { ...fixture(t), now: '2026-01-01T00:00:00Z',
+    ...(scoped ? { dispatchProjectRef: 'fixture-project' } : {}) };
   const epoch = reserveRepairEpoch(f).epoch;
-  const readImpl = async () => ({ ok: true, roots: [], absenceProof: {
-    version: 1, kind: 'canonical-exact-selector-absence' } });
+  assert.equal(Object.hasOwn(epoch, 'dispatchProjectRef'), scoped);
+  let reads = 0;
+  const readImpl = async selector => {
+    reads++;
+    assert.deepEqual(selector, { idempotency_key: f.ownerKey,
+      ...(scoped ? { project_ref: f.dispatchProjectRef, repo } : {}) });
+    return { ok: true, roots: [], absenceProof: {
+      version: 1, kind: 'canonical-exact-selector-absence' } };
+  };
   const pages = [];
   const { observeClosureWait } = await import('../src/ama/closure-wait.mjs');
   const observeWait = args => observeClosureWait({ ...args, pageImpl: async (message, options) => {
@@ -593,17 +601,23 @@ test('repeated overdue dispatch absence pages once and projects operator custody
   const first = await reconcileRepairOwner({ ...f, now: Date.parse(f.now) + 1000, readImpl, observeWait });
   assert.equal(first.ownerState, 'absent');
   assert.equal(first.absentObservations, 1);
+  assert.equal(pages.length, 0);
   const overdue = await reconcileRepairOwner({ ...f, now: Date.parse(f.now) + REPAIR_ABSENCE_ESCALATE_MS + 1000,
     readImpl, observeWait });
   assert.equal(overdue.ownerState, 'absent-unfenced');
   assert.equal(overdue.absentObservations, 2);
   assert.equal(overdue.terminalAt, undefined);
+  assert.equal(reads, 2);
+  assert.deepEqual(pendingRepairEpoch(f.rootDir, f), overdue);
+  assert.deepEqual(readHammerRetryCapLedger(f.rootDir, f).repairEpochs, [overdue]);
   assert.equal(pages.length, 1);
   assert.equal(pages[0].args.immediate, true);
   assert.equal(pages[0].args.waitClass, 'repair-absent-unfenced');
   assert.equal(pages[0].options.severity, 'SEV1');
   await reconcileRepairOwner({ ...f, now: Date.parse(f.now) + REPAIR_ABSENCE_ESCALATE_MS + 32_000,
     readImpl, observeWait });
+  assert.equal(reads, 3);
+  assert.equal(pendingRepairEpoch(f.rootDir, f).terminalAt, undefined);
   assert.equal(pages.length, 1);
   const { nextAction, deriveNextActionSnapshot } = await import('../src/pr-next-action.mjs');
   const action = nextAction(deriveNextActionSnapshot({ subjectKey: `${repo}#${prNumber}`, head: old,

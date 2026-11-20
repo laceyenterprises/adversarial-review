@@ -208,7 +208,8 @@ for (const [kind, lookupCount, remaining, exitCode, legacy = false] of [
     if (kind === 'filtered empty') return res.end(JSON.stringify(empty));
     if (kind === 'canonical empty') return res.end(JSON.stringify({ ...empty, scope_complete: true,
       absence_proof: { version: 1, kind: 'canonical-exact-selector-absence', selector,
-        grant_id: legacy ? 'fixture-exact-entitlement' : 'project-repository-dispatch-read',
+        // The grant identifier does not authorize retirement of repair custody.
+        grant_id: 'project-repository-dispatch-read',
         observed_at: new Date().toISOString() } }));
     const row = { launch_request_id: launch, idempotency_key: ownerKey, status: 'canceled',
       target_repo: kind === 'foreign repo' ? 'other/widgets' : repo,

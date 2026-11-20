@@ -75,6 +75,10 @@ reviewer-pass reaper so its persisted review-mode decision and PR-wide budget
 are included at creation. Active queue ownership and closer leases prevent
 duplicates; operator stops and safety refusals are not automatically retried.
 
+Guarded publication auth, broker and stale-lease holds retain the exact failed
+attempt for recovery by the publication owner. See the follow-up runbook for
+source verification and the guarded recovery command. [Owner publication recovery](follow-up-runbook.md#alternate-owner-follow-up-git)
+
 Watcher discovery performs queue recovery only: it does not fetch or push
 retained workspaces under watcher credentials or await network publication.
 The next bounded worker retains the unpublished-work evidence. Recovery invoked

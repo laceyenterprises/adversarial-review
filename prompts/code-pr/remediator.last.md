@@ -147,7 +147,8 @@ recover by replaying **only your remediation patch** onto the fresh PR head:
 5. Re-run the contamination audit and the relevant validation.
 6. Retry the guarded publisher with `--expected-remote-sha <fresh-remote-sha>`;
    retain its original `--previous-head` value. A diff-guard refusal is terminal:
-   report outcome `blocked` with the refusal reason and local `commitSha` in `operationalBlockers[]` and never retry through a direct push.
+   report outcome `blocked`, copy the publisher sidecar's `blocker` into
+   `operationalBlockers[]`, and never retry through a direct push.
 
 Retry that stale-head replay at most three times. If the patch is already
 present on the fresh remote head, treat that as success and request re-review.
@@ -318,6 +319,8 @@ top-level `summary` field; do **not** put them in `addressed[]`.
   failure that is not a review-design decision). These entries do NOT
   count toward the one-entry-per-review-finding contract. Each entry
   needs `title`, `finding`, and either `reasoning` or `needsHumanInput`.
+  Omit `kind` for Git and process failures. The schema reserves `kind` for
+  `pending-ci`. For guarded publisher refusals, use the sidecar's `blocker` entry.
   Pending, queued or in-progress PR-head CI is NOT an operational blocker.
   Do not wait for PR-head CI after pushing. Once the fix is pushed, set
   `reReview.requested = true`; the watcher refuses to re-review until external

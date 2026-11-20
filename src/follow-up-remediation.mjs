@@ -22,6 +22,7 @@ import { completeLiveWorkerPublishedHead, completeKnownWorkerPublish, findWorker
 import { filterGitHubBody } from './github-outbound-body.mjs';
 import { logRoundBudgetDecision, settleInfrastructureRemediationRound, recordLocalRemediationOutcome } from './remediation-round-accounting.mjs';
 import { deferForCredentialBroker, credentialBrokerReady } from './remediation-credential-broker.mjs';
+import { isPublicationHandoffCode, matchesPublicationFailureAttempt, settlePublicationHandoff } from './remediation-publication-refusal.mjs';
 import { recordedInfrastructureReason, localWorkerErrorOutcome } from './remediation-infrastructure-refund.mjs';
 import { preserveUnsafeWorkspaceMetadata } from './workspace-identity.mjs';
 import { OWNER_AUTH_HOLD, ownerAuthHold, selectRemediationReadRoute, selectRemediationPushRoute } from './remediation-owner-auth.mjs';
@@ -1414,15 +1415,26 @@ async function reconcileFollowUpJobWithinRepositoryCycle({
   let publicationFailure = null;
   let publicationReply = null;
   let publicationWorkspace = null;
+  let publicationReplyPath = null;
+  const handoffAt = now();
+  let currentPublicationFailure = false;
   if (liveness.state !== 'active') {
     try {
       const checkedPaths = buildReconciliationPaths(rootDir, job);
       publicationFailure = JSON.parse(readFileSync(`${checkedPaths.replyPath}.publication-failure.json`, 'utf8'));
       publicationWorkspace = checkedPaths.workspaceDir;
+      publicationReplyPath = checkedPaths.replyPath;
       publicationReply = readRemediationReplyArtifact(checkedPaths.replyPath, { expectedJob: job });
-    } catch { /* No validated refusal artifact for this round. */ }
-    if (publicationFailure?.code === 'remediation-empties-pr-diff'
-      && publicationFailure.previousHead === job.revisionRef) {
+    } catch { /* The sidecar and strictly validated reply are independent evidence. */ }
+    currentPublicationFailure = matchesPublicationFailureAttempt(publicationFailure, job, worker, handoffAt);
+    const protectsCustody = currentPublicationFailure && (isPublicationHandoffCode(publicationFailure.code)
+      || publicationFailure.code === 'remediation-empties-pr-diff');
+    if (protectsCustody && liveness.state === 'exited' && isHqWorker
+      && !readDispatchStatus(liveness.dispatchStatus).terminal) {
+      return { action: 'active', reason: 'publication-handoff-worker-exit-unproven', job, jobPath };
+    }
+    if (liveness.state === 'exited' && publicationFailure?.code === 'remediation-empties-pr-diff'
+      && (currentPublicationFailure || (!publicationFailure.jobId && publicationFailure.previousHead === job.revisionRef))) {
       const failure = { code: 'remediation-empties-pr-diff',
         message: 'Remediation publication refused: the result empties the PR diff or restores every originally changed file to base. The previous remote head is retained.' };
       const { commentDelivery } = buildReconcileCommentDelivery({ job, worker, action: 'failed', failure, now });
@@ -1445,6 +1457,13 @@ async function reconcileFollowUpJobWithinRepositoryCycle({
     buildReconciliationPathsImpl: buildReconciliationPaths,
     parseHqWorkerWorkspaceFromPayloadImpl: parseHqWorkerWorkspaceFromPayload,
   });
+  if (liveness.state === 'exited' && currentPublicationFailure && isPublicationHandoffCode(publicationFailure.code)
+    && !['merged', 'closed'].includes(lifecycle?.prState)) {
+    return settlePublicationHandoff({ rootDir, job, jobPath, worker,
+      hqRoot: worker.hqRoot || (process.env.HQ_ROOT ? resolveHqRoot(process.env) : rootDir),
+      failure: publicationFailure, lifecycle, lifecycleStop, workspaceDir: publicationWorkspace, replyPath: publicationReplyPath,
+      reply: publicationReply, stoppedAt: handoffAt, execFileImpl, log });
+  }
   if (liveness.state !== 'active' && ['stale-review-head', 'stale-drift'].includes(lifecycleStop?.stopCode)) {
     const completed = completeLiveWorkerPublishedHead({ rootDir, jobPath, lifecycle, completedAt: now(),
       requestReviewRereviewImpl, requestRereviewWakeImpl, requestWatcherWakeImpl });
@@ -1551,7 +1570,7 @@ async function reconcileFollowUpJobWithinRepositoryCycle({
     };
   }
 
-  if (publicationFailure?.code === OWNER_AUTH_HOLD && publicationFailure.previousHead === job.revisionRef
+  if (!publicationFailure?.jobId && publicationFailure?.code === OWNER_AUTH_HOLD && publicationFailure.previousHead === job.revisionRef
     && liveness.state === 'exited') {
     const stoppedAt = now();
     const { capability, owner, reason, localCommit } = publicationFailure;
@@ -1572,7 +1591,7 @@ async function reconcileFollowUpJobWithinRepositoryCycle({
   const completedAt = now();
   const refund = await settleInfrastructureRemediationRound({
     rootDir, job, jobPath, worker, liveness, lifecycle, lifecycleStop, completedAt,
-    publicationFailure, publicationReply,
+    publicationFailure: publicationFailure?.jobId ? null : publicationFailure, publicationReply,
     isHqWorker, resolvePathsImpl: () => buildReconciliationPaths(rootDir, job),
     postOutcomeComment: postReconcileOutcomeCommentSafe, postCommentImpl, now, log,
   });

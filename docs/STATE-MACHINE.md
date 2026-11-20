@@ -1325,6 +1325,13 @@ An exited worker reporting a retained commit that could not publish transitions
 to `stopped` with `committed-unpublished`, retaining `unpublishedWork` and the
 workspace beyond terminal TTL. The PR comment names job/commit and the gate
 reports publication failure, without asking for an operator verdict on findings.
+LAC-2283: The guarded publisher's current-attempt sidecar preserves auth,
+broker and stale-lease refusals after worker exit. Auth or broker refusal
+stops with `remediation-owner-auth-hold`; a stale lease stops with
+`remediation-publication-stale-lease`. The job retains the exact local source
+and lease for owner recovery, with a verified bundle when available. Until
+exit is proven, the worker retains custody. A missing or invalid reply
+cannot complete the round. The hold starts no new remediation or re-review.
 REMPUBPROOF-01: structural replay proof accepts a live rebased head containing
 every worker patch. Failed current-head CI can recover that stopped job under
 the queue lock, bound to its source digest and live head. Validated final-round

@@ -1,0 +1,23 @@
+{
+  "version": 1,
+  "entries": [
+    {
+      "id": "remediation-publication-refusal",
+      "title": "Guarded Remediation Publication Refusal",
+      "path": "docs/data-model/follow-up-jobs.md",
+      "store": "<replyPath>.publication-failure.json and data/follow-up-jobs/stopped/*.json",
+      "schemaSurface": "src/remediation-publication-refusal.mjs",
+      "relatedSchemaSurfaces": [
+        "bin/remediation-publish.mjs",
+        "src/follow-up-remediation.mjs"
+      ],
+      "owner": "follow-up daemon",
+      "optionalFields": [
+        "publicationFailure: { code, localCommit, previousHead, expectedRemoteSha, refusedAt, liveHeadSha, reason, owner?, capability?, routeReason? }",
+        "unpublishedWork.expectedRemoteSha",
+        "unpublishedWork.rescue"
+      ],
+      "compatibility": "Job-bound refusals add a schema-valid blocker to the sidecar and hold the stopped job for owner recovery. Legacy sidecars retain their existing behavior. The reply validator continues to admit only pending-ci as an operational blocker kind."
+    }
+  ]
+}

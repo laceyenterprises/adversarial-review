@@ -708,12 +708,28 @@ check needs the broker's token metadata to carry a `permissions` map. A
 `permissions_digest` alone holds as `broker reported no token permissions`.
 
 A pre-spawn hold keeps the job pending with a five-minute retry delay and
-refunds the unspawned round. A publisher refusal after a worker commits keeps
-local publication evidence and stops the round with the same typed hold. Check
-the recorded `owner`, `capability`, and `reason` against the owner route. Reuse
-the retained commit through authorized publication after the capability is
-available. Treat a new worker launch, a confirmed push, and an organic
-follow-up completion as separate observations.
+refunds the unspawned round. If guarded publication fails after spawn, the
+publisher records a schema-valid `blocker` in the reply sidecar. The worker
+copies it into `operationalBlockers[]`, leaves the checkout intact, and writes
+a blocked reply with re-review disabled. `kind` is reserved for `pending-ci`.
+An exited worker's current-attempt auth refusal or broker deferral stops under
+`remediation-owner-auth-hold`. A stale lease records
+`remediation-publication-stale-lease`. A running worker keeps custody.
+Reconciliation retains the sidecar's exact candidate and lease even if the
+reply is missing or invalid. It marks the reply unverified in that case.
+When it can verify the checkout and the rescue directory is owner-writable, it
+saves a verified Git bundle. See the [failure evidence contract](data-model/follow-up-jobs.md#refused-remediation-publication-remlabel-01).
+
+For recovery, the recorded owner confirms the worker exited and checks for
+another active PR owner or an operator stop. Verify the GitHub route, the open PR's exact
+recorded lease, and the retained checkout or bundle at the full recorded commit. Run
+`bin/remediation-publish.mjs` with that job's repository, PR, base, original
+reviewed head, worker class and reviewer model, plus
+`--expected-candidate <localCommit>` and `--expected-remote-sha <expectedRemoteSha>`.
+An unavailable broker leaves the handoff held. A stale head or unavailable
+source requires owner inspection before publication. The held job starts no
+worker or re-review. Verify actual publication and later follow-up completion
+independently.
 
 ## Auth-context troubleshooting
 

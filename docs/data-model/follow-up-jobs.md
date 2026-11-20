@@ -61,7 +61,9 @@ The guarded publisher classifies explicit broker credential-refresh failures as
 An ambiguous bounded credential-refresh failure requires an additional unready
 broker probe after the failed push before receiving this classification.
 
-An exited round with that current-attempt artifact and a validated reply can
+Job-bound refusals now retain the source and stop for owner publication recovery
+under the [refusal evidence contract](#refused-remediation-publication-remlabel-01).
+An exited round with a legacy sidecar without a job ID and a validated reply can
 return to pending without a round or transient-retry charge. Settlement requires
 equal known authoritative start/end heads, an artifact timestamp at or after
 spawn, a different saved commit, no lifecycle stop, no unresolved findings or
@@ -750,6 +752,10 @@ beside the round's existing reply artifact:
 | `code` | string | `remediation-empties-pr-diff` for the preservation refusal; other publication errors retain their code. |
 | `message` | string | Diagnostic reason. Reconcile uses its own fixed public message. |
 | `previousHead` | string | Original reviewed head, matched to the job's `revisionRef` before reconciliation trusts the refusal. |
+| `localCommit` | SHA or null | Checkout tip captured before running the guarded publisher. |
+| `expectedRemoteSha` | SHA | Exact lease used by this invocation, including when failure precedes the push. |
+| `jobId`, `repo`, `prNumber` | string, string, integer | Job and PR identity for native follow-up invocations. |
+| `blocker` | object | Reply-ready operational blocker containing `title`, `code`, `finding`, `reasoning` and available full `commitSha` and `expectedRemoteSha`. The publisher omits `kind`. |
 | `refusedAt` | ISO timestamp | Refusal observation time. |
 
 Once the worker exits, a matching preservation refusal precedes lifecycle
@@ -760,6 +766,24 @@ for another reviewed head cannot fail this round. A successful guarded publicati
 removes the supplied failure sidecar before reporting success; missing files are
 harmless and other unlink errors are reported. Retained failures follow existing
 reply-artifact storage; no separate sweeper or new CI gate is added.
+
+For `remediation-publication-auth-rejected`, `remediation-owner-auth-hold`,
+`remediation-credential-refresh-unavailable`, and
+`remediation-publication-stale-lease`, the job-bound sidecar is reconciled only
+after worker exit, with matching job/PR/reviewed head and refusal time in the
+current worker attempt. A locked write rechecks the round and worker
+descriptor. The stopped job's `publicationFailure` records `code`,
+`localCommit`, `previousHead`, `expectedRemoteSha`, `refusedAt`, `liveHeadSha`
+(nullable), `reason`, and optional owner route diagnostics. The disposition is
+`stale-head`, `local-source-unverified`, `credential-broker-deferred`, or
+`owner-recovery-required`. `unpublishedWork` includes the exact lease, matched
+checkout path (nullable), and an optional `rescue` Git bundle that proves the
+recorded commit. An absent checkout does not validate source. A validated,
+matching blocked or partial reply stays available as `remediationReply.payload`.
+A missing, invalid or inconsistent reply is recorded as
+`publication-refusal-reply-unverified` without accepting it as completion.
+The hold grants no publication or review authority and does not spend another
+round. Legacy sidecars remain readable under their existing rules.
 
 
 ## Missing retrigger-review label-event observations

@@ -82,12 +82,13 @@ function isWorkspaceAuthFailure(err) {
   if (!detail) return false;
   return /\bbad credentials\b/i.test(detail)
     || /\bhttp\s*401\b/i.test(detail)
+    || /\breturned error:\s*401\b/i.test(detail)
     || /\b401\b[^\n]*\bunauthorized\b/i.test(detail)
     || /\bunauthorized\b[^\n]*\b401\b/i.test(detail)
     || /\brequires authentication\b/i.test(detail)
     || /\bauthentication (?:failed|required)\b/i.test(detail)
     || /\btoken (?:has )?expired\b/i.test(detail)
-    || /\binvalid username or password\b/i.test(detail)
+    || /\binvalid username or (?:password|token)\b/i.test(detail)
     || /\bcould not read (?:Username|Password)\b/i.test(detail)
     || /\bterminal prompts disabled\b/i.test(detail);
 }

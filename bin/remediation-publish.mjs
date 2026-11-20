@@ -4,19 +4,30 @@ import { parseArgs } from 'node:util';
 import { execFileSync } from 'node:child_process';
 import { unlinkSync } from 'node:fs';
 import { writeFileAtomic } from '../src/atomic-write.mjs';
-import { publishRemediation } from '../src/remediation-publication.mjs';
+import { publicationBlocker, publishRemediation } from '../src/remediation-publication.mjs';
 import { OWNER_AUTH_HOLD } from '../src/remediation-owner-auth.mjs';
 
 const { values } = parseArgs({ options: {
   'base-branch': { type: 'string' }, 'previous-head': { type: 'string' },
   repo: { type: 'string' }, pr: { type: 'string' },
   branch: { type: 'string' }, 'expected-remote-sha': { type: 'string' },
+  'job-id': { type: 'string' }, 'expected-candidate': { type: 'string' },
   'failure-path': { type: 'string' }, 'push-command': { type: 'string' },
   'worker-class': { type: 'string' }, 'reviewer-model': { type: 'string' }, 'requires-workflow-push': { type: 'boolean' },
 } });
+const previousHead = values['previous-head'];
+const expectedRemoteSha = values['expected-remote-sha'] || previousHead;
+// Capture the tip before publication. A checkout move during error handling
+// must never change which source the sidecar names.
+let localCommit = null;
 try {
-  const result = await publishRemediation({ baseBranch: values['base-branch'], previousHead: values['previous-head'],
-    repo: values.repo, prNumber: values.pr, branch: values.branch, expectedRemoteSha: values['expected-remote-sha'] || values['previous-head'],
+  localCommit = execFileSync('git', ['--no-replace-objects', 'rev-parse', '--verify', 'HEAD^{commit}'],
+    { encoding: 'utf8', timeout: 5000, stdio: ['ignore', 'pipe', 'pipe'] }).trim();
+} catch { /* No verified local tip. */ }
+try {
+  const result = await publishRemediation({ baseBranch: values['base-branch'], previousHead,
+    repo: values.repo, prNumber: values.pr, branch: values.branch, expectedRemoteSha,
+    expectedCandidate: values['expected-candidate'] || localCommit,
     pushCommand: values['push-command'], workerClass: values['worker-class'], reviewerModel: values['reviewer-model'],
     requiresWorkflowPush: values['requires-workflow-push'] });
   if (values['failure-path']) {
@@ -25,11 +36,11 @@ try {
   }
   process.stdout.write(`${JSON.stringify(result)}\n`);
 } catch (error) {
-  let localCommit = null;
-  try { localCommit = execFileSync('git', ['rev-parse', '--verify', 'HEAD^{commit}'],
-    { encoding: 'utf8', timeout: 5000 }).trim(); } catch { /* Retain any available commit evidence. */ }
-  const failure = { localCommit, code: String(error.code || '').startsWith('remediation-') ? error.code : 'remediation-publication-unproven', message: error.message,
-    previousHead: values['previous-head'], refusedAt: new Date().toISOString(),
+  const code = String(error.code || '').startsWith('remediation-') ? error.code : 'remediation-publication-unproven';
+  const blocker = publicationBlocker({ code, localCommit, expectedRemoteSha });
+  const failure = { localCommit, code, message: blocker.finding, blocker,
+    jobId: values['job-id'], repo: values.repo, prNumber: Number(values.pr) || undefined,
+    previousHead, expectedRemoteSha, refusedAt: new Date().toISOString(),
     ...(error.code === OWNER_AUTH_HOLD && { owner: error.owner, capability: error.capability, reason: error.reason }) };
   if (values['failure-path']) writeFileAtomic(values['failure-path'], JSON.stringify(failure));
   process.stderr.write(`${failure.code}: ${failure.message}\n`);

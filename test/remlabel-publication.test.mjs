@@ -2,12 +2,13 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync, execFile } from 'node:child_process';
 import { promisify } from 'node:util';
+import { createServer } from 'node:http';
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync, readFileSync, symlinkSync, chmodSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, relative } from 'node:path';
 import { publishRemediation } from '../src/remediation-publication.mjs';
 import { reconcileFollowUpJob } from '../src/follow-up-remediation.mjs';
-import { createFollowUpJob, claimNextFollowUpJob, markFollowUpJobSpawned } from '../src/follow-up-jobs.mjs';
+import { createFollowUpJob, claimNextFollowUpJob, markFollowUpJobSpawned, readRemediationReplyArtifact } from '../src/follow-up-jobs.mjs';
 
 const execAsync = promisify(execFile);
 const env = { ...process.env, GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_NOSYSTEM: '1',
@@ -31,7 +32,7 @@ function fixture(t) {
   git('add', 'feature.txt'); git('commit', '-m', 'Create sample feature');
   const previousHead = git('rev-parse', 'HEAD');
   git('push', 'origin', 'topic');
-  return { work, git, previousHead, publish: { workspaceDir: work, baseBranch: 'main', branch: 'topic', previousHead, pushCommand: 'git', env } };
+  return { root, remote, work, git, previousHead, publish: { workspaceDir: work, baseBranch: 'main', branch: 'topic', previousHead, pushCommand: 'git', env } };
 }
 
 for (const unrelatedFile of [false, true]) {
@@ -243,7 +244,7 @@ for (const leaseMismatch of [false, true]) {
           throw Object.assign(new Error('push failed'), { code: 1, stderr });
         }
         return execAsync(command, args, options);
-      } }), { code: leaseMismatch ? 1 : 'remediation-credential-refresh-unavailable' });
+      } }), { code: leaseMismatch ? 'remediation-publication-stale-lease' : 'remediation-credential-refresh-unavailable' });
     assert.equal(pushes, 1);
     assert.equal(f.git('rev-parse', 'HEAD'), candidate);
     assert.equal(f.git('ls-remote', 'origin', 'refs/heads/topic').split('\t')[0], f.previousHead);
@@ -301,8 +302,7 @@ test('publisher artifact and validated blocked reply refund the round through re
     jobId: claimed.job.jobId, repo: claimed.job.repo, prNumber: claimed.job.prNumber,
     outcome: 'blocked', summary: 'Feature repaired; credential broker unavailable for publication.',
     validation: ['Offline feature validation passed.'], addressed: [], pushback: [], blockers: [],
-    operationalBlockers: [{ code: 'remediation-credential-refresh-unavailable', finding: 'Credential refresh unavailable.',
-      reasoning: 'Publication needs the credential broker to recover.', commitSha: savedCommit }],
+    operationalBlockers: [JSON.parse(readFileSync(`${replyPath}.publication-failure.json`)).blocker],
     reReview: { requested: false, reason: null } }));
   const spawned = markFollowUpJobSpawned({ rootDir, jobPath: claimed.jobPath, spawnedAt: '2026-01-01T00:01:01Z',
     worker: { processId: 12345, model: 'claude-code', workspaceDir: f.work, replyPath } });
@@ -317,6 +317,156 @@ test('publisher artifact and validated blocked reply refund the round through re
   assert.equal(result.job.remediationPlan.retryHistory.at(-1).retryMetadata.localCommit, savedCommit);
   assert.equal(f.git('cat-file', '-t', savedCommit), 'commit');
   assert.equal(f.git('ls-remote', 'origin', 'refs/heads/topic').split('\t')[0], f.previousHead);
+});
+
+for (const scenario of ['auth', 'broker', 'stale', 'absent-source', 'live-actor', 'invalid-reply']) {
+  test(`LAC-2283: CLI refusal, reply validation and reconciliation for ${scenario}`, async t => {
+    const f = fixture(t);
+    const rootDir = f.root;
+    const prior = Object.fromEntries(['HQ_ROOT', 'AGENT_OS_DEPLOY_CHECKOUT', 'ADVERSARIAL_REMEDIATION_WORKSPACE_ROOT']
+      .map(key => [key, process.env[key]]));
+    Object.assign(process.env, { HQ_ROOT: rootDir, AGENT_OS_DEPLOY_CHECKOUT: join(rootDir, 'deploy-checkout'),
+      ADVERSARIAL_REMEDIATION_WORKSPACE_ROOT: rootDir });
+    t.after(() => { for (const [key, value] of Object.entries(prior)) {
+      if (value === undefined) delete process.env[key]; else process.env[key] = value;
+    } });
+    const org = JSON.parse(readFileSync(new URL('../config.json', import.meta.url))).org;
+    const repo = `${org || 'fixture'}/publication-fixture`;
+    const { previousHead } = f;
+    const start = new Date(Date.now() - 10_000).toISOString();
+    createFollowUpJob({ rootDir, repo, prNumber: 42, revisionRef: previousHead,
+      branch: 'topic', baseBranch: 'main', reviewBody: 'Fix the feature.', reviewerModel: 'claude',
+      reviewPostedAt: start, critical: true });
+    const claimed = claimNextFollowUpJob({ rootDir, claimedAt: start });
+    const { jobId } = claimed.job;
+    const replyPath = join(rootDir, 'dispatch', 'remediation-replies', jobId, 'remediation-reply.json');
+    const failurePath = `${replyPath}.publication-failure.json`;
+    mkdirSync(join(replyPath, '..'), { recursive: true });
+    const spawned = markFollowUpJobSpawned({ rootDir, jobPath: claimed.jobPath, spawnedAt: start,
+      worker: { processId: process.pid, model: 'claude-code', workspaceDir: f.work, replyPath } });
+
+    let liveHead = previousHead;
+    if (scenario === 'stale') {
+      f.git('commit', '--allow-empty', '-m', 'Competing remote update');
+      f.git('push', 'origin', 'topic');
+      liveHead = f.git('rev-parse', 'HEAD');
+      f.git('reset', '--hard', previousHead);
+    }
+    writeFileSync(join(f.work, 'feature.txt'), 'corrected feature\n');
+    f.git('add', 'feature.txt');
+    f.git('commit', '-m', 'Retain validated local changes');
+    const localCommit = f.git('rev-parse', 'HEAD');
+    let refusalCode = 'remediation-publication-auth-rejected';
+    let pushCommand = 'git';
+    let requests = 0;
+    const cliEnv = { ...env, GIT_TERMINAL_PROMPT: '0', NO_PROXY: '127.0.0.1', no_proxy: '127.0.0.1' };
+    if (scenario === 'broker') {
+      refusalCode = 'remediation-credential-refresh-unavailable';
+      pushCommand = join(rootDir, 'broker-git-safe');
+      writeFileSync(pushCommand, '#!/bin/sh\n'
+        + "echo 'entitled GitHub re-mint unavailable: remint_transient_exhausted; refusing credential fallback' >&2\nexit 75\n",
+      { mode: 0o755 });
+      const broker = createServer((req, res) => {
+        if (req.url === '/readyz') requests++;
+        res.writeHead(503).end();
+      });
+      await new Promise(resolve => broker.listen(0, '127.0.0.1', resolve));
+      t.after(() => broker.close());
+      cliEnv.OAUTH_BROKER_URL = `http://127.0.0.1:${broker.address().port}`;
+    } else if (scenario === 'stale') {
+      refusalCode = 'remediation-publication-stale-lease';
+    } else {
+      const server = createServer((_req, res) => {
+        requests++;
+        res.writeHead(401, { 'WWW-Authenticate': 'Basic realm="fixture"' });
+        res.end('Invalid username or token');
+      });
+      await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+      t.after(() => server.close());
+      f.git('remote', 'set-url', 'origin', `http://127.0.0.1:${server.address().port}/fixture.git`);
+    }
+
+    const expectedRemoteSha = scenario === 'auth' ? 'a'.repeat(40) : previousHead;
+    if (scenario === 'auth') liveHead = expectedRemoteSha;
+    await assert.rejects(execAsync(process.execPath, [new URL('../bin/remediation-publish.mjs', import.meta.url).pathname,
+      '--base-branch', 'main', '--branch', 'topic', '--previous-head', previousHead,
+      '--expected-remote-sha', expectedRemoteSha, '--job-id', jobId, '--repo', repo, '--pr', '42',
+      '--failure-path', failurePath, '--push-command', pushCommand], { cwd: f.work, env: cliEnv }),
+    error => error.stderr.includes(refusalCode));
+    if (scenario !== 'stale') assert.equal(requests, 1);
+    const failure = JSON.parse(readFileSync(failurePath));
+    assert.equal(failure.localCommit, localCommit);
+    assert.equal(failure.expectedRemoteSha, expectedRemoteSha);
+    const reply = { kind: 'adversarial-review-remediation-reply', schemaVersion: 1, jobId, repo, prNumber: 42,
+      outcome: 'blocked', summary: 'Feature changes are committed locally. Publication remains unproven.',
+      validation: ['Offline validation passed.'], addressed: [], pushback: [], blockers: [],
+      operationalBlockers: [failure.blocker], reReview: { requested: false, reason: null } };
+    writeFileSync(replyPath, JSON.stringify(reply));
+    assert.deepEqual(readRemediationReplyArtifact(replyPath, { expectedJob: claimed.job }).operationalBlockers, [failure.blocker]);
+    if (scenario === 'invalid-reply') {
+      failure.blocker.kind = 'github-auth';
+      writeFileSync(replyPath, JSON.stringify(reply));
+      assert.throws(() => readRemediationReplyArtifact(replyPath, { expectedJob: claimed.job }), /kind must be one of: pending-ci/u);
+    }
+    if (scenario === 'absent-source') rmSync(f.work, { recursive: true });
+    const result = await reconcileFollowUpJob({ rootDir, ...spawned,
+      ...(scenario !== 'live-actor' && { isWorkerRunning: () => false }),
+      resolvePRLifecycleImpl: async () => ({ source: 'live', prState: 'open', headSha: liveHead }),
+      requestReviewRereviewImpl: () => assert.fail('publication refusal cannot request re-review'),
+      postCommentImpl: async () => assert.fail('publication handoff does not post a new PR comment'),
+      execFileImpl: async (command, args, settings) => {
+        assert.equal(command, 'git');
+        assert.ok(!args.includes('push') && !args.includes('fetch'), 'retention cannot publish or refresh credentials');
+        return execAsync(command, args, settings);
+      } });
+    if (scenario === 'live-actor') {
+      assert.equal(result.action, 'active');
+      assert.equal(result.job.remediationWorker.processId, process.pid);
+      assert.equal(result.job.publicationFailure, undefined);
+      return;
+    }
+    assert.equal(result.action, 'stopped');
+    const durable = JSON.parse(readFileSync(result.jobPath));
+    assert.equal(durable.remediationPlan.currentRound, spawned.job.remediationPlan.currentRound);
+    assert.equal(durable.publicationFailure.code, refusalCode);
+    assert.equal(durable.publicationFailure.liveHeadSha, liveHead);
+    assert.equal(durable.unpublishedWork.commitSha, localCommit);
+    assert.equal(durable.unpublishedWork.expectedRemoteSha, expectedRemoteSha);
+    const reason = { broker: 'credential-broker-deferred', stale: 'stale-head', 'absent-source': 'local-source-unverified' };
+    assert.equal(durable.publicationFailure.reason, reason[scenario] || 'owner-recovery-required');
+    assert.equal(durable.remediationReply.state, scenario === 'invalid-reply'
+      ? 'publication-refusal-reply-unverified' : 'worker-wrote-reply');
+    if (scenario === 'absent-source') {
+      assert.equal(durable.unpublishedWork.workspaceDir, null);
+      assert.equal(durable.unpublishedWork.rescue, undefined);
+    } else {
+      const { rescue } = durable.unpublishedWork;
+      assert.ok(rescue?.preserved);
+      assert.ok(f.git('bundle', 'list-heads', rescue.path).startsWith(`${localCommit} `));
+      assert.equal(f.git('rev-parse', 'HEAD'), localCommit);
+    }
+    assert.equal(execFileSync('git', ['--git-dir', f.remote, 'rev-parse', 'refs/heads/topic'], { encoding: 'utf8' }).trim(),
+      scenario === 'stale' ? liveHead : previousHead);
+  });
+}
+
+test('LAC-2283: explicit guarded recovery requires the exact retained checkout tip', async t => {
+  const f = fixture(t);
+  writeFileSync(join(f.work, 'feature.txt'), 'corrected feature\n');
+  f.git('add', 'feature.txt');
+  f.git('commit', '-m', 'Retain validated local changes');
+  const commit = f.git('rev-parse', 'HEAD');
+  const args = [new URL('../bin/remediation-publish.mjs', import.meta.url).pathname,
+    '--base-branch', 'main', '--branch', 'topic', '--previous-head', f.previousHead,
+    '--expected-remote-sha', f.previousHead, '--expected-candidate', commit, '--push-command', 'git'];
+  f.git('reset', '--hard', f.previousHead);
+  await assert.rejects(execAsync(process.execPath, args, { cwd: f.work, env }),
+    error => error.stderr.includes('remediation-publication-unproven'));
+  assert.ok(f.git('ls-remote', 'origin', 'refs/heads/topic').startsWith(f.previousHead));
+  f.git('reset', '--hard', commit);
+  const { stdout } = await execAsync(process.execPath, args, { cwd: f.work, env });
+  assert.equal(JSON.parse(stdout).headSha, commit);
+  assert.ok(f.git('ls-remote', 'origin', 'refs/heads/topic').startsWith(commit));
 });
 
 for (const succeeds of [true, false]) {

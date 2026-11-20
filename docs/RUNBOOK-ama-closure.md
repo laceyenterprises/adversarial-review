@@ -5200,11 +5200,29 @@ collected it. Audit copies describe the proof. A subsequent evaluation recompute
 it from immutable objects. The [offline PR #11143 witness](../test/fixtures/migration-renumber-11143/README.md)
 records both published integrations.
 
+LAC-2278 covers the next slot collision. A child originally in slot 341 can
+name the applied `successful_rss_index_339` in slot 340 and move to slot 342
+when main has added its own registered successor in slot 341. The old base's
+three ledger migration directories must match the immutable RSS main anchor.
+The protected and integrated snapshots must each add exactly the child wrapper,
+helper, SQL and registry entry to their respective bases. The collector verifies
+both registered predecessors against their SQL, checks the ordered registry
+insertions and compares the child's wrapper and module byte for byte after
+normalizing revision metadata. The child's SQL blob must be identical.
+Complete file lists must agree with the tree objects, including main's
+replacement of the projected `r341.py` path. Every first-parent snapshot must
+preserve the corresponding migration trees before or after the single
+integration of the trusted comparison base. A successful `mainIntegration`
+certificate includes `historicalParent` alongside the active `parent` and
+uses the same evidence-object and proof-object binding.
+
 Deterministic integration refusals use `main-integration-ancestry-invalid`,
 `main-integration-source-name-mismatch`, `main-integration-blob-missing` or
 `main-integration-directory-missing` for those structural errors. An ancestry
 or migration-tree mismatch leaves `main-integration-unproven`. Transport
-failures retain `snapshot-read-failed`. A copied or edited certificate,
+failures retain `snapshot-read-failed`. The slot 341 to 342 path reports
+`historical-parent-snapshot-unproven` when its checks decline proof.
+A copied or edited certificate,
 including an unchanged proof attached to a spread/cloned evidence object, refuses with
 `main-integration-certificate-unbound` on the consuming evidence. Callers must
 pass the original collected evidence object to the native evaluator. These

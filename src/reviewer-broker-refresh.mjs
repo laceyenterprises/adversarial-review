@@ -149,10 +149,12 @@ export function _resetReviewerTokenRefreshClockForTest() {
 
 class ReviewerTokenNotFresherError extends Error {}
 class BrokerTokenFetchError extends Error {
-  constructor(message, { transient = false } = {}) {
+  // `check` names the failed client-side check without token material.
+  constructor(message, { transient = false, check = 'mint' } = {}) {
     super(message);
     this.name = 'BrokerTokenFetchError';
     this.transient = transient;
+    this.check = check;
   }
 }
 
@@ -292,7 +294,7 @@ async function fetchReviewerTokenFromBrokerUrl({
     });
     if (!res.ok) {
       throw new BrokerTokenFetchError(`broker ${brokerUrl} returned HTTP ${res.status}`, {
-        transient: brokerHttpStatusIsTransient(res.status),
+        transient: brokerHttpStatusIsTransient(res.status), check: `mint refused (HTTP ${res.status})`,
       });
     }
     const body = await res.json();
@@ -300,13 +302,13 @@ async function fetchReviewerTokenFromBrokerUrl({
     if (!accessToken || typeof accessToken !== 'string') {
       throw new BrokerTokenFetchError(
         `broker ${brokerUrl} response missing access_token`,
-        { transient: false },
+        { transient: false, check: 'mint returned no token' },
       );
     }
     // The broker can label a PAT fallback with the App's IDs. Those IDs alone
     // cannot authorize replacing a reviewer's own installation-token identity.
     if ((owner || rejectPatFallback) && body?.metadata?.credential_source === 'github_pat_fallback') {
-      throw new BrokerTokenFetchError('reviewer broker returned a PAT fallback', { transient: false });
+      throw new BrokerTokenFetchError('reviewer broker returned a PAT fallback', { transient: false, check: 'PAT fallback' });
     }
     // Same metadata verification as scripts/lib/reviewer-broker.sh: never accept
     // a token minted for the wrong App/installation just because the call
@@ -315,11 +317,12 @@ async function fetchReviewerTokenFromBrokerUrl({
     if (String(body?.provider || '') !== provider) {
       throw new BrokerTokenFetchError(
         `broker ${brokerUrl} response.provider='${body?.provider ?? ''}' != expected '${provider}'`,
-        { transient: false },
+        { transient: false, check: 'provider mismatch' },
       );
     }
     if (owner && String(body?.metadata?.owner || '').toLowerCase() !== owner) {
-      throw new BrokerTokenFetchError('broker owner echo mismatch', { transient: false });
+      throw new BrokerTokenFetchError('broker owner echo mismatch', { transient: false,
+        check: body?.metadata?.owner ? 'owner mismatch' : 'unrouted (no owner echo)' });
     }
     const actualAppId = body?.metadata?.app_id != null ? String(body.metadata.app_id) : '';
     const actualInstallationId =
@@ -327,13 +330,13 @@ async function fetchReviewerTokenFromBrokerUrl({
     if (expectedAppId && actualAppId !== expectedAppId) {
       throw new BrokerTokenFetchError(
         `broker ${brokerUrl} response.metadata.app_id='${actualAppId}' != expected '${expectedAppId}'`,
-        { transient: false },
+        { transient: false, check: 'App id mismatch' },
       );
     }
     if (expectedInstallationId && actualInstallationId !== expectedInstallationId) {
       throw new BrokerTokenFetchError(
         `broker ${brokerUrl} response.metadata.installation_id='${actualInstallationId}' != expected '${expectedInstallationId}'`,
-        { transient: false },
+        { transient: false, check: 'installation mismatch' },
       );
     }
     // App IDs can accompany a PAT fallback. Bind only a positively identified
@@ -369,7 +372,7 @@ export async function fetchReviewerTokenFromBroker({ role, env, fetchImpl = glob
       .filter(([key]) => key.toLowerCase() === owner);
     if (pins.some(pin => pin.length !== 2 || !/^\d+$/.test(pin[1]))
       || new Set(pins.map(pin => pin[1])).size > 1) {
-      throw new BrokerTokenFetchError('invalid owner installation pin', { transient: false });
+      throw new BrokerTokenFetchError('invalid owner installation pin', { transient: false, check: 'invalid installation pin' });
     }
     expectedInstallationId = pins[0]?.[1] || '';
   }

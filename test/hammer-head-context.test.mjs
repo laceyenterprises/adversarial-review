@@ -41,7 +41,7 @@ test(`REBASEPROV-01 coverage fetch retries=${failures} (${failureMessage}) befor
       return execute(command, args, options);
     },
     execFile: null, promisify: () => async (command, args) => {
-      if (command === 'python3') {
+      if (command === '/trusted/install/runtime/python/bin/python3') {
         assert.deepEqual(Array.from(args), ['-IB', cli.replace('hammer-head-context.mjs', 'verify-rebase-generated.py'), 'fixture/repo', 'policy']);
         throw new Error('No installed policy');
       }
@@ -82,6 +82,47 @@ test(`REBASEPROV-01 coverage fetch retries=${failures} (${failureMessage}) befor
 });
 }
 }
+
+for (const [env, python, unavailable] of [
+  [{ HQ_PYTHON3: '/hq/python', AGENT_OS_PY: '/agent/python', AGENT_OS_DEPLOY_CHECKOUT: '/deploy' }, '/hq/python'],
+  [{ HQ_PYTHON3: '', AGENT_OS_PY: '/agent/python', AGENT_OS_DEPLOY_CHECKOUT: '/deploy' }, '/agent/python'],
+  [{ AGENT_OS_DEPLOY_CHECKOUT: '/deploy' }, '/deploy/runtime/python/bin/python3'],
+  [{}, 'python3'],
+  [{ HQ_PYTHON3: '/missing/python', AGENT_OS_PY: '/agent/python' }, '/missing/python', true],
+]) test(`generated coverage uses ${python} for policy and verification (unavailable=${!!unavailable})`, async () => {
+  const source = readFileSync(cli, 'utf8');
+  const loader = source.slice(source.indexOf('const loadRebaseCoverage ='), source.indexOf('const loadComments ='))
+    .replace("await import('../src/ama/reviewed-rebase.mjs')", 'rebaseModule')
+    .replace('import.meta.url', 'cliUrl');
+  const calls = [];
+  const head = 'c'.repeat(40), base = 'b'.repeat(40);
+  const load = runInNewContext(`${loader}\nloadRebaseCoverage`, {
+    loadAwareTimeoutMs, process: { env }, reviewedHead: 'a'.repeat(40), repo: 'fixture/repo',
+    isTransientGhError, fileURLToPath, URL, cliUrl: new URL('../bin/hammer-head-context.mjs', import.meta.url).href,
+    meteredExecFile: (execute, command, args, options) => execute(command, args, options),
+    execFile: null, promisify: () => async (command, args) => {
+      if (command === 'git') {
+        assert.equal(args[0], 'cat-file');
+        return { stdout: '' };
+      }
+      calls.push([command, Array.from(args)]);
+      assert.equal(command, python);
+      if (unavailable) throw new Error('Interpreter unavailable');
+      return { stdout: args[3] === 'policy' ? '["generated.txt"]' : 'verified\n' };
+    },
+    rebaseModule: { proveReviewedRebase: async ({ generatedFiles, verifyGenerated }) => {
+      assert.deepEqual(Array.from(generatedFiles), unavailable ? [] : ['generated.txt']);
+      if (unavailable) return null;
+      assert.equal(await verifyGenerated(head, generatedFiles), true);
+      return { proof: 'fixture-generated-coverage' };
+    } },
+  });
+  assert.equal((await load({ base, head }))?.proof ?? null, unavailable ? null : 'fixture-generated-coverage');
+  assert.deepEqual(calls, [
+    [python, ['-IB', cli.replace('hammer-head-context.mjs', 'verify-rebase-generated.py'), 'fixture/repo', 'policy']],
+    ...unavailable ? [] : [[python, ['-IB', cli.replace('hammer-head-context.mjs', 'verify-rebase-generated.py'), 'fixture/repo', 'verify', head, 'generated.txt']]],
+  ]);
+});
 
 test('timeline loader omits absent and invalid cursors and forwards a valid cursor', async () => {
   // Isolate the CLI-local loader without executing the command's top-level flow.

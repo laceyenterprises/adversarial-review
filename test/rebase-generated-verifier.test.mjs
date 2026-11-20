@@ -68,10 +68,24 @@ def regenerate_conflicts(root, paths, *, trusted_root, registry, repository):
     assert.equal(git(source, 'status', '--porcelain'), '');
     assert.throws(() => execFileSync('python3', [installedHelper, ...policyArgs, 'fixture/other', 'policy'], { cwd: source, env, stdio: 'pipe' }));
     if (mode === 'valid') {
+      const scratch = join(root, 'scratch');
+      mkdirSync(scratch);
+      for (const [flags, deployment] of [
+        [['--trusted-root', installed], join(root, 'missing')],
+        [[], installed],
+        [[], ''],
+      ]) {
+        const options = { cwd: scratch, env: { ...env, AGENT_OS_DEPLOY_CHECKOUT: deployment }, encoding: 'utf8', stdio: 'pipe' };
+        assert.deepEqual(JSON.parse(execFileSync('python3', [installedHelper, ...flags, 'fixture/repo', 'policy'], options)), ['generated.txt']);
+        assert.throws(() => execFileSync('python3', [installedHelper, ...flags, 'fixture/repo', 'verify', sha, 'generated.txt'], options),
+          /Command failed/, 'commit verification still requires a Git checkout');
+      }
       env.AGENT_OS_DEPLOY_CHECKOUT = join(root, 'missing');
       assert.throws(run, /Command failed/, 'explicit unavailable deployment must refuse despite an installed ancestor');
       env.AGENT_OS_DEPLOY_CHECKOUT = source;
       assert.throws(run, /inside the worker checkout/);
+      assert.throws(() => execFileSync('python3', [installedHelper, 'fixture/repo', 'policy'], { cwd: source, env, stdio: 'pipe' }),
+        /inside the worker checkout/, 'read-only inspection must retain the worker-root fence');
       delete env.AGENT_OS_DEPLOY_CHECKOUT;
     }
     rmSync(pkg, { recursive: true });
@@ -79,3 +93,11 @@ def regenerate_conflicts(root, paths, *, trusted_root, registry, repository):
     assert.equal(existsSync(join(root, 'shadow-loaded')), false, 'missing installed policy must not execute a worker package');
   });
 }
+
+test('generated verifier diagnoses a missing --trusted-root value before Git discovery', t => {
+  const scratch = mkdtempSync(join(tmpdir(), 'generated-verifier-args-'));
+  t.after(() => rmSync(scratch, { recursive: true, force: true }));
+  assert.throws(() => execFileSync('python3', [helper, '--trusted-root'], { cwd: scratch, stdio: 'pipe' }),
+    error => /--trusted-root requires a directory path argument/.test(error.stderr.toString())
+      && !/IndexError|not a git repository/.test(error.stderr.toString()));
+});

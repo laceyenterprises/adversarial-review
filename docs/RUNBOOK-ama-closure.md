@@ -8187,9 +8187,16 @@ temporary directory; it does not execute a branch-supplied registry or alter the
 worker checkout. Unsupported trees and unavailable generators refuse coverage.
 Without an installed registry, whole-patch equivalence remains available.
 The closer runs the verifier with Python isolation and the owner deployment
-environment. Root selection uses `AGENT_OS_DEPLOY_CHECKOUT` or the helper's
-ancestor installation, with `--trusted-root <installed-policy-root>` available
-for standalone use. The installed root's origin must match the repository under
+environment. Its interpreter selection uses `HQ_PYTHON3`, then `AGENT_OS_PY`,
+then `$AGENT_OS_DEPLOY_CHECKOUT/runtime/python/bin/python3`, with PATH `python3`
+used only when none is configured. A configured interpreter failure never
+falls back; generated coverage remains unavailable. Root selection uses
+`AGENT_OS_DEPLOY_CHECKOUT` or the helper's ancestor installation, with
+`--trusted-root <installed-policy-root>` available
+for standalone use. The `policy` query supports inspection outside a Git checkout;
+commit verification requires a checkout. Within a checkout both actions refuse
+an in-worktree policy root. A missing `--trusted-root` value reports an explicit
+argument error. The installed root's origin must match the repository under
 validation. The installed registry classifier selects that repository's entries
 and the verifier supplies the established identity when regenerating in the
 originless archive. Missing commit objects are

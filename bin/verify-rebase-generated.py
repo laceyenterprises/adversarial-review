@@ -15,8 +15,8 @@ import sys
 import tempfile
 
 
-def git(*args, cwd=None):
-    return subprocess.check_output(["git", *args], cwd=cwd, timeout=30)
+def git(*args, cwd=None, stderr=None):
+    return subprocess.check_output(["git", *args], cwd=cwd, stderr=stderr, timeout=30)
 
 
 def main():
@@ -25,11 +25,23 @@ def main():
     args = sys.argv[1:]
     configured = os.environ.get("AGENT_OS_DEPLOY_CHECKOUT") or None
     if args[:1] == ["--trusted-root"]:
+        if len(args) < 2:
+            raise ValueError("--trusted-root requires a directory path argument")
         configured = args[1]
         args = args[2:]
-    worktree = Path(
-        os.fsdecode(git("rev-parse", "--show-toplevel").rstrip(b"\n"))
-    ).resolve(strict=True)
+    repo, action, *rest = args
+    try:
+        worktree = Path(
+            os.fsdecode(
+                git("rev-parse", "--show-toplevel", stderr=subprocess.PIPE).rstrip(b"\n")
+            )
+        ).resolve(strict=True)
+    except subprocess.CalledProcessError:
+        if action != "policy":
+            raise
+        # Registry inspection needs no commit tree. In a worker checkout the
+        # containment checks below still apply to this read-only action.
+        worktree = None
     if configured is not None and not Path(configured).is_absolute():
         raise ValueError("The installed generated-file policy root must be absolute")
     if configured is not None:
@@ -40,7 +52,7 @@ def main():
             (
                 root
                 for root in Path(__file__).resolve().parents
-                if not root.is_relative_to(worktree)
+                if (worktree is None or not root.is_relative_to(worktree))
                 and (
                     root
                     / "modules/worker-pool/lib/python/cwp_dispatch/generated_conflicts.py"
@@ -52,7 +64,7 @@ def main():
             raise ValueError(
                 "No installed generated-file policy; supply --trusted-root"
             )
-    if trusted_root.is_relative_to(worktree):
+    if worktree is not None and trusted_root.is_relative_to(worktree):
         raise ValueError("The generated-file policy root is inside the worker checkout")
     library = trusted_root / "modules/worker-pool/lib/python"
     module = library / "cwp_dispatch/generated_conflicts.py"
@@ -65,7 +77,6 @@ def main():
         raise ValueError("Generated policy is not installed with this helper")
     if not policy.REGISTRY_PATH.resolve(strict=True).is_relative_to(trusted_root):
         raise ValueError("Generated registry is outside the installed policy root")
-    repo, action, *rest = args
     origin = (
         git("config", "--get", "remote.origin.url", cwd=trusted_root).decode().strip()
     )

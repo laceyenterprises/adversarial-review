@@ -66,6 +66,15 @@ const FINDING_PRIORITY_SQL = `CASE lower(coalesce(json_extract(f.finding_json,'$
         WHEN 'critical' THEN 0 WHEN 'p0' THEN 0 WHEN 'high' THEN 1 WHEN 'p1' THEN 1
         WHEN 'medium' THEN 2 WHEN 'p2' THEN 2 WHEN 'low' THEN 3 WHEN 'p3' THEN 3 ELSE 4 END`;
 
+// Bound host subprocess provisioning independently of HQ worker admission.
+const MAX_LIVE_FINDING_BATCH_CONCURRENCY = 8;
+function liveFindingBatchConcurrency(value) {
+  if (!Number.isSafeInteger(value) || value < 1 || value > MAX_LIVE_FINDING_BATCH_CONCURRENCY) {
+    throw Error(`invalid ADVERSARIAL_FINDINGS_BATCH_CONCURRENCY (expected 1-${MAX_LIVE_FINDING_BATCH_CONCURRENCY})`);
+  }
+  return value;
+}
+
 export function findingBatchOptions(env = process.env) {
   const positive = (key, fallback) => {
     const value = Number(env[key] ?? fallback);
@@ -78,6 +87,10 @@ export function findingBatchOptions(env = process.env) {
     maxAgeMs: findingBacklogMaxAgeMs(env),
     timeoutMs: positive('ADVERSARIAL_FINDINGS_BATCH_TIMEOUT_MS', 24 * 3600000),
     publishReceiptGraceMs: positive('ADVERSARIAL_FINDINGS_BATCH_PUBLISH_RECEIPT_GRACE_MS', 10 * 60000),
+    // Live collector submissions in flight per pass. Every claimed batch is
+    // submitted each pass; this bounds the pass's wall-clock (dispatch
+    // provisions before returning), so a slow pass cannot outrun the cadence.
+    concurrency: liveFindingBatchConcurrency(Number(env.ADVERSARIAL_FINDINGS_BATCH_CONCURRENCY ?? 2)),
   };
 }
 
@@ -809,6 +822,7 @@ export function createFindingBatchTicker(options) {
     try {
       const resolutionOnly = now < next;
       const { completed } = await runFindingBatches({ ...options, resolutionOnly, now,
+        concurrency: liveFindingBatchConcurrency(options.concurrency ?? findingBatchOptions(options.env).concurrency),
         day: new Date(now).toISOString().slice(0, 10) });
       if (completed) {
         if (!resolutionOnly) next = now + (options.intervalMs ?? findingBatchOptions(options.env).intervalMs);

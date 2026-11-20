@@ -60,7 +60,8 @@ Gate readers never parse reply artifacts or execute reproduction commands.
 `src/finding-backlog-window.mjs`, `migrations/20261112_historical_projection.sql`,
 `bin/review-findings.mjs`,
 `migrations/20261024_simplicity_batch_lifecycle.sql`,
-`migrations/20261107_findings_batch_requeue.sql`
+`migrations/20261107_findings_batch_requeue.sql`,
+`migrations/20261120_findings_rate_indexes.sql`
 
 `review_findings` stores each blocking and non-blocking finding from first-pass
 and rereview bodies using the existing kernel parser. Remediation comments and
@@ -438,6 +439,11 @@ The watcher claims and collects hourly by default, checking deadlines after its
 ordinary poll. `ADVERSARIAL_FINDINGS_BATCH_INTERVAL_MS` and
 `ADVERSARIAL_FINDINGS_BATCH_SIZE` configure cadence and cap (defaults 3600000
 and 100); programmatic callers can supply `intervalMs` and `batchSize`.
+`ADVERSARIAL_FINDINGS_BATCH_CONCURRENCY` (positive integer, default 2) bounds the
+live collector's concurrent `hq dispatch` submissions. Each pass submits every
+claimed batch; dispatch provisions before it returns, so this bounds the pass's
+wall-clock, not the number of batches. HQ normal-priority admission still owns
+running worker capacity, and an invalid value refuses the pass before any claim.
 There is no dedicated findings-batch slot in the shared strict CFG schema, nor a
 previous named daily key: the old cadence and cap were literals. These local
 runtime settings follow the existing pipeline-health environment convention;
@@ -640,7 +646,10 @@ unverified already-fixed PR still holds the batch. Empty finding/advisory
 manifests fail instead of completing. Advisory-only applied/declined manifests remain supported.
 
 Health also exposes finding-only `openCount`, `unbatchedCount`, `oldestOpenAt`,
-`oldestOpenAgeMs`, `perDay` (applied/dropped by UTC resolution date), and aggregated
+`oldestOpenAgeMs`, `perDay` (applied/dropped by UTC resolution date), `rates`
+(`capturedLastHour`, `resolvedLastHour`, `batchesCompletedLastHour`, and
+`netLastHour` = captured − resolved; a positive net means capture is outpacing
+the drain), and aggregated
 unresolved `batchErrors` (released batches excluded), plus the drain view
 `progress`: `open` (= `unbatched` + `batched` + `stranded`), `unbatched`, `batched`
 (in an unsettled batch with no error), `stranded` (in an unsettled batch with an
@@ -677,6 +686,22 @@ Pipeline health uses its resolved `findingsBacklogMaxAgeMs` for both summary and
 alert thresholds. Invalid direct summary defaults return `available: false`
 without throwing out of the health API.
 This is an operational alert, with no additional merge or CI gate.
+
+The three last-hour rates use strictly-after-cutoff normalized timestamp range
+reads, excluding selected work. Migration `20261120_findings_rate_indexes.sql`
+adds partial expression indexes on `julianday(captured_at)`,
+`julianday(resolved_at)` (terminal outcomes only), and `julianday(completed_at)`.
+Each index excludes rows with a selection manifest. These indexes preserve
+offset timestamp semantics without scanning historical rows for each rate.
+Schema migration builds them once over existing history; no data is rewritten.
+Other backlog summary fields retain their existing query behavior.
+
+The live ticker's `ADVERSARIAL_FINDINGS_BATCH_CONCURRENCY` accepts integers 1–8
+(default 2). Invalid settings and out-of-range explicit ticker overrides reject
+the pass before claiming or submitting batches. The ceiling bounds concurrent
+host provisioning subprocesses; HQ admission still owns running worker capacity
+and budget. Direct `runFindingBatches` callers and explicit backfill concurrency
+retain their existing positive-integer interface.
 
 After deployment and watcher restart, SRE explicitly runs the one-shot drain:
 

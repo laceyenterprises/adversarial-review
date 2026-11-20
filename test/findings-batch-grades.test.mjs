@@ -357,8 +357,12 @@ for (const batchMigrated of [false, true]) {
     claimFindingBatches(db, day, { now: fixtureNow });
     db.exec("UPDATE finding_batches SET error='synthetic failure'");
     db.exec("UPDATE finding_backlog SET captured_at='2026-01-01T00:00:00Z'");
+    db.exec('DROP INDEX finding_backlog_capture_rate; DROP INDEX finding_backlog_resolution_rate;');
     db.exec('ALTER TABLE finding_backlog DROP COLUMN manifest_sha256');
-    if (!batchMigrated) db.exec('ALTER TABLE finding_batches DROP COLUMN manifest_sha256');
+    if (!batchMigrated) {
+      db.exec('DROP INDEX finding_batches_completion_rate');
+      db.exec('ALTER TABLE finding_batches DROP COLUMN manifest_sha256');
+    }
     const health = summarizeFindingBacklog(db, Date.parse('2026-02-01'));
     assert.equal(health.available, true, health.error);
     assert.equal(health.openCount, 8);

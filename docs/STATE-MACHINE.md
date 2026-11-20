@@ -2492,6 +2492,27 @@ A crashed closer resumes through existing leases, attempt keys, retry/backoff
 and lifetime caps. Exhaustion uses the existing escalation path. No new review
 or remediation round is created.
 
+CLOSERPARKOWNER-02 reconciles a lapsed closer action on a posted row after the
+watchdog proves custody absent. Discovery uses the dispatch-only rescue entry
+with a live candidate. A closer-trailer suppression also makes the posted row
+due for its closure handler through slow-lane backoff at the evidence recheck
+cadence until a closer decision is recorded for that head; CI-wait admission
+precedes this bypass and stable refusals resume normal backoff. Live review, remediation
+and closer custody, operator holds, and existing eligibility remain authoritative.
+Refused budgets and duplicate-family hard stops use the durable closure-wait
+escalation. Intentional `adversarial-merge-blocked` labels fence discovery
+without an immediate hard-stop page.
+The watchdog receipts discovery reconciliation by head and selected decision,
+then permits a repeat after five minutes. Matching interim passes continue to
+the posted-review handler. Active drain defers closer reconciliation while the
+deadline page remains active. Discovery hard stops are observed before the
+shared next-action result is recorded.
+Background-mode discovery submits through the existing bounded hammer queue;
+mergeability sampling and closer admission retries run after a launch slot opens.
+Refusals without a successor or closure wait retain the once-per-head/transition
+missing-transition page before ordinary discovery continues. Lifecycle states,
+graph edges and smoke promises remain unchanged.
+
 HAMATTEST-03 executes an admitted head-bound review decision before coexistence returns a
 bounded closure wait, including a consumed background `not-eligible` outcome.
 The watchdog checks live/uncertain ownership before requesting review. Successful

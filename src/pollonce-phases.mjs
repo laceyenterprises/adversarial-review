@@ -865,7 +865,9 @@ export async function processReviewSubject(entry, ctx) {
             loaded.getMergeAuthorityConfig(), { fallbackSources: loaded.sources || {} });
           const recovered = await recoverOverdueOwnership({
             rootDir: ROOT, repo: repoPath, prNumber, subject, reviewStateRow: existing,
-            domainId: effectiveDomainId, enabled: authority?.enabled, execFileImpl: execFileAsync, logger: console,
+            domainId: effectiveDomainId, enabled: authority?.enabled,
+            allowCloserReconciliation: !readWatcherDrainState().active && !pendingReviewIntent(),
+            execFileImpl: execFileAsync, logger: console,
           });
           // Pending review recovery and exhausted routes own this pass too;
           // admission must not reuse the row captured before recovery acted.
@@ -1932,6 +1934,7 @@ export async function processReviewSubject(entry, ctx) {
           repoPath,
           prNumber,
           finalRoundCloserOwned,
+          closerTrailerHead: postedReviewHeadMoved && stalePostedReviewCloserSuppression.reason === 'closer-commit-trailer',
           budgetExhaustedCloserOwned: existing.rereview_reason === BUDGET_EXHAUSTED_CLOSURE_REASON,
           // WPS-01: the head this handoff was queued against. The no-progress
           // lane keys its series on (repo, pr, head) so a new push always resets

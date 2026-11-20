@@ -43,6 +43,31 @@ function fixture(t, config = {}) {
   };
 }
 
+test('schema bootstrap retries a busy quarantine write without losing identity tables', t => {
+  const f = fixture(t);
+  const exec = f.db.exec.bind(f.db);
+  let attempts = 0;
+  f.db.exec = sql => {
+    if (sql.includes('repository_discovery_quarantine') && ++attempts === 1) {
+      throw Object.assign(new Error('database is locked'), { code: 'SQLITE_BUSY' });
+    }
+    return exec(sql);
+  };
+  assert.equal(typeof f.create(), 'function');
+  assert.equal(attempts, 2);
+  assert.ok(f.db.prepare("SELECT name FROM sqlite_schema WHERE name='repository_identities'").get());
+  assert.ok(f.db.prepare("SELECT name FROM sqlite_schema WHERE name='repository_discovery_quarantine'").get());
+  assert.ok(f.warnings.some(line => line.includes('repository-discovery-schema-bootstrap')));
+});
+
+test('schema bootstrap preserves non-contention failures', t => {
+  const f = fixture(t);
+  const failure = Object.assign(new Error('disk I/O error'), { code: 'SQLITE_IOERR' });
+  f.db.exec = () => { throw failure; };
+  assert.throws(() => f.create(), error => error === failure);
+  assert.equal(f.warnings.length, 0);
+});
+
 test('startup failure immediately restores durable names with scope and exclusions', async t => {
   const f = fixture(t, { repos: ['example-org/static'], excludeRepos: ['skip', 'example-org/hidden'] });
   f.seed([repository(1, 'example-org/alpha'), repository(2, 'example-org/skip'),

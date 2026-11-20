@@ -1248,13 +1248,30 @@ export function createNoProgressLaneGate({
         decision = { ...decision, lane: 'active', due: true,
           reason: handler.budgetExhaustedCloserOwned ? 'budget-exhausted-closure-owed' : 'final-round-closure-owed', backoffTicks: 0 };
       }
-      // CIWAITLANE-01: only plain slow-lane backoff yields to a settled CI wait.
+      // CI settlement gets its existing once-per-signal admission before the
+      // trailer rescue. A recorded closer decision ends the trailer bypass;
+      // stable refusals then keep the ordinary exponential backoff.
       const ciWait = decision.reason === 'slow-lane-backoff' ? evaluateCiWaitAdmission(ledger,
         { headSha: handler.headSha, ciSignal: handler.ciWaitSignal }) : null;
       if (ciWait) {
         decision = { ...decision, due: true, reason: ciWait.reason };
         if (recordSkip) recordCiWaitAdmission(rootDir, identity, { headSha: handler.headSha,
           ciSignal: ciWait.ciSignal, now: observedAt, logger });
+      }
+      let closerDecisionRecorded = false;
+      try {
+        closerDecisionRecorded = ledger?.headSha === handler.headSha
+          && Boolean(JSON.parse(ledger?.decisionFingerprint).closure?.action);
+      } catch { /* Legacy fingerprints have no recorded closer decision. */ }
+      if (handler.closerTrailerHead === true && decision.reason === 'slow-lane-backoff'
+        && !closerDecisionRecorded && !ciWaitNextActionFor(ledger, handler.headSha)) {
+        const lastRunAt = ledger?.lastRunAt !== undefined ? ledger.lastRunAt : ledger?.updatedAt;
+        const elapsedMs = ledger?.headSha === handler.headSha
+          ? Date.parse(observedAt) - Date.parse(lastRunAt ?? '') : NaN;
+        const due = !Number.isFinite(elapsedMs) || elapsedMs >= HAMMER_EVIDENCE_RECHECK_INTERVAL_MS;
+        decision = { ...decision, lane: 'active', due,
+          reason: due ? 'closer-trailer-closure-owed' : 'closer-trailer-closure-wait',
+          backoffTicks: 0, retryAfterMs: due ? 0 : HAMMER_EVIDENCE_RECHECK_INTERVAL_MS - elapsedMs };
       }
       if (!decision.due && recordSkip) {
         recordNoProgressLaneSkip(rootDir, identity, {

@@ -48,6 +48,35 @@ import { OPERATOR_HOLD_LABELS } from '../src/operator-hold-labels.mjs';
 const deadlineDecision = { head: 'live', row: 'R08-retry', action: 'hammer', actor: 'hammer', reason: 'retry-no-merge',
   queue: { intent: 'dispatch' }, deadline: { at: '2026-10-27T10:00:00Z' } };
 
+test('drain defers closer reconciliation but retains overdue recovery', async () => {
+  let recovered = 0;
+  await recoverOverdueOwnership({ rootDir: '/fixture', repo: 'example/repo', prNumber: 1,
+    enabled: true, allowCloserReconciliation: false, now: '2026-10-27T10:30:00Z', env: {},
+    subject: { headSha: 'live', labels: [] },
+    reviewStateRow: { review_status: 'posted', reviewer_head_sha: 'old' },
+    readLaneImpl: () => ({ headSha: 'live', nextAction: {
+      ...deadlineDecision, deadline: { ...deadlineDecision.deadline, class: 'recovery' } } }),
+    recoverImpl: input => { recovered++; assert.equal(input.reconcileCloser, null); return { outcome: 'recovery-exhausted' }; },
+    fetchCandidateImpl: () => assert.fail('drain must not read the live candidate') });
+  assert.equal(recovered, 1);
+});
+
+test('failed closer reconciliation logs a redacted error', async () => {
+  const warnings = [];
+  await recoverOverdueOwnership({ rootDir: '/fixture', repo: 'example/repo', prNumber: 1,
+    enabled: true, now: '2026-10-27T10:30:00Z', env: {},
+    subject: { headSha: 'live', labels: [] },
+    reviewStateRow: { review_status: 'posted', reviewer_head_sha: 'old' },
+    readLaneImpl: () => ({ headSha: 'live', nextAction: {
+      ...deadlineDecision, queue: { intent: 'reconcile' },
+      deadline: { ...deadlineDecision.deadline, class: 'recovery' } } }),
+    recoverImpl: input => input.reconcileCloser(),
+    fetchCandidateImpl: () => { throw new Error('fetch failed: Bearer secret123'); },
+    logger: { log() {}, warn: message => warnings.push(message) } });
+  assert.match(warnings[0], /fetch failed/);
+  assert.doesNotMatch(warnings[0], /secret123/);
+});
+
 test('legacy snapshot observations recognize string and GitHub object hold labels equally', () => {
   const select = labels => nextAction(deriveNextActionSnapshot({ head: 'live',
     observedAt: '2026-10-27T10:30:00Z', anchors: { firstActionableAt: '2026-10-27T10:00:00Z' },

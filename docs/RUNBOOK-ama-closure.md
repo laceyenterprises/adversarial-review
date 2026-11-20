@@ -2368,7 +2368,16 @@ Closer orchestration, review handoff and queued launch preflight consume the
 shared snapshot/decision. Reports retain action, actor, reason, head, anchored
 UTC deadline and queue intent through capacity waits, automatic stops and cap
 exhaustion. Only explicit hold/draft/disabled-policy intent selects operator
-hold. An overdue report never stops a later eligible pass. Rescue projections preserve reconciliation, live ownership and queue deferral
+hold. A lapsed posted-review closer action with proven absent custody re-enters the
+rescue dispatch-only entry from discovery. The entry reads the current head,
+checks for live holds, and runs ordinary closer admission. An explicit review,
+remediation, or daemon decision continues through its ordinary handler. A
+closer-trailer head can pass slow-lane backoff through the posted-review
+closure handler at the evidence recheck cadence. Admitted background work counts toward `ama.closer_queue_depth`
+while waiting for a launch slot. Budget and hard-stop refusals use the existing
+closure-wait escalation receipts.
+
+Rescue projections preserve reconciliation, live ownership and queue deferral
 instead of treating the legacy hammer spelling as launch permission. The no-progress
 lane persists the selected decision and keeps automated recovery eligible;
 confirmed drain observations preserve its existing debt and original intent.
@@ -9370,6 +9379,34 @@ handler and the closer run on the same pass. Read-only symptom of the old behavi
 watchdog `transition_pages` row for `R04-ownership`/`closure-recovery`/`ownership-unreadable`,
 a lane record whose `lastRunAt` never advances, and no watcher log line for the PR.
 Exhausted executable routes still stop at `recovery-exhausted` with their single page.
+For a lapsed closer decision on a posted row, discovery runs one fenced
+reconciliation after proving custody absent. The watchdog records that decision
+and the attempt time under its PR lock. A refused or waiting result does not
+trigger another live candidate read or closure dispatch until the
+decision or head changes, or five minutes pass. Intervening passes continue to
+the posted-review handler. Active drain defers this closer dispatch while
+overdue-transition paging remains enabled.
+In background dispatch mode, discovery submits through the ordinary hammer
+queue instead of awaiting closer admission under the watchdog lock. That queue
+deduplicates PR/head submissions and limits concurrent launches to the existing
+effective closer capacity (`amaCloserMaxConcurrentLaunches`, default three,
+bounded by the process ceiling of 32). Live-head mergeability sampling and
+label-classification retries run after a queue slot opens; inline mode and
+explicit operator rescue retain their synchronous receipt contract.
+
+A failed candidate read or a refusal without a successor or closure wait still
+pages `selected-owner-executor-unavailable` once per head/transition through
+`transition_pages`, then continues ordinary discovery. A receipt does not stand
+in for escalation. Raw `adversarial-merge-blocked` labels intentionally fence
+discovery reconciliation, just like other enforced holds; they do not trigger
+the immediate `closer-hard-stop` SEV1 page. Duplicate-family refusals retain
+their existing escalation.
+
+A closer-trailer head may bypass slow-lane backoff at the five-minute evidence
+recheck cadence only until the lane records a closer decision for that head.
+Stable refusals then resume ordinary exponential backoff. CI-wait admission
+runs before the trailer override: an unchanged pending CI wait keeps backoff,
+and a new settled CI signal permits its existing once-per-signal walk.
 
 ### Deadline-bound ownership (OWNERDEADLINE-01)
 

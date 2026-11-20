@@ -45,7 +45,7 @@ import { hostname } from 'node:os';
 import { OPERATOR_HOLD_LABELS } from './operator-hold-labels.mjs';
 import { isOrphanHeadReviewRequested } from './orphan-head-review-requested.mjs';
 import { recoverOrphan, isOrphanRecoveryWait, hasExactHeadReviewDecision, overdueNextAction } from './ama/orphan-watchdog.mjs';
-import { observeClosureLag } from './ama/closure-lag.mjs';
+import { observeCloserBacklog, observeClosureLag } from './ama/closure-lag.mjs';
 // ── AMA closure orchestration: dispatch decision + coexistence + audit ────────
 //
 // ARC-18: extracted from watcher.mjs. The AMA (autonomous-merge-authority)
@@ -862,6 +862,20 @@ async function maybeDispatchAmaClosureForInner({
   if (hammerWakeSink.value && hammerWakeSink.closerInvoked) {
     try { amaDispatchCloser.settleRefusedHammerWake({ ...hammerWakeSink.value, result }); }
     catch (error) { options.logger?.warn?.(`[watcher] refused hammer wake reconciliation failed: ${error.message}`); }
+  }
+  const hardStop = orphanRecovery?.fromDiscovery && !result?.dispatched && !result?.boundedWait
+    && !result?.needsOperator
+    && [result?.reason, ...(Array.isArray(result?.reasons) ? result.reasons : [])].find(reason =>
+      reason === 'duplicate-family-unresolved');
+  if (hardStop) {
+    try {
+      const boundedWait = await (options.observeClosureWaitImpl || observeClosureWait)({
+        rootDir: options.rootDir || ROOT, repo: options.repoPath, prNumber: options.prNumber,
+        headSha: options.candidate?.headSha, now: options.now ? options.now() : Date.now(),
+        env: options.env || process.env, immediate: true, waitClass: 'closer-hard-stop', reason: hardStop,
+      });
+      result = { ...result, boundedWait, needsOperator: true, operatorReason: hardStop };
+    } catch (error) { options.logger?.warn?.(`[watcher] closer hard-stop escalation failed: ${error.message}`); }
   }
   if (result && closureOwnerSink.shared) {
     const executorShared = readClosureNextAction(result);
@@ -3043,7 +3057,10 @@ async function dispatchAmaClosureFor({
   // from the closer's own gates (retry cap, ineligibility) still reaches the
   // merge-agent fallback and alerting, one tick later.
   let backgroundSettled = null;
-  if (!orphanRecovery && resolveAmaHammerDispatchModeImpl({ cfg: loadedConfig, logger }) === 'background') {
+  // Discovery uses the ordinary bounded queue; explicit rescue still awaits
+  // its dispatch receipt. Live-head sampling and admission retries run there.
+  if ((!orphanRecovery || orphanRecovery.fromDiscovery)
+    && resolveAmaHammerDispatchModeImpl({ cfg: loadedConfig, logger }) === 'background') {
     const backgroundKey = amaHammerBackgroundKey({
       repo: repoPath,
       prNumber,
@@ -3176,6 +3193,14 @@ async function dispatchAmaClosureFor({
         `[watcher] AMA hammer dispatch ${submission.state} in background for ${backgroundKey}; ` +
           `posted-review phase continues`,
       );
+      // A queued, admitted decision has no launch yet. Include it in the
+      // same PR census that the closer samples when it acquires a slot.
+      if (submission.state === 'queued' && hasHammerDispatchIntent(shared, {
+        repo: repoPath, prNumber, headSha: currentPrHeadSha,
+      })) {
+        try { await observeCloserBacklog({ rootDir, repo: repoPath, prNumber, logger }); }
+        catch (error) { logger?.warn?.(`AMA backlog observation failed: ${error.message}`); }
+      }
       return withAmaDispatchMetadata(
         {
           dispatched: false,

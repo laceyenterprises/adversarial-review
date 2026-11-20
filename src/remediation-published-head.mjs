@@ -13,6 +13,7 @@ import { requestRereviewWake, REREVIEW_WAKE_REASONS } from './rereview-wake.mjs'
 import { resolveRemediationReplyTarget, resolveReplyStorageKey } from './remediation-reply-paths.mjs';
 import { hasWorkerJobTrailer, FINAL_ROUND_REPLAY_PROOF } from './comment-only-final-round.mjs';
 import { recoveryDigest } from './comment-only-recovery-record.mjs';
+import { hqPublicationWorker } from './remediation-publication-workspace.mjs';
 import { addToDeliveryRetryIndex, buildReconcileCommentDelivery, releaseDeliveryClaim, tryAcquireDeliveryClaim } from './adapters/comms/github-pr-comments/comment-delivery.mjs';
 
 function isCurrentAttemptReply(replyPath, round, worker) {
@@ -35,6 +36,10 @@ function workerWorkspacePath(rootDir, job, worker, round) {
 }
 
 export function findWorkerPublishedHead({ rootDir, job, headSha, execFileSyncImpl = execFileSync }) {
+  return findPublishedHeadInWorkspace({ rootDir, job, headSha, execFileSyncImpl });
+}
+
+function findPublishedHeadInWorkspace({ rootDir, job, headSha, execFileSyncImpl, verifiedHqWorkspace = null }) {
   headSha = String(headSha || '').trim().toLowerCase();
   const plan = job?.remediationPlan;
   // Pending retries decrement currentRound; their retained attempt is nextRound.
@@ -48,7 +53,7 @@ export function findWorkerPublishedHead({ rootDir, job, headSha, execFileSyncImp
 
   // Movement, a fetched branch tip, and model-written reply text cannot attest
   // authorship. Read the exact tip and the hook's job trailer in one git call.
-  const workspaceDir = workerWorkspacePath(rootDir, job, worker, round);
+  const workspaceDir = hqPublicationWorker(job) ? verifiedHqWorkspace : workerWorkspacePath(rootDir, job, worker, round);
   if (!workspaceDir || !existsSync(join(workspaceDir, '.git'))) return null;
   try {
     const output = String(execFileSyncImpl('git', ['-C', workspaceDir, 'show', '--no-patch', '--format=%H%n%B', 'HEAD'],
@@ -91,7 +96,8 @@ export function completeWorkerPublishedHead({
         && publicationRecovery.proof?.method === FINAL_ROUND_REPLAY_PROOF
         && (job.finalRound !== 'comment-only' || publicationRecovery.completedFinalRound === true);
       if (!['pending', 'in_progress'].includes(job.status) && !recovered) return null;
-      const evidence = findWorkerPublishedHead({ rootDir, job, headSha, execFileSyncImpl });
+      const evidence = findPublishedHeadInWorkspace({ rootDir, job, headSha, execFileSyncImpl,
+        verifiedHqWorkspace: recovered ? publicationRecovery.workspaceDir : null });
       if (!evidence) return null;
       ensureFollowUpJobDirs(rootDir);
       const terminalPath = join(getFollowUpJobDir(rootDir, 'completed'), basename(jobPath));
@@ -105,13 +111,13 @@ export function completeWorkerPublishedHead({
       try {
         headSha = evidence.headSha;
         const { round, worker, reply, replyPath } = evidence;
-        round.startHeadSha = evidence.startHead;
-        round.publishedHeadSha = headSha;
-        job.remediationPlan.currentRound = round.round;
         // Reconcile the durable reply when it exists; absence never erases a proven publish.
         const remediationReply = reply ? { path: replyPath, state: 'worker-wrote-reply', payload: reply, reconciledAt: completedAt } : job.remediationReply;
-        writeFollowUpJob(jobPath, job);
-        let shared = remediationCloseout({ rootDir, job, headSha, workerPushedHeadSha: headSha,
+        const plan = job.remediationPlan;
+        const publishedRound = { ...round, startHeadSha: evidence.startHead, publishedHeadSha: headSha };
+        const publishedJob = { ...job, remediationPlan: { ...plan, currentRound: round.round,
+          rounds: plan.rounds.map(entry => entry === round ? publishedRound : entry) } };
+        let shared = remediationCloseout({ rootDir, job: publishedJob, headSha, workerPushedHeadSha: headSha,
           completedAt, ciGate, lifecycle, snapshot });
         let reReview = closeoutRereview(shared, reply?.reReview?.reason);
         // Retain the existing final-round reader's compatibility marker.
@@ -121,6 +127,7 @@ export function completeWorkerPublishedHead({
         });
         const completed = markFollowUpJobCompleted({ rootDir, jobPath, completedAt,
           resultingHeadSha: headSha,
+          publishedRound,
           remediationWorker: { ...worker, state: 'completed', reconciledAt: completedAt },
           remediationReply, reReview, commentDelivery,
           completion: { ...job.completion,
@@ -182,7 +189,7 @@ export function hasWorkerPublishArtifacts({ rootDir, job, includeWorkspace = tru
   const worker = job?.remediationWorker || round?.worker || {};
   if (!round?.spawnedAt && !round?.publishedHeadSha && !worker.spawnedAt) return false;
   if (round?.publishedHeadSha) return true;
-  const workspace = workerWorkspacePath(rootDir, job, worker, round);
+  const workspace = hqPublicationWorker(job) ? null : workerWorkspacePath(rootDir, job, worker, round);
   if (includeWorkspace && workspace && existsSync(join(workspace, '.git'))) return true;
   try {
     const replyPath = worker.replyPath || job?.remediationReply?.path

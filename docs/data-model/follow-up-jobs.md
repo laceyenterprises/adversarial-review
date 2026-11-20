@@ -186,8 +186,9 @@ FFACUSTODY-01 adds optional HQ worker descriptor fields
 short repository name), and `custodyBranch` for newly dispatched final-fix-all
 jobs. `dispatchMode` and `remediationPlan.dispatchPath` are `hq`.
 `launchRequestId` is the returned HQ LRQ, never the reply storage key.
-`workspaceDir` may remain null while provisioning is pending. Before workspace
-inspection at reconciliation, its real canonical HQ slot and `workspace.json`
+`workspaceDir` may remain null while provisioning is pending. For publication,
+the owner-scoped dispatch status must identify the selected checkout for the
+recorded launch and ticket. The real canonical HQ slot and `workspace.json`
 must match the recorded launch, worker class, owner, ticket, repo, branch and
 branch-push completion shape. Missing identity is refused, never reconstructed.
 Workspace validation uses the worker's explicit `hqRoot` when present, otherwise
@@ -649,6 +650,16 @@ and immutable live commit without changing the worker checkout, checks reviewed
 patch preservation and worker ownership, and rechecks head/base before accepting.
 A trailer alone cannot establish publication.
 
+An HQ `workspaceDir` is a path hint. It can name the worker root, which can
+contain more than one checkout. Publication uses the matching launch, worker
+run and ticket from owner-scoped `hq dispatch status`. Its repository path
+must select a real Git checkout inside the associated slot and the origin
+must match the durable job repository. Recovery binds the retained `commitSha`
+to the full checkout HEAD, resolving legacy abbreviations unambiguously in
+that repository, and verifies the live PR, destination ref and
+head against the durable job. Incomplete or conflicting evidence keeps the
+debt. This read adds no publication receipt or produced attestation.
+
 On failed current-head CI, a stopped publication debt with this proof can recover
 under the queue write lock. Recovery is bound to the full source-job digest and
 the observed live head. A valid completed comment-only final-round reply is
@@ -661,6 +672,7 @@ retains its proof in `completion` with `completion.publicationRecovery` recordin
 the recovery timestamp and previous stop. Both clear `unpublishedWork` only after
 proof. Repeated admission observes the active/completed successor rather than
 requeueing it again.
+Conflicting or unreadable terminal destinations preserve the source job.
 Recovered final completion also rebuilds the existing `commentDelivery` debt
 from the validated reply and indexes its completed job for ordinary delivery
 retry. Repeated admission restores that index while the recovered comment is

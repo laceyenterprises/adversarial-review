@@ -12744,7 +12744,7 @@ test('reconcile does NOT post when the terminal move was already done by another
   mkdirSync(stoppedDir, { recursive: true });
   writeFileSync(
     path.join(stoppedDir, path.basename(spawned.jobPath)),
-    JSON.stringify({ jobId: spawned.job.jobId, status: 'stopped', sealedByProcessA: true }),
+    JSON.stringify({ ...spawned.job, status: 'stopped', stoppedAt: '2026-04-21T10:29:00.000Z' }),
     'utf8'
   );
 

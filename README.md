@@ -2257,7 +2257,11 @@ without an operator-decision notice. Stable patch equivalence can prove a rebase
 live head from a stale worker checkout. On failed current-head CI, proven stopped
 debt recovers under the queue lock: validated final completion restores hammer
 ownership, or the remaining normal round budget owns the regression. Recovery
-preserves spent rounds and the original cap; unknown evidence stays unproven. See the [queue contract](docs/data-model/follow-up-jobs.md#branch-and-publication-contract-remedbranch-01).
+preserves spent rounds and the original cap. HQ publication uses the
+repository selected by the launch owner's status and verifies the live PR
+and destination ref. Incomplete evidence retains the publication debt, and a
+conflicting terminal destination preserves the source job.
+See the [queue contract](docs/data-model/follow-up-jobs.md#branch-and-publication-contract-remedbranch-01).
 
 PRM-06 activation requires a read-only `hq fleet quota status --json` check on
 the deployed producer before a submodule bump or reader deployment: both

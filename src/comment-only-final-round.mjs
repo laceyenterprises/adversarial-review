@@ -32,8 +32,9 @@ export function isTransientGitFailure(text) {
 
 function cherryEntries(stdout) {
   return String(stdout || '').split(/\r?\n/u).map((line) => line.trim()).filter(Boolean).map((line) => {
-    const match = line.match(/^([+-])\s+([0-9a-f]{7,40})\b/iu);
-    return match ? { sign: match[1], sha: match[2] } : { sign: '?', sha: line };
+    const match = line.match(/^([+-])\s+([0-9a-f]{7,40})$/iu);
+    if (!match) throw new Error('malformed git cherry evidence');
+    return { sign: match[1], sha: match[2] };
   });
 }
 
@@ -82,16 +83,30 @@ export function hasWorkerJobTrailer(message, jobId) {
  */
 export async function proveFinalRoundWorkerPush({
   repo, prNumber, jobId, reviewedHead, baseBranch, workspaceDir, execFileImpl,
-  liveHeadSha = null, withheldBecause = null, log = console, sleep,
+  liveHeadSha = null, withheldBecause = null, publicationBranch = null, expectedLocalHead = null, log = console, sleep,
 }) {
-  if (liveHeadSha === null) {
+  const readLiveHead = async () => {
+    // HQ's registered branch can be a provisioning alias. Bind publication to
+    // the actual destination PR's head and base refs in its repository.
+    const args = publicationBranch ? ['api', `repos/${repo}/pulls/${prNumber}`]
+      : ['pr', 'view', String(prNumber), '--repo', repo, '--json', 'headRefOid', '--jq', '.headRefOid'];
+    const { stdout } = await execGhWithRetry({ execFileImpl, args, log, ...(sleep ? { sleep } : {}) });
+    if (!publicationBranch) return String(stdout || '').trim();
     try {
-      const remote = await execGhWithRetry({
-        execFileImpl, args: ['pr', 'view', String(prNumber), '--repo', repo, '--json', 'headRefOid', '--jq', '.headRefOid'],
-        log, ...(sleep ? { sleep } : {}),
-      });
-      const remoteSha = String(remote.stdout || '').trim();
-      liveHeadSha = SHA.test(remoteSha) ? remoteSha : null;
+      const pr = JSON.parse(stdout);
+      if (pr.number === Number(prNumber) && pr.state === 'open'
+        && pr.head?.repo?.full_name?.toLowerCase() === repo.toLowerCase()
+        && pr.base?.repo?.full_name?.toLowerCase() === repo.toLowerCase()
+        && pr.head.ref === publicationBranch && pr.base.ref === baseBranch
+        && typeof pr.head.sha === 'string' && SHA.test(pr.head.sha)) return pr.head.sha;
+    } catch { /* Incomplete destination evidence cannot prove publication. */ }
+    return null;
+  };
+  if (liveHeadSha === null || publicationBranch) {
+    try {
+      const observed = await readLiveHead();
+      if (liveHeadSha !== null && observed && observed !== liveHeadSha) withheldBecause ||= 'live-publication-target-changed';
+      liveHeadSha = SHA.test(observed || '') ? observed : null;
     } catch (err) {
       log.warn?.(`[follow-up-remediation] Worker-push proof failed for ${repo}#${prNumber}: ${err?.message || err}`);
       throw err;
@@ -105,6 +120,8 @@ export async function proveFinalRoundWorkerPush({
     return { workerPushedHeadSha: null, liveHeadSha, reason };
   };
   if (withheldBecause) return withheld(withheldBecause);
+  if (!workspaceDir) return withheld('publication-workspace-unavailable');
+  if (publicationBranch && !liveHeadSha) return withheld('live-publication-target-unavailable');
   if (!SHA.test(String(reviewedHead || ''))) return withheld('reviewed-head-invalid');
   const deadline = Date.now() + loadAwareTimeoutMs(60000);
   const git = async (args) => {
@@ -122,12 +139,22 @@ export async function proveFinalRoundWorkerPush({
   try {
     const localSha = (await git(['rev-parse', 'HEAD'])).trim();
     if (!SHA.test(localSha) || !SHA.test(liveHeadSha)) return withheld(`live-head-mismatch local=${localSha || 'none'} live=${liveHeadSha || 'none'}`);
-    if (localSha === reviewedHead) return { workerPushedHeadSha: null, liveHeadSha, reason: 'no-push' };
+    if (expectedLocalHead !== null && localSha !== expectedLocalHead) {
+      const uniqueLocalCommit = /^[a-f0-9]{7,39}$/u.test(expectedLocalHead)
+        && localSha.startsWith(expectedLocalHead)
+        && (await git(['rev-parse', `--disambiguate=${expectedLocalHead}`])).trim() === localSha;
+      if (!uniqueLocalCommit) return withheld('retained-commit-mismatch');
+    }
+    if (localSha === reviewedHead) {
+      return { workerPushedHeadSha: null, liveHeadSha,
+        reason: publicationBranch && liveHeadSha !== reviewedHead ? 'live-head-moved-without-local-work' : 'no-push' };
+    }
     const workerOwns = async (sha) => hasWorkerJobTrailer(await git(['show', '-s', '--format=%B', sha]), jobId);
     if (!await workerOwns(localSha)) return withheld('head-not-worker-commit');
     if (localSha !== liveHeadSha) await git(['fetch', '--no-recurse-submodules', '--no-tags', 'origin', baseBranch]);
     const baseRef = `origin/${baseBranch}`;
     const base = (await git(['rev-parse', '--verify', `${baseRef}^{commit}`])).trim();
+    if (publicationBranch && !SHA.test(base)) return withheld('base-head-invalid');
     // Inspect immutable live objects without changing the worker's checkout.
     // A publisher may have rebased in a separate checkout after this HEAD was
     // captured. Do not accept a trailer alone: all local work must survive.
@@ -162,18 +189,27 @@ export async function proveFinalRoundWorkerPush({
     }
     const pushed = cherryEntries(await git(['cherry', reviewedHead, head, base]));
     const added = pushed.filter(({ sign }) => sign !== '-');
+    if (publicationBranch && !added.length) return withheld('no-published-worker-patches');
     for (const { sha } of governedProof ? [] : added) {
       if (!await workerOwns(sha)) {
         return withheld(`foreign-commit-in-push ${sha.slice(0, 12)}`);
       }
     }
     const reviewedCommitsReplayed = governedProof?.reviewedCommitsReplayed ?? pushed.length - added.length;
-    const refreshed = await lookup(['pr', 'view', String(prNumber), '--repo', repo, '--json', 'headRefOid', '--jq', '.headRefOid']);
+    if (publicationBranch) {
+      const destination = await lookup(['api', `repos/${repo}/git/ref/heads/${encodeURIComponent(publicationBranch)}`]);
+      let ref;
+      try { ref = JSON.parse(destination.stdout); } catch { /* Ref proof must be machine-readable. */ }
+      if (ref?.ref !== `refs/heads/${publicationBranch}` || ref?.object?.type !== 'commit' || ref.object.sha !== head) {
+        return withheld('live-destination-ref-mismatch');
+      }
+    }
+    const refreshed = await readLiveHead().catch(err => { err.finalRoundLiveLookupFailure = true; throw err; });
     if (governedProof) {
       const currentBase = await lookup(['api', `repos/${repo}/git/ref/heads/${encodeURIComponent(baseBranch)}`, '--jq', '.object.sha']);
       if (String(currentBase.stdout || '').trim() !== base) return withheld('base-changed-during-proof');
     }
-    if (String(refreshed.stdout || '').trim() !== head ||
+    if (refreshed !== head ||
         (await git(['rev-parse', 'HEAD'])).trim() !== localSha ||
         (await git(['rev-parse', baseRef])).trim() !== base) return withheld('head-or-base-changed-during-proof');
     return {

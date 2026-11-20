@@ -2136,13 +2136,21 @@ function moveTerminalJobRecord({
   ensureFollowUpJobDirs(rootDir);
 
   const terminalPath = join(getFollowUpJobDir(rootDir, destinationKey), basename(jobPath));
+  const readDestination = (source) => {
+    const existing = readFollowUpJob(terminalPath);
+    if (existing.status !== destinationKey || (source && (existing.jobId !== source.jobId
+      || existing.repo !== source.repo || existing.prNumber !== source.prNumber))) {
+      throw new Error(`Conflicting follow-up job at terminal destination ${terminalPath}`);
+    }
+    return { job: existing, jobPath: terminalPath, alreadyTerminal: true };
+  };
 
   let currentJob;
   try {
     currentJob = readFollowUpJob(jobPath);
   } catch (err) {
     if (err?.code === 'ENOENT' && existsSync(terminalPath)) {
-      return { job: readFollowUpJob(terminalPath), jobPath: terminalPath, alreadyTerminal: true };
+      return readDestination();
     }
     throw err;
   }
@@ -2151,8 +2159,9 @@ function moveTerminalJobRecord({
     return { job: currentJob, jobPath: terminalPath, alreadyTerminal: true };
   }
   if (existsSync(terminalPath)) {
+    const completed = readDestination(currentJob);
     rmSync(jobPath, { force: true });
-    return { job: readFollowUpJob(terminalPath), jobPath: terminalPath, alreadyTerminal: true };
+    return completed;
   }
 
   const nextJob = buildNextJob(currentJob);
@@ -2161,8 +2170,9 @@ function moveTerminalJobRecord({
     writeFileAtomic(terminalPath, `${JSON.stringify(nextJob, null, 2)}\n`, { overwrite: false });
   } catch (err) {
     if (err?.code === 'EEXIST' && existsSync(terminalPath)) {
+      const completed = readDestination(currentJob);
       rmSync(jobPath, { force: true });
-      return { job: readFollowUpJob(terminalPath), jobPath: terminalPath, alreadyTerminal: true };
+      return completed;
     }
     throw err;
   }
@@ -3424,6 +3434,7 @@ function markFollowUpJobCompleted({
   completionPreview = null,
   commentDelivery = null,
   jobUpdates = null,
+  publishedRound = null,
 }) {
   const normalizedCompletedAt = completedAt ?? finishedAt;
   const normalizedCompletion = completion || {
@@ -3445,15 +3456,17 @@ function markFollowUpJobCompleted({
         reReview: reReview || currentJob.reReview,
         remediationPlan: {
           ...(currentJob.remediationPlan || buildRemediationRoundPlan()),
+          ...(publishedRound ? { currentRound: publishedRound.round } : {}),
           nextAction: null,
           stop: null,
           stopReason: null,
         },
       };
 
-      if (currentJob?.remediationPlan?.currentRound > 0 && getCurrentRound(nextJob)) {
+      if (getCurrentRound(nextJob)) {
         nextJob = updateCurrentRound(nextJob, (round) => ({
           ...round,
+          ...(publishedRound ? { startHeadSha: publishedRound.startHeadSha, publishedHeadSha: resultingHeadSha } : {}),
           state: 'completed',
           stop: null,
           resultingHeadSha,

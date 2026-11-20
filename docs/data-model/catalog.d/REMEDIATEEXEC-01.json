@@ -10,10 +10,11 @@
       "relatedSchemaSurfaces": [
         "src/remediation-job-missing-recovery.mjs",
         "src/remediation-ended-round-recovery.mjs",
+        "src/remediation-publication-workspace.mjs",
         "src/remediation-round-recovery.mjs"
       ],
       "owner": "follow-up remediation queue",
-      "compatibility": "Optional remediationJobMissingRecovery.round scopes automatic ended-round recovery to head and spent round. Existing records remain readable; currentRound, maxRounds, backoff and publication proof remain authoritative. No new lifecycle status."
+      "compatibility": "Optional remediationJobMissingRecovery.round scopes automatic ended-round recovery to head and spent round. Existing records remain readable. HQ checkout selection uses owner status; proof binds the retained commit and live destination. No new fields or lifecycle states for HQ publication."
     }
   ]
 }

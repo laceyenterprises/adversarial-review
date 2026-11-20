@@ -1304,6 +1304,10 @@ only within the remaining round budget. Recovery clears publication debt and
 retains the previous stop as audit evidence; it never refunds a spent round.
 Unknown, missing or partial publication retains its debt. Exhausted ordinary
 recovery escalates explicitly without another round.
+HQ publication requires the launch owner's selected repository under its
+registered worker slot and agreement between the durable job, live PR and
+destination ref. A failed terminal write preserves the source job. Publication
+leaves signed source-policy evidence and reviewer findings to their existing gates.
 REMEDIATEEXEC-01: watcher closure reconciliation requeues locally without network
 publication. Recovery supplied with an explicit worker environment can publish
 a verifiable retained checkout owned by the current uid before another round.

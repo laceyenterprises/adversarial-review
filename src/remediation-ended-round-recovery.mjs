@@ -15,6 +15,7 @@ import { tryAcquireDeliveryClaim, releaseDeliveryClaim } from './adapters/comms/
 import { findLiveAmaCloserLease } from './ama/closer-lease.mjs';
 import { completeWorkerPublishedHead } from './remediation-published-head.mjs';
 import { OWNER_AUTH_HOLD, selectRemediationReadRoute } from './remediation-owner-auth.mjs';
+import { resolvePublicationWorkspace } from './remediation-publication-workspace.mjs';
 
 const execAsync = promisify(execFile);
 
@@ -73,15 +74,18 @@ export async function recoverEndedRemediationRound({ execFileImpl = execAsync,
     let publicationRecovery = null;
     let revisionRef = headSha;
     const retained = job.unpublishedWork;
-    if (retained?.workspaceDir && retained.commitSha && job.branch && job.baseBranch) {
+    const ownedByCurrentUid = path => typeof process.getuid === 'function' && statImpl(path).uid === process.getuid();
+    const workspaceDir = retained?.commitSha && job.branch && job.baseBranch
+      ? await resolvePublicationWorkspace({ job, workspaceDir: retained.workspaceDir,
+        execFileImpl: boundedExec, env: publicationEnv, canInspect: ownedByCurrentUid }) : null;
+    if (workspaceDir) {
       const git = async args => String((await boundedExec('git',
-        ['--no-replace-objects', '-C', retained.workspaceDir, ...args],
+        ['--no-replace-objects', '-C', workspaceDir, ...args],
         { timeout: 15_000, maxBuffer: 4 * 1024 * 1024 })).stdout || '').trim();
       let verified = false;
       try {
         // Refuse cross-user checkout mutation before the first git call.
-        if (typeof process.getuid !== 'function'
-          || statImpl(retained.workspaceDir).uid !== process.getuid()) {
+        if (!ownedByCurrentUid(workspaceDir)) {
           return recreateMissingRemediationJob(options);
         }
         // Retained workspaces may lack the remote base ref. Refresh the same
@@ -89,7 +93,7 @@ export async function recoverEndedRemediationRound({ execFileImpl = execAsync,
         const readRoute = await selectRemediationReadRoute({ repo, reviewerModel: job.reviewerModel, env: publicationEnv });
         const refspec = `+refs/heads/${job.baseBranch}:refs/remotes/origin/${job.baseBranch}`;
         if (readRoute) {
-          await readRoute.run(() => boundedExec('git', ['--no-replace-objects', '-C', retained.workspaceDir,
+          await readRoute.run(() => boundedExec('git', ['--no-replace-objects', '-C', workspaceDir,
             'fetch', '--no-recurse-submodules', '--no-tags', readRoute.url, refspec], { env: readRoute.gitEnv, timeout: 15_000 }));
         } else {
           await git(['fetch', '--no-recurse-submodules', '--no-tags', 'origin', refspec]);
@@ -129,7 +133,7 @@ export async function recoverEndedRemediationRound({ execFileImpl = execAsync,
         });
         if (!unchanged) return { recreated: false, reason: 'job-evidence-changed', jobId: job.jobId };
         try {
-          const result = await publishImpl({ workspaceDir: retained.workspaceDir,
+          const result = await publishImpl({ workspaceDir,
             baseBranch: job.baseBranch, previousHead: headSha, expectedRemoteSha: headSha,
             branch: job.branch, repo, prNumber, execFileImpl: boundedExec,
             env: publicationEnv, reviewerModel: job.reviewerModel, expectedCandidate: retained.commitSha,

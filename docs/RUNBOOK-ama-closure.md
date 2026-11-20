@@ -7488,6 +7488,18 @@ checks that require the local environment. Workflow-level `mirrored_by` lists
 alone are insufficient because a workflow can succeed with individual work
 skipped.
 
+LAC-2240: current ID-keyed `checks` registries use the canonical mirror's
+`runs` and `paths`/`suite.paths` contract. Only `pre-push` contributions are
+candidates for local coverage; a check also declaring `ci` maps through its
+`ci.job` and `ci.name`. The corresponding exact-head Actions job must be green
+and its unique named workflow step must independently be completed with
+`success`. A skipped step inside a green job is not coverage. Job ID, run ID,
+head and check-run name must agree. Unreadable, absent or ambiguous step evidence
+runs the check locally. Per-check advisory and local-only placement remain
+local, as do checks without a CI mapping. Legacy `path-glob`/`ci_jobs` manifests
+retain their existing explicit-job contract; mixed schemas refuse coverage.
+These reads retain the existing deadline, quota reserve and ETag transport.
+
 The closer requires byte-identical manifest copies in the checkout, at the exact
 validation head, and at the live PR's pinned base SHA. New or changed manifests,
 including edits to `ci_jobs` or `local_only`, stay local until they land on the

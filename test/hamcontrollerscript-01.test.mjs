@@ -218,16 +218,18 @@ test('a local commit the PR lacks is published before verify-head; revalidation 
   assert.ok(firstVerify < yielded && yielded < validated && validated < secondVerify, events.join('\n'));
 });
 
-function mirrorFixture(t, { entries, runs, manifestFailure, checkFailure, partialChecks, localFailure, remoteDrift, baseDrift, baseFailure, subcontext, duplicateGlobs } = {}) {
+function mirrorFixture(t, { entries, runs, manifestFailure, checkFailure, partialChecks, localFailure, remoteDrift, baseDrift, baseFailure, subcontext, duplicateGlobs, currentRegistry, jobDetails } = {}) {
   const f = hammerFixture(t);
   const dir = join(f.checkout, 'scripts/ci-mirror');
   const path = 'scripts/ci-mirror/checks.json';
   mkdirSync(dir, { recursive: true });
   const commands = entries.map(([name, fields]) => ({ name, command: `fixture-command ${name}`, ...fields }));
-  const manifest = { 'path-glob': { 'src/**': commands },
+  let manifest = { 'path-glob': { 'src/**': commands },
     'always-on-workflow-coverage': { 'fixture.yml': { mirrored_by: commands.map(check => check.name) } },
     'ratchet-placement': { 'local-only': { 'scripts/host-check.py': 'Requires local state' } } };
   if (duplicateGlobs) manifest['path-glob']['src/*.mjs'] = commands;
+  if (currentRegistry) manifest = { checks: Object.fromEntries(commands.map(row => [row.name,
+    { runs: ['ci', 'pre-push'], paths: ['src/**'], ...row }])) };
   writeFileSync(join(f.checkout, path), JSON.stringify(manifest));
   const subpath = 'scripts/ci-mirror/checks.adversarial-review.json';
   const submanifest = { 'path-glob': { 'src/**': [
@@ -263,6 +265,14 @@ function mirrorFixture(t, { entries, runs, manifestFailure, checkFailure, partia
       })),
     },
   };
+  if (currentRegistry) for (const [index, [name]] of (runs || []).entries()) {
+    responses[`repos/fixture/repo/actions/jobs/${index + 1}`] = jobDetails === false ? null : {
+      id: index + 1, run_id: 123, head_sha: head, name, status: 'completed', conclusion: 'success',
+      steps: commands.filter(row => row.ci?.job === name).map(row => ({
+        name: row.ci.name, status: 'completed', conclusion: 'success',
+      })), ...jobDetails,
+    };
+  }
   const calls = join(f.dir, 'gh-calls');
   const localChecks = join(f.dir, 'local-checks');
   writeFileSync(join(f.bin, 'gh'), `#!${process.execPath}
@@ -720,4 +730,42 @@ test('neither closer prompt carries a controller shell body or a tty/stdin read'
   const mergeCall = hammerMerge.match(/exec-hammer pr merge [^\n]*\\\n(?:[^\n]*\\\n)*[^\n]*/)?.[0] ?? '';
   assert.match(mergeCall, /--match-head-commit "\$POST_REMEDIATION_SHA"/);
   assert.doesNotMatch(hammerMerge, /--admin\b(?![^\n]*(?:never|Never|NOT))/);
+});
+
+
+test('current registry coverage requires successful exact workflow step evidence', async t => {
+  const f = mirrorFixture(t, { currentRegistry: true,
+    entries: [['covered', { ci: { job: 'build', name: 'Run covered' } }],
+      ['skipped', { ci: { job: 'build', name: 'Run skipped' } }],
+      ['local', { ci: { job: 'build', name: 'Run local' }, advisory: true }]],
+    runs: [['build']], jobDetails: { steps: [
+      { name: 'Run covered', status: 'completed', conclusion: 'success' },
+      { name: 'Run skipped', status: 'completed', conclusion: 'skipped' },
+      { name: 'Run local', status: 'completed', conclusion: 'success' },
+    ] },
+  });
+  const result = await f.run();
+  assert.equal(result.status, 0, result.stderr);
+  assert.deepEqual(f.local(), ['fixture-command skipped', 'fixture-command local']);
+  const checks = result.closeResult.localValidation[0].checks;
+  assert.deepEqual(checks.map(row => [row.status, row.reason]), [
+    ['ci-covered', 'exact-head-ci-success'], ['run', 'ci-step-not-successful'], ['run', 'local-only'],
+  ]);
+  assert.equal(f.calls().filter(call => call[1]?.includes('/actions/jobs/')).length, 1);
+});
+
+test('current registry unknown and mismatched workflow steps retain local validation', async t => {
+  for (const [jobDetails, reason] of [
+    [false, 'ci-step-read-failed'], [{ head_sha: 'a'.repeat(40) }, 'ci-step-job-mismatch'],
+    [{ run_id: 124 }, 'ci-step-job-mismatch'], [{ steps: [] }, 'ci-step-missing'],
+    [{ steps: [1, 2].map(() => ({ name: 'Run covered', status: 'completed', conclusion: 'success' })) }, 'ci-step-ambiguous'],
+  ]) {
+    const f = mirrorFixture(t, { currentRegistry: true,
+      entries: [['covered', { ci: { job: 'build', name: 'Run covered' } }]], runs: [['build']], jobDetails,
+    });
+    const result = await f.run();
+    assert.equal(result.status, 0, result.stderr);
+    assert.deepEqual(f.local(), ['fixture-command covered']);
+    assert.equal(result.closeResult.localValidation[0].checks[0].reason, reason);
+  }
 });

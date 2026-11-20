@@ -4045,9 +4045,14 @@ are never erased by label presence.
 If the posting-time GraphQL head/label read fails, the head/state helper retries
 through REST, reading the current PR head and paginating current issue labels.
 Neither dispatch labels nor pre-review context can authorize a live-pack waiver.
-If REST also fails, the review keeps enforce mode with no waiver. Merge preflight
-independently reads REST inputs and refuses a change in head or labels during its
-evaluation; a successful preflight does not rewrite an already-posted review.
+If REST also fails, the review keeps enforce mode with no waiver. From a cold
+process, `node bin/live-pack-check.mjs OWNER/REPO PR HEAD` prepares the
+`adversarial-review` app read context with its existing bootstrap credential
+before starting merge preflight. If preparation fails, the CLI exits 1 and
+prints `ok: false`, `reason: "dispatch-context-unavailable"`, and a redacted
+`detail` as JSON. With a prepared context, merge preflight independently reads
+REST inputs and refuses a change in head or labels during evaluation. A
+successful preflight does not rewrite an already-posted review.
 After ordinary deployment, SRE observes the next natural label application on
 an already-reviewed gate-held PR scheduling review within one watcher cycle,
 without a head change or rescue. This live receipt remains pending; no worker

@@ -9,7 +9,10 @@ recording `boundAt` and starting new series/head/lifetime episode counters.
 Confirmed `dispatchCharges` remain intact. The review-request reason
 `system-repair-epoch:<id>:<head>` records admission; request/claim CAS and the
 delivered-pass journal prevent duplicate review. Live/unknown reservations
-exclude another writer. Before admission, the watcher observes a pending
+exclude another writer. A replay requires the same `ownerKey` and `baseHead`.
+Native follow-up custody can satisfy the reservation's queue check only through
+the existing [pre-spawn claim](follow-up-jobs.md#live-pr-owner-admission-snapshot-remediationowner-01).
+Before admission, the watcher observes a pending
 reservation at most once per 30 seconds, recording `ownerObservedAt`,
 `ownerState` (`live`, `unknown`, or `terminal`) and nullable `ownerLaunch`.
 Complete terminal launch/retry evidence retires custody with `terminalAt`

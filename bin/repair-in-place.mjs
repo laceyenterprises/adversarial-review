@@ -6,9 +6,9 @@ import { pathToFileURL } from 'node:url';
 import { reserveRepairEpoch, pageRepairCap, observeRepairOwner } from '../src/repair-epochs.mjs';
 import { readRepairFacts } from '../src/repair-facts.mjs';
 import { tryAcquireCloserIntentLock } from '../src/ama/pre-receipt-intent.mjs';
-import { readAmaCloserLease, abandonedAmaCloserLeaseOutcome } from '../src/ama/closer-lease.mjs';
+import { readAmaCloserLease, abandonedAmaCloserLeaseOutcome, findLiveAmaCloserLease } from '../src/ama/closer-lease.mjs';
 import { readLaunchRequestStatusFromLedgerAsync } from '../src/session-ledger-read-adapter.mjs';
-import { listFollowUpJobsInDir } from '../src/follow-up-jobs.mjs';
+import { readRepairFollowUpClaim } from '../src/repair-follow-up-claim.mjs';
 import { launchRequestOwned } from '../src/ama/launch-request-status.mjs';
 import { prepareDispatchReadContext, readDispatchLaunches } from '../src/dispatch-read-client.mjs';
 
@@ -35,7 +35,7 @@ function contextUnavailable(ready) {
 export async function main(args, {
   env = process.env, prepareDispatchReadContextImpl = prepareDispatchReadContext,
 } = {}) {
-  const [rootDir, repo, prRaw, headSha, ownerKey, conflicting] = args;
+  const [rootDir, repo, prRaw, headSha, ownerKey, conflicting, ticket, launcherPidRaw] = args;
   const prNumber = Number(prRaw);
   if (!rootDir || !repo?.includes('/') || !(prNumber > 0) || !ownerKey
     || !/^[0-9a-f]{40}$/i.test(headSha)) throw new Error('invalid repair request');
@@ -54,10 +54,19 @@ export async function main(args, {
   const readImpl = (selector, readArgs) => readDispatchLaunches(selector, { ...readArgs, env });
   let result;
   try {
-    const queued = ['pending', 'inProgress'].flatMap(status =>
-      listFollowUpJobsInDir(rootDir, status, { repo, prNumber, caseInsensitiveRepo: true }));
-    if (queued.length) return { ok: false, reason: 'remediation-owned', jobId: queued[0].job.jobId };
-    const lease = readAmaCloserLease(rootDir, { repo, prNumber, headSha });
+    const checkClaim = () => readRepairFollowUpClaim(rootDir, {
+      repo, prNumber, headSha, ticket,
+      launcherPid: /^[1-9]\d*$/.test(launcherPidRaw) ? Number(launcherPidRaw) : null,
+    });
+    const claim = checkClaim();
+    if (!claim.ok) return claim;
+    const prLease = claim.claimedAt && findLiveAmaCloserLease(rootDir, { repo, prNumber });
+    if (prLease && (prLease.headSha.toLowerCase() !== headSha.toLowerCase()
+      || !['pending', 'dispatched'].includes(prLease.lease.status)
+      || (prLease.lease.status === 'dispatched' && !prLease.lease.lrqId))) {
+      return { ok: false, reason: 'closer-owned-or-unknown' };
+    }
+    const lease = prLease?.lease ?? readAmaCloserLease(rootDir, { repo, prNumber, headSha });
     if (lease?.status === 'pending' && !abandonedAmaCloserLeaseOutcome(lease)) {
       return { ok: false, reason: 'closer-submission-owned' };
     }
@@ -76,6 +85,11 @@ export async function main(args, {
       if (!ready.ok) return contextUnavailable(ready);
     }
     const terminalOwner = await observeRepairOwner({ rootDir, epoch: pending, readImpl });
+    if (claim.claimedAt) {
+      const current = checkClaim();
+      if (!current.ok) return current;
+      if (current.claimedAt !== claim.claimedAt) return { ok: false, reason: 'remediation-ownership-unknown' };
+    }
     result = reserveRepairEpoch({ rootDir, repo, prNumber, headSha, ownerKey,
       cause: facts.cause, terminalOwner });
   } finally { release(); }

@@ -89,6 +89,7 @@ export function reserveRepairEpoch({ rootDir, repo, prNumber, headSha, ownerKey,
   if (!SHA.test(headSha) || !ownerKey || !cause) throw new Error('invalid repair identity');
   return mutateRepairEpochs(rootDir, { repo, prNumber }, ledger => {
     const epochs = ledger.repairEpochs ||= [];
+    const replay = epochs.find(epoch => epoch.ownerKey === ownerKey);
     const ended = terminalOwner?.ownerState === 'terminal'
       && epochs.find(epoch => epoch.id === terminalOwner.id && epoch.ownerKey === terminalOwner.ownerKey
         && !epoch.reviewHead && !epoch.terminalAt);
@@ -96,7 +97,7 @@ export function reserveRepairEpoch({ rootDir, repo, prNumber, headSha, ownerKey,
       ended.terminalAt = now;
       ended.terminalLaunch = terminalOwner.ownerLaunch;
     }
-    const replay = epochs.find(epoch => epoch.ownerKey === ownerKey);
+    if (replay && !sameHead(replay.baseHead, headSha)) return { ok: false, reason: 'repair-head-mismatch' };
     if (replay) return replay.terminalAt
       ? { ok: false, reason: 'repair-worker-terminal', epoch: replay }
       : { ok: true, epoch: replay, replayed: true };

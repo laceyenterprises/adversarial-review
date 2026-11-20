@@ -5845,6 +5845,38 @@ and no local pass, then proceeds to fresh verify-head and the exact-head require
 GitHub checks. Genuine test failures require repair. No strict-mode, predicate,
 head, attestation, reversal, lease or CI requirement is waived.
 
+Canonical absolute, idle, check and SIGALRM deadlines, unconfirmed controller
+validation drain, and the Telegram guard's explicit Python-lane process-inspection
+no-verdict stop with `canonical-validation-deferred`. The exact-head private
+receipt names the reason and cleanup owner. The validation result is UNKNOWN.
+Read adjacent logs and the existing cleanup evidence. Use the controller
+registration for owned drain and lease disposition, or the bounded-command
+cleanup line for a standalone run. Preserve unknown cleanup for the recovery
+owner. The closer ends the run with the existing deferred audit. Repeating
+validation or close on that head in the run returns 75 before another battery
+or controller starts. A changed head remains subject to ordinary validation.
+Only the `telegram-responder-guard` check can supply the Python-lane no-verdict
+signal; another check quoting that line retains its own result. A passing
+Telegram result containing that explicit no-verdict still defers: the reload
+cases do not establish the unavailable process-inspection verdict. A recorded
+UNKNOWN handoff takes precedence over own-package import-fault fallback.
+Operator cancellation retains its own outcome even when cleanup returns 125;
+it does not become a canonical-validation deferral.
+
+The validator records the deferred audit and `last-phase` receipt non-finally.
+The closer repeats the audit helper without `--final` and ends the run; no
+`terminal-stop` progress receipt is expected. Once the matching launch ends,
+dispatch records `canonical-validation-deferred` in the existing per-head
+inconclusive retry store. Its watcher owner retains full refunds, applies
+exponential backoff from attempt N (default three, starting at five minutes,
+capped at one hour), and surfaces one notification through the existing
+closure-wait receipt. Re-observing a launch neither increments its attempt nor
+advances its deadline. This follows INCONCLUSIVERETRY-01b rather than parking
+the PR or consuming adjudication budget.
+The validator owns its timeout and process cleanup. Avoid a second shell alarm
+around it. If the outer tool returns 124 or 142 first, follow the same handoff
+from the available diagnostics and keep unconfirmed cleanup explicit.
+
 After normal float and watcher/follow-up restart, SRE verifies both PID start
 times and kickstarts through the registered owner if either bounce was skipped.
 Observe 24 hours: no closer ends terminal on a closer-originated reason without
@@ -7709,8 +7741,10 @@ The private per-attempt receipt records local results and `ci-covered` checks
 with their job names and run IDs. Current step mappings additionally record
 the Actions job ID and the exact step name; legacy job mappings retain their
 existing receipt shape.
-`close-result.json` includes those receipts under `localValidation` for both
-completed and stopped closes.
+`close-result.json` includes those receipts under `localValidation` when the
+controller can write it. A standalone invocation in a closer run can use this
+same coverage reader when its worktree is clean and the authenticated PR read
+confirms its exact HEAD. Dirty or unreadable checkouts use local validation.
 
 Source verify-head before publishing the audit. BASEFETCH-01 captures the live
 base through a private temporary ref instead of mutable `FETCH_HEAD`; see the

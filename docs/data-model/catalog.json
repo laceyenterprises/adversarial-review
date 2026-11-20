@@ -1130,6 +1130,7 @@
       "operatorHoldRefundFields": ["operatorHoldRefundStopKeys", "operatorHoldRefundedAt"],
       "operatorHoldRefundsLifetime": true,
       "leaseWaitExhausted": "green exact-head contention refunds failures and resumes next pass; overload release sets true with deferralNextAt=null for ordinary capped selection",
+      "canonicalValidationDeferral": "Ended canonical-validation-deferred launches retain infrastructure refunds and additionally enter the existing per-head closer-inconclusive-retries store for watcher-owned exponential backoff and one closure-wait notification; lease-wait timestamps cannot bypass that deadline. No store shape change.",
       "lastOverloadDeferral": "archived exhausted overload wire receipt with jobKey and exhaustedAt ISO time; only the same job within 30 minutes of the original exhaustion inherits exhaustion and suppresses further overload refunds",
       "overloadDeferral": "active v1 overload wire receipt; null after delivered exhaustion page and release; only same-job overloads within 30 minutes inherit archived exhaustion; new jobs and expired windows regain bounded backoff within existing lifetime refund caps",
       "leaseDeferralHistoryLimit": 64,

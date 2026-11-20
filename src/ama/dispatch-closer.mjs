@@ -5663,6 +5663,20 @@ async function maybeDispatchAmaCloserAttempt({
       repo, prNumber, headSha: queuedHead, launchRequestId: existingRecord.launchRequestId,
       outcome: 'no-merge', retryable: true, phaseOutcome: classifyHammerExit(parkReason), lastPhase: parkReason,
     });
+    // Validation can deterministically defer on every launch in this sandbox.
+    // Keep the infrastructure refund, but let the shared owner pace and surface
+    // repeated same-head launches rather than immediately relaunching forever.
+    if (parkLedger && parkReason === 'canonical-validation-deferred') {
+      const backoff = await ownInconclusiveCloserRetry({ rootDir, repo, prNumber,
+        headSha: existingRecord.headSha, launchRequestId: existingRecord.launchRequestId,
+        reason: parkReason, cfg, now: dispatchContext.dispatchedAt, deliverAlertImpl, logger });
+      if (backoff) {
+        finalizeAmaCloserLeaseBestEffort({ rootDir, leaseIdentity: existingRecordLeaseIdentity,
+          terminalOutcome: `retryable-${parkReason}`, launchRequestId: existingRecord.launchRequestId,
+          now: dispatchContext.dispatchedAt, logger, repo, prNumber });
+        return backoff;
+      }
+    }
   }
   if (certifiedPark && !parkLedger) {
     return noAmaDispatch({ dispatched: false, skipMergeAgent: true,

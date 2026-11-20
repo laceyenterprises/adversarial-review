@@ -51,6 +51,7 @@
   "controller-launch-environment-identity-unconfirmed": "world",
   "controller-launch-environment-malformed": "world",
   "controller-observation-unavailable": "infrastructure",
+  "canonical-validation-deferred": "infrastructure",
   "controller-owner-lost": "world",
   "controller-owner-unconfirmed": "world",
   "controller-setup-failed": "closer",

@@ -37,6 +37,14 @@ if [ "$(cd "${HAM_ROOT_DIR:-/nonexistent}" 2>/dev/null && pwd -P)" != "$HAM_CLOS
   exit 1
 fi
 "$HAM_NODE_BIN" "$HAM_CLOSE_ROOT/bin/hammer-close-plan.mjs" check "$HAM_CLOSE_PLAN" || exit $?
+ham_close_deferred_status=0
+"$HAM_NODE_BIN" "$HAM_CLOSE_ROOT/bin/hammer-validate.mjs" --check-deferred || ham_close_deferred_status=$?
+if [ "$ham_close_deferred_status" -ne 0 ]; then
+  if [ "$ham_close_deferred_status" -eq 75 ]; then
+    printf 'HAM close result: {"status":75,"outcome":"canonical-validation-deferred"}\n'
+  fi
+  exit "$ham_close_deferred_status"
+fi
 "$HAM_NODE_BIN" "$HAM_CLOSE_ROOT/bin/hammer-controller.mjs" resolve-environment || exit $?
 rm -f "$HAM_RUN_DIR/close-result.json"
 "$HAM_NODE_BIN" "$HAM_CLOSE_ROOT/bin/hammer-controller.mjs" run \
@@ -46,7 +54,11 @@ if [ -f "$HAM_RUN_DIR/close-result.json" ]; then
   printf 'HAM close result: '
   cat "$HAM_RUN_DIR/close-result.json"
 else
-  printf 'HAM close result: {"status":%s,"outcome":"controller-shell-ended"}\n' "$ham_close_status"
+  # Teardown can stop the controller shell before it writes close-result.json.
+  ham_close_outcome=controller-shell-ended
+  "$HAM_NODE_BIN" "$HAM_CLOSE_ROOT/bin/hammer-validate.mjs" --check-deferred || ham_close_deferred_status=$?
+  if [ "$ham_close_deferred_status" -eq 75 ]; then ham_close_outcome=canonical-validation-deferred; fi
+  printf 'HAM close result: {"status":%s,"outcome":"%s"}\n' "$ham_close_status" "$ham_close_outcome"
 fi
 # The controller has drained. Scratch can already be gone after lease settlement.
 # A delivery failure leaves the controller's merge outcome and exit status intact.

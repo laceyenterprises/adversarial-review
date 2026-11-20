@@ -130,7 +130,9 @@ while :; do
     elif [ -n "$ham_close_validation_receipt" ]; then
       rm -f "$ham_close_validation_receipt"
     fi
-    if [ "$ham_close_validation_exit" -eq 78 ]; then
+    if [ "$ham_close_validation_exit" -ne 0 ] && [ -f "$HAM_RUN_DIR/validation-deferred-$ham_close_saved_head.json" ]; then
+      ham_close_finish "$ham_close_validation_exit" canonical-validation-deferred
+    elif [ "$ham_close_validation_exit" -eq 78 ]; then
       ham_close_finish 78 validation-environment-failed
     elif [ "$ham_close_validation_exit" -ne 0 ]; then
       ham_close_finish "$ham_close_validation_exit" targeted-validation-failed

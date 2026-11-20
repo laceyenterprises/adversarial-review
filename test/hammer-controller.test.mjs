@@ -999,6 +999,13 @@ async function checkCanonicalStops(t, modes) {
     const readLog = row => row?.diagnostics?.[0]?.path && readFileSync(row.diagnostics[0].path, 'utf8');
     mkdirSync(join(checkout, 'scripts/ci-mirror'), { recursive: true });
     mkdirSync(join(f.dir, 'scratch'));
+    const git = (...args) => execFileSync('git', args, { cwd: checkout, encoding: 'utf8',
+      env: { ...process.env, GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_NOSYSTEM: '1' } }).trim();
+    git('init', '-q');
+    git('-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid',
+      'commit', '--no-verify', '--allow-empty', '-qm', 'Synthetic validation head');
+    const checkoutHead = git('rev-parse', 'HEAD');
+    const handoffPath = join(f.dir, `validation-deferred-${checkoutHead}.json`);
     writeFileSync(join(f.dir, 'load.mjs'), "import os from 'node:os'; os.loadavg = () => [0, 0, 0];\n");
     writeFileSync(join(checkout, 'scripts/ci-mirror/run-ci-mirror.py'),
       readFileSync(join(root, 'test/fixtures/ci-mirror-budget.py')));
@@ -1033,6 +1040,22 @@ child.wait()
       f.cancel();
     }
     const [status] = await p.closed;
+    if (mode === 'cancel') {
+      assert.equal(existsSync(handoffPath), false, 'operator cancellation retains its own outcome');
+    } else {
+      const bytes = readFileSync(handoffPath, 'utf8');
+      assert.deepEqual(JSON.parse(bytes), { schemaVersion: 1, head: checkoutHead, outcome: 'deferred',
+        validation: 'unknown', reason: mode === 'inner' ? 'child-check-timeout' : 'absolute-timeout',
+        status: 124, localValidationReceipt: validationPath, cleanupOwner: 'controller' });
+      if (mode === 'inner') {
+        const retry = spawnSync(process.execPath, [join(root, 'bin/hammer-validate.mjs'), '--canonical', '--', 'check.py'],
+          { cwd: checkout, env: { ...process.env, HAM_RUN_DIR: f.dir }, encoding: 'utf8', timeout: 3000 });
+        assert.ifError(retry.error);
+        assert.equal(retry.status, 75, retry.stderr);
+        assert.doesNotMatch(retry.stderr, /run-bounded: started/);
+        assert.equal(readFileSync(handoffPath, 'utf8'), bytes);
+      }
+    }
     const owner = f.receipt();
     const validation = readReceipt();
     const [failed, unfinished] = validation.checks;

@@ -472,6 +472,14 @@ Green lease identities are separate from `deferralLaunches`, so they do not
 consume the ordinary queue count or start its six-hour deadline. Other deferrals
 retain their existing bounded budget; a later real failure is charged normally. Daemon recovery still applies its live eligibility predicates.
 
+`canonical-validation-deferred` retains infrastructure refund accounting, but
+dispatch also records its ended launch in the existing
+[closer inconclusive retry store](closer-inconclusive-retries.md). That per-head
+owner applies exponential backoff from the configured threshold and one
+closure-wait notification. Immediate lease-wait refund timestamps alone never
+authorize bypassing that retry deadline. Repeated observations dedupe by launch.
+No retry-ledger fields or caps change.
+
 ## Read-only activation
 
 `node bin/recovery-status.mjs --json` reports source health, observed runtime

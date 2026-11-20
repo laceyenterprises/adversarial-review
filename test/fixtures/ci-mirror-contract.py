@@ -74,7 +74,9 @@ def selected_checks(checks: list[Check], files: list[str]) -> list[Check]:
         previous = selected.get(key)
         selected[key] = replace(
             check,
-            globs=tuple(sorted(set(check.globs + (previous.globs if previous else ())))),
+            globs=tuple(
+                sorted(set(check.globs + (previous.globs if previous else ())))
+            ),
             matched_files=tuple(files),
         )
     return list(selected.values())
@@ -91,13 +93,25 @@ def run_check(
     assert repo_root == Path.cwd() and check_env == {"fixture": "environment"}
     assert not local_openclaw_boundary_advisory
     if check.skip_reason:
-        return CheckResult(check, "skipped", 0.0,
-                           reason=os.environ.get("FIXTURE_SKIP_REASON", check.skip_reason))
+        return CheckResult(
+            check,
+            "skipped",
+            0.0,
+            reason=os.environ.get("FIXTURE_SKIP_REASON", check.skip_reason),
+        )
     assert check.tier == "fast" and check.matched_files == tuple(files)
     with open(os.environ["FIXTURE_LOCAL_CHECKS"], "a") as log:
         print(check.command, file=log)
     if check.name == os.environ.get("FIXTURE_LOCAL_FAILURE"):
         return CheckResult(check, "inconclusive", 0.0, reason="synthetic timeout")
+    if check.name == os.environ.get("FIXTURE_INSPECTION_DENIED"):
+        return CheckResult(
+            check,
+            "pass",
+            0.0,
+            output="telegram guard lane python: ps unusable in this sandbox: no verdict\n"
+            "33 reload cases passed\n",
+        )
     return CheckResult(check, "pass", 0.0)
 
 
@@ -108,8 +122,13 @@ def run_checks(
     local_openclaw_boundary_advisory: bool = False,
 ) -> list[CheckResult]:
     return [
-        run_check(check, repo_root, files, local_openclaw_boundary_advisory,
-                  check_env={"fixture": "environment"})
+        run_check(
+            check,
+            repo_root,
+            files,
+            local_openclaw_boundary_advisory,
+            check_env={"fixture": "environment"},
+        )
         for check in checks
     ]
 
@@ -117,12 +136,17 @@ def run_checks(
 def main(argv: list[str]) -> int:
     assert argv == ["--", "src/example.mjs"]
     files = argv[1:]
-    checks = selected_checks(load_manifest(Path("scripts/ci-mirror/checks.json"), cwd=None), files)
+    checks = selected_checks(
+        load_manifest(Path("scripts/ci-mirror/checks.json"), cwd=None), files
+    )
     if os.environ.get("FIXTURE_SUBCONTEXT"):
-        checks += selected_checks(load_manifest(
-            Path("scripts/ci-mirror/checks.adversarial-review.json"),
-            cwd="tools/adversarial-review",
-        ), files)
+        checks += selected_checks(
+            load_manifest(
+                Path("scripts/ci-mirror/checks.adversarial-review.json"),
+                cwd="tools/adversarial-review",
+            ),
+            files,
+        )
     results = run_checks(checks, Path.cwd(), files)
     return 75 if any(r.status == "inconclusive" for r in results) else 0
 

@@ -15,12 +15,57 @@ import { execFileSync } from 'node:child_process';
 import { readRunClosureResume } from '../src/ama/closure-resume.mjs';
 import { canonicalHammerValidation, ownPackageImportFault, repositoryPythonPackages } from '../src/ama/hammer-canonical-validation.mjs';
 import { recordHammerPhase } from '../src/ama/hammer-outcome.mjs';
+import { reportHammerEarlyFailure } from '../src/ama/hammer-terminal-audit.mjs';
 import { ValidationSelectionError, UnsupportedPnpmWorkflowError } from '../src/ama/pnpm-validation.mjs';
 import { writeFileAtomic } from '../src/atomic-write.mjs';
 
 let closeReceipt = process.env.HAM_CLOSE_VALIDATION_RECEIPT;
 const expectedHead = process.env.HAM_CLOSE_VALIDATION_HEAD;
-const receipt = { schemaVersion: 1, head: expectedHead, checks: [] };
+const runDir = process.env.HAM_RUN_DIR;
+const deferredOutcome = 'canonical-validation-deferred';
+
+function gitOutput(...args) {
+  try {
+    return execFileSync('git', args, { encoding: 'utf8', timeout: 5000,
+      stdio: ['ignore', 'pipe', 'ignore'] }).trim();
+  } catch { return null; }
+}
+
+const localHead = gitOutput('rev-parse', '--verify', 'HEAD');
+const head = /^[a-f0-9]{40}$/.test(localHead || '') ? localHead : undefined;
+const deferredPath = runDir && head ? join(runDir, `validation-deferred-${head}.json`) : null;
+const receipt = { schemaVersion: 1, head, checks: [] };
+let validationUnknown = false;
+let ownsDeferral = false;
+
+function validationDeferred() {
+  if (!deferredPath || !existsSync(deferredPath)) return false;
+  console.error(`hammer-validate: ${deferredOutcome}: ${deferredPath}`);
+  process.exitCode = 75;
+  return true;
+}
+
+function deferValidation(reason, status) {
+  if (validationUnknown) return;
+  validationUnknown = true;
+  if (deferredPath) {
+    try {
+      writeFileAtomic(deferredPath, JSON.stringify({
+        schemaVersion: 1, head, outcome: 'deferred', validation: 'unknown', reason, status,
+        ...(closeReceipt ? { localValidationReceipt: closeReceipt } : {}),
+        cleanupOwner: process.env.HAM_CONTROLLER_RECORD ? 'controller' : 'bounded-command',
+      }), { mode: 0o600, overwrite: false });
+    } catch (error) {
+      if (error.code === 'EEXIST') return;
+      console.error('hammer-validate: deferred validation receipt unavailable');
+    }
+  }
+  ownsDeferral = true;
+  console.error(`hammer-validate: ${deferredOutcome}: ${reason}; validation unknown. Check the existing cleanup receipt and hand off without retrying this head.`);
+  // The controller can terminate this helper during teardown. Keep the
+  // progress reason now and leave the potentially locked audit until after it.
+  try { recordHammerPhase(deferredOutcome); } catch { /* The private receipt still records the reason. */ }
+}
 
 function writeValidationReceipt(value) {
   try { writeFileAtomic(closeReceipt, JSON.stringify(value), { mode: 0o600 }); return true; }
@@ -28,26 +73,28 @@ function writeValidationReceipt(value) {
 }
 
 async function withMirrorSupport(runner, scratch) {
-  const enabled = Boolean(process.env.HAM_CLOSE_VALIDATION_RECEIPT) && process.env.HAM_LOCAL_VALIDATION_CI_DEDUP !== '0';
-  let head;
-  if (enabled) {
-    try {
-      const local = execFileSync('git', ['rev-parse', 'HEAD'], {
-        encoding: 'utf8', timeout: 5000, stdio: ['ignore', 'pipe', 'ignore'],
-      }).trim();
-      if (local === expectedHead) head = local;
-    } catch { /* The original local validator still runs. */ }
-  }
+  const controlledReceipt = Boolean(process.env.HAM_CLOSE_VALIDATION_RECEIPT);
+  const enabled = process.env.HAM_LOCAL_VALIDATION_CI_DEDUP !== '0'
+    && (controlledReceipt || Boolean(runDir && head && /^[1-9]\d*$/.test(process.env.HAM_PR_NUMBER || '')));
+  // A pre-close validation may include uncommitted remediation. Hosted jobs
+  // cannot cover that checkout, even if Git HEAD still matches the PR.
+  const cleanCheckout = () => gitOutput('status', '--porcelain', '--untracked-files=normal') === '';
+  const matchingHead = controlledReceipt ? head === expectedHead
+    : enabled && cleanCheckout();
   const planFile = join(scratch, 'ci-coverage.json');
   try {
     const { hammerValidationCoverage } = await import('../src/ama/hammer-validation-coverage.mjs');
     const plan = await hammerValidationCoverage({
-      root: process.cwd(), repo: process.env.HAM_REPO, prNumber: process.env.HAM_PR_NUMBER, head, enabled,
+      root: process.cwd(), repo: process.env.HAM_REPO, prNumber: process.env.HAM_PR_NUMBER,
+      head: matchingHead ? head : undefined, enabled,
       // This optional probe reports unavailable coverage through validation.
       // Keep credential failures provisional, like a managed helper attempt.
       env: { ...process.env, HAM_HELPER_FAILURE_FILE: join(scratch, 'coverage-auth-failure') },
     });
-    writeFileAtomic(planFile, JSON.stringify(plan), { mode: 0o600 });
+    const checkoutMoved = !controlledReceipt && matchingHead
+      && (gitOutput('rev-parse', '--verify', 'HEAD') !== head || !cleanCheckout());
+    writeFileAtomic(planFile, JSON.stringify(checkoutMoved
+      ? { reason: 'validation-head-unavailable', manifests: {} } : plan), { mode: 0o600 });
   } catch { /* The wrapper runs locally without coverage and still retains diagnostics. */ }
   return { ...runner, args: [fileURLToPath(new URL('./hammer-ci-mirror-validation.py', import.meta.url)),
     planFile, closeReceipt, ...runner.args] };
@@ -66,6 +113,7 @@ function finishValidationReceipt(runner, runnerExit, fallbackReason) {
       name: runner?.args[0] === 'scripts/ci-mirror/run-ci-mirror.py' ? 'CI mirror' : 'canonical validator',
       status: runnerExit === 0 ? 'run' : 'failed',
       reason: fallbackReason || (runner ? 'no-per-check-evidence' : 'validation-runner-unavailable'),
+      ...(validationUnknown ? { result: 'inconclusive' } : {}),
       ...(runnerExit === undefined ? {} : { exitStatus: runnerExit }),
     });
   }
@@ -74,6 +122,7 @@ function finishValidationReceipt(runner, runnerExit, fallbackReason) {
   for (const check of observed.checks) {
     if (check.status === 'run' && !check.result && runnerExit !== 0) {
       check.status = 'failed';
+      if (validationUnknown) check.result = 'inconclusive';
       check.exitStatus = runnerExit;
       check.localReason = 'validation-interrupted';
     }
@@ -84,22 +133,17 @@ function finishValidationReceipt(runner, runnerExit, fallbackReason) {
 // CLOSERGATES-01: a closure-resume launch validated nothing new. While the
 // checkout is still the receipt's validated head, that launch's evidence
 // stands and the suite is not re-run. Any other head validates normally.
-function closureResumeReceipt() {
-  if (!process.env.HAM_RUN_DIR) return null;
-  let head;
-  try { head = execFileSync('git', ['rev-parse', 'HEAD'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim(); }
-  catch { return null; }
-  return readRunClosureResume(process.env.HAM_RUN_DIR, head);
-}
+const closureResumeReceipt = () => runDir && head ? readRunClosureResume(runDir, head) : null;
 
 const args = process.argv.slice(2);
+const checkDeferred = args.length === 1 && args[0] === '--check-deferred';
 const usage = 'usage: hammer-validate.mjs --canonical [--nominal-timeout 1..3600] -- <changed repository-relative files>';
 let pytest = false;
 let canonical = /\/(?:agent-os|adversarial-review)$/.test(process.env.HAM_REPO || '');
 let nominalSeconds = 360;
 let explicitTimeout = false;
 let valid = true;
-while (args.length && args[0] !== '--') {
+while (!checkDeferred && args.length && args[0] !== '--') {
   const flag = args.shift();
   if (flag === '--pytest') pytest = true;
   else if (flag === '--canonical') canonical = true;
@@ -111,9 +155,13 @@ while (args.length && args[0] !== '--') {
   } else { valid = false; break; }
 }
 let resumed;
-if (!valid || args.shift() !== '--' || !args.length) {
+if (checkDeferred) {
+  validationDeferred();
+} else if (!valid || args.shift() !== '--' || !args.length) {
   console.error(usage);
   process.exitCode = 64;
+} else if (canonical && validationDeferred()) {
+  // The exact head already has a handoff. Preserve its original evidence.
 } else if ((resumed = closureResumeReceipt())) {
   const receipt = resumed;
   console.error(`hammer-validate: closure resume: head ${receipt.validatedHead} was validated by launch ${receipt.launchRequestId || 'unknown'}; reusing that evidence, not re-running validation.`);
@@ -154,7 +202,7 @@ if (!valid || args.shift() !== '--' || !args.length) {
     } else runner = { command: pytest ? 'python3' : args.shift(),
       args: pytest ? ['-u', '-m', 'pytest', '-p', 'ham_pytest_progress', ...args] : args };
     if (valid) {
-      let output = '', packageImportFault = false;
+      let output = '', packageImportFault = false, stopReason;
       let packages = new Set();
       try { if (canonical && !runner?.required) packages = repositoryPythonPackages(process.cwd()); }
       catch { runner = null; }
@@ -184,11 +232,22 @@ if (!valid || args.shift() !== '--' || !args.length) {
         process.exitCode = execution ? await runBounded(execution.command, execution.args,
           { env: runner.startupReceipt ? { ...env, HAM_PNPM_VALIDATION_STARTED_FILE: startedFile } : env,
             timeoutMs: remainingMs, idleMs: leaseValidationIdleMs(remainingMs),
-            observeOutput, stopOnTimeoutExit: mirror }) : 127;
+            observeOutput, stopOnTimeoutExit: mirror,
+            observeStop: (reason, status) => {
+              stopReason = reason;
+              if (canonical && (status === 124 || status === 125)) deferValidation(reason, status);
+            } }) : 127;
         if (!runner?.startupReceipt || existsSync(startedFile) || process.exitCode === 0
           || process.exitCode >= 124 || Date.now() >= deadline) break;
       }
       runnerExit = process.exitCode;
+      const inspectionUnavailable = mirror && runnerExit === 75
+        && readValidationReceipt().checks.some(check => check.localReason === 'process-inspection-unavailable');
+      if (inspectionUnavailable) deferValidation('process-inspection-unavailable', runnerExit);
+      if (canonical && runnerExit === 125 && !stopReason?.startsWith('canceled:')) {
+        deferValidation('validation-drain-unconfirmed', runnerExit);
+      }
+      if (ownsDeferral) reportHammerEarlyFailure(deferredOutcome, { headSha: head });
       if (runner?.selectedTestFiles) {
         const wallMs = Math.round(performance.now() - validationStart);
         console.error(`hammer-validate: targeted Node validation files=${runner.selectedTestFiles}`
@@ -205,7 +264,7 @@ if (!valid || args.shift() !== '--' || !args.length) {
       // could not be read. A later inconclusive result can also follow a red check.
       const realMirrorFailure = mirror && (runnerExit === 42
         || readValidationReceipt().checks.some(check => check.result === 'fail'));
-      const environmentFault = canonical && !runner?.required && !realMirrorFailure
+      const environmentFault = canonical && !validationUnknown && !runner?.required && !realMirrorFailure
         && (!runner || [76, 78, 127].includes(process.exitCode)
           || (process.exitCode !== 0 && process.exitCode < 124 && packageImportFault));
       if (environmentFault) {
@@ -215,7 +274,8 @@ if (!valid || args.shift() !== '--' || !args.length) {
         process.exitCode = 0;
       }
       // Timeouts, cleanup uncertainty, signals and spawn failures are unknown.
-      if (!environmentFault && !startupFault && process.env.HQ_WORKER_RUN_ID && process.exitCode >= 0 && process.exitCode < 124) {
+      if (!environmentFault && !startupFault && !validationUnknown && process.env.HQ_WORKER_RUN_ID
+        && process.exitCode >= 0 && process.exitCode < 124) {
         reportHammerProgress(process.exitCode === 0 ? 'validation-passed' : 'validation-failed');
       }
     }

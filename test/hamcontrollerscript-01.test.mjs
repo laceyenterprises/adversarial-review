@@ -11,7 +11,7 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync, existsSync
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { runHelperStep } from '../bin/hammer-helper-step.mjs';
-import { amaAuditFilePath } from '../src/ama/audit.mjs';
+import { amaAuditFilePath, readAmaAuditEntry } from '../src/ama/audit.mjs';
 import { resolveHammerShellHelper, HAMMER_SERVICE_ROOT } from '../src/ama/hammer-shell-helper-command.mjs';
 import { parseClosePlan } from '../bin/hammer-close-plan.mjs';
 import { parseCloseCommands } from '../bin/close-commands.mjs';
@@ -88,8 +88,9 @@ case "$(basename "$path")" in
         exec /bin/bash -c 'IFS= read -r ready || true; source "$@"' hammer-controller "$ctl" "$@" < /dev/null ;;
     esac ;;
   hammer-validate.mjs)
-    log "validate $*"
+    if [ "$1" != --check-deferred ]; then log "validate $*"; fi
     if [ "\${FIXTURE_REAL_VALIDATE:-0}" = 1 ]; then exec ${shellQuote(process.execPath)} "$path" "$@"; fi
+    if [ "$1" = --check-deferred ]; then exit 0; fi
     if [ -n "\${FIXTURE_VALIDATION_ARGV:-}" ]; then
       ${shellQuote(process.execPath)} -e 'require("node:fs").writeFileSync(process.env.FIXTURE_VALIDATION_ARGV, JSON.stringify(process.argv.slice(1)))' -- "$@"
     fi
@@ -304,16 +305,20 @@ if (${Number.isInteger(deferJobReadsAfter)} && (
 }
 console.log('HTTP/2.0 200 OK\\nETag: "fixture"\\n\\n' + JSON.stringify(response));
 `, { mode: 0o755 });
-  const run = extra => f.close({
+  const validationEnv = {
     PATH: `${f.bin}:${process.env.PATH}`, FIXTURE_LIVE_HEAD: head,
     FIXTURE_NEEDS_REVALIDATION: '1', FIXTURE_REAL_VALIDATE: '1', FIXTURE_LOCAL_CHECKS: localChecks,
     FIXTURE_LOCAL_FAILURE: localFailure, FIXTURE_SUBCONTEXT: subcontext ? '1' : undefined,
     MERGE_AGENT_GH_TOKEN: 'synthetic-offline-token', MERGE_AGENT_GH_TOKEN_EXPIRES_AT: '2099-01-01T00:00:00Z',
     GHO_API_CALL_LOG_DISABLE: '1', GHO_RATE_LIMIT_SHARED_STATE_PATH: join(f.dir, 'quota.json'),
-    ...extra,
-  });
+  };
+  const run = extra => f.close({ ...validationEnv, ...extra });
+  const standalone = extra => runDetached('-c', [
+    'source "$1/inputs.sh" && exec "$2" "$HAM_ROOT_DIR/bin/hammer-validate.mjs" --canonical -- src/example.mjs',
+    'fixture', f.run, process.execPath], { ...f.env, ...validationEnv, ...extra }, f.checkout);
   const read = path => existsSync(path) ? readFileSync(path, 'utf8').trim().split('\n') : [];
-  return { head, run, calls: () => read(calls).map(line => JSON.parse(line)),
+  return { checkout: f.checkout, dir: f.dir, runDir: f.run, head, run, standalone,
+    calls: () => read(calls).map(line => JSON.parse(line)),
     lowBudget() {
       const credential = `token-${createHash('sha256').update('synthetic-offline-token').digest('hex').slice(0, 24)}`;
       writeFileSync(join(f.dir, 'quota.json'), JSON.stringify({ [`${credential}/core`]: {
@@ -324,6 +329,92 @@ console.log('HTTP/2.0 200 OK\\nETag: "fixture"\\n\\n' + JSON.stringify(response)
     local: () => read(localChecks), events: f.events,
     earlyAuditExists: () => existsSync(amaAuditFilePath(f.dir, 'fixture/repo', 42, f.shas.reviewed)) };
 }
+
+test('standalone exact-head coverage skips only the authenticated step and hands off a denied local-only guard once', async t => {
+  const f = mirrorFixture(t, { currentRegistry: true, entries: [
+    ['covered', { ci: { job: 'build', name: 'Run covered' } }],
+    ['telegram-responder-guard', { ci: { job: 'build', name: 'Run guard' }, local_only: true }],
+    ['later', {}],
+  ], runs: [['build']] });
+  const env = { FIXTURE_INSPECTION_DENIED: 'telegram-responder-guard', HQ_WORKER_RUN_ID: 'wrun_fixture' };
+  const first = await f.standalone(env);
+  assert.equal(first.status, 75, first.stderr);
+  assert.match(first.stderr, /canonical-validation-deferred: process-inspection-unavailable/);
+  assert.match(first.stderr, /cleanup=finished status=75/);
+  assert.deepEqual(f.local(), ['fixture-command telegram-responder-guard']);
+  const handoffPath = join(f.runDir, `validation-deferred-${f.head}.json`);
+  const handoffBytes = readFileSync(handoffPath, 'utf8');
+  const handoff = JSON.parse(handoffBytes);
+  assert.equal(handoff.outcome, 'deferred');
+  assert.equal(handoff.validation, 'unknown');
+  const receipt = JSON.parse(readFileSync(handoff.localValidationReceipt, 'utf8'));
+  assert.deepEqual(receipt.checks.map(check => [check.name, check.status, check.reason]), [
+    ['covered', 'ci-covered', 'exact-head-ci-success'], ['telegram-responder-guard', 'failed', 'local-only'],
+  ]);
+  assert.equal(receipt.checks[0].jobs[0].step, 'Run covered');
+  assert.equal(receipt.checks[1].result, 'inconclusive');
+  assert.match(readFileSync(receipt.checks[1].diagnostics[0].path, 'utf8'), /33 reload cases passed/);
+  const progress = join(f.dir, 'dispatch/lrq_fixture/hammer-progress/wrun_fixture');
+  assert.equal(existsSync(join(progress, 'validation-passed.json')), false);
+  assert.equal(existsSync(join(progress, 'validation-failed.json')), false);
+  assert.equal(JSON.parse(readFileSync(join(progress, 'last-phase.json'), 'utf8')).reason, 'canonical-validation-deferred');
+  const events = f.events();
+  const calls = f.calls();
+  assert.equal((await f.standalone(env)).status, 75);
+  assert.equal((await f.run(env)).status, 75);
+  assert.deepEqual(f.local(), ['fixture-command telegram-responder-guard']);
+  assert.deepEqual(f.events(), events, 'reentry does not start a controller or acquire a lease');
+  assert.deepEqual(f.calls(), calls);
+  assert.equal(readFileSync(handoffPath, 'utf8'), handoffBytes);
+  const audit = readAmaAuditEntry(f.dir, 'fixture/repo', 42, f.head);
+  assert.deepEqual(audit.attempts.map(({ outcome, reason }) => [outcome, reason]),
+    [['deferred', 'canonical-validation-deferred']]);
+  execFileSync('git', ['-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid',
+    'commit', '--no-verify', '--allow-empty', '-qm', 'Changed head'], { cwd: f.checkout });
+  assert.equal((await f.standalone({})).status, 0);
+  assert.deepEqual(f.local(), ['fixture-command telegram-responder-guard', 'fixture-command covered', 'fixture-command telegram-responder-guard',
+    'fixture-command later'], 'a different head runs locally when offered only stale CI');
+});
+
+test('standalone CI coverage falls back locally for dirty, stale, ambiguous and invalid evidence', async t => {
+  for (const [options, dirty, reason] of [
+    [{}, true, 'validation-head-unavailable'],
+    [{ runs: [['build', { head_sha: 'f'.repeat(40) }]] }, false, 'ci-job-head-mismatch'],
+    [{ runs: [['build'], ['build']] }, false, 'ci-job-ambiguous'],
+    [{ baseDrift: {} }, false, 'manifest-base-mismatch'],
+  ]) {
+    const f = mirrorFixture(t, { entries: [['telegram-responder-guard', { ci_jobs: ['build'] }]], runs: [['build']], ...options });
+    if (dirty) writeFileSync(join(f.checkout, 'src/example.mjs'), 'uncommitted fix\n');
+    const result = await f.standalone({ FIXTURE_INSPECTION_DENIED: 'telegram-responder-guard' });
+    assert.equal(result.status, 75, result.stderr);
+    assert.deepEqual(f.local(), ['fixture-command telegram-responder-guard']);
+    const handoff = JSON.parse(readFileSync(join(f.runDir, `validation-deferred-${f.head}.json`), 'utf8'));
+    const receipt = JSON.parse(readFileSync(handoff.localValidationReceipt, 'utf8'));
+    assert.deepEqual(receipt.checks.map(({ reason, result }) => [reason, result]), [[reason, 'inconclusive']]);
+    if (dirty) assert.deepEqual(f.calls(), []);
+  }
+});
+
+test('a different check quoting the Telegram no-verdict line keeps its passing result', async t => {
+  const f = mirrorFixture(t, { entries: [['unrelated-test', {}], ['later', {}]], runs: [] });
+  const result = await f.standalone({ FIXTURE_INSPECTION_DENIED: 'unrelated-test' });
+  assert.equal(result.status, 0, result.stderr);
+  assert.deepEqual(f.local(), ['fixture-command unrelated-test', 'fixture-command later']);
+  assert.equal(existsSync(join(f.runDir, `validation-deferred-${f.head}.json`)), false);
+});
+
+test('close controller hands off denied validation after one lease yield', async t => {
+  const f = mirrorFixture(t, { entries: [['telegram-responder-guard', { local_only: true }]], runs: [] });
+  const result = await f.run({ FIXTURE_INSPECTION_DENIED: 'telegram-responder-guard' });
+  assert.equal(result.status, 75, result.stderr);
+  assert.equal(result.closeResult.outcome, 'canonical-validation-deferred');
+  assert.equal(result.closeResult.leaseHeld, false);
+  const events = f.events();
+  assert.deepEqual(events.filter(event => event.startsWith('release ')), ['release --yield local-validation lease=ml_fixture']);
+  assert.equal(events.some(event => event.startsWith('gh pr merge')), false);
+  assert.equal((await f.run()).status, 75);
+  assert.deepEqual(f.events(), events);
+});
 
 test('the close skips only explicitly mapped, successful exact-head mirror checks and reports each decision', async t => {
   const f = mirrorFixture(t, {

@@ -57,7 +57,8 @@ companion-package integration skip. `npm run lint` passed with zero errors
   project files in the archive preserves review evidence, while putting an
   archive on the harness workspace search path could reintroduce automatic
   settings or instruction discovery. Harness startup uses an empty cwd in
-  both workspace modes.
+  both workspace modes. Argus allocates the startup workspace when a model is
+  ready to launch, so jobs settled from existing evidence skip that allocation.
 - Existing fetch tests exercise caller environment, both commit widths,
   bounded transient retries and disabled auto-maintenance. The existing
   deploy-state containment and PR-authored escaping-link regressions remain

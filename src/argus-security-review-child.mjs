@@ -51,16 +51,21 @@ async function main() {
   // Keep local Git evidence probes in a distinct scratch repository.
   spawnSync('git', ['init', '-q', workDir], { stdio: 'ignore', timeout: loadAwareTimeoutMs(30_000) });
   let harnessWorkspace;
+  const getHarnessWorkspace = () => {
+    if (!harnessWorkspace) {
+      const stateDir = resolveReviewerWorkspaceStateDir({
+        stateDir: resolveAdversarialReviewStateDir(rootDir, process.env), serviceCheckoutDir: rootDir,
+      });
+      harnessWorkspace = { ...prepareReviewerHarnessCwd(stateDir, { log: logger }), stateDir };
+    }
+    return harnessWorkspace;
+  };
   try {
-    const workspaceStateDir = resolveReviewerWorkspaceStateDir({
-      stateDir: resolveAdversarialReviewStateDir(rootDir, process.env), serviceCheckoutDir: rootDir,
-    });
-    harnessWorkspace = prepareReviewerHarnessCwd(workspaceStateDir, { log: logger });
     emit(await reviewArgusJob({
       job,
       deps: createDefaultArgusReviewDeps({
         rootDir, env: process.env, logger,
-        workspaceStateDir, harnessCwd: harnessWorkspace.cwd,
+        getHarnessWorkspace,
         agyLease: argValue('--agy-lease') === null ? undefined : JSON.parse(argValue('--agy-lease')),
         geminiResetAt: argValue('--gemini-reset-at') || null,
       }),

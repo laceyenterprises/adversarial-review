@@ -284,11 +284,13 @@ function conflictFixture(t, { conflict = true, owner = 'fixture/foreign', genera
   const clone = join(dir, 'clone');
   const author = join(dir, 'author');
   const install = join(dir, 'installed');
+  const hq = join(dir, 'hq-state');
   const policy = join(install, 'modules/worker-pool/lib/python/cwp_dispatch');
   const config = join(install, 'modules/worker-pool/config');
   mkdirSync(fakeBin); mkdirSync(run, { mode: 0o700 });
   mkdirSync(policy, { recursive: true });
   mkdirSync(config, { recursive: true });
+  mkdirSync(hq);
   const registry = join(config, 'committed-generated-files.json');
   writeFileSync(registry, JSON.stringify({
     version: 1, repository: owner,
@@ -351,7 +353,7 @@ exec ${shellQuote(python)} "$@"
   git(clone, 'config', `url.${origin}.insteadOf`, 'git@github.com:fixture/repo.git');
   git(clone, 'worktree', 'add', '-qb', 'author', work, reviewed);
   git(work, 'update-ref', 'refs/remotes/origin/main', `${base}^`);
-  const bound = { ...values(root), HQ_ROOT: install, RUN_DIR: run, REVIEWED_SHA: reviewed, TARGET_REMEDIATION_SHA: reviewed };
+  const bound = { ...values(root), HQ_ROOT: hq, RUN_DIR: run, REVIEWED_SHA: reviewed, TARGET_REMEDIATION_SHA: reviewed };
   const inputs = template.match(/cat > '<<RUN_DIR>>\/inputs\.sh' <<'HAM_INPUTS'\n([\s\S]*?)\nHAM_INPUTS/)[1]
     .replaceAll('<<TENURE_INPUTS>>', '')
     .replace(/<<([A-Z_]+)>>/g, (_, key) => bound[key]);
@@ -364,7 +366,7 @@ exec ${shellQuote(python)} "$@"
     cwd: work, encoding: 'utf8', timeout: 60_000, env: { ...env, HAM_NODE_BIN: join(fakeBin, 'node') },
   });
   const events = () => (existsSync(log) ? readFileSync(log, 'utf8') : '');
-  return { dir, run, work, author, origin, reviewed, base, git, repair, events, registry, env, install, policy, python };
+  return { dir, run, work, author, origin, reviewed, base, git, repair, events, registry, env, install, policy, python, bound, fakeBin };
 }
 
 function stageSource(f) {
@@ -396,6 +398,41 @@ test('a path outside a readable foreign registry resumes after explicit source r
   assert.equal(existsSync(join(f.run, 'conflict-repair.env')), false);
   assert.doesNotMatch(f.events(), /terminal-audit/);
   assert.match(second.stderr, /rerun the close command/);
+});
+
+test('rendered publish reads generated rebase coverage from the installation with separate HQ state', t => {
+  const f = conflictFixture(t, { owner: 'fixture/repo', generatedPath: 'example.txt' });
+  f.git(f.install, 'init', '-q');
+  f.git(f.install, 'remote', 'add', 'origin', 'git@github.com:fixture/repo.git');
+  assert.equal(f.repair().status, 22);
+  stageSource(f);
+  f.git(f.work, 'rebase', '--continue');
+  const head = f.git(f.work, 'rev-parse', 'HEAD');
+  writeFileSync(join(f.fakeBin, 'gh'), `#!/bin/bash
+case "$2" in
+  */comments*) echo '[]' ;;
+  */pulls/42) echo '${JSON.stringify({ head: { sha: head }, base: { ref: 'main', sha: f.base } })}' ;;
+  */compare/*) echo '{"status":"diverged"}' ;;
+  *) exit 97 ;;
+esac
+`, { mode: 0o755 });
+  const rendered = renderHammerProcedure('hammer-publish', f.bound);
+  const rangeFunction = rendered.slice(rendered.indexOf('ham_prove_audit_range() {'),
+    rendered.indexOf('if ! ham_is_full_sha "\${HAM_BASE_HEAD:-}" || ! ham_prove_audit_range'));
+  const run = () => spawnSync('/bin/bash', ['-c', `
+${rendered.split('\n').find(line => line.startsWith('export HAM_HQ_ROOT='))}
+${rangeFunction}
+ham_prove_audit_range
+`], {
+    cwd: f.work, encoding: 'utf8', timeout: 30_000,
+    env: { ...f.env, HAM_NODE_BIN: join(f.fakeBin, 'node'), HAM_BASE_HEAD: head, POST_REMEDIATION_SHA: head,
+      HAMMER_LACEY_GH_TOKEN: 'offline-fixture-token' },
+  });
+  const covered = run();
+  assert.equal(covered.status, 0, readFileSync(join(f.run, 'range.json'), 'utf8') + covered.stderr);
+  assert.deepEqual(JSON.parse(readFileSync(join(f.run, 'range.json'), 'utf8')).rebaseCoverage.generatedFiles, ['example.txt']);
+  f.env.AGENT_OS_DEPLOY_CHECKOUT = join(f.dir, 'missing-deployment');
+  assert.equal(run().status, 65, 'an explicit unavailable installation cannot grant generated coverage');
 });
 
 test('a same-name foreign output needs explicit source repair and never runs the generator', t => {
@@ -435,7 +472,7 @@ for (const interpreter of ['HQ_PYTHON3', 'AGENT_OS_PY', 'deploy runtime']) {
     }
     const result = f.repair('--continue');
     assert.equal(result.status, 0, result.stderr);
-    assert.match(f.events(), /^resume -IB .* --trusted-root /m);
+    assert.match(f.events(), /^resume -IB .*hammer-conflict-resume\.py fixture\/repo /m);
   });
 }
 
@@ -481,21 +518,13 @@ for (const catalogError of ['comparison', 'ownership']) {
   });
 }
 
-test('HAM_HQ_ROOT policy wins over a different deploy checkout', t => {
-  const f = conflictFixture(t);
-  assert.equal(f.repair().status, 22);
-  stageSource(f);
-  f.env.AGENT_OS_DEPLOY_CHECKOUT = join(f.dir, 'missing-deployment');
-  const result = f.repair('--continue');
-  assert.equal(result.status, 0, result.stderr);
-});
-
-test('an explicit unavailable HAM_HQ_ROOT never falls back to the deploy policy', t => {
+test('an explicit unavailable installation never falls back to a policy in HQ state', t => {
   const f = conflictFixture(t);
   assert.equal(f.repair().status, 22);
   stageSource(f);
   const inputs = join(f.run, 'inputs.sh');
-  writeFileSync(inputs, readFileSync(inputs, 'utf8').replaceAll(f.install, join(f.dir, 'missing-policy')));
+  writeFileSync(inputs, readFileSync(inputs, 'utf8').replaceAll(f.bound.HQ_ROOT, f.install));
+  f.env.AGENT_OS_DEPLOY_CHECKOUT = join(f.dir, 'missing-policy');
   const result = f.repair('--continue');
   assert.equal(result.status, 1, result.stderr);
   assert.equal(f.git(f.work, 'status', '--porcelain'), 'M  example.txt');

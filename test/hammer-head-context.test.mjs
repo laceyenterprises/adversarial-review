@@ -32,7 +32,7 @@ test(`REBASEPROV-01 coverage fetch retries=${failures} (${failureMessage}) befor
     .replace('import.meta.url', 'cliUrl');
   const load = runInNewContext(`${loader}\nloadRebaseCoverage`, {
     loadAwareTimeoutMs,
-    process: { env: { HAM_HQ_ROOT: '/trusted/install' } },
+    process: { env: { HAM_HQ_ROOT: '/hq/state', AGENT_OS_DEPLOY_CHECKOUT: '/trusted/install' } },
     isTransientGhError, setTimeout: (resolve, ms) => { delays.push(ms); resolve(); },
     reviewedHead, repo: 'fixture/repo', rebaseModule: { proveReviewedRebase },
     fileURLToPath, URL, cliUrl: new URL('../bin/hammer-head-context.mjs', import.meta.url).href,
@@ -42,7 +42,7 @@ test(`REBASEPROV-01 coverage fetch retries=${failures} (${failureMessage}) befor
     },
     execFile: null, promisify: () => async (command, args) => {
       if (command === 'python3') {
-        assert.deepEqual(Array.from(args.slice(1, 3)), ['--trusted-root', '/trusted/install']);
+        assert.deepEqual(Array.from(args), ['-IB', cli.replace('hammer-head-context.mjs', 'verify-rebase-generated.py'), 'fixture/repo', 'policy']);
         throw new Error('No installed policy');
       }
       assert.equal(command, 'git');

@@ -35,10 +35,9 @@ const loadRebaseCoverage = async ({ base, head }) => {
     || /could not resolve (?:host|hostname)|failed to connect|connection (?:refused|closed|timed out)|(?:TLS|SSL).*handshake|remote end hung up unexpectedly|early EOF|HTTP\/2 stream.*(?:closed|reset)/i
       .test(String(error.stderr || error.message || ''));
   const generatedHelper = fileURLToPath(new URL('./verify-rebase-generated.py', import.meta.url));
-  const trustedRootArgs = process.env.HAM_HQ_ROOT ? ['--trusted-root', process.env.HAM_HQ_ROOT] : [];
   let generatedFiles = [];
   try {
-    generatedFiles = JSON.parse((await execute('python3', [generatedHelper, ...trustedRootArgs, repo, 'policy'], { timeout: loadAwareTimeoutMs(15000) })).stdout);
+    generatedFiles = JSON.parse((await execute('python3', ['-IB', generatedHelper, repo, 'policy'], { timeout: loadAwareTimeoutMs(15000) })).stdout);
     if (!Array.isArray(generatedFiles)) generatedFiles = [];
   } catch { /* No installed policy: only whole-patch equivalence is available. */ }
   for (const sha of [reviewedHead, base, head]) {
@@ -57,7 +56,7 @@ const loadRebaseCoverage = async ({ base, head }) => {
   }
   const verifyGenerated = async (sha, paths) => {
     try {
-      return (await execute('python3', [generatedHelper, ...trustedRootArgs, repo, 'verify', sha, ...paths],
+      return (await execute('python3', ['-IB', generatedHelper, repo, 'verify', sha, ...paths],
         { timeout: loadAwareTimeoutMs(60000), maxBuffer: 1024 * 1024 })).stdout.trim() === 'verified';
     } catch { return false; }
   };

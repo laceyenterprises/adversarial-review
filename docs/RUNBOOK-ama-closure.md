@@ -5113,6 +5113,15 @@ Audit copies describe the proof and a subsequent evaluation recomputes it from
 immutable objects. The [offline witness](../test/fixtures/migration-renumber-11143/README.md)
 records the original history.
 
+Deterministic integration refusals use `main-integration-ancestry-invalid`,
+`main-integration-source-name-mismatch`, `main-integration-blob-missing` or
+`main-integration-directory-missing`; transport failures retain
+`snapshot-read-failed`. A copied or edited certificate, including an unchanged
+proof attached to a spread/cloned evidence object, refuses with
+`main-integration-certificate-unbound` on the consuming evidence. Callers must
+pass the original collected evidence object to the native evaluator. These
+diagnostics do not grant preservation authority or change refusal identity.
+
 `proveMigrationRenumbers` retains its array return and records failed attempts
 on the supplied transient evidence as `migrationRenumberDiagnostics`, with
 `{ proven: false, reason, headSha, path?, detail? }`. Refusal diagnostics include

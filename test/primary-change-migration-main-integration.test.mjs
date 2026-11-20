@@ -162,6 +162,61 @@ for (const [label, edit] of [
   assert.deepEqual(await f.prove(), []);
 });
 
+for (const [reason, edit] of [
+  ['main-integration-ancestry-invalid', f => { f.commit(f.args.headSha).tree = null; }],
+  ['main-integration-source-name-mismatch', f => {
+    const path = f.evidence.finalFiles.find(file => file.filename.endsWith('_dirty_queue.py')).filename;
+    f.alterBlob(f.args.headSha, path, text => text.replace(/SOURCE_NAME = "[^"]+"/, 'SOURCE_NAME = "wrong.sql"'));
+  }],
+  ['main-integration-blob-missing', f => {
+    f.alterTree(f.args.headSha, `${ledger}/migrations/20261119T130001Z_1d007001_dirty_queue.sql`,
+      (entries, name) => entries.splice(entries.findIndex(entry => entry.path === name), 1));
+  }],
+  ['main-integration-directory-missing', f => {
+    f.alterTree(f.args.headSha, `${ledger}/migrations`,
+      (entries, name) => entries.splice(entries.findIndex(entry => entry.path === name), 1));
+  }],
+]) test(`classifies structural refusal as ${reason}`, async () => {
+  const f = replay();
+  edit(f);
+  assert.deepEqual(await f.prove(), []);
+  const answer = checkPrimaryChange(f.evidence, f.args.headSha);
+  assert.equal(answer.reason, 'primary-change-reverted');
+  assert.ok(answer.migrationRenumberDiagnostics.some(entry => entry.reason === reason), JSON.stringify(answer));
+  assert.ok(!answer.migrationRenumberDiagnostics.some(entry => entry.reason === 'snapshot-read-failed'));
+});
+
+test('a transport failure retains the read-failure diagnostic', async () => {
+  const f = replay(), get = f.args.get;
+  f.args.get = path => {
+    if (path.includes('/git/commits/')) throw new Error('fixture transport unavailable');
+    return get(path);
+  };
+  assert.deepEqual(await f.prove(), []);
+  assert.equal(f.evidence.migrationRenumberDiagnostics.at(-1).reason, 'snapshot-read-failed');
+});
+
+for (const [label, clone] of [
+  ['spread evidence', evidence => ({ ...evidence })],
+  ['round-tripped evidence', evidence => JSON.parse(JSON.stringify(evidence))],
+  ['cloned proof', evidence => ({ ...evidence, migrationRenumberProofs: structuredClone(evidence.migrationRenumberProofs) })],
+]) test(`${label} exposes its unbound certificate in the native refusal`, async () => {
+  const f = replay();
+  const [proof] = await f.prove();
+  assert.ok(proof);
+  const evidence = clone(f.evidence);
+  delete evidence.migrationRenumberDiagnostics;
+  const answer = checkPrimaryChange(evidence, f.args.headSha);
+  assert.equal(answer.reason, 'primary-change-reverted');
+  assert.deepEqual(answer.migrationRenumberDiagnostics, [{
+    proven: false, reason: 'main-integration-certificate-unbound', headSha: f.args.headSha, path: proof.path,
+  }]);
+  assert.ok(!('migrationRenumberDiagnostics' in answer.missingEvidence));
+  for (let i = 0; i < 130; i++) verifiedMigrationRenumbers(evidence, f.args.headSha);
+  assert.equal(evidence.migrationRenumberDiagnostics.length, 128);
+  assert.equal(checkPrimaryChange(f.evidence, f.args.headSha).ok, true);
+});
+
 test('a copied proof, a changed binding, and a changed head each lose preservation authority', async () => {
   const f = replay();
   const [proof] = await f.prove();

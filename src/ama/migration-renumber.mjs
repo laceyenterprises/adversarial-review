@@ -756,18 +756,21 @@ async function proveSnapshot(args, evidence) {
   return proofs;
 }
 
+function recordDiagnostic(evidence, reason, headSha = evidence.headSha, path, detail) {
+  const diagnostics = evidence.migrationRenumberDiagnostics ??= [];
+  if (diagnostics.length === 128) diagnostics.shift();
+  diagnostics.push({ proven: false, reason, headSha,
+    ...(path ? { path } : {}), ...(detail ? { detail: String(detail).slice(0, 300) } : {}) });
+}
+
 // The array return remains compatible with callers. Every unsuccessful attempt
 // records a structured refusal on the supplied transient evidence, outside the
 // history cache, so a failed optional proof can explain the existing refusal.
 export async function proveMigrationRenumbers(args, evidence) {
-  const diagnostics = evidence.migrationRenumberDiagnostics = [];
+  evidence.migrationRenumberDiagnostics = [];
   delete evidence.migrationRenumberAncestry;
   if (Array.isArray(evidence.primaryFiles) && Array.isArray(evidence.finalFiles) && !candidates(evidence).length) return [];
-  const record = (reason, headSha = evidence.headSha, path, detail) => {
-    if (diagnostics.length === 128) diagnostics.shift();
-    diagnostics.push({ proven: false, reason, headSha,
-      ...(path ? { path } : {}), ...(detail ? { detail: String(detail).slice(0, 300) } : {}) });
-  };
+  const record = (reason, headSha, path, detail) => recordDiagnostic(evidence, reason, headSha, path, detail);
   const refuse = reason => { record(reason); return []; };
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(new DOMException('migration proof deadline exceeded', 'TimeoutError')),
@@ -889,6 +892,10 @@ export async function proveMigrationRenumbers(args, evidence) {
       : error?.message === 'migration read budget exhausted' ? 'read-budget-exhausted'
         : error?.message === 'non-increasing renumber chain' ? 'chain-non-increasing'
           : error?.message === 'uncertified repair predecessor' ? 'repair-predecessor-unproven'
+          : error?.message === 'invalid migration ancestry' ? 'main-integration-ancestry-invalid'
+          : error?.message === 'migration source name mismatch' ? 'main-integration-source-name-mismatch'
+          : error?.message === 'missing migration blob' ? 'main-integration-blob-missing'
+          : error?.message === 'missing migration directory' ? 'main-integration-directory-missing'
           : error?.message === 'invalid snapshot merge base' ? 'snapshot-merge-base-invalid'
             : error?.message === 'invalid migration blob' ? 'snapshot-blob-invalid'
               : error?.message === 'incomplete migration tree' ? 'snapshot-tree-incomplete' : 'snapshot-read-failed';
@@ -933,8 +940,11 @@ export function verifiedMigrationRenumbers(evidence, headSha) {
   return (evidence.migrationRenumberProofs || []).filter(proof => {
     if (proof.mainIntegration) {
       const issuance = integrationProofs.get(proof);
-      return issuance?.evidence === evidence && issuance.serialized === JSON.stringify(proof)
-        && headSha === proof.headSha && boundIntegrationFiles(evidence, proof);
+      if (issuance?.evidence !== evidence || issuance.serialized !== JSON.stringify(proof)) {
+        recordDiagnostic(evidence, 'main-integration-certificate-unbound', headSha, proof.path);
+        return false;
+      }
+      return headSha === proof.headSha && boundIntegrationFiles(evidence, proof);
     }
     // Legacy paired-module proofs never claim a SQL source.
     return !(proof.modulePath && proof.sqlPath) && proof.classification === CLASS

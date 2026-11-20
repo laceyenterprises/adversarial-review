@@ -2,6 +2,15 @@
   "version": 1,
   "entries": [
     {
+      "id": "remediation-closer-dead-letter",
+      "title": "Malformed remediation closer priority events",
+      "path": "docs/data-model/follow-up-jobs.md",
+      "store": "data/remediation-closer-queue/dead-letter/<completed-ms>-<job-digest>.json",
+      "schemaSurface": "src/remediation-closer-queue.mjs",
+      "owner": "watcher",
+      "description": "Invalid JSON is moved unchanged out of the active queue, logged and retained for manual inspection; watcher restarts do not retry it."
+    },
+    {
       "id": "follow-up-credential-broker",
       "title": "Credential broker remediation deferral and infrastructure failure",
       "path": "docs/data-model/follow-up-jobs.md",

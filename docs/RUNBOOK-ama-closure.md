@@ -6778,6 +6778,35 @@ shared queue's ceiling.
 The daemon clean path runs before hammer capacity, including automated recovery.
 No eligible inline merge waits behind `ama-closer-launch-in-progress`.
 
+### Remediation completion to closer launch
+
+For an open PR whose next action is a closer, the target is a launch within
+10 minutes of the remediation job's `completedAt`. A completion publishes a
+durable priority event. The watcher handles it before the regular poll and
+listens for new events during the poll, with a 15-second fallback. It refreshes
+the PR head and uses the posted-review handler, which applies the existing
+review, strict-mode, ownership and launch admission checks. The regular poll
+also covers completions whose priority event could not be written.
+The atomic completion writer creates the queue directory before publication.
+Events for unmanaged repositories or absent PRs are removed without dispatch.
+Malformed JSON is moved unchanged to `data/remediation-closer-queue/dead-letter/`
+with a warning naming the file; it remains there for manual inspection and does
+not retry after restart. Filesystem errors and retryable decisions still defer.
+
+The watcher gives each coexistence step at most 45 seconds before deferring
+the caller. Work already in progress retains its attempt fence until it
+settles. A launch-status snapshot can supply positive live ownership to
+multiple PR decisions. Terminal, missing and unavailable snapshots still
+require the ordinary evidence read.
+
+`ama.closer_queue_launch` emits `remediation_complete_to_closer_launch_seconds`
+on the first confirmed launch receipt for a PR and completion timestamp. The
+closure health ledger retains the sample. It uses the matched ledger launch
+timestamp when available and the receipt observation time otherwise. A
+completion with no confirmed launch has no sample.
+
+### Merge completion lag
+
 `ama.closure_lag` emits `eligible_at`, `merged_at`, and `lag_ms` once per PR;
 `ama.closure_queue_depth` emits the eligible unmerged queue depth and p95 lag.
 Observations persist under the runtime root in `data/ama-closure-lag/`. Lifecycle
@@ -6792,7 +6821,7 @@ lifecycle sync's open-row list. Already-paged waits are re-read at most every
 outside an observed walk still leaves the queue-depth gauge and the p95.
 Merged or closed state settles the entry and suppresses its page. Reads occur outside the state lock and cannot overwrite a
 concurrently changed wait/head. Unreadable state logs a warning and retains
-ordinary paging. There are no new configuration keys or SLO changes. A rolling
+ordinary paging. A rolling
 24-hour p95 includes completed lags and pending eligible waits. Exceeding the configured SLO or any eligible wait over 60 minutes creates
 an automated `ama.closure_lag.slo_breach` SEV1 event naming blocking reasons.
 Pages are durable and deduplicated; delivery failures retry, and a recovered p95

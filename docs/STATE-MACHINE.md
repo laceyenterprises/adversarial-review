@@ -1,3 +1,9 @@
+Remediation closer priority hints terminate without dispatch for unmanaged
+repositories or missing PRs. Malformed JSON moves unchanged to the queue's
+`dead-letter/` directory and remains excluded after restart. Filesystem and
+decision errors retain the existing retry path; review-row and closer lifecycle
+states, merge gates and smoke commands are unchanged.
+
 FINDINGSSTUCK-01 remediation retains never-launched batches across subprocess
 transport, timeout and admission failures, irrespective of claim age. Each retry
 uses the same batch/key without charging a finding attempt. Legacy ambiguous
@@ -1487,6 +1493,13 @@ Legacy durable jobs created before `baseBranch` was persisted are hydrated from 
 ---
 
 ## MSM two-path merge authority (current)
+
+Completed remediation publishes a priority event for the same posted-review
+closure handler used by the regular poll. The watcher refreshes the subject
+before evaluating it, including during an ongoing poll. The event changes
+scheduling only. The shared decision, exact-head checks and closer intent and
+lease fences still govern the transition to launch. See the
+[dispatch latency runbook](RUNBOOK-ama-closure.md#remediation-completion-to-closer-launch).
 
 An exhausted transient history read retains its class in audit `reasonDetail`
 and uses registered `history-read-failed` for an uncounted deferral and the

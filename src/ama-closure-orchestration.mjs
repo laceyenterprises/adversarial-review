@@ -612,6 +612,17 @@ function headProofScope(reader, { rootDir, repoPath, prNumber, reviewStateRow, c
   });
 }
 
+async function timeClosureCall(logger, operation, run) {
+  const started = performance.now();
+  try { return await run(); }
+  finally {
+    try {
+      logger?.debug?.(JSON.stringify({ event: 'ama.coexistence_timing', operation,
+        elapsed_ms: Math.round(performance.now() - started) }));
+    } catch { /* Timing is diagnostic. */ }
+  }
+}
+
 async function runTimedCoexistenceOperation(
   operation,
   fn,
@@ -640,7 +651,7 @@ async function runTimedCoexistenceOperation(
   };
   parentSignal?.addEventListener?.('abort', onParentAbort, { once: true });
   try {
-    const work = Promise.resolve().then(() => fn({ signal: childSignal }));
+    const work = Promise.resolve().then(() => timeClosureCall(logger, operation, () => fn({ signal: childSignal })));
     if (!effectiveTimeoutMs) return await work;
     const timeout = new Promise((_, reject) => {
       timer = setTimeoutFn(() => {
@@ -836,11 +847,12 @@ async function maybeDispatchAmaClosureForInner({
       hammerWakeSink.closerInvoked = true;
       return (maybeDispatchAmaCloserImpl || maybeDispatchAmaCloser)(...args);
     }, closerAuthoredStaleSink, ownerProofFactsSink, closureOwnerSink, finalRoundSink, hammerWakeSink };
-  let result = await dispatchAmaClosureFor(dispatchArgs);
-  const observeMismatch = result => observeClosureDecisionMismatch({ rootDir: options.rootDir || ROOT,
+  const timed = (operation, run) => timeClosureCall(options.logger, operation, run);
+  let result = await timed('dispatch-closure', () => dispatchAmaClosureFor(dispatchArgs));
+  const observeMismatch = result => timed('observe-decision-mismatch', () => observeClosureDecisionMismatch({ rootDir: options.rootDir || ROOT,
     repo: options.repoPath, prNumber: options.prNumber, result,
     now: options.now ? options.now() : Date.now(), env: options.env || process.env,
-    observeWaitImpl: options.observeClosureWaitImpl || observeClosureWait });
+    observeWaitImpl: options.observeClosureWaitImpl || observeClosureWait }));
   result = await observeMismatch(result);
   if (result?.reason === 'closure-decision-mismatch' && result.nextActionShared) {
     const mismatch = result.decisionMismatch;
@@ -894,28 +906,28 @@ async function maybeDispatchAmaClosureForInner({
       } } : {}) };
   }
   try {
-    result = await escalateClosureBudget({ result, rootDir: options.rootDir || ROOT,
+    result = await timed('escalateClosureBudget', () => escalateClosureBudget({ result, rootDir: options.rootDir || ROOT,
       repo: options.repoPath, prNumber: options.prNumber,
       now: options.now ? options.now() : Date.now(), env: options.env || process.env,
-      observeWaitImpl: options.observeClosureWaitImpl || observeClosureWait });
+      observeWaitImpl: options.observeClosureWaitImpl || observeClosureWait }));
   } catch (error) { options.logger?.warn?.(`[watcher] closure-budget escalation observation failed: ${error.message}`); }
   // CLOSURERECOVERYEXEC-01: the closer's custody reconciliation did not
   // resolve an R04 decision; its deadline is enforced here, once per pass.
   if (result && closureOwnerSink.shared) {
     try {
-      result = await enforceClosureRecoveryDeadline({ rootDir: options.rootDir || ROOT,
+      result = await timed('enforceClosureRecoveryDeadline', () => enforceClosureRecoveryDeadline({ rootDir: options.rootDir || ROOT,
         repo: options.repoPath, prNumber: options.prNumber,
         headSha: options.candidate?.headSha || options.currentRevisionRef || null,
         shared: closureOwnerSink.shared, result, now: options.now ? options.now() : Date.now(),
         env: options.env || process.env, logger: options.logger,
-        observeWaitImpl: options.observeClosureWaitImpl || observeClosureWait });
+        observeWaitImpl: options.observeClosureWaitImpl || observeClosureWait }));
     } catch (error) { options.logger?.warn?.(`[watcher] closure-recovery deadline observation failed: ${error.message}`); }
   }
   try {
-    result = await observeClosureRefreshLoop({ rootDir: options.rootDir || ROOT,
+    result = await timed('observeClosureRefreshLoop', () => observeClosureRefreshLoop({ rootDir: options.rootDir || ROOT,
       repo: options.repoPath, prNumber: options.prNumber, shared: closureOwnerSink.shared, result,
       now: options.now ? options.now() : Date.now(), env: options.env || process.env,
-      observeWaitImpl: options.observeClosureWaitImpl || observeClosureWait });
+      observeWaitImpl: options.observeClosureWaitImpl || observeClosureWait }));
   } catch (error) { options.logger?.warn?.(`[watcher] snapshot-refresh loop observation failed: ${error.message}`); }
   const finalRoundObservable = finalRoundSink.value
     && result?.reason !== 'hammer-stop-awaiting-companion'
@@ -945,10 +957,10 @@ async function maybeDispatchAmaClosureForInner({
   };
   if (finalRoundObservable && (!isClosureRecoveryDecision(result?.nextAction)
     || result?.closerLaunchAlive === true || result?.closerLaunchBoundMs)) {
-    await observeFinalRound(false);
+    await timed('observe-final-round', () => observeFinalRound(false));
   } else if (finalRoundObservable) {
     // Ownerless recovery keeps its clock; the watchdog owns escalation.
-    await observeFinalRound(true);
+    await timed('anchor-final-round', () => observeFinalRound(true));
   }
   // NXA-02 observational shadow of this pass's final legacy owner; no effect.
   if (result?.closureOwner && closureOwnerSink.shadowInput) {
@@ -1334,11 +1346,12 @@ async function dispatchAmaClosureFor({
       startedAt: Date.parse(finalPush?.completedAt || '') || finalRoundCompletedAt
         || Date.parse(reviewStateRow?.posted_at || '') };
   }
-  const observeWait = args => observeClosureWaitImpl({
+  const observeWait = args => timeClosureCall(logger, 'observe-closure-wait', () => observeClosureWaitImpl({
     ...(finalRoundSink?.value && args.immediate !== true
       ? { waitClass: 'final-round', startedAt: finalRoundSink.value.startedAt } : {}),
     ...args,
-  });
+  }));
+  const observeLag = args => timeClosureCall(logger, 'observe-closure-lag', () => observeClosureLag(args));
   const settledReviewHeadSha = candidate?.headSha || currentRevisionRef || null;
   // GitHub returns mergeable=UNKNOWN transiently right after a push or when the
   // base branch moves (a steady merge stream keeps `main` moving). The
@@ -1836,7 +1849,7 @@ async function dispatchAmaClosureFor({
   });
   if (autonomousMergeExecutionEnabled && !(labelNames || []).some(label =>
     [...OPERATOR_HOLD_LABELS, 'duplicate-family-hold', 'adversarial-merge-blocked'].includes(label))) {
-    handoffLease = await reconcileAndAbandonAmaCloserLease(rootDir, handoffLease, {
+    handoffLease = await timeClosureCall(logger, 'reconcile-closer-lease', () => reconcileAndAbandonAmaCloserLease(rootDir, handoffLease, {
       ...closerLeaseLivenessOptions, ...preReceiptIntentOptions,
       now: now(), prMetadata, env, signal, logger,
       // Settle launches adopted by intent recovery before reclaiming ownership.
@@ -1844,7 +1857,7 @@ async function dispatchAmaClosureFor({
         ...closerLeaseLivenessOptions, rootDir, repo: repoPath, prNumber,
         hqRoot: resolveHqRoot(env), now: new Date(now()).toISOString(), env, signal, logger,
       }),
-    });
+    }));
   }
   let recordedStop = readHammerStopForHeadImpl({ hqRoot: resolveHqRoot(env), repo: repoPath,
     prNumber, headSha: currentPrHeadSha, reviewedSha: reviewState.headSha, logger });
@@ -2639,7 +2652,7 @@ async function dispatchAmaClosureFor({
   //                     tick with no double-merge.
   throwIfAborted(signal);
   try {
-    if (!priorDaemonCleanMerge && !wouldUseDaemonPath) await observeClosureLag({ rootDir, repo: repoPath, prNumber, headSha: currentPrHeadSha,
+    if (!priorDaemonCleanMerge && !wouldUseDaemonPath) await observeLag({ rootDir, repo: repoPath, prNumber, headSha: currentPrHeadSha,
       open: String(candidate?.prState || '').toUpperCase() === 'OPEN', observedAt: closureLagObservedAt,
       eligible: !wouldUseDaemonPath && isEligibleForAmaClosure(reviewState, prMetadata, cfg).eligible,
       sloMs: cfg.closureLagSloMs, logger });
@@ -2743,7 +2756,7 @@ async function dispatchAmaClosureFor({
     return withAmaDispatchMetadata({ ...daemonCleanMerge, dispatched: false, skipMergeAgent: true }, { amaEnabled: true });
   }
   if (!priorDaemonCleanMerge && daemonCleanMerge?.reason === 'not-eligible') {
-    try { await observeClosureLag({ rootDir, repo: repoPath, prNumber, headSha: currentPrHeadSha,
+    try { await observeLag({ rootDir, repo: repoPath, prNumber, headSha: currentPrHeadSha,
       eligible: false, observedAt: closureLagObservedAt, reason: daemonCleanMerge.reason, logger }); }
     catch (error) { logger?.warn?.(`AMA closure-lag observation failed: ${error.message}`); }
   }
@@ -2792,7 +2805,7 @@ async function dispatchAmaClosureFor({
     // the one that applied (foundry#35, 8.8h on `worker-identity-unresolved`).
     // Diagnostics only — nothing reads these records to decide a merge.
     if (daemonCleanMerge.disposition === DAEMON_MERGE_DISPOSITION.MERGED) {
-      try { await observeClosureLag({ rootDir, repo: repoPath, prNumber, headSha: currentPrHeadSha,
+      try { await observeLag({ rootDir, repo: repoPath, prNumber, headSha: currentPrHeadSha,
         merged: true, mergedAt: daemonCleanMerge.mergedAt, logger }); }
       catch (error) { logger?.warn?.(`AMA closure-lag observation failed: ${error.message}`); }
       clearDaemonMergePark({ rootDir, repo: repoPath, prNumber });
@@ -2950,6 +2963,13 @@ async function dispatchAmaClosureFor({
   const dispatchContext = {
     orphanRecovery,
     automatedRecovery,
+    remediationCompletedAt: [pushedRemediation, closureOwnerInput.followUpJob, passSnapshot?.observations?.remediation?.value?.job]
+      .filter(job => {
+        if (job?.status !== 'completed' || typeof job.completedAt !== 'string') return false;
+        const plan = job.remediationPlan;
+        const round = Array.isArray(plan?.rounds) && plan.rounds.find(item => item?.round === Number(plan.currentRound));
+        return (round?.resultingHeadSha || job.completion?.workerPushedHeadSha || job.headSha || job.revisionRef) === currentPrHeadSha;
+      }).map(job => job.completedAt).filter(at => Number.isFinite(Date.parse(at))).sort().at(-1) || null,
     // Dispatch consumes the canonical settled review, including successor input.
     settledReview: gateSnapshot.settledReview,
     daemonFailureReasons: Array.isArray(daemonCleanMerge?.reasons)
@@ -3380,6 +3400,7 @@ async function resolveMergeAgentCoexistenceWithinEvaluation({
   operationTracker = null,
   passSnapshot = null,
 }) {
+  const timed = (operation, run) => timeClosureCall(logger, operation, run);
   throwIfAborted(signal);
   // BUG-1 dispatch-time terminal guard. `candidate` is the live PR read for
   // this tick (fetchMergeAgentCandidate). An already-MERGED PR needs no
@@ -3393,8 +3414,8 @@ async function resolveMergeAgentCoexistenceWithinEvaluation({
   const liveMerged =
     candidate?.merged === true || String(candidate?.prState || '').toLowerCase() === 'merged';
   if (liveMerged || String(candidate?.prState || '').toLowerCase() === 'closed') {
-    try { await observeClosureLag({ rootDir, repo: repoPath, prNumber, merged: liveMerged,
-      closed: !liveMerged, mergedAt: candidate?.mergedAt, logger }); }
+    try { await timed('observe-terminal-closure-lag', () => observeClosureLag({ rootDir, repo: repoPath, prNumber, merged: liveMerged,
+      closed: !liveMerged, mergedAt: candidate?.mergedAt, logger })); }
     catch (error) { logger?.warn?.(`AMA closure-lag observation failed: ${error.message}`); }
     return { outcome: 'pr-terminal', terminalReason: liveMerged ? 'merged' : 'closed' };
   }
@@ -3404,7 +3425,7 @@ async function resolveMergeAgentCoexistenceWithinEvaluation({
   }
   let amaClosureResult;
   try {
-    amaClosureResult = await maybeDispatchAmaClosureForImpl({
+    amaClosureResult = await timed('maybe-dispatch-closure', () => maybeDispatchAmaClosureForImpl({
       rootDir,
       reviewStateRow,
       reviewStateDb,
@@ -3427,7 +3448,7 @@ async function resolveMergeAgentCoexistenceWithinEvaluation({
       operationTracker,
       // NXA-01 pass snapshot, observational only (NXA-02 shadow).
       ...(passSnapshot ? { passSnapshot } : {}),
-    });
+    }));
   } catch (err) {
     throwIfAborted(signal);
     if (err?.code !== 'AMA_COEXISTENCE_OPERATION_TIMEOUT') throw err;
@@ -3451,7 +3472,7 @@ async function resolveMergeAgentCoexistenceWithinEvaluation({
     const head = currentRevisionRef || candidate?.headSha || dispatchJob?.headSha || null;
     let anchor = reviewStateRow?.posted_at || reviewStateRow?.reviewed_at || null;
     try {
-      const wait = await observeClosureWait({ rootDir, repo: repoPath, prNumber, headSha: head, anchorOnly: true });
+      const wait = await timed('anchor-closure-wait', () => observeClosureWait({ rootDir, repo: repoPath, prNumber, headSha: head, anchorOnly: true }));
       anchor ||= new Date(wait.startedAt).toISOString();
     } catch { /* Diagnostic persistence cannot refuse a workflow. */ }
     const snapshot = deriveNextActionSnapshot({ base: passSnapshot,
@@ -3489,18 +3510,18 @@ async function resolveMergeAgentCoexistenceWithinEvaluation({
   // operator handoff first, including when a heartbeat renews the final-round wait.
   if (!isSafetyRecoveryHold(amaClosureResult) && !labelNames?.some(label =>
     [...OPERATOR_HOLD_LABELS, 'adversarial-merge-blocked', 'merge-agent-stuck', 'duplicate-family-hold'].includes(label))) {
-    const handoff = await enforceLiveCloserHandoff({ rootDir, repo: repoPath, prNumber,
+    const handoff = await timed('enforce-live-closer-handoff', () => enforceLiveCloserHandoff({ rootDir, repo: repoPath, prNumber,
       headSha: candidate?.headSha || currentRevisionRef, shared: readClosureNextAction(amaClosureResult),
       result: amaClosureResult, now: typeof orphanOptions.now === 'number' ? orphanOptions.now
         : orphanOptions.now ? Date.parse(orphanOptions.now) : Date.now(), env: orphanOptions.env || process.env,
-      observeWaitImpl: orphanOptions.observeClosureWaitImpl || observeClosureWait, logger });
+      observeWaitImpl: orphanOptions.observeClosureWaitImpl || observeClosureWait, logger }));
     if (handoff) return { outcome: 'await-operator', amaClosureResult: bindClosureNextAction(handoff, readClosureNextAction(amaClosureResult)) };
   }
-  const admissionDisagreement = await observeReviewAdmissionContract({ rootDir, repo: repoPath, prNumber,
+  const admissionDisagreement = await timed('observe-review-admission', () => observeReviewAdmissionContract({ rootDir, repo: repoPath, prNumber,
     headSha: candidate?.headSha || currentRevisionRef, reviewStateRow, result: amaClosureResult, logger,
     now: typeof orphanOptions.now === 'number' ? orphanOptions.now
       : orphanOptions.now ? Date.parse(orphanOptions.now) : Date.now(), env: orphanOptions.env || process.env,
-    observeWaitImpl: orphanOptions.observeClosureWaitImpl || observeClosureWait });
+    observeWaitImpl: orphanOptions.observeClosureWaitImpl || observeClosureWait }));
   if (admissionDisagreement) return admissionDisagreement;
   // The generic ownerless watchdog cannot execute R05 repairs and otherwise
   // returns a pending/exhausted result before the repair owner is reached.
@@ -3528,7 +3549,7 @@ async function resolveMergeAgentCoexistenceWithinEvaluation({
   // can hide it. The watchdog still proves absence of live/uncertain owners and
   // reserves the existing once-per-head request; this grants no merge authority.
   const recoverOwnerless = async () => {
-    const orphan = await recoverOrphanImpl({
+    const orphan = await timed('recover-orphan', () => recoverOrphanImpl({
       rootDir, repo: repoPath, prNumber,
       headSha: candidate?.headSha || currentRevisionRef || dispatchJob?.headSha || '',
       candidate, labels: labelNames, result: amaClosureResult, reviewStateRow, dispatchJob, logger, signal,
@@ -3552,7 +3573,7 @@ async function resolveMergeAgentCoexistenceWithinEvaluation({
         }
       },
       ...orphanOptions,
-    });
+    }));
     if (orphan?.amaClosureResult?.reviewRequest?.triggered === true) {
       return { ...orphan, amaClosureResult: { ...orphan.amaClosureResult,
         reason: 'exact-head-review-queued', closureOwner: amaClosureResult?.nextAction

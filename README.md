@@ -1721,6 +1721,12 @@ records the evidence/admission truth table and public export fixture refresh.
 
 ## State machines and smoke verification (SMV v1)
 
+Remediation closer priority hints terminate without dispatch for unmanaged
+repositories or missing PRs. Malformed JSON moves unchanged to `dead-letter/`
+under the queue directory and stays excluded after watcher restart; filesystem
+and decision errors retain retry custody. Offline coverage is in
+`test/remediation-closer-queue.test.mjs`. Existing smoke commands are unchanged.
+
 Classified transient closer history stops record `history-read-failed` with
 the class in audit `reasonDetail`; the audit is `deferred` and enters the
 watcher's existing inconclusive retry. Permanent history stops remain counted.

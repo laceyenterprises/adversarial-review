@@ -1,4 +1,5 @@
 import { requestCloserSuccessor } from './ama/closer-successor.mjs';
+import { enqueueRemediationCloser } from './remediation-closer-queue.mjs';
 import { addCiRegressionFinding } from './ci-regression-finding.mjs';
 import { isEndedRemediationRound } from './remediation-round-recovery.mjs';
 import { infrastructureOnlyFailures, recordedCiFailures, CI_INFRASTRUCTURE_STOP_REASONS } from './ci-infrastructure.mjs';
@@ -3500,6 +3501,10 @@ function markFollowUpJobCompleted({
     },
   });
   captureFindingRemediationSafe({ rootDir, job: completed.job });
+  if (!completed.alreadyTerminal) {
+    try { enqueueRemediationCloser(rootDir, completed.job, resultingHeadSha); }
+    catch (error) { console.warn(`[follow-up] closer priority enqueue failed (${error.code || 'write-error'})`); }
+  }
   return completed;
 }
 

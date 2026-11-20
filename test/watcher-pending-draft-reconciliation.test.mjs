@@ -289,7 +289,7 @@ test('watcher terminal rereview skip releases claim and falls through to close p
   // adoption phase.
   const watcherSource = readFileSync(WATCHER_SOURCE, 'utf8');
   const dispatchPhaseIndex = watcherSource.indexOf("await processReviewSubject(subjectEntry, {");
-  const adoptionIndex = watcherSource.indexOf("await runQueuedReviewAdoptionPhase({", dispatchPhaseIndex);
+  const adoptionIndex = watcherSource.indexOf("await withWatcherClosureStatus(() => runQueuedReviewAdoptionPhase({", dispatchPhaseIndex);
   assert.ok(dispatchPhaseIndex > 0, 'per-PR processing phase should be driven from pollOnce');
   assert.ok(adoptionIndex > dispatchPhaseIndex, 'watcher close/maintenance phase should remain after per-PR queueing');
 });

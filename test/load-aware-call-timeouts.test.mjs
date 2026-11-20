@@ -211,8 +211,8 @@ test('rate-limit lock waits scale while the retry interval stays fixed', async t
 test('posted-review deadlines scale while phase cadence stays fixed', async t => {
   syntheticBusyHost(t);
   assert.equal(resolvePostedReviewPhaseBudgetMs({}), 600_000);
-  assert.equal(resolveMergeAgentCoexistenceStepDeadlineMs({}), 87_500 * 6);
-  assert.equal(resolveMergeAgentCoexistenceOperationTimeoutMs({}), 60_000 * 6);
+  assert.equal(resolveMergeAgentCoexistenceStepDeadlineMs({}), 45_000);
+  assert.equal(resolveMergeAgentCoexistenceOperationTimeoutMs({}), 40_000);
   const timers = [];
   await runPostedReviewHandlersFairly({ handlers: [{ repoPath: 'example/project', prNumber: 1, run: async () => ({}) }],
     rootDir: dirname(process.env.AGENT_OS_CONFIG_PATH), logger: quiet,

@@ -286,7 +286,7 @@ async function recoverOrphanWithinRepositoryCycle(options) {
 
 async function recoverOrphanWithStore({ rootDir, repo, prNumber, headSha, candidate,
   labels = candidate?.labels || [], result, reviewStateRow, dispatchHammer,
-  dispatchRemediation = null,
+  dispatchRemediation = null, reconcileCloser = null,
   hasOwnerImpl = probeOrphanOwnership, pageImpl = defaultPage, requestRereviewImpl = defaultRereview,
   ownershipOperation = fn => fn({}), ownershipTimeoutMs = loadAwareTimeoutMs(5000),
   onOwnershipObserved = null,
@@ -394,6 +394,13 @@ async function recoverOrphanWithStore({ rootDir, repo, prNumber, headSha, candid
       : selected?.action === 'remediate' && selected.actor === 'remediator' ? dispatchRemediation : null;
     const canDispatch = !held && selected?.head === headSha && selected.queue?.intent === 'dispatch'
       && !selected.queue?.deferredBy && typeof executor === 'function';
+    // Reconcile a lapsed closer decision under the same PR lock and absence
+    // proof before reporting that the selected transition has no executor.
+    if (overdue && !canDispatch && !held && ownership?.owned === false && !ownership.uncertain
+      && !isOrphanRecoveryWait(result) && reconcileCloser) {
+      const closure = await reconcileCloser();
+      if (closure) return { ...closure, closerReconciled: true };
+    }
     if (overdue && (ownership?.uncertain || !canDispatch || isOrphanRecoveryWait(result))) {
       return await pageTransition(ownership?.uncertain ? 'ownership-proof-unavailable'
         : isOrphanRecoveryWait(result) ? 'recovery-wait-expired'

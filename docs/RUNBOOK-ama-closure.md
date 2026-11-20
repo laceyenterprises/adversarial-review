@@ -2366,7 +2366,16 @@ Closer orchestration, review handoff and queued launch preflight consume the
 shared snapshot/decision. Reports retain action, actor, reason, head, anchored
 UTC deadline and queue intent through capacity waits, automatic stops and cap
 exhaustion. Only explicit hold/draft/disabled-policy intent selects operator
-hold. An overdue report never stops a later eligible pass. Rescue projections preserve reconciliation, live ownership and queue deferral
+hold. A lapsed posted-review closer action with proven absent custody re-enters the
+rescue dispatch-only entry from discovery. The entry reads the current head,
+checks for live holds, and runs ordinary closer admission. An explicit review,
+remediation, or daemon decision continues through its ordinary handler. A
+closer-trailer head can pass slow-lane backoff through the posted-review
+closure handler. Admitted background work counts toward `ama.closer_queue_depth`
+while waiting for a launch slot. Budget and hard-stop refusals use the existing
+closure-wait escalation receipts.
+
+Rescue projections preserve reconciliation, live ownership and queue deferral
 instead of treating the legacy hammer spelling as launch permission. The no-progress
 lane persists the selected decision and keeps automated recovery eligible;
 confirmed drain observations preserve its existing debt and original intent.

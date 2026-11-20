@@ -25,6 +25,10 @@ import { CLOSURE_RECOVERY_ESCALATED_REASON, CLOSURE_RECOVERY_WAIT_CLASS, CLOSURE
   enforceClosureRecoveryDeadline, refreshClosureRecoveryCustody } from '../src/ama/closure-recovery.mjs';
 import { hasClosureRecoveryIntent, hasHammerDispatchIntent, reviseClosureNextAction } from '../src/ama/closure-next-action.mjs';
 import { createNoProgressLaneGate } from '../src/posted-review-row.mjs';
+import { recoverOverdueOwnership } from '../src/ownerproof-review-recovery.mjs';
+import { recoverOrphan } from '../src/ama/orphan-watchdog.mjs';
+import { noProgressLaneFilePath } from '../src/watcher-no-progress-lane.mjs';
+import { observeCloserBacklog } from '../src/ama/closure-lag.mjs';
 import { collectReviewPipelineHealth, readExpiredNextActions } from '../src/review-pipeline-health.mjs';
 import { expiredNextActionDeadline } from '../src/next-action-deadline.mjs';
 
@@ -739,4 +743,128 @@ for (const exhausted of [false, true]) test(`CAPREHEAD real retry-cap decision a
   assert.notEqual(second.needsOperator, true);
   assert.equal(pages.length, 0, 'neither dispatch nor live custody pages the spent budget');
   assert.equal(launches, 1);
+});
+
+
+function parkedDiscovery(args, overrides = {}) {
+  return { rootDir: args.rootDir, ...IDENTITY, enabled: true,
+    subject: { headSha: HEAD }, reviewStateRow: args.reviewStateRow, now: new Date(args.now()).toISOString(),
+    env: {}, logger: args.logger, readLaneImpl: () => ({ headSha: HEAD, nextAction: {
+      head: HEAD, action: 'hammer', actor: 'closure-recovery', reason: 'ownership-unreadable',
+      row: 'R04-ownership', queue: { intent: 'reconcile' }, deadline: { at: new Date(DEADLINE_MS).toISOString() },
+    } }),
+    fetchCandidateImpl: async () => args.candidate,
+    recoverImpl: input => recoverOrphan({ ...input,
+      pageImpl: () => assert.fail('closure owns the result and escalation') }),
+    dispatchImpl: input => maybeDispatchAmaClosureFor({ ...args, ...input }), ...overrides };
+}
+
+for (const stale of [false, true]) test(`CLOSERPARKOWNER-02: lapsed ${stale ? 'trailer' : 'exact reviewed'} head gets one closer`, async t => {
+  let launched = 0;
+  const closer = custodyCloser({ readable: () => true });
+  const { pages, observeClosureWaitImpl } = pageRecorder();
+  t.mock.method(dispatchReadTransport, 'lookup', async selector => {
+    if (!launched) throw new Error('synthetic ledger outage');
+    const id = selector.launch_request_ids?.[0];
+    return { schema_version: 1, status: 'found', complete: true, roots: [id],
+      items: [{ launch_request_id: id, repo: REPO, status: 'running' }], retry_edges: [] };
+  });
+  const args = closerHeadArgs(t, { now: () => DEADLINE_MS + 20 * MINUTE, observeClosureWaitImpl,
+    resolveAmaHammerDispatchModeImpl: () => 'background', maybeDispatchAmaCloserImpl: async input => {
+      const result = await closer.impl(input);
+      if (result.dispatched) {
+        launched++;
+        const identity = { rootDir: input.dispatchContext.rootDir, ...IDENTITY };
+        deleteAmaCloserLease(identity.rootDir, identity);
+        const now = new Date(args.now()).toISOString();
+        assert.equal(acquireAmaCloserLease({ ...identity, watcherPid: process.pid, now }).acquired, true);
+        updateAmaCloserLease({ ...identity, status: 'dispatched', lrqId: result.launchRequestId, now });
+      }
+      return result;
+    } });
+  if (!stale) {
+    const body = BODY.replace('## Non-blocking Issues\n\n- None.',
+      '## Non-blocking Issues\n\n- **Example**\n  - **Problem:** Missing units.');
+    args.reviewStateRow = { ...args.reviewStateRow, reviewer_head_sha: HEAD, review_body: body };
+    args.fetchLatestHeadReviewBodiesImpl = async () => [body];
+  }
+  const result = await recoverOverdueOwnership(parkedDiscovery(args));
+  assert.equal(result?.outcome, 'ama-dispatched', result?.amaClosureResult?.reason);
+  assert.equal(await recoverOverdueOwnership(parkedDiscovery(args)), null);
+  assert.equal(launched, 1);
+  assert.deepEqual(pages, []);
+});
+
+test('CLOSERPARKOWNER-02: a live follow-up or a live hold fences the rescue entry', async t => {
+  const args = closerHeadArgs(t, { now: () => DEADLINE_MS + 20 * MINUTE });
+  const dispatchImpl = () => assert.fail('a live owner or hold must prevent dispatch');
+  const held = { ...args.candidate, labels: [{ name: 'no-merge-hold' }] };
+  assert.equal(await recoverOverdueOwnership(parkedDiscovery(args, {
+    fetchCandidateImpl: async () => held, dispatchImpl,
+  })), null);
+  const dir = path.join(args.rootDir, 'data', 'follow-up-jobs', 'in-progress');
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(path.join(dir, 'fixture.json'), JSON.stringify({ ...IDENTITY, status: 'in_progress',
+    revisionRef: REVIEWED, claimedAt: new Date(args.now()).toISOString() }));
+  assert.equal(await recoverOverdueOwnership(parkedDiscovery(args, {
+    fetchCandidateImpl: () => assert.fail('live follow-up owns the branch'), dispatchImpl,
+  })), null);
+});
+
+test('CLOSERPARKOWNER-02: exhausted closer routes one typed budget escalation', async t => {
+  const { pages, observeClosureWaitImpl } = pageRecorder();
+  const args = closerHeadArgs(t, { now: () => DEADLINE_MS + 20 * MINUTE, observeClosureWaitImpl,
+    logger: quiet, resolveAmaHammerDispatchModeImpl: () => 'inline',
+    maybeDispatchAmaCloserImpl: async () => ({ dispatched: false, skipMergeAgent: true, reason: 'hammer-retry-cap-exhausted' }) });
+  deleteAmaCloserLease(args.rootDir, IDENTITY);
+  args.reviewStateRow = { ...args.reviewStateRow, reviewer_head_sha: HEAD };
+  args.fetchLatestHeadReviewBodiesImpl = async () => [BODY];
+  markHammerRetryCapExhausted(args.rootDir, IDENTITY, { jobKey: HEAD, headSha: HEAD, attemptCount: 3 });
+  for (let pass = 0; pass < 2; pass++) {
+    const result = await recoverOverdueOwnership(parkedDiscovery(args));
+    assert.equal(result?.outcome, 'recovery-exhausted');
+    assert.equal(result.amaClosureResult.dispatched, false);
+    assert.equal(result.amaClosureResult.operatorReason, 'closure-retry-exhausted');
+  }
+  assert.equal(pages.length, 1);
+});
+
+test('CLOSERPARKOWNER-02: a hard-stop refusal is paged once with a typed reason', async t => {
+  const { pages, observeClosureWaitImpl } = pageRecorder();
+  const args = closerHeadArgs(t, { now: () => DEADLINE_MS + 20 * MINUTE, observeClosureWaitImpl,
+    proveCloserAuthoredStaleHeadImpl: async () => ({ proven: false, reviewedHead: REVIEWED, currentHead: HEAD,
+      reason: 'hammer-app-attestation-missing' }),
+    resolveAmaHammerDispatchModeImpl: () => 'inline', maybeDispatchAmaCloserImpl: async () => ({
+      dispatched: false, skipMergeAgent: true, reason: 'not-eligible',
+      reasons: ['label-adversarial-merge-blocked'],
+    }) });
+  deleteAmaCloserLease(args.rootDir, IDENTITY);
+  for (let pass = 0; pass < 2; pass++) {
+    const result = await recoverOverdueOwnership(parkedDiscovery(args));
+    assert.equal(result?.outcome, 'recovery-exhausted', JSON.stringify(result?.amaClosureResult?.nextAction));
+    assert.equal(result.amaClosureResult.operatorReason, 'label-adversarial-merge-blocked');
+  }
+  assert.equal(pages.length, 1);
+});
+
+test('CLOSERPARKOWNER-02: a suppressed trailer enters the posted queue through slow-lane backoff', async t => {
+  const queue = { submit: () => ({ state: 'queued' }) };
+  const args = closerHeadArgs(t, { now: () => DEADLINE_MS + 20 * MINUTE, ...pageRecorder(),
+    proveCloserAuthoredStaleHeadImpl: async () => ({ proven: false, reviewedHead: REVIEWED, currentHead: HEAD,
+      reason: 'hammer-app-attestation-missing' }),
+    resolveAmaHammerDispatchModeImpl: () => 'background', amaHammerBackgroundQueueImpl: () => queue,
+    maybeDispatchAmaCloserImpl: () => assert.fail('a queued entry awaits a slot') });
+  deleteAmaCloserLease(args.rootDir, IDENTITY);
+  const pathToLane = noProgressLaneFilePath(args.rootDir, IDENTITY);
+  mkdirSync(path.dirname(pathToLane), { recursive: true });
+  writeFileSync(pathToLane, JSON.stringify({ ...IDENTITY, headSha: HEAD, lane: 'slow', skippedTicks: 0,
+    noProgressTicks: 9, progressClass: 'self-resolving' }));
+  const gate = createNoProgressLaneGate({ rootDir: args.rootDir, logger: quiet,
+    readReviewRow: () => args.reviewStateRow });
+  const handler = { repoPath: REPO, prNumber: PR, headSha: HEAD };
+  assert.equal(gate.evaluate(handler, { recordSkip: false }).run, false);
+  assert.equal(gate.evaluate({ ...handler, closerTrailerHead: true }, { recordSkip: false }).run, true);
+  const result = await maybeDispatchAmaClosureFor(args);
+  assert.equal(result.backgroundDispatch?.state, 'queued', JSON.stringify(result.nextAction));
+  assert.equal(await observeCloserBacklog({ rootDir: args.rootDir, repo: REPO, prNumber: PR + 1, pending: false }), 1);
 });

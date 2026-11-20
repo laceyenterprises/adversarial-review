@@ -2488,6 +2488,13 @@ A crashed closer resumes through existing leases, attempt keys, retry/backoff
 and lifetime caps. Exhaustion uses the existing escalation path. No new review
 or remediation round is created.
 
+CLOSERPARKOWNER-02 reconciles a lapsed closer action on a posted row after the
+watchdog proves custody absent. Discovery uses the dispatch-only rescue entry
+with a live candidate. A closer-trailer suppression also makes the posted row
+due for its closure handler through slow-lane backoff. Live review, remediation
+and closer custody, operator holds, and existing eligibility remain authoritative.
+Refused budgets and hard-stop labels use the durable closure-wait escalation.
+
 HAMATTEST-03 executes an admitted head-bound review decision before coexistence returns a
 bounded closure wait, including a consumed background `not-eligible` outcome.
 The watchdog checks live/uncertain ownership before requesting review. Successful

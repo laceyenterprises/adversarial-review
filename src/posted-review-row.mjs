@@ -1248,6 +1248,9 @@ export function createNoProgressLaneGate({
         decision = { ...decision, lane: 'active', due: true,
           reason: handler.budgetExhaustedCloserOwned ? 'budget-exhausted-closure-owed' : 'final-round-closure-owed', backoffTicks: 0 };
       }
+      if (handler.closerTrailerHead === true && decision.reason === 'slow-lane-backoff') {
+        decision = { ...decision, lane: 'active', due: true, reason: 'closer-trailer-closure-owed', backoffTicks: 0 };
+      }
       // CIWAITLANE-01: only plain slow-lane backoff yields to a settled CI wait.
       const ciWait = decision.reason === 'slow-lane-backoff' ? evaluateCiWaitAdmission(ledger,
         { headSha: handler.headSha, ciSignal: handler.ciWaitSignal }) : null;

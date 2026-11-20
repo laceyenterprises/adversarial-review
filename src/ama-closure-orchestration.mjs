@@ -45,7 +45,7 @@ import { hostname } from 'node:os';
 import { OPERATOR_HOLD_LABELS } from './operator-hold-labels.mjs';
 import { isOrphanHeadReviewRequested } from './orphan-head-review-requested.mjs';
 import { recoverOrphan, isOrphanRecoveryWait, hasExactHeadReviewDecision, overdueNextAction } from './ama/orphan-watchdog.mjs';
-import { observeClosureLag } from './ama/closure-lag.mjs';
+import { observeCloserBacklog, observeClosureLag } from './ama/closure-lag.mjs';
 // ── AMA closure orchestration: dispatch decision + coexistence + audit ────────
 //
 // ARC-18: extracted from watcher.mjs. The AMA (autonomous-merge-authority)
@@ -885,6 +885,21 @@ async function maybeDispatchAmaClosureForInner({
       now: options.now ? options.now() : Date.now(), env: options.env || process.env,
       observeWaitImpl: options.observeClosureWaitImpl || observeClosureWait });
   } catch (error) { options.logger?.warn?.(`[watcher] closure-budget escalation observation failed: ${error.message}`); }
+  const hardStop = !result?.dispatched && !result?.boundedWait && !result?.needsOperator
+    && (orphanRecovery?.fromDiscovery || closerAuthoredStaleSink.value?.hammerHead
+      || closerAuthoredStaleSink.value?.closerCommits?.length)
+    && [result?.reason, ...(Array.isArray(result?.reasons) ? result.reasons : [])].find(reason =>
+      ['label-adversarial-merge-blocked', 'duplicate-family-unresolved'].includes(reason));
+  if (hardStop) {
+    try {
+      const boundedWait = await (options.observeClosureWaitImpl || observeClosureWait)({
+        rootDir: options.rootDir || ROOT, repo: options.repoPath, prNumber: options.prNumber,
+        headSha: options.candidate?.headSha, now: options.now ? options.now() : Date.now(),
+        env: options.env || process.env, immediate: true, waitClass: 'closer-hard-stop', reason: hardStop,
+      });
+      result = { ...result, boundedWait, needsOperator: true, operatorReason: hardStop };
+    } catch (error) { options.logger?.warn?.(`[watcher] closer hard-stop escalation failed: ${error.message}`); }
+  }
   // CLOSURERECOVERYEXEC-01: the closer's custody reconciliation did not
   // resolve an R04 decision; its deadline is enforced here, once per pass.
   if (result && closureOwnerSink.shared) {
@@ -3176,6 +3191,14 @@ async function dispatchAmaClosureFor({
         `[watcher] AMA hammer dispatch ${submission.state} in background for ${backgroundKey}; ` +
           `posted-review phase continues`,
       );
+      // A queued, admitted decision has no launch yet. Include it in the
+      // same PR census that the closer samples when it acquires a slot.
+      if (submission.state === 'queued' && hasHammerDispatchIntent(shared, {
+        repo: repoPath, prNumber, headSha: currentPrHeadSha,
+      })) {
+        try { await observeCloserBacklog({ rootDir, repo: repoPath, prNumber, logger }); }
+        catch (error) { logger?.warn?.(`AMA backlog observation failed: ${error.message}`); }
+      }
       return withAmaDispatchMetadata(
         {
           dispatched: false,

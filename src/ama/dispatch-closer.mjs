@@ -961,9 +961,15 @@ export function createHammerScratchDir(promptDir) {
 }
 
 export function hammerScratchEnvironment(scratchDir, env = process.env) {
+  // The prompt directory lives inside the service checkout, so a cwd-relative
+  // git started in scratch would otherwise walk up and act on that checkout.
+  // Fence discovery at the prompt directory and its parent (covers a git
+  // started in the prompt directory itself); inherited ceilings still apply.
+  const promptDir = dirname(resolve(scratchDir));
+  const ceilings = [promptDir, dirname(promptDir), env.GIT_CEILING_DIRECTORIES].filter(Boolean).join(':');
   // pytest parses PYTEST_ADDOPTS with shlex, so quote paths containing spaces.
   // A fixed basetemp is replaced on each invocation, retaining one test tree.
-  return { ...env, TMPDIR: scratchDir,
+  return { ...env, TMPDIR: scratchDir, GIT_CEILING_DIRECTORIES: ceilings,
     PYTEST_ADDOPTS: [env.PYTEST_ADDOPTS, `--basetemp=${JSON.stringify(join(scratchDir, 'tmp-tests'))}`,
       '-o tmp_path_retention_count=1'].filter(Boolean).join(' ') };
 }

@@ -90,8 +90,23 @@ async function alertReviewerSnapshotBaseFailure({ repo, prNumber, headSha, linkP
   }
 }
 
+async function alertReviewerWorkspaceDegradation({ repo, prNumber, headSha, cause }, {
+  deliverAlertImpl = deliverAlert,
+} = {}) {
+  try {
+    return await deliverAlertImpl(
+      `Adversarial reviewer workspace degraded to diff-only for ${repo}.\nPR #${prNumber} at ${headSha}\nCause: ${cause}`,
+      { event: 'reviewer.workspace_degraded', payload: { repo, prNumber, headSha, cause } },
+    );
+  } catch (err) {
+    console.warn(`[reviewer] failed to queue workspace degradation alert: ${err.code || 'unknown'}`);
+    return null;
+  }
+}
+
 export {
   alertClioOAuthFailure,
   alertClioOversizedAgyFailure,
   alertReviewerSnapshotBaseFailure,
+  alertReviewerWorkspaceDegradation,
 };

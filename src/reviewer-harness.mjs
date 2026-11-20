@@ -59,6 +59,7 @@ import {
   resolveReviewerTimeoutMs,
 } from './reviewer-timeout.mjs';
 import { spawnCapturedProcessGroup } from './process-group-spawn.mjs';
+import { isOwnedReviewerCwd } from './reviewer-harness-cwd.mjs';
 import { auditReviewerSubprocess } from './reviewer-workspace.mjs';
 import {
   extractReviewVerdict,
@@ -181,7 +182,7 @@ async function spawnWithInput(command, args, {
     ...(stdoutPath ? { stdoutPath } : {}),
     ...(stderrPath ? { stderrPath } : {}),
     ...(settleAfterKillMs ? { settleAfterKillMs } : {}),
-  }));
+  }), cwd);
 }
 
 async function spawnCaptured(command, args, {
@@ -524,7 +525,7 @@ async function spawnClaude(args, options = {}) {
       return spawnCapturedProcessGroup(claudeCli, args, { ...execOptions, onSpawn });
     }
     return execFileImpl(claudeCli, args, execOptions);
-  });
+  }, execOptions.cwd);
 }
 
 function resolveCodexAuthPath() {
@@ -1192,10 +1193,12 @@ function buildCodexReviewArgs({
   configOverrides = null,
   persistSession = false,
   modelCatalogPath = null,
+  skipGitRepoCheck = false,
 }) {
   const args = [
     'exec',
     '--ignore-user-config',
+    ...(skipGitRepoCheck ? ['--skip-git-repo-check'] : []),
     '--dangerously-bypass-approvals-and-sandbox',
     ...(!persistSession ? ['--ephemeral'] : []),
     '--json',
@@ -1256,7 +1259,7 @@ async function spawnCodexReview({
     return await spawnCapturedImpl(
       codexCli,
       buildCodexReviewArgs({ outputPath, prompt, model, modelProvider, configOverrides, persistSession,
-        modelCatalogPath: home.catalogPath }),
+        modelCatalogPath: home.catalogPath, skipGitRepoCheck: isOwnedReviewerCwd(cwd) }),
       {
         env: { ...scrubOAuthFallbackEnv(env).env, CODEX_HOME: home.codexHome, CODEX_AUTH_PATH: home.authPath },
         cwd,

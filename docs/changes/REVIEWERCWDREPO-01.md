@@ -32,3 +32,33 @@ dependency-evidence and snapshot-alert suites passed 294 tests with one optional
 companion-package integration skip. `npm run lint` passed with zero errors
 (existing warnings remain), `npm run typecheck:contracts` passed,
 `bash demo/research-finding-walkthrough.sh` passed, and `git diff --check` passed.
+
+## Final Claude review closeout
+
+- The reviewer and Argus accept the canonical GitHub origin forms documented
+  in the runbook, check configured and effective origin identity, and use the
+  native, case-preserving clone path. Offline fixtures cover credential-bearing
+  HTTPS without exposing userinfo, SSH spellings, aliases, URL rewrites and
+  mismatched hosts or repositories. The PR worker origin used canonical SSH.
+- Diff-only setup records five bounded causes and per-repository counts. A
+  transition from snapshot mode logs the degradation. Operational degradation
+  uses the shared digest path with a 24-hour per-repository debounce. PR-authored
+  escaping links remain log-only and safely fall back to diff-only.
+- Snapshot GC reads owned byte totals and retains the legacy filesystem walk,
+  cache budgets and liveness pins. Exact-head cache misses still build a full
+  Git archive. A sparse archive would omit unchanged files needed to interpret
+  the patch. The runbook documents the archive cost and completeness limits.
+- Empty startup directories use the owned workspace root and are reclaimed
+  after confirmed process death. The Antigravity launcher keeps the required
+  cross-user traversal in a per-UID root. Offline tests exercise signal
+  termination, a surviving detached harness, unknown liveness, and cleanup.
+- The PR archive remains a separate read-only evidence path for harnesses that
+  can access it. Argus separates evidence assembly from model startup. Keeping
+  project files in the archive preserves review evidence, while putting an
+  archive on the harness workspace search path could reintroduce automatic
+  settings or instruction discovery. Harness startup uses an empty cwd in
+  both workspace modes.
+- Existing fetch tests exercise caller environment, both commit widths,
+  bounded transient retries and disabled auto-maintenance. The existing
+  deploy-state containment and PR-authored escaping-link regressions remain
+  in the focused suite.

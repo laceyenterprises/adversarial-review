@@ -4118,9 +4118,9 @@ test('buildGeminiReviewArgs enters headless mode without carrying the prompt bod
 
 test('isolated Codex reviewer home persists a rollout for quota capture', () => {
   const args = buildCodexReviewArgs({ outputPath: '/tmp/review.md', prompt: 'review',
-    model: 'gpt-6-sol', persistSession: true });
+    model: 'gpt-6-sol', persistSession: true, skipGitRepoCheck: true });
   assert.equal(args.includes('--ephemeral'), false);
-  assert.deepEqual(args.slice(0, 4), ['exec', '--ignore-user-config',
+  assert.deepEqual(args.slice(0, 5), ['exec', '--ignore-user-config', '--skip-git-repo-check',
     '--dangerously-bypass-approvals-and-sandbox', '--json']);
 });
 

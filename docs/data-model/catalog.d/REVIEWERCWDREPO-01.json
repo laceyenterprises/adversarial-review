@@ -12,6 +12,18 @@
       "bodyDigestFields": ["rawReviewSha256", "reviewTextSha256"],
       "deliveryStateValues": ["pending-delivery", "deferred", "write-started", "delivered"],
       "compatibility": "The diffOnly boolean is part of the exact-match reuse key. Older records without the field remain evidence and are ineligible for redelivery."
+    },
+    {
+      "id": "reviewer-workspace-state",
+      "title": "Reviewer Workspace State",
+      "path": "docs/data-model/reviewer-workspace-state.md",
+      "store": "<workspace-state-dir>/reviewer-workspace-audit/modes/<repo-key>.json",
+      "schemaSurface": "src/reviewer-workspace-telemetry.mjs",
+      "relatedSchemaSurfaces": [
+        "src/reviewer-workspace.mjs",
+        "src/reviewer-harness-cwd.mjs"
+      ],
+      "owner": "hosted reviewer workspace"
     }
   ]
 }

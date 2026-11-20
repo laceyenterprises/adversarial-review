@@ -1,5 +1,7 @@
 import assert from 'node:assert/strict';
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawn } from 'node:child_process';
+import { once } from 'node:events';
+import { setTimeout as delay } from 'node:timers/promises';
 import {
   chmodSync,
   existsSync,
@@ -16,7 +18,7 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import test from 'node:test';
 
 import {
@@ -28,12 +30,14 @@ import {
   garbageCollectSnapshots,
   isReviewerSnapshotBaseError,
   prepareReviewerSnapshot,
+  prepareReviewerHarnessCwd,
   prepareReviewerWorkspace,
   resolveCheckoutHead,
   resolveReviewerWorkspaceStateDir,
 } from '../src/reviewer-workspace.mjs';
 import { materializeReviewerHead } from '../src/reviewer-repo-checkout.mjs';
 import { resolveRepoCheckoutDir } from '../src/argus-dependency-evidence.mjs';
+import { recordReviewerWorkspaceMode } from '../src/reviewer-workspace-telemetry.mjs';
 
 function git(cwd, ...args) {
   return execFileSync('git', args, { cwd, encoding: 'utf8' }).trim();
@@ -95,6 +99,53 @@ test('reviewer and Argus match repository identity for both deploy checkouts and
   }
 });
 
+test('canonical origins preserve the native mixed-case clone path and withhold userinfo', async () => {
+  const root = realpathSync.native(mkdtempSync(join(tmpdir(), 'reviewer-origin-')));
+  try {
+    const cloneRoot = join(root, 'clones');
+    const ownerDir = join(cloneRoot, 'MixedOwner');
+    mkdirSync(ownerDir, { recursive: true });
+    const checkout = makeRepo(ownerDir, 'MixedRepo');
+    const rootDir = makeRepo(root, 'service');
+    const repo = 'MixedOwner/MixedRepo';
+    const secret = 'fixture-secret-never-printed';
+    const signals = [];
+    const env = { ...process.env, ADVERSARIAL_REVIEWER_CLONE_ROOT: cloneRoot, GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: '/dev/null' };
+    const lookup = () => resolveRepoCheckoutDir({ repo, rootDir, env, onUnavailable: cause => signals.push(cause) });
+    const setOrigin = url => git(checkout, 'config', 'remote.origin.url', url);
+    for (const url of [`https://x-access-token:${secret}@github.com/mixedowner/mixedrepo.git/`,
+      'ssh://github.com/MixedOwner/MixedRepo/', 'ssh://git@github.com/MixedOwner/MixedRepo.git',
+      'git@github.com:MixedOwner/MixedRepo.git']) {
+      setOrigin(url);
+      assert.equal(await lookup(), checkout);
+    }
+    assert.deepEqual(signals, []);
+    for (const url of [`https://github.com:${secret}@other.invalid/MixedOwner/MixedRepo`,
+      'git@github-alias:MixedOwner/MixedRepo.git', 'https://github.com/MixedOwner/MixedRepo?extra',
+      'https://github.com/MixedOwner/%4DixedRepo', 'https://github.com:443/MixedOwner/MixedRepo',
+      'https://github.com/MixedOwner/MixedRepo/../MixedRepo', 'https://github.com/Other/MixedRepo']) {
+      setOrigin(url);
+      assert.equal(await lookup(), null);
+    }
+    git(checkout, 'config', 'url.git@github.com:.insteadOf', 'git@github-alias:');
+    setOrigin('git@github-alias:MixedOwner/MixedRepo.git');
+    assert.equal(await lookup(), null);
+    git(checkout, 'config', 'url.git@foreign.invalid:.insteadOf', 'git@github.com:');
+    setOrigin('git@github.com:MixedOwner/MixedRepo.git');
+    assert.equal(await lookup(), null);
+    assert.ok(signals.includes('origin-unverified'));
+    assert.doesNotMatch(JSON.stringify(signals), new RegExp(secret));
+    const warnings = [];
+    const fallback = await prepareReviewerWorkspace({
+      repo, stateDir: join(root, 'state'), headSha: 'a'.repeat(40),
+      checkoutUnavailable: signals.at(-1), log: { warn: message => warnings.push(message) },
+    });
+    assert.equal(fallback.diffOnlyCause, 'origin-unverified');
+    assert.match(warnings.join(' '), /cause=origin-unverified/);
+    assert.doesNotMatch(warnings.join(' '), new RegExp(secret));
+  } finally { removeFixture(root); }
+});
+
 test('a configured clone fetches and archives the requested commit without moving its checkout', async () => {
   const root = realpathSync(mkdtempSync(join(tmpdir(), 'reviewer-exact-repo-')));
   try {
@@ -136,6 +187,8 @@ test('a configured clone fetches and archives the requested commit without movin
       execFileImpl: async () => { throw new Error('missing object'); },
     });
     assert.equal(missing.diffOnly, true);
+    assert.equal(missing.diffOnlyCause, 'head-fetch-failed');
+    assert.equal(missing.alertDegradation, true);
     assert.equal(missing.checkoutDir, null);
     assert.deepEqual(readdirSync(missing.snapshotDir), []);
   } finally {
@@ -168,10 +221,119 @@ test('PR settings stay outside harness cwd and escaping PR links fall back to di
     const fallback = await prepareReviewerWorkspace({ ...args, headSha: git(checkoutDir, 'rev-parse', 'HEAD'),
       log: { warn: message => warnings.push(message) } });
     assert.equal(fallback.diffOnly, true);
+    assert.equal(fallback.diffOnlyCause, 'escaping-link');
+    assert.equal(fallback.alertDegradation, false);
     assert.deepEqual(readdirSync(fallback.subprocessCwd), []);
-    assert.match(warnings.join(' '), /cause=escaping-link/);
+    assert.match(warnings.join(' '), /reviewer_workspace_degraded.+cause=escaping-link/);
     const cache = join(args.stateDir, 'reviewer-snapshots');
     assert.equal(readdirSync(join(cache, readdirSync(cache)[0])).some(name => name.startsWith('.build-')), false);
+  } finally { removeFixture(root); }
+});
+
+test('workspace mode counts are per repository and pages are limited to operational transitions', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'reviewer-workspace-modes-'));
+  try {
+    const checkoutDir = makeRepo(root, 'source');
+    const args = { repo: 'example/target', stateDir: join(root, 'state'), pinSnapshot: false,
+      headSha: git(checkoutDir, 'rev-parse', 'HEAD'), log: { warn() {}, info() {} } };
+    const initial = await prepareReviewerWorkspace(args);
+    assert.equal(initial.diffOnlyCause, 'no-checkout');
+    assert.equal(initial.alertDegradation, false);
+    await prepareReviewerWorkspace({ ...args, checkoutDir });
+    writeFileSync(join(checkoutDir, 'tracked.txt'), 'different head');
+    git(checkoutDir, 'commit', '-qam', 'change');
+    const archiveFailure = await prepareReviewerWorkspace({ ...args, checkoutDir, headSha: git(checkoutDir, 'rev-parse', 'HEAD'),
+      extractArchiveImpl: async () => { throw new Error('synthetic archive failure'); } });
+    assert.equal(archiveFailure.diffOnlyCause, 'archive-unavailable');
+    assert.equal(archiveFailure.alertDegradation, true);
+    assert.equal((await prepareReviewerWorkspace(args)).alertDegradation, false);
+    await prepareReviewerWorkspace({ ...args, checkoutDir });
+    assert.equal((await prepareReviewerWorkspace(args)).alertDegradation, false);
+    await prepareReviewerWorkspace({ ...args, repo: 'example/other' });
+    const modes = join(args.stateDir, 'reviewer-workspace-audit', 'modes');
+    const readMode = name => JSON.parse(readFileSync(join(modes, readdirSync(modes).find(file => file.startsWith(name) && file.endsWith('.json'))), 'utf8'));
+    assert.deepEqual(readMode('example_target').diffOnlyCounts, {
+      'no-checkout': 3, 'origin-unverified': 0, 'head-fetch-failed': 0, 'archive-unavailable': 1, 'escaping-link': 0,
+    });
+    assert.equal(readMode('example_other').diffOnlyCounts['no-checkout'], 1);
+
+    const record = (cause, nowMs) => recordReviewerWorkspaceMode({ auditDir: join(root, 'audit'), repoKey: 'target', cause, nowMs });
+    record(null, 1);
+    assert.deepEqual(record('escaping-link', 2), { diffOnlyCount: 1, degraded: true, alert: false });
+    assert.equal(record('head-fetch-failed', 3).alert, true);
+    record(null, 4);
+    assert.equal(record('origin-unverified', 5).alert, false);
+    record(null, 6);
+    assert.equal(record('origin-unverified', 24 * 60 * 60 * 1000 + 3).alert, true);
+  } finally { removeFixture(root); }
+});
+
+test('owned harness cwd survives live owners and groups, then is reclaimed after signal termination', async () => {
+  const root = realpathSync.native(mkdtempSync(join(tmpdir(), 'reviewer-harness-lifetime-')));
+  const workspaceModule = new URL('../src/reviewer-workspace.mjs', import.meta.url).href;
+  const processModule = new URL('../src/process-group-spawn.mjs', import.meta.url).href;
+  const runner = spawn(process.execPath, ['--input-type=module', '-e', `
+    import { prepareReviewerHarnessCwd, auditReviewerSubprocess } from ${JSON.stringify(workspaceModule)};
+    import { spawnCapturedProcessGroup } from ${JSON.stringify(processModule)};
+    const { cwd } = prepareReviewerHarnessCwd(process.argv[1]);
+    await auditReviewerSubprocess(({ onSpawn }) => spawnCapturedProcessGroup(process.execPath,
+      ['-e', 'setInterval(() => {}, 1000)'], { cwd, onSpawn: group => {
+        onSpawn(group);
+        process.send({ cwd, pgid: group.pgid });
+      } }), cwd);
+  `, root], { stdio: ['ignore', 'ignore', 'inherit', 'ipc'] });
+  const exited = once(runner, 'exit');
+  let pgid;
+  try {
+    const [{ cwd, pgid: group }] = await Promise.race([
+      once(runner, 'message'),
+      exited.then(() => { throw new Error('fixture reviewer exited before reporting its cwd'); }),
+    ]);
+    pgid = group;
+    const sweep = () => prepareReviewerHarnessCwd(root).release();
+    assert.deepEqual(readdirSync(cwd), []);
+    sweep();
+    assert.equal(existsSync(cwd), true);
+    runner.kill('SIGTERM');
+    assert.deepEqual(await exited, [null, 'SIGTERM']);
+    sweep();
+    assert.equal(existsSync(cwd), true);
+    process.kill(-pgid, 'SIGTERM');
+    const { pidInUse } = await import('../src/reviewer-harness-cwd.mjs');
+    for (let i = 0; i < 100 && pidInUse(-pgid); i++) await delay(20);
+    assert.equal(pidInUse(-pgid), false);
+    const pending = join(dirname(cwd), 'pending-fixture');
+    writeFileSync(pending, '');
+    sweep();
+    assert.equal(existsSync(cwd), true);
+    rmSync(pending);
+    sweep();
+    assert.equal(existsSync(dirname(cwd)), false);
+  } finally {
+    if (runner.exitCode === null && runner.signalCode === null) runner.kill('SIGKILL');
+    await exited;
+    if (pgid) {
+      try { process.kill(-pgid, 'SIGKILL'); } catch (err) { if (err.code !== 'ESRCH') throw err; }
+    }
+    removeFixture(root);
+  }
+});
+
+test('harness startup rejects symlinked state into a checkout and ancestor project settings', async () => {
+  const root = realpathSync.native(mkdtempSync(join(tmpdir(), 'reviewer-harness-ancestry-')));
+  try {
+    const checkout = makeRepo(root, 'source');
+    const alias = join(root, 'alias');
+    symlinkSync(checkout, alias);
+    const args = { repo: 'example/target', stateDir: join(root, 'state'), headSha: 'a'.repeat(40) };
+    await assert.rejects(prepareReviewerWorkspace({
+      ...args, env: { ADVERSARIAL_REVIEW_WORKSPACE_STATE_DIR: join(alias, 'state') },
+    }), /outside the source checkout/);
+    writeFileSync(join(root, '.mcp.json'), '{}');
+    await assert.rejects(prepareReviewerWorkspace(args), /outside project settings and instructions/);
+    await assert.rejects(prepareReviewerWorkspace({
+      ...args, checkoutDir: checkout, headSha: git(checkout, 'rev-parse', 'HEAD'),
+    }), /outside project settings and instructions/);
   } finally { removeFixture(root); }
 });
 
@@ -232,7 +394,7 @@ test('Agent OS and adversarial-review snapshots are outside and read-only relati
 });
 
 test('repo-local review ledger keeps reviewer snapshots and audit outside both live checkouts', async () => {
-  const root = mkdtempSync(join(tmpdir(), 'reviewer-workspace-live-default-'));
+  const root = realpathSync.native(mkdtempSync(join(tmpdir(), 'reviewer-workspace-live-default-')));
   try {
     const agentOs = makeRepo(root, 'agent-os');
     const toolsDir = join(agentOs, 'tools');
@@ -965,6 +1127,56 @@ test('snapshot cache evicts least recently used entries for count and byte limit
       nowMs: 2000, maxAgeMs: Infinity, maxCount: 2, maxBytes: 10,
     }), [join(root, 'middle')]);
     assert.equal(existsSync(join(root, 'current')), true);
+  } finally { removeFixture(root); }
+});
+
+test('snapshot GC accounts for trusted marker bytes and walks legacy or invalid markers without following links', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'reviewer-cache-marker-'));
+  try {
+    const checkoutDir = makeRepo(root, 'target');
+    const outside = join(root, 'outside');
+    writeFileSync(outside, 'unrelated');
+    symlinkSync('tracked.txt', join(checkoutDir, '.reviewer-snapshot.json'));
+    git(checkoutDir, 'add', '.reviewer-snapshot.json');
+    git(checkoutDir, 'commit', '-qm', 'reserved marker symlink');
+    const args = { repo: 'example/target', checkoutDir, stateDir: join(root, 'state') };
+    const older = await prepareReviewerSnapshot({ ...args, nowMs: 1 });
+    const markerPath = join(older.snapshotDir, '.reviewer-snapshot.json');
+    const olderMarker = JSON.parse(readFileSync(markerPath, 'utf8'));
+    assert.equal(olderMarker.treeBytes, Buffer.byteLength('base\n'));
+    assert.equal(readFileSync(join(older.snapshotDir, 'tracked.txt'), 'utf8'), 'base\n');
+    const olderSize = olderMarker.treeBytes + statSync(markerPath).size;
+    rmSync(join(checkoutDir, '.reviewer-snapshot.json'));
+    mkdirSync(join(checkoutDir, 'nested'));
+    writeFileSync(join(checkoutDir, 'nested', 'file'), 'current');
+    git(checkoutDir, 'add', '-A');
+    git(checkoutDir, 'commit', '-qm', 'current');
+    const current = await prepareReviewerSnapshot({ ...args, nowMs: 2 });
+    const currentMarker = join(current.snapshotDir, '.reviewer-snapshot.json');
+    const currentSize = statSync(currentMarker).size + JSON.parse(readFileSync(currentMarker, 'utf8')).treeBytes;
+    // A current tree with unreadable descendants still contributes cached bytes.
+    const nested = join(current.snapshotDir, 'nested');
+    chmodSync(nested, 0o000);
+    const gc = maxBytes => garbageCollectSnapshots(dirname(current.snapshotDir), current.headSha, {
+      maxBytes, maxCount: Infinity, maxAgeMs: Infinity, log: { warn() { assert.fail('unexpected cache tree walk'); } },
+    });
+    assert.deepEqual(gc(olderSize + currentSize), []);
+    assert.deepEqual(gc(olderSize + currentSize - 1), [older.snapshotDir]);
+    chmodSync(nested, 0o555);
+
+    const legacy = join(dirname(current.snapshotDir), 'legacy');
+    mkdirSync(legacy);
+    symlinkSync(outside, join(legacy, 'link'));
+    const legacyMarker = join(legacy, '.reviewer-snapshot.json');
+    for (const treeBytes of [undefined, -1, Number.MAX_SAFE_INTEGER]) {
+      writeFileSync(legacyMarker, JSON.stringify({ schemaVersion: 2, headSha: 'legacy', treeBytes }), { mode: 0o444, flag: 'wx' });
+      const total = currentSize + statSync(legacyMarker).size + Buffer.byteLength(outside);
+      assert.deepEqual(gc(total), []);
+      rmSync(legacyMarker);
+    }
+    symlinkSync(outside, legacyMarker);
+    assert.deepEqual(gc(currentSize), [legacy]);
+    assert.equal(readFileSync(outside, 'utf8'), 'unrelated');
   } finally { removeFixture(root); }
 });
 

@@ -61,8 +61,10 @@ function productionDeps({ rootDir, pool, runner, ...options }) {
 for (const failure of [false, true]) {
   test(`Argus leases reviewer-b and cleans/releases on ${failure ? 'failure' : 'success'}`, () => withPool(async ({ rootDir, pool, cleanups }) => {
     let seen;
-    const deps = productionDeps({ rootDir, pool, runner: async (_diff, _title, options) => {
+    const harnessCwd = join(rootDir, 'empty-harness-cwd');
+    const deps = productionDeps({ rootDir, pool, harnessCwd, runner: async (_diff, _title, options) => {
       seen = options.agyIdentity;
+      assert.equal(options.reviewerSubprocessCwd, harnessCwd);
       assert.equal(pool.snapshot().find((state) => state.user === 'reviewer-b').leased, true);
       if (failure) throw new Error('reviewer execution failed');
       return TEXT;

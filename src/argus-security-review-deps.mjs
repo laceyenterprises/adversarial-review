@@ -58,6 +58,8 @@ export function createDefaultArgusReviewDeps({
   env = process.env,
   execGhWithRetryImpl = execGhWithRetry,
   logger = console,
+  harnessCwd,
+  workspaceStateDir,
   resolveReviewerModels = null,
   // Undefined for direct callers; null means the watcher could not lease one.
   agyLease = undefined,
@@ -111,7 +113,7 @@ export function createDefaultArgusReviewDeps({
     reviewerDeferral: () => ({ resetAt: availability.resetAt }),
 
     async runReviewerModel({ model, prompt, cwd, diff }) {
-      const options = { promptOverride: prompt, reviewerSubprocessCwd: cwd, ensureWorkerRegistryReadyImpl };
+      const options = { promptOverride: prompt, reviewerSubprocessCwd: harnessCwd ?? cwd, ensureWorkerRegistryReadyImpl };
       let output;
       if (model === 'claude') {
         await ensureWorkerRegistryReadyImpl({env});
@@ -176,7 +178,7 @@ export function createDefaultArgusReviewDeps({
       const identity = resolveArgusCommentIdentity({ model, env });
       if (!identity) return { ok: false, reason: 'no-identity-token' };
       const { stdout } = await execGhWithRetryImpl({
-        args: ['pr', 'comment', String(prNumber), '--repo', repo, '--body', filterGitHubBody(body, { repo, rootDir, env })],
+        args: ['pr', 'comment', String(prNumber), '--repo', repo, '--body', filterGitHubBody(body, { repo, rootDir, env, stateDir: workspaceStateDir })],
         env: { ...env, GITHUB_TOKEN: identity.token, GH_TOKEN: identity.token },
         timeoutMs: loadAwareTimeoutMs(60_000),
         log: logger,

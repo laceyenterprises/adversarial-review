@@ -210,12 +210,28 @@ export function projectRecoveredWorkflowAuthBlocker({ job, operationalBlockers, 
  * this returns `{ retryLater: true, job }` with the attempt recorded on the job,
  * so the caller leaves the job in progress instead of terminating it.
  */
-export async function resolveCommentOnlyFinalRoundCompletion({
+export async function resolveCommentOnlyFinalRoundCompletion(options = {}) {
+  const { job, reply } = options;
+  const hqWorker = hqPublicationWorker(job);
+  const workspaceDir = job?.finalRound === 'comment-only' && reply
+    ? await resolvePublicationWorkspace(options) : options.workspaceDir;
+  return evaluateCommentOnlyFinalRoundCompletion({ ...options, workspaceDir, requiresHqProof: Boolean(hqWorker) });
+}
+
+// Historical generated-index recovery owns its workspace through the native
+// file-owner, terminal-job and exact withheld-head checks at its entry point.
+export function resolveNativeCommentOnlyFinalRoundCompletion(options) {
+  return evaluateCommentOnlyFinalRoundCompletion({ ...options,
+    expectedLocalHead: options.job.completion.withheldPushHeadSha });
+}
+
+async function evaluateCommentOnlyFinalRoundCompletion({
   job,
   jobPath,
   reply,
   workspaceDir = null,
   expectedLocalHead = null,
+  requiresHqProof = false,
   auditWorkspaceForContaminationImpl,
   inspectRemediationCiRegressionImpl,
   execFileImpl,
@@ -229,18 +245,17 @@ export async function resolveCommentOnlyFinalRoundCompletion({
   if (job?.finalRound !== 'comment-only' || !reply) {
     return { completed: false, workerPushedHeadSha: null, completionFields: {} };
   }
-  const proofWorkspaceDir = await resolvePublicationWorkspace({ job, workspaceDir, execFileImpl, env, log });
   const { baseBranch } = await ensureJobBaseBranch({ job, jobPath, execFileImpl });
   let audit;
   let push;
   for (let attempt = 0; ; attempt += 1) {
-    audit = proofWorkspaceDir
-      ? await auditWorkspaceForContaminationImpl({ workspaceDir: proofWorkspaceDir, baseBranch, execFileImpl })
+    audit = workspaceDir
+      ? await auditWorkspaceForContaminationImpl({ workspaceDir, baseBranch, execFileImpl })
       : { suspect: [], error: null };
     push = await proveFinalRoundWorkerPush({
       repo: job.repo, prNumber: job.prNumber, jobId: job.jobId, reviewedHead: job.revisionRef, baseBranch,
-      workspaceDir: proofWorkspaceDir, execFileImpl, log, expectedLocalHead,
-      publicationBranch: hqPublicationWorker(job) ? job.branch : null,
+      workspaceDir, execFileImpl, log, expectedLocalHead,
+      publicationBranch: requiresHqProof ? job.branch : null,
       withheldBecause: audit.error || audit.suspect?.length ? 'branch-contamination-audit-failed' : null,
     });
     const transient = transientProofFailure(audit, push);
@@ -304,7 +319,7 @@ export async function resolveCommentOnlyFinalRoundCompletion({
   // findings); only a proven push can carry a partial/blocked reply over. An
   // unproven moved head carries no authority; watcher admission reviews it once.
   const completed = classification.pendingCiOnly && (Boolean(workerPushedHeadSha)
-    || (reply.outcome === 'completed' && (!hqPublicationWorker(job) || push.reason === 'no-push')));
+    || (reply.outcome === 'completed' && (!requiresHqProof || push.reason === 'no-push')));
   const reason = completed || !classification.pendingCiOnly ? classification.reason : 'no-proven-push';
   if (!completed) {
     log.warn?.(

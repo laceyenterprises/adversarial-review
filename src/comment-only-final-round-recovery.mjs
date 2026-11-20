@@ -12,7 +12,7 @@ import { listFollowUpJobsInDir, readRemediationReplyArtifact } from './follow-up
 import { normalizeEffectiveReviewVerdict } from './kernel/verdict.mjs';
 import { assessWorkerLivenessDetailed } from './remediation-worker-liveness.mjs';
 import { inspectRemediationCiRegression } from './remediation-ci-regression.mjs';
-import { resolveCommentOnlyFinalRoundCompletion } from './comment-only-final-round-completion.mjs';
+import { resolveNativeCommentOnlyFinalRoundCompletion } from './comment-only-final-round-completion.mjs';
 import { recoveryDigest, recoveryRecordPath, RECOVERY_LIMIT, withCommentOnlyRecovery } from './comment-only-recovery-record.mjs';
 import { tryAcquireFollowUpReconcileClaim, releaseFollowUpReconcileClaim } from './remediation-reconcile-claim.mjs';
 
@@ -77,7 +77,7 @@ export async function recoverTerminalCommentOnlyRound({ rootDir, jobId, workspac
       const { stdout } = await execFileImpl('git', ['--no-optional-locks', '--no-replace-objects', '-C', workspaceDir, 'status', '--porcelain'], { timeout: loadAwareTimeoutMs(15000), maxBuffer: 1024 * 1024 });
       return { suspect: String(stdout || '').trim() ? ['dirty-workspace'] : [], error: null };
     };
-    const result = await resolveCommentOnlyFinalRoundCompletion({ job, jobPath, reply, workspaceDir,
+    const result = await resolveNativeCommentOnlyFinalRoundCompletion({ job, jobPath, reply, workspaceDir,
       auditWorkspaceForContaminationImpl: audit, inspectRemediationCiRegressionImpl: ciImpl,
       execFileImpl, log, retryDelaysMs: [], deliverAlertImpl: async () => {},
       writeJobImpl: () => { throw new Error('recovery-does-not-rewrite-history'); } });
@@ -95,7 +95,7 @@ export async function recoverTerminalCommentOnlyRound({ rootDir, jobId, workspac
     // force-push is rejected by the proof fence; downstream still probes live
     // head/checks under its own lease before any merge.
     if (completed) {
-      const refreshed = await resolveCommentOnlyFinalRoundCompletion({ job, jobPath, reply, workspaceDir,
+      const refreshed = await resolveNativeCommentOnlyFinalRoundCompletion({ job, jobPath, reply, workspaceDir,
         auditWorkspaceForContaminationImpl: audit, inspectRemediationCiRegressionImpl: ciImpl,
         execFileImpl, log, retryDelaysMs: [], deliverAlertImpl: async () => {},
         writeJobImpl: () => { throw new Error('recovery-does-not-rewrite-history'); } });

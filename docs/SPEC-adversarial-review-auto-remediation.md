@@ -143,6 +143,7 @@ A native owner may explicitly preview a historical stopped final round:
 npm run follow-up:reconcile -- --recover-comment-only <job-id> --workspace <historical-worker-workspace>
 ```
 
+The supplied proof workspace must be at the job's exact withheld live head.
 After reviewed deployment and resident reload proof, adding `--apply` appends an
 immutable recovery record under `data/follow-up-jobs/final-round-recoveries/`.
 This is limited to three published evaluations per job, including withheld

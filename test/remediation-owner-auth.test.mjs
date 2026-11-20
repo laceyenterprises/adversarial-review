@@ -22,6 +22,22 @@ const CANDIDATE = 'b'.repeat(40);
 const BASE = 'c'.repeat(40);
 const log = { info() {}, warn() {}, log() {} };
 
+test('declared follow-up reader preserves legacy source-token revocation', async () => {
+  const minted = [];
+  const tokens = createGithubOwnerTokenSelector({ readHomeOwner: () => 'home-org',
+    mint: async ({ role, owner }) => {
+      minted.push({ role, owner });
+      return { token: 'alternate-read-token' };
+    } });
+  const route = await selectRemediationReadRoute({ repo: ALT, reviewerModel: 'claude', env: {}, tokens });
+  assert.equal(route.ghEnv.GH_TOKEN, 'alternate-read-token');
+  assert.deepEqual(minted, [{ role: 'claude-reviewer', owner: 'alternate-org' }]);
+  const legacy = { target: `repos/${ALT}`, role: 'claude-reviewer', env: {} };
+  await assert.rejects(tokens.select(legacy), { code: 'github-owner-token-unavailable' });
+  assert.throws(() => tokens.sync(legacy), { code: 'github-owner-token-unavailable' });
+  assert.equal(await tokens.select({ ...legacy, token: 'current-source-token' }), 'alternate-read-token');
+});
+
 function fixture(t, { refuse = false, ownerPin = '22' } = {}) {
   const rootDir = mkdtempSync(join(tmpdir(), 'remediation-owner-'));
   t.after(() => rmSync(rootDir, { recursive: true, force: true }));

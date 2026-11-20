@@ -90,7 +90,7 @@ export async function selectRemediationReadRoute({ repo, reviewerModel, env = pr
   const capability = `contents:read (${role || 'follow-up reader'})`;
   if (!role) throw ownerAuthHold(repo, capability, 'no declared reader role');
   try {
-    const token = await tokens.select({ role, target: `repos/${repo}`, env });
+    const token = await tokens.select({ role, target: `repos/${repo}`, env, requireSourceToken: false });
     if (!token) throw new Error('missing token');
     return route(repo, capability, env, token);
   } catch { throw ownerAuthHold(repo, capability, 'owner reader route unavailable'); }

@@ -400,8 +400,9 @@ test('hammer and every remediation stage forbid full suites and polling', () => 
   }
   assert.match(template, /hammer-validate\.mjs --canonical/);
   assert.match(template, /idle ceiling scales from 120 seconds/);
-  assert.match(template, /Timeout or cancellation stops the controller\nround/);
-  assert.match(template, /Confirm drain and lease disposition before retrying/);
+  assert.match(template, /Timeout or denied\s+process inspection hands off through Appendix G2/);
+  assert.match(template, /Do not retry validation or close on that head in this run/);
+  assert.match(template, /Use existing controller drain and lease receipts/);
 });
 test('bounded runner preserves exit status and caps combined output', () => {
   const path = join(root, 'bin/run-bounded.sh');

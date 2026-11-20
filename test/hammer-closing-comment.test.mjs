@@ -104,6 +104,7 @@ test('the close launcher calls the scratch-independent helper after a successful
   writeFileSync(helper, `#!/bin/bash
 case "\${1##*/}:$2" in
   hammer-close-plan.mjs:check|hammer-controller.mjs:resolve-environment) exit 0 ;;
+  hammer-validate.mjs:--check-deferred) printf 'deferred-check\\n' >> \"$FIXTURE_CALLS\"; exit 0 ;;
   hammer-controller.mjs:run) rm -rf "$HAM_RUN_DIR" ;;
   hammer-closing-comment.mjs:fixture/repo)
     [ ! -e "$HAM_RUN_DIR/inputs.sh" ] && [ "$3" = 42 ] && [ "$4" = "$FIXTURE_ROOT" ] || exit 98
@@ -117,12 +118,13 @@ export HAM_RUN_DIR="$FIXTURE_SCRATCH" HAM_ROOT_DIR="$FIXTURE_REPO_ROOT" HAM_NODE
 export HAM_REPO=fixture/repo HAM_PR_NUMBER=42 HAM_HQ_ROOT="$FIXTURE_ROOT"
 `);
   const result = spawnSync('/bin/bash', [join(root, 'bin/hammer-close.sh'), join(scratchDir, 'close-plan.json')], {
-    env: { ...process.env, FIXTURE_SCRATCH: scratchDir, FIXTURE_REPO_ROOT: root, FIXTURE_NODE: helper, FIXTURE_ROOT: f.rootDir },
+    env: { ...process.env, FIXTURE_SCRATCH: scratchDir, FIXTURE_REPO_ROOT: root, FIXTURE_NODE: helper, FIXTURE_ROOT: f.rootDir, FIXTURE_CALLS: join(f.rootDir, 'guard-calls') },
     encoding: 'utf8', timeout: 5000,
   });
   assert.equal(result.status, 0, result.stderr);
   assert.match(result.stdout, /"outcome":"controller-shell-ended"/);
   assert.match(result.stdout, /HAM closing comment: \{"outcome":"posted"\}/);
+  assert.equal(readFileSync(join(f.rootDir, 'guard-calls'), 'utf8'), 'deferred-check\ndeferred-check\n');
 });
 
 for (const [description, alter, error] of [

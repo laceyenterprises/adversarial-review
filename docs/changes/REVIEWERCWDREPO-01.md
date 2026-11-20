@@ -63,3 +63,24 @@ companion-package integration skip. `npm run lint` passed with zero errors
   bounded transient retries and disabled auto-maintenance. The existing
   deploy-state containment and PR-authored escaping-link regressions remain
   in the focused suite.
+
+Final comment closeout: the retry helper now raises its reachable operation-labeled
+exhaustion error with the original error as cause; permanent failures retain their
+identity. Checkout verification follows Git's first configured fetch URL while
+ignoring secondary URLs as alternate identities. User-home `.mcp.json` joins the
+trusted user settings exemptions; project/PR/other-ancestor MCP files still refuse
+harness startup. Each of the three regressions fails before and passes after.
+
+The size-recovery `resolveCwd` callback is deliberately the checkout: it is used
+only by `summariseReviewDiff` for bounded `git diff`/`git show` content evidence,
+never to launch a reviewer. Model and chunk execution receive the empty
+`reviewerSubprocessCwd` through their options. Moving the Git callback into the
+empty directory would break pure-move evidence rather than harden model startup;
+the call site now explains that boundary. No additional review is requested.
+
+Final attended validation: 72 focused workspace, retry and verdict-recovery
+cases pass. Lint has zero errors (existing warnings remain), contract typecheck
+and the three byte-stable transcript walkthrough pass. The three new behavior
+cases fail on the previous head and pass with the fixes. Full offline npm
+validation remains required in the normal hosted Node 22/26 jobs on the new head;
+no unchanged Node 22 rerun is requested.

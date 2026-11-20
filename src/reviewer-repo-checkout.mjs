@@ -50,7 +50,9 @@ export async function resolveRepoCheckoutDir({
       // Neither URL is returned, logged, or used as a fetch argument.
       const configuredOrigin = await git('config', '--get-all', 'remote.origin.url').catch(() => '');
       const effectiveOrigin = await git('remote', 'get-url', 'origin').catch(() => '');
-      const configured = githubOriginRepo(configuredOrigin);
+      // Fetch uses the first configured URL; secondary URLs never become
+      // fetch arguments or alternate identities here.
+      const configured = githubOriginRepo(configuredOrigin.split(/\r?\n/, 1)[0]);
       const effective = githubOriginRepo(effectiveOrigin);
       if (configured === target && effective === target) return cwd;
       // Service worktrees without an origin are expected in some installs.

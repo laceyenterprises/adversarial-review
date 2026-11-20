@@ -555,7 +555,7 @@ export function prepareReviewerHarnessCwd(workspaceStateDir, options) {
   for (let directory = root; ; directory = dirname(directory)) {
     for (const name of PROJECT_HARNESS_INPUTS) {
       // These home-level directories are the harnesses' trusted user settings.
-      if (directory === ownerHome && ['.claude', '.codex', '.gemini'].includes(name)) continue;
+      if (directory === ownerHome && ['.claude', '.codex', '.gemini', '.mcp.json'].includes(name)) continue;
       if (lstatSync(join(directory, name), { throwIfNoEntry: false })) {
         throw new Error('reviewer harness cwd must be outside project settings and instructions');
       }

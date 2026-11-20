@@ -1214,3 +1214,33 @@ test('snapshot cache recovers garbage left by a dead collector', () => {
     assert.equal(existsSync(garbage), false);
   } finally { removeFixture(root); }
 });
+
+
+test('checkout identity follows the first fetch URL with secondary origins', async () => {
+  const root = realpathSync(mkdtempSync(join(tmpdir(), 'reviewer-multiple-origins-')));
+  try {
+    const checkout = makeRepo(root, 'target');
+    git(checkout, 'remote', 'add', 'origin', 'git@github.com:example/target.git');
+    git(checkout, 'config', '--add', 'remote.origin.url', 'https://github.com/other/secondary.git');
+    assert.equal(await resolveRepoCheckoutDir({ repo: 'example/target', rootDir: checkout }), checkout);
+    assert.equal(await resolveRepoCheckoutDir({ repo: 'other/secondary', rootDir: checkout }), null);
+  } finally { removeFixture(root); }
+});
+
+test('trusted home MCP settings do not become project harness settings', () => {
+  const root = realpathSync(mkdtempSync(join(tmpdir(), 'reviewer-home-mcp-')));
+  try {
+    const home = join(root, 'home');
+    mkdirSync(home);
+    writeFileSync(join(home, '.mcp.json'), '{}');
+    const module = new URL('../src/reviewer-workspace.mjs', import.meta.url).href;
+    execFileSync(process.execPath, ['--input-type=module', '-e', `
+      import assert from 'node:assert/strict';
+      import { readdirSync } from 'node:fs';
+      import { join } from 'node:path';
+      import { prepareReviewerHarnessCwd } from ${JSON.stringify(module)};
+      const result = prepareReviewerHarnessCwd(join(process.argv[1], 'state'));
+      assert.deepEqual(readdirSync(result.cwd), []);
+    `, home], { env: { ...process.env, HOME: home }, timeout: 10_000 });
+  } finally { removeFixture(root); }
+});

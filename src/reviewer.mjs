@@ -2064,6 +2064,8 @@ async function main() {
   const sizeRecovery = createReviewSizeRecovery({
     diff, extraContext, repo, prNumber,
     headSha: reviewerHeadSha, initialSizing: oversizedAgyRoute,
+    // Git-only summarisation reads tracked content here. Model execution below
+    // always receives the separately allocated empty reviewerSubprocessCwd.
     resolveCwd: () => reviewerCheckoutDir,
     resolveRoute: (diff, extraContext) => resolveAgyOversizedReviewRoute({
       reviewerModel: effectiveModel, botTokenEnv: effectiveBotTokenEnv, builderTag, diff, extraContext,

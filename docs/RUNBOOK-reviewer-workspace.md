@@ -302,3 +302,12 @@ The workspace state directory contains:
 For dirty or untracked files larger than 8 MiB, the audit compares size, mode, mtime, and ctime instead of reading the whole file into memory. The audit context is process-local mutable state because `reviewer.mjs` handles exactly one PR per process. If the reviewer is ever reused for multiple PRs in one process, pass context explicitly to each spawn before enabling that mode.
 
 The commit-range diff includes submodule pointer changes so a checkout advance can explain them. The new-HEAD working-tree comparison ignores submodules, matching the status probe: an un-updated submodule checkout or local submodule build noise does not prevent attribution to the deploy. Each diff probe retries recognized transient Git failures up to three total attempts with 100/200 ms backoff. Permanent failures and exhausted retries retain the conservative ambiguous escape record described above.
+
+The oversized-review summarisation callback keeps the reviewed checkout as its
+Git-only content source (`git diff`/`git show`). It does not select a model cwd:
+normal, retry and chunk model paths receive the separately allocated empty
+`reviewerSubprocessCwd`. Trusted home-level `.mcp.json`, like the existing
+`.claude`, `.codex` and `.gemini` user settings, is exempt from project-ancestor
+rejection; the same file in a PR or another ancestor remains refused. Repository
+identity verifies the first configured origin URL and Git's effective fetch URL,
+not additional configured URLs that Git does not fetch.

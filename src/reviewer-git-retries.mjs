@@ -46,16 +46,16 @@ async function sleep(ms) {
 }
 
 export async function withTransientGitRetries(operation, label) {
-  let lastErr = null;
   for (let attempt = 1; attempt <= GIT_TRANSIENT_MAX_ATTEMPTS; attempt += 1) {
     try {
       return await operation();
     } catch (err) {
-      lastErr = err;
-      if (attempt >= GIT_TRANSIENT_MAX_ATTEMPTS || !isTransientGitError(err)) throw err;
+      if (!isTransientGitError(err)) throw err;
+      if (attempt >= GIT_TRANSIENT_MAX_ATTEMPTS) {
+        throw new Error(`${label} failed after ${attempt} attempts`, { cause: err });
+      }
       await sleep(GIT_TRANSIENT_BASE_DELAY_MS * attempt);
     }
   }
-  throw new Error(`${label} failed after ${GIT_TRANSIENT_MAX_ATTEMPTS} attempts`, { cause: lastErr });
 }
 

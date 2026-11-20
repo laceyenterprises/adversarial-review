@@ -64,9 +64,12 @@ An HQ launch admitted after that read is HQ's admission to refuse.
 Existing lifecycle graph and automated smoke promises are unchanged.
 
 Pending in-place repair reservations are observed before watcher admission at
-most once per thirty seconds. Complete terminal launch/retry evidence, or a
-proven absent launch after ten minutes of provisioning, retires custody under
-the ledger flock; live and unreadable evidence retain it. Retirement removes
+most once per thirty seconds. Complete terminal launch/retry evidence at base retires custody under the ledger
+flock. At a moved head, the same terminal evidence plus a successful missing or
+foreign publication read retires with `foreign-head-after-terminal`, preserving
+spend and leaving the head unbound. Verified publication head/launch evidence
+persists across skipped admission ticks. Live, absent dispatch and unreadable
+evidence retain custody. Retirement removes
 repair custody from canonical next-action and TTM projections, restoring the
 existing ownerless clock and SEV1 path. Reviewer harness refunds are limited
 to three per PR across heads; later failures keep ordinary infra charges and

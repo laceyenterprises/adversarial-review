@@ -264,3 +264,10 @@ test('no lease and no pending epoch: the reservation needs no dispatch context',
   assert.equal(result.ok, true);
   assert.equal(prepared, 0);
 });
+
+test('empty optional project argument reserves an unscoped repair epoch', async t => {
+  const rootDir = exhaustedPr(t);
+  const result = await main([...argv(rootDir), '', '', ''], { env: freshEnv() });
+  assert.equal(result.ok, true);
+  assert.equal(result.epoch.dispatchProjectRef, undefined);
+});

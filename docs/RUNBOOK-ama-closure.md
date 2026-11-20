@@ -995,7 +995,15 @@ observes pending repair ownership at most once per 30 seconds. A moved head
 requires an exact-head verified produced attestation from the reservation launch
 or its retry before it can consume the reservation. Complete terminal
 launch/retry evidence at the base head retires the reservation under the ledger
-flock. Point-in-time absence retains custody because the submitter may still
+flock. At a moved head, that same terminal evidence plus a successful attestation
+read showing no produced publication or a foreign publisher retires with
+`terminalReason: foreign-head-after-terminal`. This releases custody for the
+ordinary review/ownerless path without binding or resetting repair counters.
+Unreadable or invalid attestations retain custody. Verified `publicationHead`
+and `publicationLaunch` persist under the flock so a missed admission tick
+does not lose publication proof. The attestation reader uses the configured HQ
+root (the standard `HQ_ROOT` / `AGENT_OS_HQ_ROOT` resolver) and an eight-second
+subprocess budget. Point-in-time absence retains custody because the submitter may still
 enqueue. A reservation with a canonical project supplied at creation uses the
 existing project/repository paired grant for its exact-key read. Older
 reservations keep their unscoped lookup. Retirement removes

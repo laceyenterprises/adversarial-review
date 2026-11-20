@@ -1,3 +1,4 @@
+import { resolveHqRoot } from './hq-root.mjs';
 import { randomUUID } from 'node:crypto';
 import { isDeepStrictEqual } from 'node:util';
 import { mutateRepairEpochs, readHammerRetryCapLedger, evaluateHammerRetryCap } from './ama/hammer-retry-cap.mjs';
@@ -14,9 +15,9 @@ const validProject = value => typeof value === 'string' && value.length > 0
   && value.length <= 256 && !/\s/.test(value);
 const sameIdentity = (left, right) => typeof left === 'string' && typeof right === 'string'
   && left.toLowerCase() === right.toLowerCase();
-const readRepairPublisher = args => resolveDaemonWorkerIdentityFromHeadAttestation({
+const readRepairPublisher = ({ execFileImpl, ...args }) => resolveDaemonWorkerIdentityFromHeadAttestation({
   ...args, readHeadAttestationChainForPrImpl: options => readHeadAttestationChainForPr({
-    ...options, retryDelaysMs: [], timeoutMs: 8000,
+    ...options, execFileImpl, retryDelaysMs: [], timeoutMs: 8000,
   }),
 });
 const EXHAUSTION = new Set(['closure-retry-exhausted', 'closure-lifetime-exhausted',
@@ -56,10 +57,11 @@ export async function observeRepairOwner({ rootDir, repo, epoch, readImpl = read
 }
 
 // At the base head, only a positively identified terminal launch and its
-// complete retry chain can retire custody. A moved head needs publication proof.
+// complete retry chain can retire custody. A moved head binds with publication
+// proof, or retires after a successful negative read and terminal owner proof.
 export async function reconcileRepairOwner({ rootDir, repo, prNumber, headSha, now = Date.now(),
   readImpl = readDispatchLaunches, includeReviewedHead = false,
-  readPublisher = readRepairPublisher }) {
+  hqRoot = resolveHqRoot(), execFileImpl, readPublisher = readRepairPublisher }) {
   const ledger = readHammerRetryCapLedger(rootDir, { repo, prNumber });
   if (ledger?.__corrupt) throw new Error('repair ledger unreadable');
   const epoch = ledger?.repairEpochs?.findLast(entry => !entry.reviewHead && !entry.terminalAt);
@@ -68,16 +70,20 @@ export async function reconcileRepairOwner({ rootDir, repo, prNumber, headSha, n
     ? ledger?.repairEpochs?.find(entry => sameIdentity(entry.reviewHead, headSha)) || null : null;
   const atBase = sameIdentity(epoch.baseHead, headSha);
   const age = now - Date.parse(epoch.ownerObservedAt);
-  if (age >= 0 && age < REPAIR_OWNER_OBSERVE_MS) return epoch;
+  if (sameIdentity(epoch.publicationHead, headSha)
+    || (age >= 0 && age < REPAIR_OWNER_OBSERVE_MS)) return epoch;
   const observed = await observeRepairOwner({ rootDir, repo, epoch, readImpl });
-  let publicationHead;
+  let publicationHead, publicationLaunch, foreignHead = false;
   if (!atBase && typeof headSha === 'string' && SHA.test(headSha)
     && observed.ownerState !== 'unknown' && observed.retryLaunches) {
-    const publisher = await readPublisher({ repo, prNumber, currentHeadSha: headSha.toLowerCase() });
+    const publisher = await readPublisher({ rootDir, hqRoot, execFileImpl, repo, prNumber, currentHeadSha: headSha.toLowerCase() });
     if (publisher?.ok && sameIdentity(publisher.rowHeadSha, headSha)
       && [observed.ownerLaunch, ...observed.retryLaunches].includes(publisher.launchRequestId)) {
       publicationHead = headSha;
+      publicationLaunch = publisher.launchRequestId;
     }
+    foreignHead = !publicationHead && (publisher?.ok === true
+      || publisher?.reason === 'missing-produced-head-attestation');
   }
   const reconciled = mutateRepairEpochs(rootDir, { repo, prNumber }, ledger => {
     const current = ledger.repairEpochs?.findLast(entry => !entry.reviewHead && !entry.terminalAt);
@@ -86,12 +92,17 @@ export async function reconcileRepairOwner({ rootDir, repo, prNumber, headSha, n
     current.ownerObservedAt = new Date(now).toISOString();
     current.ownerState = observed.ownerState;
     current.ownerLaunch = observed.ownerLaunch || null;
-    if (atBase && observed.ownerState === 'terminal') {
+    if (observed.ownerState === 'terminal' && (atBase || foreignHead)) {
       current.terminalAt = current.ownerObservedAt;
       current.terminalLaunch = current.ownerLaunch;
+      current.terminalReason = atBase ? 'owner-terminal-at-base' : 'foreign-head-after-terminal';
       return null;
     }
-    return publicationHead ? { ...current, publicationHead } : current;
+    if (publicationHead) {
+      current.publicationHead = publicationHead;
+      current.publicationLaunch = publicationLaunch;
+    }
+    return current;
   });
   return reconciled || (includeReviewedHead ? repairEpochForHead(rootDir, { repo, prNumber }, headSha) : null);
 }

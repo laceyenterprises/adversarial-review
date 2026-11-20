@@ -19,7 +19,13 @@ Before admission, the watcher observes a pending
 reservation at most once per 30 seconds, recording `ownerObservedAt`,
 `ownerState` (`live`, `unknown`, or `terminal`) and nullable `ownerLaunch`.
 Complete terminal launch/retry evidence at the reservation base head retires
-custody with `terminalAt` and `terminalLaunch`. The keyed row and retry root must
+custody with `terminalAt`, `terminalLaunch` and `terminalReason: owner-terminal-at-base`.
+At a moved head, a successful missing-produced-attestation or foreign-publisher
+read plus a terminal owner chain retires with `terminalReason:
+foreign-head-after-terminal`, without binding or resetting counters. Unreadable
+or invalid attestation evidence retains custody. Verified `publicationHead` and
+`publicationLaunch` persist under the same snapshot check and flock, remaining
+available across skipped admission ticks; head matching ignores case. The keyed row and retry root must
 agree with the reservation key, repository and base head. A scoped keyed read
 sends the stored project and the ledger repository to the existing producer.
 Legacy reservations use the unscoped key. Canonical absence, filtered absence

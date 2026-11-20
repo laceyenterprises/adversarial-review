@@ -5623,7 +5623,12 @@ deletion, with no surviving head references or dynamic namespace hazards.
 See the [proof contract](docs/RUNBOOK-ama-closure.md).
 - **CLOSERCIWAIT-01:** published-head CI settles before the closer predicate using the existing bounded lease-yield/reacquire wait. Phase head values are exported, claim binding uses a deployed helper, and verification/terminal failures name the failed operation. Existing smoke commands remain unchanged; post-deploy acceptance is an organic remediation push merging in the same closer run, still pending.
 EXHAUSTEDHEADOWNER-01: a new builder head after cycle exhaustion receives one
-verdict-only review. Findings retain final closer ownership; head-scoped retry
+verdict-only review. Pending repair custody retires on complete terminal owner
+evidence at base, or at a moved head after a successful negative publication
+read, preserving counters. Verified repair publication evidence persists across
+admission ticks. After normal deployment, observe natural foreign-head release
+and delayed verified-publication admission read-only; offline tests do not
+certify deployment. Findings retain final closer ownership; head-scoped retry
 and deadline evidence cannot strand a new head. Spent budgets page once, with
 lifetime escalation deduplicated across head changes. See the
 [closure ownership contract](docs/RUNBOOK-ama-closure.md#exhausted-cycles-and-new-builder-heads-exhaustedheadowner-01).

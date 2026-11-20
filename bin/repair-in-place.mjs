@@ -35,7 +35,8 @@ function contextUnavailable(ready) {
 export async function main(args, {
   env = process.env, prepareDispatchReadContextImpl = prepareDispatchReadContext,
 } = {}) {
-  const [rootDir, repo, prRaw, headSha, ownerKey, conflicting, ticket, launcherPidRaw, dispatchProjectRef] = args;
+  const [rootDir, repo, prRaw, headSha, ownerKey, conflicting, ticket, launcherPidRaw, dispatchProjectRaw] = args;
+  const dispatchProjectRef = dispatchProjectRaw === '' ? undefined : dispatchProjectRaw;
   const prNumber = Number(prRaw);
   if (!rootDir || !repo?.includes('/') || !(prNumber > 0) || !ownerKey
     || !/^[0-9a-f]{40}$/i.test(headSha)) throw new Error('invalid repair request');

@@ -575,18 +575,80 @@ test('a moved head needs exact publication evidence from the reservation launch 
       readImpl: async selector => { reads++; return launchRead(epoch, 'failed', selector.include_retry_chain && 'succeeded'); },
       readPublisher: async args => {
         attestations++;
-        assert.deepEqual(args, { repo, prNumber, currentHeadSha: head });
+        assert.equal(args.rootDir, f.rootDir);
+        assert.equal(args.currentHeadSha, head);
         return { ok: true, launchRequestId: publisher, rowHeadSha: publishedHead };
       } });
-    assert.equal(observed.id, epoch.id);
-    assert.equal(observed.publicationHead, matched ? head : undefined);
+    assert.equal(observed?.id, matched ? epoch.id : undefined);
+    assert.equal(observed?.publicationHead, matched ? head : undefined);
     assert.equal(reads, 2);
     assert.equal(attestations, 1);
-    const stored = pendingRepairEpoch(f.rootDir, f);
+    const stored = readHammerRetryCapLedger(f.rootDir, f).repairEpochs[0];
     assert.equal(stored.reviewHead, null);
-    assert.equal(stored.terminalAt, undefined);
-    assert.equal(stored.publicationHead, undefined);
+    assert.equal(Boolean(stored.terminalAt), !matched);
+    assert.equal(stored.publicationHead, matched ? head : undefined);
+    if (matched) {
+      assert.equal(stored.publicationLaunch, publisher);
+      const cached = await reconcileRepairOwner({ ...f, headSha: head.toUpperCase(),
+        now: Date.now() + REPAIR_OWNER_OBSERVE_MS * 2,
+        readImpl: () => assert.fail('verified publication must survive missed admission ticks') });
+      assert.equal(cached.publicationHead, head);
+    }
   }
+});
+
+test('terminal owner at a foreign head releases custody without resetting spend or rereading', async t => {
+  const { resolveTtmOwner } = await import('../src/ttm-owner.mjs');
+  const f = fixture(t), epoch = reserveRepairEpoch(f).epoch;
+  const before = readHammerRetryCapLedger(f.rootDir, f);
+  const options = { ...f, headSha: head, readImpl: async () => launchRead(epoch),
+    readPublisher: async () => ({ ok: false, reason: 'missing-produced-head-attestation' }) };
+  assert.equal(await reconcileRepairOwner(options), null);
+  const after = readHammerRetryCapLedger(f.rootDir, f);
+  assert.equal(after.repairEpochs[0].terminalReason, 'foreign-head-after-terminal');
+  assert.equal(after.repairEpochs[0].reviewHead, null);
+  for (const key of ['attemptCount', 'targetAttemptCount', 'lifetimeAttemptCount', 'targetRemediationSha']) {
+    assert.equal(after[key], before[key]);
+  }
+  assert.equal(resolveTtmOwner({ repairEpoch: pendingRepairEpoch(f.rootDir, f),
+    review: { status: 'posted', suppressed: true } }).owner, null);
+  assert.equal(await reconcileRepairOwner({ ...options, now: Date.now() + 60_000,
+    readImpl: () => assert.fail('retired epochs must not be re-observed') }), null);
+});
+
+test('attestation failures and live retries at moved heads keep custody', async t => {
+  for (const [status, retry, reason] of [
+    ['failed', null, 'head-attestation-chain-read-failed'],
+    ['failed', null, 'invalid-produced-head-attestation'],
+    ['running', null, 'missing-produced-head-attestation'],
+    ['failed', 'running', 'missing-produced-head-attestation'],
+  ]) {
+    const f = fixture(t), epoch = reserveRepairEpoch(f).epoch;
+    const observed = await reconcileRepairOwner({ ...f, headSha: head,
+      readImpl: async () => launchRead(epoch, status, retry),
+      readPublisher: async () => ({ ok: false, reason }) });
+    assert.equal(observed.id, epoch.id);
+    assert.equal(pendingRepairEpoch(f.rootDir, f).terminalAt, undefined);
+  }
+});
+
+test('default repair publisher forwards HQ root and bounded exec options', async t => {
+  const f = fixture(t), epoch = reserveRepairEpoch(f).epoch;
+  let calls = 0;
+  const observed = await reconcileRepairOwner({ ...f, headSha: head, hqRoot: '/fixture/hq',
+    readImpl: async () => launchRead(epoch),
+    execFileImpl: async (command, args, options) => {
+      calls++;
+      assert.equal(command, 'hq');
+      assert.deepEqual(args, ['attest', 'chain', '--root', '/fixture/hq', '--repo', repo,
+        '--pr', String(prNumber), '--json']);
+      assert.equal(options.timeout, 8000);
+      return { stdout: JSON.stringify([{ kind: 'produced', valid: true, head_sha: head,
+        payload: { launch_request_id: 'fixture-launch', worker_class: 'codex' } }]) };
+    } });
+  assert.equal(calls, 1);
+  assert.equal(observed.publicationHead, head);
+  assert.equal(pendingRepairEpoch(f.rootDir, f).publicationLaunch, 'fixture-launch');
 });
 
 // Exercise the existing cross-process flock rather than a mocked in-process

@@ -98,7 +98,9 @@ export async function selectRemediationReadRoute({ repo, reviewerModel, env = pr
 
 // Use the worker-pool's existing class/provider/pin lookup. It can prepare
 // home defaults when a pin is absent, so require the routed owner and both pins
-// before handing any configuration to the owner-aware broker client.
+// before handing any configuration to the owner-aware broker client. The shell
+// only reports the prepared values; the checks run in JS, because errexit does
+// not fire on a false \`[[ ]]\` in every bash the hosts ship.
 const READ_PUSH_CONFIG = `set -euo pipefail
 source "$1"
 _hq_token_broker_auth_enabled "$2"
@@ -106,8 +108,7 @@ _hq_prepare_token_broker_env "$2"
 prefix="$(_hq_token_broker_env_prefix "$2")"
 owner="\${prefix}_OWNER"; pin="\${prefix}_OWNER_EXPECTED_INSTALLATION_ID"
 app="\${prefix}_EXPECTED_APP_ID"; provider="\${prefix}_PROVIDER"
-[[ "\${!owner:-}" == "$HQ_GITHUB_TARGET_OWNER" && "\${!pin:-}" =~ ^[0-9]+$ && "\${!app:-}" =~ ^[0-9]+$ ]]
-printf '%s\\n' "\${!provider}" "\${!app}" "\${!pin}" "$OAUTH_BROKER_SHARED_SECRET_FILE"
+printf '%s\\n' "\${!owner:-}" "\${!provider:-}" "\${!app:-}" "\${!pin:-}" "\${OAUTH_BROKER_SHARED_SECRET_FILE:-}"
 `;
 
 export async function selectRemediationPushRoute({ repo, workerClass, requiresWorkflowPush = false,
@@ -122,25 +123,40 @@ export async function selectRemediationPushRoute({ repo, workerClass, requiresWo
   }
   const hqRoot = String(env.HQ_REPO_ROOT || '').trim() || DEFAULT_HQ_ROOT;
   const helper = join(hqRoot, 'modules/worker-pool/lib/hq-gh.sh');
+  // Each stage names its failed check in the hold; no token material reaches it.
+  const hold = check => ownerAuthHold(repo, capability, `owner publication route: ${check}`);
+  let config;
   try {
     const { stdout } = await execFileImpl('bash', ['-c', READ_PUSH_CONFIG, 'remediation-owner-auth', helper, tokenVar], {
       cwd: dirname(helper), env: { ...networkEnv(env), HQ_GITHUB_TARGET_OWNER: owner },
       timeout: loadAwareTimeoutMs(15_000), maxBuffer: 128 * 1024,
     });
-    const [provider, app, installation, secretFile] = String(stdout || '').trimEnd().split('\n');
-    if (provider !== selected.provider || !/^\d+$/.test(app) || !/^\d+$/.test(installation) || !secretFile) {
-      throw new Error('incomplete or mismatched owner route');
-    }
-    const { token, expiresAtMs, permissions } = await mint({ role: 'remediation-publication', owner, env: { ...env,
+    config = String(stdout || '').trimEnd().split('\n');
+  } catch { throw hold('owner route config unavailable'); }
+  const [routedOwner, provider, app, installation, secretFile] = config;
+  if (routedOwner !== owner || provider !== selected.provider || !/^\d+$/.test(app) || !/^\d+$/.test(installation)
+    || !secretFile) {
+    throw hold('owner route config incomplete or mismatched');
+  }
+  let minted;
+  try {
+    // `owner` routes the broker request to `<provider>@<owner>` and pins the
+    // echoed owner and installation; the broker client fails closed on both.
+    minted = await mint({ role: 'remediation-publication', owner, env: { ...env,
       OAUTH_BROKER_REMEDIATION_PUBLICATION_PROVIDER: provider,
       OAUTH_BROKER_REMEDIATION_PUBLICATION_EXPECTED_APP_ID: app,
       OAUTH_BROKER_REMEDIATION_PUBLICATION_EXPECTED_INSTALLATIONS: `${owner}:${installation}`,
       OAUTH_BROKER_SHARED_SECRET_FILE: secretFile,
     } });
-    if (!token || (expiresAtMs != null && expiresAtMs <= Date.now()) || permissions?.contents !== 'write'
-      || ((requiresWorkflowPush || selected.requiresWorkflowPush) && permissions?.workflows !== 'write')) {
-      throw new Error('selected installation lacks required permissions');
-    }
-    return route(repo, capability, env, token, provider);
-  } catch { throw ownerAuthHold(repo, capability, 'owner publication route unavailable or lacks permission'); }
+  } catch (error) {
+    throw hold(error?.name === 'BrokerTokenFetchError' && error.check ? error.check : 'mint failed');
+  }
+  const { token, expiresAtMs, permissions } = minted || {};
+  if (!token || (expiresAtMs != null && expiresAtMs <= Date.now())) throw hold('minted token missing or expired');
+  if (!permissions) throw hold('broker reported no token permissions');
+  if (permissions.contents !== 'write') throw hold('missing contents:write');
+  if ((requiresWorkflowPush || selected.requiresWorkflowPush) && permissions.workflows !== 'write') {
+    throw hold('missing workflows:write');
+  }
+  return route(repo, capability, env, token, provider);
 }

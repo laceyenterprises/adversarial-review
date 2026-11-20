@@ -38,7 +38,7 @@ test('declared follow-up reader preserves legacy source-token revocation', async
   assert.equal(await tokens.select({ ...legacy, token: 'current-source-token' }), 'alternate-read-token');
 });
 
-function fixture(t, { refuse = false, ownerPin = '22' } = {}) {
+function fixture(t, { refuse = false, ownerPin = '22', routeOwner = '${HQ_GITHUB_TARGET_OWNER}' } = {}) {
   const rootDir = mkdtempSync(join(tmpdir(), 'remediation-owner-'));
   t.after(() => rmSync(rootDir, { recursive: true, force: true }));
   const env = { PATH: process.env.PATH, GH_TOKEN: 'home-default', GITHUB_TOKEN: 'home-default',
@@ -62,7 +62,7 @@ _hq_prepare_token_broker_env() {
     MERGE_AGENT_GH_TOKEN) TEST_PROVIDER=github-app-merge-agent ;;
     *) return 1 ;;
   esac
-  TEST_OWNER="\${HQ_GITHUB_TARGET_OWNER}"
+  TEST_OWNER="${routeOwner}"
   TEST_OWNER_EXPECTED_INSTALLATION_ID='${ownerPin}'
   TEST_EXPECTED_APP_ID=11
   OAUTH_BROKER_SHARED_SECRET_FILE=/nonexistent-fixture-bearer
@@ -162,19 +162,37 @@ test('Git resolves the authorization header only for the exact GitHub repository
   }
 });
 
-for (const mode of ['ordinary', 'workflow', 'missing-pin', 'refused', 'wrong-owner', 'read-only']) {
+// Each refusal names the failed check; the live broker shape (a permissions
+// digest with no permissions map) holds as missing permission evidence.
+const PUSH_HOLD_REASONS = {
+  'missing-pin': 'owner route config incomplete or mismatched',
+  'home-route': 'owner route config incomplete or mismatched',
+  refused: 'mint refused (HTTP 403)',
+  'wrong-owner': 'owner mismatch',
+  unrouted: 'unrouted (no owner echo)',
+  'home-installation': 'installation mismatch',
+  'no-permission-map': 'broker reported no token permissions',
+  'read-only': 'missing contents:write',
+  'no-workflows': 'missing workflows:write',
+};
+
+for (const mode of ['ordinary', 'workflow', ...Object.keys(PUSH_HOLD_REASONS)]) {
   test(`publication preserves the exact ${mode} capability and lease`, async t => {
-    const { rootDir, env, tokens } = fixture(t, { ownerPin: mode === 'missing-pin' ? '' : '22' });
-    const workflow = mode === 'workflow';
+    const { rootDir, env, tokens } = fixture(t, { ownerPin: mode === 'missing-pin' ? '' : '22',
+      ...(mode === 'home-route' && { routeOwner: 'home-org' }) });
+    const workflow = ['workflow', 'no-workflows'].includes(mode);
     const provider = workflow ? 'github-app-merge-agent' : 'github-app-codex-agent';
     const pushes = [], brokerRequests = [];
     const mint = options => fetchReviewerTokenFromBroker({ ...options,
       readFileImpl: () => 'fake-bearer', fetchImpl: async url => {
         brokerRequests.push(url);
         if (mode === 'refused') return { ok: false, status: 403 };
+        const owner = mode === 'unrouted' ? undefined : mode === 'wrong-owner' ? 'home-org' : 'alternate-org';
+        const permissions = mode === 'no-permission-map' ? undefined
+          : { contents: mode === 'read-only' ? 'read' : 'write', ...(mode === 'workflow' && { workflows: 'write' }) };
         return { ok: true, json: async () => ({ provider, access_token: 'alternate-publisher',
-          metadata: { owner: mode === 'wrong-owner' ? 'home-org' : 'alternate-org', app_id: 11, installation_id: 22,
-            permissions: { contents: mode === 'read-only' ? 'read' : 'write', ...(workflow && { workflows: 'write' }) } } }) };
+          metadata: { owner, app_id: 11, installation_id: mode === 'home-installation' ? 33 : 22,
+            permissions_digest: '0123456789abcdef', permissions } }) };
       },
     });
     const execFileImpl = async (command, args, options) => {
@@ -200,13 +218,45 @@ for (const mode of ['ordinary', 'workflow', 'missing-pin', 'refused', 'wrong-own
       assert.deepEqual(pushes[0].args.slice(-3), [`--force-with-lease=refs/heads/topic:${SHA}`,
         `https://github.com/${ALT}.git`, `${CANDIDATE}:refs/heads/topic`]);
     } else {
-      await assert.rejects(publish, { code: OWNER_AUTH_HOLD, owner: 'alternate-org', capability: 'contents:write (codex)' });
+      const error = await publish.then(() => assert.fail('publication must hold'), caught => caught);
+      assert.equal(error.code, OWNER_AUTH_HOLD);
+      assert.equal(error.owner, 'alternate-org');
+      assert.equal(error.capability, `contents:write${workflow ? ' + workflows:write' : ''} (codex)`);
+      assert.equal(error.reason, `owner publication route: ${PUSH_HOLD_REASONS[mode]}`);
+      assert.doesNotMatch(JSON.stringify({ message: error.message, reason: error.reason }), /alternate-publisher|fake-bearer/);
       assert.equal(pushes.length, 0);
     }
-    assert.deepEqual(brokerRequests, mode === 'missing-pin' ? [] :
+    assert.deepEqual(brokerRequests, ['missing-pin', 'home-route'].includes(mode) ? [] :
       [`http://broker.invalid/token?provider=${provider}&owner=alternate-org`]);
   });
 }
+
+// REMEDIATIONOWNERROUTE-01 Phase 0: the remediation-publication mint is owner
+// routed and pinned to the owner's installation, never the home installation.
+test('second-owner publication mint carries the owner and its installation pin', async t => {
+  const { env, tokens } = fixture(t);
+  const mints = [], urls = [];
+  const mint = options => {
+    mints.push({ role: options.role, owner: options.owner,
+      provider: options.env.OAUTH_BROKER_REMEDIATION_PUBLICATION_PROVIDER,
+      expectedAppId: options.env.OAUTH_BROKER_REMEDIATION_PUBLICATION_EXPECTED_APP_ID,
+      expectedInstallations: options.env.OAUTH_BROKER_REMEDIATION_PUBLICATION_EXPECTED_INSTALLATIONS });
+    return fetchReviewerTokenFromBroker({ ...options, readFileImpl: () => 'fake-bearer', fetchImpl: async url => {
+      urls.push(url);
+      return { ok: true, json: async () => ({ provider: 'github-app-codex-agent', access_token: 'alternate-publisher',
+        metadata: { owner: 'alternate-org', app_id: 11, installation_id: 22, permissions: { contents: 'write' } } }) };
+    } });
+  };
+  const execFileImpl = (command, args, options) => execAsync(command, args, options);
+  const route = await selectRemediationPushRoute({ repo: ALT, workerClass: 'codex', env, execFileImpl, tokens, mint });
+  assert.equal(route.provider, 'github-app-codex-agent');
+  assertIsolated(route.gitEnv, ALT, 'alternate-publisher');
+  assert.deepEqual(mints, [{ role: 'remediation-publication', owner: 'alternate-org', provider: 'github-app-codex-agent',
+    expectedAppId: '11', expectedInstallations: 'alternate-org:22' }]);
+  assert.deepEqual(urls, ['http://broker.invalid/token?provider=github-app-codex-agent&owner=alternate-org']);
+  assert.equal(await selectRemediationPushRoute({ repo: HOME, workerClass: 'codex', env, execFileImpl, tokens,
+    mint: () => assert.fail('home-owner publication must not mint an owner route') }), null);
+});
 
 test('pre-spawn owner hold keeps pending custody without spending a round', t => {
   const { rootDir } = fixture(t);

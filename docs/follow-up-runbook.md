@@ -700,6 +700,12 @@ itself. Publication repeats the check against the actual outgoing changes and
 uses the exact PR branch and old-head lease. Commit provenance remains tied to
 the worker harness. Missing or mismatched owner pins, rejected credentials,
 and fork or unknown PR head repositories produce `remediation-owner-auth-hold`.
+A publication-route hold names its failed check in `reason`
+(`owner publication route: <check>`): route config, mint refused (HTTP status),
+unrouted or mismatched owner echo, App or installation mismatch, missing token
+permissions, or a missing `contents:write`/`workflows:write`. The permission
+check needs the broker's token metadata to carry a `permissions` map. A
+`permissions_digest` alone holds as `broker reported no token permissions`.
 
 A pre-spawn hold keeps the job pending with a five-minute retry delay and
 refunds the unspawned round. A publisher refusal after a worker commits keeps

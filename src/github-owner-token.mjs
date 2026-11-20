@@ -100,7 +100,7 @@ export function createGithubOwnerTokenSelector({
     // Resolve with the Node process configuration, without forwarding it.
     env = { ...process.env, ...env };
     role ||= githubTokenRole(token, env, tokenEnv);
-    if (!token || !role) throw new GithubOwnerTokenUnavailableError();
+    if (!role) throw new GithubOwnerTokenUnavailableError();
     const key = `${role}@${owner}`;
     const cached = cache.get(key);
     return { token, env, owner, role, key, cached: cached && now() < cached.refreshAt ? cached : null };

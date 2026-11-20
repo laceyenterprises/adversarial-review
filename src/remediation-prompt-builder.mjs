@@ -93,6 +93,8 @@ export function buildRemediationPrompt(job, {
   governingDocContext = '',
   livePackContext = '',
   workerTrailerClass = REMEDIATION_WORKER_TRAILER_CLASS,
+  publicationWorkerClass,
+  requiresWorkflowPush = false,
 } = {}) {
   const replyContext = requireWorkerReplyContext({
     replyPath: remediationReplyPath,
@@ -117,6 +119,8 @@ This PR has a settled Comment only verdict. Address or explicitly account for it
   const publishCommand = `node ${quote(join(ROOT, 'bin', 'remediation-publish.mjs'))}`
     + ` --base-branch ${quote(baseBranch)} --previous-head ${quote(job.revisionRef)}`
     + ` --repo ${quote(job.repo)} --pr ${quote(job.prNumber)}`
+    + (publicationWorkerClass ? ` --worker-class ${quote(publicationWorkerClass)} --reviewer-model ${quote(job.reviewerModel)}` : '')
+    + (requiresWorkflowPush ? ' --requires-workflow-push' : '')
     + (typeof job.branch === 'string' && job.branch.trim() ? ` --branch ${quote(job.branch.trim())}` : '')
     + ` --failure-path ${quote(`${replyContext.replyPath}.publication-failure.json`)}`;
   // The contract example uses empty arrays for the per-finding lists

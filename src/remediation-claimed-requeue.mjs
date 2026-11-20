@@ -54,7 +54,7 @@ export function requeueClaimedJobForConflictedBaseProbe({
 // A claimed job that never reached the worker runtime must be budget neutral.
 // This covers both config errors and a shutdown during workspace preparation.
 export function requeueClaimedFollowUpJobBeforeSpawn({
-  rootDir, jobPath, requeuedAt = new Date().toISOString(), error = null,
+  rootDir, jobPath, requeuedAt = new Date().toISOString(), error = null, ownerAuthHold = null,
 }) {
   const currentJob = JSON.parse(readFileSync(jobPath, 'utf8'));
   const currentPlan = currentJob.remediationPlan || {};
@@ -81,7 +81,9 @@ export function requeueClaimedFollowUpJobBeforeSpawn({
       recoverable: true,
       recordedAt: requeuedAt,
     } } : {}),
-    remediationPlan: { ...currentPlan, currentRound: nextCurrentRound, rounds, nextAction: null },
+    ...(ownerAuthHold && { ownerAuthHold }),
+    remediationPlan: { ...currentPlan, currentRound: nextCurrentRound, rounds, nextAction: null,
+      ...(ownerAuthHold && { retryAfter: new Date(Date.parse(requeuedAt) + 5 * 60_000).toISOString() }) },
   };
   writeFollowUpJob(jobPath, nextJob);
   const pendingPath = join(getFollowUpJobDir(rootDir, 'pending'), basename(jobPath));

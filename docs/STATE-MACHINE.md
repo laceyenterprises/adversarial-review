@@ -1265,6 +1265,12 @@ commit/workspace; local retries resume preserved work. Independent failures,
 lease rejection, cancellation, lifecycle stops and unknown evidence retain
 ordinary accounting. Existing ownership gates still precede dispatch.
 
+An alternate-owner Git authorization refusal records
+`remediation-owner-auth-hold`. An unspawned claim follows the existing
+`in-progress` to `pending` transition with a five-minute retry. An exited
+publisher refusal follows `in-progress` to `stopped` while retaining the
+unpublished commit and workspace. Neither transition authorizes re-review.
+
 Grok subject refusals before spawn or after an assignment handoff transition
 from `in-progress` to `stopped` with `subject-refused`, a never-spawned worker
 and an operator-owned correction/retrigger action. They create no quota hold

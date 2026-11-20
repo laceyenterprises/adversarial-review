@@ -1,0 +1,16 @@
+{
+  "version": 1,
+  "entries": [
+    {
+      "id": "follow-up-owner-auth-hold",
+      "title": "Alternate-owner Git authorization hold",
+      "path": "docs/data-model/follow-up-jobs.md",
+      "store": "data/follow-up-jobs/",
+      "schemaSurface": "src/follow-up-remediation.mjs",
+      "relatedSchemaSurfaces": ["src/remediation-claimed-requeue.mjs", "src/follow-up-jobs.mjs", "bin/remediation-publish.mjs"],
+      "owner": "follow-up daemon",
+      "optionalFields": ["ownerAuthHold: { code: remediation-owner-auth-hold, owner, capability, reason, recordedAt }"],
+      "compatibility": "Additive evidence. Pre-spawn holds keep pending custody without charging a round. Publication holds retain the local commit using unpublishedWork. Older records need no migration."
+    }
+  ]
+}

@@ -1,6 +1,7 @@
 import { existsSync } from 'node:fs';
 import { isAbsolute, join, relative } from 'node:path';
 import { loadDomainConfig } from './domain-config.mjs';
+import { OWNER_AUTH_HOLD } from './remediation-owner-auth.mjs';
 
 function isRemoteBranchNotFoundError(err) {
   const detail = [err?.message, err?.stdout, err?.stderr].filter(Boolean).join('\n');
@@ -52,6 +53,7 @@ export async function cloneRemediationWorkspace({
       await clone(['clone', '--reference', reference, '--dissociate', ...networkArgs(baseBranch).slice(1)]);
       return 'reference';
     } catch (err) {
+      if (err.code === OWNER_AUTH_HOLD) throw err;
       log.warn?.(`[follow-up-remediation] reference clone failed repo=${repo}; falling back to network clone: ${err.message}`);
       if (baseBranch && isRemoteBranchNotFoundError(err)) {
         return cloneWithoutBranchNarrowing();

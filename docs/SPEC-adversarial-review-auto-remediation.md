@@ -940,7 +940,7 @@ PATH and the prompt directs it to use `git push`; each such spawn logs a warning
 The prompt leaves `WORKER_CLASS` intact and uses `WORKER_TRAILER_CLASS` for commit
 provenance.
 
-`git-safe push` runs the agent-os push-credential preflight. The adapter mints
+On the home-owner path, `git-safe push` runs the agent-os push-credential preflight. The adapter mints
 no token, so it drops any inherited `HQ_WORKER_TOKEN_MINTED_AT`. It passes
 through a known expiry (`GH_TOKEN_EXPIRES_AT`, or
 `<HQ_ENTITLEMENT_GH_TOKEN_VAR>_EXPIRES_AT`) from the daemon environment. When
@@ -951,6 +951,16 @@ worker entitlements, plus `merge-agent` when workflow-push escalation is on.
 If re-resolution fails, the preflight drops the inherited token and git uses
 its own credential. A push that then fails takes the GitHub-auth recovery path
 below.
+
+For alternate owners, workspace Git uses the recorded reviewer's owner route.
+The publication helper requires the selected remediation harness's declared
+owner installation, verifies the needed write permissions and publishes the
+inspected commit with the existing exact remote-head lease. The existing
+workflow escalation policy selects the owner-scoped workflow capability when
+required. Commit author and trailer still identify the physical harness. A
+missing or refused route produces `remediation-owner-auth-hold` without
+falling through to another identity. See the
+[follow-up runbook](follow-up-runbook.md#alternate-owner-follow-up-git).
 
 Under the shim, direct workers use `gh` for read-only queries only. The shim
 refuses agent-attributed mutating `gh` commands (exit 78) unless `GH_TOKEN`,

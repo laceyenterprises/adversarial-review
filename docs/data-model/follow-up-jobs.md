@@ -438,6 +438,21 @@ replay. Factual-dispute admission is the explicit closure exception described be
 **Source of truth:** `src/remediation-builder-authorship.mjs`, `src/follow-up-jobs.mjs`, `src/follow-up-branch.mjs`, `src/remediation-unpublished.mjs`, `src/review-mode-selection.mjs`, `src/follow-up-remediation.mjs`, `src/follow-up-retrigger-review-label.mjs`, `src/remediation-quota-hold.mjs`, `src/remediation-claimed-requeue.mjs`, `src/remediation-worker-class-fallback.mjs`, `src/worker-token-pool.mjs`, `src/remediation-round-accounting.mjs`, `src/remediation-infrastructure-refund.mjs`, `src/remediation-credential-broker.mjs`, `src/github-auth-recovery.mjs`, `src/remediation-published-head.mjs`, `src/remediation-closeout.mjs`, `src/remediation-job-ownership.mjs`, `src/remediation-live-pr-owner.mjs`
 **Runtime surface:** `src/comment-only-final-round.mjs`, `src/comment-only-final-round-completion.mjs`, `src/ama-closure-orchestration.mjs`, `src/adapters/comms/github-pr-comments/comment-delivery.mjs`, `src/reviewer-ci-admission.mjs`
 
+## Alternate-owner Git authorization hold (LAC-2248)
+
+`ownerAuthHold` is optional evidence containing `code`, `owner`, `capability`,
+`reason` and `recordedAt`. Its code is `remediation-owner-auth-hold`. A
+pre-spawn hold returns the claimed job to `pending`, removes the unspawned
+round and sets `remediationPlan.retryAfter` five minutes out. Admission clears
+the hold when a worker is durably recorded as spawned.
+
+A worker publisher records the same code and capability in its existing
+publication-failure artifact, bound to `previousHead`. When the worker exits,
+reconciliation records the hold on the stopped job. A reported distinct local
+commit is retained under `unpublishedWork` with its workspace and hold reason.
+This evidence supplies no push, re-review or merge authority. Earlier job
+records can omit the field.
+
 ## Simplicity advisory (REVIEWSIMPLE-01)
 
 Each review's existing job stores `simplicityNote`: the text of the optional

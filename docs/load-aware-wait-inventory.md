@@ -177,7 +177,7 @@ the default one-hour policy cap, but remain bounded by the platform timer limit.
 | `src/finalization/shadow-store.mjs:74` | `DEFAULT_BUSY_TIMEOUT_MS = 5000 ms` | openReadOnlyDb |
 | `src/fleet-self-repair-rereview.mjs:128` | `LOCAL_GIT_TIMEOUT_MS = 5000 ms` | runWithTransientGitRetry |
 | `src/follow-up-branch.mjs:16` | `8000 ms` | readFollowUpPRHead |
-| `src/follow-up-merge-agent.mjs:208` | `Number.isInteger(parsed) && parsed > 0 ? parsed : HQ_DISPATCH_TIMEOUT_MS` | resolveHqDispatchTimeoutMs |
+| `src/hq-dispatch-timeout.mjs:14` | `Number.isInteger(parsed) && parsed > 0 ? parsed : HQ_DISPATCH_TIMEOUT_MS` | resolveHqDispatchTimeoutMs (merge agent and shrink-diff owner) |
 | `src/follow-up-merge-agent.mjs:814` | `5000 ms` | _probeDispatchStatusViaHq |
 | `src/follow-up-merge-agent.mjs:867` | `5000 ms` | probeDispatchStatusViaHq |
 | `src/follow-up-retrigger-label.mjs:229` | `ACK_COMMENT_LOOKUP_TIMEOUT_MS = 15000 ms` | findExistingAckComment |

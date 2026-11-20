@@ -5,6 +5,7 @@ import { observeClosureWait } from './ama/closure-wait.mjs';
 import { readDispatchStatus } from './producer-contracts/launch-status.mjs';
 import { parseHqDispatchStatusOutput } from './hq-dispatch-status-output.mjs';
 import { loadAwareTimeoutMs } from './load-aware-timeout.mjs';
+import { HQ_DISPATCH_TIMEOUT_MS, resolveHqDispatchTimeoutMs } from './hq-dispatch-timeout.mjs';
 import { runCommandKeepingOutput, DEFAULT_KILL_GRACE_MS } from './run-command-keeping-output.mjs';
 import { readDispatchReceipt, parseDispatchJsonOutput } from './producer-contracts/dispatch-receipt.mjs';
 import { observeSynchronousChild } from './watcher-latency.mjs';
@@ -159,7 +160,6 @@ const MERGE_AGENT_LIFECYCLE_CLEANUP_SCHEMA_VERSION = 1;
 const OPERATOR_SKIP_LABELS = new Set(OPERATOR_HOLD_LABELS);
 const DEFAULT_HQ_PATH = 'hq';
 const HQ_WORKER_TEAR_DOWN_TIMEOUT_MS = 60_000;
-const HQ_DISPATCH_TIMEOUT_MS = 90_000;
 const HQ_DISPATCH_TRANSIENT_RETRY_DELAYS_MS = [1_000, 5_000];
 const MERGE_CLASS_ORCHESTRATION_MODES = new Set(ENUM_ROLES_ADVERSARIAL_ORCHESTRATION_MODE);
 // `operator-approved` is a mobile-friendly override the operator can
@@ -214,18 +214,6 @@ function resolveHqWorkerTearDownTimeoutMs(env = process.env, options = {}) {
   }).get('follow_up.hq_worker_tear_down_subprocess_timeout_ms', HQ_WORKER_TEAR_DOWN_TIMEOUT_MS);
   const parsed = Number(cfgValue);
   return Number.isInteger(parsed) && parsed > 0 ? parsed : HQ_WORKER_TEAR_DOWN_TIMEOUT_MS;
-}
-
-function resolveHqDispatchTimeoutMs(env = process.env, options = {}) {
-  const cfgValue = loadRoleConfig({
-    env,
-    topPath: options.topPath,
-    modulePaths: options.modulePaths,
-    loaderImpl: options.loaderImpl,
-    contextKey: 'follow_up.hq_dispatch_subprocess_timeout_ms',
-  }).get('follow_up.hq_dispatch_subprocess_timeout_ms', HQ_DISPATCH_TIMEOUT_MS);
-  const parsed = Number(cfgValue);
-  return loadAwareTimeoutMs(Number.isInteger(parsed) && parsed > 0 ? parsed : HQ_DISPATCH_TIMEOUT_MS);
 }
 
 const NORMAL_MERGE_AGENT_DISPATCH_PRIORITY = 'normal';

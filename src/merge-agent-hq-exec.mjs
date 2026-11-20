@@ -36,11 +36,17 @@ function currentUser(env = process.env) {
   }
 }
 
-function formatExecFailure(command, err) {
-  const stderrText = String(err?.stderr ?? '').trim();
-  const stdoutText = String(err?.stdout ?? '').trim();
+function formatExecFailure(command, err, { elapsedMs } = {}) {
+  const bounded = elapsedMs !== undefined;
+  const tail = text => bounded ? text.slice(-2048) : text;
+  const stderrText = tail(String(err?.stderr ?? '').trim());
+  const stdoutText = tail(String(err?.stdout ?? '').trim());
+  const detail = err?.message || 'no message';
+  const execution = bounded
+    ? `, signal ${err?.signal ?? 'none'}, killed ${err?.killed === true}, elapsed ${Math.round(elapsedMs)} ms`
+    : '';
   const augmented = new Error(
-    `${command} failed (exit code ${err?.code ?? 'unknown'}): ${err?.message || 'no message'}` +
+    `${command} failed (exit code ${err?.code ?? 'unknown'}${execution}): ${bounded ? detail.slice(0, 512).split('\n', 1)[0] : detail}` +
     (stderrText ? `\n  stderr:\n${stderrText.split('\n').map(l => `    ${l}`).join('\n')}` : '') +
     (stdoutText ? `\n  stdout:\n${stdoutText.split('\n').map(l => `    ${l}`).join('\n')}` : '')
   );

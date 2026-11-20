@@ -1,12 +1,16 @@
 import './helpers/registry-session-fixture.mjs';
 import './helpers/dispatch-files-preload.mjs';
+import './helpers/load-aware-timeout-fixture.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import childProcess from 'node:child_process';
 import { mkdtempSync, rmSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { syncBuiltinESMExports } from 'node:module';
+import os, { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { settleReviewerAttempt } from '../src/reviewer-spawn-settle.mjs';
 import { reviewerSizeFacts, reviewerSizeFactsLine, dispatchReviewerSizeUpdate, reportReviewerSizeFailure, readSizeFacts } from '../src/reviewer-size-owner.mjs';
+import { resolveHqDispatchTimeoutMs } from '../src/hq-dispatch-timeout.mjs';
 import { alertClioOversizedAgyFailure } from '../src/reviewer-alerts.mjs';
 import { openReviewStateDb, ensureReviewStateSchema, requestReviewRereview } from '../src/review-state.mjs';
 import { prepareMarkSizeFailed, prepareMarkSizeRetry, prepareMarkAttemptStarted } from '../src/review-state-statements.mjs';
@@ -227,6 +231,7 @@ test('transient HQ failure retries the same idempotency key and recovers its rec
     sleepImpl: async ms => waits.push(ms),
     execFileImpl: async (_command, args) => {
       calls++;
+      assert.ok(args.includes('--defer-provision'));
       assert.equal(args[args.indexOf('--idempotency-key') + 1], 'same-key');
       if (calls === 1) throw Object.assign(new Error('synthetic timeout'), { code: 'ETIMEDOUT' });
       return { stdout: JSON.stringify({ launchRequestId: 'lrq_recovered' }) };
@@ -235,6 +240,33 @@ test('transient HQ failure retries the same idempotency key and recovers its rec
   assert.equal(calls, 2);
   assert.deepEqual(waits, [100]);
   assert.equal(settled.launchRequestId, 'lrq_recovered');
+});
+
+test('shrink-diff dispatch uses the shared default, configured and load-scaled budgets', async t => {
+  const env = { AGENT_OS_CONFIG_PATH: process.env.AGENT_OS_CONFIG_PATH, HQ_ROOT: '/synthetic/hq' };
+  const configured = { ...env, AGENT_OS_FOLLOW_UP_HQ_DISPATCH_SUBPROCESS_TIMEOUT_MS: '120000' };
+  async function assertBudget(env, expected) {
+    assert.equal(resolveHqDispatchTimeoutMs(env), expected);
+    await dispatchReviewerSizeUpdate({ repo, prNumber: 42, workerClass: 'codex',
+      promptPath: '/synthetic/brief.md', dispatchKey: 'same-key', env,
+      execFileImpl: async (_command, _args, { timeout }) => {
+        assert.equal(timeout, expected);
+        return { stdout: JSON.stringify({ launchRequestId: 'lrq_synthetic_timeout_budget' }) };
+      },
+    });
+  }
+  await assertBudget(env, 90_000);
+  await assertBudget(configured, 120_000);
+  const cores = os.cpus().length;
+  t.mock.method(os, 'loadavg', () => [cores * 2, 0, 0]);
+  t.mock.method(os, 'platform', () => 'linux');
+  t.mock.method(childProcess, 'execFileSync', command => {
+    assert.equal(command, '/bin/ps');
+    return `${cores * 100}\n`;
+  });
+  syncBuiltinESMExports();
+  t.after(() => { t.mock.restoreAll(); syncBuiltinESMExports(); });
+  await assertBudget(configured, 420_000);
 });
 
 test('HQ retries are bounded and definite refusals are not retried', async () => {
@@ -250,6 +282,37 @@ test('HQ retries are bounded and definite refusals are not retried', async () =>
     }));
     assert.equal(calls, code === 'ENOENT' ? 3 : 1);
   }
+});
+
+test('a killed shrink-diff dispatch stops after one attempt and records the subprocess outcome', async (t) => {
+  const f = fixture(t);
+  const warnings = [];
+  let attempts = 0;
+  f.options.log.warn = line => warnings.push(line);
+  f.options.dispatchSizeUpdateImpl = request => dispatchReviewerSizeUpdate({ ...request,
+    env: { HQ_ROOT: '/synthetic/hq' },
+    sleepImpl: async () => assert.fail('must not back off after a kill'),
+    execFileImpl: async () => {
+      attempts++;
+      const stderr = 'x'.repeat(5000) + 'synthetic stderr tail';
+      const stdout = 'y'.repeat(5000) + 'synthetic stdout tail';
+      throw Object.assign(new Error(`Command failed: hq dispatch\n${stderr}`), {
+        code: null, signal: 'SIGTERM', killed: true, stdout, stderr,
+      });
+    },
+  });
+  const settled = await settleReviewerAttempt(f.options);
+  const dir = join(f.rootDir, 'data', 'review-size-actions');
+  const [name] = readdirSync(dir).filter(name => name.endsWith('.json'));
+  const { dispatch } = JSON.parse(readFileSync(join(dir, name), 'utf8'));
+  assert.equal(attempts, 1);
+  assert.match(dispatch.error, /exit code unknown, signal SIGTERM, killed true, elapsed \d+ ms/);
+  assert.equal(dispatch.dispatched, false);
+  assert.equal(settled.dispatch.error, dispatch.error);
+  assert.match(dispatch.error, /synthetic stdout tail/);
+  assert.match(dispatch.error, /synthetic stderr tail/);
+  assert.doesNotMatch(dispatch.error, /x{2049}|y{2049}/);
+  assert.ok(warnings.some(line => line.startsWith('[watcher] shrink-diff dispatch unconfirmed') && line.endsWith(dispatch.error)));
 });
 
 

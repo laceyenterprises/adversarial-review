@@ -38,7 +38,7 @@ const args = process.argv.slice(2);
 if (args[0] === '--no-replace-objects') args.shift();
 const before = ${JSON.stringify(beforeSha)}, local = ${JSON.stringify(localSha)}, published = ${JSON.stringify(publishedSha)};
 const input = args.includes('--input') ? JSON.parse(readFileSync(0, 'utf8')) : undefined;
-const key = command === 'gh' ? (args[0] === 'pr' || args[1]?.endsWith('/pulls/1') ? 'pr' : args[1] === 'graphql' ? 'mutation' : 'verification')
+const key = command === 'gh' ? (args[0] === 'pr' || args[1]?.endsWith('/pulls/1') ? 'pr' : args[1] === 'graphql' ? 'mutation' : args[1]?.includes('/branches/') ? 'source' : 'verification')
   : args[0] === 'fetch' ? 'fetch-' + (args.at(-1) === before ? 'before' : 'published') : args[0];
 const calls = JSON.parse(readFileSync(callsFile, 'utf8'));
 const attempt = calls.filter(call => call.key === key).length + 1;
@@ -54,10 +54,12 @@ if (key === target) {
   if (scenario === 'permanent') fail(command === 'git' ? 'fatal: Authentication failed' : 'HTTP 403 Forbidden');
   if (scenario === 'ambiguous' && attempt === 1) fail('TLS handshake timeout');
   if (scenario === 'ambiguous') fail('HTTP 422 expected head does not match');
+  if (scenario === 'head-race') fail('HTTP 422 expected head does not match');
   if (scenario === 'malformed') { process.stdout.write('{'); process.exit(0); }
 }
 if (command === 'gh') {
   if (key === 'pr') process.stdout.write(JSON.stringify({ head: { ref: 'worker', sha: before } }));
+  else if (key === 'source') process.stdout.write(JSON.stringify({ commit: { sha: scenario === 'head-race' ? 'd'.repeat(40) : before } }));
   else if (key === 'mutation') process.stdout.write(JSON.stringify({ data: { createCommitOnBranch: { commit: { oid: published } } } }));
   else if (key === 'verification') process.stdout.write(JSON.stringify({ commit: { tree: { sha: 'tree' } } }));
   else fail('unexpected gh call');
@@ -158,6 +160,18 @@ test('an ambiguous mutation retains the original CAS and rejects unsafe publicat
   const mutations = f.calls().filter(call => call.key === 'mutation');
   assert.equal(mutations.length, 2);
   assert.deepEqual(mutations[0].input, mutations[1].input);
+  assert.ok(!f.calls().some(call => call.key === 'reset'));
+});
+
+test('API publisher reports an expected-head race as head-changed without Git fallback', async t => {
+  const f = fixture(t, 'head-race', 'mutation');
+  const result = await f.run();
+  assert.equal(result.route, 'refused');
+  assert.equal(result.phaseOutcome, 'head-changed');
+  assert.equal(result.mutationUncertain, true);
+  assert.equal(result.observedHead, undefined);
+  assert.equal(result.fallbackHead, undefined);
+  assert.equal(f.calls().filter(call => call.key === 'source').length, 1);
   assert.ok(!f.calls().some(call => call.key === 'reset'));
 });
 

@@ -108,6 +108,11 @@ test('LAC-2252: exact replay is publishable, repeated publication is a no-op, an
   assert.notEqual(candidate, f.start);
   assert.equal(f.git(f.closer, 'rev-parse', 'HEAD^'), base);
   assert.deepEqual(output(f.api()), { route: 'git-fallback', branch: 'feature', fallbackHead: f.start, localHead: candidate, previousHead: f.start });
+  for (const captured of ['', 'invalid', 'a'.repeat(40)]) {
+    const result = output(f.direct(candidate, f.start, { HAM_BASE_HEAD: captured }));
+    assert.equal(result.phaseOutcome, captured === 'a'.repeat(40) ? 'head-changed' : 'source-publication-refused');
+    assert.equal(result.route, 'refused');
+  }
   for (const env of [{ FIXTURE_READ_OUTAGE: '1' }, { HAM_CONTROLLER_TOKEN: '' }, { HAMMER_LACEY_GH_TOKEN: '' }, { HAM_BASE_HEAD: '' }]) {
     assert.equal(output(f.direct(candidate, f.start, env)).route, 'refused');
     assert.equal(f.remoteHead(), f.start);
@@ -125,6 +130,38 @@ test('LAC-2252: exact replay is publishable, repeated publication is a no-op, an
   assert.equal(output(f.api()).route, 'unchanged');
   assert.equal(existsSync(f.pushLog), false);
 });
+
+for (const conflict of [false, true]) {
+  test(`LAC-2252: ${conflict ? 'conflict repair' : 'local rebase'} plus a new commit refuses publication`, t => {
+    const f = fixture(t);
+    f.git(f.author, 'checkout', '-q', 'main');
+    if (conflict) {
+      writeFileSync(join(f.author, 'original'), 'base-side conflicting addition\n');
+      f.git(f.author, 'add', 'original');
+      f.git(f.author, 'commit', '-qm', 'conflicting base');
+    } else f.commit(f.author, 'new-base');
+    f.git(f.author, 'push', '-q', 'origin', 'main');
+    f.git(f.closer, 'fetch', '-q', 'origin');
+    if (conflict) {
+      assert.throws(() => f.git(f.closer, 'rebase', 'origin/main'));
+      writeFileSync(join(f.closer, 'original'), 'resolved both sides\n');
+      f.git(f.closer, 'add', 'original');
+      f.git(f.closer, '-c', 'core.editor=true', 'rebase', '--continue');
+      const repaired = f.git(f.closer, 'rev-parse', 'HEAD');
+      writeFileSync(join(f.dir, 'conflict-repair-publish.env'),
+        `source=${f.start}\nhead=${repaired}\nbranch=feature\n`);
+      assert.equal(output(f.api()).route, 'git-fallback', 'the exact repaired head remains supported');
+    } else f.git(f.closer, 'rebase', 'origin/main');
+    const candidate = f.commit(f.closer, 'follow-up-remediation');
+    for (const result of [output(f.api()), output(f.direct(candidate, f.start))]) {
+      assert.equal(result.route, 'refused');
+      assert.equal(result.phaseOutcome, 'source-publication-refused');
+    }
+    assert.equal(f.remoteHead(), f.start);
+    assert.equal(f.git(f.closer, 'rev-parse', 'HEAD'), candidate);
+    assert.equal(existsSync(f.pushLog), false);
+  });
+}
 
 test('LAC-2252: a pre-mutation fallback cannot repin after the source moves', t => {
   const f = fixture(t);

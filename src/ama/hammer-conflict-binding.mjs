@@ -9,8 +9,8 @@
 //   branch=<PR head branch>
 //
 // bin/hammer-api-publish.mjs uses the binding only while the local HEAD is
-// still that rebased head. The git fallback then pushes
-// HEAD:refs/heads/<branch> with `source` as the exact-head lease, so a branch
+// still that rebased head. The owned Git publisher then pushes
+// <sha>:refs/heads/<branch> with `source` as the exact-head lease, so a branch
 // that moved after the repair captured its source refuses the push.
 import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';

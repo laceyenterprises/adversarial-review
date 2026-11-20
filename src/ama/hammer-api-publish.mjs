@@ -35,7 +35,19 @@ export async function publishHammerTree({ repo, branch, expectedHead, localTree,
     if (commit?.commit?.tree?.sha !== localTree) throw new Error('published tree mismatch');
     return { route: 'published', head, tree: localTree };
   } catch (error) {
-    return { route: 'refused', phaseOutcome: 'source-publication-refused', reason: hammerPublicationFailureReason(error),
+    let phaseOutcome = 'source-publication-refused';
+    // A rejected expectedHeadOid is a world-side race. Re-read rather than
+    // trusting transport-specific error text. A known created commit must keep
+    // its verification failure and custody; never adopt a foreign tip as ours.
+    if (!publishedHead) {
+      try {
+        const live = await api(`repos/${repo}/branches/${encodeURIComponent(branch)}`);
+        const head = live?.commit?.sha;
+        if (/^[a-f0-9]{40}$/.test(head || '') && head !== expectedHead) phaseOutcome = 'head-changed';
+      } catch { /* Unavailable evidence retains the original refusal. */ }
+    }
+    return { route: 'refused', phaseOutcome, reason: hammerPublicationFailureReason(error),
+      // A moved ref alone cannot prove a timed-out mutation had no effect.
       mutationUncertain: true, observedHead: publishedHead };
   }
 }

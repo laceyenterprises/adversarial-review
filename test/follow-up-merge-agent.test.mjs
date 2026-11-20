@@ -4771,6 +4771,10 @@ test('buildMergeAgentPrompt surfaces final-pass mode + triage contract when trig
   assert.ok(prompt.includes('never copy'));
   assert.ok(prompt.includes('quoted secrets'));
   assert.ok(prompt.includes('Merge gate for the rebase-to-merge step only'));
+  assert.ok(prompt.includes('capture the PR headRefOid and headRefName'));
+  assert.ok(prompt.includes('--force-with-lease="refs/heads/$MERGE_HEAD_REF:$MERGE_SOURCE_HEAD"'));
+  assert.ok(prompt.includes('Controller exit 20 is a source-publication-refused stop'));
+  assert.ok(!prompt.includes('continue the rebase, force-push with lease'));
   // HAMCONTROLLERSCRIPT-01: the controller is shipped code; the prompt runs it
   // with data arguments and never carries a controller shell body.
   assert.ok(prompt.includes("merge-agent-close-controller.sh' --repo 'laceyenterprises/agent-os' --base 'main' --pr '401' --commands \"$HAM_RUN_DIR/close-commands.json\""));

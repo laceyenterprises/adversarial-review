@@ -41,6 +41,9 @@ export async function inspectHammerSource({ branch, previousHead, base, localHea
   }
   if (isAncestor(previousHead, localHead)) return 'fast-forward';
   if (conflict) return 'rewrite';
+  if (!sha(process.env.HAM_BASE_HEAD)) {
+    throw refusal('captured publication source unavailable');
+  }
   if (previousHead !== process.env.HAM_BASE_HEAD) {
     throw movedPublicationHead('divergent PR head differs from the captured publication source');
   }

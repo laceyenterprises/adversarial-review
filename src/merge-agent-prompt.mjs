@@ -173,12 +173,19 @@ function buildMergeAgentPrompt(job, { trigger = null } = {}) {
       + ' FEATURE scope is not.'
     );
     lines.push(
-      '- Rebase onto the latest `main` and confirm it holds (re-validate the full'
-      + ' suite + required checks on the rebased head). If the rebase hits a merge'
-      + ' conflict, RESOLVE it locally (fix the conflict markers preserving both'
-      + ' sides, continue the rebase, force-push with lease) — do not abandon a'
-      + ' conflict to the operator. Hard-block only a genuinely unsafe semantic'
-      + ' conflict you cannot correctly settle.'
+      '- Let the shipped close controller rebase onto the latest `main` and'
+      + ' validate. Before any local conflict rebase, capture the PR headRefOid'
+      + ' and headRefName as MERGE_SOURCE_HEAD and MERGE_HEAD_REF. Resolve conflicts'
+      + ' preserving both sides, continue the rebase, and validate the resolved'
+      + ' head. Publish it only with `git push'
+      + ' --force-with-lease="refs/heads/$MERGE_HEAD_REF:$MERGE_SOURCE_HEAD"'
+      + ' origin "$(git rev-parse HEAD):refs/heads/$MERGE_HEAD_REF"`, then rerun the'
+      + ' controller. Never replace the captured source with a later head to'
+      + ' bypass rejection. Controller exit 20 is a source-publication-refused'
+      + ' stop: its local input does not contain the captured PR head; it does'
+      + ' not by itself prove external head movement. Preserve local work on'
+      + ' refusal. Hard-block only a genuinely unsafe semantic conflict you'
+      + ' cannot correctly settle.'
     );
     lines.push('- Leave the working tree clean; never merge a dirty head.');
     lines.push(
@@ -338,7 +345,7 @@ function buildMergeAgentPrompt(job, { trigger = null } = {}) {
         lines.push('```json');
         lines.push('{"validations": [{"pytest": true, "args": ["tests/test_example.py"]}]}');
         lines.push('```');
-        lines.push('Then run this ONE command in the foreground from the same calling shell. The controller records group drain independently of HQ terminal status and only releases a matching owned lease. Exit 65 means the commands file is invalid: correct it once and rerun; 70 parked, 75 retry later, other nonzero escalate.');
+        lines.push('Then run this ONE command in the foreground from the same calling shell. The controller records group drain independently of HQ terminal status and only releases a matching owned lease. Exit 20 means source-publication-refused for missing captured-source ancestry; preserve local work. Exit 65 means the commands file is invalid: correct it once and rerun; 70 parked, 75 retry later, other nonzero escalate.');
         lines.push('```bash');
         lines.push(`node ${controllerHelper} run ${closeControllerScript} --repo ${mergeRepoLiteral} --base ${mergeBaseLiteral} --pr ${mergePrLiteral} --commands "$HAM_RUN_DIR/close-commands.json"`);
         lines.push('```');

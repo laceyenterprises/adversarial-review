@@ -7819,13 +7819,33 @@ no-op. If the remote tip descends from the local candidate, the closer stops
 with `head-changed` and preserves the concurrent commits. Missing or unreadable
 proof, identity or head evidence stops with `source-publication-refused`.
 Credential refresh failures retain `git-credential-refresh-failed`.
+For divergent histories, a missing or malformed `HAM_BASE_HEAD` is unavailable
+source evidence; a valid captured SHA different from the live source is
+`head-changed`. Exact local rebase proofs require the whole replay with no
+additional commits. Conflict bindings authorize only their exact recorded
+head. A local rebase followed by remediation commits, a conflict repair followed
+by another commit, and divergent rewrites after an earlier server-side rebase
+moved the captured source are refused. Commit remediation before verify-head's
+server-side rebase, or publish the exact conflict-repair head before further edits.
 
 Transient transport failures retain bounded retries and the original
 expected-head CAS. An API timeout, malformed response, server refusal or
 unverified publication stops without Git fallback. The current run retains
 local commits, releases custody, and stops without starting another review.
+After an API mutation failure without a returned commit SHA, the publisher
+re-reads the source branch: a different valid head uses `head-changed`;
+unchanged, malformed or unreadable evidence retains `source-publication-refused`.
+The re-read does not establish that an ambiguous mutation had no effect, so
+uncertain custody remains until controller exit. A returned commit SHA is
+retained as `observedHead` even if tree verification fails.
 The standalone merge-agent controller also requires its local rebase input to
 contain the captured PR head and pins publication to that head and branch.
+Its exit 20 means `source-publication-refused` for missing ancestry proof,
+not necessarily an external head move. Before local conflict resolution,
+capture `headRefOid` and `headRefName`; validate the resolved head and publish
+with `git push --force-with-lease=refs/heads/<branch>:<captured-sha> origin <resolved-sha>:refs/heads/<branch>`
+before rerunning the controller. A rejected lease preserves local work; never
+refresh the source SHA merely to bypass that rejection.
 The server-side rebase uses its original expected-head CAS. The identity-only
 repair in Appendix E1 retains its exact-old-head lease and tree, message and
 parent checks.

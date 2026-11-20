@@ -46,6 +46,29 @@ test('file modes, symlinks and submodules fall back without calling API', async 
     assert.equal(result.route, 'git-fallback');
   }
 });
+test('API mutation refusal classifies a moved source without adopting a foreign head', async () => {
+  for (const [live, expected] of [
+    [{ commit: { sha: 'd'.repeat(40) } }, 'head-changed'],
+    [{ commit: { sha: 'a'.repeat(40) } }, 'source-publication-refused'],
+    [{ commit: { sha: 'invalid' } }, 'source-publication-refused'],
+    [null, 'source-publication-refused'],
+  ]) {
+    const calls = [];
+    const result = await publishHammerTree({ ...options, branch: 'worker/topic', expectedHead: 'a'.repeat(40),
+      api: async path => {
+        calls.push(path);
+        if (path === 'graphql') throw new Error('expectedHeadOid rejected');
+        assert.equal(path, 'repos/fixture/repo/branches/worker%2Ftopic');
+        if (!live) throw new Error('read unavailable');
+        return live;
+      } });
+    assert.deepEqual(calls, ['graphql', 'repos/fixture/repo/branches/worker%2Ftopic']);
+    assert.equal(result.route, 'refused');
+    assert.equal(result.phaseOutcome, expected);
+    assert.equal(result.observedHead, undefined);
+    assert.equal(result.mutationUncertain, true, 'head movement alone cannot settle an ambiguous mutation');
+  }
+});
 test('a timed-out post-publication git fetch under a managed token is retried as transient', async t => {
   const dir = mkdtempSync(join(tmpdir(), 'hammer-api-network-'));
   t.after(() => rmSync(dir, { recursive: true, force: true }));

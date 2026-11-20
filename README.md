@@ -2124,6 +2124,11 @@ beyond the local candidate, or `source-publication-refused` when source or
 ownership evidence is unavailable. Both preserve local work and release
 custody through the controller. Git fallback requires an explicit
 pre-mutation decision and independently verifies the exact source lease.
+For divergent histories, missing or malformed `HAM_BASE_HEAD` is a source
+refusal; a valid different source is `head-changed`. A failed API mutation
+re-reads the source branch to classify movement without claiming a foreign
+head or clearing uncertain custody. Local rewrite proofs cover only exact
+replays or the exact conflict-repair head, with no subsequent commits.
 
 Supported canonical CI-mirror checks inherit the registered group. A deadline
 stops the battery and requests bounded cleanup by the controller. Private

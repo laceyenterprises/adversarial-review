@@ -308,6 +308,7 @@ function buildLoaderSource({
   subject101Overrides = {},
   subjectRevisionRefs = {},
   followUpJobsSource = DEFAULT_FOLLOW_UP_JOBS_SOURCE,
+  tokenLedgerLookupSource = 'export async function readReviewerEvidenceInWorker() { return null; }',
   reviewerRuntimeSource = "globalThis.__watcherClaimLoopReviewerSpawns = []; export function createReviewerRuntimeAdapterForDomain() { return { spawnReviewer: async (payload) => { globalThis.__watcherClaimLoopReviewerSpawns.push(payload); return { ok: true, stdout: '', stderr: '' }; }, cancel: async () => {}, reattach: async () => ({}) }; } export function createReviewerRuntimeAdapterByName() { return createReviewerRuntimeAdapterForDomain(); } export function loadDomainConfig() { return {}; } export async function recoverReviewerRunRecords() { return { recovered: 0, failed: 0 }; }",
   followUpMergeAgentSource = "export const MERGE_AGENT_DISPATCHED_LABEL_ADD_TRANSITION = 'dispatched-label-add'; export function classifyBlockingFindings() { return { count: 0, state: 'known' }; } export async function applyMergeAgentStuckLabel() { return false; } export async function addMergeAgentDispatchedLabel() { return { added: true }; } export function buildMergeAgentDispatchJob() { return null; } export async function dispatchMergeAgentForPR() { return { dispatched: false }; } export function fetchMergeAgentCandidate() { return null; } export async function cancelMergeAgentDispatchOnMerge() { return { attempted: false, cancelled: false, labelRemoved: false }; } export function clearMergeAgentLifecycleCleanup() { return true; } export function listMergeAgentDispatches() { return []; } export function listMergeAgentLifecycleCleanups() { return []; } export async function isMergeAgentDispatchActiveForHead() { return { active: false, reason: 'fixture' }; } export async function pollFastMergeQueue() { return { processed: 0, merged: 0, blocked: 0, requeued_head_change: 0, requeued_veto: 0, skipped_still_pending: 0 }; } export function resolveFastMergePerPollCap() { return 5; } export function shouldUseReviewerTimeoutExhaustedMergeGate() { return false; } export function summarizeChecksConclusion() { return 'SUCCESS'; } export function updateMergeAgentLifecycleCleanup() { return {}; } export function upsertMergeAgentLifecycleCleanup() { return {}; } export function scanStuckMergeAgentDispatches() { return []; } export async function reconcileProactivePhantomHandoffs() { return { inspected: 0, graceStarted: 0, escalated: 0 }; } export function validateStartupMergeAgentConfig() {} export function isScopedMergeAgentRequest() { return false; }",
 } = {}) {
@@ -570,7 +571,7 @@ export async function load(url, context, nextLoad) {
     // Claim-loop cases own adapter usage fixtures, not ledger subprocesses.
     // Keep the newer worker transport inside the same offline accounting seam.
     'fixture:closer-hold-records': 'export async function evaluateCloserHoldsForPoll(args) { globalThis.__closerHoldPolls = (globalThis.__closerHoldPolls || 0) + 1; globalThis.__closerHoldSubjects = args.subjects; }',
-    'fixture:reviewer-token-ledger-lookup': 'export async function readReviewerEvidenceInWorker() { return null; }',
+    'fixture:reviewer-token-ledger-lookup': ${JSON.stringify(tokenLedgerLookupSource)},
     'fixture:remediation-ci-infrastructure': "export async function recoverInfrastructureCiStops() { return []; } export function holdRemediationForCiInfrastructure() { return null; } export async function resumeCiInfrastructureRound() { return null; } export function deferCiInfrastructureProbe() {} export function clearCiInfrastructureWait() { return null; }",
     'fixture:remediation-published-head': "export function completeWorkerPublishedHead() { return null; } export function completeLiveWorkerPublishedHead() { return null; } export function completeKnownWorkerPublish() { return null; } export function findWorkerPublishedHead() { return null; } export function hasWorkerPublishArtifacts() { return false; } export function buildRereviewResult() { return {}; }",
     // Disposable-Git publication recovery is covered in its own integration suite.
@@ -5873,5 +5874,45 @@ test('budget-deferred runtime returns its claim to pending and the next poll hon
       env: fixtureEnv({ ...installGhFixture(tmp), ADVERSARIAL_REVIEW_STATE_DIR: tmp }),
     });
     assert.equal(result.status, 0, `${result.stdout || ''}${result.stderr || ''}`);
+  } finally { rmSync(tmp, { recursive: true, force: true }); }
+});
+
+// REVIEWSETTLETOKENWAIT-01: in the rollback admission mode the poll awaits
+// reviewer settlement. A ledger miss used to cost three sequential slow reads
+// per settle; it now costs one, so one cycle carries one read per review.
+test('REVIEWSETTLETOKENWAIT-01: a slow ledger miss costs one read per settle inside an awaited poll cycle', () => {
+  const tmp = mkdtempSync(path.join(tmpdir(), 'watcher-claim-loop-'));
+  const loaderPath = path.join(tmp, 'fixture-loader.mjs');
+  const registerPath = path.join(tmp, 'fixture-register.mjs');
+  const runnerPath = path.join(tmp, 'fixture-runner.mjs');
+  const readMs = 1500;
+  try {
+    writeFileSync(loaderPath, buildLoaderSource({
+      tokenLedgerLookupSource: `export async function readReviewerEvidenceInWorker() {
+        globalThis.__ledgerReads = (globalThis.__ledgerReads || 0) + 1;
+        await new Promise(resolve => setTimeout(resolve, ${readMs}));
+        return null;
+      }`,
+      reviewerRuntimeSource: "globalThis.__watcherClaimLoopReviewerSpawns = []; export function createReviewerRuntimeAdapterForDomain() { return { spawnReviewer: async (payload) => { globalThis.__watcherClaimLoopReviewerSpawns.push(payload); return { ok: true, stdout: '', stderr: '', launchRequestId: 'lrq-fixture-' + payload.subjectContext.prNumber }; }, cancel: async () => {}, reattach: async () => ({}) }; } export function createReviewerRuntimeAdapterByName() { return createReviewerRuntimeAdapterForDomain(); } export function loadDomainConfig() { return {}; } export async function recoverReviewerRunRecords() { return { recovered: 0, failed: 0 }; }",
+    }));
+    writeFileSync(registerPath, buildRegisterSource(loaderPath));
+    writeFileSync(runnerPath, buildRunnerSource({
+      prePollSetup: 'globalThis.__pollStartedAt = Date.now();',
+      afterFirstPoll: `
+        const pollMs = Date.now() - globalThis.__pollStartedAt;
+        const spawns = globalThis.__watcherClaimLoopReviewerSpawns.length;
+        assert.ok(spawns > 0, 'fixture must settle at least one review');
+        assert.equal(globalThis.__ledgerReads, spawns, 'a ledger miss must not be re-read on the settle path');
+        // Base behaviour: three sequential reads per settle (>= ${3 * readMs} ms).
+        assert.ok(pollMs < ${3 * readMs}, 'poll cycle held for ' + pollMs + ' ms');
+      `,
+    }));
+    const result = spawnSync(process.execPath,
+      ['--no-warnings', '--import', pathToFileURL(registerPath).href, runnerPath],
+      { cwd: REPO_ROOT, encoding: 'utf8', timeout: 120000,
+        env: fixtureEnv({ ...installGhFixture(tmp), ADVERSARIAL_REVIEW_ADMISSION_SETTLEMENT_SPLIT: 'false' }) });
+    const output = `${result.stdout || ''}${result.stderr || ''}`;
+    assert.equal(result.status, 0, output);
+    assert.match(output, /step=token-ledger-lookup elapsed_ms=\d+ attempts=1 reason=worker-run-not-yet-visible deferred=false/);
   } finally { rmSync(tmp, { recursive: true, force: true }); }
 });

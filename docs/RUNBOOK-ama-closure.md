@@ -2595,6 +2595,14 @@ Pytest replaces that base on each invocation, so one test tree remains per run;
 terminal scratch removal removes it too. Concurrent pytest invocations within
 one hammer must use distinct explicit base directories inside scratch.
 
+CLOSERSCRATCHCEILING-01: the hammer environment also prepends the prompt
+directory and its parent to `GIT_CEILING_DIRECTORIES`, preserving any inherited
+entries. A cwd-relative `git` started in scratch or in the prompt directory
+therefore fails with "not a git repository" instead of discovering and
+mutating the enclosing service checkout. Repositories located outside the prompt
+directory, such as the worker's own workspace, or created inside scratch are
+discovered as before.
+
 Terminal writer and reconciliation cleanup preserve a recorded live process,
 including a process draining after cancellation. A live pending launch lease or
 a different launch's unreclaimable dispatched lease also preserves scratch.

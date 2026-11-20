@@ -1065,6 +1065,42 @@ test('SCRATCHLEAK-01: draining recorded process retains scratch until it exits',
   assert.equal(existsSync(scratchDir), false);
 });
 
+test('CLOSERSCRATCHCEILING-01: git started in closer scratch cannot discover the enclosing checkout', t => {
+  const root = fixture(t);
+  const base = { ...process.env };
+  for (const key of ['GIT_DIR', 'GIT_WORK_TREE', 'GIT_COMMON_DIR', 'GIT_INDEX_FILE']) delete base[key];
+  const init = spawnSync('git', ['init', '-q', root], { encoding: 'utf8', env: base });
+  assert.equal(init.status, 0, init.stderr);
+  const promptDir = join(root, 'data', 'follow-up-jobs', 'ama-closer-prompts');
+  const scratchDir = createHammerScratchDir(promptDir);
+  const toplevel = (cwd, env) => spawnSync('git', ['rev-parse', '--show-toplevel'], { cwd, env, encoding: 'utf8' });
+
+  // Control: the inherited environment alone walks up to the enclosing repo.
+  const control = toplevel(scratchDir, base);
+  assert.equal(control.status, 0, control.stderr);
+  assert.equal(realpathSync(control.stdout.trim()), realpathSync(root));
+
+  const env = hammerScratchEnvironment(scratchDir, base);
+  for (const cwd of [scratchDir, join(scratchDir, 'nested'), promptDir]) {
+    mkdirSync(cwd, { recursive: true });
+    const fenced = toplevel(cwd, env);
+    assert.notEqual(fenced.status, 0, `${cwd} resolved ${fenced.stdout}`);
+    assert.match(fenced.stderr, /not a git repository/);
+  }
+
+  // A repository the worker creates inside scratch is still discoverable.
+  const inner = join(scratchDir, 'inner-repo');
+  assert.equal(spawnSync('git', ['init', '-q', inner], { encoding: 'utf8', env: base }).status, 0);
+  const innerTop = toplevel(inner, env);
+  assert.equal(innerTop.status, 0, innerTop.stderr);
+  assert.equal(realpathSync(innerTop.stdout.trim()), realpathSync(inner));
+
+  // Inherited ceilings are preserved, not replaced.
+  const inherited = hammerScratchEnvironment(scratchDir, { GIT_CEILING_DIRECTORIES: '/synthetic/ceiling' });
+  assert.deepEqual(inherited.GIT_CEILING_DIRECTORIES.split(':'),
+    [resolve(promptDir), resolve(promptDir, '..'), '/synthetic/ceiling']);
+});
+
 test('SCRATCHLEAK-01: dispatch environment contains one private pytest base temp with retention one', async t => {
   const root = fixture(t);
   const scratchDir = createHammerScratchDir(join(root, 'synthetic directory with spaces'));
@@ -1080,6 +1116,7 @@ test('SCRATCHLEAK-01: dispatch environment contains one private pytest base temp
   assert.equal(result.dispatched, true, JSON.stringify(result));
   const record = JSON.parse(readFileSync(amaCloserDispatchFilePath(root, { repo: 'fixture/repo', prNumber: 42, headSha: head })));
   assert.equal(dispatchEnv.TMPDIR, record.scratchDir);
+  assert.equal(dispatchEnv.GIT_CEILING_DIRECTORIES.split(':')[0], resolve(record.scratchDir, '..'));
   assert.ok(dispatchEnv.PYTEST_ADDOPTS.includes(`--basetemp=${JSON.stringify(join(record.scratchDir, 'tmp-tests'))}`));
   assert.ok(dispatchEnv.PYTEST_ADDOPTS.endsWith('-o tmp_path_retention_count=1'));
 });

@@ -3859,9 +3859,12 @@ epochs bound automatic repair; the existing wait store pages the operator once
 with the full history. Canonical next-action and health projections retain the
 reservation as remediation custody during provisioning and publication. A
 pending reservation takes precedence over a prior epoch that reviewed the same
-base head, so the watcher cannot admit competing review work on that head. A live
-or uncertain submission retains custody; only
-complete terminal launch/retry evidence allows a successor. No replacement PR
+base head, so the watcher cannot admit competing review work on that head.
+A moved head consumes a pending reservation only with a verified exact-head
+production attestation from its launch or retry. A live or uncertain submission
+retains custody. Release at the base head requires complete terminal launch
+and retry evidence. Point-in-time absence cannot fence pre-enqueue admission.
+No replacement PR
 is opened. After both dispatch and review-service versions load, the runtime
 owner must retain an original-branch merge receipt and a 24-hour observation
 without replacement PRs used to escape budgets.

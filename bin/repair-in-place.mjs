@@ -35,7 +35,7 @@ function contextUnavailable(ready) {
 export async function main(args, {
   env = process.env, prepareDispatchReadContextImpl = prepareDispatchReadContext,
 } = {}) {
-  const [rootDir, repo, prRaw, headSha, ownerKey, conflicting, ticket, launcherPidRaw] = args;
+  const [rootDir, repo, prRaw, headSha, ownerKey, conflicting, ticket, launcherPidRaw, dispatchProjectRef] = args;
   const prNumber = Number(prRaw);
   if (!rootDir || !repo?.includes('/') || !(prNumber > 0) || !ownerKey
     || !/^[0-9a-f]{40}$/i.test(headSha)) throw new Error('invalid repair request');
@@ -80,18 +80,21 @@ export async function main(args, {
       if (owned !== false) return { ok: false, reason: 'closer-owned-or-unknown' };
     }
     const pending = facts.epochs.find(epoch => !epoch.reviewHead && !epoch.terminalAt);
-    if (pending) {
+    const atReservationHead = typeof pending?.baseHead === 'string'
+      && pending.baseHead.toLowerCase() === headSha.toLowerCase();
+    if (atReservationHead) {
       const ready = await readContext();
       if (!ready.ok) return contextUnavailable(ready);
     }
-    const terminalOwner = await observeRepairOwner({ rootDir, epoch: pending, readImpl });
+    const terminalOwner = await observeRepairOwner({ rootDir, repo,
+      epoch: atReservationHead ? pending : null, readImpl });
     if (claim.claimedAt) {
       const current = checkClaim();
       if (!current.ok) return current;
       if (current.claimedAt !== claim.claimedAt) return { ok: false, reason: 'remediation-ownership-unknown' };
     }
     result = reserveRepairEpoch({ rootDir, repo, prNumber, headSha, ownerKey,
-      cause: facts.cause, terminalOwner });
+      cause: facts.cause, dispatchProjectRef, terminalOwner, ownerSnapshot: pending });
   } finally { release(); }
   if (result.reason === 'repair-epoch-cap') await pageRepairCap({ rootDir, repo, prNumber, epochs: result.epochs });
   return { ...result, refundedSpend: facts.refundedSpend };

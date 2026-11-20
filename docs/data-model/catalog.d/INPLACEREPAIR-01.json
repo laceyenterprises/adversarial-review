@@ -17,7 +17,10 @@
         "src/ama/closure-next-action.mjs",
         "src/ttm-owner.mjs"
       ],
-      "owner": "watcher and PR repair dispatcher"
+      "owner": "watcher and PR repair dispatcher",
+      "optionalFields": [
+        "repairEpochs[].dispatchProjectRef: immutable canonical dispatch project for the existing paired repository read, when supplied at reservation"
+      ]
     }
   ]
 }

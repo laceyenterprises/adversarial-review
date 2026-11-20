@@ -1,66 +1,97 @@
 import { randomUUID } from 'node:crypto';
+import { isDeepStrictEqual } from 'node:util';
 import { mutateRepairEpochs, readHammerRetryCapLedger, evaluateHammerRetryCap } from './ama/hammer-retry-cap.mjs';
 import { observeClosureWait } from './ama/closure-wait.mjs';
 import { readDispatchLaunches, launchProbe } from './dispatch-read-client.mjs';
 import { launchRequestOwned } from './ama/launch-request-status.mjs';
+import { readHeadAttestationChainForPr, resolveDaemonWorkerIdentityFromHeadAttestation } from './daemon-worker-identity.mjs';
 
 export const REPAIR_EPOCH_CAP = 2;
-export const REPAIR_PROVISION_DEADLINE_MS = 10 * 60_000;
 export const REPAIR_OWNER_OBSERVE_MS = 30_000;
 const SHA = /^[a-f0-9]{40}$/i;
-const sameHead = (left, right) => typeof left === 'string' && typeof right === 'string'
+const REPO = /^[^/\s]+\/[^/\s]+$/;
+const validProject = value => typeof value === 'string' && value.length > 0
+  && value.length <= 256 && !/\s/.test(value);
+const sameIdentity = (left, right) => typeof left === 'string' && typeof right === 'string'
   && left.toLowerCase() === right.toLowerCase();
+const readRepairPublisher = args => resolveDaemonWorkerIdentityFromHeadAttestation({
+  ...args, readHeadAttestationChainForPrImpl: options => readHeadAttestationChainForPr({
+    ...options, retryDelaysMs: [], timeoutMs: 8000,
+  }),
+});
 const EXHAUSTION = new Set(['closure-retry-exhausted', 'closure-lifetime-exhausted',
   'retry-exhausted', 'lifetime-exhausted', 'closer-self-error-budget-exhausted',
   'budget-exhausted-closure', 'system-budget-exhausted-closure',
   'remediation-round-budget-exhausted', 'review-cycle-cap-paused']);
 
-export async function observeRepairOwner({ rootDir, epoch, now = Date.now(), readImpl = readDispatchLaunches }) {
+export async function observeRepairOwner({ rootDir, repo, epoch, readImpl = readDispatchLaunches }) {
   if (!epoch || epoch.reviewHead || epoch.terminalAt) return epoch;
-  // Absence proofs require an exact-key selector without traversal options.
-  const result = await readImpl({ idempotency_key: epoch.ownerKey },
-    { rootDir, timeoutMs: 8000 });
-  if (result.ok && result.roots?.length === 0 && result.absenceProof
-    && now - Date.parse(epoch.reservedAt) >= REPAIR_PROVISION_DEADLINE_MS) {
-    return { ...epoch, ownerState: 'terminal', ownerLaunch: null };
+  const unknown = { ...epoch, ownerState: 'unknown' };
+  if (typeof repo !== 'string' || !REPO.test(repo) || repo !== repo.trim()
+    || !SHA.test(epoch.baseHead) || typeof epoch.ownerKey !== 'string' || !epoch.ownerKey) return unknown;
+  const selector = { idempotency_key: epoch.ownerKey };
+  if (Object.hasOwn(epoch, 'dispatchProjectRef')) {
+    if (!validProject(epoch.dispatchProjectRef)) return unknown;
+    Object.assign(selector, { project_ref: epoch.dispatchProjectRef, repo });
   }
-  if (!result.ok || result.roots?.length !== 1) return { ...epoch, ownerState: 'unknown' };
-  const chain = await readImpl({ launch_request_ids: [result.roots[0]], include_retry_chain: true },
-    { rootDir, timeoutMs: 8000 });
-  const probe = launchProbe(chain, result.roots[0], true);
+  const readArgs = { rootDir, timeoutMs: 8000 };
+  const result = await readImpl(selector, readArgs);
+  // Pre-enqueue reservation and enqueue run in separate critical sections.
+  // Even canonical point-in-time absence cannot fence a delayed submitter.
+  if (!result.ok || result.roots?.length !== 1) return unknown;
+  const [ownerLaunch] = result.roots;
+  if (epoch.ownerLaunch && epoch.ownerLaunch !== ownerLaunch) return unknown;
+  const matchesOwner = row => row?.launch_request_id === ownerLaunch
+    && row.idempotency_key === epoch.ownerKey && row.identity_ambiguous === false
+    && sameIdentity(row.target_repo, repo) && sameIdentity(row.head_sha, epoch.baseHead);
+  if (!result.rows?.some(matchesOwner)) return unknown;
+  const chain = await readImpl({ launch_request_ids: [ownerLaunch], include_retry_chain: true }, readArgs);
+  const probe = launchProbe(chain, ownerLaunch, true);
+  if (chain.roots?.length !== 1 || chain.roots[0] !== ownerLaunch || !matchesOwner(probe.row)) {
+    return { ...unknown, ownerLaunch };
+  }
   const owned = launchRequestOwned(probe);
   return { ...epoch, ownerState: owned === false ? 'terminal' : owned ? 'live' : 'unknown',
-    ownerLaunch: result.roots[0] };
+    ownerLaunch, retryLaunches: probe.retryChain.map(row => row.launch_request_id) };
 }
 
-// Reconcile before watcher admission. Unknown evidence retains custody; only
-// complete terminal retry evidence or proven absence after provisioning retires.
+// At the base head, only a positively identified terminal launch and its
+// complete retry chain can retire custody. A moved head needs publication proof.
 export async function reconcileRepairOwner({ rootDir, repo, prNumber, headSha, now = Date.now(),
-  readImpl = readDispatchLaunches, includeReviewedHead = false }) {
+  readImpl = readDispatchLaunches, includeReviewedHead = false,
+  readPublisher = readRepairPublisher }) {
   const ledger = readHammerRetryCapLedger(rootDir, { repo, prNumber });
   if (ledger?.__corrupt) throw new Error('repair ledger unreadable');
   const epoch = ledger?.repairEpochs?.findLast(entry => !entry.reviewHead && !entry.terminalAt);
   // The watcher can resolve historical admission from this same snapshot.
   if (!epoch) return includeReviewedHead
-    ? ledger?.repairEpochs?.find(entry => sameHead(entry.reviewHead, headSha)) || null : null;
-  // Publication may finish before this poll observes the new head. Admission
-  // must bind that head before terminal worker observation can retire custody.
-  if (headSha && !sameHead(epoch.baseHead, headSha)) return epoch;
+    ? ledger?.repairEpochs?.find(entry => sameIdentity(entry.reviewHead, headSha)) || null : null;
+  const atBase = sameIdentity(epoch.baseHead, headSha);
   const age = now - Date.parse(epoch.ownerObservedAt);
   if (age >= 0 && age < REPAIR_OWNER_OBSERVE_MS) return epoch;
-  const observed = await observeRepairOwner({ rootDir, epoch, now, readImpl });
+  const observed = await observeRepairOwner({ rootDir, repo, epoch, readImpl });
+  let publicationHead;
+  if (!atBase && typeof headSha === 'string' && SHA.test(headSha)
+    && observed.ownerState !== 'unknown' && observed.retryLaunches) {
+    const publisher = await readPublisher({ repo, prNumber, currentHeadSha: headSha.toLowerCase() });
+    if (publisher?.ok && sameIdentity(publisher.rowHeadSha, headSha)
+      && [observed.ownerLaunch, ...observed.retryLaunches].includes(publisher.launchRequestId)) {
+      publicationHead = headSha;
+    }
+  }
   const reconciled = mutateRepairEpochs(rootDir, { repo, prNumber }, ledger => {
-    const current = ledger.repairEpochs?.find(entry => entry.id === epoch.id && entry.ownerKey === epoch.ownerKey);
-    if (!current || current.reviewHead || current.terminalAt) return null;
+    const current = ledger.repairEpochs?.findLast(entry => !entry.reviewHead && !entry.terminalAt);
+    if (!current) return null;
+    if (!isDeepStrictEqual(current, epoch)) return current;
     current.ownerObservedAt = new Date(now).toISOString();
     current.ownerState = observed.ownerState;
     current.ownerLaunch = observed.ownerLaunch || null;
-    if (observed.ownerState === 'terminal') {
+    if (atBase && observed.ownerState === 'terminal') {
       current.terminalAt = current.ownerObservedAt;
       current.terminalLaunch = current.ownerLaunch;
       return null;
     }
-    return current;
+    return publicationHead ? { ...current, publicationHead } : current;
   });
   return reconciled || (includeReviewedHead ? repairEpochForHead(rootDir, { repo, prNumber }, headSha) : null);
 }
@@ -85,19 +116,23 @@ export function repairCause({ ledger, row, cycleExhausted = false, conflicting =
 // ownerKey is the dispatch idempotency key. An uncertain submission keeps its
 // reservation; another request cannot mint a second writer on the same head.
 export function reserveRepairEpoch({ rootDir, repo, prNumber, headSha, ownerKey, cause,
-  now = new Date().toISOString(), terminalOwner = null }) {
-  if (!SHA.test(headSha) || !ownerKey || !cause) throw new Error('invalid repair identity');
+  now = new Date().toISOString(), dispatchProjectRef, terminalOwner = null, ownerSnapshot = null }) {
+  if (!SHA.test(headSha) || !ownerKey || !cause
+    || (dispatchProjectRef !== undefined && !validProject(dispatchProjectRef))) throw new Error('invalid repair identity');
   return mutateRepairEpochs(rootDir, { repo, prNumber }, ledger => {
     const epochs = ledger.repairEpochs ||= [];
     const replay = epochs.find(epoch => epoch.ownerKey === ownerKey);
-    const ended = terminalOwner?.ownerState === 'terminal'
+    if (replay?.dispatchProjectRef !== undefined && dispatchProjectRef !== undefined
+      && replay.dispatchProjectRef !== dispatchProjectRef) return { ok: false, reason: 'repair-project-mismatch' };
+    const ended = terminalOwner?.ownerState === 'terminal' && terminalOwner.ownerLaunch
+      && sameIdentity(headSha, terminalOwner.baseHead)
       && epochs.find(epoch => epoch.id === terminalOwner.id && epoch.ownerKey === terminalOwner.ownerKey
-        && !epoch.reviewHead && !epoch.terminalAt);
+        && !epoch.reviewHead && !epoch.terminalAt && isDeepStrictEqual(epoch, ownerSnapshot));
     if (ended) {
       ended.terminalAt = now;
       ended.terminalLaunch = terminalOwner.ownerLaunch;
     }
-    if (replay && !sameHead(replay.baseHead, headSha)) return { ok: false, reason: 'repair-head-mismatch' };
+    if (replay && !sameIdentity(replay.baseHead, headSha)) return { ok: false, reason: 'repair-head-mismatch' };
     if (replay) return replay.terminalAt
       ? { ok: false, reason: 'repair-worker-terminal', epoch: replay }
       : { ok: true, epoch: replay, replayed: true };
@@ -106,6 +141,7 @@ export function reserveRepairEpoch({ rootDir, repo, prNumber, headSha, ownerKey,
     if (epochs.length >= REPAIR_EPOCH_CAP) return { ok: false, reason: 'repair-epoch-cap', epochs };
     const epoch = { id: `repair-${randomUUID()}`, ownerKey, baseHead: headSha, cause,
       reservedAt: now, reviewHead: null,
+      ...(dispatchProjectRef === undefined ? {} : { dispatchProjectRef }),
       priorSpend: { series: ledger.attemptCount || 0, head: ledger.targetAttemptCount || 0,
         lifetime: ledger.lifetimeAttemptCount || 0 },
       refundedSpend: ledger.selfErrorRefunds || {} };
@@ -135,8 +171,8 @@ export function repairEpochObservation(rootDir, identity) {
 export function bindRepairHead({ rootDir, repo, prNumber, headSha, epochId, now = new Date().toISOString() }) {
   return mutateRepairEpochs(rootDir, { repo, prNumber }, ledger => {
     const epoch = ledger.repairEpochs?.find(entry => entry.id === epochId);
-    if (!epoch || epoch.terminalAt || sameHead(epoch.baseHead, headSha) || !SHA.test(headSha)
-      || (epoch.reviewHead && !sameHead(epoch.reviewHead, headSha))) return null;
+    if (!epoch || epoch.terminalAt || sameIdentity(epoch.baseHead, headSha) || !SHA.test(headSha)
+      || (epoch.reviewHead && !sameIdentity(epoch.reviewHead, headSha))) return null;
     if (!epoch.reviewHead) {
       epoch.reviewHead = headSha;
       epoch.boundAt = now;
@@ -158,7 +194,7 @@ export function bindRepairHead({ rootDir, repo, prNumber, headSha, epochId, now 
 export function repairEpochForHead(rootDir, identity, headSha) {
   const ledger = readHammerRetryCapLedger(rootDir, identity);
   if (ledger?.__corrupt) throw new Error('repair ledger unreadable');
-  return ledger?.repairEpochs?.find(epoch => sameHead(epoch.reviewHead, headSha)) || null;
+  return ledger?.repairEpochs?.find(epoch => sameIdentity(epoch.reviewHead, headSha)) || null;
 }
 
 export async function pageRepairCap({ rootDir, repo, prNumber, epochs, observeImpl = observeClosureWait }) {

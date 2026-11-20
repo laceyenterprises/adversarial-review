@@ -989,12 +989,16 @@ reservation as remediation custody during provisioning and publication. A
 pending reservation takes precedence over a prior epoch that reviewed the same
 base head, so the watcher cannot admit competing review work on that head.
 Watcher custody, verdict admission revision references and rescue head matching
-compare hexadecimal commit SHAs case-insensitively, preserving stored spelling. A live
-or uncertain submission retains custody. Before admission the watcher observes
-pending repair ownership at most once per 30 seconds. Complete terminal
-launch/retry evidence retires the reservation under the ledger flock; an exact-key
-absence proof also retires an unlaunched reservation after ten minutes from
-`reservedAt`. Unreadable or unproven absence retains custody. Retirement removes
+compare hexadecimal commit SHAs case-insensitively, preserving stored spelling.
+A live or uncertain submission retains custody. Before admission the watcher
+observes pending repair ownership at most once per 30 seconds. A moved head
+requires an exact-head verified produced attestation from the reservation launch
+or its retry before it can consume the reservation. Complete terminal
+launch/retry evidence at the base head retires the reservation under the ledger
+flock. Point-in-time absence retains custody because the submitter may still
+enqueue. A reservation with a canonical project supplied at creation uses the
+existing project/repository paired grant for its exact-key read. Older
+reservations keep their unscoped lookup. Retirement removes
 repair ownership from next-action and TTM projections, allowing the existing
 ownerless clock and SEV1 page. Corrupt ledgers and busy refund writers defer only
 the affected PR. No replacement PR

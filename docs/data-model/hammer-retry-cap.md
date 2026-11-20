@@ -4,8 +4,11 @@
 Each reservation records `id`, dispatch idempotency `ownerKey`, `baseHead`,
 exhaustion `cause`, `reservedAt`, `priorSpend` (series/head/lifetime counters),
 `refundedSpend` and nullable `reviewHead`. It shares the existing retry-ledger
-flock and closer intent lock with dispatch. A changed builder head binds once,
-recording `boundAt` and starting new series/head/lifetime episode counters.
+flock and closer intent lock with dispatch. When the dispatch caller supplies a
+canonical `dispatchProjectRef`, the reservation records it for its lifetime.
+An existing reservation keeps its original scope on replay. A changed builder
+head with a verified publication by the reservation launch or its retry binds
+once, recording `boundAt` and starting new series/head/lifetime episode counters.
 Confirmed `dispatchCharges` remain intact. The review-request reason
 `system-repair-epoch:<id>:<head>` records admission; request/claim CAS and the
 delivered-pass journal prevent duplicate review. Live/unknown reservations
@@ -15,11 +18,14 @@ the existing [pre-spawn claim](follow-up-jobs.md#live-pr-owner-admission-snapsho
 Before admission, the watcher observes a pending
 reservation at most once per 30 seconds, recording `ownerObservedAt`,
 `ownerState` (`live`, `unknown`, or `terminal`) and nullable `ownerLaunch`.
-Complete terminal launch/retry evidence retires custody with `terminalAt`
-and `terminalLaunch`. A successful exact-key absence proof can also retire
-an unlaunched reservation ten minutes after `reservedAt`. Early absence,
-unproven absence and unreadable evidence retain custody. Retirement compares
-the epoch ID/key under the ledger flock and cannot retire a bound head.
+Complete terminal launch/retry evidence at the reservation base head retires
+custody with `terminalAt` and `terminalLaunch`. The keyed row and retry root must
+agree with the reservation key, repository and base head. A scoped keyed read
+sends the stored project and the ledger repository to the existing producer.
+Legacy reservations use the unscoped key. Canonical absence, filtered absence
+and unreadable evidence retain custody. A delayed pre-enqueue submitter can
+still launch after a point-in-time absence read. Retirement compares the full
+observed reservation under the ledger flock and cannot retire a bound head.
 Retired reservations no longer appear in next-action or TTM ownership, allowing
 the existing ownerless clock/page and bounded successor.
 The existing closure-wait store deduplicates the final cap page across heads.

@@ -20,18 +20,22 @@ async function manifestBytes(get, repo, path, ref) {
 export function coverageDeclarations(bytes) {
   const manifest = JSON.parse(bytes);
   let entries;
+  const invalidEntries = new Set();
   const current = Object.hasOwn(manifest, 'checks');
   if (current) {
     if (Object.hasOwn(manifest, 'path-glob') || !manifest.checks
       || typeof manifest.checks !== 'object' || Array.isArray(manifest.checks)) throw new Error('Invalid mirror registry');
     entries = Object.entries(manifest.checks).flatMap(([id, entry]) => {
-      if (!entry || typeof entry !== 'object' || !Array.isArray(entry.runs)
-        || !entry.runs.length || entry.runs.some(lane => !['ci', 'pre-push'].includes(lane))) throw new Error('Invalid mirror check runs');
-      if (!entry.runs.includes('pre-push')) return [];
-      const paths = entry.paths ?? entry.suite?.paths;
-      if (!Array.isArray(paths) || !paths.every(path => typeof path === 'string')
-        || (entry.path_order && (!Array.isArray(entry.path_order) || entry.path_order.length !== paths.length))) throw new Error('Invalid mirror paths');
-      return [{ name: id, ...entry }];
+      if (!entry || typeof entry !== 'object' || Array.isArray(entry)) return [];
+      if (Array.isArray(entry.runs) && !entry.runs.includes('pre-push')) return [];
+      const paths = entry.paths === undefined ? (entry.suite?.paths ?? []) : entry.paths;
+      const row = { name: id, ...entry };
+      if (!Array.isArray(entry.runs) || !entry.runs.every(lane => typeof lane === 'string')
+        || !Array.isArray(paths) || !paths.every(path => typeof path === 'string')
+        || (entry.path_order && (!Array.isArray(entry.path_order) || entry.path_order.length !== paths.length))) {
+        invalidEntries.add(row);
+      }
+      return [row];
     });
   } else {
     const globs = manifest['path-glob'];
@@ -45,15 +49,19 @@ export function coverageDeclarations(bytes) {
   const checks = new Map();
   for (const entry of entries) {
     const { name, command, local_advisory_arg: localAdvisory } = entry;
-    if (typeof name !== 'string' || typeof command !== 'string') throw new Error('Invalid mirror check');
+    if (typeof name !== 'string' || typeof command !== 'string') {
+      if (current) continue;
+      throw new Error('Invalid mirror check');
+    }
     const key = JSON.stringify([name, command]);
     const local = ['local_only', 'local-only'].some(marker => Object.hasOwn(entry, marker) && entry[marker] !== false)
       || localAdvisory != null || localPaths.some(path => path && command.includes(path))
       || (current && (entry.advisory === true || entry['ratchet-placement']?.scope === 'local-only'));
-    const jobs = current ? (entry.runs.includes('ci') && entry.ci
+    const jobs = current ? (!invalidEntries.has(entry) && entry.runs.includes('ci') && entry.ci
       ? [{ job: entry.ci.job, step: entry.ci.name }] : undefined) : entry.ci_jobs;
     let mapping;
-    if (local) mapping = { reason: 'local-only' };
+    if (invalidEntries.has(entry)) mapping = { reason: 'invalid-ci-mapping' };
+    else if (local) mapping = { reason: 'local-only' };
     else if (jobs === undefined) mapping = { reason: 'no-ci-mapping' };
     else if (Array.isArray(jobs) && jobs.length && jobs.every(job => current
       ? [job.job, job.step].every(value => typeof value === 'string' && value && value.trim() === value)
@@ -83,6 +91,7 @@ function jobEvidence(repo, head, mapping, rows, details = new Map()) {
   if (typeof mapping !== 'string') {
     const detail = details.get(link[3]);
     if (!detail) return { reason: 'ci-step-read-failed' };
+    if (detail.reason === 'ci-budget-deferred') return { reason: detail.reason };
     if (String(detail.id) !== link[3] || String(detail.run_id) !== link[2]
       || detail.head_sha !== head || detail.name !== job || detail.status !== 'completed'
       || detail.conclusion !== 'success') return { reason: 'ci-step-job-mismatch' };
@@ -90,7 +99,8 @@ function jobEvidence(repo, head, mapping, rows, details = new Map()) {
     if (steps.length !== 1) return { reason: steps.length ? 'ci-step-ambiguous' : 'ci-step-missing' };
     if (steps[0].status !== 'completed' || steps[0].conclusion !== 'success') return { reason: 'ci-step-not-successful' };
   }
-  return { name: job, runId: link[2] };
+  return { name: job, runId: link[2],
+    ...(typeof mapping !== 'string' ? { jobId: link[3], step: mapping.step } : {}) };
 }
 
 export async function hammerValidationCoverage({ root, repo, prNumber, head, enabled, env }) {
@@ -140,7 +150,7 @@ export async function hammerValidationCoverage({ root, repo, prNumber, head, ena
           for await (const page of pages()) checks.push(...page);
           // Current registries map individual workflow steps, which may be
           // skipped inside an otherwise green job. A job alone is insufficient.
-          const names = new Set([...manifests.values()].flatMap(manifest =>
+          const names = new Set([...manifests.values()].filter(manifest => !manifest.reason).flatMap(manifest =>
             [...manifest.checks.values()].flatMap(mapping => (mapping.jobs || [])
               .filter(job => typeof job !== 'string').map(job => job.job))));
           const ids = new Set();
@@ -152,7 +162,16 @@ export async function hammerValidationCoverage({ root, repo, prNumber, head, ena
           // Existing read deadline and quota reserve govern these extra reads.
           for (const id of ids) {
             try { jobDetails.set(id, await get(`repos/${repo}/actions/jobs/${id}`)); }
-            catch { /* This step remains local when its evidence is unavailable. */ }
+            catch (error) {
+              if (error?.budgetDeferred) {
+                for (const unread of ids) {
+                  if (!jobDetails.has(unread)) jobDetails.set(unread, { reason: 'ci-budget-deferred' });
+                }
+                break;
+              }
+              // This step remains local when its evidence is unavailable.
+              jobDetails.set(id, null);
+            }
           }
           return checks;
         }

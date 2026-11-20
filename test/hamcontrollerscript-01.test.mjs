@@ -218,7 +218,7 @@ test('a local commit the PR lacks is published before verify-head; revalidation 
   assert.ok(firstVerify < yielded && yielded < validated && validated < secondVerify, events.join('\n'));
 });
 
-function mirrorFixture(t, { entries, runs, manifestFailure, checkFailure, partialChecks, localFailure, remoteDrift, baseDrift, baseFailure, subcontext, duplicateGlobs, currentRegistry, jobDetails } = {}) {
+function mirrorFixture(t, { entries, runs, manifestFailure, checkFailure, partialChecks, localFailure, remoteDrift, baseDrift, baseFailure, subcontext, duplicateGlobs, currentRegistry, jobDetails, deferJobReadsAfter } = {}) {
   const f = hammerFixture(t);
   const dir = join(f.checkout, 'scripts/ci-mirror');
   const path = 'scripts/ci-mirror/checks.json';
@@ -289,6 +289,18 @@ if (action !== 'api' || !response) process.exit(1);
 if (args.includes('If-None-Match: "fixture"')) {
   console.log('HTTP/2.0 304 Not Modified\\n');
   process.exit(1);
+}
+if (${Number.isInteger(deferJobReadsAfter)} && (
+  (${deferJobReadsAfter ?? -1} === 0 && path.includes('/check-runs?')) ||
+  path.endsWith('/actions/jobs/${deferJobReadsAfter ?? -1}')
+)) {
+  const { createHash } = require('node:crypto');
+  const { writeFileSync } = require('node:fs');
+  const credential = 'token-' + createHash('sha256').update('synthetic-offline-token').digest('hex').slice(0, 24);
+  writeFileSync(process.env.GHO_RATE_LIMIT_SHARED_STATE_PATH, JSON.stringify({
+    [credential + '/core']: { credential, resource: 'core', remaining: 100, limit: 5000,
+      resetAt: new Date(Date.now() + 60000).toISOString(), observedAt: Date.now() },
+  }));
 }
 console.log('HTTP/2.0 200 OK\\nETag: "fixture"\\n\\n' + JSON.stringify(response));
 `, { mode: 0o755 });
@@ -752,6 +764,34 @@ test('current registry coverage requires successful exact workflow step evidence
     ['ci-covered', 'exact-head-ci-success'], ['run', 'ci-step-not-successful'], ['run', 'local-only'],
   ]);
   assert.equal(f.calls().filter(call => call[1]?.includes('/actions/jobs/')).length, 1);
+  assert.deepEqual(checks[0].jobs, [{ name: 'build', runId: '123', jobId: '1', step: 'Run covered' }]);
+});
+
+test('current registry job-detail budget deferral stops reads and preserves completed evidence', async t => {
+  for (const deferJobReadsAfter of [0, 1]) {
+    const f = mirrorFixture(t, { currentRegistry: true, deferJobReadsAfter,
+      entries: ['first', 'second', 'third'].map(name => [name, { ci: { job: name, name: `Run ${name}` } }]),
+      runs: [['first'], ['second'], ['third']],
+    });
+    const result = await f.run();
+    assert.equal(result.status, 0, result.stderr);
+    const checks = result.closeResult.localValidation[0].checks;
+    assert.deepEqual(checks.map(row => row.reason),
+      ['first', 'second', 'third'].map((_, index) => index < deferJobReadsAfter ? 'exact-head-ci-success' : 'ci-budget-deferred'));
+    assert.deepEqual(f.local(), ['first', 'second', 'third'].slice(deferJobReadsAfter).map(name => `fixture-command ${name}`));
+    assert.equal(f.calls().filter(call => call[1]?.includes('/actions/jobs/')).length, deferJobReadsAfter);
+  }
+});
+
+test('unverified current registries do not fetch unused job details beside verified legacy manifests', async t => {
+  const f = mirrorFixture(t, { currentRegistry: true, remoteDrift: true, subcontext: true,
+    entries: [['covered', { ci: { job: 'build', name: 'Run covered' } }]], runs: [['build']],
+  });
+  const result = await f.run();
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(result.closeResult.localValidation[0].checks[0].reason, 'manifest-head-mismatch');
+  assert.deepEqual(f.local(), ['fixture-command covered', 'fixture-command sub-local']);
+  assert.equal(f.calls().filter(call => call[1]?.includes('/actions/jobs/')).length, 0);
 });
 
 test('current registry unknown and mismatched workflow steps retain local validation', async t => {

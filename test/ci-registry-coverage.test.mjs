@@ -25,10 +25,26 @@ test('current local-only, advisory and unmapped contributions retain local work'
 });
 
 test('malformed or mixed registry schemas cannot lend coverage', () => {
-  for (const manifest of [{ checks: [], 'path-glob': {} }, { checks: {} , 'path-glob': {} },
-    { checks: { id: { ...entry, paths: 'src/**' } } }, { checks: { id: { ...entry, runs: ['unknown'] } } },
-    { checks: { id: { ...entry, path_order: [] } } }]) assert.throws(() => parse(manifest));
+  for (const manifest of [{ checks: [], 'path-glob': {} }, { checks: {} , 'path-glob': {} }]) {
+    assert.throws(() => parse(manifest));
+  }
   assert.deepEqual(mapping(parse({ checks: { id: { ...entry, ci: { job: 'build' } } } })), { reason: 'invalid-ci-mapping' });
+});
+
+test('unrelated lanes and malformed entries do not collapse valid registry mappings', () => {
+  for (const fields of [{ paths: 'src/**' }, { paths: null }, { path_order: [] }, { runs: null },
+    { runs: { includes: 'invalid' } }, { runs: ['pre-push', 42] }]) {
+    const checks = parse({ checks: { good: entry, bad: { ...entry, name: 'bad', ...fields }, absent: null } });
+    assert.deepEqual(checks.get(JSON.stringify(['check', entry.command])), { jobs: [{ job: 'build', step: 'Run check' }] });
+    assert.deepEqual(checks.get(JSON.stringify(['bad', entry.command])), { reason: 'invalid-ci-mapping' });
+  }
+  const { paths, ...withoutPaths } = entry;
+  assert.ok(paths);
+  for (const fields of [{ runs: ['ci', 'pre-push', 'nightly'] }, withoutPaths]) {
+    assert.deepEqual(mapping(parse({ checks: { id: { ...withoutPaths, ...fields } } })),
+      { jobs: [{ job: 'build', step: 'Run check' }] });
+  }
+  assert.equal(parse({ checks: { unrelated: { runs: ['nightly'], paths: 'invalid' } } }).size, 0);
 });
 
 test('legacy explicit mapping and conflicting duplicate names stay conservative', () => {

@@ -1,3 +1,4 @@
+import { withTransientGitRetries } from './reviewer-git-retries.mjs';
 import { execFile } from 'node:child_process';
 import { realpathSync } from 'node:fs';
 import { isAbsolute, join } from 'node:path';
@@ -39,10 +40,10 @@ export async function resolveRepoCheckoutDir({ repo, rootDir, env = process.env,
   return null;
 }
 
-export async function materializeReviewerHead(checkoutDir, headSha, execFileImpl = execFileAsync) {
-  if (!checkoutDir || !/^[a-f0-9]{40}$/i.test(headSha || '')) return false;
+export async function materializeReviewerHead(checkoutDir, headSha, execFileImpl = execFileAsync, env = process.env, log = console) {
+  if (!checkoutDir || !/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/i.test(headSha || '')) return false;
   const git = (...args) => execFileImpl('git', ['--no-replace-objects', ...args], {
-    cwd: checkoutDir, env: reviewerGitEnv(), timeout: 30_000,
+    cwd: checkoutDir, env: reviewerGitEnv(env), timeout: 30_000,
   });
   const hasCommit = async () => {
     try {
@@ -52,7 +53,13 @@ export async function materializeReviewerHead(checkoutDir, headSha, execFileImpl
   };
   if (await hasCommit()) return true;
   try {
-    await git('fetch', '--no-tags', '--no-write-fetch-head', '--no-recurse-submodules', '--refmap=', 'origin', headSha);
-  } catch { return false; }
+    await withTransientGitRetries(
+      () => git('fetch', '--no-auto-maintenance', '--no-tags', '--no-write-fetch-head', '--no-recurse-submodules', '--refmap=', 'origin', headSha),
+      'git fetch reviewer head',
+    );
+  } catch {
+    log.warn('[reviewer] diff-only cause=head-fetch-failed (bounded retries exhausted or permanent failure)');
+    return false;
+  }
   return hasCommit();
 }

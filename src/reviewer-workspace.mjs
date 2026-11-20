@@ -22,6 +22,7 @@ import {
 import { isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { homedir, tmpdir } from 'node:os';
 import { promisify } from 'node:util';
+import { withTransientGitRetries } from './reviewer-git-retries.mjs';
 import { materializeReviewerHead, reviewerGitEnv } from './reviewer-repo-checkout.mjs';
 
 const execFileAsync = promisify(execFile);
@@ -68,31 +69,6 @@ const AUDIT_HASH_MAX_BYTES = 8 * 1024 * 1024;
 // reviewer.mjs handles one PR per process. A multi-PR process must pass this
 // context explicitly per spawn instead of sharing this mutable slot.
 let activeAuditContext = null;
-const GIT_TRANSIENT_MAX_ATTEMPTS = 3;
-const GIT_TRANSIENT_BASE_DELAY_MS = 100;
-const TRANSIENT_GIT_ERROR_CODES = new Set([
-  'EAGAIN',
-  'EBUSY',
-  'ECONNABORTED',
-  'ECONNRESET',
-  'EIO',
-  'EMFILE',
-  'ENFILE',
-  'ETIMEDOUT',
-]);
-const TRANSIENT_GIT_ERROR_PATTERNS = [
-  /\bEIO\b/i,
-  /Input\/output error/i,
-  /Operation timed out/i,
-  /Resource temporarily unavailable/i,
-  /Connection reset/i,
-  /early EOF/i,
-  /RPC failed/i,
-  /remote end hung up unexpectedly/i,
-  /fatal: unable to access/i,
-  /(?:could not|unable to) (?:create|lock).*\.lock/i,
-  /index\.lock/i,
-];
 
 class ReviewerSnapshotBaseError extends Error {
   constructor(message, {
@@ -162,39 +138,6 @@ function resolveReviewerWorkspaceStateDir({
     throw new Error('reviewer workspace state must be outside the source checkout');
   }
   return resolve(selected);
-}
-
-function gitErrorText(err) {
-  return [
-    err?.code,
-    err?.message,
-    err?.stderr,
-    err?.stdout,
-  ].filter(Boolean).map(String).join('\n');
-}
-
-function isTransientGitError(err) {
-  if (TRANSIENT_GIT_ERROR_CODES.has(String(err?.code || ''))) return true;
-  const text = gitErrorText(err);
-  return TRANSIENT_GIT_ERROR_PATTERNS.some((pattern) => pattern.test(text));
-}
-
-async function sleep(ms) {
-  await new Promise((resolvePromise) => { setTimeout(resolvePromise, ms); });
-}
-
-async function withTransientGitRetries(operation, label) {
-  let lastErr = null;
-  for (let attempt = 1; attempt <= GIT_TRANSIENT_MAX_ATTEMPTS; attempt += 1) {
-    try {
-      return await operation();
-    } catch (err) {
-      lastErr = err;
-      if (attempt >= GIT_TRANSIENT_MAX_ATTEMPTS || !isTransientGitError(err)) throw err;
-      await sleep(GIT_TRANSIENT_BASE_DELAY_MS * attempt);
-    }
-  }
-  throw new Error(`${label} failed after ${GIT_TRANSIENT_MAX_ATTEMPTS} attempts`, { cause: lastErr });
 }
 
 async function resolveCheckoutHead(checkoutDir, execFileImpl = execFileAsync) {
@@ -507,23 +450,30 @@ async function prepareReviewerSnapshot({
 
 export async function prepareReviewerWorkspace({
   repo, checkoutDir, serviceCheckoutDir, stateDir, headSha, execFileImpl,
-  env = process.env, homeDir = homedir(), pinSnapshot = true,
+  env = process.env, homeDir = homedir(), pinSnapshot = true, log = console,
 }) {
-  if (await materializeReviewerHead(checkoutDir, headSha, execFileImpl)) {
+  if (await materializeReviewerHead(checkoutDir, headSha, execFileImpl, env, log)) {
     const workspaceStateDir = resolveReviewerWorkspaceStateDir({
       stateDir, checkoutDir, serviceCheckoutDir, env, homeDir,
     });
     try {
       const snapshot = await prepareReviewerSnapshot({ repo, checkoutDir, stateDir: workspaceStateDir, expectedHeadSha: headSha, pinSnapshot });
-      return { ...snapshot, stateDir: workspaceStateDir, diffOnly: false };
+      return { ...snapshot, stateDir: workspaceStateDir, subprocessCwd: emptyReviewerCwd(), diffOnly: false };
     } catch (err) {
-      if (!err.archiveUnavailable) throw err;
+      if (!err.archiveUnavailable && !isReviewerSnapshotBaseError(err)) throw err;
+      log.warn(`[reviewer] diff-only repo=${repo} cause=${isReviewerSnapshotBaseError(err) ? 'escaping-link' : 'archive-unavailable'}`);
     }
   }
+  const snapshotDir = emptyReviewerCwd();
+  return { checkoutDir: null, headSha, snapshotDir, subprocessCwd: snapshotDir, diffOnly: true };
+}
+
+// Harness startup must never discover PR-controlled settings or memory in cwd.
+function emptyReviewerCwd() {
   const snapshotDir = mkdtempSync(join(tmpdir(), 'reviewer-diff-only-'));
   process.once('exit', () => rmSync(snapshotDir, { recursive: true, force: true }));
   chmodSync(snapshotDir, 0o500);
-  return { checkoutDir: null, headSha, snapshotDir, diffOnly: true };
+  return snapshotDir;
 }
 
 function configureReviewerWorkspaceAudit(context) {

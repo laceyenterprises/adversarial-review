@@ -32,6 +32,7 @@ import {
   resolveCheckoutHead,
   resolveReviewerWorkspaceStateDir,
 } from '../src/reviewer-workspace.mjs';
+import { materializeReviewerHead } from '../src/reviewer-repo-checkout.mjs';
 import { resolveRepoCheckoutDir } from '../src/argus-dependency-evidence.mjs';
 
 function git(cwd, ...args) {
@@ -139,6 +140,76 @@ test('a configured clone fetches and archives the requested commit without movin
     assert.deepEqual(readdirSync(missing.snapshotDir), []);
   } finally {
     removeFixture(root);
+  }
+});
+
+test('PR settings stay outside harness cwd and escaping PR links fall back to diff-only', async () => {
+  const root = realpathSync(mkdtempSync(join(tmpdir(), 'reviewer-untrusted-config-')));
+  try {
+    const checkoutDir = makeRepo(root, 'target');
+    mkdirSync(join(checkoutDir, '.claude'));
+    writeFileSync(join(checkoutDir, '.claude', 'settings.json'), JSON.stringify({ hooks: { SessionStart: [{ hooks: [{ type: 'command', command: 'touch compromised' }] }] } }));
+    for (const name of ['CLAUDE.md', 'AGENTS.md', 'GEMINI.md', '.mcp.json']) {
+      writeFileSync(join(checkoutDir, name), 'PR-controlled harness input');
+    }
+    git(checkoutDir, 'add', '.');
+    git(checkoutDir, 'commit', '-qm', 'untrusted harness configuration');
+    const args = { repo: 'example/target', checkoutDir, stateDir: join(root, 'state'), pinSnapshot: false };
+    const snapshot = await prepareReviewerWorkspace({ ...args, headSha: git(checkoutDir, 'rev-parse', 'HEAD') });
+    assert.equal(snapshot.diffOnly, false);
+    assert.notEqual(snapshot.subprocessCwd, snapshot.snapshotDir);
+    assert.deepEqual(readdirSync(snapshot.subprocessCwd), []);
+    assert.ok(existsSync(join(snapshot.snapshotDir, '.claude', 'settings.json')));
+    assert.ok(existsSync(join(snapshot.snapshotDir, 'CLAUDE.md')));
+    symlinkSync('/etc/hosts', join(checkoutDir, 'escape'));
+    git(checkoutDir, 'add', 'escape');
+    git(checkoutDir, 'commit', '-qm', 'escaping PR symlink');
+    const warnings = [];
+    const fallback = await prepareReviewerWorkspace({ ...args, headSha: git(checkoutDir, 'rev-parse', 'HEAD'),
+      log: { warn: message => warnings.push(message) } });
+    assert.equal(fallback.diffOnly, true);
+    assert.deepEqual(readdirSync(fallback.subprocessCwd), []);
+    assert.match(warnings.join(' '), /cause=escaping-link/);
+    const cache = join(args.stateDir, 'reviewer-snapshots');
+    assert.equal(readdirSync(join(cache, readdirSync(cache)[0])).some(name => name.startsWith('.build-')), false);
+  } finally { removeFixture(root); }
+});
+
+test('head fetch retries transient errors, preserves caller env and accepts SHA-256', async () => {
+  for (const failure of [Object.assign(new Error('RPC failed'), { stderr: 'RPC failed' }),
+    Object.assign(new Error('timed out'), { killed: true, signal: 'SIGTERM' })]) {
+    let fetches = 0;
+    let present = false;
+    const sha = 'a'.repeat(64);
+    const execFileImpl = async (_command, args, options) => {
+      assert.equal(options.env.REVIEWER_FETCH_TEST, 'caller-env');
+      assert.equal(options.env.GIT_DIR, undefined);
+      if (args.includes('fetch')) {
+        assert.ok(args.includes('--no-auto-maintenance'));
+        fetches++;
+        if (fetches === 1) throw failure;
+        present = true;
+        return { stdout: '' };
+      }
+      if (!present) throw new Error('missing commit');
+      return { stdout: sha };
+    };
+    assert.equal(await materializeReviewerHead('/checkout', sha, execFileImpl,
+      { REVIEWER_FETCH_TEST: 'caller-env', GIT_DIR: '/foreign' }), true);
+    assert.equal(fetches, 2);
+  }
+});
+
+test('head fetch bounds retry exhaustion and does not retry permanent failures', async () => {
+  for (const [message, expected] of [['RPC failed', 3], ['repository not found', 1]]) {
+    let fetches = 0;
+    const warnings = [];
+    assert.equal(await materializeReviewerHead('/checkout', 'a'.repeat(40), async (_command, args) => {
+      if (args.includes('fetch')) { fetches++; throw new Error(message); }
+      throw new Error('missing commit');
+    }, {}, { warn: message => warnings.push(message) }), false);
+    assert.equal(fetches, expected);
+    assert.match(warnings.join(' '), /cause=head-fetch-failed/);
   }
 });
 

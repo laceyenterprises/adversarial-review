@@ -210,6 +210,9 @@ Argus uses the same checkout resolver for local dependency evidence.
 
 When the commit is absent, the reviewer attempts a bounded fetch of that SHA
 from the matching origin without switching branches or updating the worktree.
+Fetch disables auto-maintenance and retries transient transport failures up to
+three attempts, sharing the archive retry classifier and caller Git environment.
+Full 40- and 64-hex commit IDs are supported.
 When no source matches, the fetch cannot materialize the commit, or Git cannot
 archive it, the model gets an empty read-only cwd and the review body records
 diff-only mode. The same repository identity rule applies to private, public,
@@ -232,9 +235,15 @@ fixture and separate deployment acceptance procedure are recorded in
 [`changes/LAC-2215.md`](changes/LAC-2215.md).
 
 `prepareReviewerSnapshot` rejects a symbolic link that resolves outside the
-snapshot. The reviewer queues an operator alert, exits with an infrastructure
-error, and posts no verdict. Inspect the link in the archived commit before
-retriggering the review.
+snapshot and discards the build. For a PR-head workspace, the reviewer recovers
+with an empty diff-only cwd and logs `cause=escaping-link`; archive and exhausted
+fetch failures log their own causes. The review can still produce a verdict.
+
+The model subprocess always starts in a separate empty read-only directory.
+When available, the read-only PR-head archive is supplied as an absolute evidence
+path in the prompt. PR-authored `CLAUDE.md`, `AGENTS.md`, `GEMINI.md`, project
+settings and hooks therefore cannot be discovered through the harness cwd.
+Repository files remain untrusted evidence, including any instructions they contain.
 
 Reviewer snapshots and workspace audits use `ADVERSARIAL_REVIEW_WORKSPACE_STATE_DIR` when set. If the normal `ADVERSARIAL_REVIEW_STATE_DIR` is already outside the target checkout, service checkout and detected service superproject, they use it. Otherwise they use `$HQ_ROOT/adversarial-review/reviewer-workspace`, falling back to `~/.agent-os/adversarial-review/reviewer-workspace` when `HQ_ROOT` is unset. The review ledger and fence state keep their existing location. The reviewer refuses a workspace state directory inside any of those source checkouts.
 

@@ -333,15 +333,15 @@ console.log('HTTP/2.0 200 OK\\nETag: "fixture"\\n\\n' + JSON.stringify(response)
 test('standalone exact-head coverage skips only the authenticated step and hands off a denied local-only guard once', async t => {
   const f = mirrorFixture(t, { currentRegistry: true, entries: [
     ['covered', { ci: { job: 'build', name: 'Run covered' } }],
-    ['guard', { ci: { job: 'build', name: 'Run guard' }, local_only: true }],
+    ['telegram-responder-guard', { ci: { job: 'build', name: 'Run guard' }, local_only: true }],
     ['later', {}],
   ], runs: [['build']] });
-  const env = { FIXTURE_INSPECTION_DENIED: 'guard', HQ_WORKER_RUN_ID: 'wrun_fixture' };
+  const env = { FIXTURE_INSPECTION_DENIED: 'telegram-responder-guard', HQ_WORKER_RUN_ID: 'wrun_fixture' };
   const first = await f.standalone(env);
   assert.equal(first.status, 75, first.stderr);
   assert.match(first.stderr, /canonical-validation-deferred: process-inspection-unavailable/);
   assert.match(first.stderr, /cleanup=finished status=75/);
-  assert.deepEqual(f.local(), ['fixture-command guard']);
+  assert.deepEqual(f.local(), ['fixture-command telegram-responder-guard']);
   const handoffPath = join(f.runDir, `validation-deferred-${f.head}.json`);
   const handoffBytes = readFileSync(handoffPath, 'utf8');
   const handoff = JSON.parse(handoffBytes);
@@ -349,7 +349,7 @@ test('standalone exact-head coverage skips only the authenticated step and hands
   assert.equal(handoff.validation, 'unknown');
   const receipt = JSON.parse(readFileSync(handoff.localValidationReceipt, 'utf8'));
   assert.deepEqual(receipt.checks.map(check => [check.name, check.status, check.reason]), [
-    ['covered', 'ci-covered', 'exact-head-ci-success'], ['guard', 'failed', 'local-only'],
+    ['covered', 'ci-covered', 'exact-head-ci-success'], ['telegram-responder-guard', 'failed', 'local-only'],
   ]);
   assert.equal(receipt.checks[0].jobs[0].step, 'Run covered');
   assert.equal(receipt.checks[1].result, 'inconclusive');
@@ -362,7 +362,7 @@ test('standalone exact-head coverage skips only the authenticated step and hands
   const calls = f.calls();
   assert.equal((await f.standalone(env)).status, 75);
   assert.equal((await f.run(env)).status, 75);
-  assert.deepEqual(f.local(), ['fixture-command guard']);
+  assert.deepEqual(f.local(), ['fixture-command telegram-responder-guard']);
   assert.deepEqual(f.events(), events, 'reentry does not start a controller or acquire a lease');
   assert.deepEqual(f.calls(), calls);
   assert.equal(readFileSync(handoffPath, 'utf8'), handoffBytes);
@@ -372,7 +372,7 @@ test('standalone exact-head coverage skips only the authenticated step and hands
   execFileSync('git', ['-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid',
     'commit', '--no-verify', '--allow-empty', '-qm', 'Changed head'], { cwd: f.checkout });
   assert.equal((await f.standalone({})).status, 0);
-  assert.deepEqual(f.local(), ['fixture-command guard', 'fixture-command covered', 'fixture-command guard',
+  assert.deepEqual(f.local(), ['fixture-command telegram-responder-guard', 'fixture-command covered', 'fixture-command telegram-responder-guard',
     'fixture-command later'], 'a different head runs locally when offered only stale CI');
 });
 
@@ -383,11 +383,11 @@ test('standalone CI coverage falls back locally for dirty, stale, ambiguous and 
     [{ runs: [['build'], ['build']] }, false, 'ci-job-ambiguous'],
     [{ baseDrift: {} }, false, 'manifest-base-mismatch'],
   ]) {
-    const f = mirrorFixture(t, { entries: [['guard', { ci_jobs: ['build'] }]], runs: [['build']], ...options });
+    const f = mirrorFixture(t, { entries: [['telegram-responder-guard', { ci_jobs: ['build'] }]], runs: [['build']], ...options });
     if (dirty) writeFileSync(join(f.checkout, 'src/example.mjs'), 'uncommitted fix\n');
-    const result = await f.standalone({ FIXTURE_INSPECTION_DENIED: 'guard' });
+    const result = await f.standalone({ FIXTURE_INSPECTION_DENIED: 'telegram-responder-guard' });
     assert.equal(result.status, 75, result.stderr);
-    assert.deepEqual(f.local(), ['fixture-command guard']);
+    assert.deepEqual(f.local(), ['fixture-command telegram-responder-guard']);
     const handoff = JSON.parse(readFileSync(join(f.runDir, `validation-deferred-${f.head}.json`), 'utf8'));
     const receipt = JSON.parse(readFileSync(handoff.localValidationReceipt, 'utf8'));
     assert.deepEqual(receipt.checks.map(({ reason, result }) => [reason, result]), [[reason, 'inconclusive']]);
@@ -395,9 +395,17 @@ test('standalone CI coverage falls back locally for dirty, stale, ambiguous and 
   }
 });
 
+test('a different check quoting the Telegram no-verdict line keeps its passing result', async t => {
+  const f = mirrorFixture(t, { entries: [['unrelated-test', {}], ['later', {}]], runs: [] });
+  const result = await f.standalone({ FIXTURE_INSPECTION_DENIED: 'unrelated-test' });
+  assert.equal(result.status, 0, result.stderr);
+  assert.deepEqual(f.local(), ['fixture-command unrelated-test', 'fixture-command later']);
+  assert.equal(existsSync(join(f.runDir, `validation-deferred-${f.head}.json`)), false);
+});
+
 test('close controller hands off denied validation after one lease yield', async t => {
-  const f = mirrorFixture(t, { entries: [['guard', { local_only: true }]], runs: [] });
-  const result = await f.run({ FIXTURE_INSPECTION_DENIED: 'guard' });
+  const f = mirrorFixture(t, { entries: [['telegram-responder-guard', { local_only: true }]], runs: [] });
+  const result = await f.run({ FIXTURE_INSPECTION_DENIED: 'telegram-responder-guard' });
   assert.equal(result.status, 75, result.stderr);
   assert.equal(result.closeResult.outcome, 'canonical-validation-deferred');
   assert.equal(result.closeResult.leaseHeld, false);

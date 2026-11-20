@@ -5800,6 +5800,24 @@ cleanup line for a standalone run. Preserve unknown cleanup for the recovery
 owner. The closer ends the run with the existing deferred audit. Repeating
 validation or close on that head in the run returns 75 before another battery
 or controller starts. A changed head remains subject to ordinary validation.
+Only the `telegram-responder-guard` check can supply the Python-lane no-verdict
+signal; another check quoting that line retains its own result. A passing
+Telegram result containing that explicit no-verdict still defers: the reload
+cases do not establish the unavailable process-inspection verdict. A recorded
+UNKNOWN handoff takes precedence over own-package import-fault fallback.
+Operator cancellation retains its own outcome even when cleanup returns 125;
+it does not become a canonical-validation deferral.
+
+The validator records the deferred audit and `last-phase` receipt non-finally.
+The closer repeats the audit helper without `--final` and ends the run; no
+`terminal-stop` progress receipt is expected. Once the matching launch ends,
+dispatch records `canonical-validation-deferred` in the existing per-head
+inconclusive retry store. Its watcher owner retains full refunds, applies
+exponential backoff from attempt N (default three, starting at five minutes,
+capped at one hour), and surfaces one notification through the existing
+closure-wait receipt. Re-observing a launch neither increments its attempt nor
+advances its deadline. This follows INCONCLUSIVERETRY-01b rather than parking
+the PR or consuming adjudication budget.
 The validator owns its timeout and process cleanup. Avoid a second shell alarm
 around it. If the outer tool returns 124 or 142 first, follow the same handoff
 from the available diagnostics and keep unconfirmed cleanup explicit.

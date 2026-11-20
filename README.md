@@ -2096,6 +2096,13 @@ The idle ceiling scales from 120 seconds and stays below the absolute deadline.
 Either timeout returns 124 with validation unknown. A canonical deadline or an
 explicit process-inspection no-verdict hands the current head to recovery once
 and prevents another validation or close on that head in the same run.
+The no-verdict line applies only to `telegram-responder-guard`; quoted output
+from other checks retains its result. UNKNOWN takes precedence over import-fault
+fallback, while operator cancellation retains its outcome even with unconfirmed
+drain. Across launches, the watcher records these deferrals as owned inconclusive
+retries: full refunds, exponential backoff from the configured attempt threshold,
+and one notification, using the existing last-phase receipt without a final
+terminal-stop receipt.
 Pytest reports real collection and test
 phase boundaries and uses local ledger routing; explicit disposable-Postgres
 test settings remain intact. Standalone TERM/INT/HUP cancellation initiates group TERM,

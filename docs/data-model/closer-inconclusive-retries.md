@@ -46,6 +46,10 @@ per charge, not only when every charge is listed). It also records launches it
 proves were closer faults from the AMA audit, and `closer-supersede` records a
 launch the pipeline cancelled before it booted (reason
 `superseded-by-clean-exact-head-review`).
+Dispatch also records ended `canonical-validation-deferred` launches here,
+including those with a deferred audit and infrastructure refund. Repeated
+same-head no-verdict or deadline outcomes therefore share the configured
+backoff and notification instead of starting an immediate unpaced retry.
 
 `reviewServiceRevision` (optional, CLOSERRETRYREFUND-01) is the service revision
 that recorded the entry's latest launch. When the running revision differs, the

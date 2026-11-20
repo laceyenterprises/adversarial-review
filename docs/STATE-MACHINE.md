@@ -2087,6 +2087,12 @@ A validator timeout records `validation-stopped` in the controller and
 `canonical-validation-deferred` for the exact head in the closer. The deferral
 supplies no validation audit. A process-inspection no-verdict uses the same
 deferred handoff. The run will not start another battery on that head.
+The no-verdict signal is scoped to `telegram-responder-guard` and UNKNOWN
+cannot fall through to import-fault success. Cancellation with unconfirmed
+drain retains cancellation instead of writing a validation deferral. Ended
+validation deferrals use INCONCLUSIVERETRY-01b's per-head owned retry, full
+refund, exponential backoff and one notification; the deferred last-phase
+receipt is sufficient, without a terminal-stop receipt.
 Supported CI-mirror commands run in the registered group. An inner command
 deadline also requests group teardown and ends the battery. Per-command
 diagnostics are written beside the validation receipt during execution, so

@@ -116,8 +116,10 @@ An unknown cleanup or live owner retains custody and forbids a second controller
 `validation-deferred-<head>.json` points to retained validation logs when
 available. Use existing controller drain and lease receipts, or the standalone
 bounded-command cleanup result. Preserve unknown cleanup for the recovery owner.
-Run the terminal helper with `--final canonical-validation-deferred <head>` and
-end the run. Do not retry validation or close on that head in this run, even
+Invoke the audit helper without `--final`: `canonical-validation-deferred <head>`,
+then end the run. The deferred audit and `last-phase` receipt let the watcher
+own the retry; no `terminal-stop` progress receipt is expected.
+Do not retry validation or close on that head in this run, even
 with green required CI. This takes precedence over the setup retry above.
 An exhausted closer fault is a **deferred harness fault**, never a terminal PR
 decision. Record its exact named reason with the terminal helper; dispatch

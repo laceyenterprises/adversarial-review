@@ -296,9 +296,13 @@ def main():
             finally:
                 active = None
         output = getattr(result, "output", "") or ""
-        inspection_unavailable = result.status != "fail" and (
-            "telegram guard lane python: ps unusable in this sandbox: no verdict"
-            in output.splitlines()
+        inspection_unavailable = (
+            check.name == "telegram-responder-guard"
+            and result.status != "fail"
+            and (
+                "telegram guard lane python: ps unusable in this sandbox: no verdict"
+                in output.splitlines()
+            )
         )
         if inspection_unavailable:
             row.update(

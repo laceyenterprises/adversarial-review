@@ -177,6 +177,44 @@ function harness(root, lastPhase) {
 
 const minutes = n => new Date(Date.parse('2026-11-01T00:00:00Z') + n * 60_000).toISOString();
 
+test('canonical validation deferrals across launches use owned exponential backoff and surface once', async t => {
+  const root = scratch(t);
+  const { state, deps, endCurrent, identity } = harness(root, 'canonical-validation-deferred');
+  const run = at => {
+    const args = dispatchArgs(root, at);
+    args.cfg.closerInconclusiveRetry = { surfaceAfterAttempts: 2, backoffBaseMs: 60_000, backoffMaxMs: 300_000 };
+    return maybeDispatchAmaCloser({ ...args, ...deps });
+  };
+  assert.equal((await run(minutes(0))).dispatched, true);
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    endCurrent();
+    recordHammerEarlyFailure('canonical-validation-deferred', { env: {
+      HAM_HQ_ROOT: join(root, 'hq'), HAM_REPO: REPO, HAM_PR_NUMBER: String(PR),
+      HAM_TARGET_REMEDIATION_SHA: HEAD, HQ_LAUNCH_REQUEST_ID: state.ended,
+    } });
+    const at = attempt * 10;
+    const result = await run(minutes(at));
+    const owned = readCloserInconclusiveRetries(root, identity).heads[HEAD];
+    assert.equal(owned.attempt, attempt);
+    assert.equal(owned.reason, 'canonical-validation-deferred');
+    if (attempt === 1) {
+      assert.equal(result.dispatched, true, JSON.stringify(result));
+      continue;
+    }
+    assert.equal(result.dispatched, false, JSON.stringify(result));
+    assert.equal(result.reason, 'closer-inconclusive-retry-backoff');
+    const delayMinutes = 2 ** (attempt - 2);
+    assert.equal(result.retryAfterMs, delayMinutes * 60_000);
+    assert.equal(result.ownedRetry.owner, 'watcher');
+    assert.equal(readHammerRetryCapLedger(root, identity).attemptCount, 0, 'refund retained while watcher owns backoff');
+    assert.equal((await run(minutes(at))).dispatched, false, 'repeat observation cannot bypass backoff');
+    assert.equal(readCloserInconclusiveRetries(root, identity).heads[HEAD].attempt, attempt);
+    assert.equal((await run(minutes(at + delayMinutes))).dispatched, true);
+  }
+  assert.equal(state.launches, 4);
+  assert.equal(state.alerts.filter(alert => alert.options?.event === 'ama_closer.inconclusive_retry_surfaced').length, 1);
+});
+
 test('site 1: an inconclusive exit spends no budget or no-delivery key, surfaces once at N and stays owned', async t => {
   const root = scratch(t);
   const { state, deps, endCurrent, identity } = harness(root, 'endpoint-bootstrap-failed');

@@ -200,7 +200,7 @@ if (checkDeferred) {
     } else runner = { command: pytest ? 'python3' : args.shift(),
       args: pytest ? ['-u', '-m', 'pytest', '-p', 'ham_pytest_progress', ...args] : args };
     if (valid) {
-      let output = '', packageImportFault = false;
+      let output = '', packageImportFault = false, stopReason;
       let packages = new Set();
       try { if (canonical && !runner?.required) packages = repositoryPythonPackages(process.cwd()); }
       catch { runner = null; }
@@ -231,6 +231,7 @@ if (checkDeferred) {
             timeoutMs: remainingMs, idleMs: leaseValidationIdleMs(remainingMs),
             observeOutput, stopOnTimeoutExit: mirror,
             observeStop: (reason, status) => {
+              stopReason = reason;
               if (canonical && (status === 124 || status === 125)) deferValidation(reason, status);
             } }) : 127;
         if (!runner?.startupReceipt || existsSync(startedFile) || process.exitCode === 0
@@ -240,7 +241,9 @@ if (checkDeferred) {
       const inspectionUnavailable = mirror && runnerExit === 75
         && readValidationReceipt().checks.some(check => check.localReason === 'process-inspection-unavailable');
       if (inspectionUnavailable) deferValidation('process-inspection-unavailable', runnerExit);
-      if (canonical && runnerExit === 125) deferValidation('validation-drain-unconfirmed', runnerExit);
+      if (canonical && runnerExit === 125 && !stopReason?.startsWith('canceled:')) {
+        deferValidation('validation-drain-unconfirmed', runnerExit);
+      }
       if (ownsDeferral) reportHammerEarlyFailure(deferredOutcome, { headSha: head });
       const startupFault = runner?.startupReceipt && !existsSync(startedFile)
         && ![124, 125, 130, 143].includes(process.exitCode);
@@ -253,7 +256,7 @@ if (checkDeferred) {
       // could not be read. A later inconclusive result can also follow a red check.
       const realMirrorFailure = mirror && (runnerExit === 42
         || readValidationReceipt().checks.some(check => check.result === 'fail'));
-      const environmentFault = canonical && !runner?.required && !realMirrorFailure
+      const environmentFault = canonical && !validationUnknown && !runner?.required && !realMirrorFailure
         && (!runner || [76, 78, 127].includes(process.exitCode)
           || (process.exitCode !== 0 && process.exitCode < 124 && packageImportFault));
       if (environmentFault) {

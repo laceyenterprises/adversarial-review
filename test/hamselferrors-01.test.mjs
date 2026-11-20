@@ -263,7 +263,17 @@ test('review-service canonical selection runs touched and importer tests through
   const runner = canonicalHammerValidation(root, ['src/example.mjs', 'test/adapters/adapter.test.mjs']);
   assert.equal(runner.command, process.execPath);
   assert.deepEqual(runner.args, ['test/run-tests.mjs', 'test/example.test.mjs', 'test/adapters/adapter.test.mjs']);
+  assert.equal(runner.selectedTestFiles, 2);
   assert.throws(() => canonicalHammerValidation(root, ['../foreign']), /repository-relative/);
+
+  for (const status of [0, 124]) {
+    writeFileSync(join(root, 'test/run-tests.mjs'), `process.exit(${status});`);
+    const result = spawnSync(process.execPath, [new URL('../bin/hammer-validate.mjs', import.meta.url).pathname,
+      '--canonical', '--', 'src/example.mjs', 'test/adapters/adapter.test.mjs'],
+    { cwd: root, env: { ...isolatedEnv(root), AR_TEST_CONCURRENCY: '1' }, encoding: 'utf8', timeout: 20000 });
+    assert.equal(result.status, status, result.stderr);
+    assert.match(result.stderr, new RegExp(`targeted Node validation files=2 workerLimit=1 wallMs=\\d+ budgetMs=\\d+ exitStatus=${status}\\b`));
+  }
 });
 
 test('legacy canonical validation defers Git discovery failures to the required GitHub gate without claiming a pass', t => {
@@ -310,7 +320,7 @@ test('canonical selection resolves helper and source importers relative to each 
     ['src/shared.mjs', ['test/adapters/source-user.test.mjs']],
   ]) {
     assert.deepEqual(canonicalHammerValidation(root, [changed]),
-      { command: process.execPath, args: ['test/run-tests.mjs', ...expected] }, changed);
+      { command: process.execPath, args: ['test/run-tests.mjs', ...expected], selectedTestFiles: expected.length }, changed);
   }
 });
 

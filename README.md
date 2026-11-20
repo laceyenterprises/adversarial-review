@@ -284,14 +284,26 @@ npm test
 
 CI runs both on Node 22 and Node 26 on every PR. Node 22.10 or newer is required
 for native test-runner `execArgv` support, which installs each file's preloads.
-The runner schedules files by measured duration across eight workers, capped
-only by the number of selected parallel files.
+The runner schedules files by measured duration. Local runs default to half
+the available logical CPUs rounded down, with a minimum of one and a maximum
+of four. Set `AR_TEST_CONCURRENCY` to a positive integer to override the
+local limit. The number of selected parallel files caps the actual worker
+count. CI continues to use up to eight workers.
 A single native coordinator feeds the longest pending file to each free worker.
 The SMV smoke file runs alone first because it measures real process deadlines.
 Each file runs in its own process with isolated state, home and temporary
-directory. Repeated CLI fixtures use private compile caches. Failures name the
-test file and return a nonzero status. At the 900-second deadline, the runner
-prints the active test files and the number still queued.
+directory. The runner supplies Git settings that disable automatic maintenance
+and garbage collection for fixture commits, fetches and pushes even with a fresh
+home. Push receivers own their server-side configuration. Helpers that replace
+Git command configuration own their settings. Repeated CLI fixtures use
+private compile caches.
+The suite deadline stays at 900 seconds when the selected parallel files fit
+within the configured worker limit. Otherwise it is
+`900 * 8 / min(8, limit)` seconds: 1800 seconds with a four-worker limit and
+900 with eight. Failures name the test file and return a nonzero status. At the
+deadline, the runner prints the active test files and the number still queued.
+Generic bounded validation wrappers preserve command arguments.
+`AR_TEST_CONCURRENCY` applies only to this repository’s runner.
 Set `AR_TEST_TIMINGS=/absolute/path.json` to
 record per-file wall times and total suite wall time. Relative report paths
 resolve against the caller's working directory and survive sandbox cleanup.
@@ -878,9 +890,11 @@ refusal. After normal deployment, SRE observes a natural final-fix-all launch,
 completion receipt and matching produced attestation before declaring recovery.
 
 In-place repair custody is reconciled before watcher admission, at most once
-per 30 seconds. Complete terminal retry evidence or proven exact-key absence
-after ten minutes retires an unpublished reservation; unknown evidence retains
-custody. Retirement restores the existing ownerless clock and SEV1 path.
+per 30 seconds. Complete terminal retry evidence can retire an unpublished
+reservation. Point-in-time exact-key absence retains custody; two consecutive
+canonical absence proofs after ten minutes project operator-required custody
+and send a deduplicated SEV1 page. Unknown evidence retains custody.
+Retirement restores the existing ownerless clock and SEV1 path.
 Reviewer harness refunds are bounded to three per PR across heads; later
 failures retain ordinary infrastructure cap and alert handling. Corrupt or busy
 repair/refund ledgers defer only their PR. See the
@@ -5640,7 +5654,14 @@ deletion, with no surviving head references or dynamic namespace hazards.
 See the [proof contract](docs/RUNBOOK-ama-closure.md).
 - **CLOSERCIWAIT-01:** published-head CI settles before the closer predicate using the existing bounded lease-yield/reacquire wait. Phase head values are exported, claim binding uses a deployed helper, and verification/terminal failures name the failed operation. Existing smoke commands remain unchanged; post-deploy acceptance is an organic remediation push merging in the same closer run, still pending.
 EXHAUSTEDHEADOWNER-01: a new builder head after cycle exhaustion receives one
-verdict-only review. Findings retain final closer ownership; head-scoped retry
+verdict-only review. Pending repair custody retires on complete terminal owner
+evidence at base, or at a moved head after a successful negative publication
+read, preserving counters. Verified repair publication evidence persists across
+admission ticks. Repeated overdue canonical absence retains custody and pages
+the operator for inspection. After normal deployment, observe natural
+foreign-head release, delayed verified-publication admission and absence
+escalation read-only; offline tests do not
+certify deployment. Findings retain final closer ownership; head-scoped retry
 and deadline evidence cannot strand a new head. Spent budgets page once, with
 lifetime escalation deduplicated across head changes. See the
 [closure ownership contract](docs/RUNBOOK-ama-closure.md#exhausted-cycles-and-new-builder-heads-exhaustedheadowner-01).

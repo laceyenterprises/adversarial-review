@@ -284,12 +284,15 @@ npm test
 ```
 
 This uses `test/run-tests.mjs` to discover every top-level and adapter test
-in isolated sandboxes, with eight test-file workers. It is hermetic — no
-network, no external services — and runs in CI on every PR against Node 22
-and Node 26. The suite has a 900-second deadline. Set `AR_TEST_TIMINGS` to
-an output path for the completed run's per-file timings. Native TAP output
-follows scheduled order. Use the deadline's active-file list and queued count
-to locate work in progress, then trace child processes for those files.
+in isolated sandboxes. Local runs use half the available logical CPUs rounded
+down and clamped to one through four workers. `AR_TEST_CONCURRENCY` overrides
+that local limit. CI uses up to eight workers. The suite runs offline on every
+PR against Node 22 and Node 26. The deadline stays at 900 seconds when the
+selected parallel files fit within the configured limit. Otherwise it is
+`900 * 8 / min(8, limit)` seconds. Set `AR_TEST_TIMINGS` to an output path for
+the completed run's per-file timings. Native TAP output follows scheduled
+order. Use the deadline's active-file list and queued count to locate work
+in progress, then trace child processes for those files.
 
 For the complete hammer self-rebase subset, select all three entrypoints;
 they partition one shared suite. Each test name identifies its shard, and

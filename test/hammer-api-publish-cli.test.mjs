@@ -388,7 +388,7 @@ fi
 printf 'push\\n' >> ${JSON.stringify(pushAttempts)}
 [ -z "$GH_TOKEN" ] || exit 71
 [ -z "$GITHUB_TOKEN" ] || exit 72
-case "$GIT_CONFIG_VALUE_1" in *hammer-git-credential.mjs*) ;; *) exit 73 ;; esac
+case "$(git config --get credential.helper)" in *hammer-git-credential.mjs*) ;; *) exit 73 ;; esac
 `, { mode: 0o755 });
     const run = (command, args, extra = {}) => exec(command, args, { cwd: work, env, timeout: 20000, ...extra });
     const publication = await run('/bin/bash', ['-c', `

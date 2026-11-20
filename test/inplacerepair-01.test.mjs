@@ -9,7 +9,7 @@ import { promisify } from 'node:util';
 import { pathToFileURL } from 'node:url';
 import { reserveRepairEpoch, bindRepairHead, repairCause, pageRepairCap,
   pendingRepairEpoch, observeRepairOwner, reconcileRepairOwner, repairEpochForHead,
-  REPAIR_PROVISION_DEADLINE_MS } from '../src/repair-epochs.mjs';
+  REPAIR_OWNER_OBSERVE_MS, REPAIR_ABSENCE_ESCALATE_MS } from '../src/repair-epochs.mjs';
 import { admitExhaustedHeadVerdict, isExhaustedHeadVerdictRequested,
   owesExhaustedHeadVerdict } from '../src/exhausted-head-verdict.mjs';
 import { readHammerRetryCapLedger, recordHammerRetryDispatch, refundCloserSelfError,
@@ -28,6 +28,14 @@ function fixture(t) {
   t.after(() => rmSync(rootDir, { recursive: true, force: true }));
   return { rootDir, repo, prNumber, headSha: old, ownerKey: 'repair-submit-one', cause: 'closure-retry-exhausted' };
 }
+function launchRead(epoch, status = 'canceled', retry = null) {
+  const id = 'fixture-launch';
+  return { ok: true, roots: [id],
+    rows: [{ launch_request_id: id, idempotency_key: epoch.ownerKey, target_repo: repo,
+      head_sha: epoch.baseHead, identity_ambiguous: false, status },
+    ...(retry ? [{ launch_request_id: 'retry', status: retry }] : [])],
+    retryEdges: retry ? [{ parent: id, child: 'retry' }] : [] };
+}
 function reviewDb(t) {
   const db = new Database(':memory:');
   ensureReviewStateSchema(db);
@@ -45,6 +53,10 @@ test('repair helper rejects malformed heads before opening the review database',
   for (const sha of [undefined, '', old.slice(1), `${old}a`, 'g'.repeat(40)]) {
     await assert.rejects(main([f.rootDir, repo, String(prNumber), sha, f.ownerKey]),
       { message: 'invalid repair request' });
+  }
+  for (const project of ['has space', 'x'.repeat(257)]) {
+    await assert.rejects(main([f.rootDir, repo, String(prNumber), old, f.ownerKey,
+      'false', '', '', project]), { message: 'invalid repair request' });
   }
 });
 
@@ -301,8 +313,7 @@ for (const storedSha of [old, old.toUpperCase(), 'aA'.repeat(20)]) {
 
     const second = reserveRepairEpoch({ ...f, headSha: head.toUpperCase(), ownerKey: 'second' }).epoch;
     const retired = await reconcileRepairOwner({ ...f, headSha: head, includeReviewedHead: true,
-      now: Date.now() + REPAIR_PROVISION_DEADLINE_MS,
-      readImpl: async () => ({ ok: true, roots: [], absenceProof: {} }) });
+      readImpl: async () => launchRead(second) });
     assert.equal(retired.id, epoch.id, 'retirement falls back to the same head regardless of case');
     assert.ok(readHammerRetryCapLedger(f.rootDir, f).repairEpochs.find(e => e.id === second.id).terminalAt);
   });
@@ -331,16 +342,43 @@ test('cap pages once with full history across heads and never opens a PR', async
 test('only terminal launch and complete retry evidence permit a successor epoch', async t => {
   const f = fixture(t), epoch = reserveRepairEpoch(f).epoch;
   for (const state of ['requested', 'running', 'blocked_needs_decision', 'succeeded']) {
-    const observed = await observeRepairOwner({ ...f, epoch, readImpl: async () => ({
-      ok: true, roots: ['fixture-launch'], retryEdges: [],
-      rows: [{ launch_request_id: 'fixture-launch', status: state }],
-    }) });
+    const observed = await observeRepairOwner({ ...f, epoch, readImpl: async () => launchRead(epoch, state) });
     assert.equal(observed.ownerState === 'terminal', state === 'succeeded');
     if (state === 'succeeded') {
-      const next = reserveRepairEpoch({ ...f, ownerKey: 'successor', terminalOwner: observed });
+      const next = reserveRepairEpoch({ ...f, ownerKey: 'successor', terminalOwner: observed, ownerSnapshot: epoch });
       assert.equal(next.ok, true);
       assert.notEqual(next.epoch.id, epoch.id);
     }
+  }
+});
+
+test('legacy dispatch row identity permits terminal retirement and repair publication', async t => {
+  for (const targetRepo of [null, 'widgets', repo]) {
+    const f = fixture(t), epoch = reserveRepairEpoch(f).epoch;
+    const readImpl = async () => {
+      const read = launchRead(epoch, 'succeeded');
+      read.rows[0].target_repo = targetRepo;
+      delete read.rows[0].head_sha;
+      delete read.rows[0].identity_ambiguous;
+      return read;
+    };
+    const observed = await reconcileRepairOwner({ ...f, headSha: head, readImpl,
+      readPublisher: async () => ({ ok: true, rowHeadSha: head, launchRequestId: 'fixture-launch' }) });
+    assert.equal(observed.publicationHead, head);
+    assert.equal(observed.ownerState, 'terminal');
+  }
+});
+
+test('explicit dispatch identity contradictions retain repair custody', async t => {
+  for (const mismatch of [{ identity_ambiguous: true }, { target_repo: 'other/widgets' },
+    { head_sha: head }, { idempotency_key: 'foreign-key' }]) {
+    const f = fixture(t), epoch = reserveRepairEpoch(f).epoch;
+    const observed = await observeRepairOwner({ ...f, epoch, readImpl: async () => {
+      const read = launchRead(epoch);
+      Object.assign(read.rows[0], mismatch);
+      return read;
+    } });
+    assert.equal(observed.ownerState, 'unknown');
   }
 });
 
@@ -351,12 +389,53 @@ test('a mismatched replay still records retirement of an observed terminal owner
   const pending = reserveRepairEpoch({ ...f, headSha: head, ownerKey: 'second' }).epoch;
   const now = '2026-11-20T01:00:00.000Z';
   assert.deepEqual(reserveRepairEpoch({ ...f, headSha: head, now,
-    terminalOwner: { ...pending, ownerState: 'terminal', ownerLaunch: 'ended-launch' } }),
+    ownerSnapshot: pending, terminalOwner: { ...pending, ownerState: 'terminal', ownerLaunch: 'ended-launch' } }),
   { ok: false, reason: 'repair-head-mismatch' });
   const retired = readHammerRetryCapLedger(f.rootDir, f).repairEpochs.find(epoch => epoch.id === pending.id);
   assert.equal(retired.terminalAt, now);
   assert.equal(retired.terminalLaunch, 'ended-launch');
   assert.equal(pendingRepairEpoch(f.rootDir, f), null);
+});
+
+test('a concurrent owner observation invalidates the terminal reservation snapshot', async t => {
+  const f = fixture(t), epoch = reserveRepairEpoch(f).epoch;
+  const terminalOwner = await observeRepairOwner({ ...f, epoch, readImpl: async () => launchRead(epoch) });
+  assert.equal(terminalOwner.ownerState, 'terminal');
+  await reconcileRepairOwner({ ...f, readImpl: async () => launchRead(epoch, 'running') });
+  const successor = reserveRepairEpoch({ ...f, ownerKey: 'fresh-key', terminalOwner, ownerSnapshot: epoch });
+  assert.equal(successor.reason, 'repair-owned');
+  const { repairEpochs } = readHammerRetryCapLedger(f.rootDir, f);
+  assert.equal(repairEpochs.length, 1);
+  assert.equal(repairEpochs[0].ownerState, 'live');
+  assert.equal(repairEpochs[0].terminalAt, undefined);
+});
+
+test('repair replay cannot supply scope for a legacy epoch or replace stored scope', t => {
+  const legacy = fixture(t), scoped = fixture(t);
+  const oldEpoch = reserveRepairEpoch(legacy).epoch;
+  const newEpoch = reserveRepairEpoch({ ...scoped, dispatchProjectRef: 'fixture-project' }).epoch;
+  const replay = reserveRepairEpoch({ ...legacy, dispatchProjectRef: 'fixture-project' });
+  assert.equal(replay.replayed, true);
+  assert.deepEqual(replay.epoch, oldEpoch);
+  assert.deepEqual(reserveRepairEpoch({ ...scoped, dispatchProjectRef: 'other-project' }),
+    { ok: false, reason: 'repair-project-mismatch' });
+  assert.deepEqual(pendingRepairEpoch(scoped.rootDir, scoped), newEpoch);
+});
+
+test('watcher observation returns a new pending reservation installed during its read', async t => {
+  const f = fixture(t), initial = reserveRepairEpoch(f).epoch;
+  let current, reads = 0;
+  const observed = await reconcileRepairOwner({ ...f, headSha: head, readImpl: async () => {
+    if (++reads === 1) {
+      bindRepairHead({ ...f, epochId: initial.id, headSha: head });
+      current = reserveRepairEpoch({ ...f, headSha: head, ownerKey: 'fresh-key' }).epoch;
+    }
+    return launchRead(initial);
+  }, readPublisher: async () => ({ ok: true, launchRequestId: 'fixture-launch', rowHeadSha: head }) });
+  assert.equal(reads, 2);
+  assert.equal(observed.id, current.id);
+  assert.equal(observed.publicationHead, undefined);
+  assert.equal(pendingRepairEpoch(f.rootDir, f).id, current.id);
 });
 
 for (const fault of ['provision-failed', 'workspace-wait timeout',
@@ -452,7 +531,7 @@ test('harness refund clamps nullable legacy attempt counters to zero once', t =>
 
 test('watcher reconciliation resolves reviewed heads while pending custody takes precedence', async t => {
   const f = fixture(t);
-  const options = { ...f, headSha: head, includeReviewedHead: true,
+  const options = { ...f, headSha: head, includeReviewedHead: true, now: Date.now(),
     readImpl: async () => ({ ok: false }) };
   assert.equal(await reconcileRepairOwner(options), null);
   const first = reserveRepairEpoch(f).epoch;
@@ -463,45 +542,35 @@ test('watcher reconciliation resolves reviewed heads while pending custody takes
   const second = reserveRepairEpoch({ ...f, headSha: head, ownerKey: 'second-owner' }).epoch;
   assert.equal((await reconcileRepairOwner(options)).id, second.id);
   const retired = await reconcileRepairOwner({ ...options,
-    now: Date.now() + REPAIR_PROVISION_DEADLINE_MS,
-    readImpl: async () => ({ ok: true, roots: [], absenceProof: {} }) });
+    now: options.now + REPAIR_OWNER_OBSERVE_MS,
+    readImpl: async () => launchRead(second) });
   assert.equal(retired.id, first.id, 'retirement still falls back to the reviewed-head epoch');
   assert.equal(pendingRepairEpoch(f.rootDir, f), null);
 });
 
-test('watcher reconciliation retires terminal or absent repair launches and projects ownerless', async t => {
+test('watcher reconciliation retires a positively identified terminal repair and projects ownerless', async t => {
   const { resolveTtmOwner } = await import('../src/ttm-owner.mjs');
-  for (const absent of [false, true]) {
-    const f = { ...fixture(t), now: '2026-01-01T00:00:00Z' };
-    reserveRepairEpoch(f);
-    const now = Date.parse(f.now) + REPAIR_PROVISION_DEADLINE_MS;
-    const readImpl = async () => absent
-      ? { ok: true, roots: [], absenceProof: { kind: 'canonical-exact-selector-absence' } }
-      : { ok: true, roots: ['fixture-launch'], retryEdges: [],
-        rows: [{ launch_request_id: 'fixture-launch', status: 'failed' }] };
-    assert.equal(await reconcileRepairOwner({ ...f, now, readImpl }), null);
-    assert.equal(pendingRepairEpoch(f.rootDir, f), null);
-    assert.ok(readHammerRetryCapLedger(f.rootDir, f).repairEpochs[0].terminalAt);
-    assert.equal(resolveTtmOwner({ repairEpoch: pendingRepairEpoch(f.rootDir, f),
-      review: { status: 'posted', suppressed: true } }, new Date(now).toISOString()).owner, null);
-  }
+  const f = fixture(t), epoch = reserveRepairEpoch(f).epoch;
+  assert.equal(await reconcileRepairOwner({ ...f, readImpl: async () => launchRead(epoch, 'failed') }), null);
+  assert.equal(pendingRepairEpoch(f.rootDir, f), null);
+  assert.ok(readHammerRetryCapLedger(f.rootDir, f).repairEpochs[0].terminalAt);
+  assert.equal(resolveTtmOwner({ repairEpoch: pendingRepairEpoch(f.rootDir, f),
+    review: { status: 'posted', suppressed: true } }, new Date().toISOString()).owner, null);
 });
 
 test('repair observation bounds cadence and retains live, early absent and unreadable owners', async t => {
   for (const state of ['live', 'early-absent', 'unreadable', 'unproven-absent', 'retry']) {
     const f = { ...fixture(t), now: '2026-01-01T00:00:00Z' };
-    reserveRepairEpoch(f);
-    const now = Date.parse(f.now) + (state === 'early-absent' ? 1000 : REPAIR_PROVISION_DEADLINE_MS);
+    const epoch = reserveRepairEpoch(f).epoch;
+    const now = Date.parse(f.now) + (state === 'early-absent' ? 1000 : 60 * 60_000);
     let reads = 0;
     const readImpl = async () => {
       reads++;
       if (state === 'unreadable') return { ok: false };
       if (state.includes('absent')) return { ok: true, roots: [],
-        ...(state === 'early-absent' ? { absenceProof: {} } : {}) };
-      return { ok: true, roots: ['fixture-launch'],
-        retryEdges: state === 'retry' ? [{ parent: 'fixture-launch', child: 'retry' }] : [],
-        rows: [{ launch_request_id: 'fixture-launch', status: state === 'retry' ? 'failed' : 'running' },
-          ...(state === 'retry' ? [{ launch_request_id: 'retry', status: 'running' }] : [])] };
+        ...(state === 'unproven-absent' ? {} : { absenceProof: {
+          version: 1, kind: 'canonical-exact-selector-absence' } }) };
+      return state === 'retry' ? launchRead(epoch, 'failed', 'running') : launchRead(epoch, 'running');
     };
     assert.ok(await reconcileRepairOwner({ ...f, now, readImpl }));
     const count = reads;
@@ -511,14 +580,50 @@ test('repair observation bounds cadence and retains live, early absent and unrea
   }
 });
 
+test('repeated overdue dispatch absence pages once and projects operator custody', async t => {
+  const f = { ...fixture(t), now: '2026-01-01T00:00:00Z' };
+  const epoch = reserveRepairEpoch(f).epoch;
+  const readImpl = async () => ({ ok: true, roots: [], absenceProof: {
+    version: 1, kind: 'canonical-exact-selector-absence' } });
+  const pages = [];
+  const { observeClosureWait } = await import('../src/ama/closure-wait.mjs');
+  const observeWait = args => observeClosureWait({ ...args, pageImpl: async (message, options) => {
+    pages.push({ args, message, options });
+  } });
+  const first = await reconcileRepairOwner({ ...f, now: Date.parse(f.now) + 1000, readImpl, observeWait });
+  assert.equal(first.ownerState, 'absent');
+  assert.equal(first.absentObservations, 1);
+  const overdue = await reconcileRepairOwner({ ...f, now: Date.parse(f.now) + REPAIR_ABSENCE_ESCALATE_MS + 1000,
+    readImpl, observeWait });
+  assert.equal(overdue.ownerState, 'absent-unfenced');
+  assert.equal(overdue.absentObservations, 2);
+  assert.equal(overdue.terminalAt, undefined);
+  assert.equal(pages.length, 1);
+  assert.equal(pages[0].args.immediate, true);
+  assert.equal(pages[0].args.waitClass, 'repair-absent-unfenced');
+  assert.equal(pages[0].options.severity, 'SEV1');
+  await reconcileRepairOwner({ ...f, now: Date.parse(f.now) + REPAIR_ABSENCE_ESCALATE_MS + 32_000,
+    readImpl, observeWait });
+  assert.equal(pages.length, 1);
+  const { nextAction, deriveNextActionSnapshot } = await import('../src/pr-next-action.mjs');
+  const action = nextAction(deriveNextActionSnapshot({ subjectKey: `${repo}#${prNumber}`, head: old,
+    observedAt: new Date(Date.parse(f.now) + REPAIR_ABSENCE_ESCALATE_MS + 1000).toISOString(),
+    observations: { pr: { state: 'OPEN', headSha: old, labels: [] },
+      policy: { autonomousMergeExecutionEnabled: true }, progress: { repairEpoch: overdue } } }));
+  assert.equal(action.reason, 'repair-absent-unfenced');
+  assert.equal(action.actor, 'operator');
+  const { resolveTtmOwner } = await import('../src/ttm-owner.mjs');
+  assert.equal(resolveTtmOwner({ repairEpoch: overdue }).owner, 'operator');
+});
+
 test('failed retry-chain lookup retains repair custody as unknown', async t => {
   const f = { ...fixture(t), now: '2026-01-01T00:00:00Z' };
   const epoch = reserveRepairEpoch(f).epoch;
-  const now = Date.parse(f.now) + REPAIR_PROVISION_DEADLINE_MS;
+  const now = Date.parse(f.now) + 60 * 60_000;
   let reads = 0;
   const readImpl = async selector => {
     reads++;
-    if (selector.idempotency_key) return { ok: true, roots: ['fixture-launch'] };
+    if (selector.idempotency_key) return launchRead(epoch);
     assert.deepEqual(selector, { launch_request_ids: ['fixture-launch'], include_retry_chain: true });
     return { ok: false, reason: 'timeout' };
   };
@@ -530,12 +635,91 @@ test('failed retry-chain lookup retains repair custody as unknown', async t => {
   assert.equal(pendingRepairEpoch(f.rootDir, f).terminalAt, undefined);
 });
 
-test('a changed builder head binds before terminal worker retirement', async t => {
+test('a moved head needs exact publication evidence from the reservation launch or its retry', async t => {
+  for (const [publisher, publishedHead, matched] of [
+    ['fixture-launch', head, true], ['retry', head, true],
+    ['operator-launch', head, false], ['fixture-launch', later, false],
+  ]) {
+    const f = fixture(t), epoch = reserveRepairEpoch(f).epoch;
+    let reads = 0, attestations = 0;
+    const observed = await reconcileRepairOwner({ ...f, headSha: head,
+      readImpl: async selector => { reads++; return launchRead(epoch, 'failed', selector.include_retry_chain && 'succeeded'); },
+      readPublisher: async args => {
+        attestations++;
+        assert.equal(args.rootDir, f.rootDir);
+        assert.equal(args.currentHeadSha, head);
+        return { ok: true, launchRequestId: publisher, rowHeadSha: publishedHead };
+      } });
+    assert.equal(observed?.id, matched ? epoch.id : undefined);
+    assert.equal(observed?.publicationHead, matched ? head : undefined);
+    assert.equal(reads, 2);
+    assert.equal(attestations, 1);
+    const stored = readHammerRetryCapLedger(f.rootDir, f).repairEpochs[0];
+    assert.equal(stored.reviewHead, null);
+    assert.equal(Boolean(stored.terminalAt), !matched);
+    assert.equal(stored.publicationHead, matched ? head : undefined);
+    if (matched) {
+      assert.equal(stored.publicationLaunch, publisher);
+      const cached = await reconcileRepairOwner({ ...f, headSha: head.toUpperCase(),
+        now: Date.now() + REPAIR_OWNER_OBSERVE_MS * 2,
+        readImpl: () => assert.fail('verified publication must survive missed admission ticks') });
+      assert.equal(cached.publicationHead, head);
+    }
+  }
+});
+
+test('terminal owner at a foreign head releases custody without resetting spend or rereading', async t => {
+  const { resolveTtmOwner } = await import('../src/ttm-owner.mjs');
   const f = fixture(t), epoch = reserveRepairEpoch(f).epoch;
-  const pending = await reconcileRepairOwner({ ...f, headSha: head,
-    readImpl: async () => { throw new Error('must admit publication before probing retirement'); } });
-  assert.equal(pending.id, epoch.id);
-  assert.equal(bindRepairHead({ ...f, headSha: head, epochId: pending.id }).reviewHead, head);
+  const before = readHammerRetryCapLedger(f.rootDir, f);
+  const options = { ...f, headSha: head, readImpl: async () => launchRead(epoch),
+    readPublisher: async () => ({ ok: false, reason: 'missing-produced-head-attestation' }) };
+  assert.equal(await reconcileRepairOwner(options), null);
+  const after = readHammerRetryCapLedger(f.rootDir, f);
+  assert.equal(after.repairEpochs[0].terminalReason, 'foreign-head-after-terminal');
+  assert.equal(after.repairEpochs[0].reviewHead, null);
+  for (const key of ['attemptCount', 'targetAttemptCount', 'lifetimeAttemptCount', 'targetRemediationSha']) {
+    assert.equal(after[key], before[key]);
+  }
+  assert.equal(resolveTtmOwner({ repairEpoch: pendingRepairEpoch(f.rootDir, f),
+    review: { status: 'posted', suppressed: true } }).owner, null);
+  assert.equal(await reconcileRepairOwner({ ...options, now: Date.now() + 60_000,
+    readImpl: () => assert.fail('retired epochs must not be re-observed') }), null);
+});
+
+test('attestation failures and live retries at moved heads keep custody', async t => {
+  for (const [status, retry, reason] of [
+    ['failed', null, 'head-attestation-chain-read-failed'],
+    ['failed', null, 'invalid-produced-head-attestation'],
+    ['running', null, 'missing-produced-head-attestation'],
+    ['failed', 'running', 'missing-produced-head-attestation'],
+  ]) {
+    const f = fixture(t), epoch = reserveRepairEpoch(f).epoch;
+    const observed = await reconcileRepairOwner({ ...f, headSha: head,
+      readImpl: async () => launchRead(epoch, status, retry),
+      readPublisher: async () => ({ ok: false, reason }) });
+    assert.equal(observed.id, epoch.id);
+    assert.equal(pendingRepairEpoch(f.rootDir, f).terminalAt, undefined);
+  }
+});
+
+test('default repair publisher forwards HQ root and bounded exec options', async t => {
+  const f = fixture(t), epoch = reserveRepairEpoch(f).epoch;
+  let calls = 0;
+  const observed = await reconcileRepairOwner({ ...f, headSha: head, hqRoot: '/fixture/hq',
+    readImpl: async () => launchRead(epoch),
+    execFileImpl: async (command, args, options) => {
+      calls++;
+      assert.equal(command, 'hq');
+      assert.deepEqual(args, ['attest', 'chain', '--root', '/fixture/hq', '--repo', repo,
+        '--pr', String(prNumber), '--json']);
+      assert.equal(options.timeout, 8000);
+      return { stdout: JSON.stringify([{ kind: 'produced', valid: true, head_sha: head,
+        payload: { launch_request_id: 'fixture-launch', worker_class: 'codex' } }]) };
+    } });
+  assert.equal(calls, 1);
+  assert.equal(observed.publicationHead, head);
+  assert.equal(pendingRepairEpoch(f.rootDir, f).publicationLaunch, 'fixture-launch');
 });
 
 // Exercise the existing cross-process flock rather than a mocked in-process
@@ -628,4 +812,88 @@ test('canonical next action and health retain the reserved repair owner across s
   const held = nextAction(deriveNextActionSnapshot({ ...base,
     observations: { ...base.observations, pr: { state: 'OPEN', headSha: old, isDraft: true } } }));
   assert.equal(held.action, 'operator-hold');
+});
+
+test('final rescue: terminal invalid publication escalates without retiring or granting review', async t => {
+  const { resolveTtmOwner } = await import('../src/ttm-owner.mjs');
+  for (const reason of ['missing-launch-request-id', 'missing-worker-class',
+    'invalid-produced-head-attestation', 'head-attestation-chain-read-failed']) {
+    const f = { ...fixture(t), now: '2026-01-01T00:00:00Z' };
+    const epoch = reserveRepairEpoch(f).epoch;
+    const pages = [];
+    const { observeClosureWait } = await import('../src/ama/closure-wait.mjs');
+    const observeWait = args => observeClosureWait({ ...args, pageImpl: async () => pages.push(args) });
+    const options = { ...f, headSha: head, readImpl: async () => launchRead(epoch, 'failed'),
+      readPublisher: async () => ({ ok: false, reason }), observeWait };
+    const at = Date.parse(f.now) + 1000;
+    await reconcileRepairOwner({ ...options, now: at });
+    const held = await reconcileRepairOwner({ ...options, now: at + REPAIR_ABSENCE_ESCALATE_MS + 1 });
+    assert.equal(held.terminalAt, undefined);
+    assert.equal(held.reviewHead, null);
+    assert.equal(held.publicationHead, undefined);
+    assert.equal(resolveTtmOwner({ repairEpoch: held }).owner, 'operator', reason);
+    const { nextAction, deriveNextActionSnapshot } = await import('../src/pr-next-action.mjs');
+    const action = nextAction(deriveNextActionSnapshot({ subjectKey: `${repo}#${prNumber}`, head,
+      observedAt: new Date(at + REPAIR_ABSENCE_ESCALATE_MS + 1).toISOString(),
+      observations: { pr: { state: 'OPEN', headSha: head, labels: [] },
+        policy: { autonomousMergeExecutionEnabled: true }, progress: { repairEpoch: held } } }));
+    assert.equal(action.actor, 'operator');
+    assert.equal(action.reason, 'repair-publication-unproven');
+    assert.equal(pages.length, 1);
+    assert.equal(pages[0].waitClass, 'repair-publication-unproven');
+    await reconcileRepairOwner({ ...options, now: at + REPAIR_ABSENCE_ESCALATE_MS + 32_000 });
+    assert.equal(pages.length, 1, 'operator page must be durable and deduplicated');
+  }
+});
+
+test('final rescue: live negative publisher cache expires and invalidates on owner or head changes', async t => {
+  const f = { ...fixture(t), now: '2026-01-01T00:00:00Z' };
+  const epoch = reserveRepairEpoch(f).epoch;
+  let ownerState = 'running', reads = 0, publisherReads = 0;
+  const options = { ...f, headSha: head,
+    readImpl: async () => { reads++; return launchRead(epoch, ownerState); },
+    readPublisher: async () => { publisherReads++; return { ok: false, reason: 'missing-produced-head-attestation' }; } };
+  const at = Date.parse(f.now) + 1000;
+  await reconcileRepairOwner({ ...options, now: at });
+  await reconcileRepairOwner({ ...options, now: at + 31_000 });
+  assert.equal(reads, 4, 'dispatch ownership must remain freshly observed');
+  assert.equal(publisherReads, 1, 'same live missing publisher should be cached');
+  await reconcileRepairOwner({ ...options, now: at + 121_000 });
+  assert.equal(publisherReads, 2, 'a negative result cannot hide later publication forever');
+  await reconcileRepairOwner({ ...options, headSha: later, now: at + 152_000 });
+  assert.equal(publisherReads, 3, 'new head invalidates the cache');
+  ownerState = 'failed';
+  assert.equal(await reconcileRepairOwner({ ...options, headSha: later, now: at + 183_000 }), null);
+  assert.equal(publisherReads, 4, 'terminal owner must force a fresh publisher read');
+});
+
+test('final rescue: timestamp-only successor interleavings preserve identity fences', async t => {
+  let admitted = 0;
+  for (let trial = 0; trial < 20; trial++) {
+    const f = fixture(t);
+    reserveRepairEpoch(f);
+    const file = hammerRetryCapFilePath(f.rootDir, f);
+    const data = JSON.parse(readFileSync(file, 'utf8'));
+    Object.assign(data.repairEpochs[0], { ownerLaunch: 'fixture-launch', ownerState: 'terminal',
+      ownerObservedAt: '2026-01-01T00:00:00Z' });
+    writeFileSync(file, JSON.stringify(data));
+    const snapshot = pendingRepairEpoch(f.rootDir, f);
+    data.repairEpochs[0].ownerObservedAt = '2026-01-01T00:01:00Z';
+    writeFileSync(file, JSON.stringify(data));
+    const successor = reserveRepairEpoch({ ...f, ownerKey: 'next', ownerSnapshot: snapshot,
+      terminalOwner: { ...snapshot, ownerState: 'terminal', ownerLaunch: 'fixture-launch' } });
+    admitted += successor.ok === true;
+  }
+  assert.equal(admitted, 20, 'all 20 timestamp-only interleavings must admit the proven successor');
+  for (const change of [{ ownerLaunch: 'another-launch' }, { publicationHead: head },
+    { ownerState: 'live' }]) {
+    const f = fixture(t), snapshot = reserveRepairEpoch(f).epoch;
+    const file = hammerRetryCapFilePath(f.rootDir, f);
+    const data = JSON.parse(readFileSync(file, 'utf8'));
+    Object.assign(data.repairEpochs[0], change);
+    writeFileSync(file, JSON.stringify(data));
+    const successor = reserveRepairEpoch({ ...f, ownerKey: 'next', ownerSnapshot: snapshot,
+      terminalOwner: { ...snapshot, ownerState: 'terminal', ownerLaunch: 'fixture-launch' } });
+    assert.equal(successor.ok, false, JSON.stringify(change));
+  }
 });

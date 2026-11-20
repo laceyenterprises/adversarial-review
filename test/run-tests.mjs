@@ -4,7 +4,8 @@ import { constants, tmpdir } from 'node:os';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { MAX_WORKERS, SERIAL_TEST_FILES, orderFiles, workerCount } from './helpers/parallel-plan.mjs';
+import { SERIAL_TEST_FILES, orderFiles, workerCount, suiteTimeoutMs } from './helpers/parallel-plan.mjs';
+import { fixtureGitEnv } from './helpers/fixture-git-env.mjs';
 import { reclaimAbandonedSandboxes, SANDBOX_OWNER_MARKER } from './helpers/runner-sandbox.mjs';
 
 const testDir = path.dirname(fileURLToPath(import.meta.url));
@@ -158,6 +159,7 @@ try {
   const files = [...serialFiles, ...parallelFiles];
   const paths = Object.fromEntries(files.map((file, index) => [file, path.join(makeWorkerRoot(index), file)]));
   const concurrency = workerCount(parallelFiles.length);
+  const deadlineMs = suiteTimeoutMs(parallelFiles.length);
   const logDir = path.join(sandboxRoot, 'logs');
   mkdirSync(logDir);
   const configPath = path.join(sandboxRoot, 'parallel-config.json');
@@ -170,7 +172,7 @@ try {
         .flatMap((name) => ['--import', path.join('test', 'helpers', `${name}.mjs`)]),
     ],
   }));
-  console.error(`Test plan: ${files.length} files, ${serialFiles.length} exclusive, ${concurrency} parallel workers in measured order (maximum ${MAX_WORKERS}).`);
+  console.error(`Test plan: ${files.length} files, ${serialFiles.length} exclusive, ${concurrency} parallel workers in measured order.`);
   // Tests own their CLI fixture; an omitted stub must not use host credentials.
   const fixtureBin = path.join(sandboxRoot, 'fixture-bin');
   mkdirSync(fixtureBin);
@@ -201,10 +203,11 @@ try {
   // Live Hammer head, lease and audit state belongs to the owning controller.
   // Synthetic phase fixtures must supply their own state instead of inheriting it.
   const testEnv = Object.fromEntries(Object.entries(process.env).filter(([key]) =>
-    !inheritedStatePaths.has(key) && !key.startsWith('HCP_') && !key.startsWith('HAM_') && !/^(?:GH_.*TOKEN|GITHUB_.*TOKEN|.*_GH_TOKEN)(?:_REFRESH_COMMAND|_EXPIRES_AT)?$/.test(key)));
+    !inheritedStatePaths.has(key)
+    && !key.startsWith('HCP_') && !key.startsWith('HAM_') && !/^(?:GH_.*TOKEN|GITHUB_.*TOKEN|.*_GH_TOKEN)(?:_REFRESH_COMMAND|_EXPIRES_AT)?$/.test(key)));
   child = spawn(process.execPath, [path.join(testDir, 'helpers', 'parallel-runner.mjs'), configPath], {
     cwd: sandboxRoot,
-    env: {
+    env: fixtureGitEnv({
       ...testEnv,
       // The preload replaces these again in each test-file process. Even the
       // node:test coordinator must never inherit the caller's live roots.
@@ -222,7 +225,7 @@ try {
       TEMP: sandboxTmpDir,
       PATH: [fixtureBin, path.dirname(process.execPath), process.env.PATH].filter(Boolean).join(path.delimiter),
       NODE_OPTIONS: [process.env.NODE_OPTIONS, '--preserve-symlinks', '--preserve-symlinks-main'].filter(Boolean).join(' '),
-    },
+    }),
     stdio: ['inherit', 'inherit', 'inherit', 'ipc'],
     detached: process.platform !== 'win32',
   });
@@ -254,7 +257,7 @@ try {
     terminateChild('SIGTERM');
     console.error(`Test deadline reached with ${unfinished.size - active.size} files waiting to start.`
       + ` Active test files: ${[...active].sort().join(', ') || '(none reported)'}.`);
-  }, 900_000);
+  }, deadlineMs);
   const result = await childExit;
 
   const checkoutDataAfter = listFiles(checkoutDataDir);
@@ -263,7 +266,7 @@ try {
     console.error(`Test suite wrote into the checkout data directory:\n${leakedFiles.join('\n') || '(directory created)'}`);
     process.exitCode = 1;
   } else if (timedOut) {
-    throw Object.assign(new Error('Test suite timed out after 900 seconds'), { code: 'ETIMEDOUT' });
+    throw Object.assign(new Error(`Test suite timed out after ${deadlineMs / 1000} seconds`), { code: 'ETIMEDOUT' });
   } else if (process.exitCode !== 1) {
     process.exitCode = result.status ?? 1;
   }

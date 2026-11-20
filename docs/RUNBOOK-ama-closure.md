@@ -989,18 +989,48 @@ reservation as remediation custody during provisioning and publication. A
 pending reservation takes precedence over a prior epoch that reviewed the same
 base head, so the watcher cannot admit competing review work on that head.
 Watcher custody, verdict admission revision references and rescue head matching
-compare hexadecimal commit SHAs case-insensitively, preserving stored spelling. A live
-or uncertain submission retains custody. Before admission the watcher observes
-pending repair ownership at most once per 30 seconds. Complete terminal
-launch/retry evidence retires the reservation under the ledger flock; an exact-key
-absence proof also retires an unlaunched reservation after ten minutes from
-`reservedAt`. Unreadable or unproven absence retains custody. Retirement removes
+compare hexadecimal commit SHAs case-insensitively, preserving stored spelling.
+A live or uncertain submission retains custody. Before admission the watcher
+observes pending repair ownership at most once per 30 seconds. A moved head
+requires an exact-head verified produced attestation from the reservation launch
+or its retry before it can consume the reservation. Complete terminal
+launch/retry evidence at the base head retires the reservation under the ledger
+flock. At a moved head, that same terminal evidence plus a successful attestation
+read showing no produced publication or a foreign publisher retires with
+`terminalReason: foreign-head-after-terminal`. This releases custody for the
+ordinary review/ownerless path without binding or resetting repair counters.
+Unreadable or invalid attestations retain custody. Verified `publicationHead`
+and `publicationLaunch` persist under the flock so a missed admission tick
+does not lose publication proof. The attestation reader uses the configured HQ
+root (the standard `HQ_ROOT` / `AGENT_OS_HQ_ROOT` resolver) and an eight-second
+subprocess budget. Point-in-time absence retains custody because the submitter may still
+enqueue. A reservation with a canonical project supplied at creation uses the
+existing project/repository paired grant for its exact-key read. Older
+reservations keep their unscoped lookup. Retirement removes
 repair ownership from next-action and TTM projections, allowing the existing
 ownerless clock and SEV1 page. Corrupt ledgers and busy refund writers defer only
 the affected PR. No replacement PR
 is opened. After both dispatch and review-service versions load, the runtime
 owner must retain an original-branch merge receipt and a 24-hour observation
 without replacement PRs used to escape budgets.
+
+A terminal owner at a moved head whose publication remains invalid or lacks
+launch/class identity retains the safety fence. After two observations and ten
+minutes from the first matching terminal publication observation,
+`publisherObservation.operatorRequired` projects operator custody in next-action
+and TTM and sends a deduplicated `repair-publication-unproven` SEV1 page. The
+observation records head, owner launch, owner state, retry launches, reason,
+first/last observation times and count. An invalid attestation is never treated
+as verified foreign publication or granted review admission.
+
+For a live owner, a negative missing-attestation result is cached for at most two
+minutes for the same head, owner launch/state and retry chain. Dispatch owner
+reads still run at the normal cadence; a changed identity/state/head/chain or
+expiry forces a fresh publisher read. Verified publication keeps its existing
+durable proof. Successor reservation CAS ignores only `ownerObservedAt`; owner
+identity/state, publication, review/terminal state and spend fields still fence
+concurrent changes. Watcher observation updates retain their full snapshot CAS
+so a late observation cannot overwrite a newer one.
 
 `bin/repair-in-place.mjs` rejects missing or malformed heads (anything other
 than 40 hexadecimal characters) before opening the review database or reading
@@ -5752,8 +5782,22 @@ Absolute paths, leading hyphens and parent traversal segments print canonical
 usage and exit 64, without a validation verdict or environment-fallback receipt.
 Agent OS runs `python3 scripts/ci-mirror/run-ci-mirror.py -- <changed files>`;
 this repository runs selected touched/direct-importer tests through
-`node test/run-tests.mjs <test files>`. Importer paths are resolved relative to
-each test directory, including shared test helpers. Legacy command-style callers
+`node test/run-tests.mjs <test files>`. That runner defaults locally to half
+the available logical CPUs rounded down, clamped to one through four workers;
+`AR_TEST_CONCURRENCY` overrides it, while CI retains up to eight. Selected
+parallel files cap the actual worker count. Its internal deadline stays at
+900 seconds when those files fit within the configured worker limit; otherwise
+it is `900 * 8 / min(8, limit)` seconds. The hammer’s outer load-aware
+validation budget and idle limit remain independently authoritative. The
+`hammer-validate: targeted Node validation` log line records the selected file
+count, configured worker limit, wall time, outer budget, and validator exit
+status. Use it with the `run-bounded` timeout reason to compare duration and
+timeout frequency across worker limits after deployment. Focus on selections
+larger than four files and hosts with two or three logical CPUs. Generic
+bounded command execution preserves arguments in every repository; callers of
+direct `node --test` select concurrency explicitly with `--test-concurrency`.
+Importer paths are resolved relative to each test directory, including shared
+test helpers. Legacy command-style callers
 derive changed paths from Git; unavailable Git comparison evidence uses the same
 canonical-setup fallback below. Never synthesize pytest/PYTHONPATH.
 For repositories with `pnpm-lock.yaml`, the selector reads ungated pnpm script

@@ -7,13 +7,21 @@ import { createHistoryReader } from '../src/ama/history-reader.mjs';
 import { proveMigrationRenumbers, verifiedMigrationRenumbers } from '../src/ama/migration-renumber.mjs';
 import { checkPrimaryChange } from '../src/ama/primary-change.mjs';
 
-const fixture = gunzipSync(readFileSync(new URL('./fixtures/migration-renumber-11143/history.json.gz', import.meta.url)));
+const fixture = name => gunzipSync(readFileSync(new URL(`./fixtures/migration-renumber-11143/${name}.json.gz`, import.meta.url)));
+const initial = fixture('history');
+const subsequent = fixture('subsequent-main');
 const parent = 'platform/session-ledger/alembic/versions/340_20261119T130000Z_e5570001_successful_rss_index.py';
 const ledger = 'platform/session-ledger/src/session_ledger';
 
-function replay({ continued = false } = {}) {
-  const { repo, evidence, responses, continuation } = JSON.parse(fixture);
-  if (continued) {
+function replay({ continued = false, subsequentMain = false } = {}) {
+  const { repo, evidence, responses, continuation } = JSON.parse(initial);
+  if (continued || subsequentMain) {
+    if (subsequentMain) {
+      const later = JSON.parse(subsequent);
+      continuation.push(...later.continuation);
+      evidence.baseSha = evidence.comparisonMergeBase = later.base;
+      Object.assign(responses, later.responses);
+    }
     evidence.headSha = continuation.at(-1);
     evidence.diagnosticCommitRange.push(...continuation.map(sha => ({ sha })));
   }
@@ -31,6 +39,12 @@ function replay({ continued = false } = {}) {
     return value;
   };
   const commit = head => responses[`${prefix}git/commits/${head}`];
+  const setCommit = (sha, tree, parents) => {
+    responses[`${prefix}git/commits/${sha}`] = { sha, tree: { sha: tree }, parents: parents.map(sha => ({ sha })) };
+  };
+  const setComparison = (base, head, status, mergeBase = base) => {
+    responses[`${prefix}compare/${base}...${head}`] = { status, merge_base_commit: { sha: mergeBase } };
+  };
   const tree = ref => responses[`${prefix}git/trees/${ref}`].tree;
   const alterTree = (head, path, edit) => {
     const parts = path.split('/');
@@ -76,7 +90,7 @@ function replay({ continued = false } = {}) {
   const nativeReader = () => createHistoryReader({
     execGhWithRetryImpl: async ({ args: argv }) => ({ stdout: JSON.stringify(await get(argv[1])) }),
   });
-  return { args, evidence, commit, calls, alterTree, alterBlob, prove, nativeReader, tree };
+  return { args, evidence, commit, calls, alterTree, alterBlob, prove, nativeReader, tree, setCommit, setComparison };
 }
 
 test('certifies the immutable 11143 two-parent integration and consumes its exact preservation paths', async () => {
@@ -107,6 +121,117 @@ test('certifies the same migration at the two actual first-parent continuation s
   assert.ok(proof, JSON.stringify(f.evidence.migrationRenumberDiagnostics));
   assert.deepEqual(proof.mainIntegration.snapshots.map(entry => entry.integrated), [false, false, false, true, true, true]);
   assert.equal(proof.headSha, '375e755c091bdccc06f404b1fe43838386891499');
+});
+
+test('certifies the actual second main integration at the full Agent OS #11143 head', async () => {
+  const f = replay({ subsequentMain: true });
+  const initialReplay = replay();
+  const [initialProof] = await initialReplay.prove();
+  assert.equal(checkPrimaryChange(f.evidence, f.args.headSha).reason, 'primary-change-reverted');
+  f.args.get = f.nativeReader();
+  assert.equal(f.args.headSha, '45f25a244b3e99e84bcd7c03498dc9f06850bd4a');
+  const [source, main] = f.commit(f.args.headSha).parents.map(p => p.sha);
+  assert.equal(source, '72a4f711531785e5a75c31b43ff7de26317cdaf7');
+  assert.equal(main, '8adcc49518a67a49b170f325b0230262a3095693');
+  const compare = await f.args.get.metadata(`repos/${f.args.repo}/compare/${main}...${f.args.headSha}`);
+  assert.equal(compare.merge_base_commit.sha, main);
+
+  const [proof] = await f.prove();
+  assert.ok(proof, JSON.stringify(f.evidence.migrationRenumberDiagnostics));
+  assert.deepEqual(proof.mainIntegration.parent, initialProof.mainIntegration.parent);
+  assert.deepEqual(proof.mainIntegration.additionalMainParents, [{
+    sha: main, tree: f.commit(main).tree.sha, parents: f.commit(main).parents.map(p => p.sha),
+  }]);
+  assert.equal(proof.mainIntegration.comparisonMergeBase, main);
+  assert.deepEqual(proof.mainIntegration.snapshots.map(entry => entry.sha), f.evidence.diagnosticCommitRange.map(entry => entry.sha));
+  assert.deepEqual(proof.mainIntegration.snapshots.at(-1).parents, [source, main]);
+  assert.deepEqual(proof.chain.map(entry => entry.revisionNumber), [340, 341]);
+  assert.equal(proof.sqlBlob, initialProof.sqlBlob);
+  const answer = checkPrimaryChange(f.evidence, f.args.headSha);
+  assert.equal(answer.ok, true, JSON.stringify(answer));
+  assert.deepEqual(answer.derivedChanges, [proof]);
+  assert.ok(f.calls.length < 100, `read ${f.calls.length} objects`);
+});
+
+const advancedBase = 'f'.repeat(40);
+const rssMain = '283d06e47679a91f6802f729a418746608f1e180';
+for (const comparisonMergeBase of [rssMain, advancedBase]) {
+  test(`a non-RSS first integration reaches snapshot proof with comparison base ${comparisonMergeBase}`, async () => {
+    const f = replay();
+    f.commit(f.args.headSha).parents[1].sha = advancedBase;
+    f.evidence.comparisonMergeBase = comparisonMergeBase;
+    assert.deepEqual(await f.prove(), []);
+    // The historical RSS declaration/slot mismatch still prevents a general
+    // certificate, but the ordinary proof must run and explain its own refusal.
+    assert.ok(f.calls.includes(`repos/${f.args.repo}/git/trees/${f.evidence.primaryHead}?recursive=1`));
+    const reasons = f.evidence.migrationRenumberDiagnostics.map(entry => entry.reason);
+    assert.ok(reasons.includes('snapshot-body-mismatch'), JSON.stringify(reasons));
+    assert.equal(reasons.at(-1), 'final-snapshot-unproven');
+    assert.ok(!reasons.includes('main-integration-unproven'));
+  });
+}
+
+function advanceObservedBase(f, status, mergeBase) {
+  f.setComparison(rssMain, advancedBase, 'ahead');
+  f.setComparison(f.evidence.comparisonMergeBase, advancedBase, status, mergeBase);
+  f.evidence.baseSha = advancedBase;
+}
+
+test('accepts an unchanged migration parent independently proved in the ancestry of a newer observed main', async () => {
+  const f = replay({ subsequentMain: true });
+  advanceObservedBase(f, 'ahead');
+  const [proof] = await f.prove();
+  assert.ok(proof, JSON.stringify(f.evidence.migrationRenumberDiagnostics));
+  assert.equal(proof.mainIntegration.observedBase, advancedBase);
+  assert.notEqual(proof.mainIntegration.comparisonMergeBase, advancedBase);
+});
+
+test('proves every later main parent in order and refuses a changed earlier parent even if the last is unchanged', async () => {
+  const f = replay({ subsequentMain: true });
+  const { headSha, baseSha } = f.evidence;
+  const thirdMerge = 'e'.repeat(40);
+  f.setCommit(advancedBase, f.commit(baseSha).tree.sha, [baseSha]);
+  f.setCommit(thirdMerge, f.commit(headSha).tree.sha, [headSha, advancedBase]);
+  advanceObservedBase(f, 'ahead');
+  f.setComparison(advancedBase, advancedBase, 'identical');
+  f.evidence.comparisonMergeBase = advancedBase;
+  f.args.headSha = f.evidence.headSha = thirdMerge;
+  f.evidence.diagnosticCommitRange.push({ sha: thirdMerge });
+
+  const [proof] = await f.prove();
+  assert.ok(proof, JSON.stringify(f.evidence.migrationRenumberDiagnostics));
+  assert.deepEqual(proof.mainIntegration.additionalMainParents.map(commit => commit.sha), [baseSha, advancedBase]);
+  f.alterBlob(baseSha, `${ledger}/alembic_postgres_revisions/r340.py`,
+    text => text.replace('concurrent_index_only=True', 'concurrent_index_only=False'));
+  assert.deepEqual(await f.prove(), []);
+  assert.equal(checkPrimaryChange(f.evidence, thirdMerge).reason, 'primary-change-reverted');
+});
+
+for (const [label, edit] of [
+  ['an unchanged migration parent outside trusted main ancestry', f => advanceObservedBase(f, 'diverged', rssMain)],
+  ['an ahead comparison with the wrong merge base', f => advanceObservedBase(f, 'ahead', rssMain)],
+  ['an observed comparison base different from the last second parent', f => { f.evidence.comparisonMergeBase = rssMain; }],
+  ['an unchanged but stale main parent', f => { f.commit(f.args.headSha).parents[1].sha = rssMain; }],
+  ['an octopus merge', f => { f.commit(f.args.headSha).parents.push({ sha: rssMain }); }],
+  ['out-of-order first-parent history', f => {
+    const range = f.evidence.diagnosticCommitRange;
+    [range[6], range[7]] = [range[7], range[6]];
+  }],
+  ['an unreadable later main parent', f => { f.commit(f.evidence.baseSha).tree = null; }],
+  ['a changed later main migration tree with an unchanged candidate tree', f => {
+    f.alterTree(f.evidence.baseSha, parent, (entries, name) => entries.push({
+      ...entries.find(entry => entry.path === name), path: '900_extra.py',
+    }));
+  }],
+  ['an intermediate child operation restored by the second merge', f => {
+    const source = f.commit(f.args.headSha).parents[0].sha;
+    f.alterBlob(source, `${ledger}/alembic_postgres_revisions/r341.py`, text => text.replace('CREATE TABLE', 'CREATE VIEW'));
+  }],
+]) test(`refuses ${label} after the certified RSS integration`, async () => {
+  const f = replay({ subsequentMain: true });
+  edit(f);
+  assert.deepEqual(await f.prove(), []);
+  assert.equal(checkPrimaryChange(f.evidence, f.args.headSha).reason, 'primary-change-reverted');
 });
 
 for (const [label, path, transform] of [
@@ -201,7 +326,7 @@ for (const [label, clone] of [
   ['round-tripped evidence', evidence => JSON.parse(JSON.stringify(evidence))],
   ['cloned proof', evidence => ({ ...evidence, migrationRenumberProofs: structuredClone(evidence.migrationRenumberProofs) })],
 ]) test(`${label} exposes its unbound certificate in the native refusal`, async () => {
-  const f = replay();
+  const f = replay({ subsequentMain: true });
   const [proof] = await f.prove();
   assert.ok(proof);
   const evidence = clone(f.evidence);
@@ -218,7 +343,7 @@ for (const [label, clone] of [
 });
 
 test('a copied proof, a changed binding, and a changed head each lose preservation authority', async () => {
-  const f = replay();
+  const f = replay({ subsequentMain: true });
   const [proof] = await f.prove();
   assert.ok(proof, JSON.stringify(f.evidence.migrationRenumberDiagnostics));
   assert.deepEqual(verifiedMigrationRenumbers(f.evidence, f.evidence.primaryHead), []);
@@ -229,6 +354,9 @@ test('a copied proof, a changed binding, and a changed head each lose preservati
   f.evidence.repository = 'other/agent-os';
   assert.deepEqual(verifiedMigrationRenumbers(f.evidence, f.args.headSha), []);
   delete f.evidence.repository;
+  f.evidence.comparisonMergeBase = rssMain;
+  assert.deepEqual(verifiedMigrationRenumbers(f.evidence, f.args.headSha), []);
+  f.evidence.comparisonMergeBase = proof.mainIntegration.comparisonMergeBase;
   const finalSQL = f.evidence.finalFiles.find(entry => entry.filename === proof.sqlDestination);
   finalSQL.sha = proof.blob;
   assert.deepEqual(verifiedMigrationRenumbers(f.evidence, f.args.headSha), []);

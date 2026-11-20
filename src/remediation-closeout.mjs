@@ -73,10 +73,8 @@ export function remediationCloseout({ rootDir, job, headSha, workerPushedHeadSha
       || (finalFixAll && !boundFinalFixAll)));
   // Publication moves custody only. The shared closer still consumes the
   // original findings and must validate the live head before any merge.
-  const finalPush = final && reviewAvailable && !fullReviewRequired && workerPublishedHead
-    && Boolean(job.revisionRef) && review.headSha === job.revisionRef
-    && ['comment-only', 'approved', 'request-changes'].includes(review.verdict)
-    && review.blockingFindingState === 'known';
+  const finalPush = final && !fullReviewRequired && workerPublishedHead
+    && (!finalFixAll || boundFinalFixAll);
   let policy = snapshot?.observations?.policy;
   if (!policy) {
     try {

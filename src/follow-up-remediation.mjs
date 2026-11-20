@@ -2376,7 +2376,7 @@ async function reconcileFollowUpJobWithinRepositoryCycle({
     const finalRound = await resolveCommentOnlyFinalRoundCompletion({
       job, jobPath, reply: parsedReply?.reReview?.originalOperationalBlockers
         ? { ...parsedReply, operationalBlockers: parsedReply.reReview.originalOperationalBlockers } : parsedReply,
-      worker, liveness, workspaceDir: paths.workspaceDir,
+      workspaceDir: paths.workspaceDir,
       auditWorkspaceForContaminationImpl, inspectRemediationCiRegressionImpl, deliverAlertImpl, execFileImpl, log,
     });
     if (!workerPublishedHead && !finalRound.workerPushedHeadSha

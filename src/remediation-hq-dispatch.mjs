@@ -204,14 +204,20 @@ async function resolveHqWorkerWorkspace({
   if (persistedWorkspaceDir && existsSync(join(persistedWorkspaceDir, '.git'))) {
     return assertRemediationWorkspaceCustody(persistedWorkspaceDir, worker, env);
   }
+  const status = await readHqWorkerStatus({ worker, execFileImpl, env, logger, parse: parseHqDispatchWorkspaceStatus });
+  if (status) return assertRemediationWorkspaceCustody(status.workspaceDir, worker, env);
+  if (worker?.requiresProducedAttestation) {
+    throw new Error('final-fix-all HQ workspace custody unavailable: missing dispatch handle');
+  }
+  return null;
+}
+
+export async function readHqWorkerStatus({
+  worker, execFileImpl = execFileAsync, env = process.env, logger = console, parse = parseHqDispatchStatus,
+}) {
   const dispatchId = String(worker?.dispatchId || '').trim();
   const hqRoot = worker?.hqRoot || resolveHqRoot(env, { requireExists: false });
-  if (!dispatchId || !hqRoot) {
-    if (worker?.requiresProducedAttestation) {
-      throw new Error('final-fix-all HQ workspace custody unavailable: missing dispatch handle');
-    }
-    return null;
-  }
+  if (!dispatchId || !hqRoot) return null;
   const hqBin = resolveHqBin(env);
   const args = [
     'dispatch',
@@ -227,9 +233,9 @@ async function resolveHqWorkerWorkspace({
       HQ_ROOT: hqRoot,
     },
     maxBuffer: 5 * 1024 * 1024,
+    timeout: 15_000,
   });
-  return assertRemediationWorkspaceCustody(
-    parseHqDispatchStatusOutput(stdout, args, parseHqDispatchWorkspaceStatus, logger).workspaceDir, worker, env);
+  return parseHqDispatchStatusOutput(stdout, args, parse, logger);
 }
 
 function isHqCancelRetryable(err) {

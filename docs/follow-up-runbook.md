@@ -2189,11 +2189,28 @@ prior reviewed head is known); publication alone cannot satisfy the review gate.
 An inspected workspace HEAD overrides reply hashes: when it still equals the
 job's `revisionRef`, external SHAs in worker commentary cannot create publication
 debt. Reported commit evidence remains a fallback for unavailable HQ workspaces.
+For HQ jobs, run `hq dispatch status <dispatchId> --json --root <hqRoot>`
+in the recorded owner's scope. Reconciliation matches the recorded launch and
+ticket to the status and uses the repository checkout selected by HQ beneath
+its worker slot. The stored workspace path can refer to the slot itself.
+Conflicting or missing associations, including a slot with multiple checkouts
+and no selection, leave publication unproven. Do not pick a directory by name,
+copy a manifest, or edit a job to repair the association.
+
+For an HQ publication, the selected checkout must identify the job repository
+as its origin. The live PR and its destination ref must identify the same
+repository, branch, and full commit. The proof rechecks the live PR after Git
+inspection and requires every retained worker patch. A publisher error after
+the branch update can coexist with proven Git publication. Source-policy
+acceptance still requires its own signed attestation, and final completion
+still evaluates the validated reply and any unresolved findings or blockers.
+
 Publisher branch hydration uses the caller's environment, including scoped
 GitHub credentials, for the PR metadata read as well as Git commands.
 CI-admission publication recovery supplies its already observed live head to
-the structural replay proof. The proof validates the SHA and still performs
-a fresh GitHub head check after inspecting immutable Git objects. Concurrent
+the structural replay proof. HQ recovery requires the retained commit to
+resolve unambiguously to the full checkout tip. A failed or conflicting terminal write
+keeps the source record and its publication evidence. Concurrent
 admission that finds the same job reclassified in place as `max-rounds-reached`
 reports budget exhaustion at that proven head and retains operator escalation.
 

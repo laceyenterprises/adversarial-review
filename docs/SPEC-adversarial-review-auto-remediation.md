@@ -95,14 +95,16 @@ both de-duplicate on (repo, PR, reviewed head, review-body digest) under a
 generation-chain claim, and a caller that finds the claim held by a live creator
 waits for that creator instead of treating the review as already queued.
 Reconciliation suppresses that worker's requested re-review and records
-`completion.workerPushedHeadSha` only when the worker workspace's local `HEAD`
-matches a fresh GitHub PR-head lookup, its commit carries the matching
-`Worker-Job-Id` trailer, the server-side branch-contamination audit passes
-(using the HQ topic workspace for HQ-dispatched workers), and the local replay
-proof holds: every reviewed commit has a patch-equivalent in `HEAD`, `HEAD` adds
-no merge commit, and every other commit it adds beyond the reviewed head and the
-base carries the job's trailer. The remediator's mandatory base rebase makes most
-final-round pushes diverge from the reviewed head, so the replay proof, not
+`completion.workerPushedHeadSha` only when a fresh GitHub lookup confirms the
+published head, the commit carries the matching `Worker-Job-Id` trailer, the
+branch-contamination audit passes, and the local replay proof holds. The live
+head must preserve every worker patch when it differs from checkout `HEAD`.
+Every reviewed commit must have a patch-equivalent in the live head, the live
+head adds no merge commit, and every other commit it adds beyond the reviewed
+head and base carries the job's trailer. For HQ rounds, owner-scoped dispatch
+status selects the repository under its worker slot, and the checkout origin,
+PR and destination ref must agree with the job. The mandatory base rebase
+makes most final-round pushes diverge from the reviewed head, so the replay proof, not
 GitHub compare `ahead`, decides; a diverged head proven this way keeps its
 final-round authority and does not go back to normal re-review. The live lookup
 retries transient GitHub failures. A transient git failure during the proof

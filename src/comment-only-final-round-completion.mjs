@@ -25,7 +25,7 @@ import {
 import { resolveJobPRLifecycleSafe } from './follow-up-lifecycle.mjs';
 import { isWorkflowPath } from './remediation-workflow-push-capability.mjs';
 import { ensureJobBaseBranch } from './remediation-git-pr-io.mjs';
-import { parseHqWorkerWorkspaceFromPayload, resolveHqWorkerWorkspace } from './remediation-hq-dispatch.mjs';
+import { hqPublicationWorker, resolvePublicationWorkspace } from './remediation-publication-workspace.mjs';
 
 const CI_STATES_WITHOUT_FAILURE = new Set(['pending', 'green']);
 // A transient git failure (network, lock) in the contamination audit or the push
@@ -214,9 +214,8 @@ export async function resolveCommentOnlyFinalRoundCompletion({
   job,
   jobPath,
   reply,
-  worker = null,
-  liveness = null,
   workspaceDir = null,
+  expectedLocalHead = null,
   auditWorkspaceForContaminationImpl,
   inspectRemediationCiRegressionImpl,
   execFileImpl,
@@ -230,20 +229,18 @@ export async function resolveCommentOnlyFinalRoundCompletion({
   if (job?.finalRound !== 'comment-only' || !reply) {
     return { completed: false, workerPushedHeadSha: null, completionFields: {} };
   }
-  let proofWorkspaceDir = workspaceDir;
-  if (worker?.dispatchMode === 'hq') {
-    proofWorkspaceDir = parseHqWorkerWorkspaceFromPayload(liveness?.dispatchStatus || {})
-      || await resolveHqWorkerWorkspace({ worker, execFileImpl })
-      || workspaceDir;
-  }
+  const proofWorkspaceDir = await resolvePublicationWorkspace({ job, workspaceDir, execFileImpl, env, log });
   const { baseBranch } = await ensureJobBaseBranch({ job, jobPath, execFileImpl });
   let audit;
   let push;
   for (let attempt = 0; ; attempt += 1) {
-    audit = await auditWorkspaceForContaminationImpl({ workspaceDir: proofWorkspaceDir, baseBranch, execFileImpl });
+    audit = proofWorkspaceDir
+      ? await auditWorkspaceForContaminationImpl({ workspaceDir: proofWorkspaceDir, baseBranch, execFileImpl })
+      : { suspect: [], error: null };
     push = await proveFinalRoundWorkerPush({
       repo: job.repo, prNumber: job.prNumber, jobId: job.jobId, reviewedHead: job.revisionRef, baseBranch,
-      workspaceDir: proofWorkspaceDir, execFileImpl, log,
+      workspaceDir: proofWorkspaceDir, execFileImpl, log, expectedLocalHead,
+      publicationBranch: hqPublicationWorker(job) ? job.branch : null,
       withheldBecause: audit.error || audit.suspect?.length ? 'branch-contamination-audit-failed' : null,
     });
     const transient = transientProofFailure(audit, push);
@@ -306,7 +303,8 @@ export async function resolveCommentOnlyFinalRoundCompletion({
   // A worker that pushed nothing may still finish cleanly (it disproved the
   // findings); only a proven push can carry a partial/blocked reply over. An
   // unproven moved head carries no authority; watcher admission reviews it once.
-  const completed = classification.pendingCiOnly && (reply.outcome === 'completed' || Boolean(workerPushedHeadSha));
+  const completed = classification.pendingCiOnly && (Boolean(workerPushedHeadSha)
+    || (reply.outcome === 'completed' && (!hqPublicationWorker(job) || push.reason === 'no-push')));
   const reason = completed || !classification.pendingCiOnly ? classification.reason : 'no-proven-push';
   if (!completed) {
     log.warn?.(

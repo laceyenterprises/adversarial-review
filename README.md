@@ -2335,9 +2335,9 @@ GSR receipts distinguish absent stores, accepted drains and released holds;
 token mismatches exit nonzero without changing the hold.
 Final-round exact-head Comment-only reviews with non-blocking or demoted
 findings receive one durable builder fix-all round before findings closure.
-Its published head requires fresh full review: zero findings select normal
-daemon merge, and remaining findings select the configured closer/operator
-fallback. Pending fix-all work retains ownership through admission delays;
+The closer takes a proven fix-all publication and validates its exact head
+against the original findings, source preservation and required checks before
+eligible merge. Pending fix-all work retains ownership through admission delays;
 conflict and CI-only repair keep their hammer routes. A fix-all primary-line
 reversal requires worker-generated finding citations, a durable job bound to
 the reviewed head, and exact-commit produced attestation matching its owner
@@ -3297,7 +3297,7 @@ observes natural retry progress without manual rescue pumping. See
 
 ### explicit-review-intent
 
-One durable receipt per request; only a pending exact-head receipt admits one dispatch. Capacity, credentials and queue-depth holds retain pending intent indefinitely. The nominal 900-second threshold produces one waiting notice, never expiry. Refused receipts retain visible-notification debt across restart. Only a positively unstarted launch may return its own consumed receipt to pending under the session CAS.
+A durable exact-head receipt records accepted review admission. Worker completion follows ordinary deduplication and ceilings. A priority request can supersede an unconsumed worker receipt while preserving its waiting threshold. Capacity, credentials and queue depth retain pending intent. The waiting threshold produces a notice. Only a positively unstarted launch may return its consumed receipt to pending under the session CAS.
 
 ```mermaid
 stateDiagram-v2
@@ -3307,10 +3307,11 @@ stateDiagram-v2
     state "coalesced" as s3
     [*] --> s0: explicit-review-intent.01 accepted exact-head request
     s0 --> s1: explicit-review-intent.02 claim and session CAS immediately before dispatch
-    s0 --> s2: explicit-review-intent.03 head changed, terminal PR or ceiling
+    s0 --> s2: explicit-review-intent.03 head changed, terminal PR, ceiling or automatic closure handoff
     [*] --> s3: explicit-review-intent.04 additional request joins original pending head without changing waiting threshold
     s1 --> s2: explicit-review-intent.05 runtime dispatch fails after start
     s1 --> s0: explicit-review-intent.06 positively unstarted launch returns its own intent under session CAS
+    s0 --> s3: explicit-review-intent.07 worker receipt aliases a newly accepted priority request at the same head
     s1 --> [*]
     s2 --> [*]
     s3 --> [*]

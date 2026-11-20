@@ -1287,8 +1287,12 @@ async function dispatchAmaClosureFor({
   }
   // CYCLECAPHAM-01: the watcher's review-cycle-cap hand-off. The cap stops
   // review-then-remediate cycles, so the capped PR is a final-hammer close.
-  const remediationHandoff = findFinalRemediationPushJob(rootDir, {
+  const pushedRemediation = findFinalRemediationPushJob(rootDir, {
     repo: repoPath, prNumber, headSha: candidate?.headSha || currentRevisionRef });
+  // A final fix-all receipt carries one source review into closure. A newer
+  // delivered review (including an operator-requested pass) takes precedence.
+  const remediationHandoff = pushedRemediation?.closureHandoff?.reason === 'final-fix-all'
+    && pushedRemediation.revisionRef !== reviewStateRow?.reviewer_head_sha ? null : pushedRemediation;
   const reviewCycleCapReached = Boolean(remediationHandoff) || dispatchJob?.reviewCycleCapReached === true
     || ['system-review-ceiling-closure', 'system-budget-exhausted-closure'].includes(reviewStateRow?.rereview_reason);
   // CIBLOCKHAM-01: the same final-hammer close for a red-CI head with no

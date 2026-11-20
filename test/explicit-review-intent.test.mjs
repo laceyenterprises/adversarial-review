@@ -7,7 +7,10 @@ import { join } from 'node:path';
 import { ensureReviewStateSchema, openReviewStateDb, requestReviewRereview } from '../src/review-state.mjs';
 import { pendingExplicitReviewIntent, consumeExplicitReviewIntent, reconcileExplicitReviewIntents,
   explicitReviewRefusalBody, refuseFailedExplicitReviewDispatch, requeueUnstartedExplicitReviewDispatch,
-  recordExplicitReviewIntent } from '../src/explicit-review-intent.mjs';
+  recordExplicitReviewIntent, remediationReviewRequest, priorityReviewIntent } from '../src/explicit-review-intent.mjs';
+import { routeCappedReviewToClosure } from '../src/hamclose-review-admission.mjs';
+import { closeoutRereview, remediationCloseout } from '../src/remediation-closeout.mjs';
+import { deriveNextActionSnapshot } from '../src/pr-next-action.mjs';
 import { resolveAlreadyReviewedHeadDedup, createHeadDispatchLease } from '../src/reviewed-head-dispatch-gate.mjs';
 import { tryRetriggerReviewFromLabel } from '../src/follow-up-retrigger-review-label.mjs';
 import { applyLivePackCrossEditReview, evaluateLivePackCrossEdits } from '../src/live-pack-cross-edit.mjs';
@@ -91,6 +94,121 @@ test('RETRIGGERDEDUP-01: request replay and coalescing preserve the waiting thre
   assert.equal(f.request({ targetRevisionRef: 'b'.repeat(40) }).reason, 'explicit-review-request-identity-mismatch');
   assert.equal(f.request({ explicitReviewRequest: { requestId: 'request-one', actor: 'other-actor' } }).reason,
     'explicit-review-request-identity-mismatch');
+});
+
+const finalReview = '## Blocking issues\n- None.\n\n## Non-blocking issues\n- An unresolved finding.\n\n## Verdict\nComment only';
+const witnessOld = 'b'.repeat(40);
+const reviewedAt = '2026-11-20T22:29:53.000Z';
+const completedAt = '2026-11-20T22:50:00.000Z';
+
+function remediationAdmissionFixture(t, { reviewBody = finalReview, delivery = 'completed', pending = false,
+  passes = 3, completedRoundTimestamps } = {}) {
+  const f = fixture(t);
+  f.db.prepare(`UPDATE reviewed_prs SET reviewer='gemini', review_status=?, revision_ref=?,
+    reviewer_head_sha=?, posted_at=?, review_attempts=6, failed_at=? WHERE repo=? AND pr_number=?`)
+    .run(pending ? 'pending' : delivery === 'failed' ? 'failed' : 'posted',
+      pending ? headSha : witnessOld, pending ? null : witnessOld,
+      delivery === 'completed' && !pending ? reviewedAt : null,
+      delivery === 'failed' ? reviewedAt : null, repo, prNumber);
+  const insert = f.db.prepare(`INSERT INTO reviewer_passes(repo,pr_number,attempt_number,reviewer_class,pass_kind,
+    started_at,ended_at,status,head_sha,gh_comment_id,body_md) VALUES (?,?,?,'gemini',?,?,?,?,?,?,?)`);
+  for (let i = 1; i <= passes; i++) {
+    insert.run(repo, prNumber, i, i === 1 ? 'first-pass' : 'rereview',
+      reviewedAt, reviewedAt, delivery, witnessOld, delivery === 'completed' ? `review-${i}` : null,
+      delivery === 'completed' ? reviewBody : null);
+  }
+  const job = { jobId: 'example__review-fixture-pr-71-ci-only', repo, prNumber, reviewBody,
+    revisionRef: witnessOld, remediationPlan: { currentRound: 6, maxRounds: 2 } };
+  const closeout = remediationCloseout({ rootDir: f.rootDir, job, completedAt, headSha,
+    ciGate: { headSha, state: 'green' }, snapshot: deriveNextActionSnapshot({ observations: {
+      launches: { closer: null }, leases: { closer: null }, policy: { autonomousMergeExecutionEnabled: true },
+    } }) });
+  const completionRequest = closeoutRereview(closeout, 'retrigger-review: the CI patch is ready');
+  const queue = () => f.request({ explicitReviewRequest: remediationReviewRequest(job.jobId, 2),
+    reason: completionRequest.reason, requestedAt: completedAt });
+  const row = () => f.db.prepare('SELECT * FROM reviewed_prs WHERE repo=? AND pr_number=?').get(repo, prNumber);
+  const handoff = (observed = row()) => routeCappedReviewToClosure({ db: f.db, repo, prNumber, headSha,
+    row: observed, ceiling: 3, roundBudget: 2, completedRoundTimestamps, logger: quiet });
+  return { ...f, completionRequest, queue, row, handoff };
+}
+
+for (const pending of [false, true]) test(`CI-only worker completion reaches capped closeout (already pending: ${pending})`, async t => {
+  const f = remediationAdmissionFixture(t, { pending });
+  assert.equal(f.completionRequest.requested, true, 'completion without publication proof requests review admission');
+  assert.equal(f.queue().status, pending ? 'already-pending' : 'pending');
+  const workerIntent = f.intent();
+  assert.equal(workerIntent.actor, 'remediation-watch');
+  assert.equal(priorityReviewIntent(workerIntent), null);
+  assert.doesNotMatch(f.row().rereview_reason || '', /^retrigger-review:/u);
+  assert.equal((await dedup(workerIntent)).alreadyReviewed, true);
+  assert.equal(f.handoff(), true);
+  assert.equal(f.row().review_status, 'posted');
+  assert.equal(f.row().reviewer_head_sha, witnessOld, 'restore the reviewed head, never certify the CI patch');
+  assert.equal(f.row().review_attempts, 6);
+  assert.equal(f.intent(), undefined);
+  assert.equal(f.queue().reason, 'explicit-review-request-refused');
+});
+
+for (const humanFirst of [false, true]) test(`exact-head operator request wins coalescing (operator first: ${humanFirst})`, async t => {
+  const f = remediationAdmissionFixture(t, { pending: true });
+  const operator = () => f.request();
+  humanFirst ? operator() : f.queue();
+  const before = f.intent();
+  const observed = f.row();
+  humanFirst ? f.queue() : operator();
+  const intent = f.intent();
+  assert.equal(intent.actor, 'fixture-operator');
+  assert.equal(intent.expires_at, before.expires_at);
+  assert.equal(f.handoff(observed), false);
+  assert.equal((await dedup(priorityReviewIntent(intent))).reason, 'explicit-review-intent');
+  assert.match(f.row().rereview_reason, /^retrigger-review:/u);
+  assert.equal(claimAndConsume(f, intent), true);
+  assert.equal(f.queue().reason, 'explicit-review-request-consumed');
+});
+
+for (const [name, options] of [
+  ['below the delivered ceiling', { passes: 1 }],
+  ['missing the first review', { passes: 0, pending: true }],
+  ['failed initial review', { delivery: 'failed' }],
+  ['unreadable verdict', { reviewBody: 'Incomplete output' }],
+  ['blocking verdict', { reviewBody: finalReview.replace('Comment only', 'Request changes') }],
+]) test(`worker admission still owes review ${name}`, t => {
+  const f = remediationAdmissionFixture(t, options);
+  assert.equal(f.queue().explicitReviewIntent.actor, 'remediation-watch');
+  assert.equal(f.handoff(), false);
+  assert.equal(f.row().review_status, 'pending');
+  assert.equal(claimAndConsume(f, f.intent()), true);
+});
+
+test('capped completion retains the live reviewing claim', t => {
+  const f = remediationAdmissionFixture(t);
+  f.queue();
+  const observed = f.row();
+  assert.equal(claimAndConsume(f, f.intent()), true);
+  assert.equal(f.handoff(observed), false);
+  assert.equal(f.row().review_status, 'reviewing');
+});
+
+test('worker completion coalesces without resetting an operator CI hold', t => {
+  const f = remediationAdmissionFixture(t);
+  f.request();
+  f.db.prepare("UPDATE reviewed_prs SET review_status = 'ci-blocked'").run();
+  const held = f.row();
+  assert.equal(f.queue().status, 'already-pending');
+  assert.deepEqual(f.row(), held);
+  assert.equal(f.intent().actor, 'fixture-operator');
+});
+
+test('a delivered post-budget final pass requires no redundant review below the hard ceiling', t => {
+  const f = remediationAdmissionFixture(t, { passes: 2,
+    completedRoundTimestamps: [
+      { round: 2, terminalAt: '2026-11-20T22:00:00.000Z' },
+      { round: 6, terminalAt: completedAt },
+    ] });
+  f.queue();
+  assert.equal(f.handoff(), true);
+  assert.equal(f.row().reviewer_head_sha, witnessOld);
+  assert.equal(f.handoff(), true, 'a later poll retains the same exact-head ownership');
 });
 
 test('RETRIGGERDEDUP-01: a failed dispatch reports refusal without rearming a consumed request', async t => {

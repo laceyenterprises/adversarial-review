@@ -26,13 +26,34 @@ export function pendingExplicitReviewIntent(db, { repo, prNumber, headSha }) {
     .get(repo, prNumber, headSha);
 }
 
+export function remediationReviewRequest(jobId, round) {
+  return { requestId: `remediation:${jobId}:${round}`, actor: 'remediation-watch' };
+}
+
+export function isRemediationReviewIntent(intent) {
+  return intent?.actor === 'remediation-watch'
+    && /^remediation:.+:\d+$/u.test(intent.request_id ?? intent.requestId ?? '');
+}
+
+export function priorityReviewIntent(intent) {
+  return isRemediationReviewIntent(intent) ? null : intent;
+}
+
 // Called inside requestReviewRereview's IMMEDIATE transaction. Concurrent
 // requests coalesce onto the pending receipt without changing its wait observation.
 export function recordExplicitReviewIntent(db, {
   repo, prNumber, headSha, requestId, actor, requestedAt, waitOptions = {},
 }) {
-  const existing = db.prepare(`SELECT * FROM explicit_review_intents WHERE repo = ?
-    AND pr_number = ? AND head_sha = ? AND state = 'pending'`).get(repo, prNumber, headSha);
+  const existing = pendingExplicitReviewIntent(db, { repo, prNumber, headSha });
+  // A trusted request arriving second must retain its own provenance and win
+  // admission. Keep the original wait anchor and existing request aliases.
+  const promote = isRemediationReviewIntent(existing) && priorityReviewIntent({ requestId, actor });
+  if (promote) {
+    db.prepare(`UPDATE explicit_review_intents SET state = 'coalesced', reason = ?
+      WHERE repo = ? AND pr_number = ? AND head_sha = ? AND
+        (request_id = ? OR (state = 'coalesced' AND reason = ?))`)
+      .run(`coalesced:${requestId}`, repo, prNumber, headSha, existing.request_id, `coalesced:${existing.request_id}`);
+  }
   // Retain the legacy column as an informational threshold, never an expiry.
   const waitSeconds = loadAwareTimeoutSeconds(
     resolveReviewMaxWaitSeconds('rereview') || REREVIEW_MAX_WAIT_SECONDS,
@@ -41,9 +62,20 @@ export function recordExplicitReviewIntent(db, {
   db.prepare(`INSERT INTO explicit_review_intents
     (repo, pr_number, request_id, head_sha, actor, requested_at, expires_at, state, reason)
     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(repo, prNumber, requestId, headSha, actor,
-    requestedAt, existing?.expires_at || expiresAt, existing ? 'coalesced' : 'pending',
-    existing ? `coalesced:${existing.request_id}` : null);
-  return existing || findExplicitReviewRequest(db, { repo, prNumber, requestId });
+    requestedAt, existing?.expires_at || expiresAt, existing && !promote ? 'coalesced' : 'pending',
+    existing && !promote ? `coalesced:${existing.request_id}` : null);
+  return existing && !promote ? existing : findExplicitReviewRequest(db, { repo, prNumber, requestId });
+}
+
+// Keep the row transition and receipt settlement atomic with respect to a
+// concurrent operator request. A failed row CAS leaves the intent untouched.
+export function handoffAutomaticReview(db, identity, reason, handoff) {
+  return db.transaction(() => {
+    const intent = pendingExplicitReviewIntent(db, identity);
+    if (priorityReviewIntent(intent) || !handoff(intent)) return false;
+    if (intent) settleExplicitReviewIntent(db, intent, reason);
+    return true;
+  }).immediate();
 }
 
 export function settleExplicitReviewIntent(db, intent, reason, now = new Date().toISOString()) {
@@ -114,6 +146,12 @@ export async function reconcileExplicitReviewIntents(db, {
 }
 
 export function explicitReviewRefusalBody(intent) {
+  if (isRemediationReviewIntent(intent)) {
+    if (intent.state === 'pending') {
+      return `### Remediation review admission pending\n\nThe watcher will re-evaluate the completion for head \`${intent.head_sha}\` under the normal review and closure policy.`;
+    }
+    return `### Remediation review admission settled\n\nFor head \`${intent.head_sha}\` the watcher recorded **${intent.reason}**.`;
+  }
   if (intent.state === 'pending') {
     return `### Re-review queued\n\nRe-review queued for head \`${intent.head_sha}\`; `
       + `reviewer capacity busy since ${intent.requested_at}. The watcher will retry automatically.`;

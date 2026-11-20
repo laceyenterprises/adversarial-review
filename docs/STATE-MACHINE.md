@@ -186,7 +186,12 @@ Accepted label, CLI, rescue and remediation requests atomically pair their row
 reset with a persistent exact-head request receipt. `pending` intent becomes
 `consumed` once immediately before reviewer dispatch under the existing claim
 and head lease. It spends the normal rereview budget. Concurrent request IDs
-coalesce without changing the waiting threshold; replayed IDs cannot grant another pass.
+coalesce without changing the waiting threshold. When an operator request
+arrives behind a worker completion at the same head, the operator receipt
+becomes pending and the worker receipt aliases it. Replayed IDs cannot grant
+another pass. A worker completion follows ordinary deduplication and budget
+admission. A capped transfer to closure settles the worker receipt with the
+same transaction that restores the delivered review identity.
 
 Credential, capacity and queue-depth holds retain pending intent regardless of age
 and retry each tick. The legacy `expires_at` is a load-scaled waiting-notice
@@ -204,8 +209,8 @@ memoized per request/head in a bounded process-local cache; periodic live probes
 continue settlement. New requests, changed discovery heads, eviction and restart
 permit a fresh check.
 Current/unknown-head and human reviews remain. This grants
-no merge authority: exact-head zero-finding review, attestation and leases still apply. A valid pending intent prevents dedup row repair
-from restoring `posted`. Implicit same-head dispatch remains deduplicated.
+no merge authority: exact-head zero-finding review, attestation and leases still apply. A pending priority request prevents dedup row repair from restoring `posted`.
+Worker completions and implicit same-head dispatch remain deduplicated.
 See [the store contract](data-model/explicit-review-intents.md).
 
 REPORENAME-01 changes repository identity keys without changing review, closer,
@@ -1569,7 +1574,7 @@ known zero blocking findings and remaining non-blocking or demoted findings
 gets one builder **final fix-all** work order before findings closure. The
 existing follow-up queue and builder-tag worker sync with main, address every
 finding and the PR's own red checks, validate and push. The work order uses
-`closureHandoff.reason: final-fix-all`, `review: full` and the existing statuses.
+`closureHandoff.reason: final-fix-all`, `review: closeout` and the existing statuses.
 It is claimable for exactly one round, independently of the spent ordinary
 finding-round budget. Pending admission remains remediator-owned beyond the
 ordinary pending-liveness grace; the PR closer-intent lock serializes enqueue
@@ -1577,13 +1582,16 @@ with closer admission, including rescue. Live closer or remediation custody
 prevents a second owner.
 
 A receipt deduplicates the source head even after terminal settlement or
-archival. Its published head must receive a fresh full review; this round
-never uses the suppressed final-push shortcut. If that review still has
-findings, the configured hammer/operator fallback owns closure. A zero-finding
-exact-head re-review takes the ordinary daemon path, with every existing merge
-predicate, attestation and lease check. Conflicts and CI-only repair retain
-their hammer routes. Blocking reviews retain their existing behavior. Strict
-mode, finding content, head matching, merge authority and leases are unchanged.
+archival. An independently proven final fix-all publication sends its exact
+pushed head to the closer under the existing final-push policy. The closer
+retains the reviewed source SHA and all findings as validation input. Pending
+required CI has an observer, and failed required CI has a bounded repair owner.
+The closer proves finding dispositions, preservation of the primary change and
+required CI before merging. Worker reply flags and successful CI do not resolve
+findings. An unknown or blocking fix-all source verdict, an unproven publication,
+or a head that moved again cannot qualify for this handoff. Independent review
+requirements for tenure and conflict-primary work still apply. An attributable
+operator re-review request retains its normal priority and admission checks.
 
 DAEMONSUPERSEDE-01: an owner that has done nothing yet does not outrank a
 completed clean verdict. When the shared decision sees a closer launch for the

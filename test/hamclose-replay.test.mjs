@@ -16,6 +16,8 @@ import { closeEmptyPullRequest, EMPTY_PR_COMMENT } from '../src/empty-pr-close.m
 import { openReviewStateDb, ensureReviewStateSchema, requestReviewRereview } from '../src/review-state.mjs';
 import { routeCappedReviewToClosure, hammerHandoffReviewBypass, postedReviewCeilingReached, reviewCeilingOwner } from '../src/hamclose-review-admission.mjs';
 import { classifyClosureOwnership } from '../src/merge-agent-rescue-classifier.mjs';
+import { completeWorkerPublishedHead } from '../src/remediation-published-head.mjs';
+import { deriveNextActionSnapshot } from '../src/pr-next-action.mjs';
 
 const repo = 'fixture/repo';
 const cleanBody = '## Blocking issues\n- None.\n## Non-blocking issues\n- None.\n## Verdict\nApproved';
@@ -89,6 +91,48 @@ test('CEILINGOWNER-01 replay B: admission and next action assign a capped non-cl
   assert.equal(closure.closerAuthoredStale.decision, 'rereview-exact-head');
   assert.equal(closure.closerAuthoredStale.reviewedHead, old);
   assert.equal(closure.closerAuthoredStale.currentHead, headSha);
+});
+
+test('LAC-2231: a proven final fix-all push transfers original findings to the exact-head closer', async t => {
+  const rootDir = root(t), prNumber = 81, headSha = 'c'.repeat(40), reviewedHead = 'a'.repeat(40);
+  const at = '2026-11-20T22:50:00.000Z';
+  const workspaceDir = join(rootDir, 'workspace');
+  mkdirSync(join(workspaceDir, '.git'), { recursive: true });
+  const { job, jobPath } = createFollowUpJob({ rootDir, repo, prNumber, revisionRef: reviewedHead,
+    branch: 'fixture', baseBranch: 'main', builderTag: 'codex', reviewBody: findingsBody,
+    reviewPostedAt: at, closureHandoff: { reason: 'final-fix-all', headSha: reviewedHead, review: 'closeout' } });
+  const activeDir = getFollowUpJobDir(rootDir, 'inProgress');
+  mkdirSync(activeDir, { recursive: true });
+  const activePath = join(activeDir, `${job.jobId}.json`);
+  writeFileSync(jobPath, JSON.stringify({ ...job, status: 'in_progress', workspaceDir,
+    remediationPlan: { ...job.remediationPlan, currentRound: 1, rounds: [
+      { round: 1, state: 'spawned', startHeadSha: reviewedHead, spawnedAt: at },
+    ] } }));
+  renameSync(jobPath, activePath);
+  const completed = completeWorkerPublishedHead({ rootDir, jobPath: activePath, headSha, completedAt: at,
+    ciGate: { headSha, state: 'green' }, snapshot: deriveNextActionSnapshot({ observations: {
+      leases: { closer: null }, launches: { closer: null }, policy: { autonomousMergeExecutionEnabled: true },
+    } }), requestReviewRereviewImpl: () => assert.fail('final fix-all must not request another reviewer'),
+    requestWatcherWakeImpl: () => ({ requested: true }),
+    execFileSyncImpl: () => `${headSha}\nFixture publication\n\nWorker-Job-Id: ${job.jobId}\n` });
+  assert.equal(completed.job.reReview.nextAction.reason, 'suppressed-final-push');
+  assert.equal(completed.job.reReview.requested, false);
+
+  const store = { merged: false };
+  let hammers = 0;
+  const row = { review_status: 'posted', reviewer_head_sha: reviewedHead, reviewer: 'gemini', review_body: findingsBody };
+  await watcherTick({ rootDir, prNumber, headSha, store, row, closureOnly: true,
+    closerImpl: async ({ prMetadata, reviewState, dispatchContext }) => {
+      hammers++;
+      assert.equal(prMetadata.headSha, headSha);
+      assert.equal(reviewState.headSha, reviewedHead);
+      assert.equal(reviewState.nonBlockingFindingCount, 1);
+      assert.equal(dispatchContext.targetRemediationSha, headSha);
+      return { dispatched: true };
+    } });
+  assert.equal(hammers, 1, JSON.stringify(store));
+  assert.equal(store.merged, false);
+  assert.equal(listFollowUpJobsInDir(rootDir, 'pending').length, 0);
 });
 
 test('HAMCLOSE-03 legacy hammer handoff authorizes only one exact-head review attempt', t => {

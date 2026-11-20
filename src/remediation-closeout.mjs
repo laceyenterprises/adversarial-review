@@ -11,6 +11,13 @@ import { loadDomainConfig } from './domain-config.mjs';
 import { resolveMergeAuthorityConfigFromDomain } from './domain-policy.mjs';
 import { join } from 'node:path';
 import { tenureReviewReason } from './pr-tenure.mjs';
+import { isRemediationRoundBudgetSpent } from './remediation-round-recovery.mjs';
+
+export function isSettledCommentOnlyReview({ verdict, blockingFindingState, blockingFindingCount,
+  nonBlockingFindingState } = {}) {
+  return verdict === 'comment-only' && blockingFindingState === 'known'
+    && blockingFindingCount === 0 && nonBlockingFindingState === 'known';
+}
 
 export function remediationCloseout({ rootDir, job, headSha, workerPushedHeadSha = null,
   lifecycle = null, ciGate = null, completedAt, snapshot = null }) {
@@ -24,9 +31,6 @@ export function remediationCloseout({ rootDir, job, headSha, workerPushedHeadSha
     && String(workerPushedHeadSha).toLowerCase() === String(head).toLowerCase();
   const tenureRange = job.remediationWorker?.originTenureId && workerPublishedHead
     ? tenureReviewReason(job.revisionRef, head) : null;
-  const fullReviewRequired = Boolean(tenureRange) || (['conflict-primary-unproven', 'final-fix-all'].includes(job.closureHandoff?.reason)
-    && job.closureHandoff.review === 'full' && workerPublishedHead
-    && String(head).toLowerCase() !== String(job.revisionRef).toLowerCase());
   let leases = snapshot?.observations?.leases;
   if (!leases) {
     try { leases = { closer: readAmaCloserLease(rootDir, { repo: job.repo, prNumber: job.prNumber, headSha: head }) }; }
@@ -56,6 +60,23 @@ export function remediationCloseout({ rootDir, job, headSha, workerPushedHeadSha
     ? observedReviews : { verdict: normalizeEffectiveReviewVerdict(job.reviewBody), headSha: job.revisionRef,
       blockingFindingState: findings.blocking.state, blockingFindingCount: findings.blocking.count,
       nonBlockingFindingState: findings.nonBlocking.state, nonBlockingFindingCount: findings.nonBlocking.count };
+  const review = reviews.value ?? reviews;
+  const reviewAvailable = reviews.state === undefined || reviews.state === 'complete';
+  const handoff = job.closureHandoff;
+  const finalFixAll = handoff?.reason === 'final-fix-all';
+  const boundFinalFixAll = finalFixAll && reviewAvailable && ['full', 'closeout'].includes(handoff.review)
+    && isRemediationRoundBudgetSpent(plan) && Boolean(job.revisionRef)
+    && handoff.headSha === job.revisionRef && review.headSha === job.revisionRef
+    && isSettledCommentOnlyReview(review);
+  const fullReviewRequired = Boolean(tenureRange) || (workerPublishedHead && head !== job.revisionRef
+    && ((handoff?.reason === 'conflict-primary-unproven' && handoff.review === 'full')
+      || (finalFixAll && !boundFinalFixAll)));
+  // Publication moves custody only. The shared closer still consumes the
+  // original findings and must validate the live head before any merge.
+  const finalPush = final && reviewAvailable && !fullReviewRequired && workerPublishedHead
+    && Boolean(job.revisionRef) && review.headSha === job.revisionRef
+    && ['comment-only', 'approved', 'request-changes'].includes(review.verdict)
+    && review.blockingFindingState === 'known';
   let policy = snapshot?.observations?.policy;
   if (!policy) {
     try {
@@ -100,7 +121,7 @@ export function remediationCloseout({ rootDir, job, headSha, workerPushedHeadSha
           // This is the selected retry successor, not the finished worker's
           // liveness. Reconciliation requeues it through the bounded retry path.
           live: retryActiveJob },
-        ...(final && !fullReviewRequired && workerPublishedHead ? { finalPush: { headSha: head, suppressed: true } } : {}) },
+        ...(finalPush ? { finalPush: { headSha: head, suppressed: true } } : {}) },
       checks, leases, launches, policy,
       ...((lease?.terminalOutcome === 'succeeded' || receipt?.terminalOutcome === 'succeeded' || receipt?.outcome === 'succeeded')
         ? { progress: { ...snapshot?.observations?.progress?.value,

@@ -1,3 +1,5 @@
+import { priorityReviewIntent } from './explicit-review-intent.mjs';
+
 // REVIEW-DEDUP — reviewed-head dispatch dedup gate.
 //
 // Root cause (live evidence 2026-07-13): agent-os PR #3655 received FOUR full
@@ -147,7 +149,7 @@ export async function resolveAlreadyReviewedHeadDedup({
   if (!head) {
     return { alreadyReviewed: false, reviewId: null, reviewSubmittedAt: null, reason: 'missing-head-sha' };
   }
-  if (explicitReviewIntent?.state === 'pending'
+  if (priorityReviewIntent(explicitReviewIntent)?.state === 'pending'
       && explicitReviewIntent.repo === repoPath
       && explicitReviewIntent.pr_number === Number(prNumber)
       && explicitReviewIntent.head_sha === head) {

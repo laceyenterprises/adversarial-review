@@ -57,7 +57,9 @@ function fixture(t) {
 function finish(f, job, outputHead = NEXT) {
   const bucket = job.status === 'in_progress' ? 'inProgress' : 'pending';
   const old = join(getFollowUpJobDir(f.rootDir, bucket), `${job.jobId}.json`);
-  const completed = { ...job, status: 'completed', completion: { workerPushedHeadSha: outputHead } };
+  const completed = { ...job, status: 'completed',
+    completion: { workerPushedHeadSha: outputHead, finalRemediationPush: outputHead !== job.revisionRef },
+    reReview: { requested: false, nextAction: { head: outputHead, action: 'hammer', actor: 'hammer' } } };
   writeFileSync(old, JSON.stringify(completed));
   const dir = getFollowUpJobDir(f.rootDir, 'completed');
   mkdirSync(dir, { recursive: true });
@@ -74,7 +76,7 @@ test('final-round non-blocking review enqueues one runnable fix-all and fences e
   assert.deepEqual(f.effects, []);
   const [{ job }] = listFollowUpJobsInDir(f.rootDir, 'pending');
   assert.equal(job.reviewBody, BODY);
-  assert.equal(job.closureHandoff.review, 'full');
+  assert.equal(job.closureHandoff.review, 'closeout');
   assert.equal(job.builderTag, 'codex');
   assert.equal(job.finalRound, undefined);
   assert.equal(job.remediationPlan.maxRounds, 1);
@@ -93,7 +95,7 @@ test('final-round non-blocking review enqueues one runnable fix-all and fences e
   assert.equal(finalFixAllQueueOwner(f.rootDir, f.identity).jobId, job.jobId);
 });
 
-for (const checks of ['green', 'pending']) test(`fix-all publication requires full re-review with ${checks} checks`, async t => {
+for (const checks of ['green', 'pending', 'failed']) test(`fix-all publication hands off exact-head closeout with ${checks} checks`, async t => {
   const f = fixture(t);
   await handoffFinalFixAll({ ...f.identity, reviewBody: BODY, execFileImpl: f.execFileImpl });
   const claimed = claimNextFollowUpJob({ rootDir: f.rootDir, claimedAt: AT });
@@ -103,10 +105,41 @@ for (const checks of ['green', 'pending']) test(`fix-all publication requires fu
   const closeout = remediationCloseout({ rootDir: f.rootDir, job: claimed.job, snapshot,
     completedAt: AT, headSha: NEXT, workerPushedHeadSha: NEXT,
     lifecycle: { prState: 'OPEN', headSha: NEXT, mergeable: 'MERGEABLE' }, ciGate: { state: checks, headSha: NEXT } });
-  assert.equal(closeout.snapshot.observations.remediation.value.fullReviewRequired, true);
-  assert.equal(closeout.snapshot.observations.remediation.value.finalPush, undefined);
-  assert.equal(closeoutRereview(closeout).requested, true);
-  assert.equal(closeout.decision.action, checks === 'green' ? 'review' : 'wait-for-CI');
+  assert.equal(closeout.snapshot.observations.remediation.value.fullReviewRequired, undefined);
+  assert.deepEqual(closeout.snapshot.observations.remediation.value.finalPush, { headSha: NEXT, suppressed: true });
+  assert.equal(closeoutRereview(closeout, 'Worker requested a fresh pass').requested, false);
+  assert.equal(closeout.decision.action, checks === 'pending' ? 'wait-for-CI' : 'hammer');
+  const observed = closeout.snapshot.observations.reviews.value;
+  assert.equal(observed.headSha, HEAD);
+  assert.equal(observed.nonBlockingFindingCount, 1);
+});
+
+test('fix-all closeout does not carry an unknown or blocking source verdict, wrong source or wrong publication', t => {
+  const f = fixture(t);
+  const job = { repo: f.identity.repo, prNumber: 5, revisionRef: HEAD, reviewBody: BODY,
+    closureHandoff: { reason: 'final-fix-all', headSha: HEAD, review: 'closeout' },
+    remediationPlan: { currentRound: 1, maxRounds: 1 } };
+  const decide = (job, workerPushedHeadSha = NEXT) => remediationCloseout({ rootDir: f.rootDir, job,
+    completedAt: AT, headSha: NEXT, workerPushedHeadSha, ciGate: { state: 'green', headSha: NEXT } });
+  for (const reviewBody of ['Review unreadable', BODY.replace('- None.', '- Blocking finding'),
+    BODY.replace('Comment only', 'Request changes')]) {
+    const result = decide({ ...job, reviewBody });
+    assert.equal(result.snapshot.observations.remediation.value.finalPush, undefined);
+    assert.equal(result.decision.action, 'review');
+  }
+  for (const result of [decide(job, HEAD), decide({ ...job, closureHandoff: { ...job.closureHandoff, headSha: NEXT } })]) {
+    assert.equal(result.snapshot.observations.remediation.value.finalPush, undefined);
+    assert.equal(result.decision.action, 'review');
+  }
+  const unreadable = remediationCloseout({ rootDir: f.rootDir, job, completedAt: AT,
+    headSha: NEXT, workerPushedHeadSha: NEXT, ciGate: { state: 'green', headSha: NEXT },
+    snapshot: deriveNextActionSnapshot({ observations: { policy: { autonomousMergeExecutionEnabled: true },
+      leases: { closer: null }, launches: { closer: null },
+      reviews: { state: 'error', value: { verdict: 'comment-only', headSha: HEAD,
+        blockingFindingState: 'known', blockingFindingCount: 0, nonBlockingFindingState: 'known' } },
+    } }) });
+  assert.equal(unreadable.snapshot.observations.remediation.value.finalPush, undefined);
+  assert.equal(unreadable.decision.reason, 'reviews-unknown');
 });
 
 for (const clean of [true, false]) test(`re-review ${clean ? 'clean merges through daemon' : 'with findings falls back'}`, async t => {

@@ -2,6 +2,7 @@ import { loadAwareTimeoutMs } from './load-aware-timeout.mjs';
 import { meteredExecFile } from './metered-gh.mjs';
 import {
   ensureExplicitReviewIntentSchema, findExplicitReviewRequest, recordExplicitReviewIntent,
+  isRemediationReviewIntent, pendingExplicitReviewIntent, priorityReviewIntent,
 } from './explicit-review-intent.mjs';
 import { hammerHandoffReviewBypass } from './hammer-handoff-review-bypass.mjs';
 import { isOperatorHeld } from './operator-hold-labels.mjs';
@@ -1232,6 +1233,19 @@ function requestReviewRereview({
     if (currentRow?.review_status === 'reviewing') {
       return buildBlockedRereviewResult('review-in-flight', currentRow);
     }
+    const workerCompletionRequest = isRemediationReviewIntent(explicitReviewRequest);
+    if (workerCompletionRequest && currentRow?.pr_state === 'open'
+      && currentRow.revision_ref === normalizedTargetRevisionRef
+      && ['pending', 'pending-upstream', 'ci-blocked'].includes(currentRow.review_status)
+      && priorityReviewIntent(pendingExplicitReviewIntent(db, { repo, prNumber, headSha: normalizedTargetRevisionRef }))) {
+      return acceptExplicitRequest({ triggered: false, status: 'already-pending',
+        reason: 'review-already-pending', reviewRow: currentRow });
+    }
+    // The reply reason is worker-authored text. Only the validated operator
+    // path can install an operator marker on the review row.
+    if (workerCompletionRequest && reason && !(preserveBudgets && reason.startsWith('tenure-independent-review: '))) {
+      reason = `Remediation reply: ${reason}`;
+    }
     const operatorRequestedRereview = isExplicitOperatorRetriggerReason(reason);
     const targetHead = normalizedTargetRevisionRef;
     const handoffReview = targetHead && hammerHandoffReviewBypass({
@@ -1384,7 +1398,7 @@ function requestReviewRereview({
       const pendingRevisionRefMoved =
         normalizedTargetRevisionRef &&
         currentRevisionRef !== normalizedTargetRevisionRef;
-      if (operatorRequestedRereview || explicitReviewRequest || pendingRevisionRefMoved) {
+      if (operatorRequestedRereview || (explicitReviewRequest && !workerCompletionRequest) || pendingRevisionRefMoved) {
         const pendingAssignments = [
           // RCA 2026-08-17: a lease-released row whose head/revision moved is
           // a legitimate fresh review and must not inherit the poisoned attempt

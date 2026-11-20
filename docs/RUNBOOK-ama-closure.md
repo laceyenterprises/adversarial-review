@@ -146,7 +146,7 @@ known zero blocking findings and remaining non-blocking or demoted findings
 gets one builder **final fix-all** work order before findings closure. The
 existing follow-up queue and builder-tag worker sync with main, address every
 finding and the PR's own red checks, validate and push. The work order uses
-`closureHandoff.reason: final-fix-all`, `review: full` and the existing statuses.
+`closureHandoff.reason: final-fix-all`, `review: closeout` and the existing statuses.
 It is claimable for exactly one round, independently of the spent ordinary
 finding-round budget. Pending admission remains remediator-owned beyond the
 ordinary pending-liveness grace; the PR closer-intent lock serializes enqueue
@@ -167,13 +167,16 @@ an older local final-fix-all job. Existing owners require their normal recovery
 path, rather than a competing launch.
 
 A receipt deduplicates the source head even after terminal settlement or
-archival. Its published head must receive a fresh full review; this round
-never uses the suppressed final-push shortcut. If that review still has
-findings, the configured hammer/operator fallback owns closure. A zero-finding
-exact-head re-review takes the ordinary daemon path, with every existing merge
-predicate, attestation and lease check. Conflicts and CI-only repair retain
-their hammer routes. Blocking reviews retain their existing behavior. Strict
-mode, finding content, head matching, merge authority and leases are unchanged.
+archival. An independently proven final fix-all publication sends its exact
+pushed head to the closer under the existing final-push policy. The closer
+retains the reviewed source SHA and all findings as validation input. Pending
+required CI has an observer, and failed required CI has a bounded repair owner.
+The closer proves finding dispositions, preservation of the primary change and
+required CI before merging. Worker reply flags and successful CI do not resolve
+findings. An unknown or blocking fix-all source verdict, an unproven publication,
+or a head that moved again cannot qualify for this handoff. Independent review
+requirements for tenure and conflict-primary work still apply. An attributable
+operator re-review request retains its normal priority and admission checks.
 
 The final-fix-all worker can authorize a review-cited primary-line reversal
 under the same finding/region rules as the hammer. Its existing queue record
@@ -225,8 +228,10 @@ After both PRs land, SRE lets the submodule float through main-catchup and
 restarts the registered watcher and follow-up services through the deployment
 procedure. On natural traffic, retain receipts showing (1) a newly final-round
 eligible head queued as `final-fix-all`, (2) no concurrent closer, (3) a pushed
-head with a fresh full review, (4) daemon merge after a zero-finding exact-head
-review, or the configured fallback if findings remain. Compare merges per hour
+head with its original findings and exact-head closeout ownership, and (4)
+validated dispositions, preserved source intent and required checks at the merged
+head, or a bounded refusal if a gate fails. Confirm that no automated full
+review or second fix-all was launched for that publication. Compare merges per hour
 and the closer `failed-without-merge` share with the pre-deployment window:
 acceptance requires merges rising and the closer failure share falling.
 No source fixture proves these production outcomes. No migration, new check,
@@ -3531,8 +3536,10 @@ from them. See [Operator Hold Releases](data-model/operator-hold-releases.md),
 [Hammer Stop Hold](data-model/hammer-stop-hold.md) and
 [Hammer Retry Cap](data-model/hammer-retry-cap.md) for persistence and timing.
 
-The posted-review handler also admits explicit pending re-review rows when a
-follow-up worker has just requested another adversarial pass. Those rows are
+A follow-up worker can register a durable request for another pass through
+ordinary review admission. The worker receipt cannot override delivered-review
+ceilings or force a duplicate exact-head review. The posted-review handler
+also admits pending re-review rows. Those rows are
 held while the gate remains `review-queued`, `review-in-progress`,
 `rereview-queued`, or otherwise non-success: reviewer delivery owns that state,
 not AMA/HAM. The narrow exception is a head-change re-review whose latest

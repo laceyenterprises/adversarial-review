@@ -29,8 +29,10 @@ reattach handles or lease secrets. Attribution is the validated, secret-free
 
 A record is reused only when every binding field equals the new claim's value:
 `repo`, `prNumber`, `headSha`, `passKind`, `reviewerModel`, `botTokenEnv`,
-`reviewAttemptNumber`, `promptStage`, `verdictOnly` and `diffSha256` (the
-SHA-256 of the exact diff given to the model). `reviewerModel` and `botTokenEnv`
+`reviewAttemptNumber`, `promptStage`, `verdictOnly`, `diffSha256` (the
+SHA-256 of the exact diff given to the model), and `diffOnly` (a boolean
+indicating an empty workspace). Records written before `diffOnly` was
+recorded are ineligible for reuse. `reviewerModel` and `botTokenEnv`
 record the producer that actually ran. An oversized-route fallback that
 switched reviewer family therefore never matches the pre-dispatch route.
 

@@ -77,7 +77,7 @@ async function alertClioOversizedAgyFailure({
 async function alertReviewerSnapshotBaseFailure({ repo, prNumber, headSha, linkPath, reason }, {
   deliverAlertImpl = deliverAlert,
 } = {}) {
-  const msg = `Adversarial reviewer stopped: the default checkout snapshot is unsafe.\n\nRepo: ${repo} PR #${prNumber}\nCheckout HEAD: ${headSha || 'unknown'}\nLink: ${linkPath || 'unknown'}\nReason: ${reason}\n\nRepair the base checkout; this is not a PR-authored finding.`;
+  const msg = `Adversarial reviewer stopped: the workspace snapshot is unsafe.\n\nRepo: ${repo} PR #${prNumber}\nSnapshot commit: ${headSha || 'unknown'}\nLink: ${linkPath || 'unknown'}\nReason: ${reason}\n\nInspect the link in the snapshot commit before retriggering review.`;
   console.error(`[reviewer] ALERT: ${msg}`);
   try {
     return await deliverAlertImpl(msg, {

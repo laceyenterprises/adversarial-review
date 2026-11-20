@@ -6,6 +6,8 @@ import {
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  readdirSync,
+  realpathSync,
   rmSync,
   statSync,
   symlinkSync,
@@ -26,9 +28,11 @@ import {
   garbageCollectSnapshots,
   isReviewerSnapshotBaseError,
   prepareReviewerSnapshot,
+  prepareReviewerWorkspace,
   resolveCheckoutHead,
   resolveReviewerWorkspaceStateDir,
 } from '../src/reviewer-workspace.mjs';
+import { resolveRepoCheckoutDir } from '../src/argus-dependency-evidence.mjs';
 
 function git(cwd, ...args) {
   return execFileSync('git', args, { cwd, encoding: 'utf8' }).trim();
@@ -50,6 +54,93 @@ function removeFixture(root) {
   try { execFileSync('chmod', ['-R', 'u+w', root]); } catch {}
   rmSync(root, { recursive: true, force: true, maxRetries: 3 });
 }
+
+test('reviewer and Argus match repository identity for both deploy checkouts and configured clones', async () => {
+  const root = realpathSync(mkdtempSync(join(tmpdir(), 'reviewer-repo-identity-')));
+  try {
+    const superproject = makeRepo(root, 'superproject');
+    const toolsDir = join(superproject, 'tools');
+    mkdirSync(toolsDir);
+    const rootDir = makeRepo(toolsDir, 'review-service');
+    const clones = join(root, 'clones');
+    const ownerDir = join(clones, 'example');
+    mkdirSync(ownerDir, { recursive: true });
+    const targetClone = makeRepo(ownerDir, 'public-target');
+    git(superproject, 'remote', 'add', 'origin', 'git@github.com:example/superproject.git');
+    git(rootDir, 'remote', 'add', 'origin', 'https://github.com/example/review-service.git');
+    git(targetClone, 'remote', 'add', 'origin', 'ssh://git@github.com/example/public-target.git');
+    const lookup = repo => resolveRepoCheckoutDir({ repo, rootDir, env: {
+      ...process.env, ADVERSARIAL_REVIEWER_CLONE_ROOT: clones, GIT_DIR: join(superproject, '.git'),
+    } });
+
+    assert.equal(await lookup('Example/Review-Service'), rootDir);
+    assert.equal(await lookup('example/superproject'), superproject);
+    assert.equal(await lookup('example/public-target'), targetClone);
+    assert.equal(await lookup('other-owner/review-service'), null);
+    git(targetClone, 'remote', 'set-url', 'origin', 'git@github.com:example/private-sibling.git');
+    assert.equal(await lookup('example/public-target'), null);
+    symlinkSync(superproject, join(ownerDir, 'missing-target'));
+    const checkoutDir = await lookup('example/missing-target');
+    assert.equal(checkoutDir, null);
+    const empty = await prepareReviewerWorkspace({
+      repo: 'example/missing-target', checkoutDir, stateDir: join(root, 'state'),
+      headSha: git(superproject, 'rev-parse', 'HEAD'),
+    });
+    assert.equal(empty.diffOnly, true);
+    assert.deepEqual(readdirSync(empty.snapshotDir), []);
+    assert.equal(statSync(empty.snapshotDir).mode & 0o222, 0);
+  } finally {
+    removeFixture(root);
+  }
+});
+
+test('a configured clone fetches and archives the requested commit without moving its checkout', async () => {
+  const root = realpathSync(mkdtempSync(join(tmpdir(), 'reviewer-exact-repo-')));
+  try {
+    const source = makeRepo(root, 'source');
+    const rootDir = makeRepo(root, 'review-service');
+    const defaultHead = git(source, 'rev-parse', 'HEAD');
+    const cloneRoot = join(root, 'clones');
+    const targetClone = join(cloneRoot, 'example', 'target');
+    mkdirSync(join(cloneRoot, 'example'), { recursive: true });
+    git(root, 'clone', '-q', source, targetClone);
+    git(targetClone, 'remote', 'set-url', 'origin', 'git@github.com:example/target.git');
+    writeFileSync(join(source, 'tracked.txt'), 'reviewed head\n');
+    git(source, 'commit', '-qam', 'target change');
+    const headSha = git(source, 'rev-parse', 'HEAD');
+    const repo = 'example/target';
+    const checkoutDir = await resolveRepoCheckoutDir({
+      repo, rootDir, env: { ...process.env, ADVERSARIAL_REVIEWER_CLONE_ROOT: cloneRoot },
+    });
+    let fetches = 0;
+    const execFileImpl = async (command, args, options) => {
+      const localArgs = [...args];
+      if (localArgs.includes('fetch')) {
+        assert.deepEqual(localArgs.slice(-2), ['origin', headSha]);
+        localArgs[localArgs.length - 2] = source;
+        fetches++;
+      }
+      return { stdout: execFileSync(command, localArgs, { ...options, encoding: 'utf8' }) };
+    };
+    const stateDir = join(root, 'state');
+    const snapshot = await prepareReviewerWorkspace({ repo, checkoutDir, stateDir, headSha, execFileImpl, pinSnapshot: false });
+    assert.equal(fetches, 1);
+    assert.equal(snapshot.diffOnly, false);
+    assert.equal(snapshot.headSha, headSha);
+    assert.equal(readFileSync(join(snapshot.snapshotDir, 'tracked.txt'), 'utf8'), 'reviewed head\n');
+    assert.equal(git(targetClone, 'rev-parse', 'HEAD'), defaultHead);
+    assert.equal(readFileSync(join(targetClone, 'tracked.txt'), 'utf8'), 'base\n');
+    const missing = await prepareReviewerWorkspace({
+      repo, checkoutDir, stateDir, headSha: 'f'.repeat(40), pinSnapshot: false,
+      execFileImpl: async () => { throw new Error('missing object'); },
+    });
+    assert.equal(missing.diffOnly, true);
+    assert.equal(missing.checkoutDir, null);
+    assert.deepEqual(readdirSync(missing.snapshotDir), []);
+  } finally {
+    removeFixture(root);
+  }
+});
 
 test('Agent OS and adversarial-review snapshots are outside and read-only relative to their source checkout', async () => {
   const root = mkdtempSync(join(tmpdir(), 'reviewer-workspace-two-repos-'));
@@ -214,7 +305,7 @@ test('archive extraction rejects instead of hanging when a child exits via signa
     writeFileSync(badDestination, 'nope\n');
 
     const result = await Promise.race([
-      extractArchiveOnce(checkoutDir, badDestination)
+      extractArchiveOnce(checkoutDir, badDestination, git(checkoutDir, 'rev-parse', 'HEAD'))
         .then(() => ({ status: 'resolved' }), (err) => ({ status: 'rejected', err })),
       new Promise((resolve) => { setTimeout(() => resolve({ status: 'timeout' }), 2000); }),
     ]);
@@ -383,7 +474,7 @@ test('snapshot build recovers from an invalid existing cache directory', async (
       extractArchiveImpl,
     });
     execFileSync('chmod', ['-R', 'u+w', first.snapshotDir]);
-    writeFileSync(join(first.snapshotDir, '.reviewer-snapshot.json'), `${JSON.stringify({ schemaVersion: 1, headSha: 'legacy' })}\n`);
+    writeFileSync(join(first.snapshotDir, '.reviewer-snapshot.json'), `${JSON.stringify({ schemaVersion: 1, headSha: first.headSha })}\n`);
     execFileSync('chmod', ['-R', 'a-w', first.snapshotDir]);
 
     const recovered = await prepareReviewerSnapshot({

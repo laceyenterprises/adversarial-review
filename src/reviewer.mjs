@@ -89,9 +89,9 @@ import { createGeneratedReviewDelivery } from './reviewer-generated-review-deliv
 import {
   configureReviewerWorkspaceAudit,
   ReviewerSnapshotBaseError,
-  prepareReviewerSnapshot,
-  resolveReviewerWorkspaceStateDir,
+  prepareReviewerWorkspace,
 } from './reviewer-workspace.mjs';
+import { resolveRepoCheckoutDir } from './reviewer-repo-checkout.mjs';
 import { normalizeEffectiveReviewVerdict, sanitizeCodexReviewPayload } from './kernel/verdict.mjs';
 import { reconcileReviewVerdict } from './reviewer-verdict-recovery.mjs';
 import { assertReviewerReply } from './kernel/review-reply.mjs';
@@ -1096,20 +1096,6 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 const ROOT = join(__dirname, '..');
 
-function resolveReviewerSubprocessCwd({
-  repo,
-  rootDir = ROOT,
-} = {}) {
-  const normalizedRepo = String(repo || '').trim().toLowerCase();
-  // Agent OS PRs need narrowly targeted lookups to resolve paths like
-  // platform/oauth-broker/... from the repo checkout, while adversarial-review
-  // PRs need the submodule root. In both cases the reviewer subprocess gets a
-  // structural cwd that is independent of the daemon's ambient cwd/HOME.
-  return normalizedRepo.endsWith('/adversarial-review')
-    ? rootDir
-    : join(rootDir, '..', '..');
-}
-
 function deriveSpecTouchProject(path) {
   const normalizedPath = String(path ?? '');
   let match = normalizedPath.match(/^(?:projects|modules|tools)\/([^/]+)\/SPEC\.md$/);
@@ -1883,7 +1869,7 @@ async function main() {
     }
   }
 
-  const { prContext, diff, reviewedPackLockhash, reviewDiffScope, reviewModeDecision, extraContext, guardForbiddenPaths, emptyDiff } = await runReviewerPreModel(async () => {
+  const { prContext, diff, reviewedPackLockhash, reviewDiffScope, reviewModeDecision, extraContext: prExtraContext, guardForbiddenPaths, emptyDiff } = await runReviewerPreModel(async () => {
     let prContext;
     try {
       prContext = await fetchPRContext(repo, prNumber, { botTokenEnv });
@@ -1971,6 +1957,34 @@ async function main() {
     console.log(`[reviewer] Empty diff for ${repo}#${prNumber} — nothing to review`);
     process.exit(0);
   }
+  const checkoutDir = await resolveRepoCheckoutDir({ repo, rootDir: ROOT });
+  let workspace;
+  try {
+    workspace = await prepareReviewerWorkspace({
+      repo, checkoutDir, stateDir: resolveAdversarialReviewStateDir(ROOT, process.env), headSha: reviewerHeadSha,
+    });
+  } catch (err) {
+    console.error(`[reviewer] infrastructure error: reviewer workspace snapshot unavailable for ${repo}#${prNumber}: ${err.message}`);
+    if (err instanceof ReviewerSnapshotBaseError) {
+      await alertReviewerSnapshotBaseFailure({
+        repo, prNumber, headSha: err.headSha, linkPath: err.linkPath, reason: err.message,
+      });
+    }
+    process.exit(1);
+  }
+  const {
+    checkoutDir: reviewerCheckoutDir, snapshotDir: reviewerSubprocessCwd,
+    stateDir: reviewerWorkspaceStateDir, diffOnly,
+  } = workspace;
+  const workspaceContext = diffOnly
+    ? 'The reviewer workspace is empty because the reviewed commit could not be snapshotted. Use the supplied diff and PR evidence. Do not infer absence from the workspace.'
+    : 'The reviewer workspace is a read-only archive of the reviewed commit.';
+  const extraContext = `${prExtraContext}\n\n${workspaceContext}\n`;
+  console.error(`[reviewer] reviewer workspace repo=${repo} mode=${diffOnly ? 'diff-only' : 'snapshot'} head=${reviewerHeadSha}`);
+  const configureWorkspaceAudit = model => configureReviewerWorkspaceAudit(reviewerCheckoutDir ? {
+    repo, prNumber, reviewerModel: model, headSha: reviewerHeadSha,
+    checkoutDir: reviewerCheckoutDir, stateDir: reviewerWorkspaceStateDir,
+  } : null);
   const reviewKind = selectReviewerRubric(diff);
   // 2. Run adversarial review (OAuth only — no API key fallback)
   let effectiveModel = reviewerModel;
@@ -2024,65 +2038,25 @@ async function main() {
     oversizedAgyPromptBytes: oversizedAgyRoute?.oversized ? oversizedAgyRoute.promptBytes : null,
     oversizedAgyBudgetBytes: oversizedAgyRoute?.oversized ? oversizedAgyRoute.maxBytes : null,
   });
-  const reviewerCheckoutDir = resolveReviewerSubprocessCwd({ repo, rootDir: ROOT });
-  const reviewerStateDir = resolveAdversarialReviewStateDir(ROOT, process.env);
-  let reviewerWorkspaceStateDir, reviewerSubprocessCwd;
-  let reviewerWorkspaceHeadSha;
-  try {
-    reviewerWorkspaceStateDir = resolveReviewerWorkspaceStateDir({
-      stateDir: reviewerStateDir,
-      checkoutDir: reviewerCheckoutDir,
-    });
-    const snapshot = await prepareReviewerSnapshot({
-      repo,
-      checkoutDir: reviewerCheckoutDir,
-      stateDir: reviewerWorkspaceStateDir,
-      pinSnapshot: true,
-    });
-    reviewerSubprocessCwd = snapshot.snapshotDir;
-    reviewerWorkspaceHeadSha = reviewerHeadSha || snapshot.headSha;
-    configureReviewerWorkspaceAudit({
-      repo,
-      prNumber,
-      reviewerModel: effectiveModel,
-      headSha: reviewerWorkspaceHeadSha,
-      checkoutDir: reviewerCheckoutDir,
-      stateDir: reviewerWorkspaceStateDir,
-    });
-    console.error(
-      `[reviewer] reviewer workspace snapshot repo=${repo} sourceHead=${snapshot.headSha} cwd=${snapshot.snapshotDir}`
-    );
-  } catch (err) {
-    configureReviewerWorkspaceAudit(null);
-    const kind = err instanceof ReviewerSnapshotBaseError
-      ? 'invalid base checkout snapshot'
-      : 'reviewer workspace snapshot unavailable';
-    console.error(`[reviewer] infrastructure error: ${kind} for ${repo}#${prNumber}: ${err.message}`);
-    if (err instanceof ReviewerSnapshotBaseError) {
-      await alertReviewerSnapshotBaseFailure({
-        repo, prNumber, headSha: err.headSha, linkPath: err.linkPath, reason: err.message,
-      });
-    }
-    process.exit(1);
-  }
+  configureWorkspaceAudit(effectiveModel);
 
   let reviewText;
   let rawReviewText;
   let tokenUsage = null;
   let reviewerExecution = null;
   const reviewerStartedAt = new Date().toISOString();
-  const mes = { repo, prNumber, headSha: reviewerHeadSha || reviewerWorkspaceHeadSha, title: prContext?.title, diff }; // MES-06 shadow context
+  const mes = { repo, prNumber, headSha: reviewerHeadSha, title: prContext?.title, diff }; // MES-06 shadow context
   // CHUNKTIME-01: the Gemini reviewer bounds its own run; see reviewer-process-deadline.mjs.
   const geminiDeadline = createGeminiReviewerProcessDeadline();
   if (effectiveModel === 'gemini' || useAgyChunkFallback) geminiDeadline.arm();
   // REVPOSTSTALL-01: a same-binding review preserved by a stalled delivery is redelivered, not re-run.
   const generatedReview = createGeneratedReviewDelivery({ rootDir: ROOT, repo, prNumber, headSha: reviewerHeadSha, passKind, reviewerModel: effectiveModel, botTokenEnv: effectiveBotTokenEnv,
-    reviewAttemptNumber, promptStage: reviewModeDecision.promptStage, verdictOnly, diff, sessionUuid: reviewerSessionUuid, reviewDbAttemptNumber });
+    reviewAttemptNumber, promptStage: reviewModeDecision.promptStage, verdictOnly, diff, diffOnly, sessionUuid: reviewerSessionUuid, reviewDbAttemptNumber });
   const preservedDispatch = generatedReview.readReusable();
   const sizeRecovery = createReviewSizeRecovery({
     diff, extraContext, repo, prNumber,
-    headSha: reviewerHeadSha || reviewerWorkspaceHeadSha, initialSizing: oversizedAgyRoute,
-    resolveCwd: () => resolveReviewerSubprocessCwd({ repo, rootDir: ROOT }),
+    headSha: reviewerHeadSha, initialSizing: oversizedAgyRoute,
+    resolveCwd: () => reviewerCheckoutDir,
     resolveRoute: (diff, extraContext) => resolveAgyOversizedReviewRoute({
       reviewerModel: effectiveModel, botTokenEnv: effectiveBotTokenEnv, builderTag, diff, extraContext,
       promptStage: reviewModeDecision.promptStage, reviewKind, geminiRuntime: geminiRuntimeForBudget,
@@ -2112,10 +2086,7 @@ async function main() {
       );
       effectiveModel = 'gemini';
       effectiveBotTokenEnv = 'GH_GEMINI_REVIEWER_TOKEN';
-      configureReviewerWorkspaceAudit({
-        repo, prNumber, reviewerModel: effectiveModel, headSha: reviewerWorkspaceHeadSha,
-        checkoutDir: reviewerCheckoutDir, stateDir: reviewerWorkspaceStateDir,
-      });
+      configureWorkspaceAudit(effectiveModel);
       geminiDeadline.arm();
       dispatch = await reviewWithSizeRecovery();
     }
@@ -2125,7 +2096,7 @@ async function main() {
       onRejected: rejected => persistRejectedCodexOutput({ repo, prNumber, ...rejected }),
     });
     persistReviewElisions({ rootDir: ROOT, repo, prNumber,
-      headSha: reviewerHeadSha || reviewerWorkspaceHeadSha, elisions: dispatch.elisions });
+      headSha: reviewerHeadSha, elisions: dispatch.elisions });
     rawReviewText = dispatch.rawReviewText;
     tokenUsage = dispatch.tokenUsage;
     reviewerExecution = dispatch.execution || null;
@@ -2192,7 +2163,7 @@ async function main() {
         managedByWatcher: Boolean(reviewerSpawnToken),
         failureClass: reviewerExecutionFailureExitCode(err) === REVIEWER_PROMPT_TOO_LARGE_EXIT_CODE
           ? 'reviewer-prompt-too-large' : 'reviewer-chunk-budget-exceeded',
-        facts: reviewerSizeFacts({ diff: sizeRecovery.prepared.diff, headSha: reviewerHeadSha || reviewerWorkspaceHeadSha,
+        facts: reviewerSizeFacts({ diff: sizeRecovery.prepared.diff, headSha: reviewerHeadSha,
           promptBytes: sizeRecovery.sizing?.promptBytes, maxBytes: sizeRecovery.sizing?.maxBytes,
           maxChunks: resolveAgyChunkMaxChunks(), chunkPlan: err.plan || null }),
       });
@@ -2290,10 +2261,11 @@ async function main() {
     reviewerMetadata,
     verdictMode,
     execution: reviewerExecution,
+    workspaceDiffOnly: diffOnly,
     waiverAuditBlock,
     reviewModeAuditBlock: buildReviewModeAuditBlock(reviewModeDecision),
     reviewText: reviewTextForPost,
-  }), { repo, reviewerHeadSha, rootDir: ROOT, snapshotRoot: join(reviewerWorkspaceStateDir, 'reviewer-snapshots') });
+  }), { repo, reviewerHeadSha, rootDir: ROOT, snapshotRoot: reviewerWorkspaceStateDir && join(reviewerWorkspaceStateDir, 'reviewer-snapshots') });
   const localShadowEligibility = evaluateLocalReviewShadowEligibility({
     labels,
     builderTag,
@@ -2501,7 +2473,6 @@ const __test__ = {
   reconcileLocalReviewShadow,
   resolveReviewedPackLockhash,
   resolveReviewerIdentityForBotTokenEnv,
-  resolveReviewerSubprocessCwd,
   resolveVerdictModeForHead,
   shouldQueueFollowUpForReview,
   startLocalReviewShadowCompletion,
@@ -2515,7 +2486,7 @@ export {
   assertClaudeOAuth, assertCodexOAuth, sanitizeCodexReviewPayload,
   buildReviewerPromptPrefix, spawnCaptured, resolveReviewerTimeoutMs,
   isFinalReviewRound, detectSpecTouchViolations, pinReviewerGhIdentity,
-  resolveReviewerSubprocessCwd, clearPendingReviewsForSelf, postGitHubReviewWithCapture,
+  clearPendingReviewsForSelf, postGitHubReviewWithCapture,
   ADVERSARIAL_PROMPT, ADVERSARIAL_PROMPT_FINAL_ROUND_ADDENDUM,
   REVIEWER_DOMAIN_ID, REVIEWER_PROMPT_SET, __test__,
 };

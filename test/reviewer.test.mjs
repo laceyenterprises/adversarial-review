@@ -105,7 +105,6 @@ const {
   GeminiCredentialPoolNoCreditError,
   GeminiCredentialPoolBusyError,
   resolveReviewerMetadata,
-  resolveReviewerSubprocessCwd,
   buildGeminiReviewArgs,
   buildAgyReviewArgs,
   DEFAULT_AGY_ARGV_MAX_BYTES,
@@ -4992,7 +4991,7 @@ test('reviewWithGemini antigravity runtime uses agy print, stdin prompt, env scr
   assert.match(spawnCalls[0].prompt, /Review the PROVIDED diff/);
   assert.match(spawnCalls[0].prompt, /Do not re-list the repository/);
   assert.match(spawnCalls[0].prompt, /Never search absolute host paths/);
-  assert.match(spawnCalls[0].prompt, /workspace is a read-only snapshot of the repository default checkout at review time/);
+  assert.match(spawnCalls[0].prompt, /Limit local lookups to the supplied workspace/);
   assert.match(spawnCalls[0].prompt, /Do not apply the diff, write files, or run tests/);
   assert.match(spawnCalls[0].prompt, /Emit ONLY the final Markdown review block/);
   assert.match(spawnCalls[0].prompt, /```diff\n\+diff/);
@@ -5039,21 +5038,17 @@ test('reviewWithGemini antigravity scopes reviewer subprocess cwd and PWD to the
   }
 });
 
-test('resolveReviewerSubprocessCwd selects the snapshot source checkout instead of ambient HOME', () => {
-  assert.equal(
-    resolveReviewerSubprocessCwd({
-      repo: 'laceyenterprises/agent-os',
-      rootDir: '/Users/airlock/agent-os/tools/adversarial-review',
-    }),
-    '/Users/airlock/agent-os'
-  );
-  assert.equal(
-    resolveReviewerSubprocessCwd({
-      repo: 'laceyenterprises/adversarial-review',
-      rootDir: '/Users/airlock/agent-os/tools/adversarial-review',
-    }),
-    '/Users/airlock/agent-os/tools/adversarial-review'
-  );
+test('diff-only workspace metadata is visible on public and ordinary reviews', () => {
+  for (const publicHygiene of [true, false]) {
+    const body = buildReviewCommentBody({
+      reviewerMetadata: { displayName: 'Code reviewer', reviewerIdentity: 'fixture' },
+      reviewText: '## Summary\nReviewed.\n\n## Verdict\nComment only',
+      workspaceDiffOnly: true,
+      publicHygiene,
+    });
+    assert.match(body, /^> Review workspace: diff-only\b/m);
+    assert.equal(extractReviewVerdict(body), 'Comment only');
+  }
 });
 
 test('materializeGeminiCheckoutSession writes isolated 0700 session dir and 0600 oauth_creds.json, then cleans up', () => {

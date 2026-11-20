@@ -200,7 +200,21 @@ rescue/closer workers or bypass gates to obtain those proofs. This change
 requires no config flip or new smoke command. See the
 [SEV2 RCA](postmortems/SEV2-LAC-2131-codex-service-home-auth-2026-10-30.md).
 
-Each one-shot `reviewer.mjs` process gives its model a read-only `git archive` snapshot of the repository's current default checkout HEAD. The PR diff is supplied separately. This snapshot is **not** the PR head or necessarily its merge base. The prompt names it accordingly.
+Each one-shot `reviewer.mjs` process archives the reviewed commit SHA from a
+local worktree whose GitHub `origin` matches the full target repository name.
+It checks the service checkout, the superproject two levels up, and
+`<ADVERSARIAL_REVIEWER_CLONE_ROOT>/<owner>/<repo>` in that order. Set
+`ADVERSARIAL_REVIEWER_CLONE_ROOT` to an absolute path to make additional
+checkouts available. An entry can point to a clone or an initialized submodule.
+Argus uses the same checkout resolver for local dependency evidence.
+
+When the commit is absent, the reviewer attempts a bounded fetch of that SHA
+from the matching origin without switching branches or updating the worktree.
+When no source matches, the fetch cannot materialize the commit, or Git cannot
+archive it, the model gets an empty read-only cwd and the review body records
+diff-only mode. The same repository identity rule applies to private, public,
+and unknown-visibility targets. Preserved review bodies are eligible for
+redelivery only when their workspace mode matches this run.
 
 Production review context separately includes a file inventory fetched from the
 requested full commit SHA through the Git trees API. Linked-document reads and
@@ -210,20 +224,23 @@ paths within a 16 KiB path-line budget and repeats the same evidence in every
 chunk. Capped, API-truncated, submodule-containing or unavailable inventories
 cannot establish absence by omission. A complete inventory supports literal
 path membership checks; it does not prove file contents or validator policy.
-Missing files in the default-checkout snapshot, partial diffs, rename records,
+An empty workspace, partial diffs, rename records,
 and historical PR scope prose cannot prove PR-head absence. Reviewers must
 verify absence and app validator contracts at the exact reviewed head before
 reporting them, while retaining independently actionable findings. The offline
 fixture and separate deployment acceptance procedure are recorded in
 [`changes/LAC-2215.md`](changes/LAC-2215.md).
 
-`prepareReviewerSnapshot` rejects a symbolic link that resolves outside that snapshot. Such a link is in the **base checkout**, so the reviewer queues an operator alert, exits with an infrastructure error, and posts no verdict about the PR. Repair the base checkout through its normal PR and deploy path, then retrigger the review. Do not ask the PR author to remove a link they did not introduce. Archive failures and validation failures also leave the PR without a synthetic review.
+`prepareReviewerSnapshot` rejects a symbolic link that resolves outside the
+snapshot. The reviewer queues an operator alert, exits with an infrastructure
+error, and posts no verdict. Inspect the link in the archived commit before
+retriggering the review.
 
 Reviewer snapshots and workspace audits use `ADVERSARIAL_REVIEW_WORKSPACE_STATE_DIR` when set. If the normal `ADVERSARIAL_REVIEW_STATE_DIR` is already outside the source checkout, they use it. Otherwise they use `$HQ_ROOT/adversarial-review/reviewer-workspace`, falling back to `~/.agent-os/adversarial-review/reviewer-workspace` when `HQ_ROOT` is unset. The review ledger and fence state keep their existing location. The reviewer refuses a workspace state directory inside the source checkout.
 
 The workspace state directory contains:
 
-- `reviewer-snapshots/<repo-key>/<checkout-head>/`: immutable cached archive and `.reviewer-snapshot.json` marker. The cache may be deleted when no reviewer is using it; it will be rebuilt. Old entries are collected after seven days. A failed cleanup is logged and does not block a review.
+- `reviewer-snapshots/<repo-key>/<reviewed-sha>/`: immutable cached archive and `.reviewer-snapshot.json` marker. The cache may be deleted when no reviewer is using it and will be rebuilt. Old entries are collected after seven days. A failed cleanup is logged and does not block a review.
 - `reviewer-workspace-audit/live-<pid>`: an in-flight reviewer marker, removed after its subprocess settles. Inspect the PID before removing a stale marker.
 - `reviewer-workspace-audit/reviewer-workspace-escapes.jsonl`: advisory before/after checkout differences during a model subprocess. Each event records checkout HEADs. When HEAD moves, the audit subtracts paths changed by the commit range only if their index and working-tree state match the new HEAD. Any remaining paths use `ambiguous: false` and `attribution: unattributed`. If the commit diff or new-HEAD comparison fails, the full changed set retains `ambiguous: true` and `attribution: checkout-head-moved`. Even `unattributed` is evidence to investigate, not proof the model wrote the path. Concurrent reviewers and operators can also change the shared tree.
 - `reviewer_workspace_head_moved`: a log-only record when all observed changes are explained by the checkout advance, including both HEADs and `explainedPathCount`. These reviews do not append to the escape ledger.

@@ -11,6 +11,7 @@ import {
   readdirSync,
   readlinkSync,
   readFileSync,
+  realpathSync,
   renameSync,
   rmSync,
   statSync,
@@ -19,8 +20,9 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { isAbsolute, join, relative, resolve, sep } from 'node:path';
-import { homedir } from 'node:os';
+import { homedir, tmpdir } from 'node:os';
 import { promisify } from 'node:util';
+import { materializeReviewerHead, reviewerGitEnv } from './reviewer-repo-checkout.mjs';
 
 const execFileAsync = promisify(execFile);
 const SNAPSHOT_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
@@ -200,14 +202,15 @@ async function resolveCheckoutHead(checkoutDir, execFileImpl = execFileAsync) {
   return sha;
 }
 
-function extractArchive(checkoutDir, destination) {
-  return withTransientGitRetries(() => extractArchiveOnce(checkoutDir, destination), 'git archive snapshot');
+function extractArchive(checkoutDir, destination, headSha) {
+  return withTransientGitRetries(() => extractArchiveOnce(checkoutDir, destination, headSha), 'git archive snapshot');
 }
 
-function extractArchiveOnce(checkoutDir, destination) {
+function extractArchiveOnce(checkoutDir, destination, headSha) {
   return new Promise((resolvePromise, reject) => {
-    const git = spawn('git', ['--no-optional-locks', 'archive', '--format=tar', 'HEAD'], {
+    const git = spawn('git', ['--no-optional-locks', '--no-replace-objects', 'archive', '--format=tar', headSha], {
       cwd: checkoutDir,
+      env: reviewerGitEnv(),
       stdio: ['ignore', 'pipe', 'pipe'],
     });
     const tar = spawn('tar', ['-x', '-C', destination], {
@@ -272,9 +275,9 @@ function extractArchiveOnce(checkoutDir, destination) {
   });
 }
 
-function extractArchiveWithRetries(checkoutDir, destination, extractArchiveImpl) {
-  if (extractArchiveImpl === extractArchive) return extractArchive(checkoutDir, destination);
-  return withTransientGitRetries(() => extractArchiveImpl(checkoutDir, destination), 'git archive snapshot');
+function extractArchiveWithRetries(checkoutDir, destination, headSha, extractArchiveImpl) {
+  if (extractArchiveImpl === extractArchive) return extractArchive(checkoutDir, destination, headSha);
+  return withTransientGitRetries(() => extractArchiveImpl(checkoutDir, destination, headSha), 'git archive snapshot');
 }
 
 function validateSnapshot(snapshotDir, expectedSha) {
@@ -282,7 +285,7 @@ function validateSnapshot(snapshotDir, expectedSha) {
   if (!existsSync(snapshotDir) || !statSync(snapshotDir).isDirectory() || !existsSync(markerPath)) return false;
   try {
     const marker = JSON.parse(readFileSync(markerPath, 'utf8'));
-    return marker.headSha === expectedSha && marker.schemaVersion === 1;
+    return marker.headSha === expectedSha && marker.schemaVersion === 2;
   } catch {
     return false;
   }
@@ -301,7 +304,12 @@ function validateSnapshotLinks(snapshotDir, currentDir = snapshotDir) {
     const stat = lstatSync(path);
     if (stat.isSymbolicLink()) {
       const target = readlinkSync(path);
-      if (!isInside(resolve(currentDir, target), snapshotDir)) {
+      let escapes = !isInside(resolve(currentDir, target), snapshotDir);
+      if (!escapes) {
+        try { escapes = !isInside(realpathSync.native(path), realpathSync.native(snapshotDir)); }
+        catch (err) { if (!['ENOENT', 'ENOTDIR', 'ELOOP'].includes(err.code)) throw err; }
+      }
+      if (escapes) {
         const linkPath = relative(snapshotDir, path) || entry;
         throw new ReviewerSnapshotBaseError(`snapshot contains link escaping its root: ${linkPath} -> ${target}`, {
           linkPath,
@@ -437,10 +445,8 @@ async function prepareReviewerSnapshot({
   ...cacheLimits
 } = {}) {
   if (!checkoutDir || !stateDir) throw new Error('reviewer snapshot requires checkoutDir and stateDir');
-  const headSha = await resolveCheckoutHead(checkoutDir, execFileImpl);
-  if (expectedHeadSha && headSha !== expectedHeadSha) {
-    throw new Error(`reviewer snapshot HEAD mismatch: checkout=${headSha} requested=${expectedHeadSha}`);
-  }
+  const headSha = expectedHeadSha?.toLowerCase() ?? await resolveCheckoutHead(checkoutDir, execFileImpl);
+  if (!/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/.test(headSha)) throw new Error('reviewer snapshot requires a full commit SHA');
   const cacheRoot = join(resolve(stateDir), 'reviewer-snapshots');
   if (isInside(cacheRoot, checkoutDir)) throw new Error('reviewer snapshot cache must be outside the source checkout');
   const repoCacheDir = join(cacheRoot, safeRepoName(repo));
@@ -457,9 +463,13 @@ async function prepareReviewerSnapshot({
   if (!reused) {
     const buildDir = mkdtempSync(join(repoCacheDir, '.build-'));
     try {
-      await extractArchiveWithRetries(checkoutDir, buildDir, extractArchiveImpl);
+      try {
+        await extractArchiveWithRetries(checkoutDir, buildDir, headSha, extractArchiveImpl);
+      } catch (cause) {
+        throw Object.assign(new Error(`reviewer snapshot unavailable for ${repo}@${headSha}: ${cause.message}`, { cause }), { archiveUnavailable: true });
+      }
       validateSnapshotLinks(buildDir);
-      writeFileSync(join(buildDir, '.reviewer-snapshot.json'), `${JSON.stringify({ schemaVersion: 1, repo, headSha })}\n`, { mode: 0o444 });
+      writeFileSync(join(buildDir, '.reviewer-snapshot.json'), `${JSON.stringify({ schemaVersion: 2, repo, headSha })}\n`, { mode: 0o444 });
       chmodSync(buildDir, 0o555);
       await execFileImpl('chmod', ['-R', 'a-w', buildDir]);
       promoteSnapshotBuild(buildDir, snapshotDir, headSha);
@@ -472,6 +482,7 @@ async function prepareReviewerSnapshot({
         makeTreeWritable(buildDir);
         rmSync(buildDir, { recursive: true, force: true });
       }
+      if (err.archiveUnavailable) throw err;
       if (isReviewerSnapshotBaseError(err)) {
         err.repo = repo;
         err.headSha = headSha;
@@ -484,6 +495,22 @@ async function prepareReviewerSnapshot({
   touchSnapshot(snapshotDir, nowMs);
   garbageCollectSnapshots(repoCacheDir, headSha, { nowMs, maxAgeMs, ...cacheLimits });
   return { checkoutDir: resolve(checkoutDir), headSha, snapshotDir, reused };
+}
+
+export async function prepareReviewerWorkspace({ repo, checkoutDir, stateDir, headSha, execFileImpl, pinSnapshot = true }) {
+  if (await materializeReviewerHead(checkoutDir, headSha, execFileImpl)) {
+    const workspaceStateDir = resolveReviewerWorkspaceStateDir({ stateDir, checkoutDir });
+    try {
+      const snapshot = await prepareReviewerSnapshot({ repo, checkoutDir, stateDir: workspaceStateDir, expectedHeadSha: headSha, pinSnapshot });
+      return { ...snapshot, stateDir: workspaceStateDir, diffOnly: false };
+    } catch (err) {
+      if (!err.archiveUnavailable) throw err;
+    }
+  }
+  const snapshotDir = mkdtempSync(join(tmpdir(), 'reviewer-diff-only-'));
+  process.once('exit', () => rmSync(snapshotDir, { recursive: true, force: true }));
+  chmodSync(snapshotDir, 0o500);
+  return { checkoutDir: null, headSha, snapshotDir, diffOnly: true };
 }
 
 function configureReviewerWorkspaceAudit(context) {

@@ -3,7 +3,7 @@ import test from 'node:test';
 
 import { alertReviewerSnapshotBaseFailure } from '../src/reviewer-alerts.mjs';
 
-test('unsafe default-checkout snapshots alert the operator as infrastructure failures', async () => {
+test('unsafe snapshots alert the operator about the snapshot commit', async () => {
   let delivered = null;
   const result = await alertReviewerSnapshotBaseFailure({
     repo: 'laceyenterprises/agent-os',
@@ -20,5 +20,5 @@ test('unsafe default-checkout snapshots alert the operator as infrastructure fai
   assert.deepEqual(result, { id: 'alert-1' });
   assert.equal(delivered.event.event, 'reviewer.snapshot_base_invalid');
   assert.equal(delivered.event.payload.headSha, 'base-head');
-  assert.match(delivered.message, /Repair the base checkout; this is not a PR-authored finding/);
+  assert.match(delivered.message, /Snapshot commit: base-head/);
 });

@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
+import { setImmediate } from 'node:timers/promises';
 import { proveMigrationRenumbers } from '../src/ama/migration-renumber.mjs';
 import { checkPrimaryChange } from '../src/ama/primary-change.mjs';
 
@@ -112,6 +113,65 @@ test('certifies a slot 341 → 342 snapshot with the historical RSS predecessor 
   assert.equal(proof.primarySqlBlob, proof.sqlBlob);
   assert.equal(proof.primaryRegistryBlob, proof.mainIntegration.parent.registryBlob);
   assert.deepEqual(proof.mainIntegration.snapshots.map(({ integrated }) => integrated), [false, true]);
+});
+
+function advanceObservedBase(f) {
+  const advanced = 'f'.repeat(40);
+  f.evidence.baseSha = advanced;
+  f.compares.set(`${f.base}...${advanced}`, ['ahead', f.base]);
+  f.compares.set(`${advanced}...${f.head}`, ['diverged', f.base]);
+  return advanced;
+}
+
+test('certifies the historical predecessor when observed main advances beyond the integrated base', async () => {
+  const f = fixture();
+  const advanced = advanceObservedBase(f);
+  const answer = await f.prove();
+  assert.equal(answer.ok, true, JSON.stringify(answer));
+  assert.equal(answer.derivedChanges[0].mainIntegration.observedBase, advanced);
+  assert.equal(answer.derivedChanges[0].mainIntegration.comparisonMergeBase, f.base);
+});
+
+for (const [name, status, mergeBase] of [
+  ['an ahead comparison despite advanced main', 'ahead', 'd'.repeat(40)],
+  ['a diverged comparison with a different merge base', 'diverged', 'a'.repeat(40)],
+]) test(`historical predecessor proof refuses ${name}`, async () => {
+  const f = fixture();
+  const advanced = advanceObservedBase(f);
+  f.compares.set(`${advanced}...${f.head}`, [status, mergeBase]);
+  assert.equal((await f.prove()).ok, false);
+  assert.deepEqual(f.evidence.migrationRenumberProofs, []);
+});
+
+test('historical proof batches commit and tree reads four at a time while preserving snapshot order', async () => {
+  const f = fixture();
+  const range = ['1', '2', '3', '4'].map(value => value.repeat(40)).concat(f.prior, f.head);
+  for (const [index, sha] of range.entries()) {
+    f.snapshots.set(sha, { ...(index >= 2 ? f.headFiles : f.authorFiles), 'snapshot.txt': `${index}\n` });
+    f.parents.set(sha, index === 2 ? [range[index - 1], f.base] : [range[index - 1] || f.author]);
+  }
+  f.evidence.diagnosticCommitRange = range.map(sha => ({ sha }));
+  const active = { commits: 0, trees: 0 }, peak = { commits: 0, trees: 0 };
+  const get = f.args.get;
+  const answer = await f.prove((_evidence, objects) => {
+    const commits = new Set(range.map(sha => `repos/${repo}/git/commits/${sha}`));
+    const trees = new Set(range.map(sha => `repos/${repo}/git/trees/${objects.get(`git/commits/${sha}`).tree.sha}`));
+    f.args.get = async path => {
+      const kind = commits.has(path) ? 'commits' : trees.has(path) ? 'trees' : null;
+      if (!kind) return get(path);
+      peak[kind] = Math.max(peak[kind], ++active[kind]);
+      try {
+        await setImmediate();
+        return await get(path);
+      } finally {
+        active[kind]--;
+      }
+    };
+  });
+  assert.equal(answer.ok, true, JSON.stringify(answer));
+  assert.deepEqual(peak, { commits: 4, trees: 4 });
+  assert.deepEqual(answer.derivedChanges[0].mainIntegration.snapshots.map(({ sha, integrated }) => ({ sha, integrated })),
+    range.map((sha, index) => ({ sha, integrated: index >= 2 })));
 });
 
 for (const [name, modify] of [

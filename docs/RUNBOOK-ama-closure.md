@@ -5212,7 +5212,13 @@ normalizing revision metadata. The child's SQL blob must be identical.
 Complete file lists must agree with the tree objects, including main's
 replacement of the projected `r341.py` path. Every first-parent snapshot must
 preserve the corresponding migration trees before or after the single
-integration of the trusted comparison base. A successful `mainIntegration`
+integration of the trusted comparison base. The observed `main` base may advance
+beyond that comparison base: the collector requires forward main ancestry and
+a diverged comparison to the PR head whose merge base is still the integrated
+comparison base. When both bases are equal, the PR head comparison must be
+ahead. Commit and migration-tree reads run in batches of at most four snapshots;
+ancestry and preservation checks consume those snapshots in first-parent order.
+A successful `mainIntegration`
 certificate includes `historicalParent` alongside the active `parent` and
 uses the same evidence-object and proof-object binding.
 

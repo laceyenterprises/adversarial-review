@@ -449,7 +449,7 @@ async function proveHistoricalParentSnapshot(args, evidence, range) {
     || !await compare(mergeBase, comparisonMergeBase, 'ahead')
     || !await compare(comparisonMergeBase, baseSha, comparisonMergeBase === baseSha ? 'identical' : 'ahead')
     || !await compare(comparisonMergeBase, primaryHead, 'diverged', mergeBase)
-    || !await compare(baseSha, headSha, 'ahead', comparisonMergeBase)) return [];
+    || !await compare(baseSha, headSha, comparisonMergeBase === baseSha ? 'ahead' : 'diverged', comparisonMergeBase)) return [];
 
   const [anchor, old, main, author] = await Promise.all([RSS_MAIN, mergeBase, comparisonMergeBase, primaryHead]
     .map(async sha => scopedLedger(args, (await ledgerCommit(args, sha)).tree)));
@@ -476,20 +476,24 @@ async function proveHistoricalParentSnapshot(args, evidence, range) {
 
   const snapshots = [];
   let previous = primaryHead, integrated = false, final;
-  for (const { sha } of range) {
-    const commit = await ledgerCommit(args, sha);
-    if (commit.parents[0] !== previous || commit.parents.length > 2) return [];
-    if (commit.parents.length === 2) {
-      if (integrated || commit.parents[1] !== comparisonMergeBase) return [];
-      integrated = true;
+  for (let offset = 0; offset < range.length; offset += 4) {
+    const batch = await Promise.all(range.slice(offset, offset + 4).map(async ({ sha }) => {
+      const commit = await ledgerCommit(args, sha);
+      return { commit, files: await scopedLedger(args, commit.tree) };
+    }));
+    for (const { commit, files } of batch) {
+      if (commit.parents[0] !== previous || commit.parents.length > 2) return [];
+      if (commit.parents.length === 2) {
+        if (integrated || commit.parents[1] !== comparisonMergeBase) return [];
+        integrated = true;
+      }
+      if (integrated) {
+        if (final && !exactLedgerDelta(final, files, [])) return [];
+        final = files;
+      } else if (!exactLedgerDelta(author, files, [])) return [];
+      snapshots.push({ ...commit, integrated });
+      previous = commit.sha;
     }
-    const files = await scopedLedger(args, commit.tree);
-    if (integrated) {
-      if (final && !exactLedgerDelta(final, files, [])) return [];
-      final = files;
-    } else if (!exactLedgerDelta(author, files, [])) return [];
-    snapshots.push({ ...commit, integrated });
-    previous = sha;
   }
   if (!final) return [];
   const active = await ledgerMigration(blob, final, destination.filename);

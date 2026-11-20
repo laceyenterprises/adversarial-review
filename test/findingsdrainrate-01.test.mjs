@@ -1,7 +1,7 @@
 import './helpers/dispatch-read-fixture.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { openReviewStateDb, ensureReviewStateSchema } from '../src/review-state.mjs';
@@ -56,11 +56,12 @@ function fixture(t, areas = 6) {
   return { rootDir, db, options, launches, submissions, maxInFlight: () => maxInFlight };
 }
 
-test('the concurrency knob is a validated positive integer with a default of 2', () => {
+test('the live concurrency knob accepts 1 through 8 with a default of 2', () => {
   assert.equal(findingBatchOptions({}).concurrency, 2);
   assert.equal(findingBatchOptions({ [KEY]: '5' }).concurrency, 5);
   assert.equal(findingBatchOptions({ [KEY]: '1' }).concurrency, 1);
-  for (const value of ['0', '-1', '1.5', 'many', '']) {
+  assert.equal(findingBatchOptions({ [KEY]: '8' }).concurrency, 8);
+  for (const value of ['0', '-1', '1.5', 'many', '', '9', '5000', String(Number.MAX_SAFE_INTEGER)]) {
     assert.throws(() => findingBatchOptions({ [KEY]: value }), new RegExp(`invalid ${KEY}`), value);
   }
 });
@@ -79,9 +80,19 @@ test('the live collector submits every claimed batch with the configured concurr
 });
 
 test('an invalid concurrency refuses the collector pass before any claim or submission', async t => {
+  for (const value of ['0', '9', '5000']) await t.test(value, async t => {
+    const f = fixture(t, 2);
+    const ticker = createFindingBatchTicker({ ...f.options, env: { HQ_ROOT: f.rootDir, [KEY]: value } });
+    await assert.rejects(ticker.tick(fixtureNow), new RegExp(`invalid ${KEY}`));
+    assert.equal(f.db.prepare('SELECT count(*) AS n FROM finding_batches').get().n, 0);
+    assert.equal(f.submissions.length, 0);
+  });
+});
+
+test('the live ticker also bounds an explicit concurrency override before claiming', async t => {
   const f = fixture(t, 2);
-  const ticker = createFindingBatchTicker({ ...f.options, env: { HQ_ROOT: f.rootDir, [KEY]: '0' } });
-  await assert.rejects(ticker.tick(fixtureNow), new RegExp(`invalid ${KEY}`));
+  await assert.rejects(createFindingBatchTicker({ ...f.options, env: {}, concurrency: 5000 }).tick(fixtureNow),
+    new RegExp(`invalid ${KEY}`));
   assert.equal(f.db.prepare('SELECT count(*) AS n FROM finding_batches').get().n, 0);
   assert.equal(f.submissions.length, 0);
 });
@@ -131,4 +142,54 @@ test('the backlog summary reports last-hour capture, resolution and completion r
   const summary = summarizeFindingBacklog(f.db, now);
   assert.equal(summary.available, true);
   assert.deepEqual(summary.rates, { capturedLastHour: 3, resolvedLastHour: 1, batchesCompletedLastHour: 1, netLastHour: 2 });
+});
+
+test('rate indexes upgrade populated history and serve the actual summary ranges', t => {
+  const f = fixture(t, 2000);
+  const db = f.db;
+  const now = Date.parse('2026-01-03T12:00:00Z');
+  const since = '2026-01-03T11:00:00.000Z';
+  // Simulate an existing store before the additive migration.
+  db.exec(`DROP INDEX finding_backlog_capture_rate;
+    DROP INDEX finding_backlog_resolution_rate;
+    DROP INDEX finding_batches_completion_rate;
+    UPDATE finding_backlog SET outcome='dropped',reason='not-reproducible: synthetic';
+    UPDATE finding_backlog SET captured_at='2020-01-01T00:00:00Z',resolved_at='2020-01-01T00:00:00Z';
+    WITH RECURSIVE history(n) AS (VALUES(1) UNION ALL SELECT n+1 FROM history WHERE n<2000)
+    INSERT INTO finding_batches(batch_id,repo,area,day,completed_at)
+      SELECT 'history-'||n,'sample/service','history','2020-01-01','2020-01-01T00:00:00Z' FROM history;`);
+  const ids = db.prepare('SELECT finding_id FROM finding_backlog ORDER BY finding_id LIMIT 7').all();
+  const timestamps = [since, '2026-01-03T11:00:00.001Z', '2026-01-03T12:30:00+01:00',
+    '2026-01-03T06:00:00-05:00', 'invalid', '2026-01-03T11:30:00Z', '2026-01-03T11:50:00Z'];
+  for (const [i, timestamp] of timestamps.entries()) {
+    db.prepare('UPDATE finding_backlog SET captured_at=?,resolved_at=?,manifest_sha256=? WHERE finding_id=?')
+      .run(timestamp, timestamp, i === 5 ? 'selected' : null, ids[i].finding_id);
+    db.prepare('INSERT INTO finding_batches(batch_id,repo,area,day,completed_at,manifest_sha256) VALUES (?,?,?,?,?,?)')
+      .run(`boundary-${i}`, repo, 'boundary', '2026-01-03', i === 6 ? null : timestamp, i === 5 ? 'selected' : null);
+  }
+  db.prepare('UPDATE finding_backlog SET outcome=NULL WHERE finding_id=?').run(ids[6].finding_id);
+  const before = summarizeFindingBacklog(db, now);
+  assert.equal(before.available, true, before.error);
+  const expected = { capturedLastHour: 3, resolvedLastHour: 2, batchesCompletedLastHour: 2, netLastHour: 1 };
+  assert.deepEqual(before.rates, expected);
+
+  const migration = readFileSync(new URL('../migrations/20261120_findings_rate_indexes.sql', import.meta.url), 'utf8');
+  db.exec(migration);
+  db.exec(migration); // Replaying index creation is harmless.
+  db.exec('ANALYZE');
+  let plan;
+  const summary = summarizeFindingBacklog({
+    prepare(sql) {
+      if (sql.includes('AS capturedLastHour')) {
+        plan = db.prepare(`EXPLAIN QUERY PLAN ${sql}`).all({ since }).map(row => row.detail);
+      }
+      return db.prepare(sql);
+    },
+  }, now);
+  assert.equal(summary.available, true, summary.error);
+  assert.deepEqual(summary.rates, expected, 'the indexed query preserves timestamp and selection semantics');
+  for (const index of ['finding_backlog_capture_rate', 'finding_backlog_resolution_rate', 'finding_batches_completion_rate']) {
+    assert.ok(plan.some(detail => detail.includes(`USING INDEX ${index}`) && detail.startsWith('SEARCH ')),
+      `${index} must range-search instead of scanning history: ${JSON.stringify(plan)}`);
+  }
 });

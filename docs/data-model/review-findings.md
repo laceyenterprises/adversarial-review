@@ -60,7 +60,8 @@ Gate readers never parse reply artifacts or execute reproduction commands.
 `src/finding-backlog-window.mjs`, `migrations/20261112_historical_projection.sql`,
 `bin/review-findings.mjs`,
 `migrations/20261024_simplicity_batch_lifecycle.sql`,
-`migrations/20261107_findings_batch_requeue.sql`
+`migrations/20261107_findings_batch_requeue.sql`,
+`migrations/20261120_findings_rate_indexes.sql`
 
 `review_findings` stores each blocking and non-blocking finding from first-pass
 and rereview bodies using the existing kernel parser. Remediation comments and
@@ -685,6 +686,22 @@ Pipeline health uses its resolved `findingsBacklogMaxAgeMs` for both summary and
 alert thresholds. Invalid direct summary defaults return `available: false`
 without throwing out of the health API.
 This is an operational alert, with no additional merge or CI gate.
+
+The three last-hour rates use strictly-after-cutoff normalized timestamp range
+reads, excluding selected work. Migration `20261120_findings_rate_indexes.sql`
+adds partial expression indexes on `julianday(captured_at)`,
+`julianday(resolved_at)` (terminal outcomes only), and `julianday(completed_at)`.
+Each index excludes rows with a selection manifest. These indexes preserve
+offset timestamp semantics without scanning historical rows for each rate.
+Schema migration builds them once over existing history; no data is rewritten.
+Other backlog summary fields retain their existing query behavior.
+
+The live ticker's `ADVERSARIAL_FINDINGS_BATCH_CONCURRENCY` accepts integers 1–8
+(default 2). Invalid settings and out-of-range explicit ticker overrides reject
+the pass before claiming or submitting batches. The ceiling bounds concurrent
+host provisioning subprocesses; HQ admission still owns running worker capacity
+and budget. Direct `runFindingBatches` callers and explicit backfill concurrency
+retain their existing positive-integer interface.
 
 After deployment and watcher restart, SRE explicitly runs the one-shot drain:
 

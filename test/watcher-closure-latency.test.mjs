@@ -689,6 +689,7 @@ test('synthetic posted-review pass pins GitHub and database read counts per step
   const historicalProjectionMigrationChecks = closure.database.migrationChecks['20261112_historical_projection.sql'];
   const shadowPatternsMigrationChecks = closure.database.migrationChecks['20261113_finalization_shadow_patterns.sql'];
   const decisionPublicationMigrationChecks = closure.database.migrationChecks['20261114_findings_decision_publication.sql'];
+  const rateIndexMigrationChecks = closure.database.migrationChecks['20261120_findings_rate_indexes.sql'];
   const closureWaitMigrationChecks = closure.database.migrationChecks['waits_by_class.last_paged'];
   assert.equal(findingMigrationChecks, 6);
   assert.equal(queueMigrationChecks, 6);
@@ -711,12 +712,14 @@ test('synthetic posted-review pass pins GitHub and database read counts per step
   assert.equal(historicalProjectionMigrationChecks, 6);
   assert.equal(shadowPatternsMigrationChecks, 6);
   assert.equal(decisionPublicationMigrationChecks, 6);
+  assert.equal(rateIndexMigrationChecks, 6);
   assert.equal(closureWaitMigrationChecks, 6, 'two reminder-column schema probes per PR');
   assert.equal(closure.database.count - findingMigrationChecks - queueMigrationChecks - handoffMigrationChecks - backlogMigrationChecks
     - admissionMigrationChecks - checksMigrationChecks - mergeMigrationChecks - shadowMigrationChecks - routingMigrationChecks
     - simplicityMigrationChecks - noteLifecycleMigrationChecks - drainMigrationChecks - requeueMigrationChecks - gradeMigrationChecks
     - manifestMigrationChecks - selectionScopeMigrationChecks - dispatchAttemptsMigrationChecks - gsrMigrationChecks
-    - historicalProjectionMigrationChecks - shadowPatternsMigrationChecks - decisionPublicationMigrationChecks - closureWaitMigrationChecks, 114,
+    - historicalProjectionMigrationChecks - shadowPatternsMigrationChecks - decisionPublicationMigrationChecks
+    - rateIndexMigrationChecks - closureWaitMigrationChecks, 114,
     'round counter and wake telemetry reuse the connection; three decisions persist their first-actionable anchors');
   assert.equal(profile.steps['handler-overhead'].subprocesses.gh, undefined);
   assert.ok(profile.outcomes.every(result => result.handled && !result.terminal));

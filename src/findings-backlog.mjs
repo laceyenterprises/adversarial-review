@@ -107,7 +107,8 @@ export function summarizeFindingBacklog(db, now = Date.now(), { maxAgeMs } = {})
       FROM finding_backlog WHERE ${backlogScope}outcome IS NOT NULL AND resolved_at IS NOT NULL
       GROUP BY day ORDER BY day DESC`).all();
     // Last-hour drain trend: capture above resolution means the backlog is
-    // growing even while batches complete.
+    // growing even while batches complete. The partial expression indexes in
+    // 20261120_findings_rate_indexes.sql serve these normalized-time ranges.
     const rates = db.prepare(`SELECT
       (SELECT count(*) FROM finding_backlog WHERE ${backlogScope}julianday(captured_at) > julianday(@since)) AS capturedLastHour,
       (SELECT count(*) FROM finding_backlog WHERE ${backlogScope}outcome IS NOT NULL

@@ -1,4 +1,5 @@
 import { canonicalRepositoryName, ensureRepositoryIdentitySchema, observeRepositoryListing } from './repository-identity.mjs';
+import { withSqliteBusyRetrySync } from './sqlite-busy-retry.mjs';
 
 // Discovery owns its refresh clock; identity conflicts quarantine only their repo.
 export function createRepositoryRefresher({ config, db, rootDir, additionalStateDir,
@@ -10,11 +11,13 @@ export function createRepositoryRefresher({ config, db, rootDir, additionalState
   let startupFailures = 0;
   let emptySince = null;
   let emptyAlertSent = false;
-  ensureRepositoryIdentitySchema(db);
-  // A restart must not restore a name rejected by the last identity observation.
-  db.exec(`CREATE TABLE IF NOT EXISTS repository_discovery_quarantine (
-    full_name TEXT PRIMARY KEY COLLATE NOCASE
-  )`);
+  withSqliteBusyRetrySync(() => {
+    ensureRepositoryIdentitySchema(db);
+    // A restart must not restore a name rejected by the last identity observation.
+    db.exec(`CREATE TABLE IF NOT EXISTS repository_discovery_quarantine (
+      full_name TEXT PRIMARY KEY COLLATE NOCASE
+    )`);
+  }, { label: 'repository-discovery-schema-bootstrap', log: logger });
   const excluded = new Set((config.excludeRepos ?? []).map(name => name.toLowerCase()));
   const isExcluded = name => excluded.has(name.toLowerCase())
     || excluded.has(name.split('/').at(-1).toLowerCase());

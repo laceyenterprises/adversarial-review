@@ -46,3 +46,17 @@ reviewing its added queued-admission observation guard and immediate escalation
 of existing hard-stop reasons. These additions do not add persisted states or
 new graph edges; the independently pinned graph and drift-negative fixtures
 remain unchanged.
+
+## HAM CI repair
+
+Repository-discovery schema initialization now uses the existing bounded SQLite
+busy retry, matching review-state bootstrap. Concurrent watcher imports could
+otherwise fail before detector writers ran, as observed in the Node 26 CI job.
+There are no interface changes; non-contention errors still propagate and
+quarantine semantics are unchanged.
+
+Verification: the canonical runner passed both discovery suites (52 tests),
+including a transient quarantine-table lock and an I/O error that must propagate.
+`npm run lint` passed with zero errors, `npm run typecheck:contracts` passed,
+and `bash demo/research-finding-walkthrough.sh` produced three byte-stable
+deliveries.

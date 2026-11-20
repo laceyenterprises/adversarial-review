@@ -29,6 +29,10 @@ default split mode it does not.
   `reviewer_pass_token_backfill_failed` warning logs failed ones.
 - `spawnReviewer` accepts an optional `ledgerLookupBoundMs` override, used by
   tests. No configuration key, CI check or gate is added.
+- Deferred replay in `completeReviewerPass` merges incoming late evidence with
+  existing durable attribution, guaranteeing monotonic resolved attribution:
+  a late token-only read cannot regress an attribution already resolved by
+  concurrent backfill or pass repair.
 
 ## Verification
 

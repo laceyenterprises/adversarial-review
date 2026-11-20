@@ -1371,8 +1371,8 @@ async function spawnReviewerOnceWithAccount({
                 status: result.ok ? 'completed' : (['cancelled', 'reviewer-stalled', 'github-budget-deferred'].includes(result.failureClass) ? 'cancelled' : 'failed'),
                 endedAt, tokenUsage: lateUsage, tokenSource: lateUsage?.source || 'unknown', workerRunId,
                 metadata: { reviewerSessionUuid, launchRequestId, workerRunAttribution: attribution },
-              }), { label: `reviewer-pass-token-backfill:${repo}#${prNumber}`, log: console }).then(() => console.log(
-                `[watcher] reviewer settlement timing repo=${repo} pr=${prNumber} step=token-ledger-backfill elapsed_ms=${Date.now() - backfillStartedAt} worker_run=${workerRunId ? 'resolved' : 'pending'}`
+              }), { label: `reviewer-pass-token-backfill:${repo}#${prNumber}`, log: console }).then((pass) => console.log(
+                `[watcher] reviewer settlement timing repo=${repo} pr=${prNumber} step=token-ledger-backfill elapsed_ms=${Date.now() - backfillStartedAt} worker_run=${pass?.worker_run_id || workerRunId ? 'resolved' : 'pending'}`
               ));
             }).catch((err) => console.warn(
               `[watcher] reviewer_pass_token_backfill_failed repo=${repo} pr=${prNumber} session=${reviewerSessionUuid}: ${err?.message || err}`)),

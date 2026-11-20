@@ -366,3 +366,60 @@ test('restart between outcome and delivery settlement recovers only a dead owner
     { review_status: 'posted', review_attempts: 3 });
   assert.equal(db.prepare('SELECT gh_comment_id FROM reviewer_passes').get().gh_comment_id, 'review-id');
 });
+
+test('REVIEWSETTLETOKENWAIT-01: late token-only backfill does not regress attribution resolved before deferred replay', t => {
+  const { rootDir } = fixture(t);
+  const key = { repo, prNumber: 1, attemptNumber: 1, passKind: 'first-pass' };
+  beginReviewerPass(rootDir, { ...key, reviewerClass: 'gemini', headSha: head,
+    metadata: { reviewerSessionUuid: 'primary', launchRequestId: 'lrq_race_1',
+      workerRunAttribution: { state: 'pending', launchRequestId: 'lrq_race_1', workerRunId: null, retryable: true } } });
+  // Initial settlement exceeds the bound, leaving attribution pending
+  const settled = completeReviewerPass(rootDir, {
+    ...key, status: 'completed', tokenUsage: { input: 8, output: 13, total: 21 },
+    workerRunId: null,
+    metadata: {
+      reviewerSessionUuid: 'primary', launchRequestId: 'lrq_race_1',
+      workerRunAttribution: { state: 'pending', launchRequestId: 'lrq_race_1', workerRunId: null, lookupAttempts: 1, lastError: 'settle-bound-exceeded', retryable: true },
+    },
+  });
+  assert.equal(settled.worker_run_id, null);
+  assert.equal(JSON.parse(settled.metadata_json).workerRunAttribution.state, 'pending');
+
+  // Backfill resolves the worker run while the deferred read is still pending
+  const backfilled = completeReviewerPass(rootDir, {
+    ...key, status: 'completed',
+    workerRunId: 'wr_race_1',
+    metadata: {
+      reviewerSessionUuid: 'primary', launchRequestId: 'lrq_race_1',
+      workerRunAttribution: { state: 'resolved', launchRequestId: 'lrq_race_1', workerRunId: 'wr_race_1', lookupAttempts: 2, lastError: null, retryable: false },
+    },
+  });
+  assert.equal(backfilled.worker_run_id, 'wr_race_1');
+  assert.equal(JSON.parse(backfilled.metadata_json).workerRunAttribution.state, 'resolved');
+
+  // Deferred read returns token evidence without a workerRunId
+  const late = completeReviewerPass(rootDir, {
+    ...key, status: 'completed',
+    tokenUsage: { input: 15, output: 25, total: 40, source: 'session-ledger' },
+    workerRunId: null,
+    metadata: {
+      reviewerSessionUuid: 'primary', launchRequestId: 'lrq_race_1',
+      workerRunAttribution: { state: 'pending', launchRequestId: 'lrq_race_1', workerRunId: null, lookupAttempts: 1, lastError: null, retryable: true },
+    },
+  });
+  // Token usage is updated from the deferred read
+  assert.equal(late.token_input, 15);
+  assert.equal(late.token_output, 25);
+  assert.equal(late.token_total, 40);
+  // worker_run_id and attribution remain resolved and do not regress to pending
+  assert.equal(late.worker_run_id, 'wr_race_1');
+  const lateMeta = JSON.parse(late.metadata_json);
+  assert.deepEqual(lateMeta.workerRunAttribution, {
+    state: 'resolved',
+    launchRequestId: 'lrq_race_1',
+    workerRunId: 'wr_race_1',
+    lookupAttempts: 2,
+    lastError: null,
+    retryable: false,
+  });
+});

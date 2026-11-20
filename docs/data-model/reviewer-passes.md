@@ -443,7 +443,8 @@ structural miss that is never retried), `settle-bound-exceeded` (the read
 outlived the bound; `pending`), or a sanitized lookup error. A read that
 outlives the bound keeps running. When it returns evidence, the watcher replays
 the same pass once, enriching tokens, `worker_run_id` and
-`workerRunAttribution` without changing its outcome. Every settle that reads
+`workerRunAttribution` without changing its outcome or regressing an
+already-resolved attribution record. Every settle that reads
 evidence logs one `step=token-ledger-lookup` info line with `attempts`,
 `reason` and `deferred` (REVIEWSETTLETOKENWAIT-01).
 `scripts/backfill-reviewer-passes.mjs` revisits only pending rows whose

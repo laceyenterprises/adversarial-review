@@ -379,7 +379,8 @@ function completeReviewerPass(rootDir, {
     ensureReviewStateSchema(db);
     return db.transaction(() => {
       const existing = db.prepare(
-        `SELECT status, ended_at, head_sha, gh_comment_id, metadata_json, reviewer_model, reviewer_class, token_input, token_output,
+        `SELECT status, ended_at, head_sha, gh_comment_id, metadata_json, reviewer_model, reviewer_class,
+                worker_run_id, token_input, token_output,
                 token_cache_read, token_cache_write, token_reasoning, token_tool_context,
                 token_total, token_cost_usd, token_source
            FROM reviewer_passes
@@ -468,6 +469,31 @@ function completeReviewerPass(rootDir, {
           delete mergedMetadata.tokenCostSource;
           delete mergedMetadata.tokenCostEstimated;
         }
+      }
+      const effectiveWorkerRunId = workerRunId || existing.worker_run_id || null;
+      if (metadata.workerRunAttribution) {
+        if (existingMeta.workerRunAttribution?.state === 'resolved') {
+          // A resolved attribution is monotonic: never downgrade to pending
+          mergedMetadata.workerRunAttribution = metadata.workerRunAttribution.state === 'resolved'
+            ? { ...existingMeta.workerRunAttribution, ...metadata.workerRunAttribution }
+            : existingMeta.workerRunAttribution;
+        } else if (effectiveWorkerRunId && metadata.workerRunAttribution.state !== 'resolved') {
+          mergedMetadata.workerRunAttribution = {
+            ...metadata.workerRunAttribution,
+            state: 'resolved',
+            workerRunId: effectiveWorkerRunId,
+            lastError: null,
+            retryable: false,
+          };
+        }
+      } else if (effectiveWorkerRunId && mergedMetadata.workerRunAttribution?.state !== 'resolved') {
+        mergedMetadata.workerRunAttribution = {
+          ...mergedMetadata.workerRunAttribution,
+          state: 'resolved',
+          workerRunId: effectiveWorkerRunId,
+          lastError: null,
+          retryable: false,
+        };
       }
       const writeTokenUsage = shouldWriteTokenUsage ? 1 : 0;
       const tokenCostUSD = usage?.costUSD ?? derivedCost ?? null;

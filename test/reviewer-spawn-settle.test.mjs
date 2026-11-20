@@ -1357,3 +1357,70 @@ test('REVIEWSETTLETOKENWAIT-01: a deferred read that later fails leaves the sett
   assert.equal(settled.length, 1);
   assert.equal(settled[0].metadata.workerRunAttribution.state, 'pending');
 });
+
+test('REVIEWSETTLETOKENWAIT-01: backfill resolving before a token-only deferred read does not regress attribution', async () => {
+  let releaseRead;
+  const slowRead = new Promise((resolve) => { releaseRead = resolve; });
+  const args = tokenWaitSpawnArgs({
+    prNumber: 305, launchRequestId: 'lrq_fixture_305', ledgerLookupBoundMs: 50,
+    readImpl: () => slowRead,
+  });
+  // Use production completeReviewerPass so the SQLite row is durably updated
+  delete args.completeReviewerPassImpl;
+  const db = openReviewStateDb(args.rootDir);
+  ensureReviewStateSchema(db);
+
+  const log = captureConsoleLog();
+  try {
+    const result = await spawnReviewer(args);
+    assert.equal(result.ok, true);
+
+    // Initial settle left attribution pending
+    let row = db.prepare('SELECT worker_run_id, metadata_json, token_input FROM reviewer_passes WHERE pr_number = 305').get();
+    assert.equal(row.worker_run_id, null);
+    assert.equal(JSON.parse(row.metadata_json).workerRunAttribution.state, 'pending');
+
+    // Backfill resolves the worker run while deferred read is in-flight
+    completeReviewerPass(args.rootDir, {
+      repo: args.repo, prNumber: 305, attemptNumber: 2, passKind: 'first-pass', status: 'completed',
+      workerRunId: 'wr_backfill_305',
+      metadata: {
+        reviewerSessionUuid: args.reviewerSessionUuid,
+        launchRequestId: 'lrq_fixture_305',
+        workerRunAttribution: {
+          state: 'resolved',
+          launchRequestId: 'lrq_fixture_305',
+          workerRunId: 'wr_backfill_305',
+          lookupAttempts: 2,
+          lastError: null,
+          retryable: false,
+        },
+      },
+    });
+
+    row = db.prepare('SELECT worker_run_id, metadata_json, token_input FROM reviewer_passes WHERE pr_number = 305').get();
+    assert.equal(row.worker_run_id, 'wr_backfill_305');
+    assert.equal(JSON.parse(row.metadata_json).workerRunAttribution.state, 'resolved');
+
+    // Late evidence returns token counts but NO workerRunId
+    releaseRead({ model: 'fixture-model', rateLimits: [{ limitId: 'limit-305', usedPercent: 50 }], source: 'session-ledger' });
+    // Wait for deferred replay
+    for (let i = 0; i < 100 && !log.lines.some((line) => line.includes('pr=305 step=token-ledger-backfill')); i += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 5));
+    }
+
+    const backfillLog = log.lines.find((line) => line.includes('pr=305 step=token-ledger-backfill'));
+    assert.match(backfillLog || '', /pr=305 step=token-ledger-backfill elapsed_ms=\d+ worker_run=resolved/);
+
+    row = db.prepare('SELECT worker_run_id, metadata_json, token_input FROM reviewer_passes WHERE pr_number = 305').get();
+    assert.equal(row.worker_run_id, 'wr_backfill_305', 'worker_run_id preserved');
+    const finalMeta = JSON.parse(row.metadata_json);
+    assert.equal(finalMeta.workerRunAttribution.state, 'resolved', 'attribution did not regress to pending');
+    assert.equal(finalMeta.workerRunAttribution.workerRunId, 'wr_backfill_305');
+    assert.equal(finalMeta.workerRunAttribution.lookupAttempts, 2);
+    assert.equal(finalMeta.workerRunAttribution.retryable, false);
+  } finally {
+    log.restore();
+    db.close();
+  }
+});

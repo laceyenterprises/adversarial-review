@@ -3104,6 +3104,7 @@ function markFollowUpJobSpawned({
   if (worker?.workspaceDir) {
     nextJob.workspaceDir = worker.workspaceDir;
   }
+  delete nextJob.ownerAuthHold;
 
   writeFollowUpJob(jobPath, nextJob);
   recordFollowUpRoundSpawned(passRootDir, nextJob);

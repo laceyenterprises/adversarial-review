@@ -1,5 +1,6 @@
 import { loadAwareTimeoutMs } from './load-aware-timeout.mjs';
 import { meteredExecFile } from './metered-gh.mjs';
+import { OWNER_AUTH_HOLD, ownerAuthHold, selectRemediationReadRoute } from './remediation-owner-auth.mjs';
 // Remediation git & PR I/O helpers.
 //
 // Extracted from follow-up-remediation.mjs (ARC-19 wave3). This is a
@@ -214,14 +215,17 @@ async function runWorkspaceGitWithTransientRetry(args, {
   execFileImpl,
   options,
   retryDelaysMs = WORKSPACE_GIT_RETRY_DELAYS_MS,
+  ownerRoute,
 }) {
-  return runWorkspaceNetworkCommandWithTransientRetry({
+  const run = () => runWorkspaceNetworkCommandWithTransientRetry({
     execFileImpl,
     command: 'git',
     args,
-    options,
+    options: ownerRoute ? { ...options, env: ownerRoute.gitEnv } : options,
     retryDelaysMs,
+    ...(ownerRoute && { refreshAuthEnvImpl: async () => ({ refreshed: false, detail: 'owner route rejected' }) }),
   });
+  return ownerRoute ? ownerRoute.run(run) : run();
 }
 
 async function fetchPRBranchMetadata({
@@ -229,6 +233,7 @@ async function fetchPRBranchMetadata({
   prNumber,
   execFileImpl = execFileAsync,
   env = process.env,
+  ownerRoute,
 } = {}) {
   // Resolve PR branch metadata via the REST pulls endpoint instead of
   // `gh pr view --json` (which goes through GraphQL). GraphQL and REST have
@@ -243,12 +248,14 @@ async function fetchPRBranchMetadata({
     throw new Error(`Invalid repo slug: ${repo}`);
   }
   const normalizedPrNumber = normalizePrNumber(prNumber);
-  const { stdout } = await runWorkspaceNetworkCommandWithTransientRetry({
+  const run = () => runWorkspaceNetworkCommandWithTransientRetry({
     execFileImpl,
     command: 'gh',
     args: ['api', `repos/${owner}/${repoName}/pulls/${normalizedPrNumber}`],
-    options: { env, timeout: loadAwareTimeoutMs(8000), maxBuffer: 2 * 1024 * 1024 },
+    options: { env: ownerRoute?.ghEnv ?? env, timeout: loadAwareTimeoutMs(8000), maxBuffer: 2 * 1024 * 1024 },
+    ...(ownerRoute && { refreshAuthEnvImpl: async () => ({ refreshed: false, detail: 'owner route rejected' }) }),
   });
+  const { stdout } = await (ownerRoute ? ownerRoute.run(run) : run());
   const parsed = JSON.parse(String(stdout || '{}'));
   const baseBranch = normalizeBaseBranch(parsed?.base?.ref);
   if (!baseBranch) {
@@ -266,10 +273,12 @@ async function ensureJobBranchMetadata({
   jobPath,
   requireBranch = false,
   execFileImpl = execFileAsync,
+  env = process.env,
+  ownerRoute,
 } = {}) {
   const existing = normalizeBaseBranch(job?.baseBranch);
   const existingBranch = normalizePrHeadRef(job?.branch);
-  if (existing && (!requireBranch || existingBranch)) {
+  if (!ownerRoute && existing && (!requireBranch || existingBranch)) {
     return {
       job: {
         ...job,
@@ -288,13 +297,18 @@ async function ensureJobBranchMetadata({
       repo: job?.repo,
       prNumber: job?.prNumber,
       execFileImpl,
+      env,
+      ownerRoute,
     });
   } catch (err) {
     err.isBaseBranchResolutionError = true;
     throw err;
   }
-  const baseBranch = existing || metadata.baseBranch;
-  const branch = existingBranch || metadata.branch;
+  if (ownerRoute && (!metadata.branch || metadata.headRepo?.toLowerCase() !== job.repo.toLowerCase())) {
+    throw ownerAuthHold(job.repo, 'same-repository PR branch', 'fork or missing head repository');
+  }
+  const baseBranch = ownerRoute ? metadata.baseBranch : existing || metadata.baseBranch;
+  const branch = ownerRoute ? metadata.branch : existingBranch || metadata.branch;
   if (requireBranch && !branch) {
     const err = new Error(`Could not resolve headRefName for ${job?.repo}#${job?.prNumber}`);
     err.isBaseBranchResolutionError = true;
@@ -406,9 +420,10 @@ async function inspectWorkspaceForRetry({ workspaceDir, workspaceRootDir, jobId,
 
 async function checkoutWorkspaceForRemediation({
   workspaceDir, workspaceRootDir = dirname(workspaceDir), job, repo, baseBranch, headRef, headRepo,
-  resumeRequested, fetchEnv, execFileImpl = execFileAsync, log = console,
+  resumeRequested, fetchEnv, ownerRoute, execFileImpl = execFileAsync, log = console,
 }) {
-  if ((headRepo && headRepo !== repo) || !headRef) {
+  if ((headRepo && headRepo.toLowerCase() !== repo.toLowerCase()) || !headRef) {
+    if (ownerRoute) throw ownerAuthHold(repo, 'same-repository PR branch', 'fork or missing head repository');
     if (resumeRequested) {
       throw new Error(`resume-impossible: fork or missing PR head cannot safely reuse the preserved workspace at ${workspaceDir}`);
     }
@@ -423,14 +438,16 @@ async function checkoutWorkspaceForRemediation({
   });
   const fetchRefs = [`+refs/heads/${headRef}:refs/remotes/origin/${headRef}`];
   if (baseBranch !== headRef) fetchRefs.push(`+refs/heads/${baseBranch}:refs/remotes/origin/${baseBranch}`);
-  const fetchOptions = { execFileImpl, options: { maxBuffer: 10 * 1024 * 1024, env: fetchEnv } };
+  const fetchOptions = { execFileImpl, ownerRoute, options: { maxBuffer: 10 * 1024 * 1024, env: fetchEnv } };
+  const remote = ownerRoute?.url ?? 'origin';
+  const fetchArgs = ['-C', workspaceDir, 'fetch', ...(ownerRoute ? ['--no-recurse-submodules'] : []), remote];
   try {
-    await runWorkspaceGitWithTransientRetry(['-C', workspaceDir, 'fetch', 'origin', ...fetchRefs], fetchOptions);
+    await runWorkspaceGitWithTransientRetry([...fetchArgs, ...fetchRefs], fetchOptions);
   } catch (err) {
     const detail = [err?.message, err?.stderr].filter(Boolean).join('\n');
     if (fetchRefs.length < 2 || !/(?:couldn.t find remote ref|remote ref .+ not found)/i.test(detail)) throw err;
     log.warn?.(`[follow-up-remediation] base branch disappeared during fetch repo=${repo} branch=${baseBranch}; fetching PR head only`);
-    await runWorkspaceGitWithTransientRetry(['-C', workspaceDir, 'fetch', 'origin', fetchRefs[0]], fetchOptions);
+    await runWorkspaceGitWithTransientRetry([...fetchArgs, fetchRefs[0]], fetchOptions);
   }
   if (!resumeRequested) {
     await runWorkspaceGitWithTransientRetry(['-C', workspaceDir, 'checkout', '-B', headRef, `origin/${headRef}`], {
@@ -513,6 +530,8 @@ async function inspectLostRemediationWorkspace({ workspaceDir, job, execFileImpl
 async function auditWorkspaceForContamination({
   workspaceDir,
   baseBranch,
+  repo,
+  reviewerModel,
   execFileImpl = execFileAsync,
 }) {
   const resolvedBaseBranch = normalizeBaseBranch(baseBranch);
@@ -527,10 +546,17 @@ async function auditWorkspaceForContamination({
   }
 
   try {
-    await execFileImpl('git', ['-C', workspaceDir, 'fetch', '--prune', 'origin', resolvedBaseBranch], {
-      maxBuffer: 10 * 1024 * 1024,
+    const ownerRoute = await selectRemediationReadRoute({ repo, reviewerModel });
+    const fetchArgs = ownerRoute
+      ? ['--no-recurse-submodules', ownerRoute.url, `+refs/heads/${resolvedBaseBranch}:refs/remotes/origin/${resolvedBaseBranch}`]
+      : ['--prune', 'origin', resolvedBaseBranch];
+    const fetch = () => execFileImpl('git', ['-C', workspaceDir, 'fetch', ...fetchArgs], {
+      maxBuffer: 10 * 1024 * 1024, ...(ownerRoute && { env: ownerRoute.gitEnv }),
     });
+    await (ownerRoute ? ownerRoute.run(fetch) : fetch());
   } catch (err) {
+    if (err.code === OWNER_AUTH_HOLD) return { suspect: [], error: err.message,
+      ownerAuthHold: { code: err.code, owner: err.owner, capability: err.capability, reason: err.reason } };
     return { suspect: [], error: `git fetch origin ${resolvedBaseBranch} failed: ${err.message}` };
   }
 

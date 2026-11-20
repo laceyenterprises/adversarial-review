@@ -14,6 +14,7 @@ import { proveStoppedPublication } from './remediation-publication-recovery.mjs'
 import { tryAcquireDeliveryClaim, releaseDeliveryClaim } from './adapters/comms/github-pr-comments/comment-delivery.mjs';
 import { findLiveAmaCloserLease } from './ama/closer-lease.mjs';
 import { completeWorkerPublishedHead } from './remediation-published-head.mjs';
+import { OWNER_AUTH_HOLD, selectRemediationReadRoute } from './remediation-owner-auth.mjs';
 
 const execAsync = promisify(execFile);
 
@@ -66,7 +67,7 @@ export async function recoverEndedRemediationRound({ execFileImpl = execAsync,
       const remaining = deadline - Date.now();
       if (remaining <= 0) throw new Error('retained-publication-deadline');
       return execFileImpl(command, args, { ...settings,
-        env: publicationEnv,
+        env: settings.env ?? publicationEnv,
         timeout: Math.min(settings.timeout || remaining, remaining) });
     };
     let publicationRecovery = null;
@@ -85,8 +86,14 @@ export async function recoverEndedRemediationRound({ execFileImpl = execAsync,
         }
         // Retained workspaces may lack the remote base ref. Refresh the same
         // superproject-only ref used by the publisher before ancestry checks.
-        await git(['fetch', '--no-recurse-submodules', '--no-tags', 'origin',
-          `+refs/heads/${job.baseBranch}:refs/remotes/origin/${job.baseBranch}`]);
+        const readRoute = await selectRemediationReadRoute({ repo, reviewerModel: job.reviewerModel, env: publicationEnv });
+        const refspec = `+refs/heads/${job.baseBranch}:refs/remotes/origin/${job.baseBranch}`;
+        if (readRoute) {
+          await readRoute.run(() => boundedExec('git', ['--no-replace-objects', '-C', retained.workspaceDir,
+            'fetch', '--no-recurse-submodules', '--no-tags', readRoute.url, refspec], { env: readRoute.gitEnv, timeout: 15_000 }));
+        } else {
+          await git(['fetch', '--no-recurse-submodules', '--no-tags', 'origin', refspec]);
+        }
         // A model-reported hash is only a hint. Verify the actual checkout,
         // every added commit's provenance and preservation of reviewed patches.
         const tip = await git(['rev-parse', '--verify', 'HEAD^{commit}']);
@@ -101,7 +108,11 @@ export async function recoverEndedRemediationRound({ execFileImpl = execAsync,
         for (const sha of additions) {
           if (!hasWorkerJobTrailer(await git(['show', '-s', '--format=%B', sha]), job.jobId)) verified = false;
         }
-      } catch { /* Unavailable or unverifiable work uses the next bounded round. */ }
+      } catch (error) {
+        if (error.code === OWNER_AUTH_HOLD) return { recreated: false, reason: error.code,
+          owner: error.owner, capability: error.capability, jobId: job.jobId };
+        // Unverifiable work uses the next bounded round.
+      }
       if (verified) {
         const unchanged = withFollowUpJobLock(join(rootDir, 'data', 'follow-up-jobs'), () => {
           try {
@@ -121,9 +132,14 @@ export async function recoverEndedRemediationRound({ execFileImpl = execAsync,
           const result = await publishImpl({ workspaceDir: retained.workspaceDir,
             baseBranch: job.baseBranch, previousHead: headSha, expectedRemoteSha: headSha,
             branch: job.branch, repo, prNumber, execFileImpl: boundedExec,
-            env: publicationEnv });
+            env: publicationEnv, reviewerModel: job.reviewerModel, expectedCandidate: retained.commitSha,
+            workerClass: job.remediationWorker?.workerClass || job.remediationPlan?.rounds?.at(-1)?.workerClass });
           revisionRef = result.headSha;
-        } catch { /* A refused publication never relaxes the ordinary round budget. */ }
+        } catch (error) {
+          if (error.code === OWNER_AUTH_HOLD) return { recreated: false, reason: error.code,
+            owner: error.owner, capability: error.capability, jobId: job.jobId };
+          // A refused publication never relaxes the ordinary round budget.
+        }
         if (revisionRef !== headSha) {
           publicationRecovery = await proveImpl({ job, jobPath: latest.jobPath,
             headSha: revisionRef, execFileImpl: boundedExec });

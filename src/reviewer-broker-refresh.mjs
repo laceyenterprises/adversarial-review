@@ -348,6 +348,7 @@ async function fetchReviewerTokenFromBrokerUrl({
       token: accessToken,
       expiresAtMs: Number.isFinite(expiresAtMs) ? expiresAtMs : null,
       brokerUrl,
+      permissions: body?.metadata?.permissions ?? body?.permissions ?? null,
     };
   } finally {
     clearTimeout(timer);

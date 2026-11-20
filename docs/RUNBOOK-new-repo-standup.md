@@ -41,7 +41,8 @@ broker mint or verification failed, or a synchronous caller has no cached owner
 token. No home token or PAT is sent instead. Adapter broker mode for a routed
 owner is refused until that separate transport supports owner routing; the
 adapter's environment-token mode uses the selected owner token. Managed hammer
-sessions and remediation git credentials remain separate follow-up work.
+sessions use their own entitlement path. Follow-up workspace Git and publication
+use the capability routes documented in the [follow-up runbook](follow-up-runbook.md#alternate-owner-follow-up-git).
 Merge adapter commands retain their existing auth arguments and ambient-attempt
 plus `gh --admin` fallback; service auth arguments are not injected for merges.
 

@@ -124,7 +124,7 @@ test('REMLABEL-01: publisher refreshes a stale base before refusing restoration'
   assert.equal(f.git('ls-remote', 'origin', 'refs/heads/topic').split('\t')[0], f.previousHead);
 });
 
-test('REMLABEL-01: refusal artifact marks a remediation round failed without requesting review', async t => {
+for (const refusalCode of ['remediation-empties-pr-diff', 'remediation-owner-auth-hold']) test(`${refusalCode}: publisher artifact settles the round without requesting review`, async t => {
   const rootDir = mkdtempSync(join(tmpdir(), 'remlabel-failed-'));
   t.after(() => rmSync(rootDir, { recursive: true, force: true }));
   const priorEnv = { HQ_ROOT: process.env.HQ_ROOT, AGENT_OS_DEPLOY_CHECKOUT: process.env.AGENT_OS_DEPLOY_CHECKOUT,
@@ -148,7 +148,10 @@ test('REMLABEL-01: refusal artifact marks a remediation round failed without req
   mkdirSync(artifactDir, { recursive: true });
   const replyPath = join(process.env.ADV_REPLIES_ROOT, claimed.job.jobId, 'remediation-reply.json');
   mkdirSync(join(process.env.ADV_REPLIES_ROOT, claimed.job.jobId), { recursive: true });
-  writeFileSync(`${replyPath}.publication-failure.json`, JSON.stringify({ code: 'remediation-empties-pr-diff', previousHead: head }));
+  const ownerHold = refusalCode === 'remediation-owner-auth-hold';
+  const localCommit = 'b'.repeat(40);
+  writeFileSync(`${replyPath}.publication-failure.json`, JSON.stringify({ code: refusalCode, previousHead: head,
+    ...(ownerHold && { localCommit, owner: 'sample', capability: 'contents:write (codex)', reason: 'missing owner route' }) }));
   const outputPath = join(artifactDir, 'last-message.md');
   writeFileSync(outputPath, 'Publication refused.');
   const spawned = markFollowUpJobSpawned({ rootDir, jobPath: claimed.jobPath, spawnedAt: '2026-10-16T12:01:01Z',
@@ -157,13 +160,23 @@ test('REMLABEL-01: refusal artifact marks a remediation round failed without req
   let reviews = 0;
   const result = await reconcileFollowUpJob({ rootDir, job: spawned.job, jobPath: spawned.jobPath,
     now: () => '2026-10-16T12:03:00Z', isWorkerRunning: () => false,
-    resolvePRLifecycleImpl: async () => { throw new Error('refusal must settle before lifecycle recovery'); },
+    resolvePRLifecycleImpl: async () => {
+      if (ownerHold) return { source: 'live', prState: 'open', headSha: head };
+      throw new Error('empty-diff refusal must settle before lifecycle recovery');
+    },
     postCommentImpl: async () => ({ posted: true }), requestReviewRereviewImpl: () => { reviews++; },
     log: { log() {}, warn() {}, error() {} } });
-  assert.equal(result.action, 'failed');
-  assert.equal(result.job.failure.code, 'remediation-empties-pr-diff');
+  assert.equal(result.action, ownerHold ? 'stopped' : 'failed');
+  if (ownerHold) {
+    assert.equal(result.job.remediationPlan.stop.code, refusalCode);
+    assert.equal(result.job.ownerAuthHold.capability, 'contents:write (codex)');
+    assert.equal(result.job.unpublishedWork.commitSha, localCommit);
+    assert.equal(result.job.unpublishedWork.workspaceDir, workspaceDir);
+  } else {
+    assert.equal(result.job.failure.code, refusalCode);
+  }
   assert.equal(reviews, 0);
-  assert.equal(JSON.parse(readFileSync(result.jobPath)).status, 'failed');
+  assert.equal(JSON.parse(readFileSync(result.jobPath)).status, result.action);
 });
 
 

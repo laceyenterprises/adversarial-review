@@ -3,6 +3,7 @@ import { fetchReviewerTokenFromBroker } from './reviewer-broker-refresh.mjs';
 import { isGitHubRateLimitError } from './rate-limit-throttle.mjs';
 import { loadAwareTimeoutMs } from './load-aware-timeout.mjs';
 import { meteredExecFile } from './metered-gh.mjs';
+import { selectRemediationPushRoute } from './remediation-owner-auth.mjs';
 // Workflow-file push-capability preflight for remediation.
 //
 // Extracted from follow-up-remediation.mjs (ARC-19 wave3). Self-contained leaf:
@@ -309,9 +310,10 @@ async function listPRChangedPaths({
   execFileImpl = execFileAsync,
   log = console,
   retryDelaysMs = WORKFLOW_PUSH_PREFLIGHT_RETRY_DELAYS_MS,
+  ownerReadRoute,
 }) {
-  const authEnv = withGhGitCredentialEnv(env);
-  const { stdout } = await execWorkflowPushPreflightGh({
+  const authEnv = ownerReadRoute?.ghEnv ?? withGhGitCredentialEnv(env);
+  const lookup = () => execWorkflowPushPreflightGh({
     args: [
       'pr',
       'view',
@@ -330,6 +332,7 @@ async function listPRChangedPaths({
     log,
     retryDelaysMs,
   });
+  const { stdout } = await (ownerReadRoute ? ownerReadRoute.run(lookup) : lookup());
   const parsed = JSON.parse(stdout || '{}');
   const files = Array.isArray(parsed?.files) ? parsed.files : [];
   return files
@@ -344,6 +347,7 @@ async function remediationTouchesWorkflowFiles({
   execFileImpl = execFileAsync,
   log = console,
   retryDelaysMs = WORKFLOW_PUSH_PREFLIGHT_RETRY_DELAYS_MS,
+  ownerReadRoute,
 }) {
   const embeddedPaths = extractChangedPathsFromJob(job);
   if (embeddedPaths.length > 0) {
@@ -361,6 +365,7 @@ async function remediationTouchesWorkflowFiles({
       execFileImpl,
       log,
       retryDelaysMs,
+      ownerReadRoute,
     });
     return {
       touches: livePaths.some(isWorkflowPath),
@@ -667,8 +672,15 @@ async function assertWorkflowPushCapabilityForJob({
   log = console,
   retryDelaysMs = WORKFLOW_PUSH_PREFLIGHT_RETRY_DELAYS_MS,
   readFileImpl = readFileSync,
+  workerClass,
+  ownerReadRoute,
 } = {}) {
-  const workflowTouch = await remediationTouchesWorkflowFiles({ job, env, execFileImpl, log, retryDelaysMs });
+  const workflowTouch = await remediationTouchesWorkflowFiles({ job, env, execFileImpl, log, retryDelaysMs, ownerReadRoute });
+  if (ownerReadRoute) {
+    const ownerPushRoute = await selectRemediationPushRoute({ repo: job.repo, workerClass, env, execFileImpl,
+      requiresWorkflowPush: workflowTouch.touches });
+    return { gated: false, workflowTouch, ownerPushRoute };
+  }
   if (!workflowTouch.touches) {
     const identity = resolveRemediationPushTokenIdentity(env);
     log.log?.(

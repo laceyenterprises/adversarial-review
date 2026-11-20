@@ -9,6 +9,9 @@ import { promisify } from 'node:util';
 
 import { applyMergeAgentBrokerEnv } from './adapters/agent-runtime/local/remediation.mjs';
 import { isWorkflowPath, isWorkflowPushEscalationEnabled, tryEscalateWorkflowPushCapability } from './remediation-workflow-push-capability.mjs';
+import { OWNER_AUTH_HOLD, ownerAuthHold, remediationOwner, selectRemediationReadRoute, selectRemediationPushRoute } from './remediation-owner-auth.mjs';
+import { fetchPRBranchMetadata } from './remediation-git-pr-io.mjs';
+import { publishRemediation } from './remediation-publication.mjs';
 
 const execFileAsync = promisify(execFile);
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -228,9 +231,11 @@ async function preserveUnpushedCommit({
 // assumed permission or ambient human credential can substitute for evidence.
 async function prepareWorkflowRecoveryPush({
   workspaceDir, commitSha, expectedHead, workerClass, env, execFileImpl,
-  fetchImpl, readFileImpl, retryDelaysMs, log,
+  fetchImpl, readFileImpl, retryDelaysMs, log, routedRepo,
 }) {
   if (!isWorkflowPushEscalationEnabled(env)) {
+    if (routedRepo) return { ok: false, reason: OWNER_AUTH_HOLD,
+      owner: remediationOwner(routedRepo), capability: `contents:write + workflows:write (${workerClass})` };
     return { ok: false, reason: 'workflow-push-escalation-disabled' };
   }
   if (!FULL_SHA_PATTERN.test(String(commitSha || ''))) {
@@ -247,6 +252,12 @@ async function prepareWorkflowRecoveryPush({
     const paths = [...new Set(raw.split('\0').filter(Boolean))];
     if (!paths.some(isWorkflowPath) || paths.some((path) => !path.startsWith('.github/workflows/'))) {
       return { ok: false, reason: 'workflow-push-paths-unproven' };
+    }
+    if (routedRepo) {
+      const route = await selectRemediationPushRoute({ repo: routedRepo, workerClass, requiresWorkflowPush: true, env, execFileImpl });
+      return { ok: true, route, env: route.gitEnv,
+        evidence: { source: 'workspace-commits', paths, provider: route.provider,
+          identity: route.provider, expectedRemoteSha: expectedHead, commitSha } };
     }
     const escalation = await tryEscalateWorkflowPushCapability({
       env: { ...env }, execFileImpl, fetchImpl, readFileImpl, retryDelaysMs, log,
@@ -274,6 +285,7 @@ async function prepareWorkflowRecoveryPush({
         identity: escalation.capability.identity, expectedRemoteSha: expectedHead, commitSha },
     };
   } catch (err) {
+    if (err.code === OWNER_AUTH_HOLD) return { ok: false, reason: err.code, owner: err.owner, capability: err.capability };
     return { ok: false, reason: 'workflow-push-evidence-unavailable',
       error: redactGithubAuthRecoveryDetail(githubAuthRecoveryErrorDetail(err)).slice(0, 600) };
   }
@@ -334,13 +346,45 @@ async function retryGithubAuthPushOnce({
   log = console,
   pendingNativePublication = null,
   recordNativePublicationImpl = () => {},
+  baseBranch,
+  reviewerModel,
+  publicationWorkerClass = workerClass,
+  forceWorkflowRoute = false,
 }) {
+  let routedOwner, ownerReadRoute;
+  try {
+    routedOwner = remediationOwner(repo);
+    if (routedOwner && !requiresWorkflowPush) {
+      if (!FULL_SHA_PATTERN.test(String(commitSha || ''))) {
+        return { retried: false, pushed: false, reason: 'retained-publication-commit-unproven' };
+      }
+      const publication = await publishRemediation({ workspaceDir, baseBranch, branch, repo, prNumber, reviewerModel,
+        workerClass: publicationWorkerClass, requiresWorkflowPush: forceWorkflowRoute,
+        previousHead: fallbackRemoteSha, expectedRemoteSha: expectedRemoteSha || fallbackRemoteSha,
+        expectedCandidate: commitSha, execFileImpl, env });
+      return { retried: true, pushed: true, ...publication, reason: 'push-succeeded' };
+    }
+    if (routedOwner) {
+      ownerReadRoute = await selectRemediationReadRoute({ repo, reviewerModel, env });
+      const metadata = await fetchPRBranchMetadata({ repo, prNumber, execFileImpl, env, ownerRoute: ownerReadRoute });
+      if (!metadata.branch || metadata.headRepo?.toLowerCase() !== repo.toLowerCase()
+        || (branch && branch !== metadata.branch)) {
+        throw ownerAuthHold(repo, 'same-repository PR branch', 'live PR branch identity differs');
+      }
+      branch = metadata.branch;
+    }
+  } catch (error) {
+    return { retried: false, pushed: false, reason: error.code || 'owner-publication-refused',
+      ...(error.code === OWNER_AUTH_HOLD && { owner: error.owner, capability: error.capability }) };
+  }
   // An explicit HQ_REPO_ROOT is authoritative, matching the spawn adapter.
   // Recovery sources hq-gh.sh and execs both shims, so a checkout missing any
   // of them is a missing adapter, not a credential failure.
   const rootCandidate = String(env.HQ_REPO_ROOT || '').trim() || join(ROOT, '../..');
   const missingAdapterFiles = GITHUB_ADAPTER_FILES.filter((file) => !existsSync(join(rootCandidate, file)));
   if (missingAdapterFiles.length > 0) {
+    if (routedOwner) return { retried: false, pushed: false, reason: OWNER_AUTH_HOLD, owner: routedOwner,
+      capability: `contents:write + workflows:write (${publicationWorkerClass})` };
     return { retried: false, pushed: false, reason: 'missing-gh-adapter', agentOsRoot: rootCandidate, missingAdapterFiles };
   }
   const agentOsRoot = rootCandidate;
@@ -418,10 +462,11 @@ export GH_TOKEN="$HQ_ENTITLEMENT_GH_TOKEN" GITHUB_TOKEN="$HQ_ENTITLEMENT_GH_TOKE
     return { retried: false, pushed: false, reason: 'missing-expected-remote-head' };
   }
   let pushEnv = env;
+  let ownerPushRoute = null;
   let workflowPush = null;
   let publicationProof = null;
   const readHead = (expectedHead = null) => readRecoveryPrHead({
-    repo, prNumber, execFileImpl, env: pushEnv, retryDelaysMs, sleepImpl, expectedHead,
+    repo, prNumber, execFileImpl, env: ownerReadRoute?.ghEnv ?? pushEnv, retryDelaysMs, sleepImpl, expectedHead,
   });
   const recordRewrite = () => recordWorkspaceRewrite({ oldHead: expectedHead, newHead: commitSha,
     branch: targetBranch, actor: 'review-service:auth-recovery', env,
@@ -456,11 +501,12 @@ export GH_TOKEN="$HQ_ENTITLEMENT_GH_TOKEN" GITHUB_TOKEN="$HQ_ENTITLEMENT_GH_TOKE
       return { retried: false, pushed: false, reason: 'workflow-push-pr-identity-unproven' };
     }
     const prepared = await prepareWorkflowRecoveryPush({
-      workspaceDir, commitSha, expectedHead, workerClass, env, execFileImpl,
-      fetchImpl, readFileImpl, retryDelaysMs, log,
+      workspaceDir, commitSha, expectedHead, workerClass: routedOwner ? publicationWorkerClass : workerClass,
+      env, execFileImpl, fetchImpl, readFileImpl, retryDelaysMs, log, routedRepo: routedOwner ? repo : null,
     });
     if (!prepared.ok) return { retried: false, pushed: false, ...prepared };
     pushEnv = prepared.env;
+    ownerPushRoute = prepared.route;
     workflowPush = prepared.evidence;
     if (pendingNativePublication?.schemaVersion === 1
       && pendingNativePublication.source === 'native-workflow-publisher'
@@ -546,9 +592,14 @@ export GIT_TERMINAL_PROMPT=0
       if (remaining != null && remaining <= 0) {
         return { retried: attemptsMade > 1, pushed: false, reason: 'workflow-publication-deadline', workflowPush };
       }
-      published = await execFileImpl('bash', ['-c', script],
-        remaining == null ? options : { ...options, timeout: remaining });
+      const boundedOptions = remaining == null ? options : { ...options, timeout: remaining };
+      published = ownerPushRoute
+        ? await ownerPushRoute.run(() => execFileImpl(join(agentOsRoot, 'modules/worker-pool/bin/git-safe'),
+          ['-C', workspaceDir, 'push', `--force-with-lease=refs/heads/${targetBranch}:${expectedHead}`,
+            ownerPushRoute.url, `${commitSha}:refs/heads/${targetBranch}`], boundedOptions))
+        : await execFileImpl('bash', ['-c', script], boundedOptions);
     } catch (err) {
+      if (err.code === OWNER_AUTH_HOLD) return { retried: false, pushed: false, reason: err.code, owner: err.owner, capability: err.capability };
       pushError = err;
     }
     if (workflowPush) {
@@ -662,6 +713,10 @@ async function recoverGithubAuthOperationalBlocker({
         ? 'merge-agent'
         : resolveWorkerClass(job, worker),
       branch: job.branch,
+      baseBranch: job.baseBranch,
+      reviewerModel: job.reviewerModel,
+      publicationWorkerClass: resolveWorkerClass(job, worker),
+      forceWorkflowRoute: worker?.startupEvidence?.mergeAgentBroker?.requiresWorkflowPush === true,
       repo: job.repo,
       prNumber: job.prNumber,
       commitSha: rescue.commitSha,

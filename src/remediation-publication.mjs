@@ -9,6 +9,7 @@ import { fetchPRBranchMetadata, runWorkspaceNetworkCommandWithTransientRetry } f
 import { checkRemediationPublication } from './remediation-publication-checks.mjs';
 import { credentialBrokerReady, credentialRefreshUnavailable, credentialRefreshNeedsBrokerEvidence,
   CREDENTIAL_REFRESH_UNAVAILABLE } from './remediation-credential-broker.mjs';
+import { OWNER_AUTH_HOLD, ownerAuthHold, remediationOwner, selectRemediationReadRoute, selectRemediationPushRoute } from './remediation-owner-auth.mjs';
 
 const execFileAsync = promisify(execFile);
 const SHA = /^[a-f0-9]{40}$/i;
@@ -26,14 +27,26 @@ function defaultPushCommand(env) {
 
 export async function publishRemediation({ workspaceDir = process.cwd(), baseBranch, previousHead,
   branch, repo, prNumber, expectedRemoteSha = previousHead, execFileImpl = execFileAsync,
-  pushCommand, env = process.env, credentialBrokerReadyImpl = credentialBrokerReady } = {}) {
+  pushCommand, env = process.env, credentialBrokerReadyImpl = credentialBrokerReady,
+  workerClass, reviewerModel, requiresWorkflowPush = false, expectedCandidate,
+  ownerTokens, selectReadRoute = selectRemediationReadRoute, selectPushRoute = selectRemediationPushRoute } = {}) {
   const unproven = () => Object.assign(new Error('Remediation publication requires the previous head, PR branch and exact remote lease.'), { code: 'remediation-publication-unproven' });
   if (typeof baseBranch !== 'string' || !baseBranch.trim()
     || !SHA.test(previousHead || '') || !SHA.test(expectedRemoteSha || '')) throw unproven();
-  if (typeof branch !== 'string' || !branch.trim()) {
+  const routed = remediationOwner(repo, ownerTokens);
+  const ownerReadRoute = routed ? await selectReadRoute({ repo, reviewerModel, env, tokens: ownerTokens }) : null;
+  if (routed || typeof branch !== 'string' || !branch.trim()) {
     if (!repo || !prNumber) throw unproven();
-    try { ({ branch } = await fetchPRBranchMetadata({ repo, prNumber, execFileImpl, env })); }
-    catch { throw unproven(); }
+    try {
+      const metadata = await fetchPRBranchMetadata({ repo, prNumber, execFileImpl, env, ownerRoute: ownerReadRoute });
+      if (routed && (metadata.headRepo?.toLowerCase() !== repo.toLowerCase()
+        || (branch?.trim() && branch.trim() !== metadata.branch))) {
+        throw ownerAuthHold(repo, 'same-repository PR branch', 'live PR branch identity differs');
+      }
+      if (routed && metadata.baseBranch !== baseBranch) throw unproven();
+      branch = metadata.branch;
+    }
+    catch (error) { if (error.code === OWNER_AUTH_HOLD) throw error; throw unproven(); }
   }
   if (typeof branch !== 'string' || !branch.trim()) throw unproven();
   branch = branch.trim();
@@ -42,15 +55,17 @@ export async function publishRemediation({ workspaceDir = process.cwd(), baseBra
   await git(['check-ref-format', `refs/heads/${baseBranch}`]);
   await git(['check-ref-format', `refs/heads/${branch}`]);
   // Refresh the actual target branch; never compare against a stale worker base.
-  await runWorkspaceNetworkCommandWithTransientRetry({ execFileImpl, command: 'git',
-    args: ['--no-replace-objects', '-C', workspaceDir, 'fetch', '--no-recurse-submodules', '--no-tags', 'origin',
+  const fetchBase = () => runWorkspaceNetworkCommandWithTransientRetry({ execFileImpl, command: 'git',
+    args: ['--no-replace-objects', '-C', workspaceDir, 'fetch', '--no-recurse-submodules', '--no-tags', ownerReadRoute?.url ?? 'origin',
       `+refs/heads/${baseBranch}:refs/remotes/origin/${baseBranch}`],
-    options: { env, timeout: loadAwareTimeoutMs(30_000), maxBuffer: 16 * 1024 * 1024 },
+    options: { env: ownerReadRoute?.gitEnv ?? env, timeout: loadAwareTimeoutMs(30_000), maxBuffer: 16 * 1024 * 1024 },
     // Keep the worker's selected credentials; auth failures are not transport retries.
     refreshAuthEnvImpl: async () => ({ refreshed: false, detail: 'publisher retains worker credentials' }),
   });
+  await (ownerReadRoute ? ownerReadRoute.run(fetchBase) : fetchBase());
   const base = await git(['rev-parse', '--verify', `refs/remotes/origin/${baseBranch}^{commit}`]);
   const candidate = await git(['rev-parse', '--verify', 'HEAD^{commit}']);
+  if (expectedCandidate && candidate !== expectedCandidate) throw unproven();
   const anchor = await git(['merge-base', base, previousHead]);
   const paths = (await git(['diff', '--no-ext-diff', '--no-textconv', '--name-only', '--no-renames', '-z', anchor, previousHead]))
     .split('\0').filter(Boolean);
@@ -64,8 +79,10 @@ export async function publishRemediation({ workspaceDir = process.cwd(), baseBra
     throw Object.assign(new Error('Remediation publication refused: the result empties the PR diff or restores every originally changed file to base. The previous remote head is retained.'),
       { code: 'remediation-empties-pr-diff', previousHead, candidate });
   }
-  await checkRemediationPublication({ workspaceDir, candidate,
-    paths: prDiff.split('\0').filter(Boolean), git, execFileImpl, env });
+  const changedPaths = prDiff.split('\0').filter(Boolean);
+  const outgoingWorkflowPaths = routed ? await git(['log', '--format=', '--name-only', '--no-renames', '-z',
+    `${expectedRemoteSha}..${candidate}`, '--', '.github/workflows/']) : '';
+  await checkRemediationPublication({ workspaceDir, candidate, paths: changedPaths, git, execFileImpl, env });
   if (await git(['rev-parse', 'HEAD']) !== candidate) {
     throw Object.assign(new Error('Remediation head moved during publication validation.'), { code: 'remediation-publication-head-moved' });
   }
@@ -75,10 +92,15 @@ export async function publishRemediation({ workspaceDir = process.cwd(), baseBra
     new Error('Credential broker refresh unavailable; local commit retained for publication recovery.'),
     { code: CREDENTIAL_REFRESH_UNAVAILABLE, candidate, previousHead });
   try {
-    await execFileImpl(pushCommand ?? defaultPushCommand(env), ['-C', workspaceDir, 'push',
-      `--force-with-lease=refs/heads/${branch}:${expectedRemoteSha}`, 'origin', `${candidate}:refs/heads/${branch}`],
-    { env, timeout: loadAwareTimeoutMs(120_000), maxBuffer: 4 * 1024 * 1024 });
+    const pushRoute = routed ? await selectPushRoute({ repo, workerClass, env, execFileImpl, tokens: ownerTokens,
+      requiresWorkflowPush: Boolean(requiresWorkflowPush || outgoingWorkflowPaths.trim()
+        || changedPaths.some(path => /^\.github\/workflows\//i.test(path))) }) : null;
+    const push = () => execFileImpl(pushCommand ?? defaultPushCommand(env), ['-C', workspaceDir, 'push',
+      `--force-with-lease=refs/heads/${branch}:${expectedRemoteSha}`, pushRoute?.url ?? 'origin', `${candidate}:refs/heads/${branch}`],
+    { env: pushRoute?.gitEnv ?? env, timeout: loadAwareTimeoutMs(120_000), maxBuffer: 4 * 1024 * 1024 });
+    await (pushRoute ? pushRoute.run(push) : push());
   } catch (error) {
+    if (routed) throw error;
     if (credentialRefreshUnavailable(error)
       || (credentialRefreshNeedsBrokerEvidence(error) && !(await credentialBrokerReadyImpl({ env })).ready)) {
       throw credentialUnavailable();
@@ -86,6 +108,7 @@ export async function publishRemediation({ workspaceDir = process.cwd(), baseBra
     throw error;
   }
   const receipt = await recordWorkspaceRewrite({ git, branch,
-    oldHead: expectedRemoteSha, newHead: candidate, actor: 'review-service:remediation', env });
+    oldHead: expectedRemoteSha, newHead: candidate, actor: 'review-service:remediation', env,
+    repository: routed ? `github.com/${repo.toLowerCase()}` : null });
   return { published: true, headSha: candidate, previousHead, ...receipt };
 }

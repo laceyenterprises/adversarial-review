@@ -24,6 +24,8 @@ import { logRoundBudgetDecision, settleInfrastructureRemediationRound, recordLoc
 import { deferForCredentialBroker, credentialBrokerReady } from './remediation-credential-broker.mjs';
 import { recordedInfrastructureReason, localWorkerErrorOutcome } from './remediation-infrastructure-refund.mjs';
 import { preserveUnsafeWorkspaceMetadata } from './workspace-identity.mjs';
+import { OWNER_AUTH_HOLD, ownerAuthHold, selectRemediationReadRoute, selectRemediationPushRoute } from './remediation-owner-auth.mjs';
+import { isHarnessIdentityEnforcementEnabled } from './remediation-identity-policy.mjs';
 import { execFile } from 'node:child_process';
 import { existsSync, lstatSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { userInfo } from 'node:os';
@@ -249,38 +251,6 @@ const REMEDIATION_LEGACY_UNSTAGE_COMMANDS = [
   'git rm --cached -r -- .adversarial-follow-up/ 2>/dev/null || true',
 ];
 const WORKSPACE_ARTIFACT_EXCLUDE_ENTRY = '.adversarial-follow-up/';
-
-function parseBooleanEnvFlag(value) {
-  const normalized = String(value ?? '').trim().toLowerCase();
-  if (normalized === '1' || normalized === 'true') return true;
-  if (normalized === '' || normalized === '0' || normalized === 'false') return false;
-  return null;
-}
-
-// Kill-switch for the fail-closed harness-identity assert at the remediation
-// spawn boundary. DEFAULT true: a remediation worker's git identity + push
-// provider must match its physical harness, and a mismatch fails closed. Set the
-// env override or roles.adversarial.remediation.enforce_harness_identity=false to
-// downgrade to warn+audit+continue (the assert still records the mismatch, it
-// just does not block the spawn). Empty/unset falls through to the config default.
-function isHarnessIdentityEnforcementEnabled(env = process.env, options = {}) {
-  const envValue = env.ADVERSARIAL_REMEDIATION_ENFORCE_HARNESS_IDENTITY;
-  const parsedEnv = envValue === undefined || envValue === '' ? null : parseBooleanEnvFlag(envValue);
-  if (parsedEnv !== null) return parsedEnv;
-  try {
-    return loadRoleConfig({
-      env,
-      topPath: options.topPath,
-      modulePaths: options.modulePaths,
-      loaderImpl: options.loaderImpl,
-      contextKey: 'roles.adversarial.remediation.enforce_harness_identity',
-    }).get('roles.adversarial.remediation.enforce_harness_identity', true) === true;
-  } catch {
-    // Fail SAFE toward enforcement: if config can't be read, keep the assert on
-    // so a misconfigured host still rejects a mismatched harness identity.
-    return true;
-  }
-}
 const DEFAULT_PATH_PREFIX = ['/opt/homebrew/bin', '/usr/local/bin', '/usr/bin', '/bin', '/usr/sbin', '/sbin'];
 const VALID_GITHUB_REPO_SLUG = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/;
 
@@ -488,7 +458,7 @@ function createRemediationRuntime({
         auditSink: harnessIdentityAuditSink,
         spawnImpl,
         execFileSyncImpl,
-        sourceEnv: env,
+        sourceEnv: request.ownerPushRoute?.workerEnv(env) ?? env,
         workerClass: ['codex', 'remediator-codex-corp'].includes(workerClass) ? workerClass : undefined,
         now,
       });
@@ -879,6 +849,7 @@ async function pushOssReadinessRemediationCommit({
   branch,
   env = process.env,
   execFileImpl = execFileAsync,
+  ownerRoute,
 } = {}) {
   const targetBranch = String(branch || '').trim();
   if (!targetBranch) {
@@ -890,9 +861,10 @@ async function pushOssReadinessRemediationCommit({
     execFileImpl,
   });
   await runWorkspaceGitWithTransientRetry(
-    ['-C', workspaceDir, 'push', pushTarget.remote, pushTarget.refspec],
+    ['-C', workspaceDir, 'push', ownerRoute?.url ?? pushTarget.remote, pushTarget.refspec],
     {
       execFileImpl,
+      ownerRoute,
       options: {
         maxBuffer: 10 * 1024 * 1024,
         env: withGhGitCredentialEnv(env),
@@ -914,8 +886,10 @@ async function prepareWorkspaceForJob({
   env = process.env,
   execFileImpl = execFileAsync,
   log = console,
+  selectReadRoute = selectRemediationReadRoute,
 }) {
   const repo = assertValidRepoSlug(job.repo);
+  const ownerRoute = await selectReadRoute({ repo, reviewerModel: job.reviewerModel, env });
   const startedAt = Date.now();
   let checkoutStartedAt = startedAt;
   let cloneSource = 'reused';
@@ -928,9 +902,15 @@ async function prepareWorkspaceForJob({
   const retryHistory = job?.remediationPlan?.retryHistory || [];
   let prBranchMetadataPromise = null;
   const loadPRBranchMetadata = () => {
-    prBranchMetadataPromise ||= fetchPRBranchMetadata({ repo, prNumber: job.prNumber, execFileImpl });
+    prBranchMetadataPromise ||= fetchPRBranchMetadata({ repo, prNumber: job.prNumber, execFileImpl, env, ownerRoute });
     return prBranchMetadataPromise;
   };
+  if (ownerRoute) {
+    const metadata = await loadPRBranchMetadata();
+    if (!metadata.branch || metadata.headRepo?.toLowerCase() !== repo.toLowerCase()) {
+      throw ownerAuthHold(repo, 'same-repository PR branch', 'fork or missing head repository');
+    }
+  }
   const preservedMetadataReason = await preserveUnsafeWorkspaceMetadata({
     workspaceDir, workspaceRootDir, jobId: job.jobId, repo, execFileImpl, log,
   });
@@ -958,6 +938,7 @@ async function prepareWorkspaceForJob({
       rootDir, repo, domainId: job.domainId || 'code-pr', baseBranch, workspaceDir, resetWorkspaceDir, log,
       clone: args => runWorkspaceGitWithTransientRetry(args, {
         execFileImpl,
+        ownerRoute,
         options: { maxBuffer: 10 * 1024 * 1024, env: withGhGitCredentialEnv(env) },
       }),
     });
@@ -984,7 +965,7 @@ async function prepareWorkspaceForJob({
   try {
     checkout = await checkoutWorkspaceForRemediation({
       workspaceDir, workspaceRootDir, job, repo, baseBranch, headRef, headRepo, resumeRequested,
-      fetchEnv: withGhGitCredentialEnv(env), execFileImpl, log,
+      fetchEnv: withGhGitCredentialEnv(env), ownerRoute, execFileImpl, log,
     });
   } catch (err) {
     if (!resumeRequested || !String(err?.message).startsWith('resume-impossible:')) throw err;
@@ -993,7 +974,7 @@ async function prepareWorkspaceForJob({
       rootDir,
       workspaceRootDir,
       job: { ...job, remediationPlan: { ...job.remediationPlan, retryHistory: retryHistory.slice(0, -1) } },
-      workerClass, env, execFileImpl, log,
+      workerClass, env, execFileImpl, log, selectReadRoute,
     });
   }
   const { resumed, resumePatchPath } = checkout;
@@ -1432,10 +1413,12 @@ async function reconcileFollowUpJobWithinRepositoryCycle({
   // published-head recovery. It cannot authorize a re-review or empty close.
   let publicationFailure = null;
   let publicationReply = null;
+  let publicationWorkspace = null;
   if (liveness.state !== 'active') {
     try {
       const checkedPaths = buildReconciliationPaths(rootDir, job);
       publicationFailure = JSON.parse(readFileSync(`${checkedPaths.replyPath}.publication-failure.json`, 'utf8'));
+      publicationWorkspace = checkedPaths.workspaceDir;
       publicationReply = readRemediationReplyArtifact(checkedPaths.replyPath, { expectedJob: job });
     } catch { /* No validated refusal artifact for this round. */ }
     if (publicationFailure?.code === 'remediation-empties-pr-diff'
@@ -1566,6 +1549,22 @@ async function reconcileFollowUpJobWithinRepositoryCycle({
       job: stopped.job,
       jobPath: stopped.jobPath,
     };
+  }
+
+  if (publicationFailure?.code === OWNER_AUTH_HOLD && publicationFailure.previousHead === job.revisionRef
+    && liveness.state === 'exited') {
+    const stoppedAt = now();
+    const { capability, owner, reason, localCommit } = publicationFailure;
+    const hold = { code: OWNER_AUTH_HOLD, owner, capability, reason, recordedAt: stoppedAt };
+    const stopped = markFollowUpJobStopped({ rootDir, jobPath, stoppedAt, sourceStatus: 'in_progress',
+      stopCode: OWNER_AUTH_HOLD, stopReason: ownerAuthHold(job.repo, capability, reason).message,
+      commentDeliveryExemption: 'interrupted-without-reconciled-reply',
+      remediationWorker: { ...worker, state: 'completed', reconciledAt: stoppedAt },
+      jobUpdates: { ownerAuthHold: hold, ...(/^[a-f0-9]{40}$/i.test(localCommit || '') && localCommit !== job.revisionRef
+        && { unpublishedWork: { jobId: job.jobId, commitSha: localCommit, workspaceDir: publicationWorkspace,
+          reported: true, liveHeadSha: lifecycle?.headSha ?? null, publicationReason: OWNER_AUTH_HOLD } }) },
+    });
+    return { action: 'stopped', reason: OWNER_AUTH_HOLD, job: stopped.job, jobPath: stopped.jobPath };
   }
 
   // Capture recovery evidence before ordinary exit accounting observes a changed head.
@@ -2016,9 +2015,19 @@ async function reconcileFollowUpJobWithinRepositoryCycle({
         }
         const contaminationAudit = await auditWorkspaceForContaminationImpl({
           workspaceDir: auditWorkspaceDir,
+          repo: job.repo,
+          reviewerModel: job.reviewerModel,
           baseBranch,
           execFileImpl,
         });
+          if (contaminationAudit.ownerAuthHold) {
+            const stopped = markFollowUpJobStopped({ rootDir, jobPath, stoppedAt: completedAt,
+              stopCode: OWNER_AUTH_HOLD, stopReason: contaminationAudit.error, sourceStatus: 'in_progress',
+              commentDeliveryExemption: 'interrupted-without-reconciled-reply',
+              remediationWorker: { ...workerState, state: 'completed' },
+              jobUpdates: { ownerAuthHold: { ...contaminationAudit.ownerAuthHold, recordedAt: completedAt } } });
+            return { action: 'stopped', reason: OWNER_AUTH_HOLD, job: stopped.job, jobPath: stopped.jobPath };
+          }
           if (contaminationAudit.error) {
             rereview = buildRereviewResult({
               requested: false,
@@ -3304,11 +3313,14 @@ async function consumeNextFollowUpJobWithinRepositoryCycle({
       dispatchPath: remediationDispatchPath,
     });
     const hqDispatchEnabled = remediationMode === 'os';
+    const ownerReadRoute = await selectRemediationReadRoute({ repo: claimed.job.repo,
+      reviewerModel: claimed.job.reviewerModel, env: jobEnv });
     const branchReadyJob = await ensureJobBranchMetadata({
       job: claimed.job,
       jobPath: claimed.jobPath,
       requireBranch: true,
       execFileImpl,
+      ownerRoute: ownerReadRoute,
     });
     claimed.job = branchReadyJob.job;
     const baseHold = await guardStackedBaseImpl({ rootDir, repo: claimed.job.repo,
@@ -3384,6 +3396,8 @@ async function consumeNextFollowUpJobWithinRepositoryCycle({
       env: jobEnv,
       deliverAlertImpl,
       log,
+      workerClass,
+      ownerReadRoute,
     });
 
     // OAuth pre-flight runs inside the try so an expired/missing OAuth
@@ -3419,6 +3433,7 @@ async function consumeNextFollowUpJobWithinRepositoryCycle({
         job: claimed.job,
         execFileImpl,
         log,
+        ...(ownerReadRoute && { workerClass, env: jobEnv }),
       });
       workspaceDir = prepared.workspaceDir;
       workspaceState = hqDispatchEnabled
@@ -3454,15 +3469,24 @@ async function consumeNextFollowUpJobWithinRepositoryCycle({
       writeOssReadinessApplyEvidence();
       if (hqDispatchEnabled && ossReadinessApply.commitSha) {
         try {
+          const ownerRoute = workflowPushPreflight.ownerPushRoute && ossReadinessApply.changedFiles.some(isWorkflowPath)
+            ? await selectRemediationPushRoute({ repo: claimed.job.repo, workerClass, requiresWorkflowPush: true, env: jobEnv, execFileImpl })
+            : workflowPushPreflight.ownerPushRoute;
           const push = await pushOssReadinessRemediationCommit({
             workspaceDir,
             branch: claimed.job.branch,
             env: jobEnv,
             execFileImpl,
+            ownerRoute,
           });
           ossReadinessApply.push = push;
           writeOssReadinessApplyEvidence();
         } catch (err) {
+          if (err.code === OWNER_AUTH_HOLD) {
+            err.unpublishedWork = { jobId: claimed.job.jobId, commitSha: ossReadinessApply.commitSha, workspaceDir,
+              liveHeadSha: claimed.job.revisionRef, publicationReason: OWNER_AUTH_HOLD };
+            throw err;
+          }
           const rollback = await rollbackOssReadinessLocalCommit({
             workspaceDir,
             commitSha: ossReadinessApply.commitSha,
@@ -3522,6 +3546,8 @@ async function consumeNextFollowUpJobWithinRepositoryCycle({
       // stamps. Thread the resolved class through so a gemini / claude-code
       // remediation is attributed correctly instead of defaulting to codex.
       workerTrailerClass: remediationWorkerTrailerClass(workerClass),
+      ...(ownerReadRoute && { publicationWorkerClass: workerClass,
+        requiresWorkflowPush: workflowPushPreflight.workflowTouch.touches }),
     });
     const resumeInstruction = workspaceState.action === 'resumed'
       ? `\n\n## Resume preserved work\nContinue from the existing local commits and uncommitted changes in this workspace. Do not reset the branch. The tracked diff was backed up at ${workspaceState.resumePatchPath || '(no tracked diff)'}.\n`
@@ -3621,6 +3647,7 @@ async function consumeNextFollowUpJobWithinRepositoryCycle({
       jobId: claimed.job.jobId, mesJob: claimed.job, // MES-09 decision input, local mode only
       modelResolution: remediatorRouting.modelResolution || codexModelResolution,
       requiresWorkflowPush: Boolean(workflowPushPreflight?.workflowTouch?.touches),
+      ownerPushRoute: workflowPushPreflight.ownerPushRoute,
       allowConflictedBase: conflictedBase?.allowConflictedBase === true,
     });
     const worker = runHandle.worker;
@@ -3683,6 +3710,24 @@ async function consumeNextFollowUpJobWithinRepositoryCycle({
       jobPath: updated.jobPath,
     };
   } catch (err) {
+    if (err.code === OWNER_AUTH_HOLD && !spawnAttempted && !spawnedWorker) {
+      const requeuedAt = now();
+      const hold = { code: err.code, owner: err.owner, capability: err.capability,
+        reason: err.reason, recordedAt: requeuedAt };
+      if (err.unpublishedWork) {
+        const stopped = markFollowUpJobStopped({ rootDir, jobPath: claimed.jobPath, stoppedAt: requeuedAt,
+          stopCode: err.code, stopReason: err.message, sourceStatus: 'in_progress',
+          commentDeliveryExemption: 'no-remediation-started', remediationWorker: { state: 'never-spawned' },
+          jobUpdates: { ownerAuthHold: hold, unpublishedWork: err.unpublishedWork } });
+        return { consumed: false, reason: err.code, ...stopped };
+      }
+      const requeued = requeueClaimedFollowUpJobBeforeSpawn({
+        rootDir, jobPath: claimed.jobPath, requeuedAt, ownerAuthHold: hold,
+      });
+      delayedPendingPaths?.add?.(requeued.jobPath);
+      log.warn?.(`[follow-up-remediation] ${err.message} Pending job retains custody.`);
+      return { consumed: false, reason: err.code, ...requeued };
+    }
     if (err.code === 'remediation-shutting-down' && !spawnAttempted && !spawnedWorker) {
       const requeued = requeueClaimedFollowUpJobBeforeSpawn({
         rootDir, jobPath: claimed.jobPath, requeuedAt: now(),

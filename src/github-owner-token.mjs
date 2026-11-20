@@ -93,14 +93,18 @@ export function createGithubOwnerTokenSelector({
     if (homeError) throw new GithubOwnerTokenUnavailableError(homeError);
     return homeOwner && owner !== homeOwner ? owner : null;
   }
-  function selection({ token, env = process.env, target, role, tokenEnv }) {
+  function selection({ token, env = process.env, target, role, tokenEnv, requireSourceToken = true }) {
     const owner = routedOwner(target);
     if (!owner) return { token };
     // Child allowlists omit broker inputs and sometimes the reviewer alias.
     // Resolve with the Node process configuration, without forwarding it.
     env = { ...process.env, ...env };
     role ||= githubTokenRole(token, env, tokenEnv);
-    if (!token || !role) throw new GithubOwnerTokenUnavailableError();
+    if (!role) throw new GithubOwnerTokenUnavailableError();
+    // Legacy clients must still observe source credential removal, including
+    // when an owner token is cached. Only a declared broker-only read route
+    // opts out; the broker still validates its explicit role and target owner.
+    if (requireSourceToken && !token) throw new GithubOwnerTokenUnavailableError();
     const key = `${role}@${owner}`;
     const cached = cache.get(key);
     return { token, env, owner, role, key, cached: cached && now() < cached.refreshAt ? cached : null };

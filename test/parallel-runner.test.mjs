@@ -114,6 +114,7 @@ test('suite timeout names the unchanged 900-second cap and removes the running s
   });
   assert.equal(child.status, 1, child.stdout + child.stderr);
   assert.match(child.stderr, /Test suite timed out after 900 seconds/);
+  assert.match(child.stderr, /0 files waiting to start\. Active test files: test\/hq-root-runner-probe\.test\.mjs\./);
   assert.equal(readdirSync(root).some((file) => file.startsWith('art-')), false);
 });
 

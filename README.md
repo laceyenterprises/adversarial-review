@@ -289,8 +289,9 @@ only by the number of selected parallel files.
 A single native coordinator feeds the longest pending file to each free worker.
 The SMV smoke file runs alone first because it measures real process deadlines.
 Each file runs in its own process with isolated state, home and temporary
-directory. Repeated CLI fixtures use private compile caches. The suite deadline
-remains 900 seconds; failures name the file and return a nonzero status.
+directory. Repeated CLI fixtures use private compile caches. Failures name the
+test file and return a nonzero status. At the 900-second deadline, the runner
+prints the active test files and the number still queued.
 Set `AR_TEST_TIMINGS=/absolute/path.json` to
 record per-file wall times and total suite wall time. Relative report paths
 resolve against the caller's working directory and survive sandbox cleanup.

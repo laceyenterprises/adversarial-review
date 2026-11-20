@@ -8,6 +8,14 @@ import { violations } from './oracle.mjs';
 
 const subject = { domainId: 'code-pr', subjectExternalId: 'synthetic/project#1' };
 
+function freezeEvent(value) {
+  if (value && typeof value === 'object') {
+    for (const child of Object.values(value)) freezeEvent(child);
+    Object.freeze(value);
+  }
+  return value;
+}
+
 export async function simulate(scenario, { seed = 17, load = 1, mutate } = {}) {
   if (!Object.hasOwn(profiles, scenario.profile)) throw Error(`unknown profile ${scenario.profile}`);
   const f = profiles[scenario.profile];
@@ -37,6 +45,7 @@ export async function simulate(scenario, { seed = 17, load = 1, mutate } = {}) {
   let comments = f.comment ? 1 : 0;
   let merged = f.merged === true;
   let projection;
+  let ledgerSnapshot;
   let readFailed = false;
   let refused = false;
   let transientCharges = 0;
@@ -77,8 +86,9 @@ export async function simulate(scenario, { seed = 17, load = 1, mutate } = {}) {
   }
   function append(event) {
     makeFinalizationEvent(event.type, event.subjectKey, event);
-    events.push(structuredClone(event));
+    events.push(freezeEvent(structuredClone(event)));
     projection = undefined;
+    ledgerSnapshot = undefined;
     if (event.type === 'remediation_dispatched' && refused) transientCharges++;
     if (['halted', 'closed'].includes(event.type) && ['budget-killed', 'canceled', 'crashed'].includes(f.agentOutcome)) transientRefusals++;
     inspect(`ledger:${event.type}`);
@@ -97,7 +107,9 @@ export async function simulate(scenario, { seed = 17, load = 1, mutate } = {}) {
   const ledgerStore = {
     read() {
       if (readFault()) { readFailed = true; throw Error(`synthetic ${f.readFailure} 503`); }
-      return structuredClone(events);
+      // Readers can reuse the same immutable point-in-time snapshot until the
+      // next append. The executor still folds the real event list on each read.
+      return ledgerSnapshot ??= Object.freeze(events.slice());
     }, append,
   };
   const leaseStore = {
@@ -157,6 +169,8 @@ export async function simulate(scenario, { seed = 17, load = 1, mutate } = {}) {
   let routedOwner = 'v2';
   function executor(holder) {
     return createFinalizationExecutor({ ledgerStore, leaseStore, enabled: true, holder,
+      // The synthetic repository has no configured exclusions.
+      disabledRepositories: [],
       generateLeaseId: () => `lease-${++serial}`, leaseTtlMs: pressure.timeout(500),
       policy,
       adjudicateSurface: mergeSurface, remediationSurface,

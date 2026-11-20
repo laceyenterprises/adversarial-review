@@ -118,9 +118,14 @@ sleep() {
   value=$(< "$FIXTURE_DIR/clock")
   increment="$1"
   if [ "$SCENARIO" = ci-shared-deadline ] && [ "$value" -eq 1700000000 ]; then increment=600; fi
-  if [ "$SCENARIO" = prepredicate-timeout ] && [ "$(wc -l < "$FIXTURE_DIR/sleeps")" -eq 1 ]; then
-    increment=$((${fixtureClockStart} + ${ciWaitSeconds} - 1 - value))
-  fi
+  case "$SCENARIO" in
+    prepredicate-timeout|initial-unknown)
+      # Both fixtures keep the first observation and the final clamped sleep.
+      # The observation stays the same between those points.
+      if [ "$(wc -l < "$FIXTURE_DIR/sleeps")" -eq 1 ]; then
+        increment=$((${fixtureClockStart} + ${ciWaitSeconds} - 1 - value))
+      fi ;;
+  esac
   printf '%s\\n' "$((value + increment))" > "$FIXTURE_DIR/clock"
 }
 `);
@@ -799,7 +804,10 @@ export function registerHammerSelfRebaseTests(shard) {
     const events = readFileSync(join(f.dir, 'events.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
     assert.equal(events.some(e => e.kind === 'gh' && e.value.some(arg => arg.includes('updatePullRequestBranch'))), false);
     assert.equal(events.some(e => e.kind === 'gh' && e.value[1] === 'merge'), false);
-    assert.ok(events.filter(e => e.kind === 'checks').length > 1);
+    const checks = events.filter(e => e.kind === 'checks');
+    assert.ok(checks.length > 1);
+    assert.deepEqual(checks.map(e => e.value.at), [fixtureClockStart, fixtureClockStart + ciWaitSeconds - 1]);
+    assert.equal(Number(readFileSync(join(f.dir, 'clock'), 'utf8')), fixtureClockStart + ciWaitSeconds);
     assert.equal(existsSync(join(f.dir, 'lease-held')), false);
   });
   console.info(`Hammer self-rebase shard ${shard + 1}/3: ${registeredCount} of ${caseIndex} cases; select all three entrypoints for the complete suite.`);

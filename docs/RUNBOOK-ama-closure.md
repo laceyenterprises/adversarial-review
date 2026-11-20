@@ -4046,12 +4046,18 @@ If the posting-time GraphQL head/label read fails, the head/state helper retries
 through REST, reading the current PR head and paginating current issue labels.
 Neither dispatch labels nor pre-review context can authorize a live-pack waiver.
 If REST also fails, the review keeps enforce mode with no waiver. From a cold
-process, `node bin/live-pack-check.mjs OWNER/REPO PR HEAD` prepares the
-`adversarial-review` app read context with its existing bootstrap credential
-before starting merge preflight. If preparation fails, the CLI exits 1 and
+process, `node bin/live-pack-check.mjs OWNER/REPO PR HEAD` validates identity,
+reads the current PR and lists changed files before preparing the
+`adversarial-review` app read context with its existing bootstrap credential.
+Preparation runs only when those files touch a guarded build pack; other PRs
+need no app session. Malformed identity returns `live-pack-invalid-identity`
+before any GitHub or registration request. Registration retries transient
+failures at most three times within one load-aware eight-second budget;
+credential and entitlement refusals are not retried. If preparation fails,
+the CLI exits 1 before reading plan contents or liveness and
 prints `ok: false`, `reason: "dispatch-context-unavailable"`, and a redacted
-`detail` as JSON. With a prepared context, merge preflight independently reads
-REST inputs and refuses a change in head or labels during evaluation. A
+`detail` as JSON. Merge preflight independently re-reads REST inputs and
+refuses a change in head or labels during evaluation. A
 successful preflight does not rewrite an already-posted review.
 After ordinary deployment, SRE observes the next natural label application on
 an already-reviewed gate-held PR scheduling review within one watcher cycle,

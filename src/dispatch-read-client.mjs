@@ -192,8 +192,15 @@ export async function prepareWorkerObservationSession(args = {}) {
 // The watcher and cold rescue CLI must warm the same session before sync reads.
 export async function prepareDispatchReadContext(args = {}) {
   const env = args.env ?? process.env;
+  const deadline = Date.now() + (args.timeoutMs ?? loadAwareTimeoutMs(8_000));
   try {
-    await boundedCall(() => registeredSession(args), args);
+    // Opt-in retries share one caller deadline, including backoff and HTTP time.
+    await boundedCall(() => withAppContractTransientRetry(() => {
+      args.signal?.throwIfAborted();
+      const remaining = deadline - Date.now();
+      if (remaining <= 0) throw Object.assign(new Error('session bootstrap timed out'), { code: 'ETIMEDOUT' });
+      return registeredSession({ ...args, timeoutMs: remaining });
+    }, { maxAttempts: args.maxAttempts ?? 1 }), args);
     env.ADVERSARIAL_DISPATCH_READS_ENABLED = '1';
     env.ADVERSARIAL_WORKER_OBSERVATIONS_ENABLED = '1';
     return {ok: true};

@@ -2,7 +2,15 @@
 // canonical validation/census programs are synthetic, like the controller tests'
 // snapshotImpl: only the exact child PID requested by this fixture is observed.
 import { createInterface } from 'node:readline';
-const args = process.argv.slice(2);
+import { readFileSync } from 'node:fs';
+let args = process.argv.slice(2);
+if (args.length === 6 && args[0].endsWith('/bin/hammer-ci-mirror-validation.py')
+    && args[1].endsWith('/ci-coverage.json') && args[2].endsWith('/local-validation.json')) {
+  // The real validator now supplies private coverage and receipt paths even
+  // outside a controller. Keep the canonical runner's argv contract below.
+  JSON.parse(readFileSync(args[1], 'utf8'));
+  args = args.slice(3);
+}
 if (args[0] === 'scripts/ci-mirror/run-ci-mirror.py' && args[1] === '--'
     && args.at(-1) === 'tests/test_endpoints.py') {
   console.log('synthetic canonical validation passed');

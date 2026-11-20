@@ -1,15 +1,97 @@
-"""Apply closer CI evidence inside the mirror's existing selection and runner."""
+"""Apply closer CI evidence and keep the mirror's commands under HAM custody."""
 
 import ast
 import hashlib
+import inspect
 import json
+import locale
 import os
+import selectors
+import subprocess
 import sys
+import time
 from contextlib import suppress
 from dataclasses import fields, make_dataclass, replace
 from pathlib import Path
 from tempfile import NamedTemporaryFile
 from types import ModuleType
+
+
+LOG_LIMIT = 4 * 1024 * 1024
+PROGRESS_INTERVAL = 15
+
+
+class CheckDeadline(BaseException):
+    """Leave the battery immediately so its outer owner can drain the group."""
+
+
+def compatible_shell_runner(runner):
+    """Only replace the known combined-output, keyword-only runner contract."""
+    try:
+        parameters = list(inspect.signature(runner).parameters.values())
+    except (TypeError, ValueError):
+        return False
+    return (
+        [parameter.name for parameter in parameters]
+        == ["command", "cwd", "env", "timeout"]
+        and [parameter.kind for parameter in parameters]
+        == [inspect.Parameter.POSITIONAL_OR_KEYWORD]
+        + [inspect.Parameter.KEYWORD_ONLY] * 3
+        and all(
+            parameter.default is inspect.Parameter.empty for parameter in parameters
+        )
+    )
+
+
+def run_attached(command, *, cwd, env, timeout, capture):
+    deadline = None if timeout is None else time.monotonic() + timeout
+    proc = subprocess.Popen(
+        command,
+        cwd=cwd,
+        env=env,
+        shell=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+    )
+
+    def remaining():
+        if deadline is None:
+            return None
+        seconds = deadline - time.monotonic()
+        if seconds <= 0:
+            raise CheckDeadline
+        return seconds
+
+    # Keep the repository runner's complete output for its own classification.
+    # The private on-disk diagnostic is bounded independently by capture().
+    output = bytearray()
+    next_progress = 0
+    with proc.stdout as stream, selectors.DefaultSelector() as selector:
+        selector.register(stream, selectors.EVENT_READ)
+        while True:
+            if not selector.select(remaining()):
+                continue
+            chunk = os.read(stream.fileno(), 64 * 1024)
+            if not chunk:
+                break
+            output.extend(chunk)
+            capture(chunk)
+            now = time.monotonic()
+            if now >= next_progress:
+                with suppress(BrokenPipeError, BlockingIOError):
+                    print(
+                        f"hammer CI mirror: check output received ({len(output)} bytes)",
+                        file=sys.stderr,
+                        flush=True,
+                    )
+                next_progress = now + PROGRESS_INTERVAL
+    try:
+        status = proc.wait(timeout=remaining())
+    except subprocess.TimeoutExpired as exc:
+        raise CheckDeadline from exc
+    encoding = "utf-8" if sys.flags.utf8_mode else locale.getencoding()
+    text = output.decode(encoding).replace("\r\n", "\n").replace("\r", "\n")
+    return subprocess.CompletedProcess(command, status, text, None)
 
 
 def main():
@@ -39,12 +121,13 @@ def main():
     ):
         return mirror.main(args)
 
-    try:
-        plan = json.loads(Path(plan_path).read_text(encoding="utf-8"))
-        receipt = json.loads(Path(receipt_path).read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return mirror.main(args)
     receipt_file = Path(receipt_path)
+    plan = {"manifests": {}, "reason": "ci-evidence-unavailable"}
+    receipt = {"schemaVersion": 1, "checks": []}
+    with suppress(OSError, ValueError):
+        plan = json.loads(Path(plan_path).read_text(encoding="utf-8"))
+    with suppress(OSError, ValueError):
+        receipt = json.loads(receipt_file.read_text(encoding="utf-8"))
     original_load = mirror.load_manifest
     original_run = mirror.run_check
     checkout = Path.cwd()
@@ -110,7 +193,67 @@ def main():
             for check in checks
         ]
 
+    # Supported mirrors run checks sequentially and let CheckDeadline escape.
+    # Their runner combines stderr into stdout (CompletedProcess.stderr is None).
+    # A concurrent runner needs separate receipt context before it is supported.
+    active = None
+
+    def open_diagnostic(row):
+        log = None
+        diagnostic = {"limitBytes": LOG_LIMIT}
+        try:
+            log = NamedTemporaryFile(
+                prefix=f"{receipt_file.name}.check-",
+                suffix=".log",
+                dir=receipt_file.parent,
+                buffering=0,
+                delete=False,
+            )
+            diagnostic["path"] = log.name
+        except OSError:
+            diagnostic["unavailable"] = True
+        row.setdefault("diagnostics", []).append(diagnostic)
+        persist()
+        stored = 0
+
+        def capture(chunk):
+            nonlocal stored
+            if log is None or diagnostic.get("unavailable"):
+                return
+            try:
+                data = chunk[: LOG_LIMIT - stored]
+                if log.write(data) != len(data):
+                    raise OSError("short diagnostic write")
+                stored += len(data)
+                if len(chunk) > len(data) and not diagnostic.get("truncated"):
+                    diagnostic["truncated"] = True
+                    persist()
+            except OSError:
+                diagnostic["unavailable"] = True
+                persist()
+
+        return log, diagnostic, capture
+
+    def run_shell_command(command, *, cwd, env, timeout):
+        if active is None:
+            return run_attached(
+                command, cwd=cwd, env=env, timeout=timeout, capture=lambda _: None
+            )
+        log, diagnostic, capture = open_diagnostic(active)
+        try:
+            result = run_attached(
+                command, cwd=cwd, env=env, timeout=timeout, capture=capture
+            )
+            diagnostic["exitStatus"] = result.returncode
+            persist()
+            return result
+        finally:
+            if log is not None:
+                with suppress(OSError):
+                    log.close()
+
     def run_check(check, *positional, **keywords):
+        nonlocal active
         decision = getattr(check, "ci_evidence", {})
         row = {
             "name": check.name,
@@ -134,7 +277,20 @@ def main():
             result = None
         if result is None:
             persist()
-            result = original_run(check, *positional, **keywords)
+            active = row
+            try:
+                result = original_run(check, *positional, **keywords)
+            except CheckDeadline:
+                row.update(
+                    status="failed",
+                    result="inconclusive",
+                    localReason="check-timeout",
+                    exitStatus=124,
+                )
+                persist()
+                raise
+            finally:
+                active = None
         if result.status in {"fail", "inconclusive"}:
             row.update(status="failed", result=result.status)
         elif result.status == "skipped":
@@ -143,14 +299,44 @@ def main():
             row["result"] = result.status
         if result.reason:
             row["localReason"] = result.reason
-        persist()
+        output = getattr(result, "output", "")
+        if result.status != "pass" and not row.get("diagnostics") and output:
+            log, _, capture = open_diagnostic(row)
+            if log is not None:
+                with suppress(OSError), log:
+                    capture(output.encode("utf-8", errors="replace"))
+        logs = row.pop("diagnostics", []) if result.status == "pass" else []
+        if persist():
+            for log in logs:
+                if "path" in log:
+                    with suppress(OSError):
+                        Path(log["path"]).unlink(missing_ok=True)
+        elif logs:
+            row["diagnostics"] = logs
         return result
 
     receipt["perCheck"] = True
-    if persist():
-        mirror.load_manifest = load_manifest
-        mirror.run_check = run_check
-    return mirror.main(args)
+    persist()
+    mirror.load_manifest = load_manifest
+    mirror.run_check = run_check
+    shell_runner = getattr(mirror, "run_shell_command", None)
+    if callable(shell_runner) and compatible_shell_runner(shell_runner):
+        mirror.run_shell_command = run_shell_command
+    elif callable(shell_runner):
+        print(
+            "hammer CI mirror: unsupported shell runner signature; keeping original runner",
+            file=sys.stderr,
+            flush=True,
+        )
+    try:
+        return mirror.main(args)
+    except CheckDeadline:
+        print(
+            "hammer CI mirror: check deadline expired; requesting group cleanup",
+            file=sys.stderr,
+            flush=True,
+        )
+        return 124
 
 
 if __name__ == "__main__":

@@ -112,6 +112,8 @@ timeout 142/143) is retried by rerunning the same close command in this
 workspace; never end the run to obtain a fresh workspace for it. Resume
 with verify-head and fresh lease/head checks; never replay publication or merge.
 An unknown cleanup or live owner retains custody and forbids a second controller.
+For canonical validation stops, read `local-validation.*` and its private log
+paths. Confirm drain from the controller registration before any retry.
 An exhausted closer fault is a **deferred harness fault**, never a terminal PR
 decision. Record its exact named reason with the terminal helper; dispatch
 refunds the charged attempt and parks/pages once after three refunds per head.
@@ -176,7 +178,7 @@ Bound every shell command. On macOS:
 /usr/bin/perl -e 'alarm shift; exec @ARGV' <seconds> <command> ...
 ```
 
-Validation: load-scaled 360s ceiling (`--nominal-timeout` tunes it); the 120-second no-output deadline never scales.
+Validation: load-scaled 360s ceiling (`--nominal-timeout` tunes it); the idle ceiling scales from 120 seconds.
 
 ```bash
 "${HAM_NODE_BIN:-node}" <<ROOT_DIR>>/bin/hammer-validate.mjs --canonical -- <changed repository-relative files> || exit $?
@@ -233,8 +235,9 @@ decision. Recovery resumes after exact-head checks pass.
 Run targeted tests in foreground via `hammer-validate.mjs` outside the lease.
 Yield (`--yield local-validation`), test, then source verify-head to recheck head/base.
 Use `run-bounded.sh` for other commands.
-Never nest buffering runners. Any timeout, cancellation or nonzero exit releases
-the lease via its trap before validation audit/merge. Diagnose outside it;
+Never nest buffering runners. Timeout or cancellation stops the controller
+round. Confirm drain and lease disposition before retrying. A nonzero validator
+exit forbids audit/merge. Diagnose outside the lease;
 reacquire and repeat head/base/file-overlap checks. Use one bounded harness wait
 for external waits. Never background a command and poll with `sleep`, `tail`, or `cat`.
 Codex and Claude: no background tests or "still waiting" narration.

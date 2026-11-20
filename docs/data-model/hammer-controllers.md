@@ -172,6 +172,12 @@ Any HQ-level acknowledgement change belongs in a separate Agent OS follow-up.
 
 ## Local validation receipt
 
+**Source of truth:** `bin/hammer-validate.mjs` and `bin/hammer-ci-mirror-validation.py`
+**Store:** `<HAM_RUN_DIR>/local-validation.*`, adjacent
+`*.check-*.log`, and `<HAM_RUN_DIR>/close-result.json`; standalone evidence
+uses `<HAM_RUN_DIR or system tmp>/ham-validation-evidence-*/local-validation.json`
+and adjacent `*.check-*.log`.
+
 The closing controller starts a private `local-validation.*` receipt for each
 outside-lease validation attempt. It embeds the receipts from that invocation
 in `close-result.json` under `localValidation`. An empty array means the
@@ -184,7 +190,27 @@ controller has no receipt for that invocation.
 | `status` | Effective validator exit code once the helper finishes |
 | `checks` | Ordered records with check name, status and reason, plus local result or exit status when available |
 | `checks[].jobs` | For `ci-covered`, each declared job's `name` and GitHub Actions `runId` (strings); current step mappings also include string `jobId` and the exact `step` name. Legacy job mappings and older receipts omit these optional fields. |
+| `checks[].diagnostics` | Optional ordered diagnostics for a check that did not pass or was interrupted |
+| `checks[].diagnostics[].path` | Private combined stdout/stderr file beside the original validation receipt |
+| `checks[].diagnostics[].limitBytes` | Maximum retained bytes per command, currently 4 MiB |
+| `checks[].diagnostics[].exitStatus` | Raw command result when observed |
+| `checks[].diagnostics[].truncated` / `unavailable` | Output exceeded the cap or the writer could not retain a complete bounded file |
 
 Per-check statuses are `run`, `ci-covered`, `failed` and `not-run`. Runners
 without per-check reporting produce a battery-level record. The controller
-uses these receipts for diagnosis.
+uses these receipts for diagnosis. `run` without a result means the check
+was in flight when that receipt was persisted. A cancellation can leave
+`status` unset and a partial diagnostic without an exit status. Use the
+original receipt if no `close-result.json` was written. Completed passing
+checks drop their logs. Standalone canonical mirror runs without a caller
+receipt print the path to a private evidence directory separate from their
+disposable validation scratch.
+
+Retention belongs to the caller/run-directory owner. Passing checks delete their
+command logs immediately. Failed or interrupted diagnostic files remain with
+their receipt until diagnosis is complete; after confirmed process drain and
+collection of needed incident evidence, remove the receipt/log pairs with their
+private run directory. A standalone caller removes the printed
+`ham-validation-evidence-*` directory under the same conditions. There is no
+automatic expiry or aggregate byte cap; each command can retain 4 MiB. Do not
+delete files while process drain is unconfirmed.

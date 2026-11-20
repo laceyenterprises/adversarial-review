@@ -293,11 +293,13 @@ A single native coordinator feeds the longest pending file to each free worker.
 The SMV smoke file runs alone first because it measures real process deadlines.
 Each file runs in its own process with isolated state, home and temporary
 directory. The runner supplies Git settings that disable automatic maintenance
-and garbage collection for fixture commits and fetches even with a fresh home.
-The bounded validation wrappers also use `AR_TEST_CONCURRENCY` for local
-`node --test` commands that omit `--test-concurrency`.
-Repeated CLI fixtures use private compile caches. The suite deadline
-remains 900 seconds; failures name the file and return a nonzero status.
+and garbage collection for fixture commits, fetches and pushes even with a fresh
+home. Push receivers own their server-side configuration. Helpers that replace
+Git command configuration own their settings and may replace this suppression. Repeated CLI fixtures use private compile caches.
+The suite deadline is `900 * 8 / max(1, min(8, workers))` seconds: 1800 seconds
+with four workers and 900 with eight. Failures name the file and return a
+nonzero status. Generic bounded validation wrappers preserve command arguments;
+`AR_TEST_CONCURRENCY` applies only to this repository’s runner.
 Set `AR_TEST_TIMINGS=/absolute/path.json` to
 record per-file wall times and total suite wall time. Relative report paths
 resolve against the caller's working directory and survive sandbox cleanup.

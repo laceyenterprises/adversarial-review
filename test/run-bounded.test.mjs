@@ -46,7 +46,7 @@ test('supervisor CLIs are directly executable and report usage for missing input
   }
 });
 
-test('bounded validators apply the local Node test override and preserve explicit or CI options', t => {
+test('bounded validators preserve Node test arguments regardless of local overrides or CI', t => {
   const dir = mkdtempSync(join(tmpdir(), 'bounded-node-'));
   t.after(() => rmSync(dir, { recursive: true, force: true }));
   const node = join(dir, 'node');
@@ -60,10 +60,12 @@ test('bounded validators apply the local Node test override and preserve explici
   };
   for (const wrapper of ['bin/run-bounded.mjs', 'bin/hammer-validate.mjs']) {
     assert.deepEqual(validate(wrapper, ['--test', 'fixture.test.mjs']),
-      ['--test', '--test-concurrency=2', 'fixture.test.mjs']);
+      ['--test', 'fixture.test.mjs']);
     assert.deepEqual(validate(wrapper, ['--test', '--test-concurrency', '7']),
       ['--test', '--test-concurrency', '7']);
     assert.deepEqual(validate(wrapper, ['--test'], 'true'), ['--test']);
+    assert.deepEqual(validate(wrapper, ['--import', 'preload.mjs', '--test', '--', 'fixture']),
+      ['--import', 'preload.mjs', '--test', '--', 'fixture']);
     assert.deepEqual(validate(wrapper, ['script.mjs', '--test']), ['script.mjs', '--test']);
   }
 });

@@ -3,6 +3,11 @@ import { localNodeTestConcurrency } from '../../src/node-test-concurrency.mjs';
 // Stable longest-first scheduling. Missing measurements receive the median
 // known duration so new files are not all scheduled last.
 const CI_WORKERS = 8;
+// Preserve the eight-worker wall budget's capacity when local runs use fewer
+// slots. Explicit higher concurrency never shortens the historical deadline.
+export function suiteTimeoutMs(concurrency) {
+  return 900_000 * CI_WORKERS / Math.max(1, Math.min(CI_WORKERS, concurrency));
+}
 // This smoke asserts real per-step wall budgets in its child process tree.
 // Keep that measurement independent of the suite's artificial CPU/I/O load.
 export const SERIAL_TEST_FILES = new Set(['test/smv.test.mjs']);

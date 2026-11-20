@@ -48,11 +48,19 @@ speedup.
 ## Fix and regression coverage
 
 The shared runner passes the three settings to fixture descendants through
-Git's configuration environment. A regression test makes a real commit in a
-temporary repository and uses Trace2 to check for maintenance launches.
+Git's configuration environment. A regression test constructs that environment
+explicitly, makes a real commit, push and fetch in temporary repositories, and
+uses Trace2 to check for maintenance launches. The bare push receiver is
+configured separately because Git transport strips client command settings.
+Helpers replacing Git command
+configuration can replace these settings; production credential helpers remain
+responsible for their own configuration.
 
 Local validation now defaults to half the available logical CPUs, rounded
 down and clamped to one through four. `AR_TEST_CONCURRENCY` overrides the
-limit. Tests exercise the default, the override through the runner and
-bounded validators, and CI's existing worker count. CI retains the same
-suite selection and scheduling.
+limit within this repository’s runner. Generic bounded validators preserve
+their caller’s arguments, including downstream repositories’ Node concurrency.
+The suite deadline scales as `900 * 8 / max(1, min(8, workers))` seconds.
+Tests exercise the default, override, scaled deadline and CI's existing worker
+count. CI retains the same suite selection and scheduling. A measured local
+full-suite wall time remains unavailable; remediation runs targeted tests only.

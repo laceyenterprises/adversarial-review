@@ -4,7 +4,8 @@ import { constants, tmpdir } from 'node:os';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { SERIAL_TEST_FILES, orderFiles, workerCount } from './helpers/parallel-plan.mjs';
+import { SERIAL_TEST_FILES, orderFiles, workerCount, suiteTimeoutMs } from './helpers/parallel-plan.mjs';
+import { fixtureGitEnv } from './helpers/fixture-git-env.mjs';
 import { reclaimAbandonedSandboxes, SANDBOX_OWNER_MARKER } from './helpers/runner-sandbox.mjs';
 
 const testDir = path.dirname(fileURLToPath(import.meta.url));
@@ -158,6 +159,7 @@ try {
   const files = [...serialFiles, ...parallelFiles];
   const paths = Object.fromEntries(files.map((file, index) => [file, path.join(makeWorkerRoot(index), file)]));
   const concurrency = workerCount(parallelFiles.length);
+  const deadlineMs = suiteTimeoutMs(concurrency);
   const logDir = path.join(sandboxRoot, 'logs');
   mkdirSync(logDir);
   const configPath = path.join(sandboxRoot, 'parallel-config.json');
@@ -197,16 +199,15 @@ try {
     'HAM_CONTROLLER_PID', 'HAM_CONTROLLER_FD',
     'GIT_DIR', 'GIT_WORK_TREE', 'GIT_COMMON_DIR', 'GIT_INDEX_FILE',
     'GIT_OBJECT_DIRECTORY', 'GIT_ALTERNATE_OBJECT_DIRECTORIES',
-    'GIT_CONFIG_PARAMETERS',
   ]);
   // Live Hammer head, lease and audit state belongs to the owning controller.
   // Synthetic phase fixtures must supply their own state instead of inheriting it.
   const testEnv = Object.fromEntries(Object.entries(process.env).filter(([key]) =>
-    !inheritedStatePaths.has(key) && !/^GIT_CONFIG_(?:KEY|VALUE)_\d+$/.test(key)
+    !inheritedStatePaths.has(key)
     && !key.startsWith('HCP_') && !key.startsWith('HAM_') && !/^(?:GH_.*TOKEN|GITHUB_.*TOKEN|.*_GH_TOKEN)(?:_REFRESH_COMMAND|_EXPIRES_AT)?$/.test(key)));
   child = spawn(process.execPath, [path.join(testDir, 'helpers', 'parallel-runner.mjs'), configPath], {
     cwd: sandboxRoot,
-    env: {
+    env: fixtureGitEnv({
       ...testEnv,
       // The preload replaces these again in each test-file process. Even the
       // node:test coordinator must never inherit the caller's live roots.
@@ -214,11 +215,6 @@ try {
       AGENT_OS_HQ_ROOT: coordinatorHqRoot,
       AGENT_OS_DEPLOY_CHECKOUT: path.join(sandboxTmpDir, 'deploy-checkout'),
       GIT_CEILING_DIRECTORIES: sandboxRoot,
-      // Fixture homes have no global Git config. Suppress detached housekeeping in the whole test tree.
-      GIT_CONFIG_COUNT: '3',
-      GIT_CONFIG_KEY_0: 'maintenance.auto', GIT_CONFIG_VALUE_0: 'false',
-      GIT_CONFIG_KEY_1: 'gc.auto', GIT_CONFIG_VALUE_1: '0',
-      GIT_CONFIG_KEY_2: 'gc.autoDetach', GIT_CONFIG_VALUE_2: 'false',
       HOME: coordinatorHome,
       USERPROFILE: coordinatorHome,
       GH_CONFIG_DIR: path.join(sandboxRoot, 'gh-config'),
@@ -229,7 +225,7 @@ try {
       TEMP: sandboxTmpDir,
       PATH: [fixtureBin, path.dirname(process.execPath), process.env.PATH].filter(Boolean).join(path.delimiter),
       NODE_OPTIONS: [process.env.NODE_OPTIONS, '--preserve-symlinks', '--preserve-symlinks-main'].filter(Boolean).join(' '),
-    },
+    }),
     stdio: 'inherit',
     detached: process.platform !== 'win32',
   });
@@ -249,7 +245,7 @@ try {
   timeout = setTimeout(() => {
     timedOut = true;
     terminateChild('SIGTERM');
-  }, 900_000);
+  }, deadlineMs);
   const result = await childExit;
 
   const checkoutDataAfter = listFiles(checkoutDataDir);
@@ -258,7 +254,7 @@ try {
     console.error(`Test suite wrote into the checkout data directory:\n${leakedFiles.join('\n') || '(directory created)'}`);
     process.exitCode = 1;
   } else if (timedOut) {
-    throw Object.assign(new Error('Test suite timed out after 900 seconds'), { code: 'ETIMEDOUT' });
+    throw Object.assign(new Error(`Test suite timed out after ${deadlineMs / 1000} seconds`), { code: 'ETIMEDOUT' });
   } else if (process.exitCode !== 1) {
     process.exitCode = result.status ?? 1;
   }

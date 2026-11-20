@@ -5,7 +5,8 @@ import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync,
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
-import { SERIAL_TEST_FILES, orderFiles, workerCount } from './helpers/parallel-plan.mjs';
+import { SERIAL_TEST_FILES, orderFiles, workerCount, suiteTimeoutMs } from './helpers/parallel-plan.mjs';
+import { fixtureGitEnv } from './helpers/fixture-git-env.mjs';
 
 const helper = path.join(import.meta.dirname, 'helpers', 'parallel-runner.mjs');
 
@@ -23,23 +24,43 @@ test('local parallelism uses half the available cores up to four, or an override
   assert.equal(workerCount(3, { CI: '1' }, 2), 3);
 });
 
-test('fixture commits skip auto-maintenance in a fresh home', t => {
+test('suite deadline scales with worker count without reducing the eight-worker budget', () => {
+  for (const [workers, seconds] of [[0, 7200], [1, 7200], [2, 3600], [4, 1800], [8, 900], [16, 900]]) {
+    assert.equal(suiteTimeoutMs(workers), seconds * 1000);
+  }
+  assert.equal(suiteTimeoutMs(workerCount(100, {}, 16)), 1_800_000);
+  assert.equal(suiteTimeoutMs(workerCount(100, { CI: 'true' }, 16)), 900_000);
+});
+
+test('fixture commits, push and fetch skip auto-maintenance in a fresh home', t => {
   const root = mkdtempSync(path.join(tmpdir(), 'fixture-git-'));
   t.after(() => rmSync(root, { recursive: true, force: true }));
   const home = path.join(root, 'home');
   mkdirSync(home);
   const trace = path.join(root, 'git-trace.jsonl');
-  const env = { ...process.env, HOME: home, USERPROFILE: home, GIT_CONFIG_NOSYSTEM: '1',
-    GIT_CONFIG_GLOBAL: path.join(home, '.gitconfig'), GIT_TRACE2_EVENT: trace };
+  const env = fixtureGitEnv({ ...process.env, HOME: home, USERPROFILE: home, GIT_CONFIG_NOSYSTEM: '1',
+    GIT_CONFIG_COUNT: '9', GIT_CONFIG_KEY_8: 'maintenance.auto', GIT_CONFIG_VALUE_8: 'true',
+    GIT_CONFIG_PARAMETERS: 'invalid inherited config',
+    GIT_CONFIG_GLOBAL: path.join(home, '.gitconfig'), GIT_TRACE2_EVENT: trace });
+  assert.equal(env.GIT_CONFIG_KEY_8, undefined);
+  assert.equal(env.GIT_CONFIG_PARAMETERS, undefined);
   const git = (...args) => execFileSync('git', args, { cwd: root, env, encoding: 'utf8', timeout: 10_000 }).trim();
   git('init', '--quiet', '--template=');
   git('-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid',
     '-c', 'commit.gpgsign=false', 'commit', '--quiet', '--allow-empty', '-m', 'fixture');
+  git('init', '--quiet', '--bare', '--template=', path.join(root, 'remote.git'));
+  // Git transport strips command config on the receiving side. Configure that
+  // separate fixture explicitly; the runner environment controls the client.
+  git('--git-dir', path.join(root, 'remote.git'), 'config', 'maintenance.auto', 'false');
+  git('push', '--quiet', path.join(root, 'remote.git'), 'HEAD:refs/heads/fixture');
+  git('fetch', '--quiet', path.join(root, 'remote.git'), 'refs/heads/fixture');
   for (const [key, value] of [['maintenance.auto', 'false'], ['gc.auto', '0'], ['gc.autoDetach', 'false']]) {
     assert.equal(git('config', '--get', key), value);
   }
   const events = readFileSync(trace, 'utf8').trim().split('\n').map(line => JSON.parse(line));
-  assert.ok(events.some(event => event.event === 'start' && event.argv.includes('commit')));
+  for (const command of ['commit', 'push', 'fetch']) {
+    assert.ok(events.some(event => event.event === 'start' && event.argv.includes(command)), command);
+  }
   assert.deepEqual(events.filter(event => ['start', 'child_start'].includes(event.event)
     && event.argv?.includes('maintenance')), []);
 });
@@ -119,7 +140,7 @@ for (const failure of [false, true]) test(`real parallel processes report every 
   assert.ok(report.wallMs > 0);
 });
 
-test('suite timeout names the unchanged 900-second cap and removes the running sandbox', (t) => {
+test('suite timeout names the worker-scaled cap and removes the running sandbox', (t) => {
   const root = mkdtempSync(path.join(tmpdir(), 'runner-deadline-'));
   t.after(() => rmSync(root, { recursive: true, force: true }));
   const ready = path.join(root, 'ready');
@@ -128,20 +149,20 @@ test('suite timeout names the unchanged 900-second cap and removes the running s
     import { existsSync } from 'node:fs';
     const schedule = globalThis.setTimeout;
     globalThis.setTimeout = (callback, ms, ...args) => {
-      if (ms !== 900_000) return schedule(callback, ms, ...args);
+      if (ms !== 7_200_000) return schedule(callback, ms, ...args);
       const check = () => existsSync(${JSON.stringify(ready)}) ? callback(...args) : schedule(check, 10);
       return schedule(check, 10);
     };
   `);
   const env = { ...process.env, ADVERSARIAL_REVIEW_TEST_TEMP_BASE: root,
-    HQ_ROOT_FIXTURE_HOLD: ready, HQ_ROOT_FIXTURE_FAIL: '0' };
+    HQ_ROOT_FIXTURE_HOLD: ready, HQ_ROOT_FIXTURE_FAIL: '0', CI: 'false', AR_TEST_CONCURRENCY: '1' };
   delete env.NODE_TEST_CONTEXT;
   const child = spawnSync(process.execPath, ['--import', hook,
     path.join(import.meta.dirname, 'run-tests.mjs'), 'hq-root-runner-probe.test.mjs'], {
     encoding: 'utf8', env, timeout: 30_000,
   });
   assert.equal(child.status, 1, child.stdout + child.stderr);
-  assert.match(child.stderr, /Test suite timed out after 900 seconds/);
+  assert.match(child.stderr, /Test suite timed out after 7200 seconds/);
   assert.equal(readdirSync(root).some((file) => file.startsWith('art-')), false);
 });
 

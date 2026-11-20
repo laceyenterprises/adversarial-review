@@ -284,10 +284,13 @@ npm test
 ```
 
 This uses `test/run-tests.mjs` to discover every top-level and adapter test
-in isolated sandboxes, with eight test-file workers. It is hermetic — no
-network, no external services — and runs in CI on every PR against Node 22
-and Node 26. The suite has a 900-second deadline. Set `AR_TEST_TIMINGS` to
-an output path for the completed run's per-file timings. Native TAP output
+in isolated sandboxes. Local runs use half the available logical CPUs rounded
+down and clamped to one through four workers; `AR_TEST_CONCURRENCY` overrides
+that limit. CI uses up to eight workers. Selected parallel files cap the actual
+worker count. It is hermetic — no network, no external services — and runs in CI
+on every PR against Node 22 and Node 26. The suite deadline is
+`900 * 8 / max(1, min(8, workers))` seconds (1800 with four, 900 with eight).
+Set `AR_TEST_TIMINGS` to an output path for the completed run's per-file timings. Native TAP output
 follows scheduled order, so the last visible case at a timeout identifies
 where reporting stopped. Investigate worker and child completion separately
 when diagnosing a timeout.

@@ -5745,8 +5745,16 @@ Absolute paths, leading hyphens and parent traversal segments print canonical
 usage and exit 64, without a validation verdict or environment-fallback receipt.
 Agent OS runs `python3 scripts/ci-mirror/run-ci-mirror.py -- <changed files>`;
 this repository runs selected touched/direct-importer tests through
-`node test/run-tests.mjs <test files>`. Importer paths are resolved relative to
-each test directory, including shared test helpers. Legacy command-style callers
+`node test/run-tests.mjs <test files>`. That runner defaults locally to half
+the available logical CPUs rounded down, clamped to one through four workers;
+`AR_TEST_CONCURRENCY` overrides it, while CI retains up to eight. Selected
+parallel files cap the actual worker count. Its internal deadline is
+`900 * 8 / max(1, min(8, workers))` seconds. The hammer’s outer load-aware
+validation budget and idle limit remain independently authoritative. Generic
+bounded command execution preserves arguments in every repository; callers of
+direct `node --test` select concurrency explicitly with `--test-concurrency`.
+Importer paths are resolved relative to each test directory, including shared
+test helpers. Legacy command-style callers
 derive changed paths from Git; unavailable Git comparison evidence uses the same
 canonical-setup fallback below. Never synthesize pytest/PYTHONPATH.
 For repositories with `pnpm-lock.yaml`, the selector reads ungated pnpm script

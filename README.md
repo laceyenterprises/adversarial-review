@@ -284,14 +284,26 @@ npm test
 
 CI runs both on Node 22 and Node 26 on every PR. Node 22.10 or newer is required
 for native test-runner `execArgv` support, which installs each file's preloads.
-The runner schedules files by measured duration across eight workers, capped
-only by the number of selected parallel files.
+The runner schedules files by measured duration. Local runs default to half
+the available logical CPUs rounded down, with a minimum of one and a maximum
+of four. Set `AR_TEST_CONCURRENCY` to a positive integer to override the
+local limit. The number of selected parallel files caps the actual worker
+count. CI continues to use up to eight workers.
 A single native coordinator feeds the longest pending file to each free worker.
 The SMV smoke file runs alone first because it measures real process deadlines.
 Each file runs in its own process with isolated state, home and temporary
-directory. Repeated CLI fixtures use private compile caches. Failures name the
-test file and return a nonzero status. At the 900-second deadline, the runner
-prints the active test files and the number still queued.
+directory. The runner supplies Git settings that disable automatic maintenance
+and garbage collection for fixture commits, fetches and pushes even with a fresh
+home. Push receivers own their server-side configuration. Helpers that replace
+Git command configuration own their settings. Repeated CLI fixtures use
+private compile caches.
+The suite deadline stays at 900 seconds when the selected parallel files fit
+within the configured worker limit. Otherwise it is
+`900 * 8 / min(8, limit)` seconds: 1800 seconds with a four-worker limit and
+900 with eight. Failures name the test file and return a nonzero status. At the
+deadline, the runner prints the active test files and the number still queued.
+Generic bounded validation wrappers preserve command arguments.
+`AR_TEST_CONCURRENCY` applies only to this repository’s runner.
 Set `AR_TEST_TIMINGS=/absolute/path.json` to
 record per-file wall times and total suite wall time. Relative report paths
 resolve against the caller's working directory and survive sandbox cleanup.

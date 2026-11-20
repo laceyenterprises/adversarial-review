@@ -3,7 +3,7 @@ import { FakeClock } from './helpers/load-time-kit.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn, spawnSync, execFileSync } from 'node:child_process';
-import { mkdtempSync, readFileSync, readdirSync, rmSync } from 'node:fs';
+import { mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { once, EventEmitter } from 'node:events';
@@ -43,6 +43,30 @@ test('supervisor CLIs are directly executable and report usage for missing input
     assert.equal(result.error, undefined);
     assert.equal(result.status, 64, result.stderr);
     assert.match(result.stderr, /^usage: /);
+  }
+});
+
+test('bounded validators preserve Node test arguments regardless of local overrides or CI', t => {
+  const dir = mkdtempSync(join(tmpdir(), 'bounded-node-'));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const node = join(dir, 'node');
+  writeFileSync(node, '#!/bin/sh\nprintf "%s\\n" "$@"\n', { mode: 0o755 });
+  const validate = (wrapper, args, CI = 'false') => {
+    const result = spawnSync(process.execPath, [wrapper, '--', node, ...args], {
+      env: { ...process.env, AR_TEST_CONCURRENCY: '2', CI }, encoding: 'utf8', timeout: 20_000,
+    });
+    assert.equal(result.status, 0, result.stderr);
+    return result.stdout.trim().split('\n');
+  };
+  for (const wrapper of ['bin/run-bounded.mjs', 'bin/hammer-validate.mjs']) {
+    assert.deepEqual(validate(wrapper, ['--test', 'fixture.test.mjs']),
+      ['--test', 'fixture.test.mjs']);
+    assert.deepEqual(validate(wrapper, ['--test', '--test-concurrency', '7']),
+      ['--test', '--test-concurrency', '7']);
+    assert.deepEqual(validate(wrapper, ['--test'], 'true'), ['--test']);
+    assert.deepEqual(validate(wrapper, ['--import', 'preload.mjs', '--test', '--', 'fixture']),
+      ['--import', 'preload.mjs', '--test', '--', 'fixture']);
+    assert.deepEqual(validate(wrapper, ['script.mjs', '--test']), ['script.mjs', '--test']);
   }
 });
 

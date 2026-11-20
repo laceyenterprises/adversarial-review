@@ -310,14 +310,15 @@ test('runner finally stops a live test group before cleanup after an unexpected 
     };
     const schedule = globalThis.setTimeout;
     globalThis.setTimeout = (callback, ms, ...args) => {
-      if (ms === 900_000) throw new Error('synthetic runner unwind');
+      if (ms === 7_200_000) throw new Error('synthetic runner unwind');
       return schedule(callback, ms, ...args);
     };
   `);
-  const env = { ...process.env, ADVERSARIAL_REVIEW_TEST_TEMP_BASE: base };
+  const env = { ...process.env, ADVERSARIAL_REVIEW_TEST_TEMP_BASE: base, CI: 'false', AR_TEST_CONCURRENCY: '1' };
   delete env.NODE_TEST_CONTEXT;
   const child = spawnSync(process.execPath, [
-    '--import', hook, path.join(testDir, 'run-tests.mjs'), 'hq-root-runner-probe.test.mjs',
+    '--import', hook, path.join(testDir, 'run-tests.mjs'),
+    'hq-root-runner-probe.test.mjs', 'hq-root.test.mjs',
   ], { env, encoding: 'utf8', timeout: 30_000 });
   assert.equal(child.status, 1, `${child.stdout}\n${child.stderr}`);
   assert.match(child.stderr, /synthetic runner unwind/);

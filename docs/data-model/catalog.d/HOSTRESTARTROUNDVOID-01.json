@@ -1,0 +1,29 @@
+{
+  "version": 1,
+  "entries": [
+    {
+      "id": "hammer-retry-cap-host-restart-voids",
+      "title": "Hammer retry cap host-restart voids",
+      "path": "docs/data-model/hammer-retry-cap.md",
+      "store": "data/follow-up-jobs/hammer-retry-cap/*.json",
+      "schemaSurface": "src/ama/hammer-retry-cap.mjs",
+      "relatedSchemaSurfaces": [
+        "src/pr-round-ledger.mjs",
+        "src/ama/dispatch-closer.mjs"
+      ],
+      "owner": "watcher AMA closer",
+      "optionalField": "hostRestartVoids: { [chargeKey]: { terminalClass, launchRequestId, jobKey, headSha, refundedAt, budgets } }",
+      "compatibility": "Additive. Ledgers without the field have no voided host-restart launch."
+    },
+    {
+      "id": "ama-closer-dispatch-host-restart-void",
+      "title": "AMA closer dispatch host-restart void receipt",
+      "path": "docs/data-model/ama-closer-dispatches.md",
+      "store": "data/follow-up-jobs/ama-closer-dispatches/*.json",
+      "schemaSurface": "src/ama/dispatch-closer.mjs",
+      "owner": "watcher AMA closer",
+      "optionalField": "hostRestartVoidedLaunchRequestId: string",
+      "compatibility": "Additive. Records without the field have no voided host-restart launch."
+    }
+  ]
+}

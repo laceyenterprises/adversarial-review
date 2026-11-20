@@ -31,7 +31,7 @@ import { join } from 'node:path';
 import { hammerHeadOwnership } from '../hammer-head-ownership.mjs';
 
 import { writeFileAtomic } from '../atomic-write.mjs';
-import { PR_ROUND_KINDS, readPrRoundLedger, recordPrRound, voidPrRound } from '../pr-round-ledger.mjs';
+import { PR_ROUND_KINDS, isVoidTerminalClass, readPrRoundLedger, recordPrRound, voidPrRound } from '../pr-round-ledger.mjs';
 import { deferOverload } from '../overload-deferral.mjs';
 import {
   DEFAULT_RISK_CLASS,
@@ -172,7 +172,7 @@ function writeHammerRetryCapLedger(rootDir, identity, doc) {
 
 // Permanent charge/refund identities survive every head/series reset.
 function durableChargeFields(ledger) {
-  return Object.fromEntries(['repairEpochs', 'reviewHarnessRefunds', 'dispatchCharges', 'noWorkRefunds', 'pendingTransientCharge', 'targetChargeEpoch', 'operatorApprovalRearms', 'phaseInputsReplacement', 'nonCloserHeadResets', 'stopRepairReservations', 'selfErrorRefunds']
+  return Object.fromEntries(['repairEpochs', 'reviewHarnessRefunds', 'dispatchCharges', 'noWorkRefunds', 'pendingTransientCharge', 'targetChargeEpoch', 'operatorApprovalRearms', 'phaseInputsReplacement', 'nonCloserHeadResets', 'stopRepairReservations', 'selfErrorRefunds', 'hostRestartVoids']
     .filter(key => ledger?.[key] !== undefined).map(key => [key, ledger[key]]));
 }
 
@@ -182,24 +182,9 @@ export function creditHammerDispatchBudgets(ledger, launchRequestId, budgets) {
     ...Object.fromEntries(Object.entries(budgets).filter(([, credited]) => credited)) };
 }
 
-function refundNoWorkUnlocked(rootDir, identity, options) {
-  const { jobKey, headSha, launchRequestId, executionVerdict: verdict, dispatchKey, now } = options;
-  const refuse = reason => ({ refunded: false, reason });
-  if (!validNoWorkVerdict(verdict, launchRequestId)) return refuse('execution-not-proven-no-work');
-  const ledger = readHammerRetryCapLedger(rootDir, identity);
-  if (!ledger || ledger.__corrupt) return refuse('no-ledger');
-  const entries = Object.entries(ledger.dispatchCharges || {});
-  const entry = (dispatchKey && entries.find(([key]) => key === dispatchKey))
-    || entries.find(([, charge]) => charge.launchRequestId === launchRequestId);
-  if (!entry) return refuse('no-charged-attempt');
-  const [key, charge] = entry;
-  if (charge.launchRequestId !== launchRequestId || charge.attempt !== verdict.attempt
-    || charge.jobKey !== normalizeKey(jobKey) || charge.headSha !== normalizeKey(headSha)) return refuse('charge-identity-mismatch');
-  if (ledger.noWorkRefunds?.[key]) return refuse('already-refunded');
-  if (![ledger.attemptCount, ledger.targetAttemptCount, ledger.lifetimeAttemptCount]
-    .every(count => Number.isSafeInteger(count) && count >= 0) || (ledger.lifetimeAttemptCount < 1 && !charge.refundedBudgets?.lifetime)) {
-    return refuse('invalid-charge-counters');
-  }
+// Credit every budget a charge has not already had back. Shared by the RCV-08
+// no-work refund and the HOSTRESTARTROUNDVOID-01 void; each keeps its own receipt.
+function creditChargeInFull(ledger, charge, launchRequestId, now) {
   const down = count => Math.max(0, Number(count || 0) - 1);
   const credited = charge.refundedBudgets || {};
   const seriesMatches = ledger.jobKey === charge.jobKey && !credited.pr;
@@ -216,16 +201,67 @@ function refundNoWorkUnlocked(rootDir, identity, options) {
     lifetimeSuppressed: false,
     unexecutedLaunchRequestIds: [...new Set([...(ledger.unexecutedLaunchRequestIds || []), launchRequestId])],
     transientRetryHeads: transientHeads,
-    noWorkRefunds: { ...ledger.noWorkRefunds, [key]: {
-      verdictId: verdict.verdictId, launchRequestId, attempt: verdict.attempt,
-      jobKey: charge.jobKey, headSha: charge.headSha, refundedAt: now || new Date().toISOString(),
-      budgets: { head: targetMatches, pr: seriesMatches, lifetime, transient },
-    } },
     updatedAt: now || ledger.updatedAt,
   };
-  creditHammerDispatchBudgets(doc, launchRequestId, doc.noWorkRefunds[key].budgets);
+  return { doc, budgets: { head: targetMatches, pr: seriesMatches, lifetime, transient } };
+}
+
+function validChargeCounters(ledger, charge) {
+  return [ledger.attemptCount, ledger.targetAttemptCount, ledger.lifetimeAttemptCount]
+    .every(count => Number.isSafeInteger(count) && count >= 0)
+    && !(ledger.lifetimeAttemptCount < 1 && !charge.refundedBudgets?.lifetime);
+}
+
+function refundNoWorkUnlocked(rootDir, identity, options) {
+  const { jobKey, headSha, launchRequestId, executionVerdict: verdict, dispatchKey, now } = options;
+  const refuse = reason => ({ refunded: false, reason });
+  if (!validNoWorkVerdict(verdict, launchRequestId)) return refuse('execution-not-proven-no-work');
+  const ledger = readHammerRetryCapLedger(rootDir, identity);
+  if (!ledger || ledger.__corrupt) return refuse('no-ledger');
+  const entries = Object.entries(ledger.dispatchCharges || {});
+  const entry = (dispatchKey && entries.find(([key]) => key === dispatchKey))
+    || entries.find(([, charge]) => charge.launchRequestId === launchRequestId);
+  if (!entry) return refuse('no-charged-attempt');
+  const [key, charge] = entry;
+  if (charge.launchRequestId !== launchRequestId || charge.attempt !== verdict.attempt
+    || charge.jobKey !== normalizeKey(jobKey) || charge.headSha !== normalizeKey(headSha)) return refuse('charge-identity-mismatch');
+  if (ledger.noWorkRefunds?.[key] || ledger.hostRestartVoids?.[key]) return refuse('already-refunded');
+  if (!validChargeCounters(ledger, charge)) return refuse('invalid-charge-counters');
+  const { doc, budgets } = creditChargeInFull(ledger, charge, launchRequestId, now);
+  doc.noWorkRefunds = { ...ledger.noWorkRefunds, [key]: {
+    verdictId: verdict.verdictId, launchRequestId, attempt: verdict.attempt,
+    jobKey: charge.jobKey, headSha: charge.headSha, refundedAt: now || new Date().toISOString(), budgets,
+  } };
+  creditHammerDispatchBudgets(doc, launchRequestId, budgets);
   writeHammerRetryCapLedger(rootDir, identity, doc);
   return { refunded: true, reason: 'unexecuted', receipt: doc.noWorkRefunds[key] };
+}
+
+// HOSTRESTARTROUNDVOID-01: the orchestrator settles a closer killed by a host
+// restart with a terminal class that does not charge an attempt. Give back
+// every budget its dispatch charged, once per charge. The terminal class is the
+// launch row's structured field; nothing else (free text, worker output) counts.
+function voidHostRestartChargeUnlocked(rootDir, identity, { launchRequestId, dispatchKey, terminalClass, now } = {}) {
+  const refuse = reason => ({ refunded: false, reason });
+  const launch = normalizeKey(launchRequestId);
+  if (!launch) return refuse('no-launch');
+  const ledger = readHammerRetryCapLedger(rootDir, identity);
+  if (!ledger || ledger.__corrupt) return refuse('no-ledger');
+  const entries = Object.entries(ledger.dispatchCharges || {});
+  const entry = (dispatchKey && entries.find(([key, charge]) => key === dispatchKey && charge.launchRequestId === launch))
+    || entries.find(([, charge]) => charge.launchRequestId === launch);
+  if (!entry) return refuse('no-charged-attempt');
+  const [key, charge] = entry;
+  if (ledger.hostRestartVoids?.[key] || ledger.noWorkRefunds?.[key]) return refuse('already-refunded');
+  if (!validChargeCounters(ledger, charge)) return refuse('invalid-charge-counters');
+  const { doc, budgets } = creditChargeInFull(ledger, charge, launch, now);
+  doc.hostRestartVoids = { ...ledger.hostRestartVoids, [key]: {
+    terminalClass, launchRequestId: launch, jobKey: charge.jobKey, headSha: charge.headSha,
+    refundedAt: now || new Date().toISOString(), budgets,
+  } };
+  creditHammerDispatchBudgets(doc, launch, budgets);
+  writeHammerRetryCapLedger(rootDir, identity, doc);
+  return { refunded: true, reason: 'worker-lost-to-host-restart', receipt: doc.hostRestartVoids[key] };
 }
 
 function normalizeKey(value) {
@@ -975,6 +1011,11 @@ function recordHammerPrRound(rootDir, identity, options) {
 
 function voidHammerPrRound(rootDir, identity, options, result, reason) {
   if (!result?.refunded) return result;
+  voidHammerPrRoundIds(rootDir, identity, options, reason);
+  return result;
+}
+
+function voidHammerPrRoundIds(rootDir, identity, options, reason) {
   try {
     const launch = normalizeKey(options?.launchRequestId);
     const ids = new Set(hammerRoundIds(options));
@@ -987,7 +1028,6 @@ function voidHammerPrRound(rootDir, identity, options, result, reason) {
   } catch (err) {
     console.warn(`[hammer-retry-cap] pr_round_ledger_void_failed ${identity?.repo}#${identity?.prNumber}: ${err?.message || err}`);
   }
-  return result;
 }
 
 export function recordHammerRetryDispatch(rootDir, identity, options = {}) {
@@ -1029,6 +1069,26 @@ export function refundUnexecutedHammerDispatch(rootDir, identity, options = {}) 
   return voidHammerPrRound(rootDir, identity, options,
     mutateHammerLedger(rootDir, identity, () => refundUnexecutedHammerDispatchUnlocked(rootDir, identity, options)),
     'hammer-dispatch-unexecuted');
+}
+
+/**
+ * HOSTRESTARTROUNDVOID-01: void a closer whose launch the orchestrator settled
+ * with a non-charging terminal class (`worker_lost_to_host_restart`). Its PR
+ * round is voided through the round ledger's void path and its retry-cap charge
+ * is given back in full. Every other terminal class is untouched and stays
+ * charged. Idempotent per charge; the round void is idempotent per round id.
+ *
+ * @returns {{ voided: boolean, refunded: boolean, reason: string }}
+ *   `voided` says the terminal class does not charge; `refunded` says this call
+ *   gave back the retry-cap charge (false on a re-observation).
+ */
+export function voidHostRestartLostHammerDispatch(rootDir, identity, options = {}) {
+  if (!isVoidTerminalClass(options.terminalClass)) {
+    return { voided: false, refunded: false, reason: 'charging-terminal-class' };
+  }
+  const result = mutateHammerLedger(rootDir, identity, () => voidHostRestartChargeUnlocked(rootDir, identity, options));
+  voidHammerPrRoundIds(rootDir, identity, options, options.terminalClass);
+  return { voided: true, refunded: result.refunded === true, reason: result.reason };
 }
 
 // HAMSELFERRORS-01: refund only the recorded charged launch, atomically.

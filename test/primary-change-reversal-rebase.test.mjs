@@ -7,6 +7,9 @@ import { checkPrimaryChange, fetchPrimaryChange, fetchPrimaryChangeContext,
 import { recoverStrandedCloserHead } from '../src/ama/closer-head-recovery.mjs';
 import { evaluateMergeEligibility } from '../src/ama/merge-eligibility.mjs';
 import { isEligibleForAmaClosure } from '../src/ama/eligibility.mjs';
+import { createHistoryReader } from '../src/ama/history-reader.mjs';
+import { historyReadTimeoutError } from '../src/ama/history-read-policy.mjs';
+import { createHash } from 'node:crypto';
 import { mkdtempSync, readFileSync, readdirSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -190,6 +193,146 @@ test('SAFETYSTOPOWNER-01: a later snapshot proves the cited reversal after an in
     transform: (path, response) => path.endsWith(`${reviewedHead}...${reviewedHead}`)
       ? { status: 'identical', total_commits: 0, commits: [] } : response });
   assert.equal(withdrawn.result.reason, 'primary-change-reverted');
+});
+
+async function slowSupersedingHistory(t, { failure, defer = false } = {}) {
+  const rootDir = mkdtempSync(join(tmpdir(), 'superseding-history-'));
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  const repo = 'fixture/repo', prNumber = 8088;
+  const intermediate = sha('8'), superseding = sha('f'), original = sha('d');
+  const laterReview = commit_id => review({ node_id: `PRR_${commit_id}`, commit_id, state: 'COMMENTED',
+    body: '## Blocking issues\n- None.\n## Verdict\nComment only' });
+  const { transport } = await collect({ shift: 0, originalRecorded: true,
+    reviews: [review(), laterReview(intermediate), laterReview(superseding)] });
+  const discovery = `${reviewedHead}...${intermediate}`;
+  const snapshots = new Map(), blobs = new Map();
+  const blob = (path, text) => {
+    const bytes = Buffer.from(text);
+    const sha = createHash('sha1').update(`blob ${bytes.length}\0`).update(bytes).digest('hex');
+    blobs.set(sha, { encoding: 'base64', content: bytes.toString('base64'), size: bytes.length });
+    return { path, sha, type: 'blob', mode: '100644' };
+  };
+  const sourceTree = entry => {
+    const body = Buffer.concat([Buffer.from(`100644 ${entry.path}\0`), Buffer.from(entry.sha, 'hex')]);
+    const sha = createHash('sha1').update(`tree ${body.length}\0`).update(body).digest('hex');
+    snapshots.set(sha, [entry]);
+    return { path: 'src', sha, type: 'tree', mode: '040000' };
+  };
+  const padding = Array.from({ length: 9 }, (_, i) => `line ${i}\n`).join('');
+  const before = sourceTree(blob('a.mjs', `${padding}start()\n`));
+  const changed = sourceTree(blob('a.mjs', `${padding}start_unsafe()\nlog_startup()\n`));
+  for (const ref of [oldBase, base, head, superseding]) snapshots.set(ref, [before]);
+  for (const ref of [author, reviewedHead]) snapshots.set(ref, [changed]);
+  const wide = Array.from({ length: 32 }, (_, i) => blob(`unrelated-${i}.txt`, `slow file ${i}\n`));
+  const slowBlobs = new Set(wide.map(entry => entry.sha));
+  snapshots.set(intermediate, [changed, ...wide]);
+  const candidates = Array.from({ length: 101 }, (_, i) => ({
+    sha: (i + 100).toString(16).padStart(40, '0'), commit: { message: 'Unrelated mainline work' },
+  }));
+  const attempts = [];
+  const run = async () => {
+    const controller = new AbortController();
+    const reads = [];
+    const attempt = { reads, elapsedMs: 0 };
+    attempts.push(attempt);
+    const contextTimeoutMs = 90_000;
+    // Use an additive request clock so the slowdown depends on request count,
+    // regardless of when concurrent blob reads or local Git children settle.
+    const get = createHistoryReader({ contextTimeoutMs, nowMs: () => attempt.elapsedMs,
+      execGhWithRetryImpl: async ({ args: argv }) => {
+        const path = argv[1];
+        reads.push(path);
+        attempt.elapsedMs += 100;
+        const [endpoint, query = ''] = path.split('?');
+        const page = Number(new URLSearchParams(query).get('page'));
+        const oid = endpoint.split('/').at(-1);
+        let data;
+        if (oid === discovery) {
+          if (defer && attempts.length === 1 && page === 2) {
+            attempt.elapsedMs = contextTimeoutMs;
+            controller.abort(historyReadTimeoutError());
+            throw controller.signal.reason;
+          }
+          data = { status: 'diverged', total_commits: candidates.length, merge_base_commit: { sha: oldBase },
+            commits: page === 1 ? candidates.slice(0, 100) : failure === 'partial-range' ? [] : candidates.slice(100) };
+        } else if (endpoint.includes('/git/trees/')) {
+          assert.ok(snapshots.has(oid), path);
+          const tree = snapshots.get(oid);
+          data = { truncated: false, tree: query ? tree.flatMap(entry => entry.type !== 'tree' ? [entry]
+            : [entry, ...snapshots.get(entry.sha).map(child => ({ ...child, path: `${entry.path}/${child.path}` }))]) : tree };
+        } else if (endpoint.includes('/git/blobs/')) {
+          assert.ok(blobs.has(oid), path);
+          if (slowBlobs.has(oid)) attempt.elapsedMs += 6000;
+          data = blobs.get(oid);
+        } else {
+          const live = !endpoint.includes('/compare/') && !endpoint.includes('/commits/');
+          data = await transport(live ? path : endpoint);
+          if (endpoint.includes('/compare/')) {
+            const [from, to] = oid.split('...');
+            const commits = failure === 'absent-candidate' && to === superseding ? []
+              : data.commits || [{ sha: to, commit: { message: 'Author change' } }];
+            data = { status: data.status, merge_base_commit: data.merge_base_commit || { sha: from },
+              total_commits: commits.length, ...(page ? { commits } : {}) };
+          }
+          if (oid === original) {
+            if (failure === 'absent-commit') throw Object.assign(new Error('HTTP 404'), { status: 404 });
+            if (failure === 'partial-commit') data = { ...data, files: undefined };
+            if (failure === 'mismatched-commit') data = { ...data, sha: sha('e') };
+            if (failure === 'mismatched-patch') data = { ...data, files: data.files.map(file =>
+              ({ ...file, patch: file.patch.replace('+start()', '+different()') })) };
+          }
+        }
+        return { stdout: JSON.stringify(data) };
+      } });
+    const evidence = await fetchPrimaryChangeContext({ repo, prNumber, headSha: head, rootDir, get,
+      signal: controller.signal }, { contextTimeoutMs, strictNonBlockingRemediation: true,
+      fetchCiCostImpl: async () => ({ headSha: head, ok: true }),
+      createDiagnosticReaderImpl: () => async () => { throw new Error('diagnostic fixture unavailable'); } });
+    return { evidence, verdict: checkPrimaryChange(evidence, head, { strictNonBlockingRemediation: true }) };
+  };
+  return { run, attempts, discovery, intermediate, original, slowBlobs };
+}
+
+test('LAC-2177: a bounded resume reuses compare pages and proves the original reversal without diffing discovery heads', async t => {
+  const fixture = await slowSupersedingHistory(t, { defer: true });
+  const first = await fixture.run();
+  assert.equal(first.evidence.historyReadTimedOut, true);
+  assert.equal(first.verdict.reason, 'history-read-failed');
+  const resumed = await fixture.run();
+  t.diagnostic(JSON.stringify(fixture.attempts.map(({ reads, elapsedMs }) => ({ requests: reads.length, elapsedMs }))));
+  assert.equal(resumed.verdict.ok, true, JSON.stringify(resumed.verdict));
+  assert.equal(resumed.evidence.reversalAuthorizations[0].originalAuthorization.commit.sha, fixture.original);
+  assert.equal(checkPrimaryChange(resumed.evidence, sha('9')).ok, false);
+  const [initial, resume] = fixture.attempts.map(entry => entry.reads);
+  const discoveryPages = reads => reads.filter(path => path.includes(fixture.discovery)).map(path => path.at(-1));
+  assert.deepEqual(discoveryPages(initial), ['1', '2']);
+  assert.deepEqual(discoveryPages(resume), ['2']);
+  assert.ok(resume.some(path => path.includes(`/commits/${fixture.original}?`)), 'read the independent candidate patch');
+  assert.ok([...initial, ...resume].every(path => !path.includes(`/git/trees/${fixture.intermediate}`)
+    && !fixture.slowBlobs.has(path.split('/').at(-1))));
+  for (const path of ['pulls/8088', 'pulls/8088/reviews?per_page=100']) {
+    assert.ok([initial, resume].every(reads => reads.some(read => read.endsWith(path))));
+  }
+});
+
+test('LAC-2177: complete candidate discovery cannot substitute for the original proof objects', async t => {
+  for (const [failure, reason] of [
+    ['partial-range', 'history-read-failed'],
+    ['absent-candidate', 'primary-change-reverted'],
+    ['absent-commit', 'history-read-failed'],
+    ['partial-commit', 'history-read-failed'],
+    ['mismatched-commit', 'primary-change-reverted'],
+    ['mismatched-patch', 'primary-change-reverted'],
+  ]) await t.test(failure, async t => {
+    const { run } = await slowSupersedingHistory(t, { failure });
+    const { evidence, verdict } = await run();
+    assert.equal(verdict.ok, false);
+    assert.equal(verdict.reason, reason, JSON.stringify(evidence));
+    assert.equal(evidence.reversalAuthorizations, undefined);
+    if (reason === 'primary-change-reverted') {
+      assert.equal(evidence.revertedRegionDiagnostics[0].error, 'diagnostic fixture unavailable');
+    }
+  });
 });
 
 async function recommittedReversal({ attested = false, original = false,

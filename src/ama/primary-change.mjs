@@ -1255,10 +1255,12 @@ async function attestedReversal(commit, repo, read, prNumber) {
   return Array.isArray(comments) && comments.length < 100 && comments.some(comment => exactHammerValidation(comment, commit.sha));
 }
 
-async function originalReversalAuthorization({ repo, review, reviews, superseding, commit, reviewed, mergeBase, read, readCommit, metadata, prNumber, matchTrailers = false,
+async function originalReversalAuthorization({ repo, review, reviews, superseding, commit, reviewed, mergeBase, read, readCommitHistory, readCommit, metadata, prNumber, matchTrailers = false,
   laneOwners = [], readLaneIdentityImpl = readLaneReversalIdentity, rootDir }) {
   if (!SHA.test(superseding.commit_id || '')) return { detail: 'invalid superseding review head' };
-  const snapshot = await read(`repos/${repo}/compare/${review.commit_id}...${superseding.commit_id}`);
+  // This range locates candidate commits. Only their exact patches and parent
+  // snapshots can prove a reversal, so the range's aggregate diff is unused.
+  const snapshot = await readCommitHistory(`repos/${repo}/compare/${review.commit_id}...${superseding.commit_id}`);
   if (!['ahead', 'diverged'].includes(snapshot.status) || !Array.isArray(snapshot.commits)
     || snapshot.commits.length !== snapshot.total_commits) return { detail: 'incomplete or unsupported superseding snapshot' };
   const identity = reversalCommitPatchIdentity(commit.files);
@@ -1385,6 +1387,7 @@ async function fetchPrimaryChangeHistory({ repo, prNumber, headSha, get, rootDir
     return commits.get(path);
   };
   const metadata = path => get.metadata ? get.metadata(path) : read(path);
+  const readCommitHistory = path => get.commitHistory ? get.commitHistory(path) : read(path);
   const unknown = (reason, extra = {}) => ({ headSha, hasHammerCommits: null, reason, ...extra });
   try {
     if (!SHA.test(headSha || '')) return unknown('invalid head SHA');
@@ -1392,7 +1395,7 @@ async function fetchPrimaryChangeHistory({ repo, prNumber, headSha, get, rootDir
     if (pr.head?.sha !== headSha) return unknown('live head changed during history read', { headMismatch: true });
     if (!SHA.test(pr.base?.sha || '')) return unknown('missing base SHA');
     const historyPath = `repos/${repo}/compare/${pr.base.sha}...${headSha}`;
-    let history = await (get.commitHistory ? get.commitHistory(historyPath) : read(historyPath));
+    let history = await readCommitHistory(historyPath);
     if (!Array.isArray(history.commits) || history.commits.length !== history.total_commits
       || history.commits.some((commit) => !SHA.test(commit?.sha || '')
         || typeof commit?.commit?.message !== 'string')) return unknown('missing, malformed or capped commit history');
@@ -1645,7 +1648,7 @@ async function fetchPrimaryChangeHistory({ repo, prNumber, headSha, get, rootDir
             || !Array.isArray(parent.files)) { reject('capped-file-list'); continue; }
           let originalAuthorization;
           if (superseding) {
-            const proof = await recordedReversalAuthorization({ repo, review, reviews, superseding, commit, reviewed, mergeBase, read, readCommit, metadata, prNumber,
+            const proof = await recordedReversalAuthorization({ repo, review, reviews, superseding, commit, reviewed, mergeBase, read, readCommitHistory, readCommit, metadata, prNumber,
               matchTrailers: recommitted, laneOwners, readLaneIdentityImpl: readLaneIdentity, rootDir });
             originalAuthorization = proof.authorization;
             if (!originalAuthorization) { reject(recommitted && !commit.reversalAppAttested
@@ -1666,7 +1669,7 @@ async function fetchPrimaryChangeHistory({ repo, prNumber, headSha, get, rootDir
               verifiedReversalIdentity(commit, cite[1]), { authorization, regions });
           }
         } catch (error) {
-          if (error?.primaryChangeReadFailed === true || error?.authOutage === true
+          if (error?.primaryChangeReadFailed === true || error?.code === 'HISTORY_READ_INVALID' || error?.authOutage === true
             || error?.name === 'AbortError' || error?.code === 'ABORT_ERR' || isTransientGhError(error)) throw error;
           reject(error?.code === 'COMMIT_VERIFICATION_SHA_MISMATCH' ? 'commit-provenance' : 'unverifiable');
           // A stale/deleted citation refuses only this waiver, never the whole

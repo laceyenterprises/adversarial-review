@@ -13,6 +13,10 @@ import { withGitHubAdapterReadTick } from './github-adapter-client.mjs';
 import { withClosureEvaluationReadCache } from './closure-evaluation-cache.mjs';
 import { createWatcherLatencyMonitor, sampleWatcherPollMemory } from './watcher-latency.mjs';
 import { runLowBudgetWatcherPoll } from './watcher-github-budget.mjs';
+import { startRemediationCloserDrain } from './remediation-closer-queue.mjs';
+import { withClosureLaunchStatusBatch } from './session-ledger-read-adapter.mjs';
+import { fetchHammerPr } from './hammer-pr-read.mjs';
+import { waitForReviewerHandoff } from './reviewer-admission-lifecycle.mjs';
 import { withGitHubBudgetScope } from './rate-limit-throttle.mjs';
 import { sweepPrimaryChangeStore } from './ama/primary-change-store.mjs';
 import { createHammerScratchSweepTicker } from './ama/hammer-scratch-sweep.mjs';
@@ -180,6 +184,7 @@ import {
   createNoProgressLaneGate,
   handlePostedReviewRow,
   runQueuedReviewAdoptionPhase,
+  timePostedReviewStep,
 } from './posted-review-row.mjs';
 import { resetNoProgressLanesForGeneration } from './watcher-no-progress-lane.mjs';
 import { watcherBuildIdentity, watcherConfigGeneration } from './watcher-lane-generation.mjs';
@@ -269,6 +274,7 @@ import { resolveGateStatusContext } from './adversarial-gate-context.mjs';
 // Fully clean PRs merge through the daemon path; dirty/conflicted/red-CI PRs
 // route here under the existing launch lease/idempotency machinery.
 import {
+  listActiveAmaCloserDispatches,
   maybeDispatchAmaCloser,
   namedAmaNoDispatchReason,
 } from './ama/dispatch-closer.mjs';
@@ -1091,6 +1097,8 @@ function createWatcherOperatorSurface() {
 // ── Org repo discovery ───────────────────────────────────────────────────────
 
 let activeRepos = config.repos ?? [];
+const withWatcherClosureStatus = run => withClosureLaunchStatusBatch(ROOT, () => listActiveAmaCloserDispatches(ROOT)
+  .map(record => record.launchRequestId).filter(Boolean), run);
 const adversarialGateBranchProtectionChecker = createBranchProtectionChecker({
   execFileImpl: execFileAsync,
 });
@@ -1552,7 +1560,7 @@ async function pollOnceWithinBudget(
     });
   }
 
-  await runQueuedReviewAdoptionPhase({
+  await withWatcherClosureStatus(() => runQueuedReviewAdoptionPhase({
     drainReviewerDispatchCandidates,
     postedReviewHandlers: postedReviewHandlers.map(handler => trackPollHandlerProgress(handler, watcherHeartbeat)),
     postReviewMaintenanceHandlers: postReviewMaintenanceHandlers.map(handler => trackPollHandlerProgress(handler, watcherHeartbeat)),
@@ -1561,7 +1569,7 @@ async function pollOnceWithinBudget(
     primaryDomainId: WATCHER_PRIMARY_DOMAIN_ID,
     postedReviewPriorityTargets: wakePayloadForPoll() || [],
     noProgressLaneGate: createNoProgressLaneGate({ rootDir: ROOT, watcherGeneration: watcherLaneGeneration }),
-  });
+  }));
   } finally {
     try {
       await evaluateCloserHoldsForPoll({ rootDir: ROOT, hqRoot: resolveHqRoot(), subjects: holdSubjects, deliverAlertImpl: defaultDeliverAlert, logger: console });
@@ -1830,6 +1838,42 @@ async function main() {
     deadlineMs: () => pollStarvation.deadlineMs,
   });
   const watcherWakeSource = createWatcherWakeSource({ rootDir: ROOT, logger: console, consumeExistingOnStart: true });
+  const decideRemediationCloser = ({ repo, prNumber, headSha }) =>
+    withGitHubBudgetScope({}, () => timePostedReviewStep('remediation-closer', `${repo}#${prNumber}`, console, async ({ signal }) => {
+      const repoPath = canonicalRepositoryName(db, repo);
+      if (!activeRepos.includes(repoPath)) return false;
+      const existing = stmtGetReviewRow.get(repoPath, prNumber);
+      if (existing?.review_status !== 'posted') return;
+      const pr = await fetchHammerPr(repoPath, prNumber, { withChecks: false, optional: true, signal });
+      if (pr.state !== 'OPEN' || pr.isDraft || !pr.headRefOid || (headSha && headSha !== pr.headRefOid)) return;
+      await waitForReviewerHandoff(repoPath, prNumber);
+      signal.throwIfAborted();
+      const domainId = existing.domain_id || WATCHER_PRIMARY_DOMAIN_ID;
+      const subjectRef = { domainId, subjectExternalId: `${repoPath}#${prNumber}`, revisionRef: pr.headRefOid };
+      const labelNames = (pr.labels || []).map(label => label.name);
+      const operatorSurface = createWatcherOperatorSurface();
+      const closerHead = createHeadCloserCommitSuppressionResolver({ repoPath, prNumber, headSha: pr.headRefOid, execFileImpl: execFileAsync });
+      const result = await handlePostedReviewRow({
+        rootDir: ROOT, repoPath, prNumber, existing, domainId, subjectRef,
+        currentRevisionRef: pr.headRefOid, expectedHead: pr.headRefOid, labelNames, operatorSurface,
+        projectGateStatusSafe: async reviewRow => projectAdversarialGateStatus(ROOT, {
+          repo: repoPath, prNumber, headSha: pr.headRefOid, labels: pr.labels, prAuthor: pr.author, reviewRow, domainId,
+          closerProducedHead: reviewRow.reviewer_head_sha && reviewRow.reviewer_head_sha !== pr.headRefOid
+            ? await closerHead().catch(() => null) : null,
+          operatorApprovalEvent: labelNames.includes(OPERATOR_APPROVED_LABEL)
+            ? legacyLabelEventFromControlResult(await operatorSurface.observeOperatorApproved(subjectRef, pr.headRefOid), OPERATOR_APPROVED_LABEL)
+            : null,
+        }),
+      });
+      const closure = result?.amaClosureResult;
+      if (['posted-review-in-flight', 'candidate-fetch-deadline', 'coexistence-deadline', 'review-row-reread-failed']
+        .includes(result?.outcome) || closure?.reason === 'ama-coexistence-operation-timeout'
+        || (closure?.nextAction?.action === 'hammer' && ['dispatch', 'reconcile'].includes(closure.nextAction.queue?.intent))) {
+        return closure?.retryAfterMs || false;
+      }
+    }, undefined, { deadlineMs: 90_000 }));
+  const remediationCloser = startRemediationCloserDrain({ rootDir: ROOT, decide: decideRemediationCloser,
+    runBatch: run => withGitHubAdapterReadTick(() => withWatcherClosureStatus(run)) });
   let lastAlertSinkDegradedFingerprint = null;
   async function runHeartbeatPoll(source, pollOptions = undefined) {
     const pollStartedAtMs = Date.now(); let pollResult = null;
@@ -1837,6 +1881,7 @@ async function main() {
     watcherHeartbeat.markPoll({ source });
     stallWatchdog.beginPoll();
     try {
+      await remediationCloser.drain();
       // Every tick sweeps the principal-owned queue, including startup recovery.
       scheduleAlertDrain();
       try {

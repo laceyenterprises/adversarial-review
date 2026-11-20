@@ -74,10 +74,23 @@ async function locked(rootDir, action, logger = console) {
 export const CLOSER_BACKLOG_STALE_MS = 6 * 60 * 60 * 1000;
 
 export async function observeCloserBacklog({ rootDir, repo, prNumber, pending = true,
-  deferred = false, activePrKeys = [], now = Date.now(), logger = console }) {
-  return locked(rootDir, (state) => {
+  deferred = false, activePrKeys = [], now = Date.now(), logger = console, remediationCompletedAt, launchRequestId, launchRequestedAt }) {
+  let launchSample;
+  const depth = await locked(rootDir, (state) => {
     const key = `${repo}#${prNumber}`;
     const pr = state.prs[key] ??= {};
+    const completed = Date.parse(remediationCompletedAt);
+    const requested = Date.parse(launchRequestedAt);
+    const launchAt = Number.isFinite(requested) && requested <= now ? requested : now;
+    if (launchRequestId && Number.isFinite(completed) && completed <= launchAt) {
+      const samples = (state.remediationCloserLaunches || []).filter(sample => sample.at >= now - 86400000);
+      if (!samples.some(sample => sample.repo === repo && sample.pr === prNumber && sample.completedAt === completed)) {
+        launchSample = { repo, pr: prNumber, launchRequestId, at: now, launchAt, completedAt: completed,
+          remediation_complete_to_closer_launch_seconds: (launchAt - completed) / 1000 };
+        samples.push(launchSample);
+        state.remediationCloserLaunches = samples.slice(-10000);
+      }
+    }
     // A census is not evidence that a terminal PR reopened.
     if (!pending || pr.terminal) {
       delete pr.closerSeenAt;
@@ -99,6 +112,8 @@ export async function observeCloserBacklog({ rootDir, repo, prNumber, pending = 
     return Object.values(state.prs).filter((pr) =>
       pr.closerSeenAt >= now - CLOSER_BACKLOG_STALE_MS && !pr.terminal).length;
   }, logger);
+  if (launchSample) logger?.info?.(JSON.stringify({ event: 'ama.closer_queue_launch', ...launchSample }));
+  return depth;
 }
 
 async function page(text, options) {

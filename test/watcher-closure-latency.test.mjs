@@ -8,7 +8,7 @@ import * as gateModules from '../src/adversarial-gate-status.mjs';
 import * as controlModules from '../src/adapters/operator/github-pr-label-controls/index.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -25,6 +25,12 @@ import { fetchMergeAgentCandidateSnapshot } from '../src/merge-agent-candidate-s
 import { fetchPullRequestHeadAndState } from '../src/github-api.mjs';
 import { createHistoryReader } from '../src/ama/history-reader.mjs';
 import { acquireAmaCloserLease } from '../src/ama/closer-lease.mjs';
+import { markFollowUpJobCompleted } from '../src/follow-up-jobs.mjs';
+import { enqueueRemediationCloser, startRemediationCloserDrain } from '../src/remediation-closer-queue.mjs';
+import { observeCloserBacklog } from '../src/ama/closure-lag.mjs';
+import { dispatchReadTransport } from '../src/dispatch-read-client.mjs';
+import { readLaunchRequestStatusFromLedgerAsync, withClosureLaunchStatusBatch } from '../src/session-ledger-read-adapter.mjs';
+import { launchRequestOwned } from '../src/ama/launch-request-status.mjs';
 import { readAdapterPrRollup, readAdapterHeadAndState,
   withGitHubAdapterReadTick } from '../src/github-adapter-client.mjs';
 import { recordFinalReviewHammerLatency, finalReviewHammerLatencySummary,
@@ -227,6 +233,94 @@ test('concurrent posted handlers still refuse a held per-PR lease', async t => {
     outcomes.push(acquireAmaCloserLease(identity).acquired);
   })), logger: quiet });
   assert.deepEqual(outcomes, [false, false, false, false]);
+});
+
+test('a remediation completion reaches the priority drain while the posted-review workers are occupied', async t => {
+  const rootDir = mkdtempSync(join(tmpdir(), 'completion-priority-'));
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  const gate = deferred(), decided = deferred();
+  const scan = runPostedReviewHandlersFairly({ handlers: Array.from({ length: 16 }, (_, i) =>
+    handler(i + 2, () => gate.promise)), logger: quiet });
+  t.after(() => { gate.resolve(); return scan; });
+  const identity = { rootDir, repo, prNumber: 1, headSha: head };
+  const decisions = [];
+  const queue = startRemediationCloserDrain({ rootDir, logger: quiet, decide: event => {
+    const lease = acquireAmaCloserLease({ rootDir, ...event });
+    decisions.push(lease.acquired);
+    decided.resolve(lease.acquired);
+  } });
+  t.after(() => queue.close());
+  const jobPath = join(rootDir, 'fixture-round.json');
+  writeFileSync(jobPath, JSON.stringify({ ...identity, jobId: 'fixture-round', status: 'in-progress' }));
+  await turn();
+  const { jobPath: completedPath } = markFollowUpJobCompleted({ rootDir, jobPath, resultingHeadSha: head });
+  const bounded = setTimeout(() => decided.resolve(null), 2_000);
+  try { assert.equal(await decided.promise, true); }
+  finally { clearTimeout(bounded); }
+  assert.equal(markFollowUpJobCompleted({ rootDir, jobPath: completedPath, resultingHeadSha: head }).alreadyTerminal, true);
+  await queue.drain();
+  assert.deepEqual(decisions, [true]);
+  enqueueRemediationCloser(rootDir, { ...identity, jobId: 'fixture-retry', completedAt: new Date().toISOString() }, head);
+  await queue.drain();
+  assert.deepEqual(decisions, [true, false], 'a later completion keeps the existing closer lease');
+});
+
+test('the coexistence deadline frees the caller while keeping the same PR fenced', async t => {
+  const rootDir = mkdtempSync(join(tmpdir(), 'completion-budget-'));
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  const key = 'ADVERSARIAL_WATCHER_RESOLVE_MERGE_AGENT_COEXISTENCE_DEADLINE_MS';
+  const previous = process.env[key];
+  process.env[key] = '25';
+  t.after(() => { if (previous === undefined) delete process.env[key]; else process.env[key] = previous; });
+  const pending = deferred(), row = { review_status: 'posted', reviewer_head_sha: head };
+  t.after(() => pending.resolve({ outcome: 'ama-pending', amaClosureResult: { reason: 'fixture' } }));
+  const serve = (prNumber, run) => handlePostedReviewRow({ rootDir, repoPath: repo, prNumber,
+    currentRevisionRef: head, currentReviewRowReader: () => row, projectGateStatusSafe: async () => null,
+    latestFollowUpJobFinder: () => null, latestPostedReviewBodyFinder: () => null,
+    fetchMergeAgentCandidateImpl: async () => ({ headSha: head, prState: 'open' }),
+    buildMergeAgentDispatchJobImpl: () => ({}), resolveMergeAgentCoexistenceForWatcherImpl: run, logger: quiet });
+  assert.equal((await serve(1, () => pending.promise)).outcome, 'coexistence-deadline');
+  assert.equal((await serve(1, assert.fail)).outcome, 'posted-review-in-flight');
+  assert.equal((await serve(2, async () => ({ outcome: 'ama-pending', amaClosureResult: { reason: 'fixture' } }))).outcome, 'ama-pending');
+});
+
+test('batched liveness matches individual reads, preserving retries and unknown evidence', async t => {
+  const ids = ['live', 'root', 'ended', 'unreadable'];
+  const status = { live: 'running', root: 'failed', ended: 'succeeded', retry: 'starting' };
+  let reads = 0;
+  t.mock.method(dispatchReadTransport, 'lookup', async ({ launch_request_ids: keys }) => {
+    reads++;
+    if (keys.length === 1 && keys[0] === 'unreadable') throw new Error('fixture evidence unavailable');
+    const roots = keys.filter(key => status[key]);
+    const retry = roots.includes('root');
+    return { schema_version: 1, status: 'found', complete: true, roots,
+      items: [...roots, ...(retry ? ['retry'] : [])].map(id => ({ launch_request_id: id, status: status[id] })),
+      retry_edges: retry ? [{ parent: 'root', child: 'retry' }] : [] };
+  });
+  const decisions = () => Promise.all(ids.map(async launchRequestId => launchRequestOwned(
+    await readLaunchRequestStatusFromLedgerAsync({ rootDir: '/fixture', launchRequestId, includeRetryChain: true }))));
+  const baseline = await decisions();
+  assert.deepEqual(baseline, [true, true, false, null]);
+  reads = 0;
+  assert.deepEqual(await withClosureLaunchStatusBatch('/fixture', () => ids, decisions), baseline);
+  assert.equal(reads, 3, 'one batch covers both live owners, while terminal and unknown are re-read');
+});
+
+test('closure health and queue telemetry keep one launch sample per completed round', async t => {
+  const rootDir = mkdtempSync(join(tmpdir(), 'completion-latency-'));
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  const events = [], logger = { ...quiet, info: line => events.push(JSON.parse(line)) };
+  const remediationCompletedAt = '2026-01-01T00:00:00Z';
+  const sample = { rootDir, repo, prNumber: 1, pending: false, logger, remediationCompletedAt,
+    now: Date.parse(remediationCompletedAt) + 120_000, launchRequestId: 'fixture-launch',
+    launchRequestedAt: '2026-01-01T00:01:30Z' };
+  await observeCloserBacklog(sample);
+  await observeCloserBacklog({ ...sample, launchRequestId: 'fixture-duplicate' });
+  assert.equal(events.length, 1);
+  assert.equal(events[0].event, 'ama.closer_queue_launch');
+  assert.equal(events[0].remediation_complete_to_closer_launch_seconds, 90);
+  const { remediationCloserLaunches } = JSON.parse(readFileSync(join(rootDir, 'data', 'ama-closure-lag', 'state.json')));
+  assert.equal(remediationCloserLaunches[0].remediation_complete_to_closer_launch_seconds, 90);
 });
 
 test('same-tick primary-change readers isolate in-flight deadlines and share completed immutable evidence', async () => {
@@ -626,6 +720,27 @@ test('synthetic posted-review pass pins GitHub and database read counts per step
     'round counter and wake telemetry reuse the connection; three decisions persist their first-actionable anchors');
   assert.equal(profile.steps['handler-overhead'].subprocesses.gh, undefined);
   assert.ok(profile.outcomes.every(result => result.handled && !result.terminal));
+});
+
+test('synthetic coexistence timing isolates the slow dispatch sub-call', async t => {
+  const overrides = { GITHUB_TOKEN: 'synthetic-token', GHA_ADAPTER_BIN: '/fixture/adapter',
+    AGENT_OS_GITHUB_ADAPTER_AUTO_DISCOVERY: 'false', AGENT_OS_CONFIG_PATH: '/fixture/config.yaml' };
+  for (const [key, value] of Object.entries(overrides)) {
+    const prior = process.env[key];
+    process.env[key] = value;
+    t.after(() => { if (prior === undefined) delete process.env[key]; else process.env[key] = prior; });
+  }
+  const profile = await profilePostedReviews({ handlePostedReviewRow, fetchMergeAgentCandidate,
+    fetchLatestLabelEvent, ...closureModules, ...gateModules, ...controlModules }, { prCount: 3, delayMs: 5, ledgerDelayMs: 60 });
+  const daemon = profile.timings.filter(row => row.operation === 'daemon-clean-merge-attempt');
+  const spans = profile.timings.filter(row => !['maybe-dispatch-closure', 'dispatch-closure'].includes(row.operation));
+  assert.equal(daemon.length, 3);
+  assert.ok(daemon.every(row => row.elapsed_ms >= 55));
+  const execs = Object.values(profile.steps).flatMap(step => Object.values(step.subprocesses));
+  const subprocesses = execs.reduce((count, exec) => count + exec.count, 0);
+  assert.equal(profile.steps.resolveMergeAgentCoexistence.subprocesses.gh.count, 6);
+  t.diagnostic(JSON.stringify({ daemonMs: daemon.map(row => row.elapsed_ms),
+    slowestSpan: spans.sort((a, b) => b.elapsed_ms - a.elapsed_ms)[0], subprocesses, prCount: 3 }));
 });
 
 test('label timeline is shared only for the handler head and invalidated by a candidate head change', async () => {

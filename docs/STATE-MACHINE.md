@@ -1488,6 +1488,13 @@ Legacy durable jobs created before `baseBranch` was persisted are hydrated from 
 
 ## MSM two-path merge authority (current)
 
+Completed remediation publishes a priority event for the same posted-review
+closure handler used by the regular poll. The watcher refreshes the subject
+before evaluating it, including during an ongoing poll. The event changes
+scheduling only. The shared decision, exact-head checks and closer intent and
+lease fences still govern the transition to launch. See the
+[dispatch latency runbook](RUNBOOK-ama-closure.md#remediation-completion-to-closer-launch).
+
 An exhausted transient history read retains its class in audit `reasonDetail`
 and uses registered `history-read-failed` for an uncounted deferral and the
 watcher's inconclusive retry. A permanent history read failure produces a

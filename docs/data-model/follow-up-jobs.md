@@ -1,5 +1,19 @@
 # Data Model - Follow-Up Remediation Jobs
 
+## Closer priority queue
+
+The completion writer atomically publishes a scheduling hint under
+`data/remediation-closer-queue/` for each new completed job. The filename
+contains the completion epoch milliseconds and a digest of the repository,
+PR number and job ID. The payload carries `repo`, `prNumber`, `headSha`
+(nullable) and `reviewRequested`. The completed job remains the source of
+truth for completion and review disposition.
+
+The watcher tries the oldest ready events in batches of four. It removes
+events after a decision or when the event belongs to a re-review or an old
+head. Retryable decisions remain queued. The watcher canonicalizes repository
+names when it reads events, including events written before a rename.
+
 ## Tenure review provenance
 
 An HQ remediator routed from a tenured PR build launch stores optional

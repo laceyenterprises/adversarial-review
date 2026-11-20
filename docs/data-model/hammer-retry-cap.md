@@ -96,6 +96,19 @@ never refunds. Refunds are not capped. The owned-retry record
 ([closer-inconclusive-retries](closer-inconclusive-retries.md)) paces retries with
 backoff, and its `(head, closer-inconclusive)` closure-wait receipt pages once. This is separate from PR retry exhaustion and grants no merge authority.
 
+`hostRestartVoids` (optional, HOSTRESTARTROUNDVOID-01) records charged launches
+that the orchestrator settled with the non-charging terminal class
+`worker_lost_to_host_restart`, read from the launch row's structured
+`failure_class` field only. Like a no-work refund, the void credits every budget
+the charge has not already had back (series, target, lifetime and any transient
+grant), once per charge, and voids the dispatch's `hammer` round in the
+[PR round ledger](pr-round-ledger.md). Every other terminal class keeps its
+charge on this path. Round voiding and per-head re-dispatch credit require a
+successful refund or an existing matching `hostRestartVoids` / `noWorkRefunds`
+receipt. Missing or corrupt ledgers, unproven charges and invalid counters
+leave the round and per-head bound charged; the next observation retries
+before any other failure accounting or successor dispatch.
+
 
 `overloadDeferral` is the version 1 Agent OS wire receipt, retained across
 replacement launches and review/head resets for the same PR owner. It carries
@@ -332,6 +345,7 @@ Directory: `data/follow-up-jobs/hammer-retry-cap/`
 | `lifetimeDeferralRefundCount` | integer in 0..12 | Contention lifetime refunds consumed across all series. Never reset by a fresh review or suppression write. New ledgers start at zero. Missing or malformed legacy values are treated as twelve (refunds exhausted); only operator reconciliation can restore unproven refund capacity. |
 | `dispatchCharges` | map of native attempt key to charge | Permanent launch, attempt (1), reviewed series, target SHA/epoch, ISO-8601 `chargedAt` (defaults to the current time when `now` is omitted/null), consumer version, effective wait snapshot, optional consumed transient grant identity and per-budget partial-credit flags. Written atomically with counters. Duplicate native keys/LRQs do not charge again. |
 | `noWorkRefunds` | map of charge key to receipt | Permanent verdict ID, launch/attempt, series/head, refund time and actual refunded budget flags. Stored with counter decrements; never a recent-history ring. |
+| `hostRestartVoids` | map of charge key to receipt, optional | HOSTRESTARTROUNDVOID-01. Permanent receipt for a charged launch whose launch row carries the non-charging terminal class `worker_lost_to_host_restart`: `terminalClass`, launch, series/head, refund time and the budget flags actually credited. Written atomically with the counter decrements, the `dispatchCharges` credit flags and `unexecutedLaunchRequestIds`. Survives series/head resets. Absent on ledgers with no such launch. A charge with either this receipt or a `noWorkRefunds` receipt is never credited again by either path. |
 | `targetChargeEpoch` | string | New identity when the target changes, including changes stamped by suppression. Returning to an old SHA cannot make its old verdict debit the new epoch. |
 | `pendingTransientCharge` | object or null | Grant UUID, head and series awaiting its next confirmed dispatch. Only that dispatch consumes/binds the grant. |
 | `dispatchHeads` | string array | Unique dispatched head SHAs observed in the current reviewed-head series. Resets on a fresh-review job-key change. |

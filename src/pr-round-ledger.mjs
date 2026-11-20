@@ -14,7 +14,8 @@
 // de-duplicate by `roundId`, so a retried write or a racing second writer can
 // never double-charge, and two different rounds can never collapse. A `void`
 // line uncharges a round that never really ran (a transient requeue that will
-// re-spawn the same round, an unexecuted hammer dispatch). A later `record`
+// re-spawn the same round, an unexecuted hammer dispatch, a closer lost to a
+// host restart). A later `record`
 // line for the same id charges it again.
 //
 // This module is a leaf: it imports only node built-ins and the repo-name
@@ -65,6 +66,17 @@ const CLOSURE_KINDS = new Set([
 ]);
 
 export const CHARGED_TO = Object.freeze({ PIPELINE: 'pipeline', OPERATOR: 'operator' });
+
+// HOSTRESTARTROUNDVOID-01: launch terminal classes the orchestrator settles
+// without charging an attempt. A round whose launch ended in one of these never
+// ran to a result, so its producer voids it instead of spending the budget.
+// Matched exactly against the launch row's structured terminal class field;
+// free-text failure detail is never evidence. Every other class keeps charging.
+export const VOID_TERMINAL_CLASSES = Object.freeze(['worker_lost_to_host_restart']);
+
+export function isVoidTerminalClass(terminalClass) {
+  return typeof terminalClass === 'string' && VOID_TERMINAL_CLASSES.includes(terminalClass);
+}
 
 export function isPrRoundKind(kind) {
   return REMEDIATION_KINDS.has(kind) || REVIEW_KINDS.has(kind);

@@ -6,6 +6,15 @@ Together with `unexecutedRefundCount`, this preserves the monotonic reviewer-pas
 `retryCount` while subtracting the refunded charge at redispatch admission. The
 receipt deduplicates reconciliation across ticks and process restarts.
 
+HOSTRESTARTROUNDVOID-01 adds optional `hostRestartVoidedLaunchRequestId`, the
+last ended closer launch whose launch row carried the non-charging terminal
+class `worker_lost_to_host_restart`. It increments `unexecutedRefundCount` once
+per launch in the same way, so that launch does not spend the per-head
+re-dispatch bound. Both writes require a successful retry-ledger refund or an
+existing matching refund receipt. Refused refunds retain these fields and
+the round charge, deferring other failure accounting and dispatch until a later
+observation can reconcile the charge.
+
 DAEMONSUPERSEDE-01 adds optional `supersededByReview` (`launchRequestId`,
 `headSha`, `reviewedHeadSha`, `reason: superseded-by-clean-exact-head-review`,
 `observedStatus`, `supersededAt`). The executor durably writes this intent

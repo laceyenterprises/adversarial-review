@@ -4486,6 +4486,32 @@ Now:
 A failure class outside that list (`worker_crashed`, an exit after progress
 with no 429, an unreadable LRQ row) stays charged, as before.
 
+### A closer lost to a host restart (HOSTRESTARTROUNDVOID-01)
+
+The orchestrator settles a closer killed by a host reboot with the terminal
+class `worker_lost_to_host_restart` and does not charge it an attempt. When a
+hammer launch is observed `failed` with that exact structured `failure_class`
+on its launch row (and no no-merge audit was recorded for it), the closer
+treats it as void before any other failure handling:
+
+- its `hammer` round is voided in the PR round ledger (`void` line);
+- its retry-cap charge is given back in full (series, target, lifetime and
+  any transient grant), with a permanent `hostRestartVoids` receipt;
+- the dispatch record gets `hostRestartVoidedLaunchRequestId` and one
+  `unexecutedRefundCount`, so the per-head re-dispatch bound is not spent;
+- it records no same-head no-delivery attempt and takes neither the
+  CLOSERREUSE-01 re-arm nor the INCONCLUSIVERETRY-01b refund.
+
+`ama_closer.host_restart_void` is logged once, when the charge is given back.
+Free-text failure detail never qualifies a launch, and every other class
+(`worker_crashed` included) keeps its existing charging. An unreadable launch
+row or a busy, missing, corrupt or invalid retry ledger leaves everything
+charged until a later tick re-observes the launch. The round void and per-head
+credit require a successful refund or a durable matching `hostRestartVoids`
+or `noWorkRefunds` receipt. A proven host-restart launch whose refund is refused
+returns `host-restart-refund-unavailable` with recovery ownership; it takes no
+other failure accounting or successor dispatch while that evidence is unresolved.
+
 ### A PR whose hammer cannot launch or has stopped (NOOWNER-01)
 
 An explicit `already produced zero output twice` dispatch refusal transfers the

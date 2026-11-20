@@ -6,6 +6,7 @@ export { samePrHammerHolderWorktreePaths } from './branch-holder-paths.mjs';
 import { isZeroOutputRefusal, escalateZeroOutputRefusal } from './zero-output-refusal.mjs';
 import { finalFixAllQueueOwner } from './final-fix-all.mjs';
 import { isRemediationRoundBudgetSpent } from '../remediation-round-recovery.mjs';
+import { isVoidTerminalClass } from '../pr-round-ledger.mjs';
 import { classifyHammerExit, hammerNoMergeDetails } from './hammer-outcome.mjs';
 import { appendCloserOutcome } from './closer-outcomes.mjs';
 import { ownershipReadBudgets as closerScanBudgets, boundedOwnershipRead as boundedCloserScanRead } from '../ownership-read.mjs';
@@ -213,6 +214,7 @@ import {
   deferHammerRetryDispatch,
   releaseHammerOverloadDeferral,
   refundHammerRetryDispatch,
+  voidHostRestartLostHammerDispatch,
 } from './hammer-retry-cap.mjs';
 import {
   HAMMER_EXITED_WITHOUT_CLOSE,
@@ -469,6 +471,37 @@ function refundInconclusiveCloserLaunch({ rootDir, repo, prNumber, jobKey, recor
           unexecutedRefundCount: Number(current.unexecutedRefundCount || 0) + 1 } : null));
   }
   return refund;
+}
+
+// HOSTRESTARTROUNDVOID-01: a closer the orchestrator settled as lost to a host
+// restart (structured launch-row terminal class) spends no PR round, hammer
+// retry or per-head re-dispatch. Best effort: an unreadable launch row or a
+// busy ledger leaves everything charged until a later pass re-observes it.
+async function voidHostRestartLostCloser({ rootDir, hqRoot, repo, prNumber, record, dispatchIdentity,
+  updateRecord, launchRequestProbe, readLaunchRequestStatusImpl, dispatchContext, logger }) {
+  let probe = launchRequestProbe;
+  try {
+    if (!probe?.ok) probe = await readLaunchRequestStatusImpl({ launchRequestId: record.launchRequestId,
+      ledgerTarget: dispatchContext.ledgerTarget || null, ledgerDbPath: dispatchContext.ledgerDbPath || null,
+      env: process.env, hqRoot, rootDir });
+    if (!probe?.ok) return { probe: launchRequestProbe, outcome: null };
+    const outcome = voidHostRestartLostHammerDispatch(rootDir, { repo, prNumber }, {
+      launchRequestId: record.launchRequestId, dispatchKey: record.dispatchIdempotencyKey,
+      headSha: record.headSha, terminalClass: probe.row?.failure_class, now: dispatchContext.dispatchedAt });
+    if (outcome.voided) {
+      updateRecord(rootDir, dispatchIdentity, current => (
+        current?.launchRequestId === record.launchRequestId
+          && current.hostRestartVoidedLaunchRequestId !== record.launchRequestId
+          ? { ...current, hostRestartVoidedLaunchRequestId: record.launchRequestId,
+            unexecutedRefundCount: Number(current.unexecutedRefundCount || 0) + 1 } : null));
+    }
+    if (outcome.refunded) logAmaCloserDispatchEvent(logger, 'ama_closer.host_restart_void', {
+      repo, prNumber, headSha: record.headSha || null, launchRequestId: record.launchRequestId, ...outcome });
+    return { probe, outcome };
+  } catch (error) {
+    logger?.warn?.(`[ama-closer] host-restart void failed for ${repo}#${prNumber}; retry next pass: ${error?.message || error}`);
+    return { probe, outcome: null };
+  }
 }
 
 async function gateInconclusiveCloserRetry({ rootDir, repo, prNumber, headSha, now, deliverAlertImpl, logger }) {
@@ -7170,11 +7203,24 @@ async function maybeDispatchAmaCloserAttempt({
         pollDelaysMs: dispatchContext.closerTokenRollupPollDelaysMs || undefined,
         logger,
       });
+      let hostRestartVoided = false;
+      if (status === 'failed' && !hammerEndedWithoutMerge && existingRecord.launchRequestId
+        && isHammerWorkerClass(existingRecord.workerClass || workerClass)) {
+        const hostRestart = await voidHostRestartLostCloser({ rootDir, hqRoot, repo, prNumber,
+          record: existingRecord, dispatchIdentity: existingDispatchIdentity, updateRecord: updateDispatchRecord,
+          launchRequestProbe, readLaunchRequestStatusImpl, dispatchContext, logger });
+        launchRequestProbe = hostRestart.probe;
+        hostRestartVoided = hostRestart.outcome?.voided === true;
+        if (isVoidTerminalClass(launchRequestProbe?.row?.failure_class) && !hostRestartVoided) {
+          return noAmaDispatch({ dispatched: false, skipMergeAgent: true,
+            reason: 'host-restart-refund-unavailable', recoveryWait: true });
+        }
+      }
       // CLOSERREUSE-01: a hammer that died of an infrastructure cause and
       // pushed nothing gets its dispatch refunded, so the retry cap below
       // re-arms it within the series' budget (see dead-hammer-rearm.mjs).
       let deadHammerRearmOutcome = null;
-      if (status === 'failed' && !hammerEndedWithoutMerge && !existingDispatchHeadAdvanced) {
+      if (status === 'failed' && !hammerEndedWithoutMerge && !existingDispatchHeadAdvanced && !hostRestartVoided) {
         const deadHammerRearm = await maybeRearmInfraDeadHammer({
           rootDir,
           hqRoot,
@@ -7235,7 +7281,7 @@ async function maybeDispatchAmaCloserAttempt({
       // could conclude (never started, checkout/provision/bootstrap failure)
       // and pushed nothing is refunded in full and owned, not counted.
       if (status === 'failed' && !hammerEndedWithoutMerge && !existingDispatchHeadAdvanced
-        && deadHammerRearmOutcome?.rearmed !== true && existingRecord.launchRequestId
+        && deadHammerRearmOutcome?.rearmed !== true && !hostRestartVoided && existingRecord.launchRequestId
         && existingRecord.headSha === targetRemediationSha
         && isHammerWorkerClass(existingRecord.workerClass || workerClass)) {
         const launchClass = classifyCloserOutcome({
@@ -7258,7 +7304,7 @@ async function maybeDispatchAmaCloserAttempt({
       // an attempt to close: it spends no key.
       if (status === 'failed' && !existingDispatchHeadAdvanced && existingRecord.headSha
         && !laneBusyPark && !infrastructureReadPark && !inconclusiveOutcome
-        && deadHammerRearmOutcome?.rearmed !== true) {
+        && deadHammerRearmOutcome?.rearmed !== true && !hostRestartVoided) {
         try {
           recordCloserNoDeliveryAttempt(rootDir, { repo, prNumber }, {
             headSha: existingRecord.headSha,

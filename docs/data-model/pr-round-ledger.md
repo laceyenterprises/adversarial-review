@@ -28,6 +28,7 @@ Writers:
 | `createFollowUpJob` | a posted review queued its follow-up (closure hand-offs excluded) | `review-pass` |
 | `recordHammerRetryDispatch`, `reserveHammerRepairDispatch` | a hammer dispatch was charged | `hammer` |
 | `refundUnexecutedHammerDispatch` | the dispatch never executed | `void` |
+| `voidHostRestartLostHammerDispatch` | the closer's launch row carries a terminal class in `VOID_TERMINAL_CLASSES` (`worker_lost_to_host_restart`) | `void` |
 | `retrigger-review` | before the review reset; voided if the reset is refused or throws | `operator-retrigger` |
 | `bin/pr-round-ledger.mjs record --kind hq-pr-update` | an in-place HQ PR-update finished | `hq-pr-update` |
 

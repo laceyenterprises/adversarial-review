@@ -104,6 +104,13 @@ export function createHistoryReader(options = {}) {
     if (data.truncated || !Array.isArray(data.tree)) throw invalidHistory(`incomplete tree ${ref}`);
     return new Map(data.tree.map(entry => [entry.path, entry]));
   };
+  const blob = async (repo, entry) => {
+    const data = await cached(`repos/${repo}/git/blobs/${entry.sha}`, '{encoding, content, size}');
+    if (data.encoding !== 'base64' || typeof data.content !== 'string') throw invalidHistory(`unreadable blob ${entry.sha}`);
+    const bytes = Buffer.from(data.content, 'base64');
+    if (bytes.length !== data.size) throw invalidHistory(`incomplete blob ${entry.sha}`);
+    return bytes;
+  };
   const filesBetween = async (repo, base, head) => {
     const changed = [];
     // A complete recursive snapshot coalesces directory reads. Inspect roots
@@ -220,16 +227,12 @@ export function createHistoryReader(options = {}) {
     changed.sort((a, b) => a.path < b.path ? -1 : a.path > b.path ? 1 : 0);
     const files = new Array(changed.length);
     const dir = await mkdtemp(join(tmpdir(), 'ham-history-'));
-    const blob = async entry => {
+    const changedBlob = async entry => {
       // Gitlinks have no file contents; type transitions diff the blob side
       // against empty bytes without attempting to fetch a submodule commit.
       if (!entry || entry.type === 'commit') return Buffer.alloc(0);
       if (entry.type !== 'blob') throw new Error(`unsupported changed object ${entry.type}`);
-      const data = await cached(`repos/${repo}/git/blobs/${entry.sha}`, '{encoding, content, size}');
-      if (data.encoding !== 'base64' || typeof data.content !== 'string') throw invalidHistory(`unreadable blob ${entry.sha}`);
-      const bytes = Buffer.from(data.content, 'base64');
-      if (bytes.length !== data.size) throw invalidHistory(`incomplete blob ${entry.sha}`);
-      return bytes;
+      return blob(repo, entry);
     };
     try {
       let cursor = 0;
@@ -244,8 +247,8 @@ export function createHistoryReader(options = {}) {
               file.additions = 0; file.deletions = 0; return file;
             }
             await Promise.all([
-              blob(a).then(bytes => { ghOptions.signal.throwIfAborted(); return writeFile(join(dir, beforePath), bytes, { signal: ghOptions.signal }); }),
-              blob(b).then(bytes => { ghOptions.signal.throwIfAborted(); return writeFile(join(dir, afterPath), bytes, { signal: ghOptions.signal }); }),
+              changedBlob(a).then(bytes => { ghOptions.signal.throwIfAborted(); return writeFile(join(dir, beforePath), bytes, { signal: ghOptions.signal }); }),
+              changedBlob(b).then(bytes => { ghOptions.signal.throwIfAborted(); return writeFile(join(dir, afterPath), bytes, { signal: ghOptions.signal }); }),
             ]);
             let patch;
             try {
@@ -368,6 +371,30 @@ export function createHistoryReader(options = {}) {
   // Provenance proofs request compact web-flow verification separately; avoid
   // buffering signature payloads in every history and commit-file page.
   reader.commitVerification = path => bounded(() => json(path, '{sha, verification: .commit.verification}'));
+  // Read only data blobs pinned by immutable trees. A missing entry is
+  // evidence of absence only after a complete walk of its parent tree.
+  reader.regularDataFile = (repo, ref, path, { optional = false } = {}) => bounded(async () => {
+    if (!/^[\w.-]+\/[\w.-]+$/.test(repo) || !/^[0-9a-f]{40}$/.test(ref)
+      || !path.split('/').every(part => /^[a-zA-Z0-9][a-zA-Z0-9.-]*$/.test(part))) {
+      throw new Error('invalid immutable data file identity');
+    }
+    const parts = path.split('/');
+    for (const [index, part] of parts.entries()) {
+      const entry = (await tree(repo, ref)).get(part);
+      if (!entry && optional) return null;
+      if (!/^[0-9a-f]{40}$/.test(entry?.sha || '')) break;
+      if (index === parts.length - 1 && entry.type === 'blob' && entry.mode === '100644') {
+        const bytes = await blob(repo, entry);
+        const actual = createHash('sha1').update(`blob ${bytes.length}\0`).update(bytes).digest('hex');
+        if (actual !== entry.sha) throw Object.assign(new Error('immutable data blob hash mismatch'),
+          { primaryChangeReadFailed: true });
+        return bytes.toString('utf8');
+      }
+      if (entry.type !== 'tree' || entry.mode !== '040000') break;
+      ref = entry.sha;
+    }
+    throw new Error('expected a regular data file in the Git tree');
+  });
   // The collector owns a deadline covering proofs as well as API history.
   // Bind that cancellation to every real child, without mutating a shared reader.
   reader.withSignal = signal => createHistoryReader({ ...options,

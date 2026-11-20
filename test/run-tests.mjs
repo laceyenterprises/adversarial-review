@@ -4,7 +4,7 @@ import { constants, tmpdir } from 'node:os';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { MAX_WORKERS, SERIAL_TEST_FILES, orderFiles, workerCount } from './helpers/parallel-plan.mjs';
+import { SERIAL_TEST_FILES, orderFiles, workerCount } from './helpers/parallel-plan.mjs';
 import { reclaimAbandonedSandboxes, SANDBOX_OWNER_MARKER } from './helpers/runner-sandbox.mjs';
 
 const testDir = path.dirname(fileURLToPath(import.meta.url));
@@ -170,7 +170,7 @@ try {
         .flatMap((name) => ['--import', path.join('test', 'helpers', `${name}.mjs`)]),
     ],
   }));
-  console.error(`Test plan: ${files.length} files, ${serialFiles.length} exclusive, ${concurrency} parallel workers in measured order (maximum ${MAX_WORKERS}).`);
+  console.error(`Test plan: ${files.length} files, ${serialFiles.length} exclusive, ${concurrency} parallel workers in measured order.`);
   // Tests own their CLI fixture; an omitted stub must not use host credentials.
   const fixtureBin = path.join(sandboxRoot, 'fixture-bin');
   mkdirSync(fixtureBin);
@@ -197,11 +197,13 @@ try {
     'HAM_CONTROLLER_PID', 'HAM_CONTROLLER_FD',
     'GIT_DIR', 'GIT_WORK_TREE', 'GIT_COMMON_DIR', 'GIT_INDEX_FILE',
     'GIT_OBJECT_DIRECTORY', 'GIT_ALTERNATE_OBJECT_DIRECTORIES',
+    'GIT_CONFIG_PARAMETERS',
   ]);
   // Live Hammer head, lease and audit state belongs to the owning controller.
   // Synthetic phase fixtures must supply their own state instead of inheriting it.
   const testEnv = Object.fromEntries(Object.entries(process.env).filter(([key]) =>
-    !inheritedStatePaths.has(key) && !key.startsWith('HCP_') && !key.startsWith('HAM_') && !/^(?:GH_.*TOKEN|GITHUB_.*TOKEN|.*_GH_TOKEN)(?:_REFRESH_COMMAND|_EXPIRES_AT)?$/.test(key)));
+    !inheritedStatePaths.has(key) && !/^GIT_CONFIG_(?:KEY|VALUE)_\d+$/.test(key)
+    && !key.startsWith('HCP_') && !key.startsWith('HAM_') && !/^(?:GH_.*TOKEN|GITHUB_.*TOKEN|.*_GH_TOKEN)(?:_REFRESH_COMMAND|_EXPIRES_AT)?$/.test(key)));
   child = spawn(process.execPath, [path.join(testDir, 'helpers', 'parallel-runner.mjs'), configPath], {
     cwd: sandboxRoot,
     env: {
@@ -212,6 +214,11 @@ try {
       AGENT_OS_HQ_ROOT: coordinatorHqRoot,
       AGENT_OS_DEPLOY_CHECKOUT: path.join(sandboxTmpDir, 'deploy-checkout'),
       GIT_CEILING_DIRECTORIES: sandboxRoot,
+      // Fixture homes have no global Git config. Suppress detached housekeeping in the whole test tree.
+      GIT_CONFIG_COUNT: '3',
+      GIT_CONFIG_KEY_0: 'maintenance.auto', GIT_CONFIG_VALUE_0: 'false',
+      GIT_CONFIG_KEY_1: 'gc.auto', GIT_CONFIG_VALUE_1: '0',
+      GIT_CONFIG_KEY_2: 'gc.autoDetach', GIT_CONFIG_VALUE_2: 'false',
       HOME: coordinatorHome,
       USERPROFILE: coordinatorHome,
       GH_CONFIG_DIR: path.join(sandboxRoot, 'gh-config'),

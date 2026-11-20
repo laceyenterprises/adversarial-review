@@ -1,12 +1,14 @@
+import { localNodeTestConcurrency } from '../../src/node-test-concurrency.mjs';
+
 // Stable longest-first scheduling. Missing measurements receive the median
 // known duration so new files are not all scheduled last.
-export const MAX_WORKERS = 8;
+const CI_WORKERS = 8;
 // This smoke asserts real per-step wall budgets in its child process tree.
 // Keep that measurement independent of the suite's artificial CPU/I/O load.
 export const SERIAL_TEST_FILES = new Set(['test/smv.test.mjs']);
 
-export function workerCount(fileCount) {
-  return Math.min(fileCount, MAX_WORKERS);
+export function workerCount(fileCount, env, cores) {
+  return Math.min(fileCount, localNodeTestConcurrency(env, cores) ?? CI_WORKERS);
 }
 
 function estimate(durations) {

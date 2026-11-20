@@ -1,6 +1,7 @@
 import { spawn } from 'node:child_process';
 import { constants } from 'node:os';
 import { writeSync } from 'node:fs';
+import { boundedNodeTestArgs } from '../node-test-concurrency.mjs';
 
 // Retain a bounded tail. Child bytes, never CPU usage or heartbeats, reset idle.
 export async function runBounded(command, args, {
@@ -33,7 +34,8 @@ export async function runBounded(command, args, {
     let finished = false;
     let finishing = false;
     let cleanupFailed = false;
-    const child = spawnImpl(command, args, { env, detached: !controlled, stdio: ['inherit', 'pipe', 'pipe'] });
+    const child = spawnImpl(command, boundedNodeTestArgs(command, args, env),
+      { env, detached: !controlled, stdio: ['inherit', 'pipe', 'pipe'] });
     stderr.write(`run-bounded: started absolute=${timeoutMs}ms idle=${idleMs}ms\n`);
     function signalGroup(signal) {
       if (!child.pid) return;

@@ -1,6 +1,6 @@
 import './helpers/rate-limit-state-isolation.mjs';
 import assert from 'node:assert/strict';
-import { spawnSync } from 'node:child_process';
+import { execFileSync, spawnSync } from 'node:child_process';
 import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
@@ -9,11 +9,39 @@ import { SERIAL_TEST_FILES, orderFiles, workerCount } from './helpers/parallel-p
 
 const helper = path.join(import.meta.dirname, 'helpers', 'parallel-runner.mjs');
 
-test('parallelism retains eight workers, capped only by the file count', () => {
-  assert.equal(workerCount(100), 8);
-  assert.equal(workerCount(8), 8);
-  assert.equal(workerCount(3), 3);
-  assert.equal(workerCount(0), 0);
+test('local parallelism uses half the available cores up to four, or an override', () => {
+  assert.equal(workerCount(100, {}, 16), 4);
+  assert.equal(workerCount(100, {}, 7), 3);
+  assert.equal(workerCount(100, {}, 1), 1);
+  assert.equal(workerCount(3, {}, 16), 3);
+  assert.equal(workerCount(0, {}, 16), 0);
+  assert.equal(workerCount(100, { AR_TEST_CONCURRENCY: '6' }, 16), 6);
+  for (const invalid of ['', '0', '-1', '2.5', 'Infinity', '9007199254740992']) {
+    assert.equal(workerCount(100, { AR_TEST_CONCURRENCY: invalid }, 16), 4);
+  }
+  assert.equal(workerCount(100, { CI: 'true', AR_TEST_CONCURRENCY: '1' }, 2), 8);
+  assert.equal(workerCount(3, { CI: '1' }, 2), 3);
+});
+
+test('fixture commits skip auto-maintenance in a fresh home', t => {
+  const root = mkdtempSync(path.join(tmpdir(), 'fixture-git-'));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const home = path.join(root, 'home');
+  mkdirSync(home);
+  const trace = path.join(root, 'git-trace.jsonl');
+  const env = { ...process.env, HOME: home, USERPROFILE: home, GIT_CONFIG_NOSYSTEM: '1',
+    GIT_CONFIG_GLOBAL: path.join(home, '.gitconfig'), GIT_TRACE2_EVENT: trace };
+  const git = (...args) => execFileSync('git', args, { cwd: root, env, encoding: 'utf8', timeout: 10_000 }).trim();
+  git('init', '--quiet', '--template=');
+  git('-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid',
+    '-c', 'commit.gpgsign=false', 'commit', '--quiet', '--allow-empty', '-m', 'fixture');
+  for (const [key, value] of [['maintenance.auto', 'false'], ['gc.auto', '0'], ['gc.autoDetach', 'false']]) {
+    assert.equal(git('config', '--get', key), value);
+  }
+  const events = readFileSync(trace, 'utf8').trim().split('\n').map(line => JSON.parse(line));
+  assert.ok(events.some(event => event.event === 'start' && event.argv.includes('commit')));
+  assert.deepEqual(events.filter(event => ['start', 'child_start'].includes(event.event)
+    && event.argv?.includes('maintenance')), []);
 });
 
 test('measured order is longest first with deterministic ties and unknown files', () => {
@@ -201,14 +229,9 @@ test('runner executes measured order across double-digit worker ranks', (t) => {
   for (const name of ['src', 'node_modules']) {
     symlinkSync(path.join(repo, name), path.join(root, name), 'dir');
   }
-  // Force one slot to observe dispatch order independently of CPU capacity.
   mkdirSync(path.join(root, 'test', 'helpers'));
-  writeFileSync(path.join(root, 'test', 'helpers', 'parallel-plan.mjs'), `
-    export { MAX_WORKERS, SERIAL_TEST_FILES, orderFiles } from ${JSON.stringify(path.join(repo, 'test/helpers/parallel-plan.mjs'))};
-    export const workerCount = () => 1;
-  `);
   for (const name of readdirSync(path.join(repo, 'test/helpers'))) {
-    if (name !== 'parallel-plan.mjs') symlinkSync(path.join(repo, 'test/helpers', name), path.join(root, 'test/helpers', name));
+    symlinkSync(path.join(repo, 'test/helpers', name), path.join(root, 'test/helpers', name));
   }
   const trace = path.join(root, 'order');
   const names = Array.from({ length: 12 }, (_, n) => `test/f${String(n).padStart(2, '0')}.test.mjs`);
@@ -220,11 +243,14 @@ test('runner executes measured order across double-digit worker ranks', (t) => {
   `);
   writeFileSync(path.join(root, 'test', 'fixtures', 'suite-durations.json'),
     JSON.stringify(Object.fromEntries(names.map((file, n) => [file, n + 1]))));
-  const env = { ...process.env, ADVERSARIAL_REVIEW_TEST_TEMP_BASE: root, AR_TEST_TIMINGS: 'timings.json' };
+  // Force one slot to observe dispatch order independently of CPU capacity.
+  const env = { ...process.env, CI: 'false', AR_TEST_CONCURRENCY: '1',
+    ADVERSARIAL_REVIEW_TEST_TEMP_BASE: root, AR_TEST_TIMINGS: 'timings.json' };
   delete env.NODE_TEST_CONTEXT;
   const child = spawnSync(process.execPath, [path.join(root, 'test', 'run-tests.mjs')],
     { cwd: root, env, encoding: 'utf8', timeout: 45_000 });
   assert.equal(child.status, 0, child.stdout + child.stderr);
+  assert.match(child.stderr, /12 files, 0 exclusive, 1 parallel workers/);
   assert.deepEqual(readFileSync(trace, 'utf8').trim().split('\n'), names.reverse());
   const report = JSON.parse(readFileSync(path.join(root, 'timings.json'), 'utf8'));
   assert.equal(report.files.length, names.length);

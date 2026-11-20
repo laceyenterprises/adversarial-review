@@ -10,7 +10,7 @@ installDispatchFileProducerFixture();
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir, userInfo } from 'node:os';
 import { join } from 'node:path';
 
@@ -25,13 +25,14 @@ import { classifyDeadHammerCause, INFRA_DEAD_HAMMER_FAILURE_CLASSES } from '../s
 import {
   HAMMER_RETRY_CAP_TOTAL_DISPATCHES,
   evaluateHammerRetryCap,
+  hammerRetryCapFilePath,
   readHammerRetryCapLedger,
   recordHammerRetryDispatch,
   refundHammerRetryDispatch,
   voidHostRestartLostHammerDispatch,
 } from '../src/ama/hammer-retry-cap.mjs';
 import { readCloserNoDeliveryLedger } from '../src/ama/closer-no-delivery.mjs';
-import { VOID_TERMINAL_CLASSES, isVoidTerminalClass, readPrRoundLedger, summarizePrRoundLedger } from '../src/pr-round-ledger.mjs';
+import { VOID_TERMINAL_CLASSES, isVoidTerminalClass, prRoundLedgerPath, readPrRoundLedger, summarizePrRoundLedger } from '../src/pr-round-ledger.mjs';
 import { noWorkVerdict } from './fixtures/execution-verdict.mjs';
 
 const REPO = 'synthetic-org/synthetic-repo';
@@ -115,6 +116,66 @@ test('the void survives a later charge in the same series', (t) => {
     .reason, 'already-refunded');
   assert.deepEqual(counts(rootDir), { attemptCount: 1, targetAttemptCount: 1, lifetimeAttemptCount: 1, rounds: 1 });
 });
+
+for (const priorRefund of ['host-restart', 'no-work']) {
+  test(`a durable ${priorRefund} receipt reconciles a round left charged after interruption`, t => {
+    const rootDir = tempRoot(t, 'receipt-replay');
+    chargeHammer(rootDir, 'lrq_lost');
+    const path = prRoundLedgerPath(rootDir, IDENTITY);
+    const chargedRound = readFileSync(path, 'utf8');
+    if (priorRefund === 'host-restart') {
+      voidHostRestartLostHammerDispatch(rootDir, IDENTITY, { launchRequestId: 'lrq_lost', terminalClass: LOST });
+    } else {
+      refundHammerRetryDispatch(rootDir, IDENTITY, { jobKey: HEAD, headSha: HEAD,
+        launchRequestId: 'lrq_lost', executionVerdict: noWorkVerdict('lrq_lost') });
+    }
+    // Model interruption after the retry refund committed, before the round void.
+    writeFileSync(path, chargedRound);
+    assert.equal(summarizePrRoundLedger(rootDir, IDENTITY).remediationRoundsUsed, 1);
+    assert.deepEqual(voidHostRestartLostHammerDispatch(rootDir, IDENTITY, {
+      launchRequestId: 'lrq_lost', terminalClass: LOST,
+    }), { voided: true, refunded: false, reason: 'already-refunded' });
+    assert.deepEqual(counts(rootDir), { attemptCount: 0, targetAttemptCount: 0, lifetimeAttemptCount: 0, rounds: 0 });
+  });
+}
+
+const refusedLedgers = [
+  ['missing', path => rmSync(path), 'no-ledger'],
+  ['corrupt', path => writeFileSync(path, '{'), 'no-ledger'],
+  ['invalid counters', path => {
+    const ledger = JSON.parse(readFileSync(path, 'utf8'));
+    ledger.attemptCount = -1;
+    writeFileSync(path, JSON.stringify(ledger));
+  }, 'invalid-charge-counters'],
+  ['unproven charge', path => {
+    const ledger = JSON.parse(readFileSync(path, 'utf8'));
+    ledger.dispatchCharges = {};
+    writeFileSync(path, JSON.stringify(ledger));
+  }, 'no-charged-attempt'],
+];
+
+for (const [label, damage, reason] of refusedLedgers) {
+  test(`host-restart refund refusal (${label}) retains the round and can recover`, t => {
+    const rootDir = tempRoot(t, 'refund-refused');
+    chargeHammer(rootDir, 'lrq_lost');
+    const path = hammerRetryCapFilePath(rootDir, IDENTITY);
+    const original = readFileSync(path, 'utf8');
+    damage(path);
+    const damaged = readHammerRetryCapLedger(rootDir, IDENTITY);
+    assert.deepEqual(voidHostRestartLostHammerDispatch(rootDir, IDENTITY, {
+      launchRequestId: 'lrq_lost', dispatchKey: 'intent-lrq_lost', terminalClass: LOST,
+    }), { voided: false, refunded: false, reason });
+    assert.deepEqual(readHammerRetryCapLedger(rootDir, IDENTITY), damaged);
+    assert.equal(summarizePrRoundLedger(rootDir, IDENTITY).remediationRoundsUsed, 1);
+    assert.equal(readPrRoundLedger(rootDir, IDENTITY)[0].voided, false);
+
+    writeFileSync(path, original);
+    assert.equal(voidHostRestartLostHammerDispatch(rootDir, IDENTITY, {
+      launchRequestId: 'lrq_lost', terminalClass: LOST,
+    }).voided, true);
+    assert.deepEqual(counts(rootDir), { attemptCount: 0, targetAttemptCount: 0, lifetimeAttemptCount: 0, rounds: 0 });
+  });
+}
 
 for (const terminalClass of ['worker_crashed', ...INFRA_DEAD_HAMMER_FAILURE_CLASSES, 'process_exited_after_progress',
   'worker-lost-to-host-restart', null]) {
@@ -277,3 +338,41 @@ test('closer replay: a second closer that crashed still exhausts the cap', async
   assert.equal(deps.events.filter(e => e.event === 'ama_closer.host_restart_void').length, 0);
   assert.equal(readHammerRetryCapLedger(rootDir, IDENTITY).hostRestartVoids, undefined);
 });
+
+for (const [label, damage] of refusedLedgers) {
+  test(`closer replay: refused host-restart refund (${label}) retains every other budget`, async t => {
+    _resetHammerRetryCapAlertDebounceForTests();
+    const rootDir = tempRoot(t, 'closer-refused');
+    seedSecondDeadCloser(rootDir, 'lrq_lost');
+    const path = hammerRetryCapFilePath(rootDir, IDENTITY);
+    const original = readFileSync(path, 'utf8');
+    damage(path);
+    const damaged = readHammerRetryCapLedger(rootDir, IDENTITY);
+    const deps = closerDeps({ launchRows: { lrq_lost: {
+      launch_request_id: 'lrq_lost', status: 'failed', failure_class: LOST,
+    } } });
+    for (const dispatchedAt of ['2026-11-01T02:00:00Z', '2026-11-01T02:01:00Z']) {
+      const result = await maybeDispatchAmaCloser({ ...closerArgs(rootDir, dispatchedAt), ...deps });
+      assert.equal(result.reason, 'host-restart-refund-unavailable');
+      assert.equal(result.recoveryWait, true);
+      assert.equal(result.dispatched, false);
+      assert.equal(deps.launches.length, 0);
+      assert.deepEqual(readHammerRetryCapLedger(rootDir, IDENTITY), damaged);
+      assert.equal(summarizePrRoundLedger(rootDir, IDENTITY).remediationRoundsUsed, 2);
+      const record = readAmaCloserDispatchRecord(rootDir, { ...IDENTITY, headSha: HEAD });
+      assert.equal(record.launchRequestId, 'lrq_lost');
+      assert.equal(record.hostRestartVoidedLaunchRequestId, undefined);
+      assert.equal(record.unexecutedRefundCount || 0, 0);
+      assert.equal(record.retryCount, 2);
+      assert.deepEqual(readCloserNoDeliveryLedger(rootDir, IDENTITY).heads?.[HEAD] ?? null, null);
+      assert.equal(deps.events.filter(e => e.event === 'ama_closer.host_restart_void').length, 0);
+    }
+
+    writeFileSync(path, original);
+    const recovered = await maybeDispatchAmaCloser({ ...closerArgs(rootDir, '2026-11-01T02:02:00Z'), ...deps });
+    assert.equal(recovered.dispatched, true, JSON.stringify(recovered));
+    assert.equal(deps.launches.length, 1);
+    assert.deepEqual(readPrRoundLedger(rootDir, IDENTITY).filter(e => e.voided).map(e => e.launchRequestId), ['lrq_lost']);
+    assert.deepEqual(counts(rootDir), { attemptCount: 2, targetAttemptCount: 2, lifetimeAttemptCount: 2, rounds: 2 });
+  });
+}

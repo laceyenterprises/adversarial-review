@@ -103,7 +103,11 @@ that the orchestrator settled with the non-charging terminal class
 the charge has not already had back (series, target, lifetime and any transient
 grant), once per charge, and voids the dispatch's `hammer` round in the
 [PR round ledger](pr-round-ledger.md). Every other terminal class keeps its
-charge on this path.
+charge on this path. Round voiding and per-head re-dispatch credit require a
+successful refund or an existing matching `hostRestartVoids` / `noWorkRefunds`
+receipt. Missing or corrupt ledgers, unproven charges and invalid counters
+leave the round and per-head bound charged; the next observation retries
+before any other failure accounting or successor dispatch.
 
 
 `overloadDeferral` is the version 1 Agent OS wire receipt, retained across

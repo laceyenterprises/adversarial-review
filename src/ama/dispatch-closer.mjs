@@ -6,6 +6,7 @@ export { samePrHammerHolderWorktreePaths } from './branch-holder-paths.mjs';
 import { isZeroOutputRefusal, escalateZeroOutputRefusal } from './zero-output-refusal.mjs';
 import { finalFixAllQueueOwner } from './final-fix-all.mjs';
 import { isRemediationRoundBudgetSpent } from '../remediation-round-recovery.mjs';
+import { isVoidTerminalClass } from '../pr-round-ledger.mjs';
 import { classifyHammerExit, hammerNoMergeDetails } from './hammer-outcome.mjs';
 import { appendCloserOutcome } from './closer-outcomes.mjs';
 import { ownershipReadBudgets as closerScanBudgets, boundedOwnershipRead as boundedCloserScanRead } from '../ownership-read.mjs';
@@ -7210,6 +7211,10 @@ async function maybeDispatchAmaCloserAttempt({
           launchRequestProbe, readLaunchRequestStatusImpl, dispatchContext, logger });
         launchRequestProbe = hostRestart.probe;
         hostRestartVoided = hostRestart.outcome?.voided === true;
+        if (isVoidTerminalClass(launchRequestProbe?.row?.failure_class) && !hostRestartVoided) {
+          return noAmaDispatch({ dispatched: false, skipMergeAgent: true,
+            reason: 'host-restart-refund-unavailable', recoveryWait: true });
+        }
       }
       // CLOSERREUSE-01: a hammer that died of an infrastructure cause and
       // pushed nothing gets its dispatch refunded, so the retry cap below

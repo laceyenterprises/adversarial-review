@@ -29,6 +29,14 @@ A hammer launch whose launch row carries that exact structured
 Every other terminal class keeps its existing charging, including
 `worker_crashed` and the CLOSERREUSE-01 refund classes.
 
+Final remediation requires a committed refund or matching durable refund receipt
+before voiding the round or crediting the per-head bound. Missing, corrupt,
+unproven or invalid retry-ledger evidence now retains every other budget and
+returns an owned retry before other failure accounting or successor dispatch.
+Existing host-restart and no-work receipts can reconcile an interrupted round
+void without crediting the retry charge twice. The canonical data-model catalog
+now inventories both persistent fields alongside the existing fragment.
+
 ## Interface changes
 
 - New optional retry-cap ledger field `hostRestartVoids`; see
@@ -54,3 +62,15 @@ following:
 - two closer replays through `maybeDispatchAmaCloser`. A second closer lost to
   a host restart re-dispatches. A second closer that crashed still reaches
   `hammer-retry-cap-exhausted`.
+- missing, corrupt, invalid-counter and unproven-charge refusals preserve round
+  and per-head budgets across repeated observations and recover after the ledger
+  is restored;
+- durable host-restart and no-work receipts reconcile an interrupted round void.
+
+Final remediation validation uses targeted offline tests only; PR-head CI owns
+the full suite. The state/transition source projection remains unchanged.
+`npm run lint` passed with zero errors, `npm run typecheck:contracts` passed,
+`bash demo/research-finding-walkthrough.sh` passed, and
+`node scripts/validate-data-model-catalog.mjs` validated all 100 entries.
+`node test/run-tests.mjs test/hostrestartroundvoid-01.test.mjs
+test/pr-round-ledger.test.mjs` passed all 39 tests under a 120-second bound.

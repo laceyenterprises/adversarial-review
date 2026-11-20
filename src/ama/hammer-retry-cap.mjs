@@ -252,7 +252,8 @@ function voidHostRestartChargeUnlocked(rootDir, identity, { launchRequestId, dis
     || entries.find(([, charge]) => charge.launchRequestId === launch);
   if (!entry) return refuse('no-charged-attempt');
   const [key, charge] = entry;
-  if (ledger.hostRestartVoids?.[key] || ledger.noWorkRefunds?.[key]) return refuse('already-refunded');
+  const receipt = ledger.hostRestartVoids?.[key] || ledger.noWorkRefunds?.[key];
+  if (receipt) return { ...refuse('already-refunded'), receipt };
   if (!validChargeCounters(ledger, charge)) return refuse('invalid-charge-counters');
   const { doc, budgets } = creditChargeInFull(ledger, charge, launch, now);
   doc.hostRestartVoids = { ...ledger.hostRestartVoids, [key]: {
@@ -1079,14 +1080,17 @@ export function refundUnexecutedHammerDispatch(rootDir, identity, options = {}) 
  * charged. Idempotent per charge; the round void is idempotent per round id.
  *
  * @returns {{ voided: boolean, refunded: boolean, reason: string }}
- *   `voided` says the terminal class does not charge; `refunded` says this call
- *   gave back the retry-cap charge (false on a re-observation).
+ *   `voided` requires a successful refund or a durable receipt for this charge;
+ *   `refunded` says this call gave back the charge (false on a re-observation).
  */
 export function voidHostRestartLostHammerDispatch(rootDir, identity, options = {}) {
   if (!isVoidTerminalClass(options.terminalClass)) {
     return { voided: false, refunded: false, reason: 'charging-terminal-class' };
   }
   const result = mutateHammerLedger(rootDir, identity, () => voidHostRestartChargeUnlocked(rootDir, identity, options));
+  if (!result.refunded && !result.receipt) {
+    return { voided: false, refunded: false, reason: result.reason };
+  }
   voidHammerPrRoundIds(rootDir, identity, options, options.terminalClass);
   return { voided: true, refunded: result.refunded === true, reason: result.reason };
 }

@@ -4505,8 +4505,12 @@ treats it as void before any other failure handling:
 `ama_closer.host_restart_void` is logged once, when the charge is given back.
 Free-text failure detail never qualifies a launch, and every other class
 (`worker_crashed` included) keeps its existing charging. An unreadable launch
-row or a busy ledger leaves everything charged until a later tick re-observes
-the launch.
+row or a busy, missing, corrupt or invalid retry ledger leaves everything
+charged until a later tick re-observes the launch. The round void and per-head
+credit require a successful refund or a durable matching `hostRestartVoids`
+or `noWorkRefunds` receipt. A proven host-restart launch whose refund is refused
+returns `host-restart-refund-unavailable` with recovery ownership; it takes no
+other failure accounting or successor dispatch while that evidence is unresolved.
 
 ### A PR whose hammer cannot launch or has stopped (NOOWNER-01)
 

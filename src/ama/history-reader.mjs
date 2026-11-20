@@ -373,7 +373,7 @@ export function createHistoryReader(options = {}) {
   reader.commitVerification = path => bounded(() => json(path, '{sha, verification: .commit.verification}'));
   // Read only data blobs pinned by immutable trees. A missing entry is
   // evidence of absence only after a complete walk of its parent tree.
-  reader.regularDataFile = (repo, ref, path, { optional = false } = {}) => bounded(async () => {
+  reader.regularDataFile = (repo, ref, path, { optional = false, asBuffer = false } = {}) => bounded(async () => {
     if (!/^[\w.-]+\/[\w.-]+$/.test(repo) || !/^[0-9a-f]{40}$/.test(ref)
       || !path.split('/').every(part => /^[a-zA-Z0-9][a-zA-Z0-9.-]*$/.test(part))) {
       throw new Error('invalid immutable data file identity');
@@ -388,7 +388,7 @@ export function createHistoryReader(options = {}) {
         const actual = createHash('sha1').update(`blob ${bytes.length}\0`).update(bytes).digest('hex');
         if (actual !== entry.sha) throw Object.assign(new Error('immutable data blob hash mismatch'),
           { primaryChangeReadFailed: true });
-        return bytes.toString('utf8');
+        return asBuffer ? bytes : bytes.toString('utf8');
       }
       if (entry.type !== 'tree' || entry.mode !== '040000') break;
       ref = entry.sha;

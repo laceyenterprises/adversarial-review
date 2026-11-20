@@ -343,7 +343,8 @@ async function regularFile(root, path) {
 }
 
 // Kill the whole process group on timeout/abort, including generator children.
-export async function runDerivedGenerator({ scratch, cwd, command, signal, timeoutMs = 10000 }) {
+export async function runDerivedGenerator({ scratch, cwd, command, signal, timeoutMs = 10000,
+  readOnly = [], captureStdout = false }, { spawnImpl = spawn } = {}) {
   const root = await realpath(scratch);
   let work;
   try {
@@ -357,20 +358,19 @@ export async function runDerivedGenerator({ scratch, cwd, command, signal, timeo
   await mkdir(home, { recursive: true });
   let executable, args;
   if (process.platform === 'darwin') {
-    // Read system runtimes and this scratch tree only; deny network and writes
-    // outside scratch. No host HOME, auth environment or Git config is passed.
+    // Deny network and writes outside scratch. No host HOME, auth environment
+    // or Git config is passed.
     const quote = value => JSON.stringify(value);
-    const ancestors = [];
-    for (let parent = dirname(root); parent !== '/'; parent = dirname(parent)) {
-      ancestors.push(`(literal ${quote(parent)})`);
-    }
+    const reads = readOnly.map(path => `(subpath ${quote(path)})`).join(' ');
+    const ancestors = mountParents([root, ...readOnly]).map(path => `(literal ${quote(path)})`);
     const profile = `(version 1)(deny default)(allow process*)(allow sysctl-read)(allow mach-lookup)
       (allow file-read* (literal "/") (subpath "/System") (subpath "/usr") (subpath "/bin")
         (subpath "/Library/Frameworks") (subpath "/Library/Developer")
         (subpath "/opt") (subpath "/dev")
-        (subpath ${quote(root)}))
+        (subpath ${quote(root)}) ${reads})
       ${ancestors.length ? `(allow file-read-metadata ${ancestors.join(' ')})` : ''}
-      (allow file-write* (subpath ${quote(root)}) (literal "/dev/null"))`;
+      (allow file-write* (subpath ${quote(root)}) (literal "/dev/null"))
+      ${reads ? `(deny file-write* ${reads})` : ''}`;
     executable = '/usr/bin/sandbox-exec';
     args = ['-p', profile, ...command];
   } else if (process.platform === 'linux') {
@@ -382,18 +382,21 @@ export async function runDerivedGenerator({ scratch, cwd, command, signal, timeo
     // Build mount parents explicitly, including hosts with a custom TMPDIR.
     // Only expose the loader cache from /etc, never host configuration/secrets.
     args.push('--tmpfs', '/tmp');
-    const parents = [];
-    for (let parent = dirname(root); parent !== '/'; parent = dirname(parent)) parents.unshift(parent);
-    for (const parent of parents) args.push('--dir', parent);
+    for (const parent of mountParents([root, ...readOnly])) args.push('--dir', parent);
     args.push('--dir', '/etc');
     if (existsSync('/etc/ld.so.cache')) args.push('--ro-bind', '/etc/ld.so.cache', '/etc/ld.so.cache');
+    // Auxiliary producer libraries may be absent; existing paths stay read-only.
+    for (const path of readOnly) args.push('--ro-bind-try', path, path);
     args.push('--proc', '/proc', '--dev', '/dev', '--bind', root, root, '--chdir', work, '--', ...command);
   } else throw new Error('network-denied generator sandbox unavailable');
   signal?.throwIfAborted();
-  await new Promise((resolvePromise, reject) => {
-    const child = spawn(executable, args, { cwd: work, detached: true, stdio: ['ignore', 'ignore', 'pipe'],
+  return new Promise((resolvePromise, reject) => {
+    const child = spawnImpl(executable, args, { cwd: work, detached: true,
+      stdio: ['ignore', captureStdout ? 'pipe' : 'ignore', 'pipe'],
       env: { PATH: '/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin', HOME: home, TMPDIR: home,
-        LANG: 'C.UTF-8', GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: '/dev/null' } });
+        LANG: 'C.UTF-8', GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: '/dev/null',
+        ...(captureStdout ? { GIT_NO_LAZY_FETCH: '1', GIT_TERMINAL_PROMPT: '0', GIT_ALLOW_PROTOCOL: '',
+          GIT_GRAFT_FILE: '/dev/null' } : {}) } });
     let failure;
     const kill = error => {
       failure = error;
@@ -402,6 +405,13 @@ export async function runDerivedGenerator({ scratch, cwd, command, signal, timeo
     const abort = () => kill(signal.reason);
     const timer = setTimeout(() => kill(new Error('generator timed out')), timeoutMs);
     let stderr = '';
+    const output = [];
+    let outputBytes = 0;
+    child.stdout?.on('data', bytes => {
+      outputBytes += bytes.length;
+      if (outputBytes > 4096) kill(new Error('generator output limit exceeded'));
+      else output.push(bytes);
+    });
     child.stderr.on('data', bytes => {
       stderr += bytes.toString('utf8');
       if (stderr.length > 4096) kill(new Error('generator output limit exceeded'));
@@ -414,15 +424,24 @@ export async function runDerivedGenerator({ scratch, cwd, command, signal, timeo
       // Also retire descendants left behind by an otherwise successful parent.
       try { process.kill(-child.pid, 'SIGKILL'); } catch { /* No descendants. */ }
       if (failure || code !== 0) reject(failure || new Error(`generator failed: ${stderr.slice(0, 4096)}`));
-      else resolvePromise();
+      else resolvePromise(captureStdout ? Buffer.concat(output) : undefined);
     });
     if (signal?.aborted) abort();
   });
 }
 
+function mountParents(paths) {
+  const parents = new Set();
+  for (const path of paths) {
+    for (let parent = dirname(path); parent !== '/'; parent = dirname(parent)) parents.add(parent);
+  }
+  return [...parents].sort((a, b) => a.length - b.length);
+}
+
 // Shared checkout seam for reproducible derived output (blocks or opaque files).
 // Scratch owns all Git metadata: generators cannot mutate a host worktree/index.
-export async function withDerivedCheckout({ repo, rootDir, headSha, mergeBase, primaryHead, signal, localRepository }, operation) {
+export async function withDerivedCheckout({ repo, rootDir, headSha, mergeBase, primaryHead, signal,
+  localRepository, registeredOnly = false }, operation) {
   if (!BLOCK_SHA.test(headSha) || !BLOCK_SHA.test(mergeBase) || (primaryHead && !BLOCK_SHA.test(primaryHead))
     || !/^[\w.-]+\/[\w.-]+$/.test(repo)) throw new Error('invalid derived checkout identity');
   signal?.throwIfAborted();
@@ -430,7 +449,8 @@ export async function withDerivedCheckout({ repo, rootDir, headSha, mergeBase, p
   const flags = ['--no-lazy-fetch', '--no-replace-objects', '--literal-pathspecs',
     '-c', 'core.hooksPath=/dev/null', '-c', 'core.fsmonitor=false'];
   const env = { PATH: process.env.PATH, HOME: scratch, GIT_CONFIG_GLOBAL: '/dev/null',
-    GIT_CONFIG_NOSYSTEM: '1', GIT_TERMINAL_PROMPT: '0', GIT_ALLOW_PROTOCOL: 'file', LC_ALL: 'C' };
+    GIT_CONFIG_NOSYSTEM: '1', GIT_TERMINAL_PROMPT: '0', GIT_ALLOW_PROTOCOL: 'file', LC_ALL: 'C',
+    ...(registeredOnly ? { GIT_GRAFT_FILE: '/dev/null' } : {}) };
   const options = () => ({ cwd: scratch, timeout: loadAwareTimeoutMs(15000), maxBuffer: LIMIT, signal, env });
   const readGit = (...args) => {
     signal?.throwIfAborted();
@@ -445,10 +465,10 @@ export async function withDerivedCheckout({ repo, rootDir, headSha, mergeBase, p
     });
   };
   try {
-    let source = localRepository;
+    let source = registeredOnly ? undefined : localRepository;
     if (!source && rootDir) {
       try { source = loadDomainConfig(rootDir, 'code-pr')?.remediationCloneReferences?.[repo]; } catch { /* Optional reference. */ }
-      if (!source) {
+      if (!source && !registeredOnly) {
         try {
           const origins = (await readGit('-C', rootDir, 'config', '--local', '--get-all', 'remote.origin.url')).toString('utf8');
           if (origins.split(/\r?\n/).some(origin => {
@@ -462,19 +482,23 @@ export async function withDerivedCheckout({ repo, rootDir, headSha, mergeBase, p
     signal?.throwIfAborted();
     // Proof collection is optional and must not depend on ambient GitHub auth.
     // The daemon/operator supplies a local clone containing both immutable refs.
-    if (!source) throw Object.assign(new Error('derived checkout requires a local clone reference'),
+    if (!source || (registeredOnly && !isAbsolute(source))) throw Object.assign(new Error('derived checkout requires a local clone reference'),
       { code: 'DERIVED_CLONE_REFERENCE_MISSING' });
     source = await realpath(source);
     if (!(await lstat(source)).isDirectory()) throw new Error('derived clone reference is not a directory');
     const tree = join(scratch, 'head');
     const refs = new Set([headSha, mergeBase, primaryHead].filter(Boolean));
-    const show = async (ref, path, { optional = false } = {}) => {
+    const show = async (ref, path, { optional = false, dataFile = false } = {}) => {
       if (!refs.has(ref) || !safePath(path)) throw new Error('invalid derived object identity');
       const entry = await readGit('-C', source, 'ls-tree', '--full-tree', '-z', `${ref}^{commit}`, '--', path);
       if (optional && !entry.length) return null;
-      const [, oid, name] = /^100(?:644|755) blob ([0-9a-f]{40})\t([^\0]+)\0$/.exec(entry.toString('utf8')) || [];
-      if (name !== path) throw new Error('derived input is missing or is not a regular Git blob');
+      const [, mode, oid, name] = /^(100(?:644|755)) blob ([0-9a-f]{40})\t([^\0]+)\0$/.exec(entry.toString('utf8')) || [];
+      if (name !== path || (dataFile && mode !== '100644')) throw new Error('derived input is missing or is not a regular Git blob');
       const bytes = await readGit('-C', source, 'cat-file', 'blob', oid);
+      if (dataFile) {
+        if (blobSha(bytes) !== oid) throw new Error('local data blob hash mismatch');
+        return bytes;
+      }
       const text = bytes.toString('utf8');
       if (!Buffer.from(text).equals(bytes)) throw new Error('unsupported artifact text');
       return text;
@@ -493,7 +517,11 @@ export async function withDerivedCheckout({ repo, rootDir, headSha, mergeBase, p
       await git('--git-dir=objects.git', 'worktree', 'add', '--quiet', '--detach', tree, headSha);
       materialized = true;
     };
-    return await operation({ tree, scratch, show, checkout });
+    const requireAncestor = (from, to) => {
+      if (!refs.has(from) || !refs.has(to)) throw new Error('invalid derived ancestry identity');
+      return readGit('-C', source, 'merge-base', '--is-ancestor', from, to);
+    };
+    return await operation({ tree, scratch, source, show, checkout, requireAncestor });
   } finally { await rm(scratch, { recursive: true, force: true }); }
 }
 

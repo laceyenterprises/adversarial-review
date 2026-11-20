@@ -21,6 +21,7 @@ import { hamCommitIdentityMatches, isHamWorkerTicket, parseCommitTrailers, parse
 import { isRemediationCommit, readLaneReversalOwners, laneReversalOwner,
   laneReversalIdentityMatches, readLaneReversalIdentity } from './lane-reversal.mjs';
 import { proveDerivedArtifacts, proveGeneratedBlocks } from './derived-artifacts.mjs';
+import { proveLegacyGeneratedPreservation, verifiedLegacyGeneratedPreservation } from './legacy-generated-preservation.mjs';
 import { proveMigrationRenumbers, verifiedMigrationRenumbers } from './migration-renumber.mjs';
 import { CATALOG_PATH, CATALOG_REPO, proveCatalogFieldMove } from './catalog-field-move.mjs';
 import { classifyOccurrence, deadCodeLanguage, dynamicHazard, parseDeadCodeDeclaration, symbolOccurrences } from './dead-code-symbols.mjs';
@@ -1022,12 +1023,18 @@ function evaluatePrimaryChange(evidence, headSha, { strictNonBlockingRemediation
           refusedRegions(primary.get(path), final.get(path), (unit, restoringDeletion) =>
             authorized(path, unit, diagnosticCache, restoringDeletion)), diagnosticCache) };
     };
+    const legacyGeneratedPreservation = [];
     for (const [path, change] of primary) {
       if (diagnosticSkipPaths.has(path)) continue;
       if (guardReversals.some(proof => proof.path === path)) continue;
       if (derivedChanges.some(proof => proof.path === change.filename || proof.registryPath === change.filename
         || proof.modulePath === change.filename || proof.sqlPath === change.filename)) continue;
       const actual = final.get(path);
+      const legacyProof = verifiedLegacyGeneratedPreservation(evidence, path);
+      if (legacyProof) {
+        legacyGeneratedPreservation.push(legacyProof.tuple);
+        continue;
+      }
       if (change.derivedOnly && (!actual || actual.filename === change.filename) && actual?.status !== 'removed') continue;
       if (isTestPath(path) && isTestPath(change.filename)
         && (!actual || isTestPath(actual.filename))) continue;
@@ -1095,6 +1102,7 @@ function evaluatePrimaryChange(evidence, headSha, { strictNonBlockingRemediation
     const derivedDeadCode = [...(authorizationCache.get('derivedDeadCode')?.values() || [])];
     return { ok: true, applicable: true, testRegionsChanged: testChanges, ...whitespaceEvidence,
       ...(derivedChanges.length ? { derivedChanges } : {}),
+      ...(legacyGeneratedPreservation.length ? { legacyGeneratedPreservation } : {}),
       ...(derivedDeadCode.length ? { derivedDeadCode } : {}),
       ...(guardReversals.length ? { guardReversals: guardReversals.map(({ authorization, path, failedRun, passingRun }) => ({
         authorization, paths: [path], failedCheckRun: failedRun.id, passingCheckRun: passingRun.id,
@@ -1823,6 +1831,7 @@ export async function fetchPrimaryChange(args, options = {}) {
 async function collectPrimaryChange(args, {
   fetchCiCostImpl = fetchCiCost, proveDerivedArtifactsImpl = proveDerivedArtifacts,
   proveGeneratedBlocksImpl = proveGeneratedBlocks,
+  proveLegacyGeneratedPreservationImpl = proveLegacyGeneratedPreservation,
   proveMigrationRenumbersImpl = proveMigrationRenumbers,
   fetchDeadCodeSourcesImpl = fetchDeadCodeSources,
 } = {}) {
@@ -1888,11 +1897,17 @@ async function collectPrimaryChange(args, {
     }
     const proofs = catalogProof ? [catalogProof] : await proveGeneratedBlocksImpl(proofArgs, result, refusal);
     args.signal.throwIfAborted();
-    if (!proofs.length) break;
     const previous = result.generatedBlockProofs || [];
     const added = proofs.filter(proof => !previous.some(entry => JSON.stringify(entry) === JSON.stringify(proof)));
-    if (!added.length) break;
-    result.generatedBlockProofs = [...previous, ...added];
+    if (added.length) {
+      result.generatedBlockProofs = [...previous, ...added];
+      continue;
+    }
+    const legacyProof = await proveLegacyGeneratedPreservationImpl(proofArgs, result, refusal);
+    args.signal.throwIfAborted();
+    if (!legacyProof) break;
+    result.repository = args.repo;
+    result.legacyGeneratedProofs = [...(result.legacyGeneratedProofs || []), legacyProof];
   }
   // PRIMARYDEADCODE-01: content for the derived dead-code proof, read only
   // for a path the coverage check still refuses. No new read ends the loop.

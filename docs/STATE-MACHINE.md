@@ -1764,7 +1764,11 @@ reset, and independently base-identical predecessor wrapper/SQL/module operation
 in the primary and every snapshot. The latter carries `metadataRepair: true`,
 `ahead` ancestry and ordered `parentOperations`; same-path metadata corrections
 also require those certificates. Other filename chains remain strictly
-increasing. Optional proof
+increasing. The LAC-2127 Agent OS ledger continuation can certify a move to
+slot 341 over the applied `successful_rss_index_339` revision in slot 340 using
+the immutable main integration, full first-parent history, registered parent
+operations and unchanged child operations. The current evaluation binds that
+certificate to the exact repository, heads, paths and blobs. Optional proof
 diagnostics stay outside deterministic refusal identity and bounded region
 summaries. Every observed snapshot must preserve the original
 operations; a registry swap without its paired module supplies no proof.

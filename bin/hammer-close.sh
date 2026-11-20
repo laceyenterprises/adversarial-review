@@ -48,4 +48,14 @@ if [ -f "$HAM_RUN_DIR/close-result.json" ]; then
 else
   printf 'HAM close result: {"status":%s,"outcome":"controller-shell-ended"}\n' "$ham_close_status"
 fi
+# The controller has drained. Scratch can already be gone after lease settlement.
+# A delivery failure leaves the controller's merge outcome and exit status intact.
+if [ "$ham_close_status" -eq 0 ]; then
+  if ham_close_comment=$("$HAM_NODE_BIN" "$HAM_CLOSE_ROOT/bin/hammer-closing-comment.mjs" \
+    "$HAM_REPO" "$HAM_PR_NUMBER" "$HAM_HQ_ROOT"); then
+    printf 'HAM closing comment: %s\n' "$ham_close_comment"
+  else
+    echo 'HAM closing comment: unconfirmed; run the standalone closing-comment command' >&2
+  fi
+fi
 exit "$ham_close_status"

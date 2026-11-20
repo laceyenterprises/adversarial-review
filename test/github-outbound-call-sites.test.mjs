@@ -33,6 +33,7 @@ const expected = {
   'fast-merge-processing.mjs': 1,
   'ama/dispatch-closer.mjs': 2,
   'ama/stacked-base.mjs': 1,
+  'ama/hammer-closing-comment.mjs': 1,
   'ama/hammer-api-publish.mjs': 1,
   'reviewer.mjs': 1,
   'reviewer-exact-head-post.mjs': 2,
@@ -76,6 +77,7 @@ function inventory(source, name) {
       const args = parent.type === 'ArrayExpression' ? parent.elements : parent.arguments;
       bodyArg = args?.[args.indexOf(node) + 1];
     }
+    const bodyTemplate = node.type === 'TemplateLiteral' && node.quasis[0]?.value.raw.startsWith('body=');
     function transformed(value, seen = new Set()) {
       if (!value) return false;
       if (value.type === 'CallExpression' && value.callee.name === 'filterGitHubBody') return true;
@@ -92,7 +94,11 @@ function inventory(source, name) {
     }
     // An enum of accepted CLI flags is not itself an outbound write.
     if (bodyArg?.type === 'Literal' && String(bodyArg.value).startsWith('-')) return;
-    writes.push({ filtered: bodyArg ? transformed(bodyArg) : /\bfilterGitHubBody\(/.test(scope), snippet: source.slice(node.start, node.end) });
+    const filtered = bodyTemplate
+      ? node.quasis[0].value.raw === 'body=' && node.quasis[1]?.value.raw === ''
+        && node.expressions.length === 1 && transformed(node.expressions[0])
+      : bodyArg ? transformed(bodyArg) : /\bfilterGitHubBody\(/.test(scope);
+    writes.push({ filtered, snippet: source.slice(node.start, node.end) });
   });
   return writes;
 }
@@ -118,9 +124,16 @@ test('inventory detects newly added review and inline comment writes', () => {
     'async function send(o, body) { await o.rest.pulls.createReviewComment({body}); }',
     'async function send(exec, file) { await exec("gh", ["pr", "comment", "--body-file", file]); }',
     'async function send(exec, raw) { const safe = filterGitHubBody(raw); await exec("gh", ["pr", "comment", "1", "--body", raw]); }',
+    'async function send(exec, raw) { const safe = filterGitHubBody(raw); await exec("gh", ["api", "-f", `body=${raw}`]); }',
+    'async function send(exec, raw) { await exec("gh", ["api", "-f", `body=${filterGitHubBody(raw)}${raw}`]); }',
   ]) {
     const writes = inventory(code, 'new-writer.mjs');
     assert.equal(writes.length, 1);
     assert.equal(writes[0].filtered, false);
   }
+});
+
+test('inventory follows a filtered value into a gh API body field', () => {
+  const code = 'async function send(exec, raw) { const safe = filterGitHubBody(raw); await exec("gh", ["api", "-f", `body=${safe}`]); }';
+  assert.deepEqual(inventory(code, 'new-writer.mjs'), [{ filtered: true, snippet: '`body=${safe}`' }]);
 });

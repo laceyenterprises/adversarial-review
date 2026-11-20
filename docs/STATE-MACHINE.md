@@ -1525,6 +1525,16 @@ Merged lease release preserves its successful result if publication retirement
 fails, warning on stderr. Retained publication custody still requires a live
 running controller and expires after six hours.
 
+The GitHub closing comment follows confirmed merge and lease release. It can be
+delivered after scratch retirement using the native launch/run merge receipt, the
+matching successful AMA attempt and fresh GitHub reads. The merge receipt is
+reconciliation evidence until the helper records a confirmed GitHub comment ID.
+GitHub confirmation succeeds even when writing that diagnostic record fails;
+the helper returns the comment ID with `recorded: false` and a warning, and
+recovery rereads GitHub before repairing the record without reposting.
+An entitled recovery invocation can use the original launch and run IDs after
+worker exit. The merge remains terminal throughout comment recovery.
+
 An exhausted closer that confirms an open PR without merging enrolls a durable
 PR/head successor request carrying the predicate's refusing review. The ordinary
 pre-claim remediation cap uses the same request. The watcher admits at most one

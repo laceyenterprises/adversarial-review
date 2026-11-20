@@ -1,6 +1,8 @@
 import './helpers/load-aware-timeout-fixture.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import childProcess from 'node:child_process';
+import { syncBuiltinESMExports } from 'node:module';
 import fsExt from 'fs-ext';
 import {
   closeSync,
@@ -1171,10 +1173,24 @@ test('merge-lease acquire reclaims a holder already dead at wait start', async (
   }
 });
 
-test('merge-lease acquire reclaims a local holder that dies during capped polling', async () => {
+test('merge-lease acquire reclaims a local holder that dies during capped polling', async t => {
+  const holderPid = 99999;
+  const execFileSync = childProcess.execFileSync;
+  const psMock = t.mock.method(childProcess, 'execFileSync', (command, args, options) => {
+    if (command === 'ps' && args?.join(' ') === `-o lstart= -p ${holderPid}`) {
+      // Keep the observed start before lease acquisition on every poll.
+      return 'Fri Jun 19 18:00:00 2026\n';
+    }
+    return execFileSync(command, args, options);
+  });
+  syncBuiltinESMExports();
+  t.after(() => {
+    psMock.mock.restore();
+    syncBuiltinESMExports();
+  });
+
   const rootDir = freshRoot();
   try {
-    const holderPid = 99999;
     const startMs = Date.parse('2026-06-20T18:00:00Z');
     // 250+500+1000+2000+4000+8000+15000+15000 = 45750 ms.
     const deathAfterMs = 45_750;

@@ -304,7 +304,8 @@ test('LAC-2177: a bounded resume reuses compare pages and proves the original re
   assert.equal(resumed.evidence.reversalAuthorizations[0].originalAuthorization.commit.sha, fixture.original);
   assert.equal(checkPrimaryChange(resumed.evidence, sha('9')).ok, false);
   const [initial, resume] = fixture.attempts.map(entry => entry.reads);
-  const discoveryPages = reads => reads.filter(path => path.includes(fixture.discovery)).map(path => path.at(-1));
+  const discoveryPages = reads => reads.filter(path => path.includes(fixture.discovery))
+    .map(path => new URLSearchParams(path.split('?')[1] || '').get('page'));
   assert.deepEqual(discoveryPages(initial), ['1', '2']);
   assert.deepEqual(discoveryPages(resume), ['2']);
   assert.ok(resume.some(path => path.includes(`/commits/${fixture.original}?`)), 'read the independent candidate patch');

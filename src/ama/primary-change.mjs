@@ -1255,7 +1255,7 @@ async function attestedReversal(commit, repo, read, prNumber) {
   return Array.isArray(comments) && comments.length < 100 && comments.some(comment => exactHammerValidation(comment, commit.sha));
 }
 
-async function originalReversalAuthorization({ repo, review, reviews, superseding, commit, reviewed, mergeBase, read, readCommitHistory, readCommit, metadata, prNumber, matchTrailers = false,
+async function originalReversalAuthorization({ repo, review, reviews, superseding, commit, reviewed, mergeBase, read, readCommitHistory = read, readCommit, metadata, prNumber, matchTrailers = false,
   laneOwners = [], readLaneIdentityImpl = readLaneReversalIdentity, rootDir }) {
   if (!SHA.test(superseding.commit_id || '')) return { detail: 'invalid superseding review head' };
   // This range locates candidate commits. Only their exact patches and parent

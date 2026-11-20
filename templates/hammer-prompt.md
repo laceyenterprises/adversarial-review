@@ -66,7 +66,7 @@ The close command's `close-result.json` `stage` is the phase; `status` is its ex
 | verify-head | 20 | Stop with the printed named outcome. Preserve parked/deferred audits and retry semantics (Appendix B, mandate 0b). Report `already-merged` for operator follow-up. `ci-infrastructure` stops without HQ decision. |
 | verify-head / merge | 21 | Run **Appendix D — Resolving merge conflicts**, starting with its lease-state query/release block. Repair, commit, then rerun the close command. |
 | publish | nonzero | Stop; preserve pushed-head provenance and the named failure. No merge or source re-review. |
-| local-validation | nonzero | Failed tests: repair, commit and rerun the close command, or release for another hammer pass. |
+| local-validation | nonzero | Repair proven test failures. For `canonical-validation-deferred`, preserve logs and use the existing cleanup and handoff in Appendix G2. |
 | merge | 20 / 75 / other nonzero | Stop with the printed outcome. Preserve retryable deferrals such as `lane-busy`. Report a possibly accepted merge without a verified own-merge receipt for operator follow-up. |
 | other | nonzero | Stop with the printed reason; 75 is a retryable deferral. Release/audit via the stop conditions below. |
 
@@ -112,8 +112,13 @@ timeout 142/143) is retried by rerunning the same close command in this
 workspace; never end the run to obtain a fresh workspace for it. Resume
 with verify-head and fresh lease/head checks; never replay publication or merge.
 An unknown cleanup or live owner retains custody and forbids a second controller.
-For canonical validation stops, read `local-validation.*` and its private log
-paths. Confirm drain from the controller registration before any retry.
+`canonical-validation-deferred` is UNKNOWN. The exact-head receipt
+`validation-deferred-<head>.json` points to retained validation logs when
+available. Use existing controller drain and lease receipts, or the standalone
+bounded-command cleanup result. Preserve unknown cleanup for the recovery owner.
+Run the terminal helper with `--final canonical-validation-deferred <head>` and
+end the run. Do not retry validation or close on that head in this run, even
+with green required CI. This takes precedence over the setup retry above.
 An exhausted closer fault is a **deferred harness fault**, never a terminal PR
 decision. Record its exact named reason with the terminal helper; dispatch
 refunds the charged attempt and parks/pages once after three refunds per head.
@@ -172,13 +177,16 @@ which appendix applies; these are prompt sections, never phase source files.
 Fresh shells reset state/cwd. Persist only in `<<RUN_DIR>>` (TMPDIR), never `/tmp`.
 Use absolute helpers.
 
-Bound every shell command. On macOS:
+Bound shell commands. Outside canonical validation, on macOS:
 
 ```bash
 /usr/bin/perl -e 'alarm shift; exec @ARGV' <seconds> <command> ...
 ```
 
-Validation: load-scaled 360s ceiling (`--nominal-timeout` tunes it); the idle ceiling scales from 120 seconds.
+Canonical validation uses its own load-scaled absolute limit. Its
+idle ceiling scales from 120 seconds. Do not wrap it in a separate alarm. Timeout or denied
+process inspection hands off through Appendix G2, including an outer tool
+timeout (124 or 142).
 
 ```bash
 "${HAM_NODE_BIN:-node}" <<ROOT_DIR>>/bin/hammer-validate.mjs --canonical -- <changed repository-relative files> || exit $?
@@ -233,12 +241,9 @@ decision. Recovery resumes after exact-head checks pass.
 
 **Never run a full test suite locally.** Keep required tests/checks.
 Run targeted tests in foreground via `hammer-validate.mjs` outside the lease.
-Yield (`--yield local-validation`), test, then source verify-head to recheck head/base.
-Use `run-bounded.sh` for other commands.
-Never nest buffering runners. Timeout or cancellation stops the controller
-round. Confirm drain and lease disposition before retrying. A nonzero validator
-exit forbids audit/merge. Diagnose outside the lease;
-reacquire and repeat head/base/file-overlap checks. Use one bounded harness wait
+The close controller yields before local revalidation and rechecks head/base
+on success. Use `run-bounded.sh` for other commands. Never nest buffering runners.
+A nonzero validator exit forbids a validation pass or merge. Use one bounded harness wait
 for external waits. Never background a command and poll with `sleep`, `tail`, or `cat`.
 Codex and Claude: no background tests or "still waiting" narration.
 
@@ -538,6 +543,8 @@ gates. A permanent history failure ends the run with its classified reason.
    the fail-closed live-head validation below, and
    complete the merge/closing-comment sequence idempotently. Do not restart remediation.
 0b. **A run that does not merge must say so exactly once on the PR.** Release changed heads or incomplete validation for the next pass. While open, report completed work, blocker, stop point, lease release and next actor. Edit an existing audit in place.
+   For `canonical-validation-deferred`, use the one deferred audit and handoff
+   in Appendix G2.
    Preserve App publication comments and their `HAM-Base-Head` / `HAM-Pushed-Head`
    pair in no-merge audits (CI unvalidated). Retry failed delivery with that pair.
    Only green exact-head CI permits `HAM-Validated-Head`; keep one in-lease audit.

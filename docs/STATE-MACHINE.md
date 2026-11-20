@@ -2083,7 +2083,10 @@ letting an admitted read finish before deadline refusal. Unreadable grace waits
 for that bounded gate; terminal evidence and other stop reasons remain immediate.
 HAMVALTIMEOUTFLAKE-01 requires an unreadable latest completed read for
 `launch-unreadable`; a scheduling stall alone cannot trigger that transition.
-A validator timeout records `validation-stopped` and writes no audit.
+A validator timeout records `validation-stopped` in the controller and
+`canonical-validation-deferred` for the exact head in the closer. The deferral
+supplies no validation audit. A process-inspection no-verdict uses the same
+deferred handoff. The run will not start another battery on that head.
 Supported CI-mirror commands run in the registered group. An inner command
 deadline also requests group teardown and ends the battery. Per-command
 diagnostics are written beside the validation receipt during execution, so

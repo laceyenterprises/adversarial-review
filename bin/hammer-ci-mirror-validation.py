@@ -25,6 +25,10 @@ class CheckDeadline(BaseException):
     """Leave the battery immediately so its outer owner can drain the group."""
 
 
+class ProcessInspectionUnavailable(BaseException):
+    """The Telegram guard explicitly returned no verdict for its Python lane."""
+
+
 def compatible_shell_runner(runner):
     """Only replace the known combined-output, keyword-only runner contract."""
     try:
@@ -291,21 +295,39 @@ def main():
                 raise
             finally:
                 active = None
-        if result.status in {"fail", "inconclusive"}:
+        output = getattr(result, "output", "") or ""
+        inspection_unavailable = result.status != "fail" and (
+            "telegram guard lane python: ps unusable in this sandbox: no verdict"
+            in output.splitlines()
+        )
+        if inspection_unavailable:
+            row.update(
+                status="failed",
+                result="inconclusive",
+                localReason="process-inspection-unavailable",
+            )
+        elif result.status in {"fail", "inconclusive"}:
             row.update(status="failed", result=result.status)
         elif result.status == "skipped":
             row.update(status="not-run", result=result.status)
         else:
             row["result"] = result.status
-        if result.reason:
+        if result.reason and not inspection_unavailable:
             row["localReason"] = result.reason
-        output = getattr(result, "output", "")
-        if result.status != "pass" and not row.get("diagnostics") and output:
+        if (
+            (result.status != "pass" or inspection_unavailable)
+            and not row.get("diagnostics")
+            and output
+        ):
             log, _, capture = open_diagnostic(row)
             if log is not None:
                 with suppress(OSError), log:
                     capture(output.encode("utf-8", errors="replace"))
-        logs = row.pop("diagnostics", []) if result.status == "pass" else []
+        logs = (
+            row.pop("diagnostics", [])
+            if result.status == "pass" and not inspection_unavailable
+            else []
+        )
         if persist():
             for log in logs:
                 if "path" in log:
@@ -313,6 +335,8 @@ def main():
                         Path(log["path"]).unlink(missing_ok=True)
         elif logs:
             row["diagnostics"] = logs
+        if inspection_unavailable:
+            raise ProcessInspectionUnavailable
         return result
 
     receipt["perCheck"] = True
@@ -337,6 +361,15 @@ def main():
             flush=True,
         )
         return 124
+    except ProcessInspectionUnavailable:
+        print(
+            "hammer CI mirror: process inspection unavailable; no local verdict",
+            file=sys.stderr,
+            flush=True,
+        )
+        return (
+            42 if any(row.get("result") == "fail" for row in receipt["checks"]) else 75
+        )
 
 
 if __name__ == "__main__":

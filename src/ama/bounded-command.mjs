@@ -6,7 +6,7 @@ import { writeSync } from 'node:fs';
 export async function runBounded(command, args, {
   timeoutMs = 900_000, idleMs = 120_000, tailBytes = 4096, graceMs = 5000,
   env = process.env, stdout = process.stdout, stderr = process.stderr,
-  observeOutput = () => {}, stopOnTimeoutExit = false,
+  observeOutput = () => {}, observeStop = () => {}, stopOnTimeoutExit = false,
   spawnImpl = spawn, killImpl = (pid, signal) => process.kill(pid, signal),
 } = {}) {
   // A registered closer owns one group for shell + validators + test children.
@@ -96,6 +96,9 @@ export async function runBounded(command, args, {
       if (outcome) return;
       outcome = reason;
       exitCode = code;
+      // A registered controller may stop this process as soon as FD 4 is
+      // notified. Let the caller retain the reason before requesting teardown.
+      try { observeStop(reason, code); } catch { /* Cleanup still owns the group. */ }
       if (controlled) {
         // FD 4 is a private inherited pipe to the owning controller, not a PID
         // supplied by PR code. Failure cannot authorize continued validation.

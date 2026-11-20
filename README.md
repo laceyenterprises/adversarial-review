@@ -2093,7 +2093,10 @@ or added rounds; this read-only observation is declared in
 LAC-2093 bounds validation through `bin/hammer-validate.mjs`; LAC-2097 runs it
 outside the shared lease. The absolute ceiling scales from 360 seconds.
 The idle ceiling scales from 120 seconds and stays below the absolute deadline.
-Either timeout fails with status 124. Pytest reports real collection and test
+Either timeout returns 124 with validation unknown. A canonical deadline or an
+explicit process-inspection no-verdict hands the current head to recovery once
+and prevents another validation or close on that head in the same run.
+Pytest reports real collection and test
 phase boundaries and uses local ledger routing; explicit disposable-Postgres
 test settings remain intact. Standalone TERM/INT/HUP cancellation initiates group TERM,
 with KILL after five seconds even if its leader has exited. Unconfirmed cleanup

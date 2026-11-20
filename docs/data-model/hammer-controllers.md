@@ -176,7 +176,8 @@ Any HQ-level acknowledgement change belongs in a separate Agent OS follow-up.
 **Store:** `<HAM_RUN_DIR>/local-validation.*`, adjacent
 `*.check-*.log`, and `<HAM_RUN_DIR>/close-result.json`; standalone evidence
 uses `<HAM_RUN_DIR or system tmp>/ham-validation-evidence-*/local-validation.json`
-and adjacent `*.check-*.log`.
+and adjacent `*.check-*.log`. An exact-head canonical deferral additionally
+writes `<HAM_RUN_DIR>/validation-deferred-<head>.json`.
 
 The closing controller starts a private `local-validation.*` receipt for each
 outside-lease validation attempt. It embeds the receipts from that invocation
@@ -205,6 +206,13 @@ original receipt if no `close-result.json` was written. Completed passing
 checks drop their logs. Standalone canonical mirror runs without a caller
 receipt print the path to a private evidence directory separate from their
 disposable validation scratch.
+
+The create-once deferral receipt has `schemaVersion: 1`, exact `head`,
+`outcome: deferred`, `validation: unknown`, bounded `reason` and original
+`status`. It points to `localValidationReceipt` when available. `cleanupOwner`
+is `controller` or `bounded-command`. Confirm cleanup from that owner's record
+or output. The deferral receipt itself supplies no drain proof. A repeat on
+the same head in this run returns 75 and leaves the original bytes untouched.
 
 Retention belongs to the caller/run-directory owner. Passing checks delete their
 command logs immediately. Failed or interrupted diagnostic files remain with

@@ -357,7 +357,7 @@ function boundIntegrationFiles(evidence, proof) {
     && evidence.headSha === proof.headSha && evidence.primaryHead === proof.primaryHead && evidence.mergeBase === proof.mergeBase
     && (evidence.repository === undefined || evidence.repository === proof.repo)
     && evidence.baseRef === 'main' && evidence.baseSha === proof.mainIntegration.observedBase
-    && evidence.comparisonMergeBase === RSS_MAIN
+    && evidence.comparisonMergeBase === proof.mainIntegration.comparisonMergeBase
     && evidence.diagnosticCommitRange?.length === proof.mainIntegration.snapshots.length
     && proof.mainIntegration.snapshots.every((commit, index) => commit.sha === evidence.diagnosticCommitRange[index]?.sha)
     && [[proof.path, proof.primaryBlob], [proof.modulePath, proof.primaryModuleBlob], [proof.sqlPath, proof.primarySqlBlob]]
@@ -375,7 +375,7 @@ async function proveMainIntegration(args, evidence, range) {
   if (args.repo !== LEDGER_REPO || args.headSha !== evidence.headSha || evidence.hasHammerCommits !== true
     || evidence.historyReadFailed || evidence.readFailed || evidence.headMismatch
     || evidence.completeFileLists !== true || evidence.baseRef !== 'main'
-    || !SHA.test(evidence.baseSha || '') || evidence.comparisonMergeBase !== RSS_MAIN
+    || !SHA.test(evidence.baseSha || '') || !SHA.test(evidence.comparisonMergeBase || '')
     || !SHA.test(evidence.primaryHead || '') || !SHA.test(evidence.mergeBase || '') || !evidence.diagnosticCommitRange) return null;
   const pairs = candidates(evidence).filter(({ before, after }) => before.directory === LEDGER_VERSIONS
     && before.number === migration(RSS_PARENT).number && after.number === before.number + 1);
@@ -390,20 +390,34 @@ async function proveMainIntegration(args, evidence, range) {
     return { sha, tree: commit.tree.sha, parents: commit.parents.map(parent => parent.sha) };
   };
   const snapshots = [];
-  let integrated = false, previous = evidence.primaryHead;
+  const additionalMainParents = [];
+  let mainParent, previous = evidence.primaryHead;
   for (let offset = 0; offset < range.length; offset += 4) {
     const commits = await Promise.all(range.slice(offset, offset + 4).map(({ sha }) => readCommit(sha)));
     for (const commit of commits) {
       if (commit.parents[0] !== previous || commit.parents.length < 1 || commit.parents.length > 2) return [];
       if (commit.parents.length === 2) {
-        if (integrated || commit.parents[1] !== RSS_MAIN) return [];
-        integrated = true;
+        const second = commit.parents[1];
+        if (!mainParent) {
+          if (second !== RSS_MAIN) return [];
+        } else {
+          // Check both edges by immutable SHA. A matching tree alone does not
+          // establish that this was a forward integration of trusted main.
+          if (second === mainParent) return [];
+          const advance = await args.metadata(`repos/${args.repo}/compare/${mainParent}...${second}`);
+          if (advance.status !== 'ahead' || advance.merge_base_commit?.sha !== mainParent) return [];
+          const trusted = await args.metadata(`repos/${args.repo}/compare/${second}...${evidence.baseSha}`);
+          if (trusted.status !== (second === evidence.baseSha ? 'identical' : 'ahead')
+            || trusted.merge_base_commit?.sha !== second) return [];
+          additionalMainParents.push(await readCommit(second));
+        }
+        mainParent = second;
       }
-      snapshots.push({ ...commit, integrated });
+      snapshots.push({ ...commit, integrated: mainParent !== undefined });
       previous = commit.sha;
     }
   }
-  if (!integrated) return [];
+  if (mainParent !== evidence.comparisonMergeBase) return [];
   const comparison = await args.metadata(`repos/${args.repo}/compare/${RSS_MAIN}...${evidence.primaryHead}`);
   if (comparison.status !== 'diverged' || comparison.merge_base_commit?.sha !== evidence.mergeBase) return [];
   if (evidence.baseSha !== RSS_MAIN) {
@@ -414,6 +428,9 @@ async function proveMainIntegration(args, evidence, range) {
   const final = snapshots.at(-1);
   const [oldFiles, mainFiles, authorFiles, finalFiles] = await Promise.all(
     [oldBase, main, author, final].map(commit => scopedLedger(args, commit.tree)));
+  for (const parent of additionalMainParents) {
+    if (!exactLedgerDelta(mainFiles, await scopedLedger(args, parent.tree), [])) return [];
+  }
   const shaAt = (files, path) => files.get(path)?.mode === '100644' && files.get(path).type === 'blob' ? files.get(path).sha : null;
   const textAt = (files, path) => {
     const sha = shaAt(files, path);
@@ -484,7 +501,8 @@ async function proveMainIntegration(args, evidence, range) {
     sqlBlob: shaAt(finalFiles, active.sqlPath),
     chain: [{ headSha: evidence.primaryHead, path: source.filename, blob: source.sha, revisionNumber: before.number },
       { headSha: evidence.headSha, path: destination.filename, blob: destination.sha, revisionNumber: after.number }],
-    mainIntegration: { baseSha: RSS_MAIN, observedBase: evidence.baseSha, snapshots, parent: { path: RSS_PARENT, revision: parent.revision,
+    mainIntegration: { baseSha: RSS_MAIN, observedBase: evidence.baseSha, comparisonMergeBase: evidence.comparisonMergeBase,
+      additionalMainParents, snapshots, parent: { path: RSS_PARENT, revision: parent.revision,
       blob: shaAt(mainFiles, RSS_PARENT), modulePath, moduleBlob: shaAt(mainFiles, modulePath), sqlPath: parent.sqlPath,
       sqlBlob: shaAt(mainFiles, parent.sqlPath), registryBlob: shaAt(mainFiles, ledgerRegistry) } } };
   if (!boundIntegrationFiles(evidence, proof)) return [];

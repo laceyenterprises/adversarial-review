@@ -5105,21 +5105,27 @@ base migration directories. The child moves from slot 340 to 341 with the same
 SQL and operation bytes. Main's slot 340 remains intact.
 
 The first-parent path from protected author to candidate head must include every
-diagnostic snapshot and one two-parent integration whose second parent is
-`283d06e4`. The migration directories must agree with the author snapshot before
-the integration and the proved integrated snapshot from that point onward. The
-certificate binds the repository, both heads, both merge bases, the observed
-commit parents, and the exact preservation paths and blobs. The native
-primary-change evaluator consumes it in the same evaluation that collected it.
-Audit copies describe the proof and a subsequent evaluation recomputes it from
-immutable objects. The [offline witness](../test/fixtures/migration-renumber-11143/README.md)
-records the original history.
+diagnostic snapshot and start its integrations with a two-parent merge of
+`283d06e4`. LAC-2246 allows subsequent two-parent main merges only when each
+second parent independently advances the prior main parent, is in the ancestry
+of the observed trusted `main` base, and has exactly the same migration
+directories as `283d06e4`. The last integrated parent must match the PR
+comparison merge base. The migration directories must agree with the author
+snapshot before the first integration and the proved integrated snapshot from
+that point onward, including at every later merge. The certificate binds the
+repository, both heads, both merge bases, the observed base and commit parents,
+the later main tree objects, and the exact preservation paths and blobs. The
+native primary-change evaluator consumes it in the same evaluation that
+collected it. Audit copies describe the proof. A subsequent evaluation recomputes
+it from immutable objects. The offline witness records both published
+integrations. [PR #11143 replay](../test/fixtures/migration-renumber-11143/README.md)
 
 Deterministic integration refusals use `main-integration-ancestry-invalid`,
 `main-integration-source-name-mismatch`, `main-integration-blob-missing` or
-`main-integration-directory-missing`; transport failures retain
-`snapshot-read-failed`. A copied or edited certificate, including an unchanged
-proof attached to a spread/cloned evidence object, refuses with
+`main-integration-directory-missing` for those structural errors. An ancestry
+or migration-tree mismatch leaves `main-integration-unproven`. Transport
+failures retain `snapshot-read-failed`. A copied or edited certificate,
+including an unchanged proof attached to a spread/cloned evidence object, refuses with
 `main-integration-certificate-unbound` on the consuming evidence. Callers must
 pass the original collected evidence object to the native evaluator. These
 diagnostics do not grant preservation authority or change refusal identity.

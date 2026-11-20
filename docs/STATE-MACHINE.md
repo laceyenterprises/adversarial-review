@@ -1768,7 +1768,11 @@ increasing. The LAC-2127 Agent OS ledger continuation can certify a move to
 slot 341 over the applied `successful_rss_index_339` revision in slot 340 using
 the immutable main integration, full first-parent history, registered parent
 operations and unchanged child operations. The current evaluation binds that
-certificate to the exact repository, heads, paths and blobs. Optional proof
+certificate to the exact repository, heads, paths and blobs. LAC-2246 permits
+later first-parent integrations when each second parent advances the prior
+trusted main parent, belongs to the observed main ancestry and has the same
+migration tree as the original RSS main. The last integrated parent must be
+the comparison merge base. Optional proof
 diagnostics stay outside deterministic refusal identity and bounded region
 summaries. Every observed snapshot must preserve the original
 operations; a registry swap without its paired module supplies no proof.

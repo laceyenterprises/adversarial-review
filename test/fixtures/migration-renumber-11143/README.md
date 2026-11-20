@@ -34,3 +34,30 @@ individual objects and ancestry edges to exercise refusal paths. Replay is
 offline and runs no migration code. The continuation test reuses only the
 migration-file records for the same objects. Their directory trees are
 unchanged across those two commits, as verified by the recorded Git objects.
+
+`subsequent-main.json.gz` supplements the witness with the later GitHub commit,
+tree and ancestry reads for LAC-2246. The migration-file records relative to the
+old merge base still apply because the protected tree objects are identical
+from the second continuation snapshot through the new merge head.
+
+| Role | Commit |
+| --- | --- |
+| Third continuation snapshot | `aae769e9596afd3419993ea1f3dc4c7e85d5a9cf` |
+| Source immediately before the second integration | `72a4f711531785e5a75c31b43ff7de26317cdaf7` |
+| Second main parent and observed comparison base | `8adcc49518a67a49b170f325b0230262a3095693` |
+| Second two-parent integrated head | `45f25a244b3e99e84bcd7c03498dc9f06850bd4a` |
+
+The second main parent is 29 commits ahead of `283d06e4` with `283d06e4`
+as the comparison merge base. Both main parents have these migration
+directory tree IDs.
+
+| Directory | Tree |
+| --- | --- |
+| `alembic/versions` | `f0a095ab7b29ea78c9a28eb571638b0bade1b8d5` |
+| `src/session_ledger/alembic_postgres_revisions` | `26b2778d3e3e015d4c54398435ad98ed7cd3b818` |
+| `src/session_ledger/migrations` | `b85558096250ad218b18fe0d80b5affb8285d4bd` |
+
+The replay checks the second merge through the native history reader, certificate
+collector and preservation predicate. It also exercises a later observed base,
+multiple additional parents, modified main and intermediate migration trees,
+and certificates used outside their collecting evaluation.

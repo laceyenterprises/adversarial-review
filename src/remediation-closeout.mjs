@@ -26,9 +26,11 @@ export function remediationCloseout({ rootDir, job, headSha, workerPushedHeadSha
   const max = Number(plan.maxRounds);
   const roundsLeft = job.finalRound === 'comment-only' ? false : Number.isFinite(max) ? round < max : null;
   const final = roundsLeft === false;
-  const head = headSha || lifecycle?.headSha || job.revisionRef;
+  const normalizeHead = value => value ? String(value).toLowerCase() : null;
+  const head = normalizeHead(headSha || lifecycle?.headSha || job.revisionRef);
+  const sourceHead = normalizeHead(job.revisionRef);
   const workerPublishedHead = Boolean(workerPushedHeadSha && head)
-    && String(workerPushedHeadSha).toLowerCase() === String(head).toLowerCase();
+    && normalizeHead(workerPushedHeadSha) === head;
   const tenureRange = job.remediationWorker?.originTenureId && workerPublishedHead
     ? tenureReviewReason(job.revisionRef, head) : null;
   let leases = snapshot?.observations?.leases;
@@ -65,10 +67,10 @@ export function remediationCloseout({ rootDir, job, headSha, workerPushedHeadSha
   const handoff = job.closureHandoff;
   const finalFixAll = handoff?.reason === 'final-fix-all';
   const boundFinalFixAll = finalFixAll && reviewAvailable && ['full', 'closeout'].includes(handoff.review)
-    && isRemediationRoundBudgetSpent(plan) && Boolean(job.revisionRef)
-    && handoff.headSha === job.revisionRef && review.headSha === job.revisionRef
+    && isRemediationRoundBudgetSpent(plan) && Boolean(sourceHead)
+    && normalizeHead(handoff.headSha) === sourceHead && normalizeHead(review.headSha) === sourceHead
     && isSettledCommentOnlyReview(review);
-  const fullReviewRequired = Boolean(tenureRange) || (workerPublishedHead && head !== job.revisionRef
+  const fullReviewRequired = Boolean(tenureRange) || (workerPublishedHead && head !== sourceHead
     && ((handoff?.reason === 'conflict-primary-unproven' && handoff.review === 'full')
       || (finalFixAll && !boundFinalFixAll)));
   // Publication moves custody only. The shared closer still consumes the
@@ -83,12 +85,12 @@ export function remediationCloseout({ rootDir, job, headSha, workerPushedHeadSha
         cfg.getMergeAuthorityConfig(), { fallbackSources: cfg.sources || {} });
     } catch { policy = { state: 'error', value: null, provenance: { sourceRef: 'merge-authority-policy' } }; }
   }
-  const checksValue = ciGate && ciGate.headSha === head
+  const checksValue = ciGate && normalizeHead(ciGate.headSha) === head
     ? { conclusion: ({ green: 'SUCCESS', failed: 'FAILURE', pending: 'PENDING' })[ciGate.state] || 'PENDING',
       ...(ciGate.infrastructureOnly ? { infrastructureOnly: true, failedChecks: ciGate.failedChecks } : {}),
       ...(ciGate.runnerless ? { runnerless: ciGate.runnerless } : {}) }
     : { conclusion: 'PENDING' };
-  const checkReadState = ciGate?.headSha !== head ? 'unknown'
+  const checkReadState = normalizeHead(ciGate?.headSha) !== head ? 'unknown'
     : ['green', 'failed', 'pending'].includes(ciGate?.state) ? 'complete' : ciGate?.error ? 'error' : 'unknown';
   // Without a proven publish, failed CI still belongs to the active job's
   // existing retry path. Completing that owner here would strand legacy jobs

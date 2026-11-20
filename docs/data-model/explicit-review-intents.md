@@ -35,6 +35,11 @@ pending priority receipt can bypass reviewed-head dedup. Worker completion
 receipts follow ordinary deduplication and the existing review ceilings. When
 closure takes a capped Comment-only cycle, the writer restores the delivered
 review identity and marks the worker receipt `refused` in one transaction.
+Cycle-cap hammer routing also refuses a worker receipt only while the routed
+row snapshot still matches after asynchronous ownership reads. Terminal
+closer-head, same-head budget and fleet-self-repair restorations settle the
+receipt atomically with the row change, using distinct refusal reasons.
+Failed row comparisons and priority receipts retain their pending intent.
 The worker receipt never authorizes an operator override. The existing
 head lease, durable reviewing claim and normal rereview ceilings still apply.
 Consumption occurs immediately before runtime dispatch under a SQLite write

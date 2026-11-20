@@ -83,6 +83,13 @@ test('final-round non-blocking review enqueues one runnable fix-all and fences e
   const prompt = buildRemediationPrompt(job, { template: 'Synthetic template.', remediationReplyPath: join(f.rootDir, 'reply.json') });
   assert.match(prompt, /fix every finding/);
   assert.match(prompt, /fix this PR's own red checks/);
+  assert.match(prompt, /Record a disposition for every finding in your reply or commit, with validation evidence/);
+  assert.match(prompt, /exact-head closer validation against the original findings, source preservation and required CI, with no further automatic review/);
+  assert.match(prompt, /reReview.requested = false/);
+  assert.match(prompt, /reReview.reason = null/);
+  assert.match(prompt, /## Comment-only final round \(authoritative\)/);
+  assert.doesNotMatch(prompt, /only a fresh adversarial pass can replace it/);
+  assert.doesNotMatch(prompt, /Request a fresh full adversarial review/);
   // The pending receipt survives the ordinary liveness grace.
   f.args.now = () => Date.parse(AT) + 60 * 60 * 1000;
   const again = await maybeDispatchAmaClosureFor(f.args);
@@ -93,6 +100,30 @@ test('final-round non-blocking review enqueues one runnable fix-all and fences e
   assert.equal(claimed.job.jobId, job.jobId);
   assert.equal(claimed.job.remediationPlan.currentRound, 1);
   assert.equal(finalFixAllQueueOwner(f.rootDir, f.identity).jobId, job.jobId);
+});
+
+test('fix-all closeout normalizes source, review, publication and CI SHA case', t => {
+  const f = fixture(t);
+  const job = { repo: f.identity.repo, prNumber: 5, revisionRef: HEAD.toUpperCase(), reviewBody: BODY,
+    closureHandoff: { reason: 'final-fix-all', headSha: HEAD, review: 'closeout' },
+    remediationPlan: { currentRound: 1, maxRounds: 1 } };
+  const snapshot = deriveNextActionSnapshot({ observations: {
+    leases: { closer: null }, launches: { closer: null }, policy: { autonomousMergeExecutionEnabled: true },
+    reviews: { state: 'complete', value: { verdict: 'comment-only', headSha: HEAD.toUpperCase(),
+      blockingFindingState: 'known', blockingFindingCount: 0,
+      nonBlockingFindingState: 'known', nonBlockingFindingCount: 1 } },
+  } });
+  const closeout = remediationCloseout({ rootDir: f.rootDir, job, snapshot, completedAt: AT,
+    headSha: NEXT.toUpperCase(), workerPushedHeadSha: NEXT, ciGate: { state: 'green', headSha: NEXT.toUpperCase() } });
+  assert.deepEqual(closeout.snapshot.observations.remediation.value.finalPush, { headSha: NEXT, suppressed: true });
+  assert.equal(closeoutRereview(closeout).requested, false);
+  assert.equal(closeout.decision.action, 'hammer');
+
+  const unchanged = remediationCloseout({ rootDir: f.rootDir,
+    job: { ...job, closureHandoff: { reason: 'conflict-primary-unproven', review: 'full' } },
+    snapshot, completedAt: AT, headSha: HEAD, workerPushedHeadSha: HEAD.toUpperCase(),
+    ciGate: { state: 'green', headSha: HEAD } });
+  assert.equal(unchanged.snapshot.observations.remediation.value.fullReviewRequired, undefined);
 });
 
 for (const checks of ['green', 'pending', 'failed']) test(`fix-all publication hands off exact-head closeout with ${checks} checks`, async t => {

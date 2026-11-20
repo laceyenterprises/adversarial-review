@@ -415,7 +415,7 @@
     {
       "id": "explicit-review-intent",
       "owner": "watcher review dispatch",
-      "description": "A durable exact-head receipt records accepted review admission. Worker completion follows ordinary deduplication and ceilings. A priority request can supersede an unconsumed worker receipt while preserving its waiting threshold. Capacity, credentials and queue depth retain pending intent. The waiting threshold produces a notice. Only a positively unstarted launch may return its consumed receipt to pending under the session CAS.",
+      "description": "A durable exact-head receipt records accepted review admission. Worker completion follows ordinary deduplication and ceilings. A priority request can supersede an unconsumed worker receipt while preserving its waiting threshold. Capacity, credentials and queue depth retain pending intent. The waiting threshold produces a notice. Only a positively unstarted launch may return its consumed receipt to pending under the session CAS. Automatic closure and same-head restoration refuse worker receipts under the matching row transaction; asynchronous cycle-cap routing rechecks the original row snapshot before settlement.",
       "codeSources": [
         "src/explicit-review-intent.mjs",
         "src/review-state.mjs",
@@ -463,7 +463,7 @@
           "id": "explicit-review-intent.03",
           "from": "pending",
           "to": "refused",
-          "trigger": "head changed, terminal PR, ceiling or automatic closure handoff",
+          "trigger": "head changed, terminal PR, ceiling, automatic closure handoff or same-head restoration",
           "codeSource": "src/explicit-review-intent.mjs"
         },
         {
@@ -1964,7 +1964,7 @@
     "src/ama/pre-receipt-intent.mjs": "1656fd19dfaf3ea9bc351c2a70a46f7a7add0b8a0573fbaa259661ea6f762f98",
     "src/follow-up-branch.mjs": "637f2a18c5fb2a89d2d02c98d80587a713a188c10d70891941d77df847579a8d",
     "src/posted-review-head-repair.mjs": "ce761260224b7a82d152e5b289e8967bbf54026c427a17bdb5cff0a6556ff7d6",
-    "src/pollonce-phases.mjs": "b88ebb5444de62838c8fba929be0618a20132dda79b57316bfe3eb3453e32a64",
+    "src/pollonce-phases.mjs": "8a4c183852a45a686d746b2c2dc993e2a1334ab0ef31a6884286d88fe87efcf9",
     "src/review-statuses.mjs": "e5b4f877397ccae443c0ea47babdad7c83d71b6f474a31ad92130b88382f6a7b",
     "src/adapters/reviewer-runtime/agent-os-hq/index.mjs": "8ecf105dc9f46ac09f6a8fb369c14ff7e9cfd1bc17a46da4d87fa146a1bf4d2d",
     "src/adapters/reviewer-runtime/agent-runtime/index.mjs": "37a25e62f889f9d87e83a20495a9a3baef75f53db163ef6ed7638f7d6ac09f82",
@@ -1990,7 +1990,7 @@
     "src/ama/gsr-closer-lease.mjs": "fea38cdec29edd83201cacbd0fb4134ac4f79156d98a385e647615b45406bff2",
     "src/remediation-publication-recovery.mjs": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
     "src/remediation-claimed-requeue.mjs": "cf0a1d822d48135bc08429e42eba27292e064d1c62ab283fcd5455c7dc6a140a",
-    "src/hamclose-review-admission.mjs": "a682aad2fbf1071a527de97bd8b55cf1b15a735fd6abe6cc86b9dc8d03aea9c3",
+    "src/hamclose-review-admission.mjs": "c829e93f16b63b50906a58596b5b96eca31b9e57ac84869e7377d8e629fb84bd",
     "src/ama/zero-output-refusal.mjs": "da6ef0ec280e84b2b884c7f10d27debc925a538fe5d838ac1d6154d7fad82b0e",
     "src/remediation-job-missing-recovery.mjs": "773a4a873e4bd06780ace2bca1fdcfd141bfdbaf29387fac6f19a6828ba32794",
     "src/remediation-ended-round-recovery.mjs": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",

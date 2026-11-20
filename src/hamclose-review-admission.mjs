@@ -85,7 +85,9 @@ export function routeBudgetExhaustedReviewToClosure({ db, repo, prNumber, headSh
 
 export function routeCappedReviewToClosure({ db, stmtGetReviewRow, repo, prNumber, headSha,
   row, ceiling, roundBudget, completedRoundTimestamps = [], logger = console }) {
-  if (!row || ['reviewing', 'malformed', 'failed-orphan'].includes(row.review_status)) return false;
+  // Preserve red-check evidence for the CIBLOCKHAM owner instead of converting
+  // its row to posted and dropping the closer's failed-check input.
+  if (!row || ['reviewing', 'malformed', 'failed-orphan', 'ci-blocked'].includes(row.review_status)) return false;
   if (row.review_status === 'failed' && row.rereview_reason !== 'system-review-ceiling-closure') return false;
   const hardCeiling = postedReviewCeilingReached({ db, repo, prNumber, ceiling });
   const identity = { repo, prNumber, headSha };
@@ -115,7 +117,7 @@ export function routeCappedReviewToClosure({ db, stmtGetReviewRow, repo, prNumbe
     db.prepare(`UPDATE reviewed_prs SET review_status='posted',
     reviewer_head_sha=?, posted_at=?, rereview_requested_at=NULL, rereview_reason='system-review-ceiling-closure'
     WHERE repo=? AND pr_number=? AND pr_state='open' AND review_status=?
-    AND review_status IN ('posted','pending','pending-upstream','ci-blocked','failed')
+    AND review_status IN ('posted','pending','pending-upstream','failed')
     AND revision_ref IS ? AND reviewer_head_sha IS ? AND posted_at IS ?
     AND rereview_requested_at IS ? AND rereview_reason IS ?
     AND NOT (review_status='posted' AND reviewer_head_sha IS ? AND posted_at IS ?

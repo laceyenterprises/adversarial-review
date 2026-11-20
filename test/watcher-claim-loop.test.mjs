@@ -2615,6 +2615,13 @@ for (const reason of ['closer-commit-trailer', 'active-closer-published-head', '
         'laceyenterprises/adversarial-review', 101, '2026-10-10T18:10:00Z', 'gemini',
         'open', 'pending', 0, 'sha-happy-101', '2026-10-10T18:36:00Z',
         'AMA automated recovery: stale-review-head');
+      const { recordExplicitReviewIntent } = await import(${JSON.stringify(fileUrl('src', 'explicit-review-intent.mjs'))});
+      recordExplicitReviewIntent(db, { repo: 'laceyenterprises/adversarial-review', prNumber: 101,
+        headSha: 'sha-happy-101', requestId: 'remediation:closer-fixture:2', actor: 'remediation-watch',
+        requestedAt: new Date().toISOString() });
+    `, afterFirstPoll: `
+      const receipt = db.prepare("SELECT * FROM explicit_review_intents WHERE request_id='remediation:closer-fixture:2'").get();
+      assert.equal(receipt.state, ${JSON.stringify(probeDeferred ? 'pending' : 'refused')});
     ` }));
     const run = spawnSync(process.execPath, ['--no-warnings', '--import', pathToFileURL(registerPath).href, runnerPath], {
       cwd: REPO_ROOT, encoding: 'utf8', timeout: 30000,
@@ -2631,6 +2638,38 @@ for (const reason of ['closer-commit-trailer', 'active-closer-published-head', '
     if (probeDeferred) assert.equal(summary.fsrRows.find(row => row.pr_number === 101).rereview_reason,
       'AMA automated recovery: stale-review-head', output);
     else assert.equal(summary.rows['101'].reviewer_head_sha, 'sha-reviewed-101', output);
+  } finally { rmSync(tmp, { recursive: true, force: true }); }
+});
+
+test('LAC-2231: same-head budget restoration settles the pending worker receipt', () => {
+  const tmp = mkdtempSync(path.join(tmpdir(), 'samehead-receipt-'));
+  try {
+    const loaderPath = path.join(tmp, 'loader.mjs'), registerPath = path.join(tmp, 'register.mjs');
+    const runnerPath = path.join(tmp, 'runner.mjs');
+    writeFileSync(loaderPath, buildLoaderSource());
+    writeFileSync(registerPath, buildRegisterSource(loaderPath));
+    writeFileSync(runnerPath, buildRunnerSource({ prePollSetup: `
+      db.prepare(\`INSERT INTO reviewed_prs
+        (repo, pr_number, reviewed_at, reviewer, pr_state, review_status, review_attempts,
+         revision_ref, reviewer_head_sha, posted_at, rereview_requested_at, rereview_reason)
+        VALUES (?,101,?,'gemini','open','pending',0,'sha-happy-101','sha-happy-101',?,?,?)\`)
+        .run('laceyenterprises/adversarial-review', new Date().toISOString(), new Date().toISOString(),
+          new Date().toISOString(), 'worker completion');
+      const { recordExplicitReviewIntent } = await import(${JSON.stringify(fileUrl('src', 'explicit-review-intent.mjs'))});
+      recordExplicitReviewIntent(db, { repo: 'laceyenterprises/adversarial-review', prNumber: 101,
+        headSha: 'sha-happy-101', requestId: 'remediation:samehead-fixture:2', actor: 'remediation-watch',
+        requestedAt: new Date().toISOString() });
+    `, afterFirstPoll: `
+      const receipt = db.prepare("SELECT * FROM explicit_review_intents WHERE request_id='remediation:samehead-fixture:2'").get();
+      assert.equal(receipt.state, 'refused');
+      assert.equal(receipt.reason, 'same-head-budget-restore');
+      assert.equal(db.prepare('SELECT review_status FROM reviewed_prs WHERE pr_number=101').get().review_status, 'posted');
+      assert.equal(globalThis.__watcherClaimLoopReviewerSpawns.filter(spawn => spawn.subjectContext.prNumber === 101).length, 0);
+    ` }));
+    const result = spawnSync(process.execPath,
+      ['--no-warnings', '--import', pathToFileURL(registerPath).href, runnerPath],
+      { cwd: REPO_ROOT, encoding: 'utf8', env: fixtureEnv(installGhFixture(tmp)), timeout: 30000 });
+    assert.equal(result.status, 0, `${result.stdout}${result.stderr}`);
   } finally { rmSync(tmp, { recursive: true, force: true }); }
 });
 
@@ -3151,6 +3190,59 @@ test('REVIEWSPILL-01 production admission spills overdue requests before Gemini 
   assert.ok(spill, output);
   assert.equal(spill.subjectContext.crossModelReviewWaived, false);
   assert.equal(summary.depthDiagnostics.report?.engagementSpilloverReviews, 2);
+});
+
+for (const race of ['none', 'row-moved', 'operator-request']) test(`LAC-2231: cycle-cap handoff settles only its worker receipt (${race})`, () => {
+  const tmp = mkdtempSync(path.join(tmpdir(), 'caproute-receipt-'));
+  try {
+    const loaderPath = path.join(tmp, 'loader.mjs');
+    const registerPath = path.join(tmp, 'register.mjs');
+    const runnerPath = path.join(tmp, 'runner.mjs');
+    writeFileSync(loaderPath, buildLoaderSource({ capRouteSource: `
+      export function isReviewCycleCapRoutedToHammer({reviewRow}) {
+        return reviewRow?.failure_message?.startsWith('[review-cycle-cap]') === true;
+      }
+      export async function maybeRouteReviewCycleCapToHammer({ db, prNumber }) {
+        if (prNumber !== 101) return { handled: false };
+        if (${JSON.stringify(race)} === 'row-moved') {
+          db.prepare("UPDATE reviewed_prs SET rereview_reason='newer-request' WHERE pr_number=101").run();
+        }
+        if (${JSON.stringify(race)} === 'operator-request') {
+          const { recordExplicitReviewIntent } = await import(${JSON.stringify(fileUrl('src', 'explicit-review-intent.mjs'))});
+          recordExplicitReviewIntent(db, { repo: 'laceyenterprises/adversarial-review', prNumber: 101,
+            headSha: 'sha-happy-101', requestId: 'operator-race', actor: 'fixture-operator',
+            requestedAt: new Date().toISOString() });
+        }
+        return { handled: true, outcome: 'ama-dispatched' };
+      }` }));
+    writeFileSync(registerPath, buildRegisterSource(loaderPath));
+    writeFileSync(runnerPath, buildRunnerSource({
+      prePollSetup: `
+        db.prepare(\`INSERT INTO reviewed_prs
+          (repo, pr_number, reviewed_at, reviewer, pr_state, review_status, review_attempts,
+           reviewer_head_sha, revision_ref, failure_message)
+          VALUES (?,101,?,'gemini','open','failed',9,'sha-happy-101','sha-happy-101','[review-cycle-cap] capped')\`)
+          .run('laceyenterprises/adversarial-review', new Date().toISOString());
+        const { recordExplicitReviewIntent } = await import(${JSON.stringify(fileUrl('src', 'explicit-review-intent.mjs'))});
+        recordExplicitReviewIntent(db, { repo: 'laceyenterprises/adversarial-review', prNumber: 101,
+          headSha: 'sha-happy-101', requestId: 'remediation:cap-fixture:2', actor: 'remediation-watch',
+          requestedAt: new Date().toISOString() });
+      `,
+      afterFirstPoll: `
+        const receipt = db.prepare("SELECT * FROM explicit_review_intents WHERE request_id='remediation:cap-fixture:2'").get();
+        assert.equal(receipt.state, ${JSON.stringify(race === 'none' ? 'refused' : race === 'row-moved' ? 'pending' : 'coalesced')});
+        if (${JSON.stringify(race)} === 'none') assert.equal(receipt.reason, 'review-cycle-cap-hammer');
+        if (${JSON.stringify(race)} === 'operator-request') {
+          assert.equal(db.prepare("SELECT state FROM explicit_review_intents WHERE request_id='operator-race'").get().state, 'pending');
+        }
+        assert.equal(globalThis.__watcherClaimLoopReviewerSpawns.filter(spawn => spawn.subjectContext.prNumber === 101).length, 0);
+      `,
+    }));
+    const result = spawnSync(process.execPath,
+      ['--no-warnings', '--import', pathToFileURL(registerPath).href, runnerPath],
+      { cwd: REPO_ROOT, encoding: 'utf8', env: fixtureEnv(installGhFixture(tmp)), timeout: 30000 });
+    assert.equal(result.status, 0, `${result.stdout}${result.stderr}`);
+  } finally { rmSync(tmp, { recursive: true, force: true }); }
 });
 
 test('EXHAUSTEDHEADOWNER-01: capped stale builder head reaches verdict-only admission', () => {
@@ -4260,7 +4352,7 @@ function seatIdleSynthetic(source) {
     .replaceAll("name: 'adversarial-review'", "name: 'review-fixture'");
 }
 
-for (const mode of ['dispatch', 'credential-hold', 'head-moved-held', 'closed-held', 'ceiling', 'overdue', 'no-intent', 'spawn-throw', 'spawn-refused', 'spawn-held-split']) {
+for (const mode of ['dispatch', 'credential-hold', 'head-moved-held', 'closed-held', 'ceiling', 'overdue', 'no-intent', 'worker-dedup', 'spawn-throw', 'spawn-refused', 'spawn-held-split']) {
   test(`RETRIGGERDEDUP-01: real poll preserves same-head dedup and explicit intent (${mode})`, () => {
     const tmp = mkdtempSync(path.join(tmpdir(), 'watcher-explicit-intent-'));
     try {
@@ -4322,7 +4414,9 @@ for (const mode of ['dispatch', 'credential-hold', 'head-moved-held', 'closed-he
           if (${JSON.stringify(mode)} !== 'no-intent') {
             const accepted = requestReviewRereview({ rootDir: ${JSON.stringify(REPO_ROOT)}, db, repo: fixtureRepo, prNumber: 101,
               targetRevisionRef: fixtureHead, reason: 'retrigger-review: synthetic fixture',
-              explicitReviewRequest: { requestId: 'synthetic-request', actor: 'fixture-operator' } });
+              explicitReviewRequest: ${JSON.stringify(mode === 'worker-dedup'
+                ? { requestId: 'remediation:dedup-fixture:2', actor: 'remediation-watch' }
+                : { requestId: 'synthetic-request', actor: 'fixture-operator' })} });
             assert.equal(accepted.triggered,true,JSON.stringify(accepted));
           } else db.prepare("UPDATE reviewed_prs SET review_status='pending', posted_at=NULL WHERE pr_number=101").run();
           if (${JSON.stringify(['overdue', 'credential-hold'].includes(mode))}) db.prepare(
@@ -4370,6 +4464,13 @@ for (const mode of ['dispatch', 'credential-hold', 'head-moved-held', 'closed-he
               const row = db.prepare('SELECT review_status, review_attempts FROM reviewed_prs WHERE pr_number=101').get();
               assert.equal(row.review_status, 'pending');
               assert.equal(row.review_attempts, 1, 'an unstarted launch must not charge an attempt');
+            } else if (${JSON.stringify(mode)} === 'worker-dedup') {
+              assert.equal(receipt().state,'refused');
+              assert.equal(receipt().reason,'same-head-already-reviewed');
+              assert.equal(db.prepare('SELECT review_status FROM reviewed_prs WHERE pr_number=101').get().review_status,'posted');
+              await pollOnce(octokit,pollOptions);
+              assert.ok(receipt().notified_at);
+              assert.ok(githubWrites.some(write => write.args[0].body.includes('Remediation review admission settled')));
             } else if (${JSON.stringify(mode)} !== 'no-intent') {
               assert.equal(receipt().state,'refused');
               if (${JSON.stringify(mode)} === 'head-moved-held') assert.equal(receipt().reason,'head-changed');

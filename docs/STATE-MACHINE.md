@@ -43,6 +43,15 @@ See [the closure runbook](RUNBOOK-ama-closure.md).
 
 # Adversarial Review State Machine Notes
 
+Worker completion receipts leave `pending` for `refused` when a matching
+cycle-cap hammer handoff or terminal closer-head, same-head budget or
+fleet-self-repair restoration takes custody without reviewer dispatch.
+Restoration and settlement share the row transaction; the asynchronous cap
+route rechecks its original row snapshot before settlement. A newer priority
+request or changed row retains its receipt. Capped review admission preserves
+`ci-blocked` rows for CIBLOCKHAM's live failed-check evidence path. Existing
+receipt states, waiting notices and deployed smoke commands are unchanged.
+
 REMEDIATIONOWNER-01 retains the existing follow-up lifecycle: observed live or
 unreadable HQ PR ownership defers before claim, without charging a round.
 Exhausting the 25-lookup budget saves a filename cursor and the next claim

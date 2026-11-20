@@ -285,7 +285,7 @@ import { refundReviewHarnessFault } from './review-harness-retry.mjs';
 import { isReviewCycleCapRoutedToHammer, maybeRouteReviewCycleCapToHammer } from './review-cycle-cap-hammer.mjs';
 import { latestReviewedHeadSha, maybeRouteCiBlockedToHammer } from './ci-blocked-hammer.mjs';
 import { hammerHeadOwnership } from './hammer-head-ownership.mjs';
-import { restoreHammerOwnedReview, declineSuppressedAmaRecoveryRereview } from './closer-head-rereview-decline.mjs';
+import { restoreHammerOwnedReview } from './closer-head-rereview-decline.mjs';
 import { handOffRetriggerWithoutJob } from './retrigger-no-job-handoff.mjs';
 import { resolveReviewerTimeoutMs, resolveGeminiReviewerProcessTimeoutMs } from './reviewer-timeout.mjs';
 import { resolveReviewerCeilingSeconds, usesStreamedReviewerCeiling } from './reviewer-timeout-model.mjs';
@@ -1603,19 +1603,32 @@ export async function processReviewSubject(entry, ctx) {
       });
       // CYCLECAPHAM-01: a capped PR goes to the hammer for final adjudication on
       // every tick, instead of waiting on an operator label.
-      const routeReviewCycleCapToHammer = (row) => tenureReviewRequired
-        ? Promise.resolve({ handled: false }) : maybeRouteReviewCycleCapToHammer({
-        rootDir: ROOT,
-        db,
-        repoPath,
-        prNumber,
-        existing: row,
-        subjectRef: subject.ref,
-        currentRevisionRef: subject.ref?.revisionRef || subject.headSha || null,
-        labelNames: prLabelNames,
-        cap: cycleCapConfig.cap,
-        execFileImpl: execFileAsync,
-      });
+      const routeReviewCycleCapToHammer = async (row) => {
+        if (tenureReviewRequired) return { handled: false };
+        const result = await maybeRouteReviewCycleCapToHammer({
+          rootDir: ROOT,
+          db,
+          repoPath,
+          prNumber,
+          existing: row,
+          subjectRef: subject.ref,
+          currentRevisionRef: subject.ref?.revisionRef || subject.headSha || null,
+          labelNames: prLabelNames,
+          cap: cycleCapConfig.cap,
+          execFileImpl: execFileAsync,
+        });
+        if (result.handled && row) {
+          // The route awaits external ownership reads. Settle only if its row
+          // snapshot still matches; a newer request or claim keeps its receipt.
+          handoffAutomaticReview(db, reviewIntentIdentity, 'review-cycle-cap-hammer', () =>
+            db.prepare(`SELECT 1 FROM reviewed_prs WHERE repo=? AND pr_number=?
+              AND pr_state='open' AND review_status=? AND revision_ref IS ?
+              AND reviewer_head_sha IS ? AND rereview_requested_at IS ? AND rereview_reason IS ?`)
+              .get(repoPath, prNumber, row.review_status, row.revision_ref ?? null,
+                row.reviewer_head_sha ?? null, row.rereview_requested_at ?? null, row.rereview_reason ?? null));
+        }
+        return result;
+      };
       // CAPROUTE-01: route before generic failed-row retry admission. A cap
       // failure is an ownership handoff, including when revision_ref is stale.
       if (!explicitIntentForHead() && !isExplicitOperatorReviewRetrigger(existing) && !isOrphanHeadReviewRequested(existing, subject.headSha)
@@ -3219,15 +3232,16 @@ export async function processReviewSubject(entry, ctx) {
       });
       const declineFleetSelfRepairRereview = (reason) => {
         if (!fleetSelfRepairRereview.requested || fleetSelfRepairRereview.stale) return;
-        declineFleetSelfRepairTrailerOnlyRereview({
-          db,
-          repoPath,
-          prNumber,
-          reason,
-          reviewedHeadSha: fleetSelfRepairRereview.reviewedHeadSha,
-          liveHeadSha: fleetSelfRepairRereview.liveHeadSha || subject.headSha,
-          logger: console,
-        });
+        handoffAutomaticReview(db, reviewIntentIdentity, 'fleet-self-repair-declined', () =>
+          declineFleetSelfRepairTrailerOnlyRereview({
+            db,
+            repoPath,
+            prNumber,
+            reason,
+            reviewedHeadSha: fleetSelfRepairRereview.reviewedHeadSha,
+            liveHeadSha: fleetSelfRepairRereview.liveHeadSha || subject.headSha,
+            logger: console,
+          }).declined);
       };
 
       if (!explicitIntentForHead() && !isExplicitOperatorReviewRetrigger(existing) && !isOrphanHeadReviewRequested(existing, subject.headSha)
@@ -3253,11 +3267,11 @@ export async function processReviewSubject(entry, ctx) {
           declineFleetSelfRepairRereview(`terminal-closer-head:${closerSpawnSuppression.reason}`);
           // NOOWNER-01: the same for an AMA-recovery request, so the row never
           // sits pending with no reviewer and no closer (agent-os PR 8022).
-          declineSuppressedAmaRecoveryRereview({
-            db, repoPath, prNumber, reviewRow: current || existing, headSha: subject.headSha,
-            reviewedHeadSha: latestReviewedHeadSha({ db, repoPath, prNumber }),
-            suppressionReason: closerSpawnSuppression.reason,
-          });
+          handoffAutomaticReview(db, reviewIntentIdentity, 'terminal-closer-head', () =>
+            restoreHammerOwnedReview({
+              db, repoPath, prNumber, reviewRow: stmtGetReviewRow.get(repoPath, prNumber),
+              headSha: subject.headSha, reviewedHeadSha: latestReviewedHeadSha({ db, repoPath, prNumber }),
+            }));
           return;
         }
 
@@ -3297,13 +3311,11 @@ export async function processReviewSubject(entry, ctx) {
               : '';
           let rowActionDetail = 'leaving existing review row intact';
           if (firstPassBudgetSuppression.reason === 'same-head-already-reviewed') {
-            const restored = stmtRestoreSameHeadSuppressedReviewPosted.run(
-              new Date().toISOString(),
-              repoPath,
-              prNumber,
-              subject.headSha
-            );
-            rowActionDetail = restored.changes === 1
+            const restored = handoffAutomaticReview(db, reviewIntentIdentity, 'same-head-budget-restore', () =>
+              stmtRestoreSameHeadSuppressedReviewPosted.run(
+                new Date().toISOString(), repoPath, prNumber, subject.headSha
+              ).changes === 1);
+            rowActionDetail = restored
               ? "restored review_status='posted'"
               : "same-head restore skipped by CAS";
           }

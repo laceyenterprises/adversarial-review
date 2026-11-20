@@ -862,8 +862,11 @@ two-path merge model** (operational reference:
 
 At the round cap, an eligible exact-head Comment-only review with zero
 blocking findings and remaining non-blocking or demoted findings first gets
-one builder fix-all round and a full re-review. Its zero-finding re-review
-uses the daemon path below; remaining findings use the configured fallback.
+one builder fix-all round. A bound, proven fix-all publication transfers to
+the exact-head closer without another automatic full review. The worker must
+record every finding disposition; the closer validates those dispositions,
+primary-source preservation and required CI before eligible merge. Separate
+tenure and conflict-primary independent-review requirements still apply.
 The existing durable handoff receipt prevents duplicate builder work and
 concurrent closer admission.
 Final fix-all always uses an HQ-provisioned branch-push worker, including
@@ -3297,7 +3300,7 @@ observes natural retry progress without manual rescue pumping. See
 
 ### explicit-review-intent
 
-A durable exact-head receipt records accepted review admission. Worker completion follows ordinary deduplication and ceilings. A priority request can supersede an unconsumed worker receipt while preserving its waiting threshold. Capacity, credentials and queue depth retain pending intent. The waiting threshold produces a notice. Only a positively unstarted launch may return its consumed receipt to pending under the session CAS.
+A durable exact-head receipt records accepted review admission. Worker completion follows ordinary deduplication and ceilings. A priority request can supersede an unconsumed worker receipt while preserving its waiting threshold. Capacity, credentials and queue depth retain pending intent. The waiting threshold produces a notice. Only a positively unstarted launch may return its consumed receipt to pending under the session CAS. Automatic closure and same-head restoration refuse worker receipts under the matching row transaction; asynchronous cycle-cap routing rechecks the original row snapshot before settlement.
 
 ```mermaid
 stateDiagram-v2
@@ -3307,7 +3310,7 @@ stateDiagram-v2
     state "coalesced" as s3
     [*] --> s0: explicit-review-intent.01 accepted exact-head request
     s0 --> s1: explicit-review-intent.02 claim and session CAS immediately before dispatch
-    s0 --> s2: explicit-review-intent.03 head changed, terminal PR, ceiling or automatic closure handoff
+    s0 --> s2: explicit-review-intent.03 head changed, terminal PR, ceiling, automatic closure handoff or same-head restoration
     [*] --> s3: explicit-review-intent.04 additional request joins original pending head without changing waiting threshold
     s1 --> s2: explicit-review-intent.05 runtime dispatch fails after start
     s1 --> s0: explicit-review-intent.06 positively unstarted launch returns its own intent under session CAS
@@ -5107,9 +5110,13 @@ SRE observes the next organic approval producing a closer launch with
 ## Explicit re-review dispatch (RETRIGGERDEDUP-01)
 
 An accepted `retrigger-review`, rescue `rereview`, or remediation request
-records a durable exact-head intent. It permits one fresh review even when
-the head already has a completed review, subject to existing rereview ceilings,
-reviewer claims and head leases. Implicit repeats remain deduplicated.
+records a durable exact-head intent. A priority request permits one fresh review
+even when the head already has a completed review, subject to existing rereview
+ceilings, reviewer claims and head leases. Worker completion receipts follow
+ordinary deduplication and ceilings. Automatic closure handoffs and same-head
+restorations settle those receipts under the matching row transaction; the
+asynchronous cycle-cap route rechecks its row snapshot after ownership reads.
+Implicit repeats remain deduplicated.
 Intents survive restart and admission holds regardless of age. The load-scaled
 waiting threshold, **900 seconds nominal**, produces one informational notice,
 never an expiry. Ceiling, head-change and terminal-PR refusals receive a visible

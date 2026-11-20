@@ -7,7 +7,7 @@ import { join } from 'node:path';
 import { ensureReviewStateSchema, openReviewStateDb, requestReviewRereview } from '../src/review-state.mjs';
 import { pendingExplicitReviewIntent, consumeExplicitReviewIntent, reconcileExplicitReviewIntents,
   explicitReviewRefusalBody, refuseFailedExplicitReviewDispatch, requeueUnstartedExplicitReviewDispatch,
-  recordExplicitReviewIntent, remediationReviewRequest, priorityReviewIntent } from '../src/explicit-review-intent.mjs';
+  recordExplicitReviewIntent, remediationReviewRequest, priorityReviewIntent, handoffAutomaticReview } from '../src/explicit-review-intent.mjs';
 import { routeCappedReviewToClosure } from '../src/hamclose-review-admission.mjs';
 import { closeoutRereview, remediationCloseout } from '../src/remediation-closeout.mjs';
 import { deriveNextActionSnapshot } from '../src/pr-next-action.mjs';
@@ -147,6 +147,33 @@ for (const pending of [false, true]) test(`CI-only worker completion reaches cap
   assert.equal(f.row().review_attempts, 6);
   assert.equal(f.intent(), undefined);
   assert.equal(f.queue().reason, 'explicit-review-request-refused');
+});
+
+test('capped admission preserves ci-blocked failed-check context for CIBLOCKHAM', t => {
+  const f = remediationAdmissionFixture(t);
+  f.queue();
+  f.db.prepare(`UPDATE reviewed_prs SET review_status='ci-blocked', failed_at=?,
+    failure_message='[ci-regression-no-job] unit failed' WHERE repo=? AND pr_number=?`)
+    .run(completedAt, repo, prNumber);
+  const before = f.row(), receipt = f.intent();
+  assert.equal(f.handoff(), false);
+  assert.deepEqual(f.row(), before);
+  assert.deepEqual(f.intent(), receipt);
+});
+
+test('automatic handoff rolls back receipt settlement and row writes on a failed comparison or exception', t => {
+  const f = remediationAdmissionFixture(t);
+  f.queue();
+  const before = f.row(), receipt = f.intent();
+  const handoff = callback => handoffAutomaticReview(f.db, { repo, prNumber, headSha }, 'fixture-handoff', callback);
+  const write = () => f.db.prepare("UPDATE reviewed_prs SET review_status='posted' WHERE repo=? AND pr_number=?")
+    .run(repo, prNumber);
+  assert.equal(handoff(() => { write(); return false; }), false);
+  assert.deepEqual(f.row(), before);
+  assert.deepEqual(f.intent(), receipt);
+  assert.throws(() => handoff(() => { write(); throw new Error('fixture failure'); }), /fixture failure/);
+  assert.deepEqual(f.row(), before);
+  assert.deepEqual(f.intent(), receipt);
 });
 
 for (const humanFirst of [false, true]) test(`exact-head operator request wins coalescing (operator first: ${humanFirst})`, async t => {

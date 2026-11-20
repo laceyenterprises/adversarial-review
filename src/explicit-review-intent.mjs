@@ -70,12 +70,22 @@ export function recordExplicitReviewIntent(db, {
 // Keep the row transition and receipt settlement atomic with respect to a
 // concurrent operator request. A failed row CAS leaves the intent untouched.
 export function handoffAutomaticReview(db, identity, reason, handoff) {
-  return db.transaction(() => {
-    const intent = pendingExplicitReviewIntent(db, identity);
-    if (priorityReviewIntent(intent) || !handoff(intent)) return false;
-    if (intent) settleExplicitReviewIntent(db, intent, reason);
-    return true;
-  }).immediate();
+  const rowComparisonFailed = Symbol('handoff-row-comparison-failed');
+  try {
+    return db.transaction(() => {
+      const intent = pendingExplicitReviewIntent(db, identity);
+      if (priorityReviewIntent(intent)) return false;
+      // Restore statements fence pending intents. Retire this worker receipt
+      // first, inside the same transaction, so those fences still protect any
+      // other request. Roll back settlement as well if the row CAS fails.
+      if (intent) settleExplicitReviewIntent(db, intent, reason);
+      if (!handoff(intent)) throw rowComparisonFailed;
+      return true;
+    }).immediate();
+  } catch (error) {
+    if (error === rowComparisonFailed) return false;
+    throw error;
+  }
 }
 
 export function settleExplicitReviewIntent(db, intent, reason, now = new Date().toISOString()) {

@@ -4200,15 +4200,17 @@ test('LABELGATE-01: a refusal without a matching live gate keeps its charge when
     attempt: { outcome: 'deferred', reason: 'operator-label-required:allow-submodule-pointer-bump' },
     now: '2026-07-06T11:30:00Z' });
   const deps = hammerDispatchDeps();
+  const statusReads = [];
   const result = await maybeDispatchAmaCloser({ ...args, ...deps,
     execFileImpl: async (command, argv, options) => {
       if (argv[0] === 'dispatch' && argv[1] === 'status') {
-        assert.equal(argv[2], 'unproven-label-launch');
+        statusReads.push(argv[2]);
         return { stdout: '{"status":"unknown"}', stderr: '' };
       }
       return deps.execFileImpl(command, argv, options);
     },
   });
+  assert.deepEqual(statusReads, ['unproven-label-launch']);
   assert.equal(result.dispatched, true, 'a remediation flag without a live worker cannot retain ownership');
   assert.equal(readHammerRetryCapLedger(rootDir, identity).attemptCount, 2, 'both the prior refusal and the new dispatch stay charged');
   assert.equal(readAmaCloserDispatchRecord(rootDir, { ...identity, headSha: REVIEWED_HEAD }).unexecutedRefundCount ?? 0, 0);

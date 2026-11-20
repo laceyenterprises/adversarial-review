@@ -242,8 +242,10 @@ export async function simulate(scenario, { seed = 17, load = 1, mutate } = {}) {
       // The executor reads and folds its own snapshot. Its read-failure path
       // still receives the real fixture exception from ledgerStore.read().
       if (readFault()) {
-        await exec.tick(subject, { observedAt: clock.iso(), load: loadObservation });
-        inspect(`retryable-read:synthetic ${f.readFailure} 503`);
+        const outcome = await exec.tick(subject, { observedAt: clock.iso(), load: loadObservation });
+        inspect(outcome.action === 'refresh-evidence' && outcome.detail
+          ? `retryable-read:${outcome.detail}`
+          : `executor:${outcome.status}:${outcome.action}:${outcome.reason ?? ''}`);
         return;
       }
         const outcomes = f.race

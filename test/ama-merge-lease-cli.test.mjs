@@ -1177,7 +1177,7 @@ test('merge-lease acquire reclaims a local holder that dies during capped pollin
   const holderPid = 99999;
   const execFileSync = childProcess.execFileSync;
   const psMock = t.mock.method(childProcess, 'execFileSync', (command, args, options) => {
-    if (command === 'ps' && args?.join(' ') === `-o lstart= -p ${holderPid}`) {
+    if (command === 'ps' && Array.isArray(args) && args.join(' ') === `-o lstart= -p ${holderPid}`) {
       // Keep the observed start before lease acquisition on every poll.
       return 'Fri Jun 19 18:00:00 2026\n';
     }

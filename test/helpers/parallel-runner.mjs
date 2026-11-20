@@ -6,6 +6,7 @@ import { run } from 'node:test';
 import parallelReporter from './parallel-reporter.mjs';
 
 const config = JSON.parse(readFileSync(process.argv[2], 'utf8'));
+const fileNames = new Map(Object.entries(config.paths).map(([name, file]) => [file, name]));
 const started = performance.now();
 const reportPath = path.join(config.logDir, 'native-report.json');
 const workerArgs = config.nodeArgs;
@@ -21,6 +22,17 @@ execArgv.push('--import', path.join(import.meta.dirname, 'worker-preloads.mjs'))
 // Worker-root ranks encode measured priority. Sort explicitly because native
 // discovery also sorts filenames. Each freed slot takes the next pending file.
 let failed = false;
+function reportFileProgress(event, phase) {
+  const file = fileNames.get(event.file);
+  // Only the native file events describe independent worker completion. TAP
+  // for individual cases is delivered in scheduled order and can lag behind.
+  // An orphan can finish its workers without progress IPC. The callback also
+  // handles a disconnect racing the connected check without an uncaught error.
+  if (file && event.name === event.file && process.connected) {
+    process.send({ file, phase }, () => {});
+  }
+}
+
 async function* phases() {
   const counts = {};
   let offset = 0;
@@ -33,6 +45,8 @@ async function* phases() {
     let summary;
     for await (const event of source) {
       const data = event.data;
+      if (event.type === 'test:dequeue') reportFileProgress(data, 'started');
+      if (event.type === 'test:complete') reportFileProgress(data, 'completed');
       if (!data.file && event.type === 'test:summary') {
         summary = data;
         continue;

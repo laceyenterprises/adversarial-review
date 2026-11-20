@@ -9254,6 +9254,41 @@ adds the route-scoped closer prompt described below. Those explicit composition 
 satisfied and observed before an operator promotes a lane. Capability availability
 is not an assertion that such a consumer is running.
 
+The native `bin/legacy-pr-write.mjs` wrapper resolves the live PR identity before
+entering `runLegacyLaneWrite`. It uses a metered, owner-aware PR REST read scoped to
+the requested repository and number. The response must identify that same base
+repository and PR number, an open state, a valid head SHA and a valid case-sensitive
+base branch. When the caller specifies `--head`, the observed SHA must match it.
+The read consumes the existing load-aware 5-second evidence budget (30-second
+ceiling) and passes cancellation and remaining time to the GitHub transport.
+Malformed or mismatched identity (including a renamed/transferred repository's
+redirected response) refuses with `malformed-or-mismatched-identity`; a valid
+closed/merged PR or a different requested head refuses with
+`terminal-pr-or-head-changed`. Both are temporary-failure exit 75 at the CLI.
+Unreadable or expired evidence ends the invocation before the lane writer starts.
+Admission is deliberately non-urgent by default: this wrapper accepts arbitrary
+legacy commands and cannot establish closure eligibility. A library caller's
+existing budget scope, including closer urgency, is preserved. The standalone
+CLI defers below the normal floor instead of spending the closer reserve.
+Cross-owner token selection uses the shared per-role/owner single-flight mint.
+Its broker timeout covers headers and body for each configured broker URL;
+the evidence signal does not cancel that shared mint. The evidence timer still
+bounds the caller, and cancellation is rechecked before launching the PR read,
+so a late mint cannot start an expired request. Caller-specific mint cancellation
+would require shared-flight waiter ownership and is deferred from this change.
+Merge eligibility, including stacked-base policy and its hold receipts, remains
+with the existing merge authority callers. The original command and arguments pass
+through the native route and issuance lock.
+
+For deployment acceptance, verify that the runtime invoking the native wrapper
+loads the reviewed source after its ordinary release. For organic acceptance,
+observe an eligible open PR on a legacy lane entering the native wrapper at its
+exact head, resolving the live repository/base within budget, and completing
+through the existing route, custody and merge checks. Retain the wrapper timing,
+head and merge/issuance receipts together. A read measured after merge and a
+receipt from the operator's scoped containment cannot establish native open-PR
+acceptance. [LAC-2273 evidence](changes/LAC-2273.md)
+
 HAMLANEWAIT-01 bounds the legacy shell writer's lane-lock wait by the caller's
 absolute deadline (`--deadline-ms`; the closer computes a fresh now + 60 seconds
 at the merge attempt, after CI and merge-lease waits). Direct library callers

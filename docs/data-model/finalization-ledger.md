@@ -708,6 +708,12 @@ attempt outcomes retain ambiguity. Legacy retains its existing lease/retry
 semantics; unresolved legacy evidence blocks ownership transfer. Older/external
 writers still require trusted complete drain inventory, regardless of this count.
 
+For the native PR wrapper, the repository/base key and subject PR number/head
+come from a bounded live identity check before the native writer enters the
+issuance boundary. This transient read creates no writer intent or stacked-base
+hold. Unavailable, terminal or mismatched identity stops before journal entry
+creation. The existing stacked-base eligibility guard owns its hold receipts.
+
 `finalization_queue_route_return(entry_id,delivery_key,payload_json,receipt_json)`
 retains rollback handoffs with stable `route-return:<entryId>` keys. After proven
 drain and operation reconciliation, the legacy adapter durably acknowledges each

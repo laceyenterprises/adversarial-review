@@ -11,8 +11,8 @@ const pause = ms => new Promise(resolve => setTimeout(resolve, ms));
 export const hammerNetworkClock = { sleep: pause };
 
 // Retry transport failures only, preserving the entitled token and expected-head
-// CAS on every mutation attempt. An ambiguous server-side success still fails
-// closed through the lease-protected git fallback if the CAS rejects a retry.
+// CAS on every mutation attempt. An ambiguous server-side success stays on
+// that transport. A refused retry cannot authorize another publisher.
 export async function hammerNetworkCall(command, args, input, { execFileImpl = execFileSync, env = process.env, sleep = ms => hammerNetworkClock.sleep(ms) } = {}) {
   for (let attempt = 0; attempt < 3; attempt++) {
     try {
@@ -26,6 +26,11 @@ export async function hammerNetworkCall(command, args, input, { execFileImpl = e
     }
   }
 }
+
+// Fixed-command view of the entitled, metered transport. GitHub callers cannot
+// accidentally choose another executable; retry and credential ownership stay
+// in the same boundary as Git publication operations.
+export const hammerGhCall = hammerNetworkCall.bind(undefined, 'gh');
 
 // Local publication plumbing shares the same unknown-on-error boundary. The
 // caller may classify an ancestry result only after a completed Git exit 1.

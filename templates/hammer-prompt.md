@@ -922,7 +922,7 @@ For commit/validation progress receipt semantics, read Appendix G4.
 The commit helper requires `HEAD` to differ from and descend from `HAM_TARGET_REMEDIATION_SHA || HAM_REVIEWED_SHA` before recording `remediation-committed`; an already-advanced dispatch target earns no credit by itself. The bounded validation helper records `validation-passed` or `validation-failed` for completed commands (exit 0 or 1–123); timeouts remain unknown. These validation receipts are advisory liveness signals, not proof tests ran or passed. Each receipt kind earns one bounded outcome slice per run; repeating it earns no additional time.
 <!-- /hammer-reference:G4 -->
 
-Before head validation, the close command publishes a new local commit (`HAM_COMMIT_PUBLICATION_ONLY=1` with `hammer-publish.sh`) and stops on failure. Ordinary remediation retains the conflict-repair guards.
+Before head validation, the close command publishes a new local commit (`HAM_COMMIT_PUBLICATION_ONLY=1` with `hammer-publish.sh`) and stops on failure. For `head-changed` or `source-publication-refused`, preserve the local commits and stop this run. The versioned publisher alone chooses whether to use Git fallback.
 
 Refresh and validate the live head:
 
@@ -1055,7 +1055,13 @@ trap 'ham_release_merge_lease' EXIT
 "${HAM_NODE_BIN:-node}" "<<ROOT_DIR>>/bin/hammer-predicate-inputs.mjs" || exit $?
 ```
 
-Remediate, rebase and validate; reuse an already-fixed head. Keep the range
+Remediate and commit on the captured PR head, then let verify-head perform the
+server-side rebase and validate; reuse an already-fixed head. A local rewrite
+is publishable only as an exact rebase replay with no extra commits, or as the
+exact head recorded by `hammer-conflict-repair.sh`. Do not add commits after
+either local rewrite before publication. A rewrite plus remediation commits,
+or a divergent rewrite after this run's server-side rebase moved the source,
+is refused; preserve the commits and stop for a later pass. Keep the range
 written by `hammer-publish.sh` as `$HAM_RUN_DIR/range.json` for the predicate.
 A provable starting base keeps its existing audit range. If the remediation-round
 base cannot be proven, the hammer takes responsibility for the whole range from
@@ -1071,7 +1077,7 @@ remain mandatory.
 Write `$HAM_RUN_DIR/terminal-remediation.json`. The entitled audit
 must record `HAM-Validated-Head: <exact SHA>`.
 
-API-publish one single-parent commit above fetched remote HEAD; rebased/multi-commit history uses lease-protected git. Retry transport three times (500/1000ms; 15s each), keeping CAS/tree IDs. Errors or unsupported modes use CAS git; push rejection releases the lease and aborts.
+API-publish one single-parent commit above fetched remote HEAD. Only an explicit pre-mutation `git-fallback` result permits the owned Git publisher for supported history or file modes; it independently verifies the source and pushes an immutable SHA with an exact branch/head lease. Retry transport three times (500/1000ms; 15s each), keeping CAS/tree IDs. API errors stop without Git fallback. Publication refusal preserves local commits, releases the lease and stops.
 
 ```json
 {

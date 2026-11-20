@@ -28,12 +28,15 @@ function lock(rootDir, identity, mode) {
 // watcher can never observe a server-generated SHA before its custody record.
 // Intent is durable before publication; it confers no validation authority.
 export async function withHammerPublication({ env = process.env, rootDir = env.ADVERSARIAL_REVIEW_STATE_DIR ? dirname(env.ADVERSARIAL_REVIEW_STATE_DIR) : env.HAM_ROOT_DIR || publicationRoot, repo, prNumber,
-  headSha = null, previousHead = null, now = new Date().toISOString() }, publish) {
+  headSha = null, now = new Date().toISOString() }, publish) {
   if (headSha !== null && !sha(headSha)) throw new Error('hammer-publication-head-unavailable');
-  const controller = read(env.HAM_CONTROLLER_RECORD);
+  if (!/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(repo || '') || !/^[1-9]\d*$/.test(String(prNumber))) {
+    throw new Error('hammer-publication-target-unavailable');
+  }
+  const controller = env.HAM_CONTROLLER_RECORD && read(env.HAM_CONTROLLER_RECORD);
   if (controller?.state !== 'running' || !Number.isInteger(controller.controllerPid) || controller.controllerPid <= 1
     || controller.controllerPid !== Number(env.HAM_CONTROLLER_PID)
-    || controller.token !== env.HAM_CONTROLLER_TOKEN) throw new Error('hammer-publication-owner-unconfirmed');
+    || !env.HAM_CONTROLLER_TOKEN || controller.token !== env.HAM_CONTROLLER_TOKEN) throw new Error('hammer-publication-owner-unconfirmed');
   const identity = { repo, prNumber };
   const release = lock(rootDir, identity, 'ex');
   if (!release) throw new Error('hammer-publication-busy');
@@ -45,19 +48,16 @@ export async function withHammerPublication({ env = process.env, rootDir = env.A
       heads: [...new Set([...(sameRun ? prior.heads : []), ...(sha(headSha) ? [headSha] : [])])], publishing: true };
     const save = () => writeFileAtomic(hammerPublicationPath(rootDir, identity), `${JSON.stringify(record)}\n`, { mode: 0o600 });
     save();
-    let completed = false;
+    let completed = false, mutationStarted = false;
     try {
-      const result = await publish();
+      const result = await publish(() => { mutationStarted = true; });
       completed = true;
-      // The fallback CAS input is not a head we published. Only an API result
-      // different from its captured input proves a partially completed write.
-      const partialHead = previousHead && result?.fallbackHead !== previousHead ? result?.fallbackHead : null;
-      record.uncertain = result?.route === 're-review' && !result?.pushedHead && !sha(partialHead);
-      for (const head of [result?.head, result?.pushedHead, partialHead]) {
+      record.uncertain = result?.mutationUncertain === true && !sha(result?.observedHead);
+      for (const head of [result?.route === 'unchanged' ? null : result?.head, result?.observedHead]) {
         if (sha(head) && !record.heads.includes(head)) record.heads.push(head);
       }
       return result;
-    } finally { record.publishing = false; if (!completed) record.uncertain = true; save(); }
+    } finally { record.publishing = false; if (!completed) record.uncertain = mutationStarted; save(); }
   } finally { release(); }
 }
 

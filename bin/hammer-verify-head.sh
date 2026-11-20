@@ -598,9 +598,7 @@ ham_update_branch_with_retries() {
       fi
       # Bind provenance to the mutation result, never a later mutable branch tip.
       # https://docs.github.com/en/graphql/reference/pulls#updatepullrequestbranch
-      if HAM_PUBLICATION_BASE="$HAM_CAPTURED_BASE_SHA" "$HAM_NODE_BIN" "<<ROOT_DIR>>/bin/hammer-owned-publication.mjs" "<<REPO>>" "<<PR_NUMBER>>" rebase "$POST_REMEDIATION_SHA" gh api graphql \
-        -f 'query=mutation($id: ID!, $head: GitObjectID!) { updatePullRequestBranch(input: {pullRequestId: $id, expectedHeadOid: $head, updateMethod: REBASE}) { pullRequest { headRefOid } } }' \
-        -f id="$ham_update_pr_id" -f head="$POST_REMEDIATION_SHA" \
+      if HAM_PUBLICATION_BASE="$HAM_CAPTURED_BASE_SHA" "$HAM_NODE_BIN" "<<ROOT_DIR>>/bin/hammer-owned-publication.mjs" "<<REPO>>" "<<PR_NUMBER>>" rebase "$POST_REMEDIATION_SHA" "$ham_update_pr_id" \
         > "<<RUN_DIR>>/update-branch.stdout" 2> "<<RUN_DIR>>/update-branch.stderr"; then
         HAM_REBASE_PUBLISHED_HEAD=$(jq -er '.data.updatePullRequestBranch.pullRequest.headRefOid |
           select(type == "string" and test("^[a-f0-9]{40}$"))' "<<RUN_DIR>>/update-branch.stdout") || return 1

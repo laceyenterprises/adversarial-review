@@ -4771,6 +4771,10 @@ test('buildMergeAgentPrompt surfaces final-pass mode + triage contract when trig
   assert.ok(prompt.includes('never copy'));
   assert.ok(prompt.includes('quoted secrets'));
   assert.ok(prompt.includes('Merge gate for the rebase-to-merge step only'));
+  assert.ok(prompt.includes('capture the PR headRefOid and headRefName'));
+  assert.ok(prompt.includes('--force-with-lease="refs/heads/$MERGE_HEAD_REF:$MERGE_SOURCE_HEAD"'));
+  assert.ok(prompt.includes('Controller exit 20 is a source-publication-refused stop'));
+  assert.ok(!prompt.includes('continue the rebase, force-push with lease'));
   // HAMCONTROLLERSCRIPT-01: the controller is shipped code; the prompt runs it
   // with data arguments and never carries a controller shell body.
   assert.ok(prompt.includes("merge-agent-close-controller.sh' --repo 'laceyenterprises/agent-os' --base 'main' --pr '401' --commands \"$HAM_RUN_DIR/close-commands.json\""));
@@ -4782,8 +4786,8 @@ test('buildMergeAgentPrompt surfaces final-pass mode + triage contract when trig
   for (const required of [
     'set -euo pipefail', 'exec 0</dev/null',
     '"$MERGE_LEASE_HELPER" acquire', '--pr-state-file "$MERGE_PR_STATE_JSON"',
-    'gh pr view "$MERGE_PR" --repo "$MERGE_REPO" --json headRefName,body > "$MERGE_PR_STATE_JSON"',
-    'MERGE_HEAD_REF=$(jq -r \'.headRefName\' "$MERGE_PR_STATE_JSON")',
+    'gh pr view "$MERGE_PR" --repo "$MERGE_REPO" --json headRefName,headRefOid,body > "$MERGE_PR_STATE_JSON"',
+    'MERGE_HEAD_REF=$(jq -er \'.headRefName | strings | select(length > 0)\' "$MERGE_PR_STATE_JSON")',
     'POST_REMEDIATION_SHA=$(git rev-parse HEAD)', 'MERGE_GATE_ATTEMPT_HEAD="$POST_REMEDIATION_SHA"',
     'trap cleanup_merge_lease EXIT', '--owner-pid "$$"', '--wait 300', '--head "$MERGE_GATE_ATTEMPT_HEAD"',
     'MERGE_LEASE_ID=$(jq -r \'.leaseId\' "$MERGE_LEASE_JSON")', 'MERGE_LEASE_EXIT" -eq 70',
@@ -4793,7 +4797,7 @@ test('buildMergeAgentPrompt surfaces final-pass mode + triage contract when trig
     'hq generated-conflicts rebase --worktree "$PWD" --onto "$VALIDATION_BASE"',
     '"$MERGE_NODE" "$VALIDATION_HELPER" "$@"',
     'CURRENT_BASE=$(git rev-parse --verify "origin/$MERGE_BASE^{commit}")',
-    'git push --force-with-lease origin "HEAD:$MERGE_HEAD_REF"', '"$MERGE_LEASE_HELPER" needs-revalidation',
+    'git push --force-with-lease="refs/heads/$MERGE_HEAD_REF:$MERGE_SOURCE_HEAD"', '"$MERGE_LEASE_HELPER" needs-revalidation',
     '--current-base "$CURRENT_BASE"', '--validation-base "$VALIDATION_BASE"',
     '--changed-files-from "$POST_REMEDIATION_SHA"', 'MERGE_REVALIDATION_EXIT=$?',
     'merge revalidation failed; escalate instead of retrying', 'jq -e \'.needsRevalidation == false\'',

@@ -330,21 +330,37 @@ return 0
 # Called before the hammer's ordinary git publication. The audit phase remains
 # separate, under the merge lease, after remote CI validates the published SHA.
 if [ "${HAM_COMMIT_PUBLICATION_ONLY:-0}" = "1" ]; then
-  HAM_PUBLICATION_PREVIOUS_HEAD="${POST_REMEDIATION_SHA:-${HAM_BASE_HEAD:-}}"
-  HAM_API_PUBLISH_RESULT=$(/usr/bin/perl -e 'shift or exit 1; exec @ARGV; die $!' "$HAM_NODE_BIN" "<<ROOT_DIR>>/bin/hammer-helper-step.mjs" mutation api-publish 120 720 "$HAM_NODE_BIN" "<<ROOT_DIR>>/bin/hammer-api-publish.mjs" "<<REPO>>" "<<PR_URL>>") || HAM_API_PUBLISH_RESULT='{"route":"re-review","reason":"API publication timed out"}'
+  ham_commit_publication_stop() {
+    local result="$1" status=1 observed_head
+    case "$(printf '%s\n' "$result" | jq -r '.phaseOutcome // empty')" in
+      head-changed) HAM_PHASE_OUTCOME=head-changed; status=20 ;;
+      git-credential-refresh-failed) HAM_PHASE_OUTCOME=git-credential-refresh-failed; status=76 ;;
+      *) HAM_PHASE_OUTCOME=source-publication-refused ;;
+    esac
+    HAM_NO_MERGE_NOTE="HAM closing status — no merge. Source publication stopped ($HAM_PHASE_OUTCOME); local commits retained."
+    observed_head=$(printf '%s\n' "$result" | jq -r '.observedHead // empty')
+    if [[ "$observed_head" =~ ^[0-9a-f]{40}$ ]]; then
+      printf -v HAM_NO_MERGE_NOTE '%s\nHAM-Observed-Head: %s\nHAM-CI-Validated: false' "$HAM_NO_MERGE_NOTE" "$observed_head"
+    fi
+    echo "$HAM_NO_MERGE_NOTE" >&2
+    if declare -F ham_release_merge_lease >/dev/null; then ham_release_merge_lease || return 1; fi
+    return "$status"
+  }
+
+  HAM_API_PUBLISH_RESULT=$(/usr/bin/perl -e 'shift or exit 1; exec @ARGV; die $!' "$HAM_NODE_BIN" "<<ROOT_DIR>>/bin/hammer-helper-step.mjs" mutation api-publish 120 720 "$HAM_NODE_BIN" "<<ROOT_DIR>>/bin/hammer-api-publish.mjs" "<<REPO>>" "<<PR_URL>>") || HAM_API_PUBLISH_RESULT='{"route":"refused","reason":"API publication helper failed or timed out"}'
   printf '%s\n' "$HAM_API_PUBLISH_RESULT"
   HAM_PUSHED_FROM_HEAD=$(printf '%s' "$HAM_API_PUBLISH_RESULT" | jq -r '.previousHead // empty')
-  if [ -z "$HAM_PUSHED_FROM_HEAD" ]; then HAM_PUSHED_FROM_HEAD="$HAM_PUBLICATION_PREVIOUS_HEAD"; fi
   HAM_PUSHED_HEAD=""
 
   # A verified API commit can already be live when scratch fetch/reset fails.
   # Attest that exact result, then stop: local HEAD is not synchronized and
   # must never overwrite the known remote commit through the git fallback.
   HAM_API_KNOWN_PUSHED_HEAD=$(printf '%s' "$HAM_API_PUBLISH_RESULT" | jq -r '.pushedHead // empty')
-  if [ -n "$HAM_API_KNOWN_PUSHED_HEAD" ] && [ "$HAM_API_KNOWN_PUSHED_HEAD" != "$HAM_PUSHED_FROM_HEAD" ]; then
-    "$HAM_NODE_BIN" "<<ROOT_DIR>>/bin/hammer-progress.mjs" remediation-pushed "$HAM_API_KNOWN_PUSHED_HEAD" || true
-  fi
   if [ -n "$HAM_API_KNOWN_PUSHED_HEAD" ]; then
+    if [[ ! "$HAM_API_KNOWN_PUSHED_HEAD" =~ ^[0-9a-f]{40}$ || ! "$HAM_PUSHED_FROM_HEAD" =~ ^[0-9a-f]{40}$ || "$HAM_API_KNOWN_PUSHED_HEAD" = "$HAM_PUSHED_FROM_HEAD" ]]; then
+      ham_commit_publication_stop '{}' || return $?
+    fi
+    "$HAM_NODE_BIN" "<<ROOT_DIR>>/bin/hammer-progress.mjs" remediation-pushed "$HAM_API_KNOWN_PUSHED_HEAD" || true
     HAM_PUSHED_HEAD="$HAM_API_KNOWN_PUSHED_HEAD"
     export HAM_PUSHED_FROM_HEAD HAM_PUSHED_HEAD
     if ! /usr/bin/perl -e 'shift or exit 1; exec @ARGV; die $!' "$HAM_NODE_BIN" "<<ROOT_DIR>>/bin/hammer-helper-step.mjs" mutation pushed-attestation 90 540 "$HAM_NODE_BIN" "<<ROOT_DIR>>/bin/hammer-pushed-attestation.mjs" \
@@ -368,34 +384,33 @@ if [ "${HAM_COMMIT_PUBLICATION_ONLY:-0}" = "1" ]; then
     return 1
   fi
 
-  if [ "$(printf '%s' "$HAM_API_PUBLISH_RESULT" | jq -r '.route')" = re-review ]; then
-    if [ "$(printf '%s' "$HAM_API_PUBLISH_RESULT" | jq -r '.phaseOutcome // empty')" = git-credential-refresh-failed ]; then
-      HAM_PHASE_OUTCOME=git-credential-refresh-failed
-      if declare -F ham_release_merge_lease >/dev/null; then ham_release_merge_lease; fi
-      return 76
-    fi
-    # Preserve the existing lease-protected git route. Validation and the audit
-    # cover the full reviewed-to-built range when starting-base proof is absent.
-    HAM_API_PUBLISH_FALLBACK=1
-    export HAM_API_PUBLISH_FALLBACK
-    HAM_API_FALLBACK_HEAD=$(printf '%s' "$HAM_API_PUBLISH_RESULT" | jq -r '.fallbackHead // empty')
-    HAM_API_FALLBACK_BRANCH=$(printf '%s' "$HAM_API_PUBLISH_RESULT" | jq -r '.branch // empty')
-    if [ -n "$HAM_API_FALLBACK_HEAD" ] && [ -n "$HAM_API_FALLBACK_BRANCH" ]; then
-      "$HAM_NODE_BIN" "<<ROOT_DIR>>/bin/hammer-owned-publication.mjs" "<<REPO>>" "<<PR_NUMBER>>" head "$(git rev-parse HEAD)" git push origin "HEAD:refs/heads/$HAM_API_FALLBACK_BRANCH" --force-with-lease="refs/heads/$HAM_API_FALLBACK_BRANCH:$HAM_API_FALLBACK_HEAD" || {
-        if [ "$?" -eq 76 ]; then HAM_PHASE_OUTCOME=git-credential-refresh-failed; fi
-        if declare -F ham_release_merge_lease > /dev/null; then ham_release_merge_lease; fi
-        return 1
-      }
-    else
-      "$HAM_NODE_BIN" "<<ROOT_DIR>>/bin/hammer-owned-publication.mjs" "<<REPO>>" "<<PR_NUMBER>>" head "$(git rev-parse HEAD)" git push --force-with-lease || {
-        if [ "$?" -eq 76 ]; then HAM_PHASE_OUTCOME=git-credential-refresh-failed; fi
-        if declare -F ham_release_merge_lease > /dev/null; then ham_release_merge_lease; fi
-        return 1
-      }
-    fi
-    HAM_PUSHED_HEAD=$(git rev-parse HEAD) || return 1
-  elif [ "$(printf '%s' "$HAM_API_PUBLISH_RESULT" | jq -r '.route')" = published ]; then
-    HAM_PUSHED_HEAD=$(printf '%s' "$HAM_API_PUBLISH_RESULT" | jq -r '.head')
+  case "$(printf '%s\n' "$HAM_API_PUBLISH_RESULT" | jq -r '.route')" in
+    git-fallback)
+      # Only a pre-mutation, source-bound decision can nominate a Git push.
+      HAM_API_FALLBACK_HEAD=$(printf '%s\n' "$HAM_API_PUBLISH_RESULT" | jq -r '.fallbackHead // empty')
+      HAM_API_FALLBACK_BRANCH=$(printf '%s\n' "$HAM_API_PUBLISH_RESULT" | jq -r '.branch // empty')
+      HAM_API_FALLBACK_LOCAL=$(printf '%s\n' "$HAM_API_PUBLISH_RESULT" | jq -r '.localHead // empty')
+      if [[ ! "$HAM_API_FALLBACK_HEAD" =~ ^[0-9a-f]{40}$ || ! "$HAM_API_FALLBACK_LOCAL" =~ ^[0-9a-f]{40}$ || -z "$HAM_API_FALLBACK_BRANCH" ]]; then
+        ham_commit_publication_stop '{}' || return $?
+      fi
+      if ! HAM_GIT_PUBLISH_RESULT=$("$HAM_NODE_BIN" "<<ROOT_DIR>>/bin/hammer-owned-publication.mjs" "<<REPO>>" "<<PR_NUMBER>>" head "$HAM_API_FALLBACK_LOCAL" "$HAM_API_FALLBACK_BRANCH" "$HAM_API_FALLBACK_HEAD"); then
+        printf '%s\n' "$HAM_GIT_PUBLISH_RESULT"
+        ham_commit_publication_stop "$HAM_GIT_PUBLISH_RESULT" || return $?
+      fi
+      case "$(printf '%s\n' "$HAM_GIT_PUBLISH_RESULT" | jq -r '.route')" in
+        published|unchanged) ;;
+        *) ham_commit_publication_stop "$HAM_GIT_PUBLISH_RESULT" || return $? ;;
+      esac
+      HAM_PUSHED_HEAD=$(printf '%s\n' "$HAM_GIT_PUBLISH_RESULT" | jq -r '.head')
+      HAM_PUSHED_FROM_HEAD=$(printf '%s\n' "$HAM_GIT_PUBLISH_RESULT" | jq -r '.previousHead')
+      ;;
+    published|unchanged)
+      HAM_PUSHED_HEAD=$(printf '%s\n' "$HAM_API_PUBLISH_RESULT" | jq -r '.head')
+      ;;
+    *) ham_commit_publication_stop "$HAM_API_PUBLISH_RESULT" || return $? ;;
+  esac
+  if [[ ! "$HAM_PUSHED_HEAD" =~ ^[0-9a-f]{40}$ || ! "$HAM_PUSHED_FROM_HEAD" =~ ^[0-9a-f]{40}$ ]]; then
+    ham_commit_publication_stop '{}' || return $?
   fi
   HAM_PRODUCED_HEAD="$HAM_PUSHED_HEAD"
   export HAM_PRODUCED_HEAD

@@ -206,6 +206,7 @@
   "reviewed-head-unavailable": "closer",
   "reviewer-untrusted": "world",
   "run-pin-invalid": "world",
+  "source-publication-refused": "closer",
   "stacked-base-merged": "world",
   "stacked-base-read-failed": "infrastructure",
   "stale-review-head": "world",

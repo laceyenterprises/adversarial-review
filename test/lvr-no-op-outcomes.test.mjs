@@ -167,7 +167,7 @@ test('LVR-02 closer prompt carries terminal evidence and the incident snapshot t
   // HAMCONTROLLERSCRIPT-01: the incident snapshot is taken by the shipped controller.
   assert.match(prompt, /merge-agent-close-controller\.sh/);
   const script = readFileSync(join(root, 'bin/merge-agent-close-controller.sh'), 'utf8');
-  assert.match(script, /--json headRefName,body > "\$MERGE_PR_STATE_JSON"/);
+  assert.match(script, /--json headRefName,headRefOid,body > "\$MERGE_PR_STATE_JSON"/);
   assert.match(script, /--pr-state-file "\$MERGE_PR_STATE_JSON"/);
 });
 

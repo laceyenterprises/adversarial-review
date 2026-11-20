@@ -5,10 +5,11 @@ import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { hammerPublicationFailureReason, publishHammerTree } from '../src/ama/hammer-api-publish.mjs';
-import { hammerNetworkCall } from '../src/ama/hammer-api-network.mjs';
+import { hammerGhCall, hammerNetworkCall } from '../src/ama/hammer-api-network.mjs';
 import { fleetCommitIdentityMatches, fetchHammerHeadRange } from '../src/ama/hammer-head-validation.mjs';
 const apiCommit = JSON.parse(readFileSync(new URL('./fixtures/hammer-commits/api.json', import.meta.url)));
 const gitCommit = JSON.parse(readFileSync(new URL('./fixtures/hammer-commits/git.json', import.meta.url)));
+const published = 'c'.repeat(40);
 const options = { repo: 'fixture/repo', branch: 'worker', expectedHead: 'before', localTree: 'tree', message: 'HAM\ntrailers',
   changes: [{ path: 'file', mode: '100644', contents: 'YQ==' }] };
 test('real API fixture proves fleet identity; real git fixture and foreign author require re-review', async () => {
@@ -23,28 +24,69 @@ test('publication pins expected head and proves identical tree', async () => {
   const calls = [];
   const result = await publishHammerTree({ ...options, api: async (path, input) => {
     calls.push({ path, input });
-    return input ? { data: { createCommitOnBranch: { commit: { oid: 'published' } } } } : { commit: { tree: { sha: 'tree' } } };
+    return input ? { data: { createCommitOnBranch: { commit: { oid: published } } } } : { commit: { tree: { sha: 'tree' } } };
   } });
   assert.equal(result.route, 'published');
   assert.equal(calls[0].input.variables.input.expectedHeadOid, 'before');
   assert.deepEqual(calls[0].input.variables.input.fileChanges.additions, options.changes.map(({ path, contents }) => ({ path, contents })));
 });
-test('tree mismatch and API errors use re-review, preserving lease head for git fallback', async () => {
+test('tree mismatch and API errors refuse without granting Git fallback', async () => {
   const mismatch = await publishHammerTree({ ...options, api: async (_path, input) => input
-    ? { data: { createCommitOnBranch: { commit: { oid: 'published' } } } } : { commit: { tree: { sha: 'different' } } } });
-  assert.equal(mismatch.route, 're-review');
-  assert.equal(mismatch.fallbackHead, 'published');
+    ? { data: { createCommitOnBranch: { commit: { oid: published } } } } : { commit: { tree: { sha: 'different' } } } });
+  assert.equal(mismatch.route, 'refused');
+  assert.equal(mismatch.observedHead, published);
   assert.match(mismatch.reason, /tree mismatch/);
   const error = await publishHammerTree({ ...options, api: async () => { throw new Error('offline'); } });
-  assert.equal(error.route, 're-review');
-  assert.equal(error.fallbackHead, 'before');
+  assert.equal(error.route, 'refused');
+  assert.equal(error.mutationUncertain, true);
 });
 test('file modes, symlinks and submodules fall back without calling API', async () => {
   for (const mode of ['100755', '120000', '160000']) {
     const result = await publishHammerTree({ ...options, changes: [{ path: 'file', mode }], api: () => assert.fail('API called') });
-    assert.equal(result.route, 're-review');
+    assert.equal(result.route, 'git-fallback');
   }
 });
+test('API mutation refusal classifies a moved source without adopting a foreign head', async () => {
+  for (const [live, expected] of [
+    [{ commit: { sha: 'd'.repeat(40) } }, 'head-changed'],
+    [{ commit: { sha: 'a'.repeat(40) } }, 'source-publication-refused'],
+    [{ commit: { sha: 'invalid' } }, 'source-publication-refused'],
+    [null, 'source-publication-refused'],
+  ]) {
+    const calls = [];
+    const result = await publishHammerTree({ ...options, branch: 'worker/topic', expectedHead: 'a'.repeat(40),
+      api: async path => {
+        calls.push(path);
+        if (path === 'graphql') throw new Error('expectedHeadOid rejected');
+        assert.equal(path, 'repos/fixture/repo/branches/worker%2Ftopic');
+        if (!live) throw new Error('read unavailable');
+        return live;
+      } });
+    assert.deepEqual(calls, ['graphql', 'repos/fixture/repo/branches/worker%2Ftopic']);
+    assert.equal(result.route, 'refused');
+    assert.equal(result.phaseOutcome, expected);
+    assert.equal(result.observedHead, undefined);
+    assert.equal(result.mutationUncertain, true, 'head movement alone cannot settle an ambiguous mutation');
+  }
+});
+test('the fixed GitHub transport retains the entitled token and API metering', async t => {
+  const dir = mkdtempSync(join(tmpdir(), 'hammer-gh-network-'));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const env = { PATH: '/bin:/usr/bin', HOME: dir, HAM_ROOT_DIR: dir,
+    HAMMER_LACEY_GH_TOKEN: 'synthetic-hammer-token',
+    GHO_RATE_LIMIT_SHARED_STATE_PATH: join(dir, 'budget.json') };
+  const calls = [];
+  const result = await hammerGhCall(['api', 'repos/fixture/repo/pulls/42'], undefined, { env,
+    execFileImpl: (command, args, options) => {
+      calls.push([command, ...args]);
+      assert.equal(options.env.GH_TOKEN, 'synthetic-hammer-token');
+      assert.equal(options.env.GH_DEBUG, 'api');
+      return Buffer.from('{}');
+    } });
+  assert.equal(String(result), '{}');
+  assert.deepEqual(calls, [['gh', 'api', 'repos/fixture/repo/pulls/42']]);
+});
+
 test('a timed-out post-publication git fetch under a managed token is retried as transient', async t => {
   const dir = mkdtempSync(join(tmpdir(), 'hammer-api-network-'));
   t.after(() => rmSync(dir, { recursive: true, force: true }));
@@ -88,8 +130,8 @@ test('raw string rejections retain bounded first-line publication diagnostics', 
   ]) {
     const result = await publishHammerTree({ ...options, api: () => Promise.reject(rejection) });
     assert.equal(result.reason, expected);
-    assert.equal(result.route, 're-review');
-    assert.equal(result.fallbackHead, options.expectedHead);
+    assert.equal(result.route, 'refused');
+    assert.equal(result.mutationUncertain, true);
     assert.ok(result.reason.length <= 512);
   }
 });

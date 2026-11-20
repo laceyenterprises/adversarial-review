@@ -110,6 +110,39 @@ test('bootstrap failures redact arbitrary endpoint and credential diagnostics', 
     { ok: false, reason: 'dispatch-context-unavailable', detail: 'session-bootstrap-failed' });
 });
 
+test('opt-in bootstrap retries recover a connection reset without exposing its diagnostic', async t => {
+  const { dispatchReadTransport, prepareDispatchReadContext } = await import(client);
+  let attempts = 0;
+  t.mock.method(dispatchReadTransport, 'sdk', () => ({
+    connect: async () => {
+      if (++attempts === 1) throw Object.assign(new Error('fixture-secret reset'), { code: 'ECONNRESET' });
+      return { sessionToken: 'fixture-session' };
+    },
+  }));
+  const env = { APP_CONTRACT_ENDPOINT_URL: 'https://fixture.invalid/retry' };
+  assert.deepEqual(await prepareDispatchReadContext({ env, maxAttempts: 3, timeoutMs: 1000 }), { ok: true });
+  assert.equal(attempts, 2);
+  assert.equal(env.ADVERSARIAL_DISPATCH_READS_ENABLED, '1');
+  assert.equal(env.ADVERSARIAL_WORKER_OBSERVATIONS_ENABLED, '1');
+});
+
+test('bootstrap retries stop at the original deadline without enabling reads', async t => {
+  const { dispatchReadTransport, prepareDispatchReadContext } = await import(client);
+  let attempts = 0;
+  t.mock.method(dispatchReadTransport, 'sdk', () => ({
+    connect: async () => {
+      attempts++;
+      throw Object.assign(new Error('fixture-secret reset'), { code: 'ECONNRESET' });
+    },
+  }));
+  const env = { APP_CONTRACT_ENDPOINT_URL: 'https://fixture.invalid/retry-deadline' };
+  const before = { ...env };
+  assert.deepEqual(await prepareDispatchReadContext({ env, maxAttempts: 3, timeoutMs: 10 }),
+    { ok: false, reason: 'dispatch-context-unavailable', detail: 'session-bootstrap-timeout' });
+  assert.equal(attempts, 1, 'the first retry backoff exceeds the shared deadline');
+  assert.deepEqual(env, before);
+});
+
 for (const failure of ['rejection', 'timeout']) {
   test(`bootstrap ${failure} preserves caller read switches and synchronous gates`, async t => {
     const { dispatchReadTransport, prepareDispatchReadContext } = await import(client);

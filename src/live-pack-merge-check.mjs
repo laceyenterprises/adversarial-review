@@ -3,7 +3,7 @@ import { loadAwareTimeoutMs } from './load-aware-timeout.mjs';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { execGhWithRetry } from './gh-cli.mjs';
-import { evaluateLivePackCrossEdits, listPullRequestFiles } from './live-pack-cross-edit.mjs';
+import { evaluateLivePackCrossEdits, listPullRequestFiles, touchedPacksFromPaths } from './live-pack-cross-edit.mjs';
 import { fetchRepoFileAtRef } from './pack-lockhash.mjs';
 import { normalizeActorLogin } from './untrusted-pr-gate.mjs';
 
@@ -16,7 +16,7 @@ export async function checkLivePackMerge({ repo, prNumber, headSha, execFileImpl
     args: ['api', `repos/${repo}/pulls/${prNumber}`], timeoutMs: loadAwareTimeoutMs(15_000) })).stdout),
   listFilesImpl = () => listPullRequestFiles(repo, prNumber, { execFileImpl }),
   fetchFileAtRefImpl = (repo, path, ref) => fetchRepoFileAtRef(repo, path, ref, { execFileImpl }),
-  readActiveDagRunsImpl, trustedStampLoginsImpl,
+  readActiveDagRunsImpl, trustedStampLoginsImpl, prepareReadContextImpl,
 } = {}) {
   if (!/^[^/\s]+\/[^/\s]+$/.test(repo || '') || !Number.isSafeInteger(Number(prNumber)) || Number(prNumber) <= 0
     || !/^[a-f0-9]{40}$/i.test(headSha || '')) return { ok: false, reason: 'live-pack-invalid-identity' };
@@ -25,7 +25,12 @@ export async function checkLivePackMerge({ repo, prNumber, headSha, execFileImpl
     if (pr.state !== 'open' || pr.head?.sha !== headSha || !pr.base?.sha) {
       return { ok: false, reason: 'live-pack-head-not-current' };
     }
-    const result = await evaluateLivePackCrossEdits({ repo, prNumber, changedPaths: await listFilesImpl(),
+    const changedPaths = await listFilesImpl();
+    if (prepareReadContextImpl && touchedPacksFromPaths(changedPaths, { guardedOnly: true }).size > 0) {
+      const ready = await prepareReadContextImpl();
+      if (!ready.ok) return ready;
+    }
+    const result = await evaluateLivePackCrossEdits({ repo, prNumber, changedPaths,
       branch: pr.head.ref, title: pr.title, baseRef: pr.base.sha, headRef: headSha, labels: pr.labels,
       fetchFileAtRefImpl, readActiveDagRunsImpl, trustedStampLoginsImpl,
       resolvePrAuthorImpl: async () => normalizeActorLogin(pr.user?.login, { typename: pr.user?.type }) });

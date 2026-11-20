@@ -21,7 +21,10 @@ jitters read completion; supplied CPU/load evidence drives the shared
 slow with load. Episode anchors and the absolute end bound do not slide when
 polling. Every event, ledger append and observed execution effect invokes the
 independent oracle; the trace retains first and later violations even if the
-subject eventually recovers. Clock events run serially, except an explicit
+subject eventually recovers. Oracle observations reuse the last folded ledger
+until an append and still evaluate eligibility at each observation's virtual
+time. The executor continues to read and fold the synthetic ledger through
+its own path. Clock events run serially, except an explicit
 concurrent-owner scenario that races two real executor ticks against one fake CAS.
 
 `simulator.mjs` runs the production `fold`, `eligible` and executor. Its in-memory

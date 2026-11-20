@@ -286,13 +286,17 @@ npm test
 This uses `test/run-tests.mjs` to discover every top-level and adapter test
 in isolated sandboxes, with eight test-file workers. It is hermetic — no
 network, no external services — and runs in CI on every PR against Node 22
-and Node 26.
+and Node 26. The suite has a 900-second deadline. Set `AR_TEST_TIMINGS` to
+an output path for the completed run's per-file timings. Native TAP output
+follows scheduled order, so the last visible case at a timeout identifies
+where reporting stopped. Investigate worker and child completion separately
+when diagnosing a timeout.
 
 For the complete hammer self-rebase subset, select all three entrypoints;
 they partition one shared suite. Each test name identifies its shard, and
 each entrypoint reports its shard index and registered case count. Selecting
-one entrypoint runs only that shard. The full runner uses the existing
-eight-worker pool with no priority scheduling guarantee:
+one entrypoint runs only that shard. The full runner schedules parallel
+files longest first using measured duration hints:
 
 ```bash
 node test/run-tests.mjs hammer-self-rebase.test.mjs hammer-self-rebase-2.test.mjs hammer-self-rebase-3.test.mjs

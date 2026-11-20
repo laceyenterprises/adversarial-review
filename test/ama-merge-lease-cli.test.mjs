@@ -1407,7 +1407,10 @@ test('closer polling doubles from 250ms to a fixed 15s ceiling under high load',
 test('six-hour progress wait retains its deadline with the fixed polling ceiling', async t => {
   const rootDir = freshRoot();
   t.after(() => rmSync(rootDir, { recursive: true, force: true }));
-  const held = acquireFixture(rootDir);
+  // Keep the lane busy for the full synthetic wait without probing a local
+  // PID on every 15-second virtual poll.
+  const held = acquireFixture(rootDir, { holderHost: 'remote-fixture', deadlineSeconds: 21601 });
+  assert.equal(held.acquired, true);
   let polls = 0;
   const scales = [];
   const { code, io } = await runCli(rootDir, ['acquire', '--repo', REPO, '--base', BASE,
@@ -1419,7 +1422,9 @@ test('six-hour progress wait retains its deadline with the fixed polling ceiling
   assert.equal(code, 75, io.stderrText);
   assert.deepEqual(scales, []);
   assert.ok(polls > 1400 && polls < 1450, String(polls));
-  assert.equal(jsonOutput(io).waited_s, 21600);
+  const out = jsonOutput(io);
+  assert.equal(out.reason, 'lease-wait-ceiling');
+  assert.equal(out.waited_s, 21600);
 });
 
 for (const release of [releaseMergeLease, releaseMergeLeaseForRetryableAbort]) {

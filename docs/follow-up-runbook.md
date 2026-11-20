@@ -2193,6 +2193,9 @@ For HQ jobs, run `hq dispatch status <dispatchId> --json --root <hqRoot>`
 in the recorded owner's scope. Reconciliation matches the recorded launch and
 ticket to the status and uses the repository checkout selected by HQ beneath
 its worker slot. The stored workspace path can refer to the slot itself.
+Round-only worker descriptors accept numeric or string round numbers.
+The workspace resolver treats a null or omitted environment as `process.env`;
+ended-round publication still requires an explicitly supplied worker environment.
 Conflicting or missing associations, including a slot with multiple checkouts
 and no selection, leave publication unproven. Do not pick a directory by name,
 copy a manifest, or edit a job to repair the association.
@@ -2204,6 +2207,9 @@ inspection and requires every retained worker patch. A publisher error after
 the branch update can coexist with proven Git publication. Source-policy
 acceptance still requires its own signed attestation, and final completion
 still evaluates the validated reply and any unresolved findings or blockers.
+A closed, malformed or mismatched destination reports
+`live-publication-target-unavailable`; a valid destination at a different
+previously observed head reports `live-publication-target-changed`.
 
 Publisher branch hydration uses the caller's environment, including scoped
 GitHub credentials, for the PR metadata read as well as Git commands.

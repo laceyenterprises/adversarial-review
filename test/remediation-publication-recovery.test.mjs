@@ -1,11 +1,12 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync, readFileSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync, readFileSync, realpathSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { proveFinalRoundWorkerPush } from '../src/comment-only-final-round.mjs';
 import { findCommittedUnpublishedWork } from '../src/remediation-unpublished.mjs';
+import { resolvePublicationWorkspace } from '../src/remediation-publication-workspace.mjs';
 import { buildFollowUpJob, buildRemediationReply, writeFollowUpJob, readFollowUpJob,
   requeueFollowUpJobForNextRound } from '../src/follow-up-jobs.mjs';
 import { guardRereviewCiBeforeReviewer } from '../src/reviewer-ci-admission.mjs';
@@ -131,6 +132,81 @@ test('HQ publication proof uses the selected repository beneath a non-Git worker
   assert.equal(proof.completedFinalRound, true);
   assert.equal(readFileSync(stopped.jobPath, 'utf8'), source);
   assert.equal(git(f.workspace, 'rev-parse', 'HEAD'), f.local);
+});
+
+test('HQ publication finds round-only workers with mixed serialized round numbers', async t => {
+  const f = fixture(t, { hq: true });
+  const worker = f.job.remediationWorker;
+  delete f.job.remediationWorker;
+  for (const [currentRound, round] of [[1, '1'], ['1', 1]]) {
+    f.job.remediationPlan = { dispatchPath: 'hq', currentRound, rounds: [{ round, worker }] };
+    assert.equal(await findCommittedUnpublishedWork({
+      reply: { summary: `Commit ${f.local} is unpublished.` }, job: f.job,
+      workspaceDir: f.slot, execFileImpl: f.execFileImpl, log,
+    }), null);
+    assert.equal(await resolvePublicationWorkspace({
+      job: f.job, workspaceDir: f.slot, execFileImpl: f.execFileImpl, log,
+    }), realpathSync(f.workspace));
+  }
+});
+
+test('HQ workspace resolution treats a null environment as the process environment', async t => {
+  const f = fixture(t, { hq: true });
+  delete f.job.remediationWorker.hqRoot;
+  const previous = process.env.HQ_ROOT;
+  process.env.HQ_ROOT = f.root;
+  t.after(() => {
+    if (previous === undefined) delete process.env.HQ_ROOT;
+    else process.env.HQ_ROOT = previous;
+  });
+  // Exercise both root lookup and manifest custody with the normalized env.
+  Object.assign(f.job.remediationWorker, { requiresProducedAttestation: true,
+    ticketRef: f.job.jobId, hqOwnerUser: 'fixture', custodyRepo: 'repo', custodyBranch: 'repair' });
+  writeFileSync(join(f.slot, 'workspace.json'), JSON.stringify({
+    workerId: 'worker', hqRoot: f.root, worktreePath: f.workspace,
+    launchRequestId: 'lrq_fixture', workerClass: 'codex', ownerUser: 'fixture',
+    ticketRef: f.job.jobId, repo: 'repo', branch: 'repair', expectedCompletionShape: 'branch-push',
+  }));
+  assert.equal(await resolvePublicationWorkspace({ job: f.job, workspaceDir: f.slot,
+    execFileImpl: f.execFileImpl, env: null, log }), realpathSync(f.workspace));
+});
+
+test('HQ unpublished inspection stops before live proof when no commit can be identified', async t => {
+  const f = fixture(t, { hq: true });
+  let headInspections = 0;
+  const execFileImpl = async (cmd, argv, options) => {
+    assert.notEqual(cmd, 'gh', 'no live proof without an identified commit');
+    if (cmd === 'git' && argv.includes('HEAD^{commit}')) {
+      headInspections++;
+      throw new Error('local HEAD inspection timed out');
+    }
+    return f.execFileImpl(cmd, argv, options);
+  };
+  assert.equal(await findCommittedUnpublishedWork({ reply: { summary: 'Work is unpublished.' },
+    job: f.job, workspaceDir: f.slot, execFileImpl, log }), null);
+  assert.equal(headInspections, 1);
+});
+
+test('HQ proof distinguishes unavailable destinations from a changed known head', async t => {
+  const f = fixture(t, { hq: true });
+  for (const failure of ['closed', 'wrong-head-ref', 'wrong-base-ref', 'malformed', 'changed']) {
+    const execFileImpl = async (cmd, argv, options) => {
+      assert.equal(cmd, 'gh', 'refused destinations must not reach Git inspection');
+      const result = await f.execFileImpl(cmd, argv, options);
+      if (failure === 'malformed') return { stdout: '{' };
+      const pr = JSON.parse(result.stdout);
+      if (failure === 'closed') pr.state = 'closed';
+      if (failure === 'wrong-head-ref') pr.head.ref = 'other';
+      if (failure === 'wrong-base-ref') pr.base.ref = 'other';
+      if (failure === 'changed') pr.head.sha = f.local;
+      return { stdout: JSON.stringify(pr) };
+    };
+    const proof = await proveFinalRoundWorkerPush({ ...f.proofArgs, execFileImpl,
+      publicationBranch: 'repair', liveHeadSha: f.live });
+    assert.equal(proof.workerPushedHeadSha, null);
+    assert.equal(proof.reason, failure === 'changed'
+      ? 'live-publication-target-changed' : 'live-publication-target-unavailable', failure);
+  }
 });
 
 test('HQ selection refuses conflicting, missing, malformed or foreign owner associations', async t => {

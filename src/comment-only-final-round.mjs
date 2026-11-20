@@ -105,7 +105,7 @@ export async function proveFinalRoundWorkerPush({
   if (liveHeadSha === null || publicationBranch) {
     try {
       const observed = await readLiveHead();
-      if (liveHeadSha !== null && observed !== liveHeadSha) withheldBecause ||= 'live-publication-target-changed';
+      if (liveHeadSha !== null && observed && observed !== liveHeadSha) withheldBecause ||= 'live-publication-target-changed';
       liveHeadSha = SHA.test(observed || '') ? observed : null;
     } catch (err) {
       log.warn?.(`[follow-up-remediation] Worker-push proof failed for ${repo}#${prNumber}: ${err?.message || err}`);

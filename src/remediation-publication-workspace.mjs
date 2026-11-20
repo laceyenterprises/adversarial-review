@@ -4,7 +4,7 @@ import { assertRemediationWorkspaceCustody, readHqWorkerStatus } from './remedia
 import { resolveHqRoot } from './remediation-reply-paths.mjs';
 
 export function hqPublicationWorker(job) {
-  const round = job?.remediationPlan?.rounds?.find(entry => entry.round === job.remediationPlan.currentRound);
+  const round = job?.remediationPlan?.rounds?.find(entry => Number(entry.round) === Number(job.remediationPlan.currentRound));
   const worker = job?.remediationWorker || round?.worker;
   if (worker?.dispatchMode === 'hq' || worker?.dispatchId || worker?.requiresProducedAttestation
     || job?.remediationPlan?.dispatchPath === 'hq') return worker || {};
@@ -14,6 +14,7 @@ export function hqPublicationWorker(job) {
 export async function resolvePublicationWorkspace({
   job, workspaceDir, execFileImpl, env = process.env, log = console, canInspect = () => true,
 }) {
+  env ??= process.env;
   const worker = hqPublicationWorker(job);
   if (!worker) return workspaceDir;
   try {

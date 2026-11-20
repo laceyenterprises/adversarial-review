@@ -939,10 +939,12 @@ refuses continuation and leaves the staged work in place.
 The continuation interpreter is selected from `HQ_PYTHON3`, then `AGENT_OS_PY`,
 then `$AGENT_OS_DEPLOY_CHECKOUT/runtime/python/bin/python3`; there is no bare
 PATH Python fallback. The helper refuses Python below 3.11 before importing
-policy. It reads policy from `--trusted-root "$HAM_HQ_ROOT"`, matching the
-reviewed-rebase verifier. Only when that argument is absent does it use
-`AGENT_OS_DEPLOY_CHECKOUT` or discover its own ancestor installation; an explicit
-unavailable root refuses continuation without falling back.
+policy. Both this helper and the reviewed-rebase verifier read policy from the
+owner's installed source at `AGENT_OS_DEPLOY_CHECKOUT`. `HAM_HQ_ROOT` holds
+dispatch state. Standalone helpers also accept `--trusted-root` as an explicit
+installation path. When neither source root is supplied, the helpers look for
+their own ancestor installation. An explicit relative, unavailable or
+in-worktree root refuses policy loading without falling back.
 A completed replay runs the reviewed-head preservation proof and submodule sync.
 
 The continuation currently adapts private installed GENCONFLICT functions.
@@ -8217,11 +8219,20 @@ the registry's trusted-code checks. Verification copies raw Git blobs into a
 temporary directory; it does not execute a branch-supplied registry or alter the
 worker checkout. Unsupported trees and unavailable generators refuse coverage.
 Without an installed registry, whole-patch equivalence remains available.
-The verifier accepts `--trusted-root <installed-policy-root>` for standalone
-helper installations; the closer supplies its configured `HAM_HQ_ROOT`.
-Otherwise it discovers the nearest ancestor with the installed policy. In both
-cases the installed root's origin must match the repository under validation,
-and inherited `PYTHONPATH` cannot supply policy. Missing commit objects are
+The closer runs the verifier with Python isolation and the owner deployment
+environment. Its interpreter selection uses `HQ_PYTHON3`, then `AGENT_OS_PY`,
+then `$AGENT_OS_DEPLOY_CHECKOUT/runtime/python/bin/python3`, with PATH `python3`
+used only when none is configured. A configured interpreter failure never
+falls back; generated coverage remains unavailable. Root selection uses
+`AGENT_OS_DEPLOY_CHECKOUT` or the helper's ancestor installation, with
+`--trusted-root <installed-policy-root>` available
+for standalone use. The `policy` query supports inspection outside a Git checkout;
+commit verification requires a checkout. Within a checkout both actions refuse
+an in-worktree policy root. A missing `--trusted-root` value reports an explicit
+argument error. The installed root's origin must match the repository under
+validation. The installed registry classifier selects that repository's entries
+and the verifier supplies the established identity when regenerating in the
+originless archive. Missing commit objects are
 fetched with three bounded attempts, retrying transport failures after 500ms
 and 1000ms; permanent failures refuse proof immediately. DNS resolution, connect and
 SSH/TLS handshake drops are transport failures; authorization failures are not.

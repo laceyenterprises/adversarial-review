@@ -21,7 +21,8 @@ for (const mode of ['valid', 'symlink-temp', 'mixed-case-repo', 'explicit-root',
     const policyArgs = mode === 'explicit-root' ? ['--trusted-root', installed] : [];
     writeFileSync(installedHelper, readFileSync(helper));
     for (const dir of [source, installed, pkg]) mkdirSync(dir, { recursive: true });
-    const env = { ...process.env, PYTHONPATH: join(root, 'python'), GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_NOSYSTEM: '1' };
+    const env = { ...process.env, AGENT_OS_DEPLOY_CHECKOUT: '', PYTHONPATH: join(root, 'python'),
+      GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_NOSYSTEM: '1' };
     if (mode === 'symlink-temp') {
       const temp = join(root, 'real-temp');
       mkdirSync(temp);
@@ -35,13 +36,18 @@ for (const mode of ['valid', 'symlink-temp', 'mixed-case-repo', 'explicit-root',
     mkdirSync(shadow, { recursive: true });
     writeFileSync(join(shadow, '__init__.py'), `from pathlib import Path\nPath(${JSON.stringify(join(root, 'shadow-loaded'))}).touch()\nraise RuntimeError("worker policy must not load")\n`);
     writeFileSync(join(pkg, '__init__.py'), '');
+    writeFileSync(join(installed, 'modules/worker-pool/config-registry.json'), '{}');
     // A synthetic installed policy supplies a deterministic merged-source generator.
     writeFileSync(join(pkg, 'generated_conflicts.py'), `from pathlib import Path
 from contextlib import nullcontext as termination_cleanup
-REGISTRY_PATH = Path(${JSON.stringify(join(installed, 'modules/worker-pool/config/registry.json'))})
+REGISTRY_PATH = Path(${JSON.stringify(join(installed, 'modules/worker-pool/config-registry.json'))})
 def load_registry():
-    return {'generated.txt': {}}
-def regenerate_conflicts(root, paths, trusted_root):
+    return {'generated.txt': {'repository': 'fixture/repo'}}
+def _owned_entries(entries, repository):
+    return {path: entry for path, entry in entries.items() if entry['repository'] == repository}
+def regenerate_conflicts(root, paths, *, trusted_root, registry, repository):
+    assert repository == 'fixture/repo'
+    assert list(registry) == paths
     assert trusted_root == Path(${JSON.stringify(installed)})
     for path in paths:
         (root / path).write_bytes((root / 'input.txt').read_bytes().upper())
@@ -61,8 +67,37 @@ def regenerate_conflicts(root, paths, trusted_root):
     assert.equal(readFileSync(join(source, 'generated.txt'), 'utf8'), mode !== 'forged' ? 'MERGED INPUT\n' : 'forged payload\n');
     assert.equal(git(source, 'status', '--porcelain'), '');
     assert.throws(() => execFileSync('python3', [installedHelper, ...policyArgs, 'fixture/other', 'policy'], { cwd: source, env, stdio: 'pipe' }));
+    if (mode === 'valid') {
+      const scratch = join(root, 'scratch');
+      mkdirSync(scratch);
+      for (const [flags, deployment] of [
+        [['--trusted-root', installed], join(root, 'missing')],
+        [[], installed],
+        [[], ''],
+      ]) {
+        const options = { cwd: scratch, env: { ...env, AGENT_OS_DEPLOY_CHECKOUT: deployment }, encoding: 'utf8', stdio: 'pipe' };
+        assert.deepEqual(JSON.parse(execFileSync('python3', [installedHelper, ...flags, 'fixture/repo', 'policy'], options)), ['generated.txt']);
+        assert.throws(() => execFileSync('python3', [installedHelper, ...flags, 'fixture/repo', 'verify', sha, 'generated.txt'], options),
+          /Command failed/, 'commit verification still requires a Git checkout');
+      }
+      env.AGENT_OS_DEPLOY_CHECKOUT = join(root, 'missing');
+      assert.throws(run, /Command failed/, 'explicit unavailable deployment must refuse despite an installed ancestor');
+      env.AGENT_OS_DEPLOY_CHECKOUT = source;
+      assert.throws(run, /inside the worker checkout/);
+      assert.throws(() => execFileSync('python3', [installedHelper, 'fixture/repo', 'policy'], { cwd: source, env, stdio: 'pipe' }),
+        /inside the worker checkout/, 'read-only inspection must retain the worker-root fence');
+      delete env.AGENT_OS_DEPLOY_CHECKOUT;
+    }
     rmSync(pkg, { recursive: true });
     assert.throws(() => execFileSync('python3', [installedHelper, ...policyArgs, 'fixture/repo', 'policy'], { cwd: source, env, stdio: 'pipe' }));
     assert.equal(existsSync(join(root, 'shadow-loaded')), false, 'missing installed policy must not execute a worker package');
   });
 }
+
+test('generated verifier diagnoses a missing --trusted-root value before Git discovery', t => {
+  const scratch = mkdtempSync(join(tmpdir(), 'generated-verifier-args-'));
+  t.after(() => rmSync(scratch, { recursive: true, force: true }));
+  assert.throws(() => execFileSync('python3', [helper, '--trusted-root'], { cwd: scratch, stdio: 'pipe' }),
+    error => /--trusted-root requires a directory path argument/.test(error.stderr.toString())
+      && !/IndexError|not a git repository/.test(error.stderr.toString()));
+});

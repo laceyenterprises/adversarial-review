@@ -14,10 +14,13 @@ POLICY = Path("modules/worker-pool/lib/python/cwp_dispatch/generated_conflicts.p
 
 
 def load_policy(worktree, trusted_root=None):
-    # The helper runs with Python isolation. Resolve only from the configured
-    # root shared with reviewed-rebase verification, the configured deployment,
-    # or this helper's installed superproject. An explicit root never falls back.
+    # Use the owner deployment or this helper's installed superproject.
+    # An explicit root never falls back.
     configured = trusted_root or os.environ.get("AGENT_OS_DEPLOY_CHECKOUT")
+    if configured and not Path(configured).is_absolute():
+        raise ValueError(
+            "The installed generated-conflict policy root must be absolute"
+        )
     roots = [Path(configured)] if configured else Path(__file__).resolve().parents
     for root in roots:
         root = root.resolve(strict=True)
@@ -87,7 +90,9 @@ def resume(repo, worktree, trusted_root=None):
                 )
             registry = policy.load_registry()
             if not registry:
-                raise ValueError("Installed generated-file registry ownership is unknown")
+                raise ValueError(
+                    "Installed generated-file registry ownership is unknown"
+                )
 
             owned = policy._owned_entries(registry, repository)
             if owned:
@@ -135,7 +140,9 @@ def resume(repo, worktree, trusted_root=None):
 
 if __name__ == "__main__":
     if sys.version_info < (3, 11):
-        print("Conflict continuation refused: Python >= 3.11 is required", file=sys.stderr)
+        print(
+            "Conflict continuation refused: Python >= 3.11 is required", file=sys.stderr
+        )
         sys.exit(1)
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("repository")

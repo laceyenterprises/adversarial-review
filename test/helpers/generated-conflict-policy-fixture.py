@@ -120,8 +120,18 @@ def resolve_rebase(
     paths = conflict_paths(worktree, run=run_process_group)
     assert paths == ["example.txt"]
     assert set(paths) <= _owned_entries(load_registry(), repository).keys()
+    assert regenerate_conflicts(worktree, paths, trusted_root=trusted_root)
+    git(worktree, "add", "--", *paths)
+    _continue(worktree, run=run, env=None).check_returncode()
+
+
+def regenerate_conflicts(
+    worktree, paths, *, trusted_root, registry=None, repository=None
+):
+    assert paths == ["example.txt"]
+    if registry is not None:
+        assert registry == _owned_entries(load_registry(), repository)
     generator = worktree / "generate.py"
     assert generator.read_bytes() == (trusted_root / "generate.py").read_bytes()
     subprocess.run([sys.executable, "-IB", str(generator)], cwd=worktree, check=True)
-    git(worktree, "add", "--", *paths)
-    _continue(worktree, run=run, env=None).check_returncode()
+    return True

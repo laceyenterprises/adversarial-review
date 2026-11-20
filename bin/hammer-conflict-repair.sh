@@ -136,10 +136,9 @@ else
     HAM_CONFLICT_PYTHON="${HQ_PYTHON3:-${AGENT_OS_PY:-${AGENT_OS_DEPLOY_CHECKOUT:+$AGENT_OS_DEPLOY_CHECKOUT/runtime/python/bin/python3}}}"
     [ -n "$HAM_CONFLICT_PYTHON" ] \
       || ham_conflict_stop 1 'conflict-resolver-failed: configure HQ_PYTHON3, AGENT_OS_PY or the deploy runtime Python (>= 3.11)'
-    ham_conflict_policy_args=()
-    [ -z "${HAM_HQ_ROOT:-}" ] || ham_conflict_policy_args=(--trusted-root "$HAM_HQ_ROOT")
+    # The resolver reads AGENT_OS_DEPLOY_CHECKOUT. HAM_HQ_ROOT is dispatch state.
     ( ham_conflict_comment_char
-      "$HAM_CONFLICT_PYTHON" -IB "$HAM_CONFLICT_ROOT/bin/hammer-conflict-resume.py" "$HAM_REPO" "$PWD" "${ham_conflict_policy_args[@]}"
+      "$HAM_CONFLICT_PYTHON" -IB "$HAM_CONFLICT_ROOT/bin/hammer-conflict-resume.py" "$HAM_REPO" "$PWD"
     ) || {
       [ "$?" -eq 22 ] && ham_conflict_stop 22 conflict-markers-pending
       ham_conflict_stop 1 conflict-resolver-failed

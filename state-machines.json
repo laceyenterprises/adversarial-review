@@ -1970,7 +1970,7 @@
     "src/adapters/reviewer-runtime/agent-runtime/index.mjs": "37a25e62f889f9d87e83a20495a9a3baef75f53db163ef6ed7638f7d6ac09f82",
     "src/adapters/reviewer-runtime/cli-direct/index.mjs": "4bcb3e56b005c1736d0d70d01446de77ac4f3edf4c50455bf8dd0d47cfbde402",
     "src/adapters/reviewer-runtime/run-state.mjs": "58c66556e1e4eeb550b001c00daeebcb22ed72daf475d2ced6703926a7ce2729",
-    "src/ama-closure-orchestration.mjs": "969aab133ee813314005aba409f829ceaa2060f9cd729522d815c2c04b45db3a",
+    "src/ama-closure-orchestration.mjs": "bb7556096e41a2e483ff462e54d7af22dc31eb3d6d43ccb4973cfec36d2e4198",
     "src/ama/closer-lease.mjs": "c2aa021100d2cc5fc0ba2de3ca035dab42d46d416039853d0df4a69a8b2c3900",
     "src/ama/closure-owner.mjs": "2448cded95d11c7a03d85758d16bf1719a433daef79e8d7454c1696c6bfc079e",
     "src/ama/dispatch-closer.mjs": "e16abefd990b9fea2c4c3ec4ec430b85e3a27bd59e68e935b6339c82914cf300",

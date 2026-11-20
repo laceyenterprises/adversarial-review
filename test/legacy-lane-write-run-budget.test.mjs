@@ -1,7 +1,8 @@
 // LEGACYEXECCAP-01: the wrapped command runs on its own budget, and expiry keeps its output.
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { setTimeout as wait } from 'node:timers/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { openFinalizationQueueStore } from '../src/finalization/queue-store.mjs';
@@ -27,6 +28,41 @@ function script(rootDir, body) {
 }
 const write = (rootDir, extra) => runLegacyLaneWrite({ rootDir, ...lane, readConfig: () => ({}), load: idle, ...extra });
 const flushLoop = `process.stdout.write('partial-out\\n'); process.stderr.write('partial-err\\n'); setInterval(() => {}, 1000);`;
+// The execution deadline is tested after the real child has installed its
+// handlers. Controlling the parent's timer avoids racing Node startup on CI;
+// signal delivery, output collection and process exit remain real.
+function readyScript(rootDir, handler) {
+  const ready = join(rootDir, 'ready');
+  const term = join(rootDir, 'term');
+  const [command, argv] = script(rootDir,
+    `import { renameSync, writeFileSync } from 'node:fs'; process.on('SIGTERM', () => { writeFileSync(${JSON.stringify(term)}, 'term'); ${handler} });`
+    + flushLoop + `writeFileSync(${JSON.stringify(ready + '.tmp')}, String(process.pid)); renameSync(${JSON.stringify(ready + '.tmp')}, ${JSON.stringify(ready)}); setTimeout(() => process.exit(99), 15000).unref();`);
+  return { command, argv, ready, term };
+}
+async function waitForExit(pid) {
+  const deadline = Date.now() + 5000;
+  while (true) {
+    try { process.kill(pid, 0); }
+    catch (error) {
+      assert.equal(error.code, 'ESRCH');
+      return;
+    }
+    assert.ok(Date.now() < deadline, 'real child exited after SIGKILL');
+    await wait(10);
+  }
+}
+async function waitForMarker(path) {
+  const deadline = Date.now() + 10_000;
+  while (true) {
+    if (existsSync(path)) {
+      const text = readFileSync(path, 'utf8');
+      if (text) return text;
+    }
+    assert.ok(Date.now() < deadline, `child did not write ${path}`);
+    await wait(10);
+  }
+}
+
 
 test('run budget defaults are load-aware, independent of the lane deadline, and below a 300 s caller budget', async t => {
   const rootDir = fixture(t);
@@ -58,8 +94,13 @@ test('an already-spent lane deadline still refuses before running', async t => {
 
 test('expiry sends SIGTERM, keeps partial output and names the timeout', async t => {
   const rootDir = fixture(t);
-  const [command, argv] = script(rootDir, `process.on('SIGTERM', () => { process.stdout.write('flushed-on-term\\n'); process.exit(143); });${flushLoop}`);
-  const result = await write(rootDir, { command, argv, timeoutMs: 600, killGraceMs: 5000 });
+  const { command, argv, ready } = readyScript(rootDir,
+    `process.stdout.write('flushed-on-term\\n'); process.exit(143);`);
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const pending = write(rootDir, { command, argv, timeoutMs: 600, killGraceMs: 5000 });
+  await waitForMarker(ready);
+  t.mock.timers.tick(600);
+  const result = await pending;
   assert.equal(result.ok, false);
   assert.equal(result.reason, 'legacy writer command timed out after 600 ms');
   assert.match(result.stdout, /partial-out\nflushed-on-term\n/); assert.equal(result.stderr, 'partial-err\n');
@@ -67,12 +108,22 @@ test('expiry sends SIGTERM, keeps partial output and names the timeout', async t
 
 test('a child that ignores SIGTERM is SIGKILLed after the grace and output is kept', async t => {
   const rootDir = fixture(t);
-  const [command, argv] = script(rootDir, `process.on('SIGTERM', () => {});${flushLoop}`);
-  const started = Date.now();
-  const result = await write(rootDir, { command, argv, timeoutMs: 300, killGraceMs: 300 });
+  const { command, argv, ready, term } = readyScript(rootDir, '');
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const pending = write(rootDir, { command, argv, timeoutMs: 300, killGraceMs: 300 });
+  const pidText = await waitForMarker(ready);
+  assert.match(pidText, /^[1-9][0-9]+$/);
+  const pid = Number(pidText);
+  assert.ok(Number.isSafeInteger(pid) && pid > 1);
+  t.mock.timers.tick(300);
+  await waitForMarker(term);
+  t.mock.timers.tick(299);
+  assert.doesNotThrow(() => process.kill(pid, 0), 'child survives until the complete grace expires');
+  t.mock.timers.tick(1);
+  const result = await pending;
   assert.equal(result.ok, false); assert.match(result.reason, /timed out after 300 ms/);
   assert.equal(result.stdout, 'partial-out\n'); assert.equal(result.stderr, 'partial-err\n');
-  assert.ok(Date.now() - started >= 600, 'waited the grace before SIGKILL');
+  await waitForExit(pid);
 });
 
 test('runner maps exits like execFile: codes pass through, spawn errors reject, maxBuffer kills', async t => {

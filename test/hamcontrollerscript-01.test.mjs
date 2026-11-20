@@ -720,6 +720,9 @@ case "$(basename "$path")" in
     log sanitizer
     [ "$FIXTURE_SANITIZER_EXIT" = 0 ] || exit "$FIXTURE_SANITIZER_EXIT"
     if [ "\${FIXTURE_SANITIZER_OUTPUT+x}" = x ]; then
+      # Consume the pipeline input like the real helper before returning success.
+      # Otherwise jq can race this stub's exit and fail with SIGPIPE under pipefail.
+      cat >/dev/null
       printf '%s' "$FIXTURE_SANITIZER_OUTPUT"; exit 0
     fi
     exec ${shellQuote(process.execPath)} "$path" "$@" ;;

@@ -56,3 +56,16 @@ and `--auto` are unchanged, and `--admin` is still never used.
 - `npm run lint` (0 errors), `npm run typecheck:contracts`, and
   `bash demo/research-finding-walkthrough.sh` pass; `shellcheck` is clean on
   the controller.
+
+## HAM CI repair
+
+The sanitizer-output fixture consumes stdin before returning a successful stub
+response. This mirrors the real helper and prevents upstream jq from receiving
+SIGPIPE under pipefail, which could turn decoder-failure cases into sanitizer
+failures depending on scheduling (observed in Node 22 CI).
+
+HAM validation: canonical changed-surface run passed all controller cases; one
+run-bounded suite failure passed a focused canonical rerun (17/17). Lint,
+contract typecheck and the offline research-finding walkthrough passed. The
+shipped close command repeats changed-surface validation before merge and
+requires exact-head GitHub CI.

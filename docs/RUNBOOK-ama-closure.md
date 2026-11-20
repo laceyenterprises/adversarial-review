@@ -5092,6 +5092,27 @@ The offline immutable PR9692 corpus and boundary tests are documented in
 [test/fixtures/migration-renumber-9692/README.md](../test/fixtures/migration-renumber-9692/README.md).
 See the [SEV3 RCA](postmortems/SEV3-LAC-2127-migration-metadata-repair-2026-10-29.md).
 
+The LAC-2127 continuation handles the Agent OS ledger's applied
+`successful_rss_index_339` revision in wrapper and helper slot 340. The
+exception is anchored to immutable main commit `283d06e4` and that specific
+parent path and declared revision. The collector checks the Git tree and blob
+object IDs, the parent wrapper, its registered module and SQL, and the protected
+author's predecessor. The protected author and integrated snapshots must each
+add exactly the child wrapper, helper, SQL and registry entry to their respective
+base migration directories. The child moves from slot 340 to 341 with the same
+SQL and operation bytes. Main's slot 340 remains intact.
+
+The first-parent path from protected author to candidate head must include every
+diagnostic snapshot and one two-parent integration whose second parent is
+`283d06e4`. The migration directories must agree with the author snapshot before
+the integration and the proved integrated snapshot from that point onward. The
+certificate binds the repository, both heads, both merge bases, the observed
+commit parents, and the exact preservation paths and blobs. The native
+primary-change evaluator consumes it in the same evaluation that collected it.
+Audit copies describe the proof and a subsequent evaluation recomputes it from
+immutable objects. The [offline witness](../test/fixtures/migration-renumber-11143/README.md)
+records the original history.
+
 `proveMigrationRenumbers` retains its array return and records failed attempts
 on the supplied transient evidence as `migrationRenumberDiagnostics`, with
 `{ proven: false, reason, headSha, path?, detail? }`. Refusal diagnostics include

@@ -59,7 +59,7 @@ export function createHistoryReader(options = {}) {
     try {
       // Only object-addressed evidence is immutable. Keep PR metadata, refs,
       // reviews and cost/label provenance live even on the same PR head.
-      const immutable = /\/(?:git\/(?:trees|blobs)|commits)\/[0-9a-f]{40}(?:\?|$)/i.test(path)
+      const immutable = /\/(?:git\/(?:trees|blobs|commits)|commits)\/[0-9a-f]{40}(?:\?|$)/i.test(path)
         || /\/compare\/[0-9a-f]{40}\.\.\.[0-9a-f]{40}(?:\?|$)/i.test(path);
       const execute = async () => {
         const run = () => execGhWithRetryImpl({ ...ghOptions,
@@ -340,7 +340,10 @@ export function createHistoryReader(options = {}) {
         const result = await commitHistory(path);
         return { ...result, filesComplete: true, files: await filesBetween(repo, result.merge_base_commit.sha, head) };
       }
-      if (/\/commits\/[0-9a-f]{40}$/i.test(path)) {
+      if (/^repos\/[^/]+\/[^/]+\/git\/commits\/[0-9a-f]{40}$/i.test(path)) {
+        return cached(path, '{sha, tree: {sha: .tree.sha}, parents: [.parents[] | {sha}]}');
+      }
+      if (/^repos\/[^/]+\/[^/]+\/commits\/[0-9a-f]{40}$/i.test(path)) {
         let result;
         const files = [];
         for (let page = 1; ; page++) {

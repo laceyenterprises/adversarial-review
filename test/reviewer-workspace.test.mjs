@@ -192,6 +192,38 @@ test('repo-local review ledger keeps reviewer snapshots and audit outside both l
   }
 });
 
+test('clone-root snapshot with default state stays outside the service checkout and superproject', async () => {
+  const root = realpathSync(mkdtempSync(join(tmpdir(), 'reviewer-clone-default-state-')));
+  try {
+    const superproject = makeRepo(root, 'agent-os');
+    const toolsDir = join(superproject, 'tools');
+    mkdirSync(toolsDir);
+    const serviceCheckoutDir = makeRepo(toolsDir, 'adversarial-review');
+    const cloneRoot = join(root, 'clones');
+    const cloneOwner = join(cloneRoot, 'example');
+    mkdirSync(cloneOwner, { recursive: true });
+    const checkoutDir = makeRepo(cloneOwner, 'target');
+    const stateDir = join(serviceCheckoutDir, 'data');
+    const env = { ADVERSARIAL_REVIEWER_CLONE_ROOT: cloneRoot, HQ_ROOT: join(root, 'hq') };
+    const snapshot = await prepareReviewerWorkspace({
+      repo: 'example/target', checkoutDir, serviceCheckoutDir, stateDir,
+      headSha: git(checkoutDir, 'rev-parse', 'HEAD'), env, pinSnapshot: false,
+    });
+    assert.equal(snapshot.diffOnly, false);
+    assert.equal(snapshot.stateDir, join(root, 'hq', 'adversarial-review', 'reviewer-workspace'));
+    assert.ok(snapshot.snapshotDir.startsWith(`${snapshot.stateDir}/`));
+    assert.ok(!snapshot.snapshotDir.startsWith(`${superproject}/`));
+    assert.ok(!snapshot.snapshotDir.startsWith(`${checkoutDir}/`));
+    assert.throws(() => git(snapshot.snapshotDir, 'rev-parse', '--show-toplevel'));
+    assert.throws(() => resolveReviewerWorkspaceStateDir({
+      stateDir, checkoutDir, serviceCheckoutDir,
+      env: { ...env, ADVERSARIAL_REVIEW_WORKSPACE_STATE_DIR: join(superproject, 'data') },
+    }), /outside the source checkout/);
+  } finally {
+    removeFixture(root);
+  }
+});
+
 test('reviewer workspace state override inside the checkout fails closed', () => {
   const root = mkdtempSync(join(tmpdir(), 'reviewer-workspace-invalid-root-'));
   try {

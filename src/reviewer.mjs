@@ -1961,7 +1961,8 @@ async function main() {
   let workspace;
   try {
     workspace = await prepareReviewerWorkspace({
-      repo, checkoutDir, stateDir: resolveAdversarialReviewStateDir(ROOT, process.env), headSha: reviewerHeadSha,
+      repo, checkoutDir, serviceCheckoutDir: ROOT,
+      stateDir: resolveAdversarialReviewStateDir(ROOT, process.env), headSha: reviewerHeadSha,
     });
   } catch (err) {
     console.error(`[reviewer] infrastructure error: reviewer workspace snapshot unavailable for ${repo}#${prNumber}: ${err.message}`);

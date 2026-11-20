@@ -139,18 +139,26 @@ function isInside(candidate, parent) {
 function resolveReviewerWorkspaceStateDir({
   stateDir,
   checkoutDir,
+  serviceCheckoutDir,
   env = process.env,
   homeDir = homedir(),
 } = {}) {
   if (!stateDir || !checkoutDir) throw new Error('reviewer workspace requires stateDir and checkoutDir');
+  const sourceCheckouts = [checkoutDir];
+  if (serviceCheckoutDir) {
+    sourceCheckouts.push(serviceCheckoutDir);
+    const superprojectDir = resolve(serviceCheckoutDir, '..', '..');
+    if (existsSync(join(superprojectDir, '.git'))) sourceCheckouts.push(superprojectDir);
+  }
+  const insideSourceCheckout = (path) => sourceCheckouts.some((source) => isInside(path, source));
   const configured = String(env.ADVERSARIAL_REVIEW_WORKSPACE_STATE_DIR || '').trim();
   const hqRoot = String(env.HQ_ROOT || '').trim();
-  const selected = configured || (!isInside(stateDir, checkoutDir)
+  const selected = configured || (!insideSourceCheckout(stateDir)
     ? stateDir
     : hqRoot
       ? join(hqRoot, 'adversarial-review', 'reviewer-workspace')
       : join(homeDir, '.agent-os', 'adversarial-review', 'reviewer-workspace'));
-  if (isInside(selected, checkoutDir)) {
+  if (insideSourceCheckout(selected)) {
     throw new Error('reviewer workspace state must be outside the source checkout');
   }
   return resolve(selected);
@@ -497,9 +505,14 @@ async function prepareReviewerSnapshot({
   return { checkoutDir: resolve(checkoutDir), headSha, snapshotDir, reused };
 }
 
-export async function prepareReviewerWorkspace({ repo, checkoutDir, stateDir, headSha, execFileImpl, pinSnapshot = true }) {
+export async function prepareReviewerWorkspace({
+  repo, checkoutDir, serviceCheckoutDir, stateDir, headSha, execFileImpl,
+  env = process.env, homeDir = homedir(), pinSnapshot = true,
+}) {
   if (await materializeReviewerHead(checkoutDir, headSha, execFileImpl)) {
-    const workspaceStateDir = resolveReviewerWorkspaceStateDir({ stateDir, checkoutDir });
+    const workspaceStateDir = resolveReviewerWorkspaceStateDir({
+      stateDir, checkoutDir, serviceCheckoutDir, env, homeDir,
+    });
     try {
       const snapshot = await prepareReviewerSnapshot({ repo, checkoutDir, stateDir: workspaceStateDir, expectedHeadSha: headSha, pinSnapshot });
       return { ...snapshot, stateDir: workspaceStateDir, diffOnly: false };

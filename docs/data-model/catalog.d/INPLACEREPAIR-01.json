@@ -19,7 +19,8 @@
       ],
       "owner": "watcher and PR repair dispatcher",
       "optionalFields": [
-        "repairEpochs[].dispatchProjectRef: immutable canonical dispatch project for the existing paired repository read, when supplied at reservation"
+        "repairEpochs[].dispatchProjectRef: immutable canonical dispatch project for the existing paired repository read, when supplied at reservation",
+        "repairEpochs[].absentObservations: consecutive canonical exact-key absence proofs before operator escalation"
       ]
     }
   ]

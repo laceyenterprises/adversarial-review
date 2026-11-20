@@ -9,7 +9,7 @@ import { promisify } from 'node:util';
 import { pathToFileURL } from 'node:url';
 import { reserveRepairEpoch, bindRepairHead, repairCause, pageRepairCap,
   pendingRepairEpoch, observeRepairOwner, reconcileRepairOwner, repairEpochForHead,
-  REPAIR_OWNER_OBSERVE_MS } from '../src/repair-epochs.mjs';
+  REPAIR_OWNER_OBSERVE_MS, REPAIR_ABSENCE_ESCALATE_MS } from '../src/repair-epochs.mjs';
 import { admitExhaustedHeadVerdict, isExhaustedHeadVerdictRequested,
   owesExhaustedHeadVerdict } from '../src/exhausted-head-verdict.mjs';
 import { readHammerRetryCapLedger, recordHammerRetryDispatch, refundCloserSelfError,
@@ -53,6 +53,10 @@ test('repair helper rejects malformed heads before opening the review database',
   for (const sha of [undefined, '', old.slice(1), `${old}a`, 'g'.repeat(40)]) {
     await assert.rejects(main([f.rootDir, repo, String(prNumber), sha, f.ownerKey]),
       { message: 'invalid repair request' });
+  }
+  for (const project of ['has space', 'x'.repeat(257)]) {
+    await assert.rejects(main([f.rootDir, repo, String(prNumber), old, f.ownerKey,
+      'false', '', '', project]), { message: 'invalid repair request' });
   }
 });
 
@@ -348,6 +352,36 @@ test('only terminal launch and complete retry evidence permit a successor epoch'
   }
 });
 
+test('legacy dispatch row identity permits terminal retirement and repair publication', async t => {
+  for (const targetRepo of [null, 'widgets', repo]) {
+    const f = fixture(t), epoch = reserveRepairEpoch(f).epoch;
+    const readImpl = async () => {
+      const read = launchRead(epoch, 'succeeded');
+      read.rows[0].target_repo = targetRepo;
+      delete read.rows[0].head_sha;
+      delete read.rows[0].identity_ambiguous;
+      return read;
+    };
+    const observed = await reconcileRepairOwner({ ...f, headSha: head, readImpl,
+      readPublisher: async () => ({ ok: true, rowHeadSha: head, launchRequestId: 'fixture-launch' }) });
+    assert.equal(observed.publicationHead, head);
+    assert.equal(observed.ownerState, 'terminal');
+  }
+});
+
+test('explicit dispatch identity contradictions retain repair custody', async t => {
+  for (const mismatch of [{ identity_ambiguous: true }, { target_repo: 'other/widgets' },
+    { head_sha: head }, { idempotency_key: 'foreign-key' }]) {
+    const f = fixture(t), epoch = reserveRepairEpoch(f).epoch;
+    const observed = await observeRepairOwner({ ...f, epoch, readImpl: async () => {
+      const read = launchRead(epoch);
+      Object.assign(read.rows[0], mismatch);
+      return read;
+    } });
+    assert.equal(observed.ownerState, 'unknown');
+  }
+});
+
 test('a mismatched replay still records retirement of an observed terminal owner', t => {
   const f = fixture(t);
   const replay = reserveRepairEpoch(f).epoch;
@@ -525,7 +559,7 @@ test('watcher reconciliation retires a positively identified terminal repair and
 });
 
 test('repair observation bounds cadence and retains live, early absent and unreadable owners', async t => {
-  for (const state of ['live', 'early-absent', 'late-absent', 'unreadable', 'unproven-absent', 'retry']) {
+  for (const state of ['live', 'early-absent', 'unreadable', 'unproven-absent', 'retry']) {
     const f = { ...fixture(t), now: '2026-01-01T00:00:00Z' };
     const epoch = reserveRepairEpoch(f).epoch;
     const now = Date.parse(f.now) + (state === 'early-absent' ? 1000 : 60 * 60_000);
@@ -534,7 +568,8 @@ test('repair observation bounds cadence and retains live, early absent and unrea
       reads++;
       if (state === 'unreadable') return { ok: false };
       if (state.includes('absent')) return { ok: true, roots: [],
-        ...(state === 'unproven-absent' ? {} : { absenceProof: {} }) };
+        ...(state === 'unproven-absent' ? {} : { absenceProof: {
+          version: 1, kind: 'canonical-exact-selector-absence' } }) };
       return state === 'retry' ? launchRead(epoch, 'failed', 'running') : launchRead(epoch, 'running');
     };
     assert.ok(await reconcileRepairOwner({ ...f, now, readImpl }));
@@ -543,6 +578,42 @@ test('repair observation bounds cadence and retains live, early absent and unrea
     assert.equal(reads, count, 'no repeated SDK read inside the cadence');
     assert.equal(pendingRepairEpoch(f.rootDir, f).terminalAt, undefined);
   }
+});
+
+test('repeated overdue dispatch absence pages once and projects operator custody', async t => {
+  const f = { ...fixture(t), now: '2026-01-01T00:00:00Z' };
+  const epoch = reserveRepairEpoch(f).epoch;
+  const readImpl = async () => ({ ok: true, roots: [], absenceProof: {
+    version: 1, kind: 'canonical-exact-selector-absence' } });
+  const pages = [];
+  const { observeClosureWait } = await import('../src/ama/closure-wait.mjs');
+  const observeWait = args => observeClosureWait({ ...args, pageImpl: async (message, options) => {
+    pages.push({ args, message, options });
+  } });
+  const first = await reconcileRepairOwner({ ...f, now: Date.parse(f.now) + 1000, readImpl, observeWait });
+  assert.equal(first.ownerState, 'absent');
+  assert.equal(first.absentObservations, 1);
+  const overdue = await reconcileRepairOwner({ ...f, now: Date.parse(f.now) + REPAIR_ABSENCE_ESCALATE_MS + 1000,
+    readImpl, observeWait });
+  assert.equal(overdue.ownerState, 'absent-unfenced');
+  assert.equal(overdue.absentObservations, 2);
+  assert.equal(overdue.terminalAt, undefined);
+  assert.equal(pages.length, 1);
+  assert.equal(pages[0].args.immediate, true);
+  assert.equal(pages[0].args.waitClass, 'repair-absent-unfenced');
+  assert.equal(pages[0].options.severity, 'SEV1');
+  await reconcileRepairOwner({ ...f, now: Date.parse(f.now) + REPAIR_ABSENCE_ESCALATE_MS + 32_000,
+    readImpl, observeWait });
+  assert.equal(pages.length, 1);
+  const { nextAction, deriveNextActionSnapshot } = await import('../src/pr-next-action.mjs');
+  const action = nextAction(deriveNextActionSnapshot({ subjectKey: `${repo}#${prNumber}`, head: old,
+    observedAt: new Date(Date.parse(f.now) + REPAIR_ABSENCE_ESCALATE_MS + 1000).toISOString(),
+    observations: { pr: { state: 'OPEN', headSha: old, labels: [] },
+      policy: { autonomousMergeExecutionEnabled: true }, progress: { repairEpoch: overdue } } }));
+  assert.equal(action.reason, 'repair-absent-unfenced');
+  assert.equal(action.actor, 'operator');
+  const { resolveTtmOwner } = await import('../src/ttm-owner.mjs');
+  assert.equal(resolveTtmOwner({ repairEpoch: overdue }).owner, 'operator');
 });
 
 test('failed retry-chain lookup retains repair custody as unknown', async t => {

@@ -69,7 +69,9 @@ flock. At a moved head, the same terminal evidence plus a successful missing or
 foreign publication read retires with `foreign-head-after-terminal`, preserving
 spend and leaving the head unbound. Verified publication head/launch evidence
 persists across skipped admission ticks. Live, absent dispatch and unreadable
-evidence retain custody. Retirement removes
+evidence retain custody. Two consecutive canonical absence proofs after ten
+minutes mark the reservation `absent-unfenced`, project operator custody in
+next-action/TTM and send a deduplicated SEV1 page. Retirement removes
 repair custody from canonical next-action and TTM projections, restoring the
 existing ownerless clock and SEV1 path. Reviewer harness refunds are limited
 to three per PR across heads; later failures keep ordinary infra charges and

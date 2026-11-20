@@ -877,9 +877,11 @@ refusal. After normal deployment, SRE observes a natural final-fix-all launch,
 completion receipt and matching produced attestation before declaring recovery.
 
 In-place repair custody is reconciled before watcher admission, at most once
-per 30 seconds. Complete terminal retry evidence or proven exact-key absence
-after ten minutes retires an unpublished reservation; unknown evidence retains
-custody. Retirement restores the existing ownerless clock and SEV1 path.
+per 30 seconds. Complete terminal retry evidence can retire an unpublished
+reservation. Point-in-time exact-key absence retains custody; two consecutive
+canonical absence proofs after ten minutes project operator-required custody
+and send a deduplicated SEV1 page. Unknown evidence retains custody.
+Retirement restores the existing ownerless clock and SEV1 path.
 Reviewer harness refunds are bounded to three per PR across heads; later
 failures retain ordinary infrastructure cap and alert handling. Corrupt or busy
 repair/refund ledgers defer only their PR. See the
@@ -5626,8 +5628,10 @@ EXHAUSTEDHEADOWNER-01: a new builder head after cycle exhaustion receives one
 verdict-only review. Pending repair custody retires on complete terminal owner
 evidence at base, or at a moved head after a successful negative publication
 read, preserving counters. Verified repair publication evidence persists across
-admission ticks. After normal deployment, observe natural foreign-head release
-and delayed verified-publication admission read-only; offline tests do not
+admission ticks. Repeated overdue canonical absence retains custody and pages
+the operator for inspection. After normal deployment, observe natural
+foreign-head release, delayed verified-publication admission and absence
+escalation read-only; offline tests do not
 certify deployment. Findings retain final closer ownership; head-scoped retry
 and deadline evidence cannot strand a new head. Spent budgets page once, with
 lifetime escalation deduplicated across head changes. See the

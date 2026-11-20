@@ -17,7 +17,13 @@ Native follow-up custody can satisfy the reservation's queue check only through
 the existing [pre-spawn claim](follow-up-jobs.md#live-pr-owner-admission-snapshot-remediationowner-01).
 Before admission, the watcher observes a pending
 reservation at most once per 30 seconds, recording `ownerObservedAt`,
-`ownerState` (`live`, `unknown`, or `terminal`) and nullable `ownerLaunch`.
+`ownerState` (`live`, `unknown`, `absent`, `absent-unfenced`, or `terminal`)
+and nullable `ownerLaunch`. Canonical exact-key absence increments
+`absentObservations`; an unknown or positive read clears it. After two
+consecutive absence proofs and ten minutes from `reservedAt`, the watcher
+sets `absent-unfenced`, retains the reservation, projects operator-required
+custody in next-action/TTM, and sends a deduplicated SEV1 page. The operator
+must inspect the submitter and key before releasing custody.
 Complete terminal launch/retry evidence at the reservation base head retires
 custody with `terminalAt`, `terminalLaunch` and `terminalReason: owner-terminal-at-base`.
 At a moved head, a successful missing-produced-attestation or foreign-publisher
@@ -25,11 +31,15 @@ read plus a terminal owner chain retires with `terminalReason:
 foreign-head-after-terminal`, without binding or resetting counters. Unreadable
 or invalid attestation evidence retains custody. Verified `publicationHead` and
 `publicationLaunch` persist under the same snapshot check and flock, remaining
-available across skipped admission ticks; head matching ignores case. The keyed row and retry root must
-agree with the reservation key, repository and base head. A scoped keyed read
+available across skipped admission ticks; head matching ignores case. The keyed
+row and retry root must agree with the reservation key. Explicit ambiguity or
+conflicting repository/head identity refuses ownership. Null repository and
+absent head are non-contradicting; a repository basename is accepted for the
+qualified reservation repository. A scoped keyed read
 sends the stored project and the ledger repository to the existing producer.
-Legacy reservations use the unscoped key. Canonical absence, filtered absence
-and unreadable evidence retain custody. A delayed pre-enqueue submitter can
+Legacy reservations use the unscoped key. Point-in-time absence and unreadable
+evidence retain custody; only canonical exact-key absence counts toward
+escalation. A delayed pre-enqueue submitter can
 still launch after a point-in-time absence read. Retirement compares the full
 observed reservation under the ledger flock and cannot retire a bound head.
 Retired reservations no longer appear in next-action or TTM ownership, allowing

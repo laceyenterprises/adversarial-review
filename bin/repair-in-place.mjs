@@ -39,7 +39,9 @@ export async function main(args, {
   const dispatchProjectRef = dispatchProjectRaw === '' ? undefined : dispatchProjectRaw;
   const prNumber = Number(prRaw);
   if (!rootDir || !repo?.includes('/') || !(prNumber > 0) || !ownerKey
-    || !/^[0-9a-f]{40}$/i.test(headSha)) throw new Error('invalid repair request');
+    || !/^[0-9a-f]{40}$/i.test(headSha)
+    || (dispatchProjectRef !== undefined && (typeof dispatchProjectRef !== 'string'
+      || dispatchProjectRef.length > 256 || /\s/.test(dispatchProjectRef)))) throw new Error('invalid repair request');
   const db = new Database(resolve(rootDir, 'data/reviews.db'), { readonly: true, fileMustExist: true });
   let facts;
   try {

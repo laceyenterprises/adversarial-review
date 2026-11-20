@@ -9,6 +9,7 @@ import { readHeadAttestationChainForPr, resolveDaemonWorkerIdentityFromHeadAttes
 
 export const REPAIR_EPOCH_CAP = 2;
 export const REPAIR_OWNER_OBSERVE_MS = 30_000;
+export const REPAIR_ABSENCE_ESCALATE_MS = 10 * 60_000;
 const SHA = /^[a-f0-9]{40}$/i;
 const REPO = /^[^/\s]+\/[^/\s]+$/;
 const validProject = value => typeof value === 'string' && value.length > 0
@@ -39,12 +40,18 @@ export async function observeRepairOwner({ rootDir, repo, epoch, readImpl = read
   const result = await readImpl(selector, readArgs);
   // Pre-enqueue reservation and enqueue run in separate critical sections.
   // Even canonical point-in-time absence cannot fence a delayed submitter.
-  if (!result.ok || result.roots?.length !== 1) return unknown;
+  if (!result.ok) return unknown;
+  if (result.roots?.length === 0 && result.absenceProof?.version === 1
+    && result.absenceProof.kind === 'canonical-exact-selector-absence') {
+    return { ...epoch, ownerState: 'absent', absentObservations: (epoch.absentObservations || 0) + 1 };
+  }
+  if (result.roots?.length !== 1) return unknown;
   const [ownerLaunch] = result.roots;
   if (epoch.ownerLaunch && epoch.ownerLaunch !== ownerLaunch) return unknown;
   const matchesOwner = row => row?.launch_request_id === ownerLaunch
-    && row.idempotency_key === epoch.ownerKey && row.identity_ambiguous === false
-    && sameIdentity(row.target_repo, repo) && sameIdentity(row.head_sha, epoch.baseHead);
+    && row.idempotency_key === epoch.ownerKey && row.identity_ambiguous !== true
+    && (row.target_repo == null || [repo, repo.split('/').at(-1)].some(name => sameIdentity(row.target_repo, name)))
+    && (!row.head_sha || sameIdentity(row.head_sha, epoch.baseHead));
   if (!result.rows?.some(matchesOwner)) return unknown;
   const chain = await readImpl({ launch_request_ids: [ownerLaunch], include_retry_chain: true }, readArgs);
   const probe = launchProbe(chain, ownerLaunch, true);
@@ -61,7 +68,8 @@ export async function observeRepairOwner({ rootDir, repo, epoch, readImpl = read
 // proof, or retires after a successful negative read and terminal owner proof.
 export async function reconcileRepairOwner({ rootDir, repo, prNumber, headSha, now = Date.now(),
   readImpl = readDispatchLaunches, includeReviewedHead = false,
-  hqRoot = resolveHqRoot(), execFileImpl, readPublisher = readRepairPublisher }) {
+  hqRoot = resolveHqRoot(), execFileImpl, readPublisher = readRepairPublisher,
+  observeWait = observeClosureWait }) {
   const ledger = readHammerRetryCapLedger(rootDir, { repo, prNumber });
   if (ledger?.__corrupt) throw new Error('repair ledger unreadable');
   const epoch = ledger?.repairEpochs?.findLast(entry => !entry.reviewHead && !entry.terminalAt);
@@ -90,8 +98,16 @@ export async function reconcileRepairOwner({ rootDir, repo, prNumber, headSha, n
     if (!current) return null;
     if (!isDeepStrictEqual(current, epoch)) return current;
     current.ownerObservedAt = new Date(now).toISOString();
-    current.ownerState = observed.ownerState;
+    current.ownerState = current.ownerState === 'absent-unfenced' && observed.ownerState === 'unknown'
+      ? 'absent-unfenced' : observed.ownerState;
     current.ownerLaunch = observed.ownerLaunch || null;
+    if (observed.ownerState === 'absent') {
+      current.absentObservations = observed.absentObservations;
+      if (now - Date.parse(current.reservedAt) >= REPAIR_ABSENCE_ESCALATE_MS
+        && current.absentObservations >= 2) current.ownerState = 'absent-unfenced';
+    } else if (current.ownerState !== 'absent-unfenced') {
+      delete current.absentObservations;
+    }
     if (observed.ownerState === 'terminal' && (atBase || foreignHead)) {
       current.terminalAt = current.ownerObservedAt;
       current.terminalLaunch = current.ownerLaunch;
@@ -104,6 +120,11 @@ export async function reconcileRepairOwner({ rootDir, repo, prNumber, headSha, n
     }
     return current;
   });
+  if (reconciled?.ownerState === 'absent-unfenced') {
+    await observeWait({ rootDir, repo, prNumber, headSha: `${reconciled.baseHead}:${reconciled.id}`,
+      waitClass: 'repair-absent-unfenced', immediate: true, now,
+      reason: `Repair reservation ${reconciled.id} has repeated dispatch absence without an enqueue fence; operator must inspect the submitter and key before releasing custody.` });
+  }
   return reconciled || (includeReviewedHead ? repairEpochForHead(rootDir, { repo, prNumber }, headSha) : null);
 }
 

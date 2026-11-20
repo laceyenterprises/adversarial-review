@@ -1562,7 +1562,7 @@ export async function processReviewSubject(entry, ctx) {
       // A reservation owns the PR through publication. On a moved head, only
       // a publication attested by its launch or retry can start the repair review.
       if (repairEpoch && !repairEpoch.reviewHead
-        && (!repairEpoch.publicationHead || repairEpoch.publicationHead.toLowerCase() !== subject.headSha.toLowerCase())) return;
+        && (!repairEpoch.publicationHead || repairEpoch.publicationHead.toLowerCase() !== subject.headSha?.toLowerCase())) return;
       if (effectiveDomainId === CODE_PR_DOMAIN_ID && (existing?.reviewer_head_sha || repairEpoch)
         && existing?.reviewer_head_sha !== subject.headSha && !subject.terminal
         && !isExhaustedHeadVerdictRequested(existing, subject.headSha)

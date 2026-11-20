@@ -27,7 +27,7 @@ import { hasClosureRecoveryIntent, hasHammerDispatchIntent, reviseClosureNextAct
 import { createNoProgressLaneGate } from '../src/posted-review-row.mjs';
 import { recoverOverdueOwnership } from '../src/ownerproof-review-recovery.mjs';
 import { recoverOrphan } from '../src/ama/orphan-watchdog.mjs';
-import { noProgressLaneFilePath } from '../src/watcher-no-progress-lane.mjs';
+import { handlerDecisionFingerprint, noProgressLaneFilePath } from '../src/watcher-no-progress-lane.mjs';
 import { observeCloserBacklog } from '../src/ama/closure-lag.mjs';
 import { collectReviewPipelineHealth, readExpiredNextActions } from '../src/review-pipeline-health.mjs';
 import { expiredNextActionDeadline } from '../src/next-action-deadline.mjs';
@@ -770,7 +770,7 @@ for (const stale of [false, true]) test(`CLOSERPARKOWNER-02: lapsed ${stale ? 't
       items: [{ launch_request_id: id, repo: REPO, status: 'running' }], retry_edges: [] };
   });
   const args = closerHeadArgs(t, { now: () => DEADLINE_MS + 20 * MINUTE, observeClosureWaitImpl,
-    resolveAmaHammerDispatchModeImpl: () => 'background', maybeDispatchAmaCloserImpl: async input => {
+    resolveAmaHammerDispatchModeImpl: () => 'inline', maybeDispatchAmaCloserImpl: async input => {
       const result = await closer.impl(input);
       if (result.dispatched) {
         launched++;
@@ -799,9 +799,9 @@ test('CLOSERPARKOWNER-02: a live follow-up or a live hold fences the rescue entr
   const args = closerHeadArgs(t, { now: () => DEADLINE_MS + 20 * MINUTE });
   const dispatchImpl = () => assert.fail('a live owner or hold must prevent dispatch');
   const held = { ...args.candidate, labels: [{ name: 'no-merge-hold' }] };
-  assert.equal(await recoverOverdueOwnership(parkedDiscovery(args, {
+  assert.equal((await recoverOverdueOwnership(parkedDiscovery(args, {
     fetchCandidateImpl: async () => held, dispatchImpl,
-  })), null);
+  })))?.outcome, 'ama-pending');
   const dir = path.join(args.rootDir, 'data', 'follow-up-jobs', 'in-progress');
   mkdirSync(dir, { recursive: true });
   writeFileSync(path.join(dir, 'fixture.json'), JSON.stringify({ ...IDENTITY, status: 'in_progress',
@@ -838,16 +838,85 @@ test('CLOSERPARKOWNER-02: a hard-stop refusal is paged once with a typed reason'
       reason: 'hammer-app-attestation-missing' }),
     resolveAmaHammerDispatchModeImpl: () => 'inline', maybeDispatchAmaCloserImpl: async () => ({
       dispatched: false, skipMergeAgent: true, reason: 'not-eligible',
-      reasons: ['label-adversarial-merge-blocked'],
+      reasons: ['duplicate-family-unresolved'],
     }) });
   deleteAmaCloserLease(args.rootDir, IDENTITY);
   for (let pass = 0; pass < 2; pass++) {
     const result = await recoverOverdueOwnership(parkedDiscovery(args));
     assert.equal(result?.outcome ?? null, pass === 0 ? 'recovery-exhausted' : null,
       JSON.stringify(result?.amaClosureResult?.nextAction));
-    if (pass === 0) assert.equal(result.amaClosureResult.operatorReason, 'label-adversarial-merge-blocked');
+    if (pass === 0) assert.equal(result.amaClosureResult.operatorReason, 'duplicate-family-unresolved');
   }
   assert.equal(pages.length, 1);
+});
+
+for (const unreadable of [true, false]) test(`CLOSERPARKOWNER-02: ${unreadable ? 'failed candidate read' : 'moved candidate'} pages once across reconciliation retries`, async t => {
+  let now = DEADLINE_MS + 20 * MINUTE;
+  let reads = 0;
+  const pages = [];
+  const args = closerHeadArgs(t, { now: () => now });
+  for (let pass = 0; pass < 3; pass++) {
+    const options = parkedDiscovery({ ...args, now: () => now }, {
+      fetchCandidateImpl: async () => {
+        reads++;
+        if (unreadable) throw new Error('synthetic persistent candidate-read failure');
+        return { ...args.candidate, headSha: 'd'.repeat(40) };
+      },
+      dispatchImpl: () => assert.fail('no actionable candidate'),
+      recoverImpl: input => recoverOrphan({ ...input, pageImpl: async (message, event) => {
+        pages.push(event); return { queued: true };
+      } }),
+    });
+    assert.equal(await recoverOverdueOwnership(options), null, 'ordinary discovery continues after the page');
+    // Exercise both the suppressed receipt and a later live retry.
+    if (pass === 1) now += 5 * MINUTE;
+  }
+  assert.equal(reads, 2);
+  assert.equal(pages.length, 1);
+  assert.equal(pages[0].event, 'ama.orphan_recovery.missing-transition');
+  assert.equal(pages[0].payload.missingTransition, 'selected-owner-executor-unavailable');
+});
+
+test('CLOSERPARKOWNER-02: discovery queues background admission without awaiting a slot', async t => {
+  const submissions = [];
+  const args = closerHeadArgs(t, { now: () => DEADLINE_MS + 20 * MINUTE,
+    proveCloserAuthoredStaleHeadImpl: async () => ({ proven: false, reviewedHead: REVIEWED, currentHead: HEAD,
+      reason: 'hammer-app-attestation-missing' }),
+    resolveAmaHammerDispatchModeImpl: () => 'background',
+    amaHammerBackgroundQueueImpl: () => ({ submit: input => {
+      submissions.push(input); return { state: 'queued' };
+    } }),
+    fetchCurrentPrStateImpl: () => assert.fail('live sampling awaits a background slot'),
+    maybeDispatchAmaCloserImpl: () => assert.fail('closer admission awaits a background slot'),
+  });
+  deleteAmaCloserLease(args.rootDir, IDENTITY);
+  const result = await recoverOverdueOwnership(parkedDiscovery(args));
+  assert.equal(result?.amaClosureResult?.backgroundDispatch?.state, 'queued', JSON.stringify(result));
+  assert.equal(submissions.length, 1);
+  assert.equal(typeof submissions[0].run, 'function');
+  assert.equal(await recoverOverdueOwnership(parkedDiscovery(args)), null);
+  assert.equal(submissions.length, 1, 'the per-head receipt suppresses another submission');
+});
+
+test('CLOSERPARKOWNER-02: deliberate block labels neither reconcile nor page', async t => {
+  const args = closerHeadArgs(t, { now: () => DEADLINE_MS + 20 * MINUTE });
+  for (const label of ['adversarial-merge-blocked', { name: 'adversarial-merge-blocked' }]) {
+    assert.equal(await recoverOverdueOwnership(parkedDiscovery(args, {
+      subject: { headSha: HEAD, labels: [label] },
+      readLaneImpl: () => assert.fail('a deliberate block needs no deadline recovery'),
+    })), null);
+  }
+  assert.equal((await recoverOverdueOwnership(parkedDiscovery(args, {
+    fetchCandidateImpl: async () => ({ ...args.candidate, labels: ['adversarial-merge-blocked'] }),
+    dispatchImpl: () => assert.fail('a newly observed block fences dispatch'),
+  })))?.outcome, 'ama-pending');
+  deleteAmaCloserLease(args.rootDir, IDENTITY);
+  const { pages, observeClosureWaitImpl } = pageRecorder();
+  await maybeDispatchAmaClosureFor({ ...args, observeClosureWaitImpl,
+    orphanRecovery: { closerHead: true, fromDiscovery: true },
+    maybeDispatchAmaCloserImpl: async () => ({ dispatched: false, reason: 'not-eligible',
+      reasons: ['label-adversarial-merge-blocked'] }) });
+  assert.equal(pages.length, 0, 'the dispatch wrapper does not page an intentional AMA block');
 });
 
 test('CLOSERPARKOWNER-02: a refused discovery reconciliation is bounded across polls', async t => {
@@ -900,4 +969,30 @@ test('CLOSERPARKOWNER-02: a suppressed trailer enters the posted queue through s
   const result = await maybeDispatchAmaClosureFor(args);
   assert.equal(result.backgroundDispatch?.state, 'queued', JSON.stringify(result.nextAction));
   assert.equal(await observeCloserBacklog({ rootDir: args.rootDir, repo: REPO, prNumber: PR + 1, pending: false }), 1);
+});
+
+test('CLOSERPARKOWNER-02: trailer refusals return to backoff and CI admission retains precedence', async t => {
+  const args = closerHeadArgs(t);
+  const lanePath = noProgressLaneFilePath(args.rootDir, IDENTITY);
+  mkdirSync(path.dirname(lanePath), { recursive: true });
+  const lane = { ...IDENTITY, headSha: HEAD, lane: 'slow', skippedTicks: 0,
+    noProgressTicks: 9, progressClass: 'self-resolving' };
+  const handler = { repoPath: REPO, prNumber: PR, headSha: HEAD, closerTrailerHead: true };
+  const gate = createNoProgressLaneGate({ rootDir: args.rootDir, logger: quiet,
+    readReviewRow: () => args.reviewStateRow });
+  const nextAction = { head: HEAD, action: 'hammer', row: 'R14-final-hammer', reason: 'not-eligible' };
+  writeFileSync(lanePath, JSON.stringify({ ...lane, decisionFingerprint: handlerDecisionFingerprint({
+    amaClosureResult: { reason: 'not-eligible', nextAction },
+  }) }));
+  const refusal = gate.evaluate(handler, { recordSkip: false });
+  assert.equal(refusal.run, false);
+  assert.equal(refusal.reason, 'slow-lane-backoff', 'recorded refusal ends accelerated trailer walks');
+  const ciAction = { head: HEAD, action: 'wait-for-CI', actor: 'ci' };
+  writeFileSync(lanePath, JSON.stringify({ ...lane, nextAction: ciAction }));
+  assert.equal(gate.evaluate(handler, { recordSkip: false }).reason, 'slow-lane-backoff');
+  const settled = gate.evaluate({ ...handler, ciWaitSignal: 'green-current-head' });
+  assert.equal(settled.reason, 'ci-wait-settled');
+  assert.equal(settled.run, true);
+  assert.equal(gate.evaluate({ ...handler, ciWaitSignal: 'green-current-head' },
+    { recordSkip: false }).run, false, 'unchanged CI signal buys only one walk');
 });

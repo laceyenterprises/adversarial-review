@@ -866,7 +866,7 @@ async function maybeDispatchAmaClosureForInner({
   const hardStop = orphanRecovery?.fromDiscovery && !result?.dispatched && !result?.boundedWait
     && !result?.needsOperator
     && [result?.reason, ...(Array.isArray(result?.reasons) ? result.reasons : [])].find(reason =>
-      ['label-adversarial-merge-blocked', 'duplicate-family-unresolved'].includes(reason));
+      reason === 'duplicate-family-unresolved');
   if (hardStop) {
     try {
       const boundedWait = await (options.observeClosureWaitImpl || observeClosureWait)({
@@ -3057,7 +3057,10 @@ async function dispatchAmaClosureFor({
   // from the closer's own gates (retry cap, ineligibility) still reaches the
   // merge-agent fallback and alerting, one tick later.
   let backgroundSettled = null;
-  if (!orphanRecovery && resolveAmaHammerDispatchModeImpl({ cfg: loadedConfig, logger }) === 'background') {
+  // Discovery uses the ordinary bounded queue; explicit rescue still awaits
+  // its dispatch receipt. Live-head sampling and admission retries run there.
+  if ((!orphanRecovery || orphanRecovery.fromDiscovery)
+    && resolveAmaHammerDispatchModeImpl({ cfg: loadedConfig, logger }) === 'background') {
     const backgroundKey = amaHammerBackgroundKey({
       repo: repoPath,
       prNumber,

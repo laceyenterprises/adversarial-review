@@ -408,6 +408,7 @@ async function recoverOrphanWithStore({ rootDir, repo, prNumber, headSha, candid
         && elapsed < CLOSER_RECONCILIATION_INTERVAL_MS) return { ...pending, closerReconciled: true, continueWalk: true };
       const closure = await reconcileCloser();
       if (closure) {
+        if (closure.missingTransition) await pageTransition('selected-owner-executor-unavailable');
         db.prepare('INSERT INTO closer_reconciliation(head,decision,reconciledAt) VALUES (?,?,?) ON CONFLICT(head) DO UPDATE SET decision=excluded.decision,reconciledAt=excluded.reconciledAt')
           .run(headSha, decision, now);
         return { ...closure, closerReconciled: true };

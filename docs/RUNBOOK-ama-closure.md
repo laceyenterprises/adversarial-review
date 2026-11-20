@@ -9335,13 +9335,34 @@ handler and the closer run on the same pass. Read-only symptom of the old behavi
 watchdog `transition_pages` row for `R04-ownership`/`closure-recovery`/`ownership-unreadable`,
 a lane record whose `lastRunAt` never advances, and no watcher log line for the PR.
 Exhausted executable routes still stop at `recovery-exhausted` with their single page.
-For a lapsed closer decision on a posted row, discovery runs one fenced inline
+For a lapsed closer decision on a posted row, discovery runs one fenced
 reconciliation after proving custody absent. The watchdog records that decision
 and the attempt time under its PR lock. A refused or waiting result does not
-trigger another live candidate read or inline closure dispatch until the
+trigger another live candidate read or closure dispatch until the
 decision or head changes, or five minutes pass. Intervening passes continue to
 the posted-review handler. Active drain defers this closer dispatch while
 overdue-transition paging remains enabled.
+In background dispatch mode, discovery submits through the ordinary hammer
+queue instead of awaiting closer admission under the watchdog lock. That queue
+deduplicates PR/head submissions and limits concurrent launches to the existing
+effective closer capacity (`amaCloserMaxConcurrentLaunches`, default three,
+bounded by the process ceiling of 32). Live-head mergeability sampling and
+label-classification retries run after a queue slot opens; inline mode and
+explicit operator rescue retain their synchronous receipt contract.
+
+A failed candidate read or a refusal without a successor or closure wait still
+pages `selected-owner-executor-unavailable` once per head/transition through
+`transition_pages`, then continues ordinary discovery. A receipt does not stand
+in for escalation. Raw `adversarial-merge-blocked` labels intentionally fence
+discovery reconciliation, just like other enforced holds; they do not trigger
+the immediate `closer-hard-stop` SEV1 page. Duplicate-family refusals retain
+their existing escalation.
+
+A closer-trailer head may bypass slow-lane backoff at the five-minute evidence
+recheck cadence only until the lane records a closer decision for that head.
+Stable refusals then resume ordinary exponential backoff. CI-wait admission
+runs before the trailer override: an unchanged pending CI wait keeps backoff,
+and a new settled CI signal permits its existing once-per-signal walk.
 
 ### Deadline-bound ownership (OWNERDEADLINE-01)
 

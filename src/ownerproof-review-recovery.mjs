@@ -1,4 +1,4 @@
-import { recoverOrphan, overdueNextAction } from './ama/orphan-watchdog.mjs';
+import { recoverOrphan, overdueNextAction, isOrphanRecoveryWait } from './ama/orphan-watchdog.mjs';
 import { readNoProgressLane } from './watcher-no-progress-lane.mjs';
 import { deriveNextActionSnapshot, nextAction } from './pr-next-action.mjs';
 import { isOperatorHeld } from './operator-hold-labels.mjs';
@@ -21,6 +21,8 @@ function recoveryRunsSelected(selected, headSha) {
 const NO_EFFECT_OUTCOMES = new Set(['ama-pending', 'recovery-exhausted']);
 const reasonCode = value => typeof value === 'string' && /^[a-z][a-z0-9-]{0,79}$/.test(value)
   ? value : 'redacted';
+const discoveryHeld = labels => isOperatorHeld(labels || []) || (labels || []).some(
+  label => (typeof label === 'string' ? label : label.name) === 'adversarial-merge-blocked');
 
 // Every discovered open PR visits this local check before admission/backoff.
 // Only actual recovery enters the normal executor and its fresh candidate read.
@@ -30,7 +32,7 @@ export async function recoverOverdueOwnership({ rootDir, repo, prNumber, subject
   readLaneImpl = readNoProgressLane, recoverImpl = recoverOrphan,
   fetchCandidateImpl = fetchMergeAgentCandidate, dispatchImpl = maybeDispatchAmaClosureFor }) {
   if (!enabled || subject?.terminal || subject?.isDraft || subject?.draft || !subject?.headSha
-    || isOperatorHeld(subject.labels || [])) return null;
+    || discoveryHeld(subject.labels)) return null;
   const lane = readLaneImpl(rootDir, { repo, prNumber }, { logger });
   // Pre-contract lane records may have no selected action. Missing evidence
   // selects the shared refresh row, anchored to durable lack of progress.
@@ -43,8 +45,11 @@ export async function recoverOverdueOwnership({ rootDir, repo, prNumber, subject
   const labels = (subject.labels || []).map(label => typeof label === 'string' ? label : label.name);
   const dispatch = async (orphanRecovery, options = {}) => {
     const candidate = await fetchCandidateImpl(repo, prNumber, { rootDir, execFileImpl });
+    if (discoveryHeld(candidate?.labels)) {
+      return { dispatched: false, recoveryWait: true, reason: 'recovery-candidate-held' };
+    }
     if (candidate?.headSha !== subject.headSha || candidate.merged || candidate.isDraft
-      || String(candidate.prState).toLowerCase() !== 'open' || isOperatorHeld(candidate.labels)) {
+      || String(candidate.prState).toLowerCase() !== 'open') {
       return { dispatched: false, reason: 'recovery-candidate-no-longer-actionable' };
     }
     return dispatchImpl({ rootDir, repoPath: repo, prNumber, candidate,
@@ -69,12 +74,13 @@ export async function recoverOverdueOwnership({ rootDir, repo, prNumber, subject
       logger?.log?.(`[watcher] CLOSERPARKOWNER-02: ${repo}#${prNumber}@${subject.headSha.slice(0, 12)} ` +
         `outcome=${outcome} reason=${reasonCode(amaClosureResult?.operatorReason || amaClosureResult?.reason)}`);
     }
-    if (outcome === 'ama-pending' && (
-      ['review', 'remediate', 'daemon-merge'].includes(amaClosureResult?.nextAction?.action)
-      || amaClosureResult?.exactHeadReview
-      || !(amaClosureResult?.recoveryWait || amaClosureResult?.boundedWait
-        || amaClosureResult?.nextAction?.queue?.intent === 'owned')
-    )) return { continueWalk: true };
+    const successor = ['review', 'remediate', 'daemon-merge'].includes(amaClosureResult?.nextAction?.action)
+      || amaClosureResult?.exactHeadReview;
+    const waiting = isOrphanRecoveryWait(amaClosureResult) || amaClosureResult?.boundedWait
+      || amaClosureResult?.nextAction?.queue?.intent === 'owned';
+    if (outcome === 'ama-pending' && (successor || !waiting)) {
+      return { continueWalk: true, missingTransition: !successor && !waiting };
+    }
     return { outcome, amaClosureResult };
   };
   const recovered = await recoverImpl({ rootDir, repo, prNumber, headSha: subject.headSha, reviewStateRow, labels, now, env, logger,

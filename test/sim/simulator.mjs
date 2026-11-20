@@ -36,7 +36,7 @@ export async function simulate(scenario, { seed = 17, load = 1, mutate } = {}) {
   let blocking = f.finding ? 1 : 0;
   let comments = f.comment ? 1 : 0;
   let merged = f.merged === true;
-  let decision = null;
+  let projection;
   let readFailed = false;
   let refused = false;
   let transientCharges = 0;
@@ -50,20 +50,24 @@ export async function simulate(scenario, { seed = 17, load = 1, mutate } = {}) {
   if (merged) merges.push({ revision: head, liveHead: head, blocking: 0, comments: 0, base });
   if (f.dirtyTerminal) launches.push({ id: 'terminal-holder', head, status: 'canceled', verified: false, dirty: true });
   const activeFault = () => clock.now < pressure.timeout(1500);
+  const readFault = () => f.readFailure && activeFault();
   function snapshot() {
-    const state = fold(events);
-    decision = eligible(state, policy, { observedAt: clock.iso(), load: loadObservation });
+    // Oracle observations often reuse the same append-only ledger. Re-fold
+    // after each append and still evaluate eligibility at every virtual tick.
+    const state = projection ??= fold(events);
+    const decision = eligible(state, policy, { observedAt: clock.iso(), load: loadObservation });
     const terminal = f.hold || f.killSwitch ? 'operator-hold' : state.terminal?.kind
       ?? (pages.length ? 'escalated' : null);
     const owners = decision?.owner ? [decision.owner] : [];
-    return { now: clock.now, bound, head, terminal, owners,
+    const view = { now: clock.now, bound, head, terminal, owners,
       deadline: decision?.deadline ? Date.parse(decision.deadline) - Date.UTC(2030, 0, 1) : NaN,
       merges: structuredClone(merges), activation: activated && deployed,
       causes: [...causes], pages: [...pages],
       transientCharges, transientRefusals };
+    return { view, decision };
   }
   function inspect(label) {
-    const view = snapshot();
+    const { view, decision } = snapshot();
     mutate?.(view, label);
     const errors = violations(view);
     for (const error of errors) failed.add(error);
@@ -74,6 +78,7 @@ export async function simulate(scenario, { seed = 17, load = 1, mutate } = {}) {
   function append(event) {
     makeFinalizationEvent(event.type, event.subjectKey, event);
     events.push(structuredClone(event));
+    projection = undefined;
     if (event.type === 'remediation_dispatched' && refused) transientCharges++;
     if (['halted', 'closed'].includes(event.type) && ['budget-killed', 'canceled', 'crashed'].includes(f.agentOutcome)) transientRefusals++;
     inspect(`ledger:${event.type}`);
@@ -91,7 +96,7 @@ export async function simulate(scenario, { seed = 17, load = 1, mutate } = {}) {
   };
   const ledgerStore = {
     read() {
-      if (f.readFailure && activeFault()) { readFailed = true; throw Error(`synthetic ${f.readFailure} 503`); }
+      if (readFault()) { readFailed = true; throw Error(`synthetic ${f.readFailure} 503`); }
       return structuredClone(events);
     }, append,
   };
@@ -234,16 +239,15 @@ export async function simulate(scenario, { seed = 17, load = 1, mutate } = {}) {
     const delay = Math.ceil((f.slowRead ? 300 : 10) * load * (1 + clock.random() / 4));
     if (at + delay >= bound) continue;
     clock.at(at + delay, 'snapshot:completed', async () => {
-      let state;
-      try {
-        state = fold(ledgerStore.read());
-      } catch (error) {
-        if (!f.readFailure) throw error;
-        await exec.tick(subject, { observedAt: clock.iso(), load: loadObservation });
-        inspect(`retryable-read:${error.message}`);
+      // The executor reads and folds its own snapshot. Its read-failure path
+      // still receives the real fixture exception from ledgerStore.read().
+      if (readFault()) {
+        const outcome = await exec.tick(subject, { observedAt: clock.iso(), load: loadObservation });
+        inspect(outcome.action === 'refresh-evidence' && outcome.detail
+          ? `retryable-read:${outcome.detail}`
+          : `executor:${outcome.status}:${outcome.action}:${outcome.reason ?? ''}`);
         return;
       }
-        decision = eligible(state, policy, { observedAt: clock.iso(), load: loadObservation });
         const outcomes = f.race
           ? await Promise.all([exec.tick(subject, { observedAt: clock.iso(), load: loadObservation }), executor('rival').tick(subject, { observedAt: clock.iso(), load: loadObservation })])
           : [await exec.tick(subject, { observedAt: clock.iso(), load: loadObservation })];
@@ -260,6 +264,6 @@ export async function simulate(scenario, { seed = 17, load = 1, mutate } = {}) {
   if (!activated && !pages.length) unmet.push('activation-proof');
   if (!deployed && !pages.length) unmet.push('loaded-build-proof');
   if (f.primaryEvidence === false && !pages.length) unmet.push('primary-change-proof-recovery');
-  return { id: scenario.id, load, failed: [...failed].sort(), unmet, terminal: snapshot().terminal,
+  return { id: scenario.id, load, failed: [...failed].sort(), unmet, terminal: snapshot().view.terminal,
     trace, events, merges, launches, readFailed, transientCharges, rollbackReceipt, queueState };
 }

@@ -4199,7 +4199,18 @@ test('LABELGATE-01: a refusal without a matching live gate keeps its charge when
   writeAmaAuditEntry({ hqRoot: args.dispatchContext.hqRoot, ...identity, headSha: REVIEWED_HEAD,
     attempt: { outcome: 'deferred', reason: 'operator-label-required:allow-submodule-pointer-bump' },
     now: '2026-07-06T11:30:00Z' });
-  const result = await maybeDispatchAmaCloser({ ...args, ...hammerDispatchDeps() });
+  const deps = hammerDispatchDeps();
+  const statusReads = [];
+  const result = await maybeDispatchAmaCloser({ ...args, ...deps,
+    execFileImpl: async (command, argv, options) => {
+      if (argv[0] === 'dispatch' && argv[1] === 'status') {
+        statusReads.push(argv[2]);
+        return { stdout: '{"status":"unknown"}', stderr: '' };
+      }
+      return deps.execFileImpl(command, argv, options);
+    },
+  });
+  assert.deepEqual(statusReads, ['unproven-label-launch']);
   assert.equal(result.dispatched, true, 'a remediation flag without a live worker cannot retain ownership');
   assert.equal(readHammerRetryCapLedger(rootDir, identity).attemptCount, 2, 'both the prior refusal and the new dispatch stay charged');
   assert.equal(readAmaCloserDispatchRecord(rootDir, { ...identity, headSha: REVIEWED_HEAD }).unexecutedRefundCount ?? 0, 0);
@@ -4705,7 +4716,14 @@ test('APPROVALREARM-01: watcher approval consumes a truncated-clock launch once 
     workerClass: 'hammer', retryCount: 2, launchRequestId: 'fixture-prior-2', dispatchedAt: '2026-01-01T00:02:00Z' }));
   let launches = 0;
   const alerts = [];
+  const statusReads = new Set();
   const deps = hammerDispatchDeps({ deliverAlertImpl: async (text, options) => alerts.push({ text, options }), execFileImpl: async (_cmd, args) => {
+    if (args[0] === 'dispatch' && args[1] === 'status') {
+      statusReads.add(args[2]);
+      // Keep the CLI status inconclusive so the test exercises the audit
+      // and ledger fallback without retrying a malformed CLI response.
+      return { stdout: '{"status":"unknown"}', stderr: '' };
+    }
     if (args[0] !== 'dispatch' || !args.includes('--pr')) return { stdout: '{}', stderr: '' };
     launches++;
     return { stdout: JSON.stringify({ ticketRef: `AMA-PR-${identity.prNumber}`, dispatchId: 'fixture-dispatch',
@@ -4767,6 +4785,7 @@ test('APPROVALREARM-01: watcher approval consumes a truncated-clock launch once 
   }
   assert.equal(alerts.length, alertsBeforeSecondRefusal + 1, 'the re-armed refusal pages once even after the prior cap page');
   assert.equal(launches, 1, 'a second refusal and label toggles cannot replenish the grant');
+  assert.deepEqual(statusReads, new Set(['fixture-prior-2', 'fixture-rearmed-launch']));
 });
 
 // CLOSERGATES-01: a hammer that pushed and validated this head, then exhausted

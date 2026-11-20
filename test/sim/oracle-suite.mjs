@@ -90,6 +90,9 @@ test('admission refusal does not spend work; read failures recover', async () =>
   assert.deepEqual(refusal.failed, []);
   const read = await simulate({ id: 'read', profile: 'ledger-failure' });
   assert.ok(read.readFailed);
+  const readFaults = read.trace.filter(entry => entry.label.startsWith('retryable-read:'));
+  assert.ok(readFaults.length > 0);
+  assert.ok(readFaults.every(entry => entry.label === 'retryable-read:synthetic launch-ledger 503'));
   assert.equal(read.transientCharges, 0);
   assert.equal(read.terminal, 'finalized');
 });

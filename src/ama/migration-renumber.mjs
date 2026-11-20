@@ -248,11 +248,15 @@ function sqlModule(text, info, sourceName, sql) {
   return replace(text, edits);
 }
 
-function removeModule(text, name) {
+function removeModule(text, name, after) {
   if (moduleRegistry(text, name) === null) return null;
-  const matches = tokens(text).filter(token => literal(token)?.value === name);
+  const list = tokens(text);
+  const matches = list.filter(token => literal(token)?.value === name);
   if (matches.length !== 1) return null;
   const token = matches[0], start = text.lastIndexOf('\n', token.start) + 1;
+  const index = list.indexOf(token);
+  if (after && (moduleRegistry(text, after) === null || literal(list[index - 2])?.value !== after
+    || list[index - 1]?.value !== ',')) return null;
   const end = text.indexOf('\n', token.end);
   if (end < 0 || text.slice(start, token.start).trim() || text.slice(token.end, end).trim() !== ',') return null;
   return text.slice(0, start) + text.slice(end + 1);
@@ -350,6 +354,36 @@ async function scopedLedger(args, head) {
   return files;
 }
 
+async function ledgerCommit(args, sha) {
+  const commit = await args.get(`repos/${args.repo}/git/commits/${sha}`);
+  if (commit.sha !== sha || !SHA.test(commit.tree?.sha || '') || !Array.isArray(commit.parents)
+    || commit.parents.some(parent => !SHA.test(parent.sha || ''))) throw new Error('invalid migration ancestry');
+  return { sha, tree: commit.tree.sha, parents: commit.parents.map(parent => parent.sha) };
+}
+
+function ledgerBlob(files, path) {
+  const entry = files.get(path);
+  return entry?.mode === '100644' && entry.type === 'blob' ? entry.sha : null;
+}
+
+function ledgerText(blob, files, path) {
+  const sha = ledgerBlob(files, path);
+  if (!sha) throw new Error('missing migration blob');
+  return blob(sha);
+}
+
+async function ledgerMigration(blob, files, path) {
+  const info = migration(path), modulePath = `${LEDGER_MODULES}/r${info.number}.py`;
+  const wrapper = await ledgerText(blob, files, path);
+  const name = `${info.name}.sql`, sqlPath = `${LEDGER_SQL}/${name}`;
+  if (scalarRevision(wrapper, 'SOURCE_NAME') !== name) throw new Error('migration source name mismatch');
+  const [sql, module] = await Promise.all([sqlPath, modulePath].map(file => ledgerText(blob, files, file)));
+  const revision = scalarRevision(wrapper, 'revision'), predecessor = scalarRevision(wrapper, 'down_revision');
+  const body = revision && predecessor && registeredModuleBody(module, revision, predecessor, name, sql);
+  return { path, sqlPath, modulePath, wrapper, revision, predecessor, body, blob: ledgerBlob(files, path),
+    moduleBlob: ledgerBlob(files, modulePath), sqlBlob: ledgerBlob(files, sqlPath) };
+}
+
 function boundIntegrationFiles(evidence, proof) {
   const has = (files, path, sha, status) => files.filter(file => file.filename === path).length === 1
     && files.some(file => file.filename === path && file.sha === sha && file.status === status);
@@ -366,29 +400,139 @@ function boundIntegrationFiles(evidence, proof) {
       .every(([path, sha]) => has(evidence.finalFiles, path, sha, 'added'))
     && has(evidence.primaryFiles, proof.registryPath, proof.primaryRegistryBlob, 'modified')
     && has(evidence.finalFiles, proof.registryPath, proof.registryBlob, 'modified')
-    && !evidence.finalFiles.some(file => [proof.path, proof.sqlPath].includes(file.filename) && file.status !== 'removed')
-    && evidence.finalFiles.filter(file => file.filename === proof.modulePath)
-      .every(file => file.sha === proof.mainIntegration.parent.moduleBlob && file.status === 'added');
+    && !evidence.finalFiles.some(file => (file.filename === proof.path
+      || (!proof.mainIntegration.historicalParent || proof.sqlPath !== proof.sqlDestination)
+        && file.filename === proof.sqlPath) && file.status !== 'removed')
+    && (proof.mainIntegration.historicalParent
+      ? [[proof.modulePath, proof.mainIntegration.parent.moduleBlob],
+        [proof.mainIntegration.parent.path, proof.mainIntegration.parent.blob],
+        [proof.mainIntegration.parent.sqlPath, proof.mainIntegration.parent.sqlBlob]]
+        .every(([path, sha]) => has(evidence.finalFiles, path, sha, 'added'))
+      : evidence.finalFiles.filter(file => file.filename === proof.modulePath)
+        .every(file => file.sha === proof.mainIntegration.parent.moduleBlob && file.status === 'added'));
+}
+
+function issueIntegration(evidence, proof) {
+  if (!boundIntegrationFiles(evidence, proof)) return [];
+  // A serialized copy describes the evidence but cannot stand in for the
+  // collector's proof on the same evidence object in this process.
+  integrationProofs.set(proof, { evidence, serialized: JSON.stringify(proof) });
+  return [proof];
+}
+
+function ledgerIntegrationEligible(args, evidence) {
+  return args.repo === LEDGER_REPO && args.headSha === evidence.headSha && evidence.hasHammerCommits === true
+    && !evidence.historyReadFailed && !evidence.readFailed && !evidence.headMismatch
+    && evidence.completeFileLists === true && evidence.baseRef === 'main'
+    && [evidence.baseSha, evidence.comparisonMergeBase, evidence.primaryHead, evidence.mergeBase].every(sha => SHA.test(sha || ''))
+    && Array.isArray(evidence.diagnosticCommitRange);
+}
+
+async function proveHistoricalParentSnapshot(args, evidence, range) {
+  if (!ledgerIntegrationEligible(args, evidence)) return null;
+  const rssSlot = migration(RSS_PARENT).number;
+  const pairs = candidates(evidence).filter(({ before, after }) => before.directory === LEDGER_VERSIONS
+    && before.number === rssSlot + 1 && after.number === before.number + 1);
+  if (pairs.length !== 1) return null;
+  const { source, destination, before, after } = pairs[0];
+  const blob = verifiedBlobReader(args);
+  if (scalarRevision(await blob(source.sha), 'down_revision') !== RSS_REVISION) return null;
+  // The historical alias comes from the already-applied ledger tree. The
+  // subsequent main tree may add exactly one registered successor to it.
+  const { primaryHead, headSha, mergeBase, comparisonMergeBase, baseSha } = evidence;
+  const compare = async (base, head, status, expectedBase = base) => {
+    const result = await args.metadata(`repos/${args.repo}/compare/${base}...${head}`);
+    return result.status === status && result.merge_base_commit?.sha === expectedBase;
+  };
+  if (mergeBase === comparisonMergeBase
+    || mergeBase !== RSS_MAIN && !await compare(RSS_MAIN, mergeBase, 'ahead')
+    || !await compare(mergeBase, comparisonMergeBase, 'ahead')
+    || !await compare(comparisonMergeBase, baseSha, comparisonMergeBase === baseSha ? 'identical' : 'ahead')
+    || !await compare(comparisonMergeBase, primaryHead, 'diverged', mergeBase)
+    || !await compare(baseSha, headSha, comparisonMergeBase === baseSha ? 'ahead' : 'diverged', comparisonMergeBase)) return [];
+
+  const [anchor, old, main, author] = await Promise.all([RSS_MAIN, mergeBase, comparisonMergeBase, primaryHead]
+    .map(async sha => scopedLedger(args, (await ledgerCommit(args, sha)).tree)));
+  if (!exactLedgerDelta(anchor, old, [])) return [];
+  const atSlot = [...main.keys()].filter(path => {
+    const info = migration(path);
+    return info?.directory === LEDGER_VERSIONS && info.number === before.number;
+  });
+  if (atSlot.length !== 1) return [];
+  const [historical, parent, original] = await Promise.all([
+    ledgerMigration(blob, old, RSS_PARENT), ledgerMigration(blob, main, atSlot[0]),
+    ledgerMigration(blob, author, source.filename),
+  ]);
+  if (!historical.body || historical.revision !== RSS_REVISION || !parent.body || parent.predecessor !== historical.revision
+    || !revisionLiteral({ value: `"${parent.revision}"` }, migration(parent.path))
+    || !original.body || original.blob !== source.sha || original.predecessor !== historical.revision
+    || !exactLedgerDelta(old, main, [parent.path, parent.modulePath, parent.sqlPath], [ledgerRegistry])
+    || !exactLedgerDelta(old, author, [original.path, original.modulePath, original.sqlPath], [ledgerRegistry])) return [];
+  const [oldRegistry, mainRegistry, authorRegistry] = await Promise.all(
+    [old, main, author].map(files => ledgerText(blob, files, ledgerRegistry)));
+  const previousSlot = `r${rssSlot}`, authorSlot = `r${before.number}`;
+  if (removeModule(mainRegistry, authorSlot, previousSlot) !== oldRegistry
+    || removeModule(authorRegistry, authorSlot, previousSlot) !== oldRegistry) return [];
+
+  const snapshots = [];
+  let previous = primaryHead, integrated = false, final;
+  for (let offset = 0; offset < range.length; offset += 4) {
+    const batch = await Promise.all(range.slice(offset, offset + 4).map(async ({ sha }) => {
+      const commit = await ledgerCommit(args, sha);
+      return { commit, files: await scopedLedger(args, commit.tree) };
+    }));
+    for (const { commit, files } of batch) {
+      if (commit.parents[0] !== previous || commit.parents.length > 2) return [];
+      if (commit.parents.length === 2) {
+        if (integrated || commit.parents[1] !== comparisonMergeBase) return [];
+        integrated = true;
+      }
+      if (integrated) {
+        if (final && !exactLedgerDelta(final, files, [])) return [];
+        final = files;
+      } else if (!exactLedgerDelta(author, files, [])) return [];
+      snapshots.push({ ...commit, integrated });
+      previous = commit.sha;
+    }
+  }
+  if (!final) return [];
+  const active = await ledgerMigration(blob, final, destination.filename);
+  const originalSuffix = `_${before.number}`;
+  if (active.predecessor !== parent.revision || active.blob !== destination.sha || active.sqlBlob !== original.sqlBlob
+    || !original.revision.endsWith(originalSuffix)
+    || active.revision !== `${original.revision.slice(0, -originalSuffix.length)}_${after.number}`
+    || active.body !== original.body
+    || !exactLedgerDelta(main, final, [active.path, active.modulePath, active.sqlPath], [ledgerRegistry])
+    || removeModule(await ledgerText(blob, final, ledgerRegistry), `r${after.number}`, authorSlot) !== mainRegistry) return [];
+  before.predecessors = new Set([historical.revision]);
+  after.predecessors = new Set([parent.revision]);
+  const body = migrationBody(original.wrapper, before);
+  if (body === null || body !== migrationBody(active.wrapper, after)) return [];
+
+  const parentBinding = ({ path, revision, blob, modulePath, moduleBlob, sqlPath, sqlBlob }, files) =>
+    ({ path, revision, blob, modulePath, moduleBlob, sqlPath, sqlBlob, registryBlob: ledgerBlob(files, ledgerRegistry) });
+  return issueIntegration(evidence, {
+    classification: CLASS, repo: args.repo, headSha, primaryHead, mergeBase,
+    path: original.path, destination: active.path, primaryBlob: original.blob, blob: active.blob,
+    registryPath: ledgerRegistry, primaryRegistryBlob: ledgerBlob(author, ledgerRegistry), registryBlob: ledgerBlob(final, ledgerRegistry),
+    modulePath: original.modulePath, moduleDestination: active.modulePath, primaryModuleBlob: original.moduleBlob, moduleBlob: active.moduleBlob,
+    sqlPath: original.sqlPath, sqlDestination: active.sqlPath, primarySqlBlob: original.sqlBlob, sqlBlob: active.sqlBlob,
+    chain: [{ headSha: primaryHead, path: original.path, blob: original.blob, revisionNumber: before.number },
+      { headSha, path: active.path, blob: active.blob, revisionNumber: after.number }],
+    mainIntegration: { baseSha: RSS_MAIN, observedBase: baseSha, comparisonMergeBase, snapshots,
+      parent: parentBinding(parent, main), historicalParent: parentBinding(historical, old) },
+  });
 }
 
 async function proveMainIntegration(args, evidence, range) {
-  if (args.repo !== LEDGER_REPO || args.headSha !== evidence.headSha || evidence.hasHammerCommits !== true
-    || evidence.historyReadFailed || evidence.readFailed || evidence.headMismatch
-    || evidence.completeFileLists !== true || evidence.baseRef !== 'main'
-    || !SHA.test(evidence.baseSha || '') || !SHA.test(evidence.comparisonMergeBase || '')
-    || !SHA.test(evidence.primaryHead || '') || !SHA.test(evidence.mergeBase || '') || !evidence.diagnosticCommitRange) return null;
+  if (!ledgerIntegrationEligible(args, evidence)) return null;
   const pairs = candidates(evidence).filter(({ before, after }) => before.directory === LEDGER_VERSIONS
     && before.number === migration(RSS_PARENT).number && after.number === before.number + 1);
   if (pairs.length !== 1) return null;
   const { source, destination, before, after } = pairs[0];
   const blob = verifiedBlobReader(args);
   if (scalarRevision(await blob(destination.sha), 'down_revision') !== RSS_REVISION) return null;
-  const readCommit = async sha => {
-    const commit = await args.get(`repos/${args.repo}/git/commits/${sha}`);
-    if (commit.sha !== sha || !SHA.test(commit.tree?.sha || '') || !Array.isArray(commit.parents)
-      || commit.parents.some(parent => !SHA.test(parent.sha || ''))) throw new Error('invalid migration ancestry');
-    return { sha, tree: commit.tree.sha, parents: commit.parents.map(parent => parent.sha) };
-  };
+  const readCommit = sha => ledgerCommit(args, sha);
   const commits = [];
   for (let offset = 0; offset < range.length; offset += 4) {
     commits.push(...await Promise.all(range.slice(offset, offset + 4).map(({ sha }) => readCommit(sha))));
@@ -509,11 +653,7 @@ async function proveMainIntegration(args, evidence, range) {
       additionalMainParents, snapshots, parent: { path: RSS_PARENT, revision: parent.revision,
       blob: shaAt(mainFiles, RSS_PARENT), modulePath, moduleBlob: shaAt(mainFiles, modulePath), sqlPath: parent.sqlPath,
       sqlBlob: shaAt(mainFiles, parent.sqlPath), registryBlob: shaAt(mainFiles, ledgerRegistry) } } };
-  if (!boundIntegrationFiles(evidence, proof)) return [];
-  // Only the native collector can issue this certificate. Keep the binding
-  // outside of cached history, and reject copied or edited proof records.
-  integrationProofs.set(proof, { evidence, serialized: JSON.stringify(proof) });
-  return [proof];
+  return issueIntegration(evidence, proof);
 }
 
 // A descendant can repair a stale filename while advancing its declared
@@ -828,6 +968,8 @@ export async function proveMigrationRenumbers(args, evidence) {
     }
     const integration = await proveMainIntegration(args, evidence, range);
     if (integration !== null) return integration.length ? integration : refuse('main-integration-unproven');
+    const historicalParent = await proveHistoricalParentSnapshot(args, evidence, range);
+    if (historicalParent !== null) return historicalParent.length ? historicalParent : refuse('historical-parent-snapshot-unproven');
     const proofs = await proveSnapshot(args, evidence);
     if (!proofs.length) return refuse('final-snapshot-unproven');
     const snapshots = [];

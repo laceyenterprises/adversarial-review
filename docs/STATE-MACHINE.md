@@ -1823,7 +1823,16 @@ certificate to the exact repository, heads, paths and blobs. LAC-2246 permits
 later first-parent integrations when each second parent advances the prior
 trusted main parent, belongs to the observed main ancestry and has the same
 migration tree as the original RSS main. The last integrated parent must be
-the comparison merge base. Optional proof
+the comparison merge base. LAC-2278 covers a protected slot 341 child of the
+historical RSS revision moving to slot 342 after main registers its successor
+in slot 341. Both predecessors, both registry insertions, the unchanged child
+SQL and all first-parent snapshots must agree with the immutable ledger trees
+and complete head-bound file evidence. Observed main may advance beyond the
+integrated comparison base only with proved forward ancestry and a diverged
+PR-head comparison retaining that exact merge base; equal bases require an
+ahead comparison. The native evaluator consumes the
+certificate on its original evidence object in the collecting process.
+Optional proof
 diagnostics stay outside deterministic refusal identity and bounded region
 summaries. Every observed snapshot must preserve the original
 operations; a registry swap without its paired module supplies no proof.

@@ -1,0 +1,18 @@
+{
+  "version": 1,
+  "entries": [
+    {
+      "id": "remediation-closer-queue",
+      "title": "Remediation closer priority queue",
+      "path": "docs/data-model/follow-up-jobs.md",
+      "store": "data/remediation-closer-queue/<completed-ms>-<job-digest>.json",
+      "schemaSurface": "src/remediation-closer-queue.mjs",
+      "owner": "Follow-up completion and watcher",
+      "description": "Durable scheduling hints for the posted-review closure handler."
+    },
+    {
+      "id": "ama-closure-lag",
+      "remediationCloserLaunches": "First confirmed launch latency per PR and remediation completion timestamp, retained for up to 24 hours at sample time, capped at 10000."
+    }
+  ]
+}

@@ -30,7 +30,7 @@ test('exact-head inventory survives stale scope prose and a partial final diff',
     { promptStage: 'last', runtime: 'antigravity' });
   assert.match(prompt, /Never infer global file absence/);
   assert.match(prompt, /validator.*exact head/);
-  assert.match(prompt, /default-checkout snapshot may differ from the reviewed commit/);
+  assert.match(prompt, /An empty workspace is not evidence of absence at the PR head/);
   assert.match(prompt, new RegExp(headSha));
 });
 

@@ -140,7 +140,7 @@ test('RVHAND-06: bounded posted-review step budgets fit under the handler cap', 
 
   assert.equal(phaseBudgetMs, 330_000);
   assert.equal(handlerTimeoutMs, 180_000);
-  assert.equal(deadlineMs, 87_500);
+  assert.equal(deadlineMs, 45_000);
   assert.ok(deadlineMs < phaseBudgetMs);
   assert.ok(
     boundedStepBudgetTotalMs + headroomMs <= handlerTimeoutMs,
@@ -149,7 +149,7 @@ test('RVHAND-06: bounded posted-review step budgets fit under the handler cap', 
   );
 });
 
-test('RVHAND-10: posted-review HAM step budget admits observed live tails without exceeding the handler cap', () => {
+test('posted-review coexistence caller yields at 45s within the handler cap', () => {
   const handlerTimeoutMs = resolvePostedReviewHandlerTimeoutMs({});
   const phaseBudgetMs = resolvePostedReviewPhaseBudgetMs({});
   const headroomMs = resolvePostedReviewHandlerHeadroomMs({});
@@ -158,8 +158,8 @@ test('RVHAND-10: posted-review HAM step budget admits observed live tails withou
   assert.equal(handlerTimeoutMs, 180_000);
   assert.equal(phaseBudgetMs, DEFAULT_POSTED_REVIEW_PHASE_BUDGET_MS);
   assert.ok(phaseBudgetMs >= handlerTimeoutMs * DEFAULT_POSTED_REVIEW_PHASE_HANDLER_CAPACITY);
-  assert.equal(deadlineMs, 87_500);
-  assert.ok(deadlineMs > 80_000, 'live HAM candidate/coexistence tails have exceeded 75s under load');
+  assert.equal(deadlineMs, 45_000);
+  assert.ok(deadlineMs < derivePostedReviewExpensiveStepBudgetMs(handlerTimeoutMs, { headroomMs }), 'caller wait is capped independently of the nominal handler budget');
   assert.ok(
     (deadlineMs * DEFAULT_POSTED_REVIEW_BOUNDED_EXPENSIVE_STEP_COUNT) + headroomMs <= handlerTimeoutMs,
     'the two bounded expensive steps must still fit inside one handler watchdog',

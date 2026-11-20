@@ -1175,9 +1175,13 @@ test('merge-lease acquire reclaims a holder already dead at wait start', async (
 
 test('merge-lease acquire reclaims a local holder that dies during capped polling', async t => {
   const holderPid = 99999;
+  let holderStartReads = 0;
   const execFileSync = childProcess.execFileSync;
   const psMock = t.mock.method(childProcess, 'execFileSync', (command, args, options) => {
-    if (command === 'ps' && Array.isArray(args) && args.join(' ') === `-o lstart= -p ${holderPid}`) {
+    if (command === 'ps' && Array.isArray(args)
+        && args.some(arg => typeof arg === 'string' && arg.includes('lstart='))
+        && args.some(arg => String(arg) === String(holderPid))) {
+      holderStartReads += 1;
       // Keep the observed start before lease acquisition on every poll.
       return 'Fri Jun 19 18:00:00 2026\n';
     }
@@ -1197,6 +1201,7 @@ test('merge-lease acquire reclaims a local holder that dies during capped pollin
     let elapsedMs = 0;
     const held = acquireFixture(rootDir, { holderPid, deadlineSeconds: 120 });
     assert.equal(held.acquired, true);
+    holderStartReads = 0;
     const { code, io } = await runCli(rootDir, [
       'acquire',
       '--repo', REPO,
@@ -1212,6 +1217,7 @@ test('merge-lease acquire reclaims a local holder that dies during capped pollin
       pidAliveFn: pid => pid !== holderPid || elapsedMs < deathAfterMs,
       onSleep: ({ nowMs }) => { elapsedMs = nowMs - startMs; },
     });
+    assert.ok(holderStartReads >= 8, 'CLI polling must recheck the mocked holder start time across all eight backoff intervals');
     const out = jsonOutput(io);
     assert.equal(code, 0, io.stderrText);
     assert.equal(elapsedMs, deathAfterMs);

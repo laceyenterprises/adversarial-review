@@ -5,6 +5,7 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 
 import {
+  createHeartbeatPollRunner,
   createWatcherHeartbeat,
   createWatcherStallWatchdog,
   DEFAULT_WATCHER_STALL_EXIT_CODE,
@@ -532,3 +533,44 @@ test('healthy poll-counter progress resets the stall watchdog', () => {
     cleanup(rootDir);
   }
 });
+
+for (const fails of [false, true]) {
+  test(`heartbeat poll preserves priority/maintenance order and completes watchdog cleanup (fails=${fails})`, async t => {
+    const events = [];
+    t.mock.method(console, 'log', () => {});
+    const wakePayload = { reason: 'fixture' };
+    const run = createHeartbeatPollRunner({
+      remediationCloser: { drain: async () => { events.push('priority'); } },
+      pollStarvation: { refresh: () => events.push('refresh'), deadlineMs: 10_000 },
+      watcherHeartbeat: {
+        markPoll: () => events.push('poll-start'),
+        markPollProgress: () => events.push('progress'),
+        markPollCompleted: result => { events.push('completed'); assert.equal(result.ok, !fails); },
+      },
+      stallWatchdog: { beginPoll: () => events.push('watchdog-start'), endPoll: () => events.push('watchdog-end') },
+      scheduleAlertDrain: () => events.push('alerts'),
+      readAlertSinkHealth: () => ({ ready: true }),
+      staleStateReaperTicker: { tick: async () => { events.push('reaper'); } },
+      hammerScratchSweepTicker: { tick: async () => { events.push('scratch'); } },
+      watcherWakeSource: { consumeCurrent: () => wakePayload },
+      pollOnceOptions: {
+        octokit: 'client',
+        pollOnceImpl: async (client, options) => {
+          events.push('poll');
+          assert.equal(client, 'client');
+          assert.equal(options.custom, 'value');
+          assert.equal(options.consumeWakePayload(), wakePayload);
+          if (fails) throw new Error('fixture');
+        },
+        errorHandler: async () => events.push('error'),
+      },
+    });
+    for (let tick = 0; tick < 2; tick++) {
+      events.length = 0;
+      const result = await run('fixture', { custom: 'value' });
+      assert.equal(result.ok, !fails);
+      assert.deepEqual(events, ['refresh', 'poll-start', 'watchdog-start', 'priority', 'alerts',
+        'reaper', 'progress', 'scratch', 'progress', 'poll', ...(fails ? ['error'] : []), 'completed', 'watchdog-end']);
+    }
+  });
+}

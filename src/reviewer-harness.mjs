@@ -59,6 +59,7 @@ import {
   resolveReviewerTimeoutMs,
 } from './reviewer-timeout.mjs';
 import { spawnCapturedProcessGroup } from './process-group-spawn.mjs';
+import { isOwnedReviewerCwd } from './reviewer-harness-cwd.mjs';
 import { auditReviewerSubprocess } from './reviewer-workspace.mjs';
 import {
   extractReviewVerdict,
@@ -133,7 +134,7 @@ function withReviewerSubprocessCwdEnv(env, cwd) {
 }
 
 function withSnapshotBoundaryPrompt(promptPrefix) {
-  const boundary = '- Your workspace is a read-only snapshot of the repository default checkout at review time. Do not apply the diff, write files, or run tests.';
+  const boundary = '- Limit local lookups to the supplied workspace. Do not apply the diff, write files, or run tests.';
   const lines = String(promptPrefix || '').split('\n');
   const lookupIndex = lines.findIndex((line) => line.startsWith('- Use at most one narrowly targeted lookup'));
   lines.splice(lookupIndex >= 0 ? lookupIndex + 1 : lines.length, 0, boundary);
@@ -181,7 +182,7 @@ async function spawnWithInput(command, args, {
     ...(stdoutPath ? { stdoutPath } : {}),
     ...(stderrPath ? { stderrPath } : {}),
     ...(settleAfterKillMs ? { settleAfterKillMs } : {}),
-  }));
+  }), cwd);
 }
 
 async function spawnCaptured(command, args, {
@@ -524,7 +525,7 @@ async function spawnClaude(args, options = {}) {
       return spawnCapturedProcessGroup(claudeCli, args, { ...execOptions, onSpawn });
     }
     return execFileImpl(claudeCli, args, execOptions);
-  });
+  }, execOptions.cwd);
 }
 
 function resolveCodexAuthPath() {
@@ -1192,10 +1193,12 @@ function buildCodexReviewArgs({
   configOverrides = null,
   persistSession = false,
   modelCatalogPath = null,
+  skipGitRepoCheck = false,
 }) {
   const args = [
     'exec',
     '--ignore-user-config',
+    ...(skipGitRepoCheck ? ['--skip-git-repo-check'] : []),
     '--dangerously-bypass-approvals-and-sandbox',
     ...(!persistSession ? ['--ephemeral'] : []),
     '--json',
@@ -1256,7 +1259,7 @@ async function spawnCodexReview({
     return await spawnCapturedImpl(
       codexCli,
       buildCodexReviewArgs({ outputPath, prompt, model, modelProvider, configOverrides, persistSession,
-        modelCatalogPath: home.catalogPath }),
+        modelCatalogPath: home.catalogPath, skipGitRepoCheck: isOwnedReviewerCwd(cwd) }),
       {
         env: { ...scrubOAuthFallbackEnv(env).env, CODEX_HOME: home.codexHome, CODEX_AUTH_PATH: home.authPath },
         cwd,

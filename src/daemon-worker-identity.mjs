@@ -255,6 +255,7 @@ export async function readHeadAttestationChainForPr({
   hqRoot,
   env = process.env,
   execFileImpl = execFileAsync,
+  timeoutMs = loadAwareTimeoutMs(30_000),
   retryDelaysMs = HEAD_ATTESTATION_CHAIN_RETRY_DELAYS_MS,
   sleepImpl = sleepMs,
   logger = console,
@@ -270,7 +271,7 @@ export async function readHeadAttestationChainForPr({
       ({ stdout } = await execFileImpl('hq', args, {
         env,
         maxBuffer: 5 * 1024 * 1024,
-        timeout: loadAwareTimeoutMs(30_000),
+        timeout: timeoutMs,
       }));
       break;
     } catch (err) {

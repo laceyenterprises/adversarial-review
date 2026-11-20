@@ -37,6 +37,9 @@ import { parseDependabotDependencyTitle } from './dependency-bot-autoadjudicatio
 import { execGhWithRetry } from './gh-cli.mjs';
 import { gatherArtifactEvidence, MAX_ARTIFACT_BYTES } from './argus-artifact-evidence.mjs';
 import { normalizeArgusFinding } from './argus-security-review.mjs';
+import { resolveRepoCheckoutDir, reviewerGitEnv } from './reviewer-repo-checkout.mjs';
+
+export { resolveRepoCheckoutDir };
 
 const execFileAsync = promisify(execFile);
 
@@ -105,19 +108,6 @@ export function resolveArgusRubricPythonPath({ rootDir, env = process.env, exist
   if (explicit) return existsImpl(join(explicit, 'argus_review')) ? explicit : null;
   const sibling = join(rootDir, '..', '..', 'modules', 'argus', 'lib', 'python');
   return existsImpl(join(sibling, 'argus_review')) ? sibling : null;
-}
-
-/**
- * The local checkout a repository's usage can be read from, or null. Mirrors
- * the reviewer's own cwd rule: adversarial-review is this tree, agent-os is the
- * superproject two levels up.
- */
-export function resolveRepoCheckoutDir({ repo, rootDir, existsImpl = existsSync }) {
-  const normalized = String(repo || '').trim().toLowerCase();
-  let dir = null;
-  if (normalized.endsWith('/adversarial-review')) dir = rootDir;
-  else if (normalized.endsWith('/agent-os')) dir = join(rootDir, '..', '..');
-  return dir && existsImpl(join(dir, '.git')) ? dir : null;
 }
 
 function lockPackages(lock) {
@@ -283,7 +273,7 @@ export async function gatherArgusEvidence({
   const verifiedArtifactSources = [];
   const dependency = resolveDependencyBump({ job, pr });
   const pythonPath = resolveArgusRubricPythonPath({ rootDir, env, existsImpl: io.existsImpl || existsSync });
-  const checkoutDir = resolveRepoCheckoutDir({ repo: job.repo, rootDir, existsImpl: io.existsImpl || existsSync });
+  const checkoutDir = dependency ? await resolveRepoCheckoutDir({ repo: job.repo, rootDir, env }) : null;
   let fatal = null;
 
   if (dependency) {
@@ -621,7 +611,7 @@ export function createDefaultArgusEvidenceIo({
         const { stdout } = await execFileImpl('git', [
           '-C', checkoutDir, 'grep', '-n', '-I', '-E', pattern, '--',
           ':!*package-lock.json', ':!*package.json', ':!*.lock', ':!*.md',
-        ], { timeout: loadAwareTimeoutMs(60_000), maxBuffer: 10 * 1024 * 1024, encoding: 'utf8' });
+        ], { timeout: loadAwareTimeoutMs(60_000), maxBuffer: 10 * 1024 * 1024, encoding: 'utf8', env: reviewerGitEnv(env) });
         const lines = String(stdout).split('\n').filter(Boolean);
         return lines.length > MAX_USAGE_LINES
           ? `${lines.slice(0, MAX_USAGE_LINES).join('\n')}\n… (+${lines.length - MAX_USAGE_LINES} more)`

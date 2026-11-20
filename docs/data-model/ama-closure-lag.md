@@ -13,6 +13,7 @@ deduplicated SEV1 pages. It grants no merge authority and never releases leases.
 | `samples` | array | Completion observations `{ at, lagMs, pr, reason }` used in rolling p95 lag. `at` is the observation time; for a merge discovered by the observer's live read it is the merge time, capped at the observation time, so a late reconciliation of an old merge falls outside the 24-hour window. |
 | `breaches` | object keyed by `p95` or `pr:repo#PR` | Each value contains an immutable breach `event` and a `paged` boolean. Successful delivery sets `paged`; failures leave it false for retry. |
 | `sloMs` | optional number | Last supplied p95 SLO, defaulting to 1800000 milliseconds when absent. |
+| `remediationCloserLaunches` | optional array | First confirmed closer receipt per PR and remediation completion timestamp. Each sample carries the PR, launch request ID, completion, launch and confirmation timestamps in epoch milliseconds, and `remediation_complete_to_closer_launch_seconds`. New samples prune entries older than 24 hours and cap the array at 10,000. |
 
 `observeCloserBacklog` returns a Promise of the count of pending nonterminal PRs
 attempted within `CLOSER_BACKLOG_STALE_MS` (six hours). `closerSeenAt` records the

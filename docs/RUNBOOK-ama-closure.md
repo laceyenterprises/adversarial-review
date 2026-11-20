@@ -989,18 +989,48 @@ reservation as remediation custody during provisioning and publication. A
 pending reservation takes precedence over a prior epoch that reviewed the same
 base head, so the watcher cannot admit competing review work on that head.
 Watcher custody, verdict admission revision references and rescue head matching
-compare hexadecimal commit SHAs case-insensitively, preserving stored spelling. A live
-or uncertain submission retains custody. Before admission the watcher observes
-pending repair ownership at most once per 30 seconds. Complete terminal
-launch/retry evidence retires the reservation under the ledger flock; an exact-key
-absence proof also retires an unlaunched reservation after ten minutes from
-`reservedAt`. Unreadable or unproven absence retains custody. Retirement removes
+compare hexadecimal commit SHAs case-insensitively, preserving stored spelling.
+A live or uncertain submission retains custody. Before admission the watcher
+observes pending repair ownership at most once per 30 seconds. A moved head
+requires an exact-head verified produced attestation from the reservation launch
+or its retry before it can consume the reservation. Complete terminal
+launch/retry evidence at the base head retires the reservation under the ledger
+flock. At a moved head, that same terminal evidence plus a successful attestation
+read showing no produced publication or a foreign publisher retires with
+`terminalReason: foreign-head-after-terminal`. This releases custody for the
+ordinary review/ownerless path without binding or resetting repair counters.
+Unreadable or invalid attestations retain custody. Verified `publicationHead`
+and `publicationLaunch` persist under the flock so a missed admission tick
+does not lose publication proof. The attestation reader uses the configured HQ
+root (the standard `HQ_ROOT` / `AGENT_OS_HQ_ROOT` resolver) and an eight-second
+subprocess budget. Point-in-time absence retains custody because the submitter may still
+enqueue. A reservation with a canonical project supplied at creation uses the
+existing project/repository paired grant for its exact-key read. Older
+reservations keep their unscoped lookup. Retirement removes
 repair ownership from next-action and TTM projections, allowing the existing
 ownerless clock and SEV1 page. Corrupt ledgers and busy refund writers defer only
 the affected PR. No replacement PR
 is opened. After both dispatch and review-service versions load, the runtime
 owner must retain an original-branch merge receipt and a 24-hour observation
 without replacement PRs used to escape budgets.
+
+A terminal owner at a moved head whose publication remains invalid or lacks
+launch/class identity retains the safety fence. After two observations and ten
+minutes from the first matching terminal publication observation,
+`publisherObservation.operatorRequired` projects operator custody in next-action
+and TTM and sends a deduplicated `repair-publication-unproven` SEV1 page. The
+observation records head, owner launch, owner state, retry launches, reason,
+first/last observation times and count. An invalid attestation is never treated
+as verified foreign publication or granted review admission.
+
+For a live owner, a negative missing-attestation result is cached for at most two
+minutes for the same head, owner launch/state and retry chain. Dispatch owner
+reads still run at the normal cadence; a changed identity/state/head/chain or
+expiry forces a fresh publisher read. Verified publication keeps its existing
+durable proof. Successor reservation CAS ignores only `ownerObservedAt`; owner
+identity/state, publication, review/terminal state and spend fields still fence
+concurrent changes. Watcher observation updates retain their full snapshot CAS
+so a late observation cannot overwrite a newer one.
 
 `bin/repair-in-place.mjs` rejects missing or malformed heads (anything other
 than 40 hexadecimal characters) before opening the review database or reading
@@ -5635,7 +5665,14 @@ for identities, ownership and retention.
 History classification reads every paginated commit before deciding whether a
 hammer exists. Author-only and history-only classification skips file reconstruction;
 a hammer preservation decision still reconstructs both complete author and final
-snapshots. Immutable commit pages are reused within that reader. For roots with
+snapshots. The search for an original reversal across superseding review heads
+also uses complete paginated commit metadata. It reuses the ordinary immutable
+compare-page checkpoints on resume. A matching message or trailer set only
+identifies a candidate. The verifier still reads the candidate commit's patch
+and the required reviewed and parent snapshots and checks provenance and finding
+coverage before approving a reversal. Missing or inconsistent commit pages
+remain history-read failures.
+For roots with
 directories, HAMHISTORYTHROUGHPUT-02 first requests SHA-addressed recursive trees.
 A complete snapshot must explicitly report `truncated: false`, match the separately
 read root entries, have unique valid paths and ancestors, and reproduce every
@@ -6789,6 +6826,35 @@ shared queue's ceiling.
 The daemon clean path runs before hammer capacity, including automated recovery.
 No eligible inline merge waits behind `ama-closer-launch-in-progress`.
 
+### Remediation completion to closer launch
+
+For an open PR whose next action is a closer, the target is a launch within
+10 minutes of the remediation job's `completedAt`. A completion publishes a
+durable priority event. The watcher handles it before the regular poll and
+listens for new events during the poll, with a 15-second fallback. It refreshes
+the PR head and uses the posted-review handler, which applies the existing
+review, strict-mode, ownership and launch admission checks. The regular poll
+also covers completions whose priority event could not be written.
+The atomic completion writer creates the queue directory before publication.
+Events for unmanaged repositories or absent PRs are removed without dispatch.
+Malformed JSON is moved unchanged to `data/remediation-closer-queue/dead-letter/`
+with a warning naming the file; it remains there for manual inspection and does
+not retry after restart. Filesystem errors and retryable decisions still defer.
+
+The watcher gives each coexistence step at most 45 seconds before deferring
+the caller. Work already in progress retains its attempt fence until it
+settles. A launch-status snapshot can supply positive live ownership to
+multiple PR decisions. Terminal, missing and unavailable snapshots still
+require the ordinary evidence read.
+
+`ama.closer_queue_launch` emits `remediation_complete_to_closer_launch_seconds`
+on the first confirmed launch receipt for a PR and completion timestamp. The
+closure health ledger retains the sample. It uses the matched ledger launch
+timestamp when available and the receipt observation time otherwise. A
+completion with no confirmed launch has no sample.
+
+### Merge completion lag
+
 `ama.closure_lag` emits `eligible_at`, `merged_at`, and `lag_ms` once per PR;
 `ama.closure_queue_depth` emits the eligible unmerged queue depth and p95 lag.
 Observations persist under the runtime root in `data/ama-closure-lag/`. Lifecycle
@@ -6803,7 +6869,7 @@ lifecycle sync's open-row list. Already-paged waits are re-read at most every
 outside an observed walk still leaves the queue-depth gauge and the p95.
 Merged or closed state settles the entry and suppresses its page. Reads occur outside the state lock and cannot overwrite a
 concurrently changed wait/head. Unreadable state logs a warning and retains
-ordinary paging. There are no new configuration keys or SLO changes. A rolling
+ordinary paging. A rolling
 24-hour p95 includes completed lags and pending eligible waits. Exceeding the configured SLO or any eligible wait over 60 minutes creates
 an automated `ama.closure_lag.slo_breach` SEV1 event naming blocking reasons.
 Pages are durable and deduplicated; delivery failures retry, and a recovered p95

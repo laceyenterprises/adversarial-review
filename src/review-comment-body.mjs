@@ -88,10 +88,12 @@ function buildReviewCommentBody({
   execution = null,
   waiverAuditBlock = '',
   reviewModeAuditBlock = '',
+  workspaceDiffOnly = false,
   reviewText,
   publicHygiene = false,
 }) {
   let text = String(reviewText || '');
+  const workspace = workspaceDiffOnly ? '> Review workspace: diff-only (no local snapshot of the reviewed commit).\n\n' : '';
   if (publicHygiene) {
     if (startsWithReviewCommentHeader(text)) {
       text = text.trimStart().replace(/^[^\r\n]*(?:\r?\n|$)\s*/, '');
@@ -99,7 +101,7 @@ function buildReviewCommentBody({
     return buildReviewCommentHeader({
       reviewerMetadata: { displayName: 'Code reviewer', reviewerIdentity: 'automated' },
       verdictMode,
-    }) + text;
+    }) + workspace + text;
   }
   // Blockquote lines only, never headings: the verdict and blocking-finding
   // parsers key on `## Verdict` / `## Blocking issues`, and a heading inserted
@@ -109,7 +111,7 @@ function buildReviewCommentBody({
   const stamp = execution
     ? `> Reviewer: harness ${execution.harness || 'unknown'} · model ${execution.model || 'unknown'} · effort ${execution.effort || 'n/a'}\n\n`
     : '';
-  const auditBlocks = `${stamp}${String(waiverAuditBlock || '')}${String(reviewModeAuditBlock || '')}`;
+  const auditBlocks = `${stamp}${workspace}${String(waiverAuditBlock || '')}${String(reviewModeAuditBlock || '')}`;
   if (startsWithReviewCommentHeader(text)) {
     return insertAfterExistingReviewHeader(text, auditBlocks);
   }

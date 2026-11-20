@@ -23,8 +23,12 @@ polling. Every event, ledger append and observed execution effect invokes the
 independent oracle; the trace retains first and later violations even if the
 subject eventually recovers. Oracle observations reuse the last folded ledger
 until an append and still evaluate eligibility at each observation's virtual
-time. The executor continues to read and fold the synthetic ledger through
-its own path. Clock events run serially, except an explicit
+time. A read gets the current immutable event snapshot. An append publishes a
+new snapshot and leaves earlier snapshots intact. The executor continues to
+fold each read through its own path. Both simulator executor entrypoints reject
+deferrals whose details report a frozen-object mutation, so a production catch
+cannot silently hide an incompatible reader. A leased-read mutation fixture
+exercises this failure through the real executor. Clock events run serially, except an explicit
 concurrent-owner scenario that races two real executor ticks against one fake CAS.
 
 `simulator.mjs` runs the production `fold`, `eligible` and executor. Its in-memory

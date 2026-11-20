@@ -1,3 +1,9 @@
+Remediation closer priority hints terminate without dispatch for unmanaged
+repositories or missing PRs. Malformed JSON moves unchanged to the queue's
+`dead-letter/` directory and remains excluded after restart. Filesystem and
+decision errors retain the existing retry path; review-row and closer lifecycle
+states, merge gates and smoke commands are unchanged.
+
 FINDINGSSTUCK-01 remediation retains never-launched batches across subprocess
 transport, timeout and admission failures, irrespective of claim age. Each retry
 uses the same batch/key without charging a finding attempt. Legacy ambiguous
@@ -64,14 +70,37 @@ An HQ launch admitted after that read is HQ's admission to refuse.
 Existing lifecycle graph and automated smoke promises are unchanged.
 
 Pending in-place repair reservations are observed before watcher admission at
-most once per thirty seconds. Complete terminal launch/retry evidence, or a
-proven absent launch after ten minutes of provisioning, retires custody under
-the ledger flock; live and unreadable evidence retain it. Retirement removes
+most once per thirty seconds. Complete terminal launch/retry evidence at base retires custody under the ledger
+flock. At a moved head, the same terminal evidence plus a successful missing or
+foreign publication read retires with `foreign-head-after-terminal`, preserving
+spend and leaving the head unbound. Verified publication head/launch evidence
+persists across skipped admission ticks. Live, absent dispatch and unreadable
+evidence retain custody. Two consecutive canonical absence proofs after ten
+minutes mark the reservation `absent-unfenced`, project operator custody in
+next-action/TTM and send a deduplicated SEV1 page. Retirement removes
 repair custody from canonical next-action and TTM projections, restoring the
 existing ownerless clock and SEV1 path. Reviewer harness refunds are limited
 to three per PR across heads; later failures keep ordinary infra charges and
 cap alerts. Ledger faults defer only one PR. Existing lifecycle values, merge
 predicates and automated smoke commands are unchanged.
+
+A terminal owner at a moved head whose publication remains invalid or lacks
+launch/class identity retains the safety fence. After two observations and ten
+minutes from the first matching terminal publication observation,
+`publisherObservation.operatorRequired` projects operator custody in next-action
+and TTM and sends a deduplicated `repair-publication-unproven` SEV1 page. The
+observation records head, owner launch, owner state, retry launches, reason,
+first/last observation times and count. An invalid attestation is never treated
+as verified foreign publication or granted review admission.
+
+For a live owner, a negative missing-attestation result is cached for at most two
+minutes for the same head, owner launch/state and retry chain. Dispatch owner
+reads still run at the normal cadence; a changed identity/state/head/chain or
+expiry forces a fresh publisher read. Verified publication keeps its existing
+durable proof. Successor reservation CAS ignores only `ownerObservedAt`; owner
+identity/state, publication, review/terminal state and spend fields still fence
+concurrent changes. Watcher observation updates retain their full snapshot CAS
+so a late observation cannot overwrite a newer one.
 
 Zero-output admission refusals without a launch move closer dispatch custody to
 `operator-escalated` for that head. The watcher clears the generic slow-retry
@@ -1487,6 +1516,13 @@ Legacy durable jobs created before `baseBranch` was persisted are hydrated from 
 ---
 
 ## MSM two-path merge authority (current)
+
+Completed remediation publishes a priority event for the same posted-review
+closure handler used by the regular poll. The watcher refreshes the subject
+before evaluating it, including during an ongoing poll. The event changes
+scheduling only. The shared decision, exact-head checks and closer intent and
+lease fences still govern the transition to launch. See the
+[dispatch latency runbook](RUNBOOK-ama-closure.md#remediation-completion-to-closer-launch).
 
 An exhausted transient history read retains its class in audit `reasonDetail`
 and uses registered `history-read-failed` for an uncounted deferral and the
@@ -3859,9 +3895,12 @@ epochs bound automatic repair; the existing wait store pages the operator once
 with the full history. Canonical next-action and health projections retain the
 reservation as remediation custody during provisioning and publication. A
 pending reservation takes precedence over a prior epoch that reviewed the same
-base head, so the watcher cannot admit competing review work on that head. A live
-or uncertain submission retains custody; only
-complete terminal launch/retry evidence allows a successor. No replacement PR
+base head, so the watcher cannot admit competing review work on that head.
+A moved head consumes a pending reservation only with a verified exact-head
+production attestation from its launch or retry. A live or uncertain submission
+retains custody. Release at the base head requires complete terminal launch
+and retry evidence. Point-in-time absence cannot fence pre-enqueue admission.
+No replacement PR
 is opened. After both dispatch and review-service versions load, the runtime
 owner must retain an original-branch merge receipt and a 24-hour observation
 without replacement PRs used to escape budgets.

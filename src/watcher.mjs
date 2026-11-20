@@ -13,6 +13,10 @@ import { withGitHubAdapterReadTick } from './github-adapter-client.mjs';
 import { withClosureEvaluationReadCache } from './closure-evaluation-cache.mjs';
 import { createWatcherLatencyMonitor, sampleWatcherPollMemory } from './watcher-latency.mjs';
 import { runLowBudgetWatcherPoll } from './watcher-github-budget.mjs';
+import { startRemediationCloserDrain } from './remediation-closer-queue.mjs';
+import { withClosureLaunchStatusBatch } from './session-ledger-read-adapter.mjs';
+import { fetchHammerPr } from './hammer-pr-read.mjs';
+import { waitForReviewerHandoff } from './reviewer-admission-lifecycle.mjs';
 import { withGitHubBudgetScope } from './rate-limit-throttle.mjs';
 import { sweepPrimaryChangeStore } from './ama/primary-change-store.mjs';
 import { createHammerScratchSweepTicker } from './ama/hammer-scratch-sweep.mjs';
@@ -114,7 +118,6 @@ import {
   legacyLabelEventFromControlResult,
 } from './adapters/operator/github-pr-label-controls/index.mjs';
 import {
-  buildSafePollOnce,
   computeWorkloadAwarePollDeadlineMs,
   DEFAULT_POLL_DEADLINE_FLOOR_MS,
   MAX_POLL_DEADLINE_MS,
@@ -180,6 +183,7 @@ import {
   createNoProgressLaneGate,
   handlePostedReviewRow,
   runQueuedReviewAdoptionPhase,
+  timePostedReviewStep,
 } from './posted-review-row.mjs';
 import { resetNoProgressLanesForGeneration } from './watcher-no-progress-lane.mjs';
 import { watcherBuildIdentity, watcherConfigGeneration } from './watcher-lane-generation.mjs';
@@ -269,6 +273,7 @@ import { resolveGateStatusContext } from './adversarial-gate-context.mjs';
 // Fully clean PRs merge through the daemon path; dirty/conflicted/red-CI PRs
 // route here under the existing launch lease/idempotency machinery.
 import {
+  listActiveAmaCloserDispatches,
   maybeDispatchAmaCloser,
   namedAmaNoDispatchReason,
 } from './ama/dispatch-closer.mjs';
@@ -367,6 +372,7 @@ import { reconcileReviewerCommandFailedBeforeRetry } from './reviewer-command-fa
 import { shouldSkipReviewerForStaleDrift } from './stale-drift.mjs';
 import { createWatcherHealthProbe } from './health-probe.mjs';
 import {
+  createHeartbeatPollRunner,
   createWatcherHeartbeat,
   createWatcherStallWatchdog,
   resolveWatcherHeartbeatOwnerGuardRoot,
@@ -1091,6 +1097,8 @@ function createWatcherOperatorSurface() {
 // ── Org repo discovery ───────────────────────────────────────────────────────
 
 let activeRepos = config.repos ?? [];
+const withWatcherClosureStatus = run => withClosureLaunchStatusBatch(ROOT, () => listActiveAmaCloserDispatches(ROOT)
+  .map(record => record.launchRequestId).filter(Boolean), run);
 const adversarialGateBranchProtectionChecker = createBranchProtectionChecker({
   execFileImpl: execFileAsync,
 });
@@ -1552,7 +1560,7 @@ async function pollOnceWithinBudget(
     });
   }
 
-  await runQueuedReviewAdoptionPhase({
+  await withWatcherClosureStatus(() => runQueuedReviewAdoptionPhase({
     drainReviewerDispatchCandidates,
     postedReviewHandlers: postedReviewHandlers.map(handler => trackPollHandlerProgress(handler, watcherHeartbeat)),
     postReviewMaintenanceHandlers: postReviewMaintenanceHandlers.map(handler => trackPollHandlerProgress(handler, watcherHeartbeat)),
@@ -1561,7 +1569,7 @@ async function pollOnceWithinBudget(
     primaryDomainId: WATCHER_PRIMARY_DOMAIN_ID,
     postedReviewPriorityTargets: wakePayloadForPoll() || [],
     noProgressLaneGate: createNoProgressLaneGate({ rootDir: ROOT, watcherGeneration: watcherLaneGeneration }),
-  });
+  }));
   } finally {
     try {
       await evaluateCloserHoldsForPoll({ rootDir: ROOT, hqRoot: resolveHqRoot(), subjects: holdSubjects, deliverAlertImpl: defaultDeliverAlert, logger: console });
@@ -1811,67 +1819,49 @@ async function main() {
   });
   stallWatchdog.start();
 
-  // Self-scheduling loop. Awaiting safePollOnce before sleeping
-  // guarantees no two polls overlap, so the previous overlap-skip
-  // scheme is no longer needed. Cadence is fixed-rate: the next
-  // start is `lastStart + intervalMs`, and the loop sleeps only the
-  // remaining delay (clamped at zero). This preserves the operator-
-  // expected meaning of `pollIntervalMs` — a 4m poll on a 5m
-  // interval is still ~5m start-to-start, not 9m. The watchdog
-  // deadline inside safePollOnce protects against a single hung
-  // poll wedging the loop forever — on timeout, exitForPollDeadline
-  // aborts in-flight reviewer subprocesses and calls process.exit
-  // so launchd KeepAlive respawns a clean process.
-  const safePollOnce = buildSafePollOnce({
-    pollOnceImpl: pollOnce,
-    octokit,
-    errorHandler: handlePollError,
-    onTimeout: exitForPollDeadline,
-    deadlineMs: () => pollStarvation.deadlineMs,
-  });
   const watcherWakeSource = createWatcherWakeSource({ rootDir: ROOT, logger: console, consumeExistingOnStart: true });
-  let lastAlertSinkDegradedFingerprint = null;
-  async function runHeartbeatPoll(source, pollOptions = undefined) {
-    const pollStartedAtMs = Date.now(); let pollResult = null;
-    pollStarvation.refresh();
-    watcherHeartbeat.markPoll({ source });
-    stallWatchdog.beginPoll();
-    try {
-      // Every tick sweeps the principal-owned queue, including startup recovery.
-      scheduleAlertDrain();
-      try {
-        const sinkHealth = readAlertSinkHealth();
-        const degradedFingerprint = sinkHealth.ready ? null : JSON.stringify({
-          pendingCount: sinkHealth.pendingCount,
-          inflightCount: sinkHealth.inflightCount,
-          quarantineCount: sinkHealth.quarantineCount,
-          quarantineEventCounts: sinkHealth.quarantineEventCounts,
-          deadLetterCount: sinkHealth.deadLetterCount,
-          lastFailureReason: sinkHealth.lastFailureReason,
-        });
-        if (degradedFingerprint && degradedFingerprint !== lastAlertSinkDegradedFingerprint) {
-          console.error(
-            `[watcher] alert delivery sink degraded: ${degradedFingerprint}`
-          );
-        } else if (!degradedFingerprint && lastAlertSinkDegradedFingerprint) {
-          console.log('[watcher] alert delivery sink recovered');
-        }
-        lastAlertSinkDegradedFingerprint = degradedFingerprint;
-      } catch (error) {
-        console.error(`[watcher] alert delivery sink health unavailable: ${error?.message || error}`);
+  const decideRemediationCloser = ({ repo, prNumber, headSha }) =>
+    withGitHubBudgetScope({}, () => timePostedReviewStep('remediation-closer', `${repo}#${prNumber}`, console, async ({ signal }) => {
+      const repoPath = canonicalRepositoryName(db, repo);
+      if (!activeRepos.includes(repoPath)) return;
+      const existing = stmtGetReviewRow.get(repoPath, prNumber);
+      if (existing?.review_status !== 'posted') return;
+      const pr = await fetchHammerPr(repoPath, prNumber, { withChecks: false, optional: true, signal });
+      if (!pr || pr.state !== 'OPEN' || pr.isDraft || !pr.headRefOid || (headSha && headSha !== pr.headRefOid)) return;
+      await waitForReviewerHandoff(repoPath, prNumber);
+      signal.throwIfAborted();
+      const domainId = existing.domain_id || WATCHER_PRIMARY_DOMAIN_ID;
+      const subjectRef = { domainId, subjectExternalId: `${repoPath}#${prNumber}`, revisionRef: pr.headRefOid };
+      const labelNames = (pr.labels || []).map(label => label.name);
+      const operatorSurface = createWatcherOperatorSurface();
+      const closerHead = createHeadCloserCommitSuppressionResolver({ repoPath, prNumber, headSha: pr.headRefOid, execFileImpl: execFileAsync });
+      const result = await handlePostedReviewRow({
+        rootDir: ROOT, repoPath, prNumber, existing, domainId, subjectRef,
+        currentRevisionRef: pr.headRefOid, expectedHead: pr.headRefOid, labelNames, operatorSurface,
+        projectGateStatusSafe: async reviewRow => projectAdversarialGateStatus(ROOT, {
+          repo: repoPath, prNumber, headSha: pr.headRefOid, labels: pr.labels, prAuthor: pr.author, reviewRow, domainId,
+          closerProducedHead: reviewRow.reviewer_head_sha && reviewRow.reviewer_head_sha !== pr.headRefOid
+            ? await closerHead().catch(() => null) : null,
+          operatorApprovalEvent: labelNames.includes(OPERATOR_APPROVED_LABEL)
+            ? legacyLabelEventFromControlResult(await operatorSurface.observeOperatorApproved(subjectRef, pr.headRefOid), OPERATOR_APPROVED_LABEL)
+            : null,
+        }),
+      });
+      const closure = result?.amaClosureResult;
+      if (['posted-review-in-flight', 'candidate-fetch-deadline', 'coexistence-deadline', 'review-row-reread-failed']
+        .includes(result?.outcome) || closure?.reason === 'ama-coexistence-operation-timeout'
+        || (closure?.nextAction?.action === 'hammer' && ['dispatch', 'reconcile'].includes(closure.nextAction.queue?.intent))) {
+        return closure?.retryAfterMs || false;
       }
-      await staleStateReaperTicker.tick();
-      watcherHeartbeat?.markPollProgress?.();
-      await hammerScratchSweepTicker.tick();
-      watcherHeartbeat?.markPollProgress?.();
-      pollResult = await safePollOnce(source, { ...(pollOptions || {}), consumeWakePayload: () => watcherWakeSource.consumeCurrent() });
-      watcherHeartbeat.markPollCompleted({ source, ok: Boolean(pollResult?.ok), timed_out: Boolean(pollResult?.timedOut), error: pollResult?.error ? String(pollResult.error?.message || pollResult.error) : null });
-      return pollResult;
-    } finally {
-      stallWatchdog.endPoll();
-      console.log(`[watcher] poll-cycle timing source="${source}" ok=${Boolean(pollResult?.ok)} timed_out=${Boolean(pollResult?.timedOut)} duration_ms=${Date.now() - pollStartedAtMs}`);
-    }
-  }
+    }, undefined, { deadlineMs: 90_000 }));
+  const remediationCloser = startRemediationCloserDrain({ rootDir: ROOT, decide: decideRemediationCloser,
+    runBatch: run => withGitHubAdapterReadTick(() => withWatcherClosureStatus(run)) });
+  const runHeartbeatPoll = createHeartbeatPollRunner({
+    remediationCloser, pollStarvation, watcherHeartbeat, stallWatchdog,
+    scheduleAlertDrain, readAlertSinkHealth, staleStateReaperTicker,
+    hammerScratchSweepTicker, watcherWakeSource,
+    pollOnceOptions: { pollOnceImpl: pollOnce, octokit, errorHandler: handlePollError, onTimeout: exitForPollDeadline },
+  });
 
   const { createFindingBatchTicker } = await import('./findings-batch.mjs');
   const findingBatchTicker = createFindingBatchTicker({ db, rootDir: ROOT });

@@ -1,5 +1,28 @@
 # Data Model - Follow-Up Remediation Jobs
 
+## Closer priority queue
+
+**Source of truth:** `src/remediation-closer-queue.mjs`, `src/follow-up-jobs.mjs`, `src/watcher.mjs`.
+
+The completion writer atomically publishes a scheduling hint under
+`data/remediation-closer-queue/` for each new completed job. The filename
+contains the completion epoch milliseconds and a digest of the repository,
+PR number and job ID. The payload carries `repo`, `prNumber`, `headSha`
+(nullable) and `reviewRequested`. The completed job remains the source of
+truth for completion and review disposition.
+The atomic writer creates the queue directory recursively, including before
+watcher startup.
+
+The watcher tries the oldest ready events in batches of four. It removes
+events after a decision or when the event belongs to a re-review or an old
+head, an unmanaged repository, or a missing PR. Retryable decisions remain
+queued. Invalid JSON moves unchanged to
+`data/remediation-closer-queue/dead-letter/<original-name>.json` and is excluded
+from later drains, including after restart. A warning identifies the quarantined
+file; operator inspection or removal is manual. Filesystem failures and decision
+exceptions retain the ordinary retry path. The watcher canonicalizes repository
+names when it reads events, including events written before a rename.
+
 ## Tenure review provenance
 
 An HQ remediator routed from a tenured PR build launch stores optional

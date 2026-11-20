@@ -20,14 +20,15 @@ const quiet = { log() {}, info() {}, warn() {}, error() {} };
 // code. The daemon execution boundary is a lease refusal, never a live merge.
 // Times are measured wall/SQL time plus an explicit per-exec delay, not a
 // prediction of GitHub or adapter internals. Never log commands or payloads.
-export async function profilePostedReviews(modules, { prCount = 15, delayMs = 20 } = {}) {
+export async function profilePostedReviews(modules, { prCount = 15, delayMs = 20, ledgerDelayMs = 0 } = {}) {
   const rootDir = mkdtempSync(join(tmpdir(), 'posted-profile-'));
   const db = openReviewStateDb(rootDir);
   ensureReviewStateSchema(db);
   const row = { review_status: 'posted', reviewer_head_sha: fixtureHead,
     review_body: body, reviewer: 'codex' };
   const scope = new AsyncLocalStorage();
-  const steps = {};
+  const steps = {}, timings = [];
+  const logger = { ...quiet, debug: line => timings.push(JSON.parse(line)) };
   const bucket = () => steps[scope.getStore() || 'handler-overhead'] ||= { runs: 0, wallMs: 0, samplesMs: [],
     github: {}, subprocesses: {}, database: { count: 0, ms: 0, migrationChecks: {} } };
   const timed = async (step, run) => scope.run(step, async () => {
@@ -160,13 +161,16 @@ export async function profilePostedReviews(modules, { prCount = 15, delayMs = 20
                   reviewerLogin = args[3].authoritativeReviewerLogins[0];
                   return fetchReviewBodiesForHead(execFileImpl, ...args);
                 },
-                runDaemonCleanMergeAttemptImpl: async () => ({ disposition: 'deferred', reason: 'fixture-lease-held' }),
+                runDaemonCleanMergeAttemptImpl: async () => {
+                  if (ledgerDelayMs) await new Promise(resolve => setTimeout(resolve, ledgerDelayMs));
+                  return { disposition: 'deferred', reason: 'fixture-lease-held' };
+                },
               }),
               recoverOrphanImpl: async () => ({ handled: false }),
               recoverAmaAutomationImpl: async () => ({ outcome: 'ama-pending' }),
             })),
           latestFollowUpJobFinder: () => null, latestPostedReviewBodyFinder: () => body,
-          logger: quiet,
+          logger,
         });
         outcomes.push({ handled: result?.handled, terminal: result?.prTerminal || false,
           outcome: result?.outcome, gateState: result?.gateDecision?.state,
@@ -179,7 +183,7 @@ export async function profilePostedReviews(modules, { prCount = 15, delayMs = 20
       step.maxMs = samples.at(-1) || 0;
       delete step.samplesMs;
     }
-    return { prCount, delayMs, wallMs: performance.now() - start, peak, steps, outcomes };
+    return { prCount, delayMs, wallMs: performance.now() - start, peak, steps, outcomes, timings };
   } finally {
     Database.prototype.prepare = prepare;
     db.close();

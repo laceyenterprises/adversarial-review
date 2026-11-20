@@ -96,6 +96,25 @@ test('admission refusal does not spend work; read failures recover', async () =>
   assert.equal(read.transientCharges, 0);
   assert.equal(read.terminal, 'finalized');
 });
+test('frozen snapshot mutations swallowed by a leased read fail the scenario', async () => {
+  const mutations = [
+    events => { events[0].type = 'changed'; },
+    events => { events.push(events[0]); },
+    events => { delete events[0].type; },
+    events => { events.reverse(); },
+  ];
+  for (const mutate of mutations) {
+    let exercised = false;
+    await assert.rejects(simulate({ id: 'frozen-read', profile: 'clean' }, {
+      mutateLedgerRead(events, { leased }) {
+        if (!leased) return;
+        exercised = true;
+        mutate(events);
+      },
+    }), /simulator snapshot mutation hidden by executor deferral/);
+    assert.ok(exercised, 'mutation exercised the real leased-read catch');
+  }
+});
 test('crash after effect replays without a second merge; fold resume is byte-equivalent', async () => {
   const result = await simulate({ id: 'crash', profile: 'merge-crash' });
   assert.equal(result.merges.length, 1);

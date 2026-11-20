@@ -415,6 +415,16 @@ function selectRow(facts, options = {}) {
   // or publication is in flight. It reuses remediation's owner and never
   // grants review/merge eligibility. Explicit holds and live owners win above.
   if (progress?.repairEpoch?.id && !progress.repairEpoch.reviewHead && !progress.repairEpoch.terminalAt) {
+    if (progress.repairEpoch.ownerState === 'absent-unfenced') {
+      return { row: 'R02-hold', action: 'operator-hold', actor: 'operator',
+        reason: 'repair-absent-unfenced', deadlineKind: null, queue: 'none',
+        refs: [`repair-epoch:${progress.repairEpoch.id}`] };
+    }
+    if (progress.repairEpoch.publisherObservation?.operatorRequired) {
+      return { row: 'R02-hold', action: 'operator-hold', actor: 'operator',
+        reason: 'repair-publication-unproven', deadlineKind: null, queue: 'none',
+        refs: [`repair-epoch:${progress.repairEpoch.id}`] };
+    }
     return { row: 'R03-live-owner', action: 'remediate', actor: 'remediator',
       reason: 'repair-in-place-owned', deadlineKind: 'liveDispatched', queue: 'owned',
       refs: [`repair-epoch:${progress.repairEpoch.id}`] };

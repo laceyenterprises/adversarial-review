@@ -289,8 +289,9 @@ only by the number of selected parallel files.
 A single native coordinator feeds the longest pending file to each free worker.
 The SMV smoke file runs alone first because it measures real process deadlines.
 Each file runs in its own process with isolated state, home and temporary
-directory. Repeated CLI fixtures use private compile caches. The suite deadline
-remains 900 seconds; failures name the file and return a nonzero status.
+directory. Repeated CLI fixtures use private compile caches. Failures name the
+test file and return a nonzero status. At the 900-second deadline, the runner
+prints the active test files and the number still queued.
 Set `AR_TEST_TIMINGS=/absolute/path.json` to
 record per-file wall times and total suite wall time. Relative report paths
 resolve against the caller's working directory and survive sandbox cleanup.
@@ -877,9 +878,11 @@ refusal. After normal deployment, SRE observes a natural final-fix-all launch,
 completion receipt and matching produced attestation before declaring recovery.
 
 In-place repair custody is reconciled before watcher admission, at most once
-per 30 seconds. Complete terminal retry evidence or proven exact-key absence
-after ten minutes retires an unpublished reservation; unknown evidence retains
-custody. Retirement restores the existing ownerless clock and SEV1 path.
+per 30 seconds. Complete terminal retry evidence can retire an unpublished
+reservation. Point-in-time exact-key absence retains custody; two consecutive
+canonical absence proofs after ten minutes project operator-required custody
+and send a deduplicated SEV1 page. Unknown evidence retains custody.
+Retirement restores the existing ownerless clock and SEV1 path.
 Reviewer harness refunds are bounded to three per PR across heads; later
 failures retain ordinary infrastructure cap and alert handling. Corrupt or busy
 repair/refund ledgers defer only their PR. See the
@@ -1719,6 +1722,12 @@ The [reader contract](docs/producer-contract-readers.md#weekly-evidence-and-admi
 records the evidence/admission truth table and public export fixture refresh.
 
 ## State machines and smoke verification (SMV v1)
+
+Remediation closer priority hints terminate without dispatch for unmanaged
+repositories or missing PRs. Malformed JSON moves unchanged to `dead-letter/`
+under the queue directory and stays excluded after watcher restart; filesystem
+and decision errors retain retry custody. Offline coverage is in
+`test/remediation-closer-queue.test.mjs`. Existing smoke commands are unchanged.
 
 Classified transient closer history stops record `history-read-failed` with
 the class in audit `reasonDetail`; the audit is `deferred` and enters the
@@ -5623,7 +5632,14 @@ deletion, with no surviving head references or dynamic namespace hazards.
 See the [proof contract](docs/RUNBOOK-ama-closure.md).
 - **CLOSERCIWAIT-01:** published-head CI settles before the closer predicate using the existing bounded lease-yield/reacquire wait. Phase head values are exported, claim binding uses a deployed helper, and verification/terminal failures name the failed operation. Existing smoke commands remain unchanged; post-deploy acceptance is an organic remediation push merging in the same closer run, still pending.
 EXHAUSTEDHEADOWNER-01: a new builder head after cycle exhaustion receives one
-verdict-only review. Findings retain final closer ownership; head-scoped retry
+verdict-only review. Pending repair custody retires on complete terminal owner
+evidence at base, or at a moved head after a successful negative publication
+read, preserving counters. Verified repair publication evidence persists across
+admission ticks. Repeated overdue canonical absence retains custody and pages
+the operator for inspection. After normal deployment, observe natural
+foreign-head release, delayed verified-publication admission and absence
+escalation read-only; offline tests do not
+certify deployment. Findings retain final closer ownership; head-scoped retry
 and deadline evidence cannot strand a new head. Spent budgets page once, with
 lifetime escalation deduplicated across head changes. See the
 [closure ownership contract](docs/RUNBOOK-ama-closure.md#exhausted-cycles-and-new-builder-heads-exhaustedheadowner-01).

@@ -246,11 +246,21 @@ test('REVPOSTSTALL-01: exact-head, identity, pass, stage, attempt and diff bindi
     reviewAttemptNumber: 2,
     verdictOnly: true,
     diff: `${DIFF}+two\n`,
+    diffOnly: true,
   };
   for (const [field, value] of Object.entries(mismatches)) {
     assert.equal(delivery(rootDir, { [field]: value, sessionUuid: `retry-${field}` }).readReusable(), null, `${field} must bind`);
   }
   assert.equal(delivery(rootDir, { sessionUuid: 'retry-ok' }).readReusable()?.rawReviewText, RAW_REVIEW);
+});
+
+test('preserved reviews without workspace provenance are ineligible for redelivery', (t) => {
+  const rootDir = tempRoot(t);
+  preserveOriginal(rootDir, {});
+  const [{ name, record }] = records(rootDir);
+  delete record.diffOnly;
+  writeFileSync(join(rootDir, 'data', 'reviewer-generated-reviews', name), JSON.stringify(record));
+  assert.equal(delivery(rootDir, { sessionUuid: 'retry-legacy' }).readReusable(), null);
 });
 
 test('REVPOSTSTALL-01: a record whose GitHub write started is never redelivered blindly', async (t) => {

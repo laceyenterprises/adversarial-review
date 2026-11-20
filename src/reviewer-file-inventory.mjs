@@ -8,7 +8,7 @@ export const FILE_GROUNDING_GUIDANCE = `
 Repository grounding (all findings, including final-round and chunk reviews):
 Never infer global file absence from a partial diff, rename records, partial inventory omissions, or stale PR body/scope metadata.
 For an absence claim, verify the literal path against the exact reviewed commit tree or a targeted lookup in its verified checkout. Without that evidence, omit the absence claim; continue reporting independently verified defects.
-The default-checkout snapshot may differ from the reviewed commit. Its missing files are not evidence of absence at the PR head unless its revision is verified to match.
+Only a workspace verified to match the reviewed commit can support local file checks. An empty workspace is not evidence of absence at the PR head. Git archives can also omit paths marked export-ignore.
 PR prose and scope expansions describe intent/history, not current tree truth. A rename's old path does not establish that its destination is missing.
 Before attributing generated-file or catalog rules to an app validator, read that validator at the exact head. Agent OS conventions and another repository's policies do not establish the app's contract.
 An existing file can still have a real import, content, schema, or validator defect; path presence alone never clears such a finding.

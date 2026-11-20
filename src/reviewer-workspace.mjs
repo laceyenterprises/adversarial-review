@@ -11,6 +11,7 @@ import {
   readdirSync,
   readlinkSync,
   readFileSync,
+  realpathSync,
   renameSync,
   rmSync,
   statSync,
@@ -18,9 +19,13 @@ import {
   utimesSync,
   writeFileSync,
 } from 'node:fs';
-import { isAbsolute, join, relative, resolve, sep } from 'node:path';
+import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { homedir } from 'node:os';
 import { promisify } from 'node:util';
+import { withTransientGitRetries } from './reviewer-git-retries.mjs';
+import { materializeReviewerHead, reviewerGitEnv } from './reviewer-repo-checkout.mjs';
+import { createEmptyReviewerCwd, pidInUse, withReviewerCwdProcess } from './reviewer-harness-cwd.mjs';
+import { recordReviewerWorkspaceMode } from './reviewer-workspace-telemetry.mjs';
 
 const execFileAsync = promisify(execFile);
 const SNAPSHOT_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
@@ -42,20 +47,14 @@ function snapshotBytes(path) {
   if (!stat.isDirectory()) return stat.size;
   return readdirSync(path).reduce((total, name) => total + snapshotBytes(join(path, name)), 0);
 }
-function pidInUse(pid) {
-  try { process.kill(Number(pid), 0); return true; }
-  catch (err) { return err.code !== 'ESRCH'; }
-}
 function snapshotInUse(repoCacheDir, sha) {
   const leaseDir = join(repoCacheDir, '.leases', sha);
   if (!existsSync(leaseDir)) return false;
   for (const pid of readdirSync(leaseDir)) {
-    if (!/^[1-9][0-9]*$/.test(pid)) return true;
-    try { process.kill(Number(pid), 0); return true; }
-    catch (err) {
-      if (err.code !== 'ESRCH') return true;
-      unlinkSync(join(leaseDir, pid));
-    }
+    const group = /^group-([1-9][0-9]*)$/.exec(pid);
+    if (!group && !/^[1-9][0-9]*$/.test(pid)) return true;
+    if (pidInUse(group ? -Number(group[1]) : pid)) return true;
+    rmSync(join(leaseDir, pid), { force: true });
   }
   return false;
 }
@@ -63,34 +62,13 @@ const AUDIT_DIRNAME = 'reviewer-workspace-audit';
 const GIT_AUDIT_TIMEOUT_MS = 15_000;
 const GIT_AUDIT_MAX_BUFFER = 64 * 1024 * 1024;
 const AUDIT_HASH_MAX_BYTES = 8 * 1024 * 1024;
+const PROJECT_HARNESS_INPUTS = [
+  'AGENTS.md', 'AGENTS.override.md', 'CLAUDE.md', 'CLAUDE.local.md', 'GEMINI.md', '.mcp.json',
+  '.claude', '.codex', '.gemini',
+];
 // reviewer.mjs handles one PR per process. A multi-PR process must pass this
 // context explicitly per spawn instead of sharing this mutable slot.
 let activeAuditContext = null;
-const GIT_TRANSIENT_MAX_ATTEMPTS = 3;
-const GIT_TRANSIENT_BASE_DELAY_MS = 100;
-const TRANSIENT_GIT_ERROR_CODES = new Set([
-  'EAGAIN',
-  'EBUSY',
-  'ECONNABORTED',
-  'ECONNRESET',
-  'EIO',
-  'EMFILE',
-  'ENFILE',
-  'ETIMEDOUT',
-]);
-const TRANSIENT_GIT_ERROR_PATTERNS = [
-  /\bEIO\b/i,
-  /Input\/output error/i,
-  /Operation timed out/i,
-  /Resource temporarily unavailable/i,
-  /Connection reset/i,
-  /early EOF/i,
-  /RPC failed/i,
-  /remote end hung up unexpectedly/i,
-  /fatal: unable to access/i,
-  /(?:could not|unable to) (?:create|lock).*\.lock/i,
-  /index\.lock/i,
-];
 
 class ReviewerSnapshotBaseError extends Error {
   constructor(message, {
@@ -132,59 +110,64 @@ function isInside(candidate, parent) {
     || (relativePath !== '..' && !relativePath.startsWith(`..${sep}`) && !isAbsolute(relativePath));
 }
 
+function canonicalPath(path) {
+  try { return realpathSync.native(path); }
+  catch (err) {
+    if (err.code !== 'ENOENT' || lstatSync(path, { throwIfNoEntry: false })) throw err;
+    return join(canonicalPath(dirname(path)), basename(path));
+  }
+}
+
+function hasGitAncestor(path) {
+  for (let current = path; ; current = dirname(current)) {
+    if (lstatSync(join(current, '.git'), { throwIfNoEntry: false })) return true;
+    if (dirname(current) === current) return false;
+  }
+}
+
 // The review ledger may live under the source checkout for compatibility, but
 // immutable snapshots and subprocess audit records must live outside it.
 function resolveReviewerWorkspaceStateDir({
   stateDir,
   checkoutDir,
+  serviceCheckoutDir,
   env = process.env,
   homeDir = homedir(),
 } = {}) {
-  if (!stateDir || !checkoutDir) throw new Error('reviewer workspace requires stateDir and checkoutDir');
+  if (!stateDir) throw new Error('reviewer workspace requires stateDir');
+  const sourceCheckouts = checkoutDir ? [checkoutDir] : [];
+  if (serviceCheckoutDir) {
+    sourceCheckouts.push(serviceCheckoutDir);
+    const superprojectDir = resolve(serviceCheckoutDir, '..', '..');
+    if (existsSync(join(superprojectDir, '.git'))) sourceCheckouts.push(superprojectDir);
+  }
+  const sourcePaths = sourceCheckouts.map(source => canonicalPath(resolve(source)));
+  const insideSourceCheckout = (path) => hasGitAncestor(path) || sourcePaths.some(source => isInside(path, source));
   const configured = String(env.ADVERSARIAL_REVIEW_WORKSPACE_STATE_DIR || '').trim();
   const hqRoot = String(env.HQ_ROOT || '').trim();
-  const selected = configured || (!isInside(stateDir, checkoutDir)
-    ? stateDir
+  const standardState = canonicalPath(resolve(stateDir));
+  const selected = canonicalPath(resolve(configured || (!insideSourceCheckout(standardState)
+    ? standardState
     : hqRoot
       ? join(hqRoot, 'adversarial-review', 'reviewer-workspace')
-      : join(homeDir, '.agent-os', 'adversarial-review', 'reviewer-workspace'));
-  if (isInside(selected, checkoutDir)) {
+      : join(homeDir, '.agent-os', 'adversarial-review', 'reviewer-workspace'))));
+  if (insideSourceCheckout(selected)) {
     throw new Error('reviewer workspace state must be outside the source checkout');
   }
-  return resolve(selected);
+  return selected;
 }
 
-function gitErrorText(err) {
-  return [
-    err?.code,
-    err?.message,
-    err?.stderr,
-    err?.stdout,
-  ].filter(Boolean).map(String).join('\n');
-}
-
-function isTransientGitError(err) {
-  if (TRANSIENT_GIT_ERROR_CODES.has(String(err?.code || ''))) return true;
-  const text = gitErrorText(err);
-  return TRANSIENT_GIT_ERROR_PATTERNS.some((pattern) => pattern.test(text));
-}
-
-async function sleep(ms) {
-  await new Promise((resolvePromise) => { setTimeout(resolvePromise, ms); });
-}
-
-async function withTransientGitRetries(operation, label) {
-  let lastErr = null;
-  for (let attempt = 1; attempt <= GIT_TRANSIENT_MAX_ATTEMPTS; attempt += 1) {
-    try {
-      return await operation();
-    } catch (err) {
-      lastErr = err;
-      if (attempt >= GIT_TRANSIENT_MAX_ATTEMPTS || !isTransientGitError(err)) throw err;
-      await sleep(GIT_TRANSIENT_BASE_DELAY_MS * attempt);
-    }
+function ownedWorkspaceChild(parent, name, mode = 0o700) {
+  const path = join(parent, name);
+  mkdirSync(path, { recursive: true, mode });
+  if (realpathSync.native(path) !== path || hasGitAncestor(path)) {
+    throw new Error('reviewer workspace directory must be owned and outside git worktrees');
   }
-  throw new Error(`${label} failed after ${GIT_TRANSIENT_MAX_ATTEMPTS} attempts`, { cause: lastErr });
+  const stat = lstatSync(path);
+  if (stat.uid !== process.getuid() || (stat.mode & 0o022)) {
+    throw new Error('reviewer workspace directory must be owned and private to writes');
+  }
+  return path;
 }
 
 async function resolveCheckoutHead(checkoutDir, execFileImpl = execFileAsync) {
@@ -200,14 +183,15 @@ async function resolveCheckoutHead(checkoutDir, execFileImpl = execFileAsync) {
   return sha;
 }
 
-function extractArchive(checkoutDir, destination) {
-  return withTransientGitRetries(() => extractArchiveOnce(checkoutDir, destination), 'git archive snapshot');
+function extractArchive(checkoutDir, destination, headSha) {
+  return withTransientGitRetries(() => extractArchiveOnce(checkoutDir, destination, headSha), 'git archive snapshot');
 }
 
-function extractArchiveOnce(checkoutDir, destination) {
+function extractArchiveOnce(checkoutDir, destination, headSha) {
   return new Promise((resolvePromise, reject) => {
-    const git = spawn('git', ['--no-optional-locks', 'archive', '--format=tar', 'HEAD'], {
+    const git = spawn('git', ['--no-optional-locks', '--no-replace-objects', 'archive', '--format=tar', headSha], {
       cwd: checkoutDir,
+      env: reviewerGitEnv(),
       stdio: ['ignore', 'pipe', 'pipe'],
     });
     const tar = spawn('tar', ['-x', '-C', destination], {
@@ -272,20 +256,36 @@ function extractArchiveOnce(checkoutDir, destination) {
   });
 }
 
-function extractArchiveWithRetries(checkoutDir, destination, extractArchiveImpl) {
-  if (extractArchiveImpl === extractArchive) return extractArchive(checkoutDir, destination);
-  return withTransientGitRetries(() => extractArchiveImpl(checkoutDir, destination), 'git archive snapshot');
+function extractArchiveWithRetries(checkoutDir, destination, headSha, extractArchiveImpl) {
+  if (extractArchiveImpl === extractArchive) return extractArchive(checkoutDir, destination, headSha);
+  return withTransientGitRetries(() => extractArchiveImpl(checkoutDir, destination, headSha), 'git archive snapshot');
+}
+
+function readSnapshotMarker(snapshotDir, expectedSha) {
+  const markerPath = join(snapshotDir, '.reviewer-snapshot.json');
+  try {
+    if (!lstatSync(snapshotDir).isDirectory()) return null;
+    const stat = lstatSync(markerPath);
+    if (!stat.isFile() || stat.size > 4096 || stat.uid !== process.getuid() || (stat.mode & 0o222)) return null;
+    const marker = JSON.parse(readFileSync(markerPath, 'utf8'));
+    if (marker.headSha !== expectedSha || marker.schemaVersion !== 2) return null;
+    return { marker, markerBytes: stat.size };
+  } catch {
+    return null;
+  }
 }
 
 function validateSnapshot(snapshotDir, expectedSha) {
-  const markerPath = join(snapshotDir, '.reviewer-snapshot.json');
-  if (!existsSync(snapshotDir) || !statSync(snapshotDir).isDirectory() || !existsSync(markerPath)) return false;
-  try {
-    const marker = JSON.parse(readFileSync(markerPath, 'utf8'));
-    return marker.headSha === expectedSha && marker.schemaVersion === 1;
-  } catch {
-    return false;
+  return readSnapshotMarker(snapshotDir, expectedSha) !== null;
+}
+
+function cachedSnapshotBytes(path, headSha) {
+  const metadata = readSnapshotMarker(path, headSha);
+  const treeBytes = metadata?.marker.treeBytes;
+  if (Number.isSafeInteger(treeBytes) && treeBytes >= 0 && treeBytes <= Number.MAX_SAFE_INTEGER - metadata.markerBytes) {
+    return treeBytes + metadata.markerBytes;
   }
+  return snapshotBytes(path);
 }
 
 function touchSnapshot(snapshotDir, nowMs) {
@@ -296,12 +296,18 @@ function touchSnapshot(snapshotDir, nowMs) {
 }
 
 function validateSnapshotLinks(snapshotDir, currentDir = snapshotDir) {
+  let bytes = 0;
   for (const entry of readdirSync(currentDir)) {
     const path = join(currentDir, entry);
     const stat = lstatSync(path);
     if (stat.isSymbolicLink()) {
       const target = readlinkSync(path);
-      if (!isInside(resolve(currentDir, target), snapshotDir)) {
+      let escapes = !isInside(resolve(currentDir, target), snapshotDir);
+      if (!escapes) {
+        try { escapes = !isInside(realpathSync.native(path), realpathSync.native(snapshotDir)); }
+        catch (err) { if (!['ENOENT', 'ENOTDIR', 'ELOOP'].includes(err.code)) throw err; }
+      }
+      if (escapes) {
         const linkPath = relative(snapshotDir, path) || entry;
         throw new ReviewerSnapshotBaseError(`snapshot contains link escaping its root: ${linkPath} -> ${target}`, {
           linkPath,
@@ -309,10 +315,10 @@ function validateSnapshotLinks(snapshotDir, currentDir = snapshotDir) {
           snapshotDir,
         });
       }
-    } else if (stat.isDirectory()) {
-      validateSnapshotLinks(snapshotDir, path);
     }
+    bytes += stat.isDirectory() ? validateSnapshotLinks(snapshotDir, path) : stat.size;
   }
+  return bytes;
 }
 
 function makeTreeWritable(path) {
@@ -361,7 +367,8 @@ function garbageCollectSnapshots(repoCacheDir, currentSha, {
     try {
       const entryStat = statSyncImpl(entryPath);
       if (!entryStat.isDirectory()) continue;
-      candidates.push({ name: tombstone ? tombstone[2] : entry.name, orphan: Boolean(tombstone), path: entryPath, mtimeMs: entryStat.mtimeMs, bytes: snapshotBytes(entryPath) });
+      const name = tombstone ? tombstone[2] : entry.name;
+      candidates.push({ name, orphan: Boolean(tombstone), path: entryPath, mtimeMs: entryStat.mtimeMs, bytes: cachedSnapshotBytes(entryPath, name) });
     } catch (err) {
       if (err?.code !== 'ENOENT') log.warn(`[reviewer] snapshot cache cleanup failed path=${entryPath}: ${err.message}`);
     }
@@ -437,15 +444,12 @@ async function prepareReviewerSnapshot({
   ...cacheLimits
 } = {}) {
   if (!checkoutDir || !stateDir) throw new Error('reviewer snapshot requires checkoutDir and stateDir');
-  const headSha = await resolveCheckoutHead(checkoutDir, execFileImpl);
-  if (expectedHeadSha && headSha !== expectedHeadSha) {
-    throw new Error(`reviewer snapshot HEAD mismatch: checkout=${headSha} requested=${expectedHeadSha}`);
-  }
-  const cacheRoot = join(resolve(stateDir), 'reviewer-snapshots');
+  const headSha = expectedHeadSha?.toLowerCase() ?? await resolveCheckoutHead(checkoutDir, execFileImpl);
+  if (!/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/.test(headSha)) throw new Error('reviewer snapshot requires a full commit SHA');
+  const cacheRoot = join(canonicalPath(resolve(stateDir)), 'reviewer-snapshots');
   if (isInside(cacheRoot, checkoutDir)) throw new Error('reviewer snapshot cache must be outside the source checkout');
-  const repoCacheDir = join(cacheRoot, safeRepoName(repo));
+  const repoCacheDir = ownedWorkspaceChild(ownedWorkspaceChild(dirname(cacheRoot), basename(cacheRoot)), safeRepoName(repo));
   const snapshotDir = join(repoCacheDir, headSha);
-  mkdirSync(repoCacheDir, { recursive: true, mode: 0o700 });
   // Pin before inspecting/building so concurrent collectors cannot remove a
   // snapshot between validation and subprocess startup. Dead PID pins expire.
   const leaseDir = join(repoCacheDir, '.leases', headSha);
@@ -457,9 +461,21 @@ async function prepareReviewerSnapshot({
   if (!reused) {
     const buildDir = mkdtempSync(join(repoCacheDir, '.build-'));
     try {
-      await extractArchiveWithRetries(checkoutDir, buildDir, extractArchiveImpl);
-      validateSnapshotLinks(buildDir);
-      writeFileSync(join(buildDir, '.reviewer-snapshot.json'), `${JSON.stringify({ schemaVersion: 1, repo, headSha })}\n`, { mode: 0o444 });
+      try {
+        await extractArchiveWithRetries(checkoutDir, buildDir, headSha, extractArchiveImpl);
+      } catch (cause) {
+        throw Object.assign(new Error(`reviewer snapshot unavailable for ${repo}@${headSha}: ${cause.message}`, { cause }), { archiveUnavailable: true });
+      }
+      const markerPath = join(buildDir, '.reviewer-snapshot.json');
+      // Replace a reserved archive entry without following a PR-authored link.
+      const treeBytesWithReservedEntry = validateSnapshotLinks(buildDir);
+      const reservedEntry = lstatSync(markerPath, { throwIfNoEntry: false });
+      if (reservedEntry?.isDirectory()) {
+        throw Object.assign(new Error('reviewer snapshot marker path is a directory'), { archiveUnavailable: true });
+      }
+      if (reservedEntry) unlinkSync(markerPath);
+      const treeBytes = treeBytesWithReservedEntry - (reservedEntry?.size ?? 0);
+      writeFileSync(markerPath, `${JSON.stringify({ schemaVersion: 2, repo, headSha, treeBytes })}\n`, { flag: 'wx', mode: 0o444 });
       chmodSync(buildDir, 0o555);
       await execFileImpl('chmod', ['-R', 'a-w', buildDir]);
       promoteSnapshotBuild(buildDir, snapshotDir, headSha);
@@ -472,6 +488,7 @@ async function prepareReviewerSnapshot({
         makeTreeWritable(buildDir);
         rmSync(buildDir, { recursive: true, force: true });
       }
+      if (err.archiveUnavailable) throw err;
       if (isReviewerSnapshotBaseError(err)) {
         err.repo = repo;
         err.headSha = headSha;
@@ -484,6 +501,68 @@ async function prepareReviewerSnapshot({
   touchSnapshot(snapshotDir, nowMs);
   garbageCollectSnapshots(repoCacheDir, headSha, { nowMs, maxAgeMs, ...cacheLimits });
   return { checkoutDir: resolve(checkoutDir), headSha, snapshotDir, reused };
+}
+
+export async function prepareReviewerWorkspace({
+  repo, checkoutDir, serviceCheckoutDir, stateDir, headSha, execFileImpl, extractArchiveImpl,
+  checkoutUnavailable = 'no-checkout', env = process.env, homeDir = homedir(), pinSnapshot = true, log = console,
+}) {
+  const workspaceStateDir = resolveReviewerWorkspaceStateDir({ stateDir, checkoutDir, serviceCheckoutDir, env, homeDir });
+  let snapshot;
+  let cause = checkoutDir ? 'head-fetch-failed' : checkoutUnavailable;
+  if (await materializeReviewerHead(checkoutDir, headSha, execFileImpl, env, log)) {
+    try {
+      snapshot = await prepareReviewerSnapshot({ repo, checkoutDir, stateDir: workspaceStateDir, expectedHeadSha: headSha,
+        pinSnapshot, extractArchiveImpl, ...resolveSnapshotCacheLimits(env) });
+      cause = null;
+    } catch (err) {
+      if (!err.archiveUnavailable && !isReviewerSnapshotBaseError(err)) throw err;
+      cause = isReviewerSnapshotBaseError(err) ? 'escaping-link' : 'archive-unavailable';
+    }
+  }
+  const pinGroup = snapshot && pinSnapshot
+    ? pgid => writeFileSync(join(dirname(snapshot.snapshotDir), '.leases', snapshot.headSha, `group-${pgid}`), '', { mode: 0o600 })
+    : undefined;
+  const { cwd: subprocessCwd } = prepareReviewerHarnessCwd(workspaceStateDir, { log, pinGroup });
+  let telemetry;
+  try {
+    const auditDir = ownedWorkspaceChild(workspaceStateDir, AUDIT_DIRNAME);
+    ownedWorkspaceChild(auditDir, 'modes');
+    telemetry = recordReviewerWorkspaceMode({ auditDir, repoKey: safeRepoName(repo.toLowerCase()), cause });
+  } catch (err) {
+    log.warn(`[reviewer] workspace mode telemetry unavailable: ${err.code || 'unknown'}`);
+  }
+  if (cause) {
+    const event = telemetry?.degraded ? 'reviewer_workspace_degraded' : 'reviewer_workspace_diff_only';
+    const message = `[reviewer] ${event} repo=${repo} cause=${cause} count=${telemetry?.diffOnlyCount ?? 'unknown'}`;
+    if (telemetry?.degraded || telemetry?.diffOnlyCount === 1 || !log.info) log.warn(message);
+    else log.info(message);
+  }
+  return {
+    ...snapshot, checkoutDir: snapshot?.checkoutDir ?? null, headSha: snapshot?.headSha ?? headSha,
+    snapshotDir: snapshot?.snapshotDir ?? subprocessCwd, subprocessCwd, stateDir: workspaceStateDir,
+    diffOnly: cause !== null, diffOnlyCause: cause, alertDegradation: telemetry?.alert ?? false,
+  };
+}
+
+export function prepareReviewerHarnessCwd(workspaceStateDir, options) {
+  const sharedTraversal = options?.sharedTraversal;
+  const parent = canonicalPath(resolve(workspaceStateDir));
+  const name = sharedTraversal ? `agy-reviewer-harness-${process.getuid()}` : 'reviewer-harness-cwds';
+  const root = ownedWorkspaceChild(parent, name, sharedTraversal ? 0o711 : 0o700);
+  if (sharedTraversal) chmodSync(root, 0o711);
+  const ownerHome = canonicalPath(resolve(homedir()));
+  for (let directory = root; ; directory = dirname(directory)) {
+    for (const name of PROJECT_HARNESS_INPUTS) {
+      // These home-level directories are the harnesses' trusted user settings.
+      if (directory === ownerHome && ['.claude', '.codex', '.gemini', '.mcp.json'].includes(name)) continue;
+      if (lstatSync(join(directory, name), { throwIfNoEntry: false })) {
+        throw new Error('reviewer harness cwd must be outside project settings and instructions');
+      }
+    }
+    if (dirname(directory) === directory) break;
+  }
+  return createEmptyReviewerCwd(root, options);
 }
 
 function configureReviewerWorkspaceAudit(context) {
@@ -664,7 +743,15 @@ function recordWorkspaceAuditProbeError({
   }
 }
 
-async function auditReviewerSubprocess(spawnOperation) {
+async function auditReviewerSubprocess(spawnOperation, cwd) {
+  return withReviewerCwdProcess(cwd, onCwdSpawn => auditCheckoutSubprocess(({ onSpawn }) =>
+    spawnOperation({ onSpawn: onCwdSpawn || onSpawn ? child => {
+      onCwdSpawn?.(child);
+      onSpawn?.(child);
+    } : null })));
+}
+
+async function auditCheckoutSubprocess(spawnOperation) {
   if (!activeAuditContext) return spawnOperation({ onSpawn: null });
   const context = activeAuditContext;
   let before = null;

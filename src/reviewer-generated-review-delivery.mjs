@@ -48,6 +48,7 @@ const REUSABLE_STATES = new Set(['pending-delivery', 'deferred']);
 const BINDING_FIELDS = Object.freeze([
   'repo', 'prNumber', 'headSha', 'passKind', 'reviewerModel', 'botTokenEnv',
   'reviewAttemptNumber', 'promptStage', 'verdictOnly', 'diffSha256',
+  'diffOnly',
 ]);
 
 function sha256(text) {
@@ -120,6 +121,7 @@ function createGeneratedReviewDelivery({
   promptStage,
   verdictOnly = false,
   diff,
+  diffOnly = false,
   sessionUuid = null,
   reviewDbAttemptNumber = null,
   env = process.env,
@@ -145,6 +147,7 @@ function createGeneratedReviewDelivery({
     promptStage: String(promptStage || ''),
     verdictOnly: verdictOnly === true,
     diffSha256: sha256(diff),
+    diffOnly,
   } : null;
   const dir = generatedReviewDir(rootDir);
   let activeRecordPath = null;

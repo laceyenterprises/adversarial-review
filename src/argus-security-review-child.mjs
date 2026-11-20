@@ -19,6 +19,8 @@ import { ARGUS_REVIEW_OUTCOME_PREFIX } from './argus-security-drain.mjs';
 import { readArgusJob } from './argus-security-queue.mjs';
 import { reviewArgusJob } from './argus-security-review.mjs';
 import { createDefaultArgusReviewDeps } from './argus-security-review-deps.mjs';
+import { resolveAdversarialReviewStateDir } from './reviewer-fence.mjs';
+import { prepareReviewerHarnessCwd, resolveReviewerWorkspaceStateDir } from './reviewer-workspace.mjs';
 
 // Everything but the outcome line goes to stderr, so the harness's own logging
 // cannot be mistaken for it.
@@ -46,15 +48,24 @@ async function main() {
   const workDir = join(rootDir, 'data', 'argus-security-work', job.jobId);
   rmSync(workDir, { recursive: true, force: true });
   mkdirSync(workDir, { recursive: true });
-  // The reviewer runs in this isolated scratch dir, never in a live checkout:
-  // the harness runs models with approvals bypassed. `codex exec` refuses to
-  // run outside a git repository, so the scratch dir is made one.
+  // Keep local Git evidence probes in a distinct scratch repository.
   spawnSync('git', ['init', '-q', workDir], { stdio: 'ignore', timeout: loadAwareTimeoutMs(30_000) });
+  let harnessWorkspace;
+  const getHarnessWorkspace = () => {
+    if (!harnessWorkspace) {
+      const stateDir = resolveReviewerWorkspaceStateDir({
+        stateDir: resolveAdversarialReviewStateDir(rootDir, process.env), serviceCheckoutDir: rootDir,
+      });
+      harnessWorkspace = { ...prepareReviewerHarnessCwd(stateDir, { log: logger }), stateDir };
+    }
+    return harnessWorkspace;
+  };
   try {
     emit(await reviewArgusJob({
       job,
       deps: createDefaultArgusReviewDeps({
         rootDir, env: process.env, logger,
+        getHarnessWorkspace,
         agyLease: argValue('--agy-lease') === null ? undefined : JSON.parse(argValue('--agy-lease')),
         geminiResetAt: argValue('--gemini-reset-at') || null,
       }),
@@ -62,6 +73,7 @@ async function main() {
       logger,
     }));
   } finally {
+    harnessWorkspace?.release();
     rmSync(workDir, { recursive: true, force: true });
   }
 }

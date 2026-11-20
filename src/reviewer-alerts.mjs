@@ -77,7 +77,7 @@ async function alertClioOversizedAgyFailure({
 async function alertReviewerSnapshotBaseFailure({ repo, prNumber, headSha, linkPath, reason }, {
   deliverAlertImpl = deliverAlert,
 } = {}) {
-  const msg = `Adversarial reviewer stopped: the default checkout snapshot is unsafe.\n\nRepo: ${repo} PR #${prNumber}\nCheckout HEAD: ${headSha || 'unknown'}\nLink: ${linkPath || 'unknown'}\nReason: ${reason}\n\nRepair the base checkout; this is not a PR-authored finding.`;
+  const msg = `Adversarial reviewer stopped: the workspace snapshot is unsafe.\n\nRepo: ${repo} PR #${prNumber}\nSnapshot commit: ${headSha || 'unknown'}\nLink: ${linkPath || 'unknown'}\nReason: ${reason}\n\nInspect the link in the snapshot commit before retriggering review.`;
   console.error(`[reviewer] ALERT: ${msg}`);
   try {
     return await deliverAlertImpl(msg, {
@@ -90,8 +90,23 @@ async function alertReviewerSnapshotBaseFailure({ repo, prNumber, headSha, linkP
   }
 }
 
+async function alertReviewerWorkspaceDegradation({ repo, prNumber, headSha, cause }, {
+  deliverAlertImpl = deliverAlert,
+} = {}) {
+  try {
+    return await deliverAlertImpl(
+      `Adversarial reviewer workspace degraded to diff-only for ${repo}.\nPR #${prNumber} at ${headSha}\nCause: ${cause}`,
+      { event: 'reviewer.workspace_degraded', payload: { repo, prNumber, headSha, cause } },
+    );
+  } catch (err) {
+    console.warn(`[reviewer] failed to queue workspace degradation alert: ${err.code || 'unknown'}`);
+    return null;
+  }
+}
+
 export {
   alertClioOAuthFailure,
   alertClioOversizedAgyFailure,
   alertReviewerSnapshotBaseFailure,
+  alertReviewerWorkspaceDegradation,
 };

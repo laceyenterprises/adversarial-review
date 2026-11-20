@@ -751,9 +751,10 @@ test('CCX-08: a transient extract failure is retried with backoff; a permanent o
   const runOnce = async (outcomes) => {
     const calls = { extract: 0, cleanup: [], sleeps: [] };
     const run = { user: REVIEWER_A, reviewId: 'agy-retry', cwd: null, workspaceDir: null };
+    const cwdParent = mkdtempSync(join(tmpdir(), 'agy-retry-cwd-'));
     const outcome = await prepareAgyIdentityReview(run, {
       sourceDir: '/tmp',
-      cwdParent: '/tmp',
+      cwdParent,
       extractImpl: async () => {
         const next = outcomes[calls.extract++];
         if (next instanceof Error) throw next;
@@ -763,7 +764,8 @@ test('CCX-08: a transient extract failure is retried with backoff; a permanent o
       sleepImpl: async (ms) => { calls.sleeps.push(ms); },
       log: quiet,
     }).then(() => 'ok', (err) => err);
-    rmSync(run.cwd, { recursive: true, force: true });
+    run.releaseCwd?.();
+    rmSync(cwdParent, { recursive: true, force: true });
     return { outcome, run, calls };
   };
 
@@ -2046,13 +2048,17 @@ test('CCX-08: tar resource errors remain transient even when the helper reports 
 test('CCX-08: failed cleanup stops extract retries before another snapshot is staged', async () => {
   let extracts = 0;
   const run = { user: REVIEWER_A, reviewId: 'agy-cleanup-retry' };
+  const cwdParent = mkdtempSync(join(tmpdir(), 'agy-failed-cleanup-cwd-'));
   try {
-    await assert.rejects(prepareAgyIdentityReview(run, { cwdParent: tmpdir(), retryDelaysMs: [0],
+    await assert.rejects(prepareAgyIdentityReview(run, { cwdParent, retryDelaysMs: [0],
       extractImpl: async () => { extracts++; throw Object.assign(new Error('temporary extract'), { transient: true }); },
       cleanupImpl: async () => ({ ok: false }), log: quietLog(),
     }), (err) => err.transient === true && /cleanup failed/.test(err.message));
     assert.equal(extracts, 1);
-  } finally { if (run.cwd) rmSync(run.cwd, { recursive: true, force: true }); }
+  } finally {
+    run.releaseCwd?.();
+    rmSync(cwdParent, { recursive: true, force: true });
+  }
 });
 
 test('CCX-08: cleanup failure drains the identity until a later readiness pass removes its scratch', async () => {

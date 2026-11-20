@@ -37,7 +37,7 @@ import { resolveHqRoot } from './hq-root.mjs';
 
 import { spawn } from 'node:child_process';
 import { createHash, randomUUID } from 'node:crypto';
-import { chmodSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { readFileSync } from 'node:fs';
 import { homedir, userInfo } from 'node:os';
 import { basename, dirname, isAbsolute, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -55,6 +55,7 @@ import { warnPoolConfigConflict } from './pool-config-conflict.mjs';
 import { readIdentityTokenPools } from './identity-token-snapshot.mjs';
 import { createAgyHolderLeaseStore, agyLeaseOwnerAlive } from './agy-holder-leases.mjs';
 import { resolveAdversarialReviewStateDir } from './reviewer-fence.mjs';
+import { prepareReviewerHarnessCwd } from './reviewer-workspace.mjs';
 import { scrubOAuthFallbackEnv } from './secret-source/env.mjs';
 
 // Fixed install path of the pinned commands (CCX-07 setup-reviewer-os-user.sh).
@@ -574,8 +575,9 @@ async function prepareAgyIdentityReview(run, {
   sleepImpl = (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
   log = console,
 } = {}) {
-  run.cwd = mkdtempSync(join(cwdParent, 'agy-review-cwd-'));
-  chmodSync(run.cwd, 0o755);
+  const launcher = prepareReviewerHarnessCwd(cwdParent, { log, sharedTraversal: true });
+  run.cwd = launcher.cwd;
+  run.releaseCwd = launcher.release;
   for (let attempt = 0; ; attempt += 1) {
     try {
       const workspace = await extractImpl({ user: run.user, reviewId: run.reviewId, sourceDir });
@@ -605,11 +607,9 @@ async function prepareAgyIdentityReview(run, {
 // running it again (for a child that was SIGKILLed) is harmless.
 async function finishAgyIdentityReview(run, { cleanupImpl = cleanupAgyReviewWorkspace, log = console } = {}) {
   if (!run) return null;
-  const cleanup = await cleanupImpl({ user: run.user, reviewId: run.reviewId, log });
-  if (run.cwd) {
-    try { rmSync(run.cwd, { recursive: true, force: true }); } catch { /* best effort */ }
-  }
-  return cleanup;
+  try {
+    return await cleanupImpl({ user: run.user, reviewId: run.reviewId, log });
+  } finally { run.releaseCwd?.(); }
 }
 
 // ── Watcher-side identity pool ──────────────────────────────────────────────

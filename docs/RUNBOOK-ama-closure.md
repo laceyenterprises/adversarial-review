@@ -5624,7 +5624,14 @@ for identities, ownership and retention.
 History classification reads every paginated commit before deciding whether a
 hammer exists. Author-only and history-only classification skips file reconstruction;
 a hammer preservation decision still reconstructs both complete author and final
-snapshots. Immutable commit pages are reused within that reader. For roots with
+snapshots. The search for an original reversal across superseding review heads
+also uses complete paginated commit metadata. It reuses the ordinary immutable
+compare-page checkpoints on resume. A matching message or trailer set only
+identifies a candidate. The verifier still reads the candidate commit's patch
+and the required reviewed and parent snapshots and checks provenance and finding
+coverage before approving a reversal. Missing or inconsistent commit pages
+remain history-read failures.
+For roots with
 directories, HAMHISTORYTHROUGHPUT-02 first requests SHA-addressed recursive trees.
 A complete snapshot must explicitly report `truncated: false`, match the separately
 read root entries, have unique valid paths and ancestors, and reproduce every

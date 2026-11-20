@@ -5,6 +5,7 @@
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { execFileSync } from 'node:child_process';
 import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
@@ -149,7 +150,10 @@ test('the lockfile delta reads #909 the right way round: an install script remov
 
 test('the evidence materialises both trees and runs the rubric over them', () => withRoot(async (workDir) => {
   const { io, calls } = fakeIo();
-  const evidence = await gatherArgusEvidence({ job: routedJob(), pr: PR, diff: '', workDir, rootDir: '/ar', io, logger: quiet });
+  const repo = 'example/dependencies';
+  execFileSync('git', ['init', '-q', workDir]);
+  execFileSync('git', ['-C', workDir, 'remote', 'add', 'origin', `https://github.com/${repo}.git`]);
+  const evidence = await gatherArgusEvidence({ job: routedJob({ repo }), pr: PR, diff: '', workDir, rootDir: workDir, io, logger: quiet });
 
   assert.equal(evidence.fatal, null);
   for (const side of ['base', 'head']) {

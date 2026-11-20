@@ -300,6 +300,13 @@ test('Argus child scratch initialization sizes its Git subprocess without launch
   busyHost(t);
   const { registerHooks } = await import('node:module');
   const rootDir = mkdtempSync(join(os.tmpdir(), 'operational-child-'));
+  const oldWorkspaceState = process.env.ADVERSARIAL_REVIEW_WORKSPACE_STATE_DIR;
+  process.env.ADVERSARIAL_REVIEW_WORKSPACE_STATE_DIR = join(rootDir, 'harness-state');
+  writeFileSync(join(rootDir, '.mcp.json'), '{}');
+  t.after(() => {
+    if (oldWorkspaceState === undefined) delete process.env.ADVERSARIAL_REVIEW_WORKSPACE_STATE_DIR;
+    else process.env.ADVERSARIAL_REVIEW_WORKSPACE_STATE_DIR = oldWorkspaceState;
+  });
   t.after(() => rmSync(rootDir, { recursive: true, force: true }));
   const hooks = registerHooks({ resolve(specifier, context, nextResolve) {
     if (context.parentURL?.includes('/argus-security-review-child.mjs')) {

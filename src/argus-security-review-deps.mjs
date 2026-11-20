@@ -58,6 +58,7 @@ export function createDefaultArgusReviewDeps({
   env = process.env,
   execGhWithRetryImpl = execGhWithRetry,
   logger = console,
+  getHarnessWorkspace,
   resolveReviewerModels = null,
   // Undefined for direct callers; null means the watcher could not lease one.
   agyLease = undefined,
@@ -70,6 +71,7 @@ export function createDefaultArgusReviewDeps({
 } = {}) {
   const identityOptions = () => ({ rootDir, env, pool: identityPool, logger, nowMs: nowMs() });
   let availability = { available: agyLease !== null, resetAt: geminiResetAt };
+  let workspaceStateDir;
   const resolveModels = resolveReviewerModels || createArgusReviewerModelResolver({ env, logger });
   return {
     async fetchPullRequest({ repo, prNumber }) {
@@ -111,11 +113,15 @@ export function createDefaultArgusReviewDeps({
     reviewerDeferral: () => ({ resetAt: availability.resetAt }),
 
     async runReviewerModel({ model, prompt, cwd, diff }) {
-      const options = { promptOverride: prompt, reviewerSubprocessCwd: cwd, ensureWorkerRegistryReadyImpl };
+      const launchOptions = () => {
+        const workspace = getHarnessWorkspace?.();
+        workspaceStateDir = workspace?.stateDir;
+        return { promptOverride: prompt, reviewerSubprocessCwd: workspace?.cwd ?? cwd, ensureWorkerRegistryReadyImpl };
+      };
       let output;
       if (model === 'claude') {
         await ensureWorkerRegistryReadyImpl({env});
-        output = await reviewWithClaude(diff || '', '', options);
+        output = await reviewWithClaude(diff || '', '', launchOptions());
       }
       else if (model === 'gemini') {
         const { lease, resetAt } = agyLease === undefined
@@ -142,7 +148,7 @@ export function createDefaultArgusReviewDeps({
           await ensureWorkerRegistryReadyImpl({env});
           assertNotCooled();
           output = await reviewWithGeminiImpl(diff || '', '', {
-            ...options, agyIdentity: lease.hqOwner ? null : { user: lease.user, reviewId: lease.reviewId },
+            ...launchOptions(), agyIdentity: lease.hqOwner ? null : { user: lease.user, reviewId: lease.reviewId },
           });
         } catch (err) {
           const diagnostic = [err?.message, err?.stderr].filter(Boolean).join('\n');
@@ -165,7 +171,7 @@ export function createDefaultArgusReviewDeps({
       }
       else if (model === 'codex') {
         await ensureWorkerRegistryReadyImpl({env});
-        output = await reviewWithCodex(diff || '', '', options);
+        output = await reviewWithCodex(diff || '', '', launchOptions());
       }
       else throw new Error(`unknown Argus reviewer model ${JSON.stringify(model)}`);
       const text = typeof output === 'string' ? output : output?.reviewText;
@@ -176,7 +182,7 @@ export function createDefaultArgusReviewDeps({
       const identity = resolveArgusCommentIdentity({ model, env });
       if (!identity) return { ok: false, reason: 'no-identity-token' };
       const { stdout } = await execGhWithRetryImpl({
-        args: ['pr', 'comment', String(prNumber), '--repo', repo, '--body', filterGitHubBody(body, { repo, rootDir, env })],
+        args: ['pr', 'comment', String(prNumber), '--repo', repo, '--body', filterGitHubBody(body, { repo, rootDir, env, stateDir: workspaceStateDir })],
         env: { ...env, GITHUB_TOKEN: identity.token, GH_TOKEN: identity.token },
         timeoutMs: loadAwareTimeoutMs(60_000),
         log: logger,

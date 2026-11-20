@@ -822,9 +822,11 @@ test('CLOSERPARKOWNER-02: exhausted closer routes one typed budget escalation', 
   markHammerRetryCapExhausted(args.rootDir, IDENTITY, { jobKey: HEAD, headSha: HEAD, attemptCount: 3 });
   for (let pass = 0; pass < 2; pass++) {
     const result = await recoverOverdueOwnership(parkedDiscovery(args));
-    assert.equal(result?.outcome, 'recovery-exhausted');
-    assert.equal(result.amaClosureResult.dispatched, false);
-    assert.equal(result.amaClosureResult.operatorReason, 'closure-retry-exhausted');
+    assert.equal(result?.outcome ?? null, pass === 0 ? 'recovery-exhausted' : null);
+    if (pass === 0) {
+      assert.equal(result.amaClosureResult.dispatched, false);
+      assert.equal(result.amaClosureResult.operatorReason, 'closure-retry-exhausted');
+    }
   }
   assert.equal(pages.length, 1);
 });
@@ -841,10 +843,37 @@ test('CLOSERPARKOWNER-02: a hard-stop refusal is paged once with a typed reason'
   deleteAmaCloserLease(args.rootDir, IDENTITY);
   for (let pass = 0; pass < 2; pass++) {
     const result = await recoverOverdueOwnership(parkedDiscovery(args));
-    assert.equal(result?.outcome, 'recovery-exhausted', JSON.stringify(result?.amaClosureResult?.nextAction));
-    assert.equal(result.amaClosureResult.operatorReason, 'label-adversarial-merge-blocked');
+    assert.equal(result?.outcome ?? null, pass === 0 ? 'recovery-exhausted' : null,
+      JSON.stringify(result?.amaClosureResult?.nextAction));
+    if (pass === 0) assert.equal(result.amaClosureResult.operatorReason, 'label-adversarial-merge-blocked');
   }
   assert.equal(pages.length, 1);
+});
+
+test('CLOSERPARKOWNER-02: a refused discovery reconciliation is bounded across polls', async t => {
+  let now = DEADLINE_MS + 20 * MINUTE;
+  let reads = 0;
+  let dispatches = 0;
+  const args = closerHeadArgs(t, { now: () => now });
+  const options = parkedDiscovery(args, {
+    fetchCandidateImpl: async () => { reads++; return args.candidate; },
+    dispatchImpl: async () => {
+      dispatches++;
+      return { dispatched: false, needsOperator: true, reason: 'hammer-retry-cap-exhausted' };
+    },
+  });
+  for (let pass = 0; pass < 3; pass++) {
+    const result = await recoverOverdueOwnership(options);
+    assert.equal(result?.outcome ?? null, pass === 0 ? 'recovery-exhausted' : null);
+  }
+  assert.equal(reads, 1);
+  assert.equal(dispatches, 1);
+  now += 5 * MINUTE;
+  assert.equal((await recoverOverdueOwnership(parkedDiscovery({ ...args, now: () => now }, {
+    fetchCandidateImpl: options.fetchCandidateImpl, dispatchImpl: options.dispatchImpl,
+  })))?.outcome, 'recovery-exhausted');
+  assert.equal(reads, 2);
+  assert.equal(dispatches, 2);
 });
 
 test('CLOSERPARKOWNER-02: a suppressed trailer enters the posted queue through slow-lane backoff', async t => {
@@ -864,6 +893,10 @@ test('CLOSERPARKOWNER-02: a suppressed trailer enters the posted queue through s
   const handler = { repoPath: REPO, prNumber: PR, headSha: HEAD };
   assert.equal(gate.evaluate(handler, { recordSkip: false }).run, false);
   assert.equal(gate.evaluate({ ...handler, closerTrailerHead: true }, { recordSkip: false }).run, true);
+  writeFileSync(pathToLane, JSON.stringify({ ...IDENTITY, headSha: HEAD, lane: 'slow',
+    skippedTicks: 0, noProgressTicks: 9, progressClass: 'self-resolving',
+    lastRunAt: new Date().toISOString() }));
+  assert.equal(gate.evaluate({ ...handler, closerTrailerHead: true }, { recordSkip: false }).run, false);
   const result = await maybeDispatchAmaClosureFor(args);
   assert.equal(result.backgroundDispatch?.state, 'queued', JSON.stringify(result.nextAction));
   assert.equal(await observeCloserBacklog({ rootDir: args.rootDir, repo: REPO, prNumber: PR + 1, pending: false }), 1);

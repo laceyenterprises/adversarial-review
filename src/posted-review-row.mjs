@@ -1249,7 +1249,13 @@ export function createNoProgressLaneGate({
           reason: handler.budgetExhaustedCloserOwned ? 'budget-exhausted-closure-owed' : 'final-round-closure-owed', backoffTicks: 0 };
       }
       if (handler.closerTrailerHead === true && decision.reason === 'slow-lane-backoff') {
-        decision = { ...decision, lane: 'active', due: true, reason: 'closer-trailer-closure-owed', backoffTicks: 0 };
+        const lastRunAt = ledger?.lastRunAt !== undefined ? ledger.lastRunAt : ledger?.updatedAt;
+        const elapsedMs = ledger?.headSha === handler.headSha
+          ? Date.parse(observedAt) - Date.parse(lastRunAt ?? '') : NaN;
+        const due = !Number.isFinite(elapsedMs) || elapsedMs >= HAMMER_EVIDENCE_RECHECK_INTERVAL_MS;
+        decision = { ...decision, lane: 'active', due,
+          reason: due ? 'closer-trailer-closure-owed' : 'closer-trailer-closure-wait',
+          backoffTicks: 0, retryAfterMs: due ? 0 : HAMMER_EVIDENCE_RECHECK_INTERVAL_MS - elapsedMs };
       }
       // CIWAITLANE-01: only plain slow-lane backoff yields to a settled CI wait.
       const ciWait = decision.reason === 'slow-lane-backoff' ? evaluateCiWaitAdmission(ledger,

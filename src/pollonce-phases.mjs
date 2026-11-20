@@ -865,8 +865,8 @@ export async function processReviewSubject(entry, ctx) {
             loaded.getMergeAuthorityConfig(), { fallbackSources: loaded.sources || {} });
           const recovered = await recoverOverdueOwnership({
             rootDir: ROOT, repo: repoPath, prNumber, subject, reviewStateRow: existing,
-            domainId: effectiveDomainId, enabled: authority?.enabled && !readWatcherDrainState().active,
-            allowCloserReconciliation: !pendingReviewIntent(),
+            domainId: effectiveDomainId, enabled: authority?.enabled,
+            allowCloserReconciliation: !readWatcherDrainState().active && !pendingReviewIntent(),
             execFileImpl: execFileAsync, logger: console,
           });
           // Pending review recovery and exhausted routes own this pass too;

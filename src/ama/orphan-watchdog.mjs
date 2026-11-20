@@ -24,6 +24,7 @@ import { remediationJobOwnership } from '../remediation-job-ownership.mjs';
 const terminalLaunches = new Map();
 
 export const OWNERLESS_BOUND_MS = 15 * 60 * 1000;
+const CLOSER_RECONCILIATION_INTERVAL_MS = 5 * 60 * 1000;
 export function ownerlessBoundMs(env = process.env) {
   const value = Number(env.OWNERPROOF_IDLE_MINUTES);
   return loadAwareTimeoutMs(Number.isFinite(value) && value > 0 ? value * 60 * 1000 : OWNERLESS_BOUND_MS, { maxMs: Infinity });
@@ -311,6 +312,7 @@ async function recoverOrphanWithStore({ rootDir, repo, prNumber, headSha, candid
     }
     db.exec('CREATE TABLE IF NOT EXISTS ownership (id INTEGER PRIMARY KEY CHECK (id=1), idleSince TEXT)');
     db.exec('CREATE TABLE IF NOT EXISTS transition_pages (head TEXT, transition TEXT, PRIMARY KEY(head,transition))');
+    db.exec('CREATE TABLE IF NOT EXISTS closer_reconciliation (head TEXT PRIMARY KEY, decision TEXT NOT NULL, reconciledAt TEXT NOT NULL)');
     db.prepare('INSERT OR IGNORE INTO ownership(id,idleSince) SELECT 1,MIN(idleSince) FROM heads').run();
     db.prepare('INSERT OR IGNORE INTO heads(head) VALUES (?)').run(headSha);
     const state = db.prepare('SELECT * FROM heads WHERE head=?').get(headSha);
@@ -398,8 +400,18 @@ async function recoverOrphanWithStore({ rootDir, repo, prNumber, headSha, candid
     // proof before reporting that the selected transition has no executor.
     if (overdue && !canDispatch && !held && ownership?.owned === false && !ownership.uncertain
       && !isOrphanRecoveryWait(result) && reconcileCloser) {
+      const decision = JSON.stringify([selected.row, selected.action, selected.actor,
+        selected.reason, selected.queue, selected.deadline]);
+      const receipt = db.prepare('SELECT decision, reconciledAt FROM closer_reconciliation WHERE head=?').get(headSha);
+      const elapsed = Date.parse(now) - Date.parse(receipt?.reconciledAt);
+      if (receipt?.decision === decision && Number.isFinite(elapsed) && elapsed >= 0
+        && elapsed < CLOSER_RECONCILIATION_INTERVAL_MS) return { ...pending, closerReconciled: true, continueWalk: true };
       const closure = await reconcileCloser();
-      if (closure) return { ...closure, closerReconciled: true };
+      if (closure) {
+        db.prepare('INSERT INTO closer_reconciliation(head,decision,reconciledAt) VALUES (?,?,?) ON CONFLICT(head) DO UPDATE SET decision=excluded.decision,reconciledAt=excluded.reconciledAt')
+          .run(headSha, decision, now);
+        return { ...closure, closerReconciled: true };
+      }
     }
     if (overdue && (ownership?.uncertain || !canDispatch || isOrphanRecoveryWait(result))) {
       return await pageTransition(ownership?.uncertain ? 'ownership-proof-unavailable'

@@ -863,6 +863,20 @@ async function maybeDispatchAmaClosureForInner({
     try { amaDispatchCloser.settleRefusedHammerWake({ ...hammerWakeSink.value, result }); }
     catch (error) { options.logger?.warn?.(`[watcher] refused hammer wake reconciliation failed: ${error.message}`); }
   }
+  const hardStop = orphanRecovery?.fromDiscovery && !result?.dispatched && !result?.boundedWait
+    && !result?.needsOperator
+    && [result?.reason, ...(Array.isArray(result?.reasons) ? result.reasons : [])].find(reason =>
+      ['label-adversarial-merge-blocked', 'duplicate-family-unresolved'].includes(reason));
+  if (hardStop) {
+    try {
+      const boundedWait = await (options.observeClosureWaitImpl || observeClosureWait)({
+        rootDir: options.rootDir || ROOT, repo: options.repoPath, prNumber: options.prNumber,
+        headSha: options.candidate?.headSha, now: options.now ? options.now() : Date.now(),
+        env: options.env || process.env, immediate: true, waitClass: 'closer-hard-stop', reason: hardStop,
+      });
+      result = { ...result, boundedWait, needsOperator: true, operatorReason: hardStop };
+    } catch (error) { options.logger?.warn?.(`[watcher] closer hard-stop escalation failed: ${error.message}`); }
+  }
   if (result && closureOwnerSink.shared) {
     const executorShared = readClosureNextAction(result);
     const { nextActionShared, ...publicResult } = result;
@@ -885,21 +899,6 @@ async function maybeDispatchAmaClosureForInner({
       now: options.now ? options.now() : Date.now(), env: options.env || process.env,
       observeWaitImpl: options.observeClosureWaitImpl || observeClosureWait });
   } catch (error) { options.logger?.warn?.(`[watcher] closure-budget escalation observation failed: ${error.message}`); }
-  const hardStop = !result?.dispatched && !result?.boundedWait && !result?.needsOperator
-    && (orphanRecovery?.fromDiscovery || closerAuthoredStaleSink.value?.hammerHead
-      || closerAuthoredStaleSink.value?.closerCommits?.length)
-    && [result?.reason, ...(Array.isArray(result?.reasons) ? result.reasons : [])].find(reason =>
-      ['label-adversarial-merge-blocked', 'duplicate-family-unresolved'].includes(reason));
-  if (hardStop) {
-    try {
-      const boundedWait = await (options.observeClosureWaitImpl || observeClosureWait)({
-        rootDir: options.rootDir || ROOT, repo: options.repoPath, prNumber: options.prNumber,
-        headSha: options.candidate?.headSha, now: options.now ? options.now() : Date.now(),
-        env: options.env || process.env, immediate: true, waitClass: 'closer-hard-stop', reason: hardStop,
-      });
-      result = { ...result, boundedWait, needsOperator: true, operatorReason: hardStop };
-    } catch (error) { options.logger?.warn?.(`[watcher] closer hard-stop escalation failed: ${error.message}`); }
-  }
   // CLOSURERECOVERYEXEC-01: the closer's custody reconciliation did not
   // resolve an R04 decision; its deadline is enforced here, once per pass.
   if (result && closureOwnerSink.shared) {

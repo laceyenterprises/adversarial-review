@@ -2491,9 +2491,15 @@ or remediation round is created.
 CLOSERPARKOWNER-02 reconciles a lapsed closer action on a posted row after the
 watchdog proves custody absent. Discovery uses the dispatch-only rescue entry
 with a live candidate. A closer-trailer suppression also makes the posted row
-due for its closure handler through slow-lane backoff. Live review, remediation
+due for its closure handler through slow-lane backoff at the evidence recheck
+cadence. Live review, remediation
 and closer custody, operator holds, and existing eligibility remain authoritative.
 Refused budgets and hard-stop labels use the durable closure-wait escalation.
+The watchdog receipts discovery reconciliation by head and selected decision,
+then permits a repeat after five minutes. Matching interim passes continue to
+the posted-review handler. Active drain defers closer reconciliation while the
+deadline page remains active. Discovery hard stops are observed before the
+shared next-action result is recorded.
 
 HAMATTEST-03 executes an admitted head-bound review decision before coexistence returns a
 bounded closure wait, including a consumed background `not-eligible` outcome.

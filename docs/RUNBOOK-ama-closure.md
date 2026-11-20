@@ -2371,7 +2371,7 @@ rescue dispatch-only entry from discovery. The entry reads the current head,
 checks for live holds, and runs ordinary closer admission. An explicit review,
 remediation, or daemon decision continues through its ordinary handler. A
 closer-trailer head can pass slow-lane backoff through the posted-review
-closure handler. Admitted background work counts toward `ama.closer_queue_depth`
+closure handler at the evidence recheck cadence. Admitted background work counts toward `ama.closer_queue_depth`
 while waiting for a launch slot. Budget and hard-stop refusals use the existing
 closure-wait escalation receipts.
 
@@ -9335,6 +9335,13 @@ handler and the closer run on the same pass. Read-only symptom of the old behavi
 watchdog `transition_pages` row for `R04-ownership`/`closure-recovery`/`ownership-unreadable`,
 a lane record whose `lastRunAt` never advances, and no watcher log line for the PR.
 Exhausted executable routes still stop at `recovery-exhausted` with their single page.
+For a lapsed closer decision on a posted row, discovery runs one fenced inline
+reconciliation after proving custody absent. The watchdog records that decision
+and the attempt time under its PR lock. A refused or waiting result does not
+trigger another live candidate read or inline closure dispatch until the
+decision or head changes, or five minutes pass. Intervening passes continue to
+the posted-review handler. Active drain defers this closer dispatch while
+overdue-transition paging remains enabled.
 
 ### Deadline-bound ownership (OWNERDEADLINE-01)
 

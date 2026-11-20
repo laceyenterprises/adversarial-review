@@ -4,6 +4,7 @@ import { deriveNextActionSnapshot, nextAction } from './pr-next-action.mjs';
 import { isOperatorHeld } from './operator-hold-labels.mjs';
 const fetchMergeAgentCandidate = async (...args) => (await import('./merge-agent-candidate.mjs')).fetchMergeAgentCandidate(...args);
 import { normalizeEffectiveReviewVerdict } from './review-verdict.mjs';
+import { redactPublicSafeText } from './adapters/comms/github-pr-comments/redaction.mjs';
 import { amaAuthoritativeReviewerLoginsForModel } from './ama/reviewer-authority.mjs';
 const fetchReviews = async (...args) => (await import('./github-api.mjs')).fetchReviewBodiesForHead(...args);
 const maybeDispatchAmaClosureFor = async (...args) => (await import('./ama-closure-orchestration.mjs')).maybeDispatchAmaClosureFor(...args);
@@ -57,7 +58,10 @@ export async function recoverOverdueOwnership({ rootDir, repo, prNumber, subject
     // setting ownerProof, so normal custody, review and retry fences still run.
     const amaClosureResult = await dispatch({ closerHead: true, fromDiscovery: true }, {
       runDaemonCleanMergeAttemptImpl: async () => ({ disposition: 'not-taken', reason: 'rescue-dispatch-only' }),
-    }).catch(() => ({ reason: 'closer-reconciliation-failed' }));
+    }).catch(error => {
+      logger?.warn?.(`[watcher] CLOSERPARKOWNER-02: closer reconciliation failed: ${redactPublicSafeText(error?.message || error, 200).replace(/[\r\n]+/g, ' ')}`);
+      return { reason: 'closer-reconciliation-failed' };
+    });
     const outcome = amaClosureResult?.dispatched ? 'ama-dispatched'
       : amaClosureResult?.needsOperator ? 'recovery-exhausted' : 'ama-pending';
     if (outcome === 'ama-pending' || amaClosureResult?.boundedWait?.notify

@@ -79,6 +79,12 @@ legacy reservation column if absent. Old tick and uncertainty columns remain
 readable but no longer control recovery. The independent closer-head recovery seam remains retired. Ordinary ownerless
 recovery uses the shared two-attempt budget; execution of an explicit
 `rereview-exact-head` decision uses the existing per-head `rereview` reservation.
+`closer_reconciliation(head, decision, reconciledAt)` records each discovery-side
+closer result under the same PR lock. `decision` contains the selected row,
+action, actor, reason, queue and deadline. A matching decision on the same head
+cannot repeat the live candidate read and inline closure dispatch for five
+minutes; discovery continues to the posted-review handler meanwhile. A changed
+head or selected decision, or an expired receipt, permits another reconciliation.
 
 Every recovery emits one `ownerless-recovery` log line containing repo, PR,
 head, elapsed idle minutes, last reason and action. Store failures retain the existing

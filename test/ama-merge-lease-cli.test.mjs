@@ -1146,12 +1146,38 @@ test('permanent protection 404 stays charged and transient check reads refund', 
   }
 });
 
+test('merge-lease acquire reclaims a holder already dead at wait start', async () => {
+  const rootDir = freshRoot();
+  try {
+    acquireFixture(rootDir, { holderPid: 99999, holderHost: HOST, holderHead: 'dead-head' });
+    const { code, io } = await runCli(rootDir, [
+      'acquire',
+      '--repo', REPO,
+      '--base', BASE,
+      '--pr', '501',
+      '--head', 'after-reclaim',
+      '--owner-pid', '8501',
+      '--wait', '1',
+    ], {
+      pidAliveFn: (pid) => pid !== 99999,
+    });
+    const out = jsonOutput(io);
+    assert.equal(code, 0);
+    assert.equal(out.acquired, true);
+    assert.equal(out.holder, 501);
+    assert.equal(out.holderHead, 'after-reclaim');
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
 test('merge-lease acquire reclaims a local holder that dies during capped polling', async () => {
   const rootDir = freshRoot();
   try {
     const holderPid = 99999;
     const startMs = Date.parse('2026-06-20T18:00:00Z');
-    const deathAfterMs = 45_750; // Backoff to the ceiling, then two 15-second polls.
+    // 250+500+1000+2000+4000+8000+15000+15000 = 45750 ms.
+    const deathAfterMs = 45_750;
     let elapsedMs = 0;
     const held = acquireFixture(rootDir, { holderPid, deadlineSeconds: 120 });
     assert.equal(held.acquired, true);

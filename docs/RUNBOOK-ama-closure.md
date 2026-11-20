@@ -1004,8 +1004,19 @@ PID. Under the PR's closer intent lock, the helper verifies the sole active job
 is an HQ pre-spawn claim in `in-progress` for that ticket, live launcher,
 repository, PR, and full head. It rechecks the claim after awaited ownership
 reads. Pending, competing, unreadable, and mismatched claims retain custody.
+The `HQ_BIN` chain must `exec` through to the Python dispatch process so its
+parent remains the daemon PID recorded in `claimedBy.launcherPid`; intervening
+shell, supervisor or `sudo` processes are unsupported. A launcher PID mismatch
+refuses `remediation-claim-launcher-mismatch`. An `EPERM` liveness probe counts
+as an existing process, while exact recorded PID equality is still required.
+A ticket with no active record refuses `remediation-claim-absent`. During the
+raw active-bucket scan, an unrelated record disappearing with `ENOENT` is
+skipped. A missing own claim, malformed or unreadable file, or non-file JSON
+entry refuses `remediation-ownership-unknown` with its `file` path, including
+unattributable records from other repositories.
 The closer lease and repair-epoch owner and cap checks still apply. Reusing a
 dispatch key for a different epoch base head refuses `repair-head-mismatch`.
+An observed terminal epoch is retired before that replay-head refusal.
 See the rollout and mixed-version behavior in [LAC-2228](changes/LAC-2228.md).
 
 The helper is a cold composition root: before its first dispatch read (a

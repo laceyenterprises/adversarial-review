@@ -23,8 +23,8 @@
 +        str(conflicting).lower(),
 +    ]
 +    if isinstance(dispatch_ticket, str) and dispatch_ticket:
-+        # The native hq wrappers exec this Python process. Its parent is the
-+        # claimant for a direct daemon dispatch, rather than a CLI-supplied PID.
++        # Native hq wrappers must exec through to Python so its parent remains
++        # the daemon claimant; intervening supervisor/sudo parents are unsupported.
 +        argv.extend((dispatch_ticket, str(os.getppid())))
      try:
 -        result = run(

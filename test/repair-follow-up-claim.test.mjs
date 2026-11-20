@@ -2,7 +2,8 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { dirname, join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import fs, { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { syncBuiltinESMExports } from 'node:module';
 import { main } from '../bin/repair-in-place.mjs';
 import { tryAcquireCloserIntentLock } from '../src/ama/pre-receipt-intent.mjs';
 import { amaCloserLeaseFilePath } from '../src/ama/closer-lease.mjs';
@@ -12,6 +13,7 @@ import { claimNextFollowUpJob, createFollowUpJob, getFollowUpJobDir } from '../s
 import { persistRemediationDispatchPath } from '../src/remediation-dispatch-mode.mjs';
 import { bindRepairHead, pendingRepairEpoch, reserveRepairEpoch } from '../src/repair-epochs.mjs';
 import { ensureReviewStateSchema, openReviewStateDb } from '../src/review-state.mjs';
+import { readRepairFollowUpClaim } from '../src/repair-follow-up-claim.mjs';
 
 const repo = 'fixture/widgets', prNumber = 11159, headSha = '0ff19e32' + 'a'.repeat(32);
 const identity = { repo, prNumber, headSha };
@@ -51,9 +53,12 @@ test('the real pre-spawn claim permits one repair writer and retains the job', a
 
 test('legacy, missing, mismatched and stale claim evidence all refuse', async t => {
   const { rootDir, argv, jobPath, job } = fixture(t);
-  for (const request of [argv.slice(0, 6), argv.slice(0, 7), argv.with(6, `${argv[6]}-unknown`),
-    argv.with(7, '1'), argv.with(7, String(process.pid + 1)), argv.with(3, 'b'.repeat(40))]) {
+  for (const request of [argv.slice(0, 6), argv.with(6, `${argv[6]}-unknown`),
+    argv.with(3, 'b'.repeat(40))]) {
     assert.equal((await main(request)).reason, 'remediation-owned');
+  }
+  for (const request of [argv.slice(0, 7), argv.with(7, '1'), argv.with(7, String(process.pid + 1))]) {
+    assert.equal((await main(request)).reason, 'remediation-claim-launcher-mismatch');
   }
   const deadPid = 2 ** 31 - 1;
   job.claimedBy.launcherPid = deadPid;
@@ -101,9 +106,103 @@ for (const bucket of ['pending', 'inProgress']) {
     writeFileSync(path, JSON.stringify({ ...job, jobId: 'competing-job' }));
     assert.deepEqual(await main(argv), { ok: false, reason: 'remediation-owned', jobId: 'competing-job' });
     writeFileSync(path, '{"jobId":"unknown-owner"}');
-    assert.equal((await main(argv)).reason, 'remediation-ownership-unknown');
+    assert.deepEqual(await main(argv), { ok: false, reason: 'remediation-ownership-unknown', file: path });
     writeFileSync(path, '{');
-    assert.equal((await main(argv)).reason, 'remediation-ownership-unknown');
+    assert.deepEqual(await main(argv), { ok: false, reason: 'remediation-ownership-unknown', file: path });
+    assert.equal(pendingRepairEpoch(rootDir, identity), null);
+  });
+}
+
+for (const bucket of ['pending', 'inProgress']) {
+  test(`an unrelated ${bucket} job removed between enumeration and read does not block a claim`, t => {
+    const { rootDir, job } = fixture(t);
+    const path = join(getFollowUpJobDir(rootDir, bucket), 'unrelated.json');
+    writeFileSync(path, JSON.stringify({ ...job, repo: 'other/repository', prNumber: 42 }));
+    const read = fs.readFileSync;
+    let removed = false;
+    t.mock.method(fs, 'readFileSync', (file, ...args) => {
+      if (file === path) {
+        rmSync(path);
+        removed = true;
+      }
+      return read(file, ...args);
+    });
+    syncBuiltinESMExports();
+    t.after(() => { t.mock.restoreAll(); syncBuiltinESMExports(); });
+    assert.deepEqual(readRepairFollowUpClaim(rootDir, {
+      ...identity, ticket: job.jobId, launcherPid: process.pid,
+    }), { ok: true, claimedAt: job.claimedAt });
+    assert.equal(removed, true, 'the record disappeared after enumeration');
+  });
+}
+
+test('losing the own claim between enumeration and read still fails closed', t => {
+  const { rootDir, job, jobPath } = fixture(t);
+  const read = fs.readFileSync;
+  t.mock.method(fs, 'readFileSync', (file, ...args) => {
+    if (file === jobPath) rmSync(jobPath);
+    return read(file, ...args);
+  });
+  syncBuiltinESMExports();
+  t.after(() => { t.mock.restoreAll(); syncBuiltinESMExports(); });
+  assert.deepEqual(readRepairFollowUpClaim(rootDir, {
+    ...identity, ticket: job.jobId, launcherPid: process.pid,
+  }), {
+    ok: false, reason: 'remediation-ownership-unknown', file: jobPath,
+  });
+  assert.equal(pendingRepairEpoch(rootDir, identity), null);
+});
+
+test('unattributable records retain custody and identify the offending file', async t => {
+  const { rootDir, argv } = fixture(t);
+  const path = join(getFollowUpJobDir(rootDir, 'pending'), 'other__repository-pr-42-bad.json');
+  for (const record of [{}, { repo: 'invalid' }, { repo: 'fixture/widgets' }]) {
+    writeFileSync(path, JSON.stringify(record));
+    assert.deepEqual(await main(argv), { ok: false, reason: 'remediation-ownership-unknown', file: path });
+  }
+  assert.equal(pendingRepairEpoch(rootDir, identity), null);
+});
+
+test('non-file JSON entries and non-ENOENT read errors still fail closed', async t => {
+  const { rootDir, argv } = fixture(t);
+  const path = join(getFollowUpJobDir(rootDir, 'pending'), 'unrelated.json');
+  mkdirSync(path);
+  assert.deepEqual(await main(argv), { ok: false, reason: 'remediation-ownership-unknown', file: path });
+  rmSync(path, { recursive: true });
+  writeFileSync(path, '{}');
+  const read = fs.readFileSync;
+  t.mock.method(fs, 'readFileSync', (file, ...args) => {
+    if (file === path) throw Object.assign(new Error('unreadable fixture'), { code: 'EACCES' });
+    return read(file, ...args);
+  });
+  syncBuiltinESMExports();
+  t.after(() => { t.mock.restoreAll(); syncBuiltinESMExports(); });
+  assert.deepEqual(await main(argv), { ok: false, reason: 'remediation-ownership-unknown', file: path });
+  assert.equal(pendingRepairEpoch(rootDir, identity), null);
+});
+
+test('EPERM proves a matching launcher is alive without waiving PID equality', t => {
+  const { rootDir, job } = fixture(t);
+  const request = { ...identity, ticket: job.jobId, launcherPid: process.pid };
+  const kill = t.mock.method(process, 'kill', (pid, signal) => {
+    assert.equal(pid, process.pid);
+    assert.equal(signal, 0);
+    throw Object.assign(new Error('cross-user fixture'), { code: 'EPERM' });
+  });
+  assert.deepEqual(readRepairFollowUpClaim(rootDir, request), { ok: true, claimedAt: job.claimedAt });
+  assert.equal(readRepairFollowUpClaim(rootDir, { ...request, launcherPid: process.pid + 1 }).reason,
+    'remediation-claim-launcher-mismatch');
+  assert.equal(kill.mock.callCount(), 1);
+});
+
+for (const bucket of ['completed', 'failed', 'stopped']) {
+  test(`a ticket in ${bucket} without an active claim reports absence`, async t => {
+    const { rootDir, argv, job, jobPath } = fixture(t);
+    rmSync(jobPath);
+    const dir = getFollowUpJobDir(rootDir, bucket);
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, `${job.jobId}.json`), JSON.stringify({ ...job, status: bucket }));
+    assert.deepEqual(await main(argv), { ok: false, reason: 'remediation-claim-absent', jobId: job.jobId });
     assert.equal(pendingRepairEpoch(rootDir, identity), null);
   });
 }

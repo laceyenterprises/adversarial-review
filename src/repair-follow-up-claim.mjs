@@ -10,7 +10,7 @@ const sameHead = (left, right) => typeof left === 'string' && SHA.test(left)
 
 function launcherAlive(pid) {
   try { return process.kill(pid, 0); }
-  catch { return false; }
+  catch (error) { return error.code === 'EPERM'; }
 }
 
 function ownsClaim(job, { repo, prNumber, headSha, ticket, launcherPid }) {
@@ -64,25 +64,38 @@ export function readRepairFollowUpClaim(rootDir, { repo, prNumber, headSha, tick
       }
       for (const entry of entries) {
         if (!entry.name.endsWith('.json')) continue;
-        if (!entry.isFile()) return { ok: false, reason: 'remediation-ownership-unknown' };
-        const job = JSON.parse(readFileSync(join(dir, entry.name), 'utf8'));
+        const unknown = () => ({ ok: false, reason: 'remediation-ownership-unknown',
+          file: join(dir, entry.name) });
+        if (!entry.isFile()) return unknown();
+        let job;
+        try { job = JSON.parse(readFileSync(join(dir, entry.name), 'utf8')); }
+        catch (error) {
+          // Other jobs can move between enumeration and read. Losing our own
+          // claim, malformed JSON and every other read error still refuse.
+          if (error.code === 'ENOENT' && entry.name !== ownFile) continue;
+          return unknown();
+        }
         if (typeof job?.repo !== 'string' || !/^[\w.-]+\/[\w.-]+$/.test(job.repo)) {
-          return { ok: false, reason: 'remediation-ownership-unknown' };
+          return unknown();
         }
         const namedForPr = matchesName(entry.name);
         if (!namedForPr && !repos.has(job.repo.toLowerCase())) continue;
         if (!Number.isSafeInteger(job.prNumber) || job.prNumber <= 0) {
-          return { ok: false, reason: 'remediation-ownership-unknown' };
+          return unknown();
         }
         if (!namedForPr && job.prNumber !== prNumber) continue;
-        if (bucket !== 'inProgress' || entry.name !== ownFile || claimedAt
-          || !Number.isSafeInteger(launcherPid) || launcherPid <= 1
-          || !ownsClaim(job, { repo, prNumber, headSha, ticket, launcherPid })) return refused(job.jobId);
+        if (bucket !== 'inProgress' || entry.name !== ownFile || claimedAt) return refused(job.jobId);
+        if (!Number.isSafeInteger(launcherPid) || launcherPid <= 1
+          || job.claimedBy?.launcherPid !== launcherPid) {
+          return { ok: false, reason: 'remediation-claim-launcher-mismatch', jobId: job.jobId };
+        }
+        if (!ownsClaim(job, { repo, prNumber, headSha, ticket, launcherPid })) return refused(job.jobId);
         claimedAt = job.claimedAt;
       }
     }
   } catch {
     return { ok: false, reason: 'remediation-ownership-unknown' };
   }
-  return claimedAt ? { ok: true, claimedAt } : refused(ticket);
+  return claimedAt ? { ok: true, claimedAt }
+    : { ok: false, reason: 'remediation-claim-absent', jobId: ticket };
 }

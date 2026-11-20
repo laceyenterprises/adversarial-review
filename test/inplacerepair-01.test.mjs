@@ -344,6 +344,21 @@ test('only terminal launch and complete retry evidence permit a successor epoch'
   }
 });
 
+test('a mismatched replay still records retirement of an observed terminal owner', t => {
+  const f = fixture(t);
+  const replay = reserveRepairEpoch(f).epoch;
+  bindRepairHead({ ...f, epochId: replay.id, headSha: head });
+  const pending = reserveRepairEpoch({ ...f, headSha: head, ownerKey: 'second' }).epoch;
+  const now = '2026-11-20T01:00:00.000Z';
+  assert.deepEqual(reserveRepairEpoch({ ...f, headSha: head, now,
+    terminalOwner: { ...pending, ownerState: 'terminal', ownerLaunch: 'ended-launch' } }),
+  { ok: false, reason: 'repair-head-mismatch' });
+  const retired = readHammerRetryCapLedger(f.rootDir, f).repairEpochs.find(epoch => epoch.id === pending.id);
+  assert.equal(retired.terminalAt, now);
+  assert.equal(retired.terminalLaunch, 'ended-launch');
+  assert.equal(pendingRepairEpoch(f.rootDir, f), null);
+});
+
 for (const fault of ['provision-failed', 'workspace-wait timeout',
   'hammer-wall-clock-exceeded while waiting for a workspace',
   'controller-setup-failed', 'quota-exhausted', 'credential-outage']) {

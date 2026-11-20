@@ -5321,6 +5321,61 @@ commits, generator failures, duplicate/missing markers and byte mismatches retai
 the existing refusal. This supplies evidence to the existing primary-change
 predicate and adds no CI check, status, override label or host config key.
 
+<a id="legacy-generated-preservation-lac-2101"></a>
+
+**Agent OS legacy generated JSON preservation (LAC-2101).** After the existing
+generated-content proof cannot resolve a `reversal-authorization` region refusal,
+the shared collector can request a whole-blob proof for these exact paths in
+`laceyenterprises/agent-os`.
+
+- `scripts/ledger-sql-baseline.json` permits source-derived line refreshes while
+  preserving author findings, counts and row order.
+- `platform/app-sdk/state-machines.json` permits the producer's canonical Python
+  AST inventory ordering while preserving authored declarations and other inventory.
+- `modules/worker-pool/failure-classes.json` permits the producer's alphabetical
+  placement of complete class entries while preserving their fields and nested arrays.
+
+Both diffs must provide complete, readable `modified` evidence. The collector
+uses the protected merge base, first closure parent and exact candidate head.
+All three immutable Git trees must supply non-executable regular files whose
+complete bytes agree between the history reader and the code-pr domain's
+registered `remediationCloneReferences` store. The author must descend from the
+merge base and the candidate must descend from the author. Rewritten history
+continues through the existing preservation rules.
+
+The collector runs one fixed argv command in the derived-proof sandbox.
+
+```text
+python3 -I <deployed-agent-os>/scripts/verify-legacy-generated-preservation.py
+  --repo <registered-object-store> --repository laceyenterprises/agent-os
+  --base <merge-base> --author <primary-head> --head <candidate-head>
+  --path <refused-path>
+```
+
+Resolve the executable from `AGENT_OS_DEPLOY_CHECKOUT` or the configured
+`roots.deploy`. The sandbox grants read-only access to the deployed producer
+directories and registered Git metadata, with network disabled, bounded output,
+process-group cancellation, and the existing deadlines. Branch objects supply
+data to the deployed verifier. The verifier requires its inputs to be unchanged
+across base, author and candidate and checks the permitted transform across the
+complete artifact. Advancing deployed main can change proof acceptance for
+unchanged anchors. Exit zero and exactly the version-1 JSON tuple `repository`,
+`base`, `author`, `head`, and `path` are required. The predicate rebinds the tuple
+and author/candidate blob IDs before treating that path as preserved. Each other
+path and each remaining merge gate still has to pass.
+
+Missing or incompatible producer, missing objects, incomplete or opaque diffs,
+renames, deletions, unsupported modes or ancestry, changed producer inputs,
+byte or tuple mismatches, unavailable sandbox, timeout and invalid output retain
+the refusal. Proof is evaluated outside the durable history cache.
+
+Land and deploy the Agent OS producer from
+[agent-os#11208](https://github.com/laceyenterprises/agent-os/pull/11208) before
+activating the reviewed consumer. A source merge alone does not supply the
+deployed executable. Root owns any re-evaluation of the original PRs using
+fresh live inputs and ordinary eligibility once both sides are active.
+The [immutable replay results](changes/LAC-2101.md) cover only source evidence.
+
 <a id="agent-os-catalog-field-placement-lac-2229"></a>
 
 **Agent OS catalog field placement (LAC-2229).** The shared primary-change collector can prove a top-level string field moved

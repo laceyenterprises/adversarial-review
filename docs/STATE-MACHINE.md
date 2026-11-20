@@ -2685,6 +2685,11 @@ Key control points:
   Deleting the scratch output and reproducing the complete final file exempts its
   derived regions; source declarations and generator code remain protected.
   Missing proof retains the same refusal, with no new states or merge gates.
+  LAC-2101 lets the deployed Agent OS owner prove complete-byte preservation for
+  three exact legacy JSON paths after the ordinary generated-content proof
+  leaves a region refusal. The proof binds the canonical repository, path,
+  merge base, author, and candidate. Producer deployment precedes consumer
+  activation. See the [proof and deployment contract](RUNBOOK-ama-closure.md#legacy-generated-preservation-lac-2101).
   A HAM reversal requires a `Reversal-Authorized-By` trailer citing an authoritative
   blocking finding, or a non-blocking finding required by the effective
   `strict_non_blocking_remediation` policy, on its reviewed head. Non-strict

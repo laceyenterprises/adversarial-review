@@ -8,7 +8,23 @@ import { violations } from './oracle.mjs';
 
 const subject = { domainId: 'code-pr', subjectExternalId: 'synthetic/project#1' };
 
-export async function simulate(scenario, { seed = 17, load = 1, mutate } = {}) {
+function freezeEvent(value) {
+  if (value && typeof value === 'object') {
+    for (const child of Object.values(value)) freezeEvent(child);
+    Object.freeze(value);
+  }
+  return value;
+}
+
+function checkedOutcome(outcome) {
+  if (outcome.status === 'deferred'
+    && /Cannot assign to read only property|Cannot add property|Cannot delete property|object is not extensible/.test(outcome.detail ?? '')) {
+    throw new Error(`simulator snapshot mutation hidden by executor deferral: ${outcome.detail}`);
+  }
+  return outcome;
+}
+
+export async function simulate(scenario, { seed = 17, load = 1, mutate, mutateLedgerRead } = {}) {
   if (!Object.hasOwn(profiles, scenario.profile)) throw Error(`unknown profile ${scenario.profile}`);
   const f = profiles[scenario.profile];
   const clock = new Clock(seed);
@@ -37,6 +53,7 @@ export async function simulate(scenario, { seed = 17, load = 1, mutate } = {}) {
   let comments = f.comment ? 1 : 0;
   let merged = f.merged === true;
   let projection;
+  let ledgerSnapshot;
   let readFailed = false;
   let refused = false;
   let transientCharges = 0;
@@ -77,8 +94,9 @@ export async function simulate(scenario, { seed = 17, load = 1, mutate } = {}) {
   }
   function append(event) {
     makeFinalizationEvent(event.type, event.subjectKey, event);
-    events.push(structuredClone(event));
+    events.push(freezeEvent(structuredClone(event)));
     projection = undefined;
+    ledgerSnapshot = undefined;
     if (event.type === 'remediation_dispatched' && refused) transientCharges++;
     if (['halted', 'closed'].includes(event.type) && ['budget-killed', 'canceled', 'crashed'].includes(f.agentOutcome)) transientRefusals++;
     inspect(`ledger:${event.type}`);
@@ -97,7 +115,11 @@ export async function simulate(scenario, { seed = 17, load = 1, mutate } = {}) {
   const ledgerStore = {
     read() {
       if (readFault()) { readFailed = true; throw Error(`synthetic ${f.readFailure} 503`); }
-      return structuredClone(events);
+      // Readers can reuse the same immutable point-in-time snapshot until the
+      // next append. The executor still folds the real event list on each read.
+      const snapshot = ledgerSnapshot ??= Object.freeze(events.slice());
+      mutateLedgerRead?.(snapshot, { leased: lease !== null });
+      return snapshot;
     }, append,
   };
   const leaseStore = {
@@ -156,7 +178,9 @@ export async function simulate(scenario, { seed = 17, load = 1, mutate } = {}) {
   };
   let routedOwner = 'v2';
   function executor(holder) {
-    return createFinalizationExecutor({ ledgerStore, leaseStore, enabled: true, holder,
+    const instance = createFinalizationExecutor({ ledgerStore, leaseStore, enabled: true, holder,
+      // The synthetic repository has no configured exclusions.
+      disabledRepositories: [],
       generateLeaseId: () => `lease-${++serial}`, leaseTtlMs: pressure.timeout(500),
       policy,
       adjudicateSurface: mergeSurface, remediationSurface,
@@ -207,6 +231,12 @@ export async function simulate(scenario, { seed = 17, load = 1, mutate } = {}) {
         return legacy();
       } },
     });
+    // Check both entrypoints outside the production executor's broad catches,
+    // including rival ticks and rollback execution.
+    return { ...instance,
+      async tick(...args) { return checkedOutcome(await instance.tick(...args)); },
+      async execute(...args) { return checkedOutcome(await instance.execute(...args)); },
+    };
   }
   let exec = executor('v2');
   observe();

@@ -3,10 +3,12 @@ import { existsSync, readFileSync } from 'node:fs';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
+import { performance } from 'node:perf_hooks';
 import { fileURLToPath } from 'node:url';
 import { runBounded } from '../src/ama/bounded-command.mjs';
 import { leaseValidationIdleMs, pytestValidationEnvironment } from '../src/ama/lease-validation.mjs';
 import { loadAwareTimeoutSeconds } from '../src/load-aware-timeout.mjs';
+import { nodeTestWorkerLimit } from '../src/node-test-concurrency.mjs';
 
 import { reportHammerProgress, reportRemediationCommit } from '../src/ama/hammer-progress.mjs';
 import { execFileSync } from 'node:child_process';
@@ -174,6 +176,7 @@ if (!valid || args.shift() !== '--' || !args.length) {
       const timeoutMs = loadAwareTimeoutSeconds(explicitTimeout ? nominalSeconds
         : runner?.nominalSeconds || nominalSeconds) * 1000;
       const deadline = Date.now() + timeoutMs;
+      const validationStart = performance.now();
       // A missing startup receipt distinguishes npm/tool provisioning from a
       // repository script failure. Retry startup once within the same budget.
       for (let attempt = 0; attempt < 2; attempt++) {
@@ -186,6 +189,11 @@ if (!valid || args.shift() !== '--' || !args.length) {
           || process.exitCode >= 124 || Date.now() >= deadline) break;
       }
       runnerExit = process.exitCode;
+      if (runner?.selectedTestFiles) {
+        const wallMs = Math.round(performance.now() - validationStart);
+        console.error(`hammer-validate: targeted Node validation files=${runner.selectedTestFiles}`
+          + ` workerLimit=${nodeTestWorkerLimit(env)} wallMs=${wallMs} budgetMs=${timeoutMs} exitStatus=${runnerExit}`);
+      }
       const startupFault = runner?.startupReceipt && !existsSync(startedFile)
         && ![124, 125, 130, 143].includes(process.exitCode);
       if (startupFault) {

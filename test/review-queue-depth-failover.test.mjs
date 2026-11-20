@@ -982,10 +982,11 @@ test('CI-red reservations are refunded so spill slots reach later admissible PRs
 
 test('pollonce-phases pins quota evidence for the whole poll instead of expiring per candidate', () => {
   const watcherSrc = readFileSync(new URL('../src/watcher.mjs', import.meta.url), 'utf8');
+  const heartbeatSrc = readFileSync(new URL('../src/watcher-heartbeat.mjs', import.meta.url), 'utf8');
   const pollonceSrc = readFileSync(new URL('../src/pollonce-phases.mjs', import.meta.url), 'utf8');
   assert.match(watcherSrc, /reviewerTickCaches = \{ fleetQuotaStatus: new Map\(\) \}/);
   assert.match(watcherSrc, /reviewerFleetQuotaStatusCache: reviewerTickCaches\.fleetQuotaStatus/);
-  assert.match(watcherSrc, /ok=\$\{Boolean\(pollResult\?\.ok\)\} timed_out=\$\{Boolean\(pollResult\?\.timedOut\)\}/);
+  assert.match(heartbeatSrc, /ok=\$\{Boolean\(pollResult\?\.ok\)\} timed_out=\$\{Boolean\(pollResult\?\.timedOut\)\}/);
   assert.match(pollonceSrc, /fleetQuotaStatusCache: reviewerFleetQuotaStatusCache/);
   assert.match(watcherSrc, /getAfhReviewerGroundingForTick: reviewerQuotaPoll\.getGrounding/);
   assert.match(watcherSrc, /execFileAsync: reviewerQuotaPoll\.execFile/);

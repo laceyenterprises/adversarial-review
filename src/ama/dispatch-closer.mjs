@@ -8494,6 +8494,7 @@ async function maybeDispatchAmaCloserAttempt({
   const argsWithPriority = ['dispatch', '--priority', dispatchPriority, ...args.slice(1)];
   let activeArgs = argsWithPriority;
   let execResult;
+  let launchRequestedAt;
   let transientRetryIndex = 0;
   let samePrHammerHolderRetryUsed = false;
   const dispatchEnv = hammerScratchEnvironment(scratchDir,
@@ -8538,7 +8539,10 @@ async function maybeDispatchAmaCloserAttempt({
     if (!mismatch && ticket && closerLaunchMatches(expected, {
       ticket_ref: ticket, target_repo: targetRepo || repo, head_sha: launchHead || targetRemediationSha,
       identity_ambiguous: row?.identity_ambiguous,
-    })) return null;
+    })) {
+      launchRequestedAt = row?.launch_request_id === payload.launchRequestId ? row.requested_at : undefined;
+      return null;
+    }
     logger?.warn?.(JSON.stringify({ event: mismatch ? 'ama_closer.launch_identity_mismatch' : 'ama_closer.launch_receipt_unverified', repo, prNumber,
       headSha: targetRemediationSha, launchRequestId: payload.launchRequestId,
       ticketRef: ticket || null, targetRepo: targetRepo || null, launchHead: launchHead || null }));
@@ -8559,6 +8563,9 @@ async function maybeDispatchAmaCloserAttempt({
     }));
     return noAmaDispatch({ dispatched: false, skipMergeAgent: true, reason });
   };
+  const observeConfirmedLaunch = parsed => observeCloserBacklogImpl({ rootDir, repo, prNumber, pending: false, logger,
+    ...(parsed.launchRequestId && !parsed.launchRequestIdIsDispatchFallback
+      ? { launchRequestId: parsed.launchRequestId, remediationCompletedAt: dispatchContext.remediationCompletedAt, launchRequestedAt } : {}) });
   const settleRetryProbeRefusal = (reason, err) => {
     // HQ rejected this submission on the live logical-job constraint. The
     // unreadable/foreign retry is predecessor evidence, not a new keyed intent.
@@ -8816,7 +8823,7 @@ async function maybeDispatchAmaCloserAttempt({
       // then dies early cannot re-fire forever. Branch-holder / transient / plain
       // dispatch-failed never spawned a worker and are intentionally NOT counted.
       if (ambiguousLaunch) {
-        try { await observeCloserBacklogImpl({ rootDir, repo, prNumber, pending: false, logger }); }
+        try { await observeConfirmedLaunch(parsedFailure); }
         catch (error) { logger?.warn?.(`AMA backlog dispatch observation failed: ${error.message}`); }
         promoteLaunchedLease(parsedFailure);
         recordHammerLaunchAgainstCap('ambiguous-launch-spawned', parsedFailure.launchRequestId);
@@ -8898,7 +8905,7 @@ async function maybeDispatchAmaCloserAttempt({
   }
 
   const parsed = normalizeDispatchIdentifiers(parseAmaCloserDispatchOutput(execResult?.stdout || ''));
-  try { await observeCloserBacklogImpl({ rootDir, repo, prNumber, pending: false, logger }); }
+  try { await observeConfirmedLaunch(parsed); }
   catch (error) { logger?.warn?.(`AMA backlog dispatch observation failed: ${error.message}`); }
   recordHammerLaunchAgainstCap('confirmed-launch', parsed.launchRequestId);
   updateDispatchRecord(rootDir, targetDispatchIdentity, (current) => {

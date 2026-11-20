@@ -53,19 +53,11 @@ selected. Timeout and unexpected-unwind fixtures explicitly select two files
 with `AR_TEST_CONCURRENCY=1` to exercise the scaled deadline; single-file and CI
 timeout fixtures retain the 900-second bound.
 
-Follow-up for the deployment owner: record the selected-file count, configured
-worker limit, validation wall time and timeout outcome for organic hammer runs,
-especially sets larger than four files and hosts with two or three logical
-CPUs. Compare with the former eight-worker behavior before deciding whether the
-unchanged outer validation budget needs adjustment. This round supplies no
-post-deploy throughput measurement.
-
-The PR body's concurrency claim and `src/ama/bounded-command.mjs` scope entry
-are stale. The body should say that `AR_TEST_CONCURRENCY` affects this repository's
-runner only and bounded validators preserve caller arguments, and remove
-`src/ama/bounded-command.mjs` from scope and sensitive paths. PR-body mutation is
-outside this worker's read-only GitHub authorization; the reply records this
-operator follow-up.
+The hammer logs the selected-file count, configured worker limit, wall time,
+outer budget and exit status for this repository's targeted validation. Use
+those fields after deployment to compare duration and timeout frequency across
+worker limits before changing the outer budget. Post-deploy throughput remains
+unmeasured.
 
 - `node test/run-tests.mjs test/parallel-runner.test.mjs test/runner-sandbox.test.mjs test/hq-root-runner.test.mjs test/run-bounded.test.mjs`:
   48 tests passed under a 120-second outer bound.
@@ -73,4 +65,9 @@ operator follow-up.
   four changed JavaScript files also passed.
 - `npm run typecheck:contracts`: passed.
 - `bash demo/research-finding-walkthrough.sh`: three byte-stable deliveries.
-- `git diff --check`: passed. Full local suites remain deferred to PR-head CI.
+- `git diff --check`: passed.
+
+After incorporating `main`, 94 focused tests passed across runner scheduling,
+sandbox cleanup, HQ-root isolation, bounded validation, canonical hammer
+validation and API publication. The timeout fixtures verify both the deadline
+and the active-file diagnostics.

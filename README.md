@@ -295,12 +295,14 @@ Each file runs in its own process with isolated state, home and temporary
 directory. The runner supplies Git settings that disable automatic maintenance
 and garbage collection for fixture commits, fetches and pushes even with a fresh
 home. Push receivers own their server-side configuration. Helpers that replace
-Git command configuration own their settings and may replace this suppression. Repeated CLI fixtures use private compile caches.
+Git command configuration own their settings. Repeated CLI fixtures use
+private compile caches.
 The suite deadline stays at 900 seconds when the selected parallel files fit
 within the configured worker limit. Otherwise it is
 `900 * 8 / min(8, limit)` seconds: 1800 seconds with a four-worker limit and
-900 with eight. Failures name the file and return a
-nonzero status. Generic bounded validation wrappers preserve command arguments;
+900 with eight. Failures name the test file and return a nonzero status. At the
+deadline, the runner prints the active test files and the number still queued.
+Generic bounded validation wrappers preserve command arguments.
 `AR_TEST_CONCURRENCY` applies only to this repository’s runner.
 Set `AR_TEST_TIMINGS=/absolute/path.json` to
 record per-file wall times and total suite wall time. Relative report paths
@@ -1730,6 +1732,12 @@ The [reader contract](docs/producer-contract-readers.md#weekly-evidence-and-admi
 records the evidence/admission truth table and public export fixture refresh.
 
 ## State machines and smoke verification (SMV v1)
+
+Remediation closer priority hints terminate without dispatch for unmanaged
+repositories or missing PRs. Malformed JSON moves unchanged to `dead-letter/`
+under the queue directory and stays excluded after watcher restart; filesystem
+and decision errors retain retry custody. Offline coverage is in
+`test/remediation-closer-queue.test.mjs`. Existing smoke commands are unchanged.
 
 Classified transient closer history stops record `history-read-failed` with
 the class in audit `reasonDetail`; the audit is `deferred` and enters the

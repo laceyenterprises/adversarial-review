@@ -1,9 +1,20 @@
+import { AsyncLocalStorage } from 'node:async_hooks';
 import { boundedOwnershipRead, ownershipReadBudgets } from './ownership-read.mjs';
 // Compatibility names for review policy callers; every observation uses the public SDK.
 import { readDispatchLaunches, readDispatchLaunchesSync, launchProbe,
   readWorkerObservation, readWorkerObservationSync, readLatestReviewObservation, readLatestReviewObservationSync } from './dispatch-read-client.mjs';
 import { withLiveLaunchRetry, launchRequestInFlight, isTerminalLaunchRequestStatus,
   launchRequestMeaning } from './ama/launch-request-status.mjs';
+
+const closureStatusPass = new AsyncLocalStorage();
+
+export async function withClosureLaunchStatusBatch(rootDir, listIds, run, readSnapshot = readLaunchRequestSnapshotFromLedgerAsync) {
+  const pass = { rootDir, open: true, read: null };
+  pass.snapshot = () => pass.read ??= boundedOwnershipRead(() =>
+    readSnapshot({ rootDir, launchRequestIds: [...new Set(listIds())].slice(0, 100), timeoutMs: 3_000 }), 3_000);
+  try { return await closureStatusPass.run(pass, run); }
+  finally { pass.open = false; }
+}
 
 function recoveryScope(args) {
   return args.repo ? { project_ref: args.projectRef || args.project_ref || 'adversarial-merge-authority', repo: args.repo } : {};
@@ -53,6 +64,23 @@ export function readLaunchRequestStatusFromLedger(args = {}) {
 }
 export async function readLaunchRequestStatusFromLedgerAsync(args = {}) {
   if (!normalizeText(args.launchRequestId)) return { ok: false, reason: 'missing-launch-request-id' };
+  const pass = closureStatusPass.getStore();
+  if (!args.launchSnapshot && args.includeRetryChain && pass?.open && pass.rootDir === args.rootDir
+    && !args.dispatchSession && !args.connectOptions && !args.ledgerTarget && !args.ledgerDbPath
+    && (!args.env || args.env === process.env)
+    && (args.timeoutMs ?? Infinity) > 3_000) {
+    const started = Date.now();
+    args.signal?.throwIfAborted();
+    const value = await pass.snapshot();
+    args.signal?.throwIfAborted();
+    if (pass.open && value?.ok && value.roots?.includes(args.launchRequestId)) {
+      const probe = launchProbe(value, args.launchRequestId, true);
+      // Only a positive live observation can be shared. A cached terminal,
+      // absent or incomplete chain cannot authorize a new owner.
+      if (launchRequestInFlight(probe) === true) return probe;
+    }
+    if (args.timeoutMs) args = { ...args, timeoutMs: Math.max(1, args.timeoutMs - (Date.now() - started)) };
+  }
   const result = args.launchSnapshot ?? await readDispatchLaunches({
     launch_request_ids: [args.launchRequestId], include_retry_chain: !!args.includeRetryChain }, args);
   return launchProbe(result, args.launchRequestId, args.includeRetryChain);

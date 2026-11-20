@@ -225,6 +225,7 @@ function liveCandidateTerminalReason(candidate) {
 // finishes. A handler that hangs now names the step it is still waiting on; a
 // slow step that eventually completes also records the monotonic elapsed time.
 const POSTED_REVIEW_STEP_LOG_THRESHOLD_MS = 5000;
+const MAX_COEXISTENCE_STEP_MS = 45_000;
 
 export class PostedReviewStepDeadlineError extends Error {
   constructor(label, key, deadlineMs) {
@@ -258,7 +259,7 @@ export function resolveNominalMergeAgentCoexistenceStepDeadlineMs(
 }
 
 export function resolveMergeAgentCoexistenceStepDeadlineMs(env = process.env, opts = {}) {
-  return loadAwareTimeoutMs(resolveNominalMergeAgentCoexistenceStepDeadlineMs(env, opts));
+  return Math.min(MAX_COEXISTENCE_STEP_MS, loadAwareTimeoutMs(resolveNominalMergeAgentCoexistenceStepDeadlineMs(env, opts)));
 }
 
 export function resolveMergeAgentCoexistenceOperationTimeoutMs(
@@ -409,6 +410,7 @@ async function handlePostedReviewRowWithinReadCache({
   existing,
   subjectRef,
   currentRevisionRef,
+  expectedHead = null,
   labelNames = [],
   projectGateStatusSafe,
   execFileImpl = execFileAsync,
@@ -575,7 +577,7 @@ async function handlePostedReviewRowWithinReadCache({
     // Candidate evaluation uses this tick's live read or a recent same-head
     // snapshot, rather than the previous lifecycle mirror. Guard actions still
     // execute here; downstream dispatch and merge retain their live checks.
-    const candidateDeadlineMs = resolveMergeAgentCoexistenceStepDeadlineMs();
+    const candidateDeadlineMs = loadAwareTimeoutMs(resolveNominalMergeAgentCoexistenceStepDeadlineMs());
     let candidate;
     try {
       // Preparation is scheduling evidence, never merge authority. Reuse only
@@ -619,6 +621,9 @@ async function handlePostedReviewRowWithinReadCache({
           deadlineMs: candidateDeadlineMs,
         },
       };
+    }
+    if (expectedHead && candidate?.headSha !== expectedHead) {
+      return { handled: true, outcome: 'completion-head-moved' };
     }
     reconcileHammerResumes({ hqRoot: resolveHqRoot(), repo: repoPath, prNumber,
       headSha: candidate?.headSha, prState: candidate?.prState });
@@ -901,7 +906,7 @@ async function handlePostedReviewRowWithinReadCache({
       }
       return { handled: true, outcome: 'ama-pending', urgent: coexistenceDecision.urgent === true,
         // CIWAITLANE-01: the CI wait must reach the lane ledger as the selected action.
-        ...(operatorHoldReason || remediationMissing || amaClosureResult?.reason === 'deferred-by-drain'
+        ...(expectedHead || operatorHoldReason || remediationMissing || amaClosureResult?.reason === 'deferred-by-drain'
           || leaseWaitMessage || isCiWaitNextAction(amaClosureResult?.nextAction)
           ? { amaClosureResult } : {}),
         ...(operatorHoldReason ? { operatorHoldReason } : {}),

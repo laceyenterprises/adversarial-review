@@ -12,6 +12,7 @@ import { __test__ as harness } from '../src/reviewer-harness.mjs';
 const current = { builderClass: 'claude-code', tag: 'claude-code', reviewerModel: 'codex', botTokenEnv: 'GH_CODEX_REVIEWER_TOKEN' };
 const arm = { role: 'reviewer', harness: 'codex', worker_class: 'codex-reviewer', model: 'gpt-6-luna', effort: 'low', account: 'fixture-account' };
 const quiet = { info() {}, warn() {} };
+let fixturePython;
 
 function ownerFixture(t, source) {
   const root = mkdtempSync(join(tmpdir(), 'osg-owner-'));
@@ -21,7 +22,7 @@ function ownerFixture(t, source) {
   writeFileSync(join(moduleDir, '__init__.py'), '');
   if (source !== null) writeFileSync(join(moduleDir, 'osg_reviewer.py'), source);
   // Resolve a test interpreter only; no production owner or ledger is invoked.
-  const python = execFileSync('python3', ['-c', 'import sys; print(sys.executable)'], { encoding: 'utf8' }).trim();
+  const python = fixturePython ??= execFileSync('python3', ['-c', 'import sys; print(sys.executable)'], { encoding: 'utf8' }).trim();
   mkdirSync(join(root, 'runtime/python/bin'), { recursive: true });
   symlinkSync(python, join(root, 'runtime/python/bin/python3'));
   return { env: { PATH: process.env.PATH, AGENT_OS_DEPLOY_CHECKOUT: root, PYTHONPATH: '/synthetic/ignored' }, root, python };
@@ -86,9 +87,14 @@ test('owner transport failures have stable private reasons and preserve default 
   }
 });
 
-test('the default budget admits a synthetic owner slower than the former ceiling', async t => {
-  const fixture = ownerFixture(t, 'import time\ntime.sleep(1.6)\nprint(\'{"reason":"shadow"}\')');
-  assert.deepEqual(await reviewerArmOwner({}, { env: fixture.env }), { reason: 'shadow' });
+test('the default budget admits a synthetic owner slower than the former ceiling', { timeout: 6000 }, async t => {
+  const fixture = ownerFixture(t, 'print(\'{"reason":"shadow"}\')');
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const result = reviewerArmOwner({}, { env: fixture.env });
+  // Advance past the former 1500 ms ceiling before Node can process the
+  // Python child's output or close event. The child still has to exit cleanly.
+  t.mock.timers.tick(1600);
+  assert.deepEqual(await result, { reason: 'shadow' });
 });
 
 test('assigned arm keeps review identity and carries model and effort to execution', async () => {

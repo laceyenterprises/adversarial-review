@@ -226,8 +226,18 @@ try {
       PATH: [fixtureBin, path.dirname(process.execPath), process.env.PATH].filter(Boolean).join(path.delimiter),
       NODE_OPTIONS: [process.env.NODE_OPTIONS, '--preserve-symlinks', '--preserve-symlinks-main'].filter(Boolean).join(' '),
     }),
-    stdio: 'inherit',
+    stdio: ['inherit', 'inherit', 'inherit', 'ipc'],
     detached: process.platform !== 'win32',
+  });
+  const unfinished = new Set(files);
+  const active = new Set();
+  child.on('message', ({ file, phase }) => {
+    if (!unfinished.has(file)) return;
+    if (phase === 'started') active.add(file);
+    if (phase === 'completed') {
+      unfinished.delete(file);
+      active.delete(file);
+    }
   });
   const childExit = new Promise((resolve, reject) => {
     child.once('error', reject);
@@ -245,6 +255,8 @@ try {
   timeout = setTimeout(() => {
     timedOut = true;
     terminateChild('SIGTERM');
+    console.error(`Test deadline reached with ${unfinished.size - active.size} files waiting to start.`
+      + ` Active test files: ${[...active].sort().join(', ') || '(none reported)'}.`);
   }, deadlineMs);
   const result = await childExit;
 

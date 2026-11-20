@@ -29,7 +29,11 @@ export function canonicalHammerValidation(root, changedFiles, { node = process.e
         || source.includes(specifier);
     });
   });
-  return selected.length ? { command: node, args: ['test/run-tests.mjs', ...selected] } : null;
+  return selected.length ? {
+    command: node,
+    args: ['test/run-tests.mjs', ...selected],
+    selectedTestFiles: selected.length,
+  } : null;
 }
 
 export function repositoryPythonPackages(root) {

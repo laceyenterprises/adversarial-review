@@ -1041,8 +1041,12 @@ test('health-probe and hammer-cap callers both resolve through the shared alert 
   assert.match(healthProbeSource, /import \{ deliverAlert as defaultDeliverAlert \} from '\.\/alert-delivery\.mjs';/);
   assert.match(hammerSource, /import \{ deliverAlert \} from '\.\.\/alert-delivery\.mjs';/);
   assert.match(
-    readFileSync(new URL('../src/watcher.mjs', import.meta.url), 'utf8'),
+    readFileSync(new URL('../src/watcher-heartbeat.mjs', import.meta.url), 'utf8'),
     /scheduleAlertDrain\(\);/
+  );
+  assert.match(
+    readFileSync(new URL('../src/watcher.mjs', import.meta.url), 'utf8'),
+    /createHeartbeatPollRunner\(\{[\s\S]*?scheduleAlertDrain,/
   );
 });
 
@@ -1327,8 +1331,12 @@ test('ORPHANPAGE-01: quarantine event diagnostics are bounded and watcher includ
   assert.equal(Object.keys(counts).length, 21);
   assert.equal(counts.other, 10);
   assert.equal(Object.values(counts).reduce((sum, count) => sum + count, 0), 30);
-  const source = readFileSync(new URL('../src/watcher.mjs', import.meta.url), 'utf8');
+  const source = readFileSync(new URL('../src/watcher-heartbeat.mjs', import.meta.url), 'utf8');
   assert.match(source, /quarantineEventCounts: sinkHealth\.quarantineEventCounts/);
+  assert.match(
+    readFileSync(new URL('../src/watcher.mjs', import.meta.url), 'utf8'),
+    /createHeartbeatPollRunner\(\{[\s\S]*?readAlertSinkHealth,/
+  );
 });
 
 test('quarantine diagnostics use injected reads, stable ordering and a count-invalidated cache', t => {

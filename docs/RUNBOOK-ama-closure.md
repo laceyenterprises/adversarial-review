@@ -7488,6 +7488,23 @@ checks that require the local environment. Workflow-level `mirrored_by` lists
 alone are insufficient because a workflow can succeed with individual work
 skipped.
 
+LAC-2240: current ID-keyed `checks` registries use the canonical mirror's
+`runs` and `paths`/`suite.paths` contract. Only `pre-push` contributions are
+candidates for local coverage; a check also declaring `ci` maps through its
+`ci.job` and `ci.name`. The corresponding exact-head Actions job must be green
+and its unique named workflow step must independently be completed with
+`success`. A skipped step inside a green job is not coverage. Job ID, run ID,
+head and check-run name must agree. Unreadable, absent or ambiguous step evidence
+runs the check locally. Per-check advisory and local-only placement remain
+local, as do checks without a CI mapping. Legacy `path-glob`/`ci_jobs` manifests
+retain their existing explicit-job contract; mixed schemas refuse coverage.
+Additional lane names do not invalidate a `pre-push` contribution; entries without
+`pre-push` are ignored. Missing `paths`/`suite.paths` defaults to an empty scope.
+Malformed runs or paths keep that check local with `invalid-ci-mapping` without
+discarding unrelated mappings. Unidentifiable entries cannot lend coverage.
+These reads retain the existing deadline, quota reserve and ETag transport;
+job details are fetched only for manifests verified against both head and base.
+
 The closer requires byte-identical manifest copies in the checkout, at the exact
 validation head, and at the live PR's pinned base SHA. New or changed manifests,
 including edits to `ci_jobs` or `local_only`, stay local until they land on the
@@ -7498,11 +7515,25 @@ stay ambiguous. Missing, ambiguous, skipped, or unreadable evidence keeps the
 selected check local. An unconfirmed mirror skip probe also executes the original
 check locally and records its actual result.
 
+Manifest pinning protects the coverage declarations, not the workflow content.
+For `pull_request` runs, workflow steps can come from the PR head. Both legacy
+job coverage and current named-step coverage trust that the successful workflow
+still executes the equivalent command: keeping a step name while replacing its
+command with a no-op can satisfy this evidence check. Workflow blobs are not
+compared with base, and workflow edits do not automatically disable coverage.
+Review workflow changes with this boundary in mind; operators can set
+`HAM_LOCAL_VALIDATION_CI_DEDUP=0` to require the selected local battery.
+
 GitHub reads use the same metered transport and ETag cache as the closer's PR
 reads, in a non-urgent scope. They cannot consume the reserve below the polling
 floor: a budget deferral runs checks locally with reason `ci-budget-deferred`.
-The private per-attempt receipt records local
-results and `ci-covered` checks with their job names and run IDs.
+A job-detail budget deferral stops further detail reads, preserves already
+verified evidence, and marks the remaining unread jobs `ci-budget-deferred`.
+Other unreadable job details keep their `ci-step-read-failed` diagnostic.
+The private per-attempt receipt records local results and `ci-covered` checks
+with their job names and run IDs. Current step mappings additionally record
+the Actions job ID and the exact step name; legacy job mappings retain their
+existing receipt shape.
 `close-result.json` includes those receipts under `localValidation` for both
 completed and stopped closes.
 

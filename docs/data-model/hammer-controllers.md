@@ -183,7 +183,7 @@ controller has no receipt for that invocation.
 | `head` | Full commit SHA captured before the local validation stage |
 | `status` | Effective validator exit code once the helper finishes |
 | `checks` | Ordered records with check name, status and reason, plus local result or exit status when available |
-| `checks[].jobs` | For `ci-covered`, each declared job's name and GitHub Actions run ID |
+| `checks[].jobs` | For `ci-covered`, each declared job's `name` and GitHub Actions `runId` (strings); current step mappings also include string `jobId` and the exact `step` name. Legacy job mappings and older receipts omit these optional fields. |
 
 Per-check statuses are `run`, `ci-covered`, `failed` and `not-run`. Runners
 without per-check reporting produce a battery-level record. The controller

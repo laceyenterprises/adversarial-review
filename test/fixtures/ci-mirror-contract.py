@@ -47,10 +47,23 @@ class CheckResult:
 
 
 def load_manifest(path: Path, *, cwd: str | None = None) -> list[Check]:
+    manifest = json.loads(path.read_text())
+    if "checks" in manifest:
+        contributions = [
+            (pattern, {"name": check_id, **row})
+            for check_id, row in manifest["checks"].items()
+            if "pre-push" in row["runs"]
+            for pattern in row.get("paths", row.get("suite", {}).get("paths", []))
+        ]
+    else:
+        contributions = [
+            (pattern, row)
+            for pattern, entries in manifest["path-glob"].items()
+            for row in entries
+        ]
     return [
         Check(row["name"], row["command"], row.get("tier", "fast"), (pattern,), cwd=cwd)
-        for pattern, entries in json.loads(path.read_text())["path-glob"].items()
-        for row in entries
+        for pattern, row in contributions
     ]
 
 

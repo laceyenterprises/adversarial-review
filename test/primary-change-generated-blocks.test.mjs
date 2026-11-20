@@ -533,11 +533,14 @@ test('invalid manifest entries grant no derived authority', () => {
   }
 });
 
-test('Linux sandbox creates mount parents and exposes only the loader cache from /etc', async t => {
+test('Linux sandbox creates mount parents, tolerates absent read-only paths and limits /etc access', async t => {
   const scratch = mkdtempSync(join(tmpdir(), 'derived-linux-layout-'));
   t.after(() => rmSync(scratch, { recursive: true, force: true }));
   const nested = join(scratch, 'run', 'user', '123', 'tmp', 'scratch');
   mkdirSync(nested, { recursive: true });
+  const library = join(scratch, 'producer', 'lib', 'python');
+  const missingLibrary = join(scratch, 'absent-producer', 'lib', 'python');
+  mkdirSync(library, { recursive: true });
   const platform = Object.getOwnPropertyDescriptor(process, 'platform');
   Object.defineProperty(process, 'platform', { ...platform, value: 'linux' });
   t.after(() => Object.defineProperty(process, 'platform', platform));
@@ -551,7 +554,8 @@ test('Linux sandbox creates mount parents and exposes only the loader cache from
   });
   syncBuiltinESMExports();
   t.after(() => { t.mock.restoreAll(); syncBuiltinESMExports(); });
-  await runDerivedGenerator({ scratch: nested, cwd: '.', command: ['node', '-e', 'process.exit(0)'] });
+  await runDerivedGenerator({ scratch: nested, cwd: '.', command: ['node', '-e', 'process.exit(0)'],
+    readOnly: [library, missingLibrary] });
   assert.equal(invocation.executable, 'bwrap');
   const args = invocation.args;
   assert.ok(args.indexOf('--tmpfs') < args.indexOf('--bind'));
@@ -567,6 +571,11 @@ test('Linux sandbox creates mount parents and exposes only the loader cache from
     directories.add(path);
   }
   assert.ok(directories.has(dirname(args[args.indexOf('--bind') + 1])));
+  for (const path of [library, missingLibrary]) {
+    assert.ok(directories.has(dirname(path)));
+    assert.deepEqual(args.slice(args.indexOf(path) - 1, args.indexOf(path) + 2),
+      ['--ro-bind-try', path, path]);
+  }
   for (let index = 0; index < args.length; index++) {
     if (args[index] === '--ro-bind' && args[index + 1].startsWith('/etc')) {
       assert.equal(args[index + 1], '/etc/ld.so.cache');

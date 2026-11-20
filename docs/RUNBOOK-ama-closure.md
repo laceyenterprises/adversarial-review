@@ -5355,7 +5355,10 @@ python3 -I <deployed-agent-os>/scripts/verify-legacy-generated-preservation.py
 Resolve the executable from `AGENT_OS_DEPLOY_CHECKOUT` or the configured
 `roots.deploy`. The sandbox grants read-only access to the deployed producer
 directories and registered Git metadata, with network disabled, bounded output,
-process-group cancellation, and the existing deadlines. Branch objects supply
+process-group cancellation, and the existing deadlines. Linux uses
+`--ro-bind-try` for these read-only mounts so absent auxiliary directories do not
+prevent sandbox startup; missing dependencies needed by the verifier still fail
+the proof. Branch objects supply
 data to the deployed verifier. The verifier requires its inputs to be unchanged
 across base, author and candidate and checks the permitted transform across the
 complete artifact. Advancing deployed main can change proof acceptance for

@@ -102,7 +102,7 @@ async function collect(f, { execute = true, timeoutMs, signal, beforeSpawn = () 
           } else {
             assert.equal(file, 'bwrap');
             assert.ok(args.includes('--unshare-all'));
-            for (const path of spec.readOnly) assert.deepEqual(args.slice(args.indexOf(path) - 1, args.indexOf(path) + 2), ['--ro-bind', path, path]);
+            for (const path of spec.readOnly) assert.deepEqual(args.slice(args.indexOf(path) - 1, args.indexOf(path) + 2), ['--ro-bind-try', path, path]);
           }
           assert.deepEqual(args.slice(-spec.command.length), spec.command);
           beforeSpawn();

@@ -385,7 +385,8 @@ export async function runDerivedGenerator({ scratch, cwd, command, signal, timeo
     for (const parent of mountParents([root, ...readOnly])) args.push('--dir', parent);
     args.push('--dir', '/etc');
     if (existsSync('/etc/ld.so.cache')) args.push('--ro-bind', '/etc/ld.so.cache', '/etc/ld.so.cache');
-    for (const path of readOnly) args.push('--ro-bind', path, path);
+    // Auxiliary producer libraries may be absent; existing paths stay read-only.
+    for (const path of readOnly) args.push('--ro-bind-try', path, path);
     args.push('--proc', '/proc', '--dev', '/dev', '--bind', root, root, '--chdir', work, '--', ...command);
   } else throw new Error('network-denied generator sandbox unavailable');
   signal?.throwIfAborted();

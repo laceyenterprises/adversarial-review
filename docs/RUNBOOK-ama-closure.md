@@ -5106,7 +5106,9 @@ SQL and operation bytes. Main's slot 340 remains intact.
 
 The first-parent path from protected author to candidate head must include every
 diagnostic snapshot and start its integrations with a two-parent merge of
-`283d06e4`. LAC-2246 allows subsequent two-parent main merges only when each
+`283d06e4`. A path whose first merge integrates a different parent, or has no
+merge, falls through to the general snapshot proof without this exception's
+authority. LAC-2246 allows subsequent two-parent main merges only when each
 second parent independently advances the prior main parent, is in the ancestry
 of the observed trusted `main` base, and has exactly the same migration
 directories as `283d06e4`. The last integrated parent must match the PR
@@ -5117,8 +5119,8 @@ repository, both heads, both merge bases, the observed base and commit parents,
 the later main tree objects, and the exact preservation paths and blobs. The
 native primary-change evaluator consumes it in the same evaluation that
 collected it. Audit copies describe the proof. A subsequent evaluation recomputes
-it from immutable objects. The offline witness records both published
-integrations. [PR #11143 replay](../test/fixtures/migration-renumber-11143/README.md)
+it from immutable objects. The [offline PR #11143 witness](../test/fixtures/migration-renumber-11143/README.md)
+records both published integrations.
 
 Deterministic integration refusals use `main-integration-ancestry-invalid`,
 `main-integration-source-name-mismatch`, `main-integration-blob-missing` or

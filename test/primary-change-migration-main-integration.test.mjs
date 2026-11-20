@@ -155,6 +155,22 @@ test('certifies the actual second main integration at the full Agent OS #11143 h
 
 const advancedBase = 'f'.repeat(40);
 const rssMain = '283d06e47679a91f6802f729a418746608f1e180';
+for (const comparisonMergeBase of [rssMain, advancedBase]) {
+  test(`a non-RSS first integration reaches snapshot proof with comparison base ${comparisonMergeBase}`, async () => {
+    const f = replay();
+    f.commit(f.args.headSha).parents[1].sha = advancedBase;
+    f.evidence.comparisonMergeBase = comparisonMergeBase;
+    assert.deepEqual(await f.prove(), []);
+    // The historical RSS declaration/slot mismatch still prevents a general
+    // certificate, but the ordinary proof must run and explain its own refusal.
+    assert.ok(f.calls.includes(`repos/${f.args.repo}/git/trees/${f.evidence.primaryHead}?recursive=1`));
+    const reasons = f.evidence.migrationRenumberDiagnostics.map(entry => entry.reason);
+    assert.ok(reasons.includes('snapshot-body-mismatch'), JSON.stringify(reasons));
+    assert.equal(reasons.at(-1), 'final-snapshot-unproven');
+    assert.ok(!reasons.includes('main-integration-unproven'));
+  });
+}
+
 function advanceObservedBase(f, status, mergeBase) {
   f.setComparison(rssMain, advancedBase, 'ahead');
   f.setComparison(f.evidence.comparisonMergeBase, advancedBase, status, mergeBase);

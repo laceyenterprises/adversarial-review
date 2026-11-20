@@ -389,33 +389,37 @@ async function proveMainIntegration(args, evidence, range) {
       || commit.parents.some(parent => !SHA.test(parent.sha || ''))) throw new Error('invalid migration ancestry');
     return { sha, tree: commit.tree.sha, parents: commit.parents.map(parent => parent.sha) };
   };
+  const commits = [];
+  for (let offset = 0; offset < range.length; offset += 4) {
+    commits.push(...await Promise.all(range.slice(offset, offset + 4).map(({ sha }) => readCommit(sha))));
+  }
+  // Establish incident applicability before any exception-specific refusal.
+  // Other main integrations must retain the general snapshot proof path.
+  if (commits.find(commit => commit.parents.length > 1)?.parents[1] !== RSS_MAIN) return null;
   const snapshots = [];
   const additionalMainParents = [];
   let mainParent, previous = evidence.primaryHead;
-  for (let offset = 0; offset < range.length; offset += 4) {
-    const commits = await Promise.all(range.slice(offset, offset + 4).map(({ sha }) => readCommit(sha)));
-    for (const commit of commits) {
-      if (commit.parents[0] !== previous || commit.parents.length < 1 || commit.parents.length > 2) return [];
-      if (commit.parents.length === 2) {
-        const second = commit.parents[1];
-        if (!mainParent) {
-          if (second !== RSS_MAIN) return [];
-        } else {
-          // Check both edges by immutable SHA. A matching tree alone does not
-          // establish that this was a forward integration of trusted main.
-          if (second === mainParent) return [];
-          const advance = await args.metadata(`repos/${args.repo}/compare/${mainParent}...${second}`);
-          if (advance.status !== 'ahead' || advance.merge_base_commit?.sha !== mainParent) return [];
-          const trusted = await args.metadata(`repos/${args.repo}/compare/${second}...${evidence.baseSha}`);
-          if (trusted.status !== (second === evidence.baseSha ? 'identical' : 'ahead')
-            || trusted.merge_base_commit?.sha !== second) return [];
-          additionalMainParents.push(await readCommit(second));
-        }
-        mainParent = second;
+  for (const commit of commits) {
+    if (commit.parents[0] !== previous || commit.parents.length < 1 || commit.parents.length > 2) return [];
+    if (commit.parents.length === 2) {
+      const second = commit.parents[1];
+      if (!mainParent) {
+        if (second !== RSS_MAIN) return [];
+      } else {
+        // Check both edges by immutable SHA. A matching tree alone does not
+        // establish that this was a forward integration of trusted main.
+        if (second === mainParent) return [];
+        const advance = await args.metadata(`repos/${args.repo}/compare/${mainParent}...${second}`);
+        if (advance.status !== 'ahead' || advance.merge_base_commit?.sha !== mainParent) return [];
+        const trusted = await args.metadata(`repos/${args.repo}/compare/${second}...${evidence.baseSha}`);
+        if (trusted.status !== (second === evidence.baseSha ? 'identical' : 'ahead')
+          || trusted.merge_base_commit?.sha !== second) return [];
+        additionalMainParents.push(await readCommit(second));
       }
-      snapshots.push({ ...commit, integrated: mainParent !== undefined });
-      previous = commit.sha;
+      mainParent = second;
     }
+    snapshots.push({ ...commit, integrated: mainParent !== undefined });
+    previous = commit.sha;
   }
   if (mainParent !== evidence.comparisonMergeBase) return [];
   const comparison = await args.metadata(`repos/${args.repo}/compare/${RSS_MAIN}...${evidence.primaryHead}`);

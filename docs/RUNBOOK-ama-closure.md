@@ -7810,7 +7810,8 @@ commits still require the existing independent provenance checks.
 
 LAC-2252: only an explicit pre-mutation `git-fallback` result authorizes the Git
 publisher. Supported cases include multi-commit history, file modes the API
-cannot preserve, an exact tree replay of the captured source onto the PR base,
+cannot preserve, an exact tree replay of the captured source onto the freshly
+fetched PR base branch (not the possibly stale REST `base.sha`),
 and a conflict repair bound to its recorded source, branch and local head.
 The Git publisher independently checks ownership, the live PR head and branch,
 the Git remote ref and candidate ancestry. It pushes the inspected commit with
@@ -7827,6 +7828,9 @@ head. A local rebase followed by remediation commits, a conflict repair followed
 by another commit, and divergent rewrites after an earlier server-side rebase
 moved the captured source are refused. Commit remediation before verify-head's
 server-side rebase, or publish the exact conflict-repair head before further edits.
+The different-source `head-changed` attribution does not establish an external
+writer: it can also describe this run's earlier server-side rebase. Preserve
+the custody record and captured/observed SHAs when attributing that stop.
 
 Transient transport failures retain bounded retries and the original
 expected-head CAS. An API timeout, malformed response, server refusal or
@@ -7837,7 +7841,12 @@ re-reads the source branch: a different valid head uses `head-changed`;
 unchanged, malformed or unreadable evidence retains `source-publication-refused`.
 The re-read does not establish that an ambiguous mutation had no effect, so
 uncertain custody remains until controller exit. A returned commit SHA is
-retained as `observedHead` even if tree verification fails.
+retained as `observedHead` even if tree verification fails, and the no-merge
+note records `HAM-Observed-Head` with `HAM-CI-Validated: false`.
+The publication lock intentionally spans the bounded source reads, fetches and
+proof (up to the 120-second helper window). A crash before mutation can therefore
+retain an unconfirmed deferral until controller exit; that conservative scheduling
+hold is accepted and grants no head, review or merge authority.
 The standalone merge-agent controller also requires its local rebase input to
 contain the captured PR head and pins publication to that head and branch.
 Its exit 20 means `source-publication-refused` for missing ancestry proof,

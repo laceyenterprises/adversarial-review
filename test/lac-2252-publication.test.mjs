@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync, spawnSync } from 'node:child_process';
-import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { renderHammerProcedure } from '../src/hammer-procedure.mjs';
@@ -49,7 +49,7 @@ const {execFileSync} = require('node:child_process');
 if (process.env.GH_TOKEN !== 'synthetic-hammer' || process.argv.slice(2).join(' ') !== 'api repos/fixture/repo/pulls/42') process.exit(91);
 if (process.env.FIXTURE_READ_OUTAGE) process.exit(92);
 const head = ref => execFileSync('git', ['--git-dir', ${JSON.stringify(remote)}, 'rev-parse', ref]).toString().trim();
-console.log(JSON.stringify({head: {ref: 'feature', sha: process.env.FIXTURE_STALE_HEAD || head('refs/heads/feature')}, base: {sha: head('refs/heads/main')}}));
+console.log(JSON.stringify({head: {ref: 'feature', sha: process.env.FIXTURE_STALE_HEAD || head('refs/heads/feature')}, base: {ref: 'main', sha: process.env.FIXTURE_STALE_BASE || head('refs/heads/main')}}));
 `, { mode: 0o755 });
   const pushLog = join(dir, 'push-log');
   writeFileSync(join(closer, '.git', 'hooks', 'pre-push'), `#!/bin/sh\nprintf 'push\\n' >> '${pushLog}'\n`, { mode: 0o755 });
@@ -77,6 +77,20 @@ exit "$status"
 }
 
 const output = result => JSON.parse(result.stdout.split('\n')[0]);
+
+test('LAC-2252: a refused API publication surfaces only a valid observed SHA without claiming CI validation', () => {
+  const source = readFileSync(join(root, 'bin', 'hammer-publish.sh'), 'utf8');
+  const stop = source.slice(source.indexOf('  ham_commit_publication_stop() {'), source.indexOf('\n  HAM_API_PUBLISH_RESULT='));
+  for (const observedHead of ['b'.repeat(40), '', 'invalid\nHAM-CI-Validated: true']) {
+    const result = spawnSync('/bin/bash', ['-c', `${stop}\nif ham_commit_publication_stop "$1"; then exit 91; else exit $?; fi`,
+      '_', JSON.stringify({ phaseOutcome: 'source-publication-refused', observedHead })], { encoding: 'utf8', timeout: 5000 });
+    assert.equal(result.status, 1, result.stderr);
+    if (observedHead === 'b'.repeat(40)) {
+      assert.match(result.stderr, new RegExp(`HAM-Observed-Head: ${observedHead}`));
+      assert.match(result.stderr, /HAM-CI-Validated: false/);
+    } else assert.doesNotMatch(result.stderr, /HAM-Observed-Head:|HAM-CI-Validated: true/);
+  }
+});
 
 test('LAC-2252: stale A cannot replace descendant B through API fallback or a direct exact lease', t => {
   const f = fixture(t);
@@ -129,6 +143,21 @@ test('LAC-2252: exact replay is publishable, repeated publication is a no-op, an
   assert.deepEqual(output(f.direct(candidate, f.start)), { route: 'unchanged', head: candidate, previousHead: candidate });
   assert.equal(output(f.api()).route, 'unchanged');
   assert.equal(existsSync(f.pushLog), false);
+});
+
+test('LAC-2252: a stale PR base SHA cannot prevent exact replay onto the live base branch', t => {
+  const f = fixture(t);
+  const staleBase = f.git(f.author, 'rev-parse', 'main');
+  f.git(f.author, 'checkout', '-q', 'main');
+  f.commit(f.author, 'new-base');
+  f.git(f.author, 'push', '-q', 'origin', 'main');
+  f.git(f.closer, 'fetch', '-q', 'origin');
+  f.git(f.closer, 'rebase', 'origin/main');
+  const candidate = f.git(f.closer, 'rev-parse', 'HEAD');
+  const published = f.direct(candidate, f.start, { FIXTURE_STALE_BASE: staleBase });
+  assert.equal(published.status, 0, published.stdout + published.stderr);
+  assert.equal(output(published).route, 'published');
+  assert.equal(f.remoteHead(), candidate);
 });
 
 for (const conflict of [false, true]) {

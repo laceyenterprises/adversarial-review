@@ -7,9 +7,12 @@ controllerRecord, controllerPid, startedAt, recordedAt, heads, publishing and
 optional closed and uncertain. The controller token is never copied to this store.
 
 The publisher takes an exclusive PR lock and writes intent before mutating the
-remote ref. A known Git head is recorded before push. For API-created commits
-and server rebases, the returned exact head is recorded before releasing the
-lock. Reviewer ownership reads take the shared lock before testing exact heads.
+remote ref. The Git publisher records the returned head after push, under the
+same exclusive lock. For API-created commits and server rebases, the returned
+exact head is also recorded before releasing the lock. An exception sets
+`uncertain` only after mutation begins; a returned `mutationUncertain` sets it
+only without an `observedHead`. Pre-mutation refusals leave custody certain.
+Reviewer ownership reads take the shared lock before testing exact heads.
 An old-head acknowledgment retains the lock through visibility polling and
 the existing exact full-tree replay proof. An ambiguous failure retains typed
 `closer-publication-unconfirmed` deferral only while its controller is active.

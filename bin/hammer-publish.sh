@@ -331,13 +331,17 @@ return 0
 # separate, under the merge lease, after remote CI validates the published SHA.
 if [ "${HAM_COMMIT_PUBLICATION_ONLY:-0}" = "1" ]; then
   ham_commit_publication_stop() {
-    local result="$1" status=1
+    local result="$1" status=1 observed_head
     case "$(printf '%s\n' "$result" | jq -r '.phaseOutcome // empty')" in
       head-changed) HAM_PHASE_OUTCOME=head-changed; status=20 ;;
       git-credential-refresh-failed) HAM_PHASE_OUTCOME=git-credential-refresh-failed; status=76 ;;
       *) HAM_PHASE_OUTCOME=source-publication-refused ;;
     esac
     HAM_NO_MERGE_NOTE="HAM closing status — no merge. Source publication stopped ($HAM_PHASE_OUTCOME); local commits retained."
+    observed_head=$(printf '%s\n' "$result" | jq -r '.observedHead // empty')
+    if [[ "$observed_head" =~ ^[0-9a-f]{40}$ ]]; then
+      printf -v HAM_NO_MERGE_NOTE '%s\nHAM-Observed-Head: %s\nHAM-CI-Validated: false' "$HAM_NO_MERGE_NOTE" "$observed_head"
+    fi
     echo "$HAM_NO_MERGE_NOTE" >&2
     if declare -F ham_release_merge_lease >/dev/null; then ham_release_merge_lease || return 1; fi
     return "$status"

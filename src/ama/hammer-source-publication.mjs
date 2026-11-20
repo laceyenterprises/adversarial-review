@@ -22,10 +22,10 @@ export async function readHammerSource(repo, prNumber) {
   const { ref: branch, sha: previousHead } = live.head ?? {};
   if (!sha(previousHead) || typeof branch !== 'string' || !branch) throw refusal('PR source branch or head unavailable');
   git('check-ref-format', `refs/heads/${branch}`);
-  return { branch, previousHead, base: live.base?.sha };
+  return { branch, previousHead, baseRef: live.base?.ref };
 }
 
-export async function inspectHammerSource({ branch, previousHead, base, localHead }) {
+export async function inspectHammerSource({ branch, previousHead, baseRef, localHead }) {
   if (!sha(localHead) || git('rev-parse', '--verify', 'HEAD^{commit}') !== localHead || git('status', '--porcelain')) {
     throw refusal('local publication head is unavailable, changed or dirty');
   }
@@ -47,9 +47,14 @@ export async function inspectHammerSource({ branch, previousHead, base, localHea
   if (previousHead !== process.env.HAM_BASE_HEAD) {
     throw movedPublicationHead('divergent PR head differs from the captured publication source');
   }
-  if (sha(base)) {
-    await hammerNetworkCall('git', ['fetch', '--no-recurse-submodules', 'origin', base]);
-    const replayBase = git('merge-base', base, localHead);
+  if (typeof baseRef === 'string' && baseRef) {
+    const base = `refs/heads/${baseRef}`;
+    git('check-ref-format', base);
+    // REST base.sha may predate later main commits. Bind replay to the base
+    // branch we actually fetched, without trusting a mutable tracking ref.
+    await hammerNetworkCall('git', ['fetch', '--no-tags', '--no-recurse-submodules', 'origin', base]);
+    const baseHead = git('rev-parse', '--verify', 'FETCH_HEAD^{commit}');
+    const replayBase = git('merge-base', baseHead, localHead);
     if (await proveRebaseResult({ oldHead: previousHead, head: localHead, base: replayBase, git: args => git(...args) })) {
       return 'rewrite';
     }

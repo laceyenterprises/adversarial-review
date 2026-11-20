@@ -320,7 +320,7 @@ test('reconcileFollowUpJob resets watcher review state when remediation reply re
   assert.equal(reconciled.job.reReview.status, 'pending');
   assert.equal(reviewRow.review_status, 'pending');
   assert.equal(reviewRow.failure_message, null);
-  assert.equal(reviewRow.rereview_reason, 'Remediation landed and is ready for another adversarial pass.');
+  assert.equal(reviewRow.rereview_reason, 'Remediation reply: Remediation landed and is ready for another adversarial pass.');
   assert.equal(reviewRow.rereview_requested_at, '2026-04-21T10:05:00.000Z');
   assert.equal(reviewRow.revision_ref, 'ci-green-head');
   assert.equal(reviewRow.last_attempted_at, null);
@@ -1327,7 +1327,7 @@ test('reconcileFollowUpJob completes when stdout is empty but the reply.json val
   assert.equal(reconciled.job.reReview.status, 'pending');
   // Watcher row IS reset (the user's PR can be re-reviewed).
   assert.equal(reviewRow.review_status, 'pending');
-  assert.equal(reviewRow.rereview_reason, 'Remediation landed; please run a fresh adversarial pass.');
+  assert.equal(reviewRow.rereview_reason, 'Remediation reply: Remediation landed; please run a fresh adversarial pass.');
   // Completion metadata reflects that success came from the reply,
   // not the narrative — operators reading the terminal record can
   // tell which path was taken.

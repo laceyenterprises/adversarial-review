@@ -16,7 +16,7 @@ import { meteredExecFile } from './metered-gh.mjs';
 import {
   pendingExplicitReviewIntent, reconcileExplicitReviewIntents, explicitReviewRefusalBody,
   settleExplicitReviewIntent, consumeExplicitReviewIntent, refuseFailedExplicitReviewDispatch,
-  requeueUnstartedExplicitReviewDispatch,
+  requeueUnstartedExplicitReviewDispatch, priorityReviewIntent, handoffAutomaticReview, isRemediationReviewIntent,
 } from './explicit-review-intent.mjs';
 import { maybeDeliverOperatorDecisionNotice } from './operator-decision-notice.mjs';
 import { readAmaCloserLease } from './ama/closer-lease.mjs';
@@ -285,7 +285,7 @@ import { refundReviewHarnessFault } from './review-harness-retry.mjs';
 import { isReviewCycleCapRoutedToHammer, maybeRouteReviewCycleCapToHammer } from './review-cycle-cap-hammer.mjs';
 import { latestReviewedHeadSha, maybeRouteCiBlockedToHammer } from './ci-blocked-hammer.mjs';
 import { hammerHeadOwnership } from './hammer-head-ownership.mjs';
-import { restoreHammerOwnedReview, declineSuppressedAmaRecoveryRereview } from './closer-head-rereview-decline.mjs';
+import { restoreHammerOwnedReview } from './closer-head-rereview-decline.mjs';
 import { handOffRetriggerWithoutJob } from './retrigger-no-job-handoff.mjs';
 import { resolveReviewerTimeoutMs, resolveGeminiReviewerProcessTimeoutMs } from './reviewer-timeout.mjs';
 import { resolveReviewerCeilingSeconds, usesStreamedReviewerCeiling } from './reviewer-timeout-model.mjs';
@@ -836,9 +836,9 @@ export async function processReviewSubject(entry, ctx) {
           repoPath, prNumber, body: explicitReviewRefusalBody(intent),
         }),
       });
-      const explicitIntentForHead = () => pendingExplicitReviewIntent(db, {
-        repo: repoPath, prNumber, headSha: subject.headSha,
-      });
+      const reviewIntentIdentity = { repo: repoPath, prNumber, headSha: subject.headSha };
+      const pendingReviewIntent = () => pendingExplicitReviewIntent(db, reviewIntentIdentity);
+      const explicitIntentForHead = () => priorityReviewIntent(pendingReviewIntent());
       // Observe waiting while seats/credentials hold. Head movement is settled
       // against a live read, since discovery can predate the accepted request.
       await reconcileExplicitRequests(null, Boolean(subject.terminal));
@@ -1564,6 +1564,7 @@ export async function processReviewSubject(entry, ctx) {
       if (effectiveDomainId === CODE_PR_DOMAIN_ID && (existing?.reviewer_head_sha || repairEpoch)
         && existing?.reviewer_head_sha !== subject.headSha && !subject.terminal
         && !isExhaustedHeadVerdictRequested(existing, subject.headSha)
+        && (repairEpoch || !pendingReviewIntent())
         && (repairEpoch || !isCompletedFinalRemediationJob(finalRemediationPush))) {
         const { ledger, effectiveRoundBudget } = resolveRemediationBudget();
         const exhausted = reviewCycleExhaustedFromRounds({
@@ -1602,19 +1603,32 @@ export async function processReviewSubject(entry, ctx) {
       });
       // CYCLECAPHAM-01: a capped PR goes to the hammer for final adjudication on
       // every tick, instead of waiting on an operator label.
-      const routeReviewCycleCapToHammer = (row) => tenureReviewRequired
-        ? Promise.resolve({ handled: false }) : maybeRouteReviewCycleCapToHammer({
-        rootDir: ROOT,
-        db,
-        repoPath,
-        prNumber,
-        existing: row,
-        subjectRef: subject.ref,
-        currentRevisionRef: subject.ref?.revisionRef || subject.headSha || null,
-        labelNames: prLabelNames,
-        cap: cycleCapConfig.cap,
-        execFileImpl: execFileAsync,
-      });
+      const routeReviewCycleCapToHammer = async (row) => {
+        if (tenureReviewRequired) return { handled: false };
+        const result = await maybeRouteReviewCycleCapToHammer({
+          rootDir: ROOT,
+          db,
+          repoPath,
+          prNumber,
+          existing: row,
+          subjectRef: subject.ref,
+          currentRevisionRef: subject.ref?.revisionRef || subject.headSha || null,
+          labelNames: prLabelNames,
+          cap: cycleCapConfig.cap,
+          execFileImpl: execFileAsync,
+        });
+        if (result.handled && row) {
+          // The route awaits external ownership reads. Settle only if its row
+          // snapshot still matches; a newer request or claim keeps its receipt.
+          handoffAutomaticReview(db, reviewIntentIdentity, 'review-cycle-cap-hammer', () =>
+            db.prepare(`SELECT 1 FROM reviewed_prs WHERE repo=? AND pr_number=?
+              AND pr_state='open' AND review_status=? AND revision_ref IS ?
+              AND reviewer_head_sha IS ? AND rereview_requested_at IS ? AND rereview_reason IS ?`)
+              .get(repoPath, prNumber, row.review_status, row.revision_ref ?? null,
+                row.reviewer_head_sha ?? null, row.rereview_requested_at ?? null, row.rereview_reason ?? null));
+        }
+        return result;
+      };
       // CAPROUTE-01: route before generic failed-row retry admission. A cap
       // failure is an ownership handoff, including when revision_ref is stale.
       if (!explicitIntentForHead() && !isExplicitOperatorReviewRetrigger(existing) && !isOrphanHeadReviewRequested(existing, subject.headSha)
@@ -1650,9 +1664,10 @@ export async function processReviewSubject(entry, ctx) {
       // labels and `awaiting-rereview` handoffs still re-arm review.
       let cappedClosure = false;
       if (!tenureReviewRequired && !explicitIntentForHead() && effectiveDomainId === CODE_PR_DOMAIN_ID && existing?.reviewer_head_sha !== subject.headSha && !transferredHeadReview && !exhaustedHeadVerdict) {
-        const { effectiveRoundBudget } = resolveRemediationBudget();
+        const { effectiveRoundBudget, ledger } = resolveRemediationBudget();
         cappedClosure = routeCappedReviewToClosure({ db, stmtGetReviewRow, repo: repoPath,
           prNumber, headSha: subject.headSha, row: existing,
+          roundBudget: effectiveRoundBudget, completedRoundTimestamps: ledger.completedRoundTimestamps,
           ceiling: resolveHardReviewCeiling(effectiveRoundBudget) });
       }
       if (cappedClosure) {
@@ -1702,8 +1717,9 @@ export async function processReviewSubject(entry, ctx) {
           const queued = existing.review_status !== 'posted';
           if (existing.review_status !== 'posted'
             && latestReviewedHeadSha({ db, repoPath, prNumber }) === finalPush.revisionRef) {
-            restoreHammerOwnedReview({ db, repoPath, prNumber, reviewRow: existing,
-              reviewedHeadSha: finalPush.revisionRef, headSha: subject.headSha });
+            handoffAutomaticReview(db, reviewIntentIdentity, 'completed-final-remediation-closure',
+              () => restoreHammerOwnedReview({ db, repoPath, prNumber, reviewRow: existing,
+                reviewedHeadSha: finalPush.revisionRef, headSha: subject.headSha }));
             existing = stmtGetReviewRow.get(repoPath, prNumber);
           }
           finalRoundCloserOwned = existing?.review_status === 'posted'
@@ -1727,8 +1743,9 @@ export async function processReviewSubject(entry, ctx) {
           hammerSuppression = await resolveHeadCloserCommitSuppression();
           observeReviewLane(hammerSuppression);
           if (hammerHeadOwnership(hammerSuppression, subject.headSha)) {
-            restoreHammerOwnedReview({ db, repoPath, prNumber, reviewRow: existing,
-              reviewedHeadSha: latestReviewedHeadSha({ db, repoPath, prNumber }), headSha: subject.headSha });
+            handoffAutomaticReview(db, reviewIntentIdentity, 'hammer-owned-head',
+              () => restoreHammerOwnedReview({ db, repoPath, prNumber, reviewRow: existing,
+                reviewedHeadSha: latestReviewedHeadSha({ db, repoPath, prNumber }), headSha: subject.headSha }));
             existing = stmtGetReviewRow.get(repoPath, prNumber);
           }
         } catch (error) {
@@ -3215,15 +3232,16 @@ export async function processReviewSubject(entry, ctx) {
       });
       const declineFleetSelfRepairRereview = (reason) => {
         if (!fleetSelfRepairRereview.requested || fleetSelfRepairRereview.stale) return;
-        declineFleetSelfRepairTrailerOnlyRereview({
-          db,
-          repoPath,
-          prNumber,
-          reason,
-          reviewedHeadSha: fleetSelfRepairRereview.reviewedHeadSha,
-          liveHeadSha: fleetSelfRepairRereview.liveHeadSha || subject.headSha,
-          logger: console,
-        });
+        handoffAutomaticReview(db, reviewIntentIdentity, 'fleet-self-repair-declined', () =>
+          declineFleetSelfRepairTrailerOnlyRereview({
+            db,
+            repoPath,
+            prNumber,
+            reason,
+            reviewedHeadSha: fleetSelfRepairRereview.reviewedHeadSha,
+            liveHeadSha: fleetSelfRepairRereview.liveHeadSha || subject.headSha,
+            logger: console,
+          }).declined);
       };
 
       if (!explicitIntentForHead() && !isExplicitOperatorReviewRetrigger(existing) && !isOrphanHeadReviewRequested(existing, subject.headSha)
@@ -3249,11 +3267,11 @@ export async function processReviewSubject(entry, ctx) {
           declineFleetSelfRepairRereview(`terminal-closer-head:${closerSpawnSuppression.reason}`);
           // NOOWNER-01: the same for an AMA-recovery request, so the row never
           // sits pending with no reviewer and no closer (agent-os PR 8022).
-          declineSuppressedAmaRecoveryRereview({
-            db, repoPath, prNumber, reviewRow: current || existing, headSha: subject.headSha,
-            reviewedHeadSha: latestReviewedHeadSha({ db, repoPath, prNumber }),
-            suppressionReason: closerSpawnSuppression.reason,
-          });
+          handoffAutomaticReview(db, reviewIntentIdentity, 'terminal-closer-head', () =>
+            restoreHammerOwnedReview({
+              db, repoPath, prNumber, reviewRow: stmtGetReviewRow.get(repoPath, prNumber),
+              headSha: subject.headSha, reviewedHeadSha: latestReviewedHeadSha({ db, repoPath, prNumber }),
+            }));
           return;
         }
 
@@ -3293,13 +3311,11 @@ export async function processReviewSubject(entry, ctx) {
               : '';
           let rowActionDetail = 'leaving existing review row intact';
           if (firstPassBudgetSuppression.reason === 'same-head-already-reviewed') {
-            const restored = stmtRestoreSameHeadSuppressedReviewPosted.run(
-              new Date().toISOString(),
-              repoPath,
-              prNumber,
-              subject.headSha
-            );
-            rowActionDetail = restored.changes === 1
+            const restored = handoffAutomaticReview(db, reviewIntentIdentity, 'same-head-budget-restore', () =>
+              stmtRestoreSameHeadSuppressedReviewPosted.run(
+                new Date().toISOString(), repoPath, prNumber, subject.headSha
+              ).changes === 1);
+            rowActionDetail = restored
               ? "restored review_status='posted'"
               : "same-head restore skipped by CAS";
           }
@@ -3321,7 +3337,7 @@ export async function processReviewSubject(entry, ctx) {
         now: new Date().toISOString(),
       });
       if (cycleCapDecision.escalate && !handoffReviewAdmission) {
-        const intent = explicitIntentForHead();
+        const intent = pendingReviewIntent();
         if (intent) {
           settleExplicitReviewIntent(db, intent, 'review-cycle-cap-paused');
           await reconcileExplicitRequests();
@@ -3614,6 +3630,7 @@ export async function processReviewSubject(entry, ctx) {
           let credentialProbeKey = null;
           let reviewerProcessStarted = false;
           let forcedReviewIntent = null;
+          let dispatchReviewIntent = null;
           const releaseReviewerReservation = () => {
             if (!reservation?.admit || reservationReleased) return;
             reservationReleased = true;
@@ -3639,14 +3656,18 @@ export async function processReviewSubject(entry, ctx) {
                 headSha: subject?.headSha || null,
                 reviewId: reviewedHeadDedup.reviewId,
               }));
-              const restore = restorePendingReviewedHeadDedupRow({
-                restoreStatement: stmtRestoreReviewedHeadDedupSuppressedReviewPosted,
-                repoPath,
-                prNumber,
-                headSha: subject?.headSha || null,
-                reviewSubmittedAt: reviewedHeadDedup.reviewSubmittedAt,
+              let restore;
+              handoffAutomaticReview(db, reviewIntentIdentity, 'same-head-already-reviewed', () => {
+                restore = restorePendingReviewedHeadDedupRow({
+                  restoreStatement: stmtRestoreReviewedHeadDedupSuppressedReviewPosted,
+                  repoPath,
+                  prNumber,
+                  headSha: subject?.headSha || null,
+                  reviewSubmittedAt: reviewedHeadDedup.reviewSubmittedAt,
+                });
+                return restore.restored;
               });
-              if (restore.attempted) {
+              if (restore?.attempted) {
                 console.log(
                   `[watcher] reviewed-head dedup row repair for ${repoPath}#${prNumber}: ` +
                     (restore.restored
@@ -4265,8 +4286,10 @@ export async function processReviewSubject(entry, ctx) {
             }
 
             if (skipReviewerSpawnReason) {
-              if (forcedReviewIntent) {
-                settleExplicitReviewIntent(db, forcedReviewIntent, skipReviewerSpawnReason);
+              const pendingIntent = pendingReviewIntent();
+              const refusedIntent = forcedReviewIntent || (isRemediationReviewIntent(pendingIntent) ? pendingIntent : null);
+              if (refusedIntent) {
+                settleExplicitReviewIntent(db, refusedIntent, skipReviewerSpawnReason);
                 await reconcileExplicitRequests();
               }
               stmtReleaseReviewerClaim.run(reviewerSessionUuid, repoPath, prNumber);
@@ -4459,7 +4482,7 @@ export async function processReviewSubject(entry, ctx) {
                 if (reviewRowSettled) return;
                 // Account/seat holds can settle through this callback without
                 // ever starting a process. Keep the claim for intent requeue.
-                if (forcedReviewIntent && !postedResult.ok && !reviewerProcessStarted) return;
+                if (dispatchReviewIntent && !postedResult.ok && !reviewerProcessStarted) return;
                 // Size failures include an awaited PR-update handoff. Leave
                 // those to the caller settlement path below, which retains
                 // the head reservation until the receipt and alert are saved.
@@ -4495,8 +4518,15 @@ export async function processReviewSubject(entry, ctx) {
                   + `retained_wake=${Boolean(dispatchCandidate.retainedWakePriority)} `
                   + `wait_threshold_exceeded=${waitThresholdExceeded}`);
               }
-              if (forcedReviewIntent) {
-                const consumed = db.transaction(() => consumeExplicitReviewIntent(db, forcedReviewIntent, {
+              const intentBeforeDispatch = pendingReviewIntent();
+              const priorityBeforeDispatch = priorityReviewIntent(intentBeforeDispatch);
+              if (priorityBeforeDispatch && priorityBeforeDispatch.request_id !== forcedReviewIntent?.request_id) {
+                stmtReleaseReviewerClaim.run(reviewerSessionUuid, repoPath, prNumber);
+                return { dispatched: false, reason: 'explicit-review-intent-changed' };
+              }
+              dispatchReviewIntent = forcedReviewIntent || intentBeforeDispatch;
+              if (dispatchReviewIntent) {
+                const consumed = db.transaction(() => consumeExplicitReviewIntent(db, dispatchReviewIntent, {
                   headSha: reviewerHeadSha, sessionUuid: reviewerSessionUuid,
                 })).immediate();
                 if (!consumed) {
@@ -4504,8 +4534,8 @@ export async function processReviewSubject(entry, ctx) {
                   await reconcileExplicitRequests();
                   return { dispatched: false, reason: 'explicit-review-intent-no-longer-pending' };
                 }
-                console.log(`[watcher] explicit re-review intent consumed for ${repoPath}#${prNumber}`
-                  + ` head=${reviewerHeadSha} request=${forcedReviewIntent.request_id}`);
+                console.log(`[watcher] ${forcedReviewIntent ? 'explicit re-review' : 'remediation review'} intent consumed for ${repoPath}#${prNumber}`
+                  + ` head=${reviewerHeadSha} request=${dispatchReviewIntent.request_id}`);
               }
               reviewerSpawned = true;
               if (depthSpillReserved) {
@@ -4528,11 +4558,11 @@ export async function processReviewSubject(entry, ctx) {
                   })
                   : await spawnReviewer(spawnReviewerArgs);
               } catch (error) {
-                if (forcedReviewIntent) {
+                if (dispatchReviewIntent) {
                   if (!reviewerProcessStarted) {
-                    requeueUnstartedExplicitReviewDispatch(db, forcedReviewIntent, reviewerSessionUuid);
+                    requeueUnstartedExplicitReviewDispatch(db, dispatchReviewIntent, reviewerSessionUuid);
                     stmtReleaseReviewerClaim.run(reviewerSessionUuid, repoPath, prNumber);
-                  } else refuseFailedExplicitReviewDispatch(db, forcedReviewIntent, reviewerSessionUuid);
+                  } else refuseFailedExplicitReviewDispatch(db, dispatchReviewIntent, reviewerSessionUuid);
                   await reconcileExplicitRequests();
                 }
                 if (!reviewerProcessStarted) dispatchCandidate.retainWakeForCapacity?.();
@@ -4552,8 +4582,8 @@ export async function processReviewSubject(entry, ctx) {
               // A failed launch keeps even a fresh, already-consumed wake alive.
               if (result.ok) retainedWatcherWakes?.drop(wakeIdentity);
               else if (!reviewerProcessStarted) dispatchCandidate.retainWakeForCapacity?.();
-              if (!result.ok && !reviewerProcessStarted && forcedReviewIntent) {
-                requeueUnstartedExplicitReviewDispatch(db, forcedReviewIntent, reviewerSessionUuid);
+              if (!result.ok && !reviewerProcessStarted && dispatchReviewIntent) {
+                requeueUnstartedExplicitReviewDispatch(db, dispatchReviewIntent, reviewerSessionUuid);
                 stmtReleaseReviewerClaim.run(reviewerSessionUuid, repoPath, prNumber);
                 await reconcileExplicitRequests();
               }
@@ -4566,7 +4596,7 @@ export async function processReviewSubject(entry, ctx) {
               }
 
               if (!reviewRowSettled) {
-                if (!result.ok && !reviewerProcessStarted && forcedReviewIntent) {
+                if (!result.ok && !reviewerProcessStarted && dispatchReviewIntent) {
                   return { dispatched: false, reason: 'explicit-review-launch-deferred' };
                 }
                 const settlement = await settleReviewerAttempt({

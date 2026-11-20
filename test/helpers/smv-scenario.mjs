@@ -63,6 +63,10 @@ let headSha = git('rev-parse', 'HEAD');
 assert.equal(git('show', '-s', '--format=%G?', headSha), 'N');
 const identity = () => ({ rootDir, repo, prNumber, headSha });
 const store = { merged: false };
+// Match the offline suite's no-org config even when the smoke is invoked
+// directly from the production checkout. Any actual token mint is unexpected.
+const { createGithubOwnerTokenSelector, githubOwnerTokens } = await import('../../src/github-owner-token.mjs');
+Object.assign(githubOwnerTokens, createGithubOwnerTokenSelector({ readHomeOwner: () => null, mint: refuse }));
 const tick = (overrides = {}) => watcherTick({ ...identity(), evidence: { headSha, hasHammerCommits: false }, store,
   row: { review_status: 'posted', reviewer_head_sha: headSha, reviewer: 'gemini', review_body: cleanBody },
   runMerge: async expected => { assert.equal(expected, headSha); git('checkout', '-q', 'main'); git('merge', '--ff-only', expected); git('push', '-q', 'origin', 'main'); }, ...overrides });
@@ -640,7 +644,7 @@ if (scenario === 'clean') {
       }) }),
       createJobImpl: input => (fixAll = createFollowUpJob(input)),
     }) });
-  assert.equal(store.lastClosure.reason, 'final-fix-all-builder-remediation');
+  assert.equal(store.lastClosure.reason, 'final-fix-all-builder-remediation', JSON.stringify(store.warnings));
   assert.equal(store.lastClosure.nextAction.actor, 'remediator');
   assert.equal(fixAll.job.remediationPlan.maxRounds, 1);
   assert.equal(fixAll.job.finalRound, undefined);
@@ -1163,11 +1167,15 @@ if (scenario === 'clean') {
 } else if (scenario === 'ci-blocked') {
   const ceilingDb = openReviewStateDb(rootDir); ceilingDb.transaction(() => ensureReviewStateSchema(ceilingDb))();
   const ceilingPr = 8, ceilingLogs = [];
+  const { remediationReviewRequest, pendingExplicitReviewIntent } = await import('../../src/explicit-review-intent.mjs');
   ceilingDb.prepare(`INSERT INTO reviewed_prs(repo,pr_number,reviewed_at,reviewer,review_status,reviewer_head_sha)
     VALUES (?,?,'2026-01-01','gemini','posted',?)`).run(repo, ceilingPr, base);
   ceilingDb.prepare(`INSERT INTO reviewer_passes(repo,pr_number,attempt_number,reviewer_class,pass_kind,
     started_at,ended_at,status,head_sha,body_md) VALUES (?,?,1,'gemini','first-pass',
-    '2026-01-01','2026-01-01','completed',?,?)`).run(repo, ceilingPr, base, cleanBody);
+    '2026-01-01','2026-01-01','completed',?,?)`).run(repo, ceilingPr, base, cleanBody.replace('Approved', 'Comment only'));
+  assert.equal(requestReviewRereview({ db: ceilingDb, rootDir, repo, prNumber: ceilingPr,
+    targetRevisionRef: headSha, reason: 'Worker requests a review after CI repair',
+    explicitReviewRequest: remediationReviewRequest('fixture-ci-closeout', 2) }).triggered, true);
   for (let tick = 0; tick < 2; tick++) {
     assert.equal(routeCappedReviewToClosure({ db: ceilingDb, repo, prNumber: ceilingPr, headSha, ceiling: 1,
       row: ceilingDb.prepare('SELECT * FROM reviewed_prs WHERE pr_number=?').get(ceilingPr),
@@ -1175,6 +1183,7 @@ if (scenario === 'clean') {
   }
   assert.equal(ceilingLogs.length, 1);
   assert.equal(ceilingDb.prepare('SELECT reviewer_head_sha FROM reviewed_prs WHERE pr_number=?').get(ceilingPr).reviewer_head_sha, base);
+  assert.equal(pendingExplicitReviewIntent(ceilingDb, { repo, prNumber: ceilingPr, headSha }), undefined);
   ceilingDb.close();
   const ceilingShared = matrixPair({ checks: { conclusion: 'FAILURE' } });
   assert.equal(requestEligibleHammerWake({ rootDir, repo: 'subject-07', prNumber: ceilingPr,

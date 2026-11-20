@@ -16,7 +16,7 @@
         "src/queued-review-dismissal.mjs"
       ],
       "owner": "watcher review dispatch",
-      "compatibility": "No schema change. Pending intents never expire for capacity; expires_at is a load-scaled one-time waiting-notice threshold. Exact-head claim consumption, coalescing, ceilings and terminal fences remain; positively unstarted launches return their session-scoped intent to pending. Superseded bot review dismissal grants no merge authority."
+      "compatibility": "No schema change. Pending intents never expire for capacity; expires_at is a load-scaled one-time waiting-notice threshold. Remediation-watch receipts follow ordinary admission and settle atomically with automatic closure or same-head restoration. Cycle-cap settlement rechecks the routed row snapshot; newer priority requests retain pending intent. Priority requests coalesce worker receipts at the same head while retaining the original threshold. Positively unstarted launches return their session-scoped intent to pending. Superseded bot review dismissal grants no merge authority."
     }
   ]
 }

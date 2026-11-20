@@ -173,7 +173,7 @@
         "src/reviewed-head-dispatch-gate.mjs"
       ],
       "owner": "watcher review dispatch",
-      "compatibility": "Additive table; request identity and exact-head one-shot admission persist across restart. Pending requests expire under the existing rereview wait bound, default 900 seconds; normal ceilings and terminal fences remain enforced."
+      "compatibility": "No schema change. Pending intents never expire for capacity; expires_at is a load-scaled one-time waiting-notice threshold. Remediation-watch receipts follow ordinary admission and settle atomically with automatic closure or same-head restoration. Cycle-cap settlement rechecks the routed row snapshot; newer priority requests retain pending intent. Priority requests coalesce worker receipts at the same head while retaining the original threshold. Positively unstarted launches return their session-scoped intent to pending. Superseded bot review dismissal grants no merge authority."
     },
     {
       "id": "repository-identities",

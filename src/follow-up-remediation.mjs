@@ -13,6 +13,7 @@ import { resolveLocalRemediationMes } from './mes-shadow-hook.mjs';
 import { readDispatchStatus } from './producer-contracts/launch-status.mjs';
 import { findCommittedUnpublishedWork } from './remediation-unpublished.mjs';
 import { remediationCloseout, closeoutRereview, refusedCloseout } from './remediation-closeout.mjs';
+import { remediationReviewRequest } from './explicit-review-intent.mjs';
 import { reportsCompletedPipelineWait } from './remediation-blocker-ownership.mjs';
 import { guardStackedBase } from './ama/stacked-base.mjs';
 import { logCodexWorkerDispatch } from './codex-account-routing.mjs';
@@ -2316,7 +2317,7 @@ async function reconcileFollowUpJobWithinRepositoryCycle({
         }
         if (rereview.requested) {
           const outcome = requestReviewRereviewImpl({ rootDir, repo: job.repo, prNumber: job.prNumber,
-            explicitReviewRequest: { requestId: `remediation:${job.jobId}:${job.remediationPlan.currentRound}`, actor: 'remediation-watch' },
+            explicitReviewRequest: remediationReviewRequest(job.jobId, job.remediationPlan.currentRound),
             requestedAt: completedAt, reason: rereview.reason, targetRevisionRef: closeout.decision.head,
             ...(closeout.tenureReviewRange ? { preserveBudgets: true } : {}) });
           rereview = { ...buildRereviewResult({ requested: true, reason: rereview.reason,
@@ -2403,7 +2404,7 @@ async function reconcileFollowUpJobWithinRepositoryCycle({
       if (!rereview.requested && job.finalRound === 'comment-only') rereview.suppressed = 'comment-only-final-round';
       if (rereview.requested) {
         const outcome = requestReviewRereviewImpl({ rootDir, repo: job.repo, prNumber: job.prNumber,
-          explicitReviewRequest: { requestId: `remediation:${job.jobId}:${job.remediationPlan.currentRound}`, actor: 'remediation-watch' },
+          explicitReviewRequest: remediationReviewRequest(job.jobId, job.remediationPlan.currentRound),
           requestedAt: completedAt, reason: rereview.reason, targetRevisionRef: closeout.decision.head,
           ...(closeout.tenureReviewRange ? { preserveBudgets: true } : {}) });
         rereview = { ...buildRereviewResult({ requested: true, reason: rereview.reason,

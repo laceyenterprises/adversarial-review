@@ -862,8 +862,11 @@ two-path merge model** (operational reference:
 
 At the round cap, an eligible exact-head Comment-only review with zero
 blocking findings and remaining non-blocking or demoted findings first gets
-one builder fix-all round and a full re-review. Its zero-finding re-review
-uses the daemon path below; remaining findings use the configured fallback.
+one builder fix-all round. A bound, proven fix-all publication transfers to
+the exact-head closer without another automatic full review. The worker must
+record every finding disposition; the closer validates those dispositions,
+primary-source preservation and required CI before eligible merge. Separate
+tenure and conflict-primary independent-review requirements still apply.
 The existing durable handoff receipt prevents duplicate builder work and
 concurrent closer admission.
 Final fix-all always uses an HQ-provisioned branch-push worker, including
@@ -2335,9 +2338,9 @@ GSR receipts distinguish absent stores, accepted drains and released holds;
 token mismatches exit nonzero without changing the hold.
 Final-round exact-head Comment-only reviews with non-blocking or demoted
 findings receive one durable builder fix-all round before findings closure.
-Its published head requires fresh full review: zero findings select normal
-daemon merge, and remaining findings select the configured closer/operator
-fallback. Pending fix-all work retains ownership through admission delays;
+The closer takes a proven fix-all publication and validates its exact head
+against the original findings, source preservation and required checks before
+eligible merge. Pending fix-all work retains ownership through admission delays;
 conflict and CI-only repair keep their hammer routes. A fix-all primary-line
 reversal requires worker-generated finding citations, a durable job bound to
 the reviewed head, and exact-commit produced attestation matching its owner
@@ -3297,7 +3300,7 @@ observes natural retry progress without manual rescue pumping. See
 
 ### explicit-review-intent
 
-One durable receipt per request; only a pending exact-head receipt admits one dispatch. Capacity, credentials and queue-depth holds retain pending intent indefinitely. The nominal 900-second threshold produces one waiting notice, never expiry. Refused receipts retain visible-notification debt across restart. Only a positively unstarted launch may return its own consumed receipt to pending under the session CAS.
+A durable exact-head receipt records accepted review admission. Worker completion follows ordinary deduplication and ceilings. A priority request can supersede an unconsumed worker receipt while preserving its waiting threshold. Capacity, credentials and queue depth retain pending intent. The waiting threshold produces a notice. Only a positively unstarted launch may return its consumed receipt to pending under the session CAS. Automatic closure and same-head restoration refuse worker receipts under the matching row transaction; asynchronous cycle-cap routing rechecks the original row snapshot before settlement.
 
 ```mermaid
 stateDiagram-v2
@@ -3307,10 +3310,11 @@ stateDiagram-v2
     state "coalesced" as s3
     [*] --> s0: explicit-review-intent.01 accepted exact-head request
     s0 --> s1: explicit-review-intent.02 claim and session CAS immediately before dispatch
-    s0 --> s2: explicit-review-intent.03 head changed, terminal PR or ceiling
+    s0 --> s2: explicit-review-intent.03 head changed, terminal PR, ceiling, automatic closure handoff or same-head restoration
     [*] --> s3: explicit-review-intent.04 additional request joins original pending head without changing waiting threshold
     s1 --> s2: explicit-review-intent.05 runtime dispatch fails after start
     s1 --> s0: explicit-review-intent.06 positively unstarted launch returns its own intent under session CAS
+    s0 --> s3: explicit-review-intent.07 worker receipt aliases a newly accepted priority request at the same head
     s1 --> [*]
     s2 --> [*]
     s3 --> [*]
@@ -5106,9 +5110,13 @@ SRE observes the next organic approval producing a closer launch with
 ## Explicit re-review dispatch (RETRIGGERDEDUP-01)
 
 An accepted `retrigger-review`, rescue `rereview`, or remediation request
-records a durable exact-head intent. It permits one fresh review even when
-the head already has a completed review, subject to existing rereview ceilings,
-reviewer claims and head leases. Implicit repeats remain deduplicated.
+records a durable exact-head intent. A priority request permits one fresh review
+even when the head already has a completed review, subject to existing rereview
+ceilings, reviewer claims and head leases. Worker completion receipts follow
+ordinary deduplication and ceilings. Automatic closure handoffs and same-head
+restorations settle those receipts under the matching row transaction; the
+asynchronous cycle-cap route rechecks its row snapshot after ownership reads.
+Implicit repeats remain deduplicated.
 Intents survive restart and admission holds regardless of age. The load-scaled
 waiting threshold, **900 seconds nominal**, produces one informational notice,
 never an expiry. Ceiling, head-change and terminal-PR refusals receive a visible

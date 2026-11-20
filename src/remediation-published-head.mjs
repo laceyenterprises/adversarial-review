@@ -1,5 +1,6 @@
 import { loadAwareTimeoutMs } from './load-aware-timeout.mjs';
 import { remediationCloseout, closeoutRereview, refusedCloseout } from './remediation-closeout.mjs';
+import { remediationReviewRequest } from './explicit-review-intent.mjs';
 // REMLINK-01: recovery requires worker/service evidence, never just a moved head.
 import { execFileSync } from 'node:child_process';
 import { existsSync, statSync } from 'node:fs';
@@ -138,7 +139,7 @@ export function completeWorkerPublishedHead({
             repo: job.repo, prNumber: job.prNumber, requestedAt: completedAt });
         } else {
           const outcome = requestReviewRereviewImpl({ rootDir, repo: job.repo, prNumber: job.prNumber,
-            explicitReviewRequest: { requestId: `remediation:${job.jobId}:${round.round}`, actor: 'remediation-watch' },
+            explicitReviewRequest: remediationReviewRequest(job.jobId, round.round),
             requestedAt: completedAt, reason: reReview.reason, targetRevisionRef: headSha,
             ...(shared.tenureReviewRange ? { preserveBudgets: true } : {}) });
           if (!outcome?.triggered && outcome?.status !== 'already-pending') shared = refusedCloseout(shared, outcome);

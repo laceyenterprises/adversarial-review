@@ -106,7 +106,8 @@ export function buildRemediationPrompt(job, {
     maxRemediationRounds,
   });
   const promptTemplate = template ?? loadFollowUpPromptTemplate(ROOT, { stage: remediatorPromptStage });
-  const commentOnlyFinal = job?.finalRound === 'comment-only';
+  const commentOnlyFinal = job?.finalRound === 'comment-only'
+    || job?.closureHandoff?.reason === 'final-fix-all';
   const finalRoundRules = `## Comment-only final round (authoritative)
 This PR has a settled Comment only verdict. Address or explicitly account for its non-blocking findings in this one final remediation round. Do not request another adversarial review. Set \`reReview.requested = false\` and \`reReview.reason = null\` on success. The AMA closer takes the PR after completion and green required checks. Pending PR-head CI does not block this round: if checks are still running after your one bounded wait, record them as one \`operationalBlockers[]\` entry with \`"kind": "pending-ci"\`, and keep \`blockers[]\` empty unless a finding truly needs human input. Instructions elsewhere in this template that say to request re-review or assume a Request changes verdict do not apply to this job.`;
   const criticality = job.critical ? 'critical' : 'non-critical';
@@ -188,7 +189,7 @@ ${formatFencedBlock(JSON.stringify(job.closureHandoff.reviewContext, null, 2), '
 ` : ''}${formatSimplicityNoteContext(job.simplicityNote ?? extractSimplicityNote(job.reviewBody))}${livePackContext}${operatorGatedRemediationInstructions(job.reviewBody)}${governingDocContext}${buildObviousDocsGuidance({ repoRootRelative: true, includeSelfContainedHint: true })}
 
 ${job.closureHandoff?.reason === 'final-fix-all' ? `## Final Fix-All Round
-Sync with the current base branch, fix every finding in the latest review (including non-blocking and demoted findings), fix this PR's own red checks, validate and push. This is one additional builder round. Request a fresh full adversarial review of the pushed head; only a zero-finding exact-head review can take the daemon merge path. Remaining findings return to the configured hammer/operator fallback.
+Sync with the current base branch, fix every finding in the latest review (including non-blocking and demoted findings), fix this PR's own red checks, validate and push. This is one additional builder round. Record a disposition for every finding in your reply or commit, with validation evidence. A proven publication bound to this work order's settled Comment-only source review goes straight to exact-head closer validation against the original findings, source preservation and required CI, with no further automatic review. The closer must validate those dispositions before eligible merge. Set \`reReview.requested = false\` and \`reReview.reason = null\`; do not request another adversarial review. Independent review requirements for tenure and conflict-primary work remain authoritative.
 
 When, and only when, your fix removes or replaces the PR author's primary lines to satisfy a cited finding, generate these commit trailers yourself:
 - \`Reviewed-Head: <the cited review's exact 40-character commit SHA>\`

@@ -22,11 +22,25 @@ review reset. Existing actor/provenance checks remain at request boundaries.
 | `notified_at` | Successful waiting/refusal notice delivery; null retains notification debt across restart. Settlement clears an earlier waiting receipt so the terminal notice can be delivered. |
 
 A partial unique index permits one pending receipt per `(repo, pr, head)`.
-Concurrent requests coalesce without changing the waiting threshold. Receipts remain
-for request idempotency; there is no automatic retention sweeper.
+Concurrent requests coalesce without changing the waiting threshold. A receipt
+with actor `remediation-watch` and ID `remediation:<jobId>:<round>` comes from
+follow-up completion. A pending priority request supersedes a worker receipt
+at the same head, and the worker receipt and its aliases coalesce to it. The
+original notice threshold is retained. A later worker completion coalesces to
+an existing priority request and preserves the review row. Receipts remain for
+request idempotency; there is no automatic retention sweeper.
 
 The watcher observes waiting before credential and admission holds. An exact-head
-pending receipt permits one dispatch through reviewed-head dedup regardless of age. The existing
+pending priority receipt can bypass reviewed-head dedup. Worker completion
+receipts follow ordinary deduplication and the existing review ceilings. When
+closure takes a capped Comment-only cycle, the writer restores the delivered
+review identity and marks the worker receipt `refused` in one transaction.
+Cycle-cap hammer routing also refuses a worker receipt only while the routed
+row snapshot still matches after asynchronous ownership reads. Terminal
+closer-head, same-head budget and fleet-self-repair restorations settle the
+receipt atomically with the row change, using distinct refusal reasons.
+Failed row comparisons and priority receipts retain their pending intent.
+The worker receipt never authorizes an operator override. The existing
 head lease, durable reviewing claim and normal rereview ceilings still apply.
 Consumption occurs immediately before runtime dispatch under a SQLite write
 lock. Earlier capacity deferrals preserve the pending receipt and pending row.

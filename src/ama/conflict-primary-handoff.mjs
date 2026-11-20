@@ -76,7 +76,7 @@ function handoffReceipt(job, headSha, now, reason = CONFLICT_PRIMARY_HANDOFF_REA
       live: remediationJobOwnership(job, { now }).live,
       createdAt: job.createdAt, claimedAt: job.claimedAt, lastHeartbeatAt: job.lastHeartbeatAt,
       remediationWorker: job.remediationWorker,
-      headSha, closureHandoff: { reason, headSha, review: 'full' } },
+      headSha, closureHandoff: { reason, headSha, review: job.closureHandoff.review } },
   };
 }
 
@@ -135,7 +135,7 @@ export async function handoffConflictPrimary({
     rootDir, repo, prNumber, revisionRef: headSha,
     branch: pr.headRefName, baseBranch: pr.baseRefName, builderTag, riskClass,
     reviewBody: reviewBody ?? conflictPrimaryWorkOrder(headSha), reviewPostedAt: now,
-    closureHandoff: { reason, headSha, review: 'full',
+    closureHandoff: { reason, headSha, review: reason === CONFLICT_PRIMARY_HANDOFF_REASON ? 'full' : 'closeout',
       reviewContext: boundedReviewContext([...(pr.reviews || []), ...(pr.comments || []), ...reviewComments]) },
   });
   const job = result.job || existingJob(rootDir, result.duplicateOf);

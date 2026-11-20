@@ -2028,8 +2028,9 @@ scaling with the configuration above. CPU corroboration still uses synchronous
 ## Merge-message protection and remaining scope
 
 Daemon clean merge, the closer's inline terminal-remediation merge, fast-merge,
-and the hammer shell supply explicit `--subject` and `--body` from the shared
-`buildMergeCommitBody` helper. The subject is the sanitized PR title plus
+the hammer shell and the merge-agent fallback controller
+(`bin/merge-agent-close-controller.sh`) supply explicit `--subject` and
+`--body` from the shared `buildMergeCommitBody` helper. The subject is the sanitized PR title plus
 `(#<PR number>)`; an empty or unavailable title defers the merge rather than
 writing a placeholder. The live merge-agent candidate fetch requests and
 returns `title`; the daemon prefers a non-empty live title, then the candidate
@@ -2053,6 +2054,12 @@ Sanitizer exits 64 (invalid arguments) and 78 (missing canonical trailers) also
 write a terminal audit, release the lease and return 20 without retryable abort.
 Each merge phase clears rewrite evidence before any refusal.
 
+The merge-agent fallback controller releases its lease through its EXIT trap
+on every message refusal. Failed title/body reads, malformed PR-message JSON,
+non-string titles and empty titles exit 75 (retry later). Sanitizer failures
+or invalid decoded subjects/bodies exit 64 (escalate); none falls back to
+GitHub's default merge message.
+
 Activation checklist:
 
 1. Pause hammer dispatch and drain hammers dispatched with the older prompt before
@@ -2069,10 +2076,18 @@ Reviewed-By / Risk-Class / Eligibility-Reason / Eligibility-Trace block.
 Closer-dispatched daemon merges and hammer merges retain canonical dispatch
 trailers; use the structured audits for plain-daemon/fast-merge provenance.
 
-Remaining scope: the operator-fallback merge-agent prompt and v2 finalization
-adapter still use default GitHub messages. Follow-up work must add explicit
-subject/body support to their adapter contract and route both through the
-shared sanitizer. For `merge_method: merge`, the generated merge commit also
+The merge-agent fallback controller pipes the live PR body through
+`bin/merge-commit-body.mjs` with the trailer `Closed-By: merge-agent` (a closure
+marker like the daemon's and fast-merge's, not the canonical dispatch block) and
+passes the resulting `--subject` and `--body` alongside `--match-head-commit`.
+An unreadable PR title/body or an empty title refuses the merge with exit 75
+(retry later); a sanitizer or decode failure refuses with exit 64 (escalate).
+Both release the merge lease through the controller's EXIT trap; there is no
+unsanitized fallback.
+
+Remaining scope: the v2 finalization adapter still uses default GitHub messages.
+Follow-up work must add explicit subject/body support to its adapter contract
+and route it through the shared sanitizer. For `merge_method: merge`, the generated merge commit also
 uses the explicit sanitized `<PR title> (#N)` subject and full PR body plus
 closure trailers, replacing GitHub's default `Merge pull request #N from
 owner/branch` subject. Consumers parsing that default must accept the explicit

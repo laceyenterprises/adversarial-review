@@ -4802,7 +4802,8 @@ test('buildMergeAgentPrompt surfaces final-pass mode + triage contract when trig
     '--changed-files-from "$POST_REMEDIATION_SHA"', 'MERGE_REVALIDATION_EXIT=$?',
     'merge revalidation failed; escalate instead of retrying', 'jq -e \'.needsRevalidation == false\'',
     'jq -e \'.needsRevalidation == true\'', 'exit 64',
-    'gh pr merge "$MERGE_PR" --repo "$MERGE_REPO" --squash --auto --match-head-commit "$POST_REMEDIATION_SHA"',
+    'gh pr merge "$MERGE_PR" --repo "$MERGE_REPO" --squash --auto --match-head-commit "$POST_REMEDIATION_SHA" \\\n  --subject "$HAM_COMMIT_SUBJECT" --body "$HAM_COMMIT_BODY"',
+    '"$MERGE_NODE" "$MERGE_COMMIT_BODY_HELPER" "$MERGE_REPO" "$MERGE_PR" "$POST_REMEDIATION_SHA"',
     'If rebase or validation fails, exit non-zero here; the EXIT trap releases the lease.',
     'release --repo "$MERGE_REPO" --base "$MERGE_BASE" --pr "$MERGE_PR" --lease-id "$MERGE_LEASE_ID"',
   ]) assert.ok(script.includes(required), `shipped merge controller lost: ${required}`);

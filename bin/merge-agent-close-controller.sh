@@ -48,10 +48,6 @@ done
 MERGE_VALIDATIONS=$("$MERGE_NODE" "$MERGE_CLOSE_ROOT/bin/close-commands.mjs" "$MERGE_COMMANDS_FILE")
 
 MERGE_PR_STATE_JSON=$(mktemp "$HAM_RUN_DIR/merge-pr-state.XXXXXX")
-gh pr view "$MERGE_PR" --repo "$MERGE_REPO" --json headRefName,body > "$MERGE_PR_STATE_JSON"
-MERGE_HEAD_REF=$(jq -r '.headRefName' "$MERGE_PR_STATE_JSON")
-POST_REMEDIATION_SHA=$(git rev-parse HEAD)
-MERGE_GATE_ATTEMPT_HEAD="$POST_REMEDIATION_SHA"
 MERGE_LEASE_JSON="$HAM_RUN_DIR/merge-lease-acquire.json"
 MERGE_REVALIDATION_JSON=$(mktemp "$HAM_RUN_DIR/merge-revalidation.XXXXXX")
 MERGE_LEASE_ID=""
@@ -64,6 +60,13 @@ cleanup_merge_lease() {
   exit "$status"
 }
 trap cleanup_merge_lease EXIT
+
+gh pr view "$MERGE_PR" --repo "$MERGE_REPO" --json headRefName,headRefOid,body > "$MERGE_PR_STATE_JSON"
+MERGE_HEAD_REF=$(jq -er '.headRefName | strings | select(length > 0)' "$MERGE_PR_STATE_JSON")
+MERGE_SOURCE_HEAD=$(jq -er '.headRefOid | strings | select(test("^[0-9a-f]{40}$"))' "$MERGE_PR_STATE_JSON")
+git check-ref-format "refs/heads/$MERGE_HEAD_REF"
+POST_REMEDIATION_SHA=$(git rev-parse HEAD)
+MERGE_GATE_ATTEMPT_HEAD="$POST_REMEDIATION_SHA"
 
 set +e
 "$MERGE_NODE" "$CONTROLLER_HELPER" assert-owner || exit 125
@@ -84,6 +87,10 @@ MERGE_LEASE_ID=$(jq -r '.leaseId' "$MERGE_LEASE_JSON")
 # While holding the lease, rebase onto the latest base and validate the exact rebased head.
 # If rebase or validation fails, exit non-zero here; the EXIT trap releases the lease.
 git fetch --prune origin "$MERGE_BASE" "$MERGE_HEAD_REF"
+if ! git merge-base --is-ancestor "$MERGE_SOURCE_HEAD" "$POST_REMEDIATION_SHA"; then
+  echo 'merge close: source-publication-refused; local head does not contain the captured PR head' >&2
+  exit 20
+fi
 VALIDATION_BASE=$(git rev-parse --verify "origin/$MERGE_BASE^{commit}")
 # GENCONFLICT-01: registered committed outputs are regenerated per replayed commit.
 # Failure aborts the rebase and removes this worktree; stop on nonzero status.
@@ -101,7 +108,7 @@ EOF_MERGE_VALIDATIONS
 git fetch --prune origin "$MERGE_BASE"
 CURRENT_BASE=$(git rev-parse --verify "origin/$MERGE_BASE^{commit}")
 POST_REMEDIATION_SHA=$(git rev-parse HEAD)
-git push --force-with-lease origin "HEAD:$MERGE_HEAD_REF"
+git push --force-with-lease="refs/heads/$MERGE_HEAD_REF:$MERGE_SOURCE_HEAD" origin "$POST_REMEDIATION_SHA:refs/heads/$MERGE_HEAD_REF"
 
 set +e
 "$MERGE_NODE" "$MERGE_LEASE_HELPER" needs-revalidation --repo-path "$PWD" --base "$MERGE_BASE" --validation-base "$VALIDATION_BASE" --current-base "$CURRENT_BASE" --changed-files-from "$POST_REMEDIATION_SHA" > "$MERGE_REVALIDATION_JSON"

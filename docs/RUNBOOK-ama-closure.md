@@ -7801,22 +7801,34 @@ This permits only a bounded exact-head review request; merge remains refused.
 CI, protection, labels and live ownership refusals still prevent recovery.
 
 HAMVERIFY-01: hammer publication uses GitHub's `createCommitOnBranch` API with
-its own entitled App token and an expected head lease, only for one single-parent
-local commit descending from the freshly fetched remote head. Rebased and
-multi-commit histories use the lease-protected git fallback: the API cannot
-preserve their ancestry or all commit messages. Both ordinary remediation and
-conflict resolution invoke the versioned publication procedure. GitHub signs the commit;
-the publisher compares the returned and fetched tree IDs with the tested local
-tree before adopting the new SHA. API-created fleet commits have the fleet App
-as author, GitHub `web-flow` as committer, and verified/valid verification.
-Unsigned git-pushed commits cannot qualify merely through an email-mapped login.
-The publisher retries transient `gh pr view`, API and `git fetch` transport
-failures at most three times with 500/1000ms backoff and a 15-second per-attempt
-timeout, within the existing 120-second publication window. Permanent errors
-and malformed responses take the fallback immediately. Mutation retries retain
-the original expected-head CAS; an ambiguous server-side success cannot authorize
-an overwrite. Both fallback git push routes release the merge lease and abort
-on rejection, including a stale lease following an API timeout.
+an entitled App token and an exact expected head for a single-parent commit
+descending from the freshly fetched PR head. GitHub signs the commit and the
+publisher compares the returned and fetched tree IDs with the local tree before
+adopting the new SHA. API-created fleet commits have the fleet App as author,
+GitHub `web-flow` as committer, and verified/valid verification. Unsigned Git
+commits still require the existing independent provenance checks.
+
+LAC-2252: only an explicit pre-mutation `git-fallback` result authorizes the Git
+publisher. Supported cases include multi-commit history, file modes the API
+cannot preserve, an exact tree replay of the captured source onto the PR base,
+and a conflict repair bound to its recorded source, branch and local head.
+The Git publisher independently checks ownership, the live PR head and branch,
+the Git remote ref and candidate ancestry. It pushes the inspected commit with
+an explicit lease on that exact branch and expected head. An identical tip is a
+no-op. If the remote tip descends from the local candidate, the closer stops
+with `head-changed` and preserves the concurrent commits. Missing or unreadable
+proof, identity or head evidence stops with `source-publication-refused`.
+Credential refresh failures retain `git-credential-refresh-failed`.
+
+Transient transport failures retain bounded retries and the original
+expected-head CAS. An API timeout, malformed response, server refusal or
+unverified publication stops without Git fallback. The current run retains
+local commits, releases custody, and stops without starting another review.
+The standalone merge-agent controller also requires its local rebase input to
+contain the captured PR head and pins publication to that head and branch.
+The server-side rebase uses its original expected-head CAS. The identity-only
+repair in Appendix E1 retains its exact-old-head lease and tree, message and
+parent checks.
 
 HAMCLOSE-01: the starting PR head is captured once in `HAM_BASE_HEAD`, before
 edits. `bin/hammer-base-head.mjs` uses `execGhWithRetry`: three total transport

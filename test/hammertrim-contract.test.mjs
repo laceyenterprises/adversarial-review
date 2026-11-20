@@ -240,12 +240,12 @@ echo "STATUS=$status HELD=$HAM_MERGE_LEASE_HELD PUBLISHED=\${HAM_PUBLISHED_AUDIT
   assert.match(failure.stdout, /LEASE_RELEASED/);
   assert.match(failure.stdout, /STATUS=1 HELD=0 PUBLISHED=$/m);
 });
-test('API fallback push rejection releases the lease under set -e for both push routes', t => {
+test('typed publication stops release the lease under set -e', t => {
   const dir = mkdtempSync(join(tmpdir(), 'hammer-fallback-push-'));
   t.after(() => rmSync(dir, { recursive: true, force: true }));
   writeFileSync(join(dir, 'publisher'), `#!/bin/sh
 case "$1" in
-  */hammer-owned-publication.mjs) shift 5; exec "$@" ;;
+  */hammer-owned-publication.mjs) printf '%s\\n' "$*" > "$PUSH_ARGS_FILE"; exit 1 ;;
   */metered-gh.mjs) exec "$REAL_NODE" "$@" ;;
   */hammer-progress.mjs) printf '%s\\n' "$2 $3" >> "$PROGRESS_ARGS_FILE" ;;
   */hammer-pushed-attestation.mjs) printf '%s\\n' "$*" > "$ATTESTATION_ARGS_FILE"; echo '{}' ;;
@@ -259,7 +259,7 @@ esac
   const script = join(dir, 'publish.sh');
   writeFileSync(script, source);
   for (const result of [
-    { route: 're-review', branch: 'worker', fallbackHead: 'a'.repeat(40) },
+    { route: 'git-fallback', branch: 'worker', fallbackHead: 'a'.repeat(40), localHead: 'b'.repeat(40) },
     { route: 're-review', reason: 'API publication timed out' },
     { route: 're-review', branch: 'worker', fallbackHead: 'b'.repeat(40),
       previousHead: 'a'.repeat(40), pushedHead: 'b'.repeat(40) },
@@ -288,9 +288,9 @@ echo SHOULD_NOT_CONTINUE
         `remediation-pushed ${result.pushedHead}\n`, 'known pushed head returns before the ordinary progress call');
     } else {
       assert.equal(existsSync(env.PROGRESS_ARGS_FILE), false, 'a rejected push earns no publication receipt');
-      assert.equal(readFileSync(env.PUSH_ARGS_FILE, 'utf8').trim(), result.branch
-        ? `push origin HEAD:refs/heads/worker --force-with-lease=refs/heads/worker:${result.fallbackHead}`
-        : 'push --force-with-lease');
+      if (result.route === 'git-fallback') assert.match(readFileSync(env.PUSH_ARGS_FILE, 'utf8'),
+        new RegExp(` head ${result.localHead} worker ${result.fallbackHead}$`, 'm'));
+      else assert.equal(existsSync(env.PUSH_ARGS_FILE), false);
     }
   }
 });
@@ -1018,13 +1018,14 @@ exit "$rc"`], env);
 }
 
 
-for (const route of ['API commit', 'git fallback', 'git fallback without API head']) {
+for (const route of ['API commit', 'git fallback']) {
   test(`HAMCLOSE-07 publication remembers its exact head: ${route}`, t => {
     const dir = mkdtempSync(join(tmpdir(), 'hammer-pushed-head-'));
     t.after(() => rmSync(dir, { recursive: true, force: true }));
     const before = 'a'.repeat(40), pushed = 'b'.repeat(40);
     writeFileSync(join(dir, 'publisher'), `#!/bin/sh
 case "$1" in
+  */hammer-owned-publication.mjs) echo '{"route":"published","head":"${pushed}","previousHead":"${before}"}' ;;
   */hammer-pushed-attestation.mjs)
     printf '%s\\n' "$*" > "$ATTESTATION_ARGS_FILE"
     [ "\${PUSH_ATTESTATION_FAIL:-0}" -eq 0 ] || exit 1
@@ -1034,7 +1035,7 @@ esac
 `, { mode: 0o755 });
     writeFileSync(join(dir, 'git'), `#!/bin/sh\ncase "$1" in rev-parse) echo ${pushed};; push) exit 0;; *) exit 1;; esac\n`, { mode: 0o755 });
     const publication = route === 'API commit' ? { route: 'published', head: pushed, previousHead: before }
-      : { route: 're-review', ...(route === 'git fallback' ? { previousHead: before, fallbackHead: before, branch: 'repair' } : {}) };
+      : { route: 'git-fallback', previousHead: before, fallbackHead: before, localHead: pushed, branch: 'repair' };
     const env = { HAM_PR_URL: 'https://github.com/fixture/repo/pull/1', HAM_PR_NUMBER: '1',
       HAM_REVIEWED_SHA: before, HAM_REPO: 'fixture/repo', HAM_RUN_DIR: dir, HAM_ROOT_DIR: root, HAM_HQ_ROOT: dir,
       HAM_REVIEWER: 'synthetic-reviewer', HAM_RISK_CLASS: 'low',

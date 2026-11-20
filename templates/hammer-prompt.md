@@ -922,7 +922,7 @@ For commit/validation progress receipt semantics, read Appendix G4.
 The commit helper requires `HEAD` to differ from and descend from `HAM_TARGET_REMEDIATION_SHA || HAM_REVIEWED_SHA` before recording `remediation-committed`; an already-advanced dispatch target earns no credit by itself. The bounded validation helper records `validation-passed` or `validation-failed` for completed commands (exit 0 or 1–123); timeouts remain unknown. These validation receipts are advisory liveness signals, not proof tests ran or passed. Each receipt kind earns one bounded outcome slice per run; repeating it earns no additional time.
 <!-- /hammer-reference:G4 -->
 
-Before head validation, the close command publishes a new local commit (`HAM_COMMIT_PUBLICATION_ONLY=1` with `hammer-publish.sh`) and stops on failure. Ordinary remediation retains the conflict-repair guards.
+Before head validation, the close command publishes a new local commit (`HAM_COMMIT_PUBLICATION_ONLY=1` with `hammer-publish.sh`) and stops on failure. For `head-changed` or `source-publication-refused`, preserve the local commits and stop this run. The versioned publisher alone chooses whether to use Git fallback.
 
 Refresh and validate the live head:
 

@@ -2,69 +2,55 @@
 import { withHammerPublication } from '../src/ama/hammer-publication-ownership.mjs';
 import { hammerNetworkCall, hammerLocalGit } from '../src/ama/hammer-api-network.mjs';
 import { hammerPublicationFailureReason, publishHammerTree } from '../src/ama/hammer-api-publish.mjs';
-import { conflictPublishBinding } from '../src/ama/hammer-conflict-binding.mjs';
+import { inspectHammerSource, readHammerSource } from '../src/ama/hammer-source-publication.mjs';
+
 const [repo, pr] = process.argv.slice(2);
-const git = (...args) => hammerLocalGit(args);
+const git = (...args) => hammerLocalGit(['--no-replace-objects', ...args]).toString();
 const network = hammerNetworkCall;
 const api = async (path, input) => JSON.parse((await network('gh',
   ['api', path, ...(input ? ['--input', '-'] : [])], input ? JSON.stringify(input) : undefined)).toString());
-let fallback = {};
-let previousHead;
+const number = String(pr).match(/\/pull\/([1-9]\d*)/)?.[1] || pr;
+let previousHead, pushedHead, localHead;
 try {
-  if (git('status', '--porcelain').length) throw new Error('local tree has uncommitted changes');
-  // HAMCONFLICTCUSTODY-01: a conflict-repaired detached head publishes to its
-  // recorded branch, leased on the source the repair replayed, not the live head.
-  const conflict = conflictPublishBinding(process.env.HAM_RUN_DIR, () => git('rev-parse', 'HEAD').toString());
-  if (conflict) fallback = { fallbackHead: conflict.source, branch: conflict.branch };
-  const number = String(pr).match(/\/pull\/([1-9]\d*)/)?.[1] || pr;
-  const live = JSON.parse(await network('gh', ['api', `repos/${repo}/pulls/${number}`]));
-  const info = { headRefName: live.head?.ref, headRefOid: live.head?.sha };
-  previousHead = info.headRefOid;
-  if (!conflict) fallback = { fallbackHead: info.headRefOid, branch: info.headRefName };
-  else if (info.headRefName !== conflict.branch) {
-    fallback = {};
-    throw new Error('conflict-repaired head was recorded for another branch than the PR head');
-  } else if (info.headRefOid !== conflict.source) {
-    throw new Error('PR head moved after the conflict repair captured its source; the exact-head lease refuses publication');
-  }
-  await network('git', ['fetch', 'origin', info.headRefOid]);
-  // createCommitOnBranch preserves trees, not local ancestry. A rebased head
-  // must use the lease-protected git route so the new base remains an ancestor.
-  try {
-    git('merge-base', '--is-ancestor', info.headRefOid, 'HEAD');
-  } catch (error) {
-    // Exit 1 is Git's negative ancestry proof. A killed/failed probe is unknown.
-    if (error.status !== 1 || error.signal || error.killed) throw error;
-    throw new Error('local HEAD does not descend from the remote head; preserve rebased history with git');
-  }
-  const count = git('rev-list', '--count', `${info.headRefOid}..HEAD`).toString().trim();
-  if (count !== '0' && (count !== '1'
-    || git('rev-list', '--parents', '-n', '1', 'HEAD').toString().trim().split(/\s+/).length !== 2)) {
-    throw new Error('API publication requires exactly one single-parent local commit; preserve history and messages with git');
-  }
-  const entries = ref => new Map(git('ls-tree', '-rz', ref).toString().split('\0').filter(Boolean).map(entry => {
-    const tab = entry.indexOf('\t');
-    const meta = entry.slice(0, tab), path = entry.slice(tab + 1);
-    const [mode, , oid] = meta.split(' ');
-    return [path, { mode, oid }];
-  }));
-  const before = entries(info.headRefOid), after = entries('HEAD');
-  const changes = [...new Set([...before.keys(), ...after.keys()])].filter(path => before.get(path)?.oid !== after.get(path)?.oid || before.get(path)?.mode !== after.get(path)?.mode)
-    .map(path => ({ path, oldMode: before.get(path)?.mode, mode: after.get(path)?.mode,
-      contents: after.get(path)?.mode === '100644' ? git('cat-file', 'blob', after.get(path).oid).toString('base64') : undefined }));
-  const result = await withHammerPublication({ repo, prNumber: number, previousHead: info.headRefOid }, () => publishHammerTree({ repo, branch: info.headRefName, expectedHead: info.headRefOid,
-    localTree: git('rev-parse', 'HEAD^{tree}').toString().trim(), message: git('log', '-1', '--format=%B').toString().trim(), changes, api }));
-  fallback = { fallbackHead: result.head || result.fallbackHead || info.headRefOid, branch: info.headRefName,
-    // Preserve the verified publication even if subsequent fetch/reset fails.
-    ...(result.route === 'published' ? { pushedHead: result.head } : {}) };
+  const result = await withHammerPublication({ repo, prNumber: number }, async beginMutation => {
+    const source = await readHammerSource(repo, number);
+    const { branch } = source;
+    previousHead = source.previousHead;
+    localHead = git('rev-parse', '--verify', 'HEAD^{commit}').trim();
+    const kind = await inspectHammerSource({ ...source, localHead });
+    if (kind === 'unchanged') return { route: 'unchanged', head: localHead };
+    const fallback = { route: 'git-fallback', branch, fallbackHead: previousHead, localHead };
+    if (kind === 'rewrite' || git('rev-list', '--count', `${previousHead}..${localHead}`).trim() !== '1'
+      || git('rev-list', '--parents', '-n', '1', localHead).trim().split(/\s+/).length !== 2) return fallback;
+    const entries = ref => new Map(git('ls-tree', '-rz', ref).split('\0').filter(Boolean).map(entry => {
+      const tab = entry.indexOf('\t');
+      const meta = entry.slice(0, tab), path = entry.slice(tab + 1);
+      const [mode, , oid] = meta.split(' ');
+      return [path, { mode, oid }];
+    }));
+    const before = entries(previousHead), after = entries(localHead);
+    const changes = [...new Set([...before.keys(), ...after.keys()])]
+      .filter(path => before.get(path)?.oid !== after.get(path)?.oid || before.get(path)?.mode !== after.get(path)?.mode)
+      .map(path => ({ path, oldMode: before.get(path)?.mode, mode: after.get(path)?.mode,
+        contents: after.get(path)?.mode === '100644'
+          ? hammerLocalGit(['--no-replace-objects', 'cat-file', 'blob', after.get(path).oid]).toString('base64') : undefined }));
+    const result = await publishHammerTree({ repo, branch, expectedHead: previousHead,
+      localTree: git('rev-parse', `${localHead}^{tree}`).trim(), message: git('log', '-1', '--format=%B', localHead).trim(), changes,
+      api: (path, input) => { if (input) beginMutation(); return api(path, input); } });
+    return result.route === 'git-fallback' ? { ...result, ...fallback } : result;
+  });
   if (result.route === 'published') {
-    await network('git', ['fetch', 'origin', result.head]);
-    if (git('rev-parse', `${result.head}^{tree}`).toString().trim() !== result.tree) throw new Error('fetched tree mismatch');
+    pushedHead = result.head;
+    await network('git', ['fetch', '--no-recurse-submodules', 'origin', result.head]);
+    if (git('rev-parse', `${result.head}^{tree}`).trim() !== result.tree) throw new Error('fetched tree mismatch');
+    if (git('rev-parse', 'HEAD').trim() !== localHead || git('status', '--porcelain')) {
+      throw new Error('scratch changed during API publication');
+    }
     git('reset', '--hard', result.head);
   }
   process.stdout.write(`${JSON.stringify({ ...result, previousHead })}\n`);
 } catch (error) {
-  process.stdout.write(`${JSON.stringify({ route: 're-review', reason: hammerPublicationFailureReason(error),
-    ...(error.gitCredentialRefreshFailed ? { phaseOutcome: 'git-credential-refresh-failed' } : {}),
-    ...fallback, previousHead })}\n`);
+  process.stdout.write(`${JSON.stringify({ route: 'refused', reason: hammerPublicationFailureReason(error),
+    phaseOutcome: error.gitCredentialRefreshFailed ? 'git-credential-refresh-failed' : error.phaseOutcome ?? 'source-publication-refused',
+    pushedHead, previousHead })}\n`);
 }

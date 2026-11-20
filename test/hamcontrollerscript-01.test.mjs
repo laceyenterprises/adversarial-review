@@ -599,13 +599,14 @@ test('ham_gh, ham_git and ham_pr resolve to deployed executables with a minimal 
 // ------------------------------------------------------------ merge-agent close
 
 function mergeFixture(t, { commands, predecessors = '', ciCostExit = 0, leaseExit = 0, validateExit = 0,
-  afterController = false } = {}) {
+  afterController = false, movedSource = false } = {}) {
   const dir = scratch(t, 'hamcontrollerscript-merge-');
   const checkout = join(dir, 'checkout');
   const bin = join(dir, 'fake-bin');
   const run = join(dir, 'run');
   mkdirSync(bin); mkdirSync(run);
   const shas = gitRepo(checkout);
+  const source = movedSource ? 'c'.repeat(40) : shas.head;
   const log = join(dir, 'events.log');
   const realGit = execFileSync('/bin/sh', ['-c', 'command -v git'], { encoding: 'utf8' }).trim();
   writeFileSync(join(bin, 'node'), `#!/bin/bash
@@ -629,7 +630,7 @@ esac
   writeFileSync(join(bin, 'gh'), `#!/bin/bash
 printf 'gh %s\\n' "$*" >> "$FIXTURE_LOG"
 case "$*" in
-  "pr view 42 --repo fixture/repo --json headRefName,body") echo '{"headRefName":"feature","body":""}' ;;
+  "pr view 42 --repo fixture/repo --json headRefName,headRefOid,body") echo '{"headRefName":"feature","headRefOid":"${source}","body":""}' ;;
   "pr view 42 --repo fixture/repo --json body --jq"*) printf '%s\\n' "$FIXTURE_PREDECESSORS" ;;
   "pr view 7 --repo fixture/repo --json state --jq"*) echo OPEN ;;
 esac
@@ -666,6 +667,15 @@ exec ${shellQuote(realGit)} "$@"
   return { checkout, shas, close, events };
 }
 
+test('the standalone publisher releases the merge lease when its local input cannot contain the PR head', async t => {
+  const f = mergeFixture(t, { movedSource: true });
+  const result = await f.close();
+  assert.equal(result.status, 20, result.stderr);
+  assert.match(result.stderr, /source-publication-refused/);
+  assert.ok(f.events().some(event => event.startsWith('lease-release')));
+  assert.ok(!f.events().some(event => /^(?:git push|hq generated-conflicts|validate)/.test(event)));
+});
+
 test('the shipped merge-agent controller merges only with --match-head-commit on the validated head', async t => {
   const f = mergeFixture(t);
   const result = await f.close();
@@ -675,7 +685,7 @@ test('the shipped merge-agent controller merges only with --match-head-commit on
   assert.ok(at('controller assert-owner') < at('lease-acquire'));
   assert.ok(at('lease-acquire') < at('hq generated-conflicts rebase'));
   assert.ok(at('hq generated-conflicts rebase') < at('validate --pytest -- tests/test_example.py'));
-  assert.ok(at('validate') < at('git push --force-with-lease'));
+  assert.ok(at('validate') < at(`git push --force-with-lease=refs/heads/feature:${f.shas.head} origin ${f.shas.head}:refs/heads/feature`));
   assert.ok(at('git push') < at('ci-cost'));
   const merge = events.find(event => event.startsWith('gh pr merge'));
   assert.equal(merge, `gh pr merge 42 --repo fixture/repo --squash --auto --match-head-commit ${f.shas.head}`);

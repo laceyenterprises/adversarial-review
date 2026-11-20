@@ -218,6 +218,7 @@ export const HAMMER_STOP_ORIGINS = Object.freeze({
   'published-head-probe-directory-failed': 'closer',
   'published-head-snapshot-write-failed': 'closer',
   'published-head-sync-failed': 'closer',
+  'source-publication-refused': 'closer',
   'pushed-attestation-unavailable': 'closer',
   'rebase-snapshot-write-failed': 'closer',
   'rebased-head-sync-failed': 'closer',

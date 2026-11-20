@@ -65,11 +65,13 @@ test('server-generated head is recorded before releasing the publication barrier
 
 test('fallback CAS input grants no publication custody; a returned partial publication does', async t => {
   const f = fixture(t);
-  await withHammerPublication({ ...f, previousHead: OTHER }, async () =>
-    ({ route: 're-review', fallbackHead: OTHER }));
+  await withHammerPublication(f, async () =>
+    ({ route: 'git-fallback', fallbackHead: OTHER }));
   assert.deepEqual(JSON.parse(readFileSync(hammerPublicationPath(f.rootDir, f), 'utf8')).heads, []);
-  await withHammerPublication({ ...f, previousHead: OTHER }, async () =>
-    ({ route: 're-review', fallbackHead: HEAD }));
+  await withHammerPublication(f, async () =>
+    ({ route: 'refused', observedHead: HEAD, mutationUncertain: true }));
+  const record = JSON.parse(readFileSync(hammerPublicationPath(f.rootDir, f), 'utf8'));
+  assert.deepEqual(record.heads, [HEAD]);
   assert.equal(probe(f).reason, 'active-closer-published-head');
   assert.equal(activeHammerPublication({ ...f, headSha: OTHER, now: Date.parse(NOW), isAlive: () => true }), null);
 });
@@ -191,7 +193,7 @@ test('a dispatch exception still persists and alerts typed ownerlessness', async
 
 test('ambiguous publication retains a typed probe deferral only until controller exit', async t => {
   const f = fixture(t);
-  await assert.rejects(withHammerPublication(f, async () => { throw new Error('synthetic transport failure'); }));
+  await assert.rejects(withHammerPublication(f, async beginMutation => { beginMutation(); throw new Error('synthetic transport failure'); }));
   assert.equal(probe(f).reason, 'closer-publication-unconfirmed');
   assert.equal(hammerHeadOwnership(probe(f), HEAD), null, 'uncertainty grants no head authority');
   f.controller.state = 'quiescent'; f.save();

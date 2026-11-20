@@ -17,6 +17,7 @@ import { amaAuthoritativeReviewerLoginsForModel } from '../src/ama/reviewer-auth
 const exec = promisify(execFile);
 const cli = fileURLToPath(new URL('../bin/hammer-api-publish.mjs', import.meta.url));
 const repoRoot = fileURLToPath(new URL('../', import.meta.url));
+const beforeSha = 'a'.repeat(40), localSha = 'b'.repeat(40), publishedSha = 'c'.repeat(40);
 const networkClockFixture = join(repoRoot, 'test/fixtures/virtual-hammer-network-clock.mjs');
 
 function fixture(t, scenario, target = 'pr') {
@@ -34,9 +35,11 @@ const scenario = ${JSON.stringify(scenario)};
 const target = ${JSON.stringify(target)};
 const callsFile = ${JSON.stringify(callsFile)};
 const args = process.argv.slice(2);
+if (args[0] === '--no-replace-objects') args.shift();
+const before = ${JSON.stringify(beforeSha)}, local = ${JSON.stringify(localSha)}, published = ${JSON.stringify(publishedSha)};
 const input = args.includes('--input') ? JSON.parse(readFileSync(0, 'utf8')) : undefined;
 const key = command === 'gh' ? (args[0] === 'pr' || args[1]?.endsWith('/pulls/1') ? 'pr' : args[1] === 'graphql' ? 'mutation' : 'verification')
-  : args[0] === 'fetch' ? 'fetch-' + args[2] : args[0];
+  : args[0] === 'fetch' ? 'fetch-' + (args.at(-1) === before ? 'before' : 'published') : args[0];
 const calls = JSON.parse(readFileSync(callsFile, 'utf8'));
 const attempt = calls.filter(call => call.key === key).length + 1;
 calls.push({ key, args, input, freshCredential: process.env.GH_TOKEN === 'synthetic-refreshed-hammer',
@@ -54,17 +57,17 @@ if (key === target) {
   if (scenario === 'malformed') { process.stdout.write('{'); process.exit(0); }
 }
 if (command === 'gh') {
-  if (key === 'pr') process.stdout.write(JSON.stringify({ head: { ref: 'worker', sha: 'before' } }));
-  else if (key === 'mutation') process.stdout.write(JSON.stringify({ data: { createCommitOnBranch: { commit: { oid: 'published' } } } }));
+  if (key === 'pr') process.stdout.write(JSON.stringify({ head: { ref: 'worker', sha: before } }));
+  else if (key === 'mutation') process.stdout.write(JSON.stringify({ data: { createCommitOnBranch: { commit: { oid: published } } } }));
   else if (key === 'verification') process.stdout.write(JSON.stringify({ commit: { tree: { sha: 'tree' } } }));
   else fail('unexpected gh call');
 } else {
-  if (key === 'merge-base') process.exit(scenario === 'rebased' ? 1 : 0);
+  if (key === 'merge-base') process.exit(args[2] === local ? (scenario === 'ancestor' ? 0 : 1) : 0);
   if (key === 'rev-list') { process.stdout.write(args.includes('--count') ? (scenario === 'multiple' ? '2' : '1') : (scenario === 'merge' ? 'local before other' : 'local before')); process.exit(0); }
-  if (key === 'status' || key.startsWith('fetch-') || key === 'reset') process.exit(0);
-  if (key === 'ls-tree') process.stdout.write('100644 blob ' + (args[2] === 'HEAD' ? 'new' : 'old') + '\\tfile\\0');
+  if (key === 'status' || key === 'check-ref-format' || key.startsWith('fetch-') || key === 'reset') process.exit(0);
+  if (key === 'ls-tree') process.stdout.write('100644 blob ' + (args[2] === local ? 'new' : 'old') + '\\tfile\\0');
   else if (key === 'cat-file') process.stdout.write('a');
-  else if (key === 'rev-parse') process.stdout.write('tree\\n');
+  else if (key === 'rev-parse') process.stdout.write(args.includes('--is-shallow-repository') ? 'false\\n' : args.at(-1).endsWith('^{tree}') ? 'tree\\n' : local + '\\n');
   else if (key === 'log') process.stdout.write('HAM\\ntrailers\\n');
   else fail('unexpected git call');
 }
@@ -83,7 +86,7 @@ if (command === 'gh') {
   ]) delete fixtureEnv[name];
   return {
     run: async (env = {}) => JSON.parse((await exec(process.execPath, ['--import', networkClockFixture, cli, 'fixture/repo', '1'], {
-      env: { ...fixtureEnv, ...env, HAM_TEST_NETWORK_DELAYS: delaysFile }, timeout: 20000,
+      env: { ...fixtureEnv, HAMMER_LACEY_GH_TOKEN: 'synthetic-hammer', ...env, HAM_TEST_NETWORK_DELAYS: delaysFile }, timeout: 20000,
     })).stdout),
     calls: () => JSON.parse(readFileSync(callsFile, 'utf8')),
     delays: () => readFileSync(delaysFile, 'utf8').trim().split('\n').filter(Boolean).map(Number),
@@ -105,13 +108,13 @@ test('API publisher refreshes the entitled credential for Git fetch as well as G
 
 test('API publisher retries every network subprocess and preserves mutation CAS and contents', async t => {
   const f = fixture(t, 'recover');
-  assert.deepEqual(await f.run(), { route: 'published', head: 'published', tree: 'tree', previousHead: 'before' });
+  assert.deepEqual(await f.run(), { route: 'published', head: publishedSha, tree: 'tree', previousHead: beforeSha });
   for (const key of ['pr', 'mutation', 'verification', 'fetch-before', 'fetch-published']) {
     assert.equal(f.calls().filter(call => call.key === key).length, 2, key);
   }
   const mutations = f.calls().filter(call => call.key === 'mutation');
   assert.deepEqual(mutations[0].input, mutations[1].input);
-  assert.equal(mutations[0].input.variables.input.expectedHeadOid, 'before');
+  assert.equal(mutations[0].input.variables.input.expectedHeadOid, beforeSha);
   assert.deepEqual(mutations[0].input.variables.input.fileChanges.additions, [{ path: 'file', contents: 'YQ==' }]);
   assert.equal(f.calls().at(-1).key, 'reset');
   assert.deepEqual(f.delays(), [500, 500, 500, 500, 500],
@@ -123,14 +126,14 @@ for (const target of ['pr', 'mutation', 'verification', 'fetch-before', 'fetch-p
     test(`API publisher ${target} fails closed after ${scenario}`, async t => {
       const f = fixture(t, scenario, target);
       const result = await f.run();
-      assert.equal(result.route, 're-review');
+      assert.equal(result.route, 'refused');
       assert.equal(f.calls().filter(call => call.key === target).length, attempts);
       assert.deepEqual(f.delays(), scenario === 'exhaust' ? [500, 1000] : [],
         'only transient errors back off, with no sleep after the final attempt');
       assert.ok(!f.calls().some(call => call.key === 'reset'));
-      if (target !== 'pr') assert.equal(result.fallbackHead,
-        ['verification', 'fetch-published'].includes(target) ? 'published' : 'before');
-      if (target === 'fetch-published') assert.equal(result.pushedHead, 'published',
+      assert.equal(result.fallbackHead, undefined);
+      if (target === 'verification') assert.equal(result.observedHead, publishedSha);
+      if (target === 'fetch-published') assert.equal(result.pushedHead, publishedSha,
         'scratch fetch failure must retain the verified API publication for provenance');
     });
   }
@@ -143,86 +146,40 @@ for (const target of ['fetch-before', 'fetch-published']) {
     assert.equal(result.phaseOutcome, 'git-credential-refresh-failed');
     assert.equal(f.calls().filter(call => call.key === target).length, 1);
     assert.ok(!f.calls().some(call => call.key === 'reset'));
-    assert.equal(result.pushedHead, target === 'fetch-published' ? 'published' : undefined);
+    assert.equal(result.pushedHead, target === 'fetch-published' ? publishedSha : undefined);
   });
 }
 
 test('an ambiguous mutation retains the original CAS and rejects unsafe publication', async t => {
   const f = fixture(t, 'ambiguous', 'mutation');
   const result = await f.run();
-  assert.equal(result.route, 're-review');
-  assert.equal(result.fallbackHead, 'before');
+  assert.equal(result.route, 'refused');
+  assert.equal(result.fallbackHead, undefined);
   const mutations = f.calls().filter(call => call.key === 'mutation');
   assert.equal(mutations.length, 2);
   assert.deepEqual(mutations[0].input, mutations[1].input);
   assert.ok(!f.calls().some(call => call.key === 'reset'));
 });
 
-test('malformed successful responses fall back without transport retries', async t => {
+test('malformed successful responses refuse without transport retries', async t => {
   const f = fixture(t, 'malformed');
-  assert.equal((await f.run()).route, 're-review');
+  assert.equal((await f.run()).route, 'refused');
   assert.equal(f.calls().filter(call => call.key === 'pr').length, 1);
 });
 
-for (const scenario of ['rebased', 'multiple', 'merge']) {
+for (const scenario of ['ancestor', 'multiple', 'merge']) {
   test(`API publisher refuses ${scenario} history before mutation or reset`, async t => {
     const f = fixture(t, scenario);
     const result = await f.run();
-    assert.equal(result.route, 're-review');
-    assert.equal(result.fallbackHead, 'before');
-    assert.equal(result.branch, 'worker');
+    assert.equal(result.route, scenario === 'ancestor' ? 'refused' : 'git-fallback');
+    assert.equal(result.fallbackHead, scenario === 'ancestor' ? undefined : beforeSha);
+    assert.equal(result.branch, scenario === 'ancestor' ? undefined : 'worker');
     assert.ok(!f.calls().some(call => ['mutation', 'reset'].includes(call.key)));
   });
 }
 
-test('a real rebase onto a moved base retains local ancestry and refuses the API route', async t => {
-  const root = mkdtempSync(join(tmpdir(), 'hammer-rebased-history-'));
-  t.after(() => rmSync(root, { recursive: true, force: true }));
-  const work = join(root, 'work'), remote = join(root, 'remote.git'), bin = join(root, 'bin');
-  mkdirSync(work); mkdirSync(bin);
-  const git = (...args) => exec('git', args, { cwd: work, timeout: 10000 });
-  await git('init', '--bare', remote);
-  await git('init', '-b', 'main');
-  await git('config', 'user.name', 'Fixture');
-  await git('config', 'user.email', 'fixture@example.invalid');
-  await git('remote', 'add', 'origin', remote);
-  writeFileSync(join(work, 'base'), 'old base\n');
-  await git('add', '.'); await git('commit', '-m', 'base');
-  await git('checkout', '-b', 'worker');
-  writeFileSync(join(work, 'feature'), 'remediation\n');
-  await git('add', '.'); await git('commit', '-m', 'HAM remediation');
-  await git('push', 'origin', 'worker');
-  const remoteHead = (await git('rev-parse', 'HEAD')).stdout.trim();
-  await git('checkout', 'main');
-  writeFileSync(join(work, 'base'), 'moved base\n');
-  await git('add', '.'); await git('commit', '-m', 'move base');
-  const baseHead = (await git('rev-parse', 'HEAD')).stdout.trim();
-  await git('checkout', 'worker'); await git('rebase', 'main');
-  const localHead = (await git('rev-parse', 'HEAD')).stdout.trim();
-  const callsFile = join(root, 'gh-calls');
-  writeFileSync(join(bin, 'gh'), `#!${process.execPath}
-import { appendFileSync } from 'node:fs';
-appendFileSync(${JSON.stringify(callsFile)}, process.argv.slice(2).join(' ') + '\\n');
-if (process.argv[2] !== 'api' || !process.argv[3].endsWith('/pulls/1')) process.exit(1);
-console.log(JSON.stringify({ head: { ref: 'worker', sha: ${JSON.stringify(remoteHead)} } }));
-`, { mode: 0o755 });
-  const result = JSON.parse((await exec(process.execPath, [cli, 'fixture/repo', '1'], {
-    cwd: work, env: { ...process.env, PATH: `${bin}:${process.env.PATH}`,
-      HAMMER_LACEY_GH_TOKEN: 'synthetic-token', HAMMER_LACEY_GH_TOKEN_EXPIRES_AT: '',
-      MERGE_AGENT_GH_TOKEN_EXPIRES_AT: '', HAMMER_LACEY_GH_TOKEN_REFRESH_COMMAND: '',
-      HQ_ENTITLEMENT_GH_TOKEN_REFRESH_COMMAND: '' }, timeout: 20000,
-  })).stdout);
-  assert.equal(result.route, 're-review');
-  assert.match(result.reason, /does not descend/);
-  assert.equal(result.fallbackHead, remoteHead);
-  assert.equal(readFileSync(callsFile, 'utf8'), 'api repos/fixture/repo/pulls/1\n');
-  assert.equal((await git('rev-parse', 'HEAD')).stdout.trim(), localHead);
-  await git('merge-base', '--is-ancestor', baseHead, 'HEAD');
-  assert.equal((await git('ls-remote', 'origin', 'refs/heads/worker')).stdout.split(/\s/)[0], remoteHead);
-});
-
 for (const route of ['api', 'git-explicit', 'git-tracking', 'api-timeout', 'api-reset', 'api-tree', 'api-recover', 'api-credential', 'api-attestation']) {
-  const stops = ['api-timeout', 'api-reset', 'api-tree', 'api-credential', 'api-attestation'].includes(route);
+  const stops = ['git-tracking', 'api-timeout', 'api-reset', 'api-tree', 'api-credential', 'api-attestation'].includes(route);
   test(stops ? `LAC-2086: ${route} preserves publication and stops without a stale push or review`
     : `HAMPREDICATE-01: ${route} publication and rendered audit pass the whole CLI predicate`, async t => {
     const apiRoute = route.startsWith('api');
@@ -249,6 +206,7 @@ for (const route of ['api', 'git-explicit', 'git-tracking', 'api-timeout', 'api-
     await git('add', filename); await git('commit', '-m', 'Synthetic builder change');
     await git('push', '-u', 'origin', 'worker');
     const reviewed = await git('rev-parse', 'HEAD');
+    if (route === 'git-explicit') await git('commit', '--allow-empty', '-m', 'Preserve this first commit');
     writeFileSync(join(work, filename), 'feature_safe();\n');
     await git('add', filename);
     await git('commit', '-m', `Synthetic repair\n\nWorker-Class: hammer\nWorker-Ticket: HAM\nReviewed-Head: ${reviewed}\nClosed-By: hammer (adversarial-pipe-mode)\nRemediated-Findings: 1 addressed (1 blocking, 0 non-blocking)`);
@@ -361,7 +319,7 @@ let fetches = 0;
 cp.execFileSync = (command, args, options) => {
   if (command === 'git') {
     appendFileSync(${JSON.stringify(scratchCalls)}, JSON.stringify(args) + '\\n');
-    if (args[0] === 'fetch' && args[2] !== ${JSON.stringify(reviewed)}) {
+    if (args[0] === 'fetch' && args.at(-1) !== ${JSON.stringify(reviewed)}) {
       fetches++;
       if (['api-credential', 'api-attestation'].includes(route)) {
         return original(process.execPath, [${JSON.stringify(failureChild)}, 'credential'], options);
@@ -370,10 +328,10 @@ cp.execFileSync = (command, args, options) => {
         return original(process.execPath, [${JSON.stringify(failureChild)}, 'timeout'], { ...options, timeout: 100 });
       }
     }
-    if (args[0] === 'reset' && route === 'api-reset') {
+    if (args.includes('reset') && route === 'api-reset') {
       return original(process.execPath, [${JSON.stringify(failureChild)}, 'reset'], options);
     }
-    if (args[0] === 'rev-parse' && args[1] !== 'HEAD^{tree}' && route === 'api-tree') return Buffer.from('wrong-tree');
+    if (args.includes('rev-parse') && args.at(-1).endsWith('^{tree}') && !args.at(-1).startsWith(${JSON.stringify(local)}) && route === 'api-tree') return Buffer.from('wrong-tree');
   }
   return original(command, args, options);
 };
@@ -434,16 +392,22 @@ exit "$rc"
     const scratch = readFileSync(scratchCalls, 'utf8').trim().split('\n').filter(Boolean).map(line => JSON.parse(line));
     assert.match(publication.stderr, /HAM helper step=api-publish attempt=1\/1 /,
       'the rendered publication phase must retain the real helper output/status boundary');
+    if (route === 'git-tracking') {
+      assert.match(publication.stdout, /STATE=1\|source-publication-refused\|0/);
+      assert.equal(await git('--git-dir', remote, 'rev-parse', 'refs/heads/worker'), reviewed);
+      assert.equal(existsSync(pushAttempts), false);
+      return;
+    }
     if (stops) {
       const remoteHead = await git('--git-dir', remote, 'rev-parse', 'refs/heads/worker');
       assert.notEqual(remoteHead, local);
       assert.equal(await git('rev-parse', 'HEAD'), local, 'failed scratch adoption must leave local HEAD distinct');
       assert.equal(await git('rev-parse', `${remoteHead}^{tree}`), localTree);
       const result = JSON.parse(publication.stdout.split('\n')[0]);
-      assert.equal(result.route, 're-review');
+      assert.equal(result.route, 'refused');
       assert.equal(result.previousHead, reviewed);
       assert.equal(result.pushedHead, remoteHead);
-      assert.equal(result.fallbackHead, remoteHead);
+      assert.equal(result.fallbackHead, undefined);
       assert.ok(result.reason.length <= 512);
       assert.doesNotMatch(result.reason, /Maximum call stack|repeated finding/);
       assert.match(result.reason, ['api-credential', 'api-attestation'].includes(route) ? /git-credential-refresh-failed/ : route === 'api-timeout' ? /ETIMEDOUT/ : route === 'api-reset' ? /scratch reset refused/ : /fetched tree mismatch/);
@@ -462,11 +426,11 @@ exit "$rc"
       const calls = JSON.parse(readFileSync(callsPath, 'utf8'));
       assert.equal(calls.filter(args => args[1] === 'graphql' && args.includes('--input')).length, 1);
       assert.ok(!calls.some(args => args.includes('merge') || args.includes('review') || args.some(arg => /\/reviews(?:\?|$)/.test(arg))));
-      assert.equal(scratch.filter(args => args[0] === 'fetch' && args[2] === remoteHead).length, route === 'api-timeout' ? 3 : 1);
-      assert.equal(scratch.filter(args => args[0] === 'reset').length, route === 'api-reset' ? 1 : 0);
+      assert.equal(scratch.filter(args => args[0] === 'fetch' && args.at(-1) === remoteHead).length, route === 'api-timeout' ? 3 : 1);
+      assert.equal(scratch.filter(args => args.includes('reset')).length, route === 'api-reset' ? 1 : 0);
       return;
     }
-    if (route === 'api-recover') assert.equal(scratch.filter(args => args[0] === 'fetch' && args[2] !== reviewed).length, 2);
+    if (route === 'api-recover') assert.equal(scratch.filter(args => args[0] === 'fetch' && args.at(-1) !== reviewed).length, 2);
     const published = await git('rev-parse', 'HEAD');
     assert.equal(await git('--git-dir', remote, 'rev-parse', 'refs/heads/worker'), published);
     assert.equal(await git('rev-parse', 'HEAD^{tree}'), localTree);
@@ -514,6 +478,6 @@ source "$1"
     }
     assert.equal(verdict.trace.ciGreen.green, true);
     const calls = JSON.parse(readFileSync(callsPath, 'utf8'));
-    assert.equal(calls.some(args => args[1] === 'graphql' && args.includes('--input')), route !== 'git-tracking');
+    assert.equal(calls.some(args => args[1] === 'graphql' && args.includes('--input')), apiRoute);
   });
 }

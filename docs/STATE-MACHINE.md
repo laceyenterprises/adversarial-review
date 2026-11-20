@@ -2093,6 +2093,14 @@ and the current run may neither push stale local state nor start another source
 review/remediation loop. Its no-merge diagnostic is bounded; source publication
 alone does not establish merge or production recovery. No durable state changes.
 
+LAC-2252: commit publication can stop the controller with `head-changed`
+when the source moves or the candidate is behind the authoritative PR head.
+Unavailable identity, head or rewrite proof uses `source-publication-refused`.
+Both stop before another publication, preserve the candidate and release owned
+custody. A pre-mutation API compatibility result may invoke the Git publisher,
+which verifies the source again before offering an exact branch/head lease.
+An already-current head produces no new publication edge.
+
 Launch status meanings come from the SDK-pinned public producer vocabulary
 (`hq api spec --surface producer-contracts --format json`, contractVersion 1.x).
 Boolean wire `terminal` and `succeeded` values take precedence when present;

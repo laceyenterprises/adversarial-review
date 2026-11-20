@@ -38,7 +38,7 @@ log() { printf '%s\\n' "$*" >> "$FIXTURE_LOG"; }
 path="$1"; shift
 case "$(basename "$path")" in
   hammer-helper-step.mjs) shift 4; exec "$@" ;;
-  hammer-owned-publication.mjs) shift 4; log "$*"; exec "$@" ;;
+  hammer-owned-publication.mjs) log "owned-publication $*"; exec ${shellQuote(realNode)} "$path" "$@" ;;
   metered-gh.mjs) [ "$1" = exec-git ] || exit 97; shift; log "git $*"; exec git "$@" ;;
   hammer-pr-read.mjs)
     case " $* " in
@@ -143,6 +143,11 @@ exec git -C "$4" rebase --continue
   // The close command's step 1: publish the local commit the PR does not have.
   const publishEnv = { ...process.env, ...env, HAM_NODE_BIN: join(fakeBin, 'node') };
   for (const name of TOKEN_VARIABLES) delete publishEnv[name];
+  const controllerRecord = join(run, 'controller.json');
+  writeFileSync(controllerRecord, JSON.stringify({ state: 'running', controllerPid: process.pid,
+    startedAt: new Date().toISOString(), token: 'synthetic' }));
+  Object.assign(publishEnv, { HAM_CONTROLLER_RECORD: controllerRecord, HAM_CONTROLLER_PID: String(process.pid),
+    HAM_CONTROLLER_TOKEN: 'synthetic', HAMMER_LACEY_GH_TOKEN: 'synthetic-hammer', ADVERSARIAL_REVIEW_STATE_DIR: join(dir, 'data', 'state') });
   const publish = () => spawnSync('/bin/bash', ['-c', `
 source ${shellQuote(join(run, 'inputs.sh'))} || exit 9
 export HAM_COMMIT_PUBLICATION_ONLY=1
@@ -204,7 +209,7 @@ test('a builder worktree holding the PR branch does not block conflict repair, w
   assert.equal(result.pushed, repaired);
   assert.equal(result.from, f.reviewed);
   assert.equal(f.remoteHead(), repaired, 'the PR branch now names the rebased head');
-  assert.match(f.events(), new RegExp(`^git push origin HEAD:refs/heads/feature --force-with-lease=refs/heads/feature:${f.reviewed}$`, 'm'),
+  assert.match(f.events(), new RegExp(`^owned-publication fixture/repo 42 head ${repaired} feature ${f.reviewed}$`, 'm'),
     'publication uses an explicit refspec leased on the captured source');
   assert.match(f.events(), new RegExp(`^pushed-attestation fixture/repo 42 ${f.reviewed} ${repaired}$`, 'm'));
   builderUntouched(f);
@@ -230,10 +235,10 @@ test('a PR branch updated after the repair captured its source refuses publicati
       assert.equal(result.pushed, '');
       assert.equal(f.remoteHead(), concurrent, 'the concurrent update survives');
       const api = JSON.parse(published.stdout.split('\n').find(line => line.startsWith('{"route"')));
-      assert.equal(api.route, 're-review');
-      assert.equal(api.fallbackHead, f.reviewed, 'the lease expects the captured source, not the live head');
-      if (!staleRead) assert.match(api.reason, /PR head moved after the conflict repair captured its source/);
-      assert.match(published.stderr, /stale info|rejected/);
+      assert.equal(api.route, staleRead ? 'git-fallback' : 'refused');
+      assert.equal(api.fallbackHead, staleRead ? f.reviewed : undefined);
+      if (!staleRead) assert.match(api.reason, /PR head or branch moved after conflict repair captured its source/);
+      assert.equal(result.outcome, 'head-changed');
       assert.doesNotMatch(f.events(), /^pushed-attestation/m);
       builderUntouched(f);
     });

@@ -2077,9 +2077,9 @@ or added rounds; this read-only observation is declared in
 `post-merge-verify.json`, outside the smoke harness.
 
 LAC-2093 bounds validation through `bin/hammer-validate.mjs`; LAC-2097 runs it
-outside the shared lease: the
-absolute ceiling scales from 360 seconds, but 120 seconds without child output
-fails with status 124 regardless of load. Pytest reports real collection and test
+outside the shared lease. The absolute ceiling scales from 360 seconds.
+The idle ceiling scales from 120 seconds and stays below the absolute deadline.
+Either timeout fails with status 124. Pytest reports real collection and test
 phase boundaries and uses local ledger routing; explicit disposable-Postgres
 test settings remain intact. Standalone TERM/INT/HUP cancellation initiates group TERM,
 with KILL after five seconds even if its leader has exited. Unconfirmed cleanup
@@ -2111,6 +2111,12 @@ two-second TERM grace, one-second drain bound and retained scratch. Focused
 offline `hammer-controller` tests extend source acceptance; the existing
 `smv-handoff` smoke promise is unchanged. Deployed organic cancellation and
 next-contender progress remain separate runtime-owner acceptance.
+
+Supported canonical CI-mirror checks inherit the registered group. A deadline
+stops the battery and requests bounded cleanup by the controller. Private
+command logs are retained beside the validation receipt as output arrives.
+Use the controller registration to verify drain and the validation receipt
+to inspect the retained failure, including when the close result is missing.
 
 LAC-2108 restores the controller's required read-only census inside the macOS
 worker boundary: the packaged stdlib Python helper reads one kernel-filtered

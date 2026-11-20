@@ -2052,6 +2052,10 @@ for that bounded gate; terminal evidence and other stop reasons remain immediate
 HAMVALTIMEOUTFLAKE-01 requires an unreadable latest completed read for
 `launch-unreadable`; a scheduling stall alone cannot trigger that transition.
 A validator timeout records `validation-stopped` and writes no audit.
+Supported CI-mirror commands run in the registered group. An inner command
+deadline also requests group teardown and ends the battery. Per-command
+diagnostics are written beside the validation receipt during execution, so
+they are available even when the close-result writer is interrupted.
 FD-4 replies echo a per-request UUID and callers discard stale replies. The
 controller never adopts a live retry to justify an old process. Cancellation
 defers the shell release trap until group drain; fallback release retains the

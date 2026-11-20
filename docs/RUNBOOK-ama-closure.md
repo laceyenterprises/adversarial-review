@@ -3681,8 +3681,8 @@ merge lease (see the saved head/base re-entry flow in LEASEFAIR-01). Use
 (`-- <command> [args...]` for other validators), followed by `|| exit $?` in the
 controller-owned script. Its 360-second nominal absolute limit scales with host load;
 `--nominal-timeout 1..3600` selects the project's idle-host budget within the
-existing load-helper ceiling. The 120-second child-output idle limit never
-scales. Both timeouts return 124.
+existing load-helper ceiling. The child-output idle limit scales from
+120 seconds and stays below the absolute deadline. Both timeouts return 124.
 Pytest hooks emit actual plugin-load, session, collection, test and report events,
 including setup/call/teardown failures. No heartbeat simulates test progress.
 The bounded tail and final elapsed/idle/byte/status diagnostic distinguish timeout
@@ -7505,6 +7505,17 @@ Run optional changed-surface validation outside the lease. Save the produced
 head and captured current base before `ham_release_merge_lease --yield local-validation`;
 run the registered validator, then only on success with the same local HEAD set
 `HAM_LOCALLY_VALIDATED_HEAD` and `HAM_LOCALLY_VALIDATED_BASE_SHA` to that saved pair.
+On supported Agent OS mirrors, the selected commands inherit the registered
+process group. A command deadline stops the battery and requests controller
+cleanup, as do the outer validator deadlines. `cleanup=controller-owned`
+means the validator requested teardown. Use the matching controller
+registration and its final `drained` and `leaseCleanup` fields to confirm it.
+Read `local-validation.*` in the private run directory even when cancellation
+prevented the controller script from writing `close-result.json`. Its per-check
+diagnostics point to private files beside the receipt. They retain command
+output as it arrives, up to 4 MiB per command. A pending entry carries the
+captured prefix when the battery stopped during that command. Treat these
+files as private logs. See [receipt fields](data-model/hammer-controllers.md#local-validation-receipt).
 The closer's CI-mirror deduplication is on by default. Set
 `HAM_LOCAL_VALIDATION_CI_DEDUP=0` in the closer environment to run the entire
 selected local battery without consulting GitHub for coverage. On supported

@@ -184,7 +184,18 @@ controller has no receipt for that invocation.
 | `status` | Effective validator exit code once the helper finishes |
 | `checks` | Ordered records with check name, status and reason, plus local result or exit status when available |
 | `checks[].jobs` | For `ci-covered`, each declared job's `name` and GitHub Actions `runId` (strings); current step mappings also include string `jobId` and the exact `step` name. Legacy job mappings and older receipts omit these optional fields. |
+| `checks[].diagnostics` | Optional ordered diagnostics for a check that did not pass or was interrupted |
+| `checks[].diagnostics[].path` | Private combined stdout/stderr file beside the original validation receipt |
+| `checks[].diagnostics[].limitBytes` | Maximum retained bytes per command, currently 4 MiB |
+| `checks[].diagnostics[].exitStatus` | Raw command result when observed |
+| `checks[].diagnostics[].truncated` / `unavailable` | Output exceeded the cap or the writer could not retain a complete bounded file |
 
 Per-check statuses are `run`, `ci-covered`, `failed` and `not-run`. Runners
 without per-check reporting produce a battery-level record. The controller
-uses these receipts for diagnosis.
+uses these receipts for diagnosis. `run` without a result means the check
+was in flight when that receipt was persisted. A cancellation can leave
+`status` unset and a partial diagnostic without an exit status. Use the
+original receipt if no `close-result.json` was written. Completed passing
+checks drop their logs. Standalone canonical mirror runs without a caller
+receipt print the path to a private evidence directory separate from their
+disposable validation scratch.

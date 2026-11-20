@@ -11,7 +11,7 @@ import { EventEmitter, once } from 'node:events';
 import { Duplex, PassThrough } from 'node:stream';
 import { mkdirSync, mkdtempSync, readFileSync, writeFileSync, readdirSync, renameSync, rmSync, existsSync, statSync } from 'node:fs';
 import { tmpdir, hostname } from 'node:os';
-import { join, resolve } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { createInterface } from 'node:readline';
 import { assertHammerController, controllerGroupSnapshot, createControllerGroupCensus, controllerLaunchId, controllerLaunchEnvironment, controllerLedgerTarget, groupStillOwned, releaseControllerLease, runHammerController,
@@ -58,8 +58,8 @@ test('controller rejects a malformed ham_read script as a retryable local comman
   assert.equal(attempt.outcome, 'deferred');
 });
 
-async function until(check) {
-  const deadline = performance.now() + 8000;
+async function until(check, timeoutMs = 8000) {
+  const deadline = performance.now() + timeoutMs;
   while (performance.now() < deadline) {
     const result = check();
     if (result) return result;
@@ -80,7 +80,7 @@ function recordEnvironment(dir, value = '1', launchRequestId = 'lrq_controller-t
   }));
 }
 
-function fixture(t, script, { realCensus = false } = {}) {
+function fixture(t, script, { realCensus = false, timeoutMs = 10000 } = {}) {
   const dir = mkdtempSync(join(tmpdir(), 'ham-controller-'));
   recordEnvironment(dir);
   const env = { ...process.env, HQ_ROOT: dir, HAM_HQ_ROOT: dir, HAM_RUN_DIR: dir, HAM_ROOT_DIR: dir, HAM_REPO: 'fixture/repo',
@@ -117,7 +117,7 @@ function fixture(t, script, { realCensus = false } = {}) {
     import {runHammerController,controllerGroupSnapshot} from ${JSON.stringify(new URL('../src/ama/hammer-controller.mjs', import.meta.url).href)};
     let elapsedMs = 0;
     const status = await runHammerController(${JSON.stringify(scriptPath)}, [], {
-      pollMs:20, graceMs:150, drainMs:1000, timeoutMs:10000, launchPollMs:20, gateWaitMs:2000,
+      pollMs:20, graceMs:150, drainMs:1000, timeoutMs:${timeoutMs}, launchPollMs:20, gateWaitMs:2000,
       unreadableGraceMs:Number(process.env.FIXTURE_GRACE_MS||300), readTimeoutImpl:()=>50,
       readLaunchImpl:async()=>JSON.parse(readFileSync(${JSON.stringify(launchPath)},'utf8')),
       // Synthetic census tests model elapsed poll intervals. Keep the real
@@ -977,6 +977,129 @@ test('validator timeout cancels the whole registered round without an audit', { 
   assert.equal(f.receipt().state, 'quiescent');
   assert.equal(f.receipt().leaseCleanup.released, true);
   assert.equal(existsSync(join(f.dir, 'audit')), false);
+});
+
+async function checkCanonicalStops(t, modes) {
+  const results = await Promise.all(modes.map(async mode => {
+    const f = fixture(t, `
+      cd "$HAM_RUN_DIR/checkout"
+      export HAM_CLOSE_VALIDATION_HEAD=${head} HAM_CLOSE_VALIDATION_RECEIPT="$HAM_RUN_DIR/validation.json"
+      export HAM_LOCAL_VALIDATION_CI_DEDUP=0 TMPDIR="$HAM_RUN_DIR/scratch"
+      export FIXTURE_CHECK_TIMEOUT=${mode === 'inner' ? 4 : 15}
+      "${process.execPath}" --import "$HAM_RUN_DIR/load.mjs" "${root}/bin/hammer-validate.mjs" --canonical --nominal-timeout ${mode === 'outer' ? 5 : 20} -- check.py
+      printf forbidden > "$HAM_RUN_DIR/audit"
+    `, { realCensus: true, timeoutMs: 30000 });
+    const checkout = join(f.dir, 'checkout');
+    const ready = join(f.dir, 'check-ready');
+    const validationPath = join(f.dir, 'validation.json');
+    const readReceipt = () => JSON.parse(readFileSync(validationPath, 'utf8'));
+    const readLog = row => row?.diagnostics?.[0]?.path && readFileSync(row.diagnostics[0].path, 'utf8');
+    mkdirSync(join(checkout, 'scripts/ci-mirror'), { recursive: true });
+    mkdirSync(join(f.dir, 'scratch'));
+    writeFileSync(join(f.dir, 'load.mjs'), "import os from 'node:os'; os.loadavg = () => [0, 0, 0];\n");
+    writeFileSync(join(checkout, 'scripts/ci-mirror/run-ci-mirror.py'),
+      readFileSync(join(root, 'test/fixtures/ci-mirror-budget.py')));
+    writeFileSync(join(checkout, 'check.py'), `
+import json, os, signal, subprocess, sys, time
+from pathlib import Path
+if sys.argv[1] == "fail":
+    os.write(1, b"failure-start\\n" + b"x" * 100000 + b"\\nfailure-end\\n")
+    sys.exit(7)
+signal.signal(signal.SIGTERM, signal.SIG_IGN)
+child_ready = Path(os.environ["HAM_RUN_DIR"]) / "descendant-ready"
+child = subprocess.Popen([sys.executable, "-c",
+    "import signal,sys,time; from pathlib import Path; "
+    "signal.signal(signal.SIGTERM, signal.SIG_IGN); Path(sys.argv[1]).touch(); time.sleep(12)",
+    str(child_ready)],
+    stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+while not child_ready.exists() and child.poll() is None:
+    time.sleep(0.01)
+assert child_ready.exists()
+os.write(2, b"unfinished-diagnostic\\n")
+path = Path(os.environ["HAM_RUN_DIR"]) / "check-ready"
+temporary = path.with_suffix(".tmp")
+temporary.write_text(json.dumps({"pid": os.getpid(), "pgid": os.getpgrp(), "child": child.pid}))
+temporary.replace(path)
+time.sleep(12)
+child.wait()
+`);
+    const p = f.start();
+    const check = await until(() => existsSync(ready) && JSON.parse(readFileSync(ready, 'utf8')), 20000);
+    if (mode === 'cancel') {
+      await until(() => readLog(readReceipt().checks[1]) === 'unfinished-diagnostic\n', 20000);
+      f.cancel();
+    }
+    const [status] = await p.closed;
+    const owner = f.receipt();
+    const validation = readReceipt();
+    const [failed, unfinished] = validation.checks;
+    const outcome = {
+      mode, status, reason: owner.reason, drained: owner.drained, killed: owner.killSent,
+      released: owner.leaseCleanup.released, checks: validation.checks, output: p.output(),
+      attached: check.pgid === owner.shellPid,
+      survivors: controllerGroupSnapshot(check.pgid).filter(member => [check.pid, check.child].includes(member.pid)),
+      failureLog: readLog(failed) === `failure-start\n${'x'.repeat(100000)}\nfailure-end\n`,
+      unfinishedLog: readLog(unfinished) === 'unfinished-diagnostic\n',
+      logsOutsideScratch: validation.checks.every(row => row.diagnostics?.every(log =>
+        dirname(log.path) === f.dir && (statSync(log.path).mode & 0o777) === 0o600)),
+      audit: existsSync(join(f.dir, 'audit')),
+    };
+    // Even the unpatched fixture's escaped processes have a finite lifetime.
+    if (outcome.survivors.length) await until(() => controllerGroupSnapshot(check.pgid).length === 0, 15000);
+    return outcome;
+  }));
+  const bad = results.filter(result => result.status !== 143
+    || result.reason !== (result.mode === 'cancel' ? 'launch-ended' : 'validation-stopped')
+    || !result.drained || !result.killed || !result.released
+    || !result.attached || result.survivors.length || !result.failureLog || !result.unfinishedLog
+    || !result.logsOutsideScratch || result.checks[0]?.result !== 'fail'
+    || result.checks[0]?.diagnostics?.[0]?.exitStatus !== 7
+    || (result.mode === 'inner' && result.checks[1]?.localReason !== 'check-timeout') || result.audit);
+  assert.equal(bad.length, 0, JSON.stringify(bad));
+}
+
+test('concurrent canonical budget stops retain check evidence and drain the registered group', { timeout: 45000 },
+  t => checkCanonicalStops(t, ['outer', 'outer', 'outer']));
+test('mirror check deadline and launch-status cancellation retain check evidence and drain the registered group',
+  { timeout: 45000 }, t => checkCanonicalStops(t, ['inner', 'cancel']));
+
+test('standalone canonical diagnostics are bounded and a recorded check failure stays red', t => {
+  const dir = mkdtempSync(join(tmpdir(), 'ham-mirror-output-'));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const scripts = join(dir, 'scripts/ci-mirror');
+  mkdirSync(scripts, { recursive: true });
+  mkdirSync(join(dir, 'fixture_pkg'));
+  writeFileSync(join(dir, 'fixture_pkg/__init__.py'), '');
+  writeFileSync(join(scripts, 'run-ci-mirror.py'), readFileSync(join(root, 'test/fixtures/ci-mirror-budget.py')));
+  const prefix = "ModuleNotFoundError: No module named 'fixture_pkg'\n";
+  writeFileSync(join(dir, 'check.py'), `
+import sys
+if sys.argv[1] == "fail":
+    sys.stdout.write(${JSON.stringify(prefix)} + "x" * 5 * 1024 * 1024)
+    sys.exit(7)
+print("passing diagnostic")
+`);
+  const env = { ...process.env, TMPDIR: dir, HAM_RUN_DIR: dir, HAM_HQ_ROOT: dir };
+  for (const key of ['HAM_CLOSE_VALIDATION_RECEIPT', 'HAM_CONTROLLER_RECORD', 'HQ_WORKER_RUN_ID']) delete env[key];
+  const result = spawnSync(process.execPath, [join(root, 'bin/hammer-validate.mjs'), '--canonical', '--', 'check.py'],
+    { env, cwd: dir, encoding: 'utf8', timeout: 15000 });
+  assert.ifError(result.error);
+  assert.equal(result.status, 42, result.stderr);
+  const evidencePath = result.stderr.match(/CI mirror evidence: (.+)/)?.[1];
+  assert.ok(evidencePath, result.stderr);
+  const validation = JSON.parse(readFileSync(evidencePath, 'utf8'));
+  assert.equal(validation.status, 42);
+  const [failed, passed] = validation.checks;
+  assert.equal(failed.result, 'fail');
+  const [log] = failed.diagnostics;
+  assert.equal(log.exitStatus, 7);
+  assert.equal(log.truncated, true);
+  assert.equal(log.limitBytes, 4 * 1024 * 1024);
+  assert.equal(readFileSync(log.path, 'utf8'), prefix + 'x'.repeat(log.limitBytes - prefix.length));
+  assert.equal(passed.result, 'pass');
+  assert.equal(passed.diagnostics, undefined);
+  assert.deepEqual(readdirSync(dir).filter(name => /^ham-validation-/.test(name)),
+    [dirname(evidencePath).slice(dir.length + 1)]);
 });
 
 test('two successful validators confirm descendant drain and allow exact-head continuation', { timeout: 12000 }, async t => {

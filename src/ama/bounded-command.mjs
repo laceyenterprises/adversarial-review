@@ -6,7 +6,7 @@ import { writeSync } from 'node:fs';
 export async function runBounded(command, args, {
   timeoutMs = 900_000, idleMs = 120_000, tailBytes = 4096, graceMs = 5000,
   env = process.env, stdout = process.stdout, stderr = process.stderr,
-  observeOutput = () => {},
+  observeOutput = () => {}, stopOnTimeoutExit = false,
   spawnImpl = spawn, killImpl = (pid, signal) => process.kill(pid, signal),
 } = {}) {
   // A registered closer owns one group for shell + validators + test children.
@@ -88,7 +88,8 @@ export async function runBounded(command, args, {
       if (cleanupFailed) exitCode = 125;
       stdout.write(tail);
       stdout.write('\n');
-      stderr.write(`run-bounded: ${outcome || 'exited'} elapsed=${Math.round(performance.now() - started)}ms idle=${Math.round(performance.now() - lastOutput)}ms bytes=${totalBytes} cleanup=${cleanupFailed ? 'unconfirmed' : 'finished'} status=${exitCode}\n`);
+      const cleanup = cleanupFailed ? 'unconfirmed' : controlled && outcome ? 'controller-owned' : 'finished';
+      stderr.write(`run-bounded: ${outcome || 'exited'} elapsed=${Math.round(performance.now() - started)}ms idle=${Math.round(performance.now() - lastOutput)}ms bytes=${totalBytes} cleanup=${cleanup} status=${exitCode}\n`);
       resolve(exitCode);
     }
     function stop(reason, code) {
@@ -135,6 +136,7 @@ export async function runBounded(command, args, {
     });
     child.on('exit', (code, signal) => {
       if (finished) return;
+      if (stopOnTimeoutExit && code === 124) stop('child-check-timeout', 124);
       if (!outcome) exitCode = code ?? 128 + constants.signals[signal];
       signalGroup('SIGTERM');
       if (!escalation) escalation = setTimeout(escalate, graceMs);

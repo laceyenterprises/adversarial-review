@@ -656,6 +656,12 @@ cancellation fallback release; require local host/PID plus the complete existing
 lease ID/PR/head/acquisition-time fence. Unknown drain retains ownership evidence
 and fails closed; unrelated processes and successor leases must survive.
 
+Supported canonical CI-mirror commands inherit the registered group. An
+inner or outer validation deadline stops the round and delegates group
+cleanup to the controller. Record bounded command diagnostics as output
+arrives in private files beside the validation receipt, outside validator
+scratch. A validator result or diagnostic file cannot establish group drain.
+
 No validation, base-overlap, exact-head CI, finding-remediation or merge-authority
 gate is waived. No HQ ledger mutation or new config section is introduced.
 Registration states and source/deployed acceptance are documented in

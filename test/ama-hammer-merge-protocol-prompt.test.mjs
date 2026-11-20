@@ -282,7 +282,8 @@ test('ordinary remediation publishes before validating the live head', () => {
   // HAMCONTROLLERSCRIPT-01: the shipped close command runs the publication.
   assert.match(ordinary, /the close command publishes a new local commit \(`HAM_COMMIT_PUBLICATION_ONLY=1` with `hammer-publish\.sh`\)/);
   assert.ok(ordinary.indexOf('HAM_COMMIT_PUBLICATION_ONLY=1') < ordinary.indexOf('Refresh and validate the live head'));
-  assert.match(HAMMER_TEMPLATE, /rebased\/multi-commit history uses lease-protected git/);
+  assert.match(HAMMER_TEMPLATE, /Only an explicit pre-mutation `git-fallback` result permits the owned Git publisher/);
+  assert.match(HAMMER_TEMPLATE, /API errors stop without Git fallback/);
 });
 
 test('starting head capture aborts before edits when its retry helper fails', () => {
@@ -793,9 +794,10 @@ test('hammer never moves a submodule pointer: re-syncs checkouts and unstages gi
 
   const conflictBlock = HAMMER_PROMPT.slice(HAMMER_PROMPT.indexOf('## Resolving merge conflicts'));
   const rebaseAt = conflictBlock.indexOf('git rebase "origin/$BASE_BRANCH" ); then');
-  const pushAt = conflictBlock.indexOf('git push --force-with-lease');
+  const bindingAt = conflictBlock.indexOf('> "$HAM_CONFLICT_PUBLISH"');
   const syncAt = conflictBlock.indexOf('git submodule update --recursive');
-  assert.ok(rebaseAt >= 0 && syncAt > rebaseAt && syncAt < pushAt, 'conflict rebase must re-sync submodules before pushing');
+  assert.ok(rebaseAt >= 0 && syncAt > rebaseAt && syncAt < bindingAt, 'conflict repair must re-sync submodules before authorizing publication');
+  assert.doesNotMatch(CONFLICT_REPAIR, /^\s*git push /m);
   assert.match(conflictBlock, /HAM_CONFLICT_SUBMODULE_SYNC_ATTEMPT=1/);
   // The conflict block may run in a fresh shell: the retry cap must default locally.
   assert.match(conflictBlock, /HAM_CONFLICT_SUBMODULE_SYNC_CAP="\$\{HAM_UPDATE_BRANCH_RETRY_CAP:-3\}"/);

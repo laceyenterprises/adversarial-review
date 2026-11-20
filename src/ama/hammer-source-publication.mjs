@@ -1,5 +1,5 @@
 import { conflictPublishBinding } from './hammer-conflict-binding.mjs';
-import { hammerLocalGit, hammerNetworkCall } from './hammer-api-network.mjs';
+import { hammerGhCall, hammerLocalGit, hammerNetworkCall } from './hammer-api-network.mjs';
 import { hammerTokenSession } from '../hammer-token.mjs';
 import { proveRebaseResult } from './rebase-result.mjs';
 
@@ -18,7 +18,7 @@ function isAncestor(ancestor, head) {
 
 export async function readHammerSource(repo, prNumber) {
   if (!hammerTokenSession({ hammerToken: true }).managed) throw refusal('hammer publication credential unavailable');
-  const live = JSON.parse(await hammerNetworkCall('gh', ['api', `repos/${repo}/pulls/${prNumber}`]));
+  const live = JSON.parse(await hammerGhCall(['api', `repos/${repo}/pulls/${prNumber}`]));
   const { ref: branch, sha: previousHead } = live.head ?? {};
   if (!sha(previousHead) || typeof branch !== 'string' || !branch) throw refusal('PR source branch or head unavailable');
   git('check-ref-format', `refs/heads/${branch}`);

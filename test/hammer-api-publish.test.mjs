@@ -5,7 +5,7 @@ import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { hammerPublicationFailureReason, publishHammerTree } from '../src/ama/hammer-api-publish.mjs';
-import { hammerNetworkCall } from '../src/ama/hammer-api-network.mjs';
+import { hammerGhCall, hammerNetworkCall } from '../src/ama/hammer-api-network.mjs';
 import { fleetCommitIdentityMatches, fetchHammerHeadRange } from '../src/ama/hammer-head-validation.mjs';
 const apiCommit = JSON.parse(readFileSync(new URL('./fixtures/hammer-commits/api.json', import.meta.url)));
 const gitCommit = JSON.parse(readFileSync(new URL('./fixtures/hammer-commits/git.json', import.meta.url)));
@@ -69,6 +69,24 @@ test('API mutation refusal classifies a moved source without adopting a foreign 
     assert.equal(result.mutationUncertain, true, 'head movement alone cannot settle an ambiguous mutation');
   }
 });
+test('the fixed GitHub transport retains the entitled token and API metering', async t => {
+  const dir = mkdtempSync(join(tmpdir(), 'hammer-gh-network-'));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const env = { PATH: '/bin:/usr/bin', HOME: dir, HAM_ROOT_DIR: dir,
+    HAMMER_LACEY_GH_TOKEN: 'synthetic-hammer-token',
+    GHO_RATE_LIMIT_SHARED_STATE_PATH: join(dir, 'budget.json') };
+  const calls = [];
+  const result = await hammerGhCall(['api', 'repos/fixture/repo/pulls/42'], undefined, { env,
+    execFileImpl: (command, args, options) => {
+      calls.push([command, ...args]);
+      assert.equal(options.env.GH_TOKEN, 'synthetic-hammer-token');
+      assert.equal(options.env.GH_DEBUG, 'api');
+      return Buffer.from('{}');
+    } });
+  assert.equal(String(result), '{}');
+  assert.deepEqual(calls, [['gh', 'api', 'repos/fixture/repo/pulls/42']]);
+});
+
 test('a timed-out post-publication git fetch under a managed token is retried as transient', async t => {
   const dir = mkdtempSync(join(tmpdir(), 'hammer-api-network-'));
   t.after(() => rmSync(dir, { recursive: true, force: true }));

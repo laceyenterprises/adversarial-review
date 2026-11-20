@@ -27,6 +27,11 @@ export async function hammerNetworkCall(command, args, input, { execFileImpl = e
   }
 }
 
+// Fixed-command view of the entitled, metered transport. GitHub callers cannot
+// accidentally choose another executable; retry and credential ownership stay
+// in the same boundary as Git publication operations.
+export const hammerGhCall = hammerNetworkCall.bind(undefined, 'gh');
+
 // Local publication plumbing shares the same unknown-on-error boundary. The
 // caller may classify an ancestry result only after a completed Git exit 1.
 export function hammerLocalGit(args, { execFileImpl = execFileSync } = {}) {

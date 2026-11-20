@@ -9235,7 +9235,21 @@ repository and PR number, an open state, a valid head SHA and a valid case-sensi
 base branch. When the caller specifies `--head`, the observed SHA must match it.
 The read consumes the existing load-aware 5-second evidence budget (30-second
 ceiling) and passes cancellation and remaining time to the GitHub transport.
+Malformed or mismatched identity (including a renamed/transferred repository's
+redirected response) refuses with `malformed-or-mismatched-identity`; a valid
+closed/merged PR or a different requested head refuses with
+`terminal-pr-or-head-changed`. Both are temporary-failure exit 75 at the CLI.
 Unreadable or expired evidence ends the invocation before the lane writer starts.
+Admission is deliberately non-urgent by default: this wrapper accepts arbitrary
+legacy commands and cannot establish closure eligibility. A library caller's
+existing budget scope, including closer urgency, is preserved. The standalone
+CLI defers below the normal floor instead of spending the closer reserve.
+Cross-owner token selection uses the shared per-role/owner single-flight mint.
+Its broker timeout covers headers and body for each configured broker URL;
+the evidence signal does not cancel that shared mint. The evidence timer still
+bounds the caller, and cancellation is rechecked before launching the PR read,
+so a late mint cannot start an expired request. Caller-specific mint cancellation
+would require shared-flight waiter ownership and is deferred from this change.
 Merge eligibility, including stacked-base policy and its hold receipts, remains
 with the existing merge authority callers. The original command and arguments pass
 through the native route and issuance lock.

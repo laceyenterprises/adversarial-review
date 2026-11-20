@@ -10,7 +10,8 @@ import { runLegacyPrWrite } from '../src/finalization/legacy-pr-write.mjs';
 import { readQueueEvidence } from '../src/finalization/queue-read.mjs';
 import { readLivePullRequestIdentity } from '../src/github-pr-identity.mjs';
 import { fetchMergeAgentCandidate } from '../src/merge-agent-candidate.mjs';
-import { githubTargetOwner } from '../src/github-owner-token.mjs';
+import { createGithubOwnerTokenSelector, githubOwnerTokens, githubTargetOwner } from '../src/github-owner-token.mjs';
+import { currentGitHubBudgetScope } from '../src/rate-limit-throttle.mjs';
 
 const owner = JSON.parse(readFileSync(new URL('../config.json', import.meta.url))).org ?? 'fixture-owner';
 const repository = `${owner}/fixture`;
@@ -27,6 +28,70 @@ function fixtureRoot(t) {
   t.after(() => rmSync(path, { recursive: true, force: true }));
   return path;
 }
+
+function crossOwnerFixture(t, mint) {
+  const original = { ...githubOwnerTokens };
+  Object.assign(githubOwnerTokens, createGithubOwnerTokenSelector({ readHomeOwner: () => owner, mint }));
+  t.after(() => Object.assign(githubOwnerTokens, original));
+  const targetOwner = owner.toLowerCase() === 'other-org' ? 'another-org' : 'other-org';
+  return { targetOwner, targetRepository: `${targetOwner}/fixture`,
+    targetEnv: { ...env, GITHUB_REVIEWER_TOKEN_ENV: 'GH_CODEX_REVIEWER_TOKEN' } };
+}
+
+test('cross-owner identity read mints the target token and passes it only to the child', async t => {
+  const mints = [];
+  const { targetOwner, targetRepository, targetEnv } = crossOwnerFixture(t, async options => {
+    mints.push(options);
+    return { token: 'synthetic-owner-token', expiresAtMs: Date.now() + 3600000 };
+  });
+  let calls = 0;
+  const candidate = await readLivePullRequestIdentity(targetRepository, prNumber, {
+    env: targetEnv, timeoutMs: 10000,
+    execFileImpl: async (_, args, child) => {
+      calls++;
+      assert.equal(args[1], `repos/${targetRepository}/pulls/${prNumber}`);
+      assert.equal(child.env.GH_TOKEN, 'synthetic-owner-token');
+      assert.equal(child.env.GITHUB_TOKEN, 'synthetic-owner-token');
+      assert.equal(currentGitHubBudgetScope().urgent, false);
+      return result({ ...identity, repository: targetRepository });
+    },
+  });
+  assert.deepEqual(candidate, { prState: 'open', headSha: head, baseBranch: base });
+  assert.equal(calls, 1);
+  assert.equal(mints.length, 1);
+  assert.equal(mints[0].owner, targetOwner);
+  assert.equal(mints[0].role, 'codex-reviewer');
+  assert.equal(targetEnv.GH_TOKEN, env.GH_TOKEN);
+  assert.equal(targetEnv.GITHUB_TOKEN, undefined);
+});
+
+test('evidence expiry during a shared owner mint prevents a late PR transport launch', async t => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const entered = Promise.withResolvers();
+  const release = Promise.withResolvers();
+  const { targetRepository, targetEnv } = crossOwnerFixture(t, async () => {
+    entered.resolve();
+    await release.promise;
+    return { token: 'synthetic-late-owner-token', expiresAtMs: Date.now() + 3600000 };
+  });
+  let remote;
+  const read = readQueueEvidence({ read: options => {
+    remote = readLivePullRequestIdentity(targetRepository, prNumber, { ...options, env: targetEnv,
+      execFileImpl: () => assert.fail('expired owner mint started a PR read') });
+    return remote;
+  } }, {}, 10000);
+  const rejected = assert.rejects(read, /queue evidence deadline expired/);
+  try {
+    assert.equal(await Promise.race([entered.promise.then(() => 'entered'), read]), 'entered');
+    t.mock.timers.tick(10000);
+    await rejected;
+    release.resolve();
+    await assert.rejects(remote, { name: 'AbortError' });
+  } finally {
+    release.resolve();
+    await Promise.allSettled([remote]);
+  }
+});
 
 test('full open candidate can persist a hold after an abandoned read; native identity needs one read', { timeout: 10000 }, async t => {
   const rootDir = fixtureRoot(t);
@@ -116,7 +181,9 @@ test('closed, merged, moved and malformed identities refuse before the lane writ
         execFileImpl: async () => result({ ...identity, ...patch }) }),
       run: () => assert.fail('invalid identity reached lane writer'),
     });
-    assert.deepEqual(refused, { ok: false, reason: 'terminal-pr-or-head-changed' });
+    const terminalOrMoved = patch.state === 'closed' || patch.headSha === 'b'.repeat(40);
+    assert.deepEqual(refused, { ok: false,
+      reason: terminalOrMoved ? 'terminal-pr-or-head-changed' : 'malformed-or-mismatched-identity' });
   }
   for (const execFileImpl of [async () => { throw new Error('unreadable PR'); }, async () => ({ stdout: '{' })]) {
     await assert.rejects(runLegacyPrWrite({ repository, prNumber, head,
@@ -177,6 +244,17 @@ printf '%s\\n' '${JSON.stringify(identity)}'
     env: { ...env, PATH: rootDir }, timeout: 10000,
   });
   assert.equal(response.stdout.trim(), head);
+  writeFileSync(join(rootDir, 'gh'), `#!/bin/sh
+printf '%s\\n' '${JSON.stringify({ ...identity, repository: `${owner}/renamed` })}'
+`, { mode: 0o700 });
+  await assert.rejects(promisify(execFile)(process.execPath, args, {
+    env: { ...env, PATH: rootDir }, timeout: 10000,
+  }), error => {
+    assert.equal(error.code, 75);
+    assert.equal(error.stdout, '');
+    assert.match(error.stderr, /legacy PR write deferred: malformed-or-mismatched-identity/);
+    return true;
+  });
 });
 
 test('two live identity reads still use the native lane issuance lock', async t => {

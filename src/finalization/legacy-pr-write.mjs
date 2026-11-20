@@ -11,8 +11,12 @@ export async function runLegacyPrWrite({ rootDir, repository, prNumber, head, co
     read: ({ signal, timeoutMs }) => readCandidate(repository, prNumber, { rootDir, signal, timeoutMs }),
   }, {},
     loadAwareTimeoutMs(5000, { maxMs: 30000 }));
-  if (!candidate || candidate.prState !== 'open' || !candidate.baseBranch || !candidate.headSha
-    || (head && candidate.headSha !== head)) return { ok: false, reason: 'terminal-pr-or-head-changed' };
+  if (!candidate || !candidate.baseBranch || !candidate.headSha) {
+    return { ok: false, reason: 'malformed-or-mismatched-identity' };
+  }
+  if (candidate.prState !== 'open' || (head && candidate.headSha !== head)) {
+    return { ok: false, reason: 'terminal-pr-or-head-changed' };
+  }
   return run({ ...options, rootDir, repository, base: candidate.baseBranch, command, argv,
     subject: { prNumber, head: candidate.headSha } });
 }

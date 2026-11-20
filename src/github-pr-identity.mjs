@@ -28,8 +28,9 @@ export async function readLivePullRequestIdentity(repository, prNumber, {
     'api', `repos/${repository}/pulls/${prNumber}`, '--jq',
     '{number, state, merged_at, headSha: .head.sha, baseBranch: .base.ref, repository: .base.repo.full_name}',
   ], { env, signal, credentialDeadlineMs: Date.now() + timeoutMs, killSignal: 'SIGKILL', maxBuffer: 1024 * 1024 });
-  // Use normal budget admission without an unscoped throttle sleep that could
-  // outlive the evidence deadline. Retain any already established scope.
+  // This arbitrary-command wrapper cannot attest closure eligibility. Default
+  // to normal admission; a closure caller can establish its own urgent scope.
+  // Scoped admission avoids sleeping past the evidence deadline.
   const { stdout } = await (currentGitHubBudgetScope() ? read() : withGitHubBudgetScope({}, read));
   signal?.throwIfAborted();
   if (performance.now() >= deadline) throw new Error('queue evidence deadline expired');

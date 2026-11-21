@@ -292,7 +292,11 @@ selected parallel files fit within the configured limit. Otherwise it is
 `900 * 8 / min(8, limit)` seconds. Set `AR_TEST_TIMINGS` to an output path for
 the completed run's per-file timings. Native TAP output follows scheduled
 order. Use the deadline's active-file list and queued count to locate work
-in progress, then trace child processes for those files.
+in progress, then trace child processes for those files. Unmeasured files
+are scheduled at the median duration. Add measured hints in
+`test/fixtures/suite-durations.json` for long-running integration files so
+they can overlap more of the queue. Prefer completed worker timings over
+TAP timestamps, which can reflect buffered reporting.
 
 For the complete hammer self-rebase subset, select all three entrypoints;
 they partition one shared suite. Each test name identifies its shard, and

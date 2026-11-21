@@ -28,6 +28,22 @@ function describeSpawn(stack) {
   }
 }
 
+export async function waitForClose(child, timeoutMs) {
+  if (child.exitCode !== null || child.signalCode !== null || child.closed === true) return;
+  let timer;
+  let onClose;
+  try {
+    await new Promise(resolve => {
+      onClose = resolve;
+      child.once('close', onClose);
+      timer = setTimeout(resolve, timeoutMs);
+    });
+  } finally {
+    clearTimeout(timer);
+    child.off('close', onClose);
+  }
+}
+
 if (process.env.NODE_TEST_CONTEXT) {
   const children = new Map();
   function recordChild(child, args, stack) {
@@ -70,10 +86,7 @@ if (process.env.NODE_TEST_CONTEXT) {
       // Some adapters reject on a buffer limit before their SIGKILL has
       // delivered the child's close event. Let in-flight teardown finish.
       if (child.exitCode === null && child.signalCode === null) {
-        await Promise.race([
-          new Promise((resolve) => child.once('close', resolve)),
-          new Promise((resolve) => setTimeout(resolve, 500)),
-        ]);
+        await waitForClose(child, 500);
       }
       if (children.get(pid) !== entry) continue;
       // The close listener may still be waiting for inherited stdio. Exit
@@ -89,16 +102,13 @@ if (process.env.NODE_TEST_CONTEXT) {
       }
       if (!alive) continue;
       leaked.push(`${pid} (${detached ? 'process group' : 'process'}) spawned at ${describeSpawn(stack)}`);
-      const closed = child.exitCode === null && child.signalCode === null
-        ? new Promise((resolve) => child.once('close', resolve))
-        : Promise.resolve();
       try {
         process.kill(detached ? -pid : pid, 'SIGKILL');
       } catch (error) {
         if (error.code === 'EPERM' && detached) child.kill('SIGKILL');
         else if (error.code !== 'ESRCH') throw error;
       }
-      await Promise.race([closed, new Promise((resolve) => setTimeout(resolve, 2_000))]);
+      if (child.exitCode === null && child.signalCode === null) await waitForClose(child, 2_000);
     }
     if (leaked.length) throw new Error(`Leaked test children:\n${leaked.join('\n')}\nStop shared children in t.after/finally, not a file-level after hook.`);
   });

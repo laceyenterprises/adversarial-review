@@ -163,11 +163,13 @@ test('pre-deploy history recomputes once at an unchanged head and review key', a
   const version = JSON.parse(readFileSync(currentPath, 'utf8')).key.at(-1);
   assert.equal(version, 'reversalproof-v10');
   const fragment = JSON.parse(readFileSync(new URL('../docs/data-model/catalog.d/LAC-2286.json', import.meta.url), 'utf8'));
-  const change = fragment.entries.find(entry => entry.id === 'primary-change-history');
-  assert.equal(change.identityVersion, version);
-  assert.ok(change.optionalHistoryFields.includes('finalPatchesScoped'));
   const catalog = JSON.parse(readFileSync(new URL('../docs/data-model/catalog.json', import.meta.url), 'utf8'));
-  const entry = catalog.entries.find(entry => entry.id === 'primary-change-history');
+  // Main regenerates catalog.json after merge. Check the entry with this PR's
+  // canonical overlay applied so the runtime version is checked before merge.
+  const id = 'primary-change-history';
+  const entry = { ...catalog.entries.find(entry => entry.id === id), ...fragment.entries.find(entry => entry.id === id) };
+  assert.equal(entry.identityVersion, version);
+  assert.ok(entry.optionalHistoryFields.includes('finalPatchesScoped'));
   assert.ok(entry.optionalHistoryFields.includes('laneReversalHistory'));
   assert.match(entry.laneReversalProof, /laneOwner and laneIdentity/);
 });

@@ -1456,6 +1456,7 @@ async function fetchPrimaryChangeHistory({ repo, prNumber, headSha, get, rootDir
     // rebased author commits. A hammer-authored trailer cannot narrow it.
     const primaryHead = first.parents[0].sha;
     const primary = await read(`repos/${repo}/compare/${pr.base.sha}...${primaryHead}`);
+    if (!Array.isArray(primary.files)) return unknown('missing primary file list');
     let final = history;
     const mergeBase = primary.merge_base_commit?.sha;
     const comparisonMergeBase = history.merge_base_commit?.sha;

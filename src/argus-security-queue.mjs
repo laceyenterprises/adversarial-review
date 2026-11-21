@@ -560,6 +560,7 @@ export function readArgusQueueDepth(rootDir, { nowMs = Date.now() } = {}) {
 export function claimNextArgusJob({
   rootDir,
   claimedAt = new Date().toISOString(),
+  claimOwner,
   writeJob = writeArgusJob,
   shouldClaim = null,
 } = {}) {
@@ -604,7 +605,7 @@ export function claimNextArgusJob({
       }
     }
 
-    const claimed = { ...job, status: 'in_progress', claimedAt };
+    const claimed = { ...job, status: 'in_progress', claimedAt, claimOwner };
     try {
       writeJob(inProgressPath, claimed);
     } catch (err) {
@@ -688,6 +689,7 @@ export function returnArgusJobToPending({ rootDir, jobPath, patch = {}, job = nu
     ...current,
     status: 'pending',
     claimedAt: null,
+    claimOwner: null,
     completedAt: null,
     failedAt: null,
     result: null,

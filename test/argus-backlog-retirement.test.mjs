@@ -182,6 +182,7 @@ test('claims orphaned by a restart return to pending; a live or fresh claim is l
   const summary = await retireArgusBacklog({
     rootDir,
     nowMs: T0,
+    processStartedAtMs: T0 - 10 * 60_000,
     logger: quiet,
     runningJobIds: [second.job.jobId],
     listOpenPullHeads: lister({ [AR]: { complete: true, heads: new Map([[1, sha(1)], [2, sha(2)], [3, sha(3)]]) } }),
@@ -191,6 +192,68 @@ test('claims orphaned by a restart return to pending; a live or fresh claim is l
   assert.equal(released.bucket, 'pending');
   assert.match(released.job.drain.lastError, /stale claim/u);
   assert.equal(readArgusQueueDepth(rootDir).depth.inProgress, 2);
+}));
+
+test('startup recovers predecessor and legacy claims, then retires dead heads in the same pass', async () => withRoot(async (rootDir) => {
+  const repo = 'example/review';
+  const previousOwner = 'previous-process';
+  const currentOwner = 'current-process';
+  const claimedAt = new Date(T0 - 2 * 60_000).toISOString();
+  enqueue(rootDir, repo, 1, sha(1));
+  claimNextArgusJob({ rootDir, claimedAt, claimOwner: previousOwner });
+  enqueue(rootDir, repo, 2, sha(2));
+  claimNextArgusJob({ rootDir, claimedAt });
+  enqueue(rootDir, repo, 3, sha(3));
+  claimNextArgusJob({ rootDir, claimedAt, claimOwner: previousOwner });
+
+  const drain = createArgusSecurityDrain({
+    rootDir,
+    claimOwner: currentOwner,
+    nowMs: () => T0,
+    logger: quiet,
+    retireBacklog: (context) => retireArgusBacklog({
+      ...context, rootDir, logger: quiet, processStartedAtMs: T0 - 60_000,
+      claimLeaseMs: 6 * ARGUS_CLAIM_LEASE_MS,
+      listOpenPullHeads: lister({ [repo]: { complete: true, heads: new Map([[1, sha(1)], [2, sha(20)]]) } }),
+    }),
+    runJob: async () => ({ kind: 'complete', result: { verdict: 'approve', findings: [] } }),
+  });
+
+  await drain.drain();
+  const summary = drain.snapshot().retirement.lastSummary;
+  assert.equal(summary.reclaimed, 3);
+  assert.deepEqual(summary.retiredByReason, { 'pr-merged-or-closed': 1, 'head-superseded': 1 });
+  assert.equal(bucketOf(rootDir, repo, 1, sha(1)), 'pending');
+  assert.equal(findArgusJob(rootDir, { repo, prNumber: 1, headSha: sha(1) }).job.claimOwner, null);
+  assert.equal(findArgusJob(rootDir, { repo, prNumber: 2, headSha: sha(2) }).job.result.supersededReason, 'head-superseded');
+  drain.tick();
+  assert.equal(findArgusJob(rootDir, { repo, prNumber: 1, headSha: sha(1) }).job.claimOwner, currentOwner);
+  await drain.drain();
+}));
+
+test('the capped lease protects fresh current-process claims and leaves running claims alone', async () => withRoot(async (rootDir) => {
+  const repo = 'example/review';
+  const claimOwner = 'current-process';
+  const cappedLeaseMs = 2 * ARGUS_CLAIM_LEASE_MS;
+  for (const [prNumber, ageMs] of [[1, cappedLeaseMs - 1], [2, cappedLeaseMs + 1], [3, cappedLeaseMs + 1]]) {
+    enqueue(rootDir, repo, prNumber, sha(prNumber));
+    claimNextArgusJob({ rootDir, claimedAt: new Date(T0 - ageMs).toISOString(), claimOwner });
+  }
+  const live = findArgusJob(rootDir, { repo, prNumber: 3, headSha: sha(3) });
+  const summary = await retireArgusBacklog({
+    rootDir,
+    nowMs: T0,
+    claimOwner,
+    processStartedAtMs: T0 - 3 * ARGUS_CLAIM_LEASE_MS,
+    claimLeaseMs: 6 * ARGUS_CLAIM_LEASE_MS,
+    runningJobIds: [live.job.jobId],
+    listOpenPullHeads: lister({ [repo]: { complete: true, heads: new Map([[2, sha(2)]]) } }),
+    logger: quiet,
+  });
+  assert.equal(summary.reclaimed, 1);
+  assert.equal(bucketOf(rootDir, repo, 1, sha(1)), 'inProgress');
+  assert.equal(bucketOf(rootDir, repo, 2, sha(2)), 'pending');
+  assert.equal(bucketOf(rootDir, repo, 3, sha(3)), 'inProgress');
 }));
 
 test('the drain retires the backlog before its first claim, then reviews only live heads', async () => withRoot(async (rootDir) => {

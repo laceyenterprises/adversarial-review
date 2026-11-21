@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import { loadAwareTimeoutMs } from './load-aware-timeout.mjs';
 // ARGUSDRAIN-01 item 4 — retire the backlog safely, before the drain starts.
 //
@@ -24,8 +25,8 @@ import { loadAwareTimeoutMs } from './load-aware-timeout.mjs';
 //   - finishes any requeue a crash interrupted between rewriting the record
 //     and moving it to pending (`resumeInterruptedArgusRequeues`), first, so
 //     the scans below see every job in the bucket it belongs to;
-//   - returns claims orphaned by a watcher restart (in-progress, not running
-//     in this process, older than the claim lease) to pending;
+//   - returns orphaned claims to pending before checking PR liveness, so
+//     recovered jobs can be retired in the same pass;
 //   - reopens the legacy `route-for-review` completions (the pre-drain
 //     semver-major parking, e.g. #1171 and #1172) whose head is still live, so
 //     the drain gives them the review they were routed to.
@@ -44,9 +45,13 @@ import { ARGUS_SUPERSEDED_VERDICT } from './argus-security-verdict.mjs';
 import { ARGUS_REVIEW_RESULT_SOURCE } from './argus-security-review.mjs';
 import { execGhWithRetry } from './gh-cli.mjs';
 
-// Longer than the review child's 45-minute backstop, so a live claim is never
-// taken back from a review that is still running in another process.
+// One drain owns the queue per watcher process. The nonce distinguishes
+// process generations even when the OS reuses a PID.
+export const ARGUS_DRAIN_PROCESS_OWNER = randomUUID();
+const PROCESS_STARTED_AT_MS = Math.floor(performance.timeOrigin);
+// Only untracked claims from the current process wait out the lease.
 export const ARGUS_CLAIM_LEASE_MS = 60 * 60 * 1000;
+const MAX_CLAIM_LEASE_MS = 2 * ARGUS_CLAIM_LEASE_MS;
 export const ARGUS_BACKLOG_RETIREMENT_INTERVAL_MS = 30 * 60 * 1000;
 export const ARGUS_OPEN_PR_LIST_LIMIT = 1000;
 // The completed bucket is scanned whole. A newest-N cap looks safe (a legacy
@@ -138,7 +143,9 @@ export async function retireArgusBacklog({
   rootDir,
   listOpenPullHeads,
   runningJobIds = [],
-  claimLeaseMs = loadAwareTimeoutMs(ARGUS_CLAIM_LEASE_MS, { maxMs: Infinity }),
+  claimOwner = ARGUS_DRAIN_PROCESS_OWNER,
+  processStartedAtMs = PROCESS_STARTED_AT_MS,
+  claimLeaseMs = loadAwareTimeoutMs(ARGUS_CLAIM_LEASE_MS, { maxMs: MAX_CLAIM_LEASE_MS }),
   nowMs = Date.now(),
   logger = console,
 } = {}) {
@@ -150,20 +157,43 @@ export async function retireArgusBacklog({
     logger,
   });
   const pending = listArgusJobs(rootDir, { bucket: 'pending', limit: Number.POSITIVE_INFINITY });
+  const pendingBefore = pending.length;
+  const running = new Set(runningJobIds);
+  const leaseMs = Math.min(claimLeaseMs, MAX_CLAIM_LEASE_MS);
+  let reclaimed = 0;
+  for (const { job, jobPath } of listArgusJobs(rootDir, { bucket: 'inProgress', limit: Number.POSITIVE_INFINITY })) {
+    if (running.has(job?.jobId)) continue;
+    const claimedMs = Date.parse(String(job?.claimedAt || ''));
+    const currentOwner = job?.claimOwner == null
+      ? claimedMs >= processStartedAtMs
+      : job.claimOwner === claimOwner;
+    if (currentOwner && nowMs - claimedMs < leaseMs) continue;
+    const drain = job?.drain && typeof job.drain === 'object' ? job.drain : {};
+    const released = tolerateVanished(() => returnArgusJobToPending({
+      rootDir,
+      jobPath,
+      job,
+      patch: { drain: { ...drain, lastError: `stale claim from ${job?.claimedAt || 'unknown'} recovered`, notBefore: null } },
+    }));
+    if (released) {
+      reclaimed += 1;
+      pending.push(released);
+    }
+  }
   const completed = listArgusJobs(rootDir, { bucket: 'completed', limit: COMPLETED_SCAN_LIMIT })
     .filter(({ job }) => isLegacyRouteForReviewCompletion(job));
   const quotaFailed = listArgusJobs(rootDir, { bucket: 'failed', limit: Number.POSITIVE_INFINITY })
     .filter(({ job }) => isQuotaOnlyArgusFailure(job));
   const summary = {
     observedAt: retiredAt,
-    pendingBefore: pending.length,
+    pendingBefore,
     retired: 0,
     retiredByReason: { 'pr-merged-or-closed': 0, 'head-superseded': 0 },
     liveHeads: 0,
     oldestLiveHead: null,
     requeued: 0,
     requeuedQuotaFailures: 0,
-    reclaimed: 0,
+    reclaimed,
     resumedRequeues,
     skippedRepos: [],
   };
@@ -258,21 +288,6 @@ export async function retireArgusBacklog({
       summary.requeuedQuotaFailures += 1;
       logger?.log?.(`[argus-drain] requeued quota-only failure ${job.jobId}`);
     }
-  }
-
-  const running = new Set(runningJobIds);
-  for (const { job, jobPath } of listArgusJobs(rootDir, { bucket: 'inProgress', limit: Number.POSITIVE_INFINITY })) {
-    if (running.has(job?.jobId)) continue;
-    const claimedMs = Date.parse(String(job?.claimedAt || ''));
-    if (Number.isFinite(claimedMs) && nowMs - claimedMs < claimLeaseMs) continue;
-    const drain = job?.drain && typeof job.drain === 'object' ? job.drain : {};
-    const released = tolerateVanished(() => returnArgusJobToPending({
-      rootDir,
-      jobPath,
-      job,
-      patch: { drain: { ...drain, lastError: `stale claim from ${job?.claimedAt || 'unknown'} recovered`, notBefore: null } },
-    }));
-    if (released) summary.reclaimed += 1;
   }
 
   logger?.log?.(

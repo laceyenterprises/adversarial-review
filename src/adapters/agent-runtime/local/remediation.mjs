@@ -1277,6 +1277,7 @@ function spawnCodexRemediationWorker({
       ...(CODEX_REASONING_LEVELS.has(modelResolution.resolvedReasoningLevel)
         ? ['-c', `model_reasoning_effort=${modelResolution.resolvedReasoningLevel}`]
         : []),
+      ...serviceHome.toolConfigArgs,
       '--dangerously-bypass-approvals-and-sandbox',
       '--json',
       '--output-last-message',
@@ -1337,6 +1338,9 @@ function spawnCodexRemediationWorker({
     }
   } catch (error) {
     serviceHome?.cleanup();
+    if (error.code === 'codex-direct-tools-catalog-unavailable') {
+      throw new StartupContractError(error.message, { violationType: error.code });
+    }
     throw error;
   } finally {
     cleanupStagedAuth();

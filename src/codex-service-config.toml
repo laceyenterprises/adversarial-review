@@ -12,6 +12,3 @@ plugins = false
 remote_plugin = false
 hooks = false
 skill_mcp_dependency_install = false
-
-[features.code_mode]
-enabled = true

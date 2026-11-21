@@ -10,7 +10,7 @@
       "relatedSchemaSurfaces": ["src/follow-up-reviewer-identity.mjs", "src/remediation-owner-auth.mjs"],
       "owner": "reviewer handoff and follow-up daemon",
       "optionalFields": ["reviewerRole: claude-reviewer | codex-reviewer | gemini-reviewer | grok-reviewer | null"],
-      "compatibility": "Additive to schema version 2. Older jobs use exact recognized identity evidence. Null holds alternate-owner reads."
+      "compatibility": "Additive to schema version 2. Omitted roles on new jobs use exact recognized legacy identities, including claude-opus-5-5. Explicit values are preserved; null holds alternate-owner reads."
     },
     {
       "id": "reviewer-pass-posted-role",

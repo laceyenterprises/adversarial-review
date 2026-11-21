@@ -10,7 +10,10 @@ uses the delivery identity and crash recovery uses the posted artifact's
 capture metadata. Recovery can also use the old dispatch route and validated
 reviewer attribution when they agree. Explicit unknown or conflicting evidence
 holds alternate-owner reads. Jobs without the field remain readable using the
-exact legacy identity rules. Jobs without any reviewer identity may use the
+exact legacy identity rules. New jobs with an omitted role persist the exact
+legacy role when recognized, including `claude-reviewer` for `claude-opus-5-5`;
+explicit roles (including null) are preserved, and unknown models receive no
+inferred role. Jobs without any reviewer identity may use the
 existing declared reader role for non-review work. See the
 [follow-up runbook](../follow-up-runbook.md#alternate-owner-follow-up-git).
 

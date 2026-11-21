@@ -1,6 +1,6 @@
 import { requestCloserSuccessor } from './ama/closer-successor.mjs';
 import { enqueueRemediationCloser } from './remediation-closer-queue.mjs';
-import { reviewerRoleFromRoute } from './follow-up-reviewer-identity.mjs';
+import { legacyFollowUpReviewerRole } from './follow-up-reviewer-identity.mjs';
 import { addCiRegressionFinding } from './ci-regression-finding.mjs';
 import { isEndedRemediationRound } from './remediation-round-recovery.mjs';
 import { infrastructureOnlyFailures, recordedCiFailures, CI_INFRASTRUCTURE_STOP_REASONS } from './ci-infrastructure.mjs';
@@ -2196,7 +2196,7 @@ function buildFollowUpJob({
   branch = null,
   revisionRef = null,
   reviewerModel,
-  reviewerRole = reviewerRoleFromRoute(reviewerModel),
+  reviewerRole = legacyFollowUpReviewerRole(reviewerModel),
   builderTag = null,
   linearTicketId = null,
   reviewBody,

@@ -1,7 +1,8 @@
-import { readFileSync } from 'node:fs';
+import { readFileSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { listSettledJsonNames } from './dispatch-dir-names.mjs';
 import { followUpJobFileFilter } from '../follow-up-job-names.mjs';
+import { repositoryNames } from '../repository-names.mjs';
 
 // Leaf reader shared by closer admission and event-driven hammer wakes.
 export function amaCloserDispatchDir(rootDir) {
@@ -27,14 +28,26 @@ export function readAmaCloserDispatchRecord(rootDir, identity) {
 }
 
 // Launches stay keyed to their dispatch head after the hammer rebases.
-export function readAmaCloserDispatchRecordsForPR(rootDir, { repo, prNumber }) {
-  return listSettledJsonNames(amaCloserDispatchDir(rootDir))
-    .filter(followUpJobFileFilter({ rootDir, repo, prNumber }))
+export function readAmaCloserDispatchRecordsForPR(rootDir, { repo, prNumber, strict = false }) {
+  const dir = amaCloserDispatchDir(rootDir);
+  let names;
+  try { names = strict ? readdirSync(dir) : listSettledJsonNames(dir); }
+  catch (error) {
+    if (error.code === 'ENOENT') return [];
+    throw error;
+  }
+  const aliases = strict ? new Set(repositoryNames(rootDir, repo).map(name => name.toLowerCase())) : null;
+  return names.filter(followUpJobFileFilter({ rootDir, repo, prNumber, caseInsensitiveRepo: strict }))
     .flatMap(name => {
       try {
-        const record = JSON.parse(readFileSync(join(amaCloserDispatchDir(rootDir), name), 'utf8'));
-        return record?.repo === repo && Number(record.prNumber) === Number(prNumber) ? [record] : [];
-      } catch {
+        const record = JSON.parse(readFileSync(join(dir, name), 'utf8'));
+        const matchesRepo = strict ? typeof record?.repo === 'string' && aliases.has(record.repo.toLowerCase())
+          : record?.repo === repo;
+        if (matchesRepo && Number(record.prNumber) === Number(prNumber)) return [record];
+        if (strict) throw new Error('closer dispatch record identity mismatch');
+        return [];
+      } catch (error) {
+        if (strict) throw error;
         return [];
       }
     });

@@ -4,6 +4,7 @@ import assert from 'node:assert/strict';
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
+import { ensureRepositoryIdentitySchema } from '../src/repository-identity.mjs';
 import {
   ensureReviewStateSchema,
   fetchLivePRLifecycle,
@@ -61,6 +62,83 @@ function tableInfoByName(db, tableName) {
 
 function indexNames(db, tableName) {
   return db.prepare(`PRAGMA index_list(${tableName})`).all().map((row) => row.name);
+}
+
+test('fresh review-state bootstrap rolls back and can retry on the same handle', t => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'review-state-bootstrap-'));
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  const db = openReviewStateDb(rootDir);
+  try {
+    const exec = db.exec;
+    db.exec = function (sql) {
+      if (sql.includes('CREATE TABLE IF NOT EXISTS ham_finding_disputes')) {
+        throw new Error('synthetic bootstrap failure after repository identity setup');
+      }
+      return exec.call(this, sql);
+    };
+    assert.throws(() => ensureReviewStateSchema(db), /synthetic bootstrap failure/);
+    assert.deepEqual(db.prepare('SELECT name FROM main.sqlite_schema').all(), []);
+    assert.equal(db.pragma('user_version', { simple: true }), 0);
+
+    db.exec = exec;
+    ensureReviewStateSchema(db);
+    assert.equal(db.pragma('user_version', { simple: true }), REVIEW_STATE_SCHEMA_VERSION);
+    assert.equal(db.prepare('SELECT count(*) AS n FROM repository_identities').get().n, 0);
+    assert.equal(db.prepare('SELECT count(*) AS n FROM reviewed_prs').get().n, 0);
+    assert.ok(db.prepare('SELECT 1 FROM schema_migrations LIMIT 1').get());
+
+    db.exec = () => assert.fail('committed identity schema should be memoized');
+    db.transaction(() => ensureRepositoryIdentitySchema(db))();
+  } finally {
+    db.close();
+  }
+});
+
+for (const complete of [true, false]) {
+  test(`fresh bootstrap rechecks a ${complete ? 'complete' : 'partial'} schema under the writer lock`, t => {
+    const rootDir = mkdtempSync(path.join(tmpdir(), 'review-state-racing-bootstrap-'));
+    t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+    const writer = openReviewStateDb(rootDir);
+    const contender = openReviewStateDb(rootDir);
+    try {
+      writer.exec('BEGIN IMMEDIATE');
+      if (complete) ensureReviewStateSchema(writer);
+      else ensureRepositoryIdentitySchema(writer);
+
+      const transaction = contender.transaction;
+      contender.transaction = function (callback) {
+        // Let the contender see the empty committed schema, then commit the
+        // writer just before the contender actually takes the SQLite lock.
+        this.transaction = transaction;
+        const bootstrap = transaction.call(this, callback);
+        return {
+          immediate() {
+            writer.exec('COMMIT');
+            return bootstrap.immediate();
+          },
+        };
+      };
+      const exec = contender.exec;
+      let schemaExecs = 0;
+      contender.exec = function (sql) {
+        assert.ok(this.inTransaction, 'the contender must not run autocommit DDL');
+        schemaExecs++;
+        return exec.call(this, sql);
+      };
+
+      ensureReviewStateSchema(contender);
+      assert.equal(writer.inTransaction, false);
+      assert.equal(schemaExecs === 0, complete);
+      assert.equal(contender.pragma('user_version', { simple: true }), REVIEW_STATE_SCHEMA_VERSION);
+      assert.ok(contender.prepare('SELECT 1 FROM schema_migrations LIMIT 1').get());
+      const bootstrapExecs = schemaExecs;
+      contender.transaction(() => ensureRepositoryIdentitySchema(contender))();
+      assert.equal(schemaExecs, bootstrapExecs, 'committed identity schema should be memoized');
+    } finally {
+      contender.close();
+      writer.close();
+    }
+  });
 }
 
 test('openReviewStateDb applies a busy timeout and shared schema adds reviewer handle columns', () => {

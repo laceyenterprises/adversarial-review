@@ -3961,7 +3961,12 @@ base head, so the watcher cannot admit competing review work on that head.
 A moved head consumes a pending reservation only with a verified exact-head
 production attestation from its launch or retry. A live or uncertain submission
 retains custody. Release at the base head requires complete terminal launch
-and retry evidence. Point-in-time absence cannot fence pre-enqueue admission.
+and retry evidence, or the HQ-owner retirement command for one legacy unscoped
+epoch. That command requires a committed canonical enqueue-fence receipt, an
+unfiltered owner-family read, and matching original handoff, open PR head and
+reservation under the PR locks. It records `canonical-enqueue-fenced` and the
+receipt on the existing epoch while retaining the epoch's cap usage. Point-in-time
+absence cannot fence pre-enqueue admission.
 No replacement PR
 is opened. After both dispatch and review-service versions load, the runtime
 owner must retain an original-branch merge receipt and a 24-hour observation

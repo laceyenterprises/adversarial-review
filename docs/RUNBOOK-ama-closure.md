@@ -1017,8 +1017,10 @@ reservation, `repair-owner-unproven` names the operator in next-action and TTM
 and pages once per reservation. The page names the blocked head and
 reservation. The dispatch owner must establish the original launch and
 complete retry chain, or independently establish canonical absence and fence
-the original submitter through the authorized recovery path. Existing
-publication proof and custody rules continue to govern admission. Retirement
+the original submitter through the authorized recovery path. The operator can
+separately
+[retire an already fenced legacy reservation](#retire-one-fenced-legacy-repair-reservation-lac-2297).
+Existing publication proof and custody rules continue to govern admission. Retirement
 removes repair ownership from next-action and TTM projections, allowing the existing
 ownerless clock and SEV1 page. Corrupt ledgers and busy refund writers defer only
 the affected PR. No replacement PR
@@ -1043,6 +1045,83 @@ durable proof. Successor reservation CAS ignores only `ownerObservedAt`; owner
 identity/state, publication, review/terminal state and spend fields still fence
 concurrent changes. Watcher observation updates retain their full snapshot CAS
 so a late observation cannot overwrite a newer one.
+
+### Retire one fenced legacy repair reservation (LAC-2297)
+
+The HQ owner can run this command outside a worker launch from the deployed
+Agent OS checkout. First use the [producer's inspection and fence procedure](https://github.com/laceyenterprises/agent-os/blob/97995405ea1780c7e852b7746c5f8d47717c4f21/docs/RUNBOOK-adversarial-review-pipeline.md#fence-a-legacy-merge-rescue-owner-before-retirement)
+and retain the committed producer receipt. Use the same exact selectors in
+the retirement command.
+
+```sh
+node tools/adversarial-review/bin/retire-legacy-repair.mjs --apply \
+  --repo OWNER/REPO --pr PR --base-head FULL_SHA --epoch EPOCH_ID \
+  --owner-key EXACT_IDEMPOTENCY_KEY --handoff-round ORIGINAL_ROUND
+```
+
+Retirement uses the producer's HQ-owner and outside-worker guards, native
+checkout, and canonical Postgres runtime. The existing dispatch-read App
+Contract grants establish launch evidence or point-in-time absence only. This
+command uses the operator's existing canonical ledger authority. It reads the
+committed receipt by exact key in a read-only transaction, checks both enqueue
+guards and repeats the producer's unfiltered key, retry and provenance probe.
+The reader has a 65-second total subprocess budget.
+During that read, the retry-ledger flock refuses watcher, refund and dispatch
+writes for this PR as busy; those writers recover on their next observation.
+The shared repository-state lock also delays an exclusive repository rename
+until the command exits. Allow this one-time stall when scheduling retirement.
+It independently rebuilds the evidence from GitHub, the current reservation,
+and the original merge-rescue handoff using the producer's native evidence
+reader. The receipt is read directly by the command. Its printout, the
+inspection checksum and process liveness are insufficient for retirement.
+
+The single-PR closer intent and retry-ledger flocks fence the current
+reservation through the evidence read and mutation. The open same-repository
+PR must still have the exact base head at the live GitHub observation. A scoped,
+bound, published, identified, or competing reservation refuses retirement.
+Active follow-up work, an unsettled closer dispatch or a closer/merge lease
+also refuses.
+Dispatch identities accept historical repository aliases case-insensitively;
+an active dispatch under an old name still retains custody. Corrupt or
+unreadable merge-lease JSON already raises an error rather than proving absence.
+Unavailable or inconsistent evidence, missing guards and lock contention exit
+75 without a retirement record. GitHub can move independently of the local
+flocks. The command only records custody retirement at the checked base head.
+Any subsequent review, publication or dispatch must pass its own live gates.
+
+Producer `97995405ea1780c7e852b7746c5f8d47717c4f21` excludes
+`ownerObservedAt`, `ownerState` and `absentObservations` before calculating
+`reservationSha256`. Watcher observations therefore leave the receipt valid;
+changes to reservation identity or the handoff still refuse. The bridge uses
+private producer functions, so producer upgrades must retain their consumer
+signatures and this digest definition until Agent OS supplies a public
+read-only interface. The optional offline deployment check below imports the
+installed functions and exercises the real evidence builder with external I/O
+mocked, including observation changes between fencing and retirement:
+
+```sh
+source modules/worker-pool/lib/hq-python-runtime.sh
+hq_exec_python3_runtime -B \
+  tools/adversarial-review/test/fixtures/legacy-repair-fence-producer-contract.py
+```
+
+AR's ordinary offline test suite does not require an Agent OS checkout.
+Safe producer refusals surface as `repair-fence-refused:<reason-code>`,
+including `committed-enqueue-fence-required`, `persisted-fence-identity-mismatch`
+and `canonical-postgres-ledger-required`. A path suffix is removed.
+Unexpected errors retain
+`canonical-committed-repair-fence-or-current-evidence-unavailable`; a subprocess
+timeout reports `canonical-repair-fence-reader-timeout`. Neither diagnostic
+prints raw subprocess stderr, ledger connection details or handoff paths.
+
+Success writes `terminalAt`, `terminalReason: canonical-enqueue-fenced`, and
+`enqueueFenceReceipt` on the original epoch. It retains every epoch and charge
+and leaves follow-up work untouched. A repeated invocation refuses the
+already-terminal reservation. Any later rescue must use a different original
+handoff round and owner key, within the existing two-epoch cap. The root
+operator records the deployed producer/consumer versions, committed producer
+receipt, retirement result and organic review and closure on the original PR
+separately from source publication.
 
 `bin/repair-in-place.mjs` rejects missing or malformed heads (anything other
 than 40 hexadecimal characters) before opening the review database or reading
@@ -5644,8 +5723,14 @@ review names a different head. Without such a review, cached scoped histories
 skip this work on every tick. An incomplete comparison, merge-base mismatch
 or other optional hydration failure keeps preservation evidence scoped and
 requires exact-head review; cancellation and history deadlines still propagate.
-When older reviews exist, hydration remains transient and may repeat within
-the existing history budget and per-file checkpoint reuse.
+When older reviews exist, hydration remains transient in the completed history
+record. Exact comparisons whose resolved merge base matches the requested base
+also checkpoint complete patch projections in head-scoped progress. Repeated
+full or scoped calls reuse those rows without tree walks or per-file checkpoint
+reads; scoped calls strip unselected patch fields. Inventory-only predicates and
+boolean flags reuse a separate inventory projection and cannot satisfy a later
+full-patch read. Compare SHA casing does not change either projection's identity.
+The existing history deadline and progress cleanup/retention still apply.
 Migration proof still verifies the relevant object bytes and ancestry
 separately. The history deadline and shared GitHub admission floor apply to
 all these reads.
@@ -10337,3 +10422,20 @@ Repair preserves reviewed source and current-main semantics, stops on publicatio
 failure, and requires new-head checks and normal merge authority. Existing native
 owners retain custody. See [the governing state contract](STATE-MACHINE.md#conflictbeforeci-01--positive-conflict-precedes-absent-ci)
 and [RCA/activation boundary](postmortems/LAC-2148-conflict-before-ci.md).
+
+
+### Legacy-fence repository identity constraint
+
+`retire-legacy-repair.mjs` supports canonical lowercase repository selectors and
+ledgers whose stored `repo` exactly matches that selector. Mixed-case or
+pre-rename ledger identities refuse with `legacy-repair-reservation-mismatch`;
+this command does not migrate a ledger. Historical aliases are used only to
+identify and retain competing dispatch custody. Use the normal reviewed
+repository-rename recovery before attempting retirement of a noncanonical ledger.
+
+The producer reservation read uses its `READ_EPOCHS` Node expression and
+`readHammerRetryCapLedger`, a direct read with no retry mutation flock or
+closer-intent lock. The optional owned-fixture integration check validates it
+while both outer locks remain held. Never infer canonical absence merely from
+this file read; committed producer fencing and canonical global checks remain
+mandatory.

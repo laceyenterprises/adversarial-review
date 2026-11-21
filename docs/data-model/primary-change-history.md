@@ -19,7 +19,25 @@ followed by either:
 
 - `["json", object-addressed API path, checkpoint projection]`; or
 - `["file", repo, comparison base, comparison head, path, before tree entry or
-  null, after tree entry or null, "myers-v1"]`.
+  null, after tree entry or null, "myers-v1"]`; or
+- `["complete-file-comparison-v1", exact compare API path]` for complete file
+  rows with all patches; or
+- `["complete-file-inventory-v1", exact compare API path]` for inventory-only
+  rows, including exact-blob rename links.
+
+The complete projection keys normalize the compare path's two hexadecimal
+SHAs to lowercase, preserving repository spelling. They apply only when the
+resolved merge base equals the requested base, ignoring hex casing.
+`compareFiles` accepts a path predicate or boolean patch flag (default `true`).
+A cached complete comparison supplies scoped calls by stripping patch and line
+counts from unselected rows; exact-blob renames retain their zero counts and
+previous filename. Inventory-only calls, including `() => false`, can reuse a
+separate inventory checkpoint without reading blobs or patches. Predicate scope
+is established against actual filenames, including both rename sides, never a
+synthetic path. Inventory/scoped results cannot populate a full-patch checkpoint.
+`storedHistoryRead` with no compute callback performs lookup only: missing or
+malformed entries return `undefined`, without publishing or rewriting a record.
+Lookup retains the same cancellation, ownership and symlink checks.
 
 JSON checkpoints retain projected commit authorship, compare pagination,
 verification, trees and blobs. The checkpoint projection may differ from the

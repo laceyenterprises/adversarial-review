@@ -54,6 +54,27 @@ function fixture(t) {
 }
 const evidence = args => ({ headSha: args.headSha, hasHammerCommits: true, mergeBase: args.mergeBase, primaryFiles: [], finalFiles: [] });
 
+test('history checkpoint lookup misses do not publish and hits retain ownership and cancellation checks', async t => {
+  const args = fixture(t);
+  assert.equal(await storedHistoryRead(args, ['lookup']), undefined);
+  const directory = join(args.rootDir, 'data', 'primary-change-history');
+  assert.equal(existsSync(directory), false);
+  const value = { files: ['fixture.txt'] };
+  await storedHistoryRead(args, ['lookup'], async () => value);
+  assert.deepEqual(await storedHistoryRead(args, ['lookup']), value);
+  const progress = join(directory, readdirSync(directory)[0]);
+  const record = join(progress, readdirSync(progress)[0]);
+  writeFileSync(record, '{broken');
+  assert.equal(await storedHistoryRead(args, ['lookup']), undefined);
+  assert.equal(readFileSync(record, 'utf8'), '{broken', 'lookup never rewrites a miss');
+  const controller = new AbortController();
+  controller.abort(new Error('cancelled lookup'));
+  await assert.rejects(storedHistoryRead(args, ['lookup'], undefined, controller.signal), /cancelled lookup/);
+  rmSync(record);
+  symlinkSync(join(args.rootDir, 'foreign'), record);
+  await assert.rejects(storedHistoryRead(args, ['lookup']), /symlink/);
+});
+
 test('projected history reuses only the exact live comparison base while retaining protected coordinates', async t => {
   const args = fixture(t);
   let computes = 0;

@@ -913,6 +913,8 @@ and send a deduplicated SEV1 page. An unbound reservation with no verified
 publication and an unknown owner observed at least ten minutes after
 reservation retains custody, projects `repair-owner-unproven` for the
 operator and sends one SEV1 page per reservation.
+The HQ owner can retire a legacy unscoped reservation at its unchanged open
+base head using a committed canonical enqueue fence and the original handoff.
 Retirement restores the existing ownerless clock and SEV1 path.
 Reviewer harness refunds are bounded to three per PR across heads; later
 failures retain ordinary infrastructure cap and alert handling. Corrupt or busy

@@ -28,7 +28,8 @@ function describeSpawn(stack) {
   }
 }
 
-async function waitForClose(child, timeoutMs) {
+export async function waitForClose(child, timeoutMs) {
+  if (child.exitCode !== null || child.signalCode !== null || child.closed === true) return;
   let timer;
   let onClose;
   try {

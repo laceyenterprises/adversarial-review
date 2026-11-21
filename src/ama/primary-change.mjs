@@ -1233,7 +1233,19 @@ async function fetchGuardReviewSnapshots(args, evidence) {
     const reviewedCommits = new Set();
     for (const review of reviews) {
       const family = amaReviewerFamilyForLogin(review.user?.login);
-      if (family && SHA.test(review.commit_id || '')) reviewedCommits.add(review.commit_id);
+      if (family && SHA.test(review.commit_id || '') && review.commit_id !== args.headSha) reviewedCommits.add(review.commit_id);
+    }
+    if (!reviewedCommits.size) return {};
+    // Full patches serve only optional carry-forward from an older review.
+    // Keep scoped preservation evidence intact if this enrichment fails.
+    const coverage = {};
+    if (evidence.finalPatchesScoped) {
+      if (!args.get.compareFiles) return {};
+      const final = await args.get.compareFiles(`repos/${args.repo}/compare/${evidence.mergeBase}...${args.headSha}`);
+      if (final.filesComplete !== true || !Array.isArray(final.files)
+        || final.merge_base_commit?.sha !== evidence.mergeBase) return {};
+      coverage.finalFiles = final.files;
+      coverage.finalPatchesScoped = false;
     }
     const guardReviewSnapshots = [];
     for (const reviewedHead of reviewedCommits) {
@@ -1249,9 +1261,11 @@ async function fetchGuardReviewSnapshots(args, evidence) {
           reviewToPrimary: reviewToPrimary.status, baseAncestry: baseAncestry.status });
       }
     }
-    return { guardReviewSnapshots };
+    return { ...coverage, guardReviewSnapshots };
   } catch (error) {
-    if (error?.name === 'AbortError' || error?.code === 'ABORT_ERR') throw error;
+    args.signal.throwIfAborted();
+    if (error?.name === 'AbortError' || error?.code === 'ABORT_ERR'
+      || error?.name === 'TimeoutError' || historyReadTimeoutEvidence(error).historyReadTimedOut) throw error;
     return {}; // Missing coverage leaves exact-head review mandatory.
   }
 }
@@ -1887,15 +1901,6 @@ async function collectPrimaryChange(args, {
   const derivedArtifacts = await proveDerivedArtifactsImpl({ ...args, rootDir: primaryChangeRoot(args) }, history);
   args.signal.throwIfAborted();
   const evidence = { ...history, ciCost, ...guardEvidence, ...(derivedArtifacts.length ? { derivedArtifacts } : {}) };
-  // A live guard waiver can carry a review only after checking every hunk.
-  if (evidence.finalPatchesScoped && args.get.compareFiles && verifiedGuardReversals(evidence, args.headSha).length) {
-    const final = await args.get.compareFiles(`repos/${args.repo}/compare/${evidence.mergeBase}...${args.headSha}`);
-    if (final.filesComplete !== true || final.merge_base_commit?.sha !== evidence.mergeBase) {
-      throw new Error('full guard coverage comparison unavailable');
-    }
-    evidence.finalFiles = final.files;
-    delete evidence.finalPatchesScoped;
-  }
   const result = { ...evidence, ...await fetchGuardReviewSnapshots(args, evidence) };
   args.signal.throwIfAborted();
   // Failed optional attempts record structured diagnostics on this transient

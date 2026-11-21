@@ -162,12 +162,18 @@ test('pre-deploy history recomputes once at an unchanged head and review key', a
   const currentPath = join(dir, readdirSync(dir).find(name => join(dir, name) !== legacyPath));
   const version = JSON.parse(readFileSync(currentPath, 'utf8')).key.at(-1);
   assert.equal(version, 'reversalproof-v10');
-  const fragment = JSON.parse(readFileSync(new URL('../docs/data-model/catalog.d/LAC-2286.json', import.meta.url), 'utf8'));
   const catalog = JSON.parse(readFileSync(new URL('../docs/data-model/catalog.json', import.meta.url), 'utf8'));
-  // Main regenerates catalog.json after merge. Check the entry with this PR's
-  // canonical overlay applied so the runtime version is checked before merge.
+  // Main regenerates catalog.json after merge. No retained fragment may
+  // downgrade this identity, regardless of the external regenerator's order.
   const id = 'primary-change-history';
-  const entry = { ...catalog.entries.find(entry => entry.id === id), ...fragment.entries.find(entry => entry.id === id) };
+  const fragmentsDir = new URL('../docs/data-model/catalog.d/', import.meta.url);
+  const overlays = readdirSync(fragmentsDir).filter(name => name.endsWith('.json'))
+    .flatMap(name => JSON.parse(readFileSync(new URL(name, fragmentsDir), 'utf8')).entries || [])
+    .filter(entry => entry.id === id);
+  const identityOverlays = overlays.filter(entry => entry.identityVersion !== undefined);
+  assert.ok(identityOverlays.length > 0);
+  for (const overlay of identityOverlays) assert.equal(overlay.identityVersion, version);
+  const entry = Object.assign({}, catalog.entries.find(entry => entry.id === id), ...overlays);
   assert.equal(entry.identityVersion, version);
   assert.ok(entry.optionalHistoryFields.includes('finalPatchesScoped'));
   assert.ok(entry.optionalHistoryFields.includes('laneReversalHistory'));

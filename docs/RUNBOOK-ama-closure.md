@@ -5631,6 +5631,13 @@ merge-base coordinates. It reconstructs author and test patches on this
 projected comparison. Cited reversals and live guard review carry-forward
 use full patches for their additional coverage checks. The guard's base
 comparison and intermediate migration snapshots use complete inventories.
+Guard carry-forward hydrates full projected patches only when an authoritative
+review names a different head. Without such a review, cached scoped histories
+skip this work on every tick. An incomplete comparison, merge-base mismatch
+or other optional hydration failure keeps preservation evidence scoped and
+requires exact-head review; cancellation and history deadlines still propagate.
+When older reviews exist, hydration remains transient and may repeat within
+the existing history budget and per-file checkpoint reuse.
 Migration proof still verifies the relevant object bytes and ancestry
 separately. The history deadline and shared GitHub admission floor apply to
 all these reads.

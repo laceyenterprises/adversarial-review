@@ -132,7 +132,12 @@ counts are materialized for author paths (including both rename names) and
 test paths. Other rows carry inventory evidence only. Histories with cited
 reversals retain full final patches, since an edited rename can need hunks
 from outside the author paths. Live guard review carry-forward also uses a
-full final patch, hydrated after a valid guard reversal is found.
+full final patch, hydrated after a valid guard reversal and an authoritative
+review at a different head are found. No reviews, or only exact-head reviews,
+skip hydration on subsequent cache hits too. Hydration is transient; it does
+not replace the scoped completed record. Incomplete or failed optional
+hydration leaves scoped preservation evidence usable but cannot carry an
+older review forward. Cancellation and history deadlines still fail the read.
 The per-file checkpoint key still refers only to fully materialized patches.
 The returned history may also carry `renameProofReadFailed`,
 which prevents disk publication as described below. The identity version forces

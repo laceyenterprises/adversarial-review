@@ -1,12 +1,11 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { loadConfig, validateSchema } from '../src/config-loader.mjs';
-import { extendModuleSchema } from '../src/config-module-schema.mjs';
-
-const mirror = JSON.parse(readFileSync(new URL('../src/python-module-schema.v1.json', import.meta.url), 'utf8'));
+// ONS-07 retired the packaged Python-module mirror; these keys now come from
+// the generated CFG schema like every other one.
 
 function withTop(callback) {
   const dir = mkdtempSync(join(tmpdir(), 'config-module-parity-'));
@@ -17,13 +16,6 @@ function withTop(callback) {
 
 function nested(path, value) {
   return path.reduceRight((body, key) => ({ [key]: body }), value);
-}
-
-function* strictObjects(schema, path = []) {
-  if (schema.__strict === true) yield path;
-  for (const [key, child] of Object.entries(schema.__keys ?? {})) {
-    yield* strictObjects(child, [...path, key]);
-  }
 }
 
 test('recovery role preserves the owning reader defaults, types and allowlists', () => {
@@ -56,95 +48,6 @@ test('recovery role preserves the owning reader defaults, types and allowlists',
     } });
     assert.equal(cfg.get('roles.merge_agent_failure_recovery.worker_class'), 'codex-corp');
     assert.equal(cfg.get('roles.merge_agent_failure_recovery.fallback_path'), 'litellm-vk');
-  });
-});
-
-test('packaged compatibility mirror ignores unread fields and preserves leaf constraints', () => {
-  for (const path of strictObjects({ __keys: mirror })) {
-    const validated = validateSchema({ version: 1, ...nested([...path, 'unknown_field'], true) });
-    const parent = path.reduce((doc, key) => doc?.[key], validated);
-    assert.equal(parent?.unknown_field, undefined);
-  }
-  for (const [path, invalid] of [
-    [['roles', 'oss-local', 'litellm_base_url'], 1],
-    [['worker_pool', 'network_profile', 'default'], 'bogus'],
-    [['worker_pool', 'dispatch', 'first_sign_of_life_timeout_seconds'], -1],
-  ]) {
-    assert.throws(() => validateSchema({ version: 1, ...nested(path, invalid) }),
-      { name: 'AgentOSConfigError', key: path.join('.') });
-  }
-  // Identity defaults remain owned by Python. This parse-only declaration uses
-  // an explicitly supplied synthetic value and never embeds a host identity.
-  const accepted = validateSchema({ version: 1, session_ledger: {
-    node_identity: { canonical_node_id: 'example-node', canonical_hostnames: ['example-host'] },
-  } });
-  assert.equal(accepted.session_ledger.node_identity.canonical_node_id, 'example-node');
-});
-
-const zeroDisableFields = [
-  ['worker_pool', 'claude_code', 'bash_timeout_seconds'],
-  ['worker_pool', 'dispatch', 'first_sign_of_life_timeout_seconds'],
-];
-
-test('zero-disable fields accept zero and their bounds, rejecting the gap below minimum', () => {
-  for (const path of zeroDisableFields) {
-    const leaf = path.reduce((schema, key) => schema.__keys[key], { __keys: mirror });
-    for (const value of [0, leaf.__min, leaf.__max]) {
-      const validated = validateSchema({ version: 1, ...nested(path, value) });
-      assert.equal(path.reduce((doc, key) => doc[key], validated), value);
-    }
-    for (const value of [-1, 1, leaf.__min - 1, leaf.__max + 1]) {
-      assert.throws(() => validateSchema({ version: 1, ...nested(path, value) }),
-        { name: 'AgentOSConfigError', key: path.join('.') });
-    }
-  }
-});
-
-test('mirror maximums follow Python enforcement while minimums are always enforced', () => {
-  const path = ['worker_pool', 'policy', 'dedup', 'uncommitted_line_threshold'];
-  const accepted = validateSchema({ version: 1, ...nested(path, 2000) });
-  assert.equal(accepted.worker_pool.policy.dedup.uncommitted_line_threshold, 2000);
-  assert.throws(() => validateSchema({ version: 1, ...nested(path, -1) }),
-    { name: 'AgentOSConfigError', key: path.join('.') });
-  // Find an explicitly annotated minimum rather than accidentally testing an
-  // unknown key, as the former network_profile.mode case did.
-  function* annotatedMinimums(schema, path = []) {
-    if (schema.__enforce_min && schema.__min !== undefined) yield [path, schema.__min];
-    for (const [key, child] of Object.entries(schema.__keys ?? {})) {
-      yield* annotatedMinimums(child, [...path, key]);
-    }
-  }
-  const minimums = [...annotatedMinimums({ __keys: mirror })];
-  assert.ok(minimums.length > 0);
-  for (const [path, minimum] of minimums) {
-    assert.doesNotThrow(() => validateSchema({ version: 1, ...nested(path, minimum) }));
-    assert.throws(() => validateSchema({ version: 1, ...nested(path, minimum - 1) }),
-      { name: 'AgentOSConfigError', key: path.join('.') });
-  }
-});
-
-test('local override mirror keys retain zero-disable and enum validation', () => {
-  withTop((topPath) => {
-    const localPath = join(topPath, '..', 'config.local.yaml');
-    for (const version of [{}, { version: 1 }]) {
-      writeFileSync(localPath, JSON.stringify({ ...version, worker_pool: {
-        claude_code: { bash_timeout_seconds: 0 },
-        dispatch: { first_sign_of_life_timeout_seconds: 0 },
-        network_profile: { default: 'restricted' },
-      } }));
-      const cfg = loadConfig({ topPath, env: {} });
-      for (const path of zeroDisableFields) assert.equal(cfg.get(path.join('.')), 0);
-      for (const path of zeroDisableFields) {
-        writeFileSync(localPath, JSON.stringify({ ...version, ...nested(path, 1) }));
-        assert.throws(() => loadConfig({ topPath, env: {} }),
-          { name: 'AgentOSConfigError', key: path.join('.') });
-      }
-      writeFileSync(localPath, JSON.stringify({ ...version,
-        worker_pool: { network_profile: { default: 'bogus' } },
-      }));
-      assert.throws(() => loadConfig({ topPath, env: {} }),
-        { name: 'AgentOSConfigError', key: 'worker_pool.network_profile.default' });
-    }
   });
 });
 
@@ -190,30 +93,6 @@ test('schema alias layers, getters, traces and CLI writes share the canonical ow
     writeFileSync(localPath, JSON.stringify(aliasDoc));
     assert.equal(loadConfig({ topPath, env: {} }).get(canonical), 'claude-code');
   });
-});
-
-test('mirror composition refuses leaf collisions, absent typeless parents and unsupported annotations', () => {
-  const dict = (__keys = {}) => ({ __type: 'dict', __strict: true, __keys });
-  const nullable = { __type: 'string', __nullable: true, __default: null };
-  const extended = extendModuleSchema(dict(), { __keys: { new_leaf: nullable } });
-  assert.equal(extended.__keys.new_leaf.__default, null);
-  assert.throws(() => extendModuleSchema(dict({ leaf: nullable }), { __keys: { leaf: nullable } }),
-    /leaf.*overwrite an existing leaf/);
-  assert.throws(() => extendModuleSchema(dict(), { __keys: { missing: { __keys: {} } } }),
-    /missing.*missing mirror parent type/);
-  assert.throws(() => extendModuleSchema(dict(), { __keys: { missing: dict({ child: { __keys: {} } }) } }),
-    /child.*missing mirror parent type/);
-  assert.throws(() => extendModuleSchema(dict(), { __keys: { leaf: null } }),
-    /leaf.*plain object/);
-  assert.throws(() => extendModuleSchema(dict(), { __keys: {
-    leaf: { __type: 'int', __future_constraint: true },
-  } }), /unsupported mirror annotation __future_constraint/);
-  assert.throws(() => extendModuleSchema(dict(), { __keys: {
-    leaf: { __type: 'list', __item: { __type: 'string', __future_constraint: true } },
-  } }), /unsupported mirror annotation __future_constraint/);
-  assert.throws(() => extendModuleSchema(dict(), { __keys: {
-    leaf: { __type: 'dict', __extra_keys_schema: { __type: 'int', __future_constraint: true } },
-  } }), /unsupported mirror annotation __future_constraint/);
 });
 
 test('compiled schema is reused and frozen, with independent mutable defaults per load', () => {

@@ -36,11 +36,11 @@ test('session resume checked-in schema rejects malformed supported leaves', () =
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
-test('session resume ignores unread policy leaves', () => {
+test('session resume rejects unknown policy leaves like the Python loader', () => {
   const dir = mkdtempSync(join(tmpdir(), 'resume-policy-unread-'));
   try {
     const topPath = join(dir, 'config.yaml');
     writeFileSync(topPath, 'version: 1\nworker_pool:\n  session_resume:\n    automatic:\n      future_example: true\n');
-    assert.equal(loadConfig({ topPath, env: {} }).get('worker_pool.session_resume.automatic.future_example'), null);
+    assert.throws(() => loadConfig({ topPath, env: {} }), /automatic\.future_example: unknown key/);
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });

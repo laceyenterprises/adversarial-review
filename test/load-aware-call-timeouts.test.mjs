@@ -150,7 +150,7 @@ test('load-aware config accepts multiplier bounds 1 and 20 and rejects values ou
     writeFileSync(localPath, `adversarial:\n  reviewer:\n    load_aware:\n      max_multiplier: ${value}\n`);
     assert.equal(loadConfig({ topPath, env: {} }).get('adversarial.reviewer.load_aware.max_multiplier'), value);
   }
-  for (const [value, error] of [[0.5, /below minimum 1/], [21, /above maximum 20/]]) {
+  for (const [value, error] of [[0.5, /expected >= 1, got 0.5/], [21, /expected <= 20, got 21/]]) {
     writeFileSync(localPath, `adversarial:\n  reviewer:\n    load_aware:\n      max_multiplier: ${value}\n`);
     assert.throws(() => loadConfig({ topPath, env: {} }), {
       name: 'AgentOSConfigError',

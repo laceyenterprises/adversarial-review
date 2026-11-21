@@ -5,144 +5,79 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { loadConfig, AgentOSConfigError } from '../src/config-loader.mjs';
 
+// ONS-07: worker vault policies follow the Python loader exactly: leaf types
+// from the generated schema, then _validate_secrets_config on the merged view.
 function fixture(body, check, localBody) {
   const dir = mkdtempSync(join(tmpdir(), 'worker-class-vaults-'));
   try {
     const topPath = join(dir, 'config.yaml');
     writeFileSync(topPath, body);
     if (localBody) writeFileSync(join(dir, 'config.local.yaml'), localBody);
-    check(loadConfig({ topPath, env: {}, tolerateUnknown: false }));
+    check(loadConfig({ topPath, env: {} }));
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
 }
 
-test('strict Node loader accepts fleet-defined worker vaults from canonical YAML', () => {
-  fixture(`version: 1
+const vaults = entry => `version: 1
 worker_pool:
   secrets:
+    shared_vaults: [SharedVault]
     worker_class_vaults:
-      claude-code-corp:
-        vault: ExampleVault
-        service_account_token_ref: op://ExampleVault/worker/credential
-        shared_vault_optin: []
       research:
-        vault: ResearchVault
-`, cfg => {
-    assert.deepEqual(cfg.get('worker_pool.secrets.worker_class_vaults.claude-code-corp'), {
+${Object.entries(entry).map(([key, value]) => `        ${key}: ${JSON.stringify(value)}`).join('\n')}
+`;
+
+test('strict Node loader accepts a complete worker vault policy', () => {
+  fixture(vaults({ vault: 'ExampleVault', service_account_token_ref: 'op://ExampleVault/worker/credential' }), cfg => {
+    assert.deepEqual(cfg.get('worker_pool.secrets.worker_class_vaults.research'), {
       vault: 'ExampleVault',
       service_account_token_ref: 'op://ExampleVault/worker/credential',
       shared_vault_optin: [],
     });
-    assert.equal(cfg.get('worker_pool.secrets.worker_class_vaults.research.vault'), 'ResearchVault');
-    assert.deepEqual(cfg.get('worker_pool.secrets.worker_class_vaults.research.shared_vault_optin'), []);
   });
 });
 
-for (const workerClass of ['research', 'dream', 'claude-code-corp']) {
-  test(`${workerClass} vault entry receives canonical leaf defaults`, () => {
-    fixture(`version: 1
-worker_pool:
-  secrets:
-    worker_class_vaults:
-      ${workerClass}:
-        vault: ExampleVault
-`, cfg => {
-      assert.deepEqual(cfg.get(`worker_pool.secrets.worker_class_vaults.${workerClass}`), {
-        vault: 'ExampleVault',
-        service_account_token_ref: null,
-        shared_vault_optin: [],
-      });
+for (const [entry, key] of [
+  [{ vault: 123 }, 'vault'],
+  [{ service_account_token_ref: 123 }, 'service_account_token_ref'],
+  [{ shared_vault_optin: 'wrong' }, 'shared_vault_optin'],
+  [{ shared_vault_optin: [123] }, 'shared_vault_optin[0]'],
+  [{ vault: 'ExampleVault' }, 'service_account_token_ref'],
+  [{ service_account_token_ref: 'op://ExampleVault/worker/credential' }, 'vault'],
+  [{ service_account_token_ref: '' }, 'vault'],
+  [{ vault: 'ExampleVault', service_account_token_ref: 'plain-token' }, 'service_account_token_ref'],
+  [{ vault: 'ExampleVault', service_account_token_ref: 'op://ExampleVault/worker' }, 'service_account_token_ref'],
+  [{ vault: 'V', service_account_token_ref: 'op://V/i/f', shared_vault_optin: ['Other'] }, 'shared_vault_optin[0]'],
+]) {
+  test(`worker vault policy rejects ${JSON.stringify(entry)} at ${key}`, () => {
+    assert.throws(() => fixture(vaults(entry), () => {}), error => {
+      assert.ok(error instanceof AgentOSConfigError);
+      assert.equal(error.key, `worker_pool.secrets.worker_class_vaults.research.${key}`);
+      return true;
     });
   });
-
-  for (const [leaf, value] of [
-    ['vault', 123],
-    ['service_account_token_ref', 123],
-    ['shared_vault_optin', 'wrong'],
-    ['shared_vault_optin', [123]],
-    ['service_account_token_ref', 'plain-token'],
-    ['service_account_token_ref', 'op://ExampleVault/worker'],
-    ['service_account_token_ref', 'https://ExampleVault/worker/credential'],
-  ]) {
-    test(`${workerClass} rejects ${leaf}: ${JSON.stringify(value)}`, () => {
-      assert.throws(() => fixture(`version: 1
-worker_pool:
-  secrets:
-    worker_class_vaults:
-      ${workerClass}:
-        ${leaf}: ${JSON.stringify(value)}
-`, () => {}), error => {
-        assert.ok(error instanceof AgentOSConfigError);
-        const suffix = Array.isArray(value) ? '[0]' : '';
-        assert.equal(error.key, `worker_pool.secrets.worker_class_vaults.${workerClass}.${leaf}${suffix}`);
-        return true;
-      });
-    });
-  }
-
-  for (const ref of [null, '', 'op://ExampleVault/worker/credential', 'op://ExampleVault/worker/section/credential']) {
-    test(`${workerClass} accepts token reference ${JSON.stringify(ref)}`, () => {
-      fixture(`version: 1
-worker_pool:
-  secrets:
-    worker_class_vaults:
-      ${workerClass}:
-        service_account_token_ref: ${JSON.stringify(ref)}
-`, cfg => {
-        assert.deepEqual(cfg.get(`worker_pool.secrets.worker_class_vaults.${workerClass}`), {
-          vault: null,
-          service_account_token_ref: ref,
-          shared_vault_optin: [],
-        });
-      });
-    });
-  }
 }
 
-test('fleet vault defaults are backfilled after local overrides merge', () => {
-  fixture(`version: 1
-worker_pool:
-  secrets:
-    worker_class_vaults:
-      claude-code-corp:
-        vault: ExampleVault
-        shared_vault_optin: [SharedVault]
-`, cfg => {
-    assert.deepEqual(cfg.get('worker_pool.secrets.worker_class_vaults.claude-code-corp'), {
+test('an empty policy (all leaves unset) is accepted', () => {
+  fixture(vaults({ service_account_token_ref: null }), cfg => {
+    assert.equal(cfg.get('worker_pool.secrets.worker_class_vaults.research.vault'), null);
+  });
+});
+
+test('vault policies merge across layers before semantic validation', () => {
+  fixture(vaults({ vault: 'ExampleVault', shared_vault_optin: ['SharedVault'] }), cfg => {
+    assert.deepEqual(cfg.get('worker_pool.secrets.worker_class_vaults.research'), {
       vault: 'ExampleVault',
       service_account_token_ref: 'op://ExampleVault/worker/credential',
       shared_vault_optin: ['SharedVault'],
     });
-  }, `version: 1
-worker_pool:
-  secrets:
-    worker_class_vaults:
-      claude-code-corp:
-        service_account_token_ref: op://ExampleVault/worker/credential
-`);
+  }, 'worker_pool:\n  secrets:\n    worker_class_vaults:\n      research:\n        service_account_token_ref: op://ExampleVault/worker/credential\n');
 });
 
-test('known worker vault entries retain Python leaf validation', () => {
-  assert.throws(() => fixture(`version: 1
-worker_pool:
-  secrets:
-    worker_class_vaults:
-      research:
-        shared_vault_optin: wrong
-`, () => {}), AgentOSConfigError);
-});
-
-test('unread secrets fields are ignored without adopting vault declarations', () => {
-  assert.doesNotThrow(() => fixture(`version: 1
-worker_pool:
-  secrets:
-    worker_class_vault: {}
-`, cfg => assert.equal(cfg.get('worker_pool.secrets.worker_class_vault'), null)));
-});
-
-test('vault entries ignore unread sibling metadata', () => {
-  fixture('version: 1\nworker_pool:\n  secrets:\n    worker_class_vaults:\n      research:\n        future_example: true\n', cfg => {
-    assert.equal(cfg.get('worker_pool.secrets.worker_class_vaults.research.future_example'), null);
-  });
+test('unknown secrets and vault fields fail like the Python loader', () => {
+  assert.throws(() => fixture('version: 1\nworker_pool:\n  secrets:\n    worker_class_vault: {}\n', () => {}),
+    /worker_pool\.secrets\.worker_class_vault: unknown key \(strict schema\)/);
+  assert.throws(() => fixture(vaults({ future_example: true }), () => {}),
+    /worker_pool\.secrets\.worker_class_vaults\.research\.future_example: unknown key \(strict schema\)/);
 });

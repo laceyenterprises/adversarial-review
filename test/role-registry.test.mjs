@@ -7,7 +7,7 @@ import { dirname } from 'node:path';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-import { AgentOSConfigError, loadConfig } from '../src/config-loader.mjs';
+import { AgentOSConfigError, loadConfig, loadConfigRuntime } from '../src/config-loader.mjs';
 import {
   ROLE_TASK_KINDS,
   ROLE_COMPLETION_SHAPES,
@@ -209,7 +209,7 @@ test('the config loader accepts the roles.registry subtree and routing flag', ()
   assert.equal(cfg.get('roles.routing.never-review-own-builder-class'), false);
 });
 
-test('the config loader drops an unread key inside a role entry', () => {
+test('the strict loader refuses an unknown key inside a role entry; runtime drops it', () => {
   const { topPath, modulePath } = writeCascade({
     module: [
       'roles:',
@@ -223,7 +223,9 @@ test('the config loader drops an unread key inside a role entry', () => {
       '',
     ].join('\n'),
   });
-  const entry = loadConfig({ topPath, modulePaths: [modulePath], env: {} }).get('roles.registry').r;
+  assert.throws(() => loadConfig({ topPath, modulePaths: [modulePath], env: {} }),
+    /roles\.registry\.r\.workerclass: unknown key \(strict schema\)/);
+  const entry = loadConfigRuntime({ topPath, modulePaths: [modulePath], env: {} }).get('roles.registry').r;
   assert.equal(entry.workerclass, undefined);
   assert.equal(entry.workerClass, 'gemini');
 });

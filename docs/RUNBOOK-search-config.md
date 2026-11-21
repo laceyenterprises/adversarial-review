@@ -1,6 +1,7 @@
 # Search configuration mirror (SPE-01)
 
-`src/config-loader.mjs` mirrors `services.hcp.search` for Node consumers such as
+`src/config-loader.mjs` validates `services.hcp.search` (from the generated CFG
+schema, ONS-07) for Node consumers such as
 the watcher and follow-up daemons. This reader validates metadata only: loading
 configuration does not resolve credentials, contact providers or enable worker
 access. Defaults keep all six providers disabled; omitted local budgets stay unset.

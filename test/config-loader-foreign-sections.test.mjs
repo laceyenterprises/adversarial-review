@@ -24,48 +24,34 @@ function withConfig(fn) {
   }
 }
 
-test('CFGFOREIGN-01: every authoritative root is mirrored or accepted as foreign in local overrides', () => {
-  withConfig(({ topPath, localPath }) => {
-    const baseline = loadConfig({ topPath, env: {} });
-    for (const root of roots) {
-      if (Object.hasOwn(baseline.schema.__keys, root)) continue;
-      for (const version of ['', 'version: 1\n']) {
-        writeFileSync(localPath, `${version}${root}: {}\n`);
-        for (const loader of [loadConfig, loadConfigRuntime]) {
-          const cfg = loader({ topPath, env: {} });
-          assert.deepEqual(cfg.values, baseline.values, `${root} must be ignored by ${loader.name}`);
-          assert.equal(cfg.get(root), null, `${root} must not be adopted`);
-        }
-      }
-    }
+// ONS-07: the generated validator declares every CFG root, so a "foreign"
+// section is an ordinary key validated exactly as the Python loader does.
+test('CFGFOREIGN-01: every authoritative root is declared by the generated schema', () => {
+  withConfig(({ topPath }) => {
+    const { schema } = loadConfig({ topPath, env: {} });
+    for (const root of roots) assert.ok(Object.hasOwn(schema.__keys, root), root);
   });
 });
 
-test('CFGFOREIGN-01: comms ingress override is accepted and ignored', () => {
+test('CFGFOREIGN-01: comms and timeouts overrides are read like any CFG key', () => {
   withConfig(({ topPath, localPath }) => {
     for (const version of ['', 'version: 1\n']) {
       writeFileSync(localPath, `${version}comms:\n  ingressMode: tailscale-funnel\n`);
       for (const loader of [loadConfig, loadConfigRuntime]) {
         const cfg = loader({ topPath, env: {} });
-        assert.equal(cfg.get('comms'), null);
-        assert.equal(cfg.get('comms.ingressMode'), null);
-        assert.deepEqual(cfg.resolutionTrace('comms.ingressMode'), []);
+        assert.equal(cfg.get('comms.ingressMode'), 'tailscale-funnel');
+        assert.equal(cfg.resolutionTrace('comms.ingressMode').at(-1).source, `local:${localPath}`);
       }
     }
-  });
-});
-
-test('CFGFOREIGN-01: shared timeouts override does not change this reader\'s load-aware policy', () => {
-  withConfig(({ topPath, localPath }) => {
     writeFileSync(localPath, 'timeouts:\n  load_aware:\n    enabled: false\n    max_multiplier: 2\n');
     const cfg = loadConfig({ topPath, env: {} });
-    assert.equal(cfg.get('timeouts'), null);
+    assert.equal(cfg.get('timeouts.load_aware.enabled'), false);
+    // The reviewer's own load-aware policy is a separate (Node-only) key.
     assert.equal(cfg.get('adversarial.reviewer.load_aware.enabled'), true);
-    assert.equal(cfg.get('adversarial.reviewer.load_aware.max_multiplier'), 6);
   });
 });
 
-test('CFGFOREIGN-01: unknown roots are ignored by startup and runtime local loads', () => {
+test('CFGFOREIGN-01: unknown roots are dropped from local overlays and refused in checked-in config', () => {
   withConfig(({ topPath, localPath }) => {
     for (const version of ['', 'version: 1\n']) {
       writeFileSync(localPath, `${version}unknown_example_root:\n  enabled: true\n`);
@@ -74,14 +60,8 @@ test('CFGFOREIGN-01: unknown roots are ignored by startup and runtime local load
       }
     }
   });
-});
-
-test('CFGFOREIGN-01: new foreign sections are ignored in checked-in config', () => {
-  for (const root of ['comms', 'submodule_float', 'assessment_cadence', 'argus', 'searchlight', 'timeouts']) {
-    assert.deepEqual(validateSchema({ version: 1, [root]: {} }, {
-      source: '/tmp/config.yaml',
-    }), { version: 1 });
-  }
+  assert.throws(() => validateSchema({ version: 1, unknown_example_root: {} }),
+    /unknown_example_root: unknown key \(strict schema\)/);
 });
 
 test('OVERLOADDEFER-01c: overload threshold mirrors Python and shell CFG', () => {
@@ -98,24 +78,20 @@ test('OVERLOADDEFER-01c: overload threshold mirrors Python and shell CFG', () =>
   });
 });
 
-test('LXS-02: Python-owned app_relay configuration is ignored in every shared layer', () => {
-  // Pin a realistic nested-array payload, beyond generic unknown-root coverage.
+test('LXS-02: app_relay configuration validates against the generated schema in every layer', () => {
   const relay = { apps: [{ app_id: 'example', base_url: 'https://example.invalid',
     credential_ref: 'op://vault/relay/token', app_contract_credential_ref: 'op://vault/app/bootstrap',
     max_running: 2, poll_seconds: 5, progress_seconds: 5, heartbeat_seconds: 30 }] };
-  assert.deepEqual(validateSchema({ version: 1, app_relay: relay }), { version: 1 });
+  assert.deepEqual(validateSchema({ version: 1, app_relay: relay }).app_relay, relay);
+  const { app_id: _omitted, ...missingId } = relay.apps[0];
+  assert.throws(() => validateSchema({ version: 1, app_relay: { apps: [missingId] } }),
+    /app_relay\.apps\[0\]\.app_id: required key is missing/);
   withConfig(({ topPath, localPath }) => {
-    const baselines = new Map([loadConfig, loadConfigRuntime].map(loader => [
-      loader, loader({ topPath, env: {} }),
-    ]));
-    writeFileSync(topPath, `version: 1\napp_relay: ${JSON.stringify(relay)}\n`);
+    writeFileSync(topPath, 'version: 1\n');
     for (const version of ['', 'version: 1\n']) {
       writeFileSync(localPath, `${version}app_relay: ${JSON.stringify(relay)}\n`);
       for (const loader of [loadConfig, loadConfigRuntime]) {
-        const cfg = loader({ topPath, env: {} });
-        assert.deepEqual(cfg.values, baselines.get(loader).values);
-        assert.equal(cfg.get('app_relay'), null);
-        assert.equal(cfg.get('app_relay.apps'), null);
+        assert.deepEqual(loader({ topPath, env: {} }).get('app_relay.apps'), relay.apps);
       }
     }
   });

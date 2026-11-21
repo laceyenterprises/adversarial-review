@@ -42,8 +42,8 @@ for (const body of ['developer_dir: null', 'developer_dir: false', 'developer_di
   });
 }
 
-test('Apple sibling-reader fields are ignored', () => {
+test('unknown Apple fields fail like the Python loader', () => {
   fixture('apple:\n  future_example: true\n', topPath => {
-    assert.equal(loadConfig({ topPath, env: {} }).get('apple.future_example'), null);
+    assert.throws(() => loadConfig({ topPath, env: {} }), /apple\.future_example: unknown key/);
   });
 });

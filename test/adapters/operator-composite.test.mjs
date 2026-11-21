@@ -83,6 +83,7 @@ test('composite operator surface forwards controls and triage calls through the 
   );
   assert.deepEqual(surface.routePR('[codex] LAC-486: tighten watcher', null, {
     topPath: '/dev/null',
+    env: { AGENT_OS_LINEAR_ISSUE_PREFIX: 'LAC' },
     geminiReviewerMode: 'always-on',
   }), {
     builderClass: 'codex',

@@ -11,8 +11,7 @@ const dispatchClasses = ['codex', 'codex-corp', 'claude-code', 'merge-agent', 'r
 // worker_pool.merge_agent sub-roles remain owned by the host's loaders.
 const leaves = [
   // Same members and order as the Python allowlist for this key.
-  ['roles.build_pack_default_worker_class', ['plan', 'codex', 'codex-corp', 'claude-code', 'claude-code-corp'], 'codex'],
-  ['worker_pool.post_merge_actions.rca_worker_class', dispatchClasses, 'codex'],
+  ['roles.build_pack_default_worker_class', ['plan', 'codex', 'codex-corp', 'claude-code', 'claude-code-corp'], 'plan'],
   ...[
     'coding', 'research', 'drafting', 'analysis', 'other', 'merge',
     'merge_conflict_resolution', 'merge_comment_only_followups', 'merge_agent_failure_recovery',
@@ -97,4 +96,13 @@ test('roles.build_pack_default_worker_class accepts claude-code-corp from local 
     assert.equal(cfg.get(key), 'claude-code-corp');
     assert.equal(cfg.resolutionTrace(key).at(-1).source, `local:${localPath}`);
   }
+});
+
+// ONS-07: CFG declares no allowlist for the RCA class, so neither reader
+// refuses an unlisted one; the default stays codex.
+test('worker_pool.post_merge_actions.rca_worker_class is an open string like the Python loader', t => {
+  const { topPath } = fixture(t);
+  assert.equal(loadConfig({ topPath, env: {} }).get('worker_pool.post_merge_actions.rca_worker_class'), 'codex');
+  writeFileSync(topPath, yamlFor('worker_pool.post_merge_actions.rca_worker_class', 'unknown-worker'));
+  assert.equal(loadConfig({ topPath, env: {} }).get('worker_pool.post_merge_actions.rca_worker_class'), 'unknown-worker');
 });

@@ -1,0 +1,900 @@
+{
+ "version": 1,
+ "source": "agent_os_config (agent-os platform/agent-os-config) at one-schema@6ab5e7ac02db",
+ "cases": [
+  {
+   "name": "code defaults",
+   "files": {
+    "config.yaml": "version: 1\n"
+   },
+   "get": [
+    "github.org",
+    "alert_delivery.sink",
+    "post_deploy_verify.enabled",
+    "roles.build_pack_default_worker_class",
+    "governance.emergency_stop_path",
+    "linear.issue_prefix",
+    "worker_pool.dag.autowalk.deep_reconcile",
+    "profile",
+    "reviewer.gemini.mode",
+    "roles.reviewer",
+    "main_catchup.pull_retry_delays_seconds",
+    "apps"
+   ],
+   "python": {
+    "ok": true,
+    "values": {
+     "github.org": "example-org",
+     "alert_delivery.sink": "log",
+     "post_deploy_verify.enabled": true,
+     "roles.build_pack_default_worker_class": "plan",
+     "governance.emergency_stop_path": null,
+     "linear.issue_prefix": "EXA",
+     "worker_pool.dag.autowalk.deep_reconcile": true,
+     "profile": "core",
+     "reviewer.gemini.mode": "off",
+     "roles.reviewer": "adversarial",
+     "main_catchup.pull_retry_delays_seconds": [
+      5,
+      15
+     ],
+     "apps": null
+    }
+   }
+  },
+  {
+   "name": "cascade: module over code",
+   "files": {
+    "config.yaml": "version: 1\n",
+    "mod.yaml": "roles:\n  reviewer: codex\n"
+   },
+   "get": [
+    "roles.reviewer"
+   ],
+   "modules": [
+    "mod.yaml"
+   ],
+   "python": {
+    "ok": true,
+    "values": {
+     "roles.reviewer": "codex"
+    }
+   }
+  },
+  {
+   "name": "cascade: top over module",
+   "files": {
+    "config.yaml": "version: 1\nroles:\n  reviewer: claude-code\n",
+    "mod.yaml": "roles:\n  reviewer: codex\n"
+   },
+   "get": [
+    "roles.reviewer"
+   ],
+   "modules": [
+    "mod.yaml"
+   ],
+   "python": {
+    "ok": true,
+    "values": {
+     "roles.reviewer": "claude-code"
+    }
+   }
+  },
+  {
+   "name": "cascade: local over top",
+   "files": {
+    "config.yaml": "version: 1\nroles:\n  reviewer: claude-code\n",
+    "config.local.yaml": "roles:\n  reviewer: gemini\n",
+    "mod.yaml": "roles:\n  reviewer: codex\n"
+   },
+   "get": [
+    "roles.reviewer"
+   ],
+   "modules": [
+    "mod.yaml"
+   ],
+   "python": {
+    "ok": true,
+    "values": {
+     "roles.reviewer": "gemini"
+    }
+   }
+  },
+  {
+   "name": "cascade: module local over top local",
+   "files": {
+    "config.yaml": "version: 1\n",
+    "config.local.yaml": "roles:\n  reviewer: gemini\n",
+    "mod.yaml": "roles:\n  reviewer: codex\n",
+    "mod.local.yaml": "roles:\n  reviewer: claude-code\n"
+   },
+   "get": [
+    "roles.reviewer"
+   ],
+   "modules": [
+    "mod.yaml"
+   ],
+   "python": {
+    "ok": true,
+    "values": {
+     "roles.reviewer": "claude-code"
+    }
+   }
+  },
+  {
+   "name": "cascade: env over local",
+   "files": {
+    "config.yaml": "version: 1\nroles:\n  reviewer: claude-code\n",
+    "config.local.yaml": "roles:\n  reviewer: gemini\n",
+    "mod.yaml": "roles:\n  reviewer: codex\n"
+   },
+   "get": [
+    "roles.reviewer"
+   ],
+   "modules": [
+    "mod.yaml"
+   ],
+   "env": {
+    "AGENT_OS_ROLES_REVIEWER": "adversarial"
+   },
+   "python": {
+    "ok": true,
+    "values": {
+     "roles.reviewer": "adversarial"
+    }
+   }
+  },
+  {
+   "name": "cascade: empty env value is absent",
+   "files": {
+    "config.yaml": "version: 1\nroles:\n  reviewer: claude-code\n"
+   },
+   "get": [
+    "roles.reviewer"
+   ],
+   "env": {
+    "AGENT_OS_ROLES_REVIEWER": ""
+   },
+   "python": {
+    "ok": true,
+    "values": {
+     "roles.reviewer": "claude-code"
+    }
+   }
+  },
+  {
+   "name": "cascade: versioned local",
+   "files": {
+    "config.yaml": "version: 1\n",
+    "config.local.yaml": "version: 1\nroles:\n  reviewer: gemini\n"
+   },
+   "get": [
+    "roles.reviewer"
+   ],
+   "python": {
+    "ok": true,
+    "values": {
+     "roles.reviewer": "gemini"
+    }
+   }
+  },
+  {
+   "name": "unknown nested key in checked-in top",
+   "files": {
+    "config.yaml": "version: 1\nworker_pool:\n  anything: 1\n"
+   },
+   "get": [],
+   "python": {
+    "ok": false,
+    "key": "worker_pool.anything"
+   }
+  },
+  {
+   "name": "unknown root in checked-in top",
+   "files": {
+    "config.yaml": "version: 1\nnot_a_section: 1\n"
+   },
+   "get": [],
+   "python": {
+    "ok": false,
+    "key": "not_a_section"
+   }
+  },
+  {
+   "name": "unknown nested key in module",
+   "files": {
+    "config.yaml": "version: 1\n",
+    "mod.yaml": "roles:\n  future_worker_role: x\n"
+   },
+   "get": [],
+   "modules": [
+    "mod.yaml"
+   ],
+   "python": {
+    "ok": false,
+    "key": "roles.future_worker_role"
+   }
+  },
+  {
+   "name": "unknown nested key in local is dropped",
+   "files": {
+    "config.yaml": "version: 1\n",
+    "config.local.yaml": "worker_pool:\n  anything: 1\nroles:\n  reviewer: codex\n"
+   },
+   "get": [
+    "roles.reviewer",
+    "worker_pool.anything"
+   ],
+   "python": {
+    "ok": true,
+    "values": {
+     "roles.reviewer": "codex",
+     "worker_pool.anything": null
+    }
+   }
+  },
+  {
+   "name": "unknown root in local is dropped",
+   "files": {
+    "config.yaml": "version: 1\n",
+    "config.local.yaml": "not_a_section: 1\n"
+   },
+   "get": [
+    "not_a_section"
+   ],
+   "python": {
+    "ok": true,
+    "values": {
+     "not_a_section": null
+    }
+   }
+  },
+  {
+   "name": "unknown key in module local is dropped",
+   "files": {
+    "config.yaml": "version: 1\n",
+    "mod.yaml": "roles:\n  reviewer: codex\n",
+    "mod.local.yaml": "roles:\n  future_worker_role: x\n"
+   },
+   "get": [
+    "roles.reviewer"
+   ],
+   "modules": [
+    "mod.yaml"
+   ],
+   "python": {
+    "ok": true,
+    "values": {
+     "roles.reviewer": "codex"
+    }
+   }
+  },
+  {
+   "name": "unknown key in strict-always policy fails even in local",
+   "files": {
+    "config.yaml": "version: 1\n",
+    "config.local.yaml": "services:\n  hcp:\n    search:\n      bogus: 1\n"
+   },
+   "get": [],
+   "python": {
+    "ok": false,
+    "key": "services.hcp.search.bogus"
+   }
+  },
+  {
+   "name": "metadata key is skipped",
+   "files": {
+    "config.yaml": "version: 1\nworker_pool:\n  __note: x\n"
+   },
+   "get": [
+    "worker_pool.__note"
+   ],
+   "python": {
+    "ok": true,
+    "values": {
+     "worker_pool.__note": null
+    }
+   }
+  },
+  {
+   "name": "open section passes unknown children",
+   "files": {
+    "config.yaml": "version: 1\nfeature_flags:\n  future_flag: no\n"
+   },
+   "get": [
+    "feature_flags.future_flag"
+   ],
+   "python": {
+    "ok": true,
+    "values": {
+     "feature_flags.future_flag": null
+    }
+   }
+  },
+  {
+   "name": "YAML 1.1 boolean token refused",
+   "files": {
+    "config.yaml": "version: 1\nhandoff:\n  final_to_hammer: no\n"
+   },
+   "get": [],
+   "python": {
+    "ok": false,
+    "key": "handoff.final_to_hammer"
+   }
+  },
+  {
+   "name": "explicit null on non-nullable refused",
+   "files": {
+    "config.yaml": "version: 1\nhandoff:\n  final_to_hammer:\n"
+   },
+   "get": [],
+   "python": {
+    "ok": false,
+    "key": "handoff.final_to_hammer"
+   }
+  },
+  {
+   "name": "nullable accepts null",
+   "files": {
+    "config.yaml": "version: 1\nreviewer:\n  gemini:\n    identities:\n"
+   },
+   "get": [
+    "reviewer.gemini.identities"
+   ],
+   "python": {
+    "ok": true,
+    "values": {
+     "reviewer.gemini.identities": null
+    }
+   }
+  },
+  {
+   "name": "int type refused for string",
+   "files": {
+    "config.yaml": "version: 1\nroles:\n  quota_probe:\n    ok_tick_seconds: soon\n"
+   },
+   "get": [],
+   "python": {
+    "ok": false,
+    "key": "roles.quota_probe.ok_tick_seconds"
+   }
+  },
+  {
+   "name": "float accepts int",
+   "files": {
+    "config.yaml": "version: 1\nworker_pool:\n  overload_deferral:\n    minimum_multiplier: 3\n"
+   },
+   "get": [
+    "worker_pool.overload_deferral.minimum_multiplier"
+   ],
+   "python": {
+    "ok": true,
+    "values": {
+     "worker_pool.overload_deferral.minimum_multiplier": 3
+    }
+   }
+  },
+  {
+   "name": "enum refused",
+   "files": {
+    "config.yaml": "version: 1\nroles:\n  reviewer: nobody\n"
+   },
+   "get": [],
+   "python": {
+    "ok": false,
+    "key": "roles.reviewer"
+   }
+  },
+  {
+   "name": "minimum refused",
+   "files": {
+    "config.yaml": "version: 1\nroles:\n  quota_probe:\n    ok_tick_seconds: 299\n"
+   },
+   "get": [],
+   "python": {
+    "ok": false,
+    "key": "roles.quota_probe.ok_tick_seconds"
+   }
+  },
+  {
+   "name": "advisory maximum accepted",
+   "files": {
+    "config.yaml": "version: 1\nroles:\n  quota_probe:\n    ok_tick_seconds: 21601\n"
+   },
+   "get": [
+    "roles.quota_probe.ok_tick_seconds"
+   ],
+   "python": {
+    "ok": true,
+    "values": {
+     "roles.quota_probe.ok_tick_seconds": 21601
+    }
+   }
+  },
+  {
+   "name": "enforced maximum refused",
+   "files": {
+    "config.yaml": "version: 1\nworker_pool:\n  overload_deferral:\n    minimum_multiplier: 20.1\n"
+   },
+   "get": [],
+   "python": {
+    "ok": false,
+    "key": "worker_pool.overload_deferral.minimum_multiplier"
+   }
+  },
+  {
+   "name": "allow-zero accepts zero",
+   "files": {
+    "config.yaml": "version: 1\nworker_pool:\n  claude_code:\n    bash_timeout_seconds: 0\n"
+   },
+   "get": [
+    "worker_pool.claude_code.bash_timeout_seconds"
+   ],
+   "python": {
+    "ok": true,
+    "values": {
+     "worker_pool.claude_code.bash_timeout_seconds": 0
+    }
+   }
+  },
+  {
+   "name": "allow-zero refuses the gap",
+   "files": {
+    "config.yaml": "version: 1\nworker_pool:\n  claude_code:\n    bash_timeout_seconds: 1\n"
+   },
+   "get": [],
+   "python": {
+    "ok": false,
+    "key": "worker_pool.claude_code.bash_timeout_seconds"
+   }
+  },
+  {
+   "name": "pattern is a full match",
+   "files": {
+    "config.yaml": "version: 1\nagent_gateway:\n  alert_bus_url: https://alerts.example.test/hooks/wake/\n"
+   },
+   "get": [],
+   "python": {
+    "ok": false,
+    "key": "agent_gateway.alert_bus_url"
+   }
+  },
+  {
+   "name": "pattern accepts",
+   "files": {
+    "config.yaml": "version: 1\nagent_gateway:\n  alert_bus_url: https://alerts.example.test/hooks/wake\n"
+   },
+   "get": [
+    "agent_gateway.alert_bus_url"
+   ],
+   "python": {
+    "ok": true,
+    "values": {
+     "agent_gateway.alert_bus_url": "https://alerts.example.test/hooks/wake"
+    }
+   }
+  },
+  {
+   "name": "number coerced to string",
+   "files": {
+    "config.yaml": "version: 1\nsentinel:\n  quiet_window: 300\n"
+   },
+   "get": [
+    "sentinel.quiet_window"
+   ],
+   "python": {
+    "ok": true,
+    "values": {
+     "sentinel.quiet_window": "300"
+    }
+   }
+  },
+  {
+   "name": "normalized enum alias",
+   "files": {
+    "config.yaml": "version: 1\nroles:\n  reviewer: claude\n"
+   },
+   "get": [
+    "roles.reviewer"
+   ],
+   "python": {
+    "ok": true,
+    "values": {
+     "roles.reviewer": "claude-code"
+    }
+   }
+  },
+  {
+   "name": "lowercase and unique list",
+   "files": {
+    "config.yaml": "version: 1\ngithub:\n  additional_orgs: [Foo, foo, bar]\n"
+   },
+   "get": [
+    "github.additional_orgs"
+   ],
+   "python": {
+    "ok": true,
+    "values": {
+     "github.additional_orgs": [
+      "foo",
+      "bar"
+     ]
+    }
+   }
+  },
+  {
+   "name": "max items refused",
+   "files": {
+    "config.yaml": "version: 1\nmain_catchup:\n  pull_retry_delays_seconds: [1, 2, 3]\n"
+   },
+   "get": [],
+   "python": {
+    "ok": false,
+    "key": "main_catchup.pull_retry_delays_seconds"
+   }
+  },
+  {
+   "name": "disallowed value refused",
+   "files": {
+    "config.yaml": "version: 1\nworker_pool:\n  browse:\n    policies:\n      p:\n        allowed_url_patterns: ['*']\n"
+   },
+   "get": [],
+   "python": {
+    "ok": false,
+    "key": "worker_pool.browse.policies.p.allowed_url_patterns[0]"
+   }
+  },
+  {
+   "name": "schema alias writes its canonical key",
+   "files": {
+    "config.yaml": "version: 1\nfeature_flags:\n  resume_context_envelope: false\n"
+   },
+   "get": [
+    "worker_pool.feature_flags.resume_context_envelope",
+    "feature_flags.resume_context_envelope"
+   ],
+   "python": {
+    "ok": true,
+    "values": {
+     "worker_pool.feature_flags.resume_context_envelope": false,
+     "feature_flags.resume_context_envelope": false
+    }
+   }
+  },
+  {
+   "name": "read-only diagnostic refused",
+   "files": {
+    "config.yaml": "version: 1\nsession_ledger:\n  postgres:\n    max_connections: 5\n"
+   },
+   "get": [],
+   "python": {
+    "ok": false,
+    "key": "session_ledger.postgres.max_connections"
+   }
+  },
+  {
+   "name": "scalar shorthand fills the default key",
+   "files": {
+    "config.yaml": "version: 1\nservices:\n  hcp:\n    console_capability_enforcement: enforce\n"
+   },
+   "get": [
+    "services.hcp.console_capability_enforcement.default"
+   ],
+   "python": {
+    "ok": true,
+    "values": {
+     "services.hcp.console_capability_enforcement.default": "enforce"
+    }
+   }
+  },
+  {
+   "name": "required list-item key missing",
+   "files": {
+    "config.yaml": "version: 1\napp_relay:\n  apps:\n    - {base_url: 'https://x.invalid', credential_ref: 'op://v/i/f', app_contract_credential_ref: 'op://v/a/f'}\n"
+   },
+   "get": [],
+   "python": {
+    "ok": false,
+    "key": "app_relay.apps[0].app_id"
+   }
+  },
+  {
+   "name": "keyed map entries get defaults",
+   "files": {
+    "config.yaml": "version: 1\napps:\n  foo:\n    mode: standalone\n"
+   },
+   "get": [
+    "apps.foo"
+   ],
+   "python": {
+    "ok": true,
+    "values": {
+     "apps.foo": {
+      "mode": "standalone",
+      "subscribes": [],
+      "contract_version": "1.0"
+     }
+    }
+   }
+  },
+  {
+   "name": "repository list normalized",
+   "files": {
+    "config.yaml": "version: 1\nroles:\n  adversarial:\n    merge_authority:\n      no_ci_repositories: [Example/Repo]\n"
+   },
+   "get": [
+    "roles.adversarial.merge_authority.no_ci_repositories"
+   ],
+   "python": {
+    "ok": true,
+    "values": {
+     "roles.adversarial.merge_authority.no_ci_repositories": [
+      "example/repo"
+     ]
+    }
+   }
+  },
+  {
+   "name": "module alias resolves to its canonical key",
+   "files": {
+    "config.yaml": "version: 1\n",
+    "mod.yaml": "__aliases:\n  merge_agent.worker_class: roles.merge_agent_worker_class\nmerge_agent:\n  worker_class: codex\n"
+   },
+   "get": [
+    "roles.merge_agent_worker_class"
+   ],
+   "modules": [
+    "mod.yaml"
+   ],
+   "python": {
+    "ok": true,
+    "values": {
+     "roles.merge_agent_worker_class": "codex"
+    }
+   }
+  },
+  {
+   "name": "module must not declare version",
+   "files": {
+    "config.yaml": "version: 1\n",
+    "mod.yaml": "version: 1\n"
+   },
+   "get": [],
+   "modules": [
+    "mod.yaml"
+   ],
+   "python": {
+    "ok": false,
+    "key": "version"
+   }
+  },
+  {
+   "name": "missing version refused",
+   "files": {
+    "config.yaml": "roles:\n  reviewer: codex\n"
+   },
+   "get": [],
+   "python": {
+    "ok": false,
+    "key": "version"
+   }
+  },
+  {
+   "name": "unknown version refused",
+   "files": {
+    "config.yaml": "version: 2\n"
+   },
+   "get": [],
+   "python": {
+    "ok": false,
+    "key": "version"
+   }
+  },
+  {
+   "name": "env bool",
+   "files": {
+    "config.yaml": "version: 1\n"
+   },
+   "get": [
+    "handoff.final_to_hammer"
+   ],
+   "env": {
+    "AGENT_OS_HANDOFF_FINAL_TO_HAMMER": "true"
+   },
+   "python": {
+    "ok": true,
+    "values": {
+     "handoff.final_to_hammer": true
+    }
+   }
+  },
+  {
+   "name": "env YAML 1.1 token refused",
+   "files": {
+    "config.yaml": "version: 1\n"
+   },
+   "get": [],
+   "env": {
+    "AGENT_OS_HANDOFF_FINAL_TO_HAMMER": "yes"
+   },
+   "python": {
+    "ok": false,
+    "key": "handoff.final_to_hammer"
+   }
+  },
+  {
+   "name": "unbound int list env is ignored",
+   "files": {
+    "config.yaml": "version: 1\n"
+   },
+   "get": [
+    "main_catchup.pull_retry_delays_seconds"
+   ],
+   "env": {
+    "AGENT_OS_MAIN_CATCHUP_PULL_RETRY_DELAYS_SECONDS": "1,2"
+   },
+   "python": {
+    "ok": true,
+    "values": {
+     "main_catchup.pull_retry_delays_seconds": [
+      5,
+      15
+     ]
+    }
+   }
+  },
+  {
+   "name": "env legacy alias",
+   "files": {
+    "config.yaml": "version: 1\n"
+   },
+   "get": [
+    "roles.reviewer"
+   ],
+   "env": {
+    "ADVERSARIAL_REVIEW_DEFAULT_REVIEWER": "codex"
+   },
+   "python": {
+    "ok": true,
+    "values": {
+     "roles.reviewer": "codex"
+    }
+   }
+  },
+  {
+   "name": "env alias conflict refused",
+   "files": {
+    "config.yaml": "version: 1\n"
+   },
+   "get": [],
+   "env": {
+    "AGENT_OS_ROLES_REVIEWER": "codex",
+    "ADVERSARIAL_REVIEW_DEFAULT_REVIEWER": "claude-code"
+   },
+   "python": {
+    "ok": false,
+    "key": "roles.reviewer"
+   }
+  },
+  {
+   "name": "env app registration",
+   "files": {
+    "config.yaml": "version: 1\n"
+   },
+   "get": [
+    "apps.bar"
+   ],
+   "env": {
+    "AGENT_OS_APPS_BAR_MODE": "standalone"
+   },
+   "python": {
+    "ok": true,
+    "values": {
+     "apps.bar": {
+      "mode": "standalone",
+      "subscribes": [],
+      "contract_version": "1.0"
+     }
+    }
+   }
+  },
+  {
+   "name": "worker vault policy needs vault and full ref",
+   "files": {
+    "config.yaml": "version: 1\nworker_pool:\n  secrets:\n    worker_class_vaults:\n      research:\n        vault: V\n"
+   },
+   "get": [],
+   "python": {
+    "ok": false,
+    "key": "worker_pool.secrets.worker_class_vaults.research.service_account_token_ref"
+   }
+  },
+  {
+   "name": "public-hygiene identity is complete per layer",
+   "files": {
+    "config.yaml": "version: 1\nworker_pool:\n  public_hygiene:\n    identities:\n      codex:\n        email: a@b.c\n",
+    "config.local.yaml": "worker_pool:\n  public_hygiene:\n    identities:\n      codex:\n        name: N\n"
+   },
+   "get": [],
+   "python": {
+    "ok": false,
+    "key": "worker_pool.public_hygiene.identities.codex.name"
+   }
+  },
+  {
+   "name": "enabled search needs a positive budget",
+   "files": {
+    "config.yaml": "version: 1\nservices:\n  hcp:\n    search:\n      enabled: true\n"
+   },
+   "get": [],
+   "python": {
+    "ok": true,
+    "values": {}
+   }
+  },
+  {
+   "name": "goal lineage excerpt within max",
+   "files": {
+    "config.yaml": "version: 1\nworker_pool:\n  dispatch:\n    goal_lineage:\n      max_bytes: 100\n      spec_excerpt_bytes: 200\n"
+   },
+   "get": [],
+   "python": {
+    "ok": false,
+    "key": "worker_pool.dispatch.goal_lineage.max_bytes"
+   }
+  },
+  {
+   "name": "nested module fixture directories",
+   "files": {
+    "config.yaml": "version: 1\n",
+    "modules/nested.yaml": "github:\n  org: nested-example\n"
+   },
+   "modules": [
+    "modules/nested.yaml"
+   ],
+   "get": [
+    "github.org"
+   ],
+   "python": {
+    "ok": true,
+    "values": {
+     "github.org": "nested-example"
+    }
+   }
+  },
+  {
+   "name": "YAML integer list is preserved",
+   "files": {
+    "config.yaml": "version: 1\nmain_catchup:\n  pull_retry_delays_seconds: [1, 2]\n"
+   },
+   "get": [
+    "main_catchup.pull_retry_delays_seconds"
+   ],
+   "python": {
+    "ok": true,
+    "values": {
+     "main_catchup.pull_retry_delays_seconds": [
+      1,
+      2
+     ]
+    }
+   }
+  },
+  {
+   "name": "recovery role canonical fallback env",
+   "files": {
+    "config.yaml": "version: 1\n"
+   },
+   "env": {
+    "AGENT_OS_ROLES_MERGE_AGENT_FAILURE_RECOVERY_FALLBACK_PATH": "/tmp/recovery-fallback"
+   },
+   "get": [
+    "roles.merge_agent_failure_recovery.fallback_path"
+   ],
+   "python": {
+    "ok": false,
+    "key": "roles.merge_agent_failure_recovery.fallback_path"
+   }
+  }
+ ]
+}

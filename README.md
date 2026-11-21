@@ -19,16 +19,27 @@ the rubber stamp expensive enough to fail loud.
 
 ---
 
-CFGREADERSCOPE-01: the shared configuration is an overlay. The Node reader
-validates its registered read surface and ignores unknown sibling-reader keys
-at every depth, including in checked-in files and local overlays. Set
-`ADVERSARIAL_CONFIG_DEBUG=1` for ignored-key notes. Adding an unrelated
-`worker_pool.*` key requires no companion schema edit here. Extend this reader
-when it starts supporting a key; keep shared supported values and consumed
-atomic declarations in parity. Historical parse-only registrations remain
-supported for compatibility. See the ownership rule in
-[`src/config-loader.mjs`](src/config-loader.mjs) and the
-[SEV2 report](docs/postmortems/SEV2-every-new-config-key-forced-workers-to-provision-the-review-service-repo-2026-10-31.md).
+ONS-07: the Node config reader validates against the CFG JSON Schema that
+agent-os generates from the Python `schema_v1` (vendored as
+[`src/generated/config.schema.json`](src/generated/config.schema.json), turned
+into the loader's schema by [`src/config-schema.mjs`](src/config-schema.mjs)).
+It accepts and rejects what the Python loader does:
+[`test/config-cfg-parity.test.mjs`](test/config-cfg-parity.test.mjs) replays
+Python-recorded verdicts. `loadConfig` refuses an unknown key in a checked-in
+file; local overlays and the runtime/cached loaders used by the daemons drop it
+(`ADVERSARIAL_CONFIG_DEBUG=1` prints a note). An empty env value is absent.
+Nullable projections also support a numeric zero sentinel alongside a positive
+floor. Informational metadata on a null branch is accepted; assertion keywords
+outside the supported projection still fail at import. Recorder fixture fields
+`env`, `modules`, and `get` may be omitted or null. Leaf-pattern compilation is
+cached without modifying the exported schema, and rejection diagnostics display
+the normalized value being checked.
+
+After a CFG schema change, run `node scripts/sync-cfg-schema.mjs <agent-os>`
+(`--check` reports drift). The only hand-written schema left is the inventoried
+Node-only keys in [`src/config-node-keys.mjs`](src/config-node-keys.mjs); move
+one into CFG and delete it there. This replaces CFGREADERSCOPE-01's
+read-surface mirror ([SEV2 report](docs/postmortems/SEV2-every-new-config-key-forced-workers-to-provision-the-review-service-repo-2026-10-31.md)).
 
 AFA-07 mirrors disabled-by-default `cloud_access.aws.enabled`, the fixed
 `us-east-2` region and private project/budget/activation-receipt inputs in the
@@ -37,8 +48,8 @@ parse-only, with no cloud consumer, operation, state or smoke change.
 Deploy this reader before the Agent OS companion uses its host-overlay keys;
 `test/cloud-access-config.test.mjs` covers defaults, overlay and refusals.
 
-ZFA-01 adds a parse-only strict mirror of `cloud_access.azure` foundation
-inputs in `src/cloud-access-config-schema.mjs`, consumed by the shared loader.
+ZFA-01 adds parse-only strict `cloud_access.azure` foundation inputs, now
+read from the generated CFG schema (ONS-07).
 Both enablement flags default false; the region is `eastus2`; private identity,
 certificate-path and budget choices have no defaults. No cloud operation or
 reviewer consumer is added. `test/cloud-access-config.test.mjs` covers host
@@ -4078,7 +4089,7 @@ Python/shell parity and leaves all modes off by default.
 The strict loader accepts `osg.version: 1`, `osg.mode` (`off`, `shadow`, `apply`)
 and `osg.arms`. Defaults are mode `off` and an empty arm catalog. Each arm
 requires role, harness, worker class, model, effort and a non-secret account ID.
-`src/osg-config-schema.v1.json` is the versioned schema mirror; synthetic shared
+The generated CFG schema carries the arm shape (ONS-07); synthetic shared
 vectors live in `test/fixtures/osg-config.v1.json`. Reviewer routing consumes them
 only through the optional seam below; remediation routing remains unchanged.
 
@@ -4800,9 +4811,8 @@ wake, expiry, retry credit and stop behavior. Existing smoke promises are unchan
 post-deploy observation is described in `docs/RUNBOOK-ama-closure.md`.
 
 Strict shared-config module acceptance is covered by
-`test/config-module-parity.test.mjs`. The loader packages Python-owned module
-fields in `src/python-module-schema.v1.json`, preserving their types, bounds,
-allowlists and strict nested objects alongside its existing consumer schema.
+`test/config-module-parity.test.mjs`. Python-owned module fields come from the
+generated CFG schema (ONS-07), with Python's types, bounds and allowlists.
 The parent repository's cross-reader tests exercise committed effective module
 cascades against both readers. Session-ledger shorthand is normalized by its
 existing consumer adapter before validation; node identity is supplied by that
@@ -5222,7 +5232,7 @@ live action is needed. See [the state machine](docs/STATE-MACHINE.md) and
 
 ### MES-01 strict configuration mirror
 
-The packaged `src/mes-config-schema.v1.json` mirrors Agent OS MES keys and
+The generated CFG schema carries the Agent OS MES keys (ONS-07) and
 `test/config-mes.test.mjs` exercises the shared synthetic key vectors. Defaults
 are shadow mode, enforcement false per kind and kill switch false. The
 `mes.tier_policy` string references the Agent OS module fragment; this reader

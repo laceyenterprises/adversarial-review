@@ -53,9 +53,9 @@ test('canonical overrides and legacy aliases match Python', () => fixture((topPa
   assert.equal(cfg.get(`${prefix}.secret_mirror_source`), '/private/var/db/synthetic/bearer-secret');
 }));
 
-test('corporate bridge ignores unread sibling fields', () => fixture((topPath) => {
+test('corporate bridge rejects unknown fields like the Python loader', () => fixture((topPath) => {
   writeFileSync(topPath, 'version: 1\noauth_broker:\n  claude_code_corp_bridge:\n    typo: true\n');
-  assert.deepEqual(loadConfig({ topPath, env: {} }).get(prefix), defaults);
+  assert.throws(() => loadConfig({ topPath, env: {} }), /claude_code_corp_bridge\.typo: unknown key/);
 }));
 
 for (const body of ['port: 80', 'port: 65536', 'port: nope', 'port: true', 'primary_url: null', 'audit_context: null', 'audit_context: 42', 'audit_context: true', 'audit_context: []', 'audit_context: {}']) {
@@ -77,13 +77,15 @@ test('corporate audit context canonical override takes precedence over differing
 for (const context of ['', auditContext]) {
   test(`corporate audit context survives local CFG and canonical override: ${JSON.stringify(context)}`, () => fixture((topPath, dir) => {
     writeFileSync(topPath, 'version: 1\n');
+    // Explicit file baseline: an empty env override must preserve this local layer.
     writeFileSync(join(dir, 'config.local.yaml'), `oauth_broker:\n  claude_code_corp_bridge:\n    audit_context: ${JSON.stringify(context)}\n`);
     assert.equal(loadConfig({ topPath, env: {} }).get(`${prefix}.audit_context`), context);
     assert.equal(loadConfig({ topPath, env: {
       AGENT_OS_OAUTH_BROKER_CLAUDE_CODE_CORP_BRIDGE_AUDIT_CONTEXT: context,
     } }).get(`${prefix}.audit_context`), context);
+    // An empty env value is absent (Compose ${VAR:-}), as in Python.
     assert.equal(loadConfig({ topPath, env: {
       AGENT_OS_OAUTH_BROKER_CLAUDE_CODE_CORP_BRIDGE_AUDIT_CONTEXT: '',
-    } }).get(`${prefix}.audit_context`), '');
+    } }).get(`${prefix}.audit_context`), context);
   }));
 }

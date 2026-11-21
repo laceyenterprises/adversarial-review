@@ -12,11 +12,9 @@ for (const vector of vectors.cases) {
     try {
       const topPath = join(dir, 'config.yaml');
       writeFileSync(topPath, JSON.stringify({ version: 1, mes: vector.config }));
-      // Shared vectors describe the full owner schema; unread fields are
-      // outside this reader's validation surface (CFGREADERSCOPE-01).
-      if (vector.valid || vector.name === 'unknown-key') {
+      // ONS-07: the generated validator agrees with every shared vector.
+      if (vector.valid) {
         const cfg = loadConfig({ topPath, env: {} });
-        if (vector.name === 'unknown-key') assert.equal(cfg.get('mes.typo'), null);
         const expected = { ...vectors.defaults };
         if (vector.key) expected[vector.key] = vector.expected;
         for (const [key, value] of Object.entries(expected)) {

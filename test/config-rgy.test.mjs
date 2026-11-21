@@ -1,13 +1,13 @@
 import assert from 'node:assert/strict';
-import { readFileSync, mkdtempSync, writeFileSync, rmSync } from 'node:fs';
+import { mkdtempSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { loadConfig } from '../src/config-loader.mjs';
+import { schemaV1 } from '../src/config-schema.mjs';
 import test from 'node:test';
 
 test('independent grader schema declares strict keys, budget defaults and opt-in arms', () => {
-  const schema = JSON.parse(readFileSync(new URL('../src/osg-config-schema.v1.json', import.meta.url)));
-  const grader = schema.__keys.rgy.__keys.grader;
+  const grader = schemaV1().__keys.osg.__keys.rgy.__keys.grader;
   assert.equal(grader.__strict, true);
   assert.equal(grader.__keys.run_cost_cap_usd.__default, 10);
   assert.equal(grader.__keys.day_cost_cap_usd.__default, 25);
@@ -33,7 +33,7 @@ test('grader config is accepted and negative budget rejected by Node reader', ()
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
-test('grader arms validate supplied fields and reserved keys while tolerating ordinary unknown keys', () => {
+test('grader arms validate supplied fields and reject unknown keys like the Python loader', () => {
   const dir = mkdtempSync(join(tmpdir(), 'rgy-arms-'));
   const topPath = join(dir, 'config.yaml');
   const arm = { name: 'independent', worker_class: 'codex', harness: 'codex',
@@ -48,10 +48,9 @@ test('grader arms validate supplied fields and reserved keys while tolerating or
       assert.throws(() => loadArm({ ...arm, [field]: '' }), error =>
         error.message.includes(`osg.rgy.grader.arms[0].${field}`), `invalid ${field}`);
     }
-    // The shared reader drops ordinary unknown keys for rolling-schema
-    // compatibility, but rejects reserved schema attributes.
-    assert.deepEqual(loadArm({ ...arm, unexpected: true }), [arm]);
-    assert.throws(() => loadArm({ ...arm, __unexpected: true }),
-      /osg\.rgy\.grader\.arms\[0\]\.__unexpected: unknown key \(strict schema\)/);
+    // ONS-07: same as Python — an unknown key fails, a metadata key is skipped.
+    assert.throws(() => loadArm({ ...arm, unexpected: true }),
+      /osg\.rgy\.grader\.arms\[0\]\.unexpected: unknown key \(strict schema\)/);
+    assert.deepEqual(loadArm({ ...arm, __unexpected: true }), [arm]);
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });

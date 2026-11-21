@@ -1,42 +1,22 @@
 // agent-os-config — Node loader for the cross-language config surface (CFG).
 //
-// Behavior contract: ../../../projects/cfg/LOADER-CONTRACT.md in the
-// agent-os repo is the canonical source for what this loader (and the Python
-// sibling at `platform/agent-os-config/src/agent_os_config/__init__.py`) must
-// do. The conformance suite in `test/config-loader.test.mjs` exercises the
-// same fixture cases as the Python `tests/test_loader.py`.
+// ONS-07: the schema is generated from the CFG JSON Schema that agent-os
+// emits from the Python `schema_v1` (./config-schema.mjs), and this module is
+// the cascade around it: code defaults -> module files -> top-level file ->
+// profile overlay -> *.local.yaml -> env -> CLI. Validation mirrors
+// `agent_os_config.validation` (leaf checks, unknown keys, defaults) and the
+// loader's merged-config checks, so both readers accept and reject the same
+// documents; test/config-cfg-parity.test.mjs replays Python-recorded verdicts.
 //
-// Shared supported keys aim for behavior-equivalence with the Python sibling,
-// NOT byte-equivalence. Unknown sibling-reader keys are outside this reader's
-// contract (see ownership below). Other deliberate divergences
-// (tracked for alignment in the
-// agent-os PR landing the Python helper):
-//   1. Explicit `~` / null on non-nullable keys: this loader fails the
-//      schema; the Python sibling reverts to defaults.
-//   2. Same-file alias conflict: this loader compares the canonical-target
-//      values with deep structural equality (isDeepStrictEqual); the Python
-//      sibling uses identity. Trivially-deep-equal dicts merge cleanly here.
-//   3. localSibling for non-`.yaml`/`.yml` top-level paths: this loader
-//      refuses to compute a sibling and skips Layer 4 for that file; the
-//      Python sibling appends `.local` literally (producing odd siblings
-//      like `config.conf.local`).
-//   4. Worker-class vault token refs: this loader applies PATTERN_OP_REF;
-//      the Python sibling currently checks only the nullable string type.
-// LOADER-CONTRACT.md should land these as the canonical contract on the
-// agent-os side so the divergences narrow back to zero.
-
-// Reader ownership (CFGREADERSCOPE-01): Python owns the full Agent OS schema;
-// this reader owns review/remediation/watcher settings and the shared leaves
-// registered below for its supported get()/role-config surface. worker_pool,
-// services, roles and other shared namespaces may contain sibling-reader keys.
-// Unknown keys at ANY depth are ignored with ADVERSARIAL_CONFIG_DEBUG logging,
-// in checked-in files as well as local overlays. Never mirror a sibling-only
-// addition just to make this service start. A companion schema edit is required
-// when this service starts reading a key (including new fields of an atomic
-// policy/declaration it consumes); retain type, range and allowlist parity for
-// that shared read. Existing registered leaves remain a compatibility surface.
-// __strict_always marks consumed atomic policies/declarations: their complete
-// shape is meaningful, so unknown fields there still fail closed.
+// Unknown keys fail `loadConfig` in checked-in files, as in Python. Local
+// overlays and the runtime/cached loaders (`loadConfigRuntime`,
+// `loadConfigCached`, `getConfig`) drop them, so a key from a newer schema
+// cannot crash a lagging daemon; `__strict_always` policies never tolerate.
+// Remaining deliberate differences: explicit `~` on a non-nullable key fails
+// here as in Python; Node-only keys and enum members live, inventoried, in
+// ./config-node-keys.mjs; the Python merged-config checks for GCP profiles,
+// legacy backup retention and retired Sentinel keys are not ported (this
+// reader consumes none of them).
 
 import { readFileSync, existsSync, statSync } from 'node:fs';
 import { createHash } from 'node:crypto';
@@ -46,12 +26,9 @@ import { isDeepStrictEqual } from 'node:util';
 import * as yaml from 'js-yaml';
 import { normalizeDisabledRepositories } from './merge-disabled-repositories.mjs';
 import { normalizeLaneRoutes } from './config-lane-routes.mjs';
-import { extendModuleSchema, freezeSchema } from './config-module-schema.mjs';
-import { MAX_WORKER_EXEC_TIMEOUT_SECONDS } from './worker-execution-limits.mjs';
+import { osgArmFields, schemaV1 } from './config-schema.mjs';
 import { TOKEN_POOL_DECLARATION_PATHS, validateTokenPoolDeclarations } from './config-token-pools.mjs';
-import { googleTokensSchema } from './config-google-tokens.mjs';
-import { cloudAccessConfigSchema } from './cloud-access-config-schema.mjs';
-import { grokEnvAliases, grokRolePinViolations, grokSchema } from './config-grok.mjs';
+import { grokEnvAliases, grokRolePinViolations } from './config-grok.mjs';
 
 export const __testYamlHooks = {
   load: (...args) => yaml.load(...args),
@@ -153,41 +130,24 @@ export function resetRuntimeUnknownWarningCacheForTests() {
 
 // -------- Schema declaration -----------------------------------------------
 
-// GRK-09: the public role enums recognize the Grok lanes (`grok` reviewer
-// family, `remediator-grok`, `hammer-grok`), mirroring the Python schema_v1.
-// Recognition is not dispatchability: a pin naming a Grok lane loads only while
-// `grok.enabled` and that lane's flag are true (config-grok.mjs), both default false.
-// GRK-12: the closer pin is always refused pending the Merge Authority v2 executor.
-const ENUM_ROLES_REVIEWER = ['claude-code', 'codex', 'claude', 'gemini', 'grok', 'adversarial'];
-const ENUM_ROLES_REMEDIATOR = ['claude-code', 'codex', 'gemini', 'remediator-codex-corp', 'codex-corp', 'remediator-grok', 'adversarial'];
-export const ENUM_CODEX_WORKER_ACCOUNT_ORDER = Object.freeze(['personal-first', 'corporate-first']);
-// REMFALLBACK-01: the concrete remediator worker classes a capped remediator can
-// fall back to. `adversarial` is a routing mode, not a class, so it is excluded.
-// GRK-12: Grok remediation additionally requires its default-off lane flags,
-// enabled registry class and a known original builder from another family.
-const ENUM_ROLES_REMEDIATOR_FALLBACK = ['claude-code', 'codex', 'gemini', 'remediator-gemini', 'remediator-codex-corp', 'codex-corp', 'remediator-claude', 'remediator-grok'];
-// `hammer` is the universal end-of-budget rescue worker (codex-backed, runs under
-// the merge-agent app identity); allowed here so the budget-exhausted final pass
-// can dispatch it. See worker-pool hq_resolve_worker_identity (merge-agent-lacey).
-const ENUM_ROLES_MERGE_AGENT_WORKER_CLASS = ['merge-agent', 'codex', 'claude-code', 'hammer', 'hammer-claude', 'hammer-grok'];
-// Mirrors _ENUM_ROLES_BUILD_PACK_DEFAULT_WORKER_CLASS in the Python schema (same members, same order).
-const ENUM_ROLES_BUILD_PACK_DEFAULT_WORKER_CLASS = ['plan', 'codex', 'codex-corp', 'claude-code', 'claude-code-corp'];
-export const ENUM_ROLES_ADVERSARIAL_ORCHESTRATION_MODE = ['native', 'agentos'];
-export const ENUM_ROLES_ADVERSARIAL_OPERATOR_LABEL_ACTOR_ENFORCEMENT = ['observe', 'enforce'];
-export const ENUM_ROLES_ADVERSARIAL_MERGE_CAPABILITY_ENFORCEMENT = ['observe', 'enforce'];
-const ENUM_ROLES_ADVERSARIAL_MERGE_AUTHORITY_RISK_CLASS = ['low', 'medium', 'high', 'critical'];
-const ENUM_ROLES_FALLBACK_PATH = ['none', 'litellm-vk', 'litellm-vk-then-deferral'];
-const ENUM_SENTINEL_RCA_WORKER_CLASS = ['sre', 'sre-responder', 'sre-claude'];
-const ENUM_IMM_MODE = ['observe', 'enforce'];
-// GMW-02 — gemini always-on-third-reviewer selection mode. Module-scoped knob
-// (`reviewer.gemini.mode`); see the routing layer in
-// adapters/subject/github-pr/routing.mjs.
-const ENUM_REVIEWER_GEMINI_MODE = ['off', 'fallback', 'always-on'];
-const ENUM_REVIEWER_GEMINI_RUNTIME = ['cli', 'antigravity'];
-// HAMASYNC-01 — where AMA's hammer dispatch runs relative to the posted-review
-// phase (`watcher.ama_hammer_dispatch_mode`); see ama-hammer-background-dispatch.mjs.
-const ENUM_WATCHER_AMA_HAMMER_DISPATCH_MODE = ['inline', 'background'];
-// Role-class keys are hyphenated to mirror worker class tokens.
+// -------- Schema (generated) ---------------------------------------------
+
+// ONS-07: schemaV1() is the CFG JSON Schema generated from the Python
+// schema_v1 plus the inventoried Node-only keys; see config-schema.mjs.
+// Never declare a key here.
+const TYPE_STRING = 'string';
+const TYPE_BOOL = 'bool';
+const TYPE_INT = 'int';
+const TYPE_FLOAT = 'float';
+const TYPE_LIST = 'list';
+const TYPE_DICT = 'dict';
+
+const schemaEnum = (dotted) => Object.freeze([...schemaLeaf(schemaV1(), dotted).__enum]);
+export const ENUM_CODEX_WORKER_ACCOUNT_ORDER = schemaEnum('roles.codex_worker_account_order');
+export const ENUM_ROLES_ADVERSARIAL_ORCHESTRATION_MODE = schemaEnum('roles.adversarial.orchestration_mode');
+export const ENUM_ROLES_ADVERSARIAL_OPERATOR_LABEL_ACTOR_ENFORCEMENT = schemaEnum('roles.adversarial.operator_label_actor_enforcement');
+export const ENUM_ROLES_ADVERSARIAL_MERGE_CAPABILITY_ENFORCEMENT = schemaEnum('roles.adversarial.merge_authority.merge_capability_enforcement');
+
 const ROLE_FALLBACK_CLASSES = [
   'claude-code',
   'codex',
@@ -197,58 +157,7 @@ const ROLE_FALLBACK_CLASSES = [
   'merge-agent-failure-recovery',
   'clio-agent',
 ];
-// Worker-class options for `dispatch.default_worker_class_by_task_kind` leaves.
-// Mirrors `_ENUM_DISPATCH_DEFAULT_WORKER_CLASS` in
-// `platform/agent-os-config/src/agent_os_config/schema_v1/core.py`. Includes
-// both Codex accounts plus the merge and review worker classes.
-// Operators can still pass
-// `--worker-class` at the call site to escape this constraint.
-const ENUM_DISPATCH_DEFAULT_WORKER_CLASS = ['codex', 'codex-corp', 'claude-code', 'merge-agent', 'reviewer'];
-const ENUM_SESSION_LEDGER_BACKEND = ['sqlite', 'postgres'];
-const ENUM_SESSION_LEDGER_DUAL_WRITE_MODE = [null, 'postgres', 'sqlite', 'off'];
-const ENUM_SESSION_LEDGER_SERVICE_LOG_LEVEL = ['CRITICAL', 'ERROR', 'WARNING', 'INFO', 'DEBUG'];
-const ENUM_APP_MODE = ['agent-os', 'standalone'];
-const ENUM_UPDATE_CHANNEL = ['rolling', 'stable', 'pinned'];
-const ENUM_CI_HOSTING_MODE = ['github', 'self-hosted-container', 'self-hosted-native'];
 const MANDATORY_CI_HOSTING_EXCLUDED_WORKFLOWS = ['release-freeze-gate.yml'];
-const ENUM_WORKER_POOL_MEMORY_DYNAMIC_ADMIT_PERCENTILE = ['p50', 'p95', 'p99'];
-const ENUM_SENTINEL_PROFILE = ['strict', 'balanced', 'relaxed'];
-const PATTERN_LINEAR_ISSUE_PREFIX = '^[A-Z][A-Z0-9]{1,9}$';
-const PATTERN_LINEAR_ISSUE_PREFIX_DESCRIPTION = 'Linear issue prefix /^[A-Z][A-Z0-9]{1,9}$/';
-const PATTERN_SQL_IDENTIFIER = '^[A-Za-z_][A-Za-z0-9_]{0,62}$';
-const PATTERN_SQL_IDENTIFIER_DESCRIPTION = 'SQL identifier /^[A-Za-z_][A-Za-z0-9_]{0,62}$/';
-const PATTERN_LOCAL_USERNAME = '^[A-Za-z_][A-Za-z0-9_-]{0,63}$';
-const PATTERN_LOCAL_USERNAME_DESCRIPTION = 'local username /^[A-Za-z_][A-Za-z0-9_-]{0,63}$/';
-const PATTERN_GIT_IDENTITY_FIELD = '^(?=[^\\u0000\\r\\n<>]*\\S)[^\\u0000\\r\\n<>]+$';
-const PATTERN_GIT_IDENTITY_FIELD_DESCRIPTION = 'non-blank text without NUL, CR, LF, "<" or ">"';
-const PATTERN_OP_REF = '^$|^op://[^/]+/[^/]+/[^/]+(?:/[^/]+)?$';
-const PATTERN_OP_REF_DESCRIPTION = 'empty string or full op://<vault>/<item>/[section/]<field> ref';
-
-const TYPE_STRING = 'string';
-const TYPE_BOOL = 'bool';
-const TYPE_INT = 'int';
-const TYPE_FLOAT = 'float';
-const TYPE_LIST = 'list';
-const TYPE_DICT = 'dict';
-
-function buildRoleFallbackSchemaKeys() {
-  return Object.fromEntries(
-    ROLE_FALLBACK_CLASSES.map((roleClass) => [
-      roleClass,
-      {
-        __type: TYPE_DICT,
-        __strict: true,
-        __keys: {
-          fallback_path: {
-            __type: TYPE_STRING,
-            __default: 'none',
-            __enum: ENUM_ROLES_FALLBACK_PATH,
-          },
-        },
-      },
-    ]),
-  );
-}
 
 function envClassSegment(roleClass) {
   return roleClass.replaceAll('-', '_').toUpperCase();
@@ -259,7 +168,7 @@ function buildRoleFallbackEnvAliases() {
     ROLE_FALLBACK_CLASSES.map((roleClass) => {
       const envSegment = envClassSegment(roleClass);
       return [
-        `roles.${roleClass}.fallback_path`,
+        `roles.${roleClass === 'merge-agent-failure-recovery' ? 'merge_agent_failure_recovery' : roleClass}.fallback_path`,
         {
           canonical: `AGENT_OS_ROLES_${envSegment}_FALLBACK_PATH`,
           aliases: [[`LITELLM_VK_FALLBACK_FOR_${envSegment}`, identity]],
@@ -269,18 +178,7 @@ function buildRoleFallbackEnvAliases() {
   );
 }
 
-const MES_SCHEMA = JSON.parse(readFileSync(new URL('./mes-config-schema.v1.json', import.meta.url), 'utf8'));
-
-const OSG_SCHEMA = JSON.parse(readFileSync(new URL('./osg-config-schema.v1.json', import.meta.url), 'utf8'));
-
-// Python-owned strict module fields absent from this reader's consumer schema.
-// Keep the mirror packaged, like OSG_SCHEMA; never read a parent checkout or
-// derive validation rules from configuration values at runtime.
-const PYTHON_MODULE_SCHEMA = JSON.parse(readFileSync(new URL('./python-module-schema.v1.json', import.meta.url), 'utf8'));
-
-let cachedSchemaV1;
-
-// SPE-01: independent strict-reader mirror; metadata only, no secret resolution.
+// SPE-01: search cross-field semantics; metadata only, no secret resolution.
 const SEARCH_OPERATIONS = Object.freeze({
   brave: ['web_search', 'news_search', 'answer', 'research', 'brave.image_search', 'brave.video_search', 'brave.local_search', 'brave.place_search', 'brave.llm_context'],
   exa: ['web_search', 'fetch', 'extract', 'answer', 'research'],
@@ -298,48 +196,6 @@ const ATOMIC_KEYED_MAP_PATHS = new Set(['remediation.git_identity_repo_overrides
 const SEARCH_MONEY_PATTERN = '^[0-9]{1,12}([.][0-9]{1,9})?$';
 const SEARCH_REF_PATTERN = String.raw`^op://[^/\s?#%](?:[^/?#%\r\n]*[^/\s?#%])?/[^/\s?#%](?:[^/?#%\r\n]*[^/\s?#%])?/[^/\s?#%](?:[^/?#%\r\n]*[^/\s?#%])?$`;
 const SEARCH_COUNT_LIMITS = ['max_results', 'max_pages', 'max_urls', 'max_input_tokens', 'max_output_tokens', 'max_duration_seconds'];
-
-function searchSchema() {
-  const record = keys => ({ __type: TYPE_DICT, __strict: true, __strict_always: true, __keys: keys });
-  const money = () => ({ __type: TYPE_STRING, __pattern: SEARCH_MONEY_PATTERN, __nullable: false });
-  const ref = () => ({ __type: TYPE_STRING, __pattern: SEARCH_REF_PATTERN, __nullable: false });
-  const providers = {};
-  for (const [provider, operations] of Object.entries(SEARCH_OPERATIONS)) {
-    const limitKeys = Object.fromEntries(SEARCH_COUNT_LIMITS.map(key => [key, {
-      __type: TYPE_INT, __min: 1, __max: key === 'max_duration_seconds' ? 86400 : 1000000000,
-    }]));
-    Object.assign(limitKeys, {
-      max_charge_usd: { __type: TYPE_STRING, __pattern: SEARCH_MONEY_PATTERN },
-      product_authorized: { __type: TYPE_BOOL },
-      currency: { __type: TYPE_STRING, __enum: ['USD'] },
-      pricing_provenance: { __type: TYPE_STRING, __pattern: String.raw`^\S[^\r\n]{0,511}$` },
-      research_effort: { __type: TYPE_STRING, __enum: ['low', 'medium', 'high'] },
-      processor: { __type: TYPE_STRING, __pattern: '^[A-Za-z0-9_-]{1,64}$' },
-    });
-    const limits = record({});
-    limits.__strict = false;
-    limits.__extra_keys_schema = record(limitKeys);
-    const keys = {
-      enabled: { __type: TYPE_BOOL, __default: false },
-      presentation: { __type: TYPE_STRING, __default: 'abstracted', __enum: ['abstracted', 'native'] },
-      credential_ref: ref(),
-      budget_usd: money(),
-      watch_threshold_usd: money(),
-      budget_window_seconds: { __type: TYPE_INT, __default: 86400, __min: 1, __max: 2678400 },
-      allowed_operations: { __type: TYPE_LIST, __item: { __type: TYPE_STRING, __enum: operations }, __default: [] },
-      operation_limits: limits,
-    };
-    if (provider === 'brave') keys.answers_credential_ref = ref();
-    providers[provider] = record(keys);
-  }
-  return record({
-    enabled: { __type: TYPE_BOOL, __default: false },
-    run_budget_usd: money(),
-    run_watch_threshold_usd: money(),
-    usage_watch_window_seconds: { __type: TYPE_INT, __min: 1, __max: 2678400 },
-    providers: record(providers),
-  });
-}
 
 function validateSearch(search = {}) {
   const fail = (path, reason) => {
@@ -394,3578 +250,6 @@ function validateSearch(search = {}) {
   }
 }
 
-function schemaV1() {
-  if (cachedSchemaV1) return cachedSchemaV1;
-  const workerClassVaultSchema = {
-    __type: TYPE_DICT,
-    __strict: true,
-    __keys: {
-      vault: { __type: TYPE_STRING, __default: null, __nullable: true },
-      service_account_token_ref: {
-        __type: TYPE_STRING,
-        __default: null,
-        __nullable: true,
-        __pattern: PATTERN_OP_REF,
-        __pattern_description: PATTERN_OP_REF_DESCRIPTION,
-      },
-      shared_vault_optin: {
-        __type: TYPE_LIST,
-        __default: [],
-        __item: { __type: TYPE_STRING },
-      },
-    },
-  };
-  return cachedSchemaV1 = freezeSchema(extendModuleSchema({
-    __type: TYPE_DICT,
-    __strict: true,
-    __keys: {
-      version: { __type: TYPE_INT, __required: true, __enum: [1] },
-      // PROFILENODE-01: explicit profile selector (resolution step 1). No
-      // __default on purpose: the resolved profile is exposed as
-      // AgentOSConfig.profile, so an absent key leaves `values` untouched.
-      profile: { __type: TYPE_STRING },
-      cloud_access: cloudAccessConfigSchema(),
-      // APPLEBUILD-01: shared CFG-01 toolchain selection, owned by Apple tools.
-      apple: {
-        __type: TYPE_DICT,
-        __strict: true,
-        __keys: {
-          developer_dir: { __type: TYPE_STRING, __default: '' },
-        },
-      },
-      // SRS-03 — parse-only mirror of the Python-owned scheduled surface
-      // harness timeout knob so strict checked-in config.yaml loads stay green.
-      surface_harness: {
-        __type: TYPE_DICT,
-        __strict: true,
-        __default_when_present: true,
-        __keys: {
-          timeout_seconds: { __type: TYPE_INT, __default: 150, __min: 1, __max: 180 },
-        },
-      },
-      // WGT-02: strict mirror of the optional Python-owned identity contract.
-      network: {
-        __type: TYPE_DICT,
-        __strict: true,
-        __keys: {
-          identity: {
-            __type: TYPE_DICT,
-            __strict: true,
-            __keys: {
-              state_dir: {__type: TYPE_STRING, __default: ""},
-              binary_path: {__type: TYPE_STRING, __default: ""},
-              custodian_host: {__type: TYPE_STRING, __default: ""},
-              custodian_user: {__type: TYPE_STRING, __default: ""},
-              known_hosts_file: {__type: TYPE_STRING, __default: ""},
-              ssh_identity_file: {__type: TYPE_STRING, __default: ""},
-              enabled: {__type: TYPE_BOOL, __default: false},
-              custodian_principal: {__type: TYPE_STRING, __default: "fleet-ca-custodian"},
-              custodian_port: {__type: TYPE_INT, __default: 22, __min: 1, __max: 65535},
-            },
-          },
-          cross_node: {
-            __type: TYPE_DICT, __strict: true, __keys: {
-              enabled: { __type: TYPE_BOOL, __default: false },
-              auth_mode: { __type: TYPE_STRING, __default: null, __nullable: true },
-              advertised_address: { __type: TYPE_STRING, __default: 'host.docker.internal' },
-              prometheus_scrape_host: { __type: TYPE_STRING, __default: null, __nullable: true },
-              oauth_broker: { __type: TYPE_DICT, __strict: true, __keys: {
-                bind_host: { __type: TYPE_STRING, __default: '127.0.0.1' },
-                advertised_address: { __type: TYPE_STRING, __default: null, __nullable: true },
-              } },
-              observability_exporters: { __type: TYPE_DICT, __strict: true, __keys: {
-                bind_host: { __type: TYPE_STRING, __default: '127.0.0.1' },
-                advertised_address: { __type: TYPE_STRING, __default: null, __nullable: true },
-              } },
-              session_ledger: { __type: TYPE_DICT, __strict: true, __keys: {
-                federation_dsn: { __type: TYPE_STRING, __default: null, __nullable: true },
-              } },
-            },
-          },
-        },
-      },
-      sharedOwners: {
-        __type: TYPE_LIST,
-        __item: { __type: TYPE_STRING },
-        __default: [],
-      },
-      // Alert delivery is owned by the superproject script. This watcher-side
-      // reader validates the keys it consumes while tolerating shared config
-      // growth so daemon startup does not fail when alert_delivery grows.
-      alert_delivery: {
-        __type: TYPE_DICT,
-        __strict: false,
-        __default_when_present: true,
-        __skip_global_default_tree: true,
-        __keys: {
-          sink: {
-            __type: TYPE_STRING,
-            __default: 'telegram-direct',
-          },
-          telegram: {
-            __type: TYPE_DICT,
-            __strict: false,
-            __default_when_present: true,
-            __default: {},
-            __keys: {
-              bot_token_ref: {
-                __type: TYPE_STRING,
-                __default: '',
-                __pattern: PATTERN_OP_REF,
-                __pattern_description: PATTERN_OP_REF_DESCRIPTION,
-              },
-              chat_id: {
-                __type: TYPE_STRING,
-                __default: '',
-                // Shared superproject config may already use unquoted numeric
-                // YAML values; this Node reader accepts both and normalizes
-                // internally without forcing a wire-format migration.
-                __coerce_number_to_string: true,
-              },
-            },
-          },
-          gateway: {
-            __type: TYPE_DICT,
-            __strict: false,
-            __default_when_present: true,
-            __default: {},
-            __keys: {
-              delivery_token_ref: {
-                __type: TYPE_STRING,
-                __default: '',
-                __pattern: PATTERN_OP_REF,
-                __pattern_description: PATTERN_OP_REF_DESCRIPTION,
-              },
-            },
-          },
-        },
-      },
-      review_cycle_cap: { __type: TYPE_INT, __default: 5, __min: 1 },
-      review_cycle_window_hours: { __type: TYPE_INT, __default: 24, __min: 1 },
-      update: {
-        __type: TYPE_DICT,
-        __strict: true,
-        __keys: {
-          channel: {
-            __type: TYPE_STRING,
-            __default: 'rolling',
-            __enum: ENUM_UPDATE_CHANNEL,
-          },
-        },
-      },
-      // Python owns the main-catchup daemon schema; this Node reader mirrors
-      // the checked-in main_catchup surface so strict top-level config.yaml
-      // can be loaded by the adversarial-review watcher during CFG parity.
-      main_catchup: {
-        __type: TYPE_DICT,
-        __strict: true,
-        __keys: {
-          // Python owns deploy admission; mirror its shared CFG contract.
-          deploy_batch_window_seconds: {
-            __type: TYPE_INT,
-            __default: 1200,
-            __min: 0,
-          },
-          poll_interval_seconds: {
-            __type: TYPE_INT,
-            __default: 300,
-            __min: 1,
-          },
-          drain_timeout: {
-            __type: TYPE_STRING,
-            __default: '5m',
-          },
-          stale_drain_reap_seconds: {
-            __type: TYPE_INT,
-            __default: 600,
-            __min: 0,
-          },
-          submodule_update_timeout_seconds: {
-            __type: TYPE_INT,
-            __default: 120,
-            __min: 1,
-          },
-          // Python-owned (main-catchup parent pull retries); the checked-in
-          // config.yaml carries it, so the strict checked-in-config tests
-          // failed on `main_catchup.pull_retry_delays_seconds: unknown key`.
-          pull_retry_delays_seconds: {
-            __type: TYPE_LIST,
-            __item: { __type: TYPE_INT, __min: 0, __max: 30, __enforceMax: true },
-            __default: [5, 15],
-          },
-          recovery_max_attempts: {
-            __type: TYPE_INT,
-            __default: 5,
-            __min: 1,
-            __max: 50,
-            __enforceMax: true,
-          },
-          bounce_throttle_interval_seconds: {
-            __type: TYPE_INT,
-            __default: 300,
-            __min: 0,
-          },
-          self_heal_stuck_warn_seconds: {
-            __type: TYPE_INT,
-            __default: 1800,
-            __min: 60,
-            __max: 86400,
-            __enforceMax: true,
-          },
-          self_heal_max_age_seconds: {
-            __type: TYPE_INT,
-            __default: 3600,
-            __min: 300,
-            __max: 86400,
-            __enforceMax: true,
-          },
-          adversarial_review_drain_timeout_seconds: {
-            __type: TYPE_INT,
-            __default: 180,
-            __min: 1,
-          },
-          adversarial_watcher_drain_bounce_slack_seconds: {
-            __type: TYPE_INT,
-            __default: 120,
-            __min: 0,
-          },
-          // Parent-repo main-catchup PG schema gate allowlist (TMP-UPSERT): the
-          // migration revision ids permitted to run destructive DDL. The
-          // adversarial-review watcher never reads it, but it is a legitimate
-          // checked-in key in the shared top-level config.yaml, so the strict
-          // schema must recognize it — otherwise loadConfig() fail-louds on the
-          // real config (2026-07-17 watcher outage class; runtime loader was
-          // already made tolerant in _ensureFreshConfig, strict was not).
-          pg_schema_gate_allow_destructive_revisions: {
-            __type: TYPE_LIST,
-            __item: { __type: TYPE_STRING },
-            __default: [],
-          },
-        },
-      },
-      // PMV-01 report-only post-deploy verification. Python/main-catchup
-      // consume the values, but the checked-in top-level config.yaml must load
-      // under this strict Node reader during watcher startup.
-      post_deploy_verify: {
-        __type: TYPE_DICT,
-        __strict: true,
-        __default: {},
-        __keys: {
-          enabled: {
-            __type: TYPE_BOOL,
-            __default: false,
-          },
-          shadow_only: {
-            __type: TYPE_BOOL,
-            __default: true,
-          },
-          spawn_timeout_seconds: {
-            __type: TYPE_INT,
-            __default: 180,
-            __min: 10,
-            __max: 900,
-          },
-          spawn_ready_wait_seconds: {
-            __type: TYPE_INT,
-            __default: 300,
-            __min: 0,
-            __max: 300,
-          },
-          boot_window_seconds: {
-            __type: TYPE_INT,
-            __default: 300,
-            __min: 0,
-            __max: 3600,
-          },
-          reminder_seconds: {
-            __type: TYPE_INT,
-            __default: 21600,
-            __min: 60,
-            __max: 604800,
-          },
-        },
-      },
-      // PMA-07 post-merge activation rollout controls. Python/main-catchup
-      // owns the behavior, but adversarial-review loads the shared config under
-      // this strict schema and must accept the same operator-owned keys.
-      deploy: {
-        __type: TYPE_DICT,
-        __strict: true,
-        __keys: {
-          post_merge_activation: {
-            __type: TYPE_DICT,
-            __strict: true,
-            __keys: {
-              enabled: {
-                __type: TYPE_BOOL,
-                __default: true,
-              },
-              enforce: {
-                __type: TYPE_BOOL,
-                __default: false,
-              },
-              incident_dispatch: {
-                __type: TYPE_BOOL,
-                __default: false,
-              },
-              dispatch_on_fail: {
-                __type: TYPE_BOOL,
-                __default: false,
-              },
-              baseline_worker_boot_resolve_budget_seconds: {
-                __type: TYPE_INT,
-                __default: 20,
-                __min: 1,
-                __max: 60,
-              },
-              baseline_worker_boot_probe_interval_seconds: {
-                __type: TYPE_INT,
-                __default: 1800,
-                __min: 0,
-                __max: 86400,
-              },
-              hold_alert_budget_seconds: {
-                __type: TYPE_INT,
-                __default: 5400,
-                __min: 60,
-                __max: 86400,
-              },
-              hold_alert_consecutive_passes: {
-                __type: TYPE_INT,
-                __default: 2,
-                __min: 1,
-                __max: 288,
-              },
-            },
-          },
-        },
-      },
-      roots: {
-        __type: TYPE_DICT,
-        __strict: true,
-        __keys: {
-          hq: { __type: TYPE_STRING, __default: null, __nullable: true },
-          deploy: { __type: TYPE_STRING, __default: null, __nullable: true },
-          // OSR-03 — operator account-home roots. These pair with
-          // `AGENT_OS_ROOTS_RUNTIME_HOME` / `AGENT_OS_ROOTS_ADMIN_HOME`
-          // env aliases on the Python side. Forks override per-host.
-          runtime_home: { __type: TYPE_STRING, __default: null, __nullable: true },
-          admin_home: { __type: TYPE_STRING, __default: null, __nullable: true },
-          // OSR-03 account-name/UID extension. The watcher uses the admin UID
-          // for local reviewer-runtime probes; strict CFG parity means
-          // top-level config.yaml must parse in every language sibling.
-          runtime_user: {
-            __type: TYPE_STRING,
-            __default: null,
-            __nullable: true,
-            __pattern: PATTERN_LOCAL_USERNAME,
-            __pattern_description: PATTERN_LOCAL_USERNAME_DESCRIPTION,
-          },
-          admin_user: {
-            __type: TYPE_STRING,
-            __default: null,
-            __nullable: true,
-            __pattern: PATTERN_LOCAL_USERNAME,
-            __pattern_description: PATTERN_LOCAL_USERNAME_DESCRIPTION,
-          },
-          // BUILDHOSTQUIET-01: host-local agent-account inventory. The
-          // bootstrap consumer excludes the operator even if listed here.
-          agent_users: {
-            __type: TYPE_LIST,
-            __default: [],
-            __item: {
-              __type: TYPE_STRING,
-              __pattern: PATTERN_LOCAL_USERNAME,
-              __pattern_description: PATTERN_LOCAL_USERNAME_DESCRIPTION,
-            },
-          },
-          runtime_uid: { __type: TYPE_INT, __default: null, __nullable: true, __min: 1 },
-          admin_uid: { __type: TYPE_INT, __default: null, __nullable: true, __min: 1 },
-        },
-      },
-      // FRC-02 — mirror the Python `frc.offlan_transport` shard so strict
-      // Node daemons keep accepting shared local config as the operator rolls
-      // out the authenticated off-LAN console transport.
-      frc: {
-        __type: TYPE_DICT,
-        __strict: true,
-        __keys: {
-          offlan_transport: {
-            __type: TYPE_DICT,
-            __strict: true,
-            __keys: {
-              enabled: { __type: TYPE_BOOL, __default: false },
-              port: { __type: TYPE_INT, __default: 18794, __min: 1024, __max: 65535 },
-              kill_switch_path: { __type: TYPE_STRING, __default: null, __nullable: true },
-            },
-          },
-        },
-      },
-      // MCM-07 (agent-os #7227) MCP call metering. Python owns it; this reader
-      // does not consume it, but the checked-in config.yaml carries it, so the
-      // strict checked-in-config tests failed on `mcp_metering: unknown key`
-      // (the runtime reader only logged and dropped it). Tolerant, like
-      // validate the scalar keys, allow policy rules to grow. Leaf defaults
-      // only: per-layer default injection (__default_when_present) would let a
-      // partial config.local.yaml override reset inherited siblings.
-      mcp_metering: {
-        __type: TYPE_DICT,
-        __strict: false,
-        __keys: {
-          enabled: { __type: TYPE_BOOL, __default: true },
-          surfaces: {
-            __type: TYPE_DICT,
-            __strict: false,
-            __keys: {
-              dispatched: { __type: TYPE_BOOL, __default: false },
-              host: { __type: TYPE_BOOL, __default: false },
-            },
-          },
-          policy: {
-            __type: TYPE_DICT,
-            __strict: false,
-            __keys: {
-              mode: { __type: TYPE_STRING, __default: 'observe', __enum: ['observe', 'enforce'] },
-            },
-          },
-        },
-      },
-      // IMM-00 observe-first rollout controls. The adversarial-review watcher
-      // does not consume these values, but strict CFG parity means checked-in
-      // config and operator locals must parse here before any IMM check can
-      // gain enforcement teeth.
-      imm: {
-        __type: TYPE_DICT,
-        __strict: true,
-        __keys: {
-          ...Object.fromEntries(
-            ['ownership', 'sqlSubstrate', 'zeroCostTokens', 'convergence'].map(
-              (check) => [
-                check,
-                {
-                  __type: TYPE_DICT,
-                  __strict: true,
-                  __keys: {
-                    mode: {
-                      __type: TYPE_STRING,
-                      __default: 'observe',
-                      __enum: ENUM_IMM_MODE,
-                    },
-                  },
-                },
-              ],
-            ),
-          ),
-          progressHealth: {
-            __type: TYPE_DICT,
-            __strict: true,
-            __keys: {
-              mode: {
-                __type: TYPE_STRING,
-                __default: 'observe',
-                __enum: ENUM_IMM_MODE,
-              },
-              staleThresholdSeconds: { __type: TYPE_INT, __default: 10800 },
-            },
-          },
-        },
-      },
-      openclaw: {
-        __type: TYPE_DICT,
-        __strict: true,
-        __keys: {
-          // OSR-04b: top-level keys must be accepted by every strict CFG
-          // loader even when only one language consumes the value at runtime.
-          live: { __type: TYPE_BOOL, __default: false },
-        },
-      },
-      codex: {
-        __type: TYPE_DICT,
-        __strict: true,
-        __keys: {
-          // OSR-04a: parent Agent OS promotes this for shell/Python consumers;
-          // the Node loader keeps it parseable to preserve strict-schema parity.
-          acp_state_home: { __type: TYPE_STRING, __default: null, __nullable: true },
-        },
-      },
-      agent_control: {
-        __type: TYPE_DICT,
-        __strict: true,
-        __keys: {
-          codex_runaway_guardrails: {
-            __type: TYPE_DICT,
-            __strict: true,
-            __keys: {
-              observed_repos: {
-                __type: TYPE_LIST,
-                __item: { __type: TYPE_STRING },
-                __default: ['laceyenterprises/agent-os', 'laceyenterprises/adversarial-review'],
-              },
-              convergence_stall_commit_window_seconds: { __type: TYPE_INT, __default: 3600, __min: 1 },
-              convergence_stall_min_commits: { __type: TYPE_INT, __default: 3, __min: 1 },
-              convergence_stall_file_fetch_budget_per_cycle: { __type: TYPE_INT, __default: 20, __min: 1 },
-              convergence_stall_finding_dedupe_seconds: { __type: TYPE_INT, __default: 900, __min: 1 },
-              convergence_stall_repo_backoff_seconds: { __type: TYPE_INT, __default: 60, __min: 1 },
-              convergence_stall_observed_worker_classes: {
-                __type: TYPE_LIST,
-                __item: { __type: TYPE_STRING },
-                __default: ['codex', 'claude-code', 'clio-agent'],
-              },
-              compaction_rate_alarm_per_hour: { __type: TYPE_INT, __default: 3, __min: 1 },
-              compaction_rate_alarm_finding_dedupe_seconds: { __type: TYPE_INT, __default: 86400, __min: 1 },
-              token_budget_per_session: { __type: TYPE_INT, __default: 50000000, __min: 0 },
-              pr_class_additive_only_allowlist: {
-                __type: TYPE_LIST,
-                __item: { __type: TYPE_STRING },
-                __default: [
-                  'projects/*',
-                  'modules/worker-pool/post-merge-actions/*',
-                  'docs/POSTMORTEM-*.md',
-                  'docs/AUDIT-*.md',
-                ],
-              },
-              vocabulary_fatigue_window_commits: { __type: TYPE_INT, __default: 5, __min: 1 },
-              vocabulary_fatigue_min_repeats: { __type: TYPE_INT, __default: 3, __min: 1 },
-            },
-          },
-        },
-      },
-      // Inert OAuth declarations, validated atomically after the cascade.
-      oauth: {
-        __type: TYPE_DICT,
-        __strict: true,
-        __keys: {
-          broker_instances: { __type: 'any', __default: {} },
-          token_accounts: { __type: 'any', __default: {} },
-          identity_token_pools: { __type: 'any', __default: {} },
-          // Preserve existing Python OAuth children when mirroring this root:
-          // platform/agent-os-config/src/agent_os_config/schema_v1/core.py
-          // _oauth_litellm_vk_schema_keys(), wired by oauth_github_ci.py.
-          ...Object.fromEntries(['codex', 'claude', 'gemini', 'opencode', 'hermes', 'pi', 'oss_local', 'patch'].map(role => [`litellm_vk_${role}`, {
-            __type: TYPE_DICT, __strict: true,
-            __keys: { op_ref: { __type: TYPE_STRING, __default: null, __nullable: true } },
-          }])),
-        },
-      },
-      // OAuth broker watchdog tuning. Mirrors the Python authority
-      // (`oauth_broker.watchdog` in
-      // platform/agent-os-config/src/agent_os_config/__init__.py). The Node
-      // loader does not consume these values at runtime, but strict CFG parity
-      // (LOADER-CONTRACT §2) requires every checked-in config.yaml key to parse
-      // under every sibling loader. The first six knobs landed in PR-C1
-      // (e04c7d61); the port-forward-wedge tier (broker_container_name,
-      // docker_bin, broker_internal_healthz_url,
-      // portforward_wedge_restart_max_attempts) landed in #1958, both
-      // Python-only — this section heals the drift.
-      oauth_broker: {
-        __type: TYPE_DICT,
-        __strict: true,
-        __keys: {
-          watchdog: {
-            __type: TYPE_DICT,
-            __strict: true,
-            __keys: {
-              health_poll_interval_seconds: {
-                __type: TYPE_FLOAT,
-                __default: 30.0,
-                __min: 1.0,
-                __max: 3600.0,
-              },
-              health_probe_timeout_seconds: {
-                __type: TYPE_FLOAT,
-                __default: 4.0,
-                __min: 0.5,
-                __max: 600.0,
-              },
-              confirm_ticks: {
-                __type: TYPE_INT,
-                __default: 3,
-                __min: 1,
-                __max: 100,
-              },
-              recovery_confirm_ticks: {
-                __type: TYPE_INT,
-                __default: 2,
-                __min: 1,
-                __max: 100,
-              },
-              recovery_action_timeout_seconds: {
-                __type: TYPE_FLOAT,
-                __default: 20.0,
-                __min: 1.0,
-                __max: 1800.0,
-              },
-              max_recovery_attempts_per_outage: {
-                __type: TYPE_INT,
-                __default: 3,
-                __min: 1,
-                __max: 100,
-              },
-              recovery_backoff_initial_seconds: {
-                __type: TYPE_FLOAT,
-                __default: 5.0,
-                __min: 0.0,
-                __max: 3600.0,
-              },
-              recovery_backoff_max_seconds: {
-                __type: TYPE_FLOAT,
-                __default: 30.0,
-                __min: 0.0,
-                __max: 3600.0,
-              },
-              bridge_startup_grace_seconds: {
-                __type: TYPE_FLOAT,
-                __default: 180.0,
-                __min: 0.0,
-                __max: 3600.0,
-              },
-              bridge_recovery_timeout_seconds: {
-                __type: TYPE_FLOAT,
-                __default: 135.0,
-                __min: 1.0,
-                __max: 1800.0,
-              },
-              credential_decay_warn_after_seconds: {
-                __type: TYPE_FLOAT,
-                __default: 300.0,
-                __min: 0.0,
-                __max: 86400.0,
-              },
-              credential_decay_crit_after_seconds: {
-                __type: TYPE_FLOAT,
-                __default: 3600.0,
-                __min: 0.0,
-                __max: 86400.0,
-              },
-              credential_decay_last_good_crit_expiry_margin_seconds: {
-                __type: TYPE_FLOAT,
-                __default: 1800.0,
-                __min: 0.0,
-                __max: 86400.0,
-              },
-              refresh_wedge_threshold_seconds: {
-                __type: TYPE_INT,
-                __default: 900,
-                __min: 1,
-                __max: 86400,
-              },
-              // Port-forward-wedge remediation tiers (#1958, PFW-05).
-              broker_container_name: {
-                __type: TYPE_STRING,
-                __default: 'litellm-oauth-broker-1',
-              },
-              broker_compose_file: {
-                __type: TYPE_STRING,
-                __default:
-                  '/Users/airlock/agent-os/modules/model-routing-budget-control/runtime/config/docker-compose.yml',
-              },
-              broker_compose_project_name: {
-                __type: TYPE_STRING,
-                __default: 'litellm',
-              },
-              broker_compose_service_name: {
-                __type: TYPE_STRING,
-                __default: 'oauth-broker',
-              },
-              broker_docker_network: {
-                __type: TYPE_STRING,
-                __default: 'litellm_default',
-              },
-              docker_bin: {
-                __type: TYPE_STRING,
-                __default: 'docker',
-              },
-              broker_internal_healthz_url: {
-                __type: TYPE_STRING,
-                __default: 'http://127.0.0.1:4002/healthz',
-              },
-              portforward_wedge_restart_max_attempts: {
-                __type: TYPE_INT,
-                __default: 3,
-                __min: 1,
-                __max: 20,
-              },
-              docker_reset_enabled: {
-                __type: TYPE_BOOL,
-                __default: true,
-              },
-              docker_reset_cooldown_seconds: {
-                __type: TYPE_INT,
-                __default: 3600,
-                __min: 0,
-                __max: 86400,
-              },
-              docker_reset_daily_cap: {
-                __type: TYPE_INT,
-                __default: 3,
-                __min: 0,
-                __max: 20,
-              },
-              docker_reset_lifetime_cap: {
-                __type: TYPE_INT,
-                __default: 20,
-                __min: 0,
-                __max: 1000,
-              },
-              full_restart_break_glass_enabled: {
-                __type: TYPE_BOOL,
-                __default: false,
-              },
-              full_restart_daily_cap: {
-                __type: TYPE_INT,
-                __default: 1,
-                __min: 0,
-                __max: 10,
-              },
-              full_restart_lifetime_cap: {
-                __type: TYPE_INT,
-                __default: 3,
-                __min: 0,
-                __max: 100,
-              },
-              full_restart_docker_daemon_wait_seconds: {
-                __type: TYPE_INT,
-                __default: 180,
-                __min: 1,
-                __max: 1800,
-              },
-              portforward_self_heal_max_cycles: {
-                __type: TYPE_INT,
-                __default: 3,
-                __min: 1,
-                __max: 100,
-              },
-              broker_standby_readyz_url: {
-                __type: TYPE_STRING,
-                __default: '',
-              },
-              broker_standby_container_name: {
-                __type: TYPE_STRING,
-                __default: 'litellm-oauth-broker-standby-1',
-              },
-              credential_decay_warn_after_seconds: {
-                __type: TYPE_FLOAT,
-                __default: 300.0,
-                __min: 0.0,
-                __max: 86400.0,
-              },
-              credential_decay_crit_after_seconds: {
-                __type: TYPE_FLOAT,
-                __default: 3600.0,
-                __min: 0.0,
-                __max: 86400.0,
-              },
-              credential_decay_last_good_crit_expiry_margin_seconds: {
-                __type: TYPE_FLOAT,
-                __default: 1800.0,
-                __min: 0.0,
-                __max: 86400.0,
-              },
-              critical_service_patterns: {
-                __type: TYPE_STRING,
-                __default:
-                  'litellm,litellm-db,agent-control,agent_control,lgtm-alloy,lgtm-prometheus,lgtm-loki,lgtm-tempo,lgtm-grafana,session-ledger-postgres-exporter',
-              },
-            },
-          },
-          // Parse-only mirror of the placey-side Keychain bridge recovery
-          // capability. Python owns the values and launchd rendering, but the
-          // shared config cascade must remain valid under this strict loader.
-          // CLC14PREP-01: parse-only mirror of the Python-owned corporate
-          // bridge deployment keys. Empty endpoints/source keep it absent.
-          claude_code_corp_bridge: {
-            __type: TYPE_DICT,
-            __strict: true,
-            __keys: {
-              port: { __type: TYPE_INT, __default: 4093, __min: 1024, __max: 65535 },
-              audit_context: { __type: TYPE_STRING, __default: '', __nullable: false },
-              primary_url: { __type: TYPE_STRING, __default: '', __nullable: false },
-              standby_url: { __type: TYPE_STRING, __default: '', __nullable: false },
-              watchdog_status_url: { __type: TYPE_STRING, __default: '', __nullable: false },
-              secret_mirror_source: { __type: TYPE_STRING, __default: '', __nullable: false },
-            },
-          },
-          keychain_bridge: {
-            __type: TYPE_DICT,
-            __strict: true,
-            __keys: {
-              auto_unlock: {
-                __type: TYPE_DICT,
-                __strict: true,
-                __keys: {
-                  enabled: {
-                    __type: TYPE_BOOL,
-                    __default: true,
-                  },
-                  command: {
-                    __type: TYPE_STRING,
-                    __default:
-                      '/usr/bin/sudo -n /usr/local/libexec/agent-os/oauth-bridge-unlock-keychain',
-                  },
-                },
-              },
-            },
-          },
-          // AMA closer (hammer/merge-agent/post-merge-actions) GitHub App
-          // installation-token auth. Mirrors the Python authority
-          // (`oauth_broker.merge_agent` in
-          // platform/agent-os-config/src/agent_os_config/__init__.py). The
-          // watcher does not consume these keys; the partial mirror exists so
-          // the strict loader tolerates them in config.yaml / config.local.yaml
-          // (CFG-01 multi-loader parity).
-          merge_agent: {
-            __type: TYPE_DICT,
-            __strict: true,
-            __keys: {
-              broker_auth_enabled: {
-                __type: TYPE_BOOL,
-                __default: false,
-              },
-              provider: {
-                __type: TYPE_STRING,
-                __default: '',
-              },
-              expected_app_id: {
-                __type: TYPE_STRING,
-                __default: '',
-              },
-              expected_installation_id: {
-                __type: TYPE_STRING,
-                __default: '',
-              },
-            },
-          },
-          // GitHub App provider identities keyed by provider name
-          // (hammer/sentinel/argus/etc.). Parse-only mirror of the Python
-          // authority so shared CFG stays strict without rejecting documented
-          // provider blocks.
-          github_app_providers: {
-            __type: TYPE_DICT,
-            __strict: false,
-            __default: {},
-            __keys: {},
-            // Parse-only mirror: the Python agent-os-config authority owns the
-            // canonical schema and validation for each provider block. Keep the
-            // known fields defaulted for Node consumers, but keep each provider
-            // block non-strict so unmirrored Python-only keys do not crash JS
-            // services during shared-CFG rollouts.
-            __extra_keys_schema: {
-              __type: TYPE_DICT,
-              __strict: false,
-              __default: {},
-              __keys: {
-                broker_auth_enabled: {
-                  __type: TYPE_BOOL,
-                  __default: false,
-                },
-                provider: {
-                  __type: TYPE_STRING,
-                  __default: '',
-                },
-                expected_app_id: {
-                  __type: TYPE_STRING,
-                  __default: '',
-                  __coerce_number_to_string: true,
-                },
-                expected_installation_id: {
-                  __type: TYPE_STRING,
-                  __default: '',
-                  __coerce_number_to_string: true,
-                },
-                private_key_op_ref: {
-                  __type: TYPE_STRING,
-                  __default: '',
-                },
-                private_key_file: {
-                  __type: TYPE_STRING,
-                  __default: '',
-                },
-                pat_fallback_op_ref: {
-                  __type: TYPE_STRING,
-                  __default: '',
-                },
-                source: {
-                  __type: TYPE_STRING,
-                  __default: '',
-                },
-              },
-            },
-          },
-        },
-      },
-      governance: {
-        __type: TYPE_DICT,
-        __strict: true,
-        __keys: {
-          emergency_stop_path: {
-            __type: TYPE_STRING,
-            __default: '~/.agent-os/governance/emergency-stop',
-          },
-        },
-      },
-      apps: {
-        __type: TYPE_DICT,
-        __strict: false,
-        __default: {},
-        __keys: {},
-        __extra_keys_schema: {
-          __type: TYPE_DICT,
-          __strict: true,
-          __keys: {
-            mode: {
-              __type: TYPE_STRING,
-              __default: 'agent-os',
-              __enum: ENUM_APP_MODE,
-            },
-            subscribes: {
-              __type: TYPE_LIST,
-              __item: { __type: TYPE_STRING },
-              __default: [],
-            },
-            contract_version: {
-              __type: TYPE_STRING,
-              __default: '1.0',
-            },
-          },
-        },
-      },
-      // TEL-04 / GBI alert bus. Parse-only for adversarial-review, but this
-      // strict Node CFG consumer must accept the top-level Agent OS key or the
-      // watcher can reject config.yaml before it reaches PR routing.
-      agent_gateway: {
-        __type: TYPE_DICT,
-        __strict: true,
-        __keys: {
-          alert_bus_url: {
-            __type: TYPE_STRING,
-            __default: 'http://host.docker.internal:18799/hooks/wake',
-            __pattern: '^https?://[^/]+/hooks/wake/?$',
-            __pattern_description: 'http(s) URL ending in /hooks/wake, with optional trailing slash',
-          },
-        },
-      },
-      entitlements: {
-        __type: TYPE_DICT,
-        __strict: false,
-        __default: {},
-        __keys: {},
-        __extra_keys_schema: {
-          __type: TYPE_DICT,
-          __strict: true,
-          __keys: {
-            git_name: { __type: TYPE_STRING, __default: '' },
-            git_email: { __type: TYPE_STRING, __default: '' },
-            gh_token_var: { __type: TYPE_STRING, __default: '' },
-            gh_token_op_ref: { __type: TYPE_STRING, __default: '' },
-            gh_token_op_ref_fallback: { __type: TYPE_STRING, __default: '' },
-            gh_bot_login: { __type: TYPE_STRING, __default: '' },
-          },
-        },
-      },
-      web_cookie_broker: {
-        __type: TYPE_DICT,
-        __strict: true,
-        __keys: {
-          entitlements: {
-            __type: TYPE_DICT,
-            __strict: false,
-            __default: {},
-            __keys: {},
-            __extra_keys_schema: {
-              __type: TYPE_DICT,
-              __strict: true,
-              __keys: {
-                sites: {
-                  __type: TYPE_LIST,
-                  __default: [],
-                  __item: { __type: TYPE_STRING },
-                },
-              },
-            },
-          },
-        },
-      },
-      services: {
-        __type: TYPE_DICT,
-        __strict: true,
-        __keys: {
-          // DPR-04: the Python and shell readers accept this operator path.
-          // Keep the strict Node loader aligned so the watcher preserves it.
-          memory_gateway: {
-            __type: TYPE_DICT,
-            __strict: true,
-            __keys: {
-              install_root: { __type: TYPE_STRING, __default: null, __nullable: true },
-            },
-          },
-          ports: {
-            __type: TYPE_DICT,
-            __strict: true,
-            __keys: {
-              hcp: { __type: TYPE_INT, __default: 8002 },
-            },
-          },
-          hcp: {
-            __type: TYPE_DICT,
-            __strict: true,
-            __keys: {
-              search: searchSchema(),
-              google_tokens: googleTokensSchema(),
-              capability_vocabulary: {
-                __type: TYPE_LIST,
-                __item: { __type: TYPE_STRING },
-                __default: ["comms.read", "comms.write", "dispatch.read", "dispatch.write", "finch.read", "fs.read", "fs.write", "github.read", "gmail.read", "gmail.send", "hammer.status", "linear.read", "linear.write", "session-ledger.read", "search.brave", "search.exa", "search.firecrawl", "search.parallel", "search.perplexity", "search.tavily", "talk"],
-              },
-              capability_enforcement: {
-                __type: TYPE_DICT, __strict: false,
-                __keys: Object.fromEntries([
-                  ...['autok', 'comms', 'email', 'hcp', 'linear'].map(server => [server, { __type: TYPE_STRING, __default: 'shadow', __enum: ['off', 'shadow', 'enforce'] }]),
-                  ...['memory', ...Object.keys(SEARCH_OPERATIONS).map(p => `search-${p}`)].map(server => [server, { __type: TYPE_STRING, __default: 'off', __enum: ['off', 'shadow', 'enforce'] }]),
-                ]),
-                __extra_keys_schema: { __type: TYPE_STRING, __default: 'off', __enum: ['off', 'shadow', 'enforce'] },
-              },
-              bind_host: { __type: TYPE_STRING, __default: '127.0.0.1' },
-              audit_keep_days: { __type: TYPE_INT, __default: 30, __min: 0 },
-              token_expired_keep_days: { __type: TYPE_INT, __default: 7, __min: 0 },
-              token_revoked_keep_days: { __type: TYPE_INT, __default: 30, __min: 0 },
-              idempotency_keep_days: { __type: TYPE_INT, __default: 30, __min: 0 },
-              confirmation_token_keep_minutes: { __type: TYPE_INT, __default: 60, __min: 0 },
-              comms_jobs_keep_days: { __type: TYPE_INT, __default: 30, __min: 0 },
-              rotation_cadence_days: { __type: TYPE_INT, __default: 90, __min: 1 },
-              console_capability_enforcement: {
-                __type: TYPE_DICT,
-                __strict: true,
-                __keys: {
-                  default: { __type: TYPE_STRING, __default: 'shadow', __enum: ['off', 'shadow', 'enforce'] },
-                },
-              },
-              destructive_capability_enforcement: {
-                __type: TYPE_DICT,
-                __strict: false,
-                __keys: {
-                  default: { __type: TYPE_STRING, __default: 'shadow', __enum: ['off', 'shadow', 'enforce'] },
-                },
-                __extra_keys_schema: {
-                  __type: TYPE_STRING,
-                  __enum: ['off', 'shadow', 'enforce'],
-                },
-              },
-              principal_capability_enforcement: {
-                __type: TYPE_DICT,
-                __strict: false,
-                __keys: {},
-                __extra_keys_schema: {
-                  __type: TYPE_DICT,
-                  __strict: false,
-                  __keys: {},
-                  __extra_keys_schema: {
-                    __type: TYPE_STRING,
-                    __enum: ['off', 'shadow', 'enforce'],
-                  },
-                },
-              },
-              persistent_agent_principals: {
-                __type: TYPE_LIST,
-                __item: { __type: TYPE_STRING },
-                __default: [
-                  'clio',
-                  'aria',
-                  'argus',
-                  'sentinel',
-                  'claude-responder',
-                  'codex-responder',
-                  'agent-os-responder',
-                ],
-              },
-              persistent_agent_default_capabilities: {
-                __type: TYPE_DICT,
-                __strict: false,
-                __keys: {
-                  clio: { __type: TYPE_LIST, __item: { __type: TYPE_STRING }, __default: ['dispatch.read', 'talk'] },
-                  aria: { __type: TYPE_LIST, __item: { __type: TYPE_STRING }, __default: ['dispatch.read', 'talk'] },
-                  argus: { __type: TYPE_LIST, __item: { __type: TYPE_STRING }, __default: ['dispatch.read', 'talk'] },
-                  sentinel: { __type: TYPE_LIST, __item: { __type: TYPE_STRING }, __default: ['dispatch.read', 'talk'] },
-                  'claude-responder': { __type: TYPE_LIST, __item: { __type: TYPE_STRING }, __default: ['dispatch.read', 'talk'] },
-                  'codex-responder': { __type: TYPE_LIST, __item: { __type: TYPE_STRING }, __default: ['dispatch.read', 'talk'] },
-                  'agent-os-responder': { __type: TYPE_LIST, __item: { __type: TYPE_STRING }, __default: ['dispatch.read', 'talk'] },
-                },
-                __extra_keys_schema: {
-                  __type: TYPE_LIST,
-                  __item: { __type: TYPE_STRING },
-                  __default: [],
-                },
-              },
-              op_rate_limit_regex: {
-                __type: TYPE_STRING,
-                __default: String.raw`account\s+read_write\s+[0-9]+/[0-9]+`,
-              },
-            },
-          },
-        },
-      },
-      // DRP-01N — retention policy block. Strict-shape parity matters here
-      // because the adversarial watcher consumes this Node loader and must
-      // tolerate the top-level Agent OS `retention:` surface. Policy names are
-      // intentionally fixed to the Python reaper's current schema; adding a new
-      // named policy requires a lockstep Node/Python schema rollout.
-      retention: {
-        __type: TYPE_DICT,
-        __strict: true,
-        __keys: {
-          policies: {
-            __type: TYPE_DICT,
-            __strict: true,
-            __keys: {
-              standard_backup: {
-                __type: TYPE_DICT,
-                __strict: true,
-                __keys: {
-                  daily: { __type: TYPE_INT, __default: 7, __min: 0 },
-                  weekly: { __type: TYPE_INT, __default: 4, __min: 0 },
-                  monthly: { __type: TYPE_INT, __default: 3, __min: 0 },
-                },
-              },
-            },
-          },
-          cadence: {
-            __type: TYPE_DICT,
-            __strict: true,
-            __keys: {
-              weekly_day_of_week: { __type: TYPE_INT, __default: 0, __min: 0, __max: 6 },
-              monthly_day_of_month: { __type: TYPE_INT, __default: 1, __min: 1, __max: 31 },
-            },
-          },
-          surfaces: {
-            __type: TYPE_DICT,
-            __strict: true,
-            __keys: {
-              postgres_backups: {
-                __type: TYPE_DICT,
-                __strict: true,
-                __keys: {
-                  policy: { __type: TYPE_STRING, __default: 'standard_backup' },
-                },
-              },
-            },
-          },
-          snapshots: {
-            __type: TYPE_DICT,
-            __default: {},
-            __strict: true,
-            __keys: {
-              keep_count: { __type: TYPE_INT, __default: 3, __min: 1 },
-            },
-          },
-          ephemeral: {
-            __type: TYPE_DICT,
-            __strict: true,
-            __keys: {
-              worker_worktrees_keep_hours: { __type: TYPE_INT, __default: 48, __min: 0 },
-              worker_worktrees_keep_hours_under_pressure: { __type: TYPE_INT, __default: 24, __min: 1 },
-              disk_free_gb_floor: { __type: TYPE_FLOAT, __default: 300, __nullable: true, __min: 0 },
-              gc_report_only: { __type: TYPE_BOOL, __default: true },
-              worker_worktrees_per_run_limit: { __type: TYPE_INT, __default: 200, __min: 1 },
-              token_transcripts_compression_enabled: { __type: TYPE_BOOL, __default: true },
-              token_transcripts_compress_after_days: { __type: TYPE_INT, __default: 7, __min: 1 },
-              worker_worktrees_hourly_drain_enabled: { __type: TYPE_BOOL, __default: true },
-              worker_worktrees_failed_slot_salvage_after_hours: { __type: TYPE_INT, __default: 168, __min: 1 },
-              worker_worktrees_bulk_delete_ack_threshold: { __type: TYPE_INT, __default: 200, __min: 0 },
-              worker_worktrees_bulk_delete_ack_marker_path: { __type: TYPE_STRING, __default: "__HQ_ROOT__/retention/worker-worktrees-bulk-delete-ack" },
-              follow_up_workspaces_keep_hours: { __type: TYPE_INT, __default: 72, __min: 0 },
-              acpx_sessions_keep_days: { __type: TYPE_INT, __default: 30, __min: 0 },
-              acpx_sessions_gib_cap: { __type: TYPE_FLOAT, __default: 10.0, __min: 0 },
-              acpx_sessions_min_idle_minutes: { __type: TYPE_INT, __default: 60, __min: 0 },
-              openclaw_sessions_keep_days: { __type: TYPE_INT, __default: 30, __min: 0 },
-              openclaw_sessions_min_idle_minutes: { __type: TYPE_INT, __default: 60, __min: 0 },
-              claude_code_sessions_keep_days: { __type: TYPE_INT, __default: 90, __min: 0 },
-              dispatch_audit_keep_days: { __type: TYPE_INT, __default: 365, __min: 0 },
-              sentinel_audit_keep_days: { __type: TYPE_INT, __default: 14, __min: 0 },
-            },
-          },
-          sentinel: {
-            __type: TYPE_DICT,
-            __strict: true,
-            __keys: {
-              disk_headroom: {
-                __type: TYPE_DICT,
-                __strict: true,
-                __keys: {
-                  threshold_pct: { __type: TYPE_INT, __default: 85, __min: 0, __max: 100 },
-                  threshold_pct_critical: { __type: TYPE_INT, __default: 95, __min: 0, __max: 100 },
-                  threshold_gib_free: { __type: TYPE_INT, __default: 10, __min: 0 },
-                  threshold_gib_free_critical: { __type: TYPE_INT, __default: 2, __min: 0 },
-                  page_dedupe_seconds: { __type: TYPE_INT, __default: 3600, __min: 0 },
-                },
-              },
-            },
-          },
-        },
-      },
-      session_ledger: {
-        __type: TYPE_DICT,
-        __strict: true,
-        __keys: {
-          backend: {
-            __type: TYPE_STRING,
-            __default: null,
-            __nullable: true,
-            __enum: ENUM_SESSION_LEDGER_BACKEND,
-          },
-          dsn: {
-            __type: TYPE_STRING,
-            __default: null,
-            __nullable: true,
-          },
-          database_name: {
-            __type: TYPE_STRING,
-            __default: 'agent_os_ledger',
-            __pattern: PATTERN_SQL_IDENTIFIER,
-            __pattern_description: PATTERN_SQL_IDENTIFIER_DESCRIPTION,
-          },
-          vdb: {
-            __type: TYPE_DICT,
-            __strict: true,
-            __keys: {
-              enabled: { __type: TYPE_BOOL, __default: true },
-              clone_repos: { __type: TYPE_LIST, __item: { __type: TYPE_STRING }, __default: ['agent-os'] },
-              direct_dsn: {
-                __type: TYPE_STRING,
-                __default: null,
-                __nullable: true,
-              },
-              allowCanonicalFallback: { __type: TYPE_BOOL, __default: false },
-            },
-          },
-          exposure: {
-            __type: TYPE_DICT,
-            __strict: true,
-            __keys: {
-              score_half_life_days: { __type: TYPE_FLOAT, __default: 30.0, __min: 1.0, __max: 3660.0 },
-              quarantine_threshold: { __type: TYPE_FLOAT, __default: 25.0, __min: 0.0, __max: 100.0 },
-            },
-          },
-          // CFG-04 dual-write nested block — mirrors agent_os_config
-          // `_schema_v1()` (Python loader, line ~276). Added 2026-06-02
-          // after operator's config.local.yaml set `session_ledger.dual_write.mode`
-          // and the watcher crash-skipped every PR with `routeSubject returned
-          // config-broken ... session_ledger.dual_write: unknown key (strict schema)
-          // — skipping this PR for the tick`. Same multi-language CFG drift
-          // class as the 2026-05-31 incident; keep this block in lockstep
-          // with the Python schema.
-          dual_write: {
-            __type: TYPE_DICT,
-            __strict: true,
-            __keys: {
-              mode: {
-                __type: TYPE_STRING,
-                __default: null,
-                __nullable: true,
-                __enum: ENUM_SESSION_LEDGER_DUAL_WRITE_MODE,
-              },
-              failure_threshold: { __type: TYPE_INT, __default: 5 },
-              failure_cooldown_seconds: { __type: TYPE_FLOAT, __default: 300.0 },
-              queue_max_batches: { __type: TYPE_INT, __default: 1000 },
-              slow_write_ms: { __type: TYPE_INT, __default: 1000 },
-            },
-          },
-          // Service / shadow-read / refresh / alert_bridge: same multi-loader
-          // parity rationale. Mirrors the Python `_schema_v1()` `session_ledger.*`
-          // sub-blocks. Defaults track Python; types must match.
-          service: {
-            __type: TYPE_DICT,
-            __strict: true,
-            __keys: {
-              refresh_interval_seconds: { __type: TYPE_INT, __default: null, __nullable: true },
-              stale_threshold_seconds: { __type: TYPE_INT, __default: null, __nullable: true },
-              log_level: {
-                __type: TYPE_STRING,
-                __default: 'INFO',
-                __enum: ENUM_SESSION_LEDGER_SERVICE_LOG_LEVEL,
-              },
-              log_max_bytes: { __type: TYPE_INT, __default: 10 * 1024 * 1024 },
-              log_retention_days: { __type: TYPE_INT, __default: null, __nullable: true },
-              doctor_launchctl_timeout_seconds: {
-                __type: TYPE_FLOAT,
-                __default: null,
-                __nullable: true,
-              },
-            },
-          },
-          shadow_read: {
-            __type: TYPE_DICT,
-            __strict: true,
-            __keys: {
-              max_rows: { __type: TYPE_INT, __default: 1000 },
-              failure_threshold: { __type: TYPE_INT, __default: 5 },
-              failure_cooldown_seconds: { __type: TYPE_FLOAT, __default: 300.0 },
-              slow_ms: { __type: TYPE_INT, __default: 1000 },
-              log_backup_count: { __type: TYPE_INT, __default: 128 },
-            },
-          },
-          refresh: {
-            __type: TYPE_DICT,
-            __strict: true,
-            __keys: {
-              per_source_timeout_seconds: {
-                __type: TYPE_FLOAT,
-                __default: null,
-                __nullable: true,
-              },
-              source_batch_before_conn_reset: {
-                __type: TYPE_INT,
-                __default: null,
-                __nullable: true,
-              },
-              stuck_refresh_timeout_seconds: {
-                __type: TYPE_FLOAT,
-                __default: null,
-                __nullable: true,
-              },
-              analyze_refresh_interval: {
-                __type: TYPE_INT,
-                __default: null,
-                __nullable: true,
-              },
-            },
-          },
-          alert_bridge: {
-            __type: TYPE_DICT,
-            __strict: true,
-            __keys: {
-              url: { __type: TYPE_STRING, __default: null, __nullable: true },
-              allow_remote: { __type: TYPE_BOOL, __default: false },
-            },
-          },
-        },
-      },
-      // Cross-cutting GitHub integration. Added 2026-05-31 to mirror the
-      // Python schema (`platform/agent-os-config/src/agent_os_config/__init__.py`
-      // `_schema_v1()`). PR #1136 added `github.org` to the Python side
-      // for the WBH-03 de-hardcoding fix and to top-level `config.yaml`;
-      // this Node loader has its OWN strict schema and crashed in a loop
-      // on watcher startup with `expected: 'one of [...]', got: 'github'`
-      // until this entry was added. Keep this section in sync with the
-      // Python schema. Default: `laceyenterprises`.
-      github: {
-        __type: TYPE_DICT,
-        __strict: true,
-        __keys: {
-          org: {
-            __type: TYPE_STRING,
-            __default: 'laceyenterprises',
-          },
-          // OSR-05: the Python + YAML schemas accept
-          // `github.org_email_domain` as a nullable string. The
-          // Node loader must accept the same key or the watcher crash-loops
-          // at startup with `unknown key (strict schema)` — 4th occurrence of
-          // the CFG-01 multi-loader drift bug. Keep in lockstep with
-          // `platform/agent-os-config/src/agent_os_config/__init__.py`
-          // `org_email_domain` entry under `github`.
-          org_email_domain: {
-            __type: TYPE_STRING,
-            __default: null,
-            __nullable: true,
-          },
-          // WATCHMULTIORG-01: extra orgs whose repositories the review watcher
-          // discovers, host-local only (committed default: none).
-          additional_orgs: {
-            __type: TYPE_LIST,
-            __default: [],
-            __item: {
-              __type: TYPE_STRING,
-              __pattern: '^[A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?$',
-              __pattern_description: 'a GitHub org login',
-            },
-          },
-          // Compatibility for configs written before OSR-05 settled on the
-          // `org_email_domain` name.
-          workspace_email_domain: {
-            __type: TYPE_STRING,
-            __default: null,
-            __nullable: true,
-          },
-        },
-      },
-      // Historical parse-only registrations retained for compatibility.
-      // CI routing and spend are owned by the sibling reader; new sibling
-      // fields no longer require extending this block.
-      ci: {
-        __type: TYPE_DICT,
-        __strict: true,
-        __keys: {
-          // Previously a missing mirror here prevented startup. Reader-scoped
-          // unknown-key handling now prevents that coupling for future fields.
-          billing: {
-            __type: TYPE_DICT,
-            __strict: true,
-            __keys: {
-              monthly_budget_usd: { __type: TYPE_FLOAT, __default: 200.0 },
-              warn_at_fraction: { __type: TYPE_FLOAT, __default: 0.8 },
-              rate_usd_per_minute: { __type: TYPE_FLOAT, __default: 0.008 },
-              included_minutes: { __type: TYPE_INT, __default: 0 },
-              calibration_factor: { __type: TYPE_FLOAT, __default: 1.0 },
-            },
-          },
-          hosting: {
-            __type: TYPE_DICT,
-            __strict: true,
-            __keys: {
-              mode: {
-                __type: TYPE_STRING,
-                __default: 'github',
-                __enum: ENUM_CI_HOSTING_MODE,
-              },
-              runner_labels: {
-                __type: TYPE_LIST,
-                __item: { __type: TYPE_STRING },
-                __default: [],
-              },
-              fallback_to_github: { __type: TYPE_BOOL, __default: true },
-              excluded_workflows: {
-                __type: TYPE_LIST,
-                __item: { __type: TYPE_STRING },
-                __default: ['release-freeze-gate.yml'],
-              },
-            },
-          },
-        },
-      },
-      // OSR-05 — operator identity. Parse-only for this package, but strict
-      // Node CFG consumers must accept the parent Agent OS top-level config.
-      operator: {
-        __type: TYPE_DICT,
-        __strict: true,
-        __keys: {
-          email: {
-            __type: TYPE_STRING,
-            __default: 'virtualpaul@gmail.com',  // cfg-allowlist(operator-email): oss-readiness-apply-reviewed
-          },
-          full_name: {
-            __type: TYPE_STRING,
-            __default: 'Paul Lacey',  // cfg-allowlist(operator-name): oss-readiness-apply-reviewed
-          },
-          first_name: {
-            __type: TYPE_STRING,
-            __default: 'operator',
-          },
-          github_handle: {
-            __type: TYPE_STRING,
-            __default: 'operator',
-          },
-        },
-      },
-      // OSR-06 — host + Tailscale per-device identity. Keep these keys in
-      // lockstep with the Python loader so checked-in top-level config.yaml
-      // remains readable by strict Node CFG consumers.
-      host: {
-        __type: TYPE_DICT,
-        __strict: true,
-        __keys: {
-          name: {
-            __type: TYPE_STRING,
-            __default: null,
-            __nullable: true,
-          },
-          tailscale_hostname: {
-            __type: TYPE_STRING,
-            __default: null,
-            __nullable: true,
-          },
-        },
-      },
-      tailscale: {
-        __type: TYPE_DICT,
-        __strict: true,
-        __keys: {
-          workstation_ip: {
-            __type: TYPE_STRING,
-            __default: null,
-            __nullable: true,
-          },
-          workstation_dns_name: {
-            __type: TYPE_STRING,
-            __default: null,
-            __nullable: true,
-          },
-          daily_driver_ip: {
-            __type: TYPE_STRING,
-            __default: null,
-            __nullable: true,
-          },
-          daily_driver_dns_name: {
-            __type: TYPE_STRING,
-            __default: null,
-            __nullable: true,
-          },
-          ipad_ip: {
-            __type: TYPE_STRING,
-            __default: null,
-            __nullable: true,
-          },
-          ipad_dns_name: {
-            __type: TYPE_STRING,
-            __default: null,
-            __nullable: true,
-          },
-          iphone_ip: {
-            __type: TYPE_STRING,
-            __default: null,
-            __nullable: true,
-          },
-          iphone_dns_name: {
-            __type: TYPE_STRING,
-            __default: null,
-            __nullable: true,
-          },
-        },
-      },
-      // OSR-02 — launchd label prefix for fork-safe reverse-DNS labels.
-      // Keep this in lockstep with the Python CFG schema; strict Node CFG
-      // consumers parse top-level config.yaml during watcher startup.
-      launchd: {
-        __type: TYPE_DICT,
-        __strict: true,
-        __keys: {
-          label_prefix: {
-            __type: TYPE_STRING,
-            __default: 'ai.laceyenterprises',
-          },
-          install_mode: {
-            __type: TYPE_STRING,
-            __default: 'user-agent',
-            __enum: ['system-daemon', 'user-agent'],
-          },
-          // LDD carve-out set. Mirrors the Python CFG schema
-          // (schema_v1/misc.py launchd core_services / mode_carveouts).
-          // Keep in lockstep: this strict loader must accept the same
-          // launchd keys an operator may add to config.yaml/config.local.yaml
-          // for scripts/launchd-domain-drift-watch.sh, or adversarial-watcher
-          // crash-loops on strict load (config-schema.multi-loader-parity).
-          // core_services names the launchd label-base service names whose
-          // live domain must match install_mode; empty keeps the check dark.
-          core_services: {
-            __type: TYPE_LIST,
-            __item: { __type: TYPE_STRING },
-            __default: [],
-          },
-          // Daemons intentionally pinned to a mode other than install_mode.
-          // Each entry records service, its pinned mode, and reason so the
-          // drift-watch treats a live-mode mismatch as an accepted carve-out.
-          mode_carveouts: {
-            __type: TYPE_LIST,
-            __item: {
-              __type: TYPE_DICT,
-              __strict: true,
-              __keys: {
-                service: { __type: TYPE_STRING },
-                mode: {
-                  __type: TYPE_STRING,
-                  __enum: ['system-daemon', 'user-agent'],
-                },
-                reason: { __type: TYPE_STRING },
-              },
-            },
-            __default: [],
-          },
-        },
-      },
-      linear: {
-        __type: TYPE_DICT,
-        __strict: true,
-        __keys: {
-          team_name: {
-            __type: TYPE_STRING,
-            __default: 'Laceyenterprises',  // cfg-allowlist(linear-team): oss-readiness-apply-reviewed
-          },
-          issue_prefix: {
-            __type: TYPE_STRING,
-            __default: 'LAC',
-            __pattern: PATTERN_LINEAR_ISSUE_PREFIX,
-            __pattern_description: PATTERN_LINEAR_ISSUE_PREFIX_DESCRIPTION,
-          },
-        },
-      },
-      // CFG-01 multi-loader parity: Python owns the global `op.vault` key (the
-      // single source of truth for the 1Password vault in op://<vault>/... refs)
-      // and the fork-overridable vault allowlist / release signing ref.
-      // The adversarial-review loader does not consume it, but the top-level
-      // schema is __strict, so it must be mirrored here or strict validation
-      // rejects checked-in config.yaml ("op: unknown key"). Keep in lockstep with
-      // agent_os_config `_schema_v1()` `op`.
-      op: {
-        __type: TYPE_DICT,
-        __strict: true,
-        __keys: {
-          vault: {
-            __type: TYPE_STRING,
-            __default: 'Cliovault',
-          },
-          known_vaults: {
-            __type: TYPE_LIST,
-            __item: { __type: TYPE_STRING },
-            __default: ['Cliovault', 'mem423y7ewrymvxv4ibh34zdk4', 'Personal'],
-          },
-          release_signing_private_key_ref: {
-            __type: TYPE_STRING,
-            __default: 'op://Cliovault/release-signing/private-key',
-          },
-        },
-      },
-      submodules: {
-        __type: TYPE_DICT,
-        __strict: false,
-        __keys: {},
-      },
-      osg: OSG_SCHEMA,
-      mes: MES_SCHEMA,
-      // GRK-09: Grok harness knobs; every enable flag defaults false.
-      grok: grokSchema(),
-      roles: {
-        __type: TYPE_DICT,
-        __strict: true,
-        __keys: {
-          reviewer: {
-            __type: TYPE_STRING,
-            __default: 'adversarial',
-            __enum: ENUM_ROLES_REVIEWER,
-            __normalize: { claude: 'claude-code' },
-          },
-          remediator: {
-            __type: TYPE_STRING,
-            __default: 'adversarial',
-            __enum: ENUM_ROLES_REMEDIATOR,
-            __normalize: { 'codex-corp': 'remediator-codex-corp' },
-          },
-          codex_worker_account_order: {
-            __type: TYPE_STRING,
-            __default: 'corporate-first',
-            __enum: ENUM_CODEX_WORKER_ACCOUNT_ORDER,
-          },
-          // REMFALLBACK-01: ordered remediator classes to fall back to when the
-          // routed remediator's provider is capped (grounded, AFH soft-grounded,
-          // model-exhausted, or a provider reset past the quota hold window).
-          // Resolved on every claim, so it auto-reverts when the routed class
-          // recovers. A candidate that is itself capped, or whose model family
-          // could review the PR's next round, is skipped. `[]` disables the
-          // fallback (a capped remediator then holds without respawning).
-          // Mirrored in the Python schema_v1 and the shell loader's key list.
-          remediator_fallback: {
-            __type: TYPE_LIST,
-            __item: {
-              __type: TYPE_STRING,
-              __enum: ENUM_ROLES_REMEDIATOR_FALLBACK,
-              __normalize: { 'codex-corp': 'remediator-codex-corp' },
-            },
-            __default: ['remediator-codex-corp', 'remediator-claude', 'codex'],
-          },
-          merge_agent_worker_class: {
-            __type: TYPE_STRING,
-            __default: 'merge-agent',
-            __enum: ENUM_ROLES_MERGE_AGENT_WORKER_CLASS,
-          },
-          build_pack_default_worker_class: {
-            __type: TYPE_STRING,
-            __default: 'codex',
-            __enum: ENUM_ROLES_BUILD_PACK_DEFAULT_WORKER_CLASS,
-          },
-          // ARC-12 role registry (v2 app architecture §5). A keyed map of role
-          // id → role definition. The config loader validates STRUCTURE only
-          // (known entry keys, string types); the semantic contract —
-          // promptSet required, exactly-one-of workerClass/persona, taskKind /
-          // completionShape enums, and workerClass ∈ the hq-published class
-          // list — lives in `src/role-registry.mjs`, which reads this subtree
-          // and fails loud at load. NO token, model id, or CLI path is ever a
-          // valid key here: per-role GitHub bot identity is comms-adapter
-          // delivery config keyed by role id, so the kernel and registry never
-          // see tokens.
-          registry: {
-            __type: TYPE_DICT,
-            __strict: false,
-            __default: {},
-            __keys: {},
-            __extra_keys_schema: {
-              __type: TYPE_DICT,
-              __strict: true,
-              __keys: {
-                promptSet: { __type: TYPE_STRING, __default: '' },
-                // Exactly one of workerClass / persona is set (enforced in
-                // role-registry.mjs). workerClass is validated against the
-                // hq-published roster; persona is a foundry persona id.
-                workerClass: { __type: TYPE_STRING, __default: '' },
-                persona: { __type: TYPE_STRING, __default: '' },
-                taskKind: { __type: TYPE_STRING, __default: '' },
-                completionShape: { __type: TYPE_STRING, __default: '' },
-                // Optional reviewer fallback precedence. Lower priorities are
-                // considered first; equal or omitted priorities retain registry
-                // order in the pure routing kernel.
-                priority: { __type: TYPE_INT, __default: null, __nullable: true, __min: 0 },
-              },
-            },
-          },
-          // Registry routing constraints (builder-class exclusions only). The
-          // kernel evaluates `never-review-own-builder-class` against
-          // `SubjectState.builderClass` (see `kernel/role-routing.mjs`).
-          routing: {
-            __type: TYPE_DICT,
-            __strict: true,
-            __keys: {
-              'never-review-own-builder-class': {
-                __type: TYPE_BOOL,
-                __default: true,
-              },
-            },
-          },
-          hermes: {
-            // Mirrors the Python `roles.hermes.provider` schema so the
-            // shared host config remains loadable by both CFG loaders.
-            __type: TYPE_DICT,
-            __strict: true,
-            __keys: {
-              provider: {
-                __type: TYPE_STRING,
-                __default: 'nous-portal',
-              },
-            },
-          },
-          adversarial: {
-            __type: TYPE_DICT,
-            __strict: true,
-            __keys: {
-              remediation: {
-                __type: TYPE_DICT,
-                __strict: true,
-                __keys: {
-                  non_blocking: {
-                    __type: TYPE_DICT,
-                    __strict: true,
-                    __keys: {
-                      model: { __type: TYPE_STRING, __default: 'gpt-6.1-sol' },
-                      reasoning_effort: { __type: TYPE_STRING, __default: 'high' },
-                      max_rounds: { __type: TYPE_INT, __default: 1, __min: 1 },
-                    },
-                  },
-                },
-              },
-              // SINGLEREVIEW-01: super-small PRs get exactly one (final) review.
-              single_review: {
-                __type: TYPE_DICT,
-                __strict: true,
-                __keys: {
-                  enabled: { __type: TYPE_BOOL, __default: true },
-                  max_changed_lines: { __type: TYPE_INT, __default: 50, __min: 1 },
-                  max_files: { __type: TYPE_INT, __default: 5, __min: 1 },
-                  docs_tests_follow_slim_limits: { __type: TYPE_BOOL, __default: true },
-                },
-              },
-              orchestration_mode: {
-                __type: TYPE_STRING,
-                __default: 'native',
-                __enum: ENUM_ROLES_ADVERSARIAL_ORCHESTRATION_MODE,
-              },
-              operator_logins: {
-                __type: TYPE_LIST,
-                __item: { __type: TYPE_STRING },
-                __default: [],
-              },
-              operator_label_actor_enforcement: {
-                __type: TYPE_STRING,
-                __default: 'observe',
-                __enum: ENUM_ROLES_ADVERSARIAL_OPERATOR_LABEL_ACTOR_ENFORCEMENT,
-              },
-              handoff: {
-                __type: TYPE_DICT,
-                __strict: true,
-                __keys: {
-                  enabled: { __type: TYPE_BOOL, __default: false },
-                  review_to_remediation: { __type: TYPE_BOOL, __default: false },
-                  remediation_to_rereview: { __type: TYPE_BOOL, __default: false },
-                  final_to_hammer: { __type: TYPE_BOOL, __default: false },
-                  max_per_pr_head: {
-                    __type: TYPE_INT,
-                    __default: 20,
-                    __min: 1,
-                  },
-                },
-              },
-              merge_authority: {
-                __type: TYPE_DICT,
-                __strict: true,
-                __keys: {
-                  disabled_repositories: { __type: TYPE_LIST, __default: [], __disabledRepositories: true },
-                  lane_routes: { __type: TYPE_LIST, __default: [], __laneRoutes: true,
-                    __item: { __type: TYPE_DICT, __strict: true, __keys: {
-                      repository: { __type: TYPE_STRING }, base: { __type: TYPE_STRING },
-                      executor: { __type: TYPE_STRING, __enum: ['legacy', 'queue-v2'] },
-                    } },
-                  },
-                  enabled: { __type: TYPE_BOOL, __default: false },
-                  worker_class: {
-                    __type: TYPE_STRING,
-                    __default: 'hammer',
-                    __enum: ['codex', 'claude-code', 'hammer', 'hammer-corp', 'hammer-claude', 'gemini'],
-                  },
-                  // HHR harness-fallback (2026-07-05): ordered list of harnesses
-                  // the closer/hammer falls back to when the configured
-                  // `worker_class`'s provider quota is authoritatively grounded
-                  // (per `hq fleet quota status`). Default `[hammer-claude]` so
-                  // a codex-capped hammer keeps the the-hammer-lacey merge
-                  // identity while running on the claude harness, and auto-reverts
-                  // when codex recovers. Set `[]` to disable the fallback and keep
-                  // the pre-HHR behavior (a capped harness dies instead of falling
-                  // back).
-                  worker_class_fallback: {
-                    __type: TYPE_LIST,
-                    // The corporate Claude hammer is fallback-only: a host
-                    // may append it after the personal one. The default and
-                    // the primary `worker_class` enum are unchanged.
-                    __item: {
-                      __type: TYPE_STRING,
-                      __enum: ['codex', 'claude-code', 'hammer', 'hammer-corp', 'hammer-claude', 'hammer-claude-corp', 'gemini'],
-                    },
-                    __default: ['hammer-claude'],
-                  },
-                  merge_method: {
-                    __type: TYPE_STRING,
-                    __default: 'squash',
-                    __enum: ['squash', 'merge'],
-                  },
-                  strict_non_blocking_remediation: {
-                    __type: TYPE_BOOL,
-                    __default: true,
-                  },
-                  // MSM hard-cutover kill switch. false = NEITHER merge path
-                  // executes: the watcher writes a fail-closed
-                  // `autonomous-merge-execution-disabled` audit (path recorded
-                  // as would-be daemon-merge or hammer-merge) and leaves the PR
-                  // for manual operator intervention. Takes effect on the next
-                  // watcher tick after an adversarial-watcher bounce.
-                  autonomous_merge_execution_enabled: {
-                    __type: TYPE_BOOL,
-                    __default: true,
-                  },
-                  cap_rehead_enabled: { __type: TYPE_BOOL, __default: true },
-                  cap_rehead_lifetime_cap: { __type: TYPE_INT, __default: 2, __min: 0 },
-                  merge_capability_enforcement: {
-                    __type: TYPE_STRING,
-                    __default: 'observe',
-                    __enum: ENUM_ROLES_ADVERSARIAL_MERGE_CAPABILITY_ENFORCEMENT,
-                  },
-                  // Rollback switch for the narrow stale-head clean closer lane:
-                  // a zero-finding settled review whose live head is a trusted
-                  // terminal closer commit may close under merge-agent
-                  // accountability even when hq worker identity is unresolved.
-                  autonomous_closer_commit_clean_merge_enabled: {
-                    __type: TYPE_BOOL,
-                    __default: true,
-                  },
-                  // MSM daemon clean-path strictness (distinct from
-                  // `strict_non_blocking_remediation`, which shapes the
-                  // ELIGIBILITY predicate). Consumed by the watcher as
-                  // `cfg.strictMode` and threaded into
-                  // `isDaemonMergeReviewAllowed` / `attemptDaemonCleanMerge`
-                  // (src/ama/daemon-merge.mjs): true (default) ⇒ the daemon may
-                  // inline-merge ONLY a zero-finding settled review (blocking
-                  // AND non-blocking both known-zero); anything else routes to
-                  // the hammer. false ⇒ the daemon may additionally merge over
-                  // KNOWN non-blocking findings; blocking or unknown finding
-                  // state still declines the daemon path.
-                  strict_mode: {
-                    __type: TYPE_BOOL,
-                    __default: true,
-                  },
-                  lha: {
-                    __type: TYPE_DICT,
-                    __strict: true,
-                    __keys: {
-                      // LHA-06 cutover switch. true makes merge authority
-                      // require live-head attestations; false is rollback to
-                      // legacy reconstruction.
-                      consume_attestations: {
-                        __type: TYPE_BOOL,
-                        __default: true,
-                      },
-                    },
-                  },
-                  // HISTORICAL / schema-compat. Introduced by #357 as the gate
-                  // for auto-dispatching the hammer on a hammer-remediable
-                  // eligibility miss (false = misses park awaiting operator
-                  // action). MSM-04 (#516) removed the runtime read: the hammer
-                  // route in src/ama/dispatch-closer.mjs now keys on
-                  // `workerClass === 'hammer'` / review-cycle exhaustion plus
-                  // the hammer-remediable miss-reason classification, with no
-                  // reference to this flag. It is still loaded into
-                  // `getMergeAuthorityConfig()` and accepted by strict
-                  // validation so deployed configs that set it do not fail
-                  // loud, but flipping it changes nothing in this repo's code.
-                  auto_hammer_on_eligibility_miss: {
-                    __type: TYPE_BOOL,
-                    __default: false,
-                  },
-                  no_ci_repositories: {
-                    __type: TYPE_LIST,
-                    __item: { __type: TYPE_STRING },
-                    __default: [],
-                  },
-                  required_check_contexts: {
-                    __type: TYPE_LIST,
-                    __item: { __type: TYPE_STRING },
-                    __default: [],
-                  },
-                  // Upper bound HAM terminal-remediation dispatches per PR. Set
-                  // to 0 to disable the hammer terminal-remediation path.
-                  hammer_lifetime_ceiling: {
-                    __type: TYPE_INT,
-                    __default: 6,
-                    __min: 0,
-                  },
-                  // Compatibility spelling kept for existing local configs.
-                  hammer_lifetime_dispatch_ceiling: {
-                    __type: TYPE_INT,
-                    __default: null,
-                    __nullable: true,
-                    __min: 0,
-                  },
-                  // Wall-clock cap (ms) the watcher gives `hq dispatch` to admit
-                  // + provision a closer/hammer worker before SIGTERM. This
-                  // must exceed the worker-pool provision watchdog plus cleanup
-                  // cushion, otherwise the watcher can kill the dispatch parent
-                  // while worker-pool is still reaping a slow provision tree.
-                  dispatch_timeout_ms: {
-                    __type: TYPE_INT,
-                    __default: 600000,
-                  },
-                  // INCONCLUSIVERETRY-01b: an inconclusive closer result is an
-                  // owned retry. Surface it once at this attempt; from then on
-                  // the retry delay doubles from the base up to the max.
-                  closer_inconclusive_retry: {
-                    __type: TYPE_DICT,
-                    __strict: true,
-                    __keys: {
-                      surface_after_attempts: { __type: TYPE_INT, __default: 3, __min: 1 },
-                      backoff_base_ms: { __type: TYPE_INT, __default: 300000, __min: 1000 },
-                      backoff_max_ms: { __type: TYPE_INT, __default: 3600000, __min: 1000 },
-                    },
-                  },
-                  eligibility: {
-                    __type: TYPE_DICT,
-                    __strict: true,
-                    __keys: {
-                      risk_classes: {
-                        __type: TYPE_LIST,
-                        __item: {
-                          __type: TYPE_STRING,
-                          __enum: ENUM_ROLES_ADVERSARIAL_MERGE_AUTHORITY_RISK_CLASS,
-                        },
-                        __default: ['low'],
-                      },
-                      fast_merge_labels: {
-                        __type: TYPE_LIST,
-                        __item: { __type: TYPE_STRING },
-                        __default: ['fast-merge:test-fixtures', 'fast-merge:docs'],
-                      },
-                      // Deprecated schema-compatibility no-ops. Existing
-                      // deployed configs may still carry these historical
-                      // documentation mirrors; strict validation must accept
-                      // them, but runtime eligibility uses the canonical
-                      // implementation directly.
-                      reviewer_family_policy: {
-                        __type: TYPE_STRING,
-                        __default: 'audit_existing_gate_contract',
-                        __enum: ['audit_existing_gate_contract'],
-                      },
-                      ci_green_classifier: {
-                        __type: TYPE_STRING,
-                        __default: 'existingAdversarialMergeClassifier',
-                        __enum: ['existingAdversarialMergeClassifier'],
-                      },
-                      // SPEC §4.2 #3 — by default `high`/`critical` risk PRs
-                      // require the explicit two-key override (a non-author
-                      // `adversarial-merge-requested` label AND an operator
-                      // override on the current head) before AMA may close them;
-                      // only `low`/`medium` close on plain risk_classes
-                      // membership. Operators who want AMA to be the single
-                      // authority for EVERY risk class set this false: then
-                      // `high`/`critical` close on risk_classes membership alone,
-                      // exactly like low/medium. `unknown`/unclassified risk is
-                      // NEVER waived by this knob — it always requires two-key,
-                      // because an unknown class means the risk could not be
-                      // established (fail-closed). Default true preserves the
-                      // current two-key behavior for every deployment that does
-                      // not opt in.
-                      high_risk_requires_two_key: {
-                        __type: TYPE_BOOL,
-                        __default: true,
-                      },
-                    },
-                  },
-                  branch_protection: {
-                    __type: TYPE_DICT,
-                    __strict: true,
-                    __keys: {
-                      // Deprecated schema-compatibility no-op. The gate context
-                      // is always resolved by resolveGateStatusContext().
-                      required_gate_context_source: {
-                        __type: TYPE_STRING,
-                        __default: 'resolveGateStatusContext',
-                        __enum: ['resolveGateStatusContext'],
-                      },
-                      // SPEC §4.2 #9 is satisfied by a required branch-protection
-                      // status check. Some repos run on a GitHub plan that does
-                      // not offer branch protection at all (the protection API
-                      // 403s with "Upgrade to GitHub Pro"), so the gate context
-                      // can never be present and AMA can never close. Operators
-                      // on such repos set this false to drop ONLY the
-                      // branch-protection requirement; every other §4.2 hard gate
-                      // (settled-success verdict, head-match via
-                      // --match-head-commit, mergeable, no blocking findings,
-                      // risk-class, hard-stop labels, CI-green) still applies.
-                      // Default true preserves the existing fail-closed contract
-                      // everywhere it is not explicitly opted out.
-                      required: {
-                        __type: TYPE_BOOL,
-                        __default: true,
-                      },
-                    },
-                  },
-                },
-              },
-            },
-          },
-          ...buildRoleFallbackSchemaKeys(),
-          // OSGCFGPARITY-01: Python recovery dispatch owns this role; mirror its
-          // strict shape so a shared module cascade validates in both readers.
-          merge_agent_failure_recovery: {
-            __type: TYPE_DICT,
-            __strict: true,
-            __keys: {
-              worker_class: {
-                __type: TYPE_STRING,
-                __default: 'codex',
-                __enum: ['codex', 'codex-corp', 'claude-code'],
-              },
-              fallback_path: {
-                __type: TYPE_STRING,
-                __default: 'none',
-                __enum: ENUM_ROLES_FALLBACK_PATH,
-              },
-            },
-          },
-          quota_probe: {
-            // Intentionally remains under `roles` to mirror the Python
-            // HRR-02b schema; relocating it must happen in both loaders
-            // together so Node does not fork the contract.
-            __type: TYPE_DICT,
-            __strict: true,
-            __keys: {
-              // Out-of-range values hard-fail in the Node strict loader;
-              // there is no silent clamp because operators need
-              // misconfigurations in the startup banner, not hidden
-              // boundary rewrites.
-              ok_tick_seconds: {
-                __type: TYPE_INT,
-                __default: 3600,
-                __min: 300,
-                __max: 21600,
-              },
-              exhausted_unknown_tick_seconds: {
-                __type: TYPE_INT,
-                __default: 3600,
-                __min: 600,
-                __max: 21600,
-              },
-              evidence_ttl_seconds: {
-                // Accepted config range only: cwp_quota_probe floors the
-                // effective runtime TTL at ok_tick_seconds so evidence is
-                // never older than one scheduler tick.
-                __type: TYPE_INT,
-                __default: 86400,
-                __min: 3600,
-                __max: 604800,
-              },
-              operator_suspend_default_seconds: {
-                __type: TYPE_INT,
-                __default: 86400,
-                __min: 3600,
-                __max: 604800,
-              },
-            },
-          },
-        },
-      },
-      policy: {
-        __type: TYPE_DICT,
-        __strict: true,
-        __keys: {
-          dedup: {
-            __type: TYPE_DICT,
-            __strict: true,
-            __keys: {
-              uncommitted_line_threshold: {
-                __type: TYPE_INT,
-                __default: 30,
-                __min: 10,
-                __max: 1000,
-              },
-            },
-          },
-        },
-      },
-      // worker_pool.comms.responder.*,
-      // worker_pool.dag.autowalk.deep_reconcile,
-      // worker_pool.dispatch.codex_exec_mode,
-      // worker_pool.dispatch.codex_exec_timeout_seconds,
-      // worker_pool.dispatch.codex_exec_stall_timeout_seconds,
-      // worker_pool.dispatch.codex_exec_timeout_by_worker_class.*,
-      // worker_pool.dispatch.codex_exec_stall_timeout_by_worker_class.*,
-      // worker_pool.dispatch.fleet_launch_health.*,
-      // worker_pool.dispatch.goal_lineage.*,
-      // worker_pool.dispatch.op_hammer_alerts.*,
-      // worker_pool.dispatch.substrate.*,
-      // worker_pool.hardening_ledger.*,
-      // worker_pool.quota.reserve_floor.* (Python schema_v1/worker_pool.py),
-      // worker_pool.mcp.*, worker_pool.memory.dynamic.*,
-      // worker_pool.memory_injection.*,
-      // worker_pool.memory_retention.*, worker_pool.secrets.op_read_cache.*,
-      // worker_pool.oss_dispatch.*, worker_pool.secrets_bus.*,
-      // worker_pool.worker_process_niceness, and worker_pool.shr.* —
-      // Python-owned (canonical schema at platform/agent-os-config).
-      // PARTIAL mirror, same rationale as the
-      // sentinel block below: this Node reader does not consume the values, but
-      // it must not crash-loop if these checked-in keys reach the shared
-      // canonical config.yaml (CFG-01 strict-schema parity). Worker-pool tuning
-      // outside these mirrored subtrees stays Python-owned and is
-      // tolerated-dropped in operator-local config.local.yaml (nested-unknown
-      // drop). Python stays canonical.
-      worker_pool: {
-        __type: TYPE_DICT,
-        __strict: true,
-        __keys: {
-          public_hygiene: {
-            __type: TYPE_DICT, __strict: true, __strict_always: true,
-            __keys: {
-              repos: { __type: TYPE_LIST, __item: { __type: TYPE_STRING }, __default: [] },
-              identities: {
-                __type: TYPE_DICT, __strict: false, __strict_always: true, __default: {},
-                __extra_keys_schema: {
-                  __type: TYPE_DICT, __strict: true, __strict_always: true,
-                  __keys: { name: { __type: TYPE_STRING, __required: true }, email: { __type: TYPE_STRING, __required: true } },
-                },
-              },
-              denylist_path: { __type: TYPE_STRING },
-            },
-          },
-          tenure: {
-            __type: TYPE_DICT, __strict: true,
-            __keys: {
-              enabled: { __type: TYPE_BOOL, __default: false },
-            },
-          },
-          overload_deferral: {
-            __type: TYPE_DICT, __strict: true,
-            __keys: {
-              minimum_multiplier: { __type: TYPE_FLOAT, __default: 2, __min: 2, __max: 20, __enforceMax: true },
-            },
-          },
-          session_resume: {
-            __type: TYPE_DICT,
-            __strict: true,
-            __keys: {
-              automatic: {
-                __type: TYPE_DICT,
-                __strict: true,
-                __keys: {
-                  enabled: { __type: TYPE_BOOL, __default: false },
-                  cells: { __type: TYPE_LIST, __default: [], __item: { __type: TYPE_STRING } },
-                },
-              },
-            },
-          },
-          recovery: {
-            __type: TYPE_DICT,
-            __strict: true,
-            __keys: {
-              rollout: {
-                __type: TYPE_STRING,
-                __default: 'shadow',
-                __enum: ['shadow', 'enforce'],
-              },
-              override: {
-                __type: TYPE_STRING,
-                __default: 'auto',
-                __enum: ['auto', 'normal', 'recovering'],
-              },
-              sample_interval_seconds: {
-                __type: TYPE_INT,
-                __default: 60,
-                __min: 1,
-                __max: 3600,
-                __enforceMax: true,
-              },
-              max_sample_age_seconds: {
-                __type: TYPE_INT,
-                __default: 180,
-                __min: 1,
-                __max: 86400,
-                __enforceMax: true,
-              },
-              enter_samples: {
-                __type: TYPE_INT,
-                __default: 3,
-                __min: 1,
-                __max: 100,
-                __enforceMax: true,
-              },
-              clear_samples: {
-                __type: TYPE_INT,
-                __default: 5,
-                __min: 1,
-                __max: 100,
-                __enforceMax: true,
-              },
-              minimum_dwell_seconds: {
-                __type: TYPE_INT,
-                __default: 600,
-                __min: 0,
-                __max: 86400,
-                __enforceMax: true,
-              },
-              load_enter_per_core: {
-                __type: TYPE_FLOAT,
-                __default: 3.0,
-                __min: 0,
-                __max: 1000,
-                __enforceMax: true,
-              },
-              load_clear_per_core: {
-                __type: TYPE_FLOAT,
-                __default: 2.0,
-                __min: 0,
-                __max: 1000,
-                __enforceMax: true,
-              },
-              deploy_enter_seconds: {
-                __type: TYPE_INT,
-                __default: 1200,
-                __min: 1,
-                __max: 86400,
-                __enforceMax: true,
-              },
-              deploy_clear_seconds: {
-                __type: TYPE_INT,
-                __default: 600,
-                __min: 0,
-                __max: 86400,
-                __enforceMax: true,
-              },
-              ready_pr_enter_seconds: {
-                __type: TYPE_INT,
-                __default: 1800,
-                __min: 1,
-                __max: 86400,
-                __enforceMax: true,
-              },
-              ready_pr_clear_seconds: {
-                __type: TYPE_INT,
-                __default: 900,
-                __min: 0,
-                __max: 86400,
-                __enforceMax: true,
-              },
-              throughput_enter_ratio: {
-                __type: TYPE_FLOAT,
-                __default: 0.8,
-                __min: 0,
-                __max: 1000,
-                __enforceMax: true,
-              },
-              throughput_clear_ratio: {
-                __type: TYPE_FLOAT,
-                __default: 1.0,
-                __min: 0,
-                __max: 1000,
-                __enforceMax: true,
-              },
-              throughput_window_seconds: {
-                __type: TYPE_INT,
-                __default: 3600,
-                __min: 60,
-                __max: 86400,
-                __enforceMax: true,
-              },
-              throughput_min_arrivals: {
-                __type: TYPE_INT,
-                __default: 5,
-                __min: 1,
-                __max: 100000,
-                __enforceMax: true,
-              },
-              admission_enter_seconds: {
-                __type: TYPE_INT,
-                __default: 600,
-                __min: 1,
-                __max: 86400,
-                __enforceMax: true,
-              },
-              admission_clear_seconds: {
-                __type: TYPE_INT,
-                __default: 300,
-                __min: 0,
-                __max: 86400,
-                __enforceMax: true,
-              },
-              boot_enter_ratio: {
-                __type: TYPE_FLOAT,
-                __default: 0.5,
-                __min: 0,
-                __max: 1,
-                __enforceMax: true,
-              },
-              boot_clear_ratio: {
-                __type: TYPE_FLOAT,
-                __default: 0.2,
-                __min: 0,
-                __max: 1,
-                __enforceMax: true,
-              },
-              boot_min_samples: {
-                __type: TYPE_INT,
-                __default: 5,
-                __min: 1,
-                __max: 100000,
-                __enforceMax: true,
-              },
-              heavy_refresh_multiplier: {
-                __type: TYPE_INT,
-                __default: 4,
-                __min: 1,
-                __max: 20,
-                __enforceMax: true,
-              },
-              heavy_refresh_ceiling_seconds: {
-                __type: TYPE_INT,
-                __default: 3600,
-                __min: 1,
-                __max: 86400,
-                __enforceMax: true,
-              },
-              ordinary_concurrency_fraction: {
-                __type: TYPE_FLOAT,
-                __default: 0.5,
-                __min: 0,
-                __max: 1,
-                __enforceMax: true,
-              },
-              ordinary_min_running: {
-                __type: TYPE_INT,
-                __default: 1,
-                __min: 1,
-                __max: 1000,
-                __enforceMax: true,
-              },
-              recovery_turns_before_ordinary: {
-                __type: TYPE_INT,
-                __default: 3,
-                __min: 1,
-                __max: 100,
-                __enforceMax: true,
-              },
-              ttr_objective_seconds: {
-                __type: TYPE_INT,
-                __default: 1800,
-                __min: 1,
-                __max: 86400,
-                __enforceMax: true,
-              },
-              ttr_stall_seconds: {
-                __type: TYPE_INT,
-                __default: 1800,
-                __min: 1,
-                __max: 86400,
-                __enforceMax: true,
-              },
-              baseline_window_seconds: {
-                __type: TYPE_INT,
-                __default: 3600,
-                __min: 60,
-                __max: 86400,
-                __enforceMax: true,
-              },
-              baseline_stable_samples: {
-                __type: TYPE_INT,
-                __default: 2,
-                __min: 1,
-                __max: 100,
-                __enforceMax: true,
-              },
-            },
-          },
-          // No environment alias: containment selection belongs to trusted config.
-          containment_mode: { __type: TYPE_STRING, __default: 'legacy', __enum: ['legacy', 'boundary-default'] },
-          worker_process_niceness: { __type: TYPE_INT, __default: 10, __min: 0, __max: 19 },
-          post_merge_actions: {
-            __type: TYPE_DICT,
-            __strict: true,
-            __keys: {
-              // PMARCACLASS-01: reject unknown classes at the strict loader boundary.
-              rca_worker_class: { __type: TYPE_STRING, __default: 'codex', __enum: ENUM_DISPATCH_DEFAULT_WORKER_CLASS },
-            },
-          },
-          quota: {
-            __type: TYPE_DICT,
-            __strict: true,
-            __keys: {
-              resume: {
-                __type: TYPE_DICT,
-                __strict: true,
-                __keys: {
-                  budget_seconds: { __type: TYPE_FLOAT, __default: 15, __min: 0.001, __max: 60, __enforceMax: true },
-                  max_attempts: { __type: TYPE_INT, __default: 3, __min: 1, __max: 20, __enforceMax: true },
-                  backoff_seconds: { __type: TYPE_FLOAT, __default: 60, __min: 1, __max: 86400, __enforceMax: true },
-                  max_backoff_seconds: { __type: TYPE_FLOAT, __default: 3600, __min: 1, __max: 86400, __enforceMax: true },
-                },
-              },
-              reserve_floor: {
-                __type: TYPE_DICT,
-                __strict: true,
-                __keys: Object.fromEntries(['openai-oauth', 'openai-oauth-corp', 'anthropic-oauth'].map(credential => [credential, {
-                  __type: TYPE_DICT,
-                  __strict: true,
-                  __keys: {
-                    remaining_pct: { __type: TYPE_FLOAT, __default: 0.0, __min: 0, __max: 100, __enforceMax: true },
-                    protected_classes: { __type: TYPE_LIST, __item: { __type: TYPE_STRING }, __default: [] },
-                    reroute_held: { __type: TYPE_BOOL, __default: true },
-                    // QUOTAPAUSE-01: at or below this measured remaining, hold
-                    // every autonomous launch on the credential (protected
-                    // classes included); 0 disables the pause.
-                    pause_pct: { __type: TYPE_FLOAT, __default: 5.0, __min: 0, __max: 100, __enforceMax: true },
-                    // QUOTAPAUSE-01: release pause and floor once the measured
-                    // period reset is at most this many hours away.
-                    release_before_reset_hours: { __type: TYPE_FLOAT, __default: 12.0, __min: 0, __max: 168, __enforceMax: true },
-                  },
-                }])),
-              },
-              fallback_reroute_horizon_seconds: { __type: TYPE_INT, __default: 21600, __min: 0 },
-            },
-          },
-          oss_dispatch: {
-            __type: TYPE_DICT,
-            __strict: true,
-            __keys: {
-              enabled: { __type: TYPE_BOOL, __default: false },
-              // OMT-06 (agent-os #7424): refuses the four OSS classes on a
-              // litellm-local-openai/local/* route until the operator opens
-              // it in OMT-07. Python owns it; mirrored so the key in config.yaml
-              // or a host config.local.yaml does not fail this strict reader.
-              local_routes_enabled: { __type: TYPE_BOOL, __default: false },
-              // OMBPASS-01 (agent-os): the local OSS model backend returns a
-              // model's call to a tool the request did not offer as a
-              // tool_call, as hosted providers do, instead of as text.
-              // Python owns it; mirrored so a host config.local.yaml opt-in
-              // does not fail this strict reader.
-              local_tool_call_passthrough: { __type: TYPE_BOOL, __default: false },
-              team_monthly_cap_usd: {
-                __type: TYPE_FLOAT,
-                __default: 25,
-                __min: 0.01,
-              },
-            },
-          },
-          mcp: {
-            __type: TYPE_DICT,
-            __strict: true,
-            __keys: {
-              required_servers_mode: { __type: TYPE_STRING, __default: 'warn', __enum: ['warn', 'enforce'] },
-            },
-          },
-          comms: {
-            __type: TYPE_DICT,
-            __strict: true,
-            __keys: {
-              responder: {
-                __type: TYPE_DICT,
-                __strict: true,
-                __keys: {
-                  alert_lookback_hours: {
-                    __type: TYPE_INT,
-                    __default: 12,
-                    __min: 1,
-                    __max: 168,
-                  },
-                  session_ttl_hours: {
-                    __type: TYPE_INT,
-                    __default: 24,
-                    __min: 1,
-                    __max: 168,
-                  },
-                },
-              },
-            },
-          },
-          dag: {
-            __type: TYPE_DICT,
-            __strict: true,
-            __keys: {
-              chains: {
-                __type: TYPE_DICT,
-                __strict: true,
-                __keys: {
-                  enabled: { __type: TYPE_BOOL, __default: false },
-                },
-              },
-              autowalk: {
-                __type: TYPE_DICT,
-                __strict: true,
-                __keys: {
-                  deep_reconcile: { __type: TYPE_BOOL, __default: false },
-                },
-              },
-            },
-          },
-          hardening_ledger: {
-            __type: TYPE_DICT,
-            __strict: true,
-            __keys: {
-              capture_forcing_enabled: { __type: TYPE_BOOL, __default: true },
-              reprojection_enabled: { __type: TYPE_BOOL, __default: true },
-              gate_strictness: {
-                __type: TYPE_STRING,
-                __default: 'strict',
-                __enum: ['strict', 'warn', 'off'],
-              },
-              projection_exclusions: {
-                __type: TYPE_DICT,
-                __strict: false,
-                __keys: {
-                  'claude-responder': {
-                    __type: TYPE_STRING,
-                    __default:
-                      'warm resident ATP responder bootstrap prompt is decision-only and carries no code-edit surface; live operator messages supply the actionable context',
-                  },
-                  'codex-responder': {
-                    __type: TYPE_STRING,
-                    __default:
-                      'warm resident ATP responder bootstrap prompt is decision-only and carries no code-edit surface; live operator messages supply the actionable context',
-                  },
-                },
-                __extra_keys_schema: {
-                  __type: TYPE_STRING,
-                  __default: '',
-                },
-              },
-            },
-          },
-          dispatch: {
-            __type: TYPE_DICT,
-            __strict: true,
-            __keys: {
-              night_mode: { __type: TYPE_STRING, __default: 'normal', __enum: ['hot', 'normal', 'throttled', 'background'] },
-              schedule_windows: { __type: TYPE_DICT, __strict: false, __extra_keys_schema: { __type: TYPE_STRING, __enum: ['hot', 'normal', 'throttled', 'background'] } },
-              resource_admission: { __type: TYPE_DICT, __strict: true, __keys: {
-                min_cpu_idle_percent: { __type: TYPE_FLOAT, __default: 15.0, __min: 0.0, __max: 100.0, __enforceMax: true },
-                safety_load_per_core: { __type: TYPE_FLOAT, __default: 32.0, __min: 1.0, __max: 128.0, __enforceMax: true },
-              } },
-              codex_exec_mode: { __type: TYPE_BOOL, __default: false },
-              codex_exec_timeout_seconds: { __type: TYPE_INT, __default: 14400, __min: 1, __max: MAX_WORKER_EXEC_TIMEOUT_SECONDS, __enforceMax: true },
-              codex_exec_stall_timeout_seconds: { __type: TYPE_INT, __default: 1800, __min: 1, __max: 86400, __enforceMax: true },
-              codex_exec_timeout_by_worker_class: { __type: TYPE_DICT, __strict: false, __default: {}, __extra_keys_schema: { __type: TYPE_INT, __min: 1, __max: MAX_WORKER_EXEC_TIMEOUT_SECONDS, __enforceMax: true } },
-              codex_exec_stall_timeout_by_worker_class: { __type: TYPE_DICT, __strict: false, __default: {}, __extra_keys_schema: { __type: TYPE_INT, __min: 1, __max: 86400, __enforceMax: true } },
-              fleet_launch_health: {
-                __type: TYPE_DICT,
-                __strict: true,
-                __keys: {
-                  enabled: { __type: TYPE_BOOL, __default: true },
-                  window_seconds: {
-                    __type: TYPE_INT,
-                    __default: 900,
-                    __min: 60,
-                    __max: 86400,
-                  },
-                  min_samples: {
-                    __type: TYPE_INT,
-                    __default: 5,
-                    __min: 1,
-                    __max: 100000,
-                  },
-                  unhealthy_fraction: {
-                    __type: TYPE_FLOAT,
-                    __default: 0.5,
-                    __min: 0.01,
-                    __max: 1.0,
-                  },
-                  backoff_seconds: {
-                    __type: TYPE_INT,
-                    __default: 300,
-                    __min: 30,
-                    __max: 3600,
-                  },
-                  canary_interval_seconds: {
-                    __type: TYPE_INT,
-                    __default: 120,
-                    __min: 10,
-                    __max: 3600,
-                  },
-                },
-              },
-              goal_lineage: {
-                __type: TYPE_DICT,
-                __strict: true,
-                __keys: {
-                  enabled: { __type: TYPE_BOOL, __default: true },
-                  max_bytes: {
-                    __type: TYPE_INT,
-                    __default: 1200,
-                    __min: 200,
-                    __max: 8000,
-                  },
-                  spec_excerpt_bytes: {
-                    __type: TYPE_INT,
-                    __default: 400,
-                    __min: 0,
-                  },
-                },
-              },
-              substrate: {
-                __type: TYPE_DICT,
-                __strict: true,
-                __keys: {
-                  swap_crit_requires_pressure: { __type: TYPE_BOOL, __default: true },
-                  mem_pressure_crit_level: {
-                    __type: TYPE_INT,
-                    __default: 2,
-                    __min: 1,
-                    __max: 4,
-                  },
-                },
-              },
-              op_hammer_alerts: {
-                __type: TYPE_DICT,
-                __strict: true,
-                __keys: {
-                  enabled: { __type: TYPE_BOOL, __default: true },
-                  read_threshold: {
-                    __type: TYPE_INT,
-                    __default: 40,
-                    __min: 1,
-                    __max: 1000000,
-                  },
-                  rate_limit_threshold: {
-                    __type: TYPE_INT,
-                    __default: 10,
-                    __min: 1,
-                    __max: 1000000,
-                  },
-                  window_seconds: {
-                    __type: TYPE_INT,
-                    __default: 3600,
-                    __min: 60,
-                    __max: 86400,
-                  },
-                  cooldown_seconds: {
-                    __type: TYPE_INT,
-                    __default: 3600,
-                    __min: 60,
-                    __max: 86400,
-                  },
-                  scan_interval_seconds: {
-                    __type: TYPE_INT,
-                    __default: 300,
-                    __min: 60,
-                    __max: 86400,
-                  },
-                },
-              },
-            },
-          },
-          memory: {
-            __type: TYPE_DICT,
-            __strict: true,
-            __keys: {
-              dynamic: {
-                __type: TYPE_DICT,
-                __strict: true,
-                __keys: {
-                  enabled: { __type: TYPE_BOOL, __default: false },
-                  shadow_only: { __type: TYPE_BOOL, __default: false },
-                  admit_percentile: {
-                    __type: TYPE_STRING,
-                    __default: 'p95',
-                    __enum: ENUM_WORKER_POOL_MEMORY_DYNAMIC_ADMIT_PERCENTILE,
-                  },
-                  pressure_margin_mb: { __type: TYPE_INT, __default: 512, __min: 0 },
-                  rss_window_minutes: { __type: TYPE_INT, __default: 30, __min: 1 },
-                  oss_model_reserve_mb: { __type: TYPE_INT, __default: 0, __min: 0 },
-                  snapshot_stale_seconds: { __type: TYPE_INT, __default: 60, __min: 0 },
-                  require_pressure_normal: { __type: TYPE_BOOL, __default: true },
-                },
-              },
-            },
-          },
-          memory_retention: {
-            __type: TYPE_DICT,
-            __strict: true,
-            __keys: {
-              enabled: { __type: TYPE_BOOL, __default: false },
-              shadow_only: { __type: TYPE_BOOL, __default: true },
-            },
-          },
-          memory_injection: {
-            __type: TYPE_DICT,
-            __strict: true,
-            __keys: {
-              enabled: { __type: TYPE_BOOL, __default: true },
-              max_entries: {
-                __type: TYPE_INT,
-                __default: 3,
-                __min: 0,
-                __max: 12,
-              },
-              max_chars: {
-                __type: TYPE_INT,
-                __default: 3000,
-                __min: 0,
-                __max: 12000,
-              },
-              max_per_contract: {
-                __type: TYPE_INT,
-                __default: 1,
-                __min: 1,
-                __max: 12,
-              },
-              min_term_matches: {
-                __type: TYPE_INT,
-                __default: 2,
-                __min: 1,
-                __max: 12,
-              },
-            },
-          },
-          shr: {
-            __type: TYPE_DICT,
-            __strict: true,
-            __keys: {
-              main_catchup_behind_threshold: {
-                __type: TYPE_INT,
-                __default: 3,
-                __min: 1,
-                __max: 1000,
-              },
-              worker_kill_window_seconds: {
-                __type: TYPE_INT,
-                __default: 1800,
-                __min: 60,
-                __max: 86400,
-              },
-              worker_kill_threshold: {
-                __type: TYPE_INT,
-                __default: 3,
-                __min: 1,
-                __max: 1000,
-              },
-              command_timeout_seconds: {
-                __type: TYPE_FLOAT,
-                __default: 10.0,
-                __min: 0.1,
-                __max: 120.0,
-              },
-            },
-          },
-          secrets: {
-            __type: TYPE_DICT,
-            __strict: true,
-            __keys: {
-              // SSR-01 parse-only mirror. The dispatch daemon consumes these
-              // Python-owned knobs, but shared top-level config must remain
-              // startup-safe for the adversarial watcher.
-              prewarm: {
-                __type: TYPE_DICT,
-                __strict: true,
-                __default: {},
-                __keys: {
-                  enabled: { __type: TYPE_BOOL, __default: true },
-                  min_interval_seconds: {
-                    __type: TYPE_INT,
-                    __default: 300,
-                    __min: 0,
-                    __max: 86400,
-                  },
-                  targets: {
-                    __type: TYPE_LIST,
-                    __default: [],
-                    __item: {
-                      __type: TYPE_DICT,
-                      __strict: true,
-                      __keys: {
-                        worker_class: { __type: TYPE_STRING },
-                        refs: {
-                          __type: TYPE_LIST,
-                          __default: [],
-                          __item: { __type: TYPE_STRING },
-                        },
-                      },
-                    },
-                  },
-                },
-              },
-              availability_critical_purposes: {
-                __type: TYPE_LIST,
-                __default: ['alert-delivery telegram bot token'],
-                __item: { __type: TYPE_STRING },
-              },
-              availability_critical_max_stale_seconds: {
-                __type: TYPE_INT,
-                __default: 604800,
-                __min: 0,
-                __max: 2592000,
-              },
-              known_vaults: {
-                __type: TYPE_LIST,
-                __default: ['Cliovault', 'mem423y7ewrymvxv4ibh34zdk4', 'Personal'],
-                __item: { __type: TYPE_STRING },
-              },
-              release_signing_private_key_ref: {
-                __type: TYPE_STRING,
-                __default: 'op://Cliovault/release-signing/private-key',
-                __pattern: PATTERN_OP_REF,
-                __pattern_description: PATTERN_OP_REF_DESCRIPTION,
-              },
-              // Python owns this extensible worker-class map. Known and fleet
-              // entries share validation and post-merge leaf defaults.
-              worker_class_vaults: {
-                __type: TYPE_DICT,
-                __strict: false,
-                __default: {},
-                __keys: Object.fromEntries(['research', 'dream'].map(name => [name, workerClassVaultSchema])),
-                __extra_keys_schema: workerClassVaultSchema,
-              },
-              op_read_cache: {
-                __type: TYPE_DICT,
-                __strict: true,
-                __default: {},
-                __keys: {
-                  canary_live_read_budget_percent: {
-                    __type: TYPE_INT,
-                    __default: 25,
-                    __min: 1,
-                    __max: 100,
-                  },
-                },
-              },
-            },
-          },
-          secrets_bus: {
-            __type: TYPE_DICT,
-            __strict: true,
-            __default: {},
-            __keys: {
-              op_timeout_seconds: {
-                __type: TYPE_FLOAT,
-                __default: 10.0,
-                __min: 1.0,
-                __max: 60.0,
-              },
-              cache_ttl_seconds: {
-                __type: TYPE_INT,
-                __default: 1800,
-                __min: 0,
-                __max: 86400,
-              },
-              cache_grace_seconds: {
-                __type: TYPE_INT,
-                __default: null,
-                __nullable: true,
-                __min: 0,
-                __max: 86400,
-              },
-            },
-          },
-        },
-      },
-      // Sentinel detector knobs. The Python sibling at
-      // `platform/agent-os-config/src/agent_os_config/__init__.py` is the
-      // canonical schema and remains the owner of these `sentinel.*` keys —
-      // `projects/sentinel-argus-knobs/SPEC.md` keeps them Python-owned and
-      // Node-foreign-ignored (no cfg-parity gate). This Node mirror exists
-      // only so the adversarial-watcher doesn't crash-loop the moment an
-      // operator writes the checked-in top-level `sentinel:` keys into the
-      // shared config.yaml (CFG-01 strict-schema parity rule). It mirrors the
-      // checked-in top-level keys needed at adversarial-review startup, not
-      // every future Sentinel knob; Python stays canonical for the rest.
-      sentinel: {
-        __type: TYPE_DICT,
-        __strict: true,
-        __keys: {
-          profile: {
-            __type: TYPE_STRING,
-            __default: 'balanced',
-            __enum: ENUM_SENTINEL_PROFILE,
-          },
-          quiet_window: {
-            __type: TYPE_STRING,
-            __default: 'adaptive',
-            __coerce_number_to_string: true,
-            __pattern: '^adaptive$|^0$|^[1-9][0-9]*$',
-            __pattern_description: 'adaptive or non-negative integer seconds',
-          },
-          spec_drift: {
-            __type: TYPE_DICT,
-            __strict: true,
-            __keys: {
-              cycle_interval_seconds: { __type: TYPE_INT, __default: 86400, __min: 1 },
-            },
-          },
-          deploy_checkout: {
-            __type: TYPE_DICT,
-            __strict: true,
-            __keys: {
-              repo_path: { __type: TYPE_STRING, __default: '/Users/airlock/agent-os' },
-              scan_interval_seconds: { __type: TYPE_INT, __default: 60, __min: 1 },
-              page_dedupe_seconds: { __type: TYPE_INT, __default: 300, __min: 1 },
-              worker_identity_emails: {
-                __type: TYPE_LIST,
-                __item: { __type: TYPE_STRING },
-                __default: null,
-                __nullable: true,
-              },
-            },
-          },
-          codex_compaction: {
-            __type: TYPE_DICT,
-            __strict: true,
-            __keys: {
-              rate_alarm_per_hour: { __type: TYPE_INT, __default: 3, __min: 1 },
-              finding_dedupe_seconds: { __type: TYPE_INT, __default: 86400, __min: 1 },
-            },
-          },
-          ojo_sunset_governance: {
-            __type: TYPE_DICT,
-            __strict: true,
-            __keys: {
-              interval_seconds: { __type: TYPE_INT, __default: 3600, __min: 1 },
-            },
-          },
-          convergence_stall: {
-            __type: TYPE_DICT,
-            __strict: true,
-            __keys: {
-              observed_repos: {
-                __type: TYPE_LIST,
-                __item: { __type: TYPE_STRING },
-                __default: ['laceyenterprises/agent-os', 'laceyenterprises/adversarial-review'],
-              },
-              commit_window_seconds: { __type: TYPE_INT, __default: 3600, __min: 1 },
-              min_commits: { __type: TYPE_INT, __default: 3, __min: 1 },
-              file_fetch_budget_per_cycle: { __type: TYPE_INT, __default: 20, __min: 1 },
-              finding_dedupe_seconds: { __type: TYPE_INT, __default: 900, __min: 1 },
-              repo_backoff_seconds: { __type: TYPE_INT, __default: 60, __min: 1 },
-              observed_worker_classes: {
-                __type: TYPE_LIST,
-                __item: { __type: TYPE_STRING },
-                __default: ['codex', 'claude-code', 'clio-agent'],
-              },
-            },
-          },
-          pipeline_stability: {
-            __type: TYPE_DICT,
-            __strict: true,
-            __keys: {
-              rca_dispatch: {
-                __type: TYPE_DICT,
-                __strict: true,
-                __keys: {
-                  enabled: { __type: TYPE_BOOL, __default: false },
-                  cooldown_seconds: { __type: TYPE_INT, __default: 3600, __min: 0 },
-                  authority_check: { __type: TYPE_STRING, __default: 'sag-enabled' },
-                  worker_class: {
-                    __type: TYPE_STRING,
-                    __default: 'sre',
-                    __enum: ENUM_SENTINEL_RCA_WORKER_CLASS,
-                  },
-                },
-              },
-            },
-          },
-          disk_headroom: {
-            __type: TYPE_DICT,
-            __strict: true,
-            __keys: {
-              top_consumer_roots: { __type: TYPE_STRING, __default: '/Users/airlock,/Users/placey' },
-              top_consumer_limit: { __type: TYPE_INT, __default: 3, __min: 1 },
-              df_timeout_seconds: { __type: TYPE_FLOAT, __default: 1.0, __min: 0 },
-              du_timeout_seconds: { __type: TYPE_FLOAT, __default: 30.0, __min: 0 },
-              sensor_failure_page_threshold: { __type: TYPE_INT, __default: 2, __min: 1 },
-            },
-          },
-          detectors: {
-            __type: TYPE_DICT,
-            __strict: true,
-            __keys: {
-              litellm_routing_tier_outage: {
-                __type: TYPE_DICT,
-                __strict: true,
-                __keys: {
-                  enabled: { __type: TYPE_BOOL, __default: true },
-                  log_path: { __type: TYPE_STRING, __default: null, __nullable: true },
-                  window_seconds: { __type: TYPE_INT, __default: 300, __min: 1 },
-                  event_count_threshold: { __type: TYPE_INT, __default: 3, __min: 1 },
-                  severity: { __type: TYPE_STRING, __default: 'SEV-2', __enum: ['SEV-1', 'SEV-2', 'SEV-3'] },
-                  comms_channels: {
-                    __type: TYPE_LIST,
-                    __item: { __type: TYPE_STRING, __enum: ['telegram', 'email'] },
-                    __default: ['telegram', 'email'],
-                  },
-                },
-              },
-            },
-          },
-        },
-      },
-      feature_flags: {
-        __type: TYPE_DICT,
-        __strict: true,
-        __keys: {
-          live_steer_allow_unvetted: { __type: TYPE_BOOL, __default: false },
-          claude_code_ambient_auth_fallback: { __type: TYPE_BOOL, __default: false },
-          merge_agent_final_pass_on_request_changes: { __type: TYPE_BOOL, __default: true },
-          dismiss_stale_request_changes_on_resolved: { __type: TYPE_BOOL, __default: true },
-          merge_agent_deterministic_convergence_terminal: { __type: TYPE_BOOL, __default: false },
-          allow_missing_alert_to: { __type: TYPE_BOOL, __default: false },
-          resume_context_envelope: { __type: TYPE_BOOL, __default: true },
-        },
-      },
-      handoff: {
-        __type: TYPE_DICT,
-        __strict: true,
-        __keys: {
-          remediation_to_rereview: { __type: TYPE_BOOL, __default: false },
-          final_to_hammer: { __type: TYPE_BOOL, __default: false },
-        },
-      },
-      // Module-internal sections used by tools/adversarial-review. These are
-      // module-scoped knobs (no top-level canonical equivalent); declared here
-      // so `tools/adversarial-review/config.yaml` parses against the strict
-      // schema. Only role keys are wired through resolvers in CFG-02; the
-      // others are checked-in defaults waiting on per-knob refactors.
-      // `merge_agent.worker_class` is NOT a separate slot: the adversarial
-      // module file aliases it onto `roles.merge_agent_worker_class` per
-      // SPEC §10.2, so the canonical body never carries the legacy path.
-      remediation: {
-        __type: TYPE_DICT,
-        __strict: true,
-        __keys: {
-          max_concurrent_jobs: { __type: TYPE_INT, __default: 1 },
-          // Upper bound the operator can dial `max_concurrent_jobs` up to
-          // via env / config. Existing helper at follow-up-remediation.mjs
-          // clamped to 8; promoting it lets operators on bigger hosts raise
-          // the ceiling without code edits.
-          max_concurrent_jobs_ceiling: { __type: TYPE_INT, __default: 8, __min: 1 },
-          // Lifecycle reconciliation watchdog — a remediation reservation
-          // older than this many ms is considered abandoned and reclaimed
-          // for re-dispatch. Default 6h (21_600_000 ms).
-          reconciliation_max_active_age_ms_before_abandon: {
-            __type: TYPE_INT,
-            __default: 21600000,
-            __min: 60000,
-          },
-          // RDXREMIDENTITY-02: repository-specific remediation git identities,
-          // the config twin of REMEDIATION_WORKER_GIT_IDENTITY_REPO_OVERRIDES.
-          // Keyed by lower-cased `owner/name`, then worker class, to
-          // { name, email }. The env var wins when it is set. Both fields use
-          // the same rule as `isGitIdentityField` in
-          // remediation-worker-provenance.mjs: non-blank, with no NUL, CR, LF,
-          // `<` or `>`. A layer replaces the whole map (ATOMIC_KEYED_MAP_PATHS)
-          // so dotted repository names survive. Read through
-          // remediation-identity-config.mjs.
-          git_identity_repo_overrides: {
-            __type: TYPE_DICT,
-            __strict: false,
-            __default: {},
-            __extra_keys_schema: {
-              __type: TYPE_DICT,
-              __strict: false,
-              __extra_keys_schema: {
-                __type: TYPE_DICT,
-                __strict: true,
-                __keys: {
-                  name: { __type: TYPE_STRING, __pattern: PATTERN_GIT_IDENTITY_FIELD, __pattern_description: PATTERN_GIT_IDENTITY_FIELD_DESCRIPTION },
-                  email: { __type: TYPE_STRING, __pattern: PATTERN_GIT_IDENTITY_FIELD, __pattern_description: PATTERN_GIT_IDENTITY_FIELD_DESCRIPTION },
-                },
-              },
-            },
-          },
-        },
-      },
-      merge_agent: {
-        __type: TYPE_DICT,
-        __strict: true,
-        __keys: {
-          final_pass_on_request_changes: { __type: TYPE_BOOL, __default: true },
-        },
-      },
-      reviewer: {
-        __type: TYPE_DICT,
-        __strict: true,
-        __keys: {
-          memory: {
-            __type: TYPE_DICT,
-            __strict: true,
-            __keys: {
-              pressure: {
-                __type: TYPE_DICT,
-                __strict: true,
-                __keys: {
-                  projected_headroom_floor_mb: {
-                    __type: TYPE_INT,
-                    __default: 1024,
-                    __min: 0,
-                    __max: 65536,
-                  },
-                  elevated_available_mb: {
-                    __type: TYPE_INT,
-                    __default: 2048,
-                    __min: 0,
-                    __max: 131072,
-                  },
-                  critical_available_mb: {
-                    __type: TYPE_INT,
-                    __default: 1024,
-                    __min: 0,
-                    __max: 131072,
-                  },
-                  elevated_swap_used_pct: {
-                    __type: TYPE_FLOAT,
-                    __default: 85.0,
-                    __min: 0.0,
-                    __max: 100.0,
-                  },
-                  critical_swap_used_pct: {
-                    __type: TYPE_FLOAT,
-                    __default: 95.0,
-                    __min: 0.0,
-                    __max: 100.0,
-                  },
-                  swap_pressure_available_mb: {
-                    __type: TYPE_INT,
-                    __default: 8192,
-                    __min: 0,
-                    __max: 131072,
-                  },
-                },
-              },
-            },
-          },
-          // QRT-02N pre-dispatch quota/auth gate. The gate defaults on, but
-          // ambiguous, missing, or unreadable status evidence fails open.
-          quota_check_enabled: { __type: TYPE_BOOL, __default: true },
-          quota_status_dir: {
-            __type: TYPE_STRING,
-            __default: null,
-            __nullable: true,
-          },
-          timeout_ms: { __type: TYPE_INT, __default: 1200000 },
-          // One-shot first-byte deadline for a reviewer subprocess: armed once
-          // before the child runs, cleared permanently on the first byte, never
-          // re-armed. 0 (the default) DISABLES it.
-          //
-          // Default off because the cli-direct reviewers are non-streaming --
-          // `claude --print --output-format json` writes a single document at the
-          // end of the turn, so any first-output deadline caps a healthy review
-          // instead of bounding a wedged launch. Enable this only for a reviewer
-          // launched with a streaming output format. Do NOT implement it with
-          // `progress_timeout_ms`, which is a ROLLING no-output watchdog.
-          first_output_timeout_ms: {
-            __type: TYPE_INT,
-            __default: 0,
-            __min: 0,
-          },
-          // The reviewer is also killed if it makes no progress (no output
-          // event) for this many ms. Distinct from the total wall-clock
-          // timeout above — a 20-min reviewer that keeps producing output
-          // every 5 min should not be killed by `no_progress_timeout_ms`,
-          // but one that goes silent for 15 min should be. Default 15 min.
-          no_progress_timeout_ms: {
-            __type: TYPE_INT,
-            __default: 900000,
-            __min: 1000,
-          },
-          running_pass_timeout_seconds: {
-            __type: TYPE_INT,
-            __default: 3600,
-            __min: 1,
-          },
-          idle_timeout_seconds: { __type: TYPE_INT, __default: 600, __min: 1 },
-          ceiling_base_seconds: { __type: TYPE_INT, __default: 1800, __min: 1 },
-          ceiling_max_seconds: { __type: TYPE_INT, __default: 10800, __min: 1 },
-          fallback_threshold: { __type: TYPE_INT, __default: 2 },
-          review_population_retry: {
-            __type: TYPE_DICT,
-            __strict: true,
-            __keys: {
-              max_attempts: { __type: TYPE_INT, __default: 1, __min: 0 },
-              backoff_seconds: { __type: TYPE_INT, __default: 45, __min: 0 },
-            },
-          },
-          // Gemini circuit-breaker. Default stays `off`; operators explicitly
-          // switch to `fallback` or `always-on` after provisioning auth.
-          gemini: {
-            __type: TYPE_DICT,
-            __strict: true,
-            __keys: {
-              mode: {
-                __type: TYPE_STRING,
-                __default: 'off',
-                __enum: ENUM_REVIEWER_GEMINI_MODE,
-              },
-              runtime: {
-                __type: TYPE_STRING,
-                __default: 'cli',
-                __enum: ENUM_REVIEWER_GEMINI_RUNTIME,
-              },
-              // agy/antigravity reviewer model token. Uses agy's verbatim
-              // display names (e.g. "Gemini 3.8 Flash (High)"), NOT the
-              // gemini-CLI slug. Only consulted on the antigravity runtime;
-              // the cli runtime keeps its own slug default (gemini-2.5-pro).
-              model: {
-                __type: TYPE_STRING,
-                __default: 'Gemini 3.8 Flash (High)',
-              },
-              // CCX-08 (credential-capacity-expansion SPEC §2b): the ordered
-              // agy reviewer identities, as OS user names. Unset means one
-              // identity, the HQ owner, running agy directly as today. Mirrors
-              // the Python schema entry CCX-07 added (multi-loader parity).
-              identities: {
-                __type: TYPE_LIST,
-                __item: {
-                  __type: TYPE_STRING,
-                  __pattern: PATTERN_LOCAL_USERNAME,
-                  __pattern_description: PATTERN_LOCAL_USERNAME_DESCRIPTION,
-                },
-                __default: null,
-                __nullable: true,
-              },
-              antigravity: {
-                __type: TYPE_DICT,
-                __strict: true,
-                __keys: {
-                  print_timeout_ms: {
-                    __type: TYPE_INT,
-                    __default: 1140000,
-                    __min: 1000,
-                  },
-                },
-              },
-            },
-          },
-        },
-      },
-      // CFG-01 Python-owned visibility mirror for adversarial-review watcher
-      // knobs. The watcher consumes the module-local `reviewer.*` leaves, but
-      // checked-in host config may carry the top-level `adversarial.*` mirror
-      // for `agent-os config doctor`; this Node loader must parse it so lagging
-      // watcher daemons do not crash-loop during rolling config expansion.
-      adversarial: {
-        __type: TYPE_DICT,
-        __strict: true,
-        __keys: {
-          // Agent OS projects this host setting into the runtime env gate.
-          worker_observations_enabled: { __type: TYPE_BOOL, __default: false },
-          reviewer_pool: {
-            __type: TYPE_DICT,
-            __strict: true,
-            __keys: {
-              max_concurrent_reviewers: {
-                __type: TYPE_INT,
-                __default: 6,
-                __nullable: true,
-                __min: 1,
-              },
-            },
-          },
-          reviewer: {
-            __type: TYPE_DICT,
-            __strict: false,
-            __keys: {
-              // Shared forward-compatible extension point: Python and shell
-              // accept these leaves under adversarial.reviewer (__strict=false).
-              load_aware: {
-                __type: TYPE_DICT, __strict: true,
-                __keys: {
-                  enabled: { __type: TYPE_BOOL, __default: true },
-                  max_multiplier: { __type: TYPE_FLOAT, __default: 6, __min: 1, __max: 20 },
-                },
-              },
-              memory: {
-                __type: TYPE_DICT,
-                __strict: true,
-                __keys: {
-                  pressure: {
-                    __type: TYPE_DICT,
-                    __strict: true,
-                    __keys: {
-                      projected_headroom_floor_mb: {
-                        __type: TYPE_INT,
-                        __default: 1024,
-                        __min: 0,
-                        __max: 65536,
-                      },
-                      elevated_available_mb: {
-                        __type: TYPE_INT,
-                        __default: 2048,
-                        __min: 0,
-                        __max: 131072,
-                      },
-                      critical_available_mb: {
-                        __type: TYPE_INT,
-                        __default: 1024,
-                        __min: 0,
-                        __max: 131072,
-                      },
-                      elevated_swap_used_pct: {
-                        __type: TYPE_FLOAT,
-                        __default: 85.0,
-                        __min: 0.0,
-                        __max: 100.0,
-                      },
-                      critical_swap_used_pct: {
-                        __type: TYPE_FLOAT,
-                        __default: 95.0,
-                        __min: 0.0,
-                        __max: 100.0,
-                      },
-                      swap_pressure_available_mb: {
-                        __type: TYPE_INT,
-                        __default: 8192,
-                        __min: 0,
-                        __max: 131072,
-                      },
-                    },
-                  },
-                },
-              },
-            },
-          },
-        },
-      },
-      watcher: {
-        __type: TYPE_DICT,
-        __strict: true,
-        __keys: {
-          ama_closer_max_concurrent_launches: {
-            __type: TYPE_INT,
-            __default: 3,
-            __min: 1,
-          },
-          alert_to_op_ref: {
-            __type: TYPE_STRING,
-            __default: null,
-            __nullable: true,
-          },
-          // Max ms the watcher will wait during drain before forcing exit.
-          // Default 1h. Lower for tighter restart windows on operator-driven
-          // restarts; raise for long-running PR backlogs.
-          max_drain_wait_ms: {
-            __type: TYPE_INT,
-            __default: 3600000,
-            __min: 1000,
-          },
-          // Pending-draft reviewer respawn-age gate. A pending draft review
-          // older than this many seconds is eligible for respawn. Default 15
-          // min. Floor enforced separately in the watcher code; this CFG
-          // value is the default before per-process floors apply.
-          pending_draft_review_respawn_age_seconds: {
-            __type: TYPE_INT,
-            __default: 900,
-            __min: 60,
-          },
-          // Debounce window for the stuck-dispatch alert. Default 6h: a
-          // known stuck dispatch gets an actionable initial page and an
-          // infrequent reminder, rather than hourly pages whose only change
-          // is elapsed age. A new LRQ retains its own immediate alert.
-          stuck_dispatch_alert_debounce_ms: {
-            __type: TYPE_INT,
-            __default: 21600000,
-            __min: 60000,
-          },
-          // First-pass reviewer pool concurrency cap. Maximum number of
-          // concurrent first-pass review processes the watcher may have in
-          // flight. Null preserves the runtime cascade:
-          // CFG/env -> watcherConfig -> durable default.
-          first_pass_reviewer_pool_max_concurrent_reviewers: {
-            __type: TYPE_INT,
-            __default: null,
-            __nullable: true,
-            __min: 1,
-          },
-          // RSP-01 break-glass lever. Depth, in PRs AWAITING THEIR FIRST
-          // FIRST-PASS REVIEW (open PR, `posted_at IS NULL`, review_status in
-          // pending/pending-upstream — see review-queue-depth.mjs for the exact
-          // predicate and its exclusions), at or above which first-pass review
-          // is permitted to spill off the cheap single reviewer class onto the
-          // entitled, quota-available fallback classes.
-          //
-          // Null (default) = DISARMED: reviewer selection is byte-identical to
-          // pre-RSP-01. This is deliberately a cost lever, not a parallelism
-          // knob — every non-`agy` reviewer spends provider quota that would
-          // otherwise go to builds and remediations — so it defaults off, spills
-          // the minimum (one extra concurrent reviewer per full multiple of the
-          // threshold in the queue), and disengages the moment depth recovers.
-          first_pass_review_queue_depth_failover_threshold: {
-            __type: TYPE_INT,
-            __default: null,
-            __nullable: true,
-            __min: 1,
-          },
-          // RSPREREVIEW-01. Re-review counterpart to the first-pass depth
-          // lever. Null inherits the first-pass threshold; zero/invalid env
-          // input resolves disabled in review-queue-depth.mjs.
-          rereview_queue_depth_failover_threshold: {
-            __type: TYPE_INT,
-            __default: null,
-            __nullable: true,
-            __min: 0,
-          },
-          // HAMASYNC-01. `inline` (default) awaits AMA's `hq dispatch` for a
-          // hammer inside the serial posted-review phase, so one 120-165 s
-          // dispatch holds every later PR's merge click behind it. `background`
-          // starts that dispatch in a bounded background queue (one per
-          // PR@head) and returns `ama-pending` at once; the closer's own
-          // lease / dispatch-record / active-launch guards make the next tick
-          // skip a launch that is still in flight.
-          ama_hammer_dispatch_mode: {
-            __type: TYPE_STRING,
-            __default: 'inline',
-            __enum: ENUM_WATCHER_AMA_HAMMER_DISPATCH_MODE,
-          },
-          // REVFAIR-01 lane share. While both first-pass and rereview work are
-          // pending, admit at most this many first-pass starts before giving the
-          // oldest rereview a floor slot. Default 2 keeps first-pass as the
-          // majority lane on a one-credential reviewer while preventing an
-          // endless first-pass stream from starving rereviews.
-          review_lane_first_pass_burst_limit: {
-            __type: TYPE_INT,
-            __default: 2,
-            __min: 1,
-          },
-          // LANEFAIR-01 cross-lane floor. While both first-pass and rereview
-          // work are pending, each non-priority lane receives at least this
-          // share of effective reviewer concurrency. The watcher computes a
-          // ceiling-rounded slot floor from the live pool size, so the
-          // guarantee scales as reviewer capacity changes.
-          review_lane_min_share: {
-            __type: TYPE_FLOAT,
-            __default: 0.25,
-            __min: 0,
-            __max: 0.5,
-          },
-          // Pre-alarm first-pass age that temporarily raises the first-pass
-          // floor to half the pool while rereviews are also queued. Production
-          // dispatch candidates carry the same durable pending-since signal
-          // pipeline-health reports as oldestFirstPass, but this acts before
-          // queue_starvation's later page.
-          review_lane_first_pass_urgent_age_ms: {
-            __type: TYPE_INT,
-            __default: 300000,
-            __min: 60000,
-          },
-        },
-      },
-      // Subprocess timeouts for the follow-up pipeline's calls into `hq`.
-      // Promoted from hardcoded constants in follow-up-merge-agent.mjs so
-      // operators can tune wall-clock budgets per-host.
-      follow_up: {
-        __type: TYPE_DICT,
-        __strict: true,
-        __keys: {
-          hq_worker_tear_down_subprocess_timeout_ms: {
-            __type: TYPE_INT,
-            __default: 60000,
-            __min: 1000,
-          },
-          hq_dispatch_subprocess_timeout_ms: {
-            __type: TYPE_INT,
-            __default: 90000,
-            __min: 1000,
-          },
-        },
-      },
-      // Dispatch-time defaults consulted by hq when no `--worker-class` is
-      // passed. The Python sibling at
-      // `platform/agent-os-config/src/agent_os_config/__init__.py` is the
-      // canonical schema; this Node mirror exists so the adversarial-watcher
-      // doesn't crash-loop the moment an operator writes `dispatch:` into
-      // the top-level config.yaml (CFG-01 strict-schema parity rule).
-      //
-      // The prior code default for `default_worker_class_for_task_kind` in
-      // `modules/worker-pool/lib/python/cwp_dispatch/registry.py` was a hard
-      // `claude-code` regardless of task_kind. Coding-family tasks now
-      // default to `codex` (independent OpenAI budget); merge-family tasks
-      // default to `merge-agent` for schema completeness — the actual merge
-      // dispatch path hard-routes to merge-agent without consulting this
-      // function.
-      //
-      // YAML keys use underscores (not hyphens) because the loader's alias
-      // machinery expects dotted ASCII paths; the consumer-side resolver
-      // translates hyphenated task_kind values (`merge-conflict-resolution`
-      // etc.) to the underscore form at lookup time.
-      dispatch: {
-        __type: TYPE_DICT,
-        __strict: true,
-        __keys: {
-          default_worker_class_by_task_kind: {
-            __type: TYPE_DICT,
-            __strict: true,
-            __keys: {
-              coding: {
-                __type: TYPE_STRING,
-                __default: 'codex',
-                __enum: ENUM_DISPATCH_DEFAULT_WORKER_CLASS,
-              },
-              research: {
-                __type: TYPE_STRING,
-                __default: 'codex',
-                __enum: ENUM_DISPATCH_DEFAULT_WORKER_CLASS,
-              },
-              drafting: {
-                __type: TYPE_STRING,
-                __default: 'codex',
-                __enum: ENUM_DISPATCH_DEFAULT_WORKER_CLASS,
-              },
-              analysis: {
-                __type: TYPE_STRING,
-                __default: 'codex',
-                __enum: ENUM_DISPATCH_DEFAULT_WORKER_CLASS,
-              },
-              other: {
-                __type: TYPE_STRING,
-                __default: 'codex',
-                __enum: ENUM_DISPATCH_DEFAULT_WORKER_CLASS,
-              },
-              merge: {
-                __type: TYPE_STRING,
-                __default: 'merge-agent',
-                __enum: ENUM_DISPATCH_DEFAULT_WORKER_CLASS,
-              },
-              merge_conflict_resolution: {
-                __type: TYPE_STRING,
-                __default: 'merge-agent',
-                __enum: ENUM_DISPATCH_DEFAULT_WORKER_CLASS,
-              },
-              merge_comment_only_followups: {
-                __type: TYPE_STRING,
-                __default: 'merge-agent',
-                __enum: ENUM_DISPATCH_DEFAULT_WORKER_CLASS,
-              },
-              merge_agent_failure_recovery: {
-                __type: TYPE_STRING,
-                __default: 'codex',
-                __enum: ENUM_DISPATCH_DEFAULT_WORKER_CLASS,
-              },
-            },
-          },
-        },
-      },
-    },
-  }, { __keys: PYTHON_MODULE_SCHEMA }));
-}
 
 // -------- Env alias table --------------------------------------------------
 
@@ -4049,10 +333,6 @@ export const ENV_ALIASES = {
   'remediation.max_concurrent_jobs_ceiling': {
     canonical: 'AGENT_OS_REMEDIATION_MAX_CONCURRENT_JOBS_CEILING',
     aliases: [['ADVERSARIAL_REMEDIATION_MAX_CONCURRENT_JOBS_CEILING', identity]],
-  },
-  'remediation.reconciliation_max_active_age_ms_before_abandon': {
-    canonical: 'AGENT_OS_REMEDIATION_RECONCILIATION_MAX_ACTIVE_AGE_MS_BEFORE_ABANDON',
-    aliases: [['ADVERSARIAL_REMEDIATION_RECONCILIATION_MAX_ACTIVE_MS', identity]],
   },
   'reviewer.timeout_ms': {
     canonical: 'AGENT_OS_REVIEWER_TIMEOUT_MS',
@@ -4276,18 +556,6 @@ export const ENV_ALIASES = {
   },
   'worker_pool.secrets.release_signing_private_key_ref': {
     canonical: 'AGENT_OS_WORKER_POOL_SECRETS_RELEASE_SIGNING_PRIVATE_KEY_REF',
-    aliases: [],
-  },
-  'worker_pool.secrets_bus.op_timeout_seconds': {
-    canonical: 'AGENT_OS_WORKER_POOL_SECRETS_BUS_OP_TIMEOUT_SECONDS',
-    aliases: [],
-  },
-  'worker_pool.secrets_bus.cache_ttl_seconds': {
-    canonical: 'AGENT_OS_WORKER_POOL_SECRETS_BUS_CACHE_TTL_SECONDS',
-    aliases: [],
-  },
-  'worker_pool.secrets_bus.cache_grace_seconds': {
-    canonical: 'AGENT_OS_WORKER_POOL_SECRETS_BUS_CACHE_GRACE_SECONDS',
     aliases: [],
   },
   'post_deploy_verify.enabled': {
@@ -4860,14 +1128,6 @@ export const ENV_ALIASES = {
     canonical: 'AGENT_OS_OP_VAULT',
     aliases: [],
   },
-  'op.known_vaults': {
-    canonical: 'AGENT_OS_OP_KNOWN_VAULTS',
-    aliases: [],
-  },
-  'op.release_signing_private_key_ref': {
-    canonical: 'AGENT_OS_OP_RELEASE_SIGNING_PRIVATE_KEY_REF',
-    aliases: [],
-  },
   'host.name': {
     canonical: 'AGENT_OS_HOST_NAME',
     aliases: [],
@@ -4959,14 +1219,6 @@ export const ENV_ALIASES = {
   'dispatch.default_worker_class_by_task_kind.merge_agent_failure_recovery': {
     canonical: 'AGENT_OS_DISPATCH_DEFAULT_WORKER_CLASS_BY_TASK_KIND_MERGE_AGENT_FAILURE_RECOVERY',
     aliases: [],
-  },
-  'feature_flags.live_steer_allow_unvetted': {
-    canonical: 'AGENT_OS_FEATURE_FLAGS_LIVE_STEER_ALLOW_UNVETTED',
-    aliases: [['HQ_LIVE_STEER_ALLOW_UNVETTED', identity]],
-  },
-  'feature_flags.claude_code_ambient_auth_fallback': {
-    canonical: 'AGENT_OS_FEATURE_FLAGS_CLAUDE_CODE_AMBIENT_AUTH_FALLBACK',
-    aliases: [['CLAUDE_CODE_ALLOW_AMBIENT_AUTH_FALLBACK', identity]],
   },
   'feature_flags.merge_agent_final_pass_on_request_changes': {
     canonical: 'AGENT_OS_FEATURE_FLAGS_MERGE_AGENT_FINAL_PASS_ON_REQUEST_CHANGES',
@@ -5105,128 +1357,78 @@ function jsTypeName(value) {
   return typeof value;
 }
 
-function checkLeaf(value, schema, keyPath, source, tolerateUnknown = false) {
+const compiledLeafPatterns = new WeakMap();
+
+// Mirrors agent_os_config.validation._check_leaf; keep both in step.
+function checkLeaf(value, schema, keyPath, source, tolerateUnknown = false, nested = {}) {
+  const fail = (message, expected, got = value) => {
+    throw new AgentOSConfigError(`${keyPath}: ${message}`, { key: keyPath, expected, got, source });
+  };
+  const normalizeWith = (normalize) => {
+    try { return normalize(value); } catch (error) { throw new AgentOSConfigError(`${keyPath}: ${error.message}`, { key: keyPath, source }); }
+  };
   const expected = schema.__type;
   if (expected === 'any') return value; // validated atomically after the cascade
   if (value === null || value === undefined) {
     if (schema.__nullable) return null;
-    // Explicit null/undefined (i.e. user wrote `key: ~` or `key:`) must
-    // fail loud — it is NOT the same as "key omitted, use default".
-    // Defaults are seeded from buildDefaultsDict and never flow through
-    // checkLeaf; reaching here means the value was set in YAML/env/CLI.
-    throw new AgentOSConfigError(
-      `${keyPath}: expected ${expected}, got null`,
-      { key: keyPath, expected, got: null, source },
-    );
+    // Explicit null (`key: ~`) is not "omitted"; defaults never reach here.
+    fail(`expected ${expected}, got null${Object.hasOwn(schema, '__default') ? ' (omit the key to keep the default)' : ''}`, expected, null);
   }
+  if (schema.__repository_list) return normalizeWith(normalizeDisabledRepositories);
+  if (schema.__lane_routes) return normalizeWith(normalizeLaneRoutes);
+  const shown = JSON.stringify(value);
   if (expected === TYPE_BOOL) {
     if (typeof value !== 'boolean') {
-      const instr = typeof value === 'string'
-        ? 'use `true` or `false` (YAML 1.2 booleans only)'
-        : 'boolean required';
-      const shown = typeof value === 'string' ? `"${value}"` : JSON.stringify(value);
-      throw new AgentOSConfigError(
-        `${keyPath}: expected bool, got ${jsTypeName(value)} (${shown}); ${instr}`,
-        { key: keyPath, expected: 'bool', got: value, source },
-      );
+      const instr = typeof value === 'string' ? 'use `true` or `false` (YAML 1.2 booleans only)' : 'boolean required';
+      fail(`expected bool, got ${jsTypeName(value)} (${shown}); ${instr}`, 'bool');
     }
   } else if (expected === TYPE_INT) {
-    if (typeof value !== 'number' || !Number.isFinite(value) || !Number.isInteger(value)) {
-      throw new AgentOSConfigError(
-        `${keyPath}: expected int, got ${jsTypeName(value)} (${JSON.stringify(value)})`,
-        { key: keyPath, expected: 'int', got: value, source },
-      );
-    }
+    if (!Number.isInteger(value)) fail(`expected int, got ${jsTypeName(value)} (${shown})`, 'int');
   } else if (expected === TYPE_FLOAT) {
-    // Non-finite floats (Infinity/-Infinity) fail loud for parity with the
-    // int guard; env/CLI injection should not smuggle sentinel numbers in.
-    if (typeof value !== 'number' || !Number.isFinite(value)) {
-      throw new AgentOSConfigError(
-        `${keyPath}: expected float, got ${jsTypeName(value)} (${JSON.stringify(value)})`,
-        { key: keyPath, expected: 'float', got: value, source },
-      );
-    }
+    if (typeof value !== 'number') fail(`expected float, got ${jsTypeName(value)} (${shown})`, 'float');
+    if (!Number.isFinite(value)) fail(`expected finite float, got ${value}`, 'finite float');
   } else if (expected === TYPE_STRING) {
-    if (
-      schema.__coerce_number_to_string &&
-      typeof value === 'number' &&
-      Number.isFinite(value)
-    ) {
-      value = String(value);
-    }
-    if (typeof value !== 'string') {
-      throw new AgentOSConfigError(
-        `${keyPath}: expected string, got ${jsTypeName(value)} (${JSON.stringify(value)})`,
-        { key: keyPath, expected: 'string', got: value, source },
-      );
-    }
-    if (schema.__pattern && !(new RegExp(schema.__pattern).test(value))) {
-      const expectedPattern = schema.__pattern_description || schema.__pattern;
-      throw new AgentOSConfigError(
-        `${keyPath}: value ${JSON.stringify(value)} does not match ${expectedPattern}`,
-        { key: keyPath, expected: expectedPattern, got: value, source },
-      );
+    if (schema.__coerce_number_to_string && typeof value === 'number' && Number.isFinite(value)) value = String(value);
+    if (typeof value !== 'string') fail(`expected string, got ${jsTypeName(value)} (${shown})`, 'string');
+    if (schema.__lowercase) value = value.toLowerCase();
+    if (schema.__pattern !== undefined) {
+      let compiled = compiledLeafPatterns.get(schema);
+      if (!compiled || compiled.pattern !== schema.__pattern) {
+        compiled = { pattern: schema.__pattern, regex: new RegExp(schema.__pattern) };
+        compiledLeafPatterns.set(schema, compiled);
+      }
+      if (!compiled.regex.test(value)) {
+        const description = schema.__pattern_description || schema.__pattern;
+        fail(`value ${JSON.stringify(value)} does not match ${description}`, description);
+      }
     }
   } else if (expected === TYPE_DICT) {
-    return validateDictPresentKeysOnly(value, schema, keyPath, source, null, tolerateUnknown);
+    return validateDictPresentKeysOnly(value, schema, keyPath, source, null, tolerateUnknown, nested);
   } else if (expected === TYPE_LIST) {
-    if (!Array.isArray(value)) {
-      throw new AgentOSConfigError(
-        `${keyPath}: expected list, got ${jsTypeName(value)} (${JSON.stringify(value)})`,
-        { key: keyPath, expected: 'list', got: value, source },
-      );
+    if (!Array.isArray(value)) fail(`expected list, got ${jsTypeName(value)} (${shown})`, 'list');
+    if (schema.__item) value = value.map((item, index) => checkLeaf(item, schema.__item, `${keyPath}[${index}]`, source, tolerateUnknown, nested));
+    if (schema.__unique) value = [...new Map(value.map(item => [JSON.stringify(item), item])).values()];
+    if (schema.__min_items !== undefined && value.length < schema.__min_items) {
+      fail(`expected at least ${schema.__min_items} item(s), got ${value.length}`, `>= ${schema.__min_items} item(s)`);
     }
-    if (schema.__disabledRepositories) {
-      try { return normalizeDisabledRepositories(value); }
-      catch (error) { throw new AgentOSConfigError(`${keyPath}: ${error.message}`, { key: keyPath, source }); }
+    if (schema.__max_items !== undefined && value.length > schema.__max_items) {
+      fail(`expected at most ${schema.__max_items} item(s), got ${value.length}`, `<= ${schema.__max_items} item(s)`);
     }
-    if (schema.__laneRoutes) {
-      try { return normalizeLaneRoutes(value); }
-      catch (error) { throw new AgentOSConfigError(`${keyPath}: ${error.message}`, { key: keyPath, source }); }
-    }
-    const itemSchema = schema.__item || {};
-    return value.map((item, index) => checkLeaf(item, itemSchema, `${keyPath}[${index}]`, source, tolerateUnknown));
-  }
-  if (schema.__enum && !schema.__enum.includes(value)) {
-    throw new AgentOSConfigError(
-      `${keyPath}: value ${JSON.stringify(value)} not in allowlist ${fmtEnum(schema.__enum)}`,
-      {
-        key: keyPath,
-        expected: `one of ${fmtEnum(schema.__enum)}`,
-        allowed: schema.__enum,
-        got: value,
-        source,
-      },
-    );
   }
   if (typeof value === 'number') {
-    if (schema.__min !== undefined && value < schema.__min
-      && !(value === 0 && schema.__allow_zero === true)) {
-      throw new AgentOSConfigError(
-        `${keyPath}: value ${value} below minimum ${schema.__min}`,
-        {
-          key: keyPath,
-          expected: `>= ${schema.__min}`,
-          got: value,
-          source,
-        },
-      );
+    if (schema.__min !== undefined && value < schema.__min && !(schema.__allow_zero && value === 0)) {
+      fail(`expected >= ${schema.__min}, got ${value}`, `>= ${schema.__min}`);
     }
-    if (schema.__max !== undefined && schema.__enforceMax !== false && value > schema.__max) {
-      throw new AgentOSConfigError(
-        `${keyPath}: value ${value} above maximum ${schema.__max}`,
-        {
-          key: keyPath,
-          expected: `<= ${schema.__max}`,
-          got: value,
-          source,
-        },
-      );
-    }
+    // Only enforced maxima exist: CFG projects no advisory __max.
+    if (schema.__max !== undefined && value > schema.__max) fail(`expected <= ${schema.__max}, got ${value}`, `<= ${schema.__max}`);
   }
-  if (schema.__normalize && Object.prototype.hasOwnProperty.call(schema.__normalize, value)) {
-    return schema.__normalize[value];
+  if (schema.__enum && !schema.__enum.includes(value)) {
+    throw new AgentOSConfigError(`${keyPath}: value ${JSON.stringify(value)} not in allowlist ${fmtEnum(schema.__enum)}`, {
+      key: keyPath, expected: `one of ${fmtEnum(schema.__enum)}`, allowed: schema.__enum, got: value, source,
+    });
   }
+  if (schema.__disallow?.includes(value)) fail(`value ${JSON.stringify(value)} is not allowed`, `not one of ${fmtEnum(schema.__disallow)}`);
+  if (schema.__normalize && Object.hasOwn(schema.__normalize, value)) return schema.__normalize[value];
   return value;
 }
 
@@ -5293,6 +1495,11 @@ function buildLineMap(text, allowedTopKeys) {
   return out;
 }
 
+// Mirrors agent_os_config.validation._validate_dict_present_keys_only:
+// returns only present keys (no default fill). `tolerateUnknown` (operator
+// overlays and runtime loads) drops unknown keys at any depth instead of
+// raising, so a key from a newer schema cannot crash a lagging daemon;
+// consumed atomic policies (`__strict_always`) never tolerate.
 function validateDictPresentKeysOnly(
   doc,
   schema,
@@ -5300,162 +1507,117 @@ function validateDictPresentKeysOnly(
   source,
   lineMap,
   tolerateUnknown = false,
-  {
-    tolerateTopLevelUnknown = false,
-    warnUnknownOnce = false,
-    warningSource = null,
-    droppedUnknownKeys = null,
-  } = {},
+  { warnUnknownOnce = false, warningSource = null, droppedUnknownKeys = null } = {},
 ) {
-  if ((doc === null || doc === undefined) && schema.__strict_always) {
+  const strictAlways = Boolean(schema.__strict_always);
+  if ((doc === null || doc === undefined) && strictAlways) {
     throw new AgentOSConfigError(`${keyPath}: expected mapping`, { key: keyPath, source });
   }
   if (doc === null || doc === undefined) return {};
+  const allowed = schema.__keys || {};
   if (typeof doc !== 'object' || Array.isArray(doc)) {
-    throw new AgentOSConfigError(
-      `${keyPath || '(root)'}: expected mapping, got ${jsTypeName(doc)}`,
-      {
-        key: keyPath || '(root)',
-        expected: 'mapping',
-        got: jsTypeName(doc),
-        source,
-      },
-    );
+    const scalarKey = schema.__scalar_default_key;
+    if (typeof scalarKey === 'string' && Object.hasOwn(allowed, scalarKey)) {
+      return { [scalarKey]: checkLeaf(doc, allowed[scalarKey], keyPath ? `${keyPath}.${scalarKey}` : scalarKey, source, tolerateUnknown, { warnUnknownOnce, warningSource, droppedUnknownKeys }) };
+    }
+    const anchor = keyPath || '(root)';
+    throw new AgentOSConfigError(`${anchor}: expected mapping, got ${jsTypeName(doc)}`, {
+      key: anchor, expected: 'mapping', got: jsTypeName(doc), source,
+    });
   }
-  if (schema.__strict_always) {
-    // Search policy and atomic declarations cannot use rolling-schema
-    // tolerance; deploy their Node mirror before publishing new config keys.
+  if (strictAlways) {
     tolerateUnknown = false;
     if (Object.keys(doc).some(key => key.startsWith('__'))) {
       throw new AgentOSConfigError(`${keyPath}: unknown policy key`, { key: keyPath, source });
     }
   }
-  const allowed = schema.__keys || {};
-  // Layers may supply only part of a declaration. Completeness belongs to
-  // the single-document and final merged-config semantic validators.
-  const extraSchema = schema.__extra_keys_schema || null;
-  const strict = schema.__strict !== false;
-
-  if (strict) {
-    for (const rawKey of Object.keys(doc)) {
-      if (!(schema.__strict_always ? Object.hasOwn(allowed, rawKey) : rawKey in allowed)) {
-        const lineSrc = annotateLine(source, lineMap, rawKey);
-        const near = nearestValidKey(rawKey, Object.keys(allowed));
-        const full = keyPath ? `${keyPath}.${rawKey}` : rawKey;
-        const hint = near ? ` did you mean ${keyPath ? keyPath + '.' : ''}${JSON.stringify(near)}?` : '';
-        if (!schema.__strict_always && !rawKey.startsWith('__')) {
-          if (Array.isArray(droppedUnknownKeys)) {
-            droppedUnknownKeys.push({
-              key: full,
-              source: runtimeWarningSource(warningSource || source),
-              hint: hint.trim(),
-            });
-          }
-          configDebugLog(
-            `ignoring unknown key ${JSON.stringify(full)}` +
-              `${source ? ` from ${source}` : ''} — owned by another config reader`,
-          );
-          continue;
-        }
-        if (tolerateUnknown && (keyPath || tolerateTopLevelUnknown)) {
-          // Operator-local override (config.local.yaml / module *.local.yaml):
-          // a NESTED unknown key under a root this reader owns is dropped, not
-          // raised. This is the Node mirror of agent-os#1743: the local
-          // override is live-edited and read by multiple daemons (python/shell
-          // CFG loader + this Node adversarial loader) that may each be at a
-          // different deployed schema version during a rollout, so a premature
-          // key must be a no-op here instead of a watcher crash-loop. Debug-only
-          // (never stderr by default — see agent-os#1738 warning-leak lesson).
-          if (warnUnknownOnce) {
-            warnRuntimeUnknownKeyOnce(full, warningSource || source, hint);
-            if (Array.isArray(droppedUnknownKeys)) {
-              droppedUnknownKeys.push({
-                key: full,
-                source: runtimeWarningSource(warningSource || source),
-                hint: hint.trim(),
-              });
-            }
-          } else {
-            configDebugLog(
-              `dropping unknown key ${JSON.stringify(full)} from local override` +
-                `${source ? ` (${source})` : ''} — not in this reader's schema`,
-            );
-          }
-          continue;
-        }
-        throw new AgentOSConfigError(
-          `${full}: unknown key (strict schema)${hint}`,
-          {
-            key: full,
-            expected: `one of ${JSON.stringify(Object.keys(allowed).sort())}`,
-            got: rawKey,
-            source: lineSrc,
-          },
-        );
-      }
+  // CFG requires complete atomic declarations (array items, keyed policies,
+  // and version); keep Python parity rather than deferring security completeness.
+  for (const [key, child] of Object.entries(allowed)) {
+    if (child.__required && !Object.hasOwn(doc, key)) {
+      const full = keyPath ? `${keyPath}.${key}` : key;
+      throw new AgentOSConfigError(`${full}: required key is missing`, { key: full, expected: 'required key', got: null, source });
     }
   }
-
-  const out = schema.__default_when_present ? structuredClone(buildDefaultsDict(schema)) : {};
-  for (const [childKey, raw] of Object.entries(doc)) {
-    if (!(schema.__strict_always ? Object.hasOwn(allowed, childKey) : childKey in allowed)) {
-      // Non-strict dicts are extension points. If they provide an
-      // __extra_keys_schema, arbitrary child keys are validated against it
-      // (keyed maps such as apps.<app-id>); otherwise pass subtrees through
-      // verbatim (e.g. submodules).
+  const strict = schema.__strict !== false;
+  const extraSchema = schema.__extra_keys_schema || null;
+  const nested = { warnUnknownOnce, warningSource: warningSource || source, droppedUnknownKeys };
+  const out = {};
+  for (const [key, raw] of Object.entries(doc)) {
+    // Metadata keys (`__aliases`, ...) are skipped, as in Python.
+    if (key.startsWith('__') && !strictAlways) continue;
+    const full = keyPath ? `${keyPath}.${key}` : key;
+    const childSource = annotateLine(source, lineMap, key);
+    if (!Object.hasOwn(allowed, key)) {
       if (!strict && extraSchema) {
-        const full = keyPath ? `${keyPath}.${childKey}` : childKey;
-        const childSource = annotateLine(source, lineMap, childKey);
-        if (extraSchema.__type === TYPE_DICT) {
-          const validatedExtra = validateDictPresentKeysOnly(
-            raw,
-            extraSchema,
-            full,
-            childSource,
-            null,
-            tolerateUnknown,
-            {
-              tolerateTopLevelUnknown,
-              warnUnknownOnce,
-              warningSource: warningSource || source,
-              droppedUnknownKeys,
-            },
-          );
-          // Keyed-map defaults are backfilled after all layers merge so default
-          // provenance can distinguish file-declared entries from env-created
-          // entries without treating app ids as dotted paths.
-          out[childKey] = validatedExtra;
-        } else {
-          out[childKey] = checkLeaf(raw, extraSchema, full, childSource, tolerateUnknown);
+        out[key] = extraSchema.__type === TYPE_DICT
+          ? validateDictPresentKeysOnly(raw, extraSchema, full, childSource, null, tolerateUnknown, nested)
+          : checkLeaf(raw, extraSchema, full, childSource, tolerateUnknown, nested);
+      } else if (strict) {
+        const near = nearestValidKey(key, Object.keys(allowed));
+        const hint = near ? ` did you mean ${keyPath ? `${keyPath}.` : ''}${JSON.stringify(near)}?` : '';
+        if (!tolerateUnknown) {
+          throw new AgentOSConfigError(`${full}: unknown key (strict schema)${hint}`, {
+            key: full, expected: `one of ${JSON.stringify(Object.keys(allowed).sort())}`, got: key, source: childSource,
+          });
         }
-      } else if (!strict) {
-        out[childKey] = raw;
-      }
+        if (warnUnknownOnce) {
+          warnRuntimeUnknownKeyOnce(full, nested.warningSource, hint);
+          droppedUnknownKeys?.push({ key: full, source: runtimeWarningSource(nested.warningSource), hint: hint.trim() });
+        } else {
+          configDebugLog(`dropping unknown key ${JSON.stringify(full)}${source ? ` (${source})` : ''} — not in this reader's schema`);
+        }
+      } // An open section without a typed extra schema drops the child, as in Python.
       continue;
     }
-    const childSchema = allowed[childKey];
-    const full = keyPath ? `${keyPath}.${childKey}` : childKey;
-    const childSource = annotateLine(source, lineMap, childKey);
-    if (childSchema.__type === TYPE_DICT) {
-      out[childKey] = validateDictPresentKeysOnly(
-        raw,
-        childSchema,
-        full,
-        childSource,
-        null,
-        tolerateUnknown,
-        {
-          tolerateTopLevelUnknown,
-          warnUnknownOnce,
-          warningSource: warningSource || source,
-          droppedUnknownKeys,
-        },
-      );
-    } else {
-      out[childKey] = checkLeaf(raw, childSchema, full, childSource, tolerateUnknown);
+    const child = allowed[key];
+    if (child.__type === TYPE_DICT) {
+      out[key] = validateDictPresentKeysOnly(raw, child, full, childSource, null, tolerateUnknown, nested);
+      continue;
     }
+    if (child.__read_only) {
+      throw new AgentOSConfigError(`${full}: read-only diagnostic value (${child.__read_only})`, {
+        key: full, expected: 'not configured in YAML', got: raw, source: childSource,
+      });
+    }
+    out[key] = checkLeaf(raw, child, full, childSource, tolerateUnknown, nested);
   }
   return out;
+}
+
+// Mirrors agent_os_config.validation._validate_secrets_config (rejection only;
+// this reader consumes no vault policy, so it does not normalize one).
+function validateWorkerClassVaults(secrets, trace = {}) {
+  if (!secrets || typeof secrets !== 'object') return;
+  const shared = Array.isArray(secrets.shared_vaults) ? secrets.shared_vaults : [];
+  const policies = Object.entries(secrets.worker_class_vaults ?? {}).map(([name, policy]) => [`worker_pool.secrets.worker_class_vaults.${name}`, policy]);
+  const fallback = secrets.default_vault_policy;
+  if (fallback && Object.values(fallback).some(value => ![null, '', undefined].includes(value)
+    && !(Array.isArray(value) && !value.length))) policies.push(['worker_pool.secrets.default_vault_policy', fallback]);
+  for (const [key, policy] of policies) {
+    const { vault = null, service_account_token_ref: ref = null } = policy ?? {};
+    const optin = policy?.shared_vault_optin ?? [];
+    const fail = (leaf, message) => {
+      const full = `${key}.${leaf}`;
+      // A missing required leaf has no file entry; attribute it to the policy's
+      // explicitly configured sibling rather than its generated default.
+      const entry = trace[full]?.filter(item => item.path).at(-1)
+        ?? Object.entries(trace).filter(([path]) => path.startsWith(`${key}.`))
+          .flatMap(([, entries]) => entries.filter(item => item.path)).at(-1);
+      throw new AgentOSConfigError(`${full}: ${message}`, {
+        key: full, source: entry?.path ?? entry?.source ?? 'merged-config',
+      });
+    };
+    if (!Array.isArray(optin)) fail('shared_vault_optin', 'expected list');
+    if (vault === null && ref === null && !optin.length) continue;
+    if (typeof vault !== 'string' || !vault.trim()) fail('vault', 'required non-empty string');
+    if (typeof ref !== 'string' || !/^op:\/\/([^/]+)\/(.+)\/([^/]+)$/.test(ref.trim())) {
+      fail('service_account_token_ref', 'expected full op://<vault>/<item>/<field> ref');
+    }
+    optin.forEach((item, index) => {
+      if (!shared.includes(item)) fail(`shared_vault_optin[${index}]`, `${JSON.stringify(item)} not present in worker_pool.secrets.shared_vaults`);
+    });
+  }
 }
 
 function validatePublicHygiene(policy = {}) {
@@ -5502,8 +1664,7 @@ function validateSchemaLayer(
   {
     source = null,
     rawText = null,
-    tolerateNestedUnknownLocalKeys = false,
-    tolerateUnknownTopLevelKeys = false,
+    tolerateUnknown = false,
     warnUnknownOnce = false,
     droppedUnknownKeys = null,
   } = {},
@@ -5542,9 +1703,8 @@ function validateSchemaLayer(
     '',
     source,
     lineMap,
-    tolerateNestedUnknownLocalKeys,
+    tolerateUnknown,
     {
-      tolerateTopLevelUnknown: tolerateUnknownTopLevelKeys,
       warnUnknownOnce,
       warningSource: source,
       droppedUnknownKeys,
@@ -5648,9 +1808,8 @@ function validateModuleDoc(
   source,
   rawText,
   {
-    tolerateNestedUnknownLocalKeys = false,
+    tolerateUnknown = false,
     preserveEmptyMaps = false,
-    tolerateUnknownTopLevelKeys = false,
     warnUnknownOnce = false,
     droppedUnknownKeys = null,
   } = {},
@@ -5779,9 +1938,8 @@ function validateModuleDoc(
     '',
     source,
     lineMap,
-    tolerateNestedUnknownLocalKeys,
+    tolerateUnknown,
     {
-      tolerateTopLevelUnknown: tolerateUnknownTopLevelKeys,
       warnUnknownOnce,
       warningSource: source,
       droppedUnknownKeys,
@@ -5798,15 +1956,14 @@ function sameValue(a, b) {
 
 // -------- Defaults builder -------------------------------------------------
 
+// Mirrors agent_os_config.validation._build_defaults_dict.
 function buildDefaultsDict(schema) {
   const out = {};
   for (const [key, child] of Object.entries(schema.__keys || {})) {
-    if (key === 'version') continue;
-    if (child.__skip_global_default_tree || child.__alias_of) continue;
+    if (key === 'version' || child.__alias_of) continue;
     if (child.__type === TYPE_DICT) {
-      const nested = buildDefaultsDict(child);
-      out[key] = nested;
-    } else if (Object.prototype.hasOwnProperty.call(child, '__default')) {
+      out[key] = buildDefaultsDict(child);
+    } else if (Object.hasOwn(child, '__default')) {
       out[key] = structuredClone(child.__default);
     }
   }
@@ -6503,7 +2660,10 @@ function loadConfigImpl({
   legacyGeminiReviewer = false,
 } = {}) {
   const envView = env || process.env;
-  checkDeprecatedEnvVars(envView);
+  // Compose's ${VAR:-} forwards an absent setting as "": absent for every
+  // leaf type and alias form, as in Python. envView keeps loader controls.
+  const envOverrides = Object.fromEntries(Object.entries(envView).filter(([, value]) => value !== ''));
+  checkDeprecatedEnvVars(envOverrides);
   const schema = schemaV1();
 
   const defaults = buildDefaultsDict(schema);
@@ -6540,8 +2700,7 @@ function loadConfigImpl({
     const { doc, rawText } = loadLayerFile(rawPath);
     if (doc === null || doc === undefined) continue;
     const { validated, aliases } = validateModuleDoc(doc, rawPath, rawText, {
-      tolerateNestedUnknownLocalKeys: tolerateCheckedInUnknown,
-      tolerateUnknownTopLevelKeys: tolerateCheckedInUnknown,
+      tolerateUnknown: tolerateCheckedInUnknown,
       warnUnknownOnce: tolerateCheckedInUnknown,
       droppedUnknownKeys: runtimeDroppedUnknownKeys,
     });
@@ -6573,8 +2732,7 @@ function loadConfigImpl({
     const validated = validateSchemaLayer(topDoc, {
       source: topPathResolved,
       rawText: topRaw,
-      tolerateNestedUnknownLocalKeys: tolerateCheckedInUnknown,
-      tolerateUnknownTopLevelKeys: tolerateCheckedInUnknown,
+      tolerateUnknown: tolerateCheckedInUnknown,
       warnUnknownOnce: tolerateCheckedInUnknown,
       droppedUnknownKeys: runtimeDroppedUnknownKeys,
     });
@@ -6640,11 +2798,11 @@ function loadConfigImpl({
       validatedLocal = validateSchemaLayer(localDoc, {
         source: local,
         rawText: localRaw,
-        tolerateNestedUnknownLocalKeys: true,
+        tolerateUnknown: true,
       });
     } else {
       const { validated, aliases } = validateModuleDoc(localDoc, local, localRaw, {
-        tolerateNestedUnknownLocalKeys: true,
+        tolerateUnknown: true,
         preserveEmptyMaps: true,
       });
       validatedLocal = validated;
@@ -6665,10 +2823,10 @@ function loadConfigImpl({
 
   // --- Layer 5: env vars ---
   const appIdsBeforeEnv = ownMapEntryIds(getLeaf(merged, 'apps'));
-  const dynamicAppIds = dynamicAppEnvIds(envView);
+  const dynamicAppIds = dynamicAppEnvIds(envOverrides);
   const envAliasEntries = [
     ...Object.entries(ENV_ALIASES),
-    ...dynamicAppEnvAliases(envView),
+    ...dynamicAppEnvAliases(envOverrides),
   ];
   for (const [key, info] of envAliasEntries) {
     const leaf = schemaLeaf(schema, key);
@@ -6677,7 +2835,7 @@ function loadConfigImpl({
       key,
       info.canonical,
       info.aliases,
-      envView,
+      envOverrides,
     );
     if (winning === null) continue;
     let value;
@@ -6744,6 +2902,7 @@ function loadConfigImpl({
   validateOsgShape(merged.osg);
   validateSearch(merged.services?.hcp?.search);
   validatePublicHygiene(merged.worker_pool?.public_hygiene);
+  validateWorkerClassVaults(merged.worker_pool?.secrets, trace);
 
   const sources = {};
   for (const [key, entries] of Object.entries(trace)) {
@@ -6771,9 +2930,9 @@ function validateOsgShape(value, source = null) {
     }
   }
   if (Array.isArray(value.arms)) {
-    const fields = OSG_SCHEMA.__keys.arms.__item.__keys;
+    const fields = Object.keys(osgArmFields());
     for (const arm of value.arms) {
-      if (!arm || Object.keys(fields).some(key => !Object.hasOwn(arm, key))) {
+      if (!arm || fields.some(key => !Object.hasOwn(arm, key))) {
         throw new AgentOSConfigError('osg.arms: incomplete arm', { key: 'osg.arms', source });
       }
     }

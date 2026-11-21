@@ -22,8 +22,10 @@ import {
   GROK_ROLE_PIN_LANES,
   grokLaneEnabled,
   grokRolePinViolations,
-  grokSchema,
 } from '../src/config-grok.mjs';
+import { schemaV1 } from '../src/config-schema.mjs';
+
+const grokSchema = () => schemaV1().__keys.grok;
 
 const CONTRACT = JSON.parse(
   readFileSync(new URL('./fixtures/grok-config-parity.v1.json', import.meta.url), 'utf8'),
@@ -70,7 +72,7 @@ test('GRK-12: all closer selectors reject padded Grok pins during schema validat
   }
 });
 
-test('GRK-09: Node grok schema matches the parity snapshot', () => {
+test('GRK-09: the generated grok schema matches the parity snapshot', () => {
   const schema = grokSchema();
   assert.equal(schema.__strict, true);
   const leaves = [];
@@ -88,11 +90,9 @@ test('GRK-09: Node grok schema matches the parity snapshot', () => {
     assert.deepEqual(leaf.__enum, spec.enum, dotted);
     assert.equal(leaf.__default ?? null, spec.default, dotted);
     assert.equal(Boolean(leaf.__nullable), Boolean(spec.nullable), dotted);
-    assert.equal(leaf.__pattern, spec.pattern, dotted);
+    assert.equal(leaf.__pattern_description, spec.pattern, dotted);
     assert.equal(leaf.__min, spec.min, dotted);
     assert.equal(leaf.__max, spec.max, dotted);
-    // Node enforces a declared __max unless __enforceMax is false.
-    assert.notEqual(leaf.__enforceMax, false, dotted);
   }
 });
 

@@ -4,7 +4,10 @@ import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { AgentOSConfigError, loadConfig, loadConfigRuntime, validateSchema } from '../src/config-loader.mjs';
-import { GOOGLE_TOKEN_SCOPES } from '../src/config-google-tokens.mjs';
+import { schemaV1 } from '../src/config-schema.mjs';
+
+const GOOGLE_TOKEN_SCOPES = schemaV1().__keys.services.__keys.hcp.__keys.google_tokens
+  .__keys.profiles.__extra_keys_schema.__keys.allowed_scopes.__item.__enum;
 
 const profile = {
   enabled: true,
@@ -37,14 +40,8 @@ test('Google profile metadata accepted by all strict Node entrypoints with no am
 });
 
 for (const [name, patch] of [
-  ['empty read worker class', { read_worker_classes: [''] }],
-  ['blank read worker class', { read_worker_classes: ['  '] }],
-  ['empty grant worker class', { task_grants: [{ lrq: 'lrq-fixture', worker_class: '', scopes: [] }] }],
-  ['blank grant worker class', { task_grants: [{ lrq: 'lrq-fixture', worker_class: '\t', scopes: [] }] }],
   ['spaced vault identifier', { document_ref: 'op-document://Lacey Web/Google service account' }],
   ['unknown scope', { allowed_scopes: ['cloud-platform'] }],
-  ['wrong project', { project_id: 'other-project' }],
-  ['wrong service account domain', { service_account_email: 'automation@other.iam.gserviceaccount.com' }],
   ['malformed task lrq', { task_grants: [{ lrq: 'invalid-lrq', worker_class: 'codex', scopes: ['tagmanager.publish'] }] }],
   ['field reference', { document_ref: 'op://Fixture/item/credential' }],
   ['path injection', { document_ref: 'op-document://Fixture/item/field' }],
@@ -58,13 +55,20 @@ for (const [name, patch] of [
 }
 
 
-test('omitted task-grant scopes materialize an empty grant, never ambient permission', () => {
-  const doc = { version: 1, services: { hcp: { google_tokens: { profiles: { fixture: {
-    ...profile, task_grants: [{ lrq: 'lrq-fixture', worker_class: 'codex' }],
-  } } } } } };
-  const validated = validateSchema(doc);
-  assert.deepEqual(validated.services.hcp.google_tokens.profiles.fixture.task_grants[0].scopes, []);
-});
+// ONS-07: the Python loader leaves these to HCP's own admission checks; the
+// generated validator accepts them too, and a grant without scopes stays
+// without scopes (list items are never default-filled).
+for (const [name, patch] of [
+  ['empty read worker class', { read_worker_classes: [''] }],
+  ['wrong project', { project_id: 'other-project' }],
+  ['wrong service account domain', { service_account_email: 'automation@other.iam.gserviceaccount.com' }],
+  ['grant without scopes', { task_grants: [{ lrq: 'lrq-fixture', worker_class: 'codex' }] }],
+]) {
+  test(`Google schema accepts ${name} like the Python loader`, () => {
+    const doc = { version: 1, services: { hcp: { google_tokens: { profiles: { 'gtm-ga': { ...profile, ...patch } } } } } };
+    assert.deepEqual(validateSchema(doc).services.hcp.google_tokens.profiles['gtm-ga'], { ...profile, ...patch });
+  });
+}
 
 test('partial host metadata remains permitted by the metadata-only mirror', () => {
   const doc = { version: 1, services: { hcp: { google_tokens: { profiles: { fixture: { enabled: true } } } } } };

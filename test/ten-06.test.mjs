@@ -36,7 +36,7 @@ test('TENUREGATE-01: tenure enabled uses the existing module/top/env config casc
     const read = (env = {}) => loadRoleConfig({ topPath, modulePaths: [modulePath], env, loaderImpl: loadConfig })
       .get('worker_pool.tenure.enabled');
     assert.equal(read(), false);
-    writeFileSync(modulePath, 'worker_pool:\n  tenure:\n    enabled: true\n    scope: ticket\n');
+    writeFileSync(modulePath, 'worker_pool:\n  tenure:\n    enabled: true\n');
     assert.equal(read(), true);
     writeFileSync(topPath, 'version: 1\nworker_pool:\n  tenure:\n    enabled: false\n');
     assert.equal(read(), false);

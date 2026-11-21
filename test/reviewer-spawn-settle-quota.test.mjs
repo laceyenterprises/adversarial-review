@@ -155,19 +155,23 @@ for (const [state, expectedSpawns] of [['ok', 1], ['exhausted', 0]]) {
   });
 }
 
-test('unreadable reviewer status fails open and dispatches normally', async () => {
+// CREDITSPENDGUARD-01: a credit-capable subscription account is never routed
+// blind; an unreadable quota holds (and falls back) instead of failing open.
+test('unreadable reviewer status holds a credit-capable reviewer', async () => {
   await withStatusFile('unused', async (statusDir) => {
     const capture = newCapture();
     const result = await spawnReviewer(spawnArgs({
       env: { AGENT_OS_REVIEWER_QUOTA_STATUS_DIR: statusDir },
       capture,
     }));
-    assert.equal(capture.spawnCalls, 1);
-    assert.equal(result.ok, true);
+    assert.equal(capture.spawnCalls, 0);
+    assert.equal(result.reason, 'primary-reviewer-quota-capped');
+    assert.equal(result.quotaState, 'probe-error');
+    assert.equal(capture.completed[0].metadata.quotaReason, 'quota-unverifiable-credit-capable');
   }, { invalidJson: true });
 });
 
-test('unexpected quota probe exception fails open and dispatches normally', async () => {
+test('unexpected quota probe exception holds a credit-capable reviewer', async () => {
   const capture = newCapture();
   const args = spawnArgs({ env: {}, capture });
   const result = await spawnReviewer({
@@ -176,8 +180,9 @@ test('unexpected quota probe exception fails open and dispatches normally', asyn
       throw new Error('transient probe failure');
     },
   });
-  assert.equal(capture.spawnCalls, 1);
-  assert.equal(result.ok, true);
+  assert.equal(capture.spawnCalls, 0);
+  assert.equal(result.transient, true);
+  assert.equal(result.quotaState, 'probe-error');
 });
 
 test('unknown reviewer status fails open and dispatches normally', async () => {

@@ -228,7 +228,14 @@ function exhaustedCodexPlanLimits(entry, nowMs) {
   ];
   return limits.filter(row => row?.limitId === 'codex' && row.fresh !== false
     && (!Number.isFinite(Date.parse(row.resetsAt)) || Date.parse(row.resetsAt) > nowMs)
-    && Number.isFinite(row.usedPercent) && row.usedPercent >= 100);
+    && codexPlanLimitExhausted(row));
+}
+
+// CREDITSPENDGUARD-01: one predicate. A plan window is spent at >= 100 % used
+// or when the provider says its limit is reached. Purchased credits keep turns
+// succeeding after that, so `credits` never makes the account selectable.
+export function codexPlanLimitExhausted(row) {
+  return row?.limitReached === true || (Number.isFinite(row?.usedPercent) && row.usedPercent >= 100);
 }
 
 function meterStateDiagnostic(status) {

@@ -80,3 +80,11 @@ key into CFG forces its deletion here.
   11 minutes on an untouched `origin/main` archive too.
 - `npm run lint` (0 errors), `npm run typecheck:contracts` and
   `bash demo/research-finding-walkthrough.sh` all passed.
+
+## Rescue review closeout
+
+Unknown-key tolerance and its warning context propagate into list records and typed extra keys; strict readers and consumed strict policies continue to refuse unknown keys. Vault opt-ins are normalized for explicit null and type-checked before iteration. Default-policy diagnostics identify the actual default policy, even if a worker class happens to be named `fallback`. Required atomic declaration fields retain the Python CFG check: the generated required paths are version, array records and keyed security declarations. Sparse vault overlays already merge successfully; delaying those required checks would change the canonical CFG contract and weaken completeness checks.
+
+Nullable JSON Schema branches are order independent. An undeclared required property raises an explicit unsupported-schema diagnostic rather than an accidental TypeError or silently dropping the requirement. Remediation concurrency must be at least one. Closure reads the configured builder once. Schema synchronization accepts `--check` in either argument order and rejects unknown switches; Python recording and Node replay both create nested fixture directories. Fallback tests always clean up their temporary directory.
+
+The hosted Node 22 result on the original head timed out after 900 seconds with 392 files still queued and no assertion failure located. This is tracked by LAC-2182; that unchanged full-suite timeout is not rerun or waived as validation for this repair.

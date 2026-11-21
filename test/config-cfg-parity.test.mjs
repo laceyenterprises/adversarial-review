@@ -8,9 +8,9 @@
 // leaf annotations, env coercion and merged-config semantics.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { AgentOSConfigError, loadConfig } from '../src/config-loader.mjs';
 import { CFG_JSON_SCHEMA, schemaV1 } from '../src/config-schema.mjs';
 import { NODE_ONLY_ENUM_MEMBERS, NODE_ONLY_KEYS } from '../src/config-node-keys.mjs';
@@ -21,7 +21,10 @@ for (const { name, files, modules = [], env = {}, get = [], python } of cases) {
   test(`CFG parity: ${name}`, () => {
     const dir = mkdtempSync(join(tmpdir(), 'cfg-parity-'));
     try {
-      for (const [file, text] of Object.entries(files)) writeFileSync(join(dir, file), text);
+      for (const [file, text] of Object.entries(files)) {
+        mkdirSync(dirname(join(dir, file)), { recursive: true });
+        writeFileSync(join(dir, file), text);
+      }
       const load = () => loadConfig({
         topPath: join(dir, 'config.yaml'), modulePaths: modules.map(file => join(dir, file)), env,
       });

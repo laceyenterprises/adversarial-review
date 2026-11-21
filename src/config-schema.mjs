@@ -40,8 +40,8 @@ const KNOWN = new Set([
 ]);
 
 function isNullableWrapper(js) {
-  return Array.isArray(js.anyOf) && js.anyOf.length === 2 && js.anyOf[1]?.type === 'null'
-    && Object.keys(js.anyOf[1]).length === 1;
+  return Array.isArray(js.anyOf) && js.anyOf.length === 2
+    && js.anyOf.some(branch => branch?.type === 'null' && Object.keys(branch).length === 1);
 }
 
 export function fromJsonSchema(js, path = '<root>') {
@@ -51,7 +51,7 @@ export function fromJsonSchema(js, path = '<root>') {
   if (unknown.length) throw new Error(`${path}: unsupported CFG JSON Schema keyword(s) ${unknown.join(', ')}`);
   if (isNullableWrapper(js)) {
     const { anyOf, ...annotations } = js;
-    return { ...fromJsonSchema({ ...anyOf[0], ...annotations }, path), __nullable: true };
+    return { ...fromJsonSchema({ ...anyOf.find(branch => !(branch?.type === 'null' && Object.keys(branch).length === 1)), ...annotations }, path), __nullable: true };
   }
   if (js.type === undefined) {
     if (js.anyOf) throw new Error(`${path}: unsupported anyOf`);
@@ -64,7 +64,10 @@ export function fromJsonSchema(js, path = '<root>') {
     for (const [key, child] of Object.entries(js.properties ?? {})) {
       node.__keys[key] = fromJsonSchema(child, `${path}.${key}`);
     }
-    for (const key of Array.isArray(js.required) ? js.required : []) node.__keys[key].__required = true;
+    for (const key of Array.isArray(js.required) ? js.required : []) {
+      if (!Object.hasOwn(node.__keys, key)) throw new Error(`${path}.${key}: required CFG property has no declared schema`);
+      node.__keys[key].__required = true;
+    }
     node.__strict = js.additionalProperties === false;
     if (js.additionalProperties && typeof js.additionalProperties === 'object') {
       node.__extra_keys_schema = fromJsonSchema(js.additionalProperties, `${path}.*`);

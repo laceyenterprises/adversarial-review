@@ -1,4 +1,5 @@
 import test from 'node:test';
+import os from 'node:os';
 import assert from 'node:assert/strict';
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -74,7 +75,9 @@ reviewer:
   }
 });
 
-test('AGR-CONVERGE-01 antigravity print timeout resolves from CFG and env aliases', () => {
+test('AGR-CONVERGE-01 antigravity print timeout resolves from CFG and env aliases', t => {
+  // This case verifies nominal config precedence; host scaling has its own suite.
+  t.mock.method(os, 'loadavg', () => [0, 0, 0]);
   const tmp = makeTmp();
   try {
     const modulePath = join(tmp, 'config.yaml');

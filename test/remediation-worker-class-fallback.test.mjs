@@ -526,19 +526,22 @@ test('resolveClaimedRemediatorRouting reads the declared list and, unwired, uses
 
   // `[]` declared: no class can take it, so the capped primary holds.
   const dir = mkdtempSync(join(tmpdir(), 'remfallback-off-'));
-  writeFileSync(join(dir, 'config.yaml'), 'version: 1\nroles:\n  remediator_fallback: []\n');
-  const disabled = await resolveClaimedRemediatorRouting({
-    job: jobHeldOnCodex({ providerResetAt: '2026-10-04T12:52:00.000Z' }),
-    primary: 'codex',
-    env: {},
-    nowMs: NOW,
-    topPath: join(dir, 'config.yaml'),
-    log: { warn() {} },
-  });
-  rmSync(dir, { recursive: true, force: true });
-  assert.equal(disabled.workerClass, 'codex');
-  assert.equal(disabled.hold, true);
-  assert.equal(disabled.reason, 'no-fallback-configured');
+  try {
+    writeFileSync(join(dir, 'config.yaml'), 'version: 1\nroles:\n  remediator_fallback: []\n');
+    const disabled = await resolveClaimedRemediatorRouting({
+      job: jobHeldOnCodex({ providerResetAt: '2026-10-04T12:52:00.000Z' }),
+      primary: 'codex',
+      env: {},
+      nowMs: NOW,
+      topPath: join(dir, 'config.yaml'),
+      log: { warn() {} },
+    });
+    assert.equal(disabled.workerClass, 'codex');
+    assert.equal(disabled.hold, true);
+    assert.equal(disabled.reason, 'no-fallback-configured');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 // ── REMFALLBACK-01 item 4: cross-model review stays intact ───────────────────

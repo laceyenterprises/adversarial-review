@@ -86,7 +86,7 @@ export const NODE_ONLY_KEYS = {
   remediation: {
     __type: 'dict',
     __strict: true,
-    __keys: { max_concurrent_jobs: int(1), max_concurrent_jobs_ceiling: int(8, 1) },
+    __keys: { max_concurrent_jobs: int(1, 1), max_concurrent_jobs_ceiling: int(8, 1) },
   },
   'adversarial.reviewer.load_aware': {
     __type: 'dict',

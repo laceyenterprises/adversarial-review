@@ -26,7 +26,9 @@ doc = json.load(open(path))
 for case in doc["cases"]:
     with tempfile.TemporaryDirectory() as scratch:
         for name, text in case["files"].items():
-            with open(os.path.join(scratch, name), "w") as handle:
+            target = os.path.join(scratch, name)
+            os.makedirs(os.path.dirname(target), exist_ok=True)
+            with open(target, "w") as handle:
                 handle.write(text)
         env = {"AGENT_OS_CFG_VALIDATION_EVENT_LOG": "", **case.get("env", {})}
         try:

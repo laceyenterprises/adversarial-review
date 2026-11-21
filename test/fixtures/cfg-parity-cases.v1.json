@@ -842,6 +842,25 @@
     "ok": false,
     "key": "worker_pool.dispatch.goal_lineage.max_bytes"
    }
+  },
+  {
+   "name": "nested module fixture directories",
+   "files": {
+    "config.yaml": "version: 1\n",
+    "modules/nested.yaml": "github:\n  org: nested-example\n"
+   },
+   "modules": [
+    "modules/nested.yaml"
+   ],
+   "get": [
+    "github.org"
+   ],
+   "python": {
+    "ok": true,
+    "values": {
+     "github.org": "nested-example"
+    }
+   }
   }
  ]
 }

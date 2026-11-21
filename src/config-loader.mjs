@@ -1351,7 +1351,7 @@ function jsTypeName(value) {
 }
 
 // Mirrors agent_os_config.validation._check_leaf; keep both in step.
-function checkLeaf(value, schema, keyPath, source) {
+function checkLeaf(value, schema, keyPath, source, tolerateUnknown = false, nested = {}) {
   const fail = (message, expected, got = value) => {
     throw new AgentOSConfigError(`${keyPath}: ${message}`, { key: keyPath, expected, got, source });
   };
@@ -1387,10 +1387,10 @@ function checkLeaf(value, schema, keyPath, source) {
       fail(`value ${JSON.stringify(value)} does not match ${description}`, description);
     }
   } else if (expected === TYPE_DICT) {
-    return validateDictPresentKeysOnly(value, schema, keyPath, source, null);
+    return validateDictPresentKeysOnly(value, schema, keyPath, source, null, tolerateUnknown, nested);
   } else if (expected === TYPE_LIST) {
     if (!Array.isArray(value)) fail(`expected list, got ${jsTypeName(value)} (${shown})`, 'list');
-    if (schema.__item) value = value.map((item, index) => checkLeaf(item, schema.__item, `${keyPath}[${index}]`, source));
+    if (schema.__item) value = value.map((item, index) => checkLeaf(item, schema.__item, `${keyPath}[${index}]`, source, tolerateUnknown, nested));
     if (schema.__unique) value = [...new Map(value.map(item => [JSON.stringify(item), item])).values()];
     if (schema.__min_items !== undefined && value.length < schema.__min_items) {
       fail(`expected at least ${schema.__min_items} item(s), got ${value.length}`, `>= ${schema.__min_items} item(s)`);
@@ -1502,7 +1502,7 @@ function validateDictPresentKeysOnly(
   if (typeof doc !== 'object' || Array.isArray(doc)) {
     const scalarKey = schema.__scalar_default_key;
     if (typeof scalarKey === 'string' && Object.hasOwn(allowed, scalarKey)) {
-      return { [scalarKey]: checkLeaf(doc, allowed[scalarKey], keyPath ? `${keyPath}.${scalarKey}` : scalarKey, source) };
+      return { [scalarKey]: checkLeaf(doc, allowed[scalarKey], keyPath ? `${keyPath}.${scalarKey}` : scalarKey, source, tolerateUnknown, { warnUnknownOnce, warningSource, droppedUnknownKeys }) };
     }
     const anchor = keyPath || '(root)';
     throw new AgentOSConfigError(`${anchor}: expected mapping, got ${jsTypeName(doc)}`, {
@@ -1515,6 +1515,8 @@ function validateDictPresentKeysOnly(
       throw new AgentOSConfigError(`${keyPath}: unknown policy key`, { key: keyPath, source });
     }
   }
+  // CFG requires complete atomic declarations (array items, keyed policies,
+  // and version); keep Python parity rather than deferring security completeness.
   for (const [key, child] of Object.entries(allowed)) {
     if (child.__required && !Object.hasOwn(doc, key)) {
       const full = keyPath ? `${keyPath}.${key}` : key;
@@ -1534,7 +1536,7 @@ function validateDictPresentKeysOnly(
       if (!strict && extraSchema) {
         out[key] = extraSchema.__type === TYPE_DICT
           ? validateDictPresentKeysOnly(raw, extraSchema, full, childSource, null, tolerateUnknown, nested)
-          : checkLeaf(raw, extraSchema, full, childSource);
+          : checkLeaf(raw, extraSchema, full, childSource, tolerateUnknown, nested);
       } else if (strict) {
         const near = nearestValidKey(key, Object.keys(allowed));
         const hint = near ? ` did you mean ${keyPath ? `${keyPath}.` : ''}${JSON.stringify(near)}?` : '';
@@ -1562,7 +1564,7 @@ function validateDictPresentKeysOnly(
         key: full, expected: 'not configured in YAML', got: raw, source: childSource,
       });
     }
-    out[key] = checkLeaf(raw, child, full, childSource);
+    out[key] = checkLeaf(raw, child, full, childSource, tolerateUnknown, nested);
   }
   return out;
 }
@@ -1572,17 +1574,18 @@ function validateDictPresentKeysOnly(
 function validateWorkerClassVaults(secrets) {
   if (!secrets || typeof secrets !== 'object') return;
   const shared = Array.isArray(secrets.shared_vaults) ? secrets.shared_vaults : [];
-  const policies = Object.entries(secrets.worker_class_vaults ?? {});
+  const policies = Object.entries(secrets.worker_class_vaults ?? {}).map(([name, policy]) => [`worker_pool.secrets.worker_class_vaults.${name}`, policy]);
   const fallback = secrets.default_vault_policy;
   if (fallback && Object.values(fallback).some(value => ![null, '', undefined].includes(value)
-    && !(Array.isArray(value) && !value.length))) policies.push(['fallback', fallback]);
-  for (const [workerClass, policy] of policies) {
-    const key = `worker_pool.secrets.worker_class_vaults.${workerClass}`;
-    const { vault = null, service_account_token_ref: ref = null, shared_vault_optin: optin = [] } = policy ?? {};
-    if (vault === null && ref === null && !optin.length) continue;
+    && !(Array.isArray(value) && !value.length))) policies.push(['worker_pool.secrets.default_vault_policy', fallback]);
+  for (const [key, policy] of policies) {
+    const { vault = null, service_account_token_ref: ref = null } = policy ?? {};
+    const optin = policy?.shared_vault_optin ?? [];
     const fail = (leaf, message) => {
       throw new AgentOSConfigError(`${key}.${leaf}: ${message}`, { key: `${key}.${leaf}` });
     };
+    if (!Array.isArray(optin)) fail('shared_vault_optin', 'expected list');
+    if (vault === null && ref === null && !optin.length) continue;
     if (typeof vault !== 'string' || !vault.trim()) fail('vault', 'required non-empty string');
     if (typeof ref !== 'string' || !/^op:\/\/([^/]+)\/(.+)\/([^/]+)$/.test(ref.trim())) {
       fail('service_account_token_ref', 'expected full op://<vault>/<item>/<field> ref');

@@ -1154,11 +1154,11 @@ async function dispatchAmaClosureFor({
       loadedConfig.getMergeAuthorityConfig(),
       { fallbackSources: loadedConfig.sources || {} },
     );
+    const configuredBuilder = loadedConfig.get?.('roles.build_pack_default_worker_class');
     cfg = {
       ...cfg,
       // CFG's default `plan` defers to a build plan; a cap re-head has none.
-      defaultBuilder: [undefined, null, 'plan'].includes(loadedConfig.get?.('roles.build_pack_default_worker_class'))
-        ? 'codex' : loadedConfig.get('roles.build_pack_default_worker_class'),
+      defaultBuilder: [undefined, null, 'plan'].includes(configuredBuilder) ? 'codex' : configuredBuilder,
       amaCloserMaxConcurrentLaunches: loadedConfig.get?.('watcher.ama_closer_max_concurrent_launches', 3) ?? 3,
     };
     cfg = applyRepositoryMergeOff(cfg, repoPath);

@@ -90,6 +90,12 @@ class CanonicalFenceReaderTest(unittest.TestCase):
         self.conn.close.assert_called_once_with()
         self.conn.commit.assert_not_called()
 
+    def test_canonical_receipt_accepts_text_or_decoded_json(self):
+        for value in (json.dumps(self.receipt), self.receipt):
+            with self.subTest(value_type=type(value).__name__):
+                self.conn.execute.return_value.fetchone.return_value = (value,)
+                self.assertEqual(self.reader.main(self.argv), self.receipt)
+
     def test_delayed_enqueue_or_missing_guard_refuses_retirement(self):
         for guard in (self.reader._check_scope, self.reader._require_absence):
             with self.subTest(guard=guard):

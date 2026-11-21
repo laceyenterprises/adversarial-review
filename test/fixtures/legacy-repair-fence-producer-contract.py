@@ -8,6 +8,9 @@ from contextlib import ExitStack
 import importlib.util
 from inspect import signature
 import json
+import os
+import subprocess
+from tempfile import TemporaryDirectory
 from pathlib import Path
 from types import SimpleNamespace
 import unittest
@@ -107,6 +110,105 @@ class ProducerContractTest(unittest.TestCase):
                 "persisted-fence-identity-mismatch",
             ):
                 reader.main(argv)
+
+    def test_actual_reservation_read_while_retirement_locks_are_held(self):
+        source_root = Path(__file__).resolve().parents[2]
+        with TemporaryDirectory(prefix="repair-fence-held-locks-") as temporary:
+            root = Path(temporary)
+            (root / "src").symlink_to(source_root / "src", target_is_directory=True)
+            script = r"""
+import assert from 'node:assert/strict';
+import {execFileSync} from 'node:child_process';
+import {mkdirSync, writeFileSync} from 'node:fs';
+import {dirname} from 'node:path';
+import {pathToFileURL} from 'node:url';
+const [source, root, read] = process.argv.slice(1);
+const {hammerRetryCapFilePath, updateHammerRetryCapLedger} = await import(pathToFileURL(source + '/src/ama/hammer-retry-cap.mjs'));
+const {tryAcquireCloserIntentLock} = await import(pathToFileURL(source + '/src/ama/pre-receipt-intent.mjs'));
+const {withRepositoryStateRead} = await import(pathToFileURL(source + '/src/repository-state-lock.mjs'));
+const identity = {repo:'fixture/widgets', prNumber:17};
+const epoch = {id:'repair-fixture', ownerKey:'fixture', baseHead:'a'.repeat(40)};
+const file = hammerRetryCapFilePath(root, identity);
+mkdirSync(dirname(file), {recursive:true});
+writeFileSync(file, JSON.stringify({...identity, repairEpochs:[epoch]}));
+withRepositoryStateRead(root, () => {
+  const unlock = tryAcquireCloserIntentLock(root, identity);
+  assert.equal(typeof unlock, 'function');
+  try {
+    updateHammerRetryCapLedger(root, identity, ledger => {
+      for (let i=0;i<3;i++) {
+        const result=execFileSync(process.execPath, ['--input-type=module','-e',read,root,identity.repo,'17'], {encoding:'utf8',timeout:5000});
+        assert.deepEqual(JSON.parse(result), [epoch]);
+      }
+      return ledger;
+    });
+  } finally {unlock();}
+});
+console.log('three real producer reads completed under both retirement locks');
+"""
+            result = subprocess.run(
+                [
+                    "node",
+                    "--input-type=module",
+                    "-e",
+                    script,
+                    str(source_root),
+                    str(root),
+                    producer.READ_EPOCHS,
+                ],
+                capture_output=True,
+                text=True,
+                timeout=25,
+                check=True,
+            )
+            self.assertIn("three real producer reads", result.stdout)
+
+    @unittest.skipUnless(
+        os.environ.get("AR_TEST_CANONICAL_FENCE_DSN"),
+        "owned Postgres fixture not supplied",
+    )
+    def test_real_postgres_committed_fence_read(self):
+        import psycopg
+        from session_ledger.db_postgres import (
+            PostgresLedgerConnection,
+            upgrade_postgres_schema,
+        )
+        from session_ledger.db_runtime import open_ledger_for_runtime_readonly
+        from session_ledger.pytest_disposable import require_test_database
+        from session_ledger.test_dsn import resolve_disposable_test_dsn
+        from session_ledger.repair_enqueue_fence import recover
+
+        dsn = resolve_disposable_test_dsn(os.environ["AR_TEST_CANONICAL_FENCE_DSN"])
+        require_test_database(dsn)
+        path = Path(__file__).resolve().parents[2] / "bin/read-legacy-repair-fence.py"
+        spec = importlib.util.spec_from_file_location(
+            "real_postgres_fence_reader", path
+        )
+        reader = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(reader)
+        upgrade_postgres_schema(dsn)
+        conn = PostgresLedgerConnection(psycopg.connect(dsn, connect_timeout=3))
+        try:
+            evidence = {
+                "ownerKey": "in-place-repair-" + "e" * 64,
+                "epochId": "repair-owned-fixture",
+                "repo": "fixture/widgets",
+                "prNumber": 17,
+                "submitter": {
+                    "provenanceRef": "merge-agent-rescue:fixture/widgets#17:owned-fixture"
+                },
+            }
+            committed = recover(conn, evidence, apply=True, revalidate=lambda: evidence)
+            readonly = open_ledger_for_runtime_readonly(dsn=dsn, timeout=5, fixed=True)
+            try:
+                self.assertEqual(
+                    reader.read_committed_proof(readonly, evidence["ownerKey"]),
+                    committed,
+                )
+            finally:
+                readonly.close()
+        finally:
+            conn.close()
 
 
 if __name__ == "__main__":

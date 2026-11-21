@@ -31,7 +31,7 @@ def read_committed_proof(conn, owner_key):
         ).fetchone()
         if not row or not row[0]:
             raise RepairFenceRefused("committed-enqueue-fence-required")
-        receipt = json.loads(row[0])
+        receipt = row[0] if isinstance(row[0], dict) else json.loads(row[0])
         evidence = receipt["evidence"]
         if evidence["ownerKey"] != owner_key:
             raise RepairFenceRefused("persisted-fence-identity-mismatch")

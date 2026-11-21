@@ -13,6 +13,12 @@ const { repo, prNumber, baseHead, epochId, ownerKey, handoffRound } = identity;
 assert.deepEqual(selector, [repo, String(prNumber), baseHead, epochId, ownerKey, String(handoffRound)]);
 switch (action) {
   case 'unavailable': throw new Error('canonical evidence unavailable');
+  case 'refused-with-warning':
+    console.error('DeprecationWarning: fixture-only warning');
+    console.error('repair-fence-refused:committed-enqueue-fence-required');
+    console.error('unexpected private detail must stay redacted');
+    process.exit(75);
+    break;
   case 'refused':
     console.error('repair-fence-refused:committed-enqueue-fence-required');
     process.exit(75);

@@ -118,6 +118,8 @@ test('reader refusals retain safe reason codes and redact unexpected stderr', t 
   const f = fixture(t);
   assert.throws(() => f.attempt(f.proof, 'refused'),
     { message: 'repair-fence-refused:committed-enqueue-fence-required' });
+  assert.throws(() => f.attempt(f.proof, 'refused-with-warning'),
+    { message: 'repair-fence-refused:committed-enqueue-fence-required' });
   assert.throws(() => f.attempt(f.proof, 'private-error'),
     { message: 'canonical-committed-repair-fence-or-current-evidence-unavailable' });
   assert.deepEqual(JSON.parse(f.read()), f.ledger);

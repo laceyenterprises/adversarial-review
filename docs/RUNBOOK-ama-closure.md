@@ -10416,3 +10416,20 @@ Repair preserves reviewed source and current-main semantics, stops on publicatio
 failure, and requires new-head checks and normal merge authority. Existing native
 owners retain custody. See [the governing state contract](STATE-MACHINE.md#conflictbeforeci-01--positive-conflict-precedes-absent-ci)
 and [RCA/activation boundary](postmortems/LAC-2148-conflict-before-ci.md).
+
+
+### Legacy-fence repository identity constraint
+
+`retire-legacy-repair.mjs` supports canonical lowercase repository selectors and
+ledgers whose stored `repo` exactly matches that selector. Mixed-case or
+pre-rename ledger identities refuse with `legacy-repair-reservation-mismatch`;
+this command does not migrate a ledger. Historical aliases are used only to
+identify and retain competing dispatch custody. Use the normal reviewed
+repository-rename recovery before attempting retirement of a noncanonical ledger.
+
+The producer reservation read uses its `READ_EPOCHS` Node expression and
+`readHammerRetryCapLedger`, a direct read with no retry mutation flock or
+closer-intent lock. The optional owned-fixture integration check validates it
+while both outer locks remain held. Never infer canonical absence merely from
+this file read; committed producer fencing and canonical global checks remain
+mandatory.

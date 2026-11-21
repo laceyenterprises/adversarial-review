@@ -23,6 +23,7 @@ test('suite guard reports and kills a deliberately leaked process group', () => 
   const pid = Number(output.match(/LEAKED_FIXTURE_PID=(\d+)/)?.[1]);
   assert.ok(Number.isInteger(pid), output);
   assert.throws(() => process.kill(pid, 0), { code: 'ESRCH' });
+  assert.match(output, /KILL_WATCHDOGS_SCHEDULED=1 UNCANCELLED_KILL_WATCHDOGS=0/);
 });
 
 test('suite guard forgets a closed detached group before a pgid can be recycled', () => {

@@ -27,6 +27,10 @@ an optional `configOverrides` (mapping or lazy reader). The config is read by
 only when the env layer did not settle the identity. See the
 [follow-up runbook](../follow-up-runbook.md).
 
+Both config-wired identity wrappers accept `loaderImpl` and forward it to the
+role-config reader. Workspace setup can use an injected loader without changing
+the process environment or reading host config.
+
 ## Not done
 
 No `ENV_ALIASES` entry: the loader's env coercion has no dict form, so the
@@ -36,6 +40,9 @@ before a host that uses them sets it.
 
 ## Verification
 
+- Final comment-only remediation: the injected-loader regression failed before
+  the forwarding fix (loader call count zero instead of one). After the fix,
+  `node --test test/rdxremidentity-02.test.mjs` passed all 16 tests.
 - `test/rdxremidentity-02.test.mjs` passed all 15 tests.
 - All 163 test files that import the edited modules, or the config and role-config
   loaders, passed: 2268, 2394 and 1941 tests in three runs, 0 failures. That

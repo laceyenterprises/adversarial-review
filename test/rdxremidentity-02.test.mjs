@@ -279,3 +279,29 @@ test('the config-wired workspace setup reads the identity from the config key', 
     ['config', '--worktree', 'user.email', CONFIG_IDENTITY.email],
   ]);
 });
+
+test('the config-wired workspace setup forwards an injected config loader', async (t) => {
+  const workspaceDir = mkdtempSync(path.join(tmpdir(), 'rdxremidentity-02-ws-'));
+  t.after(() => rmSync(workspaceDir, { recursive: true, force: true }));
+  mkdirSync(path.join(workspaceDir, '.git'));
+  const loader = t.mock.fn(() => ({
+    get(key) {
+      assert.equal(key, REPO_IDENTITY_OVERRIDES_CONFIG_KEY);
+      return { [REPO]: { codex: CONFIG_IDENTITY } };
+    },
+  }));
+  const calls = [];
+  await configureRemediationWorkspaceIdentityWithConfig({
+    workspaceDir,
+    workerClass: 'codex',
+    repo: REPO,
+    env: CLASS_ENV,
+    loaderImpl: loader,
+    execFileImpl: async (file, args) => { calls.push(args.slice(2)); return { stdout: '', stderr: '' }; },
+  });
+  assert.equal(loader.mock.callCount(), 1);
+  assert.deepEqual(calls.slice(1), [
+    ['config', '--worktree', 'user.name', CONFIG_IDENTITY.name],
+    ['config', '--worktree', 'user.email', CONFIG_IDENTITY.email],
+  ]);
+});

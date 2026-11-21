@@ -33,10 +33,10 @@ export function remediationWorkerGitIdentityWithConfig(workerClass, env = proces
 }
 
 // configureRemediationWorkspaceIdentity with the config layer wired in.
-export function configureRemediationWorkspaceIdentityWithConfig({ env = process.env, ...options }) {
+export function configureRemediationWorkspaceIdentityWithConfig({ env = process.env, loaderImpl, ...options }) {
   return configureRemediationWorkspaceIdentity({
     ...options,
     env,
-    configOverrides: repoIdentityConfigOverrides(env),
+    configOverrides: repoIdentityConfigOverrides(env, { loaderImpl }),
   });
 }

@@ -297,6 +297,7 @@ export const stmtMarkFailed = db.prepare(
 );
 // A terminal size failure or cancellation belongs only to the dispatched head/session.
 export const stmtMarkClaimFailed = prepareMarkClaimFailed(db);
+export { stmtMarkClaimFailed as stmtMarkSizeFailed };
 export const stmtMarkSizeRetry = prepareMarkSizeRetry(db);
 export const stmtFinalizePendingTerminalFailure = prepareFinalizePendingTerminalFailure(db);
 export const stmtReleaseReviewLease = db.prepare(

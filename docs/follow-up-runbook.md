@@ -1500,6 +1500,8 @@ Behavior:
 - writes an audit receipt under `data/review-cancellations/`
 - does not mutate `review_status`, retry counters, or any PR state columns
 
+The watcher matches the cancellation to the reviewer session and head. If
+both the cancellation intent and review row record a PGID, the IDs must match.
 The watcher first checks GitHub for a review the cancelled session already
 posted on that head. If it finds one, it reconciles the posted review. If no
 review was posted, it marks the matching claim `failed` with `[cancelled]`

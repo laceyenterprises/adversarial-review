@@ -57,7 +57,7 @@ export function hasReviewerCancellation(rootDir, { sessionUuid, headSha, pgid })
   try {
     const receipt = JSON.parse(readFileSync(`${reviewerRunStatePath(rootDir, sessionUuid)}.cancel`, 'utf8'));
     return receipt.sessionUuid === sessionUuid && receipt.headSha === headSha
-      && (receipt.pgid === pgid || receipt.pgid === null);
+      && (receipt.pgid === pgid || receipt.pgid === null || pgid == null);
   } catch {
     return false;
   }

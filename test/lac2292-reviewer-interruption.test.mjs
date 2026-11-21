@@ -7,6 +7,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createCliDirectReviewerRuntimeAdapter } from '../src/adapters/reviewer-runtime/cli-direct/index.mjs';
 import { readReviewerRunRecord, recordReviewerCancellation } from '../src/adapters/reviewer-runtime/run-state.mjs';
+import { hasReviewerCancellation } from '../src/adapters/reviewer-runtime/run-state.mjs';
 import * as reviewerOutcomes from '../src/reviewer-outcomes.mjs';
 import { reconcileReviewerSessions, reviewerBotLogin } from '../src/reviewer-reattach.mjs';
 import { shouldBackoffReviewerSpawn } from '../src/reviewer-cascade.mjs';
@@ -130,6 +131,17 @@ for (const signal of ['SIGTERM', 'SIGKILL']) test(`an unattributed ${signal} is 
   const result = await adapter.spawnReviewer(request);
   assert.equal(result.signal, signal);
   assert.equal(result.failureClass, 'daemon-bounce');
+});
+
+test('cancellation receipt tolerates an unrecorded PGID and fences known identities', t => {
+  const { rootDir } = fixture(t, '');
+  const claim = { sessionUuid: session, headSha: head, pgid: 123 };
+  recordReviewerCancellation(rootDir, claim);
+  assert.equal(hasReviewerCancellation(rootDir, { ...claim, pgid: null }), true);
+  assert.equal(hasReviewerCancellation(rootDir, claim), true);
+  assert.equal(hasReviewerCancellation(rootDir, { ...claim, pgid: 456 }), false);
+  assert.equal(hasReviewerCancellation(rootDir, { ...claim, pgid: null, headSha: 'b'.repeat(40) }), false);
+  assert.equal(hasReviewerCancellation(rootDir, { ...claim, pgid: null, sessionUuid: 'replacement' }), false);
 });
 
 for (const alreadyPosted of [false, true]) test(`operator cancellation reconciles GitHub before charging (posted=${alreadyPosted})`, async t => {

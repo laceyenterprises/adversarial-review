@@ -47,6 +47,9 @@ export function prepareMarkClaimFailed(db) {
       AND reviewer_head_sha = ? AND reviewer_session_uuid IS ?`);
 }
 
+// Legacy name for terminal size-recovery callers.
+export { prepareMarkClaimFailed as prepareMarkSizeFailed };
+
 export function prepareMarkSizeRetry(db) {
   return db.prepare(`UPDATE reviewed_prs
     SET review_status = 'pending-upstream', failed_at = ?, failure_message = ?,

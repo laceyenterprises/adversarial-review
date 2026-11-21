@@ -2566,7 +2566,9 @@ attempt. Typed GitHub budget deferral uses exit status `79` and holds the claim
 from respawning until the reported budget reset.
 
 For native reviewers, terminal operator cancellation requires intent bound to
-the reviewer session and head. Once the reviewer exits, the watcher reconciles
+the reviewer session and head. When both the receipt and claim have a PGID,
+those IDs must agree. A claim without a recorded PGID can still match by
+session and head. Once the reviewer exits, the watcher reconciles
 any posted review for that head before marking the matching claim `failed` with
 `[cancelled]` and charging the ordinary attempt. If GitHub evidence is
 temporarily unavailable, reconciliation can retry. Unattributed signals and

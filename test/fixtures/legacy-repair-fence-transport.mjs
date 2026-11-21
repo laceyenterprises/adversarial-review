@@ -13,6 +13,14 @@ const { repo, prNumber, baseHead, epochId, ownerKey, handoffRound } = identity;
 assert.deepEqual(selector, [repo, String(prNumber), baseHead, epochId, ownerKey, String(handoffRound)]);
 switch (action) {
   case 'unavailable': throw new Error('canonical evidence unavailable');
+  case 'refused':
+    console.error('repair-fence-refused:committed-enqueue-fence-required');
+    process.exit(75);
+    break;
+  case 'private-error':
+    console.error('postgresql://private-credential@host/private-path');
+    process.exit(75);
+    break;
   case 'queue-follow-up': {
     const pending = getFollowUpJobDir(rootDir, 'pending');
     mkdirSync(pending, { recursive: true });

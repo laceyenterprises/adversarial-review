@@ -1066,6 +1066,10 @@ command uses the operator's existing canonical ledger authority. It reads the
 committed receipt by exact key in a read-only transaction, checks both enqueue
 guards and repeats the producer's unfiltered key, retry and provenance probe.
 The reader has a 65-second total subprocess budget.
+During that read, the retry-ledger flock refuses watcher, refund and dispatch
+writes for this PR as busy; those writers recover on their next observation.
+The shared repository-state lock also delays an exclusive repository rename
+until the command exits. Allow this one-time stall when scheduling retirement.
 It independently rebuilds the evidence from GitHub, the current reservation,
 and the original merge-rescue handoff using the producer's native evidence
 reader. The receipt is read directly by the command. Its printout, the
@@ -1077,10 +1081,38 @@ PR must still have the exact base head at the live GitHub observation. A scoped,
 bound, published, identified, or competing reservation refuses retirement.
 Active follow-up work, an unsettled closer dispatch or a closer/merge lease
 also refuses.
+Dispatch identities accept historical repository aliases case-insensitively;
+an active dispatch under an old name still retains custody. Corrupt or
+unreadable merge-lease JSON already raises an error rather than proving absence.
 Unavailable or inconsistent evidence, missing guards and lock contention exit
 75 without a retirement record. GitHub can move independently of the local
 flocks. The command only records custody retirement at the checked base head.
 Any subsequent review, publication or dispatch must pass its own live gates.
+
+Producer `97995405ea1780c7e852b7746c5f8d47717c4f21` excludes
+`ownerObservedAt`, `ownerState` and `absentObservations` before calculating
+`reservationSha256`. Watcher observations therefore leave the receipt valid;
+changes to reservation identity or the handoff still refuse. The bridge uses
+private producer functions, so producer upgrades must retain their consumer
+signatures and this digest definition until Agent OS supplies a public
+read-only interface. The optional offline deployment check below imports the
+installed functions and exercises the real evidence builder with external I/O
+mocked, including observation changes between fencing and retirement:
+
+```sh
+source modules/worker-pool/lib/hq-python-runtime.sh
+hq_exec_python3_runtime -B \
+  tools/adversarial-review/test/fixtures/legacy-repair-fence-producer-contract.py
+```
+
+AR's ordinary offline test suite does not require an Agent OS checkout.
+Safe producer refusals surface as `repair-fence-refused:<reason-code>`,
+including `committed-enqueue-fence-required`, `persisted-fence-identity-mismatch`
+and `canonical-postgres-ledger-required`. A path suffix is removed.
+Unexpected errors retain
+`canonical-committed-repair-fence-or-current-evidence-unavailable`; a subprocess
+timeout reports `canonical-repair-fence-reader-timeout`. Neither diagnostic
+prints raw subprocess stderr, ledger connection details or handoff paths.
 
 Success writes `terminalAt`, `terminalReason: canonical-enqueue-fenced`, and
 `enqueueFenceReceipt` on the original epoch. It retains every epoch and charge

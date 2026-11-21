@@ -1,6 +1,8 @@
 """Exercise the read-only bridge without an Agent OS checkout or network."""
 
 import importlib.util
+from contextlib import redirect_stderr
+from io import StringIO
 import json
 from pathlib import Path
 import sys
@@ -136,6 +138,34 @@ class CanonicalFenceReaderTest(unittest.TestCase):
         with self.assertRaisesRegex(FenceRefused, "canonical-postgres-ledger-required"):
             self.reader.main(self.argv)
         self.reader.open_ledger_for_runtime_readonly.assert_not_called()
+
+    def test_refusal_codes_are_redacted_and_other_errors_stay_generic(self):
+        for error, expected in (
+            (
+                FenceRefused("committed-enqueue-fence-required"),
+                "repair-fence-refused:committed-enqueue-fence-required",
+            ),
+            (
+                FenceRefused("original-submitter-path-key-mismatch: /private/handoff"),
+                "repair-fence-refused:original-submitter-path-key-mismatch",
+            ),
+            (
+                FenceRefused("postgresql://private@host/db"),
+                "canonical-committed-repair-fence-or-current-evidence-unavailable",
+            ),
+            (
+                ImportError("private module path"),
+                "canonical-committed-repair-fence-or-current-evidence-unavailable",
+            ),
+        ):
+            with self.subTest(error=error):
+                stderr = StringIO()
+                with (
+                    patch.object(self.reader, "main", side_effect=error),
+                    redirect_stderr(stderr),
+                ):
+                    self.assertEqual(self.reader.run(self.argv), 75)
+                self.assertEqual(stderr.getvalue().strip(), expected)
 
 
 if __name__ == "__main__":

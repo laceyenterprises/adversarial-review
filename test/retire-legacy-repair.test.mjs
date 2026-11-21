@@ -11,6 +11,7 @@ import { amaCloserLeaseFilePath } from '../src/ama/closer-lease.mjs';
 import { amaCloserDispatchFilePath } from '../src/ama/dispatch-record-read.mjs';
 import { tryAcquireCloserIntentLock } from '../src/ama/pre-receipt-intent.mjs';
 import { getFollowUpJobDir } from '../src/follow-up-jobs.mjs';
+import { mergeLeaseFilePath, readMergeLeaseHolders } from '../src/ama/merge-lease.mjs';
 
 const identity = { repo: 'fixture/widgets', prNumber: 17, baseHead: 'a'.repeat(40),
   epochId: 'repair-aabbccdd-0000-1111-2222-333344445555',
@@ -49,7 +50,7 @@ function fixture(t, changeEpoch = () => {}) {
   write(path, ledger);
   const runtime = join(workspace, 'modules/worker-pool/lib/hq-python-runtime.sh');
   mkdirSync(dirname(runtime), { recursive: true });
-  writeFileSync(runtime, 'hq_exec_python3_runtime() { "$FIXTURE_NODE" "$FIXTURE_READER" "$@" 2>"${1%/*}/fixture-reader.stderr"; }\n');
+  writeFileSync(runtime, 'hq_exec_python3_runtime() { "$FIXTURE_NODE" "$FIXTURE_READER" "$@"; }\n');
   const reader = fileURLToPath(new URL('fixtures/legacy-repair-fence-transport.mjs', import.meta.url));
   const runId = 'mar-a-20261121T000000Z-000abc';
   const { repo, prNumber, baseHead, epochId, ownerKey } = identity;
@@ -101,6 +102,63 @@ test('a committed fence retires exactly one legacy reservation and retains the c
     ownerKey, cause: 'closure-retry-exhausted' });
   assert.equal(reserve(identity.ownerKey).reason, 'repair-worker-terminal');
   assert.equal(reserve('different-owner').reason, 'repair-epoch-cap');
+});
+
+test('watcher observation changes do not change the reservation selected for retirement', t => {
+  const f = fixture(t, epoch => Object.assign(epoch, {
+    ownerObservedAt: '2026-11-21T00:31:00Z', ownerState: 'absent-unfenced', absentObservations: 42,
+  }));
+  assert.equal(f.attempt().ok, true);
+  const epoch = JSON.parse(f.read()).repairEpochs[1];
+  assert.equal(epoch.absentObservations, 42);
+  assert.equal(epoch.ownerState, 'absent-unfenced');
+});
+
+test('reader refusals retain safe reason codes and redact unexpected stderr', t => {
+  const f = fixture(t);
+  assert.throws(() => f.attempt(f.proof, 'refused'),
+    { message: 'repair-fence-refused:committed-enqueue-fence-required' });
+  assert.throws(() => f.attempt(f.proof, 'private-error'),
+    { message: 'canonical-committed-repair-fence-or-current-evidence-unavailable' });
+  assert.deepEqual(JSON.parse(f.read()), f.ledger);
+});
+
+test('unreadable merge leases already fail closed before the canonical reader runs', t => {
+  const f = fixture(t);
+  const path = mergeLeaseFilePath(f.root, { repo: identity.repo, base: 'main' });
+  mkdirSync(dirname(path), { recursive: true });
+  writeFileSync(path, '{"repo":');
+  assert.throws(() => readMergeLeaseHolders({ rootDir: f.root, ...identity }), SyntaxError);
+  assert.throws(() => f.attempt(f.proof, 'unavailable'), /JSON/);
+  assert.deepEqual(JSON.parse(f.read()), f.ledger);
+});
+
+test('strict dispatch reads accept settled dispatches under renamed repository aliases', t => {
+  const f = fixture(t);
+  const oldRepo = 'fixture/old-widgets';
+  f.write(join(f.root, 'data/repository-names.json'), [
+    { repository_id: 1, name: oldRepo, current: identity.repo },
+    { repository_id: 1, name: identity.repo, current: identity.repo },
+  ]);
+  const dispatch = amaCloserDispatchFilePath(f.root, { ...identity, repo: oldRepo.toUpperCase(), headSha: identity.baseHead });
+  const record = { ...identity, repo: oldRepo.toUpperCase(), state: 'merged' };
+  f.write(dispatch, record);
+  // A settled historical dispatch does not refuse solely for its old name.
+  assert.equal(f.attempt().ok, true);
+});
+
+test('a renamed live dispatch still blocks retirement and a foreign payload refuses', t => {
+  const f = fixture(t);
+  const oldRepo = 'fixture/old-widgets';
+  f.write(join(f.root, 'data/repository-names.json'), [
+    { repository_id: 1, name: oldRepo, current: identity.repo },
+  ]);
+  const dispatch = amaCloserDispatchFilePath(f.root, { ...identity, repo: oldRepo, headSha: identity.baseHead });
+  f.write(dispatch, { ...identity, repo: oldRepo.toUpperCase(), state: 'dispatched' });
+  assert.throws(() => f.attempt(f.proof, 'unavailable'), /closer-owned-or-unknown/);
+  f.write(dispatch, { ...identity, repo: 'foreign/repo', state: 'merged' });
+  assert.throws(() => f.attempt(f.proof, 'unavailable'), /identity mismatch/);
+  assert.deepEqual(JSON.parse(f.read()), f.ledger);
 });
 
 for (const [name, change] of [

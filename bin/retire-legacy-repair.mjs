@@ -30,7 +30,10 @@ function readCanonicalProof(rootDir, { repo, prNumber, baseHead, epochId, ownerK
     ], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], env, timeout: 65_000,
       killSignal: 'SIGKILL', maxBuffer: 32_768 });
     return JSON.parse(output);
-  } catch {
+  } catch (error) {
+    const refusal = /^repair-fence-refused:([a-z][a-z0-9-]{0,119})$/.exec(String(error.stderr ?? '').trim());
+    if (error.status === 75 && refusal) throw new Error(refusal[0]);
+    if (error.code === 'ETIMEDOUT') throw new Error('canonical-repair-fence-reader-timeout');
     throw new Error('canonical-committed-repair-fence-or-current-evidence-unavailable');
   }
 }

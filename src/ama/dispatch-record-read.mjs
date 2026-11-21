@@ -2,6 +2,7 @@ import { readFileSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { listSettledJsonNames } from './dispatch-dir-names.mjs';
 import { followUpJobFileFilter } from '../follow-up-job-names.mjs';
+import { repositoryNames } from '../repository-names.mjs';
 
 // Leaf reader shared by closer admission and event-driven hammer wakes.
 export function amaCloserDispatchDir(rootDir) {
@@ -35,11 +36,14 @@ export function readAmaCloserDispatchRecordsForPR(rootDir, { repo, prNumber, str
     if (error.code === 'ENOENT') return [];
     throw error;
   }
-  return names.filter(followUpJobFileFilter({ rootDir, repo, prNumber }))
+  const aliases = strict ? new Set(repositoryNames(rootDir, repo).map(name => name.toLowerCase())) : null;
+  return names.filter(followUpJobFileFilter({ rootDir, repo, prNumber, caseInsensitiveRepo: strict }))
     .flatMap(name => {
       try {
         const record = JSON.parse(readFileSync(join(dir, name), 'utf8'));
-        if (record?.repo === repo && Number(record.prNumber) === Number(prNumber)) return [record];
+        const matchesRepo = strict ? typeof record?.repo === 'string' && aliases.has(record.repo.toLowerCase())
+          : record?.repo === repo;
+        if (matchesRepo && Number(record.prNumber) === Number(prNumber)) return [record];
         if (strict) throw new Error('closer dispatch record identity mismatch');
         return [];
       } catch (error) {

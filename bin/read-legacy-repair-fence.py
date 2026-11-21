@@ -2,6 +2,7 @@
 
 import json
 from pathlib import Path
+import re
 import sys
 from types import SimpleNamespace
 
@@ -71,13 +72,29 @@ def main(argv):
     return receipt
 
 
-if __name__ == "__main__":
+def run(argv):
     try:
-        print(json.dumps(main(sys.argv[1:])))
+        print(json.dumps(main(argv)))
+        return 0
+    except RepairFenceRefused as exc:
+        # Some producer refusals append a private handoff path after a colon.
+        reason = str(exc).partition(": ")[0]
+        if re.fullmatch(r"[a-z][a-z0-9-]{0,119}", reason):
+            print(f"repair-fence-refused:{reason}", file=sys.stderr)
+        else:
+            print(
+                "canonical-committed-repair-fence-or-current-evidence-unavailable",
+                file=sys.stderr,
+            )
+        return 75
     except Exception:
         # Reader exceptions can contain connection details or handoff paths.
         print(
             "canonical-committed-repair-fence-or-current-evidence-unavailable",
             file=sys.stderr,
         )
-        sys.exit(75)
+        return 75
+
+
+if __name__ == "__main__":
+    sys.exit(run(sys.argv[1:]))

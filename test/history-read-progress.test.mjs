@@ -1,7 +1,7 @@
 import './helpers/load-aware-timeout-fixture.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { existsSync, mkdtempSync, readdirSync, rmSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { createHistoryReader } from '../src/ama/history-reader.mjs';
@@ -12,6 +12,106 @@ import { primaryRenameRepository } from './helpers/primary-change.mjs';
 const base = 'a'.repeat(40), head = 'c'.repeat(40);
 const repo = 'fixture/repo', prNumber = 42;
 const never = () => new Promise(() => {});
+
+function comparisonFixture(t, { durable = true, mergeBase = base } = {}) {
+  const rootDir = mkdtempSync(join(tmpdir(), 'history-comparison-'));
+  t.after(() => rmSync(rootDir, { force: true, recursive: true }));
+  const counts = { tree: 0, blob: 0, diff: 0 };
+  const entry = (path, sha) => ({ path, sha: sha.repeat(40), type: 'blob', mode: '100644' });
+  let cachedOnly = false;
+  const reader = () => createHistoryReader({ contextTimeoutMs: 10_000,
+    ...(durable ? { progress: { rootDir, repo, prNumber, headSha: head } } : {}),
+    execGhWithRetryImpl: async ({ args }) => {
+      const path = args[1];
+      let data;
+      if (path.includes('/compare/')) data = { merge_base_commit: { sha: mergeBase }, status: 'ahead', total_commits: 0 };
+      else {
+        assert.equal(cachedOnly, false, 'projection must not walk trees or read blobs');
+        if (path.includes('/git/trees/')) {
+          counts.tree++;
+          data = { truncated: false, tree: path.endsWith(mergeBase)
+            ? [entry('old.txt', '1')] : [entry('renamed.txt', '1'), entry('chosen.txt', '2'), entry('other.txt', '3')] };
+        } else {
+          counts.blob++;
+          data = { encoding: 'base64', content: 'eAo=', size: 2 };
+        }
+      }
+      return { stdout: JSON.stringify(data) };
+    },
+    diffImpl: async () => {
+      assert.equal(cachedOnly, false, 'projection must not reopen patch checkpoints');
+      counts.diff++;
+      return { stdout: 'diff\n@@ -0,0 +1 @@\n+x\n' };
+    },
+  });
+  const retainProjectionsOnly = () => {
+    const dir = join(rootDir, 'data', 'primary-change-history');
+    for (const progress of readdirSync(dir)) for (const file of readdirSync(join(dir, progress))) {
+      const path = join(dir, progress, file);
+      const { readKey } = JSON.parse(readFileSync(path, 'utf8'));
+      if (!readKey[1].startsWith('complete-file-') && !String(readKey[2]).includes('/compare/')) rmSync(path);
+    }
+    cachedOnly = true;
+  };
+  return { reader, counts, retainProjectionsOnly };
+}
+
+test('inventory predicates and boolean flags reuse inventory without poisoning complete patches', async t => {
+  const f = comparisonFixture(t);
+  const path = `repos/${repo}/compare/${base}...${head}`;
+  const inventory = await f.reader().compareFiles(path, filename => {
+    assert.ok(filename, 'scope is evaluated only on real filenames');
+    return false;
+  });
+  assert.deepEqual(f.counts, { tree: 2, blob: 0, diff: 0 });
+  f.retainProjectionsOnly();
+  assert.deepEqual(await f.reader().compareFiles(path, () => false), inventory);
+  assert.deepEqual(await f.reader().compareFiles(path, false), inventory);
+  assert.deepEqual(await f.reader().compareFiles(`repos/${repo}/compare/${base.toUpperCase()}...${head.toUpperCase()}`, false), inventory);
+  assert.equal(inventory.files.find(file => file.filename === 'renamed.txt').previous_filename, 'old.txt');
+});
+
+test('scoped comparisons project cached complete patches and preserve rename identity across SHA casing', async t => {
+  const f = comparisonFixture(t);
+  const path = `repos/${repo}/compare/${base}...${head}`;
+  const full = await f.reader().compareFiles(`repos/${repo}/compare/${base.toUpperCase()}...${head.toUpperCase()}`);
+  assert.ok(full.files.find(file => file.filename === 'other.txt').patch);
+  const counts = { ...f.counts };
+  f.retainProjectionsOnly();
+  const scoped = await f.reader().compareFiles(path, filename => filename === 'chosen.txt');
+  assert.ok(scoped.files.find(file => file.filename === 'chosen.txt').patch);
+  assert.deepEqual(scoped.files.find(file => file.filename === 'other.txt'),
+    { filename: 'other.txt', status: 'added', sha: '3'.repeat(40) });
+  assert.deepEqual(scoped.files.find(file => file.filename === 'renamed.txt'),
+    { filename: 'renamed.txt', previous_filename: 'old.txt', status: 'renamed', sha: '1'.repeat(40), additions: 0, deletions: 0 });
+  const inventory = await f.reader().compareFiles(path, () => false);
+  assert.ok(inventory.files.every(file => !Object.hasOwn(file, 'patch')));
+  assert.deepEqual(await f.reader().compareFiles(path), full, 'projection never mutates complete evidence');
+  assert.deepEqual(f.counts, counts);
+});
+
+test('cold scoped and inventory reads cannot satisfy a later complete-patch read', async t => {
+  for (const scope of [false, () => false, filename => filename === 'chosen.txt']) await t.test(String(scope), async t => {
+    const f = comparisonFixture(t);
+    const path = `repos/${repo}/compare/${base}...${head}`;
+    await f.reader().compareFiles(path, scope);
+    const full = await f.reader().compareFiles(path);
+    assert.ok(full.files.find(file => file.filename === 'chosen.txt').patch);
+    assert.ok(full.files.find(file => file.filename === 'other.txt').patch);
+    f.retainProjectionsOnly();
+    assert.deepEqual(await f.reader().compareFiles(path, true), full);
+  });
+});
+
+test('boolean inventory flags also work without progress and with a different merge base', async t => {
+  for (const options of [{ durable: false }, { mergeBase: 'b'.repeat(40) }]) {
+    const f = comparisonFixture(t, options);
+    const result = await f.reader().compareFiles(`repos/${repo}/compare/${base}...${head}`, false);
+    assert.equal(result.filesComplete, true);
+    assert.equal(result.files.length, 3);
+    assert.deepEqual(f.counts, { tree: 2, blob: 0, diff: 0 });
+  }
+});
 
 test('HISTREADLOAD-01: a fresh reader resumes persisted pages across bounded attempts and head changes invalidate them', async t => {
   const rootDir = mkdtempSync(join(tmpdir(), 'history-progress-'));

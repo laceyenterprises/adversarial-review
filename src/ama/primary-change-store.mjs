@@ -65,6 +65,7 @@ export function discardHistoryProgress(args) {
 }
 
 // Checkpoint only completed immutable reads, never verdicts or live metadata.
+// Omitting compute performs a lookup only; a miss returns undefined.
 // A directory per head lets the sweeper evict whole histories independently
 // of the completed-record count, with a separate aggregate byte budget.
 export async function storedHistoryRead(args, readKey, compute, signal) {
@@ -82,6 +83,7 @@ export async function storedHistoryRead(args, readKey, compute, signal) {
   } catch (error) {
     if (error.code !== 'ENOENT' && !(error instanceof SyntaxError)) throw error;
   }
+  if (!compute) return undefined;
   const value = await compute();
   signal?.throwIfAborted();
   assertStoreOwner(args.rootDir, dir);

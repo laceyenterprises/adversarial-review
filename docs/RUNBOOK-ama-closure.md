@@ -5644,8 +5644,14 @@ review names a different head. Without such a review, cached scoped histories
 skip this work on every tick. An incomplete comparison, merge-base mismatch
 or other optional hydration failure keeps preservation evidence scoped and
 requires exact-head review; cancellation and history deadlines still propagate.
-When older reviews exist, hydration remains transient and may repeat within
-the existing history budget and per-file checkpoint reuse.
+When older reviews exist, hydration remains transient in the completed history
+record. Exact comparisons whose resolved merge base matches the requested base
+also checkpoint complete patch projections in head-scoped progress. Repeated
+full or scoped calls reuse those rows without tree walks or per-file checkpoint
+reads; scoped calls strip unselected patch fields. Inventory-only predicates and
+boolean flags reuse a separate inventory projection and cannot satisfy a later
+full-patch read. Compare SHA casing does not change either projection's identity.
+The existing history deadline and progress cleanup/retention still apply.
 Migration proof still verifies the relevant object bytes and ancestry
 separately. The history deadline and shared GitHub admission floor apply to
 all these reads.

@@ -3246,13 +3246,15 @@ for (const race of ['none', 'row-moved', 'operator-request']) test(`LAC-2231: cy
   } finally { rmSync(tmp, { recursive: true, force: true }); }
 });
 
-test('EXHAUSTEDHEADOWNER-01: capped stale builder head reaches verdict-only admission', () => {
+for (const mergeOwnsHead of [false, true]) test(
+  `EXHAUSTEDHEADOWNER-01: capped stale builder head ${mergeOwnsHead ? 'waits behind native merge custody' : 'reaches verdict-only admission'}`, () => {
   const tmp = mkdtempSync(path.join(tmpdir(), 'caproute-claim-'));
   try {
     const loaderPath = path.join(tmp, 'loader.mjs');
     const registerPath = path.join(tmp, 'register.mjs');
     const runnerPath = path.join(tmp, 'runner.mjs');
-    writeFileSync(loaderPath, buildLoaderSource({ subjectHeads: { '101': 'b'.repeat(40) }, capRouteSource: `
+    writeFileSync(loaderPath, buildLoaderSource({ subjectHeads: { '101': 'b'.repeat(40) },
+      subject101Overrides: { baseRefName: 'main' }, capRouteSource: `
       globalThis.capRoutes = [];
       export function isReviewCycleCapRoutedToHammer({reviewRow}) { return reviewRow?.failure_message?.startsWith('[review-cycle-cap]') === true; }
       export async function maybeRouteReviewCycleCapToHammer(args) {
@@ -3262,13 +3264,36 @@ test('EXHAUSTEDHEADOWNER-01: capped stale builder head reaches verdict-only admi
       }` }));
     writeFileSync(registerPath, buildRegisterSource(loaderPath));
     writeFileSync(runnerPath, buildRunnerSource({
-      prePollSetup: `globalThis.__watcherClaimLoopFreshHeads = { '101': '${'b'.repeat(40)}' }; db.prepare(\`INSERT INTO reviewed_prs
+      prePollSetup: `
+      const head = '${'b'.repeat(40)}', repo = 'laceyenterprises/adversarial-review';
+      const { acquireMergeLease, inspectMergeLease, releaseMergeLease } = await import(${JSON.stringify(fileUrl('src', 'ama', 'merge-lease.mjs'))});
+      const rootDir = ${JSON.stringify(REPO_ROOT)};
+      let lease;
+      if (${mergeOwnsHead}) {
+        const result = acquireMergeLease({ rootDir, repo, base: 'main', holderPr: 101, holderHead: head, holderPid: process.pid });
+        assert.equal(result.acquired, true);
+        lease = result.lease;
+      }
+      globalThis.__watcherClaimLoopFreshHeads = { '101': head };
+      db.prepare(\`INSERT INTO reviewed_prs
         (repo, pr_number, reviewed_at, reviewer, pr_state, review_status, review_attempts,
          reviewer_head_sha, revision_ref, failure_message)
         VALUES (?, 101, ?, 'codex', 'open', 'failed', 9, 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', '[review-cycle-cap] capped')\`)
         .run('laceyenterprises/adversarial-review', '2026-05-15T12:00:00Z');`,
       afterFirstPoll: `
         assert.deepEqual(globalThis.capRoutes, []);
+        if (lease) {
+          const pending = db.prepare('SELECT * FROM reviewed_prs WHERE pr_number=101').get();
+          assert.equal(claims.filter(claim => claim.prNumber === 101).length, 0, JSON.stringify({
+            reason: pending.rereview_reason, revision: pending.revision_ref, failedAt: pending.failed_at,
+            lease: inspectMergeLease({ rootDir, repo, base: 'main' }),
+          }));
+          assert.equal(pending.review_status, 'pending');
+          assert.equal(pending.rereview_reason, 'system-exhausted-head-verdict:' + head);
+          assert.equal(pending.reviewer_session_uuid, null);
+          assert.equal(releaseMergeLease({ ...lease, rootDir, yielded: true }).released, true);
+          await pollOnce(octokit, pollOptions);
+        }
         const verdictSpawns = globalThis.__watcherClaimLoopReviewerSpawns.filter(spawn => spawn.subjectContext.prNumber === 101);
         assert.equal(verdictSpawns.length, 1);
         assert.equal(verdictSpawns[0].subjectContext.verdictOnly, true);
@@ -3721,7 +3746,8 @@ for (const scenario of ['under-budget', 'exhausted-builder', 'exhausted-closer',
       'export async function processReviewSubject(entry, ctx) {',
       'export async function processReviewSubject(entry, ctx) { if (globalThis.probeFailed) (globalThis.subjectsAfterProbeFailure ||= []).push(entry.prNumber); ctx = { ...ctx, ...globalThis.__ceilingLoggingContext };',
     );
-    writeFileSync(loaderPath, buildLoaderSource({ subjectHeads: { 101: head }, followUpJobsSource })
+    writeFileSync(loaderPath, buildLoaderSource({ subjectHeads: { 101: head },
+      subject101Overrides: { baseRefName: 'main' }, followUpJobsSource })
       .replace('createHeadCloserCommitSuppressionResolver()', 'createHeadCloserCommitSuppressionResolver({ prNumber })')
       .replace('return async () => ({ suppressed: false, reason: \'fixture\' });',
         scenario === 'probe-error' ? "return async () => { if (prNumber === 101) { globalThis.probeFailed = true; throw new Error('synthetic commit probe outage'); } return { suppressed: false }; };"

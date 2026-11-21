@@ -1113,6 +1113,54 @@ export function inspectMergeLease(...args) {
   });
 }
 
+function mergeLeaseHolderObservation(lease, { inspectedAt, currentHost, pidAliveFn, captureProcessImpl }) {
+  const ageSeconds = lease ? ageSecondsFrom(lease.acquiredAt, inspectedAt) : null;
+  const deadlineSeconds = lease?.deadlineSeconds ?? defaultDeadlineSeconds();
+  const pastDeadline = ageSeconds !== null && ageSeconds >= deadlineSeconds;
+  const holderLiveness = leaseHolderLiveness({ pid: lease?.holderPid, host: lease?.holderHost,
+    startedAt: lease?.holderStartedAt, acquiredAt: lease?.acquiredAt },
+  { host: currentHost, isProcessAlive: pidAliveFn, captureProcessImpl });
+  return { ageSeconds, deadlineSeconds, pastDeadline, holderLiveness };
+}
+
+function mergeLeaseReclaimReason(lease, observation, currentHost) {
+  if (lease.holderHost === currentHost) {
+    return observation.holderLiveness === 'dead' ? 'dead-holder-pid' : null;
+  }
+  return observation.pastDeadline ? 'past-deadline' : null;
+}
+
+// The SQLite claim must commit before this lock is released. Native lease
+// acquisition takes the same lock before publishing its holder, so a lease
+// granted second observes the committed claim in its under-lease owner check.
+export function withMergeLeaseReviewClaim({
+  rootDir, repo, base, prNumber, headSha, now,
+  pidAliveFn = pidIsLive, captureProcessImpl = captureCloserProcessSync,
+}, claim) {
+  if (!base) return { reason: 'merge-lease-base-unavailable' };
+  return withRepositoryStateRead(rootDir, () => {
+    ({ repo } = canonicalRepositoryArguments(rootDir, { repo }));
+    const leasePath = mergeLeaseFilePathWithinRepositoryState(rootDir, { repo, base });
+    const locked = withMutationLock(leasePath, () => {
+      const lease = readJsonFile(leasePath);
+      const sameSubject = lease?.repo === repo && lease.base === base
+        && Number(lease.holderPr) === Number(prNumber)
+        && String(lease.holderHead || '').toLowerCase() === headSha.toLowerCase();
+      if (sameSubject) {
+        const currentHost = hostname();
+        const observation = mergeLeaseHolderObservation(lease, {
+          inspectedAt: now || isoNow(), currentHost, pidAliveFn, captureProcessImpl,
+        });
+        if (!mergeLeaseReclaimReason(lease, observation, currentHost)) {
+          return claim('native-merge-custody');
+        }
+      }
+      return claim(null);
+    });
+    return locked.acquired ? locked.value : { reason: 'merge-lease-mutation-busy' };
+  });
+}
+
 function inspectMergeLeaseWithinRepositoryState({
   rootDir,
   repo,
@@ -1130,14 +1178,11 @@ function inspectMergeLeaseWithinRepositoryState({
   const lease = readJsonFile(leasePath, null);
   const waiters = readWaiterDoc(waitersPath).waiters;
   const attempts = readMergeLeaseAttempts(rootDir, { repo, base });
-  const ageSeconds = lease ? ageSecondsFrom(lease.acquiredAt, inspectedAt) : null;
-  const deadlineSeconds = lease?.deadlineSeconds ?? defaultDeadlineSeconds();
-  const pastDeadline = lease && ageSeconds !== null ? ageSeconds >= deadlineSeconds : false;
+  const observation = mergeLeaseHolderObservation(lease, {
+    inspectedAt, currentHost, pidAliveFn, captureProcessImpl,
+  });
   const sameHost = lease ? lease.holderHost === currentHost : false;
-  const holderLiveness = leaseHolderLiveness({ pid: lease?.holderPid, host: lease?.holderHost,
-    startedAt: lease?.holderStartedAt, acquiredAt: lease?.acquiredAt },
-  { host: currentHost, isProcessAlive: pidAliveFn, captureProcessImpl });
-  const holderPidLive = lease && sameHost ? holderLiveness === 'dead' ? false
+  const holderPidLive = lease && sameHost ? observation.holderLiveness === 'dead' ? false
     : Boolean(pidAliveFn(lease.holderPid)) : null;
   return {
     key: deriveLeaseKey({ repo, base }).key,
@@ -1146,11 +1191,8 @@ function inspectMergeLeaseWithinRepositoryState({
     holder: lease,
     lease,
     exists: Boolean(lease),
-    ageSeconds,
-    deadlineSeconds,
-    pastDeadline,
+    ...observation,
     holderPidLive,
-    holderLiveness,
     waiters,
     attempts,
     inspectedAt,
@@ -1656,11 +1698,8 @@ function reclaimIfStaleWithinRepositoryState({
     return { reclaimed: false, reason: 'absent', inspection };
   }
 
-  const sameHost = lease.holderHost === (host || hostname());
-  const deadSameHostPid = sameHost && inspection.holderLiveness === 'dead';
-  const staleByDeadline = inspection.pastDeadline;
-  const reclaimByDeadline = staleByDeadline && !sameHost;
-  if (!deadSameHostPid && !reclaimByDeadline) {
+  const reason = mergeLeaseReclaimReason(lease, inspection, host || hostname());
+  if (!reason) {
     return { reclaimed: false, reason: 'live-within-deadline', inspection };
   }
 
@@ -1673,15 +1712,15 @@ function reclaimIfStaleWithinRepositoryState({
     holderHead: lease.holderHead,
     acquiredAt: lease.acquiredAt,
     now,
-    historyEvent: deadSameHostPid ? 'steal' : 'expiry',
-    reason: deadSameHostPid ? 'dead-holder-pid' : 'past-deadline',
+    historyEvent: reason === 'dead-holder-pid' ? 'steal' : 'expiry',
+    reason,
   });
   if (!released.released) {
     return { reclaimed: false, reason: released.reason || 'identity-changed', inspection, release: released };
   }
   return {
     reclaimed: true,
-    reason: deadSameHostPid ? 'dead-holder-pid' : 'past-deadline',
+    reason,
     inspection,
     release: released,
   };

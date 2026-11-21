@@ -279,7 +279,7 @@ import {
   spawnReviewer,
 } from './reviewer-spawn-settle.mjs';
 import { maybeDispatchReviewerTimeoutExhaustedMergeAgent } from './reviewer-timeout-exhausted-dispatch.mjs';
-import { admitExhaustedHeadVerdict, isExhaustedHeadVerdictRequested } from './exhausted-head-verdict.mjs';
+import { admitExhaustedHeadVerdict, claimWithExhaustedHeadMergeCustody, isExhaustedHeadVerdictRequested } from './exhausted-head-verdict.mjs';
 import { reconcileRepairOwner, bindRepairHead } from './repair-epochs.mjs';
 import { refundReviewHarnessFault } from './review-harness-retry.mjs';
 import { isReviewCycleCapRoutedToHammer, maybeRouteReviewCycleCapToHammer } from './review-cycle-cap-hammer.mjs';
@@ -2795,6 +2795,7 @@ export async function processReviewSubject(entry, ctx) {
         current?.review_status === 'pending' &&
         pendingRevisionRef &&
         String(current.revision_ref || '') !== String(pendingRevisionRef) &&
+        !isExhaustedHeadVerdictRequested(current, subject.headSha) &&
         !subject.terminal
       ) {
         try {
@@ -3835,10 +3836,30 @@ export async function processReviewSubject(entry, ctx) {
                 repoPath,
                 prNumber
               );
-            const claim = (holdReleaseId || reviewerPoolConfig.enabled) ? db.transaction(() => {
+            const claimWithSnapshot = (holdReleaseId || reviewerPoolConfig.enabled) ? db.transaction(() => {
               preClaimRow = stmtGetReviewRow.get(repoPath, prNumber);
               return claimReviewer();
-            }).immediate() : claimReviewer();
+            }).immediate : claimReviewer;
+            let result;
+            if (effectiveDomainId === CODE_PR_DOMAIN_ID && claimBranch === 'pending'
+              && /^[a-f0-9]{40}$/i.test(reviewerHeadSha || '') && !tenureReviewRequired) {
+              result = claimWithExhaustedHeadMergeCustody({
+                db, rootDir: ROOT, repo: repoPath, base: subject.baseRefName || subject.baseBranch,
+                prNumber, headSha: reviewerHeadSha, hasPriorityIntent: explicitIntentForHead,
+                readRow: () => stmtGetReviewRow.get(repoPath, prNumber),
+              }, row => {
+                if (holdReleaseId || reviewerPoolConfig.enabled) preClaimRow = row;
+                return claimReviewer();
+              });
+            } else {
+              result = { claim: claimWithSnapshot() };
+            }
+            if (result.reason) {
+              console.log(`[watcher] Deferring reviewer claim for ${repoPath}#${prNumber}@${reviewerHeadSha}: ${result.reason}`);
+              this.retainWakeForCapacity();
+              return { dispatched: false, reason: result.reason };
+            }
+            const { claim } = result;
             if (claim.changes === 0) {
               const afterClaim = stmtGetReviewRow.get(repoPath, prNumber);
               const unchangedShape = afterClaim && current &&

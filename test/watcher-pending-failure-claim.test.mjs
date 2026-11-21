@@ -76,8 +76,8 @@ const classify = between('      const inTerminalFailure = reviewRowInTerminalFai
 const retryablePopulation = between('      const reviewPopulationRetryable = Boolean(',
   '      if (inTerminalFailure && !infraRecoveryClass');
 const claimClosure = between('            const claimBranch = tokenRefreshRecovery',
-  '            const claim = (holdReleaseId');
-const claimAndFailureLog = between('            const claim = (holdReleaseId',
+  '            const claimWithSnapshot = (holdReleaseId');
+const claimAndFailureLog = between('            const claimWithSnapshot = (holdReleaseId',
   "            if (route.reviewerModel === 'codex')");
 const snapshotDiagnostic = between('              // PENDINGCLAIM-03:',
   '              console.log(unchangedShape && stillClaimable');
@@ -152,6 +152,7 @@ function claimBindings(f, decision, head = HEAD) {
       // Before any CAS runs, the post-CAS re-read the diagnostic judges is the
       // captured row itself; claimAndFailureLog shadows this with a real re-read.
       ...decision, ...statements, current: f.read(), afterClaim: f.read(), tokenRefreshRecovery: decision.infraRecoveryClass === 'token-refresh-pending',
+      effectiveDomainId: 'fixture', CODE_PR_DOMAIN_ID: 'code-pr',
       DAEMON_BOUNCE_FAILURE_CLASS, attemptAt: ATTEMPT_AT, reviewerSessionUuid: 'replacement-session',
       reviewerHeadSha: head, pendingRevisionRef: head, reviewerTimeoutMs: 60000,
       reviewerLeaseExpiresAt: '2026-10-20T12:11:00.000Z', repoPath: REPO, prNumber: PR,

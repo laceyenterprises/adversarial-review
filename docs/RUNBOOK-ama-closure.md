@@ -7604,6 +7604,21 @@ dispatch.
 
 ## LEASEFAIR-01: fair merge lease service
 
+For an automatic exhausted-head verdict, the watcher commits the reviewer claim
+under the same `(repo, base)` mutation lock as native merge lease acquisition.
+`native-merge-custody` means the exact PR and head already have a retained holder.
+`merge-lease-mutation-busy` or `merge-lease-base-unavailable` defers the claim to
+another poll. The request remains pending with its existing budget. Confirmed
+dead local holders and expired remote holders do not defer review. Uncertain
+local process identity retains custody, including after deadline. A review that
+claims first remains visible to the native under-lease owner check from the
+moment its SQLite claim commits. Existing final pre-execution checks still run.
+
+After ordinary deployment, check a natural exact-head closeout for a retained
+automatic request while the lease is held and an authorized closeout with the
+required source, findings, review and CI evidence. If the owner releases an open
+PR, check that the same request is eligible on a subsequent watcher tick.
+
 Daemon and closer acquisitions use one FIFO arrival queue per repo/base.
 The legacy `priority: daemon` field identifies a role without a scheduling boost.
 A live refresh retains its arrival; a confirmed dead same-host watcher loses its

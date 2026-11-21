@@ -73,6 +73,7 @@ test('resolver error + fallback also grounded skips it, and defers when none is 
     row('openai', 'oauth', 'exhausted')] }));
   assert.equal(none.hold, true);
   assert.equal(none.fellBack, false);
+  assert.equal(none.reason, 'all-fallbacks-grounded');
   assert.equal(none.resolverErrorDecision, 'defer:all-fallbacks-grounded');
 });
 
@@ -177,12 +178,14 @@ test('maybeDispatchAmaCloser: a resolver that succeeds is unchanged', async t =>
 });
 
 test('merge-agent: a resolver error with a grounded persisted primary takes the fallback or defers; unknown state still fails open', async t => {
-  const common = { workerClass: 'hammer-corp', fallbackWorkerClasses: FALLBACKS, logger: { warn() {} },
+  const warnings = [];
+  const common = { workerClass: 'hammer-corp', fallbackWorkerClasses: FALLBACKS, logger: { warn: message => warnings.push(message) },
     resolveHarnessImpl: throwingResolver };
   const at = Date.now();
   const unknown = await resolveMergeAgentDispatchHarness({ ...common, rootDir: scratch(t) });
   assert.equal(unknown.workerClass, 'hammer-corp');
   assert.equal(unknown.deferred, false);
+  assert.match(warnings[0], /harness_fallback_resolver_error defer:primary-state-unknown:/);
   const fellBack = await resolveMergeAgentDispatchHarness({ ...common,
     rootDir: scratch(t, { rows: EXHAUSTED_PRIMARY, at }) });
   assert.equal(fellBack.workerClass, 'hammer-claude-corp');
@@ -192,4 +195,19 @@ test('merge-agent: a resolver error with a grounded persisted primary takes the 
     EXHAUSTED_PRIMARY[0], row('anthropic', 'oauth-corp', 'exhausted'), row('openai', 'oauth', 'exhausted')] }) });
   assert.equal(deferred.deferred, true);
   assert.equal(deferred.reason, 'merge-agent-harness-grounded');
+});
+
+test('merge-agent: the normal resolver receives the quota snapshot root', async t => {
+  const rootDir = scratch(t);
+  const result = await resolveMergeAgentDispatchHarness({
+    workerClass: 'hammer-corp',
+    fallbackWorkerClasses: FALLBACKS,
+    rootDir,
+    async resolveHarnessImpl({ workerClass, rootDir: resolverRoot }) {
+      assert.equal(resolverRoot, rootDir);
+      return { workerClass, fellBack: false };
+    },
+  });
+  assert.equal(result.reason, undefined);
+  assert.equal(result.deferred, false);
 });

@@ -241,6 +241,7 @@ async function resolveHarness({
       execFileImpl,
       env,
       codexAccountPolicy,
+      rootDir,
       probeWithoutFallbacks: true,
       screenSoftGroundedFallbacks: true,
     });
@@ -255,7 +256,8 @@ async function resolveHarness({
     // closer: a resolver fault alone is not proof of grounding.
     harness = resolveHarnessAfterResolverError({ workerClass, fallbackWorkerClasses, rootDir, error: err });
     if (harness.resolverErrorDecision === 'defer:primary-state-unknown') {
-      harness = { workerClass, fellBack: false, reason: harness.reason, error: harness.error };
+      harness = { workerClass, fellBack: false, reason: harness.reason, error: harness.error,
+        resolverErrorDecision: harness.resolverErrorDecision };
     }
     logger?.warn?.(`[merge-agent] harness_fallback_resolver_error ${harness.resolverErrorDecision || 'keep-primary'}: ${harness.error}`);
   }

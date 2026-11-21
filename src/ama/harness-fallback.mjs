@@ -420,5 +420,6 @@ export function resolveHarnessAfterResolverError({
     return { ...base, ...evidence, ...grounding, workerClass: candidate, fellBack: true, from: primary, to: candidate,
       fallbackProvider: providerForCloserWorkerClass(candidate), resolverErrorDecision: `fallback:${candidate}` };
   }
-  return { ...base, ...evidence, ...grounding, hold: true, resolverErrorDecision: 'defer:all-fallbacks-grounded' };
+  return { ...base, ...evidence, ...grounding, hold: true, reason: 'all-fallbacks-grounded',
+    resolverErrorDecision: 'defer:all-fallbacks-grounded' };
 }

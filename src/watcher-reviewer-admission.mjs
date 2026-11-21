@@ -70,6 +70,10 @@ export function createReviewerAdmissionQueue({ candidates = [], logger = console
       if (candidate.subject?.headSha
         && candidate.subject.headSha === queued.subject?.headSha
         && queued.retainDepthSpill?.('candidate-refreshed') === true) return;
+      if (queued.subject?.headSha && candidate.subject?.headSha && queued.subject.headSha !== candidate.subject.headSha) {
+        logger.log?.(`[watcher] review-head-superseded repo=${candidate.repoPath} pr=${candidate.prNumber} `
+          + `previous_head=${queued.subject.headSha} head=${candidate.subject.headSha} state=queued-dispatch`);
+      }
       queued.refundDepthSpill?.('candidate-refreshed');
       candidates[index] = candidate;
     } else {

@@ -4006,6 +4006,13 @@ Head changes discard previous next-action deadline anchors. A
 builder head awaiting review uses its persisted per-head wait anchor, never an
 older head's posting or final-round timestamp.
 
+When the watcher observes a new actionable head, it clears the old head's
+parked ownership lane and audits the supersession. Durable re-review refill
+fetches fresh subject state and passes the current head through ordinary
+discovery. A changed reviewer route returns to pool admission for its own
+reservation. In-flight dispatch leases and the claim CAS still fence duplicate
+work. A lease for the superseded head cannot filter the current head.
+
 A spent closure budget first refunds each closer-fault charge (closer or
 infrastructure stop origin in the AMA audit, an owned inconclusive launch, or a
 not-booted closer the pipeline superseded) and re-arms one ordinary closer

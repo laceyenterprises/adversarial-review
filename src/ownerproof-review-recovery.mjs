@@ -1,5 +1,5 @@
 import { recoverOrphan, overdueNextAction, isOrphanRecoveryWait } from './ama/orphan-watchdog.mjs';
-import { readNoProgressLane } from './watcher-no-progress-lane.mjs';
+import { clearNoProgressLane, readNoProgressLane } from './watcher-no-progress-lane.mjs';
 import { deriveNextActionSnapshot, nextAction } from './pr-next-action.mjs';
 import { isOperatorHeld } from './operator-hold-labels.mjs';
 const fetchMergeAgentCandidate = async (...args) => (await import('./merge-agent-candidate.mjs')).fetchMergeAgentCandidate(...args);
@@ -33,7 +33,15 @@ export async function recoverOverdueOwnership({ rootDir, repo, prNumber, subject
   fetchCandidateImpl = fetchMergeAgentCandidate, dispatchImpl = maybeDispatchAmaClosureFor }) {
   if (!enabled || subject?.terminal || subject?.isDraft || subject?.draft || !subject?.headSha
     || discoveryHeld(subject.labels)) return null;
-  const lane = readLaneImpl(rootDir, { repo, prNumber }, { logger });
+  const identity = { repo, prNumber };
+  const lane = readLaneImpl(rootDir, identity, { logger });
+  if (lane?.headSha && lane.headSha !== subject.headSha) {
+    if (clearNoProgressLane(rootDir, identity, { logger })) {
+      logger?.log?.(`[watcher] review-head-superseded repo=${repo} pr=${prNumber} `
+        + `previous_head=${lane.headSha} head=${subject.headSha} state=parked-ownership-and-deadline`);
+    }
+    return null;
+  }
   // Pre-contract lane records may have no selected action. Missing evidence
   // selects the shared refresh row, anchored to durable lack of progress.
   const selected = lane?.headSha === subject.headSha ? lane.nextAction || nextAction(deriveNextActionSnapshot({

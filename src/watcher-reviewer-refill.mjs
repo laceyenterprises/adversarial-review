@@ -1,4 +1,5 @@
 import { isOperatorHeld, operatorHeldSql } from './operator-hold-labels.mjs';
+import { reviewerDispatchEnqueuedAt, reviewerSafetyPassKind } from './watcher-reviewer-pool.mjs';
 
 const identity = row => `${row.repo}#${row.pr_number}`;
 // Claim bookkeeping must not itself rearm a refused row. A new head, request,
@@ -55,12 +56,14 @@ export function createDurableReviewerRefill({ db, createCandidate, scope = () =>
       let rows = readRows.all(snapshots, cursor, allowed, primaryDomainId, allowed, limit);
       if (!rows.length && cursor) rows = readRows.all(snapshots, 0, allowed, primaryDomainId, allowed, limit);
       cursor = rows.at(-1)?.id || 0;
-      const present = new Set(queued.map(candidate => `${candidate.repoPath}#${candidate.prNumber}`));
+      const present = new Map(queued.map(candidate => [`${candidate.repoPath}#${candidate.prNumber}`, candidate]));
       return rows.flatMap(row => {
         const key = identity(row);
-        if (present.has(key) || settled.get(key) === state(row)) return [];
+        const queuedHead = present.get(key)?.subject?.headSha;
+        if ((present.has(key) && (!queuedHead || queuedHead === row.revision_ref))
+          || settled.get(key) === state(row)) return [];
         settled.delete(key);
-        const candidate = createCandidate(row);
+        const candidate = createCandidate(row, () => readRow.get(row.repo, row.pr_number));
         return candidate ? [candidate] : [];
       });
     },
@@ -69,7 +72,7 @@ export function createDurableReviewerRefill({ db, createCandidate, scope = () =>
 
 // Reuse discovery's full policy and spawn-boundary guards, but only after the
 // bounded queue has reserved the durable row's route. No API work in refill.
-export function createDurableReviewerCandidate(row, { subjectAdapter, context, processSubject, enqueue }) {
+export function createDurableReviewerCandidate(row, { subjectAdapter, context, processSubject, enqueue, readCurrent = () => row }) {
   if (!row.revision_ref || !row.reviewer) return null;
   return {
     repoPath: row.repo, prNumber: row.pr_number, reviewerModel: row.reviewer,
@@ -80,14 +83,28 @@ export function createDurableReviewerCandidate(row, { subjectAdapter, context, p
     current: row,
     hasPriorPostedReview: context.hasPriorPostedReview(row),
     pendingSince: row.head_wait_started_at || row.rereview_requested_at || row.reviewed_at,
+    enqueuedAt: reviewerDispatchEnqueuedAt(row),
     async run() {
       const subject = await subjectAdapter.fetchState({
         domainId: row.domain_id || context.domainId,
         subjectExternalId: row.subject_external_id || `${row.repo}#${row.pr_number}`,
         revisionRef: row.revision_ref,
-      });
-      if (subject.terminal || subject.headSha !== row.revision_ref || subject.labelsKnown === false || isOperatorHeld(subject.labels)) {
-        return { dispatched: false, reason: 'durable-refill-subject-changed' };
+      }, { fresh: true });
+      const refusal = subject.terminal ? 'durable-refill-terminal'
+        : !subject.headSha ? 'durable-refill-head-unknown'
+          : subject.labelsKnown === false ? 'durable-refill-labels-unknown'
+            : isOperatorHeld(subject.labels) ? 'operator-hold' : null;
+      if (refusal) return { dispatched: false, reason: refusal };
+      if (subject.headSha !== row.revision_ref) {
+        const current = readCurrent();
+        const currentRereview = current?.revision_ref === subject.headSha && current.rereview_requested_at;
+        // An exact-head request may have been written after this first-pass
+        // snapshot was queued. Ordinary first-pass head movement stays with discovery.
+        if (reviewerSafetyPassKind(this) !== 'rereview' && !currentRereview) {
+          return { dispatched: false, reason: 'durable-refill-first-pass-head-changed' };
+        }
+        console.log(`[watcher] review-head-superseded repo=${row.repo} pr=${row.pr_number} `
+          + `previous_head=${row.revision_ref} head=${subject.headSha} state=durable-refill`);
       }
       let prepared;
       await processSubject({ subject, prNumber: row.pr_number }, {
@@ -100,6 +117,8 @@ export function createDurableReviewerCandidate(row, { subjectAdapter, context, p
         enqueue(prepared);
         return { dispatched: false, reason: 'durable-refill-route-changed' };
       }
+      // Settlement snapshots belong to the head discovery actually prepared.
+      this.subject = subject;
       prepared.markAdmissionStarted = () => this.markAdmissionStarted?.();
       prepared.markReviewerSpawned = () => this.markReviewerSpawned?.();
       const release = this.admissionReleaseCapacity;
@@ -130,10 +149,10 @@ export function attachDurableReviewerRefill({ db, contexts, admission, processSu
         return repos.includes(key.slice(separator + 1)) && domains.includes(key.slice(0, separator));
       });
     },
-    createCandidate(row) {
+    createCandidate(row, readCurrent) {
       const registration = contexts.get(`${row.domain_id || readScope().primaryDomainId}:${row.repo}`);
       return registration ? createDurableReviewerCandidate(row, {
-        ...registration, processSubject, enqueue: admission.enqueue,
+        ...registration, processSubject, enqueue: admission.enqueue, readCurrent,
       }) : null;
     },
   });

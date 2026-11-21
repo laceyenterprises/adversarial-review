@@ -311,9 +311,9 @@ function createGitHubPRSubjectAdapter({
     }, action);
   }
 
-  async function fetchPRSnapshot(ref) {
+  async function fetchPRSnapshot(ref, { fresh = false } = {}) {
     const { repo, prNumber } = parseSubjectExternalId(ref.subjectExternalId);
-    const cached = getFreshCache(ref.subjectExternalId);
+    const cached = fresh ? null : getFreshCache(ref.subjectExternalId);
     if (cached) return cached;
     try {
       const adapterPr = await withAdapterTelemetry('pr_view', {
@@ -479,8 +479,8 @@ function createGitHubPRSubjectAdapter({
       return refs;
     },
 
-    async fetchState(ref) {
-      const snapshot = await fetchPRSnapshot(ref);
+    async fetchState(ref, options) {
+      const snapshot = await fetchPRSnapshot(ref, options);
       return stateFromSnapshot(snapshot, { observedAt: now().toISOString() });
     },
 

@@ -1,10 +1,16 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import Database from 'better-sqlite3';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { reviewWaitPressure } from '../src/review-queue-depth.mjs';
 import { reviewerSafetyPassKind } from '../src/watcher-reviewer-pool.mjs';
-import { ensureReviewStateSchema } from '../src/review-state.mjs';
+import { ensureReviewStateSchema, requestReviewRereview } from '../src/review-state.mjs';
 import { attachDurableReviewerRefill, createDurableReviewerCandidate, createDurableReviewerRefill } from '../src/watcher-reviewer-refill.mjs';
+import { recoverOverdueOwnership } from '../src/ownerproof-review-recovery.mjs';
+import { readNoProgressLane, recordNoProgressLaneRun } from '../src/watcher-no-progress-lane.mjs';
+import { createHeadDispatchLease, headDispatchLeaseKey } from '../src/reviewed-head-dispatch-gate.mjs';
 
 function fixture(t, limit = 50) {
   const db = new Database(':memory:');
@@ -178,7 +184,7 @@ for (const fails of [false, true]) {
   });
 }
 
-for (const subject of [{ terminal: true }, { headSha: 'head-b' }, { labels: ['merge-agent-skip'] }, { labelsKnown: false }]) {
+for (const subject of [{ terminal: true }, { labels: ['merge-agent-skip'] }, { labelsKnown: false }]) {
   test(`durable candidate refuses changed or held subject ${JSON.stringify(subject)}`, async () => {
     const f = candidateFixture({ subject });
     assert.equal((await f.candidate.run()).dispatched, false);
@@ -186,6 +192,57 @@ for (const subject of [{ terminal: true }, { headSha: 'head-b' }, { labels: ['me
     assert.equal(f.counts().processes, 0);
   });
 }
+
+for (const requestedAtStartup of [false, true]) test(`a stale startup candidate admits the current head after an operator retrigger (prior request=${requestedAtStartup})`, async t => {
+  const f = fixture(t);
+  const rootDir = mkdtempSync(join(tmpdir(), 'durable-refill-'));
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  const identity = { repo: 'example/fixture', prNumber: 1 };
+  const unrelated = { ...identity, prNumber: 2 };
+  const leases = createHeadDispatchLease();
+  const leaseKey = headSha => headDispatchLeaseKey({ repoPath: identity.repo, prNumber: identity.prNumber, headSha });
+  leases.tryAcquire(leaseKey('head-a'));
+  for (const pr of [identity, unrelated]) {
+    recordNoProgressLaneRun(rootDir, pr, { headSha: 'head-a', fingerprint: 'parked',
+      nextAction: { head: 'head-a', row: 'R04-ownership', action: 'reconcile', actor: 'operator',
+        deadline: { at: '2026-01-01T00:00:00Z' } } });
+  }
+  const unrelatedBefore = readNoProgressLane(rootDir, unrelated);
+  const audit = [];
+  f.add(1, { review_status: 'failed', reviewer_head_sha: 'head-a', infra_auto_recover_attempts: 3 });
+  const retrigger = head => requestReviewRereview({ rootDir, db: f.db, repo: 'example/fixture', prNumber: 1,
+    targetRevisionRef: head, reason: 'retrigger-review: synthetic exact-head request' });
+  const { reviewRow } = retrigger('head-a');
+  if (!requestedAtStartup) reviewRow.rereview_requested_at = null;
+  const dispatched = [];
+  const candidate = createDurableReviewerCandidate(reviewRow, {
+    context: { hasPriorPostedReview: () => false },
+    readCurrent: () => f.db.prepare('SELECT * FROM reviewed_prs WHERE pr_number = 1').get(),
+    subjectAdapter: { async fetchState(_ref, options) {
+      assert.equal(options.fresh, true);
+      return { headSha: 'head-b', labels: [] };
+    } },
+    async processSubject({ subject }, context) {
+      const recovery = await recoverOverdueOwnership({ rootDir, ...identity, subject, enabled: true,
+        recoverImpl: () => assert.fail('superseded custody cannot execute recovery'),
+        logger: { log: line => audit.push(line) } });
+      assert.equal(recovery, null);
+      assert.equal(f.db.prepare('SELECT revision_ref FROM reviewed_prs').pluck().get(), subject.headSha);
+      context.enqueueReviewerDispatchCandidate({ reviewerModel: 'gemini', async run() {
+        assert.equal(leases.tryAcquire(leaseKey(subject.headSha)), true);
+        dispatched.push(subject.headSha);
+        return { dispatched: true };
+      } });
+    },
+    enqueue() { assert.fail('unchanged route should retain its reservation'); },
+  });
+  assert.equal(retrigger('head-b').reviewRow.revision_ref, 'head-b');
+  const result = await candidate.run();
+  assert.deepEqual(dispatched, ['head-b'], JSON.stringify(result));
+  assert.equal(readNoProgressLane(rootDir, identity), null);
+  assert.deepEqual(readNoProgressLane(rootDir, unrelated), unrelatedBefore);
+  assert.match(audit[0], /previous_head=head-a head=head-b state=parked-ownership-and-deadline/);
+});
 
 test('durable candidate requeues a changed credential route instead of using the old reservation', async () => {
   const f = candidateFixture({ route: 'codex' });
@@ -200,6 +257,14 @@ test('settling an obsolete candidate does not suppress an already observed newer
   f.add(1, { revision_ref: 'head-b' });
   f.onSettled({ repoPath: 'example/fixture', prNumber: 1, subject: { headSha: 'head-a' } });
   assert.deepEqual(f.refill([]).map(c => c.prNumber), [1]);
+});
+
+test('refill offers the new head when the old head is still waiting in the pool', t => {
+  const f = fixture(t);
+  f.add(1, { revision_ref: 'head-b' });
+  const queued = { repoPath: 'example/fixture', prNumber: 1, subject: { headSha: 'head-a' } };
+  assert.deepEqual(f.refill([queued]).map(c => c.prNumber), [1]);
+  assert.deepEqual(f.refill([{ ...queued, subject: { headSha: 'head-b' } }]), []);
 });
 
 

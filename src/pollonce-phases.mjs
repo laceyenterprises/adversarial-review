@@ -786,6 +786,9 @@ export async function processReviewSubject(entry, ctx) {
     findArgusJobImpl = findArgusJob,
     maybeAutoAdjudicateDependencyBotArgusJobImpl = maybeAutoAdjudicateDependencyBotArgusJob,
   } = ctx;
+  let queued = false;
+  let filteringReason = 'discovery-ineligible';
+  try {
       const wakeIdentity = { repoPath, prNumber, headSha: subject.headSha };
       retainedWatcherWakes?.observe({ ...wakeIdentity, terminal: subject.terminal });
       const retainWakeForCapacity = () => {
@@ -857,7 +860,10 @@ export async function processReviewSubject(entry, ctx) {
       if (typeof draft === 'boolean') db.prepare(
         'UPDATE reviewed_prs SET is_draft = ? WHERE repo = ? AND pr_number = ?'
       ).run(Number(draft), repoPath, prNumber);
-      if (draft === true) return;
+      if (draft === true) {
+        filteringReason = 'draft';
+        return;
+      }
       if (!subject.terminal) {
         try {
           const loaded = loadConfigCached();
@@ -871,13 +877,19 @@ export async function processReviewSubject(entry, ctx) {
           });
           // Pending review recovery and exhausted routes own this pass too;
           // admission must not reuse the row captured before recovery acted.
-          if (recovered?.outcome != null) return;
+          if (recovered?.outcome != null) {
+            filteringReason = `deadline-recovery-${recovered.outcome}`;
+            return;
+          }
         } catch (error) {
           console.warn(`[watcher] OWNERDEADLINE-01 deadline recovery deferred for ${repoPath} PR ${prNumber}: ${error.message}`);
         }
       }
       // Waiting observation precedes even an in-process handoff deferral.
-      if (reviewerHandoffPending(repoPath, prNumber)) return;
+      if (reviewerHandoffPending(repoPath, prNumber)) {
+        filteringReason = 'inline-final-hammer-pending';
+        return;
+      }
       if (effectiveDomainId === CODE_PR_DOMAIN_ID && !subject.terminal) {
         if (await maybeRunDocsFastPath({ subject, reviewRow: existing, rootDir: ROOT,
           repoPath, prNumber, execFileImpl: execFileAsync,
@@ -1968,6 +1980,7 @@ export async function processReviewSubject(entry, ctx) {
       }
 
       if (watcherDrain.active) {
+        filteringReason = 'watcher-draining';
         if (existing) {
           await projectGateStatusSafe(existing);
         }
@@ -2082,6 +2095,7 @@ export async function processReviewSubject(entry, ctx) {
       // would have caught the same edit at daemon restart, so this
       // path is the runtime-edit-during-tick fallback.
       if (baseRoute && baseRoute.configBroken) {
+        filteringReason = 'reviewer-route-config-broken';
         console.warn(
           `[watcher] routeSubject returned config-broken for ${repoPath}#${prNumber}: ` +
           `${baseRoute.error?.message || baseRoute.error || 'unknown config error'} — ` +
@@ -2815,6 +2829,7 @@ export async function processReviewSubject(entry, ctx) {
             refreshResult.status === 'already-pending' &&
             String(refreshed?.revision_ref || '') === String(pendingRevisionRef)
           ) {
+            current = refreshed;
             console.log(
               `[watcher] auto-refresh stale pending review for ${repoPath}#${prNumber}: ` +
                 `${beforeRevisionRef ? String(beforeRevisionRef).slice(0, 12) : '<unset>'} → ` +
@@ -2840,6 +2855,7 @@ export async function processReviewSubject(entry, ctx) {
         currentRevisionRef: subject.ref?.revisionRef || subject.headSha || null,
       });
       if (activeFollowUp.defer) {
+        filteringReason = 'active-follow-up';
         console.log(
           `[watcher] Deferring reviewer for ${repoPath}#${prNumber}: active follow-up job` +
             (activeFollowUp.jobId ? ` ${activeFollowUp.jobId}` : '') +
@@ -2889,6 +2905,7 @@ export async function processReviewSubject(entry, ctx) {
         reviewerModel: route.reviewerModel,
       });
       if (cascadeGate.shouldBackoff) {
+        filteringReason = 'cascade-backoff-hold';
         markWatcherSpawnDecision({
           repo: repoPath,
           pr_number: prNumber,
@@ -2902,6 +2919,7 @@ export async function processReviewSubject(entry, ctx) {
         reserve: false,
       });
       if (credentialOutagePreflight.paused) {
+        filteringReason = 'reviewer-credential-outage-hold';
         retainWakeForCapacity();
         markWatcherSpawnDecision({
           repo: repoPath,
@@ -3446,7 +3464,11 @@ export async function processReviewSubject(entry, ctx) {
       };
       // Avoid enqueueing a retained wake, GitHub dedup reads and memory/seat
       // reservations for a system verdict that native merge custody fences.
-      if (deferForMergeCustody()) return;
+      const custodyDeferral = deferForMergeCustody();
+      if (custodyDeferral) {
+        filteringReason = custodyDeferral;
+        return;
+      }
       const preflight = createReviewerPreflight();
       let preflightConsumed = false;
       let preparation = null;
@@ -4702,7 +4724,22 @@ export async function processReviewSubject(entry, ctx) {
       }
       if (reviewerPoolConfig.enabled) {
         enqueueReviewerDispatchCandidate(dispatchCandidate);
+        queued = true;
       } else {
         await dispatchCandidate.run();
+        queued = true;
       }
+  } finally {
+    if (!queued && !subject.terminal && subject.headSha) {
+      const row = stmtGetReviewRow.get(repoPath, prNumber);
+      if (row?.revision_ref === subject.headSha && row.pr_state === 'open'
+        && String(row.domain_id || WATCHER_PRIMARY_DOMAIN_ID) === String(domainId)
+        && ['pending', 'pending-upstream'].includes(row.review_status)
+        && reviewerSafetyPassKind({ current: row }) === 'rereview') {
+        const reason = isOperatorHeld(subject.labels) ? 'operator-hold' : filteringReason;
+        console.log(`[watcher] review-wait-decision repo=${repoPath} pr=${prNumber} admission="discovery" `
+          + `pass_kind=rereview decision=${reason} reason=${reason}`);
+      }
+    }
+  }
 }

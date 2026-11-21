@@ -4273,6 +4273,15 @@ for (const scenario of ['unchanged', 'pending-missing-failed-at', 'pending-upstr
       const fixtureRepo = JSON.parse(readFileSync(path.join(REPO_ROOT, 'config.json'), 'utf8')).org + '/adversarial-review';
       const synthetic = source => source.replaceAll(fixtureRepo, 'example/adversarial-review');
       let loader = buildLoaderSource({ cascadeRootDir: tmp,
+        ...(scenario === 'new-head' ? { deadlineRecoverySource: `
+          import * as actual from ${JSON.stringify(`${fileUrl('src', 'ownerproof-review-recovery.mjs')}?actual`)};
+          export async function recoverOverdueOwnership(input) {
+            if (input.prNumber !== 101) return null;
+            return actual.recoverOverdueOwnership({ ...input, rootDir: ${JSON.stringify(tmp)}, enabled: true,
+              recoverImpl() { throw new Error('superseded deadline must never run recovery'); } });
+          }
+          export async function recoverOwnerlessReview() { return null; }
+        ` } : {}),
         ...(['new-build', 'operator-rearm'].includes(scenario) ? { reviewerRuntimeSource: `
           globalThis.__watcherClaimLoopReviewerSpawns = [];
           export function createReviewerRuntimeAdapterForDomain() { return {
@@ -4319,6 +4328,16 @@ for (const scenario of ['unchanged', 'pending-missing-failed-at', 'pending-upstr
       const parksWithoutRetry = scenario === 'unchanged' || missingFailedAt;
       writeFileSync(runnerPath, synthetic(buildRunnerSource({
         prePollSetup: `
+          ${scenario === 'new-head' ? `
+            const { recordNoProgressLaneRun, readNoProgressLane } =
+              await import(${JSON.stringify(fileUrl('src', 'watcher-no-progress-lane.mjs'))});
+            const parkIdentity = { repo: 'example/adversarial-review', prNumber: 101 };
+            recordNoProgressLaneRun(${JSON.stringify(tmp)}, parkIdentity, {
+              headSha: 'old-head', fingerprint: 'parked',
+              nextAction: { head: 'old-head', row: 'R04-ownership', action: 'reconcile',
+                actor: 'operator', deadline: { at: '2026-01-01T00:00:00Z' } },
+            });
+          ` : ''}
           db.exec(\`
             CREATE TABLE timeout_park_writes (pr_number INTEGER);
             CREATE TRIGGER track_timeout_park AFTER UPDATE OF failure_message ON reviewed_prs
@@ -4363,6 +4382,10 @@ for (const scenario of ['unchanged', 'pending-missing-failed-at', 'pending-upstr
           assert.equal(claims[0].prNumber, 102, 'waiting first pass proceeds while timeout row is parked');
         ` : `
           assert.equal(claims.filter(claim => claim.prNumber === 101).length, 1, 'changed input or upstream outage allows retry');
+          ${scenario === 'new-head' ? `
+            assert.equal(claims.find(claim => claim.prNumber === 101).reviewerHeadSha, 'sha-happy-101');
+            assert.equal(readNoProgressLane(${JSON.stringify(tmp)}, parkIdentity), null);
+          ` : ''}
           ${['new-build', 'operator-rearm'].includes(scenario) ? `
             await pollOnce(octokit, pollOptions);
             assert.equal(claims.filter(claim => claim.prNumber === 101).length, 1, 'failed probe parks again');

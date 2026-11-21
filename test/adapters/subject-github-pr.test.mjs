@@ -1,3 +1,4 @@
+import '../helpers/rate-limit-state-isolation.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
@@ -1119,6 +1120,12 @@ test('fetchState returns cached snapshot for back-to-back calls within TTL (coal
   const s2 = await adapter.fetchState(ref);
   assert.equal(mut.calls.get, 0, 'second fast fetchState must hit cache');
   assert.deepEqual(s2.labels, []);
+
+  const newHead = 'b'.repeat(40);
+  mut.setPR({ ...REGRESSION_PR_BASE, head: { ...REGRESSION_PR_BASE.head, sha: newHead } });
+  assert.equal((await adapter.fetchState(ref, { fresh: true })).headSha, newHead);
+  assert.equal((await adapter.fetchState(ref)).headSha, newHead);
+  assert.equal(mut.calls.get, 1, 'fresh read updates the shared cache');
 });
 
 test('REGRESSION 2026-05-18: fetchState re-fetches after cache TTL elapses (picks up labels applied mid-tick)', async () => {

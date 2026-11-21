@@ -86,19 +86,22 @@ export function createReviewerDispatchDrain({
       for (const candidate of candidates) {
         const passKind = candidate.depthPassKind || reviewerSafetyPassKind(candidate);
         const pressure = reviewWaitPressure({ ...candidate, depthPassKind: passKind });
-        if (pressure.engaged) {
-          const started = startedCandidates.has(candidate);
-          const result = admissionResults.get(candidate);
+        const started = startedCandidates.has(candidate);
+        const result = admissionResults.get(candidate);
+        const filteredRereview = passKind === 'rereview' && (!started || result?.dispatched === false)
+          && ['pending', 'pending-upstream'].includes(candidate.current?.review_status);
+        if (pressure.engaged || filteredRereview) {
           const spilled = started && result?.dispatched !== false && candidate.reviewerModel !== 'gemini';
           const decision = result?.dispatched === false ? result.reason || 'admission-refused'
             : spilled ? 'spilled' : candidate.admissionBlocked?.() ? candidate.admissionBlockReason?.() || 'admission-blocked'
             : candidate.pipelineGeminiSeats > 0 ? 'pipeline-requires-gemini'
-            : started ? 'gemini-admitted' : candidate.spillDecisionReason || notStartedReason(candidate);
+            : started ? 'gemini-admitted' : filteredRereview ? notStartedReason(candidate)
+              : candidate.spillDecisionReason || notStartedReason(candidate);
           const account = candidate.spawnClaudeAccountSelection || candidate.claudeAccountSelection;
           logger.log?.(`[watcher] review-wait-decision repo=${candidate.repoPath} pr=${candidate.prNumber} `
             + `admission=${JSON.stringify(reason)} pass_kind=${passKind} `
-            + `wait_seconds=${pressure.waitSeconds} decision=${decision} reviewer=${candidate.reviewerModel} `
-            + `reason=${candidate.spillDecisionReason || decision} `
+            + `wait_seconds=${pressure.waitSeconds ?? 'unknown'} decision=${decision} reviewer=${candidate.reviewerModel} `
+            + `reason=${filteredRereview ? decision : candidate.spillDecisionReason || decision} `
             + `claude_account=${account?.provider === 'claude-code-corp' ? 'corporate'
               : candidate.reviewerModel === 'claude' ? 'primary' : 'none'}`);
         }

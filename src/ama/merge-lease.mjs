@@ -1130,30 +1130,64 @@ function mergeLeaseReclaimReason(lease, observation, currentHost) {
   return observation.pastDeadline ? 'past-deadline' : null;
 }
 
+function readReviewClaimLease(path) {
+  try { return readJsonFile(path); }
+  catch (cause) {
+    throw Object.assign(new Error('Merge lease state is unreadable', { cause }),
+      { code: 'MERGE_LEASE_STATE_UNAVAILABLE' });
+  }
+}
+
+function sameReviewSubject(lease, { repo, base, prNumber, headSha }) {
+  return lease?.repo === repo && lease.base === base
+    && Number(lease.holderPr) === Number(prNumber)
+    && String(lease.holderHead || '').toLowerCase() === headSha.toLowerCase();
+}
+
+function withReviewClaimLeaseObservation({
+  rootDir, repo, base, prNumber, headSha, now,
+  pidAliveFn = pidIsLive, captureProcessImpl = captureCloserProcessSync,
+}, run) {
+  if (!base) return { reason: 'merge-lease-base-unavailable' };
+  try {
+    return withRepositoryStateRead(rootDir, () => {
+      ({ repo } = canonicalRepositoryArguments(rootDir, { repo }));
+      const identity = { repo, base, prNumber, headSha };
+      const leasePath = mergeLeaseFilePathWithinRepositoryState(rootDir, identity);
+      const lease = readReviewClaimLease(leasePath);
+      const currentHost = hostname();
+      // Process probes must run before taking the short per-base mutation lock.
+      const retained = sameReviewSubject(lease, identity)
+        && !mergeLeaseReclaimReason(lease, mergeLeaseHolderObservation(lease, {
+          inspectedAt: now || isoNow(), currentHost, pidAliveFn, captureProcessImpl,
+        }), currentHost);
+      return run({ leasePath, lease, identity, retained });
+    });
+  } catch (error) {
+    if (!['REPOSITORY_STATE_BUSY', 'MERGE_LEASE_STATE_UNAVAILABLE'].includes(error.code)) throw error;
+    console.warn(`[merge-lease] Deferring review claim for ${repo}#${prNumber}: merge-lease-state-unavailable (${error.code})`);
+    return { reason: 'merge-lease-state-unavailable' };
+  }
+}
+
+// A cheap scheduling hint: no waiter/attempt reads and no mutation lock.
+// Admission must still use withMergeLeaseReviewClaim for the authoritative CAS.
+export function inspectMergeLeaseReviewCustody(options) {
+  return withReviewClaimLeaseObservation(options,
+    ({ retained }) => ({ reason: retained ? 'native-merge-custody' : null }));
+}
+
 // The SQLite claim must commit before this lock is released. Native lease
 // acquisition takes the same lock before publishing its holder, so a lease
 // granted second observes the committed claim in its under-lease owner check.
-export function withMergeLeaseReviewClaim({
-  rootDir, repo, base, prNumber, headSha, now,
-  pidAliveFn = pidIsLive, captureProcessImpl = captureCloserProcessSync,
-}, claim) {
-  if (!base) return { reason: 'merge-lease-base-unavailable' };
-  return withRepositoryStateRead(rootDir, () => {
-    ({ repo } = canonicalRepositoryArguments(rootDir, { repo }));
-    const leasePath = mergeLeaseFilePathWithinRepositoryState(rootDir, { repo, base });
+export function withMergeLeaseReviewClaim(options, claim) {
+  return withReviewClaimLeaseObservation(options, ({ leasePath, lease: observed, identity, retained }) => {
     const locked = withMutationLock(leasePath, () => {
-      const lease = readJsonFile(leasePath);
-      const sameSubject = lease?.repo === repo && lease.base === base
-        && Number(lease.holderPr) === Number(prNumber)
-        && String(lease.holderHead || '').toLowerCase() === headSha.toLowerCase();
-      if (sameSubject) {
-        const currentHost = hostname();
-        const observation = mergeLeaseHolderObservation(lease, {
-          inspectedAt: now || isoNow(), currentHost, pidAliveFn, captureProcessImpl,
-        });
-        if (!mergeLeaseReclaimReason(lease, observation, currentHost)) {
-          return claim('native-merge-custody');
-        }
+      const lease = readReviewClaimLease(leasePath);
+      if (sameReviewSubject(lease, identity)
+        && (retained || !isDeepStrictEqual(lease, observed))) {
+        // A changed holder cannot borrow an earlier holder's death proof.
+        return claim('native-merge-custody');
       }
       return claim(null);
     });

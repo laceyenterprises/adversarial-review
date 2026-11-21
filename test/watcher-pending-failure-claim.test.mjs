@@ -1,6 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import Database from 'better-sqlite3';
 import { ensureReviewStateSchema } from '../src/review-state.mjs';
 import {
@@ -20,6 +22,7 @@ import {
 } from '../src/reviewer-failure-classification.mjs';
 import { reviewPopulationRetryDecision } from '../src/reviewer-route-selection.mjs';
 import { DAEMON_BOUNCE_FAILURE_CLASS, isDaemonBounceFailure } from '../src/daemon-bounce-recovery.mjs';
+import { claimWithExhaustedHeadMergeCustody, exhaustedHeadVerdictReason } from '../src/exhausted-head-verdict.mjs';
 
 const REPO = 'example-org/example-repo';
 const PR = 421;
@@ -77,6 +80,12 @@ const retryablePopulation = between('      const reviewPopulationRetryable = Boo
   '      if (inTerminalFailure && !infraRecoveryClass');
 const claimClosure = between('            const claimBranch = tokenRefreshRecovery',
   '            const claimWithSnapshot = (holdReleaseId');
+const snapshotAndRefund = between('            let preClaimRow = null;',
+  '            // TOKDZ-01:');
+const custodyClaim = between('            const claimWithSnapshot = (holdReleaseId',
+  '            if (result.reason) {');
+const custodyBase = between('      const mergeCustodyBase = () => {',
+  '      const mergeCustodyDeferral =');
 const claimAndFailureLog = between('            const claimWithSnapshot = (holdReleaseId',
   "            if (route.reviewerModel === 'codex')");
 const snapshotDiagnostic = between('              // PENDINGCLAIM-03:',
@@ -160,6 +169,56 @@ function claimBindings(f, decision, head = HEAD) {
       reviewRowInTerminalFailureState: f.predicate,
     },
   };
+}
+
+for (const mode of ['hold-release', 'pool']) {
+  for (const defaultBaseBranch of [undefined, 'release']) {
+    test(`LAC-2293 fragment: ${mode} custody claim refunds its transactional snapshot (base=${defaultBaseBranch || 'main'})`, () => {
+      const rootDir = mkdtempSync(join(tmpdir(), 'lac2293-refund-'));
+      const f = fixture({ failed_at: null, failure_message: null, revision_ref: HEAD,
+        rereview_requested_at: FAILED_AT, rereview_reason: exhaustedHeadVerdictReason(HEAD) });
+      try {
+        const { bindings, selected } = claimBindings(f, route(f));
+        // The queue's admission snapshot is stale by the time its claim runs.
+        f.db.prepare("UPDATE reviewed_prs SET review_attempts = 4, linear_ticket = 'LAC-2293'").run();
+        const expected = f.read();
+        let fenced = false;
+        const result = execute(`${custodyBase}\n${snapshotAndRefund}\n${claimClosure}\n${custodyClaim}
+          return { result, preClaimRow, releaseUnexecutedReviewClaim };`, {
+          ...bindings, db: f.db, ROOT: rootDir, effectiveDomainId: 'code-pr', tenureReviewRequired: false,
+          subject: { headSha: HEAD },
+          loadConfigCached: () => ({ getMergeAuthorityConfig: () => ({ defaultBaseBranch }) }),
+          loadDomainConfig: () => ({}),
+          resolveMergeAuthorityConfigFromDomain: (_domain, config) => config,
+          holdReleaseId: mode === 'hold-release' ? 'release-fixture' : null,
+          reviewerPoolConfig: { enabled: mode === 'pool' },
+          explicitIntentForHead: () => false,
+          stmtGetReviewRow: { get() {
+            assert.equal(f.db.inTransaction, true, 'snapshot is read inside the claim transaction');
+            return f.read();
+          } },
+          claimWithExhaustedHeadMergeCustody(options, claim) {
+            fenced = true;
+            assert.equal(options.base, defaultBaseBranch || 'main');
+            return claimWithExhaustedHeadMergeCustody(options, claim);
+          },
+        });
+        assert.equal(fenced, true);
+        assert.deepEqual(selected, ['stmtMarkAttemptStarted']);
+        assert.equal(result.result.claim.changes, 1);
+        assert.deepEqual(result.preClaimRow, expected);
+        assert.notDeepEqual(result.preClaimRow, bindings.current);
+        assert.equal(f.read().review_status, 'reviewing');
+        f.db.prepare("UPDATE reviewed_prs SET reviewer = 'claude', codex_broker_provider = 'fixture'").run();
+        assert.equal(result.releaseUnexecutedReviewClaim().changes, 1);
+        assert.deepEqual(f.read(), expected, 'refund restores every claim and routing field');
+        assert.equal(result.releaseUnexecutedReviewClaim().changes, 0, 'refund is session guarded');
+      } finally {
+        f.db.close();
+        rmSync(rootDir, { recursive: true, force: true });
+      }
+    });
+  }
 }
 
 const unresolvedModelMessage = '[unknown] Command failed with code 1\n'

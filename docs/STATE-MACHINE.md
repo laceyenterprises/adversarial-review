@@ -3956,6 +3956,14 @@ For `system-exhausted-head-verdict`, the watcher re-reads the admission row and
 priority intent inside the claim transaction. The claim commits under the native
 merge lease's `(repo, base)` mutation lock. A matching PR and head with a
 retained lease leaves the request pending without a reviewer claim or charge.
+An unlocked local check suppresses queueing, dedup preflight and memory
+reservation while custody is retained; queued preparation and execution repeat
+the check. Custody deferrals mark the review lane suppressed without retaining
+capacity wake priority. The locked fence still decides the claim. Liveness
+probes run outside the mutation lock and can authorize review only for an
+unchanged lease; matching replacements defer. Rename recovery and unreadable
+lease state log `merge-lease-state-unavailable` and retain pending custody.
+Absent subject base metadata uses the configured default base branch or `main`.
 The system marker's exact SHA binds a legacy pending request whose subject
 identity backfill cleared `revision_ref`. A conflicting revision prevents the
 match.

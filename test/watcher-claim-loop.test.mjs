@@ -3253,7 +3253,7 @@ for (const mergeOwnsHead of [false, true]) test(
     const loaderPath = path.join(tmp, 'loader.mjs');
     const registerPath = path.join(tmp, 'register.mjs');
     const runnerPath = path.join(tmp, 'runner.mjs');
-    writeFileSync(loaderPath, buildLoaderSource({ subjectHeads: { '101': 'b'.repeat(40) },
+    let loader = buildLoaderSource({ subjectHeads: { '101': 'b'.repeat(40) },
       subject101Overrides: { baseRefName: 'main' }, capRouteSource: `
       globalThis.capRoutes = [];
       export function isReviewCycleCapRoutedToHammer({reviewRow}) { return reviewRow?.failure_message?.startsWith('[review-cycle-cap]') === true; }
@@ -3261,7 +3261,18 @@ for (const mergeOwnsHead of [false, true]) test(
         if (!args.existing?.failure_message?.startsWith('[review-cycle-cap]')) return { handled: false };
         globalThis.capRoutes.push(args.currentRevisionRef);
         return { handled: true, outcome: 'ama-dispatched' };
-      }` }));
+      }` });
+    loader = loader.replace('  return nextLoad(url, context);', `
+      if (url === ${JSON.stringify(fileUrl('src', 'pollonce-phases.mjs'))}) {
+        const loaded = await nextLoad(url, context);
+        return { ...loaded, source: loaded.source.toString()
+          .replace('dedup: () => resolveAlreadyReviewedHeadDedup({',
+            'dedup: () => resolveAlreadyReviewedHeadDedup({ ...((globalThis.__custodyDedup ||= []).push(prNumber), {}),')
+          .replace('reservation = await reserveReviewerMemoryAdmission({',
+            'reservation = await reserveReviewerMemoryAdmission({ ...((globalThis.__custodyMemory ||= []).push(prNumber), {}),') };
+      }
+      return nextLoad(url, context);`);
+    writeFileSync(loaderPath, loader);
     writeFileSync(registerPath, buildRegisterSource(loaderPath));
     writeFileSync(runnerPath, buildRunnerSource({
       prePollSetup: `
@@ -3291,12 +3302,21 @@ for (const mergeOwnsHead of [false, true]) test(
           assert.equal(pending.review_status, 'pending');
           assert.equal(pending.rereview_reason, 'system-exhausted-head-verdict:' + head);
           assert.equal(pending.reviewer_session_uuid, null);
+          // A second tick while custody remains held must still skip preflight.
+          await pollOnce(octokit, pollOptions);
+          assert.equal((globalThis.__custodyDedup || []).includes(101), false);
+          assert.equal((globalThis.__custodyMemory || []).includes(101), false);
+          const lane = db.prepare('SELECT * FROM ttm_owner_state WHERE pr_number=101').get();
+          assert.equal(lane.review_suppressed, 1);
+          assert.equal(lane.review_reason, 'native-merge-custody');
           assert.equal(releaseMergeLease({ ...lease, rootDir, yielded: true }).released, true);
           await pollOnce(octokit, pollOptions);
         }
         const verdictSpawns = globalThis.__watcherClaimLoopReviewerSpawns.filter(spawn => spawn.subjectContext.prNumber === 101);
         assert.equal(verdictSpawns.length, 1);
         assert.equal(verdictSpawns[0].subjectContext.verdictOnly, true);
+        assert.equal(globalThis.__custodyDedup.includes(101), true);
+        assert.equal(globalThis.__custodyMemory.includes(101), true);
         await pollOnce(octokit, pollOptions);
         assert.equal(globalThis.__watcherClaimLoopReviewerSpawns.filter(spawn => spawn.subjectContext.prNumber === 101).length, 1);`,
     }));

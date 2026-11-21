@@ -7607,8 +7607,18 @@ dispatch.
 For an automatic exhausted-head verdict, the watcher commits the reviewer claim
 under the same `(repo, base)` mutation lock as native merge lease acquisition.
 `native-merge-custody` means the exact PR and head already have a retained holder.
-`merge-lease-mutation-busy` or `merge-lease-base-unavailable` defers the claim to
-another poll. The request remains pending with its existing budget. Confirmed
+An unlocked local custody precheck runs before queueing, GitHub dedup preflight
+and memory reservation, and repeats before queued preparation and execution.
+Custody deferrals record a suppressed review lane and do not retain capacity
+wake priority. The locked claim remains authoritative if custody changes after
+the precheck. Holder liveness is probed outside the mutation lock; the locked
+read uses that observation only for an unchanged lease, otherwise a matching
+replacement retains custody until another poll.
+`merge-lease-mutation-busy`, `merge-lease-base-unavailable` or
+`merge-lease-state-unavailable` defers the claim to another poll. The last reason
+logs repository rename recovery or an unreadable/invalid lease, without treating
+the state as an absent holder. Missing subject base metadata uses the configured
+default base branch, then `main`. The request remains pending with its existing budget. Confirmed
 dead local holders and expired remote holders do not defer review. Uncertain
 local process identity retains custody, including after deadline. A review that
 claims first remains visible to the native under-lease owner check from the

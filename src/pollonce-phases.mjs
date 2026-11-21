@@ -279,7 +279,7 @@ import {
   spawnReviewer,
 } from './reviewer-spawn-settle.mjs';
 import { maybeDispatchReviewerTimeoutExhaustedMergeAgent } from './reviewer-timeout-exhausted-dispatch.mjs';
-import { admitExhaustedHeadVerdict, claimWithExhaustedHeadMergeCustody, isExhaustedHeadVerdictRequested } from './exhausted-head-verdict.mjs';
+import { admitExhaustedHeadVerdict, claimWithExhaustedHeadMergeCustody, exhaustedHeadMergeCustodyDeferral, isExhaustedHeadVerdictRequested } from './exhausted-head-verdict.mjs';
 import { reconcileRepairOwner, bindRepairHead } from './repair-epochs.mjs';
 import { refundReviewHarnessFault } from './review-harness-retry.mjs';
 import { isReviewCycleCapRoutedToHammer, maybeRouteReviewCycleCapToHammer } from './review-cycle-cap-hammer.mjs';
@@ -3422,6 +3422,31 @@ export async function processReviewSubject(entry, ctx) {
         return;
       }
 
+      const mergeCustodyBase = () => {
+        if (subject.baseRefName || subject.baseBranch) return subject.baseRefName || subject.baseBranch;
+        const loadedConfig = loadConfigCached();
+        return resolveMergeAuthorityConfigFromDomain(
+          loadDomainConfig(ROOT, effectiveDomainId), loadedConfig.getMergeAuthorityConfig(),
+          { fallbackSources: loadedConfig.sources || {} },
+        ).defaultBaseBranch || 'main';
+      };
+      const mergeCustodyDeferral = () => effectiveDomainId === CODE_PR_DOMAIN_ID && !tenureReviewRequired
+        ? exhaustedHeadMergeCustodyDeferral({
+          row: stmtGetReviewRow.get(repoPath, prNumber), hasPriorityIntent: explicitIntentForHead,
+          rootDir: ROOT, repo: repoPath, prNumber, headSha: subject.headSha,
+          base: mergeCustodyBase(),
+        }) : null;
+      const deferForMergeCustody = () => {
+        const reason = mergeCustodyDeferral();
+        if (reason) {
+          observeReviewLane({ suppressed: true, reason });
+          console.log(`[watcher] Deferring reviewer preflight for ${repoPath}#${prNumber}@${subject.headSha}: ${reason}`);
+        }
+        return reason;
+      };
+      // Avoid enqueueing a retained wake, GitHub dedup reads and memory/seat
+      // reservations for a system verdict that native merge custody fences.
+      if (deferForMergeCustody()) return;
       const preflight = createReviewerPreflight();
       let preflightConsumed = false;
       let preparation = null;
@@ -3533,7 +3558,7 @@ export async function processReviewSubject(entry, ctx) {
         prepareAdmission() {
           if (preparation) return preparation;
           preparation = (async () => {
-            if (reviewerHandoffPending(repoPath, prNumber)) return;
+            if (reviewerHandoffPending(repoPath, prNumber) || deferForMergeCustody()) return;
             // Retain completed maintenance across a multi-minute review.
             // Refresh mutable live evidence before consuming the snapshot.
             // Do not reconcile drafts or update triage for a closed, moved or
@@ -3555,6 +3580,11 @@ export async function processReviewSubject(entry, ctx) {
         },
         async run() {
           preflightConsumed = true;
+          const custodyDeferral = deferForMergeCustody();
+          if (custodyDeferral) {
+            this.refundDepthSpill(custodyDeferral);
+            return { dispatched: false, reason: custodyDeferral };
+          }
           // Check the final route after quota/depth/account fallbacks, before
           // claiming the row or spawning any reviewer.
           if (tenureReviewRequired && !tenureReviewerAllowed(prTenure, route.reviewerModel)) {
@@ -3844,7 +3874,8 @@ export async function processReviewSubject(entry, ctx) {
             if (effectiveDomainId === CODE_PR_DOMAIN_ID && claimBranch === 'pending'
               && /^[a-f0-9]{40}$/i.test(reviewerHeadSha || '') && !tenureReviewRequired) {
               result = claimWithExhaustedHeadMergeCustody({
-                db, rootDir: ROOT, repo: repoPath, base: subject.baseRefName || subject.baseBranch,
+                db, rootDir: ROOT, repo: repoPath,
+                base: mergeCustodyBase(),
                 prNumber, headSha: reviewerHeadSha, hasPriorityIntent: explicitIntentForHead,
                 readRow: () => stmtGetReviewRow.get(repoPath, prNumber),
               }, row => {
@@ -3856,7 +3887,7 @@ export async function processReviewSubject(entry, ctx) {
             }
             if (result.reason) {
               console.log(`[watcher] Deferring reviewer claim for ${repoPath}#${prNumber}@${reviewerHeadSha}: ${result.reason}`);
-              this.retainWakeForCapacity();
+              observeReviewLane({ suppressed: true, reason: result.reason });
               return { dispatched: false, reason: result.reason };
             }
             const { claim } = result;

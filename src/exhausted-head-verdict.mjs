@@ -1,4 +1,4 @@
-import { withMergeLeaseReviewClaim } from './ama/merge-lease.mjs';
+import { inspectMergeLeaseReviewCustody, withMergeLeaseReviewClaim } from './ama/merge-lease.mjs';
 
 // Shared closure evidence: only a new builder head gets a new review/budget
 // episode. A closer's pushed head stays in its existing reviewed-head series.
@@ -38,6 +38,13 @@ export function isExhaustedHeadVerdictRequested(row, headSha) {
   if (!headSha || !row?.rereview_requested_at
     || row.revision_ref?.toLowerCase() !== headSha.toLowerCase()) return false;
   return REPAIR_HEAD_REASON.exec(row.rereview_reason || '')?.[1].toLowerCase() === headSha.toLowerCase();
+}
+
+// Scheduling hint only; the claim transaction still owns the final decision.
+export function exhaustedHeadMergeCustodyDeferral({ row, hasPriorityIntent, ...identity }) {
+  if (row?.failed_at || !isSystemExhaustedHeadVerdictRequested(row, identity.headSha)
+    || hasPriorityIntent()) return null;
+  return inspectMergeLeaseReviewCustody(identity).reason;
 }
 
 // A priority receipt that arrives while the candidate is queued keeps ordinary

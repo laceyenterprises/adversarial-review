@@ -1,12 +1,15 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { hostname, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import Database from 'better-sqlite3';
-import { acquireMergeLease, inspectMergeLease, releaseMergeLease } from '../src/ama/merge-lease.mjs';
+import { acquireMergeLease, inspectMergeLease, mergeLeaseFilePath, releaseMergeLease,
+  withMergeLeaseReviewClaim } from '../src/ama/merge-lease.mjs';
 import { isDaemonMergeReviewAllowed } from '../src/ama/daemon-merge.mjs';
-import { claimWithExhaustedHeadMergeCustody, exhaustedHeadVerdictReason } from '../src/exhausted-head-verdict.mjs';
+import { claimWithExhaustedHeadMergeCustody, exhaustedHeadMergeCustodyDeferral,
+  exhaustedHeadVerdictReason } from '../src/exhausted-head-verdict.mjs';
+import { repositoryRenamePendingPath } from '../src/repository-state-lock.mjs';
 import { pendingExplicitReviewIntent, priorityReviewIntent, recordExplicitReviewIntent } from '../src/explicit-review-intent.mjs';
 import { ensureReviewStateSchema } from '../src/review-state.mjs';
 import { prepareMarkAttemptStarted } from '../src/review-state-statements.mjs';
@@ -65,6 +68,105 @@ function repeat(run) {
     rmSync(rootDir, { recursive: true, force: true });
   }
 }
+
+test('LAC-2293: scheduling precheck defers only automatic system verdicts', () => {
+  repeat(({ identity, grant, release, row, seed, human }) => {
+    seed();
+    const lease = assertGranted(grant());
+    const precheck = hasPriorityIntent => exhaustedHeadMergeCustodyDeferral({
+      ...identity, row: row(), hasPriorityIntent, now: at,
+      pidAliveFn: () => true, captureProcessImpl: () => ({ startedAt: expiredAt }),
+    });
+    assert.equal(precheck(() => false), 'native-merge-custody');
+    human();
+    assert.equal(precheck(() => true), null);
+    release(lease);
+    assert.equal(precheck(() => false), null);
+    assert.equal(exhaustedHeadMergeCustodyDeferral({
+      row: { ...row(), failed_at: at }, headSha,
+      hasPriorityIntent: () => assert.fail('failed retries bypass the precheck'),
+    }), null);
+    assert.equal(exhaustedHeadMergeCustodyDeferral({
+      row: { ...row(), rereview_reason: 'human' }, headSha,
+      hasPriorityIntent: () => assert.fail('ordinary reviews bypass the precheck'),
+    }), null);
+  });
+});
+
+test('LAC-2293: liveness probe permits native release outside the mutation lock', () => {
+  repeat(({ identity, grant, release, row, seed, claim }) => {
+    seed();
+    const lease = assertGranted(grant());
+    let probed = false;
+    const result = claim({ captureProcessImpl: () => {
+      assert.equal(existsSync(`${mergeLeaseFilePath(identity.rootDir, identity)}.mutation.lock`), false);
+      release(lease);
+      probed = true;
+      return { startedAt: expiredAt };
+    } });
+    assert.equal(probed, true);
+    assert.equal(result.claim.changes, 1);
+    assert.equal(row().review_status, 'reviewing');
+  });
+});
+
+test('LAC-2293: a replacement holder cannot borrow a pre-lock death proof', () => {
+  repeat(({ grant, release, row, seed, claim }) => {
+    seed();
+    const lease = assertGranted(grant());
+    let replacement;
+    const result = claim({ captureProcessImpl: () => {
+      release(lease);
+      replacement = assertGranted(grant());
+      // Prove the original PID was reused, after a new holder was published.
+      return { startedAt: at };
+    } });
+    assertNoClaim(result, row(), 'native-merge-custody');
+    release(replacement);
+    assert.equal(claim().claim.changes, 1);
+  });
+});
+
+for (const mode of ['corrupt lease', 'unreadable lease', 'rename recovery', 'corrupt locked read']) {
+  test(`LAC-2293: ${mode} defers with no claim or attempt charge`, () => {
+    repeat(({ identity, grant, row, seed, claim }) => {
+      seed();
+      const path = mergeLeaseFilePath(identity.rootDir, identity);
+      let observations = {};
+      if (mode === 'rename recovery') {
+        const pending = repositoryRenamePendingPath(identity.rootDir);
+        mkdirSync(join(identity.rootDir, 'data', 'repository-renames'), { recursive: true });
+        writeFileSync(pending, '{}');
+      } else {
+        assertGranted(grant());
+        if (mode === 'corrupt locked read') {
+          observations = { captureProcessImpl: () => {
+            writeFileSync(path, '{');
+            return { startedAt: expiredAt };
+          } };
+        } else if (mode === 'unreadable lease') {
+          rmSync(path);
+          mkdirSync(path);
+        } else writeFileSync(path, '{');
+      }
+      const before = row();
+      assertNoClaim(claim(observations), row(), 'merge-lease-state-unavailable');
+      assert.deepEqual(row(), before);
+      rmSync(path, { recursive: true, force: true });
+      rmSync(repositoryRenamePendingPath(identity.rootDir), { force: true });
+    });
+  });
+}
+
+test('LAC-2293: claim exceptions propagate and release the mutation lock', () => {
+  const rootDir = mkdtempSync(join(tmpdir(), 'lac2293-claim-error-'));
+  const identity = { rootDir, repo, base, prNumber: 1, headSha };
+  try {
+    const error = new Error('fixture SQLite failure');
+    assert.throws(() => withMergeLeaseReviewClaim(identity, () => { throw error; }), e => e === error);
+    assert.equal(existsSync(`${mergeLeaseFilePath(rootDir, identity)}.mutation.lock`), false);
+  } finally { rmSync(rootDir, { recursive: true, force: true }); }
+});
 
 function assertGranted(result) {
   assert.equal(result.acquired, true);

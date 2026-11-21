@@ -219,6 +219,8 @@ const PATTERN_SQL_IDENTIFIER = '^[A-Za-z_][A-Za-z0-9_]{0,62}$';
 const PATTERN_SQL_IDENTIFIER_DESCRIPTION = 'SQL identifier /^[A-Za-z_][A-Za-z0-9_]{0,62}$/';
 const PATTERN_LOCAL_USERNAME = '^[A-Za-z_][A-Za-z0-9_-]{0,63}$';
 const PATTERN_LOCAL_USERNAME_DESCRIPTION = 'local username /^[A-Za-z_][A-Za-z0-9_-]{0,63}$/';
+const PATTERN_GIT_IDENTITY_FIELD = '^(?=[^\\u0000\\r\\n<>]*\\S)[^\\u0000\\r\\n<>]+$';
+const PATTERN_GIT_IDENTITY_FIELD_DESCRIPTION = 'non-blank text without NUL, CR, LF, "<" or ">"';
 const PATTERN_OP_REF = '^$|^op://[^/]+/[^/]+/[^/]+(?:/[^/]+)?$';
 const PATTERN_OP_REF_DESCRIPTION = 'empty string or full op://<vault>/<item>/[section/]<field> ref';
 
@@ -288,6 +290,11 @@ const SEARCH_OPERATIONS = Object.freeze({
   tavily: ['web_search', 'news_search', 'fetch', 'extract', 'research', 'tavily.map', 'tavily.crawl'],
 });
 const SEARCH_LIMIT_PATHS = new Set(Object.keys(SEARCH_OPERATIONS).map(p => `services.hcp.search.providers.${p}.operation_limits`));
+// Keyed maps whose keys are repository slugs (`owner/name`) and may contain
+// dots. A layer replaces the complete map, like the search provider limits
+// (see SEARCH_LIMIT_PATHS), so a key is never split into a provenance path and dropped.
+const ATOMIC_KEYED_MAP_PATHS = new Set(['remediation.git_identity_repo_overrides']);
+
 const SEARCH_MONEY_PATTERN = '^[0-9]{1,12}([.][0-9]{1,9})?$';
 const SEARCH_REF_PATTERN = String.raw`^op://[^/\s?#%](?:[^/?#%\r\n]*[^/\s?#%])?/[^/\s?#%](?:[^/?#%\r\n]*[^/\s?#%])?/[^/\s?#%](?:[^/?#%\r\n]*[^/\s?#%])?$`;
 const SEARCH_COUNT_LIMITS = ['max_results', 'max_pages', 'max_urls', 'max_input_tokens', 'max_output_tokens', 'max_duration_seconds'];
@@ -3459,6 +3466,32 @@ function schemaV1() {
             __default: 21600000,
             __min: 60000,
           },
+          // RDXREMIDENTITY-02: repository-specific remediation git identities,
+          // the config twin of REMEDIATION_WORKER_GIT_IDENTITY_REPO_OVERRIDES.
+          // Keyed by lower-cased `owner/name`, then worker class, to
+          // { name, email }. The env var wins when it is set. Both fields use
+          // the same rule as `isGitIdentityField` in
+          // remediation-worker-provenance.mjs: non-blank, with no NUL, CR, LF,
+          // `<` or `>`. A layer replaces the whole map (ATOMIC_KEYED_MAP_PATHS)
+          // so dotted repository names survive. Read through
+          // remediation-identity-config.mjs.
+          git_identity_repo_overrides: {
+            __type: TYPE_DICT,
+            __strict: false,
+            __default: {},
+            __extra_keys_schema: {
+              __type: TYPE_DICT,
+              __strict: false,
+              __extra_keys_schema: {
+                __type: TYPE_DICT,
+                __strict: true,
+                __keys: {
+                  name: { __type: TYPE_STRING, __pattern: PATTERN_GIT_IDENTITY_FIELD, __pattern_description: PATTERN_GIT_IDENTITY_FIELD_DESCRIPTION },
+                  email: { __type: TYPE_STRING, __pattern: PATTERN_GIT_IDENTITY_FIELD, __pattern_description: PATTERN_GIT_IDENTITY_FIELD_DESCRIPTION },
+                },
+              },
+            },
+          },
         },
       },
       merge_agent: {
@@ -5526,7 +5559,7 @@ function flatten(doc, prefix = '', preserveEmptyMap = () => false, atomicPaths =
   for (const [key, value] of Object.entries(doc)) {
     if (key.startsWith('__')) continue;
     const full = prefix ? `${prefix}.${key}` : key;
-    if (atomicPaths.has(full) || SEARCH_LIMIT_PATHS.has(full)) {
+    if (atomicPaths.has(full) || SEARCH_LIMIT_PATHS.has(full) || ATOMIC_KEYED_MAP_PATHS.has(full)) {
       out[full] = value;
     } else if (value && typeof value === 'object' && !Array.isArray(value)) {
       if (Object.keys(value).length > 0) {
@@ -5878,7 +5911,7 @@ function schemaLeaf(schema, key) {
 function* flattenSchemaLeaves(doc, schema, path = []) {
   // A layer replaces a provider's complete declaration, even with {}.
   // Operation IDs may contain dots and must never become provenance paths.
-  if (SEARCH_LIMIT_PATHS.has(path.join('.'))) {
+  if (SEARCH_LIMIT_PATHS.has(path.join('.')) || ATOMIC_KEYED_MAP_PATHS.has(path.join('.'))) {
     yield { dotted: path.join('.'), path, value: doc };
     return;
   }

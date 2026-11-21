@@ -676,14 +676,43 @@ lowercase `owner/name` keys and worker class keys.
 REMEDIATION_WORKER_GIT_IDENTITY_REPO_OVERRIDES='{"example-org/example-repo":{"codex":{"name":"Example Agent","email":"12345+example-agent[bot]@users.noreply.github.com"}}}'
 ```
 
-The daemon matches repository names case-insensitively and reads the setting
-when it resolves the identity. A matching entry supplies both fields. A
-missing repository or worker class falls back to
-`REMEDIATION_WORKER_GIT_NAME_<CLASS>` and `REMEDIATION_WORKER_GIT_EMAIL_<CLASS>`,
-then to the built-in defaults. Use upper snake case for `<CLASS>`, such as
-`CLAUDE_CODE`. Malformed JSON or a malformed matching entry warns on stderr
-and uses the same fallback. The warning includes only the variable name
-and a generic description.
+The same mapping can be set in config as `remediation.git_identity_repo_overrides`
+(RDXREMIDENTITY-02), which needs no service-definition edit. Put it in the host's
+`config.local.yaml`; `config.yaml` ships it as an empty map and
+[`config.local.yaml.example`](../config.local.yaml.example) shows the shape.
+
+```yaml
+remediation:
+  git_identity_repo_overrides:
+    example-org/example-repo:
+      codex:
+        name: Example Agent
+        email: 12345+example-agent[bot]@users.noreply.github.com
+```
+
+The strict loader rejects a name or email that is blank or contains NUL, CR, LF,
+`<` or `>`. A config layer replaces the whole mapping, so a host override lists
+every repository it needs. Deploy the key to the Agent OS Python and shell
+loaders before setting it on a host that uses them, since a strict loader
+refuses a key it does not know.
+
+Resolution order at call time, highest first:
+
+1. the env var `REMEDIATION_WORKER_GIT_IDENTITY_REPO_OVERRIDES`, when it has an
+   entry for the repository and class;
+2. the config key `remediation.git_identity_repo_overrides`;
+3. `REMEDIATION_WORKER_GIT_NAME_<CLASS>` and `REMEDIATION_WORKER_GIT_EMAIL_<CLASS>`;
+4. the built-in defaults.
+
+The daemon matches repository names case-insensitively and reads the settings
+when it resolves the identity; config comes from the cached config loader, so
+nothing is re-read from disk per call, and it is only consulted when the env var
+did not settle the identity. A matching entry supplies both fields. A layer
+with no entry for the repository or worker class, or an unreadable one, falls
+through to the next layer. Use upper snake case for `<CLASS>`, such as
+`CLAUDE_CODE`. Malformed JSON or a malformed matching entry in either layer
+warns on stderr and falls through the same way. The warning is a fixed
+sentence naming only the env var or config key, never a value.
 
 When the repository has no entry for the exact dispatch class, the lookup
 also uses its harness key, such as `claude-code` for `remediator-claude`,

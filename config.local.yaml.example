@@ -15,6 +15,25 @@
 #   additional_orgs:
 #     - example-second-org
 
+# Repository-specific Git author and committer identity for follow-up
+# workspaces and local remediation workers (RDXREMIDENTITY-02). The mapping is
+# keyed by lower-cased owner/name, then worker class, to { name, email }, the
+# same shape as the env var REMEDIATION_WORKER_GIT_IDENTITY_REPO_OVERRIDES,
+# which wins when it is set. Name and email must be non-blank and contain no
+# NUL, CR, LF, "<" or ">". A repository or class with no entry falls back to
+# REMEDIATION_WORKER_GIT_NAME_<CLASS> / REMEDIATION_WORKER_GIT_EMAIL_<CLASS>,
+# then the built-in defaults. A malformed entry warns without printing values
+# and falls back the same way; the strict loader rejects a bad field at load.
+# Deployment prerequisite: as with github.additional_orgs above, validate the
+# key with the Agent OS Python and shell loaders before enabling it on a host,
+# because an older strict loader refuses a key it does not know.
+# remediation:
+#   git_identity_repo_overrides:
+#     example-org/example-repo:
+#       codex:
+#         name: Example Agent
+#         email: 12345+example-agent[bot]@users.noreply.github.com
+
 adversarial:
   reviewer:
     load_aware:

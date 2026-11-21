@@ -14,9 +14,9 @@ import { materializePerWorkerCodexAuth } from '../../../codex-per-worker-auth.mj
 import {
   GEMINI_REMEDIATION_WORKER_TRAILER_CLASS,
   REMEDIATION_WORKER_TRAILER_CLASS,
-  remediationWorkerGitIdentity,
   remediationWorkerPushProvider,
 } from '../../../remediation-worker-provenance.mjs';
+import { remediationWorkerGitIdentityWithConfig } from '../../../remediation-identity-config.mjs';
 import { requireWorkerReplyContext } from '../../../remediation-reply-paths.mjs';
 import { scrubOAuthFallbackEnv, OAUTH_ENV_STRIP_LIST } from '../../../secret-source/env.mjs';
 import { resolveAgyPrintTimeoutMs } from '../../../reviewer-timeout.mjs';
@@ -308,7 +308,7 @@ function assertHarnessIdentityMatch({
   const mismatches = [];
   let expectedIdentity = null;
   try {
-    expectedIdentity = remediationWorkerGitIdentity(gitIdentityWorkerClass, env, { repo });
+    expectedIdentity = remediationWorkerGitIdentityWithConfig(gitIdentityWorkerClass, env, { repo });
   } catch (error) {
     if (!/unknown remediation worker class/u.test(String(error?.message || error))) {
       throw error;
@@ -1013,7 +1013,7 @@ function spawnClaudeCodeRemediationWorker({
   const claudeCli = resolveClaudeCodeCliPath(sourceEnv);
   // The dispatch class selects commit identity. The physical harness selects
   // the broker provider, and workerClass here carries the provenance trailer.
-  const gitIdentity = remediationWorkerGitIdentity(gitIdentityWorkerClass, sourceEnv, { repo });
+  const gitIdentity = remediationWorkerGitIdentityWithConfig(gitIdentityWorkerClass, sourceEnv, { repo });
   const { env: baseEnv, startupEvidence } = prepareClaudeCodeRemediationStartupEnv({
     gitIdentity,
     workerClass: 'claude-code',
@@ -1116,7 +1116,7 @@ function spawnGeminiRemediationWorker({
   readFileSyncImpl = readFileSync,
 }) {
   const agyCli = resolveAgyCliPath(sourceEnv);
-  const gitIdentity = remediationWorkerGitIdentity(gitIdentityWorkerClass, sourceEnv, { repo });
+  const gitIdentity = remediationWorkerGitIdentityWithConfig(gitIdentityWorkerClass, sourceEnv, { repo });
   const { env: baseEnv, startupEvidence } = prepareGeminiRemediationStartupEnv({
     gitIdentity,
     workerClass: 'gemini',
@@ -1229,7 +1229,7 @@ function spawnCodexRemediationWorker({
 }) {
   const codexCli = resolveCodexCliPath(sourceEnv);
   // For codex, `workerClass` IS the physical harness class ('codex').
-  const gitIdentity = remediationWorkerGitIdentity(workerClass, sourceEnv, { repo });
+  const gitIdentity = remediationWorkerGitIdentityWithConfig(workerClass, sourceEnv, { repo });
   const { env: baseEnv, startupEvidence, cleanup: cleanupStagedAuth } = prepareCodexRemediationStartupEnv({
     gitIdentity,
     perWorkerKey: jobId || launchRequestId || null,

@@ -106,6 +106,7 @@ import { promisify } from 'node:util';
 
 import { writeFileAtomic } from '../atomic-write.mjs';
 import { terminalReviewProofMatches } from './reviewer-authority.mjs';
+import { closerReviewProof, readCloserReviewProof } from './closer-review-proof.mjs';
 import { createReviewCurrencyReader } from './review-currency.mjs';
 import { findActiveRemediationJob } from './active-remediation-job.mjs';
 import { listSettledJsonNames } from './dispatch-dir-names.mjs';
@@ -1185,10 +1186,13 @@ async function runGhPrMergeWithTransientRetry({
   repo,
   prNumber,
   head,
+  reviewProof,
   logger = console,
 }) {
   let lastFailure = null;
   for (let attempt = 1; attempt <= AMA_CLOSER_MERGE_RETRY_CAP; attempt += 1) {
+    const proof = await reviewProof();
+    if (!proof.ok) return { exitCode: 1, closureHold: proof, mergeNotInvoked: attempt === 1 };
     try {
       const { stdout, stderr } = await meteredExecFile(execFileImpl, 'gh', args, {
         maxBuffer: 5 * 1024 * 1024,
@@ -4898,6 +4902,7 @@ async function maybeDispatchAmaCloserAttempt({
   readPullRequestStateImpl = readAmaCloserPullRequestStateAsync,
   fetchPullRequestRollupImpl = fetchPullRequestRollup,
   fetchPrimaryChangeImpl = fetchPrimaryChange,
+  readCloserReviewProofImpl = readCloserReviewProof,
   resolveHamTerminalRemediationEvidenceImpl = null,
   deliverAlertImpl = deliverAlert,
   settleCloserSuccessorImpl = settleCloserSuccessor,
@@ -6584,6 +6589,11 @@ async function maybeDispatchAmaCloserAttempt({
         if (!baseBranch) {
           sameHeadHamMergeReason = 'base-branch-missing';
         } else {
+          const readTerminalReviewProof = rollup => closerReviewProof({ snapshot: rollup, repo, prNumber,
+            headSha: mergeHead, validatedAt: eligibilityOptions.hamTerminalRemediationGroundTruth?.auditComment?.createdAt,
+            operatorLogins: cfg?.operatorLogins, get: createHistoryReader({ execFileImpl, env, signal }) });
+          const terminalReviewProof = await readTerminalReviewProof(
+            await fetchPullRequestRollupImpl(repo, prNumber, { execFileImpl }));
           sameHeadHamMerge = await withDaemonMergeReservation({ rootDir, repo,
             base: baseBranch, pr: prNumber, head: mergeHead,
           }, () => routeFinalizationWriter({ rootDir, cfg,
@@ -6606,6 +6616,7 @@ async function maybeDispatchAmaCloserAttempt({
               : [],
             requiredCheckContexts: resolveRequiredCheckContextsFromCfg(cfg),
             liveGate: {
+              terminalReviewProof,
               primaryChange: eligibilityOptions.hamTerminalRemediationGroundTruth?.commit?.primaryChange,
               requirePrimaryChange: true,
               strictNonBlockingRemediation: cfg?.strictNonBlockingRemediation !== false,
@@ -6654,6 +6665,7 @@ async function maybeDispatchAmaCloserAttempt({
             dismissStaleRequestChangesImpl: dispatchContext.dismissStaleRequestChangesOnResolved !== false
               ? async () => dismissStandingChangesRequestedReviewsForHead(execFileImpl, repo, prNumber, mergeHead, {
                   authoritativeReviewerLogins,
+                  requireSupersededCommitId: mergeHead,
                   message:
                     `AMA hammer final remediation resolved findings on ${mergeHead}; ` +
                     `dismissing stale Request changes before merge.`,
@@ -6663,13 +6675,7 @@ async function maybeDispatchAmaCloserAttempt({
             fetchLiveGateImpl: async () => {
               const rollup = await fetchPullRequestRollupImpl(repo, prNumber, { execFileImpl });
               const state = String(rollup?.state || '');
-              const get = createHistoryReader({ execFileImpl, env, signal });
-              const terminalReviewProof = await terminalReviewProofMatches({
-                reviews: rollup?.reviews, headSha: mergeHead,
-                validatedAt: eligibilityOptions.hamTerminalRemediationGroundTruth?.auditComment?.createdAt,
-                compare: (from, to) => get(`repos/${repo}/compare/${from}...${to}`),
-                currency: createReviewCurrencyReader({ repo, prNumber, get, comments: rollup?.comments }),
-              });
+              const terminalReviewProof = await readTerminalReviewProof(rollup);
               return {
                 terminalReviewProof,
                 primaryChange: await fetchPrimaryChangeImpl({ repo, prNumber, rootDir, headSha: rollup?.headSha || rollup?.headRefOid || '',
@@ -6742,6 +6748,10 @@ async function maybeDispatchAmaCloserAttempt({
                 repo: mergeRepo,
                 prNumber: mergePr,
                 head,
+                reviewProof: () => readCloserReviewProofImpl({
+                  repo: mergeRepo, prNumber: mergePr, headSha: head, signal, env, operatorLogins: cfg?.operatorLogins,
+                  validatedAt: eligibilityOptions.hamTerminalRemediationGroundTruth?.auditComment?.createdAt,
+                }),
                 logger,
               });
             },
@@ -6875,6 +6885,7 @@ async function maybeDispatchAmaCloserAttempt({
           launchRequestId: existingRecord.launchRequestId || null,
           promptPath: existingRecord.promptPath || null,
           needsOperator: !certifiedPark,
+          ...(sameHeadHamMerge?.recoveryWait ? { recoveryWait: true, retryAfterMs: sameHeadHamMerge.retryAfterMs } : {}),
         });
       }
       if (

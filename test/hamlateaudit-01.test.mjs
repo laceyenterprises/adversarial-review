@@ -9,6 +9,11 @@ import { join } from 'node:path';
 import { primaryChangeFixture } from './helpers/primary-change.mjs';
 import { resolveHamTerminalRemediationEvidence } from '../src/ama/dispatch-closer.mjs';
 import { __test__ as githubApi } from '../src/github-api.mjs';
+import { closerReviewProof, readCloserReviewProof } from '../src/ama/closer-review-proof.mjs';
+import { legacyLaneWriteMain } from '../bin/legacy-lane-write.mjs';
+import { runLegacyLaneWrite } from '../src/finalization/legacy-lane-write.mjs';
+import { routeFinalizationWriter } from '../src/finalization/queue-routing-boundary.mjs';
+import { retryableAmaCloserDeferralOutcome, AMA_CLOSER_RETRYABLE_DEFERRAL_REASONS } from '../src/ama/closer-lease.mjs';
 
 // Incident facts from the dispatch; bodies are synthetic, not a live PR read.
 const OLD = 'a757cb4904c5' + '0'.repeat(28);
@@ -22,6 +27,17 @@ const old = { node_id: 'PRR_kwDORuLkis8AAAABWptG8A', commit_id: OLD,
 const late = { ...old, node_id: 'PRR_kwDORuLkis8AAAABWqhqTA', commit_id: HEAD,
   submitted_at: '2026-11-07T01:32:13Z',
   body: body('- **Eyebrow color changed.** Restore the original artwork color.') };
+const operatorReview = {
+  id: 500, state: 'CHANGES_REQUESTED', commit_id: HEAD, submitted_at: '2026-11-07T01:32:13Z',
+  author_association: 'CONTRIBUTOR', user: { login: 'fixture-operator', type: 'User' }, body: 'Correct the regression.',
+};
+async function getReviewEvidence(path) {
+  if (path.endsWith('/collaborators/fixture-operator/permission')) return { permission: 'admin' };
+  if (path.includes('/compare/')) return { status: 'ahead' };
+  throw new Error(`Unexpected read ${path}`);
+}
+const snapshot = (reviews, headSha = HEAD) => ({ state: 'OPEN', headSha, reviews });
+const reviewIdentity = { repo: 'example/repo', prNumber: 54, headSha: HEAD, validatedAt: AUDIT_AT };
 const compare = async (from, to) => {
   assert.equal(to, HEAD);
   return { status: from === OLD ? 'ahead' : from === OTHER ? 'diverged' : 'identical' };
@@ -48,6 +64,172 @@ test('same-head repeat with identical body preserves proof; changed detail at eq
   const findingBefore = { ...initial, body: late.body };
   assert.equal((await proof([findingBefore, { ...late,
     body: late.body.replace('original artwork color', 'original eyebrow shape') }])).ok, false);
+  assert.equal((await proof([initial, { ...late, state: 'CHANGES_REQUESTED', body: initial.body }])).ok, false);
+});
+
+test('closer honors standing exact-head operator requests, including those submitted before the audit', async () => {
+  for (const submitted_at of [operatorReview.submitted_at, '2026-11-07T01:25:00Z']) {
+    const result = await closerReviewProof({ ...reviewIdentity, snapshot: snapshot([old, { ...operatorReview, submitted_at }]),
+      get: getReviewEvidence });
+    assert.deepEqual(result, { ok: false, reason: 'operator-review-changes-requested',
+      reviewId: operatorReview.id, operatorLogin: 'fixture-operator' });
+    assert.equal(gate(result).eligible, false);
+  }
+  const configured = await closerReviewProof({ ...reviewIdentity, snapshot: snapshot([operatorReview]),
+    operatorLogins: ['Fixture-Operator'], get: async () => assert.fail('configured issuer needs no permission read') });
+  assert.equal(configured.reason, 'operator-review-changes-requested');
+});
+
+test('dismissal or a later approval by the same operator clears only the disposed review across rebases', async () => {
+  const evaluate = (reviews, get = getReviewEvidence) =>
+    closerReviewProof({ ...reviewIdentity, snapshot: snapshot(reviews), get });
+  const approval = { ...operatorReview, id: 501, state: 'APPROVED', submitted_at: '2026-11-07T01:33:00Z' };
+  for (const reviews of [[{ ...operatorReview, state: 'DISMISSED' }], [operatorReview, approval],
+    [{ ...operatorReview, commit_id: OTHER }, approval],
+    [operatorReview, { ...approval, commit_id: OTHER }]]) {
+    assert.deepEqual(await evaluate(reviews), { ok: true });
+  }
+  for (const irrelevant of [
+    { ...approval, state: 'COMMENTED' }, { ...approval, user: { login: 'another-user' } },
+    { ...approval, commit_id: null }, { ...approval, id: operatorReview.id },
+    { ...approval, submitted_at: operatorReview.submitted_at },
+  ]) {
+    assert.equal((await evaluate([operatorReview, irrelevant])).reviewId, operatorReview.id);
+  }
+  const nextReview = { ...operatorReview, id: 502, submitted_at: '2026-11-07T01:34:00Z' };
+  assert.equal((await evaluate([operatorReview, approval, nextReview])).reviewId, nextReview.id);
+  assert.deepEqual(await evaluate([operatorReview], async () => ({ permission: 'read' })), { ok: true });
+  assert.equal((await evaluate([operatorReview], async () => { throw new Error('permission unavailable'); })).reason,
+    'terminal-review-evidence-unavailable');
+  assert.equal((await evaluate([operatorReview], async () => ({}))).reason, 'terminal-review-evidence-unavailable');
+});
+
+test('operator veto survives a rebase from H to H-prime, without requiring review commit evidence', async () => {
+  for (const commit_id of [HEAD, OTHER, null]) {
+    const result = await closerReviewProof({ ...reviewIdentity, headSha: OTHER,
+      snapshot: snapshot([{ ...operatorReview, commit_id }], OTHER), get: getReviewEvidence });
+    assert.equal(result.reason, 'operator-review-changes-requested');
+  }
+});
+
+test('irrelevant historical ghost approvals do not park closure; exact-head unknown authors fail closed', async () => {
+  for (const ghost of [
+    { ...operatorReview, state: 'APPROVED', commit_id: OTHER, user: null },
+    { ...operatorReview, state: 'APPROVED', commit_id: null },
+    { ...operatorReview, state: 'APPROVED', commit_id: null, user: null },
+    { ...operatorReview, commit_id: OTHER, user: null },
+  ]) {
+    const result = await closerReviewProof({ ...reviewIdentity, snapshot: snapshot([ghost]), get: getReviewEvidence });
+    assert.deepEqual(result, { ok: true });
+    const veto = await closerReviewProof({ ...reviewIdentity, snapshot: snapshot([operatorReview, ghost]), get: getReviewEvidence });
+    assert.equal(veto.reason, 'operator-review-changes-requested');
+  }
+  for (const state of ['APPROVED', 'CHANGES_REQUESTED']) {
+    const result = await closerReviewProof({ ...reviewIdentity,
+      snapshot: snapshot([{ ...operatorReview, state, user: null }]), get: getReviewEvidence });
+    assert.equal(result.reason, 'terminal-review-evidence-unavailable');
+  }
+});
+
+test('review refusals do not enter the automatic retry/refund deferral allowlist', () => {
+  for (const reason of ['operator-review-changes-requested', 'review-changed-since-validation']) {
+    assert.equal(AMA_CLOSER_RETRYABLE_DEFERRAL_REASONS.has(reason), false);
+    assert.equal(retryableAmaCloserDeferralOutcome({ outcome: 'deferred', reason }), null);
+  }
+  assert.equal(retryableAmaCloserDeferralOutcome({ outcome: 'deferred', reason: 'lane-busy' }), 'retryable-lane-busy');
+});
+
+test('explicit legacy writer PR identity survives URL variations and malformed targets are named', async t => {
+  const rootDir = mkdtempSync(join(tmpdir(), 'closer-pr-identity-'));
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  for (const suffix of ['/pull/54/', '/pull/54#review', '/pulls/54']) {
+    const args = ['--root', rootDir, '--repo', reviewIdentity.repo, '--base', 'main', '--pr', '54',
+      '--review-validated-at', AUDIT_AT, '--', 'merge', `https://github.com/example/repo${suffix}`,
+      '--match-head-commit', HEAD];
+    let writes = 0;
+    assert.equal(await legacyLaneWriteMain(args, { stdout: { write() {} }, stderr: { write() {} },
+      run: options => runLegacyLaneWrite({ ...options, readConfig: () => ({}),
+        readReviewProof: async request => { assert.equal(request.prNumber, 54); return { ok: true }; },
+        exec: async () => { writes++; return {}; },
+      }) }), 0);
+    assert.equal(writes, 1);
+  }
+  const result = await runLegacyLaneWrite({ rootDir, repository: reviewIdentity.repo, base: 'main',
+    subject: { target: 'invalid', head: HEAD }, reviewValidatedAt: AUDIT_AT, readConfig: () => ({}),
+    exec: async () => assert.fail('unidentified target cannot merge') });
+  assert.equal(result.reason, 'merge-target-unparseable');
+  for (const pr of ['0', '-1', '1e3', '9007199254740992']) {
+    assert.equal(await legacyLaneWriteMain(['--root', rootDir, '--repo', reviewIdentity.repo,
+      '--base', 'main', '--pr', pr, '--', 'merge'], { run: async () => assert.fail('invalid PR') }), 64);
+  }
+});
+
+test('FIFO writer samples fresh exact-head review evidence after another merge owner releases the lane', { timeout: 5000 }, async t => {
+  const rootDir = mkdtempSync(join(tmpdir(), 'closer-late-review-'));
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  const lane = { repository: reviewIdentity.repo, base: 'main' };
+  let admitted, releaseDaemon;
+  const daemonReady = new Promise(resolve => { admitted = resolve; });
+  const daemonDone = new Promise(resolve => { releaseDaemon = resolve; });
+  const daemon = routeFinalizationWriter({ rootDir, cfg: {}, lane, kind: 'daemon',
+    legacy: async () => { admitted(); await daemonDone; return { ok: true }; } });
+  await daemonReady;
+
+  const comment = { ...old, commit_id: HEAD };
+  const unchanged = { ...comment, node_id: late.node_id, submitted_at: late.submitted_at };
+  let live = snapshot([comment, unchanged]);
+  let reads = 0, writes = 0, diagnostics = '';
+  const args = ['--root', rootDir, '--repo', lane.repository, '--base', lane.base,
+    '--review-validated-at', AUDIT_AT, '--', 'synthetic-merge', 'https://github.com/example/repo/pull/54',
+    '--match-head-commit', HEAD];
+  const click = () => legacyLaneWriteMain(args, {
+    stdout: { write() {} }, stderr: { write(text) { diagnostics += text; } },
+    run: options => runLegacyLaneWrite({ ...options, readConfig: () => ({}), timeoutMs: 1000,
+      readReviewProof: request => readCloserReviewProof(request, {
+        fetchPr: async (repo, pr, opts) => {
+          reads++;
+          assert.equal(repo, lane.repository);
+          assert.equal(pr, reviewIdentity.prNumber);
+          assert.equal(opts.withChecks, false);
+          if (!live) throw new Error('review read failed');
+          assert.equal(opts.withReviews(live), live.headSha === HEAD);
+          return live;
+        },
+        get: getReviewEvidence,
+      }),
+      exec: async (_command, argv) => { writes++; assert.deepEqual(argv.slice(-2), ['--match-head-commit', HEAD]); return {}; },
+    }),
+  });
+  try {
+    assert.deepEqual(await closerReviewProof({ ...reviewIdentity, snapshot: live, get: getReviewEvidence }), { ok: true });
+    const pending = click();
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(reads, 0, 'the review read must wait for FIFO ownership');
+    live = snapshot([comment, unchanged, operatorReview]);
+    releaseDaemon();
+    await daemon;
+    assert.equal(await pending, 75);
+    assert.equal(writes, 0);
+    assert.match(diagnostics, /operator-review-changes-requested/);
+  } finally {
+    releaseDaemon();
+    await daemon;
+  }
+  for (const [next, reason] of [
+    [snapshot([comment, late]), 'review-changed-since-validation'],
+    [snapshot([], OTHER), 'live-head-moved-before-merge'],
+    [snapshot(undefined), 'terminal-review-evidence-unavailable'],
+    [null, 'terminal-review-evidence-unavailable'],
+  ]) {
+    live = next;
+    diagnostics = '';
+    assert.equal(await click(), 75);
+    assert.equal(writes, 0);
+    assert.match(diagnostics, new RegExp(reason));
+  }
+  live = snapshot([comment, unchanged, { ...operatorReview, state: 'DISMISSED' }]);
+  assert.equal(await click(), 0);
+  assert.equal(writes, 1, 'unchanged final comments require no additional review');
 });
 
 test('inapplicable reviews preserve terminal proof under canonical author, state and ancestry rules', async () => {
@@ -135,8 +317,10 @@ test('rendered final GitHub gate fetches reviews and rejects the race after an e
       headMatch: { current: HEAD },
       hamTerminalRemediation: { ok: true, auditComment: { createdAt: AUDIT_AT } },
     } }));
-    for (const [reviews, expected, unavailable] of [
-      [[old], true, false], [[old, late], false, false], [[old], false, true],
+    for (const [reviews, reason, unavailable] of [
+      [[old], null, false], [[old, late], 'review-changed-since-validation', false],
+      [[old], 'terminal-review-evidence-unavailable', true],
+      [[old, operatorReview], 'operator-review-changes-requested', false],
     ]) {
       // Execute the actual gate's JS with only I/O replaced. The currency and
       // merge predicates remain production code; no GitHub credentials/network.
@@ -145,8 +329,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { tenureHeadNeedsReview } from ${JSON.stringify(new URL('src/pr-tenure.mjs', root).href)};
 import { latestReviewedHeadSha } from ${JSON.stringify(new URL('src/ci-blocked-hammer.mjs', root).href)};
-import { terminalReviewProofMatches } from ${JSON.stringify(new URL('src/ama/reviewer-authority.mjs', root).href)};
-import { createReviewCurrencyReader } from ${JSON.stringify(new URL('src/ama/review-currency.mjs', root).href)};
+import { closerReviewProof } from ${JSON.stringify(new URL('src/ama/closer-review-proof.mjs', root).href)};
 import { evaluateMergeEligibility } from ${JSON.stringify(new URL('src/ama/merge-eligibility.mjs', root).href)};
 import { classifyCheckRollup, latestCheckRollupItems } from ${JSON.stringify(new URL('src/checks-summary.mjs', root).href)};
 const fetchHammerPr = async (_repo, _pr, options) => {
@@ -156,6 +339,7 @@ const fetchHammerPr = async (_repo, _pr, options) => {
     checks: [{ name: 'test', status: 'COMPLETED', conclusion: 'SUCCESS' }] };
 };
 const createHistoryReader = () => async path => {
+  if (path.endsWith('/collaborators/fixture-operator/permission')) return { permission: 'admin' };
   if (path.includes('/compare/')) {
     if (${unavailable}) throw new Error('compare 404');
     return { status: 'ahead' };
@@ -173,9 +357,8 @@ ${gateCode.replace(/^import .*;\n/gm, '').replaceAll('<<REPO>>', 'example/repo')
       });
       assert.equal(result.status, 0, result.stderr);
       const gateResult = JSON.parse(result.stdout);
-      assert.equal(gateResult.ok, expected, result.stdout);
-      if (!expected) assert.ok(gateResult.reasons.includes(unavailable
-        ? 'terminal-review-evidence-unavailable' : 'review-changed-since-validation'));
+      assert.equal(gateResult.ok, reason === null, result.stdout);
+      if (reason) assert.ok(gateResult.reasons.includes(reason));
     }
   } finally {
     rmSync(fixtureDir, { recursive: true, force: true });

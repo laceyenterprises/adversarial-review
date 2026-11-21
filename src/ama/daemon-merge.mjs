@@ -582,6 +582,10 @@ async function attemptDaemonCleanMergeInner({
 
   // ── Gate 2: check the real rollup and all cheap eligibility gates first. ──
   const preLease = normalizeGateState(liveGate);
+  if (preLease.terminalReviewProof?.ok === false) {
+    return { ...notTaken(preLease.terminalReviewProof.reason, { liveGate: preLease }),
+      skipMergeAgent: true, recoveryWait: true, retryAfterMs: 300_000 };
+  }
   let noCiEvidence = null;
   const evaluateGate = (gate, evidence = null) => evaluateEligibilityImpl({
     terminalReviewProof: gate.terminalReviewProof,
@@ -872,6 +876,12 @@ async function attemptDaemonCleanMergeInner({
     }
     // Re-verify the full gate on the fresh read (CI could have gone red, the PR
     // could have been closed, mergeable could have flipped).
+    if (live.terminalReviewProof?.ok === false) {
+      terminal = { reason: live.terminalReviewProof.reason, permanent: false,
+        closureHold: { ...live.terminalReviewProof, retryAfterMs: 300_000 },
+        mergeNotInvoked: attempts === 1 };
+      break;
+    }
     let elig = evaluateGate(live);
     noCiEvidence = null;
     if (canProbeNoCi(live, elig)) {
@@ -1048,10 +1058,15 @@ async function attemptDaemonCleanMergeInner({
     }
     // A live safety hold prevented the transport from clicking merge. Keep
     // its reason and re-walkability; it is not a permanent merge rejection.
-    if (['stacked-base-merged', 'stacked-base-read-failed'].includes(mergeRes?.closureHold?.reason)
+    if (['stacked-base-merged', 'stacked-base-read-failed', 'review-changed-since-validation',
+      'operator-review-changes-requested', 'terminal-review-evidence-unavailable',
+      'live-head-moved-before-merge'].includes(mergeRes?.closureHold?.reason)
       || mergeRes?.closureHold?.reason?.startsWith('fleet-stop-')) {
       terminal = { reason: mergeRes.closureHold.reason, permanent: false,
-        closureHold: mergeRes.closureHold };
+        closureHold: { ...mergeRes.closureHold, retryAfterMs: mergeRes.closureHold.retryAfterMs
+          ?? (['operator-review-changes-requested', 'review-changed-since-validation',
+            'terminal-review-evidence-unavailable'].includes(mergeRes.closureHold.reason) ? 300_000 : undefined) },
+        mergeNotInvoked: attempts === 1 && mergeRes.mergeNotInvoked === true };
       break;
     }
     const cls = classifyDaemonMergeError(mergeRes);
@@ -1197,6 +1212,7 @@ async function attemptDaemonCleanMergeInner({
     reason: terminal.reason,
     ...(terminal.closureHold ? { needsOperator: terminal.closureHold.needsOperator,
       skipMergeAgent: true, recoveryWait: true, retryAfterMs: terminal.closureHold.retryAfterMs } : {}),
+    ...(terminal.mergeNotInvoked ? { mergeNotInvoked: true } : {}),
     ...(terminal.historyReadError ? { historyReadError: terminal.historyReadError } : {}),
     permanent: Boolean(terminal.permanent),
     merged: false,

@@ -6,6 +6,7 @@ import { maybeDispatchAmaClosureFor } from '../src/ama-closure-orchestration.mjs
 import { fetchMergeAgentCandidate } from '../src/follow-up-merge-agent.mjs';
 import { followUpJobFilePrefix } from '../src/follow-up-job-names.mjs';
 import { primaryChangeFixture } from './helpers/primary-change.mjs';
+import { attemptDaemonCleanMerge } from '../src/ama/daemon-merge.mjs';
 import test from 'node:test';
 import fs from 'node:fs';
 import { syncBuiltinESMExports } from 'node:module';
@@ -459,13 +460,14 @@ function hammerDispatchDeps(overrides = {}) {
     readTemplateImpl: () => 'hammer prompt <<PR_URL>> <<REVIEWED_SHA>> <<TARGET_REMEDIATION_SHA>> <<AMA_TRAILERS>>',
     writeFileImpl: () => {},
     resolveCloserDispatchHarnessImpl: async ({ workerClass }) => ({ workerClass, fellBack: false }),
+    readCloserReviewProofImpl: async () => ({ ok: true }),
     readPullRequestStateImpl: () => null,
     readBuildCompletionSignalForPrImpl: () => ({ ok: false, reason: 'missing-build-completion-signal' }),
     readBuildCompletionProducerEvidenceImpl: () => ({ ok: false, reason: 'missing-build-completion-producer-evidence' }),
     // A readable PR with no hammer audit comment. Without a stub the closer
     // would shell out to the real gh, and an unreadable comment list is an
     // unconfirmed hammer outcome.
-    fetchPullRequestRollupImpl: async () => ({ state: 'OPEN', comments: [] }),
+    fetchPullRequestRollupImpl: async () => ({ state: 'OPEN', headSha: REVIEWED_HEAD, reviews: [], comments: [] }),
     logger: { log() {}, info() {}, warn() {}, error() {} },
     ...overrides,
   };
@@ -1729,6 +1731,7 @@ test('same-head terminal HAM remediation passes canonical live gate shape to dae
 
   assert.equal(result.reason, 'current-head-hammer-terminal-remediation-merged');
   assert.deepEqual(observedLiveGate, {
+    terminalReviewProof: { ok: true },
     primaryChange: primaryChangeFixture(REVIEWED_HEAD),
     requirePrimaryChange: true,
     strictNonBlockingRemediation: true,
@@ -1744,6 +1747,43 @@ test('same-head terminal HAM remediation passes canonical live gate shape to dae
     branchProtectionRequiredContexts: [],
   });
   assert.deepEqual(observedRequiredCheckContexts, ['ci/lint', 'ci/test']);
+});
+
+test('same-head terminal HAM operator veto reaches initial and live gates without acquiring a merge lease', async t => {
+  const rootDir = mkdtempSync(join(tmpdir(), 'hammer-operator-live-gate-'));
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  assert.equal((await maybeDispatchAmaCloser({
+    ...hammerDispatchArgs(rootDir), ...hammerDispatchDeps(),
+  })).dispatched, true);
+  let checked = false;
+  const result = await maybeDispatchAmaCloser({
+    ...hammerDispatchArgs(rootDir, {
+      cfg: { operatorLogins: ['fixture-operator'] },
+      prMetadata: { state: 'OPEN', mergeable: 'MERGEABLE', mergeStateStatus: 'CLEAN',
+        statusCheckRollup: [{ name: 'test', status: 'COMPLETED', conclusion: 'SUCCESS' }] },
+      dispatchContext: { baseBranch: 'main', dispatchedAt: '2026-07-06T12:02:00Z' },
+    }),
+    options: validHamTerminalRemediationOptions({ reviewedHead: REVIEWED_HEAD, currentHead: REVIEWED_HEAD }),
+    ...hammerDispatchDeps({
+      execFileImpl: async (_cmd, args) => args[0] === 'dispatch' && args[1] === 'status'
+        ? { stdout: '{"status":"succeeded"}', stderr: '' } : { stdout: '{}', stderr: '' },
+      fetchPullRequestRollupImpl: async () => ({ state: 'OPEN', headSha: REVIEWED_HEAD, reviews: [{
+        user: { login: 'fixture-operator' }, id: 14, state: 'CHANGES_REQUESTED',
+        commit_id: ADVANCED_HEAD, submitted_at: '2026-07-06T12:00:00Z',
+      }] }),
+      acquireMergeLeaseImpl: () => assert.fail('veto must precede lease acquisition'),
+      attemptDaemonCleanMergeImpl: async options => {
+        assert.equal(options.liveGate.terminalReviewProof.reason, 'operator-review-changes-requested');
+        assert.deepEqual((await options.fetchLiveGateImpl()).terminalReviewProof, options.liveGate.terminalReviewProof);
+        checked = true;
+        return attemptDaemonCleanMerge(options);
+      },
+    }),
+  });
+  assert.equal(checked, true, JSON.stringify(result));
+  assert.equal(result.recoveryWait, true);
+  assert.equal(result.retryAfterMs, 300_000);
+  assert.equal(result.skipMergeAgent, true);
 });
 
 test('same-head terminal HAM remediation records merged audit before nonfatal cleanup failure', async (t) => {

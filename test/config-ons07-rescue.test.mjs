@@ -99,3 +99,23 @@ test('schema sync accepts --check before or after its root without mutating the 
     assert.equal(readFileSync(target, 'utf8'), before);
   });
 });
+
+
+test('nullable allow-zero projections retain the floor in every branch order', () => {
+  const zero = { const: 0 }, floor = { minimum: 3 };
+  const nullable = { type: 'null', title: 'Unset', description: 'Absence', $comment: 'metadata' };
+  for (const branches of [[zero, floor, nullable], [nullable, floor, zero], [floor, nullable, zero]]) {
+    const node = fromJsonSchema({ type: 'integer', anyOf: branches });
+    assert.equal(node.__nullable, true);
+    assert.equal(node.__allow_zero, true);
+    assert.equal(node.__min, 3);
+  }
+  assert.throws(() => fromJsonSchema({ anyOf: [{ type: 'string' }, { type: 'null', not: {} }] }), /unsupported anyOf/);
+});
+
+test('recorder without a path reports usage before importing the Python loader', () => {
+  const result = spawnSync('python3', ['scripts/record-cfg-parity-cases.py'], { encoding: 'utf8', timeout: 10000 });
+  assert.equal(result.status, 2, result.stderr);
+  assert.match(result.stderr, /^usage: record-cfg-parity-cases/);
+  assert.doesNotMatch(result.stderr, /Traceback/);
+});

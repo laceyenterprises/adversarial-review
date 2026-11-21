@@ -7,6 +7,7 @@
 import { readFileSync, writeFileSync } from 'node:fs';
 import { isDeepStrictEqual } from 'node:util';
 import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 const args = process.argv.slice(2);
 const roots = args.filter(arg => !arg.startsWith('--'));
@@ -25,4 +26,4 @@ if (check) {
   process.exit(same ? 0 : 1);
 }
 writeFileSync(target, `${JSON.stringify(source, null, 2)}\n`);
-process.stdout.write(`wrote ${target.pathname}\n`);
+process.stdout.write(`wrote ${fileURLToPath(target)}\n`);

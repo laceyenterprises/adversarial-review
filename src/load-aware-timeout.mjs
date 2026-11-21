@@ -218,7 +218,7 @@ export function corroboratedLoadAwareMultiplier(
  * @param {Object} [opts]
  * @param {number} [opts.loadAvg1m]   Override 1m loadavg (else os.loadavg()[0]).
  * @param {number} [opts.cpuCount]    Override CPU count (else os.cpus().length).
- * @param {number} [opts.cpuBusyPercent] Override CPU busy percent (else sampled from host counters or ps).
+ * @param {number} [opts.cpuBusyPercent] Override CPU corroboration only after loadAvg1m exceeds cpuCount; never overrides that capacity gate.
  * @param {number} [opts.maxSeconds]  Absolute clamp (default 3600).
  * @returns {number} Effective timeout (policy caps never shrink the nominal).
  * @throws {Error} when baseSeconds is not a positive finite number.

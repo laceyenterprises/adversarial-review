@@ -39,9 +39,15 @@ const KNOWN = new Set([
   '$schema', ...Object.keys(X_CFG),
 ]);
 
+// Ignore only informational null-branch metadata, never assertion keywords.
+function isNullBranch(branch) {
+  return branch?.type === 'null'
+    && Object.keys(branch).every(key => ['type', 'description', 'title', '$comment'].includes(key));
+}
+
 function isNullableWrapper(js) {
-  return Array.isArray(js.anyOf) && js.anyOf.length === 2
-    && js.anyOf.some(branch => branch?.type === 'null' && Object.keys(branch).length === 1);
+  return Array.isArray(js.anyOf) && js.anyOf.length >= 2
+    && js.anyOf.filter(isNullBranch).length === 1;
 }
 
 export function fromJsonSchema(js, path = '<root>') {
@@ -51,7 +57,9 @@ export function fromJsonSchema(js, path = '<root>') {
   if (unknown.length) throw new Error(`${path}: unsupported CFG JSON Schema keyword(s) ${unknown.join(', ')}`);
   if (isNullableWrapper(js)) {
     const { anyOf, ...annotations } = js;
-    return { ...fromJsonSchema({ ...anyOf.find(branch => !(branch?.type === 'null' && Object.keys(branch).length === 1)), ...annotations }, path), __nullable: true };
+    const branches = anyOf.filter(branch => !isNullBranch(branch));
+    const nonNull = branches.length === 1 ? branches[0] : { anyOf: branches };
+    return { ...fromJsonSchema({ ...nonNull, ...annotations }, path), __nullable: true };
   }
   if (js.type === undefined) {
     if (js.anyOf) throw new Error(`${path}: unsupported anyOf`);

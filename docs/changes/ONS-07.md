@@ -103,3 +103,13 @@ YAML case verifies the active list contract. Search cross-field constants remain
 used by validation. The audit-context test explicitly writes its local file
 baseline. Schema loading remains eager and fail-fast: the public schema object
 and compatibility enum exports are consumed during config-loader import.
+
+
+Final hardening covers missing recorder arguments, nullable fixture collections,
+normalized sync paths, cached leaf patterns without mutating frozen schema nodes,
+post-normalization rejection diagnostics, and standalone vault trace defaults.
+Nullable numeric projections may combine null, zero and a positive floor; only
+informational null-branch metadata is ignored. Unknown assertion keywords still
+fail closed. Timeout CPU-busy overrides corroborate excess runqueue load and do
+not override the at-capacity fast path. The idle-overlay fixture already owns
+cleanup through its shared per-test temporary-directory teardown.

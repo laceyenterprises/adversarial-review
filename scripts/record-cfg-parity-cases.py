@@ -17,6 +17,10 @@ import sys
 import tempfile
 import warnings
 
+if len(sys.argv) != 2:
+    print("usage: record-cfg-parity-cases.py <cases.json>", file=sys.stderr)
+    raise SystemExit(2)
+
 warnings.simplefilter("ignore")
 logging.disable(logging.CRITICAL)
 from agent_os_config import AgentOSConfigError, load_config  # noqa: E402
@@ -31,14 +35,14 @@ for case in doc["cases"]:
             os.makedirs(os.path.dirname(target), exist_ok=True)
             with open(target, "w", encoding="utf-8") as handle:
                 handle.write(text)
-        env = {"AGENT_OS_CFG_VALIDATION_EVENT_LOG": "", **case.get("env", {})}
+        env = {"AGENT_OS_CFG_VALIDATION_EVENT_LOG": "", **(case.get("env") or {})}
         try:
             cfg = load_config(
                 top_path=os.path.join(scratch, "config.yaml"),
-                module_paths=[os.path.join(scratch, m) for m in case.get("modules", [])],
+                module_paths=[os.path.join(scratch, m) for m in (case.get("modules") or [])],
                 env=env,
             )
-            case["python"] = {"ok": True, "values": {k: cfg.get(k) for k in case.get("get", [])}}
+            case["python"] = {"ok": True, "values": {k: cfg.get(k) for k in (case.get("get") or [])}}
         except AgentOSConfigError as exc:
             case["python"] = {"ok": False, "key": exc.key}
 with open(path, "w", encoding="utf-8") as handle:

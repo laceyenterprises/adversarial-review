@@ -1352,6 +1352,8 @@ function jsTypeName(value) {
   return typeof value;
 }
 
+const compiledLeafPatterns = new WeakMap();
+
 // Mirrors agent_os_config.validation._check_leaf; keep both in step.
 function checkLeaf(value, schema, keyPath, source, tolerateUnknown = false, nested = {}) {
   const fail = (message, expected, got = value) => {
@@ -1384,9 +1386,16 @@ function checkLeaf(value, schema, keyPath, source, tolerateUnknown = false, nest
     if (schema.__coerce_number_to_string && typeof value === 'number' && Number.isFinite(value)) value = String(value);
     if (typeof value !== 'string') fail(`expected string, got ${jsTypeName(value)} (${shown})`, 'string');
     if (schema.__lowercase) value = value.toLowerCase();
-    if (schema.__pattern !== undefined && !new RegExp(schema.__pattern).test(value)) {
-      const description = schema.__pattern_description || schema.__pattern;
-      fail(`value ${JSON.stringify(value)} does not match ${description}`, description);
+    if (schema.__pattern !== undefined) {
+      let compiled = compiledLeafPatterns.get(schema);
+      if (!compiled || compiled.pattern !== schema.__pattern) {
+        compiled = { pattern: schema.__pattern, regex: new RegExp(schema.__pattern) };
+        compiledLeafPatterns.set(schema, compiled);
+      }
+      if (!compiled.regex.test(value)) {
+        const description = schema.__pattern_description || schema.__pattern;
+        fail(`value ${JSON.stringify(value)} does not match ${description}`, description);
+      }
     }
   } else if (expected === TYPE_DICT) {
     return validateDictPresentKeysOnly(value, schema, keyPath, source, null, tolerateUnknown, nested);
@@ -1409,11 +1418,11 @@ function checkLeaf(value, schema, keyPath, source, tolerateUnknown = false, nest
     if (schema.__max !== undefined && value > schema.__max) fail(`expected <= ${schema.__max}, got ${value}`, `<= ${schema.__max}`);
   }
   if (schema.__enum && !schema.__enum.includes(value)) {
-    throw new AgentOSConfigError(`${keyPath}: value ${shown} not in allowlist ${fmtEnum(schema.__enum)}`, {
+    throw new AgentOSConfigError(`${keyPath}: value ${JSON.stringify(value)} not in allowlist ${fmtEnum(schema.__enum)}`, {
       key: keyPath, expected: `one of ${fmtEnum(schema.__enum)}`, allowed: schema.__enum, got: value, source,
     });
   }
-  if (schema.__disallow?.includes(value)) fail(`value ${shown} is not allowed`, `not one of ${fmtEnum(schema.__disallow)}`);
+  if (schema.__disallow?.includes(value)) fail(`value ${JSON.stringify(value)} is not allowed`, `not one of ${fmtEnum(schema.__disallow)}`);
   if (schema.__normalize && Object.hasOwn(schema.__normalize, value)) return schema.__normalize[value];
   return value;
 }
@@ -1573,7 +1582,7 @@ function validateDictPresentKeysOnly(
 
 // Mirrors agent_os_config.validation._validate_secrets_config (rejection only;
 // this reader consumes no vault policy, so it does not normalize one).
-function validateWorkerClassVaults(secrets, trace) {
+function validateWorkerClassVaults(secrets, trace = {}) {
   if (!secrets || typeof secrets !== 'object') return;
   const shared = Array.isArray(secrets.shared_vaults) ? secrets.shared_vaults : [];
   const policies = Object.entries(secrets.worker_class_vaults ?? {}).map(([name, policy]) => [`worker_pool.secrets.worker_class_vaults.${name}`, policy]);

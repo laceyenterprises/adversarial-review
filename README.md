@@ -28,6 +28,13 @@ It accepts and rejects what the Python loader does:
 Python-recorded verdicts. `loadConfig` refuses an unknown key in a checked-in
 file; local overlays and the runtime/cached loaders used by the daemons drop it
 (`ADVERSARIAL_CONFIG_DEBUG=1` prints a note). An empty env value is absent.
+Nullable projections also support a numeric zero sentinel alongside a positive
+floor. Informational metadata on a null branch is accepted; assertion keywords
+outside the supported projection still fail at import. Recorder fixture fields
+`env`, `modules`, and `get` may be omitted or null. Leaf-pattern compilation is
+cached without modifying the exported schema, and rejection diagnostics display
+the normalized value being checked.
+
 After a CFG schema change, run `node scripts/sync-cfg-schema.mjs <agent-os>`
 (`--check` reports drift). The only hand-written schema left is the inventoried
 Node-only keys in [`src/config-node-keys.mjs`](src/config-node-keys.mjs); move

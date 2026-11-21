@@ -12,7 +12,11 @@ import { OWNER_AUTH_HOLD, selectRemediationReadRoute, selectRemediationPushRoute
 import { publishRemediation } from '../src/remediation-publication.mjs';
 import { fetchReviewerTokenFromBroker } from '../src/reviewer-broker-refresh.mjs';
 import { requeueClaimedFollowUpJobBeforeSpawn } from '../src/remediation-claimed-requeue.mjs';
-import { getFollowUpJobDir } from '../src/follow-up-jobs.mjs';
+import { getFollowUpJobDir, readFollowUpJob } from '../src/follow-up-jobs.mjs';
+import { queueFollowUpForRecoveredPostedReview } from '../src/reviewer-pass-reaper.mjs';
+import { beginReviewerPass } from '../src/reviewer-pass-tokens.mjs';
+import { captureReviewerBodyAfterPost } from '../src/review-body-capture.mjs';
+import { openReviewStateDb } from '../src/review-state.mjs';
 
 const execAsync = promisify(execFile);
 const ALT = 'alternate-org/project';
@@ -88,6 +92,132 @@ function assertIsolated(env, repo, token) {
 function metadata(repo) {
   return JSON.stringify({ base: { ref: 'main' }, head: { ref: 'topic', repo: { full_name: repo } } });
 }
+
+test('a recovered Claude pass with the deployed model reaches the owner workspace reader', async t => {
+  const { rootDir, env, requests, tokens } = fixture(t);
+  const queued = queueFollowUpForRecoveredPostedReview({
+    rootDir,
+    row: {
+      repo: ALT, pr_number: 19, head_sha: SHA,
+      reviewer_model: 'claude-opus-5-5', reviewer_class: 'claude',
+      metadata_json: JSON.stringify({ reviewerModel: 'claude', branch: 'topic', builderTag: '[codex]' }),
+      body_md: '## Blocking issues\n- Fix the failure.\n\n## Verdict\nRequest changes\n',
+    },
+    reviewPostedAt: '2026-11-21T00:00:00Z',
+    resolveHandoffConfigImpl: () => ({ enabled: false }),
+  });
+  assert.equal(queued.queued, true);
+  const job = readFollowUpJob(queued.jobPath);
+  assert.equal(job.reviewerModel, 'claude-opus-5-5');
+  const seen = [];
+  await prepareWorkspaceForJob({
+    rootDir, job, env, log,
+    selectReadRoute: options => selectRemediationReadRoute({ ...options, tokens }),
+    execFileImpl: async (command, args, options) => {
+      if (command === 'gh') return { stdout: metadata(ALT) };
+      if (args[0] === 'clone') mkdirSync(join(args.at(-1), '.git'), { recursive: true });
+      if (args[0] === 'clone' || args.includes('fetch')) {
+        assertIsolated(options.env, ALT, 'alternate-reviewer');
+        seen.push(args[0] === 'clone' ? 'clone' : 'fetch');
+      }
+      return { stdout: '' };
+    },
+  });
+  assert.deepEqual(seen, ['clone', 'fetch']);
+  assert.equal(job.reviewerRole, 'claude-reviewer');
+  assert.deepEqual(requests, [{ role: 'claude-reviewer', owner: 'alternate-org' }]);
+});
+
+for (const [family, model] of [
+  ['claude', 'claude-opus-5-5'], ['codex', 'fixture-codex-model'],
+  ['gemini', 'fixture-gemini-model'], ['grok', 'fixture-grok-model'],
+]) {
+  test(`the ${family} posted artifact binds its declared App role through recovered job creation`, async t => {
+    const { rootDir, env, requests, tokens } = fixture(t);
+    const key = { repo: ALT, prNumber: 19, attemptNumber: 1, passKind: 'first-pass' };
+    beginReviewerPass(rootDir, { ...key, reviewerClass: family, headSha: SHA });
+    await captureReviewerBodyAfterPost(rootDir, {
+      ...key, reviewerModel: family, reviewerHeadSha: SHA,
+      botTokenEnv: `GH_${family.toUpperCase()}_REVIEWER_TOKEN`,
+      reviewBody: '## Blocking issues\n- Fix the failure.\n\n## Verdict\nRequest changes\n',
+      verdict: 'request-changes', execution: { model },
+      requireGitHubArtifact: true, knownGitHubArtifact: { id: 123, commitId: SHA }, log,
+    });
+    const db = openReviewStateDb(rootDir);
+    let row;
+    try {
+      row = db.prepare('SELECT * FROM reviewer_passes WHERE repo = ? AND pr_number = ?').get(ALT, key.prNumber);
+    } finally {
+      db.close();
+    }
+    const queued = queueFollowUpForRecoveredPostedReview({ rootDir, row,
+      reviewPostedAt: '2026-11-21T00:00:00Z', resolveHandoffConfigImpl: () => ({ enabled: false }) });
+    assert.equal(queued.queued, true);
+    const job = readFollowUpJob(queued.jobPath);
+    const route = await selectRemediationReadRoute({ ...job, env, tokens });
+    assert.equal(job.reviewerModel, model);
+    assert.equal(job.reviewerRole, `${family}-reviewer`);
+    assertIsolated(route.gitEnv, ALT, 'alternate-reviewer');
+    assert.deepEqual(requests, [{ role: `${family}-reviewer`, owner: 'alternate-org' }]);
+  });
+}
+
+test('legacy job evidence is exact and missing identity alone can use the declared default', async t => {
+  const { env, tokens, requests } = fixture(t);
+  env.FOLLOW_UP_GH_BROKER_ROLE = 'grok-reviewer';
+  for (const [reviewerModel, role] of [
+    ['claude-opus-5-5', 'claude-reviewer'], ['claude', 'claude-reviewer'], ['claude-code', 'claude-reviewer'],
+    ['codex', 'codex-reviewer'], ['gemini', 'gemini-reviewer'], ['grok', 'grok-reviewer'], [undefined, 'grok-reviewer'],
+  ]) {
+    const route = await selectRemediationReadRoute({ repo: ALT, reviewerModel, env, tokens });
+    assert.equal(route.capability, `contents:read (${role})`);
+  }
+  assert.deepEqual(requests.map(({ role }) => role), ['claude-reviewer', 'codex-reviewer', 'gemini-reviewer', 'grok-reviewer']);
+});
+
+test('unknown and contradictory job identities hold before token selection', async t => {
+  const { env, tokens, requests } = fixture(t);
+  env.FOLLOW_UP_GH_BROKER_ROLE = 'codex-reviewer';
+  for (const identity of [
+    { reviewerModel: 'claude-opus-5-5-unknown' },
+    { reviewerModel: 'gpt-unknown' },
+    { reviewerRole: 'unknown-reviewer', reviewerModel: 'claude' },
+    { reviewerRole: null, reviewerModel: 'claude-opus-5-5' },
+    { reviewerRole: 'codex-reviewer', reviewerModel: 'claude-opus-5-5' },
+    { reviewerRole: 'claude-reviewer', reviewerModel: 'codex' },
+    { reviewerRole: '' },
+  ]) {
+    await assert.rejects(selectRemediationReadRoute({ repo: ALT, ...identity, env, tokens }),
+      { code: OWNER_AUTH_HOLD, reason: 'no declared reader role' });
+  }
+  assert.deepEqual(requests, []);
+});
+
+test('recovery holds when legacy pass evidence is unknown or contradictory', async t => {
+  const { rootDir, env, tokens, requests } = fixture(t);
+  env.FOLLOW_UP_GH_BROKER_ROLE = 'claude-reviewer';
+  for (const [prNumber, reviewerModel, reviewerClass, routedModel] of [
+    [20, 'claude-unregistered', 'claude', undefined],
+    [21, 'claude-opus-5-5', 'grok', undefined],
+    [22, 'claude-opus-5-5', 'claude', 'gemini'],
+  ]) {
+    const queued = queueFollowUpForRecoveredPostedReview({
+      rootDir,
+      row: {
+        repo: ALT, pr_number: prNumber, head_sha: SHA,
+        reviewer_model: reviewerModel, reviewer_class: reviewerClass,
+        metadata_json: JSON.stringify({ reviewerModel: routedModel }),
+        body_md: '## Blocking issues\n- Fix the failure.\n\n## Verdict\nRequest changes\n',
+      },
+      reviewPostedAt: '2026-11-21T00:00:00Z', resolveHandoffConfigImpl: () => ({ enabled: false }),
+    });
+    assert.equal(queued.queued, true);
+    const job = readFollowUpJob(queued.jobPath);
+    await assert.rejects(selectRemediationReadRoute({ ...job, env, tokens }),
+      { code: OWNER_AUTH_HOLD, reason: 'no declared reader role' });
+  }
+  assert.deepEqual(requests, []);
+});
 
 for (const repo of [HOME, ALT]) {
   test(`workspace clone and fetch use the ${repo} read route`, async t => {
@@ -209,7 +339,8 @@ for (const mode of ['ordinary', 'workflow', ...Object.keys(PUSH_HOLD_REASONS)]) 
       return { stdout: '' };
     };
     const publish = publishRemediation({ workspaceDir: rootDir, repo: ALT, prNumber: 4, branch: 'topic', baseBranch: 'main',
-      previousHead: SHA, env, execFileImpl, pushCommand: 'fixture-git-safe', workerClass: 'codex', reviewerModel: 'claude',
+      previousHead: SHA, env, execFileImpl, pushCommand: 'fixture-git-safe', workerClass: 'codex',
+      reviewerRole: 'claude-reviewer', reviewerModel: 'fixture-claude-model',
       ownerTokens: tokens, selectPushRoute: options => selectRemediationPushRoute({ ...options, mint }) });
     if (['ordinary', 'workflow'].includes(mode)) {
       assert.equal((await publish).headSha, CANDIDATE);

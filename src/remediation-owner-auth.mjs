@@ -6,11 +6,10 @@ import { remediationWorkerPushProvider } from './remediation-worker-provenance.m
 import { expandClassAliasRecord } from './worker-class-aliases.mjs';
 import { loadAwareTimeoutMs } from './load-aware-timeout.mjs';
 import { isGitHubRateLimitError } from './rate-limit-throttle.mjs';
+import { isDeclaredFollowUpReviewerRole, legacyFollowUpReviewerRole } from './follow-up-reviewer-identity.mjs';
 
 export const OWNER_AUTH_HOLD = 'remediation-owner-auth-hold';
 const DEFAULT_HQ_ROOT = fileURLToPath(new URL('../../../', import.meta.url));
-const REVIEWER_ROLES = Object.freeze({ claude: 'claude-reviewer', codex: 'codex-reviewer',
-  gemini: 'gemini-reviewer', grok: 'grok-reviewer' });
 const WORKER_TOKENS = expandClassAliasRecord({ codex: 'CODEX_WORKER_GH_TOKEN',
   'remediator-codex': 'CODEX_WORKER_GH_TOKEN', 'claude-code': 'CLAUDE_WORKER_GH_TOKEN',
   'remediator-claude': 'CLAUDE_WORKER_GH_TOKEN', gemini: 'GEMINI_WORKER_GH_TOKEN',
@@ -82,11 +81,19 @@ function route(repo, capability, env, token, provider = null) {
 
 // Read authority follows the review that queued the job. Callers without a
 // recorded reviewer may use the explicitly configured follow-up reader role.
-export async function selectRemediationReadRoute({ repo, reviewerModel, env = process.env, tokens = githubOwnerTokens }) {
+export async function selectRemediationReadRoute({ repo, reviewerRole, reviewerModel, env = process.env, tokens = githubOwnerTokens }) {
   if (!remediationOwner(repo, tokens)) return null;
+  const legacyRole = legacyFollowUpReviewerRole(reviewerModel);
   const configuredReader = String(env.FOLLOW_UP_GH_BROKER_ROLE || '').trim();
-  const role = Object.hasOwn(REVIEWER_ROLES, reviewerModel) ? REVIEWER_ROLES[reviewerModel]
-    : !reviewerModel && Object.values(REVIEWER_ROLES).includes(configuredReader) ? configuredReader : '';
+  let role;
+  if (reviewerRole !== undefined) {
+    if (isDeclaredFollowUpReviewerRole(reviewerRole) && (!legacyRole || legacyRole === reviewerRole)) role = reviewerRole;
+  } else {
+    role = legacyRole;
+    if ((reviewerModel == null || reviewerModel === '') && isDeclaredFollowUpReviewerRole(configuredReader)) {
+      role = configuredReader;
+    }
+  }
   const capability = `contents:read (${role || 'follow-up reader'})`;
   if (!role) throw ownerAuthHold(repo, capability, 'no declared reader role');
   try {

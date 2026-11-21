@@ -888,7 +888,7 @@ async function prepareWorkspaceForJob({
   selectReadRoute = selectRemediationReadRoute,
 }) {
   const repo = assertValidRepoSlug(job.repo);
-  const ownerRoute = await selectReadRoute({ repo, reviewerModel: job.reviewerModel, env });
+  const ownerRoute = await selectReadRoute({ repo, reviewerRole: job.reviewerRole, reviewerModel: job.reviewerModel, env });
   const startedAt = Date.now();
   let checkoutStartedAt = startedAt;
   let cloneSource = 'reused';
@@ -2013,6 +2013,7 @@ async function reconcileFollowUpJobWithinRepositoryCycle({
         const contaminationAudit = await auditWorkspaceForContaminationImpl({
           workspaceDir: auditWorkspaceDir,
           repo: job.repo,
+          reviewerRole: job.reviewerRole,
           reviewerModel: job.reviewerModel,
           baseBranch,
           execFileImpl,
@@ -3311,7 +3312,7 @@ async function consumeNextFollowUpJobWithinRepositoryCycle({
     });
     const hqDispatchEnabled = remediationMode === 'os';
     const ownerReadRoute = await selectRemediationReadRoute({ repo: claimed.job.repo,
-      reviewerModel: claimed.job.reviewerModel, env: jobEnv });
+      reviewerRole: claimed.job.reviewerRole, reviewerModel: claimed.job.reviewerModel, env: jobEnv });
     const branchReadyJob = await ensureJobBranchMetadata({
       job: claimed.job,
       jobPath: claimed.jobPath,

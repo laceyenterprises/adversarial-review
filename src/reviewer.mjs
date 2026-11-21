@@ -3,6 +3,7 @@ import { withRepositoryStateCycle } from './repository-state-lock.mjs';
 import { canonicalRepositoryArguments } from './repository-names.mjs';
 import { ensureWorkerRegistryReady } from './adapters/agent-runtime/local/remediation.mjs';
 import { reviewerAttributionForModel, validateReviewerAttribution } from './reviewer-attribution.mjs';
+import { reviewerRoleFromTokenEnv } from './follow-up-reviewer-identity.mjs';
 import { loadAwareTimeoutMs } from './load-aware-timeout.mjs';
 import { reviewerSizeFacts, reportReviewerSizeFailure } from './reviewer-size-owner.mjs';
 import { meteredExecFile } from './metered-gh.mjs';
@@ -1212,6 +1213,7 @@ function queueFollowUpForPostedReview({
   branch = null,
   revisionRef = null,
   reviewerModel,
+  reviewerRole,
   builderTag = null,
   linearTicketId = null,
   reviewText,
@@ -1264,6 +1266,7 @@ function queueFollowUpForPostedReview({
     branch,
     revisionRef: revisionRef || null,
     reviewerModel,
+    reviewerRole,
     builderTag: builderTag || null,
     linearTicketId,
     reviewBody: reviewText,
@@ -2384,6 +2387,7 @@ async function main() {
       branch: prContext?.headRefName || null,
       revisionRef: reviewerHeadSha || null,
       reviewerModel: effectiveModel,
+      reviewerRole: reviewerRoleFromTokenEnv(effectiveBotTokenEnv) ?? null,
       builderTag,
       linearTicketId,
       reviewText: fullComment,

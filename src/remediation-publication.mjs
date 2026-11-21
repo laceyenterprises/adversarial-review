@@ -57,7 +57,7 @@ function defaultPushCommand(env) {
 export async function publishRemediation({ workspaceDir = process.cwd(), baseBranch, previousHead,
   branch, repo, prNumber, expectedRemoteSha = previousHead, execFileImpl = execFileAsync,
   pushCommand, env = process.env, credentialBrokerReadyImpl = credentialBrokerReady,
-  workerClass, reviewerModel, requiresWorkflowPush = false, expectedCandidate,
+  workerClass, reviewerRole, reviewerModel, requiresWorkflowPush = false, expectedCandidate,
   ownerTokens, selectReadRoute = selectRemediationReadRoute, selectPushRoute = selectRemediationPushRoute } = {}) {
   if (typeof previousHead === 'string') previousHead = previousHead.toLowerCase();
   if (typeof expectedRemoteSha === 'string') expectedRemoteSha = expectedRemoteSha.toLowerCase();
@@ -72,7 +72,7 @@ export async function publishRemediation({ workspaceDir = process.cwd(), baseBra
   const candidate = await git(['rev-parse', '--verify', 'HEAD^{commit}']);
   if (expectedCandidate && candidate !== expectedCandidate) throw unproven();
   const routed = remediationOwner(repo, ownerTokens);
-  const ownerReadRoute = routed ? await selectReadRoute({ repo, reviewerModel, env, tokens: ownerTokens }) : null;
+  const ownerReadRoute = routed ? await selectReadRoute({ repo, reviewerRole, reviewerModel, env, tokens: ownerTokens }) : null;
   if (routed || typeof branch !== 'string' || !branch.trim()) {
     if (!repo || !prNumber) throw unproven();
     try {

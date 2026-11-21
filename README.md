@@ -1804,9 +1804,11 @@ commands are unchanged; source validation does not prove deployed exclusivity.
 See the [queue contract](docs/data-model/follow-up-jobs.md#live-pr-owner-admission-snapshot-remediationowner-01).
 
 Alternate-owner workspace and publication authorization refusals record
-`remediation-owner-auth-hold`. Before spawn the claim returns to pending
-without charging a round. After publication refusal the stopped job retains
-the local commit and workspace. The runtime owner verifies launch and
+`remediation-owner-auth-hold`. Workspace and publisher reads use the
+reviewer's declared App role carried on the follow-up job. The role is
+recorded independently of the execution model. Before spawn the claim returns
+to pending without charging a round. After publication refusal the stopped job
+retains the local commit and workspace. The runtime owner verifies launch and
 publication separately after delivery. See the
 [follow-up runbook](docs/follow-up-runbook.md#alternate-owner-follow-up-git).
 

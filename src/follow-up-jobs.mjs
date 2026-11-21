@@ -1,5 +1,6 @@
 import { requestCloserSuccessor } from './ama/closer-successor.mjs';
 import { enqueueRemediationCloser } from './remediation-closer-queue.mjs';
+import { legacyFollowUpReviewerRole } from './follow-up-reviewer-identity.mjs';
 import { addCiRegressionFinding } from './ci-regression-finding.mjs';
 import { isEndedRemediationRound } from './remediation-round-recovery.mjs';
 import { infrastructureOnlyFailures, recordedCiFailures, CI_INFRASTRUCTURE_STOP_REASONS } from './ci-infrastructure.mjs';
@@ -2195,6 +2196,7 @@ function buildFollowUpJob({
   branch = null,
   revisionRef = null,
   reviewerModel,
+  reviewerRole = legacyFollowUpReviewerRole(reviewerModel),
   builderTag = null,
   linearTicketId = null,
   reviewBody,
@@ -2265,6 +2267,7 @@ function buildFollowUpJob({
     linearTicketId,
     riskClass: normalizeRiskClass(riskClass),
     reviewerModel,
+    ...(reviewerRole !== undefined && { reviewerRole }),
     // Durable record of the original PR title tag so remediation routing
     // does not have to reverse-map from reviewerModel. Reverse-mapping is
     // ambiguous because both [claude-code] and [clio-agent] PRs carry

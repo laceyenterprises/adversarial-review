@@ -1,5 +1,7 @@
 import { loadAwareTimeoutSeconds } from './load-aware-timeout.mjs';
 import { loadRoleConfig } from './role-config.mjs';
+import { legacyFollowUpReviewerRole, reviewerRoleFromRoute } from './follow-up-reviewer-identity.mjs';
+import { validateReviewerAttribution } from './reviewer-attribution.mjs';
 import { suppressFinalRoundFollowUp } from './comment-only-final-round.mjs';
 import { recordCascadeFailure } from './reviewer-cascade.mjs';
 import { DEFAULT_REVIEWER_LEASE_RECOVERY_MAX_ATTEMPTS } from './reviewer-lease.mjs';
@@ -107,6 +109,25 @@ function shouldQueueRecoveredPostedReviewFollowUp(row, {
   return { queue: true, reason: null };
 }
 
+function recoveredReviewerRole(metadata, row) {
+  if (Object.hasOwn(metadata, 'reviewerRole')) return metadata.reviewerRole ?? null;
+  // Legacy reviewer_class was inferred from reviewer_model in the pass writer.
+  // Use it to reject conflicting known values, never to grant a reader role
+  // for an otherwise unrecognized concrete model.
+  const modelRole = legacyFollowUpReviewerRole(row.reviewer_model);
+  const classRole = reviewerRoleFromRoute(row.reviewer_class);
+  if (modelRole && classRole && modelRole !== classRole) return null;
+  const routedRole = reviewerRoleFromRoute(metadata.reviewerModel);
+  if (metadata.reviewerModel != null && !routedRole) return null;
+  if (metadata.reviewerAttribution == null) return routedRole;
+  try {
+    const { identity } = validateReviewerAttribution(metadata.reviewerAttribution);
+    return routedRole && routedRole !== identity ? null : identity;
+  } catch {
+    return null;
+  }
+}
+
 function queueFollowUpForRecoveredPostedReview({
   rootDir,
   row,
@@ -129,7 +150,8 @@ function queueFollowUpForRecoveredPostedReview({
     return { queued: false, reason: queueDecision.reason };
   }
 
-  if (parseMetadataJson(row.metadata_json).verdictOnly === true) {
+  const metadata = parseMetadataJson(row.metadata_json);
+  if (metadata.verdictOnly === true) {
     return { queued: false, reason: 'exhausted-head-verdict-only' };
   }
   const repo = row.repo;
@@ -153,7 +175,7 @@ function queueFollowUpForRecoveredPostedReview({
   // SINGLEREVIEW-01: the dead reviewer's single-review decision, read back
   // from its durable review-mode row. Only a PR with no completed rounds can
   // have had one; a miss means normal rounds.
-  const capturedDecision = parseMetadataJson(row.metadata_json).singleReview;
+  const capturedDecision = metadata.singleReview;
   const singleReview = Number(priorLedger.completedRoundsForPR || 0) === 0
     ? (capturedDecision?.applied === true ? capturedDecision
       : readSingleReviewDecisionImpl({ rootDir, repo, prNumber, headSha: row.head_sha || null, attemptNumber: row.attempt_number ?? null }))
@@ -166,10 +188,10 @@ function queueFollowUpForRecoveredPostedReview({
       defaultBaseBranch,
       defaultBaseBranchByRepo,
     }),
-    branch: parseMetadataJson(row.metadata_json).branch
-      || parseMetadataJson(row.metadata_json).subjectContext?.branch || null,
+    branch: metadata.branch || metadata.subjectContext?.branch || null,
     revisionRef,
     reviewerModel: row.reviewer_model || row.reviewer_class || reviewRow?.reviewer || null,
+    reviewerRole: recoveredReviewerRole(metadata, row),
     builderTag: builderTagFromRecoveredPass(row),
     linearTicketId,
     reviewBody,

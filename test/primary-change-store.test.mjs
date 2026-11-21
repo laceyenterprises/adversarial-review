@@ -151,7 +151,7 @@ test('pre-deploy history recomputes once at an unchanged head and review key', a
   const args = { ...fixture(t), reviewKey: 'unchanged-reviews' };
   const dir = join(args.rootDir, 'data', 'primary-change-history');
   mkdirSync(dir, { recursive: true });
-  const key = [args.repo, args.prNumber, args.baseSha, args.headSha, args.mergeBase, args.reviewKey, null, 'reversalproof-v8'];
+  const key = [args.repo, args.prNumber, args.baseSha, args.headSha, args.mergeBase, args.reviewKey, null, 'reversalproof-v9'];
   const legacyPath = join(dir, `${createHash('sha256').update(JSON.stringify(key)).digest('hex')}.json`);
   writeFileSync(legacyPath, JSON.stringify({ key, history: { ...evidence(args), primaryHead: 'e'.repeat(40) } }));
   let calls = 0;
@@ -161,12 +161,21 @@ test('pre-deploy history recomputes once at an unchanged head and review key', a
   assert.deepEqual(await storedPrimaryChange(args, () => assert.fail('must reuse refreshed history')), refreshed);
   const currentPath = join(dir, readdirSync(dir).find(name => join(dir, name) !== legacyPath));
   const version = JSON.parse(readFileSync(currentPath, 'utf8')).key.at(-1);
-  assert.equal(version, 'reversalproof-v9');
-  const fragment = JSON.parse(readFileSync(new URL('../docs/data-model/catalog.d/LAC-2202.json', import.meta.url), 'utf8'));
-  assert.equal(fragment.entries.find(entry => entry.id === 'primary-change-history').identityVersion, version);
+  assert.equal(version, 'reversalproof-v10');
   const catalog = JSON.parse(readFileSync(new URL('../docs/data-model/catalog.json', import.meta.url), 'utf8'));
-  const entry = catalog.entries.find(entry => entry.id === 'primary-change-history');
+  // Main regenerates catalog.json after merge. No retained fragment may
+  // downgrade this identity, regardless of the external regenerator's order.
+  const id = 'primary-change-history';
+  const fragmentsDir = new URL('../docs/data-model/catalog.d/', import.meta.url);
+  const overlays = readdirSync(fragmentsDir).filter(name => name.endsWith('.json'))
+    .flatMap(name => JSON.parse(readFileSync(new URL(name, fragmentsDir), 'utf8')).entries || [])
+    .filter(entry => entry.id === id);
+  const identityOverlays = overlays.filter(entry => entry.identityVersion !== undefined);
+  assert.ok(identityOverlays.length > 0);
+  for (const overlay of identityOverlays) assert.equal(overlay.identityVersion, version);
+  const entry = Object.assign({}, catalog.entries.find(entry => entry.id === id), ...overlays);
   assert.equal(entry.identityVersion, version);
+  assert.ok(entry.optionalHistoryFields.includes('finalPatchesScoped'));
   assert.ok(entry.optionalHistoryFields.includes('laneReversalHistory'));
   assert.match(entry.laneReversalProof, /laneOwner and laneIdentity/);
 });

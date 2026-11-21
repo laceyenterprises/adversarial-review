@@ -8,6 +8,7 @@ import {
 } from '../src/follow-up-jobs.mjs';
 import { reconcileFollowUpJob } from '../src/follow-up-reconcile.mjs';
 import { hasTerminalProviderCapacitySignal } from '../src/provider-capacity-signal.mjs';
+import { isEndedRemediationRound } from '../src/remediation-round-recovery.mjs';
 
 let previousHqRoot;
 let previousMaxRetries;
@@ -88,6 +89,42 @@ test('missing artifact without capacity still fails as artifact-missing-completi
   assert.equal(result.reconciled, true);
   assert.equal(result.job.failure.code, 'artifact-missing-completion');
 });
+
+const reservedToolFailure = JSON.stringify({ type: 'error', status: 400, error: {
+  type: 'invalid_request_error', param: 'tools', code: null,
+  message: "Invalid Value: 'tools'. Function 'web.run' is reserved for use by this model and must match the configured schema.",
+  private: 'synthetic-provider-private-data',
+} });
+const reservedToolEvent = JSON.stringify({ type: 'turn.failed', error: { message: reservedToolFailure } });
+const codeModeWarning = JSON.stringify({ type: 'item.completed', item: { type: 'error',
+  message: 'Code Mode is enabled in configuration, but model does not advertise Code Mode support.' } });
+
+test('direct Codex reserved schema failure reaches durable failure without a transient retry or raw output', async () => {
+  const { result } = await reconcileDeadWorker([
+    codeModeWarning, '{"type":"turn.started"}',
+    JSON.stringify({ type: 'error', message: reservedToolFailure }), reservedToolEvent, '',
+  ].join('\n'));
+  assert.equal(result.job.status, 'failed');
+  assert.equal(result.job.failure.code, 'codex-reserved-tool-schema');
+  assert.match(result.job.failure.message, /HTTP 400 invalid_request_error, tools, reserved web\.run/);
+  assert.doesNotMatch(JSON.stringify(result.job.failure), /synthetic-provider-private-data/);
+  assert.equal(result.job.remediationPlan.transientRetries || 0, 0);
+  assert.equal(result.job.remediationPlan.retryHistory?.length || 0, 0);
+  assert.equal(isEndedRemediationRound({ ...result.job, remediationPlan: { currentRound: 1, maxRounds: 2 } }), false);
+});
+
+for (const [reason, logText] of [
+  ['warning alone', codeModeWarning],
+  ['nonterminal error', JSON.stringify({ type: 'error', message: reservedToolFailure })],
+  ['later successful turn', `${reservedToolEvent}\n{"type":"turn.completed"}`],
+  ['unrelated 400', reservedToolEvent.replace('web.run', 'another.tool')],
+  ['oversized terminal event', reservedToolEvent.replace('synthetic-provider-private-data', 'x'.repeat(33 * 1024))],
+]) {
+  test(`direct Codex schema classification ignores ${reason}`, async () => {
+    const { result } = await reconcileDeadWorker(logText);
+    assert.equal(result.job.failure.code, 'artifact-missing-completion');
+  });
+}
 
 test('recovered Codex capacity error followed by turn completion remains an artifact failure', async () => {
   const { result } = await reconcileDeadWorker(

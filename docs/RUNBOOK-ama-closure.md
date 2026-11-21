@@ -1010,8 +1010,16 @@ root (the standard `HQ_ROOT` / `AGENT_OS_HQ_ROOT` resolver) and an eight-second
 subprocess budget. Point-in-time absence retains custody because the submitter may still
 enqueue. A reservation with a canonical project supplied at creation uses the
 existing project/repository paired grant for its exact-key read. Older
-reservations keep their unscoped lookup. Retirement removes
-repair ownership from next-action and TTM projections, allowing the existing
+reservations keep their unscoped lookup. A grant-filtered empty result leaves
+ownership unproven. If an unbound reservation without verified publication
+still has `ownerState: unknown` when observed at least ten minutes after
+reservation, `repair-owner-unproven` names the operator in next-action and TTM
+and pages once per reservation. The page names the blocked head and
+reservation. The dispatch owner must establish the original launch and
+complete retry chain, or independently establish canonical absence and fence
+the original submitter through the authorized recovery path. Existing
+publication proof and custody rules continue to govern admission. Retirement
+removes repair ownership from next-action and TTM projections, allowing the existing
 ownerless clock and SEV1 page. Corrupt ledgers and busy refund writers defer only
 the affected PR. No replacement PR
 is opened. After both dispatch and review-service versions load, the runtime
@@ -5623,6 +5631,24 @@ a new knob. Completed publication removes that head's partial progress.
 Compare pages use four workers; blob pairs and tree pairs are fetched together.
 Metadata-only cost reads avoid reconstructing patches they do not consume;
 each page/blob/diff retains the existing output bound.
+
+After main integration, the paginated live-base comparison still establishes
+commit history and the author boundary. The reader verifies the ancestry
+edges and keeps a complete changed-file inventory in the original author
+merge-base coordinates. It reconstructs author and test patches on this
+projected comparison. Cited reversals and live guard review carry-forward
+use full patches for their additional coverage checks. The guard's base
+comparison and intermediate migration snapshots use complete inventories.
+Guard carry-forward hydrates full projected patches only when an authoritative
+review names a different head. Without such a review, cached scoped histories
+skip this work on every tick. An incomplete comparison, merge-base mismatch
+or other optional hydration failure keeps preservation evidence scoped and
+requires exact-head review; cancellation and history deadlines still propagate.
+When older reviews exist, hydration remains transient and may repeat within
+the existing history budget and per-file checkpoint reuse.
+Migration proof still verifies the relevant object bytes and ancestry
+separately. The history deadline and shared GitHub admission floor apply to
+all these reads.
 
 Merge-gate `fetchPrimaryChange` reads and the default context CLI never collect
 refusal snapshot attribution. Commit-file removal/rename attribution is retained

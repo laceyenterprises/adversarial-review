@@ -11,6 +11,10 @@ import { promisify } from 'node:util';
 import { resolveReviewerTimeoutMs, resolveGeminiReviewerProcessTimeoutMs, resolveAgyChunkTimeoutCapMs } from '../../../reviewer-timeout.mjs';
 import { resolveReviewerAbsoluteCeilingMs, resolveReviewerCeilingSeconds, usesStreamedReviewerCeiling } from '../../../reviewer-timeout-model.mjs';
 import { spawnCapturedProcessGroup } from '../../../process-group-spawn.mjs';
+import { REVIEWER_STALLED_EXIT_CODE } from '../../../reviewer-outcomes.mjs';
+import {
+  parseReviewerBudgetDeferral, REVIEWER_GITHUB_BUDGET_DEFERRED, REVIEWER_GITHUB_BUDGET_DEFERRED_EXIT_CODE,
+} from '../../../reviewer-github-budget.mjs';
 import { resolveNodeBin } from '../../../node-interpreter.mjs';
 import { isPgidAlive, verifyPgidIdentity } from '../../../process-group-identity.mjs';
 import { domainRequiresMcpOAuth } from '../domain-mcp-oauth.mjs';
@@ -27,7 +31,9 @@ import {
   ACTIVE_RUN_STATES,
   TERMINAL_RUN_STATES,
   claimReviewerRunRecord,
+  hasReviewerCancellation,
   readReviewerRunRecord,
+  recordReviewerCancellation,
   reviewerRunSideChannelPaths,
   updateReviewerRunRecord,
 } from '../run-state.mjs';
@@ -85,7 +91,10 @@ function stdoutLooksLikeFailureSignal(value) {
 
 function reviewerSignalAwareFailureClass(err, classificationText, exitCode, details = {}) {
   if (isReviewCliResolutionFailure(err)) return CLI_RESOLUTION_TRANSIENT_FAILURE_CLASS;
-  if (err?.reviewerStalled || String(classificationText).includes('[reviewer-stalled]')) return 'reviewer-stalled';
+  if (exitCode === REVIEWER_GITHUB_BUDGET_DEFERRED_EXIT_CODE && parseReviewerBudgetDeferral(err?.stderr)) {
+    return REVIEWER_GITHUB_BUDGET_DEFERRED;
+  }
+  if (exitCode === REVIEWER_STALLED_EXIT_CODE || err?.reviewerStalled || String(classificationText).includes('[reviewer-stalled]')) return 'reviewer-stalled';
   const stdoutTail = tailText(err?.stdout || '');
   const stderrTail = tailText(err?.stderr || '');
   const messageTail = tailText(err?.message || '');
@@ -518,7 +527,7 @@ function createCliDirectReviewerRuntimeAdapter({
 
     let record = claim.record || initialRecord;
     const controller = new AbortController();
-    const activeRun = { controller, record, cancelled: false };
+    const activeRun = { controller, record, cancellationClass: null };
     activeRuns.set(sessionUuid, activeRun);
     let terminalSpawnTermination = null;
 
@@ -633,7 +642,7 @@ function createCliDirectReviewerRuntimeAdapter({
         return emptyResult({
           ok: false,
           spawnedAt: record.spawnedAt,
-          failureClass: 'daemon-bounce',
+          failureClass: activeRun.cancellationClass || 'daemon-bounce',
           stderrTail: terminalMessage,
           stdoutTail: tokenFreeStdoutTail(tailText(stdout)),
           pgid: record.pgid,
@@ -677,13 +686,19 @@ function createCliDirectReviewerRuntimeAdapter({
       const exitCode = Number.isInteger(effectiveErr?.exitCode)
         ? effectiveErr.exitCode
         : (Number.isInteger(effectiveErr?.code) ? effectiveErr.code : null);
-      const errorCode = typeof effectiveErr?.code === 'string' ? effectiveErr.code : null;
       const stderrTail = tailText(effectiveErr?.stderr || detail || '');
       const stdoutTail = tokenFreeStdoutTail(tailText(effectiveErr?.stdout || ''));
       const failureTokenEvidence = shouldParseStdoutTokenUsage(req.model)
         ? parseCodexJsonTokenUsageFromFailureStdout(effectiveErr?.stdout || '')
         : { tokenUsage: null, tokenUsageNoUsageReason: null };
-      const cancelled = activeRun.cancelled || controller.signal.aborted || errorCode === 'ABORT_ERR';
+      const unattributedSignal = effectiveErr?.timedOut === false
+        && !effectiveErr.runnerKillReason && !effectiveErr.reviewerStalled
+        && ['SIGTERM', 'SIGINT', 'SIGHUP', 'SIGKILL'].includes(effectiveErr.signal);
+      const operatorCancelled = unattributedSignal && hasReviewerCancellation(rootDir, {
+        sessionUuid,
+        headSha: record.subjectContext?.reviewerHeadSha,
+        pgid: record.pgid,
+      });
       const stdoutClassificationTail = tailText(effectiveErr?.stdout || '', DEFAULT_CLASSIFICATION_FIELD_BYTES);
       const classificationText = [
         tailText(effectiveErr?.message || '', DEFAULT_CLASSIFICATION_FIELD_BYTES),
@@ -693,7 +708,9 @@ function createCliDirectReviewerRuntimeAdapter({
         .filter(Boolean)
         .join('\n')
         .trim();
-      const failureClass = reviewerSignalAwareFailureClass(
+      const interruption = activeRun.cancellationClass
+        || (operatorCancelled ? 'cancelled' : unattributedSignal ? 'daemon-bounce' : null);
+      const failureClass = interruption || reviewerSignalAwareFailureClass(
         effectiveErr,
         classificationText,
         exitCode,
@@ -707,7 +724,7 @@ function createCliDirectReviewerRuntimeAdapter({
       record = updateReviewerRunRecord(rootDir, record, {
         state: terminalSpawnTerminationError
           ? 'failed'
-          : (cancelled || ['daemon-bounce', 'reviewer-stalled', 'github-budget-deferred'].includes(failureClass) ? 'cancelled' : 'failed'),
+          : (['cancelled', 'daemon-bounce', 'reviewer-stalled', 'github-budget-deferred'].includes(failureClass) ? 'cancelled' : 'failed'),
         lastHeartbeatAt: now(),
       });
       activeRun.record = record;
@@ -748,42 +765,40 @@ function createCliDirectReviewerRuntimeAdapter({
     };
   }
 
-  async function cancel(sessionUuid) {
+  async function cancel(sessionUuid, { terminal = true } = {}) {
     const active = activeRuns.get(sessionUuid);
+    const record = active?.record || readReviewerRunRecord(rootDir, sessionUuid);
+    if (!record) {
+      throw new Error(`Cannot cancel unknown reviewer run ${sessionUuid}`);
+    }
+    const cancellationClass = terminal ? 'cancelled' : 'daemon-bounce';
+    const rollbackIntent = terminal && record.subjectContext?.reviewerHeadSha && ACTIVE_RUN_STATES.has(record.state)
+      ? recordReviewerCancellation(rootDir, { sessionUuid, headSha: record.subjectContext.reviewerHeadSha, pgid: record.pgid })
+      : null;
     if (active) {
-      active.cancelled = true;
-      if (Number.isInteger(active.record?.pgid)) {
-        await terminateProcessGroup(active.record.pgid, {
+      active.cancellationClass = cancellationClass;
+    }
+    try {
+      if (ACTIVE_RUN_STATES.has(record.state) && Number.isInteger(record.pgid)) {
+        await terminateProcessGroup(record.pgid, {
           processKillImpl,
           sleepImpl,
           graceMs: cancelGraceMs,
           pollIntervalMs: cancelPollIntervalMs,
         });
-      } else {
+      } else if (active) {
         active.controller.abort('kernel SIGTERM');
       }
-      active.record = updateReviewerRunRecord(rootDir, active.record, {
-        state: 'cancelled',
-        lastHeartbeatAt: now(),
-      });
-      return;
+    } catch (err) {
+      rollbackIntent?.();
+      if (active) active.cancellationClass = null;
+      throw err;
     }
-    const record = readReviewerRunRecord(rootDir, sessionUuid);
-    if (!record) {
-      throw new Error(`Cannot cancel unknown reviewer run ${sessionUuid}`);
-    }
-    if (['spawned', 'heartbeating'].includes(record.state) && Number.isInteger(record.pgid)) {
-      await terminateProcessGroup(record.pgid, {
-        processKillImpl,
-        sleepImpl,
-        graceMs: cancelGraceMs,
-        pollIntervalMs: cancelPollIntervalMs,
-      });
-    }
-    updateReviewerRunRecord(rootDir, record, {
+    const updated = updateReviewerRunRecord(rootDir, active?.record || record, {
       state: 'cancelled',
       lastHeartbeatAt: now(),
     });
+    if (active) active.record = updated;
   }
 
   async function reattach(record) {

@@ -40,12 +40,12 @@ import {
   REMEDIATION_WORKER_IDENTITY_DEFAULTS,
   REMEDIATION_WORKER_TRAILER_CLASS,
   WORKER_PROVENANCE_HOOK_SRC,
-  configureRemediationWorkspaceIdentity,
   installWorkerProvenanceHook,
   remediationWorkerGitIdentity,
   remediationWorkerPushProvider,
   remediationWorkerTrailerClass,
 } from './remediation-worker-provenance.mjs';
+import { configureRemediationWorkspaceIdentityWithConfig } from './remediation-identity-config.mjs';
 import {
   summarizePRRemediationLedger,
   claimNextFollowUpJob,
@@ -408,11 +408,8 @@ function createRemediationRuntime({
       }
       await ensureWorkerRegistryReadyImpl({env});
       if (shouldStop()) throw Object.assign(new Error('remediation stopped before local spawn'), {code: 'remediation-shutting-down'});
-      // Enforce (or, under the kill-switch, just audit) that the worker about to
-      // be spawned commits + pushes under its PHYSICAL harness identity. On a
-      // mismatch while enforcing, the spawn fn throws and this run() call fails
-      // closed — the loud, correct outcome vs. a codex/claude/gemini remediation
-      // authenticating as some other identity (the #5058 class of defect).
+      // Check the worker's repository-scoped commit identity and physical
+      // harness push provider before spawn. Enforcement throws on a mismatch.
       const enforceHarnessIdentity = isHarnessIdentityEnforcementEnabled(env);
       const harnessIdentityAuditSink = (record) => {
         try {
@@ -461,6 +458,7 @@ function createRemediationRuntime({
         execFileSyncImpl,
         sourceEnv: request.ownerPushRoute?.workerEnv(env) ?? env,
         workerClass: ['codex', 'remediator-codex-corp'].includes(workerClass) ? workerClass : undefined,
+        gitIdentityWorkerClass: workerClass,
         now,
       });
       spawnedWorker.child?.once?.('error', (error) => {
@@ -890,7 +888,7 @@ async function prepareWorkspaceForJob({
   selectReadRoute = selectRemediationReadRoute,
 }) {
   const repo = assertValidRepoSlug(job.repo);
-  const ownerRoute = await selectReadRoute({ repo, reviewerModel: job.reviewerModel, env });
+  const ownerRoute = await selectReadRoute({ repo, reviewerRole: job.reviewerRole, reviewerModel: job.reviewerModel, env });
   const startedAt = Date.now();
   let checkoutStartedAt = startedAt;
   let cloneSource = 'reused';
@@ -945,7 +943,7 @@ async function prepareWorkspaceForJob({
     });
   }
 
-  await configureRemediationWorkspaceIdentity({ workspaceDir, workerClass, execFileImpl });
+  await configureRemediationWorkspaceIdentityWithConfig({ workspaceDir, workerClass, repo, env, execFileImpl });
 
   // Install the worker-provenance commit-msg hook in this workspace's
   // .git/hooks. The hook reads worker-context env vars at commit time
@@ -2015,6 +2013,7 @@ async function reconcileFollowUpJobWithinRepositoryCycle({
         const contaminationAudit = await auditWorkspaceForContaminationImpl({
           workspaceDir: auditWorkspaceDir,
           repo: job.repo,
+          reviewerRole: job.reviewerRole,
           reviewerModel: job.reviewerModel,
           baseBranch,
           execFileImpl,
@@ -3313,7 +3312,7 @@ async function consumeNextFollowUpJobWithinRepositoryCycle({
     });
     const hqDispatchEnabled = remediationMode === 'os';
     const ownerReadRoute = await selectRemediationReadRoute({ repo: claimed.job.repo,
-      reviewerModel: claimed.job.reviewerModel, env: jobEnv });
+      reviewerRole: claimed.job.reviewerRole, reviewerModel: claimed.job.reviewerModel, env: jobEnv });
     const branchReadyJob = await ensureJobBranchMetadata({
       job: claimed.job,
       jobPath: claimed.jobPath,
@@ -3432,7 +3431,8 @@ async function consumeNextFollowUpJobWithinRepositoryCycle({
         job: claimed.job,
         execFileImpl,
         log,
-        ...(ownerReadRoute && { workerClass, env: jobEnv }),
+        workerClass,
+        env: jobEnv,
       });
       workspaceDir = prepared.workspaceDir;
       workspaceState = hqDispatchEnabled

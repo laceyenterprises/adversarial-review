@@ -6,6 +6,9 @@ export const STALE_REVIEW_HEAD_EXIT_CODE = 75;
 export const REVIEWER_PROMPT_TOO_LARGE_EXIT_CODE = 76;
 export const REVIEWER_CHUNK_BUDGET_EXCEEDED_EXIT_CODE = 77;
 export const REPOSITORY_STATE_BUSY_EXIT_CODE = 78;
+export const REVIEWER_GITHUB_BUDGET_DEFERRED_EXIT_CODE = 79;
+// The wrapper owns this status. Provider text and terminal results cannot set it.
+export const REVIEWER_STALLED_EXIT_CODE = 80;
 
 export class ReviewerChunkBudgetExceededError extends Error {
   constructor(plan) {
@@ -32,6 +35,7 @@ export class ReviewerSizeRecoveryExhaustedError extends Error {
 }
 
 export function reviewerExecutionFailureExitCode(error) {
+  if (error?.reviewerStalled === true) return REVIEWER_STALLED_EXIT_CODE;
   if (error instanceof ReviewerChunkBudgetExceededError || error instanceof ReviewerSizeRecoveryExhaustedError) return REVIEWER_CHUNK_BUDGET_EXCEEDED_EXIT_CODE;
   return error instanceof ReviewerPromptTooLargeError ? REVIEWER_PROMPT_TOO_LARGE_EXIT_CODE : 1;
 }

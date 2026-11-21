@@ -80,13 +80,34 @@ const int = (defaultValue, min, extra = {}) => ({ __type: 'int', __default: defa
 const nullableInt = min => int(null, min, { __nullable: true });
 const bool = defaultValue => ({ __type: 'bool', __default: defaultValue });
 
+const gitIdentityField = () => ({
+  __type: 'string',
+  __pattern: '^(?=[^\\u0000\\r\\n<>]*\\S)[^\\u0000\\r\\n<>]+$',
+  __pattern_description: 'non-blank text without NUL, CR, LF, "<" or ">"',
+});
+
 export const NODE_ONLY_KEYS = {
   review_cycle_cap: int(5, 1),
   review_cycle_window_hours: int(24, 1),
   remediation: {
     __type: 'dict',
     __strict: true,
-    __keys: { max_concurrent_jobs: int(1, 1), max_concurrent_jobs_ceiling: int(8, 1) },
+    __keys: {
+      max_concurrent_jobs: int(1, 1), max_concurrent_jobs_ceiling: int(8, 1),
+      // RDXREMIDENTITY-02 landed after this generated-reader branch forked.
+      // Retain its repository and worker keyed identity contract here until
+      // the canonical CFG schema declares it.
+      git_identity_repo_overrides: {
+        __type: 'dict', __strict: false, __default: {},
+        __extra_keys_schema: {
+          __type: 'dict', __strict: false,
+          __extra_keys_schema: {
+            __type: 'dict', __strict: true,
+            __keys: { name: gitIdentityField(), email: gitIdentityField() },
+          },
+        },
+      },
+    },
   },
   'adversarial.reviewer.load_aware': {
     __type: 'dict',

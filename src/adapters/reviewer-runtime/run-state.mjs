@@ -1,4 +1,4 @@
-import { existsSync, readdirSync, readFileSync, rmSync } from 'node:fs';
+import { existsSync, readdirSync, readFileSync, rmSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import { writeFileAtomic } from '../../atomic-write.mjs';
 
@@ -39,6 +39,28 @@ function reviewerRunSideChannelPaths(rootDir, sessionUuid) {
     stdoutPath: join(dir, `${normalized}.stdout`),
     stderrPath: join(dir, `${normalized}.stderr`),
   };
+}
+
+export function recordReviewerCancellation(rootDir, { sessionUuid, headSha, pgid }) {
+  const path = `${reviewerRunStatePath(rootDir, sessionUuid)}.cancel`;
+  try {
+    writeFileAtomic(path, JSON.stringify({ sessionUuid, headSha, pgid }), { overwrite: false });
+  } catch (err) {
+    if (err?.code !== 'EEXIST') throw err;
+    return null;
+  }
+  return () => rmSync(path, { force: true });
+}
+
+export function hasReviewerCancellation(rootDir, { sessionUuid, headSha, pgid }) {
+  if (!sessionUuid || !headSha) return false;
+  try {
+    const receipt = JSON.parse(readFileSync(`${reviewerRunStatePath(rootDir, sessionUuid)}.cancel`, 'utf8'));
+    return receipt.sessionUuid === sessionUuid && receipt.headSha === headSha
+      && (receipt.pgid === pgid || receipt.pgid === null || pgid == null);
+  } catch {
+    return false;
+  }
 }
 
 function normalizeReviewerRunRecord(record = {}) {
@@ -216,7 +238,7 @@ function removeReviewerRunRecord(rootDir, sessionUuid) {
 }
 
 function removeReviewerRunArtifacts(rootDir, sessionUuid) {
-  // Removes the .json record AND both side-channel files. Use for TTL-driven
+  // Removes the .json record and its side-channel files. Use for TTL-driven
   // pruning where forensic retention isn't intended; do NOT use as a casual
   // "delete by sessionUuid" because the .stdout/.stderr are the only on-disk
   // record of what the reviewer wrote.
@@ -224,6 +246,7 @@ function removeReviewerRunArtifacts(rootDir, sessionUuid) {
   removeReviewerRunRecord(rootDir, sessionUuid);
   rmSync(stdoutPath, { force: true });
   rmSync(stderrPath, { force: true });
+  rmSync(`${reviewerRunStatePath(rootDir, sessionUuid)}.cancel`, { force: true });
 }
 
 function pruneReviewerRunRecords(rootDir, {
@@ -251,6 +274,18 @@ function pruneReviewerRunRecords(rootDir, {
     }
   }
   for (const name of readdirSync(dir)) {
+    if (name.endsWith('.json.cancel')) {
+      const receipt = join(dir, name);
+      try {
+        if (!existsSync(receipt.slice(0, -'.cancel'.length)) && statSync(receipt).mtimeMs <= cutoff) {
+          rmSync(receipt, { force: true });
+          orphanSideChannelFiles += 1;
+        }
+      } catch (err) {
+        if (err?.code !== 'ENOENT') throw err;
+      }
+      continue;
+    }
     if (!name.endsWith('.stdout') && !name.endsWith('.stderr')) continue;
     const sessionUuid = name.replace(/\.(stdout|stderr)$/, '');
     if (!sessionUuid || existsSync(join(dir, `${sessionUuid}.json`))) continue;

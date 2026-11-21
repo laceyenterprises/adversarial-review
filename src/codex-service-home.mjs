@@ -7,6 +7,26 @@ import { PER_WORKER_PLACEHOLDER_REFRESH_TOKEN } from './codex-per-worker-auth.mj
 import { scrubOAuthFallbackEnv } from './secret-source/env.mjs';
 
 const template = readFileSync(new URL('./codex-service-config.toml', import.meta.url), 'utf8');
+const reviewerTemplate = `${template}\n[features.code_mode]\nenabled = true\n`;
+const directTemplate = template.replace('[features]\n', '[features]\ncode_mode_only = false\nstandalone_web_search = false\n')
+  + '\n[features.code_mode]\nenabled = false\n';
+
+function directWebSearch(modelInfo) {
+  const { tool_mode, supports_search_tool, use_responses_lite, web_search_tool_type, web_search_provider } = modelInfo;
+  if ((tool_mode != null && !['direct', 'code_mode', 'code_mode_only'].includes(tool_mode))
+    || (supports_search_tool !== undefined && typeof supports_search_tool !== 'boolean')
+    || (use_responses_lite !== undefined && typeof use_responses_lite !== 'boolean')
+    || (web_search_tool_type !== undefined && !['text', 'text_and_image'].includes(web_search_tool_type))
+    || (web_search_provider != null && !['standalone', 'search_mcp'].includes(web_search_provider))) {
+    throw new Error('unrecognized direct tool capabilities');
+  }
+  // Responses Lite selects the standalone web.run function even when the
+  // standalone_web_search feature is off. Enable only the regular hosted
+  // web_search shape, when the catalog explicitly describes that capability.
+  return use_responses_lite === false && web_search_tool_type !== undefined
+    && web_search_provider !== 'search_mcp'
+    ? 'cached' : 'disabled';
+}
 
 function runServiceCodexCommandAsync(command, args, { stdio, ...options }) {
   return new Promise((resolve, reject) => {
@@ -39,7 +59,7 @@ function runServiceCodexCommand(command, args, options) {
 export function serviceCodexConfigArgs() {
   let section = '';
   const args = [];
-  for (const raw of template.split('\n')) {
+  for (const raw of reviewerTemplate.split('\n')) {
     const line = raw.trim();
     if (!line || line.startsWith('#')) continue;
     if (line.startsWith('[')) { section = line.slice(1, -1); continue; }
@@ -122,10 +142,11 @@ function* serviceCodexHomeSteps({ env, workspaceDir, model, effort = null, codex
     } catch {
       throw serviceAuthError();
     }
-    let config = `model = ${JSON.stringify(model)}\n`
+    const modelConfig = `model = ${JSON.stringify(model)}\n`
       + (effort ? `model_reasoning_effort = ${JSON.stringify(effort)}\n` : '')
-      + template
+      + (preserveToolCapabilities ? reviewerTemplate : directTemplate)
       + `\n[projects.${JSON.stringify(resolve(workspaceDir))}]\ntrust_level = "trusted"\n`;
+    let config = preserveToolCapabilities ? modelConfig : `web_search = "disabled"\n${modelConfig}`;
     writeFileSync(join(codexHome, 'config.toml'), config, { mode: 0o600 });
     const nextEnv = { ...scrubOAuthFallbackEnv(env).env, CODEX_HOME: codexHome,
       CODEX_AUTH_PATH: authPath };
@@ -142,8 +163,8 @@ function* serviceCodexHomeSteps({ env, workspaceDir, model, effort = null, codex
     } catch (error) {
       throw serviceLaunchError(error) || serviceAuthError();
     }
-    const catalogName = preserveToolCapabilities ? 'model catalog' : 'direct-tools catalog';
     let catalogPath = null;
+    let toolConfigArgs = [];
     let stage = 'fetch';
     try {
       // Fetch only through this spawn's binary, isolated config and staged auth.
@@ -154,13 +175,17 @@ function* serviceCodexHomeSteps({ env, workspaceDir, model, effort = null, codex
       } };
       stage = 'parse';
       const catalog = JSON.parse(raw);
-      if (!Array.isArray(catalog?.models) || !catalog.models.length
-        || !catalog.models.every(entry => entry && typeof entry.slug === 'string')
-        || !catalog.models.some(entry => entry.slug === model)) {
-        throw new Error('catalog must contain model entries including the selected model');
+      if (!Array.isArray(catalog?.models) || !catalog.models.every(entry => entry && typeof entry.slug === 'string')) {
+        throw new Error('invalid model catalog');
       }
+      const selected = catalog.models.filter(entry => entry.slug === model);
+      if (!selected.length || (!preserveToolCapabilities && selected.length !== 1)) throw new Error('ambiguous model catalog');
+      let webSearch;
       if (!preserveToolCapabilities) {
-        // Local remediation retains its existing direct-tools catalog policy.
+        stage = 'capabilities';
+        webSearch = directWebSearch(selected[0]);
+        // Keep the direct-tools catalog policy. The direct purpose also pins
+        // both Code Mode flags off so metadata removal cannot enable Code Mode.
         for (const entry of catalog.models) {
           delete entry.tool_mode;
           delete entry.supports_search_tool;
@@ -169,7 +194,9 @@ function* serviceCodexHomeSteps({ env, workspaceDir, model, effort = null, codex
       const candidate = join(codexHome, preserveToolCapabilities ? 'model-catalog.json' : 'model-catalog.direct-tools.json');
       stage = 'write-catalog';
       writeFileSync(candidate, `${JSON.stringify(catalog)}\n`, { mode: 0o600 });
-      const pinnedConfig = `model_catalog_json = ${JSON.stringify(candidate)}\n${config}`;
+      const catalogValue = JSON.stringify(candidate);
+      const pinnedConfig = `model_catalog_json = ${catalogValue}\n${preserveToolCapabilities
+        ? modelConfig : `web_search = "${webSearch}"\n${modelConfig}`}`;
       stage = 'pin-config';
       // Publish the config last and atomically: a failed pin must leave a
       // readable base config with no reference to an incomplete catalog.
@@ -178,13 +205,25 @@ function* serviceCodexHomeSteps({ env, workspaceDir, model, effort = null, codex
       renameSync(configTemp, join(codexHome, 'config.toml'));
       config = pinnedConfig;
       catalogPath = candidate;
-    } catch (error) {
-      // Do not include CLI output: it may contain credential/provider details.
-      log.warn?.(`[codex-service] ${catalogName} not pinned; using server catalog stage=${stage} error=${error.code || error.name}`);
+      if (!preserveToolCapabilities) {
+        // CLI pins also outrank workspace config layers during exec.
+        toolConfigArgs = ['--config', `model_catalog_json=${catalogValue}`, '--config', `web_search="${webSearch}"`,
+          '--config', 'features.code_mode.enabled=false', '--config', 'features.code_mode_only=false',
+          '--config', 'features.standalone_web_search=false'];
+      }
+    } catch {
+      // Only stable stages are diagnostic. Subprocess output and exceptions
+      // may contain provider details. The server catalog can force a tool mode.
+      if (!preserveToolCapabilities) {
+        const error = new Error(`Codex direct-tools catalog could not be pinned (stage=${stage})`);
+        error.code = 'codex-direct-tools-catalog-unavailable';
+        throw error;
+      }
+      log.warn?.(`[codex-service] model catalog not pinned; using server catalog stage=${stage}`);
     }
     const configDigest = createHash('sha256').update(config).digest('hex');
     log.info?.(`[codex-service] CODEX_HOME=${codexHome} config_sha256=${configDigest} model_catalog_json=${catalogPath || 'server'}`);
-    return { env: nextEnv, codexHome, configDigest, catalogPath, authSourcePath, authPath, codexAuthOwnerId,
+    return { env: nextEnv, codexHome, configDigest, catalogPath, toolConfigArgs, authSourcePath, authPath, codexAuthOwnerId,
       cleanupAuth: () => cleanupServiceCodexAuth({ codexHome, codexAuthOwnerId }),
       cleanup: () => rmSync(codexHome, { recursive: true, force: true }) };
   } catch (error) {

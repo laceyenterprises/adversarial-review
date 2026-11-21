@@ -1,6 +1,6 @@
 import { awaitThrottleIfNeeded, githubCredential, withGitHubBudgetScope } from './rate-limit-throttle.mjs';
 
-export const REVIEWER_GITHUB_BUDGET_DEFERRED_EXIT_CODE = 79;
+export { REVIEWER_GITHUB_BUDGET_DEFERRED_EXIT_CODE } from './reviewer-outcomes.mjs';
 export const REVIEWER_GITHUB_BUDGET_DEFERRED = 'github-budget-deferred';
 const PREFIX = '[reviewer-github-budget-deferred] ';
 

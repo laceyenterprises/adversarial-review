@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { existsSync, mkdtempSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
+import { hasReviewerCancellation } from '../src/adapters/reviewer-runtime/run-state.mjs';
 import {
   cancelActiveReview,
   parseArgs,
@@ -65,6 +66,11 @@ test('cancelActiveReview signals persisted reviewer process group without mutati
     reason: 'duplicate reviewer',
     execFileImpl: async () => ({ stdout: `${new Date('2026-05-24T15:01:00.000Z').toString()}\n` }),
     processKill: (pid, signal) => {
+      if (signal === 'SIGTERM') {
+        assert.equal(hasReviewerCancellation(rootDir, {
+          sessionUuid: 'session-149', headSha: 'abc123', pgid: 2468,
+        }), true);
+      }
       signals.push({ pid, signal });
       return true;
     },
@@ -91,6 +97,25 @@ test('cancelActiveReview signals persisted reviewer process group without mutati
   } finally {
     afterDb.close();
   }
+});
+
+for (const terminal of [false, true]) test(`cancellation without a delivered operator signal leaves no intent (terminal=${terminal})`, async () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  insertReviewingRow(rootDir);
+  const intent = { sessionUuid: 'session-149', headSha: 'abc123', pgid: 2468 };
+  const result = await cancelActiveReview({
+    rootDir, repo: 'laceyenterprises/adversarial-review', prNumber: 149, terminal,
+    execFileImpl: async () => ({ stdout: `${new Date('2026-05-24T15:01:00.000Z').toString()}\n` }),
+    processKill: (_pid, signal) => {
+      if (signal !== 0) {
+        assert.equal(hasReviewerCancellation(rootDir, intent), terminal);
+        if (terminal) throw Object.assign(new Error('gone'), { code: 'ESRCH' });
+      }
+      return true;
+    },
+  });
+  assert.equal(result.signalled, !terminal);
+  assert.equal(hasReviewerCancellation(rootDir, intent), false);
 });
 
 test('cancelActiveReview refuses non-reviewing rows', async () => {

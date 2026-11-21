@@ -613,7 +613,7 @@ npm run follow-up:reconcile                       # reconcile in-progress jobs (
 npm run follow-up:requeue -- <job-path> [reason]  # re-arm a completed job
 npm run follow-up:stop -- <job-path> [reason]     # stop a job; spawned workers are signalled first by default
 npm run follow-up:cancel-worker -- <job-path> [reason]  # signal spawned worker without moving job state
-npm run review:cancel -- --repo <slug> --pr <n> [reason]  # signal active reviewer without moving review state
+npm run review:cancel -- --repo <slug> --pr <n> [reason]  # stop an active review and suppress automatic same-head retries
 npm run merge-agent:cancel -- --repo <slug> --pr <n> [reason]  # cancel latest merge-agent LRQ + clear dispatched marker
 npm run no-merge:hold -- --repo <slug> --pr <n> [reason]  # apply a no-merge hold label for one PR/ticket
 npm run ticket-pipeline:pause -- --repo <slug> --pr <n> [reason]  # pause Linear sync for one PR via label
@@ -667,6 +667,58 @@ For effort pins use `ADVERSARIAL_REMEDIATION_CODEX_REASONING_LEVEL` / `CODEX_REM
 
 `CLAUDE_MODEL_ID` and `CLAUDE_CODE_MODEL_ID` are broker defaults, not remediation model pins. A bare Claude remediation resolves its model once and passes the same model to broker minting and CLI spawn. Gemini remediation reads only `remediator-gemini`; an unrelated `gemini` builder class cannot change its model. The packaged seed covers that class during outages. Gemini's CLI has no effort flag; registry effort is recorded as unsupported rather than applied.
 
+Set `REMEDIATION_WORKER_GIT_IDENTITY_REPO_OVERRIDES` in the follow-up daemon's
+environment to use a repository-specific Git author and committer identity
+in follow-up workspaces and local remediation workers. The JSON object uses
+lowercase `owner/name` keys and worker class keys.
+
+```bash
+REMEDIATION_WORKER_GIT_IDENTITY_REPO_OVERRIDES='{"example-org/example-repo":{"codex":{"name":"Example Agent","email":"12345+example-agent[bot]@users.noreply.github.com"}}}'
+```
+
+The same mapping can be set in config as `remediation.git_identity_repo_overrides`
+(RDXREMIDENTITY-02), which needs no service-definition edit. Put it in the host's
+`config.local.yaml`; `config.yaml` ships it as an empty map and
+[`config.local.yaml.example`](../config.local.yaml.example) shows the shape.
+
+```yaml
+remediation:
+  git_identity_repo_overrides:
+    example-org/example-repo:
+      codex:
+        name: Example Agent
+        email: 12345+example-agent[bot]@users.noreply.github.com
+```
+
+The strict loader rejects a name or email that is blank or contains NUL, CR, LF,
+`<` or `>`. A config layer replaces the whole mapping, so a host override lists
+every repository it needs. Deploy the key to the Agent OS Python and shell
+loaders before setting it on a host that uses them, since a strict loader
+refuses a key it does not know.
+
+Resolution order at call time, highest first:
+
+1. the env var `REMEDIATION_WORKER_GIT_IDENTITY_REPO_OVERRIDES`, when it has an
+   entry for the repository and class;
+2. the config key `remediation.git_identity_repo_overrides`;
+3. `REMEDIATION_WORKER_GIT_NAME_<CLASS>` and `REMEDIATION_WORKER_GIT_EMAIL_<CLASS>`;
+4. the built-in defaults.
+
+The daemon matches repository names case-insensitively and reads the settings
+when it resolves the identity; config comes from the cached config loader, so
+nothing is re-read from disk per call, and it is only consulted when the env var
+did not settle the identity. A matching entry supplies both fields. A layer
+with no entry for the repository or worker class, or an unreadable one, falls
+through to the next layer. Use upper snake case for `<CLASS>`, such as
+`CLAUDE_CODE`. Malformed JSON or a malformed matching entry in either layer
+warns on stderr and falls through the same way. The warning is a fixed
+sentence naming only the env var or config key, never a value.
+
+When the repository has no entry for the exact dispatch class, the lookup
+also uses its harness key, such as `claude-code` for `remediator-claude`,
+`gemini` for `remediator-gemini`, or `codex` for `remediator-codex` and
+`remediator-codex-corp`. An explicit dispatch-class entry takes precedence.
+
 `ADVERSARIAL_REVIEW_MERGE_AGENT_WORKER_CLASS` pins the worker class used for merge-orchestration dispatch. Allowlist: `merge-agent` (default), `codex`, `claude-code`. The default `merge-agent` routes through the stub adapter; pinning to a real model worker class substitutes that class for the duration of the env binding — useful when validating merge-agent surface against live models or when the merge-agent path is being debugged. The watcher validates this knob at startup alongside `ADVERSARIAL_REVIEW_DEFAULT_REVIEWER`, and an unknown value crashes the watcher with a `FATAL config: ADVERSARIAL_REVIEW_MERGE_AGENT_WORKER_CLASS...` banner the same way a bad reviewer pin does — config errors fail at boot, not at first merge-agent dispatch hours later.
 
 The configured class is a request, not a guarantee (CLOSERREUSE-01). Each merge-agent dispatch resolves its class through the AMA closer resolver (`src/merge-agent-harness.mjs`, `src/ama/harness-fallback.mjs`) against `hq fleet quota status` and `roles.adversarial.merge_authority.worker_class_fallback`. While the class provider is grounded, the first ungrounded fallback runs instead: a pinned `codex` or `hammer` dispatches as `hammer-claude` while openai is grounded, and returns to the pin once openai recovers. Fallback candidates are screened on hard and soft grounding. When the class is grounded and no fallback is ungrounded, the merge-agent does not dispatch: it returns `dispatch-deferred` with reason `merge-agent-harness-grounded` and retries on the next tick. Each deferral is recorded in `data/follow-up-jobs/merge-agent-harness-deferrals/` (`firstDeferredAt`, `deferralCount`), and a deferral older than 30 minutes logs one warn-level `merge_agent.harness_grounded_deferral` event. The next non-deferred resolution clears the record. The merge-agent dispatch record stores the class that actually ran as `dispatchWorkerClass` and the resolver decision as `harness` (`fellBack`, `from`, `to`, `provider`, `groundedBy`, `reason`); `workerClass` stays the configured class. An unreadable quota status is not grounding, so the configured class runs.
@@ -685,10 +737,14 @@ When `HQ_ROOT` is set, remediation workers clone PR branches under `HQ_ROOT/adve
 
 The home owner comes from `config.json`. For a repository under a different
 owner, workspace clone, branch fetch, and the publisher's base fetch use the
-owner-routed broker identity of the reviewer recorded on the follow-up job.
-Callers without a recorded reviewer need an explicitly configured reviewer role
-in `FOLLOW_UP_GH_BROKER_ROLE`. The broker verifies the owner and existing App
-and installation pins. Git sends the selected credential only to the canonical
+owner-routed broker identity from the follow-up job's `reviewerRole`.
+Branch admission, contamination audits and retained publication recovery use
+the same selector. `reviewerModel` remains execution or historical routing
+evidence. For legacy jobs the reader recognizes exact declared reviewer names
+and the observed `claude-opus-5-5` value. An absent identity may use a declared
+`FOLLOW_UP_GH_BROKER_ROLE`. Unknown or contradictory identity evidence holds
+before token selection. The broker verifies the owner and existing App and
+installation pins. Git sends the selected credential only to the canonical
 repository HTTPS URL. An owner-route refusal ends the attempt.
 
 Before spawn, the daemon also checks the selected physical remediation
@@ -737,7 +793,9 @@ For recovery, the recorded owner confirms the worker exited and checks for
 another active PR owner or an operator stop. Verify the GitHub route, the open PR's exact
 recorded lease, and the retained checkout or bundle at the full recorded commit. Run
 `bin/remediation-publish.mjs` with that job's repository, PR, base, original
-reviewed head, worker class and reviewer model, plus
+reviewed head, worker class and reviewer model. Include the job's declared
+`--reviewer-role` when recorded. An explicit unknown role requires owner
+inspection. Also pass
 `--expected-candidate <localCommit>` and `--expected-remote-sha <expectedRemoteSha>`.
 An unavailable broker leaves the handoff held. A stale head or unavailable
 source requires owner inspection before publication. The held job starts no
@@ -1483,23 +1541,30 @@ Behavior:
 Use `--signal SIGKILL` only after `SIGTERM` has failed or the process is known
 to ignore graceful termination.
 
-### Cancel an active reviewer without changing review state
+### Stop a review attempt as an operator
 
-Use this when the first-pass or re-review process itself needs to be
-interrupted but `reviews.db` should remain the durable source of truth for the
-normal orphan/reconcile path:
+Use this to stop an active first-pass review or re-review and prevent an
+automatic retry of that attempt.
 
 ```bash
-npm run review:cancel -- --repo <owner/repo> --pr <n> "Duplicate active reviewer; operator is restarting the loop"
+npm run review:cancel -- --repo <owner/repo> --pr <n> "Stop this review pending operator investigation"
 ```
 
 Behavior:
 
 - reads the `review_status='reviewing'` row from `data/reviews.db`
-- verifies process-group liveness and start-time identity before signalling,
-  then sends `SIGTERM` to the persisted `reviewer_pgid` process group by default
+- verifies process-group liveness and start-time identity, records cancellation
+  intent for the session and head, then sends `SIGTERM` by default
 - writes an audit receipt under `data/review-cancellations/`
 - does not mutate `review_status`, retry counters, or any PR state columns
+
+The watcher matches the cancellation to the reviewer session and head. If
+both the cancellation intent and review row record a PGID, the IDs must match.
+The watcher first checks GitHub for a review the cancelled session already
+posted on that head. If it finds one, it reconciles the posted review. If no
+review was posted, it marks the matching claim `failed` with `[cancelled]`
+evidence and charges the ordinary attempt. To re-arm a cancelled review, run
+`npm run retrigger-review -- --repo <owner/repo> --pr <n> --reason "..."`.
 
 Use `--signal SIGKILL` only after `SIGTERM` has failed or the process is known
 to ignore graceful termination.
@@ -2215,7 +2280,10 @@ A stopped `committed-unpublished` job has publication debt. Its `unpublishedWork
 record and PR comment identify the job and local commit; the workspace survives
 the terminal TTL. Inspect the retained work and publish through
 `bin/remediation-publish.mjs` with its original previous head, base, PR identity
-and exact remote lease. Missing branch metadata is resolved from the live PR;
+and exact remote lease. For an alternate owner, include the recorded reviewer
+identity and worker class as described in the
+[alternate-owner recovery contract](#alternate-owner-follow-up-git).
+Missing branch metadata is resolved from the live PR;
 never substitute an empty branch or bypass the publisher's diff/lease checks.
 The gate reports failed publication without an operator-decision-required notice.
 Once the live head exactly matches the retained commit, it reports pending review

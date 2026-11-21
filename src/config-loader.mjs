@@ -188,6 +188,11 @@ const SEARCH_OPERATIONS = Object.freeze({
   tavily: ['web_search', 'news_search', 'fetch', 'extract', 'research', 'tavily.map', 'tavily.crawl'],
 });
 const SEARCH_LIMIT_PATHS = new Set(Object.keys(SEARCH_OPERATIONS).map(p => `services.hcp.search.providers.${p}.operation_limits`));
+// Keyed maps whose keys are repository slugs (`owner/name`) and may contain
+// dots. A layer replaces the complete map, like the search provider limits
+// (see SEARCH_LIMIT_PATHS), so a key is never split into a provenance path and dropped.
+const ATOMIC_KEYED_MAP_PATHS = new Set(['remediation.git_identity_repo_overrides']);
+
 const SEARCH_MONEY_PATTERN = '^[0-9]{1,12}([.][0-9]{1,9})?$';
 const SEARCH_REF_PATTERN = String.raw`^op://[^/\s?#%](?:[^/?#%\r\n]*[^/\s?#%])?/[^/\s?#%](?:[^/?#%\r\n]*[^/\s?#%])?/[^/\s?#%](?:[^/?#%\r\n]*[^/\s?#%])?$`;
 const SEARCH_COUNT_LIMITS = ['max_results', 'max_pages', 'max_urls', 'max_input_tokens', 'max_output_tokens', 'max_duration_seconds'];
@@ -1714,7 +1719,7 @@ function flatten(doc, prefix = '', preserveEmptyMap = () => false, atomicPaths =
   for (const [key, value] of Object.entries(doc)) {
     if (key.startsWith('__')) continue;
     const full = prefix ? `${prefix}.${key}` : key;
-    if (atomicPaths.has(full) || SEARCH_LIMIT_PATHS.has(full)) {
+    if (atomicPaths.has(full) || SEARCH_LIMIT_PATHS.has(full) || ATOMIC_KEYED_MAP_PATHS.has(full)) {
       out[full] = value;
     } else if (value && typeof value === 'object' && !Array.isArray(value)) {
       if (Object.keys(value).length > 0) {
@@ -2063,7 +2068,7 @@ function schemaLeaf(schema, key) {
 function* flattenSchemaLeaves(doc, schema, path = []) {
   // A layer replaces a provider's complete declaration, even with {}.
   // Operation IDs may contain dots and must never become provenance paths.
-  if (SEARCH_LIMIT_PATHS.has(path.join('.'))) {
+  if (SEARCH_LIMIT_PATHS.has(path.join('.')) || ATOMIC_KEYED_MAP_PATHS.has(path.join('.'))) {
     yield { dotted: path.join('.'), path, value: doc };
     return;
   }

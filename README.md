@@ -340,6 +340,11 @@ continues to select the reviewer runtime, normally `cli-direct`. In
 so first-pass reviews launch through HQ orchestration instead of a direct
 CLI subprocess.
 
+In native mode, a local model stall returns the claim to the watcher for
+bounded backoff. After an operator cancels a reviewer, the watcher first looks
+for a posted review, then marks the matching claim failed if none exists. See the
+[reviewer recovery runbook](docs/RUNBOOK-antigravity-gemini-reviewer.md#interrupted-result-during-model-execution).
+
 The watcher refreshes that runtime adapter before startup recovery and
 again at the beginning of each poll tick. Invalid orchestration-mode
 config is logged through a deduped persistent-failure signal, and the
@@ -904,7 +909,10 @@ In-place repair custody is reconciled before watcher admission, at most once
 per 30 seconds. Complete terminal retry evidence can retire an unpublished
 reservation. Point-in-time exact-key absence retains custody; two consecutive
 canonical absence proofs after ten minutes project operator-required custody
-and send a deduplicated SEV1 page. Unknown evidence retains custody.
+and send a deduplicated SEV1 page. An unbound reservation with no verified
+publication and an unknown owner observed at least ten minutes after
+reservation retains custody, projects `repair-owner-unproven` for the
+operator and sends one SEV1 page per reservation.
 Retirement restores the existing ownerless clock and SEV1 path.
 Reviewer harness refunds are bounded to three per PR across heads; later
 failures retain ordinary infrastructure cap and alert handling. Corrupt or busy
@@ -1810,9 +1818,11 @@ commands are unchanged; source validation does not prove deployed exclusivity.
 See the [queue contract](docs/data-model/follow-up-jobs.md#live-pr-owner-admission-snapshot-remediationowner-01).
 
 Alternate-owner workspace and publication authorization refusals record
-`remediation-owner-auth-hold`. Before spawn the claim returns to pending
-without charging a round. After publication refusal the stopped job retains
-the local commit and workspace. The runtime owner verifies launch and
+`remediation-owner-auth-hold`. Workspace and publisher reads use the
+reviewer's declared App role carried on the follow-up job. The role is
+recorded independently of the execution model. Before spawn the claim returns
+to pending without charging a round. After publication refusal the stopped job
+retains the local commit and workspace. The runtime owner verifies launch and
 publication separately after delivery. See the
 [follow-up runbook](docs/follow-up-runbook.md#alternate-owner-follow-up-git).
 
@@ -1887,10 +1897,12 @@ Discovery retains the base OAuth path, local sessions persist independently of
 credential materialization, and HQ log classification uses worker class. Missing
 worker records defer refunds; reviewer preparation errors clean service homes.
 Native spawns fetch a catalog using their own binary and staged auth. Local
-remediation uses the CODEXHOMEISO-02 direct-tools catalog. Reviewer execution
-and discovery preserve the selected binary's catalog metadata and pin it in
-config, with a CLI override for reviewer exec. Catalog failures warn and
-proceed with the server catalog. Native reviewer exec failures retain bounded,
+remediation requires the direct-tools catalog and pins its direct-tool feature
+settings at exec. Direct Responses Lite launches omit standalone web search,
+and declared regular Responses capabilities can use cached hosted search.
+Reviewer execution and discovery preserve the selected binary's catalog
+metadata, with a CLI override for reviewer exec and server fallback if seeding
+fails. Native reviewer exec failures retain bounded,
 redacted terminal diagnostics for the existing failure classifier and recovery.
 LAC-2131 requires the selected CLI to recognize ChatGPT auth in the isolated
 file store before catalog retrieval or execution; auth failure uses the existing
@@ -1900,9 +1912,8 @@ retaining sessions. Dummy-only offline CLI/file-store and serialized-reconcile
 fixtures cover these boundaries. Source review/merge, parent pointer and
 deployment precede the separate organic recovery proof.
 Offline fixtures cover these boundaries and refund behavior. After ordinary deployment,
-SRE observes the next organic remediation's shell execution, re-review request,
-isolated `CODEX_HOME`, config digest and pinned catalog, with no code-mode host
-errors; publication is not that live receipt.
+SRE observes the next organic direct remediation's source work, re-review
+request, isolated `CODEX_HOME`, config digest and pinned catalog.
 See [the workspace runbook](docs/RUNBOOK-reviewer-workspace.md). No new smoke
 command or CI check is added.
 

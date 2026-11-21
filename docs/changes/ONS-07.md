@@ -113,3 +113,11 @@ informational null-branch metadata is ignored. Unknown assertion keywords still
 fail closed. Timeout CPU-busy overrides corroborate excess runqueue load and do
 not override the at-capacity fast path. The idle-overlay fixture already owns
 cleanup through its shared per-test temporary-directory teardown.
+
+### Current-main integration
+
+Preserve the merged RDXREMIDENTITY-02 repository-specific remediation identity
+contract through the inventoried Node-only `remediation` section, including its
+identity-field validation and atomic keyed-map handling for dotted repository
+names. This keeps the generated CFG reader and all earlier final-review fixes
+while integrating current main; no old hand-written schema literal is restored.

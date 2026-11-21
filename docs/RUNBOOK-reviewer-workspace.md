@@ -78,8 +78,8 @@ selection happens at the execution boundary.
 
 Codex auth and model-catalog preparation use the same selected execution path as exec,
 including after a managed-current or Homebrew symlink changes. A subsequent
-launch resolves afresh. Catalog fallback remains governed by CODEXHOMEISO-02;
-it never selects another executable. Added agy holders still use their existing
+launch resolves afresh. The reviewer can fall back to the server catalog.
+Direct remediation requires a locally pinned catalog. Added agy holders still use their existing
 root-owned pinned-command boundary; this change does not alter privileged
 commands, sudo policy or holder deployment.
 
@@ -117,10 +117,11 @@ delegates process creation to the orchestrator's existing isolated worker home.
 
 `src/codex-service-config.toml` is the reviewed tooling template. Model and effort
 come from the existing service resolver. Approval and sandbox values match the
-existing bypass flags. The template pins shell/unified execution and code mode,
-disables app/plugin loading and hooks, and declares no MCP servers, marketplaces
-or desktop configuration. Each home trusts only its job workspace. No interactive
-config or project-trust history is imported.
+existing bypass flags. The template pins shell/unified execution, disables
+app/plugin loading and hooks, and declares no MCP servers, marketplaces or
+desktop configuration. The service adds tool settings for the launch purpose.
+Each home trusts only its job workspace. No interactive config or project-trust
+history is imported.
 
 LAC-2131: `CODEX_AUTH_PATH` selects the AR credential source; the deployed Codex
 CLI does not consume that variable. Before replacing the incoming `CODEX_HOME`,
@@ -175,20 +176,37 @@ with `debug models`, its isolated home and the same auth environment
 `model-catalog.json` with the returned metadata intact, including `tool_mode`,
 `supports_search_tool` and `experimental_supported_tools`. Missing capability
 fields stay absent, and the reviewer uses the governed model with the existing
-OAuth provider routing and Code Mode configuration. Local remediation
-retains the CODEXHOMEISO-02 `model-catalog.direct-tools.json` policy, which
-removes `tool_mode` and `supports_search_tool` for its direct-tool launch.
-The private catalog must contain the exact resolved model slug.
+OAuth provider routing and Code Mode configuration. Direct remediation removes
+`tool_mode` and `supports_search_tool` from `model-catalog.direct-tools.json`
+and explicitly disables `features.code_mode`, `features.code_mode_only` and
+`features.standalone_web_search`. The direct service uses cached hosted web
+search only when the exact selected model declares regular Responses
+(`use_responses_lite = false`), a known `web_search_tool_type` and a native
+or default search provider. For Lite, undeclared search capabilities or
+`search_mcp`, it disables `web_search`. Codex can otherwise expose the
+standalone `web.run` function on Responses Lite even with the standalone
+search feature off.
 Seeding writes the catalog before atomically setting the root
-`model_catalog_json` in `config.toml`; reviewers also pass that pin through
-`--config` because they retain `--ignore-user-config`. Probes share their seeded
-home across compatibility checks. No interactive catalog/cache is read.
+`model_catalog_json` in `config.toml`. Reviewers also pass that pin through
+`--config` because they retain `--ignore-user-config`. Direct remediation
+passes the catalog pin and its tool settings through `--config` to take
+precedence over workspace settings. Probes share their seeded home across
+compatibility checks.
 
-Catalog fetch, parse or pin failures warn and keep the server catalog so the
-authenticated spawn proceeds. Authentication failure is never a catalog fallback.
-Each spawn logs `model_catalog_json=<path>` (or `server` on
-fallback) with its home and final config digest. Existing tool-host timeout
-classification and bounded infrastructure refunds are unchanged.
+Reviewer catalog fetch, parse or pin failures warn and continue with the
+server catalog. Direct remediation requires one catalog entry for the exact
+resolved model. Fetch, parse, unrecognized selected capabilities and pin
+failures stop before exec with a stage-only diagnostic and clean up the
+staged home. Each spawn logs `model_catalog_json=<path>` (or `server` on
+reviewer fallback) with its home and final config digest.
+
+On direct Codex exit without usable completion artifacts, the latest
+structured `turn.failed` with HTTP 400 `invalid_request_error`, parameter
+`tools` and the exact reserved `web.run` message records
+`codex-reserved-tool-schema`. This uses bounded log evidence and a fixed
+diagnostic. It follows the existing terminal failure path without a transient
+retry or infrastructure refund. Check the isolated config, catalog and
+terminal event when investigating a recurrence.
 
 On a nonzero native reviewer exec, the subprocess exit summary and bounded,
 redacted terminal diagnostics reach the caller. Error stream events support

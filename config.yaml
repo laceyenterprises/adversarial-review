@@ -32,6 +32,16 @@ __aliases:
 #   AGENT_OS_REVIEWER_GEMINI_RUNTIME / ADVERSARIAL_REVIEW_GEMINI_RUNTIME
 #   AGENT_OS_REVIEWER_GEMINI_ANTIGRAVITY_PRINT_TIMEOUT_MS /
 #     ADVERSARIAL_REVIEW_GEMINI_ANTIGRAVITY_PRINT_TIMEOUT_MS
+# Remediation worker settings.
+remediation:
+  # Repository-specific Git author and committer identity for follow-up
+  # workspaces and local remediation workers. A mapping keyed by lower-cased
+  # `owner/name`, then worker class, to { name, email }; empty by default.
+  # Set it in config.local.yaml. The env var
+  # REMEDIATION_WORKER_GIT_IDENTITY_REPO_OVERRIDES (the same shape as JSON)
+  # wins when set. See docs/follow-up-runbook.md.
+  git_identity_repo_overrides: {}
+
 reviewer:
   # Reviewer memory-pressure admission. Swap occupancy on macOS is sticky, so
   # swap thresholds only apply while available memory is below

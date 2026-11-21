@@ -38,7 +38,7 @@ export function prepareMarkPosted(db) {
       AND NULLIF(TRIM(reviewer_head_sha), '') IS NOT NULL`);
 }
 
-export function prepareMarkSizeFailed(db) {
+export function prepareMarkClaimFailed(db) {
   return db.prepare(`UPDATE reviewed_prs
     SET review_status = 'failed', failed_at = ?, failure_message = ?,
         quota_reset_at_utc = NULL, review_attempts = review_attempts + 1,
@@ -46,6 +46,9 @@ export function prepareMarkSizeFailed(db) {
     WHERE repo = ? AND pr_number = ? AND review_status = 'reviewing'
       AND reviewer_head_sha = ? AND reviewer_session_uuid IS ?`);
 }
+
+// Legacy name for terminal size-recovery callers.
+export { prepareMarkClaimFailed as prepareMarkSizeFailed };
 
 export function prepareMarkSizeRetry(db) {
   return db.prepare(`UPDATE reviewed_prs

@@ -23,6 +23,15 @@ test('LAC-2127: actual immutable ancestral 309/310/311/309/312 history has indep
   assert.deepEqual(ancestry.commits.map(c => c.parents.map(p => p.sha)),
     [f.evidence.primaryHead, ...ancestry.commits.slice(0, -1).map(c => c.sha)].map(sha => [sha]));
   f.calls.length = 0;
+  const inventoryReads = [];
+  f.args.get.compareFiles = async (path, includePatch) => {
+    const snapshot = await f.args.get(path);
+    inventoryReads.push(path);
+    return { ...snapshot, files: snapshot.files.map(({ filename, status, sha }) => {
+      assert.equal(includePatch(filename), false);
+      return { filename, status, sha };
+    }) };
+  };
   const [proof] = await prove(f);
   assert.ok(proof, JSON.stringify(f.evidence.migrationRenumberDiagnostics));
   assert.equal(proof.metadataRepair, true);
@@ -33,6 +42,7 @@ test('LAC-2127: actual immutable ancestral 309/310/311/309/312 history has indep
   assert.ok(proof.parentOperations.every(parent => parent.operations.length === 2));
   assert.equal(checkPrimaryChange(f.evidence, f.args.headSha).ok, true);
   assert.ok(f.calls.length < 512);
+  assert.equal(inventoryReads.length, f.snapshots.filter(({ sha }) => sha !== f.args.headSha).length);
   for (const { sha } of f.snapshots) {
     const comparison = `repos/${f.args.repo}/compare/${f.evidence.baseSha}...${sha}`;
     assert.equal(f.calls.filter(path => path === comparison).length, 1, comparison);

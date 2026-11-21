@@ -1649,7 +1649,7 @@ test('cli-direct preserves cancelled state across abort races', async () => {
 
     const cancelled = await run;
     assert.equal(cancelled.ok, false);
-    assert.equal(cancelled.failureClass, 'unknown');
+    assert.equal(cancelled.failureClass, 'cancelled');
     assert.equal(existsSync(reviewerRunStatePath(rootDir, req.sessionUuid)), true);
   } finally {
     rmSync(rootDir, { recursive: true, force: true });

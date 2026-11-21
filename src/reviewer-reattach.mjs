@@ -5,7 +5,7 @@ import { normalizeBuilderClass, normalizeReviewerModel, reviewerRefusesBuilder }
 import { loadAwareTimeoutMs } from './load-aware-timeout.mjs';
 import { execFileSync } from 'node:child_process';
 
-import { readReviewerRunRecord, REVIEWER_LAUNCH_GRACE_MS, TERMINAL_RUN_STATES } from './adapters/reviewer-runtime/run-state.mjs';
+import { hasReviewerCancellation, readReviewerRunRecord, REVIEWER_LAUNCH_GRACE_MS, TERMINAL_RUN_STATES } from './adapters/reviewer-runtime/run-state.mjs';
 import { reviewerPoolOwner, updateReviewerTokenLease } from './reviewer-token-pool.mjs';
 import { journalReviewerTokenLease, forgetReviewerTokenLease, reconcileReviewerTokenLeases } from './reviewer-token-leases.mjs';
 import {
@@ -20,7 +20,7 @@ import {
 } from './reviewer-lease.mjs';
 import { resolveReviewerTimeoutMs } from './reviewer-timeout.mjs';
 import { recordReviewLatencyEvent } from './review-latency-event-writer.mjs';
-import { prepareReleaseUnsettledPostedReview } from './review-state-statements.mjs';
+import { prepareMarkClaimFailed, prepareReleaseUnsettledPostedReview } from './review-state-statements.mjs';
 
 const LEGACY_ORPHAN_FAILURE_MESSAGE =
   'Watcher restarted while review subprocess was in flight. ' +
@@ -360,6 +360,7 @@ function prepareStatements(db) {
         ORDER BY pass_id DESC LIMIT 1`
     ),
     releaseUnsettledPostedReview: prepareReleaseUnsettledPostedReview(db),
+    markClaimFailed: prepareMarkClaimFailed(db),
     listReviewing: db.prepare(
       `SELECT repo, pr_number, reviewer, review_attempts, last_attempted_at,
               reviewer_session_uuid, reviewer_pgid, reviewer_started_at,
@@ -685,6 +686,22 @@ async function reconcileReviewerSessions({
     return Number(row.infra_auto_recover_attempts || 0) < recoveryCap;
   }
 
+  function operatorCancelled(row) {
+    return hasReviewerCancellation(rootDir, {
+      sessionUuid: row.reviewer_session_uuid,
+      headSha: row.reviewer_head_sha,
+      pgid: parsePositiveInteger(row.reviewer_pgid),
+    });
+  }
+
+  async function settleCancelledClaim(row) {
+    await onTerminalDeadSession({ row, state: 'cancelled', settledAt: failureAt, reason: 'operator-cancelled' });
+    statements.markClaimFailed.run(
+      failureAt, '[cancelled] Operator cancelled the reviewer before a GitHub review was found.',
+      row.repo, row.pr_number, row.reviewer_head_sha, row.reviewer_session_uuid,
+    );
+  }
+
   function markRecoveryCapFailed(row, message) {
     const attempts = Number(row.infra_auto_recover_attempts || 0);
     statements.markFailed.run(
@@ -936,13 +953,17 @@ async function reconcileReviewerSessions({
           continue;
         }
 
+        const cancelled = operatorCancelled(row);
         let postedReview = null;
         try {
           const probeRow = {
             ...row,
             reviewer_started_at: row.reviewer_started_at || null,
           };
-          postedReview = await findPostedReview(probeRow, { refresh: true });
+          postedReview = await findPostedReview(probeRow, {
+            refresh: true,
+            ...(cancelled ? { headSha: row.reviewer_head_sha } : {}),
+          });
         } catch (err) {
           if (isTransientGithubProbeError(err)) {
             log.warn(
@@ -995,6 +1016,13 @@ async function reconcileReviewerSessions({
           continue;
         }
 
+        if (cancelled) {
+          if (!currentHeadSha) continue;
+          if (currentHeadSha === row.reviewer_head_sha) {
+            await settleCancelledClaim(row);
+            continue;
+          }
+        }
         const canRecover = recoveryCapAvailable(row);
         await onTerminalDeadSession({
           row,
@@ -1089,9 +1117,9 @@ async function reconcileReviewerSessions({
     );
     let postedReview = null;
 
-    async function probePostedReviewOrMarkSticky({ refresh = false } = {}) {
+    async function probePostedReviewOrMarkSticky({ refresh = false, headSha = null } = {}) {
       try {
-        postedReview = await findPostedReview(row, { refresh });
+        postedReview = await findPostedReview(row, { refresh, ...(headSha ? { headSha } : {}) });
         return true;
       } catch (err) {
         if (isTransientGithubProbeError(err)) {
@@ -1117,7 +1145,7 @@ async function reconcileReviewerSessions({
       }
     }
 
-    async function probePostedReviewAfterRecoveryDeath() {
+    async function probePostedReviewAfterRecoveryDeath({ headSha = null } = {}) {
       const delays = Array.isArray(postKillReviewReprobeDelaysMs)
         ? postKillReviewReprobeDelaysMs
         : [];
@@ -1128,7 +1156,7 @@ async function reconcileReviewerSessions({
             await sleep(delayMs);
           }
         }
-        if (!(await probePostedReviewOrMarkSticky({ refresh: true }))) return false;
+        if (!(await probePostedReviewOrMarkSticky({ refresh: true, headSha }))) return false;
         if (postedReview) return true;
       }
       return true;
@@ -1155,6 +1183,8 @@ async function reconcileReviewerSessions({
             ? latestSessionProbe
             : latestSessionProbe?.alive === true;
           if (!stillAlive) {
+            // Let the next poll settle operator cancellation with the exact-head probe.
+            if (operatorCancelled(row)) return true;
             if (!(await probePostedReviewAfterRecoveryDeath())) return true;
             if (postedReview) {
               markStickyOrphan({
@@ -1327,7 +1357,12 @@ async function reconcileReviewerSessions({
       continue;
     }
 
-    if (!(await probePostedReviewOrMarkSticky())) continue;
+    const cancelled = operatorCancelled(row);
+    if (cancelled && !currentHeadSha) continue;
+    const reviewProbeSucceeded = cancelled
+      ? await probePostedReviewAfterRecoveryDeath({ headSha: row.reviewer_head_sha })
+      : await probePostedReviewOrMarkSticky();
+    if (!reviewProbeSucceeded) continue;
 
     if (postedReview) {
       if (!canSettlePostedReview(row)) continue;
@@ -1358,6 +1393,10 @@ async function reconcileReviewerSessions({
       continue;
     }
 
+    if (cancelled) {
+      await settleCancelledClaim(row);
+      continue;
+    }
     const canRecover = leaseRecoveryEnabled && recoveryCapAvailable(row);
     await onTerminalDeadSession({
       row,

@@ -208,15 +208,108 @@ const WORKER_PROVENANCE_HOOK_SENTINEL = 'managed-by: adversarial-review-worker-p
 // validation, etc.) is preserved instead of silently disabled.
 const WORKER_PROVENANCE_CHAINED_HOOK_FILENAME = 'commit-msg.worker-provenance-chain';
 
-// Each class supports an env-var override for ops flexibility:
+const REPO_IDENTITY_OVERRIDES_ENV = 'REMEDIATION_WORKER_GIT_IDENTITY_REPO_OVERRIDES';
+const REMEDIATION_IDENTITY_HARNESS_CLASSES = new Map([
+  ['remediator-claude', 'claude-code'],
+  ['remediator-gemini', 'gemini'],
+  ['remediator-codex', 'codex'],
+]);
+
+function isRecord(value) {
+  return value !== null && typeof value === 'object' && !Array.isArray(value);
+}
+
+function isGitIdentityField(value) {
+  return typeof value === 'string' && value.trim().length > 0
+    && !['\0', '\r', '\n', '<', '>'].some(character => value.includes(character));
+}
+
+const REPO_IDENTITY_OVERRIDES_CONFIG_KEY = 'remediation.git_identity_repo_overrides';
+const REPO_IDENTITY_ABSENT = Symbol('repo-identity-absent');
+const REPO_IDENTITY_MALFORMED = Symbol('repo-identity-malformed');
+
+// Select the { name, email } entry for one repository and worker class from an
+// already-parsed overrides mapping. ABSENT means this layer has nothing to say
+// about the repository or class; MALFORMED means the layer does and it is
+// unusable. Either way resolution falls through to the next layer.
+function selectRepoIdentity(overrides, repoKey, workerClass) {
+  if (!isRecord(overrides)) return REPO_IDENTITY_MALFORMED;
+  if (!Object.hasOwn(overrides, repoKey)) return REPO_IDENTITY_ABSENT;
+  const classes = overrides[repoKey];
+  if (!isRecord(classes)) return REPO_IDENTITY_MALFORMED;
+  if (!Object.hasOwn(classes, workerClass)) {
+    workerClass = REMEDIATION_IDENTITY_HARNESS_CLASSES.get(canonicalWorkerClass(workerClass)) ?? workerClass;
+  }
+  if (!Object.hasOwn(classes, workerClass)) return REPO_IDENTITY_ABSENT;
+  const identity = classes[workerClass];
+  if (isRecord(identity) && isGitIdentityField(identity.name) && isGitIdentityField(identity.email)) {
+    return { name: identity.name, email: identity.email };
+  }
+  return REPO_IDENTITY_MALFORMED;
+}
+
+function warnMalformedRepoIdentity(source) {
+  // Never interpolate parser errors or configured values; they can quote input.
+  console.warn(`[remediation-worker] Ignoring malformed ${source} configuration`);
+}
+
+function resolveEnvRepoIdentity(workerClass, env, repoKey) {
+  const raw = env[REPO_IDENTITY_OVERRIDES_ENV];
+  if (raw === undefined) return null;
+  let result;
+  try {
+    result = selectRepoIdentity(JSON.parse(raw), repoKey, workerClass);
+  } catch {
+    result = REPO_IDENTITY_MALFORMED;
+  }
+  if (result === REPO_IDENTITY_MALFORMED) warnMalformedRepoIdentity(REPO_IDENTITY_OVERRIDES_ENV);
+  return typeof result === 'symbol' ? null : result;
+}
+
+function resolveConfigRepoIdentity(workerClass, configOverrides, repoKey) {
+  let overrides;
+  try {
+    overrides = typeof configOverrides === 'function' ? configOverrides() : configOverrides;
+  } catch {
+    warnMalformedRepoIdentity(REPO_IDENTITY_OVERRIDES_CONFIG_KEY);
+    return null;
+  }
+  if (overrides === undefined || overrides === null) return null;
+  const result = selectRepoIdentity(overrides, repoKey, workerClass);
+  if (result === REPO_IDENTITY_MALFORMED) warnMalformedRepoIdentity(REPO_IDENTITY_OVERRIDES_CONFIG_KEY);
+  return typeof result === 'symbol' ? null : result;
+}
+
+// Layers, highest first: the env JSON, the config key, then the caller's
+// fall-through to per-class env vars and built-in defaults. A layer that has no
+// entry for the repository/class, or a malformed one, never blocks the next.
+function resolveRepoIdentity(workerClass, env, repo, configOverrides) {
+  if (typeof repo !== 'string' || !repo) return null;
+  const repoKey = repo.toLowerCase();
+  return resolveEnvRepoIdentity(workerClass, env, repoKey)
+    ?? resolveConfigRepoIdentity(workerClass, configOverrides, repoKey);
+}
+
+// Repository-specific identities come from two layers, each a mapping keyed by
+// lowercase owner/name and then worker class to { name, email }:
+//
+//   1. env  REMEDIATION_WORKER_GIT_IDENTITY_REPO_OVERRIDES (a JSON object)
+//   2. config  remediation.git_identity_repo_overrides (config.yaml, with a
+//      host override in config.local.yaml); passed as `configOverrides`, either
+//      the mapping or a function returning it so the config is only read when
+//      the env layer did not settle the identity.
+//
+// A matching { name, email } pair takes precedence over the class-wide env
+// vars and the built-in defaults. A malformed entry in either layer warns with
+// a fixed message that never prints values, and resolution falls through.
+// Both layers are skipped when the repository is unknown. The class-wide
+// fallback is:
 //
 //   REMEDIATION_WORKER_GIT_NAME_<CLASS>   /  REMEDIATION_WORKER_GIT_EMAIL_<CLASS>
 //
 // where <CLASS> is the upper-snake-case form of the worker class
-// (e.g. claude-code → CLAUDE_CODE). Resolved at call time, not module-load
-// time, so a long-running consumer can pick up identity changes without
-// being restarted.
-function remediationWorkerGitIdentity(workerClass, env = process.env) {
+// (e.g. claude-code → CLAUDE_CODE). All overrides are read at call time.
+function remediationWorkerGitIdentity(workerClass, env = process.env, { repo, configOverrides } = {}) {
   const defaults = REMEDIATION_WORKER_IDENTITY_DEFAULTS[workerClass];
   if (!defaults) {
     throw new Error(
@@ -225,6 +318,8 @@ function remediationWorkerGitIdentity(workerClass, env = process.env) {
       `REMEDIATION_WORKER_IDENTITY_DEFAULTS in src/follow-up-remediation.mjs.`
     );
   }
+  const repoIdentity = resolveRepoIdentity(workerClass, env, repo, configOverrides);
+  if (repoIdentity) return repoIdentity;
   const envSuffix = String(workerClass).toUpperCase().replace(/-/g, '_');
   const name = env[`REMEDIATION_WORKER_GIT_NAME_${envSuffix}`] || defaults.name;
   const email = env[`REMEDIATION_WORKER_GIT_EMAIL_${envSuffix}`] || defaults.email;
@@ -300,7 +395,7 @@ function installWorkerProvenanceHook(workspaceDir, { execFileSyncImpl = execFile
   return dest;
 }
 
-async function configureRemediationWorkspaceIdentity({ workspaceDir, workerClass, execFileImpl }) {
+async function configureRemediationWorkspaceIdentity({ workspaceDir, workerClass, repo, env, execFileImpl, configOverrides }) {
   // Set worktree git identity *before* the PR checkout so the very first
   // commits the remediation worker makes (including any in-process author
   // hooks that read `git config user.*` at startup) see the correct values.
@@ -309,9 +404,7 @@ async function configureRemediationWorkspaceIdentity({ workspaceDir, workerClass
   // agent-os IDENTBASE-01 change. Refuse shared/external metadata before enabling
   // the extension so a reused linked worktree cannot mutate another repo's config
   // or hooks. A re-run against our own standalone clone is idempotent.
-  // The identity is keyed on workerClass so the soon-to-land claude-code
-  // remediation path doesn't need a separate code change here.
-  const gitIdentity = remediationWorkerGitIdentity(workerClass);
+  const gitIdentity = remediationWorkerGitIdentity(workerClass, env, { repo, configOverrides });
   const workspaceGitDir = join(workspaceDir, '.git');
   if (!lstatSync(workspaceGitDir).isDirectory()
     || existsSync(join(workspaceGitDir, 'commondir'))

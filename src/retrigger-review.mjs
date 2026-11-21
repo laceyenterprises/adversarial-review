@@ -708,6 +708,7 @@ async function main(argv, {
           requestedAt: ts,
           requestedBy: operator,
           reason: `Cancelled for exact-head re-review recovery. ${reason}`,
+          terminal: false,
         });
       } catch (err) {
         stderr.write(`error: could not cancel active review: ${err.message}\n`);

@@ -84,6 +84,14 @@ to three per PR across heads; later failures keep ordinary infra charges and
 cap alerts. Ledger faults defer only one PR. Existing lifecycle values, merge
 predicates and automated smoke commands are unchanged.
 
+An unbound repair reservation without verified publication whose owner is
+still `unknown` when observed at least ten minutes after reservation projects
+`operator-hold` with reason `repair-owner-unproven`. The watcher sends one
+SEV1 page per reservation through the existing closure-wait store. The
+reservation fences review and branch mutation while the dispatch owner
+establishes launch and retry evidence. A later proven owner or retirement
+supersedes the operator projection.
+
 A terminal owner at a moved head whose publication remains invalid or lacks
 launch/class identity retains the safety fence. After two observations and ten
 minutes from the first matching terminal publication observation,
@@ -471,12 +479,17 @@ isolated config homes, with unchanged auth, model pins and approval/sandbox
 envelopes. See [the workspace runbook](RUNBOOK-reviewer-workspace.md) and
 [refund evidence contract](data-model/follow-up-jobs.md#infrastructure-round-refunds-remrefund-01).
 
-After auth staging, local remediation pins its CODEXHOMEISO-02 direct-tools
-catalog. Reviewer execution and discovery pin the native catalog with its
-capability fields intact. The reviewer CLI override retains the pin under
-`--ignore-user-config`. Fetch, parse and pin failures log and retain the
-server catalog. Tool-host timeout classification and refund transitions are
-unchanged.
+After auth staging, local remediation requires its direct-tools catalog and
+purpose-specific feature settings before exec. Reviewer execution and discovery
+pin the native catalog with its capability fields intact and retain server
+fallback on fetch, parse or pin failure. The reviewer CLI override retains the
+pin under `--ignore-user-config`. A direct Codex exit without usable artifacts
+can record `codex-reserved-tool-schema` under the existing `failed` status when
+the latest `turn.failed` carries the exact HTTP 400 reserved `web.run` rejection.
+It uses the ordinary terminal failure accounting and is ineligible for automatic
+execution-round recovery. A direct catalog refusal before spawn records the
+existing `startup-contract-violation` code with violation type
+`codex-direct-tools-catalog-unavailable`.
 
 ## Evidence-only completion (REVIEWEVIDENCE-01)
 
@@ -953,6 +966,13 @@ new PR
   `reviewer-stalled` session-fenced release and typed `github-budget-deferred`
   reset holds remain budget-neutral. Process identity, confirmed drain, posted
   review recovery and retry caps retain their authority.
+  The native reviewer wrapper returns a reserved exit status for a typed local
+  model stall, independent of the retained diagnostic tail. The reconciler
+  checks for a posted review on the exact dispatched head before marking a
+  confirmed operator cancellation `failed` with `[cancelled]` evidence and
+  charging an attempt. Unattributed signals and daemon shutdown remain
+  recoverable. Same-head automatic failure recovery excludes operator
+  cancellations.
 - GEMTIMEOUT-01: Gemini claims persist a single-call process timeout plus
   preparation/posting slack. A validated chunk plan extends only the matching
   active, open session's timeout and lease, before its parent timer is extended.
@@ -2824,6 +2844,13 @@ Key control points:
   comparison base: collection proves protected-base and author-head ancestry
   before projecting the final tree onto the protected common base. Missing
   ancestry or an incomplete/mismatched projection retains the existing refusal.
+  The projection keeps the complete file inventory. It materializes hunks for
+  author and test paths, with full hunks for cited reversals and guard review
+  carry-forward. This keeps unrelated main changes out of ordinary patch
+  reconstruction without dropping rename or migration evidence.
+  Guard hydration runs only for an authoritative review at a different head.
+  Failed optional hydration retains scoped preservation evidence and requires
+  exact-head review; cancellation and history deadlines retain their refusal.
   DERIVEDBLOCK-01 treats a declared generated block interior as preserved when
   its unchanged merge-base application-manifest declaration regenerates the exact
   final-head block in a bounded, network-denied scratch worktree. Marker lines,

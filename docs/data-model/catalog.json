@@ -2,6 +2,17 @@
   "version": 1,
   "entries": [
     {
+      "id": "follow-up-reviewer-role",
+      "title": "Follow-up alternate-owner reviewer role",
+      "path": "docs/data-model/follow-up-jobs.md",
+      "store": "data/follow-up-jobs/{pending,in-progress,completed,failed,stopped}/*.json",
+      "schemaSurface": "src/follow-up-jobs.mjs",
+      "relatedSchemaSurfaces": ["src/follow-up-reviewer-identity.mjs", "src/remediation-owner-auth.mjs"],
+      "owner": "reviewer handoff and follow-up daemon",
+      "optionalFields": ["reviewerRole: claude-reviewer | codex-reviewer | gemini-reviewer | grok-reviewer | null"],
+      "compatibility": "Additive to schema version 2. Omitted roles on new jobs use exact recognized legacy identities, including claude-opus-5-5. Explicit values are preserved; null holds alternate-owner reads."
+    },
+    {
       "id": "remediation-closer-dead-letter",
       "title": "Malformed remediation closer priority events",
       "path": "docs/data-model/follow-up-jobs.md",
@@ -1483,6 +1494,7 @@
       "title": "Reviewer Run Records",
       "path": "docs/data-model/reviewer-run-records.md",
       "store": "data/reviewer-runs/<sessionUuid>.json",
+      "operatorCancellationReceipt": "data/reviewer-runs/<sessionUuid>.json.cancel carries matching sessionUuid, headSha and pgid for GitHub-first cancellation reconciliation",
       "schemaSurface": "src/adapters/reviewer-runtime/run-state.mjs",
       "nestedReviewerRuntime": "subjectContext.nestedReviewerRuntime=true identifies Grok HQ child dispatches excluded from watcher startup reattachment; ordinary TTL pruning still applies",
       "reviewerReserveFloorReason": "personal-anthropic-reserve-floor; historical percentage-bearing reasons remain readable",

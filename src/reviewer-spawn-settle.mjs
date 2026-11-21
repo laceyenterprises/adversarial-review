@@ -19,7 +19,7 @@ import { resolveHqRoot } from './hq-root.mjs';
 import { REVIEWER_BUILD_ID } from './reviewer-timeout-budget.mjs';
 import { selectReviewerTokenAccount, updateReviewerTokenLease, recordReviewerAccountQuotaFailure } from './reviewer-token-pool.mjs';
 import { journalReviewerTokenLease, forgetReviewerTokenLease, markReviewerTokenLeaseActive } from './reviewer-token-leases.mjs';
-import { readReviewerRunRecord, TERMINAL_RUN_STATES } from './adapters/reviewer-runtime/run-state.mjs';
+import { hasReviewerCancellation, readReviewerRunRecord, TERMINAL_RUN_STATES } from './adapters/reviewer-runtime/run-state.mjs';
 // ARC-18 (cluster 19): the reviewer spawn/settle state machine, extracted
 // verbatim from watcher.mjs. This is the core reviewer state machine —
 // spawnReviewer + the gated pipeline entry point + settleReviewerAttempt +
@@ -99,7 +99,7 @@ import {
   stmtMarkPosted,
   stmtReleaseUnsettledPostedReview,
   stmtMarkFailed,
-  stmtMarkSizeFailed,
+  stmtMarkClaimFailed,
   stmtMarkSizeRetry,
   stmtReleaseReviewLease,
   stmtMarkFailedQuota,
@@ -1661,7 +1661,7 @@ function settleReviewerAttempt({
     markPosted: stmtMarkPosted,
     releaseUnsettledPostedReview: stmtReleaseUnsettledPostedReview,
     markFailed: stmtMarkFailed,
-    markSizeFailed: stmtMarkSizeFailed,
+    markClaimFailed: stmtMarkClaimFailed,
     markSizeRetry: stmtMarkSizeRetry,
     releaseReviewerClaim: stmtReleaseReviewerClaim,
     releaseLegacyStaleReviewerClaim: stmtReleaseLegacyStaleReviewerClaim,
@@ -1813,7 +1813,8 @@ function settleReviewerAttempt({
   const fullFailureOutput = [result.error, result.stdout, result.stderr]
     .filter(Boolean)
     .join('\n');
-  const reviewCreateFailure = classifyGitHubReviewCreateFailure(fullFailureOutput);
+  const reviewCreateFailure = ['cancelled', 'daemon-bounce'].includes(result.failureClass)
+    ? null : classifyGitHubReviewCreateFailure(fullFailureOutput);
   const failureClass = reviewCreateFailure?.failureClass || result.failureClass || 'unknown';
 
   const routingRefusal = failureClass === 'bug'
@@ -1908,6 +1909,19 @@ function settleReviewerAttempt({
   const failureMessage = appendFailureDiagnostics(baseFailureMessage, result);
   const classifiedMessage = `[${failureClass}] ${failureMessage}`;
 
+  if (failureClass === 'cancelled') {
+    // The session reconciler checks for an accepted GitHub review before
+    // charging an operator-cancelled native claim.
+    if (hasReviewerCancellation(rootDir, {
+      sessionUuid: reviewerSessionUuid, headSha: reviewerHeadSha, pgid: result.pgid ?? null,
+    })) return { posted: false, reason: 'cancellation-reconciliation-pending' };
+    withSqliteBusyRetrySync(
+      () => statements.markClaimFailed.run(failureAt, classifiedMessage, repoPath, prNumber, reviewerHeadSha, reviewerSessionUuid),
+      { label: `reviewer-cancelled:${repoPath}#${prNumber}`, log },
+    );
+    return;
+  }
+
   if (failureClass === 'reviewer-model-unavailable' || failureClass === 'reviewer-configuration-error') {
     // Immediate fallback was already tried by spawnReviewer. A deterministic
     // refusal left here needs configuration repair, not another poll-time spawn.
@@ -1923,8 +1937,8 @@ function settleReviewerAttempt({
   // bounded retry path, whose reviewer first summarises and then chunks.
   if (failureClass === 'reviewer-chunk-budget-exceeded') {
     const marked = withSqliteBusyRetrySync(
-      () => statements.markSizeFailed
-        ? statements.markSizeFailed.run(failureAt, classifiedMessage, repoPath, prNumber, reviewerHeadSha, reviewerSessionUuid)
+      () => statements.markClaimFailed
+        ? statements.markClaimFailed.run(failureAt, classifiedMessage, repoPath, prNumber, reviewerHeadSha, reviewerSessionUuid)
         : statements.markFailed.run(failureAt, classifiedMessage, repoPath, prNumber),
       { label: `reviewer-size-terminal:${repoPath}#${prNumber}`, log },
     );
@@ -2053,7 +2067,7 @@ function settleReviewerAttempt({
         : `infra auto-recovery cap exhausted (${infraRecoverAttempts}/${INFRA_AUTO_RECOVER_CAP})`;
       withSqliteBusyRetrySync(
         () => failureClass === 'reviewer-prompt-too-large'
-          ? statements.markSizeFailed.run(failureAt, `${classifiedMessage}\nSystem: ${exhaustionLabel}.`,
+          ? statements.markClaimFailed.run(failureAt, `${classifiedMessage}\nSystem: ${exhaustionLabel}.`,
             repoPath, prNumber, reviewerHeadSha, reviewerSessionUuid)
           : statements.markCascadeFailed.run(failureAt, `${classifiedMessage}\nSystem: ${exhaustionLabel}.`,
             repoPath, prNumber),

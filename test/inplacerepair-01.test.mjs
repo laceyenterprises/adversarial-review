@@ -572,11 +572,46 @@ test('repair observation bounds cadence and retains live, early absent and unrea
           version: 1, kind: 'canonical-exact-selector-absence' } }) };
       return state === 'retry' ? launchRead(epoch, 'failed', 'running') : launchRead(epoch, 'running');
     };
-    assert.ok(await reconcileRepairOwner({ ...f, now, readImpl }));
+    const waits = [];
+    const observeWait = async wait => waits.push(wait.waitClass);
+    assert.ok(await reconcileRepairOwner({ ...f, now, readImpl, observeWait }));
     const count = reads;
-    assert.ok(await reconcileRepairOwner({ ...f, now: now + 1000, readImpl }));
+    assert.ok(await reconcileRepairOwner({ ...f, now: now + 1000, readImpl, observeWait }));
     assert.equal(reads, count, 'no repeated SDK read inside the cadence');
+    assert.deepEqual(waits, ['unreadable', 'unproven-absent'].includes(state) ? ['repair-owner-unproven'] : []);
     assert.equal(pendingRepairEpoch(f.rootDir, f).terminalAt, undefined);
+  }
+});
+
+test('overdue unknown repair wait uses the candidate head when a legacy reservation lacks baseHead', async t => {
+  const { observeClosureWait } = await import('../src/ama/closure-wait.mjs');
+  for (const baseHead of [undefined, null, '', old]) {
+    const f = { ...fixture(t), now: '2026-01-01T00:00:00Z' };
+    const epoch = reserveRepairEpoch(f).epoch;
+    const ledger = readHammerRetryCapLedger(f.rootDir, f);
+    if (baseHead === undefined) delete ledger.repairEpochs[0].baseHead;
+    else ledger.repairEpochs[0].baseHead = baseHead;
+    writeFileSync(hammerRetryCapFilePath(f.rootDir, f), JSON.stringify(ledger));
+    const waits = [], pages = [];
+    const observeWait = args => {
+      waits.push(args);
+      return observeClosureWait({ ...args, pageImpl: async () => pages.push(args) });
+    };
+    const now = Date.parse(f.now) + REPAIR_ABSENCE_ESCALATE_MS;
+    const args = { ...f, headSha: head, now, observeWait,
+      readImpl: async () => ({ ok: false, reason: 'dispatch-read-unavailable' }) };
+    const observed = await reconcileRepairOwner(args);
+    await reconcileRepairOwner({ ...args, now: now + REPAIR_OWNER_OBSERVE_MS });
+    assert.equal(observed.ownerState, 'unknown');
+    assert.equal(observed.terminalAt, undefined);
+    assert.equal(observed.reviewHead, null);
+    assert.equal(waits.length, 2);
+    for (const wait of waits) {
+      assert.equal(wait.headSha, `${baseHead || head}:${epoch.id}`);
+      assert.equal(wait.waitClass, 'repair-owner-unproven');
+      assert.equal(wait.immediate, true);
+    }
+    assert.equal(pages.length, 1, 'the durable wait receipt deduplicates repeated observations');
   }
 });
 
@@ -641,7 +676,9 @@ test('failed retry-chain lookup retains repair custody as unknown', async t => {
     assert.deepEqual(selector, { launch_request_ids: ['fixture-launch'], include_retry_chain: true });
     return { ok: false, reason: 'timeout' };
   };
-  const observed = await reconcileRepairOwner({ ...f, now, readImpl });
+  const observed = await reconcileRepairOwner({ ...f, now, readImpl, observeWait: async wait => {
+    assert.equal(wait.waitClass, 'repair-owner-unproven');
+  } });
   assert.equal(reads, 2);
   assert.equal(observed.id, epoch.id);
   assert.equal(observed.ownerState, 'unknown');

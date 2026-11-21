@@ -15,7 +15,8 @@ const { values } = parseArgs({ options: {
   branch: { type: 'string' }, 'expected-remote-sha': { type: 'string' },
   'job-id': { type: 'string' }, 'expected-candidate': { type: 'string' },
   'failure-path': { type: 'string' }, 'push-command': { type: 'string' },
-  'worker-class': { type: 'string' }, 'reviewer-model': { type: 'string' }, 'requires-workflow-push': { type: 'boolean' },
+  'worker-class': { type: 'string' }, 'reviewer-model': { type: 'string' }, 'reviewer-role': { type: 'string' },
+  'requires-workflow-push': { type: 'boolean' },
 } });
 const previousHead = values['previous-head'];
 const expectedRemoteSha = values['expected-remote-sha'] || previousHead;
@@ -31,6 +32,7 @@ try {
     repo: values.repo, prNumber: values.pr, branch: values.branch, expectedRemoteSha,
     expectedCandidate: values['expected-candidate'] || localCommit,
     pushCommand: values['push-command'], workerClass: values['worker-class'], reviewerModel: values['reviewer-model'],
+    reviewerRole: values['reviewer-role'],
     requiresWorkflowPush: values['requires-workflow-push'] });
   if (values['failure-path']) {
     try { unlinkSync(values['failure-path']); }

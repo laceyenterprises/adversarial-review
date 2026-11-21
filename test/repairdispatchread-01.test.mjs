@@ -167,12 +167,14 @@ const project = 'fixture-project';
 const ownerKey = 'fixture-original-key';
 const launch = 'lrq_fixture_owner';
 
-for (const [kind, lookupCount, remaining, exitCode] of [
+for (const [kind, lookupCount, remaining, exitCode, legacy = false] of [
   ['terminal', 2, 2, 0], ['live retry', 2, 1, 75], ['retry unavailable', 2, 1, 75],
   ['foreign head', 1, 1, 75], ['foreign repo', 1, 1, 75],
   ['grant denied', 1, 1, 75], ['filtered empty', 1, 1, 75],
   ['canonical empty', 1, 1, 75], ['moved head', 0, 1, 75],
-]) test(`installed SDK repair CLI ${kind}`, async t => {
+  ['filtered empty', 1, 1, 75, true], ['canonical empty', 1, 1, 75, true],
+  ['terminal', 2, 2, 0, true],
+]) test(`installed SDK repair CLI ${legacy ? 'legacy unscoped ' : ''}${kind}`, async t => {
   const rootDir = exhaustedPr(t);
   const bootstrap = join(rootDir, 'apps', 'bootstrap');
   mkdirSync(bootstrap, { recursive: true });
@@ -206,7 +208,9 @@ for (const [kind, lookupCount, remaining, exitCode] of [
     if (kind === 'filtered empty') return res.end(JSON.stringify(empty));
     if (kind === 'canonical empty') return res.end(JSON.stringify({ ...empty, scope_complete: true,
       absence_proof: { version: 1, kind: 'canonical-exact-selector-absence', selector,
-        grant_id: 'project-repository-dispatch-read', observed_at: new Date().toISOString() } }));
+        // The grant identifier does not authorize retirement of repair custody.
+        grant_id: 'project-repository-dispatch-read',
+        observed_at: new Date().toISOString() } }));
     const row = { launch_request_id: launch, idempotency_key: ownerKey, status: 'canceled',
       target_repo: kind === 'foreign repo' ? 'other/widgets' : repo,
       head_sha: kind === 'foreign head' ? 'e'.repeat(40) : head, identity_ambiguous: false };
@@ -219,15 +223,20 @@ for (const [kind, lookupCount, remaining, exitCode] of [
   t.after(() => new Promise(resolve => server.close(resolve)));
   const endpointUrl = `http://127.0.0.1:${server.address().port}`;
 
-  const admitted = await run(head, ownerKey, project);
+  const admitted = await run(head, ownerKey, legacy ? '' : project);
   assert.equal(admitted.code, 0);
-  assert.equal(admitted.receipt.epoch.dispatchProjectRef, project);
+  assert.equal(admitted.receipt.epoch.dispatchProjectRef, legacy ? undefined : project);
   assert.equal(requests.length, 0, 'the initial reservation does no dispatch read');
-  if (kind === 'canonical empty') {
+  if (legacy || kind === 'canonical empty') {
     mutateRepairEpochs(rootDir, { repo, prNumber }, ledger => {
       ledger.repairEpochs[0].reservedAt = '2026-01-01T00:00:00Z';
+      if (legacy) {
+        ledger.repairEpochs[0].ownerState = 'unknown';
+        ledger.repairEpochs[0].ownerLaunch = null;
+      }
     });
   }
+  const before = readHammerRetryCapLedger(rootDir, { repo, prNumber });
   const successor = await run(kind === 'moved head' ? 'e'.repeat(40) : head, 'fresh-key', 'new-project');
   assert.equal(successor.code, exitCode);
   assert.equal(successor.receipt.ok, exitCode === 0);
@@ -237,6 +246,9 @@ for (const [kind, lookupCount, remaining, exitCode] of [
   assert.equal(repairEpochs[0].ownerKey, ownerKey);
   assert.equal(repairEpochs[0].reviewHead, null);
   assert.equal(Boolean(repairEpochs[0].terminalAt), exitCode === 0);
+  if (legacy && exitCode === 75) {
+    assert.deepEqual(readHammerRetryCapLedger(rootDir, { repo, prNumber }), before);
+  }
   assert.equal(pendingRepairEpoch(rootDir, { repo, prNumber }).ownerKey, exitCode === 0 ? 'fresh-key' : ownerKey);
   if (!lookupCount) {
     assert.deepEqual(requests, []);
@@ -250,7 +262,8 @@ for (const [kind, lookupCount, remaining, exitCode] of [
     assert.equal(request.path, '/v1/dispatch/lookup');
     assert.equal(request.auth, 'Bearer fixture-session');
   }
-  assert.deepEqual(requests[1].selector, { idempotency_key: ownerKey, project_ref: project, repo });
+  assert.deepEqual(requests[1].selector, legacy ? { idempotency_key: ownerKey }
+    : { idempotency_key: ownerKey, project_ref: project, repo });
   if (lookupCount === 2) assert.deepEqual(requests[2].selector, {
     launch_request_ids: [launch], include_retry_chain: true,
   });

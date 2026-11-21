@@ -169,7 +169,7 @@ async function probeCodexCli({
   // Preserve the base home's OAuth lookup before redirecting config/session state.
   const authPath = env.CODEX_AUTH_PATH || join(env.CODEX_HOME || join(env.HOME || homedir(), '.codex'), 'auth.json');
   const home = await prepareServiceCodexHomeAsync({ env: { ...env, CODEX_AUTH_PATH: authPath }, workspaceDir: cwd,
-    model: model.resolvedModel, effort: model.resolvedReasoningLevel, codexCli,
+    model: model.resolvedModel, effort: model.resolvedReasoningLevel, codexCli, preserveToolCapabilities: true,
     // Preserve the explicit fixture seam; production always uses async transport.
     execFileImpl: execFileSyncImpl ? async (...args) => ({ stdout: execFileSyncImpl(...args) }) : execFileImpl });
   env = home.env;

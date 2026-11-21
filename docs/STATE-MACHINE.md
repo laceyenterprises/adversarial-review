@@ -471,10 +471,12 @@ isolated config homes, with unchanged auth, model pins and approval/sandbox
 envelopes. See [the workspace runbook](RUNBOOK-reviewer-workspace.md) and
 [refund evidence contract](data-model/follow-up-jobs.md#infrastructure-round-refunds-remrefund-01).
 
-CODEXHOMEISO-02 adds a per-spawn direct-tools catalog to those isolated homes
-after auth staging, with reviewer CLI overrides retaining the pin under
-`--ignore-user-config`. Fetch/parse/pin failures log and retain the server
-catalog; tool-host timeout classification and refund transitions are unchanged.
+After auth staging, local remediation pins its CODEXHOMEISO-02 direct-tools
+catalog. Reviewer execution and discovery pin the native catalog with its
+capability fields intact. The reviewer CLI override retains the pin under
+`--ignore-user-config`. Fetch, parse and pin failures log and retain the
+server catalog. Tool-host timeout classification and refund transitions are
+unchanged.
 
 ## Evidence-only completion (REVIEWEVIDENCE-01)
 
@@ -1040,7 +1042,7 @@ new PR
   messages such as `gh: Bad credentials (HTTP 401)`, `quota-exhausted`,
   `infra-runtime-missing-library` (tagged, or a legacy row whose stored stderr
   carries `dyld[...]: Library not loaded`), and
-  `reviewer-command-failed` stored as `[unknown] Command failed...`) use the
+  `reviewer-command-failed` with an explicit tag or legacy `[unknown] Command failed...` evidence) use the
   dedicated claim path that atomically promotes the row to `reviewing` and
   increments `infra_auto_recover_attempts` only if the row is still the same
   failure message classified by JavaScript (`failure_message IS ?`). SQL never
@@ -1172,7 +1174,7 @@ new PR
   (`blocking-review`).
 - **Cancellation surface (`src/review-cancel.mjs`).** The canonical CLI for cancelling an in-flight reviewer is `node src/review-cancel.mjs --repo <slug> --pr <n> [--signal SIGTERM] [--allow-status <comma-list>] [reason]`. By default the CLI accepts only rows in `review_status='reviewing'` (the durable claim that a reviewer subprocess is in flight). Supported values for `--allow-status` are `reviewing`, `posted`, `failed`. The flag explicitly excludes `pending` (no subprocess to signal), `failed-orphan` (sticky operator-only recovery; use `npm run retrigger-review` instead), and `malformed` (terminal by design). The canonical surface MUST cover the extended cases so operators do not fall back to `sudo kill -KILL <pgid>` or hand-editing the row to fool the guard.
   - **`--allow-status posted`** covers the **post-merge race** observed 2026-05-30: a prior attempt's row had already transitioned to `posted` while the watcher had re-spawned a retry whose subprocess outlived the PR's own merge.
-  - **`--allow-status failed`** covers the **draining-subprocess** shape: the subprocess errored (timeout, cleanup-phase exception) and flipped the row to `failed`, but the OS process is still alive — for example holding a file handle, an open Linear API session, or its own SIGTERM teardown timer. Distinct from `failed-orphan`: a `failed` row preserves the reviewer failure evidence for operator inspection unless it matches the bounded infrastructure-recovery classifier (`cascade`, `reviewer-timeout`, `launchctl-bootstrap`, reviewer-spawn `oauth-broken`, or `reviewer-command-failed` for stored `[unknown] Command failed...` rows). Only that dedicated infra claim may promote `failed → reviewing`; generic failed rows are not re-promoted by `stmtMarkAttemptStarted`. The CLI's PID-identity guard (`verifyPgidIdentity` start-time match) is what makes the kill safe if row state changes during cancellation, and the CLI re-fetches the row on `identity-unconfirmed` to surface the new state so the operator can target the live reviewer instead.
+  - **`--allow-status failed`** covers the **draining-subprocess** shape: the subprocess errored (timeout, cleanup-phase exception) and flipped the row to `failed`, but the OS process is still alive — for example holding a file handle, an open Linear API session, or its own SIGTERM teardown timer. Distinct from `failed-orphan`: a `failed` row preserves the reviewer failure evidence for operator inspection unless it matches the bounded infrastructure-recovery classifier (`cascade`, `reviewer-timeout`, `launchctl-bootstrap`, reviewer-spawn `oauth-broken`, or `reviewer-command-failed` from an explicit tag or legacy `[unknown] Command failed...` evidence). Only that dedicated infra claim may promote `failed → reviewing`; generic failed rows are not re-promoted by `stmtMarkAttemptStarted`. The CLI's PID-identity guard (`verifyPgidIdentity` start-time match) is what makes the kill safe if row state changes during cancellation, and the CLI re-fetches the row on `identity-unconfirmed` to surface the new state so the operator can target the live reviewer instead.
   - **Audit channel.** The cancellation receipt at `data/review-cancellations/<repo>-pr-<n>-<utc>.json` records the source `review.status`, the resolved `result`, and any `postSignalState` snapshot if the row transitioned mid-cancel. This receipt directory — **not** the SQLite row — is the canonical audit trail for cancels: `cancelActiveReview` runs read-only against `reviewed_prs` (`query_only = 1`), so a successful cancel against a `posted` or `failed` row leaves the row state unchanged. To find historical cancels for a PR after the fact: `ls data/review-cancellations/ | grep -F "pr-<n>"`, then read each JSON to see the source status, requestedBy, requestedAt, reason, and signal outcome.
 - `failed-orphan` is intentionally sticky except for two bounded recovery paths.
   First, if the watcher or `npm run reconcile-posted-orphans -- --apply`

@@ -169,13 +169,16 @@ are no-ops; source credentials and other workers' homes are never cleanup target
 Reviewer/discovery adapter owners retain responsibility for their own staging.
 Logs include `CODEX_HOME` and `config_sha256` without auth data.
 
-CODEXHOMEISO-02: after auth is staged, shared service-home seeding runs the
-spawn's own Codex binary with `debug models`, its isolated home and the same
-auth environment (30-second timeout). It removes `tool_mode` and
-`supports_search_tool` from every model, preserving other metadata including
-`experimental_supported_tools`. Omitted search support defaults to false, so
-direct MCP tools remain available without advertising unsupported tool discovery.
-The private `model-catalog.direct-tools.json` must include the resolved model.
+After auth is staged, service-home seeding runs the spawn's own Codex binary
+with `debug models`, its isolated home and the same auth environment
+(30-second timeout). Reviewer execution and discovery pin
+`model-catalog.json` with the returned metadata intact, including `tool_mode`,
+`supports_search_tool` and `experimental_supported_tools`. Missing capability
+fields stay absent, and the reviewer uses the governed model with the existing
+OAuth provider routing and Code Mode configuration. Local remediation
+retains the CODEXHOMEISO-02 `model-catalog.direct-tools.json` policy, which
+removes `tool_mode` and `supports_search_tool` for its direct-tool launch.
+The private catalog must contain the exact resolved model slug.
 Seeding writes the catalog before atomically setting the root
 `model_catalog_json` in `config.toml`; reviewers also pass that pin through
 `--config` because they retain `--ignore-user-config`. Probes share their seeded
@@ -186,6 +189,17 @@ authenticated spawn proceeds. Authentication failure is never a catalog fallback
 Each spawn logs `model_catalog_json=<path>` (or `server` on
 fallback) with its home and final config digest. Existing tool-host timeout
 classification and bounded infrastructure refunds are unchanged.
+
+On a nonzero native reviewer exec, the subprocess exit summary and bounded,
+redacted terminal diagnostics reach the caller. Error stream events support
+both nested `error.message` and flat `message` payloads, preferring a nonempty
+nested message. Logger prefixes before the native exec failure marker do not
+change its classification. The adapter applies the
+existing auth, quota and upstream classifiers to that evidence. A generic
+native exec failure uses the existing `reviewer-command-failed` recovery path,
+including its posted-review probe and bounded retry budget. The Code Mode
+capability and unstable-feature startup warnings do not establish the cause
+of an exec failure.
 
 After ordinary deployment, SRE should retain the next organic Codex remediation
 receipt showing shell execution, a re-review request, and the isolated home and

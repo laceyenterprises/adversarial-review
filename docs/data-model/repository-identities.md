@@ -23,6 +23,16 @@ Secondary database participants record the same operation ID in their own
 audit table. The main transaction changes the recorded current name last.
 Repeated observations of that current name are no-ops.
 
+Fresh `reviews.db` bootstrap installs these tables, the rest of the shared
+review schema and the migration receipts in one transaction. A failed
+bootstrap rolls all of them back. A connection that initially sees an empty
+schema checks the schema version again under the writer lock. If a peer has
+completed bootstrap, the connection skips installation. If the peer committed
+only a partial schema, the connection completes installation in that same
+transaction. The connection memoizes identity setup after commit. Databases
+with a schema already visible on the first check follow the incremental
+migration path.
+
 `repository-names.json` is an atomically published projection for workers that
 retain old arguments. An active current name belongs to its current ID; a
 reused historical name never redirects the new repository to its former owner.

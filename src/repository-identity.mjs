@@ -15,6 +15,17 @@ import {
 const initialized = new WeakSet();
 export function ensureRepositoryIdentitySchema(db) {
   if (initialized.has(db)) return;
+  // A review-state bootstrap can commit this schema before the handle is
+  // memoized. Confirm the tables outside that transaction without redoing DDL.
+  if (!db.inTransaction && db.prepare(`
+    SELECT count(*) AS n FROM main.sqlite_schema
+    WHERE type = 'table' AND name COLLATE NOCASE IN (
+      'repository_identities', 'repository_name_history', 'repository_rename_audit'
+    )
+  `).get().n === 3) {
+    initialized.add(db);
+    return;
+  }
   db.exec(`
     CREATE TABLE IF NOT EXISTS repository_identities (
       repository_id TEXT PRIMARY KEY, node_id TEXT, full_name TEXT NOT NULL COLLATE NOCASE UNIQUE,
@@ -29,7 +40,8 @@ export function ensureRepositoryIdentitySchema(db) {
       new_name TEXT NOT NULL, at TEXT NOT NULL, rows_json TEXT NOT NULL
     );
   `);
-  initialized.add(db);
+  // The caller may roll back the DDL. Only remember committed installations.
+  if (!db.inTransaction) initialized.add(db);
 }
 
 function identityFrom(value) {

@@ -178,6 +178,24 @@ function openReviewStateDb(rootDir, { busyTimeoutMs = DEFAULT_BUSY_TIMEOUT_MS } 
 }
 
 function ensureReviewStateSchema(db) {
+  // Commit fresh schema DDL together to avoid per-statement journal cycles.
+  const hasSchema = () => db.prepare('SELECT 1 FROM main.sqlite_schema LIMIT 1').get() !== undefined;
+  if (!db.inTransaction && !hasSchema()) {
+    const bootstrap = db.transaction(() => {
+      // A racing connection may have finished bootstrap or committed only
+      // part of the schema. Full installation sets user_version last.
+      if (db.pragma('main.user_version', { simple: true }) < REVIEW_STATE_SCHEMA_VERSION) {
+        installReviewStateSchema(db);
+      }
+    });
+    bootstrap.immediate();
+    ensureRepositoryIdentitySchema(db);
+    return;
+  }
+  installReviewStateSchema(db);
+}
+
+function installReviewStateSchema(db) {
   ensureExplicitReviewIntentSchema(db);
 
   ensureRepositoryIdentitySchema(db);

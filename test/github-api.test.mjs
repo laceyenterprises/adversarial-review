@@ -2105,6 +2105,11 @@ export async function load(url, context, nextLoad) {
             },
             prepare(sql) {
               const normalized = String(sql || '').replace(/\\s+/g, ' ').trim();
+              if (normalized.startsWith('SELECT count(*) AS n FROM main.sqlite_schema')) {
+                // This lifecycle double has no physical identity tables. COUNT
+                // still returns a row, allowing the real schema setup to run.
+                return { get: () => ({ n: 0 }) };
+              }
               if (normalized === 'SELECT count(*) AS n FROM repository_rename_audit') {
                 return { get: () => ({ n: 0 }) };
               }

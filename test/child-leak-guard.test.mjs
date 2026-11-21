@@ -1,6 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
+import { EventEmitter } from 'node:events';
+import { waitForClose } from './helpers/child-leak-guard.mjs';
 
 const guard = new URL('./helpers/child-leak-guard.mjs', import.meta.url).pathname;
 const fixture = new URL('./fixtures/leaked-child.test.mjs', import.meta.url).pathname;
@@ -23,6 +25,20 @@ test('suite guard reports and kills a deliberately leaked process group', () => 
   const pid = Number(output.match(/LEAKED_FIXTURE_PID=(\d+)/)?.[1]);
   assert.ok(Number.isInteger(pid), output);
   assert.throws(() => process.kill(pid, 0), { code: 'ESRCH' });
+  assert.match(output, /KILL_WATCHDOGS_SCHEDULED=1 UNCANCELLED_KILL_WATCHDOGS=0 EXPIRED_KILL_WATCHDOGS=0/);
+});
+
+test('close helper skips the watchdog for already exited or closed children', async (t) => {
+  t.mock.method(globalThis, 'setTimeout', () => { throw new Error('unexpected watchdog'); });
+  for (const state of [
+    { exitCode: 0, signalCode: null },
+    { exitCode: null, signalCode: 'SIGTERM' },
+    { exitCode: null, signalCode: null, closed: true },
+  ]) {
+    const child = Object.assign(new EventEmitter(), state);
+    await waitForClose(child, 2_000);
+    assert.equal(child.listenerCount('close'), 0);
+  }
 });
 
 test('suite guard forgets a closed detached group before a pgid can be recycled', () => {

@@ -67,6 +67,7 @@ function reviewerFailureClassFromStoredRow(reviewRow) {
   const message = rawMessage.toLowerCase();
   if (message.includes('review cli resolution unavailable for ')) return 'cli-resolution-transient';
   if (message.includes('[reviewer-configuration-error]')) return 'reviewer-configuration-error';
+  if (message.startsWith('[reviewer-command-failed]')) return 'reviewer-command-failed';
   const tagMatch = message.match(
     /^\[(reviewer-prompt-too-large|reviewer-chunk-budget-exceeded|reviewer-configuration-error|reviewer-model-unresolved|reviewer-model-unavailable|reviewer-timeout|launchctl-bootstrap|cascade|quota-exhausted|provider-overloaded|reviewer-empty-output|reviewer-output|cli-resolution-transient|oauth-broken|token-refresh-pending|attestation-sign-failed|hcp-unavailable|infra-runtime-missing-library|agy-identity-unavailable|dispatch-failed|adapter_spawn_timeout|daemon-bounce|github-budget-deferred)\]/
   );
@@ -218,7 +219,8 @@ function unknownReviewerCommandFailureClass(reviewRow) {
   if (tagMatch && tagMatch[1] !== 'unknown') return null;
   if (classifyGitHubReviewCreateFailure(rawMessage)) return null;
   if (reviewerFailureClassFromStoredRow(reviewRow)) return null;
-  if (classifyReviewerFailure(rawMessage, null) !== 'unknown') return null;
+  const legacyClass = classifyReviewerFailure(rawMessage, null);
+  if (legacyClass !== 'unknown' && legacyClass !== 'reviewer-command-failed') return null;
   if (
     /\bcommand failed with code \d+\b/.test(message) ||
     /\bcommand exited with code \d+\b/.test(message) ||

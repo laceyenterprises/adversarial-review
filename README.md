@@ -93,7 +93,7 @@ isolation or credential-outage accounting, PR-level backoff, and claim release
 to `pending` below the five-consecutive-transient threshold before bounded
 `pending-upstream` recovery. Invalid JSON diagnostics contain only byte/line
 counts and a protocol-line presence flag. Each resolution
-logs path, version and digest before execution; Codex auth, direct-tools catalog
+logs path, version and digest before execution. Codex auth, model catalog
 and exec share the returned immutable path. See the
 [resolver rollout contract](docs/RUNBOOK-reviewer-workspace.md#managed-cli-resolution-hup-05n).
 HUP-09 owns administrator deployment, service refresh/restart and the live
@@ -1870,10 +1870,12 @@ isolated reviewed config homes with existing auth/model/security contracts.
 Discovery retains the base OAuth path, local sessions persist independently of
 credential materialization, and HQ log classification uses worker class. Missing
 worker records defer refunds; reviewer preparation errors clean service homes.
-CODEXHOMEISO-02 seeds each native spawn with a direct-tools catalog using that
-spawn's binary and staged auth. It removes code-mode routing and search-tool
-advertisements, pins the private catalog in config (and reviewer CLI overrides),
-and logs the path. Catalog failures warn and proceed with the server catalog.
+Native spawns fetch a catalog using their own binary and staged auth. Local
+remediation uses the CODEXHOMEISO-02 direct-tools catalog. Reviewer execution
+and discovery preserve the selected binary's catalog metadata and pin it in
+config, with a CLI override for reviewer exec. Catalog failures warn and
+proceed with the server catalog. Native reviewer exec failures retain bounded,
+redacted terminal diagnostics for the existing failure classifier and recovery.
 LAC-2131 requires the selected CLI to recognize ChatGPT auth in the isolated
 file store before catalog retrieval or execution; auth failure uses the existing
 OAuth preflight failure state. Broker refresh stays separate, staging ownership

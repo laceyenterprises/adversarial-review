@@ -83,6 +83,15 @@ test('measured order is longest first with deterministic ties and unknown files'
   assert.deepEqual(orderFiles([], {}), []);
 });
 
+test('controller and repair CLI suites are scheduled ahead of median-duration files', () => {
+  const durations = JSON.parse(readFileSync(new URL('./fixtures/suite-durations.json', import.meta.url), 'utf8'));
+  const controller = 'test/hamcontrollerscript-01.test.mjs';
+  const repair = 'test/repairdispatchread-01.test.mjs';
+  const unmeasured = 'test/a-new-fixture.test.mjs';
+  const order = orderFiles([unmeasured, controller, repair], durations);
+  assert.deepEqual(order, [controller, repair, unmeasured]);
+});
+
 for (const failure of [false, true]) test(`exclusive phase completes before parallel work and aggregates TAP (failure=${failure})`, t => {
   const root = mkdtempSync(path.join(tmpdir(), 'serial-phase-'));
   t.after(() => rmSync(root, { recursive: true, force: true }));

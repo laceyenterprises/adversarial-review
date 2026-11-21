@@ -33,7 +33,6 @@ test.beforeEach(t => t.mock.method(os, 'loadavg', () => [0, 0, 0]));
 const ALL_NEW_FLAT_KEYS = Object.freeze([
   'remediation.max_concurrent_jobs',
   'remediation.max_concurrent_jobs_ceiling',
-  'remediation.reconciliation_max_active_age_ms_before_abandon',
   'reviewer.timeout_ms',
   'reviewer.no_progress_timeout_ms',
   'watcher.max_drain_wait_ms',
@@ -158,13 +157,13 @@ test('promoted resolvers fail loud on canonical-vs-legacy env conflicts', () => 
       () => loadConfig({
         topPath: isolatedTop.configPath,
         env: {
-          AGENT_OS_REMEDIATION_RECONCILIATION_MAX_ACTIVE_AGE_MS_BEFORE_ABANDON: '21600000',
-          ADVERSARIAL_REMEDIATION_RECONCILIATION_MAX_ACTIVE_MS: '21600001',
+          AGENT_OS_REMEDIATION_MAX_CONCURRENT_JOBS: '2',
+          ADVERSARIAL_REMEDIATION_MAX_CONCURRENT_JOBS: '3',
         },
       }),
       [
-        'AGENT_OS_REMEDIATION_RECONCILIATION_MAX_ACTIVE_AGE_MS_BEFORE_ABANDON',
-        'ADVERSARIAL_REMEDIATION_RECONCILIATION_MAX_ACTIVE_MS',
+        'AGENT_OS_REMEDIATION_MAX_CONCURRENT_JOBS',
+        'ADVERSARIAL_REMEDIATION_MAX_CONCURRENT_JOBS',
       ]
     );
   } finally {
@@ -225,7 +224,6 @@ test('schema defaults resolve to documented values when nothing is overridden', 
   const expected = {
     'remediation.max_concurrent_jobs': 1,
     'remediation.max_concurrent_jobs_ceiling': 8,
-    'remediation.reconciliation_max_active_age_ms_before_abandon': 21_600_000,
     'reviewer.timeout_ms': 1_200_000,
     'reviewer.no_progress_timeout_ms': 900_000,
     'watcher.max_drain_wait_ms': 3_600_000,

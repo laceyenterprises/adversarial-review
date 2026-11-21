@@ -29,9 +29,9 @@ test('identity keys load strictly and environment override uses the canonical na
   assert.equal(cfg.get('network.identity.custodian_host'), 'ca.test');
   assert.equal(cfg.get('network.identity.custodian_port'), 2200);
 }));
-test('identity ignores unread sibling fields', () => fixture((topPath) => {
+test('identity rejects unknown fields like the Python loader', () => fixture((topPath) => {
   writeFileSync(topPath, 'version: 1\nnetwork:\n  identity:\n    typo: true\n');
-  assert.deepEqual(loadConfig({ topPath, env: {} }).get('network.identity'), defaults);
+  assert.throws(() => loadConfig({ topPath, env: {} }), /network\.identity\.typo: unknown key/);
 }));
 for (const body of ['enabled: nope', 'custodian_port: 0', 'custodian_port: 65536']) {
   test(`identity rejects ${body}`, () => fixture((topPath) => {

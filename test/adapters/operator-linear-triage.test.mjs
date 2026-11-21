@@ -18,7 +18,8 @@ import {
 import { setRepoTicketPipelinePause } from '../../src/ticket-pipeline-pause.mjs';
 
 const ALWAYS_ON_ROUTE_OPTIONS = {
-  env: {},
+  // CFG's default issue prefix is the OSS placeholder; pin this host's.
+  env: { AGENT_OS_LINEAR_ISSUE_PREFIX: 'LAC' },
   topPath: '/dev/null',
   geminiReviewerMode: 'always-on',
 };

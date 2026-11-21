@@ -39,7 +39,8 @@ const fixture = JSON.parse(
   )
 );
 const REPO_ROOT = path.resolve(fileURLToPath(new URL('../..', import.meta.url)));
-const HERMETIC_CONFIG_ENV = { AGENT_OS_CONFIG_PATH: '/dev/null' };
+// The CFG default issue prefix is the OSS placeholder; pin this host's prefix.
+const HERMETIC_CONFIG_ENV = { AGENT_OS_CONFIG_PATH: '/dev/null', AGENT_OS_LINEAR_ISSUE_PREFIX: 'LAC' };
 const NO_AUTO_ADAPTER_ROOT = '/tmp/subject-github-pr-no-auto-adapter-root';
 
 function makeOctokitSnapshot() {

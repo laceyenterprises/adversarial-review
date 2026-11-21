@@ -5,6 +5,9 @@ import { exhaustedCodexPlanRow } from './helpers/codex-plan-meter-fixture.mjs';
 // Automatic account routing is covered in codex-worker-account-routing.test.mjs.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { poolConflictFixture } from './helpers/pool-conflict-fixture.mjs';
 import { selectWorkerTokenAccount } from '../src/worker-token-pool.mjs';
 import { pickRemediationWorkerClass } from '../src/remediation-worker-routing.mjs';
@@ -208,9 +211,11 @@ test('remediationWorkerClassFallback reads the declared roles.remediator_fallbac
     remediationWorkerClassFallback({ AGENT_OS_ROLES_REMEDIATOR_FALLBACK: 'gemini' }, HERMETIC_CONFIG),
     ['gemini'],
   );
+  // ONS-07: an empty env value is absent, as in the Python loader; declare
+  // `roles.remediator_fallback: []` in config to disable the fallback.
   assert.deepEqual(
     remediationWorkerClassFallback({ ADVERSARIAL_REVIEW_REMEDIATOR_WORKER_CLASS_FALLBACK: '' }, HERMETIC_CONFIG),
-    [],
+    ['remediator-codex-corp', 'remediator-claude', 'codex'],
   );
 });
 
@@ -520,14 +525,17 @@ test('resolveClaimedRemediatorRouting reads the declared list and, unwired, uses
   assert.match(warnings[0], /routed=codex -> remediator-claude .*provider-reset-past-hold-window, resets 2026-10-04T12:52:00.000Z/);
 
   // `[]` declared: no class can take it, so the capped primary holds.
+  const dir = mkdtempSync(join(tmpdir(), 'remfallback-off-'));
+  writeFileSync(join(dir, 'config.yaml'), 'version: 1\nroles:\n  remediator_fallback: []\n');
   const disabled = await resolveClaimedRemediatorRouting({
     job: jobHeldOnCodex({ providerResetAt: '2026-10-04T12:52:00.000Z' }),
     primary: 'codex',
-    env: { AGENT_OS_ROLES_REMEDIATOR_FALLBACK: '' },
+    env: {},
     nowMs: NOW,
-    topPath: '/dev/null',
+    topPath: join(dir, 'config.yaml'),
     log: { warn() {} },
   });
+  rmSync(dir, { recursive: true, force: true });
   assert.equal(disabled.workerClass, 'codex');
   assert.equal(disabled.hold, true);
   assert.equal(disabled.reason, 'no-fallback-configured');

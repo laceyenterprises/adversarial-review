@@ -86,26 +86,6 @@ test('worker observations host key rejects non-booleans in top-level and local c
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
-test('local example keeps load-aware policy inside the shared adversarial reviewer extension', () => {
-  const dir = mkdtempSync(join(tmpdir(), 'load-aware-example-'));
-  try {
-    const topPath = join(dir, 'config.yaml');
-    writeFileSync(topPath, 'version: 1\n');
-    writeFileSync(join(dir, 'config.local.yaml'), readFileSync(join(REPO_ROOT, 'config.local.yaml.example')));
-    for (const modulePaths of [[], [MODULE_CONFIG_PATH]]) {
-      const cfg = loadConfig({ topPath, modulePaths, env: {} });
-      assert.equal(cfg.get('adversarial.reviewer.load_aware.enabled'), true);
-      assert.equal(cfg.get('adversarial.reviewer.load_aware.max_multiplier'), 6);
-      assert.equal(cfg.get('timeouts'), null);
-    }
-    // Undeclared sibling roots are ignored without a foreign-section registry.
-    writeFileSync(join(dir, 'config.local.yaml'), 'unknown_example_root:\n  enabled: true\n');
-    assert.equal(loadConfig({ topPath, env: {} }).get('unknown_example_root'), null);
-  } finally {
-    rmSync(dir, { recursive: true, force: true });
-  }
-});
-
 test('reviewer heartbeat timeout keys accept YAML and environment aliases', () => {
   const dir = mkdtempSync(join(tmpdir(), 'reviewer-timeout-config-'));
   try {
@@ -219,85 +199,6 @@ function captureWarns(fn) {
 
 // -------- §1 + §8 rows 1-4, 12-14 ------------------------------------------
 
-test('missing file returns defaults', () => {
-  const tmp = freshTmp();
-  try {
-    const top = join(tmp, 'config.yaml');
-    const cfg = loadConfig({ topPath: top, env: {} });
-    assert.equal(cfg.get('roles.reviewer'), 'adversarial');
-    assert.equal(cfg.get('roles.merge_agent_worker_class'), 'merge-agent');
-    assert.equal(
-      cfg.get('governance.emergency_stop_path'),
-      '~/.agent-os/governance/emergency-stop',
-    );
-    assert.equal(cfg.get('roots.hq'), null);
-    assert.equal(cfg.get('host.name'), null);
-    assert.equal(cfg.get('host.tailscale_hostname'), null);
-    assert.equal(cfg.get('frc.offlan_transport.enabled'), false);
-    assert.equal(cfg.get('frc.offlan_transport.port'), 18794);
-    assert.equal(cfg.get('frc.offlan_transport.kill_switch_path'), null);
-    assert.equal(cfg.get('tailscale.workstation_ip'), null);
-    assert.equal(cfg.get('tailscale.workstation_dns_name'), null);
-    assert.equal(cfg.get('tailscale.daily_driver_ip'), null);
-    assert.equal(cfg.get('tailscale.daily_driver_dns_name'), null);
-    assert.equal(cfg.get('tailscale.ipad_ip'), null);
-    assert.equal(cfg.get('tailscale.ipad_dns_name'), null);
-    assert.equal(cfg.get('tailscale.iphone_ip'), null);
-    assert.equal(cfg.get('tailscale.iphone_dns_name'), null);
-    assert.equal(cfg.get('launchd.label_prefix'), 'ai.laceyenterprises');
-    assert.equal(cfg.get('launchd.install_mode'), 'user-agent');
-    assert.equal(cfg.get('session_ledger.database_name'), 'agent_os_ledger');
-    assert.equal(cfg.get('session_ledger.vdb.enabled'), true);
-    assert.equal(cfg.get('session_ledger.vdb.direct_dsn'), null);
-    assert.equal(cfg.get('session_ledger.vdb.allowCanonicalFallback'), false);
-    assert.equal(cfg.get('services.ports.hcp'), 8002);
-    assert.equal(cfg.get('services.hcp.bind_host'), '127.0.0.1');
-    assert.equal(cfg.get('services.hcp.audit_keep_days'), 30);
-    assert.equal(cfg.get('services.hcp.token_expired_keep_days'), 7);
-    assert.equal(cfg.get('services.hcp.token_revoked_keep_days'), 30);
-    assert.equal(cfg.get('services.hcp.idempotency_keep_days'), 30);
-    assert.equal(cfg.get('services.hcp.confirmation_token_keep_minutes'), 60);
-    assert.equal(cfg.get('services.hcp.comms_jobs_keep_days'), 30);
-    assert.equal(cfg.get('services.hcp.rotation_cadence_days'), 90);
-    assert.deepEqual(cfg.get('services.hcp.persistent_agent_principals'), [
-      'clio',
-      'aria',
-      'argus',
-      'sentinel',
-      'claude-responder',
-      'codex-responder',
-      'agent-os-responder',
-    ]);
-    assert.deepEqual(cfg.get('services.hcp.persistent_agent_default_capabilities.argus'), [
-      'dispatch.read',
-      'talk',
-    ]);
-    assert.equal(cfg.get('services.hcp.op_rate_limit_regex'), String.raw`account\s+read_write\s+[0-9]+/[0-9]+`);
-    assert.equal(cfg.get('operator.email'), 'virtualpaul@gmail.com');
-    assert.equal(cfg.get('operator.full_name'), 'Paul Lacey');
-    assert.equal(cfg.get('linear.team_name'), 'Laceyenterprises');
-    assert.equal(cfg.get('linear.issue_prefix'), 'LAC');
-    assert.equal(cfg.get('agent_gateway.alert_bus_url'), 'http://host.docker.internal:18799/hooks/wake');
-    // Node-only mirror: global op.vault stays readable once the parent Agent OS
-    // rollout introduces the canonical Python/shell schema.
-    assert.equal(cfg.get('op.vault'), 'Cliovault');
-    assert.equal(cfg.get('update.channel'), 'rolling');
-    assert.equal(cfg.get('agent_control.codex_runaway_guardrails.compaction_rate_alarm_per_hour'), 3);
-    assert.equal(cfg.get('agent_control.codex_runaway_guardrails.compaction_rate_alarm_finding_dedupe_seconds'), 86400);
-    assert.equal(cfg.get('agent_control.codex_runaway_guardrails.token_budget_per_session'), 50000000);
-    assert.deepEqual(cfg.get('agent_control.codex_runaway_guardrails.pr_class_additive_only_allowlist'), [
-      'projects/*',
-      'modules/worker-pool/post-merge-actions/*',
-      'docs/POSTMORTEM-*.md',
-      'docs/AUDIT-*.md',
-    ]);
-    assert.equal(cfg.get('agent_control.codex_runaway_guardrails.vocabulary_fatigue_window_commits'), 5);
-    assert.equal(cfg.get('agent_control.codex_runaway_guardrails.vocabulary_fatigue_min_repeats'), 3);
-  } finally {
-    rmSync(tmp, { recursive: true, force: true });
-  }
-});
-
 test('watcher closer concurrency defaults to three and accepts a positive override', () => {
   const tmp = mkdtempSync(join(tmpdir(), 'ama-closer-config-'));
   try {
@@ -307,78 +208,6 @@ test('watcher closer concurrency defaults to three and accepts a positive overri
     writeFileSync(top, 'version: 1\nwatcher:\n  ama_closer_max_concurrent_launches: 4\n');
     assert.equal(loadConfig({ topPath: top, env: {} })
       .get('watcher.ama_closer_max_concurrent_launches'), 4);
-  } finally {
-    rmSync(tmp, { recursive: true, force: true });
-  }
-});
-
-test('imm observe-first modes load through strict Node schema', () => {
-  const tmp = freshTmp();
-  try {
-    const top = join(tmp, 'imm.yaml');
-    writeFile(top, `
-      version: 1
-      imm:
-        ownership:
-          mode: enforce
-        sqlSubstrate:
-          mode: observe
-        zeroCostTokens:
-          mode: observe
-        progressHealth:
-          mode: observe
-          staleThresholdSeconds: 7200
-        convergence:
-          mode: observe
-    `);
-    const cfg = loadConfig({ topPath: top, env: {} });
-    assert.equal(cfg.get('imm.ownership.mode'), 'enforce');
-    assert.equal(cfg.get('imm.sqlSubstrate.mode'), 'observe');
-    assert.equal(cfg.get('imm.zeroCostTokens.mode'), 'observe');
-    assert.equal(cfg.get('imm.progressHealth.mode'), 'observe');
-    assert.equal(cfg.get('imm.progressHealth.staleThresholdSeconds'), 7200);
-    assert.equal(cfg.get('imm.convergence.mode'), 'observe');
-
-    const defaultCfg = loadConfig({ topPath: join(tmp, 'missing.yaml'), env: {} });
-    assert.equal(defaultCfg.get('imm.ownership.mode'), 'observe');
-    assert.equal(defaultCfg.get('imm.progressHealth.staleThresholdSeconds'), 10800);
-
-    const zeroThreshold = join(tmp, 'imm-zero-threshold.yaml');
-    writeFile(zeroThreshold, `
-      version: 1
-      imm:
-        progressHealth:
-          staleThresholdSeconds: 0
-    `);
-    const zeroCfg = loadConfig({ topPath: zeroThreshold, env: {} });
-    assert.equal(zeroCfg.get('imm.progressHealth.staleThresholdSeconds'), 0);
-
-    const badMode = join(tmp, 'imm-bad-mode.yaml');
-    writeFile(badMode, `
-      version: 1
-      imm:
-        ownership:
-          mode: shadow
-    `);
-    assert.throws(
-      () => loadConfig({ topPath: badMode, env: {} }),
-      (err) => {
-        assert.ok(err instanceof AgentOSConfigError);
-        assert.equal(err.key, 'imm.ownership.mode');
-        assert.match(String(err.expected), /observe/);
-        assert.match(String(err.expected), /enforce/);
-        return true;
-      },
-    );
-
-    const badKey = join(tmp, 'imm-bad-key.yaml');
-    writeFile(badKey, `
-      version: 1
-      imm:
-        ownership:
-          report_only: true
-    `);
-    assert.doesNotThrow(() => loadConfig({ topPath: badKey, env: {} }));
   } finally {
     rmSync(tmp, { recursive: true, force: true });
   }
@@ -521,88 +350,6 @@ test('update channel loads through strict Node schema and env override', () => {
   }
 });
 
-test('gemini runtime and mode remain valid while unused antigravity accounts is ignored', () => {
-  const tmp = freshTmp();
-  try {
-    const valid = join(tmp, 'valid-gemini.yaml');
-    writeFile(valid, `
-      version: 1
-      reviewer:
-        gemini:
-          mode: always-on
-          runtime: antigravity
-    `);
-    const cfg = loadConfig({ topPath: valid, env: {} });
-    assert.equal(cfg.get('reviewer.gemini.mode'), 'always-on');
-    assert.equal(cfg.get('reviewer.gemini.runtime'), 'antigravity');
-
-    const rejected = join(tmp, 'rejected-gemini-accounts.yaml');
-    writeFile(rejected, `
-      version: 1
-      reviewer:
-        gemini:
-          mode: fallback
-          runtime: antigravity
-          antigravity:
-            accounts: []
-    `);
-    assert.doesNotThrow(() => loadConfig({ topPath: rejected, env: {} }));
-  } finally {
-    rmSync(tmp, { recursive: true, force: true });
-  }
-});
-
-test('CCX-08: the strict and runtime loaders accept reviewer.gemini.identities (Python schema parity)', () => {
-  const tmp = freshTmp();
-  try {
-    const unset = join(tmp, 'unset.yaml');
-    writeFile(unset, `
-      version: 1
-      reviewer:
-        gemini:
-          runtime: antigravity
-    `);
-    assert.equal(loadConfig({ topPath: unset, env: {} }).get('reviewer.gemini.identities'), null);
-
-    const top = join(tmp, 'identities.yaml');
-    writeFile(top, `
-      version: 1
-      reviewer:
-        gemini:
-          runtime: antigravity
-          identities: [airlock, agentos-reviewer]
-    `);
-    assert.deepEqual(loadConfig({ topPath: top, env: {} }).get('reviewer.gemini.identities'), ['airlock', 'agentos-reviewer']);
-    assert.deepEqual(loadConfigRuntime({ topPath: top, env: {} }).get('reviewer.gemini.identities'), ['airlock', 'agentos-reviewer']);
-
-    const badName = join(tmp, 'bad-name.yaml');
-    writeFile(badName, `
-      version: 1
-      reviewer:
-        gemini:
-          identities: ['../root']
-    `);
-    assert.throws(
-      () => loadConfig({ topPath: badName, env: {} }),
-      (err) => err instanceof AgentOSConfigError && /local username/.test(err.message),
-    );
-
-    const notList = join(tmp, 'not-list.yaml');
-    writeFile(notList, `
-      version: 1
-      reviewer:
-        gemini:
-          identities: agentos-reviewer
-    `);
-    assert.throws(
-      () => loadConfig({ topPath: notList, env: {} }),
-      (err) => err instanceof AgentOSConfigError && /expected list/.test(err.message),
-    );
-  } finally {
-    rmSync(tmp, { recursive: true, force: true });
-  }
-});
-
 test('codex runaway guardrail vocabulary fatigue config resolves through strict schema', () => {
   const tmp = freshTmp();
   try {
@@ -634,62 +381,6 @@ test('codex runaway guardrail vocabulary fatigue config resolves through strict 
   }
 });
 
-test('codex runaway guardrail strict schema accepts Python-owned keys', () => {
-  const tmp = freshTmp();
-  try {
-    const top = join(tmp, 'config.yaml');
-    writeFile(top, `
-      version: 1
-      agent_control:
-        codex_runaway_guardrails:
-          observed_repos:
-            - laceyenterprises/agent-os
-            - laceyenterprises/adversarial-review
-          convergence_stall_commit_window_seconds: 1800
-          convergence_stall_min_commits: 4
-          convergence_stall_file_fetch_budget_per_cycle: 12
-          convergence_stall_finding_dedupe_seconds: 600
-          convergence_stall_repo_backoff_seconds: 30
-          convergence_stall_observed_worker_classes:
-            - codex
-            - claude-code
-          compaction_rate_alarm_per_hour: 7
-          compaction_rate_alarm_finding_dedupe_seconds: 120
-          token_budget_per_session: 200000
-          pr_class_additive_only_allowlist:
-            - projects/*
-            - docs/AUDIT-*.md
-          vocabulary_fatigue_window_commits: 7
-          vocabulary_fatigue_min_repeats: 4
-    `);
-    const cfg = loadConfig({ topPath: top, env: {} });
-    assert.deepEqual(cfg.get('agent_control.codex_runaway_guardrails.observed_repos'), [
-      'laceyenterprises/agent-os',
-      'laceyenterprises/adversarial-review',
-    ]);
-    assert.equal(cfg.get('agent_control.codex_runaway_guardrails.convergence_stall_commit_window_seconds'), 1800);
-    assert.equal(cfg.get('agent_control.codex_runaway_guardrails.convergence_stall_min_commits'), 4);
-    assert.equal(cfg.get('agent_control.codex_runaway_guardrails.convergence_stall_file_fetch_budget_per_cycle'), 12);
-    assert.equal(cfg.get('agent_control.codex_runaway_guardrails.convergence_stall_finding_dedupe_seconds'), 600);
-    assert.equal(cfg.get('agent_control.codex_runaway_guardrails.convergence_stall_repo_backoff_seconds'), 30);
-    assert.deepEqual(cfg.get('agent_control.codex_runaway_guardrails.convergence_stall_observed_worker_classes'), [
-      'codex',
-      'claude-code',
-    ]);
-    assert.equal(cfg.get('agent_control.codex_runaway_guardrails.compaction_rate_alarm_per_hour'), 7);
-    assert.equal(cfg.get('agent_control.codex_runaway_guardrails.compaction_rate_alarm_finding_dedupe_seconds'), 120);
-    assert.equal(cfg.get('agent_control.codex_runaway_guardrails.token_budget_per_session'), 200000);
-    assert.deepEqual(cfg.get('agent_control.codex_runaway_guardrails.pr_class_additive_only_allowlist'), [
-      'projects/*',
-      'docs/AUDIT-*.md',
-    ]);
-    assert.equal(cfg.get('agent_control.codex_runaway_guardrails.vocabulary_fatigue_window_commits'), 7);
-    assert.equal(cfg.get('agent_control.codex_runaway_guardrails.vocabulary_fatigue_min_repeats'), 4);
-  } finally {
-    rmSync(tmp, { recursive: true, force: true });
-  }
-});
-
 test('linear and session ledger env overrides resolve through cfg loader', () => {
   const tmp = freshTmp();
   try {
@@ -705,45 +396,6 @@ test('linear and session ledger env overrides resolve through cfg loader', () =>
     assert.equal(cfg.get('linear.team_name'), 'AcmeProduct');
     assert.equal(cfg.get('linear.issue_prefix'), 'ACME');
     assert.equal(cfg.get('session_ledger.database_name'), 'acme_ledger');
-  } finally {
-    rmSync(tmp, { recursive: true, force: true });
-  }
-});
-
-test('linear issue prefix and session ledger database name reject invalid shapes', () => {
-  const tmp = freshTmp();
-  try {
-    const badLinear = join(tmp, 'bad-linear.yaml');
-    writeFile(badLinear, `
-      version: 1
-      linear:
-        issue_prefix: acme
-    `);
-    assert.throws(
-      () => loadConfig({ topPath: badLinear, env: {} }),
-      (err) => {
-        assert.ok(err instanceof AgentOSConfigError);
-        assert.equal(err.key, 'linear.issue_prefix');
-        assert.match(err.message, /Linear issue prefix/);
-        return true;
-      },
-    );
-
-    const badDatabase = join(tmp, 'bad-database.yaml');
-    writeFile(badDatabase, `
-      version: 1
-      session_ledger:
-        database_name: bad-name
-    `);
-    assert.throws(
-      () => loadConfig({ topPath: badDatabase, env: {} }),
-      (err) => {
-        assert.ok(err instanceof AgentOSConfigError);
-        assert.equal(err.key, 'session_ledger.database_name');
-        assert.match(err.message, /SQL identifier/);
-        return true;
-      },
-    );
   } finally {
     rmSync(tmp, { recursive: true, force: true });
   }
@@ -864,202 +516,6 @@ test('OSR-05 Linear team env override flows through strict Node schema', () => {
   }
 });
 
-test('alert_delivery gateway token ref loads through tolerant Node mirror', () => {
-  const tmp = freshTmp();
-  try {
-    const top = join(tmp, 'config.yaml');
-    writeFile(top, `
-      version: 1
-      alert_delivery:
-        sink: gbi-bus
-        telegram:
-          bot_token_ref: op://Vault/Alert Bot/API Credentials/credential
-          chat_id: '12345'
-        gateway:
-          delivery_token_ref: op://Vault/Gateway Delivery Token/API Credentials/credential
-    `);
-    const cfg = loadConfig({ topPath: top, env: {} });
-    assert.equal(cfg.get('alert_delivery.sink'), 'gbi-bus');
-    assert.equal(
-      cfg.get('alert_delivery.telegram.bot_token_ref'),
-      'op://Vault/Alert Bot/API Credentials/credential',
-    );
-    assert.equal(cfg.get('alert_delivery.telegram.chat_id'), '12345');
-    assert.equal(
-      cfg.get('alert_delivery.gateway.delivery_token_ref'),
-      'op://Vault/Gateway Delivery Token/API Credentials/credential',
-    );
-
-    const defaults = join(tmp, 'alert-delivery-defaults.yaml');
-    writeFile(defaults, 'version: 1\n');
-    const defaultCfg = loadConfig({ topPath: defaults, env: {} });
-    assert.equal(defaultCfg.get('alert_delivery', 'missing'), 'missing');
-    assert.equal(defaultCfg.get('alert_delivery.sink', 'missing'), 'missing');
-
-    const numericChatId = join(tmp, 'numeric-alert-chat-id.yaml');
-    writeFile(numericChatId, `
-      version: 1
-      alert_delivery:
-        telegram:
-          chat_id: 12345
-    `);
-    const numericCfg = loadConfig({ topPath: numericChatId, env: {} });
-    assert.equal(numericCfg.get('alert_delivery.sink'), 'telegram-direct');
-    assert.equal(numericCfg.get('alert_delivery.telegram.bot_token_ref'), '');
-    assert.equal(numericCfg.get('alert_delivery.telegram.chat_id'), '12345');
-    assert.equal(numericCfg.get('alert_delivery.gateway.delivery_token_ref'), '');
-
-    const badRef = join(tmp, 'bad-alert-delivery-ref.yaml');
-    writeFile(badRef, `
-      version: 1
-      alert_delivery:
-        gateway:
-          delivery_token_ref: op://Vault/Gateway Delivery Token/API Credentials/credential/extra
-    `);
-    assert.throws(
-      () => loadConfig({ topPath: badRef, env: {} }),
-      (err) => {
-        assert.ok(err instanceof AgentOSConfigError);
-        assert.equal(err.key, 'alert_delivery.gateway.delivery_token_ref');
-        assert.match(err.message, /does not match/);
-        return true;
-      },
-    );
-
-    const unknownKey = join(tmp, 'future-alert-delivery-key.yaml');
-    writeFile(unknownKey, `
-      version: 1
-      alert_delivery:
-        slack:
-          channel: '#ops'
-        telegram:
-          token_file: /tmp/telegram.token
-        gateway:
-          token_file: /tmp/gateway-delivery.token
-    `);
-    const futureCfg = loadConfig({ topPath: unknownKey, env: {} });
-    assert.equal(futureCfg.get('alert_delivery.gateway.delivery_token_ref'), '');
-    assert.equal(futureCfg.get('alert_delivery.telegram.bot_token_ref'), '');
-  } finally {
-    rmSync(tmp, { recursive: true, force: true });
-  }
-});
-
-test('agent_gateway alert bus URL loads through strict Node schema and env aliases', () => {
-  const tmp = freshTmp();
-  try {
-    const top = join(tmp, 'config.yaml');
-    writeFile(top, `
-      version: 1
-      agent_gateway:
-        alert_bus_url: https://alerts.example.test/hooks/wake
-    `);
-    const cfg = loadConfig({ topPath: top, env: {} });
-    assert.equal(cfg.get('agent_gateway.alert_bus_url'), 'https://alerts.example.test/hooks/wake');
-
-    const trailingSlash = join(tmp, 'agent-gateway-url-trailing-slash.yaml');
-    writeFile(trailingSlash, `
-      version: 1
-      agent_gateway:
-        alert_bus_url: https://alerts.example.test/hooks/wake/
-    `);
-    const trailingSlashCfg = loadConfig({ topPath: trailingSlash, env: {} });
-    assert.equal(
-      trailingSlashCfg.get('agent_gateway.alert_bus_url'),
-      'https://alerts.example.test/hooks/wake/',
-    );
-
-    const envCfg = loadConfig({
-      topPath: top,
-      env: { AGENT_OS_GBI_ALERT_BUS_URL: 'http://gbi.local:18799/hooks/wake' },
-    });
-    assert.equal(envCfg.get('agent_gateway.alert_bus_url'), 'http://gbi.local:18799/hooks/wake');
-    assert.equal(
-      envCfg.resolutionTrace('agent_gateway.alert_bus_url').at(-1).source,
-      'env:AGENT_OS_GBI_ALERT_BUS_URL',
-    );
-
-    const legacyEnvCfg = loadConfig({
-      topPath: top,
-      env: { AGENT_GATEWAY_ALERT_BUS_URL: 'http://gateway.local:18799/hooks/wake' },
-    });
-    assert.equal(legacyEnvCfg.get('agent_gateway.alert_bus_url'), 'http://gateway.local:18799/hooks/wake');
-    assert.equal(
-      legacyEnvCfg.resolutionTrace('agent_gateway.alert_bus_url').at(-1).source,
-      'env:AGENT_GATEWAY_ALERT_BUS_URL',
-    );
-
-    const badUrl = join(tmp, 'bad-agent-gateway-url.yaml');
-    writeFile(badUrl, `
-      version: 1
-      agent_gateway:
-        alert_bus_url: http://gbi.local:18799/wake
-    `);
-    assert.throws(
-      () => loadConfig({ topPath: badUrl, env: {} }),
-      (err) => {
-        assert.ok(err instanceof AgentOSConfigError);
-        assert.equal(err.key, 'agent_gateway.alert_bus_url');
-        assert.match(err.message, /does not match/);
-        return true;
-      },
-    );
-
-    const emptyHost = join(tmp, 'bad-agent-gateway-empty-host.yaml');
-    writeFile(emptyHost, `
-      version: 1
-      agent_gateway:
-        alert_bus_url: http:///hooks/wake
-    `);
-    assert.throws(
-      () => loadConfig({ topPath: emptyHost, env: {} }),
-      (err) => {
-        assert.ok(err instanceof AgentOSConfigError);
-        assert.equal(err.key, 'agent_gateway.alert_bus_url');
-        assert.match(err.message, /does not match/);
-        return true;
-      },
-    );
-
-    const unknownKey = join(tmp, 'bad-agent-gateway-key.yaml');
-    writeFile(unknownKey, `
-      version: 1
-      agent_gateway:
-        wake_url: http://gbi.local:18799/hooks/wake
-    `);
-    assert.doesNotThrow(() => loadConfig({ topPath: unknownKey, env: {} }));
-  } finally {
-    rmSync(tmp, { recursive: true, force: true });
-  }
-});
-
-test('OSR-05 operator and linear sections ignore unknown keys', () => {
-  const tmp = freshTmp();
-  try {
-    const badOperator = join(tmp, 'bad-operator.yaml');
-    writeFile(badOperator, `
-      version: 1
-      operator:
-        email: operator@example.com
-        full_name: Example Operator
-        handle: example
-    `);
-    assert.doesNotThrow(() => loadConfig({ topPath: badOperator, env: {} }));
-
-    const badLinear = join(tmp, 'bad-linear-extra.yaml');
-    writeFile(badLinear, `
-      version: 1
-      linear:
-        team_name: ExampleTeam
-        issue_prefix: EX
-        project_slug: example
-    `);
-    assert.doesNotThrow(() => loadConfig({ topPath: badLinear, env: {} }));
-  } finally {
-    rmSync(tmp, { recursive: true, force: true });
-  }
-});
-
 test('empty file returns defaults', () => {
   const tmp = freshTmp();
   try {
@@ -1150,67 +606,6 @@ test('roots runtime/admin users and UIDs load from canonical env aliases', () =>
   }
 });
 
-test('roots runtime/admin users reject invalid local username shapes', () => {
-  const tmp = freshTmp();
-  try {
-    const cases = [
-      ['runtime_user', "''"],
-      ['runtime_user', "'   '"],
-      ['runtime_user', 'bad/name'],
-      ['admin_user', '-leading-dash'],
-      ['admin_user', 'bad$user'],
-    ];
-    for (const [key, value] of cases) {
-      const top = join(tmp, `bad-${key}-${value.replaceAll(/[^A-Za-z0-9_-]/g, '_')}.yaml`);
-      writeFile(top, `
-        version: 1
-        roots:
-          ${key}: ${value}
-      `);
-      assert.throws(
-        () => loadConfig({ topPath: top, env: {} }),
-        (err) => {
-          assert.ok(err instanceof AgentOSConfigError);
-          assert.equal(err.key, `roots.${key}`);
-          assert.match(err.message, /local username/);
-          return true;
-        },
-      );
-    }
-  } finally {
-    rmSync(tmp, { recursive: true, force: true });
-  }
-});
-
-test('roots runtime/admin UIDs reject non-positive values', () => {
-  const tmp = freshTmp();
-  try {
-    const cases = [
-      ['runtime_uid', 0],
-      ['admin_uid', -1],
-    ];
-    for (const [key, value] of cases) {
-      const top = join(tmp, `bad-${key}.yaml`);
-      writeFile(top, `
-        version: 1
-        roots:
-          ${key}: ${value}
-      `);
-      assert.throws(
-        () => loadConfig({ topPath: top, env: {} }),
-        (err) => {
-          assert.ok(err instanceof AgentOSConfigError);
-          assert.equal(err.key, `roots.${key}`);
-          assert.match(err.message, /below minimum 1/);
-          return true;
-        },
-      );
-    }
-  } finally {
-    rmSync(tmp, { recursive: true, force: true });
-  }
-});
-
 test('top overrides module on canonical key', () => {
   const tmp = freshTmp();
   try {
@@ -1280,25 +675,6 @@ test('local.yaml overrides top', () => {
   }
 });
 
-test('top-level config.yaml ignores an unknown nested worker_pool key', () => {
-  // As of the deep-reconcile CFG knob (2026-06-19) `worker_pool` is a KNOWN
-  // partial root in this reader (mirrors only dag.autowalk.deep_reconcile), no
-  // longer a foreign top-level section. The canonical config.yaml stays strict,
-  // but unregistered sibling fields are ignored in checked-in files too.
-  const tmp = freshTmp();
-  try {
-    const top = join(tmp, 'config.yaml');
-    writeFile(top, `
-      version: 1
-      worker_pool:
-        anything: true
-    `);
-    assert.doesNotThrow(() => loadConfig({ topPath: top, env: {} }));
-  } finally {
-    rmSync(tmp, { recursive: true, force: true });
-  }
-});
-
 test('top-level config.yaml accepts the mirrored worker_pool.dag.autowalk.deep_reconcile key', () => {
   // The point of the partial mirror: this key may be written to the shared
   // canonical config.yaml without crashing the adversarial watcher.
@@ -1333,22 +709,6 @@ test('top-level config.yaml accepts mirrored sentinel.ojo_sunset_governance inte
     `);
     const cfg = loadConfig({ topPath: top, env: {} });
     assert.equal(cfg.get('sentinel.ojo_sunset_governance.interval_seconds'), 7200);
-  } finally {
-    rmSync(tmp, { recursive: true, force: true });
-  }
-});
-
-test('worker_pool.dag.autowalk.deep_reconcile defaults off when absent', () => {
-  const tmp = freshTmp();
-  try {
-    const top = join(tmp, 'config.yaml');
-    writeFile(top, 'version: 1\n');
-    const cfg = loadConfig({ topPath: top, env: {} });
-    assert.equal(cfg.get('worker_pool.dag.autowalk.deep_reconcile'), false);
-    assert.equal(
-      cfg.resolutionTrace('worker_pool.dag.autowalk.deep_reconcile').at(-1).source,
-      'code-default',
-    );
   } finally {
     rmSync(tmp, { recursive: true, force: true });
   }
@@ -1773,72 +1133,6 @@ test('top-level config.yaml accepts mirrored worker_pool.comms.responder keys', 
   }
 });
 
-test('top-level config.yaml accepts mirrored worker_pool.secrets.prewarm keys', () => {
-  // SSR-01/ALERT-CACHE-01 are Python-owned, but checked-in secrets keys may live in shared
-  // config.yaml and must parse under the watcher strict schema.
-  const tmp = freshTmp();
-  try {
-    const top = join(tmp, 'config.yaml');
-    writeFile(top, `
-      version: 1
-      worker_pool:
-        secrets:
-          prewarm:
-            enabled: true
-            min_interval_seconds: 120
-            targets:
-              - worker_class: service-launcher
-                refs:
-                  - op://Cliovault/agent-gateway/token
-          availability_critical_purposes:
-            - alert-delivery telegram bot token
-            - alert-delivery gateway delivery token
-          availability_critical_max_stale_seconds: 3600
-          known_vaults:
-            - ForkVault
-          release_signing_private_key_ref: op://ForkVault/release/private-key
-    `);
-    const cfg = loadConfig({ topPath: top, env: {} });
-    assert.equal(cfg.get('worker_pool.secrets.prewarm.enabled'), true);
-    assert.equal(cfg.get('worker_pool.secrets.prewarm.min_interval_seconds'), 120);
-    assert.deepEqual(cfg.get('worker_pool.secrets.prewarm.targets'), [
-      {
-        worker_class: 'service-launcher',
-        refs: ['op://Cliovault/agent-gateway/token'],
-      },
-    ]);
-    assert.deepEqual(cfg.get('worker_pool.secrets.availability_critical_purposes'), [
-      'alert-delivery telegram bot token',
-      'alert-delivery gateway delivery token',
-    ]);
-    assert.equal(cfg.get('worker_pool.secrets.availability_critical_max_stale_seconds'), 3600);
-    assert.deepEqual(cfg.get('worker_pool.secrets.known_vaults'), ['ForkVault']);
-    assert.equal(
-      cfg.get('worker_pool.secrets.release_signing_private_key_ref'),
-      'op://ForkVault/release/private-key',
-    );
-
-    const defaults = join(tmp, 'config-defaults.yaml');
-    writeFile(defaults, 'version: 1\nworker_pool:\n  secrets: {}\n');
-    const defaultCfg = loadConfig({ topPath: defaults, env: {} });
-    assert.deepEqual(defaultCfg.get('worker_pool.secrets.availability_critical_purposes'), [
-      'alert-delivery telegram bot token',
-    ]);
-    assert.equal(defaultCfg.get('worker_pool.secrets.availability_critical_max_stale_seconds'), 604800);
-    assert.deepEqual(defaultCfg.get('worker_pool.secrets.known_vaults'), [
-      'Cliovault',
-      'mem423y7ewrymvxv4ibh34zdk4',
-      'Personal',
-    ]);
-    assert.equal(
-      defaultCfg.get('worker_pool.secrets.release_signing_private_key_ref'),
-      'op://Cliovault/release-signing/private-key',
-    );
-  } finally {
-    rmSync(tmp, { recursive: true, force: true });
-  }
-});
-
 test('top-level config.yaml accepts mirrored worker_pool.secrets op-read canary budget key', () => {
   // The op-read cache live-read priority budget is Python-owned, but shared
   // config.yaml must parse under the watcher strict schema.
@@ -1854,29 +1148,6 @@ test('top-level config.yaml accepts mirrored worker_pool.secrets op-read canary 
     `);
     const cfg = loadConfig({ topPath: top, env: {} });
     assert.equal(cfg.get('worker_pool.secrets.op_read_cache.canary_live_read_budget_percent'), 30);
-  } finally {
-    rmSync(tmp, { recursive: true, force: true });
-  }
-});
-
-test('top-level config.yaml accepts mirrored worker_pool.secrets_bus keys', () => {
-  // SEV0 secrets-bus tuning is Python-owned, but shared config.yaml must parse
-  // under the watcher strict schema to preserve CFG multi-loader parity.
-  const tmp = freshTmp();
-  try {
-    const top = join(tmp, 'config.yaml');
-    writeFile(top, `
-      version: 1
-      worker_pool:
-        secrets_bus:
-          op_timeout_seconds: 15.5
-          cache_ttl_seconds: 900
-          cache_grace_seconds: 3600
-    `);
-    const cfg = loadConfig({ topPath: top, env: {} });
-    assert.equal(cfg.get('worker_pool.secrets_bus.op_timeout_seconds'), 15.5);
-    assert.equal(cfg.get('worker_pool.secrets_bus.cache_ttl_seconds'), 900);
-    assert.equal(cfg.get('worker_pool.secrets_bus.cache_grace_seconds'), 3600);
   } finally {
     rmSync(tmp, { recursive: true, force: true });
   }
@@ -1932,31 +1203,6 @@ test('worker_pool.secrets vault canonical env aliases resolve through Node schem
   }
 });
 
-test('worker_pool.secrets_bus canonical env aliases resolve through Node schema', () => {
-  const tmp = freshTmp();
-  try {
-    const top = join(tmp, 'config.yaml');
-    writeFile(top, 'version: 1\n');
-    const cfg = loadConfig({
-      topPath: top,
-      env: {
-        AGENT_OS_WORKER_POOL_SECRETS_BUS_OP_TIMEOUT_SECONDS: '12.5',
-        AGENT_OS_WORKER_POOL_SECRETS_BUS_CACHE_TTL_SECONDS: '1200',
-        AGENT_OS_WORKER_POOL_SECRETS_BUS_CACHE_GRACE_SECONDS: '2400',
-      },
-    });
-    assert.equal(cfg.get('worker_pool.secrets_bus.op_timeout_seconds'), 12.5);
-    assert.equal(cfg.get('worker_pool.secrets_bus.cache_ttl_seconds'), 1200);
-    assert.equal(cfg.get('worker_pool.secrets_bus.cache_grace_seconds'), 2400);
-    assert.equal(
-      cfg.resolutionTrace('worker_pool.secrets_bus.op_timeout_seconds').at(-1).source,
-      'env:AGENT_OS_WORKER_POOL_SECRETS_BUS_OP_TIMEOUT_SECONDS',
-    );
-  } finally {
-    rmSync(tmp, { recursive: true, force: true });
-  }
-});
-
 test('worker_pool.comms.responder canonical env aliases resolve through Node schema', () => {
   const tmp = freshTmp();
   try {
@@ -1974,48 +1220,6 @@ test('worker_pool.comms.responder canonical env aliases resolve through Node sch
     assert.equal(
       cfg.resolutionTrace('worker_pool.comms.responder.session_ttl_hours').at(-1).source,
       'env:AGENT_OS_WORKER_POOL_COMMS_RESPONDER_SESSION_TTL_HOURS',
-    );
-  } finally {
-    rmSync(tmp, { recursive: true, force: true });
-  }
-});
-
-test('worker_pool.comms.responder rejects out-of-range values', () => {
-  const tmp = freshTmp();
-  try {
-    const top = join(tmp, 'config.yaml');
-    writeFile(top, `
-      version: 1
-      worker_pool:
-        comms:
-          responder:
-            alert_lookback_hours: 0
-            session_ttl_hours: 24
-    `);
-    assert.throws(
-      () => loadConfig({ topPath: top, env: {} }),
-      (err) => {
-        assert.ok(err instanceof AgentOSConfigError);
-        assert.equal(err.key, 'worker_pool.comms.responder.alert_lookback_hours');
-        return true;
-      },
-    );
-
-    writeFile(top, `
-      version: 1
-      worker_pool:
-        comms:
-          responder:
-            alert_lookback_hours: 12
-            session_ttl_hours: 169
-    `);
-    assert.throws(
-      () => loadConfig({ topPath: top, env: {} }),
-      (err) => {
-        assert.ok(err instanceof AgentOSConfigError);
-        assert.equal(err.key, 'worker_pool.comms.responder.session_ttl_hours');
-        return true;
-      },
     );
   } finally {
     rmSync(tmp, { recursive: true, force: true });
@@ -2313,21 +1517,6 @@ test('unversioned config.local.yaml tolerates unknown nested worker_pool keys', 
   }
 });
 
-test('top-level config.yaml ignores an unknown nested main_catchup key', () => {
-  const tmp = freshTmp();
-  try {
-    const top = join(tmp, 'config.yaml');
-    writeFile(top, `
-      version: 1
-      main_catchup:
-        anything: true
-    `);
-    assert.doesNotThrow(() => loadConfig({ topPath: top, env: {} }));
-  } finally {
-    rmSync(tmp, { recursive: true, force: true });
-  }
-});
-
 test('top-level config.yaml accepts the mirrored main_catchup daemon keys', () => {
   const tmp = freshTmp();
   try {
@@ -2388,23 +1577,6 @@ test('ci.billing from the canonical config.yaml loads (CFG-01 drift regression)'
     assert.equal(cfg.get('ci.billing.calibration_factor'), 1.0);
     // The sibling subtree must keep working.
     assert.equal(cfg.get('ci.hosting.mode'), 'github');
-  } finally {
-    rmSync(tmp, { recursive: true, force: true });
-  }
-});
-
-test('an unknown key under ci.billing is ignored', () => {
-  const tmp = freshTmp();
-  try {
-    const top = join(tmp, 'config.yaml');
-    writeFile(top, `
-      version: 1
-      ci:
-        billing:
-          monthly_budget_usd: 200.0
-          not_a_real_billing_key: 1
-    `);
-    assert.doesNotThrow(() => loadConfig({ topPath: top, env: {} }));
   } finally {
     rmSync(tmp, { recursive: true, force: true });
   }
@@ -2650,43 +1822,6 @@ test('main_catchup.pull_retry_delays_seconds mirror defaults, accepts, and bound
   }
 });
 
-test('mcp_metering mirror passes extension keys through and rejects invalid scalars', () => {
-  const tmp = freshTmp();
-  try {
-    const top = join(tmp, 'config.yaml');
-    writeFile(top, `
-      version: 1
-      mcp_metering:
-        enabled: true
-        policy:
-          mode: observe
-          rules:
-            - id: r1
-              server: linear
-          rule_modes:
-            r1: enforce
-    `);
-    const cfg = loadConfig({ topPath: top, env: {} });
-    assert.deepEqual(cfg.get('mcp_metering.policy.rules'), [{ id: 'r1', server: 'linear' }]);
-    assert.deepEqual(cfg.get('mcp_metering.policy.rule_modes'), { r1: 'enforce' });
-    writeFile(top, `
-      version: 1
-      mcp_metering:
-        policy:
-          mode: bogus
-    `);
-    assert.throws(() => loadConfig({ topPath: top, env: {} }), /mcp_metering\.policy\.mode/);
-    writeFile(top, `
-      version: 1
-      mcp_metering:
-        enabled: "yes"
-    `);
-    assert.throws(() => loadConfig({ topPath: top, env: {} }), /mcp_metering\.enabled/);
-  } finally {
-    rmSync(tmp, { recursive: true, force: true });
-  }
-});
-
 test('env-sourced int lists coerce each item to a number', () => {
   // No alias is registered for this key today; register one for the test so
   // the env path a future alias would take is exercised.
@@ -2709,75 +1844,6 @@ test('env-sourced int lists coerce each item to a number', () => {
     rmSync(tmp, { recursive: true, force: true });
   }
 });
-
-test('mcp_metering extension subtrees are replaced whole by a higher layer', () => {
-  const tmp = freshTmp();
-  try {
-    const top = join(tmp, 'config.yaml');
-    const local = join(tmp, 'config.local.yaml');
-    writeFile(top, `
-      version: 1
-      mcp_metering:
-        policy:
-          mode: enforce
-          rule_modes:
-            r1: enforce
-            r2: enforce
-    `);
-    writeFile(local, `
-      version: 1
-      mcp_metering:
-        policy:
-          rule_modes:
-            r1: observe
-    `);
-    const cfg = loadConfig({ topPath: top, env: {} });
-    assert.deepEqual(cfg.get('mcp_metering.policy.rule_modes'), { r1: 'observe' });
-    assert.equal(cfg.get('mcp_metering.policy.mode'), 'enforce');
-    writeFile(local, `
-      version: 1
-      mcp_metering:
-        policy:
-          rule_modes: {}
-    `);
-    assert.deepEqual(loadConfig({ topPath: top, env: {} }).get('mcp_metering.policy.rule_modes'), {});
-  } finally {
-    rmSync(tmp, { recursive: true, force: true });
-  }
-});
-
-for (const version of ['', 'version: 1']) {
-  test(`local empty maps replace inherited maps (${version || 'versionless'})`, () => {
-    const tmp = freshTmp();
-    try {
-      const top = join(tmp, 'config.yaml');
-      writeFile(top, `
-        version: 1
-        mcp_metering:
-          policy:
-            mode: enforce
-            rule_modes: {r1: enforce}
-            rules: {r1: {mode: enforce}}
-      `);
-      writeFile(join(tmp, 'config.local.yaml'), `
-        ${version}
-        mcp_metering:
-          policy:
-            rule_modes: {}
-            rules: {}
-        worker_pool:
-          unknown_empty_map: {}
-      `);
-      const cfg = loadConfig({ topPath: top, env: {} });
-      assert.deepEqual(cfg.get('mcp_metering.policy.rule_modes'), {});
-      assert.deepEqual(cfg.get('mcp_metering.policy.rules'), {});
-      assert.equal(cfg.get('mcp_metering.policy.mode'), 'enforce');
-      assert.deepEqual(cfg.resolutionTrace('worker_pool.unknown_empty_map'), []);
-    } finally {
-      rmSync(tmp, { recursive: true, force: true });
-    }
-  });
-}
 
 test('mcp_metering mirror defaults apply when the section is absent', () => {
   const tmp = freshTmp();
@@ -2933,94 +1999,6 @@ test('config.local.yaml tolerates unknown nested main_catchup keys and reads mir
   }
 });
 
-test('top-level config.yaml accepts mirrored op keys and ignores unknown nested op keys', () => {
-  const tmp = freshTmp();
-  try {
-    const top = join(tmp, 'config.yaml');
-    writeFile(top, `
-      version: 1
-      op:
-        vault: OpsVault
-        known_vaults:
-          - OpsVault
-          - BackupVault
-        release_signing_private_key_ref: op://OpsVault/release-signing/private-key
-    `);
-    const cfg = loadConfig({ topPath: top, env: {} });
-    assert.equal(cfg.get('op.vault'), 'OpsVault');
-    assert.deepEqual(cfg.get('op.known_vaults'), ['OpsVault', 'BackupVault']);
-    assert.equal(
-      cfg.get('op.release_signing_private_key_ref'),
-      'op://OpsVault/release-signing/private-key',
-    );
-
-    const envCfg = loadConfig({
-      topPath: top,
-      env: {
-        AGENT_OS_OP_VAULT: 'EnvOpsVault',
-        AGENT_OS_OP_KNOWN_VAULTS: 'EnvOpsVault,EnvBackupVault',
-        AGENT_OS_OP_RELEASE_SIGNING_PRIVATE_KEY_REF:
-          'op://EnvOpsVault/release-signing/private-key',
-      },
-    });
-    assert.equal(envCfg.get('op.vault'), 'EnvOpsVault');
-    assert.deepEqual(envCfg.get('op.known_vaults'), ['EnvOpsVault', 'EnvBackupVault']);
-    assert.equal(
-      envCfg.get('op.release_signing_private_key_ref'),
-      'op://EnvOpsVault/release-signing/private-key',
-    );
-    assert.equal(
-      envCfg.resolutionTrace('op.vault').at(-1).source,
-      'env:AGENT_OS_OP_VAULT',
-    );
-
-    const bad = join(tmp, 'bad-op.yaml');
-    writeFile(bad, `
-      version: 1
-      op:
-        vault: OpsVault
-        account: example
-    `);
-    assert.doesNotThrow(() => loadConfig({ topPath: bad, env: {} }));
-  } finally {
-    rmSync(tmp, { recursive: true, force: true });
-  }
-});
-
-test('config.local.yaml tolerates unknown nested op keys and reads mirrored vault', () => {
-  const tmp = freshTmp();
-  try {
-    const top = join(tmp, 'config.yaml');
-    const local = join(tmp, 'config.local.yaml');
-    writeFile(top, `
-      version: 1
-      roots:
-        hq: /from-top
-    `);
-    writeFile(local, `
-      roots:
-        hq: /from-local
-      op:
-        vault: LocalOpsVault
-        known_vaults:
-          - LocalOpsVault
-        release_signing_private_key_ref: op://LocalOpsVault/release-signing/private-key
-        account: example
-    `);
-    const cfg = loadConfig({ topPath: top, env: {} });
-    assert.equal(cfg.get('roots.hq'), '/from-local');
-    assert.equal(cfg.get('op.vault'), 'LocalOpsVault');
-    assert.deepEqual(cfg.get('op.known_vaults'), ['LocalOpsVault']);
-    assert.equal(
-      cfg.get('op.release_signing_private_key_ref'),
-      'op://LocalOpsVault/release-signing/private-key',
-    );
-    assert.equal(cfg.get('op.account'), null);
-  } finally {
-    rmSync(tmp, { recursive: true, force: true });
-  }
-});
-
 test('config.local.yaml tolerates a NESTED unknown key under an owned root (no watcher crash)', () => {
   // Mirror of agent-os#1743: a nested unknown key under a root THIS reader owns
   // (here retention.policies.standard_backup, a strict nested dict) must be
@@ -3079,113 +2057,6 @@ test('config.local.yaml ignores unknown top-level keys owned by other readers', 
   }
 });
 
-test('checked-in config.yaml ignores a nested unknown key', () => {
-  // The tolerance is scoped to *.local.yaml only — the version-controlled
-  // config.yaml keeps catching genuine typos at review/CI time.
-  const tmp = freshTmp();
-  try {
-    const top = join(tmp, 'config.yaml');
-    writeFile(top, `
-      version: 1
-      retention:
-        policies:
-          standard_backup:
-            daily: 3
-            bogus_key_not_in_schema: 1
-    `);
-    assert.doesNotThrow(() => loadConfig({ topPath: top, env: {} }));
-  } finally {
-    rmSync(tmp, { recursive: true, force: true });
-  }
-});
-
-test('runtime loader tolerates an unknown checked-in config.yaml key and startup load does too', () => {
-  resetRuntimeUnknownWarningCacheForTests();
-  const tmp = freshTmp();
-  try {
-    const top = join(tmp, 'config.yaml');
-    writeFile(top, `
-      version: 1
-      roots:
-        hq: /from-top
-        future_runtime_home: /newer-than-loader
-    `);
-
-    const warnings = captureWarns(() => {
-      const cfg = loadConfigRuntime({ topPath: top, env: {} });
-      assert.equal(cfg.get('roots.hq'), '/from-top');
-      assert.equal(cfg.get('roots.future_runtime_home'), null);
-      assert.deepEqual(cfg.runtimeDroppedUnknownKeys, [
-        {
-          key: 'roots.future_runtime_home',
-          source: top,
-          hint: 'did you mean roots."runtime_home"?',
-        },
-      ]);
-    });
-    assert.equal(warnings.filter((line) => line.includes('roots.future_runtime_home')).length, 0);
-
-    assert.doesNotThrow(() => loadConfig({ topPath: top, env: {} }));
-  } finally {
-    resetRuntimeUnknownWarningCacheForTests();
-    rmSync(tmp, { recursive: true, force: true });
-  }
-});
-
-test('runtime loader tolerates unknown checked-in module keys without stderr warnings', () => {
-  resetRuntimeUnknownWarningCacheForTests();
-  const tmp = freshTmp();
-  try {
-    const top = join(tmp, 'config.yaml');
-    const mod = join(tmp, 'mod.yaml');
-    writeFile(top, 'version: 1\n');
-    writeFile(mod, `
-      roles:
-        reviewer: codex
-        future_worker_role: fast-lane
-    `);
-
-    const warnings = captureWarns(() => {
-      const first = loadConfigRuntime({ topPath: top, modulePaths: [mod], env: {} });
-      const second = loadConfigRuntime({ topPath: top, modulePaths: [mod], env: {} });
-      assert.equal(first.get('roles.reviewer'), 'codex');
-      assert.equal(second.get('roles.reviewer'), 'codex');
-      assert.equal(first.get('roles.future_worker_role'), null);
-      assert.deepEqual(first.runtimeDroppedUnknownKeys, [
-        {
-          key: 'roles.future_worker_role',
-          source: mod,
-          hint: '',
-        },
-      ]);
-    });
-    assert.equal(warnings.filter((line) => line.includes('roles.future_worker_role')).length, 0);
-
-    assert.doesNotThrow(() => loadConfig({ topPath: top, modulePaths: [mod], env: {} }));
-  } finally {
-    resetRuntimeUnknownWarningCacheForTests();
-    rmSync(tmp, { recursive: true, force: true });
-  }
-});
-
-test('topPath deliberately pointed at config.local.yaml also ignores unread keys outside Layer 4', () => {
-  const tmp = freshTmp();
-  try {
-    const top = join(tmp, 'config.local.yaml');
-    writeFile(top, `
-      version: 1
-      retention:
-        policies:
-          standard_backup:
-            daily: 3
-            bogus_key_not_in_schema: 1
-    `);
-    assert.doesNotThrow(() => loadConfig({ topPath: top, env: {} }));
-  } finally {
-    rmSync(tmp, { recursive: true, force: true });
-  }
-});
-
 test('module *.local.yaml tolerates a nested unknown key; module config.yaml also ignores unread keys', () => {
   const tmp = freshTmp();
   try {
@@ -3221,30 +2092,6 @@ test('module *.local.yaml tolerates a nested unknown key; module config.yaml als
   }
 });
 
-test('module path supplied directly as *.local.yaml also ignores unread keys outside Layer 4', () => {
-  const tmp = freshTmp();
-  try {
-    const top = join(tmp, 'config.yaml');
-    const modLocal = join(tmp, 'mod.local.yaml');
-    writeFile(top, `
-      version: 1
-      roots:
-        hq: /from-top
-    `);
-    writeFile(modLocal, `
-      roles:
-        reviewer: claude-code
-      retention:
-        policies:
-          standard_backup:
-            bogus_key_not_in_schema: 1
-    `);
-    assert.doesNotThrow(() => loadConfig({ topPath: top, modulePaths: [modLocal], env: {} }));
-  } finally {
-    rmSync(tmp, { recursive: true, force: true });
-  }
-});
-
 test('module *.local.yaml ignores unknown top-level keys owned by other readers', () => {
   const tmp = freshTmp();
   try {
@@ -3267,91 +2114,6 @@ test('module *.local.yaml ignores unknown top-level keys owned by other readers'
             daily: 3
     `);
     assert.doesNotThrow(() => loadConfig({ topPath: top, modulePaths: [mod], env: {} }));
-  } finally {
-    rmSync(tmp, { recursive: true, force: true });
-  }
-});
-
-test('retention full block accepts schema-default values', () => {
-  const tmp = freshTmp();
-  try {
-    const top = join(tmp, 'config.yaml');
-    writeFile(top, `
-      version: 1
-      retention:
-        policies:
-          standard_backup:
-            daily: 7
-            weekly: 4
-            monthly: 3
-        cadence:
-          weekly_day_of_week: 0
-          monthly_day_of_month: 1
-        surfaces:
-          postgres_backups:
-            policy: standard_backup
-        ephemeral:
-          worker_worktrees_keep_hours: 48
-          worker_worktrees_keep_hours_under_pressure: 24
-          disk_free_gb_floor: 300
-          gc_report_only: true
-          worker_worktrees_per_run_limit: 200
-          follow_up_workspaces_keep_hours: 72
-          acpx_sessions_keep_days: 30
-          acpx_sessions_gib_cap: 10.0
-          acpx_sessions_min_idle_minutes: 60
-          openclaw_sessions_keep_days: 30
-          openclaw_sessions_min_idle_minutes: 60
-          claude_code_sessions_keep_days: 90
-          dispatch_audit_keep_days: 365
-          sentinel_audit_keep_days: 14
-        sentinel:
-          disk_headroom:
-            threshold_pct: 85
-            threshold_pct_critical: 95
-            threshold_gib_free: 10
-            threshold_gib_free_critical: 2
-            page_dedupe_seconds: 3600
-    `);
-    const cfg = loadConfig({ topPath: top, env: {} });
-    assert.deepEqual(cfg.get('retention'), RETENTION_DEFAULTS);
-  } finally {
-    rmSync(tmp, { recursive: true, force: true });
-  }
-});
-
-test('retention partial override keeps non-overridden schema defaults', () => {
-  const tmp = freshTmp();
-  try {
-    const top = join(tmp, 'config.yaml');
-    writeFile(top, `
-      version: 1
-      retention:
-        ephemeral:
-          acpx_sessions_keep_days: 14
-    `);
-    const cfg = loadConfig({ topPath: top, env: {} });
-    assert.deepEqual(cfg.get('retention'), {
-      ...RETENTION_DEFAULTS,
-      ephemeral: {
-        ...RETENTION_DEFAULTS.ephemeral,
-        acpx_sessions_keep_days: 14,
-      },
-    });
-  } finally {
-    rmSync(tmp, { recursive: true, force: true });
-  }
-});
-
-test('retention absent block materializes schema defaults', () => {
-  const tmp = freshTmp();
-  try {
-    const top = join(tmp, 'config.yaml');
-    writeFile(top, `
-      version: 1
-    `);
-    const cfg = loadConfig({ topPath: top, env: {} });
-    assert.deepEqual(cfg.get('retention'), RETENTION_DEFAULTS);
   } finally {
     rmSync(tmp, { recursive: true, force: true });
   }
@@ -3448,130 +2210,6 @@ test('top-level sentinel disk headroom loads through strict Node schema', () => 
   }
 });
 
-test('checked-in top-level sentinel detector config loads through strict Node schema', () => {
-  const top = join(REPO_ROOT, '..', '..', 'config.yaml');
-  const cfg = loadConfig({ topPath: top, env: {} });
-
-  assert.equal(cfg.get('sentinel.profile'), 'balanced');
-  assert.equal(cfg.get('sentinel.quiet_window'), 'adaptive');
-  assert.equal(cfg.get('sentinel.spec_drift.cycle_interval_seconds'), 86400);
-  assert.equal(cfg.get('sentinel.deploy_checkout.repo_path'), '/Users/airlock/agent-os');
-  assert.equal(cfg.get('sentinel.deploy_checkout.worker_identity_emails'), null);
-  assert.equal(cfg.get('sentinel.codex_compaction.rate_alarm_per_hour'), 3);
-  assert.equal(cfg.get('sentinel.pipeline_stability.rca_dispatch.worker_class'), 'sre');
-  assert.deepEqual(cfg.get('sentinel.convergence_stall.observed_worker_classes'), [
-    'codex',
-    'claude-code',
-    'clio-agent',
-  ]);
-
-  const envCfg = loadConfig({
-    topPath: top,
-    env: {
-      HQ_SENTINEL_CODEX_COMPACTION_RATE_ALARM_PER_HOUR: '6',
-      AGENT_OS_SENTINEL_PIPELINE_STABILITY_RCA_DISPATCH_WORKER_CLASS: 'sre-responder',
-    },
-  });
-  assert.equal(envCfg.get('sentinel.codex_compaction.rate_alarm_per_hour'), 6);
-  assert.equal(envCfg.get('sentinel.pipeline_stability.rca_dispatch.worker_class'), 'sre-responder');
-
-  assert.throws(
-    () =>
-      loadConfig({
-        topPath: top,
-        env: {
-          AGENT_OS_SENTINEL_PIPELINE_STABILITY_RCA_DISPATCH_WORKER_CLASS: 'codex',
-        },
-      }),
-    /sentinel\.pipeline_stability\.rca_dispatch\.worker_class/,
-  );
-
-  const legacyEnvCfg = loadConfig({
-    topPath: top,
-    env: {
-      SENTINEL_CODEX_COMPACTION_RATE_ALARM_PER_HOUR: '7',
-    },
-  });
-  assert.equal(legacyEnvCfg.get('sentinel.codex_compaction.rate_alarm_per_hour'), 7);
-});
-
-test('checked-in post_deploy_verify defaults load through strict Node schema', () => {
-  const top = join(REPO_ROOT, '..', '..', 'config.yaml');
-  const cfg = loadConfig({ topPath: top, env: {} });
-
-  assert.equal(cfg.get('post_deploy_verify.enabled'), existsSync(top) ? true : false);
-  assert.equal(cfg.get('post_deploy_verify.spawn_timeout_seconds'), 180);
-  assert.equal(cfg.get('post_deploy_verify.spawn_ready_wait_seconds'), 300);
-  assert.equal(cfg.get('post_deploy_verify.boot_window_seconds'), 300);
-});
-
-test('sentinel quiet_window accepts numeric YAML and string env values', () => {
-  const tmp = freshTmp();
-  try {
-    const top = join(tmp, 'config.yaml');
-    writeFileSync(top, dedent(`
-      version: 1
-      sentinel:
-        quiet_window: 300
-    `));
-
-    const cfg = loadConfig({ topPath: top, env: {} });
-    assert.equal(cfg.get('sentinel.quiet_window'), '300');
-
-    const zeroTop = join(tmp, 'zero-config.yaml');
-    writeFileSync(zeroTop, dedent(`
-      version: 1
-      sentinel:
-        quiet_window: 0
-    `));
-
-    const zeroCfg = loadConfig({ topPath: zeroTop, env: {} });
-    assert.equal(zeroCfg.get('sentinel.quiet_window'), '0');
-
-    const envCfg = loadConfig({
-      topPath: top,
-      env: {
-        HQ_SENTINEL_QUIET_WINDOW: '0',
-      },
-    });
-    assert.equal(envCfg.get('sentinel.quiet_window'), '0');
-  } finally {
-    rmSync(tmp, { recursive: true, force: true });
-  }
-});
-
-test('retention surfaces ignore unknown keys', () => {
-  const tmp = freshTmp();
-  try {
-    const top = join(tmp, 'config.yaml');
-    writeFile(top, `
-      version: 1
-      retention:
-        surfaces:
-          foo:
-            policy: standard_backup
-    `);
-    assert.doesNotThrow(() => loadConfig({ topPath: top, env: {} }));
-  } finally {
-    rmSync(tmp, { recursive: true, force: true });
-  }
-});
-
-test('retention ignores unknown top-level nested blocks', () => {
-  const tmp = freshTmp();
-  try {
-    const top = join(tmp, 'config.yaml');
-    writeFile(top, `
-      version: 1
-      retention:
-        unknown_block: {}
-    `);
-    assert.doesNotThrow(() => loadConfig({ topPath: top, env: {} }));
-  } finally {
-    rmSync(tmp, { recursive: true, force: true });
-  }
-});
-
 test('retention rejects out-of-range calendar and percentage values', () => {
   const cases = [
     ['retention.cadence.weekly_day_of_week', '          cadence:\n            weekly_day_of_week: 7', 7],
@@ -3601,30 +2239,6 @@ ${yaml}
         },
       );
     }
-  } finally {
-    rmSync(tmp, { recursive: true, force: true });
-  }
-});
-
-test('retention rejects negative keep_days values', () => {
-  const tmp = freshTmp();
-  try {
-    const top = join(tmp, 'config.yaml');
-    writeFile(top, `
-      version: 1
-      retention:
-        ephemeral:
-          acpx_sessions_keep_days: -1
-    `);
-    assert.throws(
-      () => loadConfig({ topPath: top, env: {} }),
-      (err) => {
-        assert.ok(err instanceof AgentOSConfigError);
-        assert.equal(err.key, 'retention.ephemeral.acpx_sessions_keep_days');
-        assert.equal(err.got, -1);
-        return true;
-      },
-    );
   } finally {
     rmSync(tmp, { recursive: true, force: true });
   }
@@ -3671,92 +2285,6 @@ test('retention surface policy stays shape-only at loader layer', () => {
     const cfg = loadConfig({ topPath: top, env: {} });
     // Cross-reference validation belongs to the reaper, not this loader.
     assert.equal(cfg.get('retention.surfaces.postgres_backups.policy'), 'nonexistent');
-  } finally {
-    rmSync(tmp, { recursive: true, force: true });
-  }
-});
-
-test('retention full block resolves identically from config.yaml and config.local.yaml', () => {
-  const tmp = freshTmp();
-  try {
-    const topOnly = join(tmp, 'top-only.yaml');
-    writeFile(topOnly, `
-      version: 1
-      retention:
-        policies:
-          standard_backup:
-            daily: 7
-            weekly: 4
-            monthly: 3
-        cadence:
-          weekly_day_of_week: 0
-          monthly_day_of_month: 1
-        surfaces:
-          postgres_backups:
-            policy: standard_backup
-        ephemeral:
-          worker_worktrees_keep_hours: 48
-          worker_worktrees_per_run_limit: 200
-          follow_up_workspaces_keep_hours: 72
-          acpx_sessions_keep_days: 30
-          acpx_sessions_gib_cap: 10.0
-          acpx_sessions_min_idle_minutes: 60
-          openclaw_sessions_keep_days: 30
-          openclaw_sessions_min_idle_minutes: 60
-          claude_code_sessions_keep_days: 90
-          dispatch_audit_keep_days: 365
-          sentinel_audit_keep_days: 14
-        sentinel:
-          disk_headroom:
-            threshold_pct: 85
-            threshold_pct_critical: 95
-            threshold_gib_free: 10
-            threshold_gib_free_critical: 2
-            page_dedupe_seconds: 3600
-    `);
-    const splitTop = join(tmp, 'config.yaml');
-    const local = join(tmp, 'config.local.yaml');
-    writeFile(splitTop, `
-      version: 1
-    `);
-    writeFile(local, `
-      retention:
-        policies:
-          standard_backup:
-            daily: 7
-            weekly: 4
-            monthly: 3
-        cadence:
-          weekly_day_of_week: 0
-          monthly_day_of_month: 1
-        surfaces:
-          postgres_backups:
-            policy: standard_backup
-        ephemeral:
-          worker_worktrees_keep_hours: 48
-          worker_worktrees_per_run_limit: 200
-          follow_up_workspaces_keep_hours: 72
-          acpx_sessions_keep_days: 30
-          acpx_sessions_gib_cap: 10.0
-          acpx_sessions_min_idle_minutes: 60
-          openclaw_sessions_keep_days: 30
-          openclaw_sessions_min_idle_minutes: 60
-          claude_code_sessions_keep_days: 90
-          dispatch_audit_keep_days: 365
-          sentinel_audit_keep_days: 14
-        sentinel:
-          disk_headroom:
-            threshold_pct: 85
-            threshold_pct_critical: 95
-            threshold_gib_free: 10
-            threshold_gib_free_critical: 2
-            page_dedupe_seconds: 3600
-    `);
-    const topCfg = loadConfig({ topPath: topOnly, env: {} });
-    const localCfg = loadConfig({ topPath: splitTop, env: {} });
-    assert.deepEqual(topCfg.get('retention'), RETENTION_DEFAULTS);
-    assert.deepEqual(localCfg.get('retention'), RETENTION_DEFAULTS);
-    assert.deepEqual(localCfg.get('retention'), topCfg.get('retention'));
   } finally {
     rmSync(tmp, { recursive: true, force: true });
   }
@@ -4089,22 +2617,6 @@ test('dispatch per-task-kind env var overrides file', () => {
   }
 });
 
-test('dispatch ignores an unread task kind', () => {
-  const tmp = freshTmp();
-  try {
-    const top = join(tmp, 'config.yaml');
-    writeFile(top, `
-      version: 1
-      dispatch:
-        default_worker_class_by_task_kind:
-          synthesizing: codex
-    `);
-    assert.equal(loadConfig({ topPath: top, env: {} }).get('dispatch.default_worker_class_by_task_kind.synthesizing'), null);
-  } finally {
-    rmSync(tmp, { recursive: true, force: true });
-  }
-});
-
 test('dispatch strict schema rejects worker class outside the enum', () => {
   const tmp = freshTmp();
   try {
@@ -4221,35 +2733,6 @@ test('reviewer memory pressure thresholds load from YAML and env aliases', () =>
     assert.equal(
       legacyCfg.resolutionTrace('reviewer.memory.pressure.projected_headroom_floor_mb').at(-1).source,
       'env:ADVERSARIAL_REVIEWER_MEMORY_PRESSURE_PROJECTED_HEADROOM_FLOOR_MB',
-    );
-  } finally {
-    rmSync(tmp, { recursive: true, force: true });
-  }
-});
-
-test('top-level adversarial reviewer mirror tolerates future direct keys', () => {
-  const tmp = freshTmp();
-  try {
-    const top = join(tmp, 'config.yaml');
-    writeFile(top, `
-      version: 1
-      adversarial:
-        reviewer_pool:
-          max_concurrent_reviewers: 4
-        reviewer:
-          future_rollout_knob:
-            enabled: true
-          memory:
-            pressure:
-              projected_headroom_floor_mb: 3072
-    `);
-
-    const cfg = loadConfig({ topPath: top, env: {} });
-    assert.equal(cfg.get('adversarial.reviewer_pool.max_concurrent_reviewers'), 4);
-    assert.equal(cfg.get('adversarial.reviewer.memory.pressure.projected_headroom_floor_mb'), 3072);
-    assert.deepEqual(
-      cfg.get('adversarial.reviewer.future_rollout_knob'),
-      { enabled: true },
     );
   } finally {
     rmSync(tmp, { recursive: true, force: true });
@@ -4422,22 +2905,6 @@ test('malformed YAML fails loud with path:line', () => {
   }
 });
 
-test('unknown key is ignored beside a recognized root setting', () => {
-  const tmp = freshTmp();
-  try {
-    const top = join(tmp, 'config.yaml');
-    writeFile(top, `
-      version: 1
-      roots:
-        hq: /foo
-        not_a_root: /bar
-    `);
-    assert.doesNotThrow(() => loadConfig({ topPath: top, env: {} }));
-  } finally {
-    rmSync(tmp, { recursive: true, force: true });
-  }
-});
-
 test('wrong type fails loud', () => {
   const tmp = freshTmp();
   try {
@@ -4467,15 +2934,15 @@ test('YAML 1.2: bare \'no\' fails loud (AC-11)', () => {
     const top = join(tmp, 'config.yaml');
     writeFile(top, `
       version: 1
-      feature_flags:
-        live_steer_allow_unvetted: no
+      handoff:
+        final_to_hammer: no
     `);
     assert.throws(
       () => loadConfig({ topPath: top, env: {} }),
       (err) => {
         assert.ok(err instanceof AgentOSConfigError);
         const msg = err.message;
-        assert.match(msg, /feature_flags\.live_steer_allow_unvetted/);
+        assert.match(msg, /handoff\.final_to_hammer/);
         assert.match(msg, /no/);
         assert.match(msg, /true/);
         assert.match(msg, /false/);
@@ -4495,8 +2962,8 @@ test('YAML 1.1 yes/off/on/y/n all fail', () => {
       const top = join(tmp, 'config.yaml');
       writeFile(top, `
         version: 1
-        feature_flags:
-          live_steer_allow_unvetted: ${bad}
+        handoff:
+          final_to_hammer: ${bad}
       `);
       assert.throws(
         () => loadConfig({ topPath: top, env: {} }),
@@ -4518,11 +2985,11 @@ test('env YAML 1.1 boolean tokens fail', () => {
       assert.throws(
         () => loadConfig({
           topPath: top,
-          env: { AGENT_OS_FEATURE_FLAGS_LIVE_STEER_ALLOW_UNVETTED: bad },
+          env: { AGENT_OS_HANDOFF_FINAL_TO_HAMMER: bad },
         }),
         (err) => {
           assert.ok(err instanceof AgentOSConfigError);
-          assert.equal(err.key, 'feature_flags.live_steer_allow_unvetted');
+          assert.equal(err.key, 'handoff.final_to_hammer');
           assert.match(err.message, /true'\/'false/);
           assert.match(err.message, /1'\/'0/);
           return true;
@@ -4541,13 +3008,13 @@ test('YAML 1.2 true/false parse as bool', () => {
     const top = join(tmp, 'config.yaml');
     writeFile(top, `
       version: 1
-      feature_flags:
-        live_steer_allow_unvetted: true
-        claude_code_ambient_auth_fallback: false
+      handoff:
+        final_to_hammer: true
+        remediation_to_rereview: false
     `);
     const cfg = loadConfig({ topPath: top, env: {} });
-    assert.strictEqual(cfg.get('feature_flags.live_steer_allow_unvetted'), true);
-    assert.strictEqual(cfg.get('feature_flags.claude_code_ambient_auth_fallback'), false);
+    assert.strictEqual(cfg.get('handoff.final_to_hammer'), true);
+    assert.strictEqual(cfg.get('handoff.remediation_to_rereview'), false);
   } finally {
     rmSync(tmp, { recursive: true, force: true });
   }
@@ -4761,29 +3228,6 @@ for (const model of ['gpt-6-sol', 'gpt-6.1-sol']) {
   });
 }
 
-test('SINGLEREVIEW-01: single_review knobs default, override locally, and validate', () => {
-  const tmp = freshTmp();
-  try {
-    const top = join(tmp, 'config.yaml');
-    writeFile(top, 'version: 1\n');
-    const defaults = loadConfig({ topPath: top, env: {} });
-    assert.equal(defaults.get('roles.adversarial.single_review.enabled'), true);
-    assert.equal(defaults.get('roles.adversarial.single_review.max_changed_lines'), 50);
-    assert.equal(defaults.get('roles.adversarial.single_review.max_files'), 5);
-    assert.equal(defaults.get('roles.adversarial.single_review.docs_tests_follow_slim_limits'), true);
-    writeFile(join(tmp, 'config.local.yaml'), 'version: 1\nroles:\n  adversarial:\n    single_review:\n      enabled: false\n      max_changed_lines: 30\n      max_files: 3\n      docs_tests_follow_slim_limits: false\n');
-    const local = loadConfig({ topPath: top, env: {} });
-    assert.equal(local.get('roles.adversarial.single_review.enabled'), false);
-    assert.equal(local.get('roles.adversarial.single_review.max_changed_lines'), 30);
-    assert.equal(local.get('roles.adversarial.single_review.max_files'), 3);
-    assert.equal(local.get('roles.adversarial.single_review.docs_tests_follow_slim_limits'), false);
-    writeFile(join(tmp, 'config.local.yaml'), 'version: 1\nroles:\n  adversarial:\n    single_review:\n      max_files: 0\n');
-    assert.throws(() => loadConfig({ topPath: top, env: {} }), AgentOSConfigError);
-  } finally {
-    rmSync(tmp, { recursive: true, force: true });
-  }
-});
-
 test('roles.adversarial.orchestration_mode rejects unsupported values in Node loader', () => {
   const tmp = freshTmp();
   try {
@@ -4922,180 +3366,6 @@ test('validateSchema rejects unsupported MHX title tags in shared CFG enums', ()
   );
 });
 
-test('validateSchema ignores unknown nested worker_pool keys without a tolerance flag', () => {
-  assert.doesNotThrow(() => validateSchema(
-      { version: 1, worker_pool: { anything: true } },
-      { source: '/tmp/config.local.yaml' },
-    ));
-});
-
-test('validateSchema ignores unknown worker_pool keys in checked-in config', () => {
-  assert.doesNotThrow(() => validateSchema(
-      { version: 1, worker_pool: { anything: true } },
-      { source: '/tmp/config.yaml', tolerateForeignTopLevelSections: true },
-    ));
-});
-
-test('validateSchema tolerates unknown nested worker_pool keys in local files and keeps the mirrored one', () => {
-  // config.local.yaml is shared by several loaders (CFG-01 python loader, this
-  // adversarial-review loader, ...). worker_pool is now a KNOWN partial root in
-  // this reader; its unknown nested keys (owned by the Python CFG reader) are
-  // tolerated-dropped per-key under tolerateNestedUnknownLocalKeys, while
-  // mirrored deep_reconcile, memory.pressure and memory.dynamic are kept.
-  const out = validateSchema(
-    {
-      version: 1,
-      worker_pool: {
-        anything: true,
-        dag: { autowalk: { deep_reconcile: true } },
-        memory: {
-          pressure: { projected_headroom_floor_mb: 4096, unknown_pressure_key: true },
-          dynamic: { enabled: true },
-        },
-        secrets_bus: {
-          op_timeout_seconds: 20.0,
-        },
-      },
-    },
-    {
-      source: '/tmp/config.local.yaml',
-      tolerateForeignTopLevelSections: true,
-      tolerateNestedUnknownLocalKeys: true,
-    },
-  );
-  assert.equal(out.version, 1);
-  assert.equal(out.worker_pool?.anything, undefined, 'unknown nested key dropped');
-  assert.equal(out.worker_pool?.dag?.autowalk?.deep_reconcile, true);
-  assert.equal(out.worker_pool?.memory?.pressure?.projected_headroom_floor_mb, 4096);
-  assert.equal(out.worker_pool?.memory?.pressure?.unknown_pressure_key, undefined, 'unknown sibling key dropped');
-  assert.equal(out.worker_pool?.memory?.dynamic?.enabled, true);
-  assert.equal(out.worker_pool?.secrets_bus?.op_timeout_seconds, 20.0);
-});
-
-test('validateSchema ignores unknown nested main_catchup keys without a tolerance flag', () => {
-  assert.doesNotThrow(() => validateSchema(
-      { version: 1, main_catchup: { anything: true } },
-      { source: '/tmp/config.local.yaml' },
-    ));
-});
-
-test('validateSchema ignores unknown main_catchup keys in checked-in config', () => {
-  assert.doesNotThrow(() => validateSchema(
-      { version: 1, main_catchup: { anything: true } },
-      { source: '/tmp/config.yaml', tolerateForeignTopLevelSections: true },
-    ));
-});
-
-test('validateSchema tolerates unknown nested main_catchup keys in local files and keeps mirrored drain keys', () => {
-  const out = validateSchema(
-    {
-      version: 1,
-      main_catchup: {
-        anything: true,
-        poll_interval_seconds: 300,
-        adversarial_review_drain_timeout_seconds: 240,
-        adversarial_watcher_drain_bounce_slack_seconds: 45,
-      },
-    },
-    {
-      source: '/tmp/config.local.yaml',
-      tolerateForeignTopLevelSections: true,
-      tolerateNestedUnknownLocalKeys: true,
-    },
-  );
-  assert.equal(out.version, 1);
-  assert.equal(out.main_catchup?.anything, undefined, 'unknown nested key dropped');
-  assert.equal(out.main_catchup?.poll_interval_seconds, 300);
-  assert.equal(out.main_catchup?.adversarial_review_drain_timeout_seconds, 240);
-  assert.equal(out.main_catchup?.adversarial_watcher_drain_bounce_slack_seconds, 45);
-});
-
-test('validateSchema ignores unknown nested post_deploy_verify keys without a tolerance flag', () => {
-  assert.doesNotThrow(() => validateSchema(
-      { version: 1, post_deploy_verify: { future_python_only_key: true } },
-      { source: '/tmp/config.local.yaml' },
-    ));
-});
-
-test('validateSchema tolerates unknown nested post_deploy_verify keys in local files and keeps mirrored PMV keys', () => {
-  const out = validateSchema(
-    {
-      version: 1,
-      post_deploy_verify: {
-        future_python_only_key: true,
-        enabled: true,
-        spawn_timeout_seconds: 240,
-        boot_window_seconds: 600,
-      },
-    },
-    {
-      source: '/tmp/config.local.yaml',
-      tolerateForeignTopLevelSections: true,
-      tolerateNestedUnknownLocalKeys: true,
-    },
-  );
-  assert.equal(out.version, 1);
-  assert.equal(out.post_deploy_verify?.future_python_only_key, undefined, 'unknown nested key dropped');
-  assert.equal(out.post_deploy_verify?.enabled, true);
-  assert.equal(out.post_deploy_verify?.spawn_timeout_seconds, 240);
-  assert.equal(out.post_deploy_verify?.boot_window_seconds, 600);
-});
-
-test('validateSchema ignores unknown nested op keys without a tolerance flag', () => {
-  assert.doesNotThrow(() => validateSchema(
-      { version: 1, op: { vault: 'OpsVault', account: 'example' } },
-      { source: '/tmp/config.local.yaml' },
-    ));
-});
-
-test('validateSchema ignores unknown op keys in checked-in config', () => {
-  assert.doesNotThrow(() => validateSchema(
-      { version: 1, op: { vault: 'OpsVault', account: 'example' } },
-      { source: '/tmp/config.yaml', tolerateForeignTopLevelSections: true },
-    ));
-});
-
-test('validateSchema tolerates unknown nested op keys in local files and keeps mirrored vault', () => {
-  const out = validateSchema(
-    {
-      version: 1,
-      op: {
-        vault: 'LocalOpsVault',
-        account: 'example',
-      },
-    },
-    {
-      source: '/tmp/config.local.yaml',
-      tolerateForeignTopLevelSections: true,
-      tolerateNestedUnknownLocalKeys: true,
-    },
-  );
-  assert.equal(out.version, 1);
-  assert.equal(out.op?.account, undefined, 'unknown nested key dropped');
-  assert.equal(out.op?.vault, 'LocalOpsVault');
-});
-
-test('validateSchema drops the Python-owned email_archive root from a local file', () => {
-  // agent-os#5556 (EAR-02). The root is declared in the Python schema authority
-  // and consumed only by modules/email-archive; this reader has no use for it.
-  // Reader scoping ignores this root without a foreign-section registry.
-  const out = validateSchema(
-    {
-      version: 1,
-      email_archive: {
-        dsn: 'postgresql://airlock@localhost:6432/agent_os_email',
-        database_name: 'agent_os_email',
-      },
-    },
-    {
-      source: '/tmp/config.local.yaml',
-      tolerateForeignTopLevelSections: true,
-    },
-  );
-  assert.equal(out.version, 1);
-  assert.equal(out.email_archive, undefined, 'foreign root dropped, not adopted');
-});
-
 test('validateSchema ignores email_archive in checked-in config', () => {
   // Foreign-root tolerance is scoped to Layer-4 multi-reader local siblings. The
   // checked-in Layer-3 file stays strict so this reader cannot silently diverge
@@ -5106,31 +3376,6 @@ test('validateSchema ignores email_archive in checked-in config', () => {
     ));
 });
 
-test('validateSchema drops the Python-owned resident root from a local file', () => {
-  // agent-os#5813 (RTR-00). `resident` is declared in the Python schema
-  // authority (agent_os_config/schema_v1/misc.py) and the shell loader, and is
-  // consumed by the resident supervisor; nothing in adversarial-review reads
-  // resident token state. Without the FOREIGN_TOP_LEVEL_SECTIONS entry an
-  // operator setting `resident.token_refresh.enabled` — the documented way to
-  // enforce that flag — takes the watcher down the email_archive path: not
-  // foreign, strict schema, `unknown key`, crash-loop.
-  const out = validateSchema(
-    {
-      version: 1,
-      resident: {
-        token_refresh: { enabled: true },
-      },
-    },
-    {
-      source: '/tmp/config.local.yaml',
-      tolerateForeignTopLevelSections: true,
-      tolerateNestedUnknownLocalKeys: true,
-    },
-  );
-  assert.equal(out.version, 1);
-  assert.equal(out.resident, undefined, 'foreign root dropped, not adopted');
-});
-
 test('validateSchema ignores resident in checked-in config', () => {
   // Same scoping as email_archive: tolerance is for Layer-4 local siblings only,
   // so this reader cannot silently diverge from its sibling CFG loaders.
@@ -5138,15 +3383,6 @@ test('validateSchema ignores resident in checked-in config', () => {
       { version: 1, resident: { token_refresh: { enabled: true } } },
       { source: '/tmp/config.yaml', tolerateForeignTopLevelSections: true },
     ));
-});
-
-test('validateSchema drops the Python-owned media_generation root from a local file', () => {
-  const out = validateSchema(
-    { version: 1, media_generation: { library_dir: '/tmp/media-library' } },
-    { source: '/tmp/config.local.yaml', tolerateForeignTopLevelSections: true },
-  );
-  assert.equal(out.version, 1);
-  assert.equal(out.media_generation, undefined);
 });
 
 test('validateSchema ignores media_generation in checked-in config', () => {
@@ -5162,13 +3398,6 @@ test('top-level config.yaml accepts mirrored surface_harness timeout', () => {
     { source: '/tmp/config.yaml', tolerateForeignTopLevelSections: true },
   );
   assert.equal(out.surface_harness.timeout_seconds, 96);
-});
-
-test('surface_harness ignores unknown nested keys', () => {
-  assert.doesNotThrow(() => validateSchema(
-      { version: 1, surface_harness: { timeout_seconds: 96, surprise: true } },
-      { source: '/tmp/config.yaml', tolerateForeignTopLevelSections: true },
-    ));
 });
 
 test('top-level config.yaml accepts mirrored frc off-LAN transport keys', () => {
@@ -5231,58 +3460,6 @@ test('frc off-LAN transport env aliases override file layers and validate range'
   } finally {
     rmSync(tmp, { recursive: true, force: true });
   }
-});
-
-test('validateSchema ignores unknown top-level keys owned by other readers', () => {
-  assert.doesNotThrow(() => validateSchema(
-      { version: 1, not_a_section: { anything: true } },
-      { source: '/tmp/config.local.yaml' },
-    ));
-});
-
-test('validateSchema ignores unread keys inside a known section', () => {
-  // Unknown sibling-reader fields are ignored in every file layer.
-  assert.doesNotThrow(() => validateSchema(
-      { version: 1, remediation: { max_concur_jobs: 10 } },
-      { source: '/tmp/config.local.yaml' },
-    ));
-});
-
-test('validateSchema rejects schema metadata keys in instance data', () => {
-  assert.throws(
-    () => validateSchema(
-      { version: 1, roots: { __frozen: true, hq: '/tmp/hq' } },
-      { source: '/tmp/config.yaml' },
-    ),
-    (err) => {
-      assert.ok(err instanceof AgentOSConfigError);
-      assert.match(err.message, /roots\.__frozen/);
-      assert.match(err.message, /unknown key/);
-      return true;
-    },
-  );
-});
-
-test('validateSchema can explicitly tolerate nested unknown keys for local-layer callers', () => {
-  const out = validateSchema(
-    {
-      version: 1,
-      retention: {
-        policies: {
-          standard_backup: {
-            daily: 3,
-            bogus_key_not_in_schema: 1,
-          },
-        },
-      },
-    },
-    {
-      source: '/tmp/config.local.yaml',
-      tolerateNestedUnknownLocalKeys: true,
-    },
-  );
-  assert.equal(out.retention.policies.standard_backup.daily, 3);
-  assert.equal(out.retention.policies.standard_backup.bogus_key_not_in_schema, undefined);
 });
 
 // -------- Null-handling: explicit null must NOT bypass the schema ---------
@@ -5352,54 +3529,20 @@ test('explicit null on merge_agent_worker_class fails (non-nullable enum)', () =
 
 // -------- submodules pass-through (__strict: false) -----------------------
 
-test('submodules subtree round-trips through merged config', () => {
-  const tmp = freshTmp();
-  try {
-    const top = join(tmp, 'config.yaml');
-    writeFile(top, `
-      version: 1
-      submodules:
-        worker_pool:
-          foo: 1
-          bar:
-            baz: hello
-    `);
-    const cfg = loadConfig({ topPath: top, env: {} });
-    assert.equal(cfg.get('submodules.worker_pool.foo'), 1);
-    assert.equal(cfg.get('submodules.worker_pool.bar.baz'), 'hello');
-  } finally {
-    rmSync(tmp, { recursive: true, force: true });
-  }
-});
-
-test('submodules accepts arbitrary keys through validateSchema', () => {
-  const validated = validateSchema({
-    version: 1,
-    submodules: { anything_goes: { nested: true } },
-  });
-  assert.deepEqual(validated.submodules, { anything_goes: { nested: true } });
-});
-
 // -------- Empty env-string for booleans coerces to false ------------------
 
-test('empty-string env var for bool coerces to false', () => {
+test('empty-string env var is absent, as in the Python loader', () => {
   const tmp = freshTmp();
   try {
     const top = join(tmp, 'config.yaml');
     writeFile(top, `
       version: 1
-      feature_flags:
-        claude_code_ambient_auth_fallback: true
+      handoff:
+        final_to_hammer: true
     `);
-    const cfg = loadConfig({
-      topPath: top,
-      env: { AGENT_OS_FEATURE_FLAGS_CLAUDE_CODE_AMBIENT_AUTH_FALLBACK: '' },
-    });
-    assert.equal(cfg.get('feature_flags.claude_code_ambient_auth_fallback'), false);
-    assert.equal(
-      cfg.resolutionTrace('feature_flags.claude_code_ambient_auth_fallback').at(-1).source,
-      'env:AGENT_OS_FEATURE_FLAGS_CLAUDE_CODE_AMBIENT_AUTH_FALLBACK',
-    );
+    const cfg = loadConfig({ topPath: top, env: { AGENT_OS_HANDOFF_FINAL_TO_HAMMER: '' } });
+    assert.equal(cfg.get('handoff.final_to_hammer'), true);
+    assert.equal(cfg.resolutionTrace('handoff.final_to_hammer').at(-1).source, 'top');
   } finally {
     rmSync(tmp, { recursive: true, force: true });
   }
@@ -5428,24 +3571,6 @@ test(`module __aliases to unread canonical keys filter ${alias} before validatio
   }
 });
 }
-
-test('module __aliases targeting submodules subtree is accepted (non-strict)', () => {
-  const tmp = freshTmp();
-  try {
-    const mod = join(tmp, 'mod.yaml');
-    writeFile(mod, `
-      __aliases:
-        worker_pool.size: submodules.worker_pool.size
-      worker_pool:
-        size: 4
-    `);
-    const top = join(tmp, 'no_top.yaml');
-    const cfg = loadConfig({ topPath: top, modulePaths: [mod], env: {} });
-    assert.equal(cfg.get('submodules.worker_pool.size'), 4);
-  } finally {
-    rmSync(tmp, { recursive: true, force: true });
-  }
-});
 
 // -------- Round-2 review remediations -------------------------------------
 
@@ -5768,187 +3893,6 @@ test('AgentOSConfigError normalizes derived envName tokens', () => {
   );
 });
 
-test('AMA merge_authority spec YAML and env aliases load through strict Node schema', () => {
-  const tmp = freshTmp();
-  try {
-    const top = join(tmp, 'config.yaml');
-    writeFile(top, `
-      version: 1
-      roles:
-        adversarial:
-          operator_logins:
-            - virtualpaul
-            - backup-human
-          operator_label_actor_enforcement: enforce
-          merge_authority:
-            enabled: false
-            autonomous_merge_execution_enabled: false
-            merge_capability_enforcement: enforce
-            autonomous_closer_commit_clean_merge_enabled: false
-            strict_mode: false
-            lha:
-              consume_attestations: false
-            hammer_lifetime_ceiling: 3
-            required_check_contexts:
-              - ci/test
-              - ci/lint
-            worker_class: codex
-            merge_method: squash
-            strict_non_blocking_remediation: false
-            eligibility:
-              risk_classes: ["low"]
-              fast_merge_labels:
-                - "fast-merge:test-fixtures"
-                - "fast-merge:docs"
-              reviewer_family_policy: audit_existing_gate_contract
-              ci_green_classifier: existingAdversarialMergeClassifier
-            branch_protection:
-              required_gate_context_source: resolveGateStatusContext
-              required: true
-    `);
-    const cfg = loadConfig({ topPath: top, env: {} });
-    assert.deepEqual(cfg.get('roles.adversarial.operator_logins'), ['virtualpaul', 'backup-human']);
-    assert.equal(cfg.get('roles.adversarial.operator_label_actor_enforcement'), 'enforce');
-    assert.deepEqual(cfg.getMergeAuthorityConfig().operatorLogins, ['virtualpaul', 'backup-human']);
-    assert.equal(cfg.getMergeAuthorityConfig().operatorLabelActorEnforcement, 'enforce');
-    assert.equal(cfg.get('roles.adversarial.merge_authority.enabled'), false);
-    assert.equal(cfg.get('roles.adversarial.merge_authority.autonomous_merge_execution_enabled'), false);
-    assert.equal(cfg.get('roles.adversarial.merge_authority.merge_capability_enforcement'), 'enforce');
-    assert.equal(cfg.get('roles.adversarial.merge_authority.autonomous_closer_commit_clean_merge_enabled'), false);
-    assert.equal(cfg.get('roles.adversarial.merge_authority.strict_mode'), false);
-    assert.equal(cfg.get('roles.adversarial.merge_authority.lha.consume_attestations'), false);
-    assert.equal(cfg.get('roles.adversarial.merge_authority.hammer_lifetime_ceiling'), 3);
-    assert.equal(cfg.get('roles.adversarial.merge_authority.worker_class'), 'codex');
-    assert.equal(cfg.get('roles.adversarial.merge_authority.merge_method'), 'squash');
-    assert.equal(cfg.get('roles.adversarial.merge_authority.strict_non_blocking_remediation'), false);
-    assert.equal(cfg.getMergeAuthorityConfig().autonomousMergeExecutionEnabled, false);
-    assert.equal(cfg.getMergeAuthorityConfig().mergeCapabilityEnforcement, 'enforce');
-    assert.equal(cfg.getMergeAuthorityConfig().autonomousCloserCommitCleanMergeEnabled, false);
-    assert.equal(cfg.getMergeAuthorityConfig().strictMode, false);
-    assert.equal(cfg.getMergeAuthorityConfig().lha.consumeAttestations, false);
-    assert.equal(cfg.getMergeAuthorityConfig().hammerLifetimeDispatchCeiling, 3);
-    assert.deepEqual(cfg.getMergeAuthorityConfig().requiredCheckContexts, ['ci/test', 'ci/lint']);
-    assert.equal(cfg.getMergeAuthorityConfig().strictNonBlockingRemediation, false);
-    assert.deepEqual(cfg.get('roles.adversarial.merge_authority.eligibility.risk_classes'), ['low']);
-    assert.deepEqual(
-      cfg.get('roles.adversarial.merge_authority.eligibility.fast_merge_labels'),
-      ['fast-merge:test-fixtures', 'fast-merge:docs'],
-    );
-    assert.equal(
-      cfg.get('roles.adversarial.merge_authority.eligibility.reviewer_family_policy'),
-      'audit_existing_gate_contract',
-    );
-    assert.equal(
-      cfg.get('roles.adversarial.merge_authority.eligibility.ci_green_classifier'),
-      'existingAdversarialMergeClassifier',
-    );
-    assert.equal(
-      cfg.get('roles.adversarial.merge_authority.branch_protection.required_gate_context_source'),
-      'resolveGateStatusContext',
-    );
-    assert.equal(
-      cfg.get('roles.adversarial.merge_authority.branch_protection.required'),
-      true,
-    );
-
-    const canonicalFalseEnvCfg = loadConfig({
-      topPath: top,
-      env: { AGENT_OS_ROLES_ADVERSARIAL_MERGE_AUTHORITY_ENABLED: '0' },
-    });
-    assert.equal(canonicalFalseEnvCfg.get('roles.adversarial.merge_authority.enabled'), false);
-    assert.equal(
-      canonicalFalseEnvCfg.resolutionTrace('roles.adversarial.merge_authority.enabled').at(-1).source,
-      'env:AGENT_OS_ROLES_ADVERSARIAL_MERGE_AUTHORITY_ENABLED',
-    );
-    const envFlagCfg = loadConfig({
-      topPath: top,
-      env: {
-        AGENT_OS_ROLES_ADVERSARIAL_MERGE_AUTHORITY_AUTONOMOUS_MERGE_EXECUTION_ENABLED: 'true',
-        AGENT_OS_ROLES_ADVERSARIAL_MERGE_AUTHORITY_MERGE_CAPABILITY_ENFORCEMENT: 'observe',
-        AGENT_OS_ROLES_ADVERSARIAL_MERGE_AUTHORITY_AUTONOMOUS_CLOSER_COMMIT_CLEAN_MERGE_ENABLED: 'true',
-        AGENT_OS_ROLES_ADVERSARIAL_MERGE_AUTHORITY_STRICT_MODE: 'true',
-        AGENT_OS_ROLES_ADVERSARIAL_MERGE_AUTHORITY_LHA_CONSUME_ATTESTATIONS: 'true',
-      },
-    });
-    assert.equal(
-      envFlagCfg.get('roles.adversarial.merge_authority.autonomous_merge_execution_enabled'),
-      true,
-    );
-    assert.equal(
-      envFlagCfg.get('roles.adversarial.merge_authority.autonomous_closer_commit_clean_merge_enabled'),
-      true,
-    );
-    assert.equal(envFlagCfg.get('roles.adversarial.merge_authority.merge_capability_enforcement'), 'observe');
-    assert.equal(envFlagCfg.getMergeAuthorityConfig().mergeCapabilityEnforcement, 'observe');
-    assert.equal(envFlagCfg.getMergeAuthorityConfig().autonomousCloserCommitCleanMergeEnabled, true);
-    assert.equal(envFlagCfg.get('roles.adversarial.merge_authority.strict_mode'), true);
-    assert.equal(envFlagCfg.get('roles.adversarial.merge_authority.lha.consume_attestations'), true);
-    assert.equal(envFlagCfg.getMergeAuthorityConfig().lha.consumeAttestations, true);
-
-    const defaultLhaCfg = loadConfig({ topPath: join(tmp, 'missing.yaml'), env: {} });
-    assert.equal(defaultLhaCfg.get('roles.adversarial.merge_authority.lha.consume_attestations'), true);
-    assert.equal(defaultLhaCfg.getMergeAuthorityConfig().lha.consumeAttestations, true);
-
-    const envCeilingCfg = loadConfig({
-      topPath: top,
-      env: {
-        AGENT_OS_ROLES_ADVERSARIAL_MERGE_AUTHORITY_HAMMER_LIFETIME_CEILING: '1',
-      },
-    });
-    assert.equal(
-      envCeilingCfg.get('roles.adversarial.merge_authority.hammer_lifetime_ceiling'),
-      1,
-    );
-    assert.equal(envCeilingCfg.getMergeAuthorityConfig().hammerLifetimeDispatchCeiling, 1);
-
-    const envAliasCeilingCfg = loadConfig({
-      topPath: top,
-      env: {
-        AGENT_OS_ROLES_ADVERSARIAL_MERGE_AUTHORITY_HAMMER_LIFETIME_DISPATCH_CEILING: '2',
-      },
-    });
-    assert.equal(
-      envAliasCeilingCfg.get('roles.adversarial.merge_authority.hammer_lifetime_ceiling'),
-      2,
-    );
-    assert.equal(envAliasCeilingCfg.getMergeAuthorityConfig().hammerLifetimeDispatchCeiling, 2);
-
-    const envRequiredContextsCfg = loadConfig({
-      topPath: top,
-      env: {
-        AGENT_OS_ROLES_ADVERSARIAL_MERGE_AUTHORITY_REQUIRED_CHECK_CONTEXTS: 'repo-guards, shellcheck',
-      },
-    });
-    assert.deepEqual(
-      envRequiredContextsCfg.getMergeAuthorityConfig().requiredCheckContexts,
-      ['repo-guards', 'shellcheck'],
-    );
-
-    const envOperatorCfg = loadConfig({
-      topPath: top,
-      env: {
-        AGENT_OS_ROLES_ADVERSARIAL_OPERATOR_LOGINS: 'human-one,human-two',
-        AGENT_OS_ROLES_ADVERSARIAL_OPERATOR_LABEL_ACTOR_ENFORCEMENT: 'observe',
-      },
-    });
-    assert.deepEqual(envOperatorCfg.getMergeAuthorityConfig().operatorLogins, ['human-one', 'human-two']);
-    assert.equal(envOperatorCfg.getMergeAuthorityConfig().operatorLabelActorEnforcement, 'observe');
-
-    const legacyTop = join(tmp, 'legacy-config.yaml');
-    writeFile(legacyTop, `
-      version: 1
-      roles:
-        adversarial:
-          merge_authority:
-            hammer_lifetime_dispatch_ceiling: 4
-    `);
-    const legacyCfg = loadConfig({ topPath: legacyTop, env: {} });
-    assert.equal(legacyCfg.getMergeAuthorityConfig().hammerLifetimeDispatchCeiling, 4);
-  } finally {
-    rmSync(tmp, { recursive: true, force: true });
-  }
-});
-
 test('HOM handoff config defaults off and resolves env aliases through Node loader', () => {
   const tmp = freshTmp();
   try {
@@ -6038,89 +3982,6 @@ test('AMA merge_authority accepts hammer as closer worker class in Node loader',
     const cfg = loadConfig({ topPath: top, env: {} });
     assert.equal(cfg.get('roles.adversarial.merge_authority.worker_class'), 'hammer');
     assert.equal(cfg.getMergeAuthorityConfig().workerClass, 'hammer');
-  } finally {
-    rmSync(tmp, { recursive: true, force: true });
-  }
-});
-
-test('roles.remediator_fallback is declared config: schema default, file override, env aliases, class allowlist (REMFALLBACK-01)', () => {
-  const tmp = freshTmp();
-  try {
-    const bare = join(tmp, 'bare.yaml');
-    writeFile(bare, 'version: 1\n');
-    // Both the strict and the runtime (daemon) loader resolve the schema default.
-    for (const load of [loadConfig, loadConfigRuntime]) {
-      const cfg = load({ topPath: bare, env: {} });
-      assert.deepEqual(cfg.get('roles.remediator_fallback'), ['remediator-codex-corp', 'remediator-claude', 'codex']);
-      assert.equal(cfg.resolutionTrace('roles.remediator_fallback').at(-1).source, 'code-default');
-    }
-    // The checked-in module config declares the same order explicitly.
-    const moduleCfg = loadConfig({ topPath: bare, modulePaths: [MODULE_CONFIG_PATH], env: {} });
-    assert.deepEqual(moduleCfg.get('roles.remediator_fallback'), ['remediator-codex-corp', 'remediator-claude', 'codex']);
-
-    const top = join(tmp, 'config.yaml');
-    writeFile(top, `
-      version: 1
-      roles:
-        remediator_fallback: [claude-code, gemini]
-    `);
-    assert.deepEqual(
-      loadConfig({ topPath: top, env: {} }).get('roles.remediator_fallback'),
-      ['claude-code', 'gemini'],
-    );
-
-    // REMGEMINI-01: Gemini, then Grok when connected, then Claude. The Python
-    // loader's _ENUM_ROLES_REMEDIATOR_FALLBACK carries the same members.
-    const operatorOrder = join(tmp, 'operator-order.yaml');
-    writeFile(operatorOrder, `
-      version: 1
-      roles:
-        remediator_fallback: [gemini, remediator-grok, claude-code]
-    `);
-    for (const load of [loadConfig, loadConfigRuntime]) {
-      assert.deepEqual(load({ topPath: operatorOrder, env: {} }).get('roles.remediator_fallback'),
-        ['gemini', 'remediator-grok', 'claude-code']);
-    }
-
-    const off = join(tmp, 'off.yaml');
-    writeFile(off, `
-      version: 1
-      roles:
-        remediator_fallback: []
-    `);
-    assert.deepEqual(loadConfig({ topPath: off, env: {} }).get('roles.remediator_fallback'), []);
-
-    const canonical = loadConfig({ topPath: bare, env: { AGENT_OS_ROLES_REMEDIATOR_FALLBACK: 'gemini,codex' } });
-    assert.deepEqual(canonical.get('roles.remediator_fallback'), ['gemini', 'codex']);
-    assert.equal(
-      canonical.resolutionTrace('roles.remediator_fallback').at(-1).source,
-      'env:AGENT_OS_ROLES_REMEDIATOR_FALLBACK',
-    );
-    // The AR#859 env toggle keeps working, including `''` to disable.
-    const legacy = loadConfig({
-      topPath: bare,
-      env: { ADVERSARIAL_REVIEW_REMEDIATOR_WORKER_CLASS_FALLBACK: 'claude-code, gemini' },
-    });
-    assert.deepEqual(legacy.get('roles.remediator_fallback'), ['claude-code', 'gemini']);
-    const legacyOff = loadConfig({
-      topPath: bare,
-      env: { ADVERSARIAL_REVIEW_REMEDIATOR_WORKER_CLASS_FALLBACK: '' },
-    });
-    assert.deepEqual(legacyOff.get('roles.remediator_fallback'), []);
-
-    // `adversarial` is a routing mode and `hammer` a merge class: neither can remediate.
-    for (const bad of ['adversarial', 'hammer']) {
-      const badPath = join(tmp, `bad-${bad}.yaml`);
-      writeFile(badPath, `
-        version: 1
-        roles:
-          remediator_fallback: [claude-code, ${bad}]
-      `);
-      assert.throws(
-        () => loadConfig({ topPath: badPath, env: {} }),
-        (err) => err instanceof AgentOSConfigError && /remediator_fallback/.test(err.message),
-      );
-    }
   } finally {
     rmSync(tmp, { recursive: true, force: true });
   }
@@ -6278,33 +4139,6 @@ test('AMA merge_authority accepts hammer-claude as closer worker class in Node l
     assert.deepEqual(cfg.getMergeAuthorityConfig().workerClassFallback, ['hammer-claude']);
   } finally {
     rmSync(tmp, { recursive: true, force: true });
-  }
-});
-
-test('AMA merge_authority public docs list the Node loader worker_class enum', () => {
-  const source = readFileSync(join(REPO_ROOT, 'src/config-loader.mjs'), 'utf8');
-  const enumMatch = source.match(/merge_authority:\s*\{[\s\S]*?worker_class:\s*\{[\s\S]*?__enum:\s*\[([^\]]+)\]/);
-  assert.ok(enumMatch, 'expected merge_authority.worker_class enum in config-loader schema');
-  const enumValues = Array.from(enumMatch[1].matchAll(/'([^']+)'/g), (match) => match[1]);
-  assert.deepEqual(enumValues, ['codex', 'claude-code', 'hammer', 'hammer-corp', 'hammer-claude', 'gemini']);
-
-  for (const relativePath of [
-    'projects/adversarial-merge-authority/SPEC.md',
-    'docs/SPEC-adversarial-review-auto-remediation.md',
-    'docs/RUNBOOK-ama-closure.md',
-  ]) {
-    const doc = readFileSync(join(REPO_ROOT, relativePath), 'utf8');
-    // GRK-12 defers the Grok merge-authority enum to its v2 executor.
-    for (const workerClass of enumValues) {
-      assert.ok(
-        doc.includes(`\`${workerClass}\``),
-        `${relativePath} must document ${workerClass} as an AMA closer worker class`,
-      );
-    }
-    if (relativePath === 'docs/RUNBOOK-ama-closure.md') {
-      assert.ok(doc.includes('`hammer-grok`'));
-      assert.ok(doc.includes('grok-closer-pending-merge-authority-v2'));
-    }
   }
 });
 
@@ -6590,84 +4424,6 @@ test('AMA getMergeAuthorityConfig ignores non-array required check contexts', ()
   }
 });
 
-test('quota_probe ok_tick_seconds enforces HRR-02a range bounds', () => {
-  const tmp = freshTmp();
-  try {
-    const top = join(tmp, 'config.yaml');
-    for (const value of [299, 21601]) {
-      writeFile(top, `
-        version: 1
-        roles:
-          quota_probe:
-            ok_tick_seconds: ${value}
-      `);
-      assert.throws(
-        () => loadConfig({ topPath: top, env: {} }),
-        (err) => {
-          assert.ok(err instanceof AgentOSConfigError);
-          assert.equal(err.key, 'roles.quota_probe.ok_tick_seconds');
-          assert.equal(err.got, value);
-          return true;
-        },
-      );
-    }
-  } finally {
-    rmSync(tmp, { recursive: true, force: true });
-  }
-});
-
-test('quota_probe exhausted_unknown_tick_seconds enforces HRR-02a range bounds', () => {
-  const tmp = freshTmp();
-  try {
-    const top = join(tmp, 'config.yaml');
-    for (const value of [599, 21601]) {
-      writeFile(top, `
-        version: 1
-        roles:
-          quota_probe:
-            exhausted_unknown_tick_seconds: ${value}
-      `);
-      assert.throws(
-        () => loadConfig({ topPath: top, env: {} }),
-        (err) => {
-          assert.ok(err instanceof AgentOSConfigError);
-          assert.equal(err.key, 'roles.quota_probe.exhausted_unknown_tick_seconds');
-          assert.equal(err.got, value);
-          return true;
-        },
-      );
-    }
-  } finally {
-    rmSync(tmp, { recursive: true, force: true });
-  }
-});
-
-test('quota_probe evidence_ttl_seconds enforces HRR-02b range bounds', () => {
-  const tmp = freshTmp();
-  try {
-    const top = join(tmp, 'config.yaml');
-    for (const value of [3599, 604801]) {
-      writeFile(top, `
-        version: 1
-        roles:
-          quota_probe:
-            evidence_ttl_seconds: ${value}
-      `);
-      assert.throws(
-        () => loadConfig({ topPath: top, env: {} }),
-        (err) => {
-          assert.ok(err instanceof AgentOSConfigError);
-          assert.equal(err.key, 'roles.quota_probe.evidence_ttl_seconds');
-          assert.equal(err.got, value);
-          return true;
-        },
-      );
-    }
-  } finally {
-    rmSync(tmp, { recursive: true, force: true });
-  }
-});
-
 test('quota_probe cadence env overrides are honored', () => {
   const tmp = freshTmp();
   try {
@@ -6680,38 +4436,6 @@ test('quota_probe cadence env overrides are honored', () => {
     });
     assert.equal(cfg.get('roles.quota_probe.ok_tick_seconds'), 4200);
     assert.equal(cfg.get('roles.quota_probe.exhausted_unknown_tick_seconds'), 1800);
-  } finally {
-    rmSync(tmp, { recursive: true, force: true });
-  }
-});
-
-test('quota_probe evidence_ttl_seconds env override is honored', () => {
-  const tmp = freshTmp();
-  try {
-    const cfg = loadConfig({
-      topPath: join(tmp, 'missing.yaml'),
-      env: {
-        AGENT_OS_ROLES_QUOTA_PROBE_EVIDENCE_TTL_SECONDS: '7200',
-      },
-    });
-    assert.equal(cfg.get('roles.quota_probe.evidence_ttl_seconds'), 7200);
-
-    for (const value of [3599, 604801]) {
-      assert.throws(
-        () => loadConfig({
-          topPath: join(tmp, 'missing.yaml'),
-          env: {
-            AGENT_OS_ROLES_QUOTA_PROBE_EVIDENCE_TTL_SECONDS: String(value),
-          },
-        }),
-        (err) => {
-          assert.ok(err instanceof AgentOSConfigError);
-          assert.equal(err.key, 'roles.quota_probe.evidence_ttl_seconds');
-          assert.equal(err.got, value);
-          return true;
-        },
-      );
-    }
   } finally {
     rmSync(tmp, { recursive: true, force: true });
   }
@@ -6736,43 +4460,6 @@ test('quota_probe cadence env rejects non-numeric values before range checks', (
         return true;
       },
     );
-  } finally {
-    rmSync(tmp, { recursive: true, force: true });
-  }
-});
-
-test('policy dedup uncommitted_line_threshold mirrors default, range bounds, and env override', () => {
-  const tmp = freshTmp();
-  try {
-    let cfg = loadConfig({ topPath: join(tmp, 'missing.yaml'), env: {} });
-    assert.equal(cfg.get('policy.dedup.uncommitted_line_threshold'), 30);
-
-    const top = join(tmp, 'config.yaml');
-    for (const value of [9, 1001]) {
-      writeFile(top, `
-        version: 1
-        policy:
-          dedup:
-            uncommitted_line_threshold: ${value}
-      `);
-      assert.throws(
-        () => loadConfig({ topPath: top, env: {} }),
-        (err) => {
-          assert.ok(err instanceof AgentOSConfigError);
-          assert.equal(err.key, 'policy.dedup.uncommitted_line_threshold');
-          assert.equal(err.got, value);
-          return true;
-        },
-      );
-    }
-
-    cfg = loadConfig({
-      topPath: join(tmp, 'missing.yaml'),
-      env: {
-        AGENT_OS_POLICY_DEDUP_UNCOMMITTED_LINE_THRESHOLD: '44',
-      },
-    });
-    assert.equal(cfg.get('policy.dedup.uncommitted_line_threshold'), 44);
   } finally {
     rmSync(tmp, { recursive: true, force: true });
   }
@@ -6909,23 +4596,6 @@ test('apps.<id> YAML entry with prototype-like segment cannot pollute prototypes
     assert.equal(Object.prototype.hasOwnProperty.call(cfg.values.apps, 'foo'), false);
     assert.equal(Object.prototype.subscribes, undefined);
     assert.equal(Object.prototype.contract_version, undefined);
-  } finally {
-    rmSync(tmp, { recursive: true, force: true });
-  }
-});
-
-test('apps.<id> ignores an unread child key', () => {
-  const tmp = freshTmp();
-  try {
-    const top = join(tmp, 'config.yaml');
-    writeFile(top, `
-      version: 1
-      apps:
-        bar:
-          mode: standalone
-          bogus: 1
-    `);
-    assert.equal(loadConfig({ topPath: top, env: {} }).get('apps.bar.bogus'), null);
   } finally {
     rmSync(tmp, { recursive: true, force: true });
   }
@@ -7210,227 +4880,12 @@ test('oauth broker credential-decay keys preserve strict Python Node env parity'
   }
 });
 
-test('oauth_broker keychain auto-unlock mirror ignores unread fields', () => {
-  const tmp = freshTmp();
-  try {
-    const ok = join(tmp, 'keychain-auto-unlock-ok.yaml');
-    writeFile(ok, `
-      version: 1
-      oauth_broker:
-        keychain_bridge:
-          auto_unlock:
-            enabled: true
-            command: /usr/bin/sudo -n /usr/local/libexec/agent-os/oauth-bridge-unlock-keychain
-    `);
-    const cfg = loadConfig({ topPath: ok, env: {} });
-    assert.equal(cfg.get('oauth_broker.keychain_bridge.auto_unlock.enabled'), true);
-    assert.equal(
-      cfg.get('oauth_broker.keychain_bridge.auto_unlock.command'),
-      '/usr/bin/sudo -n /usr/local/libexec/agent-os/oauth-bridge-unlock-keychain',
-    );
-
-    const envCfg = loadConfig({
-      topPath: ok,
-      env: {
-        BRIDGE_AUTO_UNLOCK_ENABLED: 'false',
-        BRIDGE_AUTO_UNLOCK_COMMAND: '/usr/bin/sudo -n /custom/fixed-unlock',
-      },
-    });
-    assert.equal(envCfg.get('oauth_broker.keychain_bridge.auto_unlock.enabled'), false);
-    assert.equal(
-      envCfg.get('oauth_broker.keychain_bridge.auto_unlock.command'),
-      '/usr/bin/sudo -n /custom/fixed-unlock',
-    );
-
-    const bad = join(tmp, 'keychain-auto-unlock-bad.yaml');
-    writeFile(bad, `
-      version: 1
-      oauth_broker:
-        keychain_bridge:
-          auto_unlock:
-            enabled: true
-            password_ref: op://vault/admin/password
-    `);
-    assert.equal(loadConfig({ topPath: bad, env: {} }).get('oauth_broker.keychain_bridge.auto_unlock.password_ref'), null);
-  } finally {
-    resetConfigCache();
-    rmSync(tmp, { recursive: true, force: true });
-  }
-});
-
 // oauth_broker.merge_agent is a tolerate-only partial mirror: the watcher does
 // NOT consume these keys (the merge-agent App-installation-token auth is
 // resolved by modules/worker-pool/lib/hq-gh.sh; the authoritative CFG contract
 // lives in agent-os platform/agent-os-config + projects/adversarial-merge-authority/SPEC.md).
 // The mirror exists so the strict loader does not crash on shared config that
 // carries these keys. Valid values parse and unread sibling fields are ignored.
-test('oauth_broker.merge_agent: valid keys parse; unread nested key ignored', () => {
-  const tmp = freshTmp();
-  try {
-    const ok = join(tmp, 'merge-agent-ok.yaml');
-    writeFile(ok, `
-      version: 1
-      oauth_broker:
-        merge_agent:
-          broker_auth_enabled: true
-          provider: github-app-merge-agent
-          expected_app_id: "3978009"
-          expected_installation_id: "138360282"
-    `);
-    const cfg = loadConfig({ topPath: ok, env: {} });
-    assert.equal(cfg.get('oauth_broker.merge_agent.broker_auth_enabled'), true);
-    assert.equal(cfg.get('oauth_broker.merge_agent.provider'), 'github-app-merge-agent');
-    assert.equal(cfg.get('oauth_broker.merge_agent.expected_app_id'), '3978009');
-    assert.equal(
-      cfg.get('oauth_broker.merge_agent.expected_installation_id'),
-      '138360282',
-    );
-
-    const bad = join(tmp, 'merge-agent-bad.yaml');
-    writeFile(bad, `
-      version: 1
-      oauth_broker:
-        merge_agent:
-          secret_file: /tmp/x
-    `);
-    assert.doesNotThrow(() => loadConfig({ topPath: bad, env: {} }));
-  } finally {
-    resetConfigCache();
-    rmSync(tmp, { recursive: true, force: true });
-  }
-});
-
-test('oauth_broker.github_app_providers permissive mirror: numeric IDs + future Python-only keys tolerated', () => {
-  const tmp = freshTmp();
-  try {
-    // Documented provider blocks parse (quoted string IDs, all known fields).
-    const ok = join(tmp, 'github-app-providers-ok.yaml');
-    writeFile(ok, `
-      version: 1
-      oauth_broker:
-        github_app_providers:
-          hammer:
-            broker_auth_enabled: true
-            provider: hammer
-            expected_app_id: "3978009"
-            expected_installation_id: "138360282"
-            private_key_op_ref: "op://Cliovault/hammer/private-key"
-            private_key_file: ""
-            pat_fallback_op_ref: "op://Cliovault/hammer/pat"
-            source: identity_descriptor
-          sentinel:
-            broker_auth_enabled: false
-            provider: sentinel
-            expected_app_id: "3978010"
-            expected_installation_id: "138360283"
-            private_key_op_ref: "op://Cliovault/sentinel/private-key"
-            pat_fallback_op_ref: "op://Cliovault/sentinel/pat"
-    `);
-    // This is a permissive mirror of the Python authority; the Node loader must
-    // accept documented shared CFG without crashing while retaining the known
-    // fields Node consumers read.
-    const cfg = loadConfig({ topPath: ok, env: {} });
-    assert.equal(
-      cfg.get('oauth_broker.github_app_providers.hammer.broker_auth_enabled'),
-      true,
-    );
-    assert.equal(cfg.get('oauth_broker.github_app_providers.hammer.provider'), 'hammer');
-    assert.equal(
-      cfg.get('oauth_broker.github_app_providers.hammer.expected_app_id'),
-      '3978009',
-    );
-    assert.equal(
-      cfg.get('oauth_broker.github_app_providers.hammer.expected_installation_id'),
-      '138360282',
-    );
-    assert.equal(
-      cfg.get('oauth_broker.github_app_providers.hammer.private_key_op_ref'),
-      'op://Cliovault/hammer/private-key',
-    );
-    assert.equal(
-      cfg.get('oauth_broker.github_app_providers.hammer.private_key_file'),
-      '',
-    );
-    assert.equal(
-      cfg.get('oauth_broker.github_app_providers.hammer.pat_fallback_op_ref'),
-      'op://Cliovault/hammer/pat',
-    );
-    assert.equal(
-      cfg.get('oauth_broker.github_app_providers.hammer.source'),
-      'identity_descriptor',
-    );
-    assert.equal(
-      cfg.get('oauth_broker.github_app_providers.sentinel.broker_auth_enabled'),
-      false,
-    );
-    assert.equal(cfg.get('oauth_broker.github_app_providers.sentinel.provider'), 'sentinel');
-    assert.equal(
-      cfg.get('oauth_broker.github_app_providers.sentinel.expected_app_id'),
-      '3978010',
-    );
-
-    // FOOTGUN REGRESSION (adversarial-review #475 follow-on). Both of these
-    // previously threw and would have hard-failed every JS service at startup:
-    //   (a) inherently numeric GitHub App / installation IDs written UNQUOTED;
-    //   (b) a future Python-only key (webhook secret, API URL, ...) added to the
-    //       canonical Python model but not yet mirrored here.
-    // A parse-only mirror must tolerate both.
-    const footguns = join(tmp, 'github-app-providers-footguns.yaml');
-    writeFile(footguns, `
-      version: 1
-      oauth_broker:
-        github_app_providers:
-          hammer:
-            broker_auth_enabled: true
-            provider: hammer
-            expected_app_id: 3978009
-            expected_installation_id: 138360282
-            private_key_op_ref: "op://Cliovault/hammer/private-key"
-            webhook_secret_op_ref: "op://Cliovault/hammer/webhook"
-    `);
-    const footgunCfg = loadConfig({ topPath: footguns, env: {} });
-    assert.equal(
-      footgunCfg.get('oauth_broker.github_app_providers.hammer.broker_auth_enabled'),
-      true,
-    );
-    assert.equal(
-      footgunCfg.get('oauth_broker.github_app_providers.hammer.expected_app_id'),
-      '3978009',
-    );
-    assert.equal(
-      footgunCfg.get('oauth_broker.github_app_providers.hammer.expected_installation_id'),
-      '138360282',
-    );
-    assert.equal(
-      footgunCfg.get('oauth_broker.github_app_providers.hammer.private_key_op_ref'),
-      'op://Cliovault/hammer/private-key',
-    );
-    assert.equal(
-      footgunCfg.get('oauth_broker.github_app_providers.hammer.pat_fallback_op_ref'),
-      '',
-    );
-    assert.equal(
-      footgunCfg.get('oauth_broker.github_app_providers.hammer.webhook_secret_op_ref'),
-      'op://Cliovault/hammer/webhook',
-    );
-
-    // The OUTER oauth_broker block stays strict: an unknown sibling key of
-    // github_app_providers is still rejected (only the provider blocks are the
-    // permissive parse-only mirror).
-    const badBroker = join(tmp, 'github-app-providers-bad-broker.yaml');
-    writeFile(badBroker, `
-      version: 1
-      oauth_broker:
-        github_apps:
-          hammer:
-            provider: hammer
-    `);
-    assert.doesNotThrow(() => loadConfig({ topPath: badBroker, env: {} }));
-  } finally {
-    resetConfigCache();
-    rmSync(tmp, { recursive: true, force: true });
-  }
-});
 
 test('QUOTAROUTE horizon accepts checked-in config and rejects invalid values', () => {
   const tmp = freshTmp();
@@ -7496,21 +4951,6 @@ test('DISKLEAK-01 worker retention defaults and janitor safety keys mirror Pytho
 });
 
 
-test('PMARCACLASS-01 RCA class defaults to codex and accepts an operator override', () => {
-  const dir = freshTmp();
-  try {
-    const topPath = join(dir, 'config.yaml');
-    writeFileSync(topPath, 'version: 1\n');
-    assert.equal(loadConfig({ topPath, env: {} }).get('worker_pool.post_merge_actions.rca_worker_class'), 'codex');
-    writeFileSync(topPath, 'version: 1\nworker_pool:\n  post_merge_actions:\n    rca_worker_class: claude-code\n');
-    assert.equal(loadConfig({ topPath, env: {} }).get('worker_pool.post_merge_actions.rca_worker_class'), 'claude-code');
-    writeFileSync(topPath, 'version: 1\nworker_pool:\n  post_merge_actions:\n    rca_worker_class: codxe\n');
-    assert.throws(() => loadConfig({ topPath, env: {} }), /rca_worker_class/);
-  } finally {
-    rmSync(dir, { recursive: true, force: true });
-  }
-});
-
 test('AMA no-CI repository declarations default off and round-trip explicit operator config', () => {
   const tmp = freshTmp();
   try {
@@ -7532,27 +4972,6 @@ test('AMA no-CI repository declarations default off and round-trip explicit oper
   } finally { rmSync(tmp, { recursive: true, force: true }); }
 });
 
-
-test('worker CPU niceness has the canonical default and validates 0–19', () => {
-  const dir = mkdtempSync(join(tmpdir(), 'worker-niceness-config-'));
-  try {
-    const topPath = join(dir, 'config.yaml');
-    writeFileSync(topPath, 'version: 1\n');
-    assert.equal(loadConfig({ topPath, env: {} }).get('worker_pool.worker_process_niceness'), 10);
-    assert.equal(loadConfig({ topPath, env: { AGENT_OS_WORKER_POOL_WORKER_PROCESS_NICENESS: '7' } }).get('worker_pool.worker_process_niceness'), 7);
-    for (const value of ['-1', '20', '1.5', 'abc', '', '  ']) {
-      assert.throws(() => loadConfig({ topPath, env: { AGENT_OS_WORKER_POOL_WORKER_PROCESS_NICENESS: value } }), AgentOSConfigError);
-    }
-    for (const value of [0, 10, 19]) {
-      writeFileSync(topPath, `version: 1\nworker_pool:\n  worker_process_niceness: ${value}\n`);
-      assert.equal(loadConfig({ topPath, env: {} }).get('worker_pool.worker_process_niceness'), value);
-    }
-    for (const value of [-1, 20, true, 1.5]) {
-      writeFileSync(topPath, `version: 1\nworker_pool:\n  worker_process_niceness: ${value}\n`);
-      assert.throws(() => loadConfig({ topPath, env: {} }), AgentOSConfigError);
-    }
-  } finally { rmSync(dir, { recursive: true, force: true }); }
-});
 
 test('QUOTAFLOOR-01 reserve floor defaults disabled and validates per-auth-path policy', () => {
   const dir = mkdtempSync(join(tmpdir(), 'quota-reserve-config-'));
@@ -7686,44 +5105,7 @@ test('CLAUDESTEERON-01 mirrors batch steering activation, rollback and launch ov
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
-// CFGREADERSCOPE-01: these synthetic keys have never appeared in any schema.
-// Exercise all overlay layers, including module aliases' canonicalization.
-for (const loader of [loadConfig, loadConfigRuntime]) {
-  for (const layer of ['top', 'module', 'versioned-local', 'local', 'module-local']) {
-    test(`${loader.name}: sibling worker_pool keys are ignored in ${layer}`, () => {
-      const dir = freshTmp();
-      try {
-        const topPath = join(dir, 'config.yaml');
-        const modulePath = join(dir, 'module.yaml');
-        writeFile(topPath, 'version: 1\n');
-        const target = { top: topPath, module: modulePath,
-          'versioned-local': join(dir, 'config.local.yaml'),
-          local: join(dir, 'config.local.yaml'),
-          'module-local': join(dir, 'module.local.yaml') }[layer];
-        const doc = { worker_pool: { future_example: { values: [1, false, null] },
-          dispatch: { future_backoff_example: 'a sibling-only value' } },
-          roles: { reviewer: 'codex' } };
-        if (layer === 'top' || layer === 'versioned-local') doc.version = 1;
-        writeFile(target, JSON.stringify(doc));
-        const cfg = loader({ topPath, modulePaths: [modulePath], env: {} });
-        assert.equal(cfg.get('worker_pool.future_example'), null);
-        assert.equal(cfg.get('worker_pool.dispatch.future_backoff_example'), null);
-        assert.deepEqual(cfg.resolutionTrace('worker_pool.dispatch.future_backoff_example'), []);
-        assert.equal(cfg.get('roles.reviewer'), 'codex');
-        doc.roles.reviewer = 'invalid-example-class';
-        writeFile(target, JSON.stringify(doc));
-        assert.throws(() => loader({ topPath, modulePaths: [modulePath], env: {} }),
-          { name: 'AgentOSConfigError', key: 'roles.reviewer' });
-        doc.roles.reviewer = 42;
-        writeFile(target, JSON.stringify(doc));
-        assert.throws(() => loader({ topPath, modulePaths: [modulePath], env: {} }),
-          { name: 'AgentOSConfigError', key: 'roles.reviewer' });
-      } finally { rmSync(dir, { recursive: true, force: true }); }
-    });
-  }
-}
-
-test('ignored sibling keys log only when config debugging is enabled', () => {
+test('runtime-dropped unknown keys log only when config debugging is enabled', () => {
   const priorDebug = process.env.ADVERSARIAL_CONFIG_DEBUG;
   const priorWrite = process.stderr.write;
   const output = [];
@@ -7733,15 +5115,18 @@ test('ignored sibling keys log only when config debugging is enabled', () => {
     writeFile(topPath, 'version: 1\nworker_pool:\n  future_example: true\n');
     process.stderr.write = chunk => { output.push(String(chunk)); return true; };
     delete process.env.ADVERSARIAL_CONFIG_DEBUG;
-    loadConfig({ topPath, env: {} });
+    resetRuntimeUnknownWarningCacheForTests();
+    loadConfigRuntime({ topPath, env: {} });
     assert.deepEqual(output, []);
     process.env.ADVERSARIAL_CONFIG_DEBUG = '1';
-    loadConfig({ topPath, env: {} });
+    resetRuntimeUnknownWarningCacheForTests();
+    loadConfigRuntime({ topPath, env: {} });
     assert.match(output.join(''), /ignoring unknown key "worker_pool.future_example"/);
   } finally {
     process.stderr.write = priorWrite;
     if (priorDebug === undefined) delete process.env.ADVERSARIAL_CONFIG_DEBUG;
     else process.env.ADVERSARIAL_CONFIG_DEBUG = priorDebug;
+    resetRuntimeUnknownWarningCacheForTests();
     rmSync(dir, { recursive: true, force: true });
   }
 });

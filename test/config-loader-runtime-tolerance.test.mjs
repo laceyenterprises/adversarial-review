@@ -57,7 +57,7 @@ function captureWarns(fn) {
   return warnings;
 }
 
-test('runtime load tolerates an unknown checked-in top-level key and startup load also tolerates it', () => {
+test('runtime load tolerates an unknown checked-in top-level key; startup load refuses it like Python', () => {
   withTempTopConfig(
     `version: 1
 roots:
@@ -82,7 +82,7 @@ roots:
       });
       assert.equal(warnings.filter((line) => line.includes('roots.future_runtime_home')).length, 0);
 
-      assert.doesNotThrow(() => loadConfig({ topPath, modulePaths: [], env: {} }));
+      assert.throws(() => loadConfig({ topPath, modulePaths: [], env: {} }), /roots\.future_runtime_home: unknown key/);
     },
   );
 });
@@ -114,50 +114,30 @@ test('runtime load tolerates an unknown checked-in module key without warnings',
       });
       assert.equal(warnings.filter((line) => line.includes('roles.future_worker_role')).length, 0);
 
-      assert.doesNotThrow(() => loadConfig({ topPath, modulePaths: [modulePath], env: {} }));
+      assert.throws(() => loadConfig({ topPath, modulePaths: [modulePath], env: {} }), /roles\.future_worker_role: unknown key/);
     },
   );
 });
 
-test('startup load ignores a foreign nested key under a shared root', () => {
+test('startup load refuses an unknown nested key under a shared root', () => {
   withTempTopConfig(
     'version: 1\nmain_catchup:\n  some_future_sibling_module_key: true\n',
     (topPath) => {
-      const cfg = loadConfig({ topPath, env: {} });
-      assert.equal(cfg.get('main_catchup.some_future_sibling_module_key'), null);
+      assert.throws(() => loadConfig({ topPath, env: {} }), /main_catchup\.some_future_sibling_module_key: unknown key/);
+      assert.equal(loadConfigRuntime({ topPath, env: {} }).get('main_catchup.some_future_sibling_module_key'), null);
     },
   );
 });
 
-test('runtime metadata-key tolerance remains reachable and debug notes are emitted once', () => {
+test('metadata keys are skipped by startup and runtime loads, as in Python', () => {
   withTempTopConfig(
     'version: 1\nroots:\n  hq: /from-top\n  __future_runtime_home: /newer-than-loader\n',
     (topPath) => {
-      assert.throws(() => loadConfig({ topPath, env: {} }), /roots\.__future_runtime_home: unknown key/);
-      const priorDebug = process.env.ADVERSARIAL_CONFIG_DEBUG;
-      const priorWrite = process.stderr.write;
-      const notes = [];
-      resetRuntimeUnknownWarningCacheForTests();
-      process.env.ADVERSARIAL_CONFIG_DEBUG = '1';
-      process.stderr.write = (chunk) => {
-        notes.push(String(chunk));
-        return true;
-      };
-      try {
-        for (let i = 0; i < 2; i++) {
-          const cfg = loadConfigRuntime({ topPath, env: {} });
-          assert.equal(cfg.get('roots.hq'), '/from-top');
-          assert.equal(cfg.get('roots.__future_runtime_home'), null);
-          assert.deepEqual(cfg.runtimeDroppedUnknownKeys, [
-            { key: 'roots.__future_runtime_home', source: topPath, hint: '' },
-          ]);
-        }
-        assert.equal(notes.filter(note => note.includes('roots.__future_runtime_home')).length, 1);
-      } finally {
-        process.stderr.write = priorWrite;
-        if (priorDebug === undefined) delete process.env.ADVERSARIAL_CONFIG_DEBUG;
-        else process.env.ADVERSARIAL_CONFIG_DEBUG = priorDebug;
-        resetRuntimeUnknownWarningCacheForTests();
+      for (const load of [loadConfig, loadConfigRuntime]) {
+        const cfg = load({ topPath, env: {} });
+        assert.equal(cfg.get('roots.hq'), '/from-top');
+        assert.equal(cfg.get('roots.__future_runtime_home'), null);
+        assert.deepEqual(cfg.runtimeDroppedUnknownKeys, []);
       }
     },
   );

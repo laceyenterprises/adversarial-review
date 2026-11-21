@@ -106,10 +106,8 @@ test('Claude first-output deadline is disabled by default and opt-in configurabl
 test('resolveProgressTimeoutMs follows the reviewer env override parser shape', () => {
   assert.equal(resolveProgressTimeoutMs({}), DEFAULT_PROGRESS_TIMEOUT_MS);
   assert.equal(resolveProgressTimeoutMs({ ADVERSARIAL_REVIEWER_PROGRESS_TIMEOUT_MS: '2500' }), 2500);
-  assert.throws(
-    () => resolveProgressTimeoutMs({ ADVERSARIAL_REVIEWER_PROGRESS_TIMEOUT_MS: '' }),
-    AgentOSConfigError
-  );
+  // ONS-07: an empty env value is absent (Compose ${VAR:-}), as in Python.
+  assert.equal(resolveProgressTimeoutMs({ ADVERSARIAL_REVIEWER_PROGRESS_TIMEOUT_MS: '' }), DEFAULT_PROGRESS_TIMEOUT_MS);
   assert.throws(
     () => resolveProgressTimeoutMs({ ADVERSARIAL_REVIEWER_PROGRESS_TIMEOUT_MS: '2500.9' }),
     AgentOSConfigError

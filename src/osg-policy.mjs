@@ -1,7 +1,8 @@
 /** OSG-18 read-only policy contract. Availability and route authority stay with callers. */
-import { openSync, readSync, closeSync, fstatSync, constants, readFileSync } from 'node:fs';
+import { openSync, readSync, closeSync, fstatSync, constants } from 'node:fs';
+import { osgArmFields } from './config-schema.mjs';
 
-const armFields = JSON.parse(readFileSync(new URL('./osg-config-schema.v1.json', import.meta.url), 'utf8')).__keys.arms.__item.__keys;
+const armFields = osgArmFields();
 const roles = ['builder', 'reviewer', 'remediator'];
 const taskTypes = ['build', 'fix', 'refactor/chore', 'docs/config'];
 const maxBytes = 131072;

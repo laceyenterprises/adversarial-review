@@ -30,8 +30,8 @@ test('overlay absent: effective config is unchanged and the profile is core', ()
     assert.equal(cfg.profile, 'core');
     assert.equal(cfg.profileSource, 'default');
     assert.equal(cfg.get('entitlements.fixture-agent.gh_bot_login'), 'base-bot[bot]');
-    // The resolved profile is exposed as a property, not injected into values.
-    assert.equal(Object.hasOwn(cfg.values, 'profile'), false);
+    // ONS-07: CFG's code default for the `profile` key is `core`, as in Python.
+    assert.equal(cfg.get('profile'), 'core');
   } finally {
     f.cleanup();
   }

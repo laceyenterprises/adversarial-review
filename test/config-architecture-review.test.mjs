@@ -5,39 +5,32 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { validateSchema, loadConfig } from '../src/config-loader.mjs';
 
-const architectureInputs = [
-  {
-    thresholds: { scars: 30 }, detectors: [{ id: 'example', kind: 'nxa', path: 'data/example.jsonl', paths: ['modules/example'], consumers: [] }],
-  },
-  { future_key: true },
-  // Python owns threshold validation; this unread namespace cannot gate Node.
-  { thresholds: { scars: -1 } },
+// ONS-07: architecture_review validates against the generated CFG schema.
+// Expected verdicts were recorded from the Python loader (one-schema@6ab5e7ac02db).
+const accepted = {
+  thresholds: { scars: 30 },
+  detectors: [{ id: 'example', kind: 'nxa', path: 'data/example.jsonl', paths: ['modules/example'], consumers: [] }],
+};
+const refused = [
+  [{ future_key: true }, /architecture_review\.future_key: unknown key \(strict schema\)/],
+  [{ thresholds: { scars: -1 } }, /architecture_review\.thresholds\.scars: expected >= 0, got -1/],
 ];
 
-test('ARCH sibling settings are ignored by the Node schema validator', () => {
-  for (const architecture_review of architectureInputs) {
-    const validated = validateSchema({ version: 1, architecture_review });
-    assert.equal(Object.hasOwn(validated, 'architecture_review'), false);
+test('ARCH settings validate like the Python loader', () => {
+  assert.deepEqual(validateSchema({ version: 1, architecture_review: accepted }).architecture_review, accepted);
+  for (const [architecture_review, error] of refused) {
+    assert.throws(() => validateSchema({ version: 1, architecture_review }), error);
   }
 });
 
-test('ARCH sibling settings cannot stop checked-in or local config loads', () => {
+test('ARCH settings load from checked-in and local layers', () => {
   const dir = mkdtempSync(join(tmpdir(), 'arch-config-'));
   try {
     const topPath = join(dir, 'config.yaml');
     for (const layer of ['checked-in', 'local']) {
-      for (const architecture_review of architectureInputs) {
-        writeFileSync(topPath, JSON.stringify({
-          version: 1,
-          ...(layer === 'checked-in' ? { architecture_review } : {}),
-        }));
-        writeFileSync(join(dir, 'config.local.yaml'), JSON.stringify(
-          layer === 'local' ? { architecture_review } : {},
-        ));
-        const cfg = loadConfig({ topPath, env: {} });
-        assert.equal(cfg.get('architecture_review'), null);
-        assert.equal(cfg.get('architecture_review.thresholds.scars'), null);
-      }
+      writeFileSync(topPath, JSON.stringify({ version: 1, ...(layer === 'checked-in' ? { architecture_review: accepted } : {}) }));
+      writeFileSync(join(dir, 'config.local.yaml'), JSON.stringify(layer === 'local' ? { architecture_review: accepted } : {}));
+      assert.equal(loadConfig({ topPath, env: {} }).get('architecture_review.thresholds.scars'), 30);
     }
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });

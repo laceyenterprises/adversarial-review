@@ -79,7 +79,9 @@ test('cached loads tolerate a missing public hygiene projection', (t) => {
   }
 });
 
-test('identity fields merge across layers before completeness validation', () => {
+// ONS-07: as in the Python loader, every layer's identity is complete on its
+// own (CFG marks name and email required); a later complete identity wins.
+test('identity records are complete per layer and replace field by field', () => {
   const dir = mkdtempSync(join(tmpdir(), 'public-hygiene-layers-'));
   try {
     const topPath = join(dir, 'config.yaml');
@@ -87,20 +89,15 @@ test('identity fields merge across layers before completeness validation', () =>
     const identity = { name: 'Fixture Bot', email: 'fixture@example.invalid' };
     const doc = identities => ({ version: 1, worker_pool: { public_hygiene: { identities } } });
     writeFileSync(topPath, JSON.stringify(doc({ codex: identity })));
-    writeFileSync(localPath, JSON.stringify(doc({ codex: { email: 'overlay@example.invalid' } })));
+    writeFileSync(localPath, JSON.stringify(doc({ codex: { ...identity, email: 'overlay@example.invalid' } })));
     const config = loadConfig({ topPath, env: {} });
     assert.deepEqual(config.get('worker_pool.public_hygiene.identities.codex'), {
       ...identity, email: 'overlay@example.invalid',
     });
     assert.equal(config.resolutionTrace('worker_pool.public_hygiene.identities.codex.email').at(-1).path, localPath);
-
-    // Even the lower layer may be partial when a later layer completes it.
-    writeFileSync(topPath, JSON.stringify(doc({ codex: { name: identity.name } })));
-    assert.deepEqual(loadConfig({ topPath, env: {} }).get('worker_pool.public_hygiene.identities.codex'), {
-      ...identity, email: 'overlay@example.invalid',
-    });
+    writeFileSync(localPath, JSON.stringify(doc({ codex: { email: 'overlay@example.invalid' } })));
+    assert.throws(() => loadConfig({ topPath, env: {} }), /identities\.codex\.name: required key is missing/);
     rmSync(localPath);
-    assert.throws(() => loadConfig({ topPath, env: {} }), AgentOSConfigError);
     assert.throws(() => validateSchema(doc({ codex: { name: identity.name } })), AgentOSConfigError);
     assert.throws(() => validateSchema({ worker_pool: {} }), AgentOSConfigError);
   } finally { rmSync(dir, { recursive: true, force: true }); }

@@ -34,7 +34,7 @@ test('AFA AWS strict schema is disabled by default and accepts private overlay p
       assert.throws(() => loadConfig({ topPath, env: {} }), { name: 'AgentOSConfigError' });
     }
     writeFileSync(topPath, JSON.stringify({ version: 1, cloud_access: { aws: { future_example: true } } }));
-    assert.equal(loadConfig({ topPath, env: {} }).get('cloud_access.aws.future_example'), null);
+    assert.throws(() => loadConfig({ topPath, env: {} }), /cloud_access\.aws\.future_example: unknown key/);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -83,7 +83,7 @@ test('ZFA host overlay parses all foundation leaves with flags disabled', () => 
       }],
       [{ infrastructure: { budget_amount: -1 } }, {
         name: 'AgentOSConfigError', key: 'cloud_access.azure.infrastructure.budget_amount',
-        message: /value -1 below minimum 0\.01/,
+        message: /expected >= 0\.01, got -1/,
       }],
     ]) {
       writeFileSync(topPath, JSON.stringify({ version: 1, cloud_access: { azure } }));
@@ -91,7 +91,7 @@ test('ZFA host overlay parses all foundation leaves with flags disabled', () => 
       assert.throws(() => loadConfig({ topPath, env: {} }), error);
     }
     writeFileSync(topPath, JSON.stringify({ version: 1, cloud_access: { azure: { typo: true } } }));
-    assert.equal(loadConfig({ topPath, env: {} }).get('cloud_access.azure.typo'), null);
+    assert.throws(() => loadConfig({ topPath, env: {} }), /cloud_access\.azure\.typo: unknown key/);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

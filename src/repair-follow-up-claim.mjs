@@ -34,13 +34,14 @@ function ownsClaim(job, { repo, prNumber, headSha, ticket, launcherPid }) {
     && launcherAlive(launcherPid);
 }
 
-export function readRepairFollowUpClaim(rootDir, { repo, prNumber, headSha, ticket, launcherPid }) {
+export function readRepairFollowUpClaim(rootDir, { repo, prNumber, headSha, ticket, launcherPid,
+  requireUnowned = false }) {
   const target = { rootDir, repo, prNumber, caseInsensitiveRepo: true };
   const matchesName = followUpJobFileFilter(target);
   const ownFile = `${ticket}.json`;
   const buckets = ['pending', 'inProgress'];
   const refused = jobId => ({ ok: false, reason: 'remediation-owned', jobId });
-  if (typeof ticket !== 'string' || !/^[\w.-]+$/.test(ticket) || !matchesName(ownFile)) {
+  if (!requireUnowned && (typeof ticket !== 'string' || !/^[\w.-]+$/.test(ticket) || !matchesName(ownFile))) {
     for (const bucket of buckets) {
       const [entry] = listFollowUpJobsInDir(rootDir, bucket, target);
       if (entry) return refused(entry.job?.jobId);
@@ -84,7 +85,7 @@ export function readRepairFollowUpClaim(rootDir, { repo, prNumber, headSha, tick
           return unknown();
         }
         if (!namedForPr && job.prNumber !== prNumber) continue;
-        if (bucket !== 'inProgress' || entry.name !== ownFile || claimedAt) return refused(job.jobId);
+        if (requireUnowned || bucket !== 'inProgress' || entry.name !== ownFile || claimedAt) return refused(job.jobId);
         if (!Number.isSafeInteger(launcherPid) || launcherPid <= 1
           || job.claimedBy?.launcherPid !== launcherPid) {
           return { ok: false, reason: 'remediation-claim-launcher-mismatch', jobId: job.jobId };
@@ -96,6 +97,6 @@ export function readRepairFollowUpClaim(rootDir, { repo, prNumber, headSha, tick
   } catch {
     return { ok: false, reason: 'remediation-ownership-unknown' };
   }
-  return claimedAt ? { ok: true, claimedAt }
+  return requireUnowned || claimedAt ? { ok: true, claimedAt }
     : { ok: false, reason: 'remediation-claim-absent', jobId: ticket };
 }

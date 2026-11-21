@@ -758,6 +758,11 @@ beside the round's existing reply artifact:
 | `blocker` | object | Reply-ready operational blocker containing `title`, `code`, `finding`, `reasoning` and available full `commitSha` and `expectedRemoteSha`. The publisher omits `kind`. |
 | `refusedAt` | ISO timestamp | Refusal observation time. |
 
+Full hexadecimal SHA inputs are case-insensitive and normalized to lowercase
+for publication, retained-source comparisons, blocker evidence and rescue
+prerequisites. Refusal sidecars and strictly validated reply artifacts are read
+independently: a missing or malformed artifact does not hide the other.
+
 Once the worker exits or requires manual inspection, a matching preservation refusal precedes lifecycle
 completion, reply validation, no-progress handling and published-head recovery.
 The job moves to `failed/` with `failure.code: remediation-empties-pr-diff`, an

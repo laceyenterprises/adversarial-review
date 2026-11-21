@@ -193,6 +193,8 @@ async function preserveUnpushedCommit({
   existsSyncImpl = existsSync,
   getuidImpl = () => (typeof process.getuid === 'function' ? process.getuid() : null),
 }) {
+  if (typeof commitSha === 'string') commitSha = commitSha.toLowerCase();
+  if (typeof expectedRemoteSha === 'string') expectedRemoteSha = expectedRemoteSha.toLowerCase();
   const sha = String(commitSha || '').trim();
   if (!sha) return { preserved: false, reason: 'missing-commit-sha' };
   await execFileImpl('git', recoveryGitArgs(workspaceDir, ['cat-file', '-e', `${sha}^{commit}`]), localGitOptions());

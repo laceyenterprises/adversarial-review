@@ -10,9 +10,69 @@ import { publishRemediation } from '../src/remediation-publication.mjs';
 import { reconcileFollowUpJob } from '../src/follow-up-remediation.mjs';
 import { matchesPublicationFailureAttempt, settlePublicationHandoff } from '../src/remediation-publication-refusal.mjs';
 import { preserveUnpushedCommit } from '../src/github-auth-recovery.mjs';
+import { observePublicationRefusal } from '../src/remediation-publication-refusal.mjs';
 import { createFollowUpJob, claimNextFollowUpJob, markFollowUpJobSpawned, readRemediationReplyArtifact } from '../src/follow-up-jobs.mjs';
 
 const execAsync = promisify(execFile);
+
+test('LAC-2283: mixed-case retained publication keeps source, reply and rescue evidence', async t => {
+  const f = fixture(t);
+  writeFileSync(join(f.work, 'feature.txt'), 'corrected feature\n');
+  f.git('add', 'feature.txt'); f.git('commit', '-m', 'Retain mixed-case candidate');
+  const localCommit = f.git('rev-parse', 'HEAD');
+  const at = new Date().toISOString();
+  createFollowUpJob({ rootDir: f.root, repo: 'fixture/repo', prNumber: 1,
+    revisionRef: f.previousHead, branch: 'topic', baseBranch: 'main',
+    reviewBody: 'Fix feature', reviewerModel: 'claude', reviewPostedAt: at });
+  const claimed = claimNextFollowUpJob({ rootDir: f.root, claimedAt: at });
+  const spawned = markFollowUpJobSpawned({ rootDir: f.root, jobPath: claimed.jobPath, spawnedAt: at,
+    worker: { processId: 12345, workspaceDir: f.work } });
+  const code = 'remediation-publication-auth-rejected';
+  const result = await settlePublicationHandoff({ rootDir: f.root, ...spawned,
+    worker: spawned.job.remediationWorker, hqRoot: f.root, workspaceDir: f.work,
+    replyPath: null, stoppedAt: at,
+    failure: { code, localCommit: localCommit.toUpperCase(), previousHead: f.previousHead.toUpperCase(),
+      expectedRemoteSha: f.previousHead.toUpperCase(), refusedAt: at },
+    reply: { outcome: 'blocked', reReview: { requested: false }, operationalBlockers: [
+      { code, commitSha: localCommit.toUpperCase(), expectedRemoteSha: f.previousHead.toUpperCase() },
+    ] },
+    lifecycle: { source: 'live', headSha: f.previousHead.toUpperCase() },
+    execFileImpl: execAsync, log: { warn() {} } });
+  assert.equal(result.job.publicationFailure.reason, 'owner-recovery-required');
+  assert.equal(result.job.unpublishedWork.workspaceDir, f.work);
+  assert.equal(result.job.unpublishedWork.commitSha, localCommit);
+  assert.equal(result.job.remediationReply.state, 'worker-wrote-reply');
+  assert.equal(result.job.unpublishedWork.rescue.preserved, true);
+  const rescue = await preserveUnpushedCommit({ hqRoot: f.root, workspaceDir: f.work,
+    repo: 'fixture/repo', prNumber: 1, jobId: 'mixed-case', checkoutTipOnly: true,
+    commitSha: localCommit.toUpperCase(), expectedRemoteSha: f.previousHead.toUpperCase(),
+    observedAt: at, execFileImpl: execAsync });
+  assert.equal(f.git('bundle', 'list-heads', rescue.path), `${localCommit} HEAD`);
+  const published = await publishRemediation({ ...f.publish, previousHead: f.previousHead.toUpperCase(),
+    expectedRemoteSha: f.previousHead.toUpperCase(), expectedCandidate: localCommit.toUpperCase() });
+  assert.equal(published.headSha, localCommit);
+});
+
+for (const sidecar of ['missing', 'malformed']) {
+  test(`LAC-2283: valid reply remains observable with ${sidecar} refusal sidecar`, async t => {
+    const f = fixture(t);
+    const replyPath = join(f.root, 'reply.json');
+    const job = { jobId: 'independent-artifacts', repo: 'fixture/repo', prNumber: 1 };
+    const reply = { kind: 'adversarial-review-remediation-reply', schemaVersion: 1, ...job,
+      outcome: 'blocked', summary: 'Publication needs recovery.', validation: [], addressed: [],
+      pushback: [], blockers: [], operationalBlockers: [{ title: 'Publication unavailable',
+        code: 'remediation-publication-auth-rejected', finding: 'Credentials rejected.',
+        reasoning: 'The retained commit needs authorized publication.' }],
+      reReview: { requested: false, reason: null } };
+    writeFileSync(replyPath, JSON.stringify(reply));
+    if (sidecar === 'malformed') writeFileSync(`${replyPath}.publication-failure.json`, '{');
+    const result = await observePublicationRefusal({ job, worker: {}, liveness: { state: 'exited' },
+      now: () => new Date().toISOString(), resolvePaths: () => ({ replyPath, workspaceDir: f.work }) });
+    assert.deepEqual(result.publicationReply, readRemediationReplyArtifact(replyPath, { expectedJob: job }));
+    assert.equal(result.publicationFailure, null);
+    assert.equal(result.currentPublicationFailure, false);
+  });
+}
 const env = { ...process.env, GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_NOSYSTEM: '1',
   GIT_AUTHOR_NAME: 'Sample Worker', GIT_AUTHOR_EMAIL: 'worker@example.invalid',
   GIT_COMMITTER_NAME: 'Sample Worker', GIT_COMMITTER_EMAIL: 'worker@example.invalid' };

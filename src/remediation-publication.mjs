@@ -26,6 +26,8 @@ const REFUSAL_FINDINGS = new Map([
 ]);
 
 export function publicationBlocker({ code, localCommit, expectedRemoteSha }) {
+  if (typeof localCommit === 'string') localCommit = localCommit.toLowerCase();
+  if (typeof expectedRemoteSha === 'string') expectedRemoteSha = expectedRemoteSha.toLowerCase();
   return {
     title: 'guarded-publication-refused',
     code,
@@ -57,6 +59,9 @@ export async function publishRemediation({ workspaceDir = process.cwd(), baseBra
   pushCommand, env = process.env, credentialBrokerReadyImpl = credentialBrokerReady,
   workerClass, reviewerModel, requiresWorkflowPush = false, expectedCandidate,
   ownerTokens, selectReadRoute = selectRemediationReadRoute, selectPushRoute = selectRemediationPushRoute } = {}) {
+  if (typeof previousHead === 'string') previousHead = previousHead.toLowerCase();
+  if (typeof expectedRemoteSha === 'string') expectedRemoteSha = expectedRemoteSha.toLowerCase();
+  if (typeof expectedCandidate === 'string') expectedCandidate = expectedCandidate.toLowerCase();
   const unproven = () => Object.assign(new Error('Remediation publication requires the previous head, PR branch and exact remote lease.'), { code: 'remediation-publication-unproven' });
   if (typeof baseBranch !== 'string' || !baseBranch.trim()
     || !SHA.test(previousHead || '') || !SHA.test(expectedRemoteSha || '')) throw unproven();

@@ -10,12 +10,18 @@ import { resolvePublicationWorkspace } from './remediation-publication-workspace
 import { preserveUnpushedCommit } from './github-auth-recovery.mjs';
 
 const SHA = /^[a-f0-9]{40}$/iu;
+const normalizeSha = value => typeof value === 'string' ? value.toLowerCase() : value;
+const normalizeFailure = failure => failure && ({ ...failure,
+  localCommit: normalizeSha(failure.localCommit), previousHead: normalizeSha(failure.previousHead),
+  expectedRemoteSha: normalizeSha(failure.expectedRemoteSha) });
 const ownedByCurrentUid = path => typeof process.getuid !== 'function' || statSync(path).uid === process.getuid();
 
 const HANDOFF_CODES = new Set([PUBLICATION_AUTH_REJECTED, OWNER_AUTH_HOLD,
   PUBLICATION_STALE_LEASE, CREDENTIAL_REFRESH_UNAVAILABLE]);
 
 export function matchesPublicationFailureAttempt(failure, job, worker, now) {
+  failure = normalizeFailure(failure);
+  job = { ...job, revisionRef: normalizeSha(job.revisionRef) };
   return failure?.jobId === job.jobId
     && failure.repo === job.repo && failure.prNumber === job.prNumber
     && SHA.test(failure.previousHead || '') && failure.previousHead === job.revisionRef
@@ -47,6 +53,11 @@ export async function settlePublicationHandoff({
   rootDir, job, jobPath, worker, hqRoot, failure, lifecycle, lifecycleStop, workspaceDir, replyPath,
   reply, stoppedAt, execFileImpl, log,
 }) {
+  failure = normalizeFailure(failure);
+  lifecycle = lifecycle && { ...lifecycle, headSha: normalizeSha(lifecycle.headSha) };
+  reply = reply && { ...reply, operationalBlockers: reply.operationalBlockers?.map(entry => ({
+    ...entry, commitSha: normalizeSha(entry.commitSha), expectedRemoteSha: normalizeSha(entry.expectedRemoteSha),
+  })) };
   const { code, localCommit, previousHead, expectedRemoteSha, refusedAt } = failure;
   const unpublishedCommit = localCommit !== expectedRemoteSha && localCommit !== previousHead ? localCommit : null;
   const selected = await inspectRetainedSource({ job, workspaceDir, commitSha: unpublishedCommit, execFileImpl, log });
@@ -120,13 +131,20 @@ export async function observePublicationRefusal({
   const handoffAt = now();
   let currentPublicationFailure = false;
   if (liveness.state !== 'active') {
+    let checkedPaths;
     try {
-      const checkedPaths = resolvePaths();
-      publicationFailure = JSON.parse(readFileSync(`${checkedPaths.replyPath}.publication-failure.json`, 'utf8'));
+      checkedPaths = resolvePaths();
       publicationWorkspace = checkedPaths.workspaceDir;
       publicationReplyPath = checkedPaths.replyPath;
-      publicationReply = readRemediationReplyArtifact(checkedPaths.replyPath, { expectedJob: job });
-    } catch { /* The sidecar and strictly validated reply are independent evidence. */ }
+    } catch { /* Invalid paths cannot supply either artifact. */ }
+    if (checkedPaths) {
+      try {
+        publicationFailure = normalizeFailure(JSON.parse(readFileSync(`${checkedPaths.replyPath}.publication-failure.json`, 'utf8')));
+      } catch { /* A missing or malformed sidecar does not hide a valid reply. */ }
+      try {
+        publicationReply = readRemediationReplyArtifact(checkedPaths.replyPath, { expectedJob: job });
+      } catch { /* A missing or invalid reply does not hide a valid sidecar. */ }
+    }
     currentPublicationFailure = matchesPublicationFailureAttempt(publicationFailure, job, worker, handoffAt);
     const protectsCustody = currentPublicationFailure && (isPublicationHandoffCode(publicationFailure.code)
       || publicationFailure.code === 'remediation-empties-pr-diff');

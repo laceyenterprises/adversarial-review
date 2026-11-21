@@ -11,6 +11,9 @@ import {
 } from '../src/daemon-clean-merge.mjs';
 import { DAEMON_MERGE_DISPOSITION } from '../src/ama/daemon-merge.mjs';
 import { __test__ as githubApi } from '../src/github-api.mjs';
+import { readCloserReviewProof } from '../src/ama/closer-review-proof.mjs';
+import { resolveQueueOwnerAdapter } from '../src/finalization/queue-owner.mjs';
+import { openFinalizationQueueStore } from '../src/finalization/queue-store.mjs';
 
 // The daemon HAM terminal-remediation re-merge (this fix): a findings-present PR
 // whose CURRENT head an entitled hammer already remediated AND validated under
@@ -172,6 +175,55 @@ test('HAMLATEAUDIT-01: daemon terminal-audit reuse checks fresh exact-head revie
       return gate;
     }
   } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
+test('daemon HAM reuse runs the review gate inside the same lane ownership as the transport', async () => {
+  const rootDir = tempRoot();
+  const store = openFinalizationQueueStore({ rootDir });
+  const lane = { repository: 'acme/repo', base: 'main' };
+  const owner = resolveQueueOwnerAdapter(store);
+  const args = findingsReviewArgs(rootDir);
+  const rollup = await args.fetchRollupImpl();
+  const operator = { user: { login: 'fixture-operator' }, id: 14, state: 'CHANGES_REQUESTED',
+    commit_id: HAM_HEAD, submitted_at: '2026-08-06T00:05:00Z' };
+  let invoked = 0;
+  try {
+    await runDaemonCleanMergeAttempt({ ...args,
+      readAmaAuditEntryImpl: () => hamValidatedAuditEntry(HAM_HEAD),
+      readCloserReviewProofImpl: request => {
+        assert.equal(owner.tryLock(lane), null);
+        assert.equal(request.validatedAt, '2026-08-06T00:00:00Z');
+        return readCloserReviewProof(request, {
+          fetchPr: async () => rollup,
+          get: async () => ({ permission: 'admin' }),
+        });
+      },
+      guardStackedBaseImpl: async () => null,
+      execGhWithRetryImpl: async ({ execFileImpl, args }) => execFileImpl('gh', args, {}),
+      execFileImpl: async (_program, argv) => {
+        assert.deepEqual(argv.slice(0, 3), ['pr', 'merge', '4987']);
+        assert.equal(argv[argv.indexOf('--match-head-commit') + 1], HAM_HEAD);
+        invoked++;
+        return { stdout: '' };
+      },
+      attemptDaemonCleanMergeImpl: async options => {
+        const target = { repo: lane.repository, prNumber: 4987, head: HAM_HEAD, mergeMethod: 'squash', body: '', subject: '' };
+        assert.equal((await options.fetchLiveGateImpl()).terminalReviewProof.ok, true);
+        rollup.reviews = [operator];
+        const held = await options.runMergeImpl(target);
+        assert.equal(held.closureHold.reason, 'operator-review-changes-requested');
+        assert.equal(held.mergeNotInvoked, true);
+        assert.equal(invoked, 0);
+        rollup.reviews = [{ ...operator, state: 'DISMISSED' }];
+        assert.equal((await options.runMergeImpl(target)).exitCode, 0);
+        return { disposition: DAEMON_MERGE_DISPOSITION.MERGED, merged: true };
+      },
+    });
+    assert.equal(invoked, 1);
+  } finally {
+    store.close();
     rmSync(rootDir, { recursive: true, force: true });
   }
 });

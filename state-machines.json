@@ -107,10 +107,12 @@
       "queue-v2"
     ],
     "transitions": "Issuance lock and monotonic route fence precede drain/reconciliation. Unknown outcomes retain transfer-pending and fence both routes. Rollback also acknowledges durable stable-key returns before legacy ownership. Cached selector mismatches cannot mutate. Config defaults legacy, brake independent; no production flip or new smoke/check. HAMLANEWAIT-01: legacy shell contention waits on release through a fresh 60-second merge-attempt deadline after CI/lease waits; exhaustion records deferred/lane-busy and refunds contention credit with 2-minute exponential backoff capped at 30 minutes, never a final-no-merge. The third same-head launch pages through the durable closure-wait receipt; other launch statuses and bare queue-route refusals retain existing semantics. Queue-v2 transitions are unchanged.",
+    "legacyTerminalReview": "LAC-2305: inside the legacy issuance writer, every HAM terminal merge checks fresh exact-head review and issuer evidence. A standing configured human operator or proven repository admin request defers until GitHub dismissal or later same-head approval from that issuer. Unknown evidence defers. A proven no-invocation preflight drains the local writer reservation.",
     "codeSources": [
       "src/finalization/queue-routing.mjs",
       "src/finalization/queue-routing-boundary.mjs",
-      "src/finalization/legacy-lane-write.mjs"
+      "src/finalization/legacy-lane-write.mjs",
+      "src/ama/closer-review-proof.mjs"
     ],
     "validation": "test/finalization-queue-routing.test.mjs; test/finalization-queue-status.test.mjs; runtime-owner routing probe after deployment"
   },

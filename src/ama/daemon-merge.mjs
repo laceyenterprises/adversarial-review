@@ -1048,10 +1048,12 @@ async function attemptDaemonCleanMergeInner({
     }
     // A live safety hold prevented the transport from clicking merge. Keep
     // its reason and re-walkability; it is not a permanent merge rejection.
-    if (['stacked-base-merged', 'stacked-base-read-failed'].includes(mergeRes?.closureHold?.reason)
+    if (['stacked-base-merged', 'stacked-base-read-failed', 'review-changed-since-validation',
+      'operator-review-changes-requested', 'terminal-review-evidence-unavailable',
+      'live-head-moved-before-merge'].includes(mergeRes?.closureHold?.reason)
       || mergeRes?.closureHold?.reason?.startsWith('fleet-stop-')) {
       terminal = { reason: mergeRes.closureHold.reason, permanent: false,
-        closureHold: mergeRes.closureHold };
+        closureHold: mergeRes.closureHold, mergeNotInvoked: attempts === 1 && mergeRes.mergeNotInvoked === true };
       break;
     }
     const cls = classifyDaemonMergeError(mergeRes);
@@ -1197,6 +1199,7 @@ async function attemptDaemonCleanMergeInner({
     reason: terminal.reason,
     ...(terminal.closureHold ? { needsOperator: terminal.closureHold.needsOperator,
       skipMergeAgent: true, recoveryWait: true, retryAfterMs: terminal.closureHold.retryAfterMs } : {}),
+    ...(terminal.mergeNotInvoked ? { mergeNotInvoked: true } : {}),
     ...(terminal.historyReadError ? { historyReadError: terminal.historyReadError } : {}),
     permanent: Boolean(terminal.permanent),
     merged: false,

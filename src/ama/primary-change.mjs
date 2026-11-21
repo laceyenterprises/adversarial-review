@@ -108,6 +108,11 @@ function evidencePaths(primary, files) {
     .filter((file) => isTestPath(file.filename)).map((file) => file.filename)]);
 }
 
+function projectedPatchScope(primaryFiles) {
+  const paths = new Set(primaryFiles.flatMap(file => [file.filename, file.previous_filename]));
+  return path => paths.has(path) || isTestPath(path);
+}
+
 // A missing compare entry proves absence only for an added primary file. For
 // a modified or renamed file it means restoration to the base, unless a
 // removal/rename explicitly proves that the base name is gone.
@@ -1198,6 +1203,7 @@ function rebasePatchIdentity(files) {
 // Carry an approval only over the same reviewed patch, modulo a base rebase
 // and whole-path reversals independently authorized by live required guards.
 export function guardRepairReviewCoverage(evidence, reviewedHead, currentHead) {
+  if (evidence?.finalPatchesScoped) return false;
   const proofs = verifiedGuardReversals(evidence, currentHead);
   if (!reviewedHead || !proofs.length || !checkPrimaryChange(evidence, currentHead).ok) return false;
   const direct = reviewedHead === evidence.primaryHead;
@@ -1395,7 +1401,7 @@ async function fetchPrimaryChangeHistory({ repo, prNumber, headSha, get, rootDir
     if (pr.head?.sha !== headSha) return unknown('live head changed during history read', { headMismatch: true });
     if (!SHA.test(pr.base?.sha || '')) return unknown('missing base SHA');
     const historyPath = `repos/${repo}/compare/${pr.base.sha}...${headSha}`;
-    let history = await readCommitHistory(historyPath);
+    const history = await readCommitHistory(historyPath);
     if (!Array.isArray(history.commits) || history.commits.length !== history.total_commits
       || history.commits.some((commit) => !SHA.test(commit?.sha || '')
         || typeof commit?.commit?.message !== 'string')) return unknown('missing, malformed or capped commit history');
@@ -1435,23 +1441,11 @@ async function fetchPrimaryChangeHistory({ repo, prNumber, headSha, get, rootDir
     const isLaneClosure = commit => laneOwners.some(job =>
       (parseCommitTrailerValues(commit.commit.message)['worker-job-id'] || []).includes(job.jobId))
       || isRemediationCommit(commit) && parseCommitTrailers(commit.commit.message)['reversal-authorized-by'];
-    let first = history.commits.find((commit, index) => isHammerCommit(commit,
+    const first = history.commits.find((commit, index) => isHammerCommit(commit,
       launchIndex >= 0 && index > launchIndex) || isLaneClosure(commit));
     const laneHistory = hasLaneCandidates ? { laneReversalHistory: true } : {};
     if (!first) return { headSha, hasHammerCommits: false, ...laneHistory };
     if (historyOnly) return { headSha, hasHammerCommits: true, ...laneHistory };
-    // Only classification can omit patches. Every hammer proof still consumes
-    // the complete author and final tree differences before granting authority.
-    if (get.commitHistory) {
-      const full = await read(historyPath);
-      if (full.total_commits !== history.total_commits
-        || full.merge_base_commit?.sha !== history.merge_base_commit?.sha
-        || !isDeepStrictEqual(full.commits, history.commits)) {
-        return unknown('commit history changed during file collection');
-      }
-      history = full;
-      first = history.commits.find(commit => commit.sha === first.sha);
-    }
     if (first && (!first.parents?.length || first.parents.length > 2
       || !SHA.test(first.parents[0].sha))) return unknown('missing or unsupported first hammer parents');
     if (first && first.parents.length === 2) {
@@ -1468,6 +1462,16 @@ async function fetchPrimaryChangeHistory({ repo, prNumber, headSha, get, rootDir
     if (!SHA.test(mergeBase || '') || !SHA.test(comparisonMergeBase || '')) {
       return unknown('primary or final merge base is missing');
     }
+    let finalPatchesScoped = false;
+    if (get.commitHistory && (!get.compareFiles || comparisonMergeBase === mergeBase)) {
+      const full = await read(historyPath);
+      if (full.total_commits !== history.total_commits
+        || full.merge_base_commit?.sha !== comparisonMergeBase
+        || !isDeepStrictEqual(full.commits, history.commits)) {
+        return unknown('commit history changed during file collection');
+      }
+      final = full;
+    }
     if (comparisonMergeBase !== mergeBase) {
       // Integrating main advances the PR comparison base, but cannot move the
       // protected author boundary. Prove both ancestry edges before reading
@@ -1480,7 +1484,14 @@ async function fetchPrimaryChangeHistory({ repo, prNumber, headSha, get, rootDir
         || authorAncestry.merge_base_commit?.sha !== primaryHead) {
         return unknown('base integration is outside protected author ancestry');
       }
-      final = await read(`repos/${repo}/compare/${mergeBase}...${headSha}`);
+      const projected = `repos/${repo}/compare/${mergeBase}...${headSha}`;
+      // A cited edited move can consume the destination patch outside the
+      // author paths. Retain full patches whenever such authority is claimed.
+      finalPatchesScoped = !!get.compareFiles && !history.commits.some(commit =>
+        parseCommitTrailerValues(commit.commit.message)['reversal-authorized-by']?.length);
+      final = get.compareFiles
+        ? await get.compareFiles(projected, finalPatchesScoped ? projectedPatchScope(primary.files) : undefined)
+        : await read(projected);
       if (final.merge_base_commit?.sha !== mergeBase) return unknown('projected final merge base differs');
     }
     const renameProofs = [];
@@ -1686,6 +1697,7 @@ async function fetchPrimaryChangeHistory({ repo, prNumber, headSha, get, rootDir
     } catch { /* Retain raw evidence; the evaluator fails closed on unsupported patches. */ }
     return { headSha, hasHammerCommits: true, primaryHead, mergeBase, ...laneHistory,
       ...(comparisonMergeBase !== mergeBase ? { comparisonMergeBase } : {}),
+      ...(finalPatchesScoped ? { finalPatchesScoped } : {}),
       ...(pr.base.ref ? { baseSha: pr.base.sha, baseRef: pr.base.ref } : {}),
       ...(builderBoundary ? { builderBoundary } : {}),
       // Retain the trusted range for rename proof and refusal attribution.
@@ -1819,7 +1831,7 @@ export async function fetchPrimaryChange(args, options = {}) {
       }
       const read = method => (...values) => withHistoryReadBudget(() => method(...values), { signal, timeoutMs });
       const get = Object.assign(read(source), { persistPrimaryChange: source.persistPrimaryChange });
-      for (const method of ['metadata', 'commitVerification', 'commitHistory', 'regularDataFile']) {
+      for (const method of ['metadata', 'commitVerification', 'commitHistory', 'compareFiles', 'regularDataFile']) {
         if (source[method]) get[method] = read(source[method].bind(source));
       }
       return collectPrimaryChange({ ...args, get, signal }, options);
@@ -1857,7 +1869,8 @@ async function collectPrimaryChange(args, {
         baseSha: pr.base.sha, mergeBase: comparison.merge_base_commit.sha, reviewKey, launchHead },
       () => fetchPrimaryChangeHistory({ ...args, rootDir: primaryChangeRoot(args), persistAuthorizations: true, get: Object.assign(
         path => path === `repos/${args.repo}/pulls/${args.prNumber}` ? Promise.resolve(pr) : path === reviewsPath ? Promise.resolve(reviews) : args.get(path),
-        { metadata: args.get.metadata, commitVerification: args.get.commitVerification, commitHistory: args.get.commitHistory }) }));
+        { metadata: args.get.metadata, commitVerification: args.get.commitVerification,
+          commitHistory: args.get.commitHistory, compareFiles: args.get.compareFiles }) }));
     } catch (error) {
       return { headSha: args.headSha, hasHammerCommits: null, readFailed: true, historyReadFailed: true,
         ...historyReadTimeoutEvidence(error), reason: historyReadFailureReason(error) };
@@ -1873,6 +1886,15 @@ async function collectPrimaryChange(args, {
   const derivedArtifacts = await proveDerivedArtifactsImpl({ ...args, rootDir: primaryChangeRoot(args) }, history);
   args.signal.throwIfAborted();
   const evidence = { ...history, ciCost, ...guardEvidence, ...(derivedArtifacts.length ? { derivedArtifacts } : {}) };
+  // A live guard waiver can carry a review only after checking every hunk.
+  if (evidence.finalPatchesScoped && args.get.compareFiles && verifiedGuardReversals(evidence, args.headSha).length) {
+    const final = await args.get.compareFiles(`repos/${args.repo}/compare/${evidence.mergeBase}...${args.headSha}`);
+    if (final.filesComplete !== true || final.merge_base_commit?.sha !== evidence.mergeBase) {
+      throw new Error('full guard coverage comparison unavailable');
+    }
+    evidence.finalFiles = final.files;
+    delete evidence.finalPatchesScoped;
+  }
   const result = { ...evidence, ...await fetchGuardReviewSnapshots(args, evidence) };
   args.signal.throwIfAborted();
   // Failed optional attempts record structured diagnostics on this transient

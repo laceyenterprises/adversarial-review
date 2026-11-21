@@ -83,7 +83,7 @@ Each completed history read is an atomic JSON record named
 | 4 | Live merge-base SHA |
 | 5 | Review-response SHA-256 digest (`reviewKey`), or `null` |
 | 6 | Trusted dispatcher launch head (`launchHead`), or `null` |
-| 7 | History proof cache identity version: `reversalproof-v9` |
+| 7 | History proof cache identity version: `reversalproof-v10` |
 
 LAC-2202 advances the identity from v8 to v9 to recompute histories collected
 before support for consecutive Git conflict footers. Older completed records
@@ -124,8 +124,16 @@ that the protected base is an ancestor of `comparisonMergeBase`, the author
 head is an ancestor of the final head, and the projected final comparison
 resolves exactly to `mergeBase`. Cache reuse and publication compare
 `comparisonMergeBase` (or `mergeBase` when absent) to key position 4.
-Unknown/refused projections remain uncached; old unknown results were already
-uncached, so no cache purge or identity-version change is required.
+Unknown and unreadable projections remain uncached. LAC-2286 advances the
+completed-record version to v10 for the optional `finalPatchesScoped` field.
+When this field is true, `finalFiles` still contains every changed path,
+including its status, blob SHA and exact-blob rename links. Patches and line
+counts are materialized for author paths (including both rename names) and
+test paths. Other rows carry inventory evidence only. Histories with cited
+reversals retain full final patches, since an edited rename can need hunks
+from outside the author paths. Live guard review carry-forward also uses a
+full final patch, hydrated after a valid guard reversal is found.
+The per-file checkpoint key still refers only to fully materialized patches.
 The returned history may also carry `renameProofReadFailed`,
 which prevents disk publication as described below. The identity version forces
 one recomputation of older records, including cached original-reversal refusals

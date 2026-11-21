@@ -85,10 +85,11 @@ export async function fetchGuardReversals({ repo, prNumber, headSha, get }, evid
     const before = latest(await pages(get, `repos/${repo}/commits/${evidence.primaryHead}/check-runs`, 'check_runs'), evidence.primaryHead);
     const after = latest(await pages(get, `repos/${repo}/commits/${headSha}/check-runs`, 'check_runs'), headSha);
     // Base movement must not make a merge-base restoration masquerade as a
-    // restoration to the live base. Complete immutable tree comparisons supply
-    // this proof in production through createHistoryReader.
+    // restoration to the live base. This predicate only consumes changed
+    // names and rename links, so the complete inventory is sufficient.
+    const baseComparison = `repos/${repo}/compare/${evidence.mergeBase}...${pr.base.sha}`;
     const baseDelta = pr.base.sha === evidence.mergeBase ? []
-      : (await get(`repos/${repo}/compare/${evidence.mergeBase}...${pr.base.sha}`)).files;
+      : (await (get.compareFiles ? get.compareFiles(baseComparison, () => false) : get(baseComparison))).files;
     if (!Array.isArray(baseDelta) || baseDelta.length >= 300) return {};
     const guardReversals = [];
     for (const failedRun of before.values()) {

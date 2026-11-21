@@ -957,6 +957,8 @@ export async function proveMigrationRenumbers(args, evidence) {
   };
   args = { ...args, signal: deadline, record, proofHeadSha: evidence.headSha,
     finalNumbers: new Map(), treePolicy: { walkOnly: false }, get: path => read(path, get),
+    snapshotFiles: get.compareFiles ? path => read(path, snapshotPath => get.compareFiles(snapshotPath, () => false), `files:${path}`)
+      : path => read(path, get),
     metadata: path => read(path, get.metadata || get, `metadata:${path}`) };
   try {
     const range = evidence.diagnosticCommitRange || [{ sha: evidence.headSha }];
@@ -977,7 +979,7 @@ export async function proveMigrationRenumbers(args, evidence) {
       if (entry.sha === evidence.headSha) { snapshots.push(proofs); continue; }
       // Each rebased head has its own merge base. Compare its immutable tree
       // with the same protected author bytes, never a rewritten author head.
-      const snapshot = await args.get(`repos/${args.repo}/compare/${evidence.baseSha || evidence.mergeBase}...${entry.sha}`);
+      const snapshot = await args.snapshotFiles(`repos/${args.repo}/compare/${evidence.baseSha || evidence.mergeBase}...${entry.sha}`);
       if (!SHA.test(snapshot.merge_base_commit?.sha || '')) return refuse('snapshot-merge-base-invalid');
       if (!Array.isArray(snapshot.files) || snapshot.filesComplete !== true && snapshot.files.length >= 300) return refuse('snapshot-files-incomplete');
       const batch = await proveSnapshot(args, { ...evidence, headSha: entry.sha,

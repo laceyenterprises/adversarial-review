@@ -151,7 +151,7 @@ test('pre-deploy history recomputes once at an unchanged head and review key', a
   const args = { ...fixture(t), reviewKey: 'unchanged-reviews' };
   const dir = join(args.rootDir, 'data', 'primary-change-history');
   mkdirSync(dir, { recursive: true });
-  const key = [args.repo, args.prNumber, args.baseSha, args.headSha, args.mergeBase, args.reviewKey, null, 'reversalproof-v8'];
+  const key = [args.repo, args.prNumber, args.baseSha, args.headSha, args.mergeBase, args.reviewKey, null, 'reversalproof-v9'];
   const legacyPath = join(dir, `${createHash('sha256').update(JSON.stringify(key)).digest('hex')}.json`);
   writeFileSync(legacyPath, JSON.stringify({ key, history: { ...evidence(args), primaryHead: 'e'.repeat(40) } }));
   let calls = 0;
@@ -161,12 +161,13 @@ test('pre-deploy history recomputes once at an unchanged head and review key', a
   assert.deepEqual(await storedPrimaryChange(args, () => assert.fail('must reuse refreshed history')), refreshed);
   const currentPath = join(dir, readdirSync(dir).find(name => join(dir, name) !== legacyPath));
   const version = JSON.parse(readFileSync(currentPath, 'utf8')).key.at(-1);
-  assert.equal(version, 'reversalproof-v9');
-  const fragment = JSON.parse(readFileSync(new URL('../docs/data-model/catalog.d/LAC-2202.json', import.meta.url), 'utf8'));
-  assert.equal(fragment.entries.find(entry => entry.id === 'primary-change-history').identityVersion, version);
+  assert.equal(version, 'reversalproof-v10');
+  const fragment = JSON.parse(readFileSync(new URL('../docs/data-model/catalog.d/LAC-2286.json', import.meta.url), 'utf8'));
+  const change = fragment.entries.find(entry => entry.id === 'primary-change-history');
+  assert.equal(change.identityVersion, version);
+  assert.ok(change.optionalHistoryFields.includes('finalPatchesScoped'));
   const catalog = JSON.parse(readFileSync(new URL('../docs/data-model/catalog.json', import.meta.url), 'utf8'));
   const entry = catalog.entries.find(entry => entry.id === 'primary-change-history');
-  assert.equal(entry.identityVersion, version);
   assert.ok(entry.optionalHistoryFields.includes('laneReversalHistory'));
   assert.match(entry.laneReversalProof, /laneOwner and laneIdentity/);
 });

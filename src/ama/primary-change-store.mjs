@@ -21,7 +21,7 @@ const progressName = name => /^progress-[a-f0-9]{64}$/.test(name);
 // SAFETYSTOPOWNER-01: discard refusals based only on the first superseding snapshot.
 // LANEREVERSAL-01: old entries did not classify builder lane reversals.
 // LAC-2202: recover trailers preceding consecutive Git rebase conflict footers.
-const identity = args => [args.repo, Number(args.prNumber), args.baseSha, args.headSha, args.mergeBase, args.reviewKey || null, args.launchHead || null, 'reversalproof-v9'];
+const identity = args => [args.repo, Number(args.prNumber), args.baseSha, args.headSha, args.mergeBase, args.reviewKey || null, args.launchHead || null, 'reversalproof-v10'];
 const pathFor = args => join(directory(args.rootDir), `${createHash('sha256').update(JSON.stringify(identity(args))).digest('hex')}.json`);
 
 // Atomic replacement inherits the writer's UID. Never let a worker replace

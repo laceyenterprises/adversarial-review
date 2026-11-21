@@ -35,6 +35,9 @@ export function createDurableReviewerRefill({ db, createCandidate, scope = () =>
       const key = `${candidate.repoPath}#${candidate.prNumber}`;
       if (!isPending(row)) {
         settled.delete(key);
+      } else if (candidate.current && row.rereview_requested_at !== candidate.current.rereview_requested_at) {
+        // A replacement request owns its own admission, even at the same head.
+        settled.delete(key);
       } else if (!candidate.subject?.headSha || row.revision_ref === candidate.subject.headSha) {
         settled.set(key, state(row));
       }
@@ -125,14 +128,16 @@ export function createDurableReviewerCandidate(row, { subjectAdapter, context, p
 }
 
 
-// Compare-and-swap the queued head only: the request time, reason and budgets
-// stay, so an operator retrigger keeps its priority on the new head.
+// Bind the CAS to the captured request as well as its head. The request time,
+// reason and budgets stay, so an operator retrigger keeps its priority.
 export function createDurableHeadRebinder(db, { logger = console } = {}) {
   const rebind = db.prepare(`UPDATE reviewed_prs SET revision_ref = ?
     WHERE repo = ? AND pr_number = ? AND pr_state = 'open'
-      AND review_status IN ('pending', 'pending-upstream') AND revision_ref IS ?`);
+      AND review_status IN ('pending', 'pending-upstream') AND revision_ref IS ?
+      AND rereview_requested_at IS ?`);
   return (row, headSha) => {
-    const moved = rebind.run(headSha, row.repo, row.pr_number, row.revision_ref ?? null).changes === 1;
+    const moved = rebind.run(headSha, row.repo, row.pr_number, row.revision_ref ?? null,
+      row.rereview_requested_at ?? null).changes === 1;
     if (moved) {
       logger.log?.(`[watcher] REBASEDREVIEWSTRAND-01: superseded durable re-review ${identity(row)} `
         + `from=${String(row.revision_ref).slice(0, 12)} to=${headSha.slice(0, 12)}; old-head custody no longer applies`);

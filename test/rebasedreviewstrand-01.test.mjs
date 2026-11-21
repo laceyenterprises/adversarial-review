@@ -28,7 +28,7 @@ function fixture(t, rowOverrides = {}) {
   const spawned = [];
   const build = (live, current = read()) => createDurableReviewerCandidate(current, {
     context: { domainId: 'code-pr', hasPriorPostedReview: () => false },
-    subjectAdapter: { async fetchState() { return { labels: [], ...live }; } },
+    subjectAdapter: { async fetchState() { return { labels: [], ...(typeof live === 'function' ? await live() : live) }; } },
     async processSubject(entry, ctx) {
       ctx.enqueueReviewerDispatchCandidate({ reviewerModel: 'gemini', async run() {
         spawned.push(entry.subject.headSha, read().revision_ref);
@@ -57,8 +57,12 @@ test('exact-head retrigger for B after a startup durable entry for A is admitted
   const f = fixture(t);
   const refill = createDurableReviewerRefill({ db: f.db, createCandidate: row => f.build({ headSha: HEAD_B }, row) });
   const [startup] = refill.refill([]);
-  refill.onSettled({ ...startup, subject: startup.subject });
-  // Startup entry for A is refused as ineligible and settles; nothing is offered again.
+  assert.deepEqual(await startup.run(), { dispatched: true });
+  assert.equal(startup.subject.headSha, HEAD_B);
+  assert.equal(f.read().revision_ref, HEAD_B, 'startup admission rebinds A to the live head B');
+  assert.deepEqual(f.spawned, [HEAD_B, HEAD_B]);
+  refill.onSettled(startup);
+  // The admitted startup entry settles; only a new request re-arms it.
   assert.deepEqual(refill.refill([]), []);
   f.db.prepare(`UPDATE reviewed_prs SET revision_ref = ?, rereview_requested_at = '2026-01-03T00:00:00Z'
     WHERE pr_number = 1`).run(HEAD_B.slice(0, 8));
@@ -66,7 +70,45 @@ test('exact-head retrigger for B after a startup durable entry for A is admitted
   assert.ok(retriggered, 'the retrigger changes durable state and re-arms refill');
   assert.deepEqual(await retriggered.run(), { dispatched: true });
   assert.equal(f.read().revision_ref, HEAD_B, 'an abbreviated retrigger head is rebound to the full live head');
+  assert.deepEqual(f.spawned, [HEAD_B, HEAD_B, HEAD_B, HEAD_B]);
 });
+
+test('an unchanged request with a null timestamp can still rebind', async t => {
+  const f = fixture(t, { rereview_requested_at: null });
+  assert.deepEqual(await f.build({ headSha: HEAD_B }).run(), { dispatched: true });
+  assert.equal(f.read().revision_ref, HEAD_B);
+  assert.equal(f.read().rereview_requested_at, null);
+});
+
+for (const requestedAt of [null, '2026-01-02T00:00:00Z']) {
+  test(`a request replaced during the live-head read yields to the newer request (previous=${requestedAt})`, async t => {
+    const f = fixture(t, { rereview_requested_at: requestedAt });
+    let finishRead;
+    const liveRead = new Promise(resolve => { finishRead = resolve; });
+    const refill = createDurableReviewerRefill({
+      db: f.db, createCandidate: row => f.build(() => liveRead, row),
+    });
+    const [startup] = refill.refill([]);
+    const admission = startup.run();
+    f.db.prepare(`UPDATE reviewed_prs SET rereview_requested_at = '2026-01-03T00:00:00Z'
+      WHERE pr_number = 1`).run();
+    finishRead({ headSha: HEAD_B });
+    assert.deepEqual(await admission, { dispatched: false, reason: 'durable-refill-subject-changed' });
+    assert.equal(f.read().revision_ref, HEAD_A, 'the stale candidate cannot rebind the replacement request');
+    assert.deepEqual(f.spawned, []);
+    assert.deepEqual(f.logs, []);
+    refill.onSettled(startup);
+    const [replacement] = refill.refill([]);
+    assert.ok(replacement, 'settling the superseded candidate must not suppress the replacement request');
+    assert.equal(replacement.current.rereview_requested_at, '2026-01-03T00:00:00Z');
+    assert.deepEqual(await replacement.run(), { dispatched: true });
+    assert.equal(f.read().revision_ref, HEAD_B);
+    assert.equal(f.read().rereview_requested_at, '2026-01-03T00:00:00Z');
+    assert.deepEqual(f.spawned, [HEAD_B, HEAD_B]);
+    refill.onSettled(replacement);
+    assert.deepEqual(refill.refill([]), []);
+  });
+}
 
 for (const live of [{ terminal: true, headSha: HEAD_B }, { headSha: HEAD_B, labelsKnown: false },
   { headSha: HEAD_B, labels: ['merge-agent-skip'] }]) {

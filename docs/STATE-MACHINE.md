@@ -713,9 +713,13 @@ subsequent SQLite exclusion payloads.
 
 When a durable candidate's live read shows an open, unheld PR on a different
 head than the row's `revision_ref`, the row is rebound to the live head by a
-compare-and-swap on the still-pending row (only `revision_ref` changes, so the
-request time, reason and budgets keep their priority) and the candidate
-continues on that head. Head-keyed closure-park custody, next-action deadlines
+compare-and-swap on the still-pending row's captured `revision_ref` and
+`rereview_requested_at` (only `revision_ref` changes, so the request time,
+reason and budgets keep their priority) and the candidate continues on that
+head. A request replaced during the live read refuses the older candidate;
+settling that candidate leaves the replacement eligible for refill, including
+when both requests name the same revision.
+Head-keyed closure-park custody, next-action deadlines
 and recovery state for the old head are inert for the new head. Terminal, held
 or unreadable subjects are still refused as `durable-refill-subject-changed`.
 A pending re-review refused before admission logs a `review-wait-decision`

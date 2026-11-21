@@ -3805,7 +3805,9 @@ test('fallback_path canonical and legacy env aliases fail loud on conflict', () 
         }),
         (err) => {
           assert.ok(err instanceof AgentOSConfigError);
-          assert.equal(err.key, `roles.${roleClass}.fallback_path`);
+          const roleKey = roleClass === 'merge-agent-failure-recovery'
+            ? 'merge_agent_failure_recovery' : roleClass;
+          assert.equal(err.key, `roles.${roleKey}.fallback_path`);
           assert.match(err.message, /conflict/i);
           assert.equal(err.envName, null);
           assert.deepEqual(err.conflictingEnvNames, [

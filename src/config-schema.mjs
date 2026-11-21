@@ -83,8 +83,9 @@ export function fromJsonSchema(js, path = '<root>') {
   }
   if (js.minimum !== undefined) node.__min = js.minimum;
   if (js.anyOf) {
-    const [zero, floor] = js.anyOf;
-    if (js.anyOf.length !== 2 || zero.const !== 0 || floor.minimum === undefined) {
+    const zero = js.anyOf.find(branch => branch?.const === 0);
+    const floor = js.anyOf.find(branch => branch?.minimum !== undefined);
+    if (js.anyOf.length !== 2 || !zero || !floor) {
       throw new Error(`${path}: unsupported anyOf`);
     }
     Object.assign(node, { __min: floor.minimum, __allow_zero: true });
@@ -104,7 +105,9 @@ function locate(root, dotted) {
   let parent = null;
   let node = root;
   let key = null;
-  for (const part of dotted.match(/[^.[\]]+|\[\]/g)) {
+  const parts = typeof dotted === 'string' ? dotted.match(/[^.[\]]+|\[\]/g) : null;
+  if (!parts?.length) throw new Error(`${String(dotted)}: invalid CFG overlay path`);
+  for (const part of parts) {
     parent = node;
     key = part;
     if (part === '[]') node = node?.__item;

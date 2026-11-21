@@ -77,6 +77,7 @@ test('corporate audit context canonical override takes precedence over differing
 for (const context of ['', auditContext]) {
   test(`corporate audit context survives local CFG and canonical override: ${JSON.stringify(context)}`, () => fixture((topPath, dir) => {
     writeFileSync(topPath, 'version: 1\n');
+    // Explicit file baseline: an empty env override must preserve this local layer.
     writeFileSync(join(dir, 'config.local.yaml'), `oauth_broker:\n  claude_code_corp_bridge:\n    audit_context: ${JSON.stringify(context)}\n`);
     assert.equal(loadConfig({ topPath, env: {} }).get(`${prefix}.audit_context`), context);
     assert.equal(loadConfig({ topPath, env: {

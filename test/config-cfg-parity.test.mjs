@@ -51,7 +51,9 @@ test('every CFG key is in the Node schema and every Node-only key is inventoried
   })(schemaV1(), '');
   const cfgPaths = new Set();
   (function walk(js, path) {
-    if (js.anyOf?.[1]?.type === 'null') js = js.anyOf[0];
+    // Visit every non-null alternative: branch order and multiple alternatives
+    // must never hide child keys from parity coverage.
+    for (const branch of js.anyOf ?? []) if (branch.type !== 'null') walk(branch, path);
     cfgPaths.add(path);
     for (const [key, child] of Object.entries(js.properties ?? {})) walk(child, path ? `${path}.${key}` : key);
     if (js.items) walk(js.items, `${path}[]`);

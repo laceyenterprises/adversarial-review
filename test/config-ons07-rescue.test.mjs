@@ -4,7 +4,11 @@ import { mkdtempSync, mkdirSync, writeFileSync, rmSync, readFileSync } from 'nod
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { spawnSync } from 'node:child_process';
-import { loadConfig, loadConfigRuntime, AgentOSConfigError } from '../src/config-loader.mjs';
+import {
+  loadConfig, loadConfigRuntime, AgentOSConfigError,
+  ENUM_ROLES_ADVERSARIAL_OPERATOR_LABEL_ACTOR_ENFORCEMENT,
+  ENUM_ROLES_ADVERSARIAL_MERGE_CAPABILITY_ENFORCEMENT,
+} from '../src/config-loader.mjs';
 import { fromJsonSchema } from '../src/config-schema.mjs';
 
 function fixture(body, fn) {
@@ -42,6 +46,37 @@ test('fallback vault errors name the actual default policy rather than a synthet
 test('nullable schema branch ordering is immaterial and undeclared required fields fail explicitly', () => {
   assert.deepEqual(fromJsonSchema({ anyOf: [{ type: 'null' }, { type: 'string' }] }), fromJsonSchema({ anyOf: [{ type: 'string' }, { type: 'null' }] }));
   assert.throws(() => fromJsonSchema({ type: 'object', required: ['missing'] }), /required CFG property has no declared schema/);
+});
+
+test('allow-zero schema branch order does not change its contract', () => {
+  const branches = [{ const: 0 }, { minimum: 3 }];
+  assert.deepEqual(fromJsonSchema({ type: 'integer', anyOf: branches }),
+    fromJsonSchema({ type: 'integer', anyOf: [...branches].reverse() }));
+  assert.throws(() => fromJsonSchema({ type: 'integer', anyOf: [{ const: 0 }, {}] }), /unsupported anyOf/);
+});
+
+test('adversarial enforcement enum exports retain the schema contract', () => {
+  for (const values of [ENUM_ROLES_ADVERSARIAL_OPERATOR_LABEL_ACTOR_ENFORCEMENT,
+    ENUM_ROLES_ADVERSARIAL_MERGE_CAPABILITY_ENFORCEMENT]) {
+    assert.ok(values.includes('enforce'));
+    assert.ok(Object.isFrozen(values));
+  }
+});
+
+for (const key of ['disabled_repositories', 'lane_routes']) {
+  test(`null ${key} uses the standard config diagnostic`, () => {
+    fixture(`version: 1\nroles:\n  adversarial:\n    merge_authority:\n      ${key}: null\n`, topPath => {
+      assert.throws(() => loadConfig({ topPath, env: {} }), error => error instanceof AgentOSConfigError
+        && error.key.endsWith(`.${key}`) && /expected .*got null/.test(error.message));
+    });
+  });
+}
+
+test('a missing vault leaf is attributed to the file declaring its policy', () => {
+  fixture('version: 1\nworker_pool:\n  secrets:\n    default_vault_policy:\n      vault: ExampleVault\n', topPath => {
+    assert.throws(() => loadConfig({ topPath, env: {} }), error => error instanceof AgentOSConfigError
+      && error.key.endsWith('.service_account_token_ref') && error.source === topPath);
+  });
 });
 
 for (const value of [0, -1]) test(`remediation rejects non-positive concurrency ${value}`, () => {

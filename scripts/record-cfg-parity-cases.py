@@ -22,13 +22,14 @@ logging.disable(logging.CRITICAL)
 from agent_os_config import AgentOSConfigError, load_config  # noqa: E402
 
 path = sys.argv[1]
-doc = json.load(open(path))
+with open(path, encoding="utf-8") as handle:
+    doc = json.load(handle)
 for case in doc["cases"]:
     with tempfile.TemporaryDirectory() as scratch:
         for name, text in case["files"].items():
             target = os.path.join(scratch, name)
             os.makedirs(os.path.dirname(target), exist_ok=True)
-            with open(target, "w") as handle:
+            with open(target, "w", encoding="utf-8") as handle:
                 handle.write(text)
         env = {"AGENT_OS_CFG_VALIDATION_EVENT_LOG": "", **case.get("env", {})}
         try:
@@ -40,6 +41,6 @@ for case in doc["cases"]:
             case["python"] = {"ok": True, "values": {k: cfg.get(k) for k in case.get("get", [])}}
         except AgentOSConfigError as exc:
             case["python"] = {"ok": False, "key": exc.key}
-with open(path, "w") as handle:
+with open(path, "w", encoding="utf-8") as handle:
     json.dump(doc, handle, indent=1)
     handle.write("\n")

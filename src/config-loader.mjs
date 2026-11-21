@@ -145,6 +145,8 @@ const TYPE_DICT = 'dict';
 const schemaEnum = (dotted) => Object.freeze([...schemaLeaf(schemaV1(), dotted).__enum]);
 export const ENUM_CODEX_WORKER_ACCOUNT_ORDER = schemaEnum('roles.codex_worker_account_order');
 export const ENUM_ROLES_ADVERSARIAL_ORCHESTRATION_MODE = schemaEnum('roles.adversarial.orchestration_mode');
+export const ENUM_ROLES_ADVERSARIAL_OPERATOR_LABEL_ACTOR_ENFORCEMENT = schemaEnum('roles.adversarial.operator_label_actor_enforcement');
+export const ENUM_ROLES_ADVERSARIAL_MERGE_CAPABILITY_ENFORCEMENT = schemaEnum('roles.adversarial.merge_authority.merge_capability_enforcement');
 
 const ROLE_FALLBACK_CLASSES = [
   'claude-code',
@@ -166,7 +168,7 @@ function buildRoleFallbackEnvAliases() {
     ROLE_FALLBACK_CLASSES.map((roleClass) => {
       const envSegment = envClassSegment(roleClass);
       return [
-        `roles.${roleClass}.fallback_path`,
+        `roles.${roleClass === 'merge-agent-failure-recovery' ? 'merge_agent_failure_recovery' : roleClass}.fallback_path`,
         {
           canonical: `AGENT_OS_ROLES_${envSegment}_FALLBACK_PATH`,
           aliases: [[`LITELLM_VK_FALLBACK_FOR_${envSegment}`, identity]],
@@ -1358,8 +1360,6 @@ function checkLeaf(value, schema, keyPath, source, tolerateUnknown = false, nest
   const normalizeWith = (normalize) => {
     try { return normalize(value); } catch (error) { throw new AgentOSConfigError(`${keyPath}: ${error.message}`, { key: keyPath, source }); }
   };
-  if (schema.__repository_list) return normalizeWith(normalizeDisabledRepositories);
-  if (schema.__lane_routes) return normalizeWith(normalizeLaneRoutes);
   const expected = schema.__type;
   if (expected === 'any') return value; // validated atomically after the cascade
   if (value === null || value === undefined) {
@@ -1367,6 +1367,8 @@ function checkLeaf(value, schema, keyPath, source, tolerateUnknown = false, nest
     // Explicit null (`key: ~`) is not "omitted"; defaults never reach here.
     fail(`expected ${expected}, got null${Object.hasOwn(schema, '__default') ? ' (omit the key to keep the default)' : ''}`, expected, null);
   }
+  if (schema.__repository_list) return normalizeWith(normalizeDisabledRepositories);
+  if (schema.__lane_routes) return normalizeWith(normalizeLaneRoutes);
   const shown = JSON.stringify(value);
   if (expected === TYPE_BOOL) {
     if (typeof value !== 'boolean') {
@@ -1571,7 +1573,7 @@ function validateDictPresentKeysOnly(
 
 // Mirrors agent_os_config.validation._validate_secrets_config (rejection only;
 // this reader consumes no vault policy, so it does not normalize one).
-function validateWorkerClassVaults(secrets) {
+function validateWorkerClassVaults(secrets, trace) {
   if (!secrets || typeof secrets !== 'object') return;
   const shared = Array.isArray(secrets.shared_vaults) ? secrets.shared_vaults : [];
   const policies = Object.entries(secrets.worker_class_vaults ?? {}).map(([name, policy]) => [`worker_pool.secrets.worker_class_vaults.${name}`, policy]);
@@ -1582,7 +1584,15 @@ function validateWorkerClassVaults(secrets) {
     const { vault = null, service_account_token_ref: ref = null } = policy ?? {};
     const optin = policy?.shared_vault_optin ?? [];
     const fail = (leaf, message) => {
-      throw new AgentOSConfigError(`${key}.${leaf}: ${message}`, { key: `${key}.${leaf}` });
+      const full = `${key}.${leaf}`;
+      // A missing required leaf has no file entry; attribute it to the policy's
+      // explicitly configured sibling rather than its generated default.
+      const entry = trace[full]?.filter(item => item.path).at(-1)
+        ?? Object.entries(trace).filter(([path]) => path.startsWith(`${key}.`))
+          .flatMap(([, entries]) => entries.filter(item => item.path)).at(-1);
+      throw new AgentOSConfigError(`${full}: ${message}`, {
+        key: full, source: entry?.path ?? entry?.source ?? 'merged-config',
+      });
     };
     if (!Array.isArray(optin)) fail('shared_vault_optin', 'expected list');
     if (vault === null && ref === null && !optin.length) continue;
@@ -2878,7 +2888,7 @@ function loadConfigImpl({
   validateOsgShape(merged.osg);
   validateSearch(merged.services?.hcp?.search);
   validatePublicHygiene(merged.worker_pool?.public_hygiene);
-  validateWorkerClassVaults(merged.worker_pool?.secrets);
+  validateWorkerClassVaults(merged.worker_pool?.secrets, trace);
 
   const sources = {};
   for (const [key, entries] of Object.entries(trace)) {

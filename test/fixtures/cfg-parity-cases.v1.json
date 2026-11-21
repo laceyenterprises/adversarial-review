@@ -723,7 +723,7 @@
    }
   },
   {
-   "name": "env int list",
+   "name": "unbound int list env is ignored",
    "files": {
     "config.yaml": "version: 1\n"
    },
@@ -860,6 +860,40 @@
     "values": {
      "github.org": "nested-example"
     }
+   }
+  },
+  {
+   "name": "YAML integer list is preserved",
+   "files": {
+    "config.yaml": "version: 1\nmain_catchup:\n  pull_retry_delays_seconds: [1, 2]\n"
+   },
+   "get": [
+    "main_catchup.pull_retry_delays_seconds"
+   ],
+   "python": {
+    "ok": true,
+    "values": {
+     "main_catchup.pull_retry_delays_seconds": [
+      1,
+      2
+     ]
+    }
+   }
+  },
+  {
+   "name": "recovery role canonical fallback env",
+   "files": {
+    "config.yaml": "version: 1\n"
+   },
+   "env": {
+    "AGENT_OS_ROLES_MERGE_AGENT_FAILURE_RECOVERY_FALLBACK_PATH": "/tmp/recovery-fallback"
+   },
+   "get": [
+    "roles.merge_agent_failure_recovery.fallback_path"
+   ],
+   "python": {
+    "ok": false,
+    "key": "roles.merge_agent_failure_recovery.fallback_path"
    }
   }
  ]

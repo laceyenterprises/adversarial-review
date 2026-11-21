@@ -11,9 +11,7 @@ import { guardStackedBase } from './ama/stacked-base.mjs';
 import { resolveHqRoot } from './hq-root.mjs';
 import { filterGitHubBody } from './github-outbound-body.mjs';
 import { hammerAttestationChain } from './ama/hammer-head-validation.mjs';
-import { terminalReviewProofMatches } from './ama/reviewer-authority.mjs';
-import { readCloserReviewProof } from './ama/closer-review-proof.mjs';
-import { createReviewCurrencyReader } from './ama/review-currency.mjs';
+import { closerReviewProof, readCloserReviewProof } from './ama/closer-review-proof.mjs';
 import { createHistoryReader } from './ama/history-reader.mjs';
 import { verifyNoCiConfigured } from './ama/no-ci-configured.mjs';
 import { observeClosureLag } from './ama/closure-lag.mjs';
@@ -1004,7 +1002,12 @@ async function runDaemonCleanMergeAttemptInner({
         ?.eligibilityTrace?.trace?.hamTerminalRemediation?.auditComment?.createdAt;
     } catch { /* No matching audit is unavailable proof. */ }
   };
+  const readTerminalReviewProof = rollup => terminalReviewHead && String(rollup?.state).toUpperCase() === 'OPEN'
+    ? closerReviewProof({ snapshot: rollup, repo: repoPath, prNumber, headSha: terminalReviewHead,
+      validatedAt: readValidationCutoff(), operatorLogins: cfg?.operatorLogins,
+      get: createHistoryReader({ execFileImpl, env, signal }) }) : null;
   const initialGate = {
+    terminalReviewProof: await readTerminalReviewProof(liveRollup),
     requiredCheckContexts: resolveRequiredCheckContextsFromCfg(cfg),
     docsFastPath,
     terminalReviewValidated: Boolean(terminalReviewHead && terminalReviewHead === liveHead),
@@ -1190,16 +1193,7 @@ async function runDaemonCleanMergeAttemptInner({
         throw error;
       });
       const state = String(rollup?.state || '');
-      let terminalReviewProof = null;
-      if (terminalReviewHead && state.toUpperCase() === 'OPEN') {
-        const get = createHistoryReader({ execFileImpl, env, signal });
-        terminalReviewProof = await terminalReviewProofMatches({
-          reviews: rollup.reviews, headSha: terminalReviewHead,
-          validatedAt: readValidationCutoff(),
-          compare: (from, to) => get(`repos/${repoPath}/compare/${from}...${to}`),
-          currency: createReviewCurrencyReader({ repo: repoPath, prNumber, get, comments: rollup.comments }),
-        });
-      }
+      const terminalReviewProof = await readTerminalReviewProof(rollup);
       const freshDocs = docsFastPath ? await readDocsFastPathImpl({ repoPath, prNumber,
         subject: { headSha: validatedHead }, live: true, execFileImpl, env, execGhWithRetryImpl }) : null;
       const freshBootstrap = await bootstrapFor(rollup);

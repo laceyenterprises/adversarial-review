@@ -283,15 +283,19 @@ See the [offline source RCA](postmortems/SEV2-LAC-2162-late-review-terminal-audi
 
 ### Standing operator reviews and the merge writer (LAC-2305)
 
-On a HAM terminal merge, a formal current-head `CHANGES_REQUESTED` review
+On a HAM terminal merge, a non-dismissed formal `CHANGES_REQUESTED` review on any head
 from a configured `roles.adversarial.operator_logins` human or a human with
 live repository `admin` permission returns `operator-review-changes-requested`.
 Private organization membership can make an admin appear as `CONTRIBUTOR`
 in a review. The permission lookup uses the reviewing login and target
 repository. The veto stands even if the hammer published its audit after the
 review. GitHub dismissal clears that review. A strictly newer, distinct
-approval from the same issuer on the exact head also clears it. Comments,
-another issuer's approval and a disposition on another head leave it standing.
+approval from the same issuer on any head also clears it. Pushes and the hammer's
+base-retry rebase preserve the veto. Comments and another issuer's approval leave
+it standing. Historical approvals missing a commit or author cannot clear a veto;
+authorless reviews off the current head are ignored because their deleted issuer
+cannot be verified as a live operator. Missing identity on the exact head still
+fails closed.
 Recognized adversarial reviewers still use their separate family and finding
 rules. The daemon's automatic stale dismissal only clears superseded
 adversarial reviews when reusing HAM terminal authority. The explicit
@@ -299,13 +303,27 @@ validated withdrawal path still uses its review and head proof.
 
 The hammer refreshes review proof after acquiring the legacy lane writer and
 before invoking GitHub merge. Both daemon HAM terminal reuse paths refresh the
-same proof inside the lane writer before each transport attempt. A changed
+same proof in their initial pre-lease snapshot, each live gate, and inside the
+lane writer before each transport attempt. Review-proof holds carry an explicit
+five-minute recovery backoff and suppress a replacement hammer. A changed
 review or head, an unreadable review list, or an unknown issuer lookup
 prevents invocation. A preflight refusal that proves the daemon never called
 its merge transport drains the writer receipt normally. GitHub still enforces
 the exact-head CAS. Its merge endpoint offers no CAS for a review list, so
 the serialized local writer cannot fence a GitHub review submitted after the
-last remote read.
+last remote read. The shell passes `--pr` explicitly to `legacy-lane-write.mjs`;
+URL punctuation is not merge identity. Legacy callers without `--pr` retain the
+canonical URL fallback, with `merge-target-unparseable` for unreadable identity.
+
+The hammer records review-change and operator-veto refusals as `deferred`, but
+that audit value alone does not authorize a relaunch. The allowlist
+`AMA_CLOSER_RETRYABLE_DEFERRAL_REASONS` and
+`retryableAmaCloserDeferralOutcome` exclude `operator-review-changes-requested`
+and `review-changed-since-validation`; neither gets an infrastructure refund or
+a retryable lease outcome. Existing terminal-owner and attempt/lifetime caps
+still apply. Recovery requires dismissal/same-issuer approval for a veto, or a
+fresh authenticated validation that covers changed routed findings. Unavailable
+review evidence retains its existing bounded read-recovery path.
 
 The source regression holds the lane with another writer, adds an operator
 review after the earlier green gate, releases the lane and verifies zero merge

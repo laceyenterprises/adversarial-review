@@ -1185,6 +1185,7 @@ EOF_HAM_PROTECTIVE_PREDECESSORS
   HAM_MERGE_EXECUTED_AT=$(date -u +%Y-%m-%dT%H:%M:%SZ)
   "$HAM_NODE_BIN" "<<ROOT_DIR>>/bin/legacy-lane-write.mjs" \
     --root "<<ROOT_DIR>>" --repo "<<REPO>>" --base "$BASE_BRANCH" --deadline-ms "$HAM_LANE_WRITE_DEADLINE_MS" \
+    --pr "<<PR_NUMBER>>" \
     --review-validated-at "$(jq -r '.reviewValidatedAt // "unavailable"' "$HAM_GATE_JSON")" -- \
     "$HAM_NODE_BIN" "<<ROOT_DIR>>/bin/metered-gh.mjs" exec-hammer pr merge <<PR_URL>> \
     --<<MERGE_METHOD>> \

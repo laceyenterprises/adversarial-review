@@ -22,7 +22,7 @@ export function validLegacyRunTimeoutMs(ms) {
 
 export async function runLegacyLaneWrite({ rootDir, repository, base, command, argv, subject = null,
   readConfig = loadEffectiveMergeAuthorityConfig, exec = runCommandKeepingOutput, deadline, now = () => new Date().toISOString(), load,
-  timeoutMs, killGraceMs = DEFAULT_KILL_GRACE_MS, reviewValidatedAt, readReviewProof = readCloserReviewProof } = {}) {
+  timeoutMs, killGraceMs = DEFAULT_KILL_GRACE_MS, prNumber, reviewValidatedAt, readReviewProof = readCloserReviewProof } = {}) {
   if (timeoutMs !== undefined && !validLegacyRunTimeoutMs(timeoutMs)) throw new TypeError('invalid legacy writer run timeout');
   const clock = typeof now === 'function' ? now : () => now;
   deadline ??= new Date(Date.parse(clock()) + loadAwareTimeoutMs(60_000, { ...load, maxMs: 360_000 })).toISOString();
@@ -35,14 +35,18 @@ export async function runLegacyLaneWrite({ rootDir, repository, base, command, a
       if (reviewValidatedAt !== undefined) {
         const started = performance.now();
         const target = /^https:\/\/[^/]+\/([^/]+\/[^/]+)\/pull\/([1-9]\d*)$/.exec(subject?.target);
-        if (target?.[1]?.toLowerCase() !== repository.toLowerCase() || !Number.isFinite(Date.parse(reviewValidatedAt))) {
+        const targetPr = prNumber ?? (target?.[1]?.toLowerCase() === repository.toLowerCase() ? Number(target[2]) : NaN);
+        if (!Number.isSafeInteger(targetPr) || targetPr <= 0) {
+          return { ok: false, reason: 'merge-target-unparseable' };
+        }
+        if (!Number.isFinite(Date.parse(reviewValidatedAt))) {
           return { ok: false, reason: 'terminal-review-evidence-unavailable' };
         }
         // After lane admission, guard the exact write using the same run budget.
         let proof;
         try {
           proof = await readQueueEvidence({ read: ({ signal }) => readReviewProof({
-            repo: repository, prNumber: Number(target[2]), headSha: subject.head, validatedAt: reviewValidatedAt,
+            repo: repository, prNumber: targetPr, headSha: subject?.head, validatedAt: reviewValidatedAt,
             operatorLogins: cfg.operatorLogins, signal,
           }) }, {}, timeout);
         } catch { /* Missing proof is an observation failure. */ }

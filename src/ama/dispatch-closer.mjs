@@ -106,7 +106,7 @@ import { promisify } from 'node:util';
 
 import { writeFileAtomic } from '../atomic-write.mjs';
 import { terminalReviewProofMatches } from './reviewer-authority.mjs';
-import { readCloserReviewProof } from './closer-review-proof.mjs';
+import { closerReviewProof, readCloserReviewProof } from './closer-review-proof.mjs';
 import { createReviewCurrencyReader } from './review-currency.mjs';
 import { findActiveRemediationJob } from './active-remediation-job.mjs';
 import { listSettledJsonNames } from './dispatch-dir-names.mjs';
@@ -6589,6 +6589,11 @@ async function maybeDispatchAmaCloserAttempt({
         if (!baseBranch) {
           sameHeadHamMergeReason = 'base-branch-missing';
         } else {
+          const readTerminalReviewProof = rollup => closerReviewProof({ snapshot: rollup, repo, prNumber,
+            headSha: mergeHead, validatedAt: eligibilityOptions.hamTerminalRemediationGroundTruth?.auditComment?.createdAt,
+            operatorLogins: cfg?.operatorLogins, get: createHistoryReader({ execFileImpl, env, signal }) });
+          const terminalReviewProof = await readTerminalReviewProof(
+            await fetchPullRequestRollupImpl(repo, prNumber, { execFileImpl }));
           sameHeadHamMerge = await withDaemonMergeReservation({ rootDir, repo,
             base: baseBranch, pr: prNumber, head: mergeHead,
           }, () => routeFinalizationWriter({ rootDir, cfg,
@@ -6611,6 +6616,7 @@ async function maybeDispatchAmaCloserAttempt({
               : [],
             requiredCheckContexts: resolveRequiredCheckContextsFromCfg(cfg),
             liveGate: {
+              terminalReviewProof,
               primaryChange: eligibilityOptions.hamTerminalRemediationGroundTruth?.commit?.primaryChange,
               requirePrimaryChange: true,
               strictNonBlockingRemediation: cfg?.strictNonBlockingRemediation !== false,
@@ -6669,13 +6675,7 @@ async function maybeDispatchAmaCloserAttempt({
             fetchLiveGateImpl: async () => {
               const rollup = await fetchPullRequestRollupImpl(repo, prNumber, { execFileImpl });
               const state = String(rollup?.state || '');
-              const get = createHistoryReader({ execFileImpl, env, signal });
-              const terminalReviewProof = await terminalReviewProofMatches({
-                reviews: rollup?.reviews, headSha: mergeHead,
-                validatedAt: eligibilityOptions.hamTerminalRemediationGroundTruth?.auditComment?.createdAt,
-                compare: (from, to) => get(`repos/${repo}/compare/${from}...${to}`),
-                currency: createReviewCurrencyReader({ repo, prNumber, get, comments: rollup?.comments }),
-              });
+              const terminalReviewProof = await readTerminalReviewProof(rollup);
               return {
                 terminalReviewProof,
                 primaryChange: await fetchPrimaryChangeImpl({ repo, prNumber, rootDir, headSha: rollup?.headSha || rollup?.headRefOid || '',
@@ -6885,6 +6885,7 @@ async function maybeDispatchAmaCloserAttempt({
           launchRequestId: existingRecord.launchRequestId || null,
           promptPath: existingRecord.promptPath || null,
           needsOperator: !certifiedPark,
+          ...(sameHeadHamMerge?.recoveryWait ? { recoveryWait: true, retryAfterMs: sameHeadHamMerge.retryAfterMs } : {}),
         });
       }
       if (

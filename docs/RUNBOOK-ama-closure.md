@@ -1921,6 +1921,8 @@ posted-review step deadlines through `src/load-aware-timeout.mjs`. All quota
 readers share a 45-second nominal budget. The existing graded CPU
 corroboration curve supplies up to 6x patience by default under contention;
 CPU samples (including failures) and timeout policy are cached for five seconds.
+At or below CPU capacity, the helper returns the rounded nominal budget
+before reading timeout policy or sampling CPU utilization.
 On macOS, native `os.cpus()` counters supply interval deltas. A cold baseline,
 changed CPU count or baseline older than 60 seconds triggers one synchronous
 `ps` attempt with a one-second budget, so one-shot timeout CLIs can corroborate
@@ -1949,8 +1951,8 @@ LOAD_AWARE_TIMEOUT_DEBUG=1 node --input-type=module -e 'import { hostCpuBusyPerc
 Retain a finite warm reading; quiet stderr alone cannot prove sampler health.
 The cold reading should also be finite where `ps` is permitted. Separately run
 `LOAD_AWARE_TIMEOUT_DEBUG=1 node bin/load-aware-timeout.mjs 360` and retain the
-numeric budget plus any substitution/config diagnostics (an idle host may skip
-CPU sampling entirely). Repeat exact-stderr validation with the flag unset.
+numeric budget plus any substitution or config diagnostics. Those diagnostics
+apply to calls under load. Repeat exact-stderr validation with the flag unset.
 A measured zero still
 supplies zero corroboration,
 including when reused during failures for up to 60 seconds; this can retain
@@ -1960,8 +1962,8 @@ reading expires (immediately if none exists), subject to the configured cap.
 
 Set `adversarial.reviewer.load_aware.enabled: false` in `config.local.yaml` to restore
 nominal budgets, or set `adversarial.reviewer.load_aware.max_multiplier` (1..20 inclusive,
-default 6) to cap the extension. Policy changes are observed within five
-seconds. These keys use the shared `adversarial.reviewer` forward-compatible
+default 6) to cap the extension. Calls above CPU capacity observe policy changes
+within five seconds. These keys use the shared `adversarial.reviewer` forward-compatible
 extension point accepted by the Python loader and its shell wrapper; do not add
 a top-level `timeouts` root. The Node watcher owns validation and consumption of
 these leaves; Python and shell tolerate them but do not expose the timeout policy

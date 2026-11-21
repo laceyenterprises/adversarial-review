@@ -235,14 +235,16 @@ function scaledTimeout(baseValue, opts, maxValue) {
       `load-aware-timeout: base timeout must be a positive number, got ${baseValue}`,
     );
   }
-  const policy = opts.enabled !== undefined && opts.maxMultiplier !== undefined
-    ? opts : { ...timeoutPolicy(), ...opts };
-  if (policy.enabled === false) return Math.ceil(base);
   const cores = Number.isFinite(cpuCount) && cpuCount > 0
     ? cpuCount
     : HOST_CPU_COUNT;
   const load = Number.isFinite(loadAvg1m) ? loadAvg1m : (os.loadavg()?.[0] ?? 0);
+  // At or below capacity every policy returns the nominal timeout. Defer
+  // the config cascade until the policy can affect the result.
   if (load <= cores) return Math.ceil(base);
+  const policy = opts.enabled !== undefined && opts.maxMultiplier !== undefined
+    ? opts : { ...timeoutPolicy(), ...opts };
+  if (policy.enabled === false) return Math.ceil(base);
   const hasBusyOverride = Object.prototype.hasOwnProperty.call(opts, 'cpuBusyPercent');
   const busy = hasBusyOverride ? cpuBusyPercent : hostCpuBusyPercent();
   const loadPerCore = load / cores;

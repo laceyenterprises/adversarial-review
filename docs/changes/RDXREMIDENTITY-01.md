@@ -13,6 +13,9 @@ precedence over class-wide settings and built-in defaults. Malformed matching
 configuration warns without printing its contents and uses the existing
 fallback. See the [follow-up runbook](../follow-up-runbook.md).
 
+The repository lookup checks the exact dispatch class first, then its harness
+key. Workspace setup and local worker startup share that lookup.
+
 ## Verification
 
 - `npm test -- test/follow-up-remediation.test.mjs` passed all 397 tests.

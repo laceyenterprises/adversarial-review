@@ -3243,6 +3243,25 @@ test('remediationWorkerGitIdentity selects the repository override before the cl
   assert.deepEqual(remediationWorkerGitIdentity('codex', env), CLASS_GIT_IDENTITY);
 });
 
+test('remediationWorkerGitIdentity falls back from a dispatch class to its repository harness entry', () => {
+  const options = { repo: IDENTITY_FIXTURE_REPO };
+  for (const [workerClass, harnessClass] of [
+    ['remediator-claude', 'claude-code'],
+    ['remediator-gemini', 'gemini'],
+    ['remediator-codex', 'codex'],
+    ['remediator-codex-corp', 'codex'],
+  ]) {
+    const classes = { [harnessClass]: REPO_GIT_IDENTITY };
+    const env = {
+      [REPO_IDENTITY_ENV_KEY]: JSON.stringify({ [IDENTITY_FIXTURE_REPO]: classes }),
+    };
+    assert.deepEqual(remediationWorkerGitIdentity(workerClass, env, options), REPO_GIT_IDENTITY);
+    classes[workerClass] = CLASS_GIT_IDENTITY;
+    env[REPO_IDENTITY_ENV_KEY] = JSON.stringify({ [IDENTITY_FIXTURE_REPO]: classes });
+    assert.deepEqual(remediationWorkerGitIdentity(workerClass, env, options), CLASS_GIT_IDENTITY);
+  }
+});
+
 test('remediationWorkerGitIdentity falls through quietly when the repository has no override for the class', (t) => {
   const warn = t.mock.method(console, 'warn', () => {});
   const env = {
@@ -3991,6 +4010,7 @@ test('remediation runtime local mode preserves the claude-code-remediation prove
       HOME: workspaceDir,
       AGENT_OS_DEPLOY_CHECKOUT: path.join(workspaceDir, 'missing-seed'),
       HQ_REPO_ROOT: makeFakeAgentOsShimRoot(),
+      [REPO_IDENTITY_ENV_KEY]: JSON.stringify({ [IDENTITY_FIXTURE_REPO]: { 'claude-code': REPO_GIT_IDENTITY } }),
     },
     spawnImpl: (cmd, args, options) => {
       invokedCli = cmd;
@@ -4000,7 +4020,8 @@ test('remediation runtime local mode preserves the claude-code-remediation prove
     },
   }).run({
     mode: 'local',
-    role: { workerClass: 'claude-code' },
+    role: { workerClass: 'remediator-claude' },
+    repo: IDENTITY_FIXTURE_REPO,
     workspaceDir, promptPath, outputPath, logPath,
     ...testReplyContext(),
   });
@@ -4009,6 +4030,10 @@ test('remediation runtime local mode preserves the claude-code-remediation prove
   assert.match(invokedCli, /claude/);
   assert.equal(invokedEnv.WORKER_CLASS, 'claude-code');
   assert.equal(invokedEnv.WORKER_TRAILER_CLASS, 'claude-code-remediation');
+  assert.equal(invokedEnv.GIT_AUTHOR_NAME, REPO_GIT_IDENTITY.name);
+  assert.equal(invokedEnv.GIT_AUTHOR_EMAIL, REPO_GIT_IDENTITY.email);
+  assert.equal(invokedEnv.GIT_COMMITTER_NAME, REPO_GIT_IDENTITY.name);
+  assert.equal(invokedEnv.GIT_COMMITTER_EMAIL, REPO_GIT_IDENTITY.email);
   // Claude Code is invoked in --print + acceptEdits + skip-permissions so
   // the worker can edit files AND run git/bash commands non-interactively.
   // Without --dangerously-skip-permissions, shell commands gate on an

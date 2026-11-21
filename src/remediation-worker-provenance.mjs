@@ -209,6 +209,11 @@ const WORKER_PROVENANCE_HOOK_SENTINEL = 'managed-by: adversarial-review-worker-p
 const WORKER_PROVENANCE_CHAINED_HOOK_FILENAME = 'commit-msg.worker-provenance-chain';
 
 const REPO_IDENTITY_OVERRIDES_ENV = 'REMEDIATION_WORKER_GIT_IDENTITY_REPO_OVERRIDES';
+const REMEDIATION_IDENTITY_HARNESS_CLASSES = new Map([
+  ['remediator-claude', 'claude-code'],
+  ['remediator-gemini', 'gemini'],
+  ['remediator-codex', 'codex'],
+]);
 
 function isRecord(value) {
   return value !== null && typeof value === 'object' && !Array.isArray(value);
@@ -229,6 +234,9 @@ function resolveRepoIdentity(workerClass, env, repo) {
       if (!Object.hasOwn(overrides, repoKey)) return null;
       const classes = overrides[repoKey];
       if (isRecord(classes)) {
+        if (!Object.hasOwn(classes, workerClass)) {
+          workerClass = REMEDIATION_IDENTITY_HARNESS_CLASSES.get(canonicalWorkerClass(workerClass)) ?? workerClass;
+        }
         if (!Object.hasOwn(classes, workerClass)) return null;
         const identity = classes[workerClass];
         if (isRecord(identity) && isGitIdentityField(identity.name) && isGitIdentityField(identity.email)) {

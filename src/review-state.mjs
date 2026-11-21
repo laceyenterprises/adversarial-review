@@ -182,12 +182,15 @@ function ensureReviewStateSchema(db) {
   const hasSchema = () => db.prepare('SELECT 1 FROM main.sqlite_schema LIMIT 1').get() !== undefined;
   if (!db.inTransaction && !hasSchema()) {
     const bootstrap = db.transaction(() => {
-      // Another connection may have initialized the file before we got the lock.
-      if (hasSchema()) return false;
-      installReviewStateSchema(db);
-      return true;
+      // A racing connection may have finished bootstrap or committed only
+      // part of the schema. Full installation sets user_version last.
+      if (db.pragma('main.user_version', { simple: true }) < REVIEW_STATE_SCHEMA_VERSION) {
+        installReviewStateSchema(db);
+      }
     });
-    if (bootstrap.immediate()) return;
+    bootstrap.immediate();
+    ensureRepositoryIdentitySchema(db);
+    return;
   }
   installReviewStateSchema(db);
 }

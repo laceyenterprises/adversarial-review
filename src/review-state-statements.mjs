@@ -38,7 +38,7 @@ export function prepareMarkPosted(db) {
       AND NULLIF(TRIM(reviewer_head_sha), '') IS NOT NULL`);
 }
 
-export function prepareMarkSizeFailed(db) {
+export function prepareMarkClaimFailed(db) {
   return db.prepare(`UPDATE reviewed_prs
     SET review_status = 'failed', failed_at = ?, failure_message = ?,
         quota_reset_at_utc = NULL, review_attempts = review_attempts + 1,

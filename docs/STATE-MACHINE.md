@@ -953,6 +953,13 @@ new PR
   `reviewer-stalled` session-fenced release and typed `github-budget-deferred`
   reset holds remain budget-neutral. Process identity, confirmed drain, posted
   review recovery and retry caps retain their authority.
+  The native reviewer wrapper returns a reserved exit status for a typed local
+  model stall, independent of the retained diagnostic tail. An explicit
+  cancellation or an external termination signal outside a runner deadline
+  settles the exact dispatched head and session as a terminal `failed` review
+  row with `[cancelled]` evidence, retaining ordinary attempt accounting.
+  Same-head automatic failure recovery ignores diagnostics nested under that
+  cancellation tag.
 - GEMTIMEOUT-01: Gemini claims persist a single-call process timeout plus
   preparation/posting slack. A validated chunk plan extends only the matching
   active, open session's timeout and lease, before its parent timer is extended.

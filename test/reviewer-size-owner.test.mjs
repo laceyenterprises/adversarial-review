@@ -13,7 +13,7 @@ import { reviewerSizeFacts, reviewerSizeFactsLine, dispatchReviewerSizeUpdate, r
 import { resolveHqDispatchTimeoutMs } from '../src/hq-dispatch-timeout.mjs';
 import { alertClioOversizedAgyFailure } from '../src/reviewer-alerts.mjs';
 import { openReviewStateDb, ensureReviewStateSchema, requestReviewRereview } from '../src/review-state.mjs';
-import { prepareMarkSizeFailed, prepareMarkSizeRetry, prepareMarkAttemptStarted } from '../src/review-state-statements.mjs';
+import { prepareMarkClaimFailed, prepareMarkSizeRetry, prepareMarkAttemptStarted } from '../src/review-state-statements.mjs';
 
 const repo = 'example-org/example-repo';
 const headSha = 'a'.repeat(40);
@@ -38,7 +38,7 @@ function fixture(t) {
     reviewerSessionUuid: session, builderTag: 'codex', leaseRecoveryEnabled: true,
     result: { ok: false, failureClass: 'reviewer-chunk-budget-exceeded', error: 'synthetic size ceiling',
       stderr: reviewerSizeFactsLine(facts) },
-    statements: { getReviewRow: db.prepare('SELECT * FROM reviewed_prs WHERE repo = ? AND pr_number = ?'), markSizeFailed: prepareMarkSizeFailed(db),
+    statements: { getReviewRow: db.prepare('SELECT * FROM reviewed_prs WHERE repo = ? AND pr_number = ?'), markClaimFailed: prepareMarkClaimFailed(db),
       markFailed: { run() { assert.fail('must use the head/session fence'); } },
       releaseReviewLease: { run() { assert.fail('size failure must remain terminal'); } },
     },

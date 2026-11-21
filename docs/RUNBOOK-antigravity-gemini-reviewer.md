@@ -276,7 +276,7 @@ An identity is isolated when:
 - its settings drift from the HQ-owner path's effective agy settings;
 - a CCX-07 keychain-bootstrap record marks it not ready;
 - a review it ran fails with any failure class other than `cancelled`,
-  `stale-review-head`, `daemon-bounce`, or the provider-wide classes
+  `reviewer-stalled`, `stale-review-head`, `daemon-bounce`, or the provider-wide classes
   `cascade`, `provider-overloaded` and `quota-exhausted` (those hit every
   identity at once). A failed review isolates the HQ owner too;
 - a review process still runs as that user after its review ended (see
@@ -507,6 +507,19 @@ The review command's `--print-timeout` is sized from
 `--print-timeout 1170s`. If `reviewer.timeout_ms` is lowered, confirm the
 derived print timeout still leaves enough time for AGY to finish a real review;
 if it is raised, the AGY print timeout rises with it.
+
+### Interrupted result during model execution
+
+An agy `ERROR` result with `error: interrupted` and an empty response can be
+emitted during local teardown. Check the session stderr for the
+`[reviewer-stall]` timing receipt and the reviewer wrapper's
+`[reviewer-stalled]` error. The wrapper conveys a local model progress stall
+with a reserved exit status, so long diagnostics cannot hide it from the
+watcher. The existing session-fenced release and cascade backoff own the next
+eligible claim. A result that only says `interrupted` follows ordinary failure
+classification. An explicit cancellation or external termination signal is
+terminal for the claim. Use the cancellation audit receipt to identify the
+operator and reason when available.
 
 ### Stalled delivery after `Review generated` (REVPOSTSTALL-01)
 

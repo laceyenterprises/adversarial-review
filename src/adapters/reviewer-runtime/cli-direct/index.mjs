@@ -11,6 +11,7 @@ import { promisify } from 'node:util';
 import { resolveReviewerTimeoutMs, resolveGeminiReviewerProcessTimeoutMs, resolveAgyChunkTimeoutCapMs } from '../../../reviewer-timeout.mjs';
 import { resolveReviewerAbsoluteCeilingMs, resolveReviewerCeilingSeconds, usesStreamedReviewerCeiling } from '../../../reviewer-timeout-model.mjs';
 import { spawnCapturedProcessGroup } from '../../../process-group-spawn.mjs';
+import { REVIEWER_STALLED_EXIT_CODE } from '../../../reviewer-outcomes.mjs';
 import { resolveNodeBin } from '../../../node-interpreter.mjs';
 import { isPgidAlive, verifyPgidIdentity } from '../../../process-group-identity.mjs';
 import { domainRequiresMcpOAuth } from '../domain-mcp-oauth.mjs';
@@ -85,7 +86,7 @@ function stdoutLooksLikeFailureSignal(value) {
 
 function reviewerSignalAwareFailureClass(err, classificationText, exitCode, details = {}) {
   if (isReviewCliResolutionFailure(err)) return CLI_RESOLUTION_TRANSIENT_FAILURE_CLASS;
-  if (err?.reviewerStalled || String(classificationText).includes('[reviewer-stalled]')) return 'reviewer-stalled';
+  if (exitCode === REVIEWER_STALLED_EXIT_CODE || err?.reviewerStalled || String(classificationText).includes('[reviewer-stalled]')) return 'reviewer-stalled';
   const stdoutTail = tailText(err?.stdout || '');
   const stderrTail = tailText(err?.stderr || '');
   const messageTail = tailText(err?.message || '');
@@ -683,7 +684,13 @@ function createCliDirectReviewerRuntimeAdapter({
       const failureTokenEvidence = shouldParseStdoutTokenUsage(req.model)
         ? parseCodexJsonTokenUsageFromFailureStdout(effectiveErr?.stdout || '')
         : { tokenUsage: null, tokenUsageNoUsageReason: null };
-      const cancelled = activeRun.cancelled || controller.signal.aborted || errorCode === 'ABORT_ERR';
+      // The process runner sets timedOut explicitly. Its own TERM/KILL after a
+      // deadline is distinct from a signal delivered outside that deadline.
+      const externallyTerminated = effectiveErr?.timedOut === false
+        && !effectiveErr.progressTimedOut && !effectiveErr.firstOutputTimedOut
+        && !effectiveErr.reviewerStalled
+        && ['SIGTERM', 'SIGINT', 'SIGHUP', 'SIGKILL'].includes(effectiveErr.signal);
+      const cancelled = activeRun.cancelled || controller.signal.aborted || errorCode === 'ABORT_ERR' || externallyTerminated;
       const stdoutClassificationTail = tailText(effectiveErr?.stdout || '', DEFAULT_CLASSIFICATION_FIELD_BYTES);
       const classificationText = [
         tailText(effectiveErr?.message || '', DEFAULT_CLASSIFICATION_FIELD_BYTES),
@@ -693,7 +700,7 @@ function createCliDirectReviewerRuntimeAdapter({
         .filter(Boolean)
         .join('\n')
         .trim();
-      const failureClass = reviewerSignalAwareFailureClass(
+      const failureClass = cancelled ? 'cancelled' : reviewerSignalAwareFailureClass(
         effectiveErr,
         classificationText,
         exitCode,

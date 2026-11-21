@@ -1501,6 +1501,10 @@ Behavior:
 - writes an audit receipt under `data/review-cancellations/`
 - does not mutate `review_status`, retry counters, or any PR state columns
 
+The direct runtime handles the resulting external termination separately. The
+watcher settles a still-matching claim as `failed` with `[cancelled]` evidence
+and the ordinary attempt charge. Automatic same-head retries exclude it.
+
 Use `--signal SIGKILL` only after `SIGTERM` has failed or the process is known
 to ignore graceful termination.
 

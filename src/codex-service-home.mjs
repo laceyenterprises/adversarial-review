@@ -55,8 +55,8 @@ export function serviceCodexConfigArgs() {
 // Present a private, non-refreshing snapshot at the CLI's supported auth.json
 // boundary. Never link to or write back to the broker/per-worker source.
 export function prepareServiceCodexHome({ env, workspaceDir, model, effort = null, codexCli,
-  execFileSyncImpl = runServiceCodexCommand, log = console }) {
-  const steps = serviceCodexHomeSteps({ env, workspaceDir, model, effort, codexCli, log });
+  preserveToolCapabilities = false, execFileSyncImpl = runServiceCodexCommand, log = console }) {
+  const steps = serviceCodexHomeSteps({ env, workspaceDir, model, effort, codexCli, preserveToolCapabilities, log });
   let step = steps.next();
   while (!step.done) {
     let result;
@@ -87,7 +87,8 @@ export async function prepareServiceCodexHomeAsync({ execFileImpl = runServiceCo
   return step.value;
 }
 
-function* serviceCodexHomeSteps({ env, workspaceDir, model, effort = null, codexCli, log = console }) {
+function* serviceCodexHomeSteps({ env, workspaceDir, model, effort = null, codexCli,
+  preserveToolCapabilities = false, log = console }) {
   if (!model) throw new Error('service Codex home requires a resolved model');
   const codexHome = mkdtempSync(join(tmpdir(), 'adversarial-codex-'));
   try {
@@ -141,6 +142,7 @@ function* serviceCodexHomeSteps({ env, workspaceDir, model, effort = null, codex
     } catch (error) {
       throw serviceLaunchError(error) || serviceAuthError();
     }
+    const catalogName = preserveToolCapabilities ? 'model catalog' : 'direct-tools catalog';
     let catalogPath = null;
     let stage = 'fetch';
     try {
@@ -157,13 +159,14 @@ function* serviceCodexHomeSteps({ env, workspaceDir, model, effort = null, codex
         || !catalog.models.some(entry => entry.slug === model)) {
         throw new Error('catalog must contain model entries including the selected model');
       }
-      for (const entry of catalog.models) {
-        delete entry.tool_mode;
-        // Omitted search support defaults to false. Preserve all other model
-        // metadata, including experimental_supported_tools (direct MCP tools).
-        delete entry.supports_search_tool;
+      if (!preserveToolCapabilities) {
+        // Local remediation retains its existing direct-tools catalog policy.
+        for (const entry of catalog.models) {
+          delete entry.tool_mode;
+          delete entry.supports_search_tool;
+        }
       }
-      const candidate = join(codexHome, 'model-catalog.direct-tools.json');
+      const candidate = join(codexHome, preserveToolCapabilities ? 'model-catalog.json' : 'model-catalog.direct-tools.json');
       stage = 'write-catalog';
       writeFileSync(candidate, `${JSON.stringify(catalog)}\n`, { mode: 0o600 });
       const pinnedConfig = `model_catalog_json = ${JSON.stringify(candidate)}\n${config}`;
@@ -177,7 +180,7 @@ function* serviceCodexHomeSteps({ env, workspaceDir, model, effort = null, codex
       catalogPath = candidate;
     } catch (error) {
       // Do not include CLI output: it may contain credential/provider details.
-      log.warn?.(`[codex-service] direct-tools catalog not pinned; using server catalog stage=${stage} error=${error.code || error.name}`);
+      log.warn?.(`[codex-service] ${catalogName} not pinned; using server catalog stage=${stage} error=${error.code || error.name}`);
     }
     const configDigest = createHash('sha256').update(config).digest('hex');
     log.info?.(`[codex-service] CODEX_HOME=${codexHome} config_sha256=${configDigest} model_catalog_json=${catalogPath || 'server'}`);

@@ -43,6 +43,7 @@ import { join } from 'node:path';
 import { performance } from 'node:perf_hooks';
 import { promisify } from 'node:util';
 import { prepareServiceCodexHome, serviceCodexConfigArgs } from './codex-service-home.mjs';
+import { summarizeCodexReviewExecFailure } from './codex-review-exec-diagnostic.mjs';
 import { materializePerWorkerCodexAuth } from './codex-per-worker-auth.mjs';
 import { normalizeTokenUsage, readCodexTranscriptTokenUsage } from './reviewer-pass-tokens.mjs';
 import { ReviewerPromptTooLargeError } from './reviewer-outcomes.mjs';
@@ -1254,6 +1255,7 @@ async function spawnCodexReview({
 }) {
   codexCli ||= await resolveReviewCliPathAsync('codex', env || process.env);
   const home = serviceHome || prepareServiceCodexHome({ env, workspaceDir: cwd, model, codexCli, execFileSyncImpl,
+    preserveToolCapabilities: true,
     effort: configOverrides?.find((item) => item.key === 'model_reasoning_effort')?.value });
   try {
     return await spawnCapturedImpl(
@@ -1344,7 +1346,7 @@ async function reviewWithCodex(diff, extraContext = '', {
       HOME: process.env.HOME || homedir(),
     });
     serviceHome = prepareServiceCodexHome({ env, workspaceDir: reviewerSubprocessCwd, codexCli, execFileSyncImpl,
-      model: codexExecOverrides.model, effort: codexExecOverrides.reasoningEffort, log });
+      model: codexExecOverrides.model, effort: codexExecOverrides.reasoningEffort, preserveToolCapabilities: true, log });
     const codexSessionHome = serviceHome.codexHome;
     const changedLines = countChangedLines(diff);
     const effort = codexExecOverrides.reasoningEffort;
@@ -1378,9 +1380,11 @@ async function reviewWithCodex(diff, extraContext = '', {
       if (isReviewerStall(err)) throw err;
       stdout = err.stdout || '';
       stderr = err.stderr || '';
-      const msg = `${err.message || ''}\n${stdout}\n${stderr}`;
-      if (/\b(?:401|403)\b|invalid_grant|refresh_token|not logged in|\blogin\b/i.test(msg)) {
-        throw new OAuthError('codex', `CLI returned auth error: ${String(err.message || stderr || '').substring(0, 200)}`);
+      const { authRejected, diagnostic } = summarizeCodexReviewExecFailure(err);
+      if (authRejected) {
+        const authError = new OAuthError('codex', `CLI returned auth error: ${diagnostic}`);
+        console.error(`[reviewWithCodex] ${authError.message}`);
+        throw authError;
       }
       if (shouldRecoverCodexWithOAuth(err, codexExecOverrides.modelProvider)) {
         console.error('[reviewWithCodex] native CLI made no progress; retrying through OAuth Responses transport');
@@ -1415,7 +1419,7 @@ async function reviewWithCodex(diff, extraContext = '', {
       } catch {
         // Failure telemetry is best effort.
       }
-      throw new Error(`Native Codex exec failed: ${String(err.message || stderr || '').substring(0, 800)}`);
+      throw new Error(`Native Codex exec failed: ${diagnostic}`);
     }
 
     let fileOutput = '';

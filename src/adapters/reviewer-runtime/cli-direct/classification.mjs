@@ -295,7 +295,12 @@ function classifyReviewerFailure(stderr, exitCode, errorCode = null, details = {
     return 'reviewer-timeout';
   }
 
-  if (exitCode === 127 || BUG_ERROR_CODES.has(normalizedErrorCode) || /typeerror|syntaxerror|cannot find/.test(lower)) {
+  const nativeCodexExecFailure =
+    /^(?:\[reviewer\] (?:ai review failed for \S+: |error stack: error: ))?native codex exec failed:/m.test(lower);
+  // Native subprocess diagnostics can contain these words without a bug in
+  // the Node reviewer caller. Explicit caller exit/error codes still win.
+  if (exitCode === 127 || BUG_ERROR_CODES.has(normalizedErrorCode)
+    || (!nativeCodexExecFailure && /typeerror|syntaxerror|cannot find/.test(lower))) {
     return 'bug';
   }
 
@@ -337,7 +342,7 @@ function classifyReviewerFailure(stderr, exitCode, errorCode = null, details = {
     return DIFF_TOO_LARGE_FAILURE_CLASS;
   }
 
-  return 'unknown';
+  return nativeCodexExecFailure ? 'reviewer-command-failed' : 'unknown';
 }
 
 export {

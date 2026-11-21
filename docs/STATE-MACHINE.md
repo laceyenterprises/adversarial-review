@@ -711,6 +711,16 @@ excluded. Before each refill, missing, non-open or no-longer-pending rows are
 removed from the in-memory settled map, so their snapshots do not accumulate in
 subsequent SQLite exclusion payloads.
 
+When a durable candidate's live read shows an open, unheld PR on a different
+head than the row's `revision_ref`, the row is rebound to the live head by a
+compare-and-swap on the still-pending row (only `revision_ref` changes, so the
+request time, reason and budgets keep their priority) and the candidate
+continues on that head. Head-keyed closure-park custody, next-action deadlines
+and recovery state for the old head are inert for the new head. Terminal, held
+or unreadable subjects are still refused as `durable-refill-subject-changed`.
+A pending re-review refused before admission logs a `review-wait-decision`
+with its filtering reason on every drain, with or without wait pressure.
+
 Durable candidates forward the posted timestamp at split capacity release and
 at completion. Without admission splitting, the completed review result (or
 pipeline rollup delivery receipt) supplies the durable timestamp for the

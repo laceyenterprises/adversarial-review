@@ -69,7 +69,7 @@ export function createDurableReviewerRefill({ db, createCandidate, scope = () =>
 
 // Reuse discovery's full policy and spawn-boundary guards, but only after the
 // bounded queue has reserved the durable row's route. No API work in refill.
-export function createDurableReviewerCandidate(row, { subjectAdapter, context, processSubject, enqueue }) {
+export function createDurableReviewerCandidate(row, { subjectAdapter, context, processSubject, enqueue, rebindHead = null }) {
   if (!row.revision_ref || !row.reviewer) return null;
   return {
     repoPath: row.repo, prNumber: row.pr_number, reviewerModel: row.reviewer,
@@ -86,7 +86,14 @@ export function createDurableReviewerCandidate(row, { subjectAdapter, context, p
         subjectExternalId: row.subject_external_id || `${row.repo}#${row.pr_number}`,
         revisionRef: row.revision_ref,
       });
-      if (subject.terminal || subject.headSha !== row.revision_ref || subject.labelsKnown === false || isOperatorHeld(subject.labels)) {
+      // REBASEDREVIEWSTRAND-01: a queued re-review bound to a superseded head
+      // follows the live head. Dropping it left the row pending but settled, so
+      // neither refill nor an operator exact-head retrigger ever admitted it.
+      const movedHead = !subject.terminal && subject.headSha && subject.headSha !== row.revision_ref
+        && subject.labelsKnown !== false && !isOperatorHeld(subject.labels);
+      if (movedHead && rebindHead?.(row, subject.headSha) === true) {
+        this.subject = { headSha: subject.headSha };
+      } else if (subject.terminal || subject.headSha !== row.revision_ref || subject.labelsKnown === false || isOperatorHeld(subject.labels)) {
         return { dispatched: false, reason: 'durable-refill-subject-changed' };
       }
       let prepared;
@@ -118,7 +125,24 @@ export function createDurableReviewerCandidate(row, { subjectAdapter, context, p
 }
 
 
+// Compare-and-swap the queued head only: the request time, reason and budgets
+// stay, so an operator retrigger keeps its priority on the new head.
+export function createDurableHeadRebinder(db, { logger = console } = {}) {
+  const rebind = db.prepare(`UPDATE reviewed_prs SET revision_ref = ?
+    WHERE repo = ? AND pr_number = ? AND pr_state = 'open'
+      AND review_status IN ('pending', 'pending-upstream') AND revision_ref IS ?`);
+  return (row, headSha) => {
+    const moved = rebind.run(headSha, row.repo, row.pr_number, row.revision_ref ?? null).changes === 1;
+    if (moved) {
+      logger.log?.(`[watcher] REBASEDREVIEWSTRAND-01: superseded durable re-review ${identity(row)} `
+        + `from=${String(row.revision_ref).slice(0, 12)} to=${headSha.slice(0, 12)}; old-head custody no longer applies`);
+    }
+    return moved;
+  };
+}
+
 export function attachDurableReviewerRefill({ db, contexts, admission, processSubject, readScope }) {
+  const rebindHead = createDurableHeadRebinder(db);
   const refill = createDurableReviewerRefill({
     db,
     // Watcher scope is initialized after attachment; read it only on refill.
@@ -133,7 +157,7 @@ export function attachDurableReviewerRefill({ db, contexts, admission, processSu
     createCandidate(row) {
       const registration = contexts.get(`${row.domain_id || readScope().primaryDomainId}:${row.repo}`);
       return registration ? createDurableReviewerCandidate(row, {
-        ...registration, processSubject, enqueue: admission.enqueue,
+        ...registration, processSubject, enqueue: admission.enqueue, rebindHead,
       }) : null;
     },
   });

@@ -89,8 +89,7 @@ test('controller and repair CLI suites are scheduled ahead of median-duration fi
   const repair = 'test/repairdispatchread-01.test.mjs';
   const unmeasured = 'test/a-new-fixture.test.mjs';
   const order = orderFiles([unmeasured, controller, repair], durations);
-  assert.ok(order.indexOf(controller) < order.indexOf(unmeasured));
-  assert.ok(order.indexOf(repair) < order.indexOf(unmeasured));
+  assert.deepEqual(order, [controller, repair, unmeasured]);
 });
 
 for (const failure of [false, true]) test(`exclusive phase completes before parallel work and aggregates TAP (failure=${failure})`, t => {

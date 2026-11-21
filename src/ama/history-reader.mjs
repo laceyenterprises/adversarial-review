@@ -55,6 +55,8 @@ export function createHistoryReader(options = {}) {
     remainingMs();
     return immutableSnapshotValue(value);
   };
+  // checkpointProjection may differ from jq only by optional fields whose
+  // absence the reader tolerates; required fields must change the durable key.
   const json = async (path, jq = '.', checkpointProjection = jq) => {
     let attempts = 0;
     try {

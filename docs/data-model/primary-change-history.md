@@ -22,8 +22,10 @@ followed by either:
   null, after tree entry or null, "myers-v1"]`.
 
 JSON checkpoints retain projected commit authorship, compare pagination,
-verification, trees and blobs. The checkpoint projection normally matches the
-`jq` projection. Nonrecursive tree reads keep their original key when adding
+verification, trees and blobs. The checkpoint projection may differ from the
+`jq` projection only by optional fields whose absence the reader tolerates;
+adding required fields must change the durable read key.
+Nonrecursive tree reads keep their original key when adding
 the optional tree SHA, so an existing checkpoint can still supply root entries
 and use the original ref for the recursive lookup. File checkpoints retain a
 completed per-file comparison. These are observations, not authorizations: the reader still

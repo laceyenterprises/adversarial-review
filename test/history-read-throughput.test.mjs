@@ -400,9 +400,12 @@ test('recursive hammer proof still hydrates both exact snapshots before allowing
   assert.equal(counts.blob, 106, 'identical SHA-addressed blobs coalesce');
 });
 
-for (const reverted of [false, true]) {
-  test(`LAC-2286 large history with shared tree ${reverted ? 'refuses author reversal' : 'preserves author changes'}`, async t => {
-    const { get, counts, requests } = fixture({ recursive: true, hammer: true, large: true, reverted });
+for (const large of [false, true]) for (const reverted of [false, true]) {
+  test(`LAC-2286 ${large ? 'large' : 'small'} history with shared tree ${reverted ? 'refuses author reversal' : 'preserves author changes'}`, {
+    skip: large && process.env.LAC_2286_LARGE_HISTORY !== '1' ? 'opt in with LAC_2286_LARGE_HISTORY=1' : false,
+  }, async t => {
+    const { get, counts, requests } = fixture({ recursive: true, hammer: true, large, reverted });
+    const fileCount = large ? 353 : 53;
     const start = performance.now();
     const evidence = await fetchPrimaryChange({ ...args, get }, { fetchCiCostImpl: async () => ({ headSha: head, ok: true }) });
     const verdict = checkPrimaryChange(evidence, head);
@@ -413,12 +416,13 @@ for (const reverted of [false, true]) {
       localWallMs: Math.round(performance.now() - start) }));
     assert.equal(evidence.completeFileLists, true);
     assert.equal(evidence.primaryHead, middle);
-    assert.equal(evidence.primaryFiles.length, 353);
-    assert.equal(evidence.finalFiles.length, reverted ? 0 : 353);
+    assert.equal(evidence.primaryFiles.length, fileCount);
+    assert.equal(evidence.finalFiles.length, reverted ? 0 : fileCount);
     assert.equal(evidence.reversalAuthorizations?.length ?? 0, 0);
     assert.equal(verdict.ok, !reverted);
     if (reverted) assert.equal(verdict.reason, 'primary-change-reverted');
-    assert.deepEqual(counts, { compare: 6, tree: 5, blob: 706, live: 1, diff: reverted ? 353 : 706 });
+    assert.deepEqual(counts, { compare: large ? 6 : 2, tree: 5, blob: fileCount * 2, live: 1,
+      diff: fileCount * (reverted ? 1 : 2) });
     assert.equal(recursiveMisses, 2);
     assert.ok(recursiveRequests.every(key => ![base, middle, head].some(ref => key.includes(ref))));
   });

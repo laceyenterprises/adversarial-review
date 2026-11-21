@@ -712,13 +712,26 @@ refunds the unspawned round. If guarded publication fails after spawn, the
 publisher records a schema-valid `blocker` in the reply sidecar. The worker
 copies it into `operationalBlockers[]`, leaves the checkout intact, and writes
 a blocked reply with re-review disabled. `kind` is reserved for `pending-ci`.
-An exited worker's current-attempt auth refusal or broker deferral stops under
-`remediation-owner-auth-hold`. A stale lease records
+An exited worker's current-attempt auth refusal stops under
+`remediation-owner-auth-hold`. A credential-only broker deferral with a validated
+reply and unchanged authoritative head returns to pending uncharged after thirty
+seconds, including native job-bound sidecars. Other broker refusals retain the
+hold. A stale lease records
 `remediation-publication-stale-lease`. A running worker keeps custody.
 Reconciliation retains the sidecar's exact candidate and lease even if the
 reply is missing or invalid. It marks the reply unverified in that case.
 When it can verify the checkout and the rescue directory is owner-writable, it
-saves a verified Git bundle. See the [failure evidence contract](data-model/follow-up-jobs.md#refused-remediation-publication-remlabel-01).
+saves a verified Git bundle excluding history reachable from the exact remote
+lease. The lease must be locally available with shared ancestry; otherwise the
+checkout remains the source evidence. Restoration requires the prerequisites
+listed in the bundle header.
+Rescues under `rescues/adversarial-review/github-auth` have no automatic expiry;
+the recorded owner removes them only after verifying publication or retaining
+another durable copy of the commit. HQ `not-found` liveness proves exit; unknown
+dispatch evidence retains custody. Publisher stderr and sidecar `message` retain
+redacted diagnostics; `blocker.finding` stays fixed and reply-safe. Locally
+repairable fixture or dirty-tree failures should be corrected before retrying
+the guarded publisher. See the [failure evidence contract](data-model/follow-up-jobs.md#refused-remediation-publication-remlabel-01).
 
 For recovery, the recorded owner confirms the worker exited and checks for
 another active PR owner or an operator stop. Verify the GitHub route, the open PR's exact

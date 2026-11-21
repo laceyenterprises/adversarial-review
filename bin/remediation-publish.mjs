@@ -6,6 +6,7 @@ import { unlinkSync } from 'node:fs';
 import { writeFileAtomic } from '../src/atomic-write.mjs';
 import { publicationBlocker, publishRemediation } from '../src/remediation-publication.mjs';
 import { OWNER_AUTH_HOLD } from '../src/remediation-owner-auth.mjs';
+import { redactGithubAuthRecoveryDetail } from '../src/github-auth-recovery.mjs';
 
 const { values } = parseArgs({ options: {
   'base-branch': { type: 'string' }, 'previous-head': { type: 'string' },
@@ -38,7 +39,8 @@ try {
 } catch (error) {
   const code = String(error.code || '').startsWith('remediation-') ? error.code : 'remediation-publication-unproven';
   const blocker = publicationBlocker({ code, localCommit, expectedRemoteSha });
-  const failure = { localCommit, code, message: blocker.finding, blocker,
+  const message = redactGithubAuthRecoveryDetail(String(error.message || blocker.finding));
+  const failure = { localCommit, code, message, blocker,
     jobId: values['job-id'], repo: values.repo, prNumber: Number(values.pr) || undefined,
     previousHead, expectedRemoteSha, refusedAt: new Date().toISOString(),
     ...(error.code === OWNER_AUTH_HOLD && { owner: error.owner, capability: error.capability, reason: error.reason }) };

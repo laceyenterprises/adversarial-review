@@ -8,6 +8,8 @@ import { tmpdir } from 'node:os';
 import { join, relative } from 'node:path';
 import { publishRemediation } from '../src/remediation-publication.mjs';
 import { reconcileFollowUpJob } from '../src/follow-up-remediation.mjs';
+import { settlePublicationHandoff } from '../src/remediation-publication-refusal.mjs';
+import { preserveUnpushedCommit } from '../src/github-auth-recovery.mjs';
 import { createFollowUpJob, claimNextFollowUpJob, markFollowUpJobSpawned, readRemediationReplyArtifact } from '../src/follow-up-jobs.mjs';
 
 const execAsync = promisify(execFile);
@@ -125,7 +127,11 @@ test('REMLABEL-01: publisher refreshes a stale base before refusing restoration'
   assert.equal(f.git('ls-remote', 'origin', 'refs/heads/topic').split('\t')[0], f.previousHead);
 });
 
-for (const refusalCode of ['remediation-empties-pr-diff', 'remediation-owner-auth-hold']) test(`${refusalCode}: publisher artifact settles the round without requesting review`, async t => {
+for (const [refusalCode, manual] of [
+  ['remediation-empties-pr-diff', false],
+  ['remediation-owner-auth-hold', false],
+  ['remediation-empties-pr-diff', true],
+]) test(`${refusalCode} (manual: ${manual}): publisher artifact settles the round without requesting review`, async t => {
   const rootDir = mkdtempSync(join(tmpdir(), 'remlabel-failed-'));
   t.after(() => rmSync(rootDir, { recursive: true, force: true }));
   const priorEnv = { HQ_ROOT: process.env.HQ_ROOT, AGENT_OS_DEPLOY_CHECKOUT: process.env.AGENT_OS_DEPLOY_CHECKOUT,
@@ -156,11 +162,12 @@ for (const refusalCode of ['remediation-empties-pr-diff', 'remediation-owner-aut
   const outputPath = join(artifactDir, 'last-message.md');
   writeFileSync(outputPath, 'Publication refused.');
   const spawned = markFollowUpJobSpawned({ rootDir, jobPath: claimed.jobPath, spawnedAt: '2026-10-16T12:01:01Z',
-    worker: { processId: 12345, workspaceDir: relative(rootDir, workspaceDir),
+    worker: { processId: 12345, ...(manual && { dispatchMode: 'hq', dispatchId: 'running-dispatch', hqRoot: rootDir }), workspaceDir: relative(rootDir, workspaceDir),
       outputPath: relative(rootDir, outputPath), logPath: relative(rootDir, join(artifactDir, 'worker.log')), replyPath } });
   let reviews = 0;
   const result = await reconcileFollowUpJob({ rootDir, job: spawned.job, jobPath: spawned.jobPath,
-    now: () => '2026-10-16T12:03:00Z', isWorkerRunning: () => false,
+    now: () => manual ? '2026-11-16T12:03:00Z' : '2026-10-16T12:03:00Z', isWorkerRunning: () => false,
+    ...(manual && { execFileImpl: async () => ({ stdout: JSON.stringify({ status: 'running' }) }) }),
     resolvePRLifecycleImpl: async () => {
       if (ownerHold) return { source: 'live', prState: 'open', headSha: head };
       throw new Error('empty-diff refusal must settle before lifecycle recovery');
@@ -319,7 +326,7 @@ test('publisher artifact and validated blocked reply refund the round through re
   assert.equal(f.git('ls-remote', 'origin', 'refs/heads/topic').split('\t')[0], f.previousHead);
 });
 
-for (const scenario of ['auth', 'broker', 'stale', 'absent-source', 'live-actor', 'invalid-reply']) {
+for (const scenario of ['auth', 'broker', 'stale', 'absent-source', 'live-actor', 'invalid-reply', 'hq-not-found']) {
   test(`LAC-2283: CLI refusal, reply validation and reconciliation for ${scenario}`, async t => {
     const f = fixture(t);
     const rootDir = f.root;
@@ -343,7 +350,8 @@ for (const scenario of ['auth', 'broker', 'stale', 'absent-source', 'live-actor'
     const failurePath = `${replyPath}.publication-failure.json`;
     mkdirSync(join(replyPath, '..'), { recursive: true });
     const spawned = markFollowUpJobSpawned({ rootDir, jobPath: claimed.jobPath, spawnedAt: start,
-      worker: { processId: process.pid, model: 'claude-code', workspaceDir: f.work, replyPath } });
+      worker: { processId: process.pid, model: 'claude-code', workspaceDir: f.work, replyPath,
+        ...(scenario === 'hq-not-found' && { dispatchMode: 'hq', dispatchId: 'missing-dispatch' }) } });
 
     let liveHead = previousHead;
     if (scenario === 'stale') {
@@ -413,8 +421,12 @@ for (const scenario of ['auth', 'broker', 'stale', 'absent-source', 'live-actor'
       ...(scenario !== 'live-actor' && { isWorkerRunning: () => false }),
       resolvePRLifecycleImpl: async () => ({ source: 'live', prState: 'open', headSha: liveHead }),
       requestReviewRereviewImpl: () => assert.fail('publication refusal cannot request re-review'),
-      postCommentImpl: async () => assert.fail('publication handoff does not post a new PR comment'),
+      postCommentImpl: async () => {
+        assert.equal(scenario, 'broker', 'only the refunded broker round posts a notice');
+        return { posted: true };
+      },
       execFileImpl: async (command, args, settings) => {
+        if (scenario === 'hq-not-found' && args.includes('status')) throw new Error('no dispatch with id missing-dispatch');
         assert.equal(command, 'git');
         assert.ok(!args.includes('push') && !args.includes('fetch'), 'retention cannot publish or refresh credentials');
         return execAsync(command, args, settings);
@@ -425,6 +437,14 @@ for (const scenario of ['auth', 'broker', 'stale', 'absent-source', 'live-actor'
       assert.equal(result.job.publicationFailure, undefined);
       return;
     }
+    if (scenario === 'broker') {
+      assert.equal(result.action, 'requeued');
+      assert.equal(result.reason, 'credential-refresh-unavailable');
+      assert.equal(result.job.remediationPlan.currentRound, 0);
+      assert.equal(result.job.remediationPlan.retryHistory.at(-1).retryMetadata.localCommit, localCommit);
+      assert.equal(f.git('rev-parse', 'HEAD'), localCommit);
+      return;
+    }
     assert.equal(result.action, 'stopped');
     const durable = JSON.parse(readFileSync(result.jobPath));
     assert.equal(durable.remediationPlan.currentRound, spawned.job.remediationPlan.currentRound);
@@ -432,16 +452,21 @@ for (const scenario of ['auth', 'broker', 'stale', 'absent-source', 'live-actor'
     assert.equal(durable.publicationFailure.liveHeadSha, liveHead);
     assert.equal(durable.unpublishedWork.commitSha, localCommit);
     assert.equal(durable.unpublishedWork.expectedRemoteSha, expectedRemoteSha);
-    const reason = { broker: 'credential-broker-deferred', stale: 'stale-head', 'absent-source': 'local-source-unverified' };
+    const reason = { broker: 'credential-broker-deferred', stale: 'stale-head', 'absent-source': 'local-source-unverified', 'hq-not-found': 'local-source-unverified' };
     assert.equal(durable.publicationFailure.reason, reason[scenario] || 'owner-recovery-required');
     assert.equal(durable.remediationReply.state, scenario === 'invalid-reply'
       ? 'publication-refusal-reply-unverified' : 'worker-wrote-reply');
-    if (scenario === 'absent-source') {
+    if (['absent-source', 'hq-not-found'].includes(scenario)) {
       assert.equal(durable.unpublishedWork.workspaceDir, null);
       assert.equal(durable.unpublishedWork.rescue, undefined);
+    } else if (scenario === 'auth') {
+      assert.equal(durable.unpublishedWork.workspaceDir, f.work);
+      assert.equal(durable.unpublishedWork.rescue, undefined, 'unknown lease cannot supply a bundle prerequisite');
     } else {
       const { rescue } = durable.unpublishedWork;
       assert.ok(rescue?.preserved);
+      assert.ok(readFileSync(rescue.path).subarray(0, 1024).toString().includes(`-${expectedRemoteSha} `),
+        'bundle must exclude history reachable from its lease prerequisite');
       assert.ok(f.git('bundle', 'list-heads', rescue.path).startsWith(`${localCommit} `));
       assert.equal(f.git('rev-parse', 'HEAD'), localCommit);
     }
@@ -543,4 +568,78 @@ test('REMEDBRANCH-01: a branchless publisher resolves the fake PR head and publi
   assert.equal(reads, 1);
   assert.equal(result.published, true);
   assert.equal(f.git('ls-remote', 'origin', 'refs/heads/topic').split('\t')[0], result.headSha);
+});
+
+// Exercise the real CLI boundary: fixture diagnostics must survive serialization.
+test('LAC-2283: publisher exposes failing fixture names and redacts credentials', async t => {
+  const f = fixture(t);
+  mkdirSync(join(f.work, 'src'));
+  mkdirSync(join(f.work, 'test'));
+  writeFileSync(join(f.work, 'package.json'), JSON.stringify({ name: 'adversarial-review' }));
+  writeFileSync(join(f.work, 'src/load-aware-timeout.mjs'), '// fixture trigger\n');
+  writeFileSync(join(f.work, 'test/run-tests.mjs'),
+    "console.error('fixture assertion failed ghp_123456789012345678901234567890'); process.exit(1);\n");
+  f.git('add', '.'); f.git('commit', '-m', 'Trigger failing offline publication fixture');
+  const failurePath = join(f.root, 'failure.json');
+  await assert.rejects(execAsync(process.execPath, [new URL('../bin/remediation-publish.mjs', import.meta.url).pathname,
+    '--base-branch', 'main', '--branch', 'topic', '--previous-head', f.previousHead, '--failure-path', failurePath],
+  { cwd: f.work, env }), error => {
+    assert.match(error.stderr, /remediation-publication-check-failed/);
+    assert.match(error.stderr, /test\/finalization-simulator.test.mjs/);
+    assert.match(error.stderr, /fixture assertion failed/);
+    assert.ok(!error.stderr.includes('ghp_123456'));
+    return true;
+  });
+  const failure = JSON.parse(readFileSync(failurePath));
+  assert.match(failure.message, /test\/finalization-simulator.test.mjs/);
+  assert.match(failure.message, /REDACTED_GITHUB_TOKEN/);
+  assert.equal(failure.blocker.finding, 'The guarded publisher could not prove publication.');
+});
+
+test('LAC-2283: foreign-owned retained source is checked before Git inspection', async t => {
+  if (typeof process.getuid !== 'function' || process.getuid() === 0) {
+    t.skip('requires a non-root Unix worker');
+    return;
+  }
+  const f = fixture(t);
+  const at = new Date().toISOString();
+  createFollowUpJob({ rootDir: f.root, repo: 'fixture/repo', prNumber: 1,
+    revisionRef: f.previousHead, branch: 'topic', baseBranch: 'main',
+    reviewBody: 'Fix feature', reviewerModel: 'claude', reviewPostedAt: at });
+  const claimed = claimNextFollowUpJob({ rootDir: f.root, claimedAt: at });
+  const spawned = markFollowUpJobSpawned({ rootDir: f.root, jobPath: claimed.jobPath, spawnedAt: at,
+    worker: { processId: 12345, workspaceDir: f.work } });
+  let gitCalls = 0;
+  const result = await settlePublicationHandoff({ rootDir: f.root, ...spawned,
+    worker: spawned.job.remediationWorker, hqRoot: f.root,
+    // The filesystem root exists and belongs to root; no Git inspection is allowed.
+    workspaceDir: '/', replyPath: null, stoppedAt: at,
+    failure: { code: 'remediation-publication-auth-rejected', localCommit: 'a'.repeat(40),
+      previousHead: f.previousHead, expectedRemoteSha: f.previousHead, refusedAt: at },
+    lifecycle: { source: 'live', prState: 'open', headSha: f.previousHead },
+    execFileImpl: async () => { gitCalls++; throw new Error('foreign-owned checkout must not run Git'); },
+    log: { warn() {} } });
+  assert.equal(gitCalls, 0);
+  assert.equal(result.action, 'stopped');
+  assert.equal(result.job.publicationFailure.reason, 'local-source-unverified');
+  assert.equal(result.job.unpublishedWork.workspaceDir, null);
+});
+
+test('LAC-2283: rebased source bundles exclude shared history with a diverged lease', async t => {
+  const f = fixture(t);
+  f.git('checkout', 'main');
+  writeFileSync(join(f.work, 'trunk.txt'), 'new trunk content\n');
+  f.git('add', '.'); f.git('commit', '-m', 'Advance trunk');
+  f.git('checkout', 'topic');
+  f.git('rebase', 'main');
+  const commitSha = f.git('rev-parse', 'HEAD');
+  assert.notEqual(commitSha, f.previousHead);
+  const rescue = await preserveUnpushedCommit({ hqRoot: f.root, workspaceDir: f.work,
+    repo: 'fixture/repo', prNumber: 1, jobId: 'rebased-source',
+    commitSha, expectedRemoteSha: f.previousHead, checkoutTipOnly: true,
+    observedAt: new Date().toISOString(), execFileImpl: execAsync });
+  assert.equal(rescue.preserved, true);
+  assert.ok(readFileSync(rescue.path).subarray(0, 1024).toString().includes('\n-'),
+    'bundle must retain a shared-history prerequisite after rebasing');
+  assert.equal(f.git('bundle', 'list-heads', rescue.path), `${commitSha} HEAD`);
 });

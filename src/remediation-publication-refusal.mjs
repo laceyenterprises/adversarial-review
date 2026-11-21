@@ -9,6 +9,7 @@ import { resolvePublicationWorkspace } from './remediation-publication-workspace
 import { preserveUnpushedCommit } from './github-auth-recovery.mjs';
 
 const SHA = /^[a-f0-9]{40}$/u;
+const ownedByCurrentUid = path => typeof process.getuid !== 'function' || statSync(path).uid === process.getuid();
 
 const HANDOFF_CODES = new Set([PUBLICATION_AUTH_REJECTED, OWNER_AUTH_HOLD,
   PUBLICATION_STALE_LEASE, CREDENTIAL_REFRESH_UNAVAILABLE]);
@@ -30,8 +31,8 @@ export function isPublicationHandoffCode(code) {
 async function inspectRetainedSource({ job, workspaceDir, commitSha, execFileImpl, log }) {
   if (!commitSha) return null;
   try {
-    const selected = await resolvePublicationWorkspace({ job, workspaceDir, execFileImpl, log });
-    if (!selected) return null;
+    const selected = await resolvePublicationWorkspace({ job, workspaceDir, execFileImpl, log, canInspect: ownedByCurrentUid });
+    if (!selected || !ownedByCurrentUid(selected)) return null;
     const git = async args => (await execFileImpl('git', ['--no-replace-objects', '-C', selected, ...args],
       { encoding: 'utf8', timeout: 5000, maxBuffer: 64 * 1024 })).stdout.trim();
     if (realpathSync(await git(['rev-parse', '--show-toplevel'])) !== realpathSync(selected)) return null;
@@ -53,7 +54,8 @@ export async function settlePublicationHandoff({
     try {
       if (typeof process.getuid === 'function' && statSync(selected).uid === process.getuid()) {
         rescue = await preserveUnpushedCommit({ hqRoot, workspaceDir: selected, repo: job.repo, prNumber: job.prNumber,
-          jobId: job.jobId, commitSha: localCommit, observedAt: stoppedAt, checkoutTipOnly: true, execFileImpl });
+          jobId: job.jobId, commitSha: localCommit, observedAt: stoppedAt, checkoutTipOnly: true,
+          expectedRemoteSha, execFileImpl });
       }
     } catch { log.warn?.(`[follow-up-remediation] Could not bundle retained publication for ${job.jobId}; keeping checkout evidence.`); }
   }

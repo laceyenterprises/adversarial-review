@@ -750,7 +750,7 @@ beside the round's existing reply artifact:
 | Field | Type | Meaning |
 | --- | --- | --- |
 | `code` | string | `remediation-empties-pr-diff` for the preservation refusal; other publication errors retain their code. |
-| `message` | string | Diagnostic reason. Reconcile uses its own fixed public message. |
+| `message` | string | Original diagnostic reason with GitHub credentials and local paths redacted. Stderr prints the same message; the reply-ready blocker keeps fixed public text. |
 | `previousHead` | string | Original reviewed head, matched to the job's `revisionRef` before reconciliation trusts the refusal. |
 | `localCommit` | SHA or null | Checkout tip captured before running the guarded publisher. |
 | `expectedRemoteSha` | SHA | Exact lease used by this invocation, including when failure precedes the push. |
@@ -758,7 +758,7 @@ beside the round's existing reply artifact:
 | `blocker` | object | Reply-ready operational blocker containing `title`, `code`, `finding`, `reasoning` and available full `commitSha` and `expectedRemoteSha`. The publisher omits `kind`. |
 | `refusedAt` | ISO timestamp | Refusal observation time. |
 
-Once the worker exits, a matching preservation refusal precedes lifecycle
+Once the worker exits or requires manual inspection, a matching preservation refusal precedes lifecycle
 completion, reply validation, no-progress handling and published-head recovery.
 The job moves to `failed/` with `failure.code: remediation-empties-pr-diff`, an
 owed failure comment, and a failed worker; no re-review is requested. A sidecar
@@ -771,15 +771,23 @@ For `remediation-publication-auth-rejected`, `remediation-owner-auth-hold`,
 `remediation-credential-refresh-unavailable`, and
 `remediation-publication-stale-lease`, the job-bound sidecar is reconciled only
 after worker exit, with matching job/PR/reviewed head and refusal time in the
-current worker attempt. A locked write rechecks the round and worker
+current worker attempt. HQ `hq-dispatch-not-found` liveness proves exit. A proven
+credential-only broker failure first uses the existing uncharged thirty-second
+refund with its validated reply and unchanged authoritative head; retry history
+retains its local commit and workspace. Only non-qualifying failures enter the
+owner hold described below. A locked write rechecks the round and worker
 descriptor. The stopped job's `publicationFailure` records `code`,
 `localCommit`, `previousHead`, `expectedRemoteSha`, `refusedAt`, `liveHeadSha`
 (nullable), `reason`, and optional owner route diagnostics. The disposition is
 `stale-head`, `local-source-unverified`, `credential-broker-deferred`, or
 `owner-recovery-required`. `unpublishedWork` includes the exact lease, matched
 checkout path (nullable), and an optional `rescue` Git bundle that proves the
-recorded commit. An absent checkout does not validate source. A validated,
-matching blocked or partial reply stays available as `remediationReply.payload`.
+recorded commit. New handoff bundles exclude history at `expectedRemoteSha`,
+which must be locally available with shared ancestry; restoration requires
+the prerequisites listed in the bundle header. No automatic expiry is applied;
+the recorded owner removes rescues after verifying publication or another durable copy. Foreign-owned
+checkouts are not inspected with Git. An absent checkout does not validate
+source. A validated, matching blocked or partial reply stays available as `remediationReply.payload`.
 A missing, invalid or inconsistent reply is recorded as
 `publication-refusal-reply-unverified` without accepting it as completion.
 The hold grants no publication or review authority and does not spend another

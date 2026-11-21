@@ -187,6 +187,7 @@ async function preserveUnpushedCommit({
   commitSha,
   observedAt,
   checkoutTipOnly = false,
+  expectedRemoteSha = null,
   execFileImpl = execFileAsync,
   statSyncImpl = statSync,
   existsSyncImpl = existsSync,
@@ -205,8 +206,14 @@ async function preserveUnpushedCommit({
   const bundlePath = join(rescueDir, `${stamp}-${safeJob}-${sha.slice(0, 12)}${suffix}.bundle`);
   const rescueRef = checkoutTipOnly ? 'HEAD' : `refs/adversarial-review/rescues/${safeJob}/${sha}`;
   try {
+    const exclusions = [];
+    if (checkoutTipOnly) {
+      if (!/^[a-f0-9]{40}$/u.test(expectedRemoteSha || '')) throw new Error('Missing retained bundle prerequisite.');
+      await execFileImpl('git', recoveryGitArgs(workspaceDir, ['merge-base', expectedRemoteSha, sha]), localGitOptions());
+      exclusions.push(`^${expectedRemoteSha}`);
+    }
     if (!checkoutTipOnly) await execFileImpl('git', recoveryGitArgs(workspaceDir, ['update-ref', rescueRef, sha]), localGitOptions());
-    await execFileImpl('git', recoveryGitArgs(workspaceDir, ['bundle', 'create', bundlePath, rescueRef]), {
+    await execFileImpl('git', recoveryGitArgs(workspaceDir, ['bundle', 'create', bundlePath, rescueRef, ...exclusions]), {
       ...localGitOptions(), timeout: loadAwareTimeoutMs(60000),
     });
     await execFileImpl('git', recoveryGitArgs(workspaceDir, ['bundle', 'verify', bundlePath]), localGitOptions());

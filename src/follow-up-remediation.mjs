@@ -21,7 +21,7 @@ import { resolveInitialRemediatorRouting, DEFAULT_REMEDIATION_WORKER_CLASS, defa
 import { completeLiveWorkerPublishedHead, completeKnownWorkerPublish, findWorkerPublishedHead, buildRereviewResult } from './remediation-published-head.mjs';
 import { filterGitHubBody } from './github-outbound-body.mjs';
 import { logRoundBudgetDecision, settleInfrastructureRemediationRound, recordLocalRemediationOutcome } from './remediation-round-accounting.mjs';
-import { deferForCredentialBroker, credentialBrokerReady } from './remediation-credential-broker.mjs';
+import { deferForCredentialBroker, credentialBrokerReady, CREDENTIAL_REFRESH_UNAVAILABLE } from './remediation-credential-broker.mjs';
 import { isPublicationHandoffCode, matchesPublicationFailureAttempt, settlePublicationHandoff } from './remediation-publication-refusal.mjs';
 import { recordedInfrastructureReason, localWorkerErrorOutcome } from './remediation-infrastructure-refund.mjs';
 import { preserveUnsafeWorkspaceMetadata } from './workspace-identity.mjs';
@@ -1430,10 +1430,11 @@ async function reconcileFollowUpJobWithinRepositoryCycle({
     const protectsCustody = currentPublicationFailure && (isPublicationHandoffCode(publicationFailure.code)
       || publicationFailure.code === 'remediation-empties-pr-diff');
     if (protectsCustody && liveness.state === 'exited' && isHqWorker
+      && liveness.reason !== 'hq-dispatch-not-found'
       && !readDispatchStatus(liveness.dispatchStatus).terminal) {
       return { action: 'active', reason: 'publication-handoff-worker-exit-unproven', job, jobPath };
     }
-    if (liveness.state === 'exited' && publicationFailure?.code === 'remediation-empties-pr-diff'
+    if (publicationFailure?.code === 'remediation-empties-pr-diff'
       && (currentPublicationFailure || (!publicationFailure.jobId && publicationFailure.previousHead === job.revisionRef))) {
       const failure = { code: 'remediation-empties-pr-diff',
         message: 'Remediation publication refused: the result empties the PR diff or restores every originally changed file to base. The previous remote head is retained.' };
@@ -1459,6 +1460,15 @@ async function reconcileFollowUpJobWithinRepositoryCycle({
   });
   if (liveness.state === 'exited' && currentPublicationFailure && isPublicationHandoffCode(publicationFailure.code)
     && !['merged', 'closed'].includes(lifecycle?.prState)) {
+    // A job-bound sidecar must retain the existing credential-only refund.
+    // Independent failures or changed heads still fall through to owner custody.
+    const refund = publicationFailure.code === CREDENTIAL_REFRESH_UNAVAILABLE && await settleInfrastructureRemediationRound({
+      rootDir, job, jobPath, worker, liveness, lifecycle, lifecycleStop, completedAt: handoffAt,
+      publicationFailure, publicationReply,
+      isHqWorker, resolvePathsImpl: () => buildReconciliationPaths(rootDir, job),
+      postOutcomeComment: postReconcileOutcomeCommentSafe, postCommentImpl, now, log,
+    });
+    if (refund) return refund;
     return settlePublicationHandoff({ rootDir, job, jobPath, worker,
       hqRoot: worker.hqRoot || (process.env.HQ_ROOT ? resolveHqRoot(process.env) : rootDir),
       failure: publicationFailure, lifecycle, lifecycleStop, workspaceDir: publicationWorkspace, replyPath: publicationReplyPath,

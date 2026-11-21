@@ -1057,7 +1057,8 @@ queue while their ordinary round budget remains. Broker-backed remediation waits
 for the publisher broker's bounded `/readyz` probe before preparation and dispatch;
 `credential-broker-unready` keeps the pending job and round with backoff, retaining
 attempt history through preparation until spawn admission. A proven
-credential-only publication outage returns the round to pending without a charge,
+credential-only publication outage, including a native job-bound publisher sidecar,
+returns the round to pending without a charge after thirty seconds,
 records the saved commit as `infrastructure-failed`, and resumes preserved local
 work after readiness recovers. The reply must include a credential-outage
 operational blocker and no other blocker; generic supervisor `task_failed` and

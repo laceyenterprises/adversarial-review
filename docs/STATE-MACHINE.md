@@ -84,6 +84,14 @@ to three per PR across heads; later failures keep ordinary infra charges and
 cap alerts. Ledger faults defer only one PR. Existing lifecycle values, merge
 predicates and automated smoke commands are unchanged.
 
+An unbound repair reservation without verified publication whose owner is
+still `unknown` when observed at least ten minutes after reservation projects
+`operator-hold` with reason `repair-owner-unproven`. The watcher sends one
+SEV1 page per reservation through the existing closure-wait store. The
+reservation fences review and branch mutation while the dispatch owner
+establishes launch and retry evidence. A later proven owner or retirement
+supersedes the operator projection.
+
 A terminal owner at a moved head whose publication remains invalid or lacks
 launch/class identity retains the safety fence. After two observations and ten
 minutes from the first matching terminal publication observation,

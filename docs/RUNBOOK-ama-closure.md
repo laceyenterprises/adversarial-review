@@ -1010,8 +1010,16 @@ root (the standard `HQ_ROOT` / `AGENT_OS_HQ_ROOT` resolver) and an eight-second
 subprocess budget. Point-in-time absence retains custody because the submitter may still
 enqueue. A reservation with a canonical project supplied at creation uses the
 existing project/repository paired grant for its exact-key read. Older
-reservations keep their unscoped lookup. Retirement removes
-repair ownership from next-action and TTM projections, allowing the existing
+reservations keep their unscoped lookup. A grant-filtered empty result leaves
+ownership unproven. If an unbound reservation without verified publication
+still has `ownerState: unknown` when observed at least ten minutes after
+reservation, `repair-owner-unproven` names the operator in next-action and TTM
+and pages once per reservation. The page names the blocked head and
+reservation. The dispatch owner must establish the original launch and
+complete retry chain, or independently establish canonical absence and fence
+the original submitter through the authorized recovery path. Existing
+publication proof and custody rules continue to govern admission. Retirement
+removes repair ownership from next-action and TTM projections, allowing the existing
 ownerless clock and SEV1 page. Corrupt ledgers and busy refund writers defer only
 the affected PR. No replacement PR
 is opened. After both dispatch and review-service versions load, the runtime

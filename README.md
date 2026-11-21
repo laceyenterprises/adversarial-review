@@ -1881,10 +1881,12 @@ Discovery retains the base OAuth path, local sessions persist independently of
 credential materialization, and HQ log classification uses worker class. Missing
 worker records defer refunds; reviewer preparation errors clean service homes.
 Native spawns fetch a catalog using their own binary and staged auth. Local
-remediation uses the CODEXHOMEISO-02 direct-tools catalog. Reviewer execution
-and discovery preserve the selected binary's catalog metadata and pin it in
-config, with a CLI override for reviewer exec. Catalog failures warn and
-proceed with the server catalog. Native reviewer exec failures retain bounded,
+remediation requires the direct-tools catalog and pins its direct-tool feature
+settings at exec. Direct Responses Lite launches omit standalone web search,
+and declared regular Responses capabilities can use cached hosted search.
+Reviewer execution and discovery preserve the selected binary's catalog
+metadata, with a CLI override for reviewer exec and server fallback if seeding
+fails. Native reviewer exec failures retain bounded,
 redacted terminal diagnostics for the existing failure classifier and recovery.
 LAC-2131 requires the selected CLI to recognize ChatGPT auth in the isolated
 file store before catalog retrieval or execution; auth failure uses the existing
@@ -1894,9 +1896,8 @@ retaining sessions. Dummy-only offline CLI/file-store and serialized-reconcile
 fixtures cover these boundaries. Source review/merge, parent pointer and
 deployment precede the separate organic recovery proof.
 Offline fixtures cover these boundaries and refund behavior. After ordinary deployment,
-SRE observes the next organic remediation's shell execution, re-review request,
-isolated `CODEX_HOME`, config digest and pinned catalog, with no code-mode host
-errors; publication is not that live receipt.
+SRE observes the next organic direct remediation's source work, re-review
+request, isolated `CODEX_HOME`, config digest and pinned catalog.
 See [the workspace runbook](docs/RUNBOOK-reviewer-workspace.md). No new smoke
 command or CI check is added.
 

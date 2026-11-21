@@ -39,7 +39,7 @@ import { readDispatchReceipt, parseDispatchJsonOutput } from '../producer-contra
 import { isHamWorkerTicket } from './ham-provenance.mjs';
 import { guardStackedBase } from './stacked-base.mjs';
 import { dispatchConfigurationRefusal, pageDispatchConfigurationRefusal } from './dispatch-configuration-refusal.mjs';
-import { HAMMER_PHASES, renderHammerProcedure, splitHammerPrompt } from '../hammer-procedure.mjs';
+import { HAMMER_PHASES, renderHammerBootstrap, renderHammerProcedure, splitHammerPrompt } from '../hammer-procedure.mjs';
 import { meteredExecFile, meteredExecFileSync } from '../metered-gh.mjs';
 import { filterGitHubBody } from '../github-outbound-body.mjs';
 import { companionWaitRefundCount } from './companion-stop-wait.mjs';
@@ -8112,6 +8112,8 @@ async function maybeDispatchAmaCloserAttempt({
   promptPath = join(promptDir, `${repo.replace('/', '-')}-pr-${prNumber}-${reviewedSha}-${basename(scratchDir)}.md`);
   const procedureValues = closerTemplateValues({ ...promptInputs, scratchDir });
   if (!queueCloser) {
+    writeFileSync(join(scratchDir, 'hammer-bootstrap.sh'), renderHammerBootstrap(procedureValues),
+      { encoding: 'utf8', mode: 0o600, flag: 'wx' });
     const reference = composeCloserReference({ ...promptInputs, scratchDir });
     if (reference) writeFileSync(join(scratchDir, 'hammer-reference.md'), reference,
       { encoding: 'utf8', mode: 0o600, flag: 'wx' });

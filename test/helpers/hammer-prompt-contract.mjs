@@ -27,7 +27,7 @@ export function documentedExamples(markdown) {
         continue;
       }
       let command = logical.slice(start);
-      if (!/bin\/[\w-]+\.(?:mjs|sh)\b|^ham_(?:read|step|gh)\s/.test(command)) continue;
+      if (!/bin\/[\w-]+\.(?:mjs|sh)\b|^ham_(?:read|step|gh)\s|\/hammer-bootstrap\.sh\b/.test(command)) continue;
       // Metavariables for a generic command/alarm are not concrete invocations.
       if (command.includes('<read-only command...>') || command.includes('<seconds>')) continue;
       command = commandEnd(command);

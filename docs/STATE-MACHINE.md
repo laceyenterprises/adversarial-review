@@ -2570,6 +2570,13 @@ with readable process and retry evidence. SCRATCHLEAK-02 adds a durable
 oldest-first candidate cursor across passes and restarts, including kept trees
 and full zero-removal laps. Ledger probe elapsed time is excluded from the
 scan budget; a timed-out probe retains its tree and advances the cursor.
+
+HAMBOOTNOCUSTODY-01 prepares new HAM launches through the rendered foreground
+bootstrap command. It publishes `inputs.sh` after head capture, environment
+resolution and the initial context read. A pending tool result leaves the
+launch's ownership unresolved. Scratch readiness and queued steering are
+diagnostic only. Existing supervisor settlement and fenced reconciliation
+own terminal accounting and successor admission.
 No closure transitions change.
 
 LABELGATE-01 adds a non-terminal closure hold after hammer-route admission and

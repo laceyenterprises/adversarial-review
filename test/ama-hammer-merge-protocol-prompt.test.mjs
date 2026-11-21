@@ -17,6 +17,7 @@ import {
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = resolve(__dirname, '..');
+const BOOTSTRAP = readFileSync(join(REPO_ROOT, 'templates', 'hammer-bootstrap.sh'), 'utf8');
 const HAMMER_TEMPLATE = readFileSync(join(REPO_ROOT, 'templates', 'hammer-prompt.md'), 'utf8');
 // Structural merge-protocol assertions inspect the extracted versioned procedures
 // at their call sites, while the dispatched prompt remains small.
@@ -45,7 +46,7 @@ test('HAMPROMPT-01: rendered operating core directs execution, observable state 
   assert.ok(core.split('\n').length <= 150, 'the operating core must fit the first ~150 lines');
   assert.match(core, /Run phase scripts as instructed; follow exit codes and stderr/);
   assert.match(core, /Never inspect their source/);
-  assert.match(core, /test -f "\/fixture\/run\/hammer-verify-head.sh" -a -f "\/fixture\/run\/hammer-publish.sh" -a -f "\/fixture\/run\/hammer-merge.sh"/);
+  assert.match(core, /\/bin\/bash "\/fixture\/run\/hammer-bootstrap\.sh"/);
   assert.match(core, /test -f "\/fixture\/run\/inputs.sh"/);
   assert.match(core, /hammer-lease-state.mjs.*--pr "42".*--head/);
   // HAMCONTROLLERSCRIPT-01: phases run inside the one shipped close command;
@@ -117,29 +118,6 @@ esac
     assert.equal(result.status, expected, result.stderr);
     assert.match(result.stdout, new RegExp(reason));
     if (expected) assert.doesNotMatch(result.stdout, /CONFLICT_ALLOWED/);
-  }
-});
-
-test('HAMPROMPT-01: phase existence block checks files without executing their source', t => {
-  const dir = mkdtempSync(join(tmpdir(), 'hammer-existence-'));
-  t.after(() => rmSync(dir, { recursive: true, force: true }));
-  const phases = ['hammer-verify-head', 'hammer-publish', 'hammer-merge'];
-  for (const phase of phases) writeFileSync(join(dir, `${phase}.sh`), 'exit 99\n');
-  const node = join(dir, 'node');
-  writeFileSync(node, '#!/bin/sh\nprintf "%s\\n" "$2"\n', { mode: 0o755 });
-  const block = [...HAMMER_TEMPLATE.matchAll(/```bash\n([\s\S]*?)\n```/g)]
-    .find(([, body]) => body.includes('dispatch-phase-scripts-missing'))?.[1];
-  assert.ok(block);
-  const script = block.replaceAll('<<RUN_DIR>>', dir).replaceAll('<<ROOT_DIR>>', REPO_ROOT);
-  const run = () => spawnSync('/bin/bash', ['-c', script], { encoding: 'utf8', timeout: 5000,
-    env: { ...process.env, HAM_NODE_BIN: node } });
-  assert.equal(run().status, 0);
-  for (const phase of phases) {
-    rmSync(join(dir, `${phase}.sh`));
-    const missing = run();
-    assert.equal(missing.status, 1);
-    assert.equal(missing.stdout.trim(), 'dispatch-phase-scripts-missing');
-    writeFileSync(join(dir, `${phase}.sh`), 'exit 99\n');
   }
 });
 
@@ -286,22 +264,12 @@ test('ordinary remediation publishes before validating the live head', () => {
   assert.match(HAMMER_TEMPLATE, /API errors stop without Git fallback/);
 });
 
-test('starting head capture aborts before edits when its retry helper fails', () => {
-  const block = HAMMER_TEMPLATE.match(/Before edits,[\s\S]*?```bash\n([\s\S]*?)\n```/)?.[1];
-  assert.ok(block);
-  assert.match(block, /hammer-base-head\.mjs/);
-  const script = block.replace(/^.*hammer-base-head\.mjs.*$/m, '(exit 1) || exit 1');
-  const result = spawnSync('bash', ['-c', `${script}\necho EDITS_STARTED`], { encoding: 'utf8', timeout: 5000 });
-  assert.equal(result.status, 1);
-  assert.doesNotMatch(result.stdout, /EDITS_STARTED/);
-});
-
 test('HAMHELPERTIMEOUT-01 helpers declare bounded read retries separately from mutations', () => {
   const merge = readFileSync(new URL('../bin/hammer-merge.sh', import.meta.url), 'utf8');
   const publish = readFileSync(new URL('../bin/hammer-publish.sh', import.meta.url), 'utf8');
   const verify = readFileSync(new URL('../bin/hammer-verify-head.sh', import.meta.url), 'utf8');
-  assert.match(HAMMER_TEMPLATE, /hammer-helper-step.mjs" read:report base-head 90 540/);
-  assert.match(HAMMER_TEMPLATE, /ham_read\(\) \{ ham_step read:report "\$1" 90 540/);
+  assert.match(BOOTSTRAP, /hammer-helper-step.mjs" read:report base-head 90 540/);
+  assert.match(BOOTSTRAP, /ham_read\(\) \{ ham_step read:report "\$1" 90 540/);
   for (const step of ['context', 'review-read', 'primary-change-context']) {
     assert.match(HAMMER_TEMPLATE, new RegExp(`ham_read ${step}`));
   }

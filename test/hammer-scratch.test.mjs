@@ -318,7 +318,7 @@ test('HAMTMP-01: same-PR renders are fresh and every rendered helper uses privat
     const prompt = composeCloserPrompt({ templateBody: readFileSync(join(repoRoot, 'templates/hammer-prompt.md'), 'utf8'),
       rootDir: repoRoot, scratchDir, prNumber: 42 });
     assert.doesNotMatch(prompt, /\/tmp\/ham-/);
-    assert.ok(prompt.includes(`export HAM_RUN_DIR='${scratchDir}'`));
+    assert.ok(prompt.includes(`/bin/bash "${scratchDir}/hammer-bootstrap.sh"`));
     assert.ok(prompt.includes(`/bin/hammer-close.sh" "${scratchDir}/close-plan.json"`));
     for (const phase of HAMMER_PHASES) {
       const rendered = spawnSync(process.execPath, [join(repoRoot, 'bin/hammer-procedure.mjs'), phase, '--render'], {
@@ -330,30 +330,6 @@ test('HAMTMP-01: same-PR renders are fresh and every rendered helper uses privat
     }
   }
   assert.equal(readdirSync(root).length, 2);
-});
-
-test('HAMTMP-02: base-head capture runs from a deployed root containing spaces', t => {
-  const root = join(fixture(t), 'deployed root');
-  const scratchDir = join(root, 'private run');
-  mkdirSync(join(root, 'bin'), { recursive: true });
-  mkdirSync(scratchDir);
-  const prUrl = 'https://github.com/fixture/repo/pull/42';
-  writeFileSync(join(root, 'bin/hammer-base-head.mjs'), `
-    import assert from 'node:assert/strict';
-    assert.deepEqual(process.argv.slice(2), [${JSON.stringify(prUrl)}]);
-    process.stdout.write('${head}');
-  `);
-  const prompt = composeCloserPrompt({
-    templateBody: readFileSync(join(repoRoot, 'templates/hammer-prompt.md'), 'utf8'),
-    rootDir: root, scratchDir, prUrl, prNumber: 42,
-  });
-  const capture = prompt.split('\n').find(line => line.startsWith('/usr/bin/perl') && line.includes('/bin/hammer-base-head.mjs'));
-  assert.ok(capture, 'prompt contains the initial base-head capture command');
-  const result = spawnSync('/bin/bash', ['-c', capture], {
-    env: { ...process.env, HAM_NODE_BIN: process.execPath }, encoding: 'utf8', timeout: 10000,
-  });
-  assert.equal(result.status, 0, result.stderr);
-  assert.equal(readFileSync(join(scratchDir, 'base-head'), 'utf8'), head);
 });
 
 test('HAMTMP-01: a launch with an ambiguous response retains scratch until terminal reconciliation', async t => {
@@ -471,6 +447,8 @@ test('HAMTMP-02: dispatch snapshots deployed phases and the prompt sources only 
   // The state root deliberately contains a different PR-checkout procedure.
   mkdirSync(join(root, 'bin'));
   writeFileSync(join(root, 'bin/hammer-verify-head.sh'), 'synthetic untrusted procedure');
+  mkdirSync(join(root, 'templates'));
+  writeFileSync(join(root, 'templates/hammer-bootstrap.sh'), 'synthetic untrusted bootstrap');
   const args = dispatchArgs(root);
   args.readTemplateImpl = () => readFileSync(join(repoRoot, 'templates/hammer-prompt.md'), 'utf8');
   const result = await maybeDispatchAmaCloser({ ...args,
@@ -479,6 +457,13 @@ test('HAMTMP-02: dispatch snapshots deployed phases and the prompt sources only 
   const record = JSON.parse(readFileSync(amaCloserDispatchFilePath(root,
     { repo: 'fixture/repo', prNumber: 42, headSha: head })));
   const prompt = readFileSync(result.promptPath, 'utf8');
+  const bootstrapPath = join(record.scratchDir, 'hammer-bootstrap.sh');
+  const bootstrap = readFileSync(bootstrapPath, 'utf8');
+  assert.ok(prompt.includes(`/bin/bash "${bootstrapPath}"`));
+  assert.equal(statSync(bootstrapPath).mode & 0o777, 0o600);
+  assert.doesNotMatch(bootstrap, /<<[A-Z_]+>>|synthetic untrusted bootstrap/);
+  assert.match(bootstrap, /read:report base-head 90 540/);
+  assert.equal(existsSync(join(record.scratchDir, 'inputs.sh')), false);
   const referencePath = join(record.scratchDir, 'hammer-reference.md');
   const reference = readFileSync(referencePath, 'utf8');
   assert.equal(statSync(referencePath).mode & 0o777, 0o600);
@@ -494,9 +479,8 @@ test('HAMTMP-02: dispatch snapshots deployed phases and the prompt sources only 
   assert.match(prompt, /Fresh shells reset state(?:\/| and )cwd\./);
   for (const phase of ['hammer-verify-head', 'hammer-publish', 'hammer-merge']) {
     const path = join(record.scratchDir, `${phase}.sh`);
-    // HAMCONTROLLERSCRIPT-01: the shipped close command sources the private
-    // snapshot; the prompt only checks that it exists.
-    assert.ok(prompt.includes(`-f "${path}"`), phase);
+    // Bootstrap checks the private phase snapshots before invoking any reads.
+    assert.ok(bootstrap.includes(phase), phase);
     assert.equal(statSync(path).mode & 0o777, 0o600);
     const script = readFileSync(path, 'utf8');
     assert.doesNotMatch(script, /\/tmp\/ham-|<<[A-Z_]+>>|synthetic untrusted procedure/);

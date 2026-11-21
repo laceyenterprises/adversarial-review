@@ -179,7 +179,7 @@ export async function reconcileRepairOwner({ rootDir, repo, prNumber, headSha, n
       waitClass: 'repair-publication-unproven', immediate: true, now,
       reason: `Terminal repair ${reconciled.id} has unproven publication identity; operator must inspect the attestation before releasing custody.` });
   } else if (repairOwnerProofOverdue(reconciled) && SHA.test(headSha)) {
-    await observeWait({ rootDir, repo, prNumber, headSha: `${reconciled.baseHead}:${reconciled.id}`,
+    await observeWait({ rootDir, repo, prNumber, headSha: `${reconciled.baseHead || headSha}:${reconciled.id}`,
       waitClass: 'repair-owner-unproven', immediate: true, now,
       reason: `Repair reservation ${reconciled.id} blocks review of ${headSha.toLowerCase()}. ` +
         'Dispatch ownership is unproven. Establish launch and retry evidence or fence the original submitter through authorized recovery.' });

@@ -471,12 +471,17 @@ isolated config homes, with unchanged auth, model pins and approval/sandbox
 envelopes. See [the workspace runbook](RUNBOOK-reviewer-workspace.md) and
 [refund evidence contract](data-model/follow-up-jobs.md#infrastructure-round-refunds-remrefund-01).
 
-After auth staging, local remediation pins its CODEXHOMEISO-02 direct-tools
-catalog. Reviewer execution and discovery pin the native catalog with its
-capability fields intact. The reviewer CLI override retains the pin under
-`--ignore-user-config`. Fetch, parse and pin failures log and retain the
-server catalog. Tool-host timeout classification and refund transitions are
-unchanged.
+After auth staging, local remediation requires its direct-tools catalog and
+purpose-specific feature settings before exec. Reviewer execution and discovery
+pin the native catalog with its capability fields intact and retain server
+fallback on fetch, parse or pin failure. The reviewer CLI override retains the
+pin under `--ignore-user-config`. A direct Codex exit without usable artifacts
+can record `codex-reserved-tool-schema` under the existing `failed` status when
+the latest `turn.failed` carries the exact HTTP 400 reserved `web.run` rejection.
+It uses the ordinary terminal failure accounting and is ineligible for automatic
+execution-round recovery. A direct catalog refusal before spawn records the
+existing `startup-contract-violation` code with violation type
+`codex-direct-tools-catalog-unavailable`.
 
 ## Evidence-only completion (REVIEWEVIDENCE-01)
 

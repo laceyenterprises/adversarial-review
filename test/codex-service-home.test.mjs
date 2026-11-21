@@ -48,6 +48,7 @@ function prepare(f, extra = {}) {
 }
 const catalogFixture = { version: 'synthetic', models: [
   { slug: 'fixture-model', tool_mode: 'code_mode_only', supports_search_tool: true,
+    use_responses_lite: true, web_search_tool_type: 'text_and_image',
     context_window: 120000, experimental_supported_tools: ['fixture-clock'], extra: { preserved: true } },
   { slug: 'fixture-direct', tool_mode: 'direct', supports_search_tool: true },
   { slug: 'fixture-legacy', display_name: 'Synthetic legacy model' },
@@ -160,32 +161,73 @@ test('CLI auth preflight precedes catalog fetch; catalog changes only tooling fi
     const expected = structuredClone(catalogFixture);
     for (const entry of expected.models) { delete entry.tool_mode; delete entry.supports_search_tool; }
     assert.deepEqual(JSON.parse(readFileSync(home.catalogPath, 'utf8')), expected);
+    const config = readFileSync(join(home.codexHome, 'config.toml'), 'utf8');
+    assert.match(config, /web_search = "disabled"/);
+    assert.match(config, /\[features\.code_mode\]\nenabled = false/);
+    assert.match(config, /code_mode_only = false/);
+    assert.match(config, /standalone_web_search = false/);
     assert.equal(statSync(home.catalogPath).mode & 0o777, 0o600);
   } finally { home.cleanup(); f.cleanup(); }
 });
 
-for (const failure of ['fetch', 'parse', 'empty', 'entry', 'missing-model', 'write-catalog', 'pin-config']) {
-  test(`catalog ${failure} falls back only after effective auth succeeds`, () => {
+for (const [metadata, webSearch] of [
+  [{}, 'disabled'],
+  [{ tool_mode: 'code_mode', use_responses_lite: true, web_search_provider: 'standalone', web_search_tool_type: 'text' }, 'disabled'],
+  [{ tool_mode: 'direct', supports_search_tool: true, use_responses_lite: false, web_search_tool_type: 'text' }, 'cached'],
+  [{ tool_mode: 'code_mode_only', supports_search_tool: false, use_responses_lite: false,
+    web_search_provider: 'standalone', web_search_tool_type: 'text_and_image' }, 'cached'],
+  [{ use_responses_lite: false, web_search_provider: 'search_mcp', web_search_tool_type: 'text' }, 'disabled'],
+  [{ use_responses_lite: false }, 'disabled'],
+  [{ web_search_tool_type: 'text' }, 'disabled'],
+]) {
+  test(`direct web search ${webSearch} for ${JSON.stringify(metadata)}`, t => {
     const f = fixture();
-    const warnings = [];
-    const home = prepare(f, { log: { ...quiet, warn: line => warnings.push(line) },
+    t.after(f.cleanup);
+    const home = prepare(f, { execFileSyncImpl(command, args, options) {
+      if (args[0] === 'login') return serviceFixtureExec(command, args, options);
+      return JSON.stringify({ models: [{ slug: 'fixture-model', ...metadata }] });
+    } });
+    t.after(home.cleanup);
+    assert.match(readFileSync(join(home.codexHome, 'config.toml'), 'utf8'), new RegExp(`^web_search = "${webSearch}"$`, 'm'));
+    assert.ok(home.toolConfigArgs.includes(`web_search="${webSearch}"`));
+  });
+}
+
+for (const [failure, stage] of [
+  ['fetch', 'fetch'], ['parse', 'parse'], ['empty', 'parse'], ['entry', 'parse'], ['missing-model', 'parse'],
+  ['duplicate-model', 'parse'], ['tool-mode', 'capabilities'], ['tool-search', 'capabilities'],
+  ['transport', 'capabilities'], ['web-type', 'capabilities'], ['web-provider', 'capabilities'],
+  ['write-catalog', 'write-catalog'], ['pin-config', 'pin-config'],
+]) {
+  test(`direct catalog ${failure} fails closed after effective auth succeeds`, t => {
+    const f = fixture();
+    t.after(f.cleanup);
+    let isolatedHome;
+    assert.throws(() => prepare(f, {
       execFileSyncImpl(command, args, options) {
-        if (args[0] === 'login') return serviceFixtureExec(command, args, options);
-        if (failure === 'fetch') throw new Error('synthetic-private-output');
+        isolatedHome = options.env.CODEX_HOME;
+        if (args[0] === 'login') {
+          return serviceFixtureExec(command, args, options);
+        }
+        if (failure === 'fetch') throw Object.assign(new Error('private-output'), { code: 'private-code' });
         if (failure === 'parse') return '{invalid';
         if (failure === 'empty') return '{"models":[]}';
         if (failure === 'entry') return '{"models":[null]}';
         if (failure === 'missing-model') return '{"models":[{"slug":"other"}]}';
-        mkdirSync(join(options.env.CODEX_HOME, failure === 'write-catalog' ? 'model-catalog.direct-tools.json' : 'config.toml.tmp'));
-        return JSON.stringify(catalogFixture);
-      } });
-    try {
-      assert.equal(home.catalogPath, null);
-      assert.ok(existsSync(home.authPath));
-      assert.doesNotMatch(readFileSync(join(home.codexHome, 'config.toml'), 'utf8'), /model_catalog_json/);
-      assert.equal(warnings.length, 1);
-      assert.doesNotMatch(warnings[0], /synthetic-private-output/);
-    } finally { home.cleanup(); f.cleanup(); }
+        const catalog = structuredClone(catalogFixture);
+        const field = { 'tool-mode': 'tool_mode', 'tool-search': 'supports_search_tool', transport: 'use_responses_lite',
+          'web-type': 'web_search_tool_type', 'web-provider': 'web_search_provider' }[failure];
+        if (field) catalog.models[0][field] = 'private-unknown-capability';
+        if (failure === 'duplicate-model') catalog.models.push(catalog.models[0]);
+        if (failure === 'write-catalog' || failure === 'pin-config') {
+          mkdirSync(join(isolatedHome, failure === 'write-catalog' ? 'model-catalog.direct-tools.json' : 'config.toml.tmp'));
+        }
+        return JSON.stringify(catalog);
+      },
+    }), error => error.code === 'codex-direct-tools-catalog-unavailable'
+      && error.message === `Codex direct-tools catalog could not be pinned (stage=${stage})` && !error.cause);
+    assert.ok(isolatedHome);
+    assert.equal(existsSync(isolatedHome), false);
   });
 }
 
@@ -348,7 +390,7 @@ for (const failure of [null, 'progress', 'cli-auth', 'registry']) {
 }
 
 for (const provider of ['codex', 'codex-corp']) {
-  for (const failure of [null, 'cli-auth', 'spawn', 'reply-context']) {
+  for (const failure of [null, 'cli-auth', 'catalog', 'spawn', 'reply-context']) {
     test(`${provider} staging hands auth to service and cleans owned files (${failure || 'exit'})`, async () => {
       const f = fixture();
       const sourceBytes = readFileSync(f.authPath, 'utf8');
@@ -373,15 +415,21 @@ for (const provider of ['codex', 'codex-corp']) {
         execFileSyncImpl(command, args, options) {
           serviceDir = options.env.CODEX_HOME;
           if (failure === 'cli-auth') throw new Error('synthetic-secret-parser-output');
+          if (failure === 'catalog' && args[0] === 'debug') throw new Error('synthetic-secret-catalog-output');
           return serviceFixtureExec(command, args, options);
         },
         openSyncImpl() { opens += 1; return 51 + opens; }, closeSyncImpl() {},
-        spawnImpl(_cmd, _args, { env }) {
+        spawnImpl(_cmd, args, { env }) {
           assert.equal(existsSync(staged.codexHome), false);
           assert.equal(env.HOME, f.root);
           assert.equal(env.CODEX_AUTH_PATH, join(serviceDir, 'auth.json'));
           assert.equal(JSON.parse(readFileSync(env.CODEX_AUTH_PATH)).tokens.refresh_token,
             'agent-os-per-worker-placeholder-no-rotate');
+          assert.ok(args.includes('web_search="disabled"'));
+          assert.ok(args.includes('features.code_mode.enabled=false'));
+          assert.ok(args.includes('features.code_mode_only=false'));
+          assert.ok(args.includes('features.standalone_web_search=false'));
+          assert.ok(args.includes(`model_catalog_json=${JSON.stringify(join(serviceDir, 'model-catalog.direct-tools.json'))}`));
           if (failure === 'spawn') throw new Error('synthetic spawn failure');
           child = Object.assign(new EventEmitter(), { pid: 123456, unref() {} });
           return child;
@@ -389,8 +437,11 @@ for (const provider of ['codex', 'codex-corp']) {
       };
       try {
         if (failure) {
-          assert.throws(() => spawnCodexRemediationWorker(options));
-          if (failure === 'cli-auth' || failure === 'reply-context') assert.equal(opens, 0);
+          assert.throws(() => spawnCodexRemediationWorker(options), failure === 'catalog'
+            ? error => error.isPolicyViolation && error.violationType === 'codex-direct-tools-catalog-unavailable'
+              && error.message === 'Codex direct-tools catalog could not be pinned (stage=fetch)'
+            : undefined);
+          if (['cli-auth', 'catalog', 'reply-context'].includes(failure)) assert.equal(opens, 0);
           if (serviceDir) assert.equal(existsSync(serviceDir), false);
         } else {
           const worker = spawnCodexRemediationWorker(options);
@@ -488,6 +539,8 @@ test('reviewer CLI overrides pin the file credential store under --ignore-user-c
   const values = args.filter((_, index) => index % 2 === 1);
   assert.ok(args.every((arg, index) => index % 2 === 1 || arg === '--config'));
   assert.ok(values.includes('cli_auth_credentials_store="file"'));
+  assert.ok(values.includes('features.code_mode.enabled=true'));
+  assert.ok(values.every(value => !/web_search|code_mode_only/.test(value)));
 });
 
 test('discovery yields during credential and catalog commands without a synchronous executor', async t => {
@@ -536,7 +589,7 @@ test('async catalog rejection retains authenticated server-catalog fallback with
   t.after(f.cleanup);
   const warnings = [];
   const home = await prepareServiceCodexHomeAsync({ env: f.env, workspaceDir: f.root,
-    model: 'fixture-model', codexCli: '/fixture/codex',
+    model: 'fixture-model', codexCli: '/fixture/codex', preserveToolCapabilities: true,
     log: { info() {}, warn(message) { warnings.push(message); } },
     execFileImpl: async (command, args, options) => {
       await nextTurn();

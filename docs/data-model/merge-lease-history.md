@@ -15,6 +15,13 @@ foreign-host deadline expiry remains the fallback at acquisition/reconciliation.
 Confirmed-merged PR closeout releases only matching PR generations before
 scratch removal, recording `release` with `holder-pr-merged`.
 
+Native grants and automatic exhausted-head reviewer claims share the holder
+mutation lock. The watcher commits `reviewed_prs.review_status = 'reviewing'`
+before releasing the lock or leaves the request pending when a retained holder
+matches the PR and head. Grant, release and recovery own holder and history
+writes. The native under-lease reviewer check sees any claim that committed
+before its grant.
+
 LEASEFAIR-03 records every successful grant, fenced release, dead-holder steal,
 foreign-host deadline expiry, and renewal. Each version-1 JSONL row has
 `schemaVersion`, `eventId`, `event` (`grant`, `release`, `steal`, `expiry`, `renew`, `requeue`, `park`),

@@ -1921,6 +1921,8 @@ posted-review step deadlines through `src/load-aware-timeout.mjs`. All quota
 readers share a 45-second nominal budget. The existing graded CPU
 corroboration curve supplies up to 6x patience by default under contention;
 CPU samples (including failures) and timeout policy are cached for five seconds.
+At or below CPU capacity, the helper returns the rounded nominal budget
+before reading timeout policy or sampling CPU utilization.
 On macOS, native `os.cpus()` counters supply interval deltas. A cold baseline,
 changed CPU count or baseline older than 60 seconds triggers one synchronous
 `ps` attempt with a one-second budget, so one-shot timeout CLIs can corroborate
@@ -1949,8 +1951,8 @@ LOAD_AWARE_TIMEOUT_DEBUG=1 node --input-type=module -e 'import { hostCpuBusyPerc
 Retain a finite warm reading; quiet stderr alone cannot prove sampler health.
 The cold reading should also be finite where `ps` is permitted. Separately run
 `LOAD_AWARE_TIMEOUT_DEBUG=1 node bin/load-aware-timeout.mjs 360` and retain the
-numeric budget plus any substitution/config diagnostics (an idle host may skip
-CPU sampling entirely). Repeat exact-stderr validation with the flag unset.
+numeric budget plus any substitution or config diagnostics. Those diagnostics
+apply to calls under load. Repeat exact-stderr validation with the flag unset.
 A measured zero still
 supplies zero corroboration,
 including when reused during failures for up to 60 seconds; this can retain
@@ -1960,8 +1962,8 @@ reading expires (immediately if none exists), subject to the configured cap.
 
 Set `adversarial.reviewer.load_aware.enabled: false` in `config.local.yaml` to restore
 nominal budgets, or set `adversarial.reviewer.load_aware.max_multiplier` (1..20 inclusive,
-default 6) to cap the extension. Policy changes are observed within five
-seconds. These keys use the shared `adversarial.reviewer` forward-compatible
+default 6) to cap the extension. Calls above CPU capacity observe policy changes
+within five seconds. These keys use the shared `adversarial.reviewer` forward-compatible
 extension point accepted by the Python loader and its shell wrapper; do not add
 a top-level `timeouts` root. The Node watcher owns validation and consumption of
 these leaves; Python and shell tolerate them but do not expose the timeout policy
@@ -7603,6 +7605,31 @@ eligibility and merge gates remain mandatory before daemon merge or a repair
 dispatch.
 
 ## LEASEFAIR-01: fair merge lease service
+
+For an automatic exhausted-head verdict, the watcher commits the reviewer claim
+under the same `(repo, base)` mutation lock as native merge lease acquisition.
+`native-merge-custody` means the exact PR and head already have a retained holder.
+An unlocked local custody precheck runs before queueing, GitHub dedup preflight
+and memory reservation, and repeats before queued preparation and execution.
+Custody deferrals record a suppressed review lane and do not retain capacity
+wake priority. The locked claim remains authoritative if custody changes after
+the precheck. Holder liveness is probed outside the mutation lock; the locked
+read uses that observation only for an unchanged lease, otherwise a matching
+replacement retains custody until another poll.
+`merge-lease-mutation-busy`, `merge-lease-base-unavailable` or
+`merge-lease-state-unavailable` defers the claim to another poll. The last reason
+logs repository rename recovery or an unreadable/invalid lease, without treating
+the state as an absent holder. Missing subject base metadata uses the configured
+default base branch, then `main`. The request remains pending with its existing budget. Confirmed
+dead local holders and expired remote holders do not defer review. Uncertain
+local process identity retains custody, including after deadline. A review that
+claims first remains visible to the native under-lease owner check from the
+moment its SQLite claim commits. Existing final pre-execution checks still run.
+
+After ordinary deployment, check a natural exact-head closeout for a retained
+automatic request while the lease is held and an authorized closeout with the
+required source, findings, review and CI evidence. If the owner releases an open
+PR, check that the same request is eligible on a subsequent watcher tick.
 
 Daemon and closer acquisitions use one FIFO arrival queue per repo/base.
 The legacy `priority: daemon` field identifies a role without a scheduling boost.

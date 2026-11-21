@@ -1,3 +1,5 @@
+import { inspectMergeLeaseReviewCustody, withMergeLeaseReviewClaim } from './ama/merge-lease.mjs';
+
 // Shared closure evidence: only a new builder head gets a new review/budget
 // episode. A closer's pushed head stays in its existing reviewed-head series.
 export function hasUnreviewedBuilderHead(input = {}) {
@@ -23,11 +25,44 @@ export function owesExhaustedHeadVerdict({ exhausted, headSha, reviewedHeadSha, 
 
 export const exhaustedHeadVerdictReason = headSha => `system-exhausted-head-verdict:${headSha}`;
 const REPAIR_HEAD_REASON = /^system-repair-epoch:repair-[a-f0-9-]+:([a-f0-9]{40})$/i;
+function isSystemExhaustedHeadVerdictRequested(row, headSha) {
+  // Subject identity backfill can clear revision_ref on a legacy queued row.
+  // The exact SHA in the system marker still binds the request.
+  return Boolean(headSha && row?.rereview_requested_at
+    && row.rereview_reason === exhaustedHeadVerdictReason(headSha)
+    && (!row.revision_ref || row.revision_ref.toLowerCase() === headSha.toLowerCase()));
+}
+
 export function isExhaustedHeadVerdictRequested(row, headSha) {
+  if (isSystemExhaustedHeadVerdictRequested(row, headSha)) return true;
   if (!headSha || !row?.rereview_requested_at
     || row.revision_ref?.toLowerCase() !== headSha.toLowerCase()) return false;
-  return row.rereview_reason === exhaustedHeadVerdictReason(headSha)
-    || REPAIR_HEAD_REASON.exec(row.rereview_reason || '')?.[1].toLowerCase() === headSha.toLowerCase();
+  return REPAIR_HEAD_REASON.exec(row.rereview_reason || '')?.[1].toLowerCase() === headSha.toLowerCase();
+}
+
+// Scheduling hint only; the claim transaction still owns the final decision.
+export function exhaustedHeadMergeCustodyDeferral({ row, hasPriorityIntent, ...identity }) {
+  if (row?.failed_at || !isSystemExhaustedHeadVerdictRequested(row, identity.headSha)
+    || hasPriorityIntent()) return null;
+  return inspectMergeLeaseReviewCustody(identity).reason;
+}
+
+// A priority receipt that arrives while the candidate is queued keeps ordinary
+// admission. Classify the current row and receipt in the claim transaction;
+// a stale watcher snapshot cannot grant or suppress a system claim.
+export function claimWithExhaustedHeadMergeCustody({
+  db, readRow, hasPriorityIntent, ...identity
+}, claim) {
+  const { headSha } = identity;
+  const attempt = db.transaction(mergeHold => {
+    const row = readRow();
+    const systemVerdict = !row?.failed_at && isSystemExhaustedHeadVerdictRequested(row, headSha)
+      && !hasPriorityIntent();
+    if (systemVerdict && mergeHold === undefined) return null;
+    if (systemVerdict && mergeHold) return { reason: mergeHold };
+    return { claim: claim(row) };
+  }).immediate;
+  return attempt() ?? withMergeLeaseReviewClaim(identity, attempt);
 }
 
 // Admission only: the normal claim CAS, retry limits and pass journal still own

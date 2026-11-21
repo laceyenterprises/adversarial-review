@@ -23,6 +23,11 @@ Secondary database participants record the same operation ID in their own
 audit table. The main transaction changes the recorded current name last.
 Repeated observations of that current name are no-ops.
 
+Fresh `reviews.db` bootstrap installs these tables, the rest of the shared
+review schema and the migration receipts in one transaction. A failed
+bootstrap rolls all of them back. Existing databases follow the incremental
+migration path.
+
 `repository-names.json` is an atomically published projection for workers that
 retain old arguments. An active current name belongs to its current ID; a
 reused historical name never redirects the new repository to its former owner.

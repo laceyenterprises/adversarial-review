@@ -29,7 +29,8 @@ export function ensureRepositoryIdentitySchema(db) {
       new_name TEXT NOT NULL, at TEXT NOT NULL, rows_json TEXT NOT NULL
     );
   `);
-  initialized.add(db);
+  // The caller may roll back the DDL. Only remember committed installations.
+  if (!db.inTransaction) initialized.add(db);
 }
 
 function identityFrom(value) {

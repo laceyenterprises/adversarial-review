@@ -178,6 +178,21 @@ function openReviewStateDb(rootDir, { busyTimeoutMs = DEFAULT_BUSY_TIMEOUT_MS } 
 }
 
 function ensureReviewStateSchema(db) {
+  // Commit fresh schema DDL together to avoid per-statement journal cycles.
+  const hasSchema = () => db.prepare('SELECT 1 FROM main.sqlite_schema LIMIT 1').get() !== undefined;
+  if (!db.inTransaction && !hasSchema()) {
+    const bootstrap = db.transaction(() => {
+      // Another connection may have initialized the file before we got the lock.
+      if (hasSchema()) return false;
+      installReviewStateSchema(db);
+      return true;
+    });
+    if (bootstrap.immediate()) return;
+  }
+  installReviewStateSchema(db);
+}
+
+function installReviewStateSchema(db) {
   ensureExplicitReviewIntentSchema(db);
 
   ensureRepositoryIdentitySchema(db);

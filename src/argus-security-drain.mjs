@@ -34,6 +34,7 @@ import { fileURLToPath } from 'node:url';
 
 import {
   ARGUS_BACKLOG_RETIREMENT_INTERVAL_MS,
+  ARGUS_DRAIN_PROCESS_OWNER,
   createGhOpenPullHeadsLister,
   retireArgusBacklog,
 } from './argus-backlog-retirement.mjs';
@@ -326,7 +327,7 @@ export function applyArgusReviewOutcome({
  * free capacity, starts each review, and returns. Reviews settle on their own
  * and apply their outcome to the queue.
  *
- * `retireBacklog` (item 4) runs before the first claim and then on an
+ * `retireBacklog` runs at startup before the first claim and then on an
  * interval, in the background like everything else here. Until the first pass
  * has finished, successfully or not, the drain claims nothing: the backlog is
  * mostly dead heads, and reviewing it oldest-first would spend the first hours
@@ -340,6 +341,7 @@ export function createArgusSecurityDrain({
   isClaimable = isArgusJobClaimable,
   retireBacklog = null,
   retirementIntervalMs = ARGUS_BACKLOG_RETIREMENT_INTERVAL_MS,
+  claimOwner = ARGUS_DRAIN_PROCESS_OWNER,
   nowMs = () => Date.now(),
   logger = console,
 } = {}) {
@@ -362,7 +364,7 @@ export function createArgusSecurityDrain({
     retirement.running = true;
     retirement.lastStartedMs = nowMs();
     retirement.promise = Promise.resolve()
-      .then(() => retireBacklog({ runningJobIds: [...running.keys()], nowMs: nowMs() }))
+      .then(() => retireBacklog({ runningJobIds: [...running.keys()], claimOwner, nowMs: nowMs() }))
       .then((summary) => {
         retirement.lastSummary = summary || null;
         retirement.lastError = null;
@@ -402,6 +404,7 @@ export function createArgusSecurityDrain({
     }
   }
 
+  maybeStartRetirement();
   return {
     /**
      * @returns {{claimed: string[], running: number, limit: number, skipped: string|null}}
@@ -419,6 +422,7 @@ export function createArgusSecurityDrain({
           claim = claimNextArgusJob({
             rootDir,
             claimedAt: new Date(nowMs()).toISOString(),
+            claimOwner,
             shouldClaim: (job) => !running.has(job?.jobId) && isClaimable(job, { nowMs: nowMs() }),
           });
         } catch (err) {
@@ -475,8 +479,8 @@ export function argusSecurityDrainForProcess({ rootDir = ROOT, env = process.env
       rootDir,
       maxConcurrent: resolveArgusDrainMaxConcurrent(env),
       maxAttempts: resolveArgusDrainMaxAttempts(env),
-      retireBacklog: ({ runningJobIds, nowMs }) => retireArgusBacklog({
-        rootDir, listOpenPullHeads, runningJobIds, nowMs, logger,
+      retireBacklog: (context) => retireArgusBacklog({
+        rootDir, listOpenPullHeads, logger, ...context,
       }),
       logger,
     });

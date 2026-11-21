@@ -76,6 +76,7 @@ Directory: `data/argus-security-jobs/`
 | `enqueuedAt` | string or null | ISO-8601 enqueue time for normal jobs; `null` only for synthetic corrupt-record failures. |
 | `source` | string or null | Optional enqueue source label. |
 | `claimedAt` | string or null | ISO-8601 claim time once moved to `in-progress`. |
+| `claimOwner` | string, null or absent | Per-process nonce written by the drain when it claims a job. Returning the job to `pending/` clears the nonce. Older claims can omit this field. |
 | `completedAt` | string or null | ISO-8601 completion time for completed jobs. |
 | `failedAt` | string or null | ISO-8601 failure time for failed jobs. |
 | `result` | object or null | Result payload on completed jobs; reset to `null` when a job returns to `pending/`. Drain reviews and retirements carry `source: "argus-security-drain"` (`ARGUS_REVIEW_RESULT_SOURCE`); drain reviews carry `verdict` (`approve`, `needs_verification`, `block`), `summary`, `findings`, `reviewer`, `rubric`, `dependency`, `verification`, `completedAt`, `posted`, and a `drain` block `{claimedAt, completedAt, latencyMs, attempts}` the health surface reads for claim-to-verdict latency. Retirements carry `verdict: "superseded"`, `supersededReason` (`pr-merged-or-closed` or `head-superseded`), `observedHeadSha`, and `retiredBy: "backlog-retirement"`. `superseded` is a result verdict, not a job `status`. |
@@ -168,12 +169,16 @@ erDiagram
   backlog retirement pass (skipping claims running in this process), and the
   route's `reviveSupersededArgusJob` finishes one it meets for an open PR, so the
   half-done state is never stranded.
-- Backlog retirement (every 30 minutes, and before the drain's first claim)
-  completes pending jobs whose PR is no longer open, or is open at another head,
-  with a `superseded` result. It reads open PRs live from GitHub; a repo whose
-  listing fails or may be truncated retires nothing. It also returns in-progress
-  claims older than the claim lease and not running in this process to
-  `pending/`.
+- Backlog retirement runs at drain startup before the first claim and every
+  30 minutes afterward. Claims tracked as running in this process keep their
+  ownership. The pass immediately returns predecessor claims to `pending/`,
+  including legacy claims whose `claimedAt` precedes process startup.
+  Other untracked claims are recovered when their 60-minute lease expires,
+  with load scaling capped at 120 minutes.
+- In the same pass, GitHub's live open-PR listing determines which pending jobs
+  receive a `superseded` result. This includes recovered jobs for closed or
+  merged PRs and jobs whose PRs have moved to a different head. A failed or
+  potentially truncated listing leaves that repository's jobs pending.
 - The files contain no secrets. They contain PR identity, exact head SHA,
   security trigger reasons, timestamps, and review result or failure metadata.
 

@@ -29,7 +29,7 @@
 
 import { readFileSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
-import { resolveCloserDispatchHarness } from './ama/harness-fallback.mjs';
+import { resolveCloserDispatchHarness, resolveHarnessAfterResolverError } from './ama/harness-fallback.mjs';
 import { isAutomaticCodexAccountPolicy } from './codex-account-routing.mjs';
 import { writeFileAtomic } from './atomic-write.mjs';
 import { loadConfigCached } from './config-loader.mjs';
@@ -218,10 +218,11 @@ export async function resolveMergeAgentDispatchHarness({
   fallbackWorkerClasses = mergeAgentFallbackWorkerClasses(env, { logger }),
   resolveHarnessImpl = resolveCloserDispatchHarness,
   deferral = null,
+  rootDir = null,
   codexAccountPolicy = codexWorkerAccountPolicy('roles.merge_agent_worker_class', workerClass, { env }),
 } = {}) {
   const result = await resolveHarness({
-    workerClass, env, hqPath, execFileImpl, logger, fallbackWorkerClasses, resolveHarnessImpl, codexAccountPolicy,
+    workerClass, env, hqPath, execFileImpl, logger, fallbackWorkerClasses, resolveHarnessImpl, codexAccountPolicy, rootDir,
   });
   if (!deferral) return result;
   const deferralRecord = trackMergeAgentHarnessDeferral({ ...deferral, harness: result, logger });
@@ -229,7 +230,7 @@ export async function resolveMergeAgentDispatchHarness({
 }
 
 async function resolveHarness({
-  workerClass, env, hqPath, execFileImpl, logger, fallbackWorkerClasses, resolveHarnessImpl, codexAccountPolicy,
+  workerClass, env, hqPath, execFileImpl, logger, fallbackWorkerClasses, resolveHarnessImpl, codexAccountPolicy, rootDir,
 }) {
   let harness;
   try {
@@ -240,6 +241,7 @@ async function resolveHarness({
       execFileImpl,
       env,
       codexAccountPolicy,
+      rootDir,
       probeWithoutFallbacks: true,
       screenSoftGroundedFallbacks: true,
     });
@@ -249,8 +251,15 @@ async function resolveHarness({
         reason: err.failureClass || 'reviewer-model-unresolved', retryable: err.retryable !== false,
         ...(err.reason ? {refusalClass: err.reason, detail: err.detail} : {})};
     }
-    // Fail open, like the closer: a resolver fault is not proof of grounding.
-    harness = { workerClass, fellBack: false, reason: 'harness-fallback-resolver-error', error: String(err?.message || err) };
+    // CLOSERFALLBACKFAILOPEN-01: a persisted snapshot that grounds the class
+    // takes the fallback or defers. Unreadable state still fails open, like the
+    // closer: a resolver fault alone is not proof of grounding.
+    harness = resolveHarnessAfterResolverError({ workerClass, fallbackWorkerClasses, rootDir, error: err });
+    if (harness.resolverErrorDecision === 'defer:primary-state-unknown') {
+      harness = { workerClass, fellBack: false, reason: harness.reason, error: harness.error,
+        resolverErrorDecision: harness.resolverErrorDecision };
+    }
+    logger?.warn?.(`[merge-agent] harness_fallback_resolver_error ${harness.resolverErrorDecision || 'keep-primary'}: ${harness.error}`);
   }
   if (harness?.fellBack === true && harness.workerClass) {
     if (!harness.authPath) logger?.warn?.(

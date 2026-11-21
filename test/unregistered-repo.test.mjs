@@ -76,7 +76,8 @@ function eligibleInputs(rootDir) {
     rootDir,
     dispatchedAt: '2026-06-11T20:00:00Z',
   };
-  return { reviewState, prMetadata, cfg, dispatchContext, headSha };
+  return { reviewState, prMetadata, cfg, dispatchContext, headSha,
+    resolveCloserDispatchHarnessImpl: async ({ workerClass }) => ({ workerClass, fellBack: false }) };
 }
 
 // UNREGREPO-01: configuration repair is repository-wide, not a transient loop.

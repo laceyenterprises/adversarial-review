@@ -2282,6 +2282,10 @@ automatic routing holds before any launch, recording an existing `deferred`
 AMA audit outcome with the actual resolver reason and quota provenance. No
 launch state or retry budget is consumed. Genuine exhausted fallback sets keep
 `all-fallbacks-grounded`; other holds return `harness-hold:<resolver reason>`.
+If the resolver throws, the closer reads only the persisted quota snapshot.
+An exhausted fallback set retains the same deferred reason. If the snapshot
+is unusable and the primary provider is tracked, the attempt defers as
+`harness-hold:harness-fallback-resolver-error`.
 
 BRANCHPROBE-01: before hammer launch, null head-repository metadata requires
 Git confirmation of the exact head ref, using the base repository URL only

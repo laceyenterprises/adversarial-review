@@ -3079,6 +3079,13 @@ provenance still key off the configured logical class). It emits a loud
   `harness-hold:<resolver reason>` plus `holdReason`, and the AMA audit records
   a `deferred` attempt with the same reason. A genuine exhausted fallback set
   retains `all-fallbacks-grounded`. Alert transport failures remain best effort.
+- **Resolver exceptions:** the closer uses only the persisted quota snapshot.
+  A grounded primary selects the first fallback that passes hard and soft
+  quota screening. If the fallback set is exhausted, the attempt defers as
+  `all-fallbacks-grounded`. If the snapshot is missing, unreadable or stale,
+  a tracked primary defers as `harness-hold:harness-fallback-resolver-error`.
+  The `ama_closer.harness_fallback_resolver_error` warning records the decision
+  and the resolver error. This recovery path does not check model-only caps.
 - **Alert debounce ownership:** fallback operator alerts are debounced by
   fleet-wide condition under `data/ama-harness-fallback-alerts/`. Native writes
   are allowed only when the caller UID matches the canonical owner of the

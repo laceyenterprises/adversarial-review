@@ -2608,7 +2608,7 @@ async function dispatchMergeAgentForPRWithinRepositoryCycle({
   // CLOSERREUSE-01: the closer's grounding and fallback; a grounded class with
   // nothing to take its place defers instead of dispatching (merge-agent-harness.mjs).
   const harness = await resolveMergeAgentHarnessImpl({
-    workerClass: resolveMergeAgentWorkerClass(runtimeEnv), env: runtimeEnv, hqPath: resolvedHqPath, execFileImpl, logger,
+    workerClass: resolveMergeAgentWorkerClass(runtimeEnv), env: runtimeEnv, hqPath: resolvedHqPath, execFileImpl, logger, rootDir,
     deferral: { dir: join(mergeAgentSkippedDispatchDir(rootDir), '..', 'merge-agent-harness-deferrals'), job, now },
   });
   if (harness.deferred) return { decision: 'dispatch-deferred', reason: harness.reason, workerClass: harness.workerClass, harness };

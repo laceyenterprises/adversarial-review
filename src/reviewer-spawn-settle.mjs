@@ -259,12 +259,21 @@ export async function readReviewerQuotaDecision({
     return { available: !cap.capped, capped: cap.capped, state: cap.state, resetAt: cap.resetAt, provider };
   } catch (error) {
     if (error.code === 'registry-unavailable') throw error;
-    return {
-      available: true,
-      state: 'probe-error',
-      provider: providerForQuotaHarness(reviewerModel),
-    };
+    return reviewerQuotaProbeErrorDecision(reviewerModel);
   }
+}
+
+// CREDITSPENDGUARD-01: subscription accounts on these providers keep serving
+// after the plan is spent by billing credits or extra usage. A quota that
+// cannot be read is a hold for them (the route falls back like a capped one);
+// other providers keep the documented fail-open.
+const CREDIT_CAPABLE_QUOTA_PROVIDERS = new Set(['openai', 'anthropic']);
+
+function reviewerQuotaProbeErrorDecision(reviewerModel) {
+  const provider = providerForQuotaHarness(reviewerModel);
+  const hold = CREDIT_CAPABLE_QUOTA_PROVIDERS.has(provider);
+  return { available: !hold, capped: hold, state: 'probe-error', provider,
+    ...(hold ? { quotaReason: 'quota-unverifiable-credit-capable' } : {}) };
 }
 
 function sleepMs(ms) {
@@ -930,18 +939,14 @@ async function spawnReviewerOnceWithAccount({
       if (poolAvailability) quotaDecision = { ...poolAvailability, provider: 'google' };
     }
   } catch {
-    quotaDecision = {
-      available: true,
-      state: 'probe-error',
-      provider: providerForQuotaHarness(reviewerModel),
-    };
+    quotaDecision = reviewerQuotaProbeErrorDecision(reviewerModel);
   }
   if (normalizeReviewerModel(reviewerModel) === 'claude' && claudeAccountSelection?.hold) {
     quotaDecision = { available: false, capped: true, state: claudeAccountSelection.reason, provider: 'anthropic' };
   }
   if (!quotaDecision.available && (quotaDecision.capped || isGroundedProviderState(quotaDecision.state))) {
     if (normalizeReviewerModel(reviewerModel) === 'codex' && codexBrokerProvider === 'codex-corp'
-      && quotaDecision.state !== 'corporate-quota-cooldown') {
+      && !['corporate-quota-cooldown', 'probe-error'].includes(quotaDecision.state)) {
       try { recordCorporateCodexQuotaCooldown(rootDir, { env: quotaCheckEnv, resetAt: quotaDecision.resetAt }); }
       catch (error) { console.warn(`[watcher] corporate Codex quota cooldown persistence failed: ${error.message}`); }
     }
@@ -956,7 +961,7 @@ async function spawnReviewerOnceWithAccount({
       maxRemediationRounds,
       verdictOnly,
       quotaExhaustedSkip: true,
-      quotaReason: 'known-exhausted-provider-status',
+      quotaReason: quotaDecision.quotaReason || 'known-exhausted-provider-status',
       quotaState: quotaDecision.state,
       quotaProvider: quotaDecision.provider,
       failureClass: QUOTA_EXHAUSTED_FAILURE_CLASS,

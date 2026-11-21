@@ -163,6 +163,8 @@ const REVIEWER_LEASE_RECOVERY_ENABLED = resolveReviewerLeaseRecoveryEnabled({
 });
 const INFRA_AUTO_RECOVER_CAP = DEFAULT_REVIEWER_LEASE_RECOVERY_MAX_ATTEMPTS;
 const REVIEWER_LEDGER_LOOKUP_DELAYS_MS = Object.freeze([25, 75]);
+// Nominal settle-path wait (queue + forked read), scaled by host load.
+const REVIEWER_LEDGER_SETTLE_BOUND_MS = 10_000;
 const REVIEW_POST_FRESHNESS_RETRY_DELAYS_MS = Object.freeze([100, 250]);
 
 // ARC-18: resolveReviewerIdentity + its identity map stay in watcher (still used
@@ -282,33 +284,51 @@ function isTransientLedgerLookupError(err) {
   return ['sqlite-busy', 'sqlite-locked'].includes(classifyLedgerLookupError(err));
 }
 
+// REVIEWSETTLETOKENWAIT-01: a ledger miss is not retried on the settle path.
+// A worker-run row lands with worker-pool capture, long after a 25/75 ms
+// pause, so each retry only repeats a slow forked read. The pass keeps a
+// durable `pending` attribution for the offline backfill. Only transient
+// SQLite contention is retried, and only inside the settle bound. A read that
+// outlives the bound keeps running and hands its evidence to `onLateEvidence`.
+const LEDGER_READ_DEFERRED = Symbol('ledger-read-deferred');
+
 async function readReviewerLedgerEvidenceWithRetry({
   readImpl,
   args,
   sleepImpl = sleepMs,
   delaysMs = REVIEWER_LEDGER_LOOKUP_DELAYS_MS,
+  boundMs = loadAwareTimeoutMs(REVIEWER_LEDGER_SETTLE_BOUND_MS),
+  onLateEvidence = () => {},
 } = {}) {
+  const deadline = Date.now() + boundMs;
   let lastError = null;
-  let lastUsage = null;
   let attempts = 0;
   for (let attempt = 0; attempt <= delaysMs.length; attempt += 1) {
     attempts += 1;
+    let timer = null;
+    const read = Promise.resolve().then(() => readImpl(args));
     try {
-      const usage = await readImpl(args);
-      if (usage) {
-        lastUsage = usage;
-        if (!args?.launchRequestId || usage.workerRunId) {
-          return { usage, attempts, lastError: null };
-        }
+      const usage = await Promise.race([read, new Promise((resolve) => {
+        timer = setTimeout(resolve, Math.max(0, deadline - Date.now()), LEDGER_READ_DEFERRED);
+      })]);
+      if (usage === LEDGER_READ_DEFERRED) {
+        read.then((late) => late && onLateEvidence(late)).catch(() => {});
+        return { usage: null, attempts, lastError: 'settle-bound-exceeded', deferred: true };
       }
-      lastError = 'worker-run-not-yet-visible';
+      if (usage?.workerRunId || (usage && !args?.launchRequestId)) return { usage, attempts, lastError: null };
+      // Without a launch id no worker run can ever be attributed: structural.
+      return { usage: usage || null, attempts,
+        lastError: args?.launchRequestId ? 'worker-run-not-yet-visible' : 'worker-run-not-attributable' };
     } catch (err) {
       lastError = classifyLedgerLookupError(err);
       if (!isTransientLedgerLookupError(err)) break;
+    } finally {
+      clearTimeout(timer);
     }
-    if (attempt < delaysMs.length) await sleepImpl(delaysMs[attempt]);
+    if (attempt >= delaysMs.length || Date.now() + delaysMs[attempt] >= deadline) break;
+    await sleepImpl(delaysMs[attempt]);
   }
-  return { usage: lastUsage, attempts, lastError };
+  return { usage: null, attempts, lastError };
 }
 
 async function fetchReviewerPostFreshnessWithRetry({
@@ -846,6 +866,7 @@ async function spawnReviewerOnceWithAccount({
   postGitHubReviewWithCaptureImpl = defaultPostGitHubReviewWithCapture,
   readBestReviewerEvidenceTokenUsageImpl = readReviewerEvidenceInWorker,
   ledgerLookupSleepImpl = sleepMs,
+  ledgerLookupBoundMs = null,
   quotaCheckEnv = process.env,
   readReviewerQuotaDecisionImpl = readReviewerQuotaDecision,
   ensureWorkerRegistryReadyImpl = ensureWorkerRegistryReady,
@@ -1281,6 +1302,9 @@ async function spawnReviewerOnceWithAccount({
     if (result.stdoutTail) console.log(`[reviewer:${prNumber}] ${String(result.stdoutTail).trim()}`);
     if (result.stderrTail) console.error(`[reviewer:${prNumber}] stderr: ${String(result.stderrTail).trim()}`);
     const settlementStartedAt = Date.now();
+    // A late ledger backfill replays only after this settle's own replay.
+    let markAccountingSettled;
+    const accountingSettled = new Promise((resolve) => { markAccountingSettled = resolve; });
     try {
       const endedAt = new Date().toISOString();
       // Read the reviewer token-usage evidence and persist the artifact in an
@@ -1303,11 +1327,55 @@ async function spawnReviewerOnceWithAccount({
       let workerRunAttribution = null;
       try {
         let rawTokenUsage = result.tokenUsage || null;
+        // Fold ledger evidence into the runtime usage. Shared with the late
+        // backfill below so both paths keep one field contract.
+        const mergeLedgerEvidence = (base, ledgerTokenUsage, lookup) => {
+          const merged = !ledgerTokenUsage ? base : base
+            ? {
+                ...base,
+                workerRunId: base.workerRunId || ledgerTokenUsage.workerRunId || null,
+                model: base.model || ledgerTokenUsage.model || null,
+                rateLimits: base.rateLimits?.length ? base.rateLimits : (ledgerTokenUsage.rateLimits || []),
+                partial: base.partial || ledgerTokenUsage.partial || false,
+              }
+            : ledgerTokenUsage;
+          const workerRunId = merged?.workerRunId || null;
+          const attribution = {
+            state: ledgerTokenUsage?.workerRunId ? 'resolved' : (launchRequestId ? 'pending' : 'not-applicable'),
+            launchRequestId,
+            workerRunId: ledgerTokenUsage?.workerRunId || null,
+            lookupAttempts: lookup.attempts,
+            lastError: lookup.lastError,
+            retryable: Boolean(launchRequestId && !ledgerTokenUsage?.workerRunId),
+            ...(!launchRequestId && !ledgerTokenUsage?.workerRunId ? { reason: 'missing-launch-request-id' } : {}),
+          };
+          return { merged, workerRunId, attribution: workerRunId && attribution.state !== 'resolved'
+            ? { ...attribution, state: 'resolved', workerRunId, lastError: null, retryable: false } : attribution };
+        };
         if (!rawTokenUsage?.workerRunId || !rawTokenUsage?.rateLimits?.length || !rawTokenUsage?.model) {
           const ledgerStartedAt = Date.now();
+          const runtimeTokenUsageBase = rawTokenUsage;
           const ledgerLookup = await readReviewerLedgerEvidenceWithRetry({
             readImpl: readBestReviewerEvidenceTokenUsageImpl,
             sleepImpl: ledgerLookupSleepImpl,
+            ...(ledgerLookupBoundMs == null ? {} : { boundMs: ledgerLookupBoundMs }),
+            // Deferred backfill: the outcome is already durable, so late
+            // evidence only enriches tokens/attribution through a replay.
+            onLateEvidence: (late) => accountingSettled.then(() => {
+              const backfillStartedAt = Date.now();
+              const { merged, workerRunId, attribution } = mergeLedgerEvidence(runtimeTokenUsageBase, late,
+                { attempts: 1, lastError: null });
+              const lateUsage = tagTokenUsage(merged, 'guardrail');
+              return withSqliteBusyRetry(() => completeReviewerPassImpl(rootDir, {
+                repo, prNumber, attemptNumber: reviewDbAttemptNumber ?? reviewAttemptNumber ?? 0, passKind,
+                status: result.ok ? 'completed' : (['cancelled', 'reviewer-stalled', 'github-budget-deferred'].includes(result.failureClass) ? 'cancelled' : 'failed'),
+                endedAt, tokenUsage: lateUsage, tokenSource: lateUsage?.source || 'unknown', workerRunId,
+                metadata: { reviewerSessionUuid, launchRequestId, workerRunAttribution: attribution },
+              }), { label: `reviewer-pass-token-backfill:${repo}#${prNumber}`, log: console }).then((pass) => console.log(
+                `[watcher] reviewer settlement timing repo=${repo} pr=${prNumber} step=token-ledger-backfill elapsed_ms=${Date.now() - backfillStartedAt} worker_run=${pass?.worker_run_id || workerRunId ? 'resolved' : 'pending'}`
+              ));
+            }).catch((err) => console.warn(
+              `[watcher] reviewer_pass_token_backfill_failed repo=${repo} pr=${prNumber} session=${reviewerSessionUuid}: ${err?.message || err}`)),
             args: {
               // SDK/os-dispatch reattaches by app-contract request_id, but the
               // session ledger attributes worker_runs by launch_request_id.
@@ -1325,37 +1393,16 @@ async function spawnReviewerOnceWithAccount({
               rootDir,
             },
           });
-          console.log(`[watcher] reviewer settlement timing repo=${repo} pr=${prNumber} step=token-ledger-lookup elapsed_ms=${Date.now() - ledgerStartedAt} attempts=${ledgerLookup.attempts}`);
-          const ledgerTokenUsage = ledgerLookup.usage;
-          if (ledgerLookup.lastError && ledgerLookup.lastError !== 'worker-run-not-yet-visible') {
+          // One info line per settle, every reason included, so a miss that
+          // repeats on every pass cannot hide behind the warning filter.
+          console.log(`[watcher] reviewer settlement timing repo=${repo} pr=${prNumber} step=token-ledger-lookup elapsed_ms=${Date.now() - ledgerStartedAt} attempts=${ledgerLookup.attempts} reason=${ledgerLookup.lastError || 'resolved'} deferred=${Boolean(ledgerLookup.deferred)}`);
+          if (ledgerLookup.lastError && !['worker-run-not-yet-visible', 'worker-run-not-attributable', 'settle-bound-exceeded'].includes(ledgerLookup.lastError)) {
             console.warn(
               `[watcher] reviewer_pass_token_ledger_lookup_failed repo=${repo} pr=${prNumber} ` +
               `session=${reviewerSessionUuid} attempts=${ledgerLookup.attempts}: ${ledgerLookup.lastError}`
             );
           }
-          if (ledgerTokenUsage) {
-            rawTokenUsage = rawTokenUsage
-              ? {
-                  ...rawTokenUsage,
-                  workerRunId: rawTokenUsage.workerRunId || ledgerTokenUsage.workerRunId || null,
-                  model: rawTokenUsage.model || ledgerTokenUsage.model || null,
-                  rateLimits: rawTokenUsage.rateLimits?.length
-                    ? rawTokenUsage.rateLimits : (ledgerTokenUsage.rateLimits || []),
-                  partial: rawTokenUsage.partial || ledgerTokenUsage.partial || false,
-                }
-              : ledgerTokenUsage;
-          }
-          workerRunAttribution = {
-            state: ledgerTokenUsage?.workerRunId ? 'resolved' : (launchRequestId ? 'pending' : 'not-applicable'),
-            launchRequestId,
-            workerRunId: ledgerTokenUsage?.workerRunId || null,
-            lookupAttempts: ledgerLookup.attempts,
-            lastError: ledgerLookup.lastError,
-            retryable: Boolean(launchRequestId && !ledgerTokenUsage?.workerRunId),
-            ...(!launchRequestId && !ledgerTokenUsage?.workerRunId
-              ? { reason: 'missing-launch-request-id' }
-              : {}),
-          };
+          ({ merged: rawTokenUsage, attribution: workerRunAttribution } = mergeLedgerEvidence(rawTokenUsage, ledgerLookup.usage, ledgerLookup));
         }
         resolvedWorkerRunId = rawTokenUsage?.workerRunId || null;
         if (!workerRunAttribution) {
@@ -1364,14 +1411,6 @@ async function spawnReviewerOnceWithAccount({
             launchRequestId,
             workerRunId: resolvedWorkerRunId,
             lookupAttempts: 0,
-            lastError: null,
-            retryable: false,
-          };
-        } else if (resolvedWorkerRunId && workerRunAttribution.state !== 'resolved') {
-          workerRunAttribution = {
-            ...workerRunAttribution,
-            state: 'resolved',
-            workerRunId: resolvedWorkerRunId,
             lastError: null,
             retryable: false,
           };
@@ -1450,6 +1489,7 @@ async function spawnReviewerOnceWithAccount({
         `session=${reviewerSessionUuid}: ${err?.message || err}`
       );
     }
+    markAccountingSettled();
     console.log(`[watcher] reviewer settlement timing repo=${repo} pr=${prNumber} step=token-artifacts-pass-completion elapsed_ms=${Date.now() - settlementStartedAt}`);
     return result;
   } catch (err) {

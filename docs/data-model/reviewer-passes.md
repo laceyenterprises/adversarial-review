@@ -434,7 +434,19 @@ reaper can safely settle the pass.
 Settle never uses `reattachToken` as a launch-request lookup key. It may use the
 token only as adapter-session evidence; that evidence cannot populate
 `worker_run_id` unless it independently returns a real worker run identifier.
-Settle retries transient SQLite contention before recording `pending`.
+Settle makes one evidence read and does not retry a ledger miss. It retries
+only transient SQLite contention, and only inside a load-aware settle bound
+(10 s nominal, covering queue wait and the forked read). `lastError` then names
+the outcome: `worker-run-not-yet-visible` (real launch ID, no ledger row yet;
+`pending`), `worker-run-not-attributable` (no launch ID; `not-applicable`, a
+structural miss that is never retried), `settle-bound-exceeded` (the read
+outlived the bound; `pending`), or a sanitized lookup error. A read that
+outlives the bound keeps running. When it returns evidence, the watcher replays
+the same pass once, enriching tokens, `worker_run_id` and
+`workerRunAttribution` without changing its outcome or regressing an
+already-resolved attribution record. Every settle that reads
+evidence logs one `step=token-ledger-lookup` info line with `attempts`,
+`reason` and `deferred` (REVIEWSETTLETOKENWAIT-01).
 `scripts/backfill-reviewer-passes.mjs` revisits only pending rows whose
 `workerRunAttribution.launchRequestId` exactly matches the real
 `metadata_json.launchRequestId`, then fills `worker_run_id` once the session

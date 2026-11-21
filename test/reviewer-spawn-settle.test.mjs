@@ -725,7 +725,7 @@ test('spawnReviewer retries transient ledger contention and preserves adapter co
   });
 });
 
-test('spawnReviewer keeps retrying token-only evidence until worker attribution resolves', async () => {
+test('REVIEWSETTLETOKENWAIT-01: token-only evidence settles after one lookup with repairable attribution', async () => {
   const settled = [];
   let lookupCalls = 0;
   await spawnReviewer({
@@ -776,15 +776,17 @@ test('spawnReviewer keeps retrying token-only evidence until worker attribution 
     completeReviewerPassImpl: (_root, payload) => settled.push(payload),
   });
 
-  assert.equal(lookupCalls, 3);
-  assert.equal(settled[0].workerRunId, 'wr_sdk_251');
+  // A worker-run row lands with worker-pool capture, not within a 25/75 ms
+  // pause: the settle records `pending` and leaves the row to the backfill.
+  assert.equal(lookupCalls, 1);
+  assert.equal(settled[0].workerRunId, null);
   assert.deepEqual(settled[0].metadata.workerRunAttribution, {
-    state: 'resolved',
+    state: 'pending',
     launchRequestId: 'lrq_sdk_251',
-    workerRunId: 'wr_sdk_251',
-    lookupAttempts: 3,
-    lastError: null,
-    retryable: false,
+    workerRunId: null,
+    lookupAttempts: 1,
+    lastError: 'worker-run-not-yet-visible',
+    retryable: true,
   });
 });
 
@@ -999,12 +1001,14 @@ test('spawnReviewer settles worker_run_id null when no worker run resolves (cli-
   assert.equal(settled[0].workerRunId, null);
   assert.equal(settled[0].metadata.launchRequestId, null);
   assert.equal(settled[0].metadata.reattachToken, 'lrq_wcw_null');
+  // REVIEWSETTLETOKENWAIT-01: no launch id means no worker run can ever be
+  // attributed. One attempt, and a reason distinct from a timing miss.
   assert.deepEqual(settled[0].metadata.workerRunAttribution, {
     state: 'not-applicable',
     launchRequestId: null,
     workerRunId: null,
-    lookupAttempts: 3,
-    lastError: 'worker-run-not-yet-visible',
+    lookupAttempts: 1,
+    lastError: 'worker-run-not-attributable',
     retryable: false,
     reason: 'missing-launch-request-id',
   });
@@ -1209,4 +1213,214 @@ for (const replacement of [false, true]) test(`malformed budget receipt releases
   const cascade = readCascadeState(rootDir, { repo: 'example/project', prNumber: 7 });
   if (replacement) assert.equal(cascade, null);
   else assert.ok(Date.parse(cascade.nextRetryAfter) > Date.parse(cascade.lastFailureAt));
+});
+
+function tokenWaitSpawnArgs({ prNumber, launchRequestId = null, readImpl, settled, ledgerLookupBoundMs }) {
+  return {
+    readReviewerQuotaDecisionImpl: async () => ({ available: true, state: 'fixture', provider: 'google' }),
+    rootDir: mkdtempSync(path.join(tmpdir(), 'spawn-settle-token-wait-')),
+    repo: 'fixture-owner/demo',
+    prNumber,
+    reviewerModel: 'gemini',
+    botTokenEnv: 'GH_GEMINI_REVIEWER_TOKEN',
+    linearTicketId: 'FIX-1',
+    labels: [],
+    builderTag: 'codex',
+    reviewerHeadSha: `sha${prNumber}`,
+    reviewAttemptNumber: 1,
+    reviewDbAttemptNumber: 2,
+    completedRemediationRounds: 0,
+    passKind: 'first-pass',
+    maxRemediationRounds: 2,
+    reviewerSessionUuid: `spawn-settle-token-wait-${prNumber}`,
+    reviewerRuntimeAdapterOverride: {
+      async spawnReviewer() {
+        return {
+          ok: true,
+          reviewBody: '## Summary\nLooks good.\n\n## Verdict\nComment only',
+          reviewBodyDelivery: 'caller-post',
+          reattachToken: `sdk-request-id-${prNumber}`,
+          ...(launchRequestId ? { launchRequestId } : {}),
+          tokenUsage: { input: 8, output: 13, total: 21, source: 'adapter' },
+        };
+      },
+    },
+    postGitHubReviewWithCaptureImpl: async () => {},
+    fetchPullRequestHeadAndStateImpl: currentHead(`sha${prNumber}`),
+    readBestReviewerEvidenceTokenUsageImpl: readImpl,
+    ledgerLookupSleepImpl: async () => {},
+    ...(ledgerLookupBoundMs == null ? {} : { ledgerLookupBoundMs }),
+    completeReviewerPassImpl: (_root, payload) => settled.push(payload),
+  };
+}
+
+function captureConsoleLog() {
+  const lines = [];
+  const original = console.log;
+  console.log = (...args) => { lines.push(args.map(String).join(' ')); };
+  return { lines, restore: () => { console.log = original; } };
+}
+
+test('REVIEWSETTLETOKENWAIT-01: a structurally unattributable settle makes one attempt and logs its reason', async () => {
+  const settled = [];
+  let lookupCalls = 0;
+  const log = captureConsoleLog();
+  try {
+    await spawnReviewer(tokenWaitSpawnArgs({
+      prNumber: 301, settled, readImpl: async () => { lookupCalls += 1; return null; },
+    }));
+  } finally { log.restore(); }
+  assert.equal(lookupCalls, 1, 'no launch id: retrying can never surface a worker run');
+  assert.equal(settled.length, 1);
+  assert.equal(settled[0].metadata.workerRunAttribution.lastError, 'worker-run-not-attributable');
+  assert.equal(settled[0].metadata.workerRunAttribution.reason, 'missing-launch-request-id');
+  const summary = log.lines.find((line) => line.includes('step=token-ledger-lookup'));
+  assert.match(summary || '', /pr=301 step=token-ledger-lookup elapsed_ms=\d+ attempts=1 reason=worker-run-not-attributable deferred=false/);
+});
+
+test('REVIEWSETTLETOKENWAIT-01: an unready ledger miss is logged at info, not hidden', async () => {
+  const settled = [];
+  const log = captureConsoleLog();
+  try {
+    await spawnReviewer(tokenWaitSpawnArgs({
+      prNumber: 302, launchRequestId: 'lrq_fixture_302', settled, readImpl: async () => null,
+    }));
+  } finally { log.restore(); }
+  assert.match(log.lines.find((line) => line.includes('step=token-ledger-lookup')) || '',
+    /attempts=1 reason=worker-run-not-yet-visible deferred=false/);
+  assert.equal(settled[0].metadata.workerRunAttribution.state, 'pending');
+});
+
+test('REVIEWSETTLETOKENWAIT-01: a slow ledger read cannot hold settlement past the bound, and late evidence backfills the pass', async () => {
+  const settled = [];
+  let lookupCalls = 0;
+  let releaseRead;
+  const slowRead = new Promise((resolve) => { releaseRead = resolve; });
+  const startedAt = Date.now();
+  const log = captureConsoleLog();
+  let result;
+  try {
+    result = await spawnReviewer(tokenWaitSpawnArgs({
+      prNumber: 303, launchRequestId: 'lrq_fixture_303', settled, ledgerLookupBoundMs: 50,
+      readImpl: () => { lookupCalls += 1; return slowRead; },
+    }));
+  } finally { log.restore(); }
+  // The reader is still blocked, yet settlement returned within the bound.
+  assert.equal(result.ok, true);
+  assert.ok(Date.now() - startedAt < 5_000, 'settlement waited on a blocked ledger read');
+  assert.equal(lookupCalls, 1);
+  assert.equal(settled.length, 1);
+  assert.equal(settled[0].tokenUsage.input, 8, 'runtime usage still settles immediately');
+  assert.equal(settled[0].workerRunId, null);
+  assert.deepEqual(settled[0].metadata.workerRunAttribution, {
+    state: 'pending',
+    launchRequestId: 'lrq_fixture_303',
+    workerRunId: null,
+    lookupAttempts: 1,
+    lastError: 'settle-bound-exceeded',
+    retryable: true,
+  });
+  assert.match(log.lines.find((line) => line.includes('step=token-ledger-lookup')) || '',
+    /attempts=1 reason=settle-bound-exceeded deferred=true/);
+
+  // The ledger answers later: the deferred backfill patches the same pass.
+  releaseRead({ workerRunId: 'wr_fixture_303', model: 'fixture-model', input: 1, output: 2, source: 'session-ledger' });
+  for (let i = 0; i < 100 && settled.length < 2; i += 1) await new Promise((resolve) => setTimeout(resolve, 5));
+  assert.equal(settled.length, 2, 'late ledger evidence was not backfilled');
+  const backfill = settled[1];
+  assert.equal(backfill.attemptNumber, settled[0].attemptNumber);
+  assert.equal(backfill.passKind, 'first-pass');
+  assert.equal(backfill.status, settled[0].status);
+  assert.equal(backfill.workerRunId, 'wr_fixture_303');
+  assert.equal(backfill.tokenUsage.input, 8, 'runtime counts keep precedence over ledger counts');
+  assert.equal(backfill.metadata.reviewerSessionUuid, 'spawn-settle-token-wait-303');
+  assert.deepEqual(backfill.metadata.workerRunAttribution, {
+    state: 'resolved',
+    launchRequestId: 'lrq_fixture_303',
+    workerRunId: 'wr_fixture_303',
+    lookupAttempts: 1,
+    lastError: null,
+    retryable: false,
+  });
+});
+
+test('REVIEWSETTLETOKENWAIT-01: a deferred read that later fails leaves the settled pass untouched', async () => {
+  const settled = [];
+  let rejectRead;
+  const slowRead = new Promise((_resolve, reject) => { rejectRead = reject; });
+  await spawnReviewer(tokenWaitSpawnArgs({
+    prNumber: 304, launchRequestId: 'lrq_fixture_304', settled, ledgerLookupBoundMs: 20,
+    readImpl: () => slowRead,
+  }));
+  rejectRead(new Error('reviewer token ledger worker timed out'));
+  await new Promise((resolve) => setTimeout(resolve, 30));
+  assert.equal(settled.length, 1);
+  assert.equal(settled[0].metadata.workerRunAttribution.state, 'pending');
+});
+
+test('REVIEWSETTLETOKENWAIT-01: backfill resolving before a token-only deferred read does not regress attribution', async () => {
+  let releaseRead;
+  const slowRead = new Promise((resolve) => { releaseRead = resolve; });
+  const args = tokenWaitSpawnArgs({
+    prNumber: 305, launchRequestId: 'lrq_fixture_305', ledgerLookupBoundMs: 50,
+    readImpl: () => slowRead,
+  });
+  // Use production completeReviewerPass so the SQLite row is durably updated
+  delete args.completeReviewerPassImpl;
+  const db = openReviewStateDb(args.rootDir);
+  ensureReviewStateSchema(db);
+
+  const log = captureConsoleLog();
+  try {
+    const result = await spawnReviewer(args);
+    assert.equal(result.ok, true);
+
+    // Initial settle left attribution pending
+    let row = db.prepare('SELECT worker_run_id, metadata_json, token_input FROM reviewer_passes WHERE pr_number = 305').get();
+    assert.equal(row.worker_run_id, null);
+    assert.equal(JSON.parse(row.metadata_json).workerRunAttribution.state, 'pending');
+
+    // Backfill resolves the worker run while deferred read is in-flight
+    completeReviewerPass(args.rootDir, {
+      repo: args.repo, prNumber: 305, attemptNumber: 2, passKind: 'first-pass', status: 'completed',
+      workerRunId: 'wr_backfill_305',
+      metadata: {
+        reviewerSessionUuid: args.reviewerSessionUuid,
+        launchRequestId: 'lrq_fixture_305',
+        workerRunAttribution: {
+          state: 'resolved',
+          launchRequestId: 'lrq_fixture_305',
+          workerRunId: 'wr_backfill_305',
+          lookupAttempts: 2,
+          lastError: null,
+          retryable: false,
+        },
+      },
+    });
+
+    row = db.prepare('SELECT worker_run_id, metadata_json, token_input FROM reviewer_passes WHERE pr_number = 305').get();
+    assert.equal(row.worker_run_id, 'wr_backfill_305');
+    assert.equal(JSON.parse(row.metadata_json).workerRunAttribution.state, 'resolved');
+
+    // Late evidence returns token counts but NO workerRunId
+    releaseRead({ model: 'fixture-model', rateLimits: [{ limitId: 'limit-305', usedPercent: 50 }], source: 'session-ledger' });
+    // Wait for deferred replay
+    for (let i = 0; i < 100 && !log.lines.some((line) => line.includes('pr=305 step=token-ledger-backfill')); i += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 5));
+    }
+
+    const backfillLog = log.lines.find((line) => line.includes('pr=305 step=token-ledger-backfill'));
+    assert.match(backfillLog || '', /pr=305 step=token-ledger-backfill elapsed_ms=\d+ worker_run=resolved/);
+
+    row = db.prepare('SELECT worker_run_id, metadata_json, token_input FROM reviewer_passes WHERE pr_number = 305').get();
+    assert.equal(row.worker_run_id, 'wr_backfill_305', 'worker_run_id preserved');
+    const finalMeta = JSON.parse(row.metadata_json);
+    assert.equal(finalMeta.workerRunAttribution.state, 'resolved', 'attribution did not regress to pending');
+    assert.equal(finalMeta.workerRunAttribution.workerRunId, 'wr_backfill_305');
+    assert.equal(finalMeta.workerRunAttribution.lookupAttempts, 2);
+    assert.equal(finalMeta.workerRunAttribution.retryable, false);
+  } finally {
+    log.restore();
+    db.close();
+  }
 });

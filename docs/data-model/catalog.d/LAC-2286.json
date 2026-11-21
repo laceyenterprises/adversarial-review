@@ -1,0 +1,10 @@
+{
+  "version": 1,
+  "entries": [
+    {
+      "id": "primary-change-history",
+      "identityVersion": "reversalproof-v10",
+      "optionalHistoryFields": ["builderBoundary", "diagnosticCommitRange", "reversalAuthorizations", "rejectedReversalAuthorizations", "renameProofs", "primaryPathChanges", "renameProofReadFailed", "laneReversalHistory", "finalPatchesScoped"]
+    }
+  ]
+}

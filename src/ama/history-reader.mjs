@@ -117,7 +117,7 @@ export function createHistoryReader(options = {}) {
     if (bytes.length !== data.size) throw invalidHistory(`incomplete blob ${entry.sha}`);
     return bytes;
   };
-  const filesBetween = async (repo, base, head) => {
+  const filesBetween = async (repo, base, head, includePatch = () => true) => {
     const changed = [];
     // A complete recursive snapshot coalesces directory reads. Inspect roots
     // first: flat histories need no extra request, and truncated recursive
@@ -249,9 +249,13 @@ export function createHistoryReader(options = {}) {
         while (cursor < changed.length) {
           const index = cursor++;
           const { path, a, b } = changed[index];
+          const file = { filename: path, status: !a ? 'added' : !b ? 'removed' : 'modified', sha: b?.sha || a.sha };
+          if (!includePatch(path)) {
+            files[index] = file;
+            continue;
+          }
           const beforePath = `before-${index}`, afterPath = `after-${index}`;
           files[index] = await checkpoint(['file', repo, base, head, path, a || null, b || null, 'myers-v1'], async () => {
-            const file = { filename: path, status: !a ? 'added' : !b ? 'removed' : 'modified', sha: b?.sha || a.sha };
             if (a?.type === 'commit' && b?.type === 'commit') {
               file.additions = 0; file.deletions = 0; return file;
             }
@@ -380,6 +384,17 @@ export function createHistoryReader(options = {}) {
   // metadata for the rest of this evaluation without rereading it for CI cost.
   reader.metadata = path => bounded(() => (/\/compare\/[0-9a-f]{40}\.\.\.[0-9a-f]{40}$/i.test(path) ? cached : json)(
     path, '{status, total_commits, merge_base_commit: {sha: .merge_base_commit.sha}}'));
+  // A full tree inventory does not require paging commit messages. Callers
+  // select the paths that need hunks; inventory-only rows never write patch
+  // checkpoints. Both sides are pinned to immutable tree inputs.
+  reader.compareFiles = (path, includePatch) => bounded(async () => {
+    const match = /^repos\/([^/]+\/[^/]+)\/compare\/[0-9a-f]{40}\.\.\.([0-9a-f]{40})$/i.exec(path);
+    if (!match) throw new Error('file inventory requires an exact compare pair');
+    const result = await reader.metadata(path);
+    const base = result.merge_base_commit?.sha;
+    if (!/^[0-9a-f]{40}$/i.test(base || '')) throw invalidHistory('missing compare merge base');
+    return { ...result, filesComplete: true, files: await filesBetween(match[1], base, match[2], includePatch) };
+  });
   // Provenance proofs request compact web-flow verification separately; avoid
   // buffering signature payloads in every history and commit-file page.
   reader.commitVerification = path => bounded(() => json(path, '{sha, verification: .commit.verification}'));

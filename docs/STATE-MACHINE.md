@@ -2836,6 +2836,13 @@ Key control points:
   comparison base: collection proves protected-base and author-head ancestry
   before projecting the final tree onto the protected common base. Missing
   ancestry or an incomplete/mismatched projection retains the existing refusal.
+  The projection keeps the complete file inventory. It materializes hunks for
+  author and test paths, with full hunks for cited reversals and guard review
+  carry-forward. This keeps unrelated main changes out of ordinary patch
+  reconstruction without dropping rename or migration evidence.
+  Guard hydration runs only for an authoritative review at a different head.
+  Failed optional hydration retains scoped preservation evidence and requires
+  exact-head review; cancellation and history deadlines retain their refusal.
   DERIVEDBLOCK-01 treats a declared generated block interior as preserved when
   its unchanged merge-base application-manifest declaration regenerates the exact
   final-head block in a bounded, network-denied scratch worktree. Marker lines,

@@ -1,6 +1,10 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { fetchPrimaryChange, checkPrimaryChange } from '../src/ama/primary-change.mjs';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { fetchPrimaryChange, checkPrimaryChange, guardRepairReviewCoverage } from '../src/ama/primary-change.mjs';
+import { historyReadTimeoutError } from '../src/ama/history-read-policy.mjs';
 import { isEligibleForAmaClosure } from '../src/ama/eligibility.mjs';
 import { amaAllAuthoritativeReviewerLogins } from '../src/ama/reviewer-authority.mjs';
 import { attemptDaemonCleanMerge } from '../src/ama/daemon-merge.mjs';
@@ -46,6 +50,123 @@ function fixture(options = {}) {
 async function evidenceFor(f) {
   return fetchPrimaryChange(f.args, { fetchCiCostImpl: async () => ({ headSha: head, ok: true }) });
 }
+
+function scopedFixture(t, { reviewedHeads = [approved], hydrate } = {}) {
+  const protectedBase = 'd'.repeat(40);
+  const f = fixture();
+  const rootDir = mkdtempSync(join(tmpdir(), 'guard-scoped-'));
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  f.args.rootDir = rootDir;
+  f.responses[`compare/${base}...${approved}`].merge_base_commit.sha = protectedBase;
+  f.responses[`compare/${protectedBase}...${base}`] = { status: 'ahead',
+    merge_base_commit: { sha: protectedBase }, files: [], filesComplete: true };
+  f.responses[`compare/${approved}...${head}`] = { status: 'ahead', merge_base_commit: { sha: approved } };
+  f.responses['pulls/1/reviews?per_page=100'] = reviewedHeads.map(commit_id =>
+    ({ commit_id, user: { login: amaAllAuthoritativeReviewerLogins()[0] } }));
+  f.hydrations = 0;
+  f.scopedReads = 0;
+  const get = f.args.get;
+  Object.assign(get, { persistPrimaryChange: true, metadata: get, compareFiles: async (endpoint, scope) => {
+    if (endpoint.endsWith(`/compare/${protectedBase}...${head}`)) {
+      const comparison = { files: [report], filesComplete: true, merge_base_commit: { sha: protectedBase } };
+      if (scope) {
+        f.scopedReads++;
+        assert.equal(scope(report.filename), true);
+        return structuredClone(comparison);
+      }
+      f.hydrations++;
+      return hydrate ? hydrate(comparison) : structuredClone(comparison);
+    }
+    return get(endpoint);
+  } });
+  return f;
+}
+
+test('scoped guard hydration failures retain preservation and require exact-head review', async t => {
+  for (const [name, hydrate] of [
+    ['incomplete files', final => ({ ...final, filesComplete: false })],
+    ['missing files', final => ({ ...final, files: undefined })],
+    ['different merge base', final => ({ ...final, merge_base_commit: { sha: base } })],
+    ['invalid tree', () => { throw Object.assign(new Error('invalid tree'), { code: 'HISTORY_READ_INVALID' }); }],
+    ['read failure', () => { throw new Error('comparison unavailable'); }],
+  ]) {
+    await t.test(name, async t => {
+      const f = scopedFixture(t, { hydrate });
+      const evidence = await evidenceFor(f);
+      assert.equal(f.hydrations, 1, 'exercise the optional full comparison');
+      assert.equal(evidence.finalPatchesScoped, true);
+      assert.equal(evidence.historyReadFailed, undefined);
+      assert.equal(checkPrimaryChange(evidence, head).ok, true);
+      assert.equal(guardRepairReviewCoverage(evidence, approved, head), false);
+      assert.equal(isEligibleForAmaClosure({ ...cleanReview, headSha: head }, greenPr, cfg,
+        { primaryChange: evidence }).eligible, true);
+      assert.ok(isEligibleForAmaClosure(cleanReview, greenPr, cfg,
+        { primaryChange: evidence }).reasons.includes('stale-review-head'));
+    });
+  }
+});
+
+test('scoped guard hydration retains cancellation and history deadlines', async t => {
+  for (const error of [new DOMException('cancelled', 'AbortError'),
+    Object.assign(new Error('cancelled'), { code: 'ABORT_ERR' }),
+    historyReadTimeoutError(), new Error('wrapped timeout', { cause: historyReadTimeoutError() })]) {
+    await t.test(error.message, async t => {
+      const f = scopedFixture(t, { hydrate: () => { throw error; } });
+      const evidence = await evidenceFor(f);
+      assert.equal(f.hydrations, 1);
+      assert.equal(evidence.historyReadFailed, true);
+      assert.equal(checkPrimaryChange(evidence, head).ok, false);
+      if (error.code === 'HISTORY_READ_TIMEOUT' || error.cause) assert.equal(evidence.historyReadTimedOut, true);
+    });
+  }
+  await t.test('parent signal cancellation with a custom reason', async t => {
+    const controller = new AbortController();
+    const f = scopedFixture(t, { hydrate: () => {
+      controller.abort(new Error('parent cancelled'));
+      throw controller.signal.reason;
+    } });
+    f.args.signal = controller.signal;
+    assert.equal((await evidenceFor(f)).historyReadFailed, true);
+    assert.equal(f.hydrations, 1);
+  });
+});
+
+test('cached scoped guard history skips hydration without an older authoritative review', async t => {
+  for (const reviewedHeads of [[], [head]]) {
+    await t.test(JSON.stringify(reviewedHeads), async t => {
+      const f = scopedFixture(t, { reviewedHeads,
+        hydrate: () => assert.fail('no carry-forward needs full patches') });
+      for (let tick = 0; tick < 2; tick++) {
+        const evidence = await evidenceFor(f);
+        assert.equal(checkPrimaryChange(evidence, head).ok, true);
+        assert.equal(evidence.finalPatchesScoped, true);
+      }
+      assert.equal(f.scopedReads, 1, 'the second tick reused completed history');
+      assert.equal(f.hydrations, 0);
+    });
+  }
+});
+
+test('scoped guard history hydrates for primary and rebased review carry-forward', async t => {
+  const original = 'e'.repeat(40), originalBase = 'f'.repeat(40);
+  for (const reviewed of [approved, original]) {
+    await t.test(reviewed, async t => {
+      const f = scopedFixture(t, { reviewedHeads: [reviewed, head] });
+      if (reviewed === original) {
+        f.responses[`compare/${base}...${original}`] = { files: [report, index],
+          merge_base_commit: { sha: originalBase }, filesComplete: true };
+        f.responses[`compare/${original}...${approved}`] = { status: 'diverged' };
+        f.responses[`compare/${originalBase}...${'d'.repeat(40)}`] = { status: 'ahead' };
+      }
+      const evidence = await evidenceFor(f);
+      assert.equal(f.hydrations, 1);
+      assert.equal(evidence.finalPatchesScoped, false);
+      assert.equal(guardRepairReviewCoverage(evidence, reviewed, head), true);
+      assert.equal(isEligibleForAmaClosure({ ...cleanReview, headSha: reviewed }, greenPr, cfg,
+        { primaryChange: evidence }).eligible, true);
+    });
+  }
+});
 
 test('GUARDREVERT-01: required guard authorizes only its named path restored to base', async () => {
   const f = fixture();

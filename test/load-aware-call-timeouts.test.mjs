@@ -230,6 +230,22 @@ test('posted-review deadlines scale while phase cadence stays fixed', async t =>
 });
 
 
+test('idle timeout sizing leaves config reads for the first loaded call', t => {
+  t.mock.method(performance, 'now', () => 0);
+  const parseYaml = t.mock.method(__testYamlHooks, 'load');
+  const localPath = join(dirname(process.env.AGENT_OS_CONFIG_PATH), 'config.local.yaml');
+  writeFileSync(localPath, 'adversarial: [\n');
+
+  const idle = { loadAvg1m: 4, cpuCount: 4, cpuBusyPercent: 100 };
+  assert.equal(loadAwareTimeoutMs(200.1, idle), 201);
+  assert.equal(loadAwareTimeoutSeconds(20.1, idle), 21);
+  assert.equal(parseYaml.mock.callCount(), 0);
+
+  writeFileSync(localPath, 'adversarial:\n  reviewer:\n    load_aware:\n      max_multiplier: 2\n');
+  assert.equal(loadAwareTimeoutMs(200, { ...idle, loadAvg1m: 12 }), 400);
+  assert.ok(parseYaml.mock.callCount() > 0);
+});
+
 test('invalid local config degrades timeout sizing and caches failure until recovery', t => {
   let now = 0;
   t.mock.method(performance, 'now', () => now);

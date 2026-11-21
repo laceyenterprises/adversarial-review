@@ -8,7 +8,7 @@ import { tmpdir } from 'node:os';
 import { join, relative } from 'node:path';
 import { publishRemediation } from '../src/remediation-publication.mjs';
 import { reconcileFollowUpJob } from '../src/follow-up-remediation.mjs';
-import { settlePublicationHandoff } from '../src/remediation-publication-refusal.mjs';
+import { matchesPublicationFailureAttempt, settlePublicationHandoff } from '../src/remediation-publication-refusal.mjs';
 import { preserveUnpushedCommit } from '../src/github-auth-recovery.mjs';
 import { createFollowUpJob, claimNextFollowUpJob, markFollowUpJobSpawned, readRemediationReplyArtifact } from '../src/follow-up-jobs.mjs';
 
@@ -65,6 +65,89 @@ test('REMLABEL-01: publication CLI persists the refusal before exiting with the 
   assert.equal(failure.code, 'remediation-empties-pr-diff');
   assert.equal(failure.previousHead, f.previousHead);
   assert.equal(failure.localCommit, f.git('rev-parse', 'HEAD'));
+  assert.equal(f.git('ls-remote', 'origin', 'refs/heads/topic').split('\t')[0], f.previousHead);
+});
+
+test('LAC-2283: CLI captures the retained tip with a load-aware thirty-second nominal timeout', async t => {
+  const f = fixture(t);
+  const preload = join(f.root, 'probe-timeout.mjs');
+  const configPath = join(f.root, 'timeout-config.yaml');
+  writeFileSync(configPath, 'version: 1\nadversarial:\n  reviewer:\n    load_aware:\n      enabled: true\n      max_multiplier: 6\n');
+  writeFileSync(preload, `
+    import assert from 'node:assert/strict';
+    import childProcess from 'node:child_process';
+    import os from 'node:os';
+    import { syncBuiltinESMExports } from 'node:module';
+    os.loadavg = () => [Number(process.env.REMEDIATION_FIXTURE_LOAD) * os.cpus().length, 0, 0];
+    const original = childProcess.execFileSync;
+    childProcess.execFileSync = (command, args, options) => {
+      if (command === '/bin/ps') return String(os.cpus().length * 100);
+      if (command === 'git' && args.includes('HEAD^{commit}')) {
+        assert.equal(options.timeout, Number(process.env.REMEDIATION_FIXTURE_TIMEOUT));
+      }
+      return original(command, args, options);
+    };
+    syncBuiltinESMExports();
+  `);
+  writeFileSync(join(f.work, 'feature.txt'), 'base\n');
+  f.git('add', 'feature.txt'); f.git('commit', '-m', 'Restore sample files');
+  const failurePath = join(f.root, 'publication-failure.json');
+  for (const [load, timeout] of [[0, 30_000], [3, 180_000]]) {
+    await assert.rejects(execAsync(process.execPath, ['--import', preload,
+      new URL('../bin/remediation-publish.mjs', import.meta.url).pathname,
+      '--base-branch', 'main', '--branch', 'topic', '--previous-head', f.previousHead, '--failure-path', failurePath],
+    { cwd: f.work, env: { ...env, AGENT_OS_CONFIG_PATH: configPath,
+      REMEDIATION_FIXTURE_LOAD: String(load), REMEDIATION_FIXTURE_TIMEOUT: String(timeout) } }),
+    error => /remediation-empties-pr-diff/.test(error.stderr));
+    assert.equal(JSON.parse(readFileSync(failurePath)).localCommit, f.git('rev-parse', 'HEAD'));
+  }
+});
+
+test('LAC-2283: refusal matching accepts hex case while retaining job, lease and time validation', () => {
+  const head = 'aB'.repeat(20);
+  const job = { jobId: 'fixture-job', repo: 'fixture/repo', prNumber: 42, revisionRef: head };
+  const worker = { spawnedAt: '2026-11-20T00:00:00Z' };
+  const now = '2026-11-20T00:02:00Z';
+  const failure = { ...job, previousHead: head, localCommit: 'CD'.repeat(20),
+    expectedRemoteSha: 'eF'.repeat(20), refusedAt: '2026-11-20T00:01:00Z' };
+  assert.equal(matchesPublicationFailureAttempt(failure, job, worker, now), true);
+  for (const changed of [
+    { jobId: 'other-job' }, { repo: 'other/repo' }, { prNumber: 43 },
+    { previousHead: 'b'.repeat(40) }, { localCommit: 'g'.repeat(40) },
+    { expectedRemoteSha: 'F'.repeat(39) }, { refusedAt: '2026-11-19T23:59:00Z' },
+    { refusedAt: '2026-11-20T00:03:00Z' },
+  ]) {
+    assert.equal(matchesPublicationFailureAttempt({ ...failure, ...changed }, job, worker, now), false);
+  }
+});
+
+test('LAC-2283: retained source bundles when the host has no getuid API', async t => {
+  const f = fixture(t);
+  writeFileSync(join(f.work, 'feature.txt'), 'corrected feature\n');
+  f.git('add', 'feature.txt'); f.git('commit', '-m', 'Retain publication candidate');
+  const localCommit = f.git('rev-parse', 'HEAD');
+  const at = new Date().toISOString();
+  createFollowUpJob({ rootDir: f.root, repo: 'fixture/repo', prNumber: 1,
+    revisionRef: f.previousHead, branch: 'topic', baseBranch: 'main',
+    reviewBody: 'Fix feature', reviewerModel: 'claude', reviewPostedAt: at });
+  const claimed = claimNextFollowUpJob({ rootDir: f.root, claimedAt: at });
+  const spawned = markFollowUpJobSpawned({ rootDir: f.root, jobPath: claimed.jobPath, spawnedAt: at,
+    worker: { processId: 12345, workspaceDir: f.work } });
+  const getuid = process.getuid;
+  process.getuid = undefined;
+  t.after(() => { process.getuid = getuid; });
+  const result = await settlePublicationHandoff({ rootDir: f.root, ...spawned,
+    worker: spawned.job.remediationWorker, hqRoot: f.root, workspaceDir: f.work,
+    replyPath: null, stoppedAt: at,
+    failure: { code: 'remediation-publication-auth-rejected', localCommit,
+      previousHead: f.previousHead, expectedRemoteSha: f.previousHead, refusedAt: at },
+    lifecycle: { source: 'live', prState: 'open', headSha: f.previousHead },
+    execFileImpl: execAsync, log: { warn() {} } });
+  assert.equal(result.action, 'stopped');
+  const { rescue } = result.job.unpublishedWork;
+  assert.equal(rescue?.preserved, true);
+  assert.ok(f.git('bundle', 'list-heads', rescue.path).startsWith(`${localCommit} `));
+  assert.equal(f.git('rev-parse', 'HEAD'), localCommit);
   assert.equal(f.git('ls-remote', 'origin', 'refs/heads/topic').split('\t')[0], f.previousHead);
 });
 

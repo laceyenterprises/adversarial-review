@@ -9,7 +9,7 @@ import { publicationBlocker, PUBLICATION_AUTH_REJECTED, PUBLICATION_STALE_LEASE 
 import { resolvePublicationWorkspace } from './remediation-publication-workspace.mjs';
 import { preserveUnpushedCommit } from './github-auth-recovery.mjs';
 
-const SHA = /^[a-f0-9]{40}$/u;
+const SHA = /^[a-f0-9]{40}$/iu;
 const ownedByCurrentUid = path => typeof process.getuid !== 'function' || statSync(path).uid === process.getuid();
 
 const HANDOFF_CODES = new Set([PUBLICATION_AUTH_REJECTED, OWNER_AUTH_HOLD,
@@ -53,7 +53,7 @@ export async function settlePublicationHandoff({
   let rescue = null;
   if (selected) {
     try {
-      if (typeof process.getuid === 'function' && statSync(selected).uid === process.getuid()) {
+      if (ownedByCurrentUid(selected)) {
         rescue = await preserveUnpushedCommit({ hqRoot, workspaceDir: selected, repo: job.repo, prNumber: job.prNumber,
           jobId: job.jobId, commitSha: localCommit, observedAt: stoppedAt, checkoutTipOnly: true,
           expectedRemoteSha, execFileImpl });

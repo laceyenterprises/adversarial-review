@@ -7,6 +7,7 @@ import { writeFileAtomic } from '../src/atomic-write.mjs';
 import { publicationBlocker, publishRemediation } from '../src/remediation-publication.mjs';
 import { OWNER_AUTH_HOLD } from '../src/remediation-owner-auth.mjs';
 import { redactGithubAuthRecoveryDetail } from '../src/github-auth-recovery.mjs';
+import { loadAwareTimeoutMs } from '../src/load-aware-timeout.mjs';
 
 const { values } = parseArgs({ options: {
   'base-branch': { type: 'string' }, 'previous-head': { type: 'string' },
@@ -23,7 +24,7 @@ const expectedRemoteSha = values['expected-remote-sha'] || previousHead;
 let localCommit = null;
 try {
   localCommit = execFileSync('git', ['--no-replace-objects', 'rev-parse', '--verify', 'HEAD^{commit}'],
-    { encoding: 'utf8', timeout: 5000, stdio: ['ignore', 'pipe', 'pipe'] }).trim();
+    { encoding: 'utf8', timeout: loadAwareTimeoutMs(30_000), stdio: ['ignore', 'pipe', 'pipe'] }).trim();
 } catch { /* No verified local tip. */ }
 try {
   const result = await publishRemediation({ baseBranch: values['base-branch'], previousHead,

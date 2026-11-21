@@ -4,6 +4,7 @@
 // the process boundary (node helpers, gh, git remote, hq) and record the order
 // of lease, validation and merge side effects.
 import test from 'node:test';
+import { hammerBootstrapInputs } from './helpers/hammer-bootstrap-inputs.mjs';
 import assert from 'node:assert/strict';
 import { spawn, execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
@@ -151,11 +152,8 @@ return 0
     PR_URL: 'https://github.com/fixture/repo/pull/42', REVIEWED_SHA: shas.reviewed,
     TARGET_REMEDIATION_SHA: shas.reviewed, RISK_CLASS: 'low', MERGE_METHOD: 'squash', HQ_OWNER: 'fixture',
     AUDIT_PATH: join(run, 'audit.json'), REVIEWER: 'codex', AMA_TRAILERS_SHELL: "''" };
-  // The real inputs.sh body from Appendix A, rendered with synthetic values.
-  const inputs = template.match(/cat > '<<RUN_DIR>>\/inputs\.sh' <<'HAM_INPUTS'\n([\s\S]*?)\nHAM_INPUTS/)[1]
-    .replaceAll('<<TENURE_INPUTS>>', '')
-    .replace(/<<([A-Z_]+)>>/g, (_, key) => values[key]);
-  writeFileSync(join(run, 'inputs.sh'), `${inputs}\n`);
+  // The dispatched inputs.sh body rendered with synthetic values.
+  writeFileSync(join(run, 'inputs.sh'), hammerBootstrapInputs(values));
   writeFileSync(join(run, 'base-head'), shas.reviewed);
   writeFileSync(join(run, 'audit-details.md'), '**Findings addressed**\n- Synthetic correction (blocking): src/example.mjs; fixed\n');
   writeFileSync(join(run, 'terminal-remediation.json'), JSON.stringify({ active: true, commit: {}, auditComment: {} }));

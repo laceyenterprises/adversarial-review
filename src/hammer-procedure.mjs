@@ -6,6 +6,15 @@ import { HAMMER_RETRYABLE_READ_OUTCOMES } from './ama/hammer-phase-outcome.mjs';
 
 export const HAMMER_PHASES = ['hammer-verify-head', 'hammer-publish', 'hammer-merge'];
 
+export function renderHammerBootstrap(values) {
+  const source = readFileSync(new URL('../templates/hammer-bootstrap.sh', import.meta.url), 'utf8');
+  return source.replace(/"<<([A-Z_]+)>>"|<<(AMA_TRAILERS_SHELL|TENURE_INPUTS)>>/g, (_match, key, literal) => {
+    if (literal === 'TENURE_INPUTS') return values.TENURE_INPUTS || '';
+    if (literal === 'AMA_TRAILERS_SHELL') return values.AMA_TRAILERS_SHELL || "''";
+    return `'${String(values[key] ?? '').replaceAll("'", "'\\''")}'`;
+  });
+}
+
 // Keep rare procedures byte-for-byte in a private reference file. The main
 // prompt retains the rule and the condition for consulting each appendix.
 export function splitHammerPrompt(template) {

@@ -13,21 +13,19 @@ Never inspect their source. If unclear, stop with printed reason.
 After a merge or when the close command may have merged, go directly to
 mandate 7's closing-comment command before any scratch check.
 
-Before PR reads/edits, check existence only. Missing scripts require fresh
-AMA dispatch/lease; never reconstruct:
+Before PR reads or edits, run this one foreground command by itself:
 
 ```bash
-source "<<ROOT_DIR>>/bin/hammer-node-runtime.sh" || exit 1
-export HAM_REPO='<<REPO>>' HAM_PR_NUMBER='<<PR_NUMBER>>' HAM_HQ_ROOT='<<HQ_ROOT>>' HAM_TARGET_REMEDIATION_SHA='<<TARGET_REMEDIATION_SHA>>'
-if ! test -f "<<RUN_DIR>>/hammer-verify-head.sh" -a -f "<<RUN_DIR>>/hammer-publish.sh" -a -f "<<RUN_DIR>>/hammer-merge.sh" -a -x "<<ROOT_DIR>>/bin/hammer-helper-step.mjs" -a -f "<<ROOT_DIR>>/bin/hammer-shell-helpers.sh"; then
-  "${HAM_NODE_BIN:-node}" "<<ROOT_DIR>>/bin/hammer-terminal-audit.mjs" dispatch-phase-scripts-missing
-  exit 1
-fi
+/bin/bash "<<RUN_DIR>>/hammer-bootstrap.sh"
 ```
 
-Initialize `inputs.sh` once per Appendix A before edits. Guard and source it
-in every pre-merge shell/resume to resolve/export `HAM_NODE_BIN`. Never replace
-missing inputs after edits.
+Wait for its exit. On a pending tool session, wait on that session alone.
+If the current step outlasts its existing retries and cleanup without a
+result, end the turn reporting the session ID and unconfirmed bootstrap exit.
+A separate read, `inputs.sh`, or queued checkpoint cannot settle the session.
+On nonzero exit, stop with the printed stage and status. After exit 0, read
+`<<RUN_DIR>>/context.json` and the full review. Guard and source `inputs.sh`
+in subsequent pre-merge shells. Never reconstruct missing launch files.
 
 ```bash
 test -f "<<RUN_DIR>>/inputs.sh" || {
@@ -43,8 +41,8 @@ After failure, follow only the explicit conflict/deferred paths below.
 
 ### State machine
 
-1. **Prepare:** initialize Appendix A; run `hammer-context.mjs` once before reads
-   and after each push; read the final review and Appendix B's remediation policy.
+1. **Prepare:** run bootstrap; read the context, full review and Appendix B.
+   Refresh context after each push.
 2. **Repair:** remediate findings, preserve author intent, run targeted tests
    outside the lease, and commit only changed files with the contiguous HAM
    provenance trailers in Appendix C. Reuse already-fixed heads; no empty commit.
@@ -223,7 +221,7 @@ export HAM_REPO='<<REPO>>' HAM_PR_NUMBER='<<PR_NUMBER>>' HAM_HQ_ROOT='<<HQ_ROOT>
 
 ## Cost and context discipline
 
-Run `ham_read context "$HAM_NODE_BIN" "<<ROOT_DIR>>/bin/hammer-context.mjs" "<<REPO>>" "<<PR_NUMBER>>"` before reads and after **each push**; nonzero stops. Read the full final review before findings:
+Run `ham_read context "$HAM_NODE_BIN" "<<ROOT_DIR>>/bin/hammer-context.mjs" "<<REPO>>" "<<PR_NUMBER>>"` after **each push**; nonzero stops. Bootstrap captures the initial snapshot. Read the full final review before findings:
 
 <!-- hammer-reference:G1 -->
 Use this exact helper for the full final review, also whenever `review.findingsTruncated` or `review.simplicityNoteTruncated` is true:
@@ -264,32 +262,8 @@ Codex and Claude: no background tests or "still waiting" narration.
 
 ## Versioned helper inputs
 
-Before edits, capture base head ONCE; never recapture after edits/push.
-Source `<<RUN_DIR>>/inputs.sh` each shell; persist audits there.
-
-
-```bash
-umask 077
-source "<<ROOT_DIR>>/bin/hammer-node-runtime.sh" || exit 1
-/usr/bin/perl -e 'shift or exit 1; my $h=shift; if (-f $h) { exec $h, @ARGV; die $! } shift; shift; my $s=shift; shift; alarm $s; exec @ARGV' "$HAM_NODE_BIN" "<<ROOT_DIR>>/bin/hammer-helper-step.mjs" read:report base-head 90 540 "$HAM_NODE_BIN" "<<ROOT_DIR>>/bin/hammer-base-head.mjs" '<<PR_URL>>' > '<<RUN_DIR>>/base-head' || exit 1
-cat > '<<RUN_DIR>>/inputs.sh' <<'HAM_INPUTS'
-source "<<ROOT_DIR>>/bin/hammer-node-runtime.sh" || { return 1 2>/dev/null || exit 1; }
-export HAM_BASE_HEAD="$(cat '<<RUN_DIR>>/base-head')"
-export TMPDIR='<<RUN_DIR>>'
-export HAM_PR_URL='<<PR_URL>>' HAM_REPO='<<REPO>>' HAM_PR_NUMBER='<<PR_NUMBER>>'
-export HAM_REVIEWED_SHA='<<REVIEWED_SHA>>' HAM_TARGET_REMEDIATION_SHA='<<TARGET_REMEDIATION_SHA>>'
-export HAM_RISK_CLASS='<<RISK_CLASS>>' HAM_MERGE_METHOD='<<MERGE_METHOD>>'
-export HAM_RUN_DIR='<<RUN_DIR>>'
-export HAM_ROOT_DIR='<<ROOT_DIR>>' HAM_HQ_ROOT='<<HQ_ROOT>>' HAM_HQ_OWNER='<<HQ_OWNER>>'
-export HAM_AUDIT_PATH='<<AUDIT_PATH>>' HAM_REVIEWER='<<REVIEWER>>'
-export HAM_AMA_TRAILERS=<<AMA_TRAILERS_SHELL>>
-<<TENURE_INPUTS>>source "<<ROOT_DIR>>/bin/hammer-shell-helpers.sh" || { return 1 2>/dev/null || exit 1; }
-ham_step() { /usr/bin/perl -e 'my $n = shift or exit 1; exec $n, @ARGV; die $!' "$HAM_NODE_BIN" "<<ROOT_DIR>>/bin/hammer-helper-step.mjs" "$@"; }
-ham_read() { ham_step read:report "$1" 90 540 "${@:2}"; }
-HAM_INPUTS
-source "<<RUN_DIR>>/inputs.sh"
-"${HAM_NODE_BIN:-node}" "<<ROOT_DIR>>/bin/hammer-controller.mjs" resolve-environment || exit $?
-```
+Bootstrap pins the starting head before edits. Source `<<RUN_DIR>>/inputs.sh`
+in each subsequent shell and persist audits in the run directory.
 
 Close with ONE shipped command (HAMCONTROLLERSCRIPT-01); never write controller
 shell, read `/dev/tty` or stdin, or source phases yourself. Write data only:

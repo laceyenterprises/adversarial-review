@@ -11,6 +11,7 @@
 // PR through to a rebased head. Only the GitHub/credential process boundary and
 // the bounded-step wrapper are stubbed; git, the rebase and the proof are real.
 import test from 'node:test';
+import { hammerBootstrapInputs } from './helpers/hammer-bootstrap-inputs.mjs';
 import assert from 'node:assert/strict';
 import { execFileSync, spawnSync } from 'node:child_process';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
@@ -84,13 +85,7 @@ function realInputs(t, { helpers } = {}) {
   const run = join(dir, 'run');
   mkdirSync(run);
   const bound = { ...values(rootDir), RUN_DIR: run };
-  const inputs = template.match(/cat > '<<RUN_DIR>>\/inputs\.sh' <<'HAM_INPUTS'\n([\s\S]*?)\nHAM_INPUTS/)[1]
-    .replaceAll('<<TENURE_INPUTS>>', '')
-    .replace(/<<([A-Z_]+)>>/g, (_, key) => {
-      assert.ok(Object.hasOwn(bound, key), `unbound inputs.sh value ${key}`);
-      return bound[key];
-    });
-  writeFileSync(join(run, 'inputs.sh'), `${inputs}\n`);
+  writeFileSync(join(run, 'inputs.sh'), hammerBootstrapInputs(bound));
   writeFileSync(join(run, 'base-head'), SHA);
   const result = spawnSync('/bin/bash', ['-c', `source ${shellQuote(join(run, 'inputs.sh'))} || exit 9
 declare -F | sed 's/^declare -f //'
@@ -354,10 +349,7 @@ exec ${shellQuote(python)} "$@"
   git(clone, 'worktree', 'add', '-qb', 'author', work, reviewed);
   git(work, 'update-ref', 'refs/remotes/origin/main', `${base}^`);
   const bound = { ...values(root), HQ_ROOT: hq, RUN_DIR: run, REVIEWED_SHA: reviewed, TARGET_REMEDIATION_SHA: reviewed };
-  const inputs = template.match(/cat > '<<RUN_DIR>>\/inputs\.sh' <<'HAM_INPUTS'\n([\s\S]*?)\nHAM_INPUTS/)[1]
-    .replaceAll('<<TENURE_INPUTS>>', '')
-    .replace(/<<([A-Z_]+)>>/g, (_, key) => bound[key]);
-  writeFileSync(join(run, 'inputs.sh'), `${inputs}\n`);
+  writeFileSync(join(run, 'inputs.sh'), hammerBootstrapInputs(bound));
   writeFileSync(join(run, 'base-head'), reviewed);
   // The documented command, rendered with this run's values.
   const command = template.match(/^\/bin\/bash "<<ROOT_DIR>>\/bin\/hammer-conflict-repair\.sh" "<<RUN_DIR>>\/inputs\.sh"$/m)[0]

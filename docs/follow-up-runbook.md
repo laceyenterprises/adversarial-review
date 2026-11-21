@@ -613,7 +613,7 @@ npm run follow-up:reconcile                       # reconcile in-progress jobs (
 npm run follow-up:requeue -- <job-path> [reason]  # re-arm a completed job
 npm run follow-up:stop -- <job-path> [reason]     # stop a job; spawned workers are signalled first by default
 npm run follow-up:cancel-worker -- <job-path> [reason]  # signal spawned worker without moving job state
-npm run review:cancel -- --repo <slug> --pr <n> [reason]  # signal active reviewer without moving review state
+npm run review:cancel -- --repo <slug> --pr <n> [reason]  # stop an active review and suppress automatic same-head retries
 npm run merge-agent:cancel -- --repo <slug> --pr <n> [reason]  # cancel latest merge-agent LRQ + clear dispatched marker
 npm run no-merge:hold -- --repo <slug> --pr <n> [reason]  # apply a no-merge hold label for one PR/ticket
 npm run ticket-pipeline:pause -- --repo <slug> --pr <n> [reason]  # pause Linear sync for one PR via label
@@ -1483,23 +1483,30 @@ Behavior:
 Use `--signal SIGKILL` only after `SIGTERM` has failed or the process is known
 to ignore graceful termination.
 
-### Cancel an active reviewer without changing review state
+### Stop a review attempt as an operator
 
-Use this when the first-pass or re-review process itself needs to be
-interrupted but `reviews.db` should remain the durable source of truth for the
-normal orphan/reconcile path:
+Use this to stop an active first-pass review or re-review and prevent an
+automatic retry of that attempt.
 
 ```bash
-npm run review:cancel -- --repo <owner/repo> --pr <n> "Duplicate active reviewer; operator is restarting the loop"
+npm run review:cancel -- --repo <owner/repo> --pr <n> "Stop this review pending operator investigation"
 ```
 
 Behavior:
 
 - reads the `review_status='reviewing'` row from `data/reviews.db`
-- verifies process-group liveness and start-time identity before signalling,
-  then sends `SIGTERM` to the persisted `reviewer_pgid` process group by default
+- verifies process-group liveness and start-time identity, records cancellation
+  intent for the session and head, then sends `SIGTERM` by default
 - writes an audit receipt under `data/review-cancellations/`
 - does not mutate `review_status`, retry counters, or any PR state columns
+
+The watcher matches the cancellation to the reviewer session and head. If
+both the cancellation intent and review row record a PGID, the IDs must match.
+The watcher first checks GitHub for a review the cancelled session already
+posted on that head. If it finds one, it reconciles the posted review. If no
+review was posted, it marks the matching claim `failed` with `[cancelled]`
+evidence and charges the ordinary attempt. To re-arm a cancelled review, run
+`npm run retrigger-review -- --repo <owner/repo> --pr <n> --reason "..."`.
 
 Use `--signal SIGKILL` only after `SIGTERM` has failed or the process is known
 to ignore graceful termination.

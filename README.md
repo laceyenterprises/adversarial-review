@@ -329,6 +329,11 @@ continues to select the reviewer runtime, normally `cli-direct`. In
 so first-pass reviews launch through HQ orchestration instead of a direct
 CLI subprocess.
 
+In native mode, a local model stall returns the claim to the watcher for
+bounded backoff. After an operator cancels a reviewer, the watcher first looks
+for a posted review, then marks the matching claim failed if none exists. See the
+[reviewer recovery runbook](docs/RUNBOOK-antigravity-gemini-reviewer.md#interrupted-result-during-model-execution).
+
 The watcher refreshes that runtime adapter before startup recovery and
 again at the beginning of each poll tick. Invalid orchestration-mode
 config is logged through a deduped persistent-failure signal, and the

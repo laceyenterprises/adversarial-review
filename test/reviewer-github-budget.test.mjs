@@ -9,6 +9,7 @@ import { runReviewerPreModel, reviewerBudgetDeferralReceipt, parseReviewerBudget
 import { recordResponseRateLimit, githubCredential, GitHubBudgetDeferredError } from '../src/rate-limit-throttle.mjs';
 import { fetchPRDiff } from '../src/reviewer-diff-fetch.mjs';
 import { classifyReviewerFailure } from '../src/adapters/reviewer-runtime/cli-direct/classification.mjs';
+import { REVIEWER_STALLED_EXIT_CODE } from '../src/reviewer-outcomes.mjs';
 
 for (const swallowed of [false, true]) test(`pre-model diff exhaustion defers before transport or model (caught=${swallowed})`, async t => {
   const root = mkdtempSync(join(tmpdir(), 'review-budget-'));
@@ -57,7 +58,7 @@ test('malformed and incomplete receipts cannot masquerade as budget deferrals', 
   }
 });
 
-for (const phase of ['context', 'diff']) test(`reviewer CLI exits 79 before a model pass when ${phase} admission exhausts`, async t => {
+for (const phase of ['context', 'diff', 'model']) test(`reviewer CLI preserves the typed ${phase} outcome`, async t => {
   const { writeFileSync, existsSync } = await import('node:fs');
   const { spawnSync } = await import('node:child_process');
   const { fileURLToPath, pathToFileURL } = await import('node:url');
@@ -68,6 +69,7 @@ for (const phase of ['context', 'diff']) test(`reviewer CLI exits 79 before a mo
   const sourceUrl = name => new URL(`../src/${name}`, import.meta.url).href;
   const registryUrl = sourceUrl('adapters/agent-runtime/local/remediation.mjs');
   const harnessUrl = sourceUrl('reviewer-harness.mjs'), contextUrl = sourceUrl('reviewer-context-auth.mjs');
+  const diffUrl = sourceUrl('reviewer-diff-fetch.mjs');
   // This fixture tests immediate pre-model deferral; long cached holds are
   // confirmed separately by the rate-limit transport fixtures.
   const resetAt = new Date(Date.now() + 60_000).toISOString();
@@ -78,21 +80,23 @@ for (const phase of ['context', 'diff']) test(`reviewer CLI exits 79 before a mo
       import { writeFileSync } from 'node:fs';
       export function resolveReviewerExecution() { return {}; }
       export async function dispatchReviewerModel() {
-        writeFileSync(${JSON.stringify(modelMarker)}, 'unexpected model call');
-        throw new Error('model must not run');
+        writeFileSync(${JSON.stringify(modelMarker)}, 'model called');
+        throw Object.assign(new Error('[reviewer-stalled] fixture model stall'), { reviewerStalled: true });
       }`,
     'fixture:budget-context': `export * from ${JSON.stringify(contextUrl + '?actual')};
       import { recordResponseRateLimit, awaitThrottleIfNeeded, githubCredential } from ${JSON.stringify(sourceUrl('rate-limit-throttle.mjs'))};
       export async function fetchPRContext() {
         const credential = githubCredential();
-        await recordResponseRateLimit({ credential, resource: 'core', remaining: 0, limit: 5000,
-          resetAt: ${JSON.stringify(resetAt)}, observedAt: new Date().toISOString() });
+        ${phase === 'model' ? '' : `await recordResponseRateLimit({ credential, resource: 'core', remaining: 0, limit: 5000,
+          resetAt: ${JSON.stringify(resetAt)}, observedAt: new Date().toISOString() });`}
         ${phase === 'context' ? "await awaitThrottleIfNeeded('core', credential);" : ''}
         return { title: 'Synthetic change', body: '', labels: [], commits: [], reviews: [] };
       }`,
+    'fixture:stall-diff': `export * from ${JSON.stringify(diffUrl + '?actual')};
+      export async function fetchPRDiff() { return Buffer.from('diff --git a/example b/example\\n--- a/example\\n+++ b/example\\n@@ -1 +1 @@\\n-old\\n+new\\n'); }`,
   };
   const aliases = { [registryUrl]: 'fixture:budget-registry', [harnessUrl]: 'fixture:budget-harness',
-    [contextUrl]: 'fixture:budget-context' };
+    [contextUrl]: 'fixture:budget-context', ...(phase === 'model' ? { [diffUrl]: 'fixture:stall-diff' } : {}) };
   const loader = join(root, 'loader.mjs'), register = join(root, 'register.mjs');
   writeFileSync(loader, `
     const aliases = ${JSON.stringify(aliases)}, sources = ${JSON.stringify(sources)};
@@ -114,14 +118,20 @@ for (const phase of ['context', 'diff']) test(`reviewer CLI exits 79 before a mo
   const result = spawnSync(process.execPath, ['--preserve-symlinks', '--preserve-symlinks-main',
     '--import', pathToFileURL(register).href, fileURLToPath(new URL('../src/reviewer.mjs', import.meta.url)),
     JSON.stringify({ repo: 'example/project', prNumber: 7, reviewerModel: 'gemini',
-      botTokenEnv: 'GH_GEMINI_REVIEWER_TOKEN' })], {
+      botTokenEnv: 'GH_GEMINI_REVIEWER_TOKEN', reviewDbAttemptNumber: 1, passKind: 'first-pass' })], {
     env: { ...process.env, PATH: root, GH_GEMINI_REVIEWER_TOKEN: 'synthetic-reviewer-token',
+      ADVERSARIAL_REVIEW_WORKSPACE_STATE_DIR: join(root, 'workspace'),
       GHO_RATE_LIMIT_SHARED_STATE_PATH: join(root, 'state.json') },
     encoding: 'utf8', timeout: 10_000,
   });
-  assert.equal(result.status, 79, result.stdout + result.stderr);
-  assert.equal(parseReviewerBudgetDeferral(result.stderr).resetAt, resetAt);
-  assert.equal(existsSync(modelMarker), false);
+  assert.equal(result.status, phase === 'model' ? REVIEWER_STALLED_EXIT_CODE : REVIEWER_GITHUB_BUDGET_DEFERRED_EXIT_CODE,
+    result.stdout + result.stderr);
+  if (phase === 'model') {
+    assert.match(result.stderr, /\[reviewer-stalled\] fixture model stall/);
+  } else {
+    assert.equal(parseReviewerBudgetDeferral(result.stderr).resetAt, resetAt);
+  }
+  assert.equal(existsSync(modelMarker), phase === 'model');
   assert.equal(existsSync(transportMarker), false);
 });
 

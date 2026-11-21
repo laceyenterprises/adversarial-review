@@ -9,7 +9,7 @@ under `src/adapters/reviewer-runtime/`. The CCX-08 lease field is set by
 ## Ownership
 
 - Store: `data/reviewer-runs/<sessionUuid>.json`, plus `.stdout` / `.stderr`
-  side channels with the same stem.
+  output side channels and an optional `<sessionUuid>.json.cancel` receipt.
 - Writers: the reviewer-runtime adapters (launch, heartbeat, settle).
 - Readers: watcher startup recovery (adopt or settle a surviving reviewer),
   the agy identity pool (lease recovery), and the Gemini reservation reader
@@ -23,6 +23,13 @@ The run-state machine (`launching`, `heartbeating`, `spawned`, `completed`,
 `sessionUuid`, `domain`, `runtime`, `state`, `pgid` (integer or null),
 `spawnedAt`, `lastHeartbeatAt`, `reattachToken`, `adoptedAfterBounce`, and a
 free-form `subjectContext`.
+
+The native runtime and `review:cancel` write the cancellation receipt before
+signalling. Its `sessionUuid`, `headSha` and `pgid` identify the claim the
+operator intended to stop. If the signal fails, the writer removes its
+receipt. The watcher waits for confirmed exit and checks GitHub for a posted
+review on that head before settling the cancellation. The run-state pruner
+removes the receipt with the run record or after the orphan retention window.
 
 Nested Grok HQ dispatches set `subjectContext.nestedReviewerRuntime: true`.
 Watcher startup recovery skips these records because the outer hosted reviewer

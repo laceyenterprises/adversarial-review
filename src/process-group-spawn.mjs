@@ -525,6 +525,7 @@ function spawnCapturedProcessGroup(command, args, options = {}) {
       err.exitCode = code;
       err.signal = closeSignal;
       err.killed = closeSignal != null || timeoutReason !== null;
+      err.runnerKillReason = timeoutReason;
       err.timedOut = timeoutReason?.startsWith('timed out') || false;
       err.progressTimedOut = timeoutReason?.startsWith(PROGRESS_TIMEOUT_REASON_PREFIX) || false;
       err.firstOutputTimedOut = timeoutReason?.startsWith(FIRST_OUTPUT_TIMEOUT_REASON_PREFIX) || false;

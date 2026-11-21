@@ -14,6 +14,7 @@ import {
   resolveReviewerLeaseRecoveryEnabled,
 } from './reviewer-lease.mjs';
 import {
+  hasReviewerCancellation,
   readReviewerRunRecord,
   settleReviewerRunRecord,
 } from './adapters/reviewer-runtime/run-state.mjs';
@@ -188,6 +189,11 @@ export function shouldReconcileReviewerSession(row, now, options = {}) {
   // A terminal PR no longer needs its active reviewer. Do not wait for the
   // reviewer lease to expire before reclaiming the model slot.
   if (['merged', 'closed'].includes(String(row?.pr_state || '').toLowerCase())) return true;
+  if (hasReviewerCancellation(options.rootDir || ROOT, {
+    sessionUuid: row?.reviewer_session_uuid,
+    headSha: row?.reviewer_head_sha,
+    pgid: row?.reviewer_pgid ?? null,
+  })) return true;
   return shouldReconcileStaleReviewerSession(row, now, options) ||
     shouldReconcileAdoptedReviewerSession(row, options);
 }

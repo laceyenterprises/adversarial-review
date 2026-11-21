@@ -53,7 +53,8 @@ test('hard shutdown cancels active reviews and follow-up workers before returnin
       reason: 'intentional teardown',
       signal: 'SIGTERM',
       waitMs: 25,
-      cancelActiveReviewImpl: async ({ repo, prNumber, reason, signal }) => {
+      cancelActiveReviewImpl: async ({ repo, prNumber, reason, signal, terminal }) => {
+        assert.equal(terminal, false);
         events.push(`cancel-review:${repo}#${prNumber}:${signal}:${reason}`);
         return {
           signalled: true,

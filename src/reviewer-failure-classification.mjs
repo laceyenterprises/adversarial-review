@@ -65,6 +65,7 @@ function storedRowFailureSignal(reviewRow) {
 function reviewerFailureClassFromStoredRow(reviewRow) {
   const rawMessage = storedRowFailureSignal(reviewRow);
   const message = rawMessage.toLowerCase();
+  if (message.startsWith('[cancelled]')) return 'cancelled';
   if (message.includes('review cli resolution unavailable for ')) return 'cli-resolution-transient';
   if (message.includes('[reviewer-configuration-error]')) return 'reviewer-configuration-error';
   if (message.startsWith('[reviewer-command-failed]')) return 'reviewer-command-failed';
@@ -234,7 +235,7 @@ function unknownReviewerCommandFailureClass(reviewRow) {
 function reviewPopulationFailureClass(reviewRow) {
   const message = String(reviewRow?.failure_message || '').toLowerCase();
   if (!message) return null;
-  if (message.startsWith('[reviewer-lease-recovery-cap]')) return null;
+  if (message.startsWith('[reviewer-lease-recovery-cap]') || message.startsWith('[cancelled]')) return null;
   if (
     /reviewer session .+ is no longer alive/.test(message)
     && /no github review (?:was )?found/.test(message)

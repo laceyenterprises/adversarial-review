@@ -123,7 +123,7 @@ function parseCloserQuotaSnapshot(stdout) {
   return snapshot;
 }
 
-function recentQuotaSnapshot(rootDir, nowMs) {
+export function recentQuotaSnapshot(rootDir, nowMs) {
   if (!rootDir) return null;
   try {
     const cached = JSON.parse(readFileSync(closerQuotaSnapshotPath(rootDir), 'utf8'));
@@ -366,4 +366,59 @@ export async function resolveCloserDispatchHarness({
     diagnostics: boundedDiagnostics(diagnostics),
     ...groundingFields,
   };
+}
+
+// CLOSERFALLBACKFAILOPEN-01 (SEV1 2026-11-21): when the resolver itself throws
+// (governed registry or dispatch read unavailable) the caller used to dispatch
+// the primary, even though the persisted quota snapshot said its provider was
+// hard-stopped and admission would hold the closer `requested` for hours. This
+// reads only the local last-good snapshot, never the dispatch-read path that
+// just failed: a grounded primary selects the first ungrounded fallback; no
+// readable snapshot defers (`hold`); a provably healthy or untracked primary
+// keeps the pre-existing fail-open. Models are not resolved (the registry may
+// be the fault), so model-only caps are not screened here.
+export function resolveHarnessAfterResolverError({
+  workerClass, fallbackWorkerClasses = [], rootDir = null, error, nowMs = Date.now,
+} = {}) {
+  const primary = String(workerClass || '').trim();
+  const base = { workerClass: primary, fellBack: false, reason: 'harness-fallback-resolver-error',
+    error: String(error?.message || error).slice(0, 500) };
+  const primaryProvider = providerForCloserWorkerClass(primary);
+  if (!primaryProvider) return { ...base, resolverErrorDecision: 'keep-primary:provider-untracked' };
+  const cached = recentQuotaSnapshot(rootDir, nowMs());
+  const unknown = { ...base, hold: true, resolverErrorDecision: 'defer:primary-state-unknown' };
+  if (!cached) return unknown;
+  let statuses;
+  const read = (name) => {
+    const provider = providerForCloserWorkerClass(name);
+    const authPath = name.endsWith('-corp') ? 'oauth-corp' : null;
+    const availability = providerAvailabilityFromStatuses(statuses, { provider, authPath });
+    const soft = providerSoftGroundingFromStatuses(statuses, { provider, authPath });
+    return { provider, availability, soft,
+      grounded: isGroundedProviderState(availability.state) || soft.grounded === true };
+  };
+  let primaryRead;
+  try {
+    statuses = quotaStatusesFromSnapshot(cached.snapshot);
+    primaryRead = read(primary);
+  } catch {
+    return unknown;
+  }
+  if (!primaryRead.grounded) return { ...base, resolverErrorDecision: 'keep-primary:primary-not-grounded' };
+  const evidence = { evidenceSource: 'last-good-snapshot', evidenceAgeMs: cached.ageMs,
+    evidenceReadAt: cached.readAt, liveReadReason: 'harness-fallback-resolver-error' };
+  const hard = isGroundedProviderState(primaryRead.availability.state);
+  const grounding = { provider: primaryProvider, primaryState: primaryRead.availability.state,
+    groundedBy: hard && primaryRead.soft.grounded === true ? 'hard+soft' : (hard ? 'hard' : 'soft'),
+    softGrounded: primaryRead.soft.grounded === true, softGrounding: primaryRead.soft.verdict };
+  for (const candidate of normalizeFallbackList(fallbackWorkerClasses)) {
+    if (candidate === primary) continue;
+    if (providerForCloserWorkerClass(candidate)) {
+      const lane = read(candidate);
+      if (lane.grounded || (candidate === 'hammer-corp' && !lane.availability.available)) continue;
+    }
+    return { ...base, ...evidence, ...grounding, workerClass: candidate, fellBack: true, from: primary, to: candidate,
+      fallbackProvider: providerForCloserWorkerClass(candidate), resolverErrorDecision: `fallback:${candidate}` };
+  }
+  return { ...base, ...evidence, ...grounding, hold: true, resolverErrorDecision: 'defer:all-fallbacks-grounded' };
 }

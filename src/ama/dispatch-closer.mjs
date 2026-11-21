@@ -185,7 +185,7 @@ import {
   DAEMON_MERGE_SUBPROCESS_TIMEOUT_MS,
 } from './daemon-merge.mjs';
 import { resolveRequiredCheckContextsFromCfg } from './required-check-contexts.mjs';
-import { resolveCloserDispatchHarness } from './harness-fallback.mjs';
+import { resolveCloserDispatchHarness, resolveHarnessAfterResolverError } from './harness-fallback.mjs';
 import { codexWorkerAccountPolicy } from '../role-config.mjs';
 import { logCodexWorkerDispatch } from '../codex-account-routing.mjs';
 import { acquireDaemonMergeLease, acquireMergeLease, readMergeLeaseHolders, releaseMergeLease, releaseMergedPrMergeLeases, withDaemonMergeReservation } from './merge-lease.mjs';
@@ -7721,9 +7721,15 @@ async function maybeDispatchAmaCloserAttempt({
     throwIfAborted(signal);
   } catch (err) {
     throwIfAborted(signal);
-    // Fail-open: a resolver fault must never block the merge. Dispatch on the
-    // configured primary exactly as the pre-HHR path did.
-    harnessFallback = { workerClass, fellBack: false, reason: 'harness-fallback-resolver-error', error: String(err?.message || err) };
+    // CLOSERFALLBACKFAILOPEN-01: fail open only when the persisted quota state
+    // does not ground the primary; a grounded primary takes the fallback, and an
+    // unreadable state defers to the next pass. Never dispatch a held primary.
+    harnessFallback = resolveHarnessAfterResolverError({ workerClass, rootDir, error: err,
+      fallbackWorkerClasses: Array.isArray(cfg?.workerClassFallback) ? cfg.workerClassFallback : [] });
+    logAmaCloserDispatchEvent(logger, 'ama_closer.harness_fallback_resolver_error', {
+      repo, prNumber, workerClass, error: harnessFallback.error,
+      decision: harnessFallback.resolverErrorDecision, to: harnessFallback.to || null,
+    }, { level: 'warn' });
   }
   const harnessHoldReason = harnessFallback?.reason === 'all-fallbacks-grounded'
     ? 'all-fallbacks-grounded' : `harness-hold:${harnessFallback?.reason || 'unknown'}`;

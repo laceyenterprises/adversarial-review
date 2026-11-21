@@ -1017,8 +1017,10 @@ reservation, `repair-owner-unproven` names the operator in next-action and TTM
 and pages once per reservation. The page names the blocked head and
 reservation. The dispatch owner must establish the original launch and
 complete retry chain, or independently establish canonical absence and fence
-the original submitter through the authorized recovery path. Existing
-publication proof and custody rules continue to govern admission. Retirement
+the original submitter through the authorized recovery path. The operator can
+separately
+[retire an already fenced legacy reservation](#retire-one-fenced-legacy-repair-reservation-lac-2297).
+Existing publication proof and custody rules continue to govern admission. Retirement
 removes repair ownership from next-action and TTM projections, allowing the existing
 ownerless clock and SEV1 page. Corrupt ledgers and busy refund writers defer only
 the affected PR. No replacement PR
@@ -1043,6 +1045,51 @@ durable proof. Successor reservation CAS ignores only `ownerObservedAt`; owner
 identity/state, publication, review/terminal state and spend fields still fence
 concurrent changes. Watcher observation updates retain their full snapshot CAS
 so a late observation cannot overwrite a newer one.
+
+### Retire one fenced legacy repair reservation (LAC-2297)
+
+The HQ owner can run this command outside a worker launch from the deployed
+Agent OS checkout. First use the [producer's inspection and fence procedure](https://github.com/laceyenterprises/agent-os/blob/97995405ea1780c7e852b7746c5f8d47717c4f21/docs/RUNBOOK-adversarial-review-pipeline.md#fence-a-legacy-merge-rescue-owner-before-retirement)
+and retain the committed producer receipt. Use the same exact selectors in
+the retirement command.
+
+```sh
+node tools/adversarial-review/bin/retire-legacy-repair.mjs --apply \
+  --repo OWNER/REPO --pr PR --base-head FULL_SHA --epoch EPOCH_ID \
+  --owner-key EXACT_IDEMPOTENCY_KEY --handoff-round ORIGINAL_ROUND
+```
+
+Retirement uses the producer's HQ-owner and outside-worker guards, native
+checkout, and canonical Postgres runtime. The existing dispatch-read App
+Contract grants establish launch evidence or point-in-time absence only. This
+command uses the operator's existing canonical ledger authority. It reads the
+committed receipt by exact key in a read-only transaction, checks both enqueue
+guards and repeats the producer's unfiltered key, retry and provenance probe.
+The reader has a 65-second total subprocess budget.
+It independently rebuilds the evidence from GitHub, the current reservation,
+and the original merge-rescue handoff using the producer's native evidence
+reader. The receipt is read directly by the command. Its printout, the
+inspection checksum and process liveness are insufficient for retirement.
+
+The single-PR closer intent and retry-ledger flocks fence the current
+reservation through the evidence read and mutation. The open same-repository
+PR must still have the exact base head at the live GitHub observation. A scoped,
+bound, published, identified, or competing reservation refuses retirement.
+Active follow-up work, an unsettled closer dispatch or a closer/merge lease
+also refuses.
+Unavailable or inconsistent evidence, missing guards and lock contention exit
+75 without a retirement record. GitHub can move independently of the local
+flocks. The command only records custody retirement at the checked base head.
+Any subsequent review, publication or dispatch must pass its own live gates.
+
+Success writes `terminalAt`, `terminalReason: canonical-enqueue-fenced`, and
+`enqueueFenceReceipt` on the original epoch. It retains every epoch and charge
+and leaves follow-up work untouched. A repeated invocation refuses the
+already-terminal reservation. Any later rescue must use a different original
+handoff round and owner key, within the existing two-epoch cap. The root
+operator records the deployed producer/consumer versions, committed producer
+receipt, retirement result and organic review and closure on the original PR
+separately from source publication.
 
 `bin/repair-in-place.mjs` rejects missing or malformed heads (anything other
 than 40 hexadecimal characters) before opening the review database or reading

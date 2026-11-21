@@ -638,7 +638,7 @@ export function findLiveAmaCloserLease(...args) {
   });
 }
 
-function findLiveAmaCloserLeaseWithinRepositoryState(rootDir, { repo, prNumber } = {}) {
+function findLiveAmaCloserLeaseWithinRepositoryState(rootDir, { repo, prNumber, strict = false } = {}) {
   if (!repo) {
     throw new TypeError('findLiveAmaCloserLease: identity.repo is required');
   }
@@ -650,7 +650,8 @@ function findLiveAmaCloserLeaseWithinRepositoryState(rootDir, { repo, prNumber }
   let names = [];
   try {
     names = readdirSync(dir);
-  } catch {
+  } catch (error) {
+    if (strict && error.code !== 'ENOENT') throw error;
     return null;
   }
   // Derive the prefix from the canonical path builder rather than re-deriving the
@@ -665,7 +666,10 @@ function findLiveAmaCloserLeaseWithinRepositoryState(rootDir, { repo, prNumber }
     if (!name.startsWith(prefix) || !name.endsWith('.json')) continue;
     const leasePath = join(dir, name);
     const lease = readLeaseFile(leasePath);
-    if (!lease) continue;
+    if (!lease) {
+      if (strict) throw new Error('closer lease snapshot unavailable');
+      continue;
+    }
     candidates.push({ headSha: String(lease.headSha || ''), leasePath, lease });
   }
 

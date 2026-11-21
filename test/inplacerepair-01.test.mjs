@@ -572,10 +572,13 @@ test('repair observation bounds cadence and retains live, early absent and unrea
           version: 1, kind: 'canonical-exact-selector-absence' } }) };
       return state === 'retry' ? launchRead(epoch, 'failed', 'running') : launchRead(epoch, 'running');
     };
-    assert.ok(await reconcileRepairOwner({ ...f, now, readImpl }));
+    const waits = [];
+    const observeWait = async wait => waits.push(wait.waitClass);
+    assert.ok(await reconcileRepairOwner({ ...f, now, readImpl, observeWait }));
     const count = reads;
-    assert.ok(await reconcileRepairOwner({ ...f, now: now + 1000, readImpl }));
+    assert.ok(await reconcileRepairOwner({ ...f, now: now + 1000, readImpl, observeWait }));
     assert.equal(reads, count, 'no repeated SDK read inside the cadence');
+    assert.deepEqual(waits, ['unreadable', 'unproven-absent'].includes(state) ? ['repair-owner-unproven'] : []);
     assert.equal(pendingRepairEpoch(f.rootDir, f).terminalAt, undefined);
   }
 });
@@ -641,7 +644,9 @@ test('failed retry-chain lookup retains repair custody as unknown', async t => {
     assert.deepEqual(selector, { launch_request_ids: ['fixture-launch'], include_retry_chain: true });
     return { ok: false, reason: 'timeout' };
   };
-  const observed = await reconcileRepairOwner({ ...f, now, readImpl });
+  const observed = await reconcileRepairOwner({ ...f, now, readImpl, observeWait: async wait => {
+    assert.equal(wait.waitClass, 'repair-owner-unproven');
+  } });
   assert.equal(reads, 2);
   assert.equal(observed.id, epoch.id);
   assert.equal(observed.ownerState, 'unknown');

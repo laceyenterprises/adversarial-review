@@ -1,5 +1,5 @@
 // HOLDOWNER-01: observation only. No admission, retries or routing live here.
-import { pendingRepairEpoch } from './repair-epochs.mjs';
+import { pendingRepairEpoch, repairOwnerProofOverdue } from './repair-epochs.mjs';
 import { isOperatorHeld } from './operator-hold-labels.mjs';
 import { readAmaCloserLease, readAmaCloserDispatchLease } from './ama/closer-lease.mjs';
 import { readAmaCloserDispatchRecordsForPR } from './ama/dispatch-record-read.mjs';
@@ -29,6 +29,10 @@ export function resolveTtmOwner({ labels = [], review = {}, closers = [], holds 
     }
     if (repairEpoch.publisherObservation?.operatorRequired) {
       return { owner: 'operator', reason: `repair epoch ${repairEpoch.id} has unproven publication identity`,
+        repairEpoch: repairEpoch.id };
+    }
+    if (repairOwnerProofOverdue(repairEpoch)) {
+      return { owner: 'operator', reason: `repair epoch ${repairEpoch.id} has unproven dispatch ownership`,
         repairEpoch: repairEpoch.id };
     }
     return { owner: 'repair-worker', reason: `repair epoch ${repairEpoch.id}`, repairEpoch: repairEpoch.id };

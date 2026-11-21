@@ -5684,6 +5684,131 @@ test('LABELREARM-01: discovery arms a fresh exact-head review from an operator-g
   });
 });
 
+test('LAC-2300: a wake visits a pending head and overdue unproven repair custody pages once', () => {
+  const tmp = mkdtempSync(path.join(tmpdir(), 'watcher-repair-unknown-'));
+  try {
+    const repairUrl = fileUrl('src', 'repair-epochs.mjs');
+    const waitUrl = fileUrl('src', 'ama', 'closure-wait.mjs');
+    const readUrl = fileUrl('src', 'dispatch-read-client.mjs');
+    const head = 'b'.repeat(40);
+    const repo = 'laceyenterprises/adversarial-review';
+    const wrapper = `
+      import assert from 'node:assert/strict';
+      import { reconcileRepairOwner as reconcile } from '${repairUrl}?actual';
+      import { observeClosureWait } from '${waitUrl}';
+      import { readDispatchLaunches } from '${readUrl}';
+      export * from '${repairUrl}?actual';
+      export function reconcileRepairOwner(args) {
+        if (args.prNumber !== 101) return null;
+        return reconcile({ ...args, rootDir: ${JSON.stringify(tmp)}, now: globalThis.repairNow,
+          readImpl: async selector => {
+            assert.deepEqual(selector, { idempotency_key: 'legacy-repair-key' });
+            globalThis.repairReads++;
+            const result = await readDispatchLaunches(selector, { dispatchSession: { dispatchLookup: async () =>
+              ({ schema_version: 1, status: 'not_found', complete: true, roots: [], items: [], retry_edges: [] }) } });
+            assert.equal(result.detail, 'dispatch absence scope unproven');
+            return result;
+          },
+          readPublisher: async () => assert.fail('unproven owner must not authorize publication lookup'),
+          observeWait: wait => observeClosureWait({ ...wait, pageImpl: async (message, options) =>
+            globalThis.repairPages.push({ message, options }) }) });
+      }
+    `;
+    const loaderPath = path.join(tmp, 'loader.mjs');
+    const registerPath = path.join(tmp, 'register.mjs');
+    const runnerPath = path.join(tmp, 'runner.mjs');
+    writeFileSync(loaderPath, buildLoaderSource({ subjectHeads: { 101: head } }).replace(
+      '  return nextLoad(url, context);',
+      `  if (url === ${JSON.stringify(repairUrl)}) {
+        return { format: 'module', shortCircuit: true, source: ${JSON.stringify(wrapper)} };
+      }
+      return nextLoad(url, context);`,
+    ));
+    writeFileSync(registerPath, buildRegisterSource(loaderPath));
+    writeFileSync(runnerPath, buildRunnerSource({
+      freshHeads: { 101: head },
+      prePollSetup: `
+        const { reserveRepairEpoch, pendingRepairEpoch, REPAIR_ABSENCE_ESCALATE_MS,
+          REPAIR_OWNER_OBSERVE_MS } = await import('${repairUrl}?actual');
+        const identity = { rootDir: ${JSON.stringify(tmp)}, repo: '${repo}', prNumber: 101 };
+        const requestedAt = new Date().toISOString();
+        const reason = 'retrigger-review: offline exact-head request';
+        const epoch = reserveRepairEpoch({ ...identity, headSha: '${'a'.repeat(40)}',
+          now: requestedAt, ownerKey: 'legacy-repair-key', cause: 'conflict-without-owner' }).epoch;
+        globalThis.repairNow = Date.parse(requestedAt) + REPAIR_ABSENCE_ESCALATE_MS - REPAIR_OWNER_OBSERVE_MS;
+        globalThis.repairReads = 0;
+        globalThis.repairPages = [];
+        db.prepare(\`INSERT INTO reviewed_prs (repo, pr_number, reviewed_at, reviewer,
+          pr_state, review_status, domain_id, subject_external_id, revision_ref,
+          rereview_requested_at, rereview_reason, review_attempts)
+          VALUES (?, 101, ?, 'claude', 'open', 'pending', 'code-pr', ?, ?, ?, ?, 1)\`)
+          .run(identity.repo, requestedAt, identity.repo + '#101', '${head}', requestedAt, reason);
+      `,
+      healthProbeSetup: `
+        const { requestWatcherWake, createWatcherWakeSource, watcherWakeMatchesSubject } =
+          await import('${fileUrl('src', 'watcher-wake.mjs')}');
+        const source = createWatcherWakeSource({ rootDir: identity.rootDir });
+        try {
+          assert.equal(requestWatcherWake({ ...identity, headSha: '${head}', reason: 'stuck-rereview-watchdog' }).requested, true);
+          const wake = await source.wait(0);
+          assert.equal(wake.woken, true);
+          assert.equal(watcherWakeMatchesSubject(wake.payload,
+            { repoPath: identity.repo, prNumber: 101, headSha: '${head}' }), true);
+          assert.equal((await source.wait(0)).woken, false);
+          pollOptions.wakePayload = wake.payload;
+        } finally { source.close(); }
+      `,
+      afterFirstPoll: `
+        const { nextAction, deriveNextActionSnapshot } = await import('${fileUrl('src', 'pr-next-action.mjs')}');
+        const { resolveTtmOwner } = await import('${fileUrl('src', 'ttm-owner.mjs')}');
+        const readEpoch = () => pendingRepairEpoch(identity.rootDir, identity);
+        const reviewAction = repairEpoch => nextAction(deriveNextActionSnapshot({
+          subjectKey: identity.repo + '#101', head: '${head}',
+          observedAt: new Date(globalThis.repairNow).toISOString(),
+          observations: { pr: { state: 'OPEN', headSha: '${head}', labels: [] },
+            policy: { autonomousMergeExecutionEnabled: true }, progress: { repairEpoch } },
+        }));
+        assert.equal(globalThis.repairReads, 1);
+        assert.deepEqual(globalThis.repairPages, []);
+        assert.equal(reviewAction(readEpoch()).reason, 'repair-in-place-owned');
+        delete pollOptions.wakePayload;
+        for (let tick = 0; tick < 2; tick++) {
+          globalThis.repairNow += REPAIR_OWNER_OBSERVE_MS;
+          await pollOnce(octokit, pollOptions);
+        }
+        assert.equal(globalThis.repairReads, 3);
+        assert.equal(claims.filter(claim => claim.prNumber === 101).length, 0);
+        assert.equal((globalThis.__watcherClaimLoopReviewerSpawns || [])
+          .filter(spawn => spawn.subjectContext?.prNumber === 101).length, 0);
+        assert.deepEqual(db.prepare(\`SELECT review_status, revision_ref, rereview_requested_at,
+          rereview_reason, review_attempts, reviewer_head_sha, reviewer_session_uuid
+          FROM reviewed_prs WHERE pr_number=101\`).get(),
+          { review_status: 'pending', revision_ref: '${head}', rereview_requested_at: requestedAt,
+            rereview_reason: reason, review_attempts: 1, reviewer_head_sha: null, reviewer_session_uuid: null });
+        const observed = readEpoch();
+        assert.equal(observed.id, epoch.id);
+        assert.equal(observed.ownerState, 'unknown');
+        assert.equal(observed.ownerLaunch, null);
+        assert.equal(observed.terminalAt, undefined);
+        assert.equal(globalThis.repairPages.length, 1, 'bounded unknown custody must page once');
+        assert.equal(reviewAction(observed).reason, 'repair-owner-unproven');
+        assert.equal(reviewAction({ ...observed, ownerState: 'live' }).actor, 'remediator');
+        assert.equal(resolveTtmOwner({ repairEpoch: observed }).owner, 'operator');
+        assert.equal(resolveTtmOwner({ repairEpoch: observed, closers: [{ live: true }] }).owner, 'live-closer');
+        const [page] = globalThis.repairPages;
+        assert.equal(page.options.severity, 'SEV1');
+        assert.match(page.options.dedupKey, /repair-owner-unproven$/);
+        assert.match(page.message, /${head}/);
+        assert.doesNotMatch(page.message, /legacy-repair-key|dispatch absence scope unproven/);
+      `,
+    }));
+    const result = spawnSync(process.execPath,
+      ['--no-warnings', '--import', pathToFileURL(registerPath).href, runnerPath],
+      { cwd: REPO_ROOT, encoding: 'utf8', env: fixtureEnv(installGhFixture(tmp)), timeout: 60000 });
+    assert.equal(result.status, 0, `${result.stdout || ''}${result.stderr || ''}`);
+  } finally { rmSync(tmp, { recursive: true, force: true }); }
+});
+
 for (const mode of ['pending', 'pending-uppercase', 'foreign', 'publication']) test(`repair watcher custody at prior reviewed head: ${mode}`, () => {
   const uppercase = mode === 'pending-uppercase' || mode === 'publication';
   const tmp = mkdtempSync(path.join(tmpdir(), 'watcher-second-repair-'));

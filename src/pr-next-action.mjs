@@ -1,6 +1,7 @@
 import { isHammerOwnedHead } from './hammer-head-ownership.mjs';
 import { isRemediationRoundBudgetSpent, remediationBudgetHandoffAllowed } from './remediation-round-recovery.mjs';
 import { rollupInfrastructureOnly, rollupInfrastructureEvidencePending } from './ci-infrastructure.mjs';
+import { repairOwnerProofOverdue } from './repair-epochs.mjs';
 // ── NXA-02: one shared next action per open PR ───────────────────────────────
 //
 // `nextAction(snapshot)` is pure and total. It reads one frozen NXA-01 pass
@@ -423,6 +424,11 @@ function selectRow(facts, options = {}) {
     if (progress.repairEpoch.publisherObservation?.operatorRequired) {
       return { row: 'R02-hold', action: 'operator-hold', actor: 'operator',
         reason: 'repair-publication-unproven', deadlineKind: null, queue: 'none',
+        refs: [`repair-epoch:${progress.repairEpoch.id}`] };
+    }
+    if (repairOwnerProofOverdue(progress.repairEpoch)) {
+      return { row: 'R02-hold', action: 'operator-hold', actor: 'operator',
+        reason: 'repair-owner-unproven', deadlineKind: null, queue: 'none',
         refs: [`repair-epoch:${progress.repairEpoch.id}`] };
     }
     return { row: 'R03-live-owner', action: 'remediate', actor: 'remediator',

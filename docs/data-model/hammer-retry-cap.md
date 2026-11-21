@@ -38,8 +38,12 @@ absent head are non-contradicting; a repository basename is accepted for the
 qualified reservation repository. A scoped keyed read
 sends the stored project and the ledger repository to the existing producer.
 Legacy reservations use the unscoped key. Point-in-time absence and unreadable
-evidence retain custody; only canonical exact-key absence counts toward
-escalation. A delayed pre-enqueue submitter can
+evidence retain custody. Only canonical exact-key absence counts toward
+`absent-unfenced`. An unbound reservation with no verified publication and
+`ownerState: unknown` observed at least ten minutes after `reservedAt`
+projects operator custody and uses the existing closure-wait store to deduplicate
+the `repair-owner-unproven` page per reservation. The decision uses the existing
+observation fields. A delayed pre-enqueue submitter can
 still launch after a point-in-time absence read. Retirement compares the full
 observed reservation under the ledger flock and cannot retire a bound head.
 Retired reservations no longer appear in next-action or TTM ownership, allowing

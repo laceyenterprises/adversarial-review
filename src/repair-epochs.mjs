@@ -17,6 +17,15 @@ const validProject = value => typeof value === 'string' && value.length > 0
   && value.length <= 256 && !/\s/.test(value);
 const sameIdentity = (left, right) => typeof left === 'string' && typeof right === 'string'
   && left.toLowerCase() === right.toLowerCase();
+
+// Use a durable observation beyond the grace period. An old reservation alone
+// cannot establish that the dispatch lookup still lacks ownership proof.
+export function repairOwnerProofOverdue(epoch) {
+  return Boolean(epoch?.id && !epoch.reviewHead && !epoch.terminalAt && !epoch.publicationHead
+    && epoch.ownerState === 'unknown'
+    && Date.parse(epoch.ownerObservedAt) - Date.parse(epoch.reservedAt) >= REPAIR_ABSENCE_ESCALATE_MS);
+}
+
 function sameReservationSnapshot(left, right) {
   // A timestamp refresh does not change a terminal proof's reservation. Keep
   // every identity, owner state, publication and spend field in this CAS.
@@ -169,6 +178,11 @@ export async function reconcileRepairOwner({ rootDir, repo, prNumber, headSha, n
       headSha: `${reconciled.publisherObservation.headSha}:${reconciled.id}`,
       waitClass: 'repair-publication-unproven', immediate: true, now,
       reason: `Terminal repair ${reconciled.id} has unproven publication identity; operator must inspect the attestation before releasing custody.` });
+  } else if (repairOwnerProofOverdue(reconciled) && SHA.test(headSha)) {
+    await observeWait({ rootDir, repo, prNumber, headSha: `${reconciled.baseHead}:${reconciled.id}`,
+      waitClass: 'repair-owner-unproven', immediate: true, now,
+      reason: `Repair reservation ${reconciled.id} blocks review of ${headSha.toLowerCase()}. ` +
+        'Dispatch ownership is unproven. Establish launch and retry evidence or fence the original submitter through authorized recovery.' });
   }
   return reconciled || (includeReviewedHead ? repairEpochForHead(rootDir, { repo, prNumber }, headSha) : null);
 }

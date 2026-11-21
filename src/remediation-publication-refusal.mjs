@@ -1,6 +1,7 @@
-import { realpathSync, statSync } from 'node:fs';
+import { readDispatchStatus } from './producer-contracts/launch-status.mjs';
+import { readFileSync, realpathSync, statSync } from 'node:fs';
 import { join } from 'node:path';
-import { markFollowUpJobStopped, readFollowUpJob } from './follow-up-jobs.mjs';
+import { markFollowUpJobFailed, markFollowUpJobStopped, readFollowUpJob, readRemediationReplyArtifact } from './follow-up-jobs.mjs';
 import { withFollowUpJobLock } from './follow-up-job-write.mjs';
 import { CREDENTIAL_REFRESH_UNAVAILABLE } from './remediation-credential-broker.mjs';
 import { OWNER_AUTH_HOLD } from './remediation-owner-auth.mjs';
@@ -105,4 +106,46 @@ export async function settlePublicationHandoff({
     if (!['ENOENT', 'EWOULDBLOCK', 'EAGAIN'].includes(error.code)) throw error;
     return { action: 'skipped', reason: 'publication-handoff-custody-changed', job, jobPath };
   }
+}
+
+// Observe refusal evidence and settle empty-diff refusals before ordinary reply handling.
+export async function observePublicationRefusal({
+  rootDir, job, jobPath, worker, liveness, isHqWorker, now, log,
+  resolvePaths, buildCommentDelivery, postOutcomeComment, postCommentImpl,
+}) {
+  let publicationFailure = null;
+  let publicationReply = null;
+  let publicationWorkspace = null;
+  let publicationReplyPath = null;
+  const handoffAt = now();
+  let currentPublicationFailure = false;
+  if (liveness.state !== 'active') {
+    try {
+      const checkedPaths = resolvePaths();
+      publicationFailure = JSON.parse(readFileSync(`${checkedPaths.replyPath}.publication-failure.json`, 'utf8'));
+      publicationWorkspace = checkedPaths.workspaceDir;
+      publicationReplyPath = checkedPaths.replyPath;
+      publicationReply = readRemediationReplyArtifact(checkedPaths.replyPath, { expectedJob: job });
+    } catch { /* The sidecar and strictly validated reply are independent evidence. */ }
+    currentPublicationFailure = matchesPublicationFailureAttempt(publicationFailure, job, worker, handoffAt);
+    const protectsCustody = currentPublicationFailure && (isPublicationHandoffCode(publicationFailure.code)
+      || publicationFailure.code === 'remediation-empties-pr-diff');
+    if (protectsCustody && liveness.state === 'exited' && isHqWorker
+      && liveness.reason !== 'hq-dispatch-not-found'
+      && !readDispatchStatus(liveness.dispatchStatus).terminal) {
+      return { result: { action: 'active', reason: 'publication-handoff-worker-exit-unproven', job, jobPath } };
+    }
+    if (publicationFailure?.code === 'remediation-empties-pr-diff'
+      && (currentPublicationFailure || (!publicationFailure.jobId && publicationFailure.previousHead === job.revisionRef))) {
+      const failure = { code: 'remediation-empties-pr-diff',
+        message: 'Remediation publication refused: the result empties the PR diff or restores every originally changed file to base. The previous remote head is retained.' };
+      const { commentDelivery } = buildCommentDelivery({ job, worker, action: 'failed', failure, now });
+      const failed = markFollowUpJobFailed({ rootDir, jobPath, failedAt: now(), failureCode: failure.code,
+        error: new Error(failure.message), remediationWorker: { ...worker, state: 'failed', reconciledAt: now() }, commentDelivery });
+      await postOutcomeComment({ rootDir, jobPath: failed.jobPath, job: failed.job, worker,
+        action: 'failed', failure, postCommentImpl, alreadyTerminal: failed.alreadyTerminal, now, log });
+      return { result: { action: 'failed', reason: failure.code, job: failed.job, jobPath: failed.jobPath } };
+    }
+  }
+  return { publicationFailure, publicationReply, publicationWorkspace, publicationReplyPath, handoffAt, currentPublicationFailure };
 }

@@ -1337,6 +1337,9 @@ exit is proven, the worker retains custody. HQ `hq-dispatch-not-found` liveness
 is exit proof; unknown dispatch evidence remains fenced. A preservation refusal
 also precedes reply handling for manual-inspection workers. A missing or invalid
 reply cannot complete the round. The hold starts no new remediation or re-review.
+Refusal observation and empty-diff settlement live in
+`src/remediation-publication-refusal.mjs`; the daemon invokes that helper before
+ordinary reply reconciliation. This extraction preserves the lifecycle and smoke promises.
 REMPUBPROOF-01: structural replay proof accepts a live rebased head containing
 every worker patch. Failed current-head CI can recover that stopped job under
 the queue lock, bound to its source digest and live head. Validated final-round

@@ -22,7 +22,7 @@ import { completeLiveWorkerPublishedHead, completeKnownWorkerPublish, findWorker
 import { filterGitHubBody } from './github-outbound-body.mjs';
 import { logRoundBudgetDecision, settleInfrastructureRemediationRound, recordLocalRemediationOutcome } from './remediation-round-accounting.mjs';
 import { deferForCredentialBroker, credentialBrokerReady, CREDENTIAL_REFRESH_UNAVAILABLE } from './remediation-credential-broker.mjs';
-import { isPublicationHandoffCode, matchesPublicationFailureAttempt, settlePublicationHandoff } from './remediation-publication-refusal.mjs';
+import { isPublicationHandoffCode, observePublicationRefusal, settlePublicationHandoff } from './remediation-publication-refusal.mjs';
 import { recordedInfrastructureReason, localWorkerErrorOutcome } from './remediation-infrastructure-refund.mjs';
 import { preserveUnsafeWorkspaceMetadata } from './workspace-identity.mjs';
 import { OWNER_AUTH_HOLD, ownerAuthHold, selectRemediationReadRoute, selectRemediationPushRoute } from './remediation-owner-auth.mjs';
@@ -1410,42 +1410,12 @@ async function reconcileFollowUpJobWithinRepositoryCycle({
   });
   if (isHqWorker) job = recordHqLaunchObservation({ job, jobPath, liveness, observedAt: now() }); // CLOSERREVIVE-01
   if (!isHqWorker && liveness.state === 'exited') cleanupServiceCodexAuth(worker);
-  // A publication refusal wins over reply text, no-progress handling and
-  // published-head recovery. It cannot authorize a re-review or empty close.
-  let publicationFailure = null;
-  let publicationReply = null;
-  let publicationWorkspace = null;
-  let publicationReplyPath = null;
-  const handoffAt = now();
-  let currentPublicationFailure = false;
-  if (liveness.state !== 'active') {
-    try {
-      const checkedPaths = buildReconciliationPaths(rootDir, job);
-      publicationFailure = JSON.parse(readFileSync(`${checkedPaths.replyPath}.publication-failure.json`, 'utf8'));
-      publicationWorkspace = checkedPaths.workspaceDir;
-      publicationReplyPath = checkedPaths.replyPath;
-      publicationReply = readRemediationReplyArtifact(checkedPaths.replyPath, { expectedJob: job });
-    } catch { /* The sidecar and strictly validated reply are independent evidence. */ }
-    currentPublicationFailure = matchesPublicationFailureAttempt(publicationFailure, job, worker, handoffAt);
-    const protectsCustody = currentPublicationFailure && (isPublicationHandoffCode(publicationFailure.code)
-      || publicationFailure.code === 'remediation-empties-pr-diff');
-    if (protectsCustody && liveness.state === 'exited' && isHqWorker
-      && liveness.reason !== 'hq-dispatch-not-found'
-      && !readDispatchStatus(liveness.dispatchStatus).terminal) {
-      return { action: 'active', reason: 'publication-handoff-worker-exit-unproven', job, jobPath };
-    }
-    if (publicationFailure?.code === 'remediation-empties-pr-diff'
-      && (currentPublicationFailure || (!publicationFailure.jobId && publicationFailure.previousHead === job.revisionRef))) {
-      const failure = { code: 'remediation-empties-pr-diff',
-        message: 'Remediation publication refused: the result empties the PR diff or restores every originally changed file to base. The previous remote head is retained.' };
-      const { commentDelivery } = buildReconcileCommentDelivery({ job, worker, action: 'failed', failure, now });
-      const failed = markFollowUpJobFailed({ rootDir, jobPath, failedAt: now(), failureCode: failure.code,
-        error: new Error(failure.message), remediationWorker: { ...worker, state: 'failed', reconciledAt: now() }, commentDelivery });
-      await postReconcileOutcomeCommentSafe({ rootDir, jobPath: failed.jobPath, job: failed.job, worker,
-        action: 'failed', failure, postCommentImpl, alreadyTerminal: failed.alreadyTerminal, now, log });
-      return { action: 'failed', reason: failure.code, job: failed.job, jobPath: failed.jobPath };
-    }
-  }
+  const publication = await observePublicationRefusal({ rootDir, job, jobPath, worker, liveness, isHqWorker, now, log,
+    resolvePaths: () => buildReconciliationPaths(rootDir, job), buildCommentDelivery: buildReconcileCommentDelivery,
+    postOutcomeComment: postReconcileOutcomeCommentSafe, postCommentImpl });
+  if (publication.result) return publication.result;
+  const { publicationFailure, publicationReply, publicationWorkspace, publicationReplyPath,
+    handoffAt, currentPublicationFailure } = publication;
   const lifecycle = await resolveJobPRLifecycleSafe({
     rootDir,
     job,

@@ -66,20 +66,25 @@ for (const age of [600, 901]) {
 
 test('a filtered pending re-review logs its reason on every pass without a wait timestamp', async () => {
   const logs = [];
+  let leaseHeld = true;
   const c = { ...candidate(201), hasPriorPostedReview: true,
     current: { review_status: 'pending' },
-    admissionBlocked: () => true, admissionBlockReason: () => 'head-dispatch-lease-held' };
+    pipelineGeminiSeats: 1,
+    admissionBlocked: () => leaseHeld, admissionBlockReason: () => 'head-dispatch-lease-held' };
   const drain = createReviewerDispatchDrain(options([c], {
-    runQueue: async eligible => assert.deepEqual(eligible, []),
+    runQueue: async eligible => {
+      assert.deepEqual(eligible, leaseHeld ? [] : [c]);
+      return { deferredCandidates: eligible, deferredReasons: [{ reason: 'gemini-credential-concurrency-saturated' }] };
+    },
     logger: { log: line => logs.push(line), warn() {} },
   }));
   await drain('poll');
+  leaseHeld = false;
   await drain('poll');
   const decisions = logs.filter(line => line.includes('review-wait-decision'));
   assert.equal(decisions.length, 2);
-  for (const line of decisions) {
-    assert.match(line, /pass_kind=rereview wait_seconds=unknown decision=head-dispatch-lease-held/);
-  }
+  assert.match(decisions[0], /pass_kind=rereview wait_seconds=unknown decision=head-dispatch-lease-held/);
+  assert.match(decisions[1], /pass_kind=rereview wait_seconds=unknown decision=gemini-credential-concurrency-saturated/);
 });
 
 test('SEATIDLE-01: the shared drain obeys a live drain marker and the credential cap', async () => {

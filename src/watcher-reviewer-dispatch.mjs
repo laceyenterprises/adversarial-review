@@ -93,10 +93,10 @@ export function createReviewerDispatchDrain({
         if (pressure.engaged || filteredRereview) {
           const spilled = started && result?.dispatched !== false && candidate.reviewerModel !== 'gemini';
           const decision = result?.dispatched === false ? result.reason || 'admission-refused'
+            : filteredRereview ? notStartedReason(candidate)
             : spilled ? 'spilled' : candidate.admissionBlocked?.() ? candidate.admissionBlockReason?.() || 'admission-blocked'
             : candidate.pipelineGeminiSeats > 0 ? 'pipeline-requires-gemini'
-            : started ? 'gemini-admitted' : filteredRereview ? notStartedReason(candidate)
-              : candidate.spillDecisionReason || notStartedReason(candidate);
+            : started ? 'gemini-admitted' : candidate.spillDecisionReason || notStartedReason(candidate);
           const account = candidate.spawnClaudeAccountSelection || candidate.claudeAccountSelection;
           logger.log?.(`[watcher] review-wait-decision repo=${candidate.repoPath} pr=${candidate.prNumber} `
             + `admission=${JSON.stringify(reason)} pass_kind=${passKind} `

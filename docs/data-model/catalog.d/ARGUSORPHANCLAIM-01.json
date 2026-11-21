@@ -1,0 +1,14 @@
+{
+  "version": 1,
+  "entries": [
+    {
+      "id": "argus-security-jobs",
+      "title": "Argus Security Review Jobs",
+      "path": "docs/data-model/argus-security-jobs.md",
+      "store": "data/argus-security-jobs/",
+      "schemaSurface": "src/argus-security-queue.mjs",
+      "owner": "ASR-03 Argus security review queue",
+      "claimOwnership": "The drain persists an optional process nonce as claimOwner and clears it on requeue. Backlog retirement recovers predecessor claims at startup and caps the current-process lease at 120 minutes."
+    }
+  ]
+}

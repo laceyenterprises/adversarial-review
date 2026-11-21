@@ -1776,10 +1776,15 @@ closer own-commit certification remains independent of HAM terminal audit
 currency. Lifecycle states, transitions and existing smoke promises are unchanged.
 
 LAC-2305 refreshes the review proof inside the legacy lane writer before a
-HAM terminal merge attempt. A formal exact-head request from a configured
+HAM terminal merge attempt. A standing request on any head from a configured
 human operator or proven repository admin defers under
-`operator-review-changes-requested` until dismissal or a later same-issuer,
-same-head approval. Unknown review or issuer evidence returns
+`operator-review-changes-requested` until dismissal or a later same-issuer
+approval on any head. Rebases preserve the veto. Historical approvals without
+author/commit evidence cannot dispose it; authorless off-head reviews are
+inapplicable, while missing exact-head identity fails closed. Initial pre-lease
+and subsequent live gates share the proof and five-minute recovery backoff.
+Review-change and operator-veto deferrals do not qualify for the automatic
+retry/refund allowlist. Unknown review or issuer evidence returns
 `terminal-review-evidence-unavailable`. A blocked preflight that proves no
 merge transport ran settles the local writer reservation. Existing exact-head
 CAS, leases and merge retry ownership continue to apply.

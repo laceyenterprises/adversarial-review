@@ -13,6 +13,7 @@ import { closerReviewProof, readCloserReviewProof } from '../src/ama/closer-revi
 import { legacyLaneWriteMain } from '../bin/legacy-lane-write.mjs';
 import { runLegacyLaneWrite } from '../src/finalization/legacy-lane-write.mjs';
 import { routeFinalizationWriter } from '../src/finalization/queue-routing-boundary.mjs';
+import { retryableAmaCloserDeferralOutcome, AMA_CLOSER_RETRYABLE_DEFERRAL_REASONS } from '../src/ama/closer-lease.mjs';
 
 // Incident facts from the dispatch; bodies are synthetic, not a live PR read.
 const OLD = 'a757cb4904c5' + '0'.repeat(28);
@@ -79,17 +80,18 @@ test('closer honors standing exact-head operator requests, including those submi
   assert.equal(configured.reason, 'operator-review-changes-requested');
 });
 
-test('dismissal or a later exact-head approval by the same operator clears only the disposed review', async () => {
+test('dismissal or a later approval by the same operator clears only the disposed review across rebases', async () => {
   const evaluate = (reviews, get = getReviewEvidence) =>
     closerReviewProof({ ...reviewIdentity, snapshot: snapshot(reviews), get });
   const approval = { ...operatorReview, id: 501, state: 'APPROVED', submitted_at: '2026-11-07T01:33:00Z' };
   for (const reviews of [[{ ...operatorReview, state: 'DISMISSED' }], [operatorReview, approval],
-    [{ ...operatorReview, commit_id: OTHER }]]) {
+    [{ ...operatorReview, commit_id: OTHER }, approval],
+    [operatorReview, { ...approval, commit_id: OTHER }]]) {
     assert.deepEqual(await evaluate(reviews), { ok: true });
   }
   for (const irrelevant of [
     { ...approval, state: 'COMMENTED' }, { ...approval, user: { login: 'another-user' } },
-    { ...approval, commit_id: OTHER }, { ...approval, id: operatorReview.id },
+    { ...approval, commit_id: null }, { ...approval, id: operatorReview.id },
     { ...approval, submitted_at: operatorReview.submitted_at },
   ]) {
     assert.equal((await evaluate([operatorReview, irrelevant])).reviewId, operatorReview.id);
@@ -100,6 +102,66 @@ test('dismissal or a later exact-head approval by the same operator clears only 
   assert.equal((await evaluate([operatorReview], async () => { throw new Error('permission unavailable'); })).reason,
     'terminal-review-evidence-unavailable');
   assert.equal((await evaluate([operatorReview], async () => ({}))).reason, 'terminal-review-evidence-unavailable');
+});
+
+test('operator veto survives a rebase from H to H-prime, without requiring review commit evidence', async () => {
+  for (const commit_id of [HEAD, OTHER, null]) {
+    const result = await closerReviewProof({ ...reviewIdentity, headSha: OTHER,
+      snapshot: snapshot([{ ...operatorReview, commit_id }], OTHER), get: getReviewEvidence });
+    assert.equal(result.reason, 'operator-review-changes-requested');
+  }
+});
+
+test('irrelevant historical ghost approvals do not park closure; exact-head unknown authors fail closed', async () => {
+  for (const ghost of [
+    { ...operatorReview, state: 'APPROVED', commit_id: OTHER, user: null },
+    { ...operatorReview, state: 'APPROVED', commit_id: null },
+    { ...operatorReview, state: 'APPROVED', commit_id: null, user: null },
+    { ...operatorReview, commit_id: OTHER, user: null },
+  ]) {
+    const result = await closerReviewProof({ ...reviewIdentity, snapshot: snapshot([ghost]), get: getReviewEvidence });
+    assert.deepEqual(result, { ok: true });
+    const veto = await closerReviewProof({ ...reviewIdentity, snapshot: snapshot([operatorReview, ghost]), get: getReviewEvidence });
+    assert.equal(veto.reason, 'operator-review-changes-requested');
+  }
+  for (const state of ['APPROVED', 'CHANGES_REQUESTED']) {
+    const result = await closerReviewProof({ ...reviewIdentity,
+      snapshot: snapshot([{ ...operatorReview, state, user: null }]), get: getReviewEvidence });
+    assert.equal(result.reason, 'terminal-review-evidence-unavailable');
+  }
+});
+
+test('review refusals do not enter the automatic retry/refund deferral allowlist', () => {
+  for (const reason of ['operator-review-changes-requested', 'review-changed-since-validation']) {
+    assert.equal(AMA_CLOSER_RETRYABLE_DEFERRAL_REASONS.has(reason), false);
+    assert.equal(retryableAmaCloserDeferralOutcome({ outcome: 'deferred', reason }), null);
+  }
+  assert.equal(retryableAmaCloserDeferralOutcome({ outcome: 'deferred', reason: 'lane-busy' }), 'retryable-lane-busy');
+});
+
+test('explicit legacy writer PR identity survives URL variations and malformed targets are named', async t => {
+  const rootDir = mkdtempSync(join(tmpdir(), 'closer-pr-identity-'));
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  for (const suffix of ['/pull/54/', '/pull/54#review', '/pulls/54']) {
+    const args = ['--root', rootDir, '--repo', reviewIdentity.repo, '--base', 'main', '--pr', '54',
+      '--review-validated-at', AUDIT_AT, '--', 'merge', `https://github.com/example/repo${suffix}`,
+      '--match-head-commit', HEAD];
+    let writes = 0;
+    assert.equal(await legacyLaneWriteMain(args, { stdout: { write() {} }, stderr: { write() {} },
+      run: options => runLegacyLaneWrite({ ...options, readConfig: () => ({}),
+        readReviewProof: async request => { assert.equal(request.prNumber, 54); return { ok: true }; },
+        exec: async () => { writes++; return {}; },
+      }) }), 0);
+    assert.equal(writes, 1);
+  }
+  const result = await runLegacyLaneWrite({ rootDir, repository: reviewIdentity.repo, base: 'main',
+    subject: { target: 'invalid', head: HEAD }, reviewValidatedAt: AUDIT_AT, readConfig: () => ({}),
+    exec: async () => assert.fail('unidentified target cannot merge') });
+  assert.equal(result.reason, 'merge-target-unparseable');
+  for (const pr of ['0', '-1', '1e3', '9007199254740992']) {
+    assert.equal(await legacyLaneWriteMain(['--root', rootDir, '--repo', reviewIdentity.repo,
+      '--base', 'main', '--pr', pr, '--', 'merge'], { run: async () => assert.fail('invalid PR') }), 64);
+  }
 });
 
 test('FIFO writer samples fresh exact-head review evidence after another merge owner releases the lane', { timeout: 5000 }, async t => {

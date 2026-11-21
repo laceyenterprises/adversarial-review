@@ -10,7 +10,7 @@ const reviewStates = new Set(['CHANGES_REQUESTED', 'APPROVED', 'DISMISSED', 'COM
 const unavailable = () => ({ ok: false, reason: 'terminal-review-evidence-unavailable' });
 
 // A formal operator veto stands until GitHub dismisses that review or the
-// same issuer approves this head. Publishing an audit or leaving a comment
+// same issuer later approves. Rebasing, publishing an audit or leaving a comment
 // cannot clear it. This proof has no bearing on coding instructions.
 async function standingOperatorReviewProof({ reviews, headSha, operatorLogins, repo, get }) {
   if (!Array.isArray(reviews) || !sha.test(headSha)) return unavailable();
@@ -19,13 +19,21 @@ async function standingOperatorReviewProof({ reviews, headSha, operatorLogins, r
     const state = review?.state;
     if (!reviewStates.has(state)) return unavailable();
     if (state !== 'CHANGES_REQUESTED' && state !== 'APPROVED') continue;
+    const head = review.commit_id || review.commitId || review.commit?.oid;
+    const exactHead = typeof head === 'string' && head.toLowerCase() === headSha.toLowerCase();
+    // Historical approvals with missing commit/author evidence cannot dispose
+    // a veto. Deleted historical authors cannot be verified as live operators.
+    // Keep missing identity on the merge head fail-closed.
+    if (state === 'APPROVED' && !sha.test(head) && !exactHead) continue;
     const author = review.user || review.author;
     const login = normalizeActorLogin(author?.login, { typename: author?.type || author?.__typename || review.authorType });
-    if (!login) return unavailable();
+    if (!login) {
+      if (exactHead || (state === 'CHANGES_REQUESTED' && !sha.test(head))) return unavailable();
+      continue;
+    }
     if (login.endsWith('[bot]') || amaReviewerFamilyForLogin(login)) continue;
-    const head = review.commit_id || review.commitId || review.commit?.oid;
-    if (!sha.test(head)) return unavailable();
-    if (head.toLowerCase() !== headSha.toLowerCase()) continue;
+    // GitHub retains requests for changes across pushes, including the
+    // hammer's base-retry rebase. A known issuer's veto needs no head match.
     decisive.push({
       state, login, id: review.node_id || review.id,
       at: Date.parse(review.submitted_at || review.submittedAt),

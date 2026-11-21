@@ -228,6 +228,32 @@ test('daemon HAM reuse runs the review gate inside the same lane ownership as th
   }
 });
 
+test('daemon live proofs retain a configured operator veto across rebase before acquiring a merge lease', async t => {
+  const rootDir = tempRoot();
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  const args = findingsReviewArgs(rootDir);
+  const rollup = await args.fetchRollupImpl();
+  rollup.reviews = [{ user: { login: 'fixture-operator' }, id: 14, state: 'CHANGES_REQUESTED',
+    commit_id: REVIEWED_HEAD, submitted_at: '2026-08-06T00:05:00Z' }];
+  let proof;
+  await runDaemonCleanMergeAttempt({ ...args, cfg: { ...args.cfg, operatorLogins: ['fixture-operator'] },
+    fetchRollupImpl: async () => rollup, readAmaAuditEntryImpl: () => hamValidatedAuditEntry(HAM_HEAD),
+    attemptDaemonCleanMergeImpl: async options => {
+      proof = options.liveGate.terminalReviewProof;
+      assert.deepEqual((await options.fetchLiveGateImpl()).terminalReviewProof, proof);
+      return { disposition: DAEMON_MERGE_DISPOSITION.NOT_TAKEN };
+    },
+  });
+  assert.equal(proof.reason, 'operator-review-changes-requested');
+  const result = await runDaemonCleanMergeAttempt({ ...args, cfg: { ...args.cfg, operatorLogins: ['fixture-operator'] },
+    fetchRollupImpl: async () => rollup, readAmaAuditEntryImpl: () => hamValidatedAuditEntry(HAM_HEAD),
+    acquireMergeLeaseImpl: () => assert.fail('operator veto must refuse before the merge lease'),
+  });
+  assert.equal(result.reason, 'operator-review-changes-requested');
+  assert.equal(result.retryAfterMs, 300_000);
+  assert.equal(result.skipMergeAgent, true);
+});
+
 test('headHasValidatedHamTerminalRemediation: true when a validated attempt matches the head', () => {
   const ok = headHasValidatedHamTerminalRemediation({
     hqRoot: '/tmp/hq',
@@ -412,6 +438,7 @@ test('a HAM-validated head with still-pending required CI declines and falls thr
         fetchRollupImpl: async () => ({
           state: 'OPEN',
           headSha: HAM_HEAD,
+          reviews: [],
           comments: [{ author: 'the-hammer-lacey[bot]',
             body: `HAM-Base-Head: ${REVIEWED_HEAD}\nHAM-Validated-Head: ${HAM_HEAD}` }],
           headRefName: 'ham/branch',

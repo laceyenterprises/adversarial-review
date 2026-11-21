@@ -4,7 +4,8 @@ import { runLegacyLaneWrite, validLegacyRunTimeoutMs } from '../src/finalization
 
 export async function legacyLaneWriteMain(argv, { stdout = process.stdout, stderr = process.stderr, run = runLegacyLaneWrite } = {}) {
   const options = {};
-  const keys = { '--root': 'rootDir', '--repo': 'repository', '--base': 'base', '--deadline-ms': 'deadline', '--timeout-ms': 'timeoutMs' };
+  const keys = { '--root': 'rootDir', '--repo': 'repository', '--base': 'base', '--deadline-ms': 'deadline',
+    '--timeout-ms': 'timeoutMs', '--review-validated-at': 'reviewValidatedAt' };
   let i = 0;
   for (; i < argv.length && argv[i] !== '--'; i += 2) {
     if (!keys[argv[i]] || !argv[i + 1]) return 64;

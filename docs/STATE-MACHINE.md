@@ -1775,6 +1775,15 @@ consumers and retains review commit SHAs in production rollups. The daemon's
 closer own-commit certification remains independent of HAM terminal audit
 currency. Lifecycle states, transitions and existing smoke promises are unchanged.
 
+LAC-2305 refreshes the review proof inside the legacy lane writer before a
+HAM terminal merge attempt. A formal exact-head request from a configured
+human operator or proven repository admin defers under
+`operator-review-changes-requested` until dismissal or a later same-issuer,
+same-head approval. Unknown review or issuer evidence returns
+`terminal-review-evidence-unavailable`. A blocked preflight that proves no
+merge transport ran settles the local writer reservation. Existing exact-head
+CAS, leases and merge retry ownership continue to apply.
+
 CLOSERGATES-01 final remediation keeps repairable conflicts out of terminal
 AMA state: both final and non-final observations count the current head once;
 only a final report after three distinct heads records

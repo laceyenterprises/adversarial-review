@@ -12,6 +12,7 @@ import { resolveHqRoot } from './hq-root.mjs';
 import { filterGitHubBody } from './github-outbound-body.mjs';
 import { hammerAttestationChain } from './ama/hammer-head-validation.mjs';
 import { terminalReviewProofMatches } from './ama/reviewer-authority.mjs';
+import { readCloserReviewProof } from './ama/closer-review-proof.mjs';
 import { createReviewCurrencyReader } from './ama/review-currency.mjs';
 import { createHistoryReader } from './ama/history-reader.mjs';
 import { verifyNoCiConfigured } from './ama/no-ci-configured.mjs';
@@ -424,6 +425,7 @@ async function runDaemonCleanMergeAttemptInner({
   fetchPrimaryChangeImpl = fetchPrimaryChange,
   attemptDaemonCleanMergeImpl = attemptDaemonCleanMerge,
   fetchRollupImpl = fetchPullRequestRollup,
+  readCloserReviewProofImpl = readCloserReviewProof,
   inspectCiBootstrapImpl = inspectCiBootstrap,
   recoverCancelledChecksImpl = recoverCancelledChecks,
   acquireMergeLeaseImpl = acquireMergeLease,
@@ -994,6 +996,14 @@ async function runDaemonCleanMergeAttemptInner({
     }
   }
   const terminalReviewHead = (hamTerminalRemediationHead || hamTerminalRemediationValidated) ? hamAuditHead : null;
+  const readValidationCutoff = () => {
+    if (hamTerminalRemediationAudit) return hamTerminalRemediationAudit.createdAt;
+    try {
+      const entry = readAmaAuditEntryImpl(hqRoot, repoPath, prNumber, terminalReviewHead);
+      return entry?.attempts?.findLast(attempt => isHamTerminalRemediationValidatedAttempt(attempt, terminalReviewHead))
+        ?.eligibilityTrace?.trace?.hamTerminalRemediation?.auditComment?.createdAt;
+    } catch { /* No matching audit is unavailable proof. */ }
+  };
   const initialGate = {
     requiredCheckContexts: resolveRequiredCheckContextsFromCfg(cfg),
     docsFastPath,
@@ -1153,6 +1163,7 @@ async function runDaemonCleanMergeAttemptInner({
     dismissStaleRequestChangesImpl: !docsFastPath && dismissStaleRequestChangesOnResolved !== false
       ? async () => dismissStandingChangesRequestedReviewsForHead(execFileImpl, repoPath, prNumber, daemonValidatedHead, {
           authoritativeReviewerLogins,
+          ...(terminalReviewHead ? { requireSupersededCommitId: daemonValidatedHead } : {}),
           message:
             `AMA merge authority is dismissing stale Request changes on ${daemonValidatedHead}: ` +
             `review findings were remediated/resolved before merge.`,
@@ -1181,19 +1192,10 @@ async function runDaemonCleanMergeAttemptInner({
       const state = String(rollup?.state || '');
       let terminalReviewProof = null;
       if (terminalReviewHead && state.toUpperCase() === 'OPEN') {
-        let validation = hamTerminalRemediationAudit;
-        if (!validation) {
-          try {
-            const entry = readAmaAuditEntryImpl(hqRoot, repoPath, prNumber, terminalReviewHead);
-            validation = entry?.attempts?.filter(attempt =>
-              isHamTerminalRemediationValidatedAttempt(attempt, terminalReviewHead)).at(-1)
-              ?.eligibilityTrace?.trace?.hamTerminalRemediation?.auditComment;
-          } catch { /* No matching audit is unavailable proof. */ }
-        }
         const get = createHistoryReader({ execFileImpl, env, signal });
         terminalReviewProof = await terminalReviewProofMatches({
           reviews: rollup.reviews, headSha: terminalReviewHead,
-          validatedAt: validation?.createdAt,
+          validatedAt: readValidationCutoff(),
           compare: (from, to) => get(`repos/${repoPath}/compare/${from}...${to}`),
           currency: createReviewCurrencyReader({ repo: repoPath, prNumber, get, comments: rollup.comments }),
         });
@@ -1264,13 +1266,24 @@ async function runDaemonCleanMergeAttemptInner({
       const hold = stopHold();
       if (hold) return { exitCode: 1, stderr: hold.reason, closureHold: hold };
       const methodFlag = method === 'merge' ? '--merge' : '--squash';
-      let transportHold;
+      let transportHold, transportInvoked = false;
       try {
         const { stdout, stderr } = await execGhWithRetryImpl({
           // The transport can retry internally; fence every actual subprocess.
-          execFileImpl: (...args) => {
+          execFileImpl: async (...args) => {
             transportHold = stopHold();
             if (transportHold) throw new Error(transportHold.reason);
+            if (terminalReviewHead) {
+              const proof = await readCloserReviewProofImpl({ repo, prNumber: pr, headSha: head, env, signal,
+                operatorLogins: cfg?.operatorLogins, validatedAt: readValidationCutoff() });
+              if (!proof.ok) {
+                transportHold = proof;
+                throw new Error(proof.reason);
+              }
+              transportHold = stopHold();
+              if (transportHold) throw new Error(transportHold.reason);
+            }
+            transportInvoked = true;
             return execFileImpl(...args);
           },
           args: ['pr', 'merge', String(pr), '--repo', repo, methodFlag, '--match-head-commit', head, '--subject', subject, '--body', filterGitHubBody(body, { repo, reviewerHeadSha: head })],
@@ -1279,7 +1292,8 @@ async function runDaemonCleanMergeAttemptInner({
         return { exitCode: 0, stdout: String(stdout || ''), stderr: String(stderr || '') };
       } catch (err) {
         const hold = transportHold || stopHold();
-        if (hold) return { exitCode: 1, stderr: hold.reason, closureHold: hold };
+        if (hold) return { exitCode: 1, stderr: hold.reason, closureHold: hold,
+          ...(transportHold && !transportInvoked ? { mergeNotInvoked: true } : {}) };
         return {
           githubRateLimitKind: err?.githubRateLimitKind || rateLimitErrorObservation(err)?.kind,
           budgetDeferred: err?.budgetDeferred === true,

@@ -1251,7 +1251,7 @@ echo COMMON_CLOSE_SUCCEEDED
   assert.equal(graphql.length, 3, 'audit identity, comment and merge use GraphQL');
   // LAC-2174: author-only classification omits the two empty-tree reads.
   assert.equal(calls.filter(args => args.some(value => value.includes('/git/trees/'))).length, 0);
-  assert.equal(rest.length, 46, 'includes fresh review proof at both green gates, PR/check admission after lease release and the live stacked-base recheck');
+  assert.equal(rest.length, 48, 'includes the PR and review pages read inside the lane writer, with no extra check rollup');
 });
 
 test('GHBUDGET-01: REST prompt snapshots preserve review authors and exact commit heads', async () => {

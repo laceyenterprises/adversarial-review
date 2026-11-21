@@ -106,6 +106,7 @@ import { promisify } from 'node:util';
 
 import { writeFileAtomic } from '../atomic-write.mjs';
 import { terminalReviewProofMatches } from './reviewer-authority.mjs';
+import { readCloserReviewProof } from './closer-review-proof.mjs';
 import { createReviewCurrencyReader } from './review-currency.mjs';
 import { findActiveRemediationJob } from './active-remediation-job.mjs';
 import { listSettledJsonNames } from './dispatch-dir-names.mjs';
@@ -1185,10 +1186,13 @@ async function runGhPrMergeWithTransientRetry({
   repo,
   prNumber,
   head,
+  reviewProof,
   logger = console,
 }) {
   let lastFailure = null;
   for (let attempt = 1; attempt <= AMA_CLOSER_MERGE_RETRY_CAP; attempt += 1) {
+    const proof = await reviewProof();
+    if (!proof.ok) return { exitCode: 1, closureHold: proof, mergeNotInvoked: attempt === 1 };
     try {
       const { stdout, stderr } = await meteredExecFile(execFileImpl, 'gh', args, {
         maxBuffer: 5 * 1024 * 1024,
@@ -4898,6 +4902,7 @@ async function maybeDispatchAmaCloserAttempt({
   readPullRequestStateImpl = readAmaCloserPullRequestStateAsync,
   fetchPullRequestRollupImpl = fetchPullRequestRollup,
   fetchPrimaryChangeImpl = fetchPrimaryChange,
+  readCloserReviewProofImpl = readCloserReviewProof,
   resolveHamTerminalRemediationEvidenceImpl = null,
   deliverAlertImpl = deliverAlert,
   settleCloserSuccessorImpl = settleCloserSuccessor,
@@ -6654,6 +6659,7 @@ async function maybeDispatchAmaCloserAttempt({
             dismissStaleRequestChangesImpl: dispatchContext.dismissStaleRequestChangesOnResolved !== false
               ? async () => dismissStandingChangesRequestedReviewsForHead(execFileImpl, repo, prNumber, mergeHead, {
                   authoritativeReviewerLogins,
+                  requireSupersededCommitId: mergeHead,
                   message:
                     `AMA hammer final remediation resolved findings on ${mergeHead}; ` +
                     `dismissing stale Request changes before merge.`,
@@ -6742,6 +6748,10 @@ async function maybeDispatchAmaCloserAttempt({
                 repo: mergeRepo,
                 prNumber: mergePr,
                 head,
+                reviewProof: () => readCloserReviewProofImpl({
+                  repo: mergeRepo, prNumber: mergePr, headSha: head, signal, env, operatorLogins: cfg?.operatorLogins,
+                  validatedAt: eligibilityOptions.hamTerminalRemediationGroundTruth?.auditComment?.createdAt,
+                }),
                 logger,
               });
             },

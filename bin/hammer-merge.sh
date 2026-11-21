@@ -349,8 +349,7 @@ import { execGhWithRetry } from '<<ROOT_DIR>>/src/gh-cli.mjs';
 import { evaluateMergeEligibility } from '<<ROOT_DIR>>/src/ama/merge-eligibility.mjs';
 import { classifyCheckRollup, latestCheckRollupItems } from '<<ROOT_DIR>>/src/checks-summary.mjs';
 import { readFileSync } from 'node:fs';
-import { terminalReviewProofMatches } from '<<ROOT_DIR>>/src/ama/reviewer-authority.mjs';
-import { createReviewCurrencyReader } from '<<ROOT_DIR>>/src/ama/review-currency.mjs';
+import { closerReviewProof } from '<<ROOT_DIR>>/src/ama/closer-review-proof.mjs';
 import { tenureHeadNeedsReview } from '<<ROOT_DIR>>/src/pr-tenure.mjs';
 
 const repo = '<<REPO>>';
@@ -392,14 +391,13 @@ const primaryChange = checksConclusion === 'SUCCESS' ? await fetchPrimaryChange(
   get: createHistoryReader(),
 }) : null;
 let terminalReviewProof = null;
+let reviewValidatedAt = null;
 if (reviewProofRequired && checksConclusion === 'SUCCESS' && open && headMatches) {
   const verdict = JSON.parse(readFileSync(process.env.HAM_REVIEW_VERDICT_FILE, 'utf8'));
-  const get = createHistoryReader();
-  const currency = createReviewCurrencyReader({ repo, prNumber, get });
-  terminalReviewProof = await terminalReviewProofMatches({
-    reviews: rollup.reviews, headSha: expectedHead,
-    validatedAt: verdict.trace?.hamTerminalRemediation?.auditComment?.createdAt,
-    compare: (from, to) => get(`repos/${repo}/compare/${from}...${to}`), currency,
+  reviewValidatedAt = verdict.trace?.hamTerminalRemediation?.auditComment?.createdAt ?? null;
+  terminalReviewProof = await closerReviewProof({
+    snapshot: rollup, repo, prNumber, headSha: expectedHead, validatedAt: reviewValidatedAt,
+    operatorLogins: cfg?.operatorLogins, get: createHistoryReader({ hammerToken: true }),
   });
 }
 // Pending/red checks cannot merge. Defer preservation and cost evaluation until
@@ -432,6 +430,7 @@ console.log(JSON.stringify({
   ok: eligibility.eligible,
   reasons: eligibility.reasons,
   terminalReviewProof,
+  reviewValidatedAt,
   primaryChangeReason: primaryChange?.reason || primaryIntent?.detail || null,
   // REVERSALREBASE-01: the closing status names the one missing piece.
   primaryChangeMissingEvidence: primaryIntent?.missingEvidence || null,
@@ -903,6 +902,11 @@ while [ "$HAM_ALREADY_MERGED_VALIDATED_HEAD" -ne 1 ] && [ "$HAM_MERGE_ATTEMPTS" 
     ham_release_merge_lease
     return 20
   fi
+  if jq -e '.terminalReviewProof.ok == false' "$HAM_GATE_JSON" >/dev/null; then
+    ham_append_terminal_audit deferred "$(jq -r '.terminalReviewProof.reason' "$HAM_GATE_JSON")" || true
+    ham_release_merge_lease
+    return 20
+  fi
   if ! ham_required_gate_ok; then
     if ham_required_gate_mergeability_unknown && ! ham_required_gate_red \
       && ! ham_live_head_moved && jq -e '.state == "OPEN"' "$HAM_GATE_JSON" >/dev/null; then
@@ -1180,7 +1184,8 @@ EOF_HAM_PROTECTIVE_PREDECESSORS
   HAM_LANE_WRITE_DEADLINE_MS=$(( ($(date +%s) + 60) * 1000 ))
   HAM_MERGE_EXECUTED_AT=$(date -u +%Y-%m-%dT%H:%M:%SZ)
   "$HAM_NODE_BIN" "<<ROOT_DIR>>/bin/legacy-lane-write.mjs" \
-    --root "<<ROOT_DIR>>" --repo "<<REPO>>" --base "$BASE_BRANCH" --deadline-ms "$HAM_LANE_WRITE_DEADLINE_MS" -- \
+    --root "<<ROOT_DIR>>" --repo "<<REPO>>" --base "$BASE_BRANCH" --deadline-ms "$HAM_LANE_WRITE_DEADLINE_MS" \
+    --review-validated-at "$(jq -r '.reviewValidatedAt // "unavailable"' "$HAM_GATE_JSON")" -- \
     "$HAM_NODE_BIN" "<<ROOT_DIR>>/bin/metered-gh.mjs" exec-hammer pr merge <<PR_URL>> \
     --<<MERGE_METHOD>> \
     --match-head-commit "$POST_REMEDIATION_SHA" \
@@ -1189,6 +1194,19 @@ EOF_HAM_PROTECTIVE_PREDECESSORS
     > "$HAM_MERGE_STDOUT" \
     2> "$HAM_MERGE_STDERR"
   HAM_MERGE_EXIT=$?
+  if [ "$HAM_MERGE_EXIT" -eq 75 ]; then
+    HAM_CLICK_HOLD=$(sed -nE 's/^legacy lane write refused: (operator-review-changes-requested|terminal-review-evidence-unavailable|review-changed-since-validation|live-head-moved-before-merge)$/\1/p' "$HAM_MERGE_STDERR")
+    if [ -n "$HAM_CLICK_HOLD" ]; then
+      cat "$HAM_MERGE_STDERR" >&2
+      if [ "$HAM_CLICK_HOLD" = live-head-moved-before-merge ]; then
+        ham_append_terminal_audit superseded "$HAM_CLICK_HOLD" || true
+      else
+        ham_append_terminal_audit deferred "$HAM_CLICK_HOLD" || true
+      fi
+      ham_release_merge_lease
+      return 20
+    fi
+  fi
   if [ "$HAM_MERGE_EXIT" -eq 75 ] \
     && grep -Eq '^legacy lane write refused: owner-operation-in-flight; lane-busy; waited [0-9]+ms$' "$HAM_MERGE_STDERR"; then
     cat "$HAM_MERGE_STDERR" >&2 || true

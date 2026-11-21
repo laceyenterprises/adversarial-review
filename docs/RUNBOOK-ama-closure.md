@@ -281,6 +281,40 @@ predicates. No review requests or new merge authority are introduced. Source
 publication does not establish deployment or repair already merged artwork.
 See the [offline source RCA](postmortems/SEV2-LAC-2162-late-review-terminal-audit.md).
 
+### Standing operator reviews and the merge writer (LAC-2305)
+
+On a HAM terminal merge, a formal current-head `CHANGES_REQUESTED` review
+from a configured `roles.adversarial.operator_logins` human or a human with
+live repository `admin` permission returns `operator-review-changes-requested`.
+Private organization membership can make an admin appear as `CONTRIBUTOR`
+in a review. The permission lookup uses the reviewing login and target
+repository. The veto stands even if the hammer published its audit after the
+review. GitHub dismissal clears that review. A strictly newer, distinct
+approval from the same issuer on the exact head also clears it. Comments,
+another issuer's approval and a disposition on another head leave it standing.
+Recognized adversarial reviewers still use their separate family and finding
+rules. The daemon's automatic stale dismissal only clears superseded
+adversarial reviews when reusing HAM terminal authority. The explicit
+validated withdrawal path still uses its review and head proof.
+
+The hammer refreshes review proof after acquiring the legacy lane writer and
+before invoking GitHub merge. Both daemon HAM terminal reuse paths refresh the
+same proof inside the lane writer before each transport attempt. A changed
+review or head, an unreadable review list, or an unknown issuer lookup
+prevents invocation. A preflight refusal that proves the daemon never called
+its merge transport drains the writer receipt normally. GitHub still enforces
+the exact-head CAS. Its merge endpoint offers no CAS for a review list, so
+the serialized local writer cannot fence a GitHub review submitted after the
+last remote read.
+
+The source regression holds the lane with another writer, adds an operator
+review after the earlier green gate, releases the lane and verifies zero merge
+invocations. Runtime acceptance requires the deployed reader to resolve the
+issuer using the existing credential and a natural HAM close to record the
+typed refusal for a standing review. The ordinary same-head retry can proceed
+after explicit disposition and fresh green evidence. See the
+[LAC-2305 change note](changes/LAC-2305.md).
+
 ## Reading the PR blockers report
 
 Run `npm run pr-blockers -- --repo example/project --repo example/other`

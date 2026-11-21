@@ -6,6 +6,8 @@ import { join } from 'node:path';
 import test from 'node:test';
 import { createCliDirectReviewerRuntimeAdapter } from '../src/adapters/reviewer-runtime/cli-direct/index.mjs';
 import { probeCodexCli } from '../src/adapters/reviewer-runtime/cli-direct/discovery.mjs';
+import { classifyReviewerFailure } from '../src/adapters/reviewer-runtime/cli-direct/classification.mjs';
+import { summarizeCodexReviewExecFailure } from '../src/codex-review-exec-diagnostic.mjs';
 import { dispatchReadTransport } from '../src/dispatch-read-client.mjs';
 import { infraRecoverableFailureClass, unknownReviewerCommandFailureClass } from '../src/reviewer-failure-classification.mjs';
 import { reviewWithCodex } from '../src/reviewer-harness.mjs';
@@ -110,6 +112,9 @@ for (const [name, terminal, expected, failureClass] of [
   ['structured terminal error', `console.log(JSON.stringify({ type: 'turn.failed', error: {
     message: 'Provider refused reviewer initialization: cannot find runtime slot. Bearer ${bearer} ' + 'x'.repeat(1500) } }));`,
   /Provider refused reviewer initialization: cannot find runtime slot/, 'reviewer-command-failed'],
+  ['nested error event', `console.log(JSON.stringify({ type: 'error', error: {
+    message: 'Provider refused reviewer initialization: cannot find runtime slot. Bearer ${bearer} ' + 'x'.repeat(1500) } }));`,
+  /Provider refused reviewer initialization: cannot find runtime slot/, 'reviewer-command-failed'],
   ['stderr terminal error', `console.error('Error: API Error 503 upstream unavailable. Bearer ${bearer}');`,
     /API Error 503 upstream unavailable/, 'cascade'],
   ['startup warnings alone', '', /Command failed with code 1/, 'reviewer-command-failed'],
@@ -168,4 +173,40 @@ test('LAC-2291 preserves terminal auth rejection without emitting credential fie
     return true;
   });
   f.readReceipt();
+});
+
+test('LAC-2291 extracts nested error diagnostics before stderr fallback and redacts auth fields', () => {
+  const message = `Unexpected status 401 Unauthorized {"access_token":"${bearer}"}`;
+  const result = summarizeCodexReviewExecFailure({
+    message: 'Command failed with code 1',
+    stdout: JSON.stringify({ type: 'error', error: { message }, message: 'flat fallback' }),
+    stderr: 'unrelated fallback',
+  });
+  assert.equal(result.authRejected, true);
+  assert.match(result.diagnostic, /status 401 Unauthorized/);
+  assert.doesNotMatch(result.diagnostic, /flat fallback|unrelated fallback/);
+  assert.ok(!result.diagnostic.includes(bearer));
+});
+
+test('LAC-2291 retains flat error messages when the nested message is empty', () => {
+  const result = summarizeCodexReviewExecFailure({
+    message: 'Command failed with code 1',
+    stdout: JSON.stringify({ type: 'error', error: { message: '' }, message: 'flat diagnostic' }),
+  });
+  assert.match(result.diagnostic, /flat diagnostic/);
+});
+
+test('LAC-2291 classifies native exec failures with logger prefixes and retains specific failure precedence', () => {
+  for (const prefix of ['', '  ', '2026-11-21T08:26:21Z ERROR [pgid=9456] ']) {
+    for (const wrapper of ['', '[reviewer] AI review failed for fixture/repo#1: ', '[reviewer] ERROR STACK: Error: ']) {
+      const line = `${prefix}${wrapper}Native Codex exec failed: Command failed with code 1`;
+      assert.equal(classifyReviewerFailure(line, 1), 'reviewer-command-failed', line);
+      assert.equal(classifyReviewerFailure(`${line} | cannot find runtime slot`, 1), 'reviewer-command-failed', line);
+      assert.equal(classifyReviewerFailure(line, 127), 'bug', 'caller exit 127 still wins');
+      assert.equal(classifyReviewerFailure(line, 1, 'ENOENT'), 'bug', 'caller error code still wins');
+      assert.equal(classifyReviewerFailure(`${line} | API Error 503 upstream unavailable`, 1), 'cascade');
+      assert.equal(classifyReviewerFailure(line, 1, null, { timedOut: true }), 'reviewer-timeout');
+    }
+  }
+  assert.equal(classifyReviewerFailure('ERROR cannot find caller module', 1), 'bug');
 });

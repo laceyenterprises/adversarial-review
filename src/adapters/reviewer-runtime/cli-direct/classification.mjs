@@ -296,7 +296,7 @@ function classifyReviewerFailure(stderr, exitCode, errorCode = null, details = {
   }
 
   const nativeCodexExecFailure =
-    /^(?:\[reviewer\] (?:ai review failed for \S+: |error stack: error: ))?native codex exec failed:/m.test(lower);
+    /(?:^|[ \t])native codex exec failed:/m.test(lower);
   // Native subprocess diagnostics can contain these words without a bug in
   // the Node reviewer caller. Explicit caller exit/error codes still win.
   if (exitCode === 127 || BUG_ERROR_CODES.has(normalizedErrorCode)

@@ -11,7 +11,7 @@ function terminalEventMessage(stdout) {
     let event;
     try { event = JSON.parse(line); } catch { continue; }
     const message = event?.type === 'turn.failed' ? event.error?.message
-      : event?.type === 'error' ? event.message
+      : event?.type === 'error' ? (event.error?.message || event.message)
       : event?.type === 'item.completed' && event.item?.type === 'error' ? event.item.message : null;
     if (typeof message !== 'string' || !message.trim() || STARTUP_WARNING.test(message.trim())) continue;
     if (event.type === 'item.completed') itemError = message;

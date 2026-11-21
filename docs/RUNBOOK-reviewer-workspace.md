@@ -191,7 +191,10 @@ fallback) with its home and final config digest. Existing tool-host timeout
 classification and bounded infrastructure refunds are unchanged.
 
 On a nonzero native reviewer exec, the subprocess exit summary and bounded,
-redacted terminal diagnostics reach the caller. The adapter applies the
+redacted terminal diagnostics reach the caller. Error stream events support
+both nested `error.message` and flat `message` payloads, preferring a nonempty
+nested message. Logger prefixes before the native exec failure marker do not
+change its classification. The adapter applies the
 existing auth, quota and upstream classifiers to that evidence. A generic
 native exec failure uses the existing `reviewer-command-failed` recovery path,
 including its posted-review probe and bounded retry budget. The Code Mode

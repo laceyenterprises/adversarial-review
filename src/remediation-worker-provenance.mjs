@@ -208,15 +208,51 @@ const WORKER_PROVENANCE_HOOK_SENTINEL = 'managed-by: adversarial-review-worker-p
 // validation, etc.) is preserved instead of silently disabled.
 const WORKER_PROVENANCE_CHAINED_HOOK_FILENAME = 'commit-msg.worker-provenance-chain';
 
-// Each class supports an env-var override for ops flexibility:
+const REPO_IDENTITY_OVERRIDES_ENV = 'REMEDIATION_WORKER_GIT_IDENTITY_REPO_OVERRIDES';
+
+function isRecord(value) {
+  return value !== null && typeof value === 'object' && !Array.isArray(value);
+}
+
+function isGitIdentityField(value) {
+  return typeof value === 'string' && value.trim().length > 0
+    && !['\0', '\r', '\n', '<', '>'].some(character => value.includes(character));
+}
+
+function resolveRepoIdentity(workerClass, env, repo) {
+  const raw = env[REPO_IDENTITY_OVERRIDES_ENV];
+  if (typeof repo !== 'string' || !repo || raw === undefined) return null;
+  const repoKey = repo.toLowerCase();
+  try {
+    const overrides = JSON.parse(raw);
+    if (isRecord(overrides)) {
+      if (!Object.hasOwn(overrides, repoKey)) return null;
+      const classes = overrides[repoKey];
+      if (isRecord(classes)) {
+        if (!Object.hasOwn(classes, workerClass)) return null;
+        const identity = classes[workerClass];
+        if (isRecord(identity) && isGitIdentityField(identity.name) && isGitIdentityField(identity.email)) {
+          return { name: identity.name, email: identity.email };
+        }
+      }
+    }
+  } catch {
+    // Parser errors can quote the input. Emit only the fixed warning below.
+  }
+  console.warn(`[remediation-worker] Ignoring malformed ${REPO_IDENTITY_OVERRIDES_ENV} configuration`);
+  return null;
+}
+
+// REMEDIATION_WORKER_GIT_IDENTITY_REPO_OVERRIDES is a JSON object keyed by
+// lowercase owner/name and then worker class. A matching { name, email } pair
+// takes precedence over the class-wide env vars and the built-in defaults.
+// Malformed configuration at the selected entry warns and falls through.
 //
 //   REMEDIATION_WORKER_GIT_NAME_<CLASS>   /  REMEDIATION_WORKER_GIT_EMAIL_<CLASS>
 //
 // where <CLASS> is the upper-snake-case form of the worker class
-// (e.g. claude-code → CLAUDE_CODE). Resolved at call time, not module-load
-// time, so a long-running consumer can pick up identity changes without
-// being restarted.
-function remediationWorkerGitIdentity(workerClass, env = process.env) {
+// (e.g. claude-code → CLAUDE_CODE). All overrides are read at call time.
+function remediationWorkerGitIdentity(workerClass, env = process.env, { repo } = {}) {
   const defaults = REMEDIATION_WORKER_IDENTITY_DEFAULTS[workerClass];
   if (!defaults) {
     throw new Error(
@@ -225,6 +261,8 @@ function remediationWorkerGitIdentity(workerClass, env = process.env) {
       `REMEDIATION_WORKER_IDENTITY_DEFAULTS in src/follow-up-remediation.mjs.`
     );
   }
+  const repoIdentity = resolveRepoIdentity(workerClass, env, repo);
+  if (repoIdentity) return repoIdentity;
   const envSuffix = String(workerClass).toUpperCase().replace(/-/g, '_');
   const name = env[`REMEDIATION_WORKER_GIT_NAME_${envSuffix}`] || defaults.name;
   const email = env[`REMEDIATION_WORKER_GIT_EMAIL_${envSuffix}`] || defaults.email;
@@ -300,7 +338,7 @@ function installWorkerProvenanceHook(workspaceDir, { execFileSyncImpl = execFile
   return dest;
 }
 
-async function configureRemediationWorkspaceIdentity({ workspaceDir, workerClass, execFileImpl }) {
+async function configureRemediationWorkspaceIdentity({ workspaceDir, workerClass, repo, env, execFileImpl }) {
   // Set worktree git identity *before* the PR checkout so the very first
   // commits the remediation worker makes (including any in-process author
   // hooks that read `git config user.*` at startup) see the correct values.
@@ -309,9 +347,7 @@ async function configureRemediationWorkspaceIdentity({ workspaceDir, workerClass
   // agent-os IDENTBASE-01 change. Refuse shared/external metadata before enabling
   // the extension so a reused linked worktree cannot mutate another repo's config
   // or hooks. A re-run against our own standalone clone is idempotent.
-  // The identity is keyed on workerClass so the soon-to-land claude-code
-  // remediation path doesn't need a separate code change here.
-  const gitIdentity = remediationWorkerGitIdentity(workerClass);
+  const gitIdentity = remediationWorkerGitIdentity(workerClass, env, { repo });
   const workspaceGitDir = join(workspaceDir, '.git');
   if (!lstatSync(workspaceGitDir).isDirectory()
     || existsSync(join(workspaceGitDir, 'commondir'))

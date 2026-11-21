@@ -3217,6 +3217,95 @@ test('remediationWorkerGitIdentity resolves env overrides at call time, not modu
   assert.equal(codexDefault.email, 'codex-remediation-worker@laceyenterprises.com');
 });
 
+const REPO_IDENTITY_ENV_KEY = 'REMEDIATION_WORKER_GIT_IDENTITY_REPO_OVERRIDES';
+const IDENTITY_FIXTURE_REPO = 'example-org/example-repo';
+const REPO_GIT_IDENTITY = {
+  name: 'Example Agent',
+  email: '12345+example-agent[bot]@users.noreply.github.com',
+};
+const CLASS_GIT_IDENTITY = {
+  name: 'Example Class Agent',
+  email: '23456+example-class-agent[bot]@users.noreply.github.com',
+};
+const CLASS_IDENTITY_ENV = {
+  REMEDIATION_WORKER_GIT_NAME_CODEX: CLASS_GIT_IDENTITY.name,
+  REMEDIATION_WORKER_GIT_EMAIL_CODEX: CLASS_GIT_IDENTITY.email,
+};
+
+test('remediationWorkerGitIdentity selects the repository override before the class override', () => {
+  const env = { ...CLASS_IDENTITY_ENV };
+  const options = { repo: IDENTITY_FIXTURE_REPO };
+  assert.deepEqual(remediationWorkerGitIdentity('codex', env, options), CLASS_GIT_IDENTITY);
+  env[REPO_IDENTITY_ENV_KEY] = JSON.stringify({ [IDENTITY_FIXTURE_REPO]: { codex: REPO_GIT_IDENTITY } });
+  assert.deepEqual(remediationWorkerGitIdentity('codex', env, options), REPO_GIT_IDENTITY);
+  assert.deepEqual(remediationWorkerGitIdentity('codex', env, { repo: 'Example-Org/Example-Repo' }), REPO_GIT_IDENTITY);
+  assert.deepEqual(remediationWorkerGitIdentity('codex', env, { repo: 'example-org/other-repo' }), CLASS_GIT_IDENTITY);
+  assert.deepEqual(remediationWorkerGitIdentity('codex', env), CLASS_GIT_IDENTITY);
+});
+
+test('remediationWorkerGitIdentity falls through quietly when the repository has no override for the class', (t) => {
+  const warn = t.mock.method(console, 'warn', () => {});
+  const env = {
+    ...CLASS_IDENTITY_ENV,
+    [REPO_IDENTITY_ENV_KEY]: JSON.stringify({ [IDENTITY_FIXTURE_REPO]: { gemini: REPO_GIT_IDENTITY } }),
+  };
+  assert.deepEqual(remediationWorkerGitIdentity('codex', env, { repo: IDENTITY_FIXTURE_REPO }), CLASS_GIT_IDENTITY);
+  assert.equal(warn.mock.callCount(), 0);
+});
+
+test('remediationWorkerGitIdentity warns once without values for malformed repository overrides', (t) => {
+  const warn = t.mock.method(console, 'warn', () => {});
+  for (const value of [
+    '{ "example-secret":',
+    'null',
+    JSON.stringify({ [IDENTITY_FIXTURE_REPO]: [] }),
+    JSON.stringify({ [IDENTITY_FIXTURE_REPO]: { codex: { name: 'example-secret' } } }),
+    JSON.stringify({ [IDENTITY_FIXTURE_REPO]: { codex: { ...REPO_GIT_IDENTITY, email: '\0' } } }),
+  ]) {
+    warn.mock.resetCalls();
+    const env = { ...CLASS_IDENTITY_ENV, [REPO_IDENTITY_ENV_KEY]: value };
+    assert.deepEqual(remediationWorkerGitIdentity('codex', env), CLASS_GIT_IDENTITY);
+    assert.equal(warn.mock.callCount(), 0);
+    assert.deepEqual(remediationWorkerGitIdentity('codex', env, { repo: IDENTITY_FIXTURE_REPO }), CLASS_GIT_IDENTITY);
+    assert.equal(warn.mock.callCount(), 1);
+    assert.deepEqual(warn.mock.calls[0].arguments, [
+      `[remediation-worker] Ignoring malformed ${REPO_IDENTITY_ENV_KEY} configuration`,
+    ]);
+  }
+});
+
+test('prepareWorkspaceForJob writes the repository-specific identity into Git worktree config', async (t) => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  const { workspaceDir } = await prepareWorkspaceForJob({
+    rootDir,
+    job: makeJob({ repo: IDENTITY_FIXTURE_REPO, jobId: 'example-remediation', linearTicketId: null }),
+    workerClass: 'claude-code',
+    env: {
+      [REPO_IDENTITY_ENV_KEY]: JSON.stringify({ [IDENTITY_FIXTURE_REPO]: { 'claude-code': REPO_GIT_IDENTITY } }),
+    },
+    selectReadRoute: async () => null,
+    execFileImpl: async (command, args) => {
+      if (command === 'gh') {
+        return { stdout: JSON.stringify({
+          base: { ref: 'main' },
+          head: { ref: 'feature', repo: { full_name: IDENTITY_FIXTURE_REPO } },
+        }) };
+      }
+      if (args[0] === 'clone') {
+        execFileSync('git', ['init', '--quiet', args.at(-1)]);
+      } else if (args[2] === 'config') {
+        execFileSync('git', args);
+      }
+      return { stdout: '', stderr: '' };
+    },
+  });
+  assert.equal(execFileSync('git', ['-C', workspaceDir, 'config', '--worktree', 'user.name'], { encoding: 'utf8' }).trim(),
+    REPO_GIT_IDENTITY.name);
+  assert.equal(execFileSync('git', ['-C', workspaceDir, 'config', '--worktree', 'user.email'], { encoding: 'utf8' }).trim(),
+    REPO_GIT_IDENTITY.email);
+});
+
 test('buildInheritedPath prepends required system directories without dropping existing PATH entries', () => {
   const inherited = buildInheritedPath('/custom/bin:/usr/bin');
   assert.match(inherited, /^\/opt\/homebrew\/bin:/);
@@ -5963,20 +6052,32 @@ test('spawn remediation workers enforce harness identity against the isolated so
   process.env.OAUTH_BROKER_REMEDIATION_GEMINI_PROVIDER = 'ambient-gemini-provider';
   process.env.OAUTH_BROKER_REMEDIATION_CODEX_PROVIDER = 'ambient-codex-provider';
 
+  const repoOverrides = JSON.stringify({ [IDENTITY_FIXTURE_REPO]: {
+    'remediator-claude': REPO_GIT_IDENTITY,
+    gemini: REPO_GIT_IDENTITY,
+    codex: REPO_GIT_IDENTITY,
+  } });
   const spawned = [];
   const spawnImpl = (_cmd, _args, opts) => {
     spawned.push(opts.env.OAUTH_BROKER_MERGE_AGENT_PROVIDER);
+    assert.equal(opts.env.GIT_AUTHOR_NAME, REPO_GIT_IDENTITY.name);
+    assert.equal(opts.env.GIT_AUTHOR_EMAIL, REPO_GIT_IDENTITY.email);
+    assert.equal(opts.env.GIT_COMMITTER_NAME, REPO_GIT_IDENTITY.name);
+    assert.equal(opts.env.GIT_COMMITTER_EMAIL, REPO_GIT_IDENTITY.email);
     return { pid: 8123 + spawned.length, unref() {} };
   };
 
   try {
     spawnClaudeCodeRemediationWorker({
       workspaceDir,
+      repo: IDENTITY_FIXTURE_REPO,
+      gitIdentityWorkerClass: 'remediator-claude',
       promptPath,
       outputPath,
       logPath,
       ...testReplyContext(),
       sourceEnv: {
+        [REPO_IDENTITY_ENV_KEY]: repoOverrides,
         MERGE_AGENT_AUTH_VIA_BROKER: 'true',
         OAUTH_BROKER_REMEDIATION_CLAUDE_CODE_PROVIDER: 'source-claude-provider',
       },
@@ -5984,11 +6085,13 @@ test('spawn remediation workers enforce harness identity against the isolated so
     });
     spawnGeminiRemediationWorker({
       workspaceDir,
+      repo: IDENTITY_FIXTURE_REPO,
       promptPath,
       outputPath,
       logPath,
       ...testReplyContext(),
       sourceEnv: {
+        [REPO_IDENTITY_ENV_KEY]: repoOverrides,
         HOME: workspaceDir,
         MERGE_AGENT_AUTH_VIA_BROKER: 'true',
         OAUTH_BROKER_REMEDIATION_GEMINI_PROVIDER: 'source-gemini-provider',
@@ -5997,12 +6100,14 @@ test('spawn remediation workers enforce harness identity against the isolated so
     });
     spawnCodexRemediationWorker({
       workspaceDir,
+      repo: IDENTITY_FIXTURE_REPO,
       promptPath,
       outputPath,
       logPath,
       ...testReplyContext(),
       jobId: 'source-env-job',
       sourceEnv: {
+        [REPO_IDENTITY_ENV_KEY]: repoOverrides,
         HOME: workspaceDir,
         CODEX_HOME: codexHome,
         CODEX_AUTH_PATH: codexAuthPath,

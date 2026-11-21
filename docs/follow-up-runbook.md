@@ -667,6 +667,24 @@ For effort pins use `ADVERSARIAL_REMEDIATION_CODEX_REASONING_LEVEL` / `CODEX_REM
 
 `CLAUDE_MODEL_ID` and `CLAUDE_CODE_MODEL_ID` are broker defaults, not remediation model pins. A bare Claude remediation resolves its model once and passes the same model to broker minting and CLI spawn. Gemini remediation reads only `remediator-gemini`; an unrelated `gemini` builder class cannot change its model. The packaged seed covers that class during outages. Gemini's CLI has no effort flag; registry effort is recorded as unsupported rather than applied.
 
+Set `REMEDIATION_WORKER_GIT_IDENTITY_REPO_OVERRIDES` in the follow-up daemon's
+environment to use a repository-specific Git author and committer identity
+in follow-up workspaces and local remediation workers. The JSON object uses
+lowercase `owner/name` keys and worker class keys.
+
+```bash
+REMEDIATION_WORKER_GIT_IDENTITY_REPO_OVERRIDES='{"example-org/example-repo":{"codex":{"name":"Example Agent","email":"12345+example-agent[bot]@users.noreply.github.com"}}}'
+```
+
+The daemon matches repository names case-insensitively and reads the setting
+when it resolves the identity. A matching entry supplies both fields. A
+missing repository or worker class falls back to
+`REMEDIATION_WORKER_GIT_NAME_<CLASS>` and `REMEDIATION_WORKER_GIT_EMAIL_<CLASS>`,
+then to the built-in defaults. Use upper snake case for `<CLASS>`, such as
+`CLAUDE_CODE`. Malformed JSON or a malformed matching entry warns on stderr
+and uses the same fallback. The warning includes only the variable name
+and a generic description.
+
 `ADVERSARIAL_REVIEW_MERGE_AGENT_WORKER_CLASS` pins the worker class used for merge-orchestration dispatch. Allowlist: `merge-agent` (default), `codex`, `claude-code`. The default `merge-agent` routes through the stub adapter; pinning to a real model worker class substitutes that class for the duration of the env binding — useful when validating merge-agent surface against live models or when the merge-agent path is being debugged. The watcher validates this knob at startup alongside `ADVERSARIAL_REVIEW_DEFAULT_REVIEWER`, and an unknown value crashes the watcher with a `FATAL config: ADVERSARIAL_REVIEW_MERGE_AGENT_WORKER_CLASS...` banner the same way a bad reviewer pin does — config errors fail at boot, not at first merge-agent dispatch hours later.
 
 The configured class is a request, not a guarantee (CLOSERREUSE-01). Each merge-agent dispatch resolves its class through the AMA closer resolver (`src/merge-agent-harness.mjs`, `src/ama/harness-fallback.mjs`) against `hq fleet quota status` and `roles.adversarial.merge_authority.worker_class_fallback`. While the class provider is grounded, the first ungrounded fallback runs instead: a pinned `codex` or `hammer` dispatches as `hammer-claude` while openai is grounded, and returns to the pin once openai recovers. Fallback candidates are screened on hard and soft grounding. When the class is grounded and no fallback is ungrounded, the merge-agent does not dispatch: it returns `dispatch-deferred` with reason `merge-agent-harness-grounded` and retries on the next tick. Each deferral is recorded in `data/follow-up-jobs/merge-agent-harness-deferrals/` (`firstDeferredAt`, `deferralCount`), and a deferral older than 30 minutes logs one warn-level `merge_agent.harness_grounded_deferral` event. The next non-deferred resolution clears the record. The merge-agent dispatch record stores the class that actually ran as `dispatchWorkerClass` and the resolver decision as `harness` (`fellBack`, `from`, `to`, `provider`, `groundedBy`, `reason`); `workerClass` stays the configured class. An unreadable quota status is not grounding, so the configured class runs.

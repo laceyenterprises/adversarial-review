@@ -388,12 +388,20 @@ export function createHistoryReader(options = {}) {
   // select the paths that need hunks; inventory-only rows never write patch
   // checkpoints. Both sides are pinned to immutable tree inputs.
   reader.compareFiles = (path, includePatch) => bounded(async () => {
-    const match = /^repos\/([^/]+\/[^/]+)\/compare\/[0-9a-f]{40}\.\.\.([0-9a-f]{40})$/i.exec(path);
+    const match = /^repos\/([^/]+\/[^/]+)\/compare\/([0-9a-f]{40})\.\.\.([0-9a-f]{40})$/i.exec(path);
     if (!match) throw new Error('file inventory requires an exact compare pair');
+    const [, repo, requestedBase, head] = match;
     const result = await reader.metadata(path);
     const base = result.merge_base_commit?.sha;
     if (!/^[0-9a-f]{40}$/i.test(base || '')) throw invalidHistory('missing compare merge base');
-    return { ...result, filesComplete: true, files: await filesBetween(match[1], base, match[2], includePatch) };
+    const readFiles = () => filesBetween(repo, base, head, includePatch);
+    // Guard review carry-forward can need the same complete projection after
+    // each hit on scoped history. Reuse the immutable result, including rename
+    // links, without walking the trees or reopening every per-file checkpoint.
+    const files = progress && !includePatch && base === requestedBase
+      ? await checkpoint(['complete-file-comparison-v1', path], readFiles)
+      : await readFiles();
+    return { ...result, filesComplete: true, files };
   });
   // Provenance proofs request compact web-flow verification separately; avoid
   // buffering signature payloads in every history and commit-file page.

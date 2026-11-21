@@ -462,6 +462,14 @@ the verified GitHub artifact. Reviewer crash recovery prefers this pass-bound
 evidence over the best-effort review-mode latency event. Older passes without
 it still use the head-and-attempt-keyed event; neither source means normal rounds.
 
+`metadata_json.reviewerRole` records the declared GitHub App role from the
+review's delivery identity. Body capture binds it to the artifact and preserves
+it across artifact lookup retries. The recovered follow-up job uses this role
+for alternate-owner reads and retains `reviewer_model` for execution evidence.
+Earlier passes can carry the declared dispatch family in
+`metadata_json.reviewerModel` and the validated role in
+`metadata_json.reviewerAttribution`. Recovery holds on conflicting values.
+
 A same-pass Gemini quota fallback creates a fresh runtime session UUID and spawn
 token as well as a new ledger attempt after a terminal Gemini pass. Before
 starting it, the watcher atomically transfers the existing `reviewed_prs` claim

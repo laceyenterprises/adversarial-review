@@ -90,7 +90,8 @@ export async function recoverEndedRemediationRound({ execFileImpl = execAsync,
         }
         // Retained workspaces may lack the remote base ref. Refresh the same
         // superproject-only ref used by the publisher before ancestry checks.
-        const readRoute = await selectRemediationReadRoute({ repo, reviewerModel: job.reviewerModel, env: publicationEnv });
+        const readRoute = await selectRemediationReadRoute({ repo, reviewerRole: job.reviewerRole,
+          reviewerModel: job.reviewerModel, env: publicationEnv });
         const refspec = `+refs/heads/${job.baseBranch}:refs/remotes/origin/${job.baseBranch}`;
         if (readRoute) {
           await readRoute.run(() => boundedExec('git', ['--no-replace-objects', '-C', workspaceDir,
@@ -136,7 +137,8 @@ export async function recoverEndedRemediationRound({ execFileImpl = execAsync,
           const result = await publishImpl({ workspaceDir,
             baseBranch: job.baseBranch, previousHead: headSha, expectedRemoteSha: headSha,
             branch: job.branch, repo, prNumber, execFileImpl: boundedExec,
-            env: publicationEnv, reviewerModel: job.reviewerModel, expectedCandidate: retained.commitSha,
+            env: publicationEnv, reviewerRole: job.reviewerRole, reviewerModel: job.reviewerModel,
+            expectedCandidate: retained.commitSha,
             workerClass: job.remediationWorker?.workerClass || job.remediationPlan?.rounds?.at(-1)?.workerClass });
           revisionRef = result.headSha;
         } catch (error) {

@@ -1,0 +1,27 @@
+{
+  "version": 1,
+  "entries": [
+    {
+      "id": "follow-up-reviewer-role",
+      "title": "Follow-up alternate-owner reviewer role",
+      "path": "docs/data-model/follow-up-jobs.md",
+      "store": "data/follow-up-jobs/{pending,in-progress,completed,failed,stopped}/*.json",
+      "schemaSurface": "src/follow-up-jobs.mjs",
+      "relatedSchemaSurfaces": ["src/follow-up-reviewer-identity.mjs", "src/remediation-owner-auth.mjs"],
+      "owner": "reviewer handoff and follow-up daemon",
+      "optionalFields": ["reviewerRole: claude-reviewer | codex-reviewer | gemini-reviewer | grok-reviewer | null"],
+      "compatibility": "Additive to schema version 2. Older jobs use exact recognized identity evidence. Null holds alternate-owner reads."
+    },
+    {
+      "id": "reviewer-pass-posted-role",
+      "title": "Captured review artifact delivery role",
+      "path": "docs/data-model/reviewer-passes.md",
+      "store": "data/reviews.db.reviewer_passes.metadata_json",
+      "schemaSurface": "src/review-body-capture.mjs",
+      "relatedSchemaSurfaces": ["src/reviewer-pass-reaper.mjs"],
+      "owner": "reviewer body capture",
+      "optionalFields": ["reviewerRole: claude-reviewer | codex-reviewer | gemini-reviewer | grok-reviewer | null"],
+      "compatibility": "Additive metadata preserved across artifact lookup retries. Recovery can use declared dispatch and validated attribution evidence from earlier rows."
+    }
+  ]
+}

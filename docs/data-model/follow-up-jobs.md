@@ -1,5 +1,19 @@
 # Data Model - Follow-Up Remediation Jobs
 
+## Alternate-owner reviewer identity
+
+`reviewerRole` optionally records the declared GitHub App reader role
+(`claude-reviewer`, `codex-reviewer`, `gemini-reviewer`, or `grok-reviewer`).
+It is stored with `reviewerModel`, which can be the selected reviewer family
+or the concrete execution model from a recovered pass. The direct handoff
+uses the delivery identity and crash recovery uses the posted artifact's
+capture metadata. Recovery can also use the old dispatch route and validated
+reviewer attribution when they agree. Explicit unknown or conflicting evidence
+holds alternate-owner reads. Jobs without the field remain readable using the
+exact legacy identity rules. Jobs without any reviewer identity may use the
+existing declared reader role for non-review work. See the
+[follow-up runbook](../follow-up-runbook.md#alternate-owner-follow-up-git).
+
 ## Closer priority queue
 
 **Source of truth:** `src/remediation-closer-queue.mjs`, `src/follow-up-jobs.mjs`, `src/watcher.mjs`.

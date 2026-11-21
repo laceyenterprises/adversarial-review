@@ -2,6 +2,7 @@ import { persistReviewFindingsSafe } from './review-finding-records.mjs';
 import { parseReviewFindings } from './kernel/review-findings.mjs';
 import { normalizeReviewerModel } from './adapters/subject/github-pr/routing.mjs';
 import { validateReviewerAttribution } from './reviewer-attribution.mjs';
+import { reviewerRoleFromTokenEnv } from './follow-up-reviewer-identity.mjs';
 import { loadAwareTimeoutMs } from './load-aware-timeout.mjs';
 import { meteredExecFile } from './metered-gh.mjs';
 import { filterGitHubBody } from './github-outbound-body.mjs';
@@ -145,6 +146,10 @@ function mergeCaptureMetadata(existingMetadata, patch = {}) {
       ...patchCapture,
     },
   };
+  if (Object.hasOwn(existing, 'reviewerRole')) {
+    // A pending artifact lookup retry cannot reattribute the captured body.
+    merged.reviewerRole = existing.reviewerRole;
+  }
   if (Object.keys(merged.reviewBodyCapture).length === 0) {
     delete merged.reviewBodyCapture;
   }
@@ -522,8 +527,9 @@ async function captureReviewerBodyAfterPost(rootDir, {
   allowExistingBodyUpdate = false,
 } = {}) {
   reviewBody = filterGitHubBody(reviewBody, { repo, reviewerHeadSha, rootDir, env });
-  const singleReviewPatch = {
+  const reviewMetadataPatch = {
     ...(parseReviewFindings(reviewBody).verdict_inconsistent ? { verdict_inconsistent: true } : {}),
+    ...(botTokenEnv != null && { reviewerRole: reviewerRoleFromTokenEnv(botTokenEnv) ?? null }),
     ...(reviewerAttribution ? { reviewerAttribution: validateReviewerAttribution(reviewerAttribution) } : {}),
     ...(singleReview?.applied === true
       ? { singleReview: { applied: true, basis: singleReview.basis || null, stats: singleReview.stats || null } } : {}),
@@ -587,7 +593,7 @@ async function captureReviewerBodyAfterPost(rootDir, {
                 capturedAt: postedAt,
                 allowExistingBodyUpdate: true,
                 metadataPatch: {
-                  ...singleReviewPatch,
+                  ...reviewMetadataPatch,
                   reviewBodyCapture: {
                     status: REVIEW_BODY_CAPTURE_STATUS_PENDING,
                     githubArtifactRequired: true,
@@ -623,7 +629,7 @@ async function captureReviewerBodyAfterPost(rootDir, {
               capturedAt: postedAt,
               allowExistingBodyUpdate: true,
               metadataPatch: {
-                  ...singleReviewPatch,
+                ...reviewMetadataPatch,
                 reviewBodyCapture: {
                   status: REVIEW_BODY_CAPTURE_STATUS_PENDING,
                   githubArtifactRequired: true,
@@ -656,7 +662,7 @@ async function captureReviewerBodyAfterPost(rootDir, {
       allowExistingBodyUpdate,
       metadataPatch: requireGitHubArtifact
         ? {
-            ...singleReviewPatch,
+            ...reviewMetadataPatch,
             reviewBodyCapture: {
               status: REVIEW_BODY_CAPTURE_STATUS_VERIFIED,
               githubArtifactRequired: true,
@@ -664,7 +670,7 @@ async function captureReviewerBodyAfterPost(rootDir, {
               verifiedAt: new Date().toISOString(),
             },
           }
-        : singleReviewPatch,
+        : reviewMetadataPatch,
       log,
     });
     return { ghCommentId, verifiedGitHubArtifact: ghCommentId !== null };

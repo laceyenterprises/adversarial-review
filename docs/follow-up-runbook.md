@@ -708,10 +708,14 @@ When `HQ_ROOT` is set, remediation workers clone PR branches under `HQ_ROOT/adve
 
 The home owner comes from `config.json`. For a repository under a different
 owner, workspace clone, branch fetch, and the publisher's base fetch use the
-owner-routed broker identity of the reviewer recorded on the follow-up job.
-Callers without a recorded reviewer need an explicitly configured reviewer role
-in `FOLLOW_UP_GH_BROKER_ROLE`. The broker verifies the owner and existing App
-and installation pins. Git sends the selected credential only to the canonical
+owner-routed broker identity from the follow-up job's `reviewerRole`.
+Branch admission, contamination audits and retained publication recovery use
+the same selector. `reviewerModel` remains execution or historical routing
+evidence. For legacy jobs the reader recognizes exact declared reviewer names
+and the observed `claude-opus-5-5` value. An absent identity may use a declared
+`FOLLOW_UP_GH_BROKER_ROLE`. Unknown or contradictory identity evidence holds
+before token selection. The broker verifies the owner and existing App and
+installation pins. Git sends the selected credential only to the canonical
 repository HTTPS URL. An owner-route refusal ends the attempt.
 
 Before spawn, the daemon also checks the selected physical remediation
@@ -760,7 +764,9 @@ For recovery, the recorded owner confirms the worker exited and checks for
 another active PR owner or an operator stop. Verify the GitHub route, the open PR's exact
 recorded lease, and the retained checkout or bundle at the full recorded commit. Run
 `bin/remediation-publish.mjs` with that job's repository, PR, base, original
-reviewed head, worker class and reviewer model, plus
+reviewed head, worker class and reviewer model. Include the job's declared
+`--reviewer-role` when recorded. An explicit unknown role requires owner
+inspection. Also pass
 `--expected-candidate <localCommit>` and `--expected-remote-sha <expectedRemoteSha>`.
 An unavailable broker leaves the handoff held. A stale head or unavailable
 source requires owner inspection before publication. The held job starts no
@@ -2245,7 +2251,10 @@ A stopped `committed-unpublished` job has publication debt. Its `unpublishedWork
 record and PR comment identify the job and local commit; the workspace survives
 the terminal TTL. Inspect the retained work and publish through
 `bin/remediation-publish.mjs` with its original previous head, base, PR identity
-and exact remote lease. Missing branch metadata is resolved from the live PR;
+and exact remote lease. For an alternate owner, include the recorded reviewer
+identity and worker class as described in the
+[alternate-owner recovery contract](#alternate-owner-follow-up-git).
+Missing branch metadata is resolved from the live PR;
 never substitute an empty branch or bypass the publisher's diff/lease checks.
 The gate reports failed publication without an operator-decision-required notice.
 Once the live head exactly matches the retained commit, it reports pending review

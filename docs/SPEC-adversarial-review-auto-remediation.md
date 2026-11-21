@@ -39,7 +39,10 @@ Remediation publishes through `bin/remediation-publish.mjs`, which refreshes the
 base and inspects the exact candidate commit before a lease-protected push.
 The base fetch uses the shared workspace network retry helper (three attempts,
 250/750 ms backoff); authentication and missing-ref failures stop immediately.
-The publisher retains the worker's credentials. It selects executable `git-safe`
+For home-owner repositories the publisher uses the worker's credentials.
+For alternate owners, the base fetch uses the recorded `reviewerRole` through
+the owner-pinned reviewer App. Publication uses the remediation harness's
+separate declared owner capability. The publisher selects executable `git-safe`
 from `PATH` when available, otherwise `git`; `--push-command` explicitly selects
 the push executable. A selected executable's failure never triggers a fallback.
 It refuses an empty base-to-candidate or merge-base diff, and restoration of
@@ -53,6 +56,7 @@ reporting success, so a prior failed attempt cannot override the new result.
 An absent sidecar is harmless; other cleanup errors remain publication errors.
 This is a production publication boundary, with no new CI job or Git hook.
 Ordinary empty-diff closure remains unchanged.
+See the [alternate-owner route contract](follow-up-runbook.md#alternate-owner-follow-up-git).
 
 
 For the AMA closer lane documented in [`docs/RUNBOOK-ama-closure.md`](docs/RUNBOOK-ama-closure.md),

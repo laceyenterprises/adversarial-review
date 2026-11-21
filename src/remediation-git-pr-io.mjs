@@ -532,6 +532,7 @@ async function auditWorkspaceForContamination({
   workspaceDir,
   baseBranch,
   repo,
+  reviewerRole,
   reviewerModel,
   execFileImpl = execFileAsync,
 }) {
@@ -547,7 +548,7 @@ async function auditWorkspaceForContamination({
   }
 
   try {
-    const ownerRoute = await selectRemediationReadRoute({ repo, reviewerModel });
+    const ownerRoute = await selectRemediationReadRoute({ repo, reviewerRole, reviewerModel });
     const fetchArgs = ownerRoute
       ? ['--no-recurse-submodules', ownerRoute.url, `+refs/heads/${resolvedBaseBranch}:refs/remotes/origin/${resolvedBaseBranch}`]
       : ['--prune', 'origin', resolvedBaseBranch];

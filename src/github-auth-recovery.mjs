@@ -368,6 +368,7 @@ async function retryGithubAuthPushOnce({
   pendingNativePublication = null,
   recordNativePublicationImpl = () => {},
   baseBranch,
+  reviewerRole,
   reviewerModel,
   publicationWorkerClass = workerClass,
   forceWorkflowRoute = false,
@@ -379,14 +380,14 @@ async function retryGithubAuthPushOnce({
       if (!FULL_SHA_PATTERN.test(String(commitSha || ''))) {
         return { retried: false, pushed: false, reason: 'retained-publication-commit-unproven' };
       }
-      const publication = await publishRemediation({ workspaceDir, baseBranch, branch, repo, prNumber, reviewerModel,
+      const publication = await publishRemediation({ workspaceDir, baseBranch, branch, repo, prNumber, reviewerRole, reviewerModel,
         workerClass: publicationWorkerClass, requiresWorkflowPush: forceWorkflowRoute,
         previousHead: fallbackRemoteSha, expectedRemoteSha: expectedRemoteSha || fallbackRemoteSha,
         expectedCandidate: commitSha, execFileImpl, env });
       return { retried: true, pushed: true, ...publication, reason: 'push-succeeded' };
     }
     if (routedOwner) {
-      ownerReadRoute = await selectRemediationReadRoute({ repo, reviewerModel, env });
+      ownerReadRoute = await selectRemediationReadRoute({ repo, reviewerRole, reviewerModel, env });
       const metadata = await fetchPRBranchMetadata({ repo, prNumber, execFileImpl, env, ownerRoute: ownerReadRoute });
       if (!metadata.branch || metadata.headRepo?.toLowerCase() !== repo.toLowerCase()
         || (branch && branch !== metadata.branch)) {
@@ -735,6 +736,7 @@ async function recoverGithubAuthOperationalBlocker({
         : resolveWorkerClass(job, worker),
       branch: job.branch,
       baseBranch: job.baseBranch,
+      reviewerRole: job.reviewerRole,
       reviewerModel: job.reviewerModel,
       publicationWorkerClass: resolveWorkerClass(job, worker),
       forceWorkflowRoute: worker?.startupEvidence?.mergeAgentBroker?.requiresWorkflowPush === true,

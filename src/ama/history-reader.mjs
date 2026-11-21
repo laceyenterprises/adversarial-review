@@ -51,7 +51,7 @@ export function createHistoryReader(options = {}) {
   const host = env.GH_HOST || 'github.com';
   const checkpoint = async (key, run) => {
     remainingMs();
-    const value = await (progress ? storedHistoryRead(progress, [host, ...key], run, ghOptions.signal) : run());
+    const value = await (progress ? storedHistoryRead(progress, [host, ...key], run, ghOptions.signal) : run?.());
     remainingMs();
     return immutableSnapshotValue(value);
   };
@@ -387,13 +387,53 @@ export function createHistoryReader(options = {}) {
   // A full tree inventory does not require paging commit messages. Callers
   // select the paths that need hunks; inventory-only rows never write patch
   // checkpoints. Both sides are pinned to immutable tree inputs.
-  reader.compareFiles = (path, includePatch) => bounded(async () => {
-    const match = /^repos\/([^/]+\/[^/]+)\/compare\/[0-9a-f]{40}\.\.\.([0-9a-f]{40})$/i.exec(path);
+  reader.compareFiles = (path, includePatch = true) => bounded(async () => {
+    const match = /^repos\/([^/]+\/[^/]+)\/compare\/([0-9a-f]{40})\.\.\.([0-9a-f]{40})$/i.exec(path);
     if (!match) throw new Error('file inventory requires an exact compare pair');
+    const [, repo] = match;
+    const requestedBase = match[2].toLowerCase(), head = match[3].toLowerCase();
+    path = `repos/${repo}/compare/${requestedBase}...${head}`;
     const result = await reader.metadata(path);
     const base = result.merge_base_commit?.sha;
     if (!/^[0-9a-f]{40}$/i.test(base || '')) throw invalidHistory('missing compare merge base');
-    return { ...result, filesComplete: true, files: await filesBetween(match[1], base, match[2], includePatch) };
+    const filter = typeof includePatch === 'function' ? includePatch : () => Boolean(includePatch);
+    const inventoryRow = file => file.status === 'renamed'
+      ? { filename: file.filename, status: file.status, sha: file.sha,
+        previous_filename: file.previous_filename, additions: 0, deletions: 0 }
+      : { filename: file.filename, status: file.status, sha: file.sha };
+    const readFiles = predicate => filesBetween(repo, base.toLowerCase(), head, predicate);
+    // Guard review carry-forward can need the same complete projection after
+    // each hit on scoped history. Reuse the immutable result, including rename
+    // links, without walking the trees or reopening every per-file checkpoint.
+    let files;
+    if (progress && base.toLowerCase() === requestedBase) {
+      const completeKey = ['complete-file-comparison-v1', path];
+      const complete = await checkpoint(completeKey);
+      if (complete !== undefined) {
+        files = complete.map(file => filter(file.filename) ? file : inventoryRow(file));
+      } else if (includePatch === true) {
+        files = await checkpoint(completeKey, () => readFiles(filter));
+      } else {
+        const inventoryKey = ['complete-file-inventory-v1', path];
+        const inventory = await checkpoint(inventoryKey);
+        // Evaluate real paths, including both rename sides. A predicate's
+        // answer for a synthetic empty path cannot establish its scope.
+        if (inventory !== undefined && inventory.every(file => !filter(file.filename)
+          && (!file.previous_filename || !filter(file.previous_filename)))) {
+          files = inventory;
+        } else {
+          let selected = false;
+          files = await readFiles(filename => {
+            const include = filter(filename);
+            selected ||= Boolean(include);
+            return include;
+          });
+          // Inventory must never populate the complete-patch checkpoint.
+          if (!selected) await checkpoint(inventoryKey, async () => files);
+        }
+      }
+    } else files = await readFiles(filter);
+    return { ...result, filesComplete: true, files };
   });
   // Provenance proofs request compact web-flow verification separately; avoid
   // buffering signature payloads in every history and commit-file page.

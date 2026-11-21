@@ -121,3 +121,15 @@ contract through the inventoried Node-only `remediation` section, including its
 identity-field validation and atomic keyed-map handling for dotted repository
 names. This keeps the generated CFG reader and all earlier final-review fixes
 while integrating current main; no old hand-written schema literal is restored.
+
+
+### Final rescue integration — 2026-11-21
+
+Integrates reviewed main through `fdf7d82eca6fcf1e161c25ebfe2ff1cd7d97a296`,
+including LAC-2182 atomic review database bootstrap, without restoring the
+retired hand-maintained configuration schema. The Node-owned remediation
+repository identity overrides from main remain in the declared Node section.
+Independent integrated validation passes 235 cases across configuration rescue,
+Node/Python parity, review-state, repository identity and GitHub API lifecycle.
+The required new-head Node22/26 runs remain the merge gate; no unchanged failed
+run was retriggered and the 900-second deadline is unchanged.

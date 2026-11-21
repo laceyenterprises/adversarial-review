@@ -1113,6 +1113,88 @@ export function inspectMergeLease(...args) {
   });
 }
 
+function mergeLeaseHolderObservation(lease, { inspectedAt, currentHost, pidAliveFn, captureProcessImpl }) {
+  const ageSeconds = lease ? ageSecondsFrom(lease.acquiredAt, inspectedAt) : null;
+  const deadlineSeconds = lease?.deadlineSeconds ?? defaultDeadlineSeconds();
+  const pastDeadline = ageSeconds !== null && ageSeconds >= deadlineSeconds;
+  const holderLiveness = leaseHolderLiveness({ pid: lease?.holderPid, host: lease?.holderHost,
+    startedAt: lease?.holderStartedAt, acquiredAt: lease?.acquiredAt },
+  { host: currentHost, isProcessAlive: pidAliveFn, captureProcessImpl });
+  return { ageSeconds, deadlineSeconds, pastDeadline, holderLiveness };
+}
+
+function mergeLeaseReclaimReason(lease, observation, currentHost) {
+  if (lease.holderHost === currentHost) {
+    return observation.holderLiveness === 'dead' ? 'dead-holder-pid' : null;
+  }
+  return observation.pastDeadline ? 'past-deadline' : null;
+}
+
+function readReviewClaimLease(path) {
+  try { return readJsonFile(path); }
+  catch (cause) {
+    throw Object.assign(new Error('Merge lease state is unreadable', { cause }),
+      { code: 'MERGE_LEASE_STATE_UNAVAILABLE' });
+  }
+}
+
+function sameReviewSubject(lease, { repo, base, prNumber, headSha }) {
+  return lease?.repo === repo && lease.base === base
+    && Number(lease.holderPr) === Number(prNumber)
+    && String(lease.holderHead || '').toLowerCase() === headSha.toLowerCase();
+}
+
+function withReviewClaimLeaseObservation({
+  rootDir, repo, base, prNumber, headSha, now,
+  pidAliveFn = pidIsLive, captureProcessImpl = captureCloserProcessSync,
+}, run) {
+  if (!base) return { reason: 'merge-lease-base-unavailable' };
+  try {
+    return withRepositoryStateRead(rootDir, () => {
+      ({ repo } = canonicalRepositoryArguments(rootDir, { repo }));
+      const identity = { repo, base, prNumber, headSha };
+      const leasePath = mergeLeaseFilePathWithinRepositoryState(rootDir, identity);
+      const lease = readReviewClaimLease(leasePath);
+      const currentHost = hostname();
+      // Process probes must run before taking the short per-base mutation lock.
+      const retained = sameReviewSubject(lease, identity)
+        && !mergeLeaseReclaimReason(lease, mergeLeaseHolderObservation(lease, {
+          inspectedAt: now || isoNow(), currentHost, pidAliveFn, captureProcessImpl,
+        }), currentHost);
+      return run({ leasePath, lease, identity, retained });
+    });
+  } catch (error) {
+    if (!['REPOSITORY_STATE_BUSY', 'MERGE_LEASE_STATE_UNAVAILABLE'].includes(error.code)) throw error;
+    console.warn(`[merge-lease] Deferring review claim for ${repo}#${prNumber}: merge-lease-state-unavailable (${error.code})`);
+    return { reason: 'merge-lease-state-unavailable' };
+  }
+}
+
+// A cheap scheduling hint: no waiter/attempt reads and no mutation lock.
+// Admission must still use withMergeLeaseReviewClaim for the authoritative CAS.
+export function inspectMergeLeaseReviewCustody(options) {
+  return withReviewClaimLeaseObservation(options,
+    ({ retained }) => ({ reason: retained ? 'native-merge-custody' : null }));
+}
+
+// The SQLite claim must commit before this lock is released. Native lease
+// acquisition takes the same lock before publishing its holder, so a lease
+// granted second observes the committed claim in its under-lease owner check.
+export function withMergeLeaseReviewClaim(options, claim) {
+  return withReviewClaimLeaseObservation(options, ({ leasePath, lease: observed, identity, retained }) => {
+    const locked = withMutationLock(leasePath, () => {
+      const lease = readReviewClaimLease(leasePath);
+      if (sameReviewSubject(lease, identity)
+        && (retained || !isDeepStrictEqual(lease, observed))) {
+        // A changed holder cannot borrow an earlier holder's death proof.
+        return claim('native-merge-custody');
+      }
+      return claim(null);
+    });
+    return locked.acquired ? locked.value : { reason: 'merge-lease-mutation-busy' };
+  });
+}
+
 function inspectMergeLeaseWithinRepositoryState({
   rootDir,
   repo,
@@ -1130,14 +1212,11 @@ function inspectMergeLeaseWithinRepositoryState({
   const lease = readJsonFile(leasePath, null);
   const waiters = readWaiterDoc(waitersPath).waiters;
   const attempts = readMergeLeaseAttempts(rootDir, { repo, base });
-  const ageSeconds = lease ? ageSecondsFrom(lease.acquiredAt, inspectedAt) : null;
-  const deadlineSeconds = lease?.deadlineSeconds ?? defaultDeadlineSeconds();
-  const pastDeadline = lease && ageSeconds !== null ? ageSeconds >= deadlineSeconds : false;
+  const observation = mergeLeaseHolderObservation(lease, {
+    inspectedAt, currentHost, pidAliveFn, captureProcessImpl,
+  });
   const sameHost = lease ? lease.holderHost === currentHost : false;
-  const holderLiveness = leaseHolderLiveness({ pid: lease?.holderPid, host: lease?.holderHost,
-    startedAt: lease?.holderStartedAt, acquiredAt: lease?.acquiredAt },
-  { host: currentHost, isProcessAlive: pidAliveFn, captureProcessImpl });
-  const holderPidLive = lease && sameHost ? holderLiveness === 'dead' ? false
+  const holderPidLive = lease && sameHost ? observation.holderLiveness === 'dead' ? false
     : Boolean(pidAliveFn(lease.holderPid)) : null;
   return {
     key: deriveLeaseKey({ repo, base }).key,
@@ -1146,11 +1225,8 @@ function inspectMergeLeaseWithinRepositoryState({
     holder: lease,
     lease,
     exists: Boolean(lease),
-    ageSeconds,
-    deadlineSeconds,
-    pastDeadline,
+    ...observation,
     holderPidLive,
-    holderLiveness,
     waiters,
     attempts,
     inspectedAt,
@@ -1656,11 +1732,8 @@ function reclaimIfStaleWithinRepositoryState({
     return { reclaimed: false, reason: 'absent', inspection };
   }
 
-  const sameHost = lease.holderHost === (host || hostname());
-  const deadSameHostPid = sameHost && inspection.holderLiveness === 'dead';
-  const staleByDeadline = inspection.pastDeadline;
-  const reclaimByDeadline = staleByDeadline && !sameHost;
-  if (!deadSameHostPid && !reclaimByDeadline) {
+  const reason = mergeLeaseReclaimReason(lease, inspection, host || hostname());
+  if (!reason) {
     return { reclaimed: false, reason: 'live-within-deadline', inspection };
   }
 
@@ -1673,15 +1746,15 @@ function reclaimIfStaleWithinRepositoryState({
     holderHead: lease.holderHead,
     acquiredAt: lease.acquiredAt,
     now,
-    historyEvent: deadSameHostPid ? 'steal' : 'expiry',
-    reason: deadSameHostPid ? 'dead-holder-pid' : 'past-deadline',
+    historyEvent: reason === 'dead-holder-pid' ? 'steal' : 'expiry',
+    reason,
   });
   if (!released.released) {
     return { reclaimed: false, reason: released.reason || 'identity-changed', inspection, release: released };
   }
   return {
     reclaimed: true,
-    reason: deadSameHostPid ? 'dead-holder-pid' : 'past-deadline',
+    reason,
     inspection,
     release: released,
   };

@@ -1736,6 +1736,15 @@ records the evidence/admission truth table and public export fixture refresh.
 
 ## State machines and smoke verification (SMV v1)
 
+Automatic exhausted-head verdict requests remain pending while a matching native
+merge lease retains custody. The watcher checks custody before dedup preflight
+and capacity reservation, records a suppressed lane and leaves capacity wake
+priority unretained. The claim fence rechecks the lease under its mutation lock
+using liveness observed outside that lock; changed matching leases and
+unavailable repository/lease state defer. Existing states, merge gates and smoke
+commands are unchanged. See the
+[lease service contract](docs/RUNBOOK-ama-closure.md#leasefair-01-fair-merge-lease-service).
+
 Remediation closer priority hints terminate without dispatch for unmanaged
 repositories or missing PRs. Malformed JSON moves unchanged to `dead-letter/`
 under the queue directory and stays excluded after watcher restart; filesystem

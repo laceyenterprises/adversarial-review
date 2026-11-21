@@ -7604,6 +7604,31 @@ dispatch.
 
 ## LEASEFAIR-01: fair merge lease service
 
+For an automatic exhausted-head verdict, the watcher commits the reviewer claim
+under the same `(repo, base)` mutation lock as native merge lease acquisition.
+`native-merge-custody` means the exact PR and head already have a retained holder.
+An unlocked local custody precheck runs before queueing, GitHub dedup preflight
+and memory reservation, and repeats before queued preparation and execution.
+Custody deferrals record a suppressed review lane and do not retain capacity
+wake priority. The locked claim remains authoritative if custody changes after
+the precheck. Holder liveness is probed outside the mutation lock; the locked
+read uses that observation only for an unchanged lease, otherwise a matching
+replacement retains custody until another poll.
+`merge-lease-mutation-busy`, `merge-lease-base-unavailable` or
+`merge-lease-state-unavailable` defers the claim to another poll. The last reason
+logs repository rename recovery or an unreadable/invalid lease, without treating
+the state as an absent holder. Missing subject base metadata uses the configured
+default base branch, then `main`. The request remains pending with its existing budget. Confirmed
+dead local holders and expired remote holders do not defer review. Uncertain
+local process identity retains custody, including after deadline. A review that
+claims first remains visible to the native under-lease owner check from the
+moment its SQLite claim commits. Existing final pre-execution checks still run.
+
+After ordinary deployment, check a natural exact-head closeout for a retained
+automatic request while the lease is held and an authorized closeout with the
+required source, findings, review and CI evidence. If the owner releases an open
+PR, check that the same request is eligible on a subsequent watcher tick.
+
 Daemon and closer acquisitions use one FIFO arrival queue per repo/base.
 The legacy `priority: daemon` field identifies a role without a scheduling boost.
 A live refresh retains its arrival; a confirmed dead same-host watcher loses its

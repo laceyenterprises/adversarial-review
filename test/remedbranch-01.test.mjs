@@ -178,7 +178,7 @@ test('REMEDBRANCH-01: a branchless legacy prompt gives the publisher PR identity
   assert.match(prompt, /--repo 'fixture\/repo' --pr '42'/u);
 });
 
-test('REMEDBRANCH-01: publisher hydrates a missing branch before Git and refuses unresolved evidence', async () => {
+test('REMEDBRANCH-01: publisher pins the candidate before branch hydration and refuses unresolved evidence', async () => {
   const env = { GH_TOKEN: 'synthetic-scoped-token' };
   for (const branch of ['feature/retry', null]) {
     const calls = [];
@@ -191,11 +191,17 @@ test('REMEDBRANCH-01: publisher hydrates a missing branch before Git and refuses
           assert.equal(options.env.GH_TOKEN, env.GH_TOKEN);
           return { stdout: JSON.stringify({ base: { ref: 'main' }, head: { ref: branch } }) };
         }
+        if (args.includes('rev-parse')) {
+          assert.equal(calls.length, 1, 'pin the local tip before asynchronous branch hydration');
+          assert.deepEqual(args.slice(-3), ['rev-parse', '--verify', 'HEAD^{commit}']);
+          return { stdout: `${head}\n` };
+        }
         assert.equal(branch, 'feature/retry');
+        assert.equal(calls[1].command, 'gh', 'hydrate before branch-dependent Git operations');
         throw new Error('synthetic Git boundary reached');
       } }), branch ? /synthetic Git boundary/ : { code: 'remediation-publication-unproven' });
     assert.equal(calls.some(call => call.args.includes('push')), false);
-    if (!branch) assert.equal(calls.length, 1);
+    if (!branch) assert.equal(calls.length, 2);
   }
 });
 

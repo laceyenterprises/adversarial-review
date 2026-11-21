@@ -2,7 +2,8 @@ import { recordWorkspaceRewrite } from './branch-rewrite-receipt.mjs';
 import { loadAwareTimeoutMs } from './load-aware-timeout.mjs';
 import { meteredExecFile } from './metered-gh.mjs';
 import { execFile } from 'node:child_process';
-import { existsSync, mkdirSync, statSync } from 'node:fs';
+import { existsSync, mkdirSync, rmSync, statSync } from 'node:fs';
+import { randomUUID } from 'node:crypto';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
@@ -185,11 +186,15 @@ async function preserveUnpushedCommit({
   jobId,
   commitSha,
   observedAt,
+  checkoutTipOnly = false,
+  expectedRemoteSha = null,
   execFileImpl = execFileAsync,
   statSyncImpl = statSync,
   existsSyncImpl = existsSync,
   getuidImpl = () => (typeof process.getuid === 'function' ? process.getuid() : null),
 }) {
+  if (typeof commitSha === 'string') commitSha = commitSha.toLowerCase();
+  if (typeof expectedRemoteSha === 'string') expectedRemoteSha = expectedRemoteSha.toLowerCase();
   const sha = String(commitSha || '').trim();
   if (!sha) return { preserved: false, reason: 'missing-commit-sha' };
   await execFileImpl('git', recoveryGitArgs(workspaceDir, ['cat-file', '-e', `${sha}^{commit}`]), localGitOptions());
@@ -199,19 +204,35 @@ async function preserveUnpushedCommit({
   const rescueDir = join(hqRoot, 'rescues', 'adversarial-review', 'github-auth', safeRepo, `pr-${prNumber}`);
   assertHqRescueWriteOwner({ targetDir: rescueDir, statSyncImpl, existsSyncImpl, getuidImpl });
   mkdirSync(rescueDir, { recursive: true });
-  const bundlePath = join(rescueDir, `${stamp}-${safeJob}-${sha.slice(0, 12)}.bundle`);
-  const rescueRef = `refs/adversarial-review/rescues/${safeJob}/${sha}`;
+  const suffix = checkoutTipOnly ? `-${randomUUID()}` : '';
+  const bundlePath = join(rescueDir, `${stamp}-${safeJob}-${sha.slice(0, 12)}${suffix}.bundle`);
+  const rescueRef = checkoutTipOnly ? 'HEAD' : `refs/adversarial-review/rescues/${safeJob}/${sha}`;
   try {
-    await execFileImpl('git', recoveryGitArgs(workspaceDir, ['update-ref', rescueRef, sha]), localGitOptions());
-    await execFileImpl('git', recoveryGitArgs(workspaceDir, ['bundle', 'create', bundlePath, rescueRef]), {
+    const exclusions = [];
+    if (checkoutTipOnly) {
+      if (!/^[a-f0-9]{40}$/u.test(expectedRemoteSha || '')) throw new Error('Missing retained bundle prerequisite.');
+      await execFileImpl('git', recoveryGitArgs(workspaceDir, ['merge-base', expectedRemoteSha, sha]), localGitOptions());
+      exclusions.push(`^${expectedRemoteSha}`);
+    }
+    if (!checkoutTipOnly) await execFileImpl('git', recoveryGitArgs(workspaceDir, ['update-ref', rescueRef, sha]), localGitOptions());
+    await execFileImpl('git', recoveryGitArgs(workspaceDir, ['bundle', 'create', bundlePath, rescueRef, ...exclusions]), {
       ...localGitOptions(), timeout: loadAwareTimeoutMs(60000),
     });
     await execFileImpl('git', recoveryGitArgs(workspaceDir, ['bundle', 'verify', bundlePath]), localGitOptions());
+    if (checkoutTipOnly) {
+      const heads = await execFileImpl('git', recoveryGitArgs(workspaceDir, ['bundle', 'list-heads', bundlePath]), localGitOptions());
+      if (String(heads.stdout).trim() !== `${sha} HEAD`) throw new Error('Retained checkout tip moved before bundling.');
+    }
+  } catch (error) {
+    if (checkoutTipOnly) rmSync(bundlePath, { force: true });
+    throw error;
   } finally {
-    try {
-      await execFileImpl('git', recoveryGitArgs(workspaceDir, ['update-ref', '-d', rescueRef]), localGitOptions());
-    } catch {
-      // Best-effort cleanup; the durable artifact is the verified bundle.
+    if (!checkoutTipOnly) {
+      try {
+        await execFileImpl('git', recoveryGitArgs(workspaceDir, ['update-ref', '-d', rescueRef]), localGitOptions());
+      } catch {
+        // Best-effort cleanup; the durable artifact is the verified bundle.
+      }
     }
   }
   return {

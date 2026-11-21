@@ -97,6 +97,9 @@ export interface RemediationReplyOperationalBlocker {
   title?: string;
   /** Structured classification; the reconciler never infers it from `title`. */
   kind?: 'pending-ci';
+  code?: string;
+  commitSha?: string;
+  expectedRemoteSha?: string;
   finding: string;
   reasoning?: string;
   needsHumanInput?: string;

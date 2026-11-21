@@ -40,12 +40,12 @@ import {
   REMEDIATION_WORKER_IDENTITY_DEFAULTS,
   REMEDIATION_WORKER_TRAILER_CLASS,
   WORKER_PROVENANCE_HOOK_SRC,
-  configureRemediationWorkspaceIdentity,
   installWorkerProvenanceHook,
   remediationWorkerGitIdentity,
   remediationWorkerPushProvider,
   remediationWorkerTrailerClass,
 } from './remediation-worker-provenance.mjs';
+import { configureRemediationWorkspaceIdentityWithConfig } from './remediation-identity-config.mjs';
 import {
   summarizePRRemediationLedger,
   claimNextFollowUpJob,
@@ -943,7 +943,7 @@ async function prepareWorkspaceForJob({
     });
   }
 
-  await configureRemediationWorkspaceIdentity({ workspaceDir, workerClass, repo, env, execFileImpl });
+  await configureRemediationWorkspaceIdentityWithConfig({ workspaceDir, workerClass, repo, env, execFileImpl });
 
   // Install the worker-provenance commit-msg hook in this workspace's
   // .git/hooks. The hook reads worker-context env vars at commit time

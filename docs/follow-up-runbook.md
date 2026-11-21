@@ -613,7 +613,7 @@ npm run follow-up:reconcile                       # reconcile in-progress jobs (
 npm run follow-up:requeue -- <job-path> [reason]  # re-arm a completed job
 npm run follow-up:stop -- <job-path> [reason]     # stop a job; spawned workers are signalled first by default
 npm run follow-up:cancel-worker -- <job-path> [reason]  # signal spawned worker without moving job state
-npm run review:cancel -- --repo <slug> --pr <n> [reason]  # signal active reviewer without moving review state
+npm run review:cancel -- --repo <slug> --pr <n> [reason]  # stop an active review and suppress automatic same-head retries
 npm run merge-agent:cancel -- --repo <slug> --pr <n> [reason]  # cancel latest merge-agent LRQ + clear dispatched marker
 npm run no-merge:hold -- --repo <slug> --pr <n> [reason]  # apply a no-merge hold label for one PR/ticket
 npm run ticket-pipeline:pause -- --repo <slug> --pr <n> [reason]  # pause Linear sync for one PR via label

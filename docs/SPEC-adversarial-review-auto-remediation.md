@@ -2559,6 +2559,20 @@ The watcher's reviewer subprocess lifecycle is split across two durable ledgers:
 - `data/reviews.db` keeps the review-delivery row for each PR, including `review_status='reviewing'` as the durable claim that a reviewer launch is in flight.
 - `data/reviewer-runs/<sessionUuid>.json` keeps the runtime session record for that launch, including the adapter runtime id, process-group metadata, and the most recent lifecycle state observed by the runtime adapter.
 
+The native reviewer wrapper reports a model no-progress stall with exit status
+`80`. The direct adapter classifies it as `reviewer-stalled`, and the watcher
+releases the matching claim for bounded backoff without consuming a review
+attempt. Typed GitHub budget deferral uses exit status `79` and holds the claim
+from respawning until the reported budget reset.
+
+For native reviewers, terminal operator cancellation requires intent bound to
+the reviewer session and head. Once the reviewer exits, the watcher reconciles
+any posted review for that head before marking the matching claim `failed` with
+`[cancelled]` and charging the ordinary attempt. If GitHub evidence is
+temporarily unavailable, reconciliation can retry. Unattributed signals and
+maintenance shutdown retain bounded recovery. Runner callback failures follow
+execution-failure classification.
+
 `src/adapters/reviewer-runtime/cli-direct/index.mjs` is the canonical OAuth-first runtime today. When it advertises `oauthStripEnforced: true`, it must strip the full canonical OAuth fallback env set before spawning the reviewer subprocess: `ANTHROPIC_API_KEY`, `ANTHROPIC_BASE_URL`, `CLAUDE_CODE_USE_BEDROCK`, `CLAUDE_CODE_USE_VERTEX`, `AWS_BEARER_TOKEN_BEDROCK`, `OPENAI_API_KEY`, `GOOGLE_API_KEY`, and `GEMINI_API_KEY`. Partial stripping is a contract violation because downstream code trusts the adapter capability bit.
 
 The cli-direct adapter disables its outer no-output watchdog for the whole `reviewer.mjs` process. That process can be quiet during context preparation, GitHub posting, rate-limit throttle, and Codex OAuth Responses fallback. Inside the harness, Claude uses `--output-format stream-json` and Codex uses `exec --json`; their model subprocesses have a rolling idle watchdog set by `reviewer.idle_timeout_seconds` (default 600 seconds). Claude starts its scaled hard deadline when its subprocess starts, using `reviewer.ceiling_base_seconds` (default 1800), `reviewer.ceiling_max_seconds` (default 10800), changed lines, and reasoning effort. Stream events update `reviewer_passes.metadata_json.lastProgressAt` at most every 30 seconds and record `heartbeatSupported`, `changedLines`, and `reasoningEffort`. The in-process watchdog bounds model silence; it does not apply to the quiet posting and fallback phases.

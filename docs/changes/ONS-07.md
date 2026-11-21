@@ -59,9 +59,13 @@ key into CFG forces its deletion here.
 
 ## Remaining for the final ONS-07 PR
 
-- The env alias table (about 1,000 lines) is still hand-written. Generating it
-  needs the ONS-02 generator to emit CFG's env aliases.
-- The cascade engine is about 2,100 lines. The target is under 800.
+- The env alias table is now a compact row table (`ENV_ROWS` in
+  `src/config-loader.mjs`, about 550 lines, down from about 1,000): the
+  canonical name is derived from the key path and only exceptions and aliases
+  are written out. Replacing it with generated data still needs the ONS-02
+  generator to emit CFG's env aliases (an agent-os change).
+- The cascade engine is about 2,000 lines after dropping the dead
+  `buildRoleFallbackEnvAliases` helper. The target is under 800.
 - The Node-only keys and enum members need to move into CFG `schema_v1`, with
   `config.yaml` and shell parity. That is agent-os work for ONS-14 or an
   ONS-17+ ticket. The projection repairs belong in the ONS-02 generator.

@@ -148,35 +148,7 @@ export const ENUM_ROLES_ADVERSARIAL_ORCHESTRATION_MODE = schemaEnum('roles.adver
 export const ENUM_ROLES_ADVERSARIAL_OPERATOR_LABEL_ACTOR_ENFORCEMENT = schemaEnum('roles.adversarial.operator_label_actor_enforcement');
 export const ENUM_ROLES_ADVERSARIAL_MERGE_CAPABILITY_ENFORCEMENT = schemaEnum('roles.adversarial.merge_authority.merge_capability_enforcement');
 
-const ROLE_FALLBACK_CLASSES = [
-  'claude-code',
-  'codex',
-  'claude-reviewer-lacey',
-  'codex-reviewer-lacey',
-  'merge-agent',
-  'merge-agent-failure-recovery',
-  'clio-agent',
-];
 const MANDATORY_CI_HOSTING_EXCLUDED_WORKFLOWS = ['release-freeze-gate.yml'];
-
-function envClassSegment(roleClass) {
-  return roleClass.replaceAll('-', '_').toUpperCase();
-}
-
-function buildRoleFallbackEnvAliases() {
-  return Object.fromEntries(
-    ROLE_FALLBACK_CLASSES.map((roleClass) => {
-      const envSegment = envClassSegment(roleClass);
-      return [
-        `roles.${roleClass === 'merge-agent-failure-recovery' ? 'merge_agent_failure_recovery' : roleClass}.fallback_path`,
-        {
-          canonical: `AGENT_OS_ROLES_${envSegment}_FALLBACK_PATH`,
-          aliases: [[`LITELLM_VK_FALLBACK_FOR_${envSegment}`, identity]],
-        },
-      ];
-    }),
-  );
-}
 
 // SPE-01: search cross-field semantics; metadata only, no secret resolution.
 const SEARCH_OPERATIONS = Object.freeze({
@@ -259,999 +231,581 @@ function postgresRuntimeAlias(value) {
 
 const identity = (v) => v;
 
+// Rows: [path, canonicalOverride?, ...aliases]. The canonical env name is
+// AGENT_OS_ + the dotted path upper-cased with dots as underscores unless the
+// row overrides it (null keeps the derived name). An alias is a bare env name
+// (identity coercion) or [name, coerce].
+const ENV_ROWS = [
+  ['worker_pool.post_merge_actions.rca_worker_class'],
+  ['apple.developer_dir'],
+  ['network.identity.enabled'],
+  ['network.identity.state_dir'],
+  ['network.identity.binary_path'],
+  ['network.identity.custodian_host'],
+  ['network.identity.custodian_user'],
+  ['network.identity.known_hosts_file'],
+  ['network.identity.ssh_identity_file'],
+  ['network.identity.custodian_principal'],
+  ['network.identity.custodian_port'],
+  ['update.channel'],
+  ['ci.hosting.mode'],
+  ['frc.offlan_transport.enabled'],
+  ['frc.offlan_transport.port'],
+  ['frc.offlan_transport.kill_switch_path'],
+  ['roots.runtime_user'],
+  ['roots.runtime_uid'],
+  ['roots.admin_user'],
+  ['roots.admin_uid'],
+  ['roles.reviewer', null, 'ADVERSARIAL_REVIEW_DEFAULT_REVIEWER'],
+  ['remediation.max_concurrent_jobs', null, 'ADVERSARIAL_REMEDIATION_MAX_CONCURRENT_JOBS'],
+  [
+    'remediation.max_concurrent_jobs_ceiling',
+    null,
+    'ADVERSARIAL_REMEDIATION_MAX_CONCURRENT_JOBS_CEILING',
+  ],
+  ['reviewer.timeout_ms', null, 'ADVERSARIAL_REVIEWER_TIMEOUT_MS'],
+  ['reviewer.first_output_timeout_ms', null, 'ADVERSARIAL_REVIEWER_FIRST_OUTPUT_TIMEOUT_MS'],
+  ['reviewer.quota_check_enabled', null, 'ADVERSARIAL_REVIEW_QUOTA_CHECK_ENABLED'],
+  ['reviewer.quota_status_dir', null, 'ADVERSARIAL_REVIEW_QUOTA_STATUS_DIR'],
+  ['reviewer.no_progress_timeout_ms', null, 'ADVERSARIAL_REVIEWER_PROGRESS_TIMEOUT_MS'],
+  [
+    'reviewer.running_pass_timeout_seconds',
+    null,
+    'ADVERSARIAL_REVIEW_RUNNING_PASS_TIMEOUT_SECONDS',
+  ],
+  ['reviewer.idle_timeout_seconds', null, 'ADVERSARIAL_REVIEWER_IDLE_TIMEOUT_SECONDS'],
+  ['reviewer.ceiling_base_seconds', null, 'ADVERSARIAL_REVIEWER_CEILING_BASE_SECONDS'],
+  ['reviewer.ceiling_max_seconds', null, 'ADVERSARIAL_REVIEWER_CEILING_MAX_SECONDS'],
+  [
+    'reviewer.memory.pressure.projected_headroom_floor_mb',
+    null,
+    'ADVERSARIAL_REVIEWER_MEMORY_PRESSURE_PROJECTED_HEADROOM_FLOOR_MB',
+  ],
+  [
+    'reviewer.memory.pressure.elevated_available_mb',
+    null,
+    'ADVERSARIAL_REVIEWER_MEMORY_PRESSURE_ELEVATED_AVAILABLE_MB',
+  ],
+  [
+    'reviewer.memory.pressure.critical_available_mb',
+    null,
+    'ADVERSARIAL_REVIEWER_MEMORY_PRESSURE_CRITICAL_AVAILABLE_MB',
+  ],
+  [
+    'reviewer.memory.pressure.elevated_swap_used_pct',
+    null,
+    'ADVERSARIAL_REVIEWER_MEMORY_PRESSURE_ELEVATED_SWAP_USED_PCT',
+  ],
+  [
+    'reviewer.memory.pressure.critical_swap_used_pct',
+    null,
+    'ADVERSARIAL_REVIEWER_MEMORY_PRESSURE_CRITICAL_SWAP_USED_PCT',
+  ],
+  [
+    'reviewer.memory.pressure.swap_pressure_available_mb',
+    null,
+    'ADVERSARIAL_REVIEWER_MEMORY_PRESSURE_SWAP_PRESSURE_AVAILABLE_MB',
+  ],
+  [
+    'reviewer.review_population_retry.max_attempts',
+    null,
+    'ADVERSARIAL_REVIEW_POPULATION_RETRY_MAX_ATTEMPTS',
+  ],
+  [
+    'reviewer.review_population_retry.backoff_seconds',
+    null,
+    'ADVERSARIAL_REVIEW_POPULATION_RETRY_BACKOFF_SECONDS',
+  ],
+  ['worker_pool.tenure.enabled'],
+  ['worker_pool.worker_process_niceness'],
+  ['worker_pool.memory.dynamic.enabled', null, 'HQ_MEMORY_DYNAMIC_ENABLED'],
+  ['worker_pool.memory.dynamic.shadow_only', null, 'HQ_MEMORY_DYNAMIC_SHADOW_ONLY'],
+  ['worker_pool.memory.dynamic.admit_percentile', null, 'HQ_MEMORY_DYNAMIC_ADMIT_PERCENTILE'],
+  ['worker_pool.memory.dynamic.pressure_margin_mb', null, 'HQ_MEMORY_DYNAMIC_PRESSURE_MARGIN_MB'],
+  ['worker_pool.memory.dynamic.rss_window_minutes', null, 'HQ_MEMORY_DYNAMIC_RSS_WINDOW_MINUTES'],
+  [
+    'worker_pool.memory.dynamic.oss_model_reserve_mb',
+    null,
+    'HQ_MEMORY_DYNAMIC_OSS_MODEL_RESERVE_MB',
+  ],
+  [
+    'worker_pool.memory.dynamic.snapshot_stale_seconds',
+    null,
+    'HQ_MEMORY_DYNAMIC_SNAPSHOT_STALE_SECONDS',
+  ],
+  [
+    'worker_pool.memory.dynamic.require_pressure_normal',
+    null,
+    'HQ_MEMORY_DYNAMIC_REQUIRE_PRESSURE_NORMAL',
+  ],
+  ['worker_pool.dag.autowalk.deep_reconcile', null, 'HQ_AUTOWALK_DEEP_RECONCILE'],
+  ['worker_pool.memory_injection.enabled'],
+  ['worker_pool.memory_injection.max_entries'],
+  ['worker_pool.memory_injection.max_chars'],
+  ['worker_pool.memory_injection.max_per_contract'],
+  ['worker_pool.memory_injection.min_term_matches'],
+  ['worker_pool.memory_retention.enabled', null, 'HQ_MEMORY_RETENTION_ENABLED'],
+  ['worker_pool.memory_retention.shadow_only', null, 'HQ_MEMORY_RETENTION_SHADOW_ONLY'],
+  ['worker_pool.dispatch.claude_batch_steer_enabled', null, 'HQ_CLAUDE_BATCH_STEER'],
+  ['worker_pool.dispatch.codex_exec_mode', null, 'HQ_CODEX_EXEC_MODE'],
+  ['worker_pool.dispatch.fleet_launch_health.enabled', null, 'HQ_FLEET_LAUNCH_HEALTH_ENABLED'],
+  [
+    'worker_pool.dispatch.fleet_launch_health.window_seconds',
+    null,
+    'HQ_FLEET_LAUNCH_HEALTH_WINDOW_SECONDS',
+  ],
+  [
+    'worker_pool.dispatch.fleet_launch_health.min_samples',
+    null,
+    'HQ_FLEET_LAUNCH_HEALTH_MIN_SAMPLES',
+  ],
+  [
+    'worker_pool.dispatch.fleet_launch_health.unhealthy_fraction',
+    null,
+    'HQ_FLEET_LAUNCH_HEALTH_UNHEALTHY_FRACTION',
+  ],
+  [
+    'worker_pool.dispatch.fleet_launch_health.backoff_seconds',
+    null,
+    'HQ_FLEET_LAUNCH_HEALTH_BACKOFF_SECONDS',
+  ],
+  [
+    'worker_pool.dispatch.fleet_launch_health.canary_interval_seconds',
+    null,
+    'HQ_FLEET_LAUNCH_HEALTH_CANARY_INTERVAL_SECONDS',
+  ],
+  ['worker_pool.dispatch.goal_lineage.enabled', null, 'HQ_GLN_LINEAGE_ENABLED'],
+  ['worker_pool.dispatch.goal_lineage.max_bytes', null, 'HQ_GLN_LINEAGE_MAX_BYTES'],
+  [
+    'worker_pool.dispatch.goal_lineage.spec_excerpt_bytes',
+    null,
+    'HQ_GLN_LINEAGE_SPEC_EXCERPT_BYTES',
+  ],
+  [
+    'worker_pool.dispatch.substrate.swap_crit_requires_pressure',
+    null,
+    'SUBSTRATE_SWAP_CRIT_REQUIRES_PRESSURE',
+  ],
+  [
+    'worker_pool.dispatch.substrate.mem_pressure_crit_level',
+    null,
+    'SUBSTRATE_MEM_PRESSURE_CRIT_LEVEL',
+  ],
+  ['worker_pool.shr.main_catchup_behind_threshold'],
+  ['worker_pool.shr.worker_kill_window_seconds'],
+  ['worker_pool.shr.worker_kill_threshold'],
+  ['worker_pool.shr.command_timeout_seconds'],
+  ['worker_pool.secrets.prewarm.enabled'],
+  ['worker_pool.secrets.prewarm.min_interval_seconds'],
+  ['worker_pool.secrets.known_vaults'],
+  ['worker_pool.secrets.release_signing_private_key_ref'],
+  ['post_deploy_verify.enabled', null, 'HQ_POST_DEPLOY_VERIFY_ENABLED'],
+  ['post_deploy_verify.shadow_only', null, 'HQ_POST_DEPLOY_VERIFY_SHADOW_ONLY'],
+  ['post_deploy_verify.spawn_timeout_seconds', null, 'HQ_POST_DEPLOY_VERIFY_SPAWN_TIMEOUT_SECONDS'],
+  [
+    'post_deploy_verify.spawn_ready_wait_seconds',
+    null,
+    'HQ_POST_DEPLOY_VERIFY_SPAWN_READY_WAIT_SECONDS',
+  ],
+  ['post_deploy_verify.boot_window_seconds', null, 'HQ_POST_DEPLOY_VERIFY_BOOT_WINDOW_SECONDS'],
+  ['post_deploy_verify.reminder_seconds', null, 'HQ_POST_DEPLOY_VERIFY_REMINDER_SECONDS'],
+  [
+    'deploy.post_merge_activation.enabled',
+    'AGENT_OS_POST_MERGE_ACTIVATION_ENABLED',
+    'HQ_POST_MERGE_ACTIVATION_ENABLED',
+  ],
+  [
+    'deploy.post_merge_activation.enforce',
+    'AGENT_OS_POST_MERGE_ACTIVATION_ENFORCE',
+    'HQ_POST_MERGE_ACTIVATION_ENFORCE',
+  ],
+  [
+    'deploy.post_merge_activation.dispatch_on_fail',
+    'AGENT_OS_POST_MERGE_ACTIVATION_DISPATCH_ON_FAIL',
+    'HQ_POST_MERGE_ACTIVATION_DISPATCH_ON_FAIL',
+  ],
+  [
+    'deploy.post_merge_activation.baseline_worker_boot_resolve_budget_seconds',
+    'AGENT_OS_POST_MERGE_ACTIVATION_BASELINE_WORKER_BOOT_RESOLVE_BUDGET_SECONDS',
+    'HQ_POST_MERGE_ACTIVATION_BASELINE_WORKER_BOOT_RESOLVE_BUDGET_SECONDS',
+  ],
+  [
+    'deploy.post_merge_activation.hold_alert_budget_seconds',
+    'AGENT_OS_POST_MERGE_ACTIVATION_HOLD_ALERT_BUDGET_SECONDS',
+    'HQ_POST_MERGE_ACTIVATION_HOLD_ALERT_BUDGET_SECONDS',
+  ],
+  [
+    'deploy.post_merge_activation.hold_alert_consecutive_passes',
+    'AGENT_OS_POST_MERGE_ACTIVATION_HOLD_ALERT_CONSECUTIVE_PASSES',
+    'HQ_POST_MERGE_ACTIVATION_HOLD_ALERT_CONSECUTIVE_PASSES',
+  ],
+  ['reviewer.gemini.mode', null, 'ADVERSARIAL_REVIEW_GEMINI_REVIEWER_MODE'],
+  ['reviewer.gemini.runtime', null, 'ADVERSARIAL_REVIEW_GEMINI_RUNTIME'],
+  ['reviewer.gemini.model', null, 'ADVERSARIAL_REVIEW_GEMINI_MODEL'],
+  [
+    'reviewer.gemini.antigravity.print_timeout_ms',
+    null,
+    'ADVERSARIAL_REVIEW_GEMINI_ANTIGRAVITY_PRINT_TIMEOUT_MS',
+  ],
+  ['watcher.max_drain_wait_ms', null, 'ADVERSARIAL_WATCHER_DRAIN_MAX_MS'],
+  [
+    'watcher.pending_draft_review_respawn_age_seconds',
+    null,
+    'ADVERSARIAL_REVIEW_PENDING_DRAFT_RESPAWN_AGE_SECONDS',
+  ],
+  [
+    'watcher.stuck_dispatch_alert_debounce_ms',
+    null,
+    'ADVERSARIAL_STUCK_DISPATCH_ALERT_DEBOUNCE_MS',
+  ],
+  [
+    'watcher.first_pass_reviewer_pool_max_concurrent_reviewers',
+    null,
+    'ADVERSARIAL_FIRST_PASS_REVIEWER_POOL_MAX_CONCURRENT',
+    'ADVERSARIAL_FIRST_PASS_REVIEWER_MAX_CONCURRENT',
+    'ADVERSARIAL_REVIEWER_POOL_MAX_CONCURRENT',
+  ],
+  [
+    'watcher.first_pass_review_queue_depth_failover_threshold',
+    null,
+    'ADVERSARIAL_REVIEW_FIRST_PASS_QUEUE_DEPTH_FAILOVER_THRESHOLD',
+  ],
+  [
+    'watcher.rereview_queue_depth_failover_threshold',
+    null,
+    'ADVERSARIAL_REVIEW_REREVIEW_QUEUE_DEPTH_FAILOVER_THRESHOLD',
+  ],
+  ['watcher.ama_hammer_dispatch_mode', null, 'ADVERSARIAL_AMA_HAMMER_DISPATCH_MODE'],
+  [
+    'watcher.review_lane_first_pass_burst_limit',
+    null,
+    'ADVERSARIAL_REVIEW_LANE_FIRST_PASS_BURST_LIMIT',
+  ],
+  ['watcher.review_lane_min_share', null, 'ADVERSARIAL_REVIEW_LANE_MIN_SHARE'],
+  [
+    'watcher.review_lane_first_pass_urgent_age_ms',
+    null,
+    'ADVERSARIAL_REVIEW_LANE_FIRST_PASS_URGENT_AGE_MS',
+  ],
+  ['follow_up.hq_worker_tear_down_subprocess_timeout_ms', null, 'HQ_WORKER_TEAR_DOWN_TIMEOUT_MS'],
+  ['follow_up.hq_dispatch_subprocess_timeout_ms', null, 'HQ_DISPATCH_TIMEOUT_MS'],
+  ['roles.remediator', null, 'ADVERSARIAL_REVIEW_DEFAULT_REMEDIATOR'],
+  ['roles.remediator_fallback', null, 'ADVERSARIAL_REVIEW_REMEDIATOR_WORKER_CLASS_FALLBACK'],
+  ['roles.merge_agent_worker_class', null, 'ADVERSARIAL_REVIEW_MERGE_AGENT_WORKER_CLASS'],
+  ['roles.codex_worker_account_order'],
+  ['roles.build_pack_default_worker_class'],
+  ['roles.hermes.provider'],
+  ['roles.adversarial.merge_authority.enabled'],
+  ['roles.adversarial.merge_authority.autonomous_merge_execution_enabled'],
+  ['roles.adversarial.merge_authority.cap_rehead_enabled'],
+  ['roles.adversarial.merge_authority.cap_rehead_lifetime_cap'],
+  [
+    'roles.adversarial.merge_authority.merge_capability_enforcement',
+    null,
+    'MERGE_CAPABILITY_ENFORCEMENT',
+  ],
+  ['roles.adversarial.merge_authority.autonomous_closer_commit_clean_merge_enabled'],
+  ['roles.adversarial.merge_authority.strict_mode'],
+  ['roles.adversarial.merge_authority.lha.consume_attestations'],
+  [
+    'roles.adversarial.merge_authority.hammer_lifetime_ceiling',
+    null,
+    'AGENT_OS_ROLES_ADVERSARIAL_MERGE_AUTHORITY_HAMMER_LIFETIME_DISPATCH_CEILING',
+  ],
+  ['roles.adversarial.merge_authority.hammer_lifetime_dispatch_ceiling'],
+  ['roles.adversarial.merge_authority.no_ci_repositories'],
+  ['roles.adversarial.merge_authority.required_check_contexts'],
+  ['roles.adversarial.orchestration_mode'],
+  ['roles.adversarial.operator_logins'],
+  ['roles.adversarial.operator_label_actor_enforcement'],
+  ['roles.adversarial.handoff.enabled'],
+  ['roles.adversarial.handoff.review_to_remediation'],
+  ['roles.adversarial.handoff.remediation_to_rereview'],
+  ['roles.adversarial.handoff.final_to_hammer'],
+  ['roles.adversarial.handoff.max_per_pr_head'],
+  [
+    'roles.claude-code.fallback_path',
+    'AGENT_OS_ROLES_CLAUDE_CODE_FALLBACK_PATH',
+    'LITELLM_VK_FALLBACK_FOR_CLAUDE_CODE',
+  ],
+  ['roles.codex.fallback_path', null, 'LITELLM_VK_FALLBACK_FOR_CODEX'],
+  [
+    'roles.claude-reviewer-lacey.fallback_path',
+    'AGENT_OS_ROLES_CLAUDE_REVIEWER_LACEY_FALLBACK_PATH',
+    'LITELLM_VK_FALLBACK_FOR_CLAUDE_REVIEWER_LACEY',
+  ],
+  [
+    'roles.codex-reviewer-lacey.fallback_path',
+    'AGENT_OS_ROLES_CODEX_REVIEWER_LACEY_FALLBACK_PATH',
+    'LITELLM_VK_FALLBACK_FOR_CODEX_REVIEWER_LACEY',
+  ],
+  [
+    'roles.merge-agent.fallback_path',
+    'AGENT_OS_ROLES_MERGE_AGENT_FALLBACK_PATH',
+    'LITELLM_VK_FALLBACK_FOR_MERGE_AGENT',
+  ],
+  [
+    'roles.merge_agent_failure_recovery.fallback_path',
+    null,
+    'LITELLM_VK_FALLBACK_FOR_MERGE_AGENT_FAILURE_RECOVERY',
+  ],
+  [
+    'roles.clio-agent.fallback_path',
+    'AGENT_OS_ROLES_CLIO_AGENT_FALLBACK_PATH',
+    'LITELLM_VK_FALLBACK_FOR_CLIO_AGENT',
+  ],
+  ['roles.quota_probe.ok_tick_seconds'],
+  ['roles.quota_probe.exhausted_unknown_tick_seconds'],
+  ['roles.quota_probe.evidence_ttl_seconds'],
+  [
+    'oauth_broker.watchdog.portforward_self_heal_max_cycles',
+    null,
+    ['OAUTH_BROKER_WATCHDOG_PORTFORWARD_SELF_HEAL_MAX_CYCLES', Number],
+  ],
+  [
+    'oauth_broker.watchdog.broker_standby_readyz_url',
+    'AGENT_OS_OAUTH_BROKER_WATCHDOG_STANDBY_READYZ_URL',
+    'OAUTH_BROKER_WATCHDOG_STANDBY_READYZ_URL',
+  ],
+  [
+    'oauth_broker.watchdog.broker_standby_container_name',
+    'AGENT_OS_OAUTH_BROKER_WATCHDOG_STANDBY_CONTAINER_NAME',
+    'OAUTH_BROKER_WATCHDOG_STANDBY_CONTAINER_NAME',
+  ],
+  [
+    'oauth_broker.watchdog.bridge_startup_grace_seconds',
+    null,
+    ['OAUTH_BROKER_WATCHDOG_BRIDGE_STARTUP_GRACE_SECONDS', Number],
+  ],
+  [
+    'oauth_broker.watchdog.bridge_recovery_timeout_seconds',
+    null,
+    ['OAUTH_BROKER_WATCHDOG_BRIDGE_RECOVERY_TIMEOUT_SECONDS', Number],
+  ],
+  [
+    'oauth_broker.watchdog.credential_decay_warn_after_seconds',
+    null,
+    ['OAUTH_BROKER_WATCHDOG_CREDENTIAL_DECAY_WARN_AFTER_SECONDS', Number],
+  ],
+  [
+    'oauth_broker.watchdog.credential_decay_crit_after_seconds',
+    null,
+    ['OAUTH_BROKER_WATCHDOG_CREDENTIAL_DECAY_CRIT_AFTER_SECONDS', Number],
+  ],
+  [
+    'oauth_broker.watchdog.credential_decay_last_good_crit_expiry_margin_seconds',
+    null,
+    ['OAUTH_BROKER_WATCHDOG_CREDENTIAL_DECAY_LAST_GOOD_CRIT_EXPIRY_MARGIN_SECONDS', Number],
+  ],
+  [
+    'oauth_broker.watchdog.refresh_wedge_threshold_seconds',
+    null,
+    ['OAUTH_BROKER_WATCHDOG_REFRESH_WEDGE_THRESHOLD_SECONDS', Number],
+  ],
+  ['oauth_broker.claude_code_corp_bridge.port'],
+  ['oauth_broker.claude_code_corp_bridge.audit_context'],
+  ['oauth_broker.claude_code_corp_bridge.primary_url'],
+  ['oauth_broker.claude_code_corp_bridge.standby_url'],
+  [
+    'oauth_broker.claude_code_corp_bridge.watchdog_status_url',
+    null,
+    'OAUTH_BROKER_WATCHDOG_CLAUDE_CODE_CORP_STATUS_URL',
+  ],
+  [
+    'oauth_broker.claude_code_corp_bridge.secret_mirror_source',
+    null,
+    'CLAUDE_CODE_CORP_BRIDGE_SECRET_MIRROR_SRC',
+  ],
+  ['oauth_broker.keychain_bridge.auto_unlock.enabled', null, 'BRIDGE_AUTO_UNLOCK_ENABLED'],
+  ['oauth_broker.keychain_bridge.auto_unlock.command', null, 'BRIDGE_AUTO_UNLOCK_COMMAND'],
+  ['policy.dedup.uncommitted_line_threshold'],
+  ['agent_control.codex_runaway_guardrails.token_budget_per_session'],
+  ['agent_control.codex_runaway_guardrails.vocabulary_fatigue_window_commits'],
+  ['agent_control.codex_runaway_guardrails.vocabulary_fatigue_min_repeats'],
+  [
+    'agent_gateway.alert_bus_url',
+    'AGENT_OS_GBI_ALERT_BUS_URL',
+    'AGENT_OS_AGENT_GATEWAY_ALERT_BUS_URL',
+    'AGENT_GATEWAY_ALERT_BUS_URL',
+  ],
+  ['sentinel.profile', null, 'HQ_SENTINEL_PROFILE'],
+  ['sentinel.quiet_window', null, 'HQ_SENTINEL_QUIET_WINDOW'],
+  [
+    'sentinel.spec_drift.cycle_interval_seconds',
+    null,
+    'HQ_SENTINEL_SPEC_DRIFT_CYCLE_INTERVAL_SECONDS',
+  ],
+  ['sentinel.deploy_checkout.repo_path', null, 'HQ_SENTINEL_DEPLOY_CHECKOUT_REPO_PATH'],
+  [
+    'sentinel.deploy_checkout.scan_interval_seconds',
+    null,
+    'HQ_SENTINEL_DEPLOY_CHECKOUT_SCAN_INTERVAL_SECONDS',
+  ],
+  [
+    'sentinel.deploy_checkout.page_dedupe_seconds',
+    null,
+    'HQ_SENTINEL_DEPLOY_CHECKOUT_PAGE_DEDUPE_SECONDS',
+  ],
+  [
+    'sentinel.deploy_checkout.worker_identity_emails',
+    null,
+    'HQ_SENTINEL_DEPLOY_CHECKOUT_WORKER_IDENTITY_EMAILS',
+  ],
+  [
+    'sentinel.codex_compaction.rate_alarm_per_hour',
+    null,
+    'HQ_SENTINEL_CODEX_COMPACTION_RATE_ALARM_PER_HOUR',
+    'SENTINEL_CODEX_COMPACTION_RATE_ALARM_PER_HOUR',
+  ],
+  [
+    'sentinel.codex_compaction.finding_dedupe_seconds',
+    null,
+    'HQ_SENTINEL_CODEX_COMPACTION_FINDING_DEDUPE_SECONDS',
+  ],
+  [
+    'sentinel.convergence_stall.observed_repos',
+    null,
+    'HQ_SENTINEL_CONVERGENCE_STALL_OBSERVED_REPOS',
+  ],
+  [
+    'sentinel.convergence_stall.commit_window_seconds',
+    null,
+    'HQ_SENTINEL_CONVERGENCE_STALL_COMMIT_WINDOW_SECONDS',
+  ],
+  ['sentinel.convergence_stall.min_commits', null, 'HQ_SENTINEL_CONVERGENCE_STALL_MIN_COMMITS'],
+  [
+    'sentinel.convergence_stall.file_fetch_budget_per_cycle',
+    null,
+    'HQ_SENTINEL_CONVERGENCE_STALL_FILE_FETCH_BUDGET_PER_CYCLE',
+  ],
+  [
+    'sentinel.convergence_stall.finding_dedupe_seconds',
+    null,
+    'HQ_SENTINEL_CONVERGENCE_STALL_FINDING_DEDUPE_SECONDS',
+  ],
+  [
+    'sentinel.convergence_stall.repo_backoff_seconds',
+    null,
+    'HQ_SENTINEL_CONVERGENCE_STALL_REPO_BACKOFF_SECONDS',
+  ],
+  [
+    'sentinel.convergence_stall.observed_worker_classes',
+    null,
+    'HQ_SENTINEL_CONVERGENCE_STALL_OBSERVED_WORKER_CLASSES',
+  ],
+  [
+    'sentinel.pipeline_stability.rca_dispatch.worker_class',
+    null,
+    'HQ_SENTINEL_PIPELINE_STABILITY_RCA_DISPATCH_WORKER_CLASS',
+  ],
+  ['sentinel.detectors.litellm_routing_tier_outage.enabled'],
+  ['sentinel.detectors.litellm_routing_tier_outage.log_path'],
+  ['sentinel.detectors.litellm_routing_tier_outage.window_seconds'],
+  ['sentinel.detectors.litellm_routing_tier_outage.event_count_threshold'],
+  ['sentinel.detectors.litellm_routing_tier_outage.severity'],
+  ['sentinel.detectors.litellm_routing_tier_outage.comms_channels'],
+  ['sentinel.disk_headroom.top_consumer_roots'],
+  ['sentinel.disk_headroom.top_consumer_limit'],
+  ['sentinel.disk_headroom.df_timeout_seconds'],
+  ['sentinel.disk_headroom.du_timeout_seconds'],
+  ['sentinel.disk_headroom.sensor_failure_page_threshold'],
+  ['services.ports.hcp'],
+  ['services.hcp.bind_host'],
+  ['services.hcp.audit_keep_days'],
+  ['services.hcp.token_expired_keep_days'],
+  ['services.hcp.token_revoked_keep_days'],
+  ['services.hcp.idempotency_keep_days'],
+  ['services.hcp.confirmation_token_keep_minutes'],
+  ['services.hcp.comms_jobs_keep_days'],
+  ['services.hcp.rotation_cadence_days'],
+  ['services.hcp.console_capability_enforcement.default'],
+  ['services.hcp.destructive_capability_enforcement.default'],
+  ['services.hcp.persistent_agent_principals'],
+  ['services.hcp.op_rate_limit_regex'],
+  ['worker_pool.comms.responder.alert_lookback_hours'],
+  ['worker_pool.comms.responder.session_ttl_hours'],
+  [
+    'session_ledger.backend',
+    null,
+    ['AGENT_OS_SESSION_LEDGER_POSTGRES_RUNTIME', postgresRuntimeAlias],
+  ],
+  ['session_ledger.dsn'],
+  ['session_ledger.database_name'],
+  ['session_ledger.vdb.enabled', 'AGENT_OS_SESSION_LEDGER_VDB'],
+  ['session_ledger.vdb.direct_dsn'],
+  [
+    'session_ledger.vdb.allowCanonicalFallback',
+    'AGENT_OS_SESSION_LEDGER_VDB_ALLOW_CANONICAL_FALLBACK',
+  ],
+  ['session_ledger.exposure.score_half_life_days'],
+  ['session_ledger.exposure.quarantine_threshold'],
+  ['operator.email'],
+  ['operator.full_name'],
+  ['operator.first_name'],
+  ['operator.github_handle'],
+  ['github.org_email_domain', null, 'AGENT_OS_GITHUB_WORKSPACE_EMAIL_DOMAIN'],
+  ['github.workspace_email_domain'],
+  ['linear.team_name'],
+  ['linear.issue_prefix'],
+  ['op.vault'],
+  ['host.name'],
+  ['host.tailscale_hostname', 'AGENT_OS_TAILSCALE_HOSTNAME', 'TAILSCALE_HOSTNAME'],
+  ['tailscale.workstation_ip'],
+  ['tailscale.workstation_dns_name'],
+  ['tailscale.daily_driver_ip'],
+  ['tailscale.daily_driver_dns_name'],
+  ['tailscale.ipad_ip'],
+  ['tailscale.ipad_dns_name'],
+  ['tailscale.iphone_ip'],
+  ['tailscale.iphone_dns_name'],
+  ['launchd.label_prefix'],
+  ['openclaw.live'],
+  ['codex.acp_state_home'],
+  ['dispatch.default_worker_class_by_task_kind.coding'],
+  ['dispatch.default_worker_class_by_task_kind.research'],
+  ['dispatch.default_worker_class_by_task_kind.drafting'],
+  ['dispatch.default_worker_class_by_task_kind.analysis'],
+  ['dispatch.default_worker_class_by_task_kind.other'],
+  ['dispatch.default_worker_class_by_task_kind.merge'],
+  ['dispatch.default_worker_class_by_task_kind.merge_conflict_resolution'],
+  ['dispatch.default_worker_class_by_task_kind.merge_comment_only_followups'],
+  ['dispatch.default_worker_class_by_task_kind.merge_agent_failure_recovery'],
+  [
+    'feature_flags.merge_agent_final_pass_on_request_changes',
+    null,
+    'MERGE_AGENT_FINAL_PASS_ON_REQUEST_CHANGES',
+  ],
+  [
+    'feature_flags.dismiss_stale_request_changes_on_resolved',
+    null,
+    'DISMISS_STALE_REQUEST_CHANGES_ON_RESOLVED',
+  ],
+  [
+    'feature_flags.merge_agent_deterministic_convergence_terminal',
+    null,
+    'MERGE_AGENT_DETERMINISTIC_CONVERGENCE_TERMINAL',
+  ],
+  ['feature_flags.allow_missing_alert_to', null, 'ADVERSARIAL_REVIEW_ALLOW_MISSING_ALERT_TO'],
+  ['feature_flags.resume_context_envelope'],
+  [
+    'roles.merge_agent_failure_recovery.worker_class',
+    null,
+    'MERGE_AGENT_FAILURE_RECOVERY_WORKER_CLASS',
+  ],
+  ['handoff.final_to_hammer', null, 'ADVERSARIAL_REVIEW_HANDOFF_FINAL_TO_HAMMER'],
+];
+
+function deriveCanonical(path) {
+  return `AGENT_OS_${path.replace(/\./g, '_').toUpperCase()}`;
+}
+
 export const ENV_ALIASES = {
   // GRK-09: canonical AGENT_OS_GROK_* names, mirrored from the Python table.
   ...grokEnvAliases(),
-  'worker_pool.post_merge_actions.rca_worker_class': {
-    canonical: 'AGENT_OS_WORKER_POOL_POST_MERGE_ACTIONS_RCA_WORKER_CLASS',
-    aliases: [],
-  },
-  'apple.developer_dir': {
-    canonical: 'AGENT_OS_APPLE_DEVELOPER_DIR',
-    aliases: [],
-  },
-  ...Object.fromEntries([
-    'enabled',
-    'state_dir',
-    'binary_path',
-    'custodian_host',
-    'custodian_user',
-    'known_hosts_file',
-    'ssh_identity_file',
-    'custodian_principal',
-    'custodian_port',
-  ].map((key) => [`network.identity.${key}`, {
-    canonical: `AGENT_OS_NETWORK_IDENTITY_${key.toUpperCase()}`, aliases: [],
+  ...Object.fromEntries(ENV_ROWS.map(([path, canonical, ...aliases]) => [path, {
+    canonical: canonical ?? deriveCanonical(path),
+    aliases: aliases.map((alias) => (Array.isArray(alias) ? alias : [alias, identity])),
   }])),
-  'update.channel': {
-    canonical: 'AGENT_OS_UPDATE_CHANNEL',
-    aliases: [],
-  },
-  'ci.hosting.mode': {
-    canonical: 'AGENT_OS_CI_HOSTING_MODE',
-    aliases: [],
-  },
-  'frc.offlan_transport.enabled': {
-    canonical: 'AGENT_OS_FRC_OFFLAN_TRANSPORT_ENABLED',
-    aliases: [],
-  },
-  'frc.offlan_transport.port': {
-    canonical: 'AGENT_OS_FRC_OFFLAN_TRANSPORT_PORT',
-    aliases: [],
-  },
-  'frc.offlan_transport.kill_switch_path': {
-    canonical: 'AGENT_OS_FRC_OFFLAN_TRANSPORT_KILL_SWITCH_PATH',
-    aliases: [],
-  },
-  'roots.runtime_user': {
-    canonical: 'AGENT_OS_ROOTS_RUNTIME_USER',
-    aliases: [],
-  },
-  'roots.runtime_uid': {
-    canonical: 'AGENT_OS_ROOTS_RUNTIME_UID',
-    aliases: [],
-  },
-  'roots.admin_user': {
-    canonical: 'AGENT_OS_ROOTS_ADMIN_USER',
-    aliases: [],
-  },
-  'roots.admin_uid': {
-    canonical: 'AGENT_OS_ROOTS_ADMIN_UID',
-    aliases: [],
-  },
-  'roles.reviewer': {
-    canonical: 'AGENT_OS_ROLES_REVIEWER',
-    aliases: [['ADVERSARIAL_REVIEW_DEFAULT_REVIEWER', identity]],
-  },
-  // CFG promotion of pre-CFG adversarial-review knobs. Pre-CFG operators
-  // pinned these names directly in plists; preserve them as aliases so the
-  // migration is invisible to anyone who had already set a value.
-  'remediation.max_concurrent_jobs': {
-    canonical: 'AGENT_OS_REMEDIATION_MAX_CONCURRENT_JOBS',
-    aliases: [['ADVERSARIAL_REMEDIATION_MAX_CONCURRENT_JOBS', identity]],
-  },
-  'remediation.max_concurrent_jobs_ceiling': {
-    canonical: 'AGENT_OS_REMEDIATION_MAX_CONCURRENT_JOBS_CEILING',
-    aliases: [['ADVERSARIAL_REMEDIATION_MAX_CONCURRENT_JOBS_CEILING', identity]],
-  },
-  'reviewer.timeout_ms': {
-    canonical: 'AGENT_OS_REVIEWER_TIMEOUT_MS',
-    aliases: [['ADVERSARIAL_REVIEWER_TIMEOUT_MS', identity]],
-  },
-  'reviewer.first_output_timeout_ms': {
-    canonical: 'AGENT_OS_REVIEWER_FIRST_OUTPUT_TIMEOUT_MS',
-    aliases: [['ADVERSARIAL_REVIEWER_FIRST_OUTPUT_TIMEOUT_MS', identity]],
-  },
-  'reviewer.quota_check_enabled': {
-    canonical: 'AGENT_OS_REVIEWER_QUOTA_CHECK_ENABLED',
-    aliases: [['ADVERSARIAL_REVIEW_QUOTA_CHECK_ENABLED', identity]],
-  },
-  'reviewer.quota_status_dir': {
-    canonical: 'AGENT_OS_REVIEWER_QUOTA_STATUS_DIR',
-    aliases: [['ADVERSARIAL_REVIEW_QUOTA_STATUS_DIR', identity]],
-  },
-  'reviewer.no_progress_timeout_ms': {
-    canonical: 'AGENT_OS_REVIEWER_NO_PROGRESS_TIMEOUT_MS',
-    aliases: [['ADVERSARIAL_REVIEWER_PROGRESS_TIMEOUT_MS', identity]],
-  },
-  'reviewer.running_pass_timeout_seconds': {
-    canonical: 'AGENT_OS_REVIEWER_RUNNING_PASS_TIMEOUT_SECONDS',
-    aliases: [['ADVERSARIAL_REVIEW_RUNNING_PASS_TIMEOUT_SECONDS', identity]],
-  },
-  'reviewer.idle_timeout_seconds': {
-    canonical: 'AGENT_OS_REVIEWER_IDLE_TIMEOUT_SECONDS',
-    aliases: [['ADVERSARIAL_REVIEWER_IDLE_TIMEOUT_SECONDS', identity]],
-  },
-  'reviewer.ceiling_base_seconds': {
-    canonical: 'AGENT_OS_REVIEWER_CEILING_BASE_SECONDS',
-    aliases: [['ADVERSARIAL_REVIEWER_CEILING_BASE_SECONDS', identity]],
-  },
-  'reviewer.ceiling_max_seconds': {
-    canonical: 'AGENT_OS_REVIEWER_CEILING_MAX_SECONDS',
-    aliases: [['ADVERSARIAL_REVIEWER_CEILING_MAX_SECONDS', identity]],
-  },
-  'reviewer.memory.pressure.projected_headroom_floor_mb': {
-    canonical: 'AGENT_OS_REVIEWER_MEMORY_PRESSURE_PROJECTED_HEADROOM_FLOOR_MB',
-    aliases: [['ADVERSARIAL_REVIEWER_MEMORY_PRESSURE_PROJECTED_HEADROOM_FLOOR_MB', identity]],
-  },
-  'reviewer.memory.pressure.elevated_available_mb': {
-    canonical: 'AGENT_OS_REVIEWER_MEMORY_PRESSURE_ELEVATED_AVAILABLE_MB',
-    aliases: [['ADVERSARIAL_REVIEWER_MEMORY_PRESSURE_ELEVATED_AVAILABLE_MB', identity]],
-  },
-  'reviewer.memory.pressure.critical_available_mb': {
-    canonical: 'AGENT_OS_REVIEWER_MEMORY_PRESSURE_CRITICAL_AVAILABLE_MB',
-    aliases: [['ADVERSARIAL_REVIEWER_MEMORY_PRESSURE_CRITICAL_AVAILABLE_MB', identity]],
-  },
-  'reviewer.memory.pressure.elevated_swap_used_pct': {
-    canonical: 'AGENT_OS_REVIEWER_MEMORY_PRESSURE_ELEVATED_SWAP_USED_PCT',
-    aliases: [['ADVERSARIAL_REVIEWER_MEMORY_PRESSURE_ELEVATED_SWAP_USED_PCT', identity]],
-  },
-  'reviewer.memory.pressure.critical_swap_used_pct': {
-    canonical: 'AGENT_OS_REVIEWER_MEMORY_PRESSURE_CRITICAL_SWAP_USED_PCT',
-    aliases: [['ADVERSARIAL_REVIEWER_MEMORY_PRESSURE_CRITICAL_SWAP_USED_PCT', identity]],
-  },
-  'reviewer.memory.pressure.swap_pressure_available_mb': {
-    canonical: 'AGENT_OS_REVIEWER_MEMORY_PRESSURE_SWAP_PRESSURE_AVAILABLE_MB',
-    aliases: [['ADVERSARIAL_REVIEWER_MEMORY_PRESSURE_SWAP_PRESSURE_AVAILABLE_MB', identity]],
-  },
-  'reviewer.review_population_retry.max_attempts': {
-    canonical: 'AGENT_OS_REVIEWER_REVIEW_POPULATION_RETRY_MAX_ATTEMPTS',
-    aliases: [['ADVERSARIAL_REVIEW_POPULATION_RETRY_MAX_ATTEMPTS', identity]],
-  },
-  'reviewer.review_population_retry.backoff_seconds': {
-    canonical: 'AGENT_OS_REVIEWER_REVIEW_POPULATION_RETRY_BACKOFF_SECONDS',
-    aliases: [['ADVERSARIAL_REVIEW_POPULATION_RETRY_BACKOFF_SECONDS', identity]],
-  },
-  'worker_pool.tenure.enabled': {
-    canonical: 'AGENT_OS_WORKER_POOL_TENURE_ENABLED',
-    aliases: [],
-  },
-  'worker_pool.worker_process_niceness': {
-    canonical: 'AGENT_OS_WORKER_POOL_WORKER_PROCESS_NICENESS',
-    aliases: [],
-  },
-  'worker_pool.memory.dynamic.enabled': {
-    canonical: 'AGENT_OS_WORKER_POOL_MEMORY_DYNAMIC_ENABLED',
-    aliases: [['HQ_MEMORY_DYNAMIC_ENABLED', identity]],
-  },
-  'worker_pool.memory.dynamic.shadow_only': {
-    canonical: 'AGENT_OS_WORKER_POOL_MEMORY_DYNAMIC_SHADOW_ONLY',
-    aliases: [['HQ_MEMORY_DYNAMIC_SHADOW_ONLY', identity]],
-  },
-  'worker_pool.memory.dynamic.admit_percentile': {
-    canonical: 'AGENT_OS_WORKER_POOL_MEMORY_DYNAMIC_ADMIT_PERCENTILE',
-    aliases: [['HQ_MEMORY_DYNAMIC_ADMIT_PERCENTILE', identity]],
-  },
-  'worker_pool.memory.dynamic.pressure_margin_mb': {
-    canonical: 'AGENT_OS_WORKER_POOL_MEMORY_DYNAMIC_PRESSURE_MARGIN_MB',
-    aliases: [['HQ_MEMORY_DYNAMIC_PRESSURE_MARGIN_MB', identity]],
-  },
-  'worker_pool.memory.dynamic.rss_window_minutes': {
-    canonical: 'AGENT_OS_WORKER_POOL_MEMORY_DYNAMIC_RSS_WINDOW_MINUTES',
-    aliases: [['HQ_MEMORY_DYNAMIC_RSS_WINDOW_MINUTES', identity]],
-  },
-  'worker_pool.memory.dynamic.oss_model_reserve_mb': {
-    canonical: 'AGENT_OS_WORKER_POOL_MEMORY_DYNAMIC_OSS_MODEL_RESERVE_MB',
-    aliases: [['HQ_MEMORY_DYNAMIC_OSS_MODEL_RESERVE_MB', identity]],
-  },
-  'worker_pool.memory.dynamic.snapshot_stale_seconds': {
-    canonical: 'AGENT_OS_WORKER_POOL_MEMORY_DYNAMIC_SNAPSHOT_STALE_SECONDS',
-    aliases: [['HQ_MEMORY_DYNAMIC_SNAPSHOT_STALE_SECONDS', identity]],
-  },
-  'worker_pool.memory.dynamic.require_pressure_normal': {
-    canonical: 'AGENT_OS_WORKER_POOL_MEMORY_DYNAMIC_REQUIRE_PRESSURE_NORMAL',
-    aliases: [['HQ_MEMORY_DYNAMIC_REQUIRE_PRESSURE_NORMAL', identity]],
-  },
-  'worker_pool.dag.autowalk.deep_reconcile': {
-    canonical: 'AGENT_OS_WORKER_POOL_DAG_AUTOWALK_DEEP_RECONCILE',
-    aliases: [['HQ_AUTOWALK_DEEP_RECONCILE', identity]],
-  },
-  'worker_pool.memory_injection.enabled': {
-    canonical: 'AGENT_OS_WORKER_POOL_MEMORY_INJECTION_ENABLED',
-    aliases: [],
-  },
-  'worker_pool.memory_injection.max_entries': {
-    canonical: 'AGENT_OS_WORKER_POOL_MEMORY_INJECTION_MAX_ENTRIES',
-    aliases: [],
-  },
-  'worker_pool.memory_injection.max_chars': {
-    canonical: 'AGENT_OS_WORKER_POOL_MEMORY_INJECTION_MAX_CHARS',
-    aliases: [],
-  },
-  'worker_pool.memory_injection.max_per_contract': {
-    canonical: 'AGENT_OS_WORKER_POOL_MEMORY_INJECTION_MAX_PER_CONTRACT',
-    aliases: [],
-  },
-  'worker_pool.memory_injection.min_term_matches': {
-    canonical: 'AGENT_OS_WORKER_POOL_MEMORY_INJECTION_MIN_TERM_MATCHES',
-    aliases: [],
-  },
-  'worker_pool.memory_retention.enabled': {
-    canonical: 'AGENT_OS_WORKER_POOL_MEMORY_RETENTION_ENABLED',
-    aliases: [['HQ_MEMORY_RETENTION_ENABLED', identity]],
-  },
-  'worker_pool.memory_retention.shadow_only': {
-    canonical: 'AGENT_OS_WORKER_POOL_MEMORY_RETENTION_SHADOW_ONLY',
-    aliases: [['HQ_MEMORY_RETENTION_SHADOW_ONLY', identity]],
-  },
-  'worker_pool.dispatch.claude_batch_steer_enabled': {
-    canonical: 'AGENT_OS_WORKER_POOL_DISPATCH_CLAUDE_BATCH_STEER_ENABLED',
-    aliases: [['HQ_CLAUDE_BATCH_STEER', identity]],
-  },
-  'worker_pool.dispatch.codex_exec_mode': {
-    canonical: 'AGENT_OS_WORKER_POOL_DISPATCH_CODEX_EXEC_MODE',
-    aliases: [['HQ_CODEX_EXEC_MODE', identity]],
-  },
-  'worker_pool.dispatch.fleet_launch_health.enabled': {
-    canonical: 'AGENT_OS_WORKER_POOL_DISPATCH_FLEET_LAUNCH_HEALTH_ENABLED',
-    aliases: [['HQ_FLEET_LAUNCH_HEALTH_ENABLED', identity]],
-  },
-  'worker_pool.dispatch.fleet_launch_health.window_seconds': {
-    canonical: 'AGENT_OS_WORKER_POOL_DISPATCH_FLEET_LAUNCH_HEALTH_WINDOW_SECONDS',
-    aliases: [['HQ_FLEET_LAUNCH_HEALTH_WINDOW_SECONDS', identity]],
-  },
-  'worker_pool.dispatch.fleet_launch_health.min_samples': {
-    canonical: 'AGENT_OS_WORKER_POOL_DISPATCH_FLEET_LAUNCH_HEALTH_MIN_SAMPLES',
-    aliases: [['HQ_FLEET_LAUNCH_HEALTH_MIN_SAMPLES', identity]],
-  },
-  'worker_pool.dispatch.fleet_launch_health.unhealthy_fraction': {
-    canonical: 'AGENT_OS_WORKER_POOL_DISPATCH_FLEET_LAUNCH_HEALTH_UNHEALTHY_FRACTION',
-    aliases: [['HQ_FLEET_LAUNCH_HEALTH_UNHEALTHY_FRACTION', identity]],
-  },
-  'worker_pool.dispatch.fleet_launch_health.backoff_seconds': {
-    canonical: 'AGENT_OS_WORKER_POOL_DISPATCH_FLEET_LAUNCH_HEALTH_BACKOFF_SECONDS',
-    aliases: [['HQ_FLEET_LAUNCH_HEALTH_BACKOFF_SECONDS', identity]],
-  },
-  'worker_pool.dispatch.fleet_launch_health.canary_interval_seconds': {
-    canonical: 'AGENT_OS_WORKER_POOL_DISPATCH_FLEET_LAUNCH_HEALTH_CANARY_INTERVAL_SECONDS',
-    aliases: [['HQ_FLEET_LAUNCH_HEALTH_CANARY_INTERVAL_SECONDS', identity]],
-  },
-  'worker_pool.dispatch.goal_lineage.enabled': {
-    canonical: 'AGENT_OS_WORKER_POOL_DISPATCH_GOAL_LINEAGE_ENABLED',
-    aliases: [['HQ_GLN_LINEAGE_ENABLED', identity]],
-  },
-  'worker_pool.dispatch.goal_lineage.max_bytes': {
-    canonical: 'AGENT_OS_WORKER_POOL_DISPATCH_GOAL_LINEAGE_MAX_BYTES',
-    aliases: [['HQ_GLN_LINEAGE_MAX_BYTES', identity]],
-  },
-  'worker_pool.dispatch.goal_lineage.spec_excerpt_bytes': {
-    canonical: 'AGENT_OS_WORKER_POOL_DISPATCH_GOAL_LINEAGE_SPEC_EXCERPT_BYTES',
-    aliases: [['HQ_GLN_LINEAGE_SPEC_EXCERPT_BYTES', identity]],
-  },
-  'worker_pool.dispatch.substrate.swap_crit_requires_pressure': {
-    canonical: 'AGENT_OS_WORKER_POOL_DISPATCH_SUBSTRATE_SWAP_CRIT_REQUIRES_PRESSURE',
-    aliases: [['SUBSTRATE_SWAP_CRIT_REQUIRES_PRESSURE', identity]],
-  },
-  'worker_pool.dispatch.substrate.mem_pressure_crit_level': {
-    canonical: 'AGENT_OS_WORKER_POOL_DISPATCH_SUBSTRATE_MEM_PRESSURE_CRIT_LEVEL',
-    aliases: [['SUBSTRATE_MEM_PRESSURE_CRIT_LEVEL', identity]],
-  },
-  'worker_pool.shr.main_catchup_behind_threshold': {
-    canonical: 'AGENT_OS_WORKER_POOL_SHR_MAIN_CATCHUP_BEHIND_THRESHOLD',
-    aliases: [],
-  },
-  'worker_pool.shr.worker_kill_window_seconds': {
-    canonical: 'AGENT_OS_WORKER_POOL_SHR_WORKER_KILL_WINDOW_SECONDS',
-    aliases: [],
-  },
-  'worker_pool.shr.worker_kill_threshold': {
-    canonical: 'AGENT_OS_WORKER_POOL_SHR_WORKER_KILL_THRESHOLD',
-    aliases: [],
-  },
-  'worker_pool.shr.command_timeout_seconds': {
-    canonical: 'AGENT_OS_WORKER_POOL_SHR_COMMAND_TIMEOUT_SECONDS',
-    aliases: [],
-  },
-  'worker_pool.secrets.prewarm.enabled': {
-    canonical: 'AGENT_OS_WORKER_POOL_SECRETS_PREWARM_ENABLED',
-    aliases: [],
-  },
-  'worker_pool.secrets.prewarm.min_interval_seconds': {
-    canonical: 'AGENT_OS_WORKER_POOL_SECRETS_PREWARM_MIN_INTERVAL_SECONDS',
-    aliases: [],
-  },
-  'worker_pool.secrets.known_vaults': {
-    canonical: 'AGENT_OS_WORKER_POOL_SECRETS_KNOWN_VAULTS',
-    aliases: [],
-  },
-  'worker_pool.secrets.release_signing_private_key_ref': {
-    canonical: 'AGENT_OS_WORKER_POOL_SECRETS_RELEASE_SIGNING_PRIVATE_KEY_REF',
-    aliases: [],
-  },
-  'post_deploy_verify.enabled': {
-    canonical: 'AGENT_OS_POST_DEPLOY_VERIFY_ENABLED',
-    aliases: [['HQ_POST_DEPLOY_VERIFY_ENABLED', identity]],
-  },
-  'post_deploy_verify.shadow_only': {
-    canonical: 'AGENT_OS_POST_DEPLOY_VERIFY_SHADOW_ONLY',
-    aliases: [['HQ_POST_DEPLOY_VERIFY_SHADOW_ONLY', identity]],
-  },
-  'post_deploy_verify.spawn_timeout_seconds': {
-    canonical: 'AGENT_OS_POST_DEPLOY_VERIFY_SPAWN_TIMEOUT_SECONDS',
-    aliases: [['HQ_POST_DEPLOY_VERIFY_SPAWN_TIMEOUT_SECONDS', identity]],
-  },
-  'post_deploy_verify.spawn_ready_wait_seconds': {
-    canonical: 'AGENT_OS_POST_DEPLOY_VERIFY_SPAWN_READY_WAIT_SECONDS',
-    aliases: [['HQ_POST_DEPLOY_VERIFY_SPAWN_READY_WAIT_SECONDS', identity]],
-  },
-  'post_deploy_verify.boot_window_seconds': {
-    canonical: 'AGENT_OS_POST_DEPLOY_VERIFY_BOOT_WINDOW_SECONDS',
-    aliases: [['HQ_POST_DEPLOY_VERIFY_BOOT_WINDOW_SECONDS', identity]],
-  },
-  'post_deploy_verify.reminder_seconds': {
-    canonical: 'AGENT_OS_POST_DEPLOY_VERIFY_REMINDER_SECONDS',
-    aliases: [['HQ_POST_DEPLOY_VERIFY_REMINDER_SECONDS', identity]],
-  },
-  'deploy.post_merge_activation.enabled': {
-    canonical: 'AGENT_OS_POST_MERGE_ACTIVATION_ENABLED',
-    aliases: [['HQ_POST_MERGE_ACTIVATION_ENABLED', identity]],
-  },
-  'deploy.post_merge_activation.enforce': {
-    canonical: 'AGENT_OS_POST_MERGE_ACTIVATION_ENFORCE',
-    aliases: [['HQ_POST_MERGE_ACTIVATION_ENFORCE', identity]],
-  },
-  'deploy.post_merge_activation.dispatch_on_fail': {
-    canonical: 'AGENT_OS_POST_MERGE_ACTIVATION_DISPATCH_ON_FAIL',
-    aliases: [['HQ_POST_MERGE_ACTIVATION_DISPATCH_ON_FAIL', identity]],
-  },
-  'deploy.post_merge_activation.baseline_worker_boot_resolve_budget_seconds': {
-    canonical: 'AGENT_OS_POST_MERGE_ACTIVATION_BASELINE_WORKER_BOOT_RESOLVE_BUDGET_SECONDS',
-    aliases: [['HQ_POST_MERGE_ACTIVATION_BASELINE_WORKER_BOOT_RESOLVE_BUDGET_SECONDS', identity]],
-  },
-  'deploy.post_merge_activation.hold_alert_budget_seconds': {
-    canonical: 'AGENT_OS_POST_MERGE_ACTIVATION_HOLD_ALERT_BUDGET_SECONDS',
-    aliases: [['HQ_POST_MERGE_ACTIVATION_HOLD_ALERT_BUDGET_SECONDS', identity]],
-  },
-  'deploy.post_merge_activation.hold_alert_consecutive_passes': {
-    canonical: 'AGENT_OS_POST_MERGE_ACTIVATION_HOLD_ALERT_CONSECUTIVE_PASSES',
-    aliases: [['HQ_POST_MERGE_ACTIVATION_HOLD_ALERT_CONSECUTIVE_PASSES', identity]],
-  },
-  'reviewer.gemini.mode': {
-    canonical: 'AGENT_OS_REVIEWER_GEMINI_MODE',
-    aliases: [['ADVERSARIAL_REVIEW_GEMINI_REVIEWER_MODE', identity]],
-  },
-  'reviewer.gemini.runtime': {
-    canonical: 'AGENT_OS_REVIEWER_GEMINI_RUNTIME',
-    aliases: [['ADVERSARIAL_REVIEW_GEMINI_RUNTIME', identity]],
-  },
-  'reviewer.gemini.model': {
-    canonical: 'AGENT_OS_REVIEWER_GEMINI_MODEL',
-    aliases: [['ADVERSARIAL_REVIEW_GEMINI_MODEL', identity]],
-  },
-  'reviewer.gemini.antigravity.print_timeout_ms': {
-    canonical: 'AGENT_OS_REVIEWER_GEMINI_ANTIGRAVITY_PRINT_TIMEOUT_MS',
-    aliases: [['ADVERSARIAL_REVIEW_GEMINI_ANTIGRAVITY_PRINT_TIMEOUT_MS', identity]],
-  },
-  'watcher.max_drain_wait_ms': {
-    canonical: 'AGENT_OS_WATCHER_MAX_DRAIN_WAIT_MS',
-    aliases: [['ADVERSARIAL_WATCHER_DRAIN_MAX_MS', identity]],
-  },
-  'watcher.pending_draft_review_respawn_age_seconds': {
-    canonical: 'AGENT_OS_WATCHER_PENDING_DRAFT_REVIEW_RESPAWN_AGE_SECONDS',
-    aliases: [['ADVERSARIAL_REVIEW_PENDING_DRAFT_RESPAWN_AGE_SECONDS', identity]],
-  },
-  'watcher.stuck_dispatch_alert_debounce_ms': {
-    canonical: 'AGENT_OS_WATCHER_STUCK_DISPATCH_ALERT_DEBOUNCE_MS',
-    aliases: [['ADVERSARIAL_STUCK_DISPATCH_ALERT_DEBOUNCE_MS', identity]],
-  },
-  'watcher.first_pass_reviewer_pool_max_concurrent_reviewers': {
-    canonical: 'AGENT_OS_WATCHER_FIRST_PASS_REVIEWER_POOL_MAX_CONCURRENT_REVIEWERS',
-    aliases: [
-      ['ADVERSARIAL_FIRST_PASS_REVIEWER_POOL_MAX_CONCURRENT', identity],
-      ['ADVERSARIAL_FIRST_PASS_REVIEWER_MAX_CONCURRENT', identity],
-      ['ADVERSARIAL_REVIEWER_POOL_MAX_CONCURRENT', identity],
-    ],
-  },
-  'watcher.first_pass_review_queue_depth_failover_threshold': {
-    canonical: 'AGENT_OS_WATCHER_FIRST_PASS_REVIEW_QUEUE_DEPTH_FAILOVER_THRESHOLD',
-    aliases: [['ADVERSARIAL_REVIEW_FIRST_PASS_QUEUE_DEPTH_FAILOVER_THRESHOLD', identity]],
-  },
-  'watcher.rereview_queue_depth_failover_threshold': {
-    canonical: 'AGENT_OS_WATCHER_REREVIEW_QUEUE_DEPTH_FAILOVER_THRESHOLD',
-    aliases: [['ADVERSARIAL_REVIEW_REREVIEW_QUEUE_DEPTH_FAILOVER_THRESHOLD', identity]],
-  },
-  'watcher.ama_hammer_dispatch_mode': {
-    canonical: 'AGENT_OS_WATCHER_AMA_HAMMER_DISPATCH_MODE',
-    aliases: [['ADVERSARIAL_AMA_HAMMER_DISPATCH_MODE', identity]],
-  },
-  'watcher.review_lane_first_pass_burst_limit': {
-    canonical: 'AGENT_OS_WATCHER_REVIEW_LANE_FIRST_PASS_BURST_LIMIT',
-    aliases: [['ADVERSARIAL_REVIEW_LANE_FIRST_PASS_BURST_LIMIT', identity]],
-  },
-  'watcher.review_lane_min_share': {
-    canonical: 'AGENT_OS_WATCHER_REVIEW_LANE_MIN_SHARE',
-    aliases: [['ADVERSARIAL_REVIEW_LANE_MIN_SHARE', identity]],
-  },
-  'watcher.review_lane_first_pass_urgent_age_ms': {
-    canonical: 'AGENT_OS_WATCHER_REVIEW_LANE_FIRST_PASS_URGENT_AGE_MS',
-    aliases: [['ADVERSARIAL_REVIEW_LANE_FIRST_PASS_URGENT_AGE_MS', identity]],
-  },
-  'follow_up.hq_worker_tear_down_subprocess_timeout_ms': {
-    canonical: 'AGENT_OS_FOLLOW_UP_HQ_WORKER_TEAR_DOWN_SUBPROCESS_TIMEOUT_MS',
-    aliases: [['HQ_WORKER_TEAR_DOWN_TIMEOUT_MS', identity]],
-  },
-  'follow_up.hq_dispatch_subprocess_timeout_ms': {
-    canonical: 'AGENT_OS_FOLLOW_UP_HQ_DISPATCH_SUBPROCESS_TIMEOUT_MS',
-    aliases: [['HQ_DISPATCH_TIMEOUT_MS', identity]],
-  },
-  'roles.remediator': {
-    canonical: 'AGENT_OS_ROLES_REMEDIATOR',
-    // YAML and both env names share the schema's corporate alias normalization.
-    aliases: [['ADVERSARIAL_REVIEW_DEFAULT_REMEDIATOR', identity]],
-  },
-  // The legacy env toggle from AR#859 stays honored as an alias, comma-separated.
-  'roles.remediator_fallback': {
-    canonical: 'AGENT_OS_ROLES_REMEDIATOR_FALLBACK',
-    aliases: [['ADVERSARIAL_REVIEW_REMEDIATOR_WORKER_CLASS_FALLBACK', identity]],
-  },
-  'roles.merge_agent_worker_class': {
-    canonical: 'AGENT_OS_ROLES_MERGE_AGENT_WORKER_CLASS',
-    aliases: [['ADVERSARIAL_REVIEW_MERGE_AGENT_WORKER_CLASS', identity]],
-  },
-  'roles.codex_worker_account_order': {
-    canonical: 'AGENT_OS_ROLES_CODEX_WORKER_ACCOUNT_ORDER',
-    aliases: [],
-  },
-  'roles.build_pack_default_worker_class': {
-    canonical: 'AGENT_OS_ROLES_BUILD_PACK_DEFAULT_WORKER_CLASS',
-    aliases: [],
-  },
-  'roles.hermes.provider': {
-    canonical: 'AGENT_OS_ROLES_HERMES_PROVIDER',
-    aliases: [],
-  },
-  'roles.adversarial.merge_authority.enabled': {
-    canonical: 'AGENT_OS_ROLES_ADVERSARIAL_MERGE_AUTHORITY_ENABLED',
-    aliases: [],
-  },
-  'roles.adversarial.merge_authority.autonomous_merge_execution_enabled': {
-    canonical: 'AGENT_OS_ROLES_ADVERSARIAL_MERGE_AUTHORITY_AUTONOMOUS_MERGE_EXECUTION_ENABLED',
-    aliases: [],
-  },
-  'roles.adversarial.merge_authority.cap_rehead_enabled': {
-    canonical: 'AGENT_OS_ROLES_ADVERSARIAL_MERGE_AUTHORITY_CAP_REHEAD_ENABLED', aliases: [],
-  },
-  'roles.adversarial.merge_authority.cap_rehead_lifetime_cap': {
-    canonical: 'AGENT_OS_ROLES_ADVERSARIAL_MERGE_AUTHORITY_CAP_REHEAD_LIFETIME_CAP', aliases: [],
-  },
-  'roles.adversarial.merge_authority.merge_capability_enforcement': {
-    canonical: 'AGENT_OS_ROLES_ADVERSARIAL_MERGE_AUTHORITY_MERGE_CAPABILITY_ENFORCEMENT',
-    aliases: [['MERGE_CAPABILITY_ENFORCEMENT', identity]],
-  },
-  'roles.adversarial.merge_authority.autonomous_closer_commit_clean_merge_enabled': {
-    canonical: 'AGENT_OS_ROLES_ADVERSARIAL_MERGE_AUTHORITY_AUTONOMOUS_CLOSER_COMMIT_CLEAN_MERGE_ENABLED',
-    aliases: [],
-  },
-  'roles.adversarial.merge_authority.strict_mode': {
-    canonical: 'AGENT_OS_ROLES_ADVERSARIAL_MERGE_AUTHORITY_STRICT_MODE',
-    aliases: [],
-  },
-  'roles.adversarial.merge_authority.lha.consume_attestations': {
-    canonical: 'AGENT_OS_ROLES_ADVERSARIAL_MERGE_AUTHORITY_LHA_CONSUME_ATTESTATIONS',
-    aliases: [],
-  },
-  'roles.adversarial.merge_authority.hammer_lifetime_ceiling': {
-    canonical: 'AGENT_OS_ROLES_ADVERSARIAL_MERGE_AUTHORITY_HAMMER_LIFETIME_CEILING',
-    aliases: [['AGENT_OS_ROLES_ADVERSARIAL_MERGE_AUTHORITY_HAMMER_LIFETIME_DISPATCH_CEILING', identity]],
-  },
-  'roles.adversarial.merge_authority.hammer_lifetime_dispatch_ceiling': {
-    canonical: 'AGENT_OS_ROLES_ADVERSARIAL_MERGE_AUTHORITY_HAMMER_LIFETIME_DISPATCH_CEILING',
-    aliases: [],
-  },
-  'roles.adversarial.merge_authority.no_ci_repositories': {
-    canonical: 'AGENT_OS_ROLES_ADVERSARIAL_MERGE_AUTHORITY_NO_CI_REPOSITORIES',
-    aliases: [],
-  },
-  'roles.adversarial.merge_authority.required_check_contexts': {
-    canonical: 'AGENT_OS_ROLES_ADVERSARIAL_MERGE_AUTHORITY_REQUIRED_CHECK_CONTEXTS',
-    aliases: [],
-  },
-  'roles.adversarial.orchestration_mode': {
-    canonical: 'AGENT_OS_ROLES_ADVERSARIAL_ORCHESTRATION_MODE',
-    aliases: [],
-  },
-  'roles.adversarial.operator_logins': {
-    canonical: 'AGENT_OS_ROLES_ADVERSARIAL_OPERATOR_LOGINS',
-    aliases: [],
-  },
-  'roles.adversarial.operator_label_actor_enforcement': {
-    canonical: 'AGENT_OS_ROLES_ADVERSARIAL_OPERATOR_LABEL_ACTOR_ENFORCEMENT',
-    aliases: [],
-  },
-  'roles.adversarial.handoff.enabled': {
-    canonical: 'AGENT_OS_ROLES_ADVERSARIAL_HANDOFF_ENABLED',
-    aliases: [],
-  },
-  'roles.adversarial.handoff.review_to_remediation': {
-    canonical: 'AGENT_OS_ROLES_ADVERSARIAL_HANDOFF_REVIEW_TO_REMEDIATION',
-    aliases: [],
-  },
-  'roles.adversarial.handoff.remediation_to_rereview': {
-    canonical: 'AGENT_OS_ROLES_ADVERSARIAL_HANDOFF_REMEDIATION_TO_REREVIEW',
-    aliases: [],
-  },
-  'roles.adversarial.handoff.final_to_hammer': {
-    canonical: 'AGENT_OS_ROLES_ADVERSARIAL_HANDOFF_FINAL_TO_HAMMER',
-    aliases: [],
-  },
-  'roles.adversarial.handoff.max_per_pr_head': {
-    canonical: 'AGENT_OS_ROLES_ADVERSARIAL_HANDOFF_MAX_PER_PR_HEAD',
-    aliases: [],
-  },
-  ...buildRoleFallbackEnvAliases(),
-  'roles.quota_probe.ok_tick_seconds': {
-    canonical: 'AGENT_OS_ROLES_QUOTA_PROBE_OK_TICK_SECONDS',
-    aliases: [],
-  },
-  'roles.quota_probe.exhausted_unknown_tick_seconds': {
-    canonical: 'AGENT_OS_ROLES_QUOTA_PROBE_EXHAUSTED_UNKNOWN_TICK_SECONDS',
-    aliases: [],
-  },
-  'roles.quota_probe.evidence_ttl_seconds': {
-    canonical: 'AGENT_OS_ROLES_QUOTA_PROBE_EVIDENCE_TTL_SECONDS',
-    aliases: [],
-  },
-  'oauth_broker.watchdog.portforward_self_heal_max_cycles': {
-    canonical: 'AGENT_OS_OAUTH_BROKER_WATCHDOG_PORTFORWARD_SELF_HEAL_MAX_CYCLES',
-    aliases: [['OAUTH_BROKER_WATCHDOG_PORTFORWARD_SELF_HEAL_MAX_CYCLES', Number]],
-  },
-  'oauth_broker.watchdog.broker_standby_readyz_url': {
-    canonical: 'AGENT_OS_OAUTH_BROKER_WATCHDOG_STANDBY_READYZ_URL',
-    aliases: [['OAUTH_BROKER_WATCHDOG_STANDBY_READYZ_URL', identity]],
-  },
-  'oauth_broker.watchdog.broker_standby_container_name': {
-    canonical: 'AGENT_OS_OAUTH_BROKER_WATCHDOG_STANDBY_CONTAINER_NAME',
-    aliases: [['OAUTH_BROKER_WATCHDOG_STANDBY_CONTAINER_NAME', identity]],
-  },
-  'oauth_broker.watchdog.bridge_startup_grace_seconds': {
-    canonical: 'AGENT_OS_OAUTH_BROKER_WATCHDOG_BRIDGE_STARTUP_GRACE_SECONDS',
-    aliases: [['OAUTH_BROKER_WATCHDOG_BRIDGE_STARTUP_GRACE_SECONDS', Number]],
-  },
-  'oauth_broker.watchdog.bridge_recovery_timeout_seconds': {
-    canonical: 'AGENT_OS_OAUTH_BROKER_WATCHDOG_BRIDGE_RECOVERY_TIMEOUT_SECONDS',
-    aliases: [['OAUTH_BROKER_WATCHDOG_BRIDGE_RECOVERY_TIMEOUT_SECONDS', Number]],
-  },
-  'oauth_broker.watchdog.credential_decay_warn_after_seconds': {
-    canonical: 'AGENT_OS_OAUTH_BROKER_WATCHDOG_CREDENTIAL_DECAY_WARN_AFTER_SECONDS',
-    aliases: [['OAUTH_BROKER_WATCHDOG_CREDENTIAL_DECAY_WARN_AFTER_SECONDS', Number]],
-  },
-  'oauth_broker.watchdog.credential_decay_crit_after_seconds': {
-    canonical: 'AGENT_OS_OAUTH_BROKER_WATCHDOG_CREDENTIAL_DECAY_CRIT_AFTER_SECONDS',
-    aliases: [['OAUTH_BROKER_WATCHDOG_CREDENTIAL_DECAY_CRIT_AFTER_SECONDS', Number]],
-  },
-  'oauth_broker.watchdog.credential_decay_last_good_crit_expiry_margin_seconds': {
-    canonical:
-      'AGENT_OS_OAUTH_BROKER_WATCHDOG_CREDENTIAL_DECAY_LAST_GOOD_CRIT_EXPIRY_MARGIN_SECONDS',
-    aliases: [
-      ['OAUTH_BROKER_WATCHDOG_CREDENTIAL_DECAY_LAST_GOOD_CRIT_EXPIRY_MARGIN_SECONDS', Number],
-    ],
-  },
-  'oauth_broker.watchdog.refresh_wedge_threshold_seconds': {
-    canonical: 'AGENT_OS_OAUTH_BROKER_WATCHDOG_REFRESH_WEDGE_THRESHOLD_SECONDS',
-    aliases: [['OAUTH_BROKER_WATCHDOG_REFRESH_WEDGE_THRESHOLD_SECONDS', Number]],
-  },
-  'oauth_broker.claude_code_corp_bridge.port': {
-    canonical: 'AGENT_OS_OAUTH_BROKER_CLAUDE_CODE_CORP_BRIDGE_PORT',
-    aliases: [],
-  },
-  'oauth_broker.claude_code_corp_bridge.audit_context': {
-    canonical: 'AGENT_OS_OAUTH_BROKER_CLAUDE_CODE_CORP_BRIDGE_AUDIT_CONTEXT',
-    aliases: [],
-  },
-  'oauth_broker.claude_code_corp_bridge.primary_url': {
-    canonical: 'AGENT_OS_OAUTH_BROKER_CLAUDE_CODE_CORP_BRIDGE_PRIMARY_URL',
-    aliases: [],
-  },
-  'oauth_broker.claude_code_corp_bridge.standby_url': {
-    canonical: 'AGENT_OS_OAUTH_BROKER_CLAUDE_CODE_CORP_BRIDGE_STANDBY_URL',
-    aliases: [],
-  },
-  'oauth_broker.claude_code_corp_bridge.watchdog_status_url': {
-    canonical: 'AGENT_OS_OAUTH_BROKER_CLAUDE_CODE_CORP_BRIDGE_WATCHDOG_STATUS_URL',
-    aliases: [['OAUTH_BROKER_WATCHDOG_CLAUDE_CODE_CORP_STATUS_URL', identity]],
-  },
-  'oauth_broker.claude_code_corp_bridge.secret_mirror_source': {
-    canonical: 'AGENT_OS_OAUTH_BROKER_CLAUDE_CODE_CORP_BRIDGE_SECRET_MIRROR_SOURCE',
-    aliases: [['CLAUDE_CODE_CORP_BRIDGE_SECRET_MIRROR_SRC', identity]],
-  },
-  'oauth_broker.keychain_bridge.auto_unlock.enabled': {
-    canonical: 'AGENT_OS_OAUTH_BROKER_KEYCHAIN_BRIDGE_AUTO_UNLOCK_ENABLED',
-    aliases: [['BRIDGE_AUTO_UNLOCK_ENABLED', identity]],
-  },
-  'oauth_broker.keychain_bridge.auto_unlock.command': {
-    canonical: 'AGENT_OS_OAUTH_BROKER_KEYCHAIN_BRIDGE_AUTO_UNLOCK_COMMAND',
-    aliases: [['BRIDGE_AUTO_UNLOCK_COMMAND', identity]],
-  },
-  'policy.dedup.uncommitted_line_threshold': {
-    canonical: 'AGENT_OS_POLICY_DEDUP_UNCOMMITTED_LINE_THRESHOLD',
-    aliases: [],
-  },
-  'agent_control.codex_runaway_guardrails.token_budget_per_session': {
-    canonical: 'AGENT_OS_AGENT_CONTROL_CODEX_RUNAWAY_GUARDRAILS_TOKEN_BUDGET_PER_SESSION',
-    aliases: [],
-  },
-  'agent_control.codex_runaway_guardrails.vocabulary_fatigue_window_commits': {
-    canonical: 'AGENT_OS_AGENT_CONTROL_CODEX_RUNAWAY_GUARDRAILS_VOCABULARY_FATIGUE_WINDOW_COMMITS',
-    aliases: [],
-  },
-  'agent_control.codex_runaway_guardrails.vocabulary_fatigue_min_repeats': {
-    canonical: 'AGENT_OS_AGENT_CONTROL_CODEX_RUNAWAY_GUARDRAILS_VOCABULARY_FATIGUE_MIN_REPEATS',
-    aliases: [],
-  },
-  'agent_gateway.alert_bus_url': {
-    canonical: 'AGENT_OS_GBI_ALERT_BUS_URL',
-    aliases: [
-      ['AGENT_OS_AGENT_GATEWAY_ALERT_BUS_URL', identity],
-      ['AGENT_GATEWAY_ALERT_BUS_URL', identity],
-    ],
-  },
-  'sentinel.profile': {
-    canonical: 'AGENT_OS_SENTINEL_PROFILE',
-    aliases: [['HQ_SENTINEL_PROFILE', identity]],
-  },
-  'sentinel.quiet_window': {
-    canonical: 'AGENT_OS_SENTINEL_QUIET_WINDOW',
-    aliases: [['HQ_SENTINEL_QUIET_WINDOW', identity]],
-  },
-  'sentinel.spec_drift.cycle_interval_seconds': {
-    canonical: 'AGENT_OS_SENTINEL_SPEC_DRIFT_CYCLE_INTERVAL_SECONDS',
-    aliases: [['HQ_SENTINEL_SPEC_DRIFT_CYCLE_INTERVAL_SECONDS', identity]],
-  },
-  'sentinel.deploy_checkout.repo_path': {
-    canonical: 'AGENT_OS_SENTINEL_DEPLOY_CHECKOUT_REPO_PATH',
-    aliases: [['HQ_SENTINEL_DEPLOY_CHECKOUT_REPO_PATH', identity]],
-  },
-  'sentinel.deploy_checkout.scan_interval_seconds': {
-    canonical: 'AGENT_OS_SENTINEL_DEPLOY_CHECKOUT_SCAN_INTERVAL_SECONDS',
-    aliases: [['HQ_SENTINEL_DEPLOY_CHECKOUT_SCAN_INTERVAL_SECONDS', identity]],
-  },
-  'sentinel.deploy_checkout.page_dedupe_seconds': {
-    canonical: 'AGENT_OS_SENTINEL_DEPLOY_CHECKOUT_PAGE_DEDUPE_SECONDS',
-    aliases: [['HQ_SENTINEL_DEPLOY_CHECKOUT_PAGE_DEDUPE_SECONDS', identity]],
-  },
-  'sentinel.deploy_checkout.worker_identity_emails': {
-    canonical: 'AGENT_OS_SENTINEL_DEPLOY_CHECKOUT_WORKER_IDENTITY_EMAILS',
-    aliases: [['HQ_SENTINEL_DEPLOY_CHECKOUT_WORKER_IDENTITY_EMAILS', identity]],
-  },
-  'sentinel.codex_compaction.rate_alarm_per_hour': {
-    canonical: 'AGENT_OS_SENTINEL_CODEX_COMPACTION_RATE_ALARM_PER_HOUR',
-    aliases: [
-      ['HQ_SENTINEL_CODEX_COMPACTION_RATE_ALARM_PER_HOUR', identity],
-      ['SENTINEL_CODEX_COMPACTION_RATE_ALARM_PER_HOUR', identity],
-    ],
-  },
-  'sentinel.codex_compaction.finding_dedupe_seconds': {
-    canonical: 'AGENT_OS_SENTINEL_CODEX_COMPACTION_FINDING_DEDUPE_SECONDS',
-    aliases: [['HQ_SENTINEL_CODEX_COMPACTION_FINDING_DEDUPE_SECONDS', identity]],
-  },
-  'sentinel.convergence_stall.observed_repos': {
-    canonical: 'AGENT_OS_SENTINEL_CONVERGENCE_STALL_OBSERVED_REPOS',
-    aliases: [['HQ_SENTINEL_CONVERGENCE_STALL_OBSERVED_REPOS', identity]],
-  },
-  'sentinel.convergence_stall.commit_window_seconds': {
-    canonical: 'AGENT_OS_SENTINEL_CONVERGENCE_STALL_COMMIT_WINDOW_SECONDS',
-    aliases: [['HQ_SENTINEL_CONVERGENCE_STALL_COMMIT_WINDOW_SECONDS', identity]],
-  },
-  'sentinel.convergence_stall.min_commits': {
-    canonical: 'AGENT_OS_SENTINEL_CONVERGENCE_STALL_MIN_COMMITS',
-    aliases: [['HQ_SENTINEL_CONVERGENCE_STALL_MIN_COMMITS', identity]],
-  },
-  'sentinel.convergence_stall.file_fetch_budget_per_cycle': {
-    canonical: 'AGENT_OS_SENTINEL_CONVERGENCE_STALL_FILE_FETCH_BUDGET_PER_CYCLE',
-    aliases: [['HQ_SENTINEL_CONVERGENCE_STALL_FILE_FETCH_BUDGET_PER_CYCLE', identity]],
-  },
-  'sentinel.convergence_stall.finding_dedupe_seconds': {
-    canonical: 'AGENT_OS_SENTINEL_CONVERGENCE_STALL_FINDING_DEDUPE_SECONDS',
-    aliases: [['HQ_SENTINEL_CONVERGENCE_STALL_FINDING_DEDUPE_SECONDS', identity]],
-  },
-  'sentinel.convergence_stall.repo_backoff_seconds': {
-    canonical: 'AGENT_OS_SENTINEL_CONVERGENCE_STALL_REPO_BACKOFF_SECONDS',
-    aliases: [['HQ_SENTINEL_CONVERGENCE_STALL_REPO_BACKOFF_SECONDS', identity]],
-  },
-  'sentinel.convergence_stall.observed_worker_classes': {
-    canonical: 'AGENT_OS_SENTINEL_CONVERGENCE_STALL_OBSERVED_WORKER_CLASSES',
-    aliases: [['HQ_SENTINEL_CONVERGENCE_STALL_OBSERVED_WORKER_CLASSES', identity]],
-  },
-  'sentinel.pipeline_stability.rca_dispatch.worker_class': {
-    canonical: 'AGENT_OS_SENTINEL_PIPELINE_STABILITY_RCA_DISPATCH_WORKER_CLASS',
-    aliases: [['HQ_SENTINEL_PIPELINE_STABILITY_RCA_DISPATCH_WORKER_CLASS', identity]],
-  },
-  'sentinel.detectors.litellm_routing_tier_outage.enabled': {
-    canonical: 'AGENT_OS_SENTINEL_DETECTORS_LITELLM_ROUTING_TIER_OUTAGE_ENABLED',
-    aliases: [],
-  },
-  'sentinel.detectors.litellm_routing_tier_outage.log_path': {
-    canonical: 'AGENT_OS_SENTINEL_DETECTORS_LITELLM_ROUTING_TIER_OUTAGE_LOG_PATH',
-    aliases: [],
-  },
-  'sentinel.detectors.litellm_routing_tier_outage.window_seconds': {
-    canonical: 'AGENT_OS_SENTINEL_DETECTORS_LITELLM_ROUTING_TIER_OUTAGE_WINDOW_SECONDS',
-    aliases: [],
-  },
-  'sentinel.detectors.litellm_routing_tier_outage.event_count_threshold': {
-    canonical: 'AGENT_OS_SENTINEL_DETECTORS_LITELLM_ROUTING_TIER_OUTAGE_EVENT_COUNT_THRESHOLD',
-    aliases: [],
-  },
-  'sentinel.detectors.litellm_routing_tier_outage.severity': {
-    canonical: 'AGENT_OS_SENTINEL_DETECTORS_LITELLM_ROUTING_TIER_OUTAGE_SEVERITY',
-    aliases: [],
-  },
-  'sentinel.detectors.litellm_routing_tier_outage.comms_channels': {
-    canonical: 'AGENT_OS_SENTINEL_DETECTORS_LITELLM_ROUTING_TIER_OUTAGE_COMMS_CHANNELS',
-    aliases: [],
-  },
-  'sentinel.disk_headroom.top_consumer_roots': {
-    canonical: 'AGENT_OS_SENTINEL_DISK_HEADROOM_TOP_CONSUMER_ROOTS',
-    aliases: [],
-  },
-  'sentinel.disk_headroom.top_consumer_limit': {
-    canonical: 'AGENT_OS_SENTINEL_DISK_HEADROOM_TOP_CONSUMER_LIMIT',
-    aliases: [],
-  },
-  'sentinel.disk_headroom.df_timeout_seconds': {
-    canonical: 'AGENT_OS_SENTINEL_DISK_HEADROOM_DF_TIMEOUT_SECONDS',
-    aliases: [],
-  },
-  'sentinel.disk_headroom.du_timeout_seconds': {
-    canonical: 'AGENT_OS_SENTINEL_DISK_HEADROOM_DU_TIMEOUT_SECONDS',
-    aliases: [],
-  },
-  'sentinel.disk_headroom.sensor_failure_page_threshold': {
-    canonical: 'AGENT_OS_SENTINEL_DISK_HEADROOM_SENSOR_FAILURE_PAGE_THRESHOLD',
-    aliases: [],
-  },
-  'services.ports.hcp': {
-    canonical: 'AGENT_OS_SERVICES_PORTS_HCP',
-    aliases: [],
-  },
-  'services.hcp.bind_host': {
-    canonical: 'AGENT_OS_SERVICES_HCP_BIND_HOST',
-    aliases: [],
-  },
-  'services.hcp.audit_keep_days': {
-    canonical: 'AGENT_OS_SERVICES_HCP_AUDIT_KEEP_DAYS',
-    aliases: [],
-  },
-  'services.hcp.token_expired_keep_days': {
-    canonical: 'AGENT_OS_SERVICES_HCP_TOKEN_EXPIRED_KEEP_DAYS',
-    aliases: [],
-  },
-  'services.hcp.token_revoked_keep_days': {
-    canonical: 'AGENT_OS_SERVICES_HCP_TOKEN_REVOKED_KEEP_DAYS',
-    aliases: [],
-  },
-  'services.hcp.idempotency_keep_days': {
-    canonical: 'AGENT_OS_SERVICES_HCP_IDEMPOTENCY_KEEP_DAYS',
-    aliases: [],
-  },
-  'services.hcp.confirmation_token_keep_minutes': {
-    canonical: 'AGENT_OS_SERVICES_HCP_CONFIRMATION_TOKEN_KEEP_MINUTES',
-    aliases: [],
-  },
-  'services.hcp.comms_jobs_keep_days': {
-    canonical: 'AGENT_OS_SERVICES_HCP_COMMS_JOBS_KEEP_DAYS',
-    aliases: [],
-  },
-  'services.hcp.rotation_cadence_days': {
-    canonical: 'AGENT_OS_SERVICES_HCP_ROTATION_CADENCE_DAYS',
-    aliases: [],
-  },
-  'services.hcp.console_capability_enforcement.default': {
-    canonical: 'AGENT_OS_SERVICES_HCP_CONSOLE_CAPABILITY_ENFORCEMENT_DEFAULT',
-    aliases: [],
-  },
-  'services.hcp.destructive_capability_enforcement.default': {
-    canonical: 'AGENT_OS_SERVICES_HCP_DESTRUCTIVE_CAPABILITY_ENFORCEMENT_DEFAULT',
-    aliases: [],
-  },
-  'services.hcp.persistent_agent_principals': {
-    canonical: 'AGENT_OS_SERVICES_HCP_PERSISTENT_AGENT_PRINCIPALS',
-    aliases: [],
-  },
-  'services.hcp.op_rate_limit_regex': {
-    canonical: 'AGENT_OS_SERVICES_HCP_OP_RATE_LIMIT_REGEX',
-    aliases: [],
-  },
-  'worker_pool.comms.responder.alert_lookback_hours': {
-    canonical: 'AGENT_OS_WORKER_POOL_COMMS_RESPONDER_ALERT_LOOKBACK_HOURS',
-    aliases: [],
-  },
-  'worker_pool.comms.responder.session_ttl_hours': {
-    canonical: 'AGENT_OS_WORKER_POOL_COMMS_RESPONDER_SESSION_TTL_HOURS',
-    aliases: [],
-  },
-  'session_ledger.backend': {
-    canonical: 'AGENT_OS_SESSION_LEDGER_BACKEND',
-    aliases: [['AGENT_OS_SESSION_LEDGER_POSTGRES_RUNTIME', postgresRuntimeAlias]],
-  },
-  'session_ledger.dsn': {
-    canonical: 'AGENT_OS_SESSION_LEDGER_DSN',
-    aliases: [],
-  },
-  'session_ledger.database_name': {
-    canonical: 'AGENT_OS_SESSION_LEDGER_DATABASE_NAME',
-    aliases: [],
-  },
-  'session_ledger.vdb.enabled': {
-    canonical: 'AGENT_OS_SESSION_LEDGER_VDB',
-    aliases: [],
-  },
-  'session_ledger.vdb.direct_dsn': {
-    canonical: 'AGENT_OS_SESSION_LEDGER_VDB_DIRECT_DSN',
-    aliases: [],
-  },
-  'session_ledger.vdb.allowCanonicalFallback': {
-    canonical: 'AGENT_OS_SESSION_LEDGER_VDB_ALLOW_CANONICAL_FALLBACK',
-    aliases: [],
-  },
-  'session_ledger.exposure.score_half_life_days': {
-    canonical: 'AGENT_OS_SESSION_LEDGER_EXPOSURE_SCORE_HALF_LIFE_DAYS',
-    aliases: [],
-  },
-  'session_ledger.exposure.quarantine_threshold': {
-    canonical: 'AGENT_OS_SESSION_LEDGER_EXPOSURE_QUARANTINE_THRESHOLD',
-    aliases: [],
-  },
-  'operator.email': {
-    canonical: 'AGENT_OS_OPERATOR_EMAIL',
-    aliases: [],
-  },
-  'operator.full_name': {
-    canonical: 'AGENT_OS_OPERATOR_FULL_NAME',
-    aliases: [],
-  },
-  'operator.first_name': {
-    canonical: 'AGENT_OS_OPERATOR_FIRST_NAME',
-    aliases: [],
-  },
-  'operator.github_handle': {
-    canonical: 'AGENT_OS_OPERATOR_GITHUB_HANDLE',
-    aliases: [],
-  },
-  'github.org_email_domain': {
-    canonical: 'AGENT_OS_GITHUB_ORG_EMAIL_DOMAIN',
-    aliases: [['AGENT_OS_GITHUB_WORKSPACE_EMAIL_DOMAIN', identity]],
-  },
-  'github.workspace_email_domain': {
-    canonical: 'AGENT_OS_GITHUB_WORKSPACE_EMAIL_DOMAIN',
-    aliases: [],
-  },
-  'linear.team_name': {
-    canonical: 'AGENT_OS_LINEAR_TEAM_NAME',
-    aliases: [],
-  },
-  'linear.issue_prefix': {
-    canonical: 'AGENT_OS_LINEAR_ISSUE_PREFIX',
-    aliases: [],
-  },
-  'op.vault': {
-    canonical: 'AGENT_OS_OP_VAULT',
-    aliases: [],
-  },
-  'host.name': {
-    canonical: 'AGENT_OS_HOST_NAME',
-    aliases: [],
-  },
-  'host.tailscale_hostname': {
-    canonical: 'AGENT_OS_TAILSCALE_HOSTNAME',
-    aliases: [['TAILSCALE_HOSTNAME', identity]],
-  },
-  'tailscale.workstation_ip': {
-    canonical: 'AGENT_OS_TAILSCALE_WORKSTATION_IP',
-    aliases: [],
-  },
-  'tailscale.workstation_dns_name': {
-    canonical: 'AGENT_OS_TAILSCALE_WORKSTATION_DNS_NAME',
-    aliases: [],
-  },
-  'tailscale.daily_driver_ip': {
-    canonical: 'AGENT_OS_TAILSCALE_DAILY_DRIVER_IP',
-    aliases: [],
-  },
-  'tailscale.daily_driver_dns_name': {
-    canonical: 'AGENT_OS_TAILSCALE_DAILY_DRIVER_DNS_NAME',
-    aliases: [],
-  },
-  'tailscale.ipad_ip': {
-    canonical: 'AGENT_OS_TAILSCALE_IPAD_IP',
-    aliases: [],
-  },
-  'tailscale.ipad_dns_name': {
-    canonical: 'AGENT_OS_TAILSCALE_IPAD_DNS_NAME',
-    aliases: [],
-  },
-  'tailscale.iphone_ip': {
-    canonical: 'AGENT_OS_TAILSCALE_IPHONE_IP',
-    aliases: [],
-  },
-  'tailscale.iphone_dns_name': {
-    canonical: 'AGENT_OS_TAILSCALE_IPHONE_DNS_NAME',
-    aliases: [],
-  },
-  'launchd.label_prefix': {
-    canonical: 'AGENT_OS_LAUNCHD_LABEL_PREFIX',
-    aliases: [],
-  },
-  'openclaw.live': {
-    canonical: 'AGENT_OS_OPENCLAW_LIVE',
-    aliases: [],
-  },
-  'codex.acp_state_home': {
-    // OSR-04a: parse-only here; runtime shell/Python consumers use it.
-    canonical: 'AGENT_OS_CODEX_ACP_STATE_HOME',
-    aliases: [],
-  },
-  // Per-task-kind dispatch default worker class env aliases. One canonical
-  // env var per leaf — matches the Python sibling at
-  // `platform/agent-os-config/src/agent_os_config/__init__.py`.
-  'dispatch.default_worker_class_by_task_kind.coding': {
-    canonical: 'AGENT_OS_DISPATCH_DEFAULT_WORKER_CLASS_BY_TASK_KIND_CODING',
-    aliases: [],
-  },
-  'dispatch.default_worker_class_by_task_kind.research': {
-    canonical: 'AGENT_OS_DISPATCH_DEFAULT_WORKER_CLASS_BY_TASK_KIND_RESEARCH',
-    aliases: [],
-  },
-  'dispatch.default_worker_class_by_task_kind.drafting': {
-    canonical: 'AGENT_OS_DISPATCH_DEFAULT_WORKER_CLASS_BY_TASK_KIND_DRAFTING',
-    aliases: [],
-  },
-  'dispatch.default_worker_class_by_task_kind.analysis': {
-    canonical: 'AGENT_OS_DISPATCH_DEFAULT_WORKER_CLASS_BY_TASK_KIND_ANALYSIS',
-    aliases: [],
-  },
-  'dispatch.default_worker_class_by_task_kind.other': {
-    canonical: 'AGENT_OS_DISPATCH_DEFAULT_WORKER_CLASS_BY_TASK_KIND_OTHER',
-    aliases: [],
-  },
-  'dispatch.default_worker_class_by_task_kind.merge': {
-    canonical: 'AGENT_OS_DISPATCH_DEFAULT_WORKER_CLASS_BY_TASK_KIND_MERGE',
-    aliases: [],
-  },
-  'dispatch.default_worker_class_by_task_kind.merge_conflict_resolution': {
-    canonical: 'AGENT_OS_DISPATCH_DEFAULT_WORKER_CLASS_BY_TASK_KIND_MERGE_CONFLICT_RESOLUTION',
-    aliases: [],
-  },
-  'dispatch.default_worker_class_by_task_kind.merge_comment_only_followups': {
-    canonical: 'AGENT_OS_DISPATCH_DEFAULT_WORKER_CLASS_BY_TASK_KIND_MERGE_COMMENT_ONLY_FOLLOWUPS',
-    aliases: [],
-  },
-  'dispatch.default_worker_class_by_task_kind.merge_agent_failure_recovery': {
-    canonical: 'AGENT_OS_DISPATCH_DEFAULT_WORKER_CLASS_BY_TASK_KIND_MERGE_AGENT_FAILURE_RECOVERY',
-    aliases: [],
-  },
-  'feature_flags.merge_agent_final_pass_on_request_changes': {
-    canonical: 'AGENT_OS_FEATURE_FLAGS_MERGE_AGENT_FINAL_PASS_ON_REQUEST_CHANGES',
-    aliases: [['MERGE_AGENT_FINAL_PASS_ON_REQUEST_CHANGES', identity]],
-  },
-  'feature_flags.dismiss_stale_request_changes_on_resolved': {
-    canonical: 'AGENT_OS_FEATURE_FLAGS_DISMISS_STALE_REQUEST_CHANGES_ON_RESOLVED',
-    aliases: [['DISMISS_STALE_REQUEST_CHANGES_ON_RESOLVED', identity]],
-  },
-  'feature_flags.merge_agent_deterministic_convergence_terminal': {
-    canonical: 'AGENT_OS_FEATURE_FLAGS_MERGE_AGENT_DETERMINISTIC_CONVERGENCE_TERMINAL',
-    aliases: [['MERGE_AGENT_DETERMINISTIC_CONVERGENCE_TERMINAL', identity]],
-  },
-  'feature_flags.allow_missing_alert_to': {
-    canonical: 'AGENT_OS_FEATURE_FLAGS_ALLOW_MISSING_ALERT_TO',
-    aliases: [['ADVERSARIAL_REVIEW_ALLOW_MISSING_ALERT_TO', identity]],
-  },
-  'feature_flags.resume_context_envelope': {
-    canonical: 'AGENT_OS_FEATURE_FLAGS_RESUME_CONTEXT_ENVELOPE',
-    aliases: [],
-  },
-  'roles.merge_agent_failure_recovery.worker_class': {
-    canonical: 'AGENT_OS_ROLES_MERGE_AGENT_FAILURE_RECOVERY_WORKER_CLASS',
-    aliases: [['MERGE_AGENT_FAILURE_RECOVERY_WORKER_CLASS', identity]],
-  },
-  'roles.merge_agent_failure_recovery.fallback_path': {
-    canonical: 'AGENT_OS_ROLES_MERGE_AGENT_FAILURE_RECOVERY_FALLBACK_PATH',
-    aliases: [['LITELLM_VK_FALLBACK_FOR_MERGE_AGENT_FAILURE_RECOVERY', identity]],
-  },
-  'handoff.final_to_hammer': {
-    canonical: 'AGENT_OS_HANDOFF_FINAL_TO_HAMMER',
-    aliases: [['ADVERSARIAL_REVIEW_HANDOFF_FINAL_TO_HAMMER', identity]],
-  },
 };
 
 const ENTITLEMENT_ENV_ALIAS_IDS = [

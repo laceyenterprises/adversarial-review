@@ -110,7 +110,7 @@ async function cancelReviewerRuntimeSession({
   }
 
   try {
-    await cancelAdapter.cancel(sessionUuid);
+    await cancelAdapter.cancel(sessionUuid, { terminal: false });
   } catch (err) {
     logger.error?.(
       `[watcher] reviewer_runtime_cancel_failed session=${sessionUuid} reason=${reason}: ${err?.message || err}`

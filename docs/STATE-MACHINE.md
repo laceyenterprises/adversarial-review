@@ -954,12 +954,12 @@ new PR
   reset holds remain budget-neutral. Process identity, confirmed drain, posted
   review recovery and retry caps retain their authority.
   The native reviewer wrapper returns a reserved exit status for a typed local
-  model stall, independent of the retained diagnostic tail. An explicit
-  cancellation or an external termination signal outside a runner deadline
-  settles the exact dispatched head and session as a terminal `failed` review
-  row with `[cancelled]` evidence, retaining ordinary attempt accounting.
-  Same-head automatic failure recovery ignores diagnostics nested under that
-  cancellation tag.
+  model stall, independent of the retained diagnostic tail. The reconciler
+  checks for a posted review on the exact dispatched head before marking a
+  confirmed operator cancellation `failed` with `[cancelled]` evidence and
+  charging an attempt. Unattributed signals and daemon shutdown remain
+  recoverable. Same-head automatic failure recovery excludes operator
+  cancellations.
 - GEMTIMEOUT-01: Gemini claims persist a single-call process timeout plus
   preparation/posting slack. A validated chunk plan extends only the matching
   active, open session's timeout and lease, before its parent timer is extended.

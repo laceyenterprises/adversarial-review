@@ -517,9 +517,10 @@ emitted during local teardown. Check the session stderr for the
 with a reserved exit status, so long diagnostics cannot hide it from the
 watcher. The existing session-fenced release and cascade backoff own the next
 eligible claim. A result that only says `interrupted` follows ordinary failure
-classification. An explicit cancellation or external termination signal is
-terminal for the claim. Use the cancellation audit receipt to identify the
-operator and reason when available.
+classification. Unattributed termination signals follow daemon-bounce
+recovery. For an operator cancellation, the watcher checks GitHub for a posted
+review on the session head before recording a terminal failure. The
+cancellation audit receipt identifies the operator and reason.
 
 ### Stalled delivery after `Review generated` (REVPOSTSTALL-01)
 

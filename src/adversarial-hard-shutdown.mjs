@@ -128,6 +128,7 @@ async function hardShutdownInFlightWorkers({
           requestedAt,
           requestedBy,
           reason: `Hard shutdown: ${reason}`,
+          terminal: false,
           signal,
         });
         const reviewerExit = cancellation.signalled

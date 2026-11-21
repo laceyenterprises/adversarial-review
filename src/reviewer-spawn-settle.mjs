@@ -19,7 +19,7 @@ import { resolveHqRoot } from './hq-root.mjs';
 import { REVIEWER_BUILD_ID } from './reviewer-timeout-budget.mjs';
 import { selectReviewerTokenAccount, updateReviewerTokenLease, recordReviewerAccountQuotaFailure } from './reviewer-token-pool.mjs';
 import { journalReviewerTokenLease, forgetReviewerTokenLease, markReviewerTokenLeaseActive } from './reviewer-token-leases.mjs';
-import { readReviewerRunRecord, TERMINAL_RUN_STATES } from './adapters/reviewer-runtime/run-state.mjs';
+import { hasReviewerCancellation, readReviewerRunRecord, TERMINAL_RUN_STATES } from './adapters/reviewer-runtime/run-state.mjs';
 // ARC-18 (cluster 19): the reviewer spawn/settle state machine, extracted
 // verbatim from watcher.mjs. This is the core reviewer state machine —
 // spawnReviewer + the gated pipeline entry point + settleReviewerAttempt +
@@ -1813,7 +1813,8 @@ function settleReviewerAttempt({
   const fullFailureOutput = [result.error, result.stdout, result.stderr]
     .filter(Boolean)
     .join('\n');
-  const reviewCreateFailure = result.failureClass === 'cancelled' ? null : classifyGitHubReviewCreateFailure(fullFailureOutput);
+  const reviewCreateFailure = ['cancelled', 'daemon-bounce'].includes(result.failureClass)
+    ? null : classifyGitHubReviewCreateFailure(fullFailureOutput);
   const failureClass = reviewCreateFailure?.failureClass || result.failureClass || 'unknown';
 
   const routingRefusal = failureClass === 'bug'
@@ -1909,6 +1910,11 @@ function settleReviewerAttempt({
   const classifiedMessage = `[${failureClass}] ${failureMessage}`;
 
   if (failureClass === 'cancelled') {
+    // The session reconciler checks for an accepted GitHub review before
+    // charging an operator-cancelled native claim.
+    if (hasReviewerCancellation(rootDir, {
+      sessionUuid: reviewerSessionUuid, headSha: reviewerHeadSha, pgid: result.pgid ?? null,
+    })) return { posted: false, reason: 'cancellation-reconciliation-pending' };
     withSqliteBusyRetrySync(
       () => statements.markClaimFailed.run(failureAt, classifiedMessage, repoPath, prNumber, reviewerHeadSha, reviewerSessionUuid),
       { label: `reviewer-cancelled:${repoPath}#${prNumber}`, log },

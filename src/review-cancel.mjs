@@ -3,6 +3,7 @@ import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 import { writeFileAtomic } from './atomic-write.mjs';
 import { isPgidAlive, verifyPgidIdentity } from './process-group-identity.mjs';
+import { recordReviewerCancellation } from './adapters/reviewer-runtime/run-state.mjs';
 import {
   getReviewRow,
   openReviewStateDb,
@@ -132,6 +133,7 @@ async function sendReviewerSignal({
   signal,
   processKill = process.kill,
   execFileImpl,
+  recordIntent,
 } = {}) {
   if (!pgid) {
     return { signalled: false, target: null, error: 'missing-reviewer-process-group' };
@@ -151,10 +153,13 @@ async function sendReviewerSignal({
       identity,
     };
   }
+  const validSignal = parseSignal(signal);
+  const rollbackIntent = recordIntent?.();
   try {
-    processKill(-pgid, parseSignal(signal));
+    processKill(-pgid, validSignal);
     return { signalled: true, target: { kind: 'process-group', id: pgid }, error: null, identity };
   } catch (err) {
+    rollbackIntent?.();
     if (err?.code === 'ESRCH') {
       return { signalled: false, target: { kind: 'process-group', id: pgid }, error: 'process-group-not-found' };
     }
@@ -204,6 +209,7 @@ async function cancelActiveReview({
   // and ALLOW_STATUS_OPTIONS above for the rationale (post-merge race +
   // failed-with-draining-subprocess shapes from 2026-05-30 incident).
   allowStatus = null,
+  terminal = true,
   processKill = process.kill,
   execFileImpl,
   db: dbOverride = null,
@@ -240,6 +246,13 @@ async function cancelActiveReview({
       signal,
       processKill,
       execFileImpl,
+      recordIntent: terminal && row.reviewer_session_uuid && row.reviewer_head_sha
+        ? () => recordReviewerCancellation(rootDir, {
+          sessionUuid: row.reviewer_session_uuid,
+          headSha: row.reviewer_head_sha,
+          pgid,
+        })
+        : null,
     });
     // The watcher can promote infrastructure-class `failed → reviewing` via
     // its dedicated recovery claim between the operator's snapshot and our

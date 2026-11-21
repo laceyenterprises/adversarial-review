@@ -6,7 +6,9 @@ import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createCliDirectReviewerRuntimeAdapter } from '../src/adapters/reviewer-runtime/cli-direct/index.mjs';
-import { readReviewerRunRecord } from '../src/adapters/reviewer-runtime/run-state.mjs';
+import { readReviewerRunRecord, recordReviewerCancellation } from '../src/adapters/reviewer-runtime/run-state.mjs';
+import * as reviewerOutcomes from '../src/reviewer-outcomes.mjs';
+import { reconcileReviewerSessions, reviewerBotLogin } from '../src/reviewer-reattach.mjs';
 import { shouldBackoffReviewerSpawn } from '../src/reviewer-cascade.mjs';
 import {
   infraRecoverableFailureClass, reviewPopulationFailureClass, unknownReviewerCommandFailureClass,
@@ -14,7 +16,7 @@ import {
 import { settleReviewerAttempt } from '../src/reviewer-spawn-settle.mjs';
 import { ensureReviewStateSchema } from '../src/review-state.mjs';
 import {
-  prepareMarkAttemptStarted, prepareMarkClaimFailed, prepareReleaseReviewerClaim,
+  prepareMarkAttemptStarted, prepareReleaseReviewerClaim,
 } from '../src/review-state-statements.mjs';
 
 const repo = 'fixture/interruption';
@@ -37,7 +39,7 @@ function fixture(t, source) {
   });
   return { rootDir, adapter, request: {
     model: 'gemini', sessionUuid: session, timeoutMs: 5000,
-    subjectContext: { repo, prNumber: 1, reviewerHeadSha: head },
+    subjectContext: { repo, prNumber: 1, reviewerHeadSha: head, builderTag: 'claude-code' },
   } };
 }
 
@@ -46,8 +48,9 @@ function claimedRow(t) {
   t.after(() => db.close());
   ensureReviewStateSchema(db);
   db.prepare(`INSERT INTO reviewed_prs (repo, pr_number, reviewed_at, reviewer,
-    review_status, reviewer_session_uuid, reviewer_head_sha, review_attempts, infra_auto_recover_attempts)
-    VALUES (?, 1, ?, 'gemini', 'reviewing', ?, ?, 1, 2)`).run(repo, failedAt, session, head);
+    review_status, reviewer_session_uuid, reviewer_head_sha, review_attempts, infra_auto_recover_attempts,
+    reviewer_started_at, pr_state)
+    VALUES (?, 1, ?, 'gemini', 'reviewing', ?, ?, 1, 2, ?, 'open')`).run(repo, failedAt, session, head, failedAt);
   return { db, read: () => db.prepare('SELECT * FROM reviewed_prs').get() };
 }
 
@@ -95,24 +98,94 @@ test('agy interruption alone retains the ordinary command-failure path', async t
   assert.equal(infraRecoverableFailureClass({ failure_message: `[unknown] ${result.error}` }), 'reviewer-command-failed');
 });
 
-test('explicit group cancellation stays terminal even with stale retry diagnostics', async t => {
+test('reviewer wrapper control outcomes have distinct exit codes', () => {
+  const codes = Object.entries(reviewerOutcomes).filter(([key]) => key.endsWith('_EXIT_CODE')).map(([, value]) => value);
+  assert.equal(new Set(codes).size, codes.length);
+});
+
+test('the direct adapter preserves a typed GitHub budget deferral', async t => {
+  const receipt = JSON.stringify({ resource: 'core', remaining: 0, resetAt: failedAt, credential: 'fixture' });
+  const { adapter, request } = fixture(t, `
+    process.stderr.write(${JSON.stringify(`[reviewer-github-budget-deferred] ${receipt}\n[reviewer-stalled] prior diagnostic\n`)},
+      () => process.exit(${reviewerOutcomes.REVIEWER_GITHUB_BUDGET_DEFERRED_EXIT_CODE}));
+  `);
+  const result = await adapter.spawnReviewer(request);
+  assert.equal(result.failureClass, 'github-budget-deferred');
+});
+
+for (const callback of ['onSpawn', 'onMessage']) test(`runner ${callback} failures do not cancel the claim`, async t => {
+  const { adapter, request } = fixture(t, `
+    ${callback === 'onMessage' ? "process.send({ type: 'gemini-chunk-plan', plan: {} });" : ''}
+    setInterval(() => {}, 1000);
+  `);
+  if (callback === 'onSpawn') request.onReviewerPgid = () => { throw new Error('fixture spawn callback failed'); };
+  const result = await adapter.spawnReviewer(request);
+  assert.equal(result.ok, false);
+  assert.match(result.error, new RegExp(`${callback} callback failed`));
+  assert.notEqual(result.failureClass, 'cancelled');
+});
+
+for (const signal of ['SIGTERM', 'SIGKILL']) test(`an unattributed ${signal} is recoverable`, async t => {
+  const { adapter, request } = fixture(t, `process.kill(process.pid, ${JSON.stringify(signal)});`);
+  const result = await adapter.spawnReviewer(request);
+  assert.equal(result.signal, signal);
+  assert.equal(result.failureClass, 'daemon-bounce');
+});
+
+for (const alreadyPosted of [false, true]) test(`operator cancellation reconciles GitHub before charging (posted=${alreadyPosted})`, async t => {
   const { rootDir, adapter, request } = fixture(t, `
     process.stderr.write(${JSON.stringify(`${interrupted}\nno GitHub review found\n[oauth-broken] prior diagnostics\nCreate review HTTP 503\n`)},
       () => process.kill(process.pid, 'SIGTERM'));
   `);
   const { db, read } = claimedRow(t);
+  request.onReviewerPgid = ({ pgid }) => {
+    db.prepare("UPDATE reviewed_prs SET reviewer_pgid = ?").run(pgid);
+    recordReviewerCancellation(rootDir, { sessionUuid: session, headSha: head, pgid });
+  };
   const result = await adapter.spawnReviewer(request);
   assert.equal(result.signal, 'SIGTERM');
   assert.equal(result.failureClass, 'cancelled');
   assert.equal(readReviewerRunRecord(rootDir, session).state, 'cancelled');
   settleReviewerAttempt({ rootDir, repoPath: repo, prNumber: 1, result, reviewerModel: 'gemini',
     reviewerSessionUuid: session, reviewerHeadSha: head, failureAt: failedAt, leaseRecoveryEnabled: true,
-    statements: { markClaimFailed: prepareMarkClaimFailed(db) }, log: { warn() {} },
+    statements: {}, log: { warn() {} },
   });
+  assert.equal(read().review_status, 'reviewing');
+  assert.equal(read().review_attempts, 1);
+  let reviewReads = 0;
+  const reconcile = () => reconcileReviewerSessions({
+    db, rootDir, now: new Date(failedAt), fetchHeadSha: async () => head, probeAlive: () => false,
+    log: { log() {}, warn() {} }, leaseRecoveryEnabled: true, postKillReviewReprobeDelaysMs: [0],
+    octokit: { rest: { pulls: { listReviews: async () => {
+      reviewReads++;
+      const review = { user: { login: reviewerBotLogin('gemini') }, submitted_at: failedAt, state: 'COMMENTED' };
+      return { data: [
+        { ...review, commit_id: 'b'.repeat(40) },
+        ...(alreadyPosted && reviewReads === 2 ? [{ ...review, commit_id: head }] : []),
+      ] };
+    } } } },
+  });
+  // An unrelated receipt cannot apply to a different claim.
+  db.prepare("UPDATE reviewed_prs SET reviewer_session_uuid = 'replacement'").run();
+  const replacement = read();
+  settleReviewerAttempt({ rootDir, repoPath: repo, prNumber: 1, result, reviewerModel: 'gemini',
+    reviewerSessionUuid: session, reviewerHeadSha: head, failureAt: failedAt,
+    statements: {}, log: { warn() {} },
+  });
+  assert.deepEqual(read(), replacement);
+  db.prepare("UPDATE reviewed_prs SET reviewer_session_uuid = ?").run(session);
+  await reconcile();
+  assert.equal(reviewReads, 2);
   const row = read();
-  assert.equal(row.review_status, 'failed');
+  assert.equal(row.review_status, alreadyPosted ? 'posted' : 'failed');
   assert.equal(row.review_attempts, 2);
-  assert.equal(row.infra_auto_recover_attempts, 2);
+  assert.equal(row.infra_auto_recover_attempts, alreadyPosted ? 0 : 2);
+  if (alreadyPosted) {
+    assert.equal(row.failure_message, null);
+    assert.equal(row.posted_at, failedAt);
+    return;
+  }
+  assert.match(row.failure_message, /^\[cancelled\]/);
   assert.equal(infraRecoverableFailureClass(row), null);
   assert.equal(unknownReviewerCommandFailureClass(row), null);
   assert.equal(reviewPopulationFailureClass(row), null);
@@ -121,11 +194,4 @@ test('explicit group cancellation stays terminal even with stale retry diagnosti
   );
   assert.equal(claim.changes, 0);
 
-  db.prepare("UPDATE reviewed_prs SET review_status = 'reviewing', reviewer_session_uuid = 'replacement'").run();
-  const replacement = read();
-  settleReviewerAttempt({ rootDir, repoPath: repo, prNumber: 1, result, reviewerModel: 'gemini',
-    reviewerSessionUuid: session, reviewerHeadSha: head, failureAt: failedAt,
-    statements: { markClaimFailed: prepareMarkClaimFailed(db) }, log: { warn() {} },
-  });
-  assert.deepEqual(read(), replacement);
 });

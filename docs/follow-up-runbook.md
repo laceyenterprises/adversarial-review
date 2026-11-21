@@ -1483,27 +1483,28 @@ Behavior:
 Use `--signal SIGKILL` only after `SIGTERM` has failed or the process is known
 to ignore graceful termination.
 
-### Cancel an active reviewer without changing review state
+### Stop a review attempt as an operator
 
-Use this when the first-pass or re-review process itself needs to be
-interrupted but `reviews.db` should remain the durable source of truth for the
-normal orphan/reconcile path:
+Use this to stop an active first-pass review or re-review and prevent an
+automatic retry of that attempt.
 
 ```bash
-npm run review:cancel -- --repo <owner/repo> --pr <n> "Duplicate active reviewer; operator is restarting the loop"
+npm run review:cancel -- --repo <owner/repo> --pr <n> "Stop this review pending operator investigation"
 ```
 
 Behavior:
 
 - reads the `review_status='reviewing'` row from `data/reviews.db`
-- verifies process-group liveness and start-time identity before signalling,
-  then sends `SIGTERM` to the persisted `reviewer_pgid` process group by default
+- verifies process-group liveness and start-time identity, records cancellation
+  intent for the session and head, then sends `SIGTERM` by default
 - writes an audit receipt under `data/review-cancellations/`
 - does not mutate `review_status`, retry counters, or any PR state columns
 
-The direct runtime handles the resulting external termination separately. The
-watcher settles a still-matching claim as `failed` with `[cancelled]` evidence
-and the ordinary attempt charge. Automatic same-head retries exclude it.
+The watcher first checks GitHub for a review the cancelled session already
+posted on that head. If it finds one, it reconciles the posted review. If no
+review was posted, it marks the matching claim `failed` with `[cancelled]`
+evidence and charges the ordinary attempt. To re-arm a cancelled review, run
+`npm run retrigger-review -- --repo <owner/repo> --pr <n> --reason "..."`.
 
 Use `--signal SIGKILL` only after `SIGTERM` has failed or the process is known
 to ignore graceful termination.

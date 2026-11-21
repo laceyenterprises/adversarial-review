@@ -86,7 +86,10 @@ export function createReviewerDispatchDrain({
       for (const candidate of candidates) {
         const passKind = candidate.depthPassKind || reviewerSafetyPassKind(candidate);
         const pressure = reviewWaitPressure({ ...candidate, depthPassKind: passKind });
-        if (pressure.engaged) {
+        const refused = admissionResults.get(candidate)?.dispatched === false;
+        // A pending re-review refused before admission must name its filter on
+        // every pass, not only once wait pressure engages.
+        if (pressure.engaged || (refused && candidate.current?.rereview_requested_at)) {
           const started = startedCandidates.has(candidate);
           const result = admissionResults.get(candidate);
           const spilled = started && result?.dispatched !== false && candidate.reviewerModel !== 'gemini';

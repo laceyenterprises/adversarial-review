@@ -4889,14 +4889,18 @@ for (const priorStatus of ['pending', 'failed']) test(`SEATIDLE-01: unreadable q
         assert.ok(!globalThis.__watcherClaimLoopReviewerSpawns.some(s => s.subjectContext.prNumber === 101));
         assert.equal(globalThis.__seatIdleRealLease.has('example/review-fixture#101@sha-happy-101'), false,
           'the unconditional finally releases the real process-lifetime lease after freshness deferral');
-        assert.deepEqual(globalThis.__seatIdleClaimLeaseStates, [true]);
+        // REBASEDREVIEWSTRAND-01: the stale-head startup durable entry is rebound
+        // and may claim once ahead of the poll's own claim; each is refunded.
+        const firstPollClaims = globalThis.__seatIdleClaimLeaseStates.length;
+        assert.ok(firstPollClaims >= 1 && globalThis.__seatIdleClaimLeaseStates.every(Boolean));
         globalThis.__seatIdleReadError = false;
         await pollOnce(octokit, pollOptions);
-        assert.equal(claims.filter(c => c.prNumber === 101).length, 2);
-        assert.equal(claims.filter(c => c.prNumber === 101)[0].reviewerHeadSha,
-          claims.filter(c => c.prNumber === 101)[1].reviewerHeadSha, 'retry reacquires the same head');
+        const claims101 = claims.filter(c => c.prNumber === 101);
+        assert.equal(claims101.length, firstPollClaims + 1);
+        assert.equal(claims101[0].reviewerHeadSha, claims101.at(-1).reviewerHeadSha, 'retry reacquires the same head');
         assert.equal(globalThis.__watcherClaimLoopReviewerSpawns.filter(s => s.subjectContext.prNumber === 101).length, 1);
-        assert.deepEqual(globalThis.__seatIdleClaimLeaseStates, [true, true],
+        assert.equal(globalThis.__seatIdleClaimLeaseStates.length, firstPollClaims + 1);
+        assert.ok(globalThis.__seatIdleClaimLeaseStates.every(Boolean),
           'the real lease is held at each claim, including the same-head retry');
       `,
     });
@@ -5806,6 +5810,8 @@ test('LAC-2300: a wake visits a pending head and overdue unproven repair custody
       ['--no-warnings', '--import', pathToFileURL(registerPath).href, runnerPath],
       { cwd: REPO_ROOT, encoding: 'utf8', env: fixtureEnv(installGhFixture(tmp)), timeout: 60000 });
     assert.equal(result.status, 0, `${result.stdout || ''}${result.stderr || ''}`);
+    assert.match(result.stdout, /review-wait-decision repo=\S+ pr=101 admission="discovery" decision=repair-reservation-owns-pr/,
+      'REBASEDREVIEWSTRAND-01: the filtered pending head names its reason');
   } finally { rmSync(tmp, { recursive: true, force: true }); }
 });
 

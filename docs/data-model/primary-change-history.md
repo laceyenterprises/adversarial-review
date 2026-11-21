@@ -17,13 +17,18 @@ contains `{ key, readKey, value }` for one successfully completed read.
 `readKey` starts with the GitHub API host (`GH_HOST`, default `github.com`),
 followed by either:
 
-- `["json", object-addressed API path, jq projection]`; or
+- `["json", object-addressed API path, checkpoint projection]`; or
 - `["file", repo, comparison base, comparison head, path, before tree entry or
   null, after tree entry or null, "myers-v1"]`.
 
 JSON checkpoints retain projected commit authorship, compare pagination,
-verification, trees and blobs. File checkpoints retain a completed per-file
-comparison. These are observations, not authorizations: the reader still
+verification, trees and blobs. The checkpoint projection may differ from the
+`jq` projection only by optional fields whose absence the reader tolerates;
+adding required fields must change the durable read key.
+Nonrecursive tree reads keep their original key when adding
+the optional tree SHA, so an existing checkpoint can still supply root entries
+and use the original ref for the recursive lookup. File checkpoints retain a
+completed per-file comparison. These are observations, not authorizations: the reader still
 validates pagination/completeness and the collector still establishes
 provenance and author-change preservation. Live PR heads/bases, reviews,
 comments, labels, refs and cost evidence are never checkpointed.

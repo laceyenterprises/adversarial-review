@@ -19,40 +19,51 @@ const repo = 'fixture/repo', path = `repos/${repo}/compare/${base}...${head}`;
 // A nonexistent private fixture root prevents durable history writes/reuse.
 const args = { repo, prNumber: 42, headSha: head, rootDir: join(tmpdir(), randomUUID()) };
 const commit = (id, parent) => ({ sha: id, parents: [{ sha: parent }], commit: { message: 'author change' } });
-function fixture({ failTree = false, stallTree = false, contextTimeoutMs, hammer = false, schedule, recursive = false, recursiveFailure } = {}) {
+function fixture({ failTree = false, stallTree = false, contextTimeoutMs, hammer = false, schedule, recursive = false,
+  recursiveFailure, large = false, reverted = false, mismatchedRoot = false } = {}) {
   const objects = new Map();
   const roots = [[], []];
-  for (let i = 0; i < 53; i++) for (let side = 0; side < 2; side++) {
+  for (let i = 0; i < (large ? 353 : 53); i++) for (let side = 0; side < 2; side++) {
     const blob = sha(`blob-${i}-${side}`);
     const body = Buffer.concat([Buffer.from('100644 source.mjs\0'), Buffer.from(blob, 'hex')]);
     const dir = createHash('sha1').update(`tree ${body.length}\0`).update(body).digest('hex');
     const bytes = Buffer.from(`${side ? 'new' : 'old'}-${i}\n`);
-    roots[side].push({ path: `dir-${String(i).padStart(2, '0')}`, type: 'tree', mode: '040000', sha: dir });
+    roots[side].push({ path: `dir-${String(i).padStart(large ? 3 : 2, '0')}`, type: 'tree', mode: '040000', sha: dir });
     objects.set(`git/trees/${dir}`, { tree: [{ path: 'source.mjs', type: 'blob', mode: '100644', sha: blob }], truncated: false });
     objects.set(`git/blobs/${blob}`, { content: bytes.toString('base64'), size: bytes.length, encoding: 'base64' });
   }
-  objects.set(`git/trees/${base}`, { tree: roots[0], truncated: false });
-  objects.set(`git/trees/${head}`, { tree: roots[1], truncated: false });
-  objects.set(`git/trees/${middle}`, { tree: roots[1], truncated: false });
-  for (const [ref, side] of [[base, 0], [head, 1], [middle, 1]]) {
-    objects.set(`git/trees/${ref}?recursive=1`, recursive ? { truncated: false,
+  for (const [ref, side] of [[base, 0], [head, reverted ? 0 : 1], [middle, 1]]) {
+    const body = Buffer.concat(roots[side].map(entry => Buffer.concat([
+      Buffer.from(`40000 ${entry.path}\0`), Buffer.from(entry.sha, 'hex'),
+    ])));
+    const rootSha = recursive ? createHash('sha1').update(`tree ${body.length}\0`).update(body).digest('hex') : undefined;
+    objects.set(`git/trees/${ref}`, { sha: rootSha,
+      tree: mismatchedRoot && ref === middle ? roots[0] : roots[side], truncated: false });
+    const snapshot = recursive ? { truncated: false,
       tree: roots[side].flatMap(entry => [entry, ...objects.get(`git/trees/${entry.sha}`).tree.map(child => ({ ...child, path: `${entry.path}/${child.path}` }))]),
-    } : { tree: [], truncated: true });
+    } : { tree: [], truncated: true };
+    objects.set(`git/trees/${ref}?recursive=1`, snapshot);
+    if (rootSha) objects.set(`git/trees/${rootSha}?recursive=1`, snapshot);
   }
+  const preceding = large ? [base, ...Array.from({ length: 203 }, (_, i) => sha(`author-${i}`)), middle] : [base, middle];
+  const authorCommits = preceding.slice(1).map((id, i) => commit(id, preceding[i]));
   const counts = { compare: 0, tree: 0, blob: 0, live: 0, diff: 0 };
+  const requests = [];
   let activeTrees = 0, peakTrees = 0;
   const transport = async ({ args, signal }) => {
     assert.ok(currentGitHubBudgetScope(), 'quota admission remains scoped');
     signal.throwIfAborted();
     const key = args[1].replace(`repos/${repo}/`, '');
+    requests.push(key);
     if (key.startsWith('compare/')) {
       counts.compare++;
       await schedule?.read('compare');
-      const commits = key.split('?')[0].endsWith(middle) ? [commit(middle, base)]
-        : [commit(middle, base), { ...commit(head, middle),
+      const commits = key.split('?')[0].endsWith(middle) ? authorCommits
+        : [...authorCommits, { ...commit(head, middle),
           commit: { message: hammer ? 'repair\n\nWorker-Class: hammer\nWorker-Ticket: HAM\nClosed-By: hammer (adversarial-pipe-mode)' : 'author change' } }];
+      const page = Number(new URLSearchParams(key.split('?')[1]).get('page')) || 1;
       return { stdout: JSON.stringify({ status: 'ahead', total_commits: commits.length,
-        merge_base_commit: { sha: base }, commits }) };
+        merge_base_commit: { sha: base }, commits: commits.slice((page - 1) * 100, page * 100) }) };
     }
     if (key.startsWith('git/trees/')) {
       counts.tree++;
@@ -82,7 +93,7 @@ function fixture({ failTree = false, stallTree = false, contextTimeoutMs, hammer
       counts.diff++;
       return execHistoryFile(...argv);
     } });
-  return { get, transport, counts, peakTrees: () => peakTrees };
+  return { get, transport, counts, requests, peakTrees: () => peakTrees };
 }
 
 test('LAC-2174 fallback: 53 independent directories retain all patches with bounded tree requests', async t => {
@@ -385,8 +396,43 @@ test('recursive hammer proof still hydrates both exact snapshots before allowing
   assert.equal(checkPrimaryChange(evidence, head).ok, true);
   const reversed = { ...evidence, finalFiles: [] };
   assert.equal(checkPrimaryChange(reversed, head).ok, false);
-  assert.equal(counts.tree, 6, 'base snapshot requests coalesce across primary and final comparisons');
+  assert.equal(counts.tree, 5, 'three commit roots share two verified recursive responses');
   assert.equal(counts.blob, 106, 'identical SHA-addressed blobs coalesce');
+});
+
+for (const large of [false, true]) for (const reverted of [false, true]) {
+  test(`LAC-2286 ${large ? 'large' : 'small'} history with shared tree ${reverted ? 'refuses author reversal' : 'preserves author changes'}`, {
+    skip: large && process.env.LAC_2286_LARGE_HISTORY !== '1' ? 'opt in with LAC_2286_LARGE_HISTORY=1' : false,
+  }, async t => {
+    const { get, counts, requests } = fixture({ recursive: true, hammer: true, large, reverted });
+    const fileCount = large ? 353 : 53;
+    const start = performance.now();
+    const evidence = await fetchPrimaryChange({ ...args, get }, { fetchCiCostImpl: async () => ({ headSha: head, ok: true }) });
+    const verdict = checkPrimaryChange(evidence, head);
+    const recursiveRequests = requests.filter(key => key.endsWith('?recursive=1'));
+    const recursiveMisses = recursiveRequests.length;
+    t.diagnostic(JSON.stringify({ counts, apiReads: requests.length, recursiveMisses, recursiveReuse: 3 - recursiveMisses,
+      evidenceDigest: createHash('sha256').update(JSON.stringify({ evidence, verdict })).digest('hex'),
+      localWallMs: Math.round(performance.now() - start) }));
+    assert.equal(evidence.completeFileLists, true);
+    assert.equal(evidence.primaryHead, middle);
+    assert.equal(evidence.primaryFiles.length, fileCount);
+    assert.equal(evidence.finalFiles.length, reverted ? 0 : fileCount);
+    assert.equal(evidence.reversalAuthorizations?.length ?? 0, 0);
+    assert.equal(verdict.ok, !reverted);
+    if (reverted) assert.equal(verdict.reason, 'primary-change-reverted');
+    assert.deepEqual(counts, { compare: large ? 6 : 2, tree: 5, blob: fileCount * 2, live: 1,
+      diff: fileCount * (reverted ? 1 : 2) });
+    assert.equal(recursiveMisses, 2);
+    assert.ok(recursiveRequests.every(key => ![base, middle, head].some(ref => key.includes(ref))));
+  });
+}
+
+test('a shared recursive response must still match the independently read root of each commit', async () => {
+  const { get } = fixture({ recursive: true, hammer: true, mismatchedRoot: true });
+  const evidence = await fetchPrimaryChange({ ...args, get }, { fetchCiCostImpl: async () => ({ headSha: head, ok: true }) });
+  assert.equal(checkPrimaryChange(evidence, head).ok, false);
+  assert.match(evidence.reason, /inconsistent recursive tree/);
 });
 
 test('recursive snapshot verification cannot continue past the global history deadline', async () => {

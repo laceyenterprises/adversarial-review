@@ -92,8 +92,10 @@ if (args.includes('--jq')) {
     value = { ...projectCommit(value), files: value.files.map(entry =>
       pick(entry, ['filename', 'previous_filename', 'status', 'sha', 'patch', 'additions', 'deletions'])) };
   }
-  else if (jq === '{tree: [.tree[] | {path, mode, type, sha}], truncated}') {
-    value = { tree: value.tree.map(entry => pick(entry, ['path', 'mode', 'type', 'sha'])), truncated: value.truncated };
+  else if (jq === '{tree: [.tree[] | {path, mode, type, sha}], truncated}'
+    || jq === '{sha, tree: [.tree[] | {path, mode, type, sha}], truncated}') {
+    value = { ...(jq.startsWith('{sha,') ? { sha: value.sha ?? null } : {}),
+      tree: value.tree.map(entry => pick(entry, ['path', 'mode', 'type', 'sha'])), truncated: value.truncated };
   }
   else if (jq === '{encoding, content, size}') value = pick(value, ['encoding', 'content', 'size']);
   else throw Error(`unhandled fixture jq: ${jq}`);

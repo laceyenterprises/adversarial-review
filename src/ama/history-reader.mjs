@@ -11,6 +11,7 @@ import { currentGitHubBudgetScope, withGitHubBudgetScope } from '../rate-limit-t
 import { discardHistoryProgress, storedHistoryRead } from './primary-change-store.mjs';
 
 const commitFields = '{sha, commit: {message: .commit.message, author: .commit.author, committer: .commit.committer}, author, committer, parents: [.parents[] | {sha}]}';
+const treeFields = 'tree: [.tree[] | {path, mode, type, sha}], truncated';
 
 // REST compare files are capped at 300 and cannot be paginated. Read only
 // comparison metadata/commit pages, then walk immutable trees (skipping equal
@@ -54,7 +55,9 @@ export function createHistoryReader(options = {}) {
     remainingMs();
     return immutableSnapshotValue(value);
   };
-  const json = async (path, jq = '.') => {
+  // checkpointProjection may differ from jq only by optional fields whose
+  // absence the reader tolerates; required fields must change the durable key.
+  const json = async (path, jq = '.', checkpointProjection = jq) => {
     let attempts = 0;
     try {
       // Only object-addressed evidence is immutable. Keep PR metadata, refs,
@@ -76,7 +79,7 @@ export function createHistoryReader(options = {}) {
         return immutableSnapshotValue(JSON.parse(stdout.replace(/^HTTP\/[\s\S]*?\r?\n\r?\n/, '')));
       };
       return await (immutable
-        ? checkpoint(['json', path, jq], () => readClosureImmutable(execGhWithRetryImpl,
+        ? checkpoint(['json', path, checkpointProjection], () => readClosureImmutable(execGhWithRetryImpl,
           [path, jq, env.GH_TOKEN, env.GITHUB_TOKEN, env.GH_HOST, env.GH_CONFIG_DIR],
           execute, executorIdentity, ghOptions.signal))
         : execute());
@@ -90,20 +93,23 @@ export function createHistoryReader(options = {}) {
       });
     }
   };
-  const cached = (path, jq) => {
+  const cached = (path, jq, checkpointProjection) => {
     const key = `${path}:${jq}`;
     if (!cache.has(key)) {
-      const pending = json(path, jq);
+      const pending = json(path, jq, checkpointProjection);
       cache.set(key, pending);
       pending.catch(() => { if (cache.get(key) === pending) cache.delete(key); });
     }
     return cache.get(key);
   };
-  const tree = async (repo, ref) => {
-    const data = await cached(`repos/${repo}/git/trees/${ref}`, '{tree: [.tree[] | {path, mode, type, sha}], truncated}');
+  const readTree = async (repo, ref) => {
+    // Existing checkpoints without the optional SHA can still supply all
+    // root entries and use the original ref-addressed recursive lookup.
+    const data = await cached(`repos/${repo}/git/trees/${ref}`, `{sha, ${treeFields}}`, `{${treeFields}}`);
     if (data.truncated || !Array.isArray(data.tree)) throw invalidHistory(`incomplete tree ${ref}`);
-    return new Map(data.tree.map(entry => [entry.path, entry]));
+    return { sha: data.sha, entries: new Map(data.tree.map(entry => [entry.path, entry])) };
   };
+  const tree = async (repo, ref) => (await readTree(repo, ref)).entries;
   const blob = async (repo, entry) => {
     const data = await cached(`repos/${repo}/git/blobs/${entry.sha}`, '{encoding, content, size}');
     if (data.encoding !== 'base64' || typeof data.content !== 'string') throw invalidHistory(`unreadable blob ${entry.sha}`);
@@ -118,12 +124,15 @@ export function createHistoryReader(options = {}) {
     // responses must fall back to the uncapped subtree walker below.
     const snapshot = async ref => {
       if (!ref) return new Map();
-      const root = await tree(repo, ref);
+      const { sha, entries: root } = await readTree(repo, ref);
       if (![...root.values()].some(entry => entry.type === 'tree')) return root;
+      // Different commits can name the same tree. Each exact ref still reads
+      // its own root and validates the shared response against those entries.
+      const recursiveRef = /^[0-9a-f]{40}$/i.test(ref) && /^[0-9a-f]{40}$/.test(sha || '') ? sha : ref;
       let data;
       try {
-        data = await cached(`repos/${repo}/git/trees/${ref}?recursive=1`,
-          '{tree: [.tree[] | {path, mode, type, sha}], truncated}');
+        data = await cached(`repos/${repo}/git/trees/${recursiveRef}?recursive=1`,
+          `{${treeFields}}`);
       } catch (error) {
         // The recursive endpoint is an optimization. A smaller subtree read
         // may still succeed after transport retries or output overflow, but

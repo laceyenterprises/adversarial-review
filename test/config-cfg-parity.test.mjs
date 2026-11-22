@@ -64,6 +64,6 @@ test('every CFG key is in the Node schema and every Node-only key is inventoried
     && !Object.keys(NODE_ONLY_KEYS).some(root => path === root || path.startsWith(`${root}.`) || path.startsWith(`${root}[`))
     && !path.includes('.operation_limits.*') && !path.startsWith('worker_pool.public_hygiene.identities.*'));
   assert.deepEqual(extra, []);
-  assert.equal(Object.keys(NODE_ONLY_KEYS).length, 32);
+  assert.equal(Object.keys(NODE_ONLY_KEYS).length, 33);
   assert.equal(Object.keys(NODE_ONLY_ENUM_MEMBERS).length, 3);
 });

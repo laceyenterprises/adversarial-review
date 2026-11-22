@@ -139,6 +139,8 @@
   "non-blocking-findings-unknown": "world",
   "not-covered-by-cited-finding": "closer",
   "operator-cancelled": "world",
+  "operator-review-changes-requested": "world",
+  "terminal-review-issuer-unverifiable": "world",
   "overload-deferred": "infrastructure",
   "parked": "world",
   "pending-attestation-unavailable": "closer",

@@ -1775,6 +1775,27 @@ consumers and retains review commit SHAs in production rollups. The daemon's
 closer own-commit certification remains independent of HAM terminal audit
 currency. Lifecycle states, transitions and existing smoke promises are unchanged.
 
+LAC-2305 refreshes the review proof inside the legacy lane writer before a
+HAM terminal merge attempt. A standing request on any head from a configured
+human operator or proven repository admin defers under
+`operator-review-changes-requested` until dismissal or a later same-issuer
+approval on any head. Rebases preserve the veto. Historical approvals without
+author/commit evidence cannot dispose it; authorless off-head reviews are
+inapplicable, while missing exact-head identity fails closed. Initial pre-lease
+and subsequent live gates share the proof and five-minute recovery backoff.
+Review-change and operator-veto deferrals do not qualify for the automatic
+retry/refund allowlist. Transient unknown review or issuer evidence returns
+`terminal-review-evidence-unavailable`. Permanent missing issuer identity on the
+exact head (or a request without a commit) and permission 404 return
+`terminal-review-issuer-unverifiable` with `needsOperator:true`, without recovery
+backoff or automatic retry/refund credit. Closed/merged preflight snapshots
+retain normal daemon handling. The first live gate reuses its initial rollup
+and proof; subsequent gates and transport read fresh evidence. In-lane proof
+reads abort after a load-aware 15 seconds, capped at 30 seconds and the remaining
+run budget, returning `legacy-writer-timeout` without transport. A blocked preflight that proves no
+merge transport ran settles the local writer reservation. Existing exact-head
+CAS, leases and merge retry ownership continue to apply.
+
 CLOSERGATES-01 final remediation keeps repairable conflicts out of terminal
 AMA state: both final and non-final observations count the current head once;
 only a final report after three distinct heads records

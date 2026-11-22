@@ -94,6 +94,16 @@ test('current-head operator approval authorizes an older request-changes review'
 // Table-driven: each single missing precondition → exactly the expected reason.
 const SINGLE_MISS_CASES = [
   {
+    name: 'permanent issuer gap refuses otherwise eligible merge',
+    overrides: { terminalReviewProof: { ok: false, reason: 'terminal-review-issuer-unverifiable', needsOperator: true } },
+    reason: 'terminal-review-issuer-unverifiable',
+  },
+  {
+    name: 'standing operator review veto → operator-review-changes-requested',
+    overrides: { terminalReviewProof: { ok: false, reason: 'operator-review-changes-requested' } },
+    reason: 'operator-review-changes-requested',
+  },
+  {
     name: 'ineligible verdict → verdict-not-eligible',
     overrides: { verdict: 'request-changes' },
     reason: 'verdict-not-eligible',
@@ -192,6 +202,7 @@ test('reasons are emitted in the stable documented order', () => {
   // Knock out every precondition at once; the reasons must appear in exactly
   // MERGE_ELIGIBILITY_REASONS order regardless of how the state is built.
   const result = evaluateMergeEligibility({
+    terminalReviewProof: { ok: false, reason: 'operator-review-changes-requested' },
     verdict: 'request-changes',
     requiredChecks: [],
     mergeable: 'CONFLICTING',
@@ -205,7 +216,7 @@ test('reasons are emitted in the stable documented order', () => {
   assert.equal(result.eligible, false);
   // `pr-mergeability-unknown` and `pr-not-mergeable` are mutually exclusive.
   assert.deepEqual(result.reasons, MERGE_ELIGIBILITY_REASONS.filter(
-    (reason) => !['review-changed-since-validation', 'terminal-review-evidence-unavailable'].includes(reason) && !reason.startsWith('primary-change-') && reason !== 'history-read-failed' && !reason.startsWith('ci-cost-') && reason !== 'labels-unavailable' && reason !== 'pr-mergeability-unknown',
+    (reason) => !['review-changed-since-validation', 'terminal-review-evidence-unavailable', 'terminal-review-issuer-unverifiable'].includes(reason) && !reason.startsWith('primary-change-') && reason !== 'history-read-failed' && !reason.startsWith('ci-cost-') && reason !== 'labels-unavailable' && reason !== 'pr-mergeability-unknown',
   ));
 });
 
@@ -213,7 +224,7 @@ test('empty/no state → fail closed with labels-unavailable rather than a false
   const result = evaluateMergeEligibility();
   assert.equal(result.eligible, false);
   assert.deepEqual(result.reasons, MERGE_ELIGIBILITY_REASONS.filter(
-    (reason) => !['review-changed-since-validation', 'terminal-review-evidence-unavailable'].includes(reason) && !reason.startsWith('primary-change-') && reason !== 'history-read-failed' && !reason.startsWith('ci-cost-') && reason !== 'duplicate-family-unresolved' && reason !== 'pr-mergeability-unknown',
+    (reason) => !['operator-review-changes-requested', 'review-changed-since-validation', 'terminal-review-evidence-unavailable', 'terminal-review-issuer-unverifiable'].includes(reason) && !reason.startsWith('primary-change-') && reason !== 'history-read-failed' && !reason.startsWith('ci-cost-') && reason !== 'duplicate-family-unresolved' && reason !== 'pr-mergeability-unknown',
   ));
 });
 
@@ -349,8 +360,10 @@ test('exported vocabulary is stable and frozen', () => {
   // A frozen Set is still mutable via .add(); a frozen array truly is not (blocking finding #509).
   assert.throws(() => ELIGIBLE_MERGE_VERDICTS.push('request-changes'));
   assert.deepEqual(MERGE_ELIGIBILITY_REASONS, [
+    'operator-review-changes-requested',
     'review-changed-since-validation',
     'terminal-review-evidence-unavailable',
+    'terminal-review-issuer-unverifiable',
     'ci-cost-read-failed',
   'ci-cost-check-failed',
   'ci-cost-unauthorized',

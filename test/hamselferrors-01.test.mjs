@@ -82,7 +82,7 @@ test('shipped phase, stop-helper, controller and procedure emissions all have re
     const source = readFileSync(new URL(`../${path}`, import.meta.url), 'utf8');
     const reasons = emittedStops(source);
     // hammer-merge reads terminalReviewProof.reason directly from this producer.
-    if (path === 'src/ama/reviewer-authority.mjs') {
+    if (['src/ama/reviewer-authority.mjs', 'src/ama/closer-review-proof.mjs'].includes(path)) {
       for (const match of source.matchAll(/reason:\s*'([a-z][a-z0-9-]+)'/g)) reasons.add(match[1]);
     }
     for (const reason of reasons) {
@@ -93,6 +93,7 @@ test('shipped phase, stop-helper, controller and procedure emissions all have re
   assert.ok(emitted.has('conflict-resolver-failed'), 'must inspect the conflict stop helper');
   assert.ok(emitted.has('checkout-failed'), 'must expand helper step outcomes');
   assert.ok(emitted.has('review-changed-since-validation'), 'must inspect forwarded review-proof reasons');
+  assert.ok(emitted.has('operator-review-changes-requested'), 'must inspect forwarded operator-veto reasons');
   assert.ok(emitted.has('audit-not-published'), 'must inspect terminal audit calls');
   assert.deepEqual(missing, []);
 });

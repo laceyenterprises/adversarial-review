@@ -196,7 +196,49 @@ test('HAMLATEAUDIT-01: changed terminal review proof refuses merge under the hel
   assert.equal(result.merged, false);
   assert.equal(h.calls.merge, 0);
   assert.equal(h.calls.release, 1);
-  assert.ok(result.reasons.includes('review-changed-since-validation'), JSON.stringify(result));
+  assert.equal(result.reason, 'review-changed-since-validation');
+  assert.equal(result.permanent, false);
+  assert.equal(result.retryAfterMs, 300_000);
+  assert.equal(result.mergeNotInvoked, true);
+});
+
+test('terminal review holds refuse before lease acquisition and remain recoverable at the transport', async () => {
+  for (const reason of ['operator-review-changes-requested', 'review-changed-since-validation',
+    'terminal-review-evidence-unavailable']) {
+    const h = makeHarness();
+    const result = await attemptDaemonCleanMerge(baseArgs(h, {
+      liveGate: greenGate({ terminalReviewProof: { ok: false, reason } }),
+    }));
+    assert.equal(result.reason, reason);
+    assert.equal(result.retryAfterMs, 300_000);
+    assert.equal(result.skipMergeAgent, true);
+    assert.equal(h.calls.acquire, 0);
+    assert.equal(h.calls.merge, 0);
+    assert.equal(h.calls.auditWrites.length, 0);
+    const racing = makeHarness({ mergeResults: [{ exitCode: 1, mergeNotInvoked: true,
+      closureHold: { ok: false, reason } }] });
+    const held = await attemptDaemonCleanMerge(baseArgs(racing));
+    assert.equal(held.permanent, false);
+    assert.equal(held.retryAfterMs, 300_000);
+    assert.equal(held.mergeNotInvoked, true);
+  }
+});
+
+test('permanent issuer gaps surface operator custody before lease, at live gate and at transport', async () => {
+  const proof = { ok: false, reason: 'terminal-review-issuer-unverifiable', needsOperator: true };
+  for (const stage of ['pre-lease', 'live', 'transport']) {
+    const h = makeHarness({ mergeResults: [{ exitCode: 1, mergeNotInvoked: true, closureHold: proof }] });
+    if (stage === 'live') h.deps.fetchLiveGateImpl = async () => greenGate({ terminalReviewProof: proof });
+    const result = await attemptDaemonCleanMerge(baseArgs(h, stage === 'pre-lease'
+      ? { liveGate: greenGate({ terminalReviewProof: proof }) } : {}));
+    assert.equal(result.reason, proof.reason, stage);
+    assert.equal(result.merged, false);
+    assert.equal(result.needsOperator, true);
+    assert.equal(result.recoveryWait, false);
+    assert.equal(result.retryAfterMs, undefined);
+    assert.equal(h.calls.merge, stage === 'transport' ? 1 : 0);
+    if (stage === 'pre-lease') assert.equal(h.calls.acquire, 0);
+  }
 });
 
 test('pre-merge recording follows live validation on every transport retry', async () => {

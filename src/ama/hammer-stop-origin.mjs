@@ -113,6 +113,8 @@ export const HAMMER_STOP_ORIGINS = Object.freeze({
   'commit-rewrites-decode-failed': 'closer',
   'local-validation-failed': 'world',
   'review-changed-since-validation': 'world',
+  'operator-review-changes-requested': 'world',
+  'terminal-review-issuer-unverifiable': 'world',
   'already-merged': 'world',
   'parked': 'world',
   'ci-infrastructure': 'world',

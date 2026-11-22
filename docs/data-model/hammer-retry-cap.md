@@ -19,7 +19,9 @@ Before admission, the watcher observes a pending
 reservation at most once per 30 seconds, recording `ownerObservedAt`,
 `ownerState` (`live`, `unknown`, `absent`, `absent-unfenced`, or `terminal`)
 and nullable `ownerLaunch`. Canonical exact-key absence increments
-`absentObservations`; an unknown or positive read clears it. After two
+`absentObservations`. An unknown or positive ownership observation clears it,
+except that an unknown observation preserves an existing `absent-unfenced`
+state and count for reservations other than unscoped CWP conflicts. After two
 consecutive absence proofs and ten minutes from `reservedAt`, the watcher
 sets `absent-unfenced`, retains the reservation, projects operator-required
 custody in next-action/TTM, and sends a deduplicated SEV1 page. The operator
@@ -37,7 +39,17 @@ conflicting repository/head identity refuses ownership. Null repository and
 absent head are non-contradicting; a repository basename is accepted for the
 qualified reservation repository. A scoped keyed read
 sends the stored project and the ledger repository to the existing producer.
-Legacy reservations use the unscoped key. When a legacy reservation's owner
+Legacy CWP conflict reservations without a project use an exact key and
+qualified repository, with absence available after ten minutes. The producer's
+`cwp-repository-dispatch-read` grant owns the native submission-lock check;
+AR validates the grant and exact selector without a separate lock attestation.
+AR's closer intent check requires no unsettled local submission. An explicit
+selector refusal or unproven absence scope permits one key-only fallback to
+prove positive ownership, never absence. Transport failures retain custody
+without a key-only fallback. Other legacy reservations use
+the unscoped key.
+
+When a legacy reservation's owner
 resolves to `live` or `terminal`, the reconciler records the dispatch project
 named by that owner launch's own record, once, as `dispatchProjectRef` with
 `dispatchProjectDerivedAt` (REPAIROWNERSCOPE-01). Subsequent exact-key reads use
@@ -61,9 +73,14 @@ canonical-enqueue-fenced` and stores the version 1 `enqueueFenceReceipt` read
 from the canonical ledger. The receipt binds the exact epoch, owner key, base
 head, reservation digest, operator and original submitter proof. An original
 CWP conflict reservation can retire at a distinct current head. Its receipt
-also binds the checked current head, PR branch, retained worker ID, job and
-result digests, exact boot trace offset and digest, and both canonical fence
-keys. The receipt grants no review head or launch identity. Retirement retains
+also binds the checked current head, PR branch and both canonical fence keys.
+The `native-auto-merge-conflict-dispatch` submitter binds the retained worker ID,
+job and result digests, and exact boot trace offset and digest. When the original
+evidence is unavailable, `--ledger-absence` uses a `canonical-cwp-ledger-absence`
+submitter with fresh canonical family absence and clear competing custody.
+The retirement reader independently checks PR-wide HQ ownership for both CWP
+variants; the ledger-absence check runs under the native submission lock.
+The receipt grants no review head or launch identity. Retirement retains
 the epoch entry, charge counters, refunds and other history.
 Retired reservations no longer appear in next-action or TTM ownership, allowing
 the existing ownerless clock/page and bounded successor.

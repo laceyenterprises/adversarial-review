@@ -212,6 +212,58 @@ test('intent lock release is idempotent and preserves a subsequent holder', t =>
   assert.doesNotThrow(() => release());
 });
 
+test('closer record writer retries brief lock contention and refuses a persistent holder', t => {
+  const f = fixture(t);
+  const flock = fsExt.flockSync;
+  let attempts = 0;
+  const injected = t.mock.method(fsExt, 'flockSync', (fd, mode) => {
+    if (++attempts === 1) throw Object.assign(new Error('watcher holds lock'), { code: 'EAGAIN' });
+    return flock(fd, mode);
+  });
+  updateAmaCloserDispatchRecord(f.rootDir, identity, record => ({ ...record, custom: 'updated' }));
+  assert.equal(attempts, 2);
+  assert.equal(f.read().custom, 'updated');
+  injected.mock.restore();
+
+  const release = tryAcquireCloserIntentLock(f.rootDir, identity);
+  assert.equal(typeof release, 'function');
+  try {
+    assert.throws(() => updateAmaCloserDispatchRecord(f.rootDir, identity, () => {
+      assert.fail('must hold intent lock before mutating record');
+    }), { code: 'EBUSY' });
+  } finally { release(); }
+  assert.equal(f.read().custom, 'updated');
+});
+
+test('closer record writer can acquire on its final bounded contention retry', t => {
+  const f = fixture(t);
+  const flock = fsExt.flockSync;
+  let attempts = 0;
+  t.mock.method(fsExt, 'flockSync', (fd, mode) => {
+    if (++attempts <= 2) throw Object.assign(new Error('watcher holds lock'), { code: 'EWOULDBLOCK' });
+    return flock(fd, mode);
+  });
+  const waits = [];
+  t.mock.method(Atomics, 'wait', (_array, _index, _value, timeout) => { waits.push(timeout); });
+  updateAmaCloserDispatchRecord(f.rootDir, identity, record => ({ ...record, custom: 'final-retry' }));
+  assert.equal(attempts, 3);
+  assert.deepEqual(waits, [10, 25]);
+  assert.equal(f.read().custom, 'final-retry');
+});
+
+test('closer record writer propagates permanent lock errors without retry or mutation', t => {
+  const f = fixture(t);
+  const denied = Object.assign(new Error('lock file denied'), { code: 'EACCES' });
+  let attempts = 0;
+  t.mock.method(fsExt, 'flockSync', () => { attempts++; throw denied; });
+  t.mock.method(Atomics, 'wait', () => assert.fail('permanent errors must not back off'));
+  assert.throws(() => updateAmaCloserDispatchRecord(f.rootDir, identity, () => {
+    assert.fail('permanent lock errors must prevent mutation');
+  }), error => error === denied);
+  assert.equal(attempts, 1);
+  assert.equal(f.read().custom, 'preserved');
+});
+
 test('one reconciliation owns the PR fence while ledger evidence yields', async t => {
   const f = fixture(t);
   let finish;

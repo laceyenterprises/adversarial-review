@@ -1,7 +1,7 @@
 """Exercise the read-only bridge without an Agent OS checkout or network."""
 
 import importlib.util
-from contextlib import redirect_stderr
+from contextlib import contextmanager, nullcontext, redirect_stderr
 from io import StringIO
 import json
 from pathlib import Path
@@ -30,6 +30,7 @@ def load_reader(test):
             "_require_operator_continuation": Mock(),
         },
         "cwp_helm.pr_branch_owner": {"lookup_pr_owner": Mock()},
+        "cwp_dispatch.enqueue_refusal": {"observe_unlocked_key": Mock()},
         "session_ledger.db_path": {
             "BACKEND_POSTGRES": "postgres",
             "resolve_ledger_target": Mock(),
@@ -183,7 +184,7 @@ class CanonicalFenceReaderTest(FenceReaderFixture):
                 self.assertEqual(stderr.getvalue().strip(), expected)
 
 
-class CwpFenceReaderTest(FenceReaderFixture):
+class CwpFenceReaderFixture(FenceReaderFixture):
     def setUp(self):
         super().setUp()
         self.key = "cwp-" + "a" * 24
@@ -222,6 +223,8 @@ class CwpFenceReaderTest(FenceReaderFixture):
             "owner": None,
         }
 
+
+class CwpFenceReaderTest(CwpFenceReaderFixture):
     def test_cwp_both_committed_rows_and_guarded_global_read(self):
         self.assertEqual(self.reader.main(self.argv), self.receipt)
         self.reader._check_scope.assert_called_once_with(
@@ -292,6 +295,89 @@ class CwpFenceReaderTest(FenceReaderFixture):
                 with self.assertRaisesRegex(FenceRefused, reason):
                     self.reader.main(self.argv)
         self.reader._evidence.assert_not_called()
+
+
+class CwpLedgerAbsenceReaderTest(CwpFenceReaderFixture):
+    def setUp(self):
+        super().setUp()
+        self.absence_argv = [*self.argv[:-2], "ledger-absence"]
+        self.observe_lock = sys.modules[
+            "cwp_dispatch.enqueue_refusal"
+        ].observe_unlocked_key
+        self.evidence["submitter"] = {"kind": "canonical-cwp-ledger-absence"}
+        self.rows[0] = (self.key, json.dumps(self.receipt))
+
+    def test_absence_selector_excludes_original_provenance(self):
+        args = self.reader._parse_args(self.absence_argv)
+        self.assertTrue(args.ledger_absence)
+        self.assertEqual(args.current_head, "e" * 40)
+        self.assertFalse(hasattr(args, "conflict_worker_id"))
+        self.assertFalse(hasattr(args, "boot_trace_offset"))
+        for argv in (
+            [*self.absence_argv, "163"],
+            [*self.absence_argv[:-2], args.base_head, "ledger-absence"],
+        ):
+            with self.assertRaisesRegex(FenceRefused, "invalid-repair-fence-selector"):
+                self.reader._parse_args(argv)
+
+    def test_absence_checks_local_custody_while_key_is_locked(self):
+        locked = False
+
+        @contextmanager
+        def guard():
+            nonlocal locked
+            locked = True
+            try:
+                yield True
+            finally:
+                locked = False
+
+        def producer_evidence(root, args, operator, *, hq_root):
+            self.assertTrue(locked)
+            self.assertTrue(args.ledger_absence)
+            self.assertEqual(hq_root, self.hq_root)
+            return self.evidence
+
+        free = self.owner.return_value
+
+        def local_ownership(*args):
+            self.assertTrue(locked)
+            return free
+
+        self.owner.side_effect = local_ownership
+        self.observe_lock.side_effect = lambda *_: guard()
+        self.reader._evidence.side_effect = producer_evidence
+        self.assertEqual(self.reader.main(self.absence_argv), self.receipt)
+        self.observe_lock.assert_called_once_with(self.hq_root, self.key)
+        self.owner.assert_called_once_with(self.hq_root, "fixture/repo", 5)
+        self.owner.side_effect = None
+        for result, reason in (
+            ({**free, "owner": {"status": "requested"}}, "pr-branch-owned"),
+            ({**free, "ok": False}, "pr-branch-ownership-unproven"),
+            ({**free, "repo": "other/repo"}, "pr-branch-ownership-unproven"),
+            ({**free, "prNumber": 6}, "pr-branch-ownership-unproven"),
+            ({key: value for key, value in free.items() if key != "owner"},
+             "pr-branch-ownership-unproven"),
+        ):
+            with self.subTest(result=result):
+                self.owner.return_value = result
+                self.reader._evidence.reset_mock()
+                with self.assertRaisesRegex(FenceRefused, reason):
+                    self.reader.main(self.absence_argv)
+                self.reader._evidence.assert_not_called()
+                self.assertFalse(locked)
+        self.owner.side_effect = OSError("ownership unavailable")
+        with self.assertRaises(OSError):
+            self.reader.main(self.absence_argv)
+        self.assertFalse(locked)
+
+    def test_absence_busy_key_refuses_before_ledger_or_producer_reads(self):
+        self.observe_lock.return_value = nullcontext(False)
+        with self.assertRaisesRegex(FenceRefused, "conflict-submission-owned"):
+            self.reader.main(self.absence_argv)
+        self.reader.open_ledger_for_runtime_readonly.assert_not_called()
+        self.reader._evidence.assert_not_called()
+        self.owner.assert_not_called()
 
 
 if __name__ == "__main__":

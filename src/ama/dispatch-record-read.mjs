@@ -55,3 +55,8 @@ export function readAmaCloserDispatchRecordsForPR(rootDir, { repo, prNumber, str
 
 // Interrupted submissions still require canonical receipt reconciliation.
 export const isPreReceiptIntent = record => ['dispatching', 'dispatch-interrupted'].includes(record?.state);
+
+export function hasUnsettledAmaCloserDispatch(rootDir, identity) {
+  return readAmaCloserDispatchRecordsForPR(rootDir, { ...identity, strict: true })
+    .some(record => !record.state || record.state === 'dispatched' || isPreReceiptIntent(record));
+}

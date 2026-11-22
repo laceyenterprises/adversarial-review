@@ -914,15 +914,25 @@ In-place repair custody is reconciled before watcher admission, at most once
 per 30 seconds. Complete terminal retry evidence can retire an unpublished
 reservation. Point-in-time exact-key absence retains custody; two consecutive
 canonical absence proofs after ten minutes project operator-required custody
-and send a deduplicated SEV1 page. An unbound reservation with no verified
-publication and an unknown owner observed at least ten minutes after
-reservation retains custody, projects `repair-owner-unproven` for the
-operator and sends one SEV1 page per reservation.
+and send a deduplicated SEV1 page. A legacy CWP conflict reservation without a
+project can record exact-key repository absence after ten minutes. An absence
+proof relies on the producer's `cwp-repository-dispatch-read` grant to check
+the native submission lock; AR validates that grant and the exact selector,
+without a separate lock attestation. AR checks for unsettled closer submissions
+under the closer intent lock. An explicit selector refusal or unproven absence
+scope permits a single key-only fallback to establish positive ownership,
+never absence. Transport failures retain custody without a key-only fallback.
+For these reservations, an unknown
+observation after `absent-unfenced` clears the absence count and marks the owner
+`unknown`. An unbound reservation with no verified publication and an unknown
+owner observed at least ten minutes after reservation retains custody, projects
+`repair-owner-unproven` for the operator and sends one SEV1 page per reservation.
 The HQ owner can retire a legacy unscoped reservation at its unchanged open
 base head using a committed canonical enqueue fence and the original handoff.
 For an original CWP conflict reservation on a distinct live head, the HQ owner
 can retire it using matching committed owner and epoch fences and the retained
-conflict submission evidence.
+conflict submission evidence, or `--ledger-absence` with fresh canonical
+family absence and clear competing custody when the original evidence is unavailable.
 Retirement restores the existing ownerless clock and SEV1 path.
 Reviewer harness refunds are bounded to three per PR across heads; later
 failures retain ordinary infrastructure cap and alert handling. Corrupt or busy

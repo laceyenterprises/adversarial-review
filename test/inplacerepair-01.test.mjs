@@ -20,6 +20,9 @@ import { isHarnessFault } from '../src/harness-fault.mjs';
 import { refundReviewHarnessFault, REVIEW_HARNESS_REFUND_CAP } from '../src/review-harness-retry.mjs';
 import { ensureReviewStateSchema, requestReviewRereview } from '../src/review-state.mjs';
 import { readRepairFacts } from '../src/repair-facts.mjs';
+import { readDispatchLaunches } from '../src/dispatch-read-client.mjs';
+import { amaCloserDispatchFilePath } from '../src/ama/dispatch-record-read.mjs';
+import { tryAcquireCloserIntentLock } from '../src/ama/pre-receipt-intent.mjs';
 
 const repo = 'example/widgets', prNumber = 17;
 const old = 'a'.repeat(40), head = 'b'.repeat(40), later = 'c'.repeat(40);
@@ -684,6 +687,165 @@ test('failed retry-chain lookup retains repair custody as unknown', async t => {
   assert.equal(observed.ownerState, 'unknown');
   assert.equal(observed.ownerLaunch, 'fixture-launch');
   assert.equal(pendingRepairEpoch(f.rootDir, f).terminalAt, undefined);
+});
+
+test('legacy CWP absence requires a scoped canonical read, elapsed grace and no submission custody', async t => {
+  const f = { ...fixture(t), now: '2026-01-01T00:00:00Z',
+    cause: 'conflict-without-owner', ownerKey: `cwp-${'a'.repeat(24)}` };
+  const epoch = reserveRepairEpoch(f).epoch;
+  const selector = { idempotency_key: f.ownerKey, repo };
+  const overdue = Date.parse(f.now) + REPAIR_ABSENCE_ESCALATE_MS;
+  const proof = { version: 1, kind: 'canonical-exact-selector-absence',
+    grant_id: 'cwp-repository-dispatch-read', observed_at: new Date(overdue).toISOString(), selector };
+  let response = { schema_version: 1, complete: true, status: 'not_found', items: [], roots: [],
+    retry_edges: [], scope_complete: true, absence_proof: proof };
+  const readImpl = (request, options) => readDispatchLaunches(request, { ...options, dispatchSession: {
+    async dispatchLookup(payload) {
+      assert.deepEqual(payload, selector);
+      if (response instanceof Error) throw response;
+      return response;
+    },
+  } });
+  const pages = [];
+  const options = { ...f, headSha: head, epoch, readImpl, observeWait: async wait => pages.push(wait) };
+  assert.equal((await observeRepairOwner({ ...options, now: overdue - 1 })).ownerState, 'unknown');
+
+  const unlock = tryAcquireCloserIntentLock(f.rootDir, f);
+  assert.ok(unlock);
+  try {
+    assert.equal((await observeRepairOwner({ ...options, now: overdue })).ownerState, 'unknown');
+  } finally { unlock(); }
+  const intent = amaCloserDispatchFilePath(f.rootDir, { ...f, headSha: later });
+  writeFileSync(intent, JSON.stringify({ repo, prNumber, state: 'dispatch-interrupted' }));
+  assert.equal((await observeRepairOwner({ ...options, now: overdue })).ownerState, 'unknown');
+  rmSync(intent);
+
+  const first = await reconcileRepairOwner({ ...options, now: overdue });
+  assert.equal(first.ownerState, 'absent');
+  assert.equal(first.absentObservations, 1);
+  const second = await reconcileRepairOwner({ ...options, now: overdue + REPAIR_OWNER_OBSERVE_MS });
+  assert.equal(second.ownerState, 'absent-unfenced');
+  assert.deepEqual(pages.map(page => page.waitClass), ['repair-absent-unfenced']);
+  const { deriveNextActionSnapshot, nextAction } = await import('../src/pr-next-action.mjs');
+  const action = nextAction(deriveNextActionSnapshot({ subjectKey: `${repo}#${prNumber}`, head,
+    observations: { pr: { state: 'OPEN', headSha: head, labels: [] },
+      policy: { autonomousMergeExecutionEnabled: true }, progress: { repairEpoch: second } } }));
+  assert.equal(action.reason, 'repair-absent-unfenced');
+  assert.equal(action.actor, 'operator');
+
+  response = Object.assign(new Error('synthetic transport timeout'), { code: 'ETIMEDOUT' });
+  const failed = await reconcileRepairOwner({ ...options, now: overdue + 2 * REPAIR_OWNER_OBSERVE_MS });
+  assert.equal(failed.ownerState, 'unknown');
+  assert.equal(failed.absentObservations, undefined);
+  assert.equal(pages.at(-1).waitClass, 'repair-owner-unproven');
+  assert.equal(pendingRepairEpoch(f.rootDir, f).id, epoch.id);
+});
+
+test('legacy CWP repository-read refusal falls back only to positive keyed ownership', async t => {
+  const f = { ...fixture(t), cause: 'conflict-without-owner', ownerKey: `cwp-${'a'.repeat(24)}` };
+  const epoch = reserveRepairEpoch(f).epoch;
+  for (const [fallback, expected] of [[launchRead(epoch, 'running'), 'live'],
+    [launchRead(epoch, 'failed', 'running'), 'live'],
+    [{ ok: false, reason: 'lookup-unavailable' }, 'unknown'],
+    [{ ok: true, roots: [], absenceProof: { version: 1, kind: 'canonical-exact-selector-absence' } }, 'unknown'],
+    [{ ...launchRead(epoch), roots: ['fixture-launch', 'ambiguous-launch'] }, 'unknown'],
+    [{ ...launchRead(epoch), rows: [{ ...launchRead(epoch).rows[0], target_repo: 'foreign/repo' }] }, 'unknown']]) {
+    const calls = [];
+    const observed = await observeRepairOwner({ ...f, epoch, readImpl: async selector => {
+      calls.push(selector);
+      if (selector.repo) return { ok: false, reason: 'dispatch-read-unavailable', selectorRefused: true };
+      return fallback;
+    } });
+    assert.deepEqual(calls.slice(0, 2), [
+      { idempotency_key: epoch.ownerKey, repo }, { idempotency_key: epoch.ownerKey },
+    ]);
+    assert.equal(observed.ownerState, expected);
+    assert.equal(observed.absentObservations, undefined);
+  }
+});
+
+test('legacy CWP transport failures do not start a second lookup or release custody', async t => {
+  const f = { ...fixture(t), cause: 'conflict-without-owner', ownerKey: `cwp-${'a'.repeat(24)}` };
+  const epoch = reserveRepairEpoch(f).epoch;
+  for (const failure of [
+    { ok: false, reason: 'dispatch-read-unavailable', transient: true, timedOut: true },
+    { ok: false, reason: 'dispatch-read-unavailable', transient: true, timedOut: false },
+    { ok: false, reason: 'dispatch-read-unavailable', transient: false, timedOut: false },
+    { ok: false, reason: 'timeout' },
+  ]) {
+    const calls = [];
+    const observed = await observeRepairOwner({ ...f, epoch, readImpl: async selector => {
+      calls.push(selector);
+      return failure;
+    } });
+    assert.deepEqual(calls, [{ idempotency_key: epoch.ownerKey, repo }]);
+    assert.equal(observed.ownerState, 'unknown');
+    assert.equal(observed.terminalAt, undefined);
+    assert.equal(observed.absentObservations, undefined);
+  }
+});
+
+test('legacy CWP fallback accepts real selector refusals and grant-filtered emptiness', async t => {
+  const f = { ...fixture(t), cause: 'conflict-without-owner', ownerKey: `cwp-${'a'.repeat(24)}` };
+  const epoch = reserveRepairEpoch(f).epoch;
+  for (const refusal of [
+    Object.assign(new Error('selector unsupported'), { status: 400 }),
+    new Error('app-contract dispatch_scope_denied: grant required'),
+    { schema_version: 1, status: 'not_found', complete: true, items: [], roots: [], retry_edges: [] },
+  ]) {
+    const calls = [];
+    const owner = launchRead(epoch, 'running');
+    const readImpl = (selector, options) => readDispatchLaunches(selector, { ...options,
+      dispatchSession: { dispatchLookup: async request => {
+        calls.push(request);
+        if (request.repo) {
+          if (refusal instanceof Error) throw refusal;
+          return refusal;
+        }
+        return { schema_version: 1, status: 'found', complete: true,
+          items: owner.rows, roots: owner.roots, retry_edges: owner.retryEdges };
+      } },
+    });
+    const observed = await observeRepairOwner({ ...f, epoch, readImpl });
+    assert.deepEqual(calls, [
+      { idempotency_key: epoch.ownerKey, repo },
+      { idempotency_key: epoch.ownerKey },
+      { launch_request_ids: ['fixture-launch'], include_retry_chain: true },
+    ]);
+    assert.equal(observed.ownerState, 'live');
+    assert.equal(observed.absentObservations, undefined);
+  }
+});
+
+test('CWP absence record errors retain custody and log at the persisted observation cadence', async t => {
+  const f = { ...fixture(t), now: '2026-01-01T00:00:00Z',
+    cause: 'conflict-without-owner', ownerKey: `cwp-${'a'.repeat(24)}` };
+  const epoch = reserveRepairEpoch(f).epoch;
+  const overdue = Date.parse(f.now) + REPAIR_ABSENCE_ESCALATE_MS;
+  const unlock = tryAcquireCloserIntentLock(f.rootDir, f);
+  unlock();
+  const path = amaCloserDispatchFilePath(f.rootDir, { ...f, headSha: later });
+  const logs = [];
+  const options = { ...f, observeWait: async () => {}, logger: { warn: message => logs.push(JSON.parse(message)) },
+    readImpl: async () => ({ ok: true, roots: [], absenceProof: {
+      version: 1, kind: 'canonical-exact-selector-absence' } }) };
+  for (const [index, bytes, errorClass, message] of [
+    [0, JSON.stringify({ repo: 'foreign/repo', prNumber }), 'Error', /identity mismatch/],
+    [1, '{', 'SyntaxError', /JSON|property name/i],
+  ]) {
+    writeFileSync(path, bytes);
+    const now = overdue + index * REPAIR_OWNER_OBSERVE_MS;
+    assert.equal((await reconcileRepairOwner({ ...options, now })).ownerState, 'unknown');
+    assert.equal((await reconcileRepairOwner({ ...options, now: now + 1000 })).ownerState, 'unknown');
+    assert.equal(logs.length, index + 1);
+    assert.equal(logs[index].event, 'repair.cwp_absence_check_failed');
+    assert.equal(logs[index].reservationId, epoch.id);
+    assert.equal(logs[index].errorClass, errorClass);
+    assert.match(logs[index].message, message);
+  }
+  rmSync(path);
+  assert.equal((await reconcileRepairOwner({ ...options,
+    now: overdue + 2 * REPAIR_OWNER_OBSERVE_MS })).ownerState, 'absent');
 });
 
 test('a moved head needs exact publication evidence from the reservation launch or its retry', async t => {

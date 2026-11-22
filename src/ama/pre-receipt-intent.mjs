@@ -20,6 +20,7 @@ import { releaseMergedPrMergeLeases } from './merge-lease.mjs';
 import { writeAmaAuditEntry } from './audit.mjs';
 
 const heldLocks = new WeakMap();
+const intentWriteBackoff = new Int32Array(new SharedArrayBuffer(4));
 function lockPath(rootDir, identity) {
   return amaCloserDispatchFilePath(rootDir, { ...identity, headSha: 'intent' }) + '.lock';
 }
@@ -45,7 +46,14 @@ export function tryAcquireCloserIntentLock(rootDir, identity) {
 
 export function withCloserIntentWriteLock(rootDir, identity, token, write) {
   if (token && heldLocks.get(token) === lockPath(rootDir, identity)) return write();
-  const release = tryAcquireCloserIntentLock(rootDir, identity);
+  let release = tryAcquireCloserIntentLock(rootDir, identity);
+  // Let a concurrent watcher finish its synchronous custody scan before
+  // refusing a write. Keep the synchronous writer's wait bounded.
+  for (const delayMs of [10, 25]) {
+    if (release) break;
+    Atomics.wait(intentWriteBackoff, 0, 0, delayMs);
+    release = tryAcquireCloserIntentLock(rootDir, identity);
+  }
   if (!release) throw Object.assign(new Error('closer intent is owned by another writer'), { code: 'EBUSY' });
   try { return write(); } finally { release(); }
 }

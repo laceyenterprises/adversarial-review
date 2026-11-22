@@ -220,12 +220,23 @@ export async function readDispatchLaunches(selector, args = {}) {
   try { return checked(await retryingDispatchLookup(selector, args), selector); }
   catch (error) {
     cachedSession = null;
-    return unavailable(error);
+    return dispatchLookupFailure(error);
   }
 }
 export function readDispatchLaunchesSync(selector, args = {}) {
   try { return checked(dispatchReadTransport.lookupSync(selector, args), selector); }
-  catch (error) { return unavailable(error); }
+  catch (error) { return dispatchLookupFailure(error); }
+}
+function dispatchLookupFailure(error) {
+  const failure = unavailable(error);
+  const status = Number(error?.status ?? error?.statusCode ?? error?.response?.status);
+  // Keep only a fixed refusal signal; producer messages may contain secrets.
+  const selectorRefused = !failure.transient && !failure.timedOut
+    && ([400, 403].includes(status)
+      || ['invalid_selector', 'unsupported_selector', 'scope_denied', 'read_scope_denied',
+        'dispatch_read_scope_denied', 'dispatch_scope_denied'].includes(error?.code)
+      || /^app-contract (?:400|403|invalid_selector|unsupported_selector|scope_denied|read_scope_denied|dispatch_read_scope_denied|dispatch_scope_denied)\b/.test(error?.message ?? ''));
+  return selectorRefused ? { ...failure, selectorRefused: true } : failure;
 }
 function checked(result, selector) {
   const evidence = dispatchReadTransport.sdk().readDispatchLookupResult(result);
@@ -244,8 +255,15 @@ function completeAbsence(result, selector) {
   const proof = result.absence_proof;
   const keys = Object.keys(selector).sort();
   const scoped = keys.includes('project_ref') || keys.includes('repo');
-  if (scoped && (typeof selector.project_ref !== 'string' || !selector.project_ref.trim()
-    || typeof selector.repo !== 'string' || !/^[^/\s]+\/[^/\s]+$/.test(selector.repo))) return false;
+  // The producer reserves this grant ID for an unfiltered canonical CWP key
+  // lookup, including rows outside the caller's project and repo grants.
+  // The producer owns the native submission-lock check; the envelope has no
+  // separate lock attestation. This consumer validates the grant and selector.
+  const cwpScope = keys.length === 2 && keys[0] === 'idempotency_key' && keys[1] === 'repo'
+    && /^cwp-[0-9a-f]{24}$/.test(selector.idempotency_key)
+    && proof?.grant_id === 'cwp-repository-dispatch-read';
+  if (scoped && (typeof selector.repo !== 'string' || !/^[^/\s]+\/[^/\s]+$/.test(selector.repo)
+    || (!cwpScope && (typeof selector.project_ref !== 'string' || !selector.project_ref.trim())))) return false;
   const identityKeys = keys.filter(key => !scoped || !['project_ref', 'repo'].includes(key));
   const exactKey = identityKeys.length === 1 && identityKeys[0] === 'idempotency_key';
   const exactTicket = identityKeys.length === 2 && identityKeys[0] === 'requested_at_or_after' && identityKeys[1] === 'ticket_ref';

@@ -88,6 +88,30 @@ test('endpoint outage remains unavailable and never consults a ledger fallback',
   assert.equal(readLaunchRequestStatusFromLedger({...args,launchRequestId:'root'}).reason,'dispatch-read-unavailable');
 });
 
+test('dispatch lookup distinguishes selector refusals from transport faults without exposing producer details', async () => {
+  for (const [error, refused] of [
+    [Object.assign(new Error('secret'), { status: 400 }), true],
+    [Object.assign(new Error('secret'), { response: { status: 403 } }), true],
+    [Object.assign(new Error('secret'), { code: 'unsupported_selector' }), true],
+    [new Error('app-contract dispatch_scope_denied: secret'), true],
+    [Object.assign(new Error('secret'), { code: 'ETIMEDOUT' }), false],
+    [Object.assign(new Error('secret'), { code: 'ECONNREFUSED' }), false],
+    [Object.assign(new Error('secret'), { status: 503 }), false],
+    [new Error('secret'), false],
+  ]) {
+    const fail = () => { throw error; };
+    const args = { ...options(), dispatchSession: { dispatchLookup: fail }, dispatchLookupSyncImpl: fail };
+    for (const result of [
+      await readDispatchLaunches({ idempotency_key: 'key' }, args),
+      readDispatchLaunchesSync({ idempotency_key: 'key' }, args),
+    ]) {
+      assert.equal(result.ok, false);
+      assert.equal(result.selectorRefused === true, refused);
+      assert.doesNotMatch(JSON.stringify(result), /secret/);
+    }
+  }
+});
+
 test('asynchronous SDK launch observations yield without starting a database child',async()=>{
   let resolve, progressed=false;
   const pending=readLaunchRequestStatusFromLedgerAsync({launchRequestId:'root',
@@ -261,6 +285,26 @@ test('only exact selector-bound producer absence passes sync and async compatibi
     assert.equal(async.ok, true);
     assert.deepEqual(async.absenceProof, result.absence_proof);
     assert.deepEqual(readDispatchLaunchesSync(selector, options(result)), async);
+  }
+});
+test('repo-only CWP absence requires the unfiltered grant and exact proof selector', async () => {
+  const selector = { idempotency_key: `cwp-${'a'.repeat(24)}`, repo: 'fixture/repo' };
+  const grantId = 'cwp-repository-dispatch-read';
+  const proof = (keys, grant = grantId) => {
+    const result = authorizedAbsence(keys);
+    result.absence_proof.grant_id = grant;
+    return result;
+  };
+  const foreignKey = { ...selector, idempotency_key: 'non-cwp-key' };
+  for (const [request, result, expected] of [
+    [selector, proof(selector), true],
+    [selector, proof(selector, 'project-repository-dispatch-read'), false],
+    [selector, proof({ ...selector, repo: 'other/repo' }), false],
+    [selector, proof({ ...selector, project_ref: 'one-project' }), false],
+    [foreignKey, proof(foreignKey), false],
+  ]) {
+    assert.equal((await readDispatchLaunches(request, options(result))).ok, expected);
+    assert.equal(readDispatchLaunchesSync(request, options(result)).ok, expected);
   }
 });
 for (const mutation of [

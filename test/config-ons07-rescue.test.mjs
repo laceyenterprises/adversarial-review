@@ -87,19 +87,22 @@ for (const value of [0, -1]) test(`remediation rejects non-positive concurrency 
 
 test('schema sync accepts --check before or after its root without mutating the vendor', () => {
   fixture('version: 1\n', (_topPath, dir) => {
-    const target = new URL('../src/generated/config.schema.json', import.meta.url);
-    const before = readFileSync(target, 'utf8');
+    const names = ['config.schema.json', 'config.env.json'];
+    const before = names.map(name => readFileSync(new URL(`../src/generated/${name}`, import.meta.url), 'utf8'));
     mkdirSync(join(dir, 'platform/contracts/generated'), { recursive: true });
-    writeFileSync(join(dir, 'platform/contracts/generated/config.schema.json'), before);
+    names.forEach((name, index) => writeFileSync(join(dir, 'platform/contracts/generated', name), before[index]));
     for (const args of [['--check', dir], [dir, '--check']]) {
       const r = spawnSync(process.execPath, ['scripts/sync-cfg-schema.mjs', ...args], { encoding: 'utf8', timeout: 5000 });
       assert.equal(r.status, 0, r.stderr);
-      assert.match(r.stdout, /in sync/);
+      assert.match(r.stdout, /config\.schema\.json: in sync[\s\S]*config\.env\.json: in sync/);
     }
-    assert.equal(readFileSync(target, 'utf8'), before);
+    writeFileSync(join(dir, 'platform/contracts/generated/config.env.json'), '{"derived":[],"rows":{}}');
+    const drifted = spawnSync(process.execPath, ['scripts/sync-cfg-schema.mjs', dir, '--check'], { encoding: 'utf8', timeout: 5000 });
+    assert.equal(drifted.status, 1);
+    assert.match(drifted.stdout, /config\.env\.json: DRIFT/);
+    names.forEach((name, index) => assert.equal(readFileSync(new URL(`../src/generated/${name}`, import.meta.url), 'utf8'), before[index]));
   });
 });
-
 
 test('nullable allow-zero projections retain the floor in every branch order', () => {
   const zero = { const: 0 }, floor = { minimum: 3 };

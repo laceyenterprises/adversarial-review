@@ -8,6 +8,19 @@ import {
   __testYamlHooks, AgentOSConfigError, configSignatureStatus, loadConfig, loadConfigCached,
   resetConfigCache, validateSchema,
 } from '../src/config-loader.mjs';
+import { validatePublicHygiene } from '../src/config-policies.mjs';
+
+test('public hygiene validation leaves mutable, sealed and frozen policies unchanged', () => {
+  for (const protect of [value => value, Object.seal, Object.freeze]) {
+    for (const input of [{}, { repos: null, identities: null }, { identities: { codex: { name: 'Fixture', email: 'fixture@example.invalid' } } }]) {
+      const before = structuredClone(input);
+      const policy = protect(input);
+      assert.doesNotThrow(() => validatePublicHygiene(policy));
+      assert.deepEqual(policy, before);
+    }
+    assert.throws(() => validatePublicHygiene(protect({ repos: ['invalid'] })), AgentOSConfigError);
+  }
+});
 
 test('public hygiene accepts empty and populated policy without host defaults', () => {
   const dir = mkdtempSync(join(tmpdir(), 'public-hygiene-'));

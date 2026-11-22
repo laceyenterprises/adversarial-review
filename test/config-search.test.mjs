@@ -4,8 +4,33 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { AgentOSConfigError, loadConfig, loadConfigRuntime, validateSchema } from '../src/config-loader.mjs';
+import { validateSearch } from '../src/config-policies.mjs';
 
 const fixture = JSON.parse(readFileSync(new URL('./fixtures/search-config-cases.json', import.meta.url)));
+
+test('search policy checks tolerate absent mappings; schema validation rejects null overlays', () => {
+  for (const value of [undefined, null, false, 0, '']) {
+    assert.doesNotThrow(() => validateSearch(value));
+    assert.doesNotThrow(() => validateSearch({ providers: { brave: value } }));
+  }
+  const dir = mkdtempSync(join(tmpdir(), 'search-null-'));
+  const topPath = join(dir, 'config.yaml');
+  const localPath = join(dir, 'config.local.yaml');
+  try {
+    for (const search of [null, { providers: { brave: null } }]) {
+      const doc = { version: 1, services: { hcp: { search } } };
+      assert.throws(() => validateSchema(doc), AgentOSConfigError);
+      for (const local of [false, true]) {
+        writeFileSync(topPath, local ? 'version: 1\n' : JSON.stringify(doc));
+        if (local) writeFileSync(localPath, JSON.stringify({ services: doc.services }));
+        for (const load of [loadConfig, loadConfigRuntime]) {
+          assert.throws(() => load({ topPath, env: {} }), AgentOSConfigError);
+        }
+        if (local) rmSync(localPath);
+      }
+    }
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
 
 test('SPE search capability vocabulary overrides and modes cover each provider independently', () => {
   const dir = mkdtempSync(join(tmpdir(), 'search-capabilities-'));

@@ -7,6 +7,22 @@
       "properties": {
         "reviewer": {
           "properties": {
+            "load_aware": {
+              "additionalProperties": false,
+              "properties": {
+                "enabled": {
+                  "default": true,
+                  "type": "boolean"
+                },
+                "max_multiplier": {
+                  "default": 6.0,
+                  "maximum": 20.0,
+                  "minimum": 1.0,
+                  "type": "number"
+                }
+              },
+              "type": "object"
+            },
             "memory": {
               "additionalProperties": false,
               "properties": {
@@ -21,9 +37,9 @@
                       "x-cfg-alias-of": "reviewer.memory.pressure.critical_available_mb"
                     },
                     "critical_swap_used_pct": {
-                      "default": 95,
-                      "maximum": 100,
-                      "minimum": 0,
+                      "default": 95.0,
+                      "maximum": 100.0,
+                      "minimum": 0.0,
                       "type": "number",
                       "x-cfg-alias-of": "reviewer.memory.pressure.critical_swap_used_pct"
                     },
@@ -35,9 +51,9 @@
                       "x-cfg-alias-of": "reviewer.memory.pressure.elevated_available_mb"
                     },
                     "elevated_swap_used_pct": {
-                      "default": 85,
-                      "maximum": 100,
-                      "minimum": 0,
+                      "default": 85.0,
+                      "maximum": 100.0,
+                      "minimum": 0.0,
                       "type": "number",
                       "x-cfg-alias-of": "reviewer.memory.pressure.elevated_swap_used_pct"
                     },
@@ -118,7 +134,7 @@
                       "type": "null"
                     }
                   ],
-                  "default": 15
+                  "default": 15.0
                 },
                 "uncached_input_usd": {
                   "anyOf": [
@@ -129,7 +145,7 @@
                       "type": "null"
                     }
                   ],
-                  "default": 5
+                  "default": 5.0
                 }
               },
               "type": "object"
@@ -381,7 +397,7 @@
                       "properties": {
                         "estimateUsd": {
                           "maximum": 50,
-                          "minimum": 0.000001,
+                          "minimum": 1e-06,
                           "type": "number"
                         },
                         "model": {
@@ -783,8 +799,8 @@
               "type": "integer"
             },
             "timeout_seconds": {
-              "default": 2,
-              "maximum": 3600,
+              "default": 2.0,
+              "maximum": 3600.0,
               "minimum": 0.05,
               "type": "number"
             }
@@ -812,8 +828,8 @@
             },
             "retry_backoff_seconds": {
               "default": 0.1,
-              "maximum": 60,
-              "minimum": 0,
+              "maximum": 60.0,
+              "minimum": 0.0,
               "type": "number"
             }
           },
@@ -887,8 +903,8 @@
               "type": "integer"
             },
             "timeout_seconds": {
-              "default": 2,
-              "maximum": 3600,
+              "default": 2.0,
+              "maximum": 3600.0,
               "minimum": 0.05,
               "type": "number"
             }
@@ -937,7 +953,7 @@
           "additionalProperties": false,
           "properties": {
             "calibration_factor": {
-              "default": 1,
+              "default": 1.0,
               "type": "number"
             },
             "included_minutes": {
@@ -945,11 +961,11 @@
               "type": "integer"
             },
             "monthly_budget_usd": {
-              "default": 200,
+              "default": 200.0,
               "type": "number"
             },
             "page_delivery_timeout_seconds": {
-              "default": 45,
+              "default": 45.0,
               "type": "number"
             },
             "rate_usd_per_minute": {
@@ -1445,7 +1461,7 @@
                   "type": "null"
                 }
               ],
-              "default": 15
+              "default": 15.0
             },
             "uncached_input_usd": {
               "anyOf": [
@@ -1456,7 +1472,7 @@
                   "type": "null"
                 }
               ],
-              "default": 5
+              "default": 5.0
             }
           },
           "type": "object"
@@ -1558,6 +1574,23 @@
             "incident_dispatch": {
               "default": false,
               "type": "boolean"
+            }
+          },
+          "type": "object"
+        }
+      },
+      "type": "object"
+    },
+    "disk_reclaim": {
+      "additionalProperties": false,
+      "properties": {
+        "dehydrate": {
+          "additionalProperties": false,
+          "properties": {
+            "after_publish_hours": {
+              "default": 2,
+              "minimum": 0,
+              "type": "integer"
             }
           },
           "type": "object"
@@ -1784,6 +1817,10 @@
       "properties": {
         "allow_missing_alert_to": {
           "default": false,
+          "type": "boolean"
+        },
+        "dismiss_stale_request_changes_on_resolved": {
+          "default": true,
           "type": "boolean"
         },
         "merge_agent_deterministic_convergence_terminal": {
@@ -2446,7 +2483,7 @@
       "additionalProperties": false,
       "properties": {
         "acp_activation_page_seconds": {
-          "default": 1800,
+          "default": 1800.0,
           "minimum": 0,
           "type": "number"
         },
@@ -3777,15 +3814,15 @@
           "additionalProperties": false,
           "properties": {
             "bridge_recovery_timeout_seconds": {
-              "default": 135,
-              "maximum": 1800,
-              "minimum": 1,
+              "default": 135.0,
+              "maximum": 1800.0,
+              "minimum": 1.0,
               "type": "number"
             },
             "bridge_startup_grace_seconds": {
-              "default": 180,
-              "maximum": 3600,
-              "minimum": 0,
+              "default": 180.0,
+              "maximum": 3600.0,
+              "minimum": 0.0,
               "type": "number"
             },
             "broker_compose_file": {
@@ -3817,8 +3854,8 @@
               "type": "string"
             },
             "broker_standby_probe_timeout_seconds": {
-              "default": 15,
-              "maximum": 600,
+              "default": 15.0,
+              "maximum": 600.0,
               "minimum": 0.5,
               "type": "number"
             },
@@ -3837,21 +3874,21 @@
               "type": "integer"
             },
             "credential_decay_crit_after_seconds": {
-              "default": 3600,
-              "maximum": 86400,
-              "minimum": 0,
+              "default": 3600.0,
+              "maximum": 86400.0,
+              "minimum": 0.0,
               "type": "number"
             },
             "credential_decay_last_good_crit_expiry_margin_seconds": {
-              "default": 1800,
-              "maximum": 86400,
-              "minimum": 0,
+              "default": 1800.0,
+              "maximum": 86400.0,
+              "minimum": 0.0,
               "type": "number"
             },
             "credential_decay_warn_after_seconds": {
-              "default": 300,
-              "maximum": 86400,
-              "minimum": 0,
+              "default": 300.0,
+              "maximum": 86400.0,
+              "minimum": 0.0,
               "type": "number"
             },
             "critical_service_patterns": {
@@ -3907,14 +3944,14 @@
               "type": "integer"
             },
             "health_poll_interval_seconds": {
-              "default": 30,
-              "maximum": 3600,
-              "minimum": 1,
+              "default": 30.0,
+              "maximum": 3600.0,
+              "minimum": 1.0,
               "type": "number"
             },
             "health_probe_timeout_seconds": {
-              "default": 8,
-              "maximum": 600,
+              "default": 8.0,
+              "maximum": 600.0,
               "minimum": 0.5,
               "type": "number"
             },
@@ -3941,21 +3978,21 @@
               "type": "integer"
             },
             "recovery_action_timeout_seconds": {
-              "default": 20,
-              "maximum": 1800,
-              "minimum": 1,
+              "default": 20.0,
+              "maximum": 1800.0,
+              "minimum": 1.0,
               "type": "number"
             },
             "recovery_backoff_initial_seconds": {
-              "default": 5,
-              "maximum": 3600,
-              "minimum": 0,
+              "default": 5.0,
+              "maximum": 3600.0,
+              "minimum": 0.0,
               "type": "number"
             },
             "recovery_backoff_max_seconds": {
-              "default": 30,
-              "maximum": 3600,
-              "minimum": 0,
+              "default": 30.0,
+              "maximum": 3600.0,
+              "minimum": 0.0,
               "type": "number"
             },
             "recovery_confirm_ticks": {
@@ -4255,17 +4292,17 @@
                   "type": "array"
                 },
                 "day_cost_cap_usd": {
-                  "default": 25,
+                  "default": 25.0,
                   "minimum": 0,
                   "type": "number"
                 },
                 "max_call_cost_usd": {
                   "default": 0.1,
-                  "minimum": 0.000001,
+                  "minimum": 1e-06,
                   "type": "number"
                 },
                 "run_cost_cap_usd": {
-                  "default": 10,
+                  "default": 10.0,
                   "minimum": 0,
                   "type": "number"
                 },
@@ -4568,6 +4605,45 @@
       ],
       "type": "string"
     },
+    "remediation": {
+      "additionalProperties": false,
+      "properties": {
+        "git_identity_repo_overrides": {
+          "additionalProperties": {
+            "additionalProperties": {
+              "additionalProperties": false,
+              "properties": {
+                "email": {
+                  "pattern": "^(?:(?=[^\\u0000\\r\\n<>]*\\S)[^\\u0000\\r\\n<>]+)(?![\\s\\S])",
+                  "type": "string"
+                },
+                "name": {
+                  "pattern": "^(?:(?=[^\\u0000\\r\\n<>]*\\S)[^\\u0000\\r\\n<>]+)(?![\\s\\S])",
+                  "type": "string"
+                }
+              },
+              "type": "object"
+            },
+            "properties": {},
+            "type": "object"
+          },
+          "default": {},
+          "properties": {},
+          "type": "object"
+        },
+        "max_concurrent_jobs": {
+          "default": 1,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "max_concurrent_jobs_ceiling": {
+          "default": 8,
+          "minimum": 1,
+          "type": "integer"
+        }
+      },
+      "type": "object"
+    },
     "resident": {
       "additionalProperties": false,
       "properties": {
@@ -4655,6 +4731,47 @@
           },
           "type": "object"
         },
+        "disk_reclaim": {
+          "additionalProperties": false,
+          "properties": {
+            "colima_vm": {
+              "additionalProperties": false,
+              "properties": {
+                "builder_cache_keep_hours": {
+                  "default": 24,
+                  "maximum": 8760,
+                  "minimum": 1,
+                  "type": "integer"
+                },
+                "colima_home": {
+                  "default": "",
+                  "type": "string"
+                },
+                "enabled": {
+                  "default": true,
+                  "type": "boolean"
+                },
+                "helper_image": {
+                  "default": "docker.io/library/alpine@sha256:d9e853e87e55526f6b2917df91a2115c36dd7c696a35be12163d44e6e2a4b6bc",
+                  "pattern": "^(?:^(?:[a-z0-9]+(?:[.-][a-z0-9]+)*(?::[0-9]+)?/)?[a-z0-9]+(?:(?:[._]|__|-+)[a-z0-9]+)*(?:/[a-z0-9]+(?:(?:[._]|__|-+)[a-z0-9]+)*)*(?::[A-Za-z0-9_][A-Za-z0-9_.-]{0,127})?@sha256:[0-9a-f]{64}$)(?![\\s\\S])",
+                  "type": "string"
+                },
+                "prune_dangling_images": {
+                  "default": false,
+                  "type": "boolean"
+                },
+                "timeout_seconds": {
+                  "default": 900,
+                  "maximum": 3600,
+                  "minimum": 30,
+                  "type": "integer"
+                }
+              },
+              "type": "object"
+            }
+          },
+          "type": "object"
+        },
         "ephemeral": {
           "additionalProperties": false,
           "properties": {
@@ -4679,7 +4796,7 @@
                   "type": "null"
                 }
               ],
-              "default": 300
+              "default": 300.0
             },
             "dispatch_audit_keep_days": {
               "default": 365,
@@ -4694,6 +4811,11 @@
             "gc_report_only": {
               "default": true,
               "type": "boolean"
+            },
+            "hq_tmp_keep_days": {
+              "default": 14,
+              "minimum": 0,
+              "type": "integer"
             },
             "max_workspaces_reaped_per_tick": {
               "default": 10,
@@ -4739,9 +4861,19 @@
               "minimum": 1,
               "type": "integer"
             },
+            "token_transcripts_compression_budget_seconds": {
+              "default": 300,
+              "minimum": 1,
+              "type": "integer"
+            },
             "token_transcripts_compression_enabled": {
               "default": true,
               "type": "boolean"
+            },
+            "token_transcripts_compression_max_entries": {
+              "default": 20000,
+              "minimum": 1,
+              "type": "integer"
             },
             "worker_worktrees_bulk_delete_ack_marker_path": {
               "default": "__HQ_ROOT__/retention/worker-worktrees-bulk-delete-ack",
@@ -4783,8 +4915,8 @@
           "additionalProperties": false,
           "properties": {
             "max_total_gb": {
-              "default": 750,
-              "minimum": 1,
+              "default": 750.0,
+              "minimum": 1.0,
               "type": "number"
             },
             "measurement_max_age_hours": {
@@ -4855,7 +4987,7 @@
             },
             "warn_fraction": {
               "default": 0.85,
-              "minimum": 0,
+              "minimum": 0.0,
               "type": "number"
             }
           },
@@ -5011,8 +5143,8 @@
               "type": "integer"
             },
             "percent_threshold": {
-              "default": 5,
-              "minimum": 0,
+              "default": 5.0,
+              "minimum": 0.0,
               "type": "number"
             },
             "silence_marker_dir": {
@@ -5032,9 +5164,34 @@
       },
       "type": "object"
     },
+    "review_cycle_cap": {
+      "default": 5,
+      "minimum": 1,
+      "type": "integer"
+    },
+    "review_cycle_window_hours": {
+      "default": 24,
+      "minimum": 1,
+      "type": "integer"
+    },
     "reviewer": {
       "additionalProperties": false,
       "properties": {
+        "ceiling_base_seconds": {
+          "default": 1800,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "ceiling_max_seconds": {
+          "default": 10800,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "first_output_timeout_ms": {
+          "default": 0,
+          "minimum": 0,
+          "type": "integer"
+        },
         "gemini": {
           "additionalProperties": false,
           "properties": {
@@ -5088,6 +5245,11 @@
           },
           "type": "object"
         },
+        "idle_timeout_seconds": {
+          "default": 600,
+          "minimum": 1,
+          "type": "integer"
+        },
         "memory": {
           "additionalProperties": false,
           "properties": {
@@ -5101,9 +5263,9 @@
                   "type": "integer"
                 },
                 "critical_swap_used_pct": {
-                  "default": 95,
-                  "maximum": 100,
-                  "minimum": 0,
+                  "default": 95.0,
+                  "maximum": 100.0,
+                  "minimum": 0.0,
                   "type": "number"
                 },
                 "elevated_available_mb": {
@@ -5113,9 +5275,9 @@
                   "type": "integer"
                 },
                 "elevated_swap_used_pct": {
-                  "default": 85,
-                  "maximum": 100,
-                  "minimum": 0,
+                  "default": 85.0,
+                  "maximum": 100.0,
+                  "minimum": 0.0,
                   "type": "number"
                 },
                 "projected_headroom_floor_mb": {
@@ -5136,6 +5298,26 @@
           },
           "type": "object"
         },
+        "no_progress_timeout_ms": {
+          "default": 900000,
+          "minimum": 1000,
+          "type": "integer"
+        },
+        "quota_check_enabled": {
+          "default": true,
+          "type": "boolean"
+        },
+        "quota_status_dir": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
         "review_population_retry": {
           "additionalProperties": false,
           "properties": {
@@ -5151,6 +5333,15 @@
             }
           },
           "type": "object"
+        },
+        "running_pass_timeout_seconds": {
+          "default": 3600,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "timeout_ms": {
+          "default": 1200000,
+          "type": "integer"
         }
       },
       "type": "object"
@@ -5214,6 +5405,36 @@
                   },
                   "type": "object"
                 },
+                "cap_rehead_enabled": {
+                  "default": true,
+                  "type": "boolean"
+                },
+                "cap_rehead_lifetime_cap": {
+                  "default": 2,
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "closer_inconclusive_retry": {
+                  "additionalProperties": false,
+                  "properties": {
+                    "backoff_base_ms": {
+                      "default": 300000,
+                      "minimum": 1000,
+                      "type": "integer"
+                    },
+                    "backoff_max_ms": {
+                      "default": 3600000,
+                      "minimum": 1000,
+                      "type": "integer"
+                    },
+                    "surface_after_attempts": {
+                      "default": 3,
+                      "minimum": 1,
+                      "type": "integer"
+                    }
+                  },
+                  "type": "object"
+                },
                 "disabled_repositories": {
                   "default": [],
                   "items": {
@@ -5221,6 +5442,10 @@
                   },
                   "type": "array",
                   "x-cfg-repository-list": true
+                },
+                "dispatch_timeout_ms": {
+                  "default": 600000,
+                  "type": "integer"
                 },
                 "eligibility": {
                   "additionalProperties": false,
@@ -5265,6 +5490,18 @@
                   "default": 6,
                   "minimum": 0,
                   "type": "integer"
+                },
+                "hammer_lifetime_dispatch_ceiling": {
+                  "anyOf": [
+                    {
+                      "minimum": 0,
+                      "type": "integer"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ],
+                  "default": null
                 },
                 "lane_routes": {
                   "default": [],
@@ -5339,6 +5576,10 @@
                   "default": true,
                   "type": "boolean"
                 },
+                "strict_non_blocking_remediation": {
+                  "default": true,
+                  "type": "boolean"
+                },
                 "worker_class": {
                   "default": "hammer",
                   "enum": [
@@ -5371,6 +5612,21 @@
                 }
               },
               "type": "object"
+            },
+            "operator_label_actor_enforcement": {
+              "default": "observe",
+              "enum": [
+                "observe",
+                "enforce"
+              ],
+              "type": "string"
+            },
+            "operator_logins": {
+              "default": [],
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
             },
             "orchestration_mode": {
               "default": "native",
@@ -5601,6 +5857,7 @@
             "codex",
             "claude-code",
             "hammer",
+            "hammer-claude",
             "hammer-grok"
           ],
           "type": "string"
@@ -5680,6 +5937,48 @@
           },
           "type": "object"
         },
+        "registry": {
+          "additionalProperties": {
+            "additionalProperties": false,
+            "properties": {
+              "completionShape": {
+                "default": "",
+                "type": "string"
+              },
+              "persona": {
+                "default": "",
+                "type": "string"
+              },
+              "priority": {
+                "anyOf": [
+                  {
+                    "minimum": 0,
+                    "type": "integer"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null
+              },
+              "promptSet": {
+                "default": "",
+                "type": "string"
+              },
+              "taskKind": {
+                "default": "",
+                "type": "string"
+              },
+              "workerClass": {
+                "default": "",
+                "type": "string"
+              }
+            },
+            "type": "object"
+          },
+          "properties": {},
+          "type": "object"
+        },
         "remediator": {
           "default": "adversarial",
           "enum": [
@@ -5688,6 +5987,7 @@
             "remediator-codex-corp",
             "codex-corp",
             "remediator-grok",
+            "gemini",
             "adversarial"
           ],
           "type": "string",
@@ -5708,9 +6008,13 @@
               "remediator-codex-corp",
               "remediator-claude",
               "remediator-grok",
-              "remediator-gemini"
+              "remediator-gemini",
+              "codex-corp"
             ],
-            "type": "string"
+            "type": "string",
+            "x-cfg-normalize": {
+              "codex-corp": "remediator-codex-corp"
+            }
           },
           "type": "array"
         },
@@ -5728,6 +6032,16 @@
           "x-cfg-normalize": {
             "claude": "claude-code"
           }
+        },
+        "routing": {
+          "additionalProperties": false,
+          "properties": {
+            "never-review-own-builder-class": {
+              "default": true,
+              "type": "boolean"
+            }
+          },
+          "type": "object"
         }
       },
       "type": "object"
@@ -6291,12 +6605,12 @@
               "additionalProperties": false,
               "properties": {
                 "cold_start_restart_rate_per_hour": {
-                  "default": 2,
+                  "default": 2.0,
                   "minimum": 0,
                   "type": "number"
                 },
                 "docker_timeout_seconds": {
-                  "default": 20,
+                  "default": 20.0,
                   "minimum": 0,
                   "type": "number"
                 },
@@ -6427,12 +6741,12 @@
               "type": "integer"
             },
             "df_timeout_seconds": {
-              "default": 1,
+              "default": 1.0,
               "minimum": 0,
               "type": "number"
             },
             "du_timeout_seconds": {
-              "default": 30,
+              "default": 30.0,
               "minimum": 0,
               "type": "number"
             },
@@ -6572,7 +6886,7 @@
           "additionalProperties": false,
           "properties": {
             "command_timeout_seconds": {
-              "default": 10,
+              "default": 10.0,
               "maximum": 300,
               "minimum": 0.001,
               "type": "number"
@@ -6767,9 +7081,9 @@
               "type": "boolean"
             },
             "churn_crit_forks_per_second": {
-              "default": 300,
-              "maximum": 100000,
-              "minimum": 0,
+              "default": 300.0,
+              "maximum": 100000.0,
+              "minimum": 0.0,
               "type": "number"
             },
             "churn_sustained_seconds": {
@@ -6779,21 +7093,21 @@
               "type": "integer"
             },
             "churn_warn_forks_per_second": {
-              "default": 150,
-              "maximum": 100000,
-              "minimum": 0,
+              "default": 150.0,
+              "maximum": 100000.0,
+              "minimum": 0.0,
               "type": "number"
             },
             "cpu_crit_pct": {
-              "default": 300,
-              "maximum": 100000,
-              "minimum": 0,
+              "default": 300.0,
+              "maximum": 100000.0,
+              "minimum": 0.0,
               "type": "number"
             },
             "cpu_warn_pct": {
-              "default": 150,
-              "maximum": 100000,
-              "minimum": 0,
+              "default": 150.0,
+              "maximum": 100000.0,
+              "minimum": 0.0,
               "type": "number"
             },
             "retention_hours": {
@@ -7267,19 +7581,22 @@
                               "type": "string"
                             }
                           },
-                          "type": "object"
+                          "type": "object",
+                          "x-cfg-strict-always": true
                         },
                         "type": "array"
                       }
                     },
-                    "type": "object"
+                    "type": "object",
+                    "x-cfg-strict-always": true
                   },
                   "default": {},
                   "properties": {},
                   "type": "object"
                 }
               },
-              "type": "object"
+              "type": "object",
+              "x-cfg-strict-always": true
             },
             "idempotency_keep_days": {
               "default": 30,
@@ -7499,9 +7816,75 @@
                           "type": "boolean"
                         },
                         "operation_limits": {
-                          "additionalProperties": false,
+                          "additionalProperties": {
+                            "additionalProperties": false,
+                            "properties": {
+                              "currency": {
+                                "enum": [
+                                  "USD"
+                                ],
+                                "type": "string"
+                              },
+                              "max_charge_usd": {
+                                "pattern": "^(?:^[0-9]{1,12}([.][0-9]{1,9})?$)(?![\\s\\S])",
+                                "type": "string"
+                              },
+                              "max_duration_seconds": {
+                                "maximum": 86400,
+                                "minimum": 1,
+                                "type": "integer"
+                              },
+                              "max_input_tokens": {
+                                "maximum": 1000000000,
+                                "minimum": 1,
+                                "type": "integer"
+                              },
+                              "max_output_tokens": {
+                                "maximum": 1000000000,
+                                "minimum": 1,
+                                "type": "integer"
+                              },
+                              "max_pages": {
+                                "maximum": 1000000000,
+                                "minimum": 1,
+                                "type": "integer"
+                              },
+                              "max_results": {
+                                "maximum": 1000000000,
+                                "minimum": 1,
+                                "type": "integer"
+                              },
+                              "max_urls": {
+                                "maximum": 1000000000,
+                                "minimum": 1,
+                                "type": "integer"
+                              },
+                              "pricing_provenance": {
+                                "pattern": "^(?:^\\S[^\\r\\n]{0,511}$)(?![\\s\\S])",
+                                "type": "string"
+                              },
+                              "processor": {
+                                "pattern": "^(?:^[A-Za-z0-9_-]{1,64}$)(?![\\s\\S])",
+                                "type": "string"
+                              },
+                              "product_authorized": {
+                                "type": "boolean"
+                              },
+                              "research_effort": {
+                                "enum": [
+                                  "low",
+                                  "medium",
+                                  "high"
+                                ],
+                                "type": "string"
+                              }
+                            },
+                            "type": "object",
+                            "x-cfg-strict-always": true
+                          },
                           "properties": {},
-                          "type": "object"
+                          "type": "object",
+                          "x-cfg-strict-always": true
                         },
                         "presentation": {
                           "default": "abstracted",
@@ -7516,7 +7899,8 @@
                           "type": "string"
                         }
                       },
-                      "type": "object"
+                      "type": "object",
+                      "x-cfg-strict-always": true
                     },
                     "exa": {
                       "additionalProperties": false,
@@ -7554,9 +7938,75 @@
                           "type": "boolean"
                         },
                         "operation_limits": {
-                          "additionalProperties": false,
+                          "additionalProperties": {
+                            "additionalProperties": false,
+                            "properties": {
+                              "currency": {
+                                "enum": [
+                                  "USD"
+                                ],
+                                "type": "string"
+                              },
+                              "max_charge_usd": {
+                                "pattern": "^(?:^[0-9]{1,12}([.][0-9]{1,9})?$)(?![\\s\\S])",
+                                "type": "string"
+                              },
+                              "max_duration_seconds": {
+                                "maximum": 86400,
+                                "minimum": 1,
+                                "type": "integer"
+                              },
+                              "max_input_tokens": {
+                                "maximum": 1000000000,
+                                "minimum": 1,
+                                "type": "integer"
+                              },
+                              "max_output_tokens": {
+                                "maximum": 1000000000,
+                                "minimum": 1,
+                                "type": "integer"
+                              },
+                              "max_pages": {
+                                "maximum": 1000000000,
+                                "minimum": 1,
+                                "type": "integer"
+                              },
+                              "max_results": {
+                                "maximum": 1000000000,
+                                "minimum": 1,
+                                "type": "integer"
+                              },
+                              "max_urls": {
+                                "maximum": 1000000000,
+                                "minimum": 1,
+                                "type": "integer"
+                              },
+                              "pricing_provenance": {
+                                "pattern": "^(?:^\\S[^\\r\\n]{0,511}$)(?![\\s\\S])",
+                                "type": "string"
+                              },
+                              "processor": {
+                                "pattern": "^(?:^[A-Za-z0-9_-]{1,64}$)(?![\\s\\S])",
+                                "type": "string"
+                              },
+                              "product_authorized": {
+                                "type": "boolean"
+                              },
+                              "research_effort": {
+                                "enum": [
+                                  "low",
+                                  "medium",
+                                  "high"
+                                ],
+                                "type": "string"
+                              }
+                            },
+                            "type": "object",
+                            "x-cfg-strict-always": true
+                          },
                           "properties": {},
-                          "type": "object"
+                          "type": "object",
+                          "x-cfg-strict-always": true
                         },
                         "presentation": {
                           "default": "abstracted",
@@ -7571,7 +8021,8 @@
                           "type": "string"
                         }
                       },
-                      "type": "object"
+                      "type": "object",
+                      "x-cfg-strict-always": true
                     },
                     "firecrawl": {
                       "additionalProperties": false,
@@ -7611,9 +8062,75 @@
                           "type": "boolean"
                         },
                         "operation_limits": {
-                          "additionalProperties": false,
+                          "additionalProperties": {
+                            "additionalProperties": false,
+                            "properties": {
+                              "currency": {
+                                "enum": [
+                                  "USD"
+                                ],
+                                "type": "string"
+                              },
+                              "max_charge_usd": {
+                                "pattern": "^(?:^[0-9]{1,12}([.][0-9]{1,9})?$)(?![\\s\\S])",
+                                "type": "string"
+                              },
+                              "max_duration_seconds": {
+                                "maximum": 86400,
+                                "minimum": 1,
+                                "type": "integer"
+                              },
+                              "max_input_tokens": {
+                                "maximum": 1000000000,
+                                "minimum": 1,
+                                "type": "integer"
+                              },
+                              "max_output_tokens": {
+                                "maximum": 1000000000,
+                                "minimum": 1,
+                                "type": "integer"
+                              },
+                              "max_pages": {
+                                "maximum": 1000000000,
+                                "minimum": 1,
+                                "type": "integer"
+                              },
+                              "max_results": {
+                                "maximum": 1000000000,
+                                "minimum": 1,
+                                "type": "integer"
+                              },
+                              "max_urls": {
+                                "maximum": 1000000000,
+                                "minimum": 1,
+                                "type": "integer"
+                              },
+                              "pricing_provenance": {
+                                "pattern": "^(?:^\\S[^\\r\\n]{0,511}$)(?![\\s\\S])",
+                                "type": "string"
+                              },
+                              "processor": {
+                                "pattern": "^(?:^[A-Za-z0-9_-]{1,64}$)(?![\\s\\S])",
+                                "type": "string"
+                              },
+                              "product_authorized": {
+                                "type": "boolean"
+                              },
+                              "research_effort": {
+                                "enum": [
+                                  "low",
+                                  "medium",
+                                  "high"
+                                ],
+                                "type": "string"
+                              }
+                            },
+                            "type": "object",
+                            "x-cfg-strict-always": true
+                          },
                           "properties": {},
-                          "type": "object"
+                          "type": "object",
+                          "x-cfg-strict-always": true
                         },
                         "presentation": {
                           "default": "abstracted",
@@ -7628,7 +8145,8 @@
                           "type": "string"
                         }
                       },
-                      "type": "object"
+                      "type": "object",
+                      "x-cfg-strict-always": true
                     },
                     "parallel": {
                       "additionalProperties": false,
@@ -7665,9 +8183,75 @@
                           "type": "boolean"
                         },
                         "operation_limits": {
-                          "additionalProperties": false,
+                          "additionalProperties": {
+                            "additionalProperties": false,
+                            "properties": {
+                              "currency": {
+                                "enum": [
+                                  "USD"
+                                ],
+                                "type": "string"
+                              },
+                              "max_charge_usd": {
+                                "pattern": "^(?:^[0-9]{1,12}([.][0-9]{1,9})?$)(?![\\s\\S])",
+                                "type": "string"
+                              },
+                              "max_duration_seconds": {
+                                "maximum": 86400,
+                                "minimum": 1,
+                                "type": "integer"
+                              },
+                              "max_input_tokens": {
+                                "maximum": 1000000000,
+                                "minimum": 1,
+                                "type": "integer"
+                              },
+                              "max_output_tokens": {
+                                "maximum": 1000000000,
+                                "minimum": 1,
+                                "type": "integer"
+                              },
+                              "max_pages": {
+                                "maximum": 1000000000,
+                                "minimum": 1,
+                                "type": "integer"
+                              },
+                              "max_results": {
+                                "maximum": 1000000000,
+                                "minimum": 1,
+                                "type": "integer"
+                              },
+                              "max_urls": {
+                                "maximum": 1000000000,
+                                "minimum": 1,
+                                "type": "integer"
+                              },
+                              "pricing_provenance": {
+                                "pattern": "^(?:^\\S[^\\r\\n]{0,511}$)(?![\\s\\S])",
+                                "type": "string"
+                              },
+                              "processor": {
+                                "pattern": "^(?:^[A-Za-z0-9_-]{1,64}$)(?![\\s\\S])",
+                                "type": "string"
+                              },
+                              "product_authorized": {
+                                "type": "boolean"
+                              },
+                              "research_effort": {
+                                "enum": [
+                                  "low",
+                                  "medium",
+                                  "high"
+                                ],
+                                "type": "string"
+                              }
+                            },
+                            "type": "object",
+                            "x-cfg-strict-always": true
+                          },
                           "properties": {},
-                          "type": "object"
+                          "type": "object",
+                          "x-cfg-strict-always": true
                         },
                         "presentation": {
                           "default": "abstracted",
@@ -7682,7 +8266,8 @@
                           "type": "string"
                         }
                       },
-                      "type": "object"
+                      "type": "object",
+                      "x-cfg-strict-always": true
                     },
                     "perplexity": {
                       "additionalProperties": false,
@@ -7719,9 +8304,75 @@
                           "type": "boolean"
                         },
                         "operation_limits": {
-                          "additionalProperties": false,
+                          "additionalProperties": {
+                            "additionalProperties": false,
+                            "properties": {
+                              "currency": {
+                                "enum": [
+                                  "USD"
+                                ],
+                                "type": "string"
+                              },
+                              "max_charge_usd": {
+                                "pattern": "^(?:^[0-9]{1,12}([.][0-9]{1,9})?$)(?![\\s\\S])",
+                                "type": "string"
+                              },
+                              "max_duration_seconds": {
+                                "maximum": 86400,
+                                "minimum": 1,
+                                "type": "integer"
+                              },
+                              "max_input_tokens": {
+                                "maximum": 1000000000,
+                                "minimum": 1,
+                                "type": "integer"
+                              },
+                              "max_output_tokens": {
+                                "maximum": 1000000000,
+                                "minimum": 1,
+                                "type": "integer"
+                              },
+                              "max_pages": {
+                                "maximum": 1000000000,
+                                "minimum": 1,
+                                "type": "integer"
+                              },
+                              "max_results": {
+                                "maximum": 1000000000,
+                                "minimum": 1,
+                                "type": "integer"
+                              },
+                              "max_urls": {
+                                "maximum": 1000000000,
+                                "minimum": 1,
+                                "type": "integer"
+                              },
+                              "pricing_provenance": {
+                                "pattern": "^(?:^\\S[^\\r\\n]{0,511}$)(?![\\s\\S])",
+                                "type": "string"
+                              },
+                              "processor": {
+                                "pattern": "^(?:^[A-Za-z0-9_-]{1,64}$)(?![\\s\\S])",
+                                "type": "string"
+                              },
+                              "product_authorized": {
+                                "type": "boolean"
+                              },
+                              "research_effort": {
+                                "enum": [
+                                  "low",
+                                  "medium",
+                                  "high"
+                                ],
+                                "type": "string"
+                              }
+                            },
+                            "type": "object",
+                            "x-cfg-strict-always": true
+                          },
                           "properties": {},
-                          "type": "object"
+                          "type": "object",
+                          "x-cfg-strict-always": true
                         },
                         "presentation": {
                           "default": "abstracted",
@@ -7736,7 +8387,8 @@
                           "type": "string"
                         }
                       },
-                      "type": "object"
+                      "type": "object",
+                      "x-cfg-strict-always": true
                     },
                     "tavily": {
                       "additionalProperties": false,
@@ -7776,9 +8428,75 @@
                           "type": "boolean"
                         },
                         "operation_limits": {
-                          "additionalProperties": false,
+                          "additionalProperties": {
+                            "additionalProperties": false,
+                            "properties": {
+                              "currency": {
+                                "enum": [
+                                  "USD"
+                                ],
+                                "type": "string"
+                              },
+                              "max_charge_usd": {
+                                "pattern": "^(?:^[0-9]{1,12}([.][0-9]{1,9})?$)(?![\\s\\S])",
+                                "type": "string"
+                              },
+                              "max_duration_seconds": {
+                                "maximum": 86400,
+                                "minimum": 1,
+                                "type": "integer"
+                              },
+                              "max_input_tokens": {
+                                "maximum": 1000000000,
+                                "minimum": 1,
+                                "type": "integer"
+                              },
+                              "max_output_tokens": {
+                                "maximum": 1000000000,
+                                "minimum": 1,
+                                "type": "integer"
+                              },
+                              "max_pages": {
+                                "maximum": 1000000000,
+                                "minimum": 1,
+                                "type": "integer"
+                              },
+                              "max_results": {
+                                "maximum": 1000000000,
+                                "minimum": 1,
+                                "type": "integer"
+                              },
+                              "max_urls": {
+                                "maximum": 1000000000,
+                                "minimum": 1,
+                                "type": "integer"
+                              },
+                              "pricing_provenance": {
+                                "pattern": "^(?:^\\S[^\\r\\n]{0,511}$)(?![\\s\\S])",
+                                "type": "string"
+                              },
+                              "processor": {
+                                "pattern": "^(?:^[A-Za-z0-9_-]{1,64}$)(?![\\s\\S])",
+                                "type": "string"
+                              },
+                              "product_authorized": {
+                                "type": "boolean"
+                              },
+                              "research_effort": {
+                                "enum": [
+                                  "low",
+                                  "medium",
+                                  "high"
+                                ],
+                                "type": "string"
+                              }
+                            },
+                            "type": "object",
+                            "x-cfg-strict-always": true
+                          },
                           "properties": {},
-                          "type": "object"
+                          "type": "object",
+                          "x-cfg-strict-always": true
                         },
                         "presentation": {
                           "default": "abstracted",
@@ -7793,10 +8511,12 @@
                           "type": "string"
                         }
                       },
-                      "type": "object"
+                      "type": "object",
+                      "x-cfg-strict-always": true
                     }
                   },
-                  "type": "object"
+                  "type": "object",
+                  "x-cfg-strict-always": true
                 },
                 "run_budget_usd": {
                   "pattern": "^(?:^[0-9]{1,12}([.][0-9]{1,9})?$)(?![\\s\\S])",
@@ -7812,7 +8532,8 @@
                   "type": "integer"
                 }
               },
-              "type": "object"
+              "type": "object",
+              "x-cfg-strict-always": true
             },
             "token_expired_keep_days": {
               "default": 7,
@@ -7991,7 +8712,7 @@
           "additionalProperties": false,
           "properties": {
             "failure_cooldown_seconds": {
-              "default": 300,
+              "default": 300.0,
               "type": "number"
             },
             "failure_threshold": {
@@ -8027,8 +8748,8 @@
               "type": "integer"
             },
             "replay_loop_interval_seconds": {
-              "default": 30,
-              "minimum": 1,
+              "default": 30.0,
+              "minimum": 1.0,
               "type": "number"
             },
             "replay_max_attempts_before_dead_letter": {
@@ -8047,13 +8768,13 @@
           "additionalProperties": false,
           "properties": {
             "quarantine_threshold": {
-              "default": 25,
-              "minimum": 0,
+              "default": 25.0,
+              "minimum": 0.0,
               "type": "number"
             },
             "score_half_life_days": {
-              "default": 30,
-              "minimum": 1,
+              "default": 30.0,
+              "minimum": 1.0,
               "type": "number"
             }
           },
@@ -8232,7 +8953,7 @@
           "additionalProperties": false,
           "properties": {
             "failure_cooldown_seconds": {
-              "default": 300,
+              "default": 300.0,
               "type": "number"
             },
             "failure_threshold": {
@@ -8356,7 +9077,7 @@
               "properties": {
                 "low_water_fraction": {
                   "default": 0.5,
-                  "minimum": 0,
+                  "minimum": 0.0,
                   "type": "number"
                 },
                 "refill_max_per_pass": {
@@ -8511,9 +9232,9 @@
               "type": "boolean"
             },
             "max_multiplier": {
-              "default": 6,
-              "maximum": 20,
-              "minimum": 1,
+              "default": 6.0,
+              "maximum": 20.0,
+              "minimum": 1.0,
               "type": "number"
             }
           },
@@ -8586,6 +9307,65 @@
     "watcher": {
       "additionalProperties": false,
       "properties": {
+        "ama_closer_max_concurrent_launches": {
+          "default": 3,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "ama_hammer_dispatch_mode": {
+          "default": "inline",
+          "enum": [
+            "inline",
+            "background"
+          ],
+          "type": "string"
+        },
+        "first_pass_review_queue_depth_failover_threshold": {
+          "anyOf": [
+            {
+              "minimum": 1,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "first_pass_reviewer_pool_max_concurrent_reviewers": {
+          "anyOf": [
+            {
+              "minimum": 1,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "max_drain_wait_ms": {
+          "default": 3600000,
+          "minimum": 1000,
+          "type": "integer"
+        },
+        "pending_draft_review_respawn_age_seconds": {
+          "default": 900,
+          "minimum": 60,
+          "type": "integer"
+        },
+        "rereview_queue_depth_failover_threshold": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
         "review_lane_first_pass_burst_limit": {
           "default": 2,
           "minimum": 1,
@@ -8599,8 +9379,13 @@
         "review_lane_min_share": {
           "default": 0.25,
           "maximum": 0.5,
-          "minimum": 0,
+          "minimum": 0.0,
           "type": "number"
+        },
+        "stuck_dispatch_alert_debounce_ms": {
+          "default": 21600000,
+          "minimum": 60000,
+          "type": "integer"
         }
       },
       "type": "object"
@@ -9016,14 +9801,14 @@
           "properties": {
             "max_live_floor_ratio": {
               "default": 0.1,
-              "maximum": 1,
-              "minimum": 0,
+              "maximum": 1.0,
+              "minimum": 0.0,
               "type": "number"
             },
             "min_coverage_ratio": {
               "default": 0.9,
-              "maximum": 1,
-              "minimum": 0,
+              "maximum": 1.0,
+              "minimum": 0.0,
               "type": "number"
             }
           },
@@ -9050,7 +9835,7 @@
               "type": "boolean"
             },
             "oss_run_key_max_budget_usd": {
-              "default": 2,
+              "default": 2.0,
               "type": "number"
             },
             "oss_run_key_ttl_seconds": {
@@ -9211,8 +9996,8 @@
                 },
                 "infra_retry_outage_ratio": {
                   "default": 0.5,
-                  "maximum": 1,
-                  "minimum": 0,
+                  "maximum": 1.0,
+                  "minimum": 0.0,
                   "type": "number"
                 },
                 "infra_retry_outage_window_minutes": {
@@ -9231,15 +10016,15 @@
                   "additionalProperties": false,
                   "properties": {
                     "per_pr_timeout_seconds": {
-                      "default": 90,
-                      "maximum": 600,
-                      "minimum": 1,
+                      "default": 90.0,
+                      "maximum": 600.0,
+                      "minimum": 1.0,
                       "type": "number"
                     },
                     "total_budget_seconds": {
-                      "default": 300,
-                      "maximum": 1800,
-                      "minimum": 1,
+                      "default": 300.0,
+                      "maximum": 1800.0,
+                      "minimum": 1.0,
                       "type": "number"
                     }
                   },
@@ -9252,9 +10037,9 @@
                   "type": "integer"
                 },
                 "reconcile_timeout_seconds": {
-                  "default": 900,
-                  "maximum": 7200,
-                  "minimum": 1,
+                  "default": 900.0,
+                  "maximum": 7200.0,
+                  "minimum": 1.0,
                   "type": "number"
                 },
                 "recover_cancelled_runs": {
@@ -9313,30 +10098,30 @@
               "additionalProperties": false,
               "properties": {
                 "additional_repo_allowance_seconds": {
-                  "default": 150,
-                  "maximum": 1800,
-                  "minimum": 0,
+                  "default": 150.0,
+                  "maximum": 1800.0,
+                  "minimum": 0.0,
                   "type": "number"
                 },
                 "subprocess_timeout_seconds": {
-                  "default": 300,
-                  "maximum": 3600,
-                  "minimum": 30,
+                  "default": 300.0,
+                  "maximum": 3600.0,
+                  "minimum": 30.0,
                   "type": "number"
                 },
                 "timeout_backoff_seconds": {
-                  "default": 900,
-                  "maximum": 86400,
-                  "minimum": 0,
+                  "default": 900.0,
+                  "maximum": 86400.0,
+                  "minimum": 0.0,
                   "type": "number"
                 }
               },
               "type": "object"
             },
             "launch_step_timeout_seconds": {
-              "default": 600,
-              "maximum": 7200,
-              "minimum": 30,
+              "default": 600.0,
+              "maximum": 7200.0,
+              "minimum": 30.0,
               "type": "number"
             },
             "launching_grace_seconds": {
@@ -9513,7 +10298,7 @@
                 },
                 "threshold_fraction": {
                   "default": 0.5,
-                  "maximum": 1,
+                  "maximum": 1.0,
                   "minimum": 0.01,
                   "type": "number"
                 },
@@ -9556,8 +10341,8 @@
                   "type": "integer"
                 },
                 "max_load_per_core": {
-                  "default": 1,
-                  "maximum": 64,
+                  "default": 1.0,
+                  "maximum": 64.0,
                   "minimum": 0.25,
                   "type": "number"
                 }
@@ -9645,9 +10430,9 @@
               "type": "integer"
             },
             "command_timeout_seconds": {
-              "default": 3300,
-              "maximum": 86400,
-              "minimum": 1,
+              "default": 3300.0,
+              "maximum": 86400.0,
+              "minimum": 1.0,
               "type": "number"
             },
             "dirty_backlog_alerts": {
@@ -9710,7 +10495,7 @@
                 },
                 "hard_load_per_core": {
                   "default": 2.5,
-                  "maximum": 128,
+                  "maximum": 128.0,
                   "minimum": 0.01,
                   "type": "number"
                 },
@@ -9737,8 +10522,8 @@
                   "type": "boolean"
                 },
                 "target_load_per_core": {
-                  "default": 1,
-                  "maximum": 64,
+                  "default": 1.0,
+                  "maximum": 64.0,
                   "minimum": 0.01,
                   "type": "number"
                 }
@@ -9797,7 +10582,7 @@
                 },
                 "unhealthy_fraction": {
                   "default": 0.5,
-                  "maximum": 1,
+                  "maximum": 1.0,
                   "minimum": 0.01,
                   "type": "number"
                 },
@@ -9818,27 +10603,27 @@
                   "type": "boolean"
                 },
                 "max_multiplier": {
-                  "default": 6,
-                  "maximum": 20,
-                  "minimum": 1,
+                  "default": 6.0,
+                  "maximum": 20.0,
+                  "minimum": 1.0,
                   "type": "number"
                 },
                 "queue_depth_signal_weight": {
-                  "default": 1,
-                  "maximum": 10,
-                  "minimum": 0,
+                  "default": 1.0,
+                  "maximum": 10.0,
+                  "minimum": 0.0,
                   "type": "number"
                 },
                 "refusal_rate_signal_weight": {
-                  "default": 1,
-                  "maximum": 10,
-                  "minimum": 0,
+                  "default": 1.0,
+                  "maximum": 10.0,
+                  "minimum": 0.0,
                   "type": "number"
                 },
                 "saturation_signal_weight": {
-                  "default": 1,
-                  "maximum": 10,
-                  "minimum": 0,
+                  "default": 1.0,
+                  "maximum": 10.0,
+                  "minimum": 0.0,
                   "type": "number"
                 }
               },
@@ -9888,9 +10673,9 @@
                   "type": "boolean"
                 },
                 "max_seconds": {
-                  "default": 30,
-                  "maximum": 3600,
-                  "minimum": 5,
+                  "default": 30.0,
+                  "maximum": 3600.0,
+                  "minimum": 5.0,
                   "type": "number"
                 }
               },
@@ -9917,7 +10702,7 @@
                 },
                 "growth_threshold_fraction": {
                   "default": 0.25,
-                  "maximum": 100,
+                  "maximum": 100.0,
                   "minimum": 0.01,
                   "type": "number"
                 },
@@ -9947,7 +10732,7 @@
                 },
                 "warn_fraction": {
                   "default": 0.8,
-                  "maximum": 1,
+                  "maximum": 1.0,
                   "minimum": 0.05,
                   "type": "number"
                 },
@@ -10117,15 +10902,15 @@
               "additionalProperties": false,
               "properties": {
                 "min_cpu_idle_percent": {
-                  "default": 15,
-                  "maximum": 100,
-                  "minimum": 0,
+                  "default": 15.0,
+                  "maximum": 100.0,
+                  "minimum": 0.0,
                   "type": "number"
                 },
                 "safety_load_per_core": {
-                  "default": 32,
-                  "maximum": 128,
-                  "minimum": 1,
+                  "default": 32.0,
+                  "maximum": 128.0,
+                  "minimum": 1.0,
                   "type": "number"
                 }
               },
@@ -10313,9 +11098,9 @@
               "type": "integer"
             },
             "worker_teardown_timeout_seconds": {
-              "default": 300,
-              "maximum": 86400,
-              "minimum": 1,
+              "default": 300.0,
+              "maximum": 86400.0,
+              "minimum": 1.0,
               "type": "number"
             }
           },
@@ -10665,15 +11450,15 @@
                   "type": "integer"
                 },
                 "max_sweep_seconds": {
-                  "default": 1,
-                  "maximum": 30,
+                  "default": 1.0,
+                  "maximum": 30.0,
                   "minimum": 0.05,
                   "type": "number"
                 },
                 "sweep_interval_seconds": {
-                  "default": 30,
-                  "maximum": 3600,
-                  "minimum": 1,
+                  "default": 30.0,
+                  "maximum": 3600.0,
+                  "minimum": 1.0,
                   "type": "number"
                 }
               },
@@ -10887,8 +11672,8 @@
                   "type": "boolean"
                 },
                 "max_wait_seconds": {
-                  "default": 5,
-                  "maximum": 60,
+                  "default": 5.0,
+                  "maximum": 60.0,
                   "minimum": 0.1,
                   "type": "number"
                 }
@@ -11118,8 +11903,8 @@
             },
             "holdout_rate": {
               "default": 0.05,
-              "maximum": 1,
-              "minimum": 0,
+              "maximum": 1.0,
+              "minimum": 0.0,
               "type": "number"
             },
             "holdout_seed": {
@@ -11299,8 +12084,8 @@
               "type": "boolean"
             },
             "frontier_run_key_max_budget_usd": {
-              "default": 5,
-              "maximum": 5,
+              "default": 5.0,
+              "maximum": 5.0,
               "minimum": 0.01,
               "type": "number"
             },
@@ -11325,24 +12110,24 @@
               "type": "boolean"
             },
             "run_key_hard_stop_usd": {
-              "default": 20,
-              "maximum": 25,
+              "default": 20.0,
+              "maximum": 25.0,
               "minimum": 0.01,
               "type": "number"
             },
             "team_monthly_cap_usd": {
-              "default": 25,
+              "default": 25.0,
               "minimum": 0.01,
               "type": "number"
             },
             "vertex_monthly_budget_usd": {
-              "default": 40,
+              "default": 40.0,
               "minimum": 0.01,
               "type": "number"
             },
             "vertex_run_key_hard_stop_usd": {
-              "default": 5,
-              "maximum": 25,
+              "default": 5.0,
+              "maximum": 25.0,
               "minimum": 0.01,
               "type": "number"
             }
@@ -11353,9 +12138,9 @@
           "additionalProperties": false,
           "properties": {
             "minimum_multiplier": {
-              "default": 2,
-              "maximum": 20,
-              "minimum": 2,
+              "default": 2.0,
+              "maximum": 20.0,
+              "minimum": 2.0,
               "type": "number"
             }
           },
@@ -11453,10 +12238,27 @@
               "type": "string"
             },
             "identities": {
-              "additionalProperties": false,
+              "additionalProperties": {
+                "additionalProperties": false,
+                "properties": {
+                  "email": {
+                    "type": "string"
+                  },
+                  "name": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "email",
+                  "name"
+                ],
+                "type": "object",
+                "x-cfg-strict-always": true
+              },
               "default": {},
               "properties": {},
-              "type": "object"
+              "type": "object",
+              "x-cfg-strict-always": true
             },
             "repos": {
               "default": [],
@@ -11466,7 +12268,8 @@
               "type": "array"
             }
           },
-          "type": "object"
+          "type": "object",
+          "x-cfg-strict-always": true
         },
         "purchasing": {
           "additionalProperties": false,
@@ -11567,7 +12370,7 @@
                   "additionalProperties": false,
                   "properties": {
                     "pause_pct": {
-                      "default": 5,
+                      "default": 5.0,
                       "maximum": 100,
                       "minimum": 0,
                       "type": "number"
@@ -11580,13 +12383,13 @@
                       "type": "array"
                     },
                     "release_before_reset_hours": {
-                      "default": 12,
+                      "default": 12.0,
                       "maximum": 168,
                       "minimum": 0,
                       "type": "number"
                     },
                     "remaining_pct": {
-                      "default": 0,
+                      "default": 0.0,
                       "maximum": 100,
                       "minimum": 0,
                       "type": "number"
@@ -11602,7 +12405,7 @@
                   "additionalProperties": false,
                   "properties": {
                     "pause_pct": {
-                      "default": 5,
+                      "default": 5.0,
                       "maximum": 100,
                       "minimum": 0,
                       "type": "number"
@@ -11615,13 +12418,13 @@
                       "type": "array"
                     },
                     "release_before_reset_hours": {
-                      "default": 12,
+                      "default": 12.0,
                       "maximum": 168,
                       "minimum": 0,
                       "type": "number"
                     },
                     "remaining_pct": {
-                      "default": 0,
+                      "default": 0.0,
                       "maximum": 100,
                       "minimum": 0,
                       "type": "number"
@@ -11637,7 +12440,7 @@
                   "additionalProperties": false,
                   "properties": {
                     "pause_pct": {
-                      "default": 5,
+                      "default": 5.0,
                       "maximum": 100,
                       "minimum": 0,
                       "type": "number"
@@ -11650,13 +12453,13 @@
                       "type": "array"
                     },
                     "release_before_reset_hours": {
-                      "default": 12,
+                      "default": 12.0,
                       "maximum": 168,
                       "minimum": 0,
                       "type": "number"
                     },
                     "remaining_pct": {
-                      "default": 0,
+                      "default": 0.0,
                       "maximum": 100,
                       "minimum": 0,
                       "type": "number"
@@ -11823,13 +12626,13 @@
               "type": "integer"
             },
             "load_clear_per_core": {
-              "default": 2,
+              "default": 2.0,
               "maximum": 1000,
               "minimum": 0,
               "type": "number"
             },
             "load_enter_per_core": {
-              "default": 3,
+              "default": 3.0,
               "maximum": 1000,
               "minimum": 0,
               "type": "number"
@@ -11900,7 +12703,7 @@
               "type": "integer"
             },
             "throughput_clear_ratio": {
-              "default": 1,
+              "default": 1.0,
               "maximum": 1000,
               "minimum": 0,
               "type": "number"
@@ -11948,9 +12751,9 @@
               "type": "integer"
             },
             "heartbeat_grace_factor": {
-              "default": 2,
-              "maximum": 24,
-              "minimum": 1,
+              "default": 2.0,
+              "maximum": 24.0,
+              "minimum": 1.0,
               "type": "number"
             },
             "mode": {
@@ -12047,18 +12850,18 @@
               "type": "integer"
             },
             "workspace_disk_tps_crit_multiplier": {
-              "default": 3,
-              "minimum": 1,
+              "default": 3.0,
+              "minimum": 1.0,
               "type": "number"
             },
             "workspace_disk_tps_floor": {
-              "default": 4000,
-              "minimum": 1,
+              "default": 4000.0,
+              "minimum": 1.0,
               "type": "number"
             },
             "workspace_disk_tps_warn_multiplier": {
-              "default": 2,
-              "minimum": 1,
+              "default": 2.0,
+              "minimum": 1.0,
               "type": "number"
             },
             "workspace_pending_alert_seconds": {
@@ -12463,9 +13266,9 @@
                   "type": "boolean"
                 },
                 "op_timeout_seconds": {
-                  "default": 10,
-                  "maximum": 15,
-                  "minimum": 1,
+                  "default": 10.0,
+                  "maximum": 15.0,
+                  "minimum": 1.0,
                   "type": "number"
                 },
                 "scoped_secret_enabled": {
@@ -12707,8 +13510,8 @@
               "type": "integer"
             },
             "command_timeout_seconds": {
-              "default": 10,
-              "maximum": 120,
+              "default": 10.0,
+              "maximum": 120.0,
               "minimum": 0.1,
               "type": "number"
             },
@@ -12725,9 +13528,9 @@
               "type": "integer"
             },
             "dispatch_retry_backoff_seconds": {
-              "default": 1,
-              "maximum": 60,
-              "minimum": 0,
+              "default": 1.0,
+              "maximum": 60.0,
+              "minimum": 0.0,
               "type": "number"
             },
             "dispatch_token_budget": {
@@ -12789,6 +13592,18 @@
             },
             "timeout_seconds": {
               "default": 60,
+              "type": "integer"
+            }
+          },
+          "type": "object"
+        },
+        "teardown": {
+          "additionalProperties": false,
+          "properties": {
+            "targeted_mutation_lock_wait_seconds": {
+              "default": 180,
+              "maximum": 900,
+              "minimum": 1,
               "type": "integer"
             }
           },
@@ -12908,7 +13723,7 @@
           "additionalProperties": false,
           "properties": {
             "db_max_stale_s": {
-              "default": 180,
+              "default": 180.0,
               "minimum": 0,
               "type": "number"
             },
@@ -12918,27 +13733,27 @@
               "type": "integer"
             },
             "heartbeat_max_stale_s": {
-              "default": 120,
+              "default": 120.0,
               "minimum": 0,
               "type": "number"
             },
             "kick_cooldown_s": {
-              "default": 60,
+              "default": 60.0,
               "minimum": 0,
               "type": "number"
             },
             "log_max_stale_s": {
-              "default": 180,
+              "default": 180.0,
               "minimum": 0,
               "type": "number"
             },
             "startup_deadline_s": {
-              "default": 300,
+              "default": 300.0,
               "minimum": 1,
               "type": "number"
             },
             "tick_interval_s": {
-              "default": 30,
+              "default": 30.0,
               "minimum": 0,
               "type": "number"
             }
@@ -12992,6 +13807,16 @@
               "minimum": 1,
               "type": "integer",
               "x-cfg-alias-of": "retention.ephemeral.no_pr_workspace_idle_hours_before_reap"
+            }
+          },
+          "type": "object"
+        },
+        "worktree_reuse": {
+          "additionalProperties": false,
+          "properties": {
+            "enabled": {
+              "default": false,
+              "type": "boolean"
             }
           },
           "type": "object"

@@ -28,24 +28,6 @@ export const GROK_ROLE_PIN_LANES = Object.freeze({
   'roles.merge_agent_worker_class': Object.freeze({ 'hammer-grok': 'hammer' }),
 });
 
-export const GROK_ENV_KEYS = Object.freeze([
-  'enabled',
-  'model',
-  'cli_path',
-  'first_output_timeout_seconds',
-  'stall_timeout_seconds',
-  'reviewer.mode',
-  ...GROK_LANE_FLAGS.map((lane) => `${lane}.enabled`),
-]);
-
-// Canonical env names only (no legacy aliases), matching the Python table.
-export function grokEnvAliases() {
-  return Object.fromEntries(GROK_ENV_KEYS.map((key) => [`grok.${key}`, {
-    canonical: `AGENT_OS_GROK_${key.replace('.', '_').toUpperCase()}`,
-    aliases: [],
-  }]));
-}
-
 function readDotted(doc, dotted) {
   let node = doc;
   for (const part of dotted.split('.')) {

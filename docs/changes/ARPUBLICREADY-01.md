@@ -30,3 +30,10 @@ config-loader coverage already passes.
 - `git diff --check`: passed.
 
 The full local suite is reserved for PR-head CI.
+
+Final rescue folds absolute deploy-checkout resolution into the shared deploy-root
+adapter and imports it in remediation. This preserves the configured-root/null
+overlap behavior while bringing the orchestration file below its unchanged
+ARC-19 line ceiling. The actual hosted failure was4299 lines against4297.
+The measured Node22 performance repair from AR2006 is integrated as source; no
+test budget or ceiling is raised. All original Comment-only fixes remain in place.

@@ -92,6 +92,14 @@ test('controller and repair CLI suites are scheduled ahead of median-duration fi
   assert.deepEqual(order, [controller, repair, unmeasured]);
 });
 
+test('measured retirement and broker suites are scheduled ahead of an unmeasured file', () => {
+  const durations = JSON.parse(readFileSync(new URL('./fixtures/suite-durations.json', import.meta.url), 'utf8'));
+  const retirement = 'test/retire-legacy-repair.test.mjs';
+  const broker = 'test/reviewer-broker.test.mjs';
+  const unmeasured = 'test/a-new-fixture.test.mjs';
+  assert.deepEqual(orderFiles([unmeasured, broker, retirement], durations), [retirement, broker, unmeasured]);
+});
+
 for (const failure of [false, true]) test(`exclusive phase completes before parallel work and aggregates TAP (failure=${failure})`, t => {
   const root = mkdtempSync(path.join(tmpdir(), 'serial-phase-'));
   t.after(() => rmSync(root, { recursive: true, force: true }));

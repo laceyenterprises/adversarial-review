@@ -30,7 +30,7 @@ import { isHarnessIdentityEnforcementEnabled } from './remediation-identity-poli
 import { execFile } from 'node:child_process';
 import { existsSync, lstatSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { userInfo } from 'node:os';
-import { resolveDeployRoot } from './deploy-root.mjs';
+import { resolveDeployCheckout } from './deploy-root.mjs';
 import { dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
@@ -686,13 +686,6 @@ function isPathInsideOrEqual(rootPath, candidatePath) {
   const candidate = resolveRealPath(resolve(candidatePath));
   const rel = relative(root, candidate);
   return rel === '' || (!rel.startsWith('..') && !isAbsolute(rel));
-}
-
-function resolveDeployCheckout(env = process.env) {
-  // Null when no deploy root is configured: isPathInsideOrEqual() then reports
-  // no overlap, so the live-source guards below only apply where one is known.
-  const deployRoot = resolveDeployRoot(env);
-  return deployRoot ? resolve(deployRoot) : null;
 }
 
 function resolveRemediationWorkspaceRoot({

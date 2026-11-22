@@ -1,4 +1,5 @@
 import { loadConfigCached } from './config-loader.mjs';
+import { resolve } from 'node:path';
 
 /**
  * Resolve the deployment checkout root without a host-specific default.
@@ -17,4 +18,10 @@ export function resolveDeployRoot(env = process.env, { loadConfigImpl = loadConf
   } catch {
     return null;
   }
+}
+
+/** Absolute checkout for source-overlap guards; absent configuration stays null. */
+export function resolveDeployCheckout(env = process.env) {
+  const deployRoot = resolveDeployRoot(env);
+  return deployRoot ? resolve(deployRoot) : null;
 }

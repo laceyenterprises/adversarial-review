@@ -287,7 +287,7 @@ export function summarizePrRoundLedger(rootDir, identity, options = {}) {
  * One operator-facing line. Used by the remediation comment and by the
  * merge-agent rescue projection, so both say the same thing.
  */
-export function formatPrRoundLedgerSummary(summary) {
+export function formatPrRoundLedgerSummary(summary, { postBudget = false } = {}) {
   if (!summary) return null;
   const used = Number(summary.remediationRoundsUsed || 0);
   const budget = summary.budget === null || summary.budget === undefined ? '?' : summary.budget;
@@ -295,7 +295,8 @@ export function formatPrRoundLedgerSummary(summary) {
     .sort(([a], [b]) => a.localeCompare(b))
     .map(([kind, count]) => `${kind} ${count}`)
     .join(', ');
-  const parts = [`${used} of ${budget} remediation rounds used`];
+  const parts = [postBudget ? `${used} remediation rounds recorded · ordinary remediation budget ${budget}`
+    : `${used} of ${budget} remediation rounds used`];
   parts.push(`${Number(summary.reviewPasses || 0)} review passes`);
   if (Number(summary.operatorCharged || 0) > 0) parts.push(`${summary.operatorCharged} operator-charged`);
   return `${parts.join(' · ')}${kinds ? ` (${kinds})` : ''}`;

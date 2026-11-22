@@ -58,7 +58,9 @@ function finish(f, job, outputHead = NEXT) {
   const bucket = job.status === 'in_progress' ? 'inProgress' : 'pending';
   const old = join(getFollowUpJobDir(f.rootDir, bucket), `${job.jobId}.json`);
   const completed = { ...job, status: 'completed',
-    completion: { workerPushedHeadSha: outputHead, finalRemediationPush: outputHead !== job.revisionRef },
+    completion: { workerPushedHeadSha: outputHead, finalRemediationPush: outputHead !== job.revisionRef,
+      finalRoundOutcome: { completed: true },
+      workerPushProof: { method: 'git-cherry-replay', workerCommits: 1, producedAttestationId: 'lha_fixture' } },
     reReview: { requested: false, nextAction: { head: outputHead, action: 'hammer', actor: 'hammer' } } };
   writeFileSync(old, JSON.stringify(completed));
   const dir = getFollowUpJobDir(f.rootDir, 'completed');
@@ -83,7 +85,7 @@ test('final-round non-blocking review enqueues one runnable fix-all and fences e
   const prompt = buildRemediationPrompt(job, { template: 'Synthetic template.', remediationReplyPath: join(f.rootDir, 'reply.json') });
   assert.match(prompt, /fix every finding/);
   assert.match(prompt, /fix this PR's own red checks/);
-  assert.match(prompt, /Record a disposition for every finding in your reply or commit, with validation evidence/);
+  assert.match(prompt, /Record each advisory fix under `nonBlocking\[\]` with the exact title from the review/);
   assert.match(prompt, /exact-head closer validation against the original findings, source preservation and required CI, with no further automatic review/);
   assert.match(prompt, /reReview.requested = false/);
   assert.match(prompt, /reReview.reason = null/);
@@ -173,14 +175,15 @@ test('fix-all closeout does not carry an unknown or blocking source verdict, wro
   assert.equal(unreadable.decision.reason, 'reviews-unknown');
 });
 
-for (const clean of [true, false]) test(`re-review ${clean ? 'clean merges through daemon' : 'with findings falls back'}`, async t => {
+for (const clean of [true, false]) test(`newer exact-head review ${clean ? 'merges clean through daemon' : 'keeps new findings with the closer'}`, async t => {
   const f = fixture(t);
   await maybeDispatchAmaClosureFor(f.args);
   const [{ job }] = listFollowUpJobsInDir(f.rootDir, 'pending');
   finish(f, job);
   f.review(clean ? CLEAN : BODY, NEXT);
-  await maybeDispatchAmaClosureFor(f.args);
+  const result = await maybeDispatchAmaClosureFor(f.args);
   assert.deepEqual(f.effects, [clean ? 'daemon' : 'closer']);
+  assert.notEqual(result.nextAction?.reason, 'suppressed-final-push');
   assert.equal(listFollowUpJobsInDir(f.rootDir, 'pending').length, 0);
 });
 

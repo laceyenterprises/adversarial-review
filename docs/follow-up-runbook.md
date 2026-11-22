@@ -27,7 +27,16 @@ green permits review, red requeues the remaining remediation round, including a
 recovered non-final push whose CI is already red at closeout. A completed job at
 that pushed head with a prior-head review retains this admission intent while
 rounds remain. Final pushed heads keep their existing hammer handoff and
-re-review suppression.
+re-review suppression. Final fix-all is a separate one-round work order. It
+reconciles the original reply against the recorded advisory titles and proves
+publication with the matching HQ workspace, produced attestation and Git
+replay. A verified pending-CI wait preserves the original review for closure.
+Transient attestation reads retry the proof and retain the in-progress job for
+up to one hour from the first deferred proof. An operator-only CI decline
+leaves the advisory unresolved and follows the existing fallback review
+admission path.
+The comment identifies the final fix-all round and reports the PR-wide spend
+alongside the ordinary remediation budget.
 
 When publication is unproven and CI has failed, an active non-final job retains
 its existing retry ownership, including legacy jobs without a review head.
@@ -532,10 +541,10 @@ logged and retried on a later poll. See the
   row acknowledges durable admission only. The `remediation-watch` receipt
   remains subject to deduplication and the delivered-review ceiling. At capped
   Comment-only convergence, the watcher can restore the last delivered verdict
-  for the closer and settle the worker receipt atomically. A proven final
-  fix-all publication uses the exact-head closer handoff and carries the source
-  findings into validation even if the worker reply requests another review.
-  An exact-head operator request retains priority when both requests are pending.
+  for the closer and settle the worker receipt atomically. A final fix-all
+  reply with a fix for each advisory and verified native publication uses the
+  exact-head closer handoff and carries the source findings into validation.
+  An exact-head operator request retains its existing priority.
 - **Auto-remediation defaults to cross-model (adversarial) routing per PR's `builderTag`** (restored 2026-05-29 PM by PR #175 after PR #172's same-model attempt): `[codex]` PRs → claude-code remediates, `[claude-code]` PRs → codex remediates, `[clio-agent]` PRs → claude-code remediates (Clio dispatches codex writers, so claude-code is the opposite). Both reviewer AND remediator are adversarial-by-default. Operators can override that default with `ADVERSARIAL_REVIEW_DEFAULT_REMEDIATOR=codex|claude-code|gemini`; aliases `claude`, `claude-code-remediation`, `codex-remediation`, and `gemini-remediation` are accepted, while unknown non-empty values are configuration errors. When `builderTag` is missing or unknown (job-schema-migration field loss, hand-edited triage records), the derivation falls through to a degraded same-model fallback to `codex`; the operator can pin via `ADVERSARIAL_REVIEW_DEFAULT_REMEDIATOR` to bypass. The durable `builderTag` is still preserved on the job ledger for downstream queue/audit purposes. Codex remediation commits still use the remediation trailer class configured by the spawn path, and reconcile-time public PR comments post under the selected worker bot identity when the worker model is known; `never-spawned` reconcile paths fall back to the configured/default worker class. Historical note: LAC-358 (March 2026) previously hard-routed all remediation to codex regardless of builderTag — that override has been reverted, restored, reverted, and re-restored over the intervening months; today's default is the cross-model adversarial routing documented above.
 - When the routed remediator has a confirmed quota cap, the follow-up consumer checks both Claude and Codex as automatic fallback candidates and selects only a candidate with confirmed available quota. The primary route resumes after its quota recovers. Reconcile reads quota evidence from both the worker log and final-message artifact; a generic account 429 in the artifact is held as `quota-exhausted`, not accepted as a completed remediation narrative.
 - When a worker exits without a usable final-message artifact, workspace resume takes precedence. If resume is unavailable and the terminal log diagnostic shows provider capacity or overload, reconcile requeues the same round as `provider-capacity` on the shared `remediationPlan.transientRetries` budget. The pending hold starts at five minutes and follows normal exponential backoff; `retryHistory[]` records the reason. In JSONL logs, the newest provider-level failure decides the classification; later progress closes the scan, and plain-text trailers are ignored. In plain-text logs, later normal output means an earlier capacity error was recovered. The missing artifact then remains an artifact failure. An unsuccessful HQ dispatch follows HQ failure classification. Exhaustion of the transient budget after a terminal capacity diagnostic ends with `failure.code = "provider-capacity"` and structured `failure.transientRetryBudget` evidence. A worker log containing `dyld[...]: Library not loaded` means the worker CLI died in the dynamic loader: the host node lost a Homebrew dylib. It is requeued as `infra-runtime-missing-library` on the same budget and ends with that code. Run `hq doctor dylib-drift` on the host and restart the named daemons; retrying without fixing the host only spends the budget.

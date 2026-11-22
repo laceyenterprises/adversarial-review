@@ -7,6 +7,7 @@ import { join } from 'node:path';
 import { recordLiveShadow, liveV1Action } from '../src/finalization/live-shadow.mjs';
 import { openFinalizationShadowStore, openReadOnlyFinalizationShadowStore } from '../src/finalization/shadow-store.mjs';
 import { openFinalizationLedgerStore } from '../src/finalization/ledger-store.mjs';
+import { makeFinalizationEvent } from '../src/finalization/ledger-events.mjs';
 import { buildShadowReport, buildMlrPromotionGate } from '../src/finalization/shadow-report.mjs';
 import { closureOwnerShadowEvidence } from '../src/pr-next-action-consumer.mjs';
 import { deriveNextActionSnapshot, nextAction } from '../src/pr-next-action.mjs';
@@ -169,28 +170,44 @@ test('running launch status cannot renew a stale or missing closer progress boun
   const { record } = fixture(t);
   record(ownerSnapshot(now, { finding: false }));
   for (const updatedAt of ['2026-08-19T00:00:00Z', undefined]) {
-    const s = ownerSnapshot('2026-08-20T00:31:00Z', { finding: false,
-      lease: { updatedAt }, launch: { status: 'running', headSha: 'head-a' } });
-    if (updatedAt === undefined) delete s.observations.leases.value.closer.updatedAt;
-    // Frozen v1 keeps its existing launch decision. V2 additionally respects
-    // the lease/progress bound instead of renewing it from observation time.
-    assert.equal(nextAction(s).reason, 'live-owner');
-    const o = record(s);
-    assert.equal(o.live.ownerState.live, false);
-    assert.equal(o.v2Decision.kind, 'escalate');
-    assert.match(o.v2Decision.reason, /verdict patience expired/);
+    for (const launchRequestId of ['synthetic-launch', undefined]) {
+      const s = ownerSnapshot('2026-08-20T00:31:00Z', { finding: false,
+        lease: { updatedAt }, launch: { status: 'running', headSha: 'head-a', ...(launchRequestId ? { launchRequestId } : {}) } });
+      if (updatedAt === undefined) delete s.observations.leases.value.closer.updatedAt;
+      // Frozen v1 keeps its existing launch decision. V2 still respects the
+      // lease/progress bound (no live owner renewed from observation time),
+      // but a launch the ledger reports running is custody, never a page
+      // (MRQ-11 D1); an unidentifiable one is a typed unknown (D8).
+      assert.equal(nextAction(s).reason, 'live-owner');
+      const o = record(s);
+      assert.equal(o.live.ownerState.live, false);
+      assert.equal(o.foldError, false);
+      assert.equal(o.v2Decision.kind, 'wait');
+      assert.equal(o.v2Decision.reason, launchRequestId ? 'launch requires verified progress'
+        : 'live evidence unknown: launch ownership unreadable');
+      assert.equal(o.v2Decision.nextAction, launchRequestId ? 'reconcile-custody' : 'refresh-evidence');
+    }
   }
 });
 
-test('execution brake, operator holds and fold errors retain precedence over a live owner', t => {
+test('execution brake and operator holds retain precedence over a live owner; read errors never mutate', t => {
   const { record } = fixture(t);
   for (const condition of ['brake', 'hold', 'error']) {
     const s = ownerSnapshot(now);
     if (condition === 'brake') s.observations.policy = complete({ autonomousMergeExecutionEnabled: false });
     if (condition === 'hold') s.observations.pr.value.labels = ['no-merge-hold'];
     if (condition === 'error') s.observations.checks = { state: 'error', value: null };
-    assert.equal(record(s).v2Decision.kind, 'escalate');
+    const o = record(s);
+    // MRQ-11 D8: an errored read is a typed unknown, not a fold error. The
+    // live owner it would otherwise wait behind keeps the PR (both are waits).
+    assert.equal(o.v2Decision.kind, condition === 'error' ? 'wait' : 'escalate');
+    assert.equal(o.foldError, false);
   }
+  const s = ownerSnapshot(now, { lease: { updatedAt: '2026-08-19T00:00:00Z' } });
+  s.observations.checks = { state: 'error', value: null };
+  const o = record(s);
+  assert.equal(o.v2Decision.reason, 'live evidence unknown: snapshot observation error');
+  assert.equal(o.v2Decision.nextAction, 'refresh-evidence');
 });
 
 test('head moves retain budget history; repeated polls never become distinct finalizations', t => {
@@ -238,7 +255,12 @@ test('unreadable refresh cannot reuse earlier green checks; holds and the brake 
   record(snapshot());
   const failed = snapshot('head-a', '2026-08-20T00:01:00Z');
   failed.observations.checks = { state: 'unknown', value: null };
-  assert.equal(record(failed).v2Decision.kind, 'escalate');
+  const refreshed = record(failed);
+  assert.equal(refreshed.foldError, false);
+  assert.equal(refreshed.v2Decision.kind, 'wait');
+  assert.equal(refreshed.v2Decision.nextAction, 'refresh-evidence');
+  assert.equal(refreshed.v2Decision.reason, 'live evidence unknown: checks evidence regressed at settled head');
+  assert.deepEqual(refreshed.v2Decision.unknownEvidence, [{ cause: 'checks-evidence-regressed' }]);
   const held = snapshot('head-b', '2026-08-20T00:02:00Z');
   held.observations.pr.value.labels = ['no-merge-hold'];
   assert.equal(record(held).v2Decision.kind, 'escalate');
@@ -247,10 +269,13 @@ test('unreadable refresh cannot reuse earlier green checks; holds and the brake 
   assert.equal(record(disabled).v2Decision.kind, 'escalate');
 });
 
-test('out-of-order observations escalate without moving the ledger back to an older head', t => {
+test('out-of-order observations are typed unknowns and never move the ledger back to an older head', t => {
   const { record, ledger } = fixture(t);
   record(snapshot('head-b', '2026-08-20T00:01:00Z'));
-  assert.equal(record(snapshot()).v2Decision.kind, 'escalate');
+  const late = record(snapshot());
+  assert.equal(late.foldError, false);
+  assert.equal(late.v2Decision.kind, 'wait');
+  assert.equal(late.v2Decision.reason, 'live evidence unknown: out-of-order snapshot');
   const events = ledger.read({ domainId: 'code-pr', subjectExternalId: 'example/repo#1' });
   assert.equal(events.filter(e => e.type === 'revision_advanced').at(-1).revisionRef, 'head-b');
 });
@@ -370,7 +395,7 @@ test('poll timestamps do not grow the fact ledger; real transitions and head ret
     ['head-a', 'head-b', 'head-a']);
 });
 
-test('partial snapshots preserve prior evidence while explicit failed refreshes escalate', t => {
+test('partial snapshots preserve prior evidence while explicit failed refreshes are typed unknowns', t => {
   const { record, ledger } = fixture(t);
   record(snapshot());
   const subject = { domainId: 'code-pr', subjectExternalId: 'example/repo#1' };
@@ -380,7 +405,12 @@ test('partial snapshots preserve prior evidence while explicit failed refreshes 
   assert.deepEqual(ledger.read(subject), before);
   for (const name of ['reviews', 'checks']) {
     const failed = { ...partial, observations: { [name]: { state: 'error', value: null } } };
-    assert.equal(record(failed).foldError, true, name);
+    const o = record(failed);
+    assert.equal(o.foldError, false, name);
+    assert.equal(o.v2Decision.kind, 'wait', name);
+    assert.equal(o.v2Decision.reason, 'live evidence unknown: snapshot observation error', name);
+    assert.deepEqual(o.v2Decision.unknownEvidence.map(entry => entry.cause), ['snapshot-observation-error',
+      name === 'checks' ? 'checks-evidence-regressed' : 'verdict-evidence-regressed'], name);
   }
 });
 
@@ -429,4 +459,23 @@ test('daemon calls reuse app-root connection and schema setup across polls', t =
     recordLiveShadow({ ...options, snapshot: snapshot('head-a', '2026-08-20T00:01:00Z') });
     assert.equal(schemaWrites, first);
   } finally { Database.prototype.exec = exec; }
+});
+
+test('MRQ-11 D1: held-launch custody is one row per pass and never releases another producer\'s holder', t => {
+  const { record, ledger } = fixture(t);
+  const subject = { domainId: 'code-pr', subjectExternalId: 'example/repo#1' };
+  const held = ownerSnapshot(now, { launch: { status: 'running', headSha: 'head-a', launchRequestId: 'fixture-launch' } });
+  record(held, { action: 'hammer', reason: 'live-owner' });
+  record(held, { action: 'hammer', reason: 'live-owner' });
+  const custody = () => ledger.read(subject).filter(e => e.type === 'launch_custody_observed');
+  assert.equal(custody().length, 1);
+  // Another producer reports a dirty terminal workspace for a different launch.
+  ledger.append(makeFinalizationEvent('launch_custody_observed', subject, { at: now, revisionRef: 'head-a',
+    sourceRef: 'fixture:producer', idempotencyKey: 'fixture:workspace', custody: { repository: 'example/repo',
+      prNumber: 1, launchRequestId: 'fixture-workspace', state: 'workspace', at: now, freshnessSeconds: 180,
+      launchLiveness: 'terminal', dirty: true } }));
+  const released = ownerSnapshot('2026-08-20T00:01:00Z');
+  record(released, { action: 'remediate', reason: 'review-findings' });
+  assert.deepEqual(custody().map(e => [e.custody.launchRequestId, e.custody.state]),
+    [['fixture-launch', 'running'], ['fixture-workspace', 'workspace'], ['fixture-launch', 'terminal']]);
 });

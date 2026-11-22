@@ -75,6 +75,7 @@ export function queueRuntimeBuild() {
     'live-shadow.mjs',
     'live-owner.mjs',
     'workflow-decision.mjs',
+    'live-evidence-reasons.mjs',
     'exact-head-review.mjs',
     'exact-head-review-proof.mjs',
     '../pr-next-action.mjs',

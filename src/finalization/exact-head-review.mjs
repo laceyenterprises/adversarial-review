@@ -1,16 +1,36 @@
-import { findFinalRemediationPushJob } from '../comment-only-final-round.mjs';
+import { findFinalRemediationPushJob, isCompletedCommentOnlyFinalRoundJob, scanPrFollowUpJobs } from '../comment-only-final-round.mjs';
 import { isRemediationRoundBudgetSpent } from '../remediation-round-recovery.mjs';
 import { isFinalRemediatorHead, exactHeadReviewRequestId } from './exact-head-review-proof.mjs';
+
+const SHA = /^[0-9a-f]{40}$/iu;
+
+// MRQ-11 D2: a comment-only final round records its push as
+// completion.workerPushedHeadSha without the finalRemediationPush marker (the
+// closeout writer excludes comment-only rounds). Its head is a final remediator
+// head the reviewer never re-reviews, exactly like a marked final push.
+function commentOnlyFinalRoundPushJob(rootDir, { repo, prNumber, headSha }) {
+  return scanPrFollowUpJobs(rootDir, 'completed', repo, prNumber)
+    .filter(job => isCompletedCommentOnlyFinalRoundJob(job) && job.completion?.workerPushedHeadSha === headSha)
+    .sort((a, b) => String(b.completedAt || '').localeCompare(String(a.completedAt || '')))[0] || null;
+}
+
+const provable = job => Boolean(job) && job.status === 'completed' && !job.closureHandoff
+  && isRemediationRoundBudgetSpent(job.remediationPlan) && Boolean(job.jobId);
 
 // A worker's independently recorded publication proves authorship. Neither a
 // commit login nor the broad legacy "hammer owns this head" route is proof.
 export function readFinalRemediatorHead({ rootDir, repo, prNumber, headSha }) {
-  const job = findFinalRemediationPushJob(rootDir, { repo, prNumber, headSha });
-  if (!job || job.status !== 'completed' || job.closureHandoff
-    || !isRemediationRoundBudgetSpent(job.remediationPlan) || !job.jobId) return null;
+  if (!SHA.test(String(headSha || ''))) return null;
+  let job = findFinalRemediationPushJob(rootDir, { repo, prNumber, headSha });
+  let kind = 'remediation-push';
+  if (!provable(job)) {
+    job = commentOnlyFinalRoundPushJob(rootDir, { repo, prNumber, headSha });
+    kind = 'comment-only-final-round-push';
+  }
+  if (!provable(job)) return null;
   return { repo, prNumber: Number(prNumber), headSha, jobId: job.jobId,
     currentRound: Number(job.remediationPlan.currentRound), maxRounds: Number(job.remediationPlan.maxRounds),
-    suppressed: true, sourceRef: `remediation-push:${job.jobId}:${headSha}` };
+    suppressed: true, sourceRef: `${kind}:${job.jobId}:${headSha}` };
 }
 
 // Local queue API only. Its IMMEDIATE transaction coalesces pending requests

@@ -6,7 +6,7 @@ import { setTimeout as wait } from 'node:timers/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { openFinalizationQueueStore } from '../src/finalization/queue-store.mjs';
-import { runLegacyLaneWrite, LEGACY_PROOF_NOMINAL_MS, LEGACY_PROOF_CEILING_MS } from '../src/finalization/legacy-lane-write.mjs';
+import { runLegacyLaneWrite, LEGACY_PROOF_NOMINAL_MS } from '../src/finalization/legacy-lane-write.mjs';
 import { runLegacyPrWrite } from '../src/finalization/legacy-pr-write.mjs';
 import { runCommandKeepingOutput } from '../src/run-command-keeping-output.mjs';
 import { legacyLaneWriteMain } from '../bin/legacy-lane-write.mjs';
@@ -196,7 +196,10 @@ test('in-lane proof has a short load-aware abort budget and releases the lane wi
   t.mock.timers.enable({ apis: ['setTimeout'] });
   for (const [timeoutMs, load, expected] of [
     [240_000, idle, LEGACY_PROOF_NOMINAL_MS],
-    [600_000, { enabled: true, maxMultiplier: 20, loadAvg1m: 1000, cpuCount: 1, cpuBusyPercent: 100 }, LEGACY_PROOF_CEILING_MS],
+    // HAMWRITERTIMEOUT-01: no fixed cap; the load-aware 15 s x 20 applies in full.
+    [600_000, { enabled: true, maxMultiplier: 20, loadAvg1m: 1000, cpuCount: 1, cpuBusyPercent: 100 }, 300_000],
+    // A multiplier beyond the remaining run budget is bounded by that budget.
+    [120_000, { enabled: true, maxMultiplier: 20, loadAvg1m: 1000, cpuCount: 1, cpuBusyPercent: 100 }, 120_000],
     [1000, idle, 1000],
   ]) {
     let proofSignal;

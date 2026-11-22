@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto';
 import { parseReviewFindings } from './kernel/review-findings.mjs';
 import { extractSimplicityNote } from './kernel/verdict.mjs';
 import { disputeEvidenceForFinding, normalizeCoverageTitle, validateRemediationReply } from './kernel/remediation-reply.mjs';
-import { blockingFindingIdentity, evidenceDigest, REMEDIATOR_WITHDRAWN_RESOLUTION } from './ama/hammer-adjudication.mjs';
+import { blockingFindingIdentity } from './ama/hammer-adjudication.mjs';
 import { attributeFindingCommits, findingPath } from './finding-commit-attribution.mjs';
 import { withSqliteBusyRetrySync } from './sqlite-busy-retry.mjs';
 import { createBackfillWritePacer, DEFAULT_BACKFILL_WRITE_DUTY_CYCLE } from './backfill-write-pacer.mjs';
@@ -285,25 +285,6 @@ export function linkFindingRemediation(db, { job, workspaceDir, roundNumber = jo
         && disputeEvidenceForFinding(match.entry, JSON.parse(f.finding_json), job.revisionRef);
       const reason = disputed ? 'disputed-with-evidence' : ambiguous ? 'ambiguous-reply' : !match ? (matches.length ? 'ambiguous-reply' : 'no-matching-reply')
         : !addressed ? match.field : overlap?.reason || 'missing-history';
-      if (disputed) {
-        // Cache admission at the completion event. Gate readers keep their
-        // existing single keyed query; they never scan reply artifacts.
-        db.prepare(`INSERT INTO ham_finding_disputes
-          (repo, pr_number, identity, head_sha, finding_reviewed_head, resolution, resolved_at,
-           evidence_sha256, reply_id, review_body_sha256)
-          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-          ON CONFLICT(repo, pr_number, identity) DO UPDATE SET head_sha=excluded.head_sha,
-            finding_reviewed_head=excluded.finding_reviewed_head, resolution=excluded.resolution,
-            resolved_at=excluded.resolved_at, evidence_sha256=excluded.evidence_sha256,
-            reply_id=excluded.reply_id, review_body_sha256=excluded.review_body_sha256,
-            comment_id=NULL, comment_author=NULL, comment_sha256=NULL
-          WHERE ham_finding_disputes.reserved_at IS NULL AND
-            (ham_finding_disputes.resolution IS NOT 'withdrawn-by-hammer'
-             OR ham_finding_disputes.head_sha IS NOT excluded.head_sha)`)
-          .run(job.repo, job.prNumber, f.hammer_identity, disputed.headSha, f.head_sha,
-            REMEDIATOR_WITHDRAWN_RESOLUTION, job.completedAt || round.finishedAt,
-            evidenceDigest(JSON.stringify(disputed)), replyId, evidenceDigest(job.reviewBody));
-      }
       db.prepare(`INSERT INTO review_finding_remediations
         (finding_id, reply_id, reply_field, reply_ordinal, commit_sha, reason) VALUES (?, ?, ?, ?, ?, ?)
         ON CONFLICT(finding_id, reply_id) DO UPDATE SET reply_field=excluded.reply_field,
@@ -400,8 +381,7 @@ export function readReviewFindings(db, { repo = null, prNumber = null, prNumbers
   return rows.map(row => {
     const remediations = remediationsByFinding.get(row.finding_id) || [];
     const disputes = disputesByFinding.get(row.finding_id) || [];
-    const status = remediations.some(m => m.reason === 'disputed-with-evidence')
-      || disputes.some(d => d.resolution === 'withdrawn-by-hammer' && d.comment_id)
+    const status = disputes.some(d => d.resolution === 'withdrawn-by-hammer' && d.comment_id)
       ? 'withdrawn' : row.verdict === 'dismissed' ? 'dismissed'
         : remediations.some(m => m.commit_sha) ? 'addressed' : 'unaddressed';
     return { ...row, status, remediations, disputes, grades: gradesByFinding.get(row.finding_id) || [] };

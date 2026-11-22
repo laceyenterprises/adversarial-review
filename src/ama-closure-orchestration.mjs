@@ -45,6 +45,7 @@ import { hostname } from 'node:os';
 import { OPERATOR_HOLD_LABELS } from './operator-hold-labels.mjs';
 import { isOrphanHeadReviewRequested } from './orphan-head-review-requested.mjs';
 import { recoverOrphan, isOrphanRecoveryWait, hasExactHeadReviewDecision, overdueNextAction } from './ama/orphan-watchdog.mjs';
+import { DISPUTE_REVIEW_REASON } from './remediation-dispute-handoff.mjs';
 import { observeCloserBacklog, observeClosureLag } from './ama/closure-lag.mjs';
 // ── AMA closure orchestration: dispatch decision + coexistence + audit ────────
 //
@@ -2607,6 +2608,11 @@ async function dispatchAmaClosureFor({
     && reviewState.attestation !== 'invalid';
   if (['review', 'remediate'].includes(shared.decision.action) && !terminalEvidenceProbe) {
     const decision = shared.decision;
+    if (decision.reason === DISPUTE_REVIEW_REASON) {
+      // The exact-head review executor owns both admission and escalation.
+      return withAmaDispatchMetadata({ dispatched: false, skipMergeAgent: true, recoveryWait: true,
+        reason: decision.reason, nextAction: decision, retryAfterMs: 30_000 }, { amaEnabled: true });
+    }
     let boundedWait = null;
     try {
       boundedWait = await observeWait({ rootDir, repo: repoPath, prNumber,

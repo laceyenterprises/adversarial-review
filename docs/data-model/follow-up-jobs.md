@@ -460,9 +460,12 @@ round. Factual `pushback[].evidence` carries the reviewed head, exact original
 citation and either cited code/reproduction/output or test/output. See
 [review finding records](review-findings.md) for retained evidence and admission.
 If every blocker has that evidence, the reconciler independently observes the
-same open live head and completes the existing round with re-review suppressed
-(`blocking-findings-disputed-with-evidence`), even if the worker requested it.
-A watcher wake projects closure; the merge gates still decide whether to land.
+same open live head and completes the round with the worker's re-review request
+suppressed (`blocking-findings-disputed-with-evidence`). The watcher reads the
+completed round and validates the reply against the current exact head and
+review body before scheduling the independent review. The review is durably
+owned by the existing reviewer queue once admitted. Admission failure goes to
+the bounded ownerless watchdog. Worker evidence does not settle the findings.
 Known non-blocking acknowledgements in `addressed` do not prevent this path;
 claimed blocker repairs do. Complete evidence citations disambiguate duplicate
 titles during completion and withdrawal admission.
@@ -474,7 +477,7 @@ reopen an evidenced dispute. No new queue status, retry or config key is added.
 After durable completion, the queue best-effort projects the round's reply and
 local commit evidence into [review finding records](review-findings.md).
 Failures preserve job completion and leave the stored job available for offline
-replay. Factual-dispute admission is the explicit closure exception described below; other observations change no queue state, retry budget or merge decision.
+replay. The worker reply and its finding links are evidence for review.
 
 **Owner:** follow-up remediation queue
 **Store:** `data/follow-up-jobs/{pending,in-progress,completed,failed,stopped}/*.json`, `data/follow-up-jobs/single-review-voids/*.json`, `data/follow-up-jobs/missing-label-events/*.json`, `data/follow-up-jobs/live-pr-owner-scan-cursor.json`

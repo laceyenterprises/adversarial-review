@@ -1739,21 +1739,26 @@ A worker can disprove a blocker using `pushback[].evidence`: the reviewed head,
 original citation, and either code/reproduction/output or test/output. The worker
 runs the proof; daemons never execute worker-supplied commands or call a model to
 judge it. All-blocker factual disputes on an independently observed unchanged
-open head complete without another review. Ordinary pushback does not do so.
+open head complete the remediation round and wake the watcher. Ordinary
+pushback retains the existing unresolved-finding flow.
 The citation can include comma- or semicolon-separated ranges, for example
 `src/worker.mjs:10-15; 20-25, 30`; its path and complete ordered range list must
 match the original finding.
 Complete citations disambiguate identical titles in both completion and stored
-admission. Acknowledging known non-blocking advice in `addressed` does not prevent
+evidence. Acknowledging known non-blocking advice in `addressed` does not prevent
 evidence-only completion; entries claiming blocker repairs still do.
-The existing withdrawal table caches completion admission, and the shared gate,
-closer and review-dismissal paths consume it with exact-head and body checks.
-There is no new polling path, CI gate, config key or merge permission.
+The watcher binds the completed round to the latest review body and live head.
+It requests one independent exact-head review through the existing watchdog
+reservation and review queue. An existing reviewer, worker or closer keeps
+custody. The review ceiling selects the existing hammer lane. If admission
+fails, the watchdog pages once after the existing ownerless deadline with the
+PR, head and evidence reference. Only authenticated hammer withdrawals enter
+the shared withdrawal resolver. Historical worker rows are retained as evidence.
 
 SRE acceptance after deploy: sample 20 reviews and confirm every blocker has
 `path:line` and a behaviour statement. Re-run the audit's 34-finding classification
-and confirm the blocking-noise share drops. Inspect retained dispute evidence and
-confirm a fully disproved same-head review closes without re-review. Do not
+and confirm the blocking-noise share drops. Inspect retained dispute evidence and confirm disputed findings stay blocking
+until a trusted reviewer or adjudicator settles them. Do not
 claim this organic acceptance from offline tests.
 
 

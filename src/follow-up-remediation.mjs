@@ -97,6 +97,7 @@ import { captureRemediationBodyAfterPost } from './review-body-capture.mjs';
 import { resolvePRLifecycle, requestReviewRereview } from './review-state.mjs';
 import { resolvePendingCiCompletion, resolveCommentOnlyFinalRoundCompletion } from './comment-only-final-round-completion.mjs';
 import { allBlockingDisputed } from './kernel/remediation-reply.mjs';
+import { DISPUTED_COMPLETION } from './remediation-dispute-handoff.mjs';
 import { requestWatcherWake } from './watcher-wake.mjs';
 import { REREVIEW_WAKE_REASONS, requestRereviewWake } from './rereview-wake.mjs';
 import { requestHammerWakeForSettledReviewStop } from './hammer-wake.mjs';
@@ -1832,7 +1833,7 @@ async function reconcileFollowUpJobWithinRepositoryCycle({
         completionLifecycle ||= await resolveJobPRLifecycleSafe({ rootDir, job, resolvePRLifecycleImpl, execFileImpl, log });
         evidenceOnlyCompletion = completionLifecycle?.source === 'live' && completionLifecycle.prState === 'open'
           && completionLifecycle.headSha === job.revisionRef && !completionLifecycle.newerReviewPending;
-        if (evidenceOnlyCompletion) rereview = { requested: false, status: 'suppressed', reason: 'blocking-findings-disputed-with-evidence' };
+        if (evidenceOnlyCompletion) rereview = { requested: false, status: 'suppressed', reason: DISPUTED_COMPLETION };
       }
 
       if ((reply.reReview.requested || completedPipelineWait) && job?.finalRound !== 'comment-only' && !evidenceOnlyCompletion) {

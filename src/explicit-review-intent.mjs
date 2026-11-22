@@ -30,6 +30,17 @@ export function remediationReviewRequest(jobId, round) {
   return { requestId: `remediation:${jobId}:${round}`, actor: 'remediation-watch' };
 }
 
+export function disputedFindingsReviewRequest(headSha) {
+  return { requestId: `disputed-findings:${headSha}`, actor: 'closure-watchdog' };
+}
+
+export function isDisputedFindingsReviewIntent(intent, headSha) {
+  const request = disputedFindingsReviewRequest(headSha);
+  return intent?.actor === request.actor
+    && (intent.request_id ?? intent.requestId) === request.requestId
+    && (intent.head_sha ?? intent.headSha) === headSha;
+}
+
 export function isRemediationReviewIntent(intent) {
   return intent?.actor === 'remediation-watch'
     && /^remediation:.+:\d+$/u.test(intent.request_id ?? intent.requestId ?? '');

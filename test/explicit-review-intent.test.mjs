@@ -7,7 +7,8 @@ import { join } from 'node:path';
 import { ensureReviewStateSchema, openReviewStateDb, requestReviewRereview } from '../src/review-state.mjs';
 import { pendingExplicitReviewIntent, consumeExplicitReviewIntent, reconcileExplicitReviewIntents,
   explicitReviewRefusalBody, refuseFailedExplicitReviewDispatch, requeueUnstartedExplicitReviewDispatch,
-  recordExplicitReviewIntent, remediationReviewRequest, priorityReviewIntent, handoffAutomaticReview } from '../src/explicit-review-intent.mjs';
+  recordExplicitReviewIntent, remediationReviewRequest, priorityReviewIntent, handoffAutomaticReview,
+  disputedFindingsReviewRequest, isDisputedFindingsReviewIntent } from '../src/explicit-review-intent.mjs';
 import { routeCappedReviewToClosure } from '../src/hamclose-review-admission.mjs';
 import { closeoutRereview, remediationCloseout } from '../src/remediation-closeout.mjs';
 import { deriveNextActionSnapshot } from '../src/pr-next-action.mjs';
@@ -23,6 +24,29 @@ import { main as retriggerReview } from '../src/retrigger-review.mjs';
 
 const repo = 'example/review-fixture', prNumber = 71, headSha = 'a'.repeat(40);
 const quiet = { log() {}, warn() {}, error() {} };
+for (const requestKey of ['request_id', 'requestId']) {
+  for (const headKey of ['head_sha', 'headSha']) {
+    test(`LAC-2315: dispute intent matches exact identity using ${requestKey}/${headKey}`, () => {
+      const request = disputedFindingsReviewRequest(headSha);
+      const intent = { actor: request.actor, [requestKey]: request.requestId, [headKey]: headSha };
+      assert.equal(isDisputedFindingsReviewIntent(intent, headSha), true);
+      assert.equal(isDisputedFindingsReviewIntent({ ...intent, actor: 'remediation-watch' }, headSha), false);
+      assert.equal(isDisputedFindingsReviewIntent({ ...intent, [requestKey]: 'other-request' }, headSha), false);
+      assert.equal(isDisputedFindingsReviewIntent({ ...intent, [headKey]: 'b'.repeat(40) }, headSha), false);
+    });
+  }
+}
+
+test('LAC-2315: dispute intent normalization preserves database identity precedence', () => {
+  const request = disputedFindingsReviewRequest(headSha);
+  const intent = { ...request, headSha };
+  assert.equal(isDisputedFindingsReviewIntent(null, headSha), false);
+  assert.equal(isDisputedFindingsReviewIntent({ actor: request.actor }, headSha), false);
+  assert.equal(isDisputedFindingsReviewIntent({ ...intent, request_id: null, head_sha: null }, headSha), true);
+  assert.equal(isDisputedFindingsReviewIntent({ ...intent, request_id: 'other-request' }, headSha), false);
+  assert.equal(isDisputedFindingsReviewIntent({ ...intent, head_sha: 'b'.repeat(40) }, headSha), false);
+});
+
 function fixture(t) {
   const rootDir = mkdtempSync(join(tmpdir(), 'explicit-review-intent-'));
   let db = openReviewStateDb(rootDir);

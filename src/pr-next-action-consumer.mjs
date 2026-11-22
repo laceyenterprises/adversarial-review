@@ -11,6 +11,7 @@ import { isUnresolvedLaunchReference } from './launch-reference.mjs';
 import { reviewCeilingOwner } from './review-ceiling-owner.mjs';
 import { resolveRequiredCheckContextsFromCfg } from './ama/required-check-contexts.mjs';
 import { remediationJobOwnership } from './remediation-job-ownership.mjs';
+import { disputeHandoff } from './remediation-dispute-handoff.mjs';
 
 // ── Legacy adapters: old outputs expressed as owned workflows ────────────────
 // Faithful translation, not correction: a legacy page stays an operator hold
@@ -174,6 +175,7 @@ export function closureOwnerShadowEvidence(input = {}, { subjectKey = null, cand
   const observations = {
     reviews: input.reviewState ? { ...pick(input.reviewState, REVIEW_KEYS), verdict: input.reviewState.verdict ?? null } : undefined,
     remediation: { roundsLeft: typeof input.roundsLeft === 'boolean' ? input.roundsLeft : null,
+      disputeHandoff: disputeHandoff(input.followUpJob, input.reviewState, head),
       ...(input.finalPush ? { finalPush: input.finalPush } : {}),
       ...(input.followUpJob !== undefined ? { job: input.followUpJob ? {
         ...pick(input.followUpJob, ['status', 'clean', 'headSha', 'createdAt', 'jobId', 'closureHandoff']),

@@ -26,6 +26,7 @@ import { launchRequestOwned, withLiveLaunchRetry } from './ama/launch-request-st
 import { AMA_CLOSER_DISPATCHED_LEASE_RECLAIM_AGE_MS, AMA_CLOSER_PENDING_LEASE_RECLAIM_AGE_MS } from './ama/closer-lease.mjs';
 import { OPERATOR_HOLD_LABELS } from './operator-hold-labels.mjs';
 import { PROTECTIVE_PREDECESSOR_HOLD_REASONS } from './ama/protective-predecessor.mjs';
+import { DISPUTE_REVIEW_REASON } from './remediation-dispute-handoff.mjs';
 
 export const NEXT_ACTIONS = Object.freeze([
   'wait-for-CI', 'review', 'remediate', 'hammer', 'daemon-merge', 'operator-hold', 'done',
@@ -198,6 +199,7 @@ function remediationFacts(remediation) {
     jobHead: text(job?.headSha) || null,
     jobCreatedMs: timeMs(job?.createdAt),
     jobDeadlineMs: timeMs(job?.deadlineAt ?? job?.heartbeatDeadlineAt),
+    disputeHandoff: remediation.state === 'complete' ? plain(value.disputeHandoff) : null,
     finalPush: finalPush && finalPush.suppressed === true ? { headSha: text(finalPush.headSha) || null } : null,
   };
 }
@@ -723,6 +725,12 @@ function selectRow(facts, options = {}) {
   // HAMATTEST-03 recommendations remain bounded by reviewer admission.
   if (exactHeadReviewRequested) {
     return exactHeadReview('exact-head-review');
+  }
+  const dispute = remediation.disputeHandoff;
+  if (sameHead(dispute?.headSha, head) && !remediation.jobLive
+    && sameHead(review.reviewedHead, head) && review.verdict === 'request-changes') {
+    return { ...exactHeadReview(DISPUTE_REVIEW_REASON),
+      extraAnchorMs: [timeMs(dispute.completedAt)], refs: [`remediation:${dispute.jobId}`] };
   }
   // A suppressed hammer head retains its closer even when an automatic
   // refresh lost the posted row or the attestation chain cannot carry a verdict.

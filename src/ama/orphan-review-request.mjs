@@ -5,6 +5,8 @@ import fsExt from 'fs-ext';
 import { closeSync, mkdirSync, openSync } from 'node:fs';
 import { join } from 'node:path';
 import { createHash } from 'node:crypto';
+import { DISPUTE_REVIEW_REASON } from '../remediation-dispute-handoff.mjs';
+import { disputedFindingsReviewRequest } from '../explicit-review-intent.mjs';
 
 // Share REMORPHAN-01's durable guard and lock. Reserve before the external
 // local queue request so concurrent observers or interrupted processes cannot
@@ -12,6 +14,8 @@ import { createHash } from 'node:crypto';
 async function requestBoundedOrphanReviewWithinRepositoryState({ rootDir, repo, prNumber, headSha,
   reviewStateRow, requestRereviewImpl, logger, db = null, decisionReasons = null }) {
   if (reviewStateRow?.review_status === 'failed' && reviewStateRow.reviewer_head_sha === headSha) return null;
+  const dispute = decisionReasons?.includes(DISPUTE_REVIEW_REASON);
+  if (dispute && !reviewStateRow?.posted_at) return null;
   let ownedDb;
   let fd;
   try {
@@ -31,8 +35,10 @@ async function requestBoundedOrphanReviewWithinRepositoryState({ rootDir, repo, 
     let request;
     try {
       request = await requestRereviewImpl({ rootDir, repo, prNumber, targetRevisionRef: headSha,
-        reason: `system-orphan-head-review:${headSha}`,
-        ...(decisionReasons ? { ownerlessRecovery: true } : {}), logger });
+        reason: dispute ? DISPUTE_REVIEW_REASON : `system-orphan-head-review:${headSha}`,
+        ...(dispute ? { preserveBudgets: true, expectedPostedAt: reviewStateRow.posted_at,
+          explicitReviewRequest: disputedFindingsReviewRequest(headSha) }
+          : decisionReasons ? { ownerlessRecovery: true } : {}), logger });
     } catch (error) {
       // This collaborator queues local durable intent; a failed queue operation
       // must not permanently spend the once-per-head request.

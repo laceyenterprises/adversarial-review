@@ -39,7 +39,7 @@ import { groundBlockingFindingsAtHead } from '../src/review-head-grounding.mjs';
 import { parseReviewFindings } from '../src/kernel/review-findings.mjs';
 import { beginReviewerPass } from '../src/reviewer-pass-tokens.mjs';
 import { updateReviewerPassBodyCapture } from '../src/review-body-capture.mjs';
-import { openReviewStateDb, ensureReviewStateSchema } from '../src/review-state.mjs';
+import { openReviewStateDb, ensureReviewStateSchema, getReviewRow, requestReviewRereview } from '../src/review-state.mjs';
 
 const card = (title, file = 'input.mjs', lines = '1', problem = 'Input or state: input is empty; Wrong outcome: the call throws instead of returning zero.') =>
   `- **${title}**\n  - **File:** \`${file}\`\n  - **Lines:** ${lines}\n  - **Problem:** ${problem}`;
@@ -148,6 +148,11 @@ import * as remediationKernel from '../src/kernel/remediation-reply.mjs';
 import { dismissWithdrawnReviews } from '../src/ama/withdrawn-review-dismissal.mjs';
 import { amaAllAuthoritativeReviewerLogins } from '../src/ama/reviewer-authority.mjs';
 import { readReviewFindings, linkFindingRemediation } from '../src/review-finding-records.mjs';
+import { resolveClosureNextAction } from '../src/ama/closure-next-action.mjs';
+import { pickAdversarialGateStatus } from '../src/adversarial-gate-status.mjs';
+import { recoverOrphan } from '../src/ama/orphan-watchdog.mjs';
+import { pendingExplicitReviewIntent } from '../src/explicit-review-intent.mjs';
+import { resolveAlreadyReviewedHeadDedup } from '../src/reviewed-head-dispatch-gate.mjs';
 
 test('REVIEWEVIDENCE-01: factual disputes require matching complete multi-range citations', () => {
   const head = 'a'.repeat(40);
@@ -244,10 +249,10 @@ test('evidence-only completion allows acknowledged advice and disambiguates dupl
   linkFindingRemediation(db, { job: fullJob, attribute: () => new Map() });
   assert.deepEqual(db.prepare('SELECT reason FROM review_finding_remediations ORDER BY rowid').all().map(r => r.reason),
     ['disputed-with-evidence', 'disputed-with-evidence', 'missing-history']);
-  assert.equal(readHammerWithdrawals({ rootDir: root, ...key }).length, 2);
+  assert.equal(readHammerWithdrawals({ rootDir: root, ...key }).length, 0);
 });
 
-test('REVIEWEVIDENCE-01: an evidenced fixer dispute closes on the observed head without re-review', async t => {
+test('DISPUTEDHANDOFF-01: a completed worker dispute needs independent adjudication', async t => {
   const { root, head } = gitFixture(t);
   const previousDeployCheckout = process.env.AGENT_OS_DEPLOY_CHECKOUT;
   process.env.AGENT_OS_DEPLOY_CHECKOUT = join(root, 'deploy-checkout');
@@ -277,30 +282,54 @@ test('REVIEWEVIDENCE-01: an evidenced fixer dispute closes on the observed head 
   const reply = buildRemediationReply({ job: claimed.job, summary: 'Empty input returns zero; the cited throw does not occur.',
     validation: ['The cited null-input reproduction prints zero.'],
     pushback: [{ title: 'Empty input throws', finding: 'Empty input throws', reasoning: 'The optional chain returns zero for null.', evidence }],
-    reReviewRequested: true, reReviewReason: 'Ready for closure.' });
+    reReviewRequested: false });
   writeFileSync(replyPath, JSON.stringify(reply));
   const spawned = markFollowUpJobSpawned({ jobPath: claimed.jobPath, worker: { model: 'codex', processId: 9001,
     state: 'spawned', workspaceDir: relative(root, workspace), outputPath: relative(root, outputPath), logPath: relative(root, join(workspace, '.adversarial-follow-up/worker.log')), replyPath } });
   let rereviews = 0;
+  let completionComment;
   const result = await reconcileFollowUpJob({ rootDir: root, job: spawned.job, jobPath: spawned.jobPath,
     isWorkerRunning: () => false,
     resolvePRLifecycleImpl: async () => ({ prState: 'open', source: 'live', headSha: head }),
     requestReviewRereviewImpl: () => { rereviews++; return { triggered: true, status: 'pending' }; },
     auditWorkspaceForContaminationImpl: async () => ({ suspect: [], error: null }),
     inspectRemediationCiRegressionImpl: async () => ({ state: 'green', headSha: head }),
-    postCommentImpl: async () => ({ posted: true }), requestWatcherWakeImpl: () => ({}), log: { warn() {}, error() {} } });
+    postCommentImpl: async args => { completionComment = args; return { posted: true }; },
+    requestWatcherWakeImpl: () => ({}), log: { warn() {}, error() {} } });
   assert.equal(result.action, 'completed', JSON.stringify({ reason: result.reason, failure: result.job?.failure }));
   assert.equal(rereviews, 0);
   assert.equal(result.job.reReview.requested, false);
   assert.deepEqual(result.job.remediationReply.payload.pushback[0].evidence, evidence);
-  const records = readHammerWithdrawals({ rootDir: root, ...key });
-  assert.equal(records.length, 1);
-  assert.equal(hammerWithdrawalsFromComments([], records).length, 1);
+  assert.match(completionComment.body, /disputes for independent adjudication/);
+  assert.doesNotMatch(completionComment.body, /re-review queued/);
+  const postedAt = new Date(Date.parse(result.job.completedAt) - 60_000).toISOString();
+  const reviewState = { verdict: 'request-changes', headSha: head, blockingFindingCount: 1,
+    blockingFindingState: 'known', nonBlockingFindingCount: 0, nonBlockingFindingState: 'known',
+    reviewBodySha256: evidenceDigest(body), postedAt, remediationPending: false };
+  const reviewRow = { review_status: 'posted', reviewer_head_sha: head, revision_ref: head,
+    posted_at: postedAt, review_body: body };
+  const closure = {
+    input: { currentHead: head, reviewState, followUpJob: result.job, roundsLeft: true, lease: null,
+      checks: 'SUCCESS' },
+    subjectKey: `${key.repo}#${key.prNumber}`, observedAt: result.job.completedAt,
+    candidate: { headSha: head, prState: 'OPEN', mergeable: 'MERGEABLE' },
+    autonomousMergeExecutionEnabled: true,
+  };
+  const shared = await resolveClosureNextAction(closure);
+  const identity = blockingFindingIdentitiesFromBody(body)[0];
+  const legacy = { resolution: 'withdrawn-by-remediator', replyId: 'c'.repeat(64),
+    identity, headSha: head, findingReviewedHead: head, reviewBodySha256: evidenceDigest(body),
+    evidenceSha256: evidenceDigest(JSON.stringify(evidence)) };
+  const gate = pickAdversarialGateStatus({ reviewRow, headSha: head, latestJob: result.job, hammerWithdrawals: [legacy] });
+  assert.deepEqual([shared.decision.action, shared.decision.actor, gate.reason],
+    ['review', 'reviewer', 'blocking-review'], JSON.stringify(shared.decision));
+  assert.equal(shared.decision.deadline.anchoredAt, result.job.completedAt);
+  assert.equal(shared.decision.deadline.class, 'admission');
+  assert.equal(readHammerWithdrawals({ rootDir: root, ...key }).length, 0);
+  assert.deepEqual(hammerWithdrawalsFromComments([], [legacy]), []);
   const state = { blockingFindingState: 'known', blockingFindingCount: 1,
-    blockingFindingIdentities: blockingFindingIdentitiesFromBody(body), reviewedHead: head, currentHead: head, reviewBodySha256: evidenceDigest(body) };
-  assert.equal(resolveHammerAdjudication(state, records).allBlockingWithdrawn, true);
-  assert.equal(resolveHammerAdjudication({ ...state, currentHead: 'b'.repeat(40) }, records).allBlockingWithdrawn, false);
-  assert.equal(resolveHammerAdjudication({ ...state, reviewBodySha256: evidenceDigest(body + ' changed') }, records).allBlockingWithdrawn, false);
+    blockingFindingIdentities: [identity], reviewedHead: head, currentHead: head, reviewBodySha256: evidenceDigest(body) };
+  assert.equal(resolveHammerAdjudication(state, [legacy]).allBlockingWithdrawn, false);
   assert.equal(remediationKernel.allBlockingDisputed(claimed.job, { ...reply, pushback: reply.pushback.map(e => ({ ...e, evidence: undefined })) }, head), false);
   assert.equal(remediationKernel.allBlockingDisputed(claimed.job, reply, 'b'.repeat(40)), false);
   for (const bad of [{ ...evidence, output: '' }, { ...evidence, citation: 'other.mjs:1' }, { ...evidence, headSha: 'b'.repeat(40) }]) {
@@ -314,9 +343,83 @@ test('REVIEWEVIDENCE-01: an evidenced fixer dispute closes on the observed head 
       : path.endsWith('/reviews/7') ? authoritative : path.includes('/comments?') ? [] : { state: 'open', head: { sha: head } },
     dismiss: async path => dismissed.push(path),
   });
-  assert.equal(dismissed.length, 1);
+  assert.equal(dismissed.length, 0);
   const db = openReviewStateDb(root); t.after(() => db.close());
+  db.prepare(`INSERT INTO ham_finding_disputes
+    (repo, pr_number, identity, head_sha, finding_reviewed_head, resolution, reply_id, review_body_sha256, evidence_sha256)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(key.repo, key.prNumber, identity, head, head,
+    legacy.resolution, legacy.replyId, legacy.reviewBodySha256, legacy.evidenceSha256);
+  assert.deepEqual(readHammerWithdrawals({ rootDir: root, ...key }), []);
+
+  for (const mutate of [
+    job => { job.remediationPlan.rounds[0].remediationReply.payload.pushback[0].evidence.citation = 'other.mjs:1'; },
+    job => { job.remediationPlan.rounds[0].remediationReply.payload.jobId = 'different-job'; },
+    job => { job.remediationPlan.rounds[0].remediationReply.payload.pushback[0].evidence = undefined; },
+    job => { job.reReview.reason = 'worker-narrative'; },
+    job => { job.remediationPlan.rounds[0].resultingHeadSha = 'b'.repeat(40); },
+  ]) {
+    const job = structuredClone(result.job);
+    mutate(job);
+    assert.equal((await resolveClosureNextAction({ ...closure,
+      input: { ...closure.input, followUpJob: job } })).decision.action, 'remediate');
+  }
+  const movedHead = 'b'.repeat(40);
+  const moved = await resolveClosureNextAction({ ...closure, candidate: { ...closure.candidate, headSha: movedHead },
+    input: { ...closure.input, currentHead: movedHead } });
+  assert.equal(moved.decision.reason, 'stale-verdict');
+  assert.equal(moved.decision.head, movedHead);
+  const newer = await resolveClosureNextAction({ ...closure,
+    input: { ...closure.input, reviewState: { ...reviewState,
+      postedAt: new Date(Date.parse(result.job.completedAt) + 1000).toISOString() } } });
+  assert.equal(newer.decision.action, 'remediate');
+  const capped = await resolveClosureNextAction({ ...closure, input: { ...closure.input, reviewCeilingReached: true } });
+  assert.equal(capped.decision.reason, 'review-ceiling');
+  assert.equal(capped.decision.actor, 'hammer');
+
+  db.prepare(`INSERT INTO reviewed_prs
+    (repo, pr_number, reviewed_at, reviewer, pr_state, review_status, reviewer_head_sha, revision_ref,
+    posted_at, review_attempts, infra_auto_recover_attempts)
+    VALUES (?, ?, ?, 'claude', 'open', 'posted', ?, ?, ?, 2, 1)`).run(key.repo, key.prNumber, postedAt, head, head, postedAt);
+  const pages = [];
+  const recovery = { rootDir: root, ...key, headSha: head, reviewStateRow: reviewRow,
+    candidate: closure.candidate, result: { amaEnabled: true, recoveryWait: true, nextAction: shared.decision },
+    pageImpl: async text => { pages.push(text); return { queued: true }; },
+    logger: { log() {}, warn() {} }, env: { OWNERPROOF_IDLE_MINUTES: '1' } };
+  const pendingWorker = createFollowUpJob({ rootDir: root, ...key, reviewerModel: 'claude',
+    branch: 'synthetic-fix', revisionRef: movedHead, reviewBody: body });
+  const held = await recoverOrphan({ ...recovery, now: pendingWorker.job.createdAt });
+  assert.equal(held, null);
+  assert.equal(getReviewRow(db, key).review_status, 'posted');
+  rmSync(pendingWorker.jobPath);
+  const queued = await recoverOrphan({ ...recovery, now: new Date(Date.parse(result.job.completedAt) + 60 * 60_000).toISOString() });
+  assert.equal(queued?.amaClosureResult.reviewRequest?.triggered, true);
+  const queuedRow = getReviewRow(db, key);
+  assert.equal(queuedRow.review_status, 'pending');
+  assert.equal(queuedRow.revision_ref, head);
+  assert.equal(queuedRow.reviewer, 'claude');
+  assert.equal(queuedRow.review_attempts, 2);
+  assert.equal(queuedRow.infra_auto_recover_attempts, 1);
+  const explicitReviewIntent = pendingExplicitReviewIntent(db, { ...key, headSha: head });
+  assert.equal(explicitReviewIntent?.actor, 'closure-watchdog');
+  const dedupInput = { repoPath: key.repo, prNumber: key.prNumber, headSha: head,
+    fetchReviewsForHeadImpl: async () => [authoritative] };
+  assert.equal((await resolveAlreadyReviewedHeadDedup(dedupInput)).alreadyReviewed, true);
+  assert.equal((await resolveAlreadyReviewedHeadDedup({ ...dedupInput, explicitReviewIntent })).reason, 'explicit-review-intent');
+  assert.equal(await recoverOrphan({ ...recovery, now: queuedRow.rereview_requested_at, reviewStateRow: queuedRow }), null);
+  assert.equal(getReviewRow(db, key).rereview_requested_at, queuedRow.rereview_requested_at);
+  assert.deepEqual(pages, []);
+  const staleReceipt = requestReviewRereview({ rootDir: root, ...key, targetRevisionRef: head,
+    expectedPostedAt: postedAt, preserveBudgets: true });
+  assert.equal(staleReceipt.triggered, false);
+  assert.equal(staleReceipt.reason, 'posted-review-changed');
+  const expired = { ...recovery, now: new Date(Date.parse(result.job.completedAt) + 60 * 60_000).toISOString() };
+  for (let tick = 0; tick < 2; tick++) {
+    assert.equal((await recoverOrphan(expired)).outcome, 'recovery-exhausted');
+  }
+  assert.equal(pages.length, 1);
+  assert.match(pages[0], /arrange independent review or adjudicate/);
   const findings = readReviewFindings(db);
-  assert.equal(findings[0].status, 'withdrawn');
+  assert.equal(findings[0].status, 'unaddressed');
+  assert.equal(findings[0].disputed, 1);
   assert.deepEqual(JSON.parse(findings[0].remediations[0].dispute_evidence_json), evidence);
 });

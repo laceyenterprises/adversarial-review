@@ -1188,6 +1188,7 @@ function requestReviewRereview({
   db: dbOverride = null,
   logger = console,
   expectedFailedHead = null,
+  expectedPostedAt = null,
   automaticMalformedRecovery = false,
   automaticWithheldHeadRecovery = false,
   preserveBudgets = false,
@@ -1208,7 +1209,7 @@ function requestReviewRereview({
     if (!inTransaction) {
       return db.transaction(() => requestReviewRereview({
         rootDir, repo, prNumber, requestedAt, reason, targetRevisionRef,
-        allowFastMergeSkipped, db, logger, expectedFailedHead, automaticMalformedRecovery, automaticWithheldHeadRecovery, preserveBudgets, ownerlessRecovery, reviewerFamily, explicitReviewRequest, inTransaction: true,
+        allowFastMergeSkipped, db, logger, expectedFailedHead, expectedPostedAt, automaticMalformedRecovery, automaticWithheldHeadRecovery, preserveBudgets, ownerlessRecovery, reviewerFamily, explicitReviewRequest, inTransaction: true,
       })).immediate();
     }
 
@@ -1217,6 +1218,11 @@ function requestReviewRereview({
     // resetting it here would let that pass overwrite the terminal verdict.
     // Read the captured pass body, not the mutable row's reviewer label.
     const currentRow = getReviewRow(db, { repo, prNumber });
+    if (expectedPostedAt && (currentRow?.review_status !== 'posted' || currentRow.posted_at !== expectedPostedAt
+      || currentRow.reviewer_head_sha !== normalizedTargetRevisionRef
+      || (currentRow.revision_ref && currentRow.revision_ref !== normalizedTargetRevisionRef))) {
+      return buildBlockedRereviewResult('posted-review-changed', currentRow);
+    }
     if (explicitReviewRequest) {
       if (!normalizedTargetRevisionRef || !explicitReviewRequest.requestId || !explicitReviewRequest.actor
           || !Number.isFinite(Date.parse(requestedAt))) {

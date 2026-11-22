@@ -1,4 +1,6 @@
 import { inspectMergeLeaseReviewCustody, withMergeLeaseReviewClaim } from './ama/merge-lease.mjs';
+import { isDisputedFindingsReviewIntent } from './explicit-review-intent.mjs';
+import { DISPUTE_REVIEW_REASON } from './remediation-dispute-handoff.mjs';
 
 // Shared closure evidence: only a new builder head gets a new review/budget
 // episode. A closer's pushed head stays in its existing reviewed-head series.
@@ -40,24 +42,28 @@ export function isExhaustedHeadVerdictRequested(row, headSha) {
   return REPAIR_HEAD_REASON.exec(row.rereview_reason || '')?.[1].toLowerCase() === headSha.toLowerCase();
 }
 
+function requiresMergeCustodyCheck(row, headSha, hasPriorityIntent) {
+  if (row?.failed_at) return false;
+  if (row?.rereview_reason === DISPUTE_REVIEW_REASON) return isDisputedFindingsReviewIntent(hasPriorityIntent(), headSha);
+  return isSystemExhaustedHeadVerdictRequested(row, headSha) && !hasPriorityIntent();
+}
+
 // Scheduling hint only; the claim transaction still owns the final decision.
 export function exhaustedHeadMergeCustodyDeferral({ row, hasPriorityIntent, ...identity }) {
-  if (row?.failed_at || !isSystemExhaustedHeadVerdictRequested(row, identity.headSha)
-    || hasPriorityIntent()) return null;
+  if (!requiresMergeCustodyCheck(row, identity.headSha, hasPriorityIntent)) return null;
   return inspectMergeLeaseReviewCustody(identity).reason;
 }
 
-// A priority receipt that arrives while the candidate is queued keeps ordinary
-// admission. Classify the current row and receipt in the claim transaction;
-// a stale watcher snapshot cannot grant or suppress a system claim.
+// Operator priority keeps ordinary admission. The watchdog's same-head dispute
+// receipt bypasses review deduplication and still checks native custody. Classify
+// the current row and receipt in the claim transaction.
 export function claimWithExhaustedHeadMergeCustody({
   db, readRow, hasPriorityIntent, ...identity
 }, claim) {
   const { headSha } = identity;
   const attempt = db.transaction(mergeHold => {
     const row = readRow();
-    const systemVerdict = !row?.failed_at && isSystemExhaustedHeadVerdictRequested(row, headSha)
-      && !hasPriorityIntent();
+    const systemVerdict = requiresMergeCustodyCheck(row, headSha, hasPriorityIntent);
     if (systemVerdict && mergeHold === undefined) return null;
     if (systemVerdict && mergeHold) return { reason: mergeHold };
     return { claim: claim(row) };

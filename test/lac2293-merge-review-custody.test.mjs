@@ -10,7 +10,9 @@ import { isDaemonMergeReviewAllowed } from '../src/ama/daemon-merge.mjs';
 import { claimWithExhaustedHeadMergeCustody, exhaustedHeadMergeCustodyDeferral,
   exhaustedHeadVerdictReason } from '../src/exhausted-head-verdict.mjs';
 import { repositoryRenamePendingPath } from '../src/repository-state-lock.mjs';
-import { pendingExplicitReviewIntent, priorityReviewIntent, recordExplicitReviewIntent } from '../src/explicit-review-intent.mjs';
+import { disputedFindingsReviewRequest, pendingExplicitReviewIntent,
+  priorityReviewIntent, recordExplicitReviewIntent } from '../src/explicit-review-intent.mjs';
+import { DISPUTE_REVIEW_REASON } from '../src/remediation-dispute-handoff.mjs';
 import { ensureReviewStateSchema } from '../src/review-state.mjs';
 import { prepareMarkAttemptStarted } from '../src/review-state-statements.mjs';
 
@@ -60,6 +62,7 @@ function repeat(run) {
           insert.run(repo, prNumber, at, headSha, reason ? at : null, reason, failedAt),
         human: () => recordExplicitReviewIntent(db, { ...identity, requestId: 'label-fixture',
           actor: 'fixture-operator', requestedAt: at }),
+        dispute: () => recordExplicitReviewIntent(db, { ...identity, ...disputedFindingsReviewRequest(headSha), requestedAt: at }),
       });
     }
   } finally {
@@ -68,6 +71,19 @@ function repeat(run) {
     rmSync(rootDir, { recursive: true, force: true });
   }
 }
+
+test('LAC-2315: a dispute review receipt does not bypass native merge custody', () => {
+  repeat(({ claim, dispute, grant, release, row, seed }) => {
+    seed({ reason: DISPUTE_REVIEW_REASON });
+    dispute();
+    const lease = assertGranted(grant());
+    assert.equal(claim().reason, 'native-merge-custody');
+    assert.equal(row().review_status, 'pending');
+    assert.equal(row().review_attempts, 2);
+    release(lease);
+    assert.equal(claim().claim.changes, 1);
+  });
+});
 
 test('LAC-2293: scheduling precheck defers only automatic system verdicts', () => {
   repeat(({ identity, grant, release, row, seed, human }) => {

@@ -3335,9 +3335,10 @@ Source validation does not authorize apply or incident recovery.
 
 REVIEWEVIDENCE-01: new PR blockers need a resolvable head file/line and a concrete
 input/state plus wrong outcome. Unsupported findings remain visible as
-non-blocking with a reason. Evidence-backed fixer disputes close on an unchanged
-head without re-review; retained replies and body/head-bound admission feed the
-existing merge gates. The offline regression uses real SQLite and a Node
+non-blocking with a reason. An evidence-backed dispute of every blocker can
+finish the remediation round on an unchanged head. The watcher verifies the
+retained reply against that head and review body, then routes independent
+adjudication. Only a trusted disposition can settle the finding. The offline regression uses real SQLite and a Node
 reproduction (`test/review-evidence.test.mjs`). Existing smoke coverage and merge
 safety remain; SRE samples 20 deployed reviews and repeats the noise audit as
 recorded in `post-merge-verify.json` and the closure runbook.

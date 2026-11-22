@@ -31,25 +31,18 @@ reviewed `headSha`, original `citation`, and either `code`, `reproduction`,
 `output` or `test`, `output`. An unambiguous matching factual dispute gets
 `review_finding_remediations.reason = disputed-with-evidence`; the full payload
 is retained in `review_finding_replies.payload_json`; linked remediation records
-return only `dispute_evidence_json`, avoiding repeated full-reply payloads. Its historical status is `withdrawn`. Ordinary pushback
-remains unaddressed. A completed reply can close individual disputed findings
-while other findings still require repair.
+return only `dispute_evidence_json`, avoiding repeated full-reply payloads. The
+finding remains unaddressed pending a trusted disposition.
 Evidence citations accept comma- and semicolon-separated line ranges, such as
 `src/worker.mjs:10-15; 20-25, 30`, and must match the original path and complete
-ordered range list. This changes no persistent schema or payload fields.
-The complete citation disambiguates identical titles during both completion and
-withdrawal admission. Known non-blocking acknowledgements in `addressed` can
+ordered range list. The complete citation disambiguates identical titles during
+completion and finding evidence projection. Known non-blocking acknowledgements in `addressed` can
 accompany evidence-only completion; claimed blocker repairs cannot.
 
-The same completion transaction caches admitted evidence in the existing
-withdrawal table, keyed by repository, PR and finding identity. It binds the
-original reviewed head, exact review-body digest, reply ID and evidence digest.
-This admission participates in closure authority through the existing shared
-adjudicator. Other finding observations still grant no authority. Projection
-failure preserves the durable completed job and evidence for offline replay;
-missing admission leaves closure blocked rather than requesting another review.
-Gate readers never parse reply artifacts or execute reproduction commands.
-
+Worker evidence stays in the existing reply and finding-link records. The
+watcher checks the completed job directly for adjudication routing. The merge
+gate and dismissal readers accept only trusted hammer withdrawals from the
+withdrawal store.
 
 **Owner:** review-body capture and remediation completion observations
 **Store:** `data/reviews.db`

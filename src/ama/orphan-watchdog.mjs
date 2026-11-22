@@ -19,6 +19,7 @@ import { readAmaCloserLease, amaCloserPendingLeaseExpiryMs, abandonedAmaCloserLe
 import { listSettledJsonNames } from './dispatch-dir-names.mjs';
 import { requestBoundedOrphanReview } from './orphan-review-request.mjs';
 import { remediationJobOwnership } from '../remediation-job-ownership.mjs';
+import { DISPUTE_REVIEW_REASON } from '../remediation-dispute-handoff.mjs';
 
 // Only immutable terminal ledger results are cached; bound fleet memory usage.
 const terminalLaunches = new Map();
@@ -366,11 +367,14 @@ async function recoverOrphanWithStore({ rootDir, repo, prNumber, headSha, candid
     // Unknown ownership is a read wait, never permission to race a live closer.
     if (hasExactHeadReviewDecision(result, headSha)) {
       if (ownership?.uncertain && !overdue) return pending;
-      if (idleMs < ownerlessBoundMs(env)) {
+      const dispute = selected.reason === DISPUTE_REVIEW_REASON;
+      if (!ownership?.uncertain && (idleMs < ownerlessBoundMs(env) || (dispute && !state.rereview))) {
         const reviewRequest = await requestBoundedOrphanReview({ rootDir, repo, prNumber, headSha,
           reviewStateRow, requestRereviewImpl, logger, db,
           decisionReasons: [result?.nextAction?.reason].filter(Boolean) });
-        return { ...pending, amaClosureResult: { ...pending.amaClosureResult, reviewRequest } };
+        if (!dispute || !overdue || reviewRequest?.triggered) {
+          return { ...pending, amaClosureResult: { ...pending.amaClosureResult, reviewRequest } };
+        }
       }
     }
     // The route already owns a proof/read/dispatch wait. Keep the ownerless
@@ -380,7 +384,9 @@ async function recoverOrphanWithStore({ rootDir, repo, prNumber, headSha, candid
       const transition = JSON.stringify([expiredAction.row, expiredAction.action, expiredAction.actor, expiredAction.reason]);
       if (!db.prepare('SELECT 1 FROM transition_pages WHERE head=? AND transition=?').get(headSha, transition)) {
         try {
-          const receipt = await pageImpl(`SEV1 ownerless PR: ${repo} PR ${prNumber} head ${headSha}; missing transition ${missingTransition}; ${text(expiredAction.row)} ${text(expiredAction.action)} owner=${text(expiredAction.actor)} reason=${text(expiredAction.reason)} deadline=${text(expiredAction.deadline?.at)}; evidence=${(expiredAction.evidenceRefs || []).map(text).join(', ')}`, {
+          const adjudication = expiredAction.reason === DISPUTE_REVIEW_REASON
+            ? '. Inspect the completed remediation reply and arrange independent review or adjudicate the findings at this head.' : '';
+          const receipt = await pageImpl(`SEV1 ownerless PR: ${repo} PR ${prNumber} head ${headSha}; missing transition ${missingTransition}; ${text(expiredAction.row)} ${text(expiredAction.action)} owner=${text(expiredAction.actor)} reason=${text(expiredAction.reason)} deadline=${text(expiredAction.deadline?.at)}; evidence=${(expiredAction.evidenceRefs || []).map(text).join(', ')}${adjudication}`, {
             event: 'ama.orphan_recovery.missing-transition', payload: { severity: 'SEV1', repo, prNumber, headSha,
               missingTransition, nextAction: expiredAction, routeReason: text(result.reason), attempts: state.attempts } });
           if (receipt?.status === 'dead-letter') logger?.warn?.('Orphan transition page is dead-lettered; operator action required');

@@ -3,6 +3,7 @@ import { formatPrRoundLedgerSummary } from '../../../pr-round-ledger.mjs';
 import { meteredExecFile } from '../../../metered-gh.mjs';
 import { filterGitHubBody } from '../../../github-outbound-body.mjs';
 import { classifyRemediationBlockers, operationalBlockerOwner } from '../../../remediation-blocker-ownership.mjs';
+import { DISPUTED_COMPLETION } from '../../../remediation-dispute-handoff.mjs';
 // PR comment poster for the remediation pipeline.
 //
 // Every terminal reconcile transition (completed / stopped / failed) emits a
@@ -663,6 +664,8 @@ function buildRemediationOutcomeCommentBody({
     lines.push(`All findings from this review were addressed and pushed as ${pushedHead}. Required checks had not finished when the round ended.`);
     lines.push('');
     lines.push('Nothing is needed from a person. The pipeline continues when CI finishes.');
+  } else if (action === 'completed' && (reReview || job?.reReview)?.reason === DISPUTED_COMPLETION) {
+    lines.push('**Outcome:** round finished with disputes for independent adjudication.');
   } else if (action === 'completed') {
     // The completed action is gated on rereview acceptance in
     // reconcileFollowUpJob, so by the time we render here we know the

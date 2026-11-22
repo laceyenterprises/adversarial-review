@@ -2873,6 +2873,22 @@ test('Codex reviewer auth path without HOME uses the process home, not a fixed a
   });
 });
 
+test('Codex reviewer auth path ignores a nonexistent legacy path when HOME is unset or empty', () => {
+  const root = mkdtempSync(join(tmpdir(), 'adversarial-review-codex-no-home-'));
+  try {
+    for (const home of [undefined, '']) {
+      withEnv({
+        CODEX_AUTH_PATH: undefined, CODEX_HOME: undefined, HOME: home,
+        ADVERSARIAL_LEGACY_CODEX_AUTH_PATH: join(root, 'absent.json'),
+      }, () => {
+        assert.equal(resolveCodexAuthPath(), join(homedir(), '.codex', 'auth.json'));
+      });
+    }
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test('Codex reviewer auth path reaches a split-user credential only through the configured legacy path', () => {
   const root = mkdtempSync(join(tmpdir(), 'adversarial-review-codex-legacy-'));
   try {
@@ -2900,6 +2916,8 @@ test('Codex reviewer auth path prefers the current HOME default when present', (
   try {
     const homeDir = join(root, 'operator-home');
     const authPath = join(homeDir, '.codex', 'auth.json');
+    const legacyAuth = join(root, 'legacy-auth.json');
+    writeFileSync(legacyAuth, '{}', 'utf8');
     mkdirSync(join(homeDir, '.codex'), { recursive: true });
     writeFileSync(
       authPath,
@@ -2909,7 +2927,10 @@ test('Codex reviewer auth path prefers the current HOME default when present', (
       }),
       'utf8'
     );
-    withEnv({ CODEX_AUTH_PATH: undefined, CODEX_HOME: undefined, HOME: homeDir }, () => {
+    withEnv({
+      CODEX_AUTH_PATH: undefined, CODEX_HOME: undefined, HOME: homeDir,
+      ADVERSARIAL_LEGACY_CODEX_AUTH_PATH: legacyAuth,
+    }, () => {
       assert.equal(resolveCodexAuthPath(), authPath);
     });
   } finally {

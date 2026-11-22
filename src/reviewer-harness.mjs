@@ -541,11 +541,9 @@ function resolveCodexAuthPath() {
     if (isCodexOAuthAuthFile(codexHomeAuth)) return codexHomeAuth;
   }
   const legacyAuth = String(process.env.ADVERSARIAL_LEGACY_CODEX_AUTH_PATH || '').trim();
-  if (process.env.HOME) {
-    const homeAuth = join(process.env.HOME, '.codex', 'auth.json');
-    if (existsSync(homeAuth) || !legacyAuth || !existsSync(legacyAuth)) return homeAuth;
-  }
-  return legacyAuth || join(homedir(), '.codex', 'auth.json');
+  const homeAuth = join(process.env.HOME || homedir(), '.codex', 'auth.json');
+  if (existsSync(homeAuth) || !legacyAuth || !existsSync(legacyAuth)) return homeAuth;
+  return legacyAuth;
 }
 
 function isCodexOAuthAuthFile(authPath) {

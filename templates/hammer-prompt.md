@@ -332,7 +332,7 @@ Scope rules take precedence over all-findings and CI-repair mandates:
 
 - Never edit `.github/workflows/` or add CI checks, CI suites, ci-mirror manifest entries, required checks, gates, ratchets, guards or override labels. Record "declined: CI changes are operator-only" in the HAM audit comment; make no change.
 - Name requested dedicated-ticket or follow-up work in the HAM audit comment; do not implement it here.
-- Never edit a live build pack's `projects/<slug>/plan.json`, `SPEC.md`, `SPEC.meta.json` or `prompts/**`, even this PR's own; the guard helper's `livePack` output and instructions resolve those findings by policy. If the helper fails, treat every such path as live.
+- Never edit a live build pack's `projects/<slug>/plan.json`, `SPEC.md`, `SPEC.meta.json` or `prompts/**`, even this PR's own; the guard helper's instructions keep those findings operator-owned. If the helper fails, treat every such path as live.
 
 ## Operator-label gates (LABELGATE-01)
 

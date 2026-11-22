@@ -6861,17 +6861,50 @@ merge safety gate; follow the helper's audit instructions in the hammer prompt.
 `REMEDIATIONLIVEPLAN-01` extends the same helper to live build packs: it reads
 liveness for every `projects/<slug>/{plan.json,SPEC.md,SPEC.meta.json,prompts/**}`
 path the review cites through the live-pack review gate's base-plan and dispatch
-read (`livePack` in its output). A blocking or non-blocking finding whose fix lies
-entirely in a live pack's guarded files, the PR's own pack included, is resolved
-by policy with `Resolved-By-Policy: live-pack-plan <path> requires an operator
-live edit`; `remainingBlocking` lists the blockers still owed. A failed lookup
-protects every guarded pack path. The hammer runs the helper in both strict modes.
-The helper requires the complete recommended fix to use recognized edit-only
-wording: explicit protected filenames, or backtick-quoted field identifiers in
-an explicit protected file (including activation-assertion fields). A protected
-`File` field alone grants no resolution. Additional actions such as revoking a
-token, even when they name no file, and unrecognized wording remain unresolved;
-the protected files still cannot be edited.
+read (`livePack` in its output). A failed lookup protects every guarded pack path.
+The helper recognizes an edit-only remedy from explicit protected filenames or
+backtick-quoted field identifiers in an explicit protected file (including
+activation-assertion fields). A protected `File` field alone grants nothing.
+A mixed remedy that explicitly requests a protected edit and another action,
+such as token revocation, stays on the ordinary remediation list and also
+creates an operator-owned obligation for that edit.
+
+`LIVEPACKHANDOFF-01` (LAC-2307): unlike a generated path, nothing regenerates a
+live pack file, so a blocking or non-blocking finding whose fix lies entirely in
+a live pack's guarded files, the PR's own pack included, is **operator-owned**,
+not resolved by policy. The helper lists it in `operatorOwned` (not in
+`resolved` or `remainingBlocking`) with an
+`Operator-Live-Edit-Required: live-pack-plan <path>` line in `operatorHandoff`
+and no audit credit. A mixed finding remains in `remaining` or
+`remainingBlocking` for its other action; exact-head proof of the operator edit
+removes its operator obligation but does not grant finding credit by itself.
+The hammer remediates everything else and does not merge
+while a required entry remains (blocking always; non-blocking under strict
+mode): it stops with `blocking-findings-present` or
+`non-blocking-findings-present`, which hold and page once per head, and names
+each handoff line in its single no-merge status. Remediator or author text
+(pushback, `Resolved-By-Policy`, "no human input") never resolves the finding,
+and the AMA audit parser ignores a live-pack deferral bullet, so a hammer that
+copies one still fails the count and identity gates.
+The parser checks the complete audit entry, including lines following its
+finding bullet, for a live-pack deferral.
+
+An operator's repair closes the finding only with exact-head evidence the helper
+reads itself (`src/live-pack-operator-edit.mjs`, reported as
+`resolved[].operatorEdit` and `operatorEditEvidence`): the PR is open and its
+live head descends from the reviewed head (`HAM_REVIEWED_SHA`, compare status
+`ahead`, complete commit and file lists); each protected path changed in that
+range, and every range commit touching it has a GitHub-verified signature
+with reason `valid`, is attributed by GitHub to a configured operator as
+both author and committer, and lacks `Worker-Class`,
+`Worker-Job-Id`, `Worker-Ticket` and `Closed-By` trailers; `live-pack-edit-approved` is present
+and its latest label event is a `labeled` by a
+`roles.adversarial.operator_logins` login; and the head and labels are
+unchanged after the read. The hammer still confirms the change satisfies the
+finding before counting it. Any failed, truncated or ambiguous read leaves the
+finding operator-owned. The label is approval of an operator's source change,
+never a worker write grant. Operator recovery when evidence is unavailable is
+unchanged: an exact-head `retrigger-review` once the edit is published.
 
 `roles.adversarial.merge_authority.strict_non_blocking_remediation` is **on by
 default**. Because adversarial reviewers almost always emit at least one

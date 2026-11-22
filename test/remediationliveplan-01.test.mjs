@@ -1,6 +1,7 @@
-// REMEDIATIONLIVEPLAN-01: remediators resolve findings that would edit a live
-// build pack's plan, spec or prompts by policy, the PR's own pack included,
-// instead of editing them. Liveness comes from the live-pack review gate's
+// REMEDIATIONLIVEPLAN-01: remediators never edit a live build pack's plan,
+// spec or prompts, the PR's own pack included. LIVEPACKHANDOFF-01: a finding
+// that needs such an edit is operator-owned, not resolved by policy, and earns
+// no closure credit. Liveness comes from the live-pack review gate's
 // evaluation (base plan + dispatch read surface); a failed read protects every
 // guarded pack path. Synthetic repository, packs and runs only.
 import test from 'node:test';
@@ -96,33 +97,38 @@ function close(body, policy) {
       range: { verified: true, reviewedHead: HEAD, currentHead: HEAD, baseSha: HEAD, commits: [] } } });
 }
 
-test('a finding touching a live plan assertion is resolved by policy with no edit, own pack included', async () => {
+test('a finding touching a live plan assertion stays operator-owned with no edit, own pack included', async () => {
   const body = review({ nonBlocking: [liveCard] });
   const { livePack, protects } = await policyFor(body);
   assert.deepEqual(livePack, { failClosed: false, packs: [{ slug: 'demo-live-pack', planId: 'demo-live-pack-v1',
     live: true, inconclusive: false, runIds: [LIVE_RUN] }] });
   // DEMO-15 is one of the live pack's own tickets: own-pack status grants no edit right.
   const policy = resolveGuardForbiddenNonBlocking(body, [], { livePackProtects: protects });
-  assert.equal(policy.resolved.length, 1);
-  assert.deepEqual(policy.resolved[0].livePackPaths, ['projects/demo-live-pack/plan.json']);
-  assert.deepEqual(policy.remaining, []);
-  assert.ok(policy.auditDetails.split('\n').includes(
-    'Resolved-By-Policy: live-pack-plan projects/demo-live-pack/plan.json requires an operator live edit'));
-  assert.match(policy.instructions, /do not edit the file, do not raise an operator decision/);
+  assert.deepEqual(policy.resolved, []);
+  assert.equal(policy.operatorOwned.length, 1);
+  assert.deepEqual(policy.operatorOwned[0].livePackPaths, ['projects/demo-live-pack/plan.json']);
+  assert.equal(policy.operatorOwned[0].addressed, false);
+  assert.equal(policy.operatorOwned[0].required, true);
+  assert.deepEqual(policy.remaining, [], 'nothing is left for the closer to edit');
+  assert.equal(policy.auditDetails, '', 'no closure credit is offered');
+  assert.equal(policy.operatorHandoff, 'Operator-Live-Edit-Required: live-pack-plan projects/demo-live-pack/plan.json');
+  assert.match(policy.instructions, /do not edit the file, do not count it in Remediated-Findings/);
   assert.match(policy.instructions, /including this PR's own pack and a PR that is itself an approved live edit/);
-  // Strict accounting: the policy audit covers the finding, and the HAM commit edits no pack file.
+  assert.match(policy.instructions, /stop with blocking-findings-present or non-blocking-findings-present/);
+  // Strict accounting: without an operator edit there is nothing to credit, so closure refuses.
   const result = close(body, policy);
-  assert.equal(result.eligible, true, JSON.stringify(result.reasons));
+  assert.equal(result.eligible, false);
 });
 
-test('a blocking live-plan finding is resolved by policy and leaves no remaining blocker', async () => {
+test('a blocking live-plan finding is operator-owned, not a closer task and not resolved', async () => {
   const body = review({ blocking: [liveCard], verdict: 'Request changes' });
   const policy = resolveGuardForbiddenNonBlocking(body, [], { livePackProtects: (await policyFor(body)).protects });
-  assert.equal(policy.resolved.length, 1);
-  assert.equal(policy.resolved[0].blocking, true);
+  assert.deepEqual(policy.resolved, []);
+  assert.deepEqual(policy.operatorOwned.map(finding => [finding.title, finding.blocking, finding.required]),
+    [['Activation assertion drifted', true, true]]);
   assert.equal(policy.blocking.length, 1, 'the raw blocking list is unchanged');
-  assert.deepEqual(policy.remainingBlocking, []);
-  assert.match(policy.auditDetails, /\*\*Activation assertion drifted\*\* \(blocking\) — resolved by policy/);
+  assert.deepEqual(policy.remainingBlocking, [], 'the closer must not edit it');
+  assert.doesNotMatch(policy.auditDetails, /resolved by policy/);
 });
 
 test('a finding in a non-live pack plan is remediated normally', async () => {
@@ -131,7 +137,7 @@ test('a finding in a non-live pack plan is remediated normally', async () => {
   assert.equal(livePack.packs.find(pack => pack.slug === 'demo-idle-pack').live, false);
   assert.equal(protects('projects/demo-idle-pack/plan.json'), false);
   const policy = resolveGuardForbiddenNonBlocking(body, [], { livePackProtects: protects });
-  assert.deepEqual(policy.resolved.map(finding => finding.title), ['Activation assertion drifted']);
+  assert.deepEqual(policy.operatorOwned.map(finding => finding.title), ['Activation assertion drifted']);
   assert.deepEqual(policy.remaining.map(finding => finding.title), ['Idle pack assertion drifted']);
   assert.equal(close(body, policy).eligible, false, 'the idle-pack finding still needs remediation');
 });
@@ -160,7 +166,8 @@ test('a live-pack lookup failure protects every plan, spec, spec-meta and prompt
   assert.equal(livePackPolicyProtects({ failClosed: false, packs: [] }, 'projects/unread/plan.json'), true);
   const body = review({ nonBlocking: [idleCard] });
   const policy = resolveGuardForbiddenNonBlocking(body, [], { livePackProtects: path => livePackPolicyProtects(failures[0], path) });
-  assert.deepEqual(policy.resolved.map(finding => finding.title), ['Idle pack assertion drifted']);
+  assert.deepEqual(policy.operatorOwned.map(finding => finding.title), ['Idle pack assertion drifted']);
+  assert.deepEqual(policy.resolved, []);
 });
 
 test('mixed remedies, the operator-gated cross-edit finding and missing policy grant no resolution', async () => {
@@ -173,6 +180,7 @@ test('mixed remedies, the operator-gated cross-edit finding and missing policy g
   const crossEdit = '- **[live_pack_cross_edit] Cross-pack edit of live build pack `demo-live-pack`** — touched: `projects/demo-live-pack/plan.json`. Leave the change in place.';
   const gated = resolveGuardForbiddenNonBlocking(review({ blocking: [crossEdit], verdict: 'Request changes' }), [], { livePackProtects: protects });
   assert.equal(gated.resolved.length, 0);
+  assert.equal(gated.operatorOwned.length, 0, 'the cross-edit finding keeps its own operator-label gate');
   assert.equal(gated.remainingBlocking.length, 1);
   assert.equal(resolveGuardForbiddenNonBlocking(review({ nonBlocking: [liveCard] }), []).resolved.length, 0);
 });
@@ -208,13 +216,16 @@ test('live-pack policy requires a complete recognized edit-only remedy', () => {
   }
 });
 
-test('mixed remedies without additional filenames retain findings and grant no audit or closure credit', () => {
+test('mixed remedies without additional filenames retain ordinary work and operator custody without credit', () => {
   const mixed = card('Exposed credential', 'projects/demo-live-pack/plan.json',
     'Remove the embedded credential from `projects/demo-live-pack/plan.json` and revoke the exposed token in GitHub.');
   for (const blocking of [false, true]) {
     const body = review(blocking ? { blocking: [mixed], verdict: 'Request changes' } : { nonBlocking: [mixed] });
     const policy = resolveGuardForbiddenNonBlocking(body, [], { livePackProtects: () => true });
     assert.deepEqual(policy.resolved, []);
+    assert.deepEqual(policy.operatorOwned.map(finding => [finding.title, finding.livePackPaths, finding.mixed]),
+      [['Exposed credential', ['projects/demo-live-pack/plan.json'], true]]);
+    assert.match(policy.operatorHandoff, /Operator-Live-Edit-Required: live-pack-plan projects\/demo-live-pack\/plan\.json/);
     assert.equal(policy.auditDetails, '');
     assert.deepEqual((blocking ? policy.remainingBlocking : policy.remaining).map(finding => finding.title),
       ['Exposed credential']);
@@ -237,7 +248,11 @@ test('workflow-path behaviour from HAMMERNOCI-01 is unchanged and live-pack poli
     assert.match(prompt, /Never edit a live build pack's `projects\/<slug>\/plan\.json`, `SPEC\.md`, `SPEC\.meta\.json` or `prompts\/\*\*`, even this PR's own/);
   }
   assert.match(remediation, /"declined: CI changes are operator-only"/);
-  assert.match(remediation, /Resolved-By-Policy: live-pack-plan <path> requires an operator live edit/);
+  // LIVEPACKHANDOFF-01: the native worker hands the finding to the operator as a blocker.
+  assert.match(remediation, /record it once in `blockers\[\]` with `kind: "live-pack-operator-edit"` and `needsHumanInput: "Operator-Live-Edit-Required: live-pack-plan <path>"`/);
+  assert.match(remediation, /The `live-pack-edit-approved` label and broad operator approval are not a worker write grant/);
+  assert.match(remediation, /Never report it as pushback, addressed or nonBlocking work, as `Resolved-By-Policy`, or as needing no human input/);
+  assert.match(hammer, /the guard helper's instructions keep those findings operator-owned/);
   // The hammer runs the helper in both modes and passes the effective strict policy.
   assert.match(hammer, /Before remediation, run bounded `node \S+\/bin\/guard-forbidden-paths\.mjs fixture\/repo 42 <complete-final-review-file> false`/);
   assert.match(LIVE_PACK_POLICY_INSTRUCTIONS, /When livePack\.failClosed is true or this helper fails, every such path is protected/);
@@ -259,7 +274,7 @@ test('follow-up remediation context reads packs the findings cite and marks the 
   assert.match(context, /A pack listed with `live: false` is remediated normally; a pack not listed here is treated as live/);
 });
 
-test('the hammer guard helper resolves a cited live-pack finding offline and fails closed without a dispatch read', t => {
+test('the hammer guard helper keeps a cited live-pack finding operator-owned offline and fails closed without a dispatch read', t => {
   const dir = mkdtempSync(join(tmpdir(), 'remediationliveplan-'));
   t.after(() => rmSync(dir, { recursive: true, force: true }));
   const reviewFile = join(dir, 'review.md');
@@ -273,10 +288,15 @@ test('the hammer guard helper resolves a cited live-pack finding offline and fai
     + 'else { process.stderr.write("gh: Not Found (HTTP 404)"); process.exitCode = 1; }\n', { mode: 0o755 });
   const env = { ...process.env, PATH: `${dir}:${process.env.PATH}`, HQ_ROOT: join(dir, 'hq') };
   delete env.ADVERSARIAL_DISPATCH_READS_ENABLED;
+  delete env.HAM_REVIEWED_SHA;
   const output = JSON.parse(execFileSync(process.execPath, [resolve('bin/guard-forbidden-paths.mjs'), REPO, '1', reviewFile, 'true'],
     { timeout: 60_000, encoding: 'utf8', env, stdio: ['ignore', 'pipe', 'ignore'] }));
   // No dispatch read here: the idle pack's liveness is inconclusive, so it is protected.
   assert.deepEqual(output.livePack.packs.map(pack => [pack.slug, pack.live, pack.inconclusive]), [['demo-idle-pack', true, true]]);
-  assert.deepEqual(output.resolved.map(finding => finding.livePackPaths), [['projects/demo-idle-pack/plan.json']]);
-  assert.match(output.auditDetails, /^Resolved-By-Policy: live-pack-plan projects\/demo-idle-pack\/plan\.json requires an operator live edit$/m);
+  assert.deepEqual(output.resolved, []);
+  assert.deepEqual(output.operatorOwned.map(finding => finding.livePackPaths), [['projects/demo-idle-pack/plan.json']]);
+  assert.equal(output.operatorHandoff, 'Operator-Live-Edit-Required: live-pack-plan projects/demo-idle-pack/plan.json');
+  assert.doesNotMatch(output.auditDetails, /Resolved-By-Policy/);
+  // No reviewed head is supplied, so no operator edit can be proven.
+  assert.deepEqual(output.operatorEditEvidence, { ok: false, reason: 'reviewed-head-unknown' });
 });

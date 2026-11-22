@@ -415,6 +415,16 @@ Why the default leans this direction: code is the source of truth for *what runs
 
 If you genuinely believe the code is wrong and should be reverted, that is a `pushback[]` entry with explicit reasoning citing one of the narrow cases above — NOT a silent revert wrapped in an `addressed[]` entry. The reviewer's job is to flag the divergence; deciding which side of the divergence wins is a substance call that you must make explicitly and defensibly.
 
+**Live build pack exception (LIVEPACKHANDOFF-01).** When the governing doc is
+a live build pack's `projects/<slug>/SPEC.md`, `SPEC.meta.json`, `plan.json` or
+`prompts/**`, the Required Operating Rules forbid you from editing it, and the
+`live-pack-edit-approved` label or a broad operator approval does not change
+that. Such a finding is not resolved by policy and is not pushback: record it in
+`blockers[]` with `kind: "live-pack-operator-edit"` and
+`needsHumanInput: "Operator-Live-Edit-Required: live-pack-plan <path>"`, and
+remediate everything else. The operator owns that edit; validation moves any
+`Resolved-By-Policy: live-pack-plan` disposition into `blockers[]` anyway.
+
 ## Hardening what you find along the way
 
 Remediation is the one time a worker reads a subsystem closely with the

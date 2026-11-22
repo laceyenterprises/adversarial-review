@@ -676,9 +676,11 @@ test('remediation prompt includes the live-run facts and the stop-and-report rul
   assert.match(prompt, new RegExp(`"runId": "${TOC_RUN}"`));
   assert.match(prompt, /"ownPack": true/);
   assert.match(prompt, /"slug": "finished-pack"[\s\S]*?"live": false/);
-  // REMEDIATIONLIVEPLAN-01: the own pack is protected too; policy, not a blocker.
+  // REMEDIATIONLIVEPLAN-01: the own pack is protected too. LIVEPACKHANDOFF-01:
+  // a finding needing that edit is an operator-owned blocker, never policy pushback.
   assert.match(prompt, /do not edit the spec, plan or prompts of any pack whose `live` is true, this PR's own pack included/i);
-  assert.match(prompt, /Resolved-By-Policy: live-pack-plan <path> requires an operator live edit/);
+  assert.match(prompt, /record it in `blockers\[\]` with `kind: "live-pack-operator-edit"` and `needsHumanInput: "Operator-Live-Edit-Required: live-pack-plan <path>"`: the operator owns it/);
+  assert.match(prompt, /Never record it as pushback or `Resolved-By-Policy`; the approval label is not a worker write grant/);
   assert.doesNotMatch(prompt, /stop and report/);
   assert.match(prompt, new RegExp(`Never apply the \`${LIVE_PACK_EDIT_WAIVER_LABEL}\` label yourself`));
   // The block sits in the trusted part of the prompt, before the operating rules.

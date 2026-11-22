@@ -418,6 +418,76 @@ function normalizeOperationalBlockers(reply, { expectedJob = null } = {}) {
   };
 }
 
+// LIVEPACKHANDOFF-01: a remediator may never edit a live build pack's
+// protected files, so a valid finding whose fix needs one is not resolved by
+// the worker: an operator owns it. A worker that reports such a finding as
+// pushback, addressed or nonBlocking work ("Resolved-By-Policy: live-pack-plan
+// ...", "requires an operator live edit") is describing an unresolved finding.
+// Validation moves each of those entries into blockers[] with
+// `kind: live-pack-operator-edit`, so every consumer sees a human-owned blocker
+// and the reply can no longer read as complete. Worker text never resolves a
+// protected-pack finding; only an operator's published edit can.
+const LIVE_PACK_OPERATOR_EDIT_KIND = 'live-pack-operator-edit';
+const LIVE_PACK_OPERATOR_EDIT_MARKER = 'Operator-Live-Edit-Required: live-pack-plan';
+// The prose form ignores a negated claim ("does not require an operator live
+// edit"), which is a dispute, not a deferral.
+const LIVE_PACK_DEFERRAL_RE = /\bResolved-By-Policy:\s*live-pack-plan\b|\bOperator-Live-Edit-Required:\s*live-pack-plan\b|(?<!(?:\bnot|\bnever|n't)\s+)\brequires?\s+an?\s+operator\s+live[- ]edit\b/i;
+const LIVE_PACK_PROTECTED_PATH_RE = /projects\/[\w.-]+\/(?:SPEC\.md|SPEC\.meta\.json|plan\.json|prompts\/[\w./-]*[\w-])/g;
+
+function isLivePackDeferralText(value) {
+  // Reported claims inside quotes are evidence of a dispute, not the worker's
+  // own disposition. Keep matching affirmative unquoted legacy prose.
+  return typeof value === 'string'
+    && LIVE_PACK_DEFERRAL_RE.test(value.replace(/"[^"]*"|“[^”]*”/g, ' '));
+}
+
+function livePackOperatorEditBlocker(entry, disposition) {
+  const paths = [...new Set(`${disposition}\n${entry.finding}`.match(LIVE_PACK_PROTECTED_PATH_RE) || [])].sort();
+  return {
+    ...(entry.title !== undefined ? { title: entry.title } : {}),
+    finding: entry.finding,
+    reasoning: disposition,
+    needsHumanInput: `${LIVE_PACK_OPERATOR_EDIT_MARKER} ${paths.length ? paths.join(', ') : 'protected file named in the finding'}. `
+      + 'An operator must make or approve and publish this live build pack edit; remediation workers may not edit it.',
+    kind: LIVE_PACK_OPERATOR_EDIT_KIND,
+  };
+}
+
+function normalizeLivePackOperatorEdits(reply) {
+  if (!Array.isArray(reply.blockers)) return reply;
+  const moved = [];
+  const sweep = (field, textKey) => {
+    if (!Array.isArray(reply[field])) return reply[field];
+    return reply[field].filter((entry) => {
+      const disposition = entry && typeof entry === 'object' && !Array.isArray(entry) ? entry[textKey] : null;
+      if (typeof entry?.finding !== 'string' || !entry.finding.trim() || !isLivePackDeferralText(disposition)) return true;
+      moved.push(livePackOperatorEditBlocker(entry, disposition));
+      return false;
+    });
+  };
+  const pushback = sweep('pushback', 'reasoning');
+  const addressed = sweep('addressed', 'action');
+  const nonBlocking = sweep('nonBlocking', 'action');
+  let tagged = false;
+  const blockers = reply.blockers.map((entry) => {
+    if (!entry || typeof entry !== 'object' || Array.isArray(entry) || entry.kind !== undefined
+      || ![entry.reasoning, entry.needsHumanInput].some(isLivePackDeferralText)) return entry;
+    tagged = true;
+    return { ...entry, kind: LIVE_PACK_OPERATOR_EDIT_KIND };
+  });
+  if (!moved.length && !tagged) return reply;
+  const reReview = reply.reReview && typeof reply.reReview === 'object' && !Array.isArray(reply.reReview)
+    ? { ...reply.reReview, requested: false } : reply.reReview;
+  return {
+    ...reply,
+    ...(reply.pushback !== undefined ? { pushback } : {}),
+    ...(reply.addressed !== undefined ? { addressed } : {}),
+    ...(reply.nonBlocking !== undefined ? { nonBlocking } : {}),
+    blockers: [...blockers, ...moved],
+    ...(moved.length ? { outcome: reply.outcome === 'completed' ? 'partial' : reply.outcome, reReview } : {}),
+  };
+}
+
 function normalizeCoverageTitle(title) {
   return String(title ?? '')
     .normalize('NFKC')
@@ -539,8 +609,15 @@ function validateBlockingCoverage(reply, expectedJob) {
     ...pushback.map((entry, index) => ({ field: 'pushback', index, entry })),
     ...blockers.map((entry, index) => ({ field: 'blockers', index, entry })),
   ];
-  const nonBlockingExtras = addressed
-    .map((entry, index) => ({ field: 'addressed', index, entry }))
+  // A non-blocking finding handed to the operator as a live-pack blocker is
+  // accounted for like a non-blocking fix: outside the blocking count.
+  const isOperatorOwnedNonBlocking = (field, entry) => field === 'blockers'
+    && entry?.kind === LIVE_PACK_OPERATOR_EDIT_KIND;
+  const nonBlockingExtras = [
+    ...addressed.map((entry, index) => ({ field: 'addressed', index, entry })),
+    ...blockers.map((entry, index) => ({ field: 'blockers', index, entry }))
+      .filter(({ field, entry }) => isOperatorOwnedNonBlocking(field, entry)),
+  ]
     .filter(({ entry }) => {
       const key = normalizeCoverageTitle(entry?.title);
       return key && nonBlockingTitleKeys.has(key) && !blockingTitleKeys.has(key);
@@ -608,7 +685,8 @@ function validateBlockingCoverage(reply, expectedJob) {
   for (const { field, entry } of actualEntries) {
     const key = normalizeCoverageTitle(entry?.title);
     if (!key) continue;
-    if (field !== 'addressed' && nonBlockingTitleKeys.has(key) && !blockingTitleKeys.has(key)) {
+    if (field !== 'addressed' && !isOperatorOwnedNonBlocking(field, entry)
+      && nonBlockingTitleKeys.has(key) && !blockingTitleKeys.has(key)) {
       misplacedNonBlocking.add(actualDisplay.get(key) || String(entry?.title || key).trim() || key);
     }
   }
@@ -652,6 +730,7 @@ function validateRemediationReply(reply, { expectedJob = null, publicCommentLabe
     throw new Error(`Unsupported remediation reply schemaVersion: ${reply.schemaVersion}`);
   }
   reply = normalizeOperationalBlockers(reply, { expectedJob });
+  reply = normalizeLivePackOperatorEdits(reply);
 
   if (typeof reply.jobId !== 'string' || !reply.jobId.trim()) {
     throw new Error('Remediation reply jobId is required');
@@ -813,7 +892,10 @@ export {
   detectPublicReplyNoiseSignal,
   extractNonBlockingFindingIdentities,
   isNoneFindingsSentinelOnly,
+  isLivePackDeferralText,
   isOperationalBlockerEntry as isDeclaredOperationalBlockerCode,
+  LIVE_PACK_OPERATOR_EDIT_KIND,
+  LIVE_PACK_OPERATOR_EDIT_MARKER,
   normalizeCoverageTitle,
   normalizeCiPendingOnlyReply,
   parseBlockingFindingsSection,

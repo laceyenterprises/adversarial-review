@@ -78,7 +78,7 @@ export async function closerReviewProof({ snapshot, repo, prNumber, headSha, val
   try {
     const liveHead = snapshot?.headSha || snapshot?.headRefOid;
     if (!sha.test(liveHead) || snapshot.state !== 'OPEN') return unavailable();
-    if (liveHead !== headSha) return { ok: false, reason: 'live-head-moved-before-merge' };
+    if (liveHead.toLowerCase() !== headSha.toLowerCase()) return { ok: false, reason: 'live-head-moved-before-merge' };
     const operator = await withCloserGitHubBudget(() =>
       standingOperatorReviewProof({ reviews: snapshot.reviews, headSha, operatorLogins, repo, get }));
     if (!operator.ok) return operator;

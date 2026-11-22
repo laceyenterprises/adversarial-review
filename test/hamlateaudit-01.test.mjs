@@ -400,3 +400,25 @@ ${gateCode.replace(/^import .*;\n/gm, '').replaceAll('<<REPO>>', 'example/repo')
     rmSync(fixtureDir, { recursive: true, force: true });
   }
 });
+
+
+test('live review proof treats upper/lowercase spellings of the same object ID identically', async () => {
+  for (const [expectedHead, observedHead] of [[HEAD.toUpperCase(), HEAD], [HEAD, HEAD.toUpperCase()]]) {
+    const result = await readCloserReviewProof({ ...reviewIdentity, headSha: expectedHead }, {
+      fetchPr: async () => snapshot([], observedHead),
+      get: async () => assert.fail('empty reviewed snapshot needs no history or permission read'),
+    });
+    assert.deepEqual(result, { ok: true });
+  }
+});
+
+test('hammer shell recognizes the legacy proof-budget timeout as a typed deferred refusal', () => {
+  const source = readFileSync(new URL('../bin/hammer-merge.sh', import.meta.url), 'utf8');
+  const pattern = source.match(/HAM_CLICK_HOLD=\$\(sed -nE '([^']+)'/);
+  assert.ok(pattern, 'the shipped refusal classifier must exist');
+  const result = spawnSync('sed', ['-nE', pattern[1]], {
+    encoding: 'utf8', input: 'legacy lane write refused: legacy-writer-timeout\n',
+  });
+  assert.equal(result.status, 0);
+  assert.equal(result.stdout.trim(), 'legacy-writer-timeout');
+});

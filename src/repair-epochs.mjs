@@ -71,7 +71,10 @@ export async function observeRepairOwner({ rootDir, repo, epoch, readImpl = read
   const matchesOwner = row => row?.launch_request_id === ownerLaunch
     && row.idempotency_key === epoch.ownerKey && row.identity_ambiguous !== true
     && (row.target_repo == null || [repo, repo.split('/').at(-1)].some(name => sameIdentity(row.target_repo, name)))
-    && (!row.head_sha || sameIdentity(row.head_sha, epoch.baseHead));
+    && (!row.head_sha || sameIdentity(row.head_sha, epoch.baseHead))
+    // A bound scope that the launch's own record contradicts proves nothing.
+    && (row.project_ref == null || epoch.dispatchProjectRef === undefined
+      || row.project_ref === epoch.dispatchProjectRef);
   if (!result.rows?.some(matchesOwner)) return unknown;
   const chain = await readImpl({ launch_request_ids: [ownerLaunch], include_retry_chain: true }, readArgs);
   const probe = launchProbe(chain, ownerLaunch, true);
@@ -79,8 +82,19 @@ export async function observeRepairOwner({ rootDir, repo, epoch, readImpl = read
     return { ...unknown, ownerLaunch };
   }
   const owned = launchRequestOwned(probe);
+  // The owner launch's own record is durable evidence of its dispatch scope.
+  // Offer it only from the matched row, and only in a valid form; never infer it.
+  const ownerProjectRef = validProject(probe.row.project_ref) ? probe.row.project_ref : undefined;
   return { ...epoch, ownerState: owned === false ? 'terminal' : owned ? 'live' : 'unknown',
-    ownerLaunch, retryLaunches: probe.retryChain.map(row => row.launch_request_id) };
+    ownerLaunch, retryLaunches: probe.retryChain.map(row => row.launch_request_id),
+    ...(ownerProjectRef === undefined ? {} : { ownerProjectRef }) };
+}
+
+// A reservation owns the PR through publication. On a moved head, only a
+// publication attested by the owner launch or its retry releases the review gate.
+export function repairReservationOwnsPr(epoch, headSha) {
+  return Boolean(epoch && !epoch.reviewHead
+    && (!epoch.publicationHead || epoch.publicationHead.toLowerCase() !== headSha?.toLowerCase()));
 }
 
 // At the base head, only a positively identified terminal launch and its
@@ -147,6 +161,14 @@ export async function reconcileRepairOwner({ rootDir, repo, prNumber, headSha, n
     current.ownerState = current.ownerState === 'absent-unfenced' && observed.ownerState === 'unknown'
       ? 'absent-unfenced' : observed.ownerState;
     current.ownerLaunch = observed.ownerLaunch || null;
+    // REPAIROWNERSCOPE-01: a legacy reservation has no dispatch scope. Once its
+    // owner resolves, record the scope the owner's own launch record names, once.
+    // An unresolved owner derives nothing and stays on the overdue escalation path.
+    if (observed.ownerProjectRef && ['live', 'terminal'].includes(observed.ownerState)
+      && !Object.hasOwn(current, 'dispatchProjectRef')) {
+      current.dispatchProjectRef = observed.ownerProjectRef;
+      current.dispatchProjectDerivedAt = current.ownerObservedAt;
+    }
     if (observed.ownerState === 'absent') {
       current.absentObservations = observed.absentObservations;
       if (now - Date.parse(current.reservedAt) >= REPAIR_ABSENCE_ESCALATE_MS

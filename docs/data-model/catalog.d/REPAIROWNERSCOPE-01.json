@@ -1,0 +1,21 @@
+{
+  "version": 1,
+  "entries": [
+    {
+      "id": "repair-epoch-derived-dispatch-scope",
+      "title": "Repair epoch dispatch scope derived from the owner launch record",
+      "path": "docs/data-model/hammer-retry-cap.md",
+      "store": "data/follow-up-jobs/hammer-retry-cap/<repo>-pr-<n>.json",
+      "schemaSurface": "src/repair-epochs.mjs",
+      "relatedSchemaSurfaces": [
+        "src/pollonce-phases.mjs",
+        "src/dispatch-read-client.mjs"
+      ],
+      "owner": "watcher and PR repair dispatcher",
+      "optionalFields": [
+        "repairEpochs[].dispatchProjectRef: also recorded once by the reconciler for a legacy reservation, from the resolved owner launch's own project_ref",
+        "repairEpochs[].dispatchProjectDerivedAt: ISO time of that one-time derivation; absent when the scope was supplied at reservation"
+      ]
+    }
+  ]
+}

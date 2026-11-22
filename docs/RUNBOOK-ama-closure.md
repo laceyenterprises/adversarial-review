@@ -1083,8 +1083,15 @@ root (the standard `HQ_ROOT` / `AGENT_OS_HQ_ROOT` resolver) and an eight-second
 subprocess budget. Point-in-time absence retains custody because the submitter may still
 enqueue. A reservation with a canonical project supplied at creation uses the
 existing project/repository paired grant for its exact-key read. Older
-reservations keep their unscoped lookup. A grant-filtered empty result leaves
-ownership unproven. If an unbound reservation without verified publication
+reservations initially use an unscoped lookup. When compatible launch and retry
+evidence resolves an owner to `live` or `terminal` and its own launch record names
+a valid project, the reconciler records `dispatchProjectRef` once with
+`dispatchProjectDerivedAt`. Subsequent exact-key reads use that project and the
+ledger repository. An omitted or malformed project field prevents derivation
+but does not by itself prevent compatible launch evidence from establishing
+ownership. A stored scope is never overwritten; a contradicting owner record
+leaves ownership unproven. A grant-filtered empty result also leaves ownership
+unproven. If an unbound reservation without verified publication
 still has `ownerState: unknown` when observed at least ten minutes after
 reservation, `repair-owner-unproven` names the operator in next-action and TTM
 and pages once per reservation. The page names the blocked head and

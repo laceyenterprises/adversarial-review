@@ -2,7 +2,8 @@ import { performance } from 'node:perf_hooks';
 import { FakeClock } from './helpers/load-time-kit.mjs';
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync } from 'node:fs';
+import fs, { mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync } from 'node:fs';
+import { syncBuiltinESMExports } from 'node:module';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fork, execFileSync, spawnSync } from 'node:child_process';
@@ -42,6 +43,29 @@ function publishing(store, fence) {
   for (const phase of ['ready', 'rebasing', 'publishing']) advance(store, fence, phase,
     phase === 'publishing' ? { candidate: 'new-head', exactBase: 'base-head', proof: { sourceRef: 'proof:1' } } : {});
 }
+
+test('queue schema reads migrations before reserving the writer lock', t => {
+  const statements = [];
+  const db = new Database(':memory:', { verbose: sql => statements.push(sql) });
+  t.after(() => db.close());
+  const reads = [];
+  const originalRead = fs.readFileSync;
+  const readMock = t.mock.method(fs, 'readFileSync', (...args) => {
+    reads.push({ inTransaction: db.inTransaction, statements: statements.length });
+    return originalRead(...args);
+  });
+  syncBuiltinESMExports();
+  t.after(() => { readMock.mock.restore(); syncBuiltinESMExports(); });
+
+  ensureFinalizationQueueSchema(db);
+  assert.equal(reads.length, 7);
+  assert.ok(reads.every(read => !read.inTransaction && read.statements === 0),
+    'all file reads finish before beginning the schema transaction');
+  assert.equal(statements[0], 'BEGIN IMMEDIATE');
+  assert.equal(statements.at(-1), 'COMMIT');
+  assert.equal(db.inTransaction, false);
+  assert.ok(db.prepare("SELECT name FROM sqlite_schema WHERE name = 'finalization_queue_gsr'").get());
+});
 
 for (const nested of [false, true]) {
   test(`queue schema convergence rolls back and can retry (${nested ? 'savepoint' : 'transaction'})`, t => {

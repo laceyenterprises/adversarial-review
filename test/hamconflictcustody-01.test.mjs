@@ -13,6 +13,7 @@ import './helpers/rate-limit-state-isolation.mjs';
 // phase run against real git; only GitHub reads, the bounded-step wrapper,
 // provenance and the shared resolver are stubbed at the process boundary.
 import test from 'node:test';
+import { hammerBootstrapInputs } from './helpers/hammer-bootstrap-inputs.mjs';
 import assert from 'node:assert/strict';
 import { execFileSync, spawnSync } from 'node:child_process';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
@@ -129,10 +130,7 @@ exec git -C "$4" rebase --continue
     RISK_CLASS: 'low', MERGE_METHOD: 'squash', HQ_OWNER: 'fixture', AUDIT_PATH: join(run, 'audit.json'),
     REVIEWER: 'synthetic-reviewer', AMA_TRAILERS_SHELL: "''",
   };
-  const inputs = template.match(/cat > '<<RUN_DIR>>\/inputs\.sh' <<'HAM_INPUTS'\n([\s\S]*?)\nHAM_INPUTS/)[1]
-    .replaceAll('<<TENURE_INPUTS>>', '')
-    .replace(/<<([A-Z_]+)>>/g, (_, key) => bound[key]);
-  writeFileSync(join(run, 'inputs.sh'), `${inputs}\n`);
+  writeFileSync(join(run, 'inputs.sh'), hammerBootstrapInputs(bound));
   writeFileSync(join(run, 'base-head'), reviewed);
   writeFileSync(join(run, 'hammer-publish.sh'), renderHammerProcedure('hammer-publish', bound));
   const command = template.match(/^\/bin\/bash "<<ROOT_DIR>>\/bin\/hammer-conflict-repair\.sh" "<<RUN_DIR>>\/inputs\.sh"$/m)[0]

@@ -5,6 +5,7 @@
 // processes, GitHub reads/writes and the merge call itself. The verify-head and
 // publish phases are synthetic; they are not part of the verdict handoff.
 import test from 'node:test';
+import { hammerBootstrapInputs } from './helpers/hammer-bootstrap-inputs.mjs';
 import assert from 'node:assert/strict';
 import { spawn, execFileSync } from 'node:child_process';
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
@@ -12,10 +13,8 @@ import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { renderHammerProcedure } from '../src/hammer-procedure.mjs';
 import { loadAwareTimeoutMs } from '../src/load-aware-timeout.mjs';
-import { composeCloserPrompt } from '../src/ama/dispatch-closer.mjs';
 
 const root = resolve(import.meta.dirname, '..');
-const template = readFileSync(join(root, 'templates/hammer-prompt.md'), 'utf8');
 const subprocessTimeout = loadAwareTimeoutMs(60_000);
 const shellQuote = value => `'${String(value).replaceAll("'", "'\\''")}'`;
 
@@ -118,15 +117,9 @@ function closeFixture(t, { tenured = false } = {}) {
     PR_URL: 'https://github.com/fixture/repo/pull/42', REVIEWED_SHA: head, TARGET_REMEDIATION_SHA: head,
     RISK_CLASS: 'low', MERGE_METHOD: 'squash', HQ_OWNER: 'fixture', AUDIT_PATH: join(run, 'audit.json'),
     REVIEWER: 'synthetic-reviewer', AMA_TRAILERS_SHELL: "''" };
-  const prompt = composeCloserPrompt({ templateBody: template, rootDir: root, scratchDir: run,
-    hqRoot: dir, repo: values.REPO, prNumber: 42, prUrl: values.PR_URL,
-    reviewedSha: head, targetRemediationSha: head, riskClass: 'low',
-    mergeMethod: 'squash', hqOwnerUser: 'fixture', auditPath: values.AUDIT_PATH,
-    reviewer: 'synthetic-reviewer', amaTrailers: '',
-    tenureId: tenured ? 'ten_fixture' : null });
-  const inputs = prompt.match(/cat > '[^']+\/inputs\.sh' <<'HAM_INPUTS'\n([\s\S]*?)\nHAM_INPUTS/)[1]
-    .replace(/<<([A-Z_]+)>>/g, (_, key) => values[key]);
-  writeFileSync(join(run, 'inputs.sh'), `${inputs}\n`);
+  writeFileSync(join(run, 'inputs.sh'), hammerBootstrapInputs({
+    ...values, TENURE_INPUTS: tenured ? 'export HAM_TENURE_REVIEW_REQUIRED=1\n' : '',
+  }));
   writeFileSync(join(run, 'base-head'), head);
   // The real merge phase, rendered exactly as dispatch renders it.
   writeFileSync(join(run, 'hammer-merge.sh'), renderHammerProcedure('hammer-merge', values));

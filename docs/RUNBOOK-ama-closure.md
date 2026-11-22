@@ -570,7 +570,7 @@ uses `HAM_HQ_ROOT` when set, otherwise the standard `HQ_ROOT` /
 export cannot enable a missing/disabled record or disable an enabled one.
 HAMMERLAUNCHREAD-01: the hammer resolves this once, before remediation, with
 `hammer-controller.mjs resolve-environment` (run by the prompt's one-time
-`inputs.sh` initialization). It keeps the confirmed activation in the private,
+`hammer-bootstrap.sh` command). It keeps the confirmed activation in the private,
 launch-bound receipt `<HAM_RUN_DIR>/launch-environment-<lrq>.json` (mode 0600,
 written once). The closing `run` reuses that receipt and makes no new read, so
 a transient lookup failure can no longer discard a finished remediation and
@@ -579,7 +579,7 @@ validation. A failed lookup is retried with spaced backoff
 no read starts after `LAUNCH_UNREADABLE_GRACE_MS` (unchanged, 120 seconds);
 each lookup keeps its own `launchReadTimeoutMs()` load-aware timeout.
 Exhaustion at that early step records `launch-environment-read-unavailable` and
-exits 75 before any remediation, child spawn or merge-lease acquisition. A
+exits 75 before remediation, closure-controller spawn or merge-lease acquisition. A
 closing `run` with no kept receipt (an older prompt, or the merge-agent path)
 re-reads over the same window and records the distinct retryable
 `launch-environment-read-unavailable-at-closure`, so a refusal after work can
@@ -938,8 +938,37 @@ and the caller delegates terminal reporting (base-head capture, prompt
 `ham_read`, finding disputes). Even these modes leave semantic exits 20 and 21
 to their caller: context's infrastructure stop already records its own
 exact-head attempt, and a repairable conflict is not a terminal failure.
-The base-head initialization sources `hammer-node-runtime.sh` before invoking
-the runner, including in a fresh shell before `inputs.sh` exists.
+For new HAM launches, AMA renders `hammer-bootstrap.sh` beside the private
+phase scripts. Run it alone in the foreground. It closes stdin, checks the
+phase files, resolves Node, validates and pins the starting head, resolves the
+launch environment and captures the initial context with existing helper
+budgets. It publishes `context.json` and then `inputs.sh` after successful
+reads. An empty successful context read records the registered closer stop
+`context-failed`.
+
+Bootstrap holds a kernel file lock shared with its foreground helpers. A
+second invocation exits 73 while any holder remains or when an inaccessible
+lock or legacy `.bootstrap` directory leaves ownership unknown. Preserve
+that attempt.
+Exit 75 continues to signal a retryable helper read failure. If the shell
+dies, scratch becomes available once the last lock holder exits. An
+interrupted attempt keeps its validated starting-head pin.
+
+On first initialization, use `context.json` as the initial snapshot. When
+bootstrap reports `already initialized`, source `inputs.sh` and use
+`ham_read context` for the current PR context before acting. Refresh after
+each push as well. Those reads leave the original snapshot and pin intact.
+
+Wait for the bootstrap command's actual exit before starting another phase.
+If the tool result remains unconfirmed after the current step's existing
+retries and cleanup window, report the session and stop the turn. A ready file, an
+independent command result or a queued checkpoint cannot acknowledge its
+exit. Bootstrap exits without changing branch, lease or retry accounting.
+For an unconfirmed exit, the native supervisor must establish executable
+custody has drained before a cancellation or replacement transfers source
+ownership. An active child or uncertain process evidence requires retaining
+custody. See [LAC-2306](changes/LAC-2306.md) for the incident evidence and
+runtime acceptance cases.
 
 Publication and provenance writes use `mutation` mode, which never retries:
 API publication and submodule synchronization use 120/720 seconds, pushed attestation and finding disputes

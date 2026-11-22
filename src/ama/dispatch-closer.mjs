@@ -40,7 +40,7 @@ import { readDispatchReceipt, parseDispatchJsonOutput } from '../producer-contra
 import { isHamWorkerTicket } from './ham-provenance.mjs';
 import { guardStackedBase } from './stacked-base.mjs';
 import { dispatchConfigurationRefusal, pageDispatchConfigurationRefusal } from './dispatch-configuration-refusal.mjs';
-import { HAMMER_PHASES, renderHammerProcedure, splitHammerPrompt } from '../hammer-procedure.mjs';
+import { HAMMER_PHASES, renderHammerBootstrap, renderHammerProcedure, splitHammerPrompt } from '../hammer-procedure.mjs';
 import { meteredExecFile, meteredExecFileSync } from '../metered-gh.mjs';
 import { filterGitHubBody } from '../github-outbound-body.mjs';
 import { companionWaitRefundCount } from './companion-stop-wait.mjs';
@@ -4363,8 +4363,7 @@ export function substituteTemplate(body, substitutions) {
 }
 
 /**
- * Compose the hammer worker prompt body from the substitutions the
- * dispatch site provides. Exported for the golden-snapshot test.
+ * Build the shared substitutions for the hammer prompt and shipped scripts.
  *
  * @param {Object} args
  * @param {string} args.prUrl
@@ -4384,10 +4383,8 @@ export function substituteTemplate(body, substitutions) {
  * @param {string} args.reviewer
  * @param {string} args.dispatchedAt    — ISO 8601 UTC
  * @param {string} args.amaTrailers     — provenance trailer block passed to `gh pr merge`
- * @param {string} args.templateBody    — raw template content
- * @returns {string}
  */
-function closerTemplateValues({
+export function closerTemplateValues({
   prUrl,
   repo,
   prNumber,
@@ -8142,6 +8139,8 @@ async function maybeDispatchAmaCloserAttempt({
   promptPath = join(promptDir, `${repo.replace('/', '-')}-pr-${prNumber}-${reviewedSha}-${basename(scratchDir)}.md`);
   const procedureValues = closerTemplateValues({ ...promptInputs, scratchDir });
   if (!queueCloser) {
+    writeFileSync(join(scratchDir, 'hammer-bootstrap.sh'), renderHammerBootstrap(procedureValues),
+      { encoding: 'utf8', mode: 0o600, flag: 'wx' });
     const reference = composeCloserReference({ ...promptInputs, scratchDir });
     if (reference) writeFileSync(join(scratchDir, 'hammer-reference.md'), reference,
       { encoding: 'utf8', mode: 0o600, flag: 'wx' });

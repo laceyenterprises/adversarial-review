@@ -1,4 +1,5 @@
 import test from 'node:test';
+import { hammerBootstrapInputs } from './helpers/hammer-bootstrap-inputs.mjs';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
@@ -271,13 +272,9 @@ test('HAMNODEBIN-01: persisted resume inputs restore the runtime and honor the l
   const dir = mkdtempSync(join(tmpdir(), 'hammer-resume-inputs-'));
   t.after(() => rmSync(dir, { recursive: true, force: true }));
   const root = fileURLToPath(new URL('../', import.meta.url));
-  const template = readFileSync(new URL('../templates/hammer-prompt.md', import.meta.url), 'utf8');
-  const inputs = template.match(/<<'HAM_INPUTS'\n([\s\S]*?)\nHAM_INPUTS/)[1];
   writeFileSync(join(dir, 'base-head'), 'a'.repeat(40));
   const script = join(dir, 'inputs.sh');
-  writeFileSync(script, inputs.replaceAll('<<ROOT_DIR>>', root).replaceAll('<<RUN_DIR>>', dir)
-    .replaceAll('<<TENURE_INPUTS>>', '')
-    .replaceAll(/<<[A-Z_]+>>/g, 'fixture'));
+  writeFileSync(script, hammerBootstrapInputs({ ROOT_DIR: root, RUN_DIR: dir }));
   const result = spawnSync('/bin/bash', ['-euc', `source "$1"
 unset HAM_NODE_BIN
 source "$1"

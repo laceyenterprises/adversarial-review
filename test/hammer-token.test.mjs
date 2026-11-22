@@ -886,12 +886,12 @@ for (const mode of ['async', 'sync']) {
   });
 }
 
-for (const file of ['bin/hammer-publish.sh', 'bin/hammer-merge.sh', 'bin/hammer-verify-head.sh', 'templates/hammer-prompt.md']) {
+for (const file of ['bin/hammer-publish.sh', 'bin/hammer-merge.sh', 'bin/hammer-verify-head.sh', 'templates/hammer-bootstrap.sh']) {
   test(`${file}: shell gh calls explicitly enable refresh-only hammer credentials`, t => {
     const f = fixture(t);
     const source = readFileSync(resolve(file), 'utf8');
     const definition = source.match(/^ham_gh\(\) \{.*$/m)?.[0]
-      ?? source.match(/source "<<ROOT_DIR>>\/bin\/hammer-shell-helpers\.sh".*$/m)?.[0];
+      ?? source.match(/source "<<ROOT_DIR>>"?\/bin\/hammer-shell-helpers\.sh"?.*$/m)?.[0];
     assert.ok(definition, file);
     const command = f.env.HAMMER_LACEY_GH_TOKEN_REFRESH_COMMAND;
     delete f.env.HAMMER_LACEY_GH_TOKEN;

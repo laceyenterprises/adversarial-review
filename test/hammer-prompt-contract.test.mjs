@@ -6,13 +6,15 @@ import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { documentedExamples, assertExternalCommands } from './helpers/hammer-prompt-contract.mjs';
+import { hammerBootstrapInputs } from './helpers/hammer-bootstrap-inputs.mjs';
 import { amaAllAuthoritativeReviewerLogins } from '../src/ama/reviewer-authority.mjs';
 import { openReviewStateDb, ensureReviewStateSchema } from '../src/review-state.mjs';
 
 const root = resolve(import.meta.dirname, '..');
 const template = readFileSync(join(root, 'templates/hammer-prompt.md'), 'utf8');
+const bootstrap = readFileSync(join(root, 'templates/hammer-bootstrap.sh'), 'utf8');
 const shellHelpers = readFileSync(join(root, 'bin/hammer-shell-helpers.sh'), 'utf8');
-const functions = new Set([...`${template}\n${shellHelpers}`.matchAll(/\b(ham_\w+)\(\)/g)].map(m => m[1]));
+const functions = new Set([...`${template}\n${bootstrap}\n${shellHelpers}`.matchAll(/\b(ham_\w+)\(\)/g)].map(m => m[1]));
 const shellQuote = value => `'${String(value).replaceAll("'", "'\\''")}'`;
 const preload = fileURLToPath(new URL('./fixtures/hammer-prompt-clock.mjs', import.meta.url));
 
@@ -165,7 +167,7 @@ exec ${shellQuote(realGit)} "$@"
     assert.ok(Object.hasOwn(metavariables, key), `unbound argument example: ${key}`);
     return metavariables[key];
   });
-  const definitions = template.match(/^ham_(?:step|read)\(\).*$/gm).map(render).join('\n');
+  const definitions = hammerBootstrapInputs(values).match(/^ham_(?:step|read)\(\).*$/gm).join('\n');
   const execute = (command, overrides = {}) => new Promise(resolve => {
     if (t.signal.aborted) {
       resolve({ status: null, error: Error('conformance test ended'), stdout: '', stderr: '' });
@@ -324,6 +326,12 @@ test('every concrete hammer prompt helper call executes against the real helper 
     // Repeated identical examples share one execution; each occurrence still
     // passes discovery, binding and shell-function checks.
     const rendered = f.render(command);
+    if (rendered.includes('hammer-bootstrap.sh')) {
+      // The bootstrap regression executes this exact entry point with offline helpers.
+      assert.equal(rendered, `/bin/bash "${f.run}/hammer-bootstrap.sh"`);
+      executed.add(rendered);
+      continue;
+    }
     if (names.includes('hammer-close.sh')) {
       // The close command itself is exercised by hamcontrollerscript-01; here
       // the documented plan must pass the shipped validator unchanged.

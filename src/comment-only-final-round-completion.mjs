@@ -232,8 +232,9 @@ async function verifyNativeFixAllHead({ job, hqWorker, headSha, remainingMs, exe
   if (hqWorker?.requiresProducedAttestation !== true) return { reason: 'final-fix-all-hq-custody-missing' };
   const proof = await resolveDaemonWorkerIdentityFromHeadAttestation({
     repo: job.repo, prNumber: job.prNumber, currentHeadSha: headSha, hqRoot: hqWorker.hqRoot, env,
+    requireExactSubject: true,
     // Reconciliation owns the bounded retries and rechecks the live target on each attempt.
-    readHeadAttestationChainForPrImpl: args => readHeadAttestationChainForPr({ ...args, execFileImpl,
+    readHeadAttestationChainForPrImpl: args => readHeadAttestationChainForPr({ ...args, execFileImpl, useDeployVerifier: true,
       logger: log, timeoutMs: Math.min(30_000, remainingMs), retryDelaysMs: [] }),
   });
   if (!proof.ok) return proof;

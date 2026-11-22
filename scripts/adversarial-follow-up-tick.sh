@@ -47,7 +47,7 @@
 
 set -euo pipefail
 
-AGENT_OS_ROOT="${AGENT_OS_ROOT:-/Users/airlock/agent-os}"  # cfg-allowlist(account-airlock): oss-readiness-apply-reviewed
+export AGENT_OS_ROOT="${AGENT_OS_ROOT:-/Users/airlock/agent-os}"  # cfg-allowlist(account-airlock): oss-readiness-apply-reviewed
 WATCHER_DIR="$AGENT_OS_ROOT/tools/adversarial-review"
 TICK_INTERVAL_SECONDS="${TICK_INTERVAL_SECONDS:-120}"
 

@@ -1,5 +1,6 @@
 import { loadAwareTimeoutMs } from './load-aware-timeout.mjs';
 import { execFile } from 'node:child_process';
+import { isAbsolute, join } from 'node:path';
 import { promisify } from 'node:util';
 import { readWorkerObservation } from './dispatch-read-client.mjs';
 import { isTransientGhError } from './gh-cli.mjs';
@@ -255,6 +256,7 @@ export async function readHeadAttestationChainForPr({
   hqRoot,
   env = process.env,
   execFileImpl = execFileAsync,
+  useDeployVerifier = false,
   timeoutMs = loadAwareTimeoutMs(30_000),
   retryDelaysMs = HEAD_ATTESTATION_CHAIN_RETRY_DELAYS_MS,
   sleepImpl = sleepMs,
@@ -264,12 +266,20 @@ export async function readHeadAttestationChainForPr({
   if (hqRoot) {
     args.splice(2, 0, '--root', String(hqRoot));
   }
+  // The follow-up service supplies the deploy root. Give only the canonical
+  // verifier the same key-file reference as the HCP signer. HQ owns reading
+  // and validating the file, including its permissions.
+  const verifyEnv = useDeployVerifier && !env.AGENT_OS_HEAD_ATTESTATION_HMAC_KEY_V1
+    && !env.AGENT_OS_HEAD_ATTESTATION_HMAC_KEY_FILE && isAbsolute(env.AGENT_OS_ROOT || '')
+    ? { ...env, AGENT_OS_HEAD_ATTESTATION_HMAC_KEY_FILE: join(env.AGENT_OS_ROOT,
+      '.secrets', 'local', 'head-attestation-hmac-key-v1') }
+    : env;
   const delays = Array.isArray(retryDelaysMs) ? retryDelaysMs : [];
   let stdout = '';
   for (let attempt = 0; ; attempt += 1) {
     try {
       ({ stdout } = await execFileImpl('hq', args, {
-        env,
+        env: verifyEnv,
         maxBuffer: 5 * 1024 * 1024,
         timeout: timeoutMs,
       }));
@@ -303,6 +313,7 @@ export async function resolveDaemonWorkerIdentityFromHeadAttestation({
   hqRoot,
   rootDir,
   env = process.env,
+  requireExactSubject = false,
   readHeadAttestationChainForPrImpl = readHeadAttestationChainForPr,
 } = {}) {
   const currentHead = String(currentHeadSha || '').trim();
@@ -337,6 +348,11 @@ export async function resolveDaemonWorkerIdentityFromHeadAttestation({
     // An unverified row is evidence of a refusal, not a missing attestation.
     return { ok: false, reason: producedAtHead.length
       ? 'invalid-produced-head-attestation' : 'missing-produced-head-attestation' };
+  }
+  if (requireExactSubject && (typeof produced.repo !== 'string'
+    || produced.repo.toLowerCase() !== repo.toLowerCase()
+    || produced.pr_number !== Number(prNumber))) {
+    return { ok: false, reason: 'produced-attestation-subject-mismatch' };
   }
   const payload = produced.payload && typeof produced.payload === 'object' ? produced.payload : {};
   const launchRequestId = String(

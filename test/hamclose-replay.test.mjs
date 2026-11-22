@@ -16,8 +16,7 @@ import { closeEmptyPullRequest, EMPTY_PR_COMMENT } from '../src/empty-pr-close.m
 import { openReviewStateDb, ensureReviewStateSchema, requestReviewRereview } from '../src/review-state.mjs';
 import { routeCappedReviewToClosure, hammerHandoffReviewBypass, postedReviewCeilingReached, reviewCeilingOwner } from '../src/hamclose-review-admission.mjs';
 import { classifyClosureOwnership } from '../src/merge-agent-rescue-classifier.mjs';
-import { completeWorkerPublishedHead } from '../src/remediation-published-head.mjs';
-import { deriveNextActionSnapshot } from '../src/pr-next-action.mjs';
+import { FINAL_ROUND_REPLAY_PROOF } from '../src/comment-only-final-round.mjs';
 
 const repo = 'fixture/repo';
 const cleanBody = '## Blocking issues\n- None.\n## Non-blocking issues\n- None.\n## Verdict\nApproved';
@@ -96,27 +95,21 @@ test('CEILINGOWNER-01 replay B: admission and next action assign a capped non-cl
 test('LAC-2231: a proven final fix-all push transfers original findings to the exact-head closer', async t => {
   const rootDir = root(t), prNumber = 81, headSha = 'c'.repeat(40), reviewedHead = 'a'.repeat(40);
   const at = '2026-11-20T22:50:00.000Z';
-  const workspaceDir = join(rootDir, 'workspace');
-  mkdirSync(join(workspaceDir, '.git'), { recursive: true });
   const { job, jobPath } = createFollowUpJob({ rootDir, repo, prNumber, revisionRef: reviewedHead,
     branch: 'fixture', baseBranch: 'main', builderTag: 'codex', reviewBody: findingsBody,
     reviewPostedAt: at, closureHandoff: { reason: 'final-fix-all', headSha: reviewedHead, review: 'closeout' } });
-  const activeDir = getFollowUpJobDir(rootDir, 'inProgress');
-  mkdirSync(activeDir, { recursive: true });
-  const activePath = join(activeDir, `${job.jobId}.json`);
-  writeFileSync(jobPath, JSON.stringify({ ...job, status: 'in_progress', workspaceDir,
-    remediationPlan: { ...job.remediationPlan, currentRound: 1, rounds: [
-      { round: 1, state: 'spawned', startHeadSha: reviewedHead, spawnedAt: at },
-    ] } }));
-  renameSync(jobPath, activePath);
-  const completed = completeWorkerPublishedHead({ rootDir, jobPath: activePath, headSha, completedAt: at,
-    ciGate: { headSha, state: 'green' }, snapshot: deriveNextActionSnapshot({ observations: {
-      leases: { closer: null }, launches: { closer: null }, policy: { autonomousMergeExecutionEnabled: true },
-    } }), requestReviewRereviewImpl: () => assert.fail('final fix-all must not request another reviewer'),
-    requestWatcherWakeImpl: () => ({ requested: true }),
-    execFileSyncImpl: () => `${headSha}\nFixture publication\n\nWorker-Job-Id: ${job.jobId}\n` });
-  assert.equal(completed.job.reReview.nextAction.reason, 'suppressed-final-push');
-  assert.equal(completed.job.reReview.requested, false);
+  // Start the watcher replay at the native receipt boundary. The PR 11403
+  // replay exercises the reconciliation that produces this receipt.
+  writeFileSync(jobPath, JSON.stringify({ ...job, status: 'completed', completedAt: at,
+    remediationPlan: { ...job.remediationPlan, currentRound: 1, maxRounds: 1 },
+    completion: { finalRemediationPush: true, workerPushedHeadSha: headSha,
+      finalRoundOutcome: { completed: true },
+      workerPushProof: { method: FINAL_ROUND_REPLAY_PROOF, workerCommits: 1, producedAttestationId: 'lha_fixture' } },
+    reReview: { requested: false, nextAction: { head: headSha, action: 'hammer', reason: 'suppressed-final-push' } },
+  }));
+  const completedDir = getFollowUpJobDir(rootDir, 'completed');
+  mkdirSync(completedDir, { recursive: true });
+  renameSync(jobPath, join(completedDir, `${job.jobId}.json`));
 
   const store = { merged: false };
   let hammers = 0;

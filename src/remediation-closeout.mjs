@@ -12,11 +12,42 @@ import { resolveMergeAuthorityConfigFromDomain } from './domain-policy.mjs';
 import { join } from 'node:path';
 import { tenureReviewReason } from './pr-tenure.mjs';
 import { isRemediationRoundBudgetSpent } from './remediation-round-recovery.mjs';
+import { digestWorkerFinalMessage, summarizeWorkerFinalMessage } from './remediation-reply-paths.mjs';
 
 export function isSettledCommentOnlyReview({ verdict, blockingFindingState, blockingFindingCount,
   nonBlockingFindingState } = {}) {
   return verdict === 'comment-only' && blockingFindingState === 'known'
     && blockingFindingCount === 0 && nonBlockingFindingState === 'known';
+}
+
+export function buildRemediationCompletionMetadata({
+  job, worker, parsedReply, finalRound, workerPublishedHead, closeout, finalFixAll, pendingCiCompletion,
+  hasNonEmptyNarrative, finalMessage, liveness,
+}) {
+  // Keep the historical source prefix for receipts without a recorded model.
+  const workerModel = worker?.model || 'codex';
+  return {
+    source: hasNonEmptyNarrative
+      ? `${workerModel}-output-last-message`
+      : `${workerModel}-remediation-reply-only`,
+    workerModel,
+    simplicityNoteApplied: typeof parsedReply?.simplicityNoteApplied === 'boolean'
+      ? parsedReply.simplicityNoteApplied : null,
+    ...finalRound.completionFields,
+    ...(workerPublishedHead && job.finalRound !== 'comment-only' ? { workerPushedHeadSha: workerPublishedHead.headSha } : {}),
+    ...(closeout || finalFixAll ? { finalRemediationPush: closeout?.snapshot.observations.remediation.value.finalPush != null } : {}),
+    ...(pendingCiCompletion ? { pendingCiOnly: true, workerPushedHeadSha: job.completion.workerPushedHeadSha } : {}),
+    note: hasNonEmptyNarrative
+      ? 'Reconciled from detached worker exit plus non-empty final message artifact.'
+      : 'Reconciled from detached worker exit plus validated remediation-reply.json (final message artifact was empty; success signaled via the durable reply contract).',
+    finalMessagePath: worker.outputPath || null,
+    finalMessageBytes: finalMessage.bytes,
+    finalMessageDigest: digestWorkerFinalMessage(finalMessage.text),
+    preview: summarizeWorkerFinalMessage(finalMessage.text, 240),
+    finalMessageSummary: summarizeWorkerFinalMessage(finalMessage.text, 120),
+    logPath: worker.logPath || null,
+    ...(worker?.dispatchMode === 'hq' ? { dispatchStatus: liveness?.dispatchStatus || null } : {}),
+  };
 }
 
 export function remediationCloseout({ rootDir, job, headSha, workerPushedHeadSha = null,

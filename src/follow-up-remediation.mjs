@@ -12,7 +12,7 @@ import { resolveOsgRemediatorRoute } from './osg-remediator.mjs';
 import { resolveLocalRemediationMes } from './mes-shadow-hook.mjs';
 import { readDispatchStatus } from './producer-contracts/launch-status.mjs';
 import { findCommittedUnpublishedWork } from './remediation-unpublished.mjs';
-import { remediationCloseout, closeoutRereview, refusedCloseout } from './remediation-closeout.mjs';
+import { remediationCloseout, closeoutRereview, refusedCloseout, buildRemediationCompletionMetadata } from './remediation-closeout.mjs';
 import { remediationReviewRequest } from './explicit-review-intent.mjs';
 import { reportsCompletedPipelineWait } from './remediation-blocker-ownership.mjs';
 import { guardStackedBase } from './ama/stacked-base.mjs';
@@ -2369,11 +2369,6 @@ async function reconcileFollowUpJobWithinRepositoryCycle({
       }
     }
 
-    // Worker-class aware completion metadata. The legacy default is
-    // 'codex' so old jobs (model unrecorded) still produce the historical
-    // `codex-output-last-message` source string. New claude-code workers
-    // produce `claude-code-output-last-message`, so worker-class metrics
-    // and operator-visible completion records reflect what actually ran.
     const finalRound = await resolveCommentOnlyFinalRoundCompletion({
       job, jobPath, reply: parsedReply?.reReview?.originalOperationalBlockers
         ? { ...parsedReply, operationalBlockers: parsedReply.reReview.originalOperationalBlockers } : parsedReply,
@@ -2432,28 +2427,10 @@ async function reconcileFollowUpJobWithinRepositoryCycle({
           outcome: { ...outcome, requestedAt: completedAt } }), nextAction: closeout.decision };
       }
     }
-    const workerModel = worker?.model || 'codex', completionMetadata = {
-      source: hasNonEmptyNarrative
-        ? `${workerModel}-output-last-message`
-        : `${workerModel}-remediation-reply-only`,
-      workerModel,
-      simplicityNoteApplied: typeof parsedReply?.simplicityNoteApplied === 'boolean'
-        ? parsedReply.simplicityNoteApplied : null,
-      ...finalRound.completionFields,
-      ...(workerPublishedHead && job.finalRound !== 'comment-only' ? { workerPushedHeadSha: workerPublishedHead.headSha } : {}),
-      ...(closeout || finalFixAll ? { finalRemediationPush: closeout?.snapshot.observations.remediation.value.finalPush != null } : {}),
-      ...(pendingCiCompletion ? { pendingCiOnly: true, workerPushedHeadSha: job.completion.workerPushedHeadSha } : {}),
-      note: hasNonEmptyNarrative
-        ? 'Reconciled from detached worker exit plus non-empty final message artifact.'
-        : 'Reconciled from detached worker exit plus validated remediation-reply.json (final message artifact was empty; success signaled via the durable reply contract).',
-      finalMessagePath: worker.outputPath || null,
-      finalMessageBytes: finalMessage.bytes,
-      finalMessageDigest: digestWorkerFinalMessage(finalMessage.text),
-      preview: summarizeWorkerFinalMessage(finalMessage.text, 240),
-      finalMessageSummary: summarizeWorkerFinalMessage(finalMessage.text, 120),
-      logPath: worker.logPath || null,
-      ...(worker?.dispatchMode === 'hq' ? { dispatchStatus: liveness?.dispatchStatus || null } : {}),
-    };
+    const completionMetadata = buildRemediationCompletionMetadata({
+      job, worker, parsedReply, finalRound, workerPublishedHead, closeout, finalFixAll, pendingCiCompletion,
+      hasNonEmptyNarrative, finalMessage, liveness,
+    });
 
     // Gate the terminal transition on whether the rereview was actually
     // accepted by the watcher's review-state machine, not just on whether

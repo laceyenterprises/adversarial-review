@@ -1987,6 +1987,7 @@
     "src/adapters/reviewer-runtime/run-state.mjs": "58c66556e1e4eeb550b001c00daeebcb22ed72daf475d2ced6703926a7ce2729",
     "src/ama-closure-orchestration.mjs": "996175c32f1941c64c4e81eccf1616f14c269ae8a21538bdd6fb374a6988ff0f",
     "src/ama/closer-lease.mjs": "c2aa021100d2cc5fc0ba2de3ca035dab42d46d416039853d0df4a69a8b2c3900",
+    "src/ama/receipted-closer-alias.mjs": "873f9f5084047190a230275cf716b7dcf21b5deef7ab0eb5318dbc9081c3cdac",
     "src/ama/closure-owner.mjs": "2448cded95d11c7a03d85758d16bf1719a433daef79e8d7454c1696c6bfc079e",
     "src/ama/dispatch-closer.mjs": "a42642b5771ade28f58b713f6c5d681d8fdd5437fac6fc992eaef3e266d6426f",
     "src/fast-merge-processing.mjs": "ee24d2edf253284bec8fcbce50ac15c91aa8a4154d34ce594e077d3557c411fb",

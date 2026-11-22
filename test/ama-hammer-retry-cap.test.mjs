@@ -467,7 +467,9 @@ function hammerDispatchDeps(overrides = {}) {
     // A readable PR with no hammer audit comment. Without a stub the closer
     // would shell out to the real gh, and an unreadable comment list is an
     // unconfirmed hammer outcome.
-    fetchPullRequestRollupImpl: async () => ({ state: 'OPEN', headSha: REVIEWED_HEAD, reviews: [], comments: [] }),
+    fetchPullRequestRollupImpl: async () => ({ state: 'OPEN', headSha: REVIEWED_HEAD, reviews: [], comments: [],
+      mergeable: 'MERGEABLE', mergeStateStatus: 'CLEAN',
+      statusCheckRollup: [{ __typename: 'CheckRun', name: 'test', status: 'COMPLETED', conclusion: 'SUCCESS' }] }),
     logger: { log() {}, info() {}, warn() {}, error() {} },
     ...overrides,
   };
@@ -1739,7 +1741,7 @@ test('same-head terminal HAM remediation passes canonical live gate shape to dae
     requiredChecks: [
       { __typename: 'CheckRun', name: 'test', status: 'COMPLETED', conclusion: 'SUCCESS' },
     ],
-    mergeable: 'UNKNOWN',
+    mergeable: 'MERGEABLE',
     mergeStateStatus: 'CLEAN',
     prState: 'OPEN',
     merged: false,
@@ -1784,6 +1786,60 @@ test('same-head terminal HAM operator veto reaches initial and live gates withou
   assert.equal(result.recoveryWait, true);
   assert.equal(result.retryAfterMs, 300_000);
   assert.equal(result.skipMergeAgent, true);
+});
+
+test('same-head terminal HAM preflight read failures defer and non-open snapshots retain normal state handling', async t => {
+  for (const state of ['unavailable', 'CLOSED', 'MERGED', 'OPEN']) {
+    const rootDir = mkdtempSync(join(tmpdir(), 'hammer-preflight-read-'));
+    t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+    assert.equal((await maybeDispatchAmaCloser({
+      ...hammerDispatchArgs(rootDir), ...hammerDispatchDeps(),
+    })).dispatched, true);
+    let reads = 0;
+    let checked = false;
+    const result = await maybeDispatchAmaCloser({
+      ...hammerDispatchArgs(rootDir, {
+        cfg: { branchProtection: { required: false } },
+        prMetadata: { statusCheckRollup: [
+          { __typename: 'CheckRun', name: 'test', status: 'COMPLETED', conclusion: 'SUCCESS' },
+        ] },
+        dispatchContext: { baseBranch: 'main', dispatchedAt: '2026-07-06T12:02:00Z' },
+      }),
+      options: validHamTerminalRemediationOptions({ reviewedHead: REVIEWED_HEAD, currentHead: REVIEWED_HEAD }),
+      ...hammerDispatchDeps({
+        execFileImpl: async (_cmd, args) => args[0] === 'dispatch' && args[1] === 'status'
+          ? { stdout: '{"status":"succeeded"}', stderr: '' } : { stdout: '{}', stderr: '' },
+        fetchPullRequestRollupImpl: async () => {
+          reads++;
+          if (state === 'unavailable') throw new Error('GraphQL transport failed');
+          return { state, headSha: REVIEWED_HEAD, reviews: [], comments: [] };
+        },
+        acquireMergeLeaseImpl: () => assert.fail('refusal must precede merge lease'),
+        attemptDaemonCleanMergeImpl: async options => {
+          checked = true;
+          if (state === 'unavailable') {
+            assert.equal(options.liveGate.terminalReviewProof.reason, 'terminal-review-evidence-unavailable');
+            return attemptDaemonCleanMerge(options);
+          }
+          assert.equal(options.liveGate.prState, state);
+          assert.equal(options.liveGate.merged, state === 'MERGED');
+          assert.deepEqual(options.liveGate.terminalReviewProof, state === 'OPEN' ? { ok: true } : null);
+          const before = reads;
+          assert.equal((await options.fetchLiveGateImpl()).prState, state);
+          assert.equal(reads, before, 'first live gate reuses the preflight snapshot');
+          await options.fetchLiveGateImpl();
+          assert.equal(reads, before + 1, 'later gates fetch fresh evidence');
+          return { disposition: 'not-taken', reason: 'fixture-observed' };
+        },
+      }),
+    });
+    assert.equal(checked, true, JSON.stringify(result));
+    if (state === 'unavailable') {
+      assert.equal(result.recoveryWait, true);
+      assert.equal(result.retryAfterMs, 300_000);
+      assert.equal(result.needsOperator, false);
+    }
+  }
 });
 
 test('same-head terminal HAM remediation records merged audit before nonfatal cleanup failure', async (t) => {

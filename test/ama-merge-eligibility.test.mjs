@@ -94,6 +94,11 @@ test('current-head operator approval authorizes an older request-changes review'
 // Table-driven: each single missing precondition → exactly the expected reason.
 const SINGLE_MISS_CASES = [
   {
+    name: 'permanent issuer gap refuses otherwise eligible merge',
+    overrides: { terminalReviewProof: { ok: false, reason: 'terminal-review-issuer-unverifiable', needsOperator: true } },
+    reason: 'terminal-review-issuer-unverifiable',
+  },
+  {
     name: 'standing operator review veto → operator-review-changes-requested',
     overrides: { terminalReviewProof: { ok: false, reason: 'operator-review-changes-requested' } },
     reason: 'operator-review-changes-requested',
@@ -211,7 +216,7 @@ test('reasons are emitted in the stable documented order', () => {
   assert.equal(result.eligible, false);
   // `pr-mergeability-unknown` and `pr-not-mergeable` are mutually exclusive.
   assert.deepEqual(result.reasons, MERGE_ELIGIBILITY_REASONS.filter(
-    (reason) => !['review-changed-since-validation', 'terminal-review-evidence-unavailable'].includes(reason) && !reason.startsWith('primary-change-') && reason !== 'history-read-failed' && !reason.startsWith('ci-cost-') && reason !== 'labels-unavailable' && reason !== 'pr-mergeability-unknown',
+    (reason) => !['review-changed-since-validation', 'terminal-review-evidence-unavailable', 'terminal-review-issuer-unverifiable'].includes(reason) && !reason.startsWith('primary-change-') && reason !== 'history-read-failed' && !reason.startsWith('ci-cost-') && reason !== 'labels-unavailable' && reason !== 'pr-mergeability-unknown',
   ));
 });
 
@@ -219,7 +224,7 @@ test('empty/no state → fail closed with labels-unavailable rather than a false
   const result = evaluateMergeEligibility();
   assert.equal(result.eligible, false);
   assert.deepEqual(result.reasons, MERGE_ELIGIBILITY_REASONS.filter(
-    (reason) => !['operator-review-changes-requested', 'review-changed-since-validation', 'terminal-review-evidence-unavailable'].includes(reason) && !reason.startsWith('primary-change-') && reason !== 'history-read-failed' && !reason.startsWith('ci-cost-') && reason !== 'duplicate-family-unresolved' && reason !== 'pr-mergeability-unknown',
+    (reason) => !['operator-review-changes-requested', 'review-changed-since-validation', 'terminal-review-evidence-unavailable', 'terminal-review-issuer-unverifiable'].includes(reason) && !reason.startsWith('primary-change-') && reason !== 'history-read-failed' && !reason.startsWith('ci-cost-') && reason !== 'duplicate-family-unresolved' && reason !== 'pr-mergeability-unknown',
   ));
 });
 
@@ -358,6 +363,7 @@ test('exported vocabulary is stable and frozen', () => {
     'operator-review-changes-requested',
     'review-changed-since-validation',
     'terminal-review-evidence-unavailable',
+    'terminal-review-issuer-unverifiable',
     'ci-cost-read-failed',
   'ci-cost-check-failed',
   'ci-cost-unauthorized',

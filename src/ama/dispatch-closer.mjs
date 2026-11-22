@@ -6589,11 +6589,18 @@ async function maybeDispatchAmaCloserAttempt({
         if (!baseBranch) {
           sameHeadHamMergeReason = 'base-branch-missing';
         } else {
-          const readTerminalReviewProof = rollup => closerReviewProof({ snapshot: rollup, repo, prNumber,
+          const readTerminalReviewProof = rollup => ['CLOSED', 'MERGED'].includes(String(rollup?.state).toUpperCase())
+            ? null : closerReviewProof({ snapshot: rollup, repo, prNumber,
             headSha: mergeHead, validatedAt: eligibilityOptions.hamTerminalRemediationGroundTruth?.auditComment?.createdAt,
             operatorLogins: cfg?.operatorLogins, get: createHistoryReader({ execFileImpl, env, signal }) });
-          const terminalReviewProof = await readTerminalReviewProof(
-            await fetchPullRequestRollupImpl(repo, prNumber, { execFileImpl }));
+          let initialRollup;
+          try {
+            initialRollup = await fetchPullRequestRollupImpl(repo, prNumber, { execFileImpl });
+          } catch { /* The unavailable proof below defers before taking a lease. */ }
+          const initialTerminalReviewProof = await readTerminalReviewProof(initialRollup);
+          // Reuse only within this attempt. Later gates and the transport must
+          // still read fresh evidence after admission or a merge retry.
+          let firstLiveRollup = initialRollup;
           sameHeadHamMerge = await withDaemonMergeReservation({ rootDir, repo,
             base: baseBranch, pr: prNumber, head: mergeHead,
           }, () => routeFinalizationWriter({ rootDir, cfg,
@@ -6616,17 +6623,17 @@ async function maybeDispatchAmaCloserAttempt({
               : [],
             requiredCheckContexts: resolveRequiredCheckContextsFromCfg(cfg),
             liveGate: {
-              terminalReviewProof,
+              terminalReviewProof: initialTerminalReviewProof,
               primaryChange: eligibilityOptions.hamTerminalRemediationGroundTruth?.commit?.primaryChange,
               requirePrimaryChange: true,
               strictNonBlockingRemediation: cfg?.strictNonBlockingRemediation !== false,
-              candidateHead: prMetadata?.headSha || '',
-              requiredChecks: resolveRollupRequiredChecks(prMetadata) ?? [],
-              mergeable: prMetadata?.mergeable || prMetadata?.mergeableState,
-              mergeStateStatus: prMetadata?.mergeStateStatus,
-              prState: String(prMetadata?.state || '').trim() || (prMetadata?.isOpen === false ? 'CLOSED' : 'OPEN'),
-              merged: String(prMetadata?.state || '').trim().toUpperCase() === 'MERGED',
-              labels: Array.isArray(prMetadata?.labels) ? prMetadata.labels : [],
+              candidateHead: initialRollup?.headSha || initialRollup?.headRefOid || '',
+              requiredChecks: resolveRollupRequiredChecks(initialRollup) ?? [],
+              mergeable: initialRollup?.mergeable || initialRollup?.mergeableState,
+              mergeStateStatus: initialRollup?.mergeStateStatus,
+              prState: String(initialRollup?.state || '').trim(),
+              merged: String(initialRollup?.state || '').trim().toUpperCase() === 'MERGED',
+              labels: Array.isArray(initialRollup?.labels) ? initialRollup.labels : [],
               branchProtectionRequiredContexts: Array.isArray(prMetadata?.branchProtection?.requiredContexts)
                 ? prMetadata.branchProtection.requiredContexts
                 : [],
@@ -6673,9 +6680,11 @@ async function maybeDispatchAmaCloserAttempt({
                 })
               : null,
             fetchLiveGateImpl: async () => {
-              const rollup = await fetchPullRequestRollupImpl(repo, prNumber, { execFileImpl });
+              const cached = firstLiveRollup;
+              const rollup = cached ?? await fetchPullRequestRollupImpl(repo, prNumber, { execFileImpl });
+              firstLiveRollup = null;
               const state = String(rollup?.state || '');
-              const terminalReviewProof = await readTerminalReviewProof(rollup);
+              const terminalReviewProof = cached ? initialTerminalReviewProof : await readTerminalReviewProof(rollup);
               return {
                 terminalReviewProof,
                 primaryChange: await fetchPrimaryChangeImpl({ repo, prNumber, rootDir, headSha: rollup?.headSha || rollup?.headRefOid || '',
@@ -6884,7 +6893,7 @@ async function maybeDispatchAmaCloserAttempt({
           dispatchId: existingRecord.dispatchId || existingRecord.launchRequestId || null,
           launchRequestId: existingRecord.launchRequestId || null,
           promptPath: existingRecord.promptPath || null,
-          needsOperator: !certifiedPark,
+          needsOperator: sameHeadHamMerge?.needsOperator ?? !certifiedPark,
           ...(sameHeadHamMerge?.recoveryWait ? { recoveryWait: true, retryAfterMs: sameHeadHamMerge.retryAfterMs } : {}),
         });
       }

@@ -80,6 +80,41 @@ test('closer honors standing exact-head operator requests, including those submi
   assert.equal(configured.reason, 'operator-review-changes-requested');
 });
 
+test('daemon GraphQL bot reviews outside reviewer families match REST bot handling', async () => {
+  for (const commitId of [HEAD, OTHER]) {
+    const bot = githubApi.normalizeReview({ id: 'retired-app-review', state: 'CHANGES_REQUESTED',
+      commit: { oid: commitId }, author: { login: 'retired-app', __typename: 'Bot' },
+      submittedAt: operatorReview.submitted_at });
+    assert.equal(bot.authorType, 'Bot');
+    assert.equal(githubApi.normalizeReview(bot).authorType, 'Bot', 'adapter normalization retains bot identity');
+    const result = await closerReviewProof({ ...reviewIdentity, snapshot: snapshot([bot]),
+      get: async () => assert.fail('bots must not trigger collaborator lookup') });
+    assert.deepEqual(result, { ok: true });
+  }
+});
+
+test('permanent issuer gaps need an operator while permission transport failures remain retryable', async () => {
+  const permanent = { ok: false, reason: 'terminal-review-issuer-unverifiable', needsOperator: true };
+  for (const state of ['APPROVED', 'CHANGES_REQUESTED']) {
+    assert.deepEqual(await closerReviewProof({ ...reviewIdentity,
+      snapshot: snapshot([{ ...operatorReview, state, user: null }]), get: getReviewEvidence }), permanent);
+  }
+  assert.deepEqual(await closerReviewProof({ ...reviewIdentity,
+    snapshot: snapshot([{ ...operatorReview, user: null, commit_id: null }]), get: getReviewEvidence }), permanent);
+  for (const error of [
+    Object.assign(new Error('Not Found'), { status: 404 }),
+    new Error('history wrapper', { cause: Object.assign(new Error('Not Found'), { response: { status: 404 } }) }),
+    new Error('gh: Not Found (HTTP 404)'),
+  ]) {
+    assert.deepEqual(await closerReviewProof({ ...reviewIdentity, snapshot: snapshot([operatorReview]),
+      get: async () => { throw error; } }), permanent);
+  }
+  const transient = await closerReviewProof({ ...reviewIdentity, snapshot: snapshot([operatorReview]),
+    get: async () => { throw Object.assign(new Error('Unavailable'), { status: 503 }); } });
+  assert.deepEqual(transient, { ok: false, reason: 'terminal-review-evidence-unavailable' });
+  assert.deepEqual(gate(permanent).reasons, [permanent.reason]);
+});
+
 test('dismissal or a later approval by the same operator clears only the disposed review across rebases', async () => {
   const evaluate = (reviews, get = getReviewEvidence) =>
     closerReviewProof({ ...reviewIdentity, snapshot: snapshot(reviews), get });
@@ -127,12 +162,13 @@ test('irrelevant historical ghost approvals do not park closure; exact-head unkn
   for (const state of ['APPROVED', 'CHANGES_REQUESTED']) {
     const result = await closerReviewProof({ ...reviewIdentity,
       snapshot: snapshot([{ ...operatorReview, state, user: null }]), get: getReviewEvidence });
-    assert.equal(result.reason, 'terminal-review-evidence-unavailable');
+    assert.equal(result.reason, 'terminal-review-issuer-unverifiable');
   }
 });
 
 test('review refusals do not enter the automatic retry/refund deferral allowlist', () => {
-  for (const reason of ['operator-review-changes-requested', 'review-changed-since-validation']) {
+  for (const reason of ['operator-review-changes-requested', 'review-changed-since-validation',
+    'terminal-review-issuer-unverifiable']) {
     assert.equal(AMA_CLOSER_RETRYABLE_DEFERRAL_REASONS.has(reason), false);
     assert.equal(retryableAmaCloserDeferralOutcome({ outcome: 'deferred', reason }), null);
   }

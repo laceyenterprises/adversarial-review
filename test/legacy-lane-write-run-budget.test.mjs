@@ -6,7 +6,7 @@ import { setTimeout as wait } from 'node:timers/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { openFinalizationQueueStore } from '../src/finalization/queue-store.mjs';
-import { runLegacyLaneWrite } from '../src/finalization/legacy-lane-write.mjs';
+import { runLegacyLaneWrite, LEGACY_PROOF_NOMINAL_MS, LEGACY_PROOF_CEILING_MS } from '../src/finalization/legacy-lane-write.mjs';
 import { runLegacyPrWrite } from '../src/finalization/legacy-pr-write.mjs';
 import { runCommandKeepingOutput } from '../src/run-command-keeping-output.mjs';
 import { legacyLaneWriteMain } from '../bin/legacy-lane-write.mjs';
@@ -189,4 +189,32 @@ test('successful review proof that spends the run budget is classified as timeou
   });
   assert.equal(result.ok, false);
   assert.equal(result.reason, 'legacy-writer-timeout');
+});
+
+test('in-lane proof has a short load-aware abort budget and releases the lane without transport', async t => {
+  const rootDir = fixture(t);
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  for (const [timeoutMs, load, expected] of [
+    [240_000, idle, LEGACY_PROOF_NOMINAL_MS],
+    [600_000, { enabled: true, maxMultiplier: 20, loadAvg1m: 1000, cpuCount: 1, cpuBusyPercent: 100 }, LEGACY_PROOF_CEILING_MS],
+    [1000, idle, 1000],
+  ]) {
+    let proofSignal;
+    let started;
+    const admitted = new Promise(resolve => { started = resolve; });
+    const pending = write(rootDir, { command: 'never-run', argv: [], timeoutMs, load,
+      subject: { target: 'https://github.com/example/review/pull/5', head: 'a'.repeat(40) },
+      prNumber: 5, reviewValidatedAt: at,
+      readReviewProof: async ({ signal }) => { proofSignal = signal; started(); return new Promise(() => {}); },
+      exec: () => assert.fail('expired proof must never invoke transport'),
+    });
+    await admitted;
+    t.mock.timers.tick(expected - 1);
+    assert.equal(proofSignal.aborted, false);
+    t.mock.timers.tick(1);
+    assert.equal((await pending).reason, 'legacy-writer-timeout');
+    assert.equal(proofSignal.aborted, true);
+  }
+  const result = await write(rootDir, { command: 'next-writer', argv: [], exec: async () => ({ stdout: 'released' }) });
+  assert.equal(result.stdout, 'released');
 });

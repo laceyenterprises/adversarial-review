@@ -14,6 +14,8 @@ import { readQueueEvidence } from './queue-read.mjs';
 export const LEGACY_RUN_NOMINAL_MS = 240_000;
 export const LEGACY_RUN_CEILING_MS = 600_000;
 export const LEGACY_RUN_MAX_MS = 3_600_000;
+export const LEGACY_PROOF_NOMINAL_MS = 15_000;
+export const LEGACY_PROOF_CEILING_MS = 30_000;
 const MAX_BUFFER = 64 * 1024 * 1024;
 
 export function validLegacyRunTimeoutMs(ms) {
@@ -42,17 +44,25 @@ export async function runLegacyLaneWrite({ rootDir, repository, base, command, a
         if (!Number.isFinite(Date.parse(reviewValidatedAt))) {
           return { ok: false, reason: 'terminal-review-evidence-unavailable' };
         }
-        // After lane admission, guard the exact write using the same run budget.
+        // Bound remote evidence while holding the lane; charge it to the run.
+        const proofTimeout = Math.min(timeout,
+          loadAwareTimeoutMs(LEGACY_PROOF_NOMINAL_MS, { ...load, maxMs: LEGACY_PROOF_CEILING_MS }));
         let proof;
         try {
           proof = await readQueueEvidence({ read: ({ signal }) => readReviewProof({
             repo: repository, prNumber: targetPr, headSha: subject?.head, validatedAt: reviewValidatedAt,
             operatorLogins: cfg.operatorLogins, signal,
-          }) }, {}, timeout);
-        } catch { /* Missing proof is an observation failure. */ }
+          }) }, {}, proofTimeout);
+        } catch (error) {
+          if (error?.message === 'queue evidence deadline expired') {
+            return { ok: false, reason: 'legacy-writer-timeout' };
+          }
+          /* Missing proof is an observation failure. */
+        }
         timeout -= Math.ceil(performance.now() - started);
         if (proof?.ok !== true) {
-          return { ok: false, reason: proof?.reason || 'terminal-review-evidence-unavailable' };
+          return { ok: false, reason: proof?.reason || 'terminal-review-evidence-unavailable',
+            ...(proof?.needsOperator ? { needsOperator: true } : {}) };
         }
         if (timeout <= 0) return { ok: false, reason: 'legacy-writer-timeout' };
       }

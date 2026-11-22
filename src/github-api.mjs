@@ -112,6 +112,7 @@ query PullRequestRollup(
         nodes {
           id
           author {
+            __typename
             login
           }
           body
@@ -290,6 +291,7 @@ query PullRequestRollupReviews(
         nodes {
           id
           author {
+            __typename
             login
           }
           body
@@ -532,6 +534,7 @@ function normalizeReview(review) {
     id: review?.id == null ? null : String(review.id),
     commitId: review?.commitId || review?.commit?.oid || review?.commit_id || null,
     author: normalizeAuthor(review?.author),
+    ...(review?.authorType === 'Bot' || review?.author?.__typename === 'Bot' ? { authorType: 'Bot' } : {}),
     body: String(review?.body || ''),
     state: review?.state || null,
     submittedAt: review?.submittedAt || null,

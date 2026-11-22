@@ -642,7 +642,10 @@ function makeGraphqlExecStub(expected, { pagination = false } = {}) {
     assert.equal(args.includes('graphql'), true);
     const vars = parseGhArgs(args);
     const query = String(vars.query || '');
-    if (query.includes('reviews(first:')) assert.match(query, /commit\s*\{\s*oid\s*\}/);
+    if (query.includes('reviews(first:')) {
+      assert.match(query, /commit\s*\{\s*oid\s*\}/);
+      assert.match(query, /reviews\(first:[\s\S]*?author\s*\{\s*__typename\s+login\s*\}/);
+    }
     if (!pagination || (!vars.commentsAfter && !vars.reviewsAfter && !vars.checksAfter)) {
       return {
         stdout: JSON.stringify(buildGraphqlResponse(expected, {

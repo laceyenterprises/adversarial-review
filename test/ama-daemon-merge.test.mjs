@@ -224,6 +224,23 @@ test('terminal review holds refuse before lease acquisition and remain recoverab
   }
 });
 
+test('permanent issuer gaps surface operator custody before lease, at live gate and at transport', async () => {
+  const proof = { ok: false, reason: 'terminal-review-issuer-unverifiable', needsOperator: true };
+  for (const stage of ['pre-lease', 'live', 'transport']) {
+    const h = makeHarness({ mergeResults: [{ exitCode: 1, mergeNotInvoked: true, closureHold: proof }] });
+    if (stage === 'live') h.deps.fetchLiveGateImpl = async () => greenGate({ terminalReviewProof: proof });
+    const result = await attemptDaemonCleanMerge(baseArgs(h, stage === 'pre-lease'
+      ? { liveGate: greenGate({ terminalReviewProof: proof }) } : {}));
+    assert.equal(result.reason, proof.reason, stage);
+    assert.equal(result.merged, false);
+    assert.equal(result.needsOperator, true);
+    assert.equal(result.recoveryWait, false);
+    assert.equal(result.retryAfterMs, undefined);
+    assert.equal(h.calls.merge, stage === 'transport' ? 1 : 0);
+    if (stage === 'pre-lease') assert.equal(h.calls.acquire, 0);
+  }
+});
+
 test('pre-merge recording follows live validation on every transport retry', async () => {
   for (const revoked of [false, true]) {
     const events = [];

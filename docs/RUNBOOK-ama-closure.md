@@ -295,7 +295,13 @@ base-retry rebase preserve the veto. Comments and another issuer's approval leav
 it standing. Historical approvals missing a commit or author cannot clear a veto;
 authorless reviews off the current head are ignored because their deleted issuer
 cannot be verified as a live operator. Missing identity on the exact head still
-fails closed.
+fails closed with `terminal-review-issuer-unverifiable` and `needsOperator:true`,
+as does an authorless request without a commit or a repository-permission 404.
+These permanent gaps retain operator custody without a five-minute recovery
+loop; restore verifiable issuer evidence or dismiss the affected review.
+Transient read failures retain `terminal-review-evidence-unavailable` and the
+five-minute recovery delay. GraphQL review pages retain bot identity, so
+unconfigured GitHub Apps skip human permission checks just as in REST.
 Recognized adversarial reviewers still use their separate family and finding
 rules. The daemon's automatic stale dismissal only clears superseded
 adversarial reviews when reusing HAM terminal authority. The explicit
@@ -304,8 +310,14 @@ validated withdrawal path still uses its review and head proof.
 The hammer refreshes review proof after acquiring the legacy lane writer and
 before invoking GitHub merge. Both daemon HAM terminal reuse paths refresh the
 same proof in their initial pre-lease snapshot, each live gate, and inside the
-lane writer before each transport attempt. Review-proof holds carry an explicit
-five-minute recovery backoff and suppress a replacement hammer. A changed
+lane writer before each transport attempt. The in-lane proof has a load-aware
+15-second budget capped at 30 seconds and at the remaining command budget;
+expiry aborts the read and returns `legacy-writer-timeout` without transport.
+The closer reuses its initial rollup/proof for its first live gate, then
+refreshes subsequent gates and transports. Initial read failures produce a typed
+unavailable proof before the merge lease; closed/merged snapshots retain normal
+daemon state handling without requiring review proof. Recoverable review-proof
+holds carry an explicit five-minute backoff and suppress a replacement hammer. A changed
 review or head, an unreadable review list, or an unknown issuer lookup
 prevents invocation. A preflight refusal that proves the daemon never called
 its merge transport drains the writer receipt normally. GitHub still enforces
@@ -318,8 +330,9 @@ canonical URL fallback, with `merge-target-unparseable` for unreadable identity.
 The hammer records review-change and operator-veto refusals as `deferred`, but
 that audit value alone does not authorize a relaunch. The allowlist
 `AMA_CLOSER_RETRYABLE_DEFERRAL_REASONS` and
-`retryableAmaCloserDeferralOutcome` exclude `operator-review-changes-requested`
-and `review-changed-since-validation`; neither gets an infrastructure refund or
+`retryableAmaCloserDeferralOutcome` exclude `operator-review-changes-requested`,
+`terminal-review-issuer-unverifiable` and `review-changed-since-validation`;
+none gets an infrastructure refund or
 a retryable lease outcome. Existing terminal-owner and attempt/lifetime caps
 still apply. Recovery requires dismissal/same-issuer approval for a veto, or a
 fresh authenticated validation that covers changed routed findings. Unavailable

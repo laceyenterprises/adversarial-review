@@ -584,7 +584,10 @@ async function attemptDaemonCleanMergeInner({
   const preLease = normalizeGateState(liveGate);
   if (preLease.terminalReviewProof?.ok === false) {
     return { ...notTaken(preLease.terminalReviewProof.reason, { liveGate: preLease }),
-      skipMergeAgent: true, recoveryWait: true, retryAfterMs: 300_000 };
+      skipMergeAgent: true, needsOperator: preLease.terminalReviewProof.needsOperator
+        ?? (preLease.terminalReviewProof.reason === 'terminal-review-evidence-unavailable' ? false : undefined),
+      recoveryWait: !preLease.terminalReviewProof.needsOperator,
+      retryAfterMs: preLease.terminalReviewProof.needsOperator ? undefined : 300_000 };
   }
   let noCiEvidence = null;
   const evaluateGate = (gate, evidence = null) => evaluateEligibilityImpl({
@@ -878,7 +881,7 @@ async function attemptDaemonCleanMergeInner({
     // could have been closed, mergeable could have flipped).
     if (live.terminalReviewProof?.ok === false) {
       terminal = { reason: live.terminalReviewProof.reason, permanent: false,
-        closureHold: { ...live.terminalReviewProof, retryAfterMs: 300_000 },
+        closureHold: { ...live.terminalReviewProof, retryAfterMs: live.terminalReviewProof.needsOperator ? undefined : 300_000 },
         mergeNotInvoked: attempts === 1 };
       break;
     }
@@ -1059,7 +1062,7 @@ async function attemptDaemonCleanMergeInner({
     // A live safety hold prevented the transport from clicking merge. Keep
     // its reason and re-walkability; it is not a permanent merge rejection.
     if (['stacked-base-merged', 'stacked-base-read-failed', 'review-changed-since-validation',
-      'operator-review-changes-requested', 'terminal-review-evidence-unavailable',
+      'operator-review-changes-requested', 'terminal-review-evidence-unavailable', 'terminal-review-issuer-unverifiable',
       'live-head-moved-before-merge'].includes(mergeRes?.closureHold?.reason)
       || mergeRes?.closureHold?.reason?.startsWith('fleet-stop-')) {
       terminal = { reason: mergeRes.closureHold.reason, permanent: false,
@@ -1211,7 +1214,7 @@ async function attemptDaemonCleanMergeInner({
     disposition: DAEMON_MERGE_DISPOSITION.FAILED_CLOSED,
     reason: terminal.reason,
     ...(terminal.closureHold ? { needsOperator: terminal.closureHold.needsOperator,
-      skipMergeAgent: true, recoveryWait: true, retryAfterMs: terminal.closureHold.retryAfterMs } : {}),
+      skipMergeAgent: true, recoveryWait: !terminal.closureHold.needsOperator, retryAfterMs: terminal.closureHold.retryAfterMs } : {}),
     ...(terminal.mergeNotInvoked ? { mergeNotInvoked: true } : {}),
     ...(terminal.historyReadError ? { historyReadError: terminal.historyReadError } : {}),
     permanent: Boolean(terminal.permanent),

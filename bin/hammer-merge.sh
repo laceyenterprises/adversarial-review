@@ -1196,7 +1196,7 @@ EOF_HAM_PROTECTIVE_PREDECESSORS
     2> "$HAM_MERGE_STDERR"
   HAM_MERGE_EXIT=$?
   if [ "$HAM_MERGE_EXIT" -eq 75 ]; then
-    HAM_CLICK_HOLD=$(sed -nE 's/^legacy lane write refused: (operator-review-changes-requested|terminal-review-evidence-unavailable|review-changed-since-validation|live-head-moved-before-merge)$/\1/p' "$HAM_MERGE_STDERR")
+    HAM_CLICK_HOLD=$(sed -nE 's/^legacy lane write refused: (operator-review-changes-requested|terminal-review-evidence-unavailable|terminal-review-issuer-unverifiable|review-changed-since-validation|live-head-moved-before-merge)$/\1/p' "$HAM_MERGE_STDERR")
     if [ -n "$HAM_CLICK_HOLD" ]; then
       cat "$HAM_MERGE_STDERR" >&2
       if [ "$HAM_CLICK_HOLD" = live-head-moved-before-merge ]; then

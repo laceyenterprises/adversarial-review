@@ -1763,6 +1763,14 @@ records the evidence/admission truth table and public export fixture refresh.
 
 ## State machines and smoke verification (SMV v1)
 
+Terminal HAM review proofs retain any-head operator vetoes. Permanent issuer
+gaps return `terminal-review-issuer-unverifiable` with operator custody; transient
+reads retain the five-minute recovery delay. GraphQL bot identity matches REST.
+In-lane proof reads abort within a load-aware 15–30 seconds and the remaining
+command budget, without invoking transport. Existing lifecycle states and smoke
+commands remain unchanged; focused coverage and deployment acceptance are in the
+[standing review contract](docs/RUNBOOK-ama-closure.md#standing-operator-reviews-and-the-merge-writer-lac-2305).
+
 Automatic exhausted-head verdict requests remain pending while a matching native
 merge lease retains custody. The watcher checks custody before dedup preflight
 and capacity reservation, records a suppressed lane and leaves capacity wake

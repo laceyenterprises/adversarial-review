@@ -1784,8 +1784,15 @@ author/commit evidence cannot dispose it; authorless off-head reviews are
 inapplicable, while missing exact-head identity fails closed. Initial pre-lease
 and subsequent live gates share the proof and five-minute recovery backoff.
 Review-change and operator-veto deferrals do not qualify for the automatic
-retry/refund allowlist. Unknown review or issuer evidence returns
-`terminal-review-evidence-unavailable`. A blocked preflight that proves no
+retry/refund allowlist. Transient unknown review or issuer evidence returns
+`terminal-review-evidence-unavailable`. Permanent missing issuer identity on the
+exact head (or a request without a commit) and permission 404 return
+`terminal-review-issuer-unverifiable` with `needsOperator:true`, without recovery
+backoff or automatic retry/refund credit. Closed/merged preflight snapshots
+retain normal daemon handling. The first live gate reuses its initial rollup
+and proof; subsequent gates and transport read fresh evidence. In-lane proof
+reads abort after a load-aware 15 seconds, capped at 30 seconds and the remaining
+run budget, returning `legacy-writer-timeout` without transport. A blocked preflight that proves no
 merge transport ran settles the local writer reservation. Existing exact-head
 CAS, leases and merge retry ownership continue to apply.
 

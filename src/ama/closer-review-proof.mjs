@@ -4,10 +4,12 @@ import { normalizeActorLogin } from '../untrusted-pr-gate.mjs';
 import { createHistoryReader } from './history-reader.mjs';
 import { createReviewCurrencyReader } from './review-currency.mjs';
 import { amaReviewerFamilyForLogin, terminalReviewProofMatches } from './reviewer-authority.mjs';
+import { historyReadStopReason } from './history-read-policy.mjs';
 
 const sha = /^[a-f0-9]{40}$/i;
 const reviewStates = new Set(['CHANGES_REQUESTED', 'APPROVED', 'DISMISSED', 'COMMENTED', 'PENDING']);
 const unavailable = () => ({ ok: false, reason: 'terminal-review-evidence-unavailable' });
+const issuerUnverifiable = () => ({ ok: false, reason: 'terminal-review-issuer-unverifiable', needsOperator: true });
 
 // A formal operator veto stands until GitHub dismisses that review or the
 // same issuer later approves. Rebasing, publishing an audit or leaving a comment
@@ -28,7 +30,7 @@ async function standingOperatorReviewProof({ reviews, headSha, operatorLogins, r
     const author = review.user || review.author;
     const login = normalizeActorLogin(author?.login, { typename: author?.type || author?.__typename || review.authorType });
     if (!login) {
-      if (exactHead || (state === 'CHANGES_REQUESTED' && !sha.test(head))) return unavailable();
+      if (exactHead || (state === 'CHANGES_REQUESTED' && !sha.test(head))) return issuerUnverifiable();
       continue;
     }
     if (login.endsWith('[bot]') || amaReviewerFamilyForLogin(login)) continue;
@@ -48,7 +50,17 @@ async function standingOperatorReviewProof({ reviews, headSha, operatorLogins, r
       && approval.id && approval.id !== review.id && approval.at > review.at)) continue;
     if (!configured.has(review.login)) {
       if (!permissions.has(review.login)) {
-        const result = await get(`repos/${repo}/collaborators/${encodeURIComponent(review.login)}/permission`);
+        let result;
+        try {
+          result = await get(`repos/${repo}/collaborators/${encodeURIComponent(review.login)}/permission`);
+        } catch (error) {
+          // A wrapped history read retains its cause; a 404 cannot resolve by
+          // repeatedly reading the same deleted/non-collaborating issuer.
+          for (let cause = error, depth = 0; cause && depth < 8; cause = cause.cause, depth++) {
+            if (historyReadStopReason(cause) === 'history-read-failed:permanent:http-404') return issuerUnverifiable();
+          }
+          throw error;
+        }
         const permission = result?.permission;
         if (!['admin', 'maintain', 'write', 'triage', 'read', 'none'].includes(permission)) return unavailable();
         permissions.set(review.login, permission);

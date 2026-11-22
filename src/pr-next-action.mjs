@@ -1,7 +1,7 @@
 import { isHammerOwnedHead } from './hammer-head-ownership.mjs';
 import { isRemediationRoundBudgetSpent, remediationBudgetHandoffAllowed } from './remediation-round-recovery.mjs';
 import { rollupInfrastructureOnly, rollupInfrastructureEvidencePending } from './ci-infrastructure.mjs';
-import { repairOperatorHoldReason } from './repair-epochs.mjs';
+import { repairOperatorHoldReason, repairOwnerOperatorAction } from './repair-epochs.mjs';
 // ── NXA-02: one shared next action per open PR ───────────────────────────────
 //
 // `nextAction(snapshot)` is pure and total. It reads one frozen NXA-01 pass
@@ -420,9 +420,12 @@ function selectRow(facts, options = {}) {
   if (progress?.repairEpoch?.id && !progress.repairEpoch.reviewHead && !progress.repairEpoch.terminalAt) {
     const repairHold = repairOperatorHoldReason(progress.repairEpoch);
     if (repairHold) {
+      // REPAIROWNERSCOPE-02: an overdue owner hold names the operator action.
+      const ownerAction = repairHold === 'repair-owner-unproven' ? repairOwnerOperatorAction(progress.repairEpoch) : null;
       return { row: 'R02-hold', action: 'operator-hold', actor: 'operator',
         reason: repairHold, deadlineKind: null, queue: 'none',
-        refs: [`repair-epoch:${progress.repairEpoch.id}`] };
+        refs: [`repair-epoch:${progress.repairEpoch.id}`, ...(ownerAction ? [`operator-action:${ownerAction.action}`,
+          `repair-owner-scope:${ownerAction.project || 'unrecorded'}`] : [])] };
     }
     return { row: 'R03-live-owner', action: 'remediate', actor: 'remediator',
       reason: 'repair-in-place-owned', deadlineKind: 'liveDispatched', queue: 'owned',

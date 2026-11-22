@@ -1155,7 +1155,12 @@ If an unbound reservation without verified publication
 still has `ownerState: unknown` when observed at least ten minutes after
 reservation, `repair-owner-unproven` names the operator in next-action and TTM
 and pages once per reservation. The page names the blocked head and
-reservation. The dispatch owner must establish the original launch and
+reservation, and the operator action (REPAIROWNERSCOPE-02). With a recorded
+scope, the action is to grant the review app a dispatch read for that project
+and the PR's repository (`operator-action:grant-owner-dispatch-read`). Without
+one, the operator finds the owner launch by its idempotency key and grants that
+launch's pair (`operator-action:establish-owner-dispatch-scope`), or retires a
+fenced legacy or CWP reservation as below. The dispatch owner must establish the original launch and
 complete retry chain, or independently establish canonical absence and fence
 the original submitter through the authorized recovery path. The operator can
 separately

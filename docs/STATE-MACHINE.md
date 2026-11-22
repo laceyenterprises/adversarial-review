@@ -92,6 +92,13 @@ reservation fences review and branch mutation while the dispatch owner
 establishes launch and retry evidence. A later proven owner or retirement
 supersedes the operator projection.
 
+Legacy reservations record a valid project from a proven `live` or `terminal`
+owner launch once, then use scoped exact-key reads. A missing or malformed
+project field prevents derivation without changing an otherwise proven owner
+state. REPAIROWNERSCOPE-01 extracts the watcher's reservation hold predicate
+without changing its gate, states or transitions. Its source projection was
+reviewed and refreshed; the existing graph and smoke promises remain unchanged.
+
 A terminal owner at a moved head whose publication remains invalid or lacks
 launch/class identity retains the safety fence. After two observations and ten
 minutes from the first matching terminal publication observation,

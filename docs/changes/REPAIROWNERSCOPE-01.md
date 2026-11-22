@@ -45,3 +45,37 @@ covers a closer-only grant (owner unknown, never absent), a covering grant
 (terminal and live), publication binding and gate release at a moved head,
 one-time scope derivation, no derivation for an unresolved owner, failed reads,
 and contradicting or malformed project records.
+
+## Final comment-only remediation
+
+Correct the data-model and closure runbook wording: missing or malformed project
+metadata prevents scope derivation but does not negate otherwise compatible
+launch ownership evidence. Document that a derived scope switches subsequent
+exact-key reads to the project/repository selector.
+
+Import this ticket's catalog entry into the canonical `catalog.json` consumed by
+the validator, preserving the matching fragment. This checkout has no catalog
+assembly script; the superproject's database/domain generator uses a different
+schema. The imported entry was checked for exact equality with the fragment.
+
+Refresh only the watcher's source-projection hash after verifying that it matches
+the extracted reservation guard. The independent lifecycle graph, states,
+transitions and smoke promises are unchanged.
+
+Interface changes: none in this remediation; runtime source is unchanged.
+
+Verification:
+
+- Bounded `node test/run-tests.mjs test/repairownerscope-01.test.mjs
+  test/repairdispatchread-01.test.mjs test/smv.test.mjs`: pass, 43 tests across
+  three files, including disposable sandbox smoke.
+- Bounded `node test/run-tests.mjs test/watcher-claim-loop.test.mjs`: pass,
+  196 tests. The initial combined invocation hit its 240-second bound; the
+  isolated rerun completed within its 600-second bound.
+- Catalog validator: pass, 102 entries; canonical ticket entry equals its fragment.
+- Projection comparison: pass; the hash change matches only the guard extraction
+  and the independent graph is unchanged.
+- Repository lint: pass, zero errors and 147 existing warnings.
+- Contract typecheck, offline research walkthrough and `git diff --check`: pass.
+- Full-suite execution remains with PR-head CI under the worker's scoped
+  validation instructions.

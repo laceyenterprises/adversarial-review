@@ -239,10 +239,9 @@ export const HAMMER_STOP_ORIGINS = Object.freeze({
   'validation-command-invalid': 'closer',
   'validation-config-failed': 'closer',
   'validation-environment-failed': 'closer',
-  ...Object.fromEntries([...HAMMER_INFRASTRUCTURE_OUTCOMES].map(reason => [reason, 'infrastructure'])),
-  // Command construction belongs to the closer even though older read wrappers
-  // already deferred it.
-  'hammer-command-error': 'closer',
+  // Older read wrappers deferred command errors. Command construction belongs to the closer.
+  ...Object.fromEntries(Array.from(HAMMER_INFRASTRUCTURE_OUTCOMES, reason =>
+    [reason, reason === 'hammer-command-error' ? 'closer' : 'infrastructure'])),
 });
 
 export function hammerStopOrigin(reason) {

@@ -32,6 +32,10 @@ log their class, code and message at the persisted thirty-second cadence.
 The exclusive closer scan remains: shared flock still blocks writers, and an
 unlocked scan loses serialization with closer submissions.
 
+Closer record writers retry nonblocking lock acquisition after 10 ms and 25 ms
+to accommodate a brief watcher scan. A persistent holder still refuses the write
+with `EBUSY`.
+
 ## Post-merge activities
 
 Confirm Agent OS #11416's endpoint, fence schema and CLI are installed before
@@ -51,3 +55,8 @@ repo-only grant and exact-selector fixtures.
 Final Comment-only remediation: 106 repair/retirement tests, 47 dispatch-read
 tests, 197 watcher claim-loop cases, all 14 Python reader fixtures, lint (zero errors), contract typecheck,
 the 101-entry data-model catalog validator and the byte-equivalence demo passed.
+
+Hammer's canonical changed-file validation passed across 43 Node test files
+with one skip. The pre-receipt intent fixture verifies that a brief lock
+collision allows the record write to proceed and that a persistent holder
+prevents the mutation.

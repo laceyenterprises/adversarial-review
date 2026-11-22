@@ -6203,7 +6203,9 @@ an `infrastructure` stop. The terminal audit records it as the registered
 `unregistered-stop-code` deferral (the original code in `originalReason` and
 `reasonDetail`), retried through the same owned retry as every other
 infrastructure stop, with no extra credit. `hammerStopOrigin()` emits one
-`ama_closer.stop_code_unregistered` alert per code per UTC day. Only a
+`ama_closer.stop_code_unregistered` alert per code per UTC day. Its in-process
+deduplication cache clears when the UTC day changes, retaining only that day's
+keys; the alert outbox preserves durable `(code, day)` deduplication. Only a
 malformed reason throws. New attempts never record `stop-reason-unregistered`.
 An unregistered code seen only at launch end keeps the bounded, counted exit
 refund. Each retryable hammer deferral names its continuation:

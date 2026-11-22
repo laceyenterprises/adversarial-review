@@ -264,8 +264,9 @@ export function registeredHammerStopOrigin(reason) {
 }
 
 // One alert per unregistered code per UTC day. The process set suppresses
-// repeats here; the alert outbox keys the same (code, day) identity durably.
+// repeats for the active day; the alert outbox keys (code, day) durably.
 const alertedUnregisteredCodes = new Set();
+let alertedUnregisteredDay;
 function defaultUnregisteredStopCodeSink({ code, day }) {
   // Offline tests inject a sink; they never queue a real alert.
   if (process.env.NODE_TEST_CONTEXT) return;
@@ -289,6 +290,10 @@ export function setUnregisteredStopCodeSink(sink) {
 function noteUnregisteredStopCode(code, now) {
   const at = now instanceof Date ? now : new Date(now ?? Date.now());
   const day = (Number.isFinite(at.getTime()) ? at : new Date()).toISOString().slice(0, 10);
+  if (day !== alertedUnregisteredDay) {
+    alertedUnregisteredCodes.clear();
+    alertedUnregisteredDay = day;
+  }
   const key = `${day}|${code}`;
   if (alertedUnregisteredCodes.has(key)) return;
   alertedUnregisteredCodes.add(key);

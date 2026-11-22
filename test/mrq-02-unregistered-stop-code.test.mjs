@@ -67,6 +67,30 @@ test('a failing alert sink never breaks classification', t => {
   assert.equal(hammerStopOrigin('synthetic-sink-failure'), 'infrastructure');
 });
 
+test('the daily alert cache retains only the active UTC day across rollovers', t => {
+  const alerts = captureAlerts(t);
+  // Observe the private cache without adding a production inspection API.
+  let cache;
+  const add = Set.prototype.add;
+  const spy = t.mock.method(Set.prototype, 'add', function (key) {
+    if (key === '2026-10-12|synthetic-retention-alpha') cache = this;
+    return add.call(this, key);
+  });
+  hammerStopOrigin('synthetic-retention-alpha', { now: '2026-10-12T23:59:59Z' });
+  spy.mock.restore();
+  assert.ok(cache instanceof Set);
+  hammerStopOrigin('synthetic-retention-beta', { now: '2026-10-12T23:59:59Z' });
+  assert.equal(cache.size, 2);
+
+  hammerStopOrigin('synthetic-retention-alpha', { now: '2026-10-13T00:00:00Z' });
+  assert.deepEqual([...cache], ['2026-10-13|synthetic-retention-alpha']);
+  hammerStopOrigin('synthetic-retention-alpha:detail', { now: '2026-10-13T23:59:59Z' });
+  assert.equal(alerts.length, 3, 'same-day repeats stay suppressed after rollover');
+  hammerStopOrigin('synthetic-retention-beta', { now: '2026-11-01T00:00:00Z' });
+  assert.deepEqual([...cache], ['2026-11-01|synthetic-retention-beta']);
+  assert.equal(alerts.length, 4);
+});
+
 test('the terminal audit records an unknown code as a retried infrastructure deferral, never stop-reason-unregistered', t => {
   const root = scratch(t);
   const alerts = captureAlerts(t);

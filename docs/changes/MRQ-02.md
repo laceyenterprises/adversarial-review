@@ -12,9 +12,10 @@ continuation, so a reader can tell "deferred, re-drive owned" apart from
 
 - `hammerStopOrigin()` returns `infrastructure` for a well-formed unregistered
   code and emits one `ama_closer.stop_code_unregistered` alert per code per UTC
-  day: an in-process set, plus an outbox identity of `(code, day)` in alert
-  delivery. Only a malformed reason throws. `registeredHammerStopOrigin()` is
-  the side-effect-free read used by historical-audit projections.
+  day: an in-process set cleared when the UTC day changes, plus an outbox
+  identity of `(code, day)` in alert delivery. Only a malformed reason throws.
+  `registeredHammerStopOrigin()` is the side-effect-free read used by
+  historical-audit projections.
 - `recordHammerEarlyFailure()` records an unregistered code as the registered
   `unregistered-stop-code` infrastructure deferral. The original code stays in
   `originalReason` and `reasonDetail`. New attempts never record
@@ -33,3 +34,20 @@ continuation, so a reader can tell "deferred, re-drive owned" apart from
 Historical audit bytes are not rewritten. A companion change in the consuming
 runtime reads `attempts[].continuation`: a closer launch whose PR is still open
 ends succeeded only with a named continuation. Merge this change first.
+
+## Interface changes
+
+None in final remediation; only the active UTC day's alert keys are retained.
+
+## Verification
+
+Final remediation adds a rollover regression covering eviction, same-day
+deduplication after midnight and a multi-day gap. Passed:
+
+- `node --test test/mrq-02-unregistered-stop-code.test.mjs test/hamselferrors-01.test.mjs test/hamwritertimeout-01.test.mjs`
+- `npm run lint` (zero errors; existing unused-variable warnings)
+- `npm run typecheck:contracts`
+- `bash demo/research-finding-walkthrough.sh`
+- `git diff --check`
+
+The full suite is left to PR-head CI under the final-round validation policy.

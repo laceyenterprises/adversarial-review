@@ -43,9 +43,10 @@ Legacy CWP conflict reservations without a project use an exact key and
 qualified repository, with absence available after ten minutes. The producer's
 `cwp-repository-dispatch-read` grant owns the native submission-lock check;
 AR validates the grant and exact selector without a separate lock attestation.
-AR's closer intent check requires no unsettled local submission. If the
-repository lookup is refused or unavailable, one key-only fallback can prove
-positive ownership but cannot certify absence. Other legacy reservations use
+AR's closer intent check requires no unsettled local submission. An explicit
+selector refusal or unproven absence scope permits one key-only fallback to
+prove positive ownership, never absence. Transport failures retain custody
+without a key-only fallback. Other legacy reservations use
 the unscoped key.
 
 When a legacy reservation's owner

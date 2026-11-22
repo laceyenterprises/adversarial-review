@@ -88,6 +88,30 @@ test('endpoint outage remains unavailable and never consults a ledger fallback',
   assert.equal(readLaunchRequestStatusFromLedger({...args,launchRequestId:'root'}).reason,'dispatch-read-unavailable');
 });
 
+test('dispatch lookup distinguishes selector refusals from transport faults without exposing producer details', async () => {
+  for (const [error, refused] of [
+    [Object.assign(new Error('secret'), { status: 400 }), true],
+    [Object.assign(new Error('secret'), { response: { status: 403 } }), true],
+    [Object.assign(new Error('secret'), { code: 'unsupported_selector' }), true],
+    [new Error('app-contract dispatch_scope_denied: secret'), true],
+    [Object.assign(new Error('secret'), { code: 'ETIMEDOUT' }), false],
+    [Object.assign(new Error('secret'), { code: 'ECONNREFUSED' }), false],
+    [Object.assign(new Error('secret'), { status: 503 }), false],
+    [new Error('secret'), false],
+  ]) {
+    const fail = () => { throw error; };
+    const args = { ...options(), dispatchSession: { dispatchLookup: fail }, dispatchLookupSyncImpl: fail };
+    for (const result of [
+      await readDispatchLaunches({ idempotency_key: 'key' }, args),
+      readDispatchLaunchesSync({ idempotency_key: 'key' }, args),
+    ]) {
+      assert.equal(result.ok, false);
+      assert.equal(result.selectorRefused === true, refused);
+      assert.doesNotMatch(JSON.stringify(result), /secret/);
+    }
+  }
+});
+
 test('asynchronous SDK launch observations yield without starting a database child',async()=>{
   let resolve, progressed=false;
   const pending=readLaunchRequestStatusFromLedgerAsync({launchRequestId:'root',

@@ -92,9 +92,11 @@ export async function observeRepairOwner({ rootDir, repo, prNumber, epoch, now =
   }
   const readArgs = { rootDir, timeoutMs: 8000 };
   let result = await readImpl(selector, readArgs);
-  if (unscopedCwp && !result.ok) {
+  if (unscopedCwp && !result.ok && (result.selectorRefused === true
+    || result.detail === 'dispatch absence scope unproven')) {
     // Older producers may refuse the repository-only selector. Preserve their
-    // key-only positive ownership read, but never use it to certify absence.
+    // key-only positive ownership read, but skip it on transport faults and
+    // never use fallback results to certify absence.
     result = await readImpl({ idempotency_key: epoch.ownerKey }, readArgs);
     if (!result.ok || result.roots?.length !== 1) return unknown;
   }

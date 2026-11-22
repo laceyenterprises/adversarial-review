@@ -17,8 +17,9 @@ Rescue can read the operator hold from repair facts.
 Deploy the Agent OS companion, including its dispatch-read endpoint,
 ledger fence support and worker-pool fence CLI, before using `--ledger-absence`
 or accepting repository-scoped absence. There is no runtime enable switch.
-A refused or unavailable repository lookup makes one legacy key-only read to
-preserve positive ownership during deployment; fallback absence never counts.
+An explicit selector refusal or unproven absence scope permits one legacy
+key-only read to preserve positive ownership during deployment; fallback
+absence never counts. Transport failures retain custody without a key-only fallback.
 The companion supplies the repository-only CWP absence proof, `observe_unlocked_key`
 and `_evidence` support for `canonical-cwp-ledger-absence`. The latter checks
 PR-wide HQ ownership and native conflict submission custody without the
@@ -80,3 +81,22 @@ The preceding head's Node 22 CI run reached the 900-second suite deadline
 with 54 files still queued and no failed test assertions in its log; Node 26
 passed. Full-suite validation remains in PR-head CI. No CI workflow, runner
 count or deadline is changed by this remediation.
+
+The final Gemini Comment-only findings were checked against reviewed head
+`1dccc579c4527d7af8c4be1d639273580789923e`. Missing or malformed retirement
+evidence already short-circuits at `evidence?.repo !== repo`; new CLI cases
+verify the proof-mismatch refusal and byte-identical ledger for legacy,
+native-CWP and ledger-absence retirement. No retirement validator change
+was needed.
+
+Dispatch failures now expose a redacted `selectorRefused: true` signal for
+HTTP 400/403 or explicit selector/scope refusal codes. Only that signal or
+an unproven absence scope permits the positive-only legacy fallback.
+Timeouts, connection faults, server failures and unclassified failures keep
+custody without spending a second selector's timeout budget. The existing
+client retry remains inside the original lookup deadline.
+All 159 focused repair, retirement and dispatch-read cases passed, including
+actual SDK-boundary refusal/fallback and transport-failure call counts.
+Lint passed with zero errors (147 existing warnings), contract typecheck,
+the offline byte-equivalence demo and the 102-entry catalog validator passed.
+The watcher claim-loop suite passed all 197 cases within a 300-second bound.

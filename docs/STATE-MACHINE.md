@@ -79,8 +79,9 @@ evidence retain custody. An old CWP conflict reservation without a project can
 record `absent` from an exact key and repository lookup after ten minutes.
 The producer grant owns the native submission-lock check; AR validates the
 grant/selector without a separate lock attestation and checks local closer
-custody under the intent lock. One key-only fallback after a refused or
-unavailable repository lookup can prove positive ownership, never absence.
+custody under the intent lock. An explicit selector refusal or unproven absence
+scope permits one key-only fallback to prove positive ownership, never absence.
+Transport failures retain custody without a key-only fallback.
 Two consecutive canonical absence proofs after ten minutes mark the reservation
 `absent-unfenced`, project operator custody in
 next-action/TTM and send a deduplicated SEV1 page. For an unscoped CWP conflict

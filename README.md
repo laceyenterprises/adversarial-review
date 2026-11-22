@@ -917,9 +917,10 @@ project can record exact-key repository absence after ten minutes. An absence
 proof relies on the producer's `cwp-repository-dispatch-read` grant to check
 the native submission lock; AR validates that grant and the exact selector,
 without a separate lock attestation. AR checks for unsettled closer submissions
-under the closer intent lock. If the repository-only lookup is refused or
-unavailable, a single key-only fallback can establish positive ownership but
-cannot certify absence. For these reservations, an unknown
+under the closer intent lock. An explicit selector refusal or unproven absence
+scope permits a single key-only fallback to establish positive ownership,
+never absence. Transport failures retain custody without a key-only fallback.
+For these reservations, an unknown
 observation after `absent-unfenced` clears the absence count and marks the owner
 `unknown`. An unbound reservation with no verified publication and an unknown
 owner observed at least ten minutes after reservation retains custody, projects

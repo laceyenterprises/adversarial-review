@@ -188,6 +188,18 @@ test('CWP retirement rejects mismatched proof kinds, heads, provenance and fence
   }
 });
 
+for (const selector of [identity, cwpIdentity, absenceIdentity]) {
+  test(`retirement rejects missing or malformed evidence without mutation (${selector.ownerKey.slice(0, 3)}, absence=${!!selector.ledgerAbsence})`, t => {
+    const f = fixture(t, undefined, selector);
+    const before = f.read();
+    for (const evidence of [undefined, null, false, 42, 'malformed', [], {}]) {
+      const proof = { ...f.proof, evidence };
+      assert.throws(() => f.attempt(proof), /committed-enqueue-fence-proof-mismatch/);
+      assert.equal(f.read(), before);
+    }
+  });
+}
+
 test('CWP reservation and selectors must identify the same native conflict submission', t => {
   const f = fixture(t, undefined, cwpIdentity);
   const before = f.read();

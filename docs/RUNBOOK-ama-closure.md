@@ -1088,8 +1088,9 @@ Those use the exact owner key and repository under the producer's
 `cwp-repository-dispatch-read` grant. That producer owns the native
 submission-lock check. AR validates the grant and exact selector without a
 separate lock attestation and checks local closer custody under the intent lock.
-If the repository lookup is refused or unavailable, one key-only fallback can
-prove positive ownership but cannot certify absence. At ten minutes the watcher
+An explicit selector refusal or unproven absence scope permits one key-only
+fallback to prove positive ownership, never absence. Transport failures retain
+custody without a key-only fallback. At ten minutes the watcher
 can record positive absence if the canonical read proves zero matching launches
 and the local closer intent is clear. A second positive observation reaches `absent-unfenced`
 and pages the operator. A grant-filtered empty result leaves ownership unproven.

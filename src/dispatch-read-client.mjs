@@ -220,12 +220,23 @@ export async function readDispatchLaunches(selector, args = {}) {
   try { return checked(await retryingDispatchLookup(selector, args), selector); }
   catch (error) {
     cachedSession = null;
-    return unavailable(error);
+    return dispatchLookupFailure(error);
   }
 }
 export function readDispatchLaunchesSync(selector, args = {}) {
   try { return checked(dispatchReadTransport.lookupSync(selector, args), selector); }
-  catch (error) { return unavailable(error); }
+  catch (error) { return dispatchLookupFailure(error); }
+}
+function dispatchLookupFailure(error) {
+  const failure = unavailable(error);
+  const status = Number(error?.status ?? error?.statusCode ?? error?.response?.status);
+  // Keep only a fixed refusal signal; producer messages may contain secrets.
+  const selectorRefused = !failure.transient && !failure.timedOut
+    && ([400, 403].includes(status)
+      || ['invalid_selector', 'unsupported_selector', 'scope_denied', 'read_scope_denied',
+        'dispatch_read_scope_denied', 'dispatch_scope_denied'].includes(error?.code)
+      || /^app-contract (?:400|403|invalid_selector|unsupported_selector|scope_denied|read_scope_denied|dispatch_read_scope_denied|dispatch_scope_denied)\b/.test(error?.message ?? ''));
+  return selectorRefused ? { ...failure, selectorRefused: true } : failure;
 }
 function checked(result, selector) {
   const evidence = dispatchReadTransport.sdk().readDispatchLookupResult(result);

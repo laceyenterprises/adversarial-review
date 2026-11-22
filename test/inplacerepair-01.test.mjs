@@ -753,13 +753,66 @@ test('legacy CWP repository-read refusal falls back only to positive keyed owner
     const calls = [];
     const observed = await observeRepairOwner({ ...f, epoch, readImpl: async selector => {
       calls.push(selector);
-      if (selector.repo) return { ok: false, reason: 'selector-refused' };
+      if (selector.repo) return { ok: false, reason: 'dispatch-read-unavailable', selectorRefused: true };
       return fallback;
     } });
     assert.deepEqual(calls.slice(0, 2), [
       { idempotency_key: epoch.ownerKey, repo }, { idempotency_key: epoch.ownerKey },
     ]);
     assert.equal(observed.ownerState, expected);
+    assert.equal(observed.absentObservations, undefined);
+  }
+});
+
+test('legacy CWP transport failures do not start a second lookup or release custody', async t => {
+  const f = { ...fixture(t), cause: 'conflict-without-owner', ownerKey: `cwp-${'a'.repeat(24)}` };
+  const epoch = reserveRepairEpoch(f).epoch;
+  for (const failure of [
+    { ok: false, reason: 'dispatch-read-unavailable', transient: true, timedOut: true },
+    { ok: false, reason: 'dispatch-read-unavailable', transient: true, timedOut: false },
+    { ok: false, reason: 'dispatch-read-unavailable', transient: false, timedOut: false },
+    { ok: false, reason: 'timeout' },
+  ]) {
+    const calls = [];
+    const observed = await observeRepairOwner({ ...f, epoch, readImpl: async selector => {
+      calls.push(selector);
+      return failure;
+    } });
+    assert.deepEqual(calls, [{ idempotency_key: epoch.ownerKey, repo }]);
+    assert.equal(observed.ownerState, 'unknown');
+    assert.equal(observed.terminalAt, undefined);
+    assert.equal(observed.absentObservations, undefined);
+  }
+});
+
+test('legacy CWP fallback accepts real selector refusals and grant-filtered emptiness', async t => {
+  const f = { ...fixture(t), cause: 'conflict-without-owner', ownerKey: `cwp-${'a'.repeat(24)}` };
+  const epoch = reserveRepairEpoch(f).epoch;
+  for (const refusal of [
+    Object.assign(new Error('selector unsupported'), { status: 400 }),
+    new Error('app-contract dispatch_scope_denied: grant required'),
+    { schema_version: 1, status: 'not_found', complete: true, items: [], roots: [], retry_edges: [] },
+  ]) {
+    const calls = [];
+    const owner = launchRead(epoch, 'running');
+    const readImpl = (selector, options) => readDispatchLaunches(selector, { ...options,
+      dispatchSession: { dispatchLookup: async request => {
+        calls.push(request);
+        if (request.repo) {
+          if (refusal instanceof Error) throw refusal;
+          return refusal;
+        }
+        return { schema_version: 1, status: 'found', complete: true,
+          items: owner.rows, roots: owner.roots, retry_edges: owner.retryEdges };
+      } },
+    });
+    const observed = await observeRepairOwner({ ...f, epoch, readImpl });
+    assert.deepEqual(calls, [
+      { idempotency_key: epoch.ownerKey, repo },
+      { idempotency_key: epoch.ownerKey },
+      { launch_request_ids: ['fixture-launch'], include_retry_chain: true },
+    ]);
+    assert.equal(observed.ownerState, 'live');
     assert.equal(observed.absentObservations, undefined);
   }
 });

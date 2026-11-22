@@ -99,7 +99,7 @@ uses PATH and per-user defaults.
     then `$HOME/.config/adversarial-review/secrets`. Each root is only used if
     its `litellm-alert-bridge.token` file exists. If the new default token file
     is absent, the watcher still probes the legacy
-    `/Users/airlock/agent-os/agents/clio/credentials/local` token location for
+    `<deploy-checkout>/agents/clio/credentials/local` token location for
     compatibility with deployments that have not migrated their alert secrets.
 
 ## Secret Sources

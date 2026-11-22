@@ -55,6 +55,7 @@ import { homedir } from 'node:os';
 import { randomUUID } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { sleepSync } from './sqlite-busy-retry.mjs';
+import { resolveDeployRoot } from './deploy-root.mjs';
 
 export const PER_WORKER_PLACEHOLDER_REFRESH_TOKEN =
   'agent-os-per-worker-placeholder-no-rotate';
@@ -96,8 +97,9 @@ function resolveAuthSyncBin(env) {
     // src/ -> repo root -> agent-os parent (tools/adversarial-review is a
     // submodule of agent-os) -> runtime/...
     resolve(here, '..', '..', '..', 'runtime', 'codex', 'bin', 'codex-worker-auth-sync'),
-    '/Users/airlock/agent-os/runtime/codex/bin/codex-worker-auth-sync',  // cfg-allowlist(account-airlock): oss-readiness-apply-reviewed
   ];
+  const deployRoot = resolveDeployRoot(env);
+  if (deployRoot) candidates.push(resolve(deployRoot, 'runtime', 'codex', 'bin', 'codex-worker-auth-sync'));
   for (const candidate of candidates) {
     if (existsSync(candidate)) return candidate;
   }

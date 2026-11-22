@@ -30,6 +30,7 @@ import { isHarnessIdentityEnforcementEnabled } from './remediation-identity-poli
 import { execFile } from 'node:child_process';
 import { existsSync, lstatSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { userInfo } from 'node:os';
+import { resolveDeployRoot } from './deploy-root.mjs';
 import { dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
@@ -257,7 +258,6 @@ const DEFAULT_PATH_PREFIX = ['/opt/homebrew/bin', '/usr/local/bin', '/usr/bin', 
 const VALID_GITHUB_REPO_SLUG = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/;
 
 const REMEDIATION_WORKSPACE_ROOT_ENV = 'ADVERSARIAL_REMEDIATION_WORKSPACE_ROOT';
-const DEFAULT_DEPLOY_CHECKOUT = '/Users/airlock/agent-os';  // cfg-allowlist(account-airlock): oss-readiness-apply-reviewed
 const HQ_REMEDIATION_WORKSPACE_SEGMENTS = ['adversarial-review', 'follow-up-workspaces'];
 
 const REMEDIATION_CI_REGRESSION_RETRY_DELAY_MS = 60 * 1000;
@@ -690,7 +690,10 @@ function isPathInsideOrEqual(rootPath, candidatePath) {
 }
 
 function resolveDeployCheckout(env = process.env) {
-  return resolve(env.AGENT_OS_DEPLOY_CHECKOUT || DEFAULT_DEPLOY_CHECKOUT);
+  // Null when no deploy root is configured: isPathInsideOrEqual() then reports
+  // no overlap, so the live-source guards below only apply where one is known.
+  const deployRoot = resolveDeployRoot(env);
+  return deployRoot ? resolve(deployRoot) : null;
 }
 
 function resolveRemediationWorkspaceRoot({
@@ -3547,7 +3550,7 @@ async function consumeNextFollowUpJobWithinRepositoryCycle({
       : '';
     writeFileSync(promptPath, `${prompt}${resumeInstruction}\n`, 'utf8');
 
-    // LAC-957: rerun the canonical consume-time lifecycle gate just
+    // Rerun the canonical consume-time lifecycle gate just
     // before spawn. The first gate ran before OAuth pre-flight +
     // workspace prep (~10-20s), which leaves a race for merged/closed
     // PRs, stale-drift labels, or stale-review-head changes to appear

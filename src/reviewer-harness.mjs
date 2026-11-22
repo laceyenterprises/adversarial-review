@@ -532,19 +532,20 @@ async function spawnClaude(args, options = {}) {
 function resolveCodexAuthPath() {
   // CODEX_AUTH_PATH env var allows explicit override. CODEX_HOME supports
   // local/manual runs only when it points at a usable OAuth auth.json.
-  // Prefer the current operator's default auth location before falling back
-  // to the legacy split-user bridge where the watcher runs as airlock but
-  // Codex OAuth belongs to placey.
+  // Prefer the current operator's default auth location. A split-user
+  // deployment, where the daemon user differs from the Codex OAuth owner, names
+  // the other user's auth file in ADVERSARIAL_LEGACY_CODEX_AUTH_PATH.
   if (process.env.CODEX_AUTH_PATH) return process.env.CODEX_AUTH_PATH;
   if (process.env.CODEX_HOME) {
     const codexHomeAuth = join(process.env.CODEX_HOME, 'auth.json');
     if (isCodexOAuthAuthFile(codexHomeAuth)) return codexHomeAuth;
   }
+  const legacyAuth = String(process.env.ADVERSARIAL_LEGACY_CODEX_AUTH_PATH || '').trim();
   if (process.env.HOME) {
     const homeAuth = join(process.env.HOME, '.codex', 'auth.json');
-    if (existsSync(homeAuth) || !existsSync('/Users/placey/.codex/auth.json')) return homeAuth;  // cfg-allowlist(account-placey): oss-readiness-apply-reviewed
+    if (existsSync(homeAuth) || !legacyAuth || !existsSync(legacyAuth)) return homeAuth;
   }
-  return '/Users/placey/.codex/auth.json';  // cfg-allowlist(account-placey): oss-readiness-apply-reviewed
+  return legacyAuth || join(homedir(), '.codex', 'auth.json');
 }
 
 function isCodexOAuthAuthFile(authPath) {

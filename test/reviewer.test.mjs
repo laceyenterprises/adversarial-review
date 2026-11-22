@@ -11,7 +11,7 @@ import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import Database from 'better-sqlite3';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, utimesSync, writeFileSync } from 'node:fs';
-import { hostname, tmpdir } from 'node:os';
+import { homedir, hostname, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { __test__ } from '../src/reviewer.mjs';
 import { buildObviousDocsGuidance, extractLinkedRepoDocs, fetchLinkedSpecContents, parseGitHubBlobPath } from '../src/prompt-context.mjs';
@@ -2813,7 +2813,7 @@ test('new follow-up jobs preserve an elevated prior cap to avoid truncating an a
     baseBranch: 'release/2026.05',
     reviewerModel: 'claude',
     builderTag: '[codex]',
-    linearTicketId: 'LAC-466',
+    linearTicketId: 'SYN-466',
     reviewText: '## Summary\nNeeds fixes.\n\n## Verdict\nRequest changes',
     reviewPostedAt: '2026-05-08T14:00:00.000Z',
     critical: false,
@@ -2841,7 +2841,7 @@ test('new follow-up jobs re-derive cap when the prior cap is not above the curre
     baseBranch: 'release/2026.05',
     reviewerModel: 'claude',
     builderTag: '[codex]',
-    linearTicketId: 'LAC-466',
+    linearTicketId: 'SYN-466',
     reviewText: '## Summary\nNeeds fixes.\n\n## Verdict\nRequest changes',
     reviewPostedAt: '2026-05-08T14:00:00.000Z',
     critical: false,
@@ -2864,10 +2864,35 @@ test('new follow-up jobs re-derive cap when the prior cap is not above the curre
   );
 });
 
-test('Codex reviewer auth path preserves the split-user service fallback', () => {
-  withEnv({ CODEX_AUTH_PATH: undefined, CODEX_HOME: undefined, HOME: undefined }, () => {
-    assert.equal(resolveCodexAuthPath(), '/Users/placey/.codex/auth.json');
+test('Codex reviewer auth path without HOME uses the process home, not a fixed account', () => {
+  withEnv({
+    CODEX_AUTH_PATH: undefined, CODEX_HOME: undefined, HOME: undefined,
+    ADVERSARIAL_LEGACY_CODEX_AUTH_PATH: undefined,
+  }, () => {
+    assert.equal(resolveCodexAuthPath(), join(homedir(), '.codex', 'auth.json'));
   });
+});
+
+test('Codex reviewer auth path reaches a split-user credential only through the configured legacy path', () => {
+  const root = mkdtempSync(join(tmpdir(), 'adversarial-review-codex-legacy-'));
+  try {
+    const home = join(root, 'daemon-home');
+    const legacyAuth = join(root, 'other-user', '.codex', 'auth.json');
+    mkdirSync(join(root, 'other-user', '.codex'), { recursive: true });
+    writeFileSync(legacyAuth, '{}', 'utf8');
+    const base = { CODEX_AUTH_PATH: undefined, CODEX_HOME: undefined, HOME: home };
+    withEnv({ ...base, ADVERSARIAL_LEGACY_CODEX_AUTH_PATH: legacyAuth }, () => {
+      assert.equal(resolveCodexAuthPath(), legacyAuth);
+    });
+    withEnv({ ...base, ADVERSARIAL_LEGACY_CODEX_AUTH_PATH: join(root, 'absent.json') }, () => {
+      assert.equal(resolveCodexAuthPath(), join(home, '.codex', 'auth.json'));
+    });
+    withEnv({ ...base, ADVERSARIAL_LEGACY_CODEX_AUTH_PATH: undefined }, () => {
+      assert.equal(resolveCodexAuthPath(), join(home, '.codex', 'auth.json'));
+    });
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
 });
 
 test('Codex reviewer auth path prefers the current HOME default when present', () => {

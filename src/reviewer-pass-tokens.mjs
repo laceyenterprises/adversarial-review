@@ -8,6 +8,7 @@ import {
 } from './session-ledger-read-adapter.mjs';
 import { ensureReviewStateSchema, openReviewStateDb } from './review-state.mjs';
 import { deriveReviewerTokenCost, loadReviewerPricingTable } from './reviewer-token-pricing.mjs';
+import { resolveDeployRoot } from './deploy-root.mjs';
 
 const PASS_KINDS = new Set(['first-pass', 'remediation', 'rereview', 'closer']);
 const HOUR_MS = 60 * 60 * 1000;
@@ -220,7 +221,7 @@ function beginReviewerPass(rootDir, {
 } = {}) {
   const key = passKey({ repo, prNumber, attemptNumber, passKind });
   const model = normalizeReviewerModel(reviewerModel || reviewerClass);
-  // LAC-1559: the head SHA this pass reviewed, so the completed-rereview budget
+  // The head SHA this pass reviewed, so the completed-rereview budget
   // counter can key per (repo, pr, head). `null` when the caller does not know
   // the head (legacy/backfill), which the counter treats as "unattributed".
   const normalizedHeadSha = typeof headSha === 'string' && headSha.trim() !== ''
@@ -1598,7 +1599,7 @@ function readBestReviewerEvidenceTokenUsage({
   if (!ledgerUsage && (workerRunId || launchRequestId)) return null;
   let transcriptUsage = null;
   if (transcriptFallback) {
-    const shouldUseDefaults = shouldUseDefaultTranscriptRoots(rootDir);
+    const shouldUseDefaults = shouldUseDefaultTranscriptRoots(rootDir, env);
     const resolvedCodexSessionRoots = codexSessionRoots || (shouldUseDefaults ? defaultCodexSessionRoots({ env }) : []);
     const resolvedClaudeSessionRoots = claudeSessionRoots || (shouldUseDefaults ? defaultClaudeSessionRoots({ env }) : []);
     const transcriptReaders = normalizeReviewerClass(reviewerModel) === 'claude'
@@ -1649,13 +1650,14 @@ function readBestReviewerEvidenceTokenUsage({
   };
 }
 
-function shouldUseDefaultTranscriptRoots(rootDir) {
+function shouldUseDefaultTranscriptRoots(rootDir, env = process.env) {
   if (process.env.ADV_REVIEW_TOKEN_TRANSCRIPT_FALLBACK === '1') return true;
   if (process.env.ADV_REVIEW_TOKEN_TRANSCRIPT_FALLBACK === '0') return false;
-  const resolved = resolve(String(rootDir || ''));
-  return resolved === '/Users/airlock/agent-os/tools/adversarial-review'  // cfg-allowlist(account-airlock): oss-readiness-apply-reviewed
-    || resolved === '/Users/placey/agent-os-trees/codex/agent-os/tools/adversarial-review'  // cfg-allowlist(account-placey): oss-readiness-apply-reviewed
-    || resolved === '/Users/placey/agent-os-trees/claude-code/agent-os/tools/adversarial-review';  // cfg-allowlist(account-placey): oss-readiness-apply-reviewed
+  // Only the deployed module opts in by default; other checkouts (worker trees)
+  // set ADV_REVIEW_TOKEN_TRANSCRIPT_FALLBACK=1 explicitly.
+  const deployRoot = resolveDeployRoot(env);
+  if (!deployRoot || !rootDir) return false;
+  return resolve(String(rootDir)) === resolve(deployRoot, 'tools', 'adversarial-review');
 }
 
 function timestampOverlapsWindow(startedAt, endedAt, windowStart, windowEnd) {
@@ -2253,5 +2255,6 @@ export {
   readWorkerRunTokenUsageResult,
   reviewerTokenUsageArtifactPath,
   reviewerPassRows,
+  shouldUseDefaultTranscriptRoots,
   writeReviewerTokenUsageArtifact,
 };

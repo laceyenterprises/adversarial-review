@@ -63,8 +63,18 @@ export async function selectWorkerTokenAccount({ identity, model, env = process.
     }
     // Report evidence failures explicitly; callers own hold/compatibility
     // policy. No credential reads or diagnostics are emitted here.
-    return { ...base, hold: true, status: 'held', reason: 'evidence-unknown' };
+    return { ...base, hold: true, status: 'held', ...evidenceUnknownReason(error) };
   }
+}
+
+// HAMMERPOOLSTRICT-01: a config read/validation fault is not an owner or quota
+// fault. Name it, with the error class and key path only: never the message or
+// any value, which can echo operator configuration.
+const boundedLabel = value => (typeof value === 'string' && value ? value.slice(0, 200) : null);
+export function evidenceUnknownReason(error) {
+  if (error?.name !== 'AgentOSConfigError') return { reason: 'evidence-unknown' };
+  return { reason: 'config-load-error',
+    configLoadError: { errorClass: 'AgentOSConfigError', keyPath: boundedLabel(error.key) } };
 }
 
 export async function resolvePooledWorkerRouting({ primary, fallbackWorkerClasses = [],
@@ -93,7 +103,7 @@ export async function resolvePooledWorkerRouting({ primary, fallbackWorkerClasse
       }
       if (error?.code === 'registry-unavailable') throw error;
       account = { identity: role, workerClass: role, pooled: true,
-        hold: true, status: 'held', reason: 'evidence-unknown' };
+        hold: true, status: 'held', ...evidenceUnknownReason(error) };
     }
     return account;
   };

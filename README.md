@@ -915,6 +915,9 @@ reservation retains custody, projects `repair-owner-unproven` for the
 operator and sends one SEV1 page per reservation.
 The HQ owner can retire a legacy unscoped reservation at its unchanged open
 base head using a committed canonical enqueue fence and the original handoff.
+For an original CWP conflict reservation on a distinct live head, the HQ owner
+can retire it using matching committed owner and epoch fences and the retained
+conflict submission evidence.
 Retirement restores the existing ownerless clock and SEV1 path.
 Reviewer harness refunds are bounded to three per PR across heads; later
 failures retain ordinary infrastructure cap and alert handling. Corrupt or busy

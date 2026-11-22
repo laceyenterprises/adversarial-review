@@ -7775,6 +7775,7 @@ async function maybeDispatchAmaCloserAttempt({
     reason: harnessFallback?.reason || null,
     hold: Boolean(harnessFallback?.hold),
     ...(harnessFallback?.conflictKey ? { conflictKey: harnessFallback.conflictKey } : {}),
+    ...(harnessFallback?.configLoadError ? { configLoadError: harnessFallback.configLoadError } : {}),
     ...(harnessFallback?.diagnostics?.length ? { diagnostics: harnessFallback.diagnostics } : {}),
     evidenceSource: harnessFallback?.evidenceSource || null,
     evidenceAgeMs: harnessFallback?.evidenceAgeMs ?? null,

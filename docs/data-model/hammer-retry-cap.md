@@ -50,9 +50,12 @@ An HQ-owner command can also retire a legacy unscoped reservation at its
 unchanged open base head. It sets `terminalAt` and `terminalReason:
 canonical-enqueue-fenced` and stores the version 1 `enqueueFenceReceipt` read
 from the canonical ledger. The receipt binds the exact epoch, owner key, base
-head, reservation digest, operator and original submitter proof. It grants no
-review head or launch identity. Retirement retains the epoch entry, charge
-counters, refunds and other history.
+head, reservation digest, operator and original submitter proof. An original
+CWP conflict reservation can retire at a distinct current head. Its receipt
+also binds the checked current head, PR branch, retained worker ID, job and
+result digests, exact boot trace offset and digest, and both canonical fence
+keys. The receipt grants no review head or launch identity. Retirement retains
+the epoch entry, charge counters, refunds and other history.
 Retired reservations no longer appear in next-action or TTM ownership, allowing
 the existing ownerless clock/page and bounded successor.
 The existing closure-wait store deduplicates the final cap page across heads.

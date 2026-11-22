@@ -75,7 +75,7 @@ export const NODE_ONLY_ENUM_MEMBERS = {
 // through env aliases or operator-local overlays, because the Python loader
 // refuses them in checked-in YAML. Each one must move into CFG `schema_v1`
 // (with config.yaml and shell parity) or be deleted; ONS-07 deleted the
-// unread ones. Count: 32 paths.
+// unread ones. Count: 33 paths.
 const int = (defaultValue, min, extra = {}) => ({ __type: 'int', __default: defaultValue, ...(min === undefined ? {} : { __min: min }), ...extra });
 const nullableInt = min => int(null, min, { __nullable: true });
 const bool = defaultValue => ({ __type: 'bool', __default: defaultValue });
@@ -118,6 +118,15 @@ export const NODE_ONLY_KEYS = {
     },
   },
   'feature_flags.dismiss_stale_request_changes_on_resolved': bool(true),
+  // HAMMERPOOLSTRICT-01 hygiene: the host declares this off-by-default spike
+  // knob and nothing here reads it. Mirrored only so the runtime reader's
+  // unknown-key warning stays quiet; the tolerance, not this entry, is the fix.
+  // Delete this entry when a re-vendored CFG schema declares it.
+  'worker_pool.worktree_reuse': {
+    __type: 'dict',
+    __strict: true,
+    __keys: { enabled: bool(false) },
+  },
   'roles.registry': {
     __type: 'dict',
     __strict: false,

@@ -135,6 +135,31 @@ test('an effect mutation is detected immediately and stays local to its oracle o
   assert.deepEqual(mutated.merges, healthy.merges);
   assert.deepEqual(mutated.trace.filter(entry => entry.errors.length).map(entry => entry.label), ['github:merge-effect']);
 });
+test('cause and page mutation probes cannot change later observations or simulation effects', async () => {
+  const scenario = { id: 'paging-mutation', profile: 'primary-gap' };
+  const healthy = await simulate(scenario);
+  for (const field of ['causes', 'pages']) {
+    let changedAt;
+    let laterObservations = 0;
+    const mutated = await simulate(scenario, {
+      mutate(view, label) {
+        assert.ok(!view[field].includes('synthetic-probe'));
+        if (changedAt !== undefined) laterObservations++;
+        else if (view[field].length) {
+          changedAt = label;
+          view[field].push('synthetic-probe');
+        }
+      },
+    });
+    assert.ok(changedAt, `${field} probe exercised a paging effect`);
+    assert.ok(laterObservations > 0);
+    assert.deepEqual(mutated.failed, field === 'causes' ? ['bounded-terminal', 'page-once'] : ['page-once']);
+    assert.deepEqual(mutated.trace.filter(entry => entry.errors.length).map(entry => entry.label), [changedAt]);
+    assert.deepEqual(mutated.events, healthy.events);
+    assert.deepEqual(mutated.merges, healthy.merges);
+    assert.equal(mutated.terminal, healthy.terminal);
+  }
+});
 test('stale review never merges, exhausted head move retains budget, live-owner race has one effect', async () => {
   const stale = await simulate({ id: 'stale', profile: 'stale-review' });
   assert.equal(stale.merges.length, 0);

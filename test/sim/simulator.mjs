@@ -94,8 +94,8 @@ export async function simulate(scenario, { seed = 17, load = 1, mutate, mutateLe
       // Mutation probes own their observations. The default oracle only reads
       // the live effect arrays synchronously and never retains them.
       view.merges = structuredClone(merges);
-      view.causes = [...causes];
-      view.pages = [...pages];
+      view.causes = structuredClone(causes);
+      view.pages = structuredClone(pages);
       mutate(view, label);
     }
     const errors = violations(view);

@@ -53,6 +53,8 @@ export async function simulate(scenario, { seed = 17, load = 1, mutate, mutateLe
   let comments = f.comment ? 1 : 0;
   let merged = f.merged === true;
   let projection;
+  let decision;
+  let decisionAt;
   let ledgerSnapshot;
   let readFailed = false;
   let refused = false;
@@ -69,23 +71,33 @@ export async function simulate(scenario, { seed = 17, load = 1, mutate, mutateLe
   const activeFault = () => clock.now < pressure.timeout(1500);
   const readFault = () => f.readFailure && activeFault();
   function snapshot() {
-    // Oracle observations often reuse the same append-only ledger. Re-fold
-    // after each append and still evaluate eligibility at every virtual tick.
-    const state = projection ??= fold(events);
-    const decision = eligible(state, policy, { observedAt: clock.iso(), load: loadObservation });
-    const terminal = f.hold || f.killSwitch ? 'operator-hold' : state.terminal?.kind
+    // Effect, event and executor observations can share a virtual instant.
+    // Eligibility depends on the ledger and time. The oracle still inspects
+    // fresh effects at every observation, including effects before an append.
+    if (!projection || decisionAt !== clock.now || mutate) {
+      projection ??= fold(events);
+      decision = eligible(projection, policy, { observedAt: clock.iso(), load: loadObservation });
+      decisionAt = clock.now;
+    }
+    const terminal = f.hold || f.killSwitch ? 'operator-hold' : projection.terminal?.kind
       ?? (pages.length ? 'escalated' : null);
     const owners = decision?.owner ? [decision.owner] : [];
     const view = { now: clock.now, bound, head, terminal, owners,
       deadline: decision?.deadline ? Date.parse(decision.deadline) - Date.UTC(2030, 0, 1) : NaN,
-      merges: structuredClone(merges), activation: activated && deployed,
-      causes: [...causes], pages: [...pages],
+      merges, activation: activated && deployed, causes, pages,
       transientCharges, transientRefusals };
     return { view, decision };
   }
   function inspect(label) {
     const { view, decision } = snapshot();
-    mutate?.(view, label);
+    if (mutate) {
+      // Mutation probes own their observations. The default oracle only reads
+      // the live effect arrays synchronously and never retains them.
+      view.merges = structuredClone(merges);
+      view.causes = [...causes];
+      view.pages = [...pages];
+      mutate(view, label);
+    }
     const errors = violations(view);
     for (const error of errors) failed.add(error);
     trace.push({ at: clock.now, label, head, terminal: view.terminal ?? null,

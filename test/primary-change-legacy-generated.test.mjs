@@ -53,9 +53,10 @@ function fixture(t, { path = paths[0], repo = repository, lostContent = false, d
   const write = (target, file, text) => {
     mkdirSync(dirname(join(target, file)), { recursive: true });
     writeFileSync(join(target, file), text);
-    if (target === source) git('add', '--', file);
   };
-  const commit = message => {
+  const commit = (message, executablePath) => {
+    git('add', '--all');
+    if (executablePath) git('add', '--chmod=+x', '--', executablePath);
     git('commit', '-qm', message);
     return git('rev-parse', 'HEAD');
   };
@@ -68,11 +69,10 @@ function fixture(t, { path = paths[0], repo = repository, lostContent = false, d
   if (lostContent) write(source, 'z-source.txt', 'author\n');
   const author = commit('Author adds an entry');
   write(source, path, opaque ? `${final}\0` : final);
-  if (mode) git('add', '--chmod=+x', '--', path);
   if (dependencyChanged) write(source, 'scripts/fixture-producer.py', '# edited input\n');
   if (lostContent) write(source, 'z-source.txt', 'base\n');
   if (branchOnly) write(source, verifier, `${script}\nprint(json.dumps(proof))\n`);
-  const head = commit('Remediation moves the entry\n\nWorker-Class: hammer');
+  const head = commit('Remediation moves the entry\n\nWorker-Class: hammer', mode ? path : undefined);
   if (installed) write(owner, verifier, `${script}\n${emit}\n`);
   if (registered) write(root, 'domains/code-pr.json', JSON.stringify({ remediationCloneReferences: { [repository]: source } }));
   const get = localPrimaryHistory({ source, base, head, changeResponse });

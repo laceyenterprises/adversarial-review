@@ -6323,6 +6323,11 @@ before (`local-validation-unknown-required-contexts-not-green` or
 the stop (a mirror check with `result: fail` or a TAP `not ok` line), or
 unconfirmed drain after a finished battery, the existing deferral above still
 applies. A genuine local failure still blocks and the hammer remediates it.
+The merge gate revalidates any existing exact-head deferral receipt before
+consulting CI: `ciAuthoritative` must be explicitly true, the reason must
+permit deferral, no local failure may have been observed, and current required
+contexts must be non-empty. Unreadable, legacy or demoted receipts continue
+blocking even when GitHub CI is green.
 Declare contexts per repository in
 `roles.adversarial.merge_authority.required_check_contexts_by_repository`
 (`- repository: owner/name` with `contexts: [...]`). `required_check_contexts`
@@ -6331,7 +6336,9 @@ belongs in the per-repository list. Both lists also make an absent context
 read PENDING at the hammer gate and in the queue-v2 required set. The daemon
 and closer read only the global list until they are given the repository.
 Queue-v2 admits a handoff whose trusted local-validation read is
-`result: unknown`; its final merge gate requires the same declared, green
+`result: unknown` only with `ciAuthoritative: true` and
+`localFailureObserved !== true`, even if that read also claims `ok: true`;
+its final merge gate requires the same declared, green
 contexts and never accepts the configured no-CI proof for it.
 
 The validator records the deferred audit and `last-phase` receipt non-finally.

@@ -81,9 +81,10 @@ export function readUnknownValidationReceipt(runDir, head) {
 }
 
 // Re-judge a recorded UNKNOWN against current configuration. An unreadable
-// receipt, a recorded local failure or an ineligible reason stays deferred.
+// receipt, absent/withdrawn CI authority, a recorded local failure or an
+// ineligible reason stays deferred.
 export function recordedUnknownDefersToCi(receipt, requiredContexts) {
-  if (!receipt || receipt.unreadable || receipt.validation !== 'unknown') return false;
+  if (!receipt || receipt.unreadable || receipt.validation !== 'unknown' || receipt.ciAuthoritative !== true) return false;
   return unknownValidationDeferral({ reason: receipt.reason, requiredContexts,
     localFailureObserved: receipt.localFailureObserved === true }).ciAuthoritative;
 }

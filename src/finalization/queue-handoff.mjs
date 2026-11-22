@@ -48,7 +48,8 @@ export function normalizeQueueHandoff(input) {
 
 // A trusted read that local validation ended with no verdict (timed out,
 // killed for load, process inspection denied). A real failure is never this.
-export const queueLocalValidationUnknown = evidence => evidence?.localValidation?.result === 'unknown';
+export const queueLocalValidationUnknown = evidence => evidence?.localValidation?.result === 'unknown'
+  && evidence.localValidation.ciAuthoritative === true && evidence.localValidation.localFailureObserved !== true;
 
 const findingKey = finding => handoffJson([finding.reviewId, finding.reviewCommitId, finding.findingId]);
 
@@ -89,7 +90,8 @@ export function validateQueueHandoff(h, e) {
   for (const kind of ['localValidation', 'publication']) {
     // MRQ-20: UNKNOWN local validation (no verdict) is admissible; the
     // executor's final gate then requires declared exact-candidate contexts.
-    const read = e[kind]?.ok === true || (kind === 'localValidation' && queueLocalValidationUnknown(e));
+    const read = kind === 'localValidation' && e[kind]?.result === 'unknown'
+      ? queueLocalValidationUnknown(e) : e[kind]?.ok === true;
     requireFact(read && e[kind].head === h.head && e[kind].sourceRef === h[kind].sourceRef, `failed ${kind}`);
   }
   requireFact(Array.isArray(e.review.findings), 'unknown finding inventory');

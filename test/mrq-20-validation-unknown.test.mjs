@@ -21,6 +21,7 @@ import {
 import { classifyQueueChecks, resolveQueueRequiredSet } from '../src/finalization/queue-check-reader.mjs';
 import { queueLocalValidationUnknown, validateQueueHandoff } from '../src/finalization/queue-handoff.mjs';
 import { queueHandoffFixture } from './helpers/queue-handoff-fixture.mjs';
+import { primaryChangeFixture } from './helpers/primary-change.mjs';
 
 const REPO = 'example/alpha';
 const OTHER = 'example/beta';
@@ -95,8 +96,12 @@ test('UNKNOWN with no declared contexts, a real failure, or an ineligible stop n
     'validation-budget-exceeded', 'validation-killed']) {
     assert.equal(unknownValidationDeferral({ reason, requiredContexts: contexts }).ciAuthoritative, true, reason);
   }
-  assert.equal(recordedUnknownDefersToCi({ validation: 'unknown', reason: 'absolute-timeout' }, contexts), true);
-  assert.equal(recordedUnknownDefersToCi({ validation: 'unknown', reason: 'absolute-timeout' }, []), false);
+  const receipt = { validation: 'unknown', reason: 'absolute-timeout', ciAuthoritative: true };
+  assert.equal(recordedUnknownDefersToCi(receipt, contexts), true);
+  assert.equal(recordedUnknownDefersToCi(receipt, []), false);
+  for (const ciAuthoritative of [false, undefined]) {
+    assert.equal(recordedUnknownDefersToCi({ ...receipt, ciAuthoritative }, contexts), false);
+  }
   assert.equal(recordedUnknownDefersToCi({ unreadable: true }, contexts), false);
 });
 
@@ -228,27 +233,29 @@ test('hammer-validate: the mirror budget stop and an external kill are UNKNOWN, 
 
 // ---- the hammer's exact-head merge gate (bin/hammer-merge.sh), I/O stubbed ----
 
-function runGate(t, { checks, contexts, unknown }) {
+function runGate(t, { checks, contexts, unknown, receipt = {
+  schemaVersion: 1, head: HEAD, validation: 'unknown', reason: 'absolute-timeout', ciAuthoritative: true,
+} }) {
   const root = new URL('../', import.meta.url);
   const script = readFileSync(new URL('bin/hammer-merge.sh', root), 'utf8');
   const gateCode = script.match(/<<'NODE' > "\$HAM_GATE_JSON"\n([\s\S]*?)\nNODE/)[1];
   const runDir = mkdtempSync(join(tmpdir(), 'mrq20-gate-'));
   t.after(() => rmSync(runDir, { recursive: true, force: true }));
-  if (unknown) writeFileSync(join(runDir, `validation-deferred-${HEAD}.json`), JSON.stringify(
-    { schemaVersion: 1, head: HEAD, validation: 'unknown', reason: 'absolute-timeout' }));
+  if (unknown) writeFileSync(join(runDir, `validation-deferred-${HEAD}.json`),
+    typeof receipt === 'string' ? receipt : JSON.stringify(receipt));
   const href = path => JSON.stringify(new URL(path, root).href);
   const code = `
 import { evaluateMergeEligibility } from ${href('src/ama/merge-eligibility.mjs')};
 import { classifyCheckRollup, latestCheckRollupItems } from ${href('src/checks-summary.mjs')};
 import { tenureHeadNeedsReview } from ${href('src/pr-tenure.mjs')};
 import { resolveRequiredCheckContextsFromCfg } from ${href('src/ama/required-check-contexts.mjs')};
-import { readUnknownValidationReceipt, unknownValidationCiGate } from ${href('src/ama/local-validation-unknown.mjs')};
+import { readUnknownValidationReceipt, recordedUnknownDefersToCi, unknownValidationCiGate } from ${href('src/ama/local-validation-unknown.mjs')};
 const fetchHammerPr = async () => ({ headSha: ${JSON.stringify(HEAD)}, state: 'OPEN', mergeable: 'MERGEABLE',
   mergeStateStatus: 'CLEAN', labels: [], checks: ${JSON.stringify(checks)} });
 const loadEffectiveMergeAuthorityConfig = () => ({ requiredCheckContexts: [],
   requiredCheckContextsByRepository: ${JSON.stringify(contexts.length ? [{ repository: REPO, contexts }] : [])} });
 const createHistoryReader = () => async () => { throw new Error('offline'); };
-const fetchPrimaryChange = async () => null;
+const fetchPrimaryChange = async () => (${JSON.stringify(primaryChangeFixture(HEAD))});
 const checkPrimaryChange = () => ({ ok: true });
 const closerReviewProof = async () => ({ ok: true });
 ${gateCode.replace(/^import .*;\n/gm, '').replaceAll('<<REPO>>', REPO).replaceAll('<<PR_NUMBER>>', '42')
@@ -263,7 +270,7 @@ test('hammer gate: UNKNOWN + green declared contexts merges; red, absent or unde
   const ok = runGate(t, { checks: green, contexts: ['repo-guards'], unknown: true });
   assert.equal(ok.checksConclusion, 'SUCCESS');
   assert.deepEqual(ok.localValidationUnknown, { ok: true, conclusion: 'SUCCESS' });
-  assert.equal(ok.reasons.some(reason => reason.startsWith('local-validation-unknown')), false, JSON.stringify(ok));
+  assert.equal(ok.ok, true, JSON.stringify(ok));
 
   const red = runGate(t, { checks: [run('repo-guards', 'FAILURE'), run('lint')], contexts: ['repo-guards'], unknown: true });
   assert.equal(red.ok, false);
@@ -278,7 +285,26 @@ test('hammer gate: UNKNOWN + green declared contexts merges; red, absent or unde
 
   const undeclared = runGate(t, { checks: green, contexts: [], unknown: true });
   assert.equal(undeclared.ok, false);
-  assert.ok(undeclared.reasons.includes(UNKNOWN_CONTEXTS_UNDECLARED));
+  assert.ok(undeclared.reasons.includes('absolute-timeout'));
+});
+
+test('hammer gate: green CI never overrides failure-tainted or invalid UNKNOWN receipts', t => {
+  const base = { validation: 'unknown', reason: 'absolute-timeout', ciAuthoritative: true };
+  for (const receipt of [
+    { ...base, localFailureObserved: true },
+    { ...base, ciAuthoritative: false },
+    { ...base, ciAuthoritative: undefined },
+    { ...base, reason: 'validation-drain-unconfirmed' },
+    { ...base, validation: 'fail' },
+    '{unreadable',
+    'null',
+  ]) {
+    const result = runGate(t, { checks: green, contexts: ['repo-guards'], unknown: true, receipt });
+    assert.equal(result.checksConclusion, 'SUCCESS');
+    assert.equal(result.ok, false, JSON.stringify(receipt));
+    assert.equal(result.localValidationUnknown.ok, false);
+    assert.ok(result.reasons.includes(receipt.reason || 'local-validation-unknown-not-deferrable'));
+  }
 });
 
 test('hammer gate: a declared context that never reported is pending for every hammer merge', t => {
@@ -304,9 +330,17 @@ test('queue-v2: repository-scoped contexts join the lane required set; UNKNOWN v
   assert.equal(classifyQueueChecks(snapshot(green)).kind, 'green');
 
   const { h: handoff, e: evidence } = queueHandoffFixture();
-  const unknown = { ...evidence, localValidation: { ...handoff.localValidation, ok: false, result: 'unknown' } };
+  const unknown = { ...evidence, localValidation: { ...handoff.localValidation, ok: false, result: 'unknown',
+    ciAuthoritative: true, localFailureObserved: false } };
   assert.equal(queueLocalValidationUnknown(unknown), true);
   assert.equal(validateQueueHandoff(handoff, unknown), true);
   const failed = { ...unknown, localValidation: { ...unknown.localValidation, result: 'fail' } };
   assert.throws(() => validateQueueHandoff(handoff, failed), /failed localValidation/);
+  for (const patch of [{ ciAuthoritative: false }, { ciAuthoritative: undefined }, { localFailureObserved: true }]) {
+    for (const ok of [false, true]) {
+      const invalid = { ...unknown, localValidation: { ...unknown.localValidation, ...patch, ok } };
+      assert.equal(queueLocalValidationUnknown(invalid), false);
+      assert.throws(() => validateQueueHandoff(handoff, invalid), /failed localValidation/);
+    }
+  }
 });

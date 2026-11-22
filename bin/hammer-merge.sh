@@ -352,7 +352,7 @@ import { readFileSync } from 'node:fs';
 import { closerReviewProof } from '<<ROOT_DIR>>/src/ama/closer-review-proof.mjs';
 import { tenureHeadNeedsReview } from '<<ROOT_DIR>>/src/pr-tenure.mjs';
 import { resolveRequiredCheckContextsFromCfg } from '<<ROOT_DIR>>/src/ama/required-check-contexts.mjs';
-import { readUnknownValidationReceipt, unknownValidationCiGate } from '<<ROOT_DIR>>/src/ama/local-validation-unknown.mjs';
+import { readUnknownValidationReceipt, recordedUnknownDefersToCi, unknownValidationCiGate } from '<<ROOT_DIR>>/src/ama/local-validation-unknown.mjs';
 
 const repo = '<<REPO>>';
 const prNumber = Number('<<PR_NUMBER>>');
@@ -429,12 +429,15 @@ if (tenureHeadNeedsReview('<<TENURE_REVIEW_ARG>>', '<<REVIEWED_SHA>>', expectedH
   eligibility.reasons.push('tenure-independent-review-required');
 }
 // MRQ-20: an UNKNOWN local validation of this head defers to exact-head CI
-// only while declared required contexts exist and all of them are green. Red,
-// pending or absent contexts already read ci-not-green above, so only an empty
-// declaration adds a reason (and keeps pending-only CI waits unchanged).
-const unknownValidation = readUnknownValidationReceipt('<<RUN_DIR>>', expectedHead)
-  ? unknownValidationCiGate({ checks, requiredContexts }) : null;
-if (unknownValidation && !unknownValidation.ok && checksConclusion === 'SUCCESS') {
+// only with a valid CI-authoritative receipt and declared green contexts.
+// Invalid receipts block independently of CI; valid receipts with pending/red
+// contexts keep the existing ci-not-green wait/repair handling.
+const unknownReceipt = readUnknownValidationReceipt('<<RUN_DIR>>', expectedHead);
+const unknownDefersToCi = recordedUnknownDefersToCi(unknownReceipt, requiredContexts);
+const unknownValidation = !unknownReceipt ? null : unknownDefersToCi
+  ? unknownValidationCiGate({ checks, requiredContexts })
+  : { ok: false, reason: unknownReceipt.reason || 'local-validation-unknown-not-deferrable' };
+if (unknownValidation && !unknownValidation.ok && (!unknownDefersToCi || checksConclusion === 'SUCCESS')) {
   eligibility.eligible = false;
   eligibility.reasons.push(unknownValidation.reason);
 }

@@ -37,10 +37,14 @@ only one repository runs never reads as missing in another.
   validation timeout stopped, runs one fresh round.
 - `bin/hammer-merge.sh` gate: passes the resolved global and per-repository
   contexts to the shared classifier and to `evaluateMergeEligibility`. With an
-  UNKNOWN receipt for the head, it also requires a non-empty declared set.
+  UNKNOWN receipt for the head, it also requires explicit CI authority, an
+  eligible deferral reason, no observed local failure and a non-empty current
+  declared set. Unreadable, legacy and demoted receipts block even with green CI.
   The gate JSON gains `requiredContexts` and `localValidationUnknown`.
 - Queue-v2: `resolveQueueRequiredSet` takes the lane repository; a trusted
-  handoff local-validation read of `result: unknown` is admissible, and
+  handoff local-validation read of `result: unknown` is admissible only with
+  `ciAuthoritative: true` and `localFailureObserved !== true`, even when
+  `ok: true` is present, and
   `queue-merge` returns it to the closer unless the exact candidate's declared
   contexts are non-empty and green.
 - Docs corrected in place: `docs/RUNBOOK-ama-closure.md`,
@@ -49,6 +53,8 @@ only one repository runs never reads as missing in another.
 
 The daemon and closer still read only the global list; giving them the
 repository is a follow-up. No CI job, check, gate, ratchet or label is added.
+Existing store shapes, lifecycle states/transitions and smoke promises remain
+unchanged by the final remediation.
 
 ## Verification
 
@@ -64,3 +70,17 @@ repository is a follow-up. No CI job, check, gate, ratchet or label is added.
   UNKNOWN classification of an inconclusive mirror exit 75.
 - `npm run lint` (0 errors), `npm run typecheck:contracts`,
   `bash demo/research-finding-walkthrough.sh`: pass.
+
+Final comment-only remediation verification:
+
+- `bash bin/run-bounded.sh --timeout 180 -- node test/run-tests.mjs test/mrq-20-validation-unknown.test.mjs test/hamlateaudit-01.test.mjs test/finalization-queue-handoff.test.mjs test/finalization-queue-merge.test.mjs test/hammer-validation-deferral.test.mjs`:
+  136/136 pass after rebasing onto current main. The rendered gate now has valid
+  primary-change evidence, so tests assert actual eligibility and refusal for
+  failure-tainted, demoted, legacy, unconfirmed-drain and unreadable receipts.
+  Queue tests reject invalid UNKNOWN evidence with either value of `ok`.
+- `npm run lint`: 0 errors (147 existing warnings);
+  `npm run typecheck:contracts`: pass.
+- `node scripts/validate-data-model-catalog.mjs`: 103 entries validated.
+- `bash -n bin/hammer-merge.sh`, `git diff --check` and
+  `bash demo/research-finding-walkthrough.sh`: pass.
+- The full local suite was intentionally left to PR-head CI.

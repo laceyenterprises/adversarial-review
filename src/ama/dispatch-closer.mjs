@@ -99,7 +99,7 @@ import {
   statSync,
   writeFileSync,
 } from 'node:fs';
-import { hostname, userInfo } from 'node:os';
+import { homedir, hostname, userInfo } from 'node:os';
 import { basename, dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
@@ -262,9 +262,9 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 const SUBMODULE_ROOT = resolve(__dirname, '..', '..');
 const AGENT_OS_ROOT = resolve(SUBMODULE_ROOT, '..', '..');
 
-const DEFAULT_HQ_PATH = '/Users/airlock/.local/bin/hq';  // cfg-allowlist(account-airlock): oss-readiness-apply-reviewed
 function resolveCloserHqPath(dispatchContext = {}, env = process.env) {
-  return dispatchContext.hqPath || env.HQ_BIN || DEFAULT_HQ_PATH;
+  // The per-user install location follows the daemon user's home, not a fixed account.
+  return dispatchContext.hqPath || env.HQ_BIN || join(env.HOME || homedir(), '.local', 'bin', 'hq');
 }
 const DEFAULT_HQ_ROOT = process.env.HQ_ROOT || process.env.AGENT_OS_HQ_ROOT || null;
 const DEFAULT_PROJECT = 'adversarial-merge-authority';
@@ -2758,7 +2758,7 @@ export function updateAmaCloserDispatchRecord(rootDir, identity, mutate, { clean
 
 // Kept as a compatibility seam for background wake callers. A later refusal
 // cannot establish whether an earlier interrupted submission reached HQ.
-// reconcilePreReceiptIntent owns the fenced settlement now (LAC-2081).
+// reconcilePreReceiptIntent owns the fenced settlement now.
 export function settleRefusedHammerWake() { return null; }
 
 function buildBootstrapEligibilityReasons({ reviewState, prMetadata, verdict, dispatchContext }) {

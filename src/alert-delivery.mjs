@@ -19,11 +19,12 @@ import { spawn as spawnChild } from 'node:child_process';
 
 import { writeFileAtomic } from './atomic-write.mjs';
 import { resolveNodeBin } from './node-interpreter.mjs';
+import { resolveDeployRoot } from './deploy-root.mjs';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 const DEFAULT_TOP_LEVEL_PATH = join(homedir(), 'agent-os/config.yaml');
 const DEFAULT_SECRETS_ROOT = join(homedir(), '.config', 'adversarial-review', 'secrets');
-const LEGACY_SECRETS_ROOT = '/Users/airlock/agent-os/agents/clio/credentials/local';  // cfg-allowlist(account-airlock): oss-readiness-apply-reviewed
+const LEGACY_SECRETS_SUBPATH = ['agents', 'clio', 'credentials', 'local'];
 const DEFAULT_ALERT_BUS_URL = 'http://127.0.0.1:18799/hooks/wake';
 const DEFAULT_ALERT_NAME = 'Adversarial Watcher Health';
 const DEFAULT_ALERT_AGENT_ID = 'main';
@@ -68,11 +69,15 @@ function finiteNonNegativeNumber(value, fallback) {
   return Number.isFinite(parsed) && parsed >= 0 ? parsed : fallback;
 }
 
-function resolveDefaultHooksTokenFile(fsImpl = { existsSync }) {
+function resolveDefaultHooksTokenFile(fsImpl = { existsSync }, env = process.env) {
   const defaultTokenFile = join(DEFAULT_SECRETS_ROOT, 'litellm-alert-bridge.token');
-  const legacyTokenFile = join(LEGACY_SECRETS_ROOT, 'litellm-alert-bridge.token');
   if (fsImpl.existsSync(defaultTokenFile)) return defaultTokenFile;
-  if (fsImpl.existsSync(legacyTokenFile)) return legacyTokenFile;
+  // The legacy location lives under the configured deployment checkout.
+  const deployRoot = resolveDeployRoot(env);
+  if (deployRoot) {
+    const legacyTokenFile = join(deployRoot, ...LEGACY_SECRETS_SUBPATH, 'litellm-alert-bridge.token');
+    if (fsImpl.existsSync(legacyTokenFile)) return legacyTokenFile;
+  }
   return defaultTokenFile;
 }
 
@@ -474,7 +479,7 @@ function resolveAlertTransportDefaults(env = process.env, {
       env.HOOKS_TOKEN_FILE ||
       resolveHooksTokenFileFromRoot(env.ADV_SECRETS_ROOT, fsImpl) ||
       resolveHooksTokenFileFromRoot(env.LITELLM_SECRETS_ROOT, fsImpl) ||
-      resolveDefaultHooksTokenFile(fsImpl),
+      resolveDefaultHooksTokenFile(fsImpl, env),
     rootDir: resolveAlertSinkStateRoot(env, rootDir),
     retryDelayMs: finiteNonNegativeNumber(
       env.ADVERSARIAL_ALERT_DELIVERY_RETRY_DELAY_MS,

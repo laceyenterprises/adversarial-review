@@ -36,8 +36,8 @@ import { parseReviewFindings } from './kernel/review-findings.mjs';
 import { isSettledCommentOnlyReview } from './remediation-closeout.mjs';
 
 const CI_STATES_WITHOUT_FAILURE = new Set(['pending', 'green']);
-// A transient git failure (network, lock) in the contamination audit or the push
-// proof is retried in-process with this backoff, then across reconcile ticks for
+// A transient Git or attestation read failure during the audit or push proof
+// is retried in-process with this backoff, then across reconcile ticks for
 // the window below, before it may become a withheld (held, alerted) head.
 export const FINAL_ROUND_PROOF_RETRY_DELAYS_MS = [2000, 5000];
 export const FINAL_ROUND_PROOF_TRANSIENT_WINDOW_MS = 60 * 60 * 1000;
@@ -215,7 +215,7 @@ export function projectRecoveredWorkflowAuthBlocker({ job, operationalBlockers, 
  * suppressing a re-review of it. `completionFields` is spread into the job's
  * completion metadata on every terminal path.
  *
- * A transient git failure is not a verdict: it is retried, and while it lasts
+ * A transient proof failure is retried, and while it lasts
  * this returns `{ retryLater: true, job }` with the attempt recorded on the job,
  * so the caller leaves the job in progress instead of terminating it.
  */
@@ -232,6 +232,7 @@ async function verifyNativeFixAllHead({ job, hqWorker, headSha, remainingMs, exe
   if (hqWorker?.requiresProducedAttestation !== true) return { reason: 'final-fix-all-hq-custody-missing' };
   const proof = await resolveDaemonWorkerIdentityFromHeadAttestation({
     repo: job.repo, prNumber: job.prNumber, currentHeadSha: headSha, hqRoot: hqWorker.hqRoot, env,
+    // Reconciliation owns the bounded retries and rechecks the live target on each attempt.
     readHeadAttestationChainForPrImpl: args => readHeadAttestationChainForPr({ ...args, execFileImpl,
       logger: log, timeoutMs: Math.min(30_000, remainingMs), retryDelaysMs: [] }),
   });
@@ -304,7 +305,7 @@ async function evaluateCommentOnlyFinalRoundCompletion({
     const transient = transientProofFailure(audit, push);
     if (!transient) break;
     if (attempt < retryDelaysMs.length) {
-      log.warn?.(`[follow-up-remediation] Retrying final-round push proof for ${job.repo}#${job.prNumber} after a transient git failure: ${transient}`);
+      log.warn?.(`[follow-up-remediation] Retrying final-round push proof for ${job.repo}#${job.prNumber} after a transient failure: ${transient}`);
       await sleepImpl(retryDelaysMs[attempt]);
       continue;
     }

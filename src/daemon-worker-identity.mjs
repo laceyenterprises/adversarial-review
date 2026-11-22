@@ -317,6 +317,7 @@ export async function resolveDaemonWorkerIdentityFromHeadAttestation({
       ok: false,
       reason: 'head-attestation-chain-read-failed',
       error: String(err?.message || err),
+      ...(isTransientHeadAttestationReadError(err) ? { transient: true } : {}),
     };
   }
   const producedAtHead = (Array.isArray(rows) ? rows : [])

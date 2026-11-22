@@ -283,9 +283,12 @@ bounded untrusted host-read context as conflict-primary handoff. The existing
 published head, including receipts in archived stopped jobs. A completed native
 fix-all additionally records `completion.workerPushProof.producedAttestationId`
 alongside the structural replay method. The watcher requires that proof, a
-completed outcome, and a matching successor head before retaining closure. Older fix-all
-jobs marked `review: full` qualify for closeout with the same exact source,
-settled Comment-only verdict and publication proof. No new store, status,
+completed outcome, and a matching successor head before retaining closure.
+Older fix-all jobs marked `review: full` also need native HQ custody
+(`remediationWorker.requiresProducedAttestation: true`) and a verified produced
+attestation for the exact destination head. Completed legacy receipts that lack
+the new proof fields can fall back to an exact-head review at rollout.
+No new store, status,
 config key or merge predicate is introduced. The ordinary PR-wide
 round ledger remains intact; the one work order starts at round zero with a
 fixed cap of one, preserves the PR risk classification, and does not inherit the consecutive non-blocking stop.
@@ -1181,11 +1184,13 @@ mandatory base rebase makes most pushes `diverged` from the reviewed head, which
 the earlier ancestry-only proof rejected without a log line.
 `completion.workerPushProof` records `{ method: "git-cherry-replay",
 reviewedCommitsReplayed, workerCommits }`. Reconcile remains re-entrant when a
-transient lookup exhausts its retry budget. A transient git failure during the
-proof (network, remote hang-up, lock contention) is retried after 2 s and 5 s;
+transient lookup exhausts its retry budget. Transient Git failures and transient
+native fix-all attestation read failures are retried after 2 s and 5 s;
 if it persists the job stays in `in-progress/` with
 `finalRoundProofTransient: { since, lastAttemptAt, attempts, error }` and later
-ticks retry it. After one hour from `since` the proof is withheld as usual. HQ jobs use their resolved topic
+ticks retry it. After one hour from `since` the proof is withheld as usual.
+Missing or invalid attestation rows and permanent read failures withhold the
+proof immediately. HQ jobs use their resolved topic
 workspace for this proof. Every withheld proof logs its reason
 (`finalRoundOutcome.push`, for example `live-head-mismatch`,
 `foreign-commit-in-push`, `branch-contamination-audit-failed`). When the proof

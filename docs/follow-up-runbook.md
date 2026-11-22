@@ -31,6 +31,10 @@ re-review suppression. Final fix-all is a separate one-round work order. It
 reconciles the original reply against the recorded advisory titles and proves
 publication with the matching HQ workspace, produced attestation and Git
 replay. A verified pending-CI wait preserves the original review for closure.
+Transient attestation reads retry the proof and retain the in-progress job for
+up to one hour from the first deferred proof. An operator-only CI decline
+leaves the advisory unresolved and follows the existing fallback review
+admission path.
 The comment identifies the final fix-all round and reports the PR-wide spend
 alongside the ordinary remediation budget.
 

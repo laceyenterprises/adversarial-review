@@ -76,7 +76,7 @@ export function hasWorkerJobTrailer(message, jobId) {
  * commit, or a merge fails closed. Every withheld proof logs its reason; a
  * `gh` failure throws so the job stays in progress and the next reconcile
  * retries it. A git failure that `isTransientGitFailure` recognizes is withheld
- * with `transient: true`; the caller retries it rather than holding the head.
+ * with `transient: true`, as is a retryable produced-attestation read failure.
  *
  * @returns {Promise<{ workerPushedHeadSha: string|null, liveHeadSha: string|null,
  *   reason: string, proof?: object, transient?: boolean }>}
@@ -154,7 +154,8 @@ export async function proveFinalRoundWorkerPush({
     if (verifyProducedHead && remainingMs <= 0) return withheld('git-proof-deadline-exceeded');
     const produced = verifyProducedHead ? await verifyProducedHead(liveHeadSha, remainingMs) : null;
     if (verifyProducedHead && !produced?.attestationId) {
-      return withheld(produced?.reason || 'produced-attestation-unverified');
+      return { ...withheld(produced?.reason || 'produced-attestation-unverified'),
+        transient: produced?.transient === true };
     }
     // Native HQ workers can publish with a signed branch-push receipt in
     // place of a job trailer at the tip. Other added commits still need

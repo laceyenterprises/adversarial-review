@@ -901,8 +901,12 @@ Final fix-all always uses an HQ-provisioned branch-push worker, including
 during local failover. Its recorded launch must match the canonical workspace
 and exact-head produced attestation; missing identity requires recovery by the
 existing owner. Offline custody fixtures cover crash/retry and wrong-workspace
-refusal. After normal deployment, SRE observes a natural final-fix-all launch,
-completion receipt and matching produced attestation before declaring recovery.
+refusal. Transient attestation read failures retain the in-progress job within
+the existing one-hour proof window. Completed legacy receipts without native
+proof may fall back to exact-head review at rollout. After normal deployment,
+SRE checks the follow-up service identity can read the produced attestation for
+Agent OS PR 11403 and observes a natural final-fix-all launch, completion
+receipt and matching produced attestation before declaring recovery.
 
 In-place repair custody is reconciled before watcher admission, at most once
 per 30 seconds. Complete terminal retry evidence can retire an unpublished

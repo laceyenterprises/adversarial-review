@@ -8,6 +8,7 @@ import { reconcileFollowUpJob } from '../src/follow-up-remediation.mjs';
 import { getFollowUpJobDir, writeFollowUpJob } from '../src/follow-up-jobs.mjs';
 import { ensureReviewStateSchema, getReviewRow, openReviewStateDb, requestReviewRereview } from '../src/review-state.mjs';
 import { findFinalRemediationPushJob, isCompletedFinalRemediationJob } from '../src/comment-only-final-round.mjs';
+import { FINAL_ROUND_PROOF_TRANSIENT_WINDOW_MS } from '../src/comment-only-final-round-completion.mjs';
 import incident from './fixtures/commentclose-01/pr-11403-final-fix-all.json' with { type: 'json' };
 
 const HEAD = incident.priorWrapper.completion.workerPushedHeadSha;
@@ -17,14 +18,16 @@ const LRQ = 'lrq_native_fixture';
 const quiet = { log() {}, warn() {}, error() {} };
 
 async function replay(t, { checks = 'green', changeReply = () => {}, valid = true, produced = true,
-  extraCommit = false, moved = false, reviewerLive = false } = {}) {
+  extraCommit = false, moved = false, reviewerLive = false, attestationReadError = () => null,
+  transientSince, reviewBody = incident.job.reviewBody } = {}) {
   const rootDir = realpathSync(mkdtempSync(join(tmpdir(), 'lac2318-')));
   t.after(() => rmSync(rootDir, { recursive: true, force: true }));
   const previous = process.env.HQ_ROOT;
   process.env.HQ_ROOT = rootDir;
   t.after(() => { if (previous === undefined) delete process.env.HQ_ROOT; else process.env.HQ_ROOT = previous; });
-  const job = { ...structuredClone(incident.job), status: 'in_progress' };
+  const job = { ...structuredClone(incident.job), status: 'in_progress', reviewBody };
   delete job.completedAt;
+  if (transientSince) job.finalRoundProofTransient = { since: transientSince, attempts: 3 };
   const slot = join(rootDir, 'workers', 'native-fixture');
   const workspace = join(slot, 'repo');
   mkdirSync(join(workspace, '.git'), { recursive: true });
@@ -58,10 +61,15 @@ async function replay(t, { checks = 'green', changeReply = () => {}, valid = tru
   const beforeRow = readRow();
   const requests = [], wakes = [], comments = [];
   let liveReads = 0;
+  let attestationReads = 0;
   const execFileImpl = async (bin, args) => {
-    if (args[0] === 'attest') return { stdout: JSON.stringify(produced ? [
-      { kind: 'produced', valid, head_sha: HEAD, launch_request_id: LRQ, worker_class: 'codex', attestation_id: 'lha_fixture' },
-    ] : []) };
+    if (args[0] === 'attest') {
+      const failure = attestationReadError(++attestationReads);
+      if (failure) throw failure;
+      return { stdout: JSON.stringify(produced ? [
+        { kind: 'produced', valid, head_sha: HEAD, launch_request_id: LRQ, worker_class: 'codex', attestation_id: 'lha_fixture' },
+      ] : []) };
+    }
     if (args[0] === 'dispatch' && args[1] === 'status') return { stdout: JSON.stringify({
       status: 'succeeded', dispatchId: LRQ, launchRequestId: LRQ, ticketRef: job.jobId,
       workerRunId: 'wrun_fixture', workspacePath: workspace, repo: workspace,
@@ -88,7 +96,7 @@ async function replay(t, { checks = 'green', changeReply = () => {}, valid = tru
     }
     assert.fail(`Unexpected fixture command ${bin} ${args.join(' ')}`);
   };
-  const result = await reconcileFollowUpJob({ rootDir, job, jobPath, now: () => incident.job.completedAt,
+  const reconcile = async job => reconcileFollowUpJob({ rootDir, job, jobPath, now: () => incident.job.completedAt,
     execFileImpl, log: quiet, workerTerminalEvent: { lrq: LRQ, status: 'succeeded' },
     resolvePRLifecycleImpl: async () => ({ source: 'live', headSha: HEAD, prState: 'open', mergeable: 'MERGEABLE' }),
     auditWorkspaceForContaminationImpl: async () => ({ suspect: [], error: null }),
@@ -97,7 +105,8 @@ async function replay(t, { checks = 'green', changeReply = () => {}, valid = tru
     requestWatcherWakeImpl: input => wakes.push(input), requestRereviewWakeImpl: () => ({}),
     postCommentImpl: async ({ body }) => { comments.push(body); return { posted: false }; },
   });
-  return { rootDir, result, requests, wakes, comments, beforeRow, afterRow: readRow() };
+  const result = await reconcile(job);
+  return { rootDir, result, reconcile, requests, wakes, comments, beforeRow, afterRow: readRow(), attestationReads };
 }
 
 for (const checks of ['green', 'pending']) test(`PR 11403 final fix-all keeps closure with ${checks} on the published head`, async t => {
@@ -134,6 +143,54 @@ test('PR 11403 replay preserves an already live reviewer claim', async t => {
   assert.equal(result.job.reReview.nextAction.actor, 'reviewer');
 });
 
+test('PR 11403 replay retries a brief attestation read failure', async t => {
+  const { result, requests, attestationReads } = await replay(t, {
+    attestationReadError: attempt => attempt === 1 ? new Error('database is locked') : null,
+  });
+  assert.equal(attestationReads, 2);
+  assert.equal(result.action, 'completed');
+  assert.equal(result.job.completion.workerPushProof.producedAttestationId, 'lha_fixture');
+  assert.deepEqual(requests, []);
+});
+
+test('PR 11403 replay keeps custody across ticks when attestation reads stay transient', async t => {
+  const { result, reconcile, requests, wakes, attestationReads } = await replay(t, {
+    attestationReadError: attempt => attempt <= 3 ? Object.assign(new Error('read failed'), { code: 'ETIMEDOUT' }) : null,
+  });
+  assert.equal(attestationReads, 3);
+  assert.equal(result.action, 'active');
+  assert.equal(result.reason, 'final-round-proof-transient');
+  assert.equal(result.job.status, 'in_progress');
+  assert.equal(result.job.finalRoundProofTransient.attempts, 3);
+  assert.equal(result.job.finalRoundProofTransient.error, 'head-attestation-chain-read-failed');
+  assert.deepEqual(wakes, []);
+  assert.equal((await reconcile(result.job)).action, 'completed');
+  assert.deepEqual(requests, []);
+});
+
+test('PR 11403 replay withholds publication after the transient proof window', async t => {
+  const { result, wakes, attestationReads } = await replay(t, {
+    transientSince: new Date(Date.now() - FINAL_ROUND_PROOF_TRANSIENT_WINDOW_MS).toISOString(),
+    attestationReadError: () => new Error('database is locked'),
+  });
+  assert.equal(attestationReads, 3);
+  assert.equal(result.action, 'stopped');
+  assert.equal(result.job.completion.finalRoundOutcome.push, 'head-attestation-chain-read-failed');
+  assert.equal(result.job.completion.withheldPushHeadSha, HEAD);
+  assert.deepEqual(wakes, []);
+});
+
+test('PR 11403 legacy completed receipt does not establish exact-head custody', t => {
+  const rootDir = mkdtempSync(join(tmpdir(), 'lac2318-legacy-'));
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  const job = { ...incident.job, ...incident.priorWrapper, status: 'completed',
+    completion: { ...incident.priorWrapper.completion, finalRemediationPush: true },
+    reReview: { requested: false, nextAction: { action: 'wait-for-CI', head: HEAD } } };
+  writeFollowUpJob(join(getFollowUpJobDir(rootDir, 'completed'), `${job.jobId}.json`), job);
+  assert.equal(isCompletedFinalRemediationJob(job), false);
+  assert.equal(findFinalRemediationPushJob(rootDir, { ...job, headSha: HEAD }), null);
+});
+
 for (const [name, input] of [
   ['omitted advisory', { changeReply: reply => { reply.nonBlocking = []; } }],
   ['partial reply without a corroborated wait', { changeReply: reply => { reply.operationalBlockers = []; } }],
@@ -142,11 +199,21 @@ for (const [name, input] of [
     reply.nonBlocking = [];
     reply.pushback = [{ title, finding, reasoning: 'This test is unnecessary.' }];
   } }],
+  ['operator-only CI decline', {
+    reviewBody: incident.job.reviewBody.replace(/- \*\*Recommended fix:\*\* .*/,
+      '- **Recommended fix:** Add a required CI check for directory failures.'),
+    changeReply: reply => {
+      const [{ title }] = reply.nonBlocking;
+      reply.nonBlocking = [];
+      reply.pushback = [{ title, finding: 'Add a required CI check.', reasoning: 'declined: CI changes are operator-only' }];
+    },
+  }],
   ['human-owned blocker', { changeReply: reply => {
     reply.operationalBlockers[0].needsHumanInput = 'Approve access to a required signing key.';
   } }],
   ['missing produced attestation', { produced: false }],
   ['invalid produced attestation', { valid: false }],
+  ['permanent attestation read failure', { attestationReadError: () => new Error('permission denied') }],
   ['foreign added commit', { extraCommit: true }],
   ['head changes during proof', { moved: true }],
 ]) test(`PR 11403 replay refuses closure custody with ${name}`, async t => {

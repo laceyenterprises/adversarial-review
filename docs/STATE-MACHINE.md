@@ -1698,7 +1698,10 @@ review to the canonical HQ worker slot and proves the exact destination head
 using the launch's verified produced attestation and structural Git replay.
 The reply records a fix for every advisory by title. A partial reply qualifies
 only when a corroborated pipeline wait is all that remains. Disputes and
-remaining findings keep their existing adjudication paths.
+remaining findings keep their existing adjudication paths, including
+operator-only CI declines. Transient attestation read failures use the existing
+in-progress proof retry window. A permanent failure or expired window withholds
+publication proof and allows the ordinary stopped path.
 
 The completed receipt hands the exact published head and original findings to
 the closer. Pending required CI retains its existing observer. The closer

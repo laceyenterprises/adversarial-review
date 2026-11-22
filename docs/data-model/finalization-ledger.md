@@ -128,7 +128,9 @@ returned losslessly; an unrecognized safety fact selects owned evidence refresh.
 
 `migrations/20261023_finalization_queue.sql` adds four tables in the same app
 store. `openFinalizationQueueStore` (exported from `ledger-store.mjs`) converges
-this additive schema. Existing subject events and leases retain their meaning.
+the additive queue schemas in one SQLite transaction. A failed migration rolls
+back the schema changes from that call. Existing subject events and leases
+retain their meaning.
 No caller or lane is activated by this migration or by opening the store.
 
 | Table | Identity and durable fields |

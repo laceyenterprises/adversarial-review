@@ -8,13 +8,17 @@ import { reconcileQueuePublication } from './ledger-fold.mjs';
 
 const migration = new URL('../../migrations/20261023_finalization_queue.sql', import.meta.url);
 export function ensureFinalizationQueueSchema(db) {
-  db.exec(readFileSync(migration, 'utf8'));
-  db.exec(readFileSync(new URL('../../migrations/20261024_finalization_queue_handoff.sql', import.meta.url), 'utf8'));
-  db.exec(readFileSync(new URL('../../migrations/20261025_finalization_queue_admission.sql', import.meta.url), 'utf8'));
-  db.exec(readFileSync(new URL('../../migrations/20261026_finalization_queue_checks.sql', import.meta.url), 'utf8'));
-  db.exec(readFileSync(new URL('../../migrations/20261027_finalization_queue_merge.sql', import.meta.url), 'utf8'));
-  db.exec(readFileSync(new URL('../../migrations/20261029_finalization_queue_routing.sql', import.meta.url), 'utf8'));
-  db.exec(readFileSync(new URL('../../migrations/20261109_finalization_queue_gsr.sql', import.meta.url), 'utf8'));
+  // Install all additive DDL with one commit. A nested call uses SQLite's
+  // savepoint, so a failed migration also rolls back within a caller's transaction.
+  db.transaction(() => {
+    db.exec(readFileSync(migration, 'utf8'));
+    db.exec(readFileSync(new URL('../../migrations/20261024_finalization_queue_handoff.sql', import.meta.url), 'utf8'));
+    db.exec(readFileSync(new URL('../../migrations/20261025_finalization_queue_admission.sql', import.meta.url), 'utf8'));
+    db.exec(readFileSync(new URL('../../migrations/20261026_finalization_queue_checks.sql', import.meta.url), 'utf8'));
+    db.exec(readFileSync(new URL('../../migrations/20261027_finalization_queue_merge.sql', import.meta.url), 'utf8'));
+    db.exec(readFileSync(new URL('../../migrations/20261029_finalization_queue_routing.sql', import.meta.url), 'utf8'));
+    db.exec(readFileSync(new URL('../../migrations/20261109_finalization_queue_gsr.sql', import.meta.url), 'utf8'));
+  })();
 }
 
 export function assertQueueStoreOwner(rootDir) {

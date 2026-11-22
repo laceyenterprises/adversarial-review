@@ -10,6 +10,7 @@ import { fileURLToPath } from 'node:url';
 import { once } from 'node:events';
 import Database from 'better-sqlite3';
 import { openFinalizationQueueStore } from './helpers/queue-fixture-store.mjs';
+import { ensureFinalizationQueueSchema } from '../src/finalization/queue-store.mjs';
 import { createQueueOwner } from '../src/finalization/executor-lease-store.mjs';
 import { resolveQueueOwnerAdapter } from '../src/finalization/queue-owner.mjs';
 import { foldQueue, reconcileQueuePublication } from '../src/finalization/ledger-fold.mjs';
@@ -40,6 +41,33 @@ function advance(store, fence, phase, patch = {}) {
 function publishing(store, fence) {
   for (const phase of ['ready', 'rebasing', 'publishing']) advance(store, fence, phase,
     phase === 'publishing' ? { candidate: 'new-head', exactBase: 'base-head', proof: { sourceRef: 'proof:1' } } : {});
+}
+
+for (const nested of [false, true]) {
+  test(`queue schema convergence rolls back and can retry (${nested ? 'savepoint' : 'transaction'})`, t => {
+    const root = mkdtempSync(join(tmpdir(), 'mgq-schema-'));
+    const db = new Database(join(root, 'reviews.db'));
+    t.after(() => { db.close(); rmSync(root, { recursive: true, force: true }); });
+    db.exec('CREATE TABLE existing_ledger (value TEXT); INSERT INTO existing_ledger VALUES (\'prior\')');
+    // The routing migration's index references columns missing from this table.
+    db.exec('CREATE TABLE finalization_queue_legacy_writer (unrelated TEXT)');
+    const tables = () => db.prepare("SELECT name FROM sqlite_schema WHERE type = 'table' ORDER BY name").pluck().all();
+    const before = tables();
+    const fail = () => {
+      assert.throws(() => ensureFinalizationQueueSchema(db), /no such column: repository/);
+      assert.deepEqual(tables(), before);
+    };
+    if (nested) db.transaction(fail)();
+    else fail();
+    assert.deepEqual(tables(), before);
+    assert.equal(db.prepare('SELECT value FROM existing_ledger').pluck().get(), 'prior');
+    db.exec('DROP TABLE finalization_queue_legacy_writer');
+    ensureFinalizationQueueSchema(db);
+    assert.ok(tables().includes('finalization_queue_gsr'));
+    const after = tables();
+    ensureFinalizationQueueSchema(db);
+    assert.deepEqual(tables(), after);
+  });
 }
 
 test('canonical lane identity preserves distinct Git refs and rejects aliases', () => {

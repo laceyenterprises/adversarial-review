@@ -1049,7 +1049,8 @@ child.wait()
       const bytes = readFileSync(handoffPath, 'utf8');
       assert.deepEqual(JSON.parse(bytes), { schemaVersion: 1, head: checkoutHead, outcome: 'deferred',
         validation: 'unknown', reason: mode === 'inner' ? 'child-check-timeout' : 'absolute-timeout',
-        status: 124, localValidationReceipt: validationPath, cleanupOwner: 'controller' });
+        status: 124, ciAuthoritative: false, requiredContexts: [], localFailureObserved: true,
+        localValidationReceipt: validationPath, cleanupOwner: 'controller' });
       if (mode === 'inner') {
         const retry = spawnSync(process.execPath, [join(root, 'bin/hammer-validate.mjs'), '--canonical', '--', 'check.py'],
           { cwd: checkout, env: { ...process.env, HAM_RUN_DIR: f.dir }, encoding: 'utf8', timeout: 3000 });

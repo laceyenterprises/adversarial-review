@@ -21,7 +21,8 @@
         "close-result.localValidation: validation receipts from one closing invocation",
         "checks[].jobs: GitHub Actions job names and run IDs for a ci-covered check; current step mappings additionally record optional string jobId and step",
         "checks[].diagnostics: private per-command output path, byte cap, exit status and truncation or unavailability evidence",
-        "validation-deferred-<head>.json: immutable run-local unknown outcome with the cause, status, optional validation receipt path and cleanup owner"
+        "validation-deferred-<head>.json: run-local unknown outcome with the cause, status, optional validation receipt path and cleanup owner",
+        "validation-deferred-<head>.json ciAuthoritative, requiredContexts, localFailureObserved (MRQ-20): whether the UNKNOWN defers to the declared exact-head contexts; absent on older receipts"
       ]
     }
   ]

@@ -2229,6 +2229,14 @@ A validator timeout records `validation-stopped` in the controller and
 `canonical-validation-deferred` for the exact head in the closer. The deferral
 supplies no validation audit. A process-inspection no-verdict uses the same
 deferred handoff. The run will not start another battery on that head.
+MRQ-20: when the repository declares required contexts
+(`required_check_contexts` or `required_check_contexts_by_repository`) and no
+local failure was seen before the stop, that UNKNOWN instead hands its verdict
+to exact-head CI. `hammer-close.sh` starts one fresh controller round, which
+reuses the receipt without another battery and continues to publish, CI wait,
+predicate and merge. The gate merges only when every declared context is
+present and green on that head. The mirror's own budget stop (exit 75) and a
+battery killed by a signal the validator did not send are UNKNOWN too.
 The no-verdict signal is scoped to `telegram-responder-guard` and UNKNOWN
 cannot fall through to import-fault success. Cancellation with unconfirmed
 drain retains cancellation instead of writing a validation deferral. Ended

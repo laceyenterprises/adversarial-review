@@ -10069,7 +10069,11 @@ unavailable, the `defaultModel` in the packaged
 `src/adapters/agent-runtime/local/worker-model-seed.json`. The seed uses the
 registry's `classes` object with `defaultModel`, `allowedModels` and optional
 `defaultReasoningLevel`. It covers Codex, Claude and Gemini remediators and
-reviewers. Updating these emergency defaults is a reviewed repository change.
+reviewers, and every closer class the AMA closer can dispatch (`hammer`,
+`hammer-corp`, `hammer-claude`, `hammer-claude-corp`; CLOSERSEED-01), so a
+transient registry outage resolves the closer model from the seed instead of
+deferring. A unit test over the seed and the exported closer class set pins
+that coverage. Updating these emergency defaults is a reviewed repository change.
 The seed path is relative to the resolver module; host files, another checkout,
 local registries and ledgers cannot supply it. A readable registry that omits a
 class fails closed; the seed cannot restore a withdrawn class. A class with an invalid
@@ -10098,7 +10102,8 @@ HOSTOBSDENIAL-01 retains safe host-read refusal classes and fixed detail:
 entitlement-denied names host.observations.read. Entitlement denials and
 not-found registries remain non-retryable reviewer-configuration-error faults
 and never permit seed fallback or infrastructure auto-recovery. Timeouts and
-outages permit seed selection for the six supported classes; unresolved
+outages permit seed selection for the supported classes (the six reviewer and
+remediator classes plus the four closer classes); unresolved
 classes retain the original retryable refusal. Sync diagnostics never satisfy
 readiness or suppress an async refresh.
 

@@ -216,14 +216,16 @@ test('live-pack policy requires a complete recognized edit-only remedy', () => {
   }
 });
 
-test('mixed remedies without additional filenames retain findings and grant no audit or closure credit', () => {
+test('mixed remedies without additional filenames retain ordinary work and operator custody without credit', () => {
   const mixed = card('Exposed credential', 'projects/demo-live-pack/plan.json',
     'Remove the embedded credential from `projects/demo-live-pack/plan.json` and revoke the exposed token in GitHub.');
   for (const blocking of [false, true]) {
     const body = review(blocking ? { blocking: [mixed], verdict: 'Request changes' } : { nonBlocking: [mixed] });
     const policy = resolveGuardForbiddenNonBlocking(body, [], { livePackProtects: () => true });
     assert.deepEqual(policy.resolved, []);
-    assert.deepEqual(policy.operatorOwned, []);
+    assert.deepEqual(policy.operatorOwned.map(finding => [finding.title, finding.livePackPaths, finding.mixed]),
+      [['Exposed credential', ['projects/demo-live-pack/plan.json'], true]]);
+    assert.match(policy.operatorHandoff, /Operator-Live-Edit-Required: live-pack-plan projects\/demo-live-pack\/plan\.json/);
     assert.equal(policy.auditDetails, '');
     assert.deepEqual((blocking ? policy.remainingBlocking : policy.remaining).map(finding => finding.title),
       ['Exposed credential']);

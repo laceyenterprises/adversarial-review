@@ -435,7 +435,10 @@ const LIVE_PACK_DEFERRAL_RE = /\bResolved-By-Policy:\s*live-pack-plan\b|\bOperat
 const LIVE_PACK_PROTECTED_PATH_RE = /projects\/[\w.-]+\/(?:SPEC\.md|SPEC\.meta\.json|plan\.json|prompts\/[\w./-]*[\w-])/g;
 
 function isLivePackDeferralText(value) {
-  return typeof value === 'string' && LIVE_PACK_DEFERRAL_RE.test(value);
+  // Reported claims inside quotes are evidence of a dispute, not the worker's
+  // own disposition. Keep matching affirmative unquoted legacy prose.
+  return typeof value === 'string'
+    && LIVE_PACK_DEFERRAL_RE.test(value.replace(/"[^"]*"|“[^”]*”/g, ' '));
 }
 
 function livePackOperatorEditBlocker(entry, disposition) {

@@ -110,16 +110,16 @@ export function applyOperatorLivePackEdits(policy, evidence) {
     }
     const { handoffLines, ...rest } = finding;
     void handoffLines;
-    verified.push({ ...rest, addressed: true,
+    verified.push({ ...rest, addressed: !finding.mixed,
       operatorEdit: { headSha: evidence.headSha, reviewedSha: evidence.reviewedSha, approvedBy: evidence.approval.actor,
         paths, commits: [...new Set(paths.flatMap(path => evidence.paths[path].commits))] },
       auditLines: paths.map(path => `Operator-Edit-Verified: live-pack-plan ${path} at ${evidence.headSha}`) });
   }
   if (!verified.length) return policy;
-  const bullets = verified.map(finding => `- **${finding.title}** (${finding.blocking ? 'blocking' : 'non-blocking'}) — `
+  const bullets = verified.filter(finding => !finding.mixed).map(finding => `- **${finding.title}** (${finding.blocking ? 'blocking' : 'non-blocking'}) — `
     + `verified operator edit of ${finding.livePackPaths.join(', ')} at exact head ${evidence.headSha} after reviewed head ${evidence.reviewedSha}.`);
   const lines = [...new Set(verified.flatMap(finding => finding.auditLines))];
-  return { ...policy, resolved: [...policy.resolved, ...verified], operatorOwned,
+  return { ...policy, resolved: [...policy.resolved, ...verified.filter(finding => !finding.mixed)], operatorOwned,
     operatorHandoff: [...new Set(operatorOwned.flatMap(finding => finding.handoffLines))].join('\n'),
     auditDetails: [policy.auditDetails, ...bullets, ...lines].filter(Boolean).join('\n') };
 }

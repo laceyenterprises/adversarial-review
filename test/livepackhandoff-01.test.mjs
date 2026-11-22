@@ -170,6 +170,15 @@ test('legitimate pushback, evidence-backed disputes and generated-path policy ar
   }), { expectedJob: job(body) });
   assert.equal(negated.pushback.length, 1);
   assert.deepEqual(negated.blockers, []);
+  const quoted = validateRemediationReply(reply({
+    addressed: [{ title: 'Targeted wait can terminate a live holder', finding: 'x', action: 'Fixed.' }],
+    pushback: [{ title: 'Timeout reports a partially changed slot as untouched', finding: 'The cited SPEC is allegedly stale.',
+      reasoning: 'The reviewer wrote "requires an operator live edit"; the cited file already contains the correction.',
+      evidence: { headSha: REVIEWED, citation: `${SPEC}:10-14`, output: 'correction present',
+        code: 'the correction', reproduction: 'read the cited lines' } }],
+  }), { expectedJob: job(body) });
+  assert.equal(quoted.pushback.length, 1);
+  assert.deepEqual(quoted.blockers, []);
 });
 
 test('first, middle and last native rounds all carry the operator handoff rule', () => {
@@ -213,6 +222,28 @@ function auditClose(body, auditDetails, { blocking = 0 } = {}) {
 }
 
 const protects = path => path.startsWith('projects/demo-live-pack/') && !path.includes('/changes/');
+
+test('mixed remedies retain ordinary work and operator custody without early closure credit', () => {
+  const mixedSpec = card('Mixed SPEC and token repair', SPEC, `Update \`${SPEC}\` and revoke the token.`);
+  const mixedPrompt = card('Mixed prompt and token repair', PROMPT, `Edit \`${PROMPT}\` and revoke the token.`);
+  const body = review({ blocking: [mixedSpec], nonBlocking: [mixedPrompt], verdict: 'Request changes' });
+  const policy = resolveGuardForbiddenNonBlocking(body, [], { livePackProtects: protects });
+  assert.deepEqual(policy.remainingBlocking.map(finding => finding.title), ['Mixed SPEC and token repair']);
+  assert.deepEqual(policy.remaining.map(finding => finding.title), ['Mixed prompt and token repair']);
+  assert.deepEqual(policy.operatorOwned.map(finding => finding.livePackPaths), [[PROMPT], [SPEC]]);
+  assert.deepEqual(policy.operatorOwned.map(finding => finding.required), [true, true]);
+  assert.deepEqual(policy.resolved, []);
+  assert.match(policy.operatorHandoff, /Operator-Live-Edit-Required: live-pack-plan projects\/demo-live-pack\/SPEC\.md/);
+  const proven = applyOperatorLivePackEdits(policy, {
+    ok: true, headSha: HEAD, reviewedSha: REVIEWED, approval: { actor: 'operator-one' },
+    paths: { [PROMPT]: { commits: ['d'.repeat(40)] }, [SPEC]: { commits: ['e'.repeat(40)] } },
+  });
+  assert.deepEqual(proven.operatorOwned, []);
+  assert.deepEqual(proven.resolved, [], 'proof of the protected edit alone cannot credit the other action');
+  assert.deepEqual(proven.remainingBlocking.map(finding => finding.title), ['Mixed SPEC and token repair']);
+  assert.deepEqual(proven.remaining.map(finding => finding.title), ['Mixed prompt and token repair']);
+  assert.doesNotMatch(proven.auditDetails, /- \*\*Mixed/);
+});
 
 test('closer prose that calls a live-pack finding resolved by policy earns no closure credit', () => {
   const body = review({ nonBlocking: [closeoutCard] });

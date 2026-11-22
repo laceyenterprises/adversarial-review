@@ -6857,12 +6857,12 @@ merge safety gate; follow the helper's audit instructions in the hammer prompt.
 liveness for every `projects/<slug>/{plan.json,SPEC.md,SPEC.meta.json,prompts/**}`
 path the review cites through the live-pack review gate's base-plan and dispatch
 read (`livePack` in its output). A failed lookup protects every guarded pack path.
-The helper requires the complete recommended fix to use recognized edit-only
-wording: explicit protected filenames, or backtick-quoted field identifiers in
-an explicit protected file (including activation-assertion fields). A protected
-`File` field alone grants nothing. Additional actions such as revoking a token,
-even when they name no file, and unrecognized wording remain ordinary findings;
-the protected files still cannot be edited.
+The helper recognizes an edit-only remedy from explicit protected filenames or
+backtick-quoted field identifiers in an explicit protected file (including
+activation-assertion fields). A protected `File` field alone grants nothing.
+A mixed remedy that explicitly requests a protected edit and another action,
+such as token revocation, stays on the ordinary remediation list and also
+creates an operator-owned obligation for that edit.
 
 `LIVEPACKHANDOFF-01` (LAC-2307): unlike a generated path, nothing regenerates a
 live pack file, so a blocking or non-blocking finding whose fix lies entirely in
@@ -6870,7 +6870,10 @@ a live pack's guarded files, the PR's own pack included, is **operator-owned**,
 not resolved by policy. The helper lists it in `operatorOwned` (not in
 `resolved` or `remainingBlocking`) with an
 `Operator-Live-Edit-Required: live-pack-plan <path>` line in `operatorHandoff`
-and no audit credit. The hammer remediates everything else and does not merge
+and no audit credit. A mixed finding remains in `remaining` or
+`remainingBlocking` for its other action; exact-head proof of the operator edit
+removes its operator obligation but does not grant finding credit by itself.
+The hammer remediates everything else and does not merge
 while a required entry remains (blocking always; non-blocking under strict
 mode): it stops with `blocking-findings-present` or
 `non-blocking-findings-present`, which hold and page once per head, and names

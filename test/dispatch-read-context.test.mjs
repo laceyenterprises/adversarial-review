@@ -146,6 +146,9 @@ test('bootstrap retries stop at the original deadline without enabling reads', a
 for (const failure of ['rejection', 'timeout']) {
   test(`bootstrap ${failure} preserves caller read switches and synchronous gates`, async t => {
     const { dispatchReadTransport, prepareDispatchReadContext } = await import(client);
+    // Keep the rejection scenario inside its budget even on a busy runner.
+    // The timeout scenario retains the real clock and exercises expiration.
+    if (failure === 'rejection') t.mock.method(Date, 'now', () => 0);
     t.mock.method(dispatchReadTransport, 'sdk', () => ({
       connect: () => failure === 'timeout' ? new Promise(() => {})
         : Promise.reject(new Error('fixture registration failure')),

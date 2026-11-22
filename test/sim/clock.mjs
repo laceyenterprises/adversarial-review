@@ -14,6 +14,8 @@ export class Clock {
   now = 0;
   queue = [];
   sequence = 0;
+  #isoAt;
+  #iso;
   constructor(seed = 1) { this.seed = seed >>> 0; }
   random() {
     this.seed = (Math.imul(1664525, this.seed) + 1013904223) >>> 0;
@@ -32,5 +34,11 @@ export class Clock {
       await after(event.label);
     }
   }
-  iso() { return new Date(Date.UTC(2030, 0, 1) + this.now).toISOString(); }
+  iso() {
+    if (this.#isoAt !== this.now) {
+      this.#isoAt = this.now;
+      this.#iso = new Date(Date.UTC(2030, 0, 1) + this.now).toISOString();
+    }
+    return this.#iso;
+  }
 }

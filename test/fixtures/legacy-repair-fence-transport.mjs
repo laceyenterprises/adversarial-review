@@ -2,7 +2,6 @@
 import assert from 'node:assert/strict';
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
-import { getFollowUpJobDir } from '../../src/follow-up-jobs.mjs';
 
 const [script, ...selector] = process.argv.slice(2);
 const rootDir = dirname(dirname(script));
@@ -28,6 +27,7 @@ switch (action) {
     process.exit(75);
     break;
   case 'queue-follow-up': {
+    const { getFollowUpJobDir } = await import('../../src/follow-up-jobs.mjs');
     const pending = getFollowUpJobDir(rootDir, 'pending');
     mkdirSync(pending, { recursive: true });
     writeFileSync(join(pending, 'misfiled.json'), JSON.stringify({ repo, prNumber, jobId: 'live-follow-up' }));

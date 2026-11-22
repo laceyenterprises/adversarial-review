@@ -60,3 +60,23 @@ Hammer's canonical changed-file validation passed across 43 Node test files
 with one skip. The pre-receipt intent fixture verifies that a brief lock
 collision allows the record write to proceed and that a persistent holder
 prevents the mutation.
+
+Final fix-all verification retains the five existing review dispositions:
+positive-only legacy fallback during producer rollout; explicit producer
+responsibility for the native lock check; independent local PR-wide HQ custody
+validation; cadence-bounded absence-gate diagnostics; and bounded closer-writer
+contention retries. Additional offline cases cover success on the final retry
+with exactly 10 ms and 25 ms backoff, and immediate refusal without mutation
+or retry for a permanent lock error.
+`npm test -- ama-pre-receipt-intent.test.mjs inplacerepair-01.test.mjs
+retire-legacy-repair.test.mjs dispatch-read-client.test.mjs` passed all 351
+cases. The 14 Python reader cases, lint (zero errors), contract typecheck,
+offline byte-equivalence demo and 102-entry catalog validator also passed.
+`npm test -- watcher-claim-loop.test.mjs` passed all 197 cases within a
+300-second bound. An initial combined run exceeded a 180-second local bound;
+both separate runs passed without assertion failures.
+
+The preceding head's Node 22 CI run reached the 900-second suite deadline
+with 54 files still queued and no failed test assertions in its log; Node 26
+passed. Full-suite validation remains in PR-head CI. No CI workflow, runner
+count or deadline is changed by this remediation.

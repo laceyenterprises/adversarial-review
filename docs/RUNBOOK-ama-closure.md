@@ -1352,8 +1352,8 @@ See the rollout and mixed-version behavior in [LAC-2228](changes/LAC-2228.md).
 
 The helper calls `prepareDispatchReadContext` before its first dispatch read
 of a closer lease, pending repair owner, or prospective new reservation.
-Only a read terminal launch with no live retry
-releases closer custody; live, transient, timed-out or unproven reads refuse
+A terminal launch with no live retry can satisfy
+the repair admission check. Live, transient, timed-out or unproven reads refuse
 `closer-owned-or-unknown`. If preparation fails or leaves reads disabled, it
 refuses `dispatch-read-context-unavailable` with a redacted `detail` and reads
 nothing (REPAIRDISPATCHREAD-01).
@@ -1365,8 +1365,8 @@ claim. The project must be the one HQ will record for this dispatch. For a new
 epoch, the helper requires a selector-bound canonical reply under the existing
 exact review-app project/repository grant before it writes the reservation.
 Budget-available updates and existing-key replays follow their existing rules.
-After the read, it checks the follow-up claim again and re-evaluates ownership
-and the epoch cap under the retry-ledger flock.
+After the read, it checks the follow-up claim and any replacement closer lease.
+It re-evaluates epoch ownership and the cap under the retry-ledger flock.
 
 On `repair-dispatch-project-required`, inspect the native caller's project
 resolution. On `repair-dispatch-read-scope-denied`, check the intended exact
@@ -1376,6 +1376,28 @@ availability and retry through native admission. The helper returns the app,
 project and repository in its refusal JSON, and HQ surfaces the reason and
 short diagnostic. These refusals leave the epoch, predecessor and attempt
 counters as they were.
+
+For a rekeyed `dispatched` closer lease, both native repair reservation and
+`npm run merge-agent:cancel -- --repo OWNER/REPO --pr NUMBER REASON` look for
+one matching `launch-terminal` receipt across up to 32 recorded predecessor
+heads. They require a fresh authenticated App SDK read of that LRQ and its
+complete retry chain, with a 45-second total lookup budget. The repo, PR and
+original target head must match. Terminal non-success evidence releases the
+unchanged carried lease under the PR intent and lease fences. Success
+evidence, live or parked retries, identity mismatches, owner changes, unreadable
+current-head dispatch records and timeouts preserve custody. Repair prepares
+and reads alias evidence outside the intent lock and rechecks closer ownership
+after reacquiring it for reservation. Without a matching terminal receipt,
+repair uses ordinary ledger-proven admission and retains the lease. The
+existing reservation checks and caps still apply.
+
+Operator cancellation performs immediate merge-agent cleanup before AMA
+settlement. It prints the closer LRQ and disposition and writes both heads
+to `result.closer` when a matching receipt is available. `cancelled` reports
+the merge-agent cancel call, and `cleanupComplete` requires both merge-agent
+cleanup and any applicable AMA alias release. See the [operator cancellation
+runbook](follow-up-runbook.md#cancel-the-latest-merge-agent-dispatch). Check source
+review and original PR repair admission independently.
 
 Reviewer harness refunds are separate from unlimited inconclusive **closer**
 refunds: only three failed reviewer claims per PR, across all heads, receive

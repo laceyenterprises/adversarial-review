@@ -3,7 +3,7 @@
 **Owner:** AMA closer ownership and terminal settlement
 **Store:** `data/ama-closer-leases/`
 **Source of truth:** `src/ama/closer-lease.mjs`
-**Runtime surface:** `src/ama/dispatch-closer.mjs`, `src/ama/closer-terminal-cancel.mjs`, `src/ama/gsr-closer-lease.mjs`, `bin/gsr-closer-lease.mjs`
+**Runtime surface:** `src/ama/dispatch-closer.mjs`, `src/ama/closer-terminal-cancel.mjs`, `src/ama/gsr-closer-lease.mjs`, `bin/gsr-closer-lease.mjs`, `src/ama/receipted-closer-alias.mjs`
 
 ## Unreceipted intents (LAC-2081)
 
@@ -69,6 +69,16 @@ launch cannot have authored the new head, so CLOSERHEADPIN-01 ends it with
 `superseded-head-moved` instead (an unconfirmed cancel keeps the rekey). Rekeys retain
 `rekeyedFromHeadSha` and `supersededHeads` so the current lease can identify
 the original dispatch record after the PR head changes.
+
+Operator cancellation and in-place repair can retire a carried `dispatched`
+lease when exactly one `launch-terminal` dispatch receipt in its recorded
+lineage matches the repository, PR and LRQ. The authenticated App SDK must
+confirm the receipt's original target head and the exact LRQ, with complete
+retry evidence and only terminal non-success outcomes. The PR intent lock and
+the lease reclaim flock protect the exact current owner snapshot. Rekeying
+uses the same source flock. Successful audit or receipt evidence, interrupted
+rekeys, successor owners and unreadable evidence retain custody. The original
+dispatch receipt retains its history and counters.
 
 The terminal `terminalOutcome` is one of `succeeded`,
 `failed-without-merge`, `deferred`, `superseded`, `pr-merged-externally`,

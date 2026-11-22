@@ -2841,6 +2841,19 @@ capacity. Unreadable or budget-skipped receipted rows retain
 same-PR ownership and reserve fleet capacity inside the bounded pending-launch
 window. The watcher explicitly enables the shared snapshot through its retry
 wrapper; a failed snapshot does not trigger per-record PostgreSQL queries.
+
+Operator cancellation and native in-place repair can release a rekeyed
+`dispatched` closer lease once the unique original `launch-terminal` receipt
+and a fresh authenticated exact-LRQ lookup bind its dispatch to the carried
+head. Complete retry evidence must show terminal non-success for the root and
+every descendant. The PR intent lock and exact lease CAS protect replacement
+custody. Repair performs the alias lookup outside the intent lock and checks
+for a new owner under a reacquired lock before ordinary reservation. Without
+a matching terminal receipt, ordinary ledger-proven repair admission retains
+the lease. Sticky success, live and parked retries, interrupted rekeys and
+unavailable evidence retain custody. Release leaves dispatch history and
+charges intact.
+
 An armed GitHub auto-merge retains terminal-success ownership only inside the
 30-minute dispatched-lease window (`updatedAt`, falling back to `acquiredAt`);
 observations do not extend it. A no-merge audit bypasses the hold. At expiry an

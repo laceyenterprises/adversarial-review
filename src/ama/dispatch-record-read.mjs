@@ -19,10 +19,15 @@ export function amaCloserDispatchFilePath(rootDir, { repo, prNumber, headSha } =
   return join(amaCloserDispatchDir(rootDir), `${safeRepo}-pr-${Number(prNumber)}-${safeSha}.json`);
 }
 
-export function readAmaCloserDispatchRecord(rootDir, identity) {
+export function readAmaCloserDispatchRecord(rootDir, identity, { strict = false } = {}) {
   try {
-    return JSON.parse(readFileSync(amaCloserDispatchFilePath(rootDir, identity), 'utf8'));
-  } catch {
+    const record = JSON.parse(readFileSync(amaCloserDispatchFilePath(rootDir, identity), 'utf8'));
+    if (strict && (typeof record?.state !== 'string' || !record.state)) {
+      throw new Error('closer dispatch record is missing its state');
+    }
+    return record;
+  } catch (error) {
+    if (strict && error.code !== 'ENOENT') throw error;
     return null;
   }
 }

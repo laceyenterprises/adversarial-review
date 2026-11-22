@@ -14,6 +14,7 @@ import { readLaunchRequestStatusFromLedgerAsync } from '../src/session-ledger-re
 import { readRepairFollowUpClaim } from '../src/repair-follow-up-claim.mjs';
 import { launchRequestOwned } from '../src/ama/launch-request-status.mjs';
 import { prepareDispatchReadContext, readDispatchLaunches } from '../src/dispatch-read-client.mjs';
+import { findReceiptedCloserAlias, recoverReceiptedCloserAlias } from '../src/ama/receipted-closer-alias.mjs';
 
 // REPAIRDISPATCHREAD-01: this cold CLI is a composition root. Dispatch reads
 // stay disabled until it prepares the read context, and an unprepared read
@@ -72,7 +73,7 @@ export async function main(args, {
     facts = readRepairFacts({ rootDir, db, repo, prNumber, headSha, row, conflicting: conflicting === 'true' });
   } finally { db.close(); }
   if (!facts.cause) return { ok: true, epoch: null, reason: 'budget-available' };
-  const release = tryAcquireCloserIntentLock(rootDir, { repo, prNumber });
+  let release = tryAcquireCloserIntentLock(rootDir, { repo, prNumber });
   if (!release) return { ok: false, reason: 'closer-submission-owned' };
   const readContext = dispatchReadContext(env, prepareDispatchReadContextImpl);
   const readImpl = (selector, readArgs) => readDispatchLaunches(selector, { ...readArgs, env });
@@ -94,14 +95,28 @@ export async function main(args, {
     if (lease?.status === 'pending' && !abandonedAmaCloserLeaseOutcome(lease)) {
       return { ok: false, reason: 'closer-submission-owned' };
     }
+    let aliasReleased = false;
     if (lease?.lrqId && ['pending', 'dispatched'].includes(lease.status)) {
+      const alias = findReceiptedCloserAlias(rootDir, lease);
+      if (alias) release();
       const ready = await readContext();
       if (!ready.ok) return contextUnavailable(ready);
       // Only a correctly read terminal launch with no live retry is unowned;
       // transient, timed-out or unproven reads keep the closer's custody.
-      const owned = launchRequestOwned(await readLaunchRequestStatusFromLedgerAsync({
-        rootDir, env, launchRequestId: lease.lrqId, includeRetryChain: true }));
-      if (owned !== false) return { ok: false, reason: 'closer-owned-or-unknown' };
+      if (alias) {
+        const settlement = await recoverReceiptedCloserAlias({ rootDir, lease, record: alias,
+          env, hqRoot: env.HQ_ROOT });
+        if (!settlement.released) return { ok: false, reason: 'closer-owned-or-unknown', closer: settlement };
+        // Settlement reacquires its own lock. Reacquire for reservation and
+        // check for a successor before proceeding.
+        release = tryAcquireCloserIntentLock(rootDir, { repo, prNumber });
+        if (!release) return { ok: false, reason: 'closer-submission-owned' };
+        aliasReleased = true;
+      } else {
+        const owned = launchRequestOwned(await readLaunchRequestStatusFromLedgerAsync({
+          rootDir, env, launchRequestId: lease.lrqId, includeRetryChain: true }));
+        if (owned !== false) return { ok: false, reason: 'closer-owned-or-unknown' };
+      }
     }
     const pending = facts.epochs.find(epoch => !epoch.reviewHead && !epoch.terminalAt);
     const atReservationHead = typeof pending?.baseHead === 'string'
@@ -112,25 +127,28 @@ export async function main(args, {
     }
     const terminalOwner = await observeRepairOwner({ rootDir, repo,
       epoch: atReservationHead ? pending : null, readImpl });
-    const recheckClaim = () => {
+    const recheckCustody = () => {
       const current = checkClaim();
       if (!current.ok) return current;
       if (current.claimedAt !== claim.claimedAt) return { ok: false, reason: 'remediation-ownership-unknown' };
+      if (aliasReleased && findLiveAmaCloserLease(rootDir, { repo, prNumber, strict: true })) {
+        return { ok: false, reason: 'closer-owned-or-unknown' };
+      }
       return current;
     };
-    const currentClaim = recheckClaim();
-    if (!currentClaim.ok) return currentClaim;
+    const custody = recheckCustody();
+    if (!custody.ok) return custody;
     const reservation = { rootDir, repo, prNumber, headSha, ownerKey,
       cause: facts.cause, dispatchProjectRef, terminalOwner, ownerSnapshot: pending };
     result = reserveRepairEpoch({ ...reservation, requireReadPreflight: true });
     if (result.reason === REPAIR_READ_PREFLIGHT_REQUIRED) {
       const scope = await verifyRepairDispatchScope({ repo, dispatchProjectRef, readContext, readImpl });
       if (!scope.ok) return scope;
-      const current = recheckClaim();
+      const current = recheckCustody();
       if (!current.ok) return current;
       result = reserveRepairEpoch(reservation);
     }
-  } finally { release(); }
+  } finally { release?.(); }
   if (result.reason === 'repair-epoch-cap') await pageRepairCap({ rootDir, repo, prNumber, epochs: result.epochs });
   return { ...result, refundedSpend: facts.refundedSpend };
 }

@@ -30,3 +30,6 @@ its launch expiry without consuming the HQ failure budget. Corrupt records are l
 one file cannot block later obligations. Before each drain attempt, the watcher
 reads the live PR state. Reopened or merged PRs drop their pending obligation
 without cancelling the closer. An unavailable state read leaves it queued.
+
+The [operator cancellation receipt](merge-agent-cancellations.md) records
+manual AMA alias settlement separately from these close obligations.

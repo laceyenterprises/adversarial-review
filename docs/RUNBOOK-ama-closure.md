@@ -6306,6 +6306,34 @@ UNKNOWN handoff takes precedence over own-package import-fault fallback.
 Operator cancellation retains its own outcome even when cleanup returns 125;
 it does not become a canonical-validation deferral.
 
+**UNKNOWN defers to exact-head CI (MRQ-20).** A host-local battery that timed
+out (absolute, idle, check or SIGALRM deadline), was killed for load (the
+mirror's own budget stop, exit 75, or a signal the validator did not send), or
+was denied process inspection has no verdict. When the repository declares
+required contexts, that UNKNOWN does not block: the receipt records
+`ciAuthoritative: true` and the declared `requiredContexts`, no early-failure
+audit is written, and the validator exits 0 without claiming a pass
+(`local-validation-unknown-github-required-gate-authoritative`). A timeout
+also stops the controller round, so `hammer-close.sh` starts one fresh round;
+its validator reuses the receipt instead of re-running the battery. The
+hammer's exact-head gate then merges only when every declared context has
+reported and is green on that head; red, pending or absent contexts block as
+before (`local-validation-unknown-required-contexts-not-green` or
+`ci-not-green`). Without declared contexts, a recorded local failure before
+the stop (a mirror check with `result: fail` or a TAP `not ok` line), or
+unconfirmed drain after a finished battery, the existing deferral above still
+applies. A genuine local failure still blocks and the hammer remediates it.
+Declare contexts per repository in
+`roles.adversarial.merge_authority.required_check_contexts_by_repository`
+(`- repository: owner/name` with `contexts: [...]`). `required_check_contexts`
+applies to every repository, so a context that only one repository runs
+belongs in the per-repository list. Both lists also make an absent context
+read PENDING at the hammer gate and in the queue-v2 required set. The daemon
+and closer read only the global list until they are given the repository.
+Queue-v2 admits a handoff whose trusted local-validation read is
+`result: unknown`; its final merge gate requires the same declared, green
+contexts and never accepts the configured no-CI proof for it.
+
 The validator records the deferred audit and `last-phase` receipt non-finally.
 The closer repeats the audit helper without `--final` and ends the run; no
 `terminal-stop` progress receipt is expected. Once the matching launch ends,

@@ -409,7 +409,7 @@ test('hammer prompt enforces the lease guarded GitHub-required-gate merge protoc
   assert.match(HAMMER_PROMPT, /ham_mark_merge_lease_retryable_abort required-checks-pending/);
   assert.match(HAMMER_PROMPT, /ham_required_gate_pending_only\(\)/);
   assert.match(HAMMER_PROMPT, /\.checksConclusion == "PENDING" and/);
-  assert.match(HAMMER_PROMPT, /const checksConclusion = classifyCheckRollup\(checks\)/);
+  assert.match(HAMMER_PROMPT, /const checksConclusion = classifyCheckRollup\(checks, \{ requiredContexts \}\)/);
   assert.match(HAMMER_PROMPT, /classifyCheckRollup\(\[check\]\) !== 'SUCCESS'/);
   assert.match(HAMMER_PROMPT, /\.checksConclusion != "PENDING"/);
   assert.doesNotMatch(HAMMER_PROMPT, /const badChecks = latestCheckRollupItems\(checks\)\.filter\(\(check\) => \{/);

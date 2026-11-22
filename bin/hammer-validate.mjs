@@ -18,11 +18,15 @@ import { recordHammerPhase } from '../src/ama/hammer-outcome.mjs';
 import { reportHammerEarlyFailure } from '../src/ama/hammer-terminal-audit.mjs';
 import { ValidationSelectionError, UnsupportedPnpmWorkflowError } from '../src/ama/pnpm-validation.mjs';
 import { writeFileAtomic } from '../src/atomic-write.mjs';
+import { loadEffectiveMergeAuthorityConfig } from '../src/ama/effective-policy.mjs';
+import { declaredRequiredContexts, readUnknownValidationReceipt, recordedUnknownDefersToCi,
+  unknownValidationDeferral } from '../src/ama/local-validation-unknown.mjs';
 
 let closeReceipt = process.env.HAM_CLOSE_VALIDATION_RECEIPT;
 const expectedHead = process.env.HAM_CLOSE_VALIDATION_HEAD;
 const runDir = process.env.HAM_RUN_DIR;
 const deferredOutcome = 'canonical-validation-deferred';
+const ciAuthoritativeOutcome = 'local-validation-unknown-github-required-gate-authoritative';
 
 function gitOutput(...args) {
   try {
@@ -37,33 +41,84 @@ const deferredPath = runDir && head ? join(runDir, `validation-deferred-${head}.
 const receipt = { schemaVersion: 1, head, checks: [] };
 let validationUnknown = false;
 let ownsDeferral = false;
+let ciAuthoritative = false;
+let deferral;
+let localTestFailure = false;
+
+// MRQ-20: the exact-head contexts an UNKNOWN result defers to. An unreadable
+// configuration declares none, so UNKNOWN keeps its existing deferral.
+let requiredContextsCache;
+function requiredContexts() {
+  if (requiredContextsCache === undefined) {
+    try { requiredContextsCache = declaredRequiredContexts(loadEffectiveMergeAuthorityConfig(), process.env.HAM_REPO); }
+    catch { requiredContextsCache = []; }
+  }
+  return requiredContextsCache;
+}
 
 function validationDeferred() {
   if (!deferredPath || !existsSync(deferredPath)) return false;
+  if (recordedUnknownDefersToCi(readUnknownValidationReceipt(runDir, head), requiredContexts())) {
+    console.error(`hammer-validate: ${ciAuthoritativeOutcome}: ${deferredPath}; no local pass is claimed. Proceed to the close; it merges only when this exact head's declared required GitHub contexts are all green.`);
+    process.exitCode = 0;
+    return true;
+  }
   console.error(`hammer-validate: ${deferredOutcome}: ${deferredPath}`);
   process.exitCode = 75;
+  return true;
+}
+
+// A failed mirror check row or a TAP `not ok` line is a genuine local failure.
+function localFailureObserved() {
+  return localTestFailure || readValidationReceipt().checks?.some(check => check.result === 'fail') === true;
+}
+
+function writeDeferral(overwrite) {
+  if (!deferredPath) return true;
+  try {
+    writeFileAtomic(deferredPath, JSON.stringify({
+      schemaVersion: 1, head, outcome: 'deferred', validation: 'unknown', ...deferral,
+      ...(closeReceipt ? { localValidationReceipt: closeReceipt } : {}),
+      cleanupOwner: process.env.HAM_CONTROLLER_RECORD ? 'controller' : 'bounded-command',
+    }), { mode: 0o600, overwrite });
+  } catch (error) {
+    if (error.code === 'EEXIST') return false;
+    console.error('hammer-validate: deferred validation receipt unavailable');
+  }
   return true;
 }
 
 function deferValidation(reason, status) {
   if (validationUnknown) return;
   validationUnknown = true;
-  if (deferredPath) {
-    try {
-      writeFileAtomic(deferredPath, JSON.stringify({
-        schemaVersion: 1, head, outcome: 'deferred', validation: 'unknown', reason, status,
-        ...(closeReceipt ? { localValidationReceipt: closeReceipt } : {}),
-        cleanupOwner: process.env.HAM_CONTROLLER_RECORD ? 'controller' : 'bounded-command',
-      }), { mode: 0o600, overwrite: false });
-    } catch (error) {
-      if (error.code === 'EEXIST') return;
-      console.error('hammer-validate: deferred validation receipt unavailable');
-    }
+  const localFailure = localFailureObserved();
+  const decision = canonical ? unknownValidationDeferral({ reason,
+    requiredContexts: requiredContexts(), localFailureObserved: localFailure }) : { ciAuthoritative: false };
+  ciAuthoritative = decision.ciAuthoritative;
+  deferral = { reason, status, ciAuthoritative, requiredContexts: decision.requiredContexts || [],
+    localFailureObserved: localFailure };
+  if (!writeDeferral(false)) return;
+  if (ciAuthoritative) {
+    // The close re-uses this receipt and continues to the exact-head CI gate.
+    // No early-failure audit or deferred phase: this head may still merge.
+    console.error(`hammer-validate: ${ciAuthoritativeOutcome}: ${reason}; validation unknown, no local pass claimed. Exact-head required contexts decide: ${deferral.requiredContexts.join(', ')}.`);
+    return;
   }
   ownsDeferral = true;
   console.error(`hammer-validate: ${deferredOutcome}: ${reason}; validation unknown. Check the existing cleanup receipt and hand off without retrying this head.`);
   // The controller can terminate this helper during teardown. Keep the
   // progress reason now and leave the potentially locked audit until after it.
+  try { recordHammerPhase(deferredOutcome); } catch { /* The private receipt still records the reason. */ }
+}
+
+// A failure surfaced after the UNKNOWN decision keeps the head blocking.
+function demoteCiAuthoritative() {
+  if (!ciAuthoritative) return;
+  ciAuthoritative = false;
+  deferral = { ...deferral, ciAuthoritative: false, localFailureObserved: true };
+  writeDeferral(true);
+  ownsDeferral = true;
+  console.error(`hammer-validate: ${deferredOutcome}: a local check failed; UNKNOWN cannot defer to GitHub CI.`);
   try { recordHammerPhase(deferredOutcome); } catch { /* The private receipt still records the reason. */ }
 }
 
@@ -209,6 +264,7 @@ if (checkDeferred) {
       const observeOutput = chunk => {
         output += String(chunk);
         packageImportFault ||= ownPackageImportFault(output, packages);
+        localTestFailure ||= /(?:^|\n)[ \t]*not ok \d+/.test(output);
         output = output.slice(-8192);
       };
       const startedFile = join(scratch, 'pnpm-started');
@@ -247,7 +303,15 @@ if (checkDeferred) {
       if (canonical && runnerExit === 125 && !stopReason?.startsWith('canceled:')) {
         deferValidation('validation-drain-unconfirmed', runnerExit);
       }
-      if (ownsDeferral) reportHammerEarlyFailure(deferredOutcome, { headSha: head });
+      // MRQ-20: the mirror's own budget stop, and a battery killed by a signal
+      // this validator did not send, are no verdict rather than failed checks.
+      if (canonical && mirror && runnerExit === 75 && !inspectionUnavailable && !localFailureObserved()) {
+        deferValidation('validation-budget-exceeded', runnerExit);
+      }
+      if (canonical && !stopReason && [137, 143].includes(runnerExit) && !localFailureObserved()
+        && !(runner?.startupReceipt && !existsSync(startedFile))) {
+        deferValidation('validation-killed', runnerExit);
+      }
       if (runner?.selectedTestFiles) {
         const wallMs = Math.round(performance.now() - validationStart);
         console.error(`hammer-validate: targeted Node validation files=${runner.selectedTestFiles}`
@@ -264,6 +328,7 @@ if (checkDeferred) {
       // could not be read. A later inconclusive result can also follow a red check.
       const realMirrorFailure = mirror && (runnerExit === 42
         || readValidationReceipt().checks.some(check => check.result === 'fail'));
+      if (ciAuthoritative && (realMirrorFailure || localFailureObserved())) demoteCiAuthoritative();
       const environmentFault = canonical && !validationUnknown && !runner?.required && !realMirrorFailure
         && (!runner || [76, 78, 127].includes(process.exitCode)
           || (process.exitCode !== 0 && process.exitCode < 124 && packageImportFault));
@@ -273,6 +338,12 @@ if (checkDeferred) {
         recordHammerPhase('local-battery-skipped-github-required-gate-authoritative');
         process.exitCode = 0;
       }
+      // Unconfirmed cleanup (125) keeps its status and scratch for the owner.
+      if (ciAuthoritative && runnerExit !== 125) {
+        console.error(`hammer-validate: ${ciAuthoritativeOutcome}; continue to verify-head and the exact-head required GitHub contexts. No local validation pass is claimed.`);
+        process.exitCode = 0;
+      }
+      if (ownsDeferral) reportHammerEarlyFailure(deferredOutcome, { headSha: head });
       // Timeouts, cleanup uncertainty, signals and spawn failures are unknown.
       if (!environmentFault && !startupFault && !validationUnknown && process.env.HQ_WORKER_RUN_ID
         && process.exitCode >= 0 && process.exitCode < 124) {

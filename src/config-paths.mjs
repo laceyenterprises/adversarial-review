@@ -120,7 +120,7 @@ export function schemaLeaf(schema, key) {
   const parts = key.split('.');
   let cursor = schema;
   for (const part of parts) {
-    if (cursor.__type !== TYPE_DICT) return null;
+    if (!cursor || cursor.__type !== TYPE_DICT) return null;
     const keys = cursor.__keys || {};
     if (Object.prototype.hasOwnProperty.call(keys, part)) {
       cursor = keys[part];
@@ -150,17 +150,13 @@ function* flattenSchemaLeaves(doc, schema, path = []) {
     yield { dotted: path.join('.'), path, value: doc };
     return;
   }
-  if (schema.__strict === false && schema.__extra_keys_schema) {
-    for (const [key, value] of Object.entries(doc)) {
-      if (key.startsWith('__')) continue;
-      yield* flattenSchemaLeaves(value, schema.__extra_keys_schema, [...path, key]);
-    }
-    return;
-  }
   const keys = schema.__keys || {};
   for (const [key, value] of Object.entries(doc)) {
     if (key.startsWith('__')) continue;
-    yield* flattenSchemaLeaves(value, keys[key], [...path, key]);
+    const child = Object.hasOwn(keys, key)
+      ? keys[key]
+      : schema.__strict === false ? schema.__extra_keys_schema : undefined;
+    yield* flattenSchemaLeaves(value, child, [...path, key]);
   }
 }
 

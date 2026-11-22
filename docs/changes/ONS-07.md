@@ -116,6 +116,26 @@ null, `.dispatch_timeout_ms` 600000, `.closer_inconclusive_retry.surface_after_a
 `.first_pass_review_queue_depth_failover_threshold` null,
 `.rereview_queue_depth_failover_threshold` null, `.ama_hammer_dispatch_mode` inline.
 
+## Final comment-only remediation
+
+Search cross-field validation tolerates missing or non-object projections and
+provider entries; the schema validator still rejects explicit null search and
+provider declarations in checked-in files and local overlays with
+`AgentOSConfigError`. Public-hygiene validation uses local collection defaults
+without changing caller objects, including sealed and frozen policies.
+Schema leaf lookup returns null for missing traversal nodes. Leaf flattening
+uses declared property schemas before typed additional-property schemas, matching
+schema lookup and path validation.
+
+No public interface, persistent store, lifecycle or smoke promise changes.
+Verification: 605 targeted tests passed with
+`node --test test/config-paths.test.mjs test/config-search.test.mjs test/config-public-hygiene.test.mjs test/config-cfg-parity.test.mjs test/config-ons07-rescue.test.mjs test/config-loader.test.mjs`.
+`npm run lint` passed with zero errors (147 existing warnings);
+`npm run typecheck:contracts` and
+`bash demo/research-finding-walkthrough.sh` passed. Commands ran through
+`bin/run-bounded.sh` with a 60-second limit; the full suite remains PR-head CI's
+merge gate.
+
 ## Verification
 
 - `test/config-cfg-parity.test.mjs` replays 55 cases recorded from the Python

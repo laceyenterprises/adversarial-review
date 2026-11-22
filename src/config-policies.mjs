@@ -16,6 +16,7 @@ const SEARCH_REF_PATTERN = String.raw`^op://[^/\s?#%](?:[^/?#%\r\n]*[^/\s?#%])?/
 const SEARCH_COUNT_LIMITS = ['max_results', 'max_pages', 'max_urls', 'max_input_tokens', 'max_output_tokens', 'max_duration_seconds'];
 
 export function validateSearch(search = {}) {
+  if (!search || typeof search !== 'object') return;
   const fail = (path, reason) => {
     const key = `services.hcp.search${path}`;
     throw new AgentOSConfigError(`${key}: ${reason}`, { key });
@@ -33,6 +34,7 @@ export function validateSearch(search = {}) {
   for (const [provider, entry] of Object.entries(search.providers ?? {})) {
     const path = `.providers.${provider}`;
     if (!Object.hasOwn(SEARCH_OPERATIONS, provider)) fail(path, 'unknown provider');
+    if (!entry || typeof entry !== 'object') continue;
     const positive = !Object.hasOwn(entry, 'budget_usd') || money(entry.budget_usd, `${path}.budget_usd`);
     if (Object.hasOwn(entry, 'watch_threshold_usd')) money(entry.watch_threshold_usd, `${path}.watch_threshold_usd`);
     for (const field of ['credential_ref', 'answers_credential_ref']) {
@@ -116,9 +118,7 @@ export function validatePublicHygiene(policy = {}) {
     `worker_pool.public_hygiene.${field}: invalid public hygiene policy; repair host configuration`,
     { key: `worker_pool.public_hygiene.${field}` },
   ); };
-  policy.repos ??= [];
-  policy.identities ??= {};
-  const repos = policy.repos;
+  const repos = policy.repos ?? [];
   if (!Array.isArray(repos) || repos.some(repo => typeof repo !== 'string'
     || !/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(repo)
     || repo.endsWith('.git') || repo.split('/').some(part => ['.', '..'].includes(part)))) refuse('repos');

@@ -8,7 +8,8 @@
 // - the PR is open and its head moved past the cited reviewed head, which is
 //   an ancestor of it (compare status `ahead`, complete commit and file lists);
 // - every protected path changed in reviewed..head, and each commit in that
-//   range touching it carries no worker provenance trailer;
+//   range touching it is attributed to a configured operator and carries no
+//   worker provenance trailer;
 // - `live-pack-edit-approved` is present and was last labeled by a configured
 //   operator login;
 // - the head and labels are unchanged when the read finishes.
@@ -85,6 +86,12 @@ export async function readOperatorLivePackEditEvidence({ repo, prNumber, reviewe
       if (!inRange.length) refused[path] = 'protected-path-unchanged';
       else if (inRange.some(commit => WORKER_PROVENANCE_RE.test(String(commit?.commit?.message || '')))) {
         refused[path] = 'worker-authored-protected-edit';
+      } else if (inRange.some(commit => {
+        const author = normalizeActorLogin(commit?.author?.login, { typename: commit?.author?.type });
+        const committer = normalizeActorLogin(commit?.committer?.login, { typename: commit?.committer?.type });
+        return !author || !committer || !operators.has(author) || !operators.has(committer);
+      })) {
+        refused[path] = 'operator-authorship-unproven';
       } else proven[path] = { commits: inRange.map(commit => commit.sha) };
     }
     const final = await get(`repos/${repo}/pulls/${prNumber}`);

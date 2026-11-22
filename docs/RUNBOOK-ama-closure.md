@@ -6881,14 +6881,17 @@ each handoff line in its single no-merge status. Remediator or author text
 (pushback, `Resolved-By-Policy`, "no human input") never resolves the finding,
 and the AMA audit parser ignores a live-pack deferral bullet, so a hammer that
 copies one still fails the count and identity gates.
+The parser checks the complete audit entry, including lines following its
+finding bullet, for a live-pack deferral.
 
 An operator's repair closes the finding only with exact-head evidence the helper
 reads itself (`src/live-pack-operator-edit.mjs`, reported as
 `resolved[].operatorEdit` and `operatorEditEvidence`): the PR is open and its
 live head descends from the reviewed head (`HAM_REVIEWED_SHA`, compare status
 `ahead`, complete commit and file lists); each protected path changed in that
-range, and every range commit touching it lacks `Worker-Class`, `Worker-Job-Id`,
-`Worker-Ticket` and `Closed-By` trailers; `live-pack-edit-approved` is present
+range, and every range commit touching it is attributed by GitHub to a
+configured operator as both author and committer and lacks `Worker-Class`,
+`Worker-Job-Id`, `Worker-Ticket` and `Closed-By` trailers; `live-pack-edit-approved` is present
 and its latest label event is a `labeled` by a
 `roles.adversarial.operator_logins` login; and the head and labels are
 unchanged after the read. The hammer still confirms the change satisfies the

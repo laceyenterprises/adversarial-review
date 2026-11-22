@@ -256,6 +256,10 @@ test('closer prose that calls a live-pack finding resolved by policy earns no cl
   const { evidence, result } = auditClose(body, legacy);
   assert.equal(evidence.auditComment.findings, null, 'the deferral bullet is not an addressed finding');
   assert.equal(result.eligible, false);
+  const splitLine = `- **Premature two-PR closeout** (non-blocking) — deferred to operator\n${POLICY(PROMPT)}`;
+  const split = auditClose(body, splitLine);
+  assert.equal(split.evidence.auditComment.findings, null, 'the following line belongs to the deferral entry');
+  assert.equal(split.result.eligible, false);
   // A generated-path policy bullet keeps its REVIEWGUARD-01 credit.
   const generated = card('Catalog row is stale', 'docs/CATALOG.md', 'Commit the regenerated `docs/CATALOG.md`.');
   const kept = auditClose(review({ nonBlocking: [generated] }),
@@ -274,12 +278,14 @@ function fakeGitHub({ labels = ['live-pack-edit-approved'], timeline, compare, h
       return { state: 'open', head: { sha: after ? headAfter : HEAD }, labels: (after ? labelsAfter : labels).map(name => ({ name })) };
     }
     if (path.startsWith(`repos/${REPO}/issues/${PR}/timeline?`)) return timeline ?? [
-      { event: 'labeled', label: { name: 'live-pack-edit-approved' }, actor: { login: 'Operator-One', type: 'User' } }];
+      { event: 'labeled', created_at: '2026-11-20T10:00:00Z',
+        label: { name: 'live-pack-edit-approved' }, actor: { login: 'Operator-One', type: 'User' } }];
     if (path === `repos/${REPO}/compare/${REVIEWED}...${HEAD}`) return compare ?? {
       status: 'ahead', total_commits: 2, commits: [{ sha: 'd'.repeat(40) }, { sha: 'e'.repeat(40) }],
       files: [{ filename: PROMPT }, { filename: 'src/feature.mjs' }] };
     if (path === `repos/${REPO}/commits?sha=${HEAD}&path=${encodeURIComponent(PROMPT)}&per_page=100`) return history ?? [
-      { sha: 'e'.repeat(40), commit: { message: 'Finish the approved prompt amendment' } },
+      { sha: 'e'.repeat(40), author: { login: 'Operator-One', type: 'User' },
+        committer: { login: 'Operator-One', type: 'User' }, commit: { message: 'Finish the approved prompt amendment' } },
       // The author's pre-review builder commit carries worker provenance but is outside the range.
       { sha: 'f'.repeat(40), commit: { message: 'DEMO-07: amend prompt\n\nWorker-Class: claude-code' } }];
     throw new Error(`unexpected fixture call ${path}`);
@@ -331,6 +337,16 @@ test('label, authorship, ancestry, change and head evidence each fail closed', a
   assert.equal(laundered.ok, true);
   assert.deepEqual(laundered.paths, {});
   assert.deepEqual(laundered.refused, { [PROMPT]: 'worker-authored-protected-edit' });
+  for (const history of [
+    [{ sha: 'e'.repeat(40), author: { login: 'pr-author', type: 'User' },
+      committer: { login: 'pr-author', type: 'User' },
+      commit: { message: 'Untrailed protected edit', committer: { date: '2026-11-21T10:00:00Z' } } }],
+    [{ sha: 'e'.repeat(40), commit: { message: 'Unattributed protected edit' } }],
+  ]) {
+    const unproven = await read(fakeGitHub({ history }));
+    assert.deepEqual(unproven.paths, {});
+    assert.deepEqual(unproven.refused, { [PROMPT]: 'operator-authorship-unproven' });
+  }
   const unchanged = await read(fakeGitHub({ compare: { status: 'ahead', total_commits: 1, commits: [{ sha: 'e'.repeat(40) }], files: [{ filename: 'src/feature.mjs' }] } }));
   assert.deepEqual(unchanged.refused, { [PROMPT]: 'protected-path-unchanged' });
   const body = review({ nonBlocking: [closeoutCard] });

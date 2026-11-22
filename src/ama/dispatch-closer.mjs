@@ -4546,7 +4546,10 @@ function parseHamAuditFindingsFromBody(body, changedFiles) {
     // ... requires an operator live edit") names an operator-owned finding the
     // hammer did not resolve. It earns no closure credit, so the count and
     // identity gates refuse the merge instead of counting closer prose.
-    if (isLivePackDeferralText(matchedLine)) continue;
+    const rest = text.slice(match.index + matchedLine.length);
+    const nextEntry = rest.search(/\n(?=[ \t]*[-*][ \t]+|[ \t]*#{1,6}[ \t]+)/);
+    const entry = matchedLine + (nextEntry < 0 ? rest : rest.slice(0, nextEntry));
+    if (isLivePackDeferralText(entry)) continue;
     findings.push({
       title,
       blocking: kind === 'blocking',

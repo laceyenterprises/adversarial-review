@@ -72,16 +72,19 @@ function repeat(run) {
   }
 }
 
-test('LAC-2315: a dispute review receipt does not bypass native merge custody', () => {
+for (const camelCase of [false, true]) test(`LAC-2315: a dispute review receipt does not bypass native merge custody (camelCase: ${camelCase})`, () => {
   repeat(({ claim, dispute, grant, release, row, seed }) => {
     seed({ reason: DISPUTE_REVIEW_REASON });
     dispute();
     const lease = assertGranted(grant());
-    assert.equal(claim().reason, 'native-merge-custody');
+    const observations = camelCase
+      ? { hasPriorityIntent: () => ({ ...disputedFindingsReviewRequest(headSha), headSha }) }
+      : {};
+    assert.equal(claim(observations).reason, 'native-merge-custody');
     assert.equal(row().review_status, 'pending');
     assert.equal(row().review_attempts, 2);
     release(lease);
-    assert.equal(claim().claim.changes, 1);
+    assert.equal(claim(observations).claim.changes, 1);
   });
 });
 

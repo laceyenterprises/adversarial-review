@@ -36,7 +36,9 @@ export function disputedFindingsReviewRequest(headSha) {
 
 export function isDisputedFindingsReviewIntent(intent, headSha) {
   const request = disputedFindingsReviewRequest(headSha);
-  return intent?.actor === request.actor && intent.request_id === request.requestId && intent.head_sha === headSha;
+  return intent?.actor === request.actor
+    && (intent.request_id ?? intent.requestId) === request.requestId
+    && (intent.head_sha ?? intent.headSha) === headSha;
 }
 
 export function isRemediationReviewIntent(intent) {

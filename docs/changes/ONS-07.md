@@ -1,6 +1,6 @@
 # ONS-07 — Generated Node config reader (first slice)
 
-Spec: `one-schema@6ab5e7ac02db` (agent-os `projects/one-schema/SPEC.md`, ONS-07).
+Spec: `one-schema@42801d619b37` (agent-os `projects/one-schema/SPEC.md`, ONS-07).
 
 ## Summary
 
@@ -52,7 +52,7 @@ inventory is 0. The env alias table is generated the same way (below).
 
 ## Final slice: generated env aliases, empty Node-only inventory, split reader
 
-Companion agent-os PR (named by ticket; its "PR N" is in the PR body) carries the
+Companion agent-os PR 11430 (ONS-07, the first half) carries the
 CFG side: the generator emits `config.env.json` (CFG's env alias table, positional
 and process-env rows marked), the 37 review-service leaves moved into `schema_v1`
 with their code defaults, three enum members, the `__strict_always` annotation and

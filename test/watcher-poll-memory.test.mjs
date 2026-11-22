@@ -6,6 +6,7 @@ import { sep } from 'node:path';
 import perfHooks from 'node:perf_hooks';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
+import { omitWatcherDiagnosticFlushes } from './helpers/watcher-diagnostic-flush-fixture.mjs';
 
 const commands = ['gh', 'git', 'hq', 'psql', 'node'];
 
@@ -26,6 +27,7 @@ test('watcher polls reuse child histograms across passes', async t => {
     return createHistogram(...args);
   };
   syncBuiltinESMExports();
+  const restoreDiagnosticFlushes = omitWatcherDiagnosticFlushes(process.env.ADVERSARIAL_REVIEW_TEST_CWD);
   try {
     const { pollOnce } = await import('../src/watcher.mjs');
     const octokit = { rest: { repos: { listForOrg() {} } }, paginate: async () => [] };
@@ -61,6 +63,6 @@ test('watcher polls reuse child histograms across passes', async t => {
       'post-warmup external + arrayBuffers spread must stay below 16 MiB');
   } finally {
     perfHooks.createHistogram = createHistogram;
-    syncBuiltinESMExports();
+    restoreDiagnosticFlushes();
   }
 });

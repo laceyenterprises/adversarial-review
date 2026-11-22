@@ -100,3 +100,16 @@ actual SDK-boundary refusal/fallback and transport-failure call counts.
 Lint passed with zero errors (147 existing warnings), contract typecheck,
 the offline byte-equivalence demo and the 102-entry catalog validator passed.
 The watcher claim-loop suite passed all 197 cases within a 300-second bound.
+
+## Rescue CI performance integration
+
+The final head had two hosted Node22 deadline failures with no assertion failure, most recently223files still queued, while Node26 passed. Rescue integrates only the disposable watcher diagnostic-flush fixture and its two watcher test call sites from the already measured LAC2182 repair at52609bf751801ef2f14208e837486a96253537c5. It preserves actual production atomic writes/flushes, all test case identities, the900second deadline and the eight-worker plan. The source repair was measured on Node22 at37.825–43.805s before and25.750–25.807s after for the same329cases. This integration does not import the pending ARPUBLICREADY production changes. Current-head focused and full hosted acceptance remain separate.
+
+The remaining 13 MLR lines are explicitly owned by [LAC-2321](https://linear.app/laceyenterprises/issue/LAC-2321). Retry shims remain because current regression coverage still exercises their behavior. No safety deletion or budget adjustment is claimed.
+
+Root integration measurement on Node26.10.0: watcher-poll-memory preserved its one aggregate test and every internal pass/allocation probe, completing in34656ms before and23724ms after the fixture repair. This is focused evidence, not proof that the full900s budget will pass. The original Node22 measurements above remain the cross-version evidence; current hosted Node22 must pass on the changed head.
+
+The integrated watcher claim-loop suite passed all 197 cases in 319.6 seconds
+on the loaded rescue host. Agent OS companion #11416 is verified present in
+the deployed checkout; retirement acceptance still requires canonical receipt
+and reservation readback on each original PR.

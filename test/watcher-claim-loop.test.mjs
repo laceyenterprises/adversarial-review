@@ -1,4 +1,4 @@
-import { buildRegisterSource } from './helpers/fixture-loader-register.mjs';
+import { buildRegisterSource as buildFixtureRegisterSource } from './helpers/fixture-loader-register.mjs';
 import './helpers/rate-limit-state-isolation.mjs';
 import { codexAccountFixture } from './helpers/codex-account-fixture.mjs';
 import { claudeAccountFixture, fleetStatusWithClaudeAccountEvidence } from './helpers/claude-account-fixture.mjs';
@@ -21,6 +21,15 @@ const claimConfigPath = path.join(REPO_ROOT, 'config.json');
 writeFileSync(claimConfigPath, JSON.stringify({
   ...JSON.parse(readFileSync(claimConfigPath, 'utf8')), org: 'laceyenterprises',
 }));
+const diagnosticFlushFixture = new URL('./helpers/watcher-diagnostic-flush-fixture.mjs', import.meta.url);
+
+function buildRegisterSource(loaderPath) {
+  return `
+import { omitWatcherDiagnosticFlushes } from ${JSON.stringify(diagnosticFlushFixture.href)};
+omitWatcherDiagnosticFlushes(${JSON.stringify(REPO_ROOT)});
+${buildFixtureRegisterSource(loaderPath)}`;
+}
+
 const ownerRoutingFixtureSource = `
 import { githubOwnerTokens, createGithubOwnerTokenSelector } from ${JSON.stringify(new URL('../src/github-owner-token.mjs', import.meta.url).href)};
 Object.assign(githubOwnerTokens, createGithubOwnerTokenSelector({ readHomeOwner: () => null }));

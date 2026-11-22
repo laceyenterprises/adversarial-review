@@ -37,7 +37,12 @@ conflicting repository/head identity refuses ownership. Null repository and
 absent head are non-contradicting; a repository basename is accepted for the
 qualified reservation repository. A scoped keyed read
 sends the stored project and the ledger repository to the existing producer.
-Legacy reservations use the unscoped key. Point-in-time absence and unreadable
+Legacy reservations use the unscoped key. When a legacy reservation's owner
+resolves to `live` or `terminal`, the reconciler records the dispatch project
+named by that owner launch's own record, once, as `dispatchProjectRef` with
+`dispatchProjectDerivedAt` (REPAIROWNERSCOPE-01). It never derives a scope from
+an unresolved owner, an absent or malformed record, or a record that contradicts
+a stored scope; those stay `unknown` and use the overdue escalation below. Point-in-time absence and unreadable
 evidence retain custody. Only canonical exact-key absence counts toward
 `absent-unfenced`. An unbound reservation with no verified publication and
 `ownerState: unknown` observed at least ten minutes after `reservedAt`

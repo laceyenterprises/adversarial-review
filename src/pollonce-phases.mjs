@@ -280,7 +280,7 @@ import {
 } from './reviewer-spawn-settle.mjs';
 import { maybeDispatchReviewerTimeoutExhaustedMergeAgent } from './reviewer-timeout-exhausted-dispatch.mjs';
 import { admitExhaustedHeadVerdict, claimWithExhaustedHeadMergeCustody, exhaustedHeadMergeCustodyDeferral, isExhaustedHeadVerdictRequested } from './exhausted-head-verdict.mjs';
-import { reconcileRepairOwner, bindRepairHead } from './repair-epochs.mjs';
+import { reconcileRepairOwner, bindRepairHead, repairReservationOwnsPr } from './repair-epochs.mjs';
 import { refundReviewHarnessFault } from './review-harness-retry.mjs';
 import { isReviewCycleCapRoutedToHammer, maybeRouteReviewCycleCapToHammer } from './review-cycle-cap-hammer.mjs';
 import { latestReviewedHeadSha, maybeRouteCiBlockedToHammer } from './ci-blocked-hammer.mjs';
@@ -1561,8 +1561,7 @@ export async function processReviewSubject(entry, ctx) {
       }
       // A reservation owns the PR through publication. On a moved head, only
       // a publication attested by its launch or retry can start the repair review.
-      if (repairEpoch && !repairEpoch.reviewHead
-        && (!repairEpoch.publicationHead || repairEpoch.publicationHead.toLowerCase() !== subject.headSha?.toLowerCase())) {
+      if (repairReservationOwnsPr(repairEpoch, subject.headSha)) {
         // REBASEDREVIEWSTRAND-01: a pending review filtered here names its reason each pass.
         if (['pending', 'pending-upstream'].includes(existing?.review_status)) {
           console.log(`[watcher] review-wait-decision repo=${repoPath} pr=${prNumber} admission="discovery" `

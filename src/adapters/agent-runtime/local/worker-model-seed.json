@@ -53,6 +53,34 @@
         "Gemini 4 Argon (Medium)",
         "Gemini 4 Argon (High)"
       ]
+    },
+    "hammer": {
+      "defaultModel": "gpt-6-sol",
+      "allowedModels": [
+        "gpt-6-sol",
+        "gpt-6.1-sol",
+        "gpt-6-luna"
+      ]
+    },
+    "hammer-corp": {
+      "defaultModel": "gpt-6-sol",
+      "allowedModels": [
+        "gpt-6-sol",
+        "gpt-6.1-sol",
+        "gpt-6-luna"
+      ]
+    },
+    "hammer-claude": {
+      "defaultModel": "claude-opus-5-5",
+      "allowedModels": [
+        "claude-opus-5-5"
+      ]
+    },
+    "hammer-claude-corp": {
+      "defaultModel": "claude-opus-5-5",
+      "allowedModels": [
+        "claude-opus-5-5"
+      ]
     }
   }
 }

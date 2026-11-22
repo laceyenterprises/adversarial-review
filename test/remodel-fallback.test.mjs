@@ -13,12 +13,14 @@ import {
   resolveNonBlockingCodexModel,
 } from '../src/adapters/agent-runtime/local/remediation.mjs';
 import { resolveMergeAgentDispatchHarness } from '../src/merge-agent-harness.mjs';
-import { resolveCloserDispatchHarness } from '../src/ama/harness-fallback.mjs';
+import { CLOSER_WORKER_CLASS_PROVIDER, resolveCloserDispatchHarness } from '../src/ama/harness-fallback.mjs';
+import { HAMMERS } from '../src/worker-token-pool.mjs';
 import { __test__ as harness } from '../src/reviewer-harness.mjs';
 
 const seed = readCommittedWorkerModelSeed();
 const classes = ['remediator-codex', 'remediator-claude', 'remediator-gemini',
-  'codex-reviewer', 'claude-reviewer', 'gemini-reviewer'];
+  'codex-reviewer', 'claude-reviewer', 'gemini-reviewer',
+  'hammer', 'hammer-corp', 'hammer-claude', 'hammer-claude-corp'];
 const review = '## Summary\nSynthetic change reviewed.\n\n## Verdict\nComment only';
 
 const failures = [
@@ -268,27 +270,101 @@ for (const spec of [null, {}]) {
 }
 
 
+const closerFleetQuota = JSON.stringify({ providerStatuses: ['openai', 'anthropic'].map(provider => (
+  { provider, authPath: 'oauth', state: 'ok', lastProbeAt: '2026-09-29T12:00:00Z' })),
+lastProbeAt: '2026-09-29T12:00:00Z' });
+
+// CLOSERSEED-01: a retryable worker-registry outage must not defer the closer.
+// The committed seed carries every closer class, so resolution proceeds with
+// modelSource=committed-seed and the harness reaches its quota/account reads.
 for (const workerClass of ['hammer', 'hammer-claude']) {
   for (const codexAccountPolicy of ['personal-first', 'corporate-first', 'pinned']) {
-    for (const pooled of [false, true]) {
-      test(`closer outage defers ${workerClass} as unresolved (${codexAccountPolicy}, pooled=${pooled})`, async t => {
-        const f = registry(t, `closer-${workerClass}-${codexAccountPolicy}-${pooled}`, new Error('synthetic registry outage'));
-        const args = { workerClass, codexAccountPolicy, fallbackWorkerClasses: [],
-          env: { ...f.env, AGENT_OS_CONFIG_PATH: '/dev/null' },
-          execFileImpl: () => assert.fail('model infrastructure must defer before quota reads'),
-        };
-        const result = await resolveMergeAgentDispatchHarness({ ...args,
-          ...(pooled ? { resolveHarnessImpl: options => resolveCloserDispatchHarness({ ...options,
-            selectAccountImpl: () => assert.fail('model fault must propagate before selecting an account'),
-          }) } : {}),
-        });
-        assert.deepEqual(result, { workerClass, fellBack: false, deferred: true,
-          reason: 'reviewer-model-unresolved', retryable: true,
-          refusalClass: 'unavailable', detail: 'host observation unavailable' });
+    test(`closer outage resolves ${workerClass} from the committed seed and proceeds (${codexAccountPolicy}, non-pooled)`, async t => {
+      const f = registry(t, `closer-${workerClass}-${codexAccountPolicy}`, new Error('synthetic registry outage'));
+      const result = await resolveMergeAgentDispatchHarness({ workerClass, codexAccountPolicy,
+        fallbackWorkerClasses: [], log: f.log,
+        env: { ...f.env, AGENT_OS_CONFIG_PATH: '/dev/null' },
+        execFileImpl: async () => ({ stdout: closerFleetQuota, stderr: '' }),
       });
-    }
+      // Model resolution no longer defers. The automatic codex account policies
+      // then need account evidence this fixture does not supply; that is a
+      // different, later gate, so only pin the outcome where it is fully fed.
+      assert.notEqual(result.reason, 'reviewer-model-unresolved');
+      assert.notEqual(result.refusalClass, 'unavailable');
+      if (workerClass === 'hammer-claude' || codexAccountPolicy === 'pinned') {
+        assert.equal(result.deferred, false);
+        assert.equal(result.reason, 'primary-available');
+      }
+      assert.equal(result.workerClass, workerClass);
+      assert.equal(result.fellBack, false);
+    });
   }
+
+  test(`closer outage hands the committed-seed ${workerClass} model to pooled account selection`, async t => {
+    const f = registry(t, `closer-pooled-${workerClass}`, new Error('synthetic registry outage'));
+    const selected = [];
+    const result = await resolveMergeAgentDispatchHarness({ workerClass, codexAccountPolicy: 'corporate-first',
+      fallbackWorkerClasses: [], env: { ...f.env, AGENT_OS_CONFIG_PATH: '/dev/null' },
+      execFileImpl: async () => ({ stdout: closerFleetQuota, stderr: '' }),
+      resolveHarnessImpl: options => resolveCloserDispatchHarness({ ...options, log: f.log,
+        selectAccountImpl: ({ identity, model }) => {
+          selected.push({ identity, model });
+          return { identity, workerClass: identity, pooled: true, status: 'selected', accountId: 'synthetic-account' };
+        },
+      }),
+    });
+    assert.deepEqual(selected, [{ identity: workerClass, model: seed.classes[workerClass].defaultModel }]);
+    assert.notEqual(result.reason, 'reviewer-model-unresolved');
+    assert.notEqual(result.deferred, true);
+  });
 }
+
+test('closer model resolves from the seed with modelSource=committed-seed on a retryable registry outage', async t => {
+  for (const className of ['hammer', 'hammer-corp', 'hammer-claude', 'hammer-claude-corp']) {
+    const f = registry(t, `closer-source-${className}`, new Error('synthetic registry outage'));
+    await ensureWorkerRegistryReady({ env: f.env });
+    const resolved = resolveRemediationModel(className, { ...f });
+    assert.equal(resolved.modelSource, 'committed-seed');
+    assert.equal(resolved.resolvedModel, seed.classes[className].defaultModel);
+  }
+});
+
+test('a registry that withdrew a closer class still fails closed; the seed cannot restore it', async t => {
+  const f = registry(t, 'closer-withdrawn', { classes: { 'codex-reviewer': { defaultModel: 'synthetic-default' } } });
+  await ensureWorkerRegistryReady({ env: f.env });
+  assert.throws(() => resolveRemediationModel('hammer', f), { code: 'registry-unavailable' });
+  assert.match(f.messages.errors.join('\n'), /readable registry has no class; committed seed cannot restore a withdrawn class/);
+  const result = await resolveMergeAgentDispatchHarness({ workerClass: 'hammer', env: f.env,
+    codexAccountPolicy: 'corporate-first', fallbackWorkerClasses: [],
+    execFileImpl: () => assert.fail('a withdrawn class must defer before quota reads'),
+  });
+  assert.equal(result.deferred, true);
+  assert.equal(result.reason, 'reviewer-model-unresolved');
+});
+
+test('a registry-approved pin for a closer class is still honored during an outage-free read', async t => {
+  const f = registry(t, 'closer-registry-pin', { classes: { hammer: {
+    defaultModel: 'synthetic-default', allowedModels: ['synthetic-default', 'synthetic-pin'] } } });
+  await ensureWorkerRegistryReady({ env: f.env });
+  const resolved = resolveRemediationModel('hammer', { ...f, pin: 'synthetic-pin' });
+  assert.equal(resolved.resolvedModel, 'synthetic-pin');
+  assert.equal(resolved.modelSource, 'env-pin');
+  assert.throws(() => resolveRemediationModel('hammer', { ...f, pin: 'outside-allowlist' }), { code: 'registry-unavailable' });
+});
+
+test('the committed seed covers every closer/hammer class the AMA closer can dispatch', () => {
+  const closerClasses = new Set([
+    ...Object.keys(CLOSER_WORKER_CLASS_PROVIDER).filter(name => name.startsWith('hammer')),
+    ...Object.entries(HAMMERS).flat(),
+  ]);
+  assert.deepEqual([...closerClasses].sort(), ['hammer', 'hammer-claude', 'hammer-claude-corp', 'hammer-corp']);
+  for (const className of closerClasses) {
+    const spec = seed.classes[className];
+    assert.ok(spec, `${className} must have a committed seed entry`);
+    assert.ok(spec.defaultModel.trim(), `${className} needs a defaultModel`);
+    assert.ok(spec.allowedModels.includes(spec.defaultModel), `${className} defaultModel must be allowed`);
+  }
+});
 
 test('fallback closer model faults also preserve the typed infrastructure deferral', async t => {
   const f = registry(t, 'closer-fallback-withdrawn', { classes: { hammer: { defaultModel: 'synthetic-hammer' } } });

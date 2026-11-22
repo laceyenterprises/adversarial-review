@@ -11,7 +11,7 @@ import { isCrossModelReviewWaived } from './adapters/subject/github-pr/routing.m
 const REMEDIATORS = Object.freeze({ codex: 'remediator-codex', 'codex-corp': 'remediator-codex', 'claude-code': 'remediator-claude',
   claude: 'remediator-claude', 'remediator-codex-corp': 'remediator-codex',
   'remediator-claude-corp': 'remediator-claude' });
-const HAMMERS = Object.freeze({ 'hammer-corp': 'hammer', 'hammer-claude-corp': 'hammer-claude' });
+export const HAMMERS = Object.freeze({ 'hammer-corp': 'hammer', 'hammer-claude-corp': 'hammer-claude' });
 const FAMILIES = Object.freeze({ hammer: 'codex', 'hammer-claude': 'claude', grok: 'grok',
   'remediator-grok': 'grok', 'remediator-codex': 'codex', 'remediator-claude': 'claude' });
 const PROVIDERS_BY_FAMILY = Object.freeze({ codex: 'openai', claude: 'anthropic', grok: 'xai' });

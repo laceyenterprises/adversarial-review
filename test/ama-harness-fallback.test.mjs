@@ -3,6 +3,7 @@ import { beforeEach } from 'node:test';
 import { seedWorkerRegistry } from './helpers/dispatch-files-fixture.mjs';
 import './helpers/dispatch-files-preload.mjs';
 import { dispatchReadTransport } from '../src/dispatch-read-client.mjs';
+import { readCommittedWorkerModelSeed } from '../src/adapters/agent-runtime/local/remediation.mjs';
 import './helpers/load-aware-timeout-fixture.mjs';
 // Historical cross-harness scenarios retain explicit personal-class pin behavior.
 // Automatic account routing is covered in codex-worker-account-routing.test.mjs.
@@ -742,7 +743,7 @@ for (const payload of [null, [], true, 'synthetic']) {
 }
 
 
-test('closer session failure cannot silently retain a fallback model', async t => {
+test('closer session failure resolves the committed seed model, never a stale fallback (CLOSERSEED-01)', async t => {
   // The producer fixture serves both async readiness and sync model selection.
   // Fail both hooks so a synthetic ready registry cannot mask the outage.
   const env = {};
@@ -754,10 +755,19 @@ test('closer session failure cannot silently retain a fallback model', async t =
   t.mock.method(dispatchReadTransport, 'hostServicesSync', () => {
     throw new Error('fixture registry down');
   });
-  await assert.rejects(resolveCloserDispatchHarness({workerClass: 'hammer', env,
-    execFileImpl: async () => assert.fail('quota or dispatch must follow registry prefetch')}),
-  {code: 'registry-unavailable', retryable: true});
+  const seeded = readCommittedWorkerModelSeed().classes.hammer.defaultModel;
+  const models = [];
+  const result = await resolveCloserDispatchHarness({workerClass: 'hammer', env,
+    execFileImpl: async () => ({ stdout: JSON.stringify({ providerStatuses: [
+      { provider: 'openai', authPath: 'oauth', state: 'ok' }] }) }),
+    selectAccountImpl: ({ identity, model }) => {
+      models.push({ identity, model });
+      return null;
+    }});
+  assert.notEqual(result.reason, 'reviewer-model-unresolved');
+  assert.ok(!result.deferred || result.reason !== 'harness-fallback-resolver-error');
   assert.ok(registryReads > 0, 'the failing registry transport must be exercised');
+  for (const { model } of models) assert.equal(model, seeded);
 });
 
 

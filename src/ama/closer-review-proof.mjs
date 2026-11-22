@@ -77,12 +77,12 @@ async function standingOperatorReviewProof({ reviews, headSha, operatorLogins, r
 export async function closerReviewProof({ snapshot, repo, prNumber, headSha, validatedAt, operatorLogins = [], get }) {
   try {
     const liveHead = snapshot?.headSha || snapshot?.headRefOid;
-    if (!sha.test(liveHead) || snapshot.state !== 'OPEN') return unavailable();
+    if (!sha.test(liveHead) || String(snapshot?.state).toUpperCase() !== 'OPEN') return unavailable();
     if (liveHead.toLowerCase() !== headSha.toLowerCase()) return { ok: false, reason: 'live-head-moved-before-merge' };
     const operator = await withCloserGitHubBudget(() =>
       standingOperatorReviewProof({ reviews: snapshot.reviews, headSha, operatorLogins, repo, get }));
     if (!operator.ok) return operator;
-    return terminalReviewProofMatches({
+    return await terminalReviewProofMatches({
       reviews: snapshot.reviews, headSha, validatedAt,
       compare: (from, to) => get(`repos/${repo}/compare/${from}...${to}`),
       currency: createReviewCurrencyReader({ repo, prNumber, get, comments: snapshot.comments }),
@@ -96,7 +96,8 @@ export async function readCloserReviewProof({ repo, prNumber, headSha, validated
   { fetchPr = fetchHammerPr, get = createHistoryReader({ signal, env, hammerToken: true }) } = {}) {
   try {
     const snapshot = await fetchPr(repo, prNumber, { withChecks: false, signal, env,
-      withReviews: live => live.state === 'OPEN' && live.headSha === headSha });
+      withReviews: live => String(live?.state).toUpperCase() === 'OPEN'
+        && String(live?.headSha || live?.headRefOid || '').toLowerCase() === String(headSha).toLowerCase() });
     return await closerReviewProof({ snapshot, repo, prNumber, headSha, validatedAt, operatorLogins, get });
   } catch {
     return unavailable();

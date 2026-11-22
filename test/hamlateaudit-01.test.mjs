@@ -422,3 +422,35 @@ test('hammer shell recognizes the legacy proof-budget timeout as a typed deferre
   assert.equal(result.status, 0);
   assert.equal(result.stdout.trim(), 'legacy-writer-timeout');
 });
+
+
+test('review fetching and proof accept REST state and GraphQL head spelling', async () => {
+  const result = await readCloserReviewProof({ ...reviewIdentity, headSha: HEAD.toUpperCase() }, {
+    fetchPr: async (_repo, _pr, opts) => {
+      const live = { ...snapshot([], HEAD), state: 'open', headRefOid: HEAD };
+      delete live.headSha;
+      assert.equal(opts.withReviews(live), true);
+      return live;
+    },
+    get: async () => assert.fail('empty reviews need no history reads'),
+  });
+  assert.deepEqual(result, { ok: true });
+});
+
+test('asynchronous terminal proof rejection becomes an unavailable result', async () => {
+  const result = await closerReviewProof({ ...reviewIdentity, snapshot: snapshot([old]),
+    get: async () => { throw new Error('transient history outage'); },
+  });
+  assert.deepEqual(result, { ok: false, reason: 'terminal-review-evidence-unavailable' });
+});
+
+test('hammer classifies an unparseable target as a typed deferred refusal', () => {
+  const source = readFileSync(new URL('../bin/hammer-merge.sh', import.meta.url), 'utf8');
+  const pattern = source.match(/HAM_CLICK_HOLD=\$\(sed -nE '([^']+)'/);
+  assert.ok(pattern);
+  const result = spawnSync('sed', ['-nE', pattern[1]], {
+    encoding: 'utf8', input: 'legacy lane write refused: merge-target-unparseable\n',
+  });
+  assert.equal(result.status, 0);
+  assert.equal(result.stdout.trim(), 'merge-target-unparseable');
+});

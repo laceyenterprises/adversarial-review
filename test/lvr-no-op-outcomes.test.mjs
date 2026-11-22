@@ -37,9 +37,10 @@ test('LVR-02: failed refresh before any GitHub call writes a redacted launch-bou
   assert.equal(calls, 0);
   const doc = audit();
   assert.equal(doc.status, 'deferred');
-  assert.equal(doc.attempts[0].reason, 'stop-reason-unregistered');
+  // MRQ-02: an unregistered code is a retried infrastructure deferral.
+  assert.equal(doc.attempts[0].reason, 'unregistered-stop-code');
   assert.equal(doc.attempts[0].reasonDetail, 'credential-refresh-failed');
-  assert.equal(doc.attempts[0].stopOrigin, 'closer');
+  assert.equal(doc.attempts[0].stopOrigin, 'infrastructure');
   assert.equal(doc.attempts[0].launchRequestId, env.HQ_LAUNCH_REQUEST_ID);
   assert.doesNotMatch(JSON.stringify(doc), /SECRET_SYNTHETIC_VALUE/);
 });

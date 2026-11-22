@@ -1,5 +1,7 @@
 // HAMSELFERRORS-01: the world-fact stop rule. Classification grants no edit,
-// lease or merge authority. Unknown reasons must be registered before use.
+// lease or merge authority. Registration documents a code's origin; an
+// unregistered code is an infrastructure stop (MRQ-02), never a closer fault
+// that ends a launch as a silent success.
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { writeFileAtomic } from '../atomic-write.mjs';
@@ -55,6 +57,10 @@ export const HAMMER_INFRASTRUCTURE_OUTCOMES = new Set([
   // That is a transport/observation deadline, not a fact about the PR: no
   // merge was invoked, so the same head is retried under a fresh lease.
   'legacy-writer-timeout',
+  // MRQ-02: the durable reason of a stop whose own code is unregistered. The
+  // attempt keeps the original code in originalReason and reasonDetail; the
+  // stop rides the same owned retry as every other infrastructure deferral.
+  'unregistered-stop-code',
 ]);
 
 export const HAMMER_EDIT_PLAN_ERROR_ORIGINS = Object.freeze({
@@ -244,13 +250,64 @@ export const HAMMER_STOP_ORIGINS = Object.freeze({
     [reason, reason === 'hammer-command-error' ? 'closer' : 'infrastructure'])),
 });
 
-export function hammerStopOrigin(reason) {
+export const UNREGISTERED_STOP_CODE = 'unregistered-stop-code';
+export const STOP_CODE_UNREGISTERED_EVENT = 'ama_closer.stop_code_unregistered';
+const STOP_CODE = /^[a-z][a-z0-9-]*$/;
+
+/** The registered origin, or null for an unregistered or malformed reason. No side effects. */
+export function registeredHammerStopOrigin(reason) {
   const [code, diagnostic] = String(reason || '').split(':');
   if (code === 'history-read-failed' && diagnostic === 'permanent') return 'world';
   if (code === 'review-evidence-invalid'
     && HAMMER_EDIT_PLAN_ERROR_ORIGINS[diagnostic] === 'plan') return 'closer';
-  if (!Object.hasOwn(HAMMER_STOP_ORIGINS, code)) throw new TypeError(`Unregistered hammer stop reason: ${code}`);
-  return HAMMER_STOP_ORIGINS[code];
+  return Object.hasOwn(HAMMER_STOP_ORIGINS, code) ? HAMMER_STOP_ORIGINS[code] : null;
+}
+
+// One alert per unregistered code per UTC day. The process set suppresses
+// repeats here; the alert outbox keys the same (code, day) identity durably.
+const alertedUnregisteredCodes = new Set();
+function defaultUnregisteredStopCodeSink({ code, day }) {
+  // Offline tests inject a sink; they never queue a real alert.
+  if (process.env.NODE_TEST_CONTEXT) return;
+  import('../alert-delivery.mjs')
+    .then(({ deliverAlert }) => deliverAlert(
+      `Closer stop code ${code} is not registered; it was retried as an infrastructure stop. `
+        + 'Register its origin in the hammer stop-origin table.',
+      { event: STOP_CODE_UNREGISTERED_EVENT, payload: { code, day } }))
+    .catch(() => { /* Telemetry only: classification never fails on alert delivery. */ });
+}
+let unregisteredStopCodeSink = defaultUnregisteredStopCodeSink;
+
+/** Test seam: replace the alert sink and reset the daily set. Returns a restore function. */
+export function setUnregisteredStopCodeSink(sink) {
+  const previous = unregisteredStopCodeSink;
+  unregisteredStopCodeSink = typeof sink === 'function' ? sink : defaultUnregisteredStopCodeSink;
+  alertedUnregisteredCodes.clear();
+  return () => { unregisteredStopCodeSink = previous; alertedUnregisteredCodes.clear(); };
+}
+
+function noteUnregisteredStopCode(code, now) {
+  const at = now instanceof Date ? now : new Date(now ?? Date.now());
+  const day = (Number.isFinite(at.getTime()) ? at : new Date()).toISOString().slice(0, 10);
+  const key = `${day}|${code}`;
+  if (alertedUnregisteredCodes.has(key)) return;
+  alertedUnregisteredCodes.add(key);
+  try { unregisteredStopCodeSink({ event: STOP_CODE_UNREGISTERED_EVENT, code, day }); }
+  catch { /* Telemetry only. */ }
+}
+
+/**
+ * Origin of a stop reason. MRQ-02: an unregistered but well-formed code is
+ * `infrastructure` (retryable under the existing owned retry, no extra
+ * credit) and alerts once per code per day. Only a malformed reason throws.
+ */
+export function hammerStopOrigin(reason, { now } = {}) {
+  const origin = registeredHammerStopOrigin(reason);
+  if (origin) return origin;
+  const [code] = String(reason || '').split(':');
+  if (!STOP_CODE.test(code)) throw new TypeError(`Malformed hammer stop reason: ${code}`);
+  noteUnregisteredStopCode(code, now);
+  return 'infrastructure';
 }
 
 export function closerHelperError(reason, message) {

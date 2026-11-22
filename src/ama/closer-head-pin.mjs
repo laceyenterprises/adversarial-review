@@ -20,7 +20,7 @@ import { statSync } from 'node:fs';
 import { join } from 'node:path';
 import { basename, dirname } from 'node:path';
 import { amaAuditFilePath, readAmaAuditEntry } from './audit.mjs';
-import { hammerStopOrigin } from './hammer-stop-origin.mjs';
+import { registeredHammerStopOrigin } from './hammer-stop-origin.mjs';
 
 export const SUPERSEDED_HEAD_MOVED = 'superseded-head-moved';
 
@@ -42,7 +42,7 @@ function auditFingerprint(directory, names, prefix) {
 
 function worldOrigin(attempt) {
   if (attempt?.stopOrigin === 'world') return true;
-  try { return hammerStopOrigin(attempt?.reason) === 'world'; } catch { return false; }
+  return registeredHammerStopOrigin(attempt?.reason) === 'world';
 }
 
 /**

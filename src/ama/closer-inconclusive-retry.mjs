@@ -6,7 +6,9 @@
 // observation in dispatch-closer and the closure-budget escalation.
 //
 // - Stop reasons reuse the HAMSELFERRORS-01 origin registry: `closer` and
-//   `infrastructure` origins are inconclusive, `world` origins are real.
+//   `infrastructure` origins are inconclusive, `world` origins are real. The
+//   terminal audit records an unregistered code as the registered
+//   `unregistered-stop-code` infrastructure deferral (MRQ-02).
 // - Launch failures the registry cannot see (the worker never started, or a
 //   checkout, provision or helper bootstrap failed) are inconclusive.
 // - Anything else is real and keeps its existing terminal, counted handling.
@@ -18,7 +20,7 @@ import { join } from 'node:path';
 
 import { writeFileAtomic } from '../atomic-write.mjs';
 import { REVIEW_SERVICE_REVISION } from '../review-service-revision.mjs';
-import { hammerStopOrigin } from './hammer-stop-origin.mjs';
+import { registeredHammerStopOrigin } from './hammer-stop-origin.mjs';
 import { isHarnessFault } from '../harness-fault.mjs';
 
 export const CLOSER_INCONCLUSIVE_RETRY_OWNER = 'watcher';
@@ -73,17 +75,19 @@ export function classifyCloserOutcome({ reason = null, failureClass = null } = {
     return { kind: 'inconclusive', reason: code(raw), origin: 'infrastructure' };
   }
   if (raw) {
-    try {
-      const origin = hammerStopOrigin(raw);
+    const origin = registeredHammerStopOrigin(raw);
+    if (origin) {
       return { kind: origin === 'world' ? 'real' : 'inconclusive',
         reason: /^history-read-failed:(?:transient|permanent):[a-z0-9-]+$/.test(raw) ? raw : code(raw), origin };
-    } catch { /* Not a registered stop reason. */ }
+    }
     if (isHarnessFault(raw)) {
       return { kind: 'inconclusive', reason: code(raw), origin: 'infrastructure' };
     }
     if (INCONCLUSIVE_OBSERVATIONS.has(code(raw))) {
       return { kind: 'inconclusive', reason: code(raw), origin: 'infrastructure' };
     }
+    // An unregistered code seen only at launch end (not through the terminal
+    // audit) keeps the bounded, counted exit refund below: no extra credit.
   }
   if (isHarnessFault(code(failureClass))) {
     return { kind: 'inconclusive', reason: code(failureClass), origin: 'infrastructure' };

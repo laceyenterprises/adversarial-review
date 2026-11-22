@@ -92,7 +92,7 @@ test('an unrelated launch and a closer fault without a world refusal keep their 
   recordHammerEarlyFailure('current-closing-status-failed', { env: hammerEnv(rootDir) });
   const attempts = ownAttempts(rootDir);
   assert.deepEqual(attempts.map(a => [a.head, a.outcome, a.reason]),
-    [[PINNED, 'deferred', 'stop-reason-unregistered']]);
+    [[PINNED, 'deferred', 'unregistered-stop-code']]);
   assert.equal(readLaunchWorldRefusal(rootDir, { repo: REPO, prNumber: PR }, LRQ), null);
 });
 

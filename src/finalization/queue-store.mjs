@@ -6,15 +6,22 @@ import { makeQueueEvent, QUEUE_ACTIONABLE_PHASES, QUEUE_PHASES, resolveLaneKey }
 import { queuePatience, queueWaitMs } from './queue-wait.mjs';
 import { reconcileQueuePublication } from './ledger-fold.mjs';
 
-const migration = new URL('../../migrations/20261023_finalization_queue.sql', import.meta.url);
+const migrations = [
+  '20261023_finalization_queue.sql',
+  '20261024_finalization_queue_handoff.sql',
+  '20261025_finalization_queue_admission.sql',
+  '20261026_finalization_queue_checks.sql',
+  '20261027_finalization_queue_merge.sql',
+  '20261029_finalization_queue_routing.sql',
+  '20261109_finalization_queue_gsr.sql',
+].map(name => new URL(`../../migrations/${name}`, import.meta.url));
 export function ensureFinalizationQueueSchema(db) {
-  db.exec(readFileSync(migration, 'utf8'));
-  db.exec(readFileSync(new URL('../../migrations/20261024_finalization_queue_handoff.sql', import.meta.url), 'utf8'));
-  db.exec(readFileSync(new URL('../../migrations/20261025_finalization_queue_admission.sql', import.meta.url), 'utf8'));
-  db.exec(readFileSync(new URL('../../migrations/20261026_finalization_queue_checks.sql', import.meta.url), 'utf8'));
-  db.exec(readFileSync(new URL('../../migrations/20261027_finalization_queue_merge.sql', import.meta.url), 'utf8'));
-  db.exec(readFileSync(new URL('../../migrations/20261029_finalization_queue_routing.sql', import.meta.url), 'utf8'));
-  db.exec(readFileSync(new URL('../../migrations/20261109_finalization_queue_gsr.sql', import.meta.url), 'utf8'));
+  const sql = migrations.map(migration => readFileSync(migration, 'utf8'));
+  // Install all additive DDL with one commit. A nested call uses SQLite's
+  // savepoint, so a failed migration also rolls back within a caller's transaction.
+  db.transaction(() => {
+    for (const statement of sql) db.exec(statement);
+  }).immediate();
 }
 
 export function assertQueueStoreOwner(rootDir) {

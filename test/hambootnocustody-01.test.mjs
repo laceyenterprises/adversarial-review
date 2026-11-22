@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync, spawn, spawnSync } from 'node:child_process';
 import { once } from 'node:events';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { closeSync, existsSync, mkdirSync, mkdtempSync, openSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { HAMMER_PHASES, renderHammerBootstrap } from '../src/hammer-procedure.mjs';
@@ -68,9 +68,18 @@ esac
     REVIEWER: 'fixture', AUDIT_PATH: join(dir, 'audit.json'), AMA_TRAILERS_SHELL: "''" };
   writeFileSync(script, renderHammerBootstrap(values));
   const env = { PATH: '/usr/bin:/bin', HOME: dir, LOG: log, HAM_NODE_BIN: node, PR_URL: values.PR_URL };
-  const runBootstrap = extra => spawnSync('/bin/bash', [script], {
-    env: { ...env, ...extra }, input: 'unexpected tool stdin\n', encoding: 'utf8', timeout: 5000,
-  });
+  // A regular descriptor retains the hostile-stdin probe without racing the
+  // bootstrap's deliberate stdin close against a parent pipe write (EPIPE).
+  const stdin = join(dir, 'tool-stdin');
+  writeFileSync(stdin, 'unexpected tool stdin\n');
+  const runBootstrap = extra => {
+    const fd = openSync(stdin, 'r');
+    try {
+      return spawnSync('/bin/bash', [script], {
+        env: { ...env, ...extra }, stdio: [fd, 'pipe', 'pipe'], encoding: 'utf8', timeout: 5000,
+      });
+    } finally { closeSync(fd); }
+  };
   return { dir, run, gate, script, env, runBootstrap, log: () => readFileSync(log, 'utf8').trim().split('\n') };
 }
 

@@ -9,7 +9,6 @@ merge with HAM provenance; the machine gate is mandatory.
 
 Run phase scripts as instructed; follow exit codes and stderr.
 Never inspect their source. If unclear, stop with printed reason.
-
 After a merge or when the close command may have merged, go directly to
 mandate 7's closing-comment command before any scratch check.
 
@@ -47,11 +46,9 @@ ham_read context "$HAM_NODE_BIN" "<<ROOT_DIR>>/bin/hammer-context.mjs" "<<REPO>>
 ```
 
 Stop on a nonzero refresh exit.
-
 Close only through Appendix A's one shipped close command, in the foreground;
 it owns the controller, FD 4, phase order and lease. Preserve HQ environment.
 After failure, follow only the explicit conflict/deferred paths below.
-
 ### State machine
 
 1. **Prepare:** run bootstrap; read the context, full review and Appendix B.

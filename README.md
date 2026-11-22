@@ -36,9 +36,11 @@ cached without modifying the exported schema, and rejection diagnostics display
 the normalized value being checked.
 
 After a CFG schema change, run `node scripts/sync-cfg-schema.mjs <agent-os>`
-(`--check` reports drift). The only hand-written schema left is the inventoried
-Node-only keys in [`src/config-node-keys.mjs`](src/config-node-keys.mjs); move
-one into CFG and delete it there. This replaces CFGREADERSCOPE-01's
+(`--check` reports drift); it vendors both generated files, the schema
+(`src/generated/config.schema.json`) and the env alias table
+(`src/generated/config.env.json`). Nothing else is hand-written: the reader has no
+Node-only keys, enum members or env names, and a key or alias this service needs
+is added to CFG in agent-os first. This replaces CFGREADERSCOPE-01's
 read-surface mirror ([SEV2 report](docs/postmortems/SEV2-every-new-config-key-forced-workers-to-provision-the-review-service-repo-2026-10-31.md)).
 
 AFA-07 mirrors disabled-by-default `cloud_access.aws.enabled`, the fixed

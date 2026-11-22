@@ -7,12 +7,10 @@
 // the loader's node form (`__type`, `__keys`, ...) so both readers accept and
 // reject the same documents. Never hand-edit a CFG key here; regenerate.
 //
-// Explicit, inventoried exceptions remain (`./config-node-keys.mjs`):
-// Node-only keys and enum members this service reads that CFG does not
-// declare yet, and repairs for CFG annotations the ONS-02 projection drops.
-// All may only ADD to the generated tree; redefining CFG throws at import.
+// Nothing here is hand-written: every key, enum member and annotation Node
+// reads is CFG's (the Node-only inventory is empty), and the env alias table
+// comes from the sibling `config.env.json` (see ./config-env-aliases.mjs).
 import { readFileSync } from 'node:fs';
-import { NODE_ONLY_ENUM_MEMBERS, NODE_ONLY_KEYS, PROJECTION_REPAIRS, STRICT_ALWAYS_PATHS } from './config-node-keys.mjs';
 
 export const CFG_JSON_SCHEMA = JSON.parse(
   readFileSync(new URL('./generated/config.schema.json', import.meta.url), 'utf8'),
@@ -32,6 +30,7 @@ const X_CFG = {
   'x-cfg-read-only': '__read_only',
   'x-cfg-repository-list': '__repository_list',
   'x-cfg-scalar-default-key': '__scalar_default_key',
+  'x-cfg-strict-always': '__strict_always',
 };
 const KNOWN = new Set([
   'type', 'properties', 'required', 'additionalProperties', 'items', 'default', 'description',
@@ -109,35 +108,6 @@ export function fromJsonSchema(js, path = '<root>') {
   return node;
 }
 
-function locate(root, dotted) {
-  let parent = null;
-  let node = root;
-  let key = null;
-  const parts = typeof dotted === 'string' ? dotted.match(/[^.[\]]+|\[\]/g) : null;
-  if (!parts?.length) throw new Error(`${String(dotted)}: invalid CFG overlay path`);
-  for (const part of parts) {
-    parent = node;
-    key = part;
-    if (part === '[]') node = node?.__item;
-    else if (part === '*') node = node?.__extra_keys_schema;
-    else node = node?.__keys?.[part];
-  }
-  return { parent, key, node };
-}
-
-function attach(root, dotted, addition, { repair }) {
-  const { parent, key, node } = locate(root, dotted);
-  if (!parent || parent.__type !== 'dict') throw new Error(`${dotted}: overlay parent is not a CFG mapping`);
-  if (key === '*') {
-    if (node || (!repair && parent.__strict)) throw new Error(`${dotted}: overlay would redefine CFG extra keys`);
-    parent.__strict = false;
-    parent.__extra_keys_schema = addition;
-    return;
-  }
-  if (node) throw new Error(`${dotted}: Node-only key is now declared by CFG; delete it from config-node-keys.mjs`);
-  parent.__keys[key] = addition;
-}
-
 export function freezeSchema(value) {
   if (value !== null && typeof value === 'object' && !Object.isFrozen(value)) {
     for (const child of Object.values(value)) freezeSchema(child);
@@ -147,30 +117,7 @@ export function freezeSchema(value) {
 }
 
 export function buildSchema(js = CFG_JSON_SCHEMA) {
-  const root = fromJsonSchema(js);
-  for (const [dotted, addition] of Object.entries(PROJECTION_REPAIRS)) {
-    attach(root, dotted, structuredClone(addition), { repair: true });
-  }
-  for (const [dotted, addition] of Object.entries(NODE_ONLY_KEYS)) {
-    attach(root, dotted, structuredClone(addition), { repair: false });
-  }
-  for (const [dotted, { members, normalize = {} }] of Object.entries(NODE_ONLY_ENUM_MEMBERS)) {
-    const { node } = locate(root, dotted);
-    if (!Array.isArray(node?.__enum)) throw new Error(`${dotted}: Node-only enum members need a CFG enum`);
-    const declared = members.filter(member => node.__enum.includes(member));
-    if (declared.length) throw new Error(`${dotted}: ${declared.join(', ')} now declared by CFG; delete from config-node-keys.mjs`);
-    node.__enum = [...node.__enum, ...members];
-    if (Object.keys(normalize).some(key => Object.hasOwn(node.__normalize ?? {}, key))) {
-      throw new Error(`${dotted}: Node-only normalization would redefine CFG`);
-    }
-    if (Object.keys(normalize).length) node.__normalize = { ...node.__normalize, ...normalize };
-  }
-  for (const dotted of STRICT_ALWAYS_PATHS) {
-    const { node } = locate(root, dotted);
-    if (node?.__type !== 'dict') throw new Error(`${dotted}: strict-always path is not a CFG mapping`);
-    node.__strict_always = true;
-  }
-  return freezeSchema(root);
+  return freezeSchema(fromJsonSchema(js));
 }
 
 let cached;

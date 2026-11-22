@@ -11,9 +11,8 @@ import assert from 'node:assert/strict';
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
-import { AgentOSConfigError, loadConfig } from '../src/config-loader.mjs';
+import { AgentOSConfigError, ENV_ALIASES, loadConfig, loadConfigRuntime } from '../src/config-loader.mjs';
 import { CFG_JSON_SCHEMA, schemaV1 } from '../src/config-schema.mjs';
-import { NODE_ONLY_ENUM_MEMBERS, NODE_ONLY_KEYS } from '../src/config-node-keys.mjs';
 
 const { cases } = JSON.parse(readFileSync(new URL('./fixtures/cfg-parity-cases.v1.json', import.meta.url), 'utf8'));
 
@@ -41,7 +40,7 @@ for (const { name, files, modules = [], env = {}, get = [], python } of cases) {
   });
 }
 
-test('every CFG key is in the Node schema and every Node-only key is inventoried', () => {
+test('the Node schema is exactly CFG: no Node-only key or enum member remains', () => {
   const nodePaths = new Set();
   (function walk(node, path) {
     nodePaths.add(path);
@@ -59,11 +58,53 @@ test('every CFG key is in the Node schema and every Node-only key is inventoried
     if (js.items) walk(js.items, `${path}[]`);
     if (typeof js.additionalProperties === 'object') walk(js.additionalProperties, `${path}.*`);
   })(CFG_JSON_SCHEMA, '');
-  for (const path of cfgPaths) assert.ok(nodePaths.has(path), `CFG key ${path} missing from the Node schema`);
-  const extra = [...nodePaths].filter(path => !cfgPaths.has(path)
-    && !Object.keys(NODE_ONLY_KEYS).some(root => path === root || path.startsWith(`${root}.`) || path.startsWith(`${root}[`))
-    && !path.includes('.operation_limits.*') && !path.startsWith('worker_pool.public_hygiene.identities.*'));
-  assert.deepEqual(extra, []);
-  assert.equal(Object.keys(NODE_ONLY_KEYS).length, 33);
-  assert.equal(Object.keys(NODE_ONLY_ENUM_MEMBERS).length, 3);
+  assert.deepEqual([...cfgPaths].filter(path => !nodePaths.has(path)), []);
+  assert.deepEqual([...nodePaths].filter(path => !cfgPaths.has(path)), []);
+  const enumOf = dotted => dotted.split('.').reduce((node, key) => node.__keys[key], schemaV1()).__enum;
+  assert.ok(enumOf('roles.remediator').includes('gemini'));
+  assert.ok(enumOf('roles.merge_agent_worker_class').includes('hammer-claude'));
+});
+
+test('the env alias table is the generated CFG table and names real schema keys', () => {
+  const cfgEnv = JSON.parse(readFileSync(new URL('../src/generated/config.env.json', import.meta.url), 'utf8'));
+  const paths = [...cfgEnv.derived, ...Object.keys(cfgEnv.rows)];
+  const positional = Object.entries(cfgEnv.rows).filter(([, row]) => row.some(item => item?.positional_aliases)).map(([path]) => path);
+  assert.deepEqual(positional, ['worker_pool.oauth_broker.endpoints']);
+  assert.deepEqual(Object.keys(ENV_ALIASES).sort(), paths.filter(path => path !== 'profile' && !positional.includes(path)).sort());
+  const resolves = (node, dotted) => dotted.split('.').reduce((cur, key) => cur?.__keys?.[key]
+    ?? cur?.__extra_keys_schema, node);
+  for (const path of Object.keys(ENV_ALIASES)) assert.ok(resolves(schemaV1(), path), `${path} is not a CFG key`);
+  assert.deepEqual(ENV_ALIASES['reviewer.timeout_ms'].aliases.map(([name]) => name), ['ADVERSARIAL_REVIEWER_TIMEOUT_MS']);
+  assert.equal(ENV_ALIASES['reviewer.timeout_ms'].canonical, 'AGENT_OS_REVIEWER_TIMEOUT_MS');
+  assert.equal(ENV_ALIASES['session_ledger.backend'].aliases[0][1]('ON'), 'postgres');
+  assert.equal(ENV_ALIASES['worker_pool.dispatch.idle_backoff.enabled'].aliases[0][1](' 0 '), 'false');
+});
+
+// Intended difference: Python's strict input validation rejects an ordinary
+// unread sibling in a checked-in file; Node's runtime reader drops it so a key
+// from a newer schema cannot crash a lagging daemon. Keys Node consumes, and
+// strict-always declarations, validate identically in both.
+test('an ordinary unread sibling is rejected by Python strict input and dropped by the Node runtime reader', () => {
+  for (const name of ['unknown nested key in checked-in top', 'unknown root in checked-in top']) {
+    const { files, python } = cases.find(candidate => candidate.name === name);
+    assert.equal(python.ok, false, `${name}: Python refuses`);
+    const dir = mkdtempSync(join(tmpdir(), 'cfg-parity-'));
+    try {
+      for (const [file, text] of Object.entries(files)) writeFileSync(join(dir, file), text);
+      const topPath = join(dir, 'config.yaml');
+      assert.throws(() => loadConfig({ topPath, env: {} }), error => error.key === python.key);
+      const cfg = loadConfigRuntime({ topPath, env: {} });
+      assert.ok(cfg.runtimeDroppedUnknownKeys.some(entry => entry.key === python.key), `${name}: dropped and reported`);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }
+  const { files, python } = cases.find(candidate => candidate.name === 'unknown key in strict-always policy fails even in local');
+  const dir = mkdtempSync(join(tmpdir(), 'cfg-parity-'));
+  try {
+    for (const [file, text] of Object.entries(files)) writeFileSync(join(dir, file), text);
+    assert.throws(() => loadConfigRuntime({ topPath: join(dir, 'config.yaml'), env: {} }), error => error.key === python.key);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });

@@ -13,18 +13,10 @@ deleted. Leaf checks, unknown-key handling, defaults and the empty-env rule now
 follow `agent_os_config.validation` and `loaders.py`, so the two readers accept
 and reject the same documents.
 
-What stays hand-written is listed in `src/config-node-keys.mjs`:
-
-- 32 Node-only keys this service reads that CFG does not declare (reviewer
-  timeouts, watcher pool knobs, some merge-authority knobs, `remediation`,
-  `roles.registry`, `roles.routing`). Unread Node-only keys were deleted.
-- 3 Node-only enum members (`gemini` remediator, `hammer-claude` merge worker,
-  the `codex-corp` fallback alias).
-- Repairs for annotations the ONS-02 projection drops: `__strict_always`, and
-  the typed extra keys of search operation limits and public-hygiene identities.
-
-The builder throws at import if CFG starts declaring any of them, so moving a
-key into CFG forces its deletion here.
+Nothing is hand-written any more. The Node-only keys, enum members and projection
+repairs that earlier slices kept in `src/config-node-keys.mjs` now live in CFG
+(agent-os `schema_v1`) and the generator, so that file is deleted and the Node-only
+inventory is 0. The env alias table is generated the same way (below).
 
 ## Behaviour changes
 
@@ -48,27 +40,81 @@ key into CFG forces its deletion here.
 ## Interface changes
 
 - New: `src/config-schema.mjs` (`schemaV1`, `buildSchema`, `fromJsonSchema`,
-  `osgArmFields`, `CFG_JSON_SCHEMA`), `src/config-node-keys.mjs`,
+  `osgArmFields`, `CFG_JSON_SCHEMA`), `src/config-env-aliases.mjs`,
   `scripts/sync-cfg-schema.mjs <agent-os> [--check]`,
-  `scripts/record-cfg-parity-cases.py`.
+  `scripts/record-cfg-parity-cases.py`. (`src/config-node-keys.mjs`, added by the
+  first slice, is deleted by the final one.)
 - Removed: `src/config-module-schema.mjs`, `src/config-google-tokens.mjs`,
   `src/cloud-access-config-schema.mjs`, `grokSchema()` and the grok bound
   constants in `src/config-grok.mjs`, and the `*-schema.v1.json` mirrors.
 - After a CFG schema change, run `node scripts/sync-cfg-schema.mjs <agent-os>`
-  and commit `src/generated/config.schema.json`.
+  and commit `src/generated/config.schema.json` and `src/generated/config.env.json`.
 
-## Remaining for the final ONS-07 PR
+## Final slice: generated env aliases, empty Node-only inventory, split reader
 
-- The env alias table is now a compact row table (`ENV_ROWS` in
-  `src/config-loader.mjs`, about 550 lines, down from about 1,000): the
-  canonical name is derived from the key path and only exceptions and aliases
-  are written out. Replacing it with generated data still needs the ONS-02
-  generator to emit CFG's env aliases (an agent-os change).
-- The cascade engine is about 2,000 lines after dropping the dead
-  `buildRoleFallbackEnvAliases` helper. The target is under 800.
-- The Node-only keys and enum members need to move into CFG `schema_v1`, with
-  `config.yaml` and shell parity. That is agent-os work for ONS-14 or an
-  ONS-17+ ticket. The projection repairs belong in the ONS-02 generator.
+Companion agent-os PR (named by ticket; its "PR N" is in the PR body) carries the
+CFG side: the generator emits `config.env.json` (CFG's env alias table, positional
+and process-env rows marked), the 37 review-service leaves moved into `schema_v1`
+with their code defaults, three enum members, the `__strict_always` annotation and
+typed extra keys of search operation limits and public-hygiene identities.
+
+- `src/config-env-aliases.mjs` builds `ENV_ALIASES` from the vendored
+  `src/generated/config.env.json`. The 560-line hand-written `ENV_ROWS`, the
+  entitlement and Grok alias loops and `grokEnvAliases()` are deleted. The table
+  grows from 348 to 1,141 rows: every alias CFG declares is honored, including
+  the Python-only legacy names. CFG gained 16 rows and one legacy name that only this reader honored,
+  so no env name it honored is lost. The one loss: the six
+  `AGENT_OS_ENTITLEMENTS_SENTINEL_TALK_*` rows, because `sentinel-talk` is not a CFG
+  entitlement (an unseeded id has no Python alias either). Not applied here by
+  design: `profile` (chosen before the cascade; blank means unset) and the
+  positional `OAUTH_BROKER_URL` row (consumed from `process.env`).
+- `src/config-node-keys.mjs` is deleted; `config-schema.mjs` no longer overlays
+  anything and reads `x-cfg-strict-always` directly.
+- `scripts/sync-cfg-schema.mjs` vendors both generated files (`--check` compares both).
+- `src/config-loader.mjs` is a 44-line facade. The former 2,107-line module is
+  split by responsibility into `config-base`, `-checks`, `-policies`, `-paths`,
+  `-env-layer`, `-module-doc`, `-profile`, `-class`, `-cascade` (the cascade,
+  324 lines) and `-cache`. This is a move, not a deletion: the pure move is
+  reported separately in the PR body. Importers are unchanged.
+- Behavior: one deliberate change. `roles.adversarial.merge_authority.hammer_lifetime_ceiling`
+  no longer also reads `AGENT_OS_ROLES_ADVERSARIAL_MERGE_AUTHORITY_HAMMER_LIFETIME_DISPATCH_CEILING`,
+  the canonical name of the different `hammer_lifetime_dispatch_ceiling` key (CFG
+  refuses one env name shared by two keys). `loadConfig` costs about 1 ms more per
+  call (5.4 to 6.4 ms) for the larger alias table.
+- Tests: `test/config-cfg-parity.test.mjs` asserts the Node schema equals CFG with
+  no Node-only path or enum member, the env table equals the vendored table (minus
+  the two named rows), the intended unread-sibling difference (Python strict input
+  refuses an ordinary unknown sibling; the Node runtime reader drops it and reports
+  it; strict-always declarations refuse in both), and 13 new Python-recorded cases
+  for the moved keys, legacy env names, enum members, the atomic identity map and
+  typed search-limit and hygiene keys.
+
+### Deferred checked-in `config.yaml` defaults (CFGREADERORDER-01)
+
+No checked-in default is published by this ticket; every moved key keeps the code
+default below, equal to what this reader always used. Owner: the One Schema pack
+operator, in a follow-up source PR after the adversarial-review pin floats and the
+installed reader is verified (this PR's merge is the required reader revision; the
+agent-os schema PR is the required schema). No live activation happens here.
+
+`review_cycle_cap` 5; `review_cycle_window_hours` 24; `remediation.max_concurrent_jobs` 1;
+`remediation.max_concurrent_jobs_ceiling` 8; `remediation.git_identity_repo_overrides` {}
+(atomic map); `adversarial.reviewer.load_aware.enabled` true, `.max_multiplier` 6.0;
+`feature_flags.dismiss_stale_request_changes_on_resolved` true; `roles.registry` (no
+default; typed entries), `roles.routing.never-review-own-builder-class` true;
+`roles.adversarial.operator_logins` [], `.operator_label_actor_enforcement` observe;
+`roles.adversarial.merge_authority.strict_non_blocking_remediation` true,
+`.cap_rehead_enabled` true, `.cap_rehead_lifetime_cap` 2, `.hammer_lifetime_dispatch_ceiling`
+null, `.dispatch_timeout_ms` 600000, `.closer_inconclusive_retry.surface_after_attempts` 3,
+`.backoff_base_ms` 300000, `.backoff_max_ms` 3600000; `reviewer.quota_check_enabled` true,
+`.quota_status_dir` null, `.timeout_ms` 1200000, `.first_output_timeout_ms` 0,
+`.no_progress_timeout_ms` 900000, `.running_pass_timeout_seconds` 3600,
+`.idle_timeout_seconds` 600, `.ceiling_base_seconds` 1800, `.ceiling_max_seconds` 10800;
+`watcher.ama_closer_max_concurrent_launches` 3, `.max_drain_wait_ms` 3600000,
+`.pending_draft_review_respawn_age_seconds` 900, `.stuck_dispatch_alert_debounce_ms` 21600000,
+`.first_pass_reviewer_pool_max_concurrent_reviewers` null,
+`.first_pass_review_queue_depth_failover_threshold` null,
+`.rereview_queue_depth_failover_threshold` null, `.ama_hammer_dispatch_mode` inline.
 
 ## Verification
 

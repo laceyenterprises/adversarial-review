@@ -895,6 +895,220 @@
     "ok": false,
     "key": "roles.merge_agent_failure_recovery.fallback_path"
    }
+  },
+  {
+   "name": "review-service keys take their code defaults",
+   "files": {
+    "config.yaml": "version: 1\n"
+   },
+   "get": [
+    "review_cycle_cap",
+    "reviewer.timeout_ms",
+    "reviewer.quota_status_dir",
+    "watcher.ama_hammer_dispatch_mode",
+    "watcher.first_pass_reviewer_pool_max_concurrent_reviewers",
+    "remediation.max_concurrent_jobs_ceiling",
+    "roles.adversarial.operator_logins",
+    "roles.adversarial.merge_authority.closer_inconclusive_retry.backoff_max_ms",
+    "adversarial.reviewer.load_aware.max_multiplier",
+    "feature_flags.dismiss_stale_request_changes_on_resolved"
+   ],
+   "python": {
+    "ok": true,
+    "values": {
+     "review_cycle_cap": 5,
+     "reviewer.timeout_ms": 1200000,
+     "reviewer.quota_status_dir": null,
+     "watcher.ama_hammer_dispatch_mode": "inline",
+     "watcher.first_pass_reviewer_pool_max_concurrent_reviewers": null,
+     "remediation.max_concurrent_jobs_ceiling": 8,
+     "roles.adversarial.operator_logins": [],
+     "roles.adversarial.merge_authority.closer_inconclusive_retry.backoff_max_ms": 3600000,
+     "adversarial.reviewer.load_aware.max_multiplier": 6.0,
+     "feature_flags.dismiss_stale_request_changes_on_resolved": true
+    }
+   }
+  },
+  {
+   "name": "review-service keys read top-level values",
+   "files": {
+    "config.yaml": "version: 1\nreviewer:\n  timeout_ms: 900000\n  first_output_timeout_ms: 5\nwatcher:\n  first_pass_review_queue_depth_failover_threshold: 7\n  ama_hammer_dispatch_mode: background\nroles:\n  adversarial:\n    operator_logins: [alice]\n    merge_authority:\n      hammer_lifetime_dispatch_ceiling: 4\n"
+   },
+   "get": [
+    "reviewer.timeout_ms",
+    "reviewer.first_output_timeout_ms",
+    "watcher.first_pass_review_queue_depth_failover_threshold",
+    "watcher.ama_hammer_dispatch_mode",
+    "roles.adversarial.operator_logins",
+    "roles.adversarial.merge_authority.hammer_lifetime_dispatch_ceiling"
+   ],
+   "python": {
+    "ok": true,
+    "values": {
+     "reviewer.timeout_ms": 900000,
+     "reviewer.first_output_timeout_ms": 5,
+     "watcher.first_pass_review_queue_depth_failover_threshold": 7,
+     "watcher.ama_hammer_dispatch_mode": "background",
+     "roles.adversarial.operator_logins": [
+      "alice"
+     ],
+     "roles.adversarial.merge_authority.hammer_lifetime_dispatch_ceiling": 4
+    }
+   }
+  },
+  {
+   "name": "review-service legacy env aliases",
+   "files": {
+    "config.yaml": "version: 1\n"
+   },
+   "get": [
+    "reviewer.timeout_ms",
+    "watcher.first_pass_reviewer_pool_max_concurrent_reviewers",
+    "feature_flags.dismiss_stale_request_changes_on_resolved"
+   ],
+   "python": {
+    "ok": true,
+    "values": {
+     "reviewer.timeout_ms": 1500000,
+     "watcher.first_pass_reviewer_pool_max_concurrent_reviewers": 3,
+     "feature_flags.dismiss_stale_request_changes_on_resolved": false
+    }
+   },
+   "env": {
+    "ADVERSARIAL_REVIEWER_TIMEOUT_MS": "1500000",
+    "ADVERSARIAL_FIRST_PASS_REVIEWER_POOL_MAX_CONCURRENT": "3",
+    "DISMISS_STALE_REQUEST_CHANGES_ON_RESOLVED": "false"
+   }
+  },
+  {
+   "name": "review-service minimum refused",
+   "files": {
+    "config.yaml": "version: 1\nreviewer:\n  idle_timeout_seconds: 0\n"
+   },
+   "get": [],
+   "python": {
+    "ok": false,
+    "key": "reviewer.idle_timeout_seconds"
+   }
+  },
+  {
+   "name": "review-service enum refused",
+   "files": {
+    "config.yaml": "version: 1\nwatcher:\n  ama_hammer_dispatch_mode: sideways\n"
+   },
+   "get": [],
+   "python": {
+    "ok": false,
+    "key": "watcher.ama_hammer_dispatch_mode"
+   }
+  },
+  {
+   "name": "review-service unknown sibling in a strict section refused",
+   "files": {
+    "config.yaml": "version: 1\nroles:\n  routing:\n    surprise: true\n"
+   },
+   "get": [],
+   "python": {
+    "ok": false,
+    "key": "roles.routing.surprise"
+   }
+  },
+  {
+   "name": "moved enum members are accepted and normalized",
+   "files": {
+    "config.yaml": "version: 1\nroles:\n  remediator: gemini\n  remediator_fallback: [codex-corp, gemini]\n  merge_agent_worker_class: hammer-claude\n"
+   },
+   "get": [
+    "roles.remediator",
+    "roles.remediator_fallback",
+    "roles.merge_agent_worker_class"
+   ],
+   "python": {
+    "ok": true,
+    "values": {
+     "roles.remediator": "gemini",
+     "roles.remediator_fallback": [
+      "remediator-codex-corp",
+      "gemini"
+     ],
+     "roles.merge_agent_worker_class": "hammer-claude"
+    }
+   }
+  },
+  {
+   "name": "git identity overrides keep a dotted repository name",
+   "files": {
+    "config.yaml": "version: 1\nremediation:\n  git_identity_repo_overrides:\n    org/my.repo:\n      codex:\n        name: Bot\n        email: bot@example.com\n"
+   },
+   "get": [
+    "remediation.git_identity_repo_overrides"
+   ],
+   "python": {
+    "ok": true,
+    "values": {
+     "remediation.git_identity_repo_overrides": {
+      "org/my.repo": {
+       "codex": {
+        "name": "Bot",
+        "email": "bot@example.com"
+       }
+      }
+     }
+    }
+   }
+  },
+  {
+   "name": "git identity override field is validated",
+   "files": {
+    "config.yaml": "version: 1\nremediation:\n  git_identity_repo_overrides:\n    org/my.repo:\n      codex:\n        name: Bot\n        email: 'a<b@example.com'\n"
+   },
+   "get": [],
+   "python": {
+    "ok": false,
+    "key": "remediation.git_identity_repo_overrides.org/my.repo.codex.email"
+   }
+  },
+  {
+   "name": "search operation limits keep typed extra keys",
+   "files": {
+    "config.yaml": "version: 1\nservices:\n  hcp:\n    search:\n      providers:\n        brave:\n          allowed_operations: [web_search]\n          operation_limits:\n            web_search:\n              max_results: 5\n              currency: USD\n"
+   },
+   "get": [],
+   "python": {
+    "ok": true,
+    "values": {}
+   }
+  },
+  {
+   "name": "search operation limit with an unknown key is refused",
+   "files": {
+    "config.yaml": "version: 1\nservices:\n  hcp:\n    search:\n      providers:\n        brave:\n          allowed_operations: [web_search]\n          operation_limits:\n            web_search:\n              bogus: 5\n"
+   },
+   "get": [],
+   "python": {
+    "ok": false,
+    "key": "services.hcp.search.providers.brave.operation_limits.web_search.bogus"
+   }
+  },
+  {
+   "name": "public-hygiene identity accepts typed fields",
+   "files": {
+    "config.yaml": "version: 1\nworker_pool:\n  public_hygiene:\n    identities:\n      codex:\n        name: N\n        email: a@b.c\n"
+   },
+   "get": [
+    "worker_pool.public_hygiene.identities"
+   ],
+   "python": {
+    "ok": true,
+    "values": {
+     "worker_pool.public_hygiene.identities": {
+      "codex": {
+       "name": "N",
+       "email": "a@b.c"
+      }
+     }
+    }
+   }
   }
  ]
 }

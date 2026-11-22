@@ -173,3 +173,20 @@ test('runLegacyPrWrite forwards the run-budget override to the lane writer', asy
     readCandidate: async () => ({ prState: 'open', headSha: 'A', baseBranch: 'main' }), run: async a => { seen = a; return {}; } });
   assert.equal(seen.timeoutMs, 777);
 });
+
+// The proof can succeed while consuming the remaining command budget.
+test('successful review proof that spends the run budget is classified as timeout without transport', async t => {
+  const rootDir = fixture(t);
+  const monotonicNow = performance.now.bind(performance);
+  const result = await write(rootDir, { command: 'never-run', argv: [],
+    subject: { target: 'https://github.com/example/review/pull/5', head: 'a'.repeat(40) },
+    prNumber: 5, reviewValidatedAt: at, timeoutMs: 1000,
+    readReviewProof: async () => {
+      t.mock.method(performance, 'now', () => monotonicNow() + 2000);
+      return { ok: true };
+    },
+    exec: () => assert.fail('exhausted run budget must never invoke transport'),
+  });
+  assert.equal(result.ok, false);
+  assert.equal(result.reason, 'legacy-writer-timeout');
+});

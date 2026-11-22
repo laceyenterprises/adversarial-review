@@ -143,7 +143,7 @@ async function terminalReviewProofMatchesImpl({
       entries.filter(review => Date.parse(review.submitted_at) < cutoff), headSha, compare, checkedCurrency,
     );
     if (latest.commit_id !== prior?.commit_id || latest.body !== prior?.body
-      || (latest.state === 'CHANGES_REQUESTED' && prior.state !== 'CHANGES_REQUESTED')) {
+      || (latest.state === 'CHANGES_REQUESTED' && prior?.state !== 'CHANGES_REQUESTED')) {
       return { ok: false, reason: 'review-changed-since-validation',
         reviewId: latest.node_id || latest.id || null, family };
     }

@@ -51,9 +51,10 @@ export async function runLegacyLaneWrite({ rootDir, repository, base, command, a
           }) }, {}, timeout);
         } catch { /* Missing proof is an observation failure. */ }
         timeout -= Math.ceil(performance.now() - started);
-        if (proof?.ok !== true || timeout <= 0) {
+        if (proof?.ok !== true) {
           return { ok: false, reason: proof?.reason || 'terminal-review-evidence-unavailable' };
         }
+        if (timeout <= 0) return { ok: false, reason: 'legacy-writer-timeout' };
       }
       const result = await exec(command, argv, { timeout, killSignal: 'SIGTERM', killGraceMs, encoding: 'utf8', maxBuffer: MAX_BUFFER });
       return result?.timedOut

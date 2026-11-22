@@ -767,6 +767,7 @@ test('closer session failure resolves the committed seed model, never a stale fa
   assert.notEqual(result.reason, 'reviewer-model-unresolved');
   assert.ok(!result.deferred || result.reason !== 'harness-fallback-resolver-error');
   assert.ok(registryReads > 0, 'the failing registry transport must be exercised');
+  assert.equal(models.length, 1);
   for (const { model } of models) assert.equal(model, seeded);
 });
 

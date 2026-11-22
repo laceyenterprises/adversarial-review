@@ -9,6 +9,10 @@ from the seed (`modelSource=committed-seed`) instead of failing resolution and
 deferring every closer with `harness-fallback-resolver-error`. Incident report:
 [`docs/INCIDENT-2026-11-22-CLOSERSEED-01.md`](../INCIDENT-2026-11-22-CLOSERSEED-01.md).
 
+Final remediation requires the harness outage test to observe exactly one
+account-selection call before checking its seed model, preventing an empty
+collection from passing the model assertions vacuously.
+
 ## Interface changes
 
 - `src/adapters/agent-runtime/local/worker-model-seed.json` gains four class
@@ -25,6 +29,10 @@ deferring every closer with `harness-fallback-resolver-error`. Incident report:
 
 ## Verification
 
+- Final remediation: `node --test test/ama-harness-fallback.test.mjs` — all
+  45 tests pass with the account-selection count assertion. `npm run lint`
+  passes with 0 errors (147 warnings); `npm run typecheck:contracts`,
+  `bash demo/research-finding-walkthrough.sh` and `git diff --check` pass.
 - `node --test test/remodel-fallback.test.mjs` — 130 pass. With the seed file
   reverted to base, 43 fail (new outage, coverage and seed-shape tests).
 - `node --test test/ama-harness-fallback.test.mjs`,

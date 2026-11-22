@@ -321,7 +321,12 @@ MLR rollout. Existing stricter safety/evidence requirements remain in force.
    the app-store connection/schema setup. Required CI evidence uses configured
    contexts plus readable branch-protection contexts, including repositories
    without protection. Omitted domains in lightweight snapshots retain prior
-   evidence; explicit failed or incomplete refreshes of settled facts escalate.
+   evidence; explicit failed or incomplete refreshes of settled facts, late
+   snapshots, translation failures and unreadable launch ownership record a
+   typed unknown observation: a `refresh-evidence` wait naming its cause, never
+   a borrowed green and never a fold error (MRQ-11). Only an unreadable ledger
+   or a fold exception fails closed to escalate. Running closer launches are
+   translated to launch custody and observed GitHub merges to `merge_observed`.
    Synthetic live and queue rows cannot supply elapsed coverage or organic examples.
 2. Disposition every divergence in either direction, with evidence and owner:
    v1 may be wrong. Persist fold errors and missing evidence as unresolved;

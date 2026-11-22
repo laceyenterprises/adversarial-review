@@ -38,6 +38,11 @@ const workflowReasons = [
   'awaiting verdict for requested final remediator head',
   'failed final remediation requires recovery', 'primary-change provenance unavailable',
   'automated stop requires relevant evidence',
+  'operator decision required: findings gated on an operator label',
+  'live evidence unknown: out-of-order snapshot', 'live evidence unknown: snapshot translation error',
+  'live evidence unknown: snapshot observation error', 'live evidence unknown: launch ownership unreadable',
+  'live evidence unknown: checks evidence regressed at settled head',
+  'live evidence unknown: verdict evidence regressed at recorded verdict head',
 ];
 const fixedDetails = [
   'done:merged', 'hammer:ci-red-clean-verdict', 'hammer:lifetime-exhausted',
@@ -61,6 +66,7 @@ const fixedDetails = [
   'operator-hold:lifetime-exhausted', 'operator-hold:primary-change-repair', 'operator-hold:lease-expired',
   'operator-hold:checks-pending', 'operator-hold:review-findings-final',
   'operator-hold:operator-decision-required', 'done:terminal-observed',
+  'operator-hold:repair-owner-unproven', 'review:disputed-findings-review',
 ];
 function fixture(t) {
   const db = new Database(':memory:');
@@ -123,9 +129,25 @@ test('fixed producer reasons and details key exactly; dynamic and whitespace var
     'live-owner: reviewer holds an unexpired lease', 'shadow ledger unavailable (synthetic failure)',
     'kill switch: wait intercepted (autonomous execution disabled)', 'awaiting attestations from: synthetic',
   ]) assert.equal(shadowPatternKey(observation(0, { v2Decision: { kind: 'wait', reason } })), null);
-  for (const detail of ['operator-hold:operator-label-required:example-label', 'observe:unknown',
-    'hammer:synthetic-raw-reason', 'operator-hold:synthetic-raw-reason']) {
+  for (const detail of ['observe:unknown', 'hammer:synthetic-raw-reason', 'operator-hold:synthetic-raw-reason']) {
     assert.equal(shadowPatternKey(observation(0, { v1Action: { kind: 'wait', detail } })), null);
+  }
+});
+
+test('MRQ-11 D7: label-gated holds key as one class; the label name never enters the key', () => {
+  const keyFor = detail => shadowPatternKey(observation(0, { v1Action: { kind: 'halt', detail },
+    v2Decision: { kind: 'remediate', reason: 'blocking review finding at current revision' } }));
+  const first = keyFor('operator-hold:operator-label-required:example-label');
+  assert.notEqual(first, null);
+  assert.equal(keyFor('operator-hold:operator-label-required:other.label-2'), first);
+  assert.ok(!first.includes('example-label'));
+  assert.deepEqual(JSON.parse(first), ['shadow-pattern-v1', 'halt', 'operator-hold:operator-label-required',
+    'remediate', 'blocking review finding at current revision']);
+  for (const detail of ['operator-hold:operator-label-required:', 'operator-hold:operator-label-required:Example',
+    'operator-hold:operator-label-required:example label', 'operator-hold:operator-label-required:-leading',
+    'operator-hold:operator-label-required:example-label ']) assert.equal(keyFor(detail), null, detail);
+  for (const detail of ['operator-hold:repair-owner-unproven', 'review:disputed-findings-review']) {
+    assert.notEqual(keyFor(detail), null, detail);
   }
 });
 

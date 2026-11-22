@@ -41,10 +41,10 @@ import { handoffDigest } from './queue-handoff.mjs';
  * @param {{ subjectKey: SubjectKey, events: readonly FinalizationEvent[],
  *   policy?: Partial<EligibilityPolicy>, observedAt: string, ownerSnapshot?: object }} args
  */
-function shadowDecide({ subjectKey, events, policy, observedAt, ownerSnapshot }) {
+function shadowDecide({ subjectKey, events, policy, observedAt, ownerSnapshot, unknownEvidence }) {
   try {
     const state = fold(events);
-    const decision = eligible(state, policy, { observedAt, ownerSnapshot });
+    const decision = eligible(state, policy, { observedAt, ownerSnapshot, unknownEvidence });
     return { state, decision, foldError: false };
   } catch (err) {
     const decision = makeEligibilityDecision('escalate', {
@@ -70,16 +70,18 @@ function shadowDecide({ subjectKey, events, policy, observedAt, ownerSnapshot })
  *   observedAt: string,
  *   policy?: Partial<EligibilityPolicy>,
  *   ownerSnapshot?: object,
+ *   unknownEvidence?: { cause: string }[],
  * }} args
  * @returns {ShadowObservation}
  */
-export function shadowObserve({ subject, events, v1Action, observedAt, policy, ownerSnapshot }) {
+export function shadowObserve({ subject, events, v1Action, observedAt, policy, ownerSnapshot, unknownEvidence }) {
   if (!observedAt || typeof observedAt !== 'string') {
     throw new TypeError('shadowObserve requires an `observedAt` ISO timestamp');
   }
   const subjectKey = resolveSubjectKey(subject);
   const action = normalizeV1Action(v1Action);
-  const { state, decision, foldError } = shadowDecide({ subjectKey, events: events ?? [], policy, observedAt, ownerSnapshot });
+  const { state, decision, foldError } = shadowDecide({ subjectKey, events: events ?? [], policy, observedAt,
+    ownerSnapshot, unknownEvidence });
   const classification = classifyDivergence({ v1Action: action, v2Decision: decision, state, foldError });
 
   return {
@@ -113,7 +115,7 @@ export function shadowObserve({ subject, events, v1Action, observedAt, policy, o
  * }} args
  * @returns {ShadowObservation}
  */
-export function shadowObserveFromStore({ ledgerStore, subject, v1Action, observedAt, policy, ownerSnapshot }) {
+export function shadowObserveFromStore({ ledgerStore, subject, v1Action, observedAt, policy, ownerSnapshot, unknownEvidence }) {
   const subjectKey = resolveSubjectKey(subject);
   let events;
   try {
@@ -139,7 +141,7 @@ export function shadowObserveFromStore({ ledgerStore, subject, v1Action, observe
       sawExhaustion: false,
     };
   }
-  return shadowObserve({ subject, events, v1Action, observedAt, policy, ownerSnapshot });
+  return shadowObserve({ subject, events, v1Action, observedAt, policy, ownerSnapshot, unknownEvidence });
 }
 
 /**

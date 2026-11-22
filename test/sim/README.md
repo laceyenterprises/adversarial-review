@@ -118,3 +118,31 @@ This artifact deploys through ordinary source merge. It adds no production
 behavior or activation step. Read-only acceptance is the offline report and
 recorded baseline; watcher deployment, configuration and restarts belong to the
 operator/SRE cutover tickets.
+
+## Live-adapter patterns (MRQ-11)
+
+`live-patterns.mjs` holds the scenario library for the v2-wrong shadow patterns
+that the divergence adjudication traced to the live adapter rather than the pure
+fold. Each scenario feeds synthetic canonical next-action snapshots through the
+production `recordLiveShadow` into an in-memory store. It then checks the
+recorded v2 decision, its classification and that the pattern is keyable.
+`live-pattern-suite.mjs` runs from the same bridge (`finalization-simulator.test.mjs`).
+Each scenario records the adjudicated pre-fix decision as `before`. Running
+the suite against the pre-MRQ-11 sources fails every non-regression scenario.
+Scenarios marked `regression` pin behaviour that must not change: a live hammer
+lease still wins, and a terminal launch releases custody so remediation proceeds.
+
+| Defect | Scenarios | Corrected decision |
+| --- | --- | --- |
+| D1 owner/custody blindness | P01, P09, P10, P13, P17, P27, P31 | A launch the ledger reports held becomes launch custody: wait (`launch requires verified progress`), never escalate or remediate. Unreadable ownership at the head is a typed unknown. |
+| D2 suppressed-review heads | P04, P05, P14 | A completed comment-only final-round push is a final remediator head: `request-reexact-review`. |
+| D3 operator-decision holds | P06 (+ owner regressions) | Label-gated findings escalate as an operator decision only after the live-owner and custody gates. |
+| D4 spent rounds | P11 | Spent v1 rounds exhaust the review stage: final coverage-gated remediation. |
+| D5 observed merge | P20, P21 | `merge_observed`; no post-merge mergeability; classified as concurrence. |
+| D7 unkeyable details | null bucket | Stable keys for label-gated, repair-owner-unproven and disputed-findings details. |
+| D8 untyped fold errors | checks, verdict, out-of-order, post-merge | Typed `refresh-evidence` unknowns, never `foldError`. |
+
+The discrete-event library, `scenarios.json`, `baseline.json` and its pinned
+module hashes are unchanged: the generated requirement scenarios do not supply a
+live owner snapshot, so the new adapter evidence and snapshot-derived gates do
+not reach them.

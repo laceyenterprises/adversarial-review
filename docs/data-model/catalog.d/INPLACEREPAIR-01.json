@@ -22,7 +22,7 @@
       "optionalFields": [
         "repairEpochs[].dispatchProjectRef: immutable canonical dispatch project for the existing paired repository read, when supplied at reservation",
         "repairEpochs[].absentObservations: consecutive canonical exact-key absence proofs before operator escalation",
-        "repairEpochs[].enqueueFenceReceipt: committed canonical owner-family fence and original submitter evidence retained for terminalReason canonical-enqueue-fenced"
+        "repairEpochs[].enqueueFenceReceipt: committed legacy owner fence or CWP owner and epoch fences, with exact head and native submitter evidence, retained for terminalReason canonical-enqueue-fenced"
       ]
     }
   ]

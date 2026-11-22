@@ -1101,7 +1101,8 @@ reservation. The dispatch owner must establish the original launch and
 complete retry chain, or independently establish canonical absence and fence
 the original submitter through the authorized recovery path. The operator can
 separately
-[retire an already fenced legacy reservation](#retire-one-fenced-legacy-repair-reservation-lac-2297).
+retire an already fenced [legacy reservation](#retire-one-fenced-legacy-repair-reservation-lac-2297)
+or [CWP conflict reservation](#retire-one-fenced-cwp-conflict-reservation-lac-2303).
 Existing publication proof and custody rules continue to govern admission. Retirement
 removes repair ownership from next-action and TTM projections, allowing the existing
 ownerless clock and SEV1 page. Corrupt ledgers and busy refund writers defer only
@@ -1127,6 +1128,50 @@ durable proof. Successor reservation CAS ignores only `ownerObservedAt`; owner
 identity/state, publication, review/terminal state and spend fields still fence
 concurrent changes. Watcher observation updates retain their full snapshot CAS
 so a late observation cannot overwrite a newer one.
+
+### Retire one fenced CWP conflict reservation (LAC-2303)
+
+The HQ owner runs this command outside a worker launch from the deployed
+Agent OS checkout. First follow the
+[CWP producer inspection and apply procedure](https://github.com/laceyenterprises/agent-os/blob/fff114446a60a9dc8fbccf3e00b898fc348c7d47/docs/RUNBOOK-adversarial-review-pipeline.md#fence-an-original-cwp-conflict-owner-before-retirement)
+with migration 348 deployed. Carry the same selectors from the committed fence
+into retirement. The base is the original reservation head and the current
+head is the distinct live PR head. Read the conflict worker ID and exact
+decimal byte offset from the retained original job and pre-LRQ boot evidence.
+The offset must fit a JavaScript safe integer so its value survives a ledger
+read and rewrite exactly.
+
+```sh
+node tools/adversarial-review/bin/retire-legacy-repair.mjs --apply \
+  --repo OWNER/REPO --pr PR --base-head RESERVATION_SHA --current-head LIVE_SHA \
+  --epoch EPOCH_ID --owner-key EXACT_CWP_KEY \
+  --conflict-worker-id ORIGINAL_CONFLICT_WORKER --boot-trace-offset ORIGINAL_BYTE_OFFSET
+```
+
+The reader checks both canonical CWP enqueue guards and reads identical
+committed `cwp-repair-retirement-proof` receipts under the owner and
+`cwp-epoch:<epoch>` keys. It repeats the global family probe across launch
+statuses and repository/project scopes, and requires the independent HQ
+PR-wide owner lookup to report free. Missing schema, missing or inconsistent
+receipt rows, queued or late descendants, or unknown competing custody retain
+the reservation. Key absence, a dead process and expiry are insufficient
+evidence.
+
+The same PR intent and retry-ledger locks cover the reservation read and
+retirement write. With those locks held, the producer rebuilds its evidence
+using the canonical HQ root and the retained job, result and exact boot
+record. It verifies the open same-repository PR, current head, original branch,
+reservation base and digest. If the head, reservation or provenance changes,
+the command refuses and the canonical fence remains committed. The consumer
+also rechecks local competing custody after the evidence read. Retirement
+records `canonical-enqueue-fenced` on the original epoch with the receipt and
+preserves all attempt, spend, refund and cap history.
+
+LAC-2303 acceptance stays open after source publication. The HQ owner records
+deployed producer and consumer versions, the committed fence, a verified
+retirement readback and the independently authorized first review at the live
+head of the original PR. Its ordinary adversarial review, required checks and
+merge must settle before the owner closes acceptance.
 
 ### Retire one fenced legacy repair reservation (LAC-2297)
 
@@ -1178,8 +1223,9 @@ changes to reservation identity or the handoff still refuse. The bridge uses
 private producer functions, so producer upgrades must retain their consumer
 signatures and this digest definition until Agent OS supplies a public
 read-only interface. The optional offline deployment check below imports the
-installed functions and exercises the real evidence builder with external I/O
-mocked, including observation changes between fencing and retirement:
+installed functions. It exercises the real legacy and CWP evidence builders
+with disposable artifacts and stores, including observation changes between
+fencing and retirement.
 
 ```sh
 source modules/worker-pool/lib/hq-python-runtime.sh
@@ -10513,12 +10559,13 @@ owners retain custody. See [the governing state contract](STATE-MACHINE.md#confl
 and [RCA/activation boundary](postmortems/LAC-2148-conflict-before-ci.md).
 
 
-### Legacy-fence repository identity constraint
+### Repair-fence repository identity constraint
 
 `retire-legacy-repair.mjs` supports canonical lowercase repository selectors and
 ledgers whose stored `repo` exactly matches that selector. Mixed-case or
-pre-rename ledger identities refuse with `legacy-repair-reservation-mismatch`;
-this command does not migrate a ledger. Historical aliases are used only to
+pre-rename ledger identities refuse with `legacy-repair-reservation-mismatch`
+or `cwp-repair-reservation-mismatch` according to the selected variant.
+Historical aliases are used to
 identify and retain competing dispatch custody. Use the normal reviewed
 repository-rename recovery before attempting retirement of a noncanonical ledger.
 

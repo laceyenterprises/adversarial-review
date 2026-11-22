@@ -10,8 +10,9 @@
 //
 // Unknown keys fail `loadConfig` in checked-in files, as in Python. Local
 // overlays and the runtime/cached loaders (`loadConfigRuntime`,
-// `loadConfigCached`, `getConfig`) drop them, so a key from a newer schema
-// cannot crash a lagging daemon; `__strict_always` policies never tolerate.
+// `loadConfigCached`, `getConfig`, `loadConfigForIdentityTokenPool`) drop them,
+// so a key from a newer schema cannot crash a lagging daemon;
+// `__strict_always` policies never tolerate.
 // Remaining deliberate differences: explicit `~` on a non-nullable key fails
 // here as in Python; Node-only keys and enum members live, inventoried, in
 // ./config-node-keys.mjs; the Python merged-config checks for GCP profiles,
@@ -2200,8 +2201,13 @@ export function loadConfigRuntime({
 
 // Worker proposal projection only: an undeclared identity has no pool contract
 // to validate. Global/startup readers retain strict declaration validation.
+// HAMMERPOOLSTRICT-01: this is a runtime routing reader, so it shares the
+// general runtime reader's checked-in-unknown tolerance. A key that belongs to
+// a newer host config is warned about once and dropped; it must not hold every
+// closer. Value validation, `__strict_always` policies and the identity pool,
+// token account and broker declarations this reader projects stay strict.
 export function loadConfigForIdentityTokenPool({ identity, ...options } = {}) {
-  return loadConfigImpl({ ...options, tokenPoolIdentity: identity });
+  return loadConfigImpl({ ...options, tolerateCheckedInUnknown: true, tokenPoolIdentity: identity });
 }
 
 function loadConfigImpl({

@@ -1,5 +1,7 @@
 import { isDeepStrictEqual } from 'node:util';
 import { launchProbe, readDispatchLaunches } from '../dispatch-read-client.mjs';
+import { canonicalRepositoryArguments } from '../repository-names.mjs';
+import { withRepositoryStateRead } from '../repository-state-lock.mjs';
 import { readAmaAuditEntry } from './audit.mjs';
 import { deleteAmaCloserLeaseIfCurrent, findLiveAmaCloserLease, readAmaCloserLease } from './closer-lease.mjs';
 import { isPreReceiptIntent, readAmaCloserDispatchRecord } from './dispatch-record-read.mjs';
@@ -40,7 +42,7 @@ export function findReceiptedCloserAlias(rootDir, lease) {
 
 /** Retire a carried lease using a fresh, authenticated exact LRQ and retry read. */
 export async function recoverReceiptedCloserAlias({
-  rootDir, lease, record, hqRoot = process.env.HQ_ROOT || rootDir, env = process.env, signal, intentLock,
+  rootDir, lease, record, hqRoot = process.env.HQ_ROOT || rootDir, env = process.env, signal,
 }) {
   const identity = { repo: lease.repo, prNumber: lease.prNumber, headSha: lease.headSha };
   const evidence = { launchRequestId: lease.lrqId, dispatchHeadSha: record.headSha, leaseHeadSha: lease.headSha };
@@ -62,32 +64,38 @@ export async function recoverReceiptedCloserAlias({
     return held('closer-owned-or-unsettled');
   }
   try {
-    return withCloserIntentWriteLock(rootDir, identity, intentLock, () => {
-      const current = findLiveAmaCloserLease(rootDir, identity, { strict: true })?.lease;
-      const currentReceipt = findReceiptedCloserAlias(rootDir, lease);
-      const currentHeadRecord = readAmaCloserDispatchRecord(rootDir, identity);
-      if (!isDeepStrictEqual(current, lease) || !isDeepStrictEqual(currentReceipt, record)
-        || isPreReceiptIntent(currentHeadRecord)
-        || (currentHeadRecord?.state === 'dispatched' && currentHeadRecord.launchRequestId !== lease.lrqId)) {
-        return held('closer-owner-changed');
-      }
-      const previous = aliasHeads(lease);
-      // An interrupted rekey can leave two files. Removing the destination
-      // would make the shadowed source the live owner again.
-      if (previous.some(headSha => {
-        const prior = readAmaCloserLease(rootDir, { ...identity, headSha });
-        return prior && !['terminal', 'handed-to-review'].includes(prior.status);
-      })) return held('closer-rekey-incomplete');
-      if (hasSuccess(currentHeadRecord) || [lease.headSha, ...previous].some(head =>
-        readAmaAuditEntry(hqRoot, lease.repo, lease.prNumber, head)?.status === 'succeeded')) {
-        return held('closer-success-retained');
-      }
-      if (!deleteAmaCloserLeaseIfCurrent(rootDir, lease, { exactSnapshot: true })) return held('closer-owner-changed');
-      return { ...evidence, released: true, reason: 'terminal-closer-alias-released',
-        launchStatus: launchRequestMeaning(proof.row).status, failureClass: proof.row.failure_class ?? null,
-        source: proof.target.source };
+    return withRepositoryStateRead(rootDir, () => {
+      const canonicalIdentity = canonicalRepositoryArguments(rootDir, identity);
+      return withCloserIntentWriteLock(rootDir, canonicalIdentity, null, () => settle(canonicalIdentity));
     });
   } catch (error) {
     return held(error.code === 'EBUSY' ? 'closer-owner-changed' : 'closer-settlement-unavailable');
+  }
+
+  function settle(canonicalIdentity) {
+    const current = findLiveAmaCloserLease(rootDir, { ...canonicalIdentity, strict: true })?.lease;
+    const currentReceipt = findReceiptedCloserAlias(rootDir, lease);
+    const repos = new Set([identity.repo, canonicalIdentity.repo]);
+    const currentHeadRecords = [...repos].map(repo => readAmaCloserDispatchRecord(rootDir, { ...identity, repo }));
+    if (!isDeepStrictEqual(current, lease) || !isDeepStrictEqual(currentReceipt, record)
+      || currentHeadRecords.some(row => isPreReceiptIntent(row)
+        || (row?.state === 'dispatched' && row.launchRequestId !== lease.lrqId))) {
+      return held('closer-owner-changed');
+    }
+    const previous = aliasHeads(lease);
+    // An interrupted rekey can leave two files. Removing the destination
+    // would make the shadowed source the live owner again.
+    if (previous.some(headSha => {
+      const prior = readAmaCloserLease(rootDir, { ...identity, headSha });
+      return prior && !['terminal', 'handed-to-review'].includes(prior.status);
+    })) return held('closer-rekey-incomplete');
+    if (currentHeadRecords.some(hasSuccess) || [...repos].some(repo => [lease.headSha, ...previous].some(head =>
+      readAmaAuditEntry(hqRoot, repo, lease.prNumber, head)?.status === 'succeeded'))) {
+      return held('closer-success-retained');
+    }
+    if (!deleteAmaCloserLeaseIfCurrent(rootDir, lease, { exactSnapshot: true })) return held('closer-owner-changed');
+    return { ...evidence, released: true, reason: 'terminal-closer-alias-released',
+      launchStatus: launchRequestMeaning(proof.row).status, failureClass: proof.row.failure_class ?? null,
+      source: proof.target.source };
   }
 }

@@ -1352,8 +1352,8 @@ See the rollout and mixed-version behavior in [LAC-2228](changes/LAC-2228.md).
 
 The helper is a cold composition root: before its first dispatch read (a
 `dispatched` closer lease's launch, or a pending repair epoch's owner) it calls
-`prepareDispatchReadContext`. Only a read terminal launch with no live retry
-releases closer custody; live, transient, timed-out or unproven reads refuse
+`prepareDispatchReadContext`. A terminal launch with no live retry can satisfy
+the repair admission check. Live, transient, timed-out or unproven reads refuse
 `closer-owned-or-unknown`. If preparation fails or leaves reads disabled, it
 refuses `dispatch-read-context-unavailable` with a redacted `detail` and reads
 nothing (REPAIRDISPATCHREAD-01).
@@ -1366,13 +1366,19 @@ complete retry chain, with a 45-second total lookup budget. The repo, PR and
 original target head must match. Terminal non-success evidence releases the
 unchanged carried lease under the PR intent and lease fences. Success
 evidence, live or parked retries, identity mismatches, owner changes and
-timeouts preserve custody. Repair then runs the existing reservation checks
-and caps. Cancellation prints the LRQ and closer disposition and writes both
-heads to `result.closer` in its receipt when a matching receipt is available.
-An already-terminal alias release reports `cancelled=false` because no remote
-cancellation occurred. The operator receipt is separate from the legacy
-label cleanup and terminal-PR replay queues. Check source review and original
-PR repair admission independently.
+timeouts preserve custody. Repair prepares and reads alias evidence outside
+the intent lock and rechecks closer ownership after reacquiring it for
+reservation. Without a matching terminal receipt, repair uses ordinary
+ledger-proven admission and retains the lease. The existing reservation
+checks and caps still apply.
+
+Operator cancellation performs immediate merge-agent cleanup before AMA
+settlement. It prints the closer LRQ and disposition and writes both heads
+to `result.closer` when a matching receipt is available. `cancelled` reports
+the merge-agent cancel call, and `cleanupComplete` requires both merge-agent
+cleanup and any applicable AMA alias release. See the [operator cancellation
+runbook](follow-up-runbook.md#cancel-the-latest-merge-agent-dispatch). Check source
+review and original PR repair admission independently.
 
 Reviewer harness refunds are separate from unlimited inconclusive **closer**
 refunds: only three failed reviewer claims per PR, across all heads, receive

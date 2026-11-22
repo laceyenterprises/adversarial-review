@@ -124,14 +124,7 @@ async function cancelMergeAgentDispatch({
   cancelImpl = cancelMergeAgentDispatchOnMerge,
   env = process.env,
 } = {}) {
-  const closer = await settleAmaCancellation({ rootDir, repo, prNumber, env });
-  const result = closer ? {
-    attempted: true, repo, prNumber, attemptedAt: requestedAt,
-    launchRequestId: closer.launchRequestId ?? null,
-    cancelled: false, labelRemoved: false,
-    cleanupComplete: closer.released, retryable: !closer.released,
-    closer,
-  } : await cancelImpl({
+  const legacy = await cancelImpl({
     rootDir,
     repo,
     prNumber,
@@ -139,7 +132,15 @@ async function cancelMergeAgentDispatch({
     ghExecFileImpl,
     hqExecFileImpl,
     now: requestedAt,
+    env,
   });
+  const closer = await settleAmaCancellation({ rootDir, repo, prNumber, env });
+  const result = closer ? {
+    ...legacy,
+    cleanupComplete: legacy.cleanupComplete && closer.released,
+    retryable: legacy.retryable || !closer.released,
+    closer,
+  } : legacy;
   let lifecycleCleanupQueued = false;
   // The legacy queue is PR-wide and can resolve a different worker on replay.
   if (!closer && result.retryable) {
@@ -190,7 +191,8 @@ async function main() {
     console.log(
       `[merge-agent-cancel] cancelled=${result.cancelled} lrq=${result.launchRequestId || 'none'} ` +
       `labelRemoved=${result.labelRemoved} retryable=${result.retryable} ` +
-      `${result.closer ? `closer=${result.closer.reason} ` : ''}receipt=${result.receiptPath}`
+      `${result.closer ? `closer=${result.closer.reason} closerLrq=${result.closer.launchRequestId || 'none'} ` : ''}` +
+      `receipt=${result.receiptPath}`
     );
     if (result.retryable) {
       process.exitCode = 1;

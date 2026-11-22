@@ -2847,9 +2847,12 @@ Operator cancellation and native in-place repair can release a rekeyed
 and a fresh authenticated exact-LRQ lookup bind its dispatch to the carried
 head. Complete retry evidence must show terminal non-success for the root and
 every descendant. The PR intent lock and exact lease CAS protect replacement
-custody. Repair checks for a new owner before ordinary reservation. Sticky
-success, live and parked retries, interrupted rekeys and unavailable evidence
-retain custody. Release leaves dispatch history and charges intact.
+custody. Repair performs the alias lookup outside the intent lock and checks
+for a new owner under a reacquired lock before ordinary reservation. Without
+a matching terminal receipt, ordinary ledger-proven repair admission retains
+the lease. Sticky success, live and parked retries, interrupted rekeys and
+unavailable evidence retain custody. Release leaves dispatch history and
+charges intact.
 
 An armed GitHub auto-merge retains terminal-success ownership only inside the
 30-minute dispatched-lease window (`updatedAt`, falling back to `acquiredAt`);

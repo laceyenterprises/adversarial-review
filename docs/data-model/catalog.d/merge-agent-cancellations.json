@@ -1,0 +1,19 @@
+{
+  "entries": [
+    {
+      "id": "merge-agent-cancellations",
+      "title": "Operator Merge-Agent Cancellation Receipts",
+      "path": "docs/data-model/merge-agent-cancellations.md",
+      "store": "data/follow-up-jobs/merge-agent-cancellations/",
+      "schemaSurface": "src/merge-agent-cancel.mjs",
+      "relatedSchemaSurfaces": [
+        "src/follow-up-merge-agent.mjs",
+        "src/ama/receipted-closer-alias.mjs"
+      ],
+      "owner": "Follow-up merge-agent operations",
+      "optionalFields": [
+        "result.closer: AMA alias settlement disposition and available launch/head evidence"
+      ]
+    }
+  ]
+}

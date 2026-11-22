@@ -52,7 +52,7 @@ export async function main(args, {
     facts = readRepairFacts({ rootDir, db, repo, prNumber, headSha, row, conflicting: conflicting === 'true' });
   } finally { db.close(); }
   if (!facts.cause) return { ok: true, epoch: null, reason: 'budget-available' };
-  const release = tryAcquireCloserIntentLock(rootDir, { repo, prNumber });
+  let release = tryAcquireCloserIntentLock(rootDir, { repo, prNumber });
   if (!release) return { ok: false, reason: 'closer-submission-owned' };
   const readContext = dispatchReadContext(env, prepareDispatchReadContextImpl);
   const readImpl = (selector, readArgs) => readDispatchLaunches(selector, { ...readArgs, env });
@@ -77,18 +77,19 @@ export async function main(args, {
     let aliasReleased = false;
     if (lease?.lrqId && ['pending', 'dispatched'].includes(lease.status)) {
       const alias = findReceiptedCloserAlias(rootDir, lease);
-      if (!alias && lease.status === 'dispatched'
-        && (lease.rekeyedFromHeadSha || lease.supersededHeads?.length)) {
-        return { ok: false, reason: 'closer-owned-or-unknown' };
-      }
+      if (alias) release();
       const ready = await readContext();
       if (!ready.ok) return contextUnavailable(ready);
       // Only a correctly read terminal launch with no live retry is unowned;
       // transient, timed-out or unproven reads keep the closer's custody.
       if (alias) {
         const settlement = await recoverReceiptedCloserAlias({ rootDir, lease, record: alias,
-          env, hqRoot: env.HQ_ROOT, intentLock: release });
+          env, hqRoot: env.HQ_ROOT });
         if (!settlement.released) return { ok: false, reason: 'closer-owned-or-unknown', closer: settlement };
+        // Settlement reacquires its own lock. Reacquire for reservation and
+        // check for a successor before proceeding.
+        release = tryAcquireCloserIntentLock(rootDir, { repo, prNumber });
+        if (!release) return { ok: false, reason: 'closer-submission-owned' };
         aliasReleased = true;
       } else {
         const owned = launchRequestOwned(await readLaunchRequestStatusFromLedgerAsync({
@@ -115,7 +116,7 @@ export async function main(args, {
     }
     result = reserveRepairEpoch({ rootDir, repo, prNumber, headSha, ownerKey,
       cause: facts.cause, dispatchProjectRef, terminalOwner, ownerSnapshot: pending });
-  } finally { release(); }
+  } finally { release?.(); }
   if (result.reason === 'repair-epoch-cap') await pageRepairCap({ rootDir, repo, prNumber, epochs: result.epochs });
   return { ...result, refundedSpend: facts.refundedSpend };
 }

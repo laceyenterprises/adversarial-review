@@ -257,12 +257,11 @@ export function isReclaimableTerminalAmaCloserLease(lease, { launchStatusProbe, 
 
 // Revalidate after asynchronous evidence reads before retiring an observed owner.
 // Acquisition still uses the exclusive link CAS; a losing caller cannot dispatch.
-export function deleteAmaCloserLeaseIfCurrent(...args) {
-  const root = args[0];
-  return withRepositoryStateRead(root, () => {
-    args[1] = canonicalRepositoryArguments(root, args[1]);
-    return deleteAmaCloserLeaseIfCurrentWithinRepositoryState(...args);
-  });
+export function deleteAmaCloserLeaseIfCurrent(rootDir, lease, options) {
+  // The path helpers resolve the current name. Keep the observed payload
+  // intact for comparison, including an older stored repository name.
+  return withRepositoryStateRead(rootDir, () =>
+    deleteAmaCloserLeaseIfCurrentWithinRepositoryState(rootDir, lease, options));
 }
 
 function deleteAmaCloserLeaseIfCurrentWithinRepositoryState(rootDir, lease, { exactSnapshot = false } = {}) {

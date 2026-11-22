@@ -9,7 +9,7 @@ export function localPrimaryHistory({ source, base, head, prNumber = 1, changeRe
   function objects(refs, ...argv) {
     // The fixture owns this object store. Reuse Git bytes for full object IDs,
     // then build fresh responses so the fault hook still runs on each request.
-    if (!refs.every(ref => /^[0-9a-f]{40}$/.test(ref))) return readGit(...argv);
+    if (!refs.every(ref => /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/.test(ref))) return readGit(...argv);
     const key = JSON.stringify(argv);
     if (!pinnedReads.has(key)) pinnedReads.set(key, readGit(...argv));
     return pinnedReads.get(key);
@@ -17,7 +17,8 @@ export function localPrimaryHistory({ source, base, head, prNumber = 1, changeRe
   const text = (refs, ...argv) => objects(refs, ...argv).toString('utf8').trimEnd();
   const lines = (refs, ...argv) => text(refs, ...argv).split('\n').filter(Boolean);
   function commit(sha) {
-    const [parents, message] = text([sha], 'show', '-s', '--format=%P%x00%B', sha).split('\0');
+    const [parents, ...bodyParts] = text([sha], 'show', '-s', '--format=%P%x00%B', sha).split('\0');
+    const message = bodyParts.join('\0');
     return { sha, commit: { message }, parents: parents.split(' ').filter(Boolean).map(sha => ({ sha })) };
   }
   return createHistoryReader({ contextTimeoutMs: 60000, execGhWithRetryImpl: async ({ args: [, route], signal }) => {

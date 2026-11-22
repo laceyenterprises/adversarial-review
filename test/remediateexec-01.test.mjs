@@ -152,25 +152,50 @@ test.after(() => {
   if (retainedSeedRoot) rmSync(retainedSeedRoot, { recursive: true, force: true });
 });
 
-function prepareRetainedSeed() {
+function prepareRetainedSeed(makeGit = gitIn) {
   retainedSeedRoot = mkdtempSync(join(tmpdir(), 'remediateexec-seed-'));
-  const work = join(retainedSeedRoot, 'worker'), remote = join(retainedSeedRoot, 'remote.git');
-  mkdirSync(work);
-  const git = gitIn(work);
-  git('init', '-q', '--bare', '-b', 'main', remote);
-  git('init', '-q', '-b', 'main');
-  git('config', 'core.hooksPath', '/dev/null');
-  writeFileSync(join(work, 'base.txt'), 'base\n');
-  git('add', 'base.txt'); git('commit', '-qm', 'base');
-  git('remote', 'add', 'origin', remote); git('push', '-q', 'origin', 'main');
-  git('checkout', '-qb', 'topic');
-  writeFileSync(join(work, 'feature.txt'), 'feature\n');
-  git('add', 'feature.txt'); git('commit', '-qm', 'feature');
-  git('push', '-q', 'origin', 'topic');
-  writeFileSync(join(work, 'fix.txt'), 'fix\n');
-  git('add', 'fix.txt');
-  retainedSeedHead = git('rev-parse', 'HEAD');
+  try {
+    const work = join(retainedSeedRoot, 'worker'), remote = join(retainedSeedRoot, 'remote.git');
+    mkdirSync(work);
+    const git = makeGit(work);
+    git('init', '-q', '--bare', '-b', 'main', remote);
+    git('init', '-q', '-b', 'main');
+    git('config', 'core.hooksPath', '/dev/null');
+    writeFileSync(join(work, 'base.txt'), 'base\n');
+    git('add', 'base.txt'); git('commit', '-qm', 'base');
+    git('remote', 'add', 'origin', remote); git('push', '-q', 'origin', 'main');
+    git('checkout', '-qb', 'topic');
+    writeFileSync(join(work, 'feature.txt'), 'feature\n');
+    git('add', 'feature.txt'); git('commit', '-qm', 'feature');
+    git('push', '-q', 'origin', 'topic');
+    const head = git('rev-parse', 'HEAD');
+    writeFileSync(join(work, 'fix.txt'), 'fix\n');
+    git('add', 'fix.txt');
+    retainedSeedHead = head;
+  } catch (error) {
+    rmSync(retainedSeedRoot, { recursive: true, force: true });
+    retainedSeedRoot = undefined;
+    retainedSeedHead = undefined;
+    throw error;
+  }
 }
+
+test('partial retained seed setup removes its directory and clears readiness before retry', () => {
+  for (const failAt of ['init', 'push -q origin topic', 'add fix.txt']) {
+    let partialRoot;
+    const failure = new Error(`synthetic seed failure at ${failAt}`);
+    assert.throws(() => prepareRetainedSeed(work => {
+      partialRoot = join(work, '..');
+      return (...args) => {
+        if (args[0] === failAt || args.join(' ') === failAt) throw failure;
+        return HEAD;
+      };
+    }), error => error === failure);
+    assert.equal(existsSync(partialRoot), false);
+    assert.equal(retainedSeedRoot, undefined);
+    assert.equal(retainedSeedHead, undefined);
+  }
+});
 
 function retainedFixture(t) {
   const f = fixture(t);

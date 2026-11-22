@@ -38,6 +38,18 @@ test('every registered stop reason has a pinned origin; new reasons require an e
   for (const reason of ['new-stop', '__proto__', 'toString']) assert.throws(() => hammerStopOrigin(reason), /Unregistered/);
 });
 
+test('command errors remain closer faults without legacy infrastructure membership', async () => {
+  const moduleUrl = new URL('../src/ama/hammer-stop-origin.mjs', import.meta.url);
+  // Load an isolated registry as if the legacy Set entry had been pruned.
+  const source = readFileSync(moduleUrl, 'utf8')
+    .replace("  'hammer-command-error',\n", '')
+    .replace("'../atomic-write.mjs'", JSON.stringify(new URL('../atomic-write.mjs', moduleUrl).href));
+  const registry = await import(`data:text/javascript;base64,${Buffer.from(source).toString('base64')}`);
+  assert.equal(registry.HAMMER_INFRASTRUCTURE_OUTCOMES.has('hammer-command-error'), false);
+  assert.equal(registry.hammerStopOrigin('hammer-command-error'), 'closer');
+  assert.equal(registry.HAMMER_CLOSER_FAULTS.has('hammer-command-error'), true);
+});
+
 test('new infrastructure stop reasons agree across Set and origin lookups', () => {
   for (const reason of [
     'conflict-pr-read-failed', 'conflict-source-unavailable', 'conflict-base-unavailable',

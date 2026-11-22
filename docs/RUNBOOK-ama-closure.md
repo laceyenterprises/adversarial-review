@@ -176,6 +176,11 @@ A receipt deduplicates the source head even after terminal settlement or
 archival. Final fix-all reconciliation binds the delivered Comment-only source
 review to the canonical HQ worker slot and proves the exact destination head
 using the launch's verified produced attestation and structural Git replay.
+The follow-up launcher provides the deploy root to the canonical
+`hq attest chain` reader. Its verifier defaults to the same private key file
+as the HCP signer and honors explicit verifier configuration. The chain read
+uses the service's configured ledger target. Final fix-all checks the returned
+receipt's repository, PR, head, launch and worker class.
 The reply records a fix for every advisory by title. A partial reply qualifies
 only when a corroborated pipeline wait is all that remains. Disputes and
 remaining findings keep their existing adjudication paths. A worker's
@@ -184,7 +189,9 @@ fallback review admission. A transient produced-attestation read failure
 retains the in-progress proof through its existing one-hour retry window.
 
 The completed receipt hands the exact published head and original findings to
-the closer. Pending required CI retains its existing observer. The closer
+the closer and records the reviewed-to-resulting head edge in the completed
+round. A recorded `publishedHeadSha` is a branch-movement observation.
+Pending required CI retains its existing observer. The closer
 validates actual dispositions, primary-change preservation, current source and
 history, required CI, cost policy, live ownership and operator controls before
 merge. An unknown or blocking source verdict, an unproven or moved head, or

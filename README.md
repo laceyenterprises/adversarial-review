@@ -899,14 +899,16 @@ reviewers and independent review requirements retain their existing authority.
 The durable handoff receipt prevents duplicate builder work.
 Final fix-all always uses an HQ-provisioned branch-push worker, including
 during local failover. Its recorded launch must match the canonical workspace
-and exact-head produced attestation; missing identity requires recovery by the
-existing owner. Offline custody fixtures cover crash/retry and wrong-workspace
+and the verified produced attestation for the PR's repository, number and
+current head. The follow-up service supplies the deploy root for the canonical
+verifier. Offline custody fixtures cover crash/retry and wrong-workspace
 refusal. Transient attestation read failures retain the in-progress job within
 the existing one-hour proof window. Completed legacy receipts without native
 proof may fall back to exact-head review at rollout. After normal deployment,
-SRE checks the follow-up service identity can read the produced attestation for
-Agent OS PR 11403 and observes a natural final-fix-all launch, completion
-receipt and matching produced attestation before declaring recovery.
+SRE verifies the produced attestation under the follow-up service identity
+and observes a natural final fix-all go through completion. The completed
+round must record the edge from the reviewed start SHA to the verified
+published destination SHA.
 
 In-place repair custody is reconciled before watcher admission, at most once
 per 30 seconds. Complete terminal retry evidence can retire an unpublished

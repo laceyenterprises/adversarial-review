@@ -1703,6 +1703,10 @@ A receipt deduplicates the source head even after terminal settlement or
 archival. Final fix-all reconciliation binds the delivered Comment-only source
 review to the canonical HQ worker slot and proves the exact destination head
 using the launch's verified produced attestation and structural Git replay.
+The follow-up daemon reads the canonical chain with the configured ledger and
+verifier and checks the receipt's repository and PR alongside the head and
+launch binding. The ordinary completion transition records the round's start
+and resulting heads after verification.
 The reply records a fix for every advisory by title. A partial reply qualifies
 only when a corroborated pipeline wait is all that remains. Disputes and
 remaining findings keep their existing adjudication paths, including

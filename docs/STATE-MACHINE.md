@@ -1806,8 +1806,12 @@ exact head (or a request without a commit) and permission 404 return
 backoff or automatic retry/refund credit. Closed/merged preflight snapshots
 retain normal daemon handling. The first live gate reuses its initial rollup
 and proof; subsequent gates and transport read fresh evidence. In-lane proof
-reads abort after a load-aware 15 seconds, capped at 30 seconds and the remaining
-run budget, returning `legacy-writer-timeout` without transport. A blocked preflight that proves no
+reads abort after the load-aware value of a 15-second nominal; the only ceiling is the
+remaining run budget (HAMWRITERTIMEOUT-01), returning `legacy-writer-timeout` without
+transport. An exhausted budget never starts transport. `legacy-writer-timeout` is a
+registered infrastructure stop: the terminal audit keeps the real code and the existing
+closer retry re-drives the merge on the same head under a fresh lease, without
+re-remediation or re-review. `merge-target-unparseable` is a registered closer fault. A blocked preflight that proves no
 merge transport ran settles the local writer reservation. Existing exact-head
 CAS, leases and merge retry ownership continue to apply.
 

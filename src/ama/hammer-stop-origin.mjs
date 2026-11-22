@@ -51,6 +51,10 @@ export const HAMMER_INFRASTRUCTURE_OUTCOMES = new Set([
   'pr-mergeability-unknown',
   'withdrawn-review-dismissal-failed',
   'terminal-review-evidence-unavailable',
+  // HAMWRITERTIMEOUT-01: the in-lane review-proof read used up its deadline.
+  // That is a transport/observation deadline, not a fact about the PR: no
+  // merge was invoked, so the same head is retried under a fresh lease.
+  'legacy-writer-timeout',
 ]);
 
 export const HAMMER_EDIT_PLAN_ERROR_ORIGINS = Object.freeze({
@@ -107,6 +111,9 @@ export const HAMMER_STOP_ORIGINS = Object.freeze({
   'audit-not-published': 'closer',
   'predicate-failed': 'closer',
   'merge-title-missing': 'closer',
+  // HAMWRITERTIMEOUT-01: the writer could not read an explicit PR identity from
+  // the merge command the closer built; command construction is the closer's.
+  'merge-target-unparseable': 'closer',
   'commit-body-sanitization-failed': 'closer',
   'commit-body-decode-failed': 'closer',
   'commit-subject-decode-failed': 'closer',

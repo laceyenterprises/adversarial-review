@@ -319,8 +319,13 @@ The hammer refreshes review proof after acquiring the legacy lane writer and
 before invoking GitHub merge. Both daemon HAM terminal reuse paths refresh the
 same proof in their initial pre-lease snapshot, each live gate, and inside the
 lane writer before each transport attempt. The in-lane proof has a load-aware
-15-second budget capped at 30 seconds and at the remaining command budget;
+budget sized once from a 15-second nominal (about 84 seconds at a 5.6x load
+multiplier) and bounded only by the remaining command budget, with no fixed cap;
 expiry aborts the read and returns `legacy-writer-timeout` without transport.
+That code is a registered infrastructure stop (HAMWRITERTIMEOUT-01), not a PR
+fact: the hammer's deferral records it, the lease is released as a retryable
+abort, and the existing closer retry re-drives the merge on the same head with
+its usual backoff. `merge-target-unparseable` is a registered closer fault.
 The closer reuses its initial rollup/proof for its first live gate, then
 refreshes subsequent gates and transports. Initial read failures produce a typed
 unavailable proof before the merge lease; closed/merged snapshots retain normal

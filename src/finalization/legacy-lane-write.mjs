@@ -14,8 +14,11 @@ import { readQueueEvidence } from './queue-read.mjs';
 export const LEGACY_RUN_NOMINAL_MS = 240_000;
 export const LEGACY_RUN_CEILING_MS = 600_000;
 export const LEGACY_RUN_MAX_MS = 3_600_000;
+// HAMWRITERTIMEOUT-01: the in-lane review-proof read is sized once from this
+// nominal by host load. Its only ceiling is the run budget still remaining, so
+// a fixed cap can never undercut the load-aware value (a 5.6x multiplier asks
+// for 84 s; a 30 s cap turned that into a timeout after a passed predicate).
 export const LEGACY_PROOF_NOMINAL_MS = 15_000;
-export const LEGACY_PROOF_CEILING_MS = 30_000;
 const MAX_BUFFER = 64 * 1024 * 1024;
 
 export function validLegacyRunTimeoutMs(ms) {
@@ -45,8 +48,10 @@ export async function runLegacyLaneWrite({ rootDir, repository, base, command, a
           return { ok: false, reason: 'terminal-review-evidence-unavailable' };
         }
         // Bound remote evidence while holding the lane; charge it to the run.
+        // Follow the load-aware value up to the remaining run budget. An
+        // exhausted budget never starts transport (checked after the read).
         const proofTimeout = Math.min(timeout,
-          loadAwareTimeoutMs(LEGACY_PROOF_NOMINAL_MS, { ...load, maxMs: LEGACY_PROOF_CEILING_MS }));
+          loadAwareTimeoutMs(LEGACY_PROOF_NOMINAL_MS, { ...load, maxMs: timeout }));
         let proof;
         try {
           proof = await readQueueEvidence({ read: ({ signal }) => readReviewProof({

@@ -3,6 +3,7 @@ import { closerProcessFixture } from './helpers/closer-process-fixture.mjs';
 import { assertHoldRecord } from '../src/ama/hold-record.mjs';
 import { seedCloserIntent, intentExpired, intentEarly } from './helpers/closer-intent-fixture.mjs';
 import { selectWorkerTokenAccount } from '../src/worker-token-pool.mjs';
+import { AgentOSConfigError } from '../src/config-loader.mjs';
 import { poolConflictFixture } from './helpers/pool-conflict-fixture.mjs';
 import './helpers/load-aware-timeout-fixture.mjs';
 import test from 'node:test';
@@ -3066,6 +3067,35 @@ for (const holdReason of ['fleet-quota-status-unavailable', 'codex-account-evide
     assert.equal(audit.status, 'deferred');
   });
 }
+
+test('HAMMERPOOLSTRICT-01: a pool config load error is named in the harness_resolution event, result and audit', async t => {
+  const rootDir = mkdtempSync(join(tmpdir(), 'closer-config-load-error-'));
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  const deps = testDeps();
+  const args = findingsRemediationArgs(rootDir);
+  const events = [];
+  const resolvePoolsImpl = () => { throw new AgentOSConfigError('synthetic: value synthetic-secret-7 rejected',
+    { key: 'worker_pool.synthetic_new_key', got: 'synthetic-secret-7' }); };
+  const result = await maybeDispatchAmaCloser({ ...args, ...deps,
+    logger: { ...deps.logger, info: event => events.push(event), log: event => events.push(event) },
+    resolveOsgRemediatorRouteImpl: async () => assert.fail('a held harness must not reach OSG'),
+    resolveCloserDispatchHarnessImpl: options => resolveCloserDispatchHarness({ ...options,
+      codexAccountPolicy: 'pinned', execFileImpl: async () => ({ stdout: '{}' }),
+      selectAccountImpl: request => selectWorkerTokenAccount({ ...request, resolvePoolsImpl,
+        ownerImpl: () => assert.fail('no owner read after a config error') }) }) });
+  assert.equal(result.dispatched, false);
+  assert.equal(result.reason, 'harness-hold:config-load-error');
+  const expected = { errorClass: 'AgentOSConfigError', keyPath: 'worker_pool.synthetic_new_key' };
+  assert.deepEqual(result.harnessResolution.configLoadError, expected);
+  const audit = readAmaAuditEntry(args.dispatchContext.hqRoot, args.dispatchContext.repo, 404, HEAD);
+  assert.deepEqual(audit.attempts.at(-1).harnessResolution.configLoadError, expected);
+  const logged = events.map(line => JSON.parse(line)).find(entry => entry.event === 'ama_closer.harness_resolution');
+  assert.equal(logged.reason, 'config-load-error');
+  assert.equal(logged.hold, true);
+  assert.equal(logged.accountProposal.reason, 'config-load-error');
+  assert.deepEqual(logged.configLoadError, expected);
+  assert.equal(JSON.stringify([events, result, audit]).includes('synthetic-secret-7'), false);
+});
 
 test('HAMMERQUOTAREAD-01: snapshot provenance survives personal dispatch and audit', async t => {
   const rootDir = mkdtempSync(join(tmpdir(), 'closer-snapshot-audit-'));

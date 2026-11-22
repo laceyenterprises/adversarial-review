@@ -36,17 +36,22 @@ function contextUnavailable(ready) {
   return { ok: false, reason: 'dispatch-read-context-unavailable', detail: ready.detail };
 }
 
+function projectRequired(repo) {
+  return { ok: false, reason: 'repair-dispatch-project-required',
+    detail: 'supply-exact-dispatch-project',
+    scope: { appId: 'adversarial-review', repo, projectRef: null } };
+}
+
 async function verifyRepairDispatchScope({ repo, dispatchProjectRef, readContext, readImpl }) {
   const scope = { appId: 'adversarial-review', repo, projectRef: dispatchProjectRef ?? null };
-  if (!dispatchProjectRef) return { ok: false, reason: 'repair-dispatch-project-required',
-    detail: 'supply-exact-dispatch-project', scope };
+  if (!dispatchProjectRef) return projectRequired(repo);
   const ready = await readContext();
   if (!ready.ok) return { ...contextUnavailable(ready), scope };
   // A fresh probe isolates visibility from the actual dispatch key's current
   // launch state. Its reply has no role in owner reconciliation or enqueue.
   const selector = { idempotency_key: `repair-read-preflight-${randomUUID()}`,
     project_ref: dispatchProjectRef, repo };
-  const result = await readImpl(selector, { timeoutMs: 8000 });
+  const result = await readImpl(selector);
   if (result.ok && result.absenceProof?.grant_id === 'project-repository-dispatch-read') return { ok: true };
   if (result.scopeDenied) return { ok: false, reason: 'repair-dispatch-read-scope-denied',
     detail: 'inspect-adversarial-review-dispatch_reads', scope };
@@ -85,6 +90,13 @@ export async function main(args, {
     });
     const claim = checkClaim();
     if (!claim.ok) return claim;
+    // This read-only snapshot can reject an impossible new request before any
+    // alias settlement or owner observation. Pending owners, replays and caps
+    // still require ordinary admission; the flock remains the reservation fence.
+    if (!dispatchProjectRef && facts.epochs.length < facts.epochCap
+      && !facts.epochs.some(epoch => epoch.ownerKey === ownerKey || !epoch.reviewHead && !epoch.terminalAt)) {
+      return projectRequired(repo);
+    }
     const prLease = claim.claimedAt && findLiveAmaCloserLease(rootDir, { repo, prNumber });
     if (prLease && (prLease.headSha.toLowerCase() !== headSha.toLowerCase()
       || !['pending', 'dispatched'].includes(prLease.lease.status)

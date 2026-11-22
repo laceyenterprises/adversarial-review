@@ -284,6 +284,20 @@ test('a successor closer lease appearing during repair scope verification retain
   assert.equal(pendingRepairEpoch(f.rootDir, identity), null);
 });
 
+test('missing repair project preserves a terminal receipted alias without SDK reads', async t => {
+  const f = fixture(t);
+  seedRepairFacts(f);
+  const before = f.lease();
+  const calls = sdkFixture(t);
+  const result = await reserveRepair([f.rootDir, repo, String(prNumber), current,
+    'repair-fixture', 'false', '', '', ''], { env: f.env });
+  assert.equal(result.reason, 'repair-dispatch-project-required');
+  assert.deepEqual(calls, []);
+  assert.deepEqual(f.lease(), before);
+  assert.equal(readFileSync(f.recordFile, 'utf8'), f.recordBytes);
+  assert.equal(pendingRepairEpoch(f.rootDir, identity), null);
+});
+
 test('native repair uses terminal ledger evidence without deleting an alias that has no terminal receipt', async t => {
   const f = fixture(t, { state: 'dispatched' });
   seedRepairFacts(f);

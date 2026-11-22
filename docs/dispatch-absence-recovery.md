@@ -24,9 +24,12 @@ existing submission/deadline rules and native fences still decide settlement.
 Before creating a new in-place repair epoch, the native helper sends the
 intended project and qualified repository with a fresh probe key through the
 authenticated review app SDK session. It requires a selector-bound canonical
-response with `grant_id: project-repository-dispatch-read`. A generic authorization error,
-filtered response, hidden match or transport failure leaves visibility
-unproven. A typed `dispatch_scope_denied` identifies an unreadable pair.
+response with `grant_id: project-repository-dispatch-read`. A filtered response,
+hidden match, unsupported selector or transport failure leaves visibility
+unproven. HTTP 403 (including a plain `app-contract 403` message) and typed
+`scope_denied`, `read_scope_denied`, `dispatch_read_scope_denied` or
+`dispatch_scope_denied` errors identify an unreadable pair. HTTP 400 without
+such a denial code remains an unsupported/unproven selector.
 Admission persists the verified project and rechecks current custody under the
 existing lock. The preflight establishes pair visibility at admission time.
 It does not establish absence or custody for the actual dispatch key.

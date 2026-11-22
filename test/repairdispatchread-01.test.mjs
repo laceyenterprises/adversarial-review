@@ -3,7 +3,7 @@
 // are synthetic; the SDK transport is mocked, so nothing leaves the process.
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync, mkdirSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, rmSync, mkdirSync, writeFileSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { createServer } from 'node:http';
@@ -376,4 +376,28 @@ test('missing project refuses a new epoch but permits exact legacy replay', asyn
   assert.equal(replay.replayed, true);
   assert.deepEqual(replay.epoch, prior);
   assert.equal(calls.lookup, 1, 'only the preexisting owner lookup is made');
+});
+
+test('missing project refuses before closer observation and leaves its lease intact', async t => {
+  const rootDir = exhaustedPr(t);
+  closerLease(rootDir);
+  const leaseFile = amaCloserLeaseFilePath(rootDir, { repo, prNumber, headSha: head });
+  const before = readFileSync(leaseFile, 'utf8');
+  const calls = mockSdk(t);
+  const result = await main(argv(rootDir, ''), { env: freshEnv() });
+  assert.equal(result.reason, 'repair-dispatch-project-required');
+  assert.deepEqual(calls, { connect: 0, lookup: 0 });
+  assert.equal(readFileSync(leaseFile, 'utf8'), before);
+  assert.equal(readHammerRetryCapLedger(rootDir, { repo, prNumber }), null);
+});
+
+for (const error of [
+  new Error('app-contract 403 synthetic denial'),
+  Object.assign(new Error('synthetic denial'), { code: 'dispatch_read_scope_denied' }),
+]) test(`scope preflight reports denial for ${error.code ?? 'plain 403'}`, async t => {
+  const rootDir = exhaustedPr(t);
+  mockSdk(t, { lookup: () => { throw error; } });
+  const result = await main(argv(rootDir), { env: freshEnv() });
+  assert.equal(result.reason, 'repair-dispatch-read-scope-denied');
+  assert.equal(readHammerRetryCapLedger(rootDir, { repo, prNumber }), null);
 });

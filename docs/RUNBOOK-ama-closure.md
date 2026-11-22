@@ -1367,6 +1367,9 @@ exact review-app project/repository grant before it writes the reservation.
 Budget-available updates and existing-key replays follow their existing rules.
 After the read, it checks the follow-up claim and any replacement closer lease.
 It re-evaluates epoch ownership and the cap under the retry-ledger flock.
+The scope preflight retains the PR intent lock so another closer submission
+cannot enter between the custody check and reservation. It uses the dispatch
+reader's load-aware eight-second nominal default and bounded transient retry.
 
 On `repair-dispatch-project-required`, inspect the native caller's project
 resolution. On `repair-dispatch-read-scope-denied`, check the intended exact
@@ -1374,8 +1377,18 @@ pair in the review app's `dispatch_reads`. `repair-dispatch-read-scope-unproven`
 means the read did not establish visibility. Check endpoint and producer
 availability and retry through native admission. The helper returns the app,
 project and repository in its refusal JSON, and HQ surfaces the reason and
-short diagnostic. These refusals leave the epoch, predecessor and attempt
-counters as they were.
+short diagnostic. These refusals create no epoch and spend no attempt.
+When the read-only ledger snapshot has no replay or pending epoch and remains
+below the cap, a missing project refuses before any closer alias settlement or
+owner read. Existing pending epochs still undergo ordinary owner observation;
+terminal closer aliases may settle before a later successor's missing-project
+or scope refusal. Such terminal-evidence settlement is independent of new
+reservation admission and does not allocate a successor.
+
+Deploy the Agent OS caller from `c9da1e455` (#11417) or later before floating
+this helper: it supplies argument nine from the dispatch project, including
+the CWP conflict path. See the exact caller and rollout evidence in
+[LAC-2329](changes/LAC-2329.md#caller-compatibility-and-rollout).
 
 For a rekeyed `dispatched` closer lease, both native repair reservation and
 `npm run merge-agent:cancel -- --repo OWNER/REPO --pr NUMBER REASON` look for

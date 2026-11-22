@@ -1365,12 +1365,12 @@ heads. They require a fresh authenticated App SDK read of that LRQ and its
 complete retry chain, with a 45-second total lookup budget. The repo, PR and
 original target head must match. Terminal non-success evidence releases the
 unchanged carried lease under the PR intent and lease fences. Success
-evidence, live or parked retries, identity mismatches, owner changes and
-timeouts preserve custody. Repair prepares and reads alias evidence outside
-the intent lock and rechecks closer ownership after reacquiring it for
-reservation. Without a matching terminal receipt, repair uses ordinary
-ledger-proven admission and retains the lease. The existing reservation
-checks and caps still apply.
+evidence, live or parked retries, identity mismatches, owner changes, unreadable
+current-head dispatch records and timeouts preserve custody. Repair prepares
+and reads alias evidence outside the intent lock and rechecks closer ownership
+after reacquiring it for reservation. Without a matching terminal receipt,
+repair uses ordinary ledger-proven admission and retains the lease. The
+existing reservation checks and caps still apply.
 
 Operator cancellation performs immediate merge-agent cleanup before AMA
 settlement. It prints the closer LRQ and disposition and writes both heads

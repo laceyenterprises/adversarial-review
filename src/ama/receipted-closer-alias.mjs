@@ -76,7 +76,8 @@ export async function recoverReceiptedCloserAlias({
     const current = findLiveAmaCloserLease(rootDir, { ...canonicalIdentity, strict: true })?.lease;
     const currentReceipt = findReceiptedCloserAlias(rootDir, lease);
     const repos = new Set([identity.repo, canonicalIdentity.repo]);
-    const currentHeadRecords = [...repos].map(repo => readAmaCloserDispatchRecord(rootDir, { ...identity, repo }));
+    const currentHeadRecords = [...repos].map(repo =>
+      readAmaCloserDispatchRecord(rootDir, { ...identity, repo }, { strict: true }));
     if (!isDeepStrictEqual(current, lease) || !isDeepStrictEqual(currentReceipt, record)
       || currentHeadRecords.some(row => isPreReceiptIntent(row)
         || (row?.state === 'dispatched' && row.launchRequestId !== lease.lrqId))) {

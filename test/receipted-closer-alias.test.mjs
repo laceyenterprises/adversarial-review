@@ -166,6 +166,16 @@ test('alias settlement retains custody when a listed lease cannot be read during
   assert.equal(f.lease().lrqId, launchRequestId);
 });
 
+test('alias settlement retains custody when the current-head dispatch record is unreadable', async t => {
+  const f = fixture(t);
+  sdkFixture(t, () => {
+    writeFileSync(amaCloserDispatchFilePath(f.rootDir, f.leaseKey), '{');
+    return reply();
+  });
+  assert.equal((await f.cancel()).closer.reason, 'closer-settlement-unavailable');
+  assert.equal(f.lease().lrqId, launchRequestId);
+});
+
 test('alias settlement deletes the exact stored snapshot after a repository rename', async t => {
   const f = fixture(t);
   const newRepo = 'laceyenterprises/renamed-widgets';

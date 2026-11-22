@@ -267,6 +267,13 @@ test('closer prose that calls a live-pack finding resolved by policy earns no cl
   assert.deepEqual(kept.evidence.auditComment.findings.map(finding => finding.title), ['Catalog row is stale']);
 });
 
+const signedOperatorEdit = {
+  sha: 'e'.repeat(40),
+  author: { login: 'Operator-One', type: 'User' },
+  committer: { login: 'Operator-One', type: 'User' },
+  commit: { message: 'Finish the approved prompt amendment', verification: { verified: true, reason: 'valid' } },
+};
+
 function fakeGitHub({ labels = ['live-pack-edit-approved'], timeline, compare, history, headAfter = HEAD, labelsAfter = labels } = {}) {
   const calls = [];
   let prReads = 0;
@@ -284,8 +291,7 @@ function fakeGitHub({ labels = ['live-pack-edit-approved'], timeline, compare, h
       status: 'ahead', total_commits: 2, commits: [{ sha: 'd'.repeat(40) }, { sha: 'e'.repeat(40) }],
       files: [{ filename: PROMPT }, { filename: 'src/feature.mjs' }] };
     if (path === `repos/${REPO}/commits?sha=${HEAD}&path=${encodeURIComponent(PROMPT)}&per_page=100`) return history ?? [
-      { sha: 'e'.repeat(40), author: { login: 'Operator-One', type: 'User' },
-        committer: { login: 'Operator-One', type: 'User' }, commit: { message: 'Finish the approved prompt amendment' } },
+      signedOperatorEdit,
       // The author's pre-review builder commit carries worker provenance but is outside the range.
       { sha: 'f'.repeat(40), commit: { message: 'DEMO-07: amend prompt\n\nWorker-Class: claude-code' } }];
     throw new Error(`unexpected fixture call ${path}`);
@@ -340,7 +346,9 @@ test('label, authorship, ancestry, change and head evidence each fail closed', a
   for (const history of [
     [{ sha: 'e'.repeat(40), author: { login: 'pr-author', type: 'User' },
       committer: { login: 'pr-author', type: 'User' },
-      commit: { message: 'Untrailed protected edit', committer: { date: '2026-11-21T10:00:00Z' } } }],
+      commit: { ...signedOperatorEdit.commit, committer: { date: '2026-11-21T10:00:00Z' } } }],
+    [{ ...signedOperatorEdit, commit: { message: 'Unsigned protected edit',
+      verification: { verified: false, reason: 'unsigned' } } }],
     [{ sha: 'e'.repeat(40), commit: { message: 'Unattributed protected edit' } }],
   ]) {
     const unproven = await read(fakeGitHub({ history }));

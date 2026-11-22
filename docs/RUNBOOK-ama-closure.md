@@ -6889,8 +6889,9 @@ reads itself (`src/live-pack-operator-edit.mjs`, reported as
 `resolved[].operatorEdit` and `operatorEditEvidence`): the PR is open and its
 live head descends from the reviewed head (`HAM_REVIEWED_SHA`, compare status
 `ahead`, complete commit and file lists); each protected path changed in that
-range, and every range commit touching it is attributed by GitHub to a
-configured operator as both author and committer and lacks `Worker-Class`,
+range, and every range commit touching it has a GitHub-verified signature
+with reason `valid`, is attributed by GitHub to a configured operator as
+both author and committer, and lacks `Worker-Class`,
 `Worker-Job-Id`, `Worker-Ticket` and `Closed-By` trailers; `live-pack-edit-approved` is present
 and its latest label event is a `labeled` by a
 `roles.adversarial.operator_logins` login; and the head and labels are

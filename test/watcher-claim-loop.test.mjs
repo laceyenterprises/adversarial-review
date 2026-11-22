@@ -5815,11 +5815,13 @@ test('LAC-2300: a wake visits a pending head and overdue unproven repair custody
   } finally { rmSync(tmp, { recursive: true, force: true }); }
 });
 
-for (const mode of ['pending', 'pending-uppercase', 'foreign', 'publication']) test(`repair watcher custody at prior reviewed head: ${mode}`, () => {
+for (const mode of ['pending', 'pending-uppercase', 'foreign', 'publication', 'retired-cwp']) test(`repair watcher custody at prior reviewed head: ${mode}`, () => {
   const uppercase = mode === 'pending-uppercase' || mode === 'publication';
+  const retired = mode === 'retired-cwp';
+  const admits = ['foreign', 'publication', 'retired-cwp'].includes(mode);
   const tmp = mkdtempSync(path.join(tmpdir(), 'watcher-second-repair-'));
   try {
-    const head = 'b'.repeat(40), subjectHead = ['foreign', 'publication'].includes(mode) ? 'c'.repeat(40) : head, rootDir = path.join(tmp, 'repair-root');
+    const head = 'b'.repeat(40), subjectHead = admits ? 'c'.repeat(40) : head, rootDir = path.join(tmp, 'repair-root');
     const repairUrl = fileUrl('src', 'repair-epochs.mjs');
     const loaderPath = path.join(tmp, 'loader.mjs');
     const registerPath = path.join(tmp, 'register.mjs');
@@ -5863,7 +5865,10 @@ for (const mode of ['pending', 'pending-uppercase', 'foreign', 'publication']) t
           headSha: 'a'.repeat(40), ownerKey: 'first', cause: 'closure-retry-exhausted' };
         const first = reserveRepairEpoch(identity).epoch;
         bindRepairHead({ ...identity, epochId: first.id, headSha: '${head}' });
-        assert.equal(reserveRepairEpoch({ ...identity, headSha: '${head}', ownerKey: 'second' }).ok, true);
+        const second = reserveRepairEpoch({ ...identity, headSha: '${head}',
+          ownerKey: ${JSON.stringify(retired ? 'cwp-' + 'a'.repeat(24) : 'second')},
+          cause: ${JSON.stringify(retired ? 'conflict-without-owner' : 'closure-retry-exhausted')} });
+        assert.equal(second.ok, true);
         db.prepare(\`INSERT INTO reviewed_prs (repo, pr_number, reviewed_at, reviewer,
           pr_state, review_status, reviewer_head_sha, revision_ref, rereview_requested_at)
           VALUES (?, 101, ?, 'claude', 'open', 'pending', ?, ?, ?)\`).run(
@@ -5871,12 +5876,23 @@ for (const mode of ['pending', 'pending-uppercase', 'foreign', 'publication']) t
       `,
       afterFirstPoll: `
         const verify = () => {
-          assert.equal(claims.some(claim => claim.prNumber === 101), ${['foreign', 'publication'].includes(mode)}, 'custody releases or admits verified publication');
+          assert.equal(claims.some(claim => claim.prNumber === 101), ${admits}, 'custody releases or admits verified publication');
           assert.equal((globalThis.__watcherClaimLoopReviewerSpawns || [])
-            .some(spawn => spawn.subjectContext?.prNumber === 101), ${['foreign', 'publication'].includes(mode)});
+            .some(spawn => spawn.subjectContext?.prNumber === 101), ${admits});
           if (${mode === 'pending' || mode === 'pending-uppercase'}) assert.equal(db.prepare('SELECT review_status FROM reviewed_prs WHERE pr_number=101').get().review_status, 'pending');
         };
-        verify();
+        if (${retired}) {
+          assert.ok(!claims.some(claim => claim.prNumber === 101));
+          const { updateHammerRetryCapLedger } = await import('${fileUrl('src', 'ama', 'hammer-retry-cap.mjs')}');
+          const { repo } = db.prepare('SELECT repo FROM reviewed_prs WHERE pr_number=101').get();
+          updateHammerRetryCapLedger(${JSON.stringify(rootDir)},
+            { repo, prNumber: 101 }, ledger => {
+              Object.assign(ledger.repairEpochs.at(-1), {
+                terminalReason: 'canonical-enqueue-fenced', terminalAt: new Date().toISOString(),
+              });
+              return ledger;
+            });
+        } else verify();
         await pollOnce(octokit, pollOptions);
         verify();
       `,

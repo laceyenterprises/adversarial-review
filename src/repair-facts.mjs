@@ -1,5 +1,5 @@
 import { readHammerRetryCapLedger } from './ama/hammer-retry-cap.mjs';
-import { repairCause, REPAIR_EPOCH_CAP } from './repair-epochs.mjs';
+import { repairCause, repairOperatorHoldReason, REPAIR_EPOCH_CAP } from './repair-epochs.mjs';
 import { resolveFirstPassReviewBudgetSuppression } from './first-pass-review-suppression.mjs';
 import { isBudgetExhaustedReviewSuppression } from './hamclose-review-admission.mjs';
 
@@ -7,8 +7,10 @@ export function readRepairFacts({ rootDir, db, repo, prNumber, headSha, row, con
   const ledger = readHammerRetryCapLedger(rootDir, { repo, prNumber });
   const suppression = resolveFirstPassReviewBudgetSuppression({ rootDir, db, repoPath: repo,
     prNumber, domainId: 'code-pr', currentHeadSha: headSha, reviewRow: row });
+  const epochs = ledger?.repairEpochs || [];
+  const pending = epochs.findLast(epoch => !epoch.reviewHead && !epoch.terminalAt);
   return { cause: repairCause({ ledger, row, cycleExhausted: isBudgetExhaustedReviewSuppression(suppression), conflicting }),
-    epochCap: REPAIR_EPOCH_CAP, epochs: ledger?.repairEpochs || [], refundedSpend: {
+    epochCap: REPAIR_EPOCH_CAP, epochs, operatorHold: repairOperatorHoldReason(pending), refundedSpend: {
       closer: Object.values(ledger?.selfErrorRefunds || {})
         .reduce((sum, launches) => sum + (Array.isArray(launches) ? launches.length : 0), 0),
       review: Object.values(ledger?.reviewHarnessRefunds || {}).filter(receipt =>

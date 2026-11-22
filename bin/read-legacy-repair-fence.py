@@ -1,6 +1,7 @@
 """Internal read-only evidence adapter for retire-legacy-repair.mjs."""
 
 import json
+from contextlib import nullcontext
 from pathlib import Path
 import re
 import sys
@@ -82,7 +83,8 @@ def _parse_args(argv):
     ):
         args.handoff_round = int(provenance[0])
         return args
-    if len(provenance) != 3:
+    ledger_absence = len(provenance) == 2 and provenance[1] == "ledger-absence"
+    if not ledger_absence and len(provenance) != 3:
         raise RepairFenceRefused("invalid-repair-fence-selector")
     from cwp_dispatch.cli_repair_enqueue_fence import REPO
     from session_ledger.repair_enqueue_fence import (
@@ -91,7 +93,7 @@ def _parse_args(argv):
         REPAIR_EPOCH_ID,
     )
 
-    current_head, conflict_worker_id, offset = provenance
+    current_head = provenance[0]
     if (
         not CWP_OWNER_KEY.fullmatch(owner_key)
         or not REPAIR_EPOCH_ID.fullmatch(epoch)
@@ -100,14 +102,21 @@ def _parse_args(argv):
         or not HEAD_SHA.fullmatch(base_head)
         or not HEAD_SHA.fullmatch(current_head)
         or current_head == base_head
-        or not re.fullmatch(
+    ):
+        raise RepairFenceRefused("invalid-repair-fence-selector")
+    args.current_head = current_head
+    if ledger_absence:
+        args.ledger_absence = True
+        return args
+    _, conflict_worker_id, offset = provenance
+    if (
+        not re.fullmatch(
             rf"codex-conflict-pr-{args.pr}-rebase-[0-9a-f]{{8}}", conflict_worker_id
         )
         or not re.fullmatch(r"(?:0|[1-9][0-9]{0,15})", offset)
         or int(offset) > 2**53 - 1
     ):
         raise RepairFenceRefused("invalid-repair-fence-selector")
-    args.current_head = current_head
     args.conflict_worker_id = conflict_worker_id
     args.boot_trace_offset = int(offset)
     return args
@@ -127,6 +136,18 @@ def main(argv):
     target = resolve_ledger_target(hq_root=hq_root)
     if target.backend != BACKEND_POSTGRES or not target.dsn:
         raise RepairFenceRefused("canonical-postgres-ledger-required")
+    guard = nullcontext(True)
+    if getattr(args, "ledger_absence", False):
+        from cwp_dispatch.enqueue_refusal import observe_unlocked_key
+
+        guard = observe_unlocked_key(hq_root, args.owner_key)
+    with guard as unlocked:
+        if not unlocked:
+            raise RepairFenceRefused("conflict-submission-owned")
+        return _read_current_proof(root, args, hq_root, target, cwp)
+
+
+def _read_current_proof(root, args, hq_root, target, cwp):
     conn = open_ledger_for_runtime_readonly(dsn=target.dsn, timeout=5, fixed=True)
     try:
         receipt = read_committed_proof(
@@ -134,7 +155,7 @@ def main(argv):
         )
     finally:
         conn.close()
-    if cwp:
+    if cwp and not getattr(args, "ledger_absence", False):
         from cwp_helm.pr_branch_owner import lookup_pr_owner
 
         # Independent HQ branch custody is PR-wide, including queued work.

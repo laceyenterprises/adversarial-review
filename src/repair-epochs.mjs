@@ -6,6 +6,8 @@ import { observeClosureWait } from './ama/closure-wait.mjs';
 import { readDispatchLaunches, launchProbe } from './dispatch-read-client.mjs';
 import { launchRequestOwned } from './ama/launch-request-status.mjs';
 import { readHeadAttestationChainForPr, resolveDaemonWorkerIdentityFromHeadAttestation } from './daemon-worker-identity.mjs';
+import { hasUnsettledAmaCloserDispatch } from './ama/dispatch-record-read.mjs';
+import { tryAcquireCloserIntentLock } from './ama/pre-receipt-intent.mjs';
 
 export const REPAIR_EPOCH_CAP = 2;
 export const REPAIR_OWNER_OBSERVE_MS = 30_000;
@@ -13,6 +15,8 @@ export const REPAIR_ABSENCE_ESCALATE_MS = 10 * 60_000;
 const PUBLISHER_MISSING_CACHE_MS = 2 * 60_000;
 const SHA = /^[a-f0-9]{40}$/i;
 const REPO = /^[^/\s]+\/[^/\s]+$/;
+const isUnscopedCwp = epoch => /^cwp-[0-9a-f]{24}$/.test(epoch.ownerKey)
+  && epoch.cause === 'conflict-without-owner' && !Object.hasOwn(epoch, 'dispatchProjectRef');
 const validProject = value => typeof value === 'string' && value.length > 0
   && value.length <= 256 && !/\s/.test(value);
 const sameIdentity = (left, right) => typeof left === 'string' && typeof right === 'string'
@@ -24,6 +28,27 @@ export function repairOwnerProofOverdue(epoch) {
   return Boolean(epoch?.id && !epoch.reviewHead && !epoch.terminalAt && !epoch.publicationHead
     && epoch.ownerState === 'unknown'
     && Date.parse(epoch.ownerObservedAt) - Date.parse(epoch.reservedAt) >= REPAIR_ABSENCE_ESCALATE_MS);
+}
+
+export function repairOperatorHoldReason(epoch) {
+  if (!epoch?.id || epoch.reviewHead || epoch.terminalAt) return null;
+  if (epoch.ownerState === 'absent-unfenced') return 'repair-absent-unfenced';
+  if (epoch.publisherObservation?.operatorRequired) return 'repair-publication-unproven';
+  return repairOwnerProofOverdue(epoch) ? 'repair-owner-unproven' : null;
+}
+
+function canObserveCwpAbsence(rootDir, identity, epoch, now) {
+  if (!Number.isSafeInteger(identity.prNumber) || identity.prNumber <= 0
+    || epoch.ownerLaunch != null || epoch.retryLaunches?.length || epoch.publicationHead || epoch.publicationLaunch
+    || !(now - Date.parse(epoch.reservedAt) >= REPAIR_ABSENCE_ESCALATE_MS)) return false;
+  try {
+    const unlock = tryAcquireCloserIntentLock(rootDir, identity);
+    if (!unlock) return false;
+    try { return !hasUnsettledAmaCloserDispatch(rootDir, identity); }
+    finally { unlock(); }
+  } catch {
+    return false;
+  }
 }
 
 function sameReservationSnapshot(left, right) {
@@ -46,15 +71,19 @@ const EXHAUSTION = new Set(['closure-retry-exhausted', 'closure-lifetime-exhaust
   'budget-exhausted-closure', 'system-budget-exhausted-closure',
   'remediation-round-budget-exhausted', 'review-cycle-cap-paused']);
 
-export async function observeRepairOwner({ rootDir, repo, epoch, readImpl = readDispatchLaunches }) {
+export async function observeRepairOwner({ rootDir, repo, prNumber, epoch, now = Date.now(),
+  readImpl = readDispatchLaunches }) {
   if (!epoch || epoch.reviewHead || epoch.terminalAt) return epoch;
   const unknown = { ...epoch, ownerState: 'unknown' };
   if (typeof repo !== 'string' || !REPO.test(repo) || repo !== repo.trim()
     || !SHA.test(epoch.baseHead) || typeof epoch.ownerKey !== 'string' || !epoch.ownerKey) return unknown;
   const selector = { idempotency_key: epoch.ownerKey };
+  const unscopedCwp = isUnscopedCwp(epoch);
   if (Object.hasOwn(epoch, 'dispatchProjectRef')) {
     if (!validProject(epoch.dispatchProjectRef)) return unknown;
     Object.assign(selector, { project_ref: epoch.dispatchProjectRef, repo });
+  } else if (unscopedCwp) {
+    selector.repo = repo;
   }
   const readArgs = { rootDir, timeoutMs: 8000 };
   const result = await readImpl(selector, readArgs);
@@ -63,6 +92,7 @@ export async function observeRepairOwner({ rootDir, repo, epoch, readImpl = read
   if (!result.ok) return unknown;
   if (result.roots?.length === 0 && result.absenceProof?.version === 1
     && result.absenceProof.kind === 'canonical-exact-selector-absence') {
+    if (unscopedCwp && !canObserveCwpAbsence(rootDir, { repo, prNumber }, epoch, now)) return unknown;
     return { ...epoch, ownerState: 'absent', absentObservations: (epoch.absentObservations || 0) + 1 };
   }
   if (result.roots?.length !== 1) return unknown;
@@ -114,7 +144,7 @@ export async function reconcileRepairOwner({ rootDir, repo, prNumber, headSha, n
   const age = now - Date.parse(epoch.ownerObservedAt);
   if (sameIdentity(epoch.publicationHead, headSha)
     || (age >= 0 && age < REPAIR_OWNER_OBSERVE_MS)) return epoch;
-  const observed = await observeRepairOwner({ rootDir, repo, epoch, readImpl });
+  const observed = await observeRepairOwner({ rootDir, repo, prNumber, epoch, now, readImpl });
   let publicationHead, publicationLaunch, publisherObservation, foreignHead = false;
   if (!atBase && typeof headSha === 'string' && SHA.test(headSha)
     && observed.ownerState !== 'unknown' && observed.retryLaunches) {
@@ -158,7 +188,8 @@ export async function reconcileRepairOwner({ rootDir, repo, prNumber, headSha, n
     if (!current) return null;
     if (!isDeepStrictEqual(current, epoch)) return current;
     current.ownerObservedAt = new Date(now).toISOString();
-    current.ownerState = current.ownerState === 'absent-unfenced' && observed.ownerState === 'unknown'
+    current.ownerState = !isUnscopedCwp(current)
+      && current.ownerState === 'absent-unfenced' && observed.ownerState === 'unknown'
       ? 'absent-unfenced' : observed.ownerState;
     current.ownerLaunch = observed.ownerLaunch || null;
     // REPAIROWNERSCOPE-01: a legacy reservation has no dispatch scope. Once its
@@ -191,9 +222,12 @@ export async function reconcileRepairOwner({ rootDir, repo, prNumber, headSha, n
     return current;
   });
   if (reconciled?.ownerState === 'absent-unfenced') {
+    const action = isUnscopedCwp(reconciled)
+      ? 'Operator must verify custody and use the CWP enqueue fence and retirement procedure. Use --ledger-absence when the original boot evidence is unavailable.'
+      : 'Operator must inspect the submitter and key before releasing custody.';
     await observeWait({ rootDir, repo, prNumber, headSha: `${reconciled.baseHead}:${reconciled.id}`,
       waitClass: 'repair-absent-unfenced', immediate: true, now,
-      reason: `Repair reservation ${reconciled.id} has repeated dispatch absence without an enqueue fence; operator must inspect the submitter and key before releasing custody.` });
+      reason: `Repair reservation ${reconciled.id} has repeated dispatch absence without an enqueue fence. ${action}` });
   }
   if (reconciled?.publisherObservation?.operatorRequired) {
     await observeWait({ rootDir, repo, prNumber,

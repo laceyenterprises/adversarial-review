@@ -20,6 +20,9 @@ import { isHarnessFault } from '../src/harness-fault.mjs';
 import { refundReviewHarnessFault, REVIEW_HARNESS_REFUND_CAP } from '../src/review-harness-retry.mjs';
 import { ensureReviewStateSchema, requestReviewRereview } from '../src/review-state.mjs';
 import { readRepairFacts } from '../src/repair-facts.mjs';
+import { readDispatchLaunches } from '../src/dispatch-read-client.mjs';
+import { amaCloserDispatchFilePath } from '../src/ama/dispatch-record-read.mjs';
+import { tryAcquireCloserIntentLock } from '../src/ama/pre-receipt-intent.mjs';
 
 const repo = 'example/widgets', prNumber = 17;
 const old = 'a'.repeat(40), head = 'b'.repeat(40), later = 'c'.repeat(40);
@@ -684,6 +687,58 @@ test('failed retry-chain lookup retains repair custody as unknown', async t => {
   assert.equal(observed.ownerState, 'unknown');
   assert.equal(observed.ownerLaunch, 'fixture-launch');
   assert.equal(pendingRepairEpoch(f.rootDir, f).terminalAt, undefined);
+});
+
+test('legacy CWP absence requires a scoped canonical read, elapsed grace and no submission custody', async t => {
+  const f = { ...fixture(t), now: '2026-01-01T00:00:00Z',
+    cause: 'conflict-without-owner', ownerKey: `cwp-${'a'.repeat(24)}` };
+  const epoch = reserveRepairEpoch(f).epoch;
+  const selector = { idempotency_key: f.ownerKey, repo };
+  const overdue = Date.parse(f.now) + REPAIR_ABSENCE_ESCALATE_MS;
+  const proof = { version: 1, kind: 'canonical-exact-selector-absence',
+    grant_id: 'cwp-repository-dispatch-read', observed_at: new Date(overdue).toISOString(), selector };
+  let response = { schema_version: 1, complete: true, status: 'not_found', items: [], roots: [],
+    retry_edges: [], scope_complete: true, absence_proof: proof };
+  const readImpl = (request, options) => readDispatchLaunches(request, { ...options, dispatchSession: {
+    async dispatchLookup(payload) {
+      assert.deepEqual(payload, selector);
+      if (response instanceof Error) throw response;
+      return response;
+    },
+  } });
+  const pages = [];
+  const options = { ...f, headSha: head, epoch, readImpl, observeWait: async wait => pages.push(wait) };
+  assert.equal((await observeRepairOwner({ ...options, now: overdue - 1 })).ownerState, 'unknown');
+
+  const unlock = tryAcquireCloserIntentLock(f.rootDir, f);
+  assert.ok(unlock);
+  try {
+    assert.equal((await observeRepairOwner({ ...options, now: overdue })).ownerState, 'unknown');
+  } finally { unlock(); }
+  const intent = amaCloserDispatchFilePath(f.rootDir, { ...f, headSha: later });
+  writeFileSync(intent, JSON.stringify({ repo, prNumber, state: 'dispatch-interrupted' }));
+  assert.equal((await observeRepairOwner({ ...options, now: overdue })).ownerState, 'unknown');
+  rmSync(intent);
+
+  const first = await reconcileRepairOwner({ ...options, now: overdue });
+  assert.equal(first.ownerState, 'absent');
+  assert.equal(first.absentObservations, 1);
+  const second = await reconcileRepairOwner({ ...options, now: overdue + REPAIR_OWNER_OBSERVE_MS });
+  assert.equal(second.ownerState, 'absent-unfenced');
+  assert.deepEqual(pages.map(page => page.waitClass), ['repair-absent-unfenced']);
+  const { deriveNextActionSnapshot, nextAction } = await import('../src/pr-next-action.mjs');
+  const action = nextAction(deriveNextActionSnapshot({ subjectKey: `${repo}#${prNumber}`, head,
+    observations: { pr: { state: 'OPEN', headSha: head, labels: [] },
+      policy: { autonomousMergeExecutionEnabled: true }, progress: { repairEpoch: second } } }));
+  assert.equal(action.reason, 'repair-absent-unfenced');
+  assert.equal(action.actor, 'operator');
+
+  response = Object.assign(new Error('synthetic transport timeout'), { code: 'ETIMEDOUT' });
+  const failed = await reconcileRepairOwner({ ...options, now: overdue + 2 * REPAIR_OWNER_OBSERVE_MS });
+  assert.equal(failed.ownerState, 'unknown');
+  assert.equal(failed.absentObservations, undefined);
+  assert.equal(pages.at(-1).waitClass, 'repair-owner-unproven');
+  assert.equal(pendingRepairEpoch(f.rootDir, f).id, epoch.id);
 });
 
 test('a moved head needs exact publication evidence from the reservation launch or its retry', async t => {

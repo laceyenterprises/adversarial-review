@@ -19,6 +19,7 @@ const identity = { repo: 'fixture/widgets', prNumber: 17, baseHead: 'a'.repeat(4
 const cwpIdentity = { repo: identity.repo, prNumber: identity.prNumber, baseHead: identity.baseHead,
   epochId: identity.epochId, ownerKey: `cwp-${'b'.repeat(24)}`, currentHead: 'e'.repeat(40),
   conflictWorkerId: 'codex-conflict-pr-17-rebase-a1b2c3d4', bootTraceOffset: 163 };
+const absenceIdentity = { ...cwpIdentity, ledgerAbsence: true };
 const reservedAt = '2026-11-21T00:00:00Z';
 const cliSource = new URL('../bin/retire-legacy-repair.mjs', import.meta.url);
 
@@ -76,6 +77,10 @@ function fixture(t, changeEpoch = () => {}, selector = identity) {
     proof.enqueueFence = { ...proof.enqueueFence, ownerKey, epochId };
     variantArgs = ['--current-head', currentHead, '--conflict-worker-id', conflictWorkerId,
       '--boot-trace-offset', String(bootTraceOffset)];
+    if (selector.ledgerAbsence) {
+      proof.evidence.submitter = { kind: 'canonical-cwp-ledger-absence' };
+      variantArgs = ['--current-head', currentHead, '--ledger-absence'];
+    }
   }
   const readerInput = join(root, 'fixture-reader-input.json');
   const attempt = (receipt = proof, action = 'read', changeArgs = args => args) => {
@@ -107,6 +112,44 @@ test('a committed CWP fence retires only the old reservation on the same PR with
     terminalReason: 'canonical-enqueue-fenced', enqueueFenceReceipt: f.proof });
   assert.deepEqual(JSON.parse(f.read()), expected);
   assert.equal(pendingRepairEpoch(f.root, cwpIdentity), null);
+});
+
+test('ledger absence retires the CWP reservation without boot evidence or review binding', t => {
+  const f = fixture(t, undefined, absenceIdentity);
+  const result = f.attempt();
+  const expected = structuredClone(f.ledger);
+  Object.assign(expected.repairEpochs[1], { terminalAt: result.epoch.terminalAt,
+    terminalReason: 'canonical-enqueue-fenced', enqueueFenceReceipt: f.proof });
+  assert.deepEqual(JSON.parse(f.read()), expected);
+  assert.equal(pendingRepairEpoch(f.root, absenceIdentity), null);
+  assert.equal(bindRepairHead({ ...absenceIdentity, rootDir: f.root, headSha: absenceIdentity.currentHead }), null);
+});
+
+test('ledger absence refuses a transport fault, recent reservation, live owner and competing lease', t => {
+  const f = fixture(t, undefined, absenceIdentity);
+  const before = f.read();
+  assert.throws(() => f.attempt(f.proof, 'unavailable'), /current-evidence-unavailable/);
+  const recentProof = structuredClone(f.proof);
+  recentProof.recordedAt = recentProof.evidence.reservedAt;
+  assert.throws(() => f.attempt(recentProof), /proof-mismatch/);
+  const current = { ...absenceIdentity, headSha: absenceIdentity.currentHead };
+  const lease = amaCloserLeaseFilePath(f.root, current);
+  f.write(lease, { ...current, status: 'pending' });
+  assert.throws(() => f.attempt(), /closer-owned-or-unknown/);
+  rmSync(lease);
+  const release = tryAcquireCloserIntentLock(f.root, absenceIdentity);
+  try { assert.throws(() => f.attempt(), /closer-submission-owned/); }
+  finally { release(); }
+  assert.equal(f.read(), before);
+  const epoch = f.ledger.repairEpochs[1];
+  epoch.ownerState = 'live';
+  f.write(f.path, f.ledger);
+  assert.throws(() => f.attempt(), /reservation-mismatch/);
+  epoch.ownerState = 'unknown';
+  epoch.reservedAt = new Date().toISOString();
+  f.write(f.path, f.ledger);
+  assert.throws(() => f.attempt(), /repair-reservation-grace-active/);
+  assert.deepEqual(JSON.parse(f.read()), f.ledger);
 });
 
 test('CWP retirement keeps both PR locks and rechecks custody after the read', t => {

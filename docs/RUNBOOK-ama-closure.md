@@ -1083,7 +1083,14 @@ root (the standard `HQ_ROOT` / `AGENT_OS_HQ_ROOT` resolver) and an eight-second
 subprocess budget. Point-in-time absence retains custody because the submitter may still
 enqueue. A reservation with a canonical project supplied at creation uses the
 existing project/repository paired grant for its exact-key read. Older
-reservations initially use an unscoped lookup. When compatible launch and retry
+reservations generally start with an unscoped lookup. Legacy CWP conflict
+reservations instead use the exact owner key and repository under an existing
+paired dispatch grant. At ten minutes the watcher can record positive absence
+if the canonical read proves zero matching launches and the native submission
+lock and local closer intent are clear. A second positive observation reaches
+`absent-unfenced` and pages the operator.
+
+When compatible launch and retry
 evidence resolves an owner to `live` or `terminal` and its own launch record names
 a valid project, the reconciler records `dispatchProjectRef` once with
 `dispatchProjectDerivedAt`. Subsequent exact-key reads use that project and the
@@ -1164,6 +1171,15 @@ the command refuses and the canonical fence remains committed. The consumer
 also rechecks local competing custody after the evidence read. Retirement
 records `canonical-enqueue-fenced` on the original epoch with the receipt and
 preserves all attempt, spend, refund and cap history.
+
+For a legacy CWP reservation whose original job or boot trace is gone, use
+`--ledger-absence` instead of the worker ID and trace offset. Use the same
+flag when inspecting and applying the producer fence. The variant requires a
+reservation at least ten minutes old and positive global absence of the owner
+family. The reader still verifies the committed two-key fence, open PR and
+distinct current head, native submission lock and independent PR-wide custody.
+Live or unreadable closer/submission or merge lease evidence refuses retirement.
+An independently authorized review can then claim the current head.
 
 LAC-2303 acceptance stays open after source publication. The HQ owner records
 deployed producer and consumer versions, the committed fence, a verified

@@ -244,8 +244,11 @@ function completeAbsence(result, selector) {
   const proof = result.absence_proof;
   const keys = Object.keys(selector).sort();
   const scoped = keys.includes('project_ref') || keys.includes('repo');
-  if (scoped && (typeof selector.project_ref !== 'string' || !selector.project_ref.trim()
-    || typeof selector.repo !== 'string' || !/^[^/\s]+\/[^/\s]+$/.test(selector.repo))) return false;
+  const cwpScope = keys.length === 2 && keys[0] === 'idempotency_key' && keys[1] === 'repo'
+    && /^cwp-[0-9a-f]{24}$/.test(selector.idempotency_key)
+    && proof?.grant_id === 'cwp-repository-dispatch-read';
+  if (scoped && (typeof selector.repo !== 'string' || !/^[^/\s]+\/[^/\s]+$/.test(selector.repo)
+    || (!cwpScope && (typeof selector.project_ref !== 'string' || !selector.project_ref.trim())))) return false;
   const identityKeys = keys.filter(key => !scoped || !['project_ref', 'repo'].includes(key));
   const exactKey = identityKeys.length === 1 && identityKeys[0] === 'idempotency_key';
   const exactTicket = identityKeys.length === 2 && identityKeys[0] === 'requested_at_or_after' && identityKeys[1] === 'ticket_ref';

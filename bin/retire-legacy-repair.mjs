@@ -3,12 +3,13 @@ import { resolve, join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { parseArgs, isDeepStrictEqual } from 'node:util';
 import { findLiveAmaCloserLease } from '../src/ama/closer-lease.mjs';
-import { isPreReceiptIntent, readAmaCloserDispatchRecordsForPR } from '../src/ama/dispatch-record-read.mjs';
+import { hasUnsettledAmaCloserDispatch } from '../src/ama/dispatch-record-read.mjs';
 import { updateHammerRetryCapLedger } from '../src/ama/hammer-retry-cap.mjs';
 import { readMergeLeaseHolders } from '../src/ama/merge-lease.mjs';
 import { tryAcquireCloserIntentLock } from '../src/ama/pre-receipt-intent.mjs';
 import { readRepairFollowUpClaim } from '../src/repair-follow-up-claim.mjs';
 import { withRepositoryStateRead } from '../src/repository-state-lock.mjs';
+import { REPAIR_ABSENCE_ESCALATE_MS } from '../src/repair-epochs.mjs';
 
 const ROOT = fileURLToPath(new URL('../', import.meta.url));
 const HEAD = /^[0-9a-f]{40}$/;
@@ -19,14 +20,16 @@ const STATES = [undefined, null, 'unknown', 'absent', 'absent-unfenced'];
 /**
  * @typedef {{repo: string, prNumber: number, baseHead: string, epochId: string, ownerKey: string}
  *   & ({variant: 'legacy', handoffRound: number}
- *     | {variant: 'cwp', currentHead: string, conflictWorkerId: string, bootTraceOffset: number})} RetirementIdentity
+ *     | ({variant: 'cwp', currentHead: string}
+ *       & ({ledgerAbsence: true} | {ledgerAbsence?: false, conflictWorkerId: string, bootTraceOffset: number})))} RetirementIdentity
  */
 
 /** @param {RetirementIdentity} identity */
 function readCanonicalProof(rootDir, identity) {
   const { repo, prNumber, baseHead, epochId, ownerKey } = identity;
   const provenance = identity.variant === 'cwp'
-    ? [identity.currentHead, identity.conflictWorkerId, String(identity.bootTraceOffset)]
+    ? [identity.currentHead, ...(identity.ledgerAbsence ? ['ledger-absence']
+      : [identity.conflictWorkerId, String(identity.bootTraceOffset)])]
     : [String(identity.handoffRound)];
   const runtime = resolve(rootDir, '../../modules/worker-pool/lib/hq-python-runtime.sh');
   const env = { ...process.env, BASH_ENV: '', ENV: '', PYTHONNOUSERSITE: '1' };
@@ -91,10 +94,13 @@ function matchesProof(proof, epoch, identity) {
       kind: 'canonical-repair-owner-family-fence', ownerKey, ...(cwp ? { epochId: epoch.id } : {}),
     })) return false;
   if (cwp) {
-    return evidence.currentHead === identity.currentHead
-      && typeof evidence.branch === 'string' && evidence.branch.trim() !== ''
-      && typeof evidence.reservationSha256 === 'string'
-      && submitter?.kind === 'native-auto-merge-conflict-dispatch'
+    if (evidence.currentHead !== identity.currentHead
+      || typeof evidence.branch !== 'string' || evidence.branch.trim() === '') return false;
+    if (identity.ledgerAbsence) {
+      return isDeepStrictEqual(submitter, { kind: 'canonical-cwp-ledger-absence' })
+        && Date.parse(proof.recordedAt) - Date.parse(epoch.reservedAt) >= REPAIR_ABSENCE_ESCALATE_MS;
+    }
+    return submitter?.kind === 'native-auto-merge-conflict-dispatch'
       && submitter.workerId === identity.conflictWorkerId && submitter.bootTraceOffset === identity.bootTraceOffset
       && [submitter.jobSha256, submitter.resultSha256, submitter.bootTraceSha256]
         .every(digest => typeof digest === 'string' && DIGEST.test(digest));
@@ -114,8 +120,7 @@ function retireLegacyRepair(rootDir, identity) {
       const claim = readRepairFollowUpClaim(rootDir, { ...identity, requireUnowned: true });
       if (!claim.ok) throw new Error(claim.reason);
       if (findLiveAmaCloserLease(rootDir, { ...identity, strict: true })
-        || readAmaCloserDispatchRecordsForPR(rootDir, { ...identity, strict: true }).some(record =>
-          !record.state || record.state === 'dispatched' || isPreReceiptIntent(record))
+        || hasUnsettledAmaCloserDispatch(rootDir, identity)
         || readMergeLeaseHolders({ rootDir, ...identity }).length) throw new Error('closer-owned-or-unknown');
     };
     try {
@@ -123,6 +128,10 @@ function retireLegacyRepair(rootDir, identity) {
       const written = updateHammerRetryCapLedger(rootDir, identity, ledger => {
         const epoch = pendingRepairReservation(ledger, identity);
         if (!epoch) throw new Error(`${identity.variant}-repair-reservation-mismatch`);
+        if (identity.variant === 'cwp' && identity.ledgerAbsence
+          && Date.now() - Date.parse(epoch.reservedAt) < REPAIR_ABSENCE_ESCALATE_MS) {
+          throw new Error('repair-reservation-grace-active');
+        }
         checkCompetingCustody();
         const proof = readCanonicalProof(rootDir, identity);
         if (!matchesProof(proof, epoch, identity)) throw new Error('committed-enqueue-fence-proof-mismatch');
@@ -148,6 +157,7 @@ function parseIdentity(args) {
     epoch: { type: 'string' }, 'owner-key': { type: 'string' }, 'handoff-round': { type: 'string' },
     'current-head': { type: 'string' }, 'conflict-worker-id': { type: 'string' },
     'boot-trace-offset': { type: 'string' },
+    'ledger-absence': { type: 'boolean' },
     apply: { type: 'boolean' },
   } });
   const { repo, pr, epoch: epochId, 'base-head': baseHead, 'owner-key': ownerKey, 'handoff-round': round,
@@ -161,16 +171,21 @@ function parseIdentity(args) {
   const common = { repo, prNumber: Number(pr), baseHead, epochId, ownerKey };
   if (CWP_OWNER_KEY.test(ownerKey)) {
     const workerId = new RegExp(`^codex-conflict-pr-${pr}-rebase-[0-9a-f]{8}$`);
+    const cwpRequired = `${required} --current-head and either --ledger-absence or --conflict-worker-id --boot-trace-offset (exact CWP selector)`;
+    if (round !== undefined || !HEAD.test(currentHead) || currentHead === baseHead) throw new Error(cwpRequired);
+    if (values['ledger-absence']) {
+      if (conflictWorkerId !== undefined || offset !== undefined) throw new Error(cwpRequired);
+      return { ...common, variant: 'cwp', currentHead, ledgerAbsence: true };
+    }
     // The receipt is retained in the Node JSON ledger. A lossy offset would
     // change the evidence recorded there even if the reader proved it exactly.
-    if (round !== undefined || !HEAD.test(currentHead) || currentHead === baseHead
-      || !workerId.test(conflictWorkerId) || !/^(?:0|[1-9]\d{0,15})$/.test(offset)
+    if (!workerId.test(conflictWorkerId) || !/^(?:0|[1-9]\d{0,15})$/.test(offset)
       || !Number.isSafeInteger(Number(offset))) {
-      throw new Error(`${required} --current-head --conflict-worker-id --boot-trace-offset (exact CWP selector)`);
+      throw new Error(cwpRequired);
     }
     return { ...common, variant: 'cwp', currentHead, conflictWorkerId, bootTraceOffset: Number(offset) };
   }
-  if (!/^in-place-repair-[0-9a-f]{64}$/.test(ownerKey) || !validNumber(round)
+  if (values['ledger-absence'] || !/^in-place-repair-[0-9a-f]{64}$/.test(ownerKey) || !validNumber(round)
     || [currentHead, conflictWorkerId, offset].some(value => value !== undefined)) {
     throw new Error(`${required} --handoff-round`);
   }

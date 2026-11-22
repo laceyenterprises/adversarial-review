@@ -75,7 +75,10 @@ flock. At a moved head, the same terminal evidence plus a successful missing or
 foreign publication read retires with `foreign-head-after-terminal`, preserving
 spend and leaving the head unbound. Verified publication head/launch evidence
 persists across skipped admission ticks. Live, absent dispatch and unreadable
-evidence retain custody. Two consecutive canonical absence proofs after ten
+evidence retain custody. An old CWP conflict reservation without a project can
+record `absent` from an exact key and repository lookup after ten minutes, with
+its native submission lock and closer submission custody clear. Two consecutive
+canonical absence proofs after ten
 minutes mark the reservation `absent-unfenced`, project operator custody in
 next-action/TTM and send a deduplicated SEV1 page. Retirement removes
 repair custody from canonical next-action and TTM projections, restoring the
@@ -83,6 +86,12 @@ existing ownerless clock and SEV1 path. Reviewer harness refunds are limited
 to three per PR across heads; later failures keep ordinary infra charges and
 cap alerts. Ledger faults defer only one PR. Existing lifecycle values, merge
 predicates and automated smoke commands are unchanged.
+
+Rescue projects the same operator action even when a review row is pending.
+An operator can retire an orphaned CWP reservation with fresh ledger absence
+and the committed owner/epoch enqueue fence when original boot evidence is
+unavailable. The retirement receipt preserves the reservation and spend
+history and releases ordinary review admission.
 
 An unbound repair reservation without verified publication whose owner is
 still `unknown` when observed at least ten minutes after reservation projects

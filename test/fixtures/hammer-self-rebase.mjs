@@ -85,7 +85,7 @@ if (args[0] === 'advance-base') {
   save();
   console.log(JSON.stringify({ ok: verdict.eligible, reasons: verdict.reasons, state: 'OPEN',
     headMatches: state.head === expected, liveHead: state.head, expectedHead: expected,
-    checksConclusion: classifyCheckRollup(checks), mergeable, mergeStateStatus }));
+    checksConclusion: classifyCheckRollup(checks), mergeable, mergeStateStatus, reviewValidatedAt: '2026-01-01T00:00:00Z' }));
 } else if (args[0] === 'initial-predicate') {
   const at = Number(readFileSync(join(dir, 'clock'), 'utf8'));
   if (process.env.SCENARIO === 'prepredicate-green') assert.ok(at >= 1700000060);
@@ -209,6 +209,10 @@ if (args[0] === 'advance-base') {
     console.log(JSON.stringify({ strict: !['initial-disjoint', 'ci-disjoint', 'ci-disjoint-conflict', 'ci-disjoint-lease-delay'].includes(process.env.SCENARIO) }));
   } else if (args[0] === 'api' && args.some(arg => arg.includes('/commits/'))) {
     console.log(JSON.stringify({ sha: state.head, parents: [{ sha: state.nextBase }] }));
+  } else if (args[0] === 'api' && args.includes('repos/fixture/repo/pulls/42')) {
+    console.log(JSON.stringify({ state: 'open', head: { sha: state.head } }));
+  } else if (args[0] === 'api' && args.some(arg => arg.startsWith('repos/fixture/repo/pulls/42/reviews?'))) {
+    console.log('[]');
   } else if (args[0] === 'api' && args.includes('--paginate')) {
     console.log('[]');
   } else if (args[0] === 'pr' && args[1] === 'comment') {

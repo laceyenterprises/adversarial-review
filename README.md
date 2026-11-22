@@ -1291,7 +1291,13 @@ When the hammer closes a PR,
 `templates/hammer-prompt.md` directs one linear flow. The verify-head,
 publish, and merge procedures live in `bin/hammer-*.sh` and are rendered by
 `bin/hammer-procedure.mjs` into the same persistent shell so the verified
-head and merge lease survive between phases. The wrapper prints each phase's
+head and merge lease survive between phases. Formal operator requests for
+changes survive pushes and rebases until dismissed or followed by a later
+approval from the same issuer. HAM reuse checks this proof before the merge
+lease and again before transport; review holds use a five-minute recovery
+backoff. Review-change and operator-veto audit deferrals do not earn an automatic
+retry refund. See the [standing-review contract](docs/RUNBOOK-ama-closure.md#standing-operator-reviews-and-the-merge-writer-lac-2305).
+The wrapper prints each phase's
 bounded diagnostic tail, status, outcome, and lease state. A blocked phase
 stops the flow; a rebase-conflict outcome returns control for local resolution.
 
@@ -1756,6 +1762,14 @@ The [reader contract](docs/producer-contract-readers.md#weekly-evidence-and-admi
 records the evidence/admission truth table and public export fixture refresh.
 
 ## State machines and smoke verification (SMV v1)
+
+Terminal HAM review proofs retain any-head operator vetoes. Permanent issuer
+gaps return `terminal-review-issuer-unverifiable` with operator custody; transient
+reads retain the five-minute recovery delay. GraphQL bot identity matches REST.
+In-lane proof reads abort within a load-aware 15–30 seconds and the remaining
+command budget, without invoking transport. Existing lifecycle states and smoke
+commands remain unchanged; focused coverage and deployment acceptance are in the
+[standing review contract](docs/RUNBOOK-ama-closure.md#standing-operator-reviews-and-the-merge-writer-lac-2305).
 
 Automatic exhausted-head verdict requests remain pending while a matching native
 merge lease retains custody. The watcher checks custody before dedup preflight

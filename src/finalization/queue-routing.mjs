@@ -83,7 +83,7 @@ export function createLaneRoutingController({ store, now = () => new Date().toIS
         const result = await selected({ ...desired, routeGeneration: route.route_generation });
         // Exceptions retain intent. The external drain adapter must additionally
         // inventory independently running closers and older deployed writers.
-        if (!(result?.attempts > 0 && !result.merged && !result.permanent)) {
+        if (result?.mergeNotInvoked || !(result?.attempts > 0 && !result.merged && !result.permanent)) {
           db.prepare('UPDATE finalization_queue_legacy_writer SET result_json=? WHERE writer_id=?')
             .run(JSON.stringify({ outcome: 'succeeded', sourceRef: `local-return:${id}` }), id);
         }

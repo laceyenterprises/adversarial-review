@@ -4,7 +4,8 @@ import { runLegacyLaneWrite, validLegacyRunTimeoutMs } from '../src/finalization
 
 export async function legacyLaneWriteMain(argv, { stdout = process.stdout, stderr = process.stderr, run = runLegacyLaneWrite } = {}) {
   const options = {};
-  const keys = { '--root': 'rootDir', '--repo': 'repository', '--base': 'base', '--deadline-ms': 'deadline', '--timeout-ms': 'timeoutMs' };
+  const keys = { '--root': 'rootDir', '--repo': 'repository', '--base': 'base', '--deadline-ms': 'deadline',
+    '--timeout-ms': 'timeoutMs', '--review-validated-at': 'reviewValidatedAt', '--pr': 'prNumber' };
   let i = 0;
   for (; i < argv.length && argv[i] !== '--'; i += 2) {
     if (!keys[argv[i]] || !argv[i + 1]) return 64;
@@ -19,6 +20,10 @@ export async function legacyLaneWriteMain(argv, { stdout = process.stdout, stder
   if (options.timeoutMs !== undefined) {
     options.timeoutMs = /^[0-9]+$/.test(options.timeoutMs) ? Number(options.timeoutMs) : NaN;
     if (!validLegacyRunTimeoutMs(options.timeoutMs)) return 64;
+  }
+  if (options.prNumber !== undefined) {
+    options.prNumber = /^[1-9][0-9]*$/.test(options.prNumber) ? Number(options.prNumber) : NaN;
+    if (!Number.isSafeInteger(options.prNumber)) return 64;
   }
   try {
     const commandArgs = argv.slice(i + 2);

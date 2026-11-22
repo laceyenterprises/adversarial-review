@@ -21,9 +21,10 @@ jitters read completion; supplied CPU/load evidence drives the shared
 slow with load. Episode anchors and the absolute end bound do not slide when
 polling. Every event, ledger append and observed execution effect invokes the
 independent oracle; the trace retains first and later violations even if the
-subject eventually recovers. Oracle observations reuse the last folded ledger
-until an append and still evaluate eligibility at each observation's virtual
-time. A read gets the current immutable event snapshot. An append publishes a
+subject eventually recovers. Oracle observations reuse eligibility for the
+same ledger and virtual timestamp, and read current effects at every observation.
+Mutation probes get their own effect copies and recompute eligibility for each
+observation. A read gets the current immutable event snapshot. An append publishes a
 new snapshot and leaves earlier snapshots intact. The executor continues to
 fold each read through its own path. Both simulator executor entrypoints reject
 deferrals whose details report a frozen-object mutation, so a production catch

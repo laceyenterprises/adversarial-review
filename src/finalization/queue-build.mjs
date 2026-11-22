@@ -20,6 +20,8 @@ export function queueRuntimeBuild() {
     '../../bin/legacy-lane-write.mjs',
     '../../bin/hammer-merge.sh',
     '../ama/dispatch-closer.mjs',
+    '../ama/closer-review-proof.mjs',
+    '../ama/reviewer-authority.mjs',
     '../daemon-clean-merge.mjs',
     '../ama/daemon-merge.mjs',
     'queue-status.mjs',

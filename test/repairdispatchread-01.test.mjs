@@ -11,11 +11,12 @@ import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { fileURLToPath } from 'node:url';
 import { main } from '../bin/repair-in-place.mjs';
-import { dispatchReadTransport, prepareDispatchReadContext } from '../src/dispatch-read-client.mjs';
+import { dispatchReadTransport } from '../src/dispatch-read-client.mjs';
 import { openReviewStateDb, ensureReviewStateSchema } from '../src/review-state.mjs';
 import { amaCloserLeaseFilePath } from '../src/ama/closer-lease.mjs';
 import { mutateRepairEpochs, readHammerRetryCapLedger } from '../src/ama/hammer-retry-cap.mjs';
 import { pendingRepairEpoch, reserveRepairEpoch } from '../src/repair-epochs.mjs';
+import { pairedDispatchAbsence } from './helpers/repair-dispatch-scope.mjs';
 
 const repo = 'example/widgets', prNumber = 23, head = 'd'.repeat(40);
 const closerLaunch = 'lrq_synthetic_closer';
@@ -54,6 +55,7 @@ function mockSdk(t, { launchStatus = 'canceled', connect, lookup } = {}) {
     readSessionDispatchLookup: async selector => {
       calls.lookup++;
       if (lookup) return lookup(selector);
+      if (selector.project_ref) return pairedDispatchAbsence(selector);
       const row = { launch_request_id: selector.launch_request_ids[0], status: launchStatus,
         repo, pr_number: prNumber, ticket_ref: 'SYNTHETIC-1' };
       return { schema_version: 1, status: 'found', complete: true,
@@ -62,10 +64,41 @@ function mockSdk(t, { launchStatus = 'canceled', connect, lookup } = {}) {
   }));
   return calls;
 }
-const argv = rootDir => [rootDir, repo, String(prNumber), head, 'repair-submit-synthetic', 'false'];
+const argv = (rootDir, project = 'fixture-project') =>
+  [rootDir, repo, String(prNumber), head, 'repair-submit-synthetic', 'false', '', '', project];
 // A fresh endpoint per test keeps the read client's module session cache apart.
 let endpoint = 0;
 const freshEnv = () => ({ APP_CONTRACT_ENDPOINT_URL: `https://fixture.invalid/repair-${++endpoint}` });
+
+test('a denied project/repository read stops a new repair before any reservation', async t => {
+  const rootDir = exhaustedPr(t);
+  const identity = { repo, prNumber };
+  const before = readHammerRetryCapLedger(rootDir, identity);
+  const calls = mockSdk(t, { lookup: () => {
+    throw new Error('app-contract dispatch_scope_denied: synthetic entitlement denial');
+  } });
+  const result = await main(argv(rootDir, 'legacy-project'), { env: freshEnv() });
+  assert.equal(result.ok, false, JSON.stringify({ result, ledger: readHammerRetryCapLedger(rootDir, identity), calls }));
+  assert.equal(result.reason, 'repair-dispatch-read-scope-denied');
+  assert.deepEqual(result.scope, { appId: 'adversarial-review', repo, projectRef: 'legacy-project' });
+  assert.equal(calls.lookup, 1);
+  assert.deepEqual(readHammerRetryCapLedger(rootDir, identity), before);
+});
+
+for (const [kind, reply, lookups] of [
+  ['transport outage', () => { throw new Error('app-contract dispatch_read_unavailable: synthetic outage'); }, 2],
+  ['unsupported selector', () => { throw new Error('app-contract invalid_dispatch_selector: old endpoint'); }, 1],
+  ['filtered empty', selector => ({ ...pairedDispatchAbsence(selector), scope_complete: false }), 1],
+  ['retirement-only grant', selector => pairedDispatchAbsence(selector, 'operator-exact-key'), 1],
+  ['mismatched proof', selector => pairedDispatchAbsence({ ...selector, repo: 'other/widgets' }), 1],
+]) test(`new repair scope stays unproven on ${kind}`, async t => {
+  const rootDir = exhaustedPr(t);
+  const calls = mockSdk(t, { lookup: reply });
+  const result = await main(argv(rootDir), { env: freshEnv() });
+  assert.equal(result.reason, 'repair-dispatch-read-scope-unproven');
+  assert.equal(calls.lookup, lookups);
+  assert.equal(readHammerRetryCapLedger(rootDir, { repo, prNumber }), null);
+});
 
 test('a lease naming a canceled closer launch reads as terminal and the reservation proceeds', async t => {
   const rootDir = exhaustedPr(t);
@@ -77,7 +110,7 @@ test('a lease naming a canceled closer launch reads as terminal and the reservat
   assert.match(result.epoch.id, /^repair-/);
   assert.equal(env.ADVERSARIAL_DISPATCH_READS_ENABLED, '1');
   assert.equal(calls.connect, 1);
-  assert.equal(calls.lookup, 1);
+  assert.equal(calls.lookup, 2);
 });
 
 for (const launchStatus of ['dispatched', 'running']) {
@@ -150,6 +183,7 @@ test('a pending repair epoch is observed through the prepared context', async t 
   const selectors = [];
   mockSdk(t, { lookup: selector => {
     selectors.push(selector);
+    if (selector.project_ref) return pairedDispatchAbsence(selector);
     const row = { launch_request_id: 'lrq_synthetic_repair', status: 'canceled',
       idempotency_key: prior.ownerKey, target_repo: repo, head_sha: head, identity_ambiguous: false };
     return { schema_version: 1, status: 'found', complete: true, roots: [row.launch_request_id],
@@ -161,19 +195,50 @@ test('a pending repair epoch is observed through the prepared context', async t 
   assert.equal(selectors[0].idempotency_key, 'repair-submit-prior');
 });
 
+test('a newly observed publication fences a successor during scope verification', async t => {
+  const rootDir = exhaustedPr(t);
+  const identity = { repo, prNumber };
+  const prior = reserveRepairEpoch({ rootDir, ...identity, headSha: head, ownerKey: 'repair-submit-prior',
+    cause: 'closure-retry-exhausted' }).epoch;
+  const priorLaunch = 'lrq_fixture_prior';
+  const publicationHead = 'a'.repeat(40);
+  mockSdk(t, { lookup: selector => {
+    if (selector.project_ref) {
+      mutateRepairEpochs(rootDir, identity, ledger => {
+        Object.assign(ledger.repairEpochs[0], { publicationHead, publicationLaunch: priorLaunch });
+      });
+      return pairedDispatchAbsence(selector);
+    }
+    const row = { launch_request_id: priorLaunch, status: 'canceled',
+      idempotency_key: prior.ownerKey, target_repo: repo, head_sha: head, identity_ambiguous: false };
+    return { schema_version: 1, status: 'found', complete: true, roots: [priorLaunch],
+      items: [row], retry_edges: [] };
+  } });
+  const result = await main(argv(rootDir), { env: freshEnv() });
+  assert.equal(result.reason, 'repair-owned');
+  assert.deepEqual(readHammerRetryCapLedger(rootDir, identity).repairEpochs,
+    [{ ...prior, publicationHead, publicationLaunch: priorLaunch }]);
+});
+
 const execute = promisify(execFile);
 const helper = fileURLToPath(new URL('../bin/repair-in-place.mjs', import.meta.url));
 const project = 'fixture-project';
 const ownerKey = 'fixture-original-key';
 const launch = 'lrq_fixture_owner';
+const isPreflight = selector => selector.idempotency_key?.startsWith('repair-read-preflight-');
+
+function assertScopeProbe(selector, expectedProject) {
+  assert.match(selector.idempotency_key, /^repair-read-preflight-[0-9a-f-]{36}$/);
+  assert.deepEqual(selector, { idempotency_key: selector.idempotency_key, project_ref: expectedProject, repo });
+}
 
 for (const [kind, lookupCount, remaining, exitCode, legacy = false] of [
-  ['terminal', 2, 2, 0], ['live retry', 2, 1, 75], ['retry unavailable', 2, 1, 75],
+  ['terminal', 3, 2, 0], ['live retry', 2, 1, 75], ['retry unavailable', 2, 1, 75],
   ['foreign head', 1, 1, 75], ['foreign repo', 1, 1, 75],
   ['grant denied', 1, 1, 75], ['filtered empty', 1, 1, 75],
   ['canonical empty', 1, 1, 75], ['moved head', 0, 1, 75],
   ['filtered empty', 1, 1, 75, true], ['canonical empty', 1, 1, 75, true],
-  ['terminal', 2, 2, 0, true],
+  ['terminal', 3, 2, 0, true], ['denied successor', 3, 1, 75], ['denied initial', 1, 0, 75],
 ]) test(`installed SDK repair CLI ${legacy ? 'legacy unscoped ' : ''}${kind}`, async t => {
   const rootDir = exhaustedPr(t);
   const bootstrap = join(rootDir, 'apps', 'bootstrap');
@@ -199,11 +264,13 @@ for (const [kind, lookupCount, remaining, exitCode, legacy = false] of [
     requests.push({ path: req.url, auth: req.headers.authorization, selector });
     res.setHeader('Content-Type', 'application/json');
     if (req.url === '/v1/register') return res.end(JSON.stringify({ session_token: 'fixture-session' }));
-    const denied = kind === 'grant denied';
+    const denied = kind === 'grant denied' || kind === 'denied initial'
+      || (kind === 'denied successor' && isPreflight(selector));
     if (denied || (kind === 'retry unavailable' && selector.include_retry_chain)) {
       res.writeHead(403);
-      return res.end(JSON.stringify({ error: 'dispatch_scope_denied' }));
+      return res.end(JSON.stringify({ error: { code: 'dispatch_scope_denied', message: 'synthetic denial' } }));
     }
+    if (isPreflight(selector)) return res.end(JSON.stringify(pairedDispatchAbsence(selector)));
     const empty = { schema_version: 1, status: 'not_found', complete: true, items: [], roots: [], retry_edges: [] };
     if (kind === 'filtered empty') return res.end(JSON.stringify(empty));
     if (kind === 'canonical empty') return res.end(JSON.stringify({ ...empty, scope_complete: true,
@@ -223,10 +290,19 @@ for (const [kind, lookupCount, remaining, exitCode, legacy = false] of [
   t.after(() => new Promise(resolve => server.close(resolve)));
   const endpointUrl = `http://127.0.0.1:${server.address().port}`;
 
-  const admitted = await run(head, ownerKey, legacy ? '' : project);
-  assert.equal(admitted.code, 0);
-  assert.equal(admitted.receipt.epoch.dispatchProjectRef, legacy ? undefined : project);
-  assert.equal(requests.length, 0, 'the initial reservation does no dispatch read');
+  if (kind === 'denied initial') {
+    const refused = await run(head, ownerKey, project);
+    assert.equal(refused.code, 75);
+    assert.equal(refused.receipt.reason, 'repair-dispatch-read-scope-denied');
+    assert.equal(readHammerRetryCapLedger(rootDir, { repo, prNumber }), null);
+    assert.deepEqual(requests.map(({ auth, path }) => [path, auth]), [
+      ['/v1/register', 'Bearer fixture-bootstrap'], ['/v1/dispatch/lookup', 'Bearer fixture-session'],
+    ]);
+    assertScopeProbe(requests[1].selector, project);
+    return;
+  }
+  reserveRepairEpoch({ rootDir, repo, prNumber, headSha: head, ownerKey,
+    cause: 'closure-retry-exhausted', dispatchProjectRef: legacy ? undefined : project });
   if (legacy || kind === 'canonical empty') {
     mutateRepairEpochs(rootDir, { repo, prNumber }, ledger => {
       ledger.repairEpochs[0].reservedAt = '2026-01-01T00:00:00Z';
@@ -240,13 +316,14 @@ for (const [kind, lookupCount, remaining, exitCode, legacy = false] of [
   const successor = await run(kind === 'moved head' ? 'e'.repeat(40) : head, 'fresh-key', 'new-project');
   assert.equal(successor.code, exitCode);
   assert.equal(successor.receipt.ok, exitCode === 0);
-  if (exitCode === 75) assert.equal(successor.receipt.reason, 'repair-owned');
+  if (exitCode === 75) assert.equal(successor.receipt.reason,
+    kind === 'denied successor' ? 'repair-dispatch-read-scope-denied' : 'repair-owned');
   const { repairEpochs } = readHammerRetryCapLedger(rootDir, { repo, prNumber });
   assert.equal(repairEpochs.length, remaining);
   assert.equal(repairEpochs[0].ownerKey, ownerKey);
   assert.equal(repairEpochs[0].reviewHead, null);
   assert.equal(Boolean(repairEpochs[0].terminalAt), exitCode === 0);
-  if (legacy && exitCode === 75) {
+  if ((legacy && exitCode === 75) || kind === 'denied successor') {
     assert.deepEqual(readHammerRetryCapLedger(rootDir, { repo, prNumber }), before);
   }
   assert.equal(pendingRepairEpoch(rootDir, { repo, prNumber }).ownerKey, exitCode === 0 ? 'fresh-key' : ownerKey);
@@ -264,23 +341,39 @@ for (const [kind, lookupCount, remaining, exitCode, legacy = false] of [
   }
   assert.deepEqual(requests[1].selector, legacy ? { idempotency_key: ownerKey }
     : { idempotency_key: ownerKey, project_ref: project, repo });
-  if (lookupCount === 2) assert.deepEqual(requests[2].selector, {
+  if (lookupCount >= 2) assert.deepEqual(requests[2].selector, {
     launch_request_ids: [launch], include_retry_chain: true,
   });
+  if (lookupCount === 3) assertScopeProbe(requests[3].selector, 'new-project');
 });
 
-test('no lease and no pending epoch: the reservation needs no dispatch context', async t => {
+test('the first reservation records the exact project after an affirmative scoped read', async t => {
   const rootDir = exhaustedPr(t);
-  let prepared = 0;
-  const result = await main(argv(rootDir), { env: freshEnv(),
-    prepareDispatchReadContextImpl: async args => { prepared++; return prepareDispatchReadContext(args); } });
+  const calls = mockSdk(t, { lookup: selector => {
+    assertScopeProbe(selector, project);
+    assert.equal(pendingRepairEpoch(rootDir, { repo, prNumber }), null);
+    return pairedDispatchAbsence(selector);
+  } });
+  const result = await main(argv(rootDir), { env: freshEnv() });
   assert.equal(result.ok, true);
-  assert.equal(prepared, 0);
+  assert.equal(result.epoch.dispatchProjectRef, project);
+  assert.equal(calls.connect, 1);
+  assert.equal(calls.lookup, 1);
 });
 
-test('empty optional project argument reserves an unscoped repair epoch', async t => {
+test('missing project refuses a new epoch but permits exact legacy replay', async t => {
   const rootDir = exhaustedPr(t);
-  const result = await main([...argv(rootDir), '', '', ''], { env: freshEnv() });
-  assert.equal(result.ok, true);
-  assert.equal(result.epoch.dispatchProjectRef, undefined);
+  const calls = mockSdk(t, { lookup: () => { throw new Error('unavailable'); } });
+  const env = freshEnv();
+  const request = argv(rootDir, '');
+  const refused = await main(request, { env });
+  assert.equal(refused.reason, 'repair-dispatch-project-required');
+  assert.equal(calls.connect, 0);
+  assert.equal(readHammerRetryCapLedger(rootDir, { repo, prNumber }), null);
+  const prior = reserveRepairEpoch({ rootDir, repo, prNumber, headSha: head, ownerKey: request[4],
+    cause: 'closure-retry-exhausted' }).epoch;
+  const replay = await main(request, { env });
+  assert.equal(replay.replayed, true);
+  assert.deepEqual(replay.epoch, prior);
+  assert.equal(calls.lookup, 1, 'only the preexisting owner lookup is made');
 });

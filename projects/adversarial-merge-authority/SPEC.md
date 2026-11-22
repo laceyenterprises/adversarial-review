@@ -531,6 +531,18 @@ trailers, not quoted prose. Missing patches can establish preservation through
 identical blob SHA and change status; changed opaque blobs fail closed. Preservation is syntactic region
 coverage, not proof of semantic intent or immunity to adjacent neutralisation.
 
+### In-place repair admission
+
+Before reserving a new exhausted-PR repair epoch, native HQ dispatch must
+establish that the authenticated review app can read the exact dispatch
+project and repository. The helper requires a selector-bound reply from the
+existing paired grant. Denial or unproven visibility stops the submission
+before any epoch reservation or worker admission. The existing follow-up
+claim, reservation snapshot and cap still govern the write. Existing exact
+owner replays keep their stored project and ordinary updates with review
+budget proceed through the usual path. Publication still requires authoritative
+owner, retry and produced-head evidence.
+
 ## 4.4 Closure convergence predicate
 
 The watcher must not treat `hq dispatch status=succeeded` or the AMA §4.4

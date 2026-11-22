@@ -1088,10 +1088,12 @@ reservations instead use the exact owner key and repository under an existing
 paired dispatch grant. At ten minutes the watcher can record positive absence
 if the canonical read proves zero matching launches and the native submission
 lock and local closer intent are clear. A second positive observation reaches
-`absent-unfenced` and pages the operator.
+`absent-unfenced` and pages the operator. For an unscoped CWP conflict
+reservation, a later unknown observation clears the absence count and
+returns the owner state to `unknown`.
 
-When compatible launch and retry
-evidence resolves an owner to `live` or `terminal` and its own launch record names
+When compatible launch and retry evidence resolves an owner to `live` or
+`terminal` and its own launch record names
 a valid project, the reconciler records `dispatchProjectRef` once with
 `dispatchProjectDerivedAt`. Subsequent exact-key reads use that project and the
 ledger repository. An omitted or malformed project field prevents derivation
@@ -1173,13 +1175,17 @@ records `canonical-enqueue-fenced` on the original epoch with the receipt and
 preserves all attempt, spend, refund and cap history.
 
 For a legacy CWP reservation whose original job or boot trace is gone, use
-`--ledger-absence` instead of the worker ID and trace offset. Use the same
-flag when inspecting and applying the producer fence. The variant requires a
-reservation at least ten minutes old and positive global absence of the owner
-family. The reader still verifies the committed two-key fence, open PR and
-distinct current head, native submission lock and independent PR-wide custody.
+`--ledger-absence` instead of the worker ID and trace offset after deploying
+the companion producer and dispatch-read endpoint. Use the same flag when
+inspecting and applying the producer fence. The variant requires a reservation
+at least ten minutes old and positive global absence of the owner family.
+The reader rechecks the committed two-key fence and canonical absence while
+holding the native submission lock when present. It calls the producer's
+evidence builder to verify the open PR and distinct current head and require
+clear PR-wide HQ ownership and native conflict submission custody.
 Live or unreadable closer/submission or merge lease evidence refuses retirement.
-An independently authorized review can then claim the current head.
+An independently authorized review can then claim the current head. See the
+[producer deployment dependency](changes/REPAIROWNERABSENT-01.md).
 
 LAC-2303 acceptance stays open after source publication. The HQ owner records
 deployed producer and consumer versions, the committed fence, a verified

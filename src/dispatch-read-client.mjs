@@ -244,6 +244,8 @@ function completeAbsence(result, selector) {
   const proof = result.absence_proof;
   const keys = Object.keys(selector).sort();
   const scoped = keys.includes('project_ref') || keys.includes('repo');
+  // The producer reserves this grant ID for an unfiltered canonical CWP key
+  // lookup, including rows outside the caller's project and repo grants.
   const cwpScope = keys.length === 2 && keys[0] === 'idempotency_key' && keys[1] === 'repo'
     && /^cwp-[0-9a-f]{24}$/.test(selector.idempotency_key)
     && proof?.grant_id === 'cwp-repository-dispatch-read';

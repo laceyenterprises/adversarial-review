@@ -80,7 +80,9 @@ record `absent` from an exact key and repository lookup after ten minutes, with
 its native submission lock and closer submission custody clear. Two consecutive
 canonical absence proofs after ten
 minutes mark the reservation `absent-unfenced`, project operator custody in
-next-action/TTM and send a deduplicated SEV1 page. Retirement removes
+next-action/TTM and send a deduplicated SEV1 page. For an unscoped CWP conflict
+reservation, a later unknown observation marks the owner `unknown` and clears
+the consecutive absence count. Retirement removes
 repair custody from canonical next-action and TTM projections, restoring the
 existing ownerless clock and SEV1 path. Reviewer harness refunds are limited
 to three per PR across heads; later failures keep ordinary infra charges and

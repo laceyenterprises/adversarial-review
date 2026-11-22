@@ -155,6 +155,8 @@ def _read_current_proof(root, args, hq_root, target, cwp):
         )
     finally:
         conn.close()
+    # For ledger absence, the companion producer checks PR-wide HQ custody
+    # and native conflict submissions while rebuilding evidence below.
     if cwp and not getattr(args, "ledger_absence", False):
         from cwp_helm.pr_branch_owner import lookup_pr_owner
 
@@ -169,8 +171,8 @@ def _read_current_proof(root, args, hq_root, target, cwp):
             raise RepairFenceRefused("pr-branch-ownership-unproven")
         if ownership["owner"] is not None:
             raise RepairFenceRefused("pr-branch-owned")
-    # The producer's own evidence builder rechecks GitHub's open, same-repo
-    # head, the current reservation and the original on-disk submitter recipe.
+    # The producer rechecks the open same-repo PR head, current reservation
+    # and the selected submitter evidence.
     keywords = {"hq_root": hq_root} if cwp else {}
     if receipt["evidence"] != _evidence(root, args, _hq_owner(hq_root), **keywords):
         raise RepairFenceRefused("persisted-fence-identity-mismatch")

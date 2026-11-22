@@ -263,6 +263,26 @@ test('only exact selector-bound producer absence passes sync and async compatibi
     assert.deepEqual(readDispatchLaunchesSync(selector, options(result)), async);
   }
 });
+test('repo-only CWP absence requires the unfiltered grant and exact proof selector', async () => {
+  const selector = { idempotency_key: `cwp-${'a'.repeat(24)}`, repo: 'fixture/repo' };
+  const grantId = 'cwp-repository-dispatch-read';
+  const proof = (keys, grant = grantId) => {
+    const result = authorizedAbsence(keys);
+    result.absence_proof.grant_id = grant;
+    return result;
+  };
+  const foreignKey = { ...selector, idempotency_key: 'non-cwp-key' };
+  for (const [request, result, expected] of [
+    [selector, proof(selector), true],
+    [selector, proof(selector, 'project-repository-dispatch-read'), false],
+    [selector, proof({ ...selector, repo: 'other/repo' }), false],
+    [selector, proof({ ...selector, project_ref: 'one-project' }), false],
+    [foreignKey, proof(foreignKey), false],
+  ]) {
+    assert.equal((await readDispatchLaunches(request, options(result))).ok, expected);
+    assert.equal(readDispatchLaunchesSync(request, options(result)).ok, expected);
+  }
+});
 for (const mutation of [
   value => { delete value.scope_complete; },
   value => { value.scope_complete = false; },

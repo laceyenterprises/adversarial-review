@@ -907,7 +907,8 @@ the existing one-hour proof window. Completed legacy receipts without native
 proof may fall back to exact-head review at rollout. After normal deployment,
 SRE verifies the produced attestation under the follow-up service identity
 and observes a natural final fix-all go through completion. The completed
-round must connect the reviewed SHA to the same published SHA.
+round must record the edge from the reviewed start SHA to the verified
+published destination SHA.
 
 In-place repair custody is reconciled before watcher admission, at most once
 per 30 seconds. Complete terminal retry evidence can retire an unpublished

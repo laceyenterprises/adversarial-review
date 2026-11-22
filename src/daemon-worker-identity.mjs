@@ -349,9 +349,12 @@ export async function resolveDaemonWorkerIdentityFromHeadAttestation({
     return { ok: false, reason: producedAtHead.length
       ? 'invalid-produced-head-attestation' : 'missing-produced-head-attestation' };
   }
-  if (requireExactSubject && (typeof produced.repo !== 'string'
+  if (requireExactSubject && (typeof repo !== 'string'
+    || typeof produced.repo !== 'string'
     || produced.repo.toLowerCase() !== repo.toLowerCase()
-    || produced.pr_number !== Number(prNumber))) {
+    || !['number', 'string'].includes(typeof produced.pr_number)
+    || !Number.isSafeInteger(Number(prNumber)) || Number(prNumber) <= 0
+    || Number(produced.pr_number) !== Number(prNumber))) {
     return { ok: false, reason: 'produced-attestation-subject-mismatch' };
   }
   const payload = produced.payload && typeof produced.payload === 'object' ? produced.payload : {};

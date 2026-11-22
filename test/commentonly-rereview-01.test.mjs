@@ -10,7 +10,7 @@ import { ensureReviewStateSchema, getReviewRow, openReviewStateDb, requestReview
 import { findFinalRemediationPushJob, isCompletedFinalRemediationJob } from '../src/comment-only-final-round.mjs';
 import { FINAL_ROUND_PROOF_TRANSIENT_WINDOW_MS } from '../src/comment-only-final-round-completion.mjs';
 import { readCompletedRemediationRounds } from '../src/ama/hammer-head-validation.mjs';
-import { readHeadAttestationChainForPr } from '../src/daemon-worker-identity.mjs';
+import { readHeadAttestationChainForPr, resolveDaemonWorkerIdentityFromHeadAttestation } from '../src/daemon-worker-identity.mjs';
 import incident from './fixtures/commentclose-01/pr-11403-final-fix-all.json' with { type: 'json' };
 
 const HEAD = incident.priorWrapper.completion.workerPushedHeadSha;
@@ -143,6 +143,39 @@ test('native follow-up reads its canonical branch-push receipt and records the r
     [[result.job.revisionRef, HEAD]]);
   assert.deepEqual(requests, []);
   assert.deepEqual(afterRow, beforeRow);
+});
+
+for (const repo of [undefined, null, 42, {}]) test(`exact attestation subject refuses ${JSON.stringify(repo)} repository input`, async () => {
+  const result = await resolveDaemonWorkerIdentityFromHeadAttestation({
+    repo, prNumber: 42, currentHeadSha: HEAD, requireExactSubject: true,
+    readHeadAttestationChainForPrImpl: async () => [{
+      kind: 'produced', valid: true, repo: 'fixture/repo', pr_number: 42, head_sha: HEAD,
+    }],
+  });
+  assert.deepEqual(result, { ok: false, reason: 'produced-attestation-subject-mismatch' });
+});
+
+test('native follow-up accepts a numeric-string attestation PR and records the replay edge', async t => {
+  const { rootDir, result } = await replay(t, {
+    changeAttestations: ([row]) => [{ ...row, pr_number: String(row.pr_number) }],
+  });
+  assert.equal(result.action, 'completed');
+  const edges = await readCompletedRemediationRounds(rootDir, result.job.repo, result.job.prNumber);
+  assert.deepEqual(edges.map(({ startHeadSha, resultingHeadSha }) => [startHeadSha, resultingHeadSha]),
+    [[result.job.revisionRef, HEAD]]);
+});
+
+for (const [prNumber, producedPrNumber] of [
+  [42, '43'], [42, 'invalid'], [42, null], [42, [42]], [1, true],
+  [0, ''], [null, null], [-1, '-1'], [1.5, '1.5'],
+]) test(`exact attestation subject refuses PR ${JSON.stringify(prNumber)} / ${JSON.stringify(producedPrNumber)}`, async () => {
+  const result = await resolveDaemonWorkerIdentityFromHeadAttestation({
+    repo: 'fixture/repo', prNumber, currentHeadSha: HEAD, requireExactSubject: true,
+    readHeadAttestationChainForPrImpl: async () => [{
+      kind: 'produced', valid: true, repo: 'fixture/repo', pr_number: producedPrNumber, head_sha: HEAD,
+    }],
+  });
+  assert.deepEqual(result, { ok: false, reason: 'produced-attestation-subject-mismatch' });
 });
 
 for (const workerStatus of ['running', 'unknown']) test(`native follow-up leaves a ${workerStatus} worker active`, async t => {

@@ -155,9 +155,7 @@ def _read_current_proof(root, args, hq_root, target, cwp):
         )
     finally:
         conn.close()
-    # For ledger absence, the companion producer checks PR-wide HQ custody
-    # and native conflict submissions while rebuilding evidence below.
-    if cwp and not getattr(args, "ledger_absence", False):
+    if cwp:
         from cwp_helm.pr_branch_owner import lookup_pr_owner
 
         # Independent HQ branch custody is PR-wide, including queued work.

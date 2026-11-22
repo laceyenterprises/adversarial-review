@@ -320,7 +320,7 @@ class CwpLedgerAbsenceReaderTest(CwpFenceReaderFixture):
             with self.assertRaisesRegex(FenceRefused, "invalid-repair-fence-selector"):
                 self.reader._parse_args(argv)
 
-    def test_absence_delegates_custody_to_producer_while_key_is_locked(self):
+    def test_absence_checks_local_custody_while_key_is_locked(self):
         locked = False
 
         @contextmanager
@@ -336,27 +336,40 @@ class CwpLedgerAbsenceReaderTest(CwpFenceReaderFixture):
             self.assertTrue(locked)
             self.assertTrue(args.ledger_absence)
             self.assertEqual(hq_root, self.hq_root)
-            status = self.owner(hq_root, args.repo, args.pr)
-            if not status["ok"]:
-                raise FenceRefused("pr-branch-ownership-unproven")
-            if status["owner"] is not None:
-                raise FenceRefused("pr-branch-owned")
             return self.evidence
 
+        free = self.owner.return_value
+
+        def local_ownership(*args):
+            self.assertTrue(locked)
+            return free
+
+        self.owner.side_effect = local_ownership
         self.observe_lock.side_effect = lambda *_: guard()
         self.reader._evidence.side_effect = producer_evidence
         self.assertEqual(self.reader.main(self.absence_argv), self.receipt)
         self.observe_lock.assert_called_once_with(self.hq_root, self.key)
         self.owner.assert_called_once_with(self.hq_root, "fixture/repo", 5)
+        self.owner.side_effect = None
         for result, reason in (
-            ({"owner": {"status": "requested"}}, "pr-branch-owned"),
-            ({"ok": False}, "pr-branch-ownership-unproven"),
+            ({**free, "owner": {"status": "requested"}}, "pr-branch-owned"),
+            ({**free, "ok": False}, "pr-branch-ownership-unproven"),
+            ({**free, "repo": "other/repo"}, "pr-branch-ownership-unproven"),
+            ({**free, "prNumber": 6}, "pr-branch-ownership-unproven"),
+            ({key: value for key, value in free.items() if key != "owner"},
+             "pr-branch-ownership-unproven"),
         ):
             with self.subTest(result=result):
-                self.owner.return_value = {**self.owner.return_value, **result}
+                self.owner.return_value = result
+                self.reader._evidence.reset_mock()
                 with self.assertRaisesRegex(FenceRefused, reason):
                     self.reader.main(self.absence_argv)
+                self.reader._evidence.assert_not_called()
                 self.assertFalse(locked)
+        self.owner.side_effect = OSError("ownership unavailable")
+        with self.assertRaises(OSError):
+            self.reader.main(self.absence_argv)
+        self.assertFalse(locked)
 
     def test_absence_busy_key_refuses_before_ledger_or_producer_reads(self):
         self.observe_lock.return_value = nullcontext(False)

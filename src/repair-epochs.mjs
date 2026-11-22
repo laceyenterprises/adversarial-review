@@ -37,7 +37,7 @@ export function repairOperatorHoldReason(epoch) {
   return repairOwnerProofOverdue(epoch) ? 'repair-owner-unproven' : null;
 }
 
-function canObserveCwpAbsence(rootDir, identity, epoch, now) {
+function canObserveCwpAbsence(rootDir, identity, epoch, now, logger) {
   if (!Number.isSafeInteger(identity.prNumber) || identity.prNumber <= 0
     || epoch.ownerLaunch != null || epoch.retryLaunches?.length || epoch.publicationHead || epoch.publicationLaunch
     || !(now - Date.parse(epoch.reservedAt) >= REPAIR_ABSENCE_ESCALATE_MS)) return false;
@@ -46,7 +46,12 @@ function canObserveCwpAbsence(rootDir, identity, epoch, now) {
     if (!unlock) return false;
     try { return !hasUnsettledAmaCloserDispatch(rootDir, identity); }
     finally { unlock(); }
-  } catch {
+  } catch (error) {
+    // Reconciliation's persisted observation cadence bounds this diagnostic
+    // to one per reservation per thirty seconds, including after restart.
+    logger.warn(JSON.stringify({ event: 'repair.cwp_absence_check_failed',
+      ...identity, reservationId: epoch.id, errorClass: error.name,
+      code: error.code || null, message: error.message }));
     return false;
   }
 }
@@ -72,7 +77,7 @@ const EXHAUSTION = new Set(['closure-retry-exhausted', 'closure-lifetime-exhaust
   'remediation-round-budget-exhausted', 'review-cycle-cap-paused']);
 
 export async function observeRepairOwner({ rootDir, repo, prNumber, epoch, now = Date.now(),
-  readImpl = readDispatchLaunches }) {
+  readImpl = readDispatchLaunches, logger = console }) {
   if (!epoch || epoch.reviewHead || epoch.terminalAt) return epoch;
   const unknown = { ...epoch, ownerState: 'unknown' };
   if (typeof repo !== 'string' || !REPO.test(repo) || repo !== repo.trim()
@@ -86,13 +91,19 @@ export async function observeRepairOwner({ rootDir, repo, prNumber, epoch, now =
     selector.repo = repo;
   }
   const readArgs = { rootDir, timeoutMs: 8000 };
-  const result = await readImpl(selector, readArgs);
+  let result = await readImpl(selector, readArgs);
+  if (unscopedCwp && !result.ok) {
+    // Older producers may refuse the repository-only selector. Preserve their
+    // key-only positive ownership read, but never use it to certify absence.
+    result = await readImpl({ idempotency_key: epoch.ownerKey }, readArgs);
+    if (!result.ok || result.roots?.length !== 1) return unknown;
+  }
   // Pre-enqueue reservation and enqueue run in separate critical sections.
   // Even canonical point-in-time absence cannot fence a delayed submitter.
   if (!result.ok) return unknown;
   if (result.roots?.length === 0 && result.absenceProof?.version === 1
     && result.absenceProof.kind === 'canonical-exact-selector-absence') {
-    if (unscopedCwp && !canObserveCwpAbsence(rootDir, { repo, prNumber }, epoch, now)) return unknown;
+    if (unscopedCwp && !canObserveCwpAbsence(rootDir, { repo, prNumber }, epoch, now, logger)) return unknown;
     return { ...epoch, ownerState: 'absent', absentObservations: (epoch.absentObservations || 0) + 1 };
   }
   if (result.roots?.length !== 1) return unknown;
@@ -133,7 +144,7 @@ export function repairReservationOwnsPr(epoch, headSha) {
 export async function reconcileRepairOwner({ rootDir, repo, prNumber, headSha, now = Date.now(),
   readImpl = readDispatchLaunches, includeReviewedHead = false,
   hqRoot = resolveHqRoot(), execFileImpl, readPublisher = readRepairPublisher,
-  observeWait = observeClosureWait }) {
+  observeWait = observeClosureWait, logger = console }) {
   const ledger = readHammerRetryCapLedger(rootDir, { repo, prNumber });
   if (ledger?.__corrupt) throw new Error('repair ledger unreadable');
   const epoch = ledger?.repairEpochs?.findLast(entry => !entry.reviewHead && !entry.terminalAt);
@@ -144,7 +155,7 @@ export async function reconcileRepairOwner({ rootDir, repo, prNumber, headSha, n
   const age = now - Date.parse(epoch.ownerObservedAt);
   if (sameIdentity(epoch.publicationHead, headSha)
     || (age >= 0 && age < REPAIR_OWNER_OBSERVE_MS)) return epoch;
-  const observed = await observeRepairOwner({ rootDir, repo, prNumber, epoch, now, readImpl });
+  const observed = await observeRepairOwner({ rootDir, repo, prNumber, epoch, now, readImpl, logger });
   let publicationHead, publicationLaunch, publisherObservation, foreignHead = false;
   if (!atBase && typeof headSha === 'string' && SHA.test(headSha)
     && observed.ownerState !== 'unknown' && observed.retryLaunches) {

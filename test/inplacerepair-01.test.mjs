@@ -741,6 +741,60 @@ test('legacy CWP absence requires a scoped canonical read, elapsed grace and no 
   assert.equal(pendingRepairEpoch(f.rootDir, f).id, epoch.id);
 });
 
+test('legacy CWP repository-read refusal falls back only to positive keyed ownership', async t => {
+  const f = { ...fixture(t), cause: 'conflict-without-owner', ownerKey: `cwp-${'a'.repeat(24)}` };
+  const epoch = reserveRepairEpoch(f).epoch;
+  for (const [fallback, expected] of [[launchRead(epoch, 'running'), 'live'],
+    [launchRead(epoch, 'failed', 'running'), 'live'],
+    [{ ok: false, reason: 'lookup-unavailable' }, 'unknown'],
+    [{ ok: true, roots: [], absenceProof: { version: 1, kind: 'canonical-exact-selector-absence' } }, 'unknown'],
+    [{ ...launchRead(epoch), roots: ['fixture-launch', 'ambiguous-launch'] }, 'unknown'],
+    [{ ...launchRead(epoch), rows: [{ ...launchRead(epoch).rows[0], target_repo: 'foreign/repo' }] }, 'unknown']]) {
+    const calls = [];
+    const observed = await observeRepairOwner({ ...f, epoch, readImpl: async selector => {
+      calls.push(selector);
+      if (selector.repo) return { ok: false, reason: 'selector-refused' };
+      return fallback;
+    } });
+    assert.deepEqual(calls.slice(0, 2), [
+      { idempotency_key: epoch.ownerKey, repo }, { idempotency_key: epoch.ownerKey },
+    ]);
+    assert.equal(observed.ownerState, expected);
+    assert.equal(observed.absentObservations, undefined);
+  }
+});
+
+test('CWP absence record errors retain custody and log at the persisted observation cadence', async t => {
+  const f = { ...fixture(t), now: '2026-01-01T00:00:00Z',
+    cause: 'conflict-without-owner', ownerKey: `cwp-${'a'.repeat(24)}` };
+  const epoch = reserveRepairEpoch(f).epoch;
+  const overdue = Date.parse(f.now) + REPAIR_ABSENCE_ESCALATE_MS;
+  const unlock = tryAcquireCloserIntentLock(f.rootDir, f);
+  unlock();
+  const path = amaCloserDispatchFilePath(f.rootDir, { ...f, headSha: later });
+  const logs = [];
+  const options = { ...f, observeWait: async () => {}, logger: { warn: message => logs.push(JSON.parse(message)) },
+    readImpl: async () => ({ ok: true, roots: [], absenceProof: {
+      version: 1, kind: 'canonical-exact-selector-absence' } }) };
+  for (const [index, bytes, errorClass, message] of [
+    [0, JSON.stringify({ repo: 'foreign/repo', prNumber }), 'Error', /identity mismatch/],
+    [1, '{', 'SyntaxError', /JSON|property name/i],
+  ]) {
+    writeFileSync(path, bytes);
+    const now = overdue + index * REPAIR_OWNER_OBSERVE_MS;
+    assert.equal((await reconcileRepairOwner({ ...options, now })).ownerState, 'unknown');
+    assert.equal((await reconcileRepairOwner({ ...options, now: now + 1000 })).ownerState, 'unknown');
+    assert.equal(logs.length, index + 1);
+    assert.equal(logs[index].event, 'repair.cwp_absence_check_failed');
+    assert.equal(logs[index].reservationId, epoch.id);
+    assert.equal(logs[index].errorClass, errorClass);
+    assert.match(logs[index].message, message);
+  }
+  rmSync(path);
+  assert.equal((await reconcileRepairOwner({ ...options,
+    now: overdue + 2 * REPAIR_OWNER_OBSERVE_MS })).ownerState, 'absent');
+});
+
 test('a moved head needs exact publication evidence from the reservation launch or its retry', async t => {
   for (const [publisher, publishedHead, matched] of [
     ['fixture-launch', head, true], ['retry', head, true],

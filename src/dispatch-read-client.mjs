@@ -246,6 +246,8 @@ function completeAbsence(result, selector) {
   const scoped = keys.includes('project_ref') || keys.includes('repo');
   // The producer reserves this grant ID for an unfiltered canonical CWP key
   // lookup, including rows outside the caller's project and repo grants.
+  // The producer owns the native submission-lock check; the envelope has no
+  // separate lock attestation. This consumer validates the grant and selector.
   const cwpScope = keys.length === 2 && keys[0] === 'idempotency_key' && keys[1] === 'repo'
     && /^cwp-[0-9a-f]{24}$/.test(selector.idempotency_key)
     && proof?.grant_id === 'cwp-repository-dispatch-read';

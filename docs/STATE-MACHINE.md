@@ -76,10 +76,13 @@ foreign publication read retires with `foreign-head-after-terminal`, preserving
 spend and leaving the head unbound. Verified publication head/launch evidence
 persists across skipped admission ticks. Live, absent dispatch and unreadable
 evidence retain custody. An old CWP conflict reservation without a project can
-record `absent` from an exact key and repository lookup after ten minutes, with
-its native submission lock and closer submission custody clear. Two consecutive
-canonical absence proofs after ten
-minutes mark the reservation `absent-unfenced`, project operator custody in
+record `absent` from an exact key and repository lookup after ten minutes.
+The producer grant owns the native submission-lock check; AR validates the
+grant/selector without a separate lock attestation and checks local closer
+custody under the intent lock. One key-only fallback after a refused or
+unavailable repository lookup can prove positive ownership, never absence.
+Two consecutive canonical absence proofs after ten minutes mark the reservation
+`absent-unfenced`, project operator custody in
 next-action/TTM and send a deduplicated SEV1 page. For an unscoped CWP conflict
 reservation, a later unknown observation marks the owner `unknown` and clears
 the consecutive absence count. Retirement removes

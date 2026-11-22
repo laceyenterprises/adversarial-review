@@ -40,9 +40,14 @@ absent head are non-contradicting; a repository basename is accepted for the
 qualified reservation repository. A scoped keyed read
 sends the stored project and the ledger repository to the existing producer.
 Legacy CWP conflict reservations without a project use an exact key and
-qualified repository, with absence available after ten minutes only when the
-native submission lock is clear and the closer intent check finds no unsettled
-submission. Other legacy reservations use the unscoped key.
+qualified repository, with absence available after ten minutes. The producer's
+`cwp-repository-dispatch-read` grant owns the native submission-lock check;
+AR validates the grant and exact selector without a separate lock attestation.
+AR's closer intent check requires no unsettled local submission. If the
+repository lookup is refused or unavailable, one key-only fallback can prove
+positive ownership but cannot certify absence. Other legacy reservations use
+the unscoped key.
+
 When a legacy reservation's owner
 resolves to `live` or `terminal`, the reconciler records the dispatch project
 named by that owner launch's own record, once, as `dispatchProjectRef` with
@@ -72,6 +77,8 @@ The `native-auto-merge-conflict-dispatch` submitter binds the retained worker ID
 job and result digests, and exact boot trace offset and digest. When the original
 evidence is unavailable, `--ledger-absence` uses a `canonical-cwp-ledger-absence`
 submitter with fresh canonical family absence and clear competing custody.
+The retirement reader independently checks PR-wide HQ ownership for both CWP
+variants; the ledger-absence check runs under the native submission lock.
 The receipt grants no review head or launch identity. Retirement retains
 the epoch entry, charge counters, refunds and other history.
 Retired reservations no longer appear in next-action or TTM ownership, allowing

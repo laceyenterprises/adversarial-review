@@ -1083,24 +1083,33 @@ root (the standard `HQ_ROOT` / `AGENT_OS_HQ_ROOT` resolver) and an eight-second
 subprocess budget. Point-in-time absence retains custody because the submitter may still
 enqueue. A reservation with a canonical project supplied at creation uses the
 existing project/repository paired grant for its exact-key read. Older
-reservations generally start with an unscoped lookup. Legacy CWP conflict
-reservations instead use the exact owner key and repository under an existing
-paired dispatch grant. At ten minutes the watcher can record positive absence
-if the canonical read proves zero matching launches and the native submission
-lock and local closer intent are clear. A second positive observation reaches
-`absent-unfenced` and pages the operator. For an unscoped CWP conflict
-reservation, a later unknown observation clears the absence count and
-returns the owner state to `unknown`.
+reservations keep their unscoped lookup, except legacy CWP conflict reservations.
+Those use the exact owner key and repository under the producer's
+`cwp-repository-dispatch-read` grant. That producer owns the native
+submission-lock check. AR validates the grant and exact selector without a
+separate lock attestation and checks local closer custody under the intent lock.
+If the repository lookup is refused or unavailable, one key-only fallback can
+prove positive ownership but cannot certify absence. At ten minutes the watcher
+can record positive absence if the canonical read proves zero matching launches
+and the local closer intent is clear. A second positive observation reaches `absent-unfenced`
+and pages the operator. A grant-filtered empty result leaves ownership unproven.
+For an unscoped CWP conflict reservation, a later unknown observation clears
+the absence count and returns the owner state to `unknown`.
+Local lock or strict record-read failures log `repair.cwp_absence_check_failed`
+with the reservation, error class, code and message at the existing thirty-second
+observation cadence. These failures retain custody. The exclusive intent
+lock still covers the complete directory scan; a concurrent closer writer can
+receive `EBUSY` after its bounded acquisition retries.
 
 When compatible launch and retry evidence resolves an owner to `live` or
-`terminal` and its own launch record names
-a valid project, the reconciler records `dispatchProjectRef` once with
-`dispatchProjectDerivedAt`. Subsequent exact-key reads use that project and the
-ledger repository. An omitted or malformed project field prevents derivation
-but does not by itself prevent compatible launch evidence from establishing
-ownership. A stored scope is never overwritten; a contradicting owner record
-leaves ownership unproven. A grant-filtered empty result also leaves ownership
-unproven. If an unbound reservation without verified publication
+`terminal` and its own launch record names a valid project, the reconciler
+records `dispatchProjectRef` once with `dispatchProjectDerivedAt`. Subsequent
+exact-key reads use that project and the ledger repository. An omitted or
+malformed project field prevents derivation but does not by itself prevent
+compatible launch evidence from establishing ownership. A stored scope is
+never overwritten; a contradicting owner record leaves ownership unproven.
+
+If an unbound reservation without verified publication
 still has `ownerState: unknown` when observed at least ten minutes after
 reservation, `repair-owner-unproven` names the operator in next-action and TTM
 and pages once per reservation. The page names the blocked head and
@@ -1179,8 +1188,10 @@ For a legacy CWP reservation whose original job or boot trace is gone, use
 the companion producer and dispatch-read endpoint. Use the same flag when
 inspecting and applying the producer fence. The variant requires a reservation
 at least ten minutes old and positive global absence of the owner family.
-The reader rechecks the committed two-key fence and canonical absence while
-holding the native submission lock when present. It calls the producer's
+The reader rechecks the committed two-key fence, canonical absence and local
+PR-wide HQ ownership while holding the native submission lock when present.
+Unreadable, mismatched or occupied HQ ownership refuses before producer evidence
+rebuilding, even if that producer omits its own HQ check. It calls the producer's
 evidence builder to verify the open PR and distinct current head and require
 clear PR-wide HQ ownership and native conflict submission custody.
 Live or unreadable closer/submission or merge lease evidence refuses retirement.

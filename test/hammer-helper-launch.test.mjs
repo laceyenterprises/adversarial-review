@@ -7,7 +7,7 @@ import { join, resolve } from 'node:path';
 import test from 'node:test';
 
 const root = resolve('.');
-const stepSource = readFileSync(join(root, 'templates/hammer-prompt.md'), 'utf8').match(/^ham_step\(\).*$/m)[0];
+const stepSource = readFileSync(join(root, 'templates/hammer-bootstrap.sh'), 'utf8').match(/^ham_step\(\).*$/m)[0];
 
 test('an unavailable audit dependency preserves the wrapped failure status and receipt', t => {
   const dir = mkdtempSync(join(tmpdir(), 'hammer-helper-diagnostic-'));

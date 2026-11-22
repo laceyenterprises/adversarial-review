@@ -106,7 +106,7 @@ test('hammer fails closed without canonical dispatch trailers', () => {
 
 test('dispatched hammer export carries canonical provenance byte for byte', () => {
   const trailers = composeAmaTrailers({ workerClass: 'hammer', reviewerFamily: 'claude', riskClass: 'critical', eligibilityReason: "operator's reason $&", auditRef: 'ama-audit:o/r:pr-7:head-abc' });
-  const template = readFileSync('templates/hammer-prompt.md', 'utf8');
+  const template = readFileSync('templates/hammer-bootstrap.sh', 'utf8');
   const exportLine = template.split('\n').find(line => line.startsWith('export HAM_AMA_TRAILERS='));
   assert.ok(exportLine);
   const prompt = composeCloserPrompt({ amaTrailers: trailers, templateBody: exportLine });

@@ -14,7 +14,7 @@ import { loadAwareTimeoutMs } from '../src/load-aware-timeout.mjs';
 
 const exec = promisify(execFile);
 const cli = fileURLToPath(new URL('../bin/hammer-head-context.mjs', import.meta.url));
-const template = readFileSync(new URL('../templates/hammer-prompt.md', import.meta.url), 'utf8');
+const template = readFileSync(new URL('../templates/hammer-bootstrap.sh', import.meta.url), 'utf8');
 
 for (const failureMessage of ['connection reset', 'fatal: unable to access: Could not resolve host: github.com',
   'ssh: Could not resolve hostname github.com', 'fatal: unable to access: Failed to connect to github.com port 443',

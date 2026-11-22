@@ -330,7 +330,9 @@ test('closer class remains separate; rendered controller inputs and in-lease ref
   assert.equal(composeCloserPrompt(inputs), composeCloserPrompt({ ...inputs, tenureId: null }));
   const prompt = composeCloserPrompt({ ...inputs, tenureId: tenure.tenureId });
   assert.match(prompt, /Keep your merge-authority class and principal/);
-  assert.match(prompt, /export HAM_TENURE_REVIEW_REQUIRED=1/);
+  const bootstrap = composeCloserPrompt({ ...inputs, tenureId: tenure.tenureId,
+    templateBody: readFileSync(new URL('../templates/hammer-bootstrap.sh', import.meta.url), 'utf8') });
+  assert.match(bootstrap, /export HAM_TENURE_REVIEW_REQUIRED=1/);
   const source = readFileSync(new URL('../bin/hammer-merge.sh', import.meta.url), 'utf8');
   const values = Object.fromEntries([...source.matchAll(/<<([A-Z_]+)>>/g)].map(([, key]) => [key, 'fixture']));
   const rendered = renderHammerProcedure('hammer-merge', { ...values, TENURE_REVIEW_ARG: '--tenure-review ' });

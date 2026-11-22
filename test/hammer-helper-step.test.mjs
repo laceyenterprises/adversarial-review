@@ -252,6 +252,7 @@ function durableFixture(t) {
   const phasePath = join(dir, 'dispatch/lrq_synthetic/hammer-progress/wrun_synthetic/last-phase.json');
   const audit = () => readAmaAuditEntry(dir, env.HAM_REPO, 42, env.HAM_REVIEWED_SHA);
   const render = source => source
+    .replaceAll('"<<ROOT_DIR>>"/bin/hammer-helper-step.mjs', JSON.stringify(resolve('bin/hammer-helper-step.mjs')))
     .replaceAll('<<ROOT_DIR>>/bin/hammer-helper-step.mjs', resolve('bin/hammer-helper-step.mjs'))
     .replaceAll('<<ROOT_DIR>>', dir).replaceAll('<<RUN_DIR>>', dir)
     .replaceAll('<<HQ_ROOT>>', dir).replaceAll('<<REPO>>', env.HAM_REPO)
@@ -294,7 +295,7 @@ fi
 touch "$HAM_RUN_DIR/sync-recovered"
 `, { mode: 0o755 });
   f.env.PATH = `${join(f.dir, 'bin')}:${process.env.PATH}`;
-  const prompt = readFileSync(new URL('../templates/hammer-prompt.md', import.meta.url), 'utf8');
+  const prompt = readFileSync(new URL('../templates/hammer-bootstrap.sh', import.meta.url), 'utf8');
   const step = prompt.match(/^ham_step\(\).*$/m)[0];
   // HAMCONFLICTSYNC-01: the loop lives in the shipped conflict repair; it runs
   // to the script's success line, before its final head report.
@@ -319,9 +320,13 @@ test('pre-input base capture resolves its runtime in a fresh shell', t => {
   writeFileSync(join(f.dir, 'bin/hammer-base-head.mjs'), `console.log('b'.repeat(40));`);
   delete f.env.HAM_NODE_BIN;
   f.env.AGENT_OS_NODE_BIN = process.execPath;
-  const prompt = readFileSync(new URL('../templates/hammer-prompt.md', import.meta.url), 'utf8');
-  const block = prompt.slice(prompt.indexOf('umask 077'),
-    prompt.indexOf("cat > '<<RUN_DIR>>/inputs.sh'"));
+  const prompt = readFileSync(new URL('../templates/hammer-bootstrap.sh', import.meta.url), 'utf8');
+  const prelude = prompt.slice(0, prompt.indexOf('for phase in '));
+  const capture = prompt.slice(prompt.indexOf('  if [ ! -e "$HAM_RUN_DIR/base-head" ]; then'),
+    prompt.indexOf('  cat > "$pending/inputs.sh"'));
+  assert.match(capture, /hammer-base-head\.mjs/);
+  const block = `${prelude}\npending="$HAM_RUN_DIR/.bootstrap"; mkdir "$pending"\n${capture}`
+    .replaceAll('"$HAM_ROOT_DIR/bin/hammer-helper-step.mjs"', JSON.stringify(resolve('bin/hammer-helper-step.mjs')));
   const result = f.run(block);
   assert.equal(result.status, 0, result.stderr);
   assert.equal(readFileSync(join(f.dir, 'base-head'), 'utf8').trim(), 'b'.repeat(40));

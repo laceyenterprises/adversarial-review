@@ -593,12 +593,15 @@ test('HAMMERLAUNCHREAD-01: the CLI keeps one private receipt and reuses it on re
 
 test('HAMMERLAUNCHREAD-01: the prompt resolves the environment before remediation and the closing controller', () => {
   const prompt = readFileSync(join(root, 'templates/hammer-prompt.md'), 'utf8');
-  const resolveAt = prompt.indexOf('bin/hammer-controller.mjs" resolve-environment || exit $?');
-  // It is the step right after the one-time inputs initialization.
-  assert.ok(resolveAt > prompt.indexOf(`cat > '<<RUN_DIR>>/inputs.sh'`));
+  const bootstrap = readFileSync(join(root, 'templates/hammer-bootstrap.sh'), 'utf8');
+  const resolveAt = bootstrap.indexOf('bin/hammer-controller.mjs" resolve-environment');
+  assert.ok(resolveAt > bootstrap.indexOf('cat > "$pending/inputs.sh"'));
+  assert.ok(resolveAt < bootstrap.indexOf('ham_read context'));
+  const bootAt = prompt.indexOf('/bin/bash "<<RUN_DIR>>/hammer-bootstrap.sh"');
+  assert.ok(bootAt >= 0);
   // HAMCONTROLLERSCRIPT-01: the closing controller starts from the shipped close command.
   for (const later of ['bin/hammer-close.sh" "<<RUN_DIR>>/close-plan.json"', '## Appendix B', '## Mandate', '## Appendix C']) {
-    assert.ok(resolveAt < prompt.indexOf(later), later);
+    assert.ok(bootAt < prompt.indexOf(later), later);
   }
 });
 

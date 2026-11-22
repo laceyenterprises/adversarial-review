@@ -1345,6 +1345,16 @@
       "cancelEvidence": "The optional launchRequestId pins the observed HQ launch across local lease retirement. Legacy obligations use their original head. Nonterminal HQ responses retain the obligation and replacement launches retain their custody."
     },
     {
+      "id": "merge-agent-cancellations",
+      "title": "Operator Merge-Agent Cancellation Receipts",
+      "path": "docs/data-model/merge-agent-cancellations.md",
+      "store": "data/follow-up-jobs/merge-agent-cancellations/",
+      "schemaSurface": "src/merge-agent-cancel.mjs",
+      "relatedSchemaSurfaces": ["src/follow-up-merge-agent.mjs", "src/ama/receipted-closer-alias.mjs"],
+      "owner": "Follow-up merge-agent operations",
+      "optionalFields": ["result.closer: AMA alias settlement disposition and available launch/head evidence"]
+    },
+    {
       "id": "runtime-settle-smoke",
       "title": "Agent Runtime Settle Smoke",
       "path": "docs/data-model/runtime-settle-smoke.md",

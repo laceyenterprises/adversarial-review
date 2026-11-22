@@ -322,10 +322,10 @@ test('pre-input base capture resolves its runtime in a fresh shell', t => {
   f.env.AGENT_OS_NODE_BIN = process.execPath;
   const prompt = readFileSync(new URL('../templates/hammer-bootstrap.sh', import.meta.url), 'utf8');
   const prelude = prompt.slice(0, prompt.indexOf('for phase in '));
-  const capture = prompt.slice(prompt.indexOf('  if [ ! -e "$HAM_RUN_DIR/base-head" ]; then'),
-    prompt.indexOf('  cat > "$pending/inputs.sh"'));
+  const capture = prompt.slice(prompt.indexOf('if [ ! -e "$HAM_RUN_DIR/base-head" ]; then'),
+    prompt.indexOf('cat > "$pending/inputs.sh"'));
   assert.match(capture, /hammer-base-head\.mjs/);
-  const block = `${prelude}\npending="$HAM_RUN_DIR/.bootstrap"; mkdir "$pending"\n${capture}`
+  const block = `${prelude}\npending="$HAM_RUN_DIR/staging"; mkdir "$pending"\n${capture}`
     .replaceAll('"$HAM_ROOT_DIR/bin/hammer-helper-step.mjs"', JSON.stringify(resolve('bin/hammer-helper-step.mjs')));
   const result = f.run(block);
   assert.equal(result.status, 0, result.stderr);

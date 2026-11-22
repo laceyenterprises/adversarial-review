@@ -4362,8 +4362,7 @@ export function substituteTemplate(body, substitutions) {
 }
 
 /**
- * Compose the hammer worker prompt body from the substitutions the
- * dispatch site provides. Exported for the golden-snapshot test.
+ * Build the shared substitutions for the hammer prompt and shipped scripts.
  *
  * @param {Object} args
  * @param {string} args.prUrl
@@ -4383,10 +4382,8 @@ export function substituteTemplate(body, substitutions) {
  * @param {string} args.reviewer
  * @param {string} args.dispatchedAt    — ISO 8601 UTC
  * @param {string} args.amaTrailers     — provenance trailer block passed to `gh pr merge`
- * @param {string} args.templateBody    — raw template content
- * @returns {string}
  */
-function closerTemplateValues({
+export function closerTemplateValues({
   prUrl,
   repo,
   prNumber,

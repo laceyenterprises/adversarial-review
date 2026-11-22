@@ -596,7 +596,7 @@ test('HAMMERLAUNCHREAD-01: the prompt resolves the environment before remediatio
   const bootstrap = readFileSync(join(root, 'templates/hammer-bootstrap.sh'), 'utf8');
   const resolveAt = bootstrap.indexOf('bin/hammer-controller.mjs" resolve-environment');
   assert.ok(resolveAt > bootstrap.indexOf('cat > "$pending/inputs.sh"'));
-  assert.ok(resolveAt < bootstrap.indexOf('ham_read context'));
+  assert.ok(resolveAt < bootstrap.indexOf('\nham_read context "'));
   const bootAt = prompt.indexOf('/bin/bash "<<RUN_DIR>>/hammer-bootstrap.sh"');
   assert.ok(bootAt >= 0);
   // HAMCONTROLLERSCRIPT-01: the closing controller starts from the shipped close command.

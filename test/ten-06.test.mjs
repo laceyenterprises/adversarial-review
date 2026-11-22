@@ -11,11 +11,11 @@ import { readPrTenure, tenureReviewReason, tenureReviewRange, tenureReviewerAllo
 import { openReviewStateDb, ensureReviewStateSchema, requestReviewRereview } from '../src/review-state.mjs';
 import { dispatchRemediationViaHq } from '../src/follow-up-remediation.mjs';
 import { getHeadCloserCommitSuppression } from '../src/head-closer-commit-suppression.mjs';
-import { resolveHamTerminalRemediationEvidence, composeCloserPrompt } from '../src/ama/dispatch-closer.mjs';
+import { resolveHamTerminalRemediationEvidence, composeCloserPrompt, closerTemplateValues } from '../src/ama/dispatch-closer.mjs';
 import { remediationCloseout, closeoutRereview } from '../src/remediation-closeout.mjs';
 import { deriveNextActionSnapshot } from '../src/pr-next-action.mjs';
 import { buildReviewerExtraContext, buildReviewerPrompt } from '../src/reviewer-prompt.mjs';
-import { renderHammerProcedure } from '../src/hammer-procedure.mjs';
+import { renderHammerBootstrap, renderHammerProcedure } from '../src/hammer-procedure.mjs';
 import { isDaemonMergeReviewAllowed } from '../src/ama/daemon-merge.mjs';
 
 const repo = 'example/widget';
@@ -330,9 +330,9 @@ test('closer class remains separate; rendered controller inputs and in-lease ref
   assert.equal(composeCloserPrompt(inputs), composeCloserPrompt({ ...inputs, tenureId: null }));
   const prompt = composeCloserPrompt({ ...inputs, tenureId: tenure.tenureId });
   assert.match(prompt, /Keep your merge-authority class and principal/);
-  const bootstrap = composeCloserPrompt({ ...inputs, tenureId: tenure.tenureId,
-    templateBody: readFileSync(new URL('../templates/hammer-bootstrap.sh', import.meta.url), 'utf8') });
-  assert.match(bootstrap, /export HAM_TENURE_REVIEW_REQUIRED=1/);
+  const bootstrap = renderHammerBootstrap(closerTemplateValues({ ...inputs, tenureId: tenure.tenureId }));
+  assert.match(bootstrap, /^export HAM_TENURE_REVIEW_REQUIRED=1$/m);
+  assert.doesNotMatch(renderHammerBootstrap(closerTemplateValues(inputs)), /HAM_TENURE_REVIEW_REQUIRED/);
   const source = readFileSync(new URL('../bin/hammer-merge.sh', import.meta.url), 'utf8');
   const values = Object.fromEntries([...source.matchAll(/<<([A-Z_]+)>>/g)].map(([, key]) => [key, 'fixture']));
   const rendered = renderHammerProcedure('hammer-merge', { ...values, TENURE_REVIEW_ARG: '--tenure-review ' });

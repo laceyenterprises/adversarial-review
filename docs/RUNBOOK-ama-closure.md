@@ -927,12 +927,24 @@ to their caller: context's infrastructure stop already records its own
 exact-head attempt, and a repairable conflict is not a terminal failure.
 For new HAM launches, AMA renders `hammer-bootstrap.sh` beside the private
 phase scripts. Run it alone in the foreground. It closes stdin, checks the
-phase files, resolves Node, pins the starting head, resolves the launch
-environment and captures the initial context with existing helper budgets.
-It publishes `context.json` and then `inputs.sh` only after the reads
-succeed. A second invocation while the first owns scratch exits 75 without
-running helpers or changing the attempt. Once a starting head has been
-captured, an interrupted attempt keeps that pin.
+phase files, resolves Node, validates and pins the starting head, resolves the
+launch environment and captures the initial context with existing helper
+budgets. It publishes `context.json` and then `inputs.sh` after successful
+reads. An empty successful context read records the registered closer stop
+`context-failed`.
+
+Bootstrap holds a kernel file lock shared with its foreground helpers. A
+second invocation exits 73 while any holder remains or when an inaccessible
+lock or legacy `.bootstrap` directory leaves ownership unknown. Preserve
+that attempt.
+Exit 75 continues to signal a retryable helper read failure. If the shell
+dies, scratch becomes available once the last lock holder exits. An
+interrupted attempt keeps its validated starting-head pin.
+
+On first initialization, use `context.json` as the initial snapshot. When
+bootstrap reports `already initialized`, source `inputs.sh` and use
+`ham_read context` for the current PR context before acting. Refresh after
+each push as well. Those reads leave the original snapshot and pin intact.
 
 Wait for the bootstrap command's actual exit before starting another phase.
 If the tool result remains unconfirmed after the current step's existing

@@ -5,7 +5,8 @@ import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { composeAmaTrailers } from '../src/ama/audit.mjs';
-import { composeCloserPrompt } from '../src/ama/dispatch-closer.mjs';
+import { composeCloserPrompt, closerTemplateValues } from '../src/ama/dispatch-closer.mjs';
+import { hammerBootstrapInputs } from './helpers/hammer-bootstrap-inputs.mjs';
 import { buildMergeCommitBody, neutralizeClosingKeywords } from '../src/ama/closing-keywords.mjs';
 
 function renderCommitMessageSnippet(endMarker) {
@@ -106,11 +107,9 @@ test('hammer fails closed without canonical dispatch trailers', () => {
 
 test('dispatched hammer export carries canonical provenance byte for byte', () => {
   const trailers = composeAmaTrailers({ workerClass: 'hammer', reviewerFamily: 'claude', riskClass: 'critical', eligibilityReason: "operator's reason $&", auditRef: 'ama-audit:o/r:pr-7:head-abc' });
-  const template = readFileSync('templates/hammer-bootstrap.sh', 'utf8');
-  const exportLine = template.split('\n').find(line => line.startsWith('export HAM_AMA_TRAILERS='));
-  assert.ok(exportLine);
-  const prompt = composeCloserPrompt({ amaTrailers: trailers, templateBody: exportLine });
-  const result = spawnSync('bash', ['-c', prompt + `\nprintf '%s' 'Fix #7732' | "$HAM_NODE_BIN" bin/merge-commit-body.mjs o/r 7`], { encoding: 'utf8', env: { ...process.env, HAM_NODE_BIN: process.execPath, HAM_PR_TITLE: 'Preserve author title' } });
+  const inputs = hammerBootstrapInputs(closerTemplateValues({ amaTrailers: trailers }));
+  const [exportStatement] = inputs.match(/^export HAM_AMA_TRAILERS=[\s\S]*?(?=^source )/m);
+  const result = spawnSync('bash', ['-c', exportStatement + `printf '%s' 'Fix #7732' | "$HAM_NODE_BIN" bin/merge-commit-body.mjs o/r 7`], { encoding: 'utf8', env: { ...process.env, HAM_NODE_BIN: process.execPath, HAM_PR_TITLE: 'Preserve author title' } });
   assert.equal(result.status, 0, result.stderr);
   assert.equal(JSON.parse(result.stdout).text, `Fix PR #7732\n\n${trailers}`);
 });

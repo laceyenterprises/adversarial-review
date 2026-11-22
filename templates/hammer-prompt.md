@@ -23,9 +23,14 @@ Wait for its exit. On a pending tool session, wait on that session alone.
 If the current step outlasts its existing retries and cleanup without a
 result, end the turn reporting the session ID and unconfirmed bootstrap exit.
 A separate read, `inputs.sh`, or queued checkpoint cannot settle the session.
-On nonzero exit, stop with the printed stage and status. After exit 0, read
-`<<RUN_DIR>>/context.json` and the full review. Guard and source `inputs.sh`
-in subsequent pre-merge shells. Never reconstruct missing launch files.
+On nonzero exit, stop with the printed stage and status. Exit 73 means scratch
+is busy or its owner is unknown. Preserve the existing attempt. Exit 75 from
+a helper is a retryable read failure. On first initialization, read
+`<<RUN_DIR>>/context.json` as the initial snapshot. If bootstrap reports
+`already initialized`, source `inputs.sh` and run the context refresh command
+below. In both cases read the full review.
+Guard and source `inputs.sh` in subsequent pre-merge shells. Never reconstruct
+missing launch files.
 
 ```bash
 test -f "<<RUN_DIR>>/inputs.sh" || {
@@ -34,6 +39,14 @@ test -f "<<RUN_DIR>>/inputs.sh" || {
 }
 source "<<RUN_DIR>>/inputs.sh"
 ```
+
+For an already initialized bootstrap, refresh before proceeding:
+
+```bash
+ham_read context "$HAM_NODE_BIN" "<<ROOT_DIR>>/bin/hammer-context.mjs" "<<REPO>>" "<<PR_NUMBER>>"
+```
+
+Stop on a nonzero refresh exit.
 
 Close only through Appendix A's one shipped close command, in the foreground;
 it owns the controller, FD 4, phase order and lease. Preserve HQ environment.

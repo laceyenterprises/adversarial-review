@@ -10,6 +10,7 @@ import { hasUnsettledAmaCloserDispatch } from './ama/dispatch-record-read.mjs';
 import { tryAcquireCloserIntentLock } from './ama/pre-receipt-intent.mjs';
 
 export const REPAIR_EPOCH_CAP = 2;
+export const REPAIR_READ_PREFLIGHT_REQUIRED = 'repair-dispatch-read-preflight-required';
 export const REPAIR_OWNER_OBSERVE_MS = 30_000;
 export const REPAIR_ABSENCE_ESCALATE_MS = 10 * 60_000;
 const PUBLISHER_MISSING_CACHE_MS = 2 * 60_000;
@@ -276,7 +277,8 @@ export function repairCause({ ledger, row, cycleExhausted = false, conflicting =
 // ownerKey is the dispatch idempotency key. An uncertain submission keeps its
 // reservation; another request cannot mint a second writer on the same head.
 export function reserveRepairEpoch({ rootDir, repo, prNumber, headSha, ownerKey, cause,
-  now = new Date().toISOString(), dispatchProjectRef, terminalOwner = null, ownerSnapshot = null }) {
+  now = new Date().toISOString(), dispatchProjectRef, terminalOwner = null, ownerSnapshot = null,
+  requireReadPreflight = false }) {
   if (!SHA.test(headSha) || !ownerKey || !cause
     || (dispatchProjectRef !== undefined && !validProject(dispatchProjectRef))) throw new Error('invalid repair identity');
   return mutateRepairEpochs(rootDir, { repo, prNumber }, ledger => {
@@ -288,6 +290,13 @@ export function reserveRepairEpoch({ rootDir, repo, prNumber, headSha, ownerKey,
       && sameIdentity(headSha, terminalOwner.baseHead)
       && epochs.find(epoch => epoch.id === terminalOwner.id && epoch.ownerKey === terminalOwner.ownerKey
         && !epoch.reviewHead && !epoch.terminalAt && sameReservationSnapshot(epoch, ownerSnapshot));
+    const pending = epochs.find(epoch => epoch !== ended && !epoch.reviewHead && !epoch.terminalAt);
+    // Ask the native caller to prove the pair only when this transaction
+    // would mint a new epoch. Leave even a terminal predecessor untouched
+    // until the caller returns and the same snapshot is checked again.
+    if (requireReadPreflight && !replay && !pending && epochs.length < REPAIR_EPOCH_CAP) {
+      return { ok: false, reason: REPAIR_READ_PREFLIGHT_REQUIRED };
+    }
     if (ended) {
       ended.terminalAt = now;
       ended.terminalLaunch = terminalOwner.ownerLaunch;
@@ -296,7 +305,6 @@ export function reserveRepairEpoch({ rootDir, repo, prNumber, headSha, ownerKey,
     if (replay) return replay.terminalAt
       ? { ok: false, reason: 'repair-worker-terminal', epoch: replay }
       : { ok: true, epoch: replay, replayed: true };
-    const pending = epochs.find(epoch => !epoch.reviewHead && !epoch.terminalAt);
     if (pending) return { ok: false, reason: 'repair-owned', epoch: pending };
     if (epochs.length >= REPAIR_EPOCH_CAP) return { ok: false, reason: 'repair-epoch-cap', epochs };
     const epoch = { id: `repair-${randomUUID()}`, ownerKey, baseHead: headSha, cause,
@@ -307,7 +315,7 @@ export function reserveRepairEpoch({ rootDir, repo, prNumber, headSha, ownerKey,
       refundedSpend: ledger.selfErrorRefunds || {} };
     epochs.push(epoch);
     return { ok: true, epoch };
-  });
+  }, { shouldWrite: result => result.reason !== REPAIR_READ_PREFLIGHT_REQUIRED });
 }
 
 export function pendingRepairEpoch(rootDir, identity) {

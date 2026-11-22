@@ -14,6 +14,8 @@ import { persistRemediationDispatchPath } from '../src/remediation-dispatch-mode
 import { bindRepairHead, pendingRepairEpoch, reserveRepairEpoch } from '../src/repair-epochs.mjs';
 import { ensureReviewStateSchema, openReviewStateDb } from '../src/review-state.mjs';
 import { readRepairFollowUpClaim } from '../src/repair-follow-up-claim.mjs';
+import { mockRepairDispatchScope, pairedDispatchAbsence } from './helpers/repair-dispatch-scope.mjs';
+import { readHammerRetryCapLedger, recordHammerRetryDispatch } from '../src/ama/hammer-retry-cap.mjs';
 
 const repo = 'fixture/widgets', prNumber = 11159, headSha = '0ff19e32' + 'a'.repeat(32);
 const identity = { repo, prNumber, headSha };
@@ -33,15 +35,16 @@ function fixture(t, { exhausted = true } = {}) {
   const claim = claimNextFollowUpJob({ rootDir });
   const job = persistRemediationDispatchPath({ ...claim, dispatchPath: 'hq' });
   const argv = [rootDir, repo, String(prNumber), headSha, 'fixture-submit', 'false',
-    job.jobId, String(process.pid)];
+    job.jobId, String(process.pid), 'fixture-project'];
   return { rootDir, jobPath: claim.jobPath, job, argv };
 }
 
 test('the real pre-spawn claim permits one repair writer and retains the job', async t => {
   const { rootDir, jobPath, argv } = fixture(t);
   const bytes = readFileSync(jobPath);
+  const options = mockRepairDispatchScope(t);
   const [reserved, competitor] = await Promise.all([
-    main(argv),
+    main(argv, options),
     main(argv.with(4, 'competing-submit')),
   ]);
   assert.equal(reserved.ok, true, JSON.stringify(reserved));
@@ -49,6 +52,37 @@ test('the real pre-spawn claim permits one repair writer and retains the job', a
   assert.equal(competitor.reason, 'closer-submission-owned');
   assert.equal(pendingRepairEpoch(rootDir, identity).id, reserved.epoch.id);
   assert.deepEqual(readFileSync(jobPath), bytes);
+});
+
+test('denied repair scope leaves the pre-spawn claim and spent budgets intact', async t => {
+  const { rootDir, jobPath, argv } = fixture(t);
+  recordHammerRetryDispatch(rootDir, identity,
+    { jobKey: headSha, headSha, launchRequestId: 'fixture-spent-closer' });
+  const budgets = readHammerRetryCapLedger(rootDir, identity);
+  assert.equal(budgets.attemptCount, 1);
+  const bytes = readFileSync(jobPath);
+  const options = mockRepairDispatchScope(t, () => {
+    throw new Error('app-contract dispatch_scope_denied: synthetic denial');
+  });
+  const result = await main(argv, options);
+  assert.equal(result.reason, 'repair-dispatch-read-scope-denied');
+  assert.deepEqual(readFileSync(jobPath), bytes);
+  assert.deepEqual(readHammerRetryCapLedger(rootDir, identity), budgets);
+  assert.equal(pendingRepairEpoch(rootDir, identity), null);
+});
+
+test('a changed pre-spawn claim during scope verification cannot reserve', async t => {
+  const { rootDir, jobPath, job, argv } = fixture(t);
+  let read = false;
+  const options = mockRepairDispatchScope(t, selector => {
+    read = true;
+    job.remediationWorker = { state: 'spawned' };
+    writeFileSync(jobPath, JSON.stringify(job));
+    return pairedDispatchAbsence(selector);
+  });
+  assert.equal((await main(argv, options)).reason, 'remediation-owned');
+  assert.equal(read, true);
+  assert.equal(pendingRepairEpoch(rootDir, identity), null);
 });
 
 test('legacy, missing, mismatched and stale claim evidence all refuse', async t => {

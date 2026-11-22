@@ -230,13 +230,16 @@ export function readDispatchLaunchesSync(selector, args = {}) {
 function dispatchLookupFailure(error) {
   const failure = unavailable(error);
   const status = Number(error?.status ?? error?.statusCode ?? error?.response?.status);
+  const scopeDenied = !failure.transient && !failure.timedOut
+    && (error?.code === 'dispatch_scope_denied'
+      || /^app-contract dispatch_scope_denied:/.test(error?.message ?? ''));
   // Keep only a fixed refusal signal; producer messages may contain secrets.
   const selectorRefused = !failure.transient && !failure.timedOut
     && ([400, 403].includes(status)
       || ['invalid_selector', 'unsupported_selector', 'scope_denied', 'read_scope_denied',
         'dispatch_read_scope_denied', 'dispatch_scope_denied'].includes(error?.code)
       || /^app-contract (?:400|403|invalid_selector|unsupported_selector|scope_denied|read_scope_denied|dispatch_read_scope_denied|dispatch_scope_denied)\b/.test(error?.message ?? ''));
-  return selectorRefused ? { ...failure, selectorRefused: true } : failure;
+  return selectorRefused ? { ...failure, selectorRefused: true, ...(scopeDenied ? { scopeDenied } : {}) } : failure;
 }
 function checked(result, selector) {
   const evidence = dispatchReadTransport.sdk().readDispatchLookupResult(result);

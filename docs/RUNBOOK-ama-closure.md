@@ -1350,13 +1350,32 @@ dispatch key for a different epoch base head refuses `repair-head-mismatch`.
 An observed terminal epoch is retired before that replay-head refusal.
 See the rollout and mixed-version behavior in [LAC-2228](changes/LAC-2228.md).
 
-The helper is a cold composition root: before its first dispatch read (a
-`dispatched` closer lease's launch, or a pending repair epoch's owner) it calls
-`prepareDispatchReadContext`. Only a read terminal launch with no live retry
+The helper calls `prepareDispatchReadContext` before its first dispatch read
+of a closer lease, pending repair owner, or prospective new reservation.
+Only a read terminal launch with no live retry
 releases closer custody; live, transient, timed-out or unproven reads refuse
 `closer-owned-or-unknown`. If preparation fails or leaves reads disabled, it
 refuses `dispatch-read-context-unavailable` with a redacted `detail` and reads
 nothing (REPAIRDISPATCHREAD-01).
+
+The native call is `bin/repair-in-place.mjs ROOT OWNER/REPO PR BASE_HEAD
+OWNER_KEY CONFLICTING [FOLLOW_UP_TICKET LAUNCHER_PID [DISPATCH_PROJECT]]`.
+Use empty ticket and PID arguments when passing a project without a follow-up
+claim. The project must be the one HQ will record for this dispatch. For a new
+epoch, the helper requires a selector-bound canonical reply under the existing
+exact review-app project/repository grant before it writes the reservation.
+Budget-available updates and existing-key replays follow their existing rules.
+After the read, it checks the follow-up claim again and re-evaluates ownership
+and the epoch cap under the retry-ledger flock.
+
+On `repair-dispatch-project-required`, inspect the native caller's project
+resolution. On `repair-dispatch-read-scope-denied`, check the intended exact
+pair in the review app's `dispatch_reads`. `repair-dispatch-read-scope-unproven`
+means the read did not establish visibility. Check endpoint and producer
+availability and retry through native admission. The helper returns the app,
+project and repository in its refusal JSON, and HQ surfaces the reason and
+short diagnostic. These refusals leave the epoch, predecessor and attempt
+counters as they were.
 
 Reviewer harness refunds are separate from unlimited inconclusive **closer**
 refunds: only three failed reviewer claims per PR, across all heads, receive

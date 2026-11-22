@@ -1,9 +1,12 @@
 // Local dispatch boundary. PR lifecycle/branch ownership remain enforced by hq;
 // this helper only reserves the exhausted PR's audited review episode.
 import Database from 'better-sqlite3';
+import { randomUUID } from 'node:crypto';
 import { resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
-import { reserveRepairEpoch, pageRepairCap, observeRepairOwner } from '../src/repair-epochs.mjs';
+import {
+  reserveRepairEpoch, pageRepairCap, observeRepairOwner, REPAIR_READ_PREFLIGHT_REQUIRED,
+} from '../src/repair-epochs.mjs';
 import { readRepairFacts } from '../src/repair-facts.mjs';
 import { tryAcquireCloserIntentLock } from '../src/ama/pre-receipt-intent.mjs';
 import { readAmaCloserLease, abandonedAmaCloserLeaseOutcome, findLiveAmaCloserLease } from '../src/ama/closer-lease.mjs';
@@ -32,13 +35,31 @@ function contextUnavailable(ready) {
   return { ok: false, reason: 'dispatch-read-context-unavailable', detail: ready.detail };
 }
 
+async function verifyRepairDispatchScope({ repo, dispatchProjectRef, readContext, readImpl }) {
+  const scope = { appId: 'adversarial-review', repo, projectRef: dispatchProjectRef ?? null };
+  if (!dispatchProjectRef) return { ok: false, reason: 'repair-dispatch-project-required',
+    detail: 'supply-exact-dispatch-project', scope };
+  const ready = await readContext();
+  if (!ready.ok) return { ...contextUnavailable(ready), scope };
+  // A fresh probe isolates visibility from the actual dispatch key's current
+  // launch state. Its reply has no role in owner reconciliation or enqueue.
+  const selector = { idempotency_key: `repair-read-preflight-${randomUUID()}`,
+    project_ref: dispatchProjectRef, repo };
+  const result = await readImpl(selector, { timeoutMs: 8000 });
+  if (result.ok && result.absenceProof?.grant_id === 'project-repository-dispatch-read') return { ok: true };
+  if (result.scopeDenied) return { ok: false, reason: 'repair-dispatch-read-scope-denied',
+    detail: 'inspect-adversarial-review-dispatch_reads', scope };
+  return { ok: false, reason: 'repair-dispatch-read-scope-unproven',
+    detail: 'retry-after-dispatch-read-verification', scope };
+}
+
 export async function main(args, {
   env = process.env, prepareDispatchReadContextImpl = prepareDispatchReadContext,
 } = {}) {
   const [rootDir, repo, prRaw, headSha, ownerKey, conflicting, ticket, launcherPidRaw, dispatchProjectRaw] = args;
   const dispatchProjectRef = dispatchProjectRaw === '' ? undefined : dispatchProjectRaw;
   const prNumber = Number(prRaw);
-  if (!rootDir || !repo?.includes('/') || !(prNumber > 0) || !ownerKey
+  if (!rootDir || !/^[^/\s]+\/[^/\s]+$/.test(repo ?? '') || !(prNumber > 0) || !ownerKey
     || !/^[0-9a-f]{40}$/i.test(headSha)
     || (dispatchProjectRef !== undefined && (typeof dispatchProjectRef !== 'string'
       || dispatchProjectRef.length > 256 || /\s/.test(dispatchProjectRef)))) throw new Error('invalid repair request');
@@ -91,13 +112,24 @@ export async function main(args, {
     }
     const terminalOwner = await observeRepairOwner({ rootDir, repo,
       epoch: atReservationHead ? pending : null, readImpl });
-    if (claim.claimedAt) {
+    const recheckClaim = () => {
       const current = checkClaim();
       if (!current.ok) return current;
       if (current.claimedAt !== claim.claimedAt) return { ok: false, reason: 'remediation-ownership-unknown' };
+      return current;
+    };
+    const currentClaim = recheckClaim();
+    if (!currentClaim.ok) return currentClaim;
+    const reservation = { rootDir, repo, prNumber, headSha, ownerKey,
+      cause: facts.cause, dispatchProjectRef, terminalOwner, ownerSnapshot: pending };
+    result = reserveRepairEpoch({ ...reservation, requireReadPreflight: true });
+    if (result.reason === REPAIR_READ_PREFLIGHT_REQUIRED) {
+      const scope = await verifyRepairDispatchScope({ repo, dispatchProjectRef, readContext, readImpl });
+      if (!scope.ok) return scope;
+      const current = recheckClaim();
+      if (!current.ok) return current;
+      result = reserveRepairEpoch(reservation);
     }
-    result = reserveRepairEpoch({ rootDir, repo, prNumber, headSha, ownerKey,
-      cause: facts.cause, dispatchProjectRef, terminalOwner, ownerSnapshot: pending });
   } finally { release(); }
   if (result.reason === 'repair-epoch-cap') await pageRepairCap({ rootDir, repo, prNumber, epochs: result.epochs });
   return { ...result, refundedSpend: facts.refundedSpend };

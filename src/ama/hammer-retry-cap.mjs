@@ -1271,14 +1271,14 @@ export function updateHammerRetryCapLedger(rootDir, identity, update) {
 
 // Repair reservation and budget re-arm share the dispatch/refund fence. Keep
 // confirmed charge identities and the old counters in the epoch's audit.
-export function mutateRepairEpochs(rootDir, identity, update) {
+export function mutateRepairEpochs(rootDir, identity, update, { shouldWrite = () => true } = {}) {
   return mutateHammerLedger(rootDir, identity, () => {
     const ledger = readHammerRetryCapLedger(rootDir, identity);
     if (ledger?.__corrupt) throw new Error('repair ledger unreadable');
     const doc = ledger || { repo: identity.repo, prNumber: identity.prNumber,
       attemptCount: 0, lifetimeAttemptCount: 0, targetAttemptCount: 0 };
     const result = update(doc);
-    writeHammerRetryCapLedger(rootDir, identity, doc);
+    if (shouldWrite(result)) writeHammerRetryCapLedger(rootDir, identity, doc);
     return result;
   });
 }

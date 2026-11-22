@@ -13,9 +13,21 @@ import { withRepositoryStateRead } from '../src/repository-state-lock.mjs';
 const ROOT = fileURLToPath(new URL('../', import.meta.url));
 const HEAD = /^[0-9a-f]{40}$/;
 const DIGEST = /^[0-9a-f]{64}$/;
+const CWP_OWNER_KEY = /^cwp-[0-9a-f]{24}$/;
 const STATES = [undefined, null, 'unknown', 'absent', 'absent-unfenced'];
 
-function readCanonicalProof(rootDir, { repo, prNumber, baseHead, epochId, ownerKey, handoffRound }) {
+/**
+ * @typedef {{repo: string, prNumber: number, baseHead: string, epochId: string, ownerKey: string}
+ *   & ({variant: 'legacy', handoffRound: number}
+ *     | {variant: 'cwp', currentHead: string, conflictWorkerId: string, bootTraceOffset: number})} RetirementIdentity
+ */
+
+/** @param {RetirementIdentity} identity */
+function readCanonicalProof(rootDir, identity) {
+  const { repo, prNumber, baseHead, epochId, ownerKey } = identity;
+  const provenance = identity.variant === 'cwp'
+    ? [identity.currentHead, identity.conflictWorkerId, String(identity.bootTraceOffset)]
+    : [String(identity.handoffRound)];
   const runtime = resolve(rootDir, '../../modules/worker-pool/lib/hq-python-runtime.sh');
   const env = { ...process.env, BASH_ENV: '', ENV: '', PYTHONNOUSERSITE: '1' };
   for (const key of ['PYTHONPATH', 'PYTHONHOME', 'PYTHONUSERBASE',
@@ -26,7 +38,7 @@ function readCanonicalProof(rootDir, { repo, prNumber, baseHead, epochId, ownerK
     const output = execFileSync('/bin/bash', ['-c',
       'source "$1" && shift && hq_exec_python3_runtime "$@"',
       'repair-fence-reader', runtime, join(rootDir, 'bin/read-legacy-repair-fence.py'),
-      repo, String(prNumber), baseHead, epochId, ownerKey, String(handoffRound),
+      repo, String(prNumber), baseHead, epochId, ownerKey, ...provenance,
     ], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], env, timeout: 65_000,
       killSignal: 'SIGKILL', maxBuffer: 32_768 });
     return JSON.parse(output);
@@ -39,7 +51,7 @@ function readCanonicalProof(rootDir, { repo, prNumber, baseHead, epochId, ownerK
   }
 }
 
-function pendingLegacyEpoch(ledger, { repo, prNumber, baseHead, epochId, ownerKey }) {
+function pendingRepairReservation(ledger, { repo, prNumber, baseHead, epochId, ownerKey, variant }) {
   const epochs = ledger.repairEpochs;
   if (ledger.repo !== repo || ledger.prNumber !== prNumber || !Array.isArray(epochs)
     || epochs.some(epoch => !epoch || typeof epoch !== 'object'
@@ -48,6 +60,7 @@ function pendingLegacyEpoch(ledger, { repo, prNumber, baseHead, epochId, ownerKe
   const pending = epochs.filter(epoch => epoch.reviewHead == null && epoch.terminalAt == null);
   const [epoch] = pending;
   return pending.length === 1 && epoch.id === epochId && epoch.ownerKey === ownerKey && epoch.baseHead === baseHead
+    && (variant !== 'cwp' || epoch.cause === 'conflict-without-owner')
     && Number.isFinite(Date.parse(epoch.reservedAt))
     && epochs.filter(entry => entry.ownerKey === ownerKey || entry.id === epochId).length === 1
     && !Object.hasOwn(epoch, 'dispatchProjectRef') && !Object.hasOwn(epoch, 'enqueueFenceReceipt')
@@ -57,25 +70,42 @@ function pendingLegacyEpoch(ledger, { repo, prNumber, baseHead, epochId, ownerKe
     ? epoch : null;
 }
 
-function matchesProof(proof, epoch, { repo, prNumber, ownerKey }) {
+/** @param {RetirementIdentity} identity */
+function matchesProof(proof, epoch, identity) {
+  const { repo, prNumber, ownerKey, variant } = identity;
   const evidence = proof?.evidence;
   const submitter = evidence?.submitter;
-  return proof?.version === 1 && proof.kind === 'legacy-repair-retirement-proof'
-    && Date.parse(proof.recordedAt) >= Date.parse(epoch.reservedAt)
-    && evidence?.repo === repo && evidence.prNumber === prNumber && evidence.baseHead === epoch.baseHead
-    && evidence.epochId === epoch.id && evidence.ownerKey === ownerKey && evidence.reservedAt === epoch.reservedAt
-    && typeof evidence.operator === 'string' && evidence.operator.trim() !== ''
-    && DIGEST.test(evidence.reservationSha256) && DIGEST.test(submitter?.sha256)
-    && submitter.kind === 'native-merge-rescue-handoff' && typeof submitter.file === 'string' && submitter.file !== ''
-    && /^mar-[a-z]-[0-9TZ-]+-[0-9a-f]{6}$/.test(submitter.runId)
-    && submitter.provenanceRef === `merge-agent-rescue:${repo}#${prNumber}:${submitter.runId}`
-    && isDeepStrictEqual(proof.absenceProof, {
-      kind: 'canonical-repair-owner-family-absence', selector: { idempotency_key: ownerKey },
+  const cwp = variant === 'cwp';
+  if (proof?.version !== 1 || proof.kind !== `${variant}-repair-retirement-proof`
+    || !(Date.parse(proof.recordedAt) >= Date.parse(epoch.reservedAt))
+    || evidence?.repo !== repo || evidence.prNumber !== prNumber || evidence.baseHead !== epoch.baseHead
+    || evidence.epochId !== epoch.id || evidence.ownerKey !== ownerKey || evidence.reservedAt !== epoch.reservedAt
+    || typeof evidence.operator !== 'string' || evidence.operator.trim() === ''
+    || !DIGEST.test(evidence.reservationSha256)
+    || !isDeepStrictEqual(proof.absenceProof, {
+      kind: 'canonical-repair-owner-family-absence',
+      selector: { idempotency_key: ownerKey, ...(cwp ? { repair_epoch_id: epoch.id } : {}) },
       scope: 'all-canonical-launches',
     })
-    && isDeepStrictEqual(proof.enqueueFence, { kind: 'canonical-repair-owner-family-fence', ownerKey });
+    || !isDeepStrictEqual(proof.enqueueFence, {
+      kind: 'canonical-repair-owner-family-fence', ownerKey, ...(cwp ? { epochId: epoch.id } : {}),
+    })) return false;
+  if (cwp) {
+    return evidence.currentHead === identity.currentHead
+      && typeof evidence.branch === 'string' && evidence.branch.trim() !== ''
+      && typeof evidence.reservationSha256 === 'string'
+      && submitter?.kind === 'native-auto-merge-conflict-dispatch'
+      && submitter.workerId === identity.conflictWorkerId && submitter.bootTraceOffset === identity.bootTraceOffset
+      && [submitter.jobSha256, submitter.resultSha256, submitter.bootTraceSha256]
+        .every(digest => typeof digest === 'string' && DIGEST.test(digest));
+  }
+  return DIGEST.test(submitter?.sha256)
+    && submitter.kind === 'native-merge-rescue-handoff' && typeof submitter.file === 'string' && submitter.file !== ''
+    && /^mar-[a-z]-[0-9TZ-]+-[0-9a-f]{6}$/.test(submitter.runId)
+    && submitter.provenanceRef === `merge-agent-rescue:${repo}#${prNumber}:${submitter.runId}`;
 }
 
+/** @param {RetirementIdentity} identity */
 function retireLegacyRepair(rootDir, identity) {
   return withRepositoryStateRead(rootDir, () => {
     const unlock = tryAcquireCloserIntentLock(rootDir, identity);
@@ -91,8 +121,8 @@ function retireLegacyRepair(rootDir, identity) {
     try {
       let retired;
       const written = updateHammerRetryCapLedger(rootDir, identity, ledger => {
-        const epoch = pendingLegacyEpoch(ledger, identity);
-        if (!epoch) throw new Error('legacy-repair-reservation-mismatch');
+        const epoch = pendingRepairReservation(ledger, identity);
+        if (!epoch) throw new Error(`${identity.variant}-repair-reservation-mismatch`);
         checkCompetingCustody();
         const proof = readCanonicalProof(rootDir, identity);
         if (!matchesProof(proof, epoch, identity)) throw new Error('committed-enqueue-fence-proof-mismatch');
@@ -111,20 +141,40 @@ function retireLegacyRepair(rootDir, identity) {
   });
 }
 
+/** @returns {RetirementIdentity} */
 function parseIdentity(args) {
   const { values } = parseArgs({ args, options: {
     repo: { type: 'string' }, pr: { type: 'string' }, 'base-head': { type: 'string' },
     epoch: { type: 'string' }, 'owner-key': { type: 'string' }, 'handoff-round': { type: 'string' },
+    'current-head': { type: 'string' }, 'conflict-worker-id': { type: 'string' },
+    'boot-trace-offset': { type: 'string' },
     apply: { type: 'boolean' },
   } });
-  const { repo, pr, epoch: epochId, 'base-head': baseHead, 'owner-key': ownerKey, 'handoff-round': round } = values;
+  const { repo, pr, epoch: epochId, 'base-head': baseHead, 'owner-key': ownerKey, 'handoff-round': round,
+    'current-head': currentHead, 'conflict-worker-id': conflictWorkerId, 'boot-trace-offset': offset } = values;
   const validNumber = value => /^[1-9]\d{0,9}$/.test(value) && Number(value) <= 2 ** 31 - 1;
+  const required = 'required: --apply --repo --pr --base-head --epoch --owner-key';
   if (!values.apply || !/^[a-z0-9][a-z0-9-]*\/[a-z0-9_.-]+$/.test(repo) || !validNumber(pr)
-    || !HEAD.test(baseHead) || !/^repair-[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/.test(epochId)
-    || !/^in-place-repair-[0-9a-f]{64}$/.test(ownerKey) || !validNumber(round)) {
-    throw new Error('required: --apply --repo --pr --base-head --epoch --owner-key --handoff-round');
+    || !HEAD.test(baseHead) || !/^repair-[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/.test(epochId)) {
+    throw new Error(`${required} with an exact reservation selector`);
   }
-  return { repo, prNumber: Number(pr), baseHead, epochId, ownerKey, handoffRound: Number(round) };
+  const common = { repo, prNumber: Number(pr), baseHead, epochId, ownerKey };
+  if (CWP_OWNER_KEY.test(ownerKey)) {
+    const workerId = new RegExp(`^codex-conflict-pr-${pr}-rebase-[0-9a-f]{8}$`);
+    // The receipt is retained in the Node JSON ledger. A lossy offset would
+    // change the evidence recorded there even if the reader proved it exactly.
+    if (round !== undefined || !HEAD.test(currentHead) || currentHead === baseHead
+      || !workerId.test(conflictWorkerId) || !/^(?:0|[1-9]\d{0,15})$/.test(offset)
+      || !Number.isSafeInteger(Number(offset))) {
+      throw new Error(`${required} --current-head --conflict-worker-id --boot-trace-offset (exact CWP selector)`);
+    }
+    return { ...common, variant: 'cwp', currentHead, conflictWorkerId, bootTraceOffset: Number(offset) };
+  }
+  if (!/^in-place-repair-[0-9a-f]{64}$/.test(ownerKey) || !validNumber(round)
+    || [currentHead, conflictWorkerId, offset].some(value => value !== undefined)) {
+    throw new Error(`${required} --handoff-round`);
+  }
+  return { ...common, variant: 'legacy', handoffRound: Number(round) };
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {

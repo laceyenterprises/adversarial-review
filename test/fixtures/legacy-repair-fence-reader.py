@@ -5,7 +5,9 @@ from contextlib import redirect_stderr
 from io import StringIO
 import json
 from pathlib import Path
+import re
 import sys
+from tempfile import TemporaryDirectory
 from types import ModuleType, SimpleNamespace
 import unittest
 from unittest.mock import Mock, patch
@@ -15,10 +17,11 @@ class FenceRefused(ValueError):
     pass
 
 
-def load_reader():
+def load_reader(test):
     dependencies = {
         "agent_os_config.roots": {"hq_root_preferring_legacy_env": Mock()},
         "cwp_dispatch.cli_repair_enqueue_fence": {
+            "REPO": re.compile(r"[a-z0-9]+/[a-z0-9]+"),
             "RepairFenceRefused": FenceRefused,
             "_adversarial_review_root": Mock(),
             "_evidence": Mock(),
@@ -26,12 +29,16 @@ def load_reader():
             "_require_hq_root_owner": Mock(),
             "_require_operator_continuation": Mock(),
         },
+        "cwp_helm.pr_branch_owner": {"lookup_pr_owner": Mock()},
         "session_ledger.db_path": {
             "BACKEND_POSTGRES": "postgres",
             "resolve_ledger_target": Mock(),
         },
         "session_ledger.db_runtime": {"open_ledger_for_runtime_readonly": Mock()},
         "session_ledger.repair_enqueue_fence": {
+            "CWP_OWNER_KEY": re.compile(r"cwp-[a-f0-9]{24}"),
+            "HEAD_SHA": re.compile(r"[a-f0-9]{40}"),
+            "REPAIR_EPOCH_ID": re.compile(r"repair-[a-f0-9-]{36}"),
             "_check_scope": Mock(),
             "_require_absence": Mock(),
         },
@@ -43,14 +50,14 @@ def load_reader():
     path = Path(__file__).resolve().parents[2] / "bin/read-legacy-repair-fence.py"
     spec = importlib.util.spec_from_file_location("read_legacy_repair_fence", path)
     reader = importlib.util.module_from_spec(spec)
-    with patch.dict(sys.modules, modules):
-        spec.loader.exec_module(reader)
+    test.enterContext(patch.dict(sys.modules, modules))
+    spec.loader.exec_module(reader)
     return reader
 
 
-class CanonicalFenceReaderTest(unittest.TestCase):
+class FenceReaderFixture(unittest.TestCase):
     def setUp(self):
-        self.reader = load_reader()
+        self.reader = load_reader(self)
         self.key = "in-place-repair-" + "a" * 64
         self.evidence = {
             "ownerKey": self.key,
@@ -74,6 +81,8 @@ class CanonicalFenceReaderTest(unittest.TestCase):
         self.reader._evidence.return_value = self.evidence
         self.argv = ["fixture/repo", "5", "b" * 40, "epoch", self.key, "3"]
 
+
+class CanonicalFenceReaderTest(FenceReaderFixture):
     def test_existing_fence_requires_guarded_global_read_and_fresh_evidence(self):
         self.assertEqual(self.reader.main(self.argv), self.receipt)
         self.reader._require_operator_continuation.assert_called_once_with(
@@ -172,6 +181,117 @@ class CanonicalFenceReaderTest(unittest.TestCase):
                 ):
                     self.assertEqual(self.reader.run(self.argv), 75)
                 self.assertEqual(stderr.getvalue().strip(), expected)
+
+
+class CwpFenceReaderTest(FenceReaderFixture):
+    def setUp(self):
+        super().setUp()
+        self.key = "cwp-" + "a" * 24
+        self.epoch = "repair-00000000-1234-1234-1234-123456789012"
+        self.evidence.update(
+            ownerKey=self.key, epochId=self.epoch, currentHead="e" * 40
+        )
+        self.receipt["kind"] = "cwp-repair-retirement-proof"
+        self.argv = [
+            "fixture/repo",
+            "5",
+            "b" * 40,
+            self.epoch,
+            self.key,
+            "e" * 40,
+            "codex-conflict-pr-5-rebase-1234abcd",
+            "163",
+        ]
+        temp = Path(self.enterContext(TemporaryDirectory())).resolve()
+        self.hq_root = temp / "hq"
+        self.hq_root.mkdir()
+        alias = temp / "alias"
+        alias.symlink_to(self.hq_root, target_is_directory=True)
+        self.reader.hq_root_preferring_legacy_env.return_value = str(alias)
+        self.epoch_key = f"cwp-epoch:{self.epoch}"
+        self.rows = [
+            (self.key, json.dumps(self.receipt)),
+            (self.epoch_key, self.receipt),
+        ]
+        self.conn.execute.return_value.fetchall.return_value = self.rows
+        self.owner = sys.modules["cwp_helm.pr_branch_owner"].lookup_pr_owner
+        self.owner.return_value = {
+            "ok": True,
+            "repo": "fixture/repo",
+            "prNumber": 5,
+            "owner": None,
+        }
+
+    def test_cwp_both_committed_rows_and_guarded_global_read(self):
+        self.assertEqual(self.reader.main(self.argv), self.receipt)
+        self.reader._check_scope.assert_called_once_with(
+            self.conn, apply=False, cwp=True
+        )
+        self.reader._require_absence.assert_called_once_with(self.conn, self.evidence)
+        self.assertEqual(
+            self.conn.execute.call_args.args[1], (self.key, self.epoch_key)
+        )
+        self.conn.rollback.assert_called_once_with()
+        self.conn.close.assert_called_once_with()
+        self.conn.commit.assert_not_called()
+        self.owner.assert_called_once_with(self.hq_root, "fixture/repo", 5)
+        _, args, _ = self.reader._evidence.call_args.args
+        self.assertEqual(
+            self.reader._evidence.call_args.kwargs, {"hq_root": self.hq_root}
+        )
+        self.assertEqual(args.current_head, "e" * 40)
+        self.assertEqual(args.base_head, "b" * 40)
+        self.assertEqual(args.conflict_worker_id, "codex-conflict-pr-5-rebase-1234abcd")
+        self.assertEqual(args.boot_trace_offset, 163)
+        self.assertFalse(hasattr(args, "handoff_round"))
+
+    def test_cwp_incomplete_or_inconsistent_receipt_pair_is_insufficient(self):
+        for rows, reason in (
+            (self.rows[:1], "committed-enqueue-fence-required"),
+            (self.rows[1:], "committed-enqueue-fence-required"),
+            (
+                [self.rows[0], (self.epoch_key, None)],
+                "committed-enqueue-fence-required",
+            ),
+            (
+                [self.rows[0], (self.epoch_key, {**self.receipt, "version": 2})],
+                "inconsistent-canonical-fence",
+            ),
+        ):
+            with self.subTest(rows=rows):
+                self.conn.execute.return_value.fetchall.return_value = rows
+                with self.assertRaisesRegex(FenceRefused, reason):
+                    self.reader.main(self.argv)
+        self.reader._require_absence.assert_not_called()
+        self.reader._evidence.assert_not_called()
+
+    def test_cwp_missing_schema_and_read_errors_fail_closed(self):
+        for failing_call in (
+            self.reader._check_scope,
+            self.conn.execute,
+            self.reader._require_absence,
+        ):
+            with self.subTest(failing_call=failing_call):
+                failing_call.side_effect = OSError("disposable store unavailable")
+                with self.assertRaises(OSError):
+                    self.reader.main(self.argv)
+                failing_call.side_effect = None
+        self.assertEqual(self.conn.rollback.call_count, 3)
+        self.assertEqual(self.conn.close.call_count, 3)
+        self.reader._evidence.assert_not_called()
+
+    def test_cwp_queued_or_unknown_branch_owner_retains_custody(self):
+        free = self.owner.return_value
+        for result, reason in (
+            ({**free, "owner": {"status": "requested"}}, "pr-branch-owned"),
+            ({**free, "ok": False}, "pr-branch-ownership-unproven"),
+            ({**free, "repo": "other/repo"}, "pr-branch-ownership-unproven"),
+        ):
+            with self.subTest(result=result):
+                self.owner.return_value = result
+                with self.assertRaisesRegex(FenceRefused, reason):
+                    self.reader.main(self.argv)
+        self.reader._evidence.assert_not_called()
 
 
 if __name__ == "__main__":

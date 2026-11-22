@@ -25,11 +25,13 @@ In-place repair reservations can use the paired selector when their original
 dispatch project was recorded at reservation. A repair reserves before enqueue,
 so even a canonical exact-key absence proof leaves it pending. At the base head,
 release requires a positively identified terminal launch with complete retry
-evidence on the automatic path. For a legacy unscoped epoch, the [HQ-owner
+evidence on the automatic path. For legacy unscoped and original CWP conflict
+reservations, the [HQ-owner
 retirement command](RUNBOOK-ama-closure.md#retire-one-fenced-legacy-repair-reservation-lac-2297)
 requires a committed canonical enqueue fence, independently of this SDK
-contract. The command uses the existing operator boundary and requires no
-additional dispatch-read entitlement.
+contract. CWP requires matching committed owner and epoch fences and verifies
+the distinct live head on the original PR branch. The command uses the
+existing operator boundary and requires no additional dispatch-read entitlement.
 
 Public SDK 0.8.0, 0.9.0 and 0.10.0 transports forward the JSON envelope unchanged.
 `readDispatchLookupResult` still validates the base envelope; the consumer

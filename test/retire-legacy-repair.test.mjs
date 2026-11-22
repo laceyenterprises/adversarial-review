@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -16,11 +16,14 @@ import { mergeLeaseFilePath, readMergeLeaseHolders } from '../src/ama/merge-leas
 const identity = { repo: 'fixture/widgets', prNumber: 17, baseHead: 'a'.repeat(40),
   epochId: 'repair-aabbccdd-0000-1111-2222-333344445555',
   ownerKey: `in-place-repair-${'b'.repeat(64)}`, handoffRound: 3 };
+const cwpIdentity = { repo: identity.repo, prNumber: identity.prNumber, baseHead: identity.baseHead,
+  epochId: identity.epochId, ownerKey: `cwp-${'b'.repeat(24)}`, currentHead: 'e'.repeat(40),
+  conflictWorkerId: 'codex-conflict-pr-17-rebase-a1b2c3d4', bootTraceOffset: 163 };
 const reservedAt = '2026-11-21T00:00:00Z';
 const cliSource = new URL('../bin/retire-legacy-repair.mjs', import.meta.url);
 
-function fixture(t, changeEpoch = () => {}) {
-  const workspace = mkdtempSync(join(tmpdir(), 'legacy-repair-retirement-'));
+function fixture(t, changeEpoch = () => {}, selector = identity) {
+  const workspace = mkdtempSync(join(realpathSync(tmpdir()), 'legacy-repair-retirement-'));
   t.after(() => rmSync(workspace, { recursive: true, force: true }));
   const root = join(workspace, 'tools/adversarial-review');
   const cli = join(root, 'bin/retire-legacy-repair.mjs');
@@ -34,9 +37,10 @@ function fixture(t, changeEpoch = () => {}) {
     copyFileSync(new URL(`../${path}`, import.meta.url), join(root, path));
   }
   const historical = { id: 'historical', ownerKey: 'older', reviewHead: 'c'.repeat(40) };
-  const epoch = { id: identity.epochId, ownerKey: identity.ownerKey, baseHead: identity.baseHead,
+  const epoch = { id: selector.epochId, ownerKey: selector.ownerKey, baseHead: selector.baseHead,
     reservedAt, ownerState: 'unknown', ownerLaunch: null, reviewHead: null, priorSpend: { series: 3 },
     refundedSpend: { old: ['closer'] }, ownerObservedAt: reservedAt };
+  if (selector.currentHead) epoch.cause = 'conflict-without-owner';
   const ledger = { repo: identity.repo, prNumber: identity.prNumber, repairEpochs: [historical, epoch],
     attemptCount: 3, targetAttemptCount: 2, lifetimeAttemptCount: 5, suppressed: true,
     dispatchCharges: { opener: { started: true } }, selfErrorRefunds: { closer: ['old'] },
@@ -53,7 +57,7 @@ function fixture(t, changeEpoch = () => {}) {
   writeFileSync(runtime, 'hq_exec_python3_runtime() { "$FIXTURE_NODE" "$FIXTURE_READER" "$@"; }\n');
   const reader = fileURLToPath(new URL('fixtures/legacy-repair-fence-transport.mjs', import.meta.url));
   const runId = 'mar-a-20261121T000000Z-000abc';
-  const { repo, prNumber, baseHead, epochId, ownerKey } = identity;
+  const { repo, prNumber, baseHead, epochId, ownerKey, currentHead, conflictWorkerId, bootTraceOffset } = selector;
   const proof = { kind: 'legacy-repair-retirement-proof', version: 1, recordedAt: '2026-11-21T00:30:00Z',
     evidence: { repo, prNumber, baseHead, epochId, ownerKey, reservedAt,
       reservationSha256: '9'.repeat(64), operator: 'fixture-owner',
@@ -62,14 +66,24 @@ function fixture(t, changeEpoch = () => {}) {
     absenceProof: { kind: 'canonical-repair-owner-family-absence', scope: 'all-canonical-launches',
       selector: { idempotency_key: identity.ownerKey } },
     enqueueFence: { kind: 'canonical-repair-owner-family-fence', ownerKey: identity.ownerKey } };
+  let variantArgs = ['--handoff-round', String(identity.handoffRound)];
+  if (currentHead) {
+    proof.kind = 'cwp-repair-retirement-proof';
+    Object.assign(proof.evidence, { currentHead, branch: 'original-pr-branch',
+      submitter: { kind: 'native-auto-merge-conflict-dispatch', workerId: conflictWorkerId,
+        jobSha256: '1'.repeat(64), resultSha256: '2'.repeat(64), bootTraceSha256: '3'.repeat(64), bootTraceOffset } });
+    proof.absenceProof.selector = { idempotency_key: ownerKey, repair_epoch_id: epochId };
+    proof.enqueueFence = { ...proof.enqueueFence, ownerKey, epochId };
+    variantArgs = ['--current-head', currentHead, '--conflict-worker-id', conflictWorkerId,
+      '--boot-trace-offset', String(bootTraceOffset)];
+  }
   const readerInput = join(root, 'fixture-reader-input.json');
-  const attempt = (receipt = proof, action = 'read') => {
-    write(readerInput, { receipt, action, identity });
+  const attempt = (receipt = proof, action = 'read', changeArgs = args => args) => {
+    write(readerInput, { receipt, action, identity: selector });
     const diagnostic = join(root, 'bin/fixture-reader.stderr');
     rmSync(diagnostic, { force: true });
-    const result = spawnSync(process.execPath, [cli, '--apply', '--repo', repo, '--pr', String(prNumber),
-      '--base-head', baseHead, '--epoch', epochId, '--owner-key', ownerKey,
-      '--handoff-round', String(identity.handoffRound)], {
+    const result = spawnSync(process.execPath, [cli, ...changeArgs(['--apply', '--repo', repo, '--pr', String(prNumber),
+      '--base-head', baseHead, '--epoch', epochId, '--owner-key', ownerKey, ...variantArgs])], {
       cwd: workspace, env: { ...process.env, FIXTURE_NODE: process.execPath, FIXTURE_READER: reader,
         HQ_PYTHON3: '/fixture-override', HQ_PYTHON3_CANDIDATES_FOR_TEST: '/fixture-test-override' },
       encoding: 'utf8', timeout: 15_000,
@@ -84,6 +98,85 @@ function fixture(t, changeEpoch = () => {}) {
   const read = () => readFileSync(path, 'utf8');
   return { root, ledger, path, proof, attempt, read, write };
 }
+
+test('a committed CWP fence retires only the old reservation on the same PR with a moved head', t => {
+  const f = fixture(t, undefined, cwpIdentity);
+  const result = f.attempt();
+  const expected = structuredClone(f.ledger);
+  Object.assign(expected.repairEpochs[1], { terminalAt: result.epoch.terminalAt,
+    terminalReason: 'canonical-enqueue-fenced', enqueueFenceReceipt: f.proof });
+  assert.deepEqual(JSON.parse(f.read()), expected);
+  assert.equal(pendingRepairEpoch(f.root, cwpIdentity), null);
+});
+
+test('CWP retirement keeps both PR locks and rechecks custody after the read', t => {
+  const f = fixture(t, undefined, cwpIdentity);
+  const before = f.read();
+  const release = tryAcquireCloserIntentLock(f.root, cwpIdentity);
+  try {
+    assert.throws(() => f.attempt(), /closer-submission-owned/);
+  } finally { release(); }
+  updateHammerRetryCapLedger(f.root, cwpIdentity, () => {
+    assert.throws(() => f.attempt(), /hammer retry ledger busy/);
+    return null;
+  });
+  assert.throws(() => f.attempt(f.proof, 'queue-follow-up'), /remediation-owned/);
+  assert.equal(f.read(), before);
+});
+
+test('CWP retirement rejects mismatched proof kinds, heads, provenance and fence keys', t => {
+  const f = fixture(t, undefined, cwpIdentity);
+  const before = f.read();
+  for (const mutate of [
+    proof => { proof.kind = 'legacy-repair-retirement-proof'; },
+    proof => { proof.kind = 'cwp-repair-fence-inspection'; },
+    proof => { proof.evidence.currentHead = 'd'.repeat(40); },
+    proof => { proof.evidence.branch = ''; },
+    proof => { proof.evidence.submitter.workerId = 'codex-conflict-pr-17-rebase-1234abcd'; },
+    proof => { proof.evidence.submitter.bootTraceOffset++; },
+    proof => { delete proof.evidence.submitter.bootTraceSha256; },
+    proof => { delete proof.absenceProof.selector.repair_epoch_id; },
+    proof => { delete proof.enqueueFence.epochId; },
+  ]) {
+    const proof = structuredClone(f.proof);
+    mutate(proof);
+    assert.throws(() => f.attempt(proof), /committed-enqueue-fence-proof-mismatch/);
+    assert.equal(f.read(), before);
+  }
+});
+
+test('CWP reservation and selectors must identify the same native conflict submission', t => {
+  const f = fixture(t, undefined, cwpIdentity);
+  const before = f.read();
+  for (const [flag, value] of [
+    ['--owner-key', cwpIdentity.ownerKey + '-retry'],
+    ['--current-head', cwpIdentity.baseHead],
+    ['--conflict-worker-id', 'codex-conflict-pr-18-rebase-a1b2c3d4'],
+    ['--boot-trace-offset', '9007199254740993'],
+  ]) {
+    assert.throws(() => f.attempt(f.proof, 'unavailable', args => {
+      args[args.indexOf(flag) + 1] = value;
+      return args;
+    }), /required:/);
+    assert.equal(f.read(), before);
+  }
+  assert.throws(() => f.attempt(f.proof, 'unavailable', args => [...args, '--handoff-round', '3']),
+    /exact CWP selector/);
+  f.ledger.repairEpochs[1].cause = 'closure-retry-exhausted';
+  f.write(f.path, f.ledger);
+  const changed = f.read();
+  assert.throws(() => f.attempt(f.proof, 'unavailable'), /cwp-repair-reservation-mismatch/);
+  assert.equal(f.read(), changed);
+});
+
+test('a closer at the CWP current head retains custody', t => {
+  const f = fixture(t, undefined, cwpIdentity);
+  const current = { ...cwpIdentity, headSha: cwpIdentity.currentHead };
+  f.write(amaCloserLeaseFilePath(f.root, current), { ...current, status: 'pending' });
+  const before = f.read();
+  assert.throws(() => f.attempt(f.proof, 'unavailable'), /closer-owned-or-unknown/);
+  assert.equal(f.read(), before);
+});
 
 test('a committed fence retires exactly one legacy reservation and retains the complete cap ledger', t => {
   const f = fixture(t);

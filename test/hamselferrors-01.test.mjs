@@ -6,7 +6,8 @@ import { existsSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, 
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
-import { HAMMER_INFRASTRUCTURE_OUTCOMES, HAMMER_STOP_ORIGINS, hammerStopOrigin, closerFaultRecovery } from '../src/ama/hammer-stop-origin.mjs';
+import { HAMMER_INFRASTRUCTURE_OUTCOMES, HAMMER_STOP_ORIGINS, hammerStopOrigin, closerFaultRecovery,
+  setUnregisteredStopCodeSink } from '../src/ama/hammer-stop-origin.mjs';
 import { recordHammerEarlyFailure, CloserCorrectionRequired } from '../src/ama/hammer-terminal-audit.mjs';
 import { runHelperStep } from '../bin/hammer-helper-step.mjs';
 import { recordHammerRetryDispatch, refundCloserSelfError, readHammerRetryCapLedger,
@@ -35,7 +36,13 @@ test('every registered stop reason has a pinned origin; new reasons require an e
     assert.equal(hammerPhaseAttempt({ outcome: 'failed-without-merge', reason }).outcome,
       origin === 'world' ? 'failed-without-merge' : 'deferred', reason);
   }
-  for (const reason of ['new-stop', '__proto__', 'toString']) assert.throws(() => hammerStopOrigin(reason), /Unregistered/);
+  // MRQ-02: an unregistered well-formed code is infrastructure; only a
+  // malformed reason (including prototype keys) throws.
+  const restore = setUnregisteredStopCodeSink(() => {});
+  try {
+    assert.equal(hammerStopOrigin('new-stop'), 'infrastructure');
+    for (const reason of ['__proto__', 'toString']) assert.throws(() => hammerStopOrigin(reason), /Malformed/);
+  } finally { restore(); }
 });
 
 test('command errors remain closer faults without legacy infrastructure membership', async () => {
@@ -126,12 +133,14 @@ test('conflict resolver failure is a terminal world fact, never a retryable clos
 test('unknown runtime stop keeps its original reason in the durable audit', t => {
   const root = scratch(t);
   const env = { HAM_HQ_ROOT: root, HAM_REPO: 'synthetic/repo', HAM_PR_NUMBER: '1', HAM_REVIEWED_SHA: head };
+  t.after(setUnregisteredStopCodeSink(() => {}));
   recordHammerEarlyFailure('synthetic-unknown-stop:diagnostic', { env, final: true });
   const attempt = readAmaAuditEntry(root, env.HAM_REPO, 1, head).attempts.at(-1);
-  assert.equal(attempt.reason, 'stop-reason-unregistered');
+  // MRQ-02: never stop-reason-unregistered; an infrastructure deferral.
+  assert.equal(attempt.reason, 'unregistered-stop-code');
   assert.equal(attempt.originalReason, 'synthetic-unknown-stop:diagnostic');
   assert.equal(attempt.reasonDetail, attempt.originalReason);
-  assert.equal(attempt.stopOrigin, 'closer');
+  assert.equal(attempt.stopOrigin, 'infrastructure');
   assert.equal(attempt.outcome, 'deferred');
 });
 

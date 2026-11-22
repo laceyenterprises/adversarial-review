@@ -6197,8 +6197,21 @@ with the primary-change gate.
 HAMSELFERRORS-01 generalizes this to the **world-fact stop rule**: the closer
 corrects its own mistakes once; only world facts stop closure. The central
 `src/ama/hammer-stop-origin.mjs` registry covers helper usage, validation,
-controller setup, phase failures and edit-plan diagnostics. Unknown stop codes
-defer as `stop-reason-unregistered`; they never silently become terminal.
+controller setup, phase failures and edit-plan diagnostics. Registration
+documents a code's origin. MRQ-02: an unregistered but well-formed stop code is
+an `infrastructure` stop. The terminal audit records it as the registered
+`unregistered-stop-code` deferral (the original code in `originalReason` and
+`reasonDetail`), retried through the same owned retry as every other
+infrastructure stop, with no extra credit. `hammerStopOrigin()` emits one
+`ama_closer.stop_code_unregistered` alert per code per UTC day. Its in-process
+deduplication cache clears when the UTC day changes, retaining only that day's
+keys; the alert outbox preserves durable `(code, day)` deduplication. Only a
+malformed reason throws. New attempts never record `stop-reason-unregistered`.
+An unregistered code seen only at launch end keeps the bounded, counted exit
+refund. Each retryable hammer deferral names its continuation:
+`attempts[].continuation = {kind: "redrive", owner: "watcher", headSha,
+notBefore, lease: "fresh"}`, a re-drive on the same head. In-run retries and
+world refusals name none.
 Helper usage errors request correction with exit 21 and printed canonical usage.
 The dispute helper checks required arguments before inspecting database ownership;
 valid invocations still require the canonical owner before opening SQLite.

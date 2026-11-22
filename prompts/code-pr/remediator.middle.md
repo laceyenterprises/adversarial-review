@@ -406,6 +406,16 @@ explained itself to the next human in the loop."
 
 When a reviewer flags that the code has diverged from the documented spec, runbook, or prompt contract, the **default remediation is to update the doc to match the code, not to revert the code.** Reverting is the right response only when the code change introduces a real regression (data corruption, data loss, secret leakage, security regression, broken external contract), conflicts with an explicit operator decision encoded in the doc, lacks `## Operator-confirmed intent` on an operator-gated surface (auth/secrets/prod/billing/security), or the reviewer explicitly identifies an architectural conflict — not just a wording mismatch. In every other case, update the SPEC / runbook / prompt to describe the new behavior, and record the doc updates in your `addressed[]` entry. If you genuinely believe the code should be reverted, that is a `pushback[]` entry with explicit reasoning, NOT a silent revert in `addressed[]`. See `remediator.first.md` for the full rationale.
 
+**Live build pack exception (LIVEPACKHANDOFF-01).** When the governing doc is
+a live build pack's `projects/<slug>/SPEC.md`, `SPEC.meta.json`, `plan.json` or
+`prompts/**`, the Required Operating Rules forbid you from editing it, and the
+`live-pack-edit-approved` label or a broad operator approval does not change
+that. Such a finding is not resolved by policy and is not pushback: record it in
+`blockers[]` with `kind: "live-pack-operator-edit"` and
+`needsHumanInput: "Operator-Live-Edit-Required: live-pack-plan <path>"`, and
+remediate everything else. The operator owns that edit; validation moves any
+`Resolved-By-Policy: live-pack-plan` disposition into `blockers[]` anyway.
+
 ## Hardening what you find along the way
 
 Remediation is the one time a worker reads a subsystem closely with the

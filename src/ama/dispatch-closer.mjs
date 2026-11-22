@@ -1,4 +1,5 @@
 import { readPrTenure } from '../pr-tenure.mjs';
+import { isLivePackDeferralText } from '../kernel/remediation-reply.mjs';
 import { isGitHubRateLimitError } from '../rate-limit-throttle.mjs';
 import { requestCloserSuccessor, settleCloserSuccessor } from './closer-successor.mjs';
 import { samePrHammerHolderWorktreePaths } from './branch-holder-paths.mjs';
@@ -4541,6 +4542,11 @@ function parseHamAuditFindingsFromBody(body, changedFiles) {
       || files.find((candidate) => matchedLine.includes(candidate))
       || '';
     if (!title) continue;
+    // LIVEPACKHANDOFF-01: a live build pack deferral ("resolved by policy;
+    // ... requires an operator live edit") names an operator-owned finding the
+    // hammer did not resolve. It earns no closure credit, so the count and
+    // identity gates refuse the merge instead of counting closer prose.
+    if (isLivePackDeferralText(matchedLine)) continue;
     findings.push({
       title,
       blocking: kind === 'blocking',

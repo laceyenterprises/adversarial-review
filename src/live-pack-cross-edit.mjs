@@ -687,9 +687,12 @@ async function listPullRequestFiles(repo, prNumber, {
 
 // REMEDIATIONLIVEPLAN-01: a remediator never edits a live pack's guarded
 // files, the PR's own pack included. Live-pack plan changes are operator live
-// edits; a finding that needs one is resolved by policy, not by an edit and
-// not by an operator decision.
+// edits. LIVEPACKHANDOFF-01: a finding that needs one stays unresolved and
+// operator-owned (`Operator-Live-Edit-Required`); worker text never resolves
+// it. LIVE_PACK_POLICY_AUDIT names the legacy audit line that consumers now
+// treat as an unresolved deferral, never as closure credit.
 const LIVE_PACK_POLICY_AUDIT = 'Resolved-By-Policy: live-pack-plan <path> requires an operator live edit';
+const LIVE_PACK_OPERATOR_HANDOFF = 'Operator-Live-Edit-Required: live-pack-plan <path>';
 const GUARDED_PACK_PATH_TOKEN_RE = /projects\/[\w.-]+\/(?:SPEC\.md|SPEC\.meta\.json|plan\.json|prompts\/[\w./-]*[\w-])/g;
 
 // Every guarded pack path named anywhere in a text (for example a review
@@ -751,8 +754,9 @@ function livePackPolicyProtects(policy, path) {
 const REMEDIATION_RULE =
   'Do not edit the spec, plan or prompts of any pack whose `live` is true, this PR\'s own pack included ' +
   '(`ownPack` grants no edit right, and an approved live-edit PR covers only the author\'s change). ' +
-  'For a finding whose fix would edit one, change nothing for that file and record ' +
-  `\`${LIVE_PACK_POLICY_AUDIT}\` in its \`pushback[].reasoning\`; do not raise a blocker or an operator decision for it.`;
+  'For a finding whose fix would edit one, change nothing for that file and record it in `blockers[]` with ' +
+  `\`kind: "live-pack-operator-edit"\` and \`needsHumanInput: "${LIVE_PACK_OPERATOR_HANDOFF}"\`: the operator owns it. ` +
+  'Never record it as pushback or `Resolved-By-Policy`; the approval label is not a worker write grant.';
 
 function formatLivePackRemediationContext({ packs = [], error = null } = {}) {
   if (error) {
@@ -962,6 +966,7 @@ export {
   LIVE_PACK_CROSS_EDIT_KIND,
   LIVE_PACK_EDIT_WAIVER_LABEL,
   LIVE_PACK_FINDING_HEADING,
+  LIVE_PACK_OPERATOR_HANDOFF,
   LIVE_PACK_POLICY_AUDIT,
   LIVE_PACK_STAMP_EXEMPTION_HEADING,
   appendLivePackStampExemptions,

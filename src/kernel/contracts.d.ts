@@ -91,6 +91,12 @@ export interface RemediationReplyBlocker {
   finding: string;
   reasoning?: string;
   needsHumanInput?: string;
+  /**
+   * LIVEPACKHANDOFF-01: an operator owns this finding because its fix needs a
+   * live build pack edit that remediation workers may not make. Validation
+   * sets it on deferrals moved out of pushback/addressed/nonBlocking.
+   */
+  kind?: 'live-pack-operator-edit';
 }
 
 export interface RemediationReplyOperationalBlocker {

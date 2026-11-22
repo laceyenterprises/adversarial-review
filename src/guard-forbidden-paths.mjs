@@ -17,10 +17,14 @@ If every required finding is resolved by policy, no code edit or empty HAM commi
 // REMEDIATIONLIVEPLAN-01: live build pack plans and specs are operator-governed
 // like generated paths. Liveness comes from `livePack` (the live-pack review
 // gate's evaluation at the PR base), never from a hand list.
-export const LIVE_PACK_POLICY_INSTRUCTIONS = `REMEDIATIONLIVEPLAN-01: Never edit a live build pack's projects/<slug>/plan.json, SPEC.md, SPEC.meta.json or prompts/**, including this PR's own pack and a PR that is itself an approved live edit; that approval covers the author's change, not a remediator's. A pack is editable only when livePack lists it with live false. When livePack.failClosed is true or this helper fails, every such path is protected.
-Each resolved entry with livePackPaths, blocking or non-blocking, is resolved by policy: do not edit the file, do not raise an operator decision, and do not invoke the dispute helper. Copy its auditDetails line, count it in Remediated-Findings, and include one audit line per path:
-Resolved-By-Policy: live-pack-plan <path> requires an operator live edit
-remainingBlocking lists the blocking findings that still need remediation. A finding that mixes a protected path with other work is remediated normally, leaving the protected path unedited. A live_pack_cross_edit finding stays operator-gated. These policy resolutions do not waive any merge safety gate.`;
+// LIVEPACKHANDOFF-01: unlike a generated path, nothing regenerates a live pack
+// file, so a finding whose fix needs one is NOT resolved by policy. It is
+// operator-owned until an operator's published edit is proven at the exact
+// live head (`resolved[].operatorEdit`, from bin/guard-forbidden-paths.mjs).
+export const LIVE_PACK_POLICY_INSTRUCTIONS = `REMEDIATIONLIVEPLAN-01 / LIVEPACKHANDOFF-01: Never edit a live build pack's projects/<slug>/plan.json, SPEC.md, SPEC.meta.json or prompts/**, including this PR's own pack and a PR that is itself an approved live edit; that approval and the live-pack-edit-approved label cover an operator's change, never a closer's or remediator's. A pack is editable only when livePack lists it with live false. When livePack.failClosed is true or this helper fails, every such path is protected.
+Each operatorOwned entry, blocking or non-blocking, is an unresolved finding owned by an operator: do not edit the file, do not count it in Remediated-Findings or the Findings addressed list, and do not invoke the dispute helper. Remediator or author text (pushback, Resolved-By-Policy, "no human input") never resolves it. Remediate every other finding, then do not merge while a required operatorOwned entry remains (blocking always; non-blocking under strict mode): stop with blocking-findings-present or non-blocking-findings-present and put each handoff line in the single no-merge status:
+Operator-Live-Edit-Required: live-pack-plan <path>
+A non-required non-blocking operatorOwned entry is advisory: list its handoff line in the HAM audit outside Findings addressed. A resolved entry with operatorEdit is an operator edit proven at the exact live head after the reviewed head; count it only after you confirm the change satisfies the finding, copy its auditDetails bullet, and treat any head change as voiding that proof. remainingBlocking lists the blocking findings you must still remediate. A finding that mixes a protected path with other work is remediated normally, leaving the protected path unedited and its protected part operator-owned. A live_pack_cross_edit finding stays operator-gated. None of this waives any merge safety gate.`;
 
 const LIVE_PACK_FILE_RE = /^projects\/[\w.-]+\/(?:SPEC\.md|SPEC\.meta\.json|plan\.json|prompts\/.+)$/;
 
@@ -259,9 +263,11 @@ function completeSlots(reviewText, headingRe, heading, parsed) {
   return complete.length === parsed?.length ? complete : [];
 }
 
-function livePackResolution(finding, paths, blocking) {
-  return { ...finding, blocking, addressed: true, livePackPaths: paths,
-    auditLines: paths.map(path => `Resolved-By-Policy: live-pack-plan ${path} requires an operator live edit`) };
+// An operator, never this closer, owns a finding whose fix lies entirely in a
+// live pack's protected files. It earns no closure credit here.
+function livePackOperatorOwned(finding, paths, blocking, required) {
+  return { ...finding, blocking, required, addressed: false, livePackPaths: paths,
+    handoffLines: paths.map(path => `Operator-Live-Edit-Required: live-pack-plan ${path}`) };
 }
 
 // `livePackProtects(path)` reports whether remediation must not edit a live
@@ -269,6 +275,7 @@ function livePackResolution(finding, paths, blocking) {
 export function resolveGuardForbiddenNonBlocking(reviewText, guards = [],
   { strictNonBlockingRemediation = true, livePackProtects = null } = {}) {
   const resolved = [];
+  const operatorOwned = [];
   const nonBlocking = parseNonBlockingFindingsSection(reviewText);
   const blocking = parseBlockingFindingsSection(reviewText);
   const complete = completeSlots(reviewText, /^##[ \t]+Non[- \t]+blocking[ \t]+Issues?[ \t]*\r?\n?$/i, '## Non-blocking issues', nonBlocking);
@@ -281,21 +288,20 @@ export function resolveGuardForbiddenNonBlocking(reviewText, guards = [],
       continue;
     }
     const livePaths = complete[index] && livePackOnlyRemedy(finding, livePackProtects);
-    if (livePaths) resolved.push(livePackResolution(finding, livePaths, false));
+    if (livePaths) operatorOwned.push(livePackOperatorOwned(finding, livePaths, false, strictNonBlockingRemediation));
     else remaining.push(finding);
   }
   const blockingComplete = completeSlots(reviewText, /^##[ \t]+Blocking[ \t]+Issues?[ \t]*\r?\n?$/i, '## Blocking issues', blocking);
   const remainingBlocking = [];
   for (const [index, finding] of (blocking || []).entries()) {
     const livePaths = blockingComplete[index] && livePackOnlyRemedy(finding, livePackProtects);
-    if (livePaths) resolved.push(livePackResolution(finding, livePaths, true));
+    if (livePaths) operatorOwned.push(livePackOperatorOwned(finding, livePaths, true, true));
     else remainingBlocking.push(finding);
   }
-  const auditDetails = resolved.map(finding => (finding.guards
-    ? `- **${finding.title}** (non-blocking) — resolved by policy; ${finding.guards.map(guard => guard.path).join(', ')} is regenerated by automation.`
-    : `- **${finding.title}** (${finding.blocking ? 'blocking' : 'non-blocking'}) — resolved by policy; ${finding.livePackPaths.join(', ')} belongs to a live build pack and requires an operator live edit.`));
+  const auditDetails = resolved.map(finding => `- **${finding.title}** (non-blocking) — resolved by policy; ${finding.guards.map(guard => guard.path).join(', ')} is regenerated by automation.`);
   auditDetails.push(...new Set(resolved.flatMap(finding => finding.auditLines)));
-  return { instructions: `${GUARD_POLICY_INSTRUCTIONS}\n${LIVE_PACK_POLICY_INSTRUCTIONS}`, resolved,
+  return { instructions: `${GUARD_POLICY_INSTRUCTIONS}\n${LIVE_PACK_POLICY_INSTRUCTIONS}`, resolved, operatorOwned,
+    operatorHandoff: [...new Set(operatorOwned.flatMap(finding => finding.handoffLines))].join('\n'),
     remaining: nonBlocking === null ? null : remaining,
     blocking, remainingBlocking: blocking === null ? null : remainingBlocking, auditDetails: auditDetails.join('\n') };
 }

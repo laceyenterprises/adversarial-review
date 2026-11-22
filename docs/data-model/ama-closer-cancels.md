@@ -30,3 +30,9 @@ its launch expiry without consuming the HQ failure budget. Corrupt records are l
 one file cannot block later obligations. Before each drain attempt, the watcher
 reads the live PR state. Reopened or merged PRs drop their pending obligation
 without cancelling the closer. An unavailable state read leaves it queued.
+
+Operator `merge-agent:cancel` records receipted AMA alias settlement in
+`data/follow-up-jobs/merge-agent-cancellations/`. The additive `result.closer`
+reports the reason, LRQ and heads when known, and terminal launch status and
+SDK provenance on release. AMA settlement leaves terminal-PR obligations and
+the legacy merge-agent cancellation queue alone.

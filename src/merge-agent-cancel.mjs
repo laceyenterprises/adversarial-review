@@ -3,6 +3,9 @@ import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 import { promisify } from 'node:util';
 import { writeFileAtomic } from './atomic-write.mjs';
+import { findLiveAmaCloserLease } from './ama/closer-lease.mjs';
+import { findReceiptedCloserAlias, recoverReceiptedCloserAlias } from './ama/receipted-closer-alias.mjs';
+import { prepareDispatchReadContext } from './dispatch-read-client.mjs';
 import {
   cancelMergeAgentDispatchOnMerge,
   clearMergeAgentLifecycleCleanup,
@@ -92,6 +95,22 @@ function writeCancellationReceipt(rootDir, receipt) {
   throw new Error(`Unable to allocate merge-agent cancellation receipt for ${receipt.repo}#${receipt.prNumber}`);
 }
 
+async function settleAmaCancellation({ rootDir, repo, prNumber, env }) {
+  let lease;
+  try {
+    lease = findLiveAmaCloserLease(rootDir, { repo, prNumber, strict: true })?.lease;
+  } catch {
+    return { released: false, reason: 'closer-lease-unreadable' };
+  }
+  if (!lease) return null;
+  const record = findReceiptedCloserAlias(rootDir, lease);
+  const held = { released: false, launchRequestId: lease.lrqId ?? null, leaseHeadSha: lease.headSha };
+  if (!record) return { ...held, reason: 'closer-owned-or-unsettled' };
+  const ready = await prepareDispatchReadContext({ env, timeoutMs: 8_000 });
+  if (!ready.ok) return { ...held, dispatchHeadSha: record.headSha, reason: ready.reason, detail: ready.detail };
+  return recoverReceiptedCloserAlias({ rootDir, lease, record, env, hqRoot: env.HQ_ROOT });
+}
+
 async function cancelMergeAgentDispatch({
   rootDir = ROOT,
   repo,
@@ -103,8 +122,16 @@ async function cancelMergeAgentDispatch({
   ghExecFileImpl = execFileAsync,
   hqExecFileImpl = ghExecFileImpl,
   cancelImpl = cancelMergeAgentDispatchOnMerge,
+  env = process.env,
 } = {}) {
-  const result = await cancelImpl({
+  const closer = await settleAmaCancellation({ rootDir, repo, prNumber, env });
+  const result = closer ? {
+    attempted: true, repo, prNumber, attemptedAt: requestedAt,
+    launchRequestId: closer.launchRequestId ?? null,
+    cancelled: false, labelRemoved: false,
+    cleanupComplete: closer.released, retryable: !closer.released,
+    closer,
+  } : await cancelImpl({
     rootDir,
     repo,
     prNumber,
@@ -114,7 +141,8 @@ async function cancelMergeAgentDispatch({
     now: requestedAt,
   });
   let lifecycleCleanupQueued = false;
-  if (result.retryable) {
+  // The legacy queue is PR-wide and can resolve a different worker on replay.
+  if (!closer && result.retryable) {
     upsertMergeAgentLifecycleCleanup(rootDir, {
       repo,
       prNumber,
@@ -128,7 +156,7 @@ async function cancelMergeAgentDispatch({
       attemptedAt: requestedAt,
     });
     lifecycleCleanupQueued = true;
-  } else if (result.cleanupComplete) {
+  } else if (!closer && result.cleanupComplete) {
     clearMergeAgentLifecycleCleanup(rootDir, { repo, prNumber });
   }
   const receipt = {
@@ -161,7 +189,8 @@ async function main() {
     });
     console.log(
       `[merge-agent-cancel] cancelled=${result.cancelled} lrq=${result.launchRequestId || 'none'} ` +
-      `labelRemoved=${result.labelRemoved} retryable=${result.retryable} receipt=${result.receiptPath}`
+      `labelRemoved=${result.labelRemoved} retryable=${result.retryable} ` +
+      `${result.closer ? `closer=${result.closer.reason} ` : ''}receipt=${result.receiptPath}`
     );
     if (result.retryable) {
       process.exitCode = 1;

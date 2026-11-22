@@ -65,6 +65,12 @@ including early lease reconciliation. Successful launch observation uses the
 existing `unverified-terminal-success` classifier; PR merge proof and retry
 eligibility remain separate. No fields or durable status values are added.
 
+A matching `launch-terminal` receipt locates the original dispatch for a lease
+carried across one or more heads. It supplies identity for a fresh
+authenticated exact-LRQ and retry-chain lookup. The operator cancellation
+receipt records both the dispatch head and the retired lease head. Alias
+release preserves the dispatch record, outcome journal and retry accounting.
+
 ## Interrupted dispatch intents (LAC-2081)
 
 CLOSERINTENT-01: a new attempt clears predecessor receipt IDs. Dispatch output

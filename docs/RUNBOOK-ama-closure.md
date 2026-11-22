@@ -1358,6 +1358,22 @@ releases closer custody; live, transient, timed-out or unproven reads refuse
 refuses `dispatch-read-context-unavailable` with a redacted `detail` and reads
 nothing (REPAIRDISPATCHREAD-01).
 
+For a rekeyed `dispatched` closer lease, both native repair reservation and
+`npm run merge-agent:cancel -- --repo OWNER/REPO --pr NUMBER REASON` look for
+one matching `launch-terminal` receipt across up to 32 recorded predecessor
+heads. They require a fresh authenticated App SDK read of that LRQ and its
+complete retry chain, with a 45-second total lookup budget. The repo, PR and
+original target head must match. Terminal non-success evidence releases the
+unchanged carried lease under the PR intent and lease fences. Success
+evidence, live or parked retries, identity mismatches, owner changes and
+timeouts preserve custody. Repair then runs the existing reservation checks
+and caps. Cancellation prints the LRQ and closer disposition and writes both
+heads to `result.closer` in its receipt when a matching receipt is available.
+An already-terminal alias release reports `cancelled=false` because no remote
+cancellation occurred. The operator receipt is separate from the legacy
+label cleanup and terminal-PR replay queues. Check source review and original
+PR repair admission independently.
+
 Reviewer harness refunds are separate from unlimited inconclusive **closer**
 refunds: only three failed reviewer claims per PR, across all heads, receive
 credit. Later failures keep their charges so ordinary infrastructure cap/alert

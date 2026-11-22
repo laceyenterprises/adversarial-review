@@ -3621,6 +3621,7 @@ stateDiagram-v2
     s3 --> [*]: closer-lease.11 non-merge terminal with ended or absent launch reclaimed; live or unproven launch retained; succeeded sticky
     s1 --> s1: closer-lease.12 GSR-07 boot resume re-adopts a resumed launch's lease in place, or rebinds it and its dispatch record to the re-dispatched successor launch
     s1 --> s3: closer-lease.13 GSR-07 boot resume releases (superseded) only once the ledger proves the suspended launch ended before it could resume
+    s1 --> [*]: closer-lease.14 authenticated terminal non-success launch and complete retry chain release the exact carried lease bound to its original dispatch receipt
     s3 --> [*]
 ```
 

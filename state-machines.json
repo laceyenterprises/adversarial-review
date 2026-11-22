@@ -1272,7 +1272,8 @@
       "owner": "watcher / closer",
       "codeSources": [
         "src/ama/closer-lease.mjs",
-        "src/ama/gsr-closer-lease.mjs"
+        "src/ama/gsr-closer-lease.mjs",
+        "src/ama/receipted-closer-alias.mjs"
       ],
       "states": [
         {
@@ -1397,6 +1398,13 @@
           "to": "terminal",
           "trigger": "GSR-07 boot resume releases (superseded) only once the ledger proves the suspended launch ended before it could resume",
           "codeSource": "src/ama/gsr-closer-lease.mjs"
+        },
+        {
+          "id": "closer-lease.14",
+          "from": "dispatched",
+          "to": "[*]",
+          "trigger": "authenticated terminal non-success launch and complete retry chain release the exact carried lease bound to its original dispatch receipt",
+          "codeSource": "src/ama/receipted-closer-alias.mjs"
         }
       ]
     },

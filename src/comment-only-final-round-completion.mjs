@@ -13,19 +13,27 @@
 // corroborated by this reconciler's own CI probe of the proven pushed head. The
 // For a withheld push, ciState records only reported-pending, not probed CI.
 // The worker's free-text title is never read to decide that CI is merely pending.
+// Native final fix-all also requires a verified HQ publication and a fix
+// entry for every source advisory before its reply can hand off to closure.
 import { writeFileAtomic } from './atomic-write.mjs';
 import { classifyRemediationBlockers, operationalBlockerOwner, reportsCompletedPipelineWait } from './remediation-blocker-ownership.mjs';
 import { classifyGithubAuthOperationalBlocker, extractCommitShaFromOperationalBlocker } from './github-auth-recovery.mjs';
 import { FINAL_ROUND_REPLAY_PROOF, isTransientGitFailure, proveFinalRoundWorkerPush } from './comment-only-final-round.mjs';
 import {
   OPERATIONAL_BLOCKER_KIND_PENDING_CI,
+  extractNonBlockingFindingIdentities,
   isDeclaredOperationalBlockerCode,
+  normalizeCoverageTitle,
   normalizeCiPendingOnlyReply,
 } from './kernel/remediation-reply.mjs';
 import { resolveJobPRLifecycleSafe } from './follow-up-lifecycle.mjs';
 import { isWorkflowPath } from './remediation-workflow-push-capability.mjs';
 import { ensureJobBaseBranch } from './remediation-git-pr-io.mjs';
 import { hqPublicationWorker, resolvePublicationWorkspace } from './remediation-publication-workspace.mjs';
+import { readHeadAttestationChainForPr, resolveDaemonWorkerIdentityFromHeadAttestation } from './daemon-worker-identity.mjs';
+import { normalizeEffectiveReviewVerdict } from './kernel/verdict.mjs';
+import { parseReviewFindings } from './kernel/review-findings.mjs';
+import { isSettledCommentOnlyReview } from './remediation-closeout.mjs';
 
 const CI_STATES_WITHOUT_FAILURE = new Set(['pending', 'green']);
 // A transient git failure (network, lock) in the contamination audit or the push
@@ -96,8 +104,9 @@ export async function resolvePendingCiCompletion({
   pendingCiCompletion = false, resolvePRLifecycleImpl, execFileImpl,
   inspectRemediationCiRegressionImpl, log = console,
 }) {
+  const finalFixAll = job.closureHandoff?.reason === 'final-fix-all';
   if (!finalRound) {
-    if (!classifyRemediationBlockers(reply).humanRequired) {
+    if (!finalFixAll && !classifyRemediationBlockers(reply).humanRequired) {
       reply = normalizeCiPendingOnlyReply(reply, { expectedJob: job });
     }
     if (reply.reReview.normalizedFrom) {
@@ -122,7 +131,7 @@ export async function resolvePendingCiCompletion({
       });
       pushedHead = finalRound.workerPushedHeadSha;
     }
-  } else if (job?.finalRound !== 'comment-only' && operationalBlockers?.length > 0 && reply.blockers.length === 0) {
+  } else if (!finalFixAll && job?.finalRound !== 'comment-only' && operationalBlockers?.length > 0 && reply.blockers.length === 0) {
     completionLifecycle = await resolveJobPRLifecycleSafe({
       rootDir, job, resolvePRLifecycleImpl, execFileImpl, log,
     });
@@ -213,9 +222,39 @@ export function projectRecoveredWorkflowAuthBlocker({ job, operationalBlockers, 
 export async function resolveCommentOnlyFinalRoundCompletion(options = {}) {
   const { job, reply } = options;
   const hqWorker = hqPublicationWorker(job);
-  const workspaceDir = job?.finalRound === 'comment-only' && reply
+  const finalFixAll = job?.closureHandoff?.reason === 'final-fix-all';
+  const workspaceDir = (job?.finalRound === 'comment-only' || finalFixAll) && reply
     ? await resolvePublicationWorkspace(options) : options.workspaceDir;
-  return evaluateCommentOnlyFinalRoundCompletion({ ...options, workspaceDir, requiresHqProof: Boolean(hqWorker) });
+  return evaluateCommentOnlyFinalRoundCompletion({ ...options, workspaceDir, hqWorker });
+}
+
+async function verifyNativeFixAllHead({ job, hqWorker, headSha, remainingMs, execFileImpl, env, log }) {
+  if (hqWorker?.requiresProducedAttestation !== true) return { reason: 'final-fix-all-hq-custody-missing' };
+  const proof = await resolveDaemonWorkerIdentityFromHeadAttestation({
+    repo: job.repo, prNumber: job.prNumber, currentHeadSha: headSha, hqRoot: hqWorker.hqRoot, env,
+    readHeadAttestationChainForPrImpl: args => readHeadAttestationChainForPr({ ...args, execFileImpl,
+      logger: log, timeoutMs: Math.min(30_000, remainingMs), retryDelaysMs: [] }),
+  });
+  if (!proof.ok) return proof;
+  if (proof.launchRequestId !== hqWorker.launchRequestId || proof.workerClass !== hqWorker.workerClass) {
+    return { reason: 'produced-attestation-custody-mismatch' };
+  }
+  return proof;
+}
+
+function coversFinalFixAllFindings(job, reply) {
+  const findings = parseReviewFindings(job.reviewBody);
+  if (!isSettledCommentOnlyReview({ verdict: normalizeEffectiveReviewVerdict(job.reviewBody),
+    blockingFindingState: findings.blocking.state, blockingFindingCount: findings.blocking.count,
+    nonBlockingFindingState: findings.nonBlocking.state })) return false;
+  const expected = extractNonBlockingFindingIdentities(job.reviewBody);
+  // Ambiguous identities supply no per-finding evidence. Each distinct
+  // advisory needs an explicit fix entry in the validated worker reply.
+  if (!expected?.length || expected.length !== findings.nonBlocking.count
+    || new Set(expected).size !== expected.length || reply.pushback?.length) return false;
+  const fixed = new Set([...(reply.nonBlocking || []), ...(reply.addressed || [])]
+    .map(entry => normalizeCoverageTitle(entry.title || entry.finding)));
+  return expected.every(title => fixed.has(title));
 }
 
 // Historical generated-index recovery owns its workspace through the native
@@ -231,7 +270,7 @@ async function evaluateCommentOnlyFinalRoundCompletion({
   reply,
   workspaceDir = null,
   expectedLocalHead = null,
-  requiresHqProof = false,
+  hqWorker = null,
   auditWorkspaceForContaminationImpl,
   inspectRemediationCiRegressionImpl,
   execFileImpl,
@@ -242,9 +281,11 @@ async function evaluateCommentOnlyFinalRoundCompletion({
   now = Date.now,
   writeJobImpl = writeJob,
 } = {}) {
-  if (job?.finalRound !== 'comment-only' || !reply) {
+  const finalFixAll = job?.closureHandoff?.reason === 'final-fix-all';
+  if ((!finalFixAll && job?.finalRound !== 'comment-only') || !reply) {
     return { completed: false, workerPushedHeadSha: null, completionFields: {} };
   }
+  const requiresHqProof = Boolean(hqWorker) || finalFixAll;
   const { baseBranch } = await ensureJobBaseBranch({ job, jobPath, execFileImpl });
   let audit;
   let push;
@@ -256,6 +297,8 @@ async function evaluateCommentOnlyFinalRoundCompletion({
       repo: job.repo, prNumber: job.prNumber, jobId: job.jobId, reviewedHead: job.revisionRef, baseBranch,
       workspaceDir, execFileImpl, log, expectedLocalHead,
       publicationBranch: requiresHqProof ? job.branch : null,
+      verifyProducedHead: finalFixAll
+        ? (headSha, remainingMs) => verifyNativeFixAllHead({ job, hqWorker, headSha, remainingMs, execFileImpl, env, log }) : null,
       withheldBecause: audit.error || audit.suspect?.length ? 'branch-contamination-audit-failed' : null,
     });
     const transient = transientProofFailure(audit, push);
@@ -305,6 +348,11 @@ async function evaluateCommentOnlyFinalRoundCompletion({
   });
   if (blockers.length > 0) {
     classification = { pendingCiOnly: false, reason: 'review-blockers' };
+  } else if (finalFixAll && !coversFinalFixAllFindings(job, reply)) {
+    classification = { pendingCiOnly: false, reason: 'advisory-coverage-incomplete' };
+  } else if (finalFixAll && reply.outcome !== 'completed'
+    && !(reply.outcome === 'partial' && historicalOperationalBlockers.length)) {
+    classification = { pendingCiOnly: false, reason: 'incomplete-reply' };
   } else {
     // A proven final push may also wait on closure/review owners. Keep CI's
     // exact-head probe and every human-required entry in the existing gate.
@@ -319,7 +367,7 @@ async function evaluateCommentOnlyFinalRoundCompletion({
   // findings); only a proven push can carry a partial/blocked reply over. An
   // unproven moved head carries no authority; watcher admission reviews it once.
   const completed = classification.pendingCiOnly && (Boolean(workerPushedHeadSha)
-    || (reply.outcome === 'completed' && (!requiresHqProof || push.reason === 'no-push')));
+    || (!finalFixAll && reply.outcome === 'completed' && (!requiresHqProof || push.reason === 'no-push')));
   const reason = completed || !classification.pendingCiOnly ? classification.reason : 'no-proven-push';
   if (!completed) {
     log.warn?.(

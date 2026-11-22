@@ -61,7 +61,8 @@ export function remediationCloseout({ rootDir, job, headSha, workerPushedHeadSha
   const reviews = observedReviews && (observedReviews.state !== 'unknown' || observedReviews.provenance?.sourceRef)
     ? observedReviews : { verdict: normalizeEffectiveReviewVerdict(job.reviewBody), headSha: job.revisionRef,
       blockingFindingState: findings.blocking.state, blockingFindingCount: findings.blocking.count,
-      nonBlockingFindingState: findings.nonBlocking.state, nonBlockingFindingCount: findings.nonBlocking.count };
+      nonBlockingFindingState: findings.nonBlocking.state, nonBlockingFindingCount: findings.nonBlocking.count,
+      ...(job.closureHandoff?.reason === 'final-fix-all' && lifecycle?.reviewerLive === true ? { reviewerLive: true } : {}) };
   const review = reviews.value ?? reviews;
   const reviewAvailable = reviews.state === undefined || reviews.state === 'complete';
   const handoff = job.closureHandoff;

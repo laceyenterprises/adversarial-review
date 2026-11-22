@@ -55,7 +55,8 @@ async function resolveJobPRLifecycleSafe({
         ['pending', 'reviewing', 'pending-upstream'].includes(row?.review_status)
         && pendingHead && pendingHead !== job.revisionRef && pendingHead === lifecycle?.headSha
       );
-      return lifecycle ? { ...lifecycle, newerReviewPending } : { prState: null, newerReviewPending };
+      return { ...(lifecycle || { prState: null }), newerReviewPending,
+        reviewerLive: row?.review_status === 'reviewing' };
     } catch (err) {
       log.warn?.(`[follow-up-remediation] review state lookup failed for ${job.repo}#${job.prNumber} (non-fatal): ${err.message}`);
       return lifecycle;

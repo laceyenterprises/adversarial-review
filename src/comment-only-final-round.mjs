@@ -83,7 +83,8 @@ export function hasWorkerJobTrailer(message, jobId) {
  */
 export async function proveFinalRoundWorkerPush({
   repo, prNumber, jobId, reviewedHead, baseBranch, workspaceDir, execFileImpl,
-  liveHeadSha = null, withheldBecause = null, publicationBranch = null, expectedLocalHead = null, log = console, sleep,
+  liveHeadSha = null, withheldBecause = null, publicationBranch = null, expectedLocalHead = null,
+  verifyProducedHead = null, log = console, sleep,
 }) {
   const readLiveHead = async () => {
     // HQ's registered branch can be a provisioning alias. Bind publication to
@@ -149,7 +150,17 @@ export async function proveFinalRoundWorkerPush({
       return { workerPushedHeadSha: null, liveHeadSha,
         reason: publicationBranch && liveHeadSha !== reviewedHead ? 'live-head-moved-without-local-work' : 'no-push' };
     }
-    const workerOwns = async (sha) => hasWorkerJobTrailer(await git(['show', '-s', '--format=%B', sha]), jobId);
+    const remainingMs = deadline - Date.now();
+    if (verifyProducedHead && remainingMs <= 0) return withheld('git-proof-deadline-exceeded');
+    const produced = verifyProducedHead ? await verifyProducedHead(liveHeadSha, remainingMs) : null;
+    if (verifyProducedHead && !produced?.attestationId) {
+      return withheld(produced?.reason || 'produced-attestation-unverified');
+    }
+    // Native HQ workers can publish with a signed branch-push receipt in
+    // place of a job trailer at the tip. Other added commits still need
+    // their own job trailer and every reviewed patch must survive replay.
+    const workerOwns = async (sha) => (produced && sha === liveHeadSha)
+      || hasWorkerJobTrailer(await git(['show', '-s', '--format=%B', sha]), jobId);
     if (!await workerOwns(localSha)) return withheld('head-not-worker-commit');
     if (localSha !== liveHeadSha) await git(['fetch', '--no-recurse-submodules', '--no-tags', 'origin', baseBranch]);
     const baseRef = `origin/${baseBranch}`;
@@ -216,7 +227,9 @@ export async function proveFinalRoundWorkerPush({
       workerPushedHeadSha: head,
       liveHeadSha,
       reason: reviewedCommitsReplayed > 0 ? 'replayed-onto-base' : 'descendant',
-      proof: { method: FINAL_ROUND_REPLAY_PROOF, reviewedCommitsReplayed, workerCommits: added.length, ...(head !== localSha ? { localHeadSha: localSha, publication: 'patch-equivalent-live-head' } : {}), ...governedProof },
+      proof: { method: FINAL_ROUND_REPLAY_PROOF, reviewedCommitsReplayed, workerCommits: added.length,
+        ...(produced ? { producedAttestationId: produced.attestationId } : {}),
+        ...(head !== localSha ? { localHeadSha: localSha, publication: 'patch-equivalent-live-head' } : {}), ...governedProof },
     };
   } catch (err) {
     if (err.finalRoundLiveLookupFailure) throw err;
@@ -312,14 +325,28 @@ function terminalFollowUpJobs(rootDir, repo, prNumber, log) {
 
 // NXA-04: the closeout writer binds final handoff intent to its independently
 // observed worker push. A later/unrelated head cannot inherit this handoff.
+function hasFinalRemediationPush(job, headSha) {
+  if (job?.completion?.finalRemediationPush !== true
+    || job.completion.workerPushedHeadSha !== headSha
+    || job.reReview?.nextAction?.head !== headSha
+    || job.reReview.requested !== false) return false;
+  if (job.closureHandoff?.reason !== 'final-fix-all') return true;
+  const proof = job.completion.workerPushProof;
+  return job.status === 'completed'
+    && SHA.test(String(job.revisionRef || '')) && job.revisionRef !== headSha
+    && job.closureHandoff.headSha === job.revisionRef
+    && job.completion.finalRoundOutcome?.completed === true
+    && proof?.method === FINAL_ROUND_REPLAY_PROOF
+    && Number.isInteger(proof.workerCommits) && proof.workerCommits > 0
+    && typeof proof.producedAttestationId === 'string'
+    && Boolean(proof.producedAttestationId.trim());
+}
+
 export function findFinalRemediationPushJob(rootDir, { repo, prNumber, headSha }, log = console) {
   if (!SHA.test(String(headSha || ''))) return null;
   return terminalFollowUpJobs(rootDir, repo, prNumber, log)
     .map(({ job }) => job)
-    .filter(job => job.completion?.finalRemediationPush === true
-      && job.completion.workerPushedHeadSha === headSha
-      && job.reReview?.nextAction?.head === headSha
-      && job.reReview.requested === false)
+    .filter(job => hasFinalRemediationPush(job, headSha))
     .sort((a, b) => String(b.completedAt || '').localeCompare(String(a.completedAt || '')))[0] || null;
 }
 
@@ -333,10 +360,10 @@ export function isCompletedCommentOnlyFinalRoundJob(job) {
 }
 
 export function isCompletedFinalRemediationJob(job) {
-  return isCompletedCommentOnlyFinalRoundJob(job) || (job?.status === 'completed'
-    && job.completion?.finalRemediationPush === true && job.reReview?.requested === false
-    && SHA.test(String(job.completion.workerPushedHeadSha || ''))
-    && job.reReview.nextAction?.head === job.completion.workerPushedHeadSha);
+  if (job?.status !== 'completed') return false;
+  if (job.closureHandoff?.reason !== 'final-fix-all' && isCompletedCommentOnlyFinalRoundJob(job)) return true;
+  const headSha = job.completion?.workerPushedHeadSha;
+  return SHA.test(String(headSha || '')) && hasFinalRemediationPush(job, headSha);
 }
 
 export function hasSettledCommentOnlyReviewHead(rootDir, { repo, prNumber, headSha }, log = console) {

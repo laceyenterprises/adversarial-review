@@ -40,6 +40,9 @@ export function findWorkerPublishedHead({ rootDir, job, headSha, execFileSyncImp
 }
 
 function findPublishedHeadInWorkspace({ rootDir, job, headSha, execFileSyncImpl, verifiedHqWorkspace = null }) {
+  // The ordinary trailer lookup does not prove a native fix-all's signed
+  // publication or that its validated reply covers the source advisories.
+  if (job?.closureHandoff?.reason === 'final-fix-all') return null;
   headSha = String(headSha || '').trim().toLowerCase();
   const plan = job?.remediationPlan;
   // Pending retries decrement currentRound; their retained attempt is nextRound.

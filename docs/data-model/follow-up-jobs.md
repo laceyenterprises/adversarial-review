@@ -258,16 +258,21 @@ with closer admission, including rescue. Live closer or remediation custody
 prevents a second owner.
 
 A receipt deduplicates the source head even after terminal settlement or
-archival. An independently proven final fix-all publication sends its exact
-pushed head to the closer under the existing final-push policy. The closer
-retains the reviewed source SHA and all findings as validation input. Pending
-required CI has an observer, and failed required CI has a bounded repair owner.
-The closer proves finding dispositions, preservation of the primary change and
-required CI before merging. Worker reply flags and successful CI do not resolve
-findings. An unknown or blocking fix-all source verdict, an unproven publication,
-or a head that moved again cannot qualify for this handoff. Independent review
-requirements for tenure and conflict-primary work still apply. An attributable
-operator re-review request retains its normal priority and admission checks.
+archival. Final fix-all reconciliation binds the delivered Comment-only source
+review to the canonical HQ worker slot and proves the exact destination head
+using the launch's verified produced attestation and structural Git replay.
+The reply records a fix for every advisory by title. A partial reply qualifies
+only when a corroborated pipeline wait is all that remains. Disputes and
+remaining findings keep their existing adjudication paths.
+
+The completed receipt hands the exact published head and original findings to
+the closer. Pending required CI retains its existing observer. The closer
+validates actual dispositions, primary-change preservation, current source and
+history, required CI, cost policy, live ownership and operator controls before
+merge. An unknown or blocking source verdict, an unproven or moved head, or
+missing finding coverage supplies no completed handoff. A newer delivered
+review, a live reviewer and explicit operator review requests keep precedence.
+Separate tenure and conflict-primary review requirements still apply.
 
 The trigger is `final-round-review`. The deduplication key is `(repo, PR,
 revisionRef, final-fix-all)`, independent of review edits, prompt wording,
@@ -275,7 +280,10 @@ closer attempts or base advances. `reviewBody` retains the authoritative
 review body selected by the gate; `closureHandoff.reviewContext` uses the same
 bounded untrusted host-read context as conflict-primary handoff. The existing
 `completion.workerPushedHeadSha` binds the subsequent fallback decision to the
-published head, including receipts in archived stopped jobs. Older fix-all
+published head, including receipts in archived stopped jobs. A completed native
+fix-all additionally records `completion.workerPushProof.producedAttestationId`
+alongside the structural replay method. The watcher requires that proof, a
+completed outcome, and a matching successor head before retaining closure. Older fix-all
 jobs marked `review: full` qualify for closeout with the same exact source,
 settled Comment-only verdict and publication proof. No new store, status,
 config key or merge predicate is introduced. The ordinary PR-wide

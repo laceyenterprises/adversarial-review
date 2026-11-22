@@ -757,7 +757,7 @@ async function recoverGithubAuthOperationalBlocker({
       env,
       execFileImpl,
     });
-    if (retry.pushed && job?.finalRound !== 'comment-only') {
+    if (retry.pushed && job?.finalRound !== 'comment-only' && job?.closureHandoff?.reason !== 'final-fix-all') {
       const requestedAt = completedAt;
       const reason = 'Recovered a remediated commit after refreshing the worker GitHub credential.';
       const outcome = requestReviewRereviewImpl({

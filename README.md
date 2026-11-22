@@ -891,13 +891,12 @@ two-path merge model** (operational reference:
 
 At the round cap, an eligible exact-head Comment-only review with zero
 blocking findings and remaining non-blocking or demoted findings first gets
-one builder fix-all round. A bound, proven fix-all publication transfers to
-the exact-head closer without another automatic full review. The worker must
-record every finding disposition; the closer validates those dispositions,
-primary-source preservation and required CI before eligible merge. Separate
-tenure and conflict-primary independent-review requirements still apply.
-The existing durable handoff receipt prevents duplicate builder work and
-concurrent closer admission.
+one builder fix-all round. A structurally proven publication with a recorded
+fix for every finding transfers to the exact-head closer. Pending CI retains
+its observer. The closer validates the original findings, primary-source
+preservation and required CI before eligible merge. New findings, live
+reviewers and independent review requirements retain their existing authority.
+The durable handoff receipt prevents duplicate builder work.
 Final fix-all always uses an HQ-provisioned branch-push worker, including
 during local failover. Its recorded launch must match the canonical workspace
 and exact-head produced attestation; missing identity requires recovery by the
@@ -3511,12 +3510,12 @@ stateDiagram-v2
     s0 --> s4: follow-up-job.03 settled clean bypasses branch hold, exhausted branch lookups or rounds; settled clean is merge authority's strict-mode predicate in the watcher release too (STRICTSETTLED-01)
     s0 --> s3: follow-up-job.04 claim failure
     s0 --> s5: follow-up-job.05 operator cancellation
-    s1 --> s2: follow-up-job.06 validated worker reply; proven publication precedes infrastructure hold and legacy published wait completes on green
+    s1 --> s2: follow-up-job.06 validated worker reply; final fix-all requires all advisory fixes and native exact-head publication proof; proven publication precedes infrastructure hold and legacy published wait completes on green
     s1 --> s3: follow-up-job.07 worker failure
-    s1 --> s4: follow-up-job.08 lifecycle, budget, subject-refused before spawn or committed-unpublished stop
+    s1 --> s4: follow-up-job.08 lifecycle, budget, subject-refused before spawn, committed-unpublished or incomplete final fix-all stop
     s1 --> s5: follow-up-job.09 operator cancellation
     s1 --> s0: follow-up-job.10 transient retry, credential-broker readiness deferral or proven credential-only publication failure, unpublished infrastructure-only CI recovery or orchestration-mode refusal hold without round charge
-    s2 --> s0: follow-up-job.11 next round unless comment-only final hammer handoff
+    s2 --> s0: follow-up-job.11 next round unless a completed final remediation owns closure
     s3 --> s0: follow-up-job.12 explicit retrigger, all-infrastructure CI stop with successful current-head replacement checks, or ended execution failure with remaining ordinary round budget and no live owner; automatic recovery preserves spent rounds and backoff
     s4 --> s0: follow-up-job.13 allowlisted explicit retrigger or live satisfied required-label event with unchanged round cap; branch-unresolved resets lookup attempts; all-infrastructure CI stops except max-rounds recover on successful current-head replacements; ended unpublished/no-progress/execution stops automatically requeue once per head/spent round within ordinary budget, preserving retained work; explicit worker-authenticated recovery may attempt publication first; STRICTSETTLED-01 settled-clean release recovery remains once per PR head
     s1 --> s4: follow-up-job.14 stacked-base-merged: hold before worker spawn and request rebase/retarget

@@ -617,9 +617,12 @@ function buildRemediationOutcomeCommentBody({
   // hand-off jobs, so it is only the fallback for jobs claimed before the stamp.
   const prRound = job?.remediationPlan?.prRound;
   const stamped = prRound && Number(prRound.jobRound) === round && Number(prRound.number) > 0;
-  const roundLabel = stamped
-    ? `${prRound.number} of ${prRound.budget ?? '?'}${prRound.chargedTo === 'operator' ? ' (operator-charged)' : ''}`
-    : maxRounds ? `${round} of ${maxRounds}` : String(round);
+  const finalFixAll = job?.closureHandoff?.reason === 'final-fix-all';
+  const roundLabel = finalFixAll
+    ? `final fix-all round ${round} of ${maxRounds || 1}${stamped ? ` (PR round ${prRound.number})` : ''}`
+    : `round ${stamped
+      ? `${prRound.number} of ${prRound.budget ?? '?'}${prRound.chargedTo === 'operator' ? ' (operator-charged)' : ''}`
+      : maxRounds ? `${round} of ${maxRounds}` : round}`;
   const headerClass = workerClass || 'unknown';
   const marker = buildRemediationOutcomeCommentMarker({
     jobId: job?.jobId,
@@ -633,7 +636,7 @@ function buildRemediationOutcomeCommentBody({
   // span at the top of the body. HTML comments don't render in
   // GitHub markdown so this is invisible to PR readers.
   lines.push(`<!-- ${marker} -->`);
-  lines.push(`## Remediation Worker (${headerClass}) — round ${roundLabel}`);
+  lines.push(`## Remediation Worker (${headerClass}) — ${roundLabel}`);
   const execution = {
     workerClass: worker?.workerClass ?? job?.remediationWorker?.workerClass,
     resolvedModel: worker?.resolvedModel ?? job?.remediationWorker?.resolvedModel,
@@ -643,7 +646,7 @@ function buildRemediationOutcomeCommentBody({
   const harness = String(workerClass || execution.workerClass || 'unknown').replace(/^remediator-/, '');
   lines.push(`> Remediator: ${harness} · ${execution.resolvedModel || execution.model || 'unknown'} · ${execution.resolvedReasoningLevel || 'none'}`);
   if (stamped && prRound.summary) {
-    lines.push(`> Round ledger: ${sanitizeInlineText(formatPrRoundLedgerSummary(prRound.summary), 400)}`);
+    lines.push(`> Round ledger: ${sanitizeInlineText(formatPrRoundLedgerSummary(prRound.summary, { postBudget: finalFixAll }), 400)}`);
   }
   lines.push('');
 
@@ -693,7 +696,7 @@ function buildRemediationOutcomeCommentBody({
       lines.push(
         `> **Human intervention required.** The worker requested a re-review pass, but the watcher refused the reset (\`${blockedReason}\`). The PR's existing adversarial-review verdict will not be replaced. Inspect the review ledger and either re-open the PR / restore the review row / clear the malformed-title state, then re-arm with \`npm run retrigger-review\`.`
       );
-    } else if (stopCode === 'max-rounds-reached') {
+    } else if (stopCode === 'max-rounds-reached' && !finalFixAll) {
       lines.push('');
       lines.push(
         '> **Terminal close queued.** The remediation loop exhausted its bounded round cap without converging. The hammer owns the final strict-mode remediation and close once structural gates are green.'
@@ -732,6 +735,9 @@ function buildRemediationOutcomeCommentBody({
       lines.push(
         '> **Human intervention required.** The worker reported blockers it could not resolve in this round. See the blockers list below.'
       );
+    } else if (finalFixAll) {
+      const reason = sanitizeInlineText(job?.completion?.finalRoundOutcome?.reason || 'missing-reply', 120);
+      lines.push('', `Final fix-all stopped before closure handoff (${reason}). The watcher will re-evaluate the current head.`);
     } else if (stopCode === 'no-progress' || !reply?.operationalBlockers?.length) {
       lines.push('');
       lines.push(
@@ -814,6 +820,7 @@ function buildRemediationOutcomeCommentBody({
 
   if (action === 'completed') {
     for (const owner of classifyRemediationBlockers(reply).pipelineOwners) {
+      if (finalFixAll && !(owner === 'CI' && successor?.actor === 'ci')) continue;
       lines.push('');
       lines.push(`> **Informational wait.** Owner: ${owner}. The pipeline owns the next step.`);
     }

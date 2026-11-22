@@ -1327,6 +1327,7 @@ async function reconcileFollowUpJobWithinRepositoryCycle({
   sendWorkerSignalImpl = sendWorkerSignal,
   log = console,
 } = {}) {
+  const finalFixAll = job.closureHandoff?.reason === 'final-fix-all';
   if (job.ciInfrastructureWait) {
     if (Date.parse(job.ciInfrastructureWait.nextProbeAt) > Date.parse(now())) {
       return { action: 'active', reason: 'ci-infrastructure', job, jobPath };
@@ -1826,17 +1827,18 @@ async function reconcileFollowUpJobWithinRepositoryCycle({
         resolvePRLifecycleImpl, execFileImpl, inspectRemediationCiRegressionImpl, log,
       }));
       const reply = parsedReply;
-      completedPipelineWait = reportsCompletedPipelineWait(reply)
+      completedPipelineWait = !finalFixAll && reportsCompletedPipelineWait(reply)
         && !await findCommittedUnpublishedWork({ reply, job, workspaceDir: paths.workspaceDir, execFileImpl });
       remediationReply = { ...remediationReply, payload: reply };
-      if (allBlockingDisputed(job, reply, job.revisionRef)) {
+      if (!finalFixAll && allBlockingDisputed(job, reply, job.revisionRef)) {
         completionLifecycle ||= await resolveJobPRLifecycleSafe({ rootDir, job, resolvePRLifecycleImpl, execFileImpl, log });
         evidenceOnlyCompletion = completionLifecycle?.source === 'live' && completionLifecycle.prState === 'open'
           && completionLifecycle.headSha === job.revisionRef && !completionLifecycle.newerReviewPending;
         if (evidenceOnlyCompletion) rereview = { requested: false, status: 'suppressed', reason: DISPUTED_COMPLETION };
       }
 
-      if ((reply.reReview.requested || completedPipelineWait) && job?.finalRound !== 'comment-only' && !evidenceOnlyCompletion) {
+      if (!finalFixAll && (reply.reReview.requested || completedPipelineWait)
+        && job?.finalRound !== 'comment-only' && !evidenceOnlyCompletion) {
         // Pre-rereview branch-contamination gate. Even though the
         // remediator prompt forbids pushing patch-id duplicates of
         // upstream commits, workers can ignore the contract or run a
@@ -2385,10 +2387,21 @@ async function reconcileFollowUpJobWithinRepositoryCycle({
       if (held) return held;
     }
     if (finalRound.retryLater) return { action: 'active', reason: 'final-round-proof-transient', job: finalRound.job, jobPath };
-    if (job?.finalRound === 'comment-only') ({ job, completionLifecycle, pendingCiCompletion } = await resolvePendingCiCompletion({
+    if (finalFixAll && finalRound.completed) {
+      completionLifecycle = await resolveJobPRLifecycleSafe({ rootDir, job, resolvePRLifecycleImpl, execFileImpl, log });
+      if (completionLifecycle?.source !== 'live' || completionLifecycle.prState !== 'open'
+        || completionLifecycle.headSha !== finalRound.workerPushedHeadSha) {
+        finalRound.completed = false;
+        finalRound.completionFields.finalRoundOutcome = { ...finalRound.completionFields.finalRoundOutcome,
+          completed: false, reason: 'publication-head-not-current' };
+      }
+    }
+    if (finalFixAll || job?.finalRound === 'comment-only') ({ job, completionLifecycle, pendingCiCompletion } = await resolvePendingCiCompletion({
       rootDir, job, reply: parsedReply, finalRound, completionLifecycle, pendingCiCompletion,
       resolvePRLifecycleImpl, execFileImpl, inspectRemediationCiRegressionImpl, log }));
-    if (!closeout && !evidenceOnlyCompletion && (workerPublishedHead || (parsedReply && job.finalRound === 'comment-only') || pendingCiCompletion)) {
+    if (!closeout && !evidenceOnlyCompletion
+      && (finalFixAll ? finalRound.completed
+        : workerPublishedHead || (parsedReply && job.finalRound === 'comment-only') || pendingCiCompletion)) {
       completionLifecycle ||= lifecycle;
       closeoutCiGate = finalRound.ciGate || await inspectRemediationCiRegressionImpl({
         repo: job.repo, prNumber: job.prNumber, execFileImpl, env: process.env, log,
@@ -2400,8 +2413,8 @@ async function reconcileFollowUpJobWithinRepositoryCycle({
         if (held) return held;
       }
       closeout = remediationCloseout({ rootDir, job, completedAt, lifecycle: completionLifecycle,
-        headSha: closeoutCiGate.headSha || completionLifecycle?.headSha || job.revisionRef,
-        workerPushedHeadSha: job.finalRound === 'comment-only'
+        headSha: finalFixAll ? completionLifecycle.headSha : closeoutCiGate.headSha || completionLifecycle?.headSha || job.revisionRef,
+        workerPushedHeadSha: finalFixAll || job.finalRound === 'comment-only'
           ? finalRound.workerPushedHeadSha : workerPublishedHead?.headSha, ciGate: closeoutCiGate });
       rereview = closeoutRereview(closeout, parsedReply?.reReview?.reason);
       // A withheld final-round head retains the existing audited exact-head
@@ -2428,7 +2441,7 @@ async function reconcileFollowUpJobWithinRepositoryCycle({
         ? parsedReply.simplicityNoteApplied : null,
       ...finalRound.completionFields,
       ...(workerPublishedHead && job.finalRound !== 'comment-only' ? { workerPushedHeadSha: workerPublishedHead.headSha } : {}),
-      ...(closeout ? { finalRemediationPush: closeout.snapshot.observations.remediation.value.finalPush != null } : {}),
+      ...(closeout || finalFixAll ? { finalRemediationPush: closeout?.snapshot.observations.remediation.value.finalPush != null } : {}),
       ...(pendingCiCompletion ? { pendingCiOnly: true, workerPushedHeadSha: job.completion.workerPushedHeadSha } : {}),
       note: hasNonEmptyNarrative
         ? 'Reconciled from detached worker exit plus non-empty final message artifact.'
@@ -2521,12 +2534,15 @@ async function reconcileFollowUpJobWithinRepositoryCycle({
         : 'no-progress';
       const stopReason = unpublishedWork
         ? `Remediation job ${job.jobId} committed work locally (${unpublishedWork.commitSha}) but publication is unproven on live head ${unpublishedWork.liveHeadSha || 'unknown'} (${unpublishedWork.publicationReason}); retained work awaits publication.`
+        : finalFixAll
+        ? `Final fix-all did not establish closure custody (${finalRound.completionFields.finalRoundOutcome?.reason || 'missing-reply'}).`
         : stopCode === 'max-rounds-reached'
         ? `Remediation round ${currentRound || 1} finished without a durable re-review request and reached the max remediation rounds cap (${currentRound}/${maxRounds}); stopping the bounded loop.`
         : `No durable re-review request was recorded after remediation round ${currentRound || 1}; stopping to avoid a silent no-progress loop.`;
       const projectedStopJob = {
         ...job,
         ...(unpublishedWork ? { unpublishedWork } : {}),
+        ...(finalFixAll ? { completion: completionMetadata } : {}),
         status: 'stopped',
         remediationPlan: {
           ...(job.remediationPlan || {}),
@@ -2671,7 +2687,7 @@ async function reconcileFollowUpJobWithinRepositoryCycle({
       try {
         requestWatcherWakeImpl({
           rootDir,
-          reason: job.finalRound === 'comment-only'
+          reason: finalFixAll || job.finalRound === 'comment-only'
             ? 'comment-only-final-round-completed' : REREVIEW_WAKE_REASONS.REMEDIATION_CLOSEOUT,
           repo: job.repo,
           prNumber: job.prNumber,

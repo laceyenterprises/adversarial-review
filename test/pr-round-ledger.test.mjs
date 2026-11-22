@@ -305,8 +305,7 @@ test('the budget stops automatic rounds once other producers spend it, and the c
   assert.match(stopped.job.remediationPlan.stopReason, /PR round ledger: 2 of 2 remediation rounds used/u);
   assert.equal(stopped.finalCapResult, undefined, 'a budget stop is the hammer hand-off, not an operator rescue');
 
-  // The closure path the budget hands to is not blocked, and its comment is
-  // numbered PR-wide instead of "round 1 of 1".
+  // The closure comment distinguishes its one-round cap from PR-wide spend.
   createJob(rootDir, { revisionRef: HEAD(3), reviewPostedAt: '2026-01-03T00:00:00.000Z',
     closureHandoff: { reason: 'final-fix-all', headSha: HEAD(3) } });
   const closure = claimNextFollowUpJob({ rootDir, claimedAt: '2026-01-03T01:00:00.000Z', returnStopped: true });
@@ -314,10 +313,10 @@ test('the budget stops automatic rounds once other producers spend it, and the c
   assert.equal(closure.job.remediationPlan.currentRound, 1);
   assert.equal(closure.job.remediationPlan.prRound.kind, PR_ROUND_KINDS.FINAL_FIX_ALL);
   assert.equal(closure.job.remediationPlan.prRound.chargedTo, CHARGED_TO.PIPELINE);
-  assert.equal(header(closure.job), '## Remediation Worker (codex) — round 3 of 2');
+  assert.equal(header(closure.job), '## Remediation Worker (codex) — final fix-all round 1 of 1 (PR round 3)');
   const body = buildRemediationOutcomeCommentBody({ workerClass: 'codex', action: 'completed', job: closure.job,
     reReview: { status: 'pending', requested: true } });
-  assert.match(body, /> Round ledger: `?3 of 2 remediation rounds used · \d+ review passes \(.*final-fix-all 1.*hq-pr-update 1/u);
+  assert.match(body, /> Round ledger: `?3 remediation rounds recorded · ordinary remediation budget 2 · \d+ review passes \(.*final-fix-all 1.*hq-pr-update 1/u);
 });
 
 test('an operator-authorized round past the budget still runs and is charged to the operator', () => {

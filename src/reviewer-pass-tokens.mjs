@@ -1651,8 +1651,8 @@ function readBestReviewerEvidenceTokenUsage({
 }
 
 function shouldUseDefaultTranscriptRoots(rootDir, env = process.env) {
-  if (process.env.ADV_REVIEW_TOKEN_TRANSCRIPT_FALLBACK === '1') return true;
-  if (process.env.ADV_REVIEW_TOKEN_TRANSCRIPT_FALLBACK === '0') return false;
+  if (env?.ADV_REVIEW_TOKEN_TRANSCRIPT_FALLBACK === '1') return true;
+  if (env?.ADV_REVIEW_TOKEN_TRANSCRIPT_FALLBACK === '0') return false;
   // Only the deployed module opts in by default; other checkouts (worker trees)
   // set ADV_REVIEW_TOKEN_TRANSCRIPT_FALLBACK=1 explicitly.
   const deployRoot = resolveDeployRoot(env);

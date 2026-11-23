@@ -2,6 +2,7 @@ import { githubTokenForTarget } from './github-owner-token.mjs';
 import { loadAwareTimeoutMs } from './load-aware-timeout.mjs';
 import { meteredExecFile } from './metered-gh.mjs';
 import { isGitHubRateLimitError } from './rate-limit-throttle.mjs';
+import { ghErrorDetail, isGhAuthFailure } from './github-auth-error.mjs';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { setTimeout as delay } from 'node:timers/promises';
@@ -139,29 +140,6 @@ class GithubAuthOutageError extends Error {
       this.code = cause.code;
     }
   }
-}
-
-function ghErrorDetail(err) {
-  return [err?.stderr, err?.stdout, err?.message]
-    .filter(Boolean)
-    .join('\n');
-}
-
-// A rejected GitHub credential, in every shape `gh` and the REST/GraphQL APIs
-// render it. Kept deliberately narrow: 403 is NOT included, because a 403 is
-// usually a permissions/rate-limit signal on a VALID token and re-minting would
-// not change it.
-function isGhAuthFailure(err) {
-  if (!err) return false;
-  const detail = ghErrorDetail(err).toLowerCase();
-  if (!detail) return false;
-  return /\bbad credentials\b/.test(detail)
-    || /\bhttp\s*401\b/.test(detail)
-    || /\b401\b[^\n]*\bunauthorized\b/.test(detail)
-    || /\bunauthorized\b[^\n]*\b401\b/.test(detail)
-    || /\brequires authentication\b/.test(detail)
-    || /\bauthentication (?:failed|required)\b/.test(detail)
-    || /\btoken (?:has )?expired\b/.test(detail);
 }
 
 // Force a fresh installation token into env. Returns whether a NEW credential

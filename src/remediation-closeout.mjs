@@ -20,6 +20,13 @@ export function isSettledCommentOnlyReview({ verdict, blockingFindingState, bloc
     && blockingFindingCount === 0 && nonBlockingFindingState === 'known';
 }
 
+export function publishedCiRound(job, completion) {
+  if (!completion.publishedCiObservation) return null;
+  const { currentRound, rounds } = job.remediationPlan ?? {};
+  const round = Array.isArray(rounds) ? rounds.find(entry => entry && entry.round === currentRound) : null;
+  return { round: currentRound, startHeadSha: round?.startHeadSha || job.revisionRef };
+}
+
 export function buildRemediationCompletionMetadata({
   job, worker, parsedReply, finalRound, workerPublishedHead, closeout, finalFixAll, pendingCiCompletion,
   hasNonEmptyNarrative, finalMessage, liveness,

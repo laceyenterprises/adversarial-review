@@ -96,6 +96,9 @@ import {
 } from '../src/remediation-oauth-preflight.mjs';
 import { openReviewStateDb, requestReviewRereview } from '../src/review-state.mjs';
 import { pickAdversarialGateStatus } from '../src/adversarial-gate-status.mjs';
+import { findFinalRemediationPushJob } from '../src/comment-only-final-round.mjs';
+import { guardRereviewCiBeforeReviewer } from '../src/reviewer-ci-admission.mjs';
+import { inspectRemediationCiRegression } from '../src/remediation-ci-regression.mjs';
 
 function greenCiGate() {
   return {
@@ -11265,24 +11268,26 @@ async function reconcileFinalRoundWithReply(rootDir, { prNumber, replyOverrides,
   const wakes = [];
   const ciProbes = [];
   const alerts = [];
+  const sourceWrites = [];
   const pushedExec = finalRoundPushedExec({ jobId: job.jobId, pushedHead });
   const result = await withHqRootEnv(hqRoot, () => reconcileFollowUpJob({
     rootDir, job: spawned.job, jobPath: spawned.jobPath,
     now: () => '2026-04-21T10:30:00.000Z',
     isWorkerRunning: () => false,
     resolvePRLifecycleImpl: async () => ({ source: 'live', prState: 'open', headSha: pushedHead }),
-    execFileImpl: liveHead
-      ? async (command, args) => (command === 'gh' ? { stdout: `${liveHead}\n` } : pushedExec(command, args))
-      : pushedExec,
+    execFileImpl: async (command, args) => {
+      if (args.some(arg => ['push', 'bundle', 'update-ref'].includes(arg))) sourceWrites.push([command, args]);
+      return liveHead && command === 'gh' ? { stdout: `${liveHead}\n` } : pushedExec(command, args);
+    },
     auditWorkspaceForContaminationImpl: cleanContaminationAudit,
-    inspectRemediationCiRegressionImpl: async (args) => { ciProbes.push(args); return { ...ciGate, headSha: pushedHead }; },
+    inspectRemediationCiRegressionImpl: async (args) => { ciProbes.push(args); return { headSha: pushedHead, ...ciGate }; },
     deliverAlertImpl: async (text, options) => { alerts.push({ text, ...options }); return { queued: true }; },
     requestReviewRereviewImpl: () => { throw new Error('final round must not re-review'); },
     requestWatcherWakeImpl: (wake) => { wakes.push(wake); return { requested: true }; },
     postCommentImpl: async () => ({ posted: true }),
     log: { warn: () => {}, error: () => {}, log: () => {} },
   }));
-  return { result, wakes, ciProbes, alerts, job, reviewedHead, pushedHead };
+  return { result, wakes, ciProbes, alerts, job, reviewedHead, pushedHead, sourceWrites };
 }
 
 const pendingCiOperationalBlocker = {
@@ -11290,6 +11295,119 @@ const pendingCiOperationalBlocker = {
   finding: 'PR-head repo-guards had not completed after one bounded CI wait.',
   reasoning: 'Required checks need to complete before the AMA closer can merge.',
 };
+
+for (const scenario of [
+  { name: '401 after pending', http: 401, state: 'unknown', error: 'HTTP 401: Bad credentials' },
+  { name: '401 with a null legacy kind', http: 401, state: 'unknown', nullKind: true },
+  { name: 'legacy pending only', state: 'pending', legacy: true },
+  { name: 'worker 401 and observer pending', http: 401, state: 'pending' },
+  { name: 'worker 401 and observer green', http: 401, state: 'green' },
+  { name: 'permission denied', http: 403, state: 'unknown', error: 'HTTP 403: Permission denied', permission: true },
+  { name: 'actual red', http: 401, state: 'failed' },
+  { name: 'moved head', http: 401, state: 'pending', moved: true, stopped: true },
+  { name: 'source unproven', http: 401, state: 'unknown', unproven: true, stopped: true },
+  { name: 'actual input blocker', http: 401, state: 'unknown', needsInput: true, stopped: true },
+  { name: 'tagged pending CI with an approval request', state: 'pending', approval: true, stopped: true },
+  { name: 'tagged unreadable CI with an approval request', state: 'unknown', approval: true, stopped: true },
+  { name: 'legacy CI title with approval request and blocked outcome',
+    state: 'pending', legacy: true, approval: true, stopped: true },
+  { name: 'legacy CI title with approval request and partial outcome',
+    state: 'pending', legacy: true, approval: true, partial: true, stopped: true },
+]) test(`LAC-2333: final remediation closeout with ${scenario.name}`, async t => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  const pendingCheck = { name: 'Node 22', state: 'PENDING', workflowName: 'Offline tests',
+    detailsUrl: 'https://github.com/example/fixture/actions/runs/45120528143/job/2' };
+  const { result, wakes, pushedHead, sourceWrites, job } = await reconcileFinalRoundWithReply(rootDir, {
+    prNumber: 2030,
+    liveHead: scenario.unproven ? 'a'.repeat(40) : null,
+    replyOverrides: {
+      outcome: scenario.legacy && !scenario.partial ? 'blocked' : 'partial',
+      operationalBlockers: [
+        { ...(scenario.legacy ? { title: 'PR-head CI pending' } : { kind: 'pending-ci', title: 'pending-ci' }),
+          finding: scenario.approval
+            ? 'Workflow runs require operator approval before checks can start.'
+            : 'Node 22 and Node 26 were pending.',
+          reasoning: scenario.approval
+            ? 'A maintainer must approve the run.'
+            : 'Required checks on run 45120528143.' },
+        ...(scenario.http ? [{ title: 'auth-failure', ...(scenario.nullKind ? { kind: null } : {}),
+          finding: `The bounded PR-head CI watch ended with HTTP ${scenario.http} after its pending observations.`,
+          reasoning: 'Guarded publication succeeded. The CI observation owner must restore credentials.' }] : []),
+        ...(scenario.needsInput ? [{ title: 'missing approval', finding: 'Permission must be granted.',
+          reasoning: 'The approver must act.', needsHumanInput: 'Grant access.' }] : []),
+      ],
+    },
+    ciGate: { state: scenario.state, error: scenario.error,
+      ...(scenario.moved ? { headSha: 'c'.repeat(40) } : scenario.state === 'unknown' ? { headSha: null } : {}),
+      ...(scenario.state === 'pending' ? { pendingChecks: [pendingCheck] } : {}) },
+  });
+  const durable = readFollowUpJob(result.jobPath);
+  assert.deepEqual(sourceWrites, [], 'read recovery must never invoke a publication writer');
+  if (scenario.unproven) {
+    assert.equal(durable.operationalBlockerRecovery?.category, 'github-auth',
+      'CI watch prose without publication proof must still reach publication recovery');
+  }
+  if (scenario.stopped) {
+    assert.equal(result.action, 'stopped');
+    assert.equal(durable.completion.publishedCiObservation, undefined);
+    assert.equal(wakes.length, 0);
+    assert.match(durable.commentDelivery.body, /stopped/);
+    if (scenario.approval) assert.match(durable.commentDelivery.body, /Human intervention required/);
+    return;
+  }
+  assert.equal(result.action, 'completed', durable.commentDelivery.body);
+  assert.equal(durable.operationalBlockerRecovery, undefined);
+  assert.equal(durable.completion.workerPushedHeadSha, pushedHead);
+  assert.equal(durable.completion.workerPushProof.method, 'git-cherry-replay');
+  assert.equal(durable.completion.publishedCiObservation.state, scenario.state);
+  assert.equal(durable.completion.publishedCiObservation.headSha, pushedHead);
+  assert.deepEqual(durable.completion.publishedCiObservation.pendingChecks, scenario.state === 'pending' ? [pendingCheck] : []);
+  assert.equal(durable.remediationPlan.rounds.at(-1).publishedHeadSha, pushedHead);
+  assert.equal(durable.reReview.nextAction.head, pushedHead);
+  const waitsForCi = ['pending', 'unknown'].includes(scenario.state);
+  assert.equal(durable.reReview.nextAction.action, waitsForCi ? 'wait-for-CI' : 'hammer');
+  assert.equal(durable.reReview.requested, false);
+  assert.equal(wakes.length, 1);
+  assert.match(durable.commentDelivery.body, new RegExp(`source published at \`${pushedHead}\``));
+  assert.match(durable.commentDelivery.body, waitsForCi ? /watcher/i : /\*\*Owner:\*\* `hammer`/);
+  assert.equal(durable.completion.publishedCiObservation.recoveryOwner, scenario.permission ? 'operator' : undefined);
+  assert.match(durable.commentDelivery.body, /45120528143/);
+  assert.doesNotMatch(durable.commentDelivery.body, /stopped|Human intervention required/);
+  assert.equal(findFinalRemediationPushJob(rootDir, { repo: job.repo, prNumber: job.prNumber,
+    headSha: pushedHead })?.jobId, job.jobId);
+  const observedRed = await guardRereviewCiBeforeReviewer({
+    rootDir, repo: job.repo, prNumber: job.prNumber, reviewerHeadSha: pushedHead, passKind: 'rereview',
+    inspectCiImpl: async () => ({ state: 'failed', headSha: pushedHead,
+      failedChecks: [{ name: 'Node 22', state: 'FAILURE' }] }),
+    requeueImpl: () => assert.fail('the final published head already has a closure owner'),
+    createJobImpl: () => assert.fail('the final published head does not start another remediation'),
+  });
+  assert.equal(observedRed.reason, 'ci-regression-hammer-owned');
+});
+
+test('LAC-2333: published round metadata tolerates legacy plans', async () => {
+  const { publishedCiRound } = await import('../src/remediation-closeout.mjs');
+  const completion = { publishedCiObservation: {} };
+  const revisionRef = 'a'.repeat(40);
+  assert.deepEqual(publishedCiRound({ revisionRef }, completion), { round: undefined, startHeadSha: revisionRef });
+  assert.deepEqual(publishedCiRound({ revisionRef, remediationPlan: { currentRound: 1, rounds: {} } }, completion),
+    { round: 1, startHeadSha: revisionRef });
+});
+
+test('LAC-2333: the managed checks reader preserves an empty rollup as unknown', async () => {
+  const headSha = 'b'.repeat(40);
+  const result = await inspectRemediationCiRegression({
+    repo: 'example/fixture', prNumber: 2030, env: {},
+    execFileImpl: async (command, args) => {
+      assert.equal(command, 'gh');
+      assert.deepEqual(args.slice(0, 2), ['pr', 'view']);
+      return { stdout: JSON.stringify({ headRefOid: headSha, statusCheckRollup: [] }) };
+    },
+  });
+  assert.equal(result.headSha, headSha);
+  assert.equal(result.state, 'unknown');
+});
 
 test('a final round reporting only pending PR-head CI completes as final with its marker and pushed head', async () => {
   const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));

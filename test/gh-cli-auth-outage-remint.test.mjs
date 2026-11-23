@@ -43,6 +43,11 @@ function ghError(stderr, extra = {}) {
 // The exact stderr the live watcher produced against the expired ghs_ token.
 const BAD_CREDENTIALS = 'gh: Bad credentials (HTTP 401)';
 
+test('classifies raw GitHub auth errors', () => {
+  assert.equal(isGhAuthFailure(BAD_CREDENTIALS), true);
+  assert.equal(isGhAuthFailure('HTTP 403: Permission denied'), false);
+});
+
 test('I/O and transport failures use bounded backoff without retrying permanent failures', async () => {
   for (const error of [
     ghError('spawn gh EIO', { code: 'EIO' }),

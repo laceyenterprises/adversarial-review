@@ -13,6 +13,7 @@ import { isWorkflowPath, isWorkflowPushEscalationEnabled, tryEscalateWorkflowPus
 import { OWNER_AUTH_HOLD, ownerAuthHold, remediationOwner, selectRemediationReadRoute, selectRemediationPushRoute } from './remediation-owner-auth.mjs';
 import { fetchPRBranchMetadata } from './remediation-git-pr-io.mjs';
 import { publishRemediation } from './remediation-publication.mjs';
+import { reportedCiReadFailure } from './remediation-blocker-ownership.mjs';
 
 const execFileAsync = promisify(execFile);
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -148,9 +149,11 @@ function classifyGithubAuthOperationalBlocker(blocker) {
   return { kind: 'terminal', reason: 'unclassified-github-auth' };
 }
 
-function findGithubAuthOperationalBlocker(reply) {
+function findGithubAuthOperationalBlocker(reply, publishedHead) {
   const blockers = Array.isArray(reply?.operationalBlockers) ? reply.operationalBlockers : [];
   for (const blocker of blockers) {
+    // Worker prose can identify a CI watch failure after publication is proven.
+    if (publishedHead && reportedCiReadFailure(blocker)) continue;
     const classification = classifyGithubAuthOperationalBlocker(blocker);
     if (classification) return { blocker, classification };
   }
@@ -687,6 +690,7 @@ export GIT_TERMINAL_PROMPT=0
 
 async function recoverGithubAuthOperationalBlocker({
   reply,
+  resolveFinalRound,
   hqRoot,
   workspaceDir,
   job,
@@ -701,7 +705,10 @@ async function recoverGithubAuthOperationalBlocker({
   env = process.env,
   recordRecoveryImpl = () => {},
 }) {
-  const authBlocker = findGithubAuthOperationalBlocker(reply);
+  const observation = reply?.operationalBlockers?.some(reportedCiReadFailure)
+    ? await resolveFinalRound?.() : null;
+  const authBlocker = observation?.retryLater ? null
+    : findGithubAuthOperationalBlocker(reply, observation?.workerPushedHeadSha);
   if (!authBlocker) return { operationalBlockerRecovery: null, rereview: null, job: null };
   const commitSha = extractCommitShaFromOperationalBlocker(authBlocker.blocker);
   const expectedRemoteSha = authBlocker.blocker?.expectedRemoteSha || null;

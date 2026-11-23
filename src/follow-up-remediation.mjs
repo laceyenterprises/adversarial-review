@@ -12,7 +12,7 @@ import { resolveOsgRemediatorRoute } from './osg-remediator.mjs';
 import { resolveLocalRemediationMes } from './mes-shadow-hook.mjs';
 import { readDispatchStatus } from './producer-contracts/launch-status.mjs';
 import { findCommittedUnpublishedWork } from './remediation-unpublished.mjs';
-import { remediationCloseout, closeoutRereview, refusedCloseout, buildRemediationCompletionMetadata } from './remediation-closeout.mjs';
+import { remediationCloseout, closeoutRereview, refusedCloseout, buildRemediationCompletionMetadata, publishedCiRound } from './remediation-closeout.mjs';
 import { remediationReviewRequest } from './explicit-review-intent.mjs';
 import { reportsCompletedPipelineWait } from './remediation-blocker-ownership.mjs';
 import { guardStackedBase } from './ama/stacked-base.mjs';
@@ -1821,7 +1821,13 @@ async function reconcileFollowUpJobWithinRepositoryCycle({
     let pendingCiCompletion = false;
     let evidenceOnlyCompletion = false;
     let completedPipelineWait = false;
-
+    let observedFinalRound;
+    const resolveFinalRound = async () => observedFinalRound ??= await resolveCommentOnlyFinalRoundCompletion({
+      job, jobPath, reply: parsedReply?.reReview?.originalOperationalBlockers
+        ? { ...parsedReply, operationalBlockers: parsedReply.reReview.originalOperationalBlockers } : parsedReply,
+      workspaceDir: paths.workspaceDir,
+      auditWorkspaceForContaminationImpl, inspectRemediationCiRegressionImpl, deliverAlertImpl, execFileImpl, log,
+    });
     if (replyProbe.state === 'valid') {
       ({ reply: parsedReply, job, remediationReply, completionLifecycle, pendingCiCompletion } = await resolvePendingCiCompletion({
         rootDir, job, reply: replyProbe.reply, worker, remediationReply,
@@ -2345,6 +2351,7 @@ async function reconcileFollowUpJobWithinRepositoryCycle({
       if (!rereview.requested && findGithubAuthOperationalBlocker(parsedReply)) {
         const recovery = await recoverGithubAuthOperationalBlocker({
           reply: parsedReply,
+          resolveFinalRound,
           hqRoot: resolveHqRoot(process.env),
           workspaceDir: paths.workspaceDir,
           job,
@@ -2362,6 +2369,7 @@ async function reconcileFollowUpJobWithinRepositoryCycle({
           operationalBlockerRecovery = recovery.operationalBlockerRecovery;
           if (recovery.rereview) rereview = recovery.rereview;
           job = recovery.job;
+          if (operationalBlockerRecovery.retry?.pushed) observedFinalRound = undefined;
           if (operationalBlockerRecovery.retry?.retryLater) {
             writeFollowUpJob(jobPath, job);
             return { action: 'active', reason: 'workflow-publication-verification-pending', job, jobPath };
@@ -2370,12 +2378,7 @@ async function reconcileFollowUpJobWithinRepositoryCycle({
       }
     }
 
-    const finalRound = await resolveCommentOnlyFinalRoundCompletion({
-      job, jobPath, reply: parsedReply?.reReview?.originalOperationalBlockers
-        ? { ...parsedReply, operationalBlockers: parsedReply.reReview.originalOperationalBlockers } : parsedReply,
-      workspaceDir: paths.workspaceDir,
-      auditWorkspaceForContaminationImpl, inspectRemediationCiRegressionImpl, deliverAlertImpl, execFileImpl, log,
-    });
+    const finalRound = await resolveFinalRound();
     if (!workerPublishedHead && !finalRound.workerPushedHeadSha
       && finalRound.ciGate?.state === 'infrastructure' && finalRound.ciGate.headSha === lifecycle?.headSha
       && !await findCommittedUnpublishedWork({ reply: parsedReply, job, workspaceDir: paths.workspaceDir, execFileImpl })) {
@@ -2409,7 +2412,8 @@ async function reconcileFollowUpJobWithinRepositoryCycle({
         if (held) return held;
       }
       closeout = remediationCloseout({ rootDir, job, completedAt, lifecycle: completionLifecycle,
-        headSha: finalFixAll ? completionLifecycle.headSha : closeoutCiGate.headSha || completionLifecycle?.headSha || job.revisionRef,
+        headSha: finalRound.completionFields.publishedCiObservation?.headSha
+          || (finalFixAll ? completionLifecycle.headSha : closeoutCiGate.headSha || completionLifecycle?.headSha || job.revisionRef),
         workerPushedHeadSha: finalFixAll || job.finalRound === 'comment-only'
           ? finalRound.workerPushedHeadSha : workerPublishedHead?.headSha, ciGate: closeoutCiGate });
       rereview = closeoutRereview(closeout, parsedReply?.reReview?.reason);
@@ -2520,7 +2524,7 @@ async function reconcileFollowUpJobWithinRepositoryCycle({
       const projectedStopJob = {
         ...job,
         ...(unpublishedWork ? { unpublishedWork } : {}),
-        ...(finalFixAll ? { completion: completionMetadata } : {}),
+        ...((finalFixAll || completionMetadata.publishedCiObservation) ? { completion: completionMetadata } : {}),
         status: 'stopped',
         remediationPlan: {
           ...(job.remediationPlan || {}),
@@ -2588,6 +2592,7 @@ async function reconcileFollowUpJobWithinRepositoryCycle({
       const stopReasonText = `Worker requested re-review but the watcher refused the reset: ${blockedReason}. The PR's existing adversarial review verdict will not be replaced; human intervention required.`;
       const projectedStopJob = {
         ...job,
+        ...(completionMetadata.publishedCiObservation ? { completion: completionMetadata } : {}),
         status: 'stopped',
         remediationPlan: {
           ...(job.remediationPlan || {}),
@@ -2638,7 +2643,7 @@ async function reconcileFollowUpJobWithinRepositoryCycle({
     }
 
     const { commentDelivery: completedDelivery } = buildReconcileCommentDelivery({
-      job, worker, action: 'completed',
+      job: { ...job, completion: completionMetadata }, worker, action: 'completed',
       reply: parsedReply, reReview: rereview, now,
     });
     // The daemon observes the resulting head; worker replies cannot attest it.
@@ -2650,6 +2655,7 @@ async function reconcileFollowUpJobWithinRepositoryCycle({
       jobPath,
       completedAt,
       resultingHeadSha: closeout?.decision.head || (completionLifecycle?.source === 'live' ? completionLifecycle.headSha || null : null),
+      publishedRound: publishedCiRound(job, completionMetadata),
       remediationWorker: {
         ...workerState,
         state: 'completed',

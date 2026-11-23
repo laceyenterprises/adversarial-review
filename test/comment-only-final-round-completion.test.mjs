@@ -46,7 +46,7 @@ test('pending CI on the proven pushed head is the only thing a final-round block
   assert.equal(classify([pendingCiBlocker], null).reason, 'ci-probe-head-mismatch');
   assert.equal(classify([pendingCiBlocker], pendingGate, null).reason, 'no-proven-push');
   assert.equal(classify([pendingCiBlocker, { ...pendingCiBlocker, title: 'second' }]).reason,
-    'ambiguous-untagged-operational-blockers');
+    'operational-blocker-needs-human-input');
   // A declared non-CI code fails closed even when tagged and even while CI is pending.
   assert.equal(classify([{ ...pendingCiBlocker, title: 'stale-pr-head', kind: 'pending-ci' }]).reason,
     'declared-non-ci-operational-blocker');
@@ -63,7 +63,7 @@ test('an unrelated blocker is never the CI wait, even while CI is pending', () =
   assert.deepEqual(classify([unrelated], 'blocked'),
     { pendingCiOnly: false, reason: 'operational-blocker-needs-human-input' });
   assert.deepEqual(classify([{ ...unrelated, needsHumanInput: undefined, reasoning: 'Needs the key.' }], 'blocked'),
-    { pendingCiOnly: false, reason: 'untagged-blocker-outcome-blocked' });
+    { pendingCiOnly: false, reason: 'operational-blocker-needs-human-input' });
   // Asking a human is not waiting on CI, whatever the tag says.
   assert.deepEqual(classify([{ ...unrelated, kind: 'pending-ci' }]),
     { pendingCiOnly: false, reason: 'operational-blocker-needs-human-input' });

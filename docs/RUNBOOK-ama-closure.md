@@ -2768,6 +2768,15 @@ An unrelated head follows ordinary exact-head review. Existing terminal writers,
 delivery claims, rereview/wake effects, verdicts, budgets and execution gates
 remain authoritative. The final-push binding is intent, never merge evidence.
 
+A final remedy's independently proven push retains its completed source edge
+when the worker's bounded check watch ends with checks pending or a read-only
+HTTP 401 or 403. The watcher takes exact-head CI observation on a pending or
+unknown read. A continuing permission or policy denial names the operator for
+recovery and requires a fresh authorized read. The managed read helper owns
+its existing bounded 401 recovery. Normal CI and custody gates still decide
+whether closure can proceed or requires CI repair. See the
+[follow-up runbook](follow-up-runbook.md).
+
 Operator/SRE acceptance remains pending until the first naturally occurring
 hammer through a suppressed remediation push is observed under separate rollout
 authority. Privately record the exact published head, decision, CI transition,

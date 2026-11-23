@@ -1533,8 +1533,9 @@ It means:
 
 PENDINGCIOWNER-01: operational ownership uses the structured kind before prose.
 A `pending-ci` entry without a declared non-CI operational code or a non-empty
-human-input request is CI-owned even if its prose mentions human decisions or
-operator approval. The complete legacy CI-to-review follow-up sentence is still
+human-input request is CI-owned unless the reply explicitly says approval is
+required. Incidental mentions of approval leave ownership with CI. The complete
+legacy CI-to-review follow-up sentence is still
 accepted in `needsHumanInput`; appending an access request fails closed. Other
 tagged kinds remain human-owned, and only untagged legacy entries use the prose
 heuristic, ignoring explicit negated need phrases. Final-round completion still
@@ -1581,6 +1582,13 @@ That conservatism is intentional. A completed comment-only final round with
 `ci-regression-hammer-owned` without requeueing it. Direct round requeue refuses
 with an error before applying no-progress or round-cap stops. The job stays in
 `completed/` with completed start/result edges for strict hammer provenance.
+
+A proven final publication with only CI observation debt takes the completed
+transition even when the worker's check watch ends in HTTP 401 or the
+reconciler cannot read the checks. The completed edge and original reply
+remain durable. The watcher owns the exact-head check observation, and a
+permission or policy denial with unknown checks names the operator for
+recovery. An unrelated check head cannot supply this handoff.
 
 If the flag is true, reconcile still runs the branch-contamination gate before resetting `reviews.db` back to `pending`. A contaminated branch does **not** produce a synthetic stop; it moves to durable `failed/` with `failure.code = "branch-contamination"` so operators have an audit trail and a retryable terminal record after they clean the branch.
 

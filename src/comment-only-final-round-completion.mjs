@@ -16,7 +16,9 @@
 // Native final fix-all also requires a verified HQ publication and a fix
 // entry for every source advisory before its reply can hand off to closure.
 import { writeFileAtomic } from './atomic-write.mjs';
-import { classifyRemediationBlockers, operationalBlockerOwner, reportsCompletedPipelineWait } from './remediation-blocker-ownership.mjs';
+import { classifyRemediationBlockers, operationalBlockerOwner, reportedCiReadFailure,
+  reportsCompletedPipelineWait, reportsOnlyCiObservation } from './remediation-blocker-ownership.mjs';
+import { ciReadFailureKind } from './remediation-ci-regression.mjs';
 import { classifyGithubAuthOperationalBlocker, extractCommitShaFromOperationalBlocker } from './github-auth-recovery.mjs';
 import { FINAL_ROUND_REPLAY_PROOF, isTransientGitFailure, proveFinalRoundWorkerPush } from './comment-only-final-round.mjs';
 import {
@@ -82,9 +84,7 @@ export function classifyFinalRoundOperationalBlockers(operationalBlockers, {
   if (entries.some((entry) => isDeclaredOperationalBlockerCode(entry))) {
     return { pendingCiOnly: false, reason: 'declared-non-ci-operational-blocker' };
   }
-  if (entries.some((entry) => (String(entry?.needsHumanInput || '').trim()
-    || entry?.kind === OPERATIONAL_BLOCKER_KIND_PENDING_CI)
-    && operationalBlockerOwner(entry) === 'human')) {
+  if (entries.some((entry) => operationalBlockerOwner(entry) === 'human')) {
     return { pendingCiOnly: false, reason: 'operational-blocker-needs-human-input' };
   }
   const untagged = entries.filter((entry) => entry?.kind !== OPERATIONAL_BLOCKER_KIND_PENDING_CI);
@@ -338,6 +338,7 @@ async function evaluateCommentOnlyFinalRoundCompletion({
   const historicalOperationalBlockers = Array.isArray(reply.operationalBlockers) ? reply.operationalBlockers : [];
   let classification;
   let ciGate = null;
+  let publishedCiObservation = null;
   let ciState = reply.reReview?.normalizedFrom === 'ci-pending-only' ? 'reported-pending' : null;
   if (blockers.length === 0 && historicalOperationalBlockers.length > 0 && workerPushedHeadSha) {
     ciGate = await inspectRemediationCiRegressionImpl({
@@ -364,13 +365,32 @@ async function evaluateCommentOnlyFinalRoundCompletion({
     classification = classifyFinalRoundOperationalBlockers(remaining, {
       ciGate, pushedHead: workerPushedHeadSha, outcome: reply.outcome,
     });
+    if (!classification.pendingCiOnly && workerPushedHeadSha && reportsOnlyCiObservation(historicalOperationalBlockers)
+      && ['partial', 'completed', 'blocked'].includes(reply.outcome)
+      && (!ciGate?.headSha || ciGate.headSha === workerPushedHeadSha)) {
+      const exactRead = ciGate?.headSha === workerPushedHeadSha;
+      const state = exactRead ? ciGate.state || 'unknown' : 'unknown';
+      const reportedStatuses = [...new Set(historicalOperationalBlockers.map(reportedCiReadFailure).filter(Boolean))];
+      const readFailure = ciGate?.readFailure || ciReadFailureKind(ciGate?.error);
+      publishedCiObservation = {
+        headSha: workerPushedHeadSha, state,
+        ...(reportedStatuses.length ? { reportedHttpStatuses: reportedStatuses } : {}),
+        readFailure,
+        ...(['unknown', 'pending'].includes(state) ? { observer: 'watcher' } : {}),
+        ...(state === 'unknown' && readFailure === 'permission-or-policy'
+          ? { recoveryOwner: 'operator' } : {}),
+        pendingChecks: exactRead ? (ciGate.pendingChecks || []).map(({ name, state, workflowName, detailsUrl }) =>
+          ({ name, state, workflowName, detailsUrl })) : [],
+      };
+    }
   }
   // A worker that pushed nothing may still finish cleanly (it disproved the
   // findings); only a proven push can carry a partial/blocked reply over. An
   // unproven moved head carries no authority; watcher admission reviews it once.
-  const completed = classification.pendingCiOnly && (Boolean(workerPushedHeadSha)
-    || (!finalFixAll && reply.outcome === 'completed' && (!requiresHqProof || push.reason === 'no-push')));
-  const reason = completed || !classification.pendingCiOnly ? classification.reason : 'no-proven-push';
+  const completed = Boolean(publishedCiObservation) || (classification.pendingCiOnly && (Boolean(workerPushedHeadSha)
+    || (!finalFixAll && reply.outcome === 'completed' && (!requiresHqProof || push.reason === 'no-push'))));
+  const reason = publishedCiObservation ? 'published-ci-observation'
+    : completed || !classification.pendingCiOnly ? classification.reason : 'no-proven-push';
   if (!completed) {
     log.warn?.(
       `[follow-up-remediation] Comment-only final round for ${job.repo}#${job.prNumber} is not complete: ` +
@@ -384,6 +404,7 @@ async function evaluateCommentOnlyFinalRoundCompletion({
     completionFields: {
       ...(projection.audit ? { operationalBlockerResolution: projection.audit } : {}),
       ...(workerPushedHeadSha ? { workerPushedHeadSha, workerPushProof: push.proof } : {}),
+      ...(publishedCiObservation ? { publishedCiObservation } : {}),
       ...(withheldPushHeadSha ? { withheldPushHeadSha } : {}),
       finalRoundOutcome: { completed, reason, ciState, push: push.reason },
     },

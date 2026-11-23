@@ -92,6 +92,17 @@ test('final-round remediator head queues once, survives restart, preserves budge
   assert.equal(eligible(state, {}, { observedAt: at(100), load }).nextAction, 'merge');
 });
 
+test('final remediation proof normalizes uppercase and mixed-case head inputs', t => {
+  const f = fixture(t);
+  const read = headSha => readFinalRemediatorHead({ rootDir: f.rootDir, repo, prNumber, headSha });
+  const proof = read(head);
+  assert.ok(proof);
+  assert.deepEqual(read(head.toUpperCase()), proof);
+  assert.deepEqual(read('Bb'.repeat(20)), proof);
+  assert.equal(read('g'.repeat(40)), null);
+  assert.equal(read(head.slice(1)), null);
+});
+
 test('head movement before issuance discards the old request', async t => {
   const f = fixture(t);
   let reads = 0;
@@ -299,4 +310,32 @@ test('disabled execution and the kill switch cannot queue re-review', async t =>
   }
   assert.equal(f.requests.length, 0);
   assert.equal(f.intents().length, 0);
+});
+
+test('MRQ-11 D2: a completed comment-only final-round push proves a final remediator head; near misses do not', t => {
+  const base = { jobId: 'comment-only-job', repo, prNumber, status: 'completed', revisionRef: oldHead,
+    completedAt: at(0), finalRound: 'comment-only', reReview: { requested: false, suppressed: 'comment-only-final-round' },
+    remediationPlan: { currentRound: 3, maxRounds: 3 }, completion: { workerPushedHeadSha: head } };
+  // One root per case: the job scan cache is keyed on directory stamps.
+  const read = (job, status = 'completed', headSha = head) => {
+    const rootDir = mkdtempSync(join(tmpdir(), 'v2-comment-only-final-'));
+    t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+    const dir = join(rootDir, 'data', 'follow-up-jobs', status);
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, 'example__project-pr-17-comment-only.json'), JSON.stringify(job));
+    return readFinalRemediatorHead({ rootDir, repo, prNumber, headSha });
+  };
+  assert.deepEqual(read(base), { repo, prNumber, headSha: head, jobId: 'comment-only-job', currentRound: 3,
+    maxRounds: 3, suppressed: true, sourceRef: `comment-only-final-round-push:comment-only-job:${head}` });
+  assert.deepEqual(read(base, 'completed', head.toUpperCase()), read(base));
+  assert.deepEqual(read(base, 'completed', 'Bb'.repeat(20)), read(base));
+  assert.equal(read(base, 'completed', movedHead), null);
+  assert.equal(read(base, 'stopped'), null);
+  for (const change of [
+    { remediationPlan: { currentRound: 2, maxRounds: 3 } },
+    { closureHandoff: { reason: 'final-fix-all', headSha: oldHead } },
+    { reReview: { requested: false } },
+    { finalRound: undefined },
+    { jobId: undefined },
+  ]) assert.equal(read({ ...base, ...change }), null, JSON.stringify(change));
 });

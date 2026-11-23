@@ -413,6 +413,7 @@ export async function load(url, context, nextLoad) {
       export function hasCommentOnlyFinalRoundPush() { return false; }
       export function hasUnprovenCommentOnlyFinalRoundHead() { return false; }
       export function hasSettledCommentOnlyReviewHead() { return false; }
+      export function scanPrFollowUpJobs() { return []; }
       export function scanArchivedStoppedFollowUpJobs() { return []; }
       export function findFinalRoundJobForProvenPush() { return null; }
       export function findCommentOnlyFinalRoundPushJob() { return null; }

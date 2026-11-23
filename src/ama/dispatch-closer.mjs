@@ -25,7 +25,8 @@ import { infrastructureOnlyFailures, recordedCiFailures } from '../ci-infrastruc
 import { readWorkerDispatchFiles, readHostIdentitySync } from '../dispatch-files-client.mjs';
 import { readWorkerObservation } from '../dispatch-read-client.mjs';
 import { loadAppSdkSync } from '../app-sdk-loader.mjs';
-import { prepareQueueCloserDispatch, renderQueueCloserPrompt, queueAdmissionCallback } from '../finalization/queue-closer.mjs';
+import { prepareQueueCloserDispatch, queueAdmissionCallback } from '../finalization/queue-closer.mjs';
+import { hammerQueueInputs } from '../finalization/hammer-queue-command.mjs';
 import { routeFinalizationWriter } from '../finalization/queue-routing-boundary.mjs';
 import { readExecutionVerdictsFromLedgerAsync } from '../session-ledger-read-adapter.mjs';
 import { validNoWorkVerdict } from '../execution-verdict.mjs';
@@ -5524,21 +5525,23 @@ async function maybeDispatchAmaCloserAttempt({
     reviewCycleExhausted: terminalHammerReviewCycleExhausted(reviewState),
   };
   const queueCloser = dispatchContext.queueCloserPrepared;
-  let prompt = queueCloser ? '' : composeCloserPrompt(promptInputs);
+  // MRQ-21: a queue-v2 lane runs the same hammer. Its close controller ends
+  // at the attested head and hands off; the executor owns CI and the merge.
+  let prompt = composeCloserPrompt(promptInputs);
   if (reviewState?.operatorLabelFindings?.gated?.length) {
     prompt += operatorGatedRemediationInstructions('', reviewState.operatorLabelFindings);
   }
 
   const hammerOwnerRoute = hammerOwnerRouteOf(dispatchContext);
-  if (!queueCloser && hammerOwnerRoute === 'review-cycle-cap' && useHammerTerminalRemediationPrompt) {
+  if (hammerOwnerRoute === 'review-cycle-cap' && useHammerTerminalRemediationPrompt) {
     prompt += composeReviewCycleCapHammerPrompt({ reviewedSha, targetRemediationSha,
       cap: dispatchContext.reviewCycleCap, history: dispatchContext.reviewCycleHistory });
   }
-  if (!queueCloser && hammerOwnerRoute === 'ci-blocked' && useHammerTerminalRemediationPrompt) {
+  if (hammerOwnerRoute === 'ci-blocked' && useHammerTerminalRemediationPrompt) {
     prompt += composeCiBlockedHammerPrompt({ reviewedSha, targetRemediationSha,
       failedChecks: dispatchContext.ciFailedChecks });
   }
-  if (!queueCloser && orphanAdmit && useHammerTerminalRemediationPrompt) prompt += '\nREMORPHAN-01 owner-of-last-resort pass: rebase, remediate all current findings, validate CI, and merge only under your own lease with every ordinary merge predicate satisfied. Primary-line edits require per-finding Reversal-Authorized-By trailers in the HAMINTENT-03 format described above, verified required-guard reversal authority as described above, or restoration of the reverted lines. If the closer-authored head cannot be re-certified, use the exact-head re-review path; never waive primary-change or CI gates.\n';
+  if (orphanAdmit && useHammerTerminalRemediationPrompt) prompt += '\nREMORPHAN-01 owner-of-last-resort pass: rebase, remediate all current findings, validate CI, and merge only under your own lease with every ordinary merge predicate satisfied. Primary-line edits require per-finding Reversal-Authorized-By trailers in the HAMINTENT-03 format described above, verified required-guard reversal authority as described above, or restoration of the reverted lines. If the closer-authored head cannot be re-certified, use the exact-head re-review path; never waive primary-change or CI gates.\n';
 
   // CLOSERGATES-01: a previous hammer pushed and validated this exact head,
   // then exhausted a transient closure gate. This launch runs only the closure
@@ -7862,7 +7865,7 @@ async function maybeDispatchAmaCloserAttempt({
     repo,
     prNumber,
     workerClass,
-    completionShape: queueCloser ? 'branch-push' : 'decision-only',
+    completionShape: 'decision-only',
   });
   if (mergeDispatchRoute !== 'hq-dispatch') {
     throw new Error(
@@ -8137,32 +8140,21 @@ async function maybeDispatchAmaCloserAttempt({
   try {
   scratchDir = createHammerScratchDir(promptDir);
   promptPath = join(promptDir, `${repo.replace('/', '-')}-pr-${prNumber}-${reviewedSha}-${basename(scratchDir)}.md`);
-  const procedureValues = closerTemplateValues({ ...promptInputs, scratchDir });
-  if (!queueCloser) {
-    writeFileSync(join(scratchDir, 'hammer-bootstrap.sh'), renderHammerBootstrap(procedureValues),
-      { encoding: 'utf8', mode: 0o600, flag: 'wx' });
-    const reference = composeCloserReference({ ...promptInputs, scratchDir });
-    if (reference) writeFileSync(join(scratchDir, 'hammer-reference.md'), reference,
-      { encoding: 'utf8', mode: 0o600, flag: 'wx' });
-  }
-  for (const phase of queueCloser ? [] : HAMMER_PHASES) {
+  const procedureValues = { ...closerTemplateValues({ ...promptInputs, scratchDir }),
+    QUEUE_INPUTS: queueCloser ? hammerQueueInputs({ routeGeneration: queueCloser.route.routeGeneration,
+      handoffCommand: queueCloser.handoffCommand, workerId, workerClass: dispatchWorkerClass }) : '' };
+  writeFileSync(join(scratchDir, 'hammer-bootstrap.sh'), renderHammerBootstrap(procedureValues),
+    { encoding: 'utf8', mode: 0o600, flag: 'wx' });
+  const reference = composeCloserReference({ ...promptInputs, scratchDir });
+  if (reference) writeFileSync(join(scratchDir, 'hammer-reference.md'), reference,
+    { encoding: 'utf8', mode: 0o600, flag: 'wx' });
+  for (const phase of HAMMER_PHASES) {
     writeFileSync(join(scratchDir, `${phase}.sh`), renderHammerProcedure(phase, procedureValues),
       { encoding: 'utf8', mode: 0o600, flag: 'wx' });
   }
   if (closureResume) writeFileSync(join(scratchDir, CLOSURE_RESUME_FILE), `${JSON.stringify(closureResume, null, 2)}\n`,
     { encoding: 'utf8', mode: 0o600, flag: 'wx' });
-  if (queueCloser) {
-    try { prompt = renderQueueCloserPrompt(procedureValues, queueCloser) + prompt; }
-    catch (error) {
-      if (error.code !== 'QUEUE_CLOSER_INPUT_MISSING') throw error;
-      updateAmaCloserLease({ rootDir, ...leaseIdentity, status: 'terminal',
-        terminalOutcome: 'deferred', now: dispatchContext.dispatchedAt });
-      return noAmaDispatch({ dispatched: false, skipMergeAgent: true,
-        reason: 'queue-closer-prompt-input-missing' });
-    }
-  } else {
-    prompt = substituteTemplate(prompt, { RUN_DIR: scratchDir });
-  }
+  prompt = substituteTemplate(prompt, { RUN_DIR: scratchDir });
   if (writeFileImpl) {
     writeFileImpl(promptDir, promptPath, prompt);
   } else {
@@ -8428,8 +8420,9 @@ async function maybeDispatchAmaCloserAttempt({
     '--defer-provision',
     '--worker-class', dispatchWorkerClass,
     '--task-kind', 'merge',
-    '--completion-shape', queueCloser ? 'branch-push' : 'decision-only',
-    '--required-outcome', queueCloser ? 'push' : 'terminal-audit',
+    // MRQ-21: on queue-v2 lanes the terminal audit is the admitted handoff.
+    '--completion-shape', 'decision-only',
+    '--required-outcome', 'terminal-audit',
     '--project', hqProject,
     '--repo', repoBasename,
     '--pr', String(prNumber),

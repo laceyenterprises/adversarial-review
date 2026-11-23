@@ -76,7 +76,10 @@ else
 fi
 # The controller has drained. Scratch can already be gone after lease settlement.
 # A delivery failure leaves the controller's merge outcome and exit status intact.
-if [ "$ham_close_status" -eq 0 ]; then
+if [ "$ham_close_status" -eq 0 ] && [ "${HAM_FINALIZATION_EXECUTOR:-}" = queue-v2 ]; then
+  # MRQ-21: nothing merged in this run; the queue executor owns the merge.
+  echo 'HAM queue handoff admitted: no closing comment; end the run.'
+elif [ "$ham_close_status" -eq 0 ]; then
   if ham_close_comment=$("$HAM_NODE_BIN" "$HAM_CLOSE_ROOT/bin/hammer-closing-comment.mjs" \
     "$HAM_REPO" "$HAM_PR_NUMBER" "$HAM_HQ_ROOT"); then
     printf 'HAM closing comment: %s\n' "$ham_close_comment"

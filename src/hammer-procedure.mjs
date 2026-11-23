@@ -3,13 +3,19 @@ import { fileURLToPath } from 'node:url';
 import { readFileSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { HAMMER_RETRYABLE_READ_OUTCOMES } from './ama/hammer-phase-outcome.mjs';
+import { HAMMER_QUEUE_CONTROLLER_OUTCOMES } from './ama/hammer-stop-origin.mjs';
+
+const PHASE_RETRYABLE_OUTCOMES = [...HAMMER_RETRYABLE_READ_OUTCOMES]
+  .filter(reason => !HAMMER_QUEUE_CONTROLLER_OUTCOMES.includes(reason));
 
 export const HAMMER_PHASES = ['hammer-verify-head', 'hammer-publish', 'hammer-merge'];
 
 export function renderHammerBootstrap(values) {
   const source = readFileSync(new URL('../templates/hammer-bootstrap.sh', import.meta.url), 'utf8');
-  return source.replace(/"<<([A-Z_]+)>>"|<<(AMA_TRAILERS_SHELL|TENURE_INPUTS)>>/g, (_match, key, literal) => {
+  return source.replace(/"<<([A-Z_]+)>>"|<<(AMA_TRAILERS_SHELL|TENURE_INPUTS|QUEUE_INPUTS)>>/g, (_match, key, literal) => {
     if (literal === 'TENURE_INPUTS') return values.TENURE_INPUTS || '';
+    // MRQ-21: empty on legacy lanes, so their bootstrap is byte-identical.
+    if (literal === 'QUEUE_INPUTS') return values.QUEUE_INPUTS || '';
     if (literal === 'AMA_TRAILERS_SHELL') return values.AMA_TRAILERS_SHELL || "''";
     return `'${String(values[key] ?? '').replaceAll("'", "'\\''")}'`;
   });
@@ -53,7 +59,7 @@ ham_phase_read_retryable() {
       if [ -f "<<RUN_DIR>>/helper-overload.json" ]; then HAM_PHASE_OUTCOME=overload-deferred; fi ;;
   esac
   case "\${HAM_PHASE_OUTCOME:-}" in
-    ${[...HAMMER_RETRYABLE_READ_OUTCOMES].join('|')}) return 0 ;;
+    ${PHASE_RETRYABLE_OUTCOMES.join('|')}) return 0 ;;
     *) return 1 ;;
   esac
 }

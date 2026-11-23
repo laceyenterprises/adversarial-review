@@ -9734,6 +9734,42 @@ and direct remediator transports then require push evidence. This uses the
 existing endpoint and worker-pool outcome judgement; no new dispatcher or store
 is introduced. Source changes authorize no service restart.
 
+## Queue-v2 hammer handoff (MRQ-21)
+
+This is the queue-v2 rule beside the legacy two-path rule (hammer common path,
+daemon inline merge; see `docs/STATE-MACHINE.md`). Legacy lanes are unchanged.
+
+| Step | Owner | Result |
+|---|---|---|
+| Dispatch | `maybeDispatchAmaCloser` | Ordinary hammer prompt, phases and `decision-only` / `terminal-audit` launch. Bootstrap inputs add `HAM_FINALIZATION_EXECUTOR=queue-v2`, the route generation, the installed handoff argv and the closer worker identity. A durable ack for the head suppresses dispatch (`queue-handoff-acknowledged`). |
+| Close | `bin/hammer-close-controller.sh` | Publish, verify-head and exact-head audit as before, then `bin/hammer-queue-handoff.mjs`. No CI wait, predicate or merge. |
+| Handoff | `src/finalization/hammer-queue-handoff.mjs` | Re-reads the live PR (open, head equal to the attested head). Builds a request bound to repo, PR, head, closer launch and the review-proof digest (reviewed head plus the audit published for the exact head). Writes `queue-handoff-request.json` in the run directory and runs the installed command with that path. |
+| Confirm | same | The reply is not evidence. The durable `finalization_queue_handoff` receipt must carry this head, launch and review-proof digest, and the queue entry must be confirmed (`confirmQueueAdmission`). A retried launch replays an existing admission without a second delivery. |
+| Terminal audit | same | `superseded` attempt, reason `queue-handoff-admitted`, with entry/ack ids and the digest. This satisfies the launch's `terminal-audit` required outcome. No closing comment is posted. |
+| Merge | queue executor | Admission, live re-validation, exact-candidate checks and an expected-head squash merge under the lane fence. Transient failures park and retry the same entry. |
+
+Stops: `head-changed`, `already-merged` and `pr-closed` are world facts (exit 20;
+a moved head starts a fresh review lifecycle and is never re-hammered from the old
+head). `queue-handoff-unadmitted` and `queue-handoff-failed` are infrastructure
+deferrals (exit 75; same-head re-drive under a fresh lease). Nothing merges on any
+stop.
+
+**Composition.** `dispatchContext.queueCloser.hammerHandoffCommand` is the installed
+command's argv (absolute `argv[0]`, never a shell string). It receives the request
+path as its last argument, must submit the complete schema-version-1 handoff
+through `createQueueCloserComposition(...).handoff(input, {routeGeneration,
+deadline})` with a trusted evidence adapter (which must recompute the review-proof
+digest from the live audit with `hammerReviewProof`), and print the acknowledgement
+JSON on its last stdout line. Without it, migrated lanes refuse closer dispatch with
+`queue-closer-composition-unavailable`. This source change installs no command,
+evidence reader or route; activation stays with the canary procedure.
+
+Verification after deployment (read-only): on a queue-v2 lane, a hammer launch's
+close result reads `queue-handoff-admitted`, its AMA audit is `superseded` with that
+reason, `finalization queue receipt` shows the entry, and the executor's merge
+receipt names the same head. On a legacy lane, the close result still reads
+`merged` or a registered stop.
+
 ## Per-lane finalization routing (MGQ-08)
 
 The sole selector is `roles.adversarial.merge_authority.lane_routes`, default
@@ -9764,8 +9800,10 @@ merge command uses `bin/legacy-lane-write.mjs`, preserving the existing entitled
 metered transport, arguments and output. Queue admission callbacks are injected
 at the composition boundary; a missing callback returns
 `queue-composition-unavailable`, with no legacy fallback. This slice does not
-start a queue pump or install live evidence/identity/delivery adapters. MGQ-10
-adds the route-scoped closer prompt described below. Those explicit composition requirements must be
+start a queue pump or install live evidence/identity/delivery adapters. MRQ-21
+replaces MGQ-10's route-scoped closer prompt: a queue-v2 lane dispatches the
+ordinary hammer, whose controller hands off its attested head (see
+[Queue-v2 hammer handoff](#queue-v2-hammer-handoff-mrq-21)). Those explicit composition requirements must be
 satisfied and observed before an operator promotes a lane. Capability availability
 is not an assertion that such a consumer is running.
 

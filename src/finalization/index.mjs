@@ -164,7 +164,9 @@ export { openQueueStatus, readRoutingConfig, renderQueueStatus } from './queue-s
 
 export { CANARY_RECOVERIES, CANARY_PRODUCERS, CANARY_ROLLBACK_STEPS, resolveQueueCanaryAdapter, readCanaryEvidence } from './queue-canary.mjs';
 
-export { createQueueCloserComposition, prepareQueueCloserDispatch, renderQueueCloserPrompt } from './queue-closer.mjs';
+export { createQueueCloserComposition, prepareQueueCloserDispatch } from './queue-closer.mjs';
+export { admitHammerQueueHandoff, buildHammerQueueHandoffRequest, confirmHammerQueueHandoff, hammerQueueHandoffId,
+  hammerReviewProof, HAMMER_QUEUE_HANDOFF_ADMITTED } from './hammer-queue-handoff.mjs';
 export { readCutoverEvidence, resolveQueueCutoverAdapter } from './queue-cutover.mjs';
 
 export { projectWorkflow } from './workflow-decision.mjs';

@@ -9,7 +9,7 @@ import { createLaneRoutingController } from '../src/finalization/queue-routing.m
 import { resolveQueueOwnerAdapter } from '../src/finalization/queue-owner.mjs';
 import { createQueueHandoffService } from '../src/finalization/queue-handoff-store.mjs';
 import { createCleanReviewService } from '../src/finalization/queue-clean-review.mjs';
-import { prepareQueueCloserDispatch, createQueueCloserComposition, renderQueueCloserPrompt } from '../src/finalization/queue-closer.mjs';
+import { prepareQueueCloserDispatch, createQueueCloserComposition } from '../src/finalization/queue-closer.mjs';
 import { maybeDispatchAmaCloser } from '../src/ama/dispatch-closer.mjs';
 import { runDaemonCleanMergeAttempt } from '../src/daemon-clean-merge.mjs';
 import { queueHandoffFixture, handoffTime } from './helpers/queue-handoff-fixture.mjs';
@@ -70,23 +70,27 @@ async function fixture(t) {
   const { h, e } = queueHandoffFixture();
   const service = createQueueHandoffService({ store, now: () => handoffTime(0), evidenceAdapter: { read: async () => e } });
   let released = 0;
-  const composition = createQueueCloserComposition({ rootDir, readConfig: () => cfg, handoffService: service, handoffInstructions: 'Use the installed handoff tool for this run.',
-    releaseResources: ack => { assert.deepEqual(service.readAcknowledgement(h), ack); released++; } });
+  const composition = { ...createQueueCloserComposition({ rootDir, readConfig: () => cfg, handoffService: service, handoffInstructions: 'Use the installed handoff tool for this run.',
+    releaseResources: ack => { assert.deepEqual(service.readAcknowledgement(h), ack); released++; } }),
+  // MRQ-21: the installed command the hammer's close controller invokes.
+  hammerHandoffCommand: ['/fixture/installed-handoff'] };
   const prepare = (extra = {}) => prepareQueueCloserDispatch({ rootDir, cfg, lane, prNumber: h.prNumber, head: h.head, composition, ...extra });
   return { rootDir, store, routing, h, e, service, composition, prepare, released: () => released };
 }
 
-test('queue closer renders only remediation/publication/handoff/exit, legacy remains selected on other lanes', async t => {
+test('MRQ-21: queue closer preflight names the installed hammer handoff command; legacy remains selected on other lanes', async t => {
   const f = await fixture(t), prepared = await f.prepare();
   assert.equal(prepared.executor, 'queue-v2');
-  const prompt = renderQueueCloserPrompt({ PR_URL: 'https://example.invalid/pr/101', REPO: lane.repository, PR_NUMBER: 101,
-    REVIEWED_SHA: f.h.sourceReview.commitId, TARGET_REMEDIATION_SHA: f.h.head, RISK_CLASS: 'critical', RUN_DIR: '/fixture/run', ROOT_DIR: '/fixture' }, prepared);
-  assert.match(prompt, /Exit successfully/); assert.match(prompt, /matching committed ack/);
-  assert.match(prompt, /non-blocking findings/); assert.match(prompt, /source locations/);
-  assert.doesNotMatch(prompt, /<<|ham_merge_phase\(|source .*hammer-/);
+  assert.deepEqual(prepared.handoffCommand, ['/fixture/installed-handoff']);
+  assert.equal(prepared.route.routeGeneration, 1);
   assert.equal((await f.prepare({ lane: { ...lane, base: 'other' } })).executor, 'legacy');
   assert.equal((await f.prepare({ cfg: {} })).reason, 'lane-transfer-required');
   assert.equal((await f.prepare({ composition: null })).reason, 'queue-closer-composition-unavailable');
+  // Never a PATH lookup or a shell string: argv[0] must be absolute.
+  for (const hammerHandoffCommand of [undefined, [], ['relative/tool'], 'tool --flag', [''], ['/ok', 7]]) {
+    assert.equal((await f.prepare({ composition: { ...f.composition, hammerHandoffCommand } })).reason,
+      'queue-closer-composition-unavailable', JSON.stringify(hammerHandoffCommand));
+  }
 });
 
 test('actual closer dispatcher suppresses twenty duplicate wakes after durable ack without legacy recovery or launch', async t => {

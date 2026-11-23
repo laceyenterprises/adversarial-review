@@ -43,6 +43,11 @@ export function normalizeQueueHandoff(input) {
   requireFact(h.localValidation?.head === h.head && text(h.localValidation?.sourceRef), 'missing local validation');
   requireFact(h.publication?.head === h.head && text(h.publication?.sourceRef), 'missing publication');
   requireFact(Array.isArray(h.dispositions), 'missing finding dispositions');
+  // MRQ-21: a hammer handoff is bound to the review evidence it relies on.
+  // Optional, so receipts committed before this binding still validate.
+  if (h.reviewProof !== undefined) {
+    requireFact(/^[a-f0-9]{64}$/.test(h.reviewProof?.digest ?? '') && h.reviewProof.head === h.head, 'invalid review proof');
+  }
   return h;
 }
 
@@ -85,6 +90,8 @@ export function validateQueueHandoff(h, e) {
       && a.record.payload?.worker_class === h.closer.workerClass, 'produced identity mismatch');
     else requireFact(a.record.producer_identity === e.review.reviewerIdentity, 'reviewed identity mismatch');
   }
+  if (h.reviewProof !== undefined) requireFact(e.reviewProof?.ok === true && e.reviewProof.head === h.head
+    && e.reviewProof.digest === h.reviewProof.digest && text(e.reviewProof.sourceRef), 'review proof mismatch');
   requireFact(e.primaryChange?.ok === true && e.primaryChange.head === h.head
     && e.primaryChange.sourceRef === h.primaryChange.sourceRef && e.primaryChange.intent === h.primaryChange.intent, 'primary-change provenance');
   for (const kind of ['localValidation', 'publication']) {

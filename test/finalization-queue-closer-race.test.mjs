@@ -1,7 +1,8 @@
 import './helpers/load-aware-timeout-fixture.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync, readdirSync } from 'node:fs';
+import { mkdtempSync, rmSync, readdirSync, readFileSync } from 'node:fs';
+import { execFileSync } from 'node:child_process';
 import { tmpdir, userInfo } from 'node:os';
 import { join } from 'node:path';
 import { maybeDispatchAmaCloser, readAmaCloserDispatchRecord } from '../src/ama/dispatch-closer.mjs';
@@ -109,7 +110,7 @@ function findingsRemediationArgs(rootDir, overrides = {}) {
 }
 
 
-test('MGQ-10: migrated dispatch renders once with no legacy merge procedures', async () => {
+test('MRQ-21: migrated dispatch renders the ordinary hammer whose controller ends at the queue handoff', async () => {
   const { openFinalizationQueueStore } = await import('../src/finalization/queue-store.mjs');
   const { createLaneRoutingController } = await import('../src/finalization/queue-routing.mjs');
   const rootDir = mkdtempSync(join(tmpdir(), 'queue-dispatch-'));
@@ -124,19 +125,50 @@ test('MGQ-10: migrated dispatch renders once with no legacy merge procedures', a
     deps.writeFileImpl = (_dir, _path, body) => { prompt = body; };
     const args = findingsRemediationArgs(rootDir, { cfg: { laneRoutes }, prMetadata: { baseBranch: lane.base },
       dispatchContext: { repo: lane.repository, baseBranch: lane.base,
-        queueCloser: { handoffInstructions: 'Use the composed handoff service with literal <<RUN_DIR>> and <<REPO>>.', handoff: async () => {} } } });
+        queueCloser: { hammerHandoffCommand: ['/fixture/installed handoff', '--lane', "it's"] } } });
+    const result = await maybeDispatchAmaCloser({ ...args, ...deps });
+    assert.equal(result.dispatched, true, JSON.stringify(result));
+    // The required outcome is the terminal audit the admitted handoff writes.
+    const launch = deps.calls.find(c => c.args.includes('--completion-shape'));
+    assert.equal(launch.args[launch.args.indexOf('--completion-shape') + 1], 'decision-only');
+    assert.equal(launch.args[launch.args.indexOf('--required-outcome') + 1], 'terminal-audit');
+    assert.match(prompt, /^hammer prompt /, 'the ordinary hammer prompt, not a queue-only prompt');
+    assert.doesNotMatch(prompt, /<</);
+    const record = readAmaCloserDispatchRecord(rootDir, { repo: lane.repository, prNumber: 404, headSha: HEAD });
+    const files = readdirSync(record.scratchDir);
+    for (const name of ['hammer-bootstrap.sh', 'hammer-verify-head.sh', 'hammer-publish.sh', 'hammer-merge.sh']) {
+      assert.ok(files.includes(name), `${name} missing: ${files.join(', ')}`);
+    }
+    const bootstrap = readFileSync(join(record.scratchDir, 'hammer-bootstrap.sh'), 'utf8');
+    const line = bootstrap.split('\n').find(l => l.startsWith('export HAM_FINALIZATION_EXECUTOR='));
+    assert.ok(line, bootstrap);
+    // The rendered inputs line round-trips through the shell unchanged.
+    const echoed = execFileSync('/bin/bash', ['-c', `${line}\nprintf '%s\\n' "$HAM_FINALIZATION_EXECUTOR" "$HAM_QUEUE_ROUTE_GENERATION" "$HAM_QUEUE_HANDOFF_COMMAND" "$HAM_QUEUE_CLOSER_WORKER_CLASS"`],
+      { encoding: 'utf8' }).split('\n');
+    assert.equal(echoed[0], 'queue-v2');
+    assert.equal(echoed[1], '1');
+    assert.deepEqual(JSON.parse(echoed[2]), ['/fixture/installed handoff', '--lane', "it's"]);
+    assert.ok(echoed[3]);
+  } finally { store.close(); rmSync(rootDir, { recursive: true, force: true }); }
+});
+
+test('MRQ-21: a legacy lane renders no queue inputs and keeps its decision-only terminal-audit launch', async () => {
+  const rootDir = mkdtempSync(join(tmpdir(), 'legacy-dispatch-'));
+  try {
+    const deps = testDeps();
+    deps.guardStackedBaseImpl = async () => null;
+    const args = findingsRemediationArgs(rootDir, { prMetadata: { baseBranch: 'main' },
+      dispatchContext: { repo: 'example/review', baseBranch: 'main',
+        queueCloser: { hammerHandoffCommand: ['/fixture/installed-handoff'] } } });
     const result = await maybeDispatchAmaCloser({ ...args, ...deps });
     assert.equal(result.dispatched, true, JSON.stringify(result));
     const launch = deps.calls.find(c => c.args.includes('--completion-shape'));
-    assert.equal(launch.args[launch.args.indexOf('--completion-shape') + 1], 'branch-push');
-    assert.equal(launch.args[launch.args.indexOf('--required-outcome') + 1], 'push');
-    assert.match(prompt, /Queue remediation closer/);
-    assert.match(prompt, /Exit successfully/);
-    assert.match(prompt, /literal <<RUN_DIR>> and <<REPO>>/);
-    assert.doesNotMatch(prompt.replace('literal <<RUN_DIR>> and <<REPO>>', ''), /<<|ham_merge_phase\(/);
-    const record = readAmaCloserDispatchRecord(rootDir, { repo: lane.repository, prNumber: 404, headSha: HEAD });
-    assert.equal(readdirSync(record.scratchDir).some(name => /^hammer-(verify-head|publish|merge)\.sh$/.test(name)), false);
-  } finally { store.close(); rmSync(rootDir, { recursive: true, force: true }); }
+    assert.equal(launch.args[launch.args.indexOf('--completion-shape') + 1], 'decision-only');
+    assert.equal(launch.args[launch.args.indexOf('--required-outcome') + 1], 'terminal-audit');
+    const record = readAmaCloserDispatchRecord(rootDir, { repo: 'example/review', prNumber: 404, headSha: HEAD });
+    const bootstrap = readFileSync(join(record.scratchDir, 'hammer-bootstrap.sh'), 'utf8');
+    assert.doesNotMatch(bootstrap, /HAM_FINALIZATION_EXECUTOR|HAM_QUEUE_|<<QUEUE_INPUTS>>/);
+  } finally { rmSync(rootDir, { recursive: true, force: true }); }
 });
 
 test('legacy closer launches while another writer holds the lane flock without preflight writes', async () => {
@@ -157,31 +189,42 @@ test('legacy closer launches while another writer holds the lane flock without p
   } finally { release?.(); store.close(); rmSync(rootDir, { recursive: true, force: true }); }
 });
 
-test('missing queue prompt input returns a structured refusal and releases the unsubmitted lease', async () => {
-  const rootDir = mkdtempSync(join(tmpdir(), 'queue-prompt-missing-'));
-  const store = openFinalizationQueueStore({ rootDir });
-  try {
-    const lane = { repository: 'example/review', base: 'main' };
-    const cfg = { laneRoutes: [{ ...lane, executor: 'queue-v2' }] };
-    await createLaneRoutingController({ store }).transfer({ cfg, lane, expectedGeneration: 0,
-      drainAdapter: { read: async () => ({ quiescent: true, sourceRef: 'fixture:drain', results: {} }) } });
-    for (const missing of ['prUrl', 'riskClass']) {
-      const deps = testDeps();
-      deps.guardStackedBaseImpl = async () => null;
-      const args = findingsRemediationArgs(rootDir, { cfg, prMetadata: { baseBranch: lane.base },
-        dispatchContext: { repo: lane.repository, baseBranch: lane.base, [missing]: undefined,
-          queueCloser: { handoffInstructions: 'Use the composed handoff service.', handoff: async () => {} } } });
-      const result = await maybeDispatchAmaCloser({ ...args, ...deps });
-      assert.equal(result.reason, 'queue-closer-prompt-input-missing', JSON.stringify(result));
-      assert.equal(result.skipMergeAgent, true);
-      assert.equal(deps.calls.length, 0);
-      const lease = readAmaCloserLease(rootDir, { repo: lane.repository, prNumber: 404, headSha: HEAD });
-      assert.equal(lease.status, 'terminal');
-      assert.equal(lease.terminalOutcome, 'deferred');
-      assert.equal(readAmaCloserDispatchRecord(rootDir, { repo: lane.repository, prNumber: 404, headSha: HEAD }), null);
-      assert.deepEqual(readdirSync(join(rootDir, 'data', 'follow-up-jobs', 'ama-closer-prompts')), []);
+test('MRQ-21: a queue lane with a missing dispatch input fails exactly like a legacy lane', async () => {
+  // The queue-only prompt and its queue-closer-prompt-input-missing refusal are
+  // retired: a queue lane renders the ordinary hammer, with legacy's behavior.
+  const observe = async (rootDir, cfg, missing) => {
+    const deps = testDeps();
+    deps.guardStackedBaseImpl = async () => null;
+    const args = findingsRemediationArgs(rootDir, { cfg, prMetadata: { baseBranch: 'main' },
+      dispatchContext: { repo: 'example/review', baseBranch: 'main', [missing]: undefined,
+        queueCloser: { hammerHandoffCommand: ['/fixture/installed-handoff'] } } });
+    let outcome;
+    try { outcome = { result: await maybeDispatchAmaCloser({ ...args, ...deps }) }; }
+    catch (error) { outcome = { error: error.message }; }
+    const lease = readAmaCloserLease(rootDir, { repo: 'example/review', prNumber: 404, headSha: HEAD });
+    return { ...outcome, launches: deps.calls.filter(c => c.args.includes('--prompt')).length,
+      leaseStatus: lease?.status ?? null, leaseOutcome: lease?.terminalOutcome ?? null,
+      record: Boolean(readAmaCloserDispatchRecord(rootDir, { repo: 'example/review', prNumber: 404, headSha: HEAD })) };
+  };
+  for (const missing of ['prUrl', 'riskClass']) {
+    const queueRoot = mkdtempSync(join(tmpdir(), 'queue-input-missing-'));
+    const legacyRoot = mkdtempSync(join(tmpdir(), 'legacy-input-missing-'));
+    const store = openFinalizationQueueStore({ rootDir: queueRoot });
+    try {
+      const lane = { repository: 'example/review', base: 'main' };
+      const cfg = { laneRoutes: [{ ...lane, executor: 'queue-v2' }] };
+      await createLaneRoutingController({ store }).transfer({ cfg, lane, expectedGeneration: 0,
+        drainAdapter: { read: async () => ({ quiescent: true, sourceRef: 'fixture:drain', results: {} }) } });
+      const queued = await observe(queueRoot, cfg, missing);
+      const legacy = await observe(legacyRoot, {}, missing);
+      assert.deepEqual(queued, legacy, missing);
+      assert.equal(queued.launches, 0);
+    } finally {
+      store.close();
+      rmSync(queueRoot, { recursive: true, force: true });
+      rmSync(legacyRoot, { recursive: true, force: true });
     }
-  } finally { store.close(); rmSync(rootDir, { recursive: true, force: true }); }
+  }
 });
 
 test('late durable ack after route preflight: twenty consecutive dispatch decisions under the existing single-flight', async t => {
@@ -205,7 +248,7 @@ test('late durable ack after route preflight: twenty consecutive dispatch decisi
       };
       const args = findingsRemediationArgs(rootDir, { cfg, prMetadata: { baseBranch: lane.base },
         dispatchContext: { repo: lane.repository, baseBranch: lane.base,
-          queueCloser: { handoffInstructions: 'Use the composed handoff service.', handoff: async () => {} } } });
+          queueCloser: { hammerHandoffCommand: ['/fixture/installed-handoff'] } } });
       const result = await maybeDispatchAmaCloser({ ...args, ...deps });
       duplicates += deps.calls.filter(c => c.args.includes('--prompt')).length;
       confirmed += Number(result.reason === 'queue-handoff-acknowledged');

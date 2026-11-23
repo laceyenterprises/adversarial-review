@@ -357,7 +357,7 @@ NODE
     HAM_GATE_CAP_COMMENT="$HAM_GATE_CAP_MARKER
 HAM closing status — no merge. The lease admission cap ($HAM_PARK_REASON) stopped this head before lease acquisition; no merge lease is held or needs release. $HAM_GATE_CAP_CLOSING_STATUS"
     ham_gate_cap_gh_transient() {
-      sed -e '/^\[load-aware-timeout\]/d' -e '/^\[adversarial-config\] schema source=/d' "$1" | grep -Eiq '^github-rate-limit: (primary|secondary|deferred)$|Something went wrong while executing your query|"type"[[:space:]]*:[[:space:]]*"INTERNAL"|HTTP[^[:space:]]*[[:space:]]+5[0-9][0-9]|"status"[[:space:]]*:[[:space:]]*5[0-9][0-9]|timeout|timed out|TLS|connection reset|connection refused|temporar(y|ily)|try again|HTTP 5[0-9][0-9]|502|503|504|service unavailable|gateway'
+      sed -e '/^\[load-aware-timeout\]/d' -e '/^\[adversarial-config\] schema source=/d' "$1" | grep -Ei '^github-rate-limit: (primary|secondary|deferred)$|Something went wrong while executing your query|"type"[[:space:]]*:[[:space:]]*"INTERNAL"|HTTP[^[:space:]]*[[:space:]]+5[0-9][0-9]|"status"[[:space:]]*:[[:space:]]*5[0-9][0-9]|timeout|timed out|TLS|connection reset|connection refused|temporar(y|ily)|try again|HTTP 5[0-9][0-9]|502|503|504|service unavailable|gateway' >/dev/null
     }
     # All comment operations share the same bounded retry and transient test.
     ham_gate_cap_gh() {
@@ -483,7 +483,7 @@ ham_update_branch_conflict() {
 }
 
 ham_update_branch_transient() {
-  sed -e '/^\[load-aware-timeout\]/d' -e '/^\[adversarial-config\] schema source=/d' "$1" | grep -Eiq '^github-rate-limit: (primary|secondary|deferred)$|Something went wrong while executing your query|"type"[[:space:]]*:[[:space:]]*"INTERNAL"|HTTP[^[:space:]]*[[:space:]]+5[0-9][0-9]|"status"[[:space:]]*:[[:space:]]*5[0-9][0-9]|timeout|timed out|TLS|connection reset|connection refused|temporar(y|ily)|try again|HTTP 5[0-9][0-9]|502|503|504|service unavailable|gateway'
+  sed -e '/^\[load-aware-timeout\]/d' -e '/^\[adversarial-config\] schema source=/d' "$1" | grep -Ei '^github-rate-limit: (primary|secondary|deferred)$|Something went wrong while executing your query|"type"[[:space:]]*:[[:space:]]*"INTERNAL"|HTTP[^[:space:]]*[[:space:]]+5[0-9][0-9]|"status"[[:space:]]*:[[:space:]]*5[0-9][0-9]|timeout|timed out|TLS|connection reset|connection refused|temporar(y|ily)|try again|HTTP 5[0-9][0-9]|502|503|504|service unavailable|gateway' >/dev/null
 }
 
 ham_is_full_sha() {

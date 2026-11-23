@@ -305,8 +305,9 @@ test('sibling hammer phase classifiers retry GraphQL server errors and refuse pe
         '[load-aware-timeout] CPU sample unavailable; using full load-based corroboration',
         `[adversarial-config] schema source=contract sha256=${'a'.repeat(64)} path="/fixture/TLS/config.schema.json"`,
         error,
+        'additional command output\n'.repeat(12_000),
       ].join('\n'));
-      const result = spawnSync('/bin/bash', ['-c', `${name}() { ${body}; }\n${name} "$1"`, '_', errorPath],
+      const result = spawnSync('/bin/bash', ['-o', 'pipefail', '-c', `${name}() { ${body}; }\n${name} "$1"`, '_', errorPath],
         { encoding: 'utf8', timeout: 5000 });
       assert.equal(result.status, error.includes('403') ? 1 : 0, `${name}: ${error}: ${result.stderr}`);
     }

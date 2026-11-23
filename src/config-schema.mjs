@@ -132,16 +132,18 @@ export function schemaV1() {
   return cached;
 }
 
-export function contractSchemaPath(env = process.env) {
+export function contractSchemaPath(env) {
+  const envView = env ?? process.env;
   // Config-derived roots are unavailable until after schema validation.
-  const checkout = String(env.AGENT_OS_ROOT ?? '').trim()
-    || String(env.AGENT_OS_DEPLOY_CHECKOUT ?? '').trim()
+  const checkout = String(envView.AGENT_OS_ROOT ?? '').trim()
+    || String(envView.AGENT_OS_DEPLOY_CHECKOUT ?? '').trim()
     || moduleCheckout;
   return checkout ? resolve(checkout, 'platform', 'contracts', 'generated', 'config.schema.json') : null;
 }
 
 function logSchemaOnce(message) {
   if (loggedSources.has(message)) return;
+  loggedSources.clear();
   loggedSources.add(message);
   console.error(`[adversarial-config] ${message}`);
 }

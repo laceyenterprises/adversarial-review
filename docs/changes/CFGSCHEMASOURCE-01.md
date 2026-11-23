@@ -21,6 +21,12 @@ Hammer keeps schema selection diagnostics in its logs and ignores them when
 classifying retryable command failures. Checkout paths containing strings such
 as `TLS` cannot turn a permanent GitHub error into a retry.
 
+Consecutive identical schema diagnostics are suppressed. A return to an earlier
+schema source or fallback reason is logged again. `contractSchemaPath(null)`
+uses the process environment, and missing review-module paths are skipped when
+inferring the checkout. The transient-error classifiers consume all filtered
+stderr so an early match still succeeds with `pipefail` enabled.
+
 ## Verification
 
 - `npm test -- config-schema-source.test.mjs` passed five synthetic cases

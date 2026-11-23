@@ -8,6 +8,7 @@ import { fileURLToPath } from 'node:url';
 import { test } from 'node:test';
 import { loadConfig, loadConfigCached, loadConfigRuntime } from '../src/config-loader.mjs';
 import { validateOsgShape } from '../src/config-policies.mjs';
+import { deployCheckoutFromReviewModule } from '../src/deploy-checkout-path.mjs';
 import { CFG_JSON_SCHEMA, contractSchemaPath, fromJsonSchema } from '../src/config-schema.mjs';
 
 function fixture(t) {
@@ -75,6 +76,12 @@ test('schema path resolution defaults to the process environment', t => {
   });
   process.env.AGENT_OS_ROOT = root;
   assert.equal(contractSchemaPath(), contractPath);
+  assert.equal(contractSchemaPath(null), contractPath);
+});
+
+test('a missing review module does not identify a deployment checkout', t => {
+  const { root } = fixture(t);
+  assert.equal(deployCheckoutFromReviewModule(join(root, 'tools', 'adversarial-review')), null);
 });
 
 test('OSG shape validation honors required arm fields declared by the schema', () => {
@@ -98,7 +105,7 @@ test('OSG shape validation honors required arm fields declared by the schema', (
 
 test('cached loads track the deploy contract and recover after it is replaced', t => {
   const { root, topPath, contractPath } = fixture(t);
-  t.mock.method(console, 'error', () => {});
+  const log = t.mock.method(console, 'error', () => {});
   const options = { topPath, env: { AGENT_OS_DEPLOY_CHECKOUT: root } };
   writeFileSync(join(root, 'config.local.yaml'), 'roots:\n  example_retention_days: 7\n');
 
@@ -109,6 +116,10 @@ test('cached loads track the deploy contract and recover after it is replaced', 
   assert.throws(() => loadConfigCached(options), { key: 'roots.example_retention_days' });
   rmSync(contractPath);
   assert.equal(loadConfigCached(options).get('roots.example_retention_days'), null);
+  const messages = log.mock.calls.map(call => call.arguments[0]);
+  assert.match(messages[0], /schema source=bundled .*fallback=contract unavailable \(ENOENT\)/);
+  assert.equal(messages.at(-1), messages[0]);
+  assert.equal(messages.filter(message => message === messages[0]).length, 2);
 });
 
 function subprocessLogs(root, topPath, expectedDays) {

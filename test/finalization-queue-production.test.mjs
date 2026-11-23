@@ -281,7 +281,7 @@ for (const remediated of [false, true]) {
 test('queue merge passes the exact candidate and explicit installation token to the existing surface', async () => {
   const invocation = [];
   const merge = createGithubAdapterMergeSurface({ recordReceipt: false, deleteBranch: false, envTokenSelector: 'merge-agent',
-    env: { GHA_ADAPTER_BIN: '/fixture/github-adapter', GH_TOKEN: 'installation-fixture' },
+    env: { GHA_ADAPTER_BIN: '/fixture/github-adapter', GH_TOKEN: 'installation-fixture', GITHUB_TOKEN: 'foreign-ambient-fixture' },
     execFileImpl: async (command, args, options) => {
       invocation.push({ command, args, options });
       return { stdout: '{"merged":true}' };
@@ -294,6 +294,7 @@ test('queue merge passes the exact candidate and explicit installation token to 
   assert.equal(args[args.indexOf('--merge-method') + 1], 'squash');
   assert.equal(args[args.indexOf('--auth-mode') + 1], 'env-token');
   assert.equal(options.env.GH_TOKEN, 'installation-fixture');
+  assert.equal(options.env.GITHUB_TOKEN, 'installation-fixture');
   assert.ok(args.includes('--no-delete-branch'));
   assert.ok(!args.includes('--admin'));
 });

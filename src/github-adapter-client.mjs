@@ -609,7 +609,12 @@ async function writeGitHubAdapter(kind, params = {}, {
   }
   const adapterBin = resolveGitHubAdapterBin({ env, rootDir });
   if (!adapterBin) return null;
-  if (githubOwnerTokens.routedOwner(params.repo)) {
+  if (envTokenSelector != null) {
+    // The caller already resolved an installation for this exact target.
+    // Neither ambient GITHUB_TOKEN nor the default owner router can replace it.
+    if (!env.GH_TOKEN || !/^[a-z0-9-]+$/.test(envTokenSelector)) throw new Error('invalid explicit GitHub token binding');
+    env = { ...env, GITHUB_TOKEN: env.GH_TOKEN };
+  } else if (githubOwnerTokens.routedOwner(params.repo)) {
     const profile = params.reviewerLogin && REVIEWER_ADAPTER_AUTH_BY_ROLE[reviewerRoleFromLogin(params.reviewerLogin)];
     if (params.reviewerLogin && !profile) throw new GithubOwnerTokenUnavailableError();
     env = await githubEnvForTarget(env, params.repo, { tokenEnv: profile?.tokenEnv, token: profile ? env[profile.tokenEnv] : env.GITHUB_TOKEN || env.GH_TOKEN });
@@ -617,7 +622,6 @@ async function writeGitHubAdapter(kind, params = {}, {
   const execute = kind === 'pull-request-label' ? executeLabelAdapter : (impl, bin, args, options) => impl(bin, args, options);
   const args = makeAdapterWriteArgs(kind, params, env);
   if (envTokenSelector) {
-    if (!(env.GITHUB_TOKEN || env.GH_TOKEN) || !/^[a-z0-9-]+$/.test(envTokenSelector)) throw new Error('invalid explicit GitHub token binding');
     args.push('--auth', envTokenSelector, '--auth-mode', 'env-token', '--pat-env', 'GH_TOKEN', '--transport', 'gh-cli');
   }
   const { stdout } = await execute(execFileImpl, adapterBin, args, {

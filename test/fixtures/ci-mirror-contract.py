@@ -102,6 +102,10 @@ def run_check(
     assert check.tier == "fast" and check.matched_files == tuple(files)
     with open(os.environ["FIXTURE_LOCAL_CHECKS"], "a") as log:
         print(check.command, file=log)
+    if check.name == os.environ.get("FIXTURE_CHILD_TIMEOUT"):
+        raise SystemExit(124)
+    if check.name == os.environ.get("FIXTURE_FAILED_GUARD"):
+        return CheckResult(check, "fail", 0.0, reason="synthetic guard failure")
     if check.name == os.environ.get("FIXTURE_LOCAL_FAILURE"):
         return CheckResult(check, "inconclusive", 0.0, reason="synthetic timeout")
     if check.name == os.environ.get("FIXTURE_INSPECTION_DENIED"):
@@ -148,6 +152,10 @@ def main(argv: list[str]) -> int:
             files,
         )
     results = run_checks(checks, Path.cwd(), files)
+    if any(r.status == "fail" for r in results):
+        return 42
+    if os.environ.get("FIXTURE_BUDGET_AFTER_CHECKS"):
+        return 75
     return 75 if any(r.status == "inconclusive" for r in results) else 0
 
 

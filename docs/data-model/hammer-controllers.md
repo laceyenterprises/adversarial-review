@@ -188,10 +188,14 @@ controller has no receipt for that invocation.
 |---|---|
 | `schemaVersion` | `1` |
 | `head` | Full commit SHA captured before the local validation stage |
-| `status` | Effective validator exit code once the helper finishes |
+| `status` | Runner exit code for UNKNOWN, otherwise the validator exit code |
+| `selectedCheckCount` | Optional, the complete mirror selection size recorded before the first check |
+| `coverage` | Optional authenticated mapping identity with repository, PR, head and base |
 | `outcome` | Present as `harness-fault:socket-path` for a counted socket stop. The closer uses it to recognize exit 75 when the receipt head matches the validation head. |
 | `socketPathDiagnostic` | Present with the socket outcome. Records the over-budget temp root and byte budget for setup refusals, or the allocated scratch path for runtime failures. |
 | `checks` | Ordered records with check name, status and reason, plus local result or exit status when available |
+| `checks[].commandSha256` | SHA-256 of the selected command |
+| `checks[].manifest` / `manifestSha256` | Optional manifest path and digest for the authenticated check mapping |
 | `checks[].jobs` | For `ci-covered`, each declared job's `name` and GitHub Actions `runId` (strings); current step mappings also include string `jobId` and the exact `step` name. Legacy job mappings and older receipts omit these optional fields. |
 | `checks[].socketPathFault` | Optional flag set to `true` by the mirror when a single failed command's only nonblank output is a supported socket diagnostic. |
 | `checks[].localReason` | Optional local check reason. `harness-fault:socket-path` accompanies an inconclusive result when all failed mirror checks qualify for the socket stop. |
@@ -201,7 +205,7 @@ controller has no receipt for that invocation.
 | `checks[].diagnostics[].exitStatus` | Raw command result when observed |
 | `checks[].diagnostics[].truncated` / `unavailable` | Output exceeded the cap or the writer could not retain a complete bounded file |
 
-Per-check statuses are `run`, `ci-covered`, `failed` and `not-run`. Runners
+Per-check statuses include `run`, `ci-covered`, `failed`, `interrupted` and `not-run`. Runners
 without per-check reporting produce a battery-level record. The controller
 uses these receipts for diagnosis. `run` without a result means the check
 was in flight when that receipt was persisted. A cancellation can leave
@@ -219,27 +223,13 @@ from that owner's record or output. MRQ-20 adds
 `ciAuthoritative` (boolean), `requiredContexts` (the declared exact-head
 contexts the UNKNOWN would defer to, possibly empty) and `localFailureObserved`
 (a failed mirror check row or a TAP `not ok` line was seen before the stop).
-Older receipts omit them and read as not CI-authoritative. An ordinary
-CI-authoritative receipt may be rewritten to demote it when a failure surfaces
-after the stop. A repeat on the same head in this run returns 75 and leaves the
-original bytes untouched, unless the receipt still defers to CI under current
-configuration: then the repeat exits 0 without another battery, and the
-hammer's exact-head gate requires every declared context present and green.
-If another writer creates the receipt during validation, its recorded evidence
-controls CI deferral and the running validator still honors local failures and
-unconfirmed cleanup.
-
-For a completed conflict repair, optional `cleanCheckout` attests that the
-validator started from a clean checkout at `head`. `cleanupConfirmed` records
-successful validation cleanup when the validator can confirm it. If the
-controller stopped the validation round, `controllerRecord` is the basename
-of the launch-bound registration used to prove the round drained. The
-validator updates cleanup and local-failure evidence when it finishes. A
-controller still draining an eligible stop leaves `close-result.json` unwritten.
-The launcher may start one fresh round once `validation-stopped` is confirmed
-quiescent and the referenced local validation receipt can be read without
-evidence of a failed check. A repeat on the conflict head also requires that
-cleanup and check evidence before it defers to CI.
+The final receipt adds `coverageComplete` and the actual standalone `cleanup`
+result. A qualifying receipt must record `coverageComplete: true`,
+`cleanup: finished` and `localFailureObserved: false`. Repeat validation
+returns 75 unless the original launch still has qualifying complete evidence
+under current policy. The required GitHub contexts must still be green on that
+exact head. The [HQ custody store](deferred-source-custody.md) preserves the
+matching evidence separately from run scratch.
 
 Retention belongs to the caller/run-directory owner. Passing checks delete their
 command logs immediately. Failed or interrupted diagnostic files remain with

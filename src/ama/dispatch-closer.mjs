@@ -1,7 +1,8 @@
 import { readPrTenure } from '../pr-tenure.mjs';
 import { isLivePackDeferralText } from '../kernel/remediation-reply.mjs';
 import { isGitHubRateLimitError } from '../rate-limit-throttle.mjs';
-import { requestCloserSuccessor, settleCloserSuccessor } from './closer-successor.mjs';
+import { observeDeferredSourceDecision, requestCloserSuccessor, settleCloserSuccessor } from './closer-successor.mjs';
+import { deferredSourceStatus, readDeferredSourceHold } from './deferred-source-custody.mjs';
 import { samePrHammerHolderWorktreePaths } from './branch-holder-paths.mjs';
 export { samePrHammerHolderWorktreePaths } from './branch-holder-paths.mjs';
 import { isZeroOutputRefusal, escalateZeroOutputRefusal } from './zero-output-refusal.mjs';
@@ -445,7 +446,7 @@ export function namedAmaNoDispatchReason(reason, reasons = []) {
 
 // INCONCLUSIVERETRY-01b: the watcher owns an inconclusive ended launch. Record
 // it, surface it once from attempt N on, and pace the next ordinary dispatch.
-// Returns null when that dispatch may run now; it is never a park.
+// The canonical-validation hold is resolved separately from ordinary backoff.
 async function ownInconclusiveCloserRetry({ rootDir, repo, prNumber, headSha, launchRequestId, reason,
   currentHeadSha = headSha, cfg, now, deliverAlertImpl, logger }) {
   try {
@@ -456,6 +457,7 @@ async function ownInconclusiveCloserRetry({ rootDir, repo, prNumber, headSha, la
   } catch (error) {
     logger?.warn?.(`[ama-closer] inconclusive retry record failed for ${repo}#${prNumber}: ${error?.message || error}`);
   }
+  if (reason === 'canonical-validation-deferred') return null;
   return currentHeadSha === headSha
     ? gateInconclusiveCloserRetry({ rootDir, repo, prNumber, headSha, now, deliverAlertImpl, logger }) : null;
 }
@@ -535,6 +537,12 @@ async function gateInconclusiveCloserRetry({ rootDir, repo, prNumber, headSha, n
     reason: CLOSER_INCONCLUSIVE_BACKOFF_REASON, retryAfterMs,
     ownedRetry: { owner: entry.owner, attempt: entry.attempt, reason: entry.reason,
       nextAttemptAt: entry.nextAttemptAt, deadline: entry.deadline } });
+}
+
+async function gateDeferredSourceCustody({ rootDir, hqRoot, repo, prNumber, headSha, now, deliverAlertImpl, logger }) {
+  const held = await observeDeferredSourceDecision({ rootDir, hqRoot, repo, prNumber, headSha, now, logger,
+    pageImpl: (message, options) => deliverAlertImpl(message, { ...options, event: 'ama_closer.deferred_source_decision' }) });
+  return held && noAmaDispatch({ ...held, dispatched: false, skipMergeAgent: true, recoveryWait: true });
 }
 
 function noAmaDispatch(result) {
@@ -1053,6 +1061,12 @@ async function cleanupHammerCloserWorker({
   if (!isHammerWorkerClass(effectiveWorkerClass)) return null;
   const workerId = hammerCloserWorkerIdFromRecord(prNumber, existingRecord);
   if (!workerId) return null;
+  const hold = readDeferredSourceHold(hqRoot, { repo: existingRecord?.repo, prNumber,
+    headSha: existingRecord?.targetRemediationSha || existingRecord?.headSha });
+  if (hold?.unreadable || (hold?.launchRequestId && hold.launchRequestId === existingRecord?.launchRequestId
+    && !['bundled', 'matches-target'].includes(deferredSourceStatus(hold)))) {
+    return { ok: false, workerId, reason, error: 'deferred-source-retained-in-workspace' };
+  }
   const args = ['worker', 'tear-down', workerId, '--force', '--root', hqRoot];
   for (let attempt = 0; attempt <= AMA_CLOSER_TEARDOWN_TRANSIENT_RETRY_DELAYS_MS.length; attempt += 1) {
     try {
@@ -5774,12 +5788,6 @@ async function maybeDispatchAmaCloserAttempt({
       const backoff = await ownInconclusiveCloserRetry({ rootDir, repo, prNumber,
         headSha: validationRetryHead, currentHeadSha: queuedHead, launchRequestId: existingRecord.launchRequestId,
         reason: parkReason, cfg, now: dispatchContext.dispatchedAt, deliverAlertImpl, logger });
-      if (backoff) {
-        finalizeAmaCloserLeaseBestEffort({ rootDir, leaseIdentity: existingRecordLeaseIdentity,
-          terminalOutcome: `retryable-${parkReason}`, launchRequestId: existingRecord.launchRequestId,
-          now: dispatchContext.dispatchedAt, logger, repo, prNumber });
-        return backoff;
-      }
     }
   }
   if (certifiedPark && !parkLedger) {
@@ -6271,10 +6279,13 @@ async function maybeDispatchAmaCloserAttempt({
     // after posting it) and certified parks. Unknown evidence holds the launch;
     // only a readable absence of a decision permits normal retry admission.
     const handoffEndedCloser = async (headSha, { allowHammerFallback = false } = {}) => {
+      const held = await gateDeferredSourceCustody({ rootDir, hqRoot, repo, prNumber, headSha,
+        now: dispatchContext.dispatchedAt, deliverAlertImpl, logger });
+      if (held) return { ...held, status: held.reason };
       requestCloserSuccessor({ rootDir, repo, prNumber, headSha,
         reviewBody: dispatchContext.settledReview?.reviewBody, refusingReasons: verdict.reasons,
         source: 'closer-ended-without-merge', now: dispatchContext.dispatchedAt });
-      return settleCloserSuccessorImpl({ rootDir, repo, prNumber, headSha,
+      return settleCloserSuccessorImpl({ rootDir, hqRoot, repo, prNumber, headSha,
         enabled: cfg.autonomousMergeExecutionEnabled !== false, admitted: verdict.repairAdmission?.ok === true,
         allowHammerFallback,
         riskClass: reviewState.riskClass, now: dispatchContext.dispatchedAt,
@@ -7618,6 +7629,10 @@ async function maybeDispatchAmaCloserAttempt({
     ownerUser,
     currentUser: dispatchContext.currentUser,
   });
+
+  const deferredSource = await gateDeferredSourceCustody({ rootDir, hqRoot, repo, prNumber,
+    headSha: prMetadata.headSha, now: dispatchContext.dispatchedAt, deliverAlertImpl, logger });
+  if (deferredSource) return deferredSource;
 
   // ── Hammer retry cap (per-PR, robust across head churn) ────────────────────
   // The per-head redispatch bound above resets whenever a hammer moves the head,

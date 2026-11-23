@@ -12,6 +12,8 @@ import { maybeDispatchAmaCloser, readAmaCloserDispatchRecord,
   updateAmaCloserDispatchRecord } from '../src/ama/dispatch-closer.mjs';
 import { recordHammerPhase } from '../src/ama/hammer-outcome.mjs';
 import { recordHammerProgress } from '../src/ama/hammer-progress.mjs';
+import { startDeferredSourceCustody } from '../src/ama/deferred-source-custody.mjs';
+import { requestCloserSuccessor, settleCloserSuccessor } from '../src/ama/closer-successor.mjs';
 import { CloserCorrectionRequired, recordHammerEarlyFailure } from '../src/ama/hammer-terminal-audit.mjs';
 import { updateAmaCloserLease } from '../src/ama/closer-lease.mjs';
 import { proveConflictPrimary } from '../src/ama/conflict-primary.mjs';
@@ -178,7 +180,7 @@ function harness(root, lastPhase) {
 
 const minutes = n => new Date(Date.parse('2026-11-01T00:00:00Z') + n * 60_000).toISOString();
 
-test('canonical validation deferrals across launches use owned exponential backoff and surface once', async t => {
+test('a canonical validation deferral stops same-head dispatch and asks for one operator decision', async t => {
   const root = scratch(t);
   const { state, deps, endCurrent, identity } = harness(root, 'canonical-validation-deferred');
   const run = at => {
@@ -187,33 +189,36 @@ test('canonical validation deferrals across launches use owned exponential backo
     return maybeDispatchAmaCloser({ ...args, ...deps });
   };
   assert.equal((await run(minutes(0))).dispatched, true);
-  for (let attempt = 1; attempt <= 3; attempt++) {
-    endCurrent();
-    recordHammerEarlyFailure('canonical-validation-deferred', { env: {
-      HAM_HQ_ROOT: join(root, 'hq'), HAM_REPO: REPO, HAM_PR_NUMBER: String(PR),
-      HAM_TARGET_REMEDIATION_SHA: HEAD, HQ_LAUNCH_REQUEST_ID: state.ended,
-    } });
-    const at = attempt * 10;
+  endCurrent();
+  const env = { HAM_HQ_ROOT: join(root, 'hq'), HAM_REPO: REPO, HAM_PR_NUMBER: String(PR),
+    HAM_TARGET_REMEDIATION_SHA: HEAD, HQ_LAUNCH_REQUEST_ID: state.ended };
+  // The first write alone holds the successor. A crash before the cleanup
+  // owner completed the package must never permit a second validator.
+  startDeferredSourceCustody({ env, launchRequestId: state.ended, sourceHead: HEAD });
+  recordHammerEarlyFailure('canonical-validation-deferred', { env });
+  for (const at of [10, 11, 240]) {
     const result = await run(minutes(at));
-    const owned = readCloserInconclusiveRetries(root, identity).heads[HEAD];
-    assert.equal(owned.attempt, attempt);
-    assert.equal(owned.reason, 'canonical-validation-deferred');
-    if (attempt === 1) {
-      assert.equal(result.dispatched, true, JSON.stringify(result));
-      continue;
-    }
     assert.equal(result.dispatched, false, JSON.stringify(result));
-    assert.equal(result.reason, 'closer-inconclusive-retry-backoff');
-    const delayMinutes = 2 ** (attempt - 2);
-    assert.equal(result.retryAfterMs, delayMinutes * 60_000);
-    assert.equal(result.ownedRetry.owner, 'watcher');
-    assert.equal(readHammerRetryCapLedger(root, identity).attemptCount, 0, 'refund retained while watcher owns backoff');
-    assert.equal((await run(minutes(at))).dispatched, false, 'repeat observation cannot bypass backoff');
-    assert.equal(readCloserInconclusiveRetries(root, identity).heads[HEAD].attempt, attempt);
-    assert.equal((await run(minutes(at + delayMinutes))).dispatched, true);
+    assert.equal(result.reason, 'canonical-validation-operator-decision');
+    assert.equal(result.needsOperator, true);
   }
-  assert.equal(state.launches, 4);
-  assert.equal(state.alerts.filter(alert => alert.options?.event === 'ama_closer.inconclusive_retry_surfaced').length, 1);
+  const owned = readCloserInconclusiveRetries(root, identity).heads[HEAD];
+  assert.equal(owned.attempt, 1);
+  assert.equal(owned.reason, 'canonical-validation-deferred');
+  assert.equal(readHammerRetryCapLedger(root, identity).attemptCount, 0);
+  assert.equal(state.launches, 1);
+  const decisions = state.alerts.filter(alert => alert.options?.event === 'ama_closer.deferred_source_decision');
+  assert.equal(decisions.length, 1);
+  assert.match(decisions[0].message, /cleanup unconfirmed/);
+
+  requestCloserSuccessor({ rootDir: root, ...identity, headSha: HEAD, source: 'fixture-pending-before-timeout' });
+  let handoffCalls = 0;
+  const successor = await settleCloserSuccessor({ rootDir: root, hqRoot: env.HAM_HQ_ROOT,
+    ...identity, headSha: HEAD, now: minutes(241), handoffImpl: () => { handoffCalls++; },
+    observeWaitImpl: args => observeClosureWait({ ...args, pageImpl: deps.deliverAlertImpl }) });
+  assert.equal(successor.status, 'canonical-validation-operator-decision');
+  assert.equal(handoffCalls, 0, 'orchestration cannot enroll an already-pending successor');
+  assert.equal(state.alerts.length, decisions.length, 'the two routes share the same decision notice');
 });
 
 test('a validation deferral after publication schedules the live head and refunds the source launch', async t => {

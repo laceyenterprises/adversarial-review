@@ -83,7 +83,7 @@ ham_close_read() {
 ham_close_phase_or_stop() { ham_close_phase "$@" || ham_close_finish "$HAM_PHASE_STATUS" "$HAM_PHASE_OUTCOME"; }
 
 ham_close_validate() {
-  local head="$1" file changed_paths receipt status=0
+  local head="$1" base="$2" remote_head="$3" file changed_paths receipt status=0
   local files=("${HAM_CLOSE_VALIDATION_FILES[@]}")
   HAM_CLOSE_STAGE=local-validation
   export HAM_PROCEDURE_STEP=local-validation
@@ -103,6 +103,7 @@ ham_close_validate() {
   [ "${#files[@]}" -gt 0 ] || return 0
   receipt=$(mktemp "$HAM_RUN_DIR/local-validation.XXXXXX") || receipt=
   HAM_CLOSE_VALIDATION_HEAD="$head" HAM_CLOSE_VALIDATION_RECEIPT="$receipt" \
+    HAM_CLOSE_VALIDATION_BASE="$base" HAM_CLOSE_VALIDATION_REMOTE_HEAD="$remote_head" \
     "$HAM_NODE_BIN" "$HAM_CLOSE_ROOT/bin/hammer-validate.mjs" --canonical -- "${files[@]}" || status=$?
   if [ -s "$receipt" ]; then
     ham_close_validation_receipts+=("$receipt")
@@ -153,7 +154,7 @@ if [ "$ham_close_local_head" != "$ham_close_live_head" ] \
     && git merge-base --is-ancestor "$ham_close_local_head" "$ham_close_live_head"; }; then
   if [ "$ham_close_rebase_state" = validate ]; then
     ham_close_validation_exit=0
-    ham_close_validate "$ham_close_local_head" || ham_close_validation_exit=$?
+    ham_close_validate "$ham_close_local_head" "${HAM_BASE_HEAD:-}" "$ham_close_live_head" || ham_close_validation_exit=$?
     [ "$(git rev-parse HEAD)" = "$ham_close_local_head" ] || ham_close_finish 20 head-changed
     ham_close_rebase_state=$("$HAM_NODE_BIN" "$HAM_CLOSE_ROOT/bin/hammer-validate.mjs" --check-rebase-publication) \
       || ham_close_finish 1 source-publication-refused
@@ -210,13 +211,18 @@ fi
 
 # Without a usable required-check declaration we can still unblock the PR
 # branch and start CI. Persist the watcher continuation on the published head.
-if [ "$ham_close_rebase_state" = redrive ]; then
+# Settle source custody only after the exact repaired head is live.
+if [[ "$ham_close_rebase_state" = ci || "$ham_close_rebase_state" = redrive ]]; then
   [ "${HAM_PUSHED_HEAD:-$ham_close_live_head}" = "$ham_close_local_head" ] || ham_close_finish 20 head-changed
+  "$HAM_NODE_BIN" "$HAM_CLOSE_ROOT/bin/hammer-validate.mjs" --complete-rebase-publication "$ham_close_local_head" \
+    || ham_close_finish $? canonical-validation-deferred
+fi
+if [ "$ham_close_rebase_state" = redrive ]; then
   export POST_REMEDIATION_SHA="$ham_close_local_head" HAM_PROCEDURE_STEP=local-validation
   HAM_CLOSE_STAGE=local-validation
   "$HAM_NODE_BIN" "$HAM_CLOSE_ROOT/bin/hammer-terminal-audit.mjs" canonical-validation-deferred "$POST_REMEDIATION_SHA" \
     || ham_close_finish $? procedure-step-failed
-  HAM_NO_MERGE_NOTE="Published the conflict repair. Required CI authority is unavailable and the watcher will retry $POST_REMEDIATION_SHA."
+  HAM_NO_MERGE_NOTE="Published the conflict repair. Validation lacks complete CI-authoritative evidence and the watcher will retry $POST_REMEDIATION_SHA."
   ham_close_finish 75 canonical-validation-deferred
 fi
 
@@ -236,7 +242,7 @@ while :; do
   if { [ "$ham_close_rebase_state" != ci ] && [ "$ham_close_saved_head" != "$ham_close_prevalidated_head" ]; } \
     || [ "$ham_close_saved_head" != "$ham_close_local_head" ] \
     || [ "$ham_close_saved_head" != "${HAM_PUSHED_HEAD:-$ham_close_live_head}" ]; then
-    ham_close_validate "$ham_close_saved_head" \
+    ham_close_validate "$ham_close_saved_head" "$ham_close_saved_base" "$POST_REMEDIATION_SHA" \
       || ham_close_validation_stop "$?" "$ham_close_saved_head"
   fi
   [ "$(git rev-parse HEAD)" = "$ham_close_saved_head" ] || ham_close_finish 20 head-changed

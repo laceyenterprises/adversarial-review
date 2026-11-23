@@ -310,8 +310,9 @@ and honor the already-sized timeout and abort signal. Its observation fields are
   a signature-shape check.
 - `primaryChange`, `localValidation`, `publication`: successful exact-head
   observations matching submitted intent/provenance references. MRQ-20 also
-  admits `localValidation.result: unknown` only with `ciAuthoritative: true`
-  and `localFailureObserved !== true`. Missing authority or an observed failure
+  admits `localValidation.result: unknown` only with `ciAuthoritative: true`,
+  `coverageComplete: true`, `cleanup: finished` and `localFailureObserved: false`.
+  Missing authority or an observed failure
   refuses admission even if `ok: true` is present. The final merge still
   requires non-empty declared contexts green on the exact candidate.
 

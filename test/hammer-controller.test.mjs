@@ -18,6 +18,7 @@ import { assertHammerController, controllerGroupSnapshot, createControllerGroupC
   LAUNCH_POLL_MS, LAUNCH_READ_ATTEMPTS, LAUNCH_UNREADABLE_GRACE_MS, launchReadTimeoutMs,
   launchEnvironmentClock, launchEnvironmentReceiptPath, resolveLaunchEnvironment } from '../src/ama/hammer-controller.mjs';
 import { readAmaAuditEntry } from '../src/ama/audit.mjs';
+import { readDeferredSourceHold } from '../src/ama/deferred-source-custody.mjs';
 import { acquireMergeLease, inspectMergeLease, releaseMergeLease, mergeLeaseFilePath } from '../src/ama/merge-lease.mjs';
 import { readLaunchRequestStatusFromLedgerAsync } from '../src/session-ledger-read-adapter.mjs';
 import { createControllerCensus, nativeControllerIdentity } from '../src/controller-process-census.mjs';
@@ -1023,7 +1024,8 @@ async function checkCanonicalStops(t, modes) {
   for (const mode of modes) {
     const f = fixture(t, `
       cd "$HAM_RUN_DIR/checkout"
-      export HAM_CLOSE_VALIDATION_HEAD=${head} HAM_CLOSE_VALIDATION_RECEIPT="$HAM_RUN_DIR/validation.json"
+      export HAM_CLOSE_VALIDATION_HEAD="$(git rev-parse HEAD)" HAM_CLOSE_VALIDATION_RECEIPT="$HAM_RUN_DIR/validation.json"
+      export HAM_CLOSE_VALIDATION_REMOTE_HEAD="$HAM_CLOSE_VALIDATION_HEAD"
       export HAM_LOCAL_VALIDATION_CI_DEDUP=0 TMPDIR="$HAM_RUN_DIR/scratch"
       export FIXTURE_CHECK_TIMEOUT=${mode === 'inner' ? 1 : 8}
       "${process.execPath}" --import "$HAM_RUN_DIR/load.mjs" "${root}/bin/hammer-validate.mjs" --canonical --nominal-timeout ${mode === 'outer' ? 3 : 10} -- check.py
@@ -1081,7 +1083,7 @@ child.wait()
       assert.equal(existsSync(handoffPath), false, 'operator cancellation retains its own outcome');
     } else {
       const bytes = readFileSync(handoffPath, 'utf8');
-      assert.deepEqual(JSON.parse(bytes), { schemaVersion: 1, head: checkoutHead, outcome: 'deferred',
+      assert.partialDeepStrictEqual(JSON.parse(bytes), { schemaVersion: 1, head: checkoutHead, outcome: 'deferred',
         validation: 'unknown', reason: mode === 'inner' ? 'child-check-timeout' : 'absolute-timeout',
         status: 124, ciAuthoritative: false, requiredContexts: [], localFailureObserved: true,
         localValidationReceipt: validationPath, cleanupOwner: 'controller' });
@@ -1095,6 +1097,16 @@ child.wait()
       }
     }
     const owner = f.receipt();
+    const hold = readDeferredSourceHold(f.dir, { repo: 'fixture/repo', prNumber: 42, headSha: checkoutHead });
+    if (mode === 'cancel') {
+      assert.equal(hold, null);
+    } else {
+      assert.equal(hold?.sourceHead, checkoutHead, p.output());
+      const kept = JSON.parse(readFileSync(join(hold.evidenceDir, 'controller-cleanup.json'), 'utf8'));
+      assert.equal(kept.token, owner.token);
+      assert.equal(kept.drained, true);
+      assert.deepEqual(kept.leaseCleanup, owner.leaseCleanup);
+    }
     const validation = readReceipt();
     const [failed, unfinished] = validation.checks;
     const outcome = {

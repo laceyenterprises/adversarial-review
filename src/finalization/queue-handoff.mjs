@@ -6,6 +6,7 @@ import { resolveLaneKey } from './ledger-events.mjs';
 import { queueId } from './queue-store.mjs';
 import { reviewCurrencyCovers } from '../ama/review-currency.mjs';
 import { hasConcreteExactHeadEvidence } from '../ama/hammer-adjudication.mjs';
+import { hasCompletedUnknownValidationEvidence } from '../ama/local-validation-unknown.mjs';
 
 const sha = /^[a-f0-9]{40}$/i;
 const text = value => typeof value === 'string' && value.trim().length > 0;
@@ -54,7 +55,7 @@ export function normalizeQueueHandoff(input) {
 // A trusted read that local validation ended with no verdict (timed out,
 // killed for load, process inspection denied). A real failure is never this.
 export const queueLocalValidationUnknown = evidence => evidence?.localValidation?.result === 'unknown'
-  && evidence.localValidation.ciAuthoritative === true && evidence.localValidation.localFailureObserved !== true;
+  && hasCompletedUnknownValidationEvidence(evidence.localValidation);
 
 const findingKey = finding => handoffJson([finding.reviewId, finding.reviewCommitId, finding.findingId]);
 

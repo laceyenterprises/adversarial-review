@@ -13,6 +13,7 @@ import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { runHelperStep } from '../bin/hammer-helper-step.mjs';
 import { amaAuditFilePath, readAmaAuditEntry } from '../src/ama/audit.mjs';
+import { readDeferredSourceHold } from '../src/ama/deferred-source-custody.mjs';
 import { resolveHammerShellHelper, HAMMER_SERVICE_ROOT } from '../src/ama/hammer-shell-helper-command.mjs';
 import { parseClosePlan } from '../bin/hammer-close-plan.mjs';
 import { parseCloseCommands } from '../bin/close-commands.mjs';
@@ -517,9 +518,9 @@ console.log('HTTP/2.0 200 OK\\nETag: "fixture"\\n\\n' + JSON.stringify(response)
     GHO_API_CALL_LOG_DISABLE: '1', GHO_RATE_LIMIT_SHARED_STATE_PATH: join(f.dir, 'quota.json'),
   };
   const run = extra => f.close({ ...validationEnv, ...extra });
-  const standalone = extra => runDetached('-c', [
+  const standalone = (extra, { runDir = f.run, checkout = f.checkout } = {}) => runDetached('-c', [
     'source "$1/inputs.sh" && exec "$2" "$HAM_ROOT_DIR/bin/hammer-validate.mjs" --canonical -- src/example.mjs',
-    'fixture', f.run, process.execPath], { ...f.env, ...validationEnv, ...extra }, f.checkout);
+    'fixture', runDir, process.execPath], { ...f.env, ...validationEnv, ...extra }, checkout);
   const read = path => existsSync(path) ? readFileSync(path, 'utf8').trim().split('\n') : [];
   return { checkout: f.checkout, dir: f.dir, runDir: f.run, head, run, standalone,
     calls: () => read(calls).map(line => JSON.parse(line)),
@@ -575,6 +576,10 @@ test('standalone exact-head coverage skips only the authenticated step and hands
     [['deferred', 'canonical-validation-deferred']]);
   execFileSync('git', ['-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid',
     'commit', '--no-verify', '--allow-empty', '-qm', 'Changed head'], { cwd: f.checkout });
+  const newHead = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: f.checkout, encoding: 'utf8' }).trim();
+  const inputsPath = join(f.runDir, 'inputs.sh');
+  const target = readFileSync(join(f.runDir, 'base-head'), 'utf8').trim();
+  writeFileSync(inputsPath, readFileSync(inputsPath, 'utf8').replaceAll(target, newHead));
   assert.equal((await f.standalone({})).status, 0);
   assert.deepEqual(f.local(), ['fixture-command telegram-responder-guard', 'fixture-command covered', 'fixture-command telegram-responder-guard',
     'fixture-command later'], 'a different head runs locally when offered only stale CI');
@@ -607,15 +612,71 @@ test('a different check quoting the Telegram no-verdict line keeps its passing r
   assert.equal(existsSync(join(f.runDir, `validation-deferred-${f.head}.json`)), false);
 });
 
-test('MRQ-20: a CI-authoritative validation timeout gets one fresh controller round that merges', async t => {
-  const f = hammerFixture(t);
-  const result = await f.close({ FIXTURE_NEEDS_REVALIDATION: '1', FIXTURE_TIMEOUT_ONCE: join(f.dir, 'timed-out') });
-  assert.equal(result.status, 0, `${result.stderr}\n${result.stdout}`);
-  assert.equal(result.closeResult.outcome, 'merged');
-  const events = f.events();
-  assert.equal(events.filter(event => event.startsWith('controller-run ')).length, 2, events.join('\n'));
-  assert.equal(events.filter(event => event === 'validation-timeout').length, 1);
-  assert.ok(events.some(event => event.startsWith('gh pr merge --squash --match-head-commit')));
+test('a second closer keeps the unpublished repair and does not rerun the broad battery', async t => {
+  const f = mirrorFixture(t, { entries: [['broad', {}], ['local-guard', { local_only: true }]], runs: [] });
+  const git = (cwd, ...args) => execFileSync('git', args, { cwd, encoding: 'utf8',
+    env: { ...process.env, GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_NOSYSTEM: '1' } }).trim();
+  const checkout = join(f.dir, 'successor');
+  mkdirSync(checkout);
+  git(checkout, 'init', '-q');
+  git(checkout, 'fetch', '--no-tags', f.checkout, f.head);
+  git(checkout, 'checkout', '--quiet', '--detach', 'FETCH_HEAD');
+  writeFileSync(join(f.checkout, 'src/example.mjs'), 'export const finalRepair = true;\n');
+  git(f.checkout, 'add', 'src/example.mjs');
+  git(f.checkout, '-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid', 'commit', '-qm', 'Final repair');
+  const repaired = git(f.checkout, 'rev-parse', 'HEAD');
+  const nextRun = join(f.dir, 'next-run');
+  mkdirSync(nextRun);
+  const inputs = readFileSync(join(f.runDir, 'inputs.sh'), 'utf8')
+    .replaceAll(readFileSync(join(f.runDir, 'base-head'), 'utf8').trim(), f.head);
+  writeFileSync(join(f.runDir, 'inputs.sh'), inputs);
+  writeFileSync(join(nextRun, 'inputs.sh'), inputs.replaceAll(f.runDir, nextRun));
+  writeFileSync(join(nextRun, 'base-head'), f.head);
+  const first = await f.standalone({ FIXTURE_CHILD_TIMEOUT: 'broad' });
+  assert.equal(first.status, 124, first.stderr);
+  assert.deepEqual(f.local(), ['fixture-command broad']);
+  const identity = { repo: 'fixture/repo', prNumber: 42, headSha: f.head };
+  const hold = readDeferredSourceHold(f.dir, identity);
+  rmSync(f.runDir, { recursive: true });
+  rmSync(f.checkout, { recursive: true });
+  const second = await f.standalone({ FIXTURE_CHILD_TIMEOUT: 'broad', HQ_LAUNCH_REQUEST_ID: 'lrq_successor' },
+    { runDir: nextRun, checkout });
+  assert.throws(() => git(checkout, 'cat-file', '-e', repaired), 'successor has only the live head');
+  assert.deepEqual({ batteries: f.local(), retainedHead: hold?.sourceHead },
+    { batteries: ['fixture-command broad'], retainedHead: repaired }, `${first.stderr}\n${second.stderr}`);
+  assert.equal(second.status, 75, second.stderr);
+  assert.match(second.stderr, /Operator decision required/);
+  assert.equal(hold.launchRequestId, 'lrq_fixture');
+  const read = name => JSON.parse(readFileSync(join(hold.evidenceDir, name), 'utf8'));
+  assert.equal(read('deferred.json').ciAuthoritative, false);
+  assert.equal(read('bounded-cleanup.json').cleanup, 'finished');
+  assert.equal(read('validation.json').selectedCheckCount, 2);
+  assert.equal(read('validation.json').checks[0].result, 'inconclusive');
+  const source = read('source.json');
+  assert.equal(source.status, 'bundled');
+  git(checkout, 'fetch', join(hold.evidenceDir, source.bundle), source.ref);
+  assert.equal(git(checkout, 'rev-parse', 'FETCH_HEAD'), repaired, 'recover source after original checkout and scratch are removed');
+  assert.equal(git(checkout, 'rev-parse', 'HEAD'), f.head, 'custody neither publishes nor checks out retained source');
+});
+
+test('an UNKNOWN budget result can reach required CI only after the local-only guard passes', async t => {
+  for (const guardFailed of [false, true]) {
+    const f = mirrorFixture(t, { entries: [['covered', { ci_jobs: ['build'] }],
+      ['guard', { ci_jobs: ['build'], local_only: true }], ['last', {}]], runs: [['build']] });
+    const config = join(f.dir, 'config.yaml');
+    writeFileSync(config, 'version: 1\nroles:\n  adversarial:\n    merge_authority:\n      required_check_contexts: [build]\n');
+    const result = await f.standalone({ AGENT_OS_CONFIG_PATH: config, FIXTURE_BUDGET_AFTER_CHECKS: '1',
+      ...(guardFailed ? { FIXTURE_FAILED_GUARD: 'guard', FIXTURE_CHILD_TIMEOUT: 'last' } : {}) });
+    const handoff = JSON.parse(readFileSync(join(f.runDir, `validation-deferred-${f.head}.json`), 'utf8'));
+    const receipt = JSON.parse(readFileSync(handoff.localValidationReceipt, 'utf8'));
+    assert.deepEqual(f.local(), ['fixture-command guard', 'fixture-command last']);
+    assert.equal(receipt.checks[0].status, 'ci-covered');
+    assert.equal(receipt.checks[1].reason, 'local-only');
+    assert.equal(receipt.checks[1].result, guardFailed ? 'fail' : 'pass');
+    assert.equal(receipt.validation, 'unknown');
+    assert.equal(handoff.ciAuthoritative, !guardFailed);
+    assert.equal(result.status, guardFailed ? 124 : 0, result.stderr);
+  }
 });
 
 test('MRQ-20: a timeout that cannot defer to CI gets no second controller round', async t => {
@@ -848,7 +909,9 @@ test('the close skips only explicitly mapped, successful exact-head mirror check
     .map(name => `fixture-command ${name}`), 'python3 scripts/host-check.py']);
   const [receipt] = result.closeResult.localValidation;
   assert.equal(receipt.head, f.head);
-  assert.deepEqual(receipt.checks[0], { name: 'covered', cwd: null, status: 'ci-covered',
+  assert.partialDeepStrictEqual(receipt.checks[0], { name: 'covered', cwd: null, status: 'ci-covered',
+    commandSha256: createHash('sha256').update('fixture-command covered').digest('hex'),
+    manifest: 'scripts/ci-mirror/checks.json',
     reason: 'exact-head-ci-success', jobs: [{ name: 'build', runId: '123' }, { name: 'lint', runId: '123' }] });
   assert.deepEqual(receipt.checks.slice(1).map(row => [row.status, row.reason]), [
     ['run', 'ci-job-skipped'], ['run', 'ci-job-neutral'], ['run', 'ci-job-head-mismatch'], ['run', 'no-ci-mapping'],
@@ -875,7 +938,7 @@ test('a non-matching skip probe executes the check locally and reports its actua
   const result = await f.run({ FIXTURE_SKIP_REASON: 'prefixed: ci-covered' });
   assert.equal(result.status, 75, result.stderr);
   assert.deepEqual(f.local(), ['fixture-command verify']);
-  assert.deepEqual(result.closeResult.localValidation[0].checks, [{
+  assert.partialDeepStrictEqual(result.closeResult.localValidation[0].checks, [{
     name: 'verify', cwd: null, status: 'failed', reason: 'ci-evidence-unavailable',
     result: 'inconclusive', localReason: 'synthetic timeout',
   }]);
@@ -897,10 +960,11 @@ test('upstream signatures retain evidence across duplicate selection and submodu
 test('a module-level mirror refusal preserves the environment failure without claiming coverage', async t => {
   const f = mirrorFixture(t, { entries: [['covered', { ci_jobs: ['build'] }]], runs: [['build']] });
   const result = await f.run({ FIXTURE_IMPORT_EXIT: '76' });
-  assert.equal(result.status, 0, result.stderr);
+  assert.equal(result.status, 76, result.stderr);
+  assert.equal(result.closeResult.outcome, 'canonical-validation-deferred');
   assert.deepEqual(f.local(), []);
   assert.deepEqual(result.closeResult.localValidation[0].checks.map(row => [row.status, row.reason, row.exitStatus]), [
-    ['failed', 'canonical-runner-environment-unavailable', 76],
+    ['interrupted', 'canonical-mirror-environment-unavailable', 76],
   ]);
 });
 
@@ -947,7 +1011,7 @@ test('unreadable evidence, changed manifests and the off switch retain local val
     assert.equal(result.closeResult.outcome, 'canonical-validation-deferred');
     assert.equal(result.closeResult.stage, 'local-validation');
     assert.deepEqual(f.local(), ['fixture-command verify']);
-    assert.deepEqual(result.closeResult.localValidation[0].checks, [{
+    assert.partialDeepStrictEqual(result.closeResult.localValidation[0].checks, [{
       name: 'verify', cwd: null, status: 'failed', reason, result: 'inconclusive', localReason: 'synthetic timeout',
     }]);
     assert.ok(!f.events().some(event => event.startsWith('wait-ci') || event.startsWith('gh pr merge')));

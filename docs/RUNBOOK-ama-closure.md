@@ -6475,63 +6475,28 @@ any per-check receipt with `result: fail` takes precedence over import-fault
 output and environment exit codes. Even a battery whose only failed check
 reports an own-package `ModuleNotFoundError` remains red (`validation-failed`);
 inspect its retained diagnostic and repair the environment before retrying.
-Without explicit failed-check evidence, unavailable
-canonical setup records `local-battery-skipped-github-required-gate-authoritative`
-and no local pass, then proceeds to fresh verify-head and the exact-head required
-GitHub checks. Genuine test failures require repair. No strict-mode, predicate,
-head, attestation, reversal, lease or CI requirement is waived.
+Unavailable canonical mirror setup is UNKNOWN when the runner cannot establish
+which local checks ran. The exact-head gate still applies. Genuine test failures
+require repair.
 
-Canonical absolute, idle, check and SIGALRM deadlines, unconfirmed controller
-validation drain, and the Telegram guard's explicit Python-lane process-inspection
-no-verdict stop with `canonical-validation-deferred`. The exact-head private
-receipt names the reason and cleanup owner. The validation result is UNKNOWN.
-Read adjacent logs and the existing cleanup evidence. Use the controller
-registration for owned drain and lease disposition, or the bounded-command
-cleanup line for a standalone run. Preserve unknown cleanup for the recovery
-owner. The closer ends the run with the existing deferred audit. Repeating
-validation or close on that head in the run returns 75 before another battery
-or controller starts. A changed head remains subject to ordinary validation.
-The close command makes a narrow exception for a completed local conflict
-repair with a clean, head-bound UNKNOWN receipt and confirmed cleanup. It
-leaves an active controller stop to the supervisor without a terminal close
-result. Only a confirmed drain and a fresh evidence check allow one more
-controller round to publish. A blocked publication check reports
-`source-publication-refused`, including on re-entry with a deferral receipt.
-Verify-head reuses a successful pre-publish validation or a CI deferral for
-the same published SHA. If declared required contexts
-cannot supply merge authority, the close records the watcher continuation
-on the published head before returning 75. The watcher uses launch-bound push
-evidence before assigning the published head retry backoff.
-Only the `telegram-responder-guard` check can supply the Python-lane no-verdict
-signal; another check quoting that line retains its own result. A passing
-Telegram result containing that explicit no-verdict still defers: the reload
-cases do not establish the unavailable process-inspection verdict. A recorded
-UNKNOWN handoff takes precedence over own-package import-fault fallback.
-Operator cancellation retains its own outcome even when cleanup returns 125;
-it does not become a canonical-validation deferral.
+Canonical timeouts, the mirror's budget stop, an external kill, unconfirmed
+validation drain, and the Telegram guard's explicit process-inspection no-verdict
+use `canonical-validation-deferred`. Its per-head receipt records UNKNOWN and
+names the cleanup owner. Cancellation keeps its own outcome, including if drain
+is unconfirmed. Only `telegram-responder-guard` can report the Python-lane
+inspection no-verdict. Reload cases and other checks quoting the line supply no
+such proof.
 
-**UNKNOWN defers to exact-head CI (MRQ-20).** A host-local battery that timed
-out (absolute, idle, check or SIGALRM deadline), was killed for load (the
-mirror's own budget stop, exit 75, or a signal the validator did not send), or
-was denied process inspection has no verdict. When the repository declares
-required contexts, that UNKNOWN does not block: the receipt records
-`ciAuthoritative: true` and the declared `requiredContexts`, no early-failure
-audit is written, and the validator exits 0 without claiming a pass
-(`local-validation-unknown-github-required-gate-authoritative`). A timeout
-also stops the controller round, so `hammer-close.sh` starts one fresh round;
-its validator reuses the receipt instead of re-running the battery. The
-hammer's exact-head gate then merges only when every declared context has
-reported and is green on that head; red, pending or absent contexts block as
-before (`local-validation-unknown-required-contexts-not-green` or
-`ci-not-green`). Without declared contexts, a recorded local failure before
-the stop (a mirror check with `result: fail` or a TAP `not ok` line), or
-unconfirmed drain after a finished battery, the existing deferral above still
-applies. A genuine local failure still blocks and the hammer remediates it.
-The merge gate revalidates any existing exact-head deferral receipt before
-consulting CI: `ciAuthoritative` must be explicitly true, the reason must
-permit deferral, no local failure may have been observed, and current required
-contexts must be non-empty. Unreadable, legacy or demoted receipts continue
-blocking even when GitHub CI is green.
+**Continuing after UNKNOWN (MRQ-20, LAC-2332).** Declared GitHub contexts cannot
+substitute for local-only checks. On a clean, already-published exact head, the
+closer can proceed only when the canonical mirror proves its full selected check
+count, every check has a local pass or authenticated coverage under the existing
+manifest policy, no local failure was observed, and standalone cleanup is
+confirmed. The overall local outcome stays UNKNOWN. At merge, required contexts
+must be declared under the current policy and all must have reported green on
+that same head. An unreadable, older or incomplete receipt blocks. A controller
+stop never starts a fresh controller round. Repeating validation or close
+without a qualifying receipt returns 75 before another battery or controller.
 Declare contexts per repository in
 `roles.adversarial.merge_authority.required_check_contexts_by_repository`
 (`- repository: owner/name` with `contexts: [...]`). `required_check_contexts`
@@ -6540,22 +6505,33 @@ belongs in the per-repository list. Both lists also make an absent context
 read PENDING at the hammer gate and in the queue-v2 required set. The daemon
 and closer read only the global list until they are given the repository.
 Queue-v2 admits a handoff whose trusted local-validation read is
-`result: unknown` only with `ciAuthoritative: true` and
-`localFailureObserved !== true`, even if that read also claims `ok: true`;
+`result: unknown` only with `ciAuthoritative: true`, `coverageComplete: true`,
+`cleanup: finished` and `localFailureObserved: false`, even if the read also
+claims `ok: true`;
 its final merge gate requires the same declared, green
 contexts and never accepts the configured no-CI proof for it.
 
-The validator records the deferred audit and `last-phase` receipt non-finally.
-The closer repeats the audit helper without `--final` and ends the run; no
-`terminal-stop` progress receipt is expected. Once the matching launch ends,
-dispatch records `canonical-validation-deferred` in the existing per-head
-inconclusive retry store, keyed by the live head for a published rebase.
-Its watcher owner retains full refunds, applies
-exponential backoff from attempt N (default three, starting at five minutes,
-capped at one hour), and surfaces one notification through the existing
-closure-wait receipt. Re-observing a launch neither increments its attempt nor
-advances its deadline. This follows INCONCLUSIVERETRY-01b rather than parking
-the PR or consuming adjudication budget.
+**Operator decision for retained source.** Before requesting process drain, the
+validator writes an exact-target hold in the [HQ custody store](data-model/deferred-source-custody.md).
+The cleanup owner preserves the validation and cleanup receipts and retains the
+unpublished commit as an incremental Git bundle. A bundle failure leaves the
+original workspace under custody. The watcher observes the ended launch and
+keeps infrastructure refund accounting. On the same live head it suppresses a
+new launch or successor and sends one operator decision notice. Legacy deferrals
+with missing custody evidence also hold when the matching ended launch was
+recorded. Exit code, token use, and PID disappearance supply no validation or
+drain verdict.
+
+Use the notice's launch, head, and evidence directory to choose whether to
+recover the exact source for the outstanding guards and normal publication, or
+explicitly discard the attempt. Confirm cleanup before acting. Inspect the Git
+bundle and prerequisites from `source.json` in an operator-owned recovery
+checkout. Verify the imported object matches `sourceHead`. Preserve original
+commit identity and follow the ordinary source, review, lease and required CI
+gates. A live head change naturally scopes the hold out of the next dispatch.
+For an authorized same-head release, archive the custody marker and the matching
+canonical deferral entries from the existing inconclusive retry record together,
+under the canonical runtime owner's custody. Keep the evidence and audit history.
 The validator owns its timeout and process cleanup. Avoid a second shell alarm
 around it. If the outer tool returns 124 or 142 first, follow the same handoff
 from the available diagnostics and keep unconfirmed cleanup explicit.
@@ -6570,7 +6546,8 @@ No live receipt is claimed by offline tests.
 ### Inconclusive closer results (INCONCLUSIVERETRY-01b)
 
 A closer result that cannot conclude is an **owned retry with backoff**. It is
-never a closer failure, never spends closer budget and never parks the PR.
+never a closer failure or a charge against closer budget. Canonical validation
+deferrals with unproved continuation enter the operator hold above.
 `src/ama/closer-inconclusive-retry.mjs` holds the one classifier and the one
 owned-retry record shared by both sites below.
 

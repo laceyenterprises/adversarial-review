@@ -8,6 +8,8 @@ import { readLaunchRequestStatusFromLedgerAsync } from '../session-ledger-read-a
 import { isCurrentAmaCloserLease, readAmaCloserLease } from './closer-lease.mjs';
 import { launchRequestInFlight } from './launch-request-status.mjs';
 import { observeClosureWait } from './closure-wait.mjs';
+import { readCloserInconclusiveRetries } from './closer-inconclusive-retry.mjs';
+import { DEFERRED_SOURCE_HOLD, deferredSourceNotice, readDeferredSourceHold } from './deferred-source-custody.mjs';
 
 const SUCCESSOR_DEADLINE_MS = 30 * 60_000;
 const DEADLINE_PROBE_BACKOFF_MS = 5 * 60_000;
@@ -36,6 +38,25 @@ function lockReceipt(path) {
     closeSync(fd);
     throw error;
   }
+}
+
+export async function observeDeferredSourceDecision({ rootDir, hqRoot, repo, prNumber, headSha, now,
+  observeWaitImpl = observeClosureWait, pageImpl, logger = console }) {
+  const identity = { repo, prNumber, headSha };
+  let hold = readDeferredSourceHold(hqRoot, identity);
+  if (!hold) {
+    const entry = readCloserInconclusiveRetries(rootDir, identity).heads[headSha];
+    if (Array.isArray(entry?.launches)) hold = entry.launches.findLast(launch => launch?.reason === 'canonical-validation-deferred');
+  }
+  if (!hold) return null;
+  try {
+    await observeWaitImpl({ rootDir, ...identity, reason: deferredSourceNotice(hold),
+      waitClass: DEFERRED_SOURCE_HOLD, immediate: true, now: Date.parse(now), pageImpl });
+  } catch (error) {
+    logger?.warn?.(`[ama-closer] deferred source decision delivery failed for ${repo}#${prNumber}: ${error.message}`);
+  }
+  return { status: DEFERRED_SOURCE_HOLD, reason: DEFERRED_SOURCE_HOLD, needsOperator: true,
+    launchRequestId: hold.launchRequestId, custodyPath: hold.path };
 }
 
 // Synchronous enrollment lets the pre-claim cap stop transfer custody durably
@@ -76,7 +97,7 @@ export function requestCloserSuccessor({ rootDir, repo, prNumber, headSha, revie
   } finally { closeSync(fd); }
 }
 
-export async function settleCloserSuccessor({ rootDir, repo, prNumber, headSha, enabled = true,
+export async function settleCloserSuccessor({ rootDir, hqRoot, repo, prNumber, headSha, enabled = true,
   admitted = true, allowHammerFallback = false, now = new Date().toISOString(), riskClass, handoffImpl,
   observeWaitImpl = observeClosureWait }) {
   headSha = String(headSha).toLowerCase();
@@ -91,6 +112,8 @@ export async function settleCloserSuccessor({ rootDir, repo, prNumber, headSha, 
     let record = readCloserSuccessor(rootDir, identity);
     if (!record) return { status: 'successor-pending' };
     if (record.status === 'successor-enrolled') return record;
+    const held = await observeDeferredSourceDecision({ rootDir, hqRoot, ...identity, now, observeWaitImpl });
+    if (held) return held;
     // Fresh admission can revisit a retired head if the PR was reopened or moved back.
     if (record.retiredAt) {
       delete record.retiredAt;

@@ -57,6 +57,7 @@ if [ "$(cd "${HAM_ROOT_DIR:-/nonexistent}" 2>/dev/null && pwd -P)" != "$HAM_CONF
   || [ "$(cd "${HAM_RUN_DIR:-/nonexistent}" 2>/dev/null && pwd -P)" != "$HAM_CONFLICT_RUN_DIR" ]; then
   ham_conflict_stop 1 'dispatch-inputs-missing: inputs.sh names another checkout or run directory'
 fi
+"$HAM_NODE_BIN" "$HAM_CONFLICT_ROOT/bin/hammer-validate.mjs" --check-custody || exit $?
 for ham_conflict_helper in ham_pr ham_step ham_read ham_bounded_git_sync; do
   declare -F "$ham_conflict_helper" >/dev/null \
     || ham_conflict_stop 1 "conflict-repair-helper-missing: $ham_conflict_helper"

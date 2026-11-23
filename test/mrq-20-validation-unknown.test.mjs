@@ -96,7 +96,8 @@ test('UNKNOWN with no declared contexts, a real failure, or an ineligible stop n
     'validation-budget-exceeded', 'validation-killed']) {
     assert.equal(unknownValidationDeferral({ reason, requiredContexts: contexts }).ciAuthoritative, true, reason);
   }
-  const receipt = { validation: 'unknown', reason: 'absolute-timeout', ciAuthoritative: true };
+  const receipt = { validation: 'unknown', reason: 'absolute-timeout', ciAuthoritative: true,
+    cleanup: 'finished', coverageComplete: true, localFailureObserved: false };
   assert.equal(recordedUnknownDefersToCi(receipt, contexts), true);
   assert.equal(recordedUnknownDefersToCi(receipt, []), false);
   for (const ciAuthoritative of [false, undefined]) {
@@ -168,23 +169,19 @@ const deferralOf = ({ root, head }) => {
   return existsSync(path) ? JSON.parse(readFileSync(path, 'utf8')) : null;
 };
 
-test('hammer-validate: a timeout with green-gated declared contexts hands the verdict to exact-head CI', t => {
+test('hammer-validate: declared contexts without proof of local guards leave a timeout blocking', t => {
   const repo = fixture(t);
   const first = runValidator(repo, { stop: ['absolute-timeout', 124], exit: 124 });
-  assert.equal(first.status, 0, first.stderr);
-  assert.match(first.stderr, /local-validation-unknown-github-required-gate-authoritative/);
-  assert.doesNotMatch(first.stderr, /canonical-validation-deferred/);
-  assert.match(first.stderr, /no local pass claimed/i);
+  assert.equal(first.status, 124, first.stderr);
+  assert.match(first.stderr, /canonical-validation-deferred/);
   const receipt = deferralOf(repo);
   assert.equal(receipt.validation, 'unknown');
-  assert.equal(receipt.ciAuthoritative, true);
+  assert.equal(receipt.ciAuthoritative, false);
   assert.deepEqual(receipt.requiredContexts, ['repo-guards']);
-  // The close's pre-check and a fresh round both proceed on the same head
-  // without re-running the battery.
   const check = runValidator(repo, { exit: 0 }, ['--check-deferred']);
-  assert.equal(check.status, 0, check.stderr);
+  assert.equal(check.status, 75, check.stderr);
   const again = runValidator(repo, { exit: 1 });
-  assert.equal(again.status, 0, again.stderr);
+  assert.equal(again.status, 75, again.stderr);
   assert.equal(again.batteries, 1, 'the recorded UNKNOWN is reused, not re-run');
 });
 
@@ -268,11 +265,11 @@ test('hammer-validate: a failure observed before the stop keeps the head blockin
 test('hammer-validate: the mirror budget stop and an external kill are UNKNOWN, not failed checks', t => {
   const budget = fixture(t);
   const overBudget = runValidator(budget, { rows: [{ name: 'unit', status: 'run', result: 'pass' }], exit: 75 });
-  assert.equal(overBudget.status, 0, overBudget.stderr);
+  assert.equal(overBudget.status, 75, overBudget.stderr);
   assert.equal(deferralOf(budget).reason, 'validation-budget-exceeded');
   const killed = fixture(t);
   const sigkill = runValidator(killed, { exit: 137 });
-  assert.equal(sigkill.status, 0, sigkill.stderr);
+  assert.equal(sigkill.status, 137, sigkill.stderr);
   assert.equal(deferralOf(killed).reason, 'validation-killed');
   // Without declared contexts the same stop is an UNKNOWN deferral, never a pass.
   const undeclared = fixture(t, { declared: false });
@@ -285,6 +282,7 @@ test('hammer-validate: the mirror budget stop and an external kill are UNKNOWN, 
 
 function runGate(t, { checks, contexts, unknown, receipt = {
   schemaVersion: 1, head: HEAD, validation: 'unknown', reason: 'absolute-timeout', ciAuthoritative: true,
+  cleanup: 'finished', coverageComplete: true, localFailureObserved: false,
 } }) {
   const root = new URL('../', import.meta.url);
   const script = readFileSync(new URL('bin/hammer-merge.sh', root), 'utf8');
@@ -339,11 +337,16 @@ test('hammer gate: UNKNOWN + green declared contexts merges; red, absent or unde
 });
 
 test('hammer gate: green CI never overrides failure-tainted or invalid UNKNOWN receipts', t => {
-  const base = { validation: 'unknown', reason: 'absolute-timeout', ciAuthoritative: true };
+  const base = { schemaVersion: 1, head: HEAD, validation: 'unknown', reason: 'absolute-timeout',
+    ciAuthoritative: true, cleanup: 'finished', coverageComplete: true, localFailureObserved: false };
   for (const receipt of [
     { ...base, localFailureObserved: true },
     { ...base, ciAuthoritative: false },
     { ...base, ciAuthoritative: undefined },
+    { ...base, cleanup: 'unconfirmed' },
+    { ...base, cleanup: 'controller-owned' },
+    { ...base, coverageComplete: false },
+    { ...base, head: 'b'.repeat(40), reason: undefined },
     { ...base, reason: 'validation-drain-unconfirmed' },
     { ...base, validation: 'fail' },
     '{unreadable',
@@ -381,12 +384,13 @@ test('queue-v2: repository-scoped contexts join the lane required set; UNKNOWN v
 
   const { h: handoff, e: evidence } = queueHandoffFixture();
   const unknown = { ...evidence, localValidation: { ...handoff.localValidation, ok: false, result: 'unknown',
-    ciAuthoritative: true, localFailureObserved: false } };
+    ciAuthoritative: true, localFailureObserved: false, coverageComplete: true, cleanup: 'finished' } };
   assert.equal(queueLocalValidationUnknown(unknown), true);
   assert.equal(validateQueueHandoff(handoff, unknown), true);
   const failed = { ...unknown, localValidation: { ...unknown.localValidation, result: 'fail' } };
   assert.throws(() => validateQueueHandoff(handoff, failed), /failed localValidation/);
-  for (const patch of [{ ciAuthoritative: false }, { ciAuthoritative: undefined }, { localFailureObserved: true }]) {
+  for (const patch of [{ ciAuthoritative: false }, { ciAuthoritative: undefined }, { localFailureObserved: true },
+    { cleanup: 'unconfirmed' }, { coverageComplete: false }]) {
     for (const ok of [false, true]) {
       const invalid = { ...unknown, localValidation: { ...unknown.localValidation, ...patch, ok } };
       assert.equal(queueLocalValidationUnknown(invalid), false);

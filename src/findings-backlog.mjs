@@ -141,10 +141,20 @@ export function summarizeFindingBacklog(db, now = Date.now(), { maxAgeMs } = {})
       FROM finding_backlog b LEFT JOIN finding_batches a USING(batch_id)
       WHERE b.manifest_sha256 IS NOT NULL GROUP BY b.manifest_sha256
       ORDER BY b.manifest_sha256`).all() : null;
+    // FINDINGSBATCHSTRAND-01: batches the collector holds for an operator, with
+    // the reason it recorded. A hold whose error has since changed is stale.
+    const holds = requeue && Boolean(db.prepare("SELECT 1 FROM pragma_table_info('finding_batches') WHERE name='hold_json'").get());
+    const heldBatches = holds ? db.prepare(`SELECT batch_id AS batchId,repo,area,launch_id AS launchId,
+        json_extract(hold_json,'$.reason') AS reason,error,json_extract(hold_json,'$.heldAt') AS heldAt,
+        (SELECT count(*) FROM finding_backlog b WHERE b.batch_id=a.batch_id AND b.outcome IS NULL) AS openFindings
+      FROM finding_batches a WHERE completed_at IS NULL AND released_at IS NULL AND json_valid(hold_json)
+        AND error IS json_extract(hold_json,'$.error') AND json_extract(hold_json,'$.reason') IS NOT NULL
+      ORDER BY heldAt,batch_id`).all() : [];
     return { available: true, areas, ...open, ...batchable, ...excluded, unbatchedCount: open.unbatchedCount || 0,
       oldestOpenAgeMs: open.oldestOpenAt ? Math.max(0, now - Date.parse(open.oldestOpenAt)) : 0,
       oldestBatchableAgeMs: batchable.oldestBatchableAt ? Math.max(0, now - Date.parse(batchable.oldestBatchableAt)) : 0,
-      perDay, rates, batchErrors, progress, selectedBacklog };
+      perDay, rates, batchErrors, progress, selectedBacklog, heldBatches,
+      heldFindingCount: heldBatches.reduce((sum, batch) => sum + batch.openFindings, 0) };
   } catch (error) { return { available: false, error: error.message, areas: null }; }
 }
 
@@ -176,14 +186,18 @@ export function retireExpiredFindings(db, { repo, reason, limit = 100, apply = f
 }
 
 export function findingBacklogAlert(backlog, maxAgeMs = 48 * 3600000) {
-  if (!backlog?.available || !(backlog.oldestBatchableAgeMs > maxAgeMs || backlog.outOfWindow > 0)) return null;
+  const held = backlog?.heldBatches || [];
+  if (!backlog?.available || !(backlog.oldestBatchableAgeMs > maxAgeMs || backlog.outOfWindow > 0 || held.length)) return null;
   return {
     code: 'review:findings_backlog_overdue',
     tier: 'ticket',
     subject: 'Non-blocking findings backlog is overdue',
-    message: `${backlog.batchableCount} batchable findings; ${backlog.outOfWindow || 0} unclaimed findings outside the merge-age window; oldest open finding is ${Math.floor(backlog.oldestOpenAgeMs / 3600000)} hours old`,
-    evidence: [`oldestBatchableAt=${backlog.oldestBatchableAt}`, `outOfWindow=${backlog.outOfWindow || 0}`, `maxAgeMs=${maxAgeMs}`],
-    recommendedAction: 'Inspect runner health, progress and batch errors; ended batches release automatically. The operator findings batch backfill can re-batch released findings regardless of source age. For never-claimed expired findings, preview review-findings retire-expired with an explicit DB, repo, limit and reason; operator-authorized --apply retains an out-of-window disposition. An explicit consensus-validated manifest can instead select verified real findings.',
+    message: `${backlog.batchableCount} batchable findings; ${backlog.outOfWindow || 0} unclaimed findings outside the merge-age window; oldest open finding is ${Math.floor(backlog.oldestOpenAgeMs / 3600000)} hours old`
+      + (held.length ? `; ${held.length} batches (${backlog.heldFindingCount} findings) held for an operator` : ''),
+    evidence: [`oldestBatchableAt=${backlog.oldestBatchableAt}`, `outOfWindow=${backlog.outOfWindow || 0}`, `maxAgeMs=${maxAgeMs}`,
+      ...held.slice(0, 10).map(batch => `held=${batch.batchId}:${batch.reason}`)],
+    recommendedAction: 'Inspect runner health, progress and batch errors; ended batches release automatically. The operator findings batch backfill can re-batch released findings regardless of source age. For never-claimed expired findings, preview review-findings retire-expired with an explicit DB, repo, limit and reason; operator-authorized --apply retains an out-of-window disposition. An explicit consensus-validated manifest can instead select verified real findings.'
+      + (held.length ? ' A held batch names its reason: for batch-dispatch-read-scope-denied, grant the review app the named (project, repository) dispatch read; otherwise preview bin/findings-batch-release.mjs with --mode retry or drop and a --reason, then add --apply.' : ''),
     details: { ...backlog, maxAgeMs },
   };
 }

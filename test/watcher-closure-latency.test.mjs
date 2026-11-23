@@ -690,6 +690,7 @@ test('synthetic posted-review pass pins GitHub and database read counts per step
   const shadowPatternsMigrationChecks = closure.database.migrationChecks['20261113_finalization_shadow_patterns.sql'];
   const decisionPublicationMigrationChecks = closure.database.migrationChecks['20261114_findings_decision_publication.sql'];
   const rateIndexMigrationChecks = closure.database.migrationChecks['20261120_findings_rate_indexes.sql'];
+  const batchHoldMigrationChecks = closure.database.migrationChecks['20261122_findings_batch_hold.sql'];
   const closureWaitMigrationChecks = closure.database.migrationChecks['waits_by_class.last_paged'];
   const bootstrapChecks = closure.database.migrationChecks['review-state.bootstrap'];
   const identityCommitChecks = closure.database.migrationChecks['repository-identity.commit-check'];
@@ -715,6 +716,7 @@ test('synthetic posted-review pass pins GitHub and database read counts per step
   assert.equal(shadowPatternsMigrationChecks, 6);
   assert.equal(decisionPublicationMigrationChecks, 6);
   assert.equal(rateIndexMigrationChecks, 6);
+  assert.equal(batchHoldMigrationChecks, 6);
   assert.equal(closureWaitMigrationChecks, 6, 'two reminder-column schema probes per PR');
   assert.equal(bootstrapChecks, 6, 'one empty-schema check per review-state initialization');
   assert.equal(identityCommitChecks, 6, 'one committed identity-schema check per initialization');
@@ -723,7 +725,7 @@ test('synthetic posted-review pass pins GitHub and database read counts per step
     - simplicityMigrationChecks - noteLifecycleMigrationChecks - drainMigrationChecks - requeueMigrationChecks - gradeMigrationChecks
     - manifestMigrationChecks - selectionScopeMigrationChecks - dispatchAttemptsMigrationChecks - gsrMigrationChecks
     - historicalProjectionMigrationChecks - shadowPatternsMigrationChecks - decisionPublicationMigrationChecks
-    - rateIndexMigrationChecks - closureWaitMigrationChecks - bootstrapChecks - identityCommitChecks, 114,
+    - rateIndexMigrationChecks - batchHoldMigrationChecks - closureWaitMigrationChecks - bootstrapChecks - identityCommitChecks, 114,
     'round counter and wake telemetry reuse the connection; three decisions persist their first-actionable anchors');
   assert.equal(profile.steps['handler-overhead'].subprocesses.gh, undefined);
   assert.ok(profile.outcomes.every(result => result.handled && !result.terminal));

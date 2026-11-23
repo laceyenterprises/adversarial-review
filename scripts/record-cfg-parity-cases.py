@@ -8,6 +8,13 @@ Each case names YAML files written to a scratch directory (`config.yaml` is
 the top file), optional `modules` and `env`, and dotted keys to `get`. The
 script rewrites each case's `python` field with the loader's verdict, so the
 offline Node suite (test/config-cfg-parity.test.mjs) can assert agreement.
+
+The supplied JSON is also the input suite: cases are authored here, not
+imported from an upstream test list. Recording preserves all case inputs.
+Use a clean agent-os checkout and set the fixture's `source` to its full
+commit SHA after recording. For cases recorded against a newer revision,
+use a separate cfg-parity-cases.<name>.json and include it in the Node test
+so the older cases retain their original provenance.
 """
 
 import json

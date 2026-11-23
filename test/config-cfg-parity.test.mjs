@@ -1,6 +1,6 @@
 // ONS-07 — the generated Node config validator agrees with the Python loader.
 //
-// fixtures/cfg-parity-cases.v1.json holds YAML inputs and the verdict the
+// fixtures/cfg-parity-cases.*.json hold YAML inputs and the verdict the
 // Python CFG loader returned for each (recorded offline with
 // scripts/record-cfg-parity-cases.py). Both readers must accept the same
 // documents with the same resolved values, and refuse the same documents at
@@ -14,7 +14,9 @@ import { dirname, join } from 'node:path';
 import { AgentOSConfigError, ENV_ALIASES, loadConfig, loadConfigRuntime } from '../src/config-loader.mjs';
 import { CFG_JSON_SCHEMA, schemaV1 } from '../src/config-schema.mjs';
 
-const { cases } = JSON.parse(readFileSync(new URL('./fixtures/cfg-parity-cases.v1.json', import.meta.url), 'utf8'));
+// Keep independently recorded revisions separate so each source remains accurate.
+const cases = ['cfg-parity-cases.v1.json', 'cfg-parity-cases.cfgnodeschema-01.json']
+  .flatMap(file => JSON.parse(readFileSync(new URL(`./fixtures/${file}`, import.meta.url), 'utf8')).cases);
 
 for (const { name, files, modules = [], env = {}, get = [], python } of cases) {
   test(`CFG parity: ${name}`, () => {

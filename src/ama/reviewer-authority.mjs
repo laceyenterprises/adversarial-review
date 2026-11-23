@@ -63,6 +63,11 @@ export async function latestAuthoritativeReviewInAncestry(reviews, headSha, comp
 // Families may stack findings on one head, but no citation survives a newer
 // authoritative head in the parent ancestry, even from another family.
 export async function isCurrentAuthoritativeFamilyReview(review, reviews, headSha, compare, currency = null) {
+  // Resolve copies to the authoritative list entry before using its position.
+  if (review?.id && !reviews.includes(review)) {
+    review = reviews.find(entry => entry.id === review.id && entry.commit_id === review.commit_id);
+  }
+
   const family = amaReviewerFamilyForLogin(review?.user?.login);
   if (!family) return false;
   const latest = await latestAuthoritativeReviewInAncestry(reviews.filter((entry) =>

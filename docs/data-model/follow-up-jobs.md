@@ -976,6 +976,12 @@ admits findings and identifies the Hammer starting range. Merge still requires
 its own exact-head validation and source-preservation checks. HQ publication
 keeps its separate produced-attestation contract.
 
+Standalone local replay requires the settled round's explicit `publishedHeadSha`
+to match `completion.workerPushedHeadSha`. A completed final handoff can use
+the round's matching `resultingHeadSha` when `publishedHeadSha` is absent.
+That handoff evidence can be composed with an authenticated Hammer edge to
+prove review currency at the final head.
+
 The retry transition retains the round and its attempt metadata while decrementing
 `currentRound`; the next claim reuses that round number and merges the retained
 record before resetting its claim identity, delivery key, `state` and

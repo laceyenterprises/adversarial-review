@@ -12,6 +12,7 @@ import {
 import { isCurrentAuthoritativeFamilyReview, latestAuthoritativeReviewInAncestry } from '../src/ama/reviewer-authority.mjs';
 import { closerReviewProof } from '../src/ama/closer-review-proof.mjs';
 import { closerAuthoredStaleEligible, proveCloserAuthoredStaleHead } from '../src/closer-authored-stale.mjs';
+import { completedCommentOnlyHandoff, completedLocalCommentOnlyReplay } from '../src/comment-only-final-round.mjs';
 import { isEligibleForAmaClosure } from '../src/ama/eligibility.mjs';
 import { primaryChangeFixture } from './helpers/primary-change.mjs';
 import { DEFAULT_ADVERSARIAL_GATE_CONTEXT } from '../src/adversarial-gate-context.mjs';
@@ -75,6 +76,21 @@ function nativeFinalJob() {
       workerPushProof: { method: 'git-cherry-replay', reviewedCommitsReplayed: 1, workerCommits: 1 } },
   };
 }
+
+test('completed handoff and local replay reject missing or non-object job inputs', () => {
+  for (const input of [undefined, null, 'job', 1]) {
+    assert.equal(completedCommentOnlyHandoff(input), null);
+    assert.equal(completedLocalCommentOnlyReplay(input), null);
+  }
+});
+
+test('standalone local replay requires an explicitly recorded published head', () => {
+  const job = { ...nativeFinalJob(), status: 'completed' };
+  assert.deepEqual(completedLocalCommentOnlyReplay(job), { reviewedHead, head: remediated });
+  delete job.remediationPlan.rounds[0].publishedHeadSha;
+  assert.equal(completedCommentOnlyHandoff(job), job.remediationPlan.rounds[0]);
+  assert.equal(completedLocalCommentOnlyReplay(job), null);
+});
 
 test('a non-final round awaiting review cannot waive the head match after a Hammer push', async t => {
   const { options, currency } = fixture(t, { job: { reReview: {
@@ -333,8 +349,11 @@ test('an older diverged review cannot make an exact-head citation uncertain at t
   const cited = { ...reviews[1], commit_id: currentHead };
   assert.equal(await isCurrentAuthoritativeFamilyReview(cited, [older, cited], currentHead, compare, currency), true);
   const otherFamily = { ...older, user: { login: 'lacey-claude-reviewer' } };
-  await assert.rejects(isCurrentAuthoritativeFamilyReview(cited, [cited, otherFamily], currentHead, compare, currency),
+  const copy = structuredClone(cited);
+  assert.equal(await isCurrentAuthoritativeFamilyReview(copy, [otherFamily, cited], currentHead, compare, currency), true);
+  await assert.rejects(isCurrentAuthoritativeFamilyReview(copy, [cited, otherFamily], currentHead, compare, currency),
     error => error.proofLimit === HAMMER_COMMENTS_CAPPED);
+  assert.equal(await isCurrentAuthoritativeFamilyReview({ ...copy, id: 999 }, [cited], currentHead, compare, currency), false);
 });
 
 test('LAC-2331 unavailable comparisons leave an independent exact mixed proof usable', async t => {

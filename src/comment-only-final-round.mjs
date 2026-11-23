@@ -363,6 +363,7 @@ export function isCompletedCommentOnlyFinalRoundJob(job) {
 // The protected completion writer proves the push before handing its exact
 // head to the closer. A pending or requested review cannot authorize this edge.
 export function completedCommentOnlyHandoff(job) {
+  if (!job || typeof job !== 'object') return null;
   const { revisionRef: reviewedHead, jobId, completion, remediationWorker: worker, remediationPlan: plan } = job;
   const head = completion?.workerPushedHeadSha;
   const proof = completion?.workerPushProof;
@@ -402,7 +403,10 @@ export function completedCommentOnlyHandoff(job) {
 // completion records this replay proof after verifying the job-owned commits,
 // the reviewed patches and the live destination. HQ publication has a separate
 // produced-attestation contract.
+// Standalone local replay also requires the round's explicit published head
+// as evidence of the live destination.
 export function completedLocalCommentOnlyReplay(job) {
+  if (!job || typeof job !== 'object') return null;
   const { revisionRef: reviewedHead, completion, remediationWorker: worker, remediationPlan: plan } = job;
   const head = completion?.workerPushedHeadSha;
   const settled = completedCommentOnlyHandoff(job);

@@ -3092,8 +3092,9 @@ Key control points:
   review and the evidence head must match the current evaluated head or have
   independent HAMWITHDRAW-01 coverage. Findings and withdrawals share one
   review-currency rule: authenticated HAM base/head provenance ending at the
-  live head, or ordered patch-ID equivalence apart from authenticated HAM
-  remediation commits, preserves currency across a closer rebase. A proven
+  live head can compose with completed native remediation rounds from the
+  daemon's repository- and PR-scoped store. Ordered patch-ID equivalence apart
+  from authenticated HAM remediation commits is an independent proof. A proven
   rebase reuses the original withdrawal without rewriting its durable head or
   posting again. Partial withdrawals reduce the standing blocker count.
   Unproven currency admits neither findings nor dispositions and refuses merge

@@ -78,13 +78,21 @@ case "$1" in
 esac
 `);
   writeFileSync(join(dir, 'proof.mjs'), `
-import { readFileSync } from 'node:fs';
+import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { fetchHammerHeadRange } from ${JSON.stringify(join(root, 'src/ama/hammer-head-validation.mjs'))};
 const env = process.env;
+if (env.PROVABLE_ROUND) {
+  const dir = join(env.FIXTURE_DIR, 'data', 'follow-up-jobs', 'completed');
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(join(dir, 'fixture__repo-pr-42-job.json'), JSON.stringify({ repo: 'fixture/repo', prNumber: 42,
+    status: 'completed', remediationPlan: { rounds: [{ state: 'completed',
+      startHeadSha: env.REVIEWED_HEAD, resultingHeadSha: env.HAM_BASE_HEAD }] } }));
+}
 const range = await fetchHammerHeadRange({ repo: 'fixture/repo', reviewedHead: env.REVIEWED_HEAD,
   currentHead: env.CURRENT_HEAD, hammerBaseHead: env.HAM_BASE_HEAD,
   comments: JSON.parse(readFileSync(env.COMMENTS_PATH, 'utf8')),
-  remediationRounds: env.PROVABLE_ROUND ? [{ state: 'completed', startHeadSha: env.REVIEWED_HEAD, resultingHeadSha: env.HAM_BASE_HEAD }] : [],
+  rootDir: env.FIXTURE_DIR, prNumber: 42,
   get: async () => { if (env.RANGE_READ_FAILURE) throw new Error('synthetic history unavailable');
     return { status: env.PROVABLE_ROUND ? 'ahead' : 'unknown' }; } });
 if (!range) process.exit(65);

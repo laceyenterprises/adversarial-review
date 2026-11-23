@@ -8,6 +8,8 @@ import { execGhWithRetry } from './gh-cli.mjs';
 import { fetchMergeAgentCandidateSnapshot } from './merge-agent-candidate-snapshot.mjs';
 import { amaAllAuthoritativeReviewerLogins, amaReviewerFamilyForLogin,
   latestAuthoritativeReviewInAncestry } from './ama/reviewer-authority.mjs';
+import { createReviewCurrencyReader } from './ama/review-currency.mjs';
+import { readHammerProvenanceComments } from './ama/hammer-head-validation.mjs';
 import { REVIEWER_PASS_GENUINE_POSTED_REVIEW_WHERE_SQL,
   REVIEWER_PASS_NORMALIZED_POSTED_AT_SQL } from './reviewer-pass-posted-review-sql.mjs';
 import { readLaunchRequestObservationFromLedgerAsync } from './session-ledger-read-adapter.mjs';
@@ -233,8 +235,25 @@ export async function collectPrBlockers({ repos, root, checkouts = {}, cfg, now 
       };
       const trustedReviews = reviews?.filter(review =>
         trusted.has(String(review.user?.login || '').replace(/\[bot\]$/, ''))) || [];
+      const commentsPath = `repos/${repo}/issues/${number}/comments`;
+      let commentRead;
+      const readComments = () => commentRead ??= readHammerProvenanceComments(
+        page => get(`${commentsPath}?per_page=100&page=${page}`)).then(rows => {
+        if (rows === null) throw new Error('missing or capped closer attestations');
+        return rows;
+      });
+      const currency = createReviewCurrencyReader({ repo, prNumber: number, rootDir: root, cwd: checkouts[repo], loadComments: readComments,
+        pr: { head: { sha: pr.headRefOid }, base: { sha: pr.baseRefOid } },
+        get: path => path.includes('/compare/') ? compare(...path.split('/compare/')[1].split('...')) : get(path),
+      });
       const authoritative = reviews && await attempt('review authority',
-        () => latestAuthoritativeReviewInAncestry(trustedReviews, pr.headRefOid, compare), null);
+        () => latestAuthoritativeReviewInAncestry(trustedReviews, pr.headRefOid, compare, async (from, to) => {
+          const result = await currency(from, to);
+          if (!result.current && !['behind', 'diverged'].includes((await compare(from, to))?.status)) {
+            throw new Error('cannot verify review applicability');
+          }
+          return result;
+        }), null);
       const families = new Set(trustedReviews.filter(entry => entry.commit_id === authoritative?.commit_id
         && ['APPROVED', 'COMMENTED', 'CHANGES_REQUESTED', 'DISMISSED'].includes(entry.state))
         .map(entry => amaReviewerFamilyForLogin(entry.user?.login)).filter(Boolean));
@@ -261,7 +280,7 @@ export async function collectPrBlockers({ repos, root, checkouts = {}, cfg, now 
           }
           return { ...first, commits };
         }, null),
-        attempt('closer attestations', () => readPages(get, `repos/${repo}/issues/${number}/comments`), null),
+        attempt('closer attestations', readComments, null),
       ]) : [null, []];
       const exactLease = leases?.find(lease => lease.headSha === pr.headRefOid);
       const lease = exactLease || leases?.filter(lease => ['pending', 'dispatched'].includes(lease.status))

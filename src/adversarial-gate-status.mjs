@@ -1215,7 +1215,7 @@ async function buildAdversarialGateSnapshot(rootDir, {
   if (reviewedHeadSha && headSha && hammerWithdrawals.some(entry => entry.headSha !== headSha)) {
     const get = async path => JSON.parse((await meteredExecFile(execFileImpl, 'gh', ['api', path],
       { timeout: 15000, maxBuffer: 16 * 1024 * 1024 })).stdout);
-    const currency = createReviewCurrencyReader({ repo, prNumber, get, cwd: reviewCurrencyCwd });
+    const currency = createReviewCurrencyReader({ repo, prNumber, rootDir, get, cwd: reviewCurrencyCwd });
     reviewCurrency = await currency(reviewedHeadSha, headSha);
     try {
       const reviews = await get(`repos/${repo}/pulls/${prNumber}/reviews?per_page=100`);

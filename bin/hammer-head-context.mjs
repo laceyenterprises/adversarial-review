@@ -4,7 +4,7 @@ import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { fileURLToPath } from 'node:url';
 import { execGhWithRetry, isTransientGhError } from '../src/gh-cli.mjs';
-import { fetchHammerHeadRange, readCompletedRemediationRounds } from '../src/ama/hammer-head-validation.mjs';
+import { fetchHammerHeadRange, readHammerProvenanceComments } from '../src/ama/hammer-head-validation.mjs';
 import { meteredExecFile } from '../src/metered-gh.mjs';
 const [repo, reviewedHead, currentHead, baseArg, prUrl] = process.argv.slice(2);
 if (!repo || !reviewedHead || !currentHead || !baseArg || (baseArg === '--pr' && !prUrl)) {
@@ -64,16 +64,9 @@ const loadRebaseCoverage = async ({ base, head }) => {
   };
   return proveReviewedRebase({ reviewedHead, head, base, git, generatedFiles, verifyGenerated });
 };
-const loadComments = async () => {
-  const comments = [];
-  for (let page = 1; process.env.HAM_BASE_HEAD && process.env.HAM_BASE_HEAD !== reviewedHead; page++) {
-    const batch = JSON.parse((await execGhWithRetry({ hammerToken: true, args: ['api',
-      `repos/${repo}/issues/${prNumber}/comments?per_page=100&page=${page}`], timeoutMs: loadAwareTimeoutMs(15000) })).stdout);
-    comments.push(...batch);
-    if (batch.length < 100) break;
-  }
-  return comments;
-};
+const loadComments = () => !prNumber || !process.env.HAM_BASE_HEAD || process.env.HAM_BASE_HEAD === reviewedHead
+  ? [] : readHammerProvenanceComments(async page => JSON.parse((await execGhWithRetry({ hammerToken: true, args: ['api',
+    `repos/${repo}/issues/${prNumber}/comments?per_page=100&page=${page}`], timeoutMs: loadAwareTimeoutMs(15000) })).stdout));
 const loadTimelinePage = async cursor => {
   const [owner, name] = repo.split('/');
   const query = `query($owner: String!, $name: String!, $number: Int!, $cursor: String) {
@@ -106,7 +99,7 @@ const loadActivityPage = async path => {
   return { nodes: JSON.parse(body), next: next ? `${next.pathname.replace(/^\//, '')}${next.search}` : null };
 };
 const range = await fetchHammerHeadRange({ loadRebaseBase, loadRebaseCoverage, repo, reviewedHead, currentHead, baseRef, loadComments, loadTimelinePage, loadActivityPage, prNumber, hammerBaseHead: process.env.HAM_BASE_HEAD,
-  remediationRounds: await readCompletedRemediationRounds(process.env.HAM_ROOT_DIR, repo, prNumber),
+  rootDir: process.env.HAM_ROOT_DIR || fileURLToPath(new URL('../', import.meta.url)),
   get: async path => JSON.parse((await execGhWithRetry({ hammerToken: true, args: ['api', path], timeoutMs: loadAwareTimeoutMs(15000) })).stdout) }).catch(error => {
   if (error.gitCredentialRefreshFailed) process.exit(76);
   throw error;

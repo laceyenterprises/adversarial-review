@@ -508,6 +508,7 @@ async function main(argv = process.argv.slice(2)) {
     }
   }
   const cfg = loadEffectiveMergeAuthorityConfig({ rootDir: args['root-dir'] });
+  const rootDir = args['root-dir'] ? resolve(args['root-dir']) : DEFAULT_ROOT_DIR;
   let prJson, reviewsJson, protectionJson, timelineJson;
   try {
     prJson = loadJson(args.pr);
@@ -524,7 +525,7 @@ async function main(argv = process.argv.slice(2)) {
   if (dispatchedReviewCycleExhausted) {
     try {
       reviewCycleExhausted = recomputeReviewCycleExhausted({
-        rootDir: args['root-dir'] ? resolve(args['root-dir']) : DEFAULT_ROOT_DIR,
+        rootDir,
         repo: args.repo,
         prNumber: prJson?.number,
       });
@@ -624,7 +625,7 @@ async function main(argv = process.argv.slice(2)) {
         if (hamCommitJson && path.endsWith(`/commits/${hamCommitJson.sha}`)) return hamCommitJson;
         throw new Error('authenticated HAM remediation commit absent from supplied snapshot');
       };
-      const currency = createReviewCurrencyReader({ repo: args.repo, prNumber: prJson.number, comments: timelineJson, get });
+      const currency = createReviewCurrencyReader({ repo: args.repo, prNumber: prJson.number, rootDir, comments: timelineJson, get });
       const logins = amaAuthoritativeReviewerLoginsForModel(args.reviewer);
       const applicableReview = await latestAuthoritativeReviewInAncestry(
         (reviewsJson?.reviews || []).filter(review => reviewSubmittedAt(review)
@@ -646,7 +647,7 @@ async function main(argv = process.argv.slice(2)) {
     }
   }
   const recordedWithdrawals = hammerWithdrawalsFromComments(timelineJson, readHammerWithdrawals({
-    rootDir: args['root-dir'] ? resolve(args['root-dir']) : DEFAULT_ROOT_DIR,
+    rootDir,
     repo: args.repo, prNumber: prJson?.number,
   }));
   let hammerWithdrawnFindings = recordedWithdrawals;
@@ -666,7 +667,7 @@ async function main(argv = process.argv.slice(2)) {
       if (hamCommitJson && path.endsWith(`/commits/${hamCommitJson.sha}`)) return hamCommitJson;
       throw new Error('authenticated HAM remediation commit absent from supplied snapshot');
     };
-    const currency = createReviewCurrencyReader({ repo: args.repo, prNumber: prJson.number, comments: timelineJson, get });
+    const currency = createReviewCurrencyReader({ repo: args.repo, prNumber: prJson.number, rootDir, comments: timelineJson, get });
     reviewState.reviewCurrency = await currency(args['reviewed-sha'], prMetadata.headSha);
     const reviews = (Array.isArray(reviewsJson?.reviews) ? reviewsJson.reviews : []).map(entry => ({ ...entry, commit_id: reviewCommitOid(entry),
       user: { login: reviewAuthorLogin(entry) } }))

@@ -46,7 +46,7 @@ export async function disputeFinding({ rootDir, repo, prNumber, headSha, reviewR
   if (!['request-changes', 'comment-only', 'approved'].includes(verdict) || !blocking) {
     throw worldFactError('dispute-review-evidence-invalid', 'dispute requires authoritative blocking review');
   }
-  const currency = createReviewCurrencyReader({ repo, prNumber, get, pr, git });
+  const currency = createReviewCurrencyReader({ repo, prNumber, rootDir, get, pr, git });
   const reviewCurrency = await currency(review.commit_id, headSha);
   if (!await isCurrentAuthoritativeFamilyReview(review, reviews, headSha,
     (from, to) => get(`repos/${repo}/compare/${from}...${to}`), currency)) {

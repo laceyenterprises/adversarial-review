@@ -146,7 +146,7 @@ test('timeline loader omits absent and invalid cursors and forwards a valid curs
   assert.ok(calls.at(-1).includes('cursor=next-page'));
 });
 
-function fixture(t, scenario) {
+function fixture(t, scenario, { reviewed = 'reviewed', head = 'head' } = {}) {
   const root = mkdtempSync(join(tmpdir(), 'hammer-head-context-'));
   t.after(() => rmSync(root, { recursive: true, force: true }));
   // The extensionless gh executable must not inherit TMPDIR's package type.
@@ -181,22 +181,22 @@ if (scenario === 'activity' && args[1] === 'repos/fixture/repo/pulls/1') {
 } else if (args[1] === 'graphql') {
   process.stdout.write(JSON.stringify({ data: { repository: { pullRequest: { timelineItems: {
     nodes: [{ __typename: 'HeadRefForcePushedEvent', actor: { __typename: scenario === 'rebase-user' ? 'User' : 'Bot', login: 'lacey-codex-agent[bot]' },
-      beforeCommit: { oid: 'reviewed' }, afterCommit: { oid: 'head' } }], pageInfo: { hasNextPage: false, endCursor: null }
+      beforeCommit: { oid: '${reviewed}' }, afterCommit: { oid: '${head}' } }], pageInfo: { hasNextPage: false, endCursor: null }
   } } } } }));
 } else if (args[1] === 'repos/fixture/repo/issues/1/comments?per_page=100&page=1') {
   process.stdout.write(JSON.stringify([{ user: { login: 'the-hammer-lacey[bot]' },
-    body: 'HAM-Base-Head: reviewed\\nHAM-Validated-Head: earlier' }]));
+    body: 'HAM-Base-Head: ${reviewed}\\nHAM-Validated-Head: earlier' }]));
 } else if (args[1] === '--include') {
   process.stdout.write('HTTP/2.0 200 OK\\r\\n\\r\\n[]');
 } else if (args[1] === 'repos/fixture/repo/pulls/1' && !args.includes('--jq')) {
-  process.stdout.write(JSON.stringify({ head: { ref: 'repair', repo: { full_name: 'fixture/repo' } } }));
+  process.stdout.write(JSON.stringify({ head: { sha: '${head}', ref: 'repair', repo: { full_name: 'fixture/repo' } } }));
 } else if (args[1] === 'repos/fixture/repo/pulls/1') {
   if (args.join(' ') !== 'api repos/fixture/repo/pulls/1 --jq .base.ref') fail('unexpected PR call');
   process.stdout.write('release\\n');
 } else if (args[1] === 'repos/fixture/repo/commits/release') {
   process.stdout.write(JSON.stringify({ sha: 'base' }));
-} else if (['repos/fixture/repo/compare/base...head', 'repos/fixture/repo/compare/reviewed...head'].includes(args[1])) {
-  process.stdout.write(JSON.stringify({ status: scenario.startsWith('rebase') ? 'diverged' : 'ahead', total_commits: 1, commits: [{ sha: 'head',
+} else if (['repos/fixture/repo/compare/base...${head}', 'repos/fixture/repo/compare/${reviewed}...${head}'].includes(args[1])) {
+  process.stdout.write(JSON.stringify({ status: scenario.startsWith('rebase') ? 'diverged' : 'ahead', total_commits: 1, commits: [{ sha: '${head}',
     author: { login: 'lacey-codex-agent[bot]' }, committer: { login: 'web-flow' },
     commit: { verification: { verified: scenario !== 'spoof', reason: 'valid' } } }] }));
 } else fail('unexpected API call');
@@ -211,7 +211,7 @@ if (scenario === 'activity' && args[1] === 'repos/fixture/repo/pulls/1') {
   return {
     env: fixtureEnv,
     run: (baseArgs = ['--pr', 'https://github.com/fixture/repo/pull/1'], env = {}) => exec(process.execPath,
-      [cli, 'fixture/repo', 'reviewed', 'head', ...baseArgs], {
+      [cli, 'fixture/repo', reviewed, head, ...baseArgs], {
         env: { ...fixtureEnv, ...env }, timeout: 15000,
       }),
     root,
@@ -277,42 +277,44 @@ test('head context refuses a missing comment PR number before making an API requ
   assert.equal(f.calls().length, 0);
 });
 
+const reviewed = 'a'.repeat(40), head = 'b'.repeat(40);
+
 test('HAMCLOSE-05 completed daemon round exits successfully instead of handing off', async t => {
-  const f = fixture(t, 'spoof');
+  const f = fixture(t, 'spoof', { reviewed, head });
   const dir = join(f.root, 'data', 'follow-up-jobs', 'completed');
   mkdirSync(dir, { recursive: true });
   const roundFile = join(dir, 'fixture__repo-pr-1-round.json');
   writeFileSync(roundFile, JSON.stringify({ repo: 'fixture/repo', prNumber: 1,
     status: 'completed', remediationPlan: { rounds: [{ state: 'completed',
-      startHeadSha: 'reviewed', resultingHeadSha: 'head' }] } }));
+      startHeadSha: reviewed, resultingHeadSha: head }] } }));
   writeFileSync(join(dir, 'fixture__repo-pr-1-broken.json'), '{');
   mkdirSync(join(dir, 'fixture__repo-pr-1-unreadable.json'));
-  const { stdout } = await f.run(undefined, { HAM_BASE_HEAD: 'head', HAM_ROOT_DIR: f.root });
+  const { stdout } = await f.run(undefined, { HAM_BASE_HEAD: head, HAM_ROOT_DIR: f.root });
   assert.equal(JSON.parse(stdout).proof, 'completed-remediation-round-chain');
   for (const overrides of [{ repo: 'fixture/other' }, { prNumber: 2 }, { status: 'in_progress' }]) {
     writeFileSync(roundFile, JSON.stringify({ repo: 'fixture/repo', prNumber: 1,
       status: 'completed', remediationPlan: { rounds: [{ state: 'completed',
-        startHeadSha: 'reviewed', resultingHeadSha: 'head' }] }, ...overrides }));
-    await assert.rejects(f.run(undefined, { HAM_BASE_HEAD: 'head', HAM_ROOT_DIR: f.root }), error => error.code === 65);
+        startHeadSha: reviewed, resultingHeadSha: head }] }, ...overrides }));
+    await assert.rejects(f.run(undefined, { HAM_BASE_HEAD: head, HAM_ROOT_DIR: f.root }), error => error.code === 65);
   }
   writeFileSync(roundFile, '{');
-  await assert.rejects(f.run(undefined, { HAM_BASE_HEAD: 'head', HAM_ROOT_DIR: f.root }), error => error.code === 65);
+  await assert.rejects(f.run(undefined, { HAM_BASE_HEAD: head, HAM_ROOT_DIR: f.root }), error => error.code === 65);
 });
 
 test('dispatched bootstrap inputs export the daemon root used by completed-round verification', async t => {
-  const f = fixture(t, 'spoof');
+  const f = fixture(t, 'spoof', { reviewed, head });
   const dir = join(f.root, 'data', 'follow-up-jobs', 'completed');
   mkdirSync(dir, { recursive: true });
   writeFileSync(join(dir, 'fixture__repo-pr-1-round.json'), JSON.stringify({ repo: 'fixture/repo', prNumber: 1,
     status: 'completed', remediationPlan: { rounds: [{ state: 'completed',
-      startHeadSha: 'reviewed', resultingHeadSha: 'head' }] } }));
+      startHeadSha: reviewed, resultingHeadSha: head }] } }));
   const inputs = hammerBootstrapInputs(closerTemplateValues({
     rootDir: f.root, scratchDir: f.root, hqRoot: join(f.root, 'hq'), hqOwnerUser: 'fixture',
   }));
   const exportLine = inputs.split('\n').find(line => line.startsWith('export HAM_ROOT_DIR='));
   assert.ok(exportLine);
-  const { stdout } = await exec('bash', ['-c', `${exportLine}\nexec "$HAM_TEST_NODE" "$HAM_TEST_CLI" fixture/repo reviewed head --pr https://github.com/fixture/repo/pull/1`], {
-    env: { ...f.env, HAM_ROOT_DIR: '', HAM_BASE_HEAD: 'head', HAM_PR_NUMBER: '',
+  const { stdout } = await exec('bash', ['-c', `${exportLine}\nexec "$HAM_TEST_NODE" "$HAM_TEST_CLI" fixture/repo ${reviewed} ${head} --pr https://github.com/fixture/repo/pull/1`], {
+    env: { ...f.env, HAM_ROOT_DIR: '', HAM_BASE_HEAD: head, HAM_PR_NUMBER: '',
       HAM_TEST_NODE: process.execPath, HAM_TEST_CLI: cli, PATH: `${f.root}:${process.env.PATH}` }, timeout: 15000,
   });
   assert.equal(JSON.parse(stdout).proof, 'completed-remediation-round-chain');
@@ -320,12 +322,12 @@ test('dispatched bootstrap inputs export the daemon root used by completed-round
 
 for (const scenario of ['rebase-bot', 'rebase-user']) {
   test(`HAMCLOSE-06 helper: ${scenario}`, async t => {
-    const f = fixture(t, scenario);
+    const f = fixture(t, scenario, { reviewed, head });
     const dir = join(f.root, 'data', 'follow-up-jobs', 'completed');
     mkdirSync(dir, { recursive: true });
     writeFileSync(join(dir, 'fixture__repo-pr-1-round.json'), JSON.stringify({ repo: 'fixture/repo', prNumber: 1,
-      status: 'completed', remediationPlan: { rounds: [{ state: 'completed', startHeadSha: 'reviewed', resultingHeadSha: 'head' }] } }));
-    const run = () => f.run(undefined, { HAM_BASE_HEAD: 'head' });
+      status: 'completed', remediationPlan: { rounds: [{ state: 'completed', startHeadSha: reviewed, resultingHeadSha: head }] } }));
+    const run = () => f.run(undefined, { HAM_BASE_HEAD: head });
     if (scenario === 'rebase-bot') assert.deepEqual(JSON.parse((await run()).stdout).linkKinds, ['fleet-force-push']);
     else await assert.rejects(run(), error => error.code === 65 && error.stderr === 'hammer starting base or responsibility range could not be proven\n');
   });

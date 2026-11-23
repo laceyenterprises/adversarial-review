@@ -1,6 +1,6 @@
 import { loadAwareTimeoutMs } from '../load-aware-timeout.mjs';
 import { execFile } from 'node:child_process';
-import { hammerAttestationChain } from './hammer-head-validation.mjs';
+import { hammerAttestationChain, readCompletedRemediationRounds, readHammerProvenanceComments } from './hammer-head-validation.mjs';
 import { hamCommitIdentityMatches, isHamWorkerTicket, parseCommitTrailers } from './ham-provenance.mjs';
 
 const SHA = /^[a-f0-9]{40}$/i;
@@ -70,18 +70,20 @@ async function patchEquivalent({ reviewedHead, currentHead, base, git, get, repo
 // One evaluation-local reader for finding admission AND disposition admission.
 // Only an exact current endpoint is covered; a later unrelated push cannot
 // inherit a prior HAM audit edge. Cache reads only within this live evaluation.
-export function createReviewCurrencyReader({ repo, prNumber, get, comments = null, cwd,
+export function createReviewCurrencyReader({ repo, prNumber, rootDir, get, comments = null, loadComments, cwd,
   git = (args, input) => currencyGit(args, input, { cwd }), pr = null }) {
   const cache = new Map();
-  let commentRead, prRead;
-  const readComments = () => commentRead ||= comments !== null ? Promise.resolve(comments)
-    : Promise.resolve(get(`repos/${repo}/issues/${prNumber}/comments?per_page=100`)).then(rows => {
-      if (!Array.isArray(rows) || rows.length >= 100) throw new Error('missing or capped HAM provenance comments');
-      return rows;
-    });
+  let commentRead, roundRead, prRead;
+  const readComments = () => commentRead ||= loadComments ? Promise.resolve().then(loadComments)
+    : comments !== null ? Promise.resolve(comments)
+    : readHammerProvenanceComments(page => get(
+      `repos/${repo}/issues/${prNumber}/comments?per_page=100${page === 1 ? '' : `&page=${page}`}`));
   const proveRebase = async (reviewedHead, currentHead) => {
     try {
-      if (hammerAttestationChain(await readComments(), reviewedHead, currentHead)) return 'closer-rebase-provenance';
+      const provenance = await readComments();
+      if (hammerAttestationChain(provenance, reviewedHead, currentHead)) return 'closer-rebase-provenance';
+      roundRead ??= readCompletedRemediationRounds(rootDir, repo, prNumber);
+      if (hammerAttestationChain(provenance, reviewedHead, currentHead, await roundRead)) return 'closer-rebase-provenance';
     } catch { /* Independent patch proof may still succeed. */ }
     prRead ||= pr ? Promise.resolve(pr) : get(`repos/${repo}/pulls/${prNumber}`);
     const live = await prRead;

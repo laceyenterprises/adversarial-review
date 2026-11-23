@@ -939,13 +939,19 @@ The persisted accounting fields are:
   `publishedHeadSha`, computed when a budget stop is recorded.
   It feeds budget-stop comments and cannot reconstruct historical publications.
 
-HAMCLOSE-05 uses completed jobs in `completed/` for the same repo and PR to
-connect `startHeadSha` to `resultingHeadSha`. The hammer head validator requires
-each link's GitHub comparison to be strictly `ahead`; missing heads, identical
-or diverged comparisons, and failed comparison reads cannot establish proof.
-Unreadable or malformed job files are skipped individually, preserving valid
-evidence from other completed jobs. If the directory cannot be read, no round
-evidence is available.
+HAMCLOSE-05 reads completed jobs in `completed/` under the review service's
+runtime root. The job and round must both have state `completed`, the job must
+match the repository and PR, and both round endpoints must be full commit SHAs.
+The round-only starting-base proof requires a GitHub `ahead` comparison or
+the existing authenticated force-push proof for a diverged edge. Shared review
+currency can compose these stored endpoints with authenticated Hammer comment
+edges. For a mixed chain, the exact final endpoint requires a Hammer edge.
+
+The reader skips unreadable, malformed, non-regular and oversized job files
+individually. Each record is limited to 1 MiB. A scan limits directory entries
+to 100,000, matching job files to 256 and distinct completed round edges to 256.
+An unreadable directory or a scan beyond those bounds supplies no round proof.
+Authenticated comment and patch-equivalence proofs can still establish currency.
 
 The retry transition retains the round and its attempt metadata while decrementing
 `currentRound`; the next claim reuses that round number and merges the retained

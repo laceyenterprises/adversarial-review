@@ -30,7 +30,7 @@ export async function dismissWithdrawnReviews({ rootDir, repo, prNumber, headSha
   const reviews = await get(`${prPath}/reviews?per_page=100`);
   const comments = await get(`repos/${repo}/issues/${prNumber}/comments?per_page=100`);
   if (!Array.isArray(reviews) || !Array.isArray(comments)) throw new Error('missing reviews or withdrawal comments');
-  const currency = createReviewCurrencyReader({ repo, prNumber, get, comments, git });
+  const currency = createReviewCurrencyReader({ repo, prNumber, rootDir, get, comments, git });
   const withdrawals = await carryHammerWithdrawals(hammerWithdrawalsFromComments(comments, recorded), headSha, currency);
   if (!expectedWithdrawnIdentities.every(identity => withdrawals.some(entry =>
     entry.identity === identity && entry.reviewCurrency.current && entry.evidenceCurrency.current))) {

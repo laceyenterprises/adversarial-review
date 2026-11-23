@@ -1,16 +1,38 @@
 import { followUpJobFileFilter } from '../follow-up-job-names.mjs';
 import { isTransientGhError } from '../gh-cli.mjs';
 import { proveReviewedRebase } from './reviewed-rebase.mjs';
-import { opendir, readFile } from 'node:fs/promises';
+import { constants } from 'node:fs';
+import { open, opendir } from 'node:fs/promises';
 import { join } from 'node:path';
 import { HAM_AUDIT_COMMENT_AUTHOR_LOGINS, hamAuditCommentAuthorMatches } from './ham-provenance.mjs';
 
+const isAbort = error => error?.name === 'AbortError' || error?.code === 'ABORT_ERR';
+const isHistoryReadFailure = error => error?.hammerHistoryReadFailed || error?.primaryChangeReadFailed || isTransientGhError(error);
 function rethrowReadFailure(error) {
-  if (error?.hammerHistoryReadFailed || error?.primaryChangeReadFailed || isTransientGhError(error)
-    || error?.name === 'AbortError' || error?.code === 'ABORT_ERR') throw error;
+  if (isHistoryReadFailure(error) || isAbort(error)) throw error;
 }
 
 const login = identity => String(typeof identity === 'object' ? identity?.login || '' : identity || '').toLowerCase().replace(/\[bot\]$/, '');
+const FULL_SHA = /^[0-9a-f]{40}$/i;
+const HAMMER_COMMENT_MAX_PAGES = 10;
+const HAMMER_COMMENT_PAGE_SIZE = 100;
+const MAX_COMPLETED_ENTRIES = 100_000;
+const MAX_COMPLETED_RECORDS = 256;
+const MAX_COMPLETED_RECORD_BYTES = 1024 * 1024;
+const MAX_COMPLETED_ROUND_EDGES = 256;
+const BRANCH_RESET = Symbol('branch reset');
+
+// A full last page can be truncated. Partial pages may not attest a chain.
+export async function readHammerProvenanceComments(loadPage) {
+  const comments = [];
+  for (let page = 1; page <= HAMMER_COMMENT_MAX_PAGES; page++) {
+    const batch = await loadPage(page);
+    if (!Array.isArray(batch) || batch.length > HAMMER_COMMENT_PAGE_SIZE) return null;
+    comments.push(...batch);
+    if (batch.length < HAMMER_COMMENT_PAGE_SIZE) return comments;
+  }
+  return null;
+}
 // Existing fleet App identities, shared by builders, remediators and conflict rebases.
 // cfg-allowlist(github-account): compatibility identities for existing fleet installations.
 const DEFAULT_FLEET_LOGINS = ['lacey-codex-agent', 'lacey-claude-agent', 'lacey-gemini-agent', 'lacey-clio-agent'];
@@ -43,6 +65,7 @@ export function exactHammerValidation(comment, headSha) {
 // and builder-authored copies of the same trailers confer no authority.
 export function hammerProvenanceEdge(comment) {
   const author = comment?.author?.login || comment?.author || comment?.user?.login;
+  if (comment?.user && comment?.author && login(comment.user) !== login(comment.author)) return null;
   if (!exactHammerCommentAuthorMatches(author)) return null;
   const lines = String(comment?.body || '').split(/\r?\n/).map(line => line.trim());
   const values = key => lines.filter(line => line.startsWith(`${key}:`))
@@ -53,6 +76,7 @@ export function hammerProvenanceEdge(comment) {
   if (bases.length !== 1 || !bases[0] || validated.length + pushed.length !== 1) return null;
   const head = validated[0] || pushed[0];
   if (!head || (validated.length && !exactHammerValidation(comment, head))) return null;
+  if (pushed.length && values('HAM-Terminal-Remediation-Head').length) return null;
   return { base: bases[0], head, validated: validated.length === 1 };
 }
 
@@ -60,41 +84,80 @@ export function hammerProvenanceEdge(comment) {
 // bridge to a hammer base; the exact current head still needs a hammer edge.
 export function hammerAttestationChain(comments, reviewedHead, currentHead, remediationRounds = []) {
   if (!reviewedHead || !currentHead || currentHead === reviewedHead) return null;
-  const trusted = new Map([[reviewedHead, []]]);
-  const edges = (Array.isArray(comments) ? comments : []).map(hammerProvenanceEdge).filter(Boolean);
-  edges.push(...(Array.isArray(remediationRounds) ? remediationRounds : []).filter(round => round.state === 'completed'
-    && round.startHeadSha && round.resultingHeadSha && round.resultingHeadSha !== currentHead)
-    .map(round => ({ base: round.startHeadSha, head: round.resultingHeadSha })));
-  for (let pass = 0; pass < edges.length; pass++) {
-    let changed = false;
-    for (const edge of edges) {
-      if (!trusted.has(edge.base) || trusted.has(edge.head)) continue;
-      trusted.set(edge.head, [...trusted.get(edge.base), edge.head]);
-      changed = true;
-    }
-    if (!changed) break;
+  if (!Array.isArray(comments) || comments.length >= HAMMER_COMMENT_MAX_PAGES * HAMMER_COMMENT_PAGE_SIZE) return null;
+  const outgoing = new Map();
+  const addEdge = (base, head) => {
+    if (!outgoing.has(base)) outgoing.set(base, []);
+    outgoing.get(base).push(head);
+  };
+  for (const comment of comments) {
+    const edge = hammerProvenanceEdge(comment);
+    if (edge) addEdge(edge.base, edge.head);
   }
-  const chain = trusted.get(currentHead);
-  return chain?.length > 0 ? chain : null;
+  if (Array.isArray(remediationRounds) && remediationRounds.length <= MAX_COMPLETED_ROUND_EDGES) {
+    for (const round of remediationRounds) {
+      if (round?.state === 'completed' && round.startHeadSha && round.resultingHeadSha
+        && round.resultingHeadSha !== currentHead) addEdge(round.startHeadSha, round.resultingHeadSha);
+    }
+  }
+  const parents = new Map([[reviewedHead, null]]);
+  // Map iteration includes subsequently inserted nodes. Each SHA is visited once.
+  for (const [base] of parents) {
+    for (const head of outgoing.get(base) || []) {
+      if (parents.has(head)) continue;
+      parents.set(head, base);
+      if (head === currentHead) {
+        const chain = [];
+        for (let node = head; node !== reviewedHead; node = parents.get(node)) chain.push(node);
+        return chain.reverse();
+      }
+    }
+  }
+  return null;
+}
+
+async function readCompletedJob(path) {
+  const file = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+  try {
+    const stat = await file.stat();
+    if (!stat.isFile() || stat.size > MAX_COMPLETED_RECORD_BYTES) return null;
+    const buffer = Buffer.alloc(stat.size + 1);
+    const { bytesRead } = await file.read(buffer);
+    if (bytesRead !== stat.size) return null;
+    return JSON.parse(buffer.toString('utf8', 0, bytesRead));
+  } finally {
+    await file.close();
+  }
 }
 
 // Read only daemon-owned state under the supplied runtime root. Old rounds
 // without a resulting head cannot establish an edge.
 export async function readCompletedRemediationRounds(rootDir, repo, prNumber) {
-  if (!rootDir || !repo || !prNumber) return [];
-  const rounds = [];
+  if (typeof rootDir !== 'string' || !rootDir || typeof repo !== 'string' || !/^[\w.-]+\/[\w.-]+$/.test(repo)
+    || !['number', 'string'].includes(typeof prNumber)
+    || !Number.isSafeInteger(Number(prNumber)) || Number(prNumber) < 1) return [];
+  const rounds = new Map();
+  let entries = 0, records = 0;
   try {
     const dir = join(rootDir, 'data', 'follow-up-jobs', 'completed');
     const matches = followUpJobFileFilter({ rootDir, repo, prNumber, caseInsensitiveRepo: true });
     for await (const entry of await opendir(dir)) {
-      const name = entry.name;
-      if (!matches(name)) continue;
+      if (++entries > MAX_COMPLETED_ENTRIES) return [];
+      if (!entry.isFile() || !matches(entry.name)) continue;
+      if (++records > MAX_COMPLETED_RECORDS) return [];
       try {
-        const job = JSON.parse(await readFile(join(dir, name), 'utf8'));
-        if (String(job.repo).toLowerCase() !== String(repo).toLowerCase()
-          || String(job.prNumber) !== String(prNumber) || job.status !== 'completed') continue;
-        rounds.push(...(job.remediationPlan?.rounds || []).filter(round => round.state === 'completed'
-          && round.startHeadSha && round.resultingHeadSha));
+        const job = await readCompletedJob(join(dir, entry.name));
+        if (typeof job?.repo !== 'string' || job.repo.toLowerCase() !== repo.toLowerCase()
+          || !['number', 'string'].includes(typeof job.prNumber)
+          || String(job.prNumber) !== String(prNumber) || job.status !== 'completed'
+          || !Array.isArray(job.remediationPlan?.rounds)) continue;
+        for (const round of job.remediationPlan.rounds) {
+          const { startHeadSha: base, resultingHeadSha: head } = round || {};
+          if (round?.state !== 'completed' || typeof base !== 'string' || typeof head !== 'string'
+            || !FULL_SHA.test(base) || !FULL_SHA.test(head)) continue;
+          rounds.set(`${base}:${head}`, round);
+          if (rounds.size > MAX_COMPLETED_ROUND_EDGES) return [];
+        }
       } catch {
         // A damaged or concurrently removed record cannot invalidate other jobs.
       }
@@ -102,7 +165,7 @@ export async function readCompletedRemediationRounds(rootDir, repo, prNumber) {
   } catch {
     return [];
   }
-  return rounds;
+  return [...rounds.values()];
 }
 
 // A timeline read is all-or-nothing: incomplete pages cannot establish provenance.
@@ -154,7 +217,7 @@ async function remediationChain(rounds, reviewedHead, target, repo, get, loadTim
   if (!reviewedHead || !target || target === reviewedHead) return null;
   const trusted = new Map([[reviewedHead, []]]);
   const evaluated = new Set();
-  let timeline;
+  let timeline, readFailure;
   for (let pass = 0; pass < rounds.length; pass++) {
     let changed = false;
     for (const round of rounds) {
@@ -172,12 +235,17 @@ async function remediationChain(rounds, reviewedHead, target, repo, get, loadTim
           kind = 'fleet-force-push';
         } else if (comparison?.status !== 'ahead') continue;
         trusted.set(head, [...trusted.get(base), { head, kind }]);
-      } catch (error) { rethrowReadFailure(error); continue; }
+      } catch (error) {
+        if (isAbort(error)) throw error;
+        if (isHistoryReadFailure(error)) readFailure ??= error;
+        continue;
+      }
       changed = true;
     }
     if (trusted.get(target)?.length > 0) return trusted.get(target);
     if (!changed) break;
   }
+  if (readFailure) throw readFailure;
   return null;
 }
 
@@ -204,21 +272,42 @@ async function readComparison(path, get, limit) {
 
 // Read the complete head-only DAG, including side parents. The comparison with
 // the base excludes base history; foreign PR commits cannot hide behind a merge.
-async function fetchExistingHammerHeadRange({ repo, reviewedHead, currentHead, baseRef = 'main', get, env = process.env, comments = [], loadComments = null, hammerBaseHead = null, remediationRounds = [], loadTimelinePage = null }) {
+async function fetchExistingHammerHeadRange({ repo, prNumber, rootDir, reviewedHead, currentHead, baseRef = 'main', get,
+  env = process.env, comments = [], loadComments = null, hammerBaseHead = null, loadTimelinePage = null }) {
   // HAMCLOSE-01: the worker may start from the exact reviewed head. This is
   // a starting-base proof, not an App attestation or a completed round edge.
   if (reviewedHead && hammerBaseHead === reviewedHead) return { verified: true, reviewedHead, currentHead,
     baseSha: reviewedHead, commits: currentHead === reviewedHead ? [] : [currentHead], proof: 'reviewed-starting-base' };
+  const target = hammerBaseHead || currentHead;
   const fleetLogins = await resolveFleetLogins(env);
-  const rounds = await remediationChain(remediationRounds, reviewedHead, hammerBaseHead || currentHead, repo, get, loadTimelinePage, fleetLogins);
-  const chain = rounds?.length > 0 ? null
-    : hammerAttestationChain(loadComments ? await loadComments() : comments, reviewedHead, hammerBaseHead || currentHead);
-  if (chain?.length > 0) return { verified: true, reviewedHead, currentHead, baseSha: reviewedHead,
-    commits: [...chain, ...(hammerBaseHead && hammerBaseHead !== currentHead ? [currentHead] : [])],
-    proof: 'hammer-app-attestation-chain' };
+  const remediationRounds = await readCompletedRemediationRounds(rootDir, repo, prNumber);
+  let rounds, roundReadFailure;
+  try {
+    rounds = await remediationChain(remediationRounds, reviewedHead, target, repo, get, loadTimelinePage, fleetLogins);
+  } catch (error) {
+    if (isAbort(error)) throw error;
+    roundReadFailure = error;
+  }
   if (rounds?.length > 0) return { verified: true, reviewedHead, currentHead, baseSha: reviewedHead,
-    commits: [...rounds.map(link => link.head), ...(hammerBaseHead && hammerBaseHead !== currentHead ? [currentHead] : [])],
+    commits: [...rounds.map(link => link.head), ...(target !== currentHead ? [currentHead] : [])],
     proof: 'completed-remediation-round-chain', linkKinds: rounds.map(link => link.kind) };
+  const provenanceComments = loadComments ? await loadComments() : comments;
+  const chain = hammerAttestationChain(provenanceComments, reviewedHead, target);
+  if (chain?.length > 0) return { verified: true, reviewedHead, currentHead, baseSha: reviewedHead,
+    commits: [...chain, ...(target !== currentHead ? [currentHead] : [])],
+    proof: 'hammer-app-attestation-chain' };
+  const mixed = remediationRounds.length && FULL_SHA.test(reviewedHead) && FULL_SHA.test(currentHead)
+    ? hammerAttestationChain(provenanceComments, reviewedHead, currentHead, remediationRounds) : null;
+  if (mixed && (target === currentHead || mixed.includes(target))) {
+    const comparison = await get(`repos/${repo}/compare/${reviewedHead}...${currentHead}`).catch(error => {
+      if (isAbort(error)) throw error;
+      return null;
+    });
+    if (comparison?.status === 'behind') return BRANCH_RESET;
+    return { verified: true, reviewedHead, currentHead, baseSha: reviewedHead, commits: mixed,
+      proof: 'hammer-app-attestation-chain' };
+  }
+  if (roundReadFailure) throw roundReadFailure;
   if (hammerBaseHead) return null;
   const requestedLimit = Number(env.AMA_HAMMER_RANGE_MAX_COMMITS);
   const limit = Number.isSafeInteger(requestedLimit) && requestedLimit > 0 ? requestedLimit : HAMMER_RANGE_MAX_COMMITS;
@@ -277,8 +366,20 @@ export async function fetchHammerHeadRange(options) {
       }
     };
   }
-  const existing = await fetchExistingHammerHeadRange(options);
+  let existing, readFailure;
+  try { existing = await fetchExistingHammerHeadRange(options); }
+  catch (error) {
+    if (!isHistoryReadFailure(error) || isAbort(error)) throw error;
+    readFailure = error;
+  }
+  if (existing === BRANCH_RESET) return null;
   if (existing) return existing;
+  const fallback = await fetchRebasedHammerHeadRange(options);
+  if (!fallback && readFailure) throw readFailure;
+  return fallback;
+}
+
+async function fetchRebasedHammerHeadRange(options) {
   const { repo, reviewedHead, currentHead, hammerBaseHead, get, loadActivityPage,
     prNumber, env = process.env } = options;
   const target = hammerBaseHead || currentHead;

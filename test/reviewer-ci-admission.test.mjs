@@ -179,7 +179,7 @@ for (const finalRound of [true, false]) {
     const rounds = await readCompletedRemediationRounds(rootDir, repo, prNumber);
     assert.deepEqual(rounds, [round]);
     const range = await fetchHammerHeadRange({ repo, reviewedHead, currentHead: hammerHead,
-      hammerBaseHead: pushedHead, remediationRounds: rounds, env: {},
+      hammerBaseHead: pushedHead, rootDir, prNumber, env: {},
       get: async (path) => {
         assert.equal(path, `repos/${repo}/compare/${reviewedHead}...${pushedHead}`);
         return { status: 'ahead' };

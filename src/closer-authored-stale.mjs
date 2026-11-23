@@ -15,7 +15,7 @@ import { loadAwareTimeoutMs } from './load-aware-timeout.mjs';
 import { join } from 'node:path';
 import { mkdirSync } from 'node:fs';
 import {
-  hammerAttestationChain, hammerProvenanceEdge, readCompletedRemediationRounds,
+  hammerAttestationChain, hammerProvenanceEdge, readCompletedRemediationRounds, readHammerProvenanceComments,
 } from './ama/hammer-head-validation.mjs';
 import { execGhWithRetry } from './gh-cli.mjs';
 import { writeFileAtomic } from './atomic-write.mjs';
@@ -59,20 +59,16 @@ export async function proveCloserAuthoredStaleHead({
   if (!reviewed || !current) return { ...base, reason: 'head-unknown' };
   if (reviewed === current) return { ...base, reason: 'not-stale' };
   if (!comments) {
-    comments = [];
     // An absent test collaborator is missing evidence, never live GitHub I/O.
     if (!options.repoPath || !options.prNumber || (process.env.NODE_TEST_CONTEXT
       && !options.execFileImpl && execGhWithRetryImpl === execGhWithRetry)) {
       return { ...base, reason: 'hammer-app-attestation-missing' };
     }
-    for (let page = 1; ; page++) {
-      const batch = JSON.parse((await execGhWithRetryImpl({ ...options,
-        args: ['api', `repos/${options.repoPath}/issues/${options.prNumber}/comments?per_page=100&page=${page}`],
-        timeoutMs: loadAwareTimeoutMs(15000) })).stdout);
-      comments.push(...batch);
-      if (batch.length < 100) break;
-    }
+    comments = await readHammerProvenanceComments(async page => JSON.parse((await execGhWithRetryImpl({ ...options,
+      args: ['api', `repos/${options.repoPath}/issues/${options.prNumber}/comments?per_page=100&page=${page}`],
+      timeoutMs: loadAwareTimeoutMs(15000) })).stdout));
   }
+  if (!Array.isArray(comments)) return { ...base, reason: 'hammer-app-attestation-missing' };
   const rounds = await readCompletedRemediationRounds(options.rootDir, options.repoPath, options.prNumber);
   const chain = hammerAttestationChain(comments, reviewed, current, rounds);
   // Hex case is not identity: a non-lowercase edge head still attests, so the

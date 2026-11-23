@@ -4669,7 +4669,7 @@ export async function resolveHamTerminalRemediationEvidence({
   if (!verifiedAuditComment) return null;
   const exactValidation = exactHammerValidation(verifiedAuditComment, currentHead);
   if (!exactValidation && identity?.suppressed !== true) return null;
-  const range = exactValidation ? await fetchHammerHeadRange({ repo: repoPath,
+  const range = exactValidation ? await fetchHammerHeadRange({ repo: repoPath, prNumber, rootDir,
     reviewedHead, currentHead, baseRef: prMetadata.baseRefName || 'main', env, comments: rollup?.comments,
     get: async path => JSON.parse((await execGhWithRetry({ execFileImpl, args: ['api', path],
       timeoutMs: loadAwareTimeoutMs(15000), env, signal })).stdout) }) : null;
@@ -4677,7 +4677,7 @@ export async function resolveHamTerminalRemediationEvidence({
   const terminalReviewProof = await terminalReviewProofMatches({
     reviews: rollup?.reviews, headSha: currentHead, validatedAt: verifiedAuditComment.createdAt,
     compare: (from, to) => get(`repos/${repoPath}/compare/${from}...${to}`),
-    currency: createReviewCurrencyReader({ repo: repoPath, prNumber, get, comments: rollup?.comments }),
+    currency: createReviewCurrencyReader({ repo: repoPath, prNumber, rootDir, get, comments: rollup?.comments }),
   });
 
   return {
@@ -6599,7 +6599,7 @@ async function maybeDispatchAmaCloserAttempt({
           sameHeadHamMergeReason = 'base-branch-missing';
         } else {
           const readTerminalReviewProof = rollup => ['CLOSED', 'MERGED'].includes(String(rollup?.state).toUpperCase())
-            ? null : closerReviewProof({ snapshot: rollup, repo, prNumber,
+            ? null : closerReviewProof({ snapshot: rollup, repo, prNumber, rootDir,
             headSha: mergeHead, validatedAt: eligibilityOptions.hamTerminalRemediationGroundTruth?.auditComment?.createdAt,
             operatorLogins: cfg?.operatorLogins, get: createHistoryReader({ execFileImpl, env, signal }) });
           let initialRollup;
@@ -6767,7 +6767,7 @@ async function maybeDispatchAmaCloserAttempt({
                 prNumber: mergePr,
                 head,
                 reviewProof: () => readCloserReviewProofImpl({
-                  repo: mergeRepo, prNumber: mergePr, headSha: head, signal, env, operatorLogins: cfg?.operatorLogins,
+                  repo: mergeRepo, prNumber: mergePr, rootDir, headSha: head, signal, env, operatorLogins: cfg?.operatorLogins,
                   validatedAt: eligibilityOptions.hamTerminalRemediationGroundTruth?.auditComment?.createdAt,
                 }),
                 logger,

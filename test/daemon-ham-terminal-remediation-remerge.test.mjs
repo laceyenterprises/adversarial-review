@@ -1,7 +1,7 @@
 import { primaryChangeFixture } from './helpers/primary-change.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -177,6 +177,35 @@ test('HAMLATEAUDIT-01: daemon terminal-audit reuse checks fresh exact-head revie
   } finally {
     rmSync(rootDir, { recursive: true, force: true });
   }
+});
+
+test('LAC-2331 daemon can reuse an exact terminal audit after native remediation and rebase', async t => {
+  const rootDir = tempRoot();
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  const args = findingsReviewArgs(rootDir);
+  const rollup = await args.fetchRollupImpl();
+  const nativeHead = 'c'.repeat(40);
+  rollup.comments[0].body = `HAM-Base-Head: ${nativeHead}\nHAM-Validated-Head: ${HAM_HEAD}`;
+  const dir = join(rootDir, 'data', 'follow-up-jobs', 'completed');
+  mkdirSync(dir, { recursive: true });
+  const record = join(dir, 'acme__repo-pr-4987-job.json');
+  const getAudit = () => hamValidatedAuditEntry(HAM_HEAD);
+  let admittedHead;
+  const run = () => runDaemonCleanMergeAttempt({ ...args, fetchRollupImpl: async () => rollup,
+    readAmaAuditEntryImpl: getAudit, execGhWithRetryImpl: async ({ args: argv }) => {
+      assert.ok(argv.includes(`repos/acme/repo/compare/${REVIEWED_HEAD}...${HAM_HEAD}`));
+      return { stdout: '{"status":"diverged"}' };
+    },
+    attemptDaemonCleanMergeImpl: async options => {
+      admittedHead = options.validatedHead;
+      return { disposition: DAEMON_MERGE_DISPOSITION.NOT_TAKEN };
+    },
+  });
+  assert.equal((await run()).reason, 'stale-head');
+  writeFileSync(record, JSON.stringify({ repo: args.repoPath, prNumber: args.prNumber, status: 'completed',
+    remediationPlan: { rounds: [{ state: 'completed', startHeadSha: REVIEWED_HEAD, resultingHeadSha: nativeHead }] } }));
+  await run();
+  assert.equal(admittedHead, HAM_HEAD);
 });
 
 test('daemon HAM reuse runs the review gate inside the same lane ownership as the transport', async () => {

@@ -74,7 +74,7 @@ async function standingOperatorReviewProof({ reviews, headSha, operatorLogins, r
   return { ok: true };
 }
 
-export async function closerReviewProof({ snapshot, repo, prNumber, headSha, validatedAt, operatorLogins = [], get }) {
+export async function closerReviewProof({ snapshot, repo, prNumber, rootDir, headSha, validatedAt, operatorLogins = [], get }) {
   try {
     const liveHead = snapshot?.headSha || snapshot?.headRefOid;
     if (!sha.test(liveHead) || String(snapshot?.state).toUpperCase() !== 'OPEN') return unavailable();
@@ -85,20 +85,20 @@ export async function closerReviewProof({ snapshot, repo, prNumber, headSha, val
     return await terminalReviewProofMatches({
       reviews: snapshot.reviews, headSha, validatedAt,
       compare: (from, to) => get(`repos/${repo}/compare/${from}...${to}`),
-      currency: createReviewCurrencyReader({ repo, prNumber, get, comments: snapshot.comments }),
+      currency: createReviewCurrencyReader({ repo, prNumber, rootDir, get, comments: snapshot.comments }),
     });
   } catch {
     return unavailable();
   }
 }
 
-export async function readCloserReviewProof({ repo, prNumber, headSha, validatedAt, operatorLogins, signal, env },
+export async function readCloserReviewProof({ repo, prNumber, rootDir, headSha, validatedAt, operatorLogins, signal, env },
   { fetchPr = fetchHammerPr, get = createHistoryReader({ signal, env, hammerToken: true }) } = {}) {
   try {
     const snapshot = await fetchPr(repo, prNumber, { withChecks: false, signal, env,
       withReviews: live => String(live?.state).toUpperCase() === 'OPEN'
         && String(live?.headSha || live?.headRefOid || '').toLowerCase() === String(headSha).toLowerCase() });
-    return await closerReviewProof({ snapshot, repo, prNumber, headSha, validatedAt, operatorLogins, get });
+    return await closerReviewProof({ snapshot, repo, prNumber, rootDir, headSha, validatedAt, operatorLogins, get });
   } catch {
     return unavailable();
   }

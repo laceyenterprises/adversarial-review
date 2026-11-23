@@ -55,7 +55,7 @@ export async function runLegacyLaneWrite({ rootDir, repository, base, command, a
         let proof;
         try {
           proof = await readQueueEvidence({ read: ({ signal }) => readReviewProof({
-            repo: repository, prNumber: targetPr, headSha: subject?.head, validatedAt: reviewValidatedAt,
+            repo: repository, prNumber: targetPr, rootDir, headSha: subject?.head, validatedAt: reviewValidatedAt,
             operatorLogins: cfg.operatorLogins, signal,
           }) }, {}, proofTimeout);
         } catch (error) {

@@ -274,7 +274,10 @@ A validated head alone does not prove that a later review was considered.
 The hammer's initial predicate and final live gate compare each authoritative
 family's latest applicable review head/body with the evidence at the authenticated
 audit's publication time, using canonical ancestry/currency rules. The daemon
-performs the same comparison before reusing terminal validation. A changed review
+performs the same comparison before reusing terminal validation. For an exact
+live terminal audit, the daemon can recover the reviewed head through a
+completed native round followed by authenticated Hammer publication.
+A changed review
 returns `review-changed-since-validation`; unavailable evidence refuses merge.
 An identical same-head repeat preserves proof. Pending, untrusted and
 inapplicable-branch reviews retain existing selection rules.
@@ -6757,7 +6760,15 @@ under the shared review-currency rule (`src/ama/review-currency.mjs`); a
 superseded blocking review cannot be withdrawn. HAMWITHDRAW-01 preserves
 currency across a closer rebase with either an authenticated HAM base/head
 attestation chain ending at the exact live head, or ordered `git patch-id
---stable` equivalence of the PR commits. The patch proof reads at most 256
+--stable` equivalence of the PR commits. The chain can cross completed native
+remediation rounds before or between authenticated Hammer edges. Daemon and
+Hammer consumers read those rounds from the local review service runtime root,
+bound to the repository and PR. Attestation proof of a later push requires its
+own exact terminating Hammer edge. Source reversal still requires its independent
+source-preservation proof and review-citation checks. A paginated comment read
+must finish within ten pages of 100 comments.
+
+The patch proof reads at most 256
 linear commits per series, preserves empty commit positions, and permits extra
 commits only with independently authenticated HAM identity and matching
 `Reviewed-Head`, worker ticket/class and close-out trailers. A changed PR patch,
@@ -6771,8 +6782,9 @@ Git cannot produce a patch ID for a non-empty diff, the proof fails closed and
 requires an authenticated `closer-rebase-provenance` chain instead of a digest
 fallback. Local proof never fetches objects. Daemon callers with a hydrated
 target checkout can pass `reviewCurrencyCwd` to `buildAdversarialGateSnapshot`
-or `projectAdversarialGateStatus`; the lower-level `createReviewCurrencyReader`
-accepts `cwd` or a repository-bound `git(args, input)` executor (which takes
+or `projectAdversarialGateStatus`. The lower-level `createReviewCurrencyReader`
+accepts the trusted local `rootDir` for completed rounds and `cwd` or a
+repository-bound `git(args, input)` executor (which takes
 precedence over `cwd`). Without either, Git uses the process working directory;
 missing target objects remain missing proof. Once the authoritative review is
 missing or superseded, the snapshot discards withdrawals and skips their live

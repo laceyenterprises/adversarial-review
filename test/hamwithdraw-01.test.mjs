@@ -31,6 +31,19 @@ test('REBASECURRENCY-01: conflict resolution needs hammer provenance to carry re
   assert.equal((await f.currency()(f.a, 'c'.repeat(40), { rebaseOnly: true })).current, false);
 });
 
+test('LAC-2331 preserves genuine rerooted patch equivalence when Hammer evidence is capped', async t => {
+  const f = await fixture(t);
+  const pages = [];
+  const currency = createReviewCurrencyReader({ repo, prNumber, rootDir: f.dir, cwd: f.dir,
+    get: path => {
+      if (!path.includes('/comments?')) return f.get(path);
+      pages.push(path);
+      return Array.from({ length: 100 }, () => ({ body: '' }));
+    } });
+  assert.equal((await currency(f.a, f.b, { rebaseOnly: true })).proof, 'reviewed-rebase-patch-id');
+  assert.equal(pages.length, 10);
+});
+
 async function fixture(t, { changed = false, remediation = false, binary = false } = {}) {
   const dir = mkdtempSync(join(tmpdir(), 'hamwithdraw-'));
   t.after(() => rmSync(dir, { recursive: true, force: true }));

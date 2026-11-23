@@ -21,7 +21,7 @@ function storeRounds(t, rounds, number = prNumber) {
 
 test('completed-round scan warnings recur per limit and PR', async t => {
   const warnings = t.mock.method(console, 'warn', () => {});
-  const now = t.mock.method(Date, 'now', () => 0);
+  const now = t.mock.method(performance, 'now', () => 0);
   const rounds = Array.from({ length: 257 }, (_, index) => completed('reviewed', `head-${index}`));
   const scan = ({ rootDir, repo, prNumber }) => readCompletedRemediationRounds(rootDir, repo, prNumber);
   const first = storeRounds(t, rounds, 17);
@@ -29,7 +29,7 @@ test('completed-round scan warnings recur per limit and PR', async t => {
   assert.deepEqual(await scan(first), []);
   assert.deepEqual(await scan({ ...first, repo: first.repo.toUpperCase() }), []);
   assert.deepEqual(await scan(second), []);
-  now.mock.mockImplementation(() => 60_000);
+  now.mock.mockImplementation(() => 60 * 60 * 1000);
   assert.deepEqual(await scan(first), []);
   assert.deepEqual(warnings.mock.calls.map(call => call.arguments[0].split(' ').at(-1)),
     ['fixture/repo#17', 'fixture/repo#18', 'fixture/repo#17']);

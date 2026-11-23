@@ -50,15 +50,15 @@ non-mergeable states (including `CONFLICTING`) are hard misses. An unbound later
 HAMROUNDEDGE-01 loads `startHeadSha` / `resultingHeadSha` edges through
 `readCompletedRemediationEvidence(rootDir, repo, prNumber)` from completed
 daemon-owned jobs for the same repository and PR. The predicate uses
-`carryForwardRounds`, so a completed round with both heads can bridge the
-chain only if it did not request another review. When the chain requires a
-re-review-requested round, the proof reports
-`completed-remediation-rereview-required` and the predicate requests
-exact-head review. A round-only head or a round after the last Hammer edge
-cannot carry the verdict. Round edges count toward the existing chain-length
-limit. A missing or unreadable round record supplies no edge. A capped Hammer
-comment history supplies no App chain and reports
-`hammer-app-attestation-comment-limit`.
+`settledRounds`, so a completed round bridges a stale-head waiver only when
+its native Comment-only final handoff binds the review, publication proof and
+suppressed re-review. A round that requests another review cannot supply this
+waiver, even if job-level suppression disagrees. Non-final completed rounds can
+keep prior findings applicable without waiving the head match. A round-only
+head or a round after the final Hammer edge cannot carry the verdict. All edges
+count toward the existing chain-length limit. Missing or unreadable records
+supply no edge. Capped comment history supplies no App chain and reports
+`hammer-provenance-comments-capped`.
 For a supplied rollup array, `currentHeadHammerAttested` remains available even
 at the comment cap; the capped pagination sentinel has no authorship bit.
 Capped histories intentionally retain the Hammer retry series: CLOSERPROOF-01

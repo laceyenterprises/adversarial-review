@@ -103,7 +103,7 @@ test('a settled comment-only handoff followed by three hammer pushes is eligible
 test('a completed round requesting re-review cannot carry the stale verdict through a Hammer push', async t => {
   const { options } = remediationFixture(t, {}, { reReview: { requested: true } });
   const { headProof, eligibility } = await decideRound(options);
-  assert.equal(headProof.reason, 'completed-remediation-rereview-required');
+  assert.equal(headProof.reason, 'hammer-app-attestation-missing');
   assert.equal(eligibility.decision, 'rereview-exact-head');
 });
 
@@ -112,7 +112,13 @@ for (const [name, completion, reReview] of [
   ['pending-CI completion', { pendingCiOnly: true }, { requested: false }],
 ]) {
   test(`HAMROUNDEDGE-01 ${name} bridges the stale verdict and Hammer range`, async t => {
-    const { options } = remediationFixture(t, { completion, reReview }, { completion, reReview });
+    const { options, path } = remediationFixture(t);
+    const job = JSON.parse(readFileSync(path, 'utf8'));
+    Object.assign(job.completion, completion);
+    Object.assign(job.reReview, reReview);
+    job.remediationPlan.rounds[0].completion = job.completion;
+    job.remediationPlan.rounds[0].reReview = job.reReview;
+    writeFileSync(path, JSON.stringify(job));
     assert.equal((await decideRound(options)).headProof.proven, true);
     const input = { ...options, repo: options.repoPath, env: {}, get: async path => ({
       status: path.endsWith(`${R}...${M}`) ? 'ahead' : 'diverged',
@@ -132,7 +138,7 @@ test('capped complete rollups retain authorship diagnostics but do not reset the
     const comments = attested ? [...filler, options.comments.at(-1)] : filler;
     const proof = await proveCloserAuthoredStaleHead({ ...options, comments });
     assert.equal(proof.proven, false);
-    assert.equal(proof.reason, 'hammer-app-attestation-comment-limit');
+    assert.equal(proof.reason, 'hammer-provenance-comments-capped');
     assert.equal(proof.currentHeadHammerAttested, attested);
     const reset = resetHammerSeriesForNonCloserHead(options.rootDir,
       { repo: options.repoPath, prNumber: options.prNumber }, { jobKey: R, headSha: W, headProof: proof });
@@ -140,8 +146,23 @@ test('capped complete rollups retain authorship diagnostics but do not reset the
   }
   const sentinel = await readHammerProvenanceComments(async () => filler.slice(0, 100));
   const unknown = await proveCloserAuthoredStaleHead({ ...options, comments: sentinel });
-  assert.equal(unknown.reason, 'hammer-app-attestation-comment-limit');
+  assert.equal(unknown.reason, 'hammer-provenance-comments-capped');
   assert.equal(Object.hasOwn(unknown, 'currentHeadHammerAttested'), false);
+});
+
+test('capped rollup authorship diagnostics reject copied and conflicting Hammer identities', async t => {
+  const { options } = remediationFixture(t);
+  const filler = Array.from({ length: 1000 }, () => ({ event: 'commented', author: 'builder', body: 'discussion' }));
+  const authentic = options.comments.at(-1);
+  for (const claimed of [
+    { ...authentic, author: 'builder' },
+    { ...authentic, user: { login: 'builder' } },
+  ]) {
+    const proof = await proveCloserAuthoredStaleHead({ ...options, comments: [...filler, claimed] });
+    assert.equal(proof.reason, 'hammer-provenance-comments-capped');
+    assert.equal(proof.proven, false);
+    assert.equal(proof.currentHeadHammerAttested, false);
+  }
 });
 
 for (const [name, job, round] of [

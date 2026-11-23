@@ -61,19 +61,18 @@ test('LAC-2331 Hammer range composes local completion and exact publication edge
 });
 
 for (const requested of [false, true]) {
-  test(`completed round with re-review requested=${requested} controls carry-forward`, async t => {
+  test(`non-final completed round requested=${requested} retains findings without waiving head match`, async t => {
     const { options, currency } = fixture(t, {
       rounds: [{ ...round(reviewedHead, remediated), reReview: { requested } }],
     });
     const evidence = await currency(reviewedHead, currentHead);
-    assert.equal(evidence.proof, requested ? 'mixed-remediation-provenance' : 'closer-rebase-provenance');
+    assert.equal(evidence.proof, 'completed-remediation-hammer-finding-currency');
     assert.equal(evidence.current, true);
-    assert.equal(rebaseCurrencyCovers(evidence, reviewedHead, currentHead), !requested);
-    assert.equal((await currency(reviewedHead, currentHead, { rebaseOnly: true })).current, !requested);
-    assert.equal((await fetchHammerHeadRange(options))?.proof,
-      requested ? undefined : 'hammer-app-attestation-chain');
+    assert.equal(rebaseCurrencyCovers(evidence, reviewedHead, currentHead), false);
+    assert.equal((await currency(reviewedHead, currentHead, { rebaseOnly: true })).current, false);
+    assert.equal((await fetchHammerHeadRange(options))?.proof, 'hammer-app-attestation-chain');
     assert.equal((await fetchHammerHeadRange({ ...options, hammerBaseHead: remediated }))?.proof,
-      requested ? undefined : 'completed-remediation-round-chain');
+      'completed-remediation-round-chain');
   });
 }
 
@@ -84,7 +83,7 @@ test('findings-only provenance retains a failed patch proof diagnostic without g
     return options.get(path);
   } });
   const evidence = await currency(reviewedHead, currentHead);
-  assert.equal(evidence.proof, 'mixed-remediation-provenance');
+  assert.equal(evidence.proof, 'completed-remediation-hammer-finding-currency');
   assert.equal(evidence.patchProofError, 'PR lookup unavailable');
   assert.equal(evidence.current, true);
   assert.equal(rebaseCurrencyCovers(evidence, reviewedHead, currentHead), false);
@@ -403,7 +402,7 @@ test('capped snapshots and pagination diagnose missing comment proof and contrib
   assert.deepEqual(pages, Array.from({ length: 10 }, (_, i) => i + 1));
   const capped = await proveCloserAuthoredStaleHead({ ...options, repoPath: repo, comments });
   assert.equal(capped.reason, HAMMER_COMMENTS_CAPPED);
-  assert.equal(capped.currentHeadHammerAttested, undefined);
+  assert.equal(capped.currentHeadHammerAttested, true);
   const complete = comments.slice(0, -1).concat({ event: 'labeled' });
   assert.equal((await createReviewCurrencyReader({ ...options, comments: complete })(reviewedHead, currentHead)).proof,
     'closer-rebase-provenance');

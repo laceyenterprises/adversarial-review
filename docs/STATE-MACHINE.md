@@ -4098,6 +4098,15 @@ A failed live-commit ownership probe defers only that PR until the next tick.
 Watcher admission and closure use the same delivered-pass count for the live
 head, including a return to a previously reviewed commit.
 
+The completed native final-remediation handoff is scoped to the recorded
+worker-pushed SHA and the same SHA in `reReview.nextAction.head`. Keeping the
+reviewed commit in Git ancestry keeps its findings in scope. It does not
+extend closure ownership or exact-head validation to a later rescue push.
+The later head requires its own recognized publication proof or review.
+For incident triage, the final-stage banner displays completed remediation
+rounds plus one over the configured round budget plus one. The ratio does
+not identify the review request or the number of reviewer launches.
+
 For `system-exhausted-head-verdict`, the watcher re-reads the admission row and
 priority intent inside the claim transaction. The claim commits under the native
 merge lease's `(repo, base)` mutation lock. A matching PR and head with a

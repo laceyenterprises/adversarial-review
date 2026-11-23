@@ -59,6 +59,11 @@ cannot carry the verdict. Round edges count toward the existing chain-length
 limit. A missing or unreadable round record supplies no edge. A capped Hammer
 comment history supplies no App chain and reports
 `hammer-app-attestation-comment-limit`.
+For a supplied rollup array, `currentHeadHammerAttested` remains available even
+at the comment cap; the capped pagination sentinel has no authorship bit.
+Capped histories intentionally retain the Hammer retry series: CLOSERPROOF-01
+resets require `hammer-app-attestation-missing`, so the comment-limit reason
+cannot reset exhaustion even when a supplied array reports no exact-head edge.
 The watcher executes that shared decision through the
 [orphan watchdog](orphan-watchdog.md) on the next ownerless observation, once
 per head, recording its reasons; it does not wait for the idle recovery bound. A live

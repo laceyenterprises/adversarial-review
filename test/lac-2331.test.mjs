@@ -90,6 +90,38 @@ test('findings-only provenance retains a failed patch proof diagnostic without g
   assert.equal(rebaseCurrencyCovers(evidence, reviewedHead, currentHead), false);
 });
 
+for (const fields of [
+  { name: 'AbortError' },
+  { code: 'ABORT_ERR' },
+  { name: 'TimeoutError' },
+  { code: 'ETIMEDOUT' },
+  { killed: true, signal: 'SIGTERM' },
+  { killed: true, signal: 'SIGKILL' },
+]) {
+  for (const stage of ['compare', 'comments', 'PR lookup', 'git']) {
+    test(`findings-only currency propagates ${JSON.stringify(fields)} from ${stage}`, async t => {
+      const { options } = fixture(t, { job: { reReview: { requested: true } } });
+      const error = Object.assign(new Error('evaluation cancelled'), fields);
+      const currency = createReviewCurrencyReader({ ...options,
+        loadComments: async () => {
+          if (stage === 'comments') throw error;
+          return options.comments;
+        },
+        get: async path => {
+          if (stage === 'compare' && path.includes('/compare/')) throw error;
+          if (path.endsWith(`/pulls/${prNumber}`)) {
+            if (stage === 'PR lookup') throw error;
+            return { head: { sha: currentHead }, base: { sha: futureHead } };
+          }
+          return options.get(path);
+        },
+        git: async () => { throw error; },
+      });
+      await assert.rejects(currency(reviewedHead, currentHead), actual => actual === error);
+    });
+  }
+}
+
 const nativeJobId = 'fixture__repo-pr-42-job';
 function nativeFinalJob() {
   return {

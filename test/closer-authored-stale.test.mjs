@@ -20,8 +20,11 @@ import {
   markHammerRetryCapExhausted,
   readHammerRetryCapLedger,
   recordHammerRetryDispatch,
+  resetHammerSeriesForNonCloserHead,
 } from '../src/ama/hammer-retry-cap.mjs';
 import { resolveClosureNextAction } from '../src/ama/closure-next-action.mjs';
+import { createReviewCurrencyReader } from '../src/ama/review-currency.mjs';
+import { fetchHammerHeadRange, readHammerProvenanceComments } from '../src/ama/hammer-head-validation.mjs';
 
 const R = 'a'.repeat(40);
 const P = 'b'.repeat(40);
@@ -102,6 +105,43 @@ test('a completed round requesting re-review cannot carry the stale verdict thro
   const { headProof, eligibility } = await decideRound(options);
   assert.equal(headProof.reason, 'completed-remediation-rereview-required');
   assert.equal(eligibility.decision, 'rereview-exact-head');
+});
+
+for (const [name, completion, reReview] of [
+  ['comment-only final round', {}, { requested: false, suppressed: 'comment-only-final-round' }],
+  ['pending-CI completion', { pendingCiOnly: true }, { requested: false }],
+]) {
+  test(`HAMROUNDEDGE-01 ${name} bridges the stale verdict and Hammer range`, async t => {
+    const { options } = remediationFixture(t, { completion, reReview }, { completion, reReview });
+    assert.equal((await decideRound(options)).headProof.proven, true);
+    const input = { ...options, repo: options.repoPath, env: {}, get: async path => ({
+      status: path.endsWith(`${R}...${M}`) ? 'ahead' : 'diverged',
+    }) };
+    const currency = createReviewCurrencyReader(input);
+    assert.equal((await currency(R, W, { rebaseOnly: true })).proof, 'closer-rebase-provenance');
+    const range = await fetchHammerHeadRange({ ...input, hammerBaseHead: M });
+    assert.equal(range?.proof, 'completed-remediation-round-chain');
+    assert.deepEqual(range.commits, [M, W]);
+  });
+}
+
+test('capped complete rollups retain authorship diagnostics but do not reset the retry cap', async t => {
+  const { options } = remediationFixture(t);
+  const filler = Array.from({ length: 1000 }, () => ({ event: 'commented', author: 'builder', body: 'discussion' }));
+  for (const attested of [false, true]) {
+    const comments = attested ? [...filler, options.comments.at(-1)] : filler;
+    const proof = await proveCloserAuthoredStaleHead({ ...options, comments });
+    assert.equal(proof.proven, false);
+    assert.equal(proof.reason, 'hammer-app-attestation-comment-limit');
+    assert.equal(proof.currentHeadHammerAttested, attested);
+    const reset = resetHammerSeriesForNonCloserHead(options.rootDir,
+      { repo: options.repoPath, prNumber: options.prNumber }, { jobKey: R, headSha: W, headProof: proof });
+    assert.deepEqual(reset, { reset: false, reason: 'closer-authorship-not-disproven' });
+  }
+  const sentinel = await readHammerProvenanceComments(async () => filler.slice(0, 100));
+  const unknown = await proveCloserAuthoredStaleHead({ ...options, comments: sentinel });
+  assert.equal(unknown.reason, 'hammer-app-attestation-comment-limit');
+  assert.equal(Object.hasOwn(unknown, 'currentHeadHammerAttested'), false);
 });
 
 for (const [name, job, round] of [

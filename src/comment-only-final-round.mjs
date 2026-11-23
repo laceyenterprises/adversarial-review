@@ -360,6 +360,35 @@ export function isCompletedCommentOnlyFinalRoundJob(job) {
   return isTerminalFinalRound('completed', job);
 }
 
+// Only call on a protected completed job for the selected repo and PR. Local
+// completion records this replay proof after verifying the job-owned commits,
+// the reviewed patches and the live destination. HQ publication has a separate
+// produced-attestation contract.
+export function completedLocalCommentOnlyReplay(job) {
+  const { revisionRef: reviewedHead, jobId, completion, remediationWorker: worker, remediationPlan: plan } = job;
+  const head = completion?.workerPushedHeadSha;
+  const proof = completion?.workerPushProof;
+  if (job.kind !== 'adversarial-review-follow-up'
+    || !isCompletedCommentOnlyFinalRoundJob(job) || !hasFinalRemediationPush(job, head)
+    || job.nonBlockingOnly !== true || normalizeEffectiveReviewVerdict(job.reviewBody) !== 'comment-only'
+    || typeof reviewedHead !== 'string' || !SHA.test(reviewedHead)
+    || typeof head !== 'string' || !SHA.test(head) || head === reviewedHead
+    || typeof job.branch !== 'string' || !job.branch || typeof job.baseBranch !== 'string' || !job.baseBranch
+    || typeof jobId !== 'string' || !jobId || worker?.launchRequestId !== jobId
+    || worker.state !== 'completed' || worker.dispatchId || worker.requiresProducedAttestation
+    || (worker.dispatchMode !== undefined && worker.dispatchMode !== 'local') || plan?.dispatchPath === 'hq'
+    || completion.finalRoundOutcome?.completed !== true || completion.finalRoundOutcome.push !== 'replayed-onto-base'
+    || proof?.method !== FINAL_ROUND_REPLAY_PROOF || proof.producedAttestationId !== undefined
+    || !Number.isSafeInteger(proof.reviewedCommitsReplayed) || proof.reviewedCommitsReplayed < 1
+    || !Number.isSafeInteger(proof.workerCommits) || proof.workerCommits < 1
+    || !Number.isSafeInteger(plan?.currentRound) || plan.currentRound < 1
+    || !Array.isArray(plan.rounds)) return null;
+  const matching = plan.rounds.filter(round => round?.round === plan.currentRound);
+  const [settled] = matching;
+  return matching.length === 1 && settled.state === 'completed' && settled.startHeadSha === reviewedHead
+    && settled.resultingHeadSha === head && settled.publishedHeadSha === head ? { reviewedHead, head } : null;
+}
+
 export function isCompletedFinalRemediationJob(job) {
   if (job?.status !== 'completed') return false;
   if (job.closureHandoff?.reason !== 'final-fix-all' && isCompletedCommentOnlyFinalRoundJob(job)) return true;

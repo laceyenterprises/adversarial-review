@@ -31,6 +31,19 @@ test('REBASECURRENCY-01: conflict resolution needs hammer provenance to carry re
   assert.equal((await f.currency()(f.a, 'c'.repeat(40), { rebaseOnly: true })).current, false);
 });
 
+test('LAC-2331 preserves genuine rerooted patch equivalence when Hammer evidence is capped', async t => {
+  const f = await fixture(t);
+  const pages = [];
+  const currency = createReviewCurrencyReader({ repo, prNumber, rootDir: f.dir, cwd: f.dir,
+    get: path => {
+      if (!path.includes('/comments?')) return f.get(path);
+      pages.push(path);
+      return Array.from({ length: 100 }, () => ({ body: '' }));
+    } });
+  assert.equal((await currency(f.a, f.b, { rebaseOnly: true })).proof, 'reviewed-rebase-patch-id');
+  assert.equal(pages.length, 10);
+});
+
 async function fixture(t, { changed = false, remediation = false, binary = false } = {}) {
   const dir = mkdtempSync(join(tmpdir(), 'hamwithdraw-'));
   t.after(() => rmSync(dir, { recursive: true, force: true }));
@@ -170,9 +183,10 @@ test('HAMWITHDRAW-01: a newer authoritative family review supersedes rebase-carr
     (from, to) => f.get(`repos/${repo}/compare/${from}...${to}`), f.currency()), false);
 });
 
-test('HAMWITHDRAW-01: ama-check uses the same durable withdrawal at the diverged head', async t => {
-  const f = await fixture(t);
-  f.comments.push({ user: { login: 'the-hammer-lacey[bot]' }, body: `HAM-Base-Head: ${f.a}\nHAM-Validated-Head: ${f.b}` });
+test('HAMWITHDRAW-01: ama-check uses the same durable withdrawal despite unrelated timeline events', async t => {
+  const f = await fixture(t, { changed: true });
+  f.comments.push({ event: 'commented', user: { login: 'the-hammer-lacey[bot]' }, body: `HAM-Base-Head: ${f.a}\nHAM-Validated-Head: ${f.b}` });
+  const timeline = [...Array.from({ length: 1000 }, () => ({ event: 'labeled' })), ...f.comments];
   const file = (name, value) => { const path = join(f.dir, name); writeFileSync(path, JSON.stringify(value)); return path; };
   const config = join(f.dir, 'global.yaml');
   writeFileSync(config, 'version: 1\nroles:\n  adversarial:\n    merge_authority:\n      enabled: true\n      eligibility:\n        risk_classes: [low]\n      branch_protection:\n        required: false\n');
@@ -181,7 +195,7 @@ test('HAMWITHDRAW-01: ama-check uses the same durable withdrawal at the diverged
     '--pr', file('pr.json', { number: prNumber, headRefOid: f.b, baseRefOid: f.base, state: 'OPEN', isDraft: false,
       mergeable: 'MERGEABLE', mergeStateStatus: 'CLEAN', labels: [], statusCheckRollup: f.pr.statusCheckRollup }),
     '--reviews', file('reviews.json', { reviews: [{ ...f.review, submitted_at: '2026-01-01T00:00:00Z' }] }),
-    '--timeline', file('timeline.json', f.comments), '--protection', file('protection.json', {}),
+    '--timeline', file('timeline.json', timeline), '--protection', file('protection.json', {}),
     '--primary-change', file('primary.json', { headSha: f.b, hasHammerCommits: false })],
   { cwd: f.dir, encoding: 'utf8', timeout: 15000, env: { ...process.env, AGENT_OS_CONFIG_PATH: config } });
   assert.equal(result.status, 0, result.stderr);

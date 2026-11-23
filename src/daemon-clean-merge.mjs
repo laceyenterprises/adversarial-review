@@ -11,6 +11,7 @@ import { guardStackedBase } from './ama/stacked-base.mjs';
 import { resolveHqRoot } from './hq-root.mjs';
 import { filterGitHubBody } from './github-outbound-body.mjs';
 import { hammerAttestationChain } from './ama/hammer-head-validation.mjs';
+import { createReviewCurrencyReader } from './ama/review-currency.mjs';
 import { closerReviewProof, readCloserReviewProof } from './ama/closer-review-proof.mjs';
 import { createHistoryReader } from './ama/history-reader.mjs';
 import { verifyNoCiConfigured } from './ama/no-ci-configured.mjs';
@@ -656,9 +657,16 @@ async function runDaemonCleanMergeAttemptInner({
   const reviewCarryForward = !docsFastPath && validatedHead !== liveHead
     ? readReviewCarryForwardRecord(rootDir, { repo: repoPath, prNumber, reviewedHead: validatedHead, currentHead: liveHead })
     : null;
+  const hasTerminalProvenance = async () => {
+    if (hammerAttestationChain(liveRollup?.comments, validatedHead, liveHead)) return true;
+    if (!hamTerminalRemediationHead || snapshotHead !== liveHead) return false;
+    const currency = createReviewCurrencyReader({ repo: repoPath, prNumber, rootDir, comments: liveRollup?.comments ?? [],
+      get: createHistoryReader({ execGhWithRetryImpl, execFileImpl, env, signal }) });
+    return (await currency(validatedHead, liveHead, { rebaseOnly: true })).proof === 'closer-rebase-provenance';
+  };
   if (validatedHead !== liveHead && !liveOperatorOverride
     && hamTerminalRemediationValidated !== true && !reviewCarryForward
-    && !hammerAttestationChain(liveRollup?.comments, validatedHead, liveHead)) {
+    && !await hasTerminalProvenance()) {
     return NOT_TAKEN('stale-head', { reasons: ['stale-head'], exactHeadReview: true });
   }
   if (
@@ -1003,7 +1011,7 @@ async function runDaemonCleanMergeAttemptInner({
     } catch { /* No matching audit is unavailable proof. */ }
   };
   const readTerminalReviewProof = rollup => terminalReviewHead && String(rollup?.state).toUpperCase() === 'OPEN'
-    ? closerReviewProof({ snapshot: rollup, repo: repoPath, prNumber, headSha: terminalReviewHead,
+    ? closerReviewProof({ snapshot: rollup, repo: repoPath, prNumber, rootDir, headSha: terminalReviewHead,
       validatedAt: readValidationCutoff(), operatorLogins: cfg?.operatorLogins,
       get: createHistoryReader({ execFileImpl, env, signal }) }) : null;
   const initialGate = {
@@ -1268,7 +1276,7 @@ async function runDaemonCleanMergeAttemptInner({
             transportHold = stopHold();
             if (transportHold) throw new Error(transportHold.reason);
             if (terminalReviewHead) {
-              const proof = await readCloserReviewProofImpl({ repo, prNumber: pr, headSha: head, env, signal,
+              const proof = await readCloserReviewProofImpl({ repo, prNumber: pr, rootDir, headSha: head, env, signal,
                 operatorLogins: cfg?.operatorLogins, validatedAt: readValidationCutoff() });
               if (!proof.ok) {
                 transportHold = proof;

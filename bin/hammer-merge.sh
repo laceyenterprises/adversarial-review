@@ -400,7 +400,7 @@ if (reviewProofRequired && checksConclusion === 'SUCCESS' && open && headMatches
   const verdict = JSON.parse(readFileSync(process.env.HAM_REVIEW_VERDICT_FILE, 'utf8'));
   reviewValidatedAt = verdict.trace?.hamTerminalRemediation?.auditComment?.createdAt ?? null;
   terminalReviewProof = await closerReviewProof({
-    snapshot: rollup, repo, prNumber, headSha: expectedHead, validatedAt: reviewValidatedAt,
+    snapshot: rollup, repo, prNumber, rootDir: '<<ROOT_DIR>>', headSha: expectedHead, validatedAt: reviewValidatedAt,
     operatorLogins: cfg?.operatorLogins, get: createHistoryReader({ hammerToken: true }),
   });
 }

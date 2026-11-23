@@ -684,9 +684,13 @@ test('FINALCLOSE-01 transient history failure releases without an evidence read 
 });
 
 
-test('FINALCLOSE-01 starting-head chain transport failure is distinguishable from a negative provenance proof', async () => {
-  const args = { repo, reviewedHead: reviewed, currentHead: headSha, hammerBaseHead: headSha,
-    remediationRounds: [{ state: 'completed', startHeadSha: reviewed, resultingHeadSha: headSha }],
+test('FINALCLOSE-01 starting-head chain transport failure is distinguishable from a negative provenance proof', async t => {
+  const rootDir = finalRound(t);
+  writeFileSync(join(rootDir, 'data', 'follow-up-jobs', 'completed', 'fixture__repo-pr-41-chain.json'),
+    JSON.stringify({ repo, prNumber, status: 'completed', remediationPlan: { rounds: [
+      { state: 'completed', startHeadSha: reviewed, resultingHeadSha: headSha },
+    ] } }));
+  const args = { repo, prNumber, rootDir, reviewedHead: reviewed, currentHead: headSha, hammerBaseHead: headSha,
     get: async () => { throw new Error('synthetic API timeout'); } };
   await assert.rejects(fetchHammerHeadRange(args), error => error.hammerHistoryReadFailed === true
     && /synthetic API timeout/.test(error.message));

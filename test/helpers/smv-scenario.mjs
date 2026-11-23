@@ -39,7 +39,7 @@ const { cases: actionCases, matrixPair } = await import('./next-action-matrix.mj
 const { default: classifyRescue } = await import('../../src/merge-agent-rescue-classifier.mjs');
 const { closeoutRereview } = await import('../../src/remediation-closeout.mjs');
 const { isEligibleForAmaClosure } = await import('../../src/ama/eligibility.mjs');
-const { fetchHammerHeadRange, fleetCommitIdentityMatches, readCompletedRemediationRounds } = await import('../../src/ama/hammer-head-validation.mjs');
+const { fetchHammerHeadRange, fleetCommitIdentityMatches } = await import('../../src/ama/hammer-head-validation.mjs');
 const { dispatchReadTransport } = await import('../../src/dispatch-read-client.mjs');
 const { registryProducerSdk } = await import('./registry-classes-fixture.mjs');
 const registrySdk = registryProducerSdk(dispatchReadTransport.sdk());
@@ -1285,7 +1285,7 @@ if (scenario === 'clean') {
   assert.match(commentBody, /## Verdict\nRequest changes/);
   assert.match(commentBody, /## Non-blocking issues\n- None\./);
   const finalProof = await fetchHammerHeadRange({ repo, reviewedHead: base, currentHead: headSha, hammerBaseHead: headSha,
-    remediationRounds: await readCompletedRemediationRounds(rootDir, repo, prNumber), env: {}, get: async path => {
+    rootDir, prNumber, env: {}, get: async path => {
       assert.equal(path, `repos/${repo}/compare/${base}...${headSha}`);
       return { status: 'ahead' };
     } });

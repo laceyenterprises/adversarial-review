@@ -274,15 +274,25 @@ A validated head alone does not prove that a later review was considered.
 The hammer's initial predicate and final live gate compare each authoritative
 family's latest applicable review head/body with the evidence at the authenticated
 audit's publication time, using canonical ancestry/currency rules. The daemon
-performs the same comparison before reusing terminal validation. A changed review
-returns `review-changed-since-validation`; unavailable evidence refuses merge.
+performs the same comparison before reusing terminal validation. For an exact
+live terminal audit, the final Hammer gate and daemon read completed native
+rounds from the review service root. Both can recover the reviewed head through
+a completed native round followed by authenticated Hammer publication.
+A changed review returns `review-changed-since-validation`.
+If applicability cannot be established, the gate refuses merge.
 An identical same-head repeat preserves proof. Pending, untrusted and
 inapplicable-branch reviews retain existing selection rules.
 
+The shared currency reader and Hammer's mixed range proof reject an observed
+`behind` comparison as a branch reset. If the comparison is unavailable, the
+completed-round and authenticated Hammer edges can still establish proof for
+the exact live head. The range validator's pure Hammer comment chain also
+establishes proof from exact endpoints and requires no reset comparison.
+
 GraphQL (including paginated reviews), adapter and legacy REST rollups retain
 each review's commit SHA as `commitId`. Missing SHAs, unreadable comparisons
-and failed applicability proofs return `terminal-review-evidence-unavailable`
-at every terminal proof consumer, rather than a generic gate-read failure.
+without independent evidence, and failed applicability proofs return
+`terminal-review-evidence-unavailable` at every terminal proof consumer.
 Each proof evaluation caches ancestry and currency reads by commit pair;
 the next live gate evaluation reads fresh evidence. The daemon requires this
 HAM audit proof only for HAM-terminal-validated heads. The existing closer
@@ -6757,7 +6767,27 @@ under the shared review-currency rule (`src/ama/review-currency.mjs`); a
 superseded blocking review cannot be withdrawn. HAMWITHDRAW-01 preserves
 currency across a closer rebase with either an authenticated HAM base/head
 attestation chain ending at the exact live head, or ordered `git patch-id
---stable` equivalence of the PR commits. The patch proof reads at most 256
+--stable` equivalence of the PR commits. The chain can cross completed native
+remediation rounds before or between authenticated Hammer edges. Daemon and
+Hammer consumers read those rounds from the local review service runtime root,
+bound to the repository and PR. Attestation proof of a later push requires its
+own exact terminating Hammer edge. Source reversal still requires its independent
+source-preservation proof and review-citation checks. A paginated comment read
+must finish within ten pages of 100 comments.
+An explicit `behind` comparison refuses carry-forward from the discarded
+head. An unavailable comparison supplies no ancestry evidence. The protected
+round and exact Hammer comment chain can independently preserve currency.
+`pr-blockers` reports missing or capped evidence and tries local patch proof
+only when a repository checkout is configured.
+
+A local Comment-only final remediation can itself rebase before publishing.
+When the daemon records a successful job-bound replay at that exact head,
+the original review remains applicable before Hammer publication. The
+Hammer starting-range check can use that same replay. A known branch reset
+refuses it. A later push needs its own proof, and the new head still requires
+the ordinary merge validation and source-preservation checks.
+
+The patch proof reads at most 256
 linear commits per series, preserves empty commit positions, and permits extra
 commits only with independently authenticated HAM identity and matching
 `Reviewed-Head`, worker ticket/class and close-out trailers. A changed PR patch,
@@ -6771,8 +6801,9 @@ Git cannot produce a patch ID for a non-empty diff, the proof fails closed and
 requires an authenticated `closer-rebase-provenance` chain instead of a digest
 fallback. Local proof never fetches objects. Daemon callers with a hydrated
 target checkout can pass `reviewCurrencyCwd` to `buildAdversarialGateSnapshot`
-or `projectAdversarialGateStatus`; the lower-level `createReviewCurrencyReader`
-accepts `cwd` or a repository-bound `git(args, input)` executor (which takes
+or `projectAdversarialGateStatus`. The lower-level `createReviewCurrencyReader`
+accepts the trusted local `rootDir` for completed rounds and `cwd` or a
+repository-bound `git(args, input)` executor (which takes
 precedence over `cwd`). Without either, Git uses the process working directory;
 missing target objects remain missing proof. Once the authoritative review is
 missing or superseded, the snapshot discards withdrawals and skips their live
@@ -8592,6 +8623,9 @@ to a hammer base using completed `startHeadSha` / `resultingHeadSha` edges from
 same repository and PR. The exact current head must still end in an
 authenticated hammer App edge; round-only heads remain ineligible for this
 carry-forward. All mixed-chain edges count toward the existing length limit.
+When the Hammer predicate supplies the full issue timeline, only `commented`
+events count toward the 1,000-comment proof cap or carry App attestations;
+labels, commits, and other timeline activity do not exhaust comment evidence.
 Pushed provenance carries the verdict but never certifies CI; the closer reads
 and validates current exact-head required checks before merging.
 GitHub authenticates each comment's

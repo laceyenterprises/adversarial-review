@@ -2,8 +2,22 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
+import { createHash } from 'node:crypto';
 import { join } from 'node:path';
 import { exactHammerValidation, fetchHammerHeadRange, fleetCommitIdentityMatches, hammerAttestationChain, readCompletedRemediationRounds } from '../src/ama/hammer-head-validation.mjs';
+
+const sha = name => name ? createHash('sha1').update(name).digest('hex') : name;
+const repo = 'fixture/repo', prNumber = 1;
+const completed = (start, end, state = 'completed') => ({ state, startHeadSha: sha(start), resultingHeadSha: sha(end) });
+function storeRounds(t, rounds) {
+  const rootDir = mkdtempSync(join(tmpdir(), 'hammer-completed-rounds-'));
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  const dir = join(rootDir, 'data', 'follow-up-jobs', 'completed');
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(join(dir, 'fixture__repo-pr-1-job.json'), JSON.stringify({ repo, prNumber, status: 'completed',
+    remediationPlan: { rounds } }));
+  return { rootDir, repo, prNumber };
+}
 
 const fleet = sha => ({ sha, author: { login: 'lacey-codex-agent[bot]' }, committer: { login: 'web-flow' },
   commit: { verification: { verified: true, reason: 'valid' } } });
@@ -101,8 +115,8 @@ for (const damage of ['invalid JSON', 'empty file', 'unreadable file', 'invalid 
     const dir = join(root, 'data', 'follow-up-jobs', 'completed');
     mkdirSync(dir, { recursive: true });
     const rounds = [
-      { state: 'completed', startHeadSha: 'reviewed', resultingHeadSha: 'round1' },
-      { state: 'completed', startHeadSha: 'round1', resultingHeadSha: 'head' },
+      completed('reviewed', 'round1'),
+      completed('round1', 'head'),
     ];
     const job = { repo: 'fixture/repo', prNumber: 1, status: 'completed', remediationPlan: { rounds: [
       rounds[0], { state: 'spawned', startHeadSha: 'reviewed', resultingHeadSha: 'unfinished' },
@@ -140,7 +154,7 @@ test('completed round lookup selects job prefixes and matches GitHub repo casing
   t.after(() => rmSync(root, { recursive: true, force: true }));
   const dir = join(root, 'data', 'follow-up-jobs', 'completed');
   mkdirSync(dir, { recursive: true });
-  const round = { state: 'completed', startHeadSha: 'reviewed', resultingHeadSha: 'head' };
+  const round = completed('reviewed', 'head');
   const job = { repo: 'Fixture/Repo', prNumber: 1, status: 'completed', remediationPlan: { rounds: [round] } };
   writeFileSync(join(dir, 'Fixture__Repo-pr-1-2026-10-12.json'), JSON.stringify(job));
   // Even apparently matching contents in other PR/repo files are not scanned.
@@ -176,6 +190,15 @@ test('HAMROUNDEDGE-01 non-array rounds preserve App proof without granting round
   }
 });
 
+test('timeline activity does not consume the Hammer comment cap or supply provenance', () => {
+  const attestation = { event: 'commented', author: 'hammer-worker',
+    body: 'HAM-Base-Head: reviewed\nHAM-Validated-Head: head' };
+  const activity = Array.from({ length: 1000 }, () => ({ event: 'committed' }));
+  assert.deepEqual(hammerAttestationChain([...activity, attestation], 'reviewed', 'head'), ['head']);
+  assert.equal(hammerAttestationChain([{ ...attestation, event: 'committed' }], 'reviewed', 'head'), null);
+  assert.equal(hammerAttestationChain(Array(1000).fill(attestation), 'reviewed', 'head'), null);
+});
+
 test('HAMROUNDEDGE-01 mixed chain follows unordered rounds and authenticated hammer edges', () => {
   const audit = (base, head) => ({ author: 'hammer-worker',
     body: `HAM-Base-Head: ${base}\nHAM-Validated-Head: ${head}` });
@@ -197,7 +220,7 @@ test('HAMROUNDEDGE-01 mixed chain follows unordered rounds and authenticated ham
 
 test('reviewed starting base has an explicit proof, independent of completed rounds', async () => {
   const range = await fetchHammerHeadRange({ reviewedHead: 'reviewed', currentHead: 'head',
-    hammerBaseHead: 'reviewed', remediationRounds: [{ state: 'completed', startHeadSha: 'other', resultingHeadSha: 'unrelated' }],
+    hammerBaseHead: 'reviewed',
     get() { throw new Error('HAMCLOSE-01 reviewed starting base needs no ancestry reads'); } });
   assert.equal(range.proof, 'reviewed-starting-base');
   assert.deepEqual(range.commits, ['head']);
@@ -215,14 +238,14 @@ for (const [name, rounds, target, diverged, proven] of [
   ['no records', [], 'head', false, false],
   ['legacy missing result', [['reviewed', null]], 'head', false, false],
 ]) {
-  test(`HAMCLOSE-05: ${name}`, async () => {
-    const read = () => fetchHammerHeadRange({ repo: 'fixture/repo', reviewedHead: 'reviewed',
-      currentHead: target, hammerBaseHead: target,
-      remediationRounds: rounds.map(([startHeadSha, resultingHeadSha, state = 'completed']) => ({ startHeadSha, resultingHeadSha, state })),
+  test(`HAMCLOSE-05: ${name}`, async t => {
+    const source = storeRounds(t, rounds.map(args => completed(...args)));
+    const read = () => fetchHammerHeadRange({ ...source, reviewedHead: sha('reviewed'),
+      currentHead: sha(target), hammerBaseHead: sha(target),
       get: async path => {
         if (diverged === 'unreadable') throw new Error('synthetic read failure');
         return { status: diverged === 'identical' ? 'identical'
-          : diverged && path.endsWith('round1...head') ? 'diverged' : 'ahead' };
+          : diverged && path.endsWith(`${sha('round1')}...${sha('head')}`) ? 'diverged' : 'ahead' };
       },
     });
     if (diverged === 'unreadable') return assert.rejects(read(), { hammerHistoryReadFailed: true });
@@ -233,28 +256,28 @@ for (const [name, rounds, target, diverged, proven] of [
 }
 
 for (const status of ['diverged', 'identical']) {
-  test(`immutable ${status} remediation edges are evaluated once across passes`, async () => {
+  test(`immutable ${status} remediation edges are evaluated once across passes`, async t => {
     const calls = [];
     const rounds = [['middle', 'head'], ['reviewed', 'bad'], ['reviewed', 'middle'], ['reviewed', 'bad']]
-      .map(([startHeadSha, resultingHeadSha]) => ({ state: 'completed', startHeadSha, resultingHeadSha }));
-    const range = await fetchHammerHeadRange({ repo: 'fixture/repo', reviewedHead: 'reviewed', currentHead: 'head',
-      hammerBaseHead: 'head', remediationRounds: rounds, get: async path => {
+      .map(args => completed(...args));
+    const range = await fetchHammerHeadRange({ ...storeRounds(t, rounds), reviewedHead: sha('reviewed'), currentHead: sha('head'),
+      hammerBaseHead: sha('head'), get: async path => {
         calls.push(path);
-        if (path.endsWith('reviewed...bad')) {
+        if (path.endsWith(`${sha('reviewed')}...${sha('bad')}`)) {
           if (status === 'error') throw new Error('unreadable comparison');
           return { status };
         }
         return { status: 'ahead' };
       }, loadComments() { throw new Error('completed round proof must avoid comment pagination'); } });
     assert.equal(range.proof, 'completed-remediation-round-chain');
-    assert.equal(calls.filter(path => path.endsWith('reviewed...bad')).length, 1);
+    assert.equal(calls.filter(path => path.endsWith(`${sha('reviewed')}...${sha('bad')}`)).length, 1);
   });
 }
 
 test('lazy comments retain App proof fallback when local rounds do not prove the base', async () => {
   let loads = 0;
   const range = await fetchHammerHeadRange({ reviewedHead: 'reviewed', currentHead: 'head', hammerBaseHead: 'head',
-    remediationRounds: [], loadComments: async () => {
+    loadComments: async () => {
       loads++;
       return [{ author: 'hammer-worker', body: 'HAM-Base-Head: reviewed\nHAM-Validated-Head: head' }];
     }, get() { throw new Error('App proof needs no comparison'); } });
@@ -263,8 +286,8 @@ test('lazy comments retain App proof fallback when local rounds do not prove the
 });
 
 const forcePush = (before, after, actor = { __typename: 'Bot', login: 'lacey-codex-agent[bot]' }) => ({
-  __typename: 'HeadRefForcePushedEvent', beforeCommit: { oid: before },
-  afterCommit: after ? { oid: after } : null, actor,
+  __typename: 'HeadRefForcePushedEvent', beforeCommit: { oid: sha(before) },
+  afterCommit: after ? { oid: sha(after) } : null, actor,
 });
 const timelinePage = (nodes, hasNextPage = false, endCursor = null) => ({ nodes, pageInfo: { hasNextPage, endCursor } });
 
@@ -284,10 +307,10 @@ for (const [name, events, statuses, kinds] of [
   ['ten hops', Array.from({ length: 10 }, (_, i) => forcePush(i ? `hop${i}` : 'reviewed', i === 9 ? 'head' : `hop${i + 1}`)), {}, ['fleet-force-push']],
   ['eleven hops', Array.from({ length: 11 }, (_, i) => forcePush(i ? `hop${i}` : 'reviewed', i === 10 ? 'head' : `hop${i + 1}`)), {}, null],
 ]) {
-  test(`HAMCLOSE-06: ${name}`, async () => {
-    const result = await fetchHammerHeadRange({ repo: 'fixture/repo', reviewedHead: 'reviewed', currentHead: 'head',
-      hammerBaseHead: 'head', env: {}, remediationRounds: [{ state: 'completed', startHeadSha: 'reviewed', resultingHeadSha: 'head' }],
-      get: async path => ({ status: statuses[path.split('/compare/')[1]] || 'diverged' }),
+  test(`HAMCLOSE-06: ${name}`, async t => {
+    const result = await fetchHammerHeadRange({ reviewedHead: sha('reviewed'), currentHead: sha('head'),
+      hammerBaseHead: sha('head'), env: {}, ...storeRounds(t, [completed('reviewed', 'head')]),
+      get: async path => ({ status: Object.entries(statuses).find(([pair]) => pair.split('...').map(sha).join('...') === path.split('/compare/')[1])?.[1] || 'diverged' }),
       loadTimelinePage: async () => timelinePage(events) });
     assert.deepEqual(result?.linkKinds || null, kinds);
     if (kinds) assert.equal(result.proof, 'completed-remediation-round-chain');
@@ -295,10 +318,10 @@ for (const [name, events, statuses, kinds] of [
 }
 
 for (const pages of [10, 11]) {
-  test(`HAMCLOSE-06: ${pages}-page timeline respects the all-or-nothing page bound`, async () => {
+  test(`HAMCLOSE-06: ${pages}-page timeline respects the all-or-nothing page bound`, async t => {
     const calls = [];
-    const result = await fetchHammerHeadRange({ repo: 'fixture/repo', reviewedHead: 'reviewed', currentHead: 'head',
-      hammerBaseHead: 'head', env: {}, remediationRounds: [{ state: 'completed', startHeadSha: 'reviewed', resultingHeadSha: 'head' }],
+    const result = await fetchHammerHeadRange({ reviewedHead: sha('reviewed'), currentHead: sha('head'),
+      hammerBaseHead: sha('head'), env: {}, ...storeRounds(t, [completed('reviewed', 'head')]),
       get: async () => ({ status: 'diverged' }),
       loadTimelinePage: async cursor => {
         calls.push(cursor);
@@ -314,13 +337,12 @@ for (const pages of [10, 11]) {
 }
 
 for (const mode of ['throw', 'malformed', 'pagination', 'ahead', 'mixed']) {
-  test(`HAMCLOSE-06: ${mode} timeline`, async () => {
+  test(`HAMCLOSE-06: ${mode} timeline`, async t => {
     const calls = [];
-    const read = () => fetchHammerHeadRange({ repo: 'fixture/repo', reviewedHead: 'reviewed', currentHead: 'head',
-      hammerBaseHead: 'head', env: {}, remediationRounds: (mode === 'mixed'
-        ? [['reviewed', 'middle'], ['middle', 'head']] : [['reviewed', 'head']])
-        .map(([startHeadSha, resultingHeadSha]) => ({ state: 'completed', startHeadSha, resultingHeadSha })),
-      get: async path => ({ status: mode === 'ahead' || (mode === 'mixed' && path.endsWith('reviewed...middle')) ? 'ahead' : 'diverged' }),
+    const read = () => fetchHammerHeadRange({ reviewedHead: sha('reviewed'), currentHead: sha('head'),
+      hammerBaseHead: sha('head'), env: {}, ...storeRounds(t, (mode === 'mixed'
+        ? [completed('reviewed', 'middle'), completed('middle', 'head')] : [completed('reviewed', 'head')])),
+      get: async path => ({ status: mode === 'ahead' || (mode === 'mixed' && path.endsWith(`${sha('reviewed')}...${sha('middle')}`)) ? 'ahead' : 'diverged' }),
       loadTimelinePage: async cursor => {
         calls.push(cursor);
         if (mode === 'throw' || mode === 'ahead') throw new Error('synthetic read failure');
@@ -336,10 +358,10 @@ for (const mode of ['throw', 'malformed', 'pagination', 'ahead', 'mixed']) {
   });
 }
 
-test('HAMCLOSE-06 configured fleet App identity proves a rebase', async () => {
-  const result = await fetchHammerHeadRange({ repo: 'fixture/repo', reviewedHead: 'reviewed', currentHead: 'head',
-    hammerBaseHead: 'head', env: { OAUTH_BROKER_CODEX_AGENT_PROVIDER: 'github-app-synthetic-remediator' },
-    remediationRounds: [{ state: 'completed', startHeadSha: 'reviewed', resultingHeadSha: 'head' }],
+test('HAMCLOSE-06 configured fleet App identity proves a rebase', async t => {
+  const result = await fetchHammerHeadRange({ reviewedHead: sha('reviewed'), currentHead: sha('head'),
+    hammerBaseHead: sha('head'), env: { OAUTH_BROKER_CODEX_AGENT_PROVIDER: 'github-app-synthetic-remediator' },
+    ...storeRounds(t, [completed('reviewed', 'head')]),
     get: async () => ({ status: 'diverged' }), loadTimelinePage: async () => timelinePage([
       forcePush('reviewed', 'head', { __typename: 'Bot', login: 'synthetic-remediator[bot]' }),
     ]) });
@@ -365,8 +387,8 @@ for (const [name, events, rounds] of [
   ['earlier hammer repair', [activity('reviewed', 'repair'), activity('repair', 'head')], []],
   ['trusted mutations return to expected head', [activity('reviewed', 'head'), activity('head', 'middle'), activity('middle', 'head', 'force_push')], []],
 ]) {
-  test(`HAMCLOSE-07 activity: ${name}`, async () => {
-    const range = await fetchHammerHeadRange(activityOptions(events, { remediationRounds: rounds }));
+  test(`HAMCLOSE-07 activity: ${name}`, async t => {
+    const range = await fetchHammerHeadRange(activityOptions(events, storeRounds(t, rounds)));
     assert.equal(range.proof, 'branch-activity');
     assert.deepEqual(range.steps, events.map(event => ({ before: event.before, after: event.after,
       kind: event.activity_type, actor: event.actor.login, time: event.timestamp })));

@@ -1548,7 +1548,7 @@ test('REMLINK-01 J3 second claim retains a force-publish round readable by the u
   assert.equal(rounds.length, 1);
   assert.equal(rounds[0].resultingHeadSha, f.head);
   const range = await fetchHammerHeadRange({ repo: 'fixture/repo', reviewedHead: f.startHead,
-    currentHead: f.head, hammerBaseHead: f.head, remediationRounds: rounds,
+    currentHead: f.head, hammerBaseHead: f.head, rootDir: f.rootDir, prNumber: 1,
     env: { OAUTH_BROKER_CODEX_AGENT_PROVIDER: 'github-app-synthetic-remediator' },
     get: async () => ({ status: 'diverged' }),
     loadTimelinePage: async () => ({ nodes: [{ __typename: 'HeadRefForcePushedEvent',

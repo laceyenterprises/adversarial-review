@@ -1,6 +1,6 @@
 import { loadAwareTimeoutMs } from '../load-aware-timeout.mjs';
 import { execFile } from 'node:child_process';
-import { hammerAttestationChain } from './hammer-head-validation.mjs';
+import { hammerAttestationChain, readCompletedRemediationEvidence, readHammerProvenanceComments } from './hammer-head-validation.mjs';
 import { hamCommitIdentityMatches, isHamWorkerTicket, parseCommitTrailers } from './ham-provenance.mjs';
 
 const SHA = /^[a-f0-9]{40}$/i;
@@ -70,19 +70,25 @@ async function patchEquivalent({ reviewedHead, currentHead, base, git, get, repo
 // One evaluation-local reader for finding admission AND disposition admission.
 // Only an exact current endpoint is covered; a later unrelated push cannot
 // inherit a prior HAM audit edge. Cache reads only within this live evaluation.
-export function createReviewCurrencyReader({ repo, prNumber, get, comments = null, cwd,
+export function createReviewCurrencyReader({ repo, prNumber, rootDir, get, comments = null, loadComments, cwd,
   git = (args, input) => currencyGit(args, input, { cwd }), pr = null }) {
   const cache = new Map();
-  let commentRead, prRead;
-  const readComments = () => commentRead ||= comments !== null ? Promise.resolve(comments)
-    : Promise.resolve(get(`repos/${repo}/issues/${prNumber}/comments?per_page=100`)).then(rows => {
-      if (!Array.isArray(rows) || rows.length >= 100) throw new Error('missing or capped HAM provenance comments');
-      return rows;
-    });
-  const proveRebase = async (reviewedHead, currentHead) => {
-    try {
-      if (hammerAttestationChain(await readComments(), reviewedHead, currentHead)) return 'closer-rebase-provenance';
-    } catch { /* Independent patch proof may still succeed. */ }
+  let commentRead, roundRead, prRead;
+  const readComments = () => commentRead ||= loadComments ? Promise.resolve().then(loadComments)
+    : comments !== null ? Promise.resolve(comments)
+    : readHammerProvenanceComments(page => get(
+      `repos/${repo}/issues/${prNumber}/comments?per_page=100${page === 1 ? '' : `&page=${page}`}`));
+  const proveRebase = async (reviewedHead, currentHead, rebaseOnly) => {
+    const provenance = await readComments().catch(() => null);
+    if (hammerAttestationChain(provenance, reviewedHead, currentHead)) return 'closer-rebase-provenance';
+    roundRead ??= readCompletedRemediationEvidence(rootDir, repo, prNumber);
+    const { rounds, finalPublications } = await roundRead;
+    if (hammerAttestationChain(provenance, reviewedHead, currentHead, rounds)) return 'closer-rebase-provenance';
+    // The local final publication admits its source review as evidence. It
+    // confers no head-match or disposition waiver in rebaseCurrencyCovers.
+    if (!rebaseOnly && finalPublications.some(entry => entry.reviewedHead === reviewedHead && entry.head === currentHead)) {
+      return 'comment-only-final-remediation-publication';
+    }
     prRead ||= pr ? Promise.resolve(pr) : get(`repos/${repo}/pulls/${prNumber}`);
     const live = await prRead;
     if (live?.head?.sha !== currentHead || !SHA.test(live?.base?.sha || '')) return null;
@@ -95,6 +101,8 @@ export function createReviewCurrencyReader({ repo, prNumber, get, comments = nul
       const result = { reviewedHead, currentHead, current: false };
       if (!SHA.test(reviewedHead || '') || !SHA.test(currentHead || '')) return { ...result, missingProof: 'invalid reviewed or current head' };
       if (reviewedHead === currentHead) return { ...result, current: true, proof: 'exact-head' };
+      const localReplay = rebaseOnly ? '' : ' or a recorded local final-remediation replay';
+      const missingProof = `HAM base/head provenance or patch-equivalent PR commits${localReplay} for ${reviewedHead} -> ${currentHead}`;
       let status;
       try {
         try { status = (await get(`repos/${repo}/compare/${reviewedHead}...${currentHead}`))?.status; }
@@ -102,12 +110,12 @@ export function createReviewCurrencyReader({ repo, prNumber, get, comments = nul
         if (!rebaseOnly && ['ahead', 'identical'].includes(status)) return { ...result, current: true, proof: 'ancestry' };
         // A branch reset cannot borrow evidence from its discarded descendant.
         if (status === 'behind') return { ...result, missingProof: 'current head predates reviewed evidence' };
-        const proof = await proveRebase(reviewedHead, currentHead);
+        const proof = await proveRebase(reviewedHead, currentHead, rebaseOnly);
         if (proof) return { ...result, current: true, proof };
       } catch (error) {
-        return { ...result, missingProof: `HAM base/head provenance or patch-equivalent PR commits for ${reviewedHead} -> ${currentHead}: ${error.message}` };
+        return { ...result, missingProof: `${missingProof}: ${error.message}` };
       }
-      return { ...result, missingProof: `HAM base/head provenance or patch-equivalent PR commits for ${reviewedHead} -> ${currentHead}` };
+      return { ...result, missingProof };
     })());
     return cache.get(key);
   };

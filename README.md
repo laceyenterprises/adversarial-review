@@ -20,22 +20,30 @@ the rubber stamp expensive enough to fail loud.
 ---
 
 ONS-07: the Node config reader validates against the CFG JSON Schema that
-agent-os generates from the Python `schema_v1` (vendored as
-[`src/generated/config.schema.json`](src/generated/config.schema.json), turned
-into the loader's schema by [`src/config-schema.mjs`](src/config-schema.mjs)).
-It accepts and rejects what the Python loader does:
+agent-os generates from the Python `schema_v1`. The loader reads
+`platform/contracts/generated/config.schema.json` in the selected checkout.
+It checks `AGENT_OS_ROOT` and `AGENT_OS_DEPLOY_CHECKOUT` first, then the
+vendored module layout. When no checkout is found or its contract cannot be
+read or compiled, the loader uses
+[`src/generated/config.schema.json`](src/generated/config.schema.json). It
+reports the selected schema's source and SHA-256 digest to stderr and
+deduplicates repeated messages. Fallback messages include the reason. Cached
+loads watch the contract alongside the config layers.
+
 [`test/config-cfg-parity.test.mjs`](test/config-cfg-parity.test.mjs) replays
 Python-recorded verdicts. `loadConfig` refuses an unknown key in a checked-in
-file; local overlays and the runtime/cached loaders used by the daemons drop it
-(`ADVERSARIAL_CONFIG_DEBUG=1` prints a note). An empty env value is absent.
+file. Local overlays and runtime/cached loaders tolerate unknown keys outside
+strict-always policies (`ADVERSARIAL_CONFIG_DEBUG=1` prints a note for runtime
+unknowns). An empty env value is absent.
 Nullable projections also support a numeric zero sentinel alongside a positive
 floor. Informational metadata on a null branch is accepted; assertion keywords
-outside the supported projection still fail at import. Recorder fixture fields
-`env`, `modules`, and `get` may be omitted or null. Leaf-pattern compilation is
-cached without modifying the exported schema, and rejection diagnostics display
-the normalized value being checked.
+outside the supported projection cause the loader to use the bundled schema.
+Recorder fixture fields `env`, `modules`, and `get` may be omitted or null.
+Leaf-pattern compilation is cached without modifying the exported schema, and
+rejection diagnostics display the normalized value being checked.
 
-After a CFG schema change, run `node scripts/sync-cfg-schema.mjs <agent-os>`
+To refresh the standalone schema or the environment aliases, run
+`node scripts/sync-cfg-schema.mjs <agent-os>`
 (`--check` reports drift); it vendors both generated files, the schema
 (`src/generated/config.schema.json`) and the env alias table
 (`src/generated/config.env.json`). Nothing else is hand-written: the reader has no

@@ -2,7 +2,7 @@
 //
 // Source of truth: the CFG JSON Schema that agent-os generates from the Python
 // `schema_v1` (`platform/contracts/generated/config.schema.json`, ONS-02),
-// vendored as `./generated/config.schema.json` by
+// read from the deploy checkout or, for fallback, vendored by
 // `scripts/sync-cfg-schema.mjs`. This module turns that JSON Schema back into
 // the loader's node form (`__type`, `__keys`, ...) so both readers accept and
 // reject the same documents. Never hand-edit a CFG key here; regenerate.
@@ -10,11 +10,18 @@
 // Nothing here is hand-written: every key, enum member and annotation Node
 // reads is CFG's (the Node-only inventory is empty), and the env alias table
 // comes from the sibling `config.env.json` (see ./config-env-aliases.mjs).
-import { readFileSync } from 'node:fs';
+import { createHash } from 'node:crypto';
+import { readFileSync, statSync } from 'node:fs';
+import { resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { SCHEMA_VERSION } from './config-base.mjs';
+import { deployCheckoutFromReviewModule } from './deploy-checkout-path.mjs';
 
-export const CFG_JSON_SCHEMA = JSON.parse(
-  readFileSync(new URL('./generated/config.schema.json', import.meta.url), 'utf8'),
-);
+const bundledBytes = readFileSync(new URL('./generated/config.schema.json', import.meta.url));
+export const CFG_JSON_SCHEMA = JSON.parse(bundledBytes);
+const bundledDigest = createHash('sha256').update(bundledBytes).digest('hex');
+const moduleCheckout = deployCheckoutFromReviewModule(fileURLToPath(new URL('../', import.meta.url)));
+const loggedSources = new Set();
 
 const TYPES = { object: 'dict', array: 'list', string: 'string', boolean: 'bool', integer: 'int', number: 'float' };
 // cfg_schema.project() wraps CFG's fullmatch patterns for JSON Schema search
@@ -51,8 +58,7 @@ function isNullableWrapper(js) {
 
 export function fromJsonSchema(js, path = '<root>') {
   const unknown = Object.keys(js).filter(key => !KNOWN.has(key));
-  // Fail at import, not at a daemon's first read: a new projection keyword
-  // needs a deliberate Node meaning.
+  // An unsupported projection keyword needs a deliberate Node meaning.
   if (unknown.length) throw new Error(`${path}: unsupported CFG JSON Schema keyword(s) ${unknown.join(', ')}`);
   if (isNullableWrapper(js)) {
     const { anyOf, ...annotations } = js;
@@ -126,7 +132,50 @@ export function schemaV1() {
   return cached;
 }
 
+export function contractSchemaPath(env) {
+  // Config-derived roots are unavailable until after schema validation.
+  const checkout = String(env.AGENT_OS_ROOT ?? '').trim()
+    || String(env.AGENT_OS_DEPLOY_CHECKOUT ?? '').trim()
+    || moduleCheckout;
+  return checkout ? resolve(checkout, 'platform', 'contracts', 'generated', 'config.schema.json') : null;
+}
+
+function logSchemaOnce(message) {
+  if (loggedSources.has(message)) return;
+  loggedSources.add(message);
+  console.error(`[adversarial-config] ${message}`);
+}
+
+let compiledContract;
+export function schemaForConfig(path) {
+  let fallbackReason = 'no checkout';
+  if (path) {
+    let failure = 'unreadable file';
+    try {
+      const stat = statSync(path);
+      if (!stat.isFile()) throw new Error('not a regular file');
+      const bytes = readFileSync(path);
+      failure = 'invalid schema';
+      const digest = createHash('sha256').update(bytes).digest('hex');
+      if (compiledContract?.digest !== digest) {
+        const schema = buildSchema(JSON.parse(bytes));
+        if (!schema.__strict || !schema.__keys?.version?.__enum?.includes(SCHEMA_VERSION)
+          || !osgArmFields(schema)) {
+          throw new Error('invalid config contract shape');
+        }
+        compiledContract = { schema, digest };
+      }
+      logSchemaOnce(`schema source=contract sha256=${digest} path=${JSON.stringify(path)}`);
+      return compiledContract.schema;
+    } catch (error) {
+      fallbackReason = `contract unavailable (${error.code ?? failure}) at ${JSON.stringify(path)}`;
+    }
+  }
+  logSchemaOnce(`schema source=bundled sha256=${bundledDigest} fallback=${fallbackReason}`);
+  return schemaV1();
+}
+
 // OSG-18 arm records: field name -> CFG leaf; every field is mandatory.
-export function osgArmFields() {
-  return schemaV1().__keys.osg.__keys.arms.__item.__keys;
+export function osgArmFields(schema = schemaV1()) {
+  return schema.__keys?.osg?.__keys?.arms?.__item?.__keys;
 }

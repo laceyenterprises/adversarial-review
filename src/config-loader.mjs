@@ -1,8 +1,8 @@
 // agent-os-config — Node loader for the cross-language config surface (CFG).
 //
 // ONS-07: everything this reader knows about the config contract is generated
-// from agent-os (ONS-02): the schema (./config-schema.mjs, from
-// ./generated/config.schema.json) and the env alias table
+// from agent-os (ONS-02): the runtime contract schema (with a bundled
+// fallback, see ./config-schema.mjs) and the bundled env alias table
 // (./config-env-aliases.mjs, from ./generated/config.env.json). The reader
 // declares no key, enum member or env name of its own. What remains is the
 // cascade around the generated contract: code defaults -> module files ->

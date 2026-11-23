@@ -79,3 +79,10 @@ base too, so that failure predates this change.
 
 Final documentation remediation: `node scripts/validate-data-model-catalog.mjs`
 passes (103 catalog entries); `git diff --check` passes.
+
+The publisher's closure-latency fixture exposed missing accounting for the new
+hold migration's six sentinel reads. Its existing migration accounting now
+includes that migration while retaining the 114-read ordinary-operation budget.
+`node test/run-tests.mjs test/watcher-closure-latency.test.mjs` passes all 38
+tests. `npm run lint` passes with zero errors (147 warnings), and
+`npm run typecheck:contracts` passes. The full suite remains delegated to CI.

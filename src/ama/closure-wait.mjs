@@ -56,11 +56,11 @@ async function observeClosureWaitWithinRepositoryCycle({ rootDir, repo, prNumber
       }
       const firstObserved = db.prepare('INSERT OR IGNORE INTO waits_by_class(head, class, started, reason) VALUES (?, ?, ?, ?)')
         .run(headSha, reasonClass, Number.isFinite(startedAt) ? Math.min(now, startedAt) : now, reason).changes === 1;
-      const previousReason = db.prepare('SELECT reason FROM waits_by_class WHERE head=? AND class=?').get(headSha, reasonClass)?.reason;
-      db.prepare('UPDATE waits_by_class SET reason=? WHERE head=? AND class=?').run(reason, headSha, reasonClass);
-      if (refreshOnReasonChange && previousReason !== reason) {
-        db.prepare('UPDATE waits_by_class SET paged=0 WHERE head=? AND class=?').run(headSha, reasonClass);
-      }
+      db.prepare(`
+        UPDATE waits_by_class
+        SET paged=CASE WHEN ? AND reason IS NOT ? THEN 0 ELSE paged END, reason=?
+        WHERE head=? AND class=?
+      `).run(Number(refreshOnReasonChange), reason, reason, headSha, reasonClass);
       // Retained launches carry durable progress timestamps. Apply them to an
       // existing final-round wait too. Ignore future timestamps here so clock
       // skew cannot turn each poll into fresh progress.
@@ -78,8 +78,7 @@ async function observeClosureWaitWithinRepositoryCycle({ rootDir, repo, prNumber
         ? now - launchWait.startedAt >= launchWait.boundMs
         : !progress && now - row.started >= boundMs);
       const repeating = Number.isFinite(repeatAfterMs) && repeatAfterMs > 0;
-      const pageDue = !row.paged || (refreshOnReasonChange && previousReason !== reason)
-        || (repeating && (row.last_paged === null || now - row.last_paged >= repeatAfterMs));
+      const pageDue = !row.paged || (repeating && (row.last_paged === null || now - row.last_paged >= repeatAfterMs));
       const notify = !anchorOnly && exhausted && pageDue;
       if (notify) db.prepare('UPDATE waits_by_class SET paged=1, last_paged=? WHERE head=? AND class=?')
         .run(now, headSha, reasonClass);

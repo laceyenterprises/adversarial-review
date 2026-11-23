@@ -17,6 +17,9 @@ unreadable. A three-batch fixture covers the warning and retained custody,
 followed by another batch's dispatch and a third batch's settlement in the same
 pass. Both phases use the shared 30-second nominal dispatch probe budget.
 
+The selected-batch dispatch-failure fixture supplies a readable empty launch
+probe so it exercises error accounting without depending on a local ledger.
+
 ## Interface changes
 
 Preparation and publication use separate dispatch keys as described above.

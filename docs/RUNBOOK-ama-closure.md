@@ -6780,6 +6780,13 @@ round and exact Hammer comment chain can independently preserve currency.
 `pr-blockers` reports missing or capped evidence and tries local patch proof
 only when a repository checkout is configured.
 
+A local Comment-only final remediation can itself rebase before publishing.
+When the daemon records a successful job-bound replay at that exact head,
+the original review remains applicable before Hammer publication. The
+Hammer starting-range check can use that same replay. A known branch reset
+refuses it. A later push needs its own proof, and the new head still requires
+the ordinary merge validation and source-preservation checks.
+
 The patch proof reads at most 256
 linear commits per series, preserves empty commit positions, and permits extra
 commits only with independently authenticated HAM identity and matching

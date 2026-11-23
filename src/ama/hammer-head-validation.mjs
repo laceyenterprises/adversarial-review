@@ -5,6 +5,7 @@ import { constants } from 'node:fs';
 import { open, opendir } from 'node:fs/promises';
 import { join } from 'node:path';
 import { HAM_AUDIT_COMMENT_AUTHOR_LOGINS, hamAuditCommentAuthorMatches } from './ham-provenance.mjs';
+import { completedLocalCommentOnlyReplay } from '../comment-only-final-round.mjs';
 
 const isAbort = error => error?.name === 'AbortError' || error?.code === 'ABORT_ERR';
 const isHistoryReadFailure = error => error?.hammerHistoryReadFailed || error?.primaryChangeReadFailed || isTransientGhError(error);
@@ -143,11 +144,13 @@ async function readCompletedJob(path) {
 
 // Read only daemon-owned state under the supplied runtime root. Old rounds
 // without a resulting head cannot establish an edge.
-export async function readCompletedRemediationRounds(rootDir, repo, prNumber) {
+export async function readCompletedRemediationEvidence(rootDir, repo, prNumber) {
+  const unavailable = { rounds: [], finalPublications: [] };
   if (typeof rootDir !== 'string' || !rootDir || typeof repo !== 'string' || !/^[\w.-]+\/[\w.-]+$/.test(repo)
     || !['number', 'string'].includes(typeof prNumber)
-    || !Number.isSafeInteger(Number(prNumber)) || Number(prNumber) < 1) return [];
+    || !Number.isSafeInteger(Number(prNumber)) || Number(prNumber) < 1) return unavailable;
   const rounds = new Map();
+  const finalPublications = [];
   let entries = 0, records = 0;
   try {
     const dir = join(rootDir, 'data', 'follow-up-jobs', 'completed');
@@ -155,12 +158,12 @@ export async function readCompletedRemediationRounds(rootDir, repo, prNumber) {
     for await (const entry of await opendir(dir)) {
       if (++entries > MAX_COMPLETED_ENTRIES) {
         reportCompletedLimit('directory entries', MAX_COMPLETED_ENTRIES, repo, prNumber);
-        return [];
+        return unavailable;
       }
       if (!entry.isFile() || !matches(entry.name)) continue;
       if (++records > MAX_COMPLETED_RECORDS) {
         reportCompletedLimit('matching records', MAX_COMPLETED_RECORDS, repo, prNumber);
-        return [];
+        return unavailable;
       }
       try {
         const job = await readCompletedJob(join(dir, entry.name));
@@ -175,17 +178,23 @@ export async function readCompletedRemediationRounds(rootDir, repo, prNumber) {
           rounds.set(`${base}:${head}`, round);
           if (rounds.size > MAX_COMPLETED_ROUND_EDGES) {
             reportCompletedLimit('round edges', MAX_COMPLETED_ROUND_EDGES, repo, prNumber);
-            return [];
+            return unavailable;
           }
         }
+        const publication = completedLocalCommentOnlyReplay(job);
+        if (publication) finalPublications.push(publication);
       } catch {
         // A damaged or concurrently removed record cannot invalidate other jobs.
       }
     }
   } catch {
-    return [];
+    return unavailable;
   }
-  return [...rounds.values()];
+  return { rounds: [...rounds.values()], finalPublications };
+}
+
+export async function readCompletedRemediationRounds(rootDir, repo, prNumber) {
+  return (await readCompletedRemediationEvidence(rootDir, repo, prNumber)).rounds;
 }
 
 // A timeline read is all-or-nothing: incomplete pages cannot establish provenance.
@@ -308,8 +317,19 @@ async function fetchExistingHammerHeadRange({ repo, prNumber, rootDir, reviewedH
   // disk scan. A worker's round-only starting-base proof still avoids API pagination.
   const snapshotRange = !loadComments && appRange(comments);
   if (snapshotRange) return snapshotRange;
+  const { rounds: remediationRounds, finalPublications } = await readCompletedRemediationEvidence(rootDir, repo, prNumber);
+  const readEndpointComparison = targetHead => get(`repos/${repo}/compare/${reviewedHead}...${targetHead}`).catch(error => {
+    if (isAbort(error)) throw error;
+    // A reported reset refuses custody. The completed record can independently
+    // supply publication evidence when comparison is unavailable.
+    return null;
+  });
+  if (target === currentHead && finalPublications.some(entry => entry.reviewedHead === reviewedHead && entry.head === target)) {
+    if ((await readEndpointComparison(target))?.status === 'behind') return BRANCH_RESET;
+    return { verified: true, reviewedHead, currentHead, baseSha: reviewedHead,
+      commits: [target], proof: 'comment-only-final-remediation-publication' };
+  }
   const fleetLogins = await resolveFleetLogins(env);
-  const remediationRounds = await readCompletedRemediationRounds(rootDir, repo, prNumber);
   let rounds, roundReadFailure;
   try {
     rounds = await remediationChain(remediationRounds, reviewedHead, target, repo, get, loadTimelinePage, fleetLogins);
@@ -329,12 +349,7 @@ async function fetchExistingHammerHeadRange({ repo, prNumber, rootDir, reviewedH
   const mixed = remediationRounds.length && FULL_SHA.test(reviewedHead) && FULL_SHA.test(currentHead)
     ? hammerAttestationChain(provenanceComments, reviewedHead, currentHead, remediationRounds) : null;
   if (mixed && (target === currentHead || mixed.includes(target))) {
-    const comparison = await get(`repos/${repo}/compare/${reviewedHead}...${currentHead}`).catch(error => {
-      if (isAbort(error)) throw error;
-      // The comparison can establish a reset. Exact durable evidence already
-      // proves the chain independently when GitHub comparison is unavailable.
-      return null;
-    });
+    const comparison = await readEndpointComparison(currentHead);
     if (comparison?.status === 'behind') return BRANCH_RESET;
     return { verified: true, reviewedHead, currentHead, baseSha: reviewedHead, commits: mixed,
       proof: 'hammer-app-attestation-chain' };

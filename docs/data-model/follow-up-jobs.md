@@ -956,6 +956,15 @@ The process warns once for each scan limit reached. When a daemon snapshot
 already supplies a complete authenticated Hammer chain, the range validator
 uses it without scanning completed jobs.
 
+For a completed local Comment-only round, the daemon's `git-cherry-replay`
+proof can also carry review applicability to the exact recorded publication
+before any Hammer edge exists. The reader checks the local worker's job
+binding, the settled round and both pinned heads, the recorded no-rereview
+handoff, and the positive replay and worker-commit counts. This evidence
+admits findings and identifies the Hammer starting range. Merge still requires
+its own exact-head validation and source-preservation checks. HQ publication
+keeps its separate produced-attestation contract.
+
 The retry transition retains the round and its attempt metadata while decrementing
 `currentRound`; the next claim reuses that round number and merges the retained
 record before resetting its claim identity, delivery key, `state` and

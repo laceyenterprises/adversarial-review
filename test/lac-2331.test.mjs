@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { createReviewCurrencyReader } from '../src/ama/review-currency.mjs';
+import { createReviewCurrencyReader, rebaseCurrencyCovers } from '../src/ama/review-currency.mjs';
 import { fetchHammerHeadRange } from '../src/ama/hammer-head-validation.mjs';
 import { isCurrentAuthoritativeFamilyReview, latestAuthoritativeReviewInAncestry } from '../src/ama/reviewer-authority.mjs';
 import { closerReviewProof } from '../src/ama/closer-review-proof.mjs';
@@ -28,7 +28,7 @@ function fixture(t, { rounds = [round(reviewedHead, remediated)], comments = [ed
   mkdirSync(dir, { recursive: true });
   const record = join(dir, 'fixture__repo-pr-42-job.json');
   writeFileSync(record, JSON.stringify({ repo, prNumber, status: 'completed', remediationPlan: { rounds }, ...job }));
-  const compare = (from, to) => ({ status: from === reviewedHead && to === remediated ? 'ahead' : compareStatus,
+  const compare = (from, to) => ({ status: from === reviewedHead && to === remediated && comments.length ? 'ahead' : compareStatus,
     total_commits: 1, commits: [{ sha: to }] });
   const get = async path => {
     if (path.includes('/compare/')) return compare(...path.split('/compare/')[1].split('...'));
@@ -52,6 +52,64 @@ test('LAC-2331 Hammer range composes local completion and exact publication edge
   assert.deepEqual(range?.commits, [remediated, rebased, currentHead]);
   assert.deepEqual((await fetchHammerHeadRange({ ...options, hammerBaseHead: rebased }))?.commits, range.commits);
 });
+
+const nativeJobId = 'fixture__repo-pr-42-job';
+function nativeFinalJob() {
+  return {
+    kind: 'adversarial-review-follow-up', jobId: nativeJobId, revisionRef: reviewedHead, branch: 'fixture/change', baseBranch: 'main',
+    finalRound: 'comment-only', nonBlockingOnly: true,
+    reviewBody: '## Blocking Issues\n- None.\n\n## Non-blocking Issues\n- Fix the fixture.\n\n## Verdict\nComment only',
+    reReview: { requested: false, suppressed: 'comment-only-final-round', nextAction: { head: remediated } },
+    remediationPlan: { currentRound: 1, rounds: [
+      { ...round(reviewedHead, remediated), round: 1, publishedHeadSha: remediated },
+    ] },
+    remediationWorker: { state: 'completed', launchRequestId: nativeJobId },
+    completion: { finalRemediationPush: true, workerPushedHeadSha: remediated,
+      finalRoundOutcome: { completed: true, push: 'replayed-onto-base' },
+      workerPushProof: { method: 'git-cherry-replay', reviewedCommitsReplayed: 1, workerCommits: 1 } },
+  };
+}
+
+test('LAC-2331 native final remediation preserves the applicable review before Hammer publication', async t => {
+  const { options, compare, currency } = fixture(t, { comments: [], job: nativeFinalJob() });
+  const [review] = reviews;
+  assert.equal(await latestAuthoritativeReviewInAncestry([review], remediated, compare, currency), review);
+  const proof = await currency(reviewedHead, remediated);
+  assert.equal(proof.proof, 'comment-only-final-remediation-publication');
+  assert.equal(rebaseCurrencyCovers(proof, reviewedHead, remediated), false);
+  assert.equal((await currency(reviewedHead, remediated, { rebaseOnly: true })).current, false);
+  assert.equal((await currency(reviewedHead, futureHead)).current, false);
+  const range = await fetchHammerHeadRange({ ...options, currentHead: remediated, hammerBaseHead: remediated });
+  assert.deepEqual(range?.commits, [remediated]);
+  assert.equal(await fetchHammerHeadRange({ ...options, currentHead: futureHead, hammerBaseHead: remediated }), null);
+});
+
+test('LAC-2331 the final review gate still sees a changed source review after a native rebase', async t => {
+  const { options } = fixture(t, { comments: [], job: nativeFinalJob() });
+  const result = await closerReviewProof({ ...options, headSha: remediated, validatedAt: '2026-01-01T00:00:01Z',
+    snapshot: { state: 'OPEN', headSha: remediated, comments: [], reviews } });
+  assert.equal(result.reason, 'review-changed-since-validation');
+});
+
+for (const [name, alter, compareStatus] of [
+  ['other worker', job => { job.remediationWorker.launchRequestId = 'other-job'; }],
+  ['incomplete worker', job => { job.remediationWorker.state = 'spawned'; }],
+  ['unverified HQ publication', job => { job.remediationWorker.dispatchMode = 'hq'; }],
+  ['different publication head', job => { job.completion.workerPushedHeadSha = futureHead; }],
+  ['different round head', job => { job.remediationPlan.rounds[0].publishedHeadSha = futureHead; }],
+  ['requested rereview', job => { job.reReview.requested = true; }],
+  ['unverified replay', job => { delete job.completion.workerPushProof; }],
+  ['no replayed reviewed commit', job => { job.completion.workerPushProof.reviewedCommitsReplayed = 0; }],
+  ['branch reset', () => {}, 'behind'],
+]) {
+  test(`LAC-2331 native final remediation refuses ${name}`, async t => {
+    const job = nativeFinalJob();
+    alter(job);
+    const { options, currency } = fixture(t, { comments: [], job, compareStatus });
+    assert.equal((await currency(reviewedHead, remediated)).current, false);
+    assert.equal(await fetchHammerHeadRange({ ...options, currentHead: remediated, hammerBaseHead: remediated }), null);
+  });
+}
 
 for (const [name, input] of [
   ['wrong repo', { job: { repo: 'fixture/elsewhere' } }],

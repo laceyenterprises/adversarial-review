@@ -285,6 +285,55 @@ test('a preparation dispatch timeout adopts its scoped launch and settles the ba
   assert.ok(db.prepare('SELECT completed_at FROM finding_batches').get().completed_at);
 });
 
+test('unreadable preparation recovery defers only its batch', async t => {
+  const { rootDir, db, pass } = fixture(t);
+  const { claimFindingBatches, runFindingBatches } = await import('../src/findings-batch.mjs');
+  pass(1, body.replace('## Verdict', `- **Document the option**
+  - **File:** \`docs/options.md\`
+  - **Lines:** 1
+  - **Problem:** The option lacks a description.
+- **Cover the edge case**
+  - **File:** \`test/result.mjs\`
+  - **Lines:** 1
+  - **Problem:** The edge case lacks coverage.
+## Verdict`));
+  db.prepare("UPDATE reviewed_prs SET pr_state='merged'").run();
+  const day = '2026-01-02';
+  assert.equal(claimFindingBatches(db, day, { now: fixtureNow }).length, 3);
+  const [deferred, ready, finished] = db.prepare('SELECT batch_id FROM finding_batches ORDER BY rowid')
+    .all().map(row => row.batch_id);
+  const { finding_id: findingId } = db.prepare('SELECT finding_id FROM finding_backlog WHERE batch_id=?').get(finished);
+  const dir = join(rootDir, 'data', 'finding-batches', finished);
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(join(dir, 'outcomes.json'), JSON.stringify({
+    batchId: finished, findings: [{ findingId, outcome: 'dropped', reason: 'not-reproducible: Already addressed' }],
+  }));
+
+  const dispatches = [], probes = [], warnings = [];
+  const result = await runFindingBatches({ rootDir, db, now: fixtureNow, day, env: { HQ_ROOT: rootDir },
+    logger: { warn: message => warnings.push(message) },
+    execFileImpl: async (_bin, args) => {
+      const key = args[args.indexOf('--idempotency-key') + 1];
+      dispatches.push(key);
+      if (key === `findings-batch-${deferred}`) throw Error('dispatch timed out');
+      return { stdout: '{"launchRequestId":"fixture-next-receipt"}' };
+    },
+    readLaunches: async ({ idempotencyKey, timeoutMs }) => {
+      probes.push({ idempotencyKey, timeoutMs });
+      return { ok: false };
+    } });
+
+  assert.deepEqual(result, { completed: true });
+  assert.deepEqual(dispatches, [`findings-batch-${deferred}`, `findings-batch-${ready}`]);
+  assert.deepEqual(probes, [{ idempotencyKey: `findings-batch-${deferred}`, timeoutMs: 30_000 }]);
+  assert.ok(warnings.some(message => message.includes(`${deferred}: preparation dispatch receipt unavailable`)));
+  const readBatch = db.prepare('SELECT launch_id,error,batch_attempts,completed_at,released_at FROM finding_batches WHERE batch_id=?');
+  assert.deepEqual(readBatch.get(deferred),
+    { launch_id: null, error: null, batch_attempts: 0, completed_at: null, released_at: null });
+  assert.equal(readBatch.get(ready).launch_id, 'fixture-next-receipt');
+  assert.ok(readBatch.get(finished).completed_at);
+});
+
 test('mixed settlement normalizes note whitespace and persists only validated fields', async t => {
   const { db, pass } = fixture(t);
   const { claimFindingBatches, settleFindingBatch } = await import('../src/findings-batch.mjs');

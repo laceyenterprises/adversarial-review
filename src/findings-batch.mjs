@@ -29,8 +29,8 @@ const execFileAsync = promisify(execFile);
 // Leave room for the provisioner's own watchdog/rollback, and scale once for
 // host load without the helper's shorter default ceiling.
 const dispatchTimeoutMs = () => loadAwareTimeoutMs(900_000, { maxMs: Infinity });
-// Read-only publication probes use the same nominal as hammer launch reads.
-const publicationReadTimeoutMs = () => loadAwareTimeoutMs(30_000);
+// Read-only dispatch probes use the same nominal as hammer launch reads.
+const dispatchProbeTimeoutMs = () => loadAwareTimeoutMs(30_000);
 
 function publicationProbeError(error, operation, timeoutMs, fallback = error.message) {
   const outputExceeded = error.code === 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER';
@@ -456,7 +456,7 @@ async function publishFindingBatch({ db, batch, result, dir, outputPath, env, ro
     try { fsExt.flockSync(fd, 'exnb'); }
     catch (error) { if (['EAGAIN', 'EWOULDBLOCK'].includes(error.code)) return; throw error; }
     // Size once for reads; provisioning retains its separate dispatch budget.
-    const probeTimeoutMs = publicationReadTimeoutMs();
+    const probeTimeoutMs = dispatchProbeTimeoutMs();
     let stdout;
     try {
       ({ stdout } = await execFileImpl(env.HQ_BIN || 'hq',
@@ -858,7 +858,7 @@ export async function runFindingBatches({ db, rootDir, env = process.env, day = 
           launchId = receipt.launchRequestId;
         } catch (error) {
           const recovery = await recoverFindingBatchDispatch(batch, { env, rootDir, readLaunches,
-            timeoutMs: publicationReadTimeoutMs() });
+            timeoutMs: dispatchProbeTimeoutMs() });
           if (recovery.unknown) {
             logger.warn?.(`[findings-batch] ${batch.batch_id}: preparation dispatch receipt unavailable`);
             return;

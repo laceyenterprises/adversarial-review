@@ -585,6 +585,11 @@ already canceled source also retains its batch as
 stored row and the in-memory batch before subsequent publication steps.
 Both phases retain the batch ID and ticket. Preparation uses
 `findings-batch-<batch-id>` and publication uses `findings-batch-publish-<batch-id>`.
+After a failed preparation submission or invalid receipt, the collector checks
+the exact preparation key. A matching launch is adopted. Readable absence uses
+the existing dispatch error accounting. An unreadable or unconfirmed probe logs
+a warning and defers that batch for a later pass without charging an attempt.
+Other queued batches continue dispatch and settlement in the same pass.
 A PR-shaped launch without PR evidence still fails. The collector reads scoped
 launch receipts, including terminal rows, before publication. It continues to
 recognize legacy publishers under the preparation key. A publisher with a new

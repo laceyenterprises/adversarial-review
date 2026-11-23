@@ -3,7 +3,7 @@ import { loadAwareTimeoutMs } from './load-aware-timeout.mjs';
 // STALECLOSER-03: ONE eligibility rule for a closer-authored stale head.
 //
 // A head is closer-authored-stale when the PR head moved past the reviewed head
-// only through daemon-owned completed remediation rounds and authenticated
+// only through daemon-owned comment-only final handoffs and authenticated
 // hammer App pushed or validated edges, ending with a hammer edge. The
 // reviewed verdict may then be carried forward to the closer head -- but only
 // through `closerAuthoredStaleEligible`, which the AMA closer, the hammer wake,
@@ -15,7 +15,8 @@ import { loadAwareTimeoutMs } from './load-aware-timeout.mjs';
 import { join } from 'node:path';
 import { mkdirSync } from 'node:fs';
 import {
-  hammerAttestationChain, hammerProvenanceEdge, readCompletedRemediationRounds, readHammerProvenanceComments,
+  HAMMER_COMMENTS_CAPPED, hammerAttestationChain, hammerProvenanceCommentsCapped, hammerProvenanceEdge,
+  readCompletedRemediationEvidence, readHammerProvenanceComments,
 } from './ama/hammer-head-validation.mjs';
 import { execGhWithRetry } from './gh-cli.mjs';
 import { writeFileAtomic } from './atomic-write.mjs';
@@ -37,7 +38,7 @@ function sha(value) {
 }
 
 /**
- * Provenance half of the shared rule. Daemon-owned completed remediation rounds
+ * Provenance half of the shared rule. Daemon-owned comment-only final handoffs
  * can bridge the reviewed SHA to an authenticated hammer App chain. The exact
  * current SHA must end with a hammer edge. Commit trailers, author fields and
  * builder/remediator anchor heads confer no merge authority.
@@ -68,9 +69,15 @@ export async function proveCloserAuthoredStaleHead({
       args: ['api', `repos/${options.repoPath}/issues/${options.prNumber}/comments?per_page=100&page=${page}`],
       timeoutMs: loadAwareTimeoutMs(15000) })).stdout));
   }
+  if (hammerProvenanceCommentsCapped(comments, options.repoPath, options.prNumber)) {
+    return { ...base, reason: HAMMER_COMMENTS_CAPPED };
+  }
   if (!Array.isArray(comments)) return { ...base, reason: 'hammer-app-attestation-missing' };
-  const rounds = await readCompletedRemediationRounds(options.rootDir, options.repoPath, options.prNumber);
-  const chain = hammerAttestationChain(comments, reviewed, current, rounds);
+  let chain = hammerAttestationChain(comments, reviewed, current);
+  if (!chain) {
+    const { settledRounds } = await readCompletedRemediationEvidence(options.rootDir, options.repoPath, options.prNumber);
+    chain = hammerAttestationChain(comments, reviewed, current, settledRounds);
+  }
   // Hex case is not identity: a non-lowercase edge head still attests, so the
   // bit can only err toward keeping the retry cap in force.
   const read = { ...base, currentHeadHammerAttested: comments.some(comment =>

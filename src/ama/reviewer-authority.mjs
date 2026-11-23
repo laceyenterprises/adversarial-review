@@ -33,7 +33,13 @@ export function amaAllAuthoritativeReviewerLogins() {
 }
 
 async function currentReviewHead(reviewedHead, headSha, compare, currency) {
-  if (currency) return (await currency(reviewedHead, headSha)).current === true;
+  if (currency) {
+    const result = await currency(reviewedHead, headSha);
+    if (result.proofLimit && result.current !== true) {
+      throw Object.assign(new Error(result.missingProof), { proofLimit: result.proofLimit });
+    }
+    return result.current === true;
+  }
   if (reviewedHead === headSha) return true;
   const ancestry = await compare(reviewedHead, headSha);
   if (['behind', 'diverged'].includes(ancestry.status)) return false;
@@ -98,10 +104,11 @@ export async function terminalReviewProofMatches({
       reviews, headSha, validatedAt, compare: memoize(compare),
       currency: currency ? memoize(currency) : null,
     });
-  } catch {
+  } catch (error) {
     // A missing review head or unavailable compare is missing proof, not a
     // transient failure to read the entire gate (hammer, daemon and closer).
-    return { ok: false, reason: 'terminal-review-evidence-unavailable' };
+    return { ok: false, reason: 'terminal-review-evidence-unavailable',
+      ...(error?.proofLimit ? { missingProof: error.proofLimit } : {}) };
   }
 }
 
@@ -116,7 +123,7 @@ async function terminalReviewProofMatchesImpl({
   // alone cannot establish that a review belongs to a discarded branch.
   const checkedCurrency = currency && (async (from, to) => {
     const result = await currency(from, to);
-    if (result.current === true) return result;
+    if (result.current === true || result.proofLimit) return result;
     const ancestry = await compare(from, to);
     if (!['behind', 'diverged'].includes(ancestry?.status)) throw new Error('cannot verify terminal review applicability');
     return result;

@@ -1222,9 +1222,18 @@ test('HAMROUNDEDGE-01 closure passes its round root to the shared proof and wake
   t.after(() => rmSync(args.rootDir, { recursive: true, force: true }));
   const dir = path.join(args.rootDir, 'data', 'follow-up-jobs', 'completed');
   mkdirSync(dir, { recursive: true });
-  writeFileSync(path.join(dir, 'fixture__subject-07-pr-7-round.json'), JSON.stringify({
-    repo: args.repoPath, prNumber: args.prNumber, status: 'completed', remediationPlan: { rounds: [
-      { state: 'completed', startHeadSha: reviewedHead, resultingHeadSha: remediatedHead },
+  const jobId = 'fixture__subject-07-pr-7-round';
+  writeFileSync(path.join(dir, `${jobId}.json`), JSON.stringify({
+    repo: args.repoPath, prNumber: args.prNumber, status: 'completed', jobId,
+    kind: 'adversarial-review-follow-up', revisionRef: reviewedHead, finalRound: 'comment-only', nonBlockingOnly: true,
+    reviewBody: '## Verdict\nComment only',
+    reReview: { requested: false, suppressed: 'comment-only-final-round', nextAction: { head: remediatedHead } },
+    remediationWorker: { state: 'completed', launchRequestId: jobId },
+    completion: { finalRemediationPush: true, workerPushedHeadSha: remediatedHead,
+      finalRoundOutcome: { completed: true, push: 'descendant' },
+      workerPushProof: { method: 'git-cherry-replay', workerCommits: 1 } },
+    remediationPlan: { currentRound: 1, rounds: [
+      { round: 1, state: 'completed', startHeadSha: reviewedHead, resultingHeadSha: remediatedHead },
     ] },
   }));
   args.proveCloserAuthoredStaleHeadImpl = input => {

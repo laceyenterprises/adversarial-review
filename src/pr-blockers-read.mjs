@@ -9,7 +9,7 @@ import { fetchMergeAgentCandidateSnapshot } from './merge-agent-candidate-snapsh
 import { amaAllAuthoritativeReviewerLogins, amaReviewerFamilyForLogin,
   latestAuthoritativeReviewInAncestry } from './ama/reviewer-authority.mjs';
 import { createReviewCurrencyReader } from './ama/review-currency.mjs';
-import { readHammerProvenanceComments } from './ama/hammer-head-validation.mjs';
+import { HAMMER_COMMENTS_CAPPED, readHammerProvenanceComments } from './ama/hammer-head-validation.mjs';
 import { REVIEWER_PASS_GENUINE_POSTED_REVIEW_WHERE_SQL,
   REVIEWER_PASS_NORMALIZED_POSTED_AT_SQL } from './reviewer-pass-posted-review-sql.mjs';
 import { readLaunchRequestObservationFromLedgerAsync } from './session-ledger-read-adapter.mjs';
@@ -204,7 +204,11 @@ export async function collectPrBlockers({ repos, root, checkouts = {}, cfg, now 
       const rowErrors = [];
       const attempt = async (name, read, fallback) => {
         try { return await read(); }
-        catch { rowErrors.push(`${name} unavailable`); return fallback; }
+        catch (error) {
+          rowErrors.push(`${name} unavailable`);
+          if (error?.proofLimit) rowErrors.push(error.proofLimit);
+          return fallback;
+        }
       };
       // Independent reads settle together; no read dispatches work or writes
       // lease/state records. The final PR read below fences moving heads.
@@ -239,7 +243,7 @@ export async function collectPrBlockers({ repos, root, checkouts = {}, cfg, now 
       let commentRead;
       const readComments = () => commentRead ??= readHammerProvenanceComments(
         page => get(`${commentsPath}?per_page=100&page=${page}`)).then(rows => {
-        if (rows === null) throw new Error('missing or capped closer attestations');
+        if (rows === null) throw new Error('missing closer attestations');
         return rows;
       });
       const currency = createReviewCurrencyReader({ repo, prNumber: number, rootDir: root, cwd: checkouts[repo], loadComments: readComments,
@@ -250,7 +254,7 @@ export async function collectPrBlockers({ repos, root, checkouts = {}, cfg, now 
       const authoritative = reviews && await attempt('review authority',
         () => latestAuthoritativeReviewInAncestry(trustedReviews, pr.headRefOid, compare, async (from, to) => {
           const result = await currency(from, to);
-          if (!result.current && !['behind', 'diverged'].includes((await compare(from, to))?.status)) {
+          if (!result.current && !result.proofLimit && !['behind', 'diverged'].includes((await compare(from, to))?.status)) {
             throw new Error('cannot verify review applicability');
           }
           return result;
@@ -283,6 +287,9 @@ export async function collectPrBlockers({ repos, root, checkouts = {}, cfg, now 
         }, null),
         attempt('closer attestations', readComments, null),
       ]) : [null, []];
+      if (comments === HAMMER_COMMENTS_CAPPED && !rowErrors.includes(HAMMER_COMMENTS_CAPPED)) {
+        rowErrors.push(HAMMER_COMMENTS_CAPPED);
+      }
       const exactLease = leases?.find(lease => lease.headSha === pr.headRefOid);
       const lease = exactLease || leases?.filter(lease => ['pending', 'dispatched'].includes(lease.status))
         .sort((a, b) => Date.parse(b.updatedAt || b.acquiredAt) - Date.parse(a.updatedAt || a.acquiredAt))[0] || null;
@@ -348,7 +355,8 @@ export async function collectPrBlockers({ repos, root, checkouts = {}, cfg, now 
         pr.statusCheckRollup = null;
         pr.mergeable = 'UNKNOWN';
       }
-      const row = buildPrBlocker({ repo, pr, review: ambiguousReview ? null : review || storedReview, comparison, comments,
+      const row = buildPrBlocker({ repo, pr, review: ambiguousReview ? null : review || storedReview, comparison,
+        comments: comments === HAMMER_COMMENTS_CAPPED ? null : comments,
         conflicts, observations, policy, cfg: checksCfg, now, errors: rowErrors,
         reviewKnown: reviews !== null && !storedReview && !ambiguousReview
           && !rowErrors.includes('review authority unavailable'), currencyKnown });

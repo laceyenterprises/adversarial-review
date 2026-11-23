@@ -679,10 +679,18 @@ async function main(argv = process.argv.slice(2)) {
     const logins = amaAuthoritativeReviewerLoginsForModel(args.reviewer);
     const review = reviews.findLast(entry => entry.commit_id === args['reviewed-sha']
       && logins.includes(normalizeLogin(entry.user.login)));
-    if (!review || !await isCurrentAuthoritativeFamilyReview(review, reviews, prMetadata.headSha,
-      (from, to) => get(`repos/${args.repo}/compare/${from}...${to}`), currency)) {
+    let currentReview = false, cappedReviewProof;
+    try {
+      currentReview = review && await isCurrentAuthoritativeFamilyReview(review, reviews, prMetadata.headSha,
+        (from, to) => get(`repos/${args.repo}/compare/${from}...${to}`), currency);
+    } catch (error) {
+      if (!error?.proofLimit) throw error;
+      cappedReviewProof = error.missingProof || error.message;
+    }
+    if (!currentReview) {
       reviewState.reviewCurrency = { ...reviewState.reviewCurrency, current: false,
-        missingProof: reviewState.reviewCurrency.missingProof || 'cited review is missing or superseded by a newer authoritative review' };
+        missingProof: cappedReviewProof || reviewState.reviewCurrency.missingProof
+          || 'cited review is missing or superseded by a newer authoritative review' };
     }
     hammerWithdrawnFindings = await carryHammerWithdrawals(recordedWithdrawals, prMetadata.headSha, currency);
   }

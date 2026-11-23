@@ -6768,15 +6768,20 @@ superseded blocking review cannot be withdrawn. HAMWITHDRAW-01 preserves
 currency across a closer rebase with either an authenticated HAM base/head
 attestation chain ending at the exact live head, or ordered `git patch-id
 --stable` equivalence of the PR commits. The chain can cross completed native
-remediation rounds before or between authenticated Hammer edges. Daemon and
+remediation rounds before or between authenticated Hammer edges to keep findings
+applicable. To carry a withdrawal's evidence head or waive the exact review
+head match, every native round in the chain must record an exact, proven
+comment-only final publication and a suppressed re-review handoff. Daemon and
 Hammer consumers read those rounds from the local review service runtime root,
 bound to the repository and PR. Attestation proof of a later push requires its
 own exact terminating Hammer edge. Source reversal still requires its independent
 source-preservation proof and review-citation checks. A paginated comment read
-must finish within ten pages of 100 comments.
+must finish within ten pages of 100 comments. Ten full pages or a supplied
+snapshot at the comment cap yield `hammer-provenance-comments-capped`. Partial
+comments supply no proof, and independent proofs can still establish currency.
 An explicit `behind` comparison refuses carry-forward from the discarded
 head. An unavailable comparison supplies no ancestry evidence. The protected
-round and exact Hammer comment chain can independently preserve currency.
+round and exact Hammer comment chain can independently preserve finding applicability.
 `pr-blockers` reports missing or capped evidence and tries local patch proof
 only when a repository checkout is configured.
 
@@ -8617,12 +8622,14 @@ never claim `HAM-Validated-Head` until exact-head CI passes. Publication
 provenance comments are distinct from the successful in-lease validation audit.
 `hammerAttestationChain` reads both kinds for the closer's range proof and the
 shared stale-head rule consumed by watcher closure, hammer wake and rescue.
-HAMROUNDEDGE-01 also lets the shared stale-head proof bridge the reviewed head
-to a hammer base using completed `startHeadSha` / `resultingHeadSha` edges from
-`readCompletedRemediationRounds` under the caller's runtime root, scoped to the
-same repository and PR. The exact current head must still end in an
-authenticated hammer App edge; round-only heads remain ineligible for this
-carry-forward. All mixed-chain edges count toward the existing length limit.
+The shared stale-head proof can bridge the reviewed head to a Hammer base
+through a completed comment-only final handoff in the review service's
+repository- and PR-scoped job history. The handoff binds the publication
+proof and the suppressed re-review to the completed round and both endpoint
+SHAs. The exact current head must end in an authenticated Hammer App edge.
+All mixed-chain edges count toward the existing length limit. A completed
+non-final round with a pending review can retain findings and range evidence
+after a Hammer push. It supplies no stale-head waiver.
 When the Hammer predicate supplies the full issue timeline, only `commented`
 events count toward the 1,000-comment proof cap or carry App attestations;
 labels, commits, and other timeline activity do not exhaust comment evidence.
@@ -8662,7 +8669,10 @@ review. Lookup opens only JSON filenames with the existing
 `<sanitized-repo>-pr-<number>-` job ID prefix, compares repo names without case
 sensitivity, and still validates each record's repo, PR and completed status.
 It asynchronously iterates the flat directory and reads matching records without
-blocking the event loop; unrelated historical jobs are not read or parsed.
+blocking the event loop. Unrelated jobs consume no per-target proof budget.
+Exceeding 256 matching records or 256 distinct round edges discards that target's
+round proof. Records larger than 1 MiB are skipped. Limit warnings identify the
+repository, PR and limit and recur at most hourly while their key remains cached.
 Completed-round proof is attempted before lazily fetching PR comment pages for
 the App-attestation fallback. Each immutable start/result comparison is evaluated
 at most once per proof attempt, including non-ahead and unreadable comparisons.

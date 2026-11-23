@@ -9,7 +9,7 @@ import { getFollowUpJobDir, writeFollowUpJob } from '../src/follow-up-jobs.mjs';
 import { ensureReviewStateSchema, getReviewRow, openReviewStateDb, requestReviewRereview } from '../src/review-state.mjs';
 import { findFinalRemediationPushJob, isCompletedFinalRemediationJob } from '../src/comment-only-final-round.mjs';
 import { FINAL_ROUND_PROOF_TRANSIENT_WINDOW_MS } from '../src/comment-only-final-round-completion.mjs';
-import { readCompletedRemediationRounds } from '../src/ama/hammer-head-validation.mjs';
+import { readCompletedRemediationEvidence, readCompletedRemediationRounds } from '../src/ama/hammer-head-validation.mjs';
 import { readHeadAttestationChainForPr, resolveDaemonWorkerIdentityFromHeadAttestation } from '../src/daemon-worker-identity.mjs';
 import incident from './fixtures/commentclose-01/pr-11403-final-fix-all.json' with { type: 'json' };
 
@@ -138,9 +138,10 @@ test('native follow-up reads its canonical branch-push receipt and records the r
   const { rootDir, result, requests, beforeRow, afterRow } = await replay(t, { requireVerifierPath: true });
   assert.equal(result.action, 'completed');
   assert.equal(result.job.completion.workerPushProof.producedAttestationId, 'lha_fixture');
-  const edges = await readCompletedRemediationRounds(rootDir, result.job.repo, result.job.prNumber);
+  const { rounds: edges, settledRounds } = await readCompletedRemediationEvidence(rootDir, result.job.repo, result.job.prNumber);
   assert.deepEqual(edges.map(({ startHeadSha, resultingHeadSha }) => [startHeadSha, resultingHeadSha]),
     [[result.job.revisionRef, HEAD]]);
+  assert.deepEqual(settledRounds, edges);
   assert.deepEqual(requests, []);
   assert.deepEqual(afterRow, beforeRow);
 });

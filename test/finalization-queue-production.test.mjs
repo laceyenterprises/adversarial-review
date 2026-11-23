@@ -255,6 +255,23 @@ test('a required check supplied by a foreign App cannot satisfy branch rules', a
   assert.equal(classifyQueueChecks(snapshot).kind, 'green');
 });
 
+test('same-name checks satisfy distinct App pins with each App’s latest run', async () => {
+  const policy = await readQueueBranchPolicy(async path => {
+    if (path.includes('/rules/')) return [{ type: 'required_status_checks', parameters: { required_status_checks: [{ context: 'unit', integration_id: 7 }] } }];
+    if (path.endsWith('/protection')) return { required_status_checks: { contexts: ['unit'], checks: [{ context: 'unit', app_id: 8 }] } };
+    return { name: lane.base, protected: true, commit: { sha: reviewHead } };
+  }, lane);
+  const requiredSet = resolveQueueRequiredSet({ cfg: {}, rules: policy });
+  const check = (id, conclusion, createdAt) => ({ name: 'unit', app: { id }, head: reviewHead, conclusion, createdAt });
+  const snapshot = { head: reviewHead, complete: true, requiredSet,
+    results: [check(7, 'SUCCESS'), check(9, 'SUCCESS')] };
+  assert.equal(classifyQueueChecks(snapshot).reason, 'missing-required-check:unit');
+  snapshot.results.push(check(8, 'FAILURE', '2026-11-23T00:00:00Z'));
+  assert.equal(classifyQueueChecks(snapshot).kind, 'red');
+  snapshot.results.push(check(8, 'SUCCESS', '2026-11-23T00:01:00Z'));
+  assert.equal(classifyQueueChecks(snapshot).kind, 'green');
+});
+
 test('entitled credentials retain a valid token on transient refresh failure and never fall back to ambient auth', async () => {
   let now = 0, count = 0;
   const github = createQueueGitHub({ ownerFor: () => null, now: () => now, env: { GH_TOKEN: 'ambient-fixture' },

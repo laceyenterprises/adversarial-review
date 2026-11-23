@@ -134,7 +134,8 @@ export function createQueueConsumer({ rootDir, compose, readConfig = loadEffecti
     try {
       const cfg = readConfig({ rootDir });
       const routes = (cfg.laneRoutes ?? []).filter(route => route.executor === 'queue-v2')
-        .map(route => resolveLaneRoute(cfg, route)).filter(route => route.autonomousExecutionEnabled
+        .map(({ repository, base }) => resolveLaneRoute(cfg, { repository, base }))
+        .filter(route => route.autonomousExecutionEnabled
           && !isMergeDisabledForRepository(cfg, route.lane.repository));
       if (!routes.length) return;
       const store = openStore({ rootDir });

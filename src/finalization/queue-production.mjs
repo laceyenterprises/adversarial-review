@@ -72,7 +72,7 @@ export function createProductionQueue({ rootDir, env = process.env, hqRoot = res
       catch { return { ok: false, reason: 'adapter-unavailable' }; }
       if (budget() <= 0) return { ok: false, reason: 'adapter-unavailable' };
       return createGithubAdapterMergeSurface({ rootDir, recordReceipt: false, disabledRepositories: cfg.disabledRepositories,
-        env: { ...env, ...github.childEnv(token) }, envTokenSelector: github.role, deleteBranch: false,
+        env: { ...env, ...github.childEnv(token), GH_TOKEN: token }, envTokenSelector: github.role, deleteBranch: false,
       }).merge({ subjectExternalId, ...intent, timeoutMs: budget() });
     } };
     return { liveAdapter, gitAdapter, checkReader, identitySurface, mergeSurface,

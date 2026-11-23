@@ -27,6 +27,11 @@ progress time and records original patience expiry without a live read.
 Hammer handoffs retain unresolved advisory findings as `deferred` when the
 effective policy explicitly disables strict non-blocking remediation.
 
+The production merge adapter binds `GH_TOKEN` to the verified installation
+token. The watcher passes the validated repository and base to the lane
+resolver. For same-name checks with multiple required App sources, the queue
+requires each source's latest result.
+
 ### Verification
 
 Synthetic fixtures use disposable Git repositories and SQLite stores with
@@ -36,6 +41,10 @@ separate evidence of loaded services, effective route and organic entries.
 
 The focused production, handoff and admission suites passed 122 tests.
 `node scripts/validate-data-model-catalog.mjs` validated 103 entries.
+
+Hammer canonical changed-surface validation passed 337 tests in 12 files.
+`npm run lint` reported zero errors. `npm run typecheck:contracts` and
+`bash demo/research-finding-walkthrough.sh` passed.
 
 ```sh
 node src/finalization/queue-probe.mjs --capability canary --json

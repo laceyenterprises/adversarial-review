@@ -618,6 +618,10 @@ parks immediately again. A changed base after expiry remains parked rather than
 obtaining another rebase budget. Final merge authority and immediate live reads
 belong to the subsequent executor slice.
 
+When classic protection and active rulesets pin the same check context to
+multiple Apps, the snapshot must include the latest successful result from
+each required App. A result from another App cannot fill a missing pin.
+
 `createEntitledQueueCheckRequest` uses the existing broker export/parser and
 held-token behavior around each operation. An optional early-refresh failure
 retains the entitled credential; rejected/absent credentials require successful

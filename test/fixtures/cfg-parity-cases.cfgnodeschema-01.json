@@ -44,6 +44,86 @@
     "ok": false,
     "key": "worker_pool.work_items.shadow_gate_days"
    }
+  },
+  {
+   "name": "low_priority_max_wait_seconds: below minimum value is refused",
+   "files": {
+    "config.yaml": "version: 1\nworker_pool:\n  admission:\n    low_priority_max_wait_seconds: -1\n"
+   },
+   "python": {
+    "ok": false,
+    "key": "worker_pool.admission.low_priority_max_wait_seconds"
+   }
+  },
+  {
+   "name": "low_priority_max_wait_seconds: fractional value is refused",
+   "files": {
+    "config.yaml": "version: 1\nworker_pool:\n  admission:\n    low_priority_max_wait_seconds: 1.5\n"
+   },
+   "python": {
+    "ok": false,
+    "key": "worker_pool.admission.low_priority_max_wait_seconds"
+   }
+  },
+  {
+   "name": "low_priority_reserved_slots: below minimum value is refused",
+   "files": {
+    "config.yaml": "version: 1\nworker_pool:\n  admission:\n    low_priority_reserved_slots: -1\n"
+   },
+   "python": {
+    "ok": false,
+    "key": "worker_pool.admission.low_priority_reserved_slots"
+   }
+  },
+  {
+   "name": "low_priority_reserved_slots: fractional value is refused",
+   "files": {
+    "config.yaml": "version: 1\nworker_pool:\n  admission:\n    low_priority_reserved_slots: 1.5\n"
+   },
+   "python": {
+    "ok": false,
+    "key": "worker_pool.admission.low_priority_reserved_slots"
+   }
+  },
+  {
+   "name": "archive_ref_retention_days: below minimum value is refused",
+   "files": {
+    "config.yaml": "version: 1\ndisk_reclaim:\n  archive_ref_retention_days: 0\n"
+   },
+   "python": {
+    "ok": false,
+    "key": "disk_reclaim.archive_ref_retention_days"
+   }
+  },
+  {
+   "name": "archive_ref_retention_days: fractional value is refused",
+   "files": {
+    "config.yaml": "version: 1\ndisk_reclaim:\n  archive_ref_retention_days: 1.5\n"
+   },
+   "python": {
+    "ok": false,
+    "key": "disk_reclaim.archive_ref_retention_days"
+   }
+  },
+  {
+   "name": "unreclaimable_recheck_hours: below minimum value is refused",
+   "files": {
+    "config.yaml": "version: 1\ndisk_reclaim:\n  dehydrate:\n    unreclaimable_recheck_hours: -1\n"
+   },
+   "python": {
+    "ok": false,
+    "key": "disk_reclaim.dehydrate.unreclaimable_recheck_hours"
+   }
+  },
+  {
+   "name": "unreclaimable_recheck_hours: fractional value is refused",
+   "files": {
+    "config.yaml": "version: 1\ndisk_reclaim:\n  dehydrate:\n    unreclaimable_recheck_hours: 1.5\n"
+   },
+   "python": {
+    "ok": false,
+    "key": "disk_reclaim.dehydrate.unreclaimable_recheck_hours"
+   }
   }
  ]
 }

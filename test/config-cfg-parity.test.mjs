@@ -11,6 +11,7 @@ import assert from 'node:assert/strict';
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
+import { _resetCodeDefaultsForTesting } from '../src/config-cascade.mjs';
 import { AgentOSConfigError, ENV_ALIASES, loadConfig, loadConfigRuntime } from '../src/config-loader.mjs';
 import { CFG_JSON_SCHEMA, schemaV1 } from '../src/config-schema.mjs';
 
@@ -111,6 +112,14 @@ test('refreshed defaults and disk reclaim aliases resolve on independent loads',
     assert.equal(second.get(key), override);
     assert.equal(second.resolutionTrace(key)[0].value, defaultValue);
   }
+
+  _resetCodeDefaultsForTesting();
+  const afterReset = loadConfig({ topPath, env: {} });
+  const retentionKey = 'disk_reclaim.archive_ref_retention_days';
+  assert.equal(afterReset.get(retentionKey), 30);
+  assert.deepEqual(afterReset.resolutionTrace(retentionKey), [
+    { source: 'code-default', value: 30, path: null },
+  ]);
 });
 
 // Intended difference: Python's strict input validation rejects an ordinary

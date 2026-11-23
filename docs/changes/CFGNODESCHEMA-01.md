@@ -21,6 +21,13 @@ environment aliases, or CLI overrides.
 
 ## Verification
 
+Hammer added an internal `_resetCodeDefaultsForTesting()` hook in
+`src/config-cascade.mjs` so an in-process test can rebuild the memoized
+values and their provenance on the next load. The extended parity fixture
+records below-minimum and fractional inputs for each of the four admission
+and disk reclaim settings. Re-recording at the same Python revision produced
+byte-identical output.
+
 `node --test test/config-cfg-parity.test.mjs` passed all 76 tests. The new
 cases compare both loaders on all five settings and on zero and fractional
 shadow durations.

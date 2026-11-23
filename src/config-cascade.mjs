@@ -85,6 +85,11 @@ function buildCodeDefaults(schema) {
 
 let codeDefaults;
 
+// Internal test hook: the next load rebuilds values and provenance together.
+export function _resetCodeDefaultsForTesting() {
+  codeDefaults = undefined;
+}
+
 export function loadConfigImpl({
   topPath = null,
   modulePaths = [],

@@ -41,3 +41,11 @@ all 90 tests; recording the new fixture again was byte-identical. `npm run
 lint` passed with zero errors (147 existing warnings), `npm run
 typecheck:contracts` passed, and `bash demo/research-finding-walkthrough.sh`
 passed. The full suite is left to PR-head CI.
+
+The final fix-all round revalidated all 90 targeted tests after a fresh base
+fetch and rebase, and reproduced the three-case fixture twice from an archive
+of its declared Python revision with byte-identical results. Lint, contract
+typecheck, and the offline walkthrough passed again. The earlier Node 22 CI
+failure in run `45189283580` exhausted the 900-second suite deadline; the same
+deadline failure occurred on main in run `45152911652`. No runtime or CI
+configuration change was needed for the fixture provenance finding.

@@ -445,7 +445,7 @@ export function namedAmaNoDispatchReason(reason, reasons = []) {
 // it, surface it once from attempt N on, and pace the next ordinary dispatch.
 // Returns null when that dispatch may run now; it is never a park.
 async function ownInconclusiveCloserRetry({ rootDir, repo, prNumber, headSha, launchRequestId, reason,
-  cfg, now, deliverAlertImpl, logger }) {
+  currentHeadSha = headSha, cfg, now, deliverAlertImpl, logger }) {
   try {
     const owned = recordCloserInconclusiveRetry(rootDir, { repo, prNumber }, { headSha, launchRequestId,
       reason, now, policy: closerInconclusiveRetryPolicy(cfg) });
@@ -454,7 +454,8 @@ async function ownInconclusiveCloserRetry({ rootDir, repo, prNumber, headSha, la
   } catch (error) {
     logger?.warn?.(`[ama-closer] inconclusive retry record failed for ${repo}#${prNumber}: ${error?.message || error}`);
   }
-  return gateInconclusiveCloserRetry({ rootDir, repo, prNumber, headSha, now, deliverAlertImpl, logger });
+  return currentHeadSha === headSha
+    ? gateInconclusiveCloserRetry({ rootDir, repo, prNumber, headSha, now, deliverAlertImpl, logger }) : null;
 }
 
 // Refund an inconclusive launch's charge in full. Best effort: a missed refund
@@ -3950,9 +3951,11 @@ function normalizeDispatchIdentifiers(payload) {
 }
 
 function readAmaAuditTerminalOutcome(hqRoot, { repo, prNumber, headSha } = {}) {
-  const status = String(readAmaAuditEntry(hqRoot, repo, prNumber, headSha)?.status || '')
-    .trim()
-    .toLowerCase();
+  return amaAuditTerminalOutcome(readAmaAuditEntry(hqRoot, repo, prNumber, headSha));
+}
+
+function amaAuditTerminalOutcome(audit) {
+  const status = String(audit?.status || '').trim().toLowerCase();
   return AMA_CLOSER_AUDIT_TERMINAL_OUTCOMES.has(status) ? status : null;
 }
 
@@ -5643,14 +5646,19 @@ async function maybeDispatchAmaCloserAttempt({
   const targetHeadAuditTerminalOutcome = headAdvancedDuringDispatch
     ? readAmaAuditTerminalOutcome(hqRoot, targetAuditIdentity)
     : null;
-  const existingRecordAuditTerminalOutcome = existingRecord?.headSha
-    ? readAmaAuditTerminalOutcome(hqRoot, existingRecordLeaseIdentity)
+  const existingRecordAudit = existingRecord?.headSha
+    ? readAmaAuditEntry(hqRoot, repo, prNumber, existingRecord.headSha)
     : null;
+  const existingRecordAuditTerminalOutcome = amaAuditTerminalOutcome(existingRecordAudit);
   const auditTerminalOutcome = existingRecord
     ? existingRecordAuditTerminalOutcome
     : (headAdvancedDuringDispatch ? targetHeadAuditTerminalOutcome : reviewedHeadAuditTerminalOutcome);
   const queuedHead = prMetadata?.headSha;
-  const parkAudit = queuedParkAudit;
+  const sourceAttempt = existingRecordAudit?.attempts?.at(-1);
+  const sourceValidationAudit = existingRecordAudit?.status === 'deferred'
+    && sourceAttempt?.reason === 'canonical-validation-deferred'
+    && sourceAttempt.launchRequestId === existingRecord?.launchRequestId ? existingRecordAudit : null;
+  const parkAudit = queuedParkAudit || sourceValidationAudit;
   const parkAttempt = parkAudit?.attempts?.at(-1);
   const parkReason = parkAttempt?.reason;
   const deferredPark = parkAudit?.status === 'deferred'
@@ -5678,6 +5686,16 @@ async function maybeDispatchAmaCloserAttempt({
     && (!infrastructureAbortProbe.row?.ticket_ref
       || isAmaHammerLaunchTicket(infrastructureAbortProbe.row.ticket_ref, prNumber))
     && ['succeeded', 'failed'].includes(infrastructureAbortProbe.row?.status);
+  const validationPark = parkReason === 'canonical-validation-deferred';
+  let validationRetryHead = existingRecord?.headSha;
+  // A live-head audit can describe an unpushed repair. Move its retry only
+  // when the ended run also recorded publication of that exact head.
+  if (validationPark && refundableReadAbort && queuedHead !== validationRetryHead
+    && parkAudit === queuedParkAudit && parkAttempt.launchRequestId === existingRecord.launchRequestId) {
+    const { pushedHeadSha } = hammerNoMergeDetails({ hqRoot, launchRequestId: existingRecord.launchRequestId,
+      runId: infrastructureAbortProbe.row.run_id || existingRecord.workerRunId });
+    if (pushedHeadSha === queuedHead) validationRetryHead = queuedHead;
+  }
   if (deferredPark && existingRecord?.launchRequestId && (!infrastructureReadPark || refundableReadAbort)) {
     if (HAMMER_CLOSER_FAULTS.has(parkReason)) {
       const refund = refundCloserSelfError(rootDir, { repo, prNumber }, {
@@ -5722,9 +5740,9 @@ async function maybeDispatchAmaCloserAttempt({
     // Validation can deterministically defer on every launch in this sandbox.
     // Keep the infrastructure refund, but let the shared owner pace and surface
     // repeated same-head launches rather than immediately relaunching forever.
-    if (parkLedger && parkReason === 'canonical-validation-deferred') {
+    if (parkLedger && validationPark) {
       const backoff = await ownInconclusiveCloserRetry({ rootDir, repo, prNumber,
-        headSha: existingRecord.headSha, launchRequestId: existingRecord.launchRequestId,
+        headSha: validationRetryHead, currentHeadSha: queuedHead, launchRequestId: existingRecord.launchRequestId,
         reason: parkReason, cfg, now: dispatchContext.dispatchedAt, deliverAlertImpl, logger });
       if (backoff) {
         finalizeAmaCloserLeaseBestEffort({ rootDir, leaseIdentity: existingRecordLeaseIdentity,
@@ -5751,7 +5769,9 @@ async function maybeDispatchAmaCloserAttempt({
       logger?.warn?.(`[ama-closer] lane-busy alert failed; retry next pass: ${error?.message || error}`);
     }
   }
-  if (deferredPark && parkLedger && (parkLedger.overloadDeferral || !certifiedPark || laneBusyPark)) {
+  const parkAppliesToLiveHead = !validationPark || validationRetryHead === queuedHead;
+  if (deferredPark && parkLedger
+    && (parkLedger.overloadDeferral || (parkAppliesToLiveHead && (!certifiedPark || laneBusyPark)))) {
     const { expired, backoff } = evaluateHammerDeferralQueue(parkLedger, dispatchContext.dispatchedAt);
     if (expired || backoff) {
       const overloadExhausted = expired && parkLedger.overloadDeferral?.overloadAlert;
@@ -7367,6 +7387,7 @@ async function maybeDispatchAmaCloserAttempt({
       if (inconclusiveOutcome) {
         const backoff = await ownInconclusiveCloserRetry({ rootDir, repo, prNumber,
           headSha: existingRecord.headSha, launchRequestId: existingRecord.launchRequestId,
+          ...(inconclusiveOutcome.reason === 'canonical-validation-deferred' ? { currentHeadSha: queuedHead } : {}),
           reason: inconclusiveOutcome.reason, cfg, now: dispatchContext.dispatchedAt, deliverAlertImpl, logger });
         if (backoff) return backoff;
       }

@@ -61,7 +61,7 @@ console.log(JSON.stringify({head: {ref: 'feature', sha: process.env.FIXTURE_STAL
     assert.ifError(result.error);
     return result;
   };
-  const api = () => run(process.execPath, [join(root, 'bin', 'hammer-api-publish.mjs'), repo, '42']);
+  const api = extra => run(process.execPath, [join(root, 'bin', 'hammer-api-publish.mjs'), repo, String(identity.prNumber)], extra);
   const direct = (candidate, expected, extra) => run(process.execPath,
     [join(root, 'bin', 'hammer-owned-publication.mjs'), repo, '42', 'head', candidate, 'feature', expected], extra);
   const phase = extra => run('/bin/bash', ['-c', `
@@ -179,7 +179,10 @@ for (const conflict of [false, true]) {
       const repaired = f.git(f.closer, 'rev-parse', 'HEAD');
       writeFileSync(join(f.dir, 'conflict-repair-publish.env'),
         `source=${f.start}\nhead=${repaired}\nbranch=feature\n`);
-      assert.equal(output(f.api()).route, 'git-fallback', 'the exact repaired head remains supported');
+      assert.equal(output(f.api({ HAM_CLOSE_REBASE_HEAD: repaired })).route, 'git-fallback',
+        'the validated repaired head uses the source-bound Git lease');
+      assert.equal(output(f.api({ HAM_CLOSE_REBASE_HEAD: f.start })).phaseOutcome, 'head-changed',
+        'publication cannot swap in a different checkout after validation');
     } else f.git(f.closer, 'rebase', 'origin/main');
     const candidate = f.commit(f.closer, 'follow-up-remediation');
     for (const result of [output(f.api()), output(f.direct(candidate, f.start))]) {

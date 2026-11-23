@@ -2245,6 +2245,17 @@ reuses the receipt without another battery and continues to publish, CI wait,
 predicate and merge. The gate merges only when every declared context is
 present and green on that head. The mirror's own budget stop (exit 75) and a
 battery killed by a signal the validator did not send are UNKNOWN too.
+A completed local conflict repair enters canonical validation before publication
+and outside the merge lease. A genuine local failure blocks the push. An active
+validation stop leaves the controller's terminal result unwritten so one fresh
+round can publish a head-bound UNKNOWN after confirmed drain, using the captured
+source as its Git lease. A blocked publication check reports
+`source-publication-refused`. Verify-head reuses a passing pre-publish battery
+or CI deferral at the same SHA, and declared required CI gates the published
+head. If CI
+authority is unavailable, the close records a watcher-owned re-drive on that
+head and ends deferred. Dispatch refunds the source launch and schedules the
+retry against the live published head when the launch's push receipt names it.
 The no-verdict signal is scoped to `telegram-responder-guard` and UNKNOWN
 cannot fall through to import-fault success. Cancellation with unconfirmed
 drain retains cancellation instead of writing a validation deferral. Ended

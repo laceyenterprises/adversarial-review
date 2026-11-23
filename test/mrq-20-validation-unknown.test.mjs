@@ -128,7 +128,7 @@ function fixture(t, { declared = true } = {}) {
 }
 
 // scenario: { stop?: [reason, status], rows?: [...], output?: string, exit: number }
-function runValidator({ root, config }, scenario, extraArgs = ['--canonical', '--', 'src/example.py']) {
+function runValidator({ root, head, config }, scenario, extraArgs = ['--canonical', '--', 'src/example.py']) {
   const receipt = join(root, 'validation.json');
   const calls = join(root, 'battery-calls');
   const runner = `
@@ -138,6 +138,8 @@ function runValidator({ root, config }, scenario, extraArgs = ['--canonical', '-
       const scenario = ${JSON.stringify(scenario)};
       if (scenario.rows) writeFileSync(process.env.HAM_CLOSE_VALIDATION_RECEIPT, JSON.stringify({ checks: scenario.rows }));
       if (scenario.output) options.observeOutput(scenario.output);
+      if (scenario.concurrentReceipt) writeFileSync(${JSON.stringify(join(root, `validation-deferred-${head}.json`))},
+        JSON.stringify(scenario.concurrentReceipt));
       if (scenario.stop) options.observeStop(...scenario.stop);
       return scenario.exit;
     }`;
@@ -193,6 +195,54 @@ test('hammer-validate: without declared contexts a timeout keeps the existing de
   assert.match(result.stderr, /canonical-validation-deferred/);
   assert.equal(deferralOf(repo).ciAuthoritative, false);
   assert.equal(runValidator(repo, { exit: 0 }, ['--check-deferred']).status, 75);
+});
+
+test('hammer-validate: a concurrently recorded deferral decides only if its exact-head evidence permits CI', t => {
+  for (const [receiptOverride, exit, expected] of [[{}, 124, 0], [{ ciAuthoritative: false }, 124, 75],
+    [{ head: HEAD }, 124, 75], [{}, 125, 125]]) {
+    const repo = fixture(t);
+    const concurrentReceipt = { head: repo.head, validation: 'unknown', reason: 'absolute-timeout',
+      ciAuthoritative: true, localFailureObserved: false, ...receiptOverride };
+    const first = runValidator(repo, { concurrentReceipt, stop: ['absolute-timeout', 124], exit });
+    assert.equal(first.status, expected, first.stderr);
+    assert.deepEqual(deferralOf(repo), concurrentReceipt);
+  }
+});
+
+test('a clean conflict rebase retains cleanup evidence for publication after a timeout', t => {
+  for (const declared of [true, false]) {
+    const repo = fixture(t, { declared });
+    writeFileSync(join(repo.root, '.git/info/exclude'), '/*\n');
+    writeFileSync(join(repo.root, 'conflict-repair-publish.env'),
+      `source=${HEAD}\nhead=${repo.head}\nbranch=feature\n`);
+    const result = runValidator(repo, { stop: ['absolute-timeout', 124], exit: 124 });
+    assert.equal(result.status, declared ? 0 : 124, result.stderr);
+    const receipt = deferralOf(repo);
+    assert.equal(receipt.cleanCheckout, true);
+    assert.equal(receipt.cleanupConfirmed, true);
+    assert.equal(receipt.localValidationReceipt, join(repo.root, 'validation.json'));
+    const state = runValidator(repo, { exit: 1 }, ['--check-rebase-publication']);
+    assert.equal(state.status, 0, state.stderr);
+    assert.equal(state.stdout.trim(), declared ? 'ci' : 'redrive');
+    assert.equal(state.batteries, 1);
+    const repeated = runValidator(repo, { exit: 1 });
+    assert.equal(repeated.status, declared ? 0 : 75, repeated.stderr);
+    assert.equal(repeated.batteries, 1);
+    for (const evidence of ['{"checks":[{"result":"fail"}]}', '{']) {
+      writeFileSync(receipt.localValidationReceipt, evidence);
+      const blocked = runValidator(repo, { exit: 1 }, ['--check-rebase-publication']);
+      assert.equal(blocked.status, 0, blocked.stderr);
+      assert.equal(blocked.stdout.trim(), 'blocked');
+      assert.equal(blocked.batteries, 1);
+    }
+    writeFileSync(receipt.localValidationReceipt, '{"checks":[]}');
+    writeFileSync(join(repo.root, `validation-deferred-${repo.head}.json`), JSON.stringify({
+      ...receipt, cleanupConfirmed: false,
+    }));
+    const undrained = runValidator(repo, { exit: 1 });
+    assert.equal(undrained.status, 75, undrained.stderr);
+    assert.equal(undrained.batteries, 1);
+  }
 });
 
 test('hammer-validate: a real local failure still blocks', t => {

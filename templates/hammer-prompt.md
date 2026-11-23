@@ -124,6 +124,11 @@ An unknown cleanup or live owner retains custody and forbids a second controller
 `validation-deferred-<head>.json` points to retained validation logs when
 available. Use existing controller drain and lease receipts, or the standalone
 bounded-command cleanup result. Preserve unknown cleanup for the recovery owner.
+For a completed Appendix D rebase, run the close command as directed there.
+After confirmed drain it can publish the repaired head and wait for required CI.
+If it exits with a deferred audit on the published head, the watcher owns that
+head's scheduled retry.
+For other validation deferrals, use the following handoff.
 Invoke the audit helper without `--final`: `canonical-validation-deferred <head>`,
 then end the run. The deferred audit and `last-phase` receipt let the watcher
 own the retry; no `terminal-stop` progress receipt is expected.
@@ -293,7 +298,8 @@ obligation`. Commit, then run in the foreground (it sources inputs, holds FD 4):
 /bin/bash "<<ROOT_DIR>>/bin/hammer-close.sh" "<<RUN_DIR>>/close-plan.json"
 ```
 
-It publishes a new commit, verifies head under the lease, revalidates
+It validates a completed conflict repair before publishing it. It publishes
+other new commits first, verifies head under the lease, revalidates
 `validationFiles` outside it, publishes the audit, waits for exact-head CI,
 builds the claim and predicate, and merges. It prints `close-result.json`
 (`status`, `outcome`); act on them per the exit-code table; 21 enters Appendix D,
@@ -915,7 +921,11 @@ For commit/validation progress receipt semantics, read Appendix G4.
 The commit helper requires `HEAD` to differ from and descend from `HAM_TARGET_REMEDIATION_SHA || HAM_REVIEWED_SHA` before recording `remediation-committed`; an already-advanced dispatch target earns no credit by itself. The bounded validation helper records `validation-passed` or `validation-failed` for completed commands (exit 0 or 1–123); timeouts remain unknown. These validation receipts are advisory liveness signals, not proof tests ran or passed. Each receipt kind earns one bounded outcome slice per run; repeating it earns no additional time.
 <!-- /hammer-reference:G4 -->
 
-Before head validation, the close command publishes a new local commit (`HAM_COMMIT_PUBLICATION_ONLY=1` with `hammer-publish.sh`) and stops on failure. For `head-changed` or `source-publication-refused`, preserve the local commits and stop this run. The versioned publisher alone chooses whether to use Git fallback.
+For ordinary remediation, the close command publishes a new local commit (`HAM_COMMIT_PUBLICATION_ONLY=1` with `hammer-publish.sh`)
+before verifying the live head and stops on publication failure. A completed
+Appendix D rebase gets local validation first. For `head-changed` or
+`source-publication-refused`, preserve the local commits and stop this run.
+The versioned publisher selects the publication route.
 
 Refresh and validate the live head:
 
@@ -941,9 +951,8 @@ The hammer OWNS merge-conflict resolution. A conflicting (`mergeable=CONFLICTING
 or behind PR must NOT be left for the operator, but the merge lease must be
 released BEFORE conflict resolution starts. Never hold the lease while opening
 files, resolving markers, running changed-surface tests, or force-pushing the conflict
-resolution. After the conflict is resolved and re-validated in the parallel
-phase, re-enter the merge step and re-acquire the lease through verify-head for
-its bounded server-rebase/gate/merge window.
+resolution. After resolving the conflict, use the close command to validate
+and publish it before verify-head reacquires the lease.
 Local conflict rebasing and commit publication remain outside the merge lease.
 When the rebase loop above hits a conflict, this is the procedure to run only
 after `ham_release_merge_lease` has completed. Start here (the query never
@@ -1013,9 +1022,15 @@ cannot be established, stop with the reported refusal and retain the staged
 work. A completed replay runs the reviewed-head proof and submodule sync.
 Exit 76 is retryable. Other nonzero exits stop with the printed reason.
 
-Rerun the close command: it publishes this commit first
-(`HAM_COMMIT_PUBLICATION_ONLY=1`; rebased/multi-commit history keeps the
-lease-protected git route).
+Rerun the close command directly. It runs local canonical validation for the
+repaired head before publication. A genuine local failure stops the push.
+After confirmed cleanup, a timeout, load-related stop or denied process
+inspection still allows a push with a Git lease against the captured source.
+The controller uses `HAM_COMMIT_PUBLICATION_ONLY=1` for that push.
+The close then waits on the required CI contexts for the published head, or
+hands the attested head to the queue executor. When no required contexts
+can establish merge authority, the close records a watcher retry on the
+published head and exits deferred.
 
 `conflict-primary-unproven` routes this head to the watcher's builder-tag
 follow-up remediation queue: resolve onto current base, preserve both sides,
@@ -1023,11 +1038,10 @@ fix findings and push for full review and full-range validation. No replay retry
 Report reviewed head and captured base.
 `conflict-primary-timeout`/`-failed`: proof did not run, not a mismatch.
 
-After conflict repair, refresh context and re-run changed-surface tests (2b)
-outside the lease. Rerun the close command; it re-enters **verify-head** (Appendix C)
-to acquire the lease and recheck head/base and exact-head required checks. Follow
-`HAM_NEEDS_REVALIDATION` as usual, rebuild audit/predicate, then merge. Never
-jump straight from conflict repair to audit publication or merge.
+The close command re-enters **verify-head** (Appendix C) to acquire the lease
+and recheck head/base and exact-head required checks. It handles
+`HAM_NEEDS_REVALIDATION`, rebuilds audit and predicate evidence, and follows
+the usual merge or queue handoff path.
 
 ## Appendix E — Audit, predicate and merge
 

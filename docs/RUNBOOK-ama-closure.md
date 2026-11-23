@@ -1085,8 +1085,13 @@ compatibility probe checks the installed call signatures without changing CI:
 Without that explicit root the host probe is skipped and tests remain offline.
 A public staged-rebase entry point remains a companion Agent OS follow-up.
 Exit 76 is the retryable `git-credential-refresh-failed`. The closer then reruns
-the close command, which publishes the commit, validates outside the lease and
-re-enters verify-head. For a hand-written JSON map,
+the close command, which validates the completed rebase outside the merge
+lease before publishing and re-entering verify-head. A genuine local failure
+blocks publication. A timeout, load-related stop or denied process inspection
+permits the source-fenced push after confirmed cleanup. Declared required CI
+then decides on the published head. Without a usable declaration, the
+controller records a durable watcher re-drive on that head and ends deferred.
+For a hand-written JSON map,
 take the union only after proving both sides only added keys; keep distinct-key
 values and ordering, validate JSON/unique keys, and never overwrite conflicting
 same-key values. Rebuild the audit and exact-head predicate before merge.
@@ -6354,6 +6359,17 @@ cleanup line for a standalone run. Preserve unknown cleanup for the recovery
 owner. The closer ends the run with the existing deferred audit. Repeating
 validation or close on that head in the run returns 75 before another battery
 or controller starts. A changed head remains subject to ordinary validation.
+The close command makes a narrow exception for a completed local conflict
+repair with a clean, head-bound UNKNOWN receipt and confirmed cleanup. It
+leaves an active controller stop to the supervisor without a terminal close
+result. Only a confirmed drain and a fresh evidence check allow one more
+controller round to publish. A blocked publication check reports
+`source-publication-refused`, including on re-entry with a deferral receipt.
+Verify-head reuses a successful pre-publish validation or a CI deferral for
+the same published SHA. If declared required contexts
+cannot supply merge authority, the close records the watcher continuation
+on the published head before returning 75. The watcher uses launch-bound push
+evidence before assigning the published head retry backoff.
 Only the `telegram-responder-guard` check can supply the Python-lane no-verdict
 signal; another check quoting that line retains its own result. A passing
 Telegram result containing that explicit no-verdict still defers: the reload
@@ -6401,7 +6417,8 @@ The validator records the deferred audit and `last-phase` receipt non-finally.
 The closer repeats the audit helper without `--final` and ends the run; no
 `terminal-stop` progress receipt is expected. Once the matching launch ends,
 dispatch records `canonical-validation-deferred` in the existing per-head
-inconclusive retry store. Its watcher owner retains full refunds, applies
+inconclusive retry store, keyed by the live head for a published rebase.
+Its watcher owner retains full refunds, applies
 exponential backoff from attempt N (default three, starting at five minutes,
 capped at one hour), and surfaces one notification through the existing
 closure-wait receipt. Re-observing a launch neither increments its attempt nor

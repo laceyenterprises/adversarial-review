@@ -147,15 +147,33 @@ case "$(basename "$path")" in
       log "terminal-audit primary-change-context-failed"
     fi
     exit "$status" ;;
-  hammer-pr-read.mjs) log "pr-read $*"; printf '{"headRefOid":"%s"}\\n' "$FIXTURE_LIVE_HEAD" ;;
+  hammer-pr-read.mjs)
+    log "pr-read $*"
+    live="$FIXTURE_LIVE_HEAD"
+    if [ -n "\${FIXTURE_REBASE_REMOTE:-}" ]; then live=$(git --git-dir="$FIXTURE_REBASE_REMOTE" rev-parse refs/heads/feature); fi
+    printf '{"headRefOid":"%s"}\\n' "$live" ;;
   hammer-controller.mjs)
     case "$1" in
       assert-owner) log assert-owner ;;
       resolve-environment) [ -n "\${HAM_RUN_DIR:-}" ] || { log 'resolve-before-inputs'; exit 125; }; log resolve-environment ;;
       run) shift; ctl="$1"; shift; log "controller-run $(basename "$ctl")"
+        if [ -n "\${FIXTURE_TIMEOUT_EXIT:-}" ]; then
+          export HAM_CONTROLLER_RECORD="$HAM_RUN_DIR/controller-00000000-0000-0000-0000-000000000000.json"
+          /bin/bash "$ctl" "$@" < /dev/null
+          status=$?
+          if [ -f "$HAM_CONTROLLER_RECORD" ] && [ ! -f "$HAM_RUN_DIR/controller-drained" ]; then
+            [ ! -f "$HAM_RUN_DIR/close-result.json" ] || log premature-close-result
+            jq '.state = "quiescent" | .drained = true' "$HAM_CONTROLLER_RECORD" > "$HAM_CONTROLLER_RECORD.tmp"
+            mv "$HAM_CONTROLLER_RECORD.tmp" "$HAM_CONTROLLER_RECORD"
+            : > "$HAM_RUN_DIR/controller-drained"
+            log controller-drained
+          fi
+          exit "$status"
+        fi
         exec /bin/bash -c 'IFS= read -r ready || true; source "$@"' hammer-controller "$ctl" "$@" < /dev/null ;;
     esac ;;
   hammer-validate.mjs)
+    if [ "$1" = --check-rebase-publication ]; then exec ${shellQuote(process.execPath)} "$path" "$@"; fi
     if [ "$1" != --check-deferred ]; then log "validate $*"; fi
     if [ "\${FIXTURE_REAL_VALIDATE:-0}" = 1 ]; then exec ${shellQuote(process.execPath)} "$path" "$@"; fi
     if [ "$1" = --check-deferred ]; then
@@ -167,7 +185,28 @@ case "$(basename "$path")" in
     # MRQ-20: a validator timeout stops the whole controller round once.
     if [ -n "\${FIXTURE_TIMEOUT_ONCE:-}" ] && [ ! -f "$FIXTURE_TIMEOUT_ONCE" ]; then
       : > "$FIXTURE_TIMEOUT_ONCE"; log validation-timeout
-      printf '{"validation":"unknown","reason":"absolute-timeout"}' > "$HAM_RUN_DIR/validation-deferred-$(git rev-parse HEAD).json"
+      head=$(git rev-parse HEAD)
+      if [ -n "\${FIXTURE_REBASE_REMOTE:-}" ]; then
+        record=controller-00000000-0000-0000-0000-000000000000.json
+        jq -cn --arg head "$head" --arg record "$record" --arg ci "\${FIXTURE_DECLARED_CI:-false}" \
+          --arg receipt "$HAM_CLOSE_VALIDATION_RECEIPT" \
+          '{head:$head,validation:"unknown",reason:"absolute-timeout",localFailureObserved:false,
+            cleanCheckout:true,ciAuthoritative:($ci == "true"),controllerRecord:$record,localValidationReceipt:$receipt}' \
+          > "$HAM_RUN_DIR/validation-deferred-$head.json"
+        case "\${FIXTURE_VALIDATION_EVIDENCE:-unknown}" in
+          failed) printf '{"checks":[{"result":"fail"}]}\\n' ;;
+          unreadable) printf '{\\n' ;;
+          *) printf '{"checks":[]}\\n' ;;
+        esac > "$HAM_CLOSE_VALIDATION_RECEIPT"
+        state="\${FIXTURE_DRAIN_STATE:-quiescent}"
+        if [ -n "\${FIXTURE_TIMEOUT_EXIT:-}" ]; then state=running; fi
+        jq -cn --arg launch "$HQ_LAUNCH_REQUEST_ID" --arg state "$state" \
+          '{launchRequestId:$launch,state:$state,reason:"validation-stopped",drained:($state == "quiescent")}' \
+          > "$HAM_RUN_DIR/$record"
+      else
+        printf '{"validation":"unknown","reason":"absolute-timeout"}' > "$HAM_RUN_DIR/validation-deferred-$head.json"
+      fi
+      if [ -n "\${FIXTURE_TIMEOUT_EXIT:-}" ]; then exit "$FIXTURE_TIMEOUT_EXIT"; fi
       kill -TERM "$PPID"; exit 124
     fi
     if [ -n "\${FIXTURE_VALIDATION_ARGV:-}" ]; then
@@ -184,7 +223,9 @@ case "$(basename "$path")" in
     if [ -n "\${FIXTURE_HISTORY_ERROR:-}" ]; then printf '%s\\n' "$FIXTURE_HISTORY_ERROR"; exit 1; fi
     echo '{}' ;;
   ama-check.mjs) log "ama-check reviewed=$(printf '%s' "$*" | sed -n 's/.*--reviewed-sha \\([0-9a-f]*\\).*/\\1/p')"; echo '{"eligible":true}' ;;
-  hammer-terminal-audit.mjs) log "terminal-audit $*" ;;
+  hammer-terminal-audit.mjs)
+    log "terminal-audit $*"
+    if [ -n "\${FIXTURE_REBASE_REMOTE:-}" ]; then exec ${shellQuote(process.execPath)} "$path" "$@"; fi ;;
   *) exec ${shellQuote(process.execPath)} "$path" "$@" ;;
 esac
 `, { mode: 0o755 });
@@ -202,6 +243,10 @@ log "verify-head validated=\${HAM_LOCALLY_VALIDATED_HEAD:-none}"
 HAM_MERGE_LEASE_HELD=1; HAM_MERGE_LEASE_ID=ml_fixture; log acquire
 trap ham_release_merge_lease EXIT
 export POST_REMEDIATION_SHA HAM_PRODUCED_HEAD
+if [ -n "\${FIXTURE_ADVANCE_REBASE:-}" ] && [ -z "\${HAM_LOCALLY_VALIDATED_HEAD:-}" ]; then
+  git -c user.name=Fixture -c user.email=fixture@example.invalid commit -q --allow-empty -m 'Synthetic next head' || return 1
+  git push -q "$FIXTURE_REBASE_REMOTE" HEAD:refs/heads/feature || return 1
+fi
 POST_REMEDIATION_SHA=$(git rev-parse HEAD); HAM_PRODUCED_HEAD="$POST_REMEDIATION_SHA"; HAM_CURRENT_BASE_SHA="$HAM_REVIEWED_SHA"
 if [ "\${FIXTURE_VERIFY_EXIT:-0}" != 0 ]; then HAM_PHASE_OUTCOME=rebase-conflict; ham_release_merge_lease; return "$FIXTURE_VERIFY_EXIT"; fi
 if [ -n "\${FIXTURE_NEEDS_REVALIDATION:-}" ] && [ -z "\${HAM_LOCALLY_VALIDATED_HEAD:-}" ]; then HAM_NEEDS_REVALIDATION=true; else HAM_NEEDS_REVALIDATION=false; fi
@@ -211,12 +256,30 @@ return 0
   writeFileSync(join(run, 'hammer-publish.sh'), `${phasePrelude}
 log "publish publication-only=\${HAM_COMMIT_PUBLICATION_ONLY:-0} held=\${HAM_MERGE_LEASE_HELD:-0} total=$HAM_AUDIT_REMEDIATED_TOTAL doc=$HAM_DOC_CURRENCY"
 [ -s "$HAM_AUDIT_DETAILS_FILE" ] || return 1
+if [ "\${HAM_COMMIT_PUBLICATION_ONLY:-0}" = 1 ] && [ -n "\${FIXTURE_REBASE_REMOTE:-}" ]; then
+  [ "$HAM_CLOSE_REBASE_HEAD" = "$(git rev-parse HEAD)" ] || return 1
+  git push -q --force-with-lease="refs/heads/feature:$FIXTURE_LIVE_HEAD" "$FIXTURE_REBASE_REMOTE" \
+    "$HAM_CLOSE_REBASE_HEAD:refs/heads/feature" || return 1
+  HAM_PUSHED_HEAD="$HAM_CLOSE_REBASE_HEAD"
+fi
 if [ "\${HAM_COMMIT_PUBLICATION_ONLY:-0}" != 1 ]; then export HAM_AUDIT_COMMENT_BODY="HAM-Validated-Head: $POST_REMEDIATION_SHA" HAM_PUBLISHED_AUDIT_HEAD="$POST_REMEDIATION_SHA"; fi
 HAM_PHASE_OUTCOME=published
 return 0
 `);
   writeFileSync(join(run, 'hammer-merge.sh'), `${phasePrelude}
-if [ "\${1:-}" = --wait-ci ]; then log "wait-ci held=$HAM_MERGE_LEASE_HELD"; HAM_PHASE_OUTCOME=ci-wait-not-needed; return 0; fi
+if [ "\${1:-}" = --wait-ci ]; then
+  log "wait-ci held=$HAM_MERGE_LEASE_HELD"
+  if [ -n "\${FIXTURE_REBASE_REMOTE:-}" ]; then
+    log "required-ci head=$POST_REMEDIATION_SHA"
+    [ "$POST_REMEDIATION_SHA" = "$(git --git-dir="$FIXTURE_REBASE_REMOTE" rev-parse refs/heads/feature)" ] || return 1
+    if [ "$POST_REMEDIATION_SHA" != "\${FIXTURE_GREEN_HEAD:-}" ]; then
+      HAM_PHASE_OUTCOME=required-checks-pending
+      return 75
+    fi
+  fi
+  HAM_PHASE_OUTCOME=ci-wait-not-needed
+  return 0
+fi
 [ "\${HAM_MERGE_LEASE_HELD:-0}" = 1 ] || { HAM_PHASE_OUTCOME=merge-lease-not-held; return 1; }
 if [ "\${1:-}" = --history-read-abort ]; then
   log "history-read-abort $HAM_HISTORY_READ_ERROR"; HAM_PHASE_OUTCOME=history-read-failed:transient:http-502
@@ -255,7 +318,8 @@ return 0
   const close = (extra = {}) => runDetached(join(root, 'bin/hammer-close.sh'), [join(run, 'close-plan.json')],
     { ...env, ...extra }, checkout).then(result => ({ ...result,
     closeResult: existsSync(join(run, 'close-result.json')) ? JSON.parse(readFileSync(join(run, 'close-result.json'), 'utf8')) : null }));
-  return { dir, run, checkout, shas, env, events, close, plan, bin };
+  return { dir, run, checkout, shas, env, events, close, plan, bin,
+    auditIdentity: { repo: values.REPO, prNumber: Number(values.PR_NUMBER) } };
 }
 
 test('the shipped hammer close runs with no tty and closed stdin, holds the lease through merge and releases it', async t => {
@@ -549,6 +613,119 @@ test('MRQ-20: a timeout that cannot defer to CI gets no second controller round'
   const events = f.events();
   assert.equal(events.filter(event => event.startsWith('controller-run ')).length, 1, events.join('\n'));
   assert.equal(events.some(event => event.startsWith('gh pr merge')), false);
+});
+
+function conflictRebaseFixture(t, { declared = true } = {}) {
+  const f = hammerFixture(t);
+  const git = (...args) => execFileSync('git', args, { cwd: f.checkout, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'],
+    env: { ...f.env, GIT_AUTHOR_NAME: 'Fixture', GIT_AUTHOR_EMAIL: 'fixture@example.invalid',
+      GIT_COMMITTER_NAME: 'Fixture', GIT_COMMITTER_EMAIL: 'fixture@example.invalid' } }).trim();
+  const remote = join(f.dir, 'remote.git');
+  git('init', '-q', '--bare', remote);
+  git('push', '-q', remote, 'HEAD:refs/heads/feature');
+  git('checkout', '-qb', 'upstream', f.shas.reviewed);
+  mkdirSync(join(f.checkout, 'src'), { recursive: true });
+  writeFileSync(join(f.checkout, 'src/example.mjs'), 'export const upstream = true;\n');
+  git('add', 'src/example.mjs');
+  git('commit', '-qm', 'Synthetic upstream change');
+  git('checkout', '-q', '--detach', f.shas.head);
+  assert.throws(() => git('rebase', 'upstream'));
+  writeFileSync(join(f.checkout, 'src/example.mjs'), 'export const fixed = true, upstream = true;\n');
+  git('add', 'src/example.mjs');
+  git('-c', 'core.editor=true', 'rebase', '--continue');
+  const head = git('rev-parse', 'HEAD');
+  writeFileSync(join(f.run, 'conflict-repair-publish.env'), `source=${f.shas.head}\nhead=${head}\nbranch=feature\n`);
+  const config = join(f.dir, 'config.yaml');
+  writeFileSync(config, declared
+    ? 'version: 1\nroles:\n  adversarial:\n    merge_authority:\n      required_check_contexts: [unit]\n'
+    : 'version: 1\n');
+  const close = (extra = {}) => f.close({ FIXTURE_REBASE_REMOTE: remote, AGENT_OS_CONFIG_PATH: config,
+    FIXTURE_DECLARED_CI: String(declared), ...extra });
+  return { ...f, close, head, remoteHead: () => git(`--git-dir=${remote}`, 'rev-parse', 'refs/heads/feature'),
+    timeout: join(f.dir, 'timed-out') };
+}
+
+test('a drained validation timeout publishes the repaired rebase and waits on CI for that exact head', async t => {
+  for (const green of [false, true]) {
+    const f = conflictRebaseFixture(t);
+    const result = await f.close({ FIXTURE_TIMEOUT_ONCE: f.timeout, FIXTURE_NEEDS_REVALIDATION: '1',
+      FIXTURE_GREEN_HEAD: green ? f.head : f.shas.head });
+    assert.equal(result.status, green ? 0 : 75, result.stderr);
+    assert.equal(result.closeResult.outcome, green ? 'merged' : 'required-checks-pending');
+    assert.equal(f.remoteHead(), f.head);
+    const events = f.events();
+    const publish = events.findIndex(event => event.startsWith('publish publication-only=1 held=0'));
+    assert.ok(publish > events.indexOf('validation-timeout'), events.join('\n'));
+    assert.ok(events.indexOf(`required-ci head=${f.head}`) > publish, events.join('\n'));
+    assert.equal(events.filter(event => event.startsWith('validate ')).length, 1);
+    assert.equal(events.includes(`gh pr merge --squash --match-head-commit ${f.head}`), green);
+  }
+});
+
+test('a passing conflict repair reuses validation only on the same published head', async t => {
+  for (const moved of [false, true]) {
+    const f = conflictRebaseFixture(t);
+    const result = await f.close({ FIXTURE_NEEDS_REVALIDATION: '1', FIXTURE_GREEN_HEAD: f.head,
+      FIXTURE_ADVANCE_REBASE: moved ? '1' : '' });
+    const events = f.events();
+    assert.equal(result.status, moved ? 75 : 0, result.stderr);
+    assert.equal(events.filter(event => event.startsWith('validate ')).length, moved ? 2 : 1, events.join('\n'));
+    assert.ok(events.includes(`verify-head validated=${f.remoteHead()}`), events.join('\n'));
+  }
+});
+
+test('conflict-repair timeout or load stop leaves publication to a fresh round after supervisor drain', async t => {
+  for (const status of [75, 124, 137, 143]) {
+    const f = conflictRebaseFixture(t);
+    const result = await f.close({ FIXTURE_TIMEOUT_ONCE: f.timeout, FIXTURE_TIMEOUT_EXIT: String(status),
+      FIXTURE_GREEN_HEAD: f.head });
+    assert.equal(result.status, 0, result.stderr);
+    assert.equal(f.remoteHead(), f.head);
+    const events = f.events();
+    assert.equal(events.filter(event => event.startsWith('controller-run ')).length, 2);
+    assert.equal(events.includes('premature-close-result'), false);
+    assert.ok(events.indexOf('controller-drained') < events.findIndex(event => event.startsWith('publish ')));
+  }
+});
+
+test('a genuine local failure, an undrained round or unreadable evidence blocks rebase publication', async t => {
+  for (const scenario of ['failure', 'undrained', 'failed', 'unreadable']) {
+    const f = conflictRebaseFixture(t);
+    const result = await f.close(scenario === 'failure' ? { FIXTURE_VALIDATE_EXIT: '42' }
+      : { FIXTURE_TIMEOUT_ONCE: f.timeout,
+        FIXTURE_DRAIN_STATE: scenario === 'undrained' ? 'cleanup-unconfirmed' : 'quiescent',
+        FIXTURE_VALIDATION_EVIDENCE: scenario });
+    assert.notEqual(result.status, 0);
+    if (scenario === 'failure') {
+      assert.equal(result.closeResult.outcome, 'targeted-validation-failed');
+    } else {
+      assert.match(result.stdout, /"outcome":"source-publication-refused"/);
+      const events = f.events();
+      const repeated = await f.close({ FIXTURE_CHECK_DEFERRED_EXIT: '75' });
+      assert.equal(repeated.status, 1, repeated.stderr);
+      assert.match(repeated.stdout, /"outcome":"source-publication-refused"/);
+      assert.deepEqual(f.events(), events);
+    }
+    assert.equal(f.remoteHead(), f.shas.head);
+    assert.ok(!f.events().some(event => /^(publish|wait-ci|gh pr merge)/.test(event)));
+    assert.equal(f.events().filter(event => event.startsWith('controller-run ')).length, 1);
+  }
+});
+
+test('a published rebase without declared CI authority leaves a durable watcher continuation', async t => {
+  const f = conflictRebaseFixture(t, { declared: false });
+  const result = await f.close({ FIXTURE_TIMEOUT_ONCE: f.timeout });
+  assert.equal(result.status, 75, result.stderr);
+  assert.equal(result.closeResult.outcome, 'canonical-validation-deferred');
+  assert.equal(result.closeResult.postRemediationSha, f.head);
+  assert.equal(f.remoteHead(), f.head);
+  assert.ok(!f.events().some(event => /^(acquire|wait-ci|gh pr merge)/.test(event)));
+  const audit = readAmaAuditEntry(f.dir, f.auditIdentity.repo, f.auditIdentity.prNumber, f.head);
+  const [attempt] = audit.attempts;
+  assert.equal(attempt.outcome, 'deferred');
+  assert.deepEqual(attempt.continuation, { kind: 'redrive', owner: 'watcher', headSha: f.head,
+    notBefore: attempt.continuation.notBefore, lease: 'fresh' });
+  assert.ok(Number.isFinite(Date.parse(attempt.continuation.notBefore)));
 });
 
 test('close controller hands off denied validation after one lease yield', async t => {

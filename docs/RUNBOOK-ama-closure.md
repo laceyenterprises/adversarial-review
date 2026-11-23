@@ -8683,6 +8683,10 @@ Completed-round proof is attempted before lazily fetching PR comment pages for
 the App-attestation fallback. Each immutable start/result comparison is evaluated
 at most once per proof attempt, including non-ahead and unreadable comparisons.
 
+The flat directory scan also stops at 125,000 entries across all repositories
+and PRs. If the scan exceeds that ceiling, it discards partial round proof and
+reports the `directory entries` limit.
+
 HAMCLOSE-07 adds branch activity as a fallback when existing proofs decline.
 It reads the PR's head-repository ref activity, including fork branches, through
 GitHub Link cursors with a ten-page all-or-nothing bound. From the latest

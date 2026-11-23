@@ -963,6 +963,10 @@ for each key retained in its bounded diagnostic cache. When a daemon snapshot
 already supplies a complete authenticated Hammer chain, the range validator uses
 it without scanning completed jobs.
 
+The directory scan has a separate ceiling of 125,000 entries across all
+repositories and PRs. If it encounters another entry, the reader discards
+partial round evidence and reports the `directory entries` limit.
+
 For a completed local Comment-only round, the daemon's `git-cherry-replay`
 proof can also carry review applicability to the exact recorded publication
 before any Hammer edge exists. The reader checks the local worker's job

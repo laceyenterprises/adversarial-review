@@ -68,3 +68,5 @@ removed), whose handoff was submitted by the model through operator instructions
   queue-only retry codes to remain absent from legacy rendered phases.
   `node test/run-tests.mjs test/retire-legacy-repair.test.mjs test/verifyheadtransient-01.test.mjs`:
   207/207 passed offline.
+
+Final review closeout: production hammer-publish already exports HAM_PUBLISHED_AUDIT_HEAD and clears it before delivery, setting it only after the audit succeeds. A rendered production-phase regression now verifies the exact audit body/head reach a child process and failed publication leaves the head empty. No controller fallback may fabricate publication success. Queue audit headers normalize SHA casing; installed handoff acknowledgements accept formatted JSON with leading diagnostic lines while durable receipt, head, launch and review-proof checks remain mandatory.

@@ -117,6 +117,7 @@ echo "status=$status outcome=$HAM_PHASE_OUTCOME held=$HAM_MERGE_LEASE_HELD publi
 echo "base=$HAM_BASE_HEAD"
 echo "note=\${HAM_NO_MERGE_NOTE:-}"
 echo "release-retryable=\${HAM_RELEASE_RETRYABLE_ABORT_REASON:-}"
+"$REAL_NODE" -e 'console.log("child-audit=" + JSON.stringify({head: process.env.HAM_PUBLISHED_AUDIT_HEAD, body: process.env.HAM_AUDIT_COMMENT_BODY}))'
 exit "$status"
 `], { env: runEnv, encoding: 'utf8', timeout: 30000 });
     assert.equal(result.signal, null, result.stderr);
@@ -405,4 +406,19 @@ test('HAMNOREREVIEW-01 comment-only final findings merge after hammer covers the
     nonBlockingFindingCount: 1, nonBlockingFindingIdentities: ['cleanup'] },
     findings: [{ title: 'Cleanup', blocking: false, addressed: true }] });
   assert.equal(verdict.eligible, true, JSON.stringify(verdict));
+});
+
+
+test('MRQ-21: the production publish phase exports exact-head audit proof to child processes', t => {
+  const f = fixture(t);
+  const result = f.run();
+  assert.equal(result.status, 0, result.stderr);
+  const child = JSON.parse(result.stdout.match(/^child-audit=(.*)$/m)[1]);
+  assert.equal(child.head, validated);
+  assert.equal(child.body, f.comments()[0].body);
+  assert.match(child.body, new RegExp(`HAM-Validated-Head: ${validated}`));
+  const failed = fixture(t).run({ FAIL_COUNT: '5', POST_ERROR: 'HTTP 403 Forbidden' });
+  assert.equal(failed.status, 1);
+  const failedChild = JSON.parse(failed.stdout.match(/^child-audit=(.*)$/m)[1]);
+  assert.equal(failedChild.head, '', 'failed delivery never exports an admitted audit head');
 });

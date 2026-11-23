@@ -50,7 +50,7 @@ export function hammerReviewProof({ lane, prNumber, head, reviewedSha, auditHead
     refuse(HAMMER_QUEUE_HANDOFF_UNADMITTED, 'review-proof identity invalid');
   }
   if (!sameSha(auditHead, head)) refuse(HAMMER_QUEUE_HANDOFF_UNADMITTED, 'audit not published for the exact head');
-  if (!text(auditBody) || !auditBody.split(/\r?\n/).some(line => line.trim() === `HAM-Validated-Head: ${head}`)) {
+  if (!text(auditBody) || !auditBody.split(/\r?\n/).some(line => line.trim().toLowerCase() === `ham-validated-head: ${head.toLowerCase()}`)) {
     refuse(HAMMER_QUEUE_HANDOFF_UNADMITTED, 'audit body does not name the exact head');
   }
   const bound = { schemaVersion: 1, lane, prNumber, head: head.toLowerCase(),
@@ -82,11 +82,17 @@ export function buildHammerQueueHandoffRequest({ lane, prNumber, head, routeGene
 }
 
 function lastJsonLine(stdout) {
-  const lines = String(stdout || '').split(/\r?\n/).map(line => line.trim()).filter(Boolean);
+  const output = String(stdout || '').trim();
+  try {
+    const value = JSON.parse(output);
+    if (value && typeof value === 'object' && !Array.isArray(value)) return value;
+  } catch { /* permit diagnostic lines before the acknowledgement */ }
+  const lines = output.split(/\r?\n/).map(line => line.trim()).filter(Boolean);
   for (let i = lines.length - 1; i >= 0; i--) {
     try {
-      const value = JSON.parse(lines[i]);
-      if (value && typeof value === 'object') return value;
+      if (!lines[i].startsWith('{')) continue;
+      const value = JSON.parse(lines.slice(i).join('\n'));
+      if (value && typeof value === 'object' && !Array.isArray(value)) return value;
     } catch { /* keep looking */ }
   }
   return null;

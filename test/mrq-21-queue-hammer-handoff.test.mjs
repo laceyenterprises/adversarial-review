@@ -23,7 +23,7 @@ import { validateQueueHandoff } from '../src/finalization/queue-handoff.mjs';
 import { appendAmaAuditAttempt, readAmaAuditEntry } from '../src/ama/audit.mjs';
 import { hammerStopOrigin } from '../src/ama/hammer-stop-origin.mjs';
 import { admitHammerQueueHandoff, confirmHammerQueueHandoff, hammerReviewProof, runHammerQueueHandoffStep,
-  HAMMER_QUEUE_HANDOFF_ADMITTED } from '../src/finalization/hammer-queue-handoff.mjs';
+  runHammerQueueHandoffCommand, HAMMER_QUEUE_HANDOFF_ADMITTED } from '../src/finalization/hammer-queue-handoff.mjs';
 import { gitFixture, idle } from './helpers/queue-rebase-fixture.mjs';
 import { queueHandoffFixture, reviewHead, handoffTime } from './helpers/queue-handoff-fixture.mjs';
 import { queueLiveFixture } from './helpers/queue-clean-fixture.mjs';
@@ -293,3 +293,24 @@ test('MRQ-21: legacy rendered phases and bootstrap carry no queue codes or input
     for (const code of HAMMER_QUEUE_CONTROLLER_OUTCOMES) assert.ok(!source.includes(code), `${phase} names ${code}`);
   }
 });
+
+
+test('MRQ-21: audit header comparison normalizes SHA casing without changing the proof body', () => {
+  const head = 'aBcD'.repeat(10);
+  const proof = hammerReviewProof({ lane, prNumber: 102, head, reviewedSha: reviewHead,
+    auditHead: head.toUpperCase(), auditBody: auditBody(head.toLowerCase()) });
+  assert.equal(proof.head, head.toLowerCase());
+  assert.throws(() => hammerReviewProof({ lane, prNumber: 102, head, reviewedSha: reviewHead,
+    auditHead: head, auditBody: auditBody('f'.repeat(40)) }), /does not name the exact head/);
+});
+
+for (const prefix of ['', 'diagnostic line\n']) {
+  test(`MRQ-21: installed handoff accepts formatted acknowledgement (${prefix ? 'with diagnostics' : 'JSON only'})`, async () => {
+    const ack = { ack: { entryId: 'entry-1', ackId: 'ack-1', head: 'a'.repeat(40),
+      lane: { repository: lane.repository, base: lane.base } } };
+    const output = prefix + JSON.stringify(ack, null, 2) + '\n';
+    const reply = await runHammerQueueHandoffCommand({ command: [process.execPath, '-e',
+      `process.stdout.write(${JSON.stringify(output)})`], requestPath: '/fixture/request.json', timeoutMs: 10000 });
+    assert.deepEqual(reply, ack);
+  });
+}

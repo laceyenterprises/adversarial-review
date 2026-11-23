@@ -7,9 +7,11 @@ fallback() {
   exec "$REAL_NODE" "$FIXTURE_HELPER" gh "$@"
 }
 
+[ -n "${SCENARIO:-}" ] && [ -n "${FIXTURE_DIR:-}" ] || fallback "$@"
+
 case "${1-}:${2-}" in
   pr:view)
-    case "$SCENARIO" in
+    case "${SCENARIO:-}" in
       foreign-after-rebase|lease-probe-exhausted|prepredicate-probe-exhausted|snapshot-*|ci-snapshot-*|*old-reply*)
         fallback "$@" ;;
     esac
@@ -30,7 +32,7 @@ case "${1-}:${2-}" in
   *) fallback "$@" ;;
 esac
 
-result=$(jq -cr --arg scenario "$SCENARIO" --args '
+result=$(jq -cr --arg scenario "${SCENARIO:-}" --args '
   $ARGS.positional as $args |
   {kind: "gh", value: $args},
   (if $args[0] == "pr" then
@@ -59,6 +61,6 @@ result=$(jq -cr --arg scenario "$SCENARIO" --args '
   }
   elif $args[1] == "repos/fixture/repo/pulls/42" then {state: "open", head: {sha: .head}}
   else [] end)
-' -- "$@" < "$FIXTURE_DIR/state.json")
-printf '%s\n' "${result%%$'\n'*}" >> "$FIXTURE_DIR/events.jsonl"
+' -- "$@" < "${FIXTURE_DIR:-}/state.json")
+printf '%s\n' "${result%%$'\n'*}" >> "${FIXTURE_DIR:-}/events.jsonl"
 printf '%s\n' "${result#*$'\n'}"

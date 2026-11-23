@@ -141,7 +141,10 @@ function _cacheKeyFor({ topPath, modulePaths, env, legacyGeminiReviewer = false 
     addAlias(canonical);
     for (const [name] of aliases || []) addAlias(name);
   }
-  for (const [, { canonical }] of dynamicAppEnvAliases(envView)) addAlias(canonical);
+  for (const [, { canonical, aliases }] of dynamicAppEnvAliases(envView)) {
+    addAlias(canonical);
+    for (const [name] of aliases || []) addAlias(name);
+  }
   // PROFILENODE-01: AGENT_OS_PROFILE selects the profile, so it is part of the
   // slot identity like the declared env aliases. Key on the value
   // resolveProfile actually reads (trimmed, blank = unset) so a blank or

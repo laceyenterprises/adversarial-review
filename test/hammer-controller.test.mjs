@@ -153,10 +153,10 @@ function fixture(t, script, { realCensus = false, timeoutMs = 10000, launchGateC
         else if (gateRequested && advanceGateBy) {
           elapsedMs+=advanceGateBy;
           advanceGateBy=0;
-        } else if (!gateRequested && elapsedMs===0 && !readProbe().ok) {
-          // Expire the permitted sample and let the controller observe a
-          // failed periodic read before the shell sends its launch request.
-          elapsedMs=launchPollMs+readTimeoutMs+1;
+        } else if (!gateRequested || readProbe().ok) {
+          // Startup/periodic reads and successful gate probes advance normally.
+          // Only the blocked gate's retry backoff uses synthetic jumps.
+          elapsedMs+=ms;
         }
       }} : {}),
       // The test owns these exact births. Inject the OS census so this offline
@@ -173,6 +173,8 @@ function fixture(t, script, { realCensus = false, timeoutMs = 10000, launchGateC
         }).map(pid=>({pid,birth:'fixture-'+pid}));
       }})
     });
+    if (launchGateClock) writeFileSync(${JSON.stringify(join(dir, 'gate-clock.json'))},
+      JSON.stringify({elapsedMs, gateFailures}));
     writeFileSync(${JSON.stringify(join(dir, 'result.tmp'))},String(status));
     renameSync(${JSON.stringify(join(dir, 'result.tmp'))},${JSON.stringify(join(dir, 'result'))});
     process.exitCode=status;
@@ -1863,6 +1865,8 @@ test('real shell: assert-launch clears on a fresh read and blocks a stale unread
     const p = clear.start();
     assert.equal((await p.closed)[0], 0, `${p.output()} ${JSON.stringify(clear.receipt())}`);
     assert.equal(readFileSync(join(clear.dir, 'audit'), 'utf8'), 'cleared');
+    assert.ok(JSON.parse(readFileSync(join(clear.dir, 'gate-clock.json'), 'utf8')).elapsedMs > 0,
+      'successful probes must not freeze the synthetic clock');
 
     const blocked = fixture(t, gate, { launchGateClock: true });
     blocked.env.FIXTURE_GRACE_MS = '60000';
@@ -1874,7 +1878,9 @@ test('real shell: assert-launch clears on a fresh read and blocks a stale unread
     assert.equal((await q.closed)[0], 0, `${q.output()} ${JSON.stringify(blocked.receipt())}`);
     assert.equal(readFileSync(join(blocked.dir, 'audit'), 'utf8'), 'blocked');
     assert.equal(blocked.receipt().reason, 'shell-exited');
-    assert.equal(blocked.receipt().launchReadFailures, 1 + LAUNCH_READ_ATTEMPTS);
+    assert.ok(blocked.receipt().launchReadFailures >= 1 + LAUNCH_READ_ATTEMPTS);
+    assert.equal(JSON.parse(readFileSync(join(blocked.dir, 'gate-clock.json'), 'utf8')).gateFailures,
+      LAUNCH_READ_ATTEMPTS, 'periodic failures do not change the gate retry budget');
     assert.equal(blocked.receipt().launchReadLastError, 'fixture-read-timeout');
   });
 

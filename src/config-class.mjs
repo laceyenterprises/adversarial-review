@@ -70,6 +70,10 @@ export class AgentOSConfig {
       'roles.adversarial.merge_authority.required_check_contexts',
       [],
     );
+    const requiredCheckContextsByRepository = this.get(
+      'roles.adversarial.merge_authority.required_check_contexts_by_repository',
+      [],
+    );
     const noCiRepositories = this.get('roles.adversarial.merge_authority.no_ci_repositories', []);
     return {
       disabledRepositories: normalizeDisabledRepositories(this.get('roles.adversarial.merge_authority.disabled_repositories', [])),
@@ -135,6 +139,13 @@ export class AgentOSConfig {
       ),
       requiredCheckContexts: Array.isArray(requiredCheckContexts)
         ? [...requiredCheckContexts]
+        : [],
+      // MRQ-20: repository-scoped contexts; see required-check-contexts.mjs.
+      requiredCheckContextsByRepository: Array.isArray(requiredCheckContextsByRepository)
+        ? requiredCheckContextsByRepository.map(entry => ({
+          repository: entry?.repository,
+          contexts: Array.isArray(entry?.contexts) ? [...entry.contexts] : [],
+        }))
         : [],
       hammerLifetimeDispatchCeiling: legacyHammerLifetimeCeiling !== null && hammerLifetimeCeiling === 6
         ? legacyHammerLifetimeCeiling

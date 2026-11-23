@@ -1,0 +1,10 @@
+{
+  "version": 1,
+  "entries": [
+    {
+      "id": "ama-audit",
+      "unregisteredStopCode": "attempts[].reason=unregistered-stop-code with stopOrigin=infrastructure: an unregistered runtime stop code, original preserved in originalReason and reasonDetail; retried through the existing owned retry",
+      "attemptContinuation": "attempts[].continuation: optional durable continuation of a retryable hammer deferral; kind=redrive (owner, headSha equal to the attempt head, notBefore ISO time, lease=fresh) or kind=park (owner, operatorAction)"
+    }
+  ]
+}

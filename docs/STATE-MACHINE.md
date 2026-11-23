@@ -2229,6 +2229,14 @@ A validator timeout records `validation-stopped` in the controller and
 `canonical-validation-deferred` for the exact head in the closer. The deferral
 supplies no validation audit. A process-inspection no-verdict uses the same
 deferred handoff. The run will not start another battery on that head.
+MRQ-20: when the repository declares required contexts
+(`required_check_contexts` or `required_check_contexts_by_repository`) and no
+local failure was seen before the stop, that UNKNOWN instead hands its verdict
+to exact-head CI. `hammer-close.sh` starts one fresh controller round, which
+reuses the receipt without another battery and continues to publish, CI wait,
+predicate and merge. The gate merges only when every declared context is
+present and green on that head. The mirror's own budget stop (exit 75) and a
+battery killed by a signal the validator did not send are UNKNOWN too.
 The no-verdict signal is scoped to `telegram-responder-guard` and UNKNOWN
 cannot fall through to import-fault success. Cancellation with unconfirmed
 drain retains cancellation instead of writing a validation deferral. Ended
@@ -2841,6 +2849,19 @@ capacity. Unreadable or budget-skipped receipted rows retain
 same-PR ownership and reserve fleet capacity inside the bounded pending-launch
 window. The watcher explicitly enables the shared snapshot through its retry
 wrapper; a failed snapshot does not trigger per-record PostgreSQL queries.
+
+Operator cancellation and native in-place repair can release a rekeyed
+`dispatched` closer lease once the unique original `launch-terminal` receipt
+and a fresh authenticated exact-LRQ lookup bind its dispatch to the carried
+head. Complete retry evidence must show terminal non-success for the root and
+every descendant. The PR intent lock and exact lease CAS protect replacement
+custody. Repair performs the alias lookup outside the intent lock and checks
+for a new owner under a reacquired lock before ordinary reservation. Without
+a matching terminal receipt, ordinary ledger-proven repair admission retains
+the lease. Sticky success, live and parked retries, interrupted rekeys and
+unavailable evidence retain custody. Release leaves dispatch history and
+charges intact.
+
 An armed GitHub auto-merge retains terminal-success ownership only inside the
 30-minute dispatched-lease window (`updatedAt`, falling back to `acquiredAt`);
 observations do not extend it. A no-merge audit bypasses the hold. At expiry an

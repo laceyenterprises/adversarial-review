@@ -368,6 +368,8 @@ import { latestReviewedHeadSha } from ${JSON.stringify(new URL('src/ci-blocked-h
 import { closerReviewProof } from ${JSON.stringify(new URL('src/ama/closer-review-proof.mjs', root).href)};
 import { evaluateMergeEligibility } from ${JSON.stringify(new URL('src/ama/merge-eligibility.mjs', root).href)};
 import { classifyCheckRollup, latestCheckRollupItems } from ${JSON.stringify(new URL('src/checks-summary.mjs', root).href)};
+import { resolveRequiredCheckContextsFromCfg } from ${JSON.stringify(new URL('src/ama/required-check-contexts.mjs', root).href)};
+import { readUnknownValidationReceipt, recordedUnknownDefersToCi, unknownValidationCiGate } from ${JSON.stringify(new URL('src/ama/local-validation-unknown.mjs', root).href)};
 const fetchHammerPr = async (_repo, _pr, options) => {
   assert.equal(options.withReviews({ checks: [{ name: 'test', status: 'COMPLETED', conclusion: 'SUCCESS' }], state: 'OPEN', headSha: ${JSON.stringify(HEAD)} }), true);
   return { headSha: ${JSON.stringify(HEAD)}, state: 'OPEN', mergeable: 'MERGEABLE',
@@ -385,7 +387,7 @@ const createHistoryReader = () => async path => {
 const loadEffectiveMergeAuthorityConfig = () => ({});
 const fetchPrimaryChange = async () => (${JSON.stringify(primaryChangeFixture(HEAD))});
 const checkPrimaryChange = () => ({ ok: true });
-${gateCode.replace(/^import .*;\n/gm, '').replaceAll('<<REPO>>', 'example/repo').replaceAll('<<PR_NUMBER>>', '54').replaceAll('<<TENURE_REVIEW_ARG>>', '').replaceAll('<<REVIEWED_SHA>>', OLD)}`;
+${gateCode.replace(/^import .*;\n/gm, '').replaceAll('<<REPO>>', 'example/repo').replaceAll('<<PR_NUMBER>>', '54').replaceAll('<<TENURE_REVIEW_ARG>>', '').replaceAll('<<REVIEWED_SHA>>', OLD).replaceAll('<<RUN_DIR>>', fixtureDir)}`;
       const result = spawnSync(process.execPath, ['--input-type=module'], {
         input: code, encoding: 'utf8', timeout: 15000,
         env: { ...process.env, POST_REMEDIATION_SHA: HEAD, HAM_REVIEW_PROOF_REQUIRED: '1',

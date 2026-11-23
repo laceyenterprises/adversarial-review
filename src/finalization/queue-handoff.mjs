@@ -46,6 +46,11 @@ export function normalizeQueueHandoff(input) {
   return h;
 }
 
+// A trusted read that local validation ended with no verdict (timed out,
+// killed for load, process inspection denied). A real failure is never this.
+export const queueLocalValidationUnknown = evidence => evidence?.localValidation?.result === 'unknown'
+  && evidence.localValidation.ciAuthoritative === true && evidence.localValidation.localFailureObserved !== true;
+
 const findingKey = finding => handoffJson([finding.reviewId, finding.reviewCommitId, finding.findingId]);
 
 /** Trusted evidence adapter contract:
@@ -83,7 +88,11 @@ export function validateQueueHandoff(h, e) {
   requireFact(e.primaryChange?.ok === true && e.primaryChange.head === h.head
     && e.primaryChange.sourceRef === h.primaryChange.sourceRef && e.primaryChange.intent === h.primaryChange.intent, 'primary-change provenance');
   for (const kind of ['localValidation', 'publication']) {
-    requireFact(e[kind]?.ok === true && e[kind].head === h.head && e[kind].sourceRef === h[kind].sourceRef, `failed ${kind}`);
+    // MRQ-20: UNKNOWN local validation (no verdict) is admissible; the
+    // executor's final gate then requires declared exact-candidate contexts.
+    const read = kind === 'localValidation' && e[kind]?.result === 'unknown'
+      ? queueLocalValidationUnknown(e) : e[kind]?.ok === true;
+    requireFact(read && e[kind].head === h.head && e[kind].sourceRef === h[kind].sourceRef, `failed ${kind}`);
   }
   requireFact(Array.isArray(e.review.findings), 'unknown finding inventory');
   const inventory = new Map();

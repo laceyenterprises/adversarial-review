@@ -10,8 +10,9 @@ const text = x => typeof x === 'string' && x.trim().length > 0;
 const same = (a, b) => text(a) && text(b) && a.toLowerCase() === b.toLowerCase();
 const red = new Set(['FAILURE', 'ERROR', 'TIMED_OUT', 'CANCELLED', 'ACTION_REQUIRED', 'STALE']);
 
-export function resolveQueueRequiredSet({ cfg, rules }) {
-  const configured = resolveRequiredCheckContextsFromCfg(cfg);
+export function resolveQueueRequiredSet({ cfg, rules, repository }) {
+  // MRQ-20: repository-scoped contexts join the global list for this lane.
+  const configured = resolveRequiredCheckContextsFromCfg(cfg, { repository });
   // An unavailable protection/rules read is not evidence that no rules exist.
   if (rules?.complete !== true || !text(rules.sourceRef) || !text(rules.version)
     || !Array.isArray(rules.contexts) || rules.unresolved === true
@@ -57,7 +58,8 @@ export function createQueueCheckReader({ request, policyAdapter, cfg, noCiAdapte
         return readQueueEvidence(adapter, req, timeoutMs);
       };
       const rules = await call(policyAdapter, { entry, deadline });
-      const requiredSet = resolveQueueRequiredSet({ cfg, rules });
+      const repository = entry.lane.repository;
+      const requiredSet = resolveQueueRequiredSet({ cfg, rules, repository });
       const all = [], pages = [];
       for (const kind of ['check-runs', 'statuses']) {
         const seen = new Set();
@@ -98,7 +100,7 @@ export function createQueueCheckReader({ request, policyAdapter, cfg, noCiAdapte
         if (total !== null && count !== total) throw new Error('checks-partial-pages');
       }
       // Re-read policy after pagination: a moving required set is inconclusive.
-      const after = resolveQueueRequiredSet({ cfg, rules: await call(policyAdapter, { entry, deadline }) });
+      const after = resolveQueueRequiredSet({ cfg, rules: await call(policyAdapter, { entry, deadline }), repository });
       if (after.version !== requiredSet.version) throw new Error('required-set-changed');
       const results = latestCheckRollupItems(all).map(item => ({ ...item, result: checkItemState(item) }));
       let noCi = null;

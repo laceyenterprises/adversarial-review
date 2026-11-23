@@ -46,10 +46,24 @@ if [ "$ham_close_deferred_status" -ne 0 ]; then
   exit "$ham_close_deferred_status"
 fi
 "$HAM_NODE_BIN" "$HAM_CLOSE_ROOT/bin/hammer-controller.mjs" resolve-environment || exit $?
-rm -f "$HAM_RUN_DIR/close-result.json"
-"$HAM_NODE_BIN" "$HAM_CLOSE_ROOT/bin/hammer-controller.mjs" run \
-  "$HAM_CLOSE_ROOT/bin/hammer-close-controller.sh" "$HAM_CLOSE_PLAN"
-ham_close_status=$?
+ham_close_round=1
+while :; do
+  rm -f "$HAM_RUN_DIR/close-result.json"
+  "$HAM_NODE_BIN" "$HAM_CLOSE_ROOT/bin/hammer-controller.mjs" run \
+    "$HAM_CLOSE_ROOT/bin/hammer-close-controller.sh" "$HAM_CLOSE_PLAN"
+  ham_close_status=$?
+  # MRQ-20: a validation timeout stops the whole controller round. When its
+  # UNKNOWN receipt defers to exact-head CI, one fresh round reuses that receipt
+  # (no second battery) and continues to the CI-gated predicate and merge.
+  ham_close_head=$(git rev-parse --verify 'HEAD^{commit}' 2>/dev/null) || ham_close_head=
+  if [ "$ham_close_round" -eq 1 ] && [ ! -f "$HAM_RUN_DIR/close-result.json" ] && [ -n "$ham_close_head" ] \
+    && [ -f "$HAM_RUN_DIR/validation-deferred-$ham_close_head.json" ] \
+    && "$HAM_NODE_BIN" "$HAM_CLOSE_ROOT/bin/hammer-validate.mjs" --check-deferred; then
+    ham_close_round=2
+    continue
+  fi
+  break
+done
 if [ -f "$HAM_RUN_DIR/close-result.json" ]; then
   printf 'HAM close result: '
   cat "$HAM_RUN_DIR/close-result.json"

@@ -5,7 +5,8 @@ import { HAMMER_RETRYABLE_READ_OUTCOMES, hammerPhaseAttempt } from './hammer-pha
 import { readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { writeFileAtomic } from '../atomic-write.mjs';
-import { hammerStopOrigin, closerFaultRecovery } from './hammer-stop-origin.mjs';
+import { UNREGISTERED_STOP_CODE, closerFaultRecovery, hammerStopOrigin, registeredHammerStopOrigin,
+} from './hammer-stop-origin.mjs';
 import { readLaunchWorldRefusal } from './closer-head-pin.mjs';
 
 export class CloserCorrectionRequired extends Error {
@@ -70,10 +71,11 @@ export function recordHammerEarlyFailure(reason, { env = process.env, headSha, f
     if (heads) reason = CONFLICT_REPAIR_EXHAUSTED;
   }
   const originalReason = reason;
-  let origin;
-  let unregistered = false;
-  try { origin = hammerStopOrigin(reason); }
-  catch { reason = 'stop-reason-unregistered'; origin = 'closer'; unregistered = true; }
+  // MRQ-02: an unregistered code is an infrastructure stop under its own
+  // durable code (never stop-reason-unregistered); hammerStopOrigin alerts.
+  const unregistered = registeredHammerStopOrigin(reason) === null;
+  const origin = hammerStopOrigin(reason);
+  if (unregistered) reason = UNREGISTERED_STOP_CODE;
   const parts = reason.split(':');
   if (parts[0] !== 'history-read-failed' || parts[1] === 'transient') {
     reason = origin === 'closer' && parts[0] === 'review-evidence-invalid' ? parts[1] : parts[0];
@@ -143,7 +145,8 @@ export function recordHammerEarlyFailure(reason, { env = process.env, headSha, f
     attempt: hammerPhaseAttempt({ outcome: 'failed-without-merge', reason, stopOrigin: origin, launchRequestId,
       ...(originalReason !== reason ? { reasonDetail: originalReason } : {}),
       ...(unregistered ? { originalReason } : {}),
-      attemptPhase: 'hammer-early-exit', ...(overloadEvidence ? { overloadEvidence } : {}) }),
+      attemptPhase: 'hammer-early-exit', ...(overloadEvidence ? { overloadEvidence } : {}) },
+    { headSha: identity.headSha }),
     metadata: { closureAuthority: 'ham-terminal-remediation', stopOrigin: origin },
   });
 }

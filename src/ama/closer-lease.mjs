@@ -257,15 +257,14 @@ export function isReclaimableTerminalAmaCloserLease(lease, { launchStatusProbe, 
 
 // Revalidate after asynchronous evidence reads before retiring an observed owner.
 // Acquisition still uses the exclusive link CAS; a losing caller cannot dispatch.
-export function deleteAmaCloserLeaseIfCurrent(...args) {
-  const root = args[0];
-  return withRepositoryStateRead(root, () => {
-    args[1] = canonicalRepositoryArguments(root, args[1]);
-    return deleteAmaCloserLeaseIfCurrentWithinRepositoryState(...args);
-  });
+export function deleteAmaCloserLeaseIfCurrent(rootDir, lease, options) {
+  // The path helpers resolve the current name. Keep the observed payload
+  // intact for comparison, including an older stored repository name.
+  return withRepositoryStateRead(rootDir, () =>
+    deleteAmaCloserLeaseIfCurrentWithinRepositoryState(rootDir, lease, options));
 }
 
-function deleteAmaCloserLeaseIfCurrentWithinRepositoryState(rootDir, lease) {
+function deleteAmaCloserLeaseIfCurrentWithinRepositoryState(rootDir, lease, { exactSnapshot = false } = {}) {
   const leasePath = amaCloserLeaseFilePath(rootDir, lease);
   const fd = openSync(`${leasePath}.reclaim.lock`, 'a', LEASE_FILE_MODE);
   try {
@@ -274,7 +273,9 @@ function deleteAmaCloserLeaseIfCurrentWithinRepositoryState(rootDir, lease) {
       if (!['EAGAIN', 'EWOULDBLOCK'].includes(error.code)) throw error;
       return false;
     }
-    if (!isCurrentAmaCloserLease(rootDir, lease)) return false;
+    const matches = exactSnapshot ? isDeepStrictEqual(readAmaCloserLease(rootDir, lease), lease)
+      : isCurrentAmaCloserLease(rootDir, lease);
+    if (!matches) return false;
     deleteAmaCloserLease(rootDir, lease);
     return true;
   } finally { closeSync(fd); }
@@ -560,6 +561,26 @@ function rekeyAmaCloserLeaseWithinRepositoryState({
   }
 
   const fromPath = amaCloserLeaseFilePath(rootDir, { repo, prNumber, headSha: fromHeadSha });
+  const toPath = amaCloserLeaseFilePath(rootDir, { repo, prNumber, headSha: toHeadSha });
+  // Use the source mutation fence so retirement cannot race a rekey that
+  // has already read the old owner but has yet to publish the destination.
+  let fd;
+  try { fd = openSync(`${fromPath}.reclaim.lock`, 'a', LEASE_FILE_MODE); }
+  catch (error) {
+    if (error.code === 'ENOENT') return { rekeyed: false, reason: 'no-lease-at-from-head' };
+    throw error;
+  }
+  try {
+    try { fsExt.flockSync(fd, 'exnb'); }
+    catch (error) {
+      if (!['EAGAIN', 'EWOULDBLOCK'].includes(error.code)) throw error;
+      return { rekeyed: false, reason: 'lease-mutation-in-progress' };
+    }
+    return carryAmaCloserLease({ fromPath, toPath, fromHeadSha, toHeadSha, now });
+  } finally { closeSync(fd); }
+}
+
+function carryAmaCloserLease({ fromPath, toPath, fromHeadSha, toHeadSha, now }) {
   const existing = readLeaseFile(fromPath);
   if (!existing) {
     return { rekeyed: false, reason: 'no-lease-at-from-head' };
@@ -570,7 +591,6 @@ function rekeyAmaCloserLeaseWithinRepositoryState({
     return { rekeyed: false, reason: 'refusing-to-rekey-terminal-lease', lease: existing };
   }
 
-  const toPath = amaCloserLeaseFilePath(rootDir, { repo, prNumber, headSha: toHeadSha });
   const destination = readLeaseFile(toPath);
   if (destination) {
     // RESUME an interrupted rekey before refusing. This is a two-step operation

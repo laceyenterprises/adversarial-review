@@ -771,6 +771,7 @@
       "schemaSurface": "migrations/20260717_finalization_ledger.sql",
       "relatedSchemaSurfaces": ["migrations/20261029_finalization_queue_routing.sql", "src/finalization/queue-routing.mjs", "src/finalization/queue-status.mjs", "migrations/20261023_finalization_queue.sql", "migrations/20261024_finalization_queue_handoff.sql", "migrations/20261025_finalization_queue_admission.sql", "src/finalization/queue-admission.mjs", "src/finalization/queue-clean-review.mjs", "src/finalization/queue-read.mjs", "migrations/20261026_finalization_queue_checks.sql", "src/finalization/queue-checks.mjs", "migrations/20261027_finalization_queue_merge.sql", "src/finalization/queue-merge.mjs", "src/finalization/queue-delivery.mjs", "src/finalization/queue-check-reader.mjs", "src/finalization/queue-check-transport.mjs", "src/finalization/queue-rebase.mjs", "src/finalization/queue-rebase-proof.mjs", "src/finalization/queue-git.mjs", "src/finalization/queue-store.mjs", "src/finalization/queue-owner.mjs", "src/finalization/queue-handoff.mjs", "src/finalization/queue-handoff-store.mjs", "src/ama/closer-queue-handoff.mjs", "src/finalization/ledger-events.mjs", "src/finalization/ledger-fold.mjs", "src/finalization/queue-probe.mjs"],
       "owner": "Merge Authority v2 subject ledger and repository/base queue",
+      "queueLocalValidation": "MRQ-20: trusted result unknown requires explicit ciAuthoritative true and localFailureObserved not true, even with ok true. Exact-candidate declared contexts must still be non-empty and green at merge. Existing receipt fields and lifecycle values are unchanged.",
       "liveSnapshotIngestion": "Fact-transition replay keys retain unchanged observations across poll times; one app-root handle/schema setup; configured CI contexts survive absent protection; omitted domains retain facts while failed refreshes escalate.",
       "custodyReceipts": "Existing owner-matched app store required; conflicting replay content refuses acknowledgment. Unknown custody payloads remain readable; custody does not advance merge eligibility currency. GSR reports present/accepted/released and exits nonzero on token refusal.",
       "queueCheckTimestamps": "REST check-run createdAt normalizes started_at then completed_at, or null for undated runs retained without deduplication; legacy statuses require created_at. Numeric REST IDs or GraphQL databaseId break timestamp ties despite opaque node IDs. Repeated Link headers and canonical repository-ID next links retain the exact candidate/endpoint and original named repository reads.",
@@ -1343,6 +1344,16 @@
       "relatedSchemaSurfaces": ["src/pr-lifecycle-sync.mjs", "src/posted-review-row.mjs"],
       "owner": "AMA lifecycle settlement",
       "cancelEvidence": "The optional launchRequestId pins the observed HQ launch across local lease retirement. Legacy obligations use their original head. Nonterminal HQ responses retain the obligation and replacement launches retain their custody."
+    },
+    {
+      "id": "merge-agent-cancellations",
+      "title": "Operator Merge-Agent Cancellation Receipts",
+      "path": "docs/data-model/merge-agent-cancellations.md",
+      "store": "data/follow-up-jobs/merge-agent-cancellations/",
+      "schemaSurface": "src/merge-agent-cancel.mjs",
+      "relatedSchemaSurfaces": ["src/follow-up-merge-agent.mjs", "src/ama/receipted-closer-alias.mjs"],
+      "owner": "Follow-up merge-agent operations",
+      "optionalFields": ["result.closer: AMA alias settlement disposition and available launch/head evidence"]
     },
     {
       "id": "runtime-settle-smoke",

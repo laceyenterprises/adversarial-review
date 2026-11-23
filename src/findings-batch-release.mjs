@@ -3,7 +3,7 @@ import { closeSync, existsSync, openSync } from 'node:fs';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
 import fsExt from 'fs-ext';
-import { findingBatchDispatchScope, releaseFindingBatch, FINDING_BATCH_MAX_ATTEMPTS } from './findings-batch.mjs';
+import { findingBatchDispatchScope, readFindingBatchLaunches, releaseFindingBatch, FINDING_BATCH_MAX_ATTEMPTS } from './findings-batch.mjs';
 import { parseHqDispatchStatus, readDispatchReceipt } from './producer-contracts/dispatch-receipt.mjs';
 import { readDispatchStatus, readLaunchRequestStatus } from './producer-contracts/launch-status.mjs';
 import { readLaunchRequestByIdempotencyKeyAsync } from './session-ledger-read-adapter.mjs';
@@ -52,8 +52,7 @@ export async function readOperatorReleaseCustody(batch, { rootDir, env, execFile
   const scope = findingBatchDispatchScope(batch, env);
   let probe;
   try {
-    probe = await readLaunches({ env, rootDir, hqRoot: resolveHqRoot(env), ...scope,
-      idempotencyKey: `findings-batch-${batch.batch_id}`, timeoutMs: 15_000 });
+    probe = await readFindingBatchLaunches(batch, { env, rootDir, readLaunches, timeoutMs: 15_000 });
   } catch { probe = { ok: false }; }
   if (probe?.ok && Array.isArray(probe.rows)) {
     for (const row of probe.rows) {

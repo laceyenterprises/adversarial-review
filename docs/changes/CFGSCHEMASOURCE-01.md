@@ -17,6 +17,10 @@ documents. Direct calls to `contractSchemaPath()` use the process environment
 when no environment is supplied. OSG arm validation checks the schema's
 required fields when an arm definition is present.
 
+Hammer keeps schema selection diagnostics in its logs and ignores them when
+classifying retryable command failures. Checkout paths containing strings such
+as `TLS` cannot turn a permanent GitHub error into a retry.
+
 ## Verification
 
 - `npm test -- config-schema-source.test.mjs` passed five synthetic cases

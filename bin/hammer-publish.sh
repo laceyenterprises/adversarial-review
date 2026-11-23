@@ -35,7 +35,7 @@ ham_publish_abort() {
   return "${1:-1}"
 }
 ham_audit_comment_transient() {
-  grep -Eiq 'Something went wrong while executing your query|"type"[[:space:]]*:[[:space:]]*"INTERNAL"|HTTP[^[:space:]]*[[:space:]]+5[0-9][0-9]|"status"[[:space:]]*:[[:space:]]*5[0-9][0-9]|timeout|timed out|TLS|connection reset|connection refused|temporar(y|ily)|try again|HTTP 5[0-9][0-9]|502|503|504|service unavailable|gateway' "$1"
+  sed -e '/^\[load-aware-timeout\]/d' -e '/^\[adversarial-config\] schema source=/d' "$1" | grep -Ei 'Something went wrong while executing your query|"type"[[:space:]]*:[[:space:]]*"INTERNAL"|HTTP[^[:space:]]*[[:space:]]+5[0-9][0-9]|"status"[[:space:]]*:[[:space:]]*5[0-9][0-9]|timeout|timed out|TLS|connection reset|connection refused|temporar(y|ily)|try again|HTTP 5[0-9][0-9]|502|503|504|service unavailable|gateway' >/dev/null
 }
 
 # Fixed publication budget; these are procedure constants, not configuration.

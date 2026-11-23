@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
 import { channel } from 'node:diagnostics_channel';
+import fs from 'node:fs';
 import { syncBuiltinESMExports } from 'node:module';
 import { sep } from 'node:path';
 import perfHooks from 'node:perf_hooks';
@@ -9,6 +10,26 @@ import { fileURLToPath } from 'node:url';
 import { omitWatcherDiagnosticFlushes } from './helpers/watcher-diagnostic-flush-fixture.mjs';
 
 const commands = ['gh', 'git', 'hq', 'psql', 'node'];
+
+test('watcher diagnostic flush patch requires cleanup and rejects nested use', (t) => {
+  const root = process.env.ADVERSARIAL_REVIEW_TEST_CWD;
+  const original = fs.openSync;
+  assert.throws(() => omitWatcherDiagnosticFlushes(root, () => { throw new Error('registration failed'); }),
+    /registration failed/);
+  assert.equal(fs.openSync, original);
+  let restore;
+  omitWatcherDiagnosticFlushes(root, cleanup => {
+    restore = cleanup;
+    t.after(cleanup);
+  });
+  assert.notEqual(fs.openSync, original);
+  assert.throws(() => omitWatcherDiagnosticFlushes(root, cleanup => t.after(cleanup)), /already active/);
+  restore();
+  assert.equal(fs.openSync, original);
+  omitWatcherDiagnosticFlushes(root, cleanup => t.after(cleanup));
+  restore();
+  assert.notEqual(fs.openSync, original, 'stale cleanup cannot restore over a later registration');
+});
 
 test('watcher polls reuse child histograms across passes', async t => {
   const sandbox = process.env.ADVERSARIAL_REVIEW_TEST_SANDBOX_ROOT;
@@ -27,8 +48,8 @@ test('watcher polls reuse child histograms across passes', async t => {
     return createHistogram(...args);
   };
   syncBuiltinESMExports();
-  const restoreDiagnosticFlushes = omitWatcherDiagnosticFlushes(process.env.ADVERSARIAL_REVIEW_TEST_CWD);
   try {
+    omitWatcherDiagnosticFlushes(process.env.ADVERSARIAL_REVIEW_TEST_CWD, restore => t.after(restore));
     const { pollOnce } = await import('../src/watcher.mjs');
     const octokit = { rest: { repos: { listForOrg() {} } }, paginate: async () => [] };
     const options = {
@@ -63,6 +84,5 @@ test('watcher polls reuse child histograms across passes', async t => {
       'post-warmup external + arrayBuffers spread must stay below 16 MiB');
   } finally {
     perfHooks.createHistogram = createHistogram;
-    restoreDiagnosticFlushes();
   }
 });

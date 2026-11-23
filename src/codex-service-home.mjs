@@ -1,7 +1,8 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { execFile, execFileSync, spawnSync } from 'node:child_process';
 import { mkdtempSync, readFileSync, realpathSync, renameSync, rmSync, writeFileSync } from 'node:fs';
-import { homedir, tmpdir } from 'node:os';
+import { tmpdir } from 'node:os';
+import { resolveHomePath } from './account-home.mjs';
 import { basename, dirname, join, resolve } from 'node:path';
 import { PER_WORKER_PLACEHOLDER_REFRESH_TOKEN } from './codex-per-worker-auth.mjs';
 import { scrubOAuthFallbackEnv } from './secret-source/env.mjs';
@@ -114,10 +115,11 @@ function* serviceCodexHomeSteps({ env, workspaceDir, model, effort = null, codex
   try {
     const codexAuthOwnerId = randomUUID();
     writeFileSync(join(codexHome, '.service-auth-owner'), codexAuthOwnerId, { mode: 0o600 });
-    const authSourcePath = env.CODEX_AUTH_PATH
-      || join(env.CODEX_HOME || join(env.HOME || homedir(), '.codex'), 'auth.json');
+    const authSourcePath = env.CODEX_AUTH_PATH || (env.CODEX_HOME
+      ? join(env.CODEX_HOME, 'auth.json') : resolveHomePath(env, '.codex', 'auth.json'));
     const authPath = join(codexHome, 'auth.json');
     try {
+      if (!authSourcePath) throw serviceAuthError();
       const source = JSON.parse(readFileSync(authSourcePath, 'utf8'));
       // The deployed CLI also accepts legacy token-bearing files with no
       // auth_mode. Normalize those to explicit ChatGPT auth; never reinterpret

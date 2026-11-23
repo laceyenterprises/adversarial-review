@@ -1,7 +1,8 @@
 import './helpers/worker-observation-fixture.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { existsSync, mkdirSync, mkdtempSync, rmSync, utimesSync, writeFileSync } from 'node:fs';
+import fs, { existsSync, mkdirSync, mkdtempSync, rmSync, utimesSync, writeFileSync } from 'node:fs';
+import { syncBuiltinESMExports } from 'node:module';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 
@@ -863,6 +864,59 @@ test('best evidence reader forwards injected env to ledger readers', () => {
   assert.equal(usage.workerRunId, 'wr_1');
   assert.equal(usage.input, 120);
   assert.equal(usage.source, 'session-ledger');
+});
+
+test('relocated Claude fallback visits each project and observes a transcript rewrite', t => {
+  const rootDir = tempRoot();
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  const deploy = path.join(rootDir, 'relocated');
+  const projects = path.join(rootDir, 'projects');
+  const workspacePath = path.join(rootDir, 'work');
+  const write = (i, j, input) => {
+    writeFileSync(path.join(projects, `project-${i}`, `${j}.jsonl`), JSON.stringify({
+      sessionId: `${i}-${j}`,
+      cwd: i + j === 0 ? workspacePath : path.join(rootDir, `other-${i}-${j}`),
+      timestamp: '2026-11-22T20:00:00Z',
+      usage: { input_tokens: input, output_tokens: 2 },
+    }));
+  };
+  for (let i = 0; i < 24; i++) {
+    mkdirSync(path.join(projects, `project-${i}`), { recursive: true });
+    for (let j = 0; j < 4; j++) write(i, j, 4);
+  }
+  const { readdirSync, readFileSync } = fs;
+  let listings = 0;
+  let reads = 0;
+  const inProjects = p => typeof p === 'string' && (p === projects || p.startsWith(projects + path.sep));
+  const list = t.mock.method(fs, 'readdirSync', (p, ...args) => {
+    if (inProjects(p)) listings++;
+    return readdirSync(p, ...args);
+  });
+  const read = t.mock.method(fs, 'readFileSync', (p, ...args) => {
+    if (inProjects(p) && p.endsWith('.jsonl')) reads++;
+    return readFileSync(p, ...args);
+  });
+  syncBuiltinESMExports();
+  const readUsage = root => readBestReviewerEvidenceTokenUsage({
+    rootDir: root, workspacePath, reviewerModel: 'claude-code', codexSessionRoots: [],
+    env: { ...HERMETIC_CONFIG_ENV, HOME: rootDir, AGENT_OS_DEPLOY_CHECKOUT: deploy, CLAUDE_PROJECTS_ROOT: projects },
+  });
+  try {
+    assert.equal(readUsage(path.join(rootDir, 'isolated')), null);
+    assert.deepEqual({ listings, reads }, { listings: 0, reads: 0 });
+    const relocated = path.join(deploy, 'tools', 'adversarial-review');
+    const start = performance.now();
+    for (let i = 0; i < 6; i++) {
+      write(0, 0, 4 + i);
+      assert.equal(readUsage(relocated)?.input, 4 + i);
+    }
+    assert.deepEqual({ listings, reads }, { listings: 150, reads: 576 });
+    t.diagnostic(`${listings} directory listings and ${reads} JSONL reads in ${(performance.now() - start).toFixed(1)} ms`);
+  } finally {
+    read.mock.restore();
+    list.mock.restore();
+    syncBuiltinESMExports();
+  }
 });
 
 test('ledger usage keeps reviewer provider for cache-inclusive fallback totals', () => {

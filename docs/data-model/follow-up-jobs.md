@@ -653,7 +653,9 @@ dispatch process's live parent PID, and `revisionRef` and `startHeadSha` must
 match the full dispatch head. The claim must still be at `worker-spawn` on the
 HQ dispatch path, with no worker attached and no competing job for the PR in
 either active bucket. This handoff reads existing fields and leaves the job in
-daemon custody. See the [repair runbook](../RUNBOOK-ama-closure.md#exhausted-cycles-and-new-builder-heads-exhaustedheadowner-01).
+daemon custody. The repair helper rechecks the claim after the dispatch-read
+preflight. Refusing visibility leaves the pre-spawn claim and round untouched
+by the helper. See the [repair runbook](../RUNBOOK-ama-closure.md#exhausted-cycles-and-new-builder-heads-exhaustedheadowner-01).
 
 ## Branch and publication contract (REMEDBRANCH-01)
 

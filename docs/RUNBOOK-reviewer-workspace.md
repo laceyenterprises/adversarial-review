@@ -131,6 +131,15 @@ Existing personal/corporate materialization and broker routing still own source
 selection and refresh. Corporate staging remains mandatory, including when the
 personal per-worker kill switch is disabled.
 
+The native reviewer resolves its credential source before service-home staging:
+explicit `CODEX_AUTH_PATH`, then a usable OAuth `CODEX_HOME/auth.json`, then
+`.codex/auth.json` under an absolute `HOME`. If `HOME` is unset, empty or
+relative, the default uses the OS account home. An existing file selected by
+`ADVERSARIAL_LEGACY_CODEX_AUTH_PATH` supplies the split-user bridge when the
+default file is missing or the account home is unavailable. A stale legacy path
+leaves the ordinary default in effect. Without an absolute home or a usable
+explicit selection, credential discovery fails closed.
+
 The service writes an independent mode-0600 OAuth snapshot under its mode-0700
 `CODEX_HOME/auth.json`, with `cli_auth_credentials_store = "file"` in the reviewed
 template. It allowlists ChatGPT access/ID/account fields and replaces the refresh

@@ -61,7 +61,13 @@ neither mutates), and v1 `none` (held authority, did nothing) concurs with v2
 The fold-error / ledger-unavailable path is its own case: v2 **fails closed to
 `escalate`** (§5.5 — never a guess). If v1 also paged, that concurs (`benign`).
 If v1 acted while v2 could not even fold, that is `open` — triage the ledger
-**and** v1.
+**and** v1. Missing or regressed live evidence is not a fold error (MRQ-11): it is
+a keyable `refresh-evidence` wait whose reason names the cause
+(`live evidence unknown: …`) and is triaged like any other divergence.
+
+`merge-observed` (`benign`): v1 merged and v2 recorded the same GitHub merge;
+v2's `merged; post-merge activation pending` is delivery ownership, not a
+different merge decision.
 
 ### Divergences that stay `open` (you decide)
 

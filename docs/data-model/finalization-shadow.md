@@ -103,11 +103,24 @@ proposed divergence classification. The existing `dedupeKey` index also
 deduplicates these pairs. Live disagreements start open; their annotations
 require the same direction/principal/evidence note as queue disagreements.
 Ingestion and comparison append share a transaction; no execution adapter is
-available. Translation/read/fold failure persists an escalate pair. An unavailable
-store produces a local diagnostic rather than fabricated durable evidence.
-Lightweight snapshots may omit observation domains without producing fold errors;
-explicit failed or unreadable refreshes of settled facts still escalate. Repeated
+available. An unreadable ledger or a fold exception persists an escalate pair
+(`foldError`). Evidence problems are typed unknown observations instead (MRQ-11):
+an errored observation, an explicit failed or unreadable refresh of settled checks
+or of a recorded verdict, an out-of-order snapshot, a translation failure, or
+unreadable launch ownership at the head. Each records a `refresh-evidence` wait
+whose reason names the cause and whose `v2Decision.unknownEvidence` lists every
+cause; the fold still runs over the real ledger. An unavailable store produces a
+local diagnostic rather than fabricated durable evidence. Lightweight snapshots
+may omit observation domains without producing either. The adapter also appends
+`launch_custody_observed` for the snapshot's closer launch (each poll while held,
+`terminal` once it ends or a complete read stops naming it), `merge_observed` for
+a GitHub-merged PR (with no post-merge `mergeability_observed`), and
+`budget_exhausted` when v1's remediation rounds are spent. No column or migration
+is added; these are existing event types. Repeated
 polls append comparison telemetry, but unchanged facts do not grow the ledger.
+Once the ledger records a confirmed merge, workflow decisions retain post-merge
+delivery ownership ahead of typed refresh errors. An errored PR observation
+cannot establish that merge, even if its unreadable value says `MERGED`.
 Live ingestion reuses a bounded single-root database handle and schema setup.
 Both SQL coverage readers and report fallback exclude any row carrying non-organic
 live or queue provenance from elapsed coverage, head moves and exhaustion counts.
@@ -135,7 +148,10 @@ these optional fields. This evidence does not change triage dispositions.
 Classes are exact strings in `src/finalization/shadow-pattern.mjs`: recognized
 static detail/reason text is preserved verbatim, and absent v1 detail is `null`.
 No subject, head, source reference, timestamp, round, stage or deadline enters
-the key. There is no trimming, substring matching, regex family or wildcard.
+the key. There is no trimming, substring matching or wildcard. The single
+normalization is MRQ-11's `operator-hold:operator-label-required:<label>`, which
+keys as the class `operator-hold:operator-label-required` only when the label is
+a lowercase label token; the label never enters the key.
 Unrecognized/dynamic text (including fold error messages and principal lists)
 is unkeyable and cannot receive a pattern disposition. Adding classes requires
 an explicit code change; unknown text never shares an auto-applicable fallback.
@@ -152,10 +168,10 @@ ineligible even when their reason and detail are recognized.
 | Producer file | Recognized classes |
 |---|---|
 | `src/finalization/eligibility.mjs` | Existing fixed revision, verdict, checks, attestation, finding and remediation reasons. |
-| `src/finalization/workflow-decision.mjs` | Fixed merge/delivery, disabled execution, unknown evidence, custody/progress, effect reconciliation, primary-change, conflict, mergeability, remediation admission/recovery and final-head review reasons, including the default terminal recovery reason `automated stop requires relevant evidence`. The live-owner template admits exactly `hammer` and `remediator`, the closed actor set in `src/finalization/live-owner.mjs`. |
+| `src/finalization/workflow-decision.mjs` | Fixed merge/delivery, disabled execution, unknown evidence (including MRQ-11's typed `live evidence unknown: …` reasons and the label-gated operator-decision hold, listed in `live-evidence-reasons.mjs`), custody/progress, effect reconciliation, primary-change, conflict, mergeability, remediation admission/recovery and final-head review reasons, including the default terminal recovery reason `automated stop requires relevant evidence`. The live-owner template admits exactly `hammer` and `remediator`, the closed actor set in `src/finalization/live-owner.mjs`. |
 | `src/pr-next-action.mjs` | Fixed `done`, `operator-hold`, `hammer`, `remediate`, `review`, `daemon-merge` and `wait-for-CI` action/reason pairs: terminal/hold, ownership, structural repair, retry/cap, checks, final push, findings, review admission and snapshot refresh rows. Builder handoffs admit exactly `remediate:conflict-primary-unproven` and `remediate:final-fix-all`. |
 | `src/pr-next-action-consumer.mjs` | Fixed legacy closure mappings and posted-review outcomes, including `operator-hold:needs-operator`, mapped page reasons, `done:closed`, `done:merged`, `done:terminal-observed` (only when the terminal reason is absent or null), `daemon-merge:merged-this-pass` and `remediate:clean-review-drain`; also the fixed no-progress operator-decision outcome. Unmapped owners, wait/review reasons and explicit terminal reasons use distinct `unmapped-legacy-*` reasons that are not allowlisted. |
-| `src/finalization/live-shadow.mjs` | Builds the exact `action:reason` detail from the above producers; existing `hammer:dispatched` remains recognized. Hammer/page pass-through reasons are keyed only when the resulting detail equals an allowlisted literal. No `observe:unknown` or dynamic `operator-label-required:*` detail is admitted. |
+| `src/finalization/live-shadow.mjs` | Builds the exact `action:reason` detail from the above producers; existing `hammer:dispatched` remains recognized. Hammer/page pass-through reasons are keyed only when the resulting detail equals an allowlisted literal. No `observe:unknown` detail is admitted. MRQ-11 admits `operator-hold:repair-owner-unproven`, `review:disputed-findings-review` and the normalized `operator-hold:operator-label-required` class. |
 
 | Column | Type | Contract |
 |---|---|---|

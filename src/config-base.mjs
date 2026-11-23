@@ -1,15 +1,14 @@
 // ONS-07 — config reader basics: the error type, shared constants and the
 // runtime unknown-key / deprecated-env diagnostics. No other config module may
 // be imported here.
-import { join } from 'node:path';
-import { homedir } from 'node:os';
+import { resolveHomePath } from './account-home.mjs';
 
 export const SCHEMA_VERSION = 1;
 
 // Default top-level path resolves relative to the current user's home dir so
 // the loader works on any host. Operators can override with topPath= or the
 // AGENT_OS_CONFIG_PATH env var.
-export const DEFAULT_TOP_LEVEL_PATH = join(homedir(), 'agent-os/config.yaml');
+export const DEFAULT_TOP_LEVEL_PATH = resolveHomePath(process.env, 'agent-os', 'config.yaml');
 
 // -------- AgentOSConfigError ------------------------------------------------
 

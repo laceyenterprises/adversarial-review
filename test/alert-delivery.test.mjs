@@ -111,8 +111,8 @@ test('alert sink health remains observable without an ALERT_TO recipient', () =>
 test('watcher alert defaults use the configured alert bus and token discovery chain', () => {
   const tokenFile = join(homedir(), '.config', 'adversarial-review', 'secrets', 'litellm-alert-bridge.token');
   const cfg = resolveAlertDefaults(
-    { ALERT_TO: '123456' },
-    { fsImpl: { existsSync: (filePath) => filePath === tokenFile } }
+    { ALERT_TO: '123456', HOME: process.env.HOME },
+    { fsImpl: { existsSync: (filePath) => filePath === tokenFile, readFileSync: () => '' } }
   );
   assert.equal(cfg.alertBusUrl, 'http://127.0.0.1:18799/hooks/wake');
   assert.equal(cfg.hooksTokenFile, tokenFile);

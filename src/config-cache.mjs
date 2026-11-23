@@ -55,7 +55,7 @@ const _signatureFileCache = new Map();
 function _watchedPathsForCall({ topPath, modulePaths, env, cachedConfig }) {
   const envView = env || process.env;
   const resolvedTop = topPath || envView.AGENT_OS_CONFIG_PATH || DEFAULT_TOP_LEVEL_PATH;
-  const watched = [resolvedTop];
+  const watched = resolvedTop ? [resolvedTop] : [];
   // PROFILENODE-01: the overlay is read between the top file and its local
   // sibling, so edits to it must invalidate cached loads.
   const topOverlay = profileOverlaySibling(resolvedTop);
@@ -127,18 +127,21 @@ function _cacheKeyFor({ topPath, modulePaths, env, legacyGeminiReviewer = false 
   const envView = env || process.env;
   const resolvedTop = topPath || envView.AGENT_OS_CONFIG_PATH || DEFAULT_TOP_LEVEL_PATH;
   const envAliases = [];
-  const envAliasInfos = [
-    ...Object.values(ENV_ALIASES),
-    ...dynamicAppEnvAliases(envView).map(([, info]) => info),
-  ];
-  for (const info of envAliasInfos) {
-    const names = [info.canonical, ...(info.aliases || []).map(([name]) => name)];
-    for (const name of names) {
-      if (Object.prototype.hasOwnProperty.call(envView, name)) {
-        envAliases.push([name, envView[name]]);
-      }
+  // Snapshot names on each lookup so rotations and removals still invalidate
+  // the slot. Avoid a native process.env lookup for every absent schema alias.
+  // Windows's process environment can match names case-insensitively.
+  const envNames = envView === process.env && process.platform !== 'win32'
+    ? new Set(Object.getOwnPropertyNames(envView)) : null;
+  const addAlias = name => {
+    if (envNames ? envNames.has(name) : Object.hasOwn(envView, name)) {
+      envAliases.push([name, envView[name]]);
     }
+  };
+  for (const { canonical, aliases } of Object.values(ENV_ALIASES)) {
+    addAlias(canonical);
+    for (const [name] of aliases || []) addAlias(name);
   }
+  for (const [, { canonical }] of dynamicAppEnvAliases(envView)) addAlias(canonical);
   // PROFILENODE-01: AGENT_OS_PROFILE selects the profile, so it is part of the
   // slot identity like the declared env aliases. Key on the value
   // resolveProfile actually reads (trimmed, blank = unset) so a blank or

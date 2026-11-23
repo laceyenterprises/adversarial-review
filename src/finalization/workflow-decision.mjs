@@ -2,6 +2,20 @@ import { loadAwareTimeoutMs } from '../load-aware-timeout.mjs';
 import { finalizationOwner } from './live-owner.mjs';
 import { isFinalRemediatorHead, exactHeadReviewRequestId } from './exact-head-review-proof.mjs';
 import { isOperatorHeld } from '../operator-hold-labels.mjs';
+import { LIVE_EVIDENCE_UNKNOWN_REASONS, OPERATOR_DECISION_REASON } from './live-evidence-reasons.mjs';
+
+// The canonical snapshot's exact-head review gates every finding behind an
+// operator-only label (v1 R02 `operator-label-required:<label>`).
+function operatorLabelGate(ownerSnapshot, subjectKey, head) {
+  if (!ownerSnapshot || ownerSnapshot.subjectKey !== subjectKey?.subjectExternalId) return null;
+  const reviews = ownerSnapshot.observations?.reviews;
+  const value = reviews?.state === 'complete' ? reviews.value : null;
+  const reviewedHead = value?.headSha ?? value?.reviewedHeadSha ?? value?.reviewer_head_sha;
+  const gate = value?.operatorLabelFindings;
+  if (!head || reviewedHead !== head || gate?.allGated !== true
+    || !Array.isArray(gate.gated) || !gate.gated.length) return null;
+  return { sourceRef: reviews.provenance?.sourceRef ?? null };
+}
 
 export function workflowEpisode(state, policy) {
   const pending = state.remediation.dispatched.find(d => d.revisionRef === state.currentRevision
@@ -69,6 +83,11 @@ export function workflowDecision(state, policy, observation, core) {
     });
   }
   if (w?.unknown) return blocked('refresh-evidence', 'unknown safety-relevant event');
+  const unknownEvidence = (observation.unknownEvidence ?? [])
+    .filter(entry => Object.hasOwn(LIVE_EVIDENCE_UNKNOWN_REASONS, entry?.cause));
+  if (unknownEvidence.length) {
+    return blocked('refresh-evidence', LIVE_EVIDENCE_UNKNOWN_REASONS[unknownEvidence[0].cause], { unknownEvidence });
+  }
   for (const custody of Object.values(w?.custody ?? {})) {
     const c = custody.custody;
     if (Object.hasOwn(w.recoveries, custody.sourceRef)) continue;
@@ -90,6 +109,14 @@ export function workflowDecision(state, policy, observation, core) {
       }
       return blocked('reconcile-custody', 'launch requires verified progress', { custody });
     }
+  }
+  // Only after the live-owner and custody gates: a closer already landing a
+  // label-gated PR keeps it. Re-derived per observation, so applying the label
+  // releases it; escalation pages once per episode and persists no halt.
+  const labelGate = operatorLabelGate(observation.ownerSnapshot, state.subjectKey, head);
+  if (labelGate) {
+    return D('escalate', 'monitor-hold', OPERATOR_DECISION_REASON, {
+      evidence: [...base.evidence, labelGate.sourceRef].filter(Boolean) });
   }
   const killed = Object.values(w?.kills ?? {}).find(kill => !['absent', 'completed', 'merged'].includes(w.operations[kill.operationId]?.observation?.outcome));
   if (killed) return blocked('reconcile-effects', 'worker kill requires effect reconciliation', { operationId: killed.operationId });

@@ -5,7 +5,7 @@ import { AgentOSConfigError } from './config-base.mjs';
 import { parseYaml } from './config-checks.mjs';
 
 export function loadLayerFile(path) {
-  if (!existsSync(path)) return { doc: null, rawText: '' };
+  if (!path || !existsSync(path)) return { doc: null, rawText: '' };
   let text;
   try {
     text = readFileSync(path, 'utf8');
@@ -26,6 +26,7 @@ export function loadLayerFile(path) {
 // the YAML parser would happily try to load. Refusing makes the rule legible:
 // pick a `.yaml` / `.yml` path or the loader doesn't synthesize a sibling.
 export function localSibling(path) {
+  if (!path) return null;
   const dir = dirname(path);
   const name = basename(path);
   if (name.endsWith('.yaml')) {
@@ -51,6 +52,7 @@ export const OVERLAY_PROFILE = 'reference-host';
 // `config.profile.reference-host.yaml`); null for non-YAML top paths, like
 // localSibling.
 export function profileOverlaySibling(path, profile = OVERLAY_PROFILE) {
+  if (!path) return null;
   const dir = dirname(path);
   const name = basename(path);
   if (name.endsWith('.yaml')) {

@@ -72,9 +72,10 @@ while :; do
     ham_close_retry=0
     case "$ham_close_rebase_state" in
       validate)
-        if [ "$ham_close_status" -eq 143 ]; then
-          case "$(ham_close_rebase_publication)" in ci|redrive) ham_close_retry=1 ;; esac
-        fi ;;
+        case "$ham_close_status" in
+          75|124|137|143)
+            case "$(ham_close_rebase_publication)" in ci|redrive) ham_close_retry=1 ;; esac ;;
+        esac ;;
       none)
         if "$HAM_NODE_BIN" "$HAM_CLOSE_ROOT/bin/hammer-validate.mjs" --check-deferred; then ham_close_retry=1; fi ;;
     esac

@@ -12,13 +12,17 @@ against the captured source head.
 Declared required CI gates the exact published head. If the closer must defer
 because there is no usable required CI declaration, it records a durable
 watcher continuation on that head. The original launch remains eligible for the
-existing infrastructure refund.
+existing infrastructure refund. Backoff moves to the published head only when
+the ended launch's push receipt confirms that exact SHA.
 
 ## Interface changes
 
 The conflict-repair instructions now route the completed rebase directly to
 `bin/hammer-close.sh`. The command performs validation, publication, and the
-existing CI wait or queue handoff.
+existing CI wait or queue handoff. If validation stops while the supervisor
+still owns cleanup, the controller leaves the result unwritten and the launcher
+can start one fresh round after verified drain. Verify-head reuses the
+CI-authoritative receipt for the published SHA.
 
 ## Verification
 
@@ -31,3 +35,10 @@ existing CI wait or queue handoff.
   with three skips.
 - `npm run lint`, `npm run typecheck:contracts`, ShellCheck on both controller
   scripts, and `bash demo/research-finding-walkthrough.sh` passed.
+- The review-remediation regressions cover a timeout or load stop before
+  supervisor drain, same-head CI receipt reuse, and external head movement
+  with and without a matching push receipt. The focused close-controller
+  selection passed all nine cases. The targeted `node --test` run for
+  `mrq-20-validation-unknown`, `inconclusiveretry-01b`, `hammer-controller`,
+  `hammer-validation-deferral`, and `lac-2252-publication` passed 165 cases.
+  The data-model catalog validator passed.

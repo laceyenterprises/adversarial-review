@@ -157,6 +157,19 @@ case "$(basename "$path")" in
       assert-owner) log assert-owner ;;
       resolve-environment) [ -n "\${HAM_RUN_DIR:-}" ] || { log 'resolve-before-inputs'; exit 125; }; log resolve-environment ;;
       run) shift; ctl="$1"; shift; log "controller-run $(basename "$ctl")"
+        if [ -n "\${FIXTURE_TIMEOUT_EXIT:-}" ]; then
+          export HAM_CONTROLLER_RECORD="$HAM_RUN_DIR/controller-00000000-0000-0000-0000-000000000000.json"
+          /bin/bash "$ctl" "$@" < /dev/null
+          status=$?
+          if [ -f "$HAM_CONTROLLER_RECORD" ] && [ ! -f "$HAM_RUN_DIR/controller-drained" ]; then
+            [ ! -f "$HAM_RUN_DIR/close-result.json" ] || log premature-close-result
+            jq '.state = "quiescent" | .drained = true' "$HAM_CONTROLLER_RECORD" > "$HAM_CONTROLLER_RECORD.tmp"
+            mv "$HAM_CONTROLLER_RECORD.tmp" "$HAM_CONTROLLER_RECORD"
+            : > "$HAM_RUN_DIR/controller-drained"
+            log controller-drained
+          fi
+          exit "$status"
+        fi
         exec /bin/bash -c 'IFS= read -r ready || true; source "$@"' hammer-controller "$ctl" "$@" < /dev/null ;;
     esac ;;
   hammer-validate.mjs)
@@ -185,12 +198,15 @@ case "$(basename "$path")" in
           unreadable) printf '{\\n' ;;
           *) printf '{"checks":[]}\\n' ;;
         esac > "$HAM_CLOSE_VALIDATION_RECEIPT"
-        jq -cn --arg launch "$HQ_LAUNCH_REQUEST_ID" --arg state "\${FIXTURE_DRAIN_STATE:-quiescent}" \
+        state="\${FIXTURE_DRAIN_STATE:-quiescent}"
+        if [ -n "\${FIXTURE_TIMEOUT_EXIT:-}" ]; then state=running; fi
+        jq -cn --arg launch "$HQ_LAUNCH_REQUEST_ID" --arg state "$state" \
           '{launchRequestId:$launch,state:$state,reason:"validation-stopped",drained:($state == "quiescent")}' \
           > "$HAM_RUN_DIR/$record"
       else
         printf '{"validation":"unknown","reason":"absolute-timeout"}' > "$HAM_RUN_DIR/validation-deferred-$head.json"
       fi
+      if [ -n "\${FIXTURE_TIMEOUT_EXIT:-}" ]; then exit "$FIXTURE_TIMEOUT_EXIT"; fi
       kill -TERM "$PPID"; exit 124
     fi
     if [ -n "\${FIXTURE_VALIDATION_ARGV:-}" ]; then
@@ -628,7 +644,8 @@ function conflictRebaseFixture(t, { declared = true } = {}) {
 test('a drained validation timeout publishes the repaired rebase and waits on CI for that exact head', async t => {
   for (const green of [false, true]) {
     const f = conflictRebaseFixture(t);
-    const result = await f.close({ FIXTURE_TIMEOUT_ONCE: f.timeout, FIXTURE_GREEN_HEAD: green ? f.head : f.shas.head });
+    const result = await f.close({ FIXTURE_TIMEOUT_ONCE: f.timeout, FIXTURE_NEEDS_REVALIDATION: '1',
+      FIXTURE_GREEN_HEAD: green ? f.head : f.shas.head });
     assert.equal(result.status, green ? 0 : 75, result.stderr);
     assert.equal(result.closeResult.outcome, green ? 'merged' : 'required-checks-pending');
     assert.equal(f.remoteHead(), f.head);
@@ -638,6 +655,20 @@ test('a drained validation timeout publishes the repaired rebase and waits on CI
     assert.ok(events.indexOf(`required-ci head=${f.head}`) > publish, events.join('\n'));
     assert.equal(events.filter(event => event.startsWith('validate ')).length, 1);
     assert.equal(events.includes(`gh pr merge --squash --match-head-commit ${f.head}`), green);
+  }
+});
+
+test('conflict-repair timeout or load stop leaves publication to a fresh round after supervisor drain', async t => {
+  for (const status of [75, 124, 137, 143]) {
+    const f = conflictRebaseFixture(t);
+    const result = await f.close({ FIXTURE_TIMEOUT_ONCE: f.timeout, FIXTURE_TIMEOUT_EXIT: String(status),
+      FIXTURE_GREEN_HEAD: f.head });
+    assert.equal(result.status, 0, result.stderr);
+    assert.equal(f.remoteHead(), f.head);
+    const events = f.events();
+    assert.equal(events.filter(event => event.startsWith('controller-run ')).length, 2);
+    assert.equal(events.includes('premature-close-result'), false);
+    assert.ok(events.indexOf('controller-drained') < events.findIndex(event => event.startsWith('publish ')));
   }
 });
 

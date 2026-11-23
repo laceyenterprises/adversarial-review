@@ -2183,7 +2183,10 @@ and prevents another local battery on that head in the same run. After confirmed
 cleanup, the close command can publish a completed conflict repair with an
 UNKNOWN verdict and let the exact published head's required CI decide. If
 required CI authority is unavailable, the watcher retries the published head
-under a fresh lease. A genuine local failure blocks publication.
+under a fresh lease. A validation stop that requires supervisor cleanup leaves
+one fresh close round to publish after drain. Verify-head reuses the confirmed
+CI deferral while the head is still the same. A genuine local failure blocks
+publication.
 The no-verdict line applies only to `telegram-responder-guard`; quoted output
 from other checks retains its result. UNKNOWN takes precedence over import-fault
 fallback, while operator cancellation retains its outcome even with unconfirmed

@@ -61,7 +61,10 @@ function requiredContexts() {
 
 function validationDeferred() {
   if (!deferredPath || !existsSync(deferredPath)) return false;
-  if (recordedUnknownDefersToCi(readUnknownValidationReceipt(runDir, head), requiredContexts())) {
+  const recorded = readUnknownValidationReceipt(runDir, head);
+  if ((!expectedHead || expectedHead === head) && (recorded?.head === undefined || recorded.head === head)
+    && recordedUnknownDefersToCi(recorded, requiredContexts())
+    && (!hasCompletedConflictRebase() || conflictRebasePublication() === 'ci')) {
     console.error(`hammer-validate: ${ciAuthoritativeOutcome}: ${deferredPath}; no local pass is claimed. Proceed to the close; it merges only when this exact head's declared required GitHub contexts are all green.`);
     process.exitCode = 0;
     return true;
@@ -90,11 +93,16 @@ function conflictRebasePublication() {
     const name = recorded.controllerRecord;
     if (!/^controller-[a-f0-9-]{36}\.json$/.test(name || '')) return 'blocked';
     try {
-      const controller = JSON.parse(readFileSync(join(runDir, name), 'utf8'));
+      const path = join(runDir, name);
+      const controller = JSON.parse(readFileSync(path, 'utf8'));
+      const launchId = process.env.HQ_LAUNCH_REQUEST_ID
+        || process.env.AGENT_OS_WORKER_LRQ_ID || process.env.LAUNCH_REQUEST_ID;
+      if (!launchId || controller.launchRequestId !== launchId) return 'blocked';
+      if (path === process.env.HAM_CONTROLLER_RECORD && ['running', 'stopping'].includes(controller.state)) {
+        return 'draining';
+      }
       if (controller.state !== 'quiescent' || controller.reason !== 'validation-stopped'
         || controller.drained !== true
-        || controller.launchRequestId !== (process.env.HQ_LAUNCH_REQUEST_ID
-          || process.env.AGENT_OS_WORKER_LRQ_ID || process.env.LAUNCH_REQUEST_ID)
         || ['lease-cleanup-failed', 'mutation-lock-busy'].includes(controller.leaseCleanup?.reason)) return 'blocked';
     } catch { return 'blocked'; }
   }
@@ -404,9 +412,14 @@ if (checkRebase) {
         process.exitCode = 0;
       }
       // Unconfirmed cleanup (125) keeps its status and scratch for the owner.
-      if (ciAuthoritative && wroteDeferral && runnerExit !== 125) {
-        console.error(`hammer-validate: ${ciAuthoritativeOutcome}; continue to verify-head and the exact-head required GitHub contexts. No local validation pass is claimed.`);
-        process.exitCode = 0;
+      if (ciAuthoritative && runnerExit !== 125 && !(stopReason && cleanConflictRebase && process.env.HAM_CONTROLLER_RECORD)) {
+        if (wroteDeferral) {
+          console.error(`hammer-validate: ${ciAuthoritativeOutcome}; continue to verify-head and the exact-head required GitHub contexts. No local validation pass is claimed.`);
+          process.exitCode = 0;
+        } else {
+          // Another writer may have recorded the handoff while this battery ran.
+          validationDeferred();
+        }
       }
       if (ownsDeferral) reportHammerEarlyFailure(deferredOutcome, { headSha: head });
       // Timeouts, cleanup uncertainty, signals and spawn failures are unknown.

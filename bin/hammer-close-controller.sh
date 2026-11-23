@@ -8,8 +8,8 @@
 # Sequence: validate a completed local conflict repair, publish a new local
 # commit, verify-head (lease, rebase, bounded
 # outside-lease revalidation), publish the audit, exact-head CI wait, predicate
-# inputs, claim, predicate, merge. Every stop writes close-result.json and keeps
-# the phase's own exit code (20 stop, 21 conflict repair, 75 retryable deferral).
+# inputs, claim, predicate, merge. Terminal stops write close-result.json and
+# keep the phase's exit code (20 stop, 21 conflict repair, 75 retryable deferral).
 exec 0</dev/null
 
 HAM_CLOSE_ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P) || exit 1
@@ -147,6 +147,14 @@ if [ "$ham_close_local_head" != "$ham_close_live_head" ] \
     ham_close_rebase_state=$("$HAM_NODE_BIN" "$HAM_CLOSE_ROOT/bin/hammer-validate.mjs" --check-rebase-publication) \
       || ham_close_finish 1 source-publication-refused
     case "$ham_close_rebase_state" in
+      draining)
+        # The supervisor owns this round's drain. Leave the outer close free
+        # to check its final registration and start one fresh round.
+        case "$ham_close_validation_exit" in
+          75|124|137|143) exit "$ham_close_validation_exit" ;;
+        esac
+        [ "$ham_close_validation_exit" -ne 0 ] || ham_close_validation_exit=75
+        ham_close_validation_stop "$ham_close_validation_exit" "$ham_close_local_head" ;;
       ci|redrive)
         case "$ham_close_validation_exit" in
           0|75|124|137|143) ;;
@@ -158,7 +166,7 @@ if [ "$ham_close_local_head" != "$ham_close_live_head" ] \
         if [ "$ham_close_validation_exit" -eq 0 ]; then ham_close_validation_exit=75; fi
         ham_close_validation_stop "$ham_close_validation_exit" "$ham_close_local_head" ;;
     esac
-  elif [ "$ham_close_rebase_state" = blocked ]; then
+  elif [[ "$ham_close_rebase_state" != none && "$ham_close_rebase_state" != ci && "$ham_close_rebase_state" != redrive ]]; then
     ham_close_validation_stop 75 "$ham_close_local_head"
   fi
   export HAM_COMMIT_PUBLICATION_ONLY=1
@@ -201,8 +209,11 @@ while :; do
   ham_close_saved_head="$HAM_PRODUCED_HEAD"
   ham_close_saved_base="${HAM_CURRENT_BASE_SHA:-}"
   ham_release_merge_lease --yield local-validation || ham_close_finish 125 "${HAM_PHASE_OUTCOME:-controller-owner-lost}"
-  ham_close_validate "$ham_close_saved_head" \
-    || ham_close_validation_stop "$?" "$ham_close_saved_head"
+  if [ "$ham_close_rebase_state" != ci ] || [ "$ham_close_saved_head" != "$ham_close_local_head" ] \
+    || [ "$ham_close_saved_head" != "${HAM_PUSHED_HEAD:-$ham_close_live_head}" ]; then
+    ham_close_validate "$ham_close_saved_head" \
+      || ham_close_validation_stop "$?" "$ham_close_saved_head"
+  fi
   [ "$(git rev-parse HEAD)" = "$ham_close_saved_head" ] || ham_close_finish 20 head-changed
   export HAM_LOCALLY_VALIDATED_HEAD="$ham_close_saved_head"
   export HAM_LOCALLY_VALIDATED_BASE_SHA="$ham_close_saved_base"

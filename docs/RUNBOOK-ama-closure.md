@@ -6361,9 +6361,13 @@ validation or close on that head in the run returns 75 before another battery
 or controller starts. A changed head remains subject to ordinary validation.
 The close command makes a narrow exception for a completed local conflict
 repair with a clean, head-bound UNKNOWN receipt and confirmed cleanup. It
-publishes that rebase without rerunning the battery. If declared required
-contexts cannot supply merge authority, it records the watcher continuation
-on the published head before returning 75.
+leaves an active controller stop to the supervisor without a terminal close
+result. Only a confirmed drain and a fresh evidence check allow one more
+controller round to publish. Verify-head reuses the CI deferral on that
+published SHA without rerunning the battery. If declared required contexts
+cannot supply merge authority, the close records the watcher continuation
+on the published head before returning 75. The watcher uses launch-bound push
+evidence before assigning the published head retry backoff.
 Only the `telegram-responder-guard` check can supply the Python-lane no-verdict
 signal; another check quoting that line retains its own result. A passing
 Telegram result containing that explicit no-verdict still defers: the reload

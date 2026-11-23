@@ -7,6 +7,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { openFinalizationQueueStore } from './helpers/queue-fixture-store.mjs';
+import { withFixtureProcesses } from './helpers/repeated-fixture-process.mjs';
 import { createQueueHandoffService, resolveQueueHandoffStore } from '../src/finalization/queue-handoff-store.mjs';
 import { handoffDigest, handoffJson } from '../src/finalization/queue-handoff.mjs';
 import { createCloserQueueHandoffBoundary } from '../src/ama/closer-queue-handoff.mjs';
@@ -275,20 +276,20 @@ function client(t, root, fixture, crash = false) {
 }
 test('20 independent duplicate submitter pairs commit one entry/ack after both observe absence', async t => {
   const f = fixture(t);
-  for (let i = 1; i <= 20; i++) {
-    const input = queueHandoffFixture(i), children = [client(t, f.root, input), client(t, f.root, input)];
-    const exits = children.map(c => once(c, 'exit'));
-    assert.deepEqual(await Promise.all(children.map(c => once(c, 'message').then(([m]) => m))), ['ready', 'ready']);
-    const reading = children.map(c => once(c, 'message'));
-    children.forEach(c => c.send('submit')); await Promise.all(reading);
-    const responses = children.map(c => once(c, 'message').then(([m]) => m));
-    children.forEach(c => c.send('commit'));
-    const [a, b] = await Promise.all(responses); await Promise.all(exits);
-    assert.equal(a.status, 'acknowledged'); assert.deepEqual(a, b);
-    assert.equal(f.service.readAcknowledgement(input.h).readinessSeq, i);
-    assert.equal(count(f.store, 'finalization_queue_handoff'), i);
-    assert.equal(count(f.store, 'finalization_queue_entry'), i);
-  }
+  const script = new URL('./helpers/queue-handoff-client.mjs', import.meta.url);
+  const inputs = Array.from({ length: 2 }, () => ({ root: f.root, repeated: true }));
+  await withFixtureProcesses(script, inputs, async contenders => {
+    for (let i = 1; i <= 20; i++) {
+      const input = queueHandoffFixture(i);
+      assert.deepEqual(await Promise.all(contenders.map(send => send({ prepare: input }))), ['prepared', 'prepared']);
+      assert.deepEqual(await Promise.all(contenders.map(send => send('submit'))), ['reading', 'reading']);
+      const [a, b] = await Promise.all(contenders.map(send => send('commit')));
+      assert.equal(a.status, 'acknowledged'); assert.deepEqual(a, b);
+      assert.equal(f.service.readAcknowledgement(input.h).readinessSeq, i);
+      assert.equal(count(f.store, 'finalization_queue_handoff'), i);
+      assert.equal(count(f.store, 'finalization_queue_entry'), i);
+    }
+  }, { timeoutMs: 15_000 });
   t.diagnostic('fixed: 20/20 consecutive process pairs; one durable entry and identical ack per pair; zero duplicate entries');
 });
 

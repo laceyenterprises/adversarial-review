@@ -11,6 +11,7 @@ import { fileURLToPath } from 'node:url';
 import { once } from 'node:events';
 import Database from 'better-sqlite3';
 import { openFinalizationQueueStore } from './helpers/queue-fixture-store.mjs';
+import { withFixtureProcesses } from './helpers/repeated-fixture-process.mjs';
 import { ensureFinalizationQueueSchema } from '../src/finalization/queue-store.mjs';
 import { createQueueOwner } from '../src/finalization/executor-lease-store.mjs';
 import { resolveQueueOwnerAdapter } from '../src/finalization/queue-owner.mjs';
@@ -104,27 +105,24 @@ test('canonical lane identity preserves distinct Git refs and rejects aliases', 
 test('30 simultaneous claimant pairs: exactly one owner and outcome read-back each time', async t => {
   const f = fixture(t);
   let consecutive = 0;
-  for (let trial = 0; trial < 30; trial++) {
-    const key = { ...lane, base: `trial-${trial}` };
-    const workers = ['a','b'].map(id => fork(fileURLToPath(new URL('./helpers/queue-claimant.mjs', import.meta.url)),
-      [JSON.stringify({ root: f.root, lane: key, id: `owner-${id}`, now: time(0), expiry: time(60) })], {
-      execArgv: ['--preserve-symlinks', '--preserve-symlinks-main'],
-      env: { ...process.env, NODE_TEST_CONTEXT: '' },
-      stdio: ['ignore', 'ignore', 'inherit', 'ipc'],
-    }));
-    const exited = workers.map(w => once(w, 'exit'));
-    assert.deepEqual(await Promise.all(workers.map(w => once(w, 'message').then(([m]) => m))), ['ready','ready']);
-    const replies = workers.map(w => once(w, 'message').then(([m]) => m));
-    workers.forEach(w => w.send('claim'));
-    const results = await Promise.all(replies);
-    await Promise.all(exited);
-    assert.equal(results.filter(r => r.ok).length, 1, JSON.stringify(results));
-    const winner = results.find(r => r.ok);
-    const persisted = f.store.readOwner(key);
-    assert.equal(persisted.owner_id, winner.fence.ownerId);
-    assert.equal(persisted.generation, 1);
-    consecutive++;
-  }
+  const script = new URL('./helpers/queue-claimant.mjs', import.meta.url);
+  const inputs = ['a', 'b'].map(id => ({
+    root: f.root, id: `owner-${id}`, now: time(0), expiry: time(60), repeated: true,
+  }));
+  await withFixtureProcesses(script, inputs, async contenders => {
+    for (let trial = 0; trial < 30; trial++) {
+      const key = { ...lane, base: `trial-${trial}` };
+      assert.deepEqual(await Promise.all(contenders.map(send => send('prepare'))), ['prepared', 'prepared']);
+      const results = await Promise.all(contenders.map(send => send(key)));
+      assert.equal(results.filter(r => r.ok).length, 1, JSON.stringify(results));
+      const winner = results.find(r => r.ok);
+      assert.ok(['held', 'owner-operation-in-flight'].includes(results.find(r => !r.ok).reason));
+      const persisted = f.store.readOwner(key);
+      assert.equal(persisted.owner_id, winner.fence.ownerId);
+      assert.equal(persisted.generation, 1);
+      consecutive++;
+    }
+  }, { timeoutMs: 15_000 });
   t.diagnostic(`fixed: ${consecutive}/30 consecutive single-owner outcomes; 0 duplicate owners`);
 });
 

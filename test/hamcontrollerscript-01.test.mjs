@@ -6,7 +6,7 @@
 import test from 'node:test';
 import { hammerBootstrapInputs } from './helpers/hammer-bootstrap-inputs.mjs';
 import assert from 'node:assert/strict';
-import { spawn, execFileSync } from 'node:child_process';
+import { spawn, execFileSync, spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -22,6 +22,32 @@ import { hammerQueueInputs } from '../src/finalization/hammer-queue-command.mjs'
 const root = resolve(import.meta.dirname, '..');
 const template = readFileSync(join(root, 'templates/hammer-prompt.md'), 'utf8');
 const shellQuote = value => `'${String(value).replaceAll("'", "'\\''")}'`;
+
+function staticMirrorGh(responses, calls) {
+  const routes = Object.entries(responses).flatMap(([path, response]) => {
+    if (response === 'unauthorized') {
+      return [`${shellQuote(path)}) printf '%s\\n' 'HTTP 401 Unauthorized' >&2; exit 1 ;;`];
+    }
+    if (!response || response === true) return [];
+    return [`${shellQuote(path)}) response=${shellQuote(JSON.stringify(response))} ;;`];
+  });
+  return `#!/bin/sh
+jq -cn '$ARGS.positional' --args -- "$@" >> ${shellQuote(calls)} || { echo 'fixture gh: jq argv capture failed' >&2; exit 97; }
+case "\${2-}" in
+  ${routes.join('\n  ')}
+  *) exit 1 ;;
+esac
+[ "\${1-}" = api ] || exit 1
+shift 2
+for arg do
+  if [ "$arg" = 'If-None-Match: "fixture"' ]; then
+    printf 'HTTP/2.0 304 Not Modified\\n\\n'
+    exit 1
+  fi
+done
+printf 'HTTP/2.0 200 OK\\nETag: "fixture"\\n\\n%s\\n' "$response"
+`;
+}
 
 // Run with no controlling terminal (new session) and file descriptor 0 closed.
 function runDetached(script, args, env, cwd) {
@@ -42,6 +68,46 @@ function scratch(t, prefix) {
   t.after(() => rmSync(dir, { recursive: true, force: true }));
   return dir;
 }
+
+test('the static validation transport records exact argv and refuses invalid requests', t => {
+  const dir = scratch(t, 'hammer-mirror-gh-');
+  const executable = join(dir, 'gh');
+  const calls = join(dir, 'calls');
+  const path = "repos/fixture/repo/content/a'b?ref=abc";
+  const response = { content: 'quote "\'\n' };
+  writeFileSync(executable, staticMirrorGh({ [path]: response, '/private': 'unauthorized' }, calls), { mode: 0o755 });
+  const argv = [
+    ['api', path, '--header', 'line one\nline two'],
+    ['api', path, '--header', 'If-None-Match: "fixture"'],
+    ['api', '/private'],
+    ['api', '/missing'],
+    ['pr', path],
+  ];
+  const results = argv.map(args => spawnSync(executable, args, { encoding: 'utf8' }));
+  assert.deepEqual(results.map(({ status, stdout, stderr }) => [status, stdout, stderr]), [
+    [0, `HTTP/2.0 200 OK\nETag: "fixture"\n\n${JSON.stringify(response)}\n`, ''],
+    [1, 'HTTP/2.0 304 Not Modified\n\n', ''],
+    [1, '', 'HTTP 401 Unauthorized\n'],
+    [1, '', ''],
+    [1, '', ''],
+  ]);
+  assert.deepEqual(readFileSync(calls, 'utf8').trimEnd().split('\n').map(line => JSON.parse(line)), argv);
+});
+
+test('the static validation transport diagnoses missing or failing jq', t => {
+  const dir = scratch(t, 'hammer-mirror-jq-');
+  const executable = join(dir, 'gh');
+  writeFileSync(executable, staticMirrorGh({ '/route': { ok: true } }, join(dir, 'calls')), { mode: 0o755 });
+  for (const failing of [false, true]) {
+    if (failing) writeFileSync(join(dir, 'jq'), '#!/bin/sh\nexit 2\n', { mode: 0o755 });
+    const result = spawnSync(executable, ['api', '/route'], {
+      encoding: 'utf8', env: { ...process.env, PATH: dir },
+    });
+    assert.equal(result.status, 97);
+    assert.equal(result.stdout, '');
+    assert.match(result.stderr, /fixture gh: jq argv capture failed/);
+  }
+});
 
 function gitRepo(dir) {
   const git = (...args) => execFileSync('git', args, { cwd: dir, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'],
@@ -334,7 +400,9 @@ function mirrorFixture(t, { entries, runs, manifestFailure, checkFailure, partia
   }
   const calls = join(f.dir, 'gh-calls');
   const localChecks = join(f.dir, 'local-checks');
-  writeFileSync(join(f.bin, 'gh'), `#!${process.execPath}
+  // Only the quota-defer cases need to write dynamic credential state. Most
+  // calls replay an already serialized HTTP response and record exact argv.
+  const gh = !Number.isInteger(deferJobReadsAfter) ? staticMirrorGh(responses, calls) : `#!${process.execPath}
 const { appendFileSync } = require('node:fs');
 const [action, path, ...args] = process.argv.slice(2);
 appendFileSync(${JSON.stringify(calls)}, JSON.stringify([action, path, ...args]) + '\\n');
@@ -349,10 +417,8 @@ if (args.includes('If-None-Match: "fixture"')) {
   console.log('HTTP/2.0 304 Not Modified\\n');
   process.exit(1);
 }
-if (${Number.isInteger(deferJobReadsAfter)} && (
-  (${deferJobReadsAfter ?? -1} === 0 && path.includes('/check-runs?')) ||
-  path.endsWith('/actions/jobs/${deferJobReadsAfter ?? -1}')
-)) {
+if ((${deferJobReadsAfter} === 0 && path.includes('/check-runs?')) ||
+  path.endsWith('/actions/jobs/${deferJobReadsAfter}')) {
   const { createHash } = require('node:crypto');
   const { writeFileSync } = require('node:fs');
   const credential = 'token-' + createHash('sha256').update('synthetic-offline-token').digest('hex').slice(0, 24);
@@ -362,7 +428,8 @@ if (${Number.isInteger(deferJobReadsAfter)} && (
   }));
 }
 console.log('HTTP/2.0 200 OK\\nETag: "fixture"\\n\\n' + JSON.stringify(response));
-`, { mode: 0o755 });
+`;
+  writeFileSync(join(f.bin, 'gh'), gh, { mode: 0o755 });
   const validationEnv = {
     PATH: `${f.bin}:${process.env.PATH}`, FIXTURE_LIVE_HEAD: head,
     FIXTURE_NEEDS_REVALIDATION: '1', FIXTURE_REAL_VALIDATE: '1', FIXTURE_LOCAL_CHECKS: localChecks,

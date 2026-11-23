@@ -215,6 +215,28 @@ test('canonical validation deferrals across launches use owned exponential backo
   assert.equal(state.alerts.filter(alert => alert.options?.event === 'ama_closer.inconclusive_retry_surfaced').length, 1);
 });
 
+test('a validation deferral after publication schedules the live head and refunds the source launch', async t => {
+  const root = scratch(t);
+  const { state, deps, endCurrent, identity } = harness(root, 'canonical-validation-deferred');
+  const run = (at, headSha) => {
+    const args = dispatchArgs(root, at, { prMetadata: { headSha } });
+    args.cfg.closerInconclusiveRetry = { surfaceAfterAttempts: 1, backoffBaseMs: 60_000 };
+    return maybeDispatchAmaCloser({ ...args, ...deps });
+  };
+  assert.equal((await run(minutes(0), HEAD)).dispatched, true);
+  endCurrent();
+  recordHammerEarlyFailure('canonical-validation-deferred', { headSha: OTHER, env: {
+    HAM_HQ_ROOT: join(root, 'hq'), HAM_REPO: REPO, HAM_PR_NUMBER: String(PR),
+    HAM_TARGET_REMEDIATION_SHA: HEAD, HQ_LAUNCH_REQUEST_ID: state.ended,
+  } });
+  const result = await run(minutes(1), OTHER);
+  assert.equal(result.reason, 'closer-inconclusive-retry-backoff', JSON.stringify(result));
+  const { heads } = readCloserInconclusiveRetries(root, identity);
+  assert.equal(heads[OTHER].nextAttemptAt, minutes(2));
+  assert.equal(heads[HEAD], undefined);
+  assert.equal(readHammerRetryCapLedger(root, identity).attemptCount, 0);
+});
+
 test('site 1: an inconclusive exit spends no budget or no-delivery key, surfaces once at N and stays owned', async t => {
   const root = scratch(t);
   const { state, deps, endCurrent, identity } = harness(root, 'endpoint-bootstrap-failed');

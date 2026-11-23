@@ -47,8 +47,10 @@ proves were closer faults from the AMA audit, and `closer-supersede` records a
 launch the pipeline cancelled before it booted (reason
 `superseded-by-clean-exact-head-review`).
 Dispatch also records ended `canonical-validation-deferred` launches here,
-including those with a deferred audit and infrastructure refund. Repeated
-same-head no-verdict or deadline outcomes therefore share the configured
+including those with a deferred audit and infrastructure refund. A closer that
+published a conflict-resolving rebase before deferring records its continuation
+against the live published head. The refund remains tied to the original launch.
+Repeated same-head no-verdict or deadline outcomes share the configured
 backoff and notification instead of starting an immediate unpaced retry.
 
 `reviewServiceRevision` (optional, CLOSERRETRYREFUND-01) is the service revision

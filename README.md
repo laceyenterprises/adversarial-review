@@ -2179,7 +2179,11 @@ outside the shared lease. The absolute ceiling scales from 360 seconds.
 The idle ceiling scales from 120 seconds and stays below the absolute deadline.
 Either timeout returns 124 with validation unknown. A canonical deadline or an
 explicit process-inspection no-verdict hands the current head to recovery once
-and prevents another validation or close on that head in the same run.
+and prevents another local battery on that head in the same run. After confirmed
+cleanup, the close command can publish a completed conflict repair with an
+UNKNOWN verdict and let the exact published head's required CI decide. If
+required CI authority is unavailable, the watcher retries the published head
+under a fresh lease. A genuine local failure blocks publication.
 The no-verdict line applies only to `telegram-responder-guard`; quoted output
 from other checks retains its result. UNKNOWN takes precedence over import-fault
 fallback, while operator cancellation retains its outcome even with unconfirmed

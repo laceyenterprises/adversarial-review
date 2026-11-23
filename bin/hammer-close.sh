@@ -37,8 +37,19 @@ if [ "$(cd "${HAM_ROOT_DIR:-/nonexistent}" 2>/dev/null && pwd -P)" != "$HAM_CLOS
   exit 1
 fi
 "$HAM_NODE_BIN" "$HAM_CLOSE_ROOT/bin/hammer-close-plan.mjs" check "$HAM_CLOSE_PLAN" || exit $?
+ham_close_rebase_publication() {
+  if [ -f "$HAM_RUN_DIR/conflict-repair-publish.env" ]; then
+    "$HAM_NODE_BIN" "$HAM_CLOSE_ROOT/bin/hammer-validate.mjs" --check-rebase-publication
+  else
+    echo none
+  fi
+}
+ham_close_rebase_state=$(ham_close_rebase_publication) || exit $?
 ham_close_deferred_status=0
-"$HAM_NODE_BIN" "$HAM_CLOSE_ROOT/bin/hammer-validate.mjs" --check-deferred || ham_close_deferred_status=$?
+case "$ham_close_rebase_state" in
+  ci|redrive) ;; # A completed conflict repair can publish after a drained UNKNOWN.
+  *) "$HAM_NODE_BIN" "$HAM_CLOSE_ROOT/bin/hammer-validate.mjs" --check-deferred || ham_close_deferred_status=$? ;;
+esac
 if [ "$ham_close_deferred_status" -ne 0 ]; then
   if [ "$ham_close_deferred_status" -eq 75 ]; then
     printf 'HAM close result: {"status":75,"outcome":"canonical-validation-deferred"}\n'
@@ -57,10 +68,20 @@ while :; do
   # (no second battery) and continues to the CI-gated predicate and merge.
   ham_close_head=$(git rev-parse --verify 'HEAD^{commit}' 2>/dev/null) || ham_close_head=
   if [ "$ham_close_round" -eq 1 ] && [ ! -f "$HAM_RUN_DIR/close-result.json" ] && [ -n "$ham_close_head" ] \
-    && [ -f "$HAM_RUN_DIR/validation-deferred-$ham_close_head.json" ] \
-    && "$HAM_NODE_BIN" "$HAM_CLOSE_ROOT/bin/hammer-validate.mjs" --check-deferred; then
-    ham_close_round=2
-    continue
+    && [ -f "$HAM_RUN_DIR/validation-deferred-$ham_close_head.json" ]; then
+    ham_close_retry=0
+    case "$ham_close_rebase_state" in
+      validate)
+        if [ "$ham_close_status" -eq 143 ]; then
+          case "$(ham_close_rebase_publication)" in ci|redrive) ham_close_retry=1 ;; esac
+        fi ;;
+      none)
+        if "$HAM_NODE_BIN" "$HAM_CLOSE_ROOT/bin/hammer-validate.mjs" --check-deferred; then ham_close_retry=1; fi ;;
+    esac
+    if [ "$ham_close_retry" -eq 1 ]; then
+      ham_close_round=2
+      continue
+    fi
   fi
   break
 done

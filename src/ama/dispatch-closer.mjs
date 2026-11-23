@@ -5724,7 +5724,7 @@ async function maybeDispatchAmaCloserAttempt({
     // repeated same-head launches rather than immediately relaunching forever.
     if (parkLedger && parkReason === 'canonical-validation-deferred') {
       const backoff = await ownInconclusiveCloserRetry({ rootDir, repo, prNumber,
-        headSha: existingRecord.headSha, launchRequestId: existingRecord.launchRequestId,
+        headSha: queuedHead, launchRequestId: existingRecord.launchRequestId,
         reason: parkReason, cfg, now: dispatchContext.dispatchedAt, deliverAlertImpl, logger });
       if (backoff) {
         finalizeAmaCloserLeaseBestEffort({ rootDir, leaseIdentity: existingRecordLeaseIdentity,

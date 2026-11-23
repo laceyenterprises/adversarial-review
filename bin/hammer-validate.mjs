@@ -2,7 +2,7 @@
 import { existsSync, readFileSync } from 'node:fs';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { dirname, join } from 'node:path';
+import { basename, dirname, isAbsolute, join, relative, sep } from 'node:path';
 import { performance } from 'node:perf_hooks';
 import { fileURLToPath } from 'node:url';
 import { runBounded } from '../src/ama/bounded-command.mjs';
@@ -19,7 +19,8 @@ import { reportHammerEarlyFailure } from '../src/ama/hammer-terminal-audit.mjs';
 import { ValidationSelectionError, UnsupportedPnpmWorkflowError } from '../src/ama/pnpm-validation.mjs';
 import { writeFileAtomic } from '../src/atomic-write.mjs';
 import { loadEffectiveMergeAuthorityConfig } from '../src/ama/effective-policy.mjs';
-import { declaredRequiredContexts, readUnknownValidationReceipt, recordedUnknownDefersToCi,
+import { conflictPublishBinding } from '../src/ama/hammer-conflict-binding.mjs';
+import { CI_AUTHORITATIVE_UNKNOWN_REASONS, declaredRequiredContexts, readUnknownValidationReceipt, recordedUnknownDefersToCi,
   unknownValidationDeferral } from '../src/ama/local-validation-unknown.mjs';
 
 let closeReceipt = process.env.HAM_CLOSE_VALIDATION_RECEIPT;
@@ -43,7 +44,9 @@ let validationUnknown = false;
 let ownsDeferral = false;
 let ciAuthoritative = false;
 let deferral;
+let wroteDeferral = false;
 let localTestFailure = false;
+let cleanConflictRebase = false;
 
 // MRQ-20: the exact-head contexts an UNKNOWN result defers to. An unreadable
 // configuration declares none, so UNKNOWN keeps its existing deferral.
@@ -68,6 +71,46 @@ function validationDeferred() {
   return true;
 }
 
+function hasCompletedConflictRebase() {
+  const binding = conflictPublishBinding(runDir, () => head);
+  return Boolean(binding && binding.source !== head);
+}
+
+function conflictRebasePublication() {
+  if (!hasCompletedConflictRebase()) return 'none';
+  if (gitOutput('status', '--porcelain') !== '') return 'blocked';
+  if (!deferredPath || !existsSync(deferredPath)) return 'validate';
+  const recorded = readUnknownValidationReceipt(runDir, head);
+  if (recorded?.head !== head || recorded.validation !== 'unknown'
+    || recorded.localFailureObserved !== false || recorded.cleanCheckout !== true
+    || !CI_AUTHORITATIVE_UNKNOWN_REASONS.includes(recorded.reason)) return 'blocked';
+  // A timeout writes its receipt before the owning controller stops the
+  // process group. Require its durable drain proof before starting a new round.
+  if (recorded.cleanupConfirmed !== true) {
+    const name = recorded.controllerRecord;
+    if (!/^controller-[a-f0-9-]{36}\.json$/.test(name || '')) return 'blocked';
+    try {
+      const controller = JSON.parse(readFileSync(join(runDir, name), 'utf8'));
+      if (controller.state !== 'quiescent' || controller.reason !== 'validation-stopped'
+        || controller.drained !== true
+        || controller.launchRequestId !== (process.env.HQ_LAUNCH_REQUEST_ID
+          || process.env.AGENT_OS_WORKER_LRQ_ID || process.env.LAUNCH_REQUEST_ID)
+        || ['lease-cleanup-failed', 'mutation-lock-busy'].includes(controller.leaseCleanup?.reason)) return 'blocked';
+    } catch { return 'blocked'; }
+  }
+  // The mirror can finish writing a failed check while the group is stopping.
+  // Re-read that evidence after drain before giving UNKNOWN publication authority.
+  if (recorded.localValidationReceipt) {
+    const path = relative(runDir, recorded.localValidationReceipt);
+    if (!path || isAbsolute(path) || path.split(sep)[0] === '..') return 'blocked';
+    try {
+      const evidence = JSON.parse(readFileSync(recorded.localValidationReceipt, 'utf8'));
+      if (!Array.isArray(evidence.checks) || evidence.checks.some(check => check?.result === 'fail')) return 'blocked';
+    } catch { return 'blocked'; }
+  }
+  return recordedUnknownDefersToCi(recorded, requiredContexts()) ? 'ci' : 'redrive';
+}
+
 // A failed mirror check row or a TAP `not ok` line is a genuine local failure.
 function localFailureObserved() {
   return localTestFailure || readValidationReceipt().checks?.some(check => check.result === 'fail') === true;
@@ -84,6 +127,7 @@ function writeDeferral(overwrite) {
   } catch (error) {
     if (error.code === 'EEXIST') return false;
     console.error('hammer-validate: deferred validation receipt unavailable');
+    return false;
   }
   return true;
 }
@@ -97,7 +141,12 @@ function deferValidation(reason, status) {
   ciAuthoritative = decision.ciAuthoritative;
   deferral = { reason, status, ciAuthoritative, requiredContexts: decision.requiredContexts || [],
     localFailureObserved: localFailure };
-  if (!writeDeferral(false)) return;
+  if (cleanConflictRebase) {
+    deferral.cleanCheckout = true;
+    if (process.env.HAM_CONTROLLER_RECORD) deferral.controllerRecord = basename(process.env.HAM_CONTROLLER_RECORD);
+  }
+  wroteDeferral = writeDeferral(false);
+  if (!wroteDeferral) return;
   if (ciAuthoritative) {
     // The close re-uses this receipt and continues to the exact-head CI gate.
     // No early-failure audit or deferred phase: this head may still merge.
@@ -116,7 +165,7 @@ function demoteCiAuthoritative() {
   if (!ciAuthoritative) return;
   ciAuthoritative = false;
   deferral = { ...deferral, ciAuthoritative: false, localFailureObserved: true };
-  writeDeferral(true);
+  if (wroteDeferral) writeDeferral(true);
   ownsDeferral = true;
   console.error(`hammer-validate: ${deferredOutcome}: a local check failed; UNKNOWN cannot defer to GitHub CI.`);
   try { recordHammerPhase(deferredOutcome); } catch { /* The private receipt still records the reason. */ }
@@ -192,13 +241,14 @@ const closureResumeReceipt = () => runDir && head ? readRunClosureResume(runDir,
 
 const args = process.argv.slice(2);
 const checkDeferred = args.length === 1 && args[0] === '--check-deferred';
+const checkRebase = args.length === 1 && args[0] === '--check-rebase-publication';
 const usage = 'usage: hammer-validate.mjs --canonical [--nominal-timeout 1..3600] -- <changed repository-relative files>';
 let pytest = false;
 let canonical = /\/(?:agent-os|adversarial-review)$/.test(process.env.HAM_REPO || '');
 let nominalSeconds = 360;
 let explicitTimeout = false;
 let valid = true;
-while (!checkDeferred && args.length && args[0] !== '--') {
+while (!checkDeferred && !checkRebase && args.length && args[0] !== '--') {
   const flag = args.shift();
   if (flag === '--pytest') pytest = true;
   else if (flag === '--canonical') canonical = true;
@@ -210,7 +260,13 @@ while (!checkDeferred && args.length && args[0] !== '--') {
   } else { valid = false; break; }
 }
 let resumed;
-if (checkDeferred) {
+if (checkRebase) {
+  try { console.log(conflictRebasePublication()); }
+  catch {
+    console.error('hammer-validate: conflict-repair publication binding unavailable');
+    process.exitCode = 1;
+  }
+} else if (checkDeferred) {
   validationDeferred();
 } else if (!valid || args.shift() !== '--' || !args.length) {
   console.error(usage);
@@ -221,6 +277,9 @@ if (checkDeferred) {
   const receipt = resumed;
   console.error(`hammer-validate: closure resume: head ${receipt.validatedHead} was validated by launch ${receipt.launchRequestId || 'unknown'}; reusing that evidence, not re-running validation.`);
 } else {
+  try {
+    cleanConflictRebase = canonical && hasCompletedConflictRebase() && gitOutput('status', '--porcelain') === '';
+  } catch { /* An unreadable binding gives validation no publication authority. */ }
   const scratch = await mkdtemp(join(tmpdir(), 'ham-validation-'));
   let runner, runnerExit, fallbackReason;
   if (closeReceipt) writeValidationReceipt(receipt);
@@ -329,6 +388,12 @@ if (checkDeferred) {
       const realMirrorFailure = mirror && (runnerExit === 42
         || readValidationReceipt().checks.some(check => check.result === 'fail'));
       if (ciAuthoritative && (realMirrorFailure || localFailureObserved())) demoteCiAuthoritative();
+      if (wroteDeferral && cleanConflictRebase) {
+        deferral = { ...deferral,
+          cleanupConfirmed: runnerExit !== 125 && !(stopReason && process.env.HAM_CONTROLLER_RECORD),
+          localFailureObserved: deferral.localFailureObserved || realMirrorFailure || localFailureObserved() };
+        writeDeferral(true);
+      }
       const environmentFault = canonical && !validationUnknown && !runner?.required && !realMirrorFailure
         && (!runner || [76, 78, 127].includes(process.exitCode)
           || (process.exitCode !== 0 && process.exitCode < 124 && packageImportFault));
@@ -339,7 +404,7 @@ if (checkDeferred) {
         process.exitCode = 0;
       }
       // Unconfirmed cleanup (125) keeps its status and scratch for the owner.
-      if (ciAuthoritative && runnerExit !== 125) {
+      if (ciAuthoritative && wroteDeferral && runnerExit !== 125) {
         console.error(`hammer-validate: ${ciAuthoritativeOutcome}; continue to verify-head and the exact-head required GitHub contexts. No local validation pass is claimed.`);
         process.exitCode = 0;
       }

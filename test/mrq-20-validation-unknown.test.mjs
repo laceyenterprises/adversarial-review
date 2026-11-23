@@ -195,6 +195,24 @@ test('hammer-validate: without declared contexts a timeout keeps the existing de
   assert.equal(runValidator(repo, { exit: 0 }, ['--check-deferred']).status, 75);
 });
 
+test('a clean conflict rebase retains cleanup evidence for publication after a timeout', t => {
+  for (const declared of [true, false]) {
+    const repo = fixture(t, { declared });
+    writeFileSync(join(repo.root, '.git/info/exclude'), '/*\n');
+    writeFileSync(join(repo.root, 'conflict-repair-publish.env'),
+      `source=${HEAD}\nhead=${repo.head}\nbranch=feature\n`);
+    const result = runValidator(repo, { stop: ['absolute-timeout', 124], exit: 124 });
+    assert.equal(result.status, declared ? 0 : 124, result.stderr);
+    const receipt = deferralOf(repo);
+    assert.equal(receipt.cleanCheckout, true);
+    assert.equal(receipt.cleanupConfirmed, true);
+    const state = runValidator(repo, { exit: 1 }, ['--check-rebase-publication']);
+    assert.equal(state.status, 0, state.stderr);
+    assert.equal(state.stdout.trim(), declared ? 'ci' : 'redrive');
+    assert.equal(state.batteries, 1);
+  }
+});
+
 test('hammer-validate: a real local failure still blocks', t => {
   const repo = fixture(t);
   const failed = runValidator(repo, { rows: [{ name: 'unit', status: 'failed', result: 'fail' }], exit: 42 });

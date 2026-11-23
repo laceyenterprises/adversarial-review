@@ -210,17 +210,26 @@ disposable validation scratch.
 The create-once deferral receipt has `schemaVersion: 1`, exact `head`,
 `outcome: deferred`, `validation: unknown`, bounded `reason` and original
 `status`. It points to `localValidationReceipt` when available. `cleanupOwner`
-is `controller` or `bounded-command`. Confirm cleanup from that owner's record
-or output. The deferral receipt itself supplies no drain proof. MRQ-20 adds
+is `controller` or `bounded-command`. For ordinary validation, confirm cleanup
+from that owner's record or output. MRQ-20 adds
 `ciAuthoritative` (boolean), `requiredContexts` (the declared exact-head
 contexts the UNKNOWN would defer to, possibly empty) and `localFailureObserved`
 (a failed mirror check row or a TAP `not ok` line was seen before the stop).
-Older receipts omit them and read as not CI-authoritative. A CI-authoritative
-receipt may be rewritten once, only to demote it when a failure surfaces after
-the stop. A repeat on the same head in this run returns 75 and leaves the
+Older receipts omit them and read as not CI-authoritative. An ordinary
+CI-authoritative receipt may be rewritten to demote it when a failure surfaces
+after the stop. A repeat on the same head in this run returns 75 and leaves the
 original bytes untouched, unless the receipt still defers to CI under current
 configuration: then the repeat exits 0 without another battery, and the
 hammer's exact-head gate requires every declared context present and green.
+
+For a completed conflict repair, optional `cleanCheckout` attests that the
+validator started from a clean checkout at `head`. `cleanupConfirmed` records
+successful validation cleanup when the validator can confirm it. If the
+controller stopped the validation round, `controllerRecord` is the basename
+of the launch-bound registration used to prove the round drained. The
+validator updates cleanup and local-failure evidence when it finishes. The
+close command also rereads the referenced local validation receipt after
+drain and refuses publication if it is unreadable or records a failed check.
 
 Retention belongs to the caller/run-directory owner. Passing checks delete their
 command logs immediately. Failed or interrupted diagnostic files remain with

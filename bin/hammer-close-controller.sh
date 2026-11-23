@@ -5,7 +5,8 @@
 # lease after drain. Its only inputs are data: the run's inputs.sh (written by
 # Appendix A) and the plan path in $1. It never reads a terminal or stdin.
 #
-# Sequence: publish a new local commit, verify-head (lease, rebase, bounded
+# Sequence: validate a completed local conflict repair, publish a new local
+# commit, verify-head (lease, rebase, bounded
 # outside-lease revalidation), publish the audit, exact-head CI wait, predicate
 # inputs, claim, predicate, merge. Every stop writes close-result.json and keeps
 # the phase's own exit code (20 stop, 21 conflict repair, 75 retryable deferral).
@@ -44,6 +45,7 @@ fi
 # Functions are not inherited across the controller boundary; source again.
 # shellcheck disable=SC1091
 source "$HAM_RUN_DIR/inputs.sh" || ham_close_finish 1 dispatch-inputs-missing
+unset HAM_CLOSE_REBASE_HEAD
 "$HAM_NODE_BIN" "$HAM_CLOSE_ROOT/bin/hammer-controller.mjs" assert-owner || ham_close_finish 125 controller-setup-failed
 ham_close_exports=$("$HAM_NODE_BIN" "$HAM_CLOSE_ROOT/bin/hammer-close-plan.mjs" exports "$HAM_CLOSE_PLAN") \
   || ham_close_finish 65 close-plan-invalid
@@ -80,6 +82,47 @@ ham_close_read() {
 }
 ham_close_phase_or_stop() { ham_close_phase "$@" || ham_close_finish "$HAM_PHASE_STATUS" "$HAM_PHASE_OUTCOME"; }
 
+ham_close_validate() {
+  local head="$1" file changed_paths receipt status=0
+  local files=("${HAM_CLOSE_VALIDATION_FILES[@]}")
+  HAM_CLOSE_STAGE=local-validation
+  export HAM_PROCEDURE_STEP=local-validation
+  HAM_PHASE_OUTCOME=targeted-validation-failed
+  if [ "${#files[@]}" -eq 0 ]; then
+    changed_paths=$(mktemp "$HAM_RUN_DIR/validation-files.XXXXXX") || return 1
+    if ! git diff -z --name-only --diff-filter=d "$HAM_REVIEWED_SHA" "$head" -- > "$changed_paths"; then
+      rm -f "$changed_paths"
+      return 1
+    fi
+    while IFS= read -r -d '' file; do
+      [ -n "$file" ] && files+=("$file")
+    done < "$changed_paths"
+    rm -f "$changed_paths"
+  fi
+  [ "${#files[@]}" -gt 0 ] || return 0
+  receipt=$(mktemp "$HAM_RUN_DIR/local-validation.XXXXXX") || receipt=
+  HAM_CLOSE_VALIDATION_HEAD="$head" HAM_CLOSE_VALIDATION_RECEIPT="$receipt" \
+    "$HAM_NODE_BIN" "$HAM_CLOSE_ROOT/bin/hammer-validate.mjs" --canonical -- "${files[@]}" || status=$?
+  if [ -s "$receipt" ]; then
+    ham_close_validation_receipts+=("$receipt")
+  elif [ -n "$receipt" ]; then
+    rm -f "$receipt"
+  fi
+  return "$status"
+}
+
+ham_close_validation_stop() {
+  local status="$1" head="$2"
+  HAM_CLOSE_STAGE=local-validation
+  if [ -f "$HAM_RUN_DIR/validation-deferred-$head.json" ]; then
+    ham_close_finish "$status" canonical-validation-deferred
+  elif [ "$status" -eq 78 ]; then
+    ham_close_finish 78 validation-environment-failed
+  else
+    ham_close_finish "$status" targeted-validation-failed
+  fi
+}
+
 # 1. Publish a local remediation or conflict-repair commit the PR does not have.
 HAM_CLOSE_STAGE=live-head-read
 export HAM_PROCEDURE_STEP=live-head-read
@@ -89,12 +132,60 @@ ham_close_read close-live-head "$HAM_CLOSE_ROOT/bin/hammer-pr-read.mjs" "$HAM_RE
 ham_close_live_head=$(jq -er '.headRefOid | select(type == "string") | select(test("^[0-9a-fA-F]{40}$"))' \
   "$HAM_RUN_DIR/close-live-head.json") || ham_close_finish 1 starting-pr-state-unavailable
 ham_close_local_head=$(git rev-parse --verify 'HEAD^{commit}') || ham_close_finish 1 reviewed-head-unavailable
+ham_close_rebase_state=none
+if [ -f "$HAM_RUN_DIR/conflict-repair-publish.env" ]; then
+  ham_close_rebase_state=$("$HAM_NODE_BIN" "$HAM_CLOSE_ROOT/bin/hammer-validate.mjs" --check-rebase-publication) \
+    || ham_close_finish 1 source-publication-refused
+fi
 if [ "$ham_close_local_head" != "$ham_close_live_head" ] \
   && ! { git cat-file -e "$ham_close_live_head^{commit}" 2>/dev/null \
     && git merge-base --is-ancestor "$ham_close_local_head" "$ham_close_live_head"; }; then
+  if [ "$ham_close_rebase_state" = validate ]; then
+    ham_close_validation_exit=0
+    ham_close_validate "$ham_close_local_head" || ham_close_validation_exit=$?
+    [ "$(git rev-parse HEAD)" = "$ham_close_local_head" ] || ham_close_finish 20 head-changed
+    ham_close_rebase_state=$("$HAM_NODE_BIN" "$HAM_CLOSE_ROOT/bin/hammer-validate.mjs" --check-rebase-publication) \
+      || ham_close_finish 1 source-publication-refused
+    case "$ham_close_rebase_state" in
+      ci|redrive)
+        case "$ham_close_validation_exit" in
+          0|75|124|137|143) ;;
+          *) ham_close_validation_stop "$ham_close_validation_exit" "$ham_close_local_head" ;;
+        esac ;;
+      validate)
+        [ "$ham_close_validation_exit" -eq 0 ] || ham_close_validation_stop "$ham_close_validation_exit" "$ham_close_local_head" ;;
+      *)
+        if [ "$ham_close_validation_exit" -eq 0 ]; then ham_close_validation_exit=75; fi
+        ham_close_validation_stop "$ham_close_validation_exit" "$ham_close_local_head" ;;
+    esac
+  elif [ "$ham_close_rebase_state" = blocked ]; then
+    ham_close_validation_stop 75 "$ham_close_local_head"
+  fi
   export HAM_COMMIT_PUBLICATION_ONLY=1
-  ham_close_phase_or_stop hammer-publish
-  unset HAM_COMMIT_PUBLICATION_ONLY
+  if [ "$ham_close_rebase_state" != none ]; then export HAM_CLOSE_REBASE_HEAD="$ham_close_local_head"; fi
+  if ! ham_close_phase hammer-publish; then
+    # The push may be live even if the subsequent provenance write failed.
+    if [[ "$ham_close_rebase_state" = ci || "$ham_close_rebase_state" = redrive ]] \
+      && [ "${HAM_PUSHED_HEAD:-}" = "$ham_close_local_head" ]; then
+      export POST_REMEDIATION_SHA="$ham_close_local_head"
+      "$HAM_NODE_BIN" "$HAM_CLOSE_ROOT/bin/hammer-terminal-audit.mjs" "$HAM_PHASE_OUTCOME" "$POST_REMEDIATION_SHA" \
+        || ham_close_finish $? procedure-step-failed
+    fi
+    ham_close_finish "$HAM_PHASE_STATUS" "$HAM_PHASE_OUTCOME"
+  fi
+  unset HAM_COMMIT_PUBLICATION_ONLY HAM_CLOSE_REBASE_HEAD
+fi
+
+# Without a usable required-check declaration we can still unblock the PR
+# branch and start CI. Persist the watcher continuation on the published head.
+if [ "$ham_close_rebase_state" = redrive ]; then
+  [ "${HAM_PUSHED_HEAD:-$ham_close_live_head}" = "$ham_close_local_head" ] || ham_close_finish 20 head-changed
+  export POST_REMEDIATION_SHA="$ham_close_local_head" HAM_PROCEDURE_STEP=local-validation
+  HAM_CLOSE_STAGE=local-validation
+  "$HAM_NODE_BIN" "$HAM_CLOSE_ROOT/bin/hammer-terminal-audit.mjs" canonical-validation-deferred "$POST_REMEDIATION_SHA" \
+    || ham_close_finish $? procedure-step-failed
+  HAM_NO_MERGE_NOTE="Published the conflict repair. Required CI authority is unavailable and the watcher will retry $POST_REMEDIATION_SHA."
+  ham_close_finish 75 canonical-validation-deferred
 fi
 
 # 2. Verify the head under the lease; revalidate outside it when required.
@@ -110,34 +201,8 @@ while :; do
   ham_close_saved_head="$HAM_PRODUCED_HEAD"
   ham_close_saved_base="${HAM_CURRENT_BASE_SHA:-}"
   ham_release_merge_lease --yield local-validation || ham_close_finish 125 "${HAM_PHASE_OUTCOME:-controller-owner-lost}"
-  ham_close_files=("${HAM_CLOSE_VALIDATION_FILES[@]}")
-  if [ "${#ham_close_files[@]}" -eq 0 ]; then
-    while IFS= read -r -d '' ham_close_file; do
-      [ -n "$ham_close_file" ] && ham_close_files+=("$ham_close_file")
-    done < <(git diff -z --name-only --diff-filter=d "$HAM_REVIEWED_SHA" HEAD --)
-  fi
-  export HAM_PROCEDURE_STEP=local-validation
-  HAM_PHASE_OUTCOME=targeted-validation-failed
-  if [ "${#ham_close_files[@]}" -gt 0 ]; then
-    ham_close_validation_receipt=$(mktemp "$HAM_RUN_DIR/local-validation.XXXXXX") \
-      || ham_close_validation_receipt=
-    ham_close_validation_exit=0
-    HAM_CLOSE_VALIDATION_HEAD="$ham_close_saved_head" HAM_CLOSE_VALIDATION_RECEIPT="$ham_close_validation_receipt" \
-      "$HAM_NODE_BIN" "$HAM_CLOSE_ROOT/bin/hammer-validate.mjs" --canonical -- "${ham_close_files[@]}" \
-      || ham_close_validation_exit=$?
-    if [ -s "$ham_close_validation_receipt" ]; then
-      ham_close_validation_receipts+=("$ham_close_validation_receipt")
-    elif [ -n "$ham_close_validation_receipt" ]; then
-      rm -f "$ham_close_validation_receipt"
-    fi
-    if [ "$ham_close_validation_exit" -ne 0 ] && [ -f "$HAM_RUN_DIR/validation-deferred-$ham_close_saved_head.json" ]; then
-      ham_close_finish "$ham_close_validation_exit" canonical-validation-deferred
-    elif [ "$ham_close_validation_exit" -eq 78 ]; then
-      ham_close_finish 78 validation-environment-failed
-    elif [ "$ham_close_validation_exit" -ne 0 ]; then
-      ham_close_finish "$ham_close_validation_exit" targeted-validation-failed
-    fi
-  fi
+  ham_close_validate "$ham_close_saved_head" \
+    || ham_close_validation_stop "$?" "$ham_close_saved_head"
   [ "$(git rev-parse HEAD)" = "$ham_close_saved_head" ] || ham_close_finish 20 head-changed
   export HAM_LOCALLY_VALIDATED_HEAD="$ham_close_saved_head"
   export HAM_LOCALLY_VALIDATED_BASE_SHA="$ham_close_saved_base"
@@ -194,6 +259,8 @@ chmod 600 "$HAM_PRIMARY_CHANGE_FILE"
   "$HAM_NODE_BIN" "$HAM_CLOSE_ROOT/bin/primary-change-context.mjs" "$HAM_REPO" "$HAM_PR_NUMBER" "$POST_REMEDIATION_SHA" \
   > "$HAM_PRIMARY_CHANGE_FILE" || {
     ham_history_status=$?
+    # Read by the sourced `hammer-merge --history-read-abort` phase.
+    # shellcheck disable=SC2034
     if HAM_HISTORY_READ_ERROR=$(jq -er 'select(.historyReadFailed == true) | .reason | strings' "$HAM_PRIMARY_CHANGE_FILE"); then
       ham_close_phase hammer-merge --history-read-abort
       ham_close_finish "$ham_history_status" "$HAM_PHASE_OUTCOME"

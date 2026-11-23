@@ -29,8 +29,13 @@ export async function inspectHammerSource({ branch, previousHead, baseRef, local
   if (!sha(localHead) || git('rev-parse', '--verify', 'HEAD^{commit}') !== localHead || git('status', '--porcelain')) {
     throw refusal('local publication head is unavailable, changed or dirty');
   }
+  const expectedRebase = process.env.HAM_CLOSE_REBASE_HEAD;
+  if (expectedRebase && localHead !== expectedRebase) {
+    throw movedPublicationHead('conflict repair head changed before publication');
+  }
   if (localHead === previousHead) return 'unchanged';
   const conflict = conflictPublishBinding(process.env.HAM_RUN_DIR, () => localHead);
+  if (expectedRebase && !conflict) throw refusal('conflict repair publication binding unavailable');
   if (conflict && (conflict.branch !== branch || conflict.source !== previousHead)) {
     throw movedPublicationHead('PR head or branch moved after conflict repair captured its source');
   }
@@ -39,8 +44,8 @@ export async function inspectHammerSource({ branch, previousHead, baseRef, local
   if (isAncestor(localHead, previousHead)) {
     throw movedPublicationHead('PR head descends from the local candidate; preserve the remote commits');
   }
-  if (isAncestor(previousHead, localHead)) return 'fast-forward';
   if (conflict) return 'rewrite';
+  if (isAncestor(previousHead, localHead)) return 'fast-forward';
   if (!sha(process.env.HAM_BASE_HEAD)) {
     throw refusal('captured publication source unavailable');
   }

@@ -43,15 +43,18 @@ function lockReceipt(path) {
 export async function observeDeferredSourceDecision({ rootDir, hqRoot, repo, prNumber, headSha, now,
   observeWaitImpl = observeClosureWait, pageImpl, logger = console }) {
   const identity = { repo, prNumber, headSha };
-  let hold = readDeferredSourceHold(hqRoot, identity);
+  let hold = readDeferredSourceHold(hqRoot, identity, { includeContinued: true });
+  if (hold?.continuedAt) return null;
   if (!hold) {
-    const entry = readCloserInconclusiveRetries(rootDir, identity).heads[headSha];
+    const retries = readCloserInconclusiveRetries(rootDir, identity);
+    const entry = retries.heads[headSha];
     if (Array.isArray(entry?.launches)) hold = entry.launches.findLast(launch => launch?.reason === 'canonical-validation-deferred');
+    if (retries.__corrupt) hold = { unreadable: true };
   }
   if (!hold) return null;
   try {
     await observeWaitImpl({ rootDir, ...identity, reason: deferredSourceNotice(hold),
-      waitClass: DEFERRED_SOURCE_HOLD, immediate: true, now: Date.parse(now), pageImpl });
+      waitClass: DEFERRED_SOURCE_HOLD, immediate: true, refreshOnReasonChange: true, now: Date.parse(now), pageImpl });
   } catch (error) {
     logger?.warn?.(`[ama-closer] deferred source decision delivery failed for ${repo}#${prNumber}: ${error.message}`);
   }

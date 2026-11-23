@@ -981,7 +981,14 @@ repair/refund ledgers defer only their PR. See the
   the merge bar of required checks plus changed-surface tests, waits out
   GitHub required checks on the exact post-remediation head within a
   bounded remote-CI window, and merges under its own lease with
-  `--match-head-commit`. Watcher tenure review routing requires effective
+  `--match-head-commit`. UNKNOWN validation retains exact source and cleanup
+  evidence and holds a same-head successor for operator decision. Proved
+  standalone CI continuation archives the hold as continued; required checks
+  still govern merge. Teardown checks every target marker for the ending launch
+  and keeps an unbundled workspace across published-head changes. Changed
+  source/cleanup facts refresh the operator notice. Existing smoke commands
+  remain unchanged; organic recovery evidence follows normal deployment.
+  Watcher tenure review routing requires effective
   `worker_pool.tenure.enabled: true` (default false); disabled routing performs
   no tenure reads. When enabled and the PR's stable build launch exposes `tenureId`,
   a changed head instead requires independent exact-head review before merge.

@@ -58,18 +58,19 @@ export async function runBounded(command, args, {
     }
     function escalate() {
       escalated = true;
-      signalGroup('SIGKILL');
-      if (closed) finish();
-      else cleanupDeadline = setTimeout(() => {
+      // KILL delivery is asynchronous. Give the group a bounded drain window,
+      // even when the leader has already closed its pipes.
+      cleanupDeadline = setTimeout(() => {
         // Permission failures cannot turn an idle bound into an infinite lease
         // hold. Report unknown cleanup as failure; canonical worker teardown
         // remains responsible for any process we could not terminate.
-        cleanupFailed = true;
+        cleanupFailed ||= !closed;
         child.stdout.destroy();
         child.stderr.destroy();
         child.unref();
         finish();
       }, 1000);
+      signalGroup('SIGKILL');
     }
     async function finish() {
       if (finished || finishing) return;
@@ -151,7 +152,7 @@ export async function runBounded(command, args, {
     child.on('close', () => {
       if (finished) return;
       closed = true;
-      if (!escalation || escalated || !groupPresent()) finish();
+      if (!escalation || !groupPresent()) finish();
     });
   });
 }

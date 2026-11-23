@@ -51,13 +51,13 @@ printf 'HTTP/2.0 200 OK\\nETag: "fixture"\\n\\n%s\\n' "$response"
 }
 
 // Run with no controlling terminal (new session) and file descriptor 0 closed.
-function runDetached(script, args, env, cwd) {
+function runDetached(script, args, env, cwd, timeoutMs = 20_000) {
   return new Promise(done => {
     const child = spawn('/bin/bash', ['-c', 'exec 0<&-; exec /bin/bash "$@"', 'fixture', script, ...args], {
       env, cwd, detached: true, stdio: ['ignore', 'pipe', 'pipe'],
     });
     let stdout = '', stderr = '';
-    const timer = setTimeout(() => { try { process.kill(-child.pid, 'SIGKILL'); } catch { /* exited */ } }, 20_000);
+    const timer = setTimeout(() => { try { process.kill(-child.pid, 'SIGKILL'); } catch { /* exited */ } }, timeoutMs);
     child.stdout.on('data', data => { stdout += data; });
     child.stderr.on('data', data => { stderr += data; });
     child.on('close', status => { clearTimeout(timer); done({ status, stdout, stderr }); });
@@ -518,9 +518,9 @@ console.log('HTTP/2.0 200 OK\\nETag: "fixture"\\n\\n' + JSON.stringify(response)
     GHO_API_CALL_LOG_DISABLE: '1', GHO_RATE_LIMIT_SHARED_STATE_PATH: join(f.dir, 'quota.json'),
   };
   const run = extra => f.close({ ...validationEnv, ...extra });
-  const standalone = (extra, { runDir = f.run, checkout = f.checkout } = {}) => runDetached('-c', [
+  const standalone = (extra, { runDir = f.run, checkout = f.checkout, timeoutMs = 20_000 } = {}) => runDetached('-c', [
     'source "$1/inputs.sh" && exec "$2" "$HAM_ROOT_DIR/bin/hammer-validate.mjs" --canonical -- src/example.mjs',
-    'fixture', runDir, process.execPath], { ...f.env, ...validationEnv, ...extra }, checkout);
+    'fixture', runDir, process.execPath], { ...f.env, ...validationEnv, ...extra }, checkout, timeoutMs);
   const read = path => existsSync(path) ? readFileSync(path, 'utf8').trim().split('\n') : [];
   return { checkout: f.checkout, dir: f.dir, runDir: f.run, head, run, standalone,
     calls: () => read(calls).map(line => JSON.parse(line)),
@@ -666,8 +666,11 @@ test('an UNKNOWN budget result can reach required CI only after the local-only g
     const config = join(f.dir, 'config.yaml');
     writeFileSync(config, 'version: 1\nroles:\n  adversarial:\n    merge_authority:\n      required_check_contexts: [build]\n');
     const result = await f.standalone({ AGENT_OS_CONFIG_PATH: config, FIXTURE_BUDGET_AFTER_CHECKS: '1',
-      ...(guardFailed ? { FIXTURE_FAILED_GUARD: 'guard', FIXTURE_CHILD_TIMEOUT: 'last' } : {}) });
-    const handoff = JSON.parse(readFileSync(join(f.runDir, `validation-deferred-${f.head}.json`), 'utf8'));
+      HQ_WORKER_RUN_ID: 'wrun_fixture',
+      ...(guardFailed ? { FIXTURE_FAILED_GUARD: 'guard', FIXTURE_CHILD_TIMEOUT: 'last' } : {}) }, { timeoutMs: 60_000 });
+    const handoffPath = join(f.runDir, `validation-deferred-${f.head}.json`);
+    assert.ok(existsSync(handoffPath), `${result.status}: ${result.stderr}\n${result.stdout}`);
+    const handoff = JSON.parse(readFileSync(handoffPath, 'utf8'));
     const receipt = JSON.parse(readFileSync(handoff.localValidationReceipt, 'utf8'));
     assert.deepEqual(f.local(), ['fixture-command guard', 'fixture-command last']);
     assert.equal(receipt.checks[0].status, 'ci-covered');
@@ -676,6 +679,23 @@ test('an UNKNOWN budget result can reach required CI only after the local-only g
     assert.equal(receipt.validation, 'unknown');
     assert.equal(handoff.ciAuthoritative, !guardFailed);
     assert.equal(result.status, guardFailed ? 124 : 0, result.stderr);
+    const phase = JSON.parse(readFileSync(join(f.dir,
+      'dispatch/lrq_fixture/hammer-progress/wrun_fixture/last-phase.json'), 'utf8'));
+    assert.equal(phase.reason, guardFailed ? 'canonical-validation-deferred'
+      : 'local-validation-unknown-github-required-gate-authoritative');
+    const identity = { repo: 'fixture/repo', prNumber: 42,
+      headSha: readFileSync(join(f.runDir, 'base-head'), 'utf8').trim() };
+    const retained = readDeferredSourceHold(f.dir, identity, { includeContinued: true });
+    assert.equal(Boolean(retained.continuedAt), !guardFailed);
+    assert.equal(Boolean(readDeferredSourceHold(f.dir, identity)), guardFailed);
+    if (!guardFailed) {
+      const closed = await f.run({ AGENT_OS_CONFIG_PATH: config });
+      assert.equal(closed.status, 0, `${closed.stderr}\n${closed.stdout}`);
+      assert.equal(closed.closeResult.outcome, 'merged');
+      assert.ok(f.events().includes(`gh pr merge --squash --match-head-commit ${f.head}`));
+      assert.deepEqual(f.local(), ['fixture-command guard', 'fixture-command last'],
+        'the shipped close preflight and controller reuse the qualifying UNKNOWN receipt');
+    }
   }
 });
 

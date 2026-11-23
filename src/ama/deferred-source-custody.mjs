@@ -1,5 +1,6 @@
 import { execFileSync } from 'node:child_process';
-import { copyFileSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { closeSync, copyFileSync, lstatSync, mkdirSync, mkdtempSync, openSync, readFileSync, readdirSync, rmSync } from 'node:fs';
+import fsExt from 'fs-ext';
 import { basename, dirname, join } from 'node:path';
 import { writeFileAtomic } from '../atomic-write.mjs';
 
@@ -18,7 +19,15 @@ function read(path) {
   return JSON.parse(readFileSync(path, 'utf8'));
 }
 
-export function readDeferredSourceHold(hqRoot, identity) {
+function withHoldLock(path, action) {
+  const fd = openSync(`${path}.lock`, 'a', 0o600);
+  try {
+    fsExt.flockSync(fd, 'exnb');
+    return action();
+  } finally { closeSync(fd); }
+}
+
+export function readDeferredSourceHold(hqRoot, identity, { includeContinued = false } = {}) {
   const dir = directory(hqRoot, identity);
   if (!dir) return null;
   const path = join(dir, 'hold.json');
@@ -28,10 +37,40 @@ export function readDeferredSourceHold(hqRoot, identity) {
     if (record.schemaVersion !== 1 || record.targetHead !== identity.headSha
       || record.repo !== identity.repo.toLowerCase() || record.prNumber !== Number(identity.prNumber)
       || !sha(record.sourceHead) || !/^attempt-[a-zA-Z0-9]+$/.test(record.attempt || '')) throw new Error('invalid hold');
+    if (record.continuedAt && !includeContinued) return null;
     return { ...record, path, evidenceDir: join(dir, record.attempt) };
   } catch (error) {
     return error.code === 'ENOENT' ? null : { path, unreadable: true };
   }
+}
+
+// A launch can publish or rebase before deferring. Its dispatch head is not
+// necessarily the target used by the validator. Read all target markers for
+// this PR, including legacy holds without a run-local controller pointer.
+export function readDeferredSourceHoldsForLaunch(hqRoot, identity) {
+  const candidate = directory(hqRoot, { ...identity, headSha: '0'.repeat(40) });
+  if (!candidate || !identity.launchRequestId) return [];
+  const prDir = dirname(candidate);
+  try {
+    return readdirSync(prDir).filter(sha).map(headSha =>
+      readDeferredSourceHold(hqRoot, { ...identity, headSha }, { includeContinued: true }))
+      .filter(hold => hold?.unreadable || hold?.launchRequestId === identity.launchRequestId);
+  } catch (error) {
+    return error.code === 'ENOENT' ? [] : [{ path: prDir, unreadable: true }];
+  }
+}
+
+export function continueDeferredSourceCustody(hold) {
+  return withHoldLock(hold.path, () => {
+    const record = read(hold.path);
+    if (record.launchRequestId !== hold.launchRequestId || record.sourceHead !== hold.sourceHead
+      || record.attempt !== hold.attempt) {
+      throw new Error('deferred source identity changed');
+    }
+    if (!['bundled', 'matches-target'].includes(deferredSourceStatus(hold))) return false;
+    writeFileAtomic(hold.path, JSON.stringify({ ...record, continuedAt: new Date().toISOString() }), { mode: 0o600 });
+    return true;
+  });
 }
 
 export function deferredSourceIdentity(env) {
@@ -58,7 +97,15 @@ export function startDeferredSourceCustody({ env, launchRequestId, sourceHead, c
     targetHead: identity.headSha, dispatchHead: env.HAM_TARGET_REMEDIATION_SHA, sourceHead,
     launchRequestId, runId: env.HQ_WORKER_RUN_ID, attempt: basename(evidenceDir), controller,
     validationBase, clean, files, runner, workspace: process.cwd(), at: new Date().toISOString() };
-  try { writeFileAtomic(path, JSON.stringify(record), { mode: 0o600, overwrite: false }); }
+  try {
+    withHoldLock(path, () => {
+      const previous = readDeferredSourceHold(env.HAM_HQ_ROOT, identity, { includeContinued: true });
+      if (previous?.continuedAt && ['bundled', 'matches-target'].includes(deferredSourceStatus(previous))) {
+        writeFileAtomic(join(previous.evidenceDir, 'continued-hold.json'), JSON.stringify(read(path)), { mode: 0o600 });
+        writeFileAtomic(path, JSON.stringify(record), { mode: 0o600 });
+      } else writeFileAtomic(path, JSON.stringify(record), { mode: 0o600, overwrite: false });
+    });
+  }
   catch (error) { rmSync(evidenceDir, { recursive: true, force: true }); throw error; }
   return evidenceDir;
 }

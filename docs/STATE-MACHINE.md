@@ -2298,6 +2298,13 @@ requires authenticated exact-head coverage, a full set of executed local-only
 checks, confirmed standalone cleanup and declared green GitHub contexts. Legacy
 or incomplete receipts cannot supply that authority. A genuine failed check
 blocks. Cancellation with unknown cleanup retains its cancellation outcome.
+Proved standalone continuation records `continuedAt` on the archived marker and
+CI-authoritative last-phase instead of deferred last-phase; watcher/successor
+gates ignore that marker and its legacy retry fallback. Workspace teardown still
+checks all target-head markers belonging to the ending launch, including
+continued markers, and retains incomplete source. Source/cleanup evidence
+changes refresh the operator notice; corrupt retry evidence holds. Standalone
+SIGKILL cleanup allows one bounded second for group disappearance.
 Supported CI-mirror commands run in the registered group. An inner command
 deadline also requests group teardown and ends the battery. Per-command
 diagnostics are written beside the validation receipt during execution, so

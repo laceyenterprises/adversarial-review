@@ -477,7 +477,8 @@ function hammerDispatchDeps(overrides = {}) {
 }
 
 for (const reason of HAMMER_RETRYABLE_READ_OUTCOMES) {
-  test(`VERIFYHEADTRANSIENT-01: repeated ${reason} refunds the unchanged head and retries`, async t => {
+  const sourceDecision = reason === 'canonical-validation-deferred';
+  test(`VERIFYHEADTRANSIENT-01: repeated ${reason} refunds the unchanged head and ${sourceDecision ? 'holds for source decision' : 'retries'}`, async t => {
     const rootDir = mkdtempSync(join(tmpdir(), 'verifyheadtransient-retry-'));
     t.after(() => rmSync(rootDir, { recursive: true, force: true }));
     const identity = { repo: REPO, prNumber: PR_NUMBER, headSha: REVIEWED_HEAD };
@@ -486,7 +487,7 @@ for (const reason of HAMMER_RETRYABLE_READ_OUTCOMES) {
       jobKey: REVIEWED_HEAD, headSha: REVIEWED_HEAD, launchRequestId: 'synthetic-prior-adjudication',
       now: '2025-12-31T23:59:00Z',
     });
-    let launches = 0, endedLaunch = null;
+    let launches = 0, endedLaunch = null, pages = 0;
     const events = [];
     const warnings = [];
     const deps = hammerDispatchDeps({
@@ -501,7 +502,10 @@ for (const reason of HAMMER_RETRYABLE_READ_OUTCOMES) {
           dispatchId: `synthetic-infra-dispatch-${launches}` }) };
         return { stdout: '{}' };
       },
-      deliverAlertImpl: async () => assert.fail('infrastructure observations must not exhaust the cap'),
+      deliverAlertImpl: async () => {
+        assert.equal(sourceDecision, true, 'ordinary infrastructure observations must not exhaust the cap');
+        pages++;
+      },
     });
     const run = dispatchedAt => maybeDispatchAmaCloser({
       ...hammerDispatchArgs(rootDir, { dispatchContext: { dispatchedAt } }), ...deps,
@@ -514,6 +518,17 @@ for (const reason of HAMMER_RETRYABLE_READ_OUTCOMES) {
         attempt: hammerPhaseAttempt({ outcome: 'failed-without-merge', reason, launchRequestId: endedLaunch }),
         now: `2026-01-01T00:0${i}:00Z` });
       const result = await run(`2026-01-01T00:0${i}:30Z`);
+      if (sourceDecision) {
+        assert.equal(result.dispatched, false);
+        assert.equal(result.reason, 'canonical-validation-operator-decision');
+        assert.equal(result.needsOperator, true);
+        const ledger = readHammerRetryCapLedger(rootDir, identity);
+        assert.equal(ledger.attemptCount, 0, 'source custody preserves infrastructure refunds');
+        assert.equal(ledger.targetAttemptCount, 0);
+        assert.equal(ledger.lifetimeAttemptCount, 0);
+        assert.equal(ledger.leaseWaitLaunches.length, 1, 'the same ended launch refunds once');
+        continue;
+      }
       assert.equal(result.dispatched, true, JSON.stringify(result));
       assert.notEqual(result.reason, 'hammer-final-no-merge');
       const owner = readAmaCloserLease(rootDir, identity);
@@ -526,7 +541,8 @@ for (const reason of HAMMER_RETRYABLE_READ_OUTCOMES) {
       assert.equal(ledger.leaseWaitLaunches.length, i);
       assert.equal(readHammerStopForHead({ hqRoot: join(rootDir, 'hq-root'), ...identity }), null);
     }
-    assert.equal(launches, 3);
+    assert.equal(launches, sourceDecision ? 1 : 3);
+    assert.equal(pages, sourceDecision ? 1 : 0);
     assert.equal(warnings.some(message => message.includes('ama_closer.lease_terminal_finalize_failed')),
       false, 'retryable infrastructure leases must not be finalized with a conflicting terminal outcome');
     assert.ok(events.some(message => {

@@ -2,7 +2,7 @@ import { readPrTenure } from '../pr-tenure.mjs';
 import { isLivePackDeferralText } from '../kernel/remediation-reply.mjs';
 import { isGitHubRateLimitError } from '../rate-limit-throttle.mjs';
 import { observeDeferredSourceDecision, requestCloserSuccessor, settleCloserSuccessor } from './closer-successor.mjs';
-import { deferredSourceStatus, readDeferredSourceHold } from './deferred-source-custody.mjs';
+import { deferredSourceStatus, readDeferredSourceHoldsForLaunch } from './deferred-source-custody.mjs';
 import { samePrHammerHolderWorktreePaths } from './branch-holder-paths.mjs';
 export { samePrHammerHolderWorktreePaths } from './branch-holder-paths.mjs';
 import { isZeroOutputRefusal, escalateZeroOutputRefusal } from './zero-output-refusal.mjs';
@@ -1061,10 +1061,10 @@ async function cleanupHammerCloserWorker({
   if (!isHammerWorkerClass(effectiveWorkerClass)) return null;
   const workerId = hammerCloserWorkerIdFromRecord(prNumber, existingRecord);
   if (!workerId) return null;
-  const hold = readDeferredSourceHold(hqRoot, { repo: existingRecord?.repo, prNumber,
-    headSha: existingRecord?.targetRemediationSha || existingRecord?.headSha });
-  if (hold?.unreadable || (hold?.launchRequestId && hold.launchRequestId === existingRecord?.launchRequestId
-    && !['bundled', 'matches-target'].includes(deferredSourceStatus(hold)))) {
+  const holds = readDeferredSourceHoldsForLaunch(hqRoot, { repo: existingRecord?.repo, prNumber,
+    launchRequestId: existingRecord?.launchRequestId });
+  if (holds.some(hold => hold.unreadable
+    || !['bundled', 'matches-target'].includes(deferredSourceStatus(hold)))) {
     return { ok: false, workerId, reason, error: 'deferred-source-retained-in-workspace' };
   }
   const args = ['worker', 'tear-down', workerId, '--force', '--root', hqRoot];

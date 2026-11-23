@@ -23,7 +23,7 @@ export async function observeClosureWait(args = {}) {
 
 async function observeClosureWaitWithinRepositoryCycle({ rootDir, repo, prNumber, headSha, reason,
   now = Date.now(), env = process.env, pageImpl = page, immediate = false, waitClass = null, startedAt = null, progress = false,
-  launchWait = null, launchAlive = false, anchorOnly = false, repeatAfterMs = null }) {
+  launchWait = null, launchAlive = false, anchorOnly = false, repeatAfterMs = null, refreshOnReasonChange = false }) {
   const reasonClass = waitClass || (immediate ? 'primary-change' : 'bounded-wait');
   const requested = Number(env.AMA_CLOSURE_WAIT_BOUND_MS);
   const baseMs = Number.isFinite(requested) && requested > 0 ? requested : CLOSURE_WAIT_BOUND_MS;
@@ -56,7 +56,11 @@ async function observeClosureWaitWithinRepositoryCycle({ rootDir, repo, prNumber
       }
       const firstObserved = db.prepare('INSERT OR IGNORE INTO waits_by_class(head, class, started, reason) VALUES (?, ?, ?, ?)')
         .run(headSha, reasonClass, Number.isFinite(startedAt) ? Math.min(now, startedAt) : now, reason).changes === 1;
+      const previousReason = db.prepare('SELECT reason FROM waits_by_class WHERE head=? AND class=?').get(headSha, reasonClass)?.reason;
       db.prepare('UPDATE waits_by_class SET reason=? WHERE head=? AND class=?').run(reason, headSha, reasonClass);
+      if (refreshOnReasonChange && previousReason !== reason) {
+        db.prepare('UPDATE waits_by_class SET paged=0 WHERE head=? AND class=?').run(headSha, reasonClass);
+      }
       // Retained launches carry durable progress timestamps. Apply them to an
       // existing final-round wait too. Ignore future timestamps here so clock
       // skew cannot turn each poll into fresh progress.
@@ -74,7 +78,8 @@ async function observeClosureWaitWithinRepositoryCycle({ rootDir, repo, prNumber
         ? now - launchWait.startedAt >= launchWait.boundMs
         : !progress && now - row.started >= boundMs);
       const repeating = Number.isFinite(repeatAfterMs) && repeatAfterMs > 0;
-      const pageDue = !row.paged || (repeating && (row.last_paged === null || now - row.last_paged >= repeatAfterMs));
+      const pageDue = !row.paged || (refreshOnReasonChange && previousReason !== reason)
+        || (repeating && (row.last_paged === null || now - row.last_paged >= repeatAfterMs));
       const notify = !anchorOnly && exhausted && pageDue;
       if (notify) db.prepare('UPDATE waits_by_class SET paged=1, last_paged=? WHERE head=? AND class=?')
         .run(now, headSha, reasonClass);
@@ -90,6 +95,7 @@ async function observeClosureWaitWithinRepositoryCycle({ rootDir, repo, prNumber
           : 'closure wait exhausted';
         await pageImpl(`HAMCLOSE-01 ${notice}: ${repo} PR ${prNumber}@${headSha}: ${reason}`, {
           source: 'hamclose-closure-wait', severity: 'SEV1', dedupKey: `hamclose:${repo}:${prNumber}:${headSha}:${reasonClass}`
+            + (refreshOnReasonChange ? `:${createHash('sha256').update(reason).digest('hex')}` : '')
             + (Number.isFinite(repeatAfterMs) && repeatAfterMs > 0 ? `:${now}` : ''),
         });
       } catch (error) {

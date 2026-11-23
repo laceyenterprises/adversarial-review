@@ -6,7 +6,7 @@
       "store": "<HQ_ROOT>/dispatch/audit/deferred-source-custody/<owner>/<repo>/pr-<number>/<target-head>/",
       "schemaSurface": "src/ama/deferred-source-custody.mjs",
       "owner": "Hammer validation and the watcher",
-      "semantics": "An exact-target hold prevents successor retries after an UNKNOWN canonical outcome. The private attempt retains the exact unpublished Git source, selected check evidence and authoritative cleanup receipt for the operator decision."
+      "semantics": "An active exact-target hold prevents successor retries after UNKNOWN. Proved standalone CI continuation archives the marker with continuedAt; watcher/successor ignore it and its legacy fallback. Teardown reads all PR target markers for the ending launch and retains incomplete source. Evidence changes refresh notices; corrupt legacy retry records hold."
     }
   ]
 }

@@ -6504,6 +6504,11 @@ applies to every repository, so a context that only one repository runs
 belongs in the per-repository list. Both lists also make an absent context
 read PENDING at the hammer gate and in the queue-v2 required set. The daemon
 and closer read only the global list until they are given the repository.
+Once standalone continuation is proved, its custody marker records `continuedAt`
+and its last-phase records CI-authoritative continuation. The archived evidence
+remains, while watcher and successor holds ignore this continued marker and its
+legacy retry fallback. A later pending/red CI result or merge transport failure
+therefore follows ordinary closure retry rather than an unrecovered-source page.
 Queue-v2 admits a handoff whose trusted local-validation read is
 `result: unknown` only with `ciAuthoritative: true`, `coverageComplete: true`,
 `cleanup: finished` and `localFailureObserved: false`, even if the read also
@@ -6521,6 +6526,13 @@ new launch or successor and sends one operator decision notice. Legacy deferrals
 with missing custody evidence also hold when the matching ended launch was
 recorded. Exit code, token use, and PID disappearance supply no validation or
 drain verdict.
+Teardown finds all custody markers for the ending launch across target heads,
+including after publication changed the dispatch head. Incomplete source
+retention keeps the worker, even if continuation was recorded. Unreadable custody
+or legacy retry records fail closed. Notices refresh when source or cleanup
+facts change; unchanged observations do not page again. After SIGKILL the bounded
+runner allows up to one second for group disappearance before calling cleanup
+unconfirmed.
 
 Use the notice's launch, head, and evidence directory to choose whether to
 recover the exact source for the outstanding guards and normal publication, or
@@ -6532,6 +6544,14 @@ gates. A live head change naturally scopes the hold out of the next dispatch.
 For an authorized same-head release, archive the custody marker and the matching
 canonical deferral entries from the existing inconclusive retry record together,
 under the canonical runtime owner's custody. Keep the evidence and audit history.
+There is currently no single release command. Pause admission through the
+runtime owner's supported controls while handling both records, preserve their
+originals, then verify that neither an active `hold.json` nor a matching
+`canonical-validation-deferred` retry entry remains before resuming. Archiving
+only the marker does not release the legacy hold. A combined runtime-owned
+release command remains a follow-up. Environment-unavailable deferrals continue
+to hold and page per head because local guard coverage is unproved; grouping a
+host-wide toolchain incident into one page remains a separate follow-up.
 The validator owns its timeout and process cleanup. Avoid a second shell alarm
 around it. If the outer tool returns 124 or 142 first, follow the same handoff
 from the available diagnostics and keep unconfirmed cleanup explicit.

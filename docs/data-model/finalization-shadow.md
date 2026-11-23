@@ -118,6 +118,9 @@ a GitHub-merged PR (with no post-merge `mergeability_observed`), and
 `budget_exhausted` when v1's remediation rounds are spent. No column or migration
 is added; these are existing event types. Repeated
 polls append comparison telemetry, but unchanged facts do not grow the ledger.
+Once the ledger records a confirmed merge, workflow decisions retain post-merge
+delivery ownership ahead of typed refresh errors. An errored PR observation
+cannot establish that merge, even if its unreadable value says `MERGED`.
 Live ingestion reuses a bounded single-root database handle and schema setup.
 Both SQL coverage readers and report fallback exclude any row carrying non-organic
 live or queue provenance from elapsed coverage, head moves and exhaustion counts.

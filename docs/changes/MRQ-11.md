@@ -118,3 +118,16 @@ The memory search for this scope returned no matching scars.
   including `test/watcher-claim-loop.test.mjs`. `npm run lint` reported zero
   errors and 147 warnings. `npm run typecheck:contracts` and
   `bash demo/research-finding-walkthrough.sh` passed.
+- Final fix-all round retained the existing SHA normalization and regression
+  coverage for both advisories. The v2 spec and shadow data-model prose now
+  explicitly state that a recorded merge retains delivery ownership ahead of refresh errors,
+  while an unreadable PR observation cannot establish a merge. There is no
+  runtime, storage, lifecycle or smoke-contract change in this round.
+  The dispatched head's Node 26 CI run `45091784058` hit the 900-second suite
+  deadline without a failing assertion; current main (`e844f9a483fe004dc4d6902c785d563006093b6c`,
+  run `45084331983`) has the same Node 26 timeout. Node 22 passed on the
+  dispatched head. This baseline timeout does not justify changing CI policy.
+  Fresh bounded advisory validation passes all 22 exact-head and 37 live-shadow
+  tests; the workflow suite passes all 15 tests. Lint has zero errors (147
+  existing warnings); contract typechecking, the catalog validator (103 entries),
+  the offline byte-equivalence demo and `git diff --check` pass.

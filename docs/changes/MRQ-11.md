@@ -109,3 +109,12 @@ The memory search for this scope returned no matching scars.
   shape, lifecycle state, transition or smoke promise changes.
   Bounded workflow and SMV suites also pass (26 tests, including the disposable
   Git sandbox smoke).
+- Hammer verified that a confirmed merge enters delivery before the workflow
+  evaluates snapshot refresh errors. The regression tests distinguish that case
+  from a failed refresh on an open PR or an unreadable PR state. The HELDHEAD
+  watcher fixture now supplies the empty follow-up scan expected by the live
+  finalization adapter, so the test reaches the request-exception assertion.
+  Hammer's canonical changed-file validation passed 2,080 tests across 49 files,
+  including `test/watcher-claim-loop.test.mjs`. `npm run lint` reported zero
+  errors and 147 warnings. `npm run typecheck:contracts` and
+  `bash demo/research-finding-walkthrough.sh` passed.

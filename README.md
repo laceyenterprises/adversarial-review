@@ -4802,21 +4802,21 @@ See [the health contract](docs/review-pipeline-health.md#lane-liveness-evidence)
 
 ### Queue lane expansion and closer retirement (MGQ-10)
 
-Resolved `queue-v2` lanes dispatch a dedicated remediation/publication/handoff
-prompt and render no legacy merge-lease/CI/rebase/merge procedures. Completion
-requires a matching committed full-coverage acknowledgement and mandatory
-idempotent worker/closer resource release. Wakes observing the durable ack before
+Resolved `queue-v2` lanes dispatch the ordinary hammer (MRQ-21). Its close
+controller stops after publish and the exact-head audit, delivers a handoff bound
+to repo, PR, head and review-proof digest through the installed handoff command,
+and confirms the durable receipt and entry before recording a superseded
+`queue-handoff-admitted` terminal audit. It never waits for CI, runs the merge
+predicate or merges; the queue executor does. Wakes observing the durable ack before
 the final dispatch recheck reuse it; an ack committed after that read can still
 race launch. Returned work owes fresh admission. Clean daemon and certified closer
 recovery only enqueue, confirming the actual stored receipt before reporting queued.
 Other lanes and rollback retain existing legacy prompts and incident repair.
 Legacy closer preflight reads config and durable routing without a lane lock,
 schema migration or writer journal; unreadable durable routing refuses explicitly.
-Queue prompts render once after scratch allocation; missing inputs return
-`queue-closer-prompt-input-missing` without submitting a launch.
-Before deployment/bounce, inventory already migrated lanes: without installed
-`dispatchContext.queueCloser` composition, every closer remediation on those
-lanes refuses with `queue-closer-composition-unavailable`, including findings repair.
+Before deployment/bounce, inventory already migrated lanes: without an installed
+`dispatchContext.queueCloser.hammerHandoffCommand`, every closer remediation on
+those lanes refuses with `queue-closer-composition-unavailable`, including findings repair.
 
 `node src/finalization/queue-probe.mjs --capability cutover --json` reads actual
 schema/adapters, route, private loaded writer/owner observations, confirmed

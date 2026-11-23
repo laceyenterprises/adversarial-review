@@ -17,6 +17,7 @@ import { resolveHammerShellHelper, HAMMER_SERVICE_ROOT } from '../src/ama/hammer
 import { parseClosePlan } from '../bin/hammer-close-plan.mjs';
 import { parseCloseCommands } from '../bin/close-commands.mjs';
 import { buildMergeAgentPrompt, FINAL_PASS_ON_BUDGET_EXHAUSTED_TRIGGER } from '../src/merge-agent-prompt.mjs';
+import { hammerQueueInputs } from '../src/finalization/hammer-queue-command.mjs';
 
 const root = resolve(import.meta.dirname, '..');
 const template = readFileSync(join(root, 'templates/hammer-prompt.md'), 'utf8');
@@ -59,7 +60,7 @@ function gitRepo(dir) {
 
 // ---------------------------------------------------------------- hammer close
 
-function hammerFixture(t, { liveHead } = {}) {
+function hammerFixture(t, { liveHead, queue = false } = {}) {
   const dir = scratch(t, 'hamcontrollerscript-');
   const run = join(dir, 'run');
   const checkout = join(dir, 'checkout');
@@ -108,6 +109,10 @@ case "$(basename "$path")" in
     fi
     exit "\${FIXTURE_VALIDATE_EXIT:-0}" ;;
   hammer-predicate-inputs.mjs) log predicate-inputs ;;
+  hammer-queue-handoff.mjs)
+    log "queue-handoff head=$POST_REMEDIATION_SHA audit=$HAM_PUBLISHED_AUDIT_HEAD gen=$HAM_QUEUE_ROUTE_GENERATION"
+    printf '{"outcome":"%s"}\n' "\${FIXTURE_QUEUE_OUTCOME:-queue-handoff-admitted}" > "$HAM_RUN_DIR/queue-handoff.json"
+    exit "\${FIXTURE_QUEUE_EXIT:-0}" ;;
   primary-change-context.mjs)
     if [ -n "\${FIXTURE_PRIMARY_ERROR:-}" ]; then exit 1; fi
     if [ -n "\${FIXTURE_HISTORY_ERROR:-}" ]; then printf '%s\\n' "$FIXTURE_HISTORY_ERROR"; exit 1; fi
@@ -140,7 +145,7 @@ return 0
   writeFileSync(join(run, 'hammer-publish.sh'), `${phasePrelude}
 log "publish publication-only=\${HAM_COMMIT_PUBLICATION_ONLY:-0} held=\${HAM_MERGE_LEASE_HELD:-0} total=$HAM_AUDIT_REMEDIATED_TOTAL doc=$HAM_DOC_CURRENCY"
 [ -s "$HAM_AUDIT_DETAILS_FILE" ] || return 1
-if [ "\${HAM_COMMIT_PUBLICATION_ONLY:-0}" != 1 ]; then export HAM_AUDIT_COMMENT_BODY="HAM-Validated-Head: $POST_REMEDIATION_SHA"; fi
+if [ "\${HAM_COMMIT_PUBLICATION_ONLY:-0}" != 1 ]; then export HAM_AUDIT_COMMENT_BODY="HAM-Validated-Head: $POST_REMEDIATION_SHA" HAM_PUBLISHED_AUDIT_HEAD="$POST_REMEDIATION_SHA"; fi
 HAM_PHASE_OUTCOME=published
 return 0
 `);
@@ -162,7 +167,9 @@ return 0
   const values = { ROOT_DIR: root, RUN_DIR: run, HQ_ROOT: dir, REPO: 'fixture/repo', PR_NUMBER: '42',
     PR_URL: 'https://github.com/fixture/repo/pull/42', REVIEWED_SHA: shas.reviewed,
     TARGET_REMEDIATION_SHA: shas.reviewed, RISK_CLASS: 'low', MERGE_METHOD: 'squash', HQ_OWNER: 'fixture',
-    AUDIT_PATH: join(run, 'audit.json'), REVIEWER: 'codex', AMA_TRAILERS_SHELL: "''" };
+    AUDIT_PATH: join(run, 'audit.json'), REVIEWER: 'codex', AMA_TRAILERS_SHELL: "''",
+    ...(queue ? { QUEUE_INPUTS: hammerQueueInputs({ routeGeneration: 3, handoffCommand: ['/fixture/queue-handoff'],
+      workerId: 'hammer-fixture', workerClass: 'hammer' }) } : {}) };
   // The dispatched inputs.sh body rendered with synthetic values.
   writeFileSync(join(run, 'inputs.sh'), hammerBootstrapInputs(values));
   writeFileSync(join(run, 'base-head'), shas.reviewed);
@@ -210,8 +217,50 @@ test('the shipped hammer close runs with no tty and closed stdin, holds the leas
   assert.equal(events.filter(event => event.startsWith('release ')).length, 1);
   assert.ok(!events.some(event => event.startsWith('publish publication-only=1')), 'no publication when the PR has the head');
   assert.ok(!events.some(event => /--admin/.test(event)));
+  assert.ok(!events.some(event => event.startsWith('queue-handoff')), 'MRQ-21: a legacy lane never hands off');
   // The claim was bound to the exact merged head by the real helper.
   assert.equal(JSON.parse(readFileSync(join(f.run, 'terminal-remediation.json'), 'utf8')).commit.sha, f.shas.head);
+});
+
+test('MRQ-21: a queue-v2 lane hands off the published head and never waits CI, runs the predicate or merges', async t => {
+  const f = hammerFixture(t, { queue: true });
+  const result = await f.close();
+  assert.equal(result.status, 0, `${result.stderr}\n${result.stdout}`);
+  assert.equal(result.closeResult.outcome, 'queue-handoff-admitted');
+  assert.equal(result.closeResult.stage, 'queue-handoff');
+  assert.equal(result.closeResult.postRemediationSha, f.shas.head);
+  assert.match(result.stdout, /HAM queue handoff admitted: no closing comment/);
+  const events = f.events();
+  const order = ['acquire', 'publish publication-only=0 held=1 total=1 doc=not applicable',
+    `queue-handoff head=${f.shas.head} audit=${f.shas.head} gen=3`, 'release holder lease=ml_fixture'];
+  let at = -1;
+  for (const event of order) {
+    const next = events.indexOf(event, at + 1);
+    assert.ok(next > at, `missing or out of order: ${event}\n${events.join('\n')}`);
+    at = next;
+  }
+  for (const after of ['wait-ci', 'predicate-inputs', 'ama-check', 'merge-phase', 'gh pr merge']) {
+    assert.ok(!events.some(event => event.startsWith(after)), `${after} ran on a queue-v2 lane\n${events.join('\n')}`);
+  }
+  assert.equal(events.filter(event => event.startsWith('release ')).length, 1);
+});
+
+test('MRQ-21: an unconfirmed or world-ended handoff stops without merge and releases the lease', async t => {
+  for (const [exit, outcome] of [[75, 'queue-handoff-unadmitted'], [20, 'head-changed']]) {
+    const f = hammerFixture(t, { queue: true });
+    const result = await f.close({ FIXTURE_QUEUE_EXIT: String(exit), FIXTURE_QUEUE_OUTCOME: outcome });
+    assert.equal(result.status, exit, `${result.stderr}\n${result.stdout}`);
+    assert.equal(result.closeResult.outcome, outcome);
+    const events = f.events();
+    assert.ok(!events.some(event => /^(wait-ci|ama-check|merge-phase|gh pr merge)/.test(event)), events.join('\n'));
+    assert.equal(events.filter(event => event.startsWith('release ')).length, 1);
+    assert.doesNotMatch(result.stdout, /no closing comment/);
+  }
+  // A zero exit without a durable admitted outcome is never success.
+  const f = hammerFixture(t, { queue: true });
+  const result = await f.close({ FIXTURE_QUEUE_OUTCOME: 'something-else' });
+  assert.equal(result.status, 75);
+  assert.equal(result.closeResult.outcome, 'something-else');
 });
 
 test('a local commit the PR lacks is published before verify-head; revalidation yields the lease and runs the plan files', async t => {

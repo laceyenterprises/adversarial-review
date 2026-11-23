@@ -250,6 +250,17 @@ issuance lock, owner/route generations, live-head guard and eligibility checks.
 Use the existing [queue routing](../src/finalization/queue-routing.mjs), durable
 handoffs and operation reconciliation; do not create another lease or rescue loop.
 
+On a `queue-v2` lane the hammer remediates and stops at its attested head (MRQ-21).
+After publish and the exact-head audit, its close controller delivers a handoff
+bound to repo, PR, head and review-proof digest through the installed handoff
+surface, confirms the durable `finalization_queue_handoff` receipt and entry, and
+exits; admission (a `superseded` `queue-handoff-admitted` terminal attempt) is the
+launch's required outcome, not a merge. The executor admits the entry, re-validates
+live state and merges with the expected head under its lane fence and retries. A
+head move voids the handoff and starts a fresh review lifecycle, so no re-hammer
+loop exists. Legacy lanes keep the two-path rule (hammer and daemon inline merge).
+See [the closure runbook](RUNBOOK-ama-closure.md#queue-v2-hammer-handoff-mrq-21).
+
 Before issuing an effect, re-fold and revalidate authoritative live state. A
 changed head/generation discards the decision. Persist intent/idempotency before
 issuance and reconcile unknown outcomes before retry. Timeout after applying a

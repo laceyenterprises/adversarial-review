@@ -61,7 +61,17 @@ export const HAMMER_INFRASTRUCTURE_OUTCOMES = new Set([
   // attempt keeps the original code in originalReason and reasonDetail; the
   // stop rides the same owned retry as every other infrastructure deferral.
   'unregistered-stop-code',
+  // MRQ-21: a queue-v2 handoff whose durable admission could not be confirmed.
+  // Nothing merged; the same attested head is re-driven under a fresh lease.
+  'queue-handoff-unadmitted',
+  // The handoff step itself failed before naming an outcome; nothing merged.
+  'queue-handoff-failed',
 ]);
+
+// MRQ-21: emitted only by the queue-v2 close step, never by a rendered phase.
+// Phase scripts omit them from their retryable list, so a legacy lane's
+// rendered procedure stays byte-identical.
+export const HAMMER_QUEUE_CONTROLLER_OUTCOMES = Object.freeze(['queue-handoff-unadmitted', 'queue-handoff-failed']);
 
 export const HAMMER_EDIT_PLAN_ERROR_ORIGINS = Object.freeze({
   'run-pin-invalid': 'evidence',
@@ -129,6 +139,8 @@ export const HAMMER_STOP_ORIGINS = Object.freeze({
   'operator-review-changes-requested': 'world',
   'terminal-review-issuer-unverifiable': 'world',
   'already-merged': 'world',
+  // MRQ-21: the queue-v2 handoff found the PR closed without a merge.
+  'pr-closed': 'world',
   'parked': 'world',
   'ci-infrastructure': 'world',
   'ci-not-green': 'world',

@@ -78,13 +78,16 @@
       "acknowledged",
       "resources-released"
     ],
-    "transitions": "Resolved queue route selects dedicated remediation/publication/handoff prompt without legacy merge procedures. A durable acknowledgement observed before the final dispatch recheck suppresses duplicate dispatch; a later commit can still race launch. Acknowledgement precedes mandatory idempotent worker/closer resource release and successful exit. Failed ack or release cannot complete. Returned entries owe fresh admission; legacy/rollback routes retain existing incident repair and execution. Legacy preflight reads routing without a lane lock or writer journal; unreadable ownership refuses. Queue prompts render once after scratch allocation; missing inputs defer the unsubmitted lease with a structured refusal. Uncomposed migrated lanes refuse all closer remediation at deployment.",
+    "transitions": "MRQ-21: a resolved queue route dispatches the ordinary hammer (same prompt, phases and decision-only/terminal-audit launch) with queue inputs naming the route generation and the installed handoff command. Its close controller stops after publish and the exact-head audit, delivers a handoff bound to repo, PR, head and review-proof digest, and confirms the durable receipt and entry before recording a superseded terminal audit (queue-handoff-admitted); it never waits CI, runs the predicate or merges. Unconfirmed admission is a retryable queue-handoff-unadmitted re-drive; a moved, merged or closed head stops on the world fact and starts a fresh review lifecycle. A durable acknowledgement observed before the final dispatch recheck suppresses duplicate dispatch; a later commit can still race launch. Acknowledgement precedes mandatory idempotent resource release in the installed composition. Returned entries owe fresh admission; legacy/rollback routes retain existing incident repair and execution. Legacy preflight reads routing without a lane lock or writer journal; unreadable ownership refuses. Missing dispatch inputs fail exactly as on a legacy lane. Migrated lanes without an installed handoff command refuse all closer remediation at deployment.",
     "codeSources": [
       "src/finalization/queue-closer.mjs",
       "src/ama/dispatch-closer.mjs",
-      "templates/queue-closer-prompt.md"
+      "src/finalization/hammer-queue-handoff.mjs",
+      "src/finalization/hammer-queue-command.mjs",
+      "bin/hammer-queue-handoff.mjs",
+      "bin/hammer-close-controller.sh"
     ],
-    "validation": "test/finalization-queue-closer.test.mjs; test/finalization-queue-closer-race.test.mjs; organic resource-release observation separate from smoke"
+    "validation": "test/finalization-queue-closer.test.mjs; test/finalization-queue-closer-race.test.mjs; test/mrq-21-queue-hammer-handoff.test.mjs; test/hamcontrollerscript-01.test.mjs; organic resource-release observation separate from smoke"
   },
   "queueCanaryObservation": {
     "owner": "v2 finalization read-only canary observer",
@@ -1992,7 +1995,7 @@
     "src/ama/closer-lease.mjs": "c2aa021100d2cc5fc0ba2de3ca035dab42d46d416039853d0df4a69a8b2c3900",
     "src/ama/receipted-closer-alias.mjs": "873f9f5084047190a230275cf716b7dcf21b5deef7ab0eb5318dbc9081c3cdac",
     "src/ama/closure-owner.mjs": "2448cded95d11c7a03d85758d16bf1719a433daef79e8d7454c1696c6bfc079e",
-    "src/ama/dispatch-closer.mjs": "a42642b5771ade28f58b713f6c5d681d8fdd5437fac6fc992eaef3e266d6426f",
+    "src/ama/dispatch-closer.mjs": "8447fc160ca9a94e3118c6c667373e96726e32f9d3d1be8e800d193c0dad907f",
     "src/fast-merge-processing.mjs": "ee24d2edf253284bec8fcbce50ac15c91aa8a4154d34ce594e077d3557c411fb",
     "src/follow-up-jobs.mjs": "023fa8d0892a5f669a9dad550403ad56ff4e2d2e4309f989e9e6868b40dec33e",
     "src/follow-up-remediation.mjs": "c6e24842a0659f8e5e2445f7d11690f6ebb13c497ecf080dec7e7f33c7a9041c",

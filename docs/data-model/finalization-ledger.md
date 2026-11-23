@@ -255,6 +255,16 @@ source reference and concrete fenced evidence. `fixed` also requires changed
 paths; `withdrawn` requires an explanation and source path/line locations.
 Acknowledgement and budget exhaustion are never finding dispositions.
 
+Optional `reviewProof` (`digest`, `head`) binds a hammer handoff (MRQ-21) to the
+review evidence it relies on: the 64-hex digest of the reviewed head and the
+terminal-remediation audit the hammer published for the exact head, computed by
+`hammerReviewProof` in `src/finalization/hammer-queue-handoff.mjs`. When present,
+`head` must equal the handoff head and the trusted observation must carry
+`reviewProof` with `ok: true`, the same head and digest, and a `sourceRef`.
+Receipts without the field (committed before MRQ-21) still validate unchanged.
+Hammer handoffs use a stable `handoffId` and admission generation 1 per
+`(lane, PR, head)`; a moved head needs a new review and a new handoff.
+
 Canonical handoff/evidence JSON accepts ordinary and null-prototype dictionaries
 with JSON values; dictionary prototypes and object-key order do not affect the
 digest. Arrays retain their order and non-JSON values remain invalid. Commit SHA

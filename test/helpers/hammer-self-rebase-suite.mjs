@@ -12,6 +12,7 @@ import { loadAwareTimeoutMs } from '../../src/load-aware-timeout.mjs';
 
 const root = resolve(import.meta.dirname, '../..');
 const helper = join(root, 'test/fixtures/hammer-self-rebase.mjs');
+const ghFixture = readFileSync(join(root, 'test/fixtures/hammer-self-rebase-gh.sh'), 'utf8');
 const realGit = execFileSync('which', ['git'], { encoding: 'utf8' }).trim();
 const subprocessTimeout = loadAwareTimeoutMs(45_000);
 // The isolation preload routes direct launches through the runner too, so
@@ -100,7 +101,7 @@ function fixture(t, scenario) {
   writeFileSync(join(dir, 'protection.json'), '{}');
   writeFileSync(join(dir, 'clock'), String(fixtureClockStart));
   const executable = (name, source) => writeFileSync(join(bin, name), source, { mode: 0o755 });
-  executable('gh', '#!/bin/sh\nexec "$REAL_NODE" "$FIXTURE_HELPER" gh "$@"\n');
+  executable('gh', ghFixture);
   // Perl's direct exec uses the helper's /usr/bin/env node shebang. Route
   // that entrypoint through the same fixture runtime as HAM_NODE_BIN.
   executable('node', '#!/bin/sh\nexec "$FIXTURE_DIR/bin/node-fixture" "$@"\n');

@@ -11,6 +11,9 @@ import { resolveLaneKey } from './ledger-events.mjs';
 
 const config = ['-c', 'core.hooksPath=/dev/null', '-c', 'core.quotePath=true', '-c', 'commit.gpgsign=false',
   '-c', 'core.autocrlf=false', '-c', 'rerere.enabled=false', '-c', 'submodule.recurse=false'];
+// Queue workspaces are short-lived. Keep fetch from spawning auto-maintenance
+// on the critical path for their two immutable object reads.
+const fetchOptions = ['fetch', '--no-tags', '--no-recurse-submodules', '--no-auto-maintenance'];
 const remote = repository => `git@github.com:${resolveLaneKey({ repository, base: 'main' }).repository}.git`;
 const error = reason => Object.assign(new Error(reason), { reason });
 
@@ -100,8 +103,8 @@ export function resolveQueueGitAdapter({ rootDir, run = runQueueGit, networkRunn
         const g = git(cwd, deadline);
         await g(['init', '--quiet', '--template=']);
         // Fetch immutable objects; shallow or missing histories cannot prove.
-        await transport(entry.lane.repository, target => ['fetch', '--no-tags', '--no-recurse-submodules', '--', target, exactBase], cwd, deadline);
-        await transport(headRepository, target => ['fetch', '--no-tags', '--no-recurse-submodules', '--', target, oldHead], cwd, deadline);
+        await transport(entry.lane.repository, target => [...fetchOptions, '--', target, exactBase], cwd, deadline);
+        await transport(headRepository, target => [...fetchOptions, '--', target, oldHead], cwd, deadline);
         await g(['checkout', '--detach', '--quiet', oldHead]);
         const fork = (await g(['merge-base', '--all', oldHead, exactBase])).trim();
         if (!isQueueSha(fork)) throw error('unsupported-rebase-history');
@@ -119,7 +122,10 @@ export function resolveQueueGitAdapter({ rootDir, run = runQueueGit, networkRunn
           }
         }
         const candidate = (await g(['rev-parse', 'HEAD'])).trim();
-        const proof = await proveQueueRebase({ oldHead, candidate, exactBase, git: g });
+        // An unchanged checkout on the same base already has this exact proof.
+        // Replayed or unexpected heads always take the full derivation path.
+        const proof = candidate === oldHead && fork === exactBase ? sourceProof
+          : await proveQueueRebase({ oldHead, candidate, exactBase, git: g });
         if (!proof) throw error('rebase-preservation-unproven');
         prepared = true;
         return { candidate, exactBase, expectedOldHead: oldHead, proof, workspace: cwd.slice(parent.length + 1) };

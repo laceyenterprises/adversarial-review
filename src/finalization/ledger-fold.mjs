@@ -234,6 +234,11 @@ function applyEvent(state, event) {
   }
 }
 
+function applyEvents(state, events) {
+  for (const event of events ?? []) applyEvent(state, event);
+  return state;
+}
+
 /**
  * Fold a tail of events onto a prior snapshot, returning a NEW state. The input
  * `snapshot` is never mutated (it is deep-cloned first), so replay is safe.
@@ -243,9 +248,7 @@ function applyEvent(state, event) {
  * @returns {LedgerState}
  */
 export function foldFrom(snapshot, events) {
-  const state = cloneState(snapshot);
-  for (const event of events ?? []) applyEvent(state, event);
-  return state;
+  return applyEvents(cloneState(snapshot), events);
 }
 
 /**
@@ -255,7 +258,7 @@ export function foldFrom(snapshot, events) {
  * @returns {LedgerState}
  */
 export function fold(events) {
-  return foldFrom(initialLedgerState(), events);
+  return applyEvents(initialLedgerState(), events);
 }
 
 /** Replay lane events without resetting candidate, readiness or patience. */

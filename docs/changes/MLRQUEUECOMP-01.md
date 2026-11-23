@@ -32,6 +32,15 @@ token. The watcher passes the validated repository and base to the lane
 resolver. For same-name checks with multiple required App sources, the queue
 requires each source's latest result.
 
+The Node 26 run on the original remediation head reached the suite deadline
+with 115 files still queued and no failed assertions in the reported TAP.
+Queue tests now copy fixture seeds without unused Git templates or receiver
+auto-GC. The queue's isolated Git fetches avoid automatic maintenance, and
+no-op preparation uses the source proof once the checked-out head and base
+match it. Later verification still recomputes the proof. Full ledger replay
+folds into a fresh projection directly, while replay from a supplied snapshot
+still clones that snapshot.
+
 ### Verification
 
 Synthetic fixtures use disposable Git repositories and SQLite stores with
@@ -45,6 +54,11 @@ The focused production, handoff and admission suites passed 122 tests.
 Hammer canonical changed-surface validation passed 337 tests in 12 files.
 `npm run lint` reported zero errors. `npm run typecheck:contracts` and
 `bash demo/research-finding-walkthrough.sh` passed.
+
+On Node 26.10.0, the repair's focused `node test/run-tests.mjs` run passed
+532 tests across 22 files, including queue Git, production composition,
+admission, merge, and ledger replay. The no-op regression verifies that
+preparation reads the patch once and a later verifier reads it independently.
 
 ```sh
 node src/finalization/queue-probe.mjs --capability canary --json

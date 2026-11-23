@@ -315,6 +315,7 @@ export function validateSchema(doc, options = {}) {
 export function validateSchemaLayer(
   doc,
   {
+    schema = schemaV1(),
     source = null,
     rawText = null,
     tolerateUnknown = false,
@@ -322,7 +323,6 @@ export function validateSchemaLayer(
     droppedUnknownKeys = null,
   } = {},
 ) {
-  const schema = schemaV1();
   const lineMap = rawText ? buildLineMap(rawText, Object.keys(schema.__keys)) : null;
   if (doc === null || doc === undefined) {
     throw new AgentOSConfigError(
@@ -348,7 +348,7 @@ export function validateSchemaLayer(
       { key: 'version', expected: String(SCHEMA_VERSION), got: doc.version, source },
     );
   }
-  if (Object.hasOwn(doc, 'osg')) validateOsgShape(doc.osg, source);
+  if (Object.hasOwn(doc, 'osg')) validateOsgShape(doc.osg, source, schema);
 
   return validateDictPresentKeysOnly(
     doc,

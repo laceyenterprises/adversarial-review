@@ -11,6 +11,7 @@ export function validateModuleDoc(
   source,
   rawText,
   {
+    schema = schemaV1(),
     tolerateUnknown = false,
     preserveEmptyMaps = false,
     warnUnknownOnce = false,
@@ -30,7 +31,6 @@ export function validateModuleDoc(
       { key: 'version', source },
     );
   }
-  const schema = schemaV1();
   const aliasesRaw = doc.__aliases || {};
   if (typeof aliasesRaw !== 'object' || Array.isArray(aliasesRaw)) {
     throw new AgentOSConfigError(
@@ -40,7 +40,6 @@ export function validateModuleDoc(
   }
   const aliases = {};
   const unreadAliases = new Set();
-  const schemaForAliasCheck = schemaV1();
   for (const [moduleKey, canonicalKey] of Object.entries(aliasesRaw)) {
     if (typeof moduleKey !== 'string' || typeof canonicalKey !== 'string') {
       throw new AgentOSConfigError(
@@ -48,12 +47,12 @@ export function validateModuleDoc(
         { source },
       );
     }
-    if (!isValidSchemaPath(schemaForAliasCheck, canonicalKey)) {
+    if (!isValidSchemaPath(schema, canonicalKey)) {
       const parts = canonicalKey.split('.');
       const consumedAtomicPath = [...TOKEN_POOL_DECLARATION_PATHS]
         .some(path => canonicalKey.startsWith(`${path}.`))
         || parts.some((_, index) =>
-          schemaLeaf(schemaForAliasCheck, parts.slice(0, index + 1).join('.'))?.__strict_always);
+          schemaLeaf(schema, parts.slice(0, index + 1).join('.'))?.__strict_always);
       if (!consumedAtomicPath) {
         unreadAliases.add(moduleKey);
         configDebugLog(`ignoring alias ${JSON.stringify(moduleKey)} to unread key ${JSON.stringify(canonicalKey)}`);
@@ -125,7 +124,7 @@ export function validateModuleDoc(
     setLeaf(canonicalBody, dotted, value);
   }
 
-  if (Object.hasOwn(canonicalBody, 'osg')) validateOsgShape(canonicalBody.osg, source);
+  if (Object.hasOwn(canonicalBody, 'osg')) validateOsgShape(canonicalBody.osg, source, schema);
   const moduleSchema = {
     __type: TYPE_DICT,
     __strict: schema.__strict,

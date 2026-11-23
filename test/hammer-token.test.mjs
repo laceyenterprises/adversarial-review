@@ -1,6 +1,7 @@
 import './helpers/load-aware-timeout-fixture.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { withoutConfigSchemaDiagnostics } from './helpers/config-schema-diagnostic.mjs';
 import { execFileSync, spawnSync } from 'node:child_process';
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -593,7 +594,8 @@ process.stderr.write(process.env.GITHUB_TOKEN);
   });
   assert.equal(result.status, 0, result.stderr);
   assert.equal(result.stdout, '[redacted]');
-  const stderr = result.stderr.replace(/^\[load-aware-timeout\] CPU sample unavailable; (?:using full load-based corroboration|reusing last good sample \(under 60s old\))\n/, '');
+  const stderr = withoutConfigSchemaDiagnostics(result.stderr)
+    .replace(/^\[load-aware-timeout\] CPU sample unavailable; (?:using full load-based corroboration|reusing last good sample \(under 60s old\))\n/, '');
   assert.equal(stderr, 'hammer-token: warning: proactive entitled token refresh failed (empty or invalid output); continuing with the held token\n[redacted]');
   assert.doesNotMatch(result.stdout + result.stderr, new RegExp(`${expired}|${fresh}`));
 });

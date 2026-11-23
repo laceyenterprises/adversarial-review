@@ -6,12 +6,13 @@ import { ENV_ALIASES, dynamicAppEnvAliases } from './config-env-aliases.mjs';
 import { DEFAULT_TOP_LEVEL_PATH } from './config-base.mjs';
 import { loadConfigImpl } from './config-cascade.mjs';
 import { PROFILE_ENV, localSibling, nonBlankString, profileOverlaySibling } from './config-profile.mjs';
+import { contractSchemaPath } from './config-schema.mjs';
 
 // `getConfig` and `loadConfigCached` share a per-call-shape cache that
 // invalidates when ANY watched file's mtime / inode changes. "Watched" =
 // the top-level path + its `*.local.yaml` sibling + each module path in
 // the call + each module's `*.local.yaml` sibling + the profile overlay
-// + the resolved public-hygiene denylist, when configured.
+// + the deploy contract schema and resolved public-hygiene denylist, when present.
 //
 // Env-var rotations are part of the cache key for declared CFG aliases
 // (canonical + legacy names in ENV_ALIASES), so per-call env overlays
@@ -56,6 +57,8 @@ function _watchedPathsForCall({ topPath, modulePaths, env, cachedConfig }) {
   const envView = env || process.env;
   const resolvedTop = topPath || envView.AGENT_OS_CONFIG_PATH || DEFAULT_TOP_LEVEL_PATH;
   const watched = resolvedTop ? [resolvedTop] : [];
+  const contractPath = contractSchemaPath(envView);
+  if (contractPath) watched.push(contractPath);
   // PROFILENODE-01: the overlay is read between the top file and its local
   // sibling, so edits to it must invalidate cached loads.
   const topOverlay = profileOverlaySibling(resolvedTop);
@@ -102,6 +105,7 @@ function _signatureForPaths(watched, options = {}) {
   for (const path of watched) {
     try {
       const st = statSync(path);
+      if (!st.isFile()) throw new Error('not a regular file');
       // CFGSTALE-01: metadata alone is not a content identity. Restore tools
       // can write in place and restore the original timestamps, leaving both
       // inode and mtime unchanged while the bytes differ. Hash the bytes so a

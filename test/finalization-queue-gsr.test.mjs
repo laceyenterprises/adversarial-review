@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { withoutConfigSchemaDiagnostics } from './helpers/config-schema-diagnostic.mjs';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
 import { spawnSync } from 'node:child_process';
@@ -37,7 +38,7 @@ test('queue GSR CLI reports argument and maintenance token errors on stderr', t 
     assert.equal(result.error, undefined);
     assert.equal(result.status, 1);
     assert.equal(result.stdout, '');
-    assert.equal(result.stderr, `queue GSR unavailable: ${message}\n`);
+    assert.equal(withoutConfigSchemaDiagnostics(result.stderr), `queue GSR unavailable: ${message}\n`);
   }
 });
 

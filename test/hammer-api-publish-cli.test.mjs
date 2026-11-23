@@ -2,6 +2,7 @@ import './helpers/rate-limit-state-isolation.mjs';
 import { renderHammerProcedure } from '../src/hammer-procedure.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { withoutConfigSchemaDiagnostics } from './helpers/config-schema-diagnostic.mjs';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
@@ -429,7 +430,7 @@ exit "$rc"
       assert.match(publication.stdout, new RegExp(`HAM-Base-Head: ${reviewed}\nHAM-Pushed-Head: ${remoteHead}\nHAM-CI-Validated: false`));
       assert.ok(publication.stdout.length < 2500, publication.stdout);
       assert.doesNotMatch(publication.stderr, /repeated finding|Maximum call stack/);
-      assert.ok(publication.stderr.length < 1024, publication.stderr);
+      assert.ok(withoutConfigSchemaDiagnostics(publication.stderr).length < 1024, publication.stderr);
       const comments = existsSync(commentsPath) ? JSON.parse(readFileSync(commentsPath, 'utf8')) : [];
       assert.equal(comments.length, route === 'api-attestation' ? 0 : 1, 'only publication provenance is posted');
       if (comments.length) {

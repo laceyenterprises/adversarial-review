@@ -1,8 +1,7 @@
 import { loadConfigCached } from './config-loader.mjs';
-import { dirname, join, resolve } from 'node:path';
+import { join, resolve } from 'node:path';
+import { deployCheckoutFromReviewModule, REVIEW_MODULE } from './deploy-checkout-path.mjs';
 import { resolveRealPath } from './remediation-reply-paths.mjs';
-
-const REVIEW_MODULE = ['tools', 'adversarial-review'];
 
 /**
  * Resolve the deployment checkout root without a host-specific default.
@@ -30,13 +29,8 @@ export function resolveDeployCheckout(env = process.env, { sourceRoots = [], loa
   const configured = resolveDeployRoot(env, { loadConfigImpl });
   if (configured) return configured;
   for (const root of sourceRoots) {
-    const absoluteSource = resolve(root);
-    for (const source of [absoluteSource, resolveRealPath(absoluteSource)]) {
-      const checkout = dirname(dirname(source));
-      if (source === join(checkout, ...REVIEW_MODULE)) {
-        return resolveRealPath(checkout);
-      }
-    }
+    const checkout = deployCheckoutFromReviewModule(root);
+    if (checkout) return checkout;
   }
   return null;
 }

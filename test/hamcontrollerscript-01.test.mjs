@@ -32,7 +32,7 @@ function staticMirrorGh(responses, calls) {
     return [`${shellQuote(path)}) response=${shellQuote(JSON.stringify(response))} ;;`];
   });
   return `#!/bin/sh
-jq -cn '$ARGS.positional' --args -- "$@" >> ${shellQuote(calls)} || exit 1
+jq -cn '$ARGS.positional' --args -- "$@" >> ${shellQuote(calls)} || { echo 'fixture gh: jq argv capture failed' >&2; exit 97; }
 case "\${2-}" in
   ${routes.join('\n  ')}
   *) exit 1 ;;
@@ -92,6 +92,21 @@ test('the static validation transport records exact argv and refuses invalid req
     [1, '', ''],
   ]);
   assert.deepEqual(readFileSync(calls, 'utf8').trimEnd().split('\n').map(line => JSON.parse(line)), argv);
+});
+
+test('the static validation transport diagnoses missing or failing jq', t => {
+  const dir = scratch(t, 'hammer-mirror-jq-');
+  const executable = join(dir, 'gh');
+  writeFileSync(executable, staticMirrorGh({ '/route': { ok: true } }, join(dir, 'calls')), { mode: 0o755 });
+  for (const failing of [false, true]) {
+    if (failing) writeFileSync(join(dir, 'jq'), '#!/bin/sh\nexit 2\n', { mode: 0o755 });
+    const result = spawnSync(executable, ['api', '/route'], {
+      encoding: 'utf8', env: { ...process.env, PATH: dir },
+    });
+    assert.equal(result.status, 97);
+    assert.equal(result.stdout, '');
+    assert.match(result.stderr, /fixture gh: jq argv capture failed/);
+  }
 });
 
 function gitRepo(dir) {

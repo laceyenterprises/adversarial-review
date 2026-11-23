@@ -289,7 +289,7 @@ test('20 independent duplicate submitter pairs commit one entry/ack after both o
       assert.equal(count(f.store, 'finalization_queue_handoff'), i);
       assert.equal(count(f.store, 'finalization_queue_entry'), i);
     }
-  });
+  }, { timeoutMs: 15_000 });
   t.diagnostic('fixed: 20/20 consecutive process pairs; one durable entry and identical ack per pair; zero duplicate entries');
 });
 

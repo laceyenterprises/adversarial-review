@@ -122,7 +122,7 @@ test('30 simultaneous claimant pairs: exactly one owner and outcome read-back ea
       assert.equal(persisted.generation, 1);
       consecutive++;
     }
-  });
+  }, { timeoutMs: 15_000 });
   t.diagnostic(`fixed: ${consecutive}/30 consecutive single-owner outcomes; 0 duplicate owners`);
 });
 

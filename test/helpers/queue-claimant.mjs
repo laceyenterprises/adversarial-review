@@ -9,7 +9,10 @@ os.loadavg = () => [0, 0, 0];
 const data = JSON.parse(process.argv[2]);
 if (data.repeated) {
   let store;
-  process.once('disconnect', () => store?.close());
+  let inFlight = false;
+  process.once('disconnect', () => {
+    if (!inFlight) { store?.close(); store = undefined; }
+  });
   process.on('message', async lane => {
     if (lane === 'prepare') {
       assert.equal(store, undefined);
@@ -19,14 +22,16 @@ if (data.repeated) {
     }
     assert.ok(store);
     let result;
+    inFlight = true;
     try {
       const owner = createQueueOwner({ store, now: () => data.now });
       result = await owner.claim({ lane, ownerId: data.id, expiresAt: data.expiry });
     } finally {
       store.close();
       store = undefined;
+      inFlight = false;
     }
-    process.send(result);
+    if (process.connected) process.send(result);
   });
 } else {
   const store = openFinalizationQueueStore({ rootDir: data.root });

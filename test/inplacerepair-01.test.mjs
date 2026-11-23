@@ -975,6 +975,28 @@ test('a fixture contender that exits mid-command fails the round', async t => {
     error => error.name === 'AbortError' && /Fixture process (disconnected|exited)/.test(error.cause?.message));
 });
 
+for (const phase of ['exchange', 'exit']) test(`a wedged fixture contender has a bounded ${phase} wait and is reaped`, async t => {
+  const f = fixture(t);
+  const script = pathToFileURL(join(f.rootDir, 'wedged.mjs'));
+  writeFileSync(script, `
+process.on('message', command => { if (command === 'identify') process.send(process.pid); });
+process.on('disconnect', () => {});
+setInterval(() => {}, 1000);
+process.send('ready');
+`);
+  let pid;
+  await assert.rejects(withFixtureProcesses(script, [{}], async ([send]) => {
+    pid = await send('identify');
+    if (phase === 'exchange') await send('wedge');
+  }, { timeoutMs: 2_000 }), error => {
+    const diagnostic = phase === 'exchange' ? error.cause?.message : error.message;
+    assert.match(diagnostic, new RegExp(`wedged\\.mjs worker 0 \\(pid ${pid}\\): ${phase}`));
+    assert.match(diagnostic, /timed out after 2000ms/);
+    return true;
+  });
+  assert.throws(() => process.kill(pid, 0), { code: 'ESRCH' });
+});
+
 test('reserved repair excludes a new final-fix-all queue owner', async t => {
   const f = fixture(t);
   reserveRepairEpoch(f);

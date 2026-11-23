@@ -9764,6 +9764,10 @@ JSON on its last stdout line. Without it, migrated lanes refuse closer dispatch 
 `queue-closer-composition-unavailable`. This source change installs no command,
 evidence reader or route; activation stays with the canary procedure.
 
+Queue input rendering requires a non-empty closer worker ID and worker class.
+An unavailable identity refuses dispatch before launch, rather than failing
+after remediation at handoff admission.
+
 Verification after deployment (read-only): on a queue-v2 lane, a hammer launch's
 close result reads `queue-handoff-admitted`, its AMA audit is `superseded` with that
 reason, `finalization queue receipt` shows the entry, and the executor's merge

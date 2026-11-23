@@ -23,7 +23,10 @@ export function hammerQueueInputs({ routeGeneration, handoffCommand, workerId, w
   if (!Number.isSafeInteger(routeGeneration) || routeGeneration < 0 || !command) {
     throw new Error('queue hammer inputs require a route generation and an installed handoff command');
   }
+  if (!text(workerId) || !text(workerClass)) {
+    throw new Error('queue hammer inputs require a non-empty closer worker identity');
+  }
   return `export HAM_FINALIZATION_EXECUTOR='queue-v2' HAM_QUEUE_ROUTE_GENERATION=${shellQuote(routeGeneration)}`
     + ` HAM_QUEUE_HANDOFF_COMMAND=${shellQuote(JSON.stringify(command))}`
-    + ` HAM_QUEUE_CLOSER_WORKER_ID=${shellQuote(workerId ?? '')} HAM_QUEUE_CLOSER_WORKER_CLASS=${shellQuote(workerClass ?? '')}\n`;
+    + ` HAM_QUEUE_CLOSER_WORKER_ID=${shellQuote(workerId)} HAM_QUEUE_CLOSER_WORKER_CLASS=${shellQuote(workerClass)}\n`;
 }

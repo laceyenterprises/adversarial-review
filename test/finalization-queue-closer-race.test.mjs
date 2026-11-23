@@ -12,6 +12,7 @@ import { resolveQueueOwnerAdapter } from '../src/finalization/queue-owner.mjs';
 import { readAmaCloserLease } from '../src/ama/closer-lease.mjs';
 import { createQueueHandoffService } from '../src/finalization/queue-handoff-store.mjs';
 import { queueHandoffFixture } from './helpers/queue-handoff-fixture.mjs';
+import { hammerQueueInputs } from '../src/finalization/hammer-queue-command.mjs';
 
 const CURRENT_USER = userInfo().username || process.env.USER || process.env.LOGNAME || 'unknown';
 const HEAD = 'a'.repeat(40);
@@ -143,13 +144,26 @@ test('MRQ-21: migrated dispatch renders the ordinary hammer whose controller end
     const line = bootstrap.split('\n').find(l => l.startsWith('export HAM_FINALIZATION_EXECUTOR='));
     assert.ok(line, bootstrap);
     // The rendered inputs line round-trips through the shell unchanged.
-    const echoed = execFileSync('/bin/bash', ['-c', `${line}\nprintf '%s\\n' "$HAM_FINALIZATION_EXECUTOR" "$HAM_QUEUE_ROUTE_GENERATION" "$HAM_QUEUE_HANDOFF_COMMAND" "$HAM_QUEUE_CLOSER_WORKER_CLASS"`],
+    const echoed = execFileSync('/bin/bash', ['-c', `${line}\nprintf '%s\\n' "$HAM_FINALIZATION_EXECUTOR" "$HAM_QUEUE_ROUTE_GENERATION" "$HAM_QUEUE_HANDOFF_COMMAND" "$HAM_QUEUE_CLOSER_WORKER_CLASS" "$HAM_QUEUE_CLOSER_WORKER_ID"`],
       { encoding: 'utf8' }).split('\n');
     assert.equal(echoed[0], 'queue-v2');
     assert.equal(echoed[1], '1');
     assert.deepEqual(JSON.parse(echoed[2]), ['/fixture/installed handoff', '--lane', "it's"]);
     assert.ok(echoed[3]);
+    assert.equal(echoed[4], record.workerId);
+    assert.ok(echoed[4]);
   } finally { store.close(); rmSync(rootDir, { recursive: true, force: true }); }
+});
+
+test('MRQ-21: queue inputs reject unavailable closer identity at render time', () => {
+  const inputs = { routeGeneration: 1, handoffCommand: ['/fixture/installed-handoff'],
+    workerId: 'closer-1', workerClass: 'hammer' };
+  for (const field of ['workerId', 'workerClass']) {
+    for (const value of [undefined, null, '', ' \t', false, 0]) {
+      assert.throws(() => hammerQueueInputs({ ...inputs, [field]: value }),
+        /queue hammer inputs require a non-empty closer worker identity/);
+    }
+  }
 });
 
 test('MRQ-21: a legacy lane renders no queue inputs and keeps its decision-only terminal-audit launch', async () => {

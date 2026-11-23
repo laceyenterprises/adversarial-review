@@ -174,7 +174,8 @@ ham_release_merge_lease
     });
     assert.equal(result.status, 0, result.stderr);
     const args = readFileSync(argsPath, 'utf8');
-    if (HAMMER_RETRYABLE_READ_OUTCOMES.has(reason)) assert.ok(args.includes(`--retryable-abort\n${reason}`), args);
+    // This renders a legacy lane: queue-only retry codes are deliberately absent.
+    if (HAMMER_RETRYABLE_READ_OUTCOMES.has(reason) && !reason.startsWith('queue-handoff-')) assert.ok(args.includes(`--retryable-abort\n${reason}`), args);
     else assert.ok(args.includes(`--reason\n${reason}`), args);
   }
 });

@@ -32,6 +32,9 @@ removed), whose handoff was submitted by the model through operator instructions
   `composition.hammerHandoffCommand` (absolute argv) and returns
   `handoffCommand`; otherwise `queue-closer-composition-unavailable`.
   `renderQueueCloserPrompt` and `queue-closer-prompt-input-missing` are removed.
+- `hammerQueueInputs` rejects missing or blank closer worker ID/class while
+  rendering dispatch inputs, before any worker launch, rather than deferring
+  the failure until handoff.
 - Queue-v2 hammer launches use `decision-only` / `terminal-audit` (was
   `branch-push` / `push`); the terminal audit is a `superseded` attempt with
   reason `queue-handoff-admitted` naming the launch.
@@ -42,7 +45,7 @@ removed), whose handoff was submitted by the model through operator instructions
 
 ## Verification
 
-- `node --test test/mrq-21-queue-hammer-handoff.test.mjs`: 7/7. Attested head,
+- `node --test test/mrq-21-queue-hammer-handoff.test.mjs`: 8/8. Attested head,
   then handoff, then executor merge on the exact head; replay without a second
   delivery; head move voids with no merge and no re-hammer; transient executor
   refusal retried on the same head with the handoff kept; world/unbound refusals;
@@ -53,6 +56,15 @@ removed), whose handoff was submitted by the model through operator instructions
   the lease without merge.
 - `node --test test/finalization-queue-closer.test.mjs test/finalization-queue-closer-race.test.mjs`:
   dispatch renders the ordinary hammer with queue inputs on queue-v2 lanes and
-  none on legacy lanes; missing inputs fail exactly as on a legacy lane.
+  none on legacy lanes; missing prompt inputs fail exactly as on a legacy lane.
+  Missing closer identity refuses at input rendering;
+  valid dispatch inputs carry the exact recorded worker ID.
+  `node test/run-tests.mjs test/finalization-queue-closer-race.test.mjs`:
+  6/6 passed offline.
 - `test/smv.test.mjs`, `test/hamselferrors-01.test.mjs`: state declaration and
   stop-origin table updated.
+- CI fixture repairs: `test/retire-legacy-repair.test.mjs` copies the new
+  queue-runtime hash inputs; `test/verifyheadtransient-01.test.mjs` expects
+  queue-only retry codes to remain absent from legacy rendered phases.
+  `node test/run-tests.mjs test/retire-legacy-repair.test.mjs test/verifyheadtransient-01.test.mjs`:
+  207/207 passed offline.

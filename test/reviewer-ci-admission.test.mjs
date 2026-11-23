@@ -21,6 +21,7 @@ import { classifyOperatorGatedFindings } from '../src/ama/operator-label-gates.m
 import { parseBlockingFindingsSection } from '../src/kernel/review-findings.mjs';
 import { extractReviewVerdict } from '../src/kernel/verdict.mjs';
 import { REREVIEW_CI_BLOCKED_STATUS } from '../src/review-statuses.mjs';
+import { inspectRemediationCiRegression } from '../src/remediation-ci-regression.mjs';
 
 function silentLog() {
   return {
@@ -283,6 +284,23 @@ test('guardRereviewCiBeforeReviewer defers rereview when CI evidence is unavaila
 
   assert.equal(result.proceed, false);
   assert.equal(result.reason, 'ci-settlement-unknown');
+});
+
+test('guardRereviewCiBeforeReviewer defers an empty external rollup as unknown', async () => {
+  const headSha = 'b'.repeat(40);
+  const result = await guardRereviewCiBeforeReviewer({
+    repo: 'example/fixture', prNumber: 2030, passKind: 'rereview',
+    reviewerHeadSha: headSha, log: silentLog(),
+    inspectCiImpl: args => inspectRemediationCiRegression({
+      ...args, env: {},
+      execFileImpl: async () => ({
+        stdout: JSON.stringify({ headRefOid: headSha, statusCheckRollup: [] }),
+      }),
+    }),
+  });
+  assert.equal(result.proceed, false);
+  assert.equal(result.reason, 'ci-settlement-unknown');
+  assert.equal(result.ciGate.totalExternalChecks, 0);
 });
 
 test('guardRereviewCiBeforeReviewer requeues latest follow-up job on failed external CI', async () => {

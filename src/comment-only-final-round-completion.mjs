@@ -84,9 +84,7 @@ export function classifyFinalRoundOperationalBlockers(operationalBlockers, {
   if (entries.some((entry) => isDeclaredOperationalBlockerCode(entry))) {
     return { pendingCiOnly: false, reason: 'declared-non-ci-operational-blocker' };
   }
-  if (entries.some((entry) => (String(entry?.needsHumanInput || '').trim()
-    || entry?.kind === OPERATIONAL_BLOCKER_KIND_PENDING_CI)
-    && operationalBlockerOwner(entry) === 'human')) {
+  if (entries.some((entry) => operationalBlockerOwner(entry) === 'human')) {
     return { pendingCiOnly: false, reason: 'operational-blocker-needs-human-input' };
   }
   const untagged = entries.filter((entry) => entry?.kind !== OPERATIONAL_BLOCKER_KIND_PENDING_CI);

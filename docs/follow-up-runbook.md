@@ -38,6 +38,14 @@ admission path.
 The comment identifies the final fix-all round and reports the PR-wide spend
 alongside the ordinary remediation budget.
 
+The shared remediation CI probe reports an empty external check rollup as
+`unknown`, including a rollup containing only the excluded adversarial gate.
+This prevents a just-pushed head from passing admission before checks register.
+Re-review admission returns `ci-settlement-unknown`, and a `ci-blocked` review
+cannot auto-release as green on that evidence. A repository intentionally
+running without external CI needs operator resolution of this admission hold;
+the separate no-CI merge bootstrap does not waive re-review CI admission.
+
 For a final remediation with independently proven publication, a worker's
 pending-check report or read-only CI watch failure can complete the source
 round. The watcher observes the exact published head through its existing
@@ -45,8 +53,9 @@ managed read path. A worker HTTP 401 alone does not require intervention.
 The existing read helper can recover a rejected credential within its managed
 retry allowance. A permission or policy denial with no authorized observation
 names the operator as recovery owner and keeps CI unknown until a fresh
-authorized read. The worker's original check names and run IDs stay with its
-reply. Use the completed job's `completion.publishedCiObservation` and
+authorized read. The PR comment is the operator notice for this denial; this
+receipt does not itself send a page. The worker's original check names and run
+IDs stay with its reply. Use the completed job's `completion.publishedCiObservation` and
 `reReview.nextAction` to identify the head, observation and successor.
 
 When publication is unproven and CI has failed, an active non-final job retains

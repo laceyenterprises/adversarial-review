@@ -15,7 +15,8 @@ export function reportsOnlyCiObservation(entries) {
   return entries.length > 0 && entries.every(entry => reportedCiReadFailure(entry)
     || (!isDeclaredOperationalBlockerCode(entry) && !entry.needsHumanInput
       && (entry.kind === 'pending-ci' || (entry.kind === undefined
-        && /^(?:pr-head[ -])?ci[ -]pending$|^pending[ -]ci$/i.test(entry.title || '')))));
+        && /^(?:pr-head[ -])?ci[ -]pending$|^pending[ -]ci$/i.test(entry.title || '')
+        && operationalBlockerOwner(entry) === 'CI'))));
 }
 
 // Presentation and completion routing share this conservative classification.
@@ -52,7 +53,7 @@ export function operationalBlockerOwner(entry) {
     || /\b(?:fetch|rebase|push)\b[^.]{0,30}\b(?:failed|rejected|conflict)\b/i.test(text)) return 'human';
   if (legacyCiFollowup) return 'CI';
   // Legacy replies have no ownership field. Accept only explicit wait language.
-  if (/\b(?:pending-ci|ci-pending|pr-head-ci-pending)\b/i.test(entry?.title || '')
+  if (/\b(?:pending-ci|ci-pending|pr-head-ci-pending|pending-pr-head-ci)\b/i.test(entry?.title || '')
     || /\b(?:required checks?|PR[- ]head CI|CI checks?|CI)\b (?:is |are |remains? |still )?(?:pending|queued|running|in[ -]progress)\b/i.test(text)) return 'CI';
   if (/\b(?:AMA )?closer (?:retains?|owns?) (?:closure authority|(?:PR )?closure|(?:the )?close)\b/i.test(text)) return 'AMA closer';
   if (/\b(?:re-review|adversarial review) (?:is |already )?(?:queued|pending)\b/i.test(text)

@@ -11306,6 +11306,10 @@ for (const scenario of [
   { name: 'moved head', http: 401, state: 'pending', moved: true, stopped: true },
   { name: 'source unproven', http: 401, state: 'unknown', unproven: true, stopped: true },
   { name: 'actual input blocker', http: 401, state: 'unknown', needsInput: true, stopped: true },
+  { name: 'legacy CI title with approval request and blocked outcome',
+    state: 'pending', legacy: true, approval: true, stopped: true },
+  { name: 'legacy CI title with approval request and partial outcome',
+    state: 'pending', legacy: true, approval: true, partial: true, stopped: true },
 ]) test(`LAC-2333: final remediation closeout with ${scenario.name}`, async t => {
   const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
   t.after(() => rmSync(rootDir, { recursive: true, force: true }));
@@ -11315,11 +11319,15 @@ for (const scenario of [
     prNumber: 2030,
     liveHead: scenario.unproven ? 'a'.repeat(40) : null,
     replyOverrides: {
-      outcome: scenario.legacy ? 'blocked' : 'partial',
+      outcome: scenario.legacy && !scenario.partial ? 'blocked' : 'partial',
       operationalBlockers: [
         { ...(scenario.legacy ? { title: 'PR-head CI pending' } : { kind: 'pending-ci', title: 'pending-ci' }),
-          finding: 'Node 22 and Node 26 were pending.',
-          reasoning: 'Required checks on run 45120528143.' },
+          finding: scenario.approval
+            ? 'Workflow runs require operator approval before checks can start.'
+            : 'Node 22 and Node 26 were pending.',
+          reasoning: scenario.approval
+            ? 'A maintainer must approve the run.'
+            : 'Required checks on run 45120528143.' },
         ...(scenario.http ? [{ title: 'auth-failure',
           finding: `The bounded PR-head CI watch ended with HTTP ${scenario.http} after its pending observations.`,
           reasoning: 'Guarded publication succeeded. The CI observation owner must restore credentials.' }] : []),
@@ -11338,6 +11346,7 @@ for (const scenario of [
     assert.equal(durable.completion.publishedCiObservation, undefined);
     assert.equal(wakes.length, 0);
     assert.match(durable.commentDelivery.body, /stopped/);
+    if (scenario.approval) assert.match(durable.commentDelivery.body, /Human intervention required/);
     return;
   }
   assert.equal(result.action, 'completed', durable.commentDelivery.body);

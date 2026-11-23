@@ -52,6 +52,11 @@ missing.
 - New batch error and hold reason `batch-dispatch-read-scope-denied: <project> <owner/repo>`.
 - Additive column `finding_batches.hold_json`.
 
+Final documentation remediation adds the hold migration and both batch-release
+entry points to the review-findings domain document's source-of-truth list,
+matching their existing catalog fragment registration. This correction adds
+no interface changes.
+
 ## Operator follow-up
 
 Grant the review app the `(HQ_PROJECT, owner/repo)` dispatch read for every
@@ -71,3 +76,6 @@ findingsdrainrate-01, grok-remediator, hamscope-01, review-pipeline-health-ttm,
 smv and the FINDINGSBATCH case of watcher-daemon-clean-merge. In
 review-pipeline-health, `CI orphan workspace pages are memoized…` fails on the
 base too, so that failure predates this change.
+
+Final documentation remediation: `node scripts/validate-data-model-catalog.mjs`
+passes (103 catalog entries); `git diff --check` passes.

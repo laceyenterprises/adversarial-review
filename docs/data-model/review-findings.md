@@ -54,7 +54,9 @@ withdrawal store.
 `bin/review-findings.mjs`,
 `migrations/20261024_simplicity_batch_lifecycle.sql`,
 `migrations/20261107_findings_batch_requeue.sql`,
-`migrations/20261120_findings_rate_indexes.sql`
+`migrations/20261120_findings_rate_indexes.sql`,
+`migrations/20261122_findings_batch_hold.sql`,
+`src/findings-batch-release.mjs`, `bin/findings-batch-release.mjs`
 
 `review_findings` stores each blocking and non-blocking finding from first-pass
 and rereview bodies using the existing kernel parser. Remediation comments and

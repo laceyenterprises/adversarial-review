@@ -3123,7 +3123,10 @@ Key control points:
   independent HAMWITHDRAW-01 coverage. Findings and withdrawals share one
   review-currency rule: authenticated HAM base/head provenance ending at the
   live head can compose with completed native remediation rounds from the
-  daemon's repository- and PR-scoped store. Ordered patch-ID equivalence apart
+  daemon's repository- and PR-scoped store for finding applicability.
+  A head-match waiver or cross-head withdrawal requires each native edge to
+  be a proven comment-only final handoff with re-review suppressed.
+  Ordered patch-ID equivalence apart
   from authenticated HAM remediation commits is an independent proof. A proven
   rebase reuses the original withdrawal without rewriting its durable head or
   posting again. Partial withdrawals reduce the standing blocker count.

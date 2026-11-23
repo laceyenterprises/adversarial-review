@@ -10,6 +10,7 @@ import { collectPrBlockers, readPages, readReviewStore, readCloserLeases,
   readConflictFiles, readRemediation, readCloserReceipts } from '../src/pr-blockers-read.mjs';
 import { parsePrBlockersArgs } from '../bin/pr-blockers.mjs';
 import { nextAction, deriveNextActionSnapshot } from '../src/pr-next-action.mjs';
+import { HAMMER_COMMENTS_CAPPED } from '../src/ama/hammer-head-validation.mjs';
 
 const repo = 'example/project', head = 'a'.repeat(40), previous = 'b'.repeat(40);
 const now = Date.parse('2026-01-02T12:00:00Z');
@@ -445,6 +446,25 @@ test('review selection walks ancestry past a newer review from a discarded branc
   } });
   assert.equal(report.rows[0].coverage.kind, 'exact-head');
   assert.equal(report.rows[0].nextAction, 'merge-ready');
+});
+
+test('combined proof limits appear once each in row diagnostics', async t => {
+  const root = await fixture(t);
+  const dir = join(root, 'data', 'follow-up-jobs', 'completed');
+  await mkdir(dir, { recursive: true });
+  await Promise.all(Array.from({ length: 257 }, (_, i) => writeFile(
+    join(dir, `example__project-pr-7-job-${i}.json`), '{}')));
+  const options = collectorOptions({ root });
+  const result = await collectPrBlockers({ ...options, get: async path => {
+    if (path.includes('/reviews?')) return [{ user: { login: 'lacey-claude-reviewer' },
+      state: 'COMMENTED', commit_id: previous, body, submitted_at: review.postedAt }];
+    if (path.includes('/comments?')) return Array(100).fill({ body: 'other' });
+    if (path.includes('/compare/')) return { status: 'diverged', commits: [] };
+    return options.get(path);
+  } });
+  const errors = result.rows[0].errors;
+  assert.equal(errors.filter(error => error === HAMMER_COMMENTS_CAPPED).length, 1);
+  assert.equal(errors.filter(error => error === 'completed-round proof scan hit the matching records limit').length, 1);
 });
 
 test('collector reports unreadable reviews as unknown and preserves partial repository errors', async () => {

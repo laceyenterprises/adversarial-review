@@ -5,7 +5,7 @@ import { constants } from 'node:fs';
 import { open, opendir } from 'node:fs/promises';
 import { join } from 'node:path';
 import { HAM_AUDIT_COMMENT_AUTHOR_LOGINS, hamAuditCommentAuthorMatches } from './ham-provenance.mjs';
-import { completedLocalCommentOnlyReplay } from '../comment-only-final-round.mjs';
+import { completedCommentOnlyHandoff, completedLocalCommentOnlyReplay } from '../comment-only-final-round.mjs';
 
 const isAbort = error => error?.name === 'AbortError' || error?.code === 'ABORT_ERR';
 const isHistoryReadFailure = error => error?.hammerHistoryReadFailed || error?.primaryChangeReadFailed || isTransientGhError(error);
@@ -17,17 +17,24 @@ const login = identity => String(typeof identity === 'object' ? identity?.login 
 const FULL_SHA = /^[0-9a-f]{40}$/i;
 const HAMMER_COMMENT_MAX_PAGES = 10;
 const HAMMER_COMMENT_PAGE_SIZE = 100;
-const MAX_COMPLETED_ENTRIES = 100_000;
 const MAX_COMPLETED_RECORDS = 256;
+const MAX_COMPLETED_ENTRIES = 125_000;
 const MAX_COMPLETED_RECORD_BYTES = 1024 * 1024;
 const MAX_COMPLETED_ROUND_EDGES = 256;
 const BRANCH_RESET = Symbol('branch reset');
-const reportedCompletedLimits = new Set();
+export const HAMMER_COMMENTS_CAPPED = 'hammer-provenance-comments-capped';
+const LIMIT_LOG_INTERVAL_MS = 60 * 60 * 1000;
+const LIMIT_LOG_KEYS = 4096;
+const reportedProofLimits = new Map();
 
-function reportCompletedLimit(kind, limit, repo, prNumber) {
-  if (reportedCompletedLimits.has(kind)) return;
-  reportedCompletedLimits.add(kind);
-  console.warn(`[ama] completed-round proof scan hit the ${kind} limit (${limit}) for ${repo}#${prNumber}`);
+function reportProofLimit(kind, limit, repo, prNumber) {
+  const key = `${String(repo).toLowerCase()}#${Number(prNumber)}:${kind}`;
+  const now = performance.now();
+  if (now - (reportedProofLimits.get(key) ?? -Infinity) < LIMIT_LOG_INTERVAL_MS) return;
+  reportedProofLimits.delete(key);
+  if (reportedProofLimits.size >= LIMIT_LOG_KEYS) reportedProofLimits.delete(reportedProofLimits.keys().next().value);
+  reportedProofLimits.set(key, now);
+  console.warn(`[ama] ${kind} (${limit}) for ${repo}#${prNumber}`);
 }
 
 // A full last page can be truncated. Partial pages may not attest a chain.
@@ -39,7 +46,19 @@ export async function readHammerProvenanceComments(loadPage) {
     comments.push(...batch);
     if (batch.length < HAMMER_COMMENT_PAGE_SIZE) return comments;
   }
-  return null;
+  return HAMMER_COMMENTS_CAPPED;
+}
+
+const isProvenanceComment = comment => !comment?.event || comment.event === 'commented';
+
+export function hammerProvenanceCommentsCapped(comments, repo, prNumber) {
+  const limit = HAMMER_COMMENT_MAX_PAGES * HAMMER_COMMENT_PAGE_SIZE;
+  let count = 0;
+  const capped = comments === HAMMER_COMMENTS_CAPPED
+    || (Array.isArray(comments) && comments.length >= limit
+      && comments.some(comment => isProvenanceComment(comment) && ++count >= limit));
+  if (capped && repo && prNumber) reportProofLimit(HAMMER_COMMENTS_CAPPED, limit, repo, prNumber);
+  return capped;
 }
 // Existing fleet App identities, shared by builders, remediators and conflict rebases.
 // cfg-allowlist(github-account): compatibility identities for existing fleet installations.
@@ -95,14 +114,14 @@ export function hammerAttestationChain(comments, reviewedHead, currentHead, reme
   if (!Array.isArray(comments)) return null;
   // The Hammer CLI supplies the full issue timeline; only comment events
   // consume the comment completeness budget or carry App attestations.
-  const provenanceComments = comments.filter(comment => !comment?.event || comment.event === 'commented');
-  if (provenanceComments.length >= HAMMER_COMMENT_MAX_PAGES * HAMMER_COMMENT_PAGE_SIZE) return null;
+  if (hammerProvenanceCommentsCapped(comments)) return null;
   const outgoing = new Map();
   const addEdge = (base, head) => {
     if (!outgoing.has(base)) outgoing.set(base, []);
     outgoing.get(base).push(head);
   };
-  for (const comment of provenanceComments) {
+  for (const comment of comments) {
+    if (!isProvenanceComment(comment)) continue;
     const edge = hammerProvenanceEdge(comment);
     if (edge) addEdge(edge.base, edge.head);
   }
@@ -128,11 +147,15 @@ export function hammerAttestationChain(comments, reviewedHead, currentHead, reme
   return null;
 }
 
-async function readCompletedJob(path) {
+async function readCompletedJob(path, onOversize) {
   const file = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
   try {
     const stat = await file.stat();
-    if (!stat.isFile() || stat.size > MAX_COMPLETED_RECORD_BYTES) return null;
+    if (!stat.isFile()) return null;
+    if (stat.size > MAX_COMPLETED_RECORD_BYTES) {
+      onOversize();
+      return null;
+    }
     const buffer = Buffer.alloc(stat.size + 1);
     const { bytesRead } = await file.read(buffer);
     if (bytesRead !== stat.size) return null;
@@ -145,28 +168,32 @@ async function readCompletedJob(path) {
 // Read only daemon-owned state under the supplied runtime root. Old rounds
 // without a resulting head cannot establish an edge.
 export async function readCompletedRemediationEvidence(rootDir, repo, prNumber) {
-  const unavailable = { rounds: [], finalPublications: [] };
+  const unavailable = { rounds: [], settledRounds: [], finalPublications: [] };
   if (typeof rootDir !== 'string' || !rootDir || typeof repo !== 'string' || !/^[\w.-]+\/[\w.-]+$/.test(repo)
     || !['number', 'string'].includes(typeof prNumber)
     || !Number.isSafeInteger(Number(prNumber)) || Number(prNumber) < 1) return unavailable;
   const rounds = new Map();
+  const settledRounds = new Map();
   const finalPublications = [];
-  let entries = 0, records = 0;
+  let records = 0;
+  let entries = 0;
+  const capped = (kind, limit) => {
+    reportProofLimit(`completed-round proof scan hit the ${kind} limit`, limit, repo, prNumber);
+    return { ...unavailable, limitReached: kind };
+  };
+  const reportOversize = () => reportProofLimit('completed-round proof scan hit the record bytes limit',
+    MAX_COMPLETED_RECORD_BYTES, repo, prNumber);
   try {
     const dir = join(rootDir, 'data', 'follow-up-jobs', 'completed');
     const matches = followUpJobFileFilter({ rootDir, repo, prNumber, caseInsensitiveRepo: true });
     for await (const entry of await opendir(dir)) {
-      if (++entries > MAX_COMPLETED_ENTRIES) {
-        reportCompletedLimit('directory entries', MAX_COMPLETED_ENTRIES, repo, prNumber);
-        return unavailable;
-      }
+      if (++entries > MAX_COMPLETED_ENTRIES) return capped('directory entries', MAX_COMPLETED_ENTRIES);
       if (!entry.isFile() || !matches(entry.name)) continue;
       if (++records > MAX_COMPLETED_RECORDS) {
-        reportCompletedLimit('matching records', MAX_COMPLETED_RECORDS, repo, prNumber);
-        return unavailable;
+        return capped('matching records', MAX_COMPLETED_RECORDS);
       }
       try {
-        const job = await readCompletedJob(join(dir, entry.name));
+        const job = await readCompletedJob(join(dir, entry.name), reportOversize);
         if (typeof job?.repo !== 'string' || job.repo.toLowerCase() !== repo.toLowerCase()
           || !['number', 'string'].includes(typeof job.prNumber)
           || String(job.prNumber) !== String(prNumber) || job.status !== 'completed'
@@ -177,10 +204,11 @@ export async function readCompletedRemediationEvidence(rootDir, repo, prNumber) 
             || !FULL_SHA.test(base) || !FULL_SHA.test(head)) continue;
           rounds.set(`${base}:${head}`, round);
           if (rounds.size > MAX_COMPLETED_ROUND_EDGES) {
-            reportCompletedLimit('round edges', MAX_COMPLETED_ROUND_EDGES, repo, prNumber);
-            return unavailable;
+            return capped('round edges', MAX_COMPLETED_ROUND_EDGES);
           }
         }
+        const settled = completedCommentOnlyHandoff(job);
+        if (settled) settledRounds.set(`${settled.startHeadSha}:${settled.resultingHeadSha}`, settled);
         const publication = completedLocalCommentOnlyReplay(job);
         if (publication) finalPublications.push(publication);
       } catch {
@@ -190,7 +218,7 @@ export async function readCompletedRemediationEvidence(rootDir, repo, prNumber) 
   } catch {
     return unavailable;
   }
-  return { rounds: [...rounds.values()], finalPublications };
+  return { rounds: [...rounds.values()], settledRounds: [...settledRounds.values()], finalPublications };
 }
 
 export async function readCompletedRemediationRounds(rootDir, repo, prNumber) {
@@ -309,6 +337,7 @@ async function fetchExistingHammerHeadRange({ repo, prNumber, rootDir, reviewedH
     baseSha: reviewedHead, commits: currentHead === reviewedHead ? [] : [currentHead], proof: 'reviewed-starting-base' };
   const target = hammerBaseHead || currentHead;
   const appRange = provenance => {
+    if (hammerProvenanceCommentsCapped(provenance, repo, prNumber)) return null;
     const chain = hammerAttestationChain(provenance, reviewedHead, target);
     return chain && { verified: true, reviewedHead, currentHead, baseSha: reviewedHead,
       commits: [...chain, ...(target !== currentHead ? [currentHead] : [])], proof: 'hammer-app-attestation-chain' };

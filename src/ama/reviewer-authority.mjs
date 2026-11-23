@@ -33,12 +33,19 @@ export function amaAllAuthoritativeReviewerLogins() {
 }
 
 async function currentReviewHead(reviewedHead, headSha, compare, currency) {
-  if (currency) return (await currency(reviewedHead, headSha)).current === true;
-  if (reviewedHead === headSha) return true;
+  if (currency) return currency(reviewedHead, headSha);
+  if (reviewedHead === headSha) return { current: true };
   const ancestry = await compare(reviewedHead, headSha);
-  if (['behind', 'diverged'].includes(ancestry.status)) return false;
+  if (['behind', 'diverged'].includes(ancestry.status)) return { current: false };
   if (!['ahead', 'identical'].includes(ancestry.status)) throw new Error('cannot verify review ancestry');
-  return true;
+  return { current: true };
+}
+
+function requireReviewApplicability(result) {
+  if (result.proofLimit && result.current !== true) {
+    throw Object.assign(new Error(result.missingProof), { proofLimit: result.proofLimit });
+  }
+  return result.current === true;
 }
 
 // REST review lists are oldest first. Include dismissed blocking bodies:
@@ -48,7 +55,7 @@ export async function latestAuthoritativeReviewInAncestry(reviews, headSha, comp
     if (!['CHANGES_REQUESTED', 'COMMENTED', 'DISMISSED', 'APPROVED'].includes(entry.state)
       || !amaAllAuthoritativeReviewerLogins().includes(String(entry.user?.login || '').replace(/\[bot\]$/, ''))) continue;
     if (!/^[a-f0-9]{40}$/i.test(entry.commit_id || '')) throw new Error('authoritative review has no valid head');
-    if (!await currentReviewHead(entry.commit_id, headSha, compare, currency)) continue;
+    if (!requireReviewApplicability(await currentReviewHead(entry.commit_id, headSha, compare, currency))) continue;
     return entry;
   }
 }
@@ -56,6 +63,11 @@ export async function latestAuthoritativeReviewInAncestry(reviews, headSha, comp
 // Families may stack findings on one head, but no citation survives a newer
 // authoritative head in the parent ancestry, even from another family.
 export async function isCurrentAuthoritativeFamilyReview(review, reviews, headSha, compare, currency = null) {
+  // Resolve copies to the authoritative list entry before using its position.
+  if (review?.id && !reviews.includes(review)) {
+    review = reviews.find(entry => entry.id === review.id && entry.commit_id === review.commit_id);
+  }
+
   const family = amaReviewerFamilyForLogin(review?.user?.login);
   if (!family) return false;
   const latest = await latestAuthoritativeReviewInAncestry(reviews.filter((entry) =>
@@ -66,11 +78,15 @@ export async function isCurrentAuthoritativeFamilyReview(review, reviews, headSh
       || !['CHANGES_REQUESTED', 'COMMENTED', 'DISMISSED', 'APPROVED'].includes(entry.state)
       || entry.commit_id === review.commit_id) continue;
     if (!/^[a-f0-9]{40}$/i.test(entry.commit_id || '')) throw new Error('authoritative review has no valid head');
-    if (!await currentReviewHead(entry.commit_id, headSha, compare, currency)) continue;
+    const applicability = await currentReviewHead(entry.commit_id, headSha, compare, currency);
+    if (!applicability.current && !applicability.proofLimit) continue;
     const newer = await compare(review.commit_id, entry.commit_id);
-    if (newer.status === 'ahead' || (currency && newer.status === 'diverged'
-      && reviews.indexOf(entry) > reviews.indexOf(review))) return false;
-    if (!['behind', 'diverged', 'identical'].includes(newer.status)) throw new Error('cannot verify review supersession');
+    if (!['ahead', 'behind', 'diverged', 'identical'].includes(newer.status)) {
+      throw new Error('cannot verify review supersession');
+    }
+    if (newer.status !== 'ahead'
+      && !(currency && newer.status === 'diverged' && reviews.indexOf(entry) > reviews.indexOf(review))) continue;
+    if (requireReviewApplicability(applicability)) return false;
   }
   return true;
 }
@@ -98,10 +114,11 @@ export async function terminalReviewProofMatches({
       reviews, headSha, validatedAt, compare: memoize(compare),
       currency: currency ? memoize(currency) : null,
     });
-  } catch {
+  } catch (error) {
     // A missing review head or unavailable compare is missing proof, not a
     // transient failure to read the entire gate (hammer, daemon and closer).
-    return { ok: false, reason: 'terminal-review-evidence-unavailable' };
+    return { ok: false, reason: 'terminal-review-evidence-unavailable',
+      ...(error?.proofLimit ? { missingProof: error.proofLimit } : {}) };
   }
 }
 
@@ -116,7 +133,7 @@ async function terminalReviewProofMatchesImpl({
   // alone cannot establish that a review belongs to a discarded branch.
   const checkedCurrency = currency && (async (from, to) => {
     const result = await currency(from, to);
-    if (result.current === true) return result;
+    if (result.current === true || result.proofLimit) return result;
     const ancestry = await compare(from, to);
     if (!['behind', 'diverged'].includes(ancestry?.status)) throw new Error('cannot verify terminal review applicability');
     return result;

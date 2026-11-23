@@ -1,6 +1,9 @@
 import { loadAwareTimeoutMs } from '../load-aware-timeout.mjs';
 import { execFile } from 'node:child_process';
-import { hammerAttestationChain, readCompletedRemediationEvidence, readHammerProvenanceComments } from './hammer-head-validation.mjs';
+import {
+  HAMMER_COMMENTS_CAPPED, hammerAttestationChain, hammerProvenanceCommentsCapped,
+  readCompletedRemediationEvidence, readHammerProvenanceComments,
+} from './hammer-head-validation.mjs';
 import { hamCommitIdentityMatches, isHamWorkerTicket, parseCommitTrailers } from './ham-provenance.mjs';
 
 const SHA = /^[a-f0-9]{40}$/i;
@@ -78,22 +81,31 @@ export function createReviewCurrencyReader({ repo, prNumber, rootDir, get, comme
     : comments !== null ? Promise.resolve(comments)
     : readHammerProvenanceComments(page => get(
       `repos/${repo}/issues/${prNumber}/comments?per_page=100${page === 1 ? '' : `&page=${page}`}`));
-  const proveRebase = async (reviewedHead, currentHead, rebaseOnly) => {
+  const proveRebase = async (reviewedHead, currentHead, { rebaseOnly, limits, diagnostics }) => {
     const provenance = await readComments().catch(() => null);
+    if (hammerProvenanceCommentsCapped(provenance, repo, prNumber)) limits.push(HAMMER_COMMENTS_CAPPED);
     if (hammerAttestationChain(provenance, reviewedHead, currentHead)) return 'closer-rebase-provenance';
     roundRead ??= readCompletedRemediationEvidence(rootDir, repo, prNumber);
-    const { rounds, finalPublications } = await roundRead;
-    if (hammerAttestationChain(provenance, reviewedHead, currentHead, rounds)) return 'closer-rebase-provenance';
+    const { rounds, settledRounds, finalPublications, limitReached } = await roundRead;
+    if (limitReached) limits.push(`completed-round proof scan hit the ${limitReached} limit`);
+    if (hammerAttestationChain(provenance, reviewedHead, currentHead, settledRounds)) return 'closer-rebase-provenance';
     // The local final publication admits its source review as evidence. It
     // confers no head-match or disposition waiver in rebaseCurrencyCovers.
     if (!rebaseOnly && finalPublications.some(entry => entry.reviewedHead === reviewedHead && entry.head === currentHead)) {
       return 'comment-only-final-remediation-publication';
     }
-    prRead ||= pr ? Promise.resolve(pr) : get(`repos/${repo}/pulls/${prNumber}`);
-    const live = await prRead;
-    if (live?.head?.sha !== currentHead || !SHA.test(live?.base?.sha || '')) return null;
-    return await patchEquivalent({ reviewedHead, currentHead, base: live.base.sha, git, get, repo })
-      ? 'reviewed-rebase-patch-id' : null;
+    try {
+      prRead ||= pr ? Promise.resolve(pr) : get(`repos/${repo}/pulls/${prNumber}`);
+      const live = await prRead;
+      if (live?.head?.sha === currentHead && SHA.test(live?.base?.sha || '')
+        && await patchEquivalent({ reviewedHead, currentHead, base: live.base.sha, git, get, repo })) return 'reviewed-rebase-patch-id';
+    } catch (error) {
+      diagnostics.push(error.message);
+    }
+    // Native rounds can keep findings and superseding reviews in scope.
+    // A round awaiting review carries no head-match or disposition waiver.
+    return !rebaseOnly && hammerAttestationChain(provenance, reviewedHead, currentHead, rounds)
+      ? 'completed-remediation-hammer-finding-currency' : null;
   };
   return (reviewedHead, currentHead, { rebaseOnly = false } = {}) => {
     const key = JSON.stringify([reviewedHead, currentHead, rebaseOnly]);
@@ -103,6 +115,7 @@ export function createReviewCurrencyReader({ repo, prNumber, rootDir, get, comme
       if (reviewedHead === currentHead) return { ...result, current: true, proof: 'exact-head' };
       const localReplay = rebaseOnly ? '' : ' or a recorded local final-remediation replay';
       const missingProof = `HAM base/head provenance or patch-equivalent PR commits${localReplay} for ${reviewedHead} -> ${currentHead}`;
+      const limits = [], diagnostics = [];
       let status;
       try {
         try { status = (await get(`repos/${repo}/compare/${reviewedHead}...${currentHead}`))?.status; }
@@ -110,12 +123,13 @@ export function createReviewCurrencyReader({ repo, prNumber, rootDir, get, comme
         if (!rebaseOnly && ['ahead', 'identical'].includes(status)) return { ...result, current: true, proof: 'ancestry' };
         // A branch reset cannot borrow evidence from its discarded descendant.
         if (status === 'behind') return { ...result, missingProof: 'current head predates reviewed evidence' };
-        const proof = await proveRebase(reviewedHead, currentHead, rebaseOnly);
+        const proof = await proveRebase(reviewedHead, currentHead, { rebaseOnly, limits, diagnostics });
         if (proof) return { ...result, current: true, proof };
       } catch (error) {
-        return { ...result, missingProof: `${missingProof}: ${error.message}` };
+        diagnostics.push(error.message);
       }
-      return { ...result, missingProof };
+      return { ...result, missingProof: [missingProof, ...limits, ...diagnostics].join(': '),
+        ...(limits.length ? { proofLimit: limits.join(', ') } : {}) };
     })());
     return cache.get(key);
   };

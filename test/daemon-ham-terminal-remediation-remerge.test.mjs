@@ -179,16 +179,21 @@ test('HAMLATEAUDIT-01: daemon terminal-audit reuse checks fresh exact-head revie
   }
 });
 
-test('LAC-2331 daemon can reuse an exact terminal audit after native remediation and rebase', async t => {
+test('daemon terminal-audit reuse across a native round requires a settled comment-only handoff', async t => {
   const rootDir = tempRoot();
   t.after(() => rmSync(rootDir, { recursive: true, force: true }));
   const args = findingsReviewArgs(rootDir);
+  args.cfg.autonomousCloserCommitCleanMergeEnabled = false;
+  args.gateSnapshot.settledReview.verdict = 'comment-only';
+  args.reviewState.blockingFindingCount = 0;
+  args.reviewState.nonBlockingFindingCount = 1;
   const rollup = await args.fetchRollupImpl();
   const nativeHead = 'c'.repeat(40);
   rollup.comments[0].body = `HAM-Base-Head: ${nativeHead}\nHAM-Validated-Head: ${HAM_HEAD}`;
   const dir = join(rootDir, 'data', 'follow-up-jobs', 'completed');
   mkdirSync(dir, { recursive: true });
-  const record = join(dir, 'acme__repo-pr-4987-job.json');
+  const jobId = 'acme__repo-pr-4987-job';
+  const record = join(dir, `${jobId}.json`);
   const getAudit = () => hamValidatedAuditEntry(HAM_HEAD);
   let admittedHead;
   const run = () => runDaemonCleanMergeAttempt({ ...args, fetchRollupImpl: async () => rollup,
@@ -202,8 +207,22 @@ test('LAC-2331 daemon can reuse an exact terminal audit after native remediation
     },
   });
   assert.equal((await run()).reason, 'stale-head');
-  writeFileSync(record, JSON.stringify({ repo: args.repoPath, prNumber: args.prNumber, status: 'completed',
-    remediationPlan: { rounds: [{ state: 'completed', startHeadSha: REVIEWED_HEAD, resultingHeadSha: nativeHead }] } }));
+  const job = { repo: args.repoPath, prNumber: args.prNumber, status: 'completed', jobId,
+    kind: 'adversarial-review-follow-up', revisionRef: REVIEWED_HEAD, nonBlockingOnly: true,
+    reviewBody: '## Verdict\nComment only',
+    remediationPlan: { currentRound: 1, rounds: [
+      { round: 1, state: 'completed', startHeadSha: REVIEWED_HEAD, resultingHeadSha: nativeHead },
+    ] },
+  };
+  writeFileSync(record, JSON.stringify({ ...job, reReview: { requested: true, status: 'pending' } }));
+  assert.equal((await run()).reason, 'stale-head');
+  writeFileSync(record, JSON.stringify({ ...job, finalRound: 'comment-only',
+    reReview: { requested: false, suppressed: 'comment-only-final-round', nextAction: { head: nativeHead } },
+    remediationWorker: { state: 'completed', launchRequestId: jobId },
+    completion: { finalRemediationPush: true, workerPushedHeadSha: nativeHead,
+      finalRoundOutcome: { completed: true, push: 'descendant' },
+      workerPushProof: { method: 'git-cherry-replay', workerCommits: 1 } },
+  }));
   await run();
   assert.equal(admittedHead, HAM_HEAD);
 });

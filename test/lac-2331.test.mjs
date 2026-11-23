@@ -1,14 +1,21 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import fs from 'node:fs/promises';
+import { syncBuiltinESMExports } from 'node:module';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { createReviewCurrencyReader, rebaseCurrencyCovers } from '../src/ama/review-currency.mjs';
-import { fetchHammerHeadRange } from '../src/ama/hammer-head-validation.mjs';
+import {
+  fetchHammerHeadRange, HAMMER_COMMENTS_CAPPED, readCompletedRemediationEvidence,
+} from '../src/ama/hammer-head-validation.mjs';
 import { isCurrentAuthoritativeFamilyReview, latestAuthoritativeReviewInAncestry } from '../src/ama/reviewer-authority.mjs';
 import { closerReviewProof } from '../src/ama/closer-review-proof.mjs';
+import { closerAuthoredStaleEligible, proveCloserAuthoredStaleHead } from '../src/closer-authored-stale.mjs';
+import { completedCommentOnlyHandoff, completedLocalCommentOnlyReplay } from '../src/comment-only-final-round.mjs';
 import { isEligibleForAmaClosure } from '../src/ama/eligibility.mjs';
 import { primaryChangeFixture } from './helpers/primary-change.mjs';
+import { DEFAULT_ADVERSARIAL_GATE_CONTEXT } from '../src/adversarial-gate-context.mjs';
 
 const repo = 'fixture/repo', prNumber = 42;
 const [reviewedHead, remediated, rebased, currentHead, futureHead] = 'abcde'.split('').map(hex => hex.repeat(40));
@@ -43,7 +50,7 @@ test('LAC-2331 native completed round then repeated Hammer rebases preserves the
   const { currency, compare } = fixture(t);
   const [review] = reviews;
   assert.equal(await latestAuthoritativeReviewInAncestry([review], currentHead, compare, currency), review);
-  assert.equal((await currency(reviewedHead, currentHead, { rebaseOnly: true })).proof, 'closer-rebase-provenance');
+  assert.equal((await currency(reviewedHead, currentHead)).proof, 'completed-remediation-hammer-finding-currency');
 });
 
 test('LAC-2331 Hammer range composes local completion and exact publication edges', async t => {
@@ -69,6 +76,60 @@ function nativeFinalJob() {
       workerPushProof: { method: 'git-cherry-replay', reviewedCommitsReplayed: 1, workerCommits: 1 } },
   };
 }
+
+test('completed handoff and local replay reject missing or non-object job inputs', () => {
+  for (const input of [undefined, null, 'job', 1]) {
+    assert.equal(completedCommentOnlyHandoff(input), null);
+    assert.equal(completedLocalCommentOnlyReplay(input), null);
+  }
+});
+
+test('standalone local replay requires an explicitly recorded published head', () => {
+  const job = { ...nativeFinalJob(), status: 'completed' };
+  assert.deepEqual(completedLocalCommentOnlyReplay(job), { reviewedHead, head: remediated });
+  delete job.remediationPlan.rounds[0].publishedHeadSha;
+  assert.equal(completedCommentOnlyHandoff(job), job.remediationPlan.rounds[0]);
+  assert.equal(completedLocalCommentOnlyReplay(job), null);
+});
+
+test('a non-final round awaiting review cannot waive the head match after a Hammer push', async t => {
+  const { options, currency } = fixture(t, { job: { reReview: {
+    requested: true, status: 'pending', nextAction: { head: remediated },
+  } } });
+  const reviewCurrency = await currency(reviewedHead, currentHead);
+  const headProof = await proveCloserAuthoredStaleHead({ ...options, repoPath: repo });
+  const closerAuthoredStale = closerAuthoredStaleEligible({ headProof, verdict: 'settled-success',
+    blockingFindingState: 'known', blockingFindingCount: 0, checksConclusion: 'SUCCESS', mergeability: 'MERGEABLE' });
+  const result = isEligibleForAmaClosure({
+    headSha: reviewedHead, verdict: 'approved', reviewCurrency,
+    remediationPending: false, blockingFindingState: 'known', blockingFindingCount: 0,
+    nonBlockingFindingState: 'known', nonBlockingFindingCount: 0, riskClass: 'low',
+  }, {
+    headSha: currentHead, isOpen: true, mergeableState: 'MERGEABLE', labels: [],
+    statusCheckRollup: [{ __typename: 'CheckRun', name: 'test', conclusion: 'SUCCESS' }],
+    branchProtection: { requiredContexts: [DEFAULT_ADVERSARIAL_GATE_CONTEXT] },
+  }, { enabled: true, eligibility: { riskClasses: ['low'] } }, {
+    closerAuthoredStale, primaryChange: primaryChangeFixture(currentHead), env: {},
+  });
+  assert.equal(reviewCurrency.current, true, 'the original findings remain applicable');
+  assert.equal(result.eligible, false);
+  assert.deepEqual(result.reasons, ['stale-review-head']);
+  assert.equal(closerAuthoredStale.eligible, false);
+  assert.equal((await currency(reviewedHead, currentHead, { rebaseOnly: true })).current, false);
+});
+
+test('a settled comment-only publication followed by Hammer pushes waives only the head match', async t => {
+  const { options, currency } = fixture(t, { job: nativeFinalJob() });
+  const proof = await currency(reviewedHead, currentHead, { rebaseOnly: true });
+  assert.equal(rebaseCurrencyCovers(proof, reviewedHead, currentHead), true);
+  const headProof = await proveCloserAuthoredStaleHead({ ...options, repoPath: repo });
+  assert.deepEqual(headProof.closerCommits, [currentHead, rebased, remediated]);
+  const gates = { headProof, verdict: 'settled-success', blockingFindingState: 'known',
+    blockingFindingCount: 0, checksConclusion: 'SUCCESS', mergeability: 'MERGEABLE' };
+  assert.equal(closerAuthoredStaleEligible(gates).eligible, true);
+  assert.equal(closerAuthoredStaleEligible({ ...gates, checksConclusion: 'PENDING' }).eligible, false);
+  assert.equal(closerAuthoredStaleEligible({ ...gates, blockingFindingCount: 1 }).eligible, false);
+});
 
 test('LAC-2331 native final remediation preserves the applicable review before Hammer publication', async t => {
   const { options, compare, currency } = fixture(t, { comments: [], job: nativeFinalJob() });
@@ -98,6 +159,7 @@ for (const [name, alter, compareStatus] of [
   ['different publication head', job => { job.completion.workerPushedHeadSha = futureHead; }],
   ['different round head', job => { job.remediationPlan.rounds[0].publishedHeadSha = futureHead; }],
   ['requested rereview', job => { job.reReview.requested = true; }],
+  ['inconsistent pending rereview', job => { job.reReview.status = 'pending'; }],
   ['unverified replay', job => { delete job.completion.workerPushProof; }],
   ['no replayed reviewed commit', job => { job.completion.workerPushProof.reviewedCommitsReplayed = 0; }],
   ['branch reset', () => {}, 'behind'],
@@ -108,6 +170,8 @@ for (const [name, alter, compareStatus] of [
     const { options, currency } = fixture(t, { comments: [], job, compareStatus });
     assert.equal((await currency(reviewedHead, remediated)).current, false);
     assert.equal(await fetchHammerHeadRange({ ...options, currentHead: remediated, hammerBaseHead: remediated }), null);
+    const mixed = createReviewCurrencyReader({ ...options, comments: [edge(remediated, currentHead)] });
+    assert.equal((await mixed(reviewedHead, currentHead, { rebaseOnly: true })).current, false);
   });
 }
 
@@ -183,15 +247,124 @@ test('LAC-2331 a capped round scan still admits independent exact App provenance
   assert.deepEqual((await fetchHammerHeadRange(direct))?.commits, [currentHead]);
 });
 
-test('LAC-2331 unavailable comparisons leave an independent exact mixed proof usable', async t => {
+test('completed proof work is scoped to the matching PR in a large shared directory', async t => {
+  const { options, record } = fixture(t, { job: nativeFinalJob() });
+  const opendir = fs.opendir;
+  const file = name => ({ name, isFile: () => true });
+  const replacement = t.mock.method(fs, 'opendir', async path => {
+    if (path !== dirname(record)) return opendir(path);
+    return (async function* () {
+      const other = file('fixture__repo-pr-420-unrelated.json');
+      for (let i = 0; i <= 100_000; i++) yield other;
+      yield file('fixture__repo-pr-42-job.json');
+    })();
+  });
+  syncBuiltinESMExports();
+  t.after(() => { replacement.mock.restore(); syncBuiltinESMExports(); });
+  const evidence = await readCompletedRemediationEvidence(options.rootDir, repo, prNumber);
+  assert.equal(evidence.rounds.length, 1);
+  assert.equal(evidence.settledRounds.length, 1);
+});
+
+test('completed proof scan stops after a bounded number of unrelated directory entries', async t => {
+  const { options, record } = fixture(t, { job: nativeFinalJob() });
+  const opendir = fs.opendir;
+  const replacement = t.mock.method(fs, 'opendir', async path => {
+    if (path !== dirname(record)) return opendir(path);
+    return (async function* () {
+      for (let i = 0; i < 125_000; i++) yield { name: 'unrelated-pr-1-job.json', isFile: () => true };
+      yield { name: 'fixture__repo-pr-42-job.json', isFile: () => true };
+    })();
+  });
+  syncBuiltinESMExports();
+  t.after(() => { replacement.mock.restore(); syncBuiltinESMExports(); });
+  const evidence = await readCompletedRemediationEvidence(options.rootDir, repo, prNumber);
+  assert.deepEqual(evidence, { rounds: [], settledRounds: [], finalPublications: [],
+    limitReached: 'directory entries' });
+});
+
+test('record and edge limits are attributed to their target and rate limited per reason', async t => {
+  const { options, record } = fixture(t, { job: nativeFinalJob() });
+  const logs = t.mock.method(console, 'warn', () => {});
+  let clock = 0;
+  t.mock.method(performance, 'now', () => clock);
+  for (const number of [4201, 4202]) {
+    for (let i = 0; i < 257; i++) writeFileSync(record.replace('42-job', `${number}-job-${i}`), '{}');
+    for (const name of [repo, repo.toUpperCase()]) {
+      const evidence = await readCompletedRemediationEvidence(options.rootDir, name, number);
+      assert.deepEqual(evidence, { rounds: [], settledRounds: [], finalPublications: [], limitReached: 'matching records' });
+    }
+  }
+  const many = Array.from({ length: 257 }, (_, i) => round(reviewedHead, i.toString(16).padStart(40, '0')));
+  writeFileSync(record.replace('42-job', '4201-edges'), JSON.stringify({
+    repo, prNumber: 4201, status: 'completed', remediationPlan: { rounds: many },
+  }));
+  // Replace the matching-record cap with an independent excess-edge cap.
+  for (let i = 0; i < 257; i++) rmSync(record.replace('42-job', `4201-job-${i}`));
+  const evidence = await readCompletedRemediationEvidence(options.rootDir, repo, 4201);
+  assert.equal(evidence.limitReached, 'round edges');
+  assert.equal(evidence.rounds.length, 0);
+  clock = 60 * 60 * 1000;
+  await readCompletedRemediationEvidence(options.rootDir, repo, 4202);
+  assert.deepEqual(logs.mock.calls.map(call => call.arguments[0].split(' for ')), [
+    ['[ama] completed-round proof scan hit the matching records limit (256)', `${repo}#4201`],
+    ['[ama] completed-round proof scan hit the matching records limit (256)', `${repo}#4202`],
+    ['[ama] completed-round proof scan hit the round edges limit (256)', `${repo}#4201`],
+    ['[ama] completed-round proof scan hit the matching records limit (256)', `${repo}#4202`],
+  ]);
+});
+
+test('capped snapshots and pagination diagnose missing comment proof and contribute no partial edge', async t => {
   const { options } = fixture(t);
+  const comments = [edge(reviewedHead, currentHead), ...Array(999).fill({ body: 'other' })];
+  const snapshot = createReviewCurrencyReader({ ...options, comments });
+  assert.match((await snapshot(reviewedHead, currentHead)).missingProof, new RegExp(HAMMER_COMMENTS_CAPPED));
+  const pages = [];
+  const paginated = createReviewCurrencyReader({ ...options, comments: null, get: async path => {
+    if (!path.includes('/comments?')) return options.get(path);
+    const page = Number(path.match(/&page=(\d+)/)?.[1] || 1);
+    pages.push(page);
+    return comments.slice((page - 1) * 100, page * 100);
+  } });
+  assert.match((await paginated(reviewedHead, currentHead)).missingProof, new RegExp(HAMMER_COMMENTS_CAPPED));
+  assert.deepEqual(pages, Array.from({ length: 10 }, (_, i) => i + 1));
+  const capped = await proveCloserAuthoredStaleHead({ ...options, repoPath: repo, comments });
+  assert.equal(capped.reason, HAMMER_COMMENTS_CAPPED);
+  assert.equal(capped.currentHeadHammerAttested, undefined);
+  const complete = comments.slice(0, -1).concat({ event: 'labeled' });
+  assert.equal((await createReviewCurrencyReader({ ...options, comments: complete })(reviewedHead, currentHead)).proof,
+    'closer-rebase-provenance');
+  const prior = { ...reviews[0], commit_id: currentHead };
+  const later = { ...reviews[1], commit_id: rebased, state: 'CHANGES_REQUESTED' };
+  const proof = await closerReviewProof({ ...options, headSha: currentHead, validatedAt: '2026-01-01T00:00:01Z',
+    snapshot: { state: 'OPEN', headSha: currentHead, comments, reviews: [prior, later] } });
+  assert.deepEqual(proof, { ok: false, reason: 'terminal-review-evidence-unavailable',
+    missingProof: HAMMER_COMMENTS_CAPPED });
+});
+
+test('an older diverged review cannot make an exact-head citation uncertain at the comment cap', async t => {
+  const { options, compare } = fixture(t, { comments: Array(1000).fill({ body: 'other' }) });
+  const currency = createReviewCurrencyReader(options);
+  const older = { ...reviews[0], commit_id: reviewedHead };
+  const cited = { ...reviews[1], commit_id: currentHead };
+  assert.equal(await isCurrentAuthoritativeFamilyReview(cited, [older, cited], currentHead, compare, currency), true);
+  const otherFamily = { ...older, user: { login: 'lacey-claude-reviewer' } };
+  const copy = structuredClone(cited);
+  assert.equal(await isCurrentAuthoritativeFamilyReview(copy, [otherFamily, cited], currentHead, compare, currency), true);
+  await assert.rejects(isCurrentAuthoritativeFamilyReview(copy, [cited, otherFamily], currentHead, compare, currency),
+    error => error.proofLimit === HAMMER_COMMENTS_CAPPED);
+  assert.equal(await isCurrentAuthoritativeFamilyReview({ ...copy, id: 999 }, [cited], currentHead, compare, currency), false);
+});
+
+test('LAC-2331 unavailable comparisons leave an independent exact mixed proof usable', async t => {
+  const { options } = fixture(t, { job: nativeFinalJob() });
   const unreadableCompare = { ...options, get: async () => { throw new Error('comparison unavailable'); } };
   assert.equal((await createReviewCurrencyReader(unreadableCompare)(reviewedHead, currentHead)).proof, 'closer-rebase-provenance');
   assert.deepEqual((await fetchHammerHeadRange(unreadableCompare))?.commits, [remediated, rebased, currentHead]);
 });
 
 test('LAC-2331 mixed provenance retains reviewer-family supersession and the standing operator veto', async t => {
-  const { options, compare, currency } = fixture(t);
+  const { options, compare, currency } = fixture(t, { job: nativeFinalJob() });
   assert.equal(await isCurrentAuthoritativeFamilyReview(reviews[0], reviews, currentHead, compare, currency), false);
   assert.equal(await isCurrentAuthoritativeFamilyReview(reviews[1], reviews, currentHead, compare, currency), true);
   const proof = rows => closerReviewProof({ ...options, headSha: currentHead, validatedAt: '2026-01-01T00:00:01Z',
@@ -202,7 +375,7 @@ test('LAC-2331 mixed provenance retains reviewer-family supersession and the sta
 });
 
 test('LAC-2331 certified review currency does not authorize reversal of primary source', async t => {
-  const { currency } = fixture(t);
+  const { currency } = fixture(t, { job: nativeFinalJob() });
   const reviewCurrency = await currency(reviewedHead, currentHead);
   const result = isEligibleForAmaClosure({ headSha: reviewedHead, verdict: 'approved', reviewCurrency,
     remediationPending: false, blockingFindingState: 'known', blockingFindingCount: 0,

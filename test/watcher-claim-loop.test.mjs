@@ -410,6 +410,7 @@ export async function load(url, context, nextLoad) {
       }
       export function isCompletedFinalRemediationJob(job) { return isCompletedCommentOnlyFinalRoundJob(job); }
       export function completedLocalCommentOnlyReplay() { return null; }
+      export function completedCommentOnlyHandoff() { return null; }
       export function hasInProgressCommentOnlyFinalRound() { return false; }
       export function hasCommentOnlyFinalRoundPush() { return false; }
       export function hasUnprovenCommentOnlyFinalRoundHead() { return false; }

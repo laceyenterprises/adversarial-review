@@ -58,8 +58,17 @@ function remediationFixture(t, jobOverrides = {}, roundOverrides = {}) {
   const dir = join(rootDir, 'data', 'follow-up-jobs', 'completed');
   mkdirSync(dir, { recursive: true });
   const path = join(dir, 'fixture__repo-pr-42-round.json');
-  writeFileSync(path, JSON.stringify({ repo: 'fixture/repo', prNumber: 42, status: 'completed',
-    remediationPlan: { rounds: [{ state: 'completed', startHeadSha: R, resultingHeadSha: M, ...roundOverrides }] },
+  const jobId = 'fixture__repo-pr-42-round';
+  writeFileSync(path, JSON.stringify({ repo: 'fixture/repo', prNumber: 42, status: 'completed', jobId,
+    kind: 'adversarial-review-follow-up', revisionRef: R, finalRound: 'comment-only', nonBlockingOnly: true,
+    reviewBody: '## Verdict\nComment only',
+    reReview: { requested: false, suppressed: 'comment-only-final-round', nextAction: { head: M } },
+    remediationWorker: { state: 'completed', launchRequestId: jobId },
+    completion: { finalRemediationPush: true, workerPushedHeadSha: M,
+      finalRoundOutcome: { completed: true, push: 'descendant' },
+      workerPushProof: { method: 'git-cherry-replay', workerCommits: 1 } },
+    remediationPlan: { currentRound: 1,
+      rounds: [{ round: 1, state: 'completed', startHeadSha: R, resultingHeadSha: M, ...roundOverrides }] },
     ...jobOverrides }));
   const comments = [[M, C1], [C1, C2], [C2, W]].map(([base, head]) => ({
     author: 'hammer-worker', body: `HAM-Base-Head: ${base}\nHAM-Pushed-Head: ${head}`,
@@ -74,7 +83,7 @@ async function decideRound(options) {
     checksConclusion: 'SUCCESS', mergeability: 'MERGEABLE' }) };
 }
 
-test('HAMROUNDEDGE-01 reviewed -> remediated -> three hammer pushes is eligible', async t => {
+test('a settled comment-only handoff followed by three hammer pushes is eligible', async t => {
   const { path, options } = remediationFixture(t);
   const { headProof, eligibility } = await decideRound(options);
   assert.equal(headProof.proven, true);

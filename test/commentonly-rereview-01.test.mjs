@@ -9,7 +9,7 @@ import { getFollowUpJobDir, writeFollowUpJob } from '../src/follow-up-jobs.mjs';
 import { ensureReviewStateSchema, getReviewRow, openReviewStateDb, requestReviewRereview } from '../src/review-state.mjs';
 import { findFinalRemediationPushJob, isCompletedFinalRemediationJob } from '../src/comment-only-final-round.mjs';
 import { FINAL_ROUND_PROOF_TRANSIENT_WINDOW_MS } from '../src/comment-only-final-round-completion.mjs';
-import { readCompletedRemediationRounds } from '../src/ama/hammer-head-validation.mjs';
+import { readCompletedRemediationEvidence, readCompletedRemediationRounds } from '../src/ama/hammer-head-validation.mjs';
 import { readHeadAttestationChainForPr, resolveDaemonWorkerIdentityFromHeadAttestation } from '../src/daemon-worker-identity.mjs';
 import incident from './fixtures/commentclose-01/pr-11403-final-fix-all.json' with { type: 'json' };
 
@@ -20,7 +20,7 @@ const LRQ = 'lrq_native_fixture';
 const quiet = { log() {}, warn() {}, error() {} };
 
 async function replay(t, { checks = 'green', changeReply = () => {}, valid = true, produced = true,
-  extraCommit = false, moved = false, reviewerLive = false, attestationReadError = () => null,
+  extraCommit = false, moved = false, descendant = false, reviewerLive = false, attestationReadError = () => null,
   changeAttestations = rows => rows, changeWorkspace = manifest => manifest,
   workerStatus = 'succeeded', liveState = 'open', requireVerifierPath = false,
   transientSince, reviewBody = incident.job.reviewBody } = {}) {
@@ -106,8 +106,8 @@ async function replay(t, { checks = 'green', changeReply = () => {}, valid = tru
       if (cmd === 'show') return { stdout: 'Add failure coverage\n\nWorker-Class: codex\n' };
       if (cmd === 'rev-list') return { stdout: '' };
       if (cmd === 'cherry') return { stdout: args.at(-1) === BASE
-        ? `- ${REPLAYED}\n+ ${HEAD}\n${extraCommit ? `+ ${'c'.repeat(40)}\n` : ''}`
-        : `- ${job.revisionRef}\n` };
+        ? `${descendant ? '' : `- ${REPLAYED}\n`}+ ${HEAD}\n${extraCommit ? `+ ${'c'.repeat(40)}\n` : ''}`
+        : descendant ? '' : `- ${job.revisionRef}\n` };
     }
     if (bin === 'gh' && args[0] === 'api') {
       if (args[1].includes('/git/ref/heads/')) return { stdout: JSON.stringify({
@@ -138,11 +138,22 @@ test('native follow-up reads its canonical branch-push receipt and records the r
   const { rootDir, result, requests, beforeRow, afterRow } = await replay(t, { requireVerifierPath: true });
   assert.equal(result.action, 'completed');
   assert.equal(result.job.completion.workerPushProof.producedAttestationId, 'lha_fixture');
-  const edges = await readCompletedRemediationRounds(rootDir, result.job.repo, result.job.prNumber);
+  const { rounds: edges, settledRounds } = await readCompletedRemediationEvidence(rootDir, result.job.repo, result.job.prNumber);
   assert.deepEqual(edges.map(({ startHeadSha, resultingHeadSha }) => [startHeadSha, resultingHeadSha]),
     [[result.job.revisionRef, HEAD]]);
+  assert.deepEqual(settledRounds, edges);
   assert.deepEqual(requests, []);
   assert.deepEqual(afterRow, beforeRow);
+});
+
+test('canonical completion writer produces a descendant handoff accepted by the reader', async t => {
+  const { rootDir, result } = await replay(t, { descendant: true });
+  assert.equal(result.action, 'completed');
+  assert.equal(result.job.completion.finalRoundOutcome.push, 'descendant');
+  assert.equal(result.job.completion.workerPushProof.reviewedCommitsReplayed, 0);
+  const evidence = await readCompletedRemediationEvidence(rootDir, result.job.repo, result.job.prNumber);
+  assert.deepEqual(evidence.settledRounds.map(({ startHeadSha, resultingHeadSha }) =>
+    [startHeadSha, resultingHeadSha]), [[result.job.revisionRef, HEAD]]);
 });
 
 for (const repo of [undefined, null, 42, {}]) test(`exact attestation subject refuses ${JSON.stringify(repo)} repository input`, async () => {

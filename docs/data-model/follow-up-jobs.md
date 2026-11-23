@@ -943,18 +943,29 @@ HAMCLOSE-05 reads completed jobs in `completed/` under the review service's
 runtime root. The job and round must both have state `completed`, the job must
 match the repository and PR, and both round endpoints must be full commit SHAs.
 The round-only starting-base proof requires a GitHub `ahead` comparison or
-the existing authenticated force-push proof for a diverged edge. Shared review
-currency can compose these stored endpoints with authenticated Hammer comment
-edges. For a mixed chain, the exact final endpoint requires a Hammer edge.
+the existing authenticated force-push proof for a diverged edge. Shared
+finding applicability can compose these stored endpoints with authenticated
+Hammer comment edges. The exact final endpoint requires a Hammer edge.
+For head-match and cross-head withdrawal evidence, each native edge must
+come from a completed comment-only final handoff that binds its reviewed and
+published heads to the completed round, its publication proof and its
+suppressed review request.
 
 The reader skips unreadable, malformed, non-regular and oversized job files
-individually. Each record is limited to 1 MiB. A scan limits directory entries
-to 100,000, matching job files to 256 and distinct completed round edges to 256.
-An unreadable directory or a scan beyond those bounds supplies no round proof.
+individually. Each record is limited to 1 MiB. The reader streams directory
+entries, opening at most 256 matching files and retaining at most 256 distinct
+completed round edges for the selected repository and PR. Unrelated filenames
+consume neither limit. An unreadable directory or an excess of matching records
+or round edges supplies no round proof.
 Authenticated comment and patch-equivalence proofs can still establish currency.
-The process warns once for each scan limit reached. When a daemon snapshot
-already supplies a complete authenticated Hammer chain, the range validator
-uses it without scanning completed jobs.
+The process logs limit hits by repository, PR and limit, at most once per hour
+for each key retained in its bounded diagnostic cache. When a daemon snapshot
+already supplies a complete authenticated Hammer chain, the range validator uses
+it without scanning completed jobs.
+
+The directory scan has a separate ceiling of 125,000 entries across all
+repositories and PRs. If it encounters another entry, the reader discards
+partial round evidence and reports the `directory entries` limit.
 
 For a completed local Comment-only round, the daemon's `git-cherry-replay`
 proof can also carry review applicability to the exact recorded publication
@@ -964,6 +975,12 @@ handoff, and the positive replay and worker-commit counts. This evidence
 admits findings and identifies the Hammer starting range. Merge still requires
 its own exact-head validation and source-preservation checks. HQ publication
 keeps its separate produced-attestation contract.
+
+Standalone local replay requires the settled round's explicit `publishedHeadSha`
+to match `completion.workerPushedHeadSha`. A completed final handoff can use
+the round's matching `resultingHeadSha` when `publishedHeadSha` is absent.
+That handoff evidence can be composed with an authenticated Hammer edge to
+prove review currency at the final head.
 
 The retry transition retains the round and its attempt metadata while decrementing
 `currentRound`; the next claim reuses that round number and merges the retained

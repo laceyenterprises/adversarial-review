@@ -10,7 +10,9 @@ import { isGitHubRateLimitError, rateLimitErrorObservation } from './rate-limit-
 import { guardStackedBase } from './ama/stacked-base.mjs';
 import { resolveHqRoot } from './hq-root.mjs';
 import { filterGitHubBody } from './github-outbound-body.mjs';
-import { hammerAttestationChain } from './ama/hammer-head-validation.mjs';
+import {
+  HAMMER_COMMENTS_CAPPED, hammerAttestationChain, hammerProvenanceCommentsCapped,
+} from './ama/hammer-head-validation.mjs';
 import { createReviewCurrencyReader } from './ama/review-currency.mjs';
 import { closerReviewProof, readCloserReviewProof } from './ama/closer-review-proof.mjs';
 import { createHistoryReader } from './ama/history-reader.mjs';
@@ -657,7 +659,9 @@ async function runDaemonCleanMergeAttemptInner({
   const reviewCarryForward = !docsFastPath && validatedHead !== liveHead
     ? readReviewCarryForwardRecord(rootDir, { repo: repoPath, prNumber, reviewedHead: validatedHead, currentHead: liveHead })
     : null;
+  let terminalCommentsCapped = false;
   const hasTerminalProvenance = async () => {
+    terminalCommentsCapped = hammerProvenanceCommentsCapped(liveRollup?.comments, repoPath, prNumber);
     if (hammerAttestationChain(liveRollup?.comments, validatedHead, liveHead)) return true;
     if (!hamTerminalRemediationHead || snapshotHead !== liveHead) return false;
     const currency = createReviewCurrencyReader({ repo: repoPath, prNumber, rootDir, comments: liveRollup?.comments ?? [],
@@ -667,7 +671,9 @@ async function runDaemonCleanMergeAttemptInner({
   if (validatedHead !== liveHead && !liveOperatorOverride
     && hamTerminalRemediationValidated !== true && !reviewCarryForward
     && !await hasTerminalProvenance()) {
-    return NOT_TAKEN('stale-head', { reasons: ['stale-head'], exactHeadReview: true });
+    return NOT_TAKEN('stale-head', {
+      reasons: ['stale-head', ...(terminalCommentsCapped ? [HAMMER_COMMENTS_CAPPED] : [])], exactHeadReview: true,
+    });
   }
   if (
     cfg?.autonomousCloserCommitCleanMergeEnabled !== false &&

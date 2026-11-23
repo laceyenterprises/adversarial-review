@@ -979,27 +979,28 @@ test('abort removes a queued task without launching it', async () => {
   assert.equal(launched, false);
 });
 
-function closerResumeFixture(scenario) {
+function closerResumeFixture(scenario, { reviewedHead = HEAD, liveHead = 'H1', repo = 'subject-07' } = {}) {
   const body = SETTLED_BODY.replace('- None.', scenario === 'blocking' ? '- Blocking defect.' : '- None.')
     .replace('## Non-blocking Issues\n\n- None.', '## Non-blocking Issues\n\n- Measurement evidence needs clarification.');
   const wakes = [];
   const payloads = [];
   const liveHeads = [];
   const args = closureArgs({
+    repoPath: repo,
     resolveAmaHammerDispatchModeImpl: () => 'inline',
     resolveReviewCycleExhaustionImpl: () => ({ riskClass: 'low', reviewCycleExhausted: false }),
     fetchLatestHeadReviewBodiesImpl: async (_repo, _pr, head) => {
       liveHeads.push(head);
-      return head === HEAD ? [body]
+      return head === reviewedHead ? [body]
         : scenario === 'live-blocking' ? ['## Verdict\nRequest changes\n## Blocking Issues\n- Live defect.']
           : scenario === 'live-clean' ? [body] : [];
     },
     proveCloserAuthoredStaleHeadImpl: args => proveCloserAuthoredStaleHead({ ...args,
       comments: scenario === 'worker' ? [] : [{ author: 'the-hammer-lacey[bot]',
-        body: `HAM-Base-Head: ${HEAD}\nHAM-Validated-Head: H1` }],
+        body: `HAM-Base-Head: ${reviewedHead}\nHAM-Validated-Head: ${liveHead}` }],
     }),
     resolveHeadCloserCommitSuppressionImpl: async () => ({ suppressed: scenario !== 'worker', reason: 'closer-commit-trailer' }),
-    fetchHeadCloserVerifiedCommitImpl: async () => ({ sha: 'H1', parentSha: HEAD, message: 'Closed-By: hammer' }),
+    fetchHeadCloserVerifiedCommitImpl: async () => ({ sha: liveHead, parentSha: reviewedHead, message: 'Closed-By: hammer' }),
     resolveHamTerminalRemediationEvidenceImpl: async () => null,
     runDaemonCleanMergeAttemptImpl: async () => ({ disposition: 'not-taken', reason: 'not-eligible', reasons: [] }),
     fetchMergedProtectiveDependentsImpl: async () => [],
@@ -1007,9 +1008,11 @@ function closerResumeFixture(scenario) {
     requestEligibleHammerWakeImpl: options => { wakes.push(options); },
     maybeDispatchAmaCloserImpl: async payload => { payloads.push(payload); return { dispatched: true }; },
   });
+  args.reviewStateRow.repo = repo;
+  args.reviewStateRow.reviewer_head_sha = reviewedHead;
   args.reviewStateRow.review_body = body;
-  args.candidate.headSha = 'H1';
-  args.currentRevisionRef = 'H1';
+  args.candidate.headSha = liveHead;
+  args.currentRevisionRef = liveHead;
   args.candidate.statusCheckRollup = scenario === 'unknown' ? [] : [{ __typename: 'CheckRun', name: 'test',
     status: scenario.startsWith('pending') ? 'IN_PROGRESS' : 'COMPLETED',
     conclusion: ['red', 'red-and-pending'].includes(scenario) ? 'FAILURE' : scenario.startsWith('pending') ? null : 'SUCCESS' }];
@@ -1214,24 +1217,25 @@ function closerAuthoredStaleWakes(args) {
 }
 
 test('HAMROUNDEDGE-01 closure passes its round root to the shared proof and wakes the hammer', async t => {
-  const { args, payloads } = closerResumeFixture('green');
+  const [reviewedHead, remediatedHead, liveHead] = ['a', 'b', 'c'].map(hex => hex.repeat(40));
+  const { args, payloads } = closerResumeFixture('green', { reviewedHead, liveHead, repo: 'fixture/subject-07' });
   t.after(() => rmSync(args.rootDir, { recursive: true, force: true }));
   const dir = path.join(args.rootDir, 'data', 'follow-up-jobs', 'completed');
   mkdirSync(dir, { recursive: true });
-  writeFileSync(path.join(dir, 'subject-07-pr-7-round.json'), JSON.stringify({
+  writeFileSync(path.join(dir, 'fixture__subject-07-pr-7-round.json'), JSON.stringify({
     repo: args.repoPath, prNumber: args.prNumber, status: 'completed', remediationPlan: { rounds: [
-      { state: 'completed', startHeadSha: HEAD, resultingHeadSha: 'remediated' },
+      { state: 'completed', startHeadSha: reviewedHead, resultingHeadSha: remediatedHead },
     ] },
   }));
   args.proveCloserAuthoredStaleHeadImpl = input => {
     assert.equal(input.rootDir, args.rootDir);
     return proveCloserAuthoredStaleHead({ ...input, comments: [{ author: 'hammer-worker',
-      body: 'HAM-Base-Head: remediated\nHAM-Pushed-Head: H1' }] });
+      body: `HAM-Base-Head: ${remediatedHead}\nHAM-Pushed-Head: ${liveHead}` }] });
   };
   const wakes = closerAuthoredStaleWakes(args);
   const result = await maybeDispatchAmaClosureFor(args);
   assert.equal(result.closerAuthoredStale.decision, 'eligible');
-  assert.deepEqual(result.closerAuthoredStale.closerCommits, ['H1', 'remediated']);
+  assert.deepEqual(result.closerAuthoredStale.closerCommits, [liveHead, remediatedHead]);
   assert.equal(wakes.length, 1);
   assert.equal(payloads.length, 1);
   assert.equal(payloads[0].dispatchContext.closerAuthoredStale.eligible, true);

@@ -23,12 +23,12 @@ import {
 } from '../src/ama/hammer-retry-cap.mjs';
 import { resolveClosureNextAction } from '../src/ama/closure-next-action.mjs';
 
-const R = 'r'.repeat(40);
-const P = 'p'.repeat(40);
-const W = 'w'.repeat(40);
+const R = 'a'.repeat(40);
+const P = 'b'.repeat(40);
+const W = 'e'.repeat(40);
 const C1 = 'c'.repeat(40);
 const C2 = 'd'.repeat(40);
-const M = 'm'.repeat(40);
+const M = 'f'.repeat(40);
 
 // graph: head -> { parent, closer, parentCount }
 function graphStubs(graph) {

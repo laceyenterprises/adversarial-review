@@ -51,10 +51,11 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
-import { homedir } from 'node:os';
+import { resolveHomePath } from './account-home.mjs';
 import { randomUUID } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { sleepSync } from './sqlite-busy-retry.mjs';
+import { resolveDeployRoot } from './deploy-root.mjs';
 
 export const PER_WORKER_PLACEHOLDER_REFRESH_TOKEN =
   'agent-os-per-worker-placeholder-no-rotate';
@@ -96,8 +97,9 @@ function resolveAuthSyncBin(env) {
     // src/ -> repo root -> agent-os parent (tools/adversarial-review is a
     // submodule of agent-os) -> runtime/...
     resolve(here, '..', '..', '..', 'runtime', 'codex', 'bin', 'codex-worker-auth-sync'),
-    '/Users/airlock/agent-os/runtime/codex/bin/codex-worker-auth-sync',  // cfg-allowlist(account-airlock): oss-readiness-apply-reviewed
   ];
+  const deployRoot = resolveDeployRoot(env);
+  if (deployRoot) candidates.push(resolve(deployRoot, 'runtime', 'codex', 'bin', 'codex-worker-auth-sync'));
   for (const candidate of candidates) {
     if (existsSync(candidate)) return candidate;
   }
@@ -246,7 +248,10 @@ export function materializePerWorkerCodexAuth({
 export function prepareCorporateCodexReviewerAuth(env, sessionUuid, { materializeImpl = materializePerWorkerCodexAuth } = {}) {
   delete env.CODEX_REVIEWER_AUTH_PROVIDER;
   if (env.CODEX_BROKER_PROVIDER !== 'codex-corp') return null;
-  const sharedAuthPath = env.CODEX_AUTH_PATH || join(env.CODEX_SOURCE_HOME || env.CODEX_HOME || join(env.HOME || homedir(), '.codex'), 'auth.json');
+  const codexHome = env.CODEX_SOURCE_HOME || env.CODEX_HOME;
+  const sharedAuthPath = env.CODEX_AUTH_PATH || (codexHome
+    ? join(codexHome, 'auth.json') : resolveHomePath(env, '.codex', 'auth.json'));
+  if (!sharedAuthPath) throw new Error('corporate Codex broker credential unavailable: no absolute account home');
   const auth = materializeImpl({ sharedAuthPath, key: `reviewer-${sessionUuid}-${randomUUID()}`, env, provider: 'codex-corp' });
   if (!auth) throw new Error('corporate Codex broker credential unavailable');
   env.CODEX_AUTH_PATH = auth.authPath;

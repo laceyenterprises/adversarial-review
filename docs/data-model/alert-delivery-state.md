@@ -6,6 +6,8 @@ principal-owned `ADVERSARIAL_ALERT_DELIVERY_ROOT` /
 `AGENT_OS_ALERT_DELIVERY_STATE_DIR` owner-root override. Overrides name the
 parent root; the sink appends `data/alert-delivery/`. A path already ending in
 `data/alert-delivery/` is accepted as the final sink path for compatibility.
+The default uses an absolute `HOME` or the OS account home. An account without
+an absolute home requires an explicit state root.
 **Source of truth:** `src/alert-delivery.mjs`
 **Runtime surface:** `src/alert-delivery.mjs`, `src/health-probe.mjs`, `src/watcher.mjs`, `src/fleet-stop.mjs`
 

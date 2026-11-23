@@ -15,7 +15,7 @@ import { resolveClaudeBrokerProvider } from './claude-account-routing.mjs';
 import { execFile } from 'node:child_process';
 import { existsSync, readFileSync } from 'node:fs';
 import { readFile } from 'node:fs/promises';
-import { homedir } from 'node:os';
+import { resolveHomePath } from './account-home.mjs';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
 import { resolveClaudeCodeCliPath } from './remediation-claude-code-worker.mjs';
@@ -33,8 +33,8 @@ function resolveCodexAuthPath() {
     return process.env.CODEX_AUTH_PATH;
   }
 
-  const codexHome = process.env.CODEX_HOME || join(process.env.HOME || homedir(), '.codex');
-  return join(codexHome, 'auth.json');
+  return process.env.CODEX_HOME ? join(process.env.CODEX_HOME, 'auth.json')
+    : resolveHomePath(process.env, '.codex', 'auth.json');
 }
 
 class OAuthError extends Error {

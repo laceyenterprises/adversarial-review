@@ -54,7 +54,9 @@ withdrawal store.
 `bin/review-findings.mjs`,
 `migrations/20261024_simplicity_batch_lifecycle.sql`,
 `migrations/20261107_findings_batch_requeue.sql`,
-`migrations/20261120_findings_rate_indexes.sql`
+`migrations/20261120_findings_rate_indexes.sql`,
+`migrations/20261122_findings_batch_hold.sql`,
+`src/findings-batch-release.mjs`, `bin/findings-batch-release.mjs`
 
 `review_findings` stores each blocking and non-blocking finding from first-pass
 and rereview bodies using the existing kernel parser. Remediation comments and
@@ -418,6 +420,68 @@ retired with `dropped_reason = 'batch-released: <reason>'`. The next claim pass
 re-batches the findings. A re-batched finding hashes its attempt number into the
 manifest, so the retry gets a fresh batch ID, artifact directory and dispatch
 idempotency key, and never collides with the released batch.
+
+#### Read scope and operator holds (FINDINGSBATCHSTRAND-01)
+
+The review app reads dispatch launches only through exact `(project,
+owner/repo)` grants. Every keyed batch read (the publication receipt probe and
+the release probe) therefore names the pair the batch was dispatched under:
+`project_ref` is `HQ_PROJECT` (default `adversarial-merge-authority`, the same
+value passed to `hq dispatch --project`), and `repo` is the batch's qualified
+repository. An unqualified repository keeps the unscoped read. Without the pair,
+an unscoped read silently dropped the launch row, and the empty reply read as
+unproven absence. A repository under a second GitHub owner with no grant
+therefore held its batches with no stated cause. The scoped read is refused
+instead (`selectorRefused`):
+
+- Publication records `batch-dispatch-read-scope-denied: <project> <owner/repo>`.
+- Release reports that same reason as `needs-operator` on the first pass,
+  without waiting for the timeout, because only an operator grant clears it.
+- Once the pair is granted, an unexpired prepared batch publishes on the next
+  pass. An ended preparation releases as before.
+
+With the grant present, a scoped empty reply can also carry the producer's
+exact-selector absence proof.
+
+Migration `20261122_findings_batch_hold.sql` adds `finding_batches.hold_json`,
+`{reason, error, heldAt}` or NULL. Each release decision rewrites it: a
+`needs-operator` result records the reason and keeps `heldAt` while the reason
+and error are unchanged; any other result clears it. The backlog summary lists
+`heldBatches` (`batchId`, `repo`, `area`, `launchId`, `reason`, `error`,
+`heldAt`, `openFindings`) and `heldFindingCount`. It lists only unsettled,
+unreleased batches whose current `error` still equals the held error, so a later
+settlement write retires a stale hold. Any held batch raises
+`review:findings_backlog_overdue`, with one `held=<batchId>:<reason>` evidence
+entry per batch (at most 10).
+
+The operator release verb is read-only unless `--apply` is given:
+
+```sh
+node bin/findings-batch-release.mjs --root <review-root> --db <review-root>/data/reviews.db \
+  --batch <64-hex batch id> --mode retry|drop --reason '<one line>' [--accept-unreadable-custody] [--apply]
+```
+
+It refuses (exit 2, JSON `refused`) in these cases:
+
+- the batch is already settled or released;
+- the recorded launch's `hq dispatch status` is not terminal, is decision-blocked,
+  is unreadable or names another launch;
+- a readable keyed launch is live, decision-blocked or has an unknown status;
+- the collector holds the batch's `publish.lock` (apply only).
+
+When the keyed read is refused or unreadable, the verb proceeds only for a
+recorded terminal launch with no `publish-intent.json` (no publisher submitted),
+and only with `--accept-unreadable-custody`. Retry descendants of that launch are
+otherwise unobserved.
+
+- `retry` uses `releaseFindingBatch` with `operator-retry: <reason>`. Each open
+  finding gets `batch_attempts + 1` and a `requeued` audit row; the third attempt
+  exhausts as usual.
+- `drop` sets each open finding to `outcome='dropped'`,
+  `reason='operator-dropped: <reason>'`, retires the batch's advice and records
+  `released_at`/`release_reason`. It writes no grade or release audit row.
+
+A preview creates nothing, not even the lock file.
 
 An immediate SQLite transaction assigns **all** unassigned findings from confirmed
 merged source PRs to capped batches. Severity (`critical`/P0, `high`/P1,

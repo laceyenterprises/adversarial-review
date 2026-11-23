@@ -1,6 +1,7 @@
 // Exact, versioned classes. Unknown/dynamic text is deliberately unkeyable:
 // never collapse new evidence, identifiers or error messages into a wildcard.
 import { V1_ACTION_KINDS, v2DecisionBucket } from './shadow-actions.mjs';
+import { LIVE_EVIDENCE_UNKNOWN_REASONS, OPERATOR_DECISION_REASON } from './live-evidence-reasons.mjs';
 
 const DETAILS = new Set([
   null,
@@ -31,7 +32,13 @@ const DETAILS = new Set([
   'operator-hold:primary-change-repair', 'operator-hold:lease-expired',
   'operator-hold:checks-pending', 'operator-hold:review-findings-final',
   'operator-hold:needs-operator', 'operator-hold:operator-decision-required', 'done:terminal-observed',
+  // MRQ-11 D7: fixed v1 classes that previously fell into the null bucket.
+  // operator-label-required is the class; its label suffix is normalized away below.
+  'operator-hold:operator-label-required', 'operator-hold:repair-owner-unproven',
+  'review:disputed-findings-review',
 ]);
+// One class for every operator-only label. The key never carries the label name.
+const OPERATOR_LABEL_DETAIL = /^operator-hold:operator-label-required:[a-z0-9][a-z0-9._-]*$/;
 const REASONS = new Set([
   // src/finalization/eligibility.mjs: fixed eligibility reasons.
   'no revision advanced yet', 'no verdict at current revision',
@@ -59,11 +66,15 @@ const REASONS = new Set([
   'final remediator head requires strict exact-head review',
   'failed final remediation requires recovery', 'primary-change provenance unavailable',
   'automated stop requires relevant evidence',
+  // MRQ-11 D3 and D8 (workflow-decision.mjs fixed reasons).
+  OPERATOR_DECISION_REASON, ...Object.values(LIVE_EVIDENCE_UNKNOWN_REASONS),
 ]);
 
 export function shadowPatternKey(observation) {
   const { v1Action: v1, v2Decision: v2 } = observation;
+  const detail = OPERATOR_LABEL_DETAIL.test(v1?.detail ?? '') ? 'operator-hold:operator-label-required'
+    : v1?.detail ?? null;
   if (!V1_ACTION_KINDS.includes(v1?.kind) || !v2DecisionBucket(v2?.kind)
-    || !DETAILS.has(v1?.detail ?? null) || !REASONS.has(v2?.reason)) return null;
-  return JSON.stringify(['shadow-pattern-v1', v1.kind, v1.detail ?? null, v2.kind, v2.reason]);
+    || !DETAILS.has(detail) || !REASONS.has(v2?.reason)) return null;
+  return JSON.stringify(['shadow-pattern-v1', v1.kind, detail, v2.kind, v2.reason]);
 }

@@ -23,6 +23,7 @@ import { readRepairFacts } from '../src/repair-facts.mjs';
 import { readDispatchLaunches } from '../src/dispatch-read-client.mjs';
 import { amaCloserDispatchFilePath } from '../src/ama/dispatch-record-read.mjs';
 import { tryAcquireCloserIntentLock } from '../src/ama/pre-receipt-intent.mjs';
+import { mockRepairDispatchScope } from './helpers/repair-dispatch-scope.mjs';
 
 const repo = 'example/widgets', prNumber = 17;
 const old = 'a'.repeat(40), head = 'b'.repeat(40), later = 'c'.repeat(40);
@@ -993,12 +994,12 @@ test('PR-update helper reserves an exhausted review epoch before launch and reje
   const queued = join(dir, `${followUpJobFilePrefix(repo, prNumber)}synthetic-queue.json`);
   writeFileSync(queued, JSON.stringify({ jobId: 'synthetic-queue', repo, prNumber,
     status: 'pending', revisionRef: old }));
-  const argv = [f.rootDir, repo, String(prNumber), old, f.ownerKey, 'false'];
+  const argv = [f.rootDir, repo, String(prNumber), old, f.ownerKey, 'false', '', '', 'fixture-project'];
   const held = await main(argv);
   assert.equal(held.reason, 'remediation-owned');
   assert.equal(pendingRepairEpoch(f.rootDir, f), null);
   rmSync(queued);
-  const result = await main(argv);
+  const result = await main(argv, mockRepairDispatchScope(t));
   assert.equal(result.ok, true);
   assert.match(result.epoch.id, /^repair-/);
   assert.equal(result.epoch.ownerKey, f.ownerKey);

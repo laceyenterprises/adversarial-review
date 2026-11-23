@@ -26,7 +26,7 @@ const diagnosticFlushFixture = new URL('./helpers/watcher-diagnostic-flush-fixtu
 function buildRegisterSource(loaderPath) {
   return `
 import { omitWatcherDiagnosticFlushes } from ${JSON.stringify(diagnosticFlushFixture.href)};
-omitWatcherDiagnosticFlushes(${JSON.stringify(REPO_ROOT)});
+omitWatcherDiagnosticFlushes(${JSON.stringify(REPO_ROOT)}, restore => process.once('exit', restore));
 ${buildFixtureRegisterSource(loaderPath)}`;
 }
 
@@ -413,6 +413,7 @@ export async function load(url, context, nextLoad) {
       export function hasCommentOnlyFinalRoundPush() { return false; }
       export function hasUnprovenCommentOnlyFinalRoundHead() { return false; }
       export function hasSettledCommentOnlyReviewHead() { return false; }
+      export function scanPrFollowUpJobs() { return []; }
       export function scanArchivedStoppedFollowUpJobs() { return []; }
       export function findFinalRoundJobForProvenPush() { return null; }
       export function findCommentOnlyFinalRoundPushJob() { return null; }

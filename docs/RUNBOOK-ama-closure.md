@@ -1355,13 +1355,45 @@ dispatch key for a different epoch base head refuses `repair-head-mismatch`.
 An observed terminal epoch is retired before that replay-head refusal.
 See the rollout and mixed-version behavior in [LAC-2228](changes/LAC-2228.md).
 
-The helper is a cold composition root: before its first dispatch read (a
-`dispatched` closer lease's launch, or a pending repair epoch's owner) it calls
-`prepareDispatchReadContext`. A terminal launch with no live retry can satisfy
+The helper calls `prepareDispatchReadContext` before its first dispatch read
+of a closer lease, pending repair owner, or prospective new reservation.
+A terminal launch with no live retry can satisfy
 the repair admission check. Live, transient, timed-out or unproven reads refuse
 `closer-owned-or-unknown`. If preparation fails or leaves reads disabled, it
 refuses `dispatch-read-context-unavailable` with a redacted `detail` and reads
 nothing (REPAIRDISPATCHREAD-01).
+
+The native call is `bin/repair-in-place.mjs ROOT OWNER/REPO PR BASE_HEAD
+OWNER_KEY CONFLICTING [FOLLOW_UP_TICKET LAUNCHER_PID [DISPATCH_PROJECT]]`.
+Use empty ticket and PID arguments when passing a project without a follow-up
+claim. The project must be the one HQ will record for this dispatch. For a new
+epoch, the helper requires a selector-bound canonical reply under the existing
+exact review-app project/repository grant before it writes the reservation.
+Budget-available updates and existing-key replays follow their existing rules.
+After the read, it checks the follow-up claim and any replacement closer lease.
+It re-evaluates epoch ownership and the cap under the retry-ledger flock.
+The scope preflight retains the PR intent lock so another closer submission
+cannot enter between the custody check and reservation. It uses the dispatch
+reader's load-aware eight-second nominal default and bounded transient retry.
+
+On `repair-dispatch-project-required`, inspect the native caller's project
+resolution. On `repair-dispatch-read-scope-denied`, check the intended exact
+pair in the review app's `dispatch_reads`. `repair-dispatch-read-scope-unproven`
+means the read did not establish visibility. Check endpoint and producer
+availability and retry through native admission. The helper returns the app,
+project and repository in its refusal JSON, and HQ surfaces the reason and
+short diagnostic. These refusals create no epoch and spend no attempt.
+When the read-only ledger snapshot has no replay or pending epoch and remains
+below the cap, a missing project refuses before any closer alias settlement or
+owner read. Existing pending epochs still undergo ordinary owner observation;
+terminal closer aliases may settle before a later successor's missing-project
+or scope refusal. Such terminal-evidence settlement is independent of new
+reservation admission and does not allocate a successor.
+
+Deploy the Agent OS caller from `c9da1e455` (#11417) or later before floating
+this helper: it supplies argument nine from the dispatch project, including
+the CWP conflict path. See the exact caller and rollout evidence in
+[LAC-2329](changes/LAC-2329.md#caller-compatibility-and-rollout).
 
 For a rekeyed `dispatched` closer lease, both native repair reservation and
 `npm run merge-agent:cancel -- --repo OWNER/REPO --pr NUMBER REASON` look for
@@ -9117,8 +9149,10 @@ After deploy, SRE owns these checks:
 
 Closer dispatch, drain-status reads and post-merge signal emission resolve HQ
 from `dispatchContext.hqPath`, then `HQ_BIN` in the caller's execution environment,
-then the daemon default `/Users/airlock/.local/bin/hq`. A supplied environment
-does not require changing the watcher's process environment.
+then `.local/bin/hq` under the caller's absolute `HOME`. An unset, empty or
+relative `HOME` uses the OS account home. If no absolute account home is
+available, dispatch requires an explicit HQ path. A supplied environment is
+independent of the watcher's process environment.
 
 Drain refusal classification requires exit 6 and an anchored diagnostic; incidental
 drain text and other exit codes keep their ordinary handling. Epoch metadata

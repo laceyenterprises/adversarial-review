@@ -9,7 +9,7 @@ import {
   rmSync,
   statSync,
 } from 'node:fs';
-import { homedir } from 'node:os';
+import { resolveHomePath } from './account-home.mjs';
 import { basename, dirname, join, normalize } from 'node:path';
 import http from 'node:http';
 import https from 'node:https';
@@ -19,11 +19,10 @@ import { spawn as spawnChild } from 'node:child_process';
 
 import { writeFileAtomic } from './atomic-write.mjs';
 import { resolveNodeBin } from './node-interpreter.mjs';
+import { resolveDeployRoot } from './deploy-root.mjs';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
-const DEFAULT_TOP_LEVEL_PATH = join(homedir(), 'agent-os/config.yaml');
-const DEFAULT_SECRETS_ROOT = join(homedir(), '.config', 'adversarial-review', 'secrets');
-const LEGACY_SECRETS_ROOT = '/Users/airlock/agent-os/agents/clio/credentials/local';  // cfg-allowlist(account-airlock): oss-readiness-apply-reviewed
+const LEGACY_SECRETS_SUBPATH = ['agents', 'clio', 'credentials', 'local'];
 const DEFAULT_ALERT_BUS_URL = 'http://127.0.0.1:18799/hooks/wake';
 const DEFAULT_ALERT_NAME = 'Adversarial Watcher Health';
 const DEFAULT_ALERT_AGENT_ID = 'main';
@@ -68,11 +67,15 @@ function finiteNonNegativeNumber(value, fallback) {
   return Number.isFinite(parsed) && parsed >= 0 ? parsed : fallback;
 }
 
-function resolveDefaultHooksTokenFile(fsImpl = { existsSync }) {
-  const defaultTokenFile = join(DEFAULT_SECRETS_ROOT, 'litellm-alert-bridge.token');
-  const legacyTokenFile = join(LEGACY_SECRETS_ROOT, 'litellm-alert-bridge.token');
-  if (fsImpl.existsSync(defaultTokenFile)) return defaultTokenFile;
-  if (fsImpl.existsSync(legacyTokenFile)) return legacyTokenFile;
+function resolveDefaultHooksTokenFile(fsImpl = { existsSync }, env = process.env) {
+  const defaultTokenFile = resolveHomePath(env, '.config', 'adversarial-review', 'secrets', 'litellm-alert-bridge.token');
+  if (defaultTokenFile && fsImpl.existsSync(defaultTokenFile)) return defaultTokenFile;
+  // The legacy location lives under the configured deployment checkout.
+  const deployRoot = resolveDeployRoot(env);
+  if (deployRoot) {
+    const legacyTokenFile = join(deployRoot, ...LEGACY_SECRETS_SUBPATH, 'litellm-alert-bridge.token');
+    if (fsImpl.existsSync(legacyTokenFile)) return legacyTokenFile;
+  }
   return defaultTokenFile;
 }
 
@@ -99,7 +102,8 @@ function parseYamlStringValue(raw) {
 }
 
 function readAlertBusUrlFromConfig(env = process.env, fsImpl = { readFileSync }) {
-  const topPath = env.AGENT_OS_CONFIG_PATH || DEFAULT_TOP_LEVEL_PATH;
+  const topPath = env.AGENT_OS_CONFIG_PATH || resolveHomePath(env, 'agent-os', 'config.yaml');
+  if (!topPath) return null;
   let raw = null;
   try {
     raw = fsImpl.readFileSync(topPath, 'utf8');
@@ -157,13 +161,14 @@ function alertSinkRoot(rootDir = ROOT) {
 }
 
 function resolveAlertSinkStateRoot(env = process.env, rootDir = ROOT) {
-  const defaultOwnerRoot = rootDir === ROOT
-    ? join(homedir(), '.config', 'adversarial-review')
-    : rootDir;
-  return firstNonEmpty(
+  const configured = firstNonEmpty(
     env.ADVERSARIAL_ALERT_DELIVERY_ROOT,
     env.AGENT_OS_ALERT_DELIVERY_STATE_DIR
-  ) || alertSinkRoot(defaultOwnerRoot);
+  );
+  if (configured) return configured;
+  const ownerRoot = rootDir === ROOT ? resolveHomePath(env, '.config', 'adversarial-review') : rootDir;
+  if (!ownerRoot) throw new Error('Alert delivery state requires an absolute account home or an explicit state root');
+  return alertSinkRoot(ownerRoot);
 }
 
 function pendingDir(rootDir = ROOT) {
@@ -474,7 +479,7 @@ function resolveAlertTransportDefaults(env = process.env, {
       env.HOOKS_TOKEN_FILE ||
       resolveHooksTokenFileFromRoot(env.ADV_SECRETS_ROOT, fsImpl) ||
       resolveHooksTokenFileFromRoot(env.LITELLM_SECRETS_ROOT, fsImpl) ||
-      resolveDefaultHooksTokenFile(fsImpl),
+      resolveDefaultHooksTokenFile(fsImpl, env),
     rootDir: resolveAlertSinkStateRoot(env, rootDir),
     retryDelayMs: finiteNonNegativeNumber(
       env.ADVERSARIAL_ALERT_DELIVERY_RETRY_DELAY_MS,
@@ -516,7 +521,7 @@ function readHooksToken({ env = process.env, fsImpl = { readFileSync, existsSync
   });
   let tokenFromFile = null;
   try {
-    tokenFromFile = fsImpl.readFileSync(config.hooksTokenFile, 'utf8');
+    if (config.hooksTokenFile) tokenFromFile = fsImpl.readFileSync(config.hooksTokenFile, 'utf8');
   } catch {
     tokenFromFile = null;
   }

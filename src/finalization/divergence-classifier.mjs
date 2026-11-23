@@ -170,6 +170,13 @@ export function classifyDivergence({ v1Action, v2Decision, state = null, foldErr
     return classification('agree', { direction: 'benign', class: 'concur', ref: null, reason: `v1 (${v1Action.kind}) and v2 (${v2Decision.kind}) concur on ${v1Bucket}` });
   }
 
+  // MRQ-11 D5: both systems observed the same GitHub landing. v2 owning the
+  // post-merge delivery of a recorded merge is not a different merge decision.
+  if (v1Action?.kind === 'merged' && state?.workflow?.merge && v2Decision?.nextAction === 'deliver') {
+    return classification('agree', { direction: 'benign', class: 'merge-observed', ref: null,
+      reason: 'v1 merged and v2 recorded the same observed merge; v2 now owns post-merge delivery' });
+  }
+
   // Divergence. Try each documented v1 failure-family fingerprint in order.
   for (const sig of V1_DEFECT_SIGNATURES) {
     if (sig.match(v1Action, v2Decision, state ?? { revisions: {} })) {

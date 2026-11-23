@@ -89,11 +89,18 @@ test('endpoint outage remains unavailable and never consults a ledger fallback',
 });
 
 test('dispatch lookup distinguishes selector refusals from transport faults without exposing producer details', async () => {
-  for (const [error, refused] of [
+  for (const [error, refused, denied = false] of [
     [Object.assign(new Error('secret'), { status: 400 }), true],
-    [Object.assign(new Error('secret'), { response: { status: 403 } }), true],
+    [Object.assign(new Error('secret'), { response: { status: 403 } }), true, true],
+    [Object.assign(new Error('secret'), { statusCode: 403 }), true, true],
+    [new Error('app-contract 403 secret'), true, true],
+    [Object.assign(new Error('secret'), { code: 'dispatch_read_scope_denied' }), true, true],
+    [new Error('app-contract dispatch_read_scope_denied: secret'), true, true],
+    [Object.assign(new Error('secret'), { code: 'dispatch_scope_denied' }), true, true],
+    [Object.assign(new Error('secret'), { code: 'scope_denied' }), true, true],
+    [Object.assign(new Error('secret'), { code: 'read_scope_denied' }), true, true],
     [Object.assign(new Error('secret'), { code: 'unsupported_selector' }), true],
-    [new Error('app-contract dispatch_scope_denied: secret'), true],
+    [new Error('app-contract dispatch_scope_denied: secret'), true, true],
     [Object.assign(new Error('secret'), { code: 'ETIMEDOUT' }), false],
     [Object.assign(new Error('secret'), { code: 'ECONNREFUSED' }), false],
     [Object.assign(new Error('secret'), { status: 503 }), false],
@@ -107,6 +114,7 @@ test('dispatch lookup distinguishes selector refusals from transport faults with
     ]) {
       assert.equal(result.ok, false);
       assert.equal(result.selectorRefused === true, refused);
+      assert.equal(result.scopeDenied === true, denied);
       assert.doesNotMatch(JSON.stringify(result), /secret/);
     }
   }

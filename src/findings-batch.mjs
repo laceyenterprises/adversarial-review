@@ -351,6 +351,21 @@ export function settleFindingBatch(db, batch, result, pr = null, dropPrs = {}) {
   }).immediate();
 }
 
+const QUALIFIED_REPO = /^[^/\s]+\/[^/\s]+$/;
+const READ_SCOPE_DENIED = 'batch-dispatch-read-scope-denied';
+
+// The review app's dispatch reads are granted per exact (project, owner/repo)
+// pair. Name that pair on every keyed read, so a repository under an owner
+// without its grant is refused as such instead of reading as unproven absence.
+export function findingBatchDispatchScope(batch, env = process.env) {
+  return { projectRef: env.HQ_PROJECT || 'adversarial-merge-authority',
+    ...(QUALIFIED_REPO.test(batch.repo || '') ? { repo: batch.repo } : {}) };
+}
+
+function readScopeDenied(scope) {
+  return `${READ_SCOPE_DENIED}: ${scope.projectRef} ${scope.repo || '(unqualified repository)'}`;
+}
+
 export function findingBatchDispatchArgs({ batch, workerClass, promptPath, env, branch = null }) {
   // Both decision and publication launches can cover mixed/unknown builders.
   // Without per-finding provenance, a Grok pin cannot establish subject eligibility.
@@ -358,7 +373,7 @@ export function findingBatchDispatchArgs({ batch, workerClass, promptPath, env, 
   return ['dispatch', '--priority', 'normal', '--idempotency-key', `findings-batch-${batch.batch_id}`,
     '--worker-class', workerClass, '--task-kind', 'coding', '--completion-shape', branch ? 'pr' : 'decision-only',
     ...(branch ? ['--branch', branch] : []),
-    '--project', env.HQ_PROJECT || 'adversarial-merge-authority', '--repo', batch.repo.split('/').at(-1),
+    '--project', findingBatchDispatchScope(batch, env).projectRef, '--repo', batch.repo.split('/').at(-1),
     '--ticket', `FINDINGS-${batch.batch_id}`, '--parent-session', env.HQ_PARENT_SESSION || 'adversarial-review',
     '--prompt', promptPath, '--root', resolveHqRoot(env)];
 }
@@ -422,14 +437,16 @@ async function publishFindingBatch({ db, batch, result, dir, outputPath, env, ro
     const branch = status.branch;
     if (typeof branch !== 'string' || !branch.trim() || branch.startsWith('-')) throw Error('batch-branch-missing');
     const key = `findings-batch-${batch.batch_id}`;
+    const scope = findingBatchDispatchScope(batch, env);
     const probeLaunches = async () => {
       let probe;
       try {
         probe = await readLaunches({ env, rootDir, hqRoot: resolveHqRoot(env),
-          idempotencyKey: key, timeoutMs: probeTimeoutMs });
+          ...scope, idempotencyKey: key, timeoutMs: probeTimeoutMs });
       } catch (error) {
         throw publicationProbeError(error, 'keyed launch probe', probeTimeoutMs, 'batch-publish-receipt-unavailable');
       }
+      if (!probe?.ok && probe?.selectorRefused === true) throw Error(readScopeDenied(scope));
       if (!probe?.ok && (probe?.timedOut || probe?.killed || probe?.signal)) {
         throw publicationProbeError(probe, 'keyed launch probe', probeTimeoutMs, 'batch-publish-receipt-unavailable');
       }
@@ -629,17 +646,25 @@ async function releaseEndedFindingBatch({ db, batchId, hasOutcomes, env, rootDir
   }
   if (!batch.launch_id && !batch.error) return null;
   const stale = batchAgeMs(batch, now) > timeoutMs && Boolean(batch.error || !hasOutcomes);
-  if (!stale && !dispatchExhausted && !(batch.launch_id && batch.error && ENDED_LAUNCH_RELEASE_ERRORS.test(batch.error))) return null;
+  // A refused read grant never clears by waiting; re-probe it every pass.
+  const scopeDenied = Boolean(batch.launch_id) && (batch.error || '').startsWith(`${READ_SCOPE_DENIED}:`);
+  if (!stale && !dispatchExhausted && !scopeDenied
+    && !(batch.launch_id && batch.error && ENDED_LAUNCH_RELEASE_ERRORS.test(batch.error))) return null;
   const hold = reason => stale || dispatchExhausted ? { needsOperator: reason } : null;
   // A partially recorded lifecycle handoff may already have canceled the
   // source. Its typed refusal/receipt mismatch still retains publication work.
   if (/decision-publication/.test(batch.error || '')) return hold('batch-decision-publication-unresolved');
   const key = `findings-batch-${batch.batch_id}`;
   const options = { env, rootDir, hqRoot: resolveHqRoot(env), timeoutMs: 15_000 };
+  const scope = findingBatchDispatchScope(batch, env);
   let probe;
-  try { probe = await readLaunches({ ...options, idempotencyKey: key }); }
+  try { probe = await readLaunches({ ...options, ...scope, idempotencyKey: key }); }
   catch { return hold('batch-keyed-launch-probe-unreadable'); }
+  // Only an operator grant for this exact pair can make the launch readable.
+  if (!probe?.ok && probe?.selectorRefused === true) return { needsOperator: readScopeDenied(scope) };
   if (!probe?.ok || !Array.isArray(probe.rows)) return hold('batch-keyed-launch-probe-unreadable');
+  // Readable again before expiry: collection resumes publication next pass.
+  if (scopeDenied && !stale) return null;
   if (probe.rows.some(row => row?.idempotency_key !== key)) return hold('batch-keyed-launch-probe-mismatch');
   if (probe.rows.some(row => !readLaunchRequestStatus(row.status).status)) return hold('batch-launch-status-unreadable');
   if (probe.rows.some(row => !readLaunchRequestStatus(row.status).terminal)) return null;
@@ -672,6 +697,21 @@ async function releaseEndedFindingBatch({ db, batchId, hasOutcomes, env, rootDir
   return releaseFindingBatch(db, batch, reason);
 }
 
+// Retain each pass's needs-operator decision on the batch, so health can name
+// the held batch and reason. The hold binds the error it was decided on: any
+// later settlement write that changes the error retires it from the report.
+function recordFindingBatchHold(db, batchId, reason, now) {
+  const row = db.prepare('SELECT error,hold_json FROM finding_batches WHERE batch_id=?').get(batchId);
+  if (!row) return;
+  let previous = null;
+  try { previous = JSON.parse(row.hold_json || 'null'); } catch { previous = null; }
+  const error = row.error ?? null;
+  const json = reason == null ? null : JSON.stringify({ reason, error,
+    heldAt: previous?.reason === reason && previous?.error === error && typeof previous.heldAt === 'string'
+      ? previous.heldAt : new Date(now).toISOString() });
+  if (json !== (row.hold_json ?? null)) db.prepare('UPDATE finding_batches SET hold_json=? WHERE batch_id=?').run(json, batchId);
+}
+
 export async function runFindingBatches({ db, rootDir, env = process.env, day = new Date().toISOString().slice(0, 10),
   execFileImpl = execFileAsync, fetchPr = fetchFindingBatchPr, fetchPublication = fetchFindingBatchPublication,
   readLaunches = readLaunchRequestByIdempotencyKeyAsync, logger = console, resolutionOnly = false,
@@ -699,6 +739,9 @@ export async function runFindingBatches({ db, rootDir, env = process.env, day = 
       logger.warn?.(`[findings-batch] needs-operator ${batch.batch_id}: ${released.needsOperator}`);
     } else if (released) logger.warn?.(`[findings-batch] ${batch.repo}/${batch.area}: released ${batch.batch_id} `
       + `(${released.reason}): ${released.requeued} requeued, ${released.exhausted} exhausted`);
+    // Reporting only: a failed hold write never becomes the batch's error.
+    try { recordFindingBatchHold(db, batch.batch_id, released?.needsOperator ?? null, now); }
+    catch (error) { logger.warn?.(`[findings-batch] ${batch.batch_id}: hold record failed: ${error.message}`); }
     return released;
   };
   const processBatch = async batch => {

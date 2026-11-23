@@ -11,6 +11,9 @@ import { hamCommitIdentityMatches, isHamWorkerTicket, parseCommitTrailers, parse
 
 const SHA = /^[a-f0-9]{40}$/i;
 const LIMIT = 256;
+const isAbort = error => ['AbortError', 'TimeoutError'].includes(error?.name)
+  || ['ABORT_ERR', 'ETIMEDOUT'].includes(error?.code)
+  || (error?.killed === true && ['SIGTERM', 'SIGKILL'].includes(error?.signal));
 
 // No fetches: callers own checkout hydration. Missing objects are missing proof,
 // never permission to assume that a rewritten review is still current.
@@ -138,7 +141,10 @@ export function createReviewCurrencyReader({ repo, prNumber, rootDir, get, comme
     return matched;
   };
   const proveRebase = async (reviewedHead, currentHead, { rebaseOnly, limits, diagnostics }) => {
-    const provenance = await readComments().catch(() => null);
+    const provenance = await readComments().catch(error => {
+      if (isAbort(error)) throw error;
+      return null;
+    });
     if (hammerProvenanceCommentsCapped(provenance, repo, prNumber)) limits.push(HAMMER_COMMENTS_CAPPED);
     if (hammerAttestationChain(provenance, reviewedHead, currentHead)) return 'closer-rebase-provenance';
     roundRead ??= readCompletedRemediationEvidence(rootDir, repo, prNumber);
@@ -162,12 +168,13 @@ export function createReviewCurrencyReader({ repo, prNumber, rootDir, get, comme
         if (proof) return proof;
       }
     } catch (error) {
+      if (isAbort(error)) throw error;
       diagnostics.push(error.message);
     }
     // Native rounds can keep findings and superseding reviews in scope.
     // A round awaiting review carries no head-match or disposition waiver.
     return !rebaseOnly && hammerAttestationChain(provenance, reviewedHead, currentHead, rounds)
-      ? 'completed-remediation-hammer-finding-currency' : null;
+      ? { proof: 'completed-remediation-hammer-finding-currency', ...(diagnostics.length ? { patchProofError: diagnostics.at(-1) } : {}) } : null;
   };
   return (reviewedHead, currentHead, { rebaseOnly = false } = {}) => {
     const key = JSON.stringify([reviewedHead, currentHead, rebaseOnly]);
@@ -182,13 +189,17 @@ export function createReviewCurrencyReader({ repo, prNumber, rootDir, get, comme
       let status;
       try {
         try { status = (await get(`repos/${repo}/compare/${reviewedHead}...${currentHead}`))?.status; }
-        catch { /* A durable exact-endpoint edge can independently prove currency. */ }
+        catch (error) {
+          if (isAbort(error)) throw error;
+          // A durable exact-endpoint edge can independently prove currency.
+        }
         if (!rebaseOnly && ['ahead', 'identical'].includes(status)) return { ...result, current: true, proof: 'ancestry' };
         // A branch reset cannot borrow evidence from its discarded descendant.
         if (status === 'behind') return { ...result, missingProof: 'current head predates reviewed evidence' };
         const proof = await proveRebase(reviewedHead, currentHead, { rebaseOnly, limits, diagnostics });
-        if (proof) return { ...result, current: true, proof };
+        if (proof) return { ...result, current: true, ...(typeof proof === 'string' ? { proof } : proof) };
       } catch (error) {
+        if (isAbort(error)) throw error;
         diagnostics.push(error.message);
       }
       return { ...result, missingProof: [missingProof, ...limits, ...diagnostics].join(': '),

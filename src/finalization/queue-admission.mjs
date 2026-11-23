@@ -144,7 +144,10 @@ export function createQueueAdmissionService({ store, liveAdapter, gitAdapter, no
         if (Date.parse(now()) >= Date.parse(deadline)) decision = disposition('parked-infrastructure', 'admission-deadline-expired');
         if (decision.phase === 'ready' && !parked(entry.phase)
           && adapters.order(entry.lane).actionable[0]?.entryId !== entryId) return current;
-        if (decision.phase === entry.phase && decision.reason === entry.reason) return current;
+        // A repeated parked observation advances updatedAt for the consumer's
+        // next probe, including after restart. An observed expiry is settled.
+        if (decision.phase === entry.phase && decision.reason === entry.reason
+          && (!parked(entry.phase) || decision.reason === 'admission-deadline-expired')) return current;
         return store.progress({ fence, entryId, phase: decision.phase, at: queueTime(now()), expectedEntry: entry,
           readmit: parked(entry.phase) && decision.phase === 'ready', patch: {
             reason: decision.reason, admission: { kind: receipt?.kind ?? null, observedAt: at,

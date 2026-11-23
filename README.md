@@ -4832,6 +4832,11 @@ predicate or merges; the queue executor does. Wakes observing the durable ack be
 the final dispatch recheck reuse it; an ack committed after that read can still
 race launch. Returned work owes fresh admission. Clean daemon and certified closer
 recovery only enqueue, confirming the actual stored receipt before reporting queued.
+Hammer receipts retain the full finding inventory. If strict non-blocking
+remediation is explicitly disabled, an unresolved advisory finding can be
+recorded as deferred. Blocking findings still require exact-head evidence.
+The watcher rechecks parked holds and permissions at one-minute intervals
+within original patience and records deadline expiry without a GitHub read.
 Other lanes and rollback retain existing legacy prompts and incident repair.
 Legacy closer preflight reads config and durable routing without a lane lock,
 schema migration or writer journal; unreadable durable routing refuses explicitly.

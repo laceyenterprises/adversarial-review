@@ -233,9 +233,10 @@
       "returned-to-closer",
       "closed-observed"
     ],
-    "transitions": "Clean signed exact-head reviews and validated terminal handoffs share transactional readiness. Live reads validate holds, head/base, identity, permission and shared structural policy; normal clean work retains its final review read. Terminal lifecycle observations reconcile without dispatch. Parked recovery appends tail readiness with fresh reads and original patience; repair uses a new admission generation. Snapshot CAS after awaits rejects stale recovery and duplicate wakes. Terminal structural returns retain their matching conflict/reversion diagnostic despite infrastructure failures. Valid SHA comparisons ignore hex casing and review IDs compare as strings without rewriting evidence; validated labels become names. Progress events capture priorPhase before applying the patch, while legacy events remain replayable. Readiness grants no merge authority. Candidate or expected-old-head readmission requires recomputing every contiguous derivation and matching the immutable receipt digest; transient proof execution failures park; existing structural/hold/permission checks remain enforced.",
+    "transitions": "Clean signed exact-head reviews and validated terminal handoffs share transactional readiness. Live reads validate holds, head/base, identity, permission and shared structural policy; normal clean work retains its final review read. Terminal lifecycle observations reconcile without dispatch. Parked recovery appends tail readiness with fresh reads and original patience; repair uses a new admission generation. The watcher schedules admission probes from persisted progress at one-minute intervals, clipped to original expiry; expiry without an infrastructure probe schedule records admission-deadline-expired without remote reads. Snapshot CAS after awaits rejects stale recovery and duplicate wakes. Terminal structural returns retain their matching conflict/reversion diagnostic despite infrastructure failures. Valid SHA comparisons ignore hex casing and review IDs compare as strings without rewriting evidence; validated labels become names. Progress events capture priorPhase before applying the patch, while legacy events remain replayable. Readiness grants no merge authority. Candidate or expected-old-head readmission requires recomputing every contiguous derivation and matching the immutable receipt digest; transient proof execution failures park; existing structural/hold/permission checks remain enforced.",
     "codeSources": [
       "src/finalization/queue-admission.mjs",
+      "src/finalization/queue-consumer.mjs",
       "src/finalization/queue-clean-review.mjs",
       "src/finalization/queue-store.mjs"
     ],
@@ -298,7 +299,7 @@
       "absent",
       "acknowledged"
     ],
-    "transitions": "Complete mechanically validated evidence atomically commits handoff, queue entry, readiness/event and immutable ack. Invalid evidence or write failure leaves absent. Duplicate/lost ack and restart return the same acknowledged receipt. The explicit closer boundary confirms durable ack before idempotent resource release and suppresses duplicate dispatch at the admission tuple. Candidate derivation preserves original signed evidence/dispositions. Legacy execution is unchanged until lane routing.",
+    "transitions": "Complete mechanically validated evidence atomically commits handoff, queue entry, readiness/event and immutable ack. Every finding is accounted for; only non-blocking findings may be deferred with the authenticated audit and explicit non-strict policy evidence. Invalid evidence or write failure leaves absent. Duplicate/lost ack and restart return the same acknowledged receipt. The explicit closer boundary confirms durable ack before idempotent resource release and suppresses duplicate dispatch at the admission tuple. Candidate derivation preserves original signed evidence/dispositions. Legacy execution is unchanged until lane routing.",
     "codeSources": [
       "src/finalization/queue-handoff.mjs",
       "src/finalization/queue-handoff-store.mjs",

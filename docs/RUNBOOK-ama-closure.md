@@ -9862,6 +9862,12 @@ daemon inline merge; see `docs/STATE-MACHINE.md`). Legacy lanes are unchanged.
 | Terminal audit | same | `superseded` attempt, reason `queue-handoff-admitted`, with entry/ack ids and the digest. This satisfies the launch's `terminal-audit` required outcome. No closing comment is posted. |
 | Merge | queue executor | Admission, live re-validation, exact-candidate checks and an expected-head squash merge under the lane fence. Transient failures park and retry the same entry. |
 
+The receiver accounts for every applicable finding. It requires an exact-head
+fix or verified withdrawal for blockers and enforces non-blocking coverage
+under the default strict policy. With `strict_non_blocking_remediation: false`,
+an advisory without a verified fix can be recorded as `deferred`, linked to
+the authenticated audit and original finding. It receives no fix credit.
+
 Stops: `head-changed`, `already-merged` and `pr-closed` are world facts (exit 20;
 a moved head starts a fresh review lifecycle and is never re-hammered from the old
 head). `queue-handoff-unadmitted` and `queue-handoff-failed` are infrastructure

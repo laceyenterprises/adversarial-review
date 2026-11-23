@@ -15,6 +15,14 @@ function ownedRoute(store, route) {
   return durable?.executor === 'queue-v2' && !durable.transition && !legacyWriters.length ? durable : null;
 }
 
+function nextParkedWake(entry) {
+  if (entry.phase === 'parked-infrastructure' && entry.infrastructure?.nextProbeAt) {
+    return Date.parse(entry.infrastructure.nextProbeAt);
+  }
+  if (entry.reason === 'admission-deadline-expired') return Infinity;
+  return Math.min(Date.parse(entry.updatedAt) + 60_000, Date.parse(entry.patience.deadline));
+}
+
 /** The watcher owns scheduling. A tick only advances persisted work on lanes
  * for which BOTH the selector and durable route name the queue. Every phase
  * uses the existing owner/issuance fence. Unknown remote work stays pending. */
@@ -60,11 +68,14 @@ export function createQueueConsumer({ rootDir, compose, readConfig = loadEffecti
     if (page) await checks.flushPages(page.entry_id);
 
     if (policy.autonomousExecutionDisabled || store.executionHold()) return;
-    const order = admission.order(lane);
-    const due = order.parked.find(entry => entry.infrastructure?.nextProbeAt
-      ? Date.parse(entry.infrastructure.nextProbeAt) <= Date.parse(now())
-      : Date.parse(entry.patience.deadline) > Date.parse(now()));
-    if (!order.actionable.length && !due && !store.operations(lane).length) return;
+    function selectParked(parked = admission.order(lane).parked) {
+      const at = Date.parse(now());
+      return parked
+        .map(entry => ({ entry, wake: nextParkedWake(entry) }))
+        .filter(({ wake }) => wake <= at)
+        .sort((a, b) => a.wake - b.wake)[0]?.entry;
+    }
+    const selectActionable = () => admission.order(lane).actionable[0];
     async function processEntry(select, maxSteps) {
       const claim = await owner.claim({ lane, ownerId, routeGeneration: durable.route_generation,
         expiresAt: new Date(Date.parse(now()) + 300_000).toISOString() });
@@ -94,7 +105,8 @@ export function createQueueConsumer({ rootDir, compose, readConfig = loadEffecti
             case 'finalizing': result = await merge.finalize(args); break;
             default:
               if (entry.phase.startsWith('parked-')) {
-                result = entry.infrastructure ? await checks.reprobe(args) : await admission.reconcile(args);
+                result = entry.phase === 'parked-infrastructure' && entry.infrastructure?.nextProbeAt
+                  ? await checks.reprobe(args) : await admission.reconcile(args);
               }
           }
           if (result?.phase === 'returned-to-closer') await adapters.returnSubject?.(result);
@@ -108,8 +120,12 @@ export function createQueueConsumer({ rootDir, compose, readConfig = loadEffecti
         if (stillOwned()) await owner.release({ fence });
       }
     }
-    if (due) await processEntry(() => store.readEntry(due.entryId), 1);
-    await processEntry(() => admission.order(lane).actionable[0], 6);
+    const order = admission.order(lane);
+    const due = selectParked(order.parked);
+    if (due) await processEntry(selectParked, 1);
+    if ((due ? selectActionable() : order.actionable[0]) || store.operations(lane).length) {
+      await processEntry(selectActionable, 6);
+    }
   }
 
   return { async tick() {

@@ -116,7 +116,13 @@ export function validateQueueHandoff(h, e) {
     const key = findingKey(d), f = inventory.get(key);
     requireFact(f && !seen.has(key) && d.severity === f.severity, 'foreign or duplicate finding disposition');
     seen.add(key);
-    requireFact(d.head === h.head && text(d.sourceRef) && hasConcreteExactHeadEvidence(d.evidence), 'missing exact-head finding evidence');
+    requireFact(d.head === h.head && text(d.sourceRef), 'missing exact-head finding reference');
+    if (d.resolution === 'deferred') {
+      requireFact(f.severity === 'non-blocking' && e.strictNonBlockingRemediation === false, 'finding cannot be deferred');
+      requireFact(h.reviewProof && d.sourceRef === e.reviewProof?.sourceRef, 'missing deferral audit reference');
+      continue;
+    }
+    requireFact(hasConcreteExactHeadEvidence(d.evidence), 'missing exact-head finding evidence');
     requireFact(['fixed', 'withdrawn'].includes(d.resolution), 'unsupported finding disposition');
     if (d.resolution === 'fixed') requireFact(Array.isArray(d.paths) && d.paths.length > 0 && d.paths.every(text), 'fix paths missing');
     else requireFact(text(d.explanation) && Array.isArray(d.sourceLocations) && d.sourceLocations.length > 0

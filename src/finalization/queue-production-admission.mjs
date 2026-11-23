@@ -87,7 +87,7 @@ function findAudit(current, request, launch) {
   return matches[0];
 }
 
-async function findingDispositions({ rootDir, observed, inventory, audit, comments, launch }) {
+async function findingDispositions({ rootDir, observed, inventory, audit, comments, launch, strictNonBlockingRemediation }) {
   const { subject, get } = observed;
   const repo = subject.lane.repository;
   const { prNumber, head } = subject;
@@ -119,7 +119,12 @@ async function findingDispositions({ rootDir, observed, inventory, audit, commen
     }
     const matches = reported.filter(item => item.title === finding.title && item.blocking === (severity === 'blocking') && item.file);
     const file = matches.length === 1 && comparison.files.find(file => file.filename === matches[0].file);
-    if (!file || !text(file.patch)) throw new Error('queue-exact-finding-fix-unavailable');
+    if (!file || !text(file.patch)) {
+      if (severity === 'non-blocking' && !strictNonBlockingRemediation) {
+        return { ...disposition, resolution: 'deferred', sourceRef: auditRef };
+      }
+      throw new Error('queue-exact-finding-fix-unavailable');
+    }
     const fence = '~'.repeat(Math.max(3, ...Array.from(file.patch.matchAll(/~+/g), match => match[0].length + 1)));
     return { ...disposition, resolution: 'fixed', sourceRef: auditRef, paths: [file.filename],
       evidence: `${fence}diff\n${file.patch}\n${fence}` };
@@ -146,6 +151,7 @@ export function createQueueProductionEvidence({ rootDir, hqRoot, env = process.e
       retryDelaysMs: [], ...budget() })).filter(row => row.valid === true && row.repo === repo && row.pr_number === prNumber);
     const reviews = await live.reviews(observed);
     const inventory = reviews.applicable.flatMap(review => review.findings);
+    const strictNonBlockingRemediation = cfg.strictNonBlockingRemediation !== false;
     const source = request ? reviews.applicable.find(record => record.row.commit_id === request.reviewProof.reviewedSha) : reviews.applicable[0];
     if (!source || (!request && (source.row.commit_id !== head || !cleanReview(source) || inventory.length))) {
       throw new Error('queue-admission-review-unavailable');
@@ -176,7 +182,8 @@ export function createQueueProductionEvidence({ rootDir, hqRoot, env = process.e
       const terminal = await closerReviewProof({ snapshot: reviews.snapshot, repo, prNumber, rootDir, headSha: head,
         validatedAt: audit.updated_at ?? audit.created_at, operatorLogins: cfg.operatorLogins, get: observed.get });
       if (!terminal.ok) throw new Error('queue-hammer-review-coverage-unverified');
-      dispositions = await findingDispositions({ rootDir, observed, inventory, audit, comments: reviews.comments, launch });
+      dispositions = await findingDispositions({ rootDir, observed, inventory, audit, comments: reviews.comments, launch,
+        strictNonBlockingRemediation });
       const auditRef = `github:repos/${repo}/issues/comments/${audit.id}`;
       proof = { ok: true, head, digest: request.reviewProof.digest, sourceRef: auditRef, observedAt: audit.updated_at ?? audit.created_at };
       validation = { ok: true, head, sourceRef: auditRef };
@@ -206,7 +213,7 @@ export function createQueueProductionEvidence({ rootDir, hqRoot, env = process.e
         currentHead: source.currency.currentHead, proof: source.currency.proof, sourceRef: source.sourceRef },
       identities: { ok: true, worker, closer, sourceRef: produced.sourceRef },
       attestations: { produced, reviewed }, primaryChange, publication, localValidation: validation,
-      ...(proof ? { reviewProof: proof, builderAttestation } : {}),
+      ...(proof ? { reviewProof: proof, builderAttestation, strictNonBlockingRemediation } : {}),
     };
     return { input, evidence };
   };

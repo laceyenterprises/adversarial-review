@@ -58,9 +58,11 @@ so authoritative writer checks remain at the merge/publication boundaries.
 Certified recovery always retains `withDaemonMergeReservation`, regardless of
 the prepared route snapshot.
 
-Remediation may edit, validate locally, adjudicate all findings and publish its
-remediated head with entitled expected-old-head protection. Terminal adjudication
-remains final without a new model judgement. Only the queue mechanically rebases,
+Remediation may edit, validate locally and publish its remediated head with
+entitled expected-old-head protection. The handoff accounts for every finding
+and can defer unresolved advisories only when strict non-blocking remediation
+is disabled. Terminal adjudication remains final without a new model judgement.
+Only the queue mechanically rebases,
 waits remote CI and merges. Returned same-head entries owe fresh remediation and
 admission; a historical ack cannot hide a return. A terminal/parked acknowledged
 entry suppresses duplicate wakes that observe its ack. Handoff commits take the

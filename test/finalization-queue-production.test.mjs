@@ -22,6 +22,7 @@ import { createQueueGsr } from '../src/finalization/queue-gsr.mjs';
 import { createQueueGitHub } from '../src/finalization/queue-github.mjs';
 import { resolveQueueHandoffStore } from '../src/finalization/queue-handoff-store.mjs';
 import { createLaneRoutingController } from '../src/finalization/queue-routing.mjs';
+import { ensureReviewStateSchema } from '../src/review-state.mjs';
 import { gitFixture, idle } from './helpers/queue-rebase-fixture.mjs';
 import { queueCleanFixture, queueLiveFixture } from './helpers/queue-clean-fixture.mjs';
 import { handoffTime, queueHandoffFixture, reviewHead } from './helpers/queue-handoff-fixture.mjs';
@@ -188,6 +189,58 @@ test('a moved head returns its receipt for a fresh review without calling the wr
   assert.deepEqual(world.returns.map(entry => [entry.entryId, entry.reason]), [[ack.entryId, 'external-head-change']]);
 });
 
+for (const phase of ['parked-hold', 'parked-permission']) {
+  test(`the watcher throttles ${phase} probes across restarts and settles expiry once`, async t => {
+    const f = gitFixture(t, { noop: true });
+    const generation = await transfer(f);
+    const fixture = receiptFixture({ prNumber: 102, head: f.oldHead });
+    const production = createProductionQueue({ rootDir: f.root, readConfig: () => cfg, now: f.now, observe: () => fixture });
+    const { entryId } = await production.admitClean({ route: { lane, routeGeneration: generation }, prNumber: 102, head: f.oldHead });
+    let reads = 0;
+    const start = () => createQueueConsumer({ rootDir: f.root, readConfig: () => cfg, now: f.now,
+      logger: { warn: message => assert.fail(message) },
+      compose: () => ({ liveAdapter: { read() {
+        reads++;
+        const live = queueLiveFixture(fixture.input);
+        if (phase === 'parked-hold') live.subject.labels = ['no-merge-hold'];
+        else live.permission.canPush = false;
+        return live;
+      } } }),
+    });
+    const consumer = start();
+    await consumer.tick();
+    const parked = f.store.readEntry(entryId);
+    assert.equal(parked.phase, phase);
+    assert.equal(reads, 1);
+    const initialFence = f.store.readOwner(lane).generation;
+    f.clock(59);
+    await consumer.tick();
+    assert.equal(f.store.readOwner(lane).generation, initialFence);
+    assert.equal(reads, 1);
+    f.clock(60);
+    await start().tick();
+    assert.equal(reads, 2);
+    assert.equal(f.store.readEntry(entryId).updatedAt, f.now());
+    f.clock(61);
+    await start().tick();
+    assert.equal(reads, 2);
+    f.clock(parked.patience.effectiveMs / 1000 - 1);
+    await start().tick();
+    assert.equal(reads, 3);
+    assert.equal(f.store.readEntry(entryId).phase, phase);
+    f.clock(parked.patience.effectiveMs / 1000);
+    await start().tick();
+    const expired = f.store.readEntry(entryId);
+    assert.equal(expired.phase, 'parked-infrastructure');
+    assert.equal(expired.reason, 'admission-deadline-expired');
+    assert.deepEqual(expired.patience, parked.patience);
+    const settledFence = f.store.readOwner(lane).generation;
+    await start().tick();
+    assert.equal(f.store.readOwner(lane).generation, settledFence);
+    assert.equal(reads, 3);
+  });
+}
+
 test('a required check supplied by a foreign App cannot satisfy branch rules', async () => {
   const policy = await readQueueBranchPolicy(async path => {
     if (path.includes('/rules/')) return [{ type: 'required_status_checks', parameters: { required_status_checks: [{ context: 'unit', integration_id: 7 }] } }];
@@ -236,27 +289,36 @@ test('production evidence refuses subject movement and missing signed source rec
 });
 
 for (const remediated of [false, true]) {
-  test(`production evidence assembles validator-compatible ${remediated ? 'hammer' : 'clean'} evidence`, async () => {
+  test(`production evidence assembles validator-compatible ${remediated ? 'hammer' : 'clean'} evidence`, async t => {
     const head = 'b'.repeat(40), reviewed = remediated ? reviewHead : head, prNumber = 102;
     const closer = { workerId: 'fixture-closer', workerClass: 'hammer', launchRequestId: 'lrq_fixture' };
     const auditBody = launch => `<!-- hq:ham-terminal-remediation:audit -->\n`
-      + `HAM-Base-Head: ${reviewed}\nHAM-Validated-Head: ${head}\nHAM-Queue-Launch-SHA256: ${createHash('sha256').update(launch).digest('hex')}`;
+      + `HAM-Base-Head: ${reviewed}\nHAM-Validated-Head: ${head}\nHAM-Queue-Launch-SHA256: ${createHash('sha256').update(launch).digest('hex')}\n`
+      + '- **Blocking bug** (blocking) — fixed src/example.mjs';
     const reviewer = 'claude-reviewer-lacey';
     const review = { id: 1, state: 'APPROVED', commit_id: reviewed, submitted_at: handoffTime(-20), user: { login: reviewer } };
     const verifiedRecord = (kind, atHead, producer, payload, extra = {}) => ({ valid: true, kind,
       repo: lane.repository, pr_number: prNumber, head_sha: atHead, producer_identity: producer, payload,
       signature: { algorithm: 'fixture', subject: producer, digest: `fixture:${kind}` }, ...extra });
-    const rows = [verifiedRecord('reviewed', reviewed, reviewer, {}, { findings_count: 0, verdict: 'approved' }),
+    const currency = { current: true, reviewedHead: reviewed, currentHead: head, proof: remediated ? 'ancestry' : 'exact-head',
+      sourceRef: 'compare:fixture' };
+    const findings = remediated ? [
+      { findingId: 'blocker', severity: 'blocking', title: 'Blocking bug' },
+      { findingId: 'advisory', severity: 'non-blocking', title: 'Optional cleanup' },
+    ].map(finding => ({ ...finding, reviewId: '1', reviewCommitId: reviewed, sourceRef: 'review:1', currency })) : [];
+    const rows = [verifiedRecord('reviewed', reviewed, reviewer, {}, { findings_count: findings.length, verdict: 'approved' }),
       verifiedRecord('produced', reviewed, 'fixture-builder', { source: 'hq_pr_open', worker_class: 'builder', launch_request_id: 'build-1' })];
     let comment = { id: 4, body: auditBody(closer.launchRequestId), updated_at: handoffTime(-1), user: { type: 'Bot', login: [...HAM_AUDIT_COMMENT_AUTHOR_LOGINS].find(login => login.endsWith('[bot]')) } };
     const subject = { state: 'open', lane, prNumber, head, labels: [], sourceRef: 'github:fixture' };
-    const snapshot = { subject, pr: { draft: false }, get: async () => ({ status: 'ahead' }) };
+    const files = [{ filename: 'src/example.mjs', patch: '@@ -1 +1 @@\n-old\n+fixed' }];
+    const snapshot = { subject, pr: { draft: false }, get: async () => ({ status: 'ahead', files }) };
     const live = { snapshot: () => snapshot, primary: () => ({ headSha: head, hasHammerCommits: false }),
-      reviews: () => ({ applicable: [{ row: review, family: 'claude', findings: [], verdict: 'approved', sourceRef: 'review:1',
-        currency: { current: true, reviewedHead: reviewed, currentHead: head, proof: remediated ? 'ancestry' : 'exact-head' } }],
+      reviews: () => ({ applicable: [{ row: review, family: 'claude', findings, verdict: 'approved', sourceRef: 'review:1', currency }],
       comments: [comment], snapshot: { state: 'OPEN', headSha: head, reviews: [review], comments: [comment] } }) };
     let signatures = 0;
-    const observe = createQueueProductionEvidence({ rootDir: '/fixture', hqRoot: '/fixture', live, readChain: () => rows,
+    const f = remediated ? gitFixture(t, { noop: true }) : null;
+    if (f) ensureReviewStateSchema(f.store.db);
+    const observe = createQueueProductionEvidence({ rootDir: f?.root ?? '/fixture', hqRoot: '/fixture', live, readChain: () => rows,
       now: () => handoffTime(0), readDispatches: () => [{ ...closer, dispatchWorkerClass: closer.workerClass,
         state: 'dispatched', reviewedSha: reviewed, dispatchedAt: handoffTime(-10) }],
       sign: () => {
@@ -271,10 +333,26 @@ for (const remediated of [false, true]) {
       await assert.rejects(observe(parameters), /queue-exact-hammer-audit-unavailable/);
       assert.equal(signatures, 0);
       comment = { ...comment, body: auditBody(closer.launchRequestId) };
+      await assert.rejects(observe(parameters), /queue-exact-finding-fix-unavailable/);
+      parameters.cfg = { ...cfg, strictNonBlockingRemediation: false };
+      const fixed = files.pop();
+      await assert.rejects(observe(parameters), /queue-exact-finding-fix-unavailable/);
+      files.push(fixed);
     }
     const { input, evidence } = await observe(parameters);
     assert.equal(remediated ? validateQueueHandoff(input, evidence) : validateCleanReview(input, evidence), true);
     assert.equal(signatures, Number(remediated));
+    if (remediated) {
+      assert.deepEqual(input.dispositions.map(d => [d.findingId, d.resolution]), [['blocker', 'fixed'], ['advisory', 'deferred']]);
+      assert.deepEqual(evidence.review.findings.map(f => f.findingId), ['blocker', 'advisory']);
+      const store = resolveQueueHandoffStore(f.store);
+      f.store.ensureLane(lane);
+      const ack = store.commit(input, evidence, { deadline: parameters.deadline, now: f.now });
+      f.reopen();
+      const persisted = resolveQueueHandoffStore(f.store).read(parameters.request);
+      assert.equal(persisted.ack.entryId, ack.entryId);
+      assert.equal(validateQueueHandoff(persisted.handoff, persisted.evidence), true);
+    }
   });
 }
 

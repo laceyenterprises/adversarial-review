@@ -250,9 +250,14 @@ Handoff schema version 1 contains `lane`, `prNumber`, `head` (pushed head),
 worker class and launch-request id), `sourceReview` (`id`, `commitId`), produced
 and reviewed attestation references, primary-change intent/reference,
 exact-head validation/publication references, and `dispositions`. Each
-disposition retains review id/commit, finding id/severity, evidence head,
-source reference and concrete fenced evidence. `fixed` also requires changed
-paths; `withdrawn` requires an explanation and source path/line locations.
+disposition retains review id/commit, finding id/severity, evidence head and
+source reference. `fixed` and `withdrawn` require concrete fenced evidence.
+`fixed` also requires changed paths. `withdrawn` requires an explanation and
+source path/line locations. `deferred` is an unresolved non-blocking finding
+with the authenticated audit reference. It requires the production handoff's
+trusted `evidence.strictNonBlockingRemediation: false` and `reviewProof`.
+Old receipts may omit the policy field and continue to require fix or withdrawal
+evidence for every finding.
 Acknowledgement and budget exhaustion are never finding dispositions.
 
 Optional `reviewProof` (`digest`, `head`) binds a hammer handoff (MRQ-21) to the
@@ -405,6 +410,11 @@ and Node timer cap. Clean submission defaults to a 30-second absolute bound;
 entry patience remains nominal 30 minutes with a 60-minute ceiling. Read timers
 abort and reject late evidence; SQLite busy settings are restored. An expired
 entry parks rather than renewing its deadline. Owner expiry is not patience.
+For entries without a checks/merge infrastructure probe schedule, the watcher
+uses persisted `updatedAt` to space admission probes by one minute, waking at
+original patience expiry if sooner. A repeated parked observation advances
+`updatedAt` through ordinary progress. Expiry records `admission-deadline-expired`
+without remote I/O and ends admission probes for that entry.
 
 `resolveQueueAdmissionAdapters` and `resolveCleanReviewStore` also serve the
 read-only deployed probe. It compares the real clean-review schema, resolves

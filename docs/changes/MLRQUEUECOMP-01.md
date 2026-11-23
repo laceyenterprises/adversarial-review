@@ -22,12 +22,20 @@ A branch with an unreadable rule set or an unsupported GitHub-native merge queue
 or required workflow remains pending. Unresolved push or merge intents retain
 operator drain and reconciliation ownership under the existing transfer port.
 
+The watcher spaces parked admission probes one minute apart using durable
+progress time and records original patience expiry without a live read.
+Hammer handoffs retain unresolved advisory findings as `deferred` when the
+effective policy explicitly disables strict non-blocking remediation.
+
 ### Verification
 
 Synthetic fixtures use disposable Git repositories and SQLite stores with
 injected GitHub, broker, signature and delivery evidence. The runtime owner
 uses the existing read-only canary probe after reviewed deployment and keeps
 separate evidence of loaded services, effective route and organic entries.
+
+The focused production, handoff and admission suites passed 122 tests.
+`node scripts/validate-data-model-catalog.mjs` validated 103 entries.
 
 ```sh
 node src/finalization/queue-probe.mjs --capability canary --json

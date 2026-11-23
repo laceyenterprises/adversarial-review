@@ -2573,6 +2573,13 @@ admission is the infrastructure deferral `queue-handoff-unadmitted` (same-head
 re-drive); a merged or closed PR stops with `already-merged` / `pr-closed`.
 Legacy lanes render no queue inputs and run the two paths unchanged.
 
+The queue watcher schedules admission probes from the last persisted progress
+time, at most once a minute per parked entry, or at original patience expiry
+if sooner. Expiry without a checks recovery schedule records
+`parked-infrastructure` / `admission-deadline-expired` without a remote read.
+Checks/merge infrastructure parks with a stored probe schedule continue on
+that schedule.
+
 HAMCONFLICTOWNER-01: a closer terminal audit with
 `reason: conflict-primary-unproven` at the live head transfers conflict work
 to the existing follow-up remediation queue before closer retry/cap selection.

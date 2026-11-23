@@ -1863,6 +1863,16 @@ async function main() {
     pollOnceOptions: { pollOnceImpl: pollOnce, octokit, errorHandler: handlePollError, onTimeout: exitForPollDeadline },
   });
 
+  const { createProductionQueue } = await import('./finalization/queue-production.mjs');
+  const finalizationQueue = createProductionQueue({ rootDir: ROOT });
+  const advanceFinalizationQueue = () => {
+    void finalizationQueue.tick().catch(error => console.warn(`[finalization-queue] tick unavailable: ${error.name}`));
+  };
+  // Share the watcher's lifetime, independently of discovery latency. The
+  // single-flight tick returns before opening the store on legacy-only config.
+  advanceFinalizationQueue();
+  setInterval(advanceFinalizationQueue, intervalMs).unref();
+
   const { createFindingBatchTicker } = await import('./findings-batch.mjs');
   const findingBatchTicker = createFindingBatchTicker({ db, rootDir: ROOT });
   startWatcherAuthenticationRefreshTimer({ log: console });

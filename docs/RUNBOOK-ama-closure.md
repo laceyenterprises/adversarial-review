@@ -9915,15 +9915,14 @@ never waives eligibility, current-head review, holds, complete checks or identit
 `resolveLaneRoute` is the shared resolver. `routeFinalizationWriter` protects the
 clean daemon and the closer's certified-head inline writer. The rendered hammer
 merge command uses `bin/legacy-lane-write.mjs`, preserving the existing entitled
-metered transport, arguments and output. Queue admission callbacks are injected
-at the composition boundary; a missing callback returns
-`queue-composition-unavailable`, with no legacy fallback. This slice does not
-start a queue pump or install live evidence/identity/delivery adapters. MRQ-21
-replaces MGQ-10's route-scoped closer prompt: a queue-v2 lane dispatches the
-ordinary hammer, whose controller hands off its attested head (see
-[Queue-v2 hammer handoff](#queue-v2-hammer-handoff-mrq-21)). Those explicit composition requirements must be
-satisfied and observed before an operator promotes a lane. Capability availability
-is not an assertion that such a consumer is running.
+metered transport, arguments and output. The installed clean producer and
+hammer receiver enter the existing FIFO. A missing admission callback returns
+`queue-composition-unavailable`. For a matching queue selector and durable
+route, the watcher advances the FIFO under the owner fence. A queue-v2 lane
+dispatches the ordinary hammer, whose controller hands off its attested head.
+Before transfer, verify the loaded watcher and the required adapters through the
+[whole-lane canary procedure](finalization-queue-canary-runbook.md). See also the
+[queue-v2 hammer handoff](#queue-v2-hammer-handoff-mrq-21).
 
 The native `bin/legacy-pr-write.mjs` wrapper resolves the live PR identity before
 entering `runLegacyLaneWrite`. It uses a metered, owner-aware PR REST read scoped to

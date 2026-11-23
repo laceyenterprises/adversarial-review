@@ -602,7 +602,7 @@ async function writeGitHubAdapter(kind, params = {}, {
   execFileImpl,
   env = process.env,
   rootDir,
-  timeoutMs,
+  timeoutMs, envTokenSelector,
 } = {}) {
   if (typeof execFileImpl !== 'function') {
     throw new TypeError('writeGitHubAdapter requires execFileImpl');
@@ -615,7 +615,12 @@ async function writeGitHubAdapter(kind, params = {}, {
     env = await githubEnvForTarget(env, params.repo, { tokenEnv: profile?.tokenEnv, token: profile ? env[profile.tokenEnv] : env.GITHUB_TOKEN || env.GH_TOKEN });
   }
   const execute = kind === 'pull-request-label' ? executeLabelAdapter : (impl, bin, args, options) => impl(bin, args, options);
-  const { stdout } = await execute(execFileImpl, adapterBin, makeAdapterWriteArgs(kind, params, env), {
+  const args = makeAdapterWriteArgs(kind, params, env);
+  if (envTokenSelector) {
+    if (!(env.GITHUB_TOKEN || env.GH_TOKEN) || !/^[a-z0-9-]+$/.test(envTokenSelector)) throw new Error('invalid explicit GitHub token binding');
+    args.push('--auth', envTokenSelector, '--auth-mode', 'env-token', '--pat-env', 'GH_TOKEN', '--transport', 'gh-cli');
+  }
+  const { stdout } = await execute(execFileImpl, adapterBin, args, {
     maxBuffer: ADAPTER_MAX_BUFFER,
     // Callers with a persisted deadline pass an already-scaled, clipped budget.
     timeout: Number.isFinite(timeoutMs) && timeoutMs > 0 ? Math.min(timeoutMs, MAX_TIMER_DELAY_MS) : loadAwareTimeoutMs(ADAPTER_TIMEOUT_MS),

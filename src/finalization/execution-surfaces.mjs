@@ -36,14 +36,14 @@ export function parseCodePrSubject(subjectExternalId) {
  * refuses a merge whose head moved, so a stale-revision merge is structurally
  * impossible to issue even if a re-fold guard is somehow bypassed.
  *
- * @param {{ disabledRepositories?: string[], mergeMethod?: string, execFileImpl?: Function, env?: NodeJS.ProcessEnv, rootDir?: string }} [config]
+ * @param {{ disabledRepositories?: string[], mergeMethod?: string, execFileImpl?: Function, env?: NodeJS.ProcessEnv, rootDir?: string, envTokenSelector?: string, deleteBranch?: boolean }} [config]
  */
 export function createGithubAdapterMergeSurface({
   disabledRepositories = [],
   mergeMethod: defaultMergeMethod = 'squash',
   execFileImpl = execFileAsync,
   env = process.env,
-  rootDir,
+  rootDir, envTokenSelector, deleteBranch = true,
   // A caller that journals its own stable-key receipt (the v2 queue outbox)
   // disables the adapter's best-effort receipt so accounting is never doubled.
   recordReceipt = true,
@@ -66,8 +66,8 @@ export function createGithubAdapterMergeSurface({
         result = await writeAdapterPullRequestMerge(parsed.repo, parsed.prNumber, {
           matchHeadCommit: revisionRef,
           mergeMethod: mergeMethod || defaultMergeMethod,
-          deleteBranch: true,
-        }, { execFileImpl, env, rootDir, producerClass: 'closer-hammer', timeoutMs,
+          deleteBranch,
+        }, { execFileImpl, env, rootDir, producerClass: 'closer-hammer', timeoutMs, envTokenSelector,
           ...(recordReceipt ? {} : { recordReceipt: false }) });
       } catch (err) {
         const payload = adapterErrorPayload(err);

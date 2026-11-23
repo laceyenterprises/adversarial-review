@@ -261,6 +261,11 @@ terminal-remediation audit the hammer published for the exact head, computed by
 `hammerReviewProof` in `src/finalization/hammer-queue-handoff.mjs`. When present,
 `head` must equal the handoff head and the trusted observation must carry
 `reviewProof` with `ok: true`, the same head and digest, and a `sourceRef`.
+The production receiver also records the App audit's observation time in
+`evidence.reviewProof.observedAt` and retains the service-signed produced
+observation with the original reviewed record and `builderAttestation`. The produced payload binds the
+closer launch, audit comment and review-proof digest. Its signature lives in
+this receipt. Existing HQ head-attestation records do not change.
 Receipts without the field (committed before MRQ-21) still validate unchanged.
 Hammer handoffs use a stable `handoffId` and admission generation 1 per
 `(lane, PR, head)`; a moved head needs a new review and a new handoff.

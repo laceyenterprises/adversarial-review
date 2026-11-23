@@ -78,14 +78,16 @@
       "acknowledged",
       "resources-released"
     ],
-    "transitions": "MRQ-21: a resolved queue route dispatches the ordinary hammer (same prompt, phases and decision-only/terminal-audit launch) with queue inputs naming the route generation and the installed handoff command. Its close controller stops after publish and the exact-head audit, delivers a handoff bound to repo, PR, head and review-proof digest, and confirms the durable receipt and entry before recording a superseded terminal audit (queue-handoff-admitted); it never waits CI, runs the predicate or merges. Unconfirmed admission is a retryable queue-handoff-unadmitted re-drive; a moved, merged or closed head stops on the world fact and starts a fresh review lifecycle. A durable acknowledgement observed before the final dispatch recheck suppresses duplicate dispatch; a later commit can still race launch. Acknowledgement precedes mandatory idempotent resource release in the installed composition. Returned entries owe fresh admission; legacy/rollback routes retain existing incident repair and execution. Legacy preflight reads routing without a lane lock or writer journal; unreadable ownership refuses. Missing dispatch inputs fail exactly as on a legacy lane. Migrated lanes without an installed handoff command refuse all closer remediation at deployment.",
+    "transitions": "MRQ-21: a resolved queue route dispatches the ordinary hammer (same prompt, phases and decision-only/terminal-audit launch) with queue inputs naming the route generation and the installed handoff command. Its close controller stops after publish and the exact-head audit, delivers a handoff bound to repo, PR, head and review-proof digest, and confirms the durable receipt and entry before recording a superseded terminal audit (queue-handoff-admitted); it never waits CI, runs the predicate or merges. Unconfirmed admission is a retryable queue-handoff-unadmitted re-drive; a moved, merged or closed head stops on the world fact and starts a fresh review lifecycle. A durable acknowledgement observed before the final dispatch recheck suppresses duplicate dispatch; a later commit can still race launch. Acknowledgement precedes mandatory idempotent resource release in the installed composition. Returned entries owe fresh admission; legacy/rollback routes retain existing incident repair and execution. Legacy preflight reads routing without a lane lock or writer journal; unreadable ownership refuses. Missing dispatch inputs fail exactly as on a legacy lane. The installed receiver verifies the closer launch and authenticated exact-head audit and enqueues through the route fence. A missing command or unresolved evidence refuses closer admission.",
     "codeSources": [
       "src/finalization/queue-closer.mjs",
       "src/ama/dispatch-closer.mjs",
       "src/finalization/hammer-queue-handoff.mjs",
       "src/finalization/hammer-queue-command.mjs",
       "bin/hammer-queue-handoff.mjs",
-      "bin/hammer-close-controller.sh"
+      "bin/hammer-close-controller.sh",
+      "bin/finalization-queue-handoff.mjs",
+      "src/finalization/queue-production-admission.mjs"
     ],
     "validation": "test/finalization-queue-closer.test.mjs; test/finalization-queue-closer-race.test.mjs; test/mrq-21-queue-hammer-handoff.test.mjs; test/hamcontrollerscript-01.test.mjs; organic resource-release observation separate from smoke"
   },
@@ -109,13 +111,15 @@
       "transfer-pending",
       "queue-v2"
     ],
-    "transitions": "Issuance lock and monotonic route fence precede drain/reconciliation. Unknown outcomes retain transfer-pending and fence both routes. Rollback also acknowledges durable stable-key returns before legacy ownership. Cached selector mismatches cannot mutate. Config defaults legacy, brake independent; no production flip or new smoke/check. HAMLANEWAIT-01: legacy shell contention waits on release through a fresh 60-second merge-attempt deadline after CI/lease waits; exhaustion records deferred/lane-busy and refunds contention credit with 2-minute exponential backoff capped at 30 minutes, never a final-no-merge. The third same-head launch pages through the durable closure-wait receipt; other launch statuses and bare queue-route refusals retain existing semantics. Queue-v2 transitions are unchanged.",
+    "transitions": "Issuance lock and monotonic route fence precede drain/reconciliation. Unknown outcomes retain transfer-pending and fence both routes. Rollback also acknowledges durable stable-key returns before legacy ownership. Cached selector mismatches cannot mutate. Config defaults legacy, brake independent; no production flip or new smoke/check. HAMLANEWAIT-01: legacy shell contention waits on release through a fresh 60-second merge-attempt deadline after CI/lease waits; exhaustion records deferred/lane-busy and refunds contention credit with 2-minute exponential backoff capped at 30 minutes, never a final-no-merge. The third same-head launch pages through the durable closure-wait receipt; other launch statuses and bare queue-route refusals retain existing semantics. The watcher pumps the existing queue phases only for matching configured and durable queue ownership. GSR and the execution brake pause claims. The current owner advances the first ready entry and retires before the next tick; unresolved remote requests remain fenced pending proved drain and reconciliation.",
     "legacyTerminalReview": "LAC-2305: HAM terminal merges check fresh review and issuer evidence before the merge lease, at live gates and inside the legacy issuance writer. A standing configured human operator or proven repository admin request on any head survives rebases until GitHub dismissal or later approval from that issuer on any head. Historical authorless off-head reviews and incomplete approvals cannot dispose a veto; missing exact-head identity fails closed. Recoverable review-proof holds use a five-minute recovery backoff. Missing exact-head issuer identity, authorless requests without a commit and permission 404 instead return terminal-review-issuer-unverifiable with needsOperator true and no recovery backoff or retry/refund credit. Closed/merged initial snapshots retain daemon state handling; initial read failures return typed unavailable proof. The first live gate reuses the initial rollup/proof; later gates and transports refresh. In-lane proof reads abort within the load-aware value of a 15 second nominal (HAMWRITERTIMEOUT-01: no fixed cap; the only ceiling is the remaining run budget), returning legacy-writer-timeout without transport; an exhausted budget never starts transport. legacy-writer-timeout is a registered infrastructure stop, so the hammer's deferral keeps its real code and the existing closer retry re-drives the merge on the same head under a fresh lease and its existing backoff, without re-remediation or re-review. Operator-veto and review-change deferred audits do not qualify for the retry/refund allowlist. A proven no-invocation preflight drains the local writer reservation. The shell supplies explicit PR identity; unparseable legacy identity refuses with merge-target-unparseable, a registered closer fault (command construction). Existing lifecycle values and smoke promises remain unchanged.",
     "codeSources": [
       "src/finalization/queue-routing.mjs",
       "src/finalization/queue-routing-boundary.mjs",
       "src/finalization/legacy-lane-write.mjs",
-      "src/ama/closer-review-proof.mjs"
+      "src/ama/closer-review-proof.mjs",
+      "src/finalization/queue-consumer.mjs",
+      "src/finalization/queue-production.mjs"
     ],
     "validation": "test/finalization-queue-routing.test.mjs; test/finalization-queue-status.test.mjs; runtime-owner routing probe after deployment"
   },
@@ -1991,7 +1995,7 @@
     "src/adapters/reviewer-runtime/agent-runtime/index.mjs": "37a25e62f889f9d87e83a20495a9a3baef75f53db163ef6ed7638f7d6ac09f82",
     "src/adapters/reviewer-runtime/cli-direct/index.mjs": "6cc1691412ebaf017344318149467a4f604ba2a3fb1634d803a6d1964fe66a7d",
     "src/adapters/reviewer-runtime/run-state.mjs": "58c66556e1e4eeb550b001c00daeebcb22ed72daf475d2ced6703926a7ce2729",
-    "src/ama-closure-orchestration.mjs": "996175c32f1941c64c4e81eccf1616f14c269ae8a21538bdd6fb374a6988ff0f",
+    "src/ama-closure-orchestration.mjs": "2d74cf19287179ea0a4b5eba115197ab33232e59aa9ad88613c6d8c1f1f5fbf7",
     "src/ama/closer-lease.mjs": "c2aa021100d2cc5fc0ba2de3ca035dab42d46d416039853d0df4a69a8b2c3900",
     "src/ama/receipted-closer-alias.mjs": "873f9f5084047190a230275cf716b7dcf21b5deef7ab0eb5318dbc9081c3cdac",
     "src/ama/closure-owner.mjs": "2448cded95d11c7a03d85758d16bf1719a433daef79e8d7454c1696c6bfc079e",

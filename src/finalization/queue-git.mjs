@@ -16,13 +16,27 @@ const error = reason => Object.assign(new Error(reason), { reason });
 
 // A timeout kills the complete process group and rejects only on close/drain.
 // stdout/stderr are bounded and failures never expose auth/transport output.
-export function runQueueGit(args, { cwd, timeoutMs, env = process.env } = {}) {
+export function runQueueGit(args, { cwd, timeoutMs, env = process.env, githubToken } = {}) {
   if (!Number.isFinite(timeoutMs) || timeoutMs <= 0 || timeoutMs > 2 ** 31 - 1) throw error('git-deadline-expired');
   return new Promise((resolveResult, reject) => {
     const clean = { ...env, GIT_TERMINAL_PROMPT: '0', GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: '/dev/null', GIT_NO_REPLACE_OBJECTS: '1', GIT_ATTR_NOSYSTEM: '1' };
     for (const key of Object.keys(clean)) if (/^GIT_(DIR|COMMON_DIR|WORK_TREE|INDEX_FILE|OBJECT_DIRECTORY|ALTERNATE_OBJECT_DIRECTORIES|SHALLOW_FILE|NAMESPACE|TEMPLATE_DIR|CONFIG_COUNT|CONFIG_KEY_\d+|CONFIG_VALUE_\d+|CONFIG_PARAMETERS)$/.test(key)
       || /^(GIT_AUTHOR_|GIT_COMMITTER_|GIT_TRACE)/.test(key) || key === 'EMAIL') delete clean[key];
-    const child = spawn('git', [...config, ...args], { cwd, env: clean, detached: true, stdio: ['ignore', 'pipe', 'pipe'] });
+    const auth = [];
+    if (githubToken) {
+      if (!['fetch', 'push'].includes(args[0]) || !/^https:\/\/github\.com\/[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+\.git$/.test(args[args.indexOf('--') + 1] || '')) {
+        throw error('invalid-entitled-git-remote');
+      }
+      // The argument and process table carry only the helper configuration.
+      // Git receives the token through its child environment for this request.
+      clean.GH_TOKEN = githubToken;
+      delete clean.GITHUB_TOKEN;
+      clean.GH_HOST = 'github.com';
+      clean.GIT_ASKPASS = '/usr/bin/false';
+      auth.push('-c', 'credential.helper=', '-c', 'credential.helper=!gh auth git-credential',
+        '-c', 'http.followRedirects=false', '-c', 'protocol.allow=never', '-c', 'protocol.https.allow=always');
+    }
+    const child = spawn('git', [...config, ...auth, ...args], { cwd, env: clean, detached: true, stdio: ['ignore', 'pipe', 'pipe'] });
     let output = [], bytes = 0, failed = false;
     const kill = () => { failed = true; try { process.kill(-child.pid, 'SIGKILL'); } catch { /* close/error settles */ } };
     const timer = setTimeout(kill, timeoutMs);
@@ -136,7 +150,7 @@ export function resolveQueueGitAdapter({ rootDir, run = runQueueGit, networkRunn
       } catch (failure) {
         // Explicit single-ref porcelain refusals prove non-application.
         // Transport/timeout failures remain ambiguous; do not expose diagnostics.
-        if (!invoked) return { outcome: 'not-applied', sourceRef: 'git:push-not-spawned' };
+        if (!invoked || failure.publicationNotStarted === true) return { outcome: 'not-applied', sourceRef: 'git:push-not-spawned' };
         if (failure.reason === 'git-command-refused' && failure.publicationRefused) {
           return { outcome: 'not-applied', sourceRef: 'git:publication-refused' };
         }

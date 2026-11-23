@@ -167,6 +167,7 @@ export async function admitHammerQueueHandoff({ rootDir, request, command, runDi
   const requestPath = join(runDir, 'queue-handoff-request.json');
   writeFileSync(requestPath, `${JSON.stringify(request)}\n`, { mode: 0o600 });
   const reply = await run({ command, requestPath, timeoutMs, env });
+  if (reply?.ok === false && /^[a-z-]{1,80}$/.test(reply.reason ?? '')) refuse(HAMMER_QUEUE_HANDOFF_UNADMITTED, reply.reason);
   return confirmHammerQueueHandoff({ rootDir, request, ack: reply });
 }
 

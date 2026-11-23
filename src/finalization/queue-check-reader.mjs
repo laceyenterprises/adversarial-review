@@ -18,8 +18,13 @@ export function resolveQueueRequiredSet({ cfg, rules, repository }) {
     || !Array.isArray(rules.contexts) || rules.unresolved === true
     || [...configured, ...rules.contexts].some(x => !text(x))) throw new Error('required-set-unresolved');
   const contexts = [...new Set([...configured, ...rules.contexts].map(x => x.trim().toLowerCase()))].sort();
-  const source = { configured: [...configured], rules: rules.sourceRef, rulesVersion: rules.version, contexts };
-  return { contexts, source, version: 'sha256:' + createHash('sha256').update(JSON.stringify(source)).digest('hex') };
+  const checkApps = (rules.checkApps ?? []).map(({ context, appId }) => {
+    if (!text(context) || !Number.isSafeInteger(appId) || appId <= 0) throw new Error('required-set-unresolved');
+    return { context: context.trim().toLowerCase(), appId };
+  }).sort((a, b) => a.context.localeCompare(b.context) || a.appId - b.appId);
+  const source = { configured: [...configured], rules: rules.sourceRef, rulesVersion: rules.version, contexts,
+    ...(checkApps.length ? { checkApps } : {}) };
+  return { contexts, source, ...(checkApps.length ? { checkApps } : {}), version: 'sha256:' + createHash('sha256').update(JSON.stringify(source)).digest('hex') };
 }
 
 export function classifyQueueChecks(snapshot) {
@@ -27,14 +32,19 @@ export function classifyQueueChecks(snapshot) {
     || !Array.isArray(snapshot.results) || snapshot.results.some(r => !same(r.head, snapshot.head))) {
     return { kind: 'wait', reason: 'checks-unreadable' };
   }
-  const conclusion = classifyCheckRollup(snapshot.results, { requiredContexts: snapshot.requiredSet.contexts });
+  const pins = snapshot.requiredSet.checkApps ?? [];
+  const results = snapshot.results.filter(item => {
+    const name = String(item.context ?? item.name ?? '').trim().toLowerCase();
+    return pins.every(pin => name !== pin.context || item.app?.id === pin.appId);
+  });
+  const conclusion = classifyCheckRollup(results, { requiredContexts: snapshot.requiredSet.contexts });
   if (red.has(conclusion)) return { kind: 'red', reason: 'checks-completed-red', conclusion };
   if (conclusion === 'SUCCESS') return { kind: 'green', reason: 'exact-candidate-checks-green', conclusion };
   if (!snapshot.results.length && !snapshot.requiredSet.contexts.length && snapshot.noCi?.ok === true
     && snapshot.noCi.configured === true && same(snapshot.noCi.head, snapshot.head) && text(snapshot.noCi.sourceRef)) {
     return { kind: 'green', reason: 'configured-no-ci-proof', conclusion: 'SUCCESS' };
   }
-  const reported = new Set(snapshot.results.map(r => String(r.context ?? r.name ?? '').trim().toLowerCase()));
+  const reported = new Set(results.map(r => String(r.context ?? r.name ?? '').trim().toLowerCase()));
   const missing = snapshot.requiredSet.contexts.filter(name => !reported.has(name));
   return { kind: 'wait', reason: missing.length ? 'missing-required-check:' + missing.join(',')
     : conclusion === 'PENDING' ? 'checks-pending' : 'checks-inconclusive', conclusion };

@@ -10,6 +10,17 @@ const PHASE_RETRYABLE_OUTCOMES = [...HAMMER_RETRYABLE_READ_OUTCOMES]
 
 export const HAMMER_PHASES = ['hammer-verify-head', 'hammer-publish', 'hammer-merge'];
 
+const PUBLISH_AUDIT_SANITIZER = `HAM_AUDIT_COMMENT_BODY=$(printf '%s' "$HAM_AUDIT_COMMENT_BODY" |`;
+const QUEUE_AUDIT_BINDING = `if [[ ! "\${HQ_LAUNCH_REQUEST_ID:-}" =~ ^lrq_[A-Za-z0-9-]+$ ]]; then
+  echo "HAM publish requires a queue launch identity" >&2
+  ham_publish_abort 1; return 1
+fi
+ham_queue_launch_digest=$("$HAM_NODE_BIN" -e \\
+  'process.stdout.write(require("node:crypto").createHash("sha256").update(process.argv[1]).digest("hex"))' \\
+  "$HQ_LAUNCH_REQUEST_ID") || { ham_publish_abort 1; return 1; }
+HAM_AUDIT_COMMENT_BODY=$(printf '%s\\nHAM-Queue-Launch-SHA256: %s' "$HAM_AUDIT_COMMENT_BODY" "$ham_queue_launch_digest")
+`;
+
 export function renderHammerBootstrap(values) {
   const source = readFileSync(new URL('../templates/hammer-bootstrap.sh', import.meta.url), 'utf8');
   return source.replace(/"<<([A-Z_]+)>>"|<<(AMA_TRAILERS_SHELL|TENURE_INPUTS|QUEUE_INPUTS)>>/g, (_match, key, literal) => {
@@ -45,6 +56,12 @@ export function renderHammerProcedure(phase, values) {
   if (!HAMMER_PHASES.includes(phase)) throw new Error(`unknown hammer phase: ${phase}`);
   const path = fileURLToPath(new URL(`../bin/${phase}.sh`, import.meta.url));
   let source = readFileSync(path, 'utf8');
+  if (phase === 'hammer-publish' && values.QUEUE_INPUTS) {
+    // Bind the authenticated audit before sanitization. Legacy phase bytes and
+    // their source hash retain the exact pre-queue rendering.
+    if (!source.includes(PUBLISH_AUDIT_SANITIZER)) throw new Error('hammer publish audit sanitizer unavailable');
+    source = source.replace(PUBLISH_AUDIT_SANITIZER, anchor => QUEUE_AUDIT_BINDING + anchor);
+  }
   const sourceHash = createHash('sha256').update(source).digest('hex');
   // Run unconditionally: placing a shell function in `if` disables errexit in
   // every nested function. Record handled refusals after return, and fatal

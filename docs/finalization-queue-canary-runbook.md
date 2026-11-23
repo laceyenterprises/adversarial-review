@@ -34,10 +34,12 @@ Before activation, the operator:
 2. Inventories installed clean-admission and remediated-handoff producers, queue
    consumer/pump, exact-head checks policy, entitled per-operation credential
    refresh, identity/attestation, merge, delivery, shadow and drain/reconciliation
-   adapters. Record actual identities, source refs and process build. The MGQ-08
-   routing boundary **does not install a live queue pump or these adapters**.
-   Uncomposed production is pending: use the existing operator escalation route
-   and obtain reviewed composition before a selector change.
+   adapters. Record actual identities, source refs and process build. The watcher
+   hosts the queue consumer and the installed hammer receiver handles admitted
+   queue routes. Verify the deployed watcher, receiver, App credentials and
+   signer all resolve under the runtime owner. A missing adapter or unverified
+   loaded build remains pending before a selector change. The operator supplies
+   proved drain and reconciliation for unresolved prior requests.
 3. Runs the existing `finalization shadow-report --days 7 --json`. Retain its
    coverage, organic head movement/exhaustion evidence and dispositions for both
    directions of divergence. Resolve blockers through the existing triage path;
@@ -201,8 +203,8 @@ emergency execution brake and its established operator procedure independently.
 After the implementation PR merges, durable organic observations and the isolated
 exercise ledger are reviewed by the named operator. Record explicit approval
 through the existing rollout completion owner. Merging source or satisfying JSON
-does not complete operator approval. This procedure installs no live consumer,
-service restart, automated promotion or new CI/smoke action.
+does not complete operator approval. Composition uses the existing selector,
+service and read-only probe.
 
 ## After canary approval
 

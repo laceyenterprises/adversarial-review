@@ -25,7 +25,10 @@ cycle; deletion requires its separate approval. No worker performs these actions
 Before a canary, the runtime owner verifies the deployed source contains the
 reviewed implementation and the loaded watcher/consumer started from that build.
 Observe actual build, effective route, fresh custody appends and organic consumer
-progress read-only. Source merge and submodule float alone are not loaded-code
+progress read-only. The watcher schedules the production queue consumer on its
+existing poll cadence. It requires both the queue selector and the durable
+whole-lane transfer. The installed receiver validates the dispatched generation,
+recorded closer launch and exact-head audit before writing a queue receipt. Source merge and submodule float alone are not loaded-code
 or activation evidence. Privileged deploy/restart/config changes belong to SRE.
 
 The subject executor requires an authoritative lifecycle/head reader and the
@@ -433,16 +436,13 @@ probe's code, not an already-running watcher's build. Empty snapshots/pages are
 pending organic evidence, not a successful outage/recovery exercise. Missing
 schema or adapters reports unavailable; never insert a lane to satisfy the probe.
 
-The capability remains unwired. Future queue composition must supply the complete
-existing required-policy reader, entitled per-operation credential environment,
-live admission reader, Git derivation verifier, owner and existing Sentinel alert
-bus. The check transport is GET-only; no check context is created or rerun. The
-transport uses the shared GitHub request meter with its entitled credentials,
-so pagination and credential retries remain subject to the existing read budget.
-The required-set resolver never guesses from a green subset or unreadable protection.
-An explicitly configured no-CI repository still needs its existing live proof.
-Source fixture validation is not evidence that any of these production adapters
-or routing is active.
+For transferred lanes the watcher composes the live required-policy read,
+entitled per-operation credentials, the Git derivation verifier and the existing
+Sentinel alert bus. The GET-only transport uses the shared GitHub request meter
+and resolves classic branch protection and applicable ruleset status checks.
+Unreadable policy and an absent required App check defer the entry. An explicitly
+configured no-CI repository still needs its existing live proof. Observe runtime
+identity and effective routing separately from source fixture validation.
 
 During subsequent organic operation, inspect completed-red returns separately
 from infrastructure parks. Verify that missing/hung/unreadable checks and auth
@@ -492,15 +492,13 @@ through the composed service's `deliver()`, never by deleting rows. A non-zero
 `unresolvedMergeOperations` means an ambiguous merge awaits drained owner
 takeover; do not clear it by hand.
 
-The capability remains unwired. Future composition must supply the live
-admission reader (including `mergeCommitSha`, `mergedAt` and `mergedBy`), the
-complete check reader, Git derivation verifier, a mandatory identity surface
-that names the merging bot, the existing squash expected-head surface with
-`recordReceipt: false` (the outbox owns accounting), the existing merge-action
-and AMA audit delivery adapters with the deployment HQ root, the Sentinel page
-adapter and an owner recovery adapter that proves drain before calling
-`observeQueueMergeOperation`. The existing emergency brake stays independent and
-intercepts both before the intent and under the issuance lock.
+For transferred queue lanes the watcher uses authoritative merge readback
+(`mergeCommitSha`, `mergedAt` and `mergedBy`), entitled App identity, and the
+expected-head squash surface with `recordReceipt: false`. The outbox delivers
+through the existing merge-action and AMA audit adapters. The emergency brake
+intercepts both before intent and under the issuance lock. For unresolved prior
+requests the operator proves drain before calling `observeQueueMergeOperation`
+through the existing reconciliation boundary.
 
 Offline concurrency measurements use a deterministic stale observer: observer B
 passes the start checks and keeps serving a pre-merge live snapshot (a stale

@@ -133,9 +133,11 @@ ham_close_live_head=$(jq -er '.headRefOid | select(type == "string") | select(te
   "$HAM_RUN_DIR/close-live-head.json") || ham_close_finish 1 starting-pr-state-unavailable
 ham_close_local_head=$(git rev-parse --verify 'HEAD^{commit}') || ham_close_finish 1 reviewed-head-unavailable
 ham_close_rebase_state=none
+ham_close_prevalidated_head=
 if [ -f "$HAM_RUN_DIR/conflict-repair-publish.env" ]; then
   ham_close_rebase_state=$("$HAM_NODE_BIN" "$HAM_CLOSE_ROOT/bin/hammer-validate.mjs" --check-rebase-publication) \
     || ham_close_finish 1 source-publication-refused
+  [ "$ham_close_rebase_state" != blocked ] || ham_close_finish 1 source-publication-refused
 fi
 if [ "$ham_close_local_head" != "$ham_close_live_head" ] \
   && ! { git cat-file -e "$ham_close_live_head^{commit}" 2>/dev/null \
@@ -161,7 +163,9 @@ if [ "$ham_close_local_head" != "$ham_close_live_head" ] \
           *) ham_close_validation_stop "$ham_close_validation_exit" "$ham_close_local_head" ;;
         esac ;;
       validate)
-        [ "$ham_close_validation_exit" -eq 0 ] || ham_close_validation_stop "$ham_close_validation_exit" "$ham_close_local_head" ;;
+        [ "$ham_close_validation_exit" -eq 0 ] || ham_close_validation_stop "$ham_close_validation_exit" "$ham_close_local_head"
+        ham_close_prevalidated_head="$ham_close_local_head" ;;
+      blocked) ham_close_finish 1 source-publication-refused ;;
       *)
         if [ "$ham_close_validation_exit" -eq 0 ]; then ham_close_validation_exit=75; fi
         ham_close_validation_stop "$ham_close_validation_exit" "$ham_close_local_head" ;;
@@ -209,7 +213,8 @@ while :; do
   ham_close_saved_head="$HAM_PRODUCED_HEAD"
   ham_close_saved_base="${HAM_CURRENT_BASE_SHA:-}"
   ham_release_merge_lease --yield local-validation || ham_close_finish 125 "${HAM_PHASE_OUTCOME:-controller-owner-lost}"
-  if [ "$ham_close_rebase_state" != ci ] || [ "$ham_close_saved_head" != "$ham_close_local_head" ] \
+  if { [ "$ham_close_rebase_state" != ci ] && [ "$ham_close_saved_head" != "$ham_close_prevalidated_head" ]; } \
+    || [ "$ham_close_saved_head" != "$ham_close_local_head" ] \
     || [ "$ham_close_saved_head" != "${HAM_PUSHED_HEAD:-$ham_close_live_head}" ]; then
     ham_close_validate "$ham_close_saved_head" \
       || ham_close_validation_stop "$?" "$ham_close_saved_head"

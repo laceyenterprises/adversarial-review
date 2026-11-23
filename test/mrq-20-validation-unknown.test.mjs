@@ -220,6 +220,7 @@ test('a clean conflict rebase retains cleanup evidence for publication after a t
     const receipt = deferralOf(repo);
     assert.equal(receipt.cleanCheckout, true);
     assert.equal(receipt.cleanupConfirmed, true);
+    assert.equal(receipt.localValidationReceipt, join(repo.root, 'validation.json'));
     const state = runValidator(repo, { exit: 1 }, ['--check-rebase-publication']);
     assert.equal(state.status, 0, state.stderr);
     assert.equal(state.stdout.trim(), declared ? 'ci' : 'redrive');
@@ -227,6 +228,14 @@ test('a clean conflict rebase retains cleanup evidence for publication after a t
     const repeated = runValidator(repo, { exit: 1 });
     assert.equal(repeated.status, declared ? 0 : 75, repeated.stderr);
     assert.equal(repeated.batteries, 1);
+    for (const evidence of ['{"checks":[{"result":"fail"}]}', '{']) {
+      writeFileSync(receipt.localValidationReceipt, evidence);
+      const blocked = runValidator(repo, { exit: 1 }, ['--check-rebase-publication']);
+      assert.equal(blocked.status, 0, blocked.stderr);
+      assert.equal(blocked.stdout.trim(), 'blocked');
+      assert.equal(blocked.batteries, 1);
+    }
+    writeFileSync(receipt.localValidationReceipt, '{"checks":[]}');
     writeFileSync(join(repo.root, `validation-deferred-${repo.head}.json`), JSON.stringify({
       ...receipt, cleanupConfirmed: false,
     }));

@@ -243,6 +243,10 @@ log "verify-head validated=\${HAM_LOCALLY_VALIDATED_HEAD:-none}"
 HAM_MERGE_LEASE_HELD=1; HAM_MERGE_LEASE_ID=ml_fixture; log acquire
 trap ham_release_merge_lease EXIT
 export POST_REMEDIATION_SHA HAM_PRODUCED_HEAD
+if [ -n "\${FIXTURE_ADVANCE_REBASE:-}" ] && [ -z "\${HAM_LOCALLY_VALIDATED_HEAD:-}" ]; then
+  git -c user.name=Fixture -c user.email=fixture@example.invalid commit -q --allow-empty -m 'Synthetic next head' || return 1
+  git push -q "$FIXTURE_REBASE_REMOTE" HEAD:refs/heads/feature || return 1
+fi
 POST_REMEDIATION_SHA=$(git rev-parse HEAD); HAM_PRODUCED_HEAD="$POST_REMEDIATION_SHA"; HAM_CURRENT_BASE_SHA="$HAM_REVIEWED_SHA"
 if [ "\${FIXTURE_VERIFY_EXIT:-0}" != 0 ]; then HAM_PHASE_OUTCOME=rebase-conflict; ham_release_merge_lease; return "$FIXTURE_VERIFY_EXIT"; fi
 if [ -n "\${FIXTURE_NEEDS_REVALIDATION:-}" ] && [ -z "\${HAM_LOCALLY_VALIDATED_HEAD:-}" ]; then HAM_NEEDS_REVALIDATION=true; else HAM_NEEDS_REVALIDATION=false; fi
@@ -658,6 +662,18 @@ test('a drained validation timeout publishes the repaired rebase and waits on CI
   }
 });
 
+test('a passing conflict repair reuses validation only on the same published head', async t => {
+  for (const moved of [false, true]) {
+    const f = conflictRebaseFixture(t);
+    const result = await f.close({ FIXTURE_NEEDS_REVALIDATION: '1', FIXTURE_GREEN_HEAD: f.head,
+      FIXTURE_ADVANCE_REBASE: moved ? '1' : '' });
+    const events = f.events();
+    assert.equal(result.status, moved ? 75 : 0, result.stderr);
+    assert.equal(events.filter(event => event.startsWith('validate ')).length, moved ? 2 : 1, events.join('\n'));
+    assert.ok(events.includes(`verify-head validated=${f.remoteHead()}`), events.join('\n'));
+  }
+});
+
 test('conflict-repair timeout or load stop leaves publication to a fresh round after supervisor drain', async t => {
   for (const status of [75, 124, 137, 143]) {
     const f = conflictRebaseFixture(t);
@@ -680,7 +696,16 @@ test('a genuine local failure, an undrained round or unreadable evidence blocks 
         FIXTURE_DRAIN_STATE: scenario === 'undrained' ? 'cleanup-unconfirmed' : 'quiescent',
         FIXTURE_VALIDATION_EVIDENCE: scenario });
     assert.notEqual(result.status, 0);
-    if (scenario === 'failure') assert.equal(result.closeResult.outcome, 'targeted-validation-failed');
+    if (scenario === 'failure') {
+      assert.equal(result.closeResult.outcome, 'targeted-validation-failed');
+    } else {
+      assert.match(result.stdout, /"outcome":"source-publication-refused"/);
+      const events = f.events();
+      const repeated = await f.close({ FIXTURE_CHECK_DEFERRED_EXIT: '75' });
+      assert.equal(repeated.status, 1, repeated.stderr);
+      assert.match(repeated.stdout, /"outcome":"source-publication-refused"/);
+      assert.deepEqual(f.events(), events);
+    }
     assert.equal(f.remoteHead(), f.shas.head);
     assert.ok(!f.events().some(event => /^(publish|wait-ci|gh pr merge)/.test(event)));
     assert.equal(f.events().filter(event => event.startsWith('controller-run ')).length, 1);

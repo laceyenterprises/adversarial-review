@@ -21,8 +21,10 @@ The conflict-repair instructions now route the completed rebase directly to
 `bin/hammer-close.sh`. The command performs validation, publication, and the
 existing CI wait or queue handoff. If validation stops while the supervisor
 still owns cleanup, the controller leaves the result unwritten and the launcher
-can start one fresh round after verified drain. Verify-head reuses the
-CI-authoritative receipt for the published SHA.
+can start one fresh round after verified drain. Verify-head reuses a passing
+pre-publish battery or CI-authoritative receipt for the same published SHA.
+Blocked publication evidence reports `source-publication-refused` on both the
+initial close and re-entry.
 
 ## Verification
 
@@ -42,3 +44,7 @@ CI-authoritative receipt for the published SHA.
   `mrq-20-validation-unknown`, `inconclusiveretry-01b`, `hammer-controller`,
   `hammer-validation-deferral`, and `lac-2252-publication` passed 165 cases.
   The data-model catalog validator passed.
+- The close-controller remediation selection passed eight cases, including
+  same-head validation reuse, revalidation after head movement, and blocked
+  publication on re-entry. The real validator retained the receipt path and
+  blocked publication when that evidence later became failed or unreadable.

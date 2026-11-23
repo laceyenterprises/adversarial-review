@@ -48,6 +48,9 @@ ham_close_rebase_state=$(ham_close_rebase_publication) || exit $?
 ham_close_deferred_status=0
 case "$ham_close_rebase_state" in
   ci|redrive) ;; # A completed conflict repair can publish after a drained UNKNOWN.
+  blocked)
+    printf 'HAM close result: {"status":1,"outcome":"source-publication-refused"}\n'
+    exit 1 ;;
   *) "$HAM_NODE_BIN" "$HAM_CLOSE_ROOT/bin/hammer-validate.mjs" --check-deferred || ham_close_deferred_status=$? ;;
 esac
 if [ "$ham_close_deferred_status" -ne 0 ]; then
@@ -92,8 +95,12 @@ if [ -f "$HAM_RUN_DIR/close-result.json" ]; then
 else
   # Teardown can stop the controller shell before it writes close-result.json.
   ham_close_outcome=controller-shell-ended
-  "$HAM_NODE_BIN" "$HAM_CLOSE_ROOT/bin/hammer-validate.mjs" --check-deferred || ham_close_deferred_status=$?
-  if [ "$ham_close_deferred_status" -eq 75 ]; then ham_close_outcome=canonical-validation-deferred; fi
+  case "$(ham_close_rebase_publication)" in
+    blocked) ham_close_outcome=source-publication-refused ;;
+    *)
+      "$HAM_NODE_BIN" "$HAM_CLOSE_ROOT/bin/hammer-validate.mjs" --check-deferred || ham_close_deferred_status=$?
+      if [ "$ham_close_deferred_status" -eq 75 ]; then ham_close_outcome=canonical-validation-deferred; fi ;;
+  esac
   printf 'HAM close result: {"status":%s,"outcome":"%s"}\n' "$ham_close_status" "$ham_close_outcome"
 fi
 # The controller has drained. Scratch can already be gone after lease settlement.

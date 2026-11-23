@@ -6363,8 +6363,10 @@ The close command makes a narrow exception for a completed local conflict
 repair with a clean, head-bound UNKNOWN receipt and confirmed cleanup. It
 leaves an active controller stop to the supervisor without a terminal close
 result. Only a confirmed drain and a fresh evidence check allow one more
-controller round to publish. Verify-head reuses the CI deferral on that
-published SHA without rerunning the battery. If declared required contexts
+controller round to publish. A blocked publication check reports
+`source-publication-refused`, including on re-entry with a deferral receipt.
+Verify-head reuses a successful pre-publish validation or a CI deferral for
+the same published SHA. If declared required contexts
 cannot supply merge authority, the close records the watcher continuation
 on the published head before returning 75. The watcher uses launch-bound push
 evidence before assigning the published head retry backoff.

@@ -3,6 +3,49 @@
  "source": "agent_os_config (agent-os platform/agent-os-config) at one-schema@6ab5e7ac02db",
  "cases": [
   {
+   "name": "shared config accepts work item, admission, and disk reclaim settings",
+   "files": {
+    "config.yaml": "version: 1\nworker_pool:\n  work_items:\n    shadow_gate_days: 9\n  admission:\n    low_priority_max_wait_seconds: 120\n    low_priority_reserved_slots: 2\ndisk_reclaim:\n  archive_ref_retention_days: 14\n  dehydrate:\n    unreclaimable_recheck_hours: 3\n"
+   },
+   "get": [
+    "worker_pool.work_items.shadow_gate_days",
+    "worker_pool.admission.low_priority_max_wait_seconds",
+    "worker_pool.admission.low_priority_reserved_slots",
+    "disk_reclaim.archive_ref_retention_days",
+    "disk_reclaim.dehydrate.unreclaimable_recheck_hours"
+   ],
+   "python": {
+    "ok": true,
+    "values": {
+     "worker_pool.work_items.shadow_gate_days": 9,
+     "worker_pool.admission.low_priority_max_wait_seconds": 120,
+     "worker_pool.admission.low_priority_reserved_slots": 2,
+     "disk_reclaim.archive_ref_retention_days": 14,
+     "disk_reclaim.dehydrate.unreclaimable_recheck_hours": 3
+    }
+   }
+  },
+  {
+   "name": "zero work item shadow duration is refused",
+   "files": {
+    "config.yaml": "version: 1\nworker_pool:\n  work_items:\n    shadow_gate_days: 0\n"
+   },
+   "python": {
+    "ok": false,
+    "key": "worker_pool.work_items.shadow_gate_days"
+   }
+  },
+  {
+   "name": "fractional work item shadow duration is refused",
+   "files": {
+    "config.yaml": "version: 1\nworker_pool:\n  work_items:\n    shadow_gate_days: 1.5\n"
+   },
+   "python": {
+    "ok": false,
+    "key": "worker_pool.work_items.shadow_gate_days"
+   }
+  },
+  {
    "name": "code defaults",
    "files": {
     "config.yaml": "version: 1\n"

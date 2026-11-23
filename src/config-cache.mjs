@@ -55,7 +55,7 @@ const _signatureFileCache = new Map();
 function _watchedPathsForCall({ topPath, modulePaths, env, cachedConfig }) {
   const envView = env || process.env;
   const resolvedTop = topPath || envView.AGENT_OS_CONFIG_PATH || DEFAULT_TOP_LEVEL_PATH;
-  const watched = [resolvedTop];
+  const watched = resolvedTop ? [resolvedTop] : [];
   // PROFILENODE-01: the overlay is read between the top file and its local
   // sibling, so edits to it must invalidate cached loads.
   const topOverlay = profileOverlaySibling(resolvedTop);

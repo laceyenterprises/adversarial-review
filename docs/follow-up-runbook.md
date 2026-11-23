@@ -743,11 +743,29 @@ The configured class is a request, not a guarantee (CLOSERREUSE-01). Each merge-
 Workspace root:
 
 ```bash
-HQ_ROOT=/Users/airlock/agent-os-hq
+HQ_ROOT=/absolute/runtime-root
 ADVERSARIAL_REMEDIATION_WORKSPACE_ROOT=/optional/explicit/workspace-root
 ```
 
-When `HQ_ROOT` is set, remediation workers clone PR branches under `HQ_ROOT/adversarial-review/follow-up-workspaces/` instead of under the deployed adversarial-review checkout. `ADVERSARIAL_REMEDIATION_WORKSPACE_ROOT` can override that location, but it must not point inside the deploy checkout. If the daemon is running from `/Users/airlock/agent-os` without either setting, it refuses to spawn mutable worker clones.
+Set `HQ_ROOT` to place mutable clones in `HQ_ROOT/adversarial-review/follow-up-workspaces/`.
+`ADVERSARIAL_REMEDIATION_WORKSPACE_ROOT` overrides that location. The guard
+rejects explicit workspace roots inside service source or the deployment checkout,
+including paths through symlinked ancestors. Deployment discovery checks
+`AGENT_OS_DEPLOY_CHECKOUT`, then CFG `roots.deploy`. If neither is available,
+the vendored `tools/adversarial-review` module path still identifies the
+checkout for this guard. The deployed service requires an external workspace
+root. Standalone worker and test trees can use `data/follow-up-jobs/workspaces`.
+
+Remediation accounting enables default transcript discovery for the configured
+deploy module, including relocated deployments. `ADV_REVIEW_TOKEN_TRANSCRIPT_FALLBACK=0`
+disables default roots, and `1` enables them in other checkouts. An implicit
+transcript root uses an absolute `HOME` or the OS account home. With neither
+available, discovery uses only explicitly configured transcript locations.
+Claude's completion reader lists the configured projects tree and reads candidate
+JSONL files before matching session or workspace evidence. Each qualifying
+lookup can repeat that work. An offline fixture with 24 projects and 96 files
+recorded 150 directory listings and 576 JSONL reads across six lookups. Fresh
+reads preserve visibility of transcript rewrites and any new candidates.
 
 
 ## Alternate-owner follow-up Git

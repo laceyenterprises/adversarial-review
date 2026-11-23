@@ -33,7 +33,7 @@ function redactSensitiveText(text) {
 // Mask host-local filesystem paths before writing to a public surface
 // (PR comments, GitHub issue bodies). Internal exception messages
 // commonly include absolute paths like
-// `/Users/airlock/agent-os/tools/.../foo.json` or
+// `/Users/<user>/agent-os/tools/.../foo.json` or
 // `/private/var/folders/.../tmp.X/data.json`. Publishing those leaks
 // the operator's username, the repo's filesystem layout, and the
 // host's homedir convention. We replace the path with a stable
@@ -74,7 +74,7 @@ function redactPathlikeText(text) {
 //
 // Token redaction AND path masking both apply here: worker-supplied
 // fields can contain log-line echoes that include either kind of leak
-// (e.g. `failed at /Users/airlock/.../foo.json` or `Bearer eyJ...`).
+// (e.g. `failed at /Users/<user>/.../foo.json` or `Bearer eyJ...`).
 // PR #18 round 6 flagged the path-redaction gap on these fields; both
 // need to run before the value is fenced/posted.
 function redactAndCap(text, limit = 2000) {

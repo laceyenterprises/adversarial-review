@@ -46,7 +46,7 @@ test('closer capture resolves explicit, environment and daemon-default hq binari
   for (const [hqPath, env, expected] of [
     ['/explicit/hq', { HQ_BIN: '/environment/hq' }, '/explicit/hq'],
     [undefined, { HQ_BIN: '/environment/hq' }, '/environment/hq'],
-    [undefined, { PATH: '/usr/bin:/bin' }, '/Users/airlock/.local/bin/hq'],
+    [undefined, { PATH: '/usr/bin:/bin', HOME: '/synthetic/home' }, '/synthetic/home/.local/bin/hq'],
   ]) {
     let binary;
     assert.equal(await closer.emitWorkerGitMergeSignalBestEffort({

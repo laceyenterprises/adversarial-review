@@ -543,7 +543,7 @@ function sanitizeInlineText(text, limit) {
 // code blocks because it could contain anything): failure messages
 // are inline-safe text from our own code, but they routinely embed
 // absolute filesystem paths from exception messages
-// (`/Users/airlock/agent-os/.../foo.json`). Publishing those leaks
+// (`/Users/<user>/agent-os/.../foo.json`). Publishing those leaks
 // host filesystem layout. Redact tokens (defense-in-depth) and mask
 // paths to `<path-redacted>/<basename>`. Output is plain text, not
 // fenced — the caller wraps it in inline code.
@@ -749,7 +749,7 @@ function buildRemediationOutcomeCommentBody({
     lines.push('');
     // failure.message and failure.code originate from internal
     // exceptions and stop codes (e.g. `Failed to read remediation
-    // reply artifact at /Users/airlock/agent-os/.../foo.json`).
+    // reply artifact at /Users/<user>/agent-os/.../foo.json`).
     // They cross a trust boundary into a public PR comment, so
     // we redact tokens AND mask host-local filesystem paths
     // before publishing. R3 review #3.
@@ -1072,7 +1072,7 @@ async function findExistingRemediationComment({
 }) {
   if (!marker) return { found: false };
   try {
-    // Budget admission follows the token this lookup sends (LAC-2075).
+    // Budget admission follows the token this lookup sends.
     await awaitThrottleIfNeeded('core', githubCredential({ env }));
     const { stdout } = await meteredExecFile(execFileImpl,
       'gh',
@@ -1243,7 +1243,7 @@ async function postRemediationOutcomeComment({
 
   try {
     // The write spends the selected bot token's budget, not the anonymous or
-    // the parent's operator bucket (LAC-2075).
+    // the parent's operator bucket.
     await awaitThrottleIfNeeded('core', githubCredential({ token }));
     let ghResult = null;
     let adapterHandled = false;

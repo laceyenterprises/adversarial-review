@@ -71,7 +71,7 @@ ham_wait_for_published_head() {
       probe_exit=$?
       cat "$probe_dir/stderr" >&2
       # Keep the last valid read; transport failures consume the visibility budget.
-      if [ "$probe_exit" -eq 142 ] || sed -e '/^\[load-aware-timeout\]/d' -e '/^\[adversarial-config\] schema source=/d' "$probe_dir/stderr" | grep -Eiq '^github-rate-limit: (primary|secondary|deferred)$|Something went wrong while executing your query|"type"[[:space:]]*:[[:space:]]*"INTERNAL"|HTTP[^[:space:]]*[[:space:]]+5[0-9][0-9]|"status"[[:space:]]*:[[:space:]]*5[0-9][0-9]|timed? out|timeout|TLS|connection (reset|refused|aborted)|temporar(y|ily)|resource temporarily unavailable|HTTP[ /]5[0-9][0-9]([^0-9]|$)|(^|[^0-9])50[234] (Bad Gateway|Service Unavailable|Gateway Timeout)|bad gateway|service unavailable|gateway timeout'; then
+      if [ "$probe_exit" -eq 142 ] || sed -e '/^\[load-aware-timeout\]/d' -e '/^\[adversarial-config\] schema source=/d' "$probe_dir/stderr" | grep -Ei '^github-rate-limit: (primary|secondary|deferred)$|Something went wrong while executing your query|"type"[[:space:]]*:[[:space:]]*"INTERNAL"|HTTP[^[:space:]]*[[:space:]]+5[0-9][0-9]|"status"[[:space:]]*:[[:space:]]*5[0-9][0-9]|timed? out|timeout|TLS|connection (reset|refused|aborted)|temporar(y|ily)|resource temporarily unavailable|HTTP[ /]5[0-9][0-9]([^0-9]|$)|(^|[^0-9])50[234] (Bad Gateway|Service Unavailable|Gateway Timeout)|bad gateway|service unavailable|gateway timeout' >/dev/null; then
         rm -rf "$probe_dir"
         continue
       fi
@@ -179,7 +179,7 @@ ham_lease_pr_view() {
       rc=$?
     fi
     cat "$err" >&2
-    if [ "$rc" -eq 142 ] || sed -e '/^\[load-aware-timeout\]/d' -e '/^\[adversarial-config\] schema source=/d' "$err" | grep -Eiq '^github-rate-limit: (primary|secondary|deferred)$|Something went wrong while executing your query|"type"[[:space:]]*:[[:space:]]*"INTERNAL"|HTTP[^[:space:]]*[[:space:]]+5[0-9][0-9]|"status"[[:space:]]*:[[:space:]]*5[0-9][0-9]|timed? out|timeout|TLS|connection (reset|refused|aborted)|temporar(y|ily)|resource temporarily unavailable|HTTP[ /]5[0-9][0-9]([^0-9]|$)|(^|[^0-9])50[234] (Bad Gateway|Service Unavailable|Gateway Timeout)|bad gateway|service unavailable|gateway timeout'; then
+    if [ "$rc" -eq 142 ] || sed -e '/^\[load-aware-timeout\]/d' -e '/^\[adversarial-config\] schema source=/d' "$err" | grep -Ei '^github-rate-limit: (primary|secondary|deferred)$|Something went wrong while executing your query|"type"[[:space:]]*:[[:space:]]*"INTERNAL"|HTTP[^[:space:]]*[[:space:]]+5[0-9][0-9]|"status"[[:space:]]*:[[:space:]]*5[0-9][0-9]|timed? out|timeout|TLS|connection (reset|refused|aborted)|temporar(y|ily)|resource temporarily unavailable|HTTP[ /]5[0-9][0-9]([^0-9]|$)|(^|[^0-9])50[234] (Bad Gateway|Service Unavailable|Gateway Timeout)|bad gateway|service unavailable|gateway timeout' >/dev/null; then
       HAM_LEASE_PROBE_TRANSIENT=1
     else
       HAM_LEASE_PROBE_TRANSIENT=0

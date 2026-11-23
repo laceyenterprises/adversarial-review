@@ -3,10 +3,8 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, rmSync, mkdirSync, writeFileSync, readFileSync, statSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import Database from 'better-sqlite3';
-import { execFile } from 'node:child_process';
-import { promisify } from 'node:util';
 import { pathToFileURL } from 'node:url';
+import Database from 'better-sqlite3';
 import { reserveRepairEpoch, bindRepairHead, repairCause, pageRepairCap,
   pendingRepairEpoch, observeRepairOwner, reconcileRepairOwner, repairEpochForHead,
   REPAIR_OWNER_OBSERVE_MS, REPAIR_ABSENCE_ESCALATE_MS } from '../src/repair-epochs.mjs';
@@ -24,6 +22,7 @@ import { readDispatchLaunches } from '../src/dispatch-read-client.mjs';
 import { amaCloserDispatchFilePath } from '../src/ama/dispatch-record-read.mjs';
 import { tryAcquireCloserIntentLock } from '../src/ama/pre-receipt-intent.mjs';
 import { mockRepairDispatchScope } from './helpers/repair-dispatch-scope.mjs';
+import { withFixtureProcesses } from './helpers/repeated-fixture-process.mjs';
 
 const repo = 'example/widgets', prNumber = 17;
 const old = 'a'.repeat(40), head = 'b'.repeat(40), later = 'c'.repeat(40);
@@ -940,29 +939,40 @@ test('default repair publisher forwards HQ root and bounded exec options', async
 // read/modify/write. A competing observer may retry EBUSY, never steal custody.
 test('22 concurrent reservation runs each retain exactly one repair owner', async t => {
   const f = fixture(t);
-  const moduleUrl = pathToFileURL(join(process.cwd(), 'src/repair-epochs.mjs')).href;
-  const execute = promisify(execFile);
-  for (let round = 0; round < 22; round++) {
-    const roundRoot = join(f.rootDir, String(round));
-    const outcomes = await Promise.all(Array.from({ length: 4 }, (_, writer) => {
-      const identity = { ...f, rootDir: roundRoot, ownerKey: `writer-${writer}` };
-      const code = `import { reserveRepairEpoch } from ${JSON.stringify(moduleUrl)};
-        let result;
-        // Bound by wall time, not attempts: a loaded host can hold the
-        // flock past a fixed count of short retries.
-        for (const deadline = Date.now() + 10000; Date.now() < deadline;) {
-          try { result = reserveRepairEpoch(${JSON.stringify(identity)}); break; }
-          catch (error) { if (error.code !== 'EBUSY') throw error;
-            await new Promise(resolve => setTimeout(resolve, 5)); }
-        }
-        if (!result) throw Error('reservation never completed');
-        console.log(JSON.stringify(result));`;
-      return execute(process.execPath, ['--input-type=module', '-e', code], { timeout: 15000 })
-        .then(({ stdout }) => JSON.parse(stdout));
-    }));
-    assert.equal(outcomes.filter(outcome => outcome.ok).length, 1);
-    assert.equal(readHammerRetryCapLedger(roundRoot, f).repairEpochs.length, 1);
-  }
+  const script = new URL('./helpers/repair-reservation-writer.mjs', import.meta.url);
+  const writers = Array.from({ length: 4 }, (_, writer) => ({ ownerKey: `writer-${writer}` }));
+  await withFixtureProcesses(script, writers, async contenders => {
+    for (let round = 0; round < 22; round++) {
+      const roundRoot = join(f.rootDir, String(round));
+      const replies = await Promise.all(contenders.map(send => send({ ...f, rootDir: roundRoot })));
+      for (const reply of replies) assert.ok(reply.result, reply.error);
+      const outcomes = replies.map(reply => reply.result);
+      assert.equal(outcomes.filter(outcome => outcome.ok).length, 1);
+      assert.deepEqual(outcomes.filter(outcome => !outcome.ok).map(outcome => outcome.reason),
+        ['repair-owned', 'repair-owned', 'repair-owned']);
+      assert.equal(readHammerRetryCapLedger(roundRoot, f).repairEpochs.length, 1);
+    }
+  }, { timeoutMs: 15_000 });
+});
+
+test('a reused reservation contender refuses invalid input and keeps the next trial independent', async t => {
+  const f = fixture(t);
+  const script = new URL('./helpers/repair-reservation-writer.mjs', import.meta.url);
+  await withFixtureProcesses(script, [{ ownerKey: f.ownerKey }], async ([send]) => {
+    assert.deepEqual(await send({ ...f, headSha: 'invalid' }), { error: 'invalid repair identity' });
+    assert.equal(pendingRepairEpoch(f.rootDir, f), null);
+    const { result } = await send(f);
+    assert.equal(result.ok, true);
+    assert.equal(pendingRepairEpoch(f.rootDir, f).id, result.epoch.id);
+  }, { timeoutMs: 15_000 });
+});
+
+test('a fixture contender that exits mid-command fails the round', async t => {
+  const f = fixture(t);
+  const script = pathToFileURL(join(f.rootDir, 'exit.mjs'));
+  writeFileSync(script, "process.once('message', () => process.exit(23)); process.send('ready');\n");
+  await assert.rejects(withFixtureProcesses(script, [{}], ([send]) => send('run'), { timeoutMs: 15_000 }),
+    error => error.name === 'AbortError' && /Fixture process (disconnected|exited)/.test(error.cause?.message));
 });
 
 test('reserved repair excludes a new final-fix-all queue owner', async t => {

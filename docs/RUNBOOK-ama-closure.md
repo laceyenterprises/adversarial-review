@@ -6782,6 +6782,12 @@ comments supply no proof, and independent proofs can still establish currency.
 An explicit `behind` comparison refuses carry-forward from the discarded
 head. An unavailable comparison supplies no ancestry evidence. The protected
 round and exact Hammer comment chain can independently preserve finding applicability.
+The completed-job proof reader scans at most 125,000 directory entries per
+evaluation, independently of its 256 matching-record and 256 round-edge limits.
+An exhausted directory scan reports `completed-round proof scan hit the directory
+entries limit` and supplies no partial round proof. Review citation checks use
+proof-limit diagnostics only for reviews that could supersede the cited review;
+an older diverged review cannot make an exact-head citation uncertain.
 `pr-blockers` reports missing or capped evidence and tries local patch proof
 only when a repository checkout is configured.
 

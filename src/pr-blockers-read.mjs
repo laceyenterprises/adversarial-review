@@ -206,7 +206,11 @@ export async function collectPrBlockers({ repos, root, checkouts = {}, cfg, now 
         try { return await read(); }
         catch (error) {
           rowErrors.push(`${name} unavailable`);
-          if (error?.proofLimit) rowErrors.push(error.proofLimit);
+          if (error?.proofLimit) {
+            for (const limit of error.proofLimit.split(', ')) {
+              if (!rowErrors.includes(limit)) rowErrors.push(limit);
+            }
+          }
           return fallback;
         }
       };

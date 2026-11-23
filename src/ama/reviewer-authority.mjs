@@ -72,11 +72,13 @@ export async function isCurrentAuthoritativeFamilyReview(review, reviews, headSh
       || !['CHANGES_REQUESTED', 'COMMENTED', 'DISMISSED', 'APPROVED'].includes(entry.state)
       || entry.commit_id === review.commit_id) continue;
     if (!/^[a-f0-9]{40}$/i.test(entry.commit_id || '')) throw new Error('authoritative review has no valid head');
-    if (!await currentReviewHead(entry.commit_id, headSha, compare, currency)) continue;
     const newer = await compare(review.commit_id, entry.commit_id);
-    if (newer.status === 'ahead' || (currency && newer.status === 'diverged'
-      && reviews.indexOf(entry) > reviews.indexOf(review))) return false;
-    if (!['behind', 'diverged', 'identical'].includes(newer.status)) throw new Error('cannot verify review supersession');
+    if (!['ahead', 'behind', 'diverged', 'identical'].includes(newer.status)) {
+      throw new Error('cannot verify review supersession');
+    }
+    if (newer.status !== 'ahead'
+      && !(currency && newer.status === 'diverged' && reviews.indexOf(entry) > reviews.indexOf(review))) continue;
+    if (await currentReviewHead(entry.commit_id, headSha, compare, currency)) return false;
   }
   return true;
 }

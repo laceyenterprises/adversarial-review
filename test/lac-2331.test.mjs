@@ -250,6 +250,23 @@ test('completed proof work is scoped to the matching PR in a large shared direct
   assert.equal(evidence.settledRounds.length, 1);
 });
 
+test('completed proof scan stops after a bounded number of unrelated directory entries', async t => {
+  const { options, record } = fixture(t, { job: nativeFinalJob() });
+  const opendir = fs.opendir;
+  const replacement = t.mock.method(fs, 'opendir', async path => {
+    if (path !== dirname(record)) return opendir(path);
+    return (async function* () {
+      for (let i = 0; i < 125_000; i++) yield { name: 'unrelated-pr-1-job.json', isFile: () => true };
+      yield { name: 'fixture__repo-pr-42-job.json', isFile: () => true };
+    })();
+  });
+  syncBuiltinESMExports();
+  t.after(() => { replacement.mock.restore(); syncBuiltinESMExports(); });
+  const evidence = await readCompletedRemediationEvidence(options.rootDir, repo, prNumber);
+  assert.deepEqual(evidence, { rounds: [], settledRounds: [], finalPublications: [],
+    limitReached: 'directory entries' });
+});
+
 test('record and edge limits are attributed to their target and rate limited per reason', async t => {
   const { options, record } = fixture(t, { job: nativeFinalJob() });
   const logs = t.mock.method(console, 'warn', () => {});
@@ -307,6 +324,17 @@ test('capped snapshots and pagination diagnose missing comment proof and contrib
     snapshot: { state: 'OPEN', headSha: currentHead, comments, reviews: [prior, later] } });
   assert.deepEqual(proof, { ok: false, reason: 'terminal-review-evidence-unavailable',
     missingProof: HAMMER_COMMENTS_CAPPED });
+});
+
+test('an older diverged review cannot make an exact-head citation uncertain at the comment cap', async t => {
+  const { options, compare } = fixture(t, { comments: Array(1000).fill({ body: 'other' }) });
+  const currency = createReviewCurrencyReader(options);
+  const older = { ...reviews[0], commit_id: reviewedHead };
+  const cited = { ...reviews[1], commit_id: currentHead };
+  assert.equal(await isCurrentAuthoritativeFamilyReview(cited, [older, cited], currentHead, compare, currency), true);
+  const otherFamily = { ...older, user: { login: 'lacey-claude-reviewer' } };
+  await assert.rejects(isCurrentAuthoritativeFamilyReview(cited, [cited, otherFamily], currentHead, compare, currency),
+    error => error.proofLimit === HAMMER_COMMENTS_CAPPED);
 });
 
 test('LAC-2331 unavailable comparisons leave an independent exact mixed proof usable', async t => {

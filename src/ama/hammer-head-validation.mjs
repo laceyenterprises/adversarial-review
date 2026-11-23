@@ -18,6 +18,7 @@ const FULL_SHA = /^[0-9a-f]{40}$/i;
 const HAMMER_COMMENT_MAX_PAGES = 10;
 const HAMMER_COMMENT_PAGE_SIZE = 100;
 const MAX_COMPLETED_RECORDS = 256;
+const MAX_COMPLETED_ENTRIES = 125_000;
 const MAX_COMPLETED_RECORD_BYTES = 1024 * 1024;
 const MAX_COMPLETED_ROUND_EDGES = 256;
 const BRANCH_RESET = Symbol('branch reset');
@@ -175,6 +176,7 @@ export async function readCompletedRemediationEvidence(rootDir, repo, prNumber) 
   const settledRounds = new Map();
   const finalPublications = [];
   let records = 0;
+  let entries = 0;
   const capped = (kind, limit) => {
     reportProofLimit(`completed-round proof scan hit the ${kind} limit`, limit, repo, prNumber);
     return { ...unavailable, limitReached: kind };
@@ -185,6 +187,7 @@ export async function readCompletedRemediationEvidence(rootDir, repo, prNumber) 
     const dir = join(rootDir, 'data', 'follow-up-jobs', 'completed');
     const matches = followUpJobFileFilter({ rootDir, repo, prNumber, caseInsensitiveRepo: true });
     for await (const entry of await opendir(dir)) {
+      if (++entries > MAX_COMPLETED_ENTRIES) return capped('directory entries', MAX_COMPLETED_ENTRIES);
       if (!entry.isFile() || !matches(entry.name)) continue;
       if (++records > MAX_COMPLETED_RECORDS) {
         return capped('matching records', MAX_COMPLETED_RECORDS);

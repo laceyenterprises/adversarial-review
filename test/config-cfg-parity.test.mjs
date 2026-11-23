@@ -82,6 +82,37 @@ test('the env alias table is the generated CFG table and names real schema keys'
   assert.equal(ENV_ALIASES['worker_pool.dispatch.idle_backoff.enabled'].aliases[0][1](' 0 '), 'false');
 });
 
+test('refreshed defaults and disk reclaim aliases resolve on independent loads', t => {
+  const dir = mkdtempSync(join(tmpdir(), 'cfg-defaults-'));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const topPath = join(dir, 'config.yaml');
+  writeFileSync(topPath, 'version: 1\n');
+
+  const first = loadConfig({ topPath, env: {} });
+  assert.equal(first.get('worker_pool.work_items.shadow_gate_days'), 7);
+  assert.equal(first.get('worker_pool.admission.low_priority_max_wait_seconds'), 3600);
+  assert.equal(first.get('worker_pool.admission.low_priority_reserved_slots'), 1);
+  const listKey = 'roles.adversarial.merge_authority.no_ci_repositories';
+  first.get(listKey).push('example/fixture');
+
+  const second = loadConfig({ topPath, env: {
+    AGENT_OS_DISK_RECLAIM_ARCHIVE_REF_RETENTION_DAYS: '14',
+    AGENT_OS_DISK_RECLAIM_DEHYDRATE_UNRECLAIMABLE_RECHECK_HOURS: '3',
+  } });
+  assert.deepEqual(second.get(listKey), []);
+  assert.deepEqual(second.resolutionTrace(listKey), [
+    { source: 'code-default', value: [], path: null },
+  ]);
+  for (const [key, defaultValue, override] of [
+    ['disk_reclaim.archive_ref_retention_days', 30, 14],
+    ['disk_reclaim.dehydrate.unreclaimable_recheck_hours', 6, 3],
+  ]) {
+    assert.equal(first.get(key), defaultValue);
+    assert.equal(second.get(key), override);
+    assert.equal(second.resolutionTrace(key)[0].value, defaultValue);
+  }
+});
+
 // Intended difference: Python's strict input validation rejects an ordinary
 // unread sibling in a checked-in file; Node's runtime reader drops it so a key
 // from a newer schema cannot crash a lagging daemon. Keys Node consumes, and

@@ -53,26 +53,10 @@ export function loadConfigForIdentityTokenPool({ identity, ...options } = {}) {
   return loadConfigImpl({ ...options, tolerateCheckedInUnknown: true, tokenPoolIdentity: identity });
 }
 
-export function loadConfigImpl({
-  topPath = null,
-  modulePaths = [],
-  env = null,
-  cliOverrides = null,
-  tolerateCheckedInUnknown = false,
-  tokenPoolIdentity,
-  legacyGeminiReviewer = false,
-} = {}) {
-  const envView = env || process.env;
-  // Compose's ${VAR:-} forwards an absent setting as "": absent for every
-  // leaf type and alias form, as in Python. envView keeps loader controls.
-  const envOverrides = Object.fromEntries(Object.entries(envView).filter(([, value]) => value !== ''));
-  checkDeprecatedEnvVars(envOverrides);
-  const schema = schemaV1();
-
+function buildCodeDefaults(schema) {
   const defaults = buildDefaultsDict(schema);
   const merged = {};
   const trace = {};
-  const runtimeDroppedUnknownKeys = [];
   for (const [dotted, value] of Object.entries(flatten(defaults))) {
     setLeaf(merged, dotted, value);
     (trace[dotted] = trace[dotted] || []).push({
@@ -96,6 +80,32 @@ export function loadConfigImpl({
       source: 'code-default', value: {}, path: null,
     });
   }
+  return { merged, trace };
+}
+
+let codeDefaults;
+
+export function loadConfigImpl({
+  topPath = null,
+  modulePaths = [],
+  env = null,
+  cliOverrides = null,
+  tolerateCheckedInUnknown = false,
+  tokenPoolIdentity,
+  legacyGeminiReviewer = false,
+} = {}) {
+  const envView = env || process.env;
+  // Compose's ${VAR:-} forwards an absent setting as "": absent for every
+  // leaf type and alias form, as in Python. envView keeps loader controls.
+  const envOverrides = Object.fromEntries(Object.entries(envView).filter(([, value]) => value !== ''));
+  checkDeprecatedEnvVars(envOverrides);
+  const schema = schemaV1();
+
+  // The bundled schema is immutable for the life of the process. Clone the
+  // baseline together so each load owns its values and provenance.
+  codeDefaults ??= buildCodeDefaults(schema);
+  const { merged, trace } = structuredClone(codeDefaults);
+  const runtimeDroppedUnknownKeys = [];
 
   // --- Layer 2: module files ---
   const moduleAliases = {};

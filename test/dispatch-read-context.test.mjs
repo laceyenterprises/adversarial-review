@@ -148,7 +148,10 @@ for (const failure of ['rejection', 'timeout']) {
     const { dispatchReadTransport, prepareDispatchReadContext } = await import(client);
     // Keep the rejection scenario inside its budget even on a busy runner.
     // The timeout scenario retains the real clock and exercises expiration.
-    if (failure === 'rejection') t.mock.method(Date, 'now', () => 0);
+    if (failure === 'rejection') {
+      let now = Date.UTC(2026, 10, 22);
+      t.mock.method(Date, 'now', () => now++);
+    }
     t.mock.method(dispatchReadTransport, 'sdk', () => ({
       connect: () => failure === 'timeout' ? new Promise(() => {})
         : Promise.reject(new Error('fixture registration failure')),

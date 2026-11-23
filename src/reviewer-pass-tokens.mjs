@@ -1,5 +1,5 @@
 import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, statSync, writeFileSync } from 'node:fs';
-import { homedir } from 'node:os';
+import { resolveHomePath } from './account-home.mjs';
 import { dirname, isAbsolute, join, resolve } from 'node:path';
 
 import {
@@ -8,7 +8,7 @@ import {
 } from './session-ledger-read-adapter.mjs';
 import { ensureReviewStateSchema, openReviewStateDb } from './review-state.mjs';
 import { deriveReviewerTokenCost, loadReviewerPricingTable } from './reviewer-token-pricing.mjs';
-import { resolveDeployRoot } from './deploy-root.mjs';
+import { isDeployedReviewModule } from './deploy-root.mjs';
 
 const PASS_KINDS = new Set(['first-pass', 'remediation', 'rereview', 'closer']);
 const HOUR_MS = 60 * 60 * 1000;
@@ -1056,7 +1056,8 @@ function readLocalReviewerTranscriptUsage({ model, workspacePath, startedAt, end
   if (model === 'claude') {
     const [workspace] = normalizedWorkspacePaths(workspacePath, rootDir);
     if (!workspace || !parseDate(startedAt)) return null;
-    const home = env.CLAUDE_CONFIG_DIR || join(env.HOME || homedir(), '.claude');
+    const home = env.CLAUDE_CONFIG_DIR || resolveHomePath(env, '.claude');
+    if (!home) return null;
     // Claude stores each cwd under a project slug. A reviewer snapshot has its
     // own cwd, so never enumerate every project on the host's Claude account.
     const projectDir = join(home, 'projects', workspace.replace(/[^A-Za-z0-9]/g, '-'));
@@ -1530,7 +1531,7 @@ function defaultCodexSessionRoots({ env = process.env } = {}) {
     ...(env.CODEX_SESSION_ROOTS ? env.CODEX_SESSION_ROOTS.split(':') : []),
     env.CODEX_SESSION_ROOT,
     env.CODEX_HOME ? join(env.CODEX_HOME, 'sessions') : null,
-    join(homedir(), '.codex', 'sessions'),
+    resolveHomePath(env, '.codex', 'sessions'),
   ]);
 }
 
@@ -1540,7 +1541,7 @@ function defaultClaudeSessionRoots({ env = process.env } = {}) {
     env.CLAUDE_SESSION_ROOT,
     env.CLAUDE_PROJECTS_ROOT,
     env.CLAUDE_CONFIG_DIR ? join(env.CLAUDE_CONFIG_DIR, 'projects') : null,
-    join(homedir(), '.claude', 'projects'),
+    resolveHomePath(env, '.claude', 'projects'),
   ]);
 }
 
@@ -1655,9 +1656,7 @@ function shouldUseDefaultTranscriptRoots(rootDir, env = process.env) {
   if (env?.ADV_REVIEW_TOKEN_TRANSCRIPT_FALLBACK === '0') return false;
   // Only the deployed module opts in by default; other checkouts (worker trees)
   // set ADV_REVIEW_TOKEN_TRANSCRIPT_FALLBACK=1 explicitly.
-  const deployRoot = resolveDeployRoot(env);
-  if (!deployRoot || !rootDir) return false;
-  return resolve(String(rootDir)) === resolve(deployRoot, 'tools', 'adversarial-review');
+  return isDeployedReviewModule(rootDir, env);
 }
 
 function timestampOverlapsWindow(startedAt, endedAt, windowStart, windowEnd) {

@@ -2,13 +2,16 @@ import fs from 'node:fs';
 import { syncBuiltinESMExports } from 'node:module';
 import { basename, dirname, join } from 'node:path';
 
+let active = false;
+
 // The repeated watcher fixtures check poll behavior and read back atomic
 // status writes. Their disposable diagnostic snapshots can omit disk flushes.
-export function omitWatcherDiagnosticFlushes(root) {
+export function omitWatcherDiagnosticFlushes(root, registerCleanup) {
   const sandbox = process.env.ADVERSARIAL_REVIEW_TEST_SANDBOX_ROOT;
   if (!sandbox || dirname(root) !== sandbox || root !== process.env.ADVERSARIAL_REVIEW_TEST_CWD) {
     throw new Error('Watcher diagnostic flush fixture requires an isolated test root');
   }
+  if (active) throw new Error('Watcher diagnostic flush fixture is already active');
 
   const tempPrefixes = new Map([
     join(root, 'data', 'argus-security-drain-status.json'),
@@ -23,8 +26,15 @@ export function omitWatcherDiagnosticFlushes(root) {
   const { closeSync, fsyncSync, openSync, renameSync } = fs;
   const diagnosticFds = new Set();
   let renamedParent;
-
-  fs.openSync = (file, flags, ...args) => {
+  let restored = false;
+  const restore = () => {
+    if (restored) return;
+    restored = true;
+    active = false;
+    Object.assign(fs, { closeSync, fsyncSync, openSync, renameSync });
+    syncBuiltinESMExports();
+  };
+  const open = (file, flags, ...args) => {
     // writeFileAtomic opens the parent immediately after publishing a file.
     // Other opens of that directory still receive a real flush.
     const parentSync = flags === 'r' && file === renamedParent;
@@ -35,21 +45,25 @@ export function omitWatcherDiagnosticFlushes(root) {
     }
     return fd;
   };
-  fs.renameSync = (source, destination) => {
+  const rename = (source, destination) => {
     renameSync(source, destination);
     renamedParent = matchesTempFile(source, tempPrefixes.get(destination)) ? dirname(destination) : undefined;
   };
-  fs.fsyncSync = fd => {
+  const fsync = fd => {
     if (!diagnosticFds.has(fd)) fsyncSync(fd);
   };
-  fs.closeSync = fd => {
+  const close = fd => {
     diagnosticFds.delete(fd);
     return closeSync(fd);
   };
-  syncBuiltinESMExports();
-
-  return () => {
-    Object.assign(fs, { closeSync, fsyncSync, openSync, renameSync });
+  active = true;
+  try {
+    registerCleanup(restore);
+    if (restored) return;
+    Object.assign(fs, { closeSync: close, fsyncSync: fsync, openSync: open, renameSync: rename });
     syncBuiltinESMExports();
-  };
+  } catch (error) {
+    restore();
+    throw error;
+  }
 }

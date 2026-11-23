@@ -133,10 +133,12 @@ personal per-worker kill switch is disabled.
 
 The native reviewer resolves its credential source before service-home staging:
 explicit `CODEX_AUTH_PATH`, then a usable OAuth `CODEX_HOME/auth.json`, then
-`$HOME/.codex/auth.json` (using the process home directory when `HOME` is unset
-or empty). Only when that default file is missing may an existing file selected
-by `ADVERSARIAL_LEGACY_CODEX_AUTH_PATH` supply the split-user bridge. A stale
-legacy path never replaces the default path; there is no fixed account fallback.
+`.codex/auth.json` under an absolute `HOME`. If `HOME` is unset, empty or
+relative, the default uses the OS account home. An existing file selected by
+`ADVERSARIAL_LEGACY_CODEX_AUTH_PATH` supplies the split-user bridge when the
+default file is missing or the account home is unavailable. A stale legacy path
+leaves the ordinary default in effect. Without an absolute home or a usable
+explicit selection, credential discovery fails closed.
 
 The service writes an independent mode-0600 OAuth snapshot under its mode-0700
 `CODEX_HOME/auth.json`, with `cli_auth_credentials_store = "file"` in the reviewed

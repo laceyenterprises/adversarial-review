@@ -38,7 +38,8 @@ import {
   unlinkSync,
   writeFileSync,
 } from 'node:fs';
-import { hostname, homedir, tmpdir } from 'node:os';
+import { hostname, tmpdir } from 'node:os';
+import { resolveHomeDir, resolveHomePath } from './account-home.mjs';
 import { join } from 'node:path';
 import { performance } from 'node:perf_hooks';
 import { promisify } from 'node:util';
@@ -529,21 +530,21 @@ async function spawnClaude(args, options = {}) {
   }, execOptions.cwd);
 }
 
-function resolveCodexAuthPath() {
+function resolveCodexAuthPath(env = process.env, { existsSyncImpl = existsSync } = {}) {
   // CODEX_AUTH_PATH env var allows explicit override. CODEX_HOME supports
   // local/manual runs only when it points at a usable OAuth auth.json.
   // Prefer the current operator's default auth location. A split-user
   // deployment, where the daemon user differs from the Codex OAuth owner, names
   // the other user's auth file in ADVERSARIAL_LEGACY_CODEX_AUTH_PATH.
-  if (process.env.CODEX_AUTH_PATH) return process.env.CODEX_AUTH_PATH;
-  if (process.env.CODEX_HOME) {
-    const codexHomeAuth = join(process.env.CODEX_HOME, 'auth.json');
+  if (env.CODEX_AUTH_PATH) return env.CODEX_AUTH_PATH;
+  if (env.CODEX_HOME) {
+    const codexHomeAuth = join(env.CODEX_HOME, 'auth.json');
     if (isCodexOAuthAuthFile(codexHomeAuth)) return codexHomeAuth;
   }
-  const legacyAuth = String(process.env.ADVERSARIAL_LEGACY_CODEX_AUTH_PATH || '').trim();
-  const homeAuth = join(process.env.HOME || homedir(), '.codex', 'auth.json');
-  if (existsSync(homeAuth) || !legacyAuth || !existsSync(legacyAuth)) return homeAuth;
-  return legacyAuth;
+  const legacyAuth = String(env.ADVERSARIAL_LEGACY_CODEX_AUTH_PATH || '').trim();
+  const homeAuth = resolveHomePath(env, '.codex', 'auth.json');
+  if (homeAuth && (!legacyAuth || existsSyncImpl(homeAuth))) return homeAuth;
+  return legacyAuth && existsSyncImpl(legacyAuth) ? legacyAuth : homeAuth;
 }
 
 function isCodexOAuthAuthFile(authPath) {
@@ -614,8 +615,8 @@ async function assertCodexOAuth({ codexCli = null } = {}) {
  */
 function resolveGeminiOAuthCredsPath(env = process.env) {
   if (env.GEMINI_OAUTH_CREDS_PATH) return env.GEMINI_OAUTH_CREDS_PATH;
-  const geminiHome = env.GEMINI_HOME || join(env.HOME || homedir(), '.gemini');
-  return join(geminiHome, 'oauth_creds.json');
+  return env.GEMINI_HOME ? join(env.GEMINI_HOME, 'oauth_creds.json')
+    : resolveHomePath(env, '.gemini', 'oauth_creds.json');
 }
 
 /**
@@ -1342,7 +1343,7 @@ async function reviewWithCodex(diff, extraContext = '', {
       ...process.env,
       PATH: '/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin',
       CODEX_AUTH_PATH: effectiveAuthPath,
-      HOME: process.env.HOME || homedir(),
+      HOME: resolveHomeDir() ?? undefined,
     });
     serviceHome = prepareServiceCodexHome({ env, workspaceDir: reviewerSubprocessCwd, codexCli, execFileSyncImpl,
       model: codexExecOverrides.model, effort: codexExecOverrides.reasoningEffort, preserveToolCapabilities: true, log });
@@ -1560,8 +1561,9 @@ class GeminiCredentialPoolBusyError extends Error {
 }
 
 function resolveGeminiReviewerSessionParent(env = process.env) {
-  if (env.GEMINI_REVIEWER_SESSION_PARENT) return env.GEMINI_REVIEWER_SESSION_PARENT;
-  return join(env.HOME || homedir(), '.gemini', 'reviewer-sessions');
+  const parent = env.GEMINI_REVIEWER_SESSION_PARENT || resolveHomePath(env, '.gemini', 'reviewer-sessions');
+  if (!parent) throw new Error('Gemini reviewer session parent requires an absolute account home or GEMINI_REVIEWER_SESSION_PARENT');
+  return parent;
 }
 
 function normalizeGeminiReviewerHostname(value) {
@@ -2917,7 +2919,7 @@ async function reviewWithGemini(diff, extraContext = '', {
   // subprocess probe or review spawn so the runtime exercises OAuth only.
   const { env } = scrubOAuthFallbackEnv({
     ...process.env,
-    HOME: process.env.HOME || homedir(),
+    HOME: resolveHomeDir() ?? undefined,
   });
   let reviewEnv = env;
   let checkout = null;

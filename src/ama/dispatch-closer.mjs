@@ -100,7 +100,8 @@ import {
   statSync,
   writeFileSync,
 } from 'node:fs';
-import { homedir, hostname, userInfo } from 'node:os';
+import { hostname, userInfo } from 'node:os';
+import { resolveHomePath } from '../account-home.mjs';
 import { basename, dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
@@ -263,9 +264,11 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 const SUBMODULE_ROOT = resolve(__dirname, '..', '..');
 const AGENT_OS_ROOT = resolve(SUBMODULE_ROOT, '..', '..');
 
-function resolveCloserHqPath(dispatchContext = {}, env = process.env) {
+export function resolveCloserHqPath(dispatchContext = {}, env = process.env) {
   // The per-user install location follows the daemon user's home, not a fixed account.
-  return dispatchContext.hqPath || env.HQ_BIN || join(env.HOME || homedir(), '.local', 'bin', 'hq');
+  const hqPath = dispatchContext?.hqPath || env?.HQ_BIN || resolveHomePath(env, '.local', 'bin', 'hq');
+  if (!hqPath) throw new Error('Closer HQ executable requires an absolute account home or an explicit HQ path');
+  return hqPath;
 }
 const DEFAULT_HQ_ROOT = process.env.HQ_ROOT || process.env.AGENT_OS_HQ_ROOT || null;
 const DEFAULT_PROJECT = 'adversarial-merge-authority';

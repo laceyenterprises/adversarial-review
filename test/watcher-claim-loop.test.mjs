@@ -26,7 +26,7 @@ const diagnosticFlushFixture = new URL('./helpers/watcher-diagnostic-flush-fixtu
 function buildRegisterSource(loaderPath) {
   return `
 import { omitWatcherDiagnosticFlushes } from ${JSON.stringify(diagnosticFlushFixture.href)};
-omitWatcherDiagnosticFlushes(${JSON.stringify(REPO_ROOT)});
+omitWatcherDiagnosticFlushes(${JSON.stringify(REPO_ROOT)}, restore => process.once('exit', restore));
 ${buildFixtureRegisterSource(loaderPath)}`;
 }
 

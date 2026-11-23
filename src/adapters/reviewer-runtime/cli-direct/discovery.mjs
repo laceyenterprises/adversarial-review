@@ -4,7 +4,7 @@ import { ensureWorkerRegistryReady, resolveRemediationModel } from '../../agent-
 import { loadAwareTimeoutMs } from '../../../load-aware-timeout.mjs';
 import { constants } from 'node:fs';
 import { access, readFile } from 'node:fs/promises';
-import { homedir } from 'node:os';
+import { resolveHomePath } from '../../../account-home.mjs';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
 import { execFile } from 'node:child_process';
@@ -48,8 +48,8 @@ async function resolveGeminiCliBinary({ env = process.env } = {}) {
 
 function resolveGeminiOAuthCredsPath(env = process.env) {
   if (env?.GEMINI_OAUTH_CREDS_PATH) return env.GEMINI_OAUTH_CREDS_PATH;
-  const geminiHome = env?.GEMINI_HOME || join(env?.HOME || homedir(), '.gemini');
-  return join(geminiHome, 'oauth_creds.json');
+  return env?.GEMINI_HOME ? join(env.GEMINI_HOME, 'oauth_creds.json')
+    : resolveHomePath(env, '.gemini', 'oauth_creds.json');
 }
 
 async function assertGeminiOAuthReadable(env = process.env) {
@@ -166,9 +166,7 @@ async function probeCodexCli({
   const codexCli = await resolveCliBinary({ binaryName: 'codex', envVar: 'CODEX_CLI', env });
   await ensureWorkerRegistryReadyImpl({ env });
   const model = resolveRemediationModel('codex-reviewer', { env });
-  // Preserve the base home's OAuth lookup before redirecting config/session state.
-  const authPath = env.CODEX_AUTH_PATH || join(env.CODEX_HOME || join(env.HOME || homedir(), '.codex'), 'auth.json');
-  const home = await prepareServiceCodexHomeAsync({ env: { ...env, CODEX_AUTH_PATH: authPath }, workspaceDir: cwd,
+  const home = await prepareServiceCodexHomeAsync({ env, workspaceDir: cwd,
     model: model.resolvedModel, effort: model.resolvedReasoningLevel, codexCli, preserveToolCapabilities: true,
     // Preserve the explicit fixture seam; production always uses async transport.
     execFileImpl: execFileSyncImpl ? async (...args) => ({ stdout: execFileSyncImpl(...args) }) : execFileImpl });

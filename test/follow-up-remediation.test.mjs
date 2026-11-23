@@ -8,7 +8,7 @@ import test, { beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync, spawn, spawnSync } from 'node:child_process';
 import { killFixtureChild } from './helpers/fixture-child.mjs';
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs';
 import { createServer } from 'node:http';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
@@ -1358,6 +1358,44 @@ test('resolveRemediationWorkspaceRoot refuses deploy-checkout workspaces without
     }),
     /HQ_ROOT must be set|must be set before spawning remediation workers/,
   );
+});
+
+test('unreadable deploy config still protects the vendored source and sibling paths', (t) => {
+  const tmp = mkdtempSync(path.join(tmpdir(), 'adversarial-review-deploy-guard-'));
+  t.after(() => rmSync(tmp, { recursive: true, force: true }));
+  const deploy = path.join(tmp, 'relocated');
+  const rootDir = path.join(deploy, 'tools', 'adversarial-review');
+  const worker = path.join(tmp, 'isolated-worker');
+  const alias = path.join(tmp, 'module-alias');
+  const deployAlias = path.join(tmp, 'deploy-alias');
+  const sourceAlias = path.join(tmp, 'source-alias');
+  mkdirSync(rootDir, { recursive: true });
+  mkdirSync(worker);
+  symlinkSync(rootDir, alias, 'dir');
+  symlinkSync(deploy, deployAlias, 'dir');
+  const moduleFile = realpathSync(new URL('../src/follow-up-remediation.mjs', import.meta.url));
+  symlinkSync(path.dirname(path.dirname(moduleFile)), sourceAlias, 'dir');
+  const loadConfigImpl = () => { throw new Error('failed-loader probe'); };
+
+  for (const source of [rootDir, alias]) {
+    assert.throws(() => resolveRemediationWorkspaceRoot({ rootDir: source, env: {}, loadConfigImpl }),
+      /refusing to create mutable worker clones under live source/);
+    for (const root of [path.join(rootDir, 'clones'), path.join(deploy, 'sibling', 'clones'),
+      path.join(deployAlias, 'sibling', 'clones'), path.join(deployAlias, '..scratch')]) {
+      assert.throws(() => resolveRemediationWorkspaceRoot({ rootDir: source, loadConfigImpl,
+        env: { ADVERSARIAL_REMEDIATION_WORKSPACE_ROOT: root } }), /inside deploy checkout/);
+    }
+    assert.equal(resolveRemediationWorkspaceRoot({ rootDir: source, loadConfigImpl, env: { HQ_ROOT: worker } }),
+      path.join(worker, 'adversarial-review', 'follow-up-workspaces'));
+  }
+  assert.equal(resolveRemediationWorkspaceRoot({ rootDir: worker, env: {}, loadConfigImpl }),
+    path.join(worker, 'data', 'follow-up-jobs', 'workspaces'));
+  const workerOverride = path.join(worker, 'external-override');
+  assert.equal(resolveRemediationWorkspaceRoot({ rootDir: worker, loadConfigImpl,
+    env: { ADVERSARIAL_REMEDIATION_WORKSPACE_ROOT: workerOverride } }), workerOverride);
+  assert.throws(() => resolveRemediationWorkspaceRoot({ rootDir: worker, loadConfigImpl,
+    env: { ADVERSARIAL_REMEDIATION_WORKSPACE_ROOT: path.join(sourceAlias, 'clones') } }), /inside source checkout/);
+  assert.equal(existsSync(path.join(rootDir, 'data')), false);
 });
 
 test('resolveWorkerStoredPath allows absolute worker artifacts only under the workspace root', async () => {

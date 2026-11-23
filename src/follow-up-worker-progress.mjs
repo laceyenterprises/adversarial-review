@@ -3,7 +3,7 @@ import { loadAwareTimeoutMs } from './load-aware-timeout.mjs';
 // lifecycle gate. Both the watcher and the follow-up daemon use these probes.
 import { execFileSync } from 'node:child_process';
 import { existsSync, statSync } from 'node:fs';
-import { homedir } from 'node:os';
+import { resolveHomePath } from './account-home.mjs';
 import { isAbsolute, join, resolve } from 'node:path';
 import { readClaudeTranscriptTokenUsage, readCodexTranscriptTokenUsage } from './reviewer-pass-tokens.mjs';
 
@@ -51,12 +51,12 @@ function resolveWorkerSessionProgressMs(rootDir, job) {
       ...(process.env.CLAUDE_SESSION_ROOTS || '').split(':'),
       process.env.CLAUDE_SESSION_ROOT,
       process.env.CLAUDE_PROJECTS_ROOT,
-      defaultRoots ? join(homedir(), '.claude', 'projects') : null,
+      defaultRoots ? resolveHomePath(process.env, '.claude', 'projects') : null,
     ]
     : [
       ...(process.env.CODEX_SESSION_ROOTS || '').split(':'),
       process.env.CODEX_SESSION_ROOT,
-      defaultRoots ? join(homedir(), '.codex', 'sessions') : null,
+      defaultRoots ? resolveHomePath(process.env, '.codex', 'sessions') : null,
     ];
   try {
     const usage = model.includes('claude')

@@ -30,8 +30,8 @@ import { isHarnessIdentityEnforcementEnabled } from './remediation-identity-poli
 import { execFile } from 'node:child_process';
 import { existsSync, lstatSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { userInfo } from 'node:os';
-import { resolveDeployRoot } from './deploy-root.mjs';
-import { dirname, isAbsolute, join, relative, resolve } from 'node:path';
+import { resolveDeployCheckout } from './deploy-root.mjs';
+import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 import { loadAppSdkConnect } from './app-sdk-loader.mjs';
@@ -249,6 +249,7 @@ import {
 const execFileAsync = promisify(execFile);
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const ROOT = join(__dirname, '..');
+const SOURCE_ROOT = dirname(dirname(resolveRealPath(fileURLToPath(import.meta.url))));
 const REMEDIATION_LEGACY_UNSTAGE_COMMANDS = [
   'git rm --cached -- .adversarial-follow-up/remediation-reply.json 2>/dev/null || true',
   'git rm --cached -r -- .adversarial-follow-up/ 2>/dev/null || true',
@@ -686,19 +687,13 @@ function isPathInsideOrEqual(rootPath, candidatePath) {
   const root = resolveRealPath(resolve(rootPath));
   const candidate = resolveRealPath(resolve(candidatePath));
   const rel = relative(root, candidate);
-  return rel === '' || (!rel.startsWith('..') && !isAbsolute(rel));
-}
-
-function resolveDeployCheckout(env = process.env) {
-  // Null when no deploy root is configured: isPathInsideOrEqual() then reports
-  // no overlap, so the live-source guards below only apply where one is known.
-  const deployRoot = resolveDeployRoot(env);
-  return deployRoot ? resolve(deployRoot) : null;
+  return rel === '' || (rel !== '..' && !rel.startsWith(`..${sep}`) && !isAbsolute(rel));
 }
 
 function resolveRemediationWorkspaceRoot({
   rootDir = ROOT,
   env = process.env,
+  loadConfigImpl,
 } = {}) {
   const configuredRoot = String(env[REMEDIATION_WORKSPACE_ROOT_ENV] || '').trim();
   const hqRoot = String(env.HQ_ROOT || '').trim();
@@ -708,8 +703,8 @@ function resolveRemediationWorkspaceRoot({
       ? resolve(hqRoot, ...HQ_REMEDIATION_WORKSPACE_SEGMENTS)
       : getFollowUpJobDir(rootDir, 'workspaces');
 
-  const deployCheckout = resolveDeployCheckout(env);
   const sourceRoot = resolve(rootDir);
+  const deployCheckout = resolveDeployCheckout(env, { sourceRoots: [ROOT, SOURCE_ROOT, sourceRoot], loadConfigImpl });
   const externalRootConfigured = Boolean(configuredRoot || hqRoot);
   if (!externalRootConfigured && isPathInsideOrEqual(deployCheckout, sourceRoot)) {
     throw new Error(
@@ -718,10 +713,13 @@ function resolveRemediationWorkspaceRoot({
     );
   }
 
-  if (externalRootConfigured && isPathInsideOrEqual(deployCheckout, workspaceRoot)) {
+  if (isPathInsideOrEqual(deployCheckout, workspaceRoot)) {
     throw new Error(
       `Invalid remediation workspace root: ${workspaceRoot} is inside deploy checkout ${deployCheckout}`
     );
+  }
+  if (externalRootConfigured && isPathInsideOrEqual(SOURCE_ROOT, workspaceRoot)) {
+    throw new Error(`Invalid remediation workspace root: ${workspaceRoot} is inside source checkout ${SOURCE_ROOT}`);
   }
 
   return workspaceRoot;

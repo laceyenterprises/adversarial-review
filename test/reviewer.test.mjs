@@ -11,8 +11,8 @@ import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import Database from 'better-sqlite3';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, utimesSync, writeFileSync } from 'node:fs';
-import { homedir, hostname, tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { hostname, tmpdir, userInfo } from 'node:os';
+import { isAbsolute, join } from 'node:path';
 import { __test__ } from '../src/reviewer.mjs';
 import { buildObviousDocsGuidance, extractLinkedRepoDocs, fetchLinkedSpecContents, parseGitHubBlobPath } from '../src/prompt-context.mjs';
 import { AgentOSConfigError } from '../src/config-loader.mjs';
@@ -2864,27 +2864,36 @@ test('new follow-up jobs re-derive cap when the prior cap is not above the curre
   );
 });
 
-test('Codex reviewer auth path without HOME uses the process home, not a fixed account', () => {
-  withEnv({
-    CODEX_AUTH_PATH: undefined, CODEX_HOME: undefined, HOME: undefined,
-    ADVERSARIAL_LEGACY_CODEX_AUTH_PATH: undefined,
-  }, () => {
-    assert.equal(resolveCodexAuthPath(), join(homedir(), '.codex', 'auth.json'));
-  });
-});
-
-test('Codex reviewer auth path ignores a nonexistent legacy path when HOME is unset or empty', () => {
+test('Codex reviewer auth uses the OS account home for unset, empty and relative HOME', () => {
   const root = mkdtempSync(join(tmpdir(), 'adversarial-review-codex-no-home-'));
+  const originalCwd = process.cwd();
+  const expected = join(userInfo().homedir, '.codex', 'auth.json');
+  assert.ok(isAbsolute(expected));
   try {
-    for (const home of [undefined, '']) {
+    mkdirSync(join(root, '.codex'));
+    writeFileSync(join(root, '.codex', 'auth.json'), '{}');
+    process.chdir(root);
+    for (const home of [undefined, '', '.']) {
+      const bridge = join(root, 'bridge.json');
+      const probes = [];
+      const existsSyncImpl = path => {
+        probes.push(path);
+        return path === bridge || path === '.codex/auth.json';
+      };
       withEnv({
         CODEX_AUTH_PATH: undefined, CODEX_HOME: undefined, HOME: home,
-        ADVERSARIAL_LEGACY_CODEX_AUTH_PATH: join(root, 'absent.json'),
+        ADVERSARIAL_LEGACY_CODEX_AUTH_PATH: bridge,
       }, () => {
-        assert.equal(resolveCodexAuthPath(), join(homedir(), '.codex', 'auth.json'));
+        assert.equal(resolveCodexAuthPath(process.env, { existsSyncImpl }), bridge);
+        assert.deepEqual(probes, [expected, bridge]);
+      });
+      withEnv({ CODEX_AUTH_PATH: undefined, CODEX_HOME: undefined, HOME: home,
+        ADVERSARIAL_LEGACY_CODEX_AUTH_PATH: join(root, 'absent.json') }, () => {
+        assert.equal(resolveCodexAuthPath(process.env, { existsSyncImpl }), expected);
       });
     }
   } finally {
+    process.chdir(originalCwd);
     rmSync(root, { recursive: true, force: true });
   }
 });

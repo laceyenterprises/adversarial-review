@@ -116,10 +116,20 @@ test('LAC-2331 damaged and oversized jobs leave independent completed records us
 });
 
 test('LAC-2331 a capped round scan still admits independent exact App provenance', async t => {
-  const { options, record } = fixture(t, { comments: [edge(reviewedHead, currentHead)] });
+  const { options, record, currency } = fixture(t);
   for (let i = 0; i < 256; i++) writeFileSync(record.replace('job.json', `job-${i}.json`), '{}');
-  assert.equal((await createReviewCurrencyReader(options)(reviewedHead, currentHead)).proof, 'closer-rebase-provenance');
-  assert.deepEqual((await fetchHammerHeadRange(options))?.commits, [currentHead]);
+  assert.equal((await currency(reviewedHead, currentHead)).current, false);
+  assert.equal(await fetchHammerHeadRange(options), null);
+  const direct = { ...options, comments: [edge(reviewedHead, currentHead)] };
+  assert.equal((await createReviewCurrencyReader(direct)(reviewedHead, currentHead)).proof, 'closer-rebase-provenance');
+  assert.deepEqual((await fetchHammerHeadRange(direct))?.commits, [currentHead]);
+});
+
+test('LAC-2331 unavailable comparisons leave an independent exact mixed proof usable', async t => {
+  const { options } = fixture(t);
+  const unreadableCompare = { ...options, get: async () => { throw new Error('comparison unavailable'); } };
+  assert.equal((await createReviewCurrencyReader(unreadableCompare)(reviewedHead, currentHead)).proof, 'closer-rebase-provenance');
+  assert.deepEqual((await fetchHammerHeadRange(unreadableCompare))?.commits, [remediated, rebased, currentHead]);
 });
 
 test('LAC-2331 mixed provenance retains reviewer-family supersession and the standing operator veto', async t => {

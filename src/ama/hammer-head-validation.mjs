@@ -21,6 +21,13 @@ const MAX_COMPLETED_RECORDS = 256;
 const MAX_COMPLETED_RECORD_BYTES = 1024 * 1024;
 const MAX_COMPLETED_ROUND_EDGES = 256;
 const BRANCH_RESET = Symbol('branch reset');
+const reportedCompletedLimits = new Set();
+
+function reportCompletedLimit(kind, limit, repo, prNumber) {
+  if (reportedCompletedLimits.has(kind)) return;
+  reportedCompletedLimits.add(kind);
+  console.warn(`[ama] completed-round proof scan hit the ${kind} limit (${limit}) for ${repo}#${prNumber}`);
+}
 
 // A full last page can be truncated. Partial pages may not attest a chain.
 export async function readHammerProvenanceComments(loadPage) {
@@ -146,9 +153,15 @@ export async function readCompletedRemediationRounds(rootDir, repo, prNumber) {
     const dir = join(rootDir, 'data', 'follow-up-jobs', 'completed');
     const matches = followUpJobFileFilter({ rootDir, repo, prNumber, caseInsensitiveRepo: true });
     for await (const entry of await opendir(dir)) {
-      if (++entries > MAX_COMPLETED_ENTRIES) return [];
+      if (++entries > MAX_COMPLETED_ENTRIES) {
+        reportCompletedLimit('directory entries', MAX_COMPLETED_ENTRIES, repo, prNumber);
+        return [];
+      }
       if (!entry.isFile() || !matches(entry.name)) continue;
-      if (++records > MAX_COMPLETED_RECORDS) return [];
+      if (++records > MAX_COMPLETED_RECORDS) {
+        reportCompletedLimit('matching records', MAX_COMPLETED_RECORDS, repo, prNumber);
+        return [];
+      }
       try {
         const job = await readCompletedJob(join(dir, entry.name));
         if (typeof job?.repo !== 'string' || job.repo.toLowerCase() !== repo.toLowerCase()
@@ -160,7 +173,10 @@ export async function readCompletedRemediationRounds(rootDir, repo, prNumber) {
           if (round?.state !== 'completed' || typeof base !== 'string' || typeof head !== 'string'
             || !FULL_SHA.test(base) || !FULL_SHA.test(head)) continue;
           rounds.set(`${base}:${head}`, round);
-          if (rounds.size > MAX_COMPLETED_ROUND_EDGES) return [];
+          if (rounds.size > MAX_COMPLETED_ROUND_EDGES) {
+            reportCompletedLimit('round edges', MAX_COMPLETED_ROUND_EDGES, repo, prNumber);
+            return [];
+          }
         }
       } catch {
         // A damaged or concurrently removed record cannot invalidate other jobs.
@@ -283,6 +299,15 @@ async function fetchExistingHammerHeadRange({ repo, prNumber, rootDir, reviewedH
   if (reviewedHead && hammerBaseHead === reviewedHead) return { verified: true, reviewedHead, currentHead,
     baseSha: reviewedHead, commits: currentHead === reviewedHead ? [] : [currentHead], proof: 'reviewed-starting-base' };
   const target = hammerBaseHead || currentHead;
+  const appRange = provenance => {
+    const chain = hammerAttestationChain(provenance, reviewedHead, target);
+    return chain && { verified: true, reviewedHead, currentHead, baseSha: reviewedHead,
+      commits: [...chain, ...(target !== currentHead ? [currentHead] : [])], proof: 'hammer-app-attestation-chain' };
+  };
+  // Daemon snapshots already have comments. Their pure App proof needs no
+  // disk scan. A worker's round-only starting-base proof still avoids API pagination.
+  const snapshotRange = !loadComments && appRange(comments);
+  if (snapshotRange) return snapshotRange;
   const fleetLogins = await resolveFleetLogins(env);
   const remediationRounds = await readCompletedRemediationRounds(rootDir, repo, prNumber);
   let rounds, roundReadFailure;
@@ -296,18 +321,18 @@ async function fetchExistingHammerHeadRange({ repo, prNumber, rootDir, reviewedH
     commits: [...rounds.map(link => link.head), ...(target !== currentHead ? [currentHead] : [])],
     proof: 'completed-remediation-round-chain', linkKinds: rounds.map(link => link.kind) };
   const provenanceComments = loadComments ? await loadComments() : comments;
-  const chain = hammerAttestationChain(provenanceComments, reviewedHead, target);
-  if (chain?.length > 0) return { verified: true, reviewedHead, currentHead, baseSha: reviewedHead,
-    commits: [...chain, ...(target !== currentHead ? [currentHead] : [])],
-    proof: 'hammer-app-attestation-chain' };
-  // The authenticated Hammer endpoint lets completed-round records bridge to
-  // its base even when the rebase has removed Git ancestry. The round-only
-  // proof has no such anchor and verifies each hop independently.
+  const loadedRange = loadComments && appRange(provenanceComments);
+  if (loadedRange) return loadedRange;
+  // A mixed proof uses the daemon's recorded endpoints as intermediate custody.
+  // The authenticated final Hammer edge supplies the publication proof that a
+  // round-only starting-base proof must establish through GitHub comparisons.
   const mixed = remediationRounds.length && FULL_SHA.test(reviewedHead) && FULL_SHA.test(currentHead)
     ? hammerAttestationChain(provenanceComments, reviewedHead, currentHead, remediationRounds) : null;
   if (mixed && (target === currentHead || mixed.includes(target))) {
     const comparison = await get(`repos/${repo}/compare/${reviewedHead}...${currentHead}`).catch(error => {
       if (isAbort(error)) throw error;
+      // The comparison can establish a reset. Exact durable evidence already
+      // proves the chain independently when GitHub comparison is unavailable.
       return null;
     });
     if (comparison?.status === 'behind') return BRANCH_RESET;

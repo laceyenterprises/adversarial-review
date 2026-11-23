@@ -6774,6 +6774,11 @@ bound to the repository and PR. Attestation proof of a later push requires its
 own exact terminating Hammer edge. Source reversal still requires its independent
 source-preservation proof and review-citation checks. A paginated comment read
 must finish within ten pages of 100 comments.
+An explicit `behind` comparison refuses carry-forward from the discarded
+head. An unavailable comparison supplies no ancestry evidence. The protected
+round and exact Hammer comment chain can independently preserve currency.
+`pr-blockers` reports missing or capped evidence and tries local patch proof
+only when a repository checkout is configured.
 
 The patch proof reads at most 256
 linear commits per series, preserves empty commit positions, and permits extra

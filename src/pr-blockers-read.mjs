@@ -243,6 +243,7 @@ export async function collectPrBlockers({ repos, root, checkouts = {}, cfg, now 
         return rows;
       });
       const currency = createReviewCurrencyReader({ repo, prNumber: number, rootDir: root, cwd: checkouts[repo], loadComments: readComments,
+        git: checkouts[repo] ? undefined : async () => { throw new Error('no repository checkout for patch proof'); },
         pr: { head: { sha: pr.headRefOid }, base: { sha: pr.baseRefOid } },
         get: path => path.includes('/compare/') ? compare(...path.split('/compare/')[1].split('...')) : get(path),
       });

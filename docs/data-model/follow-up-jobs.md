@@ -952,6 +952,9 @@ individually. Each record is limited to 1 MiB. A scan limits directory entries
 to 100,000, matching job files to 256 and distinct completed round edges to 256.
 An unreadable directory or a scan beyond those bounds supplies no round proof.
 Authenticated comment and patch-equivalence proofs can still establish currency.
+The process warns once for each scan limit reached. When a daemon snapshot
+already supplies a complete authenticated Hammer chain, the range validator
+uses it without scanning completed jobs.
 
 The retry transition retains the round and its attempt metadata while decrementing
 `currentRound`; the next claim reuses that round number and merges the retained

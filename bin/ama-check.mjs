@@ -519,6 +519,10 @@ async function main(argv = process.argv.slice(2)) {
     process.stderr.write(`error: failed to load input JSON: ${err.message}\n`);
     return 1;
   }
+  // The timeline also includes state changes and reviews. Apply provenance
+  // comment bounds to actual comments, including flat comment-only snapshots.
+  const provenanceComments = Array.isArray(timelineJson) ? timelineJson.filter(entry =>
+    entry?.event === 'commented' || (entry?.event === undefined && typeof entry?.body === 'string')) : [];
   const dispatchedReviewCycleExhausted =
     String(args['review-cycle-exhausted'] || '').trim().toLowerCase() === 'true';
   let reviewCycleExhausted = false;
@@ -625,7 +629,7 @@ async function main(argv = process.argv.slice(2)) {
         if (hamCommitJson && path.endsWith(`/commits/${hamCommitJson.sha}`)) return hamCommitJson;
         throw new Error('authenticated HAM remediation commit absent from supplied snapshot');
       };
-      const currency = createReviewCurrencyReader({ repo: args.repo, prNumber: prJson.number, rootDir, comments: timelineJson, get });
+      const currency = createReviewCurrencyReader({ repo: args.repo, prNumber: prJson.number, rootDir, comments: provenanceComments, get });
       const logins = amaAuthoritativeReviewerLoginsForModel(args.reviewer);
       const applicableReview = await latestAuthoritativeReviewInAncestry(
         (reviewsJson?.reviews || []).filter(review => reviewSubmittedAt(review)
@@ -667,7 +671,7 @@ async function main(argv = process.argv.slice(2)) {
       if (hamCommitJson && path.endsWith(`/commits/${hamCommitJson.sha}`)) return hamCommitJson;
       throw new Error('authenticated HAM remediation commit absent from supplied snapshot');
     };
-    const currency = createReviewCurrencyReader({ repo: args.repo, prNumber: prJson.number, rootDir, comments: timelineJson, get });
+    const currency = createReviewCurrencyReader({ repo: args.repo, prNumber: prJson.number, rootDir, comments: provenanceComments, get });
     reviewState.reviewCurrency = await currency(args['reviewed-sha'], prMetadata.headSha);
     const reviews = (Array.isArray(reviewsJson?.reviews) ? reviewsJson.reviews : []).map(entry => ({ ...entry, commit_id: reviewCommitOid(entry),
       user: { login: reviewAuthorLogin(entry) } }))

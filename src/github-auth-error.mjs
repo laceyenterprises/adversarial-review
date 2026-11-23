@@ -1,4 +1,5 @@
 export function ghErrorDetail(err) {
+  if (typeof err === 'string') return err;
   return [err?.stderr, err?.stdout, err?.message]
     .filter(Boolean)
     .join('\n');

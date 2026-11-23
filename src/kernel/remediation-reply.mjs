@@ -336,7 +336,8 @@ function validateOperationalBlockersField(items, options = {}) {
       throw new Error(`Remediation reply operationalBlockers[${index}].finding must be a non-empty string`);
     }
     validateOptionalTitle(entry, `operationalBlockers[${index}]`);
-    if (entry.kind !== undefined && !OPERATIONAL_BLOCKER_KINDS.has(entry.kind)) {
+    const legacyAuthNullKind = entry.kind === null && normalizeOperationalBlockerTitle(entry.title) === 'auth-failure';
+    if (entry.kind !== undefined && !legacyAuthNullKind && !OPERATIONAL_BLOCKER_KINDS.has(entry.kind)) {
       throw new Error(
         `Remediation reply operationalBlockers[${index}].kind must be one of: ${[...OPERATIONAL_BLOCKER_KINDS].join(', ')}`
       );

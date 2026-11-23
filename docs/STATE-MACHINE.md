@@ -1533,8 +1533,9 @@ It means:
 
 PENDINGCIOWNER-01: operational ownership uses the structured kind before prose.
 A `pending-ci` entry without a declared non-CI operational code or a non-empty
-human-input request is CI-owned even if its prose mentions human decisions or
-operator approval. The complete legacy CI-to-review follow-up sentence is still
+human-input request is CI-owned unless the reply explicitly says approval is
+required. Incidental mentions of approval leave ownership with CI. The complete
+legacy CI-to-review follow-up sentence is still
 accepted in `needsHumanInput`; appending an access request fails closed. Other
 tagged kinds remain human-owned, and only untagged legacy entries use the prose
 heuristic, ignoring explicit negated need phrases. Final-round completion still

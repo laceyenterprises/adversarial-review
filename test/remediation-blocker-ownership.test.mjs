@@ -10,6 +10,7 @@ const legacyFollowup = 'Confirm required checks pass for the pushed head, then r
 
 for (const [name, entry, owner] of [
   ['negated human decision', pendingCi, 'CI'],
+  ['negated approval requirement', { ...pendingCi, reasoning: 'No operator approval required.' }, 'CI'],
   ['arbitrary prose', { ...pendingCi, reasoning: 'Operator approval, human decision, permissions, credentials and push failed.' }, 'CI'],
   ['empty input', { ...pendingCi, needsHumanInput: '  ' }, 'CI'],
   ['access request', { ...pendingCi, needsHumanInput: 'Grant access to the fixture repository.' }, 'human'],

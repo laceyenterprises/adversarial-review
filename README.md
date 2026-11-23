@@ -2718,9 +2718,10 @@ The suppressed comment-only final round hands its recorded worker-pushed head
 to the hammer. A green-CI wake accepts that exact head despite the older review;
 merge still requires HAM terminal validation. Unrecorded pushes stay stale.
 PENDINGCIOWNER-01: a `kind: "pending-ci"` operational blocker is CI-owned
-regardless of prose, including negated human decisions, unless it carries a
-declared non-CI code or an explicit `needsHumanInput` request. Only the complete
-legacy CI-to-review sentence is accepted in that field; appended access requests
+unless it reports an explicit approval requirement, carries a declared non-CI
+code, or includes an explicit `needsHumanInput` request. Negated need prose
+keeps CI ownership. Only the complete legacy CI-to-review sentence is accepted
+in `needsHumanInput`; appended access requests
 remain human-owned. Other tagged kinds remain human-owned. Offline ownership,
 final-round, follow-up and comment fixtures cover completion and CI handoff.
 After normal deployment, SRE observes the next natural comment-only final round

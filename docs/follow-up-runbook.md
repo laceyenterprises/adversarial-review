@@ -52,7 +52,9 @@ round. The watcher observes the exact published head through its existing
 managed read path. A worker HTTP 401 alone does not require intervention.
 The existing read helper can recover a rejected credential within its managed
 retry allowance. A legacy CI watch report bypasses publication recovery only
-after the reconciler independently proves the push. A permission or policy denial with no authorized observation
+after the reconciler independently proves the push. A pending-CI tag does not
+transfer an explicit approval requirement to the watcher. A permission or
+policy denial with no authorized observation
 names the operator as recovery owner and keeps CI unknown until a fresh
 authorized read. The PR comment is the operator notice for this denial; this
 receipt does not itself send a page. The worker's original check names and run

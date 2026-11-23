@@ -11298,6 +11298,7 @@ const pendingCiOperationalBlocker = {
 
 for (const scenario of [
   { name: '401 after pending', http: 401, state: 'unknown', error: 'HTTP 401: Bad credentials' },
+  { name: '401 with a null legacy kind', http: 401, state: 'unknown', nullKind: true },
   { name: 'legacy pending only', state: 'pending', legacy: true },
   { name: 'worker 401 and observer pending', http: 401, state: 'pending' },
   { name: 'worker 401 and observer green', http: 401, state: 'green' },
@@ -11306,6 +11307,8 @@ for (const scenario of [
   { name: 'moved head', http: 401, state: 'pending', moved: true, stopped: true },
   { name: 'source unproven', http: 401, state: 'unknown', unproven: true, stopped: true },
   { name: 'actual input blocker', http: 401, state: 'unknown', needsInput: true, stopped: true },
+  { name: 'tagged pending CI with an approval request', state: 'pending', approval: true, stopped: true },
+  { name: 'tagged unreadable CI with an approval request', state: 'unknown', approval: true, stopped: true },
   { name: 'legacy CI title with approval request and blocked outcome',
     state: 'pending', legacy: true, approval: true, stopped: true },
   { name: 'legacy CI title with approval request and partial outcome',
@@ -11328,7 +11331,7 @@ for (const scenario of [
           reasoning: scenario.approval
             ? 'A maintainer must approve the run.'
             : 'Required checks on run 45120528143.' },
-        ...(scenario.http ? [{ title: 'auth-failure',
+        ...(scenario.http ? [{ title: 'auth-failure', ...(scenario.nullKind ? { kind: null } : {}),
           finding: `The bounded PR-head CI watch ended with HTTP ${scenario.http} after its pending observations.`,
           reasoning: 'Guarded publication succeeded. The CI observation owner must restore credentials.' }] : []),
         ...(scenario.needsInput ? [{ title: 'missing approval', finding: 'Permission must be granted.',
@@ -11381,6 +11384,15 @@ for (const scenario of [
     createJobImpl: () => assert.fail('the final published head does not start another remediation'),
   });
   assert.equal(observedRed.reason, 'ci-regression-hammer-owned');
+});
+
+test('LAC-2333: published round metadata tolerates legacy plans', async () => {
+  const { publishedCiRound } = await import('../src/remediation-closeout.mjs');
+  const completion = { publishedCiObservation: {} };
+  const revisionRef = 'a'.repeat(40);
+  assert.deepEqual(publishedCiRound({ revisionRef }, completion), { round: undefined, startHeadSha: revisionRef });
+  assert.deepEqual(publishedCiRound({ revisionRef, remediationPlan: { currentRound: 1, rounds: {} } }, completion),
+    { round: 1, startHeadSha: revisionRef });
 });
 
 test('LAC-2333: the managed checks reader preserves an empty rollup as unknown', async () => {

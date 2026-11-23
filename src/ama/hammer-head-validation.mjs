@@ -84,13 +84,17 @@ export function hammerProvenanceEdge(comment) {
 // bridge to a hammer base; the exact current head still needs a hammer edge.
 export function hammerAttestationChain(comments, reviewedHead, currentHead, remediationRounds = []) {
   if (!reviewedHead || !currentHead || currentHead === reviewedHead) return null;
-  if (!Array.isArray(comments) || comments.length >= HAMMER_COMMENT_MAX_PAGES * HAMMER_COMMENT_PAGE_SIZE) return null;
+  if (!Array.isArray(comments)) return null;
+  // The Hammer CLI supplies the full issue timeline; only comment events
+  // consume the comment completeness budget or carry App attestations.
+  const provenanceComments = comments.filter(comment => !comment?.event || comment.event === 'commented');
+  if (provenanceComments.length >= HAMMER_COMMENT_MAX_PAGES * HAMMER_COMMENT_PAGE_SIZE) return null;
   const outgoing = new Map();
   const addEdge = (base, head) => {
     if (!outgoing.has(base)) outgoing.set(base, []);
     outgoing.get(base).push(head);
   };
-  for (const comment of comments) {
+  for (const comment of provenanceComments) {
     const edge = hammerProvenanceEdge(comment);
     if (edge) addEdge(edge.base, edge.head);
   }

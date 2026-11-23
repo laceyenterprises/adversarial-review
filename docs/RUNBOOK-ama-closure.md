@@ -8611,6 +8611,9 @@ to a hammer base using completed `startHeadSha` / `resultingHeadSha` edges from
 same repository and PR. The exact current head must still end in an
 authenticated hammer App edge; round-only heads remain ineligible for this
 carry-forward. All mixed-chain edges count toward the existing length limit.
+When the Hammer predicate supplies the full issue timeline, only `commented`
+events count toward the 1,000-comment proof cap or carry App attestations;
+labels, commits, and other timeline activity do not exhaust comment evidence.
 Pushed provenance carries the verdict but never certifies CI; the closer reads
 and validates current exact-head required checks before merging.
 GitHub authenticates each comment's

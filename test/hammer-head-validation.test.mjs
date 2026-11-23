@@ -190,6 +190,15 @@ test('HAMROUNDEDGE-01 non-array rounds preserve App proof without granting round
   }
 });
 
+test('timeline activity does not consume the Hammer comment cap or supply provenance', () => {
+  const attestation = { event: 'commented', author: 'hammer-worker',
+    body: 'HAM-Base-Head: reviewed\nHAM-Validated-Head: head' };
+  const activity = Array.from({ length: 1000 }, () => ({ event: 'committed' }));
+  assert.deepEqual(hammerAttestationChain([...activity, attestation], 'reviewed', 'head'), ['head']);
+  assert.equal(hammerAttestationChain([{ ...attestation, event: 'committed' }], 'reviewed', 'head'), null);
+  assert.equal(hammerAttestationChain(Array(1000).fill(attestation), 'reviewed', 'head'), null);
+});
+
 test('HAMROUNDEDGE-01 mixed chain follows unordered rounds and authenticated hammer edges', () => {
   const audit = (base, head) => ({ author: 'hammer-worker',
     body: `HAM-Base-Head: ${base}\nHAM-Validated-Head: ${head}` });

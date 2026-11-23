@@ -80,7 +80,7 @@ function recordEnvironment(dir, value = '1', launchRequestId = 'lrq_controller-t
   }));
 }
 
-function fixture(t, script, { realCensus = false, timeoutMs = 10000 } = {}) {
+function fixture(t, script, { realCensus = false, timeoutMs = 10000, launchGateClock = false } = {}) {
   const dir = mkdtempSync(join(tmpdir(), 'ham-controller-'));
   recordEnvironment(dir);
   const env = { ...process.env, HQ_ROOT: dir, HAM_HQ_ROOT: dir, HAM_RUN_DIR: dir, HAM_ROOT_DIR: dir, HAM_REPO: 'fixture/repo',
@@ -113,19 +113,51 @@ function fixture(t, script, { realCensus = false, timeoutMs = 10000 } = {}) {
   writeFileSync(scriptPath, `#!/bin/bash\nset -e\n"${process.execPath}" "${leaseHelper}"\n${script}\n`);
   const driver = join(dir, 'driver.mjs');
   writeFileSync(driver, `
+    import {spawn} from 'node:child_process';
     import {readFileSync,writeFileSync,renameSync} from 'node:fs';
-    import {runHammerController,controllerGroupSnapshot} from ${JSON.stringify(new URL('../src/ama/hammer-controller.mjs', import.meta.url).href)};
+    import {runHammerController,launchReadBackoffMs,LAUNCH_READ_ATTEMPTS} from ${JSON.stringify(new URL('../src/ama/hammer-controller.mjs', import.meta.url).href)};
     let elapsedMs = 0;
+    const launchGateClock = ${launchGateClock};
+    const launchPollMs = 20, readTimeoutMs = 50;
+    const readProbe = () => JSON.parse(readFileSync(${JSON.stringify(launchPath)},'utf8'));
+    let gateRequested = false, gateFailures = 0, advanceGateBy = 0, terminating = false;
+    if (launchGateClock) process.once('SIGTERM', () => { terminating = true; });
     const status = await runHammerController(${JSON.stringify(scriptPath)}, [], {
-      pollMs:20, graceMs:150, drainMs:1000, timeoutMs:${timeoutMs}, launchPollMs:20, gateWaitMs:2000,
-      unreadableGraceMs:Number(process.env.FIXTURE_GRACE_MS||300), readTimeoutImpl:()=>50,
-      readLaunchImpl:async()=>JSON.parse(readFileSync(${JSON.stringify(launchPath)},'utf8')),
+      pollMs:20, graceMs:150, drainMs:1000, timeoutMs:${timeoutMs}, launchPollMs, gateWaitMs:2000,
+      unreadableGraceMs:Number(process.env.FIXTURE_GRACE_MS||300), readTimeoutImpl:()=>readTimeoutMs,
+      ...(launchGateClock ? {spawnImpl:(...args)=>{
+        const child=spawn(...args);
+        let frame='';
+        child.stdio[4].on('data', chunk=>{
+          if (gateRequested) return;
+          frame+=chunk;
+          gateRequested=/^launch:[^\\n]+\\n/.test(frame);
+        });
+        return child;
+      }} : {}),
+      readLaunchImpl:async()=>{
+        const probe=readProbe();
+        if (launchGateClock && !probe.ok) {
+          if (gateRequested) {
+            if (++gateFailures<LAUNCH_READ_ATTEMPTS) advanceGateBy=launchReadBackoffMs(gateFailures);
+          } else writeFileSync(${JSON.stringify(join(dir, 'launch-stale'))}, '');
+        }
+        return probe;
+      },
       // Synthetic census tests model elapsed poll intervals. Keep the real
       // I/O yield so signalled children can exit, but exclude scheduler and
       // synchronous filesystem delays from the grace/drain assertions.
       ...(${!realCensus} ? {nowImpl:()=>elapsedMs,delayImpl:async ms=>{
         await new Promise(resolve=>setTimeout(resolve,ms));
-        elapsedMs+=ms;
+        if (!launchGateClock || terminating) elapsedMs+=ms;
+        else if (gateRequested && advanceGateBy) {
+          elapsedMs+=advanceGateBy;
+          advanceGateBy=0;
+        } else if (!gateRequested || readProbe().ok) {
+          // Startup/periodic reads and successful gate probes advance normally.
+          // Only the blocked gate's retry backoff uses synthetic jumps.
+          elapsedMs+=ms;
+        }
       }} : {}),
       // The test owns these exact births. Inject the OS census so this offline
       // regression also runs in workers whose sandbox forbids ps.
@@ -141,6 +173,8 @@ function fixture(t, script, { realCensus = false, timeoutMs = 10000 } = {}) {
         }).map(pid=>({pid,birth:'fixture-'+pid}));
       }})
     });
+    if (launchGateClock) writeFileSync(${JSON.stringify(join(dir, 'gate-clock.json'))},
+      JSON.stringify({elapsedMs, gateFailures}));
     writeFileSync(${JSON.stringify(join(dir, 'result.tmp'))},String(status));
     renameSync(${JSON.stringify(join(dir, 'result.tmp'))},${JSON.stringify(join(dir, 'result'))});
     process.exitCode=status;
@@ -1823,7 +1857,7 @@ test('real shell: assert-launch clears on a fresh read and blocks a stale unread
       if "${process.execPath}" "${root}/bin/hammer-controller.mjs" assert-launch; then
         printf cleared > "$HAM_RUN_DIR/audit"
       else printf blocked > "$HAM_RUN_DIR/audit"; fi`;
-    const clear = fixture(t, gate);
+    const clear = fixture(t, gate, { launchGateClock: true });
     // This case tests a fresh read, not startup deadline expiry. Match the
     // unreadable-read sibling's grace on loaded full-suite CI workers.
     clear.env.FIXTURE_GRACE_MS = '60000';
@@ -1831,19 +1865,22 @@ test('real shell: assert-launch clears on a fresh read and blocks a stale unread
     const p = clear.start();
     assert.equal((await p.closed)[0], 0, `${p.output()} ${JSON.stringify(clear.receipt())}`);
     assert.equal(readFileSync(join(clear.dir, 'audit'), 'utf8'), 'cleared');
+    assert.ok(JSON.parse(readFileSync(join(clear.dir, 'gate-clock.json'), 'utf8')).elapsedMs > 0,
+      'successful probes must not freeze the synthetic clock');
 
-    const blocked = fixture(t, gate);
+    const blocked = fixture(t, gate, { launchGateClock: true });
     blocked.env.FIXTURE_GRACE_MS = '60000';
     const q = blocked.start();
     await until(() => existsSync(join(blocked.dir, 'ready')));
     blocked.cancel({ ok: false, reason: 'fixture-read-timeout' });
-    // Let the newest permitted read age past one poll plus one read timeout.
-    await delay(300);
+    await until(() => existsSync(join(blocked.dir, 'launch-stale')));
     writeFileSync(join(blocked.dir, 'go'), 'go');
     assert.equal((await q.closed)[0], 0, `${q.output()} ${JSON.stringify(blocked.receipt())}`);
     assert.equal(readFileSync(join(blocked.dir, 'audit'), 'utf8'), 'blocked');
     assert.equal(blocked.receipt().reason, 'shell-exited');
-    assert.ok(blocked.receipt().launchReadFailures > 0);
+    assert.ok(blocked.receipt().launchReadFailures >= 1 + LAUNCH_READ_ATTEMPTS);
+    assert.equal(JSON.parse(readFileSync(join(blocked.dir, 'gate-clock.json'), 'utf8')).gateFailures,
+      LAUNCH_READ_ATTEMPTS, 'periodic failures do not change the gate retry budget');
     assert.equal(blocked.receipt().launchReadLastError, 'fixture-read-timeout');
   });
 

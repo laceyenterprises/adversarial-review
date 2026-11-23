@@ -12,9 +12,9 @@ import { resolveOsgRemediatorRoute } from './osg-remediator.mjs';
 import { resolveLocalRemediationMes } from './mes-shadow-hook.mjs';
 import { readDispatchStatus } from './producer-contracts/launch-status.mjs';
 import { findCommittedUnpublishedWork } from './remediation-unpublished.mjs';
-import { remediationCloseout, closeoutRereview, refusedCloseout, buildRemediationCompletionMetadata } from './remediation-closeout.mjs';
+import { remediationCloseout, closeoutRereview, refusedCloseout, buildRemediationCompletionMetadata, publishedCiRound } from './remediation-closeout.mjs';
 import { remediationReviewRequest } from './explicit-review-intent.mjs';
-import { reportedCiReadFailure, reportsCompletedPipelineWait } from './remediation-blocker-ownership.mjs';
+import { reportsCompletedPipelineWait } from './remediation-blocker-ownership.mjs';
 import { guardStackedBase } from './ama/stacked-base.mjs';
 import { logCodexWorkerDispatch } from './codex-account-routing.mjs';
 import { resolveInitialRemediatorRouting, DEFAULT_REMEDIATION_WORKER_CLASS, defaultRemediatorWorkerClassFromEnv, resolveRoleRegistryRemediator, pickRemediationWorkerClass, resolveReconcileWorkerClass } from './remediation-worker-routing.mjs';
@@ -2342,13 +2342,9 @@ async function reconcileFollowUpJobWithinRepositoryCycle({
         });
       }
 
-      // The publish recovery path can issue a ref update. A read-only watch
-      // failure belongs to the CI observer even if source proof later fails.
-      const publicationBlockerReply = { ...parsedReply,
-        operationalBlockers: (parsedReply.operationalBlockers || []).filter(entry => !reportedCiReadFailure(entry)) };
-      if (!rereview.requested && findGithubAuthOperationalBlocker(publicationBlockerReply)) {
+      if (!rereview.requested && findGithubAuthOperationalBlocker(parsedReply)) {
         const recovery = await recoverGithubAuthOperationalBlocker({
-          reply: publicationBlockerReply,
+          reply: parsedReply,
           hqRoot: resolveHqRoot(process.env),
           workspaceDir: paths.workspaceDir,
           job,
@@ -2656,11 +2652,7 @@ async function reconcileFollowUpJobWithinRepositoryCycle({
       jobPath,
       completedAt,
       resultingHeadSha: closeout?.decision.head || (completionLifecycle?.source === 'live' ? completionLifecycle.headSha || null : null),
-      ...(completionMetadata.publishedCiObservation && { publishedRound: {
-        round: job.remediationPlan.currentRound,
-        startHeadSha: job.remediationPlan.rounds?.find(entry => entry.round === job.remediationPlan.currentRound)?.startHeadSha
-          || job.revisionRef,
-      } }),
+      publishedRound: publishedCiRound(job, completionMetadata),
       remediationWorker: {
         ...workerState,
         state: 'completed',

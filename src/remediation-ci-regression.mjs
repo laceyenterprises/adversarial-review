@@ -4,7 +4,8 @@ import { resolveRequiredCheckContextsFromCfg } from './ama/required-check-contex
 import { resolveGateStatusContext } from './adversarial-gate-context.mjs';
 import { checkItemState, latestCheckRollupItems, summarizeChecksConclusion } from './checks-summary.mjs';
 import { checkInfrastructureReason, checkSteps, hasMissingActionsEvidence, infrastructureEvidencePending, enrichCiInfrastructureEvidence, infrastructureOnlyFailures } from './ci-infrastructure.mjs';
-import { execGhWithRetry, isGhAuthFailure } from './gh-cli.mjs';
+import { execGhWithRetry } from './gh-cli.mjs';
+import { isGhAuthFailure } from './github-auth-error.mjs';
 import { isGitHubRateLimitError } from './rate-limit-throttle.mjs';
 
 const execFileAsync = promisify(execFile);

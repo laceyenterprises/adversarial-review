@@ -13,6 +13,7 @@ import { isWorkflowPath, isWorkflowPushEscalationEnabled, tryEscalateWorkflowPus
 import { OWNER_AUTH_HOLD, ownerAuthHold, remediationOwner, selectRemediationReadRoute, selectRemediationPushRoute } from './remediation-owner-auth.mjs';
 import { fetchPRBranchMetadata } from './remediation-git-pr-io.mjs';
 import { publishRemediation } from './remediation-publication.mjs';
+import { reportedCiReadFailure } from './remediation-blocker-ownership.mjs';
 
 const execFileAsync = promisify(execFile);
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -151,6 +152,9 @@ function classifyGithubAuthOperationalBlocker(blocker) {
 function findGithubAuthOperationalBlocker(reply) {
   const blockers = Array.isArray(reply?.operationalBlockers) ? reply.operationalBlockers : [];
   for (const blocker of blockers) {
+    // This recovery path can write to the PR branch. CI watch failures are
+    // handled by the read-only observer.
+    if (reportedCiReadFailure(blocker)) continue;
     const classification = classifyGithubAuthOperationalBlocker(blocker);
     if (classification) return { blocker, classification };
   }

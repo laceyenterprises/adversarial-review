@@ -149,12 +149,11 @@ function classifyGithubAuthOperationalBlocker(blocker) {
   return { kind: 'terminal', reason: 'unclassified-github-auth' };
 }
 
-function findGithubAuthOperationalBlocker(reply) {
+function findGithubAuthOperationalBlocker(reply, publishedHead) {
   const blockers = Array.isArray(reply?.operationalBlockers) ? reply.operationalBlockers : [];
   for (const blocker of blockers) {
-    // This recovery path can write to the PR branch. CI watch failures are
-    // handled by the read-only observer.
-    if (reportedCiReadFailure(blocker)) continue;
+    // Worker prose can identify a CI watch failure after publication is proven.
+    if (publishedHead && reportedCiReadFailure(blocker)) continue;
     const classification = classifyGithubAuthOperationalBlocker(blocker);
     if (classification) return { blocker, classification };
   }
@@ -691,6 +690,7 @@ export GIT_TERMINAL_PROMPT=0
 
 async function recoverGithubAuthOperationalBlocker({
   reply,
+  resolveFinalRound,
   hqRoot,
   workspaceDir,
   job,
@@ -705,7 +705,10 @@ async function recoverGithubAuthOperationalBlocker({
   env = process.env,
   recordRecoveryImpl = () => {},
 }) {
-  const authBlocker = findGithubAuthOperationalBlocker(reply);
+  const observation = reply?.operationalBlockers?.some(reportedCiReadFailure)
+    ? await resolveFinalRound?.() : null;
+  const authBlocker = observation?.retryLater ? null
+    : findGithubAuthOperationalBlocker(reply, observation?.workerPushedHeadSha);
   if (!authBlocker) return { operationalBlockerRecovery: null, rereview: null, job: null };
   const commitSha = extractCommitShaFromOperationalBlocker(authBlocker.blocker);
   const expectedRemoteSha = authBlocker.blocker?.expectedRemoteSha || null;

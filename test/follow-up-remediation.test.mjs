@@ -11341,6 +11341,10 @@ for (const scenario of [
   });
   const durable = readFollowUpJob(result.jobPath);
   assert.deepEqual(sourceWrites, [], 'read recovery must never invoke a publication writer');
+  if (scenario.unproven) {
+    assert.equal(durable.operationalBlockerRecovery?.category, 'github-auth',
+      'CI watch prose without publication proof must still reach publication recovery');
+  }
   if (scenario.stopped) {
     assert.equal(result.action, 'stopped');
     assert.equal(durable.completion.publishedCiObservation, undefined);
@@ -11350,6 +11354,7 @@ for (const scenario of [
     return;
   }
   assert.equal(result.action, 'completed', durable.commentDelivery.body);
+  assert.equal(durable.operationalBlockerRecovery, undefined);
   assert.equal(durable.completion.workerPushedHeadSha, pushedHead);
   assert.equal(durable.completion.workerPushProof.method, 'git-cherry-replay');
   assert.equal(durable.completion.publishedCiObservation.state, scenario.state);

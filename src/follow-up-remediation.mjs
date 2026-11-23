@@ -1821,6 +1821,13 @@ async function reconcileFollowUpJobWithinRepositoryCycle({
     let pendingCiCompletion = false;
     let evidenceOnlyCompletion = false;
     let completedPipelineWait = false;
+    let observedFinalRound;
+    const resolveFinalRound = async () => observedFinalRound ??= await resolveCommentOnlyFinalRoundCompletion({
+      job, jobPath, reply: parsedReply?.reReview?.originalOperationalBlockers
+        ? { ...parsedReply, operationalBlockers: parsedReply.reReview.originalOperationalBlockers } : parsedReply,
+      workspaceDir: paths.workspaceDir,
+      auditWorkspaceForContaminationImpl, inspectRemediationCiRegressionImpl, deliverAlertImpl, execFileImpl, log,
+    });
 
     if (replyProbe.state === 'valid') {
       ({ reply: parsedReply, job, remediationReply, completionLifecycle, pendingCiCompletion } = await resolvePendingCiCompletion({
@@ -2345,6 +2352,7 @@ async function reconcileFollowUpJobWithinRepositoryCycle({
       if (!rereview.requested && findGithubAuthOperationalBlocker(parsedReply)) {
         const recovery = await recoverGithubAuthOperationalBlocker({
           reply: parsedReply,
+          resolveFinalRound,
           hqRoot: resolveHqRoot(process.env),
           workspaceDir: paths.workspaceDir,
           job,
@@ -2362,6 +2370,7 @@ async function reconcileFollowUpJobWithinRepositoryCycle({
           operationalBlockerRecovery = recovery.operationalBlockerRecovery;
           if (recovery.rereview) rereview = recovery.rereview;
           job = recovery.job;
+          if (operationalBlockerRecovery.retry?.pushed) observedFinalRound = undefined;
           if (operationalBlockerRecovery.retry?.retryLater) {
             writeFollowUpJob(jobPath, job);
             return { action: 'active', reason: 'workflow-publication-verification-pending', job, jobPath };
@@ -2370,12 +2379,7 @@ async function reconcileFollowUpJobWithinRepositoryCycle({
       }
     }
 
-    const finalRound = await resolveCommentOnlyFinalRoundCompletion({
-      job, jobPath, reply: parsedReply?.reReview?.originalOperationalBlockers
-        ? { ...parsedReply, operationalBlockers: parsedReply.reReview.originalOperationalBlockers } : parsedReply,
-      workspaceDir: paths.workspaceDir,
-      auditWorkspaceForContaminationImpl, inspectRemediationCiRegressionImpl, deliverAlertImpl, execFileImpl, log,
-    });
+    const finalRound = await resolveFinalRound();
     if (!workerPublishedHead && !finalRound.workerPushedHeadSha
       && finalRound.ciGate?.state === 'infrastructure' && finalRound.ciGate.headSha === lifecycle?.headSha
       && !await findCommittedUnpublishedWork({ reply: parsedReply, job, workspaceDir: paths.workspaceDir, execFileImpl })) {

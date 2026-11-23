@@ -10842,6 +10842,19 @@ classification. A missing closer carry-forward proof alone is not builder
 provenance. Final-round handoffs and existing closer attempts keep their owner;
 returning delivered heads retain recorded same-head/lifetime caps.
 
+For a final-remediation reopen report, compare the exact live head at claim
+with the native job's `revisionRef`, `completion.workerPushedHeadSha` and
+`reReview.nextAction.head`. Inspect the commit range and any authenticated
+publication connecting those endpoints. A later rescue push can preserve
+the original findings through ancestry while still owing a verdict on its
+own head. A closeout comment alone cannot bind the new publication.
+Correlate the request reason and intent with the claim and the reviewer's
+first useful output or posted review. The `FINAL round attempt` banner
+identifies the prompt stage and remediation-round context. Audit exact-head
+required checks and any later review or operator veto independently. See
+[the watcher transition](STATE-MACHINE.md#exhausted-cycles-and-new-builder-heads-exhaustedheadowner-01)
+and [the AR2027 replay](changes/LAC-2334.md).
+
 HAMGITTOKEN-01 final timeout ownership: bounded submodule sync exports `HAM_GIT_SYNC_BOUNDED=1` only for its child, so the metered Git wrapper yields its default 30-second timeout to the existing outer 120-second bound. Snapshot and pushed-attestation proof calls use the exported `HAM_NODE_BIN` resolved at phase entry; extracted-function tests must run that same runtime setup. No merge, credential or cancellation predicate changes.
 
 Both bounded Git paths use the same TERM/wait/KILL deadline owner. Submodule expiry waits for child cleanup before returning 124, rather than replacing the deadline owner with Node and losing child cleanup to SIGALRM. An offline shortened-deadline fixture verifies lock removal before return; the production submodule bound remains 120 seconds.

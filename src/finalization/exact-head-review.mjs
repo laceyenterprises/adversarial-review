@@ -21,6 +21,7 @@ const provable = job => Boolean(job) && job.status === 'completed' && !job.closu
 // commit login nor the broad legacy "hammer owns this head" route is proof.
 export function readFinalRemediatorHead({ rootDir, repo, prNumber, headSha }) {
   if (!SHA.test(String(headSha || ''))) return null;
+  headSha = String(headSha).toLowerCase();
   let job = findFinalRemediationPushJob(rootDir, { repo, prNumber, headSha });
   let kind = 'remediation-push';
   if (!provable(job)) {

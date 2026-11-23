@@ -20,6 +20,8 @@ one MLR-05 live-adapter scenario per fixed pattern. v1 (`src/ama/*`,
   the round budget spent), which the closeout writer never marks
   `finalRemediationPush`. The shadow and the executor's exact-head review surface
   share this reader, so v2 requests the strict exact-head review for such heads.
+  Final comment remediation normalizes validated input SHAs to lowercase before
+  either job lookup, and returns the canonical lowercase proof and source reference.
 - **D3 operator-decision holds.** `workflow-decision.mjs` escalates
   (`monitor-hold`) when the snapshot's exact-head review gates every finding behind
   an operator label. It does this only after the live-owner and custody gates, so
@@ -30,6 +32,11 @@ one MLR-05 live-adapter scenario per fixed pattern. v1 (`src/ama/*`,
 - **D5 observed merge.** A GitHub-merged PR appends `merge_observed` and no
   post-merge `mergeability_observed`. The classifier records v1 `merged` against
   v2's delivery wait on that recorded merge as `merge-observed` concurrence.
+  The final review's observation-error precedence concern is already prevented
+  by `workflowDecision`'s merge branch, before its unknown-evidence gate. Added
+  adapter regressions prove checks/reviews refresh errors retain delivery after
+  landing, still hold open PRs, and cannot use an unreadable PR state as merge proof.
+  No production change is needed for that finding.
 - **D7 keys.** `operator-hold:operator-label-required:<label>` keys as one class
   (the label never enters the key). `operator-hold:repair-owner-unproven` and
   `review:disputed-findings-review` are keyable. The new v2 reasons are keyable.
@@ -92,3 +99,13 @@ The memory search for this scope returned no matching scars.
   final-round proof and its near misses).
 - `node --test test/smv.test.mjs`: 11 pass. `npm run lint`: 0 errors.
   `npm run typecheck:contracts`: clean. `bash demo/research-finding-walkthrough.sh`: exit 0.
+- Final comment remediation: bounded
+  `node --test test/finalization-exact-head-review.test.mjs test/finalization-live-shadow.test.mjs`
+  passes (22 exact-head tests and 37 live-shadow tests). The uppercase proof
+  cases failed before the one-line normalization fix; the merged-refresh cases
+  passed without changing production code. Lint has 0 errors (147 existing
+  warnings); contract typecheck, the byte-equivalence demo, the data-model
+  catalog validator (103 entries), and `git diff --check` pass. No persistent
+  shape, lifecycle state, transition or smoke promise changes.
+  Bounded workflow and SMV suites also pass (26 tests, including the disposable
+  Git sandbox smoke).

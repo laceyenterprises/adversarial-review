@@ -432,6 +432,40 @@ test('configured check contexts settle on unprotected repositories and enforce m
   }
 });
 
+for (const domain of ['checks', 'reviews']) {
+  test(`confirmed GitHub merge permits delivery despite ${domain} refresh errors`, t => {
+    const { record, ledger } = fixture(t);
+    record(snapshot());
+    const s = snapshot('head-a', '2026-08-20T00:01:00Z');
+    s.observations[domain] = { state: 'error', value: null };
+    // The same failed refresh must still hold an open PR.
+    assert.equal(record(s).v2Decision.nextAction, 'refresh-evidence');
+    s.observedAt = '2026-08-20T00:02:00Z';
+    s.observations.pr.value.state = 'MERGED';
+    s.observations.pr.value.mergeable = 'UNKNOWN';
+    const landed = record(s);
+    assert.equal(landed.foldError, false);
+    assert.equal(landed.v2Decision.nextAction, 'deliver');
+    assert.equal(landed.v2Decision.unknownEvidence, undefined);
+    s.observedAt = '2026-08-20T00:03:00Z';
+    assert.equal(record(s).v2Decision.nextAction, 'deliver');
+    const events = ledger.read({ domainId: 'code-pr', subjectExternalId: 'example/repo#1' });
+    assert.equal(events.filter(e => e.type === 'merge_observed').length, 1);
+    assert.equal(events.filter(e => e.type === 'mergeability_observed').at(-1).mergeability, 'MERGEABLE');
+  });
+}
+
+test('unreadable PR state cannot prove a merge and bypass observation errors', t => {
+  const { record, ledger } = fixture(t);
+  const s = snapshot();
+  s.observations.pr = { state: 'error', value: { state: 'MERGED' } };
+  const observation = record(s);
+  assert.equal(observation.v2Decision.nextAction, 'refresh-evidence');
+  assert.equal(observation.v2Decision.reason, 'live evidence unknown: snapshot observation error');
+  assert.equal(ledger.read({ domainId: 'code-pr', subjectExternalId: 'example/repo#1' })
+    .some(e => e.type === 'merge_observed'), false);
+});
+
 
 test('live ingestion converges ledger schema once per borrowed connection', t => {
   const { db, record } = fixture(t);

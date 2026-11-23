@@ -92,6 +92,17 @@ test('final-round remediator head queues once, survives restart, preserves budge
   assert.equal(eligible(state, {}, { observedAt: at(100), load }).nextAction, 'merge');
 });
 
+test('final remediation proof normalizes uppercase and mixed-case head inputs', t => {
+  const f = fixture(t);
+  const read = headSha => readFinalRemediatorHead({ rootDir: f.rootDir, repo, prNumber, headSha });
+  const proof = read(head);
+  assert.ok(proof);
+  assert.deepEqual(read(head.toUpperCase()), proof);
+  assert.deepEqual(read('Bb'.repeat(20)), proof);
+  assert.equal(read('g'.repeat(40)), null);
+  assert.equal(read(head.slice(1)), null);
+});
+
 test('head movement before issuance discards the old request', async t => {
   const f = fixture(t);
   let reads = 0;
@@ -316,6 +327,8 @@ test('MRQ-11 D2: a completed comment-only final-round push proves a final remedi
   };
   assert.deepEqual(read(base), { repo, prNumber, headSha: head, jobId: 'comment-only-job', currentRound: 3,
     maxRounds: 3, suppressed: true, sourceRef: `comment-only-final-round-push:comment-only-job:${head}` });
+  assert.deepEqual(read(base, 'completed', head.toUpperCase()), read(base));
+  assert.deepEqual(read(base, 'completed', 'Bb'.repeat(20)), read(base));
   assert.equal(read(base, 'completed', movedHead), null);
   assert.equal(read(base, 'stopped'), null);
   for (const change of [

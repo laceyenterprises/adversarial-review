@@ -8798,6 +8798,11 @@ through a completed comment-only final handoff in the review service's
 repository- and PR-scoped job history. The handoff binds the publication
 proof and the suppressed re-review to the completed round and both endpoint
 SHAs. The exact current head must end in an authenticated Hammer App edge.
+Complete supplied comment rollups retain exact-head Hammer authorship even at
+the comment cap; the capped pagination sentinel leaves it unknown. Neither cap
+case resets retry-series exhaustion. Round-level re-review requests cannot be
+hidden by contradictory job-level suppression. Cancellation and timeout errors
+propagate rather than admitting a fallback findings-only proof.
 All mixed-chain edges count toward the existing length limit. A completed
 non-final round with a pending review can retain findings and range evidence
 after a Hammer push. It supplies no stale-head waiver.

@@ -48,11 +48,17 @@ they never satisfy exact-head validation. All chain readers use
 trailers and authors confer no authority. Pending checks or unknown mergeability defer eligibility; resolved
 non-mergeable states (including `CONFLICTING`) are hard misses. An unbound later head, broken chain or overlong chain requires exact-head review.
 HAMROUNDEDGE-01 loads `startHeadSha` / `resultingHeadSha` edges through
-`readCompletedRemediationRounds(rootDir, repo, prNumber)` from completed
-daemon-owned jobs for the same repository and PR. Only completed rounds with
-both heads bridge into the chain; a round-only head or a round after the last
-hammer edge cannot carry the verdict. Round edges count toward the existing
-chain-length limit. A missing or unreadable round record supplies no edge.
+`readCompletedRemediationEvidence(rootDir, repo, prNumber)` from completed
+daemon-owned jobs for the same repository and PR. The predicate uses
+`carryForwardRounds`, so a completed round with both heads can bridge the
+chain only if it did not request another review. When the chain requires a
+re-review-requested round, the proof reports
+`completed-remediation-rereview-required` and the predicate requests
+exact-head review. A round-only head or a round after the last Hammer edge
+cannot carry the verdict. Round edges count toward the existing chain-length
+limit. A missing or unreadable round record supplies no edge. A capped Hammer
+comment history supplies no App chain and reports
+`hammer-app-attestation-comment-limit`.
 The watcher executes that shared decision through the
 [orphan watchdog](orphan-watchdog.md) on the next ownerless observation, once
 per head, recording its reasons; it does not wait for the idle recovery bound. A live

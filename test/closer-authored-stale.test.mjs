@@ -97,6 +97,13 @@ test('a settled comment-only handoff followed by three hammer pushes is eligible
   assert.equal(missing.eligibility.decision, 'rereview-exact-head');
 });
 
+test('a completed round requesting re-review cannot carry the stale verdict through a Hammer push', async t => {
+  const { options } = remediationFixture(t, {}, { reReview: { requested: true } });
+  const { headProof, eligibility } = await decideRound(options);
+  assert.equal(headProof.reason, 'completed-remediation-rereview-required');
+  assert.equal(eligibility.decision, 'rereview-exact-head');
+});
+
 for (const [name, job, round] of [
   ['incomplete round', {}, { state: 'spawned' }],
   ['missing resulting head', {}, { resultingHeadSha: null }],

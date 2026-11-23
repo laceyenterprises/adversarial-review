@@ -60,6 +60,36 @@ test('LAC-2331 Hammer range composes local completion and exact publication edge
   assert.deepEqual((await fetchHammerHeadRange({ ...options, hammerBaseHead: rebased }))?.commits, range.commits);
 });
 
+for (const requested of [false, true]) {
+  test(`completed round with re-review requested=${requested} controls carry-forward`, async t => {
+    const { options, currency } = fixture(t, {
+      rounds: [{ ...round(reviewedHead, remediated), reReview: { requested } }],
+    });
+    const evidence = await currency(reviewedHead, currentHead);
+    assert.equal(evidence.proof, requested ? 'mixed-remediation-provenance' : 'closer-rebase-provenance');
+    assert.equal(evidence.current, true);
+    assert.equal(rebaseCurrencyCovers(evidence, reviewedHead, currentHead), !requested);
+    assert.equal((await currency(reviewedHead, currentHead, { rebaseOnly: true })).current, !requested);
+    assert.equal((await fetchHammerHeadRange(options))?.proof,
+      requested ? undefined : 'hammer-app-attestation-chain');
+    assert.equal((await fetchHammerHeadRange({ ...options, hammerBaseHead: remediated }))?.proof,
+      requested ? undefined : 'completed-remediation-round-chain');
+  });
+}
+
+test('findings-only provenance retains a failed patch proof diagnostic without granting a waiver', async t => {
+  const { options } = fixture(t, { job: { reReview: { requested: true } } });
+  const currency = createReviewCurrencyReader({ ...options, get: async path => {
+    if (path.endsWith(`/pulls/${prNumber}`)) throw new Error('PR lookup unavailable');
+    return options.get(path);
+  } });
+  const evidence = await currency(reviewedHead, currentHead);
+  assert.equal(evidence.proof, 'mixed-remediation-provenance');
+  assert.equal(evidence.patchProofError, 'PR lookup unavailable');
+  assert.equal(evidence.current, true);
+  assert.equal(rebaseCurrencyCovers(evidence, reviewedHead, currentHead), false);
+});
+
 const nativeJobId = 'fixture__repo-pr-42-job';
 function nativeFinalJob() {
   return {

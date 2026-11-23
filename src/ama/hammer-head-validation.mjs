@@ -296,6 +296,9 @@ async function fetchExistingHammerHeadRange({ repo, prNumber, rootDir, reviewedH
   if (chain?.length > 0) return { verified: true, reviewedHead, currentHead, baseSha: reviewedHead,
     commits: [...chain, ...(target !== currentHead ? [currentHead] : [])],
     proof: 'hammer-app-attestation-chain' };
+  // The authenticated Hammer endpoint lets completed-round records bridge to
+  // its base even when the rebase has removed Git ancestry. The round-only
+  // proof has no such anchor and verifies each hop independently.
   const mixed = remediationRounds.length && FULL_SHA.test(reviewedHead) && FULL_SHA.test(currentHead)
     ? hammerAttestationChain(provenanceComments, reviewedHead, currentHead, remediationRounds) : null;
   if (mixed && (target === currentHead || mixed.includes(target))) {

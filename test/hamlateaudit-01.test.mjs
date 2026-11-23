@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { terminalReviewProofMatches } from '../src/ama/reviewer-authority.mjs';
 import { evaluateMergeEligibility } from '../src/ama/merge-eligibility.mjs';
 import { spawnSync } from 'node:child_process';
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { primaryChangeFixture } from './helpers/primary-change.mjs';
@@ -348,15 +348,26 @@ test('rendered final GitHub gate fetches reviews and rejects the race after an e
   const gateCode = script.match(/<<'NODE' > "\$HAM_GATE_JSON"\n([\s\S]*?)\nNODE/)[1];
   const fixtureDir = mkdtempSync(join(tmpdir(), 'hamlateaudit-'));
   try {
+    const remediated = 'b'.repeat(40);
+    const completed = join(fixtureDir, 'data', 'follow-up-jobs', 'completed');
+    mkdirSync(completed, { recursive: true });
+    writeFileSync(join(completed, 'example__repo-pr-54-job.json'), JSON.stringify({
+      repo: 'example/repo', prNumber: 54, status: 'completed',
+      remediationPlan: { rounds: [{ state: 'completed', startHeadSha: OLD, resultingHeadSha: remediated }] },
+    }));
+    const hammerComments = [{ user: { login: 'the-hammer-lacey[bot]' },
+      body: `HAM-Base-Head: ${remediated}\nHAM-Pushed-Head: ${HEAD}` }];
     const verdictFile = join(fixtureDir, 'verdict.json');
     writeFileSync(verdictFile, JSON.stringify({ eligible: true, trace: {
       headMatch: { current: HEAD },
       hamTerminalRemediation: { ok: true, auditComment: { createdAt: AUDIT_AT } },
     } }));
-    for (const [reviews, reason, unavailable] of [
-      [[old], null, false], [[old, late], 'review-changed-since-validation', false],
-      [[old], 'terminal-review-evidence-unavailable', true],
-      [[old, operatorReview], 'operator-review-changes-requested', false],
+    for (const [reviews, reason, compareStatus = 'ahead', comments = []] of [
+      [[old], null], [[old, late], 'review-changed-since-validation'],
+      [[old], 'terminal-review-evidence-unavailable', null],
+      [[old, operatorReview], 'operator-review-changes-requested'],
+      [[old], null, 'diverged', hammerComments],
+      [[old, { ...late, commit_id: OLD }], 'review-changed-since-validation', 'diverged', hammerComments],
     ]) {
       // Execute the actual gate's JS with only I/O replaced. The currency and
       // merge predicates remain production code; no GitHub credentials/network.
@@ -373,21 +384,22 @@ import { readUnknownValidationReceipt, recordedUnknownDefersToCi, unknownValidat
 const fetchHammerPr = async (_repo, _pr, options) => {
   assert.equal(options.withReviews({ checks: [{ name: 'test', status: 'COMPLETED', conclusion: 'SUCCESS' }], state: 'OPEN', headSha: ${JSON.stringify(HEAD)} }), true);
   return { headSha: ${JSON.stringify(HEAD)}, state: 'OPEN', mergeable: 'MERGEABLE',
-    mergeStateStatus: 'CLEAN', labels: [], reviews: ${JSON.stringify(reviews)},
+    mergeStateStatus: 'CLEAN', labels: [], reviews: ${JSON.stringify(reviews)}, comments: ${JSON.stringify(comments)},
     checks: [{ name: 'test', status: 'COMPLETED', conclusion: 'SUCCESS' }] };
 };
 const createHistoryReader = () => async path => {
   if (path.endsWith('/collaborators/fixture-operator/permission')) return { permission: 'admin' };
   if (path.includes('/compare/')) {
-    if (${unavailable}) throw new Error('compare 404');
-    return { status: 'ahead' };
+    const status = ${JSON.stringify(compareStatus)};
+    if (!status) throw new Error('compare 404');
+    return { status };
   }
   throw new Error('unexpected offline read: ' + path);
 };
 const loadEffectiveMergeAuthorityConfig = () => ({});
 const fetchPrimaryChange = async () => (${JSON.stringify(primaryChangeFixture(HEAD))});
 const checkPrimaryChange = () => ({ ok: true });
-${gateCode.replace(/^import .*;\n/gm, '').replaceAll('<<REPO>>', 'example/repo').replaceAll('<<PR_NUMBER>>', '54').replaceAll('<<TENURE_REVIEW_ARG>>', '').replaceAll('<<REVIEWED_SHA>>', OLD).replaceAll('<<RUN_DIR>>', fixtureDir)}`;
+${gateCode.replace(/^import .*;\n/gm, '').replaceAll('<<REPO>>', 'example/repo').replaceAll('<<PR_NUMBER>>', '54').replaceAll('<<TENURE_REVIEW_ARG>>', '').replaceAll('<<REVIEWED_SHA>>', OLD).replaceAll('<<RUN_DIR>>', fixtureDir).replaceAll('<<ROOT_DIR>>', fixtureDir)}`;
       const result = spawnSync(process.execPath, ['--input-type=module'], {
         input: code, encoding: 'utf8', timeout: 15000,
         env: { ...process.env, POST_REMEDIATION_SHA: HEAD, HAM_REVIEW_PROOF_REQUIRED: '1',

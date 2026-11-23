@@ -275,17 +275,24 @@ The hammer's initial predicate and final live gate compare each authoritative
 family's latest applicable review head/body with the evidence at the authenticated
 audit's publication time, using canonical ancestry/currency rules. The daemon
 performs the same comparison before reusing terminal validation. For an exact
-live terminal audit, the daemon can recover the reviewed head through a
-completed native round followed by authenticated Hammer publication.
-A changed review
-returns `review-changed-since-validation`; unavailable evidence refuses merge.
+live terminal audit, the final Hammer gate and daemon read completed native
+rounds from the review service root. Both can recover the reviewed head through
+a completed native round followed by authenticated Hammer publication.
+A changed review returns `review-changed-since-validation`.
+If applicability cannot be established, the gate refuses merge.
 An identical same-head repeat preserves proof. Pending, untrusted and
 inapplicable-branch reviews retain existing selection rules.
 
+The shared currency reader and Hammer's mixed range proof reject an observed
+`behind` comparison as a branch reset. If the comparison is unavailable, the
+completed-round and authenticated Hammer edges can still establish proof for
+the exact live head. The range validator's pure Hammer comment chain also
+establishes proof from exact endpoints and requires no reset comparison.
+
 GraphQL (including paginated reviews), adapter and legacy REST rollups retain
 each review's commit SHA as `commitId`. Missing SHAs, unreadable comparisons
-and failed applicability proofs return `terminal-review-evidence-unavailable`
-at every terminal proof consumer, rather than a generic gate-read failure.
+without independent evidence, and failed applicability proofs return
+`terminal-review-evidence-unavailable` at every terminal proof consumer.
 Each proof evaluation caches ancestry and currency reads by commit pair;
 the next live gate evaluation reads fresh evidence. The daemon requires this
 HAM audit proof only for HAM-terminal-validated heads. The existing closer

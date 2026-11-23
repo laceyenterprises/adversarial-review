@@ -181,6 +181,40 @@ test('CFG-09 env mutation without reset resolves from the changed env alias slot
   }
 });
 
+test('CFG-09 cache sees native env alias changes and removal without reset', () => {
+  const tmp = makeTmp();
+  const topPath = join(tmp, 'top.yaml');
+  const canonical = 'AGENT_OS_ROLES_REMEDIATOR';
+  const legacy = 'ADVERSARIAL_REVIEW_DEFAULT_REMEDIATOR';
+  const previous = [process.env[canonical], process.env[legacy]];
+  const load = () => loadRoleConfig({ topPath, env: process.env });
+  try {
+    writeYaml(topPath, 'version: 1\nroles:\n  remediator: codex\n');
+    delete process.env[canonical];
+    delete process.env[legacy];
+    const fromFile = load();
+    assert.equal(fromFile.get('roles.remediator'), 'codex');
+
+    process.env[legacy] = 'claude-code';
+    assert.equal(load().get('roles.remediator'), 'claude-code');
+    process.env[legacy] = 'gemini';
+    assert.equal(load().get('roles.remediator'), 'gemini');
+
+    delete process.env[legacy];
+    process.env[canonical] = 'claude-code';
+    assert.equal(load().get('roles.remediator'), 'claude-code');
+    delete process.env[canonical];
+    assert.equal(load(), fromFile);
+  } finally {
+    for (const [index, name] of [canonical, legacy].entries()) {
+      if (previous[index] === undefined) delete process.env[name];
+      else process.env[name] = previous[index];
+    }
+    resetRoleConfigCache();
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
 // ── N2 hot path regression: routeSubject × ~10 PRs × repeated ticks ──
 
 test('CFG-09 N2 hot path: routeSubject parses once per tick across 10 PRs', (t) => {

@@ -4,9 +4,12 @@
 Each reservation records `id`, dispatch idempotency `ownerKey`, `baseHead`,
 exhaustion `cause`, `reservedAt`, `priorSpend` (series/head/lifetime counters),
 `refundedSpend` and nullable `reviewHead`. It shares the existing retry-ledger
-flock and closer intent lock with dispatch. When the dispatch caller supplies a
-canonical `dispatchProjectRef`, the reservation records it for its lifetime.
-An existing reservation keeps its original scope on replay. A changed builder
+flock and closer intent lock with dispatch. A new native reservation records the
+exact `dispatchProjectRef` after an authenticated preflight proves read access
+for that project and the ledger repository. A refused preflight writes no
+epoch or attempt, and preserves any predecessor. It stores no proof receipt.
+An existing reservation keeps its original scope on replay. Legacy entries can
+omit the field. A changed builder
 head with a verified publication by the reservation launch or its retry binds
 once, recording `boundAt` and starting new series/head/lifetime episode counters.
 Confirmed `dispatchCharges` remain intact. The review-request reason

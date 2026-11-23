@@ -27,6 +27,22 @@ function commonJsFixtureDir(prefix) {
   writeFileSync(join(dir, 'package.json'), '{"type":"commonjs"}\n');
   return dir;
 }
+function installBudgetClock(dir, initialSeconds) {
+  writeFileSync(join(dir, 'clock'), `${initialSeconds}\n`);
+  writeFileSync(join(dir, 'date'), `#!/bin/sh
+if [ "$1" = +%s ]; then
+  IFS= read -r now < "$TMPDIR/clock" || exit 1
+  printf '%s\\n' "$now"
+else
+  exec /bin/date "$@"
+fi
+`, { mode: 0o755 });
+  writeFileSync(join(dir, 'sleep'), `#!/bin/sh
+case "$1" in ''|*[!0-9]*) exit 1 ;; esac
+IFS= read -r now < "$TMPDIR/clock" || exit 1
+printf '%s\\n' "$((now + $1))" > "$TMPDIR/clock"
+`, { mode: 0o755 });
+}
 function fixtureEnv(env = {}) {
   // Fake gh fixtures must never inherit live credentials or a worker launch identity.
   const cleanEnv = Object.fromEntries(Object.entries(process.env).filter(([key]) =>
@@ -1083,21 +1099,19 @@ test('GHBUDGET-01: rendered pending CI uses at most eleven REST check snapshots 
   };
   writeFileSync(join(dir, 'timeout-config.yaml'), 'version: 1\nadversarial:\n  reviewer:\n    load_aware:\n      enabled: false\n');
   env.AGENT_OS_CONFIG_PATH = join(dir, 'timeout-config.yaml');
-  writeFileSync(join(dir, 'clock'), '1700000000');
-  writeFileSync(join(dir, 'date'), '#!/bin/sh\nif [ "$1" = +%s ]; then cat "$TMPDIR/clock"; else exec /bin/date "$@"; fi\n', { mode: 0o755 });
-  writeFileSync(join(dir, 'sleep'), `#!${process.execPath}
-const fs = require('node:fs'); const file = process.env.TMPDIR + '/clock';
-fs.writeFileSync(file, String(Number(fs.readFileSync(file)) + Number(process.argv[2])));
-`, { mode: 0o755 });
-  writeFileSync(join(dir, 'gh'), `#!${process.execPath}
-const fs = require('node:fs'); const args = process.argv.slice(2);
-fs.appendFileSync(process.env.TMPDIR + '/calls.jsonl', JSON.stringify({args, at: Number(fs.readFileSync(process.env.TMPDIR + '/clock'))}) + '\\n');
-const path = args[1];
-if (args[0] !== 'api') process.exit(1);
-if (path.includes('/check-runs?')) console.log(JSON.stringify({check_runs:[{name:'fixture-ci',status:'queued',conclusion:null,created_at:'2026-01-01T00:00:00Z'}]}));
-else if (path.includes('/statuses?')) console.log('[]');
-else if (path.endsWith('/pulls/42')) console.log(JSON.stringify({number:42,state:'open',draft:false,head:{sha:'${head}'},base:{sha:'${'b'.repeat(40)}',ref:'main'},mergeable:true,mergeable_state:'clean',labels:[]}));
-else process.exit(1);
+  installBudgetClock(dir, 1700000000);
+  // Keep real gh process arguments and timestamps without loading the Node
+  // fixture preloads for every synthetic REST response.
+  writeFileSync(join(dir, 'gh'), `#!/bin/sh
+IFS= read -r now < "$TMPDIR/clock" || exit 1
+jq -cn --argjson at "$now" '{args: $ARGS.positional, at: $at}' --args -- "$@" >> "$TMPDIR/calls.jsonl" || exit 1
+[ "$1" = api ] || exit 1
+case "$2" in
+  *'/check-runs?'*) printf '%s\\n' '{"check_runs":[{"name":"fixture-ci","status":"queued","conclusion":null,"created_at":"2026-01-01T00:00:00Z"}]}' ;;
+  *'/statuses?'*) printf '%s\\n' '[]' ;;
+  */pulls/42) printf '%s\\n' '{"number":42,"state":"open","draft":false,"head":{"sha":"${head}"},"base":{"sha":"${'b'.repeat(40)}","ref":"main"},"mergeable":true,"mergeable_state":"clean","labels":[]}' ;;
+  *) exit 1 ;;
+esac
 `, { mode: 0o755 });
   const rendered = renderPhase('hammer-merge', env);
   assert.equal(rendered.status, 0, rendered.stderr);
@@ -1181,13 +1195,8 @@ test('GHBUDGET-01: count a rendered common hammer close with fake gh', async t =
   };
   writeFileSync(join(dir, 'details'), 'Synthetic no-diff close.');
   // The real lane wrapper shares this absolute deadline with the fake shell clock.
-  writeFileSync(join(dir, 'clock'), String(Math.floor(Date.now() / 1000)));
+  installBudgetClock(dir, Math.floor(Date.now() / 1000));
   writeFileSync(join(dir, 'verdict'), JSON.stringify({ eligible: true, trace: { headMatch: { current: head }, branchProtection: { required: false }, hamTerminalRemediation: { auditComment: { createdAt: '2026-01-02T00:00:00Z' } } } }));
-  writeFileSync(join(dir, 'date'), '#!/bin/sh\nif [ "$1" = +%s ]; then cat "$TMPDIR/clock"; else exec /bin/date "$@"; fi\n', { mode: 0o755 });
-  writeFileSync(join(dir, 'sleep'), `#!${process.execPath}
-const fs = require('node:fs'); const file = process.env.TMPDIR + '/clock';
-fs.writeFileSync(file, String(Number(fs.readFileSync(file)) + Number(process.argv[2])));
-`, { mode: 0o755 });
   writeFileSync(join(dir, 'git'), `#!/bin/sh\ncase "$*" in 'rev-parse HEAD') echo '${head}' ;; 'diff --name-only '*) exit 0 ;; *) echo '${base}' ;; esac\n`, { mode: 0o755 });
   writeFileSync(join(dir, 'node-stub'), `#!/bin/sh
 case "$1" in
@@ -1205,22 +1214,32 @@ case "$1" in
   *) exec "$REAL_NODE" "$@" ;;
 esac
 `, { mode: 0o755 });
-  writeFileSync(join(dir, 'gh'), `#!${process.execPath}
-const fs = require('node:fs'); const args = process.argv.slice(2);
-fs.appendFileSync(process.env.TMPDIR + '/calls.jsonl', JSON.stringify(args) + '\\n');
-if (args[0] === 'pr' && args[1] === 'merge') { fs.writeFileSync(process.env.TMPDIR + '/merged', '1'); process.exit(0); }
-if (args[0] === 'pr' && args[1] === 'comment') process.exit(0);
-const path = args.find(arg => arg.startsWith('repos/')) || '';
-if (args.includes('graphql')) console.log('{"login":"hammer-worker","databaseId":77}');
-else if (path.includes('/check-runs')) console.log(JSON.stringify({total_count:1,check_runs:[{id:1,name:'fixture-ci',status:'completed',conclusion:'success',created_at:'2026-01-01T00:00:00Z'}]}));
-else if (path.includes('/statuses')) console.log('[]');
-else if (path.includes('/reviews') || path.includes('/files?')) console.log('[]');
-else if (path.includes('/comments')) console.log('[[]]');
-else if (path.includes('/protection')) console.log('{"strict":false}');
-else if (path.includes('/compare/')) console.log(JSON.stringify({status:'ahead',total_commits:0,commits:[],merge_base_commit:{sha:'${base}'},files:[]}));
-else if (path.includes('/git/trees/')) console.log('{"tree":[],"truncated":false}');
-else if (path.endsWith('/pulls/42')) console.log(JSON.stringify({number:42,title:'Synthetic budget fixture',body:'Synthetic body',state:'open',draft:false,head:{sha:'${head}',ref:'fixture-branch'},base:{sha:'${base}',ref:'main',repo:{default_branch:'main'}},mergeable:true,mergeable_state:'clean',labels:[],changed_files:0,merged_at:fs.existsSync(process.env.TMPDIR+'/merged')?'2026-01-01T00:00:00Z':null,merge_commit_sha:'${'c'.repeat(40)}'}));
-else { console.error('Unexpected synthetic call: ' + JSON.stringify(args)); process.exit(1); }
+  writeFileSync(join(dir, 'gh'), `#!/bin/sh
+jq -cn '$ARGS.positional' --args -- "$@" >> "$TMPDIR/calls.jsonl" || exit 1
+case "$1:$2" in
+  pr:merge) printf '1' > "$TMPDIR/merged"; exit $? ;;
+  pr:comment) exit 0 ;;
+esac
+route=
+for arg do
+  case "$arg" in
+    graphql) printf '%s\\n' '{"login":"hammer-worker","databaseId":77}'; exit 0 ;;
+    repos/*) [ -n "$route" ] || route=$arg ;;
+  esac
+done
+case "$route" in
+  */check-runs*) printf '%s\\n' '{"total_count":1,"check_runs":[{"id":1,"name":"fixture-ci","status":"completed","conclusion":"success","created_at":"2026-01-01T00:00:00Z"}]}' ;;
+  */statuses*|*/reviews*|*'/files?'*) printf '%s\\n' '[]' ;;
+  */comments*) printf '%s\\n' '[[]]' ;;
+  */protection*) printf '%s\\n' '{"strict":false}' ;;
+  */compare/*) printf '%s\\n' '{"status":"ahead","total_commits":0,"commits":[],"merge_base_commit":{"sha":"${base}"},"files":[]}' ;;
+  */git/trees/*) printf '%s\\n' '{"tree":[],"truncated":false}' ;;
+  */pulls/42)
+    merged_at=null
+    if [ -f "$TMPDIR/merged" ]; then merged_at='"2026-01-01T00:00:00Z"'; fi
+    printf '{"number":42,"title":"Synthetic budget fixture","body":"Synthetic body","state":"open","draft":false,"head":{"sha":"${head}","ref":"fixture-branch"},"base":{"sha":"${base}","ref":"main","repo":{"default_branch":"main"}},"mergeable":true,"mergeable_state":"clean","labels":[],"changed_files":0,"merged_at":%s,"merge_commit_sha":"${'c'.repeat(40)}"}\\n' "$merged_at" ;;
+  *) printf 'Unexpected synthetic call: %s\\n' "$*" >&2; exit 1 ;;
+esac
 `, { mode: 0o755 });
   const phasePaths = [];
   for (const phase of ['hammer-verify-head', 'hammer-publish', 'hammer-merge']) {

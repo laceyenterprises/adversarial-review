@@ -16,6 +16,7 @@ import { recordMergeAgentDispatch } from '../src/follow-up-merge-agent.mjs';
 import { cancelMergeAgentDispatch } from '../src/merge-agent-cancel.mjs';
 import { pendingRepairEpoch } from '../src/repair-epochs.mjs';
 import { ensureReviewStateSchema, openReviewStateDb } from '../src/review-state.mjs';
+import { pairedDispatchAbsence } from './helpers/repair-dispatch-scope.mjs';
 
 const repo = 'laceyenterprises/widgets';
 const prNumber = 23;
@@ -54,7 +55,8 @@ function fixture(t, recordOverrides = {}) {
       ghExecFileImpl: async () => ({ stdout: '', stderr: '' }),
       hqExecFileImpl: () => assert.fail('an AMA launch is never sent to merge-agent cancellation'),
       ...options }),
-    repair: () => reserveRepair([rootDir, repo, String(prNumber), current, 'repair-fixture', 'false'], { env }),
+    repair: () => reserveRepair([rootDir, repo, String(prNumber), current, 'repair-fixture', 'false',
+      '', '', 'fixture-project'], { env }),
   };
 }
 
@@ -65,7 +67,7 @@ function reply({ row = {}, retries = [], complete = true } = {}) {
     retry_edges: retries.map(child => ({ parent: launchRequestId, child: child.launch_request_id })) };
 }
 
-function sdkFixture(t, lookup = () => reply()) {
+function sdkFixture(t, lookup = () => reply(), lookupScope = pairedDispatchAbsence) {
   const sdk = dispatchReadTransport.sdk();
   const calls = [];
   t.mock.method(dispatchReadTransport, 'sdk', () => ({ ...sdk,
@@ -75,10 +77,15 @@ function sdkFixture(t, lookup = () => reply()) {
       return { sessionToken: 'fixture-token', endpoint_url: config.endpoint_url };
     },
     readSessionDispatchLookup: async (selector, config) => {
-      assert.deepEqual(selector, { launch_request_ids: [launchRequestId], include_retry_chain: true });
       assert.equal(config.session_token, 'fixture-token');
       assert.ok(config.request_timeout_ms <= 45_000);
       calls.push(selector);
+      if (selector.project_ref) {
+        assert.equal(selector.project_ref, 'fixture-project');
+        assert.equal(selector.repo, repo);
+        return lookupScope(selector);
+      }
+      assert.deepEqual(selector, { launch_request_ids: [launchRequestId], include_retry_chain: true });
       return lookup();
     },
   }));
@@ -263,6 +270,32 @@ test('native repair admission preserves the alias on unknown evidence and reserv
   assert.equal(result.epoch.baseHead, current);
   assert.equal(f.lease(), null);
   assert.equal(readFileSync(f.recordFile, 'utf8'), f.recordBytes);
+});
+
+test('a successor closer lease appearing during repair scope verification retains custody', async t => {
+  const f = fixture(t);
+  seedRepairFacts(f);
+  sdkFixture(t, () => reply(), selector => {
+    assert.equal(acquireAmaCloserLease(f.leaseKey).acquired, true);
+    return pairedDispatchAbsence(selector);
+  });
+  assert.equal((await f.repair()).reason, 'closer-owned-or-unknown');
+  assert.ok(f.lease());
+  assert.equal(pendingRepairEpoch(f.rootDir, identity), null);
+});
+
+test('missing repair project preserves a terminal receipted alias without SDK reads', async t => {
+  const f = fixture(t);
+  seedRepairFacts(f);
+  const before = f.lease();
+  const calls = sdkFixture(t);
+  const result = await reserveRepair([f.rootDir, repo, String(prNumber), current,
+    'repair-fixture', 'false', '', '', ''], { env: f.env });
+  assert.equal(result.reason, 'repair-dispatch-project-required');
+  assert.deepEqual(calls, []);
+  assert.deepEqual(f.lease(), before);
+  assert.equal(readFileSync(f.recordFile, 'utf8'), f.recordBytes);
+  assert.equal(pendingRepairEpoch(f.rootDir, identity), null);
 });
 
 test('native repair uses terminal ledger evidence without deleting an alias that has no terminal receipt', async t => {

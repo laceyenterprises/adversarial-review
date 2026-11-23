@@ -255,6 +255,14 @@ function fixtureEnv(overrides = {}) {
   };
 }
 
+function writeQuotaHqFixture(file, payload) {
+  const json = JSON.stringify(payload).replaceAll("'", "'\\''");
+  writeFileSync(file, `#!/bin/sh
+[ "$*" = 'fleet quota status --json' ] || exit 1
+printf '%s' '${json}'
+`, { mode: 0o755 });
+}
+
 function installGhFixture(tmp) {
   const ghPath = path.join(tmp, 'gh');
   writeFileSync(ghPath, `#!/usr/bin/env bash
@@ -277,15 +285,14 @@ exit 1
 `);
   chmodSync(ghPath, 0o755);
   const hqPath = path.join(tmp, 'fixture-quota-hq');
-  writeFileSync(hqPath, `#!/usr/bin/env node
-if (process.argv.slice(2).join(' ') !== 'fleet quota status --json') process.exit(1);
-process.stdout.write(${JSON.stringify(JSON.stringify({ ...claudeAccountFixture(),
-  providerStatuses: [...claudeAccountFixture().providerStatuses.filter(row => row.provider !== 'openai'), ...codexAccountFixture().providerStatuses],
-  reserveFloors: { ...claudeAccountFixture().reserveFloors, ...codexAccountFixture().reserveFloors },
-  brokerAuth: { provider_states: { ...claudeAccountFixture().brokerAuth.provider_states, ...codexAccountFixture().brokerAuth.provider_states } },
-}))});
-`);
-  chmodSync(hqPath, 0o755);
+  const claude = claudeAccountFixture();
+  const codex = codexAccountFixture();
+  writeQuotaHqFixture(hqPath, {
+    ...claude,
+    providerStatuses: [...claude.providerStatuses.filter(row => row.provider !== 'openai'), ...codex.providerStatuses],
+    reserveFloors: { ...claude.reserveFloors, ...codex.reserveFloors },
+    brokerAuth: { provider_states: { ...claude.brokerAuth.provider_states, ...codex.brokerAuth.provider_states } },
+  });
   // Raw hq fallbacks must also stay inside this synthetic service boundary.
   const cliBin = path.join(tmp, 'fixture-cli-bin');
   mkdirSync(cliBin, { recursive: true });
@@ -2929,9 +2936,7 @@ function runDepthDiscoveryScenario({ burst = false, depthEngaged = true, drainOu
     const quotaFixtureEnv = installGhFixture(tmp);
     if (primaryClaude && accountEvidence !== 'ready') {
       const payload = accountEvidence === 'missing' ? {} : claudeAccountFixture({ corpReady: false, primaryReady: false });
-      writeFileSync(quotaFixtureEnv.AGENT_OS_HQ_BIN, `#!/usr/bin/env node
-process.stdout.write(${JSON.stringify(JSON.stringify(payload))});
-`);
+      writeQuotaHqFixture(quotaFixtureEnv.AGENT_OS_HQ_BIN, payload);
     }
     const result = spawnSync(process.execPath,
       ['--no-warnings', '--import', pathToFileURL(registerPath).href, runnerPath], {

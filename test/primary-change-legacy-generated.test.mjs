@@ -1,6 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync, spawn } from 'node:child_process';
+import childProcess from 'node:child_process';
+import { syncBuiltinESMExports } from 'node:module';
 import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
@@ -53,9 +55,10 @@ function fixture(t, { path = paths[0], repo = repository, lostContent = false, d
   const write = (target, file, text) => {
     mkdirSync(dirname(join(target, file)), { recursive: true });
     writeFileSync(join(target, file), text);
-    if (target === source) git('add', '--', file);
   };
-  const commit = message => {
+  const commit = (message, executablePath) => {
+    git('add', '--all');
+    if (executablePath) git('add', '--chmod=+x', '--', executablePath);
     git('commit', '-qm', message);
     return git('rev-parse', 'HEAD');
   };
@@ -68,17 +71,86 @@ function fixture(t, { path = paths[0], repo = repository, lostContent = false, d
   if (lostContent) write(source, 'z-source.txt', 'author\n');
   const author = commit('Author adds an entry');
   write(source, path, opaque ? `${final}\0` : final);
-  if (mode) git('add', '--chmod=+x', '--', path);
   if (dependencyChanged) write(source, 'scripts/fixture-producer.py', '# edited input\n');
   if (lostContent) write(source, 'z-source.txt', 'base\n');
   if (branchOnly) write(source, verifier, `${script}\nprint(json.dumps(proof))\n`);
-  const head = commit('Remediation moves the entry\n\nWorker-Class: hammer');
+  const head = commit('Remediation moves the entry\n\nWorker-Class: hammer', mode ? path : undefined);
   if (installed) write(owner, verifier, `${script}\n${emit}\n`);
   if (registered) write(root, 'domains/code-pr.json', JSON.stringify({ remediationCloneReferences: { [repository]: source } }));
   const get = localPrimaryHistory({ source, base, head, changeResponse });
   return { args: { rootDir: root, repo, prNumber: 1, headSha: head, get, env: { AGENT_OS_DEPLOY_CHECKOUT: owner },
     localRepository: source }, path, source, owner, base, author, head, git };
 }
+
+test('local history preserves embedded NULs in a formatted commit payload', async t => {
+  const f = fixture(t);
+  const message = 'synthetic\0commit\0body';
+  const execGit = execFileSync;
+  t.mock.method(childProcess, 'execFileSync', (command, args, options) => {
+    if (command === 'git' && args.includes('--format=%P%x00%B') && args.at(-1) === f.head) {
+      return Buffer.from(`${f.author}\0${message}\n`);
+    }
+    return execGit(command, args, options);
+  });
+  syncBuiltinESMExports();
+  t.after(() => { t.mock.restoreAll(); syncBuiltinESMExports(); });
+  const history = await f.args.get.commitHistory(`repos/${repository}/compare/${f.base}...${f.head}`);
+  assert.equal(history.commits.at(-1).commit.message, message);
+  assert.deepEqual(history.commits.at(-1).parents, [{ sha: f.author }]);
+});
+
+test('local history reuses SHA-256 tree reads and rebuilds hook responses', async t => {
+  const source = mkdtempSync(join(tmpdir(), 'history-sha256-'));
+  t.after(() => rmSync(source, { recursive: true, force: true }));
+  const git = (...args) => execFileSync('git', ['-C', source, ...args], { encoding: 'utf8' }).trim();
+  git('init', '-q', '--object-format=sha256');
+  writeFileSync(join(source, 'entry.txt'), 'fixture\n');
+  git('add', 'entry.txt');
+  const tree = git('write-tree');
+  let reads = 0, responses = 0;
+  const execGit = execFileSync;
+  t.mock.method(childProcess, 'execFileSync', (command, args, options) => {
+    if (command === 'git' && args.includes('ls-tree')) reads++;
+    return execGit(command, args, options);
+  });
+  syncBuiltinESMExports();
+  t.after(() => { t.mock.restoreAll(); syncBuiltinESMExports(); });
+  const get = localPrimaryHistory({ source, changeResponse(_route, data) {
+    if (++responses === 1) data.tree[0].path = 'mutated.txt';
+    return data;
+  } });
+  const route = `repos/${repository}/git/trees/${tree}`;
+  assert.equal((await get(route)).tree[0].path, 'mutated.txt');
+  assert.equal((await get(route)).tree[0].path, 'entry.txt');
+  assert.equal(responses, 2);
+  assert.equal(reads, 1);
+});
+
+test('local history keeps cached bytes private across hook and caller mutations', async t => {
+  let blobHooks = 0;
+  const f = fixture(t, { changeResponse(route, data) {
+    if (route.includes('/git/blobs/')) {
+      blobHooks++;
+      assert.equal(typeof data.content, 'string');
+      assert.equal(Object.values(data).some(Buffer.isBuffer), false);
+      // Decoding creates separate bytes; an in-place hook mutation cannot
+      // change the private Git buffer used for subsequent responses.
+      Buffer.from(data.content, 'base64').fill(0);
+    }
+    return data;
+  } });
+  const blob = f.git('rev-parse', `${f.base}:${f.path}`);
+  const route = `repos/${repository}/git/blobs/${blob}`;
+  const response = await f.args.get(route);
+  const bytes = Buffer.from(response.content, 'base64');
+  bytes.fill(0);
+  assert.throws(() => { response.content = bytes.toString('base64'); }, TypeError);
+  // A second offline repository alias bypasses the reader's API-response
+  // cache while both routes still share the same pinned Git buffer.
+  const again = await f.args.get(`repos/fixture/alias/git/blobs/${blob}`);
+  assert.equal(blobHooks, 2);
+  assert.equal(Buffer.from(again.content, 'base64').toString(), baseText);
+});
 
 const evaluate = evidence => checkPrimaryChange(evidence, evidence.headSha);
 

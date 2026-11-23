@@ -217,7 +217,7 @@ export function validateOsgShape(value, source = null, schema) {
     }
   }
   if (Array.isArray(value.arms)) {
-    const fields = Object.entries(osgArmFields(schema)).filter(([, field]) => field.__required);
+    const fields = Object.entries(osgArmFields(schema) ?? {}).filter(([, field]) => field.__required);
     for (const arm of value.arms) {
       if (!arm || fields.some(([key]) => !Object.hasOwn(arm, key))) {
         throw new AgentOSConfigError('osg.arms: incomplete arm', { key: 'osg.arms', source });

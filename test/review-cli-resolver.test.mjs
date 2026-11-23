@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { isConfigSchemaDiagnostic } from './helpers/config-schema-diagnostic.mjs';
 import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import fs from 'node:fs';
@@ -47,7 +48,9 @@ else if (doc.mode === 'invalid-json') console.log('{broken');
 else console.log(JSON.stringify({...doc, cli: args[3]}));
 `, { mode: 0o700 });
   const events = [];
-  const log = { error: (line) => events.push(JSON.parse(line.slice(line.indexOf('{')))) };
+  const log = { error: (line) => {
+    if (!isConfigSchemaDiagnostic(line)) events.push(JSON.parse(line.slice(line.indexOf('{'))));
+  } };
   return { root, hq, binary, selected, response, requestFile, events, log, set, env: { HQ_BIN: hq, PATH: '/synthetic/bin' } };
 }
 

@@ -7,7 +7,8 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { test } from 'node:test';
 import { loadConfig, loadConfigCached, loadConfigRuntime } from '../src/config-loader.mjs';
-import { CFG_JSON_SCHEMA } from '../src/config-schema.mjs';
+import { validateOsgShape } from '../src/config-policies.mjs';
+import { CFG_JSON_SCHEMA, contractSchemaPath, fromJsonSchema } from '../src/config-schema.mjs';
 
 function fixture(t) {
   const root = mkdtempSync(join(tmpdir(), 'cfg-schema-source-'));
@@ -49,6 +50,50 @@ test('checkout schema validates a contract-only key in local overlays and module
 
   writeFileSync(topPath, 'version: 1\nroots:\n  genuinely_unknown_example: 7\n');
   assert.throws(() => loadConfig(options), { key: 'roots.genuinely_unknown_example' });
+});
+
+test('profile overlays validate contract-only keys in both document forms', t => {
+  const { root, topPath, contractPath } = fixture(t);
+  writeContract(contractPath);
+  t.mock.method(console, 'error', () => {});
+  const overlayPath = join(root, 'config.profile.reference-host.yaml');
+  const options = { topPath, env: { AGENT_OS_ROOT: root, AGENT_OS_PROFILE: 'reference-host' } };
+  for (const version of ['', 'version: 1\n']) {
+    writeFileSync(overlayPath, `${version}roots:\n  example_retention_days: 7\n`);
+    const config = loadConfig(options);
+    assert.equal(config.get('roots.example_retention_days'), 7);
+    assert.equal(config.resolutionTrace('roots.example_retention_days').at(-1).source, `profile:${overlayPath}`);
+  }
+});
+
+test('schema path resolution defaults to the process environment', t => {
+  const { root, contractPath } = fixture(t);
+  const previousRoot = process.env.AGENT_OS_ROOT;
+  t.after(() => {
+    if (previousRoot === undefined) delete process.env.AGENT_OS_ROOT;
+    else process.env.AGENT_OS_ROOT = previousRoot;
+  });
+  process.env.AGENT_OS_ROOT = root;
+  assert.equal(contractSchemaPath(), contractPath);
+});
+
+test('OSG shape validation honors required arm fields declared by the schema', () => {
+  const contract = structuredClone(CFG_JSON_SCHEMA);
+  const osg = contract.properties.osg;
+  const arm = osg.properties.arms.items;
+  arm.properties.example_optional_field = { type: 'string' };
+  const schema = fromJsonSchema(contract);
+  const validArm = Object.fromEntries(arm.required.map(key => [key, true]));
+  validateOsgShape({ arms: [validArm] }, null, schema);
+  for (const key of arm.required) {
+    const incomplete = { ...validArm };
+    delete incomplete[key];
+    assert.throws(() => validateOsgShape({ arms: [incomplete] }, null, schema), { key: 'osg.arms' });
+  }
+
+  const partialSchema = fromJsonSchema({ type: 'object' });
+  validateOsgShape({ arms: [{}] }, null, partialSchema);
+  assert.throws(() => validateOsgShape({ arms: [null] }, null, partialSchema), { key: 'osg.arms' });
 });
 
 test('cached loads track the deploy contract and recover after it is replaced', t => {

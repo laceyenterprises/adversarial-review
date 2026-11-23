@@ -132,7 +132,7 @@ export function schemaV1() {
   return cached;
 }
 
-export function contractSchemaPath(env) {
+export function contractSchemaPath(env = process.env) {
   // Config-derived roots are unavailable until after schema validation.
   const checkout = String(env.AGENT_OS_ROOT ?? '').trim()
     || String(env.AGENT_OS_DEPLOY_CHECKOUT ?? '').trim()

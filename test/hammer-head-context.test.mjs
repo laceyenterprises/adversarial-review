@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { withoutConfigSchemaDiagnostics } from './helpers/config-schema-diagnostic.mjs';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
@@ -329,7 +330,8 @@ for (const scenario of ['rebase-bot', 'rebase-user']) {
       status: 'completed', remediationPlan: { rounds: [{ state: 'completed', startHeadSha: reviewed, resultingHeadSha: head }] } }));
     const run = () => f.run(undefined, { HAM_BASE_HEAD: head });
     if (scenario === 'rebase-bot') assert.deepEqual(JSON.parse((await run()).stdout).linkKinds, ['fleet-force-push']);
-    else await assert.rejects(run(), error => error.code === 65 && error.stderr === 'hammer starting base or responsibility range could not be proven\n');
+    else await assert.rejects(run(), error => error.code === 65
+      && withoutConfigSchemaDiagnostics(error.stderr) === 'hammer starting base or responsibility range could not be proven\n');
   });
 }
 

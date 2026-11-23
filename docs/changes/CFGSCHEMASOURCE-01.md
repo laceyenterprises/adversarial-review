@@ -12,6 +12,11 @@ The loader reports the selected schema and SHA-256 digest to stderr, including
 the reason for a fallback. Cached reads track changes to the contract file.
 The existing checkout variables and vendored module layout locate the contract.
 
+Profile overlays use the same resolved schema for versioned and unversioned
+documents. Direct calls to `contractSchemaPath()` use the process environment
+when no environment is supplied. OSG arm validation checks the schema's
+required fields when an arm definition is present.
+
 ## Verification
 
 - `npm test -- config-schema-source.test.mjs` passed five synthetic cases
@@ -21,3 +26,7 @@ The existing checkout variables and vendored module layout locate the contract.
   suites passed individually.
 - `npm run lint`, `npm run typecheck:contracts` and the offline research-finding
   walkthrough passed.
+- Hammer's canonical targeted validation passed 776 tests across 17 files,
+  including both profile overlay document forms, OSG required and optional
+  fields, the default schema path, and CLI stderr contracts. Lint completed
+  with zero errors. Contract typechecking and the offline walkthrough passed.

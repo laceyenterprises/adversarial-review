@@ -5508,20 +5508,49 @@ test('OWNERDEADLINE-01: every open subject visits deadline recovery before revie
   } finally { rmSync(tmp, { recursive: true, force: true }); }
 });
 
-for (const initialStatus of ['posted', 'pending', 'pending-upstream', 'ci-blocked', 'sequence', 'parked-green', 'expired-hammer-handoff', 'expired-ci-handoff', 'satisfied-ci-handoff', 'spent-review-only', 'spent-review-wait', 'rescue-descendant']) {
-  const rescueDescendant = initialStatus === 'rescue-descendant';
-  test(rescueDescendant
-    ? 'LAC-2334: a later unproven rescue head owes a final verdict even with completed native remediation'
-    : `CLOSERDEADLOCK-01 ${initialStatus} final-round push remains in the closer lane`, () => {
+function runFinalRoundOwnerFixture(tmp, { liveHead, postedSource, afterFirstPoll }) {
+  const postedUrl = fileUrl('src', 'posted-review-row.mjs');
+  const finalRoundUrl = fileUrl('src', 'comment-only-final-round.mjs');
+  const jobsSource = `export * from ${JSON.stringify(finalRoundUrl + '?actual')};
+    import { findFinalRemediationPushJob as actual } from ${JSON.stringify(finalRoundUrl + '?actual')};
+    export function findFinalRemediationPushJob(_root, args, log) { return actual(${JSON.stringify(tmp)}, args, log); }`;
+  let loader = buildLoaderSource({ subjectHeads: { 101: liveHead },
+    followUpJobsSource: DEFAULT_FOLLOW_UP_JOBS_SOURCE.replace('return { completedRoundsForPR: 0, latestRiskClass:',
+      'return globalThis.finalRoundLedger || { completedRoundsForPR: 0, latestRiskClass:'),
+  })
+    .replace('return globalThis.__holdReleaseSettled ||', 'return globalThis.finalRoundSettled || globalThis.__holdReleaseSettled ||')
+    .replace("export function buildAdversarialGateSnapshot() { return { settledReview: { verdict: '', remediationPending: false }, reviewedHeadSha: null, mergeableState: '', labels: [] }; }",
+      "export function buildAdversarialGateSnapshot() { return globalThis.finalRoundSettled ? { settledReview: globalThis.finalRoundSettled, reviewedHeadSha: globalThis.finalRoundSettled.reviewedHeadSha, labels: [] } : { settledReview: { verdict: '', remediationPending: false }, reviewedHeadSha: null, mergeableState: '', labels: [] }; }")
+    .replaceAll('laceyenterprises/adversarial-review', 'example/project');
+  loader = loader.replace('export async function resolve',
+    `stubs.set(${JSON.stringify(postedUrl)}, 'fixture:final-round-posted');\nstubs.set(${JSON.stringify(finalRoundUrl)}, 'fixture:final-round-jobs');\nexport async function resolve`)
+    .replace('export async function load(url, context, nextLoad) {',
+      `export async function load(url, context, nextLoad) {\nif (url === 'fixture:final-round-posted') return { format: 'module', shortCircuit: true, source: ${JSON.stringify(postedSource)} };\nif (url === 'fixture:final-round-jobs') return { format: 'module', shortCircuit: true, source: ${JSON.stringify(jobsSource)} };`);
+  const loaderPath = path.join(tmp, 'loader.mjs'), registerPath = path.join(tmp, 'register.mjs');
+  const runnerPath = path.join(tmp, 'runner.mjs');
+  writeFileSync(loaderPath, loader);
+  writeFileSync(registerPath, buildRegisterSource(loaderPath));
+  writeFileSync(runnerPath, buildRunnerSource({ freshHeads: { 101: liveHead }, afterFirstPoll }).replaceAll('laceyenterprises/adversarial-review', 'example/project')
+    .replace("name: 'adversarial-review', archived: false", "name: 'project', full_name: 'example/project', archived: false"));
+  const env = fixtureEnv(installGhFixture(tmp));
+  const ghPath = path.join(tmp, 'gh');
+  writeFileSync(ghPath, readFileSync(ghPath, 'utf8').replaceAll('laceyenterprises/adversarial-review', 'example/project'));
+  const result = spawnSync(process.execPath, ['--no-warnings', '--import', pathToFileURL(registerPath).href, runnerPath],
+    { cwd: REPO_ROOT, encoding: 'utf8', env, timeout: 30000 });
+  const output = `${result.stdout}${result.stderr}`;
+  assert.equal(result.status, 0, output);
+  assert.ok((output.match(/budget-exhausted-closure-transition/g) || []).length <= 1,
+    'certain budget handoff logs once per head instead of retrying every pass');
+}
+
+for (const initialStatus of ['posted', 'pending', 'pending-upstream', 'ci-blocked', 'sequence', 'parked-green', 'expired-hammer-handoff', 'expired-ci-handoff', 'satisfied-ci-handoff', 'spent-review-only', 'spent-review-wait']) {
+  test(`CLOSERDEADLOCK-01 ${initialStatus} final-round push remains in the closer lane`, () => {
     const tmp = mkdtempSync(path.join(tmpdir(), 'watcher-final-round-owner-'));
     const reviewed = '1'.repeat(40), pushed = '2'.repeat(40);
-    const liveHead = rescueDescendant ? '3'.repeat(40) : pushed;
-    const completedRounds = rescueDescendant ? 4 : 2;
     const delivered = ['spent-review-only', 'spent-review-wait'].includes(initialStatus) ? pushed : reviewed;
     const body = '## Blocking issues\n- None.\n## Non-blocking issues\n- Synthetic typo.\n## Verdict\nComment only';
     try {
       const postedUrl = fileUrl('src', 'posted-review-row.mjs');
-      const finalRoundUrl = fileUrl('src', 'comment-only-final-round.mjs');
       const postedSource = `export * from ${JSON.stringify(postedUrl + '?actual')};
         import assert from 'node:assert/strict';
         import { maybeDispatchAmaClosureFor } from ${JSON.stringify(fileUrl('src', 'ama-closure-orchestration.mjs'))};
@@ -5558,26 +5587,7 @@ for (const initialStatus of ['posted', 'pending', 'pending-upstream', 'ci-blocke
           (globalThis.finalRoundDecisions ||= []).push(result);
           return { outcome: green ? 'ama-dispatched' : 'ama-pending', amaClosureResult: result };
         }`;
-      const jobsSource = `export * from ${JSON.stringify(finalRoundUrl + '?actual')};
-        import { findFinalRemediationPushJob as actual } from ${JSON.stringify(finalRoundUrl + '?actual')};
-        export function findFinalRemediationPushJob(_root, args, log) { return actual(${JSON.stringify(tmp)}, args, log); }`;
-      let loader = buildLoaderSource({ subjectHeads: { 101: liveHead },
-        followUpJobsSource: DEFAULT_FOLLOW_UP_JOBS_SOURCE.replace('return { completedRoundsForPR: 0, latestRiskClass:',
-          'return globalThis.finalRoundLedger || { completedRoundsForPR: 0, latestRiskClass:'),
-      })
-        .replace('return globalThis.__holdReleaseSettled ||', 'return globalThis.finalRoundSettled || globalThis.__holdReleaseSettled ||')
-        .replace("export function buildAdversarialGateSnapshot() { return { settledReview: { verdict: '', remediationPending: false }, reviewedHeadSha: null, mergeableState: '', labels: [] }; }",
-          "export function buildAdversarialGateSnapshot() { return globalThis.finalRoundSettled ? { settledReview: globalThis.finalRoundSettled, reviewedHeadSha: globalThis.finalRoundSettled.reviewedHeadSha, labels: [] } : { settledReview: { verdict: '', remediationPending: false }, reviewedHeadSha: null, mergeableState: '', labels: [] }; }")
-        .replaceAll('laceyenterprises/adversarial-review', 'example/project');
-      loader = loader.replace('export async function resolve',
-        `stubs.set(${JSON.stringify(postedUrl)}, 'fixture:final-round-posted');\nstubs.set(${JSON.stringify(finalRoundUrl)}, 'fixture:final-round-jobs');\nexport async function resolve`)
-        .replace('export async function load(url, context, nextLoad) {',
-          `export async function load(url, context, nextLoad) {\nif (url === 'fixture:final-round-posted') return { format: 'module', shortCircuit: true, source: ${JSON.stringify(postedSource)} };\nif (url === 'fixture:final-round-jobs') return { format: 'module', shortCircuit: true, source: ${JSON.stringify(jobsSource)} };`);
-      const loaderPath = path.join(tmp, 'loader.mjs'), registerPath = path.join(tmp, 'register.mjs');
-      const runnerPath = path.join(tmp, 'runner.mjs');
-      writeFileSync(loaderPath, loader);
-      writeFileSync(registerPath, buildRegisterSource(loaderPath));
-      writeFileSync(runnerPath, buildRunnerSource({ freshHeads: { 101: liveHead }, afterFirstPoll: `
+      runFinalRoundOwnerFixture(tmp, { liveHead: pushed, postedSource, afterFirstPoll: `
         const { mkdirSync, writeFileSync } = await import('node:fs');
         const completedAt = new Date(Date.now() - (['expired-hammer-handoff', 'expired-ci-handoff'].includes('${initialStatus}') ? 3600000 : 0)).toISOString();
         globalThis.finalRoundCompletedAt = completedAt;
@@ -5587,9 +5597,8 @@ for (const initialStatus of ['posted', 'pending', 'pending-upstream', 'ci-blocke
         writeFileSync(dir + '/' + jobId + '.json', JSON.stringify({
           jobId, repo: 'example/project', prNumber: 101, status: 'completed', finalRound: ['expired-ci-handoff', 'satisfied-ci-handoff', 'spent-review-only', 'spent-review-wait'].includes('${initialStatus}') ? null : 'comment-only',
           revisionRef: '${delivered}', reviewBody: ${JSON.stringify(body)}, completedAt,
-          remediationPlan: { currentRound: ${completedRounds}, maxRounds: 2 },
-          completion: { finalRemediationPush: !['spent-review-only', 'spent-review-wait'].includes('${initialStatus}'),
-            workerPushedHeadSha: '${pushed}', finalRoundOutcome: { completed: true } },
+          remediationPlan: { currentRound: 2, maxRounds: 2 },
+          completion: { finalRemediationPush: !['spent-review-only', 'spent-review-wait'].includes('${initialStatus}'), workerPushedHeadSha: '${pushed}' },
           reReview: { requested: false, suppressed: ['expired-hammer-handoff', 'expired-ci-handoff', 'satisfied-ci-handoff', 'spent-review-only'].includes('${initialStatus}') ? 'shared-next-action' : 'comment-only-final-round', nextAction: {
             action: '${initialStatus}' === 'expired-hammer-handoff' ? 'hammer' : 'wait-for-CI',
             actor: '${initialStatus}' === 'expired-hammer-handoff' ? 'hammer' : 'ci',
@@ -5605,10 +5614,10 @@ for (const initialStatus of ['posted', 'pending', 'pending-upstream', 'ci-blocke
         db.prepare(\`UPDATE reviewed_prs SET review_status=?,reviewer_head_sha='${delivered}',revision_ref='${pushed}',
           rereview_requested_at=?,rereview_reason='auto-refresh: posted review on stale head',
           reviewer_session_uuid=NULL,reviewer_lease_expires_at=NULL WHERE pr_number=101\`)
-          .run(['sequence', 'rescue-descendant'].includes('${initialStatus}') ? 'posted' : ['parked-green', 'expired-hammer-handoff', 'expired-ci-handoff', 'satisfied-ci-handoff', 'spent-review-only', 'spent-review-wait'].includes('${initialStatus}') ? 'pending' : '${initialStatus}',
-            ['posted', 'sequence', 'rescue-descendant'].includes('${initialStatus}') ? null : completedAt);
+          .run('${initialStatus}' === 'sequence' ? 'posted' : ['parked-green', 'expired-hammer-handoff', 'expired-ci-handoff', 'satisfied-ci-handoff', 'spent-review-only', 'spent-review-wait'].includes('${initialStatus}') ? 'pending' : '${initialStatus}',
+            ['posted', 'sequence'].includes('${initialStatus}') ? null : completedAt);
         globalThis.finalRoundArmed = true;
-        globalThis.finalRoundLedger = { completedRoundsForPR: ${completedRounds}, latestRiskClass: 'medium', latestMaxRounds: 2,
+        globalThis.finalRoundLedger = { completedRoundsForPR: 2, latestRiskClass: 'medium', latestMaxRounds: 2,
           commentOnlyFinalRoundRevisionRefs: ['spent-review-only', 'spent-review-wait'].includes('${initialStatus}') ? [] : ['${delivered}'],
           commentOnlyFinalRoundPushedHeads: ['spent-review-only', 'spent-review-wait'].includes('${initialStatus}') ? [] : [{ reviewedHead: '${delivered}', workerPushedHeadSha: '${pushed}', status: 'completed', completedAt }] };
         globalThis.finalRoundSettled = { verdict: 'comment-only', remediationPending: false,
@@ -5617,19 +5626,6 @@ for (const initialStatus of ['posted', 'pending', 'pending-upstream', 'ci-blocke
         globalThis.__watcherClaimLoopReviewerSpawns = [];
         globalThis.finalRoundGreen = ['parked-green', 'expired-hammer-handoff', 'expired-ci-handoff', 'satisfied-ci-handoff', 'spent-review-only'].includes('${initialStatus}');
         await pollOnce(octokit, pollOptions);
-        ${rescueDescendant ? `
-        const current = db.prepare('SELECT * FROM reviewed_prs WHERE pr_number=101').get();
-        assert.equal(current.rereview_reason, 'system-exhausted-head-verdict:${liveHead}');
-        assert.equal(current.revision_ref, '${liveHead}');
-        assert.equal(globalThis.finalRoundDecisions, undefined, 'old handoff cannot dispatch closure on the new head');
-        const verdicts = () => globalThis.__watcherClaimLoopReviewerSpawns.filter(spawn => spawn.subjectContext.prNumber === 101);
-        assert.equal(verdicts().length, 1);
-        assert.equal(verdicts()[0].subjectContext.verdictOnly, true);
-        assert.equal(verdicts()[0].subjectContext.reviewAttemptNumber, 5);
-        assert.equal(verdicts()[0].subjectContext.maxRemediationRounds, 2);
-        await pollOnce(octokit, pollOptions);
-        assert.equal(verdicts().length, 1, 'repeat polls must coalesce while the review is in flight');
-        ` : `
         assert.ok(globalThis.finalRoundDecisions?.length >= 1, 'pending CI must reach the closer in this pass');
         assert.equal(db.prepare('SELECT review_status FROM reviewed_prs WHERE pr_number=101').get().review_status, 'posted');
         if (['parked-green', 'expired-hammer-handoff', 'expired-ci-handoff', 'satisfied-ci-handoff', 'spent-review-only'].includes('${initialStatus}')) {
@@ -5661,22 +5657,124 @@ for (const initialStatus of ['posted', 'pending', 'pending-upstream', 'ci-blocke
           assert.ok([1, 2].includes(globalThis.finalRoundClosureAdmissions), 'first green pass reaches each due closure observation');
         }
         assert.equal(globalThis.__watcherClaimLoopReviewerSpawns.length, 0);
-        `}
-      ` }).replaceAll('laceyenterprises/adversarial-review', 'example/project')
-        .replace("name: 'adversarial-review', archived: false", "name: 'project', full_name: 'example/project', archived: false"));
-      const env = fixtureEnv(installGhFixture(tmp));
-      const ghPath = path.join(tmp, 'gh');
-      writeFileSync(ghPath, readFileSync(ghPath, 'utf8').replaceAll('laceyenterprises/adversarial-review', 'example/project'));
-      const result = spawnSync(process.execPath, ['--no-warnings', '--import', pathToFileURL(registerPath).href, runnerPath],
-        { cwd: REPO_ROOT, encoding: 'utf8', env, timeout: 30000 });
-      const output = `${result.stdout}${result.stderr}`;
-      assert.equal(result.status, 0, output);
-      assert.ok((output.match(/budget-exhausted-closure-transition/g) || []).length <= 1,
-        'certain budget handoff logs once per head instead of retrying every pass');
+      ` });
     } finally { rmSync(tmp, { recursive: true, force: true }); }
   });
 }
 
+
+function runRescueDescendantFixture({ additionalPass = '', verify }) {
+  const tmp = mkdtempSync(path.join(tmpdir(), 'watcher-rescue-descendant-'));
+  const postedUrl = fileUrl('src', 'posted-review-row.mjs');
+  const finalRoundUrl = fileUrl('src', 'comment-only-final-round.mjs');
+  const currencyUrl = fileUrl('src', 'ama', 'review-currency.mjs');
+  const metricsUrl = fileUrl('src', 'review-ceiling-metrics.mjs');
+  const reviewed = '1'.repeat(40), pushed = '2'.repeat(40), rescue = '3'.repeat(40);
+  const postedSource = `export * from ${JSON.stringify(postedUrl + '?actual')};
+    export async function handlePostedReviewRow(input) {
+      if (input.prNumber === 101 && globalThis.finalRoundArmed) globalThis.rescueReachedPostedLane = true;
+      return { outcome: 'fixture-posted' };
+    }`;
+  try {
+    runFinalRoundOwnerFixture(tmp, { liveHead: rescue, postedSource, afterFirstPoll: `
+      const { mkdirSync, writeFileSync } = await import('node:fs');
+      const { FINAL_ROUND_REPLAY_PROOF, findFinalRemediationPushJob } = await import(${JSON.stringify(finalRoundUrl)});
+      const { createReviewCurrencyReader } = await import(${JSON.stringify(currencyUrl)});
+      const { countReviewCeilingUnits } = await import(${JSON.stringify(metricsUrl)});
+      const rootDir = ${JSON.stringify(tmp)}, repo = 'example/project', prNumber = 101;
+      const reviewed = '${reviewed}', pushed = '${pushed}', rescue = '${rescue}';
+      const completedAt = new Date().toISOString();
+      const body = '## Blocking issues\\n- None.\\n## Non-blocking issues\\n- Synthetic typo.\\n## Verdict\\nComment only';
+      const dir = rootDir + '/data/follow-up-jobs/completed';
+      const jobId = 'example__project-pr-101-final';
+      mkdirSync(dir, { recursive: true });
+      writeFileSync(dir + '/' + jobId + '.json', JSON.stringify({
+        jobId, repo, prNumber, status: 'completed', finalRound: 'comment-only',
+        revisionRef: reviewed, reviewBody: body, completedAt,
+        remediationPlan: { currentRound: 4, maxRounds: 2 },
+        closureHandoff: { reason: 'final-fix-all', headSha: reviewed },
+        completion: { finalRemediationPush: true, workerPushedHeadSha: pushed, finalRoundOutcome: { completed: true },
+          workerPushProof: { method: FINAL_ROUND_REPLAY_PROOF, workerCommits: 1, producedAttestationId: 'fixture' } },
+        reReview: { requested: false, suppressed: 'comment-only-final-round',
+          nextAction: { action: 'wait-for-CI', actor: 'ci', reason: 'suppressed-final-push', head: pushed } },
+      }));
+      const compare = new Map([
+        [\`repos/\${repo}/compare/\${reviewed}...\${rescue}\`, { status: 'ahead', ahead_by: 2, behind_by: 0 }],
+        [\`repos/\${repo}/compare/\${pushed}...\${rescue}\`, { status: 'ahead', ahead_by: 1, behind_by: 0 }],
+      ]);
+      const currency = createReviewCurrencyReader({ repo, prNumber, rootDir, get: async endpoint => {
+        assert.ok(compare.has(endpoint), 'unexpected compare request: ' + endpoint);
+        return compare.get(endpoint);
+      } });
+      for (const ancestor of [reviewed, pushed]) {
+        assert.deepEqual(await currency(ancestor, rescue), {
+          reviewedHead: ancestor, currentHead: rescue, current: true, proof: 'ancestry',
+        });
+      }
+      assert.equal(findFinalRemediationPushJob(rootDir, { repo, prNumber, headSha: pushed })?.jobId, jobId);
+      assert.equal(findFinalRemediationPushJob(rootDir, { repo, prNumber, headSha: rescue }), null);
+
+      const deliver = (attempt, head, reviewId) => db.prepare(\`
+        INSERT INTO reviewer_passes(repo,pr_number,attempt_number,reviewer_class,pass_kind,
+          started_at,ended_at,status,head_sha,gh_comment_id,body_md,body_captured_at)
+        VALUES (?,101,?,'claude','rereview',?,?,'completed',?,?,?,?)\`)
+        .run(repo, attempt, completedAt, completedAt, head, reviewId, body, completedAt);
+      deliver(50, reviewed, 'synthetic-original-review');
+      db.prepare(\`UPDATE reviewed_prs SET review_status='posted', reviewer_head_sha=?, revision_ref=?,
+        rereview_requested_at=NULL, rereview_reason=NULL, reviewer_session_uuid=NULL,
+        reviewer_lease_expires_at=NULL WHERE repo=? AND pr_number=101\`).run(reviewed, pushed, repo);
+      globalThis.finalRoundLedger = { completedRoundsForPR: 4, latestRiskClass: 'medium', latestMaxRounds: 2,
+        commentOnlyFinalRoundRevisionRefs: [reviewed],
+        commentOnlyFinalRoundPushedHeads: [{ reviewedHead: reviewed, workerPushedHeadSha: pushed, status: 'completed', completedAt }] };
+      globalThis.finalRoundSettled = { verdict: 'comment-only', remediationPending: false, reviewedHeadSha: reviewed,
+        blockingFindingState: 'known', blockingFindingCount: 0, nonBlockingFindingState: 'known',
+        nonBlockingFindingCount: 1, commentOnlyFinalRoundPush: true };
+      globalThis.finalRoundArmed = true;
+      globalThis.__watcherClaimLoopReviewerSpawns = [];
+      const row = () => db.prepare('SELECT * FROM reviewed_prs WHERE repo=? AND pr_number=101').get(repo);
+      const spawns = () => globalThis.__watcherClaimLoopReviewerSpawns.filter(spawn => spawn.subjectContext.prNumber === 101);
+      const deliveredCount = () => countReviewCeilingUnits({ db, rootDir, repoPath: repo, prNumber, headSha: rescue });
+      ${additionalPass}
+      assert.equal(row().reviewer_head_sha, reviewed, 'admission must consult passes even with a stale row');
+      assert.equal(row().revision_ref, pushed);
+      await pollOnce(octokit, pollOptions);
+      ${verify}
+    ` });
+  } finally { rmSync(tmp, { recursive: true, force: true }); }
+}
+
+test('LAC-2334: a descendant without its own publication or verdict gets one verdict-only review', () => {
+  runRescueDescendantFixture({
+    additionalPass: `assert.equal(deliveredCount(), 0);`,
+    verify: `
+      assert.equal(row().rereview_reason, 'system-exhausted-head-verdict:' + rescue);
+      assert.equal(row().revision_ref, rescue);
+      assert.equal(globalThis.rescueReachedPostedLane, undefined, 'the older handoff cannot route the rescue head to closure');
+      assert.equal(spawns().length, 1);
+      const { subjectContext } = spawns()[0];
+      assert.equal(subjectContext.reviewerHeadSha, rescue);
+      assert.equal(subjectContext.verdictOnly, true);
+      assert.equal(subjectContext.reviewAttemptNumber, 5);
+      assert.equal(subjectContext.maxRemediationRounds, 2);
+      await pollOnce(octokit, pollOptions);
+      assert.equal(spawns().length, 1, 'repeat polls coalesce while the exact-head review is in flight');
+    `,
+  });
+});
+
+test('LAC-2334: a delivered verdict on the descendant prevents another verdict-only review', () => {
+  runRescueDescendantFixture({
+    additionalPass: `
+      deliver(51, rescue, 'synthetic-rescue-review');
+      assert.equal(deliveredCount(), 1);
+    `,
+    verify: `
+      await pollOnce(octokit, pollOptions);
+      assert.notEqual(row().rereview_reason, 'system-exhausted-head-verdict:' + rescue);
+      assert.equal(spawns().length, 0);
+    `,
+  });
+});
 
 test('LABELREARM-01: discovery arms a fresh exact-head review from an operator-gated posted pass', () => {
   const wakeUrl = fileUrl('src', 'operator-label-review-wake.mjs');

@@ -1828,7 +1828,6 @@ async function reconcileFollowUpJobWithinRepositoryCycle({
       workspaceDir: paths.workspaceDir,
       auditWorkspaceForContaminationImpl, inspectRemediationCiRegressionImpl, deliverAlertImpl, execFileImpl, log,
     });
-
     if (replyProbe.state === 'valid') {
       ({ reply: parsedReply, job, remediationReply, completionLifecycle, pendingCiCompletion } = await resolvePendingCiCompletion({
         rootDir, job, reply: replyProbe.reply, worker, remediationReply,

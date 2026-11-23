@@ -33,18 +33,19 @@ export function amaAllAuthoritativeReviewerLogins() {
 }
 
 async function currentReviewHead(reviewedHead, headSha, compare, currency) {
-  if (currency) {
-    const result = await currency(reviewedHead, headSha);
-    if (result.proofLimit && result.current !== true) {
-      throw Object.assign(new Error(result.missingProof), { proofLimit: result.proofLimit });
-    }
-    return result.current === true;
-  }
-  if (reviewedHead === headSha) return true;
+  if (currency) return currency(reviewedHead, headSha);
+  if (reviewedHead === headSha) return { current: true };
   const ancestry = await compare(reviewedHead, headSha);
-  if (['behind', 'diverged'].includes(ancestry.status)) return false;
+  if (['behind', 'diverged'].includes(ancestry.status)) return { current: false };
   if (!['ahead', 'identical'].includes(ancestry.status)) throw new Error('cannot verify review ancestry');
-  return true;
+  return { current: true };
+}
+
+function requireReviewApplicability(result) {
+  if (result.proofLimit && result.current !== true) {
+    throw Object.assign(new Error(result.missingProof), { proofLimit: result.proofLimit });
+  }
+  return result.current === true;
 }
 
 // REST review lists are oldest first. Include dismissed blocking bodies:
@@ -54,7 +55,7 @@ export async function latestAuthoritativeReviewInAncestry(reviews, headSha, comp
     if (!['CHANGES_REQUESTED', 'COMMENTED', 'DISMISSED', 'APPROVED'].includes(entry.state)
       || !amaAllAuthoritativeReviewerLogins().includes(String(entry.user?.login || '').replace(/\[bot\]$/, ''))) continue;
     if (!/^[a-f0-9]{40}$/i.test(entry.commit_id || '')) throw new Error('authoritative review has no valid head');
-    if (!await currentReviewHead(entry.commit_id, headSha, compare, currency)) continue;
+    if (!requireReviewApplicability(await currentReviewHead(entry.commit_id, headSha, compare, currency))) continue;
     return entry;
   }
 }
@@ -72,13 +73,15 @@ export async function isCurrentAuthoritativeFamilyReview(review, reviews, headSh
       || !['CHANGES_REQUESTED', 'COMMENTED', 'DISMISSED', 'APPROVED'].includes(entry.state)
       || entry.commit_id === review.commit_id) continue;
     if (!/^[a-f0-9]{40}$/i.test(entry.commit_id || '')) throw new Error('authoritative review has no valid head');
+    const applicability = await currentReviewHead(entry.commit_id, headSha, compare, currency);
+    if (!applicability.current && !applicability.proofLimit) continue;
     const newer = await compare(review.commit_id, entry.commit_id);
     if (!['ahead', 'behind', 'diverged', 'identical'].includes(newer.status)) {
       throw new Error('cannot verify review supersession');
     }
     if (newer.status !== 'ahead'
       && !(currency && newer.status === 'diverged' && reviews.indexOf(entry) > reviews.indexOf(review))) continue;
-    if (await currentReviewHead(entry.commit_id, headSha, compare, currency)) return false;
+    if (requireReviewApplicability(applicability)) return false;
   }
   return true;
 }

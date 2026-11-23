@@ -146,6 +146,24 @@ done
 # 3. Publish the validation audit under the lease.
 ham_close_phase_or_stop hammer-publish
 
+# MRQ-21: a queue-v2 lane ends here, at the published, exact-head-attested
+# head. The queue executor owns the CI wait, the merge predicate and the merge;
+# this run hands the head off and never reaches them. Legacy lanes skip this.
+if [ "${HAM_FINALIZATION_EXECUTOR:-}" = queue-v2 ]; then
+  HAM_CLOSE_STAGE=queue-handoff
+  export HAM_PROCEDURE_STEP=queue-handoff
+  HAM_PHASE_OUTCOME=queue-handoff-unadmitted
+  rm -f "$HAM_RUN_DIR/queue-handoff.json"
+  ham_close_queue_status=0
+  "$HAM_NODE_BIN" "$HAM_CLOSE_ROOT/bin/hammer-queue-handoff.mjs" || ham_close_queue_status=$?
+  ham_close_queue_outcome=$(jq -er '.outcome | strings | select(test("^[a-z][a-z0-9-]*$"))' \
+    "$HAM_RUN_DIR/queue-handoff.json" 2>/dev/null) || ham_close_queue_outcome=queue-handoff-unadmitted
+  if [ "$ham_close_queue_status" -eq 0 ] && [ "$ham_close_queue_outcome" != queue-handoff-admitted ]; then
+    ham_close_queue_status=75
+  fi
+  ham_close_finish "$ham_close_queue_status" "$ham_close_queue_outcome"
+fi
+
 # 4. Bounded exact-head CI wait; a changed head republishes its audit.
 ham_close_before_wait="${POST_REMEDIATION_SHA:-}"
 ham_close_phase_or_stop hammer-merge --wait-ci

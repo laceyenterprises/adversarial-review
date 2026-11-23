@@ -20,7 +20,7 @@ check, label, blocking probe or promotion gate is introduced.
 
 Before deployment or a watcher bounce, inventory both configured and durable
 `queue-v2` lanes, including existing canaries. Production does not install
-`dispatchContext.queueCloser` automatically. Without that composition, **all**
+`dispatchContext.queueCloser.hammerHandoffCommand` automatically. Without it, **all**
 closer remediation on an already migrated lane refuses with
 `queue-closer-composition-unavailable`, including ordinary findings repair that
 previously used a legacy prompt. Install the reviewed composition before the
@@ -32,31 +32,33 @@ Before changing the selector, verify the installed runtime composition:
 
 | Invocation | Queue lane behavior | Legacy/rollback behavior |
 |---|---|---|
-| `maybeDispatchAmaCloser` | Resolve durable route before legacy recovery. A complete handoff observed before the final dispatch recheck suppresses another closer, including after restart. Recheck under the existing per-PR dispatch single-flight after asynchronous reads; a later commit can still race launch. New remediation uses `templates/queue-closer-prompt.md`, with no rendered lease/CI/rebase/merge procedures. | Read-only route preflight avoids lane locks, schema convergence and writer intents on legacy lanes. Existing prompt, dispatch/closer leases, incident repair and merge procedures remain. |
-| Closer completion | `createQueueCloserComposition` wraps the trusted handoff service, confirms the matching committed ack and requires idempotent resource release before returning success. Failed release retries the same ack. | Existing terminal/retry handoff remains; it is not a queue ack. |
+| `maybeDispatchAmaCloser` | Resolve durable route before legacy recovery. A complete handoff observed before the final dispatch recheck suppresses another closer, including after restart. Recheck under the existing per-PR dispatch single-flight after asynchronous reads; a later commit can still race launch. New remediation runs the ordinary hammer (MRQ-21); its close controller stops after publish and the exact-head audit and hands that head off, never reaching the CI wait, predicate or merge. | Read-only route preflight avoids lane locks, schema convergence and writer intents on legacy lanes. Existing prompt, dispatch/closer leases, incident repair and merge procedures remain. |
+| Closer completion | `bin/hammer-queue-handoff.mjs` runs the installed handoff command, which wraps the trusted handoff service through `createQueueCloserComposition` (matching committed ack, then idempotent resource release). The hammer independently confirms the durable receipt (head, launch, review-proof digest) and entry, then records a `superseded` `queue-handoff-admitted` terminal audit. | Existing terminal/retry handoff remains; it is not a queue ack. |
 | Clean daemon and certified closer recovery | Queue admission only. Read the actual stored full receipt/ack before reporting queued; no legacy lease, checks wait or merge click. | Existing daemon/hammer eligibility, reservation, bounded repair and merge paths remain. |
 | Rendered legacy merge command | Existing route/issuance boundary refuses the old writer. Independently running old closers must also be drained, including their publication helpers and requests. | Existing entitled metered command is retained. |
 | Queue owner / subject executor | Existing lane generation, operation intents, shared issuance lock, exact-head checks, expected-head merge and durable delivery remain sole merge execution authority. | Existing transfer/return acknowledgement protocol owns rollback. |
 
-The composition root supplies `dispatchContext.queueCloser` from
-`createQueueCloserComposition({rootDir, handoffService, handoffInstructions, releaseResources})`.
-Migrated launches use the existing `branch-push` / `push` completion contract;
-legacy launches retain `decision-only` / `terminal-audit`.
-`handoffInstructions` names the installed sanctioned tool/surface for that run,
-not an invented transport or a file of self-certified evidence. Its tool must
-invoke this composition's `handoff()` with the dispatch's `routeGeneration`
-and pass its caller's original absolute deadline to the existing bounded handoff service. Submission and resource release hold the existing lane issuance lock; stale
-dispatch generations and rollback refuse submission. Resource release must be
-idempotent and actually release the worker slot and closer lease. Never substitute
-a no-op release. Queue admission callbacks must use the trusted clean/handoff
-services; replies are independently joined to the actual store. Missing
-composition refuses dispatch/enqueue without legacy fallback. These ports do not
-install a production pump, tool endpoint, evidence reader, credentials or service.
-Uncomposed migrated lanes stall through the existing escalation route and
-require reviewed composition before deployment. Queue prompts render once after
-scratch allocation; operator-composed instruction placeholders remain literal.
-Missing prompt inputs return `queue-closer-prompt-input-missing`, release the
-unsubmitted closer lease and remove unused scratch/prompt artifacts.
+The composition root supplies `dispatchContext.queueCloser.hammerHandoffCommand`:
+the installed handoff command's argv, with an absolute `argv[0]` (never a shell
+string or PATH lookup). The dispatcher renders it into the hammer's inputs with
+the route generation. The command receives the hammer's head-bound request path as
+its last argument. It must build the complete schema-version-1 handoff and submit
+it through `createQueueCloserComposition({rootDir, handoffService,
+handoffInstructions, releaseResources}).handoff(input, {routeGeneration, deadline})`,
+then print the acknowledgement JSON on its last stdout line. Its trusted evidence
+adapter must recompute the review-proof digest from the live audit
+(`hammerReviewProof`); the submitter's own claims are never evidence. Migrated and
+legacy launches both use `decision-only` / `terminal-audit`: on a migrated lane
+the terminal audit is the admitted handoff. Submission and resource release hold
+the existing lane issuance lock; stale dispatch generations and rollback refuse
+submission. Resource release must be idempotent and actually release the closer
+resources it names. Never substitute a no-op release. Queue admission callbacks
+must use the trusted clean/handoff services; replies are independently joined to
+the actual store. Missing composition refuses dispatch/enqueue without legacy
+fallback. These ports do not install a production pump, tool endpoint, evidence
+reader, credentials or service. Uncomposed migrated lanes stall through the
+existing escalation route and require reviewed composition before deployment.
+Missing dispatch inputs fail exactly as on a legacy lane.
 
 Legacy preflight reads the selector and, when present, the durable route through
 a read-only SQLite handle. An absent DB/routing schema or a stable legacy route

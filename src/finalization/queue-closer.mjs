@@ -3,7 +3,7 @@ import { createCloserQueueHandoffBoundary } from '../ama/closer-queue-handoff.mj
 // Route-scoped closer retirement. Live composition supplies the sanctioned
 // handoff surface; no new transport, credential source or routing configuration.
 import Database from 'better-sqlite3';
-import { readFileSync, statSync } from 'node:fs';
+import { statSync } from 'node:fs';
 import { join } from 'node:path';
 import { openFinalizationQueueStore } from './queue-store.mjs';
 import { resolveLaneRoute, resolveQueueRoutingStore } from './queue-routing.mjs';
@@ -11,6 +11,7 @@ import { queueWaitMs } from './queue-wait.mjs';
 import { resolveQueueAdmissionAdapters } from './queue-admission.mjs';
 import { resolveQueueHandoffStore } from './queue-handoff-store.mjs';
 import { routeFinalizationWriter } from './queue-routing-boundary.mjs';
+import { parseHammerQueueHandoffCommand } from './hammer-queue-command.mjs';
 
 export function readCompletedQueueHandoff(store, { lane, prNumber, head }) {
   const receipts = resolveQueueHandoffStore(store);
@@ -61,25 +62,14 @@ export async function prepareQueueCloserDispatch({ rootDir, cfg, lane, prNumber,
         const ack = readCompletedQueueHandoff(store, { lane: route.lane, prNumber, head });
         if (ack) return { dispatched: false, skipMergeAgent: true, queued: true,
           reason: 'queue-handoff-acknowledged', acknowledgement: ack };
-        if (typeof composition?.handoffInstructions !== 'string' || !composition.handoffInstructions.trim()
-          || typeof composition.handoff !== 'function') return { ok: false, reason: 'queue-closer-composition-unavailable' };
-        return { executor: 'queue-v2', route, handoffInstructions: composition.handoffInstructions };
+        // MRQ-21: the hammer's close controller delivers its attested-head
+        // handoff through this installed command, which invokes the
+        // composition's handoff service. No command, no queue-lane closer.
+        const handoffCommand = parseHammerQueueHandoffCommand(composition?.hammerHandoffCommand);
+        if (!handoffCommand) return { ok: false, reason: 'queue-closer-composition-unavailable' };
+        return { executor: 'queue-v2', route, handoffCommand };
       } finally { store.close(); }
     } });
-}
-
-export function renderQueueCloserPrompt(values, prepared) {
-  if (prepared?.executor !== 'queue-v2') throw new Error('queue closer route required');
-  const source = readFileSync(new URL('../../templates/queue-closer-prompt.md', import.meta.url), 'utf8');
-  // One substitution pass: operator-composed instructions are never recursively
-  // interpreted as template variables or shell code by this renderer.
-  return source.replace(/<<([A-Z_]+)>>/g, (_match, key) => {
-    const value = { ...values, QUEUE_HANDOFF_INSTRUCTIONS: prepared.handoffInstructions,
-      QUEUE_ROUTE_GENERATION: prepared.route.routeGeneration }[key];
-    if (value == null || value === '') throw Object.assign(new Error(`missing queue closer input: ${key}`),
-      { code: 'QUEUE_CLOSER_INPUT_MISSING' });
-    return String(value);
-  });
 }
 
 // A queue callback reply is not durable admission evidence. Confirm the actual

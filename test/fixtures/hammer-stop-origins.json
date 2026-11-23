@@ -223,6 +223,7 @@
   "terminal-review-issuer-unverifiable": "world",
   "timeline-read-failed": "world",
   "unclassified-merge-failure": "world",
+  "unregistered-stop-code": "infrastructure",
   "update-branch-failed": "closer",
   "validation-command-invalid": "closer",
   "validation-config-failed": "closer",

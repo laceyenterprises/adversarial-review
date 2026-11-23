@@ -150,7 +150,7 @@ function runInitOrAppend(subcommand, argv) {
   const rawAttempt = { ...attemptBase, outcome: values.outcome,
     ...(launchRequestId ? { launchRequestId } : {}) };
   const attempt = values['closure-authority'] === 'ham-terminal-remediation'
-    ? hammerPhaseAttempt(rawAttempt) : rawAttempt;
+    ? hammerPhaseAttempt(rawAttempt, { headSha: values.head, now: values.now }) : rawAttempt;
   const metadata = Object.fromEntries([
     ['closureAuthority', values['closure-authority']],
     ['reviewer', values.reviewer],

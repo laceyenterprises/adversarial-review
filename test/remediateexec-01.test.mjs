@@ -1,7 +1,7 @@
 import './helpers/rate-limit-state-isolation.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { existsSync, mkdtempSync, rmSync, mkdirSync, writeFileSync } from 'node:fs';
+import { cpSync, existsSync, mkdtempSync, rmSync, mkdirSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { execFileSync } from 'node:child_process';
@@ -143,24 +143,72 @@ test('a live closer lease prevents round recovery', async t => {
 const gitEnv = { ...process.env, GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_NOSYSTEM: '1',
   GIT_AUTHOR_NAME: 'Fixture', GIT_AUTHOR_EMAIL: 'fixture@example.invalid',
   GIT_COMMITTER_NAME: 'Fixture', GIT_COMMITTER_EMAIL: 'fixture@example.invalid' };
+const gitIn = work => (...args) => execFileSync('git', ['-C', work, ...args],
+  { env: gitEnv, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
+
+let retainedSeedRoot;
+let retainedSeedHead;
+test.after(() => {
+  if (retainedSeedRoot) rmSync(retainedSeedRoot, { recursive: true, force: true });
+});
+
+function prepareRetainedSeed(makeGit = gitIn) {
+  retainedSeedRoot = mkdtempSync(join(tmpdir(), 'remediateexec-seed-'));
+  try {
+    const work = join(retainedSeedRoot, 'worker'), remote = join(retainedSeedRoot, 'remote.git');
+    mkdirSync(work);
+    const git = makeGit(work);
+    git('init', '-q', '--bare', '-b', 'main', remote);
+    git('init', '-q', '-b', 'main');
+    git('config', 'core.hooksPath', '/dev/null');
+    writeFileSync(join(work, 'base.txt'), 'base\n');
+    git('add', 'base.txt'); git('commit', '-qm', 'base');
+    git('remote', 'add', 'origin', remote); git('push', '-q', 'origin', 'main');
+    git('checkout', '-qb', 'topic');
+    writeFileSync(join(work, 'feature.txt'), 'feature\n');
+    git('add', 'feature.txt'); git('commit', '-qm', 'feature');
+    git('push', '-q', 'origin', 'topic');
+    const head = git('rev-parse', 'HEAD');
+    writeFileSync(join(work, 'fix.txt'), 'fix\n');
+    git('add', 'fix.txt');
+    retainedSeedHead = head;
+  } catch (error) {
+    rmSync(retainedSeedRoot, { recursive: true, force: true });
+    retainedSeedRoot = undefined;
+    retainedSeedHead = undefined;
+    throw error;
+  }
+}
+
+test('partial retained seed setup removes its directory and clears readiness before retry', () => {
+  for (const failAt of ['init', 'push -q origin topic', 'add fix.txt']) {
+    let partialRoot;
+    const failure = new Error(`synthetic seed failure at ${failAt}`);
+    assert.throws(() => prepareRetainedSeed(work => {
+      partialRoot = join(work, '..');
+      return (...args) => {
+        if (args[0] === failAt || args.join(' ') === failAt) throw failure;
+        return HEAD;
+      };
+    }), error => error === failure);
+    assert.equal(existsSync(partialRoot), false);
+    assert.equal(retainedSeedRoot, undefined);
+    assert.equal(retainedSeedHead, undefined);
+  }
+});
+
 function retainedFixture(t) {
   const f = fixture(t);
+  if (!retainedSeedHead) prepareRetainedSeed();
+  // Each case gets independent worktree, index, refs and remote. Production
+  // fetches and pushes run against the copies, including cases that drop refs.
   const work = join(f.rootDir, 'worker'), remote = join(f.rootDir, 'remote.git');
-  mkdirSync(work);
-  const git = (...args) => execFileSync('git', ['-C', work, ...args],
-    { env: gitEnv, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
-  git('init', '-q', '--bare', '-b', 'main', remote);
-  git('init', '-q', '-b', 'main');
-  git('config', 'core.hooksPath', '/dev/null');
-  writeFileSync(join(work, 'base.txt'), 'base\n');
-  git('add', 'base.txt'); git('commit', '-qm', 'base');
-  git('remote', 'add', 'origin', remote); git('push', '-q', 'origin', 'main');
-  git('checkout', '-qb', 'topic');
-  writeFileSync(join(work, 'feature.txt'), 'feature\n');
-  git('add', 'feature.txt'); git('commit', '-qm', 'feature');
-  const head = git('rev-parse', 'HEAD'); git('push', '-q', 'origin', 'topic');
-  writeFileSync(join(work, 'fix.txt'), 'fix\n');
-  git('add', 'fix.txt'); git('commit', '-qm', `repair\n\nWorker-Job-Id: ${f.job.jobId}`);
+  cpSync(join(retainedSeedRoot, 'worker'), work, { recursive: true });
+  cpSync(join(retainedSeedRoot, 'remote.git'), remote, { recursive: true });
+  const git = gitIn(work);
+  git('remote', 'set-url', 'origin', remote);
+  git('commit', '-qm', `repair\n\nWorker-Job-Id: ${f.job.jobId}`);
+  const head = retainedSeedHead;
   const local = git('rev-parse', 'HEAD');
   f.job.revisionRef = head;
   f.job.remediationWorker = { state: 'completed', workspaceDir: work, spawnedAt: AT };

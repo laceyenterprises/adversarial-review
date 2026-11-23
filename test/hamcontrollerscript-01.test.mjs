@@ -91,7 +91,18 @@ case "$(basename "$path")" in
   hammer-validate.mjs)
     if [ "$1" != --check-deferred ]; then log "validate $*"; fi
     if [ "\${FIXTURE_REAL_VALIDATE:-0}" = 1 ]; then exec ${shellQuote(process.execPath)} "$path" "$@"; fi
-    if [ "$1" = --check-deferred ]; then exit 0; fi
+    if [ "$1" = --check-deferred ]; then
+      if [ -n "\${FIXTURE_CHECK_DEFERRED_EXIT:-}" ] && ls "$HAM_RUN_DIR"/validation-deferred-*.json >/dev/null 2>&1; then
+        exit "$FIXTURE_CHECK_DEFERRED_EXIT"
+      fi
+      exit 0
+    fi
+    # MRQ-20: a validator timeout stops the whole controller round once.
+    if [ -n "\${FIXTURE_TIMEOUT_ONCE:-}" ] && [ ! -f "$FIXTURE_TIMEOUT_ONCE" ]; then
+      : > "$FIXTURE_TIMEOUT_ONCE"; log validation-timeout
+      printf '{"validation":"unknown","reason":"absolute-timeout"}' > "$HAM_RUN_DIR/validation-deferred-$(git rev-parse HEAD).json"
+      kill -TERM "$PPID"; exit 124
+    fi
     if [ -n "\${FIXTURE_VALIDATION_ARGV:-}" ]; then
       ${shellQuote(process.execPath)} -e 'require("node:fs").writeFileSync(process.env.FIXTURE_VALIDATION_ARGV, JSON.stringify(process.argv.slice(1)))' -- "$@"
     fi
@@ -401,6 +412,29 @@ test('a different check quoting the Telegram no-verdict line keeps its passing r
   assert.equal(existsSync(join(f.runDir, `validation-deferred-${f.head}.json`)), false);
 });
 
+test('MRQ-20: a CI-authoritative validation timeout gets one fresh controller round that merges', async t => {
+  const f = hammerFixture(t);
+  const result = await f.close({ FIXTURE_NEEDS_REVALIDATION: '1', FIXTURE_TIMEOUT_ONCE: join(f.dir, 'timed-out') });
+  assert.equal(result.status, 0, `${result.stderr}\n${result.stdout}`);
+  assert.equal(result.closeResult.outcome, 'merged');
+  const events = f.events();
+  assert.equal(events.filter(event => event.startsWith('controller-run ')).length, 2, events.join('\n'));
+  assert.equal(events.filter(event => event === 'validation-timeout').length, 1);
+  assert.ok(events.some(event => event.startsWith('gh pr merge --squash --match-head-commit')));
+});
+
+test('MRQ-20: a timeout that cannot defer to CI gets no second controller round', async t => {
+  const f = hammerFixture(t);
+  const result = await f.close({ FIXTURE_NEEDS_REVALIDATION: '1', FIXTURE_TIMEOUT_ONCE: join(f.dir, 'timed-out'),
+    FIXTURE_CHECK_DEFERRED_EXIT: '75' });
+  assert.notEqual(result.status, 0);
+  assert.equal(result.closeResult, null);
+  assert.match(result.stdout, /"outcome":"canonical-validation-deferred"/);
+  const events = f.events();
+  assert.equal(events.filter(event => event.startsWith('controller-run ')).length, 1, events.join('\n'));
+  assert.equal(events.some(event => event.startsWith('gh pr merge')), false);
+});
+
 test('close controller hands off denied validation after one lease yield', async t => {
   const f = mirrorFixture(t, { entries: [['telegram-responder-guard', { local_only: true }]], runs: [] });
   const result = await f.run({ FIXTURE_INSPECTION_DENIED: 'telegram-responder-guard' });
@@ -530,7 +564,9 @@ test('unreadable evidence, changed manifests and the off switch retain local val
       localFailure: 'verify', ...options });
     const result = await f.run(env);
     assert.equal(result.status, 75, result.stderr);
-    assert.equal(result.closeResult.outcome, 'targeted-validation-failed');
+    // MRQ-20: an inconclusive mirror check (exit 75) is UNKNOWN, never a pass;
+    // with no declared required contexts it keeps the canonical deferral.
+    assert.equal(result.closeResult.outcome, 'canonical-validation-deferred');
     assert.equal(result.closeResult.stage, 'local-validation');
     assert.deepEqual(f.local(), ['fixture-command verify']);
     assert.deepEqual(result.closeResult.localValidation[0].checks, [{

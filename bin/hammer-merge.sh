@@ -351,13 +351,19 @@ import { classifyCheckRollup, latestCheckRollupItems } from '<<ROOT_DIR>>/src/ch
 import { readFileSync } from 'node:fs';
 import { closerReviewProof } from '<<ROOT_DIR>>/src/ama/closer-review-proof.mjs';
 import { tenureHeadNeedsReview } from '<<ROOT_DIR>>/src/pr-tenure.mjs';
+import { resolveRequiredCheckContextsFromCfg } from '<<ROOT_DIR>>/src/ama/required-check-contexts.mjs';
+import { readUnknownValidationReceipt, recordedUnknownDefersToCi, unknownValidationCiGate } from '<<ROOT_DIR>>/src/ama/local-validation-unknown.mjs';
 
 const repo = '<<REPO>>';
 const prNumber = Number('<<PR_NUMBER>>');
 const expectedHead = process.env.POST_REMEDIATION_SHA;
 const reviewProofRequired = process.env.HAM_REVIEW_PROOF_REQUIRED === '1';
+// Resolve the same effective policy as bin/ama-check.mjs, including its strict default.
+const cfg = loadEffectiveMergeAuthorityConfig({ rootDir: '<<ROOT_DIR>>' });
+// MRQ-20: a declared required context that has not reported reads PENDING.
+const requiredContexts = resolveRequiredCheckContextsFromCfg(cfg, { repository: repo });
 const rollup = await fetchHammerPr(repo, prNumber, { withReviews: snapshot =>
-  reviewProofRequired && classifyCheckRollup(snapshot.checks || []) === 'SUCCESS'
+  reviewProofRequired && classifyCheckRollup(snapshot.checks || [], { requiredContexts }) === 'SUCCESS'
     && snapshot.state === 'OPEN' && snapshot.headSha === expectedHead,
 });
 const checks = Array.isArray(rollup.checks)
@@ -367,7 +373,7 @@ const checks = Array.isArray(rollup.checks)
     : [];
 // Keep diagnostics and the shell's red/pending decision on the same classifier
 // used by evaluateMergeEligibility's required-checks gate (CIDEDUPE-01).
-const checksConclusion = classifyCheckRollup(checks);
+const checksConclusion = classifyCheckRollup(checks, { requiredContexts });
 const badChecks = latestCheckRollupItems(checks)
   .filter((check) => classifyCheckRollup([check]) !== 'SUCCESS');
 const headMatches = String(rollup.headSha || rollup.headRefOid || '') === expectedHead;
@@ -385,8 +391,6 @@ const open = state === 'OPEN';
 // BEHIND-but-MERGEABLE validated head is eligible instead of forcing a
 // churn-inducing rebase. Fail closed: any value other than '0' keeps the block.
 const requiresUpToDateBranch = process.env.HAM_REQUIRES_UP_TO_DATE !== '0';
-// Resolve the same effective policy as bin/ama-check.mjs, including its strict default.
-const cfg = loadEffectiveMergeAuthorityConfig({ rootDir: '<<ROOT_DIR>>' });
 const primaryChange = checksConclusion === 'SUCCESS' ? await fetchPrimaryChange({ repo, prNumber, headSha: expectedHead, rootDir: '<<ROOT_DIR>>',
   get: createHistoryReader(),
 }) : null;
@@ -410,6 +414,7 @@ const eligibility = evaluateMergeEligibility({
   verdict: 'settled-success',
   leaseHeld: true,
   requiredChecks: checks,
+  requiredCheckContexts: requiredContexts,
   branchProtectionRequired: process.env.HAM_BRANCH_PROTECTION_REQUIRED === 'true',
   mergeable: rollup.mergeable,
   mergeStateStatus: rollup.mergeStateStatus,
@@ -422,6 +427,19 @@ const eligibility = evaluateMergeEligibility({
 if (tenureHeadNeedsReview('<<TENURE_REVIEW_ARG>>', '<<REVIEWED_SHA>>', expectedHead)) {
   eligibility.eligible = false;
   eligibility.reasons.push('tenure-independent-review-required');
+}
+// MRQ-20: an UNKNOWN local validation of this head defers to exact-head CI
+// only with a valid CI-authoritative receipt and declared green contexts.
+// Invalid receipts block independently of CI; valid receipts with pending/red
+// contexts keep the existing ci-not-green wait/repair handling.
+const unknownReceipt = readUnknownValidationReceipt('<<RUN_DIR>>', expectedHead);
+const unknownDefersToCi = recordedUnknownDefersToCi(unknownReceipt, requiredContexts);
+const unknownValidation = !unknownReceipt ? null : unknownDefersToCi
+  ? unknownValidationCiGate({ checks, requiredContexts })
+  : { ok: false, reason: unknownReceipt.reason || 'local-validation-unknown-not-deferrable' };
+if (unknownValidation && !unknownValidation.ok && (!unknownDefersToCi || checksConclusion === 'SUCCESS')) {
+  eligibility.eligible = false;
+  eligibility.reasons.push(unknownValidation.reason);
 }
 const primaryIntent = primaryChange ? checkPrimaryChange(primaryChange, expectedHead, {
   strictNonBlockingRemediation: cfg?.strictNonBlockingRemediation !== false,
@@ -445,6 +463,8 @@ console.log(JSON.stringify({
   mergeStateStatus: rollup.mergeStateStatus || null,
   checksCount: checks.length,
   checksConclusion,
+  requiredContexts,
+  localValidationUnknown: unknownValidation,
   badChecks,
 }, null, 2));
 NODE

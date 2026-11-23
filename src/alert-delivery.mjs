@@ -1534,11 +1534,15 @@ async function deliverAlert(text, {
   // fsImpl supplies token/config reads; virtual token presence is not a receipt.
   const progressStalled = event === 'adversarial_review.pr_progress_stalled';
   const budgetDeficit = event === 'adversarial-github-budget' && payload?.budget && payload?.since;
-  if (event === 'reviewer.model_unavailable' || progressStalled || budgetDeficit) {
-    const family = progressStalled ? 'pr-progress' : budgetDeficit ? 'github-budget' : 'reviewer-model';
+  // MRQ-02: one alert per unregistered closer stop code per UTC day.
+  const stopCodeUnregistered = event === 'ama_closer.stop_code_unregistered' && payload?.code && payload?.day;
+  if (event === 'reviewer.model_unavailable' || progressStalled || budgetDeficit || stopCodeUnregistered) {
+    const family = progressStalled ? 'pr-progress' : budgetDeficit ? 'github-budget'
+      : stopCodeUnregistered ? 'stop-code-unregistered' : 'reviewer-model';
     const identity = progressStalled ? [payload?.repo, payload?.prNumber, payload?.headSha]
       : budgetDeficit ? [payload.budget, payload.since]
-        : [payload?.refusedModel, new Date(now).toISOString().slice(0, 10)];
+        : stopCodeUnregistered ? [payload.code, payload.day]
+          : [payload?.refusedModel, new Date(now).toISOString().slice(0, 10)];
     doc.id = fixedAlertId(family, crypto.createHash('sha256').update(JSON.stringify(identity)).digest('hex'));
     for (const state of ['pending', 'inflight', 'delivered', 'dead-letter']) {
       const existingPath = alertDocPath(rootDir, state, doc.id);

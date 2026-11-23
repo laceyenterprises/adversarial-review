@@ -1185,6 +1185,26 @@ test('REVIEWMODEL-02: model refusal alerts deduplicate across PRs by model and U
   assert.notEqual(otherModel.id, first.id);
 });
 
+test('MRQ-02: unregistered stop-code alerts deduplicate by code and UTC day', async (t) => {
+  const { env, rootDir } = makeEnv();
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  const options = {
+    event: 'ama_closer.stop_code_unregistered', env,
+    now: new Date('2026-10-12T01:00:00Z'),
+    requestText: async () => { throw new Error('synthetic offline transport'); },
+    fsImpl: { readFileSync: () => 'synthetic-token', existsSync: () => true },
+  };
+  const first = await deliverAlert('synthetic stop code', { ...options, payload: { code: 'synthetic-stop', day: '2026-10-12' } });
+  const second = await deliverAlert('synthetic stop code', { ...options, payload: { code: 'synthetic-stop', day: '2026-10-12' } });
+  assert.equal(first.queued, true);
+  assert.equal(second.queued, false);
+  assert.equal(first.id, second.id);
+  const nextDay = await deliverAlert('synthetic stop code', { ...options, payload: { code: 'synthetic-stop', day: '2026-10-13' } });
+  const otherCode = await deliverAlert('synthetic stop code', { ...options, payload: { code: 'other-stop', day: '2026-10-12' } });
+  assert.notEqual(nextDay.id, first.id);
+  assert.notEqual(otherCode.id, first.id);
+});
+
 test('REVIEWMODEL-02: refusal receipt checks use their injected filesystem', async (t) => {
   const { env, rootDir } = makeEnv();
   t.after(() => rmSync(rootDir, { recursive: true, force: true }));

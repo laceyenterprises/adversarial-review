@@ -5572,6 +5572,32 @@
                   },
                   "type": "array"
                 },
+                "required_check_contexts_by_repository": {
+                  "default": [],
+                  "items": {
+                    "additionalProperties": false,
+                    "properties": {
+                      "contexts": {
+                        "items": {
+                          "pattern": "^(?:\\S(?:.*\\S)?)(?![\\s\\S])",
+                          "type": "string"
+                        },
+                        "minItems": 1,
+                        "type": "array"
+                      },
+                      "repository": {
+                        "pattern": "^(?:[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)(?![\\s\\S])",
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "contexts",
+                      "repository"
+                    ],
+                    "type": "object"
+                  },
+                  "type": "array"
+                },
                 "strict_mode": {
                   "default": true,
                   "type": "boolean"

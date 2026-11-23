@@ -12,9 +12,14 @@ initial origin. Colon-suffixed diagnostics usually remain in the optional
 `attempts[].reasonDetail`. Transient classified history stops use registered
 `reason=history-read-failed` and retain their class in `reasonDetail`.
 Permanent classified stops retain their suffix in `reason` for counted world
-routing. Unknown runtime stops retain
-`reason=stop-reason-unregistered` and `stopOrigin=closer`, with the unregistered
+routing. Unknown runtime stops record `reason=unregistered-stop-code` and
+`stopOrigin=infrastructure` (MRQ-02; older attempts retain
+`reason=stop-reason-unregistered` and `stopOrigin=closer`), with the unregistered
 reason preserved in optional `attempts[].originalReason` as well as `reasonDetail`.
+A retryable hammer deferral carries optional `attempts[].continuation`
+(`kind=redrive`, `owner=watcher`, the attempt's `headSha`, `notBefore` ISO time,
+`lease=fresh`): the durable continuation the watcher owns. Readers also accept
+`kind=park` with a non-empty `owner` and `operatorAction`.
 `recordHammerEarlyFailure` checks failure-code syntax (`^[a-z][a-z0-9:-]*$`)
 before recording; it preserves the accepted value without normalization.
 Registered conflict-resolver failures are world-origin terminal failures,

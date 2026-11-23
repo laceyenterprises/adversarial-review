@@ -1155,7 +1155,12 @@ If an unbound reservation without verified publication
 still has `ownerState: unknown` when observed at least ten minutes after
 reservation, `repair-owner-unproven` names the operator in next-action and TTM
 and pages once per reservation. The page names the blocked head and
-reservation. The dispatch owner must establish the original launch and
+reservation, and the operator action (REPAIROWNERSCOPE-02). With a recorded
+scope, the action is to grant the review app a dispatch read for that project
+and the PR's repository (`operator-action:grant-owner-dispatch-read`). Without
+one, the operator finds the owner launch by its idempotency key and grants that
+launch's pair (`operator-action:establish-owner-dispatch-scope`), or retires a
+fenced legacy or CWP reservation as below. The dispatch owner must establish the original launch and
 complete retry chain, or independently establish canonical absence and fence
 the original submitter through the authorized recovery path. The operator can
 separately
@@ -6229,8 +6234,21 @@ with the primary-change gate.
 HAMSELFERRORS-01 generalizes this to the **world-fact stop rule**: the closer
 corrects its own mistakes once; only world facts stop closure. The central
 `src/ama/hammer-stop-origin.mjs` registry covers helper usage, validation,
-controller setup, phase failures and edit-plan diagnostics. Unknown stop codes
-defer as `stop-reason-unregistered`; they never silently become terminal.
+controller setup, phase failures and edit-plan diagnostics. Registration
+documents a code's origin. MRQ-02: an unregistered but well-formed stop code is
+an `infrastructure` stop. The terminal audit records it as the registered
+`unregistered-stop-code` deferral (the original code in `originalReason` and
+`reasonDetail`), retried through the same owned retry as every other
+infrastructure stop, with no extra credit. `hammerStopOrigin()` emits one
+`ama_closer.stop_code_unregistered` alert per code per UTC day. Its in-process
+deduplication cache clears when the UTC day changes, retaining only that day's
+keys; the alert outbox preserves durable `(code, day)` deduplication. Only a
+malformed reason throws. New attempts never record `stop-reason-unregistered`.
+An unregistered code seen only at launch end keeps the bounded, counted exit
+refund. Each retryable hammer deferral names its continuation:
+`attempts[].continuation = {kind: "redrive", owner: "watcher", headSha,
+notBefore, lease: "fresh"}`, a re-drive on the same head. In-run retries and
+world refusals name none.
 Helper usage errors request correction with exit 21 and printed canonical usage.
 The dispute helper checks required arguments before inspecting database ownership;
 valid invocations still require the canonical owner before opening SQLite.
@@ -6324,6 +6342,41 @@ cases do not establish the unavailable process-inspection verdict. A recorded
 UNKNOWN handoff takes precedence over own-package import-fault fallback.
 Operator cancellation retains its own outcome even when cleanup returns 125;
 it does not become a canonical-validation deferral.
+
+**UNKNOWN defers to exact-head CI (MRQ-20).** A host-local battery that timed
+out (absolute, idle, check or SIGALRM deadline), was killed for load (the
+mirror's own budget stop, exit 75, or a signal the validator did not send), or
+was denied process inspection has no verdict. When the repository declares
+required contexts, that UNKNOWN does not block: the receipt records
+`ciAuthoritative: true` and the declared `requiredContexts`, no early-failure
+audit is written, and the validator exits 0 without claiming a pass
+(`local-validation-unknown-github-required-gate-authoritative`). A timeout
+also stops the controller round, so `hammer-close.sh` starts one fresh round;
+its validator reuses the receipt instead of re-running the battery. The
+hammer's exact-head gate then merges only when every declared context has
+reported and is green on that head; red, pending or absent contexts block as
+before (`local-validation-unknown-required-contexts-not-green` or
+`ci-not-green`). Without declared contexts, a recorded local failure before
+the stop (a mirror check with `result: fail` or a TAP `not ok` line), or
+unconfirmed drain after a finished battery, the existing deferral above still
+applies. A genuine local failure still blocks and the hammer remediates it.
+The merge gate revalidates any existing exact-head deferral receipt before
+consulting CI: `ciAuthoritative` must be explicitly true, the reason must
+permit deferral, no local failure may have been observed, and current required
+contexts must be non-empty. Unreadable, legacy or demoted receipts continue
+blocking even when GitHub CI is green.
+Declare contexts per repository in
+`roles.adversarial.merge_authority.required_check_contexts_by_repository`
+(`- repository: owner/name` with `contexts: [...]`). `required_check_contexts`
+applies to every repository, so a context that only one repository runs
+belongs in the per-repository list. Both lists also make an absent context
+read PENDING at the hammer gate and in the queue-v2 required set. The daemon
+and closer read only the global list until they are given the repository.
+Queue-v2 admits a handoff whose trusted local-validation read is
+`result: unknown` only with `ciAuthoritative: true` and
+`localFailureObserved !== true`, even if that read also claims `ok: true`;
+its final merge gate requires the same declared, green
+contexts and never accepts the configured no-CI proof for it.
 
 The validator records the deferred audit and `last-phase` receipt non-finally.
 The closer repeats the audit helper without `--final` and ends the run; no

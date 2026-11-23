@@ -31,6 +31,32 @@ export function repairOwnerProofOverdue(epoch) {
     && Date.parse(epoch.ownerObservedAt) - Date.parse(epoch.reservedAt) >= REPAIR_ABSENCE_ESCALATE_MS);
 }
 
+// REPAIROWNERSCOPE-02: an overdue unknown owner names what releases it. A
+// recorded scope names the exact (project, repository) read the app lacks. An
+// unrecorded scope means the owner launch is unreadable under any granted
+// project, so the operator must find that launch's project. A scope is never
+// taken from any field other than the owner record's own project: the producer
+// authorizes a scoped read only on that value, so any other source would move
+// the reservation onto a read that can never match.
+export function repairOwnerOperatorAction(epoch) {
+  if (!repairOwnerProofOverdue(epoch)) return null;
+  return Object.hasOwn(epoch, 'dispatchProjectRef') && validProject(epoch.dispatchProjectRef)
+    ? { action: 'grant-owner-dispatch-read', scope: 'recorded', project: epoch.dispatchProjectRef }
+    : { action: 'establish-owner-dispatch-scope', scope: 'unrecorded' };
+}
+
+function repairOwnerOperatorText(epoch, repo) {
+  const action = repairOwnerOperatorAction(epoch);
+  if (action?.scope === 'recorded') {
+    return `Operator action: grant the review app a dispatch read for project ${action.project} `
+      + `and repository ${repo}; the owner then resolves on the next pass and a terminal owner releases review.`;
+  }
+  return 'Operator action: the reservation records no dispatch scope and the owner launch is not readable. '
+    + 'Find the owner launch by its idempotency key and grant the review app a dispatch read for that '
+    + "launch's project and repository; the scope is then recorded once. A fenced legacy or CWP conflict "
+    + 'reservation can instead be retired with bin/retire-legacy-repair.mjs.';
+}
+
 export function repairOperatorHoldReason(epoch) {
   if (!epoch?.id || epoch.reviewHead || epoch.terminalAt) return null;
   if (epoch.ownerState === 'absent-unfenced') return 'repair-absent-unfenced';
@@ -252,7 +278,8 @@ export async function reconcileRepairOwner({ rootDir, repo, prNumber, headSha, n
     await observeWait({ rootDir, repo, prNumber, headSha: `${reconciled.baseHead || headSha}:${reconciled.id}`,
       waitClass: 'repair-owner-unproven', immediate: true, now,
       reason: `Repair reservation ${reconciled.id} blocks review of ${headSha.toLowerCase()}. ` +
-        'Dispatch ownership is unproven. Establish launch and retry evidence or fence the original submitter through authorized recovery.' });
+        'Dispatch ownership is unproven. Establish launch and retry evidence or fence the original submitter through authorized recovery. '
+        + repairOwnerOperatorText(reconciled, repo) });
   }
   return reconciled || (includeReviewedHead ? repairEpochForHead(rootDir, { repo, prNumber }, headSha) : null);
 }

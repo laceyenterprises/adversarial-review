@@ -1109,6 +1109,18 @@ uses the existing bounded CI-regression requeue and retry accounting, with the
 shared decision in retry metadata. Deadlines report through the existing
 closure-wait/shadow delivery; expiry grants no refusal or extra work.
 
+`completion.publishedCiObservation` is optional at job and round level. It
+records the independently proved publication `headSha`, the closeout probe
+`state`, and `pendingChecks` identities (name, state, workflow and details URL
+when returned by an exact-head read). `reportedHttpStatuses` preserves the
+worker's historical watch errors separately from the managed probe's
+`readFailure`. Pending and unknown states name `observer: "watcher"`. An
+unresolved permission or policy denial names `recoveryOwner: "operator"`.
+The immutable reply retains check names and run IDs that the worker observed
+before an unreadable probe. The Git replay proof and the round's
+`publishedHeadSha` retain source evidence independently of these observations.
+The shared `reReview.nextAction` still drives the head-bound handoff.
+
 `completion.pendingCiOnly` remains reply-normalization evidence. It cannot
 substitute for independent worker push proof or waive an execution gate.
 REMREPORTHUMAN-01 also accepts an explicit completed-remediation summary with

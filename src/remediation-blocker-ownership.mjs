@@ -1,5 +1,23 @@
 import { isDeclaredOperationalBlockerCode } from './kernel/remediation-reply.mjs';
 
+// Historical workers used auth-failure for both reads and pushes. Only the
+// explicit CI-watch failure can leave the publication recovery path.
+export function reportedCiReadFailure(entry) {
+  if (entry?.title?.toLowerCase() !== 'auth-failure' || entry.kind !== undefined
+    || (entry.code && entry.code !== 'auth-failure') || entry.commitSha || entry.expectedRemoteSha
+    || entry.needsHumanInput) return null;
+  const match = /^(?:the )?(?:bounded )?(?:pr-head )?ci (?:watch|read) (?:ended|failed) with HTTP (401|403)(?: after its pending observations)?\.?$/i
+    .exec(String(entry.finding || '').trim());
+  return match ? Number(match[1]) : null;
+}
+
+export function reportsOnlyCiObservation(entries) {
+  return entries.length > 0 && entries.every(entry => reportedCiReadFailure(entry)
+    || (!isDeclaredOperationalBlockerCode(entry) && !entry.needsHumanInput
+      && (entry.kind === 'pending-ci' || (entry.kind === undefined
+        && /^(?:pr-head[ -])?ci[ -]pending$|^pending[ -]ci$/i.test(entry.title || '')))));
+}
+
 // Presentation and completion routing share this conservative classification.
 // Unknown blockers still need a person; worker text never grants merge authority.
 export function operationalBlockerOwner(entry) {

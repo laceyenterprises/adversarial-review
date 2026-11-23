@@ -1582,6 +1582,13 @@ That conservatism is intentional. A completed comment-only final round with
 with an error before applying no-progress or round-cap stops. The job stays in
 `completed/` with completed start/result edges for strict hammer provenance.
 
+A proven final publication with only CI observation debt takes the completed
+transition even when the worker's check watch ends in HTTP 401 or the
+reconciler cannot read the checks. The completed edge and original reply
+remain durable. The watcher owns the exact-head check observation, and a
+permission or policy denial with unknown checks names the operator for
+recovery. An unrelated check head cannot supply this handoff.
+
 If the flag is true, reconcile still runs the branch-contamination gate before resetting `reviews.db` back to `pending`. A contaminated branch does **not** produce a synthetic stop; it moves to durable `failed/` with `failure.code = "branch-contamination"` so operators have an audit trail and a retryable terminal record after they clean the branch.
 
 Legacy durable jobs created before `baseBranch` was persisted are hydrated from GitHub before any worker prompt or reconcile audit uses the branch. If GitHub cannot prove the real PR base, the job fails with `base-branch-resolution-failed` rather than rebasing or auditing against `main` by default.

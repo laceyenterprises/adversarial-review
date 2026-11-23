@@ -2626,6 +2626,10 @@ the watcher holds admission until green CI or requeues remediation on red CI,
 including recovered publication whose CI is already red. Proven publications
 delegate failed-CI retries to watcher admission; in-job retries cover unproven heads.
 Final pushed heads retain their existing hammer observer and suppression.
+A proven final publication remains a completed source round when the
+worker's bounded CI watch ends with pending checks or read-only auth failure.
+The watcher retains exact-head CI observation. An unresolved permission or
+policy denial names the operator for recovery.
 A proven final push goes to hammer after settlement or as failed-CI repair. Unproven heads retain exact-head review. Verdicts, round/retry budgets,
 delivery claims, authenticated cancellation and execution safety remain intact.
 The handoff smoke checks pending-to-hammer redecision; scoped coverage is

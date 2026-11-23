@@ -4,7 +4,8 @@ import { resolveRequiredCheckContextsFromCfg } from './ama/required-check-contex
 import { resolveGateStatusContext } from './adversarial-gate-context.mjs';
 import { checkItemState, latestCheckRollupItems, summarizeChecksConclusion } from './checks-summary.mjs';
 import { checkInfrastructureReason, checkSteps, hasMissingActionsEvidence, infrastructureEvidencePending, enrichCiInfrastructureEvidence, infrastructureOnlyFailures } from './ci-infrastructure.mjs';
-import { execGhWithRetry } from './gh-cli.mjs';
+import { execGhWithRetry, isGhAuthFailure } from './gh-cli.mjs';
+import { isGitHubRateLimitError } from './rate-limit-throttle.mjs';
 
 const execFileAsync = promisify(execFile);
 
@@ -18,6 +19,19 @@ const PENDING_CHECK_STATES = new Set([
   'WAITING',
   'REQUESTED',
 ]);
+
+export function ciReadFailureKind(error) {
+  if (typeof error === 'string') error = { message: error };
+  if (isGitHubRateLimitError(error)) return null;
+  if (/\bHTTP\s*403\b|\b(?:permission denied|resource not accessible by integration)\b/i
+    .test([error?.stderr, error?.message].filter(Boolean).join('\n'))) {
+    return 'permission-or-policy';
+  }
+  if (error?.authOutage || isGhAuthFailure(error)) {
+    return 'authentication';
+  }
+  return null;
+}
 
 function ownGateContexts(env = process.env) {
   const contexts = new Set([DEFAULT_ADVERSARIAL_GATE_CONTEXT.toLowerCase()]);
@@ -147,6 +161,7 @@ async function inspectRemediationCiRegression({
       totalExternalChecks: 0,
       failedChecks: [],
       pendingChecks: [],
+      readFailure: ciReadFailureKind(err),
       error: err?.message || String(err),
     };
   }
@@ -161,7 +176,7 @@ async function inspectRemediationCiRegression({
     && hasMissingActionsEvidence(summary.failedChecks, repo)) return {
     ...summary, state: 'infrastructure', headSha: payload.headSha, infrastructureEvidencePending: true,
   };
-  if (!summary.rollupKnown) {
+  if (!summary.rollupKnown || summary.conclusion == null) {
     return {
       state: 'unknown',
       headSha: payload.headSha,

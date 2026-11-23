@@ -14,7 +14,7 @@ import { readDispatchStatus } from './producer-contracts/launch-status.mjs';
 import { findCommittedUnpublishedWork } from './remediation-unpublished.mjs';
 import { remediationCloseout, closeoutRereview, refusedCloseout, buildRemediationCompletionMetadata } from './remediation-closeout.mjs';
 import { remediationReviewRequest } from './explicit-review-intent.mjs';
-import { reportsCompletedPipelineWait } from './remediation-blocker-ownership.mjs';
+import { reportedCiReadFailure, reportsCompletedPipelineWait } from './remediation-blocker-ownership.mjs';
 import { guardStackedBase } from './ama/stacked-base.mjs';
 import { logCodexWorkerDispatch } from './codex-account-routing.mjs';
 import { resolveInitialRemediatorRouting, DEFAULT_REMEDIATION_WORKER_CLASS, defaultRemediatorWorkerClassFromEnv, resolveRoleRegistryRemediator, pickRemediationWorkerClass, resolveReconcileWorkerClass } from './remediation-worker-routing.mjs';
@@ -2342,9 +2342,13 @@ async function reconcileFollowUpJobWithinRepositoryCycle({
         });
       }
 
-      if (!rereview.requested && findGithubAuthOperationalBlocker(parsedReply)) {
+      // The publish recovery path can issue a ref update. A read-only watch
+      // failure belongs to the CI observer even if source proof later fails.
+      const publicationBlockerReply = { ...parsedReply,
+        operationalBlockers: (parsedReply.operationalBlockers || []).filter(entry => !reportedCiReadFailure(entry)) };
+      if (!rereview.requested && findGithubAuthOperationalBlocker(publicationBlockerReply)) {
         const recovery = await recoverGithubAuthOperationalBlocker({
-          reply: parsedReply,
+          reply: publicationBlockerReply,
           hqRoot: resolveHqRoot(process.env),
           workspaceDir: paths.workspaceDir,
           job,
@@ -2409,7 +2413,8 @@ async function reconcileFollowUpJobWithinRepositoryCycle({
         if (held) return held;
       }
       closeout = remediationCloseout({ rootDir, job, completedAt, lifecycle: completionLifecycle,
-        headSha: finalFixAll ? completionLifecycle.headSha : closeoutCiGate.headSha || completionLifecycle?.headSha || job.revisionRef,
+        headSha: finalRound.completionFields.publishedCiObservation?.headSha
+          || (finalFixAll ? completionLifecycle.headSha : closeoutCiGate.headSha || completionLifecycle?.headSha || job.revisionRef),
         workerPushedHeadSha: finalFixAll || job.finalRound === 'comment-only'
           ? finalRound.workerPushedHeadSha : workerPublishedHead?.headSha, ciGate: closeoutCiGate });
       rereview = closeoutRereview(closeout, parsedReply?.reReview?.reason);
@@ -2520,7 +2525,7 @@ async function reconcileFollowUpJobWithinRepositoryCycle({
       const projectedStopJob = {
         ...job,
         ...(unpublishedWork ? { unpublishedWork } : {}),
-        ...(finalFixAll ? { completion: completionMetadata } : {}),
+        ...((finalFixAll || completionMetadata.publishedCiObservation) ? { completion: completionMetadata } : {}),
         status: 'stopped',
         remediationPlan: {
           ...(job.remediationPlan || {}),
@@ -2588,6 +2593,7 @@ async function reconcileFollowUpJobWithinRepositoryCycle({
       const stopReasonText = `Worker requested re-review but the watcher refused the reset: ${blockedReason}. The PR's existing adversarial review verdict will not be replaced; human intervention required.`;
       const projectedStopJob = {
         ...job,
+        ...(completionMetadata.publishedCiObservation ? { completion: completionMetadata } : {}),
         status: 'stopped',
         remediationPlan: {
           ...(job.remediationPlan || {}),
@@ -2638,7 +2644,7 @@ async function reconcileFollowUpJobWithinRepositoryCycle({
     }
 
     const { commentDelivery: completedDelivery } = buildReconcileCommentDelivery({
-      job, worker, action: 'completed',
+      job: { ...job, completion: completionMetadata }, worker, action: 'completed',
       reply: parsedReply, reReview: rereview, now,
     });
     // The daemon observes the resulting head; worker replies cannot attest it.
@@ -2650,6 +2656,11 @@ async function reconcileFollowUpJobWithinRepositoryCycle({
       jobPath,
       completedAt,
       resultingHeadSha: closeout?.decision.head || (completionLifecycle?.source === 'live' ? completionLifecycle.headSha || null : null),
+      ...(completionMetadata.publishedCiObservation && { publishedRound: {
+        round: job.remediationPlan.currentRound,
+        startHeadSha: job.remediationPlan.rounds?.find(entry => entry.round === job.remediationPlan.currentRound)?.startHeadSha
+          || job.revisionRef,
+      } }),
       remediationWorker: {
         ...workerState,
         state: 'completed',

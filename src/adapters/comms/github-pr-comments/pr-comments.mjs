@@ -631,6 +631,10 @@ function buildRemediationOutcomeCommentBody({
   });
   const lines = [];
   const successor = (reReview || job?.reReview)?.nextAction;
+  const ciObservation = job?.completion?.publishedCiObservation;
+  const publishedCiHead = /^[a-f0-9]{40}$/i.test(ciObservation?.headSha)
+    && ciObservation.headSha === job.completion.workerPushedHeadSha ? ciObservation.headSha : null;
+  const showPublishedCi = publishedCiHead && action === 'completed';
 
   // Marker first so a substring search hits the smallest possible
   // span at the top of the body. HTML comments don't render in
@@ -652,6 +656,16 @@ function buildRemediationOutcomeCommentBody({
 
   if (action === 'refunded') {
     lines.push(`**Outcome:** ${sanitizeFailureText(failure?.message || 'not charged: infrastructure failure')}. Queued once more.`);
+  } else if (showPublishedCi) {
+    lines.push(`**Outcome:** source published at \`${publishedCiHead}\`.`);
+    if (ciObservation.state === 'pending') lines.push('Required checks were still pending.');
+    else if (ciObservation.state === 'unknown') lines.push('Required checks could not be verified.');
+    else if (ciObservation.state === 'failed') lines.push('The exact-head CI observation reported a failed check.');
+    if (ciObservation.recoveryOwner === 'operator') {
+      lines.push('The operator owns permission or policy recovery. The watcher requires a fresh authorized read of this head.');
+    } else if (successor?.action === 'wait-for-CI' && successor.actor === 'ci') {
+      lines.push('The watcher owns exact-head CI observation and re-evaluates closure when checks settle.');
+    }
   } else if (action === 'completed' && successor
     && !(successor.action === 'review' && reReview?.requested)
     && !(successor.action === 'wait-for-CI' && job?.completion?.pendingCiOnly === true)) {
@@ -683,6 +697,7 @@ function buildRemediationOutcomeCommentBody({
   } else if (action === 'stopped') {
     const stopCode = job?.remediationPlan?.stop?.code || 'no-progress';
     lines.push(`**Outcome:** stopped (\`${stopCode}\`).`);
+    if (publishedCiHead) lines.push(`Source was published at \`${publishedCiHead}\`.`);
     if (stopCode === 'committed-unpublished') {
       lines.push(`Job \`${job.jobId}\` retained local commit \`${job.unpublishedWork?.commitSha || 'unknown'}\`; publication is pending.`);
     }
@@ -818,7 +833,7 @@ function buildRemediationOutcomeCommentBody({
     }
   }
 
-  if (action === 'completed') {
+  if (action === 'completed' && !showPublishedCi) {
     for (const owner of classifyRemediationBlockers(reply).pipelineOwners) {
       if (finalFixAll && !(owner === 'CI' && successor?.actor === 'ci')) continue;
       lines.push('');
@@ -902,10 +917,10 @@ function buildRemediationOutcomeCommentBody({
   }
 
   if (reply?.operationalBlockers?.length) {
-    const blockers = formatBlockersList(reply.operationalBlockers, '', { operational: true });
+    const blockers = formatBlockersList(reply.operationalBlockers, '', { operational: !showPublishedCi });
     if (blockers) {
       lines.push('');
-      lines.push('## Operational blockers');
+      lines.push(showPublishedCi ? '## Worker CI observations' : '## Operational blockers');
       lines.push('');
       lines.push(blockers);
     }

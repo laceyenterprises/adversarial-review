@@ -38,6 +38,17 @@ admission path.
 The comment identifies the final fix-all round and reports the PR-wide spend
 alongside the ordinary remediation budget.
 
+For a final remediation with independently proven publication, a worker's
+pending-check report or read-only CI watch failure can complete the source
+round. The watcher observes the exact published head through its existing
+managed read path. A worker HTTP 401 alone does not require intervention.
+The existing read helper can recover a rejected credential within its managed
+retry allowance. A permission or policy denial with no authorized observation
+names the operator as recovery owner and keeps CI unknown until a fresh
+authorized read. The worker's original check names and run IDs stay with its
+reply. Use the completed job's `completion.publishedCiObservation` and
+`reReview.nextAction` to identify the head, observation and successor.
+
 When publication is unproven and CI has failed, an active non-final job retains
 its existing retry ownership, including legacy jobs without a review head.
 Reconciliation requeues that job instead of completing its owner prematurely.

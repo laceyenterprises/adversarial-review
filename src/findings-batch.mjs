@@ -1,12 +1,13 @@
 import { createHash } from 'node:crypto';
 import { execFile } from 'node:child_process';
-import { chmodSync, closeSync, existsSync, mkdirSync, openSync, readFileSync, statSync, writeFileSync } from 'node:fs';
+import { chmodSync, closeSync, existsSync, fstatSync, mkdirSync, openSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { isAbsolute, join } from 'node:path';
+import { setTimeout as delay } from 'node:timers/promises';
 import { promisify } from 'node:util';
 import { DEFAULT_REMEDIATION_WORKER_CLASS, pickRemediationWorkerClass } from './remediation-worker-routing.mjs';
 import { isGrokRemediationWorkerClass } from './remediation-worker-class.mjs';
 import { parseDispatchJsonOutput, readDispatchReceipt, parseHqDispatchStatus } from './producer-contracts/dispatch-receipt.mjs';
-import { execGhWithRetry } from './gh-cli.mjs';
+import { execGhWithRetry, isTransientGhError } from './gh-cli.mjs';
 import { resolveHqRoot } from './hq-root.mjs';
 import { fleetStopReason } from './fleet-stop.mjs';
 import fsExt from 'fs-ext';
@@ -32,13 +33,17 @@ const dispatchTimeoutMs = () => loadAwareTimeoutMs(900_000, { maxMs: Infinity })
 // Read-only dispatch probes use the same nominal as hammer launch reads.
 const dispatchProbeTimeoutMs = () => loadAwareTimeoutMs(30_000);
 
+class PublicationReadError extends Error {}
+
 function publicationProbeError(error, operation, timeoutMs, fallback = error.message) {
   const outputExceeded = error.code === 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER';
   const timedOut = error.killed || error.timedOut || error.code === 'ETIMEDOUT';
   const detail = outputExceeded ? `${operation} output exceeded limit`
     : timedOut ? `${operation} timed out after ${timeoutMs} ms`
     : error.signal ? `${operation} terminated` : null;
-  return Object.assign(Error(detail || fallback, { cause: error }), {
+  const ErrorType = !outputExceeded && (timedOut || error.signal || isTransientGhError(error))
+    ? PublicationReadError : Error;
+  return Object.assign(new ErrorType(detail || fallback, { cause: error }), {
     stderr: error.stderr,
     // Keep termination evidence ahead of stderr/command echoes in the row and log.
     probeFailureDetail: detail ? `${detail}${error.signal ? ` (signal ${error.signal})` : ''}` : null,
@@ -50,6 +55,23 @@ async function fetchFindingBatchPr(repo, prNumber, { execFileImpl, env, logger }
     args: ['pr', 'view', String(prNumber), '--repo', repo, '--json', 'state,mergedAt,body,headRefOid'],
     timeoutMs: 15_000 });
   return JSON.parse(stdout);
+}
+
+async function readPublicationEvidence(reader, args, { numberedPr = false } = {}) {
+  try {
+    return await reader(...args);
+  } catch (error) {
+    const detail = error?.stderr || error?.message || String(error);
+    if (numberedPr && /Could not resolve to a PullRequest with the number of \d+.*\(repository\.pullRequest\)/i.test(detail)) {
+      throw Error('batch-pr-not-found', { cause: error });
+    }
+    // The GitHub CLI transport already backs off on transient errors. If its
+    // budget is exhausted, keep custody for the next collection pass.
+    if (isTransientGhError(error) || error?.timedOut || error?.killed || error?.signal) {
+      throw new PublicationReadError(detail, { cause: error });
+    }
+    throw error;
+  }
 }
 
 function hasBatchMarker(body, batchId) {
@@ -174,7 +196,8 @@ ${batch.area === '_simplicity' ? 'Work only on the cited simplicity alternatives
 Drop stale findings and noise with no cited line or behaviour (REVIEWEVIDENCE-01), explaining each drop.
 For dropped findings, reason MUST be one of these codes followed by a colon and a concrete justification line:
 stale-code-changed, already-fixed-in-<positive PR number>, not-reproducible, out-of-scope-with-ticket, false-positive.
-For already-fixed-in-<pr>, cite the merged fix PR. For out-of-scope-with-ticket, cite the follow-up ticket.
+For already-fixed-in-<pr>, cite the merged fix PR with its repository and explain the current-main evidence.
+For out-of-scope-with-ticket, cite the follow-up ticket.
 Never drop an item merely because this batch ran out of time; leave the batch unresolved if work remains.
 Only apply findings that are still applicable on current origin/main. A prior real grade does not prove current applicability.
 Prepare valid findings together on this batch's branch for one PR through normal review.
@@ -189,7 +212,8 @@ Apply each only if it reduces net lines or runtime cost
 without changing behavior; otherwise decline it. Advice alone never changes a review verdict or requests a remediation round.
 For every noteId, record simplicityNoteApplied as true or false and a one-line reason in simplicityNotes.
 Prepare applied advice on the same pushed branch as any applied findings for the single follow-up PR.
-` : ''}Write the complete outcome JSON atomically with group-readable permissions (0664) to ${JSON.stringify(outputPath)} before ending.
+` : ''}Write the complete outcome JSON to a temporary file in the same directory, chmod it to 0664, and rename
+it over ${JSON.stringify(outputPath)} before ending. Do not write directly to the final path.
 Schema: {"batchId":"${batch.batch_id}","prNumber":null,"headSha":null,
 "findings":[{"findingId":"<manifest id>","outcome":"applied or dropped","reason":"for applied: specific evidence and action; for dropped: code: justification"}]${notes.length ? ',\n"simplicityNotes":[{"noteId":"<advisory id>","simplicityNoteApplied":false,"reason":"one-line reason"}]' : ''}}.
 Include every manifest ID exactly once. When any finding or advisory is applied, leave prNumber null and set
@@ -234,7 +258,7 @@ function validateBatchOutcomes(db, batch, result) {
   const outcomes = result.simplicityNotes ?? [];
   if (!Array.isArray(outcomes) || outcomes.length !== noteIds.size) throw Error('invalid-advisory-manifest');
   const simplicityNotes = outcomes.map(n => {
-    if (!noteIds.delete(n.noteId) || typeof n.simplicityNoteApplied !== 'boolean'
+    if (!noteIds.delete(n?.noteId) || typeof n.simplicityNoteApplied !== 'boolean'
       || typeof n.reason !== 'string' || !n.reason.trim()) {
       throw Error('invalid-advisory-outcome');
     }
@@ -302,18 +326,13 @@ export function releaseFindingBatch(db, batch, reason, { maxAttempts = FINDING_B
 // Validate the entire manifest before writing any outcome. A worker report alone
 // never proves application: the batch PR marker and pipeline state must agree.
 // Normal review can rebase its commits; this record grants no merge authority.
-export function settleFindingBatch(db, batch, result, pr = null, dropPrs = {}) {
+export function settleFindingBatch(db, batch, result, pr = null) {
   return db.transaction(() => {
     const stored = db.prepare('SELECT completed_at,released_at FROM finding_batches WHERE batch_id=?').get(batch.batch_id);
     if (stored?.completed_at) return true;
     // A concurrent collector released it; its findings belong to the queue now.
     if (stored?.released_at) throw Error('batch-released');
     const { findings, requeue, simplicityNotes, applied } = validateBatchOutcomes(db, batch, result);
-    for (const f of findings) {
-      const fixedBy = f.outcome === 'dropped' && /^already-fixed-in-([1-9]\d*):/.exec(f.reason);
-      if (fixedBy && String(dropPrs[fixedBy[1]]?.state).toUpperCase() !== 'MERGED'
-        && !dropPrs[fixedBy[1]]?.mergedAt) throw Error('batch-drop-pr-unverified');
-    }
     if (applied) {
       if (!Number.isSafeInteger(result.prNumber) || result.prNumber < 1 || !/^[a-f0-9]{40}$/i.test(result.headSha || '')
         || !hasBatchMarker(pr?.body, batch.batch_id)) {
@@ -424,7 +443,7 @@ async function fetchFindingBatchPublication(repo, branch, { execFileImpl, env, l
   const run = async args => JSON.parse((await execGhWithRetry({ execFileImpl, env, log: logger,
     args, timeoutMs: 15_000 })).stdout);
   const prs = await run(['pr', 'list', '--repo', repo, '--head', branch, '--state', 'all', '--limit', '100',
-    '--json', 'number,state,mergedAt,body,headRefOid,headRefName,isCrossRepository']);
+    '--json', 'number,headRefOid,body,headRefName,isCrossRepository']);
   // A deleted branch is normal after merge; PR recovery must precede ref lookup.
   if (prs.length) return { prs };
   const refPath = branch.split('/').map(encodeURIComponent).join('/');
@@ -439,14 +458,55 @@ Use normal review through hq pr open --spec-ref none for exactly one PR carrying
 Finding-Batch: ${batch.batch_id}
 First look for an existing PR on this branch, including closed and merged PRs. Reuse it; never open a second PR.
 Do not reopen a closed PR or merge anything. Preserve every finding/advisory outcome and reason.
-Update only prNumber and headSha in the outcomes file to the published PR number and head, atomically with
-group-readable permissions (0664). Do not commit the artifact. If publication fails, leave the batch unresolved.
+Update only prNumber and headSha to the published PR number and head in ${batch.repo}. Write the complete JSON to a
+temporary file in the same directory, chmod it to 0664, and rename it over the outcomes file before ending.
+Do not commit the artifact. If publication fails, leave the batch unresolved.
 `;
 }
 
-async function publishFindingBatch({ db, batch, result, dir, outputPath, env, rootDir,
-  execFileImpl, fetchPublication, fetchPr, readLaunches, logger, now, publishReceiptGraceMs }) {
-  validateBatchOutcomes(db, batch, result);
+async function readFindingBatchPreparation(batch, { execFileImpl, env, timeoutMs }) {
+  let stdout;
+  try {
+    ({ stdout } = await execFileImpl(env.HQ_BIN || 'hq',
+      ['dispatch', 'status', batch.launch_id, '--json', '--root', resolveHqRoot(env)],
+      { env, timeout: timeoutMs, maxBuffer: 1024 * 1024 }));
+  } catch (error) { throw publicationProbeError(error, 'hq dispatch status', timeoutMs); }
+  let status;
+  try { status = parseHqDispatchStatus(stdout, { normalize: false }); }
+  catch (error) { throw Error('batch-launch-status-invalid', { cause: error }); }
+  const workspaceRepo = typeof status.repo === 'string' && isAbsolute(status.repo);
+  if (readDispatchReceipt(status).launchRequestId !== batch.launch_id
+    || (status.repo != null && !workspaceRepo && ![batch.repo, batch.repo.split('/').at(-1)].includes(status.repo))) {
+    throw Error('batch-launch-evidence-mismatch');
+  }
+  const preparation = readDispatchStatus(status);
+  if (preparation.diagnostics.length) throw Error('batch-launch-status-invalid');
+  return preparation;
+}
+
+async function readBatchOutcomes(outputPath) {
+  for (const waitMs of [0, 50, 100, 200]) {
+    if (waitMs) await delay(waitMs);
+    const fd = openSync(outputPath, 'r');
+    try {
+      // Size and read the same inode even when the publisher replaces the file.
+      const maxBytes = 1024 * 1024;
+      if (fstatSync(fd).size > maxBytes) throw Error('batch-outcome-too-large');
+      const bytes = readFileSync(fd);
+      if (bytes.length > maxBytes) throw Error('batch-outcome-too-large');
+      try { return JSON.parse(bytes.toString('utf8')); }
+      catch (error) { if (!(error instanceof SyntaxError)) throw error; }
+    } finally { closeSync(fd); }
+  }
+  throw Error('batch-outcome-invalid-json');
+}
+
+function clearFindingBatchError(db, batch) {
+  db.prepare('UPDATE finding_batches SET error=NULL WHERE batch_id=? AND error IS NOT NULL').run(batch.batch_id);
+}
+
+async function publishFindingBatch({ db, batch, result, dir, outputPath, env, rootDir, preparation, probeTimeoutMs,
+  execFileImpl, fetchPublication, readLaunches, logger, now, publishReceiptGraceMs }) {
   if (!batch.launch_id) throw Error('batch-launch-receipt-missing');
   if (!/^[a-f0-9]{40}$/i.test(result.headSha || '')) throw Error('batch-push-evidence-missing');
   // Fence concurrent collectors across the receipt lookup and submission. The
@@ -455,28 +515,13 @@ async function publishFindingBatch({ db, batch, result, dir, outputPath, env, ro
   try {
     try { fsExt.flockSync(fd, 'exnb'); }
     catch (error) { if (['EAGAIN', 'EWOULDBLOCK'].includes(error.code)) return; throw error; }
-    // Size once for reads; provisioning retains its separate dispatch budget.
-    const probeTimeoutMs = dispatchProbeTimeoutMs();
-    let stdout;
-    try {
-      ({ stdout } = await execFileImpl(env.HQ_BIN || 'hq',
-        ['dispatch', 'status', batch.launch_id, '--json', '--root', resolveHqRoot(env)],
-        { env, timeout: probeTimeoutMs, maxBuffer: 1024 * 1024 }));
-    } catch (error) { throw publicationProbeError(error, 'hq dispatch status', probeTimeoutMs); }
-    const status = parseHqDispatchStatus(stdout, { normalize: false });
-    if (readDispatchReceipt(status).launchRequestId !== batch.launch_id) throw Error('batch-launch-evidence-mismatch');
-    const workspaceRepo = typeof status.repo === 'string' && isAbsolute(status.repo);
-    if (status.repo != null && !workspaceRepo
-      && ![batch.repo, batch.repo.split('/').at(-1)].includes(status.repo)) throw Error('batch-launch-evidence-mismatch');
-    const meaning = readDispatchStatus(status);
-    if (!meaning.terminal) return;
     // A publication-blocked decision launch may have pushed successfully.
     // Other terminal failures cannot authorize a publisher.
     // A canceled source can be the supported handoff after a collector crash.
     // Only the exact lifecycle receipt below can authorize that recovery.
-    const handoffCandidate = meaning.blockedNeedsDecision || status.status === 'canceled';
-    if (meaning.diagnostics.length || (!meaning.succeeded && !handoffCandidate)) throw Error('batch-preparation-failed');
-    const branch = status.branch;
+    const handoffCandidate = preparation.blockedNeedsDecision || preparation.status === 'canceled';
+    if (!preparation.succeeded && !handoffCandidate) throw Error('batch-preparation-failed');
+    const branch = preparation.payload.branch;
     if (typeof branch !== 'string' || !branch.trim() || branch.startsWith('-')) throw Error('batch-branch-missing');
     const key = findingBatchDispatchKey(batch, true);
     const scope = findingBatchDispatchScope(batch, env);
@@ -507,16 +552,21 @@ async function publishFindingBatch({ db, batch, result, dir, outputPath, env, ro
     // not_started, and a decision-only launch is not re-probed when it exits,
     // so the milestone cannot refute a push. Bind the launch through the
     // ledger above and verify the actual remote branch/head below instead.
-    const publication = await fetchPublication(batch.repo, branch, { execFileImpl, env, logger });
-    if (!Array.isArray(publication.prs)) throw Error('batch-publication-evidence-invalid');
+    const publication = await readPublicationEvidence(fetchPublication, [batch.repo, branch, { execFileImpl, env, logger }]);
+    if (!Array.isArray(publication?.prs)) throw Error('batch-publication-evidence-invalid');
     if (publication.prs.length) {
-      if (publication.prs.length !== 1 || publication.prs[0].headRefName !== branch
-        || publication.prs[0].isCrossRepository !== false
-        || !hasBatchMarker(publication.prs[0].body, batch.batch_id)) throw Error('batch-pr-evidence-mismatch');
-      const pr = publication.prs[0];
-      const dropPrs = await verifyDropPrs(batch, result, { execFileImpl, env, logger }, fetchPr);
-      settleFindingBatch(db, batch, { ...result, prNumber: pr.number, headSha: pr.headRefOid }, pr, dropPrs);
-      return;
+      const [pr] = publication.prs;
+      if (publication.prs.length !== 1 || pr?.headRefName !== branch
+        || pr.isCrossRepository !== false
+        || !hasBatchMarker(pr.body, batch.batch_id)
+        || !Number.isSafeInteger(pr.number) || pr.number < 1
+        || !/^[a-f0-9]{40}$/i.test(pr.headRefOid || '')) throw Error('batch-pr-evidence-mismatch');
+      // Recover a publisher that created its PR but exited before updating the
+      // artifact. Keep all decisions intact and use the ordinary numbered read.
+      const recovered = { ...result, prNumber: pr.number, headSha: pr.headRefOid };
+      writeFileAtomic(outputPath, JSON.stringify(recovered), { mode: 0o664 });
+      clearFindingBatchError(db, batch);
+      return recovered;
     }
     if (publication.headSha !== result.headSha) throw Error('batch-push-evidence-mismatch');
     // A failed publisher retains its fence too. Recovery repairs that launch;
@@ -650,15 +700,6 @@ async function publishFindingBatch({ db, batch, result, dir, outputPath, env, ro
     }
     db.prepare('UPDATE finding_batches SET error=NULL WHERE batch_id=?').run(batch.batch_id);
   } finally { closeSync(fd); }
-}
-
-async function verifyDropPrs(batch, result, options, fetchPr = fetchFindingBatchPr) {
-  const prs = {};
-  for (const f of result.findings || []) {
-    const match = f?.outcome === 'dropped' && /^already-fixed-in-([1-9]\d*):/.exec(normalizeDroppedReason(f.reason) || '');
-    if (match && !prs[match[1]]) prs[match[1]] = await fetchPr(batch.repo, Number(match[1]), options);
-  }
-  return prs;
 }
 
 // Settlement errors that cannot clear once the launch has ended: no pushed
@@ -818,25 +859,39 @@ export async function runFindingBatches({ db, rootDir, env = process.env, day = 
       }
       const dir = join(rootDir, 'data', 'finding-batches', batch.batch_id);
       const outputPath = join(dir, 'outcomes.json');
-      let result;
       try {
-        const size = statSync(outputPath).size;
+        statSync(outputPath);
         hasOutcomes = true;
-        if (size > 1024 * 1024) throw Error('batch-outcome-too-large');
-        result = JSON.parse(readFileSync(outputPath, 'utf8'));
       } catch (error) { if (error.code !== 'ENOENT') throw error; }
-      if (result) {
+      if (hasOutcomes) {
+        // Published outcomes already passed preparation. Avoid probing the
+        // ended worker on every tick while its PR waits for attachment/merge.
+        const probeTimeoutMs = dispatchProbeTimeoutMs();
+        let result, readError;
+        try { result = await readBatchOutcomes(outputPath); }
+        catch (error) { readError = error; }
+        // Historical imports can have artifacts without a launch receipt.
+        const preparation = batch.launch_id && result?.prNumber == null
+          ? await readFindingBatchPreparation(batch, { execFileImpl, env, timeoutMs: probeTimeoutMs }) : null;
+        if (preparation && !preparation.terminal) return;
+        if (readError) throw readError;
         // Applied claims that fail validation are re-verified, never published.
-        const applied = hasAppliedOutcome(result) && validateBatchOutcomes(db, batch, result).applied;
+        const { applied } = validateBatchOutcomes(db, batch, result);
         if (applied && result.prNumber == null) {
-          await publishFindingBatch({ db, batch, result, dir, outputPath, env, rootDir,
-            execFileImpl, fetchPublication, fetchPr, readLaunches, logger, now: publicationNow, publishReceiptGraceMs });
-          return;
+          const recovered = await publishFindingBatch({ db, batch, result, dir, outputPath, env, rootDir,
+            preparation, probeTimeoutMs, execFileImpl, fetchPublication, readLaunches, logger,
+            now: publicationNow, publishReceiptGraceMs });
+          if (!recovered) return;
+          result = recovered;
         }
-        const pr = applied && Number.isSafeInteger(result.prNumber)
-          ? await fetchPr(batch.repo, result.prNumber, { execFileImpl, env, logger }) : null;
-        const dropPrs = await verifyDropPrs(batch, result, { execFileImpl, env, logger }, fetchPr);
-        settleFindingBatch(db, batch, result, pr, dropPrs);
+        let pr = null;
+        if (applied) {
+          if (!Number.isSafeInteger(result.prNumber) || result.prNumber < 1 || !/^[a-f0-9]{40}$/i.test(result.headSha || '')) {
+            throw Error('batch-pr-evidence-mismatch');
+          }
+          pr = await readPublicationEvidence(fetchPr, [batch.repo, result.prNumber, { execFileImpl, env, logger }], { numberedPr: true });
+        }
+        settleFindingBatch(db, batch, result, pr);
       } else if (!resolutionOnly && !batch.launch_id && (manifest !== null || batch.manifest_sha256 === null)) {
         dispatching = true;
         const findings = db.prepare(`SELECT b.finding_id AS findingId,b.pr_number AS prNumber,
@@ -877,6 +932,12 @@ export async function runFindingBatches({ db, rootDir, env = process.env, day = 
       const cause = error.probeFailureDetail || stderr.split(/\r?\n/).find(line => line.includes('[hq] error:'))
         || stderr.trim() || error.message;
       const detail = redactPublicSafeText(String(cause), 300).replace(/\s+/g, ' ').trim();
+      const diagnostic = stderr ? `\nstderr:\n${redactPublicSafeText(stderr, Infinity)}` : '';
+      if (error instanceof PublicationReadError) {
+        clearFindingBatchError(db, batch);
+        logger.warn?.(`[findings-batch] ${batch.batch_id}: publication read will retry: ${detail}${diagnostic}`);
+        return;
+      }
       const reason = dispatching
         ? `batch-dispatch-${dispatchReturned ? 'receipt-invalid' : 'retryable'}: ${detail}`.slice(0, 300) : detail;
       // Only a returned, invalid receipt spends the bounded dispatch budget.
@@ -887,8 +948,7 @@ export async function runFindingBatches({ db, rootDir, env = process.env, day = 
         .run(reason, dispatchReturned ? 1 : 0, batch.batch_id);
       // One log record per failure carries all captured stderr. Redact before
       // storage/logging; the bounded row keeps the actual cause at its front.
-      logger.warn?.(`[findings-batch] ${batch.repo}/${batch.area}: ${reason}`
-        + (stderr ? `\nstderr:\n${redactPublicSafeText(stderr, Infinity)}` : ''));
+      logger.warn?.(`[findings-batch] ${batch.repo}/${batch.area}: ${reason}${diagnostic}`);
     }
     try {
       await release(batch, hasOutcomes);

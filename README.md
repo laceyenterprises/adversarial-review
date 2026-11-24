@@ -2127,7 +2127,11 @@ same-key publisher resubmission. Configure the positive grace in milliseconds wi
 `ADVERSARIAL_FINDINGS_BATCH_PUBLISH_RECEIPT_GRACE_MS`; legacy intents use file mtime.
 Unreadable evidence and live launches hold custody; any publisher receipt fences
 resubmission. A second absence retains the existing stale release/requeue path.
-Existing failed publishers stay visible for same-launch repair.
+Existing failed publishers stay visible for same-launch repair. A single validated
+marked branch PR recovers a missing artifact PR number/head after publication;
+numbered outcomes skip further preparation status reads. Permanent GitHub read
+failures retain diagnostics and follow the existing timeout and terminal-custody
+release rules, while transient reads defer collection.
 Simplicity advisories keep their final-review enrollment and validated outcome
 rules, sharing the cap and marked result PR with findings. Failed initial dispatch
 subprocesses retain the same batch/key for retry, even after the batch timeout,

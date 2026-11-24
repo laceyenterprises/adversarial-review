@@ -177,17 +177,16 @@ test('settlement records taxonomy grades atomically after PR verification, with 
   const result = { batchId: batch.batch_id, prNumber: 24, headSha: head,
     findings: members.map((row, i) => ({ findingId: row.finding_id,
       outcome: i === 6 ? 'applied' : 'dropped', reason: reasons[i] ?? (i === 6 ? 'Added validation' : 'unknown reason') })) };
-  assert.throws(() => settleFindingBatch(db, batch, result), /batch-drop-pr-unverified/);
-  const fixPrs = { 23: { state: 'MERGED' } };
+  assert.throws(() => settleFindingBatch(db, batch, result), /batch-pr-evidence-mismatch/);
   const pr = { state: 'OPEN', headRefOid: head, body: `Finding-Batch: ${batch.batch_id}` };
-  assert.equal(settleFindingBatch(db, batch, result, pr, fixPrs), false);
+  assert.equal(settleFindingBatch(db, batch, result, pr), false);
   assert.equal(db.prepare('SELECT count(*) n FROM review_finding_grades').get().n, 0);
   pr.state = 'MERGED';
   db.exec(`CREATE TRIGGER fail_grade BEFORE INSERT ON review_finding_grades BEGIN SELECT RAISE(ABORT,'synthetic write failure'); END`);
-  assert.throws(() => settleFindingBatch(db, batch, result, pr, fixPrs), /synthetic write failure/);
+  assert.throws(() => settleFindingBatch(db, batch, result, pr), /synthetic write failure/);
   assert.equal(db.prepare('SELECT count(*) n FROM finding_backlog WHERE outcome IS NOT NULL').get().n, 0);
   db.exec('DROP TRIGGER fail_grade');
-  assert.equal(settleFindingBatch(db, batch, result, pr, fixPrs), true);
+  assert.equal(settleFindingBatch(db, batch, result, pr), true);
   const grades = db.prepare('SELECT * FROM review_finding_grades ORDER BY grade_id').all();
   assert.deepEqual(grades.map(g => g.taxonomy_code), ['ind.stale', 'tp.already-fixed-elsewhere',
     'ind.cannot-reproduce', 'tp.out-of-scope', 'fp.misread-code', 'life.pr-closed', 'tp.valid']);
@@ -196,7 +195,7 @@ test('settlement records taxonomy grades atomically after PR verification, with 
   assert.equal(grades[5].lifecycle, 1);
   assert.equal(grades[5].label, 'indeterminate');
   assert.equal(JSON.parse(grades[6].evidence_json).resultPr, 24);
-  assert.equal(settleFindingBatch(db, batch, result, pr, fixPrs), true);
+  assert.equal(settleFindingBatch(db, batch, result, pr), true);
   assert.equal(db.prepare('SELECT count(*) n FROM review_finding_grades').get().n, 7);
   assert.equal(backfillFindingGrades(db).inserted, 0);
   assert.equal(db.prepare('SELECT count(*) n FROM review_finding_grades').get().n, 7);

@@ -22,8 +22,11 @@ records `needs-closer` and alerts through closure-wait. Later closure passes
 recheck admission on that head, including from legacy `ownerless-closer-no-merge`
 receipts. If final fix-all has already spent its head-scoped round, only a strict
 exact-head final findings route continues through ordinary hammer admission and
-caps. Other routes retain `needs-closer` custody and the refusal page. The immediate refusal
-page is deduplicated and the 1800-second target has no timed escalation. See
+caps. Other routes retain `needs-closer` custody and the refusal page. Every
+30 seconds the watcher scans a bounded batch of receipts independently of
+closure selection. After 1800 seconds from `updatedAt` or `requestedAt`, it
+confirms the PR still has the same open head and uses the same durable page
+latch as an immediate refusal. See
 [successor records](data-model/closer-successors.md) and
 [publication ownership](data-model/hammer-publication-ownership.md).
 Strict exact-head findings remain recognized after the automatic retry-cap stop

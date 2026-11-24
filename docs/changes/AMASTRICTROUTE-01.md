@@ -15,25 +15,21 @@ receipt. Later closure passes can retry admission from either this state or the
 legacy receipt. A confirmed successor records its remediation job ID. If final
 fix-all is already spent, normal hammer admission receives only strict exact-head
 final findings routes. Other routes retain `needs-closer` and refusal alerting.
-Successor custody has an immediate refusal alert and no timed escalation.
+Successor custody has an immediate refusal alert and a 1800-second escalation
+for receipts that remain non-enrolled on the same open head. A bounded watcher
+sweep checks receipts independently of closure selection, using the same page
+latch for both observations.
 The daemon executor also checks strict exact-head finding counts when called
 without a shared decision.
 
 The final Comment-only remediation preserves the strict-mode removal of the
 per-PR `operator-approved` findings override. Approval still overrides the
 verdict; accepting findings in the daemon lane requires `strict_mode: false`.
-Explicit operator confirmation of that workflow change remains a follow-up,
-not a sign-off supplied by this worker. The declared 1800-second successor
-deadline remains unenforced; implementing the review's proposed timer is a
-separate follow-up. Pending receipts that stop being selected can remain pending
-without a page; `needs-closer` refusals page immediately.
 
 Strict exact-head findings now decline before unused HAM or head-closer
 certification reads. Gate 1 consolidates the existing bypass expression without
 changing merge authority. The acceptance command tolerates per-row read errors,
-excludes those rows and explicitly refuses report-level errors. The PR body's
-old audit-log command should be replaced with the committed YAML command by the
-publication owner; this worker is restricted to read-only GitHub queries.
+excludes those rows and explicitly refuses report-level errors.
 The multi-pass fallback fixture exposed a related cap-page bypass: selecting R07
 cleared the strict findings guard and retained an already succeeded dispatch.
 Strict findings recognition now survives that stop, allowing terminal
@@ -48,6 +44,8 @@ The routing, successor, dispatch, retry-cap and state-machine suites passed
 individually, along with lint, contract typechecking and the offline demo.
 After deployment, a strict-mode Comment-only head with non-blocking findings
 gets a closer or an explicit `needs-closer` receipt when admission is deferred.
+The handoff smoke checks the 1800-second boundary, closed and moved heads,
+and page deduplication across watcher restarts.
 
 Final-round checks use `bash bin/run-bounded.sh --timeout <seconds> -- node
 test/run-tests.mjs <targeted files>` for the daemon, watcher daemon wiring,

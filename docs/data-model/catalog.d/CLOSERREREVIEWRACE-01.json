@@ -25,7 +25,8 @@
       "relatedSchemaSurfaces": [
         "src/ama/dispatch-closer.mjs",
         "src/ama-closure-orchestration.mjs",
-        "src/follow-up-jobs.mjs"
+        "src/follow-up-jobs.mjs",
+        "src/watcher.mjs"
       ],
       "owner": "AMA closure orchestration"
     },

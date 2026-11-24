@@ -1684,6 +1684,7 @@ test('daemon clean merge fail-closes when worker LRQ identity cannot be resolved
 
 test('daemon clean merge strict mode declines non-blocking findings before identity reads', async () => {
   const rootDir = tempRoot();
+  const head = 'a'.repeat(40);
   try {
     let identityReads = 0;
     let liveFetches = 0;
@@ -1700,24 +1701,27 @@ test('daemon clean merge strict mode declines non-blocking findings before ident
       prNumber: 563,
       candidate: {
         baseBranch: 'main',
-        headSha: 'finding-head',
+        headSha: head,
         statusCheckRollup: [],
         mergeable: 'MERGEABLE',
         mergeStateStatus: 'CLEAN',
         prState: 'open',
       },
       gateSnapshot: {
-        reviewedHeadSha: 'finding-head',
+        reviewedHeadSha: head,
         settledReview: { verdict: 'comment-only' },
       },
       mergeabilityForGate: { mergeable: 'MERGEABLE', mergeStateStatus: 'CLEAN' },
       reviewState: {
+        headSha: head.toUpperCase(),
         blockingFindingCount: 0,
         blockingFindingState: 'known',
         nonBlockingFindingCount: 1,
         nonBlockingFindingState: 'known',
       },
-      currentPrHeadSha: 'finding-head',
+      currentPrHeadSha: head,
+      resolveHeadCloserCommitSuppressionImpl: () => assert.fail('exact-head findings cannot use closer certification'),
+      headHasValidatedHamTerminalRemediationImpl: () => assert.fail('exact-head findings cannot use the HAM audit'),
       readBuildCompletionSignalForPrImpl: () => {
         identityReads += 1;
         return {
@@ -1725,7 +1729,7 @@ test('daemon clean merge strict mode declines non-blocking findings before ident
           row: {
             launch_request_id: 'lrq_with_finding',
             worker_class: 'codex',
-            head_sha: 'finding-head',
+            head_sha: head,
           },
         };
       },
@@ -1733,7 +1737,7 @@ test('daemon clean merge strict mode declines non-blocking findings before ident
         liveFetches += 1;
         return {
           state: 'OPEN',
-          headSha: 'finding-head',
+          headSha: head,
           headRefName: 'worker/finding-head',
           statusCheckRollup: [],
           mergeable: 'MERGEABLE',
@@ -1764,21 +1768,10 @@ test('daemon clean merge strict mode declines non-blocking findings before ident
   }
 });
 
-test('#5053 strict exact-head closer findings skip unused suppression proof and retain hammer ownership', async t => {
+test('#5053 strict exact-head closer findings route directly to the hammer', async t => {
   const rootDir = tempRoot();
   t.after(() => rmSync(rootDir, { recursive: true, force: true }));
   const args = findingsArgs(rootDir);
-  const result = await runDaemonCleanMergeAttempt({
-    rootDir, cfg: { strictMode: true }, repoPath: args.repoPath, prNumber: args.prNumber,
-    candidate: args.candidate, currentPrHeadSha: 'head-live',
-    gateSnapshot: { settledReview: { verdict: 'comment-only' } },
-    reviewState: { headSha: 'head-live', blockingFindingState: 'known', blockingFindingCount: 0,
-      nonBlockingFindingState: 'known', nonBlockingFindingCount: 1 },
-    resolveHeadCloserCommitSuppressionImpl: () => assert.fail('unusable #5053 proof must not read GitHub'),
-    headHasValidatedHamTerminalRemediationImpl: () => assert.fail('unusable HAM proof must not be read'),
-    fetchRollupImpl: () => assert.fail('strict findings must decline before live reads'),
-  });
-  assert.equal(result.reason, 'non-blocking-findings-present');
   let hammers = 0;
   const routed = await maybeDispatchAmaClosureFor({ ...args,
     resolveHeadCloserCommitSuppressionImpl: () => assert.fail('strict final findings must skip daemon certification'),
@@ -2845,14 +2838,14 @@ function operatorApprovedEventAt(head, overrides = {}) {
   };
 }
 
-for (const configMode of ['omitted', 'undefined', true]) {
-  test(`strict-mode default refuses operator-approved exact-head findings (${configMode})`, async t => {
+for (const configMode of ['omitted', 'undefined', true, 'superseded']) {
+  test(`strict-mode default refuses findings despite current-head approval (${configMode})`, async t => {
     const rootDir = tempRoot();
     t.after(() => rmSync(rootDir, { recursive: true, force: true }));
     const head = 'a'.repeat(40), event = operatorApprovedEventAt(head);
     const args = unattributedDaemonArgs({ rootDir, head });
     const cfg = { operatorLogins: [event.actor], operatorLabelActorEnforcement: 'enforce' };
-    if (configMode !== 'omitted') cfg.strictMode = configMode === true ? true : undefined;
+    if (configMode !== 'omitted') cfg.strictMode = configMode === 'undefined' ? undefined : true;
     const operatorApprovedEvidence = { applied: true, observedRevisionRef: head,
       actor: event.actor, eventId: event.id, observedAt: event.createdAt };
     assert.equal(hasOperatorApprovedOverride({ ...cfg, operatorApprovedEvidence },
@@ -2860,11 +2853,17 @@ for (const configMode of ['omitted', 'undefined', true]) {
     const result = await runDaemonCleanMergeAttempt({
       ...args, cfg,
       candidate: { ...args.candidate, labels: ['operator-approved'] },
-      reviewState: { ...args.reviewState, headSha: head, nonBlockingFindingCount: 1,
-        operatorApprovedEvidence },
+      reviewState: { ...args.reviewState, headSha: configMode === 'superseded' ? 'b'.repeat(40) : head,
+        nonBlockingFindingCount: 1, operatorApprovedEvidence },
       readBuildCompletionSignalForPrImpl: () => assert.fail('decline before identity reads'),
-      resolveHeadCloserCommitSuppressionImpl: () => assert.fail('decline before certification reads'),
-      headHasValidatedHamTerminalRemediationImpl: () => assert.fail('decline before HAM audit reads'),
+      resolveHeadCloserCommitSuppressionImpl: () => {
+        assert.equal(configMode, 'superseded');
+        return { suppressed: false };
+      },
+      headHasValidatedHamTerminalRemediationImpl: () => {
+        assert.equal(configMode, 'superseded');
+        return false;
+      },
       fetchRollupImpl: () => assert.fail('decline before live reads'),
       attemptDaemonCleanMergeImpl: () => assert.fail('operator approval cannot bypass strict findings'),
     });
@@ -2975,7 +2974,7 @@ test('Deliverable 1: operator-approved at the current head substitutes for worke
   }
 });
 
-test('current-head operator approval routes an older request-changes review to daemon merge', async () => {
+test('outside strict mode current-head operator approval can override findings on an older review', async () => {
   const rootDir = tempRoot();
   try {
     const head = 'remediated-head';
@@ -2985,7 +2984,7 @@ test('current-head operator approval routes an older request-changes review to d
     let mergeArgs = null;
     const result = await runDaemonCleanMergeAttempt({
       ...args,
-      cfg: { ...args.cfg, operatorLogins: ['VirtualPaul'], operatorLabelActorEnforcement: 'enforce' },
+      cfg: { ...args.cfg, strictMode: false, operatorLogins: ['VirtualPaul'], operatorLabelActorEnforcement: 'enforce' },
       candidate: { ...args.candidate, labels: ['operator-approved'] },
       fetchRollupImpl: async () => ({
         state: 'OPEN', headRefOid: head, checks: args.candidate.statusCheckRollup,
@@ -3023,7 +3022,7 @@ test('operator override on an attributed worker records approval instead of work
     let mergeArgs;
     const result = await runDaemonCleanMergeAttempt({
       ...args,
-      cfg: { ...args.cfg, operatorLogins: ['VirtualPaul'], operatorLabelActorEnforcement: 'enforce' },
+      cfg: { ...args.cfg, strictMode: false, operatorLogins: ['VirtualPaul'], operatorLabelActorEnforcement: 'enforce' },
       candidate: { ...args.candidate, labels: ['operator-approved'] },
       fetchRollupImpl: async () => ({
         state: 'OPEN', headRefOid: head, checks: args.candidate.statusCheckRollup,

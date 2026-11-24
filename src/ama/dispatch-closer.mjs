@@ -188,6 +188,7 @@ import {
   DAEMON_MERGE_DISPOSITION,
   DAEMON_MERGE_SUBPROCESS_TIMEOUT_MS,
   isFullyCleanSettledReview,
+  sameFullReviewHead,
 } from './daemon-merge.mjs';
 import { resolveRequiredCheckContextsFromCfg } from './required-check-contexts.mjs';
 import { resolveCloserDispatchHarness, resolveHarnessAfterResolverError } from './harness-fallback.mjs';
@@ -5437,7 +5438,7 @@ async function maybeDispatchAmaCloserAttempt({
     verdict?.trace?.hamTerminalRemediation?.ok === true && !repairCertifiedPark;
   // Recognition must survive R07: terminal reconciliation still owes the cap page.
   const strictExactHeadHammerFindings = cfg?.strictMode !== false
-    && reviewState.headSha === prMetadata.headSha && !isFullyCleanSettledReview(reviewState);
+    && sameFullReviewHead(reviewState.headSha, prMetadata.headSha) && !isFullyCleanSettledReview(reviewState);
   const templatePath = dispatchContext.templatePath || HAMMER_TEMPLATE_PATH;
   const templateBody = readTemplateImpl
     ? readTemplateImpl(templatePath)
@@ -7387,7 +7388,7 @@ async function maybeDispatchAmaCloserAttempt({
       }
       if (hammerEndedWithoutMerge && hammerShouldHandoff && !inconclusiveOutcome && reviewState?.reviewCycleExhausted === true) {
         const successor = await handoffEndedCloser(hammerEndedHead, {
-          allowHammerFallback: strictExactHeadHammerFindings && hammerEndedHead === prMetadata.headSha,
+          allowHammerFallback: strictExactHeadHammerFindings && sameFullReviewHead(hammerEndedHead, prMetadata.headSha),
         });
         if (successor?.action !== 'fallback') {
           return noAmaDispatch({ dispatched: false, skipMergeAgent: true,

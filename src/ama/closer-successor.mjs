@@ -10,6 +10,8 @@ import { launchRequestInFlight } from './launch-request-status.mjs';
 import { observeClosureWait } from './closure-wait.mjs';
 
 const SUCCESSOR_DEADLINE_MS = 30 * 60_000;
+const DEADLINE_PROBE_BACKOFF_MS = 5 * 60_000;
+const RETIREMENT_PROBE_INTERVAL_MS = 24 * 60 * 60_000;
 const RETIRED_TTL_MS = 7 * 24 * 60 * 60_000;
 const waitClass = 'closer-successor';
 
@@ -78,6 +80,7 @@ export async function settleCloserSuccessor({ rootDir, repo, prNumber, headSha, 
     if (record.retiredAt) {
       delete record.retiredAt;
       delete record.escalatedAt;
+      delete record.lastProbedAt;
       writeFileAtomic(path, `${JSON.stringify(record)}\n`);
     }
     let result;
@@ -121,9 +124,13 @@ export function createCloserSuccessorDeadlineSweep({ rootDir, readLive, now = Da
   let cursor;
   let running = false;
   let stopped = false;
-  const overdue = (record, observedAt) => record && record.schemaVersion === 1
-    && record.status !== 'successor-enrolled' && !record.retiredAt && !record.fallbackAt && !record.escalatedAt
-    && observedAt - Date.parse(record.requestedAt) >= SUCCESSOR_DEADLINE_MS;
+  const owesDeadline = record => record.status !== 'successor-enrolled' && !record.fallbackAt && !record.escalatedAt;
+  const probeDue = (record, observedAt) => {
+    if (record?.schemaVersion !== 1 || record.retiredAt
+      || !(observedAt - Date.parse(record.requestedAt) >= SUCCESSOR_DEADLINE_MS)) return false;
+    const lastProbe = Math.max(Date.parse(record.lastProbedAt) || 0, Date.parse(record.escalatedAt) || 0);
+    return observedAt - lastProbe >= (owesDeadline(record) ? DEADLINE_PROBE_BACKOFF_MS : RETIREMENT_PROBE_INTERVAL_MS);
+  };
   const expired = (record, observedAt) => record?.schemaVersion === 1
     && observedAt - Date.parse(record.retiredAt) >= RETIRED_TTL_MS;
 
@@ -136,7 +143,7 @@ export function createCloserSuccessorDeadlineSweep({ rootDir, readLive, now = Da
   async function check(entry) {
     const path = join(directory, entry.name);
     const receipt = JSON.parse(await readFile(path, 'utf8'));
-    if ((!overdue(receipt, now()) && !expired(receipt, now())) || !/^[\w.-]+\/[\w.-]+$/.test(receipt.repo)
+    if ((!probeDue(receipt, now()) && !expired(receipt, now())) || !/^[\w.-]+\/[\w.-]+$/.test(receipt.repo)
       || !Number.isSafeInteger(receipt.prNumber) || receipt.prNumber < 1
       || !/^[0-9a-f]{40}$/i.test(receipt.headSha)
       || closerSuccessorPath(rootDir, receipt) !== path) return false;
@@ -149,28 +156,39 @@ export function createCloserSuccessorDeadlineSweep({ rootDir, readLive, now = Da
       } finally { closeSync(fd); }
       return false;
     }
-    const live = await readLive(repo, prNumber);
+    let live;
+    try {
+      live = await readLive(repo, prNumber);
+    } catch (error) {
+      logger.warn?.(`[closer-successor] live PR read failed for ${entry.name}: ${error.message}`);
+    }
     if (stopped) return true;
     const liveHead = /^[0-9a-f]{40}$/i.test(live?.headRefOid) ? live.headRefOid.toLowerCase() : null;
     const retire = ['closed', 'merged'].includes(live?.state) || live?.mergedAt || live?.closedAt
       || (live?.state === 'open' && liveHead && liveHead !== headSha);
-    if (!retire && (live?.state !== 'open' || liveHead !== headSha
-      || await hasLiveCloserImpl(rootDir, { repo, prNumber, headSha }))) return true;
+    const shouldPage = !retire && owesDeadline(receipt) && live?.state === 'open' && liveHead === headSha
+      && !await hasLiveCloserImpl(rootDir, { repo, prNumber, headSha });
     if (stopped) return true;
     const fd = openSync(`${path}.lock`, 'a', 0o640);
     try {
       fsExt.flockSync(fd, 'exnb');
       const current = readCloserSuccessor(rootDir, receipt);
       const observedAt = now();
-      if (overdue(current, observedAt)) {
-        if (retire) {
-          writeFileAtomic(path, `${JSON.stringify({ ...current, retiredAt: new Date(observedAt).toISOString() })}\n`);
-          return true;
-        }
+      if (current?.requestedAt !== receipt.requestedAt || !probeDue(current, observedAt)) return true;
+      const timestamp = new Date(observedAt).toISOString();
+      if (retire) {
+        current.retiredAt = timestamp;
+      } else if (shouldPage && owesDeadline(current)) {
         await observeWaitImpl({ rootDir, repo, prNumber, headSha, now: observedAt,
           reason: 'closer-successor-overdue', immediate: true, waitClass });
-        writeFileAtomic(path, `${JSON.stringify({ ...current, escalatedAt: new Date(observedAt).toISOString() })}\n`);
+        current.escalatedAt = timestamp;
+      } else if (!owesDeadline(current) || owesDeadline(receipt)) {
+        // A retirement-only probe cannot defer a newly reinstated deadline.
+        current.lastProbedAt = timestamp;
+      } else {
+        return true;
       }
+      writeFileAtomic(path, `${JSON.stringify(current)}\n`);
     } finally { closeSync(fd); }
     return true;
   }

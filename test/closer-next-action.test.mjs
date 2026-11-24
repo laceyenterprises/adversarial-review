@@ -1460,6 +1460,14 @@ for (const { strictMode, count, expected } of [
   const rescue = classifyRescue({ snapshot, headSha: HEAD, reviewBody });
   assert.equal(rescue.nonBlockingFindings, count);
   assert.equal(rescue.decision, expected[0] === 'hammer' ? 'hammer-eligible' : 'merge-eligible');
+  if (strictMode && count) {
+    const capped = pair(base({ reviews: { ...withFinding, nonBlockingFindingCount: count },
+      progress: { terminalReview: { validated: true, headSha: HEAD, reviewedHeadSha: HEAD } },
+      policy: { autonomousMergeExecutionEnabled: true, strictMode,
+        hammerCap: { retryExhausted: true, headSha: HEAD, recordedAt: AT } } }));
+    assert.equal(capped.decision.row, 'R07-stop', 'an unchanged terminal audit cannot clear the cap or findings');
+    assert.equal(capped.decision.reason, 'retry-exhausted');
+  }
 });
 
 test('AMASTRICTROUTE-01: closure hands strict exact-head findings to the hammer despite a terminal receipt', async t => {

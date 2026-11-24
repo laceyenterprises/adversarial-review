@@ -103,10 +103,10 @@ offline research walkthrough pass; the full suite remains with PR-head CI.
 ### Final Comment-only advisory remediation
 
 Successor receipts now record `fallbackAt` when the spent fix-all hands custody
-to normal hammer admission. The deadline sweep skips that ownership through
-retry gaps and cap escalation. A different settlement clears the marker.
+to normal hammer admission. The deadline sweep leaves paging to the hammer
+through retry gaps and cap escalation. A different settlement clears the marker.
 Successful immediate or overdue pages record `escalatedAt` under the receipt
-lock and suppress subsequent probes; delivery failures remain retryable.
+lock and end deadline paging. Delivery failures remain retryable.
 Retired receipt JSON expires after seven days, with a locked timestamp recheck
 and retained lock inode. The data-model fragment records these optional fields;
 the generated catalog remains main-owned.
@@ -119,18 +119,15 @@ exact-head findings traffic, retry-cap pages and manual closures. More than
 three pages or more than three manual closures requires policy review before
 broader rollout. Strict runtime merge authority is unchanged.
 
-The live PR body still embeds the older acceptance command. This work order
-permits read-only `gh` queries and guarded code publication; regenerating that
-section from the committed `plan_path` remains a publication-owner follow-up.
-The worker-pool walkthrough and change-fragment obligation live in the Agent OS
-superproject and remain outside this checkout. Shared scanner/head-predicate
-extraction was left unapplied because it broadens the patch across independent
-recovery paths; estimated savings applied in this round: zero lines or probes.
+The review follow-up separates daily retirement probes from successor deadline
+paging and persists a five-minute probe backoff for live closers and unreadable
+PRs. The daemon executor now requires known zero findings for approval-based
+closure in strict mode, including for superseded reviews. Dispatch and successor
+fallback share a case-insensitive full-SHA comparison. An unchanged terminal
+hammer audit with unresolved strict findings still reaches the bounded retry
+cap and its existing deduplicated operator page. The recovery timer stops once
+across mixed shutdown signals. The PR body uses the committed plan command.
 
-Verification: `bash bin/run-bounded.sh --timeout 120 -- node
-test/run-tests.mjs test/closerrereviewrace-01.test.mjs
-test/pr-blockers.test.mjs` passed all 68 tests, including delivery retry,
-post-page probe suppression, hammer ownership and locked TTL boundaries.
 Lint passed with zero errors (147 existing warnings), contract typechecking,
 the 103-entry catalog validator, the offline walkthrough and `git diff --check`
 passed. The Python worker-validation module is unavailable in this checkout;

@@ -33,25 +33,28 @@ review with findings that selects hammer (including failed-CI repair), the watch
 records optional `fallbackAt` (UTC ISO 8601) under the receipt flock and passes
 the selected hammer decision to normal admission. This transfers deadline
 ownership to hammer, including retry-admission gaps, unreadable launch liveness
-and retry-cap escalation; the successor sweep skips these receipts. A later
-non-fallback settlement clears `fallbackAt`. Other routes record `needs-closer` with the
+and retry-cap escalation. A later non-fallback settlement clears `fallbackAt`. Other routes record `needs-closer` with the
 handoff's reason and surface the refusal instead of admitting another hammer.
 Final-fix-all's durable claim prevents duplicate work. An independent watcher
-sweep checks non-enrolled receipts after 1800 seconds from the original
-`requestedAt`; poll updates to `updatedAt` do not extend custody. The sweep
+sweep checks receipts after 1800 seconds from the original `requestedAt`. Poll
+updates to `updatedAt` do not extend custody. Enrolled, escalated and
+hammer-owned receipts get retirement-only probes at most daily. The sweep
 records optional `retiredAt` (UTC ISO 8601) under the receipt flock if GitHub
 confirms the PR is terminal or its head moved. Retired receipts skip future
 probes. After seven days the sweep removes retired receipt JSON under the same
 flock, with a locked timestamp recheck. The persistent lock inode is retained.
 Fresh admission can clear the marker if the PR returns to that head.
 A same-head open PR only pages after a locked receipt recheck and when the
-sweep cannot confirm a live closer dispatch or retry on that head.
+sweep cannot confirm a live closer dispatch or retry on that head. The sweep
+records optional `lastProbedAt` (UTC ISO 8601) under the receipt lock for an
+inconclusive or retirement-only probe. A live closer or unreadable PR backs
+off deadline probes for five minutes across restarts.
 The immediate refusal and overdue escalation share one page latch.
 After either observation succeeds, optional `escalatedAt` (UTC ISO 8601) is
-written under the receipt flock. Escalated receipts skip deadline probes across
-restarts; failed delivery leaves the marker unset and remains retryable.
-Later settlement still attempts admission. Reopening a retired receipt clears
-its escalation marker; the existing page latch remains authoritative.
+written under the receipt flock. It ends deadline paging across restarts.
+Failed delivery leaves the marker unset and remains retryable. Later settlement
+still attempts admission. Reopening a retired receipt clears its probe and
+escalation timestamps. The existing page latch remains authoritative.
 
 A pending receipt grants no merge, review or budget authority. Head matching,
 operator holds, strict findings remediation, CI and both closure paths keep their

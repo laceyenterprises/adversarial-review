@@ -14,6 +14,8 @@ export function startWatcherRecoveryTimers({ rootDir, overloadRescueRetry, readL
   void successorDeadline.tick();
   const timer = setIntervalImpl(() => { void successorDeadline.tick(); }, 30_000).unref();
   const stop = () => {
+    signals.removeListener('SIGTERM', stop);
+    signals.removeListener('SIGINT', stop);
     clearIntervalImpl(timer);
     void successorDeadline.stop();
   };

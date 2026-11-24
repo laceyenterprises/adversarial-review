@@ -27,8 +27,13 @@ hammer admission and caps, including when failed CI is the repair reason. A dura
 closure selection. After 1800 seconds from the original `requestedAt`, it
 retires a receipt when GitHub confirms a terminal PR or a moved head. For the
 same open head, a live closer launch (including retries) suppresses the overdue
-page while it owns the head. Successful immediate or overdue delivery records `escalatedAt` and stops future probes; failed delivery remains retryable. Retired receipt JSON is pruned after seven days under its persistent lock. Overdue pages share the immediate refusal latch. Poll updates to `updatedAt` do not extend the
-deadline. See
+page while it owns the head. A live closer or unreadable PR backs off deadline
+probes for five minutes. Successful immediate or overdue delivery records
+`escalatedAt` and ends deadline paging. Failed delivery remains retryable.
+Enrolled, escalated and hammer-owned receipts get retirement-only probes at
+most daily. Retired JSON is pruned after seven days under its persistent lock.
+Overdue pages share the immediate refusal latch. Poll updates to `updatedAt`
+do not extend the deadline. See
 [successor records](data-model/closer-successors.md) and
 [publication ownership](data-model/hammer-publication-ownership.md).
 Strict exact-head findings remain recognized after the automatic retry-cap stop

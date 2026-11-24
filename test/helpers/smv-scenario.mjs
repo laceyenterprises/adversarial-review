@@ -1129,7 +1129,7 @@ if (scenario === 'clean') {
   assert.equal(existsSync(cursorTrees[2]), false);
   assert.deepEqual(visits.slice(0, 3), ['synthetic-cursor-0', 'synthetic-cursor-1', 'synthetic-cursor-2']);
   const { withHammerPublication, activeHammerPublication, retireHammerPublication } = await import('../../src/ama/hammer-publication-ownership.mjs');
-  const { closerSuccessorPath, createCloserSuccessorDeadlineSweep, requestCloserSuccessor, settleCloserSuccessor } = await import('../../src/ama/closer-successor.mjs');
+  const { closerSuccessorPath, createCloserSuccessorDeadlineSweep, readCloserSuccessor, requestCloserSuccessor, settleCloserSuccessor } = await import('../../src/ama/closer-successor.mjs');
   const custodyHead = 'd'.repeat(40), custodyNow = '2030-01-01T00:00:00.000Z';
   const custody = { rootDir, repo: 'fixture/custody', prNumber: 71, headSha: custodyHead, now: custodyNow };
   const controllerPath = join(rootDir, 'synthetic-publication-controller.json');
@@ -1188,12 +1188,14 @@ if (scenario === 'clean') {
   const pages = [];
   const probes = [];
   let closerLive = true;
+  let settledHeadsClosed = false;
   let sweepTime = Date.parse(custodyNow) + 1_799_999;
   const sweepOptions = { rootDir: successorDeadlineRoot, now: () => sweepTime,
     hasLiveCloserImpl: async (_root, identity) => identity.prNumber === pending.prNumber && closerLive,
     readLive: async (_repo, number) => {
       probes.push(number);
-      return { state: number === terminal.prNumber ? 'merged' : 'open',
+      const closed = settledHeadsClosed && [fallback.prNumber, enrolled.prNumber].includes(number);
+      return { state: number === terminal.prNumber ? 'merged' : closed ? 'closed' : 'open',
         headRefOid: number === moved.prNumber ? 'a'.repeat(40) : custodyHead };
     },
     observeWaitImpl: args => observeClosureWait({ ...args, pageImpl: async message => { pages.push(message); } }),
@@ -1201,7 +1203,7 @@ if (scenario === 'clean') {
   async function sweepAt(time) {
     sweepTime = time;
     const sweep = createCloserSuccessorDeadlineSweep(sweepOptions);
-    try { await sweep.tick(); }
+    try { await sweep.tick(); await sweep.tick(); }
     finally { await sweep.stop(); }
   }
   await sweepAt(sweepTime);
@@ -1212,17 +1214,26 @@ if (scenario === 'clean') {
   assert.ok(pages[0].includes(`PR ${needsCloser.prNumber}@`));
   closerLive = false;
   await sweepAt(Date.parse(custodyNow) + 1_850_000);
+  assert.equal(pages.length, 1, 'live closer observation backs off across restarts');
+  await sweepAt(Date.parse(custodyNow) + 2_100_000);
   assert.equal(pages.length, 2);
   for (const subject of [pending, needsCloser]) {
     assert.ok(pages.some(page => page.includes(`PR ${subject.prNumber}@`) && page.includes('closer-successor-overdue')));
   }
-  await sweepAt(Date.parse(custodyNow) + 1_900_000);
+  await sweepAt(Date.parse(custodyNow) + 2_130_000);
   assert.equal(pages.length, 2, 'pages deduplicate across sweep restarts');
-  assert.equal(probes.filter(number => number === needsCloser.prNumber).length, 1, 'paged receipts skip probes');
-  assert.equal(probes.includes(fallback.prNumber), false, 'hammer ownership survives gaps between launches');
-  assert.equal(probes.includes(enrolled.prNumber), false);
+  assert.equal(probes.filter(number => number === needsCloser.prNumber).length, 1, 'paged receipts back off retirement probes');
+  for (const subject of [fallback, enrolled]) {
+    assert.equal(probes.filter(number => number === subject.prNumber).length, 1);
+    assert.equal(readCloserSuccessor(successorDeadlineRoot, subject).retiredAt, undefined);
+  }
   for (const subject of [terminal, moved]) {
     assert.equal(probes.filter(prNumber => prNumber === subject.prNumber).length, 1);
+  }
+  settledHeadsClosed = true;
+  await sweepAt(Date.parse(custodyNow) + 1_800_000 + 86_400_000);
+  for (const subject of [fallback, enrolled]) {
+    assert.ok(readCloserSuccessor(successorDeadlineRoot, subject).retiredAt);
   }
   await sweepAt(Date.parse(custodyNow) + 1_800_000 + 7 * 86_400_000);
   for (const subject of [terminal, moved]) {

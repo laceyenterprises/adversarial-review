@@ -534,10 +534,13 @@ async function runDaemonCleanMergeAttemptInner({
   let headCloserCertifiedNonBlocking = false;
   let cleanCloserCommitAccountability = null;
   let cleanCloserCommitSuppression = null;
-  const operatorApprovedEvidence = reviewState?.operatorApprovedEvidence || null;
+  const reviewAllowed = isDaemonMergeReviewAllowed(reviewState, { strictMode });
+  const operatorApprovedEvidence = !strictMode || reviewAllowed
+    ? reviewState?.operatorApprovedEvidence || null
+    : null;
   const ordinaryReviewAllowed =
     SETTLED_SUCCESS_VERDICTS.has(gateSnapshot?.settledReview?.verdict) &&
-    isDaemonMergeReviewAllowed(reviewState, { strictMode });
+    reviewAllowed;
   // Clearing a verdict or findings gate in the inline lane requires an
   // allowlisted operator even when the broader closer policy is observing.
   const daemonOperatorActorEnforcement = ordinaryReviewAllowed
@@ -548,7 +551,7 @@ async function runDaemonCleanMergeAttemptInner({
     operatorLogins: cfg?.operatorLogins,
     operatorLabelActorEnforcement: daemonOperatorActorEnforcement,
   }, { headSha: hamAuditHead, labels: candidate?.labels });
-  if (!docsFastPath && (strictExactHead || !snapshotOperatorOverride) && !isDaemonMergeReviewAllowed(reviewState, { strictMode })) {
+  if (!docsFastPath && !snapshotOperatorOverride && !reviewAllowed) {
     const uncleanReason =
       resolveDaemonMergeUncleanReason(reviewState, { strictMode }) || 'findings-unknown';
     // These proofs cannot clear strict exact-head findings in the executor.

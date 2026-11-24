@@ -33,6 +33,10 @@ const fixture = async t => {
 
 for (const scenario of ['matching-route', 'merged-daemon-route', 'no-observation']) {
   test(`strict-route journal acceptance handles ${scenario}`, async t => {
+    const jq = spawnSync('jq', ['--version'], { timeout: 5000 });
+    if (jq.error?.code === 'ENOENT') return t.skip('jq unavailable for the operator acceptance command');
+    assert.ifError(jq.error);
+    assert.equal(jq.status, 0, 'jq --version must succeed');
     const root = await fixture(t);
     const journalDir = join(root, 'data', 'next-action-shadow');
     await mkdir(join(root, 'src'));
@@ -52,9 +56,9 @@ for (const scenario of ['matching-route', 'merged-daemon-route', 'no-observation
     }
     await writeFile(join(journalDir, 'observations.jsonl'), observations.map(event => JSON.stringify(event)).join('\n') + '\n');
     const plan = loadYaml(await readFile(new URL('../modules/worker-pool/post-merge-actions/AMASTRICTROUTE-01.yaml', import.meta.url), 'utf8'));
-    const result = spawnSync('/bin/sh', ['-c', plan.operator_steps[0].command], {
+    const result = spawnSync('/bin/sh', ['-c', 'node() { "$TEST_NODE" "$@"; }\n' + plan.operator_steps[0].command], {
       cwd: root, encoding: 'utf8', timeout: 5000,
-      env: { ...process.env, REVIEW_REPO: repo, DEPLOYED_AT_UTC: '2026-01-02T12:00:00.001Z' },
+      env: { ...process.env, TEST_NODE: process.execPath, REVIEW_REPO: repo, DEPLOYED_AT_UTC: '2026-01-02T12:00:00.001Z' },
     });
     assert.equal(result.status, scenario === 'matching-route' ? 0 : 5, result.stderr);
     if (scenario === 'merged-daemon-route') assert.match(result.stderr, /unexpected daemon route/);

@@ -18,6 +18,7 @@ import {
   daemonMergeBackoffMs,
   isDaemonMergeReviewAllowed,
   isFullyCleanSettledReview,
+  sameFullReviewHead,
   DAEMON_MERGE_CLOSURE_AUTHORITY,
   DAEMON_MERGE_DISPOSITION,
   __testables__,
@@ -404,7 +405,7 @@ test('clean + eligible → daemon merges inline; daemon-merge audit; no local CI
   assert.equal(h.lastMergeCtx.mergeMethod, 'squash');
 });
 
-test('current-head operator approval merges an older request-changes verdict', async () => {
+test('current-head operator approval merges an older request-changes verdict with findings only outside strict mode', async () => {
   const approval = {
     applied: true, observedRevisionRef: HEAD, actor: 'operator',
     eventId: 'label-1', observedAt: '2026-09-26T19:03:00Z',
@@ -412,13 +413,22 @@ test('current-head operator approval merges an older request-changes verdict', a
   const gate = greenGate({ labels: ['operator-approved'] });
   const h = makeHarness({ liveGate: gate });
   const result = await attemptDaemonCleanMerge(baseArgs(h, {
-    verdict: 'request-changes', liveGate: gate,
+    verdict: 'request-changes', liveGate: gate, strictMode: false,
     operatorApprovedEvidence: approval, operatorLogins: ['operator'],
     operatorLabelActorEnforcement: 'enforce',
     reviewState: cleanReview({ blockingFindingCount: 1 }),
   }));
   assert.equal(result.disposition, DAEMON_MERGE_DISPOSITION.MERGED);
   assert.equal(h.lastMergeCtx.head, HEAD);
+  const strict = makeHarness({ liveGate: gate });
+  const strictResult = await attemptDaemonCleanMerge(baseArgs(strict, {
+    verdict: 'request-changes', liveGate: gate, strictMode: true,
+    operatorApprovedEvidence: approval, operatorLogins: ['operator'],
+    operatorLabelActorEnforcement: 'enforce',
+    reviewState: cleanReview({ headSha: OTHER_HEAD, nonBlockingFindingCount: 1 }),
+  }));
+  assert.equal(strictResult.reason, 'non-blocking-findings-present');
+  assert.equal(strict.calls.acquire, 0);
   const stale = makeHarness({ liveGate: gate });
   const staleResult = await attemptDaemonCleanMerge(baseArgs(stale, {
     verdict: 'request-changes', liveGate: gate,
@@ -437,6 +447,7 @@ test('operator approval removed inside the lease holds the override without a me
   const h = makeHarness({ liveGate: greenGate({ labels: [] }) });
   const result = await attemptDaemonCleanMerge(baseArgs(h, {
     verdict: 'request-changes',
+    strictMode: false,
     reviewState: cleanReview({ blockingFindingCount: 1 }),
     liveGate: greenGate({ labels: ['operator-approved'] }),
     operatorApprovedEvidence: approval,
@@ -470,6 +481,14 @@ test('operator approval removed inside the lease holds the override without a me
   }));
   assert.equal(accountableResult.reason, 'operator-approval-no-longer-current');
   assert.equal(accountable.calls.merge, 0, 'operator-accountable merge needs a live label');
+});
+
+test('strict dispatch compares full review heads case-insensitively and rejects missing or short heads', () => {
+  assert.equal(sameFullReviewHead(HEAD.toUpperCase(), HEAD), true);
+  assert.equal(sameFullReviewHead(HEAD, OTHER_HEAD), false);
+  assert.equal(sameFullReviewHead(undefined, undefined), false);
+  assert.equal(sameFullReviewHead('', ''), false);
+  assert.equal(sameFullReviewHead(HEAD.slice(0, 7), HEAD.slice(0, 7)), false);
 });
 
 test('clean older-head review cannot merge after its required approval is removed in lease', async () => {

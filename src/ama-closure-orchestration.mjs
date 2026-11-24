@@ -73,6 +73,7 @@ import {
   DAEMON_MERGE_DISPOSITION,
   isDaemonMergeReviewAllowed,
   isFullyCleanSettledReview,
+  sameFullReviewHead,
 } from './ama/daemon-merge.mjs';
 import * as amaDispatchCloser from './ama/dispatch-closer.mjs';
 import { companionOnlyStop } from './ama/companion-stop-wait.mjs';
@@ -2052,7 +2053,7 @@ async function dispatchAmaClosureFor({
       enabled: autonomousMergeExecutionEnabled, admitted: !prMetadata.isDraft
         && shared.decision.action === 'hammer' && shared.decision.reason !== 'automated-stop'
         && !['R05-structural', 'R10-conflict'].includes(shared.decision.row),
-      allowHammerFallback: cfg?.strictMode !== false && reviewState.headSha === currentPrHeadSha
+      allowHammerFallback: cfg?.strictMode !== false && sameFullReviewHead(reviewState.headSha, currentPrHeadSha)
         && shared.decision.action === 'hammer' && !isFullyCleanSettledReview(reviewState),
       now: new Date(now()).toISOString(), riskClass: reviewState.riskClass,
       handoffImpl: handoffFinalFixAllImpl, observeWaitImpl: observeWait });

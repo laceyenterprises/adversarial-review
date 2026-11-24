@@ -30,7 +30,7 @@
         "src/watcher-tick-preflight.mjs"
       ],
       "owner": "AMA closure orchestration",
-      "optionalField": "retiredAt, fallbackAt, escalatedAt (UTC ISO 8601); retired JSON pruned after seven days under the persistent lock; hammer ownership and successful escalation suppress deadline probes"
+      "optionalField": "retiredAt, fallbackAt, escalatedAt, lastProbedAt (UTC ISO 8601). Retired JSON is pruned after seven days under the persistent lock. Enrolled, escalated and hammer-owned receipts get retirement-only probes at most daily. Live closer or unreadable PR observations back off deadline probes for five minutes."
     },
     {
       "id": "ama-closure-waits",

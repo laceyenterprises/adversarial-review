@@ -53,15 +53,15 @@ export function reconcileQueueMergeObservation(entry, observation, { bot, report
 
 /** Takeover helper for an owner recovery adapter. Call only AFTER the prior
  * execution tree is stopped and drained; it never invokes a merge. */
-export async function observeQueueMergeOperation({ store, liveAdapter, operation, load }) {
+export async function observeQueueMergeOperation({ store, liveAdapter, operation, load, timeoutMs, drained = true }) {
   const intent = operation.intent ?? JSON.parse(operation.intent_json);
   const entry = store.readEntry(intent.entryId);
   const bot = entry?.decision?.attribution?.bot;
   if (intent.kind !== 'merge' || !entry || !bot) return null;
   const pinned = { ...entry, candidate: intent.candidate };
   const observation = await readQueueEvidence(liveAdapter, { entry: pinned, kind: 'merge-reconcile' },
-    queueWaitMs(5_000, { ceilingMs: 30_000, load }));
-  const result = reconcileQueueMergeObservation(pinned, observation, { bot, drained: true });
+    timeoutMs ?? queueWaitMs(5_000, { ceilingMs: 30_000, load }));
+  const result = reconcileQueueMergeObservation(pinned, observation, { bot, drained });
   return result && { ...result, observation };
 }
 
@@ -337,9 +337,9 @@ export function createQueueMergeService({ store, owner, liveAdapter, checkReader
         } catch (failure) { error = /^[a-z0-9-]{1,80}$/.test(failure?.message ?? '') ? failure.message : 'delivery-failed'; }
       }
       const delivered = receipt?.id === row.delivery_key && text(receipt.sourceRef);
-      store.db.prepare(`UPDATE finalization_queue_delivery SET attempts=attempts+1,last_error=?,
+      store.tx(() => store.db.prepare(`UPDATE finalization_queue_delivery SET attempts=attempts+1,last_error=?,
         receipt_json=COALESCE(receipt_json,?) WHERE delivery_key=?`).run(delivered ? null : (receipt ? 'delivery-receipt-invalid' : error),
-        delivered ? JSON.stringify({ id: receipt.id, sourceRef: receipt.sourceRef, at: now() }) : null, row.delivery_key);
+        delivered ? JSON.stringify({ id: receipt.id, sourceRef: receipt.sourceRef, at: now() }) : null, row.delivery_key));
       outcome[delivered ? 'delivered' : 'pending']++;
     }
     return outcome;

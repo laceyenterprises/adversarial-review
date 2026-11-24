@@ -13,7 +13,7 @@ import { validateCleanReview } from '../src/finalization/queue-clean-review.mjs'
 import { validateQueueHandoff } from '../src/finalization/queue-handoff.mjs';
 import { createGithubAdapterMergeSurface } from '../src/finalization/execution-surfaces.mjs';
 import { createQueueConsumer } from '../src/finalization/queue-consumer.mjs';
-import { createProductionQueue } from '../src/finalization/queue-production.mjs';
+import { createProductionQueue, reconcileProductionOperations } from '../src/finalization/queue-production.mjs';
 import { createQueueProductionEvidence } from '../src/finalization/queue-production-admission.mjs';
 import { prepareQueueCloserDispatch, readCompletedQueueHandoff } from '../src/finalization/queue-closer.mjs';
 import { buildHammerQueueHandoffRequest, hammerReviewProof } from '../src/finalization/hammer-queue-handoff.mjs';
@@ -37,9 +37,11 @@ const bot = 'queue-app[bot]';
 const requiredSet = resolveQueueRequiredSet({ cfg: { requiredCheckContexts: ['unit'] },
   rules: { complete: true, contexts: [], sourceRef: 'rules:fixture', version: '1' } });
 
-function receiptFixture({ prNumber, head, request }) {
+function receiptFixture({ prNumber, head, request, admissionGeneration = 1 }) {
   const { h, e } = { ...JSON.parse(JSON.stringify(request ? queueHandoffFixture(prNumber) : queueCleanFixture(prNumber)).replaceAll('b'.repeat(40), head)) };
-  if (!request) return { input: { ...h, prNumber }, evidence: { ...e, subject: { ...e.subject, prNumber } } };
+  if (!request) return { input: { ...h, prNumber, admissionGeneration,
+    handoffId: admissionGeneration === 1 ? h.handoffId : `${h.handoffId}-${admissionGeneration}` },
+  evidence: { ...e, subject: { ...e.subject, prNumber } } };
   h.handoffId = request.handoffId;
   h.reviewProof = request.reviewProof;
   e.reviewProof = { ok: true, head, digest: request.reviewProof.digest, sourceRef: 'github:audit' };
@@ -76,6 +78,21 @@ test('legacy/default config schedules nothing and a queue selector alone grants 
   assert.equal(result.reason, 'lane-transfer-required');
   assert.deepEqual(f.store.entries(lane), []);
   assert.equal(f.store.readOwner(lane).route_generation, 0);
+});
+
+test('the AMA master switch stops a transferred queue and refuses fresh admission', async t => {
+  const f = gitFixture(t, { noop: true });
+  const routeGeneration = await transfer(f);
+  const production = createProductionQueue({ rootDir: f.root, readConfig: () => cfg, now: f.now, observe: receiptFixture });
+  const route = { lane, routeGeneration };
+  const entry = await production.admitClean({ route, prNumber: 102, head: f.oldHead });
+  const owner = f.store.readOwner(lane);
+  const readConfig = () => ({ ...cfg, enabled: false });
+  await createQueueConsumer({ rootDir: f.root, readConfig, openStore: refuse, compose: refuse }).tick();
+  assert.deepEqual(f.store.readEntry(entry.entryId), entry);
+  assert.deepEqual(f.store.readOwner(lane), owner);
+  const disabled = createProductionQueue({ rootDir: f.root, readConfig, now: f.now, observe: refuse });
+  await assert.rejects(disabled.admitClean({ route, prNumber: 103, head: f.oldHead }), /queue-admission-paused/);
 });
 
 test('the production handoff receiver checks the route fence and replays a committed receipt', async t => {
@@ -232,13 +249,48 @@ test('the watcher relinquishes an active fence after an ambiguous merge response
   assert.equal(f.store.operations(lane).length, 1);
 });
 
+test('the same watcher reconciles an accepted merge after a lost reply and an unavailable readback', async t => {
+  const f = gitFixture(t, { noop: true });
+  const routeGeneration = await transfer(f);
+  const fixture = receiptFixture({ prNumber: 102, head: f.oldHead });
+  const production = createProductionQueue({ rootDir: f.root, readConfig: () => cfg, now: f.now, observe: () => fixture });
+  const { entryId } = await production.admitClean({ route: { lane, routeGeneration }, prNumber: 102, head: f.oldHead });
+  const world = fakeWorld(f, fixture);
+  const adapters = world.compose();
+  const { merge } = adapters.mergeSurface;
+  const { read } = adapters.liveAdapter;
+  let readbacks = 0;
+  adapters.mergeSurface.merge = args => { merge(args); throw new Error('lost reply'); };
+  adapters.liveAdapter.read = args => {
+    if (args.kind === 'merge-reconcile' && ++readbacks <= 2) throw new Error('read unavailable');
+    return read(args);
+  };
+  const consumer = createQueueConsumer({ rootDir: f.root, readConfig: () => cfg, now: f.now,
+    logger: { warn: () => {} }, compose: ({ store, ownerId }) => ({
+      ...adapters, recoveryAdapter: { stopDrainAndReconcile: args => reconcileProductionOperations({
+        ...args, store, ownerId, liveAdapter: adapters.liveAdapter,
+      }) },
+    }),
+  });
+  await consumer.tick();
+  assert.equal(f.store.readOwner(lane).owner_state, 'parked');
+  assert.equal(f.store.operations(lane).length, 1);
+  await consumer.tick();
+  assert.equal(f.store.readEntry(entryId).phase, 'merged');
+  assert.deepEqual(f.store.operations(lane), []);
+  assert.equal(world.writes.length, 1);
+  assert.equal(readbacks, 3);
+});
+
 for (const phase of ['parked-hold', 'parked-permission']) {
   test(`the watcher throttles ${phase} probes across restarts and settles expiry once`, async t => {
     const f = gitFixture(t, { noop: true });
     const generation = await transfer(f);
     const fixture = receiptFixture({ prNumber: 102, head: f.oldHead });
-    const production = createProductionQueue({ rootDir: f.root, readConfig: () => cfg, now: f.now, observe: () => fixture });
-    const { entryId } = await production.admitClean({ route: { lane, routeGeneration: generation }, prNumber: 102, head: f.oldHead });
+    const production = createProductionQueue({ rootDir: f.root, readConfig: () => cfg, now: f.now, observe: receiptFixture });
+    const subject = { lane, prNumber: 102, head: f.oldHead };
+    const input = { route: { lane, routeGeneration: generation }, ...subject };
+    const { entryId } = await production.admitClean(input);
     let reads = 0;
     const start = () => createQueueConsumer({ rootDir: f.root, readConfig: () => cfg, now: f.now,
       logger: { warn: message => assert.fail(message) },
@@ -274,13 +326,17 @@ for (const phase of ['parked-hold', 'parked-permission']) {
     f.clock(parked.patience.effectiveMs / 1000);
     await start().tick();
     const expired = f.store.readEntry(entryId);
-    assert.equal(expired.phase, 'parked-infrastructure');
+    assert.equal(expired.phase, 'returned-to-closer');
     assert.equal(expired.reason, 'admission-deadline-expired');
     assert.deepEqual(expired.patience, parked.patience);
     const settledFence = f.store.readOwner(lane).generation;
     await start().tick();
     assert.equal(f.store.readOwner(lane).generation, settledFence);
     assert.equal(reads, 3);
+    assert.equal(readCompletedQueueHandoff(f.store, subject, { includeClean: true }), null);
+    const readmitted = await production.admitClean(input);
+    assert.equal(readmitted.admissionGeneration, 2);
+    assert.notEqual(readmitted.entryId, entryId);
   });
 }
 
@@ -294,6 +350,8 @@ test('a required check supplied by a foreign App cannot satisfy branch rules', a
   const snapshot = { head: reviewHead, complete: true, requiredSet,
     results: [{ name: 'unit', app: { id: 8 }, head: reviewHead, conclusion: 'SUCCESS' }] };
   assert.equal(classifyQueueChecks(snapshot).kind, 'wait');
+  snapshot.results.push({ __typename: 'StatusContext', context: 'unit', head: reviewHead, state: 'SUCCESS' });
+  assert.equal(classifyQueueChecks(snapshot).reason, 'queue-branch-policy-unsupported');
   snapshot.results[0].app.id = 7;
   assert.equal(classifyQueueChecks(snapshot).kind, 'green');
 });
@@ -452,6 +510,11 @@ test('queue merge passes the exact candidate and explicit installation token to 
   assert.equal(options.env.GITHUB_TOKEN, 'installation-fixture');
   assert.ok(args.includes('--no-delete-branch'));
   assert.ok(!args.includes('--admin'));
+  const unavailable = createGithubAdapterMergeSurface({ recordReceipt: false, envTokenSelector: 'merge-agent',
+    env: { GHA_ADAPTER_BIN: '/fixture/github-adapter', GITHUB_TOKEN: 'foreign-ambient-fixture' },
+    execFileImpl: refuse }).merge;
+  const result = await unavailable({ subjectExternalId: `${lane.repository}#102`, revisionRef: reviewHead, timeoutMs: 5_000 });
+  assert.equal(result.reason, 'adapter-unavailable');
 });
 
 test('the next watcher resumes a published CI wait under the original deadline', async t => {

@@ -109,6 +109,11 @@ export function createQueueAdmissionService({ store, liveAdapter, gitAdapter, no
       const started = queueTime(now());
       deadline = deadline == null ? entry.patience.deadline : queueTime(deadline);
       deadline = new Date(Math.min(Date.parse(deadline), Date.parse(entry.patience.deadline))).toISOString();
+      const expired = (at) => Date.parse(at) >= Date.parse(deadline);
+      const deadlineDisposition = (at) => disposition(
+        Date.parse(at) >= Date.parse(entry.patience.deadline) ? 'returned-to-closer' : 'parked-infrastructure',
+        'admission-deadline-expired',
+      );
       const wait = queueWaitMs(5_000, { ceilingMs: 30_000, deadline, now: started, load });
       let live = null, receipt = null, decision;
       if (wait) {
@@ -130,7 +135,7 @@ export function createQueueAdmissionService({ store, liveAdapter, gitAdapter, no
         } catch { proofUnavailable = true; }
       }
       const at = queueTime(now());
-      if (Date.parse(at) >= Date.parse(deadline)) decision = disposition('parked-infrastructure', 'admission-deadline-expired');
+      if (expired(at)) decision = deadlineDisposition(at);
       else if (proofUnavailable) decision = disposition('parked-infrastructure', 'rebase-git-unavailable');
       else decision = classifyQueueAdmission(entry, receipt, live, derivation);
       // Snapshot CAS spans the await: a late recovery cannot overwrite a newer
@@ -141,20 +146,28 @@ export function createQueueAdmissionService({ store, liveAdapter, gitAdapter, no
         store.assertFence(fence, queueTime(now()));
         const current = store.readEntry(entryId);
         if (!isDeepStrictEqual(current, entry)) return current;
-        if (Date.parse(now()) >= Date.parse(deadline)) decision = disposition('parked-infrastructure', 'admission-deadline-expired');
+        const commitAt = queueTime(now());
+        if (expired(commitAt)) decision = deadlineDisposition(commitAt);
         if (decision.phase === 'ready' && !parked(entry.phase)
           && adapters.order(entry.lane).actionable[0]?.entryId !== entryId) return current;
-        // A repeated parked observation advances updatedAt for the consumer's
-        // next probe, including after restart. An observed expiry is settled.
-        if (decision.phase === entry.phase && decision.reason === entry.reason
-          && (!parked(entry.phase) || decision.reason === 'admission-deadline-expired')) return current;
-        return store.progress({ fence, entryId, phase: decision.phase, at: queueTime(now()), expectedEntry: entry,
+        // A repeated parked observation advances the durable next-probe clock.
+        if (decision.phase === entry.phase && decision.reason === entry.reason && !parked(entry.phase)) return current;
+        const result = store.progress({ fence, entryId, phase: decision.phase, at: commitAt, expectedEntry: entry,
           readmit: parked(entry.phase) && decision.phase === 'ready', patch: {
             reason: decision.reason, admission: { kind: receipt?.kind ?? null, observedAt: at,
               subject: live?.subject ?? null, structuralSourceRef: live?.structuralSourceRef ?? null,
               eligibility: decision.eligibility ?? null, currentReview: live?.currentReview ?? null,
               identity: live?.identity ?? null, permission: live?.permission ?? null },
           } });
+        if (result.phase === 'returned-to-closer' && result.reason === 'admission-deadline-expired') {
+          const reason = result.reason;
+          const causeKey = handoffDigest([entryId, reason]);
+          const payload = { causeKey, dependency: 'admission', reason, repo: entry.lane.repository,
+            pr: entry.prNumber, head: entry.head, deadline: entry.patience.deadline };
+          store.db.prepare('INSERT INTO finalization_queue_check_page VALUES (?,?,?,NULL) ON CONFLICT DO NOTHING')
+            .run(causeKey, entryId, JSON.stringify(payload));
+        }
+        return result;
       }); } finally { store.db.pragma(`busy_timeout = ${priorWait}`); }
     },
   };

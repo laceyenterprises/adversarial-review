@@ -34,6 +34,13 @@ export function classifyQueueChecks(snapshot) {
   }
   const pins = snapshot.requiredSet.checkApps ?? [];
   const contextName = item => String(item.context ?? item.name ?? '').trim().toLowerCase();
+  for (const { context, appId } of pins) {
+    const named = snapshot.results.filter(item => contextName(item) === context);
+    if (named.some(item => item.__typename === 'StatusContext' && item.app?.id == null)
+      && !named.some(item => item.app?.id === appId)) {
+      return { kind: 'wait', reason: 'queue-branch-policy-unsupported' };
+    }
+  }
   const results = snapshot.results.filter(item => {
     const contextPins = pins.filter(pin => pin.context === contextName(item));
     return contextPins.length === 0 || contextPins.some(pin => item.app?.id === pin.appId);

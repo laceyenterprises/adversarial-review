@@ -612,7 +612,7 @@ async function writeGitHubAdapter(kind, params = {}, {
   if (envTokenSelector != null) {
     // The caller already resolved an installation for this exact target.
     // Neither ambient GITHUB_TOKEN nor the default owner router can replace it.
-    if (!env.GH_TOKEN || !/^[a-z0-9-]+$/.test(envTokenSelector)) throw new Error('invalid explicit GitHub token binding');
+    if (!env.GH_TOKEN || !/^[a-z0-9-]+$/.test(envTokenSelector)) return null;
     env = { ...env, GITHUB_TOKEN: env.GH_TOKEN };
   } else if (githubOwnerTokens.routedOwner(params.repo)) {
     const profile = params.reviewerLogin && REVIEWER_ADAPTER_AUTH_BY_ROLE[reviewerRoleFromLogin(params.reviewerLogin)];

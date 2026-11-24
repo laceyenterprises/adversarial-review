@@ -1,6 +1,8 @@
 import { createHash } from 'node:crypto';
 import { execFile } from 'node:child_process';
+import { isAbsolute } from 'node:path';
 import { promisify } from 'node:util';
+import { resolveHomePath } from '../account-home.mjs';
 import { isDeepStrictEqual } from 'node:util';
 import { closerReviewProof } from '../ama/closer-review-proof.mjs';
 import { readAmaCloserDispatchRecordsForPR } from '../ama/dispatch-record-read.mjs';
@@ -61,7 +63,9 @@ async function signHammerPublication({ request, audit, hqRoot, env, signal, time
   const payload = { source: 'finalization_queue_hammer_publication', launch_request_id: closer.launchRequestId,
     worker_id: closer.workerId, worker_class: closer.workerClass, review_proof_digest: reviewProof.digest,
     audit_comment_id: audit.id };
-  const { stdout } = await exec('hq', ['attest', 'sign', '--root', hqRoot, '--repo', lane.repository,
+  const hqBin = env.HQ_BIN || resolveHomePath(env, '.local', 'bin', 'hq');
+  if (!hqBin || !isAbsolute(hqBin)) throw new Error('queue-hammer-signer-unavailable');
+  const { stdout } = await exec(hqBin, ['attest', 'sign', '--root', hqRoot, '--repo', lane.repository,
     '--pr', String(prNumber), '--head-sha', head, '--kind', 'produced', '--payload-json', JSON.stringify(payload)], {
     env: { ...deployAttestationVerifierEnv(env), HCP_SUBJECT: 'finalization-queue-v2' }, signal, timeout: timeoutMs,
     killSignal: 'SIGKILL', maxBuffer: 128 * 1024,
@@ -134,7 +138,7 @@ async function findingDispositions({ rootDir, observed, inventory, audit, commen
 export function createQueueProductionEvidence({ rootDir, hqRoot, env = process.env, live,
   readChain = readHeadAttestationChainForPr, readDispatches = readAmaCloserDispatchRecordsForPR,
   sign = signHammerPublication, now = () => new Date().toISOString() }) {
-  return async function observe({ lane, prNumber, head, request, cfg, deadline, signal: parentSignal }) {
+  return async function observe({ lane, prNumber, head, request, cfg, deadline, admissionGeneration = 1, signal: parentSignal }) {
     const timeoutMs = queueWaitMs(15_000, { ceilingMs: 60_000, deadline, now: now() });
     if (!timeoutMs) throw new Error('queue-admission-deadline-expired');
     const timerSignal = AbortSignal.timeout(timeoutMs);
@@ -195,8 +199,9 @@ export function createQueueProductionEvidence({ rootDir, hqRoot, env = process.e
     const latest = await live.snapshot(lane, prNumber, budget());
     requireOpen(latest, head);
     const primaryChange = { ok: true, head, intent: 'primary-change-preserved', sourceRef: `primary-change:${repo}#${prNumber}@${head}` };
-    const input = { schemaVersion: 1, lane, prNumber, head, admissionGeneration: request?.admissionGeneration ?? 1,
-      handoffId: request?.handoffId ?? `clean:${handoffDigest([lane, prNumber, head])}`, worker,
+    const input = { schemaVersion: 1, lane, prNumber, head, admissionGeneration: request?.admissionGeneration ?? admissionGeneration,
+      handoffId: request?.handoffId ?? `clean:${handoffDigest(admissionGeneration === 1
+        ? [lane, prNumber, head] : [lane, prNumber, head, admissionGeneration])}`, worker,
       sourceReview: { id: String(source.row.id), commitId: source.row.commit_id },
       attestations: { produced: produced.ref, reviewed: reviewed.ref }, primaryChange: { intent: primaryChange.intent, sourceRef: primaryChange.sourceRef },
       publication: { head, sourceRef: publication.sourceRef }, localValidation: { head, sourceRef: validation.sourceRef },

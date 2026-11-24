@@ -10039,6 +10039,13 @@ an exact-candidate merge receipt before settlement. Unknown evidence leaves the
 transition pending and both routes fenced. There is no automatic expiry escape.
 The adapter receives a finite, scaled-once timeout clipped to the deadline.
 
+The queue consumer honors the AMA master switch and the autonomous execution
+brake. A warning identifies a tick that remains in flight across three watcher
+intervals. For an ambiguous push or merge, the same watcher retries readback
+after its issuance callback drains. If the outcome remains unknown or the
+previous owner cannot prove drain, the lane retains its fence and queues a
+durable page. Use the existing operator recovery route for that fence.
+
 Promotion and rollback are operator work:
 
 1. Deploy both reviewed repositories without changing production routes. Confirm

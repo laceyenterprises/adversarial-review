@@ -18,7 +18,11 @@ fi
 ham_queue_launch_digest=$("$HAM_NODE_BIN" -e \\
   'process.stdout.write(require("node:crypto").createHash("sha256").update(process.argv[1]).digest("hex"))' \\
   "$HQ_LAUNCH_REQUEST_ID") || { ham_publish_abort 1; return 1; }
-HAM_AUDIT_COMMENT_BODY=$(printf '%s\\nHAM-Queue-Launch-SHA256: %s' "$HAM_AUDIT_COMMENT_BODY" "$ham_queue_launch_digest")
+if [[ "$HAM_AUDIT_COMMENT_BODY" != *$'\\n</sub>' ]]; then
+  echo "HAM publish requires a closing audit trailer block" >&2
+  ham_publish_abort 1; return 1
+fi
+HAM_AUDIT_COMMENT_BODY=$(printf '%s\\nHAM-Queue-Launch-SHA256: %s\\n</sub>' "\${HAM_AUDIT_COMMENT_BODY%$'\\n</sub>'}" "$ham_queue_launch_digest")
 `;
 
 export function renderHammerBootstrap(values) {

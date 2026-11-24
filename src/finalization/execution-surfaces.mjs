@@ -76,10 +76,9 @@ export function createGithubAdapterMergeSurface({
         }
         return { ok: false, reason: 'adapter-error', detail: err?.message || String(err) };
       }
-      // A null return means the adapter binary was not resolvable — local mode is
-      // not actually available; fail closed rather than reporting a phantom merge.
+      // An unavailable binary or credential binding can prevent invocation.
       if (!result || result.ran !== true) {
-        return { ok: false, reason: 'adapter-unavailable', detail: 'github adapter binary not resolvable' };
+        return { ok: false, reason: 'adapter-unavailable', detail: 'github adapter could not start' };
       }
       const payload = result.payload ?? {};
       const merged = payload.merged === true || payload.state === 'MERGED' || payload.ok === true;

@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { isMergeDisabledForRepository } from '../merge-disabled-repositories.mjs';
-import { withRepositoryStateCycle } from '../repository-state-lock.mjs';
+import { withRepositoryStateRead } from '../repository-state-lock.mjs';
 import { loadEffectiveMergeAuthorityConfig } from '../ama/effective-policy.mjs';
 import { createQueueAdmissionService } from './queue-admission.mjs';
 import { createQueueChecksService } from './queue-checks.mjs';
@@ -19,7 +19,6 @@ function nextParkedWake(entry) {
   if (entry.phase === 'parked-infrastructure' && entry.infrastructure?.nextProbeAt) {
     return Date.parse(entry.infrastructure.nextProbeAt);
   }
-  if (entry.reason === 'admission-deadline-expired') return Infinity;
   return Math.min(Date.parse(entry.updatedAt) + 60_000, Date.parse(entry.patience.deadline));
 }
 
@@ -27,22 +26,24 @@ function nextParkedWake(entry) {
  * for which BOTH the selector and durable route name the queue. Every phase
  * uses the existing owner/issuance fence. Unknown remote work stays pending. */
 export function createQueueConsumer({ rootDir, compose, readConfig = loadEffectiveMergeAuthorityConfig,
-  openStore = openFinalizationQueueStore, now = () => new Date().toISOString(), logger = console } = {}) {
-  let running = false;
+  openStore = openFinalizationQueueStore, now = () => new Date().toISOString(), logger = console,
+  stallWarningMs = 180_000 } = {}) {
+  let startedAt = null;
+  let warned = false;
   const ownerId = `watcher:${randomUUID()}`;
 
   async function advance(store, route, cfg) {
-    const durable = ownedRoute(store, route);
+    const durable = withRepositoryStateRead(rootDir, () => ownedRoute(store, route));
     if (!durable) return;
     const { lane } = route;
-    const adapters = compose({ store, cfg, now });
+    const adapters = compose({ store, cfg, now, ownerId });
     const owner = createQueueOwner({ store, now, recoveryAdapter: adapters.recoveryAdapter });
     const policy = {
       get autonomousExecutionDisabled() {
         try {
           const latest = readConfig({ rootDir });
           const current = resolveLaneRoute(latest, lane);
-          return current.executor !== 'queue-v2' || !current.autonomousExecutionEnabled
+          return latest.enabled !== true || current.executor !== 'queue-v2' || !current.autonomousExecutionEnabled
             || isMergeDisabledForRepository(latest, lane.repository);
         } catch { return true; }
       },
@@ -120,7 +121,7 @@ export function createQueueConsumer({ rootDir, compose, readConfig = loadEffecti
         if (stillOwned()) await owner.release({ fence, parkPending: true });
       }
     }
-    const order = admission.order(lane);
+    const order = withRepositoryStateRead(rootDir, () => admission.order(lane));
     const due = selectParked(order.parked);
     if (due) await processEntry(selectParked, 1);
     if ((due ? selectActionable() : order.actionable[0]) || store.operations(lane).length) {
@@ -129,25 +130,33 @@ export function createQueueConsumer({ rootDir, compose, readConfig = loadEffecti
   }
 
   return { async tick() {
-    if (running) return;
-    running = true;
+    if (startedAt !== null) {
+      if (!warned && Date.parse(now()) - startedAt >= stallWarningMs) {
+        warned = true;
+        logger.warn('[finalization-queue] prior tick is still running beyond its stall threshold');
+      }
+      return;
+    }
+    startedAt = Date.parse(now());
+    warned = false;
     try {
       const cfg = readConfig({ rootDir });
+      if (cfg.enabled !== true) return;
       const routes = (cfg.laneRoutes ?? []).filter(route => route.executor === 'queue-v2')
         .map(({ repository, base }) => resolveLaneRoute(cfg, { repository, base }))
         .filter(route => route.autonomousExecutionEnabled
           && !isMergeDisabledForRepository(cfg, route.lane.repository));
       if (!routes.length) return;
-      const store = openStore({ rootDir });
+      const store = withRepositoryStateRead(rootDir, () => openStore({ rootDir }));
       try {
         for (const route of routes) {
-          try { await withRepositoryStateCycle(rootDir, () => advance(store, route, cfg)); }
+          try { await advance(store, route, cfg); }
           catch (error) {
             const reason = /^[a-z-]{1,100}$/.test(error.message) ? error.message : error.name;
             logger.warn(`[finalization-queue] ${route.lane.repository}/${route.lane.base}: ${reason}`);
           }
         }
       } finally { store.close(); }
-    } finally { running = false; }
+    } finally { startedAt = null; }
   } };
 }

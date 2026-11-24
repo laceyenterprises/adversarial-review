@@ -1865,7 +1865,7 @@ async function main() {
   });
 
   const { createProductionQueue } = await import('./finalization/queue-production.mjs');
-  const finalizationQueue = createProductionQueue({ rootDir: ROOT });
+  const finalizationQueue = createProductionQueue({ rootDir: ROOT, stallWarningMs: 3 * intervalMs });
   const advanceFinalizationQueue = () => void finalizationQueue.tick().catch(error =>
     console.warn(`[finalization-queue] tick unavailable: ${
       redactAndCap(error?.message || error?.name || error, 500).replace(/\s+/g, ' ')}`));

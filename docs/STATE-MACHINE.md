@@ -2575,15 +2575,17 @@ Legacy lanes render no queue inputs and run the two paths unchanged.
 
 The queue watcher schedules admission probes from the last persisted progress
 time, at most once a minute per parked entry, or at original patience expiry
-if sooner. Expiry without a checks recovery schedule records
-`parked-infrastructure` / `admission-deadline-expired` without a remote read.
-Checks/merge infrastructure parks with a stored probe schedule continue on
-that schedule.
+if sooner. When admission patience expires, the watcher records
+`returned-to-closer` / `admission-deadline-expired` and queues a durable page
+without a remote read. Same-head readmission needs fresh evidence and a new
+generation. A Hammer readmission also needs a fresh launch. Checks and merge
+infrastructure parks with a stored probe schedule continue on that schedule.
 
 If a queue tick ends with an unresolved push or merge intent, the watcher parks
 its active owner fence so the next claimant can start reconciliation before
-expiry. Takeover still requires proven drain and authoritative outcomes for
-every unresolved operation.
+expiry. The same running watcher can retry authoritative readback for its
+own drained callback. It accepts proven publication or a terminal PR outcome.
+An unresolved operation retains its fence and a durable escalation page.
 
 HAMCONFLICTOWNER-01: a closer terminal audit with
 `reason: conflict-primary-unproven` at the live head transfers conflict work

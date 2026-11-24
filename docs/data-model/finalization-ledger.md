@@ -256,7 +256,10 @@ and reviewed attestation references, primary-change intent/reference,
 exact-head validation/publication references, and `dispositions`. Each
 disposition retains review id/commit, finding id/severity, evidence head and
 source reference. `fixed` and `withdrawn` require concrete fenced evidence.
-`fixed` also requires changed paths. `withdrawn` requires an explanation and
+`fixed` also requires changed paths. In production, fix credit is attested by
+the entitled Hammer's exact-head audit and a patch for the named file. The file
+patch provides supporting evidence and does not establish that individual finding
+lines changed. `withdrawn` requires an explanation and
 source path/line locations. `deferred` is an unresolved non-blocking finding
 with the authenticated audit reference. It requires the production handoff's
 trusted `evidence.strictNonBlockingRemediation: false` and `reviewProof`.
@@ -412,13 +415,22 @@ Live reads and SQLite writer waits use nominal 5-second budgets scaled once,
 clipped to the original entry/submission deadline with a 30-second finite ceiling
 and Node timer cap. Clean submission defaults to a 30-second absolute bound;
 entry patience remains nominal 30 minutes with a 60-minute ceiling. Read timers
-abort and reject late evidence; SQLite busy settings are restored. An expired
-entry parks rather than renewing its deadline. Owner expiry is not patience.
+abort and reject late evidence; SQLite busy settings are restored. Expired
+admission returns ownership to closure evaluation and enqueues a durable page.
+A fresh submission can establish new evidence for a new generation. A Hammer
+submission also needs a fresh launch.
+Owner expiry is independent of admission patience.
 For entries without a checks/merge infrastructure probe schedule, the watcher
 uses persisted `updatedAt` to space admission probes by one minute, waking at
 original patience expiry if sooner. A repeated parked observation advances
-`updatedAt` through ordinary progress. Expiry records `admission-deadline-expired`
-without remote I/O and ends admission probes for that entry.
+`updatedAt` through ordinary progress. The one-minute cadence and original
+60-minute patience ceiling limit these scheduling events to about 60 per entry.
+Expiry records `admission-deadline-expired` without remote I/O and ends
+admission probes for that entry. When a production
+watcher encounters its own parked issuance intent, it retries authoritative
+readback up to three times inside the owner recovery budget. Positive publication
+or terminal merge evidence can settle the intent. An unproven outcome keeps the
+lane fenced and enqueues a page keyed to the operation.
 
 `resolveQueueAdmissionAdapters` and `resolveCleanReviewStore` also serve the
 read-only deployed probe. It compares the real clean-review schema, resolves

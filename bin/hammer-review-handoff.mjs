@@ -46,6 +46,8 @@ async function handoffExactHead({ rootDir, repo, prNumber, headSha }) {
   return { outcome: 'exact-head-review-required', headSha };
 }
 
+export { handoffExactHead };
+
 export async function handoffHammerReview({ rootDir, repo, prNumber, headSha }) {
   const identity = { repo, prNumber, headSha };
   const live = findLiveAmaCloserLease(rootDir, identity);

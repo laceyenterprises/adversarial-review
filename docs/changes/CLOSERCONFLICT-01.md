@@ -55,3 +55,7 @@ this change's UNKNOWN admission semantics and main's exact-head primary review
 recovery. The original author declaration of `mergeabilityUnknown` stays at the
 verdict boundary; the earlier custody guard reads mergeability directly, so its
 precedence stays intact without removing the primary source region.
+
+The exact-head review handoff helper is exported for direct isolated consumers,
+matching the existing retry handoff export. Its lease checks, audit behavior
+and command-line entry point are unchanged.

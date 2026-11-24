@@ -10,19 +10,22 @@ export async function maybeRunDocsFastPath({ subject, reviewRow, cfg, loadCfg = 
   readReviewRow = () => reviewRow, readDocsFastPathImpl = readDocsFastPath,
   publishStatusImpl = publishAdversarialGateStatus,
   fetchProtectionImpl = readProtection,
-  runDaemonImpl = runDaemonCleanMergeAttempt } = {}) {
+  runDaemonImpl = runDaemonCleanMergeAttempt, onHandled = () => {} } = {}) {
   if (subject.terminal || subject.isDraft) return false;
-  const withdrawWaiver = async headSha => {
+  const withdrawWaiver = async (headSha, reason = 'docs-review-requested') => {
     try {
       await publishStatusImpl(rootDir, { repo: repoPath, prNumber, headSha,
-        decision: { state: 'pending', reason: 'docs-review-requested', description: 'Adversarial review requested; docs waiver withdrawn.' }, execFileImpl });
+        decision: { state: 'pending', reason, description: 'Adversarial review pending; docs waiver withdrawn.' }, execFileImpl });
       return false;
     } catch (error) {
       logger.warn?.(`[docs-fast-path] waiver withdrawal unavailable: ${error.message}`);
+      onHandled('docs-waiver-withdrawal-unavailable');
       return true;
     }
   };
   if (docsReviewRequested({ ...subject, ...reviewRow })) return withdrawWaiver(subject.headSha);
+  if (reviewRow?.reviewer && (reviewRow.revision_ref === subject.headSha
+    || reviewRow.reviewer_head_sha === subject.headSha)) return false;
   let evidence = null;
   const read = async args => {
     const current = await readDocsFastPathImpl({ repoPath, prNumber, execFileImpl, ...args });
@@ -42,7 +45,10 @@ export async function maybeRunDocsFastPath({ subject, reviewRow, cfg, loadCfg = 
   // Neither a reviewer nor a closer is useful while these deterministic gates wait.
   try {
     cfg = loadCfg();
-    if (!cfg?.enabled || cfg.autonomousMergeExecutionEnabled === false) return true;
+    if (!cfg?.enabled || cfg.autonomousMergeExecutionEnabled === false) {
+      onHandled('docs-merge-disabled');
+      return true;
+    }
     const branchProtection = await fetchProtectionImpl({
       repoPath, baseBranch: evidence.baseBranch, execFileImpl });
     await publishStatusImpl(rootDir, { repo: repoPath, prNumber, headSha: evidence.headSha,
@@ -54,9 +60,20 @@ export async function maybeRunDocsFastPath({ subject, reviewRow, cfg, loadCfg = 
     if (result?.liveGate?.docsFastPath?.reviewRequested) {
       return withdrawWaiver(evidence.headSha);
     }
-    logger.log?.(`[docs-fast-path] ${repoPath} PR ${prNumber}: ${result?.reason || result?.disposition}`);
+    const reason = result?.reason || result?.disposition || 'docs-merge-deferred';
+    const gates = result?.reasons?.join(',');
+    logger.log?.(`[docs-fast-path] ${repoPath} PR ${prNumber}: ${reason}${gates ? ` gates=${gates}` : ''}`);
+    if (result?.merged || ['MERGED', 'CLOSED'].includes(result?.liveGate?.prState)) {
+      onHandled(reason, true);
+      return true;
+    }
+    // The daemon declined the shortcut. Restore the pending gate before the
+    // ordinary first pass, which can run while external CI is red.
+    if (reason === 'not-eligible') return withdrawWaiver(evidence.headSha, 'docs-fast-path-not-eligible');
+    onHandled(reason);
   } catch (error) {
     logger.warn?.(`[docs-fast-path] merge deferred: ${error.message}`);
+    onHandled('docs-merge-unavailable');
   }
   return true;
 }

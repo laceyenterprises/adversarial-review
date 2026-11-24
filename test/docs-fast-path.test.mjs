@@ -52,7 +52,7 @@ test('DOCSFASTPATH-01 merge uses the daemon lease, green exact head and recorded
   const rootDir = mkdtempSync(join(tmpdir(), 'docs-fast-path-'));
   t.after(() => rmSync(rootDir, { recursive: true, force: true }));
   let merged = 0, attested = 0, rollupReads = 0;
-  const published = [], comparedRanges = [];
+  const published = [], comparedRanges = [], daemonResults = [];
   let scenario = 'green';
   const repoPath = 'example/docs-service';
   let prNumber = 2;
@@ -101,14 +101,25 @@ test('DOCSFASTPATH-01 merge uses the daemon lease, green exact head and recorded
   const run = () => maybeRunDocsFastPath({ rootDir, repoPath, prNumber, cfg, subject, logger: quiet,
     readDocsFastPathImpl: async () => evidence,
     publishStatusImpl: async (_root, { decision }) => { published.push(decision.state); },
-    fetchProtectionImpl: async () => ({ requiredContexts: ['ci', 'agent-os/adversarial-gate'] }), runDaemonImpl });
+    fetchProtectionImpl: async () => ({ requiredContexts: ['ci', 'agent-os/adversarial-gate'] }),
+    runDaemonImpl: async args => {
+      const result = await runDaemonImpl(args);
+      daemonResults.push(result);
+      return result;
+    } });
   for (scenario of ['red', 'conflict', 'live-red', 'live-conflict', 'moved', 'attestation-outage', 'late-review', 'retarget', 'base-non-docs']) {
     rollupReads = 0; prNumber++;
     const priorAttested = attested;
-    assert.equal(await run(), scenario !== 'late-review', scenario);
+    const handled = await run();
+    const normalReview = ['red', 'conflict', 'late-review'].includes(scenario);
+    if (scenario === 'red') {
+      assert.equal(daemonResults.at(-1).reason, 'not-eligible');
+      assert.ok(daemonResults.at(-1).reasons.includes('ci-not-green'));
+    }
+    assert.equal(handled, !normalReview, scenario);
     assert.equal(merged, 0, scenario);
     assert.equal(attested - priorAttested, scenario === 'attestation-outage' ? 1 : 0, scenario);
-    assert.equal(published.at(-1), scenario === 'late-review' ? 'pending' : 'success', scenario);
+    assert.equal(published.at(-1), normalReview ? 'pending' : 'success', scenario);
     assert.equal(inspectMergeLease({ rootDir, repo: repoPath, base: 'main' }).lease, null, scenario);
   }
   for (scenario of ['green', 'base-advanced']) {

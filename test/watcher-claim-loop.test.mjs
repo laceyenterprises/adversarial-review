@@ -308,6 +308,93 @@ function fileUrl(...parts) {
   return pathToFileURL(path.join(REPO_ROOT, ...parts)).href;
 }
 
+for (const scenario of ['first review', 'repair custody', 'legacy rescue intent']) {
+  test(`rowless subject with failed CI handles ${scenario}`, () => {
+    const repairOwned = scenario === 'repair custody';
+    const legacyIntent = scenario === 'legacy rescue intent';
+    const tmp = mkdtempSync(path.join(tmpdir(), 'watcher-first-review-'));
+    const head = 'b'.repeat(40);
+    const identity = { repo: 'laceyenterprises/adversarial-review', prNumber: 101 };
+    try {
+      const loaderPath = path.join(tmp, 'loader.mjs');
+      const registerPath = path.join(tmp, 'register.mjs');
+      const runnerPath = path.join(tmp, 'runner.mjs');
+      const docsUrl = fileUrl('src', 'docs-fast-path.mjs');
+      const docsFixture = `
+        import { maybeRunDocsFastPath as actual } from ${JSON.stringify(`${docsUrl}?actual`)};
+        export const maybeRunDocsFastPath = args => actual({ ...args,
+          loadCfg: () => ({ enabled: true }),
+          publishStatusImpl: async (_root, { decision }) => {
+            (globalThis.__docsStatuses ||= []).push(decision.state);
+          },
+          fetchProtectionImpl: async () => ({}),
+          runDaemonImpl: async () => ({ reason: 'not-eligible', reasons: ['ci-not-green'] }),
+        });
+      `;
+      const loader = buildLoaderSource({
+        subjectHeads: { 101: head },
+        subject101Overrides: { baseRefName: 'main', baseSha: 'a'.repeat(40) },
+      });
+      writeFileSync(loaderPath, loader.replace('  return nextLoad(url, context);', `
+        if (url === ${JSON.stringify(docsUrl)}) {
+          return { format: 'module', shortCircuit: true, source: ${JSON.stringify(docsFixture)} };
+        }
+        return nextLoad(url, context);`));
+      writeFileSync(registerPath, buildRegisterSource(loaderPath));
+      writeFileSync(runnerPath, buildRunnerSource({
+        freshHeads: { 101: head },
+        prePollSetup: repairOwned ? `
+          const { mutateRepairEpochs } = await import(${JSON.stringify(fileUrl('src', 'ama', 'hammer-retry-cap.mjs'))});
+          mutateRepairEpochs(${JSON.stringify(REPO_ROOT)}, ${JSON.stringify(identity)}, ledger => {
+            ledger.repairEpochs = [{ id: 'fixture-epoch', ownerKey: 'fixture-repair',
+              baseHead: '${head}', ownerObservedAt: new Date().toISOString() }];
+          });
+        ` : legacyIntent ? `
+          const { recordExplicitReviewIntent } = await import(${JSON.stringify(fileUrl('src', 'explicit-review-intent.mjs'))});
+          recordExplicitReviewIntent(db, { ...${JSON.stringify(identity)}, headSha: '${head}',
+            requestId: 'rescue:fixture:${head}', actor: 'merge-agent-rescue',
+            requestedAt: new Date().toISOString() });
+        ` : '',
+        afterFirstPoll: `
+          const row = db.prepare('SELECT * FROM reviewed_prs WHERE pr_number=101').get();
+          assert.ok(row, 'discovery must persist a review row');
+          if (${repairOwned}) {
+            assert.equal(row.review_status, 'pending');
+            assert.equal(row.review_attempts, 0);
+            assert.match(row.failure_message, /repair-reservation-owns-pr.*fixture-epoch/);
+            assert.ok(!claims.some(claim => claim.prNumber === 101));
+            mutateRepairEpochs(${JSON.stringify(REPO_ROOT)}, ${JSON.stringify(identity)}, ledger => {
+              ledger.repairEpochs[0].terminalAt = new Date().toISOString();
+            });
+            await pollOnce(octokit, pollOptions);
+          }
+          assert.equal(claims.filter(claim => claim.prNumber === 101).length, 1);
+          assert.equal(readPassRows(db).find(pass => pass.pr_number === 101).pass_kind, ${JSON.stringify(legacyIntent ? 'rereview' : 'first-pass')});
+          await pollOnce(octokit, pollOptions);
+          assert.equal(claims.filter(claim => claim.prNumber === 101).length, 1);
+          assert.deepEqual(globalThis.__docsStatuses, ${JSON.stringify(repairOwned ? ['success', 'pending', 'success', 'pending'] : ['success', 'pending'])});
+        `,
+      }));
+      const env = installGhFixture(tmp);
+      const ghPath = path.join(tmp, 'gh');
+      writeFileSync(ghPath, readFileSync(ghPath, 'utf8').replace('set -euo pipefail', `set -euo pipefail
+if [[ "\${1:-}" == api && "\${2:-}" == *'/compare/'* ]]; then
+  printf '{"files":[{"filename":"docs/example.md","status":"modified"}]}\\n'
+  exit 0
+fi
+`).replace('"conclusion":"SUCCESS"', '"status":"COMPLETED","conclusion":"FAILURE"'));
+      const result = spawnSync(process.execPath, ['--no-warnings', '--import', pathToFileURL(registerPath).href, runnerPath],
+        { cwd: REPO_ROOT, encoding: 'utf8', env: fixtureEnv({ ...env, WATCHER_CLAIM_LOOP_FIXTURE_HEAD_101: head }), timeout: 60000 });
+      assert.equal(result.status, 0, `${result.stdout || ''}${result.stderr || ''}`);
+      assert.match(result.stdout, /PR 101: not-eligible gates=ci-not-green/);
+      if (repairOwned) assert.match(result.stdout, /#101:.*repair-reservation-owns-pr.*fixture-epoch/);
+    } finally {
+      rmSync(hammerRetryCapFilePath(REPO_ROOT, identity), { force: true });
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+}
+
 const DEFAULT_FOLLOW_UP_JOBS_SOURCE = "export const FOLLOW_UP_JOB_DIRS = { pending: 'pending', inProgress: 'in-progress', completed: 'completed', failed: 'failed', stopped: 'stopped', workspaces: 'workspaces', stoppedArchived: 'stopped-archived' }; export function classifyFollowUpCriticality() { return { critical: false, blockingFindingCount: 0, blockingFindingState: 'known', verdict: 'comment-only' }; } export function createFollowUpJob() { return { jobPath: '/tmp/watcher-claim-loop-follow-up.json' }; } export function listFollowUpJobsInDir() { return []; } export function listInProgressFollowUpJobs() { return []; } export function resolveRoundBudgetForJob() { return { roundBudget: 1, riskClass: 'medium' }; } export function summarizePRRemediationLedger() { return { completedRoundsForPR: 0, latestRiskClass: 'medium', latestMaxRounds: 1 }; } export const PUBLIC_REPLY_MAX_CHARS = 1200; export function detectPublicReplyNoiseSignal() { return null; } export function isActiveFollowUpJobStatus(status) { return ['pending','inProgress','in-progress','in_progress'].includes(status); } export function isSettledReviewJob() { return false; } export function markFollowUpJobStopped() { return { status: 'stopped' }; } export function requeueFollowUpJobForNextRound() { return { requeued: false }; } export function markFollowUpJobFailed() { return { status: 'failed' }; } export function requeueInProgressFollowUpJobForRetry() { return { requeued: false }; } export function stopPendingNoRemediationJobs() { return []; } export function writeFollowUpJob() {} export function voidSingleReviewCredit() { return { voided: false }; }"
   // The CI recovery module imports these store methods transitively. Claim-loop
   // fixtures own no persisted job, so an unexpected call must fail visibly.

@@ -89,13 +89,46 @@ export const stmtCreateReviewRow = db.prepare(
      review_attempts, labels_json
    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?)`
 );
+// An empty reviewer records discovery before routing and keeps the row out of
+// durable reviewer refill until the watcher selects a route.
+export const stmtRecordReviewDiscoveryWait = db.prepare(
+  `INSERT INTO reviewed_prs (
+     repo, pr_number, domain_id, subject_external_id, revision_ref,
+     reviewed_at, reviewer, pr_state, linear_ticket, review_status,
+     review_attempts, labels_json, failure_message, is_draft
+   ) VALUES (@repo, @prNumber, @domainId, @subjectId, @head, @now, '', 'open',
+     @ticket, 'pending', 0, @labels, @reason, @draft)
+   ON CONFLICT(repo, pr_number) DO UPDATE SET revision_ref = excluded.revision_ref,
+     failure_message = excluded.failure_message, is_draft = excluded.is_draft
+   WHERE reviewed_prs.domain_id = excluded.domain_id
+     AND reviewed_prs.pr_state = 'open' AND reviewed_prs.review_status = 'pending'
+     AND reviewed_prs.reviewer = '' AND reviewed_prs.rereview_requested_at IS NULL`
+);
+export const stmtAssignDiscoveredReviewer = db.prepare(
+  `UPDATE reviewed_prs SET reviewer = ?, failure_message = NULL,
+     revision_ref = CASE WHEN rereview_requested_at IS NULL THEN ? ELSE revision_ref END,
+     labels_json = COALESCE(?, labels_json)
+   WHERE repo = ? AND pr_number = ? AND domain_id = ?
+     AND pr_state = 'open' AND review_status = 'pending' AND reviewer = ''`
+);
 export const stmtCreateFastMergeSkippedReviewRow = db.prepare(
-  `INSERT OR IGNORE INTO reviewed_prs (
+  `INSERT INTO reviewed_prs (
      repo, pr_number, domain_id, subject_external_id, revision_ref,
      reviewed_at, reviewer, pr_state, linear_ticket, review_status,
      review_attempts, labels_json, fast_merge_authorized_head_sha,
      fast_merge_audit_status, fast_merge_audit_payload_json, fast_merge_audit_error
-   ) VALUES (?, ?, ?, ?, ?, ?, ?, 'fast_merge_skipped', ?, 'fast_merge_skipped', 0, ?, ?, ?, ?, ?)`
+   ) VALUES (?, ?, ?, ?, ?, ?, ?, 'fast_merge_skipped', ?, 'fast_merge_skipped', 0, ?, ?, ?, ?, ?)
+   ON CONFLICT(repo, pr_number) DO UPDATE SET revision_ref = excluded.revision_ref,
+     reviewed_at = excluded.reviewed_at, reviewer = excluded.reviewer,
+     pr_state = excluded.pr_state, review_status = excluded.review_status,
+     labels_json = excluded.labels_json, failure_message = NULL,
+     fast_merge_authorized_head_sha = excluded.fast_merge_authorized_head_sha,
+     fast_merge_audit_status = excluded.fast_merge_audit_status,
+     fast_merge_audit_payload_json = excluded.fast_merge_audit_payload_json,
+     fast_merge_audit_error = excluded.fast_merge_audit_error
+   WHERE reviewed_prs.domain_id = excluded.domain_id
+     AND reviewed_prs.pr_state = 'open' AND reviewed_prs.review_status = 'pending'
+     AND reviewed_prs.reviewer = '' AND reviewed_prs.rereview_requested_at IS NULL`
 );
 export const stmtUpdateReviewRouting = db.prepare(
   UPDATE_REVIEW_ROUTING_SQL

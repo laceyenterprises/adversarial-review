@@ -1,7 +1,7 @@
 import fsExt from 'fs-ext';
 import { createHash } from 'node:crypto';
-import { closeSync, mkdirSync, openSync, readFileSync } from 'node:fs';
-import { opendir, readFile, unlink } from 'node:fs/promises';
+import { closeSync, fstatSync, mkdirSync, openSync, readFileSync, statSync, unlinkSync } from 'node:fs';
+import { opendir, readFile, stat } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { writeFileAtomic } from '../atomic-write.mjs';
 import { readLaunchRequestStatusFromLedgerAsync } from '../session-ledger-read-adapter.mjs';
@@ -22,6 +22,22 @@ export function readCloserSuccessor(rootDir, identity) {
   catch (error) { if (error.code === 'ENOENT') return null; throw error; }
 }
 
+// Pruning can unlink a lock while another process has already opened it.
+// Only enter the critical section on an inode still reachable by new openers.
+function lockReceipt(path) {
+  const fd = openSync(`${path}.lock`, 'a', 0o640);
+  try {
+    fsExt.flockSync(fd, 'exnb');
+    if (fstatSync(fd).nlink === 0) {
+      throw Object.assign(new Error('receipt lock was pruned'), { code: 'EAGAIN' });
+    }
+    return fd;
+  } catch (error) {
+    closeSync(fd);
+    throw error;
+  }
+}
+
 // Synchronous enrollment lets the pre-claim cap stop transfer custody durably
 // before returning. The watcher executes it using fresh admission evidence.
 export function requestCloserSuccessor({ rootDir, repo, prNumber, headSha, reviewBody, refusingReasons = [],
@@ -35,10 +51,9 @@ export function requestCloserSuccessor({ rootDir, repo, prNumber, headSha, revie
     reviewBody, refusingReasons, requestedAt: now };
   try { writeFileAtomic(path, `${JSON.stringify(record)}\n`, { overwrite: false }); }
   catch (error) { if (error.code !== 'EEXIST') throw error; }
-  const fd = openSync(`${path}.lock`, 'a', 0o640);
-  try { fsExt.flockSync(fd, 'exnb'); }
+  let fd;
+  try { fd = lockReceipt(path); }
   catch (error) {
-    closeSync(fd);
     if (['EAGAIN', 'EWOULDBLOCK'].includes(error.code)) return readCloserSuccessor(rootDir, identity);
     throw error;
   }
@@ -69,9 +84,9 @@ export async function settleCloserSuccessor({ rootDir, repo, prNumber, headSha, 
   const path = closerSuccessorPath(rootDir, identity);
   const initial = readCloserSuccessor(rootDir, identity);
   if (!initial) return null;
-  const fd = openSync(`${path}.lock`, 'a', 0o640);
-  try { fsExt.flockSync(fd, 'exnb'); }
-  catch (error) { closeSync(fd); if (['EAGAIN', 'EWOULDBLOCK'].includes(error.code)) return { status: 'successor-pending' }; throw error; }
+  let fd;
+  try { fd = lockReceipt(path); }
+  catch (error) { if (['EAGAIN', 'EWOULDBLOCK'].includes(error.code)) return { status: 'successor-pending' }; throw error; }
   try {
     let record = readCloserSuccessor(rootDir, identity);
     if (!record) return { status: 'successor-pending' };
@@ -83,6 +98,7 @@ export async function settleCloserSuccessor({ rootDir, repo, prNumber, headSha, 
       delete record.lastProbedAt;
       writeFileAtomic(path, `${JSON.stringify(record)}\n`);
     }
+    if (enabled && admitted && allowHammerFallback && record.fallbackAt) return { ...record, action: 'fallback' };
     let result;
     try {
       const handoff = handoffImpl || (await import('./final-fix-all.mjs')).handoffFinalFixAll;
@@ -110,10 +126,12 @@ export async function settleCloserSuccessor({ rootDir, repo, prNumber, headSha, 
 
 async function hasLiveCloser(rootDir, identity) {
   const lease = readAmaCloserLease(rootDir, identity);
-  if (lease?.status !== 'dispatched' || !lease.lrqId) return false;
+  if (!lease) return false;
+  if (lease.status === 'pending' || (lease.status === 'dispatched' && !lease.lrqId)) return null;
+  if (lease.status !== 'dispatched') return false;
   const probe = await readLaunchRequestStatusFromLedgerAsync({ rootDir, launchRequestId: lease.lrqId,
     includeRetryChain: true });
-  return launchRequestInFlight(probe) === true && isCurrentAmaCloserLease(rootDir, lease);
+  return isCurrentAmaCloserLease(rootDir, lease) ? launchRequestInFlight(probe) : null;
 }
 
 // Scan independently of dispatch selection. An old receipt only warrants a
@@ -149,10 +167,12 @@ export function createCloserSuccessorDeadlineSweep({ rootDir, readLive, now = Da
       || closerSuccessorPath(rootDir, receipt) !== path) return false;
     const { repo, prNumber, headSha } = receipt;
     if (expired(receipt, now())) {
-      const fd = openSync(`${path}.lock`, 'a', 0o640);
+      const fd = lockReceipt(path);
       try {
-        fsExt.flockSync(fd, 'exnb');
-        if (expired(readCloserSuccessor(rootDir, receipt), now())) await unlink(path);
+        if (expired(readCloserSuccessor(rootDir, receipt), now())) {
+          unlinkSync(path);
+          unlinkSync(`${path}.lock`);
+        }
       } finally { closeSync(fd); }
       return false;
     }
@@ -166,19 +186,24 @@ export function createCloserSuccessorDeadlineSweep({ rootDir, readLive, now = Da
     const liveHead = /^[0-9a-f]{40}$/i.test(live?.headRefOid) ? live.headRefOid.toLowerCase() : null;
     const retire = ['closed', 'merged'].includes(live?.state) || live?.mergedAt || live?.closedAt
       || (live?.state === 'open' && liveHead && liveHead !== headSha);
-    const shouldPage = !retire && owesDeadline(receipt) && live?.state === 'open' && liveHead === headSha
-      && !await hasLiveCloserImpl(rootDir, { repo, prNumber, headSha });
+    let closerLive = null;
+    if (!retire && owesDeadline(receipt) && live?.state === 'open' && liveHead === headSha) {
+      try {
+        closerLive = await hasLiveCloserImpl(rootDir, { repo, prNumber, headSha });
+      } catch (error) {
+        logger.warn?.(`[closer-successor] closer liveness read failed for ${entry.name}: ${error.message}`);
+      }
+    }
     if (stopped) return true;
-    const fd = openSync(`${path}.lock`, 'a', 0o640);
+    const fd = lockReceipt(path);
     try {
-      fsExt.flockSync(fd, 'exnb');
       const current = readCloserSuccessor(rootDir, receipt);
       const observedAt = now();
       if (current?.requestedAt !== receipt.requestedAt || !probeDue(current, observedAt)) return true;
       const timestamp = new Date(observedAt).toISOString();
       if (retire) {
         current.retiredAt = timestamp;
-      } else if (shouldPage && owesDeadline(current)) {
+      } else if (closerLive === false && owesDeadline(current)) {
         await observeWaitImpl({ rootDir, repo, prNumber, headSha, now: observedAt,
           reason: 'closer-successor-overdue', immediate: true, waitClass });
         current.escalatedAt = timestamp;
@@ -202,8 +227,20 @@ export function createCloserSuccessorDeadlineSweep({ rootDir, readLive, now = Da
         for (let scanned = 0, probes = 0; !stopped && scanned < 100 && probes < 4; scanned++) {
           const entry = await cursor.read();
           if (!entry) { await closeCursor(); break; }
-          if (!entry.isFile() || !/^[0-9a-f]{64}\.json$/.test(entry.name)) continue;
-          try { if (await check(entry)) probes++; }
+          if (!entry.isFile() || !/^[0-9a-f]{64}\.json(?:\.lock)?$/.test(entry.name)) continue;
+          try {
+            if (entry.name.endsWith('.lock')) {
+              const path = join(directory, entry.name.slice(0, -5));
+              try { await stat(path); }
+              catch (error) {
+                if (error.code !== 'ENOENT') throw error;
+                const fd = lockReceipt(path);
+                try {
+                  if (!statSync(path, { throwIfNoEntry: false })) unlinkSync(`${path}.lock`);
+                } finally { closeSync(fd); }
+              }
+            } else if (await check(entry)) probes++;
+          }
           catch (error) {
             probes++;
             if (!['ENOENT', 'EAGAIN', 'EWOULDBLOCK'].includes(error.code)) {

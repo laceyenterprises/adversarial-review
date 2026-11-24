@@ -31,7 +31,8 @@ const fixture = async t => {
   return root;
 };
 
-for (const scenario of ['matching-route', 'merged-daemon-route', 'no-observation']) {
+for (const scenario of ['matching-route', 'merged-daemon-route', 'no-observation', 'uncovered-head',
+  'retry-cap-page', 'manual-closure']) {
   test(`strict-route journal acceptance handles ${scenario}`, async t => {
     const jq = spawnSync('jq', ['--version'], { timeout: 5000 });
     if (jq.error?.code === 'ENOENT') return t.skip('jq unavailable for the operator acceptance command');
@@ -49,20 +50,38 @@ for (const scenario of ['matching-route', 'merged-daemon-route', 'no-observation
       next: { action: 'hammer', reason: 'review-findings-final' } };
     const daemon = { ...sample, prNumber: 8, state: 'MERGED', next: { action: 'daemon-merge' } };
     const outsideWindow = { ...daemon, observedAt: '2026-01-02T12:00:00Z', observedAtMs: now };
-    const observations = [outsideWindow, { ...daemon, observedAtMs: now + 2, exactReview: null }];
+    const windowEnd = { ...daemon, observedAtMs: now + 1 + 86_400_000 };
+    const observations = [outsideWindow, windowEnd, { ...daemon, observedAtMs: now + 2, exactReview: null }];
+    if (scenario === 'uncovered-head') {
+      observations.push({ ...daemon, observedAtMs: now + 3, next: { action: 'wait', reason: 'needs-closer' } });
+    }
     if (scenario !== 'no-observation') observations.push({ ...sample, observedAtMs: now + 2 });
     if (scenario === 'merged-daemon-route') {
       await writeFile(join(journalDir, 'observations.jsonl.1'), JSON.stringify({ ...daemon, observedAtMs: now + 1 }) + '\n');
     }
     await writeFile(join(journalDir, 'observations.jsonl'), observations.map(event => JSON.stringify(event)).join('\n') + '\n');
+    const evidenceFile = join(root, 'evidence.json');
+    const evidence = ['retry-cap-page', 'manual-closure'].includes(scenario)
+      ? Array.from({ length: 4 }, (_, index) => ({ kind: scenario, prNumber: sample.prNumber, head,
+        observedAtMs: now + 3, url: `https://example.invalid/event/${index}` })) : [];
+    await writeFile(evidenceFile, JSON.stringify(evidence));
     const plan = loadYaml(await readFile(new URL('../modules/worker-pool/post-merge-actions/AMASTRICTROUTE-01.yaml', import.meta.url), 'utf8'));
     const result = spawnSync('/bin/sh', ['-c', 'node() { "$TEST_NODE" "$@"; }\n' + plan.operator_steps[0].command], {
       cwd: root, encoding: 'utf8', timeout: 5000,
-      env: { ...process.env, TEST_NODE: process.execPath, REVIEW_REPO: repo, DEPLOYED_AT_UTC: '2026-01-02T12:00:00.001Z' },
+      env: { ...process.env, TEST_NODE: process.execPath, REVIEW_REPO: repo,
+        DEPLOYED_AT_UTC: '2026-01-02T12:00:00.001Z', ACCEPTANCE_EVIDENCE_JSON: evidenceFile },
     });
-    assert.equal(result.status, scenario === 'matching-route' ? 0 : 5, result.stderr);
-    if (scenario === 'merged-daemon-route') assert.match(result.stderr, /unexpected daemon route/);
-    if (scenario === 'no-observation') assert.match(result.stderr, /acceptance pending/);
+    const accepted = scenario === 'matching-route';
+    assert.equal(result.status, accepted ? 0 : 1, result.stderr);
+    const report = JSON.parse(result.stdout);
+    assert.equal(report.accepted, accepted);
+    assert.equal(report.sampledHeads, scenario === 'no-observation' ? 0
+      : Number(['merged-daemon-route', 'uncovered-head'].includes(scenario)) + 1);
+    assert.deepEqual(report.heads.filter(candidate => candidate.daemon).map(candidate => candidate.prNumber),
+      scenario === 'merged-daemon-route' ? [8] : []);
+    if (scenario === 'uncovered-head') assert.equal(report.heads.find(candidate => candidate.prNumber === 8).hammer, false);
+    assert.equal(report.retryCapPages, scenario === 'retry-cap-page' ? 4 : 0);
+    assert.equal(report.manualClosures, scenario === 'manual-closure' ? 4 : 0);
   });
 }
 

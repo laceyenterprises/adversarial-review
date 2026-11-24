@@ -22,16 +22,17 @@ records `needs-closer` and alerts through closure-wait. Later closure passes
 recheck admission on that head, including from legacy `ownerless-closer-no-merge`
 receipts. If final fix-all has already spent its head-scoped round, only a strict
 exact-head review with findings that selects hammer continues through ordinary
-hammer admission and caps, including when failed CI is the repair reason. A durable `fallbackAt` marker transfers deadline ownership to hammer across retry gaps and cap escalation. Other routes retain `needs-closer` custody and the refusal page. Every
+hammer admission and caps, including when failed CI is the repair reason. A durable `fallbackAt` marker transfers deadline ownership to hammer across retry gaps and cap escalation. Later passes on the same hammer route reuse the marker. Other routes retain `needs-closer` custody and the refusal page. Every
 30 seconds the watcher scans a bounded batch of receipts independently of
 closure selection. After 1800 seconds from the original `requestedAt`, it
 retires a receipt when GitHub confirms a terminal PR or a moved head. For the
 same open head, a live closer launch (including retries) suppresses the overdue
-page while it owns the head. A live closer or unreadable PR backs off deadline
-probes for five minutes. Successful immediate or overdue delivery records
+page while it owns the head. A live closer, pending lease or unreadable PR or
+launch evidence backs off deadline probes for five minutes. Successful immediate or overdue delivery records
 `escalatedAt` and ends deadline paging. Failed delivery remains retryable.
 Enrolled, escalated and hammer-owned receipts get retirement-only probes at
-most daily. Retired JSON is pruned after seven days under its persistent lock.
+most daily. The sweep prunes retired JSON and its lock after seven days and
+reaps orphaned legacy lock files under flock.
 Overdue pages share the immediate refusal latch. Poll updates to `updatedAt`
 do not extend the deadline. See
 [successor records](data-model/closer-successors.md) and
@@ -5264,7 +5265,10 @@ exact-head findings heads, retry-cap pages and manual
 `merge-agent-requested` closures, with PR/head identities and page/closure
 evidence. More than 3 retry-cap pages or more than 3 manual closures fails
 operator acceptance and requires revisiting the policy before broader rollout.
-Record zero counts explicitly; no matching traffic leaves acceptance pending.
+The operator plan checks the half-open 24-hour window and requires a final
+findings route for every sampled head. Supply the verified page and closure
+evidence as `ACCEPTANCE_EVIDENCE_JSON`; an explicit empty array records zero
+counts. No matching traffic leaves acceptance pending.
 The committed operator plan is
 `modules/worker-pool/post-merge-actions/AMASTRICTROUTE-01.yaml`.
 

@@ -12,7 +12,7 @@ import {
 const silent = { log() {}, warn() {} };
 
 for (const [first, second] of [["SIGTERM", "SIGTERM"], ["SIGINT", "SIGINT"], ["SIGTERM", "SIGINT"]]) {
-  test(`recovery sweeps run outside discovery and stop once on ${first} then ${second}`, () => {
+  test(`recovery sweeps run outside discovery and stop once on ${first} then ${second}`, async () => {
     const signals = new EventEmitter();
     const timers = [];
     let retries = 0, deadlines = 0, stops = 0;
@@ -22,7 +22,7 @@ for (const [first, second] of [["SIGTERM", "SIGTERM"], ["SIGINT", "SIGINT"], ["S
       overloadRescueRetry: { tick: () => { retries++; } },
       createSweep: options => {
         assert.deepEqual(options, { rootDir: "/synthetic", readLive });
-        return { tick: () => { deadlines++; }, stop: () => { stops++; } };
+        return { tick: () => { deadlines++; }, stop: async () => { stops++; throw new Error("synthetic stop failure"); } };
       },
       setIntervalImpl: (fn, ms) => {
         const timer = { fn, ms, referenced: true, unref() { this.referenced = false; return this; } };
@@ -41,8 +41,11 @@ for (const [first, second] of [["SIGTERM", "SIGTERM"], ["SIGINT", "SIGINT"], ["S
     const [overloadTimer] = timers;
     signals.emit(first);
     signals.emit(second);
+    await new Promise(resolve => setImmediate(resolve));
     assert.equal(stops, 1, "successor sweep stops once across both shutdown signals");
-    assert.deepEqual(timers, [overloadTimer], "the watcher exit owns the unref'ed overload timer");
+    assert.deepEqual(timers, []);
+    overloadTimer.fn();
+    assert.equal(retries, 2, "a queued overload callback cannot start recovery after shutdown");
   });
 }
 

@@ -1692,12 +1692,12 @@ retry caps, including when failed CI is the repair reason. The receipt records `
 refusal; the watcher deadline sweep also escalates after 1800 seconds from the
 original request if the receipt remains unenrolled on the same open head
 without hammer fallback ownership, prior successful escalation or a live closer
-dispatch or retry. A live closer or unreadable PR backs off deadline probes for
+dispatch or retry. A live closer, pending lease or unreadable PR or launch evidence backs off deadline probes for
 five minutes across restarts. Successful delivery records `escalatedAt` and
 ends deadline paging. Failed delivery remains retryable. Enrolled, escalated
 and hammer-owned receipts get retirement-only probes at most daily. Confirmed
 terminal or moved heads retire their receipts, and retired JSON is pruned after
-seven days under its persistent lock. Poll updates do not extend the deadline,
+seven days under its lock, which the sweep also unlinks. Poll updates do not extend the deadline,
 and both observations share one page
 latch. See
 [successor records](data-model/closer-successors.md) and

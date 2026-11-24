@@ -1673,7 +1673,7 @@ test('strict exact-head spent successor fallback relaunches once and pages once 
     }));
     assert.ok(launches - before <= 1, 'at most one launch in each closure pass');
   }
-  assert.equal(fallbacks, results.length - 1, 'each ended launch observes the spent final-fix-all');
+  assert.equal(fallbacks, 1, 'same-head retries reuse the spent final-fix-all result');
   assert.equal(launches, HAMMER_RETRY_CAP_TOTAL_DISPATCHES);
   assert.deepEqual(results.map(result => result.dispatched), [true, true, false, false, false]);
   assert.equal(results.at(-1).needsOperator, true);

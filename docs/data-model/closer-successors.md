@@ -33,7 +33,7 @@ review with findings that selects hammer (including failed-CI repair), the watch
 records optional `fallbackAt` (UTC ISO 8601) under the receipt flock and passes
 the selected hammer decision to normal admission. This transfers deadline
 ownership to hammer, including retry-admission gaps, unreadable launch liveness
-and retry-cap escalation. A later non-fallback settlement clears `fallbackAt`. Other routes record `needs-closer` with the
+and retry-cap escalation. Later passes that select the same hammer route reuse `fallbackAt` without another final-fix-all lookup. A later non-fallback settlement clears `fallbackAt`. Other routes record `needs-closer` with the
 handoff's reason and surface the refusal instead of admitting another hammer.
 Final-fix-all's durable claim prevents duplicate work. An independent watcher
 sweep checks receipts after 1800 seconds from the original `requestedAt`. Poll
@@ -42,12 +42,12 @@ hammer-owned receipts get retirement-only probes at most daily. The sweep
 records optional `retiredAt` (UTC ISO 8601) under the receipt flock if GitHub
 confirms the PR is terminal or its head moved. Retired receipts skip future
 probes. After seven days the sweep removes retired receipt JSON under the same
-flock, with a locked timestamp recheck. The persistent lock inode is retained.
+flock, with a locked timestamp recheck, and unlinks its lock file. Openers verify the lock inode is still linked after acquiring it. The bounded sweep also removes orphaned legacy locks after confirming under flock that the receipt is absent.
 Fresh admission can clear the marker if the PR returns to that head.
 A same-head open PR only pages after a locked receipt recheck and when the
-sweep cannot confirm a live closer dispatch or retry on that head. The sweep
+sweep confirms there is no live closer dispatch or retry on that head. The sweep
 records optional `lastProbedAt` (UTC ISO 8601) under the receipt lock for an
-inconclusive or retirement-only probe. A live closer or unreadable PR backs
+inconclusive or retirement-only probe. A live closer, pending lease or unreadable PR or launch evidence backs
 off deadline probes for five minutes across restarts.
 The immediate refusal and overdue escalation share one page latch.
 After either observation succeeds, optional `escalatedAt` (UTC ISO 8601) is

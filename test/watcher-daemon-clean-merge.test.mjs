@@ -1779,6 +1779,9 @@ test('#5053 strict exact-head closer findings route directly to the hammer', asy
     maybeDispatchAmaCloserImpl: async input => {
       hammers++;
       assert.equal(input.reviewState.headSha, 'head-live');
+      assert.equal(input.reviewState.nonBlockingFindingCount, 1);
+      assert.equal(input.reviewState.nonBlockingFindingState, 'known');
+      assert.match(input.settledReview.reviewBody, /Improve the error message/);
       return { dispatched: true };
     },
   });
@@ -2846,6 +2849,7 @@ for (const configMode of ['omitted', 'undefined', true, 'superseded']) {
     const args = unattributedDaemonArgs({ rootDir, head });
     const cfg = { operatorLogins: [event.actor], operatorLabelActorEnforcement: 'enforce' };
     if (configMode !== 'omitted') cfg.strictMode = configMode === 'undefined' ? undefined : true;
+    const reviewedHead = configMode === 'superseded' ? 'b'.repeat(40) : head;
     const operatorApprovedEvidence = { applied: true, observedRevisionRef: head,
       actor: event.actor, eventId: event.id, observedAt: event.createdAt };
     assert.equal(hasOperatorApprovedOverride({ ...cfg, operatorApprovedEvidence },
@@ -2853,7 +2857,8 @@ for (const configMode of ['omitted', 'undefined', true, 'superseded']) {
     const result = await runDaemonCleanMergeAttempt({
       ...args, cfg,
       candidate: { ...args.candidate, labels: ['operator-approved'] },
-      reviewState: { ...args.reviewState, headSha: configMode === 'superseded' ? 'b'.repeat(40) : head,
+      gateSnapshot: { ...args.gateSnapshot, reviewedHeadSha: reviewedHead },
+      reviewState: { ...args.reviewState, headSha: reviewedHead,
         nonBlockingFindingCount: 1, operatorApprovedEvidence },
       readBuildCompletionSignalForPrImpl: () => assert.fail('decline before identity reads'),
       resolveHeadCloserCommitSuppressionImpl: () => {

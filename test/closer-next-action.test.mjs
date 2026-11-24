@@ -1497,7 +1497,7 @@ test('AMASTRICTROUTE-01: a spent final fix-all does not intercept hammer admissi
     assert.equal(result.dispatched, true);
     assert.deepEqual(tuple(result.nextAction), ['hammer', 'hammer', 'review-findings-final']);
   }
-  assert.equal(handoffs, 2, 'only one handoff probe per pass');
+  assert.equal(handoffs, 1, 'reuse the same-head spent handoff on subsequent passes');
   assert.equal(f.effects.filter(([effect]) => effect === 'closer').length, 2);
   assert.equal(f.waits.filter(wait => wait.waitClass === 'closer-successor').length, 0);
 });

@@ -2,7 +2,7 @@ import './helpers/rate-limit-state-isolation.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import fsExt from 'fs-ext';
-import { closeSync, mkdtempSync, openSync, readFileSync, writeFileSync, rmSync } from 'node:fs';
+import { closeSync, existsSync, mkdtempSync, openSync, readFileSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { withHammerPublication, activeHammerPublication, retireHammerPublication, settleHammerRebasePublication, hammerPublicationPath } from '../src/ama/hammer-publication-ownership.mjs';
@@ -398,7 +398,7 @@ test('successful successor pages stop probes across restarts; failed delivery re
   assert.equal(dispatches, 1, 'escalation does not block later admission');
 });
 
-test('retired receipt TTL prunes under the persistent lock and fresh admission preserves custody', async t => {
+test('retired receipt TTL prunes under the exclusive lock and fresh admission preserves custody', async t => {
   const f = fixture(t), input = { ...f, headSha: HEAD, source: 'closer-ended-without-merge' };
   const record = requestCloserSuccessor(input), path = closerSuccessorPath(f.rootDir, input);
   const sweepAt = async elapsed => {
@@ -423,5 +423,38 @@ test('retired receipt TTL prunes under the persistent lock and fresh admission p
   writeFileSync(path, JSON.stringify({ ...record, retiredAt: NOW }));
   await sweepAt(ttl);
   assert.equal(readCloserSuccessor(f.rootDir, input), null);
-  assert.ok(readFileSync(`${path}.lock`) instanceof Buffer, 'never unlink the coordination inode');
+  assert.equal(existsSync(`${path}.lock`), false);
+  writeFileSync(`${path}.lock`, ''); // Legacy orphan from a prior cleanup.
+  await sweepAt(ttl);
+  assert.equal(existsSync(`${path}.lock`), false);
+  assert.equal(requestCloserSuccessor(input).status, 'successor-pending');
 });
+
+for (const [name, probe] of [
+  ['unknown ledger evidence', async () => null],
+  ['thrown liveness read', async () => { throw new Error('ledger unavailable'); }],
+]) {
+  test(`successor deadline backs off on ${name} and pages only after confirmed absence`, async t => {
+    const f = fixture(t), input = { ...f, headSha: HEAD, source: 'closer-ended-without-merge' };
+    requestCloserSuccessor(input);
+    const due = Date.parse(NOW) + 1_800_000;
+    let now = due, reads = 0, pages = 0;
+    const run = async () => {
+      const sweep = createCloserSuccessorDeadlineSweep({ rootDir: f.rootDir, now: () => now,
+        readLive: async () => { reads++; return { state: 'open', headRefOid: HEAD }; },
+        hasLiveCloserImpl: async () => now === due ? probe() : false,
+        observeWaitImpl: async () => { pages++; }, logger: {} });
+      try { await sweep.tick(); } finally { await sweep.stop(); }
+    };
+    await run();
+    const receipt = readCloserSuccessor(f.rootDir, input);
+    assert.equal(Date.parse(receipt.lastProbedAt), due);
+    assert.equal(receipt.escalatedAt, undefined);
+    now += 299_999;
+    await run();
+    assert.deepEqual({ reads, pages }, { reads: 1, pages: 0 });
+    now++;
+    await run();
+    assert.deepEqual({ reads, pages }, { reads: 2, pages: 1 });
+  });
+}

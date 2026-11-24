@@ -137,3 +137,16 @@ sandbox handoff smoke. The watcher claim-loop suite passed all 199 tests within
 its separate 300-second bound. An initial combined run reached its 180-second
 bound without failed assertions; the completed separate runs cover all three
 files. Total completed targeted coverage: 387 tests.
+
+### Hammer remediation
+
+The successor sweep backs off for five minutes when closer evidence is unknown,
+including when the lease is pending or the launch read throws. It prunes retired
+receipts and their lock files under an exclusive lock and removes orphaned legacy
+locks. Same-head hammer passes reuse the spent final-fix-all result. Watcher
+shutdown clears both recovery timers. The SMV declaration describes legacy
+receipt aliases and the retirement overlay.
+
+The operator acceptance command reports each sampled head and enforces both
+thresholds after the 24-hour window. It uses operator-verified page and closure
+links as event evidence.

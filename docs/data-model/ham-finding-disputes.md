@@ -65,6 +65,10 @@ to dismiss only authoritative current GitHub reviews whose complete blocker
 lists are withdrawn. Unknown or standing blockers and unrelated vetoes remain;
 read/dismissal failures refuse merge. Dismissal does not remove finding authority
 from the review body: `ama-check` continues to evaluate it on retries.
+When the exact-head predicate accepts terminal remediation of older-head
+blockers, cleanup recognizes a prior queued re-review dismissal only from
+the matching native-bot GitHub timeline event. This produces no withdrawal row
+and leaves any admitted withdrawals subject to the usual revalidation.
 `bin/ama-check.mjs` matches the HAM-authored PR comment to these successfully
 recorded rows, checking comment node ID, author, full-body digest, both heads,
 finding identity and evidence digest, then re-hashes the embedded evidence

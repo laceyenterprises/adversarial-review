@@ -36,6 +36,7 @@ import {
   bouncedPostedReviewSettleSql,
   reconcileDaemonBounceBeforeRetry,
   isDaemonBounceFailure,
+  verifyBouncedReviewerIdentity,
 } from '../src/daemon-bounce-recovery.mjs';
 
 const REPO = 'laceyenterprises/agent-os';
@@ -146,6 +147,48 @@ for (const outcome of ['live', 'gone', 'reused-pid', 'different-session', 'diffe
     }
   });
 }
+
+for (const outcome of ['reused-pid', 'moved-head']) {
+  test(`expired bounce custody releases ${outcome} for bounded recovery without signaling`, async () => {
+    const { rootDir, db } = setup();
+    try {
+      insertReviewingRow(db);
+      await bounceWatcher(rootDir, db);
+      writeReviewerRunRecord(rootDir, {
+        sessionUuid: SESSION, runtime: 'cli-direct', state: 'failed', pgid: 7171,
+        spawnedAt: STARTED_AT, subjectContext: PROCESS_IDENTITY,
+      });
+      const row = reviewRow(db);
+      const result = await adoptBouncedReviewerBeforeAdmission({
+        db, rootDir, row, now: new Date(Date.parse(STARTED_AT) + row.reviewer_timeout_ms),
+        headSha: outcome === 'moved-head' ? OTHER_HEAD : HEAD,
+        isAlive: () => true,
+        verifyIdentity: outcome === 'moved-head'
+          ? () => assert.fail('moved head must not be adopted')
+          : record => verifyDirectReviewerIdentity(record, {
+            execFileImpl: reviewerProcessProbe({ lstart: BOUNCED_AT.toISOString() }),
+          }),
+      });
+      assert.deepEqual(result, { handled: false });
+      assert.deepEqual(reviewRow(db), row, 'admission must leave the original claim for bounded recovery');
+      assert.equal(claimInfraRecovery(db, row, DAEMON_BOUNCE_FAILURE_CLASS).changes, 1);
+    } finally {
+      db.close();
+      rmSync(rootDir, { recursive: true, force: true });
+    }
+  });
+}
+
+test('malformed reviewer process output reports a command mismatch', async () => {
+  const record = {
+    sessionUuid: SESSION, runtime: 'cli-direct', state: 'failed', pgid: 7171,
+    spawnedAt: STARTED_AT, subjectContext: PROCESS_IDENTITY,
+  };
+  const result = await verifyDirectReviewerIdentity(record, {
+    execFileImpl: async () => ({ stdout: 'unparseable process output' }),
+  });
+  assert.deepEqual(result, { match: false, reason: 'reviewer group leader or command did not match' });
+});
 
 for (const posted of [true, false]) {
   test(`adopted reviewer exit settles ${posted ? 'an exact posted Comment-only review' : 'through the existing bounce cap'}`, async () => {
@@ -578,9 +621,17 @@ test('expired live bounce allows replacement only after TERM/KILL exit confirmat
   try {
     insertReviewingRow(db);
     await bounceWatcher(rootDir, db);
+    writeReviewerRunRecord(rootDir, {
+      sessionUuid: SESSION, runtime: 'cli-direct', state: 'failed', pgid: 7171,
+      spawnedAt: STARTED_AT, subjectContext: PROCESS_IDENTITY,
+    });
     const events = [];
     let alive = true;
     const result = await expiredBounceRecovery({ db, events, overrides: {
+      rootDir,
+      verifyReviewerIdentity: (record, row) => verifyBouncedReviewerIdentity(record, row, {
+        execFileImpl: reviewerProcessProbe(),
+      }),
       isAlive: () => alive,
       killProcessGroup: (pgid, signal) => {
         assert.equal(pgid, 7171);
@@ -595,6 +646,32 @@ test('expired live bounce allows replacement only after TERM/KILL exit confirmat
     assert.equal(reviewRow(db).reviewer_session_uuid, SESSION);
     assert.equal(claimInfraRecovery(db, reviewRow(db), DAEMON_BOUNCE_FAILURE_CLASS).changes, 1);
     assert.equal(reviewRow(db).reviewer_session_uuid, 'requeued-session');
+  } finally {
+    db.close();
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
+test('expired bounce never signals a group with mismatched reviewer launch arguments', async () => {
+  const { rootDir, db } = setup();
+  try {
+    insertReviewingRow(db);
+    await bounceWatcher(rootDir, db);
+    writeReviewerRunRecord(rootDir, {
+      sessionUuid: SESSION, runtime: 'cli-direct', state: 'failed', pgid: 7171,
+      spawnedAt: STARTED_AT, subjectContext: PROCESS_IDENTITY,
+    });
+    const result = await expiredBounceRecovery({ db, overrides: {
+      rootDir,
+      verifyReviewerIdentity: (record, row) => verifyBouncedReviewerIdentity(record, row, {
+        execFileImpl: reviewerProcessProbe({
+          command: { ...PROCESS_IDENTITY, reviewerSessionUuid: 'foreign-session' },
+        }),
+      }),
+      killProcessGroup: () => assert.fail('unverified reviewer must not be signaled'),
+    } });
+    assert.equal(result.handled, false);
+    assert.equal(claimInfraRecovery(db, reviewRow(db), DAEMON_BOUNCE_FAILURE_CLASS).changes, 1);
   } finally {
     db.close();
     rmSync(rootDir, { recursive: true, force: true });

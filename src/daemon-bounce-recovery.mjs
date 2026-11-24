@@ -84,10 +84,16 @@ export async function adoptBouncedReviewerBeforeAdmission({
     return { handled: false };
   }
   if (isAlive(row.reviewer_pgid) === false) return { handled: false };
-  if (!headSha || headSha !== row.reviewer_head_sha) return { handled: true, reason: 'retained-reviewer-head' };
+  const holdUnverified = (reason) => {
+    const { hold } = daemonBounceReviewerHold(row, {
+      now, isAlive, verifyIdentity: () => ({ match: false }),
+    });
+    return hold ? { handled: true, reason } : { handled: false };
+  };
+  if (!headSha || headSha !== row.reviewer_head_sha) return holdUnverified('retained-reviewer-head');
   const record = readBouncedReviewerRecord(rootDir, row);
   if (!record || !(await verifyIdentity(record)).match) {
-    return { handled: true, reason: 'unverified-retained-reviewer' };
+    return holdUnverified('unverified-retained-reviewer');
   }
   const adopt = db.transaction(() => {
     const current = readBouncedReviewerRecord(rootDir, row);
@@ -144,9 +150,11 @@ export function daemonBounceReviewerHold(row, {
 // intact; the caller may claim a replacement only when handled is false.
 export async function reconcileDaemonBounceBeforeRetry({
   row,
+  rootDir = null,
   now = Date.now(),
   isAlive = defaultIsAlive,
   verifyIdentity = verifyPgidIdentitySync,
+  verifyReviewerIdentity = verifyBouncedReviewerIdentity,
   killProcessGroup = (pgid, signal) => process.kill(-pgid, signal),
   ownPgid = currentProcessGroupId,
   sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
@@ -174,6 +182,10 @@ export async function reconcileDaemonBounceBeforeRetry({
         if (decision.processEvidenceMissing) return { handled: true, reason: 'cleanup-identity-lost' };
         if (!decision.hold) break;
         if (!decision.expired) return { handled: true, ...decision };
+        if (rootDir && !(await verifyReviewerIdentity(readBouncedReviewerRecord(rootDir, row), row))) {
+          decision = { ...decision, processEvidenceMissing: true };
+          break;
+        }
         try {
           killProcessGroup(decision.pgid, signal);
         } catch (err) {

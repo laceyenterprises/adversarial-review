@@ -23,7 +23,7 @@ export async function verifyDirectReviewerIdentity(record, { execFileImpl = exec
       '-ww', '-p', String(record.pgid), '-o', 'pgid=,lstart=,command=',
     ], { timeout: loadAwareTimeoutMs(5_000) });
     const processRow = String(stdout).trim().match(/^(\d+)\s+(\S+\s+\S+\s+\d+\s+\S+\s+\d+)\s+(.+)$/);
-    const argv = processRow?.[3].match(/^\S*node(?:\s+)\S*[/]reviewer\.mjs\s+(\{.*\})$/)?.[1];
+    const argv = processRow?.[3]?.match(/^\S*node(?:\s+)\S*[/]reviewer\.mjs\s+(\{.*\})$/)?.[1];
     if (Number(processRow?.[1]) !== record.pgid || !argv) {
       return { match: false, reason: 'reviewer group leader or command did not match' };
     }

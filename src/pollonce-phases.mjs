@@ -3112,6 +3112,7 @@ async function runReviewSubjectPhases(entry, ctx) {
       if (infraRecoveryClass === DAEMON_BOUNCE_FAILURE_CLASS) {
         const bounceRecovery = await reconcileDaemonBounceBeforeRetry({
           row: current,
+          rootDir: ROOT,
           findPostedReview: reviewerCommandFailedReviewProbe,
           resolveReviewerLogin: reviewerBotLogin,
           markPosted: ({ row, postedAt, postedReview }) => {

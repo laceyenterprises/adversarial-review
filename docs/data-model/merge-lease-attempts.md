@@ -69,6 +69,10 @@ closer arrivals across all heads of that PR. Changing the head or observed base 
 existing 30-day attempt expiry still applies. Gate charges and retryable refunds
 preserve these fields and cannot erase a park.
 
+HAMWRITERREFUND-01 releases `merge-writer-deferred` as an ordinary
+chargeable release. The exact-head/base [AMA writer audit](ama-audit.md)
+fences another click even if this counter later expires or is reset.
+
 Both normal and retryable-abort no-merge releases update this state under the
 holder/waiter and attempt locks. Refund and release identity persist atomically
 in one attempts-file write, so retry after a later history/write failure cannot

@@ -1,0 +1,9 @@
+{
+  "version": 1,
+  "entries": [
+    {
+      "id": "ama-audit",
+      "mergeWriter": "Optional attempts[].mergeWriter on hammer-gh-pr-merge attempts records the base ref/SHA, writer phase and elapsed milliseconds, redacted command output, command disposition and authoritative readback separately. An interrupted intent or a merge-writer-deferred result fences an unchanged head/base. Closure recovery pages once per head using the existing closure-wait store."
+    }
+  ]
+}

@@ -42,6 +42,11 @@ daemon owns these databases. `CREATE TABLE IF NOT EXISTS` initializes
 
 ## Lifecycle and recovery
 
+`merge-writer-deferred` reserves one immediate closure recovery page per
+PR/head. The page identifies the [AMA writer audit](ama-audit.md), base,
+phase, duration and readback disposition. The existing reservation retries
+failed alert delivery.
+
 `original-worker-evidence` and `closer-worker-evidence` use separate per-head
 rows for unavailable original-worker teardown evidence and unknown closer
 liveness. Each retains its first observation and pages once at the configured

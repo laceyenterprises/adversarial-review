@@ -135,6 +135,10 @@ then end the run. The deferred audit and `last-phase` receipt let the watcher
 own the retry; no `terminal-stop` progress receipt is expected.
 Do not retry validation or close on that head in this run, even
 with green required CI. This takes precedence over the setup retry above.
+For `merge-writer-deferred`, end the run and leave the writer audit to closure
+recovery. Do not repeat close, post a terminal no-merge comment, or request
+another review. Report the recorded GitHub observation and name any unknown
+write outcome explicitly.
 An exhausted closer fault is a **deferred harness fault**, never a terminal PR
 decision. Record its exact named reason with the terminal helper; dispatch
 refunds the charged attempt and parks/pages once after three refunds per head.
@@ -1246,20 +1250,13 @@ In-lease merge:
 The close command then sources `hammer-merge.sh` under the lease. It requires successful audit publication and an eligible `POST_REMEDIATION_SHA` predicate, then rechecks live head/CI under lease. Either missing prerequisite appends `failed-without-merge` and releases the lease. The wrapper reports bounded diagnostics, status, outcome and lease state. Nonzero status on an open PR requires mandate 0b's report; preserve retryable deferrals such as `lane-busy`.
 
 
-After the merged audit append succeeds, emit the merge signal and then release
-the lease before posting the CLOSING comment described above. If `gh pr merge` or the post-merge `gh pr view`
-confirmation returns a retryable transport, TLS, DNS/socket, HTTP 5xx, or
-rate-limit/secondary-rate-limit failure, retry only inside the bounded budget
-above while holding the same lease. When that bounded budget is exhausted before
-a confirmed merge, release with `--retryable-abort <reason>` so the exact PR/head
-gate attempt is cleared for another dispatch. Never use retryable-abort for red
-required checks, live-head movement, permanent GitHub rejections, unclassified
-merge failures, or any path where the merge may already have been accepted. The
-merge retry loop must re-read the live head before each attempt; if that
-pre-flight observes the PR already `MERGED` at `POST_REMEDIATION_SHA`, proceed
-to the post-merge validation instead of recording a failed gate. Permanent
-head/protection/auth/check/closed or unmergeable failures fail closed
-immediately with a non-merged audit reason.
+After the merged audit append succeeds, emit the merge signal and release the
+lease before posting the CLOSING comment. The procedure reads GitHub after
+the writer returns. Only confirmation at `POST_REMEDIATION_SHA` can settle
+the merge. After `merge-writer-deferred`, closure recovery owns reconciliation.
+Repeating the command with the same head and base cannot issue another write.
+Never use retryable-abort for red required checks, a moved head, or an
+unconfirmed merge write.
 
 If the head moved, a required check failed or is unchecked, HAM evidence is
 missing, the predicate fails for the exact live SHA, the PR is closed/draft, or

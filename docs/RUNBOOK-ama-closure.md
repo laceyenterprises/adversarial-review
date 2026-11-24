@@ -357,10 +357,23 @@ lane writer before each transport attempt. The in-lane proof has a load-aware
 budget sized once from a 15-second nominal (about 84 seconds at a 5.6x load
 multiplier) and bounded only by the remaining command budget, with no fixed cap;
 expiry aborts the read and returns `legacy-writer-timeout` without transport.
-That code is a registered infrastructure stop (HAMWRITERTIMEOUT-01), not a PR
-fact: the hammer's deferral records it, the lease is released as a retryable
-abort, and the existing closer retry re-drives the merge on the same head with
-its usual backoff. `merge-target-unparseable` is a registered closer fault.
+HAMWRITERREFUND-01 records an exact-head and base writer intent under the
+merge lease before calling the legacy lane. A proof timeout retains
+`legacy-writer-timeout` in its diagnostics with `write: not-invoked`.
+Unconfirmed transport retains `write: unknown` and the bounded, redacted
+output. Fresh GitHub readback distinguishes a confirmed merge, a moved head,
+an open or closed PR, and unavailable evidence. Open readback only describes
+the observation at that time. A confirmed merge following an ambiguous write
+settles the PR without an own-merge receipt.
+
+`merge-writer-deferred` releases the merge lease without a retry refund.
+The watcher keeps that head parked at the same base and pages once per head
+with the AMA audit attempt number. An interrupted writer intent provides
+the same fence. Inspect the named audit, reconcile the PR on GitHub, and
+investigate the named phase and its output. A provably changed head or live
+base branch ref returns through ordinary closure admission. The PR payload's
+base SHA can be historical. Unavailable readback retains
+the hold. `merge-target-unparseable` is a registered closer fault.
 The closer reuses its initial rollup/proof for its first live gate, then
 refreshes subsequent gates and transports. Initial read failures produce a typed
 unavailable proof before the merge lease; closed/merged snapshots retain normal

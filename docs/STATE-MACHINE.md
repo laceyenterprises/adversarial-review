@@ -1869,10 +1869,15 @@ retain normal daemon handling. The first live gate reuses its initial rollup
 and proof; subsequent gates and transport read fresh evidence. In-lane proof
 reads abort after the load-aware value of a 15-second nominal; the only ceiling is the
 remaining run budget (HAMWRITERTIMEOUT-01), returning `legacy-writer-timeout` without
-transport. An exhausted budget never starts transport. `legacy-writer-timeout` is a
-registered infrastructure stop: the terminal audit keeps the real code and the existing
-closer retry re-drives the merge on the same head under a fresh lease, without
-re-remediation or re-review. `merge-target-unparseable` is a registered closer fault. A blocked preflight that proves no
+transport. An exhausted budget never starts transport. HAMWRITERREFUND-01
+persists an exact-head/base writer intent first. After a proof timeout or
+unconfirmed write, GitHub readback drives the transition. An exact-head merge
+settles the PR, a moved head supersedes the attempt, and unresolved outcomes
+defer with `merge-writer-deferred` and one closure recovery page per head.
+An interrupted intent also fences unchanged inputs. The ordinary lease release
+keeps the gate charge. A fresh open head or changed base must pass ordinary
+closure admission before a new write. `merge-target-unparseable` is a
+registered closer fault. A blocked preflight that proves no
 merge transport ran settles the local writer reservation. Existing exact-head
 CAS, leases and merge retry ownership continue to apply.
 

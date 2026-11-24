@@ -116,6 +116,7 @@
   "merge-confirmation-read-failed": "infrastructure",
   "merge-confirmation-read-failed-after-merge-accepted": "infrastructure",
   "merge-error": "closer",
+  "merge-writer-deferred": "world",
   "merge-lease-acquire-failed": "closer",
   "merge-lease-admission-failed": "closer",
   "merge-lease-admission-refused": "world",

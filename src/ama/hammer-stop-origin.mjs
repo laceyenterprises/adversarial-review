@@ -120,6 +120,8 @@ export const HAMMER_STOP_ORIGINS = Object.freeze({
   'lane-busy': 'world',
   'merge-lease-timeout': 'world',
   'merge-not-confirmed': 'world',
+  // An unresolved writer observation parks for readback, without a refund.
+  'merge-writer-deferred': 'world',
   'unclassified-merge-failure': 'world',
   // Missing/corrupt private state and command construction can be corrected
   // by the closer; these are not evidence of an unresolvable PR conflict.

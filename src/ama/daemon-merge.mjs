@@ -4,6 +4,9 @@ import { observeClosureLag } from './closure-lag.mjs';
 import { attestationRecordErrorDetails } from '../attestation-record-error.mjs';
 import { loadAwareTimeoutMs } from '../load-aware-timeout.mjs';
 import { buildMergeCommitBody } from './closing-keywords.mjs';
+import { readLivePullRequestIdentity } from '../github-pr-identity.mjs';
+import { HAMMER_WRITER_HOLD, hammerWriterInputsChanged, pageHammerWriterHold, readHammerWriterHold } from './hammer-writer-hold.mjs';
+import { readMergeLeaseHolders } from './merge-lease.mjs';
 /**
  * MSM-03 — daemon clean-path merge ("Path B").
  *
@@ -36,8 +39,7 @@ import { buildMergeCommitBody } from './closing-keywords.mjs';
  *     `evaluateMergeEligibility` so the hammer and daemon cannot drift apart on
  *     "may this PR merge right now?".
  *
- * Retry semantics are shared with the MSM-01 hammer merge loop
- * (`templates/hammer-prompt.md`): transient `gh`/GitHub failures (transport
+ * The daemon retries transient `gh`/GitHub failures (transport
  * reset, TLS handshake timeout, DNS/socket timeout, OS-level spawn/resource
  * errors, HTTP 5xx, rate-limit / secondary-rate-limit) retry with bounded
  * exponential backoff + jitter under the same lease, and the live head is
@@ -70,7 +72,7 @@ import {
   resolveProtectivePredecessorDeclaration,
 } from './protective-predecessor.mjs';
 
-/** Bounded-retry defaults, byte-for-byte the MSM-01 hammer merge budget. */
+/** Bounded-retry defaults for the daemon path. */
 export const DAEMON_MERGE_DEFAULTS = Object.freeze({
   // Independent daemon merge retry budget. Hammer dispatch lifetime ceilings
   // must not change clean-path merge retries.
@@ -437,6 +439,7 @@ async function attemptDaemonCleanMergeInner({
   writeAuditImpl = writeAmaAuditEntry,
   appendAuditImpl = appendAmaAuditAttempt,
   readAuditImpl = readAmaAuditEntry,
+  readWriterIdentityImpl = readLivePullRequestIdentity,
   now = () => new Date().toISOString(),
   sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
   rng = Math.random,
@@ -453,6 +456,21 @@ async function attemptDaemonCleanMergeInner({
     auditWritten: false,
     ...extra,
   });
+  async function checkWriterHold({ attempts = 0, leaseAcquired = false } = {}) {
+    const deferred = { disposition: DAEMON_MERGE_DISPOSITION.DEFERRED, merged: false, attempts,
+      leaseAcquired, skipMergeAgent: true, recoveryWait: true };
+    let hold;
+    try { hold = readHammerWriterHold(hqRoot, repo, prNumber, validatedHead, readAuditImpl); }
+    catch { return { ...deferred, reason: 'merge-writer-audit-unreadable' }; }
+    if (!hold) return null;
+    const identity = await Promise.resolve().then(() => readWriterIdentityImpl(repo, prNumber, {
+      includeBaseSha: true, env: mergeEnv, timeoutMs: loadAwareTimeoutMs(5000, { maxMs: 30000 }),
+    })).catch(() => null);
+    const atTarget = identity?.prState === 'open' && identity.headSha === validatedHead;
+    if (atTarget && hammerWriterInputsChanged(hold, { state: 'OPEN', headSha: identity.headSha,
+      baseRef: identity.baseBranch, baseSha: identity.baseSha })) return null;
+    return { ...deferred, reason: HAMMER_WRITER_HOLD, ...(atTarget || !identity ? { writerHold: hold } : {}) };
+  }
 
   if (isMergeDisabledForRepository(disabledRepositories, repo)) {
     let auditWritten = false;
@@ -719,6 +737,9 @@ async function attemptDaemonCleanMergeInner({
     try { await onEligibleImpl({ repo, prNumber, headSha: validatedHead }); }
     catch (error) { logger?.warn?.(`[daemon-merge] eligibility observation failed: ${error.message}`); }
   }
+
+  const writerAdmission = await checkWriterHold();
+  if (writerAdmission) return writerAdmission;
 
   // ── Acquire the merge lease for the head. Contention defers cleanly. ───────
   let leaseResult;
@@ -1070,6 +1091,11 @@ async function attemptDaemonCleanMergeInner({
       }
     }
 
+    // A hammer may have released the shared lease with its write still
+    // unresolved. Check under the lease acquired by this daemon attempt.
+    const writerDeferred = await checkWriterHold({ attempts, leaseAcquired: true });
+    if (writerDeferred) return writerDeferred;
+
     // Click the button.
     let mergeRes;
     try {
@@ -1277,7 +1303,7 @@ export async function attemptDaemonCleanMerge(args = {}) {
   let remoteMergedConfirmed = false;
   let executedAt;
   let mergedAt;
-  const result = await attemptDaemonCleanMergeInner({ ...args,
+  const { writerHold, ...result } = await attemptDaemonCleanMergeInner({ ...args,
     runMergeImpl: async (target) => {
       const response = await args.runMergeImpl(target);
       if (Number(response?.exitCode) === 0 && !/already merged/i.test(`${response?.stdout || ''} ${response?.stderr || ''}`)) {
@@ -1287,6 +1313,17 @@ export async function attemptDaemonCleanMerge(args = {}) {
       return response;
     },
   });
+  if (writerHold && args.rootDir) {
+    try {
+      const lane = { rootDir: args.rootDir, repo: args.repo, prNumber: args.prNumber };
+      if (!readMergeLeaseHolders(lane).some(lease => lease.holderHead === writerHold.validatedHead)) {
+        await pageHammerWriterHold({ ...lane, hold: writerHold,
+          now: Date.parse(args.now?.()) || Date.now(), pageImpl: args.writerHoldPageImpl });
+      }
+    } catch (error) {
+      args.logger?.warn?.(`[daemon-merge] writer handoff delivery failed: ${error?.message || error}`);
+    }
+  }
   const writer = args.writeMergeActionImpl || recordMergeActionBestEffort;
   if (result.merged) {
     mergedAt = executedAt || (args.now || (() => new Date().toISOString()))();

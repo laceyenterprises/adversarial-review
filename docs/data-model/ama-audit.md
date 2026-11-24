@@ -20,6 +20,19 @@ A retryable hammer deferral carries optional `attempts[].continuation`
 (`kind=redrive`, `owner=watcher`, the attempt's `headSha`, `notBefore` ISO time,
 `lease=fresh`): the durable continuation the watcher owns. Readers also accept
 `kind=park` with a non-empty `owner` and `operatorAction`.
+
+HAMWRITERREFUND-01 adds optional `attempts[].mergeWriter` on
+`hammer-gh-pr-merge` attempts. `merge-writer-intent` records the exact
+`validatedHead`, `baseRef` and `baseSha` before calling the legacy writer.
+The result records `phase`, `elapsedMs`, `phaseElapsedMs`, `exitCode`,
+`reason`, and bounded redacted `stdout` and `stderr` when available. `write`
+is `not-invoked`, `acknowledged` or `unknown`. `readback` is `open`, `closed`,
+`merged` or `unavailable`, separately from `readbackHead` and `readExit`.
+`merge-writer-deferred` retains a `park` continuation owned by
+`closure-recovery`. An interrupted intent retains unknown write and readback
+evidence. Later generic audits do not settle either record. The closure-wait
+store deduplicates the page for the exact PR/head and `merge-writer-deferred`
+class. Older audits have no writer intent or hold.
 `recordHammerEarlyFailure` checks failure-code syntax (`^[a-z][a-z0-9:-]*$`)
 before recording; it preserves the accepted value without normalization.
 Registered conflict-resolver failures are world-origin terminal failures,

@@ -23,6 +23,29 @@ const identity = { number: prNumber, repository: repository.toUpperCase(), baseB
 const env = { GH_TOKEN: 'synthetic-fixture-token', GHO_API_CALL_LOG_DISABLE: '1' };
 const result = value => ({ stdout: JSON.stringify(value), stderr: '' });
 
+test('a writer hold observes the current branch ref and ignores the PR snapshot base SHA', async () => {
+  const stale = 'b'.repeat(40);
+  const live = 'c'.repeat(40);
+  for (const branch of [
+    { ref: `refs/heads/${base}`, object: { type: 'commit', sha: live } },
+    { ref: 'refs/heads/foreign', object: { type: 'commit', sha: live } },
+    null,
+  ]) {
+    const calls = [];
+    const pr = await readLivePullRequestIdentity(repository, prNumber, {
+      includeBaseSha: true, env, timeoutMs: 10000,
+      execFileImpl: async (_, args) => {
+        calls.push(args[1]);
+        if (calls.length === 1) return result({ ...identity, baseSha: stale });
+        if (!branch) throw new Error('ref unavailable');
+        return result(branch);
+      },
+    });
+    assert.deepEqual(calls, [`repos/${repository}/pulls/${prNumber}`, `repos/${repository}/git/ref/heads/${base}`]);
+    assert.equal(pr.baseSha, branch?.ref === `refs/heads/${base}` ? live : null);
+  }
+});
+
 function fixtureRoot(t) {
   const path = mkdtempSync(join(tmpdir(), 'legacy-pr-identity-'));
   t.after(() => rmSync(path, { recursive: true, force: true }));

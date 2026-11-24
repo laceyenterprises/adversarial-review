@@ -220,7 +220,7 @@ function harness(root) {
 
 const at = n => new Date(Date.parse('2026-11-01T00:00:00Z') + n * 60_000).toISOString();
 
-test('a hammer that ended on a writer timeout is re-driven on the same head without charging the retry budget', async t => {
+test('a historical writer timeout without a writer receipt remains compatible with redrive', async t => {
   const root = scratch(t);
   const { state, deps, endCurrent, identity } = harness(root);
   const pass = minutes => maybeDispatchAmaCloser({ ...dispatchArgs(root, at(minutes)), ...deps });
@@ -239,7 +239,7 @@ test('a hammer that ended on a writer timeout is re-driven on the same head with
   }
 });
 
-test('repeated writer timeouts keep the existing backoff and never ask for an operator on the first passes', async t => {
+test('historical timeouts without writer receipts retain the legacy backoff', async t => {
   const root = scratch(t);
   const { state, deps, endCurrent } = harness(root);
   const pass = minutes => maybeDispatchAmaCloser({ ...dispatchArgs(root, at(minutes)), ...deps });
@@ -252,6 +252,35 @@ test('repeated writer timeouts keep the existing backoff and never ask for an op
   assert.equal(results[0].dispatched, true, JSON.stringify(results[0]));
   for (const result of results) assert.notEqual(result.needsOperator, true, JSON.stringify(result));
   assert.ok(state.launches >= 2);
+});
+
+test('an unresolved writer intent stays parked across watcher passes and pages once', async t => {
+  const root = scratch(t);
+  const { state, deps } = harness(root);
+  const base = 'b'.repeat(40);
+  appendAmaAuditAttempt({ hqRoot: join(root, 'hq'), repo: REPO, prNumber: PR, headSha: HEAD, attempt: {
+    outcome: 'in_progress', reason: 'merge-writer-intent', attemptPhase: 'hammer-gh-pr-merge', validatedHead: HEAD,
+    mergeWriter: { baseSha: base, baseRef: 'main', write: 'unknown', readback: 'unavailable' },
+  } });
+  let live;
+  const pass = minutes => maybeDispatchAmaCloser({ ...dispatchArgs(root, at(minutes)), ...deps,
+    readPullRequestStateImpl: () => live });
+  const active = { state: 'OPEN', headRefOid: HEAD, baseRefName: 'main', baseRefOid: base };
+  for (const [index, observation] of [null, active, { ...active, state: 'MERGED' },
+    { ...active, headRefOid: 'd'.repeat(40) }].entries()) {
+    live = observation;
+    const result = await pass(index);
+    assert.equal(result.dispatched, false);
+    assert.equal(result.reason, 'merge-writer-deferred');
+    assert.equal(result.preservePredecessorArtifacts, true);
+  }
+  assert.equal(state.alerts.length, 1);
+  assert.match(state.alerts[0].message, new RegExp(`${HEAD}.*audit attempt 1; base ${base}.*write unknown, readback unavailable`));
+  assert.equal(state.launches, 0);
+  live = { ...active, baseRefOid: 'e'.repeat(40) };
+  const changed = await pass(5);
+  assert.equal(changed.dispatched, true, JSON.stringify(changed));
+  assert.equal(state.launches, 1);
 });
 
 test('an operator-veto hold is not re-driven by the infrastructure path', async t => {

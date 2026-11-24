@@ -27,7 +27,8 @@ export function validLegacyRunTimeoutMs(ms) {
 
 export async function runLegacyLaneWrite({ rootDir, repository, base, command, argv, subject = null,
   readConfig = loadEffectiveMergeAuthorityConfig, exec = runCommandKeepingOutput, deadline, now = () => new Date().toISOString(), load,
-  timeoutMs, killGraceMs = DEFAULT_KILL_GRACE_MS, prNumber, reviewValidatedAt, readReviewProof = readCloserReviewProof } = {}) {
+  timeoutMs, killGraceMs = DEFAULT_KILL_GRACE_MS, prNumber, reviewValidatedAt, readReviewProof = readCloserReviewProof,
+  onPhase = () => {} } = {}) {
   if (timeoutMs !== undefined && !validLegacyRunTimeoutMs(timeoutMs)) throw new TypeError('invalid legacy writer run timeout');
   const clock = typeof now === 'function' ? now : () => now;
   deadline ??= new Date(Date.parse(clock()) + loadAwareTimeoutMs(60_000, { ...load, maxMs: 360_000 })).toISOString();
@@ -35,9 +36,13 @@ export async function runLegacyLaneWrite({ rootDir, repository, base, command, a
   return routeFinalizationWriter({ rootDir, cfg, lane: { repository, base }, kind: 'closer', subject, legacyDeadline: deadline, now: clock,
     legacy: async () => {
       // Refuse an already-spent lane deadline; it never limits the run itself.
-      if (!queueWaitMs(30_000, { ceilingMs: 60_000, deadline, now: clock(), load })) throw new Error('legacy writer deadline expired');
+      if (!queueWaitMs(30_000, { ceilingMs: 60_000, deadline, now: clock(), load })) {
+        if (reviewValidatedAt !== undefined) return { ok: false, reason: 'legacy-writer-timeout' };
+        throw new Error('legacy writer deadline expired');
+      }
       let timeout = timeoutMs ?? loadAwareTimeoutMs(LEGACY_RUN_NOMINAL_MS, { ...load, maxMs: LEGACY_RUN_CEILING_MS });
       if (reviewValidatedAt !== undefined) {
+        onPhase('review-proof');
         const started = performance.now();
         const target = /^https:\/\/[^/]+\/([^/]+\/[^/]+)\/pull\/([1-9]\d*)$/.exec(subject?.target);
         const targetPr = prNumber ?? (target?.[1]?.toLowerCase() === repository.toLowerCase() ? Number(target[2]) : NaN);
@@ -71,9 +76,11 @@ export async function runLegacyLaneWrite({ rootDir, repository, base, command, a
         }
         if (timeout <= 0) return { ok: false, reason: 'legacy-writer-timeout' };
       }
+      onPhase('transport');
       const result = await exec(command, argv, { timeout, killSignal: 'SIGTERM', killGraceMs, encoding: 'utf8', maxBuffer: MAX_BUFFER });
       return result?.timedOut
-        ? { ok: false, reason: `legacy writer command timed out after ${timeout} ms`, stdout: result.stdout, stderr: result.stderr }
+        ? { ok: false, reason: `legacy writer command timed out after ${timeout} ms`, stdout: result.stdout, stderr: result.stderr,
+          ...(reviewValidatedAt !== undefined ? { mergeOutcomeUnknown: true } : {}) }
         : result;
     } });
 }

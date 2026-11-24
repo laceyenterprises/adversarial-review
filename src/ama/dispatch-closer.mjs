@@ -12,6 +12,8 @@ import { classifyHammerExit, hammerNoMergeDetails } from './hammer-outcome.mjs';
 import { appendCloserOutcome } from './closer-outcomes.mjs';
 import { ownershipReadBudgets as closerScanBudgets, boundedOwnershipRead as boundedCloserScanRead } from '../ownership-read.mjs';
 import { HAMMER_RETRYABLE_READ_OUTCOMES } from './hammer-phase-outcome.mjs';
+import { HAMMER_WRITER_HOLD, hammerWriterInputsChanged, pageHammerWriterHold, readHammerWriterHold } from './hammer-writer-hold.mjs';
+import { readLivePullRequestIdentity } from '../github-pr-identity.mjs';
 import { HAMMER_CLOSER_FAULTS } from './hammer-stop-origin.mjs';
 import { readLaunchWorldRefusal, worldRefusalLeaseOutcome } from './closer-head-pin.mjs';
 import { refundCloserSelfError } from './hammer-retry-cap.mjs';
@@ -1472,8 +1474,14 @@ function isAmaCloserAutoMergeHoldActive(lease, now) {
 }
 
 // Watcher closure reads yield while the GitHub child runs.
-async function readAmaCloserPullRequestStateAsync({ repo, prNumber, env, signal }) {
+async function readAmaCloserPullRequestStateAsync({ repo, prNumber, env, signal, includeBase = false }) {
   try {
+    if (includeBase) {
+      const identity = await readLivePullRequestIdentity(repo, prNumber, { env, signal, includeBaseSha: true,
+        timeoutMs: loadAwareTimeoutMs(AMA_LIVE_PR_PROBE_TIMEOUT_MS) });
+      return identity && { state: identity.prState.toUpperCase(), headRefOid: identity.headSha,
+        baseRefName: identity.baseBranch, baseRefOid: identity.baseSha };
+    }
     const { stdout } = await meteredExecFile(execFileAsync, 'gh', [
       'pr', 'view', String(prNumber), '--repo', repo, '--json', 'state,headRefOid,autoMergeRequest',
     ], { env, signal, encoding: 'utf8', timeout: loadAwareTimeoutMs(AMA_LIVE_PR_PROBE_TIMEOUT_MS), maxBuffer: 1024 * 1024 });
@@ -5100,6 +5108,39 @@ async function maybeDispatchAmaCloserAttempt({
     })) {
     return noAmaDispatch({ dispatched: false, skipMergeAgent: true,
       inFlight: true, reason: 'closer-lease-held-by-other-process', existingLease: pendingLaunchLease });
+  }
+
+  if (reconciliationRepo && prMetadata?.isOpen === true && prMetadata.headSha) {
+    const hqRoot = dispatchContext.hqRoot || DEFAULT_HQ_ROOT;
+    let hold;
+    try { hold = readHammerWriterHold(hqRoot, reconciliationRepo, prNumber, prMetadata.headSha); }
+    catch {
+      return noAmaDispatch({ dispatched: false, skipMergeAgent: true,
+        reason: 'merge-writer-audit-unreadable', recoveryWait: true, preservePredecessorArtifacts: true });
+    }
+    if (hold) {
+      const rootDir = reconciliationRoot || SUBMODULE_ROOT;
+      const result = { dispatched: false, skipMergeAgent: true, reason: HAMMER_WRITER_HOLD,
+        recoveryWait: true, preservePredecessorArtifacts: true };
+      const live = await Promise.resolve().then(() =>
+        readPullRequestStateImpl({ repo: reconciliationRepo, prNumber, env, signal, includeBase: true })).catch(() => null);
+      throwIfAborted(signal);
+      if (live?.state === 'MERGED' || live?.state === 'CLOSED'
+        || (live?.headRefOid && live.headRefOid !== prMetadata.headSha)) return noAmaDispatch(result);
+      if (!hammerWriterInputsChanged(hold, { state: live?.state, headSha: live?.headRefOid,
+        baseSha: live?.baseRefOid, baseRef: live?.baseRefName })) {
+        if (readMergeLeaseHolders({ rootDir, repo: reconciliationRepo, prNumber })
+          .some(lease => lease.holderHead === prMetadata.headSha)) return noAmaDispatch({ ...result, inFlight: true });
+        try {
+          await pageHammerWriterHold({ rootDir, repo: reconciliationRepo, prNumber, hold,
+            now: Date.parse(dispatchContext.dispatchedAt) || Date.now(),
+            pageImpl: (message, options) => deliverAlertImpl(message, { ...options, event: 'ama_closer.merge_writer_deferred' }) });
+        } catch (error) {
+          logger?.warn?.(`[ama-closer] writer handoff delivery failed: ${error?.message || error}`);
+        }
+        return noAmaDispatch(result);
+      }
+    }
   }
 
   // Reconcile existing custody before refusing a new launch without review provenance.

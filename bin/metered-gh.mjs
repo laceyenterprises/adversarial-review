@@ -45,10 +45,11 @@ if (action === 'wait' || action === 'record' || action === 'limited' || action =
     if (action === 'record') process.stdout.write(JSON.stringify(recorded));
   }
 } else if (action === 'exec' || action === 'exec-hammer' || action === 'exec-git') {
+  const hammerMerge = action === 'exec-hammer' && isPrMerge(args);
   let terminationSignal;
   let terminationTimer;
   const execute = (command, argv, options) => new Promise((resolve, reject) => {
-    if (action === 'exec-hammer' && command === 'gh' && isPrMerge(argv)) {
+    if (hammerMerge && command === 'gh' && isPrMerge(argv)) {
       reportHammerProgress('merge-attempted');
     }
     const child = execFile(command, argv, options, (err, stdout, stderr) => {
@@ -69,6 +70,8 @@ if (action === 'wait' || action === 'record' || action === 'limited' || action =
   try {
     const result = await meteredExecFile(execute, action === 'exec-git' ? 'git' : 'gh', args, {
       ...(action !== 'exec' ? { hammerToken: true } : {}),
+      // A new mutation requires fresh GitHub readback from the close procedure.
+      ...(hammerMerge ? { retryAuthFailure: false } : {}),
       // The bounded shell fetch owns its load-aware deadline and TERM cleanup.
       timeout: action === 'exec-git' && process.env.HAM_GIT_SYNC_BOUNDED === '1' ? 0 : 30_000,
       killSignal: 'SIGKILL', encoding: 'utf8', maxBuffer: 64 * 1024 * 1024,
@@ -77,7 +80,9 @@ if (action === 'wait' || action === 'record' || action === 'limited' || action =
     process.stderr.write(result.stderr || '');
   } catch (err) {
     process.stdout.write(err.stdout || '');
-    process.stderr.write(err.stderr || err.message || '');
+    process.stderr.write(err.stderr || (hammerMerge
+      ? `gh pr merge did not return a usable result (${err.signal || err.code || err.status || 'unknown'}).\n`
+      : err.message || ''));
     if (isGitHubRateLimitError(err)) {
       // Only transport evidence emits this protocol line; command prose cannot.
       process.stderr.write(`\ngithub-rate-limit: ${err.githubRateLimitKind || rateLimitErrorObservation(err)?.kind || 'deferred'}\n`);

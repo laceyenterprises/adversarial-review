@@ -92,6 +92,33 @@ test('an already-spent lane deadline still refuses before running', async t => {
   await assert.rejects(write(rootDir, { command: 'x', argv: [], now: () => at, deadline: at, exec: () => assert.fail('no run') }), /deadline/);
 });
 
+test('hammer audit diagnostics retain actual output, redact credentials and distinguish timeout from proof refusal', async t => {
+  const rootDir = fixture(t);
+  const diagnostics = join(rootDir, 'writer.json');
+  const buffer = () => ({ text: '', write(value) { this.text += value; } });
+  const stderr = buffer();
+  const argv = ['--root', rootDir, '--repo', lane.repository, '--base', lane.base, '--diagnostics', diagnostics,
+    '--', 'node', 'merge-transport'];
+  const status = await legacyLaneWriteMain(argv, { stdout: buffer(), stderr, run: async ({ onPhase }) => {
+    onPhase('review-proof');
+    onPhase('transport');
+    return { ok: false, reason: 'legacy writer command timed out after 10 ms', stdout: 'upstream progress\n',
+      stderr: `writer log\n${'.'.repeat(5000)}\nHTTP 502 upstream disconnected; Bearer synthetic-secret github_pat_SYNTHETICSECRET` };
+  } });
+  const receipt = JSON.parse(readFileSync(diagnostics, 'utf8'));
+  assert.equal(status, 75);
+  assert.equal(receipt.phase, 'transport');
+  assert.equal(receipt.write, 'unknown');
+  assert.ok(receipt.elapsedMs >= receipt.phaseElapsedMs);
+  assert.equal(receipt.stdout, 'upstream progress\n');
+  for (const output of [receipt.stderr, stderr.text]) {
+    assert.match(output, /\[output truncated\]/);
+    assert.match(output, /HTTP 502 upstream disconnected/);
+    assert.doesNotMatch(output, /synthetic-secret|SYNTHETICSECRET/);
+  }
+  assert.match(stderr.text, /\nlegacy lane write refused: legacy writer command timed out/);
+});
+
 test('expiry sends SIGTERM, keeps partial output and names the timeout', async t => {
   const rootDir = fixture(t);
   const { command, argv, ready } = readyScript(rootDir,

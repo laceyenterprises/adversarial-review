@@ -208,7 +208,9 @@ export function createQueueMergeService({ store, owner, liveAdapter, checkReader
     if (receipt.evidence?.localValidation?.result === 'unknown') {
       const gate = unknownValidationCiGate({ checks: checks.results, requiredContexts: checks.requiredSet.contexts });
       if (!gate.ok) return { phase: 'returned-to-closer', reason: gate.reason, checks };
-      if (!hasCompletedUnknownValidationEvidence(receipt.evidence.localValidation)) {
+      // Clean admissions have no closer battery; their signed exact-head
+      // review uses CI-only evidence, as at admission.
+      if (receipt.kind !== 'clean' && !hasCompletedUnknownValidationEvidence(receipt.evidence.localValidation)) {
         return { phase: 'returned-to-closer', reason: 'local-validation-unknown-evidence-incomplete', checks };
       }
     }

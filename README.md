@@ -299,6 +299,11 @@ Deferred validation preserves unpublished source and unknown cleanup in HQ custo
 A clean published source with confirmed cleanup resumes the existing paced closer
 retry; every merge still needs exact-head review, source provenance and required
 CI. See [the custody contract](docs/data-model/deferred-source-custody.md).
+Without a CI mirror, local environment faults may defer to exact-head GitHub
+checks. Mirror setup faults instead remain UNKNOWN under source custody and
+paced retry; unpublished source or unconfirmed cleanup requires operator recovery.
+The existing five-second group TERM-to-KILL escalation, isolated pytest phases,
+lease release before failure audit, and head/base/file-overlap gates still apply.
 
 Active follow-up remediation keeps its execution owner when cancellation fails or remains pending. Own published heads survive history rewrites while attestation is unavailable; cancellation identity and custody are documented in the [follow-up lifecycle contract](docs/follow-up-runbook.md#6-bounded-stop-conditions). These custody checks do not authorize completion, rereview or merge.
 

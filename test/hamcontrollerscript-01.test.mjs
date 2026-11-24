@@ -178,6 +178,7 @@ case "$(basename "$path")" in
     if [ "$1" = --check-rebase-publication ]; then exec ${shellQuote(process.execPath)} "$path" "$@"; fi
     if [ "$1" = --complete-rebase-publication ]; then
       log complete-publication
+      if [ "\${FIXTURE_COMPLETION_FAIL_ALWAYS:-0}" = 1 ]; then exit 1; fi
       if [ -n "\${FIXTURE_COMPLETION_FAIL_ONCE:-}" ] && [ ! -f "$FIXTURE_COMPLETION_FAIL_ONCE" ]; then
         : > "$FIXTURE_COMPLETION_FAIL_ONCE"; exit 1
       fi
@@ -851,6 +852,20 @@ test('post-publication completion retries a transient failure without pushing ag
   assert.equal(f.remoteHead(), f.head);
   assert.equal(f.events().filter(event => event === 'complete-publication').length, 2);
   assert.equal(f.events().filter(event => event.startsWith('publish publication-only=1')).length, 1);
+});
+
+test('post-publication custody failure defers with status 75 after three attempts', async t => {
+  const f = conflictRebaseFixture(t);
+  const result = await f.close({ FIXTURE_TIMEOUT_ONCE: f.timeout,
+    FIXTURE_COMPLETION_FAIL_ALWAYS: '1', FIXTURE_GREEN_HEAD: f.head });
+  assert.equal(result.status, 75, result.stderr);
+  assert.equal(result.closeResult.status, 75);
+  assert.equal(result.closeResult.outcome, 'canonical-validation-deferred');
+  assert.equal(f.remoteHead(), f.head);
+  const events = f.events();
+  assert.equal(events.filter(event => event === 'complete-publication').length, 3);
+  assert.equal(events.filter(event => event.startsWith('publish publication-only=1')).length, 1);
+  assert.equal(events.some(event => event.startsWith('gh pr merge')), false);
 });
 
 test('a passing conflict repair reuses validation only on the same published head', async t => {

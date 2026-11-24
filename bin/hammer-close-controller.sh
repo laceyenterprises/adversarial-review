@@ -198,19 +198,6 @@ if [ "$ham_close_local_head" != "$ham_close_live_head" ] \
   unset HAM_COMMIT_PUBLICATION_ONLY HAM_CLOSE_REBASE_HEAD
 fi
 
-# A replay whose patch changed gets an independent review after publication.
-if [ -f "$HAM_RUN_DIR/final-gate-review-head" ] \
-  && [ "$(cat "$HAM_RUN_DIR/final-gate-review-head")" = "$ham_close_local_head" ]; then
-  HAM_CLOSE_STAGE=review-handoff
-  export POST_REMEDIATION_SHA="$ham_close_local_head"
-  "$HAM_NODE_BIN" "$HAM_CLOSE_ROOT/bin/hammer-review-handoff.mjs" \
-    "$HAM_CLOSE_ROOT" "$HAM_REPO" "$HAM_PR_NUMBER" "$ham_close_local_head" --exact-head \
-    || ham_close_finish 75 review-handoff-unconfirmed
-  ham_close_finish 20 exact-head-review-required
-fi
-
-# Without a usable required-check declaration we can still unblock the PR
-# branch and start CI. Persist the watcher continuation on the published head.
 # Settle source custody only after the exact repaired head is live.
 if [[ "$ham_close_rebase_state" = ci || "$ham_close_rebase_state" = redrive ]]; then
   [ "${HAM_PUSHED_HEAD:-$ham_close_live_head}" = "$ham_close_local_head" ] || ham_close_finish 20 head-changed
@@ -222,8 +209,21 @@ if [[ "$ham_close_rebase_state" = ci || "$ham_close_rebase_state" = redrive ]]; 
     [ "$ham_close_completion_status" -ne 0 ] || break
     [ "$ham_close_completion_attempt" -eq 3 ] || sleep 0.1
   done
-  [ "$ham_close_completion_status" -eq 0 ] || ham_close_finish "$ham_close_completion_status" canonical-validation-deferred
+  [ "$ham_close_completion_status" -eq 0 ] || ham_close_finish 75 canonical-validation-deferred
 fi
+
+# A replay whose patch changed gets an independent review after publication.
+if [ -f "$HAM_RUN_DIR/final-gate-review-head" ] \
+  && [ "$(cat "$HAM_RUN_DIR/final-gate-review-head")" = "$ham_close_local_head" ]; then
+  HAM_CLOSE_STAGE=review-handoff
+  export POST_REMEDIATION_SHA="$ham_close_local_head"
+  "$HAM_NODE_BIN" "$HAM_CLOSE_ROOT/bin/hammer-review-handoff.mjs" \
+    "$HAM_CLOSE_ROOT" "$HAM_REPO" "$HAM_PR_NUMBER" "$ham_close_local_head" --exact-head \
+    || ham_close_finish 75 review-handoff-unconfirmed
+  ham_close_finish 20 exact-head-review-required
+fi
+
+# Without usable required checks, leave published-head continuation to the watcher.
 if [ "$ham_close_rebase_state" = redrive ]; then
   export POST_REMEDIATION_SHA="$ham_close_local_head" HAM_PROCEDURE_STEP=local-validation
   HAM_CLOSE_STAGE=local-validation

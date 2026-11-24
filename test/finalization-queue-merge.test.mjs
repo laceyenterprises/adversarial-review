@@ -31,8 +31,8 @@ const mergeSha = 'd'.repeat(40);
 const count = (f, table) => f.store.db.prepare(`SELECT COUNT(*) AS n FROM ${table}`).get().n;
 
 // Drive one synthetic admission to an exact green `finalizing` candidate.
-async function finalizing(t, { noop = false, remediated = false } = {}) {
-  const f = gitFixture(t, { noop }), a = await admitted(f, { remediated });
+async function finalizing(t, { noop = false, remediated = false, ciOnly = false } = {}) {
+  const f = gitFixture(t, { noop }), a = await admitted(f, { remediated, ciOnly });
   const world = { merged: false, mergedBy: BOT, mergeSha, mergedHead: null };
   const live = { read: async () => {
     const s = a.live.subject;
@@ -88,17 +88,28 @@ test('legacy UNKNOWN receipts still require declared CI even when ordinary no-CI
   assert.equal(p.calls.length, 0);
 });
 
-test('green declared CI cannot merge a legacy UNKNOWN receipt with incomplete local evidence', async t => {
-  const p = await finalizing(t);
+test('green declared CI cannot merge a legacy remediated UNKNOWN receipt with incomplete local evidence', async t => {
+  const p = await finalizing(t, { remediated: true });
   const evidence = structuredClone(p.a.e);
   evidence.localValidation = { ...evidence.localValidation, result: 'unknown',
     ciAuthoritative: true, localFailureObserved: false };
-  p.f.store.db.prepare('UPDATE finalization_queue_clean_review SET evidence_json=? WHERE entry_id=?')
+  p.f.store.db.prepare('UPDATE finalization_queue_handoff SET evidence_json=? WHERE entry_id=?')
     .run(JSON.stringify(evidence), p.entry.entryId);
   const result = await p.finalize();
-  assert.equal(result.phase, 'returned-to-closer');
-  assert.equal(result.reason, 'local-validation-unknown-evidence-incomplete');
+  // The remediated receipt reader already rejects missing completion evidence.
+  assert.equal(result.phase, 'parked-infrastructure');
+  assert.equal(result.reason, 'admission-receipt-unavailable');
   assert.equal(p.calls.length, 0);
+});
+
+test('clean admission with production CI-only UNKNOWN evidence merges on declared green contexts', async t => {
+  const p = await finalizing(t, { ciOnly: true });
+  const result = await p.finalize();
+  assert.equal(result.phase, 'merged');
+  assert.equal(p.calls.length, 1);
+  const receipt = JSON.parse(p.f.store.db.prepare('SELECT receipt_json FROM finalization_queue_merge_receipt').get().receipt_json);
+  assert.equal(receipt.admissionKind, 'clean');
+  assert.equal(receipt.newHead, p.entry.candidate);
 });
 
 test('final eligibility merges the exact candidate once and journals a complete attributed receipt', async t => {

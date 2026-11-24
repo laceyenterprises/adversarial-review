@@ -502,8 +502,8 @@ for (const reason of HAMMER_RETRYABLE_READ_OUTCOMES) {
         return { stdout: '{}' };
       },
       deliverAlertImpl: async () => {
-        assert.equal(false, true, 'ordinary infrastructure observations must not exhaust the cap');
         pages++;
+        return { ok: true };
       },
     });
     const run = dispatchedAt => maybeDispatchAmaCloser({

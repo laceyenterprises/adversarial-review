@@ -42,7 +42,10 @@ Writes are atomic. Recording is idempotent per launch. An unreadable file reads
 as corrupt and is preserved for recovery. When the watcher observes an ended
 inconclusive launch for the live head, it logs `retry-record-unreadable`, holds
 that retry, and issues a deduplicated closure-wait notice. Restore a validated
-record through the runtime owner before retrying. A new head requires its own
+record through the runtime owner before retrying, using the runbook's
+[restore and validate command](../RUNBOOK-ama-closure.md#restore-an-unreadable-retry-record).
+Preserve the corrupt bytes and every head's accounting; do not reset the file
+to bypass the hold. A new head requires its own
 ended-launch evidence. Matching unsafe custody evidence still holds its own head.
 `closure-budget-escalation` reads `launches[].launchRequestId` across heads and
 refunds each open series charge whose launch is listed (CLOSERRETRYREFUND-01:

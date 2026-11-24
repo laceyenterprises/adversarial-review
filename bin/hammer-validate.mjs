@@ -288,7 +288,9 @@ function finishValidationReceipt(runner, runnerExit, fallbackReason, socketPathD
       check.localReason = 'validation-interrupted';
     }
   }
-  writeValidationReceipt({ ...observed, status: validationUnknown ? runnerExit : status,
+  // Only an owned canonical deferral keeps the raw runner status. Scratch
+  // setup and socket faults retain their classified 78/75 exit status.
+  writeValidationReceipt({ ...observed, status: ownsDeferral ? runnerExit : status,
     ...(validationUnknown ? { validation: 'unknown' } : {}),
     ...(socketPathDiagnostic ? { outcome: SOCKET_PATH_HARNESS_FAULT, socketPathDiagnostic } : {}) });
 }
@@ -374,9 +376,6 @@ if (checkRebase || completeRebase) {
 }
 
 async function validate() {
-  try {
-    cleanConflictRebase = canonical && hasCompletedConflictRebase() && gitOutput('status', '--porcelain') === '';
-  } catch { /* An unreadable binding gives validation no publication authority. */ }
   let scratch;
   let runner, runnerExit, fallbackReason, socketPathDiagnostic;
   startedClean = cleanCheckout();

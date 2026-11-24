@@ -7,6 +7,7 @@
 //   source=<40-hex PR head the rebase replayed>
 //   head=<40-hex rebased head>
 //   branch=<PR head branch>
+//   base=<40-hex rebase base, optional for older records>
 //
 // bin/hammer-api-publish.mjs uses the binding only while the local HEAD is
 // still that rebased head. The owned Git publisher then pushes
@@ -26,16 +27,18 @@ export function parseConflictPublishBinding(text) {
     if (!line) continue;
     const at = line.indexOf('=');
     const key = at > 0 ? line.slice(0, at) : '';
-    if (!['source', 'head', 'branch'].includes(key) || fields.has(key)) {
+    if (!['source', 'head', 'branch', 'base'].includes(key) || fields.has(key)) {
       throw new Error('conflict-repair publication binding is malformed');
     }
     fields.set(key, line.slice(at + 1));
   }
   const binding = { source: fields.get('source'), head: fields.get('head'), branch: fields.get('branch') };
   if (!SHA.test(binding.source || '') || !SHA.test(binding.head || '') || !binding.branch
-    || binding.branch.startsWith('-') || /[\s\0]/.test(binding.branch)) {
+    || binding.branch.startsWith('-') || /[\s\0]/.test(binding.branch)
+    || (fields.has('base') && !SHA.test(fields.get('base')))) {
     throw new Error('conflict-repair publication binding is malformed');
   }
+  if (fields.has('base')) binding.base = fields.get('base');
   return binding;
 }
 

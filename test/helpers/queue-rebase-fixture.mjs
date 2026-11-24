@@ -82,11 +82,17 @@ export function gitFixture(t, { second = false, conflict = false, noop = false, 
   };
   return fixture;
 }
-export async function admitted(f, { remediated = false } = {}) {
+export async function admitted(f, { remediated = false, ciOnly = false } = {}) {
   let { h, e } = remediated ? queueHandoffFixture(102) : queueCleanFixture();
   // Replace only exact fixture head identities; signatures stay synthetic.
   const replace = value => JSON.parse(JSON.stringify(value).replaceAll('b'.repeat(40), f.oldHead));
   h = replace(h); e = replace(e);
+  if (ciOnly) {
+    // createQueueProductionEvidence's clean lane has no local battery.
+    e.localValidation = { head: h.head, result: 'unknown',
+      ciAuthoritative: true, sourceRef: e.attestations.produced.sourceRef };
+    h.localValidation = { head: h.head, sourceRef: e.localValidation.sourceRef };
+  }
   const service = remediated ? createQueueHandoffService : createCleanReviewService;
   const ack = await service({ store: f.store, now: f.now, load: idle,
     evidenceAdapter: { read: async () => e } }).submit(h);

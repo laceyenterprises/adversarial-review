@@ -6532,6 +6532,9 @@ claims `ok: true`;
 its final merge gate requires the same declared, green
 contexts for every UNKNOWN, including legacy receipts without coverage fields,
 and never accepts the configured no-CI proof for it.
+Signed, exact-head, zero-finding clean admissions have no closer battery and
+retain their CI-only UNKNOWN evidence at both admission and merge. Only
+remediated UNKNOWN receipts require the completed local-evidence fields.
 
 **Operator decision for unrecovered source.** Before requesting drain, the
 validator writes an exact-target hold in the [HQ custody store](data-model/deferred-source-custody.md).
@@ -6560,7 +6563,8 @@ only when source equals target and cleanliness is not explicitly false. Corrupt
 source receipts remain unconfirmed. The watcher tries the lock once per pass.
 Explicit continuation waits up to one second for the lock, and the controller
 retries post-publication completion three times
-before ending deferred, without repeating publication. Notices refresh when source or cleanup facts
+before ending `canonical-validation-deferred` with exit 75, without repeating
+publication. Notices refresh when source or cleanup facts
 change and unchanged observations retain their delivery latch. After SIGKILL,
 the bounded runner allows up to one second for the group to disappear before
 reporting unconfirmed cleanup with exit 125. A custody refusal during conflict
@@ -6585,6 +6589,54 @@ cleanup use ordinary retry backoff.
 If an ended inconclusive launch's retry record is unreadable, the watcher logs
 `retry-record-unreadable`, keeps the record, and pauses that head's retry with
 one operator notice. Restore a validated copy before resuming that retry.
+
+#### Restore an unreadable retry record
+
+The runtime owner first pauses closer admission and confirms no writer remains
+for this PR. Use a known-good backup
+that preserves all heads' attempt counts, launch IDs, backoff and custody flags;
+do not delete the record to reset the budget. From this checkout, set
+`RETRY_ROOT` to the adversarial-review runtime root, `RETRY_REPO` to `owner/repo`,
+`RETRY_PR` to the PR number and `RETRY_BACKUP` to that backup's absolute path.
+The following command validates the backup with the production reader in an
+isolated directory, archives the corrupt bytes beside the original, then
+atomically installs and revalidates the copy:
+
+```bash
+node --input-type=module <<'JS'
+import { constants, copyFileSync, mkdtempSync, mkdirSync, readFileSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { dirname, join } from 'node:path';
+import { closerInconclusiveRetryFilePath, readCloserInconclusiveRetries } from './src/ama/closer-inconclusive-retry.mjs';
+import { writeFileAtomic } from './src/atomic-write.mjs';
+const { RETRY_ROOT: root, RETRY_REPO: repo, RETRY_PR: pr, RETRY_BACKUP: backup } = process.env;
+if (!root || !repo || !backup || !/^[1-9][0-9]*$/.test(pr || '')) throw Error('Set all RETRY_* inputs');
+const identity = { repo, prNumber: Number(pr) };
+const stage = mkdtempSync(join(tmpdir(), 'retry-restore-'));
+try {
+  const staged = closerInconclusiveRetryFilePath(stage, identity);
+  mkdirSync(dirname(staged), { recursive: true });
+  copyFileSync(backup, staged);
+  const valid = doc => !doc.__corrupt && doc.schemaVersion === 1
+    && doc.repo === repo && doc.prNumber === identity.prNumber && doc.owner === 'watcher';
+  if (!valid(readCloserInconclusiveRetries(stage, identity))) throw Error('Backup validation failed; original unchanged');
+  const file = closerInconclusiveRetryFilePath(root, identity);
+  const archive = `${file}.corrupt-${Date.now()}`;
+  copyFileSync(file, archive, constants.COPYFILE_EXCL);
+  writeFileAtomic(file, readFileSync(staged), { mode: 0o600 });
+  if (!valid(readCloserInconclusiveRetries(root, identity))) throw Error(`Restore failed; preserve ${archive}`);
+  console.log(`Validated retry record restored; original retained at ${archive}`);
+} finally { rmSync(stage, { recursive: true, force: true }); }
+JS
+```
+
+If there is no valid backup, retain the hold for operator reconstruction from
+launch/audit evidence; never silently rebuild empty accounting. Before resuming
+admission, verify the restored record retains the affected head and launches.
+On the next watcher pass confirm `retry-record-unreadable` clears, then verify
+the normal backoff or dispatch decision. Matching unsafe source custody remains
+held until the separate source-recovery procedure above is complete.
+
 The validator owns its timeout and process cleanup. Avoid a second shell alarm
 around it. If the outer tool returns 124 or 142 first, follow the same handoff
 from the available diagnostics and keep unconfirmed cleanup explicit.

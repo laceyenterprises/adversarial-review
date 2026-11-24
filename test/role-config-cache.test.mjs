@@ -215,6 +215,43 @@ test('CFG-09 cache sees native env alias changes and removal without reset', () 
   }
 });
 
+test('native cache keys retain both aliases and ignore unrelated environment changes', () => {
+  const tmp = makeTmp();
+  const topPath = join(tmp, 'top.yaml');
+  const canonical = 'AGENT_OS_ROLES_REMEDIATOR';
+  const legacy = 'ADVERSARIAL_REVIEW_DEFAULT_REMEDIATOR';
+  const unrelated = 'AR_CONFIG_CACHE_UNRELATED_FIXTURE';
+  const names = [canonical, legacy, unrelated];
+  const previous = names.map(name => process.env[name]);
+  const load = () => loadRoleConfig({ topPath, env: process.env });
+  try {
+    writeYaml(topPath, 'version: 1\nroles:\n  remediator: codex\n');
+    process.env[canonical] = 'codex';
+    process.env[legacy] = 'codex';
+    const both = load();
+    process.env[unrelated] = 'first';
+    assert.equal(load(), both);
+    process.env[unrelated] = 'second';
+    assert.equal(load(), both, 'undeclared values cannot invalidate the alias cache');
+    delete process.env[legacy];
+    const canonicalOnly = load();
+    assert.notEqual(canonicalOnly, both, 'removal of a present legacy alias changes identity');
+    assert.equal(canonicalOnly.get('roles.remediator'), 'codex');
+    process.env[canonical] = 'gemini';
+    assert.equal(load().get('roles.remediator'), 'gemini');
+    delete process.env[canonical];
+    process.env[legacy] = 'claude-code';
+    assert.equal(load().get('roles.remediator'), 'claude-code');
+  } finally {
+    for (const [index, name] of names.entries()) {
+      if (previous[index] === undefined) delete process.env[name];
+      else process.env[name] = previous[index];
+    }
+    resetRoleConfigCache();
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
 // ── N2 hot path regression: routeSubject × ~10 PRs × repeated ticks ──
 
 test('CFG-09 N2 hot path: routeSubject parses once per tick across 10 PRs', (t) => {

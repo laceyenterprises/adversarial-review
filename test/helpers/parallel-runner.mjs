@@ -3,10 +3,11 @@ import path from 'node:path';
 import { performance } from 'node:perf_hooks';
 import { pipeline } from 'node:stream/promises';
 import { run } from 'node:test';
-import parallelReporter, { nativeFileName } from './parallel-reporter.mjs';
+import parallelReporter, { trackNativeFiles } from './parallel-reporter.mjs';
 
 const config = JSON.parse(readFileSync(process.argv[2], 'utf8'));
 const fileNames = new Map(Object.entries(config.paths).map(([name, file]) => [file, name]));
+const nativeFileName = trackNativeFiles(fileNames);
 const started = performance.now();
 const reportPath = path.join(config.logDir, 'native-report.json');
 const workerArgs = config.nodeArgs;
@@ -56,16 +57,12 @@ async function* phases(checkpoint) {
       // Native file events are independent of scheduled-order TAP and case
       // counts. Record the outcome before notifying the parent, which may
       // immediately terminate this coordinator at the deadline.
-      if (event.type === 'test:dequeue' || event.type === 'test:complete') {
-        const file = nativeFileName(data, fileNames);
-        if (file) {
-          if (event.type === 'test:dequeue') reportFileProgress(file, 'started');
-          else {
-            writeCheckpoint(checkpoint, { type: 'completed', file, status: data.details.passed ? 0 : 1,
-              durationMs: data.details.duration_ms });
-            reportFileProgress(file, 'completed');
-          }
-        }
+      const file = nativeFileName(event);
+      if (file && event.type === 'test:dequeue') reportFileProgress(file, 'started');
+      if (file && event.type === 'test:complete') {
+        writeCheckpoint(checkpoint, { type: 'completed', file, status: data.details.passed ? 0 : 1,
+          durationMs: data.details.duration_ms });
+        reportFileProgress(file, 'completed');
       }
       if (!data.file && event.type === 'test:summary') {
         summary = data;

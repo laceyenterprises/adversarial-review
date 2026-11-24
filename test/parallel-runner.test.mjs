@@ -6,9 +6,35 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 import { SERIAL_TEST_FILES, orderFiles, workerCount, suiteTimeoutMs } from './helpers/parallel-plan.mjs';
+import { trackNativeFiles } from './helpers/parallel-reporter.mjs';
 import { fixtureGitEnv } from './helpers/fixture-git-env.mjs';
 
 const helper = path.join(import.meta.dirname, 'helpers', 'parallel-runner.mjs');
+
+for (const tagged of [false, true]) test(`plain coordinator events distinguish an identically located worker case (tagged=${tagged})`, () => {
+  const file = '/suite/file.test.mjs';
+  const fileEvent = { name: file, file, nesting: 0, line: 1, column: 1 };
+  const caseEvent = tagged ? { ...fileEvent, entryFile: file } : { ...fileEvent };
+  const track = trackNativeFiles(new Map([[file, 'file.test.mjs']]));
+  const event = (phase, data) => track({ type: `test:${phase}`, data });
+  assert.equal(event('enqueue', fileEvent), undefined);
+  assert.equal(event('dequeue', fileEvent), 'file.test.mjs');
+  assert.equal(event('enqueue', caseEvent), undefined);
+  assert.equal(event('dequeue', caseEvent), undefined);
+  assert.equal(event('complete', caseEvent), undefined);
+  assert.equal(event('complete', fileEvent), 'file.test.mjs');
+  assert.equal(event('complete', fileEvent), undefined);
+});
+
+test('an untagged worker can exit with a matching case still outstanding', () => {
+  const file = '/suite/file.test.mjs';
+  const fileEvent = { __proto__: null, name: file, file, nesting: 0, line: 1, column: 1 };
+  const track = trackNativeFiles(new Map([[file, 'file.test.mjs']]));
+  track({ type: 'test:enqueue', data: fileEvent });
+  track({ type: 'test:dequeue', data: fileEvent });
+  track({ type: 'test:enqueue', data: { ...fileEvent } });
+  assert.equal(track({ type: 'test:complete', data: fileEvent }), 'file.test.mjs');
+});
 
 test('local parallelism uses half the available cores up to four, or an override', () => {
   assert.equal(workerCount(100, {}, 16), 4);
@@ -261,9 +287,9 @@ test('deadline tracking removes an out-of-order completed file and counts only q
     symlinkSync(path.join(repo, name), path.join(root, name), 'dir');
   }
   const held = 'test/a-held.test.mjs', finished = 'test/b-finished.test.mjs';
-  writeFileSync(path.join(root, held), `
+  // Match the file wrapper's name and source location on Node 22.
+  writeFileSync(path.join(root, held), `test(import.meta.filename, () => {});
     import test from 'node:test';
-    test(import.meta.filename, () => {});
     test('held until the deadline', () => new Promise(resolve => setTimeout(resolve, 60_000)));
   `);
   writeFileSync(path.join(root, finished), "import test from 'node:test'; test('finished first', () => {});");

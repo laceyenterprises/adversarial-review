@@ -696,7 +696,8 @@ test('ARGUSLANEBUSY-01 legacy recovery waits for fresh evidence of an open green
   const before = readFileSync(read().jobPath, 'utf8');
   for (const evidence of [
     { headRefOid: NEXT_HEAD }, { state: 'CLOSED' }, { state: 'MERGED' }, { baseRefName: 'release' },
-    { isDraft: true }, { mergeable: 'UNKNOWN' }, { statusCheckRollup: RED_CHECKS },
+    { isDraft: true }, { isDraft: undefined }, { isDraft: null },
+    { mergeable: 'UNKNOWN' }, { statusCheckRollup: RED_CHECKS },
     { statusCheckRollup: PENDING_CHECKS }, { statusCheckRollup: [] }, null,
   ]) {
     const result = await maybeAutoAdjudicateDependencyBotArgusJob({
@@ -788,6 +789,8 @@ for (const [name, overrides] of Object.entries({
   closed: { state: 'CLOSED' },
   merged: { state: 'MERGED' },
   draft: { isDraft: true },
+  'missing draft evidence': { isDraft: undefined },
+  'null draft evidence': { isDraft: null },
   'newer failing rerun': { statusCheckRollup: [
     { ...GREEN_CHECKS[0], createdAt: '2026-01-01T00:00:00Z' },
     { ...RED_CHECKS[0], createdAt: '2026-01-01T00:01:00Z' },

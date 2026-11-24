@@ -428,7 +428,7 @@ function isDependencyMergeRecoveryReady(live, headSha, cfg, env) {
     && String(live?.state || '').toUpperCase() === 'OPEN'
     && String(live?.mergeable || '').toUpperCase() === 'MERGEABLE'
     && String(live?.mergeStateStatus || '').toUpperCase() !== 'DIRTY'
-    && live?.isDraft !== true
+    && live?.isDraft === false
     && summarizeChecksConclusion(live?.statusCheckRollup, { cfg, env }) === 'SUCCESS';
 }
 
@@ -484,7 +484,7 @@ export async function maybeAutoAdjudicateDependencyBotArgusJob({
         return { attempted: false, reason: 'merge-recovery-evidence-unavailable' };
       }
       if (!isDependencyMergeRecoveryReady(live, job.headSha, cfg, env)
-        || live.isDraft !== false || !live.baseRefName || live.baseRefName !== candidate?.baseBranch) {
+        || !live.baseRefName || live.baseRefName !== candidate?.baseBranch) {
         return { attempted: false, reason: 'merge-recovery-not-ready' };
       }
       // Resume the completed approval in place. The security drain must not

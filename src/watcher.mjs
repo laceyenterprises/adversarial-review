@@ -268,7 +268,7 @@ import {
 } from './adversarial-gate-status.mjs';
 import { runTtmTrackerWatcherTick } from './ttm-tracker.mjs';
 import { fastMergeAuditDir, fastMergeAuditPath } from './fast-merge-audit-storage.mjs';
-import { processReviewSubject } from './pollonce-phases.mjs';
+import { discoverReviewSubjects, processReviewSubject } from './pollonce-phases.mjs';
 import { resolveGateStatusContext } from './adversarial-gate-context.mjs';
 // MSM-04 — the only agent dispatch left on the AMA surface is the hammer.
 // Fully clean PRs merge through the daemon path; dirty/conflicted/red-CI PRs
@@ -1425,13 +1425,8 @@ async function pollOnceWithinBudget(
     // process the same PR before or during discovery, so keep its collectors separate.
     const reviewContext = { ...refillContext, activeMergeAgentPRs: [], currentRepoPRs: [] };
     const { activeMergeAgentPRs, currentRepoPRs } = reviewContext;
-    let subjectRefs;
-    try {
-      subjectRefs = await subjectAdapter.discoverSubjects();
-      watcherHeartbeat?.markPollProgress?.();
-    } catch (err) {
-      if (['REPOSITORY_STATE_BUSY', 'REPOSITORY_IDENTITY_CONFLICT'].includes(err.code)) throw err;
-      console.error(`[watcher] Failed to fetch PRs for ${repoPath}:`, err.message);
+    const subjectRefs = await discoverReviewSubjects(subjectAdapter, repoPath, watcherHeartbeat);
+    if (subjectRefs === null) {
       reconcileWatcherPriorityDiscoveryPending(priorityDiscoveryPending, { repoPath, discoveredPrNumbers: new Set() });
       continue;
     }

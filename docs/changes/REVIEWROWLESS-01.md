@@ -32,3 +32,9 @@ first-pass claim after repair custody clears, and queue accounting.
 The remediation fixtures also cover repeated polls after waiver withdrawal,
 new-head reconsideration, wait persistence without a fetched reference, and
 production discovery-first and oldest-first re-review ordering.
+The discovery error handling lives in `pollonce-phases.mjs` so the watcher
+entry point stays within its existing ARC-18 line limit. Canonical targeted
+validation passed 2,027 tests, including the watcher claim loop, both ARC-18
+line-limit checks, and the state projection check. `npm run lint` reported
+zero errors. `npm run typecheck:contracts` and
+`bash demo/research-finding-walkthrough.sh` passed.

@@ -726,6 +726,18 @@ export async function resolveClaudeRuntimeProbeUidForWatcher({
   return resolveClaudeLaunchctlUidFromConfig({ loadConfigImpl, execFileImpl, env, logger });
 }
 
+export async function discoverReviewSubjects(subjectAdapter, repoPath, watcherHeartbeat) {
+  try {
+    const subjectRefs = await subjectAdapter.discoverSubjects();
+    watcherHeartbeat?.markPollProgress?.();
+    return subjectRefs;
+  } catch (err) {
+    if (['REPOSITORY_STATE_BUSY', 'REPOSITORY_IDENTITY_CONFLICT'].includes(err.code)) throw err;
+    console.error(`[watcher] Failed to fetch PRs for ${repoPath}:`, err.message);
+    return null;
+  }
+}
+
 export async function processReviewSubject(entry, ctx) {
   const { subject, prNumber } = entry;
   const { repoPath, operatorSurface } = ctx;

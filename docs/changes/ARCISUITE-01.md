@@ -27,7 +27,8 @@ suite. Exact path and basename arguments still run a focused selection.
 Synthetic fixtures exercise reverse reachability, non-import CLI links,
 the merge commit's first-parent diff, scope fallbacks and shard coverage.
 The focused runner, sandbox, selector and watcher claim-loop suites passed
-238 tests. Repository lint, changed-file ESLint, contract typechecking,
-workflow lint and the offline byte-equivalence demo passed. The Agent OS
+238 tests. A synthetic PR diff then ran 40 selector, runner and sandbox
+tests, including nested runner isolation. Repository lint, changed-file ESLint,
+contract typechecking, workflow lint and the offline byte-equivalence demo passed. The Agent OS
 mirror drift check also passed with the AR overlay present. See the committed
 observation plan for the hosted 450-second target.

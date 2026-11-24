@@ -220,6 +220,9 @@ try {
   // skip its refresh. Tests set their own synthetic auth inputs rather than
   // inheriting tokens, their launch commands or their expiries.
   const inheritedStatePaths = new Set([
+    // Diff selection applies only to this coordinator. Several test fixtures
+    // invoke their own runner with a different repo or explicit file list.
+    'AR_TEST_PR_BASE', 'AR_TEST_PR_SHARD',
     'AR_TEST_TIMINGS', 'AR_TEST_SHARD_CONFIG', 'NODE_COMPILE_CACHE', 'NODE_TEST_CONTEXT',
     'CODEX_HOME', 'CODEX_SOURCE_HOME', 'CODEX_AUTH_PATH', 'GEMINI_HOME',
     'GEMINI_OAUTH_CREDS_PATH', 'CLAUDE_CONFIG_DIR',

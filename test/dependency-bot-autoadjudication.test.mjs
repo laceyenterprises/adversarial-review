@@ -536,7 +536,210 @@ async function withCompletedWithheld(rootDir, overrides = {}) {
 
 function recoveryEvidence(overrides = {}) {
   return { state: 'OPEN', headRefOid: HEAD, mergeable: 'MERGEABLE', mergeStateStatus: 'CLEAN',
-    isDraft: false, statusCheckRollup: GREEN_CHECKS, ...overrides };
+    baseRefName: 'main', isDraft: false, statusCheckRollup: GREEN_CHECKS, ...overrides };
+}
+
+const LEGACY_OWNER_BUSY_MERGE = {
+  attemptedAt: '2026-09-07T19:29:00.000Z',
+  disposition: null,
+  reason: 'owner-operation-in-flight',
+  reasons: [],
+  merged: false,
+  settled: true,
+};
+
+function withDrainApproval(rootDir, prNumber, merge, headSha = HEAD) {
+  const args = baseArgs(rootDir, { prNumber, headSha, title: 'chore(deps): bump the tooling group' });
+  completeArgusJob({ rootDir, jobPath: args.jobRecord.jobPath, job: args.jobRecord.job,
+    result: {
+      source: 'argus-security-drain', verdict: 'approve', headSha,
+      findings: [{ severity: 'low', title: 'fixture advisory' }],
+      reviewer: { model: 'gemini' }, verification: { status: 'satisfied' },
+      posted: { url: 'https://github.com/example/dependency-fixture/pull/966#issuecomment-1' },
+      ...(merge ? { merge } : {}),
+    } });
+  const read = () => findArgusJob(rootDir, { repo: REPO, prNumber, headSha });
+  return { args, read };
+}
+
+// Keep the native writer lock, lease and AMA gates. Substitute remote reads
+// and the merge transport so both PRs can use the normal daemon offline.
+function nativeDrainMerge(args, { fetchRollupImpl, execGhWithRetryImpl }) {
+  return runDaemonCleanMergeAttempt({
+    ...args,
+    env: { HQ_ROOT: args.rootDir },
+    fetchRollupImpl,
+    execGhWithRetryImpl,
+    execFileImpl: async (file, argv) => assert.fail(`unexpected command ${file} ${argv}`),
+    guardStackedBaseImpl: async () => null,
+    readBuildCompletionSignalForPrImpl: () => null,
+    readHeadAttestationChainForPrImpl: () => [],
+    resolveHeadCloserCommitSuppressionImpl: async () => ({ suppressed: false }),
+    inspectCiBootstrapImpl: async () => ({ mode: 'github-checks' }),
+    recoverCancelledChecksImpl: async () => false,
+    dismissStaleRequestChangesOnResolved: false,
+  });
+}
+
+function nativeRollup(overrides = {}) {
+  return { ...recoveryEvidence(), headRefName: 'dependabot/npm/tooling', checks: GREEN_CHECKS,
+    labels: [], title: 'chore(deps): bump the tooling group', ...overrides };
+}
+
+for (const [name, legacyMerge] of [['a new approval', undefined], ['an orphaned approval', LEGACY_OWNER_BUSY_MERGE]]) {
+  test(`ARGUSLANEBUSY-01 cross-PR native lane contention defers ${name}, then merges it once`, async () => withRoot(async (rootDir) => {
+    const holder = withDrainApproval(rootDir, 965, undefined, NEXT_HEAD);
+    const waiter = withDrainApproval(rootDir, 966, legacyMerge);
+    const { merge: ignored, ...securityResult } = waiter.read().job.result;
+    let clock = Date.parse(waiter.args.now());
+    let recoveryReads = 0;
+    let waiterReads = 0;
+    let entered;
+    let release;
+    const inTransport = new Promise(resolve => { entered = resolve; });
+    const finishHolder = new Promise(resolve => { release = resolve; });
+    const mergedPrs = [];
+    const run = ({ args, read }) => maybeAutoAdjudicateDependencyBotArgusJob({
+      ...args,
+      jobRecord: read(),
+      now: () => new Date(clock).toISOString(),
+      fetchMergeRecoveryEvidenceImpl: async (repo, pr) => {
+        assert.equal(repo, REPO);
+        assert.equal(pr, 966);
+        recoveryReads++;
+        return recoveryEvidence();
+      },
+      runDaemonCleanMergeAttemptImpl: mergeArgs => nativeDrainMerge(mergeArgs, {
+        fetchRollupImpl: async () => {
+          if (mergeArgs.prNumber === 966) waiterReads++;
+          return nativeRollup({ headRefOid: args.currentPrHeadSha,
+            state: mergedPrs.includes(mergeArgs.prNumber) ? 'MERGED' : 'OPEN' });
+        },
+        execGhWithRetryImpl: async ({ args: command }) => {
+          assert.deepEqual(command.slice(0, 3), ['pr', 'merge', String(mergeArgs.prNumber)]);
+          assert.equal(command[command.indexOf('--match-head-commit') + 1], args.currentPrHeadSha);
+          assert.ok(!mergedPrs.includes(mergeArgs.prNumber), 'one click per PR');
+          if (mergeArgs.prNumber === 965) {
+            entered();
+            await finishHolder;
+          }
+          mergedPrs.push(mergeArgs.prNumber);
+          return { stdout: '', stderr: '' };
+        },
+      }),
+    });
+    const active = run(holder);
+    try {
+      await Promise.race([inTransport, active.then(result => assert.fail(`holder did not reach merge: ${JSON.stringify(result.merge)}`))]);
+      const busy = await run(waiter);
+      assert.deepEqual(busy.merge, { ok: false, reason: 'owner-operation-in-flight', taken: false,
+        dispatched: false, skipMergeAgent: true });
+      const deferred = waiter.read();
+      assert.equal(deferred.bucket, 'completed');
+      assert.deepEqual(deferred.job.result, { ...securityResult, merge: {
+        attemptedAt: new Date(clock).toISOString(), disposition: null,
+        reason: 'owner-operation-in-flight', reasons: [], merged: false, settled: false,
+        deferrals: 1, notBefore: new Date(clock + CI_WAIT_RETRY_MS).toISOString(),
+        ...(legacyMerge ? { reopenedAt: new Date(clock).toISOString() } : {}),
+      } });
+      assert.equal((await run(waiter)).reason, 'merge-retry-wait');
+      assert.equal(waiterReads, 0, 'a live writer excludes the other PR before daemon gate reads');
+      assert.deepEqual(mergedPrs, []);
+    } finally {
+      release();
+      assert.equal((await active).reason, 'merged');
+    }
+    clock += CI_WAIT_RETRY_MS;
+    assert.equal((await run(waiter)).reason, 'merged');
+    const final = waiter.read().job.result;
+    assert.deepEqual(final, { ...securityResult, merge: {
+      attemptedAt: new Date(clock).toISOString(), disposition: 'merged', reason: 'merged', reasons: [],
+      merged: true, settled: true, deferrals: 1,
+      ...(legacyMerge ? { reopenedAt: new Date(clock - CI_WAIT_RETRY_MS).toISOString() } : {}),
+    } });
+    assert.ok(waiterReads >= 3, 'fresh pre-lease, under-lease, and post-merge reads');
+    assert.equal((await run(waiter)).attempted, false);
+    assert.equal(recoveryReads, legacyMerge ? 1 : 0);
+    assert.deepEqual(mergedPrs, [965, 966]);
+  }));
+}
+
+test('ARGUSLANEBUSY-01 uses one bounded budget across routing and daemon deferrals', async () => withRoot(async (rootDir) => {
+  const { args, read } = withDrainApproval(rootDir, 966);
+  let clock = Date.parse(args.now());
+  let attempts = 0;
+  const busy = { ok: false, reason: 'owner-operation-in-flight', taken: false, dispatched: false, skipMergeAgent: true };
+  const run = () => maybeAutoAdjudicateDependencyBotArgusJob({
+    ...args, jobRecord: read(), now: () => new Date(clock).toISOString(),
+    fetchMergeRecoveryEvidenceImpl: () => assert.fail('exhausted records cannot reopen'),
+    runDaemonCleanMergeAttemptImpl: async () => ++attempts % 2 ? busy : { disposition: 'deferred', reason: 'lease-contended' },
+  });
+  for (let i = 0; i < ARGUS_CI_WAIT_DEFERRAL_BUDGET; i++) {
+    assert.equal((await run()).completed.job.result.merge.settled, false);
+    clock += CI_WAIT_RETRY_MS;
+  }
+  const last = await run();
+  assert.equal(last.reason, 'argus-approved-merge-retry-exhausted-owner-operation-in-flight');
+  const exhausted = last.completed.job.result.merge;
+  assert.equal(exhausted.reason, 'owner-operation-in-flight');
+  assert.equal(exhausted.disposition, null);
+  assert.equal(exhausted.settled, true);
+  assert.equal(exhausted.merged, false);
+  assert.equal(exhausted.deferrals, ARGUS_CI_WAIT_DEFERRAL_BUDGET);
+  clock += CI_WAIT_RETRY_MS;
+  assert.equal((await run()).attempted, false);
+  assert.equal(attempts, ARGUS_CI_WAIT_DEFERRAL_BUDGET + 1);
+}));
+
+test('ARGUSLANEBUSY-01 legacy recovery waits for fresh evidence of an open green exact head on its lane', async () => withRoot(async (rootDir) => {
+  const { args, read } = withDrainApproval(rootDir, 966, LEGACY_OWNER_BUSY_MERGE);
+  const before = readFileSync(read().jobPath, 'utf8');
+  for (const evidence of [
+    { headRefOid: NEXT_HEAD }, { state: 'CLOSED' }, { state: 'MERGED' }, { baseRefName: 'release' },
+    { isDraft: true }, { isDraft: undefined }, { isDraft: null },
+    { mergeable: 'UNKNOWN' }, { statusCheckRollup: RED_CHECKS },
+    { statusCheckRollup: PENDING_CHECKS }, { statusCheckRollup: [] }, null,
+  ]) {
+    const result = await maybeAutoAdjudicateDependencyBotArgusJob({
+      ...args, jobRecord: read(),
+      fetchMergeRecoveryEvidenceImpl: async () => {
+        if (!evidence) throw new Error('fixture GitHub read failed');
+        return recoveryEvidence(evidence);
+      },
+      runDaemonCleanMergeAttemptImpl: () => assert.fail('unready legacy approval must not resume'),
+    });
+    assert.equal(result.attempted, false);
+    assert.equal(readFileSync(read().jobPath, 'utf8'), before);
+  }
+}));
+
+for (const [name, cfg, rollup, reason, gate] of [
+  ['moved head', {}, { headRefOid: NEXT_HEAD }, 'pr-head-moved'],
+  ['closed PR', {}, { state: 'CLOSED' }, 'not-eligible', 'pr-not-mergeable'],
+  ['failed checks', {}, { checks: RED_CHECKS, statusCheckRollup: RED_CHECKS }, 'not-eligible', 'ci-not-green'],
+  ['missing branch protection', { branchProtection: { required: true } }, {}, 'not-eligible', 'branch-protection-missing-gate'],
+  ['disabled execution', { autonomousMergeExecutionEnabled: false }, {}, 'autonomous-merge-execution-disabled'],
+]) {
+  test(`ARGUSLANEBUSY-01 a deferred approval settles on native ${name} and never reopens`, async () => withRoot(async (rootDir) => {
+    const { args, read } = withDrainApproval(rootDir, 966);
+    const run = (runDaemonCleanMergeAttemptImpl, overrides = {}) => maybeAutoAdjudicateDependencyBotArgusJob({
+      ...args, jobRecord: read(), runDaemonCleanMergeAttemptImpl,
+      ...overrides,
+    });
+    const busy = await run(async () => ({ ok: false, reason: 'owner-operation-in-flight',
+      taken: false, dispatched: false, skipMergeAgent: true }));
+    const later = { now: () => busy.completed.job.result.merge.notBefore };
+    assert.equal((await run(() => assert.fail('stale caller'), { ...later, currentPrHeadSha: NEXT_HEAD })).attempted, false);
+    const refusal = await run(mergeArgs => nativeDrainMerge({ ...mergeArgs, cfg: { ...mergeArgs.cfg, ...cfg } }, {
+      fetchRollupImpl: async () => nativeRollup(rollup),
+      execGhWithRetryImpl: () => assert.fail('refused state must never invoke merge'),
+    }), later);
+    assert.equal(refusal.merge.reason, reason);
+    if (gate) assert.ok(refusal.merge.reasons.includes(gate));
+    assert.equal(refusal.completed.job.result.merge.settled, true);
+    assert.equal(refusal.completed.job.result.verdict, 'approve');
+    assert.equal((await run(() => assert.fail('settled refusal must not reopen'), later)).attempted, false);
+  }));
 }
 
 test('DEPWAIT-01 completed exact-head withheld approval reopens once and merges through the same daemon', async () => withRoot(async (rootDir) => {
@@ -586,6 +789,8 @@ for (const [name, overrides] of Object.entries({
   closed: { state: 'CLOSED' },
   merged: { state: 'MERGED' },
   draft: { isDraft: true },
+  'missing draft evidence': { isDraft: undefined },
+  'null draft evidence': { isDraft: null },
   'newer failing rerun': { statusCheckRollup: [
     { ...GREEN_CHECKS[0], createdAt: '2026-01-01T00:00:00Z' },
     { ...RED_CHECKS[0], createdAt: '2026-01-01T00:01:00Z' },

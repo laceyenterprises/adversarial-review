@@ -337,13 +337,12 @@ test('the requeue migration is idempotent on re-application', async t => {
   assert.deepEqual(f.db.pragma('foreign_key_check'), []);
 });
 
-test('settlement still refuses an already-fixed drop whose fix PR is unverified', async t => {
+test('settlement preserves a legacy already-fixed citation as drop evidence', async t => {
   const f = fixture(t, ['Only result']);
   const [batch] = claimFindingBatches(f.db, '2026-01-02', { now: fixtureNow });
   const [id] = f.ids(batch);
   const result = { batchId: batch.batch_id, findings: [{ findingId: id, outcome: 'dropped', reason: 'already fixed in #23: removed it' }] };
-  assert.throws(() => settleFindingBatch(f.db, batch, result), /batch-drop-pr-unverified/);
-  assert.equal(settleFindingBatch(f.db, batch, result, null, { 23: { state: 'MERGED' } }), true);
+  assert.equal(settleFindingBatch(f.db, batch, result), true);
   assert.equal(f.backlog()[0].reason, 'already-fixed-in-23: removed it');
 });
 

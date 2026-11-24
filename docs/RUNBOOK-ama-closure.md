@@ -9789,17 +9789,21 @@ other batch work. At 6×, those probe/handoff/dispatch budgets total 103 minutes
 at 20×, they total 334 minutes. These are per-publication budgets, not a whole-pass
 deadline; workers run with bounded parallelism and may process multiple batches.
 Timeout, signal and output-limit failures name the probe and cause in the
-bounded batch error and watcher log. Timeout diagnostics include the effective
-bound; output-limit kills are reported as `output exceeded limit`, even when
-the child was killed. These read failures retry
-on later collection passes without spending preparation attempts; the existing
-stale-release and launch-custody rules still apply.
-Collection reads `state,mergedAt,body,headRefOid` with `gh pr view` through the
-retrying GitHub transport. Applied findings require a merged batch PR with its
-exact batch ID on a marker line; whitespace, bold and HTML-comment wrappers
-are accepted. Valid manifest and marker evidence clears prior batch errors even
-while the PR awaits merge; finding outcomes remain pending. Missing or foreign
-markers and unreadable PRs remain unresolved.
+watcher log. Timeout diagnostics include the effective bound. Network
+failures, timeouts and signals keep the batch pending for later collection
+without spending preparation attempts. A probe whose output exceeds its cap
+records `output exceeded limit` in the batch error.
+Collection waits for terminal preparation and retries incomplete JSON before
+recording `batch-outcome-invalid-json`. Non-applied outcomes settle without
+GitHub. For applied outcomes, collection reads `state,mergedAt,body,headRefOid`
+with `gh pr view` using only `outcomes.json`'s PR number in the batch repository.
+The GitHub transport backs off on transient failures. If its retries are
+exhausted, collection keeps the batch pending for another pass. Applied
+findings require a merged batch PR or an open PR with a current-head review
+attachment. Both require the exact batch ID on a marker line, which accepts
+whitespace, bold and HTML-comment wrappers. Valid manifest and marker evidence
+clears prior errors while the PR awaits attachment or merge. Missing or foreign
+markers and unreadable PRs leave the findings unresolved.
 See [the store contract](data-model/review-findings.md#non-blocking-backlog-findingsbatch-01)
 for outcome validation and restart fencing. Preserve batch artifacts until their
 outcomes are collected. An incomplete batch stays fenced and visible for repair.

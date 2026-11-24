@@ -519,8 +519,12 @@ FINDINGSSHAPE-01 keeps preparation `decision-only`: workers re-check current mai
 drop stale/no-evidence findings with reasons, and push tested fixes on their batch
 branch. They write provisional outcomes in the existing schema, with null
 `prNumber` and the pushed commit as `headSha`. A provisional applied outcome never
-settles a finding. An all-dropped/declined batch completes from this artifact with
-no PR, push, or publication launch.
+settles a finding. An all-dropped/declined batch completes from this artifact
+without GitHub, a push, or a publication launch. Preparation and publication
+write complete JSON to a temporary file in the same directory and rename it to
+`outcomes.json` with mode `0664`. The collector reads a dispatched batch's
+artifact after observing terminal preparation. It retries JSON parse failures
+after 50, 100 and 200 ms before recording `batch-outcome-invalid-json`.
 
 For provisional applied findings or advice, the collector validates complete
 manifest coverage, waits for terminal preparation (including a launch parked at
@@ -541,12 +545,13 @@ re-probe a decision-only launch when it exits, so a real push can show any
 non-`done` value. Since FINDINGSREQUEUE-01 the milestone value is not consulted
 at all; the remote tested head is the push evidence. Failed or unknown terminal
 preparation still refuses publication. It looks for PRs on that branch across all states before inspecting the
-remote ref, preserving branch slashes and percent-encoding each path segment. One
-same-repository PR with the exact marker is bound through ordinary settlement;
-an unmerged close stays unresolved and never starts another publisher. Foreign,
-unmarked, or ambiguous PR evidence retains the batch fence. This also recovers a
-PR opened before its worker could rewrite the outcome artifact, even after its
-branch was deleted or normal review rebased the head.
+remote ref, preserving branch slashes and percent-encoding each path segment.
+The same-repository PR with the exact marker prevents a duplicate publisher,
+even after its branch is deleted. Settlement waits for the publisher to record
+`prNumber` in `outcomes.json`, then looks up that number in the batch repository.
+An unmerged close stays unresolved. Foreign, unmarked, or ambiguous branch PR
+evidence retains the batch fence. Exhausted GitHub read retries keep the batch
+pending for the next collection pass without recording a terminal error.
 
 With no existing PR, a matching remote branch SHA permits one follow-up
 `--completion-shape pr --branch <existing-branch>` launch. If preparation ended
@@ -695,9 +700,11 @@ semantics unchanged; use the backlog fields to audit batch application.
 Worker drops use `reason: "<code>: <justification line>"`, with code restricted to
 `stale-code-changed`, `already-fixed-in-<positive PR number>`, `not-reproducible`,
 `out-of-scope-with-ticket`, or `false-positive`. The worker must describe the
-current-main evidence; lack of time is not a drop. Already-fixed drops additionally
-require an independently fetched merged fix PR; out-of-scope drops must cite a
-ticket or ticket URL. Incomplete, duplicate or foreign manifest IDs leave the
+current-main evidence; lack of time is not a drop. For already-fixed drops the
+worker cites the merged fix with its repository and explains the current-main
+evidence. The collector retains the citation as evidence without a GitHub
+lookup. Out-of-scope drops must cite a ticket or ticket URL. Incomplete,
+duplicate or foreign manifest IDs leave the
 entire batch unresolved (`invalid-batch-manifest`). Since FINDINGSREQUEUE-01 a
 single bad outcome no longer errors the batch. A legacy drop reason written
 before this vocabulary maps to the current code only when the code is exact and
@@ -707,8 +714,7 @@ justified. That covers spelling variants such as `False positive - <why>`,
 any outcome other than `applied`/`dropped`, a blank reason, or an out-of-scope
 drop with no ticket returns that finding to the queue for re-verification. This
 counts as an attempt and is recorded in `result_json.requeued`. The rest of the
-batch settles normally, and such a claim is never published as applied. An
-unverified already-fixed PR still holds the batch. Empty finding/advisory
+batch settles normally, and such a claim is never published as applied. Empty finding/advisory
 manifests fail instead of completing. Advisory-only applied/declined manifests remain supported.
 
 Health also exposes finding-only `openCount`, `unbatchedCount`, `oldestOpenAt`,

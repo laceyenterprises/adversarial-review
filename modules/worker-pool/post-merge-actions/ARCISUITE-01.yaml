@@ -1,0 +1,14 @@
+operator_steps:
+  - description: >-
+      After merge, verify that a typical pull request's npm test steps finish
+      under 450 seconds and that main and nightly runs still execute the full
+      suite on both Node majors. Record links, file counts and step durations
+      from the next ordinary runs in the incident follow-up.
+    run_as: designated SRE
+    command: >-
+      gh run list --workflow test.yml --limit 20
+      --json databaseId,event,headBranch,conclusion,url
+actions: []
+catchup:
+  catchup_timeout_s: 1800
+contact_on_failure: operator

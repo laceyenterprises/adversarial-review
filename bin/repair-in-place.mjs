@@ -5,7 +5,8 @@ import { randomUUID } from 'node:crypto';
 import { resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import {
-  reserveRepairEpoch, pageRepairCap, observeRepairOwner, REPAIR_READ_PREFLIGHT_REQUIRED,
+  reserveRepairEpoch, pageRepairCap, observeRepairOwner, replayUnenqueuedFinalFixEpoch,
+  REPAIR_READ_PREFLIGHT_REQUIRED,
 } from '../src/repair-epochs.mjs';
 import { readRepairFacts } from '../src/repair-facts.mjs';
 import { tryAcquireCloserIntentLock } from '../src/ama/pre-receipt-intent.mjs';
@@ -62,11 +63,17 @@ async function verifyRepairDispatchScope({ repo, dispatchProjectRef, readContext
 export async function main(args, {
   env = process.env, prepareDispatchReadContextImpl = prepareDispatchReadContext,
 } = {}) {
-  const [rootDir, repo, prRaw, headSha, ownerKey, conflicting, ticket, launcherPidRaw, dispatchProjectRaw] = args;
+  if (args.length === 1 && args[0] === '--final-fix-recovery-protocol') {
+    return { ok: true, protocol: 'final-fix-recovery-v1' };
+  }
+  const [rootDir, repo, prRaw, headSha, ownerKey, conflicting, ticket, launcherPidRaw, dispatchProjectRaw, recoveryEpochId] = args;
   const dispatchProjectRef = dispatchProjectRaw === '' ? undefined : dispatchProjectRaw;
   const prNumber = Number(prRaw);
   if (!rootDir || !/^[^/\s]+\/[^/\s]+$/.test(repo ?? '') || !(prNumber > 0) || !ownerKey
     || !/^[0-9a-f]{40}$/i.test(headSha)
+    || (recoveryEpochId !== undefined && (ticket || launcherPidRaw || conflicting !== 'false'
+      || !/^repair-[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/.test(recoveryEpochId)
+      || !/^ffa-[0-9a-f]{64}$/.test(ownerKey) || !dispatchProjectRef))
     || (dispatchProjectRef !== undefined && (typeof dispatchProjectRef !== 'string'
       || dispatchProjectRef.length > 256 || /\s/.test(dispatchProjectRef)))) throw new Error('invalid repair request');
   const db = new Database(resolve(rootDir, 'data/reviews.db'), { readonly: true, fileMustExist: true });
@@ -77,7 +84,7 @@ export async function main(args, {
     if (!row && conflicting !== 'true') return { ok: true, epoch: null, reason: 'no-open-review-row' };
     facts = readRepairFacts({ rootDir, db, repo, prNumber, headSha, row, conflicting: conflicting === 'true' });
   } finally { db.close(); }
-  if (!facts.cause) return { ok: true, epoch: null, reason: 'budget-available' };
+  if (!facts.cause && !recoveryEpochId) return { ok: true, epoch: null, reason: 'budget-available' };
   let release = tryAcquireCloserIntentLock(rootDir, { repo, prNumber });
   if (!release) return { ok: false, reason: 'closer-submission-owned' };
   const readContext = dispatchReadContext(env, prepareDispatchReadContextImpl);
@@ -87,6 +94,7 @@ export async function main(args, {
     const checkClaim = () => readRepairFollowUpClaim(rootDir, {
       repo, prNumber, headSha, ticket,
       launcherPid: /^[1-9]\d*$/.test(launcherPidRaw) ? Number(launcherPidRaw) : null,
+      requireUnowned: Boolean(recoveryEpochId),
     });
     const claim = checkClaim();
     if (!claim.ok) return claim;
@@ -97,7 +105,8 @@ export async function main(args, {
       && !facts.epochs.some(epoch => epoch.ownerKey === ownerKey || !epoch.reviewHead && !epoch.terminalAt)) {
       return projectRequired(repo);
     }
-    const prLease = claim.claimedAt && findLiveAmaCloserLease(rootDir, { repo, prNumber });
+    const prLease = (claim.claimedAt || recoveryEpochId)
+      && findLiveAmaCloserLease(rootDir, { repo, prNumber, strict: Boolean(recoveryEpochId) });
     if (prLease && (prLease.headSha.toLowerCase() !== headSha.toLowerCase()
       || !['pending', 'dispatched'].includes(prLease.lease.status)
       || (prLease.lease.status === 'dispatched' && !prLease.lease.lrqId))) {
@@ -133,12 +142,15 @@ export async function main(args, {
     const pending = facts.epochs.find(epoch => !epoch.reviewHead && !epoch.terminalAt);
     const atReservationHead = typeof pending?.baseHead === 'string'
       && pending.baseHead.toLowerCase() === headSha.toLowerCase();
+    if (recoveryEpochId && (!atReservationHead || pending.id !== recoveryEpochId
+      || pending.ownerKey !== ownerKey || pending.dispatchProjectRef !== dispatchProjectRef
+      || pending.ownerLaunch != null || pending.publicationHead != null)) {
+      return { ok: false, reason: 'final-fix-reservation-changed' };
+    }
     if (atReservationHead) {
       const ready = await readContext();
       if (!ready.ok) return contextUnavailable(ready);
     }
-    const terminalOwner = await observeRepairOwner({ rootDir, repo,
-      epoch: atReservationHead ? pending : null, readImpl });
     const recheckCustody = () => {
       const current = checkClaim();
       if (!current.ok) return current;
@@ -148,6 +160,21 @@ export async function main(args, {
       }
       return current;
     };
+    if (recoveryEpochId) {
+      const selector = { idempotency_key: ownerKey, project_ref: dispatchProjectRef, repo };
+      const read = await readImpl(selector, { rootDir, timeoutMs: 8000 });
+      if (!read.ok || read.roots?.length !== 0
+        || read.absenceProof?.grant_id !== 'project-repository-dispatch-read') {
+        return { ok: false, reason: 'final-fix-owner-absence-unproven' };
+      }
+      const custody = recheckCustody();
+      if (!custody.ok) return custody;
+      const replay = replayUnenqueuedFinalFixEpoch({ rootDir, repo, prNumber, headSha,
+        ownerKey, dispatchProjectRef, recoveryEpochId, ownerSnapshot: pending });
+      return { ...replay, protocol: 'final-fix-recovery-v1' };
+    }
+    const terminalOwner = await observeRepairOwner({ rootDir, repo,
+      epoch: atReservationHead ? pending : null, readImpl });
     const custody = recheckCustody();
     if (!custody.ok) return custody;
     const reservation = { rootDir, repo, prNumber, headSha, ownerKey,

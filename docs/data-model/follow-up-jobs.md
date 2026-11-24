@@ -100,6 +100,11 @@ These positively proven broker outages do not spend the separate bounded
 infrastructure-refund allowance described below. Lease mismatches and other
 publication, validation, review or CI failures retain ordinary accounting.
 
+When Worker Pool recovers a pre-enqueue native final fix under its original
+repair key, the failed job remains terminal `never-spawned`. The new LRQ and
+later managed publication are read through the repair reservation's existing
+owner lookup.
+
 ## Nonblocking cap terminal result
 
 A claim refused by the consecutive nonblocking cap retains `status: stopped`

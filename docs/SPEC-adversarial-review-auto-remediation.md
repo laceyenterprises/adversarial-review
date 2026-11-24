@@ -212,6 +212,15 @@ AMA holds the PR without spending the retain-loop cap, for at most two hours
 after the proven push; past that deadline the wait counts toward the cap again
 and escalates to the operator.
 
+FINALREPAIRCUSTODY-01 covers a pre-enqueue final-round failure that retained an
+unbound `ffa-` repair reservation. The HQ-root owner can resume submission
+through Worker Pool using the original dispatch key and terminal closer source.
+The companion requires fresh project/repository-scoped absence and compares the
+unique unbound epoch under the existing intent and retry-ledger locks. Active
+queue claims, live or uncertain closer ownership, unavailable reads and changed
+epochs refuse admission. The failed job remains terminal `never-spawned`.
+The new launch's managed produced-head evidence enters ordinary review admission.
+
 Two row states that used to hide this handoff no longer do (COMMENTCLOSE-02).
 First, a recorded final-round push is checked before the row's
 `rereview_reason`. That reason survives the posted review it asked for, so an

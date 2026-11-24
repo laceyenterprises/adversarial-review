@@ -19,6 +19,7 @@
         "src/ttm-owner.mjs"
       ],
       "owner": "watcher and PR repair dispatcher",
+      "recovery": "FINALREPAIRCUSTODY-01 compares and reads the existing unbound ffa- epoch under the closer-intent and retry-ledger locks after fresh paired absence and a strict queue ownership check. The native failed job and epoch fields remain unchanged.",
       "optionalFields": [
         "repairEpochs[].dispatchProjectRef: immutable canonical project required for new native reservations after exact paired dispatch-read preflight; optional in legacy entries",
         "repairEpochs[].absentObservations: consecutive canonical exact-key absence proofs before operator escalation",

@@ -298,6 +298,16 @@ Exits non-zero if any kernel or adapter invariant fails. The same
 contracts the demo exercises are the contracts the production
 GitHub-PR pipeline depends on.
 
+Deferred validation preserves unpublished source and unknown cleanup in HQ custody.
+A clean published source with confirmed cleanup resumes the existing paced closer
+retry; every merge still needs exact-head review, source provenance and required
+CI. See [the custody contract](docs/data-model/deferred-source-custody.md).
+Without a CI mirror, local environment faults may defer to exact-head GitHub
+checks. Mirror setup faults instead remain UNKNOWN under source custody and
+paced retry; unpublished source or unconfirmed cleanup requires operator recovery.
+The existing five-second group TERM-to-KILL escalation, isolated pytest phases,
+lease release before failure audit, and head/base/file-overlap gates still apply.
+
 Active follow-up remediation keeps its execution owner when cancellation fails or remains pending. Own published heads survive history rewrites while attestation is unavailable; cancellation identity and custody are documented in the [follow-up lifecycle contract](docs/follow-up-runbook.md#6-bounded-stop-conditions). These custody checks do not authorize completion, rereview or merge.
 
 The full unit + adapter test suite runs the same way:
@@ -993,7 +1003,14 @@ repair/refund ledgers defer only their PR. See the
   the merge bar of required checks plus changed-surface tests, waits out
   GitHub required checks on the exact post-remediation head within a
   bounded remote-CI window, and merges under its own lease with
-  `--match-head-commit`. Watcher tenure review routing requires effective
+  `--match-head-commit`. UNKNOWN validation retains exact source and cleanup
+  evidence and holds a same-head successor for operator decision. Proved
+  standalone CI continuation archives the hold as continued; required checks
+  still govern merge. Teardown checks every target marker for the ending launch
+  and keeps an unbundled workspace across published-head changes. Changed
+  source/cleanup facts refresh the operator notice. Existing smoke commands
+  remain unchanged; organic recovery evidence follows normal deployment.
+  Watcher tenure review routing requires effective
   `worker_pool.tenure.enabled: true` (default false); disabled routing performs
   no tenure reads. When enabled and the PR's stable build launch exposes `tenureId`,
   a changed head instead requires independent exact-head review before merge.
@@ -2246,6 +2263,10 @@ drain. Across launches, the watcher records these deferrals as owned inconclusiv
 retries: full refunds, exponential backoff from the configured attempt threshold,
 and one notification, using the existing last-phase receipt without a final
 terminal-stop receipt.
+If the record for an observed ended inconclusive launch is unreadable, the
+watcher holds that head's retry and sends one operator notice. Teardown paces
+retention failures per hold and accepts continued custody with exact-source
+publication.
 Pytest reports real collection and test
 phase boundaries and uses local ledger routing; explicit disposable-Postgres
 test settings remain intact. Standalone TERM/INT/HUP cancellation initiates group TERM,

@@ -16,8 +16,9 @@ import { resolveRepositoryRequiredCheckContexts, resolveRequiredCheckContextsFro
   from '../src/ama/required-check-contexts.mjs';
 import {
   UNKNOWN_CONTEXTS_NOT_GREEN, UNKNOWN_CONTEXTS_UNDECLARED, recordedUnknownDefersToCi,
-  unknownValidationCiGate, unknownValidationDeferral,
+  readDeferredValidationChecks, unknownValidationCiGate, unknownValidationDeferral,
 } from '../src/ama/local-validation-unknown.mjs';
+import { startDeferredSourceCustody } from '../src/ama/deferred-source-custody.mjs';
 import { classifyQueueChecks, resolveQueueRequiredSet } from '../src/finalization/queue-check-reader.mjs';
 import { queueLocalValidationUnknown, validateQueueHandoff } from '../src/finalization/queue-handoff.mjs';
 import { queueHandoffFixture } from './helpers/queue-handoff-fixture.mjs';
@@ -30,6 +31,33 @@ const cfg = { requiredCheckContexts: [],
   requiredCheckContextsByRepository: [{ repository: REPO, contexts: ['repo-guards'] }] };
 const run = (name, conclusion = 'SUCCESS') => ({ __typename: 'CheckRun', name, status: 'COMPLETED', conclusion });
 const green = [run('repo-guards'), run('lint')];
+
+test('deferred check receipts handle absent evidence and normalize unreadable payloads', t => {
+  const dir = mkdtempSync(join(tmpdir(), 'mrq20-receipt-'));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  for (const recorded of [null, undefined, {}]) {
+    assert.equal(readDeferredValidationChecks(dir, HEAD, recorded), null);
+  }
+  const recorded = { localValidationReceipt: join(dir, 'checks.json') };
+  assert.equal(readDeferredValidationChecks(dir, HEAD, recorded), null);
+  for (const payload of ['{', 'null', '{}', JSON.stringify({ head: HEAD, checks: [null] })]) {
+    writeFileSync(recorded.localValidationReceipt, payload);
+    assert.throws(() => readDeferredValidationChecks(dir, HEAD, recorded), /^Error: invalid validation receipt$/);
+  }
+  const evidence = { head: HEAD, checks: [{ result: 'pass' }] };
+  writeFileSync(recorded.localValidationReceipt, JSON.stringify(evidence));
+  assert.deepEqual(readDeferredValidationChecks(dir, HEAD, recorded), evidence);
+  assert.deepEqual(readDeferredValidationChecks(dir, HEAD, { localValidationReceipt: 'checks.json' }), evidence);
+  assert.throws(() => readDeferredValidationChecks(dir, 'b'.repeat(40), recorded), /invalid validation receipt/);
+  assert.throws(() => readDeferredValidationChecks(dir, HEAD,
+    { localValidationReceipt: join(dir, '..', 'checks.json') }), /invalid validation receipt path/);
+  assert.throws(() => readDeferredValidationChecks(dir, HEAD,
+    { localValidationReceipt: '../checks.json' }), /invalid validation receipt path/);
+  const unreadable = join(dir, 'directory');
+  mkdirSync(unreadable);
+  assert.throws(() => readDeferredValidationChecks(dir, HEAD,
+    { localValidationReceipt: unreadable }), /^Error: invalid validation receipt$/);
+});
 
 test('repository-scoped contexts bind to one repository and keep global callers unchanged', () => {
   assert.deepEqual(resolveRequiredCheckContextsFromCfg(cfg, { repository: REPO }), ['repo-guards']);
@@ -96,7 +124,8 @@ test('UNKNOWN with no declared contexts, a real failure, or an ineligible stop n
     'validation-budget-exceeded', 'validation-killed']) {
     assert.equal(unknownValidationDeferral({ reason, requiredContexts: contexts }).ciAuthoritative, true, reason);
   }
-  const receipt = { validation: 'unknown', reason: 'absolute-timeout', ciAuthoritative: true };
+  const receipt = { validation: 'unknown', reason: 'absolute-timeout', ciAuthoritative: true,
+    cleanup: 'finished', coverageComplete: true, localFailureObserved: false };
   assert.equal(recordedUnknownDefersToCi(receipt, contexts), true);
   assert.equal(recordedUnknownDefersToCi(receipt, []), false);
   for (const ciAuthoritative of [false, undefined]) {
@@ -136,11 +165,12 @@ function runValidator({ root, head, config }, scenario, extraArgs = ['--canonica
     export async function runBounded(_command, _args, options) {
       appendFileSync(${JSON.stringify(calls)}, 'run\\n');
       const scenario = ${JSON.stringify(scenario)};
-      if (scenario.rows) writeFileSync(process.env.HAM_CLOSE_VALIDATION_RECEIPT, JSON.stringify({ checks: scenario.rows }));
+      if (scenario.rows) writeFileSync(process.env.HAM_CLOSE_VALIDATION_RECEIPT, JSON.stringify({ head: process.env.HAM_CLOSE_VALIDATION_HEAD, selectedCheckCount: scenario.rows.length, checks: scenario.rows }));
       if (scenario.output) options.observeOutput(scenario.output);
       if (scenario.concurrentReceipt) writeFileSync(${JSON.stringify(join(root, `validation-deferred-${head}.json`))},
         JSON.stringify(scenario.concurrentReceipt));
       if (scenario.stop) options.observeStop(...scenario.stop);
+      options.observeCleanup?.({ cleanup: scenario.exit === 125 ? 'unconfirmed' : 'finished' });
       return scenario.exit;
     }`;
   const loader = join(root, 'loader.mjs');
@@ -154,7 +184,7 @@ function runValidator({ root, head, config }, scenario, extraArgs = ['--canonica
     } });
   `);
   const env = { ...process.env, HAM_RUN_DIR: root, HAM_CLOSE_VALIDATION_RECEIPT: receipt,
-    HAM_LOCAL_VALIDATION_CI_DEDUP: '0', HAM_HQ_ROOT: root, HAM_REPO: REPO, HAM_PR_NUMBER: '42',
+    HAM_LOCAL_VALIDATION_CI_DEDUP: '0', HAM_CLOSE_VALIDATION_HEAD: head, HAM_HQ_ROOT: root, HAM_REPO: REPO, HAM_PR_NUMBER: '42',
     AGENT_OS_CONFIG_PATH: config, TMPDIR: root };
   for (const key of ['HQ_LAUNCH_REQUEST_ID', 'LAUNCH_REQUEST_ID', 'HQ_WORKER_RUN_ID', 'HAM_CONTROLLER_RECORD']) delete env[key];
   const result = spawnSync(process.execPath, ['--import', loader, validator, ...extraArgs], {
@@ -168,23 +198,19 @@ const deferralOf = ({ root, head }) => {
   return existsSync(path) ? JSON.parse(readFileSync(path, 'utf8')) : null;
 };
 
-test('hammer-validate: a timeout with green-gated declared contexts hands the verdict to exact-head CI', t => {
+test('hammer-validate: declared contexts without proof of local guards leave a timeout blocking', t => {
   const repo = fixture(t);
   const first = runValidator(repo, { stop: ['absolute-timeout', 124], exit: 124 });
-  assert.equal(first.status, 0, first.stderr);
-  assert.match(first.stderr, /local-validation-unknown-github-required-gate-authoritative/);
-  assert.doesNotMatch(first.stderr, /canonical-validation-deferred/);
-  assert.match(first.stderr, /no local pass claimed/i);
+  assert.equal(first.status, 124, first.stderr);
+  assert.match(first.stderr, /canonical-validation-deferred/);
   const receipt = deferralOf(repo);
   assert.equal(receipt.validation, 'unknown');
-  assert.equal(receipt.ciAuthoritative, true);
+  assert.equal(receipt.ciAuthoritative, false);
   assert.deepEqual(receipt.requiredContexts, ['repo-guards']);
-  // The close's pre-check and a fresh round both proceed on the same head
-  // without re-running the battery.
   const check = runValidator(repo, { exit: 0 }, ['--check-deferred']);
-  assert.equal(check.status, 0, check.stderr);
+  assert.equal(check.status, 75, check.stderr);
   const again = runValidator(repo, { exit: 1 });
-  assert.equal(again.status, 0, again.stderr);
+  assert.equal(again.status, 75, again.stderr);
   assert.equal(again.batteries, 1, 'the recorded UNKNOWN is reused, not re-run');
 });
 
@@ -197,12 +223,26 @@ test('hammer-validate: without declared contexts a timeout keeps the existing de
   assert.equal(runValidator(repo, { exit: 0 }, ['--check-deferred']).status, 75);
 });
 
+test('hammer-validate: an all-local-pass selection can continue after a standalone budget stop', t => {
+  const repo = fixture(t);
+  writeFileSync(join(repo.root, '.git/info/exclude'), '/*\n');
+  const result = runValidator(repo, { rows: [{ name: 'local guard', status: 'run', result: 'pass' }],
+    stop: ['absolute-timeout', 124], exit: 124 });
+  assert.equal(result.status, 0, result.stderr);
+  const receipt = deferralOf(repo);
+  assert.equal(receipt.ciAuthoritative, true);
+  assert.equal(receipt.coverageComplete, true);
+  assert.equal(receipt.cleanup, 'finished');
+  assert.equal(runValidator(repo, { exit: 1 }, ['--check-deferred']).status, 0);
+});
+
 test('hammer-validate: a concurrently recorded deferral decides only if its exact-head evidence permits CI', t => {
   for (const [receiptOverride, exit, expected] of [[{}, 124, 0], [{ ciAuthoritative: false }, 124, 75],
     [{ head: HEAD }, 124, 75], [{}, 125, 125]]) {
     const repo = fixture(t);
-    const concurrentReceipt = { head: repo.head, validation: 'unknown', reason: 'absolute-timeout',
-      ciAuthoritative: true, localFailureObserved: false, ...receiptOverride };
+    writeFileSync(join(repo.root, '.git/info/exclude'), '/*\n');
+    const concurrentReceipt = { schemaVersion: 1, head: repo.head, validation: 'unknown', reason: 'absolute-timeout',
+      ciAuthoritative: true, coverageComplete: true, cleanup: 'finished', localFailureObserved: false, ...receiptOverride };
     const first = runValidator(repo, { concurrentReceipt, stop: ['absolute-timeout', 124], exit });
     assert.equal(first.status, expected, first.stderr);
     assert.deepEqual(deferralOf(repo), concurrentReceipt);
@@ -215,7 +255,7 @@ test('a clean conflict rebase retains cleanup evidence for publication after a t
     writeFileSync(join(repo.root, '.git/info/exclude'), '/*\n');
     writeFileSync(join(repo.root, 'conflict-repair-publish.env'),
       `source=${HEAD}\nhead=${repo.head}\nbranch=feature\n`);
-    const result = runValidator(repo, { stop: ['absolute-timeout', 124], exit: 124 });
+    const result = runValidator(repo, { rows: [{ name: 'local', result: 'pass' }], stop: ['absolute-timeout', 124], exit: 124 });
     assert.equal(result.status, declared ? 0 : 124, result.stderr);
     const receipt = deferralOf(repo);
     assert.equal(receipt.cleanCheckout, true);
@@ -245,6 +285,24 @@ test('a clean conflict rebase retains cleanup evidence for publication after a t
   }
 });
 
+test('deferred conflict validation finds source custody without a remote-head environment hint', t => {
+  const repo = fixture(t);
+  writeFileSync(join(repo.root, '.git/info/exclude'), '/*\n');
+  writeFileSync(join(repo.root, 'conflict-repair-publish.env'),
+    `source=${HEAD}\nhead=${repo.head}\nbranch=feature\n`);
+  const hold = startDeferredSourceCustody({
+    env: { HAM_HQ_ROOT: repo.root, HAM_REPO: REPO, HAM_PR_NUMBER: '42',
+      HAM_CLOSE_VALIDATION_REMOTE_HEAD: HEAD },
+    launchRequestId: 'lrq_other', sourceHead: repo.head, clean: true, files: [], runner: 'canonical',
+  });
+  assert.ok(hold);
+  const result = runValidator(repo, { exit: 0 }, ['--check-deferred']);
+  assert.equal(result.status, 75, result.stderr);
+  assert.match(result.stderr, /canonical-validation-deferred/);
+  assert.match(result.stderr, /hold\.json/);
+  assert.equal(result.batteries, 0);
+});
+
 test('hammer-validate: a real local failure still blocks', t => {
   const repo = fixture(t);
   const failed = runValidator(repo, { rows: [{ name: 'unit', status: 'failed', result: 'fail' }], exit: 42 });
@@ -268,11 +326,11 @@ test('hammer-validate: a failure observed before the stop keeps the head blockin
 test('hammer-validate: the mirror budget stop and an external kill are UNKNOWN, not failed checks', t => {
   const budget = fixture(t);
   const overBudget = runValidator(budget, { rows: [{ name: 'unit', status: 'run', result: 'pass' }], exit: 75 });
-  assert.equal(overBudget.status, 0, overBudget.stderr);
+  assert.equal(overBudget.status, 75, overBudget.stderr);
   assert.equal(deferralOf(budget).reason, 'validation-budget-exceeded');
   const killed = fixture(t);
   const sigkill = runValidator(killed, { exit: 137 });
-  assert.equal(sigkill.status, 0, sigkill.stderr);
+  assert.equal(sigkill.status, 137, sigkill.stderr);
   assert.equal(deferralOf(killed).reason, 'validation-killed');
   // Without declared contexts the same stop is an UNKNOWN deferral, never a pass.
   const undeclared = fixture(t, { declared: false });
@@ -285,6 +343,7 @@ test('hammer-validate: the mirror budget stop and an external kill are UNKNOWN, 
 
 function runGate(t, { checks, contexts, unknown, receipt = {
   schemaVersion: 1, head: HEAD, validation: 'unknown', reason: 'absolute-timeout', ciAuthoritative: true,
+  cleanup: 'finished', coverageComplete: true, localFailureObserved: false,
 } }) {
   const root = new URL('../', import.meta.url);
   const script = readFileSync(new URL('bin/hammer-merge.sh', root), 'utf8');
@@ -339,11 +398,16 @@ test('hammer gate: UNKNOWN + green declared contexts merges; red, absent or unde
 });
 
 test('hammer gate: green CI never overrides failure-tainted or invalid UNKNOWN receipts', t => {
-  const base = { validation: 'unknown', reason: 'absolute-timeout', ciAuthoritative: true };
+  const base = { schemaVersion: 1, head: HEAD, validation: 'unknown', reason: 'absolute-timeout',
+    ciAuthoritative: true, cleanup: 'finished', coverageComplete: true, localFailureObserved: false };
   for (const receipt of [
     { ...base, localFailureObserved: true },
     { ...base, ciAuthoritative: false },
     { ...base, ciAuthoritative: undefined },
+    { ...base, cleanup: 'unconfirmed' },
+    { ...base, cleanup: 'controller-owned' },
+    { ...base, coverageComplete: false },
+    { ...base, head: 'b'.repeat(40), reason: undefined },
     { ...base, reason: 'validation-drain-unconfirmed' },
     { ...base, validation: 'fail' },
     '{unreadable',
@@ -381,12 +445,13 @@ test('queue-v2: repository-scoped contexts join the lane required set; UNKNOWN v
 
   const { h: handoff, e: evidence } = queueHandoffFixture();
   const unknown = { ...evidence, localValidation: { ...handoff.localValidation, ok: false, result: 'unknown',
-    ciAuthoritative: true, localFailureObserved: false } };
+    ciAuthoritative: true, localFailureObserved: false, coverageComplete: true, cleanup: 'finished' } };
   assert.equal(queueLocalValidationUnknown(unknown), true);
   assert.equal(validateQueueHandoff(handoff, unknown), true);
   const failed = { ...unknown, localValidation: { ...unknown.localValidation, result: 'fail' } };
   assert.throws(() => validateQueueHandoff(handoff, failed), /failed localValidation/);
-  for (const patch of [{ ciAuthoritative: false }, { ciAuthoritative: undefined }, { localFailureObserved: true }]) {
+  for (const patch of [{ ciAuthoritative: false }, { ciAuthoritative: undefined }, { localFailureObserved: true },
+    { cleanup: 'unconfirmed' }, { coverageComplete: false }]) {
     for (const ok of [false, true]) {
       const invalid = { ...unknown, localValidation: { ...unknown.localValidation, ...patch, ok } };
       assert.equal(queueLocalValidationUnknown(invalid), false);

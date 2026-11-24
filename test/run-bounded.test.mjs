@@ -200,6 +200,34 @@ test('clean descendant exit completes before escalation and preserves the leader
   assert.ok(!signals.includes('SIGKILL'), 'clean exit must cancel escalation');
 });
 
+for (const drains of [true, false]) test(`KILL gets a bounded asynchronous group drain window after leader close: drains=${drains}`, async t => {
+  const clock = new FakeClock(t, { wall: Date.now() });
+  t.mock.method(performance, 'now', () => clock.monotonic());
+  const child = Object.assign(new EventEmitter(), {
+    pid: 42424, exitCode: 7, signalCode: null,
+    stdout: new PassThrough(), stderr: new PassThrough(), unref() {},
+  });
+  let present = true, killed = false, settled = false, err = '';
+  const pending = runBounded('fixture', [], {
+    timeoutMs: 10_000, idleMs: 10_000, graceMs: 50,
+    spawnImpl: () => child,
+    killImpl: (_pid, signal) => {
+      if (signal === 'SIGKILL') killed = true;
+      if (signal === 0 && !present) throw Object.assign(new Error('gone'), { code: 'ESRCH' });
+    },
+    stdout: { write() {} }, stderr: { write(chunk) { err += chunk; } },
+  });
+  pending.then(() => { settled = true; });
+  child.emit('exit', 7, null); child.emit('close');
+  await clock.advance(50);
+  assert.equal(killed, true);
+  assert.equal(settled, false, 'KILL delivery does not synchronously finish cleanup');
+  present = !drains;
+  await clock.advance(drains ? 50 : 1000);
+  assert.equal(await pending, drains ? 7 : 125);
+  assert.match(err, drains ? /cleanup=finished/ : /cleanup=unconfirmed/);
+});
+
 test('idle failure after first output stops a lease-owning script before its audit', async t => {
   const dir = mkdtempSync(join(tmpdir(), 'ham-release-'));
   t.after(() => rmSync(dir, { recursive: true, force: true }));

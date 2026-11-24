@@ -142,6 +142,8 @@ def main():
         plan = json.loads(Path(plan_path).read_text(encoding="utf-8"))
     with suppress(OSError, ValueError):
         receipt = json.loads(receipt_file.read_text(encoding="utf-8"))
+    if plan.get("source"):
+        receipt["coverage"] = plan["source"]
     original_load = mirror.load_manifest
     original_run = mirror.run_check
     checkout = Path.cwd()
@@ -202,7 +204,11 @@ def main():
         return [
             mapped_check(
                 **{name: getattr(check, name) for name in check_fields},
-                ci_evidence=entries.get((check.name, check.command), {}),
+                ci_evidence={
+                    **entries.get((check.name, check.command), {}),
+                    "manifest": relative,
+                    "manifestSha256": declaration["sha256"],
+                },
             )
             for check in checks
         ]
@@ -276,14 +282,24 @@ def main():
         row = {
             "name": check.name,
             "cwd": check.cwd,
+            "commandSha256": hashlib.sha256(check.command.encode()).hexdigest(),
             "status": "run",
             "reason": decision.get("reason", plan["reason"]),
         }
         receipt["checks"].append(row)
         jobs = decision.get("jobs")
+        if jobs and not (decision.get("manifest") and decision.get("manifestSha256")):
+            jobs = None
+            row["reason"] = "ci-evidence-unavailable"
         result = None
         if jobs and not check.skip_reason:
-            row.update(status="ci-covered", reason="exact-head-ci-success", jobs=jobs)
+            row.update(
+                status="ci-covered",
+                reason="exact-head-ci-success",
+                jobs=jobs,
+                manifest=decision["manifest"],
+                manifestSha256=decision["manifestSha256"],
+            )
             if persist():
                 result = original_run(
                     replace(check, skip_reason="ci-covered"), *positional, **keywords
@@ -291,6 +307,8 @@ def main():
                 if result.status == "skipped" and result.reason == "ci-covered":
                     return result
             row.pop("jobs")
+            row.pop("manifest")
+            row.pop("manifestSha256")
             row.update(status="run", reason="ci-evidence-unavailable")
             result = None
         if result is None:
@@ -364,6 +382,25 @@ def main():
     persist()
     mirror.load_manifest = load_manifest
     mirror.run_check = run_check
+    original_run_checks = getattr(mirror, "run_checks", None)
+    if callable(original_run_checks):
+        # Persist the entire selection size before the first check. Rows seen
+        # before a timeout cannot stand in for guards the runner never reached.
+        def run_checks(checks, *positional, **keywords):
+            selected = list(checks)
+            receipt["selectedCheckCount"] = receipt.get("selectedCheckCount", 0) + len(selected)
+            persist()
+            return original_run_checks(selected, *positional, **keywords)
+
+        mirror.run_checks = run_checks
+    else:
+        receipt["selectionSizeReason"] = "selection-size-unavailable"
+        persist()
+        print(
+            "hammer CI mirror: selection-size-unavailable; UNKNOWN cannot use CI continuation",
+            file=sys.stderr,
+            flush=True,
+        )
     shell_runner = getattr(mirror, "run_shell_command", None)
     if callable(shell_runner) and compatible_shell_runner(shell_runner):
         mirror.run_shell_command = run_shell_command

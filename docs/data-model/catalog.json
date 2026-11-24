@@ -1347,6 +1347,7 @@
       "sharedDecisionAnchor": "anchor-only observations reuse bounded-wait started without reserving or delivering a page",
       "owner": "AMA bounded closure wait and exhaustion paging",
       "waitTable": "waits_by_class",
+      "deferredSourceNoticeRefresh": "Changed source/cleanup facts reset the page latch transactionally without moving the deadline; delivery keys append the reason digest and failed refresh delivery remains retryable.",
       "waitColumns": ["head", "class", "started", "reason", "paged", "last_paged"],
       "recoveryCustodyTable": "recovery_custody(head TEXT PRIMARY KEY, attempts INTEGER NOT NULL, deadline TEXT, observed INTEGER NOT NULL, evidence TEXT NOT NULL)",
       "recoveryCustodyContract": "RECOVERYSTALL-01: each expired R04 execution re-reads exact-head lease and referenced launch/retry custody, revalidates the observed lease after yielding, and atomically increments durable attempts with deadline, observation time and last JSON evidence. Diagnostic only; directory/open/schema/write/close failures warn and return refreshed custody without a durable attempt record. Normal per-PR intent lock and lease CAS own retirement/replacement. No pruning. Pipeline health reads custody only after selecting its oldest 50 expired items; aggregates retain all entries.",
@@ -1714,6 +1715,15 @@
         "repairEpochs[].dispatchProjectRef: also recorded once by the reconciler for a legacy reservation, from the resolved owner launch's own project_ref",
         "repairEpochs[].dispatchProjectDerivedAt: ISO time of that one-time derivation; absent when the scope was supplied at reservation"
       ]
+    },
+    {
+      "id": "deferred-source-custody",
+      "title": "Deferred closer source custody",
+      "path": "docs/data-model/deferred-source-custody.md",
+      "store": "<HQ_ROOT>/dispatch/audit/deferred-source-custody/<owner>/<repo>/pr-<number>/<target-head>/",
+      "schemaSurface": "src/ama/deferred-source-custody.mjs",
+      "owner": "Hammer validation and the watcher",
+      "semantics": "An active exact-target hold prevents successor retries after UNKNOWN. Proved standalone CI continuation archives the marker with continuedAt; watcher/successor ignore it and its legacy fallback. Teardown reads all PR target markers for the ending launch and retains incomplete source. Evidence changes refresh notices; corrupt legacy retry records hold."
     }
   ]
 }

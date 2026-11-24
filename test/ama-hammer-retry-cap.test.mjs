@@ -477,7 +477,7 @@ function hammerDispatchDeps(overrides = {}) {
 }
 
 for (const reason of HAMMER_RETRYABLE_READ_OUTCOMES) {
-  test(`VERIFYHEADTRANSIENT-01: repeated ${reason} refunds the unchanged head and retries`, async t => {
+  test(`VERIFYHEADTRANSIENT-01: repeated ${reason} refunds the unchanged head and retries without custody evidence`, async t => {
     const rootDir = mkdtempSync(join(tmpdir(), 'verifyheadtransient-retry-'));
     t.after(() => rmSync(rootDir, { recursive: true, force: true }));
     const identity = { repo: REPO, prNumber: PR_NUMBER, headSha: REVIEWED_HEAD };
@@ -486,7 +486,7 @@ for (const reason of HAMMER_RETRYABLE_READ_OUTCOMES) {
       jobKey: REVIEWED_HEAD, headSha: REVIEWED_HEAD, launchRequestId: 'synthetic-prior-adjudication',
       now: '2025-12-31T23:59:00Z',
     });
-    let launches = 0, endedLaunch = null;
+    let launches = 0, endedLaunch = null, pages = 0;
     const events = [];
     const warnings = [];
     const deps = hammerDispatchDeps({
@@ -501,7 +501,10 @@ for (const reason of HAMMER_RETRYABLE_READ_OUTCOMES) {
           dispatchId: `synthetic-infra-dispatch-${launches}` }) };
         return { stdout: '{}' };
       },
-      deliverAlertImpl: async () => assert.fail('infrastructure observations must not exhaust the cap'),
+      deliverAlertImpl: async () => {
+        pages++;
+        return { ok: true };
+      },
     });
     const run = dispatchedAt => maybeDispatchAmaCloser({
       ...hammerDispatchArgs(rootDir, { dispatchContext: { dispatchedAt } }), ...deps,
@@ -527,6 +530,7 @@ for (const reason of HAMMER_RETRYABLE_READ_OUTCOMES) {
       assert.equal(readHammerStopForHead({ hqRoot: join(rootDir, 'hq-root'), ...identity }), null);
     }
     assert.equal(launches, 3);
+    assert.equal(pages, 0);
     assert.equal(warnings.some(message => message.includes('ama_closer.lease_terminal_finalize_failed')),
       false, 'retryable infrastructure leases must not be finalized with a conflicting terminal outcome');
     assert.ok(events.some(message => {

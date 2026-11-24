@@ -121,20 +121,18 @@ timeout 142/143) is retried by rerunning the same close command in this
 workspace; never end the run to obtain a fresh workspace for it. Resume
 with verify-head and fresh lease/head checks; never replay publication or merge.
 An unknown cleanup or live owner retains custody and forbids a second controller.
-`canonical-validation-deferred` is UNKNOWN. The exact-head receipt
-`validation-deferred-<head>.json` points to retained validation logs when
-available. Use existing controller drain and lease receipts, or the standalone
-bounded-command cleanup result. Preserve unknown cleanup for the recovery owner.
-For a completed Appendix D rebase, run the close command as directed there.
-After confirmed drain it can publish the repaired head and wait for required CI.
-If it exits with a deferred audit on the published head, the watcher owns that
-head's scheduled retry.
-For other validation deferrals, use the following handoff.
-Invoke the audit helper without `--final`: `canonical-validation-deferred <head>`,
-then end the run. The deferred audit and `last-phase` receipt let the watcher
-own the retry; no `terminal-stop` progress receipt is expected.
-Do not retry validation or close on that head in this run, even
-with green required CI. This takes precedence over the setup retry above.
+`canonical-validation-deferred` is UNKNOWN. Keep its exact-head receipt
+`validation-deferred-<head>.json` and custody directory.
+Preserve the existing cleanup receipt and any unpublished commit.
+The shipped close command handles a completed Appendix D
+repair: after confirmed drain it can publish to the captured source branch,
+reuse qualifying validation and continue to exact-head CI, or redrive via the
+watcher on a confirmed published head. For unrecovered source invoke
+`hammer-terminal-audit.mjs canonical-validation-deferred <head>` without `--final`,
+then end the run. The watcher holds the corresponding live head for recovery.
+Do not retry
+validation, conflict repair, publication or close on that head after this stop,
+even with green required CI. This takes precedence over setup retry.
 An exhausted closer fault is a **deferred harness fault**, never a terminal PR
 decision. Record its exact named reason with the terminal helper; dispatch
 refunds the charged attempt and parks/pages once after three refunds per head.
@@ -216,10 +214,8 @@ helper runs `python3 scripts/ci-mirror/run-ci-mirror.py -- <changed files>`;
 in adversarial-review it selects touched tests and direct importer tests through
 the repository's `test/run-tests.mjs`. Never construct pytest/PYTHONPATH commands.
 An ImportError for the PR repository's own package is an environment fault,
-not a failed test. If the canonical runner cannot be set up locally, record
-`local-battery-skipped-github-required-gate-authoritative`, claim no local pass,
-and continue to verify-head and the exact-head GitHub required gate. A real
-canonical test failure remains a CI fact requiring repair.
+not a failed test. If the mirror cannot establish the required local checks,
+follow Appendix G2. A genuine canonical check failure requires repair.
 <!-- /hammer-reference:G3 -->
 
 Never scan `/tmp`, `/private/tmp`, `$HOME`, `$HQ_ROOT` or whole checkouts for review state.
@@ -539,8 +535,8 @@ gates. A permanent history failure ends the run with its classified reason.
    the fail-closed live-head validation below, and
    complete the merge/closing-comment sequence idempotently. Do not restart remediation.
 0b. **A run that does not merge must say so exactly once on the PR.** Release changed heads or incomplete validation for the next pass. While open, report completed work, blocker, stop point, lease release and next actor. Edit an existing audit in place.
-   For `canonical-validation-deferred`, use the one deferred audit and handoff
-   in Appendix G2.
+   For `canonical-validation-deferred`, keep source custody and use the
+   operator handoff in Appendix G2.
    Preserve App publication comments and their `HAM-Base-Head` / `HAM-Pushed-Head`
    pair in no-merge audits (CI unvalidated). Retry failed delivery with that pair.
    Only green exact-head CI permits `HAM-Validated-Head`; keep one in-lease audit.

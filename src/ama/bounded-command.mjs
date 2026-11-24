@@ -6,7 +6,7 @@ import { writeSync } from 'node:fs';
 export async function runBounded(command, args, {
   timeoutMs = 900_000, idleMs = 120_000, tailBytes = 4096, graceMs = 5000,
   env = process.env, stdout = process.stdout, stderr = process.stderr,
-  observeOutput = () => {}, observeStop = () => {}, stopOnTimeoutExit = false,
+  observeOutput = () => {}, observeStop = () => {}, observeCleanup = () => {}, stopOnTimeoutExit = false,
   spawnImpl = spawn, killImpl = (pid, signal) => process.kill(pid, signal),
 } = {}) {
   // A registered closer owns one group for shell + validators + test children.
@@ -58,18 +58,19 @@ export async function runBounded(command, args, {
     }
     function escalate() {
       escalated = true;
-      signalGroup('SIGKILL');
-      if (closed) finish();
-      else cleanupDeadline = setTimeout(() => {
+      // KILL delivery is asynchronous. Give the group a bounded drain window,
+      // even when the leader has already closed its pipes.
+      cleanupDeadline = setTimeout(() => {
         // Permission failures cannot turn an idle bound into an infinite lease
         // hold. Report unknown cleanup as failure; canonical worker teardown
         // remains responsible for any process we could not terminate.
-        cleanupFailed = true;
+        cleanupFailed ||= !closed;
         child.stdout.destroy();
         child.stderr.destroy();
         child.unref();
         finish();
       }, 1000);
+      signalGroup('SIGKILL');
     }
     async function finish() {
       if (finished || finishing) return;
@@ -85,11 +86,15 @@ export async function runBounded(command, args, {
       clearTimeout(escalation);
       clearTimeout(cleanupDeadline);
       for (const [signal, handler] of handlers) process.off(signal, handler);
-      if (cleanupFailed) exitCode = 125;
+      // A successful KILL delivery alone does not confirm group drain.
+      const unconfirmed = cleanupFailed || (!controlled && escalated && groupPresent());
+      if (unconfirmed) exitCode = 125;
       stdout.write(tail);
       stdout.write('\n');
-      const cleanup = cleanupFailed ? 'unconfirmed' : controlled && outcome ? 'controller-owned' : 'finished';
+      const cleanup = unconfirmed ? 'unconfirmed' : controlled && outcome ? 'controller-owned' : 'finished';
       stderr.write(`run-bounded: ${outcome || 'exited'} elapsed=${Math.round(performance.now() - started)}ms idle=${Math.round(performance.now() - lastOutput)}ms bytes=${totalBytes} cleanup=${cleanup} status=${exitCode}\n`);
+      try { observeCleanup({ reason: outcome || 'exited', cleanup, status: exitCode }); }
+      catch { /* The caller treats a missing receipt as unconfirmed. */ }
       resolve(exitCode);
     }
     function stop(reason, code) {
@@ -147,7 +152,7 @@ export async function runBounded(command, args, {
     child.on('close', () => {
       if (finished) return;
       closed = true;
-      if (!escalation || escalated || !groupPresent()) finish();
+      if (!escalation || !groupPresent()) finish();
     });
   });
 }

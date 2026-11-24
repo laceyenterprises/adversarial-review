@@ -1148,7 +1148,7 @@ async function dispatchAmaClosureFor({
     const headSha = candidate?.headSha || currentRevisionRef;
     if (String(candidate?.prState || reviewStateRow?.pr_state).toLowerCase() !== 'open'
       || !readCloserSuccessor(rootDir, { repo: repoPath, prNumber, headSha })) return null;
-    return settleCloserSuccessor({ rootDir, repo: repoPath, prNumber, headSha, enabled: false,
+    return settleCloserSuccessor({ rootDir, hqRoot: resolveHqRoot(env), repo: repoPath, prNumber, headSha, enabled: false,
       now: new Date(now()).toISOString(),
       observeWaitImpl: args => observeClosureWaitImpl(args) });
   };
@@ -2119,7 +2119,7 @@ async function dispatchAmaClosureFor({
     requestCloserSuccessor({ rootDir, repo: repoPath, prNumber, headSha: currentPrHeadSha,
       source: pendingSuccessor.source, reviewBody: gateSnapshot.settledReview?.reviewBody,
       refusingReasons: pendingSuccessor.refusingReasons, now: new Date(now()).toISOString() });
-    const successor = await settleCloserSuccessor({ rootDir, repo: repoPath, prNumber, headSha: currentPrHeadSha,
+    const successor = await settleCloserSuccessor({ rootDir, hqRoot: resolveHqRoot(env), repo: repoPath, prNumber, headSha: currentPrHeadSha,
       enabled: autonomousMergeExecutionEnabled, admitted: !prMetadata.isDraft
         && shared.decision.action === 'hammer' && shared.decision.reason !== 'automated-stop'
         && !['R05-structural', 'R10-conflict'].includes(shared.decision.row),

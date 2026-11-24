@@ -23,7 +23,7 @@ export async function observeClosureWait(args = {}) {
 
 async function observeClosureWaitWithinRepositoryCycle({ rootDir, repo, prNumber, headSha, reason,
   now = Date.now(), env = process.env, pageImpl = page, immediate = false, waitClass = null, startedAt = null, progress = false,
-  launchWait = null, launchAlive = false, anchorOnly = false, repeatAfterMs = null }) {
+  launchWait = null, launchAlive = false, anchorOnly = false, repeatAfterMs = null, refreshOnReasonChange = false }) {
   const reasonClass = waitClass || (immediate ? 'primary-change' : 'bounded-wait');
   const requested = Number(env.AMA_CLOSURE_WAIT_BOUND_MS);
   const baseMs = Number.isFinite(requested) && requested > 0 ? requested : CLOSURE_WAIT_BOUND_MS;
@@ -56,7 +56,11 @@ async function observeClosureWaitWithinRepositoryCycle({ rootDir, repo, prNumber
       }
       const firstObserved = db.prepare('INSERT OR IGNORE INTO waits_by_class(head, class, started, reason) VALUES (?, ?, ?, ?)')
         .run(headSha, reasonClass, Number.isFinite(startedAt) ? Math.min(now, startedAt) : now, reason).changes === 1;
-      db.prepare('UPDATE waits_by_class SET reason=? WHERE head=? AND class=?').run(reason, headSha, reasonClass);
+      db.prepare(`
+        UPDATE waits_by_class
+        SET paged=CASE WHEN ? AND reason IS NOT ? THEN 0 ELSE paged END, reason=?
+        WHERE head=? AND class=?
+      `).run(Number(refreshOnReasonChange), reason, reason, headSha, reasonClass);
       // Retained launches carry durable progress timestamps. Apply them to an
       // existing final-round wait too. Ignore future timestamps here so clock
       // skew cannot turn each poll into fresh progress.
@@ -90,6 +94,7 @@ async function observeClosureWaitWithinRepositoryCycle({ rootDir, repo, prNumber
           : 'closure wait exhausted';
         await pageImpl(`HAMCLOSE-01 ${notice}: ${repo} PR ${prNumber}@${headSha}: ${reason}`, {
           source: 'hamclose-closure-wait', severity: 'SEV1', dedupKey: `hamclose:${repo}:${prNumber}:${headSha}:${reasonClass}`
+            + (refreshOnReasonChange ? `:${createHash('sha256').update(reason).digest('hex')}` : '')
             + (Number.isFinite(repeatAfterMs) && repeatAfterMs > 0 ? `:${now}` : ''),
         });
       } catch (error) {

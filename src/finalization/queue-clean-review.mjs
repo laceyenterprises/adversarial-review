@@ -18,7 +18,7 @@ export function validateCleanReview(input, evidence) {
     || evidence?.currency?.proof !== 'exact-head') throw new QueueReceiptValidationError('clean review is not current and zero-finding');
   return validateQueueHandoff({ ...h, closer: h.worker, dispositions: [] }, {
     ...evidence, identities: { ...evidence.identities, closer: evidence.identities?.worker },
-  });
+  }, { clean: true });
 }
 
 // The same resolver is used by the read-only deployed probe. Preparing the

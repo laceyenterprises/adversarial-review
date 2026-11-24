@@ -559,10 +559,9 @@ retain their existing bounded budget; a later real failure is charged normally. 
 
 `canonical-validation-deferred` retains infrastructure refund accounting, but
 dispatch also records its ended launch in the existing
-[closer inconclusive retry store](closer-inconclusive-retries.md). That per-head
-owner applies exponential backoff from the configured threshold and one
-closure-wait notification. Immediate lease-wait refund timestamps alone never
-authorize bypassing that retry deadline. Repeated observations dedupe by launch.
+[closer inconclusive retry store](closer-inconclusive-retries.md). The watcher uses that record as a fallback when a legacy deferral has no
+readable [custody package](deferred-source-custody.md). It holds the live head for
+an operator decision. Repeated observations dedupe by launch.
 No retry-ledger fields or caps change.
 
 ## Read-only activation

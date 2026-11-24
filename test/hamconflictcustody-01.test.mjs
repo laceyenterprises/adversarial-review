@@ -197,7 +197,7 @@ test('a builder worktree holding the PR branch does not block conflict repair, w
     'Fixture Author <author@example.invalid>\nSynthetic feature change');
   assert.equal(JSON.parse(readFileSync(join(f.run, 'conflict-primary.json'), 'utf8')).proof, 'conflict-primary-preserved');
   assert.equal(readFileSync(join(f.run, CONFLICT_PUBLISH_FILE), 'utf8'),
-    `source=${f.reviewed}\nhead=${repaired}\nbranch=feature\n`);
+    `source=${f.reviewed}\nhead=${repaired}\nbranch=feature\nbase=${f.base}\n`);
   assert.match(f.events(), /^resume .*hammer-conflict-resume\.py /m);
   builderUntouched(f);
 
@@ -251,6 +251,9 @@ test('the publication binding applies only to its own head and fails closed when
   assert.equal(conflictPublishBinding('', () => head), null, 'no run directory');
   writeFileSync(join(dir, CONFLICT_PUBLISH_FILE), `source=${source}\nhead=${head}\nbranch=feature/x\n`);
   assert.deepEqual(conflictPublishBinding(dir, () => `${head}\n`), { source, head, branch: 'feature/x' });
+  const base = 'd'.repeat(40);
+  writeFileSync(join(dir, CONFLICT_PUBLISH_FILE), `source=${source}\nhead=${head}\nbranch=feature/x\nbase=${base}\n`);
+  assert.deepEqual(conflictPublishBinding(dir, () => head), { source, head, branch: 'feature/x', base });
   assert.equal(conflictPublishBinding(dir, () => 'c'.repeat(40)), null, 'a later local commit is not the repaired head');
   for (const text of [
     `source=${source}\nhead=${head}\n`,
@@ -258,6 +261,8 @@ test('the publication binding applies only to its own head and fails closed when
     `source=${source}\nhead=${head}\nbranch=-x\n`,
     `source=${source}\nhead=${head}\nbranch=a b\n`,
     `source=${source}\nsource=${source}\nhead=${head}\nbranch=feature\n`,
+    `source=${source}\nhead=${head}\nbranch=feature\nbase=short\n`,
+    `source=${source}\nhead=${head}\nbranch=feature\nbase=${base}\nbase=${base}\n`,
     `source=${source}\nhead=${head}\nbranch=feature\nextra=1\n`,
   ]) {
     assert.throws(() => parseConflictPublishBinding(text), /malformed/, JSON.stringify(text));

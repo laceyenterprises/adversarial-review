@@ -58,7 +58,7 @@ Directory: `data/argus-security-jobs/`
 |---|---|---|
 | `pending/*.json` | Argus job document with `status: "pending"` | Durable work waiting to be claimed. Filenames are deterministic job IDs derived from `(repo, prNumber, headSha)`. |
 | `in-progress/*.json` | Argus job document with `status: "in_progress"` | Claimed work owned by a security reviewer worker. Claims are acquired by hard-linking the pending file into this lane, then unlinking the pending name. |
-| `completed/*.json` | Argus job document with `status: "completed"`, `completedAt`, and `result` | Archive for answered jobs: drain reviews (`approve`, `needs_verification`, `block`), dependency-bot adjudications, and retirements with a `superseded` result. Not strictly terminal: superseded and legacy routed jobs can return to `pending/`; a dependency-bot `merge-withheld-*` completion can also recover once after live exact-head checks turn green. |
+| `completed/*.json` | Argus job document with `status: "completed"`, `completedAt`, and `result` | Archive for answered jobs: drain reviews (`approve`, `needs_verification`, `block`), dependency-bot adjudications, and retirements with a `superseded` result. Superseded jobs, legacy routed jobs and eligible auto-adjudicated `merge-withheld-*` jobs can return to `pending/`. Eligible drain approvals retry merge in `completed/`. |
 | `failed/*.json` | Argus job document with `status: "failed"`, `failedAt`, and `error` | Terminal archive for failed reviews and unreadable pending records that were quarantined out of the active queue. |
 
 ## Job Document
@@ -84,6 +84,7 @@ Directory: `data/argus-security-jobs/`
 | `lastAutoadjudicationAttempt` | object or null | Watcher-owned approval retry record: `{schemaVersion: 1, decision: "approve-auto-merge", reason, inputs, attemptedAt, deferrals, notBefore?, mergeDisposition?, mergeReason?, mergeReasons?}`. `deferrals` counts waits across all curable merge refusals; each refusal sets `notBefore` to ten minutes after `attemptedAt`. Recovery seeds an approval with `deferrals: 0` and no merge-attempt fields. |
 | `mergeWithheldRecovery` | object or absent | Once-only recovery marker `{headSha, reopenedAt, inputs}`. `headSha` references this job's exact head; `inputs` retains the original approved dependency evidence. Persisted before returning a completed merge-withheld job to pending, and retained across retries and later completion. |
 | `result.autoadjudication` | object or absent | Dependency-bot result metadata `{schemaVersion, decision, reason, inputs, completedAt, mergeDisposition?, mergeReasons?}`. A withheld merge records `decision: "route-for-review"`, a `merge-withheld-*` reason, and the daemon's disposition and reasons. |
+| `result.merge` | object or absent | Merge bookkeeping for a completed drain approval. `attemptedAt` is the time the watcher invoked the route. `disposition` can be null for pre-daemon refusals. `reason`, `reasons`, `merged` and `settled` record the result. New records carry `deferrals` across polls. `notBefore` gates a scheduled retry and `reopenedAt` marks one-time legacy recovery. |
 | `routedForReview` | object or absent | ARGUSDRAIN-01. Set when the dependency-bot auto-adjudicator declines to approve a bump on its own (for example semver-major): `{schemaVersion, source: "dependency-bot-autoadjudication", decision: "route-for-review", reason, inputs, routedAt}`. The job stays in `pending/` and the drain claims it without waiting out the bot-adjudication grace. Legacy completions reopened by backlog retirement also carry `requeuedFrom: "legacy-route-for-review-completion"` and `requeuedAt`. |
 | `drain` | object or absent | ARGUSDRAIN-01 drain bookkeeping, carried across claims: `attempts`, `lastError`, `lastAttemptAt`, `notBefore` (the drain does not claim the job before this ISO time), `deferrals`, `lastDeferReason`, `lastDeferredAt`, and `cachedReview` (a model review bound to `headSha` and `evidenceFingerprint`, with observed `baseSha` retained for audit, reused within its max age only after re-reading matching deterministic evidence; cleared on completion or failure). |
 | `priorResult` | object or absent | The `result` a job carried before it was moved back to `pending/` (a revived `superseded` retirement or a reopened legacy `route-for-review` completion), kept for the record. |
@@ -159,6 +160,22 @@ erDiagram
   it persists `mergeWithheldRecovery` and seeds the pending approval from the
   original inputs; a later title edit cannot replace that evidence. The marker
   prevents a second recovery even after restart or another withheld completion.
+- A drain-approved dependency bot job stays in `completed/` with its security
+  evidence intact. The watcher's call to
+  `maybeAutoAdjudicateDependencyBotArgusJob` retries an exact-head approval
+  when the native route reports `owner-operation-in-flight` without entering
+  the daemon. The watcher stores up to 18 waits of ten minutes in `result.merge`,
+  shared with the existing reviewed-approval deferrals. Exhaustion ends
+  automatic polling for that approval while retaining the native reason and
+  disposition. The approval remains subject to the normal live daemon gates
+  and issuance lock throughout.
+- The same watcher API resumes a legacy drain approval settled with
+  `reason: "owner-operation-in-flight"`, null disposition and `merged: false`
+  before retry bookkeeping existed. Admission uses a fresh read of the open,
+  non-draft, mergeable exact head on the same base branch, with green external
+  checks. The API records `reopenedAt` before invoking the daemon and keeps the
+  marker across retries and restarts. Withholdings for policy, terminal PRs
+  and superseded heads receive no legacy recovery.
 - Returning a job to `pending/` (`returnArgusJobToPending`: a drain retry or
   deferral, a revive, a reopened legacy completion, or a reclaimed stale claim)
   rewrites the record in place first and renames it into `pending/` second, then

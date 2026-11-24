@@ -9,6 +9,7 @@ import {
   REPAIR_READ_PREFLIGHT_REQUIRED,
 } from '../src/repair-epochs.mjs';
 import { automaticRemediationBudgetExhausted, readRepairFacts } from '../src/repair-facts.mjs';
+import { readHammerRetryCapLedger } from '../src/ama/hammer-retry-cap.mjs';
 import { tryAcquireCloserIntentLock } from '../src/ama/pre-receipt-intent.mjs';
 import { readAmaCloserLease, abandonedAmaCloserLeaseOutcome, findLiveAmaCloserLease } from '../src/ama/closer-lease.mjs';
 import { readLaunchRequestStatusFromLedgerAsync } from '../src/session-ledger-read-adapter.mjs';
@@ -62,6 +63,7 @@ async function verifyRepairDispatchScope({ repo, dispatchProjectRef, readContext
 
 export async function main(args, {
   env = process.env, prepareDispatchReadContextImpl = prepareDispatchReadContext,
+  pageRepairCapImpl = pageRepairCap,
 } = {}) {
   if (args.length === 1 && args[0] === '--final-fix-recovery-protocol') {
     return { ok: true, protocol: 'final-fix-recovery-v1' };
@@ -210,7 +212,13 @@ export async function main(args, {
       result = reserveRepairEpoch(reservation);
     }
   } finally { release?.(); }
-  if (result.reason === 'repair-epoch-cap') await pageRepairCap({ rootDir, repo, prNumber, epochs: result.epochs });
+  // Replays retry a failed alert too; the existing per-PR latch deduplicates
+  // successful delivery across replacement chains, heads and process restarts.
+  const history = result.ok && result.epoch?.supersedesEpochId
+    ? readHammerRetryCapLedger(rootDir, identity)?.repairEpochs : null;
+  if (result.reason === 'repair-epoch-cap' || history?.length > facts.epochCap) {
+    await pageRepairCapImpl({ rootDir, repo, prNumber, epochs: history || result.epochs });
+  }
   return { ...result, refundedSpend: facts.refundedSpend };
 }
 

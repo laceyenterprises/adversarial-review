@@ -95,6 +95,16 @@ function sameReservationSnapshot(left, right) {
   };
   return isDeepStrictEqual(withoutObservationTime(left), withoutObservationTime(right));
 }
+
+function sameSupersessionSnapshot(current, snapshot) {
+  // The watcher keeps counting canonical absence after absent-unfenced. Growth
+  // alone cannot invalidate a fresh absence proof; resets and all other fields
+  // still fence supersession. Other reservation CAS callers remain strict.
+  return Number.isSafeInteger(snapshot?.absentObservations) && snapshot.absentObservations >= 2
+    && Number.isSafeInteger(current.absentObservations)
+    && current.absentObservations >= snapshot.absentObservations
+    && sameReservationSnapshot(current, { ...snapshot, absentObservations: current.absentObservations });
+}
 const readRepairPublisher = ({ execFileImpl, ...args }) => resolveDaemonWorkerIdentityFromHeadAttestation({
   ...args, readHeadAttestationChainForPrImpl: options => readHeadAttestationChainForPr({
     ...options, execFileImpl, retryDelaysMs: [], timeoutMs: 8000,
@@ -265,7 +275,7 @@ export async function reconcileRepairOwner({ rootDir, repo, prNumber, headSha, n
   });
   if (reconciled?.ownerState === 'absent-unfenced') {
     const action = isUnscopedCwp(reconciled)
-      ? 'Operator must verify custody and use the CWP enqueue fence and retirement procedure. Use --ledger-absence when the original boot evidence is unavailable.'
+      ? 'Operator must verify custody and use the CWP enqueue fence and retirement procedure; an operator PR update cannot supersede this unscoped reservation. Use --ledger-absence when the original boot evidence is unavailable.'
       : 'Operator must inspect the submitter and key before releasing custody.';
     await observeWait({ rootDir, repo, prNumber, headSha: `${reconciled.baseHead}:${reconciled.id}`,
       waitClass: 'repair-absent-unfenced', immediate: true, now,
@@ -324,7 +334,12 @@ export function reserveRepairEpoch({ rootDir, repo, prNumber, headSha, ownerKey,
       && pending.ownerState === 'absent-unfenced' && pending.absentObservations >= 2
       && Date.parse(pending.ownerObservedAt) - Date.parse(pending.reservedAt) >= REPAIR_ABSENCE_ESCALATE_MS
       && !pending.publicationHead && !pending.publicationLaunch
-      && operatorAbsence.id === pending.id && sameReservationSnapshot(pending, ownerSnapshot);
+      && operatorAbsence.id === pending.id && sameSupersessionSnapshot(pending, ownerSnapshot);
+    // A legacy CWP submitter may already have passed its reservation check.
+    // Canonical absence cannot replace the committed enqueue-fence procedure.
+    if (superseded && isUnscopedCwp(pending)) {
+      return { ok: false, reason: 'repair-cwp-enqueue-fence-required', epoch: pending };
+    }
     // Ask the native caller to prove the pair only when this transaction
     // would mint a new epoch. Leave even a terminal predecessor untouched
     // until the caller returns and the same snapshot is checked again.

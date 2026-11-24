@@ -726,6 +726,7 @@ test('legacy CWP absence requires a scoped canonical read, elapsed grace and no 
   const second = await reconcileRepairOwner({ ...options, now: overdue + REPAIR_OWNER_OBSERVE_MS });
   assert.equal(second.ownerState, 'absent-unfenced');
   assert.deepEqual(pages.map(page => page.waitClass), ['repair-absent-unfenced']);
+  assert.match(pages[0].reason, /operator PR update cannot supersede this unscoped reservation/);
   const { deriveNextActionSnapshot, nextAction } = await import('../src/pr-next-action.mjs');
   const action = nextAction(deriveNextActionSnapshot({ subjectKey: `${repo}#${prNumber}`, head,
     observations: { pr: { state: 'OPEN', headSha: head, labels: [] },
@@ -1141,5 +1142,37 @@ test('final rescue: timestamp-only successor interleavings preserve identity fen
     const successor = reserveRepairEpoch({ ...f, ownerKey: 'next', ownerSnapshot: snapshot,
       terminalOwner: { ...snapshot, ownerState: 'terminal', ownerLaunch: 'fixture-launch' } });
     assert.equal(successor.ok, false, JSON.stringify(change));
+  }
+});
+
+test('operator supersession ignores only monotonic absence growth and observation time', t => {
+  for (const change of [
+    { absentObservations: 4, ownerObservedAt: '2026-01-01T00:12:00Z' },
+    { absentObservations: 2 },
+    { absentObservations: null },
+    { ownerState: 'live', absentObservations: 4 },
+    { ownerLaunch: 'new-launch', absentObservations: 4 },
+    { publicationHead: head, absentObservations: 4 },
+    { priorSpend: { series: 99 }, absentObservations: 4 },
+    { dispatchProjectRef: 'another-project', absentObservations: 4 },
+  ]) {
+    const f = fixture(t);
+    reserveRepairEpoch({ ...f, now: '2026-01-01T00:00:00Z', dispatchProjectRef: 'fixture-project' });
+    const file = hammerRetryCapFilePath(f.rootDir, f);
+    const ledger = JSON.parse(readFileSync(file, 'utf8'));
+    Object.assign(ledger.repairEpochs[0], { ownerState: 'absent-unfenced', absentObservations: 3,
+      ownerObservedAt: '2026-01-01T00:11:00Z' });
+    writeFileSync(file, JSON.stringify(ledger));
+    const snapshot = pendingRepairEpoch(f.rootDir, f);
+    Object.assign(ledger.repairEpochs[0], change);
+    writeFileSync(file, JSON.stringify(ledger));
+    const result = reserveRepairEpoch({ ...f, ownerKey: 'operator-successor', ownerSnapshot: snapshot,
+      operatorAbsence: { ...snapshot, ownerState: 'absent' } });
+    const allowed = change.ownerObservedAt !== undefined;
+    assert.equal(result.ok, allowed, JSON.stringify(change));
+    if (!allowed) {
+      assert.equal(result.reason, 'repair-owned');
+      assert.deepEqual(readHammerRetryCapLedger(f.rootDir, f), ledger, 'refusal preserves custody and spend');
+    }
   }
 });

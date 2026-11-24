@@ -99,6 +99,16 @@ and the committed owner/epoch enqueue fence when original boot evidence is
 unavailable. The retirement receipt preserves the reservation and spend
 history and releases ordinary review admission.
 
+After automatic remediation exhausts its round budget, a detected operator PR
+update can replace an `absent-unfenced` repair reservation with fresh canonical
+absence and the existing custody checks. Unscoped CWP conflict reservations
+retain custody with `repair-cwp-enqueue-fence-required` until fenced retirement.
+The ledger atomically retires the old epoch and reserves the successor, which
+publishes against its reserved head. Replacement history beyond the ordinary
+two-entry cap observes the existing deduplicated `repair-epoch-cap` SEV1 page.
+The [operator PR update procedure](RUNBOOK-ama-closure.md#operator-pr-update-after-the-automatic-remediation-budget-is-spent)
+describes caller provenance, the publication lease and recovery when the head moves.
+
 An unbound repair reservation without verified publication whose owner is
 still `unknown` when observed at least ten minutes after reservation projects
 `operator-hold` with reason `repair-owner-unproven`. The watcher sends one
@@ -129,8 +139,10 @@ reads still run at the normal cadence; a changed identity/state/head/chain or
 expiry forces a fresh publisher read. Verified publication keeps its existing
 durable proof. Successor reservation CAS ignores only `ownerObservedAt`; owner
 identity/state, publication, review/terminal state and spend fields still fence
-concurrent changes. Watcher observation updates retain their full snapshot CAS
-so a late observation cannot overwrite a newer one.
+concurrent changes. Operator supersession additionally tolerates monotonic
+`absentObservations` growth while the owner remains `absent-unfenced`; a reset
+or decrease still refuses it. Watcher observation updates retain their full
+snapshot CAS so a late observation cannot overwrite a newer one.
 
 Zero-output admission refusals without a launch move closer dispatch custody to
 `operator-escalated` for that head. The watcher clears the generic slow-retry
@@ -1611,13 +1623,6 @@ Legacy durable jobs created before `baseBranch` was persisted are hydrated from 
 ---
 
 ## MSM two-path merge authority (current)
-
-After automatic remediation exhausts its round budget, a detected operator PR
-update can replace an `absent-unfenced` repair reservation with fresh canonical
-absence and the existing custody checks. The ledger atomically retires the old
-epoch and reserves the successor, which publishes against its reserved head.
-The [operator PR update procedure](RUNBOOK-ama-closure.md#operator-pr-update-after-the-automatic-remediation-budget-is-spent)
-describes the publication lease and recovery when the head moves.
 
 At the legacy closer's final gate, a confirmed conflict can yield the merge
 lease and re-enter local replay, validation and exact-head publication. The

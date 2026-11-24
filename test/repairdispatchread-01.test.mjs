@@ -16,8 +16,9 @@ import { dispatchReadTransport } from '../src/dispatch-read-client.mjs';
 import { openReviewStateDb, ensureReviewStateSchema } from '../src/review-state.mjs';
 import { amaCloserLeaseFilePath } from '../src/ama/closer-lease.mjs';
 import { mutateRepairEpochs, readHammerRetryCapLedger } from '../src/ama/hammer-retry-cap.mjs';
-import { bindRepairHead, pendingRepairEpoch, reconcileRepairOwner, reserveRepairEpoch,
+import { bindRepairHead, pageRepairCap, pendingRepairEpoch, reconcileRepairOwner, reserveRepairEpoch,
   REPAIR_ABSENCE_ESCALATE_MS, REPAIR_OWNER_OBSERVE_MS } from '../src/repair-epochs.mjs';
+import { observeClosureWait } from '../src/ama/closure-wait.mjs';
 import { recordPrRound, PR_ROUND_KINDS } from '../src/pr-round-ledger.mjs';
 import { pairedDispatchAbsence } from './helpers/repair-dispatch-scope.mjs';
 
@@ -74,9 +75,11 @@ let endpoint = 0;
 const freshEnv = () => ({ APP_CONTRACT_ENDPOINT_URL: `https://fixture.invalid/repair-${++endpoint}` });
 
 for (const { name, allowed, rounds = 2, state = 'absent-unfenced', lookupFailure,
-  automatic, legacy, movedHead, capped } of [
+  automatic, legacy, movedHead, capped, counterBump } of [
   { name: 'operator PR update after budget exhaustion', allowed: true },
-  { name: 'legacy CWP conflict at a moved head and at the cap', allowed: true, legacy: true, movedHead: true, capped: true },
+  { name: 'scoped reservation at a moved head and at the cap', allowed: true, movedHead: true, capped: true },
+  { name: 'legacy CWP conflict still needs an enqueue fence', legacy: true, movedHead: true, capped: true },
+  { name: 'watcher increments absence during preflight', allowed: true, counterBump: true },
   { name: 'budget available', rounds: 0 },
   { name: 'persisted live owner', state: 'live' },
   { name: 'owner appears live during preflight', lookupFailure: 'live' },
@@ -129,6 +132,10 @@ for (const { name, allowed, rounds = 2, state = 'absent-unfenced', lookupFailure
   mockSdk(t, { lookup: selector => {
     if (selector.idempotency_key?.startsWith('repair-read-preflight-')) {
       scoped = true;
+      if (counterBump) mutateRepairEpochs(rootDir, identity, ledger => {
+        ledger.repairEpochs.at(-1).absentObservations++;
+        ledger.repairEpochs.at(-1).ownerObservedAt = '2026-01-01T00:11:00Z';
+      });
       return pairedDispatchAbsence(selector);
     }
     if (lookupFailure === 'transport') throw Object.assign(new Error('synthetic outage'), { status: 503 });
@@ -143,11 +150,20 @@ for (const { name, allowed, rounds = 2, state = 'absent-unfenced', lookupFailure
   const args = argv(rootDir);
   if (movedHead) args[3] = 'b'.repeat(40);
   const env = { ...freshEnv(), ...(!automatic && { HQ_REPAIR_REQUEST_KIND: 'operator-pr-update' }) };
-  const result = await main(args, { env });
+  const pages = [];
+  let deliveries = 0;
+  const pageRepairCapImpl = async args => {
+    pages.push(args);
+    return pageRepairCap({ ...args, observeImpl: wait => observeClosureWait({
+      ...wait, pageImpl: async () => { deliveries++; },
+    }) });
+  };
+  const result = await main(args, { env, pageRepairCapImpl });
   const after = readHammerRetryCapLedger(rootDir, identity);
   if (!allowed) {
-    assert.equal(result.reason, 'repair-owned');
+    assert.equal(result.reason, legacy ? 'repair-cwp-enqueue-fence-required' : 'repair-owned');
     assert.deepEqual(after, before);
+    assert.equal(pages.length, 0);
     return;
   }
   assert.equal(result.ok, true, JSON.stringify(result));
@@ -157,14 +173,36 @@ for (const { name, allowed, rounds = 2, state = 'absent-unfenced', lookupFailure
   assert.ok(retired.terminalAt);
   assert.deepEqual(after, { ...before, repairEpochs: [
     ...before.repairEpochs.slice(0, -1),
-    { ...prior, terminalAt: retired.terminalAt,
+    { ...prior, ...(counterBump && { absentObservations: 3, ownerObservedAt: '2026-01-01T00:11:00Z' }),
+      terminalAt: retired.terminalAt,
       supersededBy: { kind: 'operator-repair', launch: args[4], at: retired.terminalAt } },
     result.epoch,
   ] });
+  assert.equal(pages.length, capped ? 1 : 0, 'supersession beyond the cap must page');
+  if (capped) assert.deepEqual(pages[0].epochs, after.repairEpochs);
   assert.equal(bindRepairHead({ rootDir, ...identity, epochId: prior.id, headSha: 'f'.repeat(40) }), null);
   assert.equal(reserveRepairEpoch({ rootDir, ...identity, headSha: head, ownerKey: oldKey,
     cause: 'conflict-without-owner' }).reason, 'repair-worker-terminal');
   assert.deepEqual(readHammerRetryCapLedger(rootDir, identity), after);
+  if (capped) {
+    assert.equal((await main(args, { env, pageRepairCapImpl })).replayed, true);
+    assert.equal(pages.length, 2, 'replay observes the cap page again');
+    assert.deepEqual(readHammerRetryCapLedger(rootDir, identity), after);
+    mutateRepairEpochs(rootDir, identity, ledger => {
+      Object.assign(ledger.repairEpochs.at(-1), {
+        reservedAt: '2026-01-01T00:00:00Z', ownerObservedAt: '2026-01-01T00:11:00Z',
+        ownerState: 'absent-unfenced', absentObservations: 2,
+      });
+    });
+    const nextArgs = [...args];
+    nextArgs[3] = 'c'.repeat(40);
+    nextArgs[4] += '-next';
+    const next = await main(nextArgs, { env, pageRepairCapImpl });
+    assert.equal(next.epoch.supersedesEpochId, result.epoch.id);
+    assert.equal(pages.length, 3, 'another above-cap replacement observes the same page');
+    assert.equal(pages.at(-1).epochs.length, 4);
+    assert.equal(deliveries, 1, 'delivery deduplicates across replays, heads and chains');
+  }
 });
 
 for (const [scenario, expected] of [

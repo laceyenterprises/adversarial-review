@@ -3,7 +3,9 @@
 `repairEpochs` is an optional ordered array. Ordinary admissions are capped at
 two entries per PR. A qualifying operator supersession may append a replacement
 for the pending epoch even at the cap. Every entry still counts toward the
-ordinary cap.
+ordinary cap. A replacement beyond two entries observes the existing per-PR
+`repair-epoch-cap` SEV1 page with full history; successful delivery is deduplicated
+across heads and replacement chains, and replay retries failed delivery.
 Each reservation records `id`, dispatch idempotency `ownerKey`, `baseHead`,
 exhaustion `cause`, `reservedAt`, `priorSpend` (series/head/lifetime counters),
 `refundedSpend` and nullable `reviewHead`. It shares the existing retry-ledger
@@ -38,6 +40,9 @@ sets `absent-unfenced`, retains the reservation, projects operator-required
 custody in next-action/TTM, and sends a deduplicated SEV1 page. After the
 automatic remediation round budget is spent, an operator-directed PR update can
 supersede that reservation after another successful canonical absence read.
+Unscoped CWP conflict reservations instead return
+`repair-cwp-enqueue-fence-required` and keep custody until the committed
+owner/epoch enqueue-fence retirement procedure completes.
 The ledger writes `terminalAt` and `supersededBy: {kind, launch, at}` on the
 predecessor and `supersedesEpochId` on the successor in one write. The
 supersession kind is `operator-repair`. `launch` is the successor's dispatch
@@ -119,8 +124,10 @@ reads still run at the normal cadence; a changed identity/state/head/chain or
 expiry forces a fresh publisher read. Verified publication keeps its existing
 durable proof. Successor reservation CAS ignores only `ownerObservedAt`; owner
 identity/state, publication, review/terminal state and spend fields still fence
-concurrent changes. Watcher observation updates retain their full snapshot CAS
-so a late observation cannot overwrite a newer one.
+concurrent changes. Operator supersession additionally tolerates monotonic
+`absentObservations` growth while the owner remains `absent-unfenced`; a reset
+or decrease still refuses it. Watcher observation updates retain their full
+snapshot CAS so a late observation cannot overwrite a newer one.
 
 `reviewHarnessRefunds` maps the SHA-256 identity of a failed reviewer claim to
 `{id, headSha, failure, reservedAt, nextRetryAt}`. The identity includes failed

@@ -9646,7 +9646,12 @@ that head withdraws the waiver before ordinary review admission, where a first
 pass can run with red external CI. While the exact-head withdrawal receipt is
 current, later polls continue ordinary admission even if reviewer routing has
 to wait. An explicit review request preserves an existing withdrawal receipt
-for that head. A new head is classified independently.
+for that head. The gate record retains `docsFastPathWithdrawn: true` when
+queued or running review status replaces the withdrawal reason. Nullish reviewer
+fields and assignment followed by a routing reset therefore keep ordinary review
+admission on that head. Legacy pending withdrawal reasons remain readable.
+See the [gate record contract](data-model/adversarial-gate-status.md).
+A new head is classified independently.
 Under the lease, each attempt revalidates live classification, review requests,
 exact head, required checks and merge eligibility before signing/recording.
 A base tip advance is accepted after classifying the new immutable base/head

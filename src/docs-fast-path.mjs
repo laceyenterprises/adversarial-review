@@ -1,10 +1,9 @@
-import { docsReviewRequested, readDocsFastPath } from './docs-only.mjs';
+import { DOCS_WITHDRAWAL_REASON, docsReviewRequested, readDocsFastPath } from './docs-only.mjs';
 import { publishAdversarialGateStatus, readGateRecord } from './adversarial-gate-status.mjs';
 import { createBranchProtectionChecker } from './branch-protection.mjs';
 import { runDaemonCleanMergeAttempt } from './daemon-clean-merge.mjs';
 
 const readProtection = createBranchProtectionChecker();
-const DOCS_WITHDRAWAL_REASON = 'docs-fast-path-not-eligible';
 
 export async function maybeRunDocsFastPath({ subject, reviewRow, cfg, loadCfg = () => cfg, rootDir, repoPath, prNumber,
   execFileImpl, logger = console,
@@ -16,7 +15,8 @@ export async function maybeRunDocsFastPath({ subject, reviewRow, cfg, loadCfg = 
   if (subject.terminal || subject.isDraft) return null;
   const waiverWithdrawn = headSha => {
     const gate = rootDir && headSha && readGateRecordImpl(rootDir, { repo: repoPath, prNumber, headSha });
-    return gate?.state === 'pending' && gate.reason === DOCS_WITHDRAWAL_REASON;
+    return gate?.docsFastPathWithdrawn === true
+      || (gate?.state === 'pending' && gate.reason === DOCS_WITHDRAWAL_REASON);
   };
   const withdrawWaiver = async (headSha, reason = 'docs-review-requested') => {
     try {
@@ -34,7 +34,7 @@ export async function maybeRunDocsFastPath({ subject, reviewRow, cfg, loadCfg = 
   if (reviewRow?.reviewer && (reviewRow.revision_ref === subject.headSha
     || reviewRow.reviewer_head_sha === subject.headSha)) return null;
   // A same-head unrouted wait still belongs to ordinary review after withdrawal.
-  if (reviewRow?.reviewer === '' && reviewRow.revision_ref === subject.headSha
+  if ((reviewRow?.reviewer ?? '') === '' && reviewRow?.revision_ref === subject.headSha
     && waiverWithdrawn(subject.headSha)) return null;
   let evidence = null;
   const read = async args => {

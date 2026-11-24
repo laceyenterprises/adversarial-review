@@ -36,6 +36,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { maybeRunDocsFastPath } from '../src/docs-fast-path.mjs';
+import { projectAdversarialGateStatus, publishAdversarialGateStatus, readGateRecord } from '../src/adversarial-gate-status.mjs';
 import { runDaemonCleanMergeAttempt } from '../src/daemon-clean-merge.mjs';
 import { emitDocsFastPathAttestation } from '../src/reviewed-attestation.mjs';
 import { isEligibleForAmaClosure } from '../src/ama/eligibility.mjs';
@@ -288,6 +289,64 @@ test('REVIEWROWLESS-01 settled refusal hands the head to review while routing wa
   } }), 'docs-merge-deferred');
   assert.deepEqual(states, ['success', 'pending', 'success']);
   assert.equal(daemonCalls, 2);
+});
+
+test('queued-review projection keeps a withdrawn docs waiver pending across drained polls', async t => {
+  const rootDir = mkdtempSync(join(tmpdir(), 'docs-withdrawal-projection-'));
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  const identity = { repo: 'example/docs', prNumber: 7, headSha: head };
+  const env = { GITHUB_TOKEN: 'fixture', PATH: '/usr/bin:/bin' };
+  const statuses = [];
+  const execFileImpl = async (_command, args) => {
+    statuses.push(args.find(arg => arg.startsWith('state=')));
+    return { stdout: '{}', stderr: '' };
+  };
+  let daemonCalls = 0;
+  const args = { rootDir, repoPath: identity.repo, prNumber: identity.prNumber, execFileImpl,
+    subject: { headSha: head, labels: [] }, cfg: { enabled: true }, logger: quiet,
+    readDocsFastPathImpl: async () => evidence, fetchProtectionImpl: async () => ({}),
+    publishStatusImpl: (root, status) => publishAdversarialGateStatus(root, { ...status, env }),
+    runDaemonImpl: async () => { daemonCalls++; return { docsReviewRequired: true }; } };
+  assert.equal(await maybeRunDocsFastPath(args), null);
+  const reviewRow = { reviewer: '', revision_ref: head, review_status: 'pending',
+    failure_message: '[watcher-drain] owner=watcher-operator' };
+  for (const reviewer of ['', null, undefined]) {
+    const unrouted = { ...reviewRow, reviewer };
+    if (reviewer === undefined) delete unrouted.reviewer;
+    for (let tick = 0; tick < 2; tick++) {
+      assert.equal(await maybeRunDocsFastPath({ ...args, reviewRow: unrouted }), null);
+      const projected = await projectAdversarialGateStatus(rootDir, { ...identity, reviewRow: unrouted, execFileImpl, env });
+      assert.equal(projected.decision.reason, 'docs-fast-path-not-eligible');
+    }
+  }
+  assert.equal(daemonCalls, 1);
+  assert.deepEqual(statuses, ['state=success', 'state=pending']);
+
+  const routed = await projectAdversarialGateStatus(rootDir, {
+    ...identity, reviewRow: { ...reviewRow, reviewer: 'claude' }, execFileImpl, env,
+  });
+  assert.equal(routed.decision.reason, 'review-queued');
+  assert.equal(routed.publish.posted, true);
+  assert.equal(routed.publish.record.docsFastPathWithdrawn, true);
+
+  // Running status and a later routing reset must not resurrect this head's waiver.
+  await projectAdversarialGateStatus(rootDir, { ...identity,
+    reviewRow: { ...reviewRow, reviewer: 'claude', review_status: 'reviewing' }, execFileImpl, env });
+  for (const reviewer of ['', null, undefined]) {
+    const unrouted = { ...reviewRow, reviewer };
+    await projectAdversarialGateStatus(rootDir, { ...identity, reviewRow: unrouted, execFileImpl, env });
+    assert.equal(readGateRecord(rootDir, identity).docsFastPathWithdrawn, true);
+    assert.equal(await maybeRunDocsFastPath({ ...args, reviewRow: unrouted }), null);
+  }
+  assert.equal(daemonCalls, 1);
+
+  const movedHead = 'f'.repeat(40);
+  assert.equal(await maybeRunDocsFastPath({ ...args,
+    subject: { ...args.subject, headSha: movedHead },
+    reviewRow: { ...reviewRow, revision_ref: movedHead },
+    readDocsFastPathImpl: async () => ({ ...evidence, headSha: movedHead }),
+  }), null);
+  assert.equal(daemonCalls, 2, 'a new head gets an independent fast-path attempt');
 });
 
 test('DOCSFASTPATH-01 reader delegates live labels and retains row requests after discovery', async () => {

@@ -2205,7 +2205,9 @@ with red external CI. Unsettled checks or `UNKNOWN` mergeability keep the fast-p
 and retry on the same head. A failed waiver withdrawal stays with the watcher
 for retry.
 Once an ordinary reviewer is assigned for the head, later polls keep it on
-the ordinary path.
+the ordinary path. The head's gate record retains `docsFastPathWithdrawn: true`
+across queued/running status replacement and a later routing reset; nullish
+reviewer fields also preserve withdrawal. A new head is classified independently.
 
 The former `fast-merge:docs` label shortcut is retired; it cannot waive review
 for Markdown outside `docs/`. Other explicit fast-merge categories are unchanged.

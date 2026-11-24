@@ -2,6 +2,17 @@
   "version": 1,
   "entries": [
     {
+      "id": "adversarial-gate-status",
+      "title": "Adversarial Gate Status",
+      "path": "docs/data-model/adversarial-gate-status.md",
+      "store": "data/adversarial-gate-status/",
+      "schemaSurface": "src/adversarial-gate-status.mjs",
+      "relatedSchemaSurfaces": ["src/docs-fast-path.mjs"],
+      "owner": "watcher gate projection and docs fast path",
+      "optionalFields": ["docsFastPathWithdrawn: true"],
+      "compatibility": "Additive head-scoped withdrawal evidence retained across status replacement. Legacy pending docs-fast-path-not-eligible records remain readable and gain the flag on their next changed publication. New heads do not inherit it."
+    },
+    {
       "id": "follow-up-reviewer-role",
       "title": "Follow-up alternate-owner reviewer role",
       "path": "docs/data-model/follow-up-jobs.md",

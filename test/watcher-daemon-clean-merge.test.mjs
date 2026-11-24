@@ -23,6 +23,7 @@ import { resolveMergeAgentCoexistenceForWatcher } from '../src/ama-closure-orche
 import { readDaemonMergeParks } from '../src/daemon-merge-park-log.mjs';
 import { appendAmaAuditAttempt } from '../src/ama/audit.mjs';
 import { __testables__ as daemonCleanMergeTestables } from '../src/daemon-clean-merge.mjs';
+import { hasOperatorApprovedOverride } from '../src/ama/eligibility.mjs';
 
 // Integration test for the MSM-03 wiring seam in `maybeDispatchAmaClosureFor`:
 // the daemon clean-merge attempt runs BEFORE the AMA closer dispatch, and any
@@ -2842,6 +2843,34 @@ function operatorApprovedEventAt(head, overrides = {}) {
     headSha: head,
     ...overrides,
   };
+}
+
+for (const configMode of ['omitted', 'undefined', true]) {
+  test(`strict-mode default refuses operator-approved exact-head findings (${configMode})`, async t => {
+    const rootDir = tempRoot();
+    t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+    const head = 'a'.repeat(40), event = operatorApprovedEventAt(head);
+    const args = unattributedDaemonArgs({ rootDir, head });
+    const cfg = { operatorLogins: [event.actor], operatorLabelActorEnforcement: 'enforce' };
+    if (configMode !== 'omitted') cfg.strictMode = configMode === true ? true : undefined;
+    const operatorApprovedEvidence = { applied: true, observedRevisionRef: head,
+      actor: event.actor, eventId: event.id, observedAt: event.createdAt };
+    assert.equal(hasOperatorApprovedOverride({ ...cfg, operatorApprovedEvidence },
+      { headSha: head, labels: ['operator-approved'] }), true, 'fixture has a valid exact-head override');
+    const result = await runDaemonCleanMergeAttempt({
+      ...args, cfg,
+      candidate: { ...args.candidate, labels: ['operator-approved'] },
+      reviewState: { ...args.reviewState, headSha: head, nonBlockingFindingCount: 1,
+        operatorApprovedEvidence },
+      readBuildCompletionSignalForPrImpl: () => assert.fail('decline before identity reads'),
+      resolveHeadCloserCommitSuppressionImpl: () => assert.fail('decline before certification reads'),
+      headHasValidatedHamTerminalRemediationImpl: () => assert.fail('decline before HAM audit reads'),
+      fetchRollupImpl: () => assert.fail('decline before live reads'),
+      attemptDaemonCleanMergeImpl: () => assert.fail('operator approval cannot bypass strict findings'),
+    });
+    assert.equal(result.disposition, DAEMON_MERGE_DISPOSITION.NOT_TAKEN);
+    assert.equal(result.reason, 'non-blocking-findings-present');
+  });
 }
 
 test('file stop refuses daemon closure before dependencies and recovers without reload', async () => {

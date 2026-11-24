@@ -1688,7 +1688,10 @@ existing final-fix-all work order for that head. A disabled or refused handoff
 records `needs-closer`, alerts through closure-wait and retains the receipt for
 later closure passes. A terminal final-fix-all result lets the selected hammer
 proceed through ordinary admission and retry caps. Successor custody pages on
-refusal and has no timed escalation at the 1800-second target. See
+refusal; the watcher deadline sweep also escalates after 1800 seconds from the
+original request if the receipt remains unenrolled on the same open head.
+Poll updates do not extend that deadline, and both observations share one page
+latch. See
 [successor records](data-model/closer-successors.md) and
 [publication ownership](data-model/hammer-publication-ownership.md).
 Exits before completing the close retain their existing bounded retry/refund

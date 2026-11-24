@@ -8,7 +8,7 @@ import { join } from 'node:path';
 import { withHammerPublication, activeHammerPublication, retireHammerPublication, settleHammerRebasePublication, hammerPublicationPath } from '../src/ama/hammer-publication-ownership.mjs';
 import { getHeadCloserCommitSuppression } from '../src/head-closer-commit-suppression.mjs';
 import { hammerHeadOwnership } from '../src/hammer-head-ownership.mjs';
-import { requestCloserSuccessor, settleCloserSuccessor, readCloserSuccessor, closerSuccessorPath } from '../src/ama/closer-successor.mjs';
+import { requestCloserSuccessor, settleCloserSuccessor, readCloserSuccessor, closerSuccessorPath, createCloserSuccessorDeadlineSweep } from '../src/ama/closer-successor.mjs';
 import { acquireMergeLease, releaseMergeLease } from '../src/ama/merge-lease.mjs';
 
 const NOW = '2030-01-01T00:00:00.000Z';
@@ -255,4 +255,33 @@ test('AMASTRICTROUTE-01: refused successor admission leaves a durable needs-clos
   assert.equal(result.reason, 'successor-admission-refused');
   assert.equal(result.status, 'needs-closer');
   assert.deepEqual(readCloserSuccessor(f.rootDir, input), result);
+});
+
+test('successor deadline survives repeated poll updates, including during the live-head read', async t => {
+  const f = fixture(t), input = { ...f, headSha: HEAD, source: 'closer-ended-without-merge' };
+  requestCloserSuccessor(input);
+  const start = Date.parse(NOW), pages = [], probes = [];
+  const settleAt = elapsed => settleCloserSuccessor({ ...input, admitted: false,
+    now: new Date(start + elapsed).toISOString(), observeWaitImpl: async () => {} });
+  for (let elapsed = 30_000; elapsed < 1_800_000; elapsed += 30_000) await settleAt(elapsed);
+  const sweepAt = async elapsed => {
+    const sweep = createCloserSuccessorDeadlineSweep({ rootDir: f.rootDir, now: () => start + elapsed,
+      readLive: async () => {
+        probes.push(elapsed);
+        await settleAt(elapsed); // The locked recheck must use the original request too.
+        return { state: 'open', headRefOid: HEAD };
+      },
+      observeWaitImpl: async args => pages.push(args) });
+    try { await sweep.tick(); } finally { await sweep.stop(); }
+  };
+  await sweepAt(1_799_999);
+  assert.deepEqual(probes, []);
+  assert.deepEqual(pages, []);
+  await sweepAt(1_800_000);
+  assert.deepEqual(probes, [1_800_000]);
+  assert.equal(pages.length, 1);
+  assert.equal(pages[0].reason, 'closer-successor-overdue');
+  const receipt = readCloserSuccessor(f.rootDir, input);
+  assert.equal(receipt.requestedAt, NOW);
+  assert.equal(receipt.updatedAt, new Date(start + 1_800_000).toISOString());
 });

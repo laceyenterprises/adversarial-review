@@ -47,6 +47,23 @@ gets a closer or an explicit `needs-closer` receipt when admission is deferred.
 The handoff smoke checks the 1800-second boundary, closed and moved heads,
 and page deduplication across watcher restarts.
 
+Final review remediation anchors the successor deadline to the original
+`requestedAt`, so repeated settlement updates cannot starve escalation. The
+focused regression also refreshes the receipt during the live-head read to
+exercise the locked recheck. Canonical custody docs and the handoff smoke now
+describe and verify this clock under repeated polling.
+The reported strict-mode default bypass does not reproduce: the executor
+already normalizes `cfg?.strictMode !== false` before computing `strictExactHead`.
+Regression cases cover omitted, undefined and enabled configuration with
+exact-head findings and valid operator approval; each declines before identity,
+certification, live-head or merge calls. The legacy certification parameter
+remains necessary for superseded reviews and non-strict mode.
+Final-review validation passed: 164 tests across the watcher daemon, successor
+and SMV files; lint with zero errors (147 existing warnings), contract
+typechecking, the data-model catalog validator (103 entries), the offline
+walkthrough demo and `git diff --check`. The Python worker-validation module
+was unavailable in this checkout; commands used the checked-in bounded runner.
+
 Final-round checks use `bash bin/run-bounded.sh --timeout <seconds> -- node
 test/run-tests.mjs <targeted files>` for the daemon, watcher daemon wiring,
 final fix-all, dispatch priority, retry cap, pr-blockers, claim-loop and SMV

@@ -33,9 +33,10 @@ findings, the watcher leaves the receipt intact and passes the selected hammer
 decision to normal admission. Other routes record `needs-closer` with the
 handoff's reason and surface the refusal instead of admitting another hammer.
 Final-fix-all's durable claim prevents duplicate work. An independent watcher
-sweep checks non-enrolled receipts after 1800 seconds from `updatedAt`, falling
-back to `requestedAt` for pending receipts. The sweep confirms the PR is open
-at the recorded head and rechecks the receipt under its flock before paging.
+sweep checks non-enrolled receipts after 1800 seconds from the original
+`requestedAt`; poll updates to `updatedAt` do not extend custody. The sweep
+confirms the PR is open at the recorded head and rechecks the receipt under its
+flock before paging.
 The immediate refusal and overdue escalation share one page latch.
 
 A pending receipt grants no merge, review or budget authority. Head matching,

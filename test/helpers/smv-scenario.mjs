@@ -1178,8 +1178,10 @@ if (scenario === 'clean') {
   for (const subject of [pending, needsCloser, terminal, moved, enrolled]) requestCloserSuccessor(subject);
   assert.equal((await settleCloserSuccessor({ ...pending, allowHammerFallback: true,
     handoffImpl: async () => ({ action: 'fallback' }) })).action, 'fallback');
-  await settleCloserSuccessor({ ...needsCloser, enabled: false,
-    now: new Date(Date.parse(custodyNow) + 1_000).toISOString(), observeWaitImpl: async () => {} });
+  for (let elapsed = 30_000; elapsed < 1_800_000; elapsed += 30_000) {
+    await settleCloserSuccessor({ ...needsCloser, enabled: false,
+      now: new Date(Date.parse(custodyNow) + elapsed).toISOString(), observeWaitImpl: async () => {} });
+  }
   await settleCloserSuccessor({ ...enrolled, handoffImpl: successorHandoff });
   const pages = [];
   const probes = [];
@@ -1202,11 +1204,10 @@ if (scenario === 'clean') {
   assert.deepEqual(pages, []);
   assert.deepEqual(probes, []);
   await sweepAt(Date.parse(custodyNow) + 1_800_000);
-  assert.equal(pages.length, 1);
-  assert.match(pages[0], /PR 72@.*closer-successor-overdue/);
-  await sweepAt(Date.parse(custodyNow) + 1_801_000);
   assert.equal(pages.length, 2);
-  assert.match(pages[1], /PR 73@.*closer-successor-overdue/);
+  for (const subject of [pending, needsCloser]) {
+    assert.ok(pages.some(page => page.includes(`PR ${subject.prNumber}@`) && page.includes('closer-successor-overdue')));
+  }
   await sweepAt(Date.parse(custodyNow) + 1_900_000);
   assert.equal(pages.length, 2, 'pages deduplicate across sweep restarts');
   assert.equal(probes.includes(enrolled.prNumber), false);

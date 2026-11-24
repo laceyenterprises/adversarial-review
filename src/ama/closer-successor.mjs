@@ -98,7 +98,7 @@ export function createCloserSuccessorDeadlineSweep({ rootDir, readLive, now = Da
   let stopped = false;
   const overdue = (record, observedAt) => record && record.schemaVersion === 1
     && record.status !== 'successor-enrolled'
-    && observedAt - Date.parse(record.updatedAt ?? record.requestedAt) >= SUCCESSOR_DEADLINE_MS;
+    && observedAt - Date.parse(record.requestedAt) >= SUCCESSOR_DEADLINE_MS;
 
   async function closeCursor() {
     const current = cursor;

@@ -24,9 +24,10 @@ receipts. If final fix-all has already spent its head-scoped round, only a stric
 exact-head final findings route continues through ordinary hammer admission and
 caps. Other routes retain `needs-closer` custody and the refusal page. Every
 30 seconds the watcher scans a bounded batch of receipts independently of
-closure selection. After 1800 seconds from `updatedAt` or `requestedAt`, it
+closure selection. After 1800 seconds from the original `requestedAt`, it
 confirms the PR still has the same open head and uses the same durable page
-latch as an immediate refusal. See
+latch as an immediate refusal. Poll updates to `updatedAt` do not extend the
+deadline. See
 [successor records](data-model/closer-successors.md) and
 [publication ownership](data-model/hammer-publication-ownership.md).
 Strict exact-head findings remain recognized after the automatic retry-cap stop

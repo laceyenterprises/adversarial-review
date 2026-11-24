@@ -10,11 +10,11 @@
 // fixture then runs the shipped conflict repair against a synthetic CONFLICTING
 // PR through to a rebased head. Only the GitHub/credential process boundary and
 // the bounded-step wrapper are stubbed; git, the rebase and the proof are real.
-import test from 'node:test';
+import test, { after } from 'node:test';
 import { hammerBootstrapInputs } from './helpers/hammer-bootstrap-inputs.mjs';
 import assert from 'node:assert/strict';
 import { execFileSync, spawnSync } from 'node:child_process';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { renderHammerProcedure, HAMMER_PHASES } from '../src/hammer-procedure.mjs';
@@ -270,6 +270,55 @@ case "$(basename "$path")" in
 esac
 `;
 
+const generator = `from pathlib import Path
+import os
+with Path(os.environ["FIXTURE_LOG"]).open("a") as events:
+    events.write("generator ran\\n")
+Path("example.txt").write_text("one\\n" + Path("author-part.txt").read_text() + Path("base-part.txt").read_text())
+`;
+const histories = new Map();
+let historyRoot;
+after(() => {
+  if (historyRoot) rmSync(historyRoot, { recursive: true, force: true });
+});
+
+function seedConflictHistory(git, { conflict, generated }) {
+  const shape = `${conflict ? 'conflict' : 'clean'}-${generated ? 'generated' : 'source'}`;
+  const cached = histories.get(shape);
+  if (cached) return cached;
+  historyRoot ??= mkdtempSync(join(tmpdir(), 'hamconflictsync-history-'));
+  const seed = join(historyRoot, shape);
+  mkdirSync(seed);
+  git(seed, 'init', '-q', '-b', 'main', 'author');
+  const author = join(seed, 'author');
+  writeFileSync(join(author, 'example.txt'), 'one\ntwo\nthree\n');
+  if (generated) {
+    writeFileSync(join(author, 'generate.py'), generator);
+    writeFileSync(join(author, 'author-part.txt'), 'two\n');
+    writeFileSync(join(author, 'base-part.txt'), 'three\n');
+  }
+  git(author, 'add', '.');
+  git(author, 'commit', '-qm', 'Synthetic base');
+  git(author, 'checkout', '-qb', 'author');
+  if (conflict) writeFileSync(join(author, 'example.txt'), 'one\ntwo author\nthree\n');
+  else writeFileSync(join(author, 'author.txt'), 'author\n');
+  if (generated) writeFileSync(join(author, 'author-part.txt'), 'two author\n');
+  git(author, 'add', '.');
+  git(author, 'commit', '-qm', 'Synthetic author change\n\n# Heading kept by the rebase');
+  const reviewed = git(author, 'rev-parse', 'HEAD');
+  git(author, 'checkout', '-q', 'main');
+  writeFileSync(join(author, 'example.txt'), 'one\ntwo\nthree upstream\n');
+  if (generated) writeFileSync(join(author, 'base-part.txt'), 'three upstream\n');
+  git(author, 'commit', '-qam', 'Synthetic upstream change');
+  const base = git(author, 'rev-parse', 'HEAD');
+  const origin = join(seed, 'origin.git');
+  git(seed, 'init', '-q', '--bare', '-b', 'main', origin);
+  git(author, 'push', '-q', origin, 'main', 'author');
+  const history = { origin, reviewed, base };
+  histories.set(shape, history);
+  return history;
+}
+
 function conflictFixture(t, { conflict = true, owner = 'fixture/foreign', generatedPath = 'unrelated.txt' } = {}) {
   const dir = mkdtempSync(join(tmpdir(), 'hamconflictsync-pr-'));
   t.after(() => rmSync(dir, { recursive: true, force: true }));
@@ -277,7 +326,6 @@ function conflictFixture(t, { conflict = true, owner = 'fixture/foreign', genera
   const run = join(dir, 'run');
   const work = join(dir, 'work');
   const clone = join(dir, 'clone');
-  const author = join(dir, 'author');
   const install = join(dir, 'installed');
   const hq = join(dir, 'hq-state');
   const policy = join(install, 'modules/worker-pool/lib/python/cwp_dispatch');
@@ -292,12 +340,6 @@ function conflictFixture(t, { conflict = true, owner = 'fixture/foreign', genera
     files: [{ path: generatedPath, argv: ['{python}', 'generate.py'], inputs: ['author-part.txt'], evidence: 'fixture' }],
   }));
   writeFileSync(join(policy, 'generated_conflicts.py'), read('test/helpers/generated-conflict-policy-fixture.py'));
-  const generator = `from pathlib import Path
-import os
-with Path(os.environ["FIXTURE_LOG"]).open("a") as events:
-    events.write("generator ran\\n")
-Path("example.txt").write_text("one\\n" + Path("author-part.txt").read_text() + Path("base-part.txt").read_text())
-`;
   writeFileSync(join(install, 'generate.py'), generator);
   writeFileSync(join(dir, 'gitconfig'), '');
   const log = join(dir, 'events.log');
@@ -317,31 +359,12 @@ printf 'resume %s\\n' "$*" >> "$FIXTURE_LOG"
 exec ${shellQuote(python)} "$@"
 `, { mode: 0o755 });
   const git = (cwd, ...args) => execFileSync('git', args, { cwd, env, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
-  git(dir, 'init', '-q', '--bare', '-b', 'main', 'origin.git');
+  const seed = seedConflictHistory(git, { conflict, generated: generatedPath === 'example.txt' });
   const origin = join(dir, 'origin.git');
-  git(dir, 'clone', '-q', origin, 'author');
-  writeFileSync(join(author, 'example.txt'), 'one\ntwo\nthree\n');
-  if (generatedPath === 'example.txt') {
-    writeFileSync(join(author, 'generate.py'), generator);
-    writeFileSync(join(author, 'author-part.txt'), 'two\n');
-    writeFileSync(join(author, 'base-part.txt'), 'three\n');
-  }
-  git(author, 'add', '.'); git(author, 'commit', '-qm', 'Synthetic base');
-  git(author, 'push', '-q', 'origin', 'main');
-  git(author, 'checkout', '-qb', 'author');
-  if (conflict) writeFileSync(join(author, 'example.txt'), 'one\ntwo author\nthree\n');
-  else writeFileSync(join(author, 'author.txt'), 'author\n');
-  if (generatedPath === 'example.txt') writeFileSync(join(author, 'author-part.txt'), 'two author\n');
-  git(author, 'add', '.');
-  git(author, 'commit', '-qm', 'Synthetic author change\n\n# Heading kept by the rebase');
-  git(author, 'push', '-q', 'origin', 'author');
-  const reviewed = git(author, 'rev-parse', 'HEAD');
-  git(author, 'checkout', '-q', 'main');
-  writeFileSync(join(author, 'example.txt'), 'one\ntwo\nthree upstream\n');
-  if (generatedPath === 'example.txt') writeFileSync(join(author, 'base-part.txt'), 'three upstream\n');
-  git(author, 'commit', '-qam', 'Synthetic upstream change');
-  git(author, 'push', '-q', 'origin', 'main');
-  const base = git(author, 'rev-parse', 'HEAD');
+  // Force pushes and ref edits belong to this case alone. The copied origin
+  // has its own refs and objects, and the separate clone owns the worktree.
+  cpSync(seed.origin, origin, { recursive: true });
+  const { reviewed, base } = seed;
   // Use a linked worktree and a canonical raw origin. Transport stays local.
   git(dir, 'clone', '-q', origin, 'clone');
   git(clone, 'remote', 'set-url', 'origin', 'git@github.com:fixture/repo.git');
@@ -358,7 +381,7 @@ exec ${shellQuote(python)} "$@"
     cwd: work, encoding: 'utf8', timeout: 60_000, env: { ...env, HAM_NODE_BIN: join(fakeBin, 'node') },
   });
   const events = () => (existsSync(log) ? readFileSync(log, 'utf8') : '');
-  return { dir, run, work, author, origin, reviewed, base, git, repair, events, registry, env, install, policy, python, bound, fakeBin };
+  return { dir, run, work, origin, reviewed, base, git, repair, events, registry, env, install, policy, python, bound, fakeBin };
 }
 
 function stageSource(f) {

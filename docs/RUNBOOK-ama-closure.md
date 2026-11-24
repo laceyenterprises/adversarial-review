@@ -6366,6 +6366,17 @@ three-refund park with an owned retry; see "Inconclusive closer results" below.
 Head/review changes do not erase a head's refund history; a world refusal still
 wins over a later generic controller failure. This adds no merge authority.
 
+The validator gives every local test battery its own real, mode-0700 directory
+under the system `/tmp`. It sets `TMPDIR`, `TMP`, and `TEMP` there and moves
+the hammer's pytest base temp there. Checkouts and close receipts still live
+in the run workspace. The validator checks a 92-byte socket-path budget
+before starting the battery. A setup refusal or a validation failure with
+explicit overlong Unix socket evidence records `harness-fault:socket-path`.
+The watcher owns the same-head retry and refunds the failed launch's charges.
+Validation removes its private temp directory after command cleanup. Later
+validations reap directories at least a day old when owner and process
+checks show them unused.
+
 Local validation uses `hammer-validate.mjs --canonical -- <changed files>`.
 Absolute paths, leading hyphens and parent traversal segments print canonical
 usage and exit 64, without a validation verdict or environment-fallback receipt.

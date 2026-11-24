@@ -20,6 +20,8 @@ import { ValidationSelectionError, UnsupportedPnpmWorkflowError } from '../src/a
 import { writeFileAtomic } from '../src/atomic-write.mjs';
 import { loadEffectiveMergeAuthorityConfig } from '../src/ama/effective-policy.mjs';
 import { conflictPublishBinding } from '../src/ama/hammer-conflict-binding.mjs';
+import { createValidationScratch, reapValidationScratch, validationScratchEnv } from '../src/ama/hammer-validation-scratch.mjs';
+import { isSocketPathFailure, SOCKET_PATH_HARNESS_FAULT } from '../src/harness-fault.mjs';
 import { CI_AUTHORITATIVE_UNKNOWN_REASONS, declaredRequiredContexts, readUnknownValidationReceipt, recordedUnknownDefersToCi,
   unknownValidationDeferral } from '../src/ama/local-validation-unknown.mjs';
 
@@ -184,7 +186,7 @@ function writeValidationReceipt(value) {
   catch { console.error('hammer-validate: local validation receipt unavailable'); return false; }
 }
 
-async function withMirrorSupport(runner, scratch) {
+async function withMirrorSupport(runner, scratch, env) {
   const controlledReceipt = Boolean(process.env.HAM_CLOSE_VALIDATION_RECEIPT);
   const enabled = process.env.HAM_LOCAL_VALIDATION_CI_DEDUP !== '0'
     && (controlledReceipt || Boolean(runDir && head && /^[1-9]\d*$/.test(process.env.HAM_PR_NUMBER || '')));
@@ -201,7 +203,7 @@ async function withMirrorSupport(runner, scratch) {
       head: matchingHead ? head : undefined, enabled,
       // This optional probe reports unavailable coverage through validation.
       // Keep credential failures provisional, like a managed helper attempt.
-      env: { ...process.env, HAM_HELPER_FAILURE_FILE: join(scratch, 'coverage-auth-failure') },
+      env: { ...env, HAM_HELPER_FAILURE_FILE: join(scratch, 'coverage-auth-failure') },
     });
     const checkoutMoved = !controlledReceipt && matchingHead
       && (gitOutput('rev-parse', '--verify', 'HEAD') !== head || !cleanCheckout());
@@ -217,7 +219,7 @@ function readValidationReceipt() {
   catch { return receipt; }
 }
 
-function finishValidationReceipt(runner, runnerExit, fallbackReason) {
+function finishValidationReceipt(runner, runnerExit, fallbackReason, outcome) {
   const observed = readValidationReceipt();
   const status = process.exitCode;
   if (!observed.checks.length && (!observed.perCheck || runnerExit !== 0)) {
@@ -232,6 +234,10 @@ function finishValidationReceipt(runner, runnerExit, fallbackReason) {
   delete observed.perCheck;
   // A timeout can kill the mirror before its last check records a result.
   for (const check of observed.checks) {
+    if (outcome === SOCKET_PATH_HARNESS_FAULT && check.socketPathFault) {
+      check.result = 'inconclusive';
+      check.localReason = outcome;
+    }
     if (check.status === 'run' && !check.result && runnerExit !== 0) {
       check.status = 'failed';
       if (validationUnknown) check.result = 'inconclusive';
@@ -239,7 +245,18 @@ function finishValidationReceipt(runner, runnerExit, fallbackReason) {
       check.localReason = 'validation-interrupted';
     }
   }
-  writeValidationReceipt({ ...observed, status });
+  writeValidationReceipt({ ...observed, status, ...(outcome ? { outcome } : {}) });
+}
+
+function recordSocketPathFault(detail) {
+  console.error(`hammer-validate: ${detail}`);
+  process.exitCode = 75;
+  validationUnknown = true;
+  // A local rebase can have an unpublished HEAD. Refund the launch's charge
+  // on its dispatch target, while the validation receipt keeps the tested head.
+  reportHammerEarlyFailure(SOCKET_PATH_HARNESS_FAULT, {
+    headSha: process.env.HAM_TARGET_REMEDIATION_SHA || process.env.HAM_REVIEWED_SHA || head,
+  });
 }
 
 // CLOSERGATES-01: a closure-resume launch validated nothing new. While the
@@ -285,16 +302,31 @@ if (checkRebase) {
   const receipt = resumed;
   console.error(`hammer-validate: closure resume: head ${receipt.validatedHead} was validated by launch ${receipt.launchRequestId || 'unknown'}; reusing that evidence, not re-running validation.`);
 } else {
+  await validate();
+}
+
+async function validate() {
   try {
     cleanConflictRebase = canonical && hasCompletedConflictRebase() && gitOutput('status', '--porcelain') === '';
   } catch { /* An unreadable binding gives validation no publication authority. */ }
-  const scratch = await mkdtemp(join(tmpdir(), 'ham-validation-'));
-  let runner, runnerExit, fallbackReason;
+  let scratch;
+  let runner, runnerExit, fallbackReason, outcome;
   if (closeReceipt) writeValidationReceipt(receipt);
   try {
+    try { scratch = await createValidationScratch(); }
+    catch (error) {
+      outcome = SOCKET_PATH_HARNESS_FAULT;
+      fallbackReason = outcome;
+      recordSocketPathFault(error.message.startsWith(outcome) ? error.message
+        : `${outcome}: unable to create a writable short temp root (${error.code || 'setup failed'})`);
+      return;
+    }
+    try { await reapValidationScratch(dirname(scratch)); }
+    catch { /* Missing process evidence retains orphan candidates. */ }
     reportRemediationCommit();
-    const env = !canonical && pytest ? pytestValidationEnvironment(process.env, scratch,
-      join(dirname(fileURLToPath(import.meta.url)), 'pytest')) : process.env;
+    const scratchEnv = validationScratchEnv(process.env, scratch);
+    const env = !canonical && pytest ? pytestValidationEnvironment(scratchEnv, scratch,
+      join(dirname(fileURLToPath(import.meta.url)), 'pytest')) : scratchEnv;
     if (canonical) {
       // Older callers passed commands. Always derive changed paths from Git in
       // that compatibility case instead of executing a hand-built validator.
@@ -324,13 +356,14 @@ if (checkRebase) {
     } else runner = { command: pytest ? 'python3' : args.shift(),
       args: pytest ? ['-u', '-m', 'pytest', '-p', 'ham_pytest_progress', ...args] : args };
     if (valid) {
-      let output = '', packageImportFault = false, stopReason;
+      let output = '', packageImportFault = false, socketPathFault = false, stopReason;
       let packages = new Set();
       try { if (canonical && !runner?.required) packages = repositoryPythonPackages(process.cwd()); }
       catch { runner = null; }
       const observeOutput = chunk => {
         output += String(chunk);
         packageImportFault ||= ownPackageImportFault(output, packages);
+        socketPathFault ||= isSocketPathFailure(output);
         localTestFailure ||= /(?:^|\n)[ \t]*not ok \d+/.test(output);
         output = output.slice(-8192);
       };
@@ -343,7 +376,7 @@ if (checkRebase) {
         writeValidationReceipt(receipt);
         console.error(`hammer-validate: CI mirror evidence: ${closeReceipt}`);
       }
-      const execution = mirror ? await withMirrorSupport(runner, scratch) : runner;
+      const execution = mirror ? await withMirrorSupport(runner, scratch, env) : runner;
       const timeoutMs = loadAwareTimeoutSeconds(explicitTimeout ? nominalSeconds
         : runner?.nominalSeconds || nominalSeconds) * 1000;
       const deadline = Date.now() + timeoutMs;
@@ -364,6 +397,15 @@ if (checkRebase) {
           || process.exitCode >= 124 || Date.now() >= deadline) break;
       }
       runnerExit = process.exitCode;
+      const failedMirrorChecks = mirror ? readValidationReceipt().checks.filter(check => check.result === 'fail') : [];
+      if (!stopReason && runnerExit > 0 && runnerExit < 124
+        && (mirror ? runnerExit === 42 && failedMirrorChecks.length > 0
+          && failedMirrorChecks.every(check => check.socketPathFault) : socketPathFault)) {
+        outcome = SOCKET_PATH_HARNESS_FAULT;
+        fallbackReason = outcome;
+        recordSocketPathFault(`${outcome}: local validation reported an overlong Unix socket path; retry with a short writable temp root.`);
+        return;
+      }
       const inspectionUnavailable = mirror && runnerExit === 75
         && readValidationReceipt().checks.some(check => check.localReason === 'process-inspection-unavailable');
       if (inspectionUnavailable) deferValidation('process-inspection-unavailable', runnerExit);
@@ -429,11 +471,14 @@ if (checkRebase) {
       }
     }
   } finally {
-    if (closeReceipt) finishValidationReceipt(runner, runnerExit, fallbackReason);
-    if (process.exitCode === undefined || process.exitCode === 125) {
-      console.error(`hammer-validate: scratch retained for canonical cleanup: ${scratch}`);
-    } else {
-      await rm(scratch, { recursive: true, force: true });
+    if (closeReceipt) finishValidationReceipt(runner, runnerExit, fallbackReason, outcome);
+    if (scratch) {
+      if (process.exitCode === undefined || process.exitCode === 125) {
+        console.error(`hammer-validate: scratch retained for orphan cleanup: ${scratch}`);
+      } else {
+        try { await rm(scratch, { recursive: true, force: true }); }
+        catch (error) { console.error(`hammer-validate: scratch cleanup deferred (${error.code})`); }
+      }
     }
   }
 }

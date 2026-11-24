@@ -7,13 +7,15 @@ import { join } from 'node:path';
 
 const validator = new URL('../bin/hammer-validate.mjs', import.meta.url).pathname;
 
-for (const [reason, status, deferred] of [
+for (const [reason, status, deferred, runnerStatus = status] of [
   ['inspection-and-import-fault', 75, true],
   ['canceled:SIGTERM', 125, false],
   ['canceled:SIGINT', 125, false],
   ['canceled:SIGHUP', 125, false],
   ['absolute-timeout', 125, true],
   ['validation-drain-unconfirmed', 125, true],
+  ['socket-path', 75, false, 42],
+  ['mixed-socket-and-product-failures', 42, false],
 ]) {
   test(`canonical validator preserves ${reason} with runner status ${status}`, t => {
     const root = mkdtempSync(join(tmpdir(), 'ham-validation-deferral-'));
@@ -40,9 +42,15 @@ for (const [reason, status, deferred] of [
             checks: [{ name: 'telegram-responder-guard', status: 'failed',
               result: 'inconclusive', localReason: 'process-inspection-unavailable' }]
           }));
+        } else if (${JSON.stringify(reason)}.includes('socket')) {
+          const checks = [{ name: 'socket', status: 'failed', result: 'fail', socketPathFault: true }];
+          if (${JSON.stringify(reason)}.startsWith('mixed')) {
+            checks.push({ name: 'product', status: 'failed', result: 'fail' });
+          }
+          writeFileSync(process.env.HAM_CLOSE_VALIDATION_RECEIPT, JSON.stringify({ checks }));
         } else options.observeStop(${JSON.stringify(reason)},
           ${reason.startsWith('canceled:') ? 143 : 125});
-        return ${status};
+        return ${runnerStatus};
       }`;
     writeFileSync(loader, `
       import { registerHooks } from 'node:module';
@@ -61,10 +69,21 @@ for (const [reason, status, deferred] of [
         HAM_PR_NUMBER: '42', HQ_LAUNCH_REQUEST_ID: 'lrq_fixture', TMPDIR: root },
     });
     assert.ifError(result.error);
+    const retained = result.stderr.match(/scratch retained for orphan cleanup: (.+)/)?.[1];
+    if (retained) t.after(() => rmSync(retained, { recursive: true, force: true }));
     assert.equal(result.status, status, result.stderr);
     assert.doesNotMatch(result.stderr, /local-battery-skipped-github-required-gate-authoritative/);
     assert.equal(existsSync(join(root, `validation-deferred-${head}.json`)), deferred);
-    assert.equal(JSON.parse(readFileSync(receipt, 'utf8')).status, status);
+    const evidence = JSON.parse(readFileSync(receipt, 'utf8'));
+    assert.equal(evidence.status, status);
+    if (reason === 'socket-path') {
+      assert.equal(evidence.outcome, 'harness-fault:socket-path');
+      assert.equal(evidence.checks[0].result, 'inconclusive');
+    }
+    if (reason.startsWith('mixed')) {
+      assert.equal(evidence.outcome, undefined);
+      assert.ok(evidence.checks.every(check => check.result === 'fail'));
+    }
     assert.equal(result.stderr.includes('canonical-validation-deferred'), deferred);
   });
 }

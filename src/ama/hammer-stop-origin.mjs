@@ -5,6 +5,7 @@
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { writeFileAtomic } from '../atomic-write.mjs';
+import { SOCKET_PATH_HARNESS_FAULT } from '../harness-fault.mjs';
 
 export const HAMMER_INFRASTRUCTURE_OUTCOMES = new Set([
   'overload-deferred',
@@ -26,6 +27,7 @@ export const HAMMER_INFRASTRUCTURE_OUTCOMES = new Set([
   'published-head-probe-invalid',
   'controller-observation-unavailable',
   'canonical-validation-deferred',
+  SOCKET_PATH_HARNESS_FAULT,
   'ci-infrastructure-evidence-unavailable',
   'merge-lease-probe-failed',
   'merge-lease-response-invalid',
@@ -271,6 +273,7 @@ const STOP_CODE = /^[a-z][a-z0-9-]*$/;
 
 /** The registered origin, or null for an unregistered or malformed reason. No side effects. */
 export function registeredHammerStopOrigin(reason) {
+  if (reason === SOCKET_PATH_HARNESS_FAULT) return HAMMER_STOP_ORIGINS[reason];
   const [code, diagnostic] = String(reason || '').split(':');
   if (code === 'history-read-failed' && diagnostic === 'permanent') return 'world';
   if (code === 'review-evidence-invalid'

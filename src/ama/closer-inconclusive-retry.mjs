@@ -21,7 +21,7 @@ import { join } from 'node:path';
 import { writeFileAtomic } from '../atomic-write.mjs';
 import { REVIEW_SERVICE_REVISION } from '../review-service-revision.mjs';
 import { registeredHammerStopOrigin } from './hammer-stop-origin.mjs';
-import { isHarnessFault } from '../harness-fault.mjs';
+import { isHarnessFault, SOCKET_PATH_HARNESS_FAULT } from '../harness-fault.mjs';
 
 export const CLOSER_INCONCLUSIVE_RETRY_OWNER = 'watcher';
 export const CLOSER_INCONCLUSIVE_WAIT_CLASS = 'closer-inconclusive';
@@ -60,7 +60,8 @@ const MAX_HEADS = 8;
 const MAX_LAUNCHES = 32;
 
 function code(value) {
-  return String(value ?? '').trim().split(':')[0].toLowerCase().replace(/_/g, '-');
+  const text = String(value ?? '').trim().toLowerCase().replace(/_/g, '-');
+  return text === SOCKET_PATH_HARNESS_FAULT ? text : text.split(':')[0];
 }
 
 /**

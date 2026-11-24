@@ -133,6 +133,11 @@ test('the installed handoff receiver accepts larger inventory files within its b
   assert.equal(receive().reason, 'queue-handoff-request-unreadable');
 });
 
+test('the installed handoff receiver reports invalid argument counts', () => {
+  const result = JSON.parse(execFileSync(process.execPath, ['bin/finalization-queue-handoff.mjs'], { encoding: 'utf8' }));
+  assert.deepEqual(result, { ok: false, reason: 'queue-handoff-arguments-invalid' });
+});
+
 test('a drain committed during admission prevents the durable acknowledgement', async t => {
   const f = gitFixture(t, { noop: true });
   const generation = await transfer(f);
@@ -266,6 +271,11 @@ test('lifting an expired hold permits fresh clean admission and a single merge',
   held = false;
   const fresh = await production.admitClean(input);
   assert.equal(fresh.admissionGeneration, 2);
+  // Durable admission generation, rather than physical row order, determines preflight custody.
+  f.store.db.prepare(`UPDATE finalization_queue_entry SET rowid =
+    (SELECT MAX(rowid) + 1 FROM finalization_queue_entry) WHERE entry_id = ?`).run(original.entryId);
+  assert.equal(readCompletedQueueHandoff(f.store, { lane, prNumber: 102, head: f.oldHead },
+    { includeClean: true })?.entry.entryId, fresh.entryId);
   await consumer.tick();
   await consumer.tick();
   assert.equal(f.store.readEntry(fresh.entryId).phase, 'merged');
@@ -472,6 +482,12 @@ test('same-name checks satisfy distinct App pins with each App’s latest run', 
   assert.equal(classifyQueueChecks(snapshot).kind, 'red');
   snapshot.results.push(check(8, 'SUCCESS', '2026-11-23T00:01:00Z'));
   assert.equal(classifyQueueChecks(snapshot).kind, 'green');
+  snapshot.results.push(check(8, 'FAILURE', '2026-11-23T00:02:00Z'), check(7, 'SUCCESS', '2026-11-23T00:04:00Z'));
+  assert.equal(classifyQueueChecks(snapshot).kind, 'red');
+  snapshot.results.push({ ...check(8, null, '2026-11-23T00:03:00Z'), status: 'IN_PROGRESS' });
+  assert.equal(classifyQueueChecks(snapshot).reason, 'checks-pending');
+  snapshot.results.push(check(8, 'SUCCESS', '2026-11-23T00:05:00Z'));
+  assert.equal(classifyQueueChecks(snapshot).kind, 'green');
 });
 
 test('entitled credentials retain a valid token on transient refresh failure and never fall back to ambient auth', async () => {
@@ -507,6 +523,20 @@ test('production evidence refuses subject movement and missing signed source rec
   await assert.rejects(observe({ lane, head, prNumber: 102, cfg, deadline: handoffTime(10) }), /queue-admission-subject-ineligible/);
   liveHead = head;
   await assert.rejects(observe({ lane, head, prNumber: 102, cfg, deadline: handoffTime(10) }), /queue-source-review-attestation-unavailable/);
+});
+
+test('production admission accepts string labels and still refuses operator holds', async () => {
+  const head = 'b'.repeat(40);
+  const subject = { state: 'open', head, labels: ['reviewed', { name: 'ready' }] };
+  const observe = createQueueProductionEvidence({ hqRoot: '/fixture', rootDir: '/fixture',
+    live: { snapshot: () => ({ subject, pr: { draft: false } }), reviews: () => ({ applicable: [] }) },
+    readChain: () => [], now: () => handoffTime(0) });
+  const args = { lane, head, prNumber: 102, cfg, deadline: handoffTime(10) };
+  await assert.rejects(observe(args), /queue-admission-review-unavailable/);
+  subject.labels.push('no-merge-hold');
+  await assert.rejects(observe(args), /queue-admission-subject-ineligible/);
+  subject.labels = [''];
+  await assert.rejects(observe(args), /queue-admission-subject-ineligible/);
 });
 
 for (const remediated of [false, true]) {
@@ -573,6 +603,17 @@ for (const remediated of [false, true]) {
       const persisted = resolveQueueHandoffStore(f.store).read(parameters.request);
       assert.equal(persisted.ack.entryId, ack.entryId);
       assert.equal(validateQueueHandoff(persisted.handoff, persisted.evidence), true);
+
+      Object.assign(findings[0], { file: 'src/example.mjs', lines: '1' });
+      findings.push({ ...findings[0], findingId: 'second-blocker', lines: '2' });
+      rows[0].findings_count = findings.length;
+      await assert.rejects(observe(parameters), /queue-exact-finding-fix-unavailable/);
+      comment = { ...comment, body: `${comment.body}\n- **Blocking bug** (blocking) — also fixed src/example.mjs` };
+      parameters.request = fixtureRequest(head, 1, { closer, auditBody: comment.body });
+      const duplicate = await observe(parameters);
+      assert.equal(validateQueueHandoff(duplicate.input, duplicate.evidence), true);
+      assert.deepEqual(duplicate.input.dispositions.map(d => [d.findingId, d.resolution]),
+        [['blocker', 'fixed'], ['advisory', 'deferred'], ['second-blocker', 'fixed']]);
     }
   });
 }

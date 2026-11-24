@@ -30,6 +30,8 @@ try {
   process.stdout.write(`${JSON.stringify(acknowledgement)}\n`);
 } catch (error) {
   // Child errors may carry raw remote output or subprocess environment data.
-  const reason = /^queue-[a-z-]+$/.test(error.message) ? error.message : 'queue-handoff-evidence-unavailable';
+  const code = error.message === 'one queue handoff request file required'
+    ? 'queue-handoff-arguments-invalid' : error.message;
+  const reason = /^queue-[a-z-]+$/.test(code) ? code : 'queue-handoff-evidence-unavailable';
   process.stdout.write(`${JSON.stringify({ ok: false, reason })}\n`);
 }

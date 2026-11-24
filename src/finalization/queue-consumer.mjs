@@ -111,6 +111,7 @@ export function createQueueConsumer({ rootDir, compose, readConfig = loadEffecti
               }
           }
           if (result?.phase === 'returned-to-closer') await adapters.returnSubject?.(result);
+          if (result?.phase === 'returned-to-closer') break;
           // Wait for the next wake when a phase has no new action. A final
           // reread that sends us back to checks also yields to the next tick.
           if (!result || result.phase === entry.phase || (entry.phase === 'finalizing' && result.phase === 'waiting-checks')

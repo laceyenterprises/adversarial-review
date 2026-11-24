@@ -48,12 +48,19 @@ export function classifyQueueChecks(snapshot) {
   const reported = new Set(results.map(contextName));
   const missing = new Set(snapshot.requiredSet.contexts.filter(name => !reported.has(name)));
   // Classic protection and active rulesets can each require a different App.
+  const pinConclusions = [];
   for (const { context, appId } of pins) {
-    if (!results.some(item => contextName(item) === context && item.app?.id === appId)) missing.add(context);
+    const appResults = results.filter(item => contextName(item) === context && item.app?.id === appId);
+    if (!appResults.length) missing.add(context);
+    pinConclusions.push(classifyCheckRollup(appResults, { requiredContexts: [context] }));
   }
-  const conclusion = classifyCheckRollup(results, { requiredContexts: snapshot.requiredSet.contexts });
-  if (red.has(conclusion)) return { kind: 'red', reason: 'checks-completed-red', conclusion };
+  const rollupConclusion = classifyCheckRollup(results, { requiredContexts: snapshot.requiredSet.contexts });
+  const conclusions = [rollupConclusion, ...pinConclusions];
+  const failure = conclusions.find(state => red.has(state));
+  if (failure) return { kind: 'red', reason: 'checks-completed-red', conclusion: failure };
   if (missing.size) return { kind: 'wait', reason: 'missing-required-check:' + [...missing].join(','), conclusion: 'PENDING' };
+  const conclusion = conclusions.find(state => state !== 'SUCCESS' && state !== 'PENDING')
+    ?? (conclusions.includes('PENDING') ? 'PENDING' : rollupConclusion);
   if (conclusion === 'SUCCESS') return { kind: 'green', reason: 'exact-candidate-checks-green', conclusion };
   if (!snapshot.results.length && !snapshot.requiredSet.contexts.length && snapshot.noCi?.ok === true
     && snapshot.noCi.configured === true && same(snapshot.noCi.head, snapshot.head) && text(snapshot.noCi.sourceRef)) {

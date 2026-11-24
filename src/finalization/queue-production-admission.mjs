@@ -42,7 +42,7 @@ export function validateHammerQueueRequest(request) {
 function requireOpen(context, head) {
   const { subject, pr } = context;
   if (subject.state !== 'open' || subject.head !== head || pr.draft !== false
-    || !Array.isArray(subject.labels) || subject.labels.some(label => !text(label?.name))
+    || !Array.isArray(subject.labels) || subject.labels.some(label => !text(typeof label === 'string' ? label : label?.name))
     || isOperatorHeld(subject.labels)) throw new Error('queue-admission-subject-ineligible');
 }
 
@@ -122,7 +122,12 @@ async function findingDispositions({ rootDir, observed, inventory, audit, commen
         sourceLocations: location.ranges.map(range => ({ path: location.path, line: range.start })), evidence };
     }
     const matches = reported.filter(item => item.title === finding.title && item.blocking === (severity === 'blocking') && item.file);
-    const file = matches.length === 1 && comparison.files.find(file => file.filename === matches[0].file);
+    const repeated = inventory.some(other => other !== finding && other.title === finding.title && other.severity === severity);
+    const match = matches.find(item => item.file === location?.path)
+      ?? (!repeated && matches.length === 1 ? matches[0] : null);
+    const file = match && comparison.files.find(file => file.filename === match.file);
+    // Each addressed occurrence requires its own audit bullet.
+    if (file && text(file.patch)) reported.splice(reported.indexOf(match), 1);
     if (!file || !text(file.patch)) {
       if (severity === 'non-blocking' && !strictNonBlockingRemediation) {
         return { ...disposition, resolution: 'deferred', sourceRef: auditRef };

@@ -2581,6 +2581,9 @@ without a remote read. Same-head readmission needs fresh evidence and a new
 generation. A Hammer readmission also needs a fresh launch. Checks and merge
 infrastructure parks with a stored probe schedule continue on that schedule.
 
+Closer preflight uses the latest generation for each admission head. A returned
+generation cannot mask a newer acknowledged admission for that same head.
+
 If a queue tick ends with an unresolved push or merge intent, the watcher parks
 its active owner fence so the next claimant can start reconciliation before
 expiry. The same running watcher can retry authoritative readback for its

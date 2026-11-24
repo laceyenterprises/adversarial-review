@@ -17,8 +17,16 @@ import { parseHammerQueueHandoffCommand } from './hammer-queue-command.mjs';
 export function readCompletedQueueHandoff(store, { lane, prNumber, head }, { includeClean = false } = {}) {
   const receipts = resolveQueueHandoffStore(store);
   const admissions = resolveQueueAdmissionAdapters(store);
-  const rows = store.db.prepare(`SELECT payload_json FROM finalization_queue_entry
-    WHERE repository=? AND base=? AND pr_number=? ORDER BY rowid DESC`).all(lane.repository, lane.base, prNumber);
+  // Generations are scoped to the admission head. Retain row order across
+  // different heads, where an entry may match by its published candidate.
+  const rows = store.db.prepare(`SELECT entry.payload_json FROM finalization_queue_entry AS entry
+    WHERE entry.repository=? AND entry.base=? AND entry.pr_number=?
+      AND NOT EXISTS (
+        SELECT 1 FROM finalization_queue_entry AS newer
+        WHERE newer.repository=entry.repository AND newer.base=entry.base AND newer.pr_number=entry.pr_number
+          AND newer.admission_head=entry.admission_head AND newer.admission_generation>entry.admission_generation
+      )
+    ORDER BY entry.rowid DESC`).all(lane.repository, lane.base, prNumber);
   for (const row of rows) {
     const entry = JSON.parse(row.payload_json);
     if (entry.head !== head && entry.candidate !== head) continue;

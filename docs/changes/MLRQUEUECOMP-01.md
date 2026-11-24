@@ -57,7 +57,19 @@ match it. Later verification still recomputes the proof. Full ledger replay
 folds into a fresh projection directly, while replay from a supplied snapshot
 still clones that snapshot.
 
+The closing repair uses the shared check classifier on each required App's
+latest runs. Closer preflight reads the latest admission generation for each
+head. A returned entry stops processing after its handoff callback, and the
+handoff receiver reports invalid argument counts explicitly. Admission
+consumes one audit bullet per finding occurrence and accepts string and
+object labels while still enforcing operator holds.
+
 ### Verification
+
+The closing repair passed 204 targeted tests across eight files through
+`hammer-validate.mjs --canonical`. `npm run lint` reported zero errors.
+`npm run typecheck:contracts` and `bash demo/research-finding-walkthrough.sh`
+passed. `node scripts/validate-data-model-catalog.mjs` validated 103 entries.
 
 Synthetic fixtures use disposable Git repositories and SQLite stores with
 injected GitHub, broker, signature and delivery evidence. The runtime owner

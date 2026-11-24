@@ -338,6 +338,7 @@ for (const scenario of ['first review', 'repair custody', 'legacy rescue intent'
       const loader = buildLoaderSource({
         subjectHeads: { 101: head },
         subject101Overrides: { baseRefName: 'main', baseSha: 'a'.repeat(40) },
+        omitFetchedRefFor101: repairOwned,
       });
       writeFileSync(loaderPath, loader.replace('  return nextLoad(url, context);', `
         if (url === ${JSON.stringify(docsUrl)}) {
@@ -359,12 +360,20 @@ for (const scenario of ['first review', 'repair custody', 'legacy rescue intent'
             requestId: 'rescue:fixture:${head}', actor: 'merge-agent-rescue',
             requestedAt: new Date().toISOString() });
         ` : '',
+        postSeedSetup: repairOwned ? `
+          const repo = ${JSON.stringify(identity.repo)};
+          insert.run(repo, 103, '2026-05-15T12:00:00.000Z', 'claude', 'closed', 'pending', 0);
+          const stamp = db.prepare('UPDATE reviewed_prs SET rereview_requested_at = ? WHERE pr_number = ?');
+          stamp.run('2026-05-15T12:01:00.000Z', 102);
+          stamp.run('2026-05-15T12:00:00.000Z', 103);
+        ` : '',
         afterFirstPoll: `
           const row = db.prepare('SELECT * FROM reviewed_prs WHERE pr_number=101').get();
           assert.ok(row, 'discovery must persist a review row');
           if (${repairOwned}) {
             assert.equal(row.review_status, 'pending');
             assert.equal(row.review_attempts, 0);
+            assert.equal(row.subject_external_id, ${JSON.stringify(`${identity.repo}#101`)});
             assert.match(row.failure_message, /repair-reservation-owns-pr.*fixture-epoch/);
             assert.ok(!claims.some(claim => claim.prNumber === 101));
             await pollOnce(octokit, pollOptions);
@@ -385,10 +394,10 @@ for (const scenario of ['first review', 'repair custody', 'legacy rescue intent'
             const ctx = { repoPath, domainId: 'code-pr', currentRepoPRs: [],
               operatorSurface: { extractLinearTicketId: () => null } };
             const subject = { headSha: '${head}', isDraft: true };
-            const subjectRef = { subjectExternalId: repoPath + '#103', revisionRef: '${head}' };
-            await processReviewSubject({ prNumber: 103, subject, subjectRef }, ctx);
-            await processReviewSubject({ prNumber: 104, subject }, ctx);
-            const waits = db.prepare('SELECT subject_external_id, revision_ref, failure_message FROM reviewed_prs WHERE pr_number IN (103,104) ORDER BY pr_number').all();
+            const subjectRef = { subjectExternalId: repoPath + '#104', revisionRef: '${head}' };
+            await processReviewSubject({ prNumber: 104, subject, subjectRef }, ctx);
+            await processReviewSubject({ prNumber: 105, subject }, ctx);
+            const waits = db.prepare('SELECT subject_external_id, revision_ref, failure_message FROM reviewed_prs WHERE pr_number IN (104,105) ORDER BY pr_number').all();
             assert.deepEqual(waits, [subjectRef.subjectExternalId, null].map(subject_external_id => ({
               subject_external_id, revision_ref: '${head}', failure_message: '[draft] owner=pr-author',
             })));
@@ -407,8 +416,12 @@ fi
         { cwd: REPO_ROOT, encoding: 'utf8', env: fixtureEnv({ ...env, WATCHER_CLAIM_LOOP_FIXTURE_HEAD_101: head }), timeout: 60000 });
       assert.equal(result.status, 0, `${result.stdout || ''}${result.stderr || ''}`);
       assert.match(result.stdout, /PR 101: not-eligible gates=ci-not-green/);
-      if (repairOwned) assert.equal(
-        [...result.stdout.matchAll(/review discovery wait for .*#101:.*repair-reservation-owns-pr.*fixture-epoch/g)].length, 1);
+      if (repairOwned) {
+        assert.match(result.stdout, /discovery-first ordering.*\(#101\) promoted/);
+        assert.match(result.stdout, /re-review FIFO ordering.*\(#103,#102\)/);
+        assert.equal(
+          [...result.stdout.matchAll(/review discovery wait for .*#101:.*repair-reservation-owns-pr.*fixture-epoch/g)].length, 1);
+      }
     } finally {
       rmSync(hammerRetryCapFilePath(REPO_ROOT, identity), { force: true });
       rmSync(tmp, { recursive: true, force: true });
@@ -431,6 +444,7 @@ function buildLoaderSource({
   subjectHeads = {},
   subject101Overrides = {},
   subjectRevisionRefs = {},
+  omitFetchedRefFor101 = false,
   followUpJobsSource = DEFAULT_FOLLOW_UP_JOBS_SOURCE,
   tokenLedgerLookupSource = 'export async function readReviewerEvidenceInWorker() { return null; }',
   reviewerRuntimeSource = "globalThis.__watcherClaimLoopReviewerSpawns = []; export function createReviewerRuntimeAdapterForDomain() { return { spawnReviewer: async (payload) => { globalThis.__watcherClaimLoopReviewerSpawns.push(payload); return { ok: true, stdout: '', stderr: '' }; }, cancel: async () => {}, reattach: async () => ({}) }; } export function createReviewerRuntimeAdapterByName() { return createReviewerRuntimeAdapterForDomain(); } export function loadDomainConfig() { return {}; } export async function recoverReviewerRunRecords() { return { recovered: 0, failed: 0 }; }",
@@ -664,6 +678,9 @@ export async function load(url, context, nextLoad) {
                   terminal: true,
                   observedAt: '2026-05-15T12:00:05.000Z',
                 };
+              }
+              if (${omitFetchedRefFor101} && ref.subjectExternalId.endsWith('#101')) {
+                return { ...subject, ref: undefined };
               }
               const nextHead = globalThis.__watcherClaimLoopSubjectHead;
               return nextHead && ref.subjectExternalId.endsWith('#101')

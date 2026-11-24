@@ -930,8 +930,7 @@ async function attemptDaemonCleanMergeInner({
       // made only of transient reads exhausts as `gate-read-failed`; any miss
       // carrying one stays NON-permanent so the next tick retries instead of
       // Gate 3 refusing the head forever on a half-read gate.
-      const docsRefusal = docsFastPath && live.candidateHead === validatedHead
-        ? docsGateRefusal(live, elig.reasons) : null;
+      const docsRefusal = docsFastPath ? docsGateRefusal(live, elig.reasons) : null;
       const isTransientRead = reason => TRANSIENT_GATE_READ_REASONS.has(reason)
         || (reason === 'ci-not-green' && docsRefusal?.checksUnsettled);
       const transientReadOnly = elig.reasons.length > 0 && elig.reasons.every(isTransientRead);

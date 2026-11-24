@@ -1443,8 +1443,12 @@ async function pollOnceWithinBudget(
     });
     let subjectEntries = (await Promise.all(subjectRefs.map(async (subjectRef) => {
       try {
-        const subject = await subjectAdapter.fetchState(subjectRef);
+        const fetched = await subjectAdapter.fetchState(subjectRef);
         watcherHeartbeat?.markPollProgress?.();
+        const subject = fetched.ref ? fetched : {
+          ...fetched,
+          ref: { ...subjectRef, revisionRef: fetched.headSha ?? subjectRef.revisionRef },
+        };
         const { prNumber } = parseSubjectExternalId(subject.ref.subjectExternalId);
         return { subjectRef, subject, prNumber };
       } catch (err) {
@@ -1459,7 +1463,8 @@ async function pollOnceWithinBudget(
     subjectEntries = subjectEntries
       .map((entry) => ({
         ...entry,
-        current: stmtGetReviewRow.get(repoPath, entry.prNumber), hasPriorPostedReview: Boolean(stmtHasPostedReview.get(repoPath, entry.prNumber)),
+        current: stmtGetReviewRow.get(repoPath, entry.prNumber),
+        hasPriorPostedReview: Boolean(stmtHasPostedReview.get(repoPath, entry.prNumber)),
       }))
       .sort((a, b) =>
         compareWatcherWakeSubjectEntries(wakePayloadForPoll(), repoPath, a, b, compareReviewerDispatchCandidates)

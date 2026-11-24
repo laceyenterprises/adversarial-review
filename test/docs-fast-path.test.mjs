@@ -260,10 +260,10 @@ test('DOCSFASTPATH-01 prior waiver is withdrawn before admission hands an explic
 
 test('REVIEWROWLESS-01 settled refusal hands the head to review while routing waits', async () => {
   const receipts = new Map(), states = [];
-  let currentEvidence = evidence, daemonCalls = 0;
+  let currentEvidence = evidence, daemonCalls = 0, classificationReads = 0;
   const args = { rootDir: '/unused', subject: { headSha: head, labels: [] }, repoPath: 'example/docs', prNumber: 6,
     cfg: { enabled: true }, logger: quiet,
-    readDocsFastPathImpl: async () => currentEvidence,
+    readDocsFastPathImpl: async () => { classificationReads++; return currentEvidence; },
     readGateRecordImpl: (_root, { headSha }) => receipts.get(headSha),
     publishStatusImpl: async (_root, { headSha, decision }) => {
       states.push(decision.state);
@@ -276,10 +276,14 @@ test('REVIEWROWLESS-01 settled refusal hands the head to review while routing wa
   assert.equal(await maybeRunDocsFastPath(args), null);
   const reviewRow = { reviewer: '', revision_ref: head, failure_message: '[reviewer-capacity] owner=watcher' };
   assert.equal(await maybeRunDocsFastPath({ ...args, reviewRow }), null);
+  assert.equal(await maybeRunDocsFastPath({ ...args, reviewRow,
+    subject: { ...args.subject, labels: ['request-review'] } }), null);
+  assert.equal(receipts.get(head).reason, 'docs-fast-path-not-eligible');
+  assert.equal(classificationReads, 1);
   assert.deepEqual(states, ['success', 'pending']);
   assert.equal(daemonCalls, 1);
   currentEvidence = { ...evidence, headSha: 'f'.repeat(40) };
-  assert.equal(await maybeRunDocsFastPath({ ...args, reviewRow, subject: {
+  assert.equal(await maybeRunDocsFastPath({ ...args, reviewRow: { ...reviewRow, revision_ref: currentEvidence.headSha }, subject: {
     ...args.subject, headSha: currentEvidence.headSha,
   } }), 'docs-merge-deferred');
   assert.deepEqual(states, ['success', 'pending', 'success']);

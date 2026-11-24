@@ -759,7 +759,7 @@ export async function processReviewSubject(entry, ctx) {
 
 async function runReviewSubjectPhases(entry, ctx) {
   let { subject } = entry;
-  const { prNumber, current: cachedCurrent } = entry;
+  const { prNumber } = entry;
   const {
     octokit,
     operatorSurface,
@@ -848,7 +848,8 @@ async function runReviewSubjectPhases(entry, ctx) {
       if (prLabelNames.includes(MERGE_AGENT_DISPATCHED_LABEL)) {
         activeMergeAgentPRs.push({ repo: repoPath, prNumber, headSha: subject.headSha || null });
       }
-      let existing = cachedCurrent ?? stmtGetReviewRow.get(repoPath, prNumber);
+      // The discovery census also caches misses for the ordering passes.
+      let existing = Object.hasOwn(entry, 'current') ? entry.current : stmtGetReviewRow.get(repoPath, prNumber);
       // ARC-03 review finding: review rows are keyed (repo, pr) but carry a
       // domain identity. Only the owning domain may process a row — without
       // this guard, a second github-pr domain would drive another domain's

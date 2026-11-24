@@ -14,6 +14,10 @@ export async function maybeRunDocsFastPath({ subject, reviewRow, cfg, loadCfg = 
   fetchProtectionImpl = readProtection,
   runDaemonImpl = runDaemonCleanMergeAttempt } = {}) {
   if (subject.terminal || subject.isDraft) return null;
+  const waiverWithdrawn = headSha => {
+    const gate = rootDir && headSha && readGateRecordImpl(rootDir, { repo: repoPath, prNumber, headSha });
+    return gate?.state === 'pending' && gate.reason === DOCS_WITHDRAWAL_REASON;
+  };
   const withdrawWaiver = async (headSha, reason = 'docs-review-requested') => {
     try {
       await publishStatusImpl(rootDir, { repo: repoPath, prNumber, headSha,
@@ -24,9 +28,14 @@ export async function maybeRunDocsFastPath({ subject, reviewRow, cfg, loadCfg = 
       return 'docs-waiver-withdrawal-unavailable';
     }
   };
-  if (docsReviewRequested({ ...subject, ...reviewRow })) return withdrawWaiver(subject.headSha);
+  if (docsReviewRequested({ ...subject, ...reviewRow })) {
+    return waiverWithdrawn(subject.headSha) ? null : withdrawWaiver(subject.headSha);
+  }
   if (reviewRow?.reviewer && (reviewRow.revision_ref === subject.headSha
     || reviewRow.reviewer_head_sha === subject.headSha)) return null;
+  // A same-head unrouted wait still belongs to ordinary review after withdrawal.
+  if (reviewRow?.reviewer === '' && reviewRow.revision_ref === subject.headSha
+    && waiverWithdrawn(subject.headSha)) return null;
   let evidence = null;
   const read = async args => {
     const current = await readDocsFastPathImpl({ repoPath, prNumber, execFileImpl, ...args });
@@ -40,11 +49,10 @@ export async function maybeRunDocsFastPath({ subject, reviewRow, cfg, loadCfg = 
     logger.warn?.(`[docs-fast-path] classification unavailable: ${error.message}`);
     return null;
   }
-  if (evidence?.reviewRequested) return withdrawWaiver(evidence.headSha || subject.headSha);
   if (!evidence) return null;
-  const gate = rootDir && readGateRecordImpl(rootDir, { repo: repoPath, prNumber, headSha: evidence.headSha });
-  // A recorded withdrawal hands this head to ordinary review even if routing must wait.
-  if (gate?.state === 'pending' && gate.reason === DOCS_WITHDRAWAL_REASON) return null;
+  const evidenceHead = evidence.headSha || subject.headSha;
+  if (waiverWithdrawn(evidenceHead)) return null;
+  if (evidence.reviewRequested) return withdrawWaiver(evidenceHead);
   // An eligible docs head owns its wait, including disabled authority and unsettled CI.
   // Neither a reviewer nor a closer is useful while these deterministic gates wait.
   try {

@@ -67,7 +67,10 @@ async function readPublicationEvidence(reader, args, { numberedPr = false } = {}
     }
     // The GitHub CLI transport already backs off on transient errors. If its
     // budget is exhausted, keep custody for the next collection pass.
-    throw new PublicationReadError(detail, { cause: error });
+    if (isTransientGhError(error) || error?.timedOut || error?.killed || error?.signal) {
+      throw new PublicationReadError(detail, { cause: error });
+    }
+    throw error;
   }
 }
 
@@ -440,7 +443,7 @@ async function fetchFindingBatchPublication(repo, branch, { execFileImpl, env, l
   const run = async args => JSON.parse((await execGhWithRetry({ execFileImpl, env, log: logger,
     args, timeoutMs: 15_000 })).stdout);
   const prs = await run(['pr', 'list', '--repo', repo, '--head', branch, '--state', 'all', '--limit', '100',
-    '--json', 'body,headRefName,isCrossRepository']);
+    '--json', 'number,headRefOid,body,headRefName,isCrossRepository']);
   // A deleted branch is normal after merge; PR recovery must precede ref lookup.
   if (prs.length) return { prs };
   const refPath = branch.split('/').map(encodeURIComponent).join('/');
@@ -555,11 +558,15 @@ async function publishFindingBatch({ db, batch, result, dir, outputPath, env, ro
       const [pr] = publication.prs;
       if (publication.prs.length !== 1 || pr?.headRefName !== branch
         || pr.isCrossRepository !== false
-        || !hasBatchMarker(pr.body, batch.batch_id)) throw Error('batch-pr-evidence-mismatch');
-      // The branch lookup fences duplicate publication. Only the publisher's
-      // outcomes file can identify the PR used for settlement.
+        || !hasBatchMarker(pr.body, batch.batch_id)
+        || !Number.isSafeInteger(pr.number) || pr.number < 1
+        || !/^[a-f0-9]{40}$/i.test(pr.headRefOid || '')) throw Error('batch-pr-evidence-mismatch');
+      // Recover a publisher that created its PR but exited before updating the
+      // artifact. Keep all decisions intact and use the ordinary numbered read.
+      const recovered = { ...result, prNumber: pr.number, headSha: pr.headRefOid };
+      writeFileAtomic(outputPath, JSON.stringify(recovered), { mode: 0o664 });
       clearFindingBatchError(db, batch);
-      return;
+      return recovered;
     }
     if (publication.headSha !== result.headSha) throw Error('batch-push-evidence-mismatch');
     // A failed publisher retains its fence too. Recovery repairs that launch;
@@ -857,20 +864,25 @@ export async function runFindingBatches({ db, rootDir, env = process.env, day = 
         hasOutcomes = true;
       } catch (error) { if (error.code !== 'ENOENT') throw error; }
       if (hasOutcomes) {
-        // Historical imports can have artifacts without a launch receipt.
-        // A dispatched worker's file is consumed only after terminal status.
+        // Published outcomes already passed preparation. Avoid probing the
+        // ended worker on every tick while its PR waits for attachment/merge.
         const probeTimeoutMs = dispatchProbeTimeoutMs();
-        const preparation = batch.launch_id
+        let result, readError;
+        try { result = await readBatchOutcomes(outputPath); }
+        catch (error) { readError = error; }
+        // Historical imports can have artifacts without a launch receipt.
+        const preparation = batch.launch_id && result?.prNumber == null
           ? await readFindingBatchPreparation(batch, { execFileImpl, env, timeoutMs: probeTimeoutMs }) : null;
         if (preparation && !preparation.terminal) return;
-        const result = await readBatchOutcomes(outputPath);
+        if (readError) throw readError;
         // Applied claims that fail validation are re-verified, never published.
         const { applied } = validateBatchOutcomes(db, batch, result);
         if (applied && result.prNumber == null) {
-          await publishFindingBatch({ db, batch, result, dir, outputPath, env, rootDir,
+          const recovered = await publishFindingBatch({ db, batch, result, dir, outputPath, env, rootDir,
             preparation, probeTimeoutMs, execFileImpl, fetchPublication, readLaunches, logger,
             now: publicationNow, publishReceiptGraceMs });
-          return;
+          if (!recovered) return;
+          result = recovered;
         }
         let pr = null;
         if (applied) {

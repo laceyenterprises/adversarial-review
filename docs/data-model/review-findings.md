@@ -523,7 +523,8 @@ settles a finding. An all-dropped/declined batch completes from this artifact
 without GitHub, a push, or a publication launch. Preparation and publication
 write complete JSON to a temporary file in the same directory and rename it to
 `outcomes.json` with mode `0664`. The collector reads a dispatched batch's
-artifact after observing terminal preparation. It retries JSON parse failures
+provisional artifact after observing terminal preparation. Published outcomes with
+an existing PR number skip further preparation status probes. It retries JSON parse failures
 after 50, 100 and 200 ms before recording `batch-outcome-invalid-json`.
 
 For provisional applied findings or advice, the collector validates complete
@@ -547,11 +548,19 @@ at all; the remote tested head is the push evidence. Failed or unknown terminal
 preparation still refuses publication. It looks for PRs on that branch across all states before inspecting the
 remote ref, preserving branch slashes and percent-encoding each path segment.
 The same-repository PR with the exact marker prevents a duplicate publisher,
-even after its branch is deleted. Settlement waits for the publisher to record
-`prNumber` in `outcomes.json`, then looks up that number in the batch repository.
+even after its branch is deleted. If a publisher exited before updating the
+artifact, the collector atomically recovers only `prNumber` and `headSha` from
+the single validated branch PR, preserving every decision and reason. Recovery
+requires a positive PR number and valid head SHA as well as the branch,
+same-repository and exact-marker checks. It then uses the ordinary numbered PR
+lookup in the batch repository for settlement; no live publisher is required.
 An unmerged close stays unresolved. Foreign, unmarked, or ambiguous branch PR
 evidence retains the batch fence. Exhausted GitHub read retries keep the batch
-pending for the next collection pass without recording a terminal error.
+pending for the next collection pass without recording a terminal error only
+for transient transport, timeout or signal failures. Permanent authentication,
+permission, repository and malformed-response errors remain visible in the batch
+error and enter the existing timeout/terminal-custody release path. They do not
+charge the invalid-dispatch-receipt counter; release charges finding attempts.
 
 With no existing PR, a matching remote branch SHA permits one follow-up
 `--completion-shape pr --branch <existing-branch>` launch. If preparation ended

@@ -520,7 +520,7 @@ test('FINDINGSBATCH-01 default PR reader collects merged evidence through gh and
   }
   response = Error('permission denied');
   await runFindingBatches(options);
-  assert.equal(db.prepare('SELECT error FROM finding_batches').get().error, null);
+  assert.equal(db.prepare('SELECT error FROM finding_batches').get().error, 'permission denied');
   assert.equal(db.prepare('SELECT outcome FROM finding_backlog').get().outcome, null);
   for (const marker of [`  Finding-Batch: ${batch.batch_id}  `,
     `**Finding-Batch: ${batch.batch_id}**`, ` <!-- Finding-Batch: ${batch.batch_id} --> `]) {
@@ -733,11 +733,9 @@ test('a terminal preparation with a partially written artifact settles after the
   f.result.findings[0] = { ...f.result.findings[0], outcome: 'dropped', reason: 'not-reproducible: Checked current main' };
   f.result.headSha = null;
   writeFileSync(f.outputPath, '{"batchId":');
-  await f.run({ fetchPr: () => assert.fail('no GitHub lookup for a drop'), execFileImpl: async (...args) => {
-    const finish = setTimeout(() => writeFileSync(f.outputPath, JSON.stringify(f.result)), 25);
-    t.after(() => clearTimeout(finish));
-    return f.options.execFileImpl(...args);
-  } });
+  const finish = setTimeout(() => writeFileSync(f.outputPath, JSON.stringify(f.result)), 25);
+  t.after(() => clearTimeout(finish));
+  await f.run({ fetchPr: () => assert.fail('no GitHub lookup for a drop') });
   const row = f.db.prepare('SELECT completed_at,error FROM finding_batches').get();
   assert.equal(row.error, null);
   assert.ok(row.completed_at);
@@ -761,7 +759,7 @@ test('a drop citation from another repository never becomes a batch PR lookup', 
   assert.ok(row.completed_at);
 });
 
-test('outcomes are never parsed while preparation is live and invalid JSON after exit has a typed error', async t => {
+test('invalid JSON is not reported while preparation is live and after exit has a typed error', async t => {
   const f = await publicationFixture(t);
   Object.assign(f.status, { status: 'running', terminal: false, succeeded: false });
   writeFileSync(f.outputPath, '{"batchId":');
@@ -800,6 +798,62 @@ test('GitHub failure after retries keeps aged work pending for the next pass', a
   assert.deepEqual(get(), { completed_at: null, released_at: null, error: null });
   await f.run({ now: now + 3600000, fetchPr: async () => ({ ...f.pr, state: 'MERGED' }) });
   assert.ok(get().completed_at);
+});
+
+test('published outcomes skip preparation probes across collection ticks', async t => {
+  const f = await publicationFixture(t);
+  writeFileSync(f.outputPath, JSON.stringify({ ...f.result, prNumber: f.pr.number }));
+  const options = { execFileImpl: () => assert.fail('published outcomes need no preparation command'),
+    fetchPr: async () => f.pr };
+  await f.run(options);
+  await f.run(options);
+  assert.equal(f.db.prepare('SELECT completed_at,error FROM finding_batches').get().error, null);
+  await f.run({ ...options, fetchPr: async () => ({ ...f.pr, state: 'MERGED' }) });
+  assert.ok(f.db.prepare('SELECT completed_at FROM finding_batches').get().completed_at);
+});
+
+test('marked branch PR recovery survives a lost artifact rewrite without a live publisher', async t => {
+  for (const publisher of ['absent', 'failed']) await t.test(publisher, async t => {
+    const f = await publicationFixture(t);
+    if (publisher === 'failed') {
+      writeFileSync(join(f.rootDir, 'data', 'finding-batches', f.batch.batch_id, 'publish-intent.json'), '{}');
+      f.launches.push({ ...f.launches[0], idempotency_key: `findings-batch-publish-${f.batch.batch_id}`,
+        launch_request_id: 'dead-publisher', status: 'failed' });
+    }
+    f.publication.prs = [{ ...f.pr, headRefOid: 'c'.repeat(40) }];
+    await f.run({ fetchPr: async (target, number) => {
+      assert.equal(target, repo);
+      assert.equal(number, f.pr.number);
+      return f.publication.prs[0];
+    } });
+    const recovered = JSON.parse(readFileSync(f.outputPath, 'utf8'));
+    assert.deepEqual(recovered, { ...f.result, prNumber: f.pr.number, headSha: 'c'.repeat(40) });
+    assert.equal(f.dispatches.length, 1);
+    assert.equal(f.db.prepare('SELECT completed_at FROM finding_batches').get().completed_at, null);
+    await f.run({ execFileImpl: () => assert.fail('restart uses recovered artifact'),
+      fetchPublication: () => assert.fail('restart uses numbered PR'),
+      fetchPr: async () => ({ ...f.pr, state: 'MERGED', headRefOid: 'c'.repeat(40) }) });
+    assert.ok(f.db.prepare('SELECT completed_at FROM finding_batches').get().completed_at);
+    assert.equal(f.db.prepare('SELECT result_pr FROM finding_backlog').get().result_pr, f.pr.number);
+  });
+});
+
+test('permanent GitHub read failures remain visible and release aged terminal batches', async t => {
+  for (const boundary of ['numbered PR', 'branch PR']) {
+    for (const detail of ['HTTP 401 Bad credentials', 'HTTP 403 Forbidden', 'repository not found', 'Unexpected token in JSON']) {
+      await t.test(`${boundary}: ${detail}`, async t => {
+        const f = await publicationFixture(t);
+        if (boundary === 'numbered PR') writeFileSync(f.outputPath, JSON.stringify({ ...f.result, prNumber: f.pr.number }));
+        const fail = async () => { throw Error(detail); };
+        const options = boundary === 'numbered PR' ? { fetchPr: fail } : { fetchPublication: fail };
+        await f.run(options);
+        assert.equal(f.db.prepare('SELECT error FROM finding_batches').get().error, detail);
+        await f.run({ ...options, now: fixtureNow + 86400001 });
+        assert.ok(f.db.prepare('SELECT released_at FROM finding_batches').get().released_at);
+        assert.equal(f.db.prepare('SELECT batch_attempts FROM finding_backlog').get().batch_attempts, 1);
+      });
+    }
+  }
 });
 
 test('an explicitly missing artifact PR records a typed error and does not fall back to branch discovery', async t => {
@@ -973,7 +1027,7 @@ test('FINDINGSDECISIONHOLD-01 handoff cannot bypass the old ambiguity deadline o
     assert.equal(JSON.parse(readFileSync(intentPath, 'utf8')).resubmissionCount, 1);
     if (latePublisher) {
       f.publication.prs = [f.pr];
-      await f.run();
+      await f.run({ fetchPr: async () => f.pr });
       assert.equal(f.dispatches.length, 1, 'fresh PR recovery never submits another publisher');
       assert.equal(f.db.prepare('SELECT error FROM finding_batches').get().error, null);
     }
@@ -1237,13 +1291,10 @@ test('FINDINGSSHAPE-01 dispatches decision-only preparation and one pr-shaped pu
     await f.run(); // A restart/next hourly pass sees the existing publisher.
     assert.equal(f.dispatches.length, 2);
     f.publication.prs = [f.pr];
-    await f.run();
+    await f.run({ fetchPr: async () => f.pr });
     assert.equal(f.db.prepare('SELECT completed_at FROM finding_batches').get().completed_at, null);
     const merged = { ...f.pr, state: 'MERGED', headRefOid: 'b'.repeat(40) };
     f.publication.prs[0] = merged;
-    await f.run(); // Branch evidence alone prevents duplication without settling.
-    assert.equal(f.db.prepare('SELECT completed_at FROM finding_batches').get().completed_at, null);
-    writeFileSync(f.outputPath, JSON.stringify({ ...f.result, prNumber: f.pr.number }));
     await f.run({ fetchPr: async () => merged });
     const stored = f.db.prepare('SELECT * FROM finding_batches').get();
     assert.ok(stored.completed_at);
@@ -1298,7 +1349,7 @@ test('FINDINGSSHAPE-01 valid unmerged publication clears stale errors without se
     await f.run();
     assert.equal(f.db.prepare('SELECT error FROM finding_batches').get().error, 'batch-pr-evidence-mismatch');
     f.publication.prs = [{ ...f.pr, state }];
-    await f.run();
+    await f.run({ fetchPr: async () => ({ ...f.pr, state }) });
     const stored = f.db.prepare('SELECT * FROM finding_batches').get();
     assert.equal(stored.error, null);
     assert.equal(stored.completed_at, null);
@@ -1333,9 +1384,6 @@ test('FINDINGSSHAPE-01 lost publisher receipts and terminal launches never dispa
     }
     const merged = { ...f.pr, state: 'MERGED' };
     f.publication.prs = [merged];
-    await f.run();
-    assert.equal(f.db.prepare('SELECT completed_at FROM finding_batches').get().completed_at, null);
-    writeFileSync(f.outputPath, JSON.stringify({ ...f.result, prNumber: f.pr.number }));
     await f.run({ fetchPr: async () => merged });
     assert.ok(f.db.prepare('SELECT completed_at FROM finding_batches').get().completed_at);
   });
@@ -1543,6 +1591,8 @@ test('FINDINGSSHAPE-01 publication holds on invalid manifests, live preparation 
     ['multiple PRs', f => { f.publication.prs = [f.pr, f.pr]; }],
     ['fork PR', f => { f.publication.prs = [{ ...f.pr, isCrossRepository: true }]; }],
     ['other branch PR', f => { f.publication.prs = [{ ...f.pr, headRefName: 'other' }]; }],
+    ['missing PR number', f => { f.publication.prs = [{ ...f.pr, number: null }]; }],
+    ['missing PR head', f => { f.publication.prs = [{ ...f.pr, headRefOid: null }]; }],
   ];
   for (const [name, mutate] of cases) await t.test(name, async t => {
     const f = await publicationFixture(t);
@@ -1580,7 +1630,7 @@ test('FINDINGSSHAPE-01 branch discovery fences duplicate publication even after 
     assert.equal(bin, 'gh');
     assert.equal(opts.timeout, 15_000);
     ghCalls.push(args);
-    if (args[0] === 'pr') return { stdout: JSON.stringify(f.publication.prs) };
+    if (args[0] === 'pr') return { stdout: JSON.stringify(args[1] === 'view' ? f.publication.prs[0] : f.publication.prs) };
     assert.deepEqual(args, ['api', `repos/${repo}/git/ref/heads/fixture/findings`]);
     return { stdout: JSON.stringify({ object: { sha: head } }) };
   };
@@ -1591,7 +1641,7 @@ test('FINDINGSSHAPE-01 branch discovery fences duplicate publication even after 
   await runFindingBatches({ now: fixtureNow, ...options, execFileImpl });
   assert.deepEqual(ghCalls, [
     ['pr', 'list', '--repo', repo, '--head', f.status.branch, '--state', 'all', '--limit', '100',
-      '--json', 'body,headRefName,isCrossRepository'],
+      '--json', 'number,headRefOid,body,headRefName,isCrossRepository'],
     ['api', `repos/${repo}/git/ref/heads/fixture/findings`],
   ]);
   for (const state of ['CLOSED', 'MERGED']) {
@@ -1599,7 +1649,7 @@ test('FINDINGSSHAPE-01 branch discovery fences duplicate publication even after 
     await runFindingBatches({ now: fixtureNow, ...options, execFileImpl });
     assert.equal(ghCalls.at(-1)[0], 'pr');
     assert.equal(f.dispatches.length, 2);
-    assert.equal(f.db.prepare('SELECT completed_at FROM finding_batches').get().completed_at, null);
+    assert.equal(Boolean(f.db.prepare('SELECT completed_at FROM finding_batches').get().completed_at), state === 'MERGED');
   }
   assert.equal(ghCalls.filter(args => args[0] === 'api').length, 1);
 });
@@ -1640,7 +1690,7 @@ test('FINDINGSSHAPE-01 ref reader encodes reserved characters within branch segm
 test('FINDINGSSHAPE-01 unreadable command or ledger evidence preserves unresolved outcomes', async t => {
   for (const [boundary, reason] of [
     ['status', 'fixture evidence unavailable'],
-    ['branch/PR', null],
+    ['branch/PR', 'fixture evidence unavailable'],
     ['ledger', 'batch-publish-receipt-unavailable'],
   ]) await t.test(boundary, async t => {
     const f = await publicationFixture(t);

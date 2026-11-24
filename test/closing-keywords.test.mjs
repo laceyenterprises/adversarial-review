@@ -116,7 +116,7 @@ test('dispatched hammer export carries canonical provenance byte for byte', () =
 
 for (const failure of ['sanitizer', 'body', 'subject', 'rewrites', 'title']) {
   test(`hammer ${failure} failure records audit and retryable lease abort`, () => {
-    const snippet = renderCommitMessageSnippet('  HAM_MERGE_EXECUTED_AT=');
+    const snippet = renderCommitMessageSnippet('  # Withdrawal-only closure');
     const stubs = `ham_append_terminal_audit() { echo "audit:$2"; }
 ham_mark_merge_lease_retryable_abort() { echo "retry:$1"; }
 ham_release_merge_lease() { echo release; }
@@ -133,7 +133,7 @@ run() {
 
 for (const failure of ['permanent', 'empty']) {
   test(`hammer ${failure} title prevents a merge with the correct lease outcome`, () => {
-    const snippet = renderCommitMessageSnippet('  HAM_MERGE_EXECUTED_AT=');
+    const snippet = renderCommitMessageSnippet('  # Withdrawal-only closure');
     const stubs = `ham_append_terminal_audit() { echo "audit:$2"; }
 ham_mark_merge_lease_retryable_abort() { echo "retry:$1"; }
 ham_release_merge_lease() { echo release; }

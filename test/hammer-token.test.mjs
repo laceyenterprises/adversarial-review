@@ -637,6 +637,20 @@ test('an ambient GH_TOKEN is neither kept on a failed refresh nor trusted to exp
   assert.throws(() => hammerTokenSession({ env, hammerToken: true }).prepare(), /refresh failed \(command error\)/);
 });
 
+test('forced merge refresh requires a fresh entitled credential before transport', t => {
+  const f = fixture(t);
+  f.env.HAMMER_LACEY_GH_TOKEN_EXPIRES_AT = new Date(Date.now() + 60 * 60_000).toISOString();
+  const options = { hammerToken: true, forceCredentialRefresh: true, reportAuthFailure() {} };
+  assert.equal(hammerTokenSession({ ...options, env: f.env }).prepare().env.GH_TOKEN, fresh);
+  assert.equal(f.count(), 1);
+
+  const env = { ...f.env };
+  delete env.HAMMER_LACEY_GH_TOKEN_REFRESH_COMMAND;
+  for (const credentialEnv of [env, {}]) {
+    assert.throws(() => hammerTokenSession({ ...options, env: credentialEnv }).prepare(), /no launch refresh command/);
+  }
+});
+
 test('refresh command respects an explicit deadline and discards its diagnostics', t => {
   const f = fixture(t);
   delete f.env.HAMMER_LACEY_GH_TOKEN;

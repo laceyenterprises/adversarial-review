@@ -738,9 +738,6 @@ async function attemptDaemonCleanMergeInner({
     catch (error) { logger?.warn?.(`[daemon-merge] eligibility observation failed: ${error.message}`); }
   }
 
-  const writerAdmission = await checkWriterHold();
-  if (writerAdmission) return writerAdmission;
-
   // ── Acquire the merge lease for the head. Contention defers cleanly. ───────
   let leaseResult;
   try {

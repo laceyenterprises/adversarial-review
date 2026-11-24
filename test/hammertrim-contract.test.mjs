@@ -574,13 +574,15 @@ else console.log(JSON.stringify({state:'open',head:{sha:'${head}'},base:{sha:'${
 
 for (const scenario of ['no-diff validated merge', 'git-attested merge', 'prior-attested-base merge', 'widened-reviewed-range merge', 'accepted confirmation timeout', 'accepted confirmation permanent read error',
   'superseded head', 'gate read failed', 'gate timeout', 'red CI after pending', 'permanent merge rejection',
-  'writer proof timeout', 'open after write error', 'merged after write error', 'moved after write error']) {
+  'writer proof timeout', 'open after write error', 'merged after write error', 'moved after write error',
+  'transient recovery merge', 'credential recovery merge']) {
   test(`rendered hammer receipt classification: ${scenario}`, async t => {
     const dir = mkdtempSync(join(tmpdir(), 'hammer-receipt-decision-'));
     t.after(() => rmSync(dir, { recursive: true, force: true }));
     const head = 'a'.repeat(40);
     const reviewedHead = 'd'.repeat(40);
-    const successfulMerge = ['no-diff validated merge', 'git-attested merge', 'prior-attested-base merge', 'widened-reviewed-range merge'].includes(scenario);
+    const retryMerge = scenario.endsWith('recovery merge');
+    const successfulMerge = retryMerge || ['no-diff validated merge', 'git-attested merge', 'prior-attested-base merge', 'widened-reviewed-range merge'].includes(scenario);
     const mergedReadback = successfulMerge || scenario === 'merged after write error';
     const writerFixture = scenario === 'writer proof timeout' || scenario.endsWith('after write error');
     const verdict = join(dir, 'verdict.json');
@@ -615,7 +617,7 @@ for (const scenario of ['no-diff validated merge', 'git-attested merge', 'prior-
     mkdirSync(join(dir, '.hq'));
     writeFileSync(join(dir, '.hq/config.json'), JSON.stringify({ ownerUser: userInfo().username }));
     const gate = { ok: true, state: 'OPEN', headMatches: true, expectedHead: head,
-      liveHead: head, checksConclusion: 'SUCCESS', reasons: [] };
+      liveHead: head, baseRefName: 'main', checksConclusion: 'SUCCESS', reasons: [] };
     if (scenario === 'superseded head') gate.headMatches = false;
     if (scenario === 'gate timeout') { gate.ok = false; gate.checksConclusion = 'PENDING'; }
     writeFileSync(join(dir, 'gate.json'), JSON.stringify(gate));
@@ -639,15 +641,30 @@ case "$*" in
       shift
     done
     if [ "$RECEIPT_SCENARIO" = 'permanent merge rejection' ]; then echo 'permission denied' >&2; exit 1; fi
+    if [ '${retryMerge}' = true ]; then
+      if [ "$(wc -l < "$TMPDIR/merge-attempted")" -eq 1 ]; then
+        if [ "$RECEIPT_SCENARIO" = 'credential recovery merge' ]; then echo 'HTTP 401 Bad credentials' >&2;
+        else echo 'HTTP 502 upstream disconnected' >&2; fi
+        exit 1
+      fi
+      if [ "$RECEIPT_SCENARIO" = 'credential recovery merge' ] && [ "$HAM_MERGE_FORCE_CREDENTIAL_REFRESH" != 1 ]; then
+        echo 'expected forced refresh' >&2; exit 1
+      fi
+      touch "$TMPDIR/retry-succeeded"
+    fi
     if [ '${writerFixture}' = true ] && [ ! -f "$TMPDIR/base-changed" ]; then echo 'HTTP 502 upstream disconnected' >&2; exit 1; fi
     exit 0 ;;
   'pr view '*)
+    if [ '${retryMerge}' = true ] && [ ! -f "$TMPDIR/retry-succeeded" ]; then
+      echo '{"state":"OPEN","headRefOid":"${head}","baseRefName":"main"}'; exit 0
+    fi
     if { [ '${mergedReadback}' = true ] || [ -f "$TMPDIR/base-changed" ]; } && [ -f '${dir}/merge-attempted' ]; then
       echo '{"state":"MERGED","mergedAt":"${new Date().toISOString()}","mergeCommit":{"oid":"${'b'.repeat(40)}"},"headRefOid":"${head}"}'
       exit 0
     fi
     case "$RECEIPT_SCENARIO" in
-      'writer proof timeout'|'open after write error') echo '{"state":"OPEN","headRefOid":"${head}"}'; exit 0 ;;
+      'writer proof timeout'|'open after write error'|'permanent merge rejection')
+        echo '{"state":"OPEN","headRefOid":"${head}","baseRefName":"main"}'; exit 0 ;;
       'moved after write error') echo '{"state":"OPEN","headRefOid":"${'c'.repeat(40)}"}'; exit 0 ;;
     esac
     if [ "$RECEIPT_SCENARIO" = 'accepted confirmation timeout' ]; then echo 'TLS handshake timeout' >&2;
@@ -724,7 +741,8 @@ if [ "$1" = +%s ]; then
   echo $((value + ${scenario === 'gate timeout' ? 1000 : 0})) > "$TMPDIR/clock"
 else exec /bin/date "$@"; fi
 `, { mode: 0o755 });
-    const shell = `HAM_MERGE_LEASE_HELD=1 HAM_MERGE_LEASE_ID=lease POST_REMEDIATION_SHA=${head} HAM_PUBLISHED_AUDIT_HEAD=${head} HAM_NODE_BIN=${nodeStub} HAM_VERDICT_FILE=${verdict} HAM_VERDICT_READY_FILE=${verdict} HAM_REMOTE_CI_WAIT_SECONDS=${scenario === 'red CI after pending' ? 60 : 0} HAM_REMOTE_CI_GATE_READ_FAILURE_LIMIT=1 HAM_MERGE_RETRY_CAP=1
+    const shell = `HAM_MERGE_LEASE_HELD=1 HAM_MERGE_LEASE_ID=lease POST_REMEDIATION_SHA=${head} HAM_PUBLISHED_AUDIT_HEAD=${head} HAM_NODE_BIN=${nodeStub} HAM_VERDICT_FILE=${verdict} HAM_VERDICT_READY_FILE=${verdict} HAM_REMOTE_CI_WAIT_SECONDS=${scenario === 'red CI after pending' ? 60 : 0} HAM_REMOTE_CI_GATE_READ_FAILURE_LIMIT=1 HAM_MERGE_RETRY_CAP=${retryMerge ? 3 : 1}
+BASE_BRANCH=main
 ham_fixture_emit_git_merge_signal() { echo FIXTURE_MERGE_SIGNAL; }
 ham_fixture_mark_ama_closer_lease_succeeded() { echo FIXTURE_CLOSER_SUCCEEDED; }
 ham_release_merge_lease() { HAM_MERGE_LEASE_HELD=0; }
@@ -754,6 +772,11 @@ echo "STATUS=$? HELD=$HAM_MERGE_LEASE_HELD OWN=$HAM_OWN_MERGE_EXECUTED EXIT=$HAM
     if (successfulMerge) {
       assert.match(result.stdout, /STATUS=0 HELD=0 OWN=1 EXIT=0/);
       assert.equal(readFileSync(join(dir, 'merge-head'), 'utf8'), head);
+      if (retryMerge) {
+        assert.equal(readFileSync(join(dir, 'merge-attempted'), 'utf8').trim().split('\n').length, 2);
+        assert.doesNotMatch(result.stdout, /merge-writer-deferred|REFUNDED/);
+        assert.match(result.stdout, /"readback": "open"/);
+      }
       assert.doesNotMatch(result.stderr, /merge-action receipt unavailable/);
       const outcome = JSON.parse(readFileSync(join(dir,
         'dispatch/lrq_receipt-fixture/hammer-progress/wrun_receipt-fixture/outcome.json'), 'utf8'));
@@ -767,22 +790,24 @@ echo "STATUS=$? HELD=$HAM_MERGE_LEASE_HELD OWN=$HAM_OWN_MERGE_EXECUTED EXIT=$HAM
       assert.match(result.stdout, /--outcome deferred/);
       assert.match(result.stdout, /merge-writer-deferred/);
     } else if (scenario === 'permanent merge rejection') {
-      assert.match(result.stdout, /merge-writer-deferred/);
-      assert.match(result.stdout, /"readback": "unavailable"/);
+      assert.match(result.stdout, /STATUS=1 HELD=0 OWN=0/);
+      assert.match(result.stdout, /permanent-merge-rejection/);
+      assert.match(result.stdout, /"readback": "open"/);
+      assert.doesNotMatch(result.stdout, /merge-writer-deferred|REFUNDED/);
     } else if (!writerFixture) {
       assert.equal(readdirSync(dir).includes('merge-attempted'), false);
     }
     const directory = join(dir, 'dispatch/audit/automation-merge-actions');
     const receipts = (() => { try { return readdirSync(directory); } catch (error) { if (error.code === 'ENOENT') return []; throw error; } })();
-    assert.equal(receipts.length, (successfulMerge || scenario === 'red CI after pending') ? 1 : 0, result.stderr);
+    assert.equal(receipts.length, (successfulMerge || ['red CI after pending', 'permanent merge rejection'].includes(scenario)) ? 1 : 0, result.stderr);
     if (receipts.length) {
       const receipt = JSON.parse(readFileSync(join(directory, receipts[0])));
       assert.equal(receipt.merged, successfulMerge);
-      if (!successfulMerge) assert.equal(receipt.reason, 'github-gate-red');
+      if (!successfulMerge) assert.equal(receipt.reason, scenario === 'permanent merge rejection' ? 'permanent-merge-rejection' : 'github-gate-red');
     }
     if (writerFixture) {
       assert.doesNotMatch(result.stdout, /REFUNDED/);
-      assert.ok(readdirSync(dir).every(file => !file.endsWith('.writer.json')));
+      assert.ok(readdirSync(dir).every(file => !file.includes('.writer.')));
       const audit = () => readAmaAuditEntry(dir, 'acme/repo', 424244, head);
       const attempt = audit().attempts.at(-1);
       if (scenario === 'merged after write error') {
@@ -798,16 +823,22 @@ echo "STATUS=$? HELD=$HAM_MERGE_LEASE_HELD OWN=$HAM_OWN_MERGE_EXECUTED EXIT=$HAM
         assert.equal(attempt.mergeWriter.readback, 'open');
         assert.equal(attempt.mergeWriter.write, scenario === 'writer proof timeout' ? 'not-invoked' : 'unknown');
         assert.equal(attempt.continuation.owner, 'closure-recovery');
+        const clicks = () => {
+          const path = join(dir, 'merge-attempted');
+          return existsSync(path) ? readFileSync(path, 'utf8').trim().split('\n').length : 0;
+        };
+        const originalClicks = clicks();
+        // With the fixed polling cadence, the 60-second writer budget admits one retry.
+        assert.equal(originalClicks, scenario === 'writer proof timeout' ? 0 : 2, result.stdout);
         const repeated = run('/bin/bash', ['-c', shell, '_', script], env);
         assert.match(repeated.stdout, /STATUS=20 HELD=0 OWN=0/);
         assert.equal(audit().attempts.filter(row => row.reason === 'merge-writer-deferred').length, 1);
-        assert.equal(existsSync(join(dir, 'merge-attempted')), scenario !== 'writer proof timeout');
+        assert.equal(clicks(), originalClicks, repeated.stdout);
         writeFileSync(join(dir, 'base-changed'), '');
         const changed = run('/bin/bash', ['-c', shell, '_', script], env);
         assert.match(changed.stdout, /STATUS=0 HELD=0 OWN=1/);
         assert.equal(audit().status, 'succeeded');
-        assert.equal(readFileSync(join(dir, 'merge-attempted'), 'utf8').trim().split('\n').length,
-          scenario === 'writer proof timeout' ? 1 : 2);
+        assert.equal(clicks(), originalClicks + 1, changed.stdout);
       }
     }
   });

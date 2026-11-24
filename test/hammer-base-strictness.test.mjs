@@ -134,6 +134,7 @@ BASE_BRANCH=main
 HAM_REQUIRES_UP_TO_DATE=${strict}
 HAM_CURRENT_BASE_SHA=${previous}
 HAM_GATE_JSON=unused
+HAM_MERGE_ATTEMPTS=1
 HQ_LAUNCH_REQUEST_ID= AGENT_OS_WORKER_LRQ_ID= LAUNCH_REQUEST_ID=
 jq() { if [[ "$2" == *mergeStateStatus* ]]; then echo ${state}; else echo MERGEABLE; fi; }
 ham_fetch_base_with_retries() { return ${fetchOk ? 0 : 1}; }

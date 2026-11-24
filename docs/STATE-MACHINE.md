@@ -1872,11 +1872,14 @@ remaining run budget (HAMWRITERTIMEOUT-01), returning `legacy-writer-timeout` wi
 transport. An exhausted budget never starts transport. HAMWRITERREFUND-01
 persists an exact-head/base writer intent first. After a proof timeout or
 unconfirmed write, GitHub readback drives the transition. An exact-head merge
-settles the PR, a moved head supersedes the attempt, and unresolved outcomes
-defer with `merge-writer-deferred` and one closure recovery page per head.
-An interrupted intent also fences unchanged inputs. The ordinary lease release
-keeps the gate charge. A fresh open head or changed base must pass ordinary
-closure admission before a new write. `merge-target-unparseable` is a
+settles the PR and a moved head supersedes the attempt. Exact open readback at
+an unchanged base and a fresh green gate permit a bounded retry of recognized
+transport failures under the same lease and writer deadline. A definitive
+rejection at the same open head records a refusal. Unresolved outcomes defer
+with `merge-writer-deferred` and one closure recovery page per head. An
+interrupted intent also fences unchanged inputs. The ordinary lease release
+keeps the gate charge. Proven input movement or an operator reconciliation
+receipt permits ordinary closure admission before a new write. `merge-target-unparseable` is a
 registered closer fault. A blocked preflight that proves no
 merge transport ran settles the local writer reservation. Unclassified
 preflight refusals retain the terminal failure outcome, and the recognized

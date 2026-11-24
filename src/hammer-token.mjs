@@ -94,7 +94,7 @@ function warnProactiveFailure(outcome) {
 // refresh keeps a held token; only the refresh after a rejection must succeed.
 function tokenContext(options) {
   const { credentialEnv = options.env || process.env, hammerToken = false,
-    reportAuthFailure = reportHammerEarlyFailure, retryAuthFailure = true, ...childOptions } = options;
+    reportAuthFailure = reportHammerEarlyFailure, retryAuthFailure = true, forceCredentialRefresh = false, ...childOptions } = options;
   delete childOptions.credentialDeadlineMs;
   const variable = ENTITLED_VARS.find(key => credentialEnv[key] || credentialEnv[`${key}_REFRESH_COMMAND`])
     || ['GH_TOKEN', 'GITHUB_TOKEN'].find(key => credentialEnv[key]);
@@ -103,7 +103,7 @@ function tokenContext(options) {
   const entitled = ENTITLED_VARS.some(key => credentialEnv[key] || credentialEnv[`${key}_REFRESH_COMMAND`]);
   const managed = Boolean(hammerToken || (credentialEnv.HAM_ROOT_DIR && entitled))
     && (entitled || Boolean(command));
-  return { credentialEnv, childOptions, variable, command, managed, reportAuthFailure, retryAuthFailure };
+  return { credentialEnv, childOptions, variable, command, managed, reportAuthFailure, retryAuthFailure, forceCredentialRefresh };
 }
 
 // Scope Git's credential helper to this child, preserving other inline config.
@@ -155,7 +155,7 @@ export function withHammerGitSync(execute, options) {
 }
 
 export function hammerTokenSession(options = {}) {
-  const { credentialEnv, childOptions, variable, command, managed, reportAuthFailure, retryAuthFailure } = tokenContext(options);
+  const { credentialEnv, childOptions, variable, command, managed, reportAuthFailure, retryAuthFailure, forceCredentialRefresh } = tokenContext(options);
   const launchToken = variable && credentialEnv[variable];
   const launchExpiry = variable && credentialEnv[`${variable}_EXPIRES_AT`];
   const cached = refreshedCredentials.get(credentialEnv);
@@ -169,7 +169,7 @@ export function hammerTokenSession(options = {}) {
   let held = Boolean(current || (token && ENTITLED_VARS.includes(variable)));
   let expiresAt = current ? current.expiresAt : held ? launchExpiry : undefined;
   let retried = false;
-  let forced = false;
+  let forced = forceCredentialRefresh;
 
   function failure(outcome) {
     const error = new Error(`GitHub credential rejected or unavailable; entitled token refresh ${outcome}`);
@@ -298,12 +298,15 @@ export function hammerTokenSession(options = {}) {
     // after budget admission. Recompute the allowance on every preparation.
     prepare({ timeoutMs = options.credentialDeadlineMs === undefined ? undefined : options.credentialDeadlineMs - Date.now() } = {}) {
       if (timeoutMs !== undefined && (!Number.isFinite(timeoutMs) || timeoutMs <= 0)) throw failure('failed (deadline expired)');
-      if (!managed) return childOptions;
+      if (!managed && !forced) return childOptions;
       const refreshTimeout = () => Math.min(loadAwareTimeoutMs(REFRESH_COMMAND_TIMEOUT_MS),
         timeoutMs === undefined ? Infinity : Math.max(1, Math.floor(timeoutMs)));
       if (forced) {
         forced = false;
-        try { refresh(refreshTimeout()); } catch (error) {
+        try {
+          if (!command) throw failure('unavailable (no launch refresh command)');
+          refresh(refreshTimeout());
+        } catch (error) {
           reportAuthFailure(mintFailureReason(error), { env: credentialEnv });
           throw error;
         }

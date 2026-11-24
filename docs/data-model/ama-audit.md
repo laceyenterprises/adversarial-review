@@ -30,9 +30,15 @@ is `not-invoked`, `acknowledged` or `unknown`. `readback` is `open`, `closed`,
 `merged` or `unavailable`, separately from `readbackHead` and `readExit`.
 `merge-writer-deferred` retains a `park` continuation owned by
 `closure-recovery`. An interrupted intent retains unknown write and readback
-evidence. Later generic audits do not settle either record. The closure-wait
-store deduplicates the page for the exact PR/head and `merge-writer-deferred`
-class. Older audits have no writer intent or hold.
+evidence. Before a bounded transport retry the lease owner records the open
+readback as another `merge-writer-intent`, keeping the hold until the next
+click has its own intent. `permanent-merge-rejection` records a definitive
+refusal with exact open readback. An operator may append
+`merge-writer-reconciled` through the runbook procedure, linking the inspected
+hold with `reconcilesAttemptNumber` and the fresh readback in `mergeWriter`.
+Later generic audits do not settle either hold. The closure-wait store
+deduplicates pages by exact PR/head and class (`merge-writer-deferred` or
+`merge-writer-audit-unreadable`). Older audits have no writer intent or hold.
 `recordHammerEarlyFailure` checks failure-code syntax (`^[a-z][a-z0-9:-]*$`)
 before recording; it preserves the accepted value without normalization.
 Registered conflict-resolver failures are world-origin terminal failures,

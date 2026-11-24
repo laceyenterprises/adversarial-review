@@ -283,6 +283,23 @@ test('an unresolved writer intent stays parked across watcher passes and pages o
   assert.equal(state.launches, 1);
 });
 
+test('an invalid writer audit pages once and parks without a launch', async t => {
+  const root = scratch(t);
+  const { state, deps } = harness(root);
+  appendAmaAuditAttempt({ hqRoot: join(root, 'hq'), repo: REPO, prNumber: PR, headSha: HEAD, attempt: {
+    outcome: 'in_progress', reason: 'merge-writer-intent', attemptPhase: 'hammer-gh-pr-merge', validatedHead: HEAD,
+    mergeWriter: { baseSha: 'invalid', baseRef: 'main', write: 'unknown', readback: 'unavailable' },
+  } });
+  for (const minutes of [0, 1]) {
+    const result = await maybeDispatchAmaCloser({ ...dispatchArgs(root, at(minutes)), ...deps });
+    assert.equal(result.reason, 'merge-writer-audit-unreadable');
+    assert.equal(result.preservePredecessorArtifacts, true);
+  }
+  assert.equal(state.launches, 0);
+  assert.equal(state.alerts.length, 1);
+  assert.match(state.alerts[0].message, /reconcile the writer audit identity/);
+});
+
 test('an operator-veto hold is not re-driven by the infrastructure path', async t => {
   const root = scratch(t);
   const { state, deps, endCurrent } = harness(root);

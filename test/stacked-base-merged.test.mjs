@@ -226,6 +226,7 @@ for (const [name, output, reason] of [
     assert.ok(start > 0 && end > start, 'live check must precede the actual merge click');
     const fragment = source.slice(start, end).replace(/<<[A-Z_]+>>/g, 'synthetic');
     const result = spawnSync('bash', ['-c', `
+    HAM_MERGE_ATTEMPTS=1
     HAM_NODE_BIN=refuse_base
     refuse_base() { printf '%s\n' "$STACKED_BASE_OUTPUT" >&2; return 20; }
     ham_append_terminal_audit() { echo "audit:$*"; }

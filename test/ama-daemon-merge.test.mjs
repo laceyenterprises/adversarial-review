@@ -197,23 +197,29 @@ test('the shared lease writer checks for a hammer intent that appeared during da
       outcome: 'deferred', reason: 'merge-writer-deferred', attemptPhase: 'hammer-gh-pr-merge', validatedHead: HEAD,
       mergeWriter: { baseSha: originalBase, baseRef: 'main', write: 'unknown', readback: 'unavailable' },
     }] });
+    h.deps.acquireLeaseImpl = acquire;
     return acquire();
   };
   let baseSha = originalBase;
-  const overrides = { readWriterIdentityImpl: async () => ({ prState: 'open', headSha: HEAD, baseBranch: 'main', baseSha }) };
+  const identityReadAcquisitions = [];
+  const overrides = { readWriterIdentityImpl: async () => {
+    identityReadAcquisitions.push(h.calls.acquire);
+    return { prState: 'open', headSha: HEAD, baseBranch: 'main', baseSha };
+  } };
   const hold = await attemptDaemonCleanMerge(baseArgs(h, overrides));
   assert.equal(hold.reason, 'merge-writer-deferred');
   assert.equal(h.calls.merge, 0);
   assert.equal(h.calls.release, 1);
   const repeat = await attemptDaemonCleanMerge(baseArgs(h, overrides));
   assert.equal(repeat.reason, 'merge-writer-deferred');
-  assert.equal(h.calls.acquire, 1);
+  assert.equal(h.calls.release, 2);
   assert.equal(h.calls.merge, 0);
   baseSha = 'c'.repeat(40);
   const changed = await attemptDaemonCleanMerge(baseArgs(h, overrides));
   assert.equal(changed.merged, true);
   assert.equal(h.calls.merge, 1);
-  assert.equal(h.calls.release, 2);
+  assert.equal(h.calls.release, 3);
+  assert.deepEqual(identityReadAcquisitions, [1, 2, 3]);
 });
 
 test('HAMLATEAUDIT-01: changed terminal review proof refuses merge under the held daemon lease', async () => {

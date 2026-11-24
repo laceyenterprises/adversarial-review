@@ -71,7 +71,8 @@ if (action === 'wait' || action === 'record' || action === 'limited' || action =
     const result = await meteredExecFile(execute, action === 'exec-git' ? 'git' : 'gh', args, {
       ...(action !== 'exec' ? { hammerToken: true } : {}),
       // A new mutation requires fresh GitHub readback from the close procedure.
-      ...(hammerMerge ? { retryAuthFailure: false } : {}),
+      ...(hammerMerge ? { retryAuthFailure: false,
+        forceCredentialRefresh: process.env.HAM_MERGE_FORCE_CREDENTIAL_REFRESH === '1' } : {}),
       // The bounded shell fetch owns its load-aware deadline and TERM cleanup.
       timeout: action === 'exec-git' && process.env.HAM_GIT_SYNC_BOUNDED === '1' ? 0 : 30_000,
       killSignal: 'SIGKILL', encoding: 'utf8', maxBuffer: 64 * 1024 * 1024,

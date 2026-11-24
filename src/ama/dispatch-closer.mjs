@@ -5118,8 +5118,20 @@ async function maybeDispatchAmaCloserAttempt({
     catch (error) {
       // The existing park-audit gate diagnoses corrupt JSON with its
       // certification context before any new launch or merge admission.
-      if (!(error instanceof SyntaxError)) return noAmaDispatch({ dispatched: false, skipMergeAgent: true,
-        reason: 'merge-writer-audit-unreadable', recoveryWait: true, preservePredecessorArtifacts: true });
+      if (!(error instanceof SyntaxError)) {
+        const reason = 'merge-writer-audit-unreadable';
+        try {
+          await observeClosureWait({ rootDir: reconciliationRoot || SUBMODULE_ROOT, repo: reconciliationRepo,
+            prNumber, headSha: prMetadata.headSha, waitClass: reason, immediate: true,
+            reason: 'reconcile the writer audit identity against the live PR head and base ref',
+            now: Date.parse(dispatchContext.dispatchedAt) || Date.now(),
+            pageImpl: (message, options) => deliverAlertImpl(message, { ...options, event: 'ama_closer.merge_writer_audit_unreadable' }) });
+        } catch (pageError) {
+          logger?.warn?.(`[ama-closer] writer audit page delivery failed: ${pageError?.message || pageError}`);
+        }
+        return noAmaDispatch({ dispatched: false, skipMergeAgent: true,
+          reason, recoveryWait: true, preservePredecessorArtifacts: true });
+      }
       writerAuditParseError = error;
     }
     if (hold) {

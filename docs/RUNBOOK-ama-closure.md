@@ -363,8 +363,14 @@ merge lease before calling the legacy lane. A proof timeout retains
 Unconfirmed transport retains `write: unknown` and the bounded, redacted
 output. Fresh GitHub readback distinguishes a confirmed merge, a moved head,
 an open or closed PR, and unavailable evidence. Open readback only describes
-the observation at that time. A confirmed merge following an ambiguous write
-settles the PR without an own-merge receipt.
+the observation at that time. With a fresh open readback, unchanged head and
+live base, a green gate, and the same lease, a recognized transient transport
+failure can retry within the same writer budget (at most three clicks). A
+credential rejection allows one forced refresh before its next fenced click.
+Each click records writer intent and rechecks review proof. A definitive
+rejection with matching open readback records a refused merge-action receipt.
+A confirmed merge following an ambiguous write settles the PR without an
+own-merge receipt unless a later, individually acknowledged click owns it.
 
 `merge-writer-deferred` releases the merge lease without a retry refund.
 The watcher keeps that head parked at the same base and pages once per head
@@ -376,7 +382,31 @@ base SHA can be historical. Unavailable readback retains
 the hold. `merge-target-unparseable` is a registered closer fault.
 When local writer diagnostics prove transport was never invoked, other
 unclassified preflight refusals settle the intent as `unclassified-merge-failure`.
-The recognized lane-busy deferral keeps its retry refund.
+The recognized lane-busy deferral keeps its retry refund. An unreadable writer
+identity parks and pages once per head under `merge-writer-audit-unreadable`.
+
+To settle an unchanged writer hold, the operator first confirms the earlier
+writer has drained and acquires the shared merge lease for the PR, head and
+base using `bin/merge-lease.mjs acquire`. While holding it, re-read GitHub and
+the audit. Proceed only if GitHub confirms an open PR at that same head with the
+same base branch and current branch-ref SHA, and the latest writer attempt is
+the hold the operator investigated. With `ATTEMPT` set to an operator-owned
+scratch file, record the reconciliation through the existing audit command.
+
+```bash
+jq -n --arg head "$PR_HEAD" --arg base "$BASE_BRANCH" --arg sha "$BASE_SHA" \
+  --argjson attempt "$HELD_ATTEMPT_NUMBER" \
+  '{attemptPhase:"hammer-gh-pr-merge", reason:"merge-writer-reconciled", validatedHead:$head,
+    reconcilesAttemptNumber:$attempt, mergeWriter:{baseRef:$base,baseSha:$sha,
+      write:"unknown",readback:"open",readbackHead:$head,readExit:0}}' > "$ATTEMPT"
+node bin/ama-audit.mjs append --hq-root "$HQ_ROOT" --repo "$REPO" --pr "$PR" \
+  --head "$PR_HEAD" --outcome in_progress --attempt-json "$ATTEMPT"
+```
+
+Release the acquired lease by ID with `bin/merge-lease.mjs release`. The next
+ordinary closure pass still requires all current merge predicates and lease
+admission. This reconciliation attests to readback and drain. It carries no
+retry refund or own-merge proof.
 The closer reuses its initial rollup/proof for its first live gate, then
 refreshes subsequent gates and transports. Initial read failures produce a typed
 unavailable proof before the merge lease; closed/merged snapshots retain normal

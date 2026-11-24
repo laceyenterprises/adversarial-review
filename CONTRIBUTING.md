@@ -286,8 +286,9 @@ npm test
 This uses `test/run-tests.mjs` to discover every top-level and adapter test
 in isolated sandboxes. Local runs use half the available logical CPUs rounded
 down and clamped to one through four workers. `AR_TEST_CONCURRENCY` overrides
-that local limit. CI uses up to eight workers. The suite runs offline on every
-PR against Node 22 and Node 26. The deadline stays at 900 seconds when the
+that local limit. CI uses up to eight workers and checks Node 22 and Node 26
+offline. PRs use affected selection. Main, scheduled and manual runs execute
+the full suite on both versions. The deadline stays at 900 seconds when the
 selected parallel files fit within the configured limit. Otherwise it is
 `900 * 8 / min(8, limit)` seconds. Set `AR_TEST_TIMINGS` to an output path for
 the completed run's per-file timings. Native TAP output follows scheduled
@@ -297,6 +298,18 @@ are scheduled at the median duration. Add measured hints in
 `test/fixtures/suite-durations.json` for long-running integration files so
 they can overlap more of the queue. Prefer completed worker timings over
 TAP timestamps, which can reflect buffered reporting.
+
+For interrupted runs, set `AR_TEST_CHECKPOINT` to a new output file outside
+the test sandbox and distinct from `AR_TEST_TIMINGS`. The JSON Lines file
+starts with the selected file list, Node version and worker count. Each
+`completed` record gives the native file outcome and wall time as soon as the
+coordinator observes it, even while earlier files are still running. An
+interruption can leave a truncated last line. Use only newline-terminated
+records and treat files without a completion record as unverified. The
+checkpoint records file progress. Whole-suite acceptance still uses the
+runner exit status, and case identities still come from TAP. The runner
+always executes its full selection for that invocation. A checkpoint
+write error fails the invocation after the native workers finish.
 
 For the complete hammer self-rebase subset, select all three entrypoints;
 they partition one shared suite. Each test name identifies its shard, and

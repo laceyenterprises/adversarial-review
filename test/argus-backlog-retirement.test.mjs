@@ -4,7 +4,7 @@
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync, utimesSync } from 'node:fs';
+import { mkdtempSync, rmSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -14,10 +14,12 @@ import {
   retireArgusBacklog,
 } from '../src/argus-backlog-retirement.mjs';
 import {
+  buildArgusJob,
   claimNextArgusJob,
   completeArgusJob,
   enqueueArgusSecurityReview,
   findArgusJob,
+  getArgusJobDir,
   readArgusQueueDepth,
   writeArgusJob,
 } from '../src/argus-security-queue.mjs';
@@ -146,18 +148,26 @@ test('a legacy route-for-review completion buried under 500+ newer completions i
   const bot = [{ trigger: 'bot-author', author: 'dependabot[bot]' }, { trigger: 'manifest-change', ecosystems: ['npm'] }];
   enqueue(rootDir, AR, 1172, sha(1172), bot);
   const parked = findArgusJob(rootDir, { repo: AR, prNumber: 1172, headSha: sha(1172) });
+  const older = new Date(T0 - 60_000);
+  const newer = new Date(T0);
   const { jobPath } = completeArgusJob({
     rootDir,
     jobPath: parked.jobPath,
     job: parked.job,
+    completedAt: older.toISOString(),
     result: { schemaVersion: 1, kind: 'argus-security-result', verdict: 'needs_verification', findings: [], autoadjudication: { decision: 'route-for-review', reason: 'semver-major' } },
   });
-  utimesSync(jobPath, new Date(T0 - 86_400_000), new Date(T0 - 86_400_000));
-  // What one retirement pass over the backlog leaves behind: hundreds of newer completions.
+  utimesSync(jobPath, older, older);
+  // These already-completed records only supply scan depth. The parked job
+  // above and its requeue below still exercise the durable queue transitions.
+  const completedDir = getArgusJobDir(rootDir, 'completed');
   for (let pr = 2000; pr < 2520; pr += 1) {
-    enqueue(rootDir, AR, pr, sha(pr));
-    const found = findArgusJob(rootDir, { repo: AR, prNumber: pr, headSha: sha(pr) });
-    completeArgusJob({ rootDir, jobPath: found.jobPath, job: found.job, result: { schemaVersion: 1, kind: 'argus-security-result', verdict: 'approve', findings: [] } });
+    const job = buildArgusJob({ repo: AR, prNumber: pr, headSha: sha(pr), reasons: REASONS,
+      enqueuedAt: new Date(T0 - pr * 1000).toISOString() });
+    const path = join(completedDir, `${job.jobId}.json`);
+    writeFileSync(path, JSON.stringify({ ...job, status: 'completed', completedAt: newer.toISOString(),
+      result: { schemaVersion: 1, kind: 'argus-security-result', verdict: 'approve', findings: [] } }));
+    utimesSync(path, newer, newer);
   }
 
   const summary = await retireArgusBacklog({
@@ -168,6 +178,7 @@ test('a legacy route-for-review completion buried under 500+ newer completions i
   });
   assert.equal(summary.requeued, 1);
   assert.equal(bucketOf(rootDir, AR, 1172, sha(1172)), 'pending');
+  assert.equal(readArgusQueueDepth(rootDir).depth.completed, 520);
 }));
 
 test('claims orphaned by a restart return to pending; a live or fresh claim is left alone', async () => withRoot(async (rootDir) => {

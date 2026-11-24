@@ -516,6 +516,8 @@ async function runDaemonCleanMergeAttemptInner({
   // head-match assertion compare `liveHead` to itself, so a head that advanced
   // after this audit check would be merged unvalidated.
   const hamAuditHead = currentPrHeadSha || candidate?.headSha || null;
+  const strictExactHead = strictMode && Boolean(hamAuditHead)
+    && String(reviewState?.headSha || '').toLowerCase() === String(hamAuditHead).toLowerCase();
   let hamTerminalRemediationHead = false;
   // FIX (stale-review-head spin, #5053): a SECOND head-match certification for the
   // daemon re-merge lane. A settled-success (comment-only / approved) review whose
@@ -546,9 +548,11 @@ async function runDaemonCleanMergeAttemptInner({
     operatorLogins: cfg?.operatorLogins,
     operatorLabelActorEnforcement: daemonOperatorActorEnforcement,
   }, { headSha: hamAuditHead, labels: candidate?.labels });
-  if (!docsFastPath && !snapshotOperatorOverride && !isDaemonMergeReviewAllowed(reviewState, { strictMode })) {
+  if (!docsFastPath && (strictExactHead || !snapshotOperatorOverride) && !isDaemonMergeReviewAllowed(reviewState, { strictMode })) {
     const uncleanReason =
       resolveDaemonMergeUncleanReason(reviewState, { strictMode }) || 'findings-unknown';
+    // These proofs cannot clear strict exact-head findings in the executor.
+    if (strictExactHead) return NOT_TAKEN(uncleanReason);
     hamTerminalRemediationHead =
       hamTerminalRemediationValidated === true ||
       headHasValidatedHamTerminalRemediationImpl({

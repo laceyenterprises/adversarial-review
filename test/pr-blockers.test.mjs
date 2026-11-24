@@ -3,7 +3,8 @@ import assert from 'node:assert/strict';
 import { mkdtemp, mkdir, writeFile, readFile, readdir, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawnSync } from 'node:child_process';
+import { load as loadYaml } from 'js-yaml';
 import Database from 'better-sqlite3';
 import { buildPrBlocker, reviewCoverage, formatPrBlockers, makePrBlockersReport, reportAction } from '../src/pr-blockers.mjs';
 import { collectPrBlockers, readPages, readReviewStore, readCloserLeases,
@@ -29,6 +30,40 @@ const fixture = async t => {
   t.after(() => rm(root, { recursive: true, force: true }));
   return root;
 };
+
+for (const scenario of ['row-error', 'report-error', 'daemon-route', 'no-observation']) {
+  test(`strict-route acceptance handles ${scenario} explicitly`, async t => {
+    const root = await fixture(t);
+    const bin = join(root, 'bin'), journalDir = join(root, 'data', 'next-action-shadow');
+    await mkdir(bin);
+    await mkdir(journalDir, { recursive: true });
+    const reportPath = join(root, 'report.json');
+    const sample = { repo, number: 7, headSha: head, errors: [], coverage: { kind: 'exact-head' },
+      review: { headSha: head, verdict: 'comment-only', nonBlockingFindingCount: 1,
+        postedAt: '2026-01-02T11:55:00Z' } };
+    await writeFile(reportPath, JSON.stringify({ errors: scenario === 'report-error' ? ['listing unavailable'] : [],
+      rows: [sample, { ...sample, number: 8, errors: ['unrelated read failed'] }] }));
+    // Model pr-blockers' documented exit 1 while preserving its usable JSON.
+    await writeFile(join(bin, 'node'), '#!/bin/sh\nif [ "$1" = "bin/pr-blockers.mjs" ]; then\n/bin/cat "$FIXTURE_REPORT"\nexit 1\nfi\nexit 0\n', { mode: 0o755 });
+    const event = number => ({ schema: 'merge-lane-observation/v1', repo, prNumber: number, head,
+      observedAt: '2026-01-02T12:00:00Z',
+      next: { action: scenario === 'daemon-route' || number === 8 ? 'daemon-merge' : 'hammer',
+        reason: 'review-findings-final' } });
+    // The erroneous row's daemon observation must never enter the acceptance sample.
+    await writeFile(join(journalDir, 'observations.jsonl'),
+      (scenario === 'no-observation' ? [] : [event(7), event(8)]).map(event => JSON.stringify(event)).join('\n') + '\n');
+    const plan = loadYaml(await readFile(new URL('../modules/worker-pool/post-merge-actions/AMASTRICTROUTE-01.yaml', import.meta.url), 'utf8'));
+    const result = spawnSync('/bin/sh', ['-c', plan.operator_steps[0].command], {
+      cwd: root, encoding: 'utf8', timeout: 5000,
+      env: { ...process.env, PATH: `${bin}:${process.env.PATH}`, FIXTURE_REPORT: reportPath,
+        DEPLOYED_AT_UTC: '2026-01-02T11:00:00Z' },
+    });
+    assert.equal(result.status, scenario === 'row-error' ? 0 : 5, result.stderr);
+    if (scenario === 'report-error') assert.match(result.stderr, /pr-blockers report unavailable/);
+    if (scenario === 'daemon-route') assert.match(result.stderr, /unexpected daemon route/);
+    if (scenario === 'no-observation') assert.match(result.stderr, /acceptance pending/);
+  });
+}
 
 test('coverage distinguishes no review, exact head, post-review authors and rebase', () => {
   assert.equal(reviewCoverage(null, head).kind, 'no-review');

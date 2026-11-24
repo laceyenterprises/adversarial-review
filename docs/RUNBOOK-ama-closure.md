@@ -20,11 +20,15 @@ pre-claim remediation cap uses the same request. The watcher admits at most one
 existing final-fix-all work order for that head. A disabled or refused handoff
 records `needs-closer` and alerts through closure-wait. Later closure passes
 recheck admission on that head, including from legacy `ownerless-closer-no-merge`
-receipts. If final fix-all has already spent its head-scoped round, the selected
-hammer continues through ordinary admission and caps. The immediate refusal
+receipts. If final fix-all has already spent its head-scoped round, only a strict
+exact-head final findings route continues through ordinary hammer admission and
+caps. Other routes retain `needs-closer` custody and the refusal page. The immediate refusal
 page is deduplicated and the 1800-second target has no timed escalation. See
 [successor records](data-model/closer-successors.md) and
 [publication ownership](data-model/hammer-publication-ownership.md).
+Strict exact-head findings remain recognized after the automatic retry-cap stop
+is selected, so an ended launch still reconciles and reaches the existing
+deduplicated cap page instead of retaining a succeeded dispatch as an owner.
 Exits before completing the close retain their existing bounded retry/refund
 executor and cap alert; confirmed no-merge decisions and `no_work_done` take
 the successor path after terminal cleanup and accounting.

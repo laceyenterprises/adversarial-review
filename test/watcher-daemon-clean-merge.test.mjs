@@ -1763,6 +1763,36 @@ test('daemon clean merge strict mode declines non-blocking findings before ident
   }
 });
 
+test('#5053 strict exact-head closer findings skip unused suppression proof and retain hammer ownership', async t => {
+  const rootDir = tempRoot();
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  const args = findingsArgs(rootDir);
+  const result = await runDaemonCleanMergeAttempt({
+    rootDir, cfg: { strictMode: true }, repoPath: args.repoPath, prNumber: args.prNumber,
+    candidate: args.candidate, currentPrHeadSha: 'head-live',
+    gateSnapshot: { settledReview: { verdict: 'comment-only' } },
+    reviewState: { headSha: 'head-live', blockingFindingState: 'known', blockingFindingCount: 0,
+      nonBlockingFindingState: 'known', nonBlockingFindingCount: 1 },
+    resolveHeadCloserCommitSuppressionImpl: () => assert.fail('unusable #5053 proof must not read GitHub'),
+    headHasValidatedHamTerminalRemediationImpl: () => assert.fail('unusable HAM proof must not be read'),
+    fetchRollupImpl: () => assert.fail('strict findings must decline before live reads'),
+  });
+  assert.equal(result.reason, 'non-blocking-findings-present');
+  let hammers = 0;
+  const routed = await maybeDispatchAmaClosureFor({ ...args,
+    resolveHeadCloserCommitSuppressionImpl: () => assert.fail('strict final findings must skip daemon certification'),
+    runDaemonCleanMergeAttemptImpl: () => assert.fail('shared decision must route directly to hammer'),
+    maybeDispatchAmaCloserImpl: async input => {
+      hammers++;
+      assert.equal(input.reviewState.headSha, 'head-live');
+      return { dispatched: true };
+    },
+  });
+  assert.equal(routed.nextAction.action, 'hammer');
+  assert.equal(routed.nextAction.reason, 'review-findings-final');
+  assert.equal(hammers, 1);
+});
+
 test('daemon clean merge defers when the live PR head moved after the tick snapshot', async () => {
   const rootDir = tempRoot();
   try {

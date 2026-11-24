@@ -356,3 +356,21 @@ test('disabled AMA still records and alerts a pending cap successor refusal', as
   assert.equal(alerts.length, 1);
   assert.deepEqual(f.effects, []);
 });
+
+for (const strictMode of [true, false]) test(`spent successor fallback respects strict exact-head scope (strict=${strictMode})`, async t => {
+  const f = fixture(t);
+  requestCloserSuccessor({ ...f.identity, reviewBody: BODY, source: 'follow-up-pre-claim-cap' });
+  // Failed CI keeps both modes on the hammer route, isolating fallback policy.
+  f.args.candidate.statusCheckRollup[0].conclusion = 'FAILURE';
+  f.args.loadConfigImpl = () => ({ getMergeAuthorityConfig: () => ({ enabled: true, strictMode }) });
+  f.args.handoffFinalFixAllImpl = async () => ({ action: 'fallback', reason: 'final-fix-all-spent' });
+  const result = await maybeDispatchAmaClosureFor(f.args);
+  if (strictMode) {
+    assert.deepEqual(f.effects, ['closer']);
+    assert.equal(result.nextAction.action, 'hammer');
+  } else {
+    assert.deepEqual(f.effects, []);
+    assert.equal(result.reason, 'needs-closer');
+    assert.equal(readCloserSuccessor(f.rootDir, f.identity).reason, 'final-fix-all-spent');
+  }
+});

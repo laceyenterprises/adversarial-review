@@ -573,12 +573,9 @@ async function attemptDaemonCleanMergeInner({
   const strictExactHead = strictMode !== false && Boolean(validatedHead)
     && String(reviewState.headSha || '').toLowerCase() === String(validatedHead).toLowerCase();
   const reviewAllowed = isDaemonMergeReviewAllowed(reviewState, { strictMode });
-  if (
-    !docsFastPath &&
-    !reviewAllowed &&
-    (strictExactHead || (!(allowHamTerminalRemediation === true && hamTerminalVerdict)
-      && !headCloserCertifiedBypass && !initialOperatorOverride))
-  ) {
+  const findingsBypass = !strictExactHead && ((allowHamTerminalRemediation === true && hamTerminalVerdict)
+    || headCloserCertifiedBypass || initialOperatorOverride);
+  if (!docsFastPath && !reviewAllowed && !findingsBypass) {
     return notTaken(uncleanReason(reviewState, { strictMode }) || 'findings-unknown');
   }
 

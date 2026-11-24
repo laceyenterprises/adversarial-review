@@ -28,8 +28,10 @@ updatedAt, then calls the existing closure-wait alert surface immediately with
 waitClass `closer-successor`. Its persistent page latch deduplicates repeated
 observations. Delivery failures remain retryable. The closure pass can retry
 admission from `needs-closer` or the legacy `ownerless-closer-no-merge` value.
-When a terminal final-fix-all job returns fallback, the watcher leaves the
-receipt intact and passes the selected hammer decision to normal admission.
+When a terminal final-fix-all job returns fallback for strict exact-head final
+findings, the watcher leaves the receipt intact and passes the selected hammer
+decision to normal admission. Other routes record `needs-closer` with the
+handoff's reason and surface the refusal instead of admitting another hammer.
 Final-fix-all's durable claim prevents duplicate work. The refusal page is
 immediate and there is no separate escalation at the 1800-second target.
 

@@ -5435,7 +5435,8 @@ async function maybeDispatchAmaCloserAttempt({
     reviewState?.reviewCycleExhausted === true;
   const validatedHamTerminalRemediation =
     verdict?.trace?.hamTerminalRemediation?.ok === true && !repairCertifiedPark;
-  const strictExactHeadHammerFindings = cfg?.strictMode !== false && forceHammerTerminalRemediationPrompt
+  // Recognition must survive R07: terminal reconciliation still owes the cap page.
+  const strictExactHeadHammerFindings = cfg?.strictMode !== false
     && reviewState.headSha === prMetadata.headSha && !isFullyCleanSettledReview(reviewState);
   const templatePath = dispatchContext.templatePath || HAMMER_TEMPLATE_PATH;
   const templateBody = readTemplateImpl

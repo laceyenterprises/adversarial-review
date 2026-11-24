@@ -314,9 +314,21 @@ function patchSegments(files, path, cache) {
 
 // Project a base-coordinate region into a reviewed/parent head. Missing or
 // truncated diffs cannot authorize anything. Findings use inclusive head lines.
-function projectRegion(files, path, region, cache) {
+function projectRegion(files, path, region, cache, { ignoreInsertionPadding = false } = {}) {
   const { file, segments } = patchSegments(files, path, cache);
   if (!file) return { ...region, filename: path };
+  if (ignoreInsertionPadding && region.start === region.end) {
+    const insertion = segments.find(segment => segment.old === region.start && segment.oldEnd === region.end);
+    if (insertion) {
+      // Git groups adjacent blank lines with an insertion. The citation must
+      // cover every content line. The parent-state patch proof still uses the
+      // full insertion, including its blanks.
+      const hasContent = line => line.slice(1).trim() !== '';
+      const first = insertion.lines.findIndex(hasContent);
+      if (first >= 0) return { filename: file.filename,
+        start: insertion.next + first, end: insertion.next + insertion.lines.findLastIndex(hasContent) };
+    }
+  }
   const project = (line, end) => {
     let offset = 0;
     for (const segment of segments) {
@@ -529,7 +541,7 @@ function reversalAuthorized(evidence, path, region, cache, strictNonBlockingReme
         }
         const reviewed = authorization.verifiedRegions || originalParentProof ? null : rebased === true
           ? projectRebasedRegion(parentFiles, reviewedFiles, path, region, cache)
-          : projectRegion(reviewedFiles, path, region, cache);
+          : projectRegion(reviewedFiles, path, region, cache, { ignoreInsertionPadding: !lane });
         if (rebased && !authorization.verifiedRegions) {
           const expectedParent = originalParentProof ? originalParentProof.parentFiles : reviewedFiles;
           if (reversalPatchIdentity(expectedParent, cache) !== reversalPatchIdentity(parentFiles, cache)) return reject('reviewed-parent-patch-differs');

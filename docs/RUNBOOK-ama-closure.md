@@ -703,6 +703,11 @@ alias. Nothing changes until a repository is listed.
 
 ## Change notes
 
+- **PRIMARYLANEPROV-01:** A closer can cite the authoritative review of a
+  lane-update head. Finding coverage for a pure insertion runs from its first
+  through its last nonblank line. The commit patch still proves what the
+  closer removed. [Change note](changes/PRIMARYLANEPROV-01.md)
+
 - **HAMEDITPLAN-04:** An otherwise admissible `author-lines` plan outside the
   cited finding's ranges receives exit 21 with those ranges and re-planning
   guidance. It never permits the uncovered edit; exit 1 remains terminal.
@@ -5277,6 +5282,14 @@ insertion anchors. Renames, opaque files, test-path rules and required-guard
 proofs retain their existing rules. No configuration or operator override is
 needed for whitespace normalization.
 
+For a closer citation on an ancestor review, a pure insertion's finding range
+must cover from its first through its last nonblank line. Git can group
+surrounding blank lines into the insertion. The closer's patch must still prove
+removal of the full protected insertion in its parent. For provenance, the
+gate verifies the commit carrying the citation. An earlier lane commit must
+prove its own provenance for any reversal it performed. Its lane owner supplies
+no authority for a closer's later reversal.
+
 PRIMARYDEADCODE-01: a finding-authorized deletion can leave an author-added
 import or module binding dead outside the cited lines. Its reversal is part of
 that deletion only when file contents prove it. The unit must be a pure author
@@ -6605,7 +6618,7 @@ list and themselves contain only literal paths and numeric ranges. Explanatory
 notes stop secondary parsing. Nested braces, globs, traversal, absolute paths,
 missing coordinates and paths mentioned only in Problem/Recommended fix confer
 no authority. File and Lines are each bounded at 512 characters. All original
-identity, ancestry, currency, patch-content and whole-span checks still apply.
+identity, ancestry, currency, patch-content and line-coverage checks still apply.
 Inputs over 512 characters are refused before parsing, rather than truncated
 into a potentially authorizing prefix. Invalid numeric ranges also refuse
 authorization. The refusal includes the unreadable `Lines:` text (bounded).
@@ -6624,11 +6637,13 @@ A fresh evaluation reads verification again. A verification SHA mismatch records
 snapshots; an otherwise unclassified verification read error records `unverifiable`.
 Equal-length replacements map by line position; unequal-length replacements
 require the finding to cover the entire projected span. Insertion-only regions
-remain protected: deleting the insertion requires a citation covering its entire
-introduced span and HAM removals covering the remaining parent-state added-line
-multiset at its projected parent coordinates (REVERSALPROV-02). In-place repairs
-may still change introduced text while preserving the changed region. A one-line finding cannot waive the uncited
-remainder of a contiguous author hunk.
+remain protected. A closer citing a review in its parent ancestry must cover
+the span from the first through the last nonblank line of the reviewed
+insertion. Lane and rebased citations require the full introduced span. The
+closer's removals must cover the remaining parent-state added-line multiset
+at its projected parent coordinates (REVERSALPROV-02). In-place repairs may
+still change introduced text while preserving the changed region. A one-line
+finding cannot waive uncited content in a contiguous author hunk.
 Unrelated regions, missing trailers and old reviews outside
 the closure cannot authorize a reversal. Restoring a deleted base line requires
 matching HAM additions, including when the author hunk also introduced new lines;

@@ -8,6 +8,7 @@ import { isEligibleForAmaClosure, __testables__ } from '../src/ama/eligibility.m
 import { checkPrimaryChange } from '../src/ama/primary-change.mjs';
 import { primaryChangeExactReviewEvidence } from '../src/ama/primary-change.mjs';
 import { recoverStrandedCloserHead } from '../src/ama/closer-head-recovery.mjs';
+import { buildHamTerminalRemediationEvidenceFromGroundTruth } from '../src/ama/dispatch-closer.mjs';
 import { parseCommitTrailers } from '../src/ama/ham-provenance.mjs';
 import { isTerminalCloserCommitIdentity } from '../src/head-closer-commit-suppression.mjs';
 import { DEFAULT_ADVERSARIAL_GATE_CONTEXT } from '../src/adversarial-gate-context.mjs';
@@ -3242,6 +3243,36 @@ test('ham terminal remediation: standalone doc-currency wins over a legacy valid
     hamTerminalRemediationGroundTruth: hamGroundTruth({ auditBody, changedFiles: ['README.md'] }),
   });
   assert.equal(result.trace.hamTerminalRemediation.checks.docCurrency, true);
+});
+
+test('PRIMARYLANEPROV-01: exact doc paths affect audit evidence independently of primary-change preservation', () => {
+  const { reviewState, prMetadata, cfg } = eligibleFixture({ prMetadata: { headSha: 'def67890' } });
+  const changedFiles = ['src/example.mjs', 'docs/runtime.md', 'docs/operations.md'];
+  for (const exactPaths of [false, true]) {
+    const auditBody = [
+      '- **Add startup diagnostic** (non-blocking) - Updated src/example.mjs.',
+      `Doc-currency: updated ${exactPaths ? 'docs/runtime.md and docs/operations.md' : 'the runtime and operations guides'}.`,
+    ].join('\n');
+    const groundTruth = hamGroundTruth({ auditBody, changedFiles });
+    const evidence = buildHamTerminalRemediationEvidenceFromGroundTruth({
+      verifiedCommit: groundTruth.commit, verifiedAuditComment: groundTruth.auditComment,
+    });
+    assert.deepEqual(evidence.auditComment.docCurrency.docsUpdated, exactPaths ? changedFiles.slice(1) : []);
+    for (const reverted of [false, true]) {
+      const commit = { ...groundTruth.commit, primaryChange: {
+        ...groundTruth.commit.primaryChange, ...(reverted ? { finalFiles: [] } : {}),
+      } };
+      const result = isEligibleForAmaClosure(reviewState, prMetadata, cfg, {
+        env: ENV, hamTerminalRemediation: evidence,
+        hamTerminalRemediationGroundTruth: { ...groundTruth, commit },
+      });
+      const trace = result.trace.hamTerminalRemediation;
+      assert.equal(trace.checks.docCurrency, exactPaths);
+      assert.equal(trace.checks.primaryChange, !reverted);
+      assert.equal(trace.activeAuthorized, !reverted);
+      assert.equal(result.reasons.includes('primary-change-reverted'), reverted);
+    }
+  }
 });
 
 test('ham terminal remediation: App audit author is mandatory; bookkeeping and empty diff do not veto a validated head', () => {

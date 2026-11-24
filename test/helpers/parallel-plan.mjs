@@ -27,3 +27,21 @@ export function orderFiles(files, durations) {
   const duration = estimate(durations);
   return [...files].sort((a, b) => duration(b) - duration(a) || (a < b ? -1 : a > b ? 1 : 0));
 }
+
+export function planPrShards(selected, suite, durations) {
+  const duration = estimate(durations);
+  const work = files => files.reduce((sum, file) => sum + duration(file), 0);
+  // Leave room for runner variance. Use counts as well as measured weights
+  // because newly added files only have a median-duration estimate.
+  if (selected.length < 2 || (selected.length * 3 < suite.length && work(selected) * 3 < work(suite))) {
+    return null;
+  }
+  const shards = [[], []];
+  const weights = [0, 0];
+  for (const file of orderFiles(selected, durations)) {
+    const index = weights[0] <= weights[1] ? 0 : 1;
+    shards[index].push(file);
+    weights[index] += duration(file);
+  }
+  return shards;
+}

@@ -3,29 +3,39 @@ import { createCloserQueueHandoffBoundary } from '../ama/closer-queue-handoff.mj
 // Route-scoped closer retirement. Live composition supplies the sanctioned
 // handoff surface; no new transport, credential source or routing configuration.
 import Database from 'better-sqlite3';
-import { statSync } from 'node:fs';
+import { existsSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import { openFinalizationQueueStore } from './queue-store.mjs';
 import { resolveLaneRoute, resolveQueueRoutingStore } from './queue-routing.mjs';
 import { queueWaitMs } from './queue-wait.mjs';
 import { resolveQueueAdmissionAdapters } from './queue-admission.mjs';
 import { resolveQueueHandoffStore } from './queue-handoff-store.mjs';
+import { resolveCleanReviewStore } from './queue-clean-review.mjs';
 import { routeFinalizationWriter } from './queue-routing-boundary.mjs';
 import { parseHammerQueueHandoffCommand } from './hammer-queue-command.mjs';
 
-export function readCompletedQueueHandoff(store, { lane, prNumber, head }) {
+export function readCompletedQueueHandoff(store, { lane, prNumber, head }, { includeClean = false } = {}) {
   const receipts = resolveQueueHandoffStore(store);
   const admissions = resolveQueueAdmissionAdapters(store);
-  const rows = store.db.prepare(`SELECT payload_json FROM finalization_queue_entry
-    WHERE repository=? AND base=? AND pr_number=? ORDER BY rowid DESC`).all(lane.repository, lane.base, prNumber);
+  // Generations are scoped to the admission head. Retain row order across
+  // different heads, where an entry may match by its published candidate.
+  const rows = store.db.prepare(`SELECT entry.payload_json FROM finalization_queue_entry AS entry
+    WHERE entry.repository=? AND entry.base=? AND entry.pr_number=?
+      AND NOT EXISTS (
+        SELECT 1 FROM finalization_queue_entry AS newer
+        WHERE newer.repository=entry.repository AND newer.base=entry.base AND newer.pr_number=entry.pr_number
+          AND newer.admission_head=entry.admission_head AND newer.admission_generation>entry.admission_generation
+      )
+    ORDER BY entry.rowid DESC`).all(lane.repository, lane.base, prNumber);
   for (const row of rows) {
     const entry = JSON.parse(row.payload_json);
     if (entry.head !== head && entry.candidate !== head) continue;
     // A returned entry owes fresh remediation/admission, including same-head
     // returns. Never let an older acknowledgement hide that obligation.
     if (entry.phase === 'returned-to-closer') return null;
+    if (includeClean && resolveCleanReviewStore(store).read(entry.entryId)) return { entry, ack: null };
     const ack = receipts.read({ lane, prNumber, head: entry.head, admissionGeneration: entry.admissionGeneration })?.ack;
-    if (ack) { admissions.receipt(entry); return ack; }
+    if (ack) { admissions.receipt(entry); return { entry, ack }; }
   }
   return null;
 }
@@ -59,13 +69,14 @@ export async function prepareQueueCloserDispatch({ rootDir, cfg, lane, prNumber,
     legacy: () => ({ executor: 'legacy' }), queue: route => {
       const store = openFinalizationQueueStore({ rootDir });
       try {
-        const ack = readCompletedQueueHandoff(store, { lane: route.lane, prNumber, head });
-        if (ack) return { dispatched: false, skipMergeAgent: true, queued: true,
-          reason: 'queue-handoff-acknowledged', acknowledgement: ack };
+        const completed = readCompletedQueueHandoff(store, { lane: route.lane, prNumber, head }, { includeClean: true });
+        if (completed) return { dispatched: false, skipMergeAgent: true, queued: true,
+          reason: 'queue-handoff-acknowledged', acknowledgement: completed.entry };
         // MRQ-21: the hammer's close controller delivers its attested-head
         // handoff through this installed command, which invokes the
         // composition's handoff service. No command, no queue-lane closer.
-        const handoffCommand = parseHammerQueueHandoffCommand(composition?.hammerHandoffCommand);
+        const handoffCommand = parseHammerQueueHandoffCommand(composition == null
+          ? installedQueueHandoffCommand(rootDir) : composition.hammerHandoffCommand);
         if (!handoffCommand) return { ok: false, reason: 'queue-closer-composition-unavailable' };
         return { executor: 'queue-v2', route, handoffCommand };
       } finally { store.close(); }
@@ -87,14 +98,28 @@ export function confirmQueueAdmission({ rootDir, lane, prNumber, head, acknowled
     const receipt = resolveQueueAdmissionAdapters(store).receipt(entry);
     if (!receipt) throw new Error('queue admission receipt unavailable');
     return { ok: true, taken: true, dispatched: false, skipMergeAgent: true, queued: true,
-      reason: 'queue-handoff-acknowledged', acknowledgement: ack };
+      reason: 'queue-handoff-acknowledged', acknowledgement: entry };
   } finally { store.close(); }
 }
 
+function installedQueueHandoffCommand(rootDir) {
+  const path = join(rootDir, 'bin', 'finalization-queue-handoff.mjs');
+  return existsSync(path) ? [process.execPath, path] : null;
+}
+
 export function queueAdmissionCallback({ rootDir, lane, prNumber, head, admit }) {
-  if (typeof admit !== 'function') return undefined;
-  return async route => confirmQueueAdmission({ rootDir, lane: route.lane ?? lane, prNumber, head,
-    acknowledgement: await admit(route) });
+  if (typeof admit !== 'function' && !installedQueueHandoffCommand(rootDir)) return undefined;
+  return async route => {
+    try {
+      const acknowledgement = typeof admit === 'function' ? await admit(route) :
+        await (await import('./queue-production.mjs')).createProductionQueue({ rootDir }).admitClean({ route, prNumber, head });
+      if (acknowledgement?.ok === false) return acknowledgement;
+      return confirmQueueAdmission({ rootDir, lane: route.lane ?? lane, prNumber, head, acknowledgement });
+    } catch (error) {
+      if (typeof admit === 'function') throw error;
+      return { ok: false, reason: /^queue-[a-z-]+$/.test(error.message) ? error.message : 'queue-admission-evidence-unavailable' };
+    }
+  };
 }
 
 // Resource release is mandatory for this migrated-lane composition. Failure

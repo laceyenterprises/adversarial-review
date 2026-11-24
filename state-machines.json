@@ -78,14 +78,16 @@
       "acknowledged",
       "resources-released"
     ],
-    "transitions": "MRQ-21: a resolved queue route dispatches the ordinary hammer (same prompt, phases and decision-only/terminal-audit launch) with queue inputs naming the route generation and the installed handoff command. Its close controller stops after publish and the exact-head audit, delivers a handoff bound to repo, PR, head and review-proof digest, and confirms the durable receipt and entry before recording a superseded terminal audit (queue-handoff-admitted); it never waits CI, runs the predicate or merges. Unconfirmed admission is a retryable queue-handoff-unadmitted re-drive; a moved, merged or closed head stops on the world fact and starts a fresh review lifecycle. A durable acknowledgement observed before the final dispatch recheck suppresses duplicate dispatch; a later commit can still race launch. Acknowledgement precedes mandatory idempotent resource release in the installed composition. Returned entries owe fresh admission; legacy/rollback routes retain existing incident repair and execution. Legacy preflight reads routing without a lane lock or writer journal; unreadable ownership refuses. Missing dispatch inputs fail exactly as on a legacy lane. Migrated lanes without an installed handoff command refuse all closer remediation at deployment.",
+    "transitions": "MRQ-21: a resolved queue route dispatches the ordinary hammer (same prompt, phases and decision-only/terminal-audit launch) with queue inputs naming the route generation and the installed handoff command. Its close controller stops after publish and the exact-head audit, delivers a handoff bound to repo, PR, head and review-proof digest, and confirms the durable receipt and entry before recording a superseded terminal audit (queue-handoff-admitted); it never waits CI, runs the predicate or merges. Unconfirmed admission is a retryable queue-handoff-unadmitted re-drive; a moved, merged or closed head stops on the world fact and starts a fresh review lifecycle. A durable acknowledgement observed before the final dispatch recheck suppresses duplicate dispatch; a later commit can still race launch. Acknowledgement precedes mandatory idempotent resource release in the installed composition. Returned entries owe fresh admission; legacy/rollback routes retain existing incident repair and execution. Legacy preflight reads routing without a lane lock or writer journal; unreadable ownership refuses. Missing dispatch inputs fail exactly as on a legacy lane. The installed receiver verifies the closer launch and authenticated exact-head audit and enqueues through the route fence. A missing command or unresolved evidence refuses closer admission.",
     "codeSources": [
       "src/finalization/queue-closer.mjs",
       "src/ama/dispatch-closer.mjs",
       "src/finalization/hammer-queue-handoff.mjs",
       "src/finalization/hammer-queue-command.mjs",
       "bin/hammer-queue-handoff.mjs",
-      "bin/hammer-close-controller.sh"
+      "bin/hammer-close-controller.sh",
+      "bin/finalization-queue-handoff.mjs",
+      "src/finalization/queue-production-admission.mjs"
     ],
     "validation": "test/finalization-queue-closer.test.mjs; test/finalization-queue-closer-race.test.mjs; test/mrq-21-queue-hammer-handoff.test.mjs; test/hamcontrollerscript-01.test.mjs; organic resource-release observation separate from smoke"
   },
@@ -109,13 +111,15 @@
       "transfer-pending",
       "queue-v2"
     ],
-    "transitions": "Issuance lock and monotonic route fence precede drain/reconciliation. Unknown outcomes retain transfer-pending and fence both routes. Rollback also acknowledges durable stable-key returns before legacy ownership. Cached selector mismatches cannot mutate. Config defaults legacy, brake independent; no production flip or new smoke/check. HAMLANEWAIT-01: legacy shell contention waits on release through a fresh 60-second merge-attempt deadline after CI/lease waits; exhaustion records deferred/lane-busy and refunds contention credit with 2-minute exponential backoff capped at 30 minutes, never a final-no-merge. The third same-head launch pages through the durable closure-wait receipt; other launch statuses and bare queue-route refusals retain existing semantics. Queue-v2 transitions are unchanged.",
+    "transitions": "Issuance lock and monotonic route fence precede drain/reconciliation. Unknown outcomes retain transfer-pending and fence both routes. Rollback also acknowledges durable stable-key returns before legacy ownership. Cached selector mismatches cannot mutate. Config defaults legacy, brake independent; no production flip or new smoke/check. HAMLANEWAIT-01: legacy shell contention waits on release through a fresh 60-second merge-attempt deadline after CI/lease waits; exhaustion records deferred/lane-busy and refunds contention credit with 2-minute exponential backoff capped at 30 minutes, never a final-no-merge. The third same-head launch pages through the durable closure-wait receipt; other launch statuses and bare queue-route refusals retain existing semantics. The watcher pumps the existing queue phases only for matching configured and durable queue ownership. GSR and the execution brake pause claims. The current owner advances the first ready entry and retires before the next tick; unresolved remote requests remain fenced pending proved drain and reconciliation.",
     "legacyTerminalReview": "LAC-2305: HAM terminal merges check fresh review and issuer evidence before the merge lease, at live gates and inside the legacy issuance writer. A standing configured human operator or proven repository admin request on any head survives rebases until GitHub dismissal or later approval from that issuer on any head. Historical authorless off-head reviews and incomplete approvals cannot dispose a veto; missing exact-head identity fails closed. Recoverable review-proof holds use a five-minute recovery backoff. Missing exact-head issuer identity, authorless requests without a commit and permission 404 instead return terminal-review-issuer-unverifiable with needsOperator true and no recovery backoff or retry/refund credit. Closed/merged initial snapshots retain daemon state handling; initial read failures return typed unavailable proof. The first live gate reuses the initial rollup/proof; later gates and transports refresh. In-lane proof reads abort within the load-aware value of a 15 second nominal (HAMWRITERTIMEOUT-01: no fixed cap; the only ceiling is the remaining run budget), returning legacy-writer-timeout without transport; an exhausted budget never starts transport. legacy-writer-timeout is a registered infrastructure stop, so the hammer's deferral keeps its real code and the existing closer retry re-drives the merge on the same head under a fresh lease and its existing backoff, without re-remediation or re-review. Operator-veto and review-change deferred audits do not qualify for the retry/refund allowlist. A proven no-invocation preflight drains the local writer reservation. The shell supplies explicit PR identity; unparseable legacy identity refuses with merge-target-unparseable, a registered closer fault (command construction). Existing lifecycle values and smoke promises remain unchanged.",
     "codeSources": [
       "src/finalization/queue-routing.mjs",
       "src/finalization/queue-routing-boundary.mjs",
       "src/finalization/legacy-lane-write.mjs",
-      "src/ama/closer-review-proof.mjs"
+      "src/ama/closer-review-proof.mjs",
+      "src/finalization/queue-consumer.mjs",
+      "src/finalization/queue-production.mjs"
     ],
     "validation": "test/finalization-queue-routing.test.mjs; test/finalization-queue-status.test.mjs; runtime-owner routing probe after deployment"
   },
@@ -165,7 +169,7 @@
       "returned-to-closer",
       "closed-observed"
     ],
-    "transitions": "Green complete policy-resolved exact-candidate checks advance to finalizing; completed red returns and releases. Infrastructure expiry retains original once-scaled absolute deadline, journals deduplicated cause page, parks outside FIFO and releases lane without remediation charge. Base movement invalidates checks under original patience. Bounded reprobe verifies checks, immutable receipt and derivation, then freshly rechecks holds/identity/permission/structural policy before tail readmission. A recovered published candidate gets one bounded observation, no fresh CI patience. Snapshot CAS rejects late responses. Owner expiry and fixed reprobe cadence are independent of patience. Existing Sentinel bus owns delivery; no production route or smoke promise change.",
+    "transitions": "Green complete policy-resolved exact-candidate checks advance to finalizing; completed red or an unsupported App-pinned status context returns and releases. Infrastructure expiry retains original once-scaled absolute deadline, journals deduplicated cause page, parks outside FIFO and releases lane without remediation charge. Base movement invalidates checks under original patience. Bounded reprobe verifies checks, immutable receipt and derivation, then freshly rechecks holds/identity/permission/structural policy before tail readmission. A recovered published candidate gets one bounded observation, no fresh CI patience. Snapshot CAS rejects late responses. Owner expiry and fixed reprobe cadence are independent of patience. Existing Sentinel bus owns delivery; no production route or smoke promise change.",
     "codeSources": [
       "src/finalization/queue-checks.mjs",
       "src/finalization/queue-check-reader.mjs",
@@ -229,9 +233,10 @@
       "returned-to-closer",
       "closed-observed"
     ],
-    "transitions": "Clean signed exact-head reviews and validated terminal handoffs share transactional readiness. Live reads validate holds, head/base, identity, permission and shared structural policy; normal clean work retains its final review read. Terminal lifecycle observations reconcile without dispatch. Parked recovery appends tail readiness with fresh reads and original patience; repair uses a new admission generation. Snapshot CAS after awaits rejects stale recovery and duplicate wakes. Terminal structural returns retain their matching conflict/reversion diagnostic despite infrastructure failures. Valid SHA comparisons ignore hex casing and review IDs compare as strings without rewriting evidence; validated labels become names. Progress events capture priorPhase before applying the patch, while legacy events remain replayable. Readiness grants no merge authority. Candidate or expected-old-head readmission requires recomputing every contiguous derivation and matching the immutable receipt digest; transient proof execution failures park; existing structural/hold/permission checks remain enforced.",
+    "transitions": "Clean signed exact-head reviews and validated terminal handoffs share transactional readiness. Live reads validate holds, head/base, identity, permission and shared structural policy; normal clean work retains its final review read. Terminal lifecycle observations reconcile without dispatch. Parked recovery appends tail readiness with fresh reads and original patience; repair uses a new admission generation. The watcher schedules admission probes from persisted progress at one-minute intervals, clipped to original expiry; expiry without an infrastructure probe schedule returns ownership to the closer and queues an admission-deadline-expired page without remote reads. Same-head readmission needs fresh evidence and a fresh generation. Snapshot CAS after awaits rejects stale recovery and duplicate wakes. Terminal structural returns retain their matching conflict/reversion diagnostic despite infrastructure failures. Valid SHA comparisons ignore hex casing and review IDs compare as strings without rewriting evidence; validated labels become names. Progress events capture priorPhase before applying the patch, while legacy events remain replayable. Readiness grants no merge authority. Candidate or expected-old-head readmission requires recomputing every contiguous derivation and matching the immutable receipt digest; transient proof execution failures park; existing structural/hold/permission checks remain enforced.",
     "codeSources": [
       "src/finalization/queue-admission.mjs",
+      "src/finalization/queue-consumer.mjs",
       "src/finalization/queue-clean-review.mjs",
       "src/finalization/queue-store.mjs"
     ],
@@ -287,14 +292,14 @@
     ]
   },
   "reviewEvidence": "REVIEWEVIDENCE-01: unsupported new PR blockers demote with recorded reasons. Missing repository metadata or an absent/malformed head SHA preserves blockers and verdicts; grounding retains raw Markdown reproductions. Failed reads and exhausted file budgets preserve blockers and verdicts; hosted result verdicts follow the grounded body. Disputes accept complete comma/semicolon range lists and disambiguate repeated titles by citation during completion and durable admission. Known non-blocking acknowledgements may accompany evidence-only completion; claimed blocker repairs cannot. Focused evidence fixtures cover these cases; deployed smoke promises are unchanged. Validated evidence-only remediation completes the existing round after an independent unchanged open-head observation. The exact-head watcher requests an independent review through the existing deduplicated queue and escalates failed admission at the ownerless deadline. Only authenticated hammer withdrawals count at the shared adjudicator. Offline acceptance: test/review-evidence.test.mjs (real SQLite and Node). SRE after deploy: sample 20 reviews for path:line and behaviour on every blocker, repeat the audit 34-finding noise classification and verify its noise share drops. Organic acceptance is separate from the disposable smoke; no new step, runner or lifecycle state.",
-  "docsFastPath": "DOCSFASTPATH-01: docs-only classification precedes review/closer admission and owns deterministic CI/lease waits. The existing daemon lease requires green exact-head checks and a signed/recorded docs-fast-path attestation; Before each transport attempt, live head/base classification, review requests and merge gates are rechecked under lease before recording. A moving base tip requires a fresh docs-only range on the same leased branch; terminal audit metadata records that range. Review requests observed at admission, classification or the live gate withdraw the waiver with pending status before full review; failed withdrawal retains the fast-path wait for retry. Request-review/operator retrigger selects full review. No durable review states or existing smoke promises change. After signer/ledger-first deployment SRE observes three natural docs-only merges within about ten minutes of green checks, no reviewer/closer, recorded attestation, and one non-docs change reviewed. Record subprocess promises retain child.stdin through watcher passthrough. Failed records are deferred outcomes with redacted exit code (including zero) and bounded stderr tail formatted once across module boundaries. Synchronous stdin delivery failure without successful child termination fails promptly while observing late subprocess rejection. Durable exact-head audit history allows three failed pre-merge record attempts with 60-second then 120-second backoff; later ticks park as attestation-record-retry-exhausted with needsOperator until the head changes. Unit fixtures cover child rejection, stdin delivery failure, retry history and a fresh-head budget. After deployment SRE verifies a natural docs-only merge records successfully and the watcher stays running; any record failure must include bounded redacted diagnostics.",
+  "docsFastPath": "DOCSFASTPATH-01: docs-only classification precedes review and closer admission. REVIEWROWLESS-01: a settled check failure or definite mergeability refusal withdraws the waiver and admits ordinary review, including first-pass review with red external CI. The exact-head withdrawal receipt keeps ordinary admission active while routing waits. Gate records retain docsFastPathWithdrawn=true across reviewer assignment, running status and routing reset, including nullish reviewer fields; a new head is classified independently. Unsettled checks and UNKNOWN mergeability retain the waiver for a same-head retry. Unrouted pending rows store the logged reason and owner, keep discovery-first priority, and stay outside reviewer queue reporting until routing. The existing daemon lease requires green exact-head checks and a signed/recorded docs-fast-path attestation; Before each transport attempt, live head/base classification, review requests and merge gates are rechecked under lease before recording. A moving base tip requires a fresh docs-only range on the same leased branch; terminal audit metadata records that range. Review requests observed at admission, classification or the live gate withdraw the waiver with pending status before full review; failed withdrawal retains the fast-path wait for retry. Request-review/operator retrigger selects full review. No durable review states or existing smoke promises change. After signer/ledger-first deployment SRE observes three natural docs-only merges within about ten minutes of green checks, no reviewer/closer, recorded attestation, and one non-docs change reviewed. Record subprocess promises retain child.stdin through watcher passthrough. Failed records are deferred outcomes with redacted exit code (including zero) and bounded stderr tail formatted once across module boundaries. Synchronous stdin delivery failure without successful child termination fails promptly while observing late subprocess rejection. Durable exact-head audit history allows three failed pre-merge record attempts with 60-second then 120-second backoff; later ticks park as attestation-record-retry-exhausted with needsOperator until the head changes. Unit fixtures cover child rejection, stdin delivery failure, retry history and a fresh-head budget. After deployment SRE verifies a natural docs-only merge records successfully and the watcher stays running; any record failure must include bounded redacted diagnostics.",
   "queueHandoffFoundation": {
     "owner": "v2 finalization queue handoff (unwired)",
     "states": [
       "absent",
       "acknowledged"
     ],
-    "transitions": "Complete mechanically validated evidence atomically commits handoff, queue entry, readiness/event and immutable ack. Invalid evidence or write failure leaves absent. Duplicate/lost ack and restart return the same acknowledged receipt. The explicit closer boundary confirms durable ack before idempotent resource release and suppresses duplicate dispatch at the admission tuple. Candidate derivation preserves original signed evidence/dispositions. Legacy execution is unchanged until lane routing.",
+    "transitions": "Complete mechanically validated evidence atomically commits handoff, queue entry, readiness/event and immutable ack. Every finding is accounted for; only non-blocking findings may be deferred with the authenticated audit and explicit non-strict policy evidence. Invalid evidence or write failure leaves absent. Duplicate/lost ack and restart return the same acknowledged receipt. The explicit closer boundary confirms durable ack before idempotent resource release and suppresses duplicate dispatch at the admission tuple. Candidate derivation preserves original signed evidence/dispositions. Legacy execution is unchanged until lane routing.",
     "codeSources": [
       "src/finalization/queue-handoff.mjs",
       "src/finalization/queue-handoff-store.mjs",
@@ -304,7 +309,7 @@
   },
   "deadCloserSubmitter": "CLOSERPENDINGDEAD-01: dispatching to no-dispatch also permits first-poll recovery of a matching local pending submitting intent with dead/reused watcher and submitter identities, no live key carrier in a bounded complete process scan including argument continuation lines, and a subsequent successful empty exact-key ledger query. Child identity persistence requires the same dispatching attempt key and preserves missing or replaced records. System PID 0 rows are valid scan evidence but not process handles. A scanned watcher overrides prior ESRCH: matching identity is live, verified reuse is gone, and unverified identity is unknown. Unknown liveness retains the original deadline; lease CAS, intent fence and merge authority are unchanged.",
   "queueOwnerFoundation": {
-    "owner": "v2 finalization queue (unwired)",
+    "owner": "v2 finalization queue (transferred lanes)",
     "ownerStates": [
       "idle",
       "active",
@@ -324,13 +329,14 @@
       "returned-to-closer",
       "closed-observed"
     ],
-    "transitions": "Claim increments retained generation; expiry requires issuance lock and proven reconciliation of every unresolved operation. Ambiguous drain parks the lane. Release with no unresolved operations returns idle. Parked entries explicitly rejoin readiness tail; terminal admissions require fresh generation. Original patience/candidate survive replay.",
+    "transitions": "Claim increments retained generation. A watcher tick with an unresolved operation parks its active fence before expiry and retains the prior owner and intent. Takeover requires the issuance lock and proven reconciliation of every unresolved operation. The same watcher can retry readback of its own drained issuance. Missing drain or outcome proof keeps the lane parked and queues a durable page. Release with no unresolved operations returns idle. Parked entries explicitly rejoin readiness tail; terminal admissions require fresh generation. Original patience/candidate survive replay.",
     "codeSources": [
       "src/finalization/queue-owner.mjs",
+      "src/finalization/queue-consumer.mjs",
       "src/finalization/queue-store.mjs",
       "src/finalization/ledger-fold.mjs"
     ],
-    "validation": "test/finalization-queue-owner.test.mjs; no live route or service lifecycle change"
+    "validation": "test/finalization-queue-owner.test.mjs; test/finalization-queue-production.test.mjs; runtime-owner read-only ownership probe"
   },
   "closerDecisionRouting": "CIREDOWNER-01: failed CI with rounds left selects remediation for a PR-scoped pending/in-progress job regardless of head or repo case, posted current-head findings awaiting job creation before the existing admission deadline, or completed non-final pushed-head closeout with a prior-head review awaiting watcher CI admission. Closure reuses the gate live-job observation and scans terminal history only without a live owner. A same-head terminal job created before the latest review does not suppress its job-creation wait. Otherwise clean verdicts, terminal jobs and expired missing-job admission select hammer with ci-red-clean-verdict. Closure waits report active-remediation-job only for live PR jobs; otherwise remediation-job-missing. Findings, pending-check waits and mutation-time merge gates retain their existing rules. NXA-07: nextAction(snapshot) is the only successor policy for wake, closeout, closer, daemon, rescue and recovery/no-progress adapters. Changed preflight or execution facts replace the immutable generation. Exact-head validated terminal HAM proof bypasses retry selection only to re-enter CI/review gates; mismatched heads, review handoff, live owners and lifetime caps retain their existing routes. Deleted reason allowlists, final-round resume/grace selection, legacy owner/rescue tables, daemon route classifiers, background mergeability admission refusal and independent rescue eligibility. Retained structural and pure merge predicates, semantic reversal/content proof, strict/domain and terminal hammer judgement, arming, HCP/identity, exact-head required-check/protection rules, terminal settlement, claim/idempotency, shared leases, bounded retries, immutable history/cache, wake transport, drain observations, queues and external class-cap diagnostics. No new runtime refusal, lifecycle state or CI topology. Handoff smoke exercises seven synthetic incident families and unknown/stop combinations. Live rollout evidence remains separate operator/SRE work. Rollback uses source revision 4d06237c.",
   "truthfulNoOpOutcomes": "LVR-02: hammer/closer require terminal-audit and remediation requires push. Launch-bound early failure attempts use failed-without-merge and fixed reasons. Unkeyed early-exit reports preserve the first unkeyed terminal reason per repo/PR/head independently of keyed launches. An open PR without a terminal audit records failed/no_work_done with a reason under existing grace, holds and bounded refund/final-hammer charging. Incident scheduling preserves timeout/wait/wake protections, daemon reservation lifetimes and holder exclusivity. Unreadable auxiliary lease snapshots warn and fall back to ordinary priority; nested subject bodies supply the daemon hint when the live body is absent. Lifecycle states, smoke promises and merge authority are unchanged.",
@@ -1917,12 +1923,14 @@
     {
       "id": "closer-successor",
       "owner": "closure orchestrator",
-      "description": "Head-scoped exhausted closer and pre-claim-cap successor custody; never merge authority.",
+      "description": "Head-scoped exhausted closer and pre-claim-cap successor custody; never merge authority. Legacy `ownerless-closer-no-merge` receipts follow the `needs-closer` transitions. Retirement overlays the status via `retiredAt`: terminal PRs and moved heads retire, retired receipts prune after seven days, and fresh admission to a returned head can clear retirement for non-enrolled receipts.",
       "codeSources": [
         "src/ama/closer-successor.mjs",
         "src/ama/dispatch-closer.mjs",
         "src/ama-closure-orchestration.mjs",
-        "src/follow-up-jobs.mjs"
+        "src/follow-up-jobs.mjs",
+        "src/watcher.mjs",
+        "src/watcher-tick-preflight.mjs"
       ],
       "states": [
         {
@@ -1938,8 +1946,12 @@
           "terminal": true
         },
         {
-          "name": "ownerless-closer-no-merge",
-          "terminal": true
+          "name": "needs-closer",
+          "terminal": false,
+          "exitOwner": "closure orchestrator",
+          "maxDurationSeconds": 1800,
+          "overdueRecipient": "adversarial-review operator",
+          "enforcement": "present"
         }
       ],
       "transitions": [
@@ -1960,15 +1972,29 @@
         {
           "id": "closer-successor.03",
           "from": "successor-pending",
-          "to": "ownerless-closer-no-merge",
-          "trigger": "disabled, refused or failed handoff records typed state and alerts",
+          "to": "needs-closer",
+          "trigger": "disabled, refused or failed handoff records recovery custody and alerts",
           "codeSource": "src/ama/closer-successor.mjs"
         },
         {
           "id": "closer-successor.04",
-          "from": "ownerless-closer-no-merge",
+          "from": "needs-closer",
           "to": "successor-enrolled",
-          "trigger": "later admitted handoff confirms custody without duplicate source-head work",
+          "trigger": "later closure pass enrolls one successor when admission permits",
+          "codeSource": "src/ama/closer-successor.mjs"
+        },
+        {
+          "id": "closer-successor.05",
+          "from": "successor-pending",
+          "to": "successor-pending",
+          "trigger": "watcher deadline sweep confirms the same open head and the absence of a live closer, hammer fallback and prior escalation, then pages once",
+          "codeSource": "src/ama/closer-successor.mjs"
+        },
+        {
+          "id": "closer-successor.06",
+          "from": "needs-closer",
+          "to": "needs-closer",
+          "trigger": "watcher deadline sweep confirms the same open head and the absence of a live closer, hammer fallback and prior escalation, then pages once",
           "codeSource": "src/ama/closer-successor.mjs"
         }
       ]
@@ -1985,13 +2011,13 @@
     "src/ama/pre-receipt-intent.mjs": "1656fd19dfaf3ea9bc351c2a70a46f7a7add0b8a0573fbaa259661ea6f762f98",
     "src/follow-up-branch.mjs": "637f2a18c5fb2a89d2d02c98d80587a713a188c10d70891941d77df847579a8d",
     "src/posted-review-head-repair.mjs": "ce761260224b7a82d152e5b289e8967bbf54026c427a17bdb5cff0a6556ff7d6",
-    "src/pollonce-phases.mjs": "55d6d1b6015953cd8a18a9f497de29cb860f4b001372094aa7ab90419bc002a9",
+    "src/pollonce-phases.mjs": "abd51cf52c39acc7ad6452c46f87712e56c6421a2be99446d7ddaace77819a39",
     "src/review-statuses.mjs": "e5b4f877397ccae443c0ea47babdad7c83d71b6f474a31ad92130b88382f6a7b",
     "src/adapters/reviewer-runtime/agent-os-hq/index.mjs": "8ecf105dc9f46ac09f6a8fb369c14ff7e9cfd1bc17a46da4d87fa146a1bf4d2d",
     "src/adapters/reviewer-runtime/agent-runtime/index.mjs": "37a25e62f889f9d87e83a20495a9a3baef75f53db163ef6ed7638f7d6ac09f82",
     "src/adapters/reviewer-runtime/cli-direct/index.mjs": "6cc1691412ebaf017344318149467a4f604ba2a3fb1634d803a6d1964fe66a7d",
     "src/adapters/reviewer-runtime/run-state.mjs": "58c66556e1e4eeb550b001c00daeebcb22ed72daf475d2ced6703926a7ce2729",
-    "src/ama-closure-orchestration.mjs": "996175c32f1941c64c4e81eccf1616f14c269ae8a21538bdd6fb374a6988ff0f",
+    "src/ama-closure-orchestration.mjs": "acf5f358791a967734f8ca3ef415e4fd24ba671c3d09fc8d86170be846a5eb6b",
     "src/ama/closer-lease.mjs": "c2aa021100d2cc5fc0ba2de3ca035dab42d46d416039853d0df4a69a8b2c3900",
     "src/ama/receipted-closer-alias.mjs": "873f9f5084047190a230275cf716b7dcf21b5deef7ab0eb5318dbc9081c3cdac",
     "src/ama/closure-owner.mjs": "2448cded95d11c7a03d85758d16bf1719a433daef79e8d7454c1696c6bfc079e",
@@ -2001,13 +2027,13 @@
     "src/follow-up-remediation.mjs": "c6e24842a0659f8e5e2445f7d11690f6ebb13c497ecf080dec7e7f33c7a9041c",
     "src/orphan-post-reconcile.mjs": "a4f21f7764d361da91bfa699ad5261e41a2f8348f13c6330ea113b3ae4dad826",
     "src/posted-review-row.mjs": "ae3be33e5c3812b6d421eae1fa19311767e966681da0f8a997ae93127a1f3a07",
-    "src/review-state-db.mjs": "c6cf6b7df98d7c89ef461d163a3ab857bfe67e6866aa35a751e0641c90415413",
+    "src/review-state-db.mjs": "6d67417ccb4594a504d6bcbd2a6d60a3a34b453f2fc18b5aeb0f5c45cdc43de7",
     "src/review-state-statements.mjs": "020ca2b4bd412ccfa4eaec2c76e9c7a9d62c8bad9fb17e6e255c668e29bde0a9",
-    "src/review-state.mjs": "667bb38e77b122ab4942e9e40934b9fe116da01181ac544aea374efb9b0b579c",
+    "src/review-state.mjs": "861c0e309b2cc49c8023a86c7354ea7ab9ec673aec9f9a751510587ad6777b94",
     "src/reviewer-ci-admission.mjs": "b24995f796ae6af2e665d93a30c954b1c78fc59ce62e88074cfb69b965837bdf",
     "src/reviewer-reattach.mjs": "2b27ac21c80425cf460e18f0080d4decf63c28c7bbbd3f6878514160c989efc7",
     "src/reviewer.mjs": "10b8e5b50611cebbcffabc5e5709ffcbf33ed856f469c2a946ed14d72c775e88",
-    "src/watcher.mjs": "950f532574e46ae565ee1c2e982761523dabe5013e384980e082428183eef669",
+    "src/watcher.mjs": "93ce86a60d5eb815311bbe66546e90969fdd1c0ac4e465cf6f81b30f85669ba9",
     "src/adapters/reviewer-runtime/fixture-stub/index.mjs": "551075e64dc0fba15d5411f1d79297bedec2d3e17accecc5c496c04dab3e26ad",
     "src/ama/gsr-closer-lease.mjs": "fea38cdec29edd83201cacbd0fb4134ac4f79156d98a385e647615b45406bff2",
     "src/remediation-publication-recovery.mjs": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
@@ -2018,8 +2044,9 @@
     "src/remediation-ended-round-recovery.mjs": "334e668578c0d8328ba2ef248e506a3fdc5b60830c891789c38bbb2bcbf55f89",
     "src/remediation-round-recovery.mjs": "c80b1959142130b61aac19a11d86d22b874148896569e812aa09a0595bb16b8e",
     "src/remediation-published-head.mjs": "9820f8cf04c26dead1289e92682f4c6f99ed31091a113a9a0688a2e134578a24",
-    "src/ama/closer-successor.mjs": "227842513f6eb0f3c3fc52d8bc892550cb2b042c4edb54771f8a2927342733d9",
-    "src/remediation-publication-refusal.mjs": "c45424d89d38b9ce1bff1581039a64fe358211bebbf7fafbe85d7504cbdaf888"
+    "src/ama/closer-successor.mjs": "f0f89eac3fabb73f8661ae7579053ef168789b4739eb77473f1f89817f4febcc",
+    "src/remediation-publication-refusal.mjs": "c45424d89d38b9ce1bff1581039a64fe358211bebbf7fafbe85d7504cbdaf888",
+    "src/watcher-tick-preflight.mjs": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945"
   },
   "workerObservationReads": "DOG-10 / LAC-2118: worker/process/session/provenance observations use the immutable SDK 0.9.0 public HTTP boundary, separately gated by default-off ADVERSARIAL_WORKER_OBSERVATIONS_ENABLED=1 (env only; no template activation). Already enabled ADVERSARIAL_DISPATCH_READS_ENABLED own-launch HCP reads remain independent. Disabled, unsupported, failed and successful-empty provenance permits existing title-based cross-model review intake with persisted builder_class_inconclusive; empty scope_complete:false evidence never certifies absence, merge identity, lease release or teardown. Positive head attestations remain valid independently; otherwise authoritative identity stays unknown without authorized evidence, with no private fallback. Default PR provenance means the single live pr_opened row; builder_identity permits later completions and is reserved for review routing. Ambiguous identity fails closed; branch provenance is diagnostic-only and cannot replace an opener hidden by grants. Cache identity excludes request_timeout_ms; public token-based HTTP reads receive per-call remaining physical deadlines and failed sessions are evicted. Reroute uses async provenance; cold backfill prepares one SDK registration before sync loops and fails readiness before writes. Partial accounting and zero/null meanings persist. No new lifecycle states or smoke authority.",
   "mergeLeaseGateAccounting": "GATECAPBASE-01: head/base-scoped refusal budgets refund base advances, server rebase conflicts, lane-busy, contention and planned yields under the release-identity fence. New heads and observed bases reset caps; stable-base predicate loops still stop. Capped admissible conflicts return to the existing hammer conflict procedure without a lease; other admissible heads page through durable closure-wait deduplication. Terminal, moved, held and draft heads retain admission fences. No operator reset is required. Synthetic merge-lease, recovery and rendered hammer fixtures cover these routes; existing lifecycle states, merge fences and smoke promises remain unchanged. Runtime owner may observe organic reasons and owner/page receipts read-only after normal deployment; no live worker action or new probe.",
@@ -2037,6 +2064,6 @@
   "overloadDeferral": "OVERLOADDEFER-01: helper load timeouts use the existing deferred audit and retryable lease-abort edge, retaining closer custody. Launch-bound overloadEvidence feeds a per-PR overloadDeferral receipt; replacement launches preserve its bounded counter/backoff. The original five-deferral custody hold and shared host-overload paging are superseded by OVERLOADDEFER-01b: exhaustion releases the hold to normal capped closer selection after one page per PR/head. Generic wrappers preserve deferrals; policy/head/owner fences remain authoritative. States and merge predicates are unchanged. After normal deployment and separately authorized activation SRE observes natural helper deferrals completing later and terminal timeout failures approaching zero. OVERLOADDEFER-01b: the existing watcher owns pending rescue dispatch retry at startup and on a 30-second timer. It runs one bounded process group at a time with fair PR selection, passing only PR identity to retry-only rescue so head/review/holds/writers and original-key reconciliation are re-evaluated. Legacy exhausted/null-retry receipts are observed too when touched within 24 hours; the file-age limit survives restart and fresh writes restore eligibility. Removed or no-longer-eligible receipts after successful rescue count as progress. Each tick asynchronously scans at most 100 directory entries with a retained cursor; receipt progress can require a full rotation including queued due receipts, child execution and applicable per-PR backoff. Live AMA enablement/execution switches suppress retry when disabled or unreadable. Child failures and successful no-op children receive per-PR process-local exponential backoff from 30 seconds through 30 minutes, reset on restart. Due windows drain before cursor advancement; queued receipts revalidate before execution. Broken cursors close and reopen. SIGTERM/SIGINT immediately shuts down the background queue and aborts the active child group alongside reviewer cleanup, with bounded post-kill pipe settlement. Process exit synchronously sends SIGKILL to the recorded active rescue group; ordinary signal cleanup first sends SIGTERM. A companion rejection of --retry-overload-only logs once and suspends retries until watcher restart after companion deployment. Helper exhaustion alerts once per PR/head with phase/load evidence, archives lastOverloadDeferral and releases its hold to normal capped closer selection. Refund suppression is limited to that incident. Within the same job and fixed 30-minute incident window (releases do not extend it), later overloads inherit the exhausted count and release immediately through page deduplication. Existing lifecycle enums, head matching, strict mode, merge predicates and smoke steps are unchanged. SRE retains deployed revisions and watcher PID/start time, then verifies organic receipt progress and closer/released ownership without manual pumping; see changes/OVERLOADDEFER-01b.md.",
   "finalizationWorkflow": "MLR-06: the shared fold projects exactly one workflow/recovery/delivery owner, next action and anchored capped load-aware deadline. Requested/refused work is not admitted work. Useful work deduplicates per subject; kills reconcile effects without a debit. Custody salvage is recorded before existing teardown and successor handoff; held/failed release retains custody. Queue and subject executors record merge_observed, with finalized only after matching verified PMA delivery. Escalations retry acknowledged pages through the existing route and retain recovery ownership. Synthetic scoped tests only; no new smoke step. MLR-08 owns deployed build, composed custody/PMA/pager capabilities, organic receipts and operator-authorized activation; no worker route change or restart.",
   "reviewCliResolution": "Executable resolution retries once with load-aware deadlines; exhausted resolution is cli-resolution-transient, never an OAuth outage or seat-isolation reason. Below CASCADE_FAILURE_CAP consecutive transient failures, release only the matching session to pending without charging review or infrastructure recovery attempts, retaining PR-level backoff; at the threshold use existing bounded pending-upstream recovery. No new durable status or merge predicate.",
-  "closerPublicationSuccessor": "Active closer publication writes intent before mutation and serializes exact returned-head recording with reviewer ownership reads. Known Git heads are reserved before push; old-head server acknowledgments retain the barrier through visibility and full-tree replay proof. Exact lease or running-controller publication custody defers automatic review only; explicit operator requests and unrelated settled publications retain normal admission. Confirmed merged release attempts publication retirement; cleanup errors warn without failing the settled lease release, and retained custody remains bounded by controller liveness and the six-hour receipt lifetime. A successor request recreates a receipt missing at the locked read; settlement returns a pending deferral without dispatch or alert if its receipt disappears. Exhausted confirmed no-merge and ordinary pre-claim cap stops enroll one PR/head successor before terminal stop; final-fix-all owns the work or ownerless-closer-no-merge is persisted and immediately surfaced by existing closure-wait alerting. No merge or finding predicate changes.",
+  "closerPublicationSuccessor": "Active closer publication writes intent before mutation and serializes exact returned-head recording with reviewer ownership reads. Known Git heads are reserved before push; old-head server acknowledgments retain the barrier through visibility and full-tree replay proof. Exact lease or running-controller publication custody defers automatic review only; explicit operator requests and unrelated settled publications retain normal admission. Confirmed merged release attempts publication retirement; cleanup errors warn without failing the settled lease release, and retained custody remains bounded by controller liveness and the six-hour receipt lifetime. A successor request recreates a receipt missing at the locked read; settlement returns a pending deferral without dispatch or alert if its receipt disappears. Exhausted confirmed no-merge and ordinary pre-claim cap stops enroll one PR/head successor before terminal stop; final-fix-all owns the work or needs-closer is persisted and immediately surfaced by existing closure-wait alerting. A spent final fix-all permits normal hammer admission only when a strict exact-head review with findings selects hammer, including CI repair. The watcher independently scans receipts after 1800 seconds from the original requestedAt. It retires receipts for confirmed terminal or moved heads and pages once for a deadline-eligible open exact head without a live closer dispatch or retry through the existing closure-wait latch. Live closers or unreadable PRs back off deadline probes for five minutes. Durable fallbackAt transfers deadline ownership to hammer across retry gaps and caps. Successful refusal or overdue delivery records escalatedAt and ends deadline paging. Delivery failure remains retryable. Enrolled, escalated and hammer-owned receipts get retirement-only probes at most daily. Retired JSON is pruned after seven days under its retained lock inode.",
   "remediationCancellationCustody": "LAC-2218: failed or pending lifecycle cancellation retains in_progress/spawned ownership with the last cancellation receipt and cancellationHold; no failure comment or successor. HQ uses the accepted parent session only when the monitor has no explicit parent, preserving operator precedence and owner authorization. HEAD reflog ancestry and exact matching produced attestations retain own publications across rewrites; unavailable evidence retains custody. Terminal workers reconcile without lifecycle cancellation. Existing merge gates and smoke commands are unchanged. Source proofs and separately authorized deployed read-only acceptance remain distinct."
 }

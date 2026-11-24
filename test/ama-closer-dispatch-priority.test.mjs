@@ -2749,8 +2749,10 @@ test('CLOSERGATE-01: slow pre-receipt acknowledgements serialize only their own 
   }
 });
 
-for (const scenario of ['audit', 'no audit', 'auto-merge armed', 'expired auto-merge', 'expired auto-merge fallback']) {
-  const audited = scenario === 'audit';
+for (const scenario of ['audit', 'no audit', 'auto-merge armed', 'expired auto-merge', 'expired auto-merge fallback',
+  'strict mixed-case findings']) {
+  const strictFindings = scenario === 'strict mixed-case findings';
+  const audited = scenario === 'audit' || strictFindings;
   test(`HAMRETRY-01: terminal success on the open same head reconciles before retry (${scenario})`, async t => {
     const rootDir = mkdtempSync(join(tmpdir(), 'same-head-retry-'));
     t.after(() => rmSync(rootDir, { recursive: true, force: true }));
@@ -2798,7 +2800,15 @@ for (const scenario of ['audit', 'no audit', 'auto-merge armed', 'expired auto-m
         if (scenario.endsWith('fallback')) input.readPullRequestStateImpl = () => null;
       } else live.autoMergeRequest = null;
     }
-    if (scenario === 'audit') input.dispatchContext.settledReview = { reviewBody: 'Synthetic refusing review.' };
+    if (audited) input.dispatchContext.settledReview = { reviewBody: 'Synthetic refusing review.' };
+    if (strictFindings) {
+      Object.assign(input.reviewState, { headSha: HEAD.toUpperCase(), verdict: 'comment-only',
+        blockingFindingCount: 0, nonBlockingFindingCount: 1 });
+      input.settleCloserSuccessorImpl = async ({ allowHammerFallback }) => {
+        assert.equal(allowHammerFallback, true, 'the reviewed and current full SHA differ only in case');
+        return { action: 'fallback' };
+      };
+    }
     let result = await maybeDispatchAmaCloser(input);
     if (scenario.endsWith('fallback')) {
       assert.equal(result.reason, 'stale-dispatched-lease-terminalized');
@@ -2809,7 +2819,7 @@ for (const scenario of ['audit', 'no audit', 'auto-merge armed', 'expired auto-m
       assert.equal(events.filter(event => event.event === 'ama_closer.auto_merge_hold_released').length, 1);
     }
     if (scenario === 'audit') {
-      assert.equal(result.reason, 'ownerless-closer-no-merge');
+      assert.equal(result.reason, 'needs-closer');
       assert.equal(result.successor.headSha, HEAD);
       assert.equal(deps.calls.filter(c => c.args[0] === 'dispatch').length, 0);
       return;

@@ -3,6 +3,7 @@
 // are synthetic; the SDK transport is mocked, so nothing leaves the process.
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { withoutConfigSchemaDiagnostics } from './helpers/config-schema-diagnostic.mjs';
 import { mkdtempSync, rmSync, mkdirSync, writeFileSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
@@ -253,7 +254,7 @@ for (const [kind, lookupCount, remaining, exitCode, legacy = false] of [
     const options = { env: { ...env, HQ_ROOT: rootDir, APP_CONTRACT_ENDPOINT_URL: endpointUrl }, timeout: 15000 };
     const output = await execute(process.execPath, [helper, ...argvFor(sha, key, projectRef)], options)
       .then(result => ({ ...result, code: 0 }), error => error);
-    assert.equal(output.stderr, '');
+    assert.equal(withoutConfigSchemaDiagnostics(output.stderr), '');
     return { code: output.code, receipt: JSON.parse(output.stdout) };
   };
   const requests = [];

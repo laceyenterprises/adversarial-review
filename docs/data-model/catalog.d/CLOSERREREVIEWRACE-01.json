@@ -25,9 +25,12 @@
       "relatedSchemaSurfaces": [
         "src/ama/dispatch-closer.mjs",
         "src/ama-closure-orchestration.mjs",
-        "src/follow-up-jobs.mjs"
+        "src/follow-up-jobs.mjs",
+        "src/watcher.mjs",
+        "src/watcher-tick-preflight.mjs"
       ],
-      "owner": "AMA closure orchestration"
+      "owner": "AMA closure orchestration",
+      "optionalField": "retiredAt, fallbackAt, escalatedAt, lastProbedAt (UTC ISO 8601). Retired JSON and its lock are pruned after seven days under flock. Enrolled, escalated and hammer-owned receipts get retirement-only probes at most daily. Live closers, pending leases and unreadable PR or launch evidence back off deadline probes for five minutes."
     },
     {
       "id": "ama-closure-waits",
@@ -52,7 +55,7 @@
       ],
       "owner": "follow-up remediation queue",
       "optionalField": "finalCapResult",
-      "successorState": "successor-pending or ownerless-closer-no-merge; enrollment precedes terminal move"
+      "successorState": "successor-pending or needs-closer; enrollment precedes terminal move"
     }
   ]
 }

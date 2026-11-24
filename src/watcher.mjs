@@ -106,6 +106,7 @@ import {
 } from './role-config.mjs';
 import { validateStartupRoleRegistry } from './role-registry.mjs';
 import { validateStartupDeliveryIdentity } from './adapters/comms/github-pr-comments/delivery-identity.mjs';
+import { redactAndCap } from './adapters/comms/github-pr-comments/redaction.mjs';
 import { isPipelineEnabled } from './domain-pipeline.mjs';
 import { reconcileDuplicateFamilyLabels, runDuplicateFamilyCensusForWatcher } from './duplicate-family-state.mjs';
 import { runAgyReviewerStartupChecks, warnIfAntigravityReviewerAuthUnavailable } from './watcher-agy-startup-preflight.mjs';
@@ -267,7 +268,7 @@ import {
 } from './adversarial-gate-status.mjs';
 import { runTtmTrackerWatcherTick } from './ttm-tracker.mjs';
 import { fastMergeAuditDir, fastMergeAuditPath } from './fast-merge-audit-storage.mjs';
-import { processReviewSubject } from './pollonce-phases.mjs';
+import { discoverReviewSubjects, processReviewSubject } from './pollonce-phases.mjs';
 import { resolveGateStatusContext } from './adversarial-gate-context.mjs';
 // MSM-04 — the only agent dispatch left on the AMA surface is the hammer.
 // Fully clean PRs merge through the daemon path; dirty/conflicted/red-CI PRs
@@ -400,7 +401,7 @@ import {
 } from './conditional-request.mjs';
 import { reviewBodyHasScopeViolationFinding } from './additive-only-scope.mjs';
 import { sweepEtagCache } from './etag-cache.mjs';
-import { refreshWatcherAuthenticationForTick, startWatcherAuthenticationRefreshTimer, createTickHcpHealthzProbe, startPendingReviewedAttestationRetryForWatcher } from './watcher-tick-preflight.mjs';
+import { refreshWatcherAuthenticationForTick, startWatcherAuthenticationRefreshTimer, startWatcherRecoveryTimers, createTickHcpHealthzProbe, startPendingReviewedAttestationRetryForWatcher } from './watcher-tick-preflight.mjs';
 import {
   fetchPullRequestHeadAndState,
   fetchPullRequestMergeability,
@@ -1424,13 +1425,8 @@ async function pollOnceWithinBudget(
     // process the same PR before or during discovery, so keep its collectors separate.
     const reviewContext = { ...refillContext, activeMergeAgentPRs: [], currentRepoPRs: [] };
     const { activeMergeAgentPRs, currentRepoPRs } = reviewContext;
-    let subjectRefs;
-    try {
-      subjectRefs = await subjectAdapter.discoverSubjects();
-      watcherHeartbeat?.markPollProgress?.();
-    } catch (err) {
-      if (['REPOSITORY_STATE_BUSY', 'REPOSITORY_IDENTITY_CONFLICT'].includes(err.code)) throw err;
-      console.error(`[watcher] Failed to fetch PRs for ${repoPath}:`, err.message);
+    const subjectRefs = await discoverReviewSubjects(subjectAdapter, repoPath, watcherHeartbeat);
+    if (subjectRefs === null) {
       reconcileWatcherPriorityDiscoveryPending(priorityDiscoveryPending, { repoPath, discoveredPrNumbers: new Set() });
       continue;
     }
@@ -1442,8 +1438,12 @@ async function pollOnceWithinBudget(
     });
     let subjectEntries = (await Promise.all(subjectRefs.map(async (subjectRef) => {
       try {
-        const subject = await subjectAdapter.fetchState(subjectRef);
+        const fetched = await subjectAdapter.fetchState(subjectRef);
         watcherHeartbeat?.markPollProgress?.();
+        const subject = fetched.ref ? fetched : {
+          ...fetched,
+          ref: { ...subjectRef, revisionRef: fetched.headSha ?? subjectRef.revisionRef },
+        };
         const { prNumber } = parseSubjectExternalId(subject.ref.subjectExternalId);
         return { subjectRef, subject, prNumber };
       } catch (err) {
@@ -1458,7 +1458,8 @@ async function pollOnceWithinBudget(
     subjectEntries = subjectEntries
       .map((entry) => ({
         ...entry,
-        current: stmtGetReviewRow.get(repoPath, entry.prNumber), hasPriorPostedReview: Boolean(stmtHasPostedReview.get(repoPath, entry.prNumber)),
+        current: stmtGetReviewRow.get(repoPath, entry.prNumber),
+        hasPriorPostedReview: Boolean(stmtHasPostedReview.get(repoPath, entry.prNumber)),
       }))
       .sort((a, b) =>
         compareWatcherWakeSubjectEntries(wakePayloadForPoll(), repoPath, a, b, compareReviewerDispatchCandidates)
@@ -1468,7 +1469,6 @@ async function pollOnceWithinBudget(
     subjectEntries = orderSubjectEntriesDiscoveryFirst(subjectEntries, {
       repoPath,
       logger: console,
-      hasReviewRow: (entry) => Boolean('current' in entry ? entry.current : (entry.current = stmtGetReviewRow.get(repoPath, entry.prNumber))),
     });
     subjectEntries = orderSubjectEntriesRereviewOldestFirst(subjectEntries, { repoPath, logger: console });
     const duplicateFamilyCensus = await runDuplicateFamilyCensusForWatcher({ db, octokit, subjectEntries, repoPath, rootDir: ROOT, env: process.env });
@@ -1863,13 +1863,21 @@ async function main() {
     pollOnceOptions: { pollOnceImpl: pollOnce, octokit, errorHandler: handlePollError, onTimeout: exitForPollDeadline },
   });
 
+  const { createProductionQueue } = await import('./finalization/queue-production.mjs');
+  const finalizationQueue = createProductionQueue({ rootDir: ROOT, stallWarningMs: 3 * intervalMs });
+  const advanceFinalizationQueue = () => void finalizationQueue.tick().catch(error =>
+    console.warn(`[finalization-queue] tick unavailable: ${
+      redactAndCap(error?.message || error?.name || error, 500).replace(/\s+/g, ' ')}`));
+  // Share the watcher's lifetime, independently of discovery latency. The
+  // single-flight tick returns before opening the store on legacy-only config.
+  advanceFinalizationQueue();
+  setInterval(advanceFinalizationQueue, intervalMs).unref();
+
   const { createFindingBatchTicker } = await import('./findings-batch.mjs');
   const findingBatchTicker = createFindingBatchTicker({ db, rootDir: ROOT });
   startWatcherAuthenticationRefreshTimer({ log: console });
-  // Recovery shares this watcher's lifetime, but not a long discovery pass's
-  // latency. The shortest overload backoff is 30 seconds.
-  void overloadRescueRetry.tick();
-  setInterval(() => { void overloadRescueRetry.tick(); }, 30_000).unref();
+  startWatcherRecoveryTimers({ rootDir: ROOT, overloadRescueRetry,
+    readLive: (repo, prNumber) => fetchPullRequestHeadAndState(repo, prNumber, { withLabels: false }) });
 
   (async function pollLoop() {
     let nextStart = Date.now();

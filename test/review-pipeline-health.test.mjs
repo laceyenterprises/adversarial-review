@@ -973,7 +973,7 @@ function insertReviewRow(rootDir, overrides = {}) {
       overrides.repo || REPO,
       overrides.prNumber || 946,
       overrides.reviewedAt || '2026-05-25T17:00:00.000Z',
-      overrides.reviewer || 'claude',
+      overrides.reviewer ?? 'claude',
       overrides.prState || 'open',
       overrides.reviewStatus || 'pending',
       overrides.reviewAttempts ?? 0,
@@ -2753,6 +2753,23 @@ test('queue starvation finding fires on an old pending first-pass row and clears
     config: { queueStarvationMaxAgeMs: 10 * 60 * 1000 },
   });
   assert.ok(!findingCodes(cleared).includes('review:queue_starvation'));
+});
+
+test('unrouted discovery waits and routed drafts are outside the starvation queue', () => {
+  const rootDir = tempRoot();
+  insertReviewRow(rootDir, { prNumber: 946, reviewer: '', failureMessage: '[draft] owner=pr-author' });
+  insertReviewRow(rootDir, { prNumber: 947, reviewer: '', failureMessage: '[repair-reservation-owns-pr] owner=repair-epoch:1' });
+  insertReviewRow(rootDir, { prNumber: 948 });
+  const db = openDb(rootDir);
+  try {
+    db.prepare('UPDATE reviewed_prs SET is_draft = 1 WHERE pr_number IN (946, 948)').run();
+  } finally {
+    db.close();
+  }
+
+  const snapshot = collectReviewPipelineHealth({ rootDir, now: () => new Date(NOW) });
+  assert.equal(snapshot.firstPassQueue.pendingDepth, 0);
+  assert.ok(!findingCodes(snapshot).includes('review:queue_starvation'));
 });
 
 test('collector surfaces first-pass wait, rereview share, and effective reviewer concurrency', () => {

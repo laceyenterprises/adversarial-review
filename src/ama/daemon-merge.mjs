@@ -59,6 +59,7 @@ import {
   writeAmaAuditEntry,
 } from './audit.mjs';
 import { evaluateMergeEligibility } from './merge-eligibility.mjs';
+import { rollupFailures } from '../ci-infrastructure.mjs';
 import { isTransientGhError } from '../gh-cli.mjs';
 import { hasOperatorApprovedOverride } from './eligibility.mjs';
 import { evaluateMergeCapabilityEnforcement } from './merge-capability-enforcement.mjs';
@@ -121,6 +122,15 @@ export const TRANSIENT_GATE_READ_REASONS = new Set([
   'pr-mergeability-unknown',
 ]);
 
+function docsGateRefusal(gate, reasons) {
+  const checksBlocked = reasons.includes('ci-not-green');
+  const checksFailed = checksBlocked && rollupFailures(gate.requiredChecks).length > 0;
+  return {
+    reviewRequired: checksFailed || reasons.includes('pr-not-mergeable'),
+    checksUnsettled: checksBlocked && !checksFailed,
+  };
+}
+
 /**
  * Disposition vocabulary returned to the watcher.
  *
@@ -167,6 +177,11 @@ export function isFullyCleanSettledReview(reviewState = {}) {
   const nonBlockingCount = normalizeFindingCount(reviewState.nonBlockingFindingCount);
   if (blockingCount === null || nonBlockingCount === null) return false;
   return blockingCount === 0 && nonBlockingCount === 0;
+}
+
+export function sameFullReviewHead(left, right) {
+  return typeof left === 'string' && typeof right === 'string'
+    && /^[0-9a-f]{40}$/i.test(left) && left.toLowerCase() === right.toLowerCase();
 }
 
 export function isDaemonMergeReviewAllowed(reviewState = {}, { strictMode = true } = {}) {
@@ -383,7 +398,7 @@ async function attemptDaemonCleanMergeInner({
   verdict,
   docsFastPath = null,
   beforeMergeImpl = null,
-  operatorApprovedEvidence = null,
+  operatorApprovedEvidence: observedOperatorApproval = null,
   operatorLogins = [],
   operatorLabelActorEnforcement = 'observe',
   reviewState = {},
@@ -565,18 +580,18 @@ async function attemptDaemonCleanMergeInner({
   const headCloserCertifiedBypass =
     allowHeadCloserCertifiedNonBlocking === true &&
     isDaemonMergeReviewAllowed(reviewState, { strictMode: false });
+  const reviewAllowed = isDaemonMergeReviewAllowed(reviewState, { strictMode });
+  const operatorApprovedEvidence = strictMode !== false && !reviewAllowed ? null : observedOperatorApproval;
   const initialOperatorOverride = hasOperatorApprovedOverride({
     operatorApprovedEvidence,
     operatorLogins,
     operatorLabelActorEnforcement,
   }, { headSha: liveGate?.candidateHead, labels: liveGate?.labels });
-  if (
-    !docsFastPath &&
-    !(allowHamTerminalRemediation === true && hamTerminalVerdict) &&
-    !headCloserCertifiedBypass &&
-    !initialOperatorOverride &&
-    !isDaemonMergeReviewAllowed(reviewState, { strictMode })
-  ) {
+  const strictExactHead = strictMode !== false && Boolean(validatedHead)
+    && String(reviewState.headSha || '').toLowerCase() === String(validatedHead).toLowerCase();
+  const findingsBypass = !strictExactHead && ((allowHamTerminalRemediation === true && hamTerminalVerdict)
+    || headCloserCertifiedBypass || initialOperatorOverride);
+  if (!docsFastPath && !reviewAllowed && !findingsBypass) {
     return notTaken(uncleanReason(reviewState, { strictMode }) || 'findings-unknown');
   }
 
@@ -657,7 +672,10 @@ async function attemptDaemonCleanMergeInner({
   }
   if (noCiEvidence) onGateEvidenceImpl?.({ ...preLease, requiredChecks: true });
   if (!preEligibility.eligible) {
-    return notTaken('not-eligible', { reasons: preEligibility.reasons, liveGate: preLease });
+    const docsReviewRequired = docsFastPath && preLease.candidateHead === validatedHead
+      && docsGateRefusal(preLease, preEligibility.reasons).reviewRequired;
+    return notTaken('not-eligible', { reasons: preEligibility.reasons, liveGate: preLease,
+      ...(docsReviewRequired ? { docsReviewRequired: true } : {}) });
   }
   const selected = getNextAction();
   if (selected && (selected.action !== 'daemon-merge' || selected.actor !== 'daemon' || selected.queue?.intent !== 'daemon')) return notTaken(selected.reason);
@@ -810,6 +828,7 @@ async function attemptDaemonCleanMergeInner({
   let merged = false;
   let guardReversals = [];
   let derivedChanges = [];
+  let reversalAuthorization;
   let terminal = null; // { reason, permanent, reasons }
 
   while (attempts < retryCap && !merged && !terminal) {
@@ -904,6 +923,7 @@ async function attemptDaemonCleanMergeInner({
     if (live.isDraft) { terminal = { reason: 'pr-is-draft', permanent: true }; break; }
     guardReversals = elig.guardReversals || [];
     derivedChanges = elig.derivedChanges || [];
+    reversalAuthorization = elig.reversalAuthorization;
     // A revoked proof or newly appearing CI is a changing gate, not a permanent
     // rejection of this head. The next tick must evaluate the real rollup.
     const noCiRevoked = admittedWithNoCi && !noCiEvidence && !elig.eligible &&
@@ -917,9 +937,11 @@ async function attemptDaemonCleanMergeInner({
       // made only of transient reads exhausts as `gate-read-failed`; any miss
       // carrying one stays NON-permanent so the next tick retries instead of
       // Gate 3 refusing the head forever on a half-read gate.
-      const transientReadOnly = elig.reasons.length > 0
-        && elig.reasons.every((reason) => TRANSIENT_GATE_READ_REASONS.has(reason));
-      const hasTransientRead = elig.reasons.some((reason) => TRANSIENT_GATE_READ_REASONS.has(reason));
+      const docsRefusal = docsFastPath ? docsGateRefusal(live, elig.reasons) : null;
+      const isTransientRead = reason => TRANSIENT_GATE_READ_REASONS.has(reason)
+        || (reason === 'ci-not-green' && docsRefusal?.checksUnsettled);
+      const transientReadOnly = elig.reasons.length > 0 && elig.reasons.every(isTransientRead);
+      const hasTransientRead = elig.reasons.some(isTransientRead);
       if (elig.reasons.includes('pr-mergeability-unknown') && attempts < retryCap) {
         await sleep(daemonMergeBackoffMs(attempts, { baseMs: backoffBaseMs, rng }));
         continue;
@@ -931,6 +953,7 @@ async function attemptDaemonCleanMergeInner({
         // Evidence recovery can repair the same head; retain scoped escalation
         // without writing the permanent failed-head marker.
         permanent: !hasTransientRead && !noCiRevoked && !elig.reasons.includes('primary-change-unknown'),
+        docsReviewRequired: docsRefusal?.reviewRequired,
         reasons: elig.reasons,
         ...(elig.reasons.includes('history-read-failed') ? { historyReadError: live.primaryChange?.reason } : {}),
         liveGate: live,
@@ -1139,6 +1162,7 @@ async function attemptDaemonCleanMergeInner({
           attemptPhase: 'daemon-merged',
           ...(guardReversals.length ? { guardReversals } : {}),
           ...(derivedChanges.length ? { derivedChanges } : {}),
+          ...(reversalAuthorization ? { reversalAuthorization } : {}),
           reason: 'merged',
           ...(noCiEvidence ? { ciConfiguration: noCiEvidence } : {}),
           validatedHead,
@@ -1158,6 +1182,7 @@ async function attemptDaemonCleanMergeInner({
           attemptPhase: terminal.closureHold ? 'daemon-deferred' : 'daemon-failed',
           ...(guardReversals.length ? { guardReversals } : {}),
           ...(derivedChanges.length ? { derivedChanges } : {}),
+          ...(reversalAuthorization ? { reversalAuthorization } : {}),
           reason: terminal.reason,
           ...(terminal.historyReadError ? { historyReadError: terminal.historyReadError } : {}),
           permanent: Boolean(terminal.permanent),
@@ -1193,6 +1218,7 @@ async function attemptDaemonCleanMergeInner({
       reason: 'merged',
       merged: true,
       ...(derivedChanges.length ? { derivedChanges } : {}),
+      ...(reversalAuthorization ? { reversalAuthorization } : {}),
       attempts,
       leaseAcquired: true,
       auditWritten,
@@ -1224,6 +1250,7 @@ async function attemptDaemonCleanMergeInner({
     auditWritten,
     manualCloseRequired: cleanParkManualCloseRequired,
     ...(terminal.reasons ? { reasons: terminal.reasons } : {}),
+    ...(terminal.docsReviewRequired ? { docsReviewRequired: true } : {}),
     ...(terminal.liveGate ? { liveGate: terminal.liveGate } : {}),
   };
   })();
@@ -1278,6 +1305,7 @@ export async function attemptDaemonCleanMerge(args = {}) {
         if (ownMergeExecuted) writer({ hqRoot: args.hqRoot, repo: args.repo, prNumber: args.prNumber,
           headSha: args.validatedHead, merged: true, executedAt,
           ...(result.derivedChanges?.length ? { derivedChanges: result.derivedChanges } : {}),
+          ...(result.reversalAuthorization ? { reversalAuthorization: result.reversalAuthorization } : {}),
           producerClass: args.receiptProducerClass || 'ama-daemon' }, args.logger);
       }
     } catch (error) { args.logger?.warn?.(`[merge-action] post-merge verification unavailable: ${error.message}`); }

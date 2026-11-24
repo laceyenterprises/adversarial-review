@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 import { execFile } from 'node:child_process';
-import { chmodSync, closeSync, mkdirSync, openSync, readFileSync, statSync, writeFileSync } from 'node:fs';
+import { chmodSync, closeSync, existsSync, mkdirSync, openSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { isAbsolute, join } from 'node:path';
 import { promisify } from 'node:util';
 import { DEFAULT_REMEDIATION_WORKER_CLASS, pickRemediationWorkerClass } from './remediation-worker-routing.mjs';
@@ -29,8 +29,8 @@ const execFileAsync = promisify(execFile);
 // Leave room for the provisioner's own watchdog/rollback, and scale once for
 // host load without the helper's shorter default ceiling.
 const dispatchTimeoutMs = () => loadAwareTimeoutMs(900_000, { maxMs: Infinity });
-// Read-only publication probes use the same nominal as hammer launch reads.
-const publicationReadTimeoutMs = () => loadAwareTimeoutMs(30_000);
+// Read-only dispatch probes use the same nominal as hammer launch reads.
+const dispatchProbeTimeoutMs = () => loadAwareTimeoutMs(30_000);
 
 function publicationProbeError(error, operation, timeoutMs, fallback = error.message) {
   const outputExceeded = error.code === 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER';
@@ -366,11 +366,53 @@ function readScopeDenied(scope) {
   return `${READ_SCOPE_DENIED}: ${scope.projectRef} ${scope.repo || '(unqualified repository)'}`;
 }
 
+function findingBatchDispatchKey(batch, publish = false) {
+  return `findings-batch-${publish ? 'publish-' : ''}${batch.batch_id}`;
+}
+
+function matchesFindingBatchLaunch(batch, row) {
+  return row.ticket_ref === `FINDINGS-${batch.batch_id}`
+    && [batch.repo, batch.repo.split('/').at(-1)].includes(row.target_repo)
+    && typeof row.launch_request_id === 'string' && Boolean(row.launch_request_id);
+}
+
+export async function readFindingBatchLaunches(batch, { env, rootDir, readLaunches, timeoutMs }, keys = null) {
+  const scope = findingBatchDispatchScope(batch, env);
+  if (keys === null) {
+    keys = [findingBatchDispatchKey(batch)];
+    // A publisher always persists its intent before invoking dispatch.
+    if (existsSync(join(rootDir, 'data', 'finding-batches', batch.batch_id, 'publish-intent.json'))) {
+      keys.push(findingBatchDispatchKey(batch, true));
+    }
+  }
+  const rows = [];
+  for (const idempotencyKey of keys) {
+    const probe = await readLaunches({ env, rootDir, hqRoot: resolveHqRoot(env), ...scope, idempotencyKey, timeoutMs });
+    if (!probe?.ok || !Array.isArray(probe.rows)) return probe;
+    if (probe.rows.some(row => row?.idempotency_key !== idempotencyKey)) return { ok: false, mismatch: true };
+    rows.push(...probe.rows);
+  }
+  return { ok: true, rows };
+}
+
+async function recoverFindingBatchDispatch(batch, options, { publish = false } = {}) {
+  const key = findingBatchDispatchKey(batch, publish);
+  let probe;
+  try { probe = await readFindingBatchLaunches(batch, options, [key]); }
+  catch { return { unknown: true }; }
+  if (!probe?.ok || !Array.isArray(probe.rows) || probe.rows.length > 1) return { unknown: true };
+  const [row] = probe.rows;
+  if (!row) return {};
+  if (!matchesFindingBatchLaunch(batch, row) || !readLaunchRequestStatus(row.status).status
+    || (publish && row.launch_request_id === batch.launch_id)) return { unknown: true };
+  return { launchId: row.launch_request_id };
+}
+
 export function findingBatchDispatchArgs({ batch, workerClass, promptPath, env, branch = null }) {
   // Both decision and publication launches can cover mixed/unknown builders.
   // Without per-finding provenance, a Grok pin cannot establish subject eligibility.
   if (isGrokRemediationWorkerClass(workerClass)) workerClass = DEFAULT_REMEDIATION_WORKER_CLASS;
-  return ['dispatch', '--priority', 'normal', '--idempotency-key', `findings-batch-${batch.batch_id}`,
+  return ['dispatch', '--priority', 'normal', '--idempotency-key', findingBatchDispatchKey(batch, Boolean(branch)),
     '--worker-class', workerClass, '--task-kind', 'coding', '--completion-shape', branch ? 'pr' : 'decision-only',
     ...(branch ? ['--branch', branch] : []),
     '--project', findingBatchDispatchScope(batch, env).projectRef, '--repo', batch.repo.split('/').at(-1),
@@ -414,7 +456,7 @@ async function publishFindingBatch({ db, batch, result, dir, outputPath, env, ro
     try { fsExt.flockSync(fd, 'exnb'); }
     catch (error) { if (['EAGAIN', 'EWOULDBLOCK'].includes(error.code)) return; throw error; }
     // Size once for reads; provisioning retains its separate dispatch budget.
-    const probeTimeoutMs = publicationReadTimeoutMs();
+    const probeTimeoutMs = dispatchProbeTimeoutMs();
     let stdout;
     try {
       ({ stdout } = await execFileImpl(env.HQ_BIN || 'hq',
@@ -436,13 +478,12 @@ async function publishFindingBatch({ db, batch, result, dir, outputPath, env, ro
     if (meaning.diagnostics.length || (!meaning.succeeded && !handoffCandidate)) throw Error('batch-preparation-failed');
     const branch = status.branch;
     if (typeof branch !== 'string' || !branch.trim() || branch.startsWith('-')) throw Error('batch-branch-missing');
-    const key = `findings-batch-${batch.batch_id}`;
+    const key = findingBatchDispatchKey(batch, true);
     const scope = findingBatchDispatchScope(batch, env);
     const probeLaunches = async () => {
       let probe;
       try {
-        probe = await readLaunches({ env, rootDir, hqRoot: resolveHqRoot(env),
-          ...scope, idempotencyKey: key, timeoutMs: probeTimeoutMs });
+        probe = await readFindingBatchLaunches(batch, { env, rootDir, readLaunches, timeoutMs: probeTimeoutMs });
       } catch (error) {
         throw publicationProbeError(error, 'keyed launch probe', probeTimeoutMs, 'batch-publish-receipt-unavailable');
       }
@@ -450,10 +491,9 @@ async function publishFindingBatch({ db, batch, result, dir, outputPath, env, ro
       if (!probe?.ok && (probe?.timedOut || probe?.killed || probe?.signal)) {
         throw publicationProbeError(probe, 'keyed launch probe', probeTimeoutMs, 'batch-publish-receipt-unavailable');
       }
+      if (probe?.mismatch) throw Error('batch-publish-receipt-mismatch');
       if (!probe?.ok || !Array.isArray(probe.rows) || !probe.rows.length) throw Error('batch-publish-receipt-unavailable');
-      if (probe.rows.some(row => row.idempotency_key !== key || row.ticket_ref !== `FINDINGS-${batch.batch_id}`
-        || ![batch.repo, batch.repo.split('/').at(-1)].includes(row.target_repo)
-        || typeof row.launch_request_id !== 'string' || !row.launch_request_id)) throw Error('batch-publish-receipt-mismatch');
+      if (probe.rows.some(row => !matchesFindingBatchLaunch(batch, row))) throw Error('batch-publish-receipt-mismatch');
       if (!probe.rows.some(row => row.launch_request_id === batch.launch_id)) throw Error('batch-launch-evidence-mismatch');
       return probe;
     };
@@ -574,7 +614,7 @@ async function publishFindingBatch({ db, batch, result, dir, outputPath, env, ro
         && Object.entries(handoffBinding || {}).every(([key, value]) => previous.decisionPublication[key] === value);
       // Unknown/corrupt intent evidence cannot authorize a replacement.
       if (previous.batchId !== batch.batch_id || previous.branch !== branch
-        || previous.idempotencyKey !== key || previous.sourceLaunchId !== batch.launch_id
+        || ![key, findingBatchDispatchKey(batch)].includes(previous.idempotencyKey) || previous.sourceLaunchId !== batch.launch_id
         || !Number.isFinite(submittedAt) || !Number.isSafeInteger(previousTimeoutMs) || previousTimeoutMs < 1
         || (handoffEpoch ? ![0, 1].includes(previousCount) : previousCount !== 0)
         || (previous.decisionPublication !== undefined && (!handoffBinding || !sameHandoff))
@@ -594,10 +634,20 @@ async function publishFindingBatch({ db, batch, result, dir, outputPath, env, ro
     }
     const args = findingBatchDispatchArgs({ batch, promptPath, branch, env,
       workerClass: pickRemediationWorkerClass({ repo: batch.repo }, { env }) });
-    const receipt = readDispatchReceipt(parseDispatchJsonOutput((await execFileImpl(env.HQ_BIN || 'hq', args,
-      { env, timeout: submissionTimeoutMs, maxBuffer: 1024 * 1024 })).stdout));
-    if (!receipt.launchRequestId) throw Error(receipt.identityDiagnostic);
-    if (receipt.launchRequestId === batch.launch_id) throw Error('batch-publish-reused-decision-launch');
+    try {
+      const receipt = readDispatchReceipt(parseDispatchJsonOutput((await execFileImpl(env.HQ_BIN || 'hq', args,
+        { env, timeout: submissionTimeoutMs, maxBuffer: 1024 * 1024 })).stdout));
+      if (!receipt.launchRequestId) throw Error(receipt.identityDiagnostic);
+      if (receipt.launchRequestId === batch.launch_id) throw Error('batch-publish-reused-decision-launch');
+    } catch (error) {
+      const recovery = await recoverFindingBatchDispatch(batch, { env, rootDir, readLaunches, timeoutMs: probeTimeoutMs },
+        { publish: true });
+      if (recovery.unknown) {
+        logger.warn?.(`[findings-batch] ${batch.batch_id}: publication dispatch receipt unavailable`);
+        return;
+      }
+      if (!recovery.launchId) throw error;
+    }
     db.prepare('UPDATE finding_batches SET error=NULL WHERE batch_id=?').run(batch.batch_id);
   } finally { closeSync(fd); }
 }
@@ -654,18 +704,17 @@ async function releaseEndedFindingBatch({ db, batchId, hasOutcomes, env, rootDir
   // A partially recorded lifecycle handoff may already have canceled the
   // source. Its typed refusal/receipt mismatch still retains publication work.
   if (/decision-publication/.test(batch.error || '')) return hold('batch-decision-publication-unresolved');
-  const key = `findings-batch-${batch.batch_id}`;
-  const options = { env, rootDir, hqRoot: resolveHqRoot(env), timeoutMs: 15_000 };
+  const options = { env, rootDir, hqRoot: resolveHqRoot(env), readLaunches, timeoutMs: 15_000 };
   const scope = findingBatchDispatchScope(batch, env);
   let probe;
-  try { probe = await readLaunches({ ...options, ...scope, idempotencyKey: key }); }
+  try { probe = await readFindingBatchLaunches(batch, options); }
   catch { return hold('batch-keyed-launch-probe-unreadable'); }
   // Only an operator grant for this exact pair can make the launch readable.
   if (!probe?.ok && probe?.selectorRefused === true) return { needsOperator: readScopeDenied(scope) };
+  if (probe?.mismatch) return hold('batch-keyed-launch-probe-mismatch');
   if (!probe?.ok || !Array.isArray(probe.rows)) return hold('batch-keyed-launch-probe-unreadable');
   // Readable again before expiry: collection resumes publication next pass.
   if (scopeDenied && !stale) return null;
-  if (probe.rows.some(row => row?.idempotency_key !== key)) return hold('batch-keyed-launch-probe-mismatch');
   if (probe.rows.some(row => !readLaunchRequestStatus(row.status).status)) return hold('batch-launch-status-unreadable');
   if (probe.rows.some(row => !readLaunchRequestStatus(row.status).terminal)) return null;
   if (probe.rows.some(row => row.status === 'blocked_needs_decision')) {
@@ -800,12 +849,26 @@ export async function runFindingBatches({ db, rootDir, env = process.env, day = 
         const promptPath = join(dir, 'prompt.md');
         writeFileSync(promptPath, findingBatchPrompt(batch, findings, outputPath, batchNotes(db, batch.batch_id)));
         const args = findingBatchDispatchArgs({ batch, promptPath, workerClass: pickRemediationWorkerClass({ repo: batch.repo }, { env }), env });
-        const { stdout } = await execFileImpl(env.HQ_BIN || 'hq', args, { env, timeout: dispatchTimeoutMs(), maxBuffer: 1024 * 1024 });
-        dispatchReturned = true;
-        const receipt = readDispatchReceipt(parseDispatchJsonOutput(stdout));
-        if (!receipt.launchRequestId) throw Error(receipt.identityDiagnostic);
-        db.prepare('UPDATE finding_batches SET launch_id=?,launched_at=?,error=NULL WHERE batch_id=?')
-          .run(receipt.launchRequestId, new Date(now).toISOString(), batch.batch_id);
+        let launchId;
+        try {
+          const { stdout } = await execFileImpl(env.HQ_BIN || 'hq', args, { env, timeout: dispatchTimeoutMs(), maxBuffer: 1024 * 1024 });
+          dispatchReturned = true;
+          const receipt = readDispatchReceipt(parseDispatchJsonOutput(stdout));
+          if (!receipt.launchRequestId) throw Error(receipt.identityDiagnostic);
+          launchId = receipt.launchRequestId;
+        } catch (error) {
+          const recovery = await recoverFindingBatchDispatch(batch, { env, rootDir, readLaunches,
+            timeoutMs: dispatchProbeTimeoutMs() });
+          if (recovery.unknown) {
+            logger.warn?.(`[findings-batch] ${batch.batch_id}: preparation dispatch receipt unavailable`);
+            return;
+          }
+          if (!recovery.launchId) throw error;
+          launchId = recovery.launchId;
+        }
+        db.prepare(`UPDATE finding_batches SET launch_id=?,launched_at=?,error=NULL
+          WHERE batch_id=? AND launch_id IS NULL AND completed_at IS NULL AND released_at IS NULL`)
+          .run(launchId, new Date(now).toISOString(), batch.batch_id);
       }
     } catch (error) {
       // Prefer the actual dispatcher refusal over execFile's command echo.
@@ -819,7 +882,8 @@ export async function runFindingBatches({ db, rootDir, env = process.env, day = 
       // Only a returned, invalid receipt spends the bounded dispatch budget.
       // Timeouts, transport failures and admission refusals retain the same
       // batch/key and preserve any earlier invalid-receipt charges.
-      db.prepare('UPDATE finding_batches SET error=?,batch_attempts=batch_attempts+? WHERE batch_id=?')
+      db.prepare(`UPDATE finding_batches SET error=?,batch_attempts=batch_attempts+?
+        WHERE batch_id=? AND completed_at IS NULL AND released_at IS NULL${dispatching ? ' AND launch_id IS NULL' : ''}`)
         .run(reason, dispatchReturned ? 1 : 0, batch.batch_id);
       // One log record per failure carries all captured stderr. Redact before
       // storage/logging; the bounded row keeps the actual cause at its front.

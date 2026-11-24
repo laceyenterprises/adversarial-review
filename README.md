@@ -20,22 +20,30 @@ the rubber stamp expensive enough to fail loud.
 ---
 
 ONS-07: the Node config reader validates against the CFG JSON Schema that
-agent-os generates from the Python `schema_v1` (vendored as
-[`src/generated/config.schema.json`](src/generated/config.schema.json), turned
-into the loader's schema by [`src/config-schema.mjs`](src/config-schema.mjs)).
-It accepts and rejects what the Python loader does:
+agent-os generates from the Python `schema_v1`. The loader reads
+`platform/contracts/generated/config.schema.json` in the selected checkout.
+It checks `AGENT_OS_ROOT` and `AGENT_OS_DEPLOY_CHECKOUT` first, then the
+vendored module layout. When no checkout is found or its contract cannot be
+read or compiled, the loader uses
+[`src/generated/config.schema.json`](src/generated/config.schema.json). It
+reports the selected schema's source and SHA-256 digest to stderr and
+deduplicates repeated messages. Fallback messages include the reason. Cached
+loads watch the contract alongside the config layers.
+
 [`test/config-cfg-parity.test.mjs`](test/config-cfg-parity.test.mjs) replays
 Python-recorded verdicts. `loadConfig` refuses an unknown key in a checked-in
-file; local overlays and the runtime/cached loaders used by the daemons drop it
-(`ADVERSARIAL_CONFIG_DEBUG=1` prints a note). An empty env value is absent.
+file. Local overlays and runtime/cached loaders tolerate unknown keys outside
+strict-always policies (`ADVERSARIAL_CONFIG_DEBUG=1` prints a note for runtime
+unknowns). An empty env value is absent.
 Nullable projections also support a numeric zero sentinel alongside a positive
 floor. Informational metadata on a null branch is accepted; assertion keywords
-outside the supported projection still fail at import. Recorder fixture fields
-`env`, `modules`, and `get` may be omitted or null. Leaf-pattern compilation is
-cached without modifying the exported schema, and rejection diagnostics display
-the normalized value being checked.
+outside the supported projection cause the loader to use the bundled schema.
+Recorder fixture fields `env`, `modules`, and `get` may be omitted or null.
+Leaf-pattern compilation is cached without modifying the exported schema, and
+rejection diagnostics display the normalized value being checked.
 
-After a CFG schema change, run `node scripts/sync-cfg-schema.mjs <agent-os>`
+To refresh the standalone schema or the environment aliases, run
+`node scripts/sync-cfg-schema.mjs <agent-os>`
 (`--check` reports drift); it vendors both generated files, the schema
 (`src/generated/config.schema.json`) and the env alias table
 (`src/generated/config.env.json`). Nothing else is hand-written: the reader has no
@@ -295,8 +303,17 @@ The full unit + adapter test suite runs the same way:
 npm test
 ```
 
-CI runs both on Node 22 and Node 26 on every PR. Node 22.10 or newer is required
-for native test-runner `execArgv` support, which installs each file's preloads.
+CI runs the full suite on Node 22 and Node 26 on main, at 06:37 UTC nightly
+and on manual dispatch. Pull requests select tests from the diff against the
+checked-out merge commit's first parent. The selection follows reverse imports
+and literal source references, including CLI invocations. Harness, dependency,
+workflow and shared fixture changes use the full file set. Unclassified changes
+and unavailable selection also use the full set. Docs-only and empty diffs run
+zero Node test files. Each existing job runs a small selection, and the two
+jobs split broad selections when they reach a third of the suite by file count
+or estimated work. Both keep their existing check names. Node 22.10 or newer
+is required for native test-runner `execArgv` support, which installs each
+file's preloads.
 The runner schedules files by measured duration. Local runs default to half
 the available logical CPUs rounded down, with a minimum of one and a maximum
 of four. Set `AR_TEST_CONCURRENCY` to a positive integer to override the
@@ -320,8 +337,13 @@ Generic bounded validation wrappers preserve command arguments.
 Set `AR_TEST_TIMINGS=/absolute/path.json` to
 record per-file wall times and total suite wall time. Relative report paths
 resolve against the caller's working directory and survive sandbox cleanup.
-Scheduling hints in `test/fixtures/suite-durations.json` never control which files run.
+Scheduling hints in `test/fixtures/suite-durations.json` control execution
+order and shard balance. The selection comes from the diff and dependency graph.
 For a focused run, pass exact paths or basenames to `node test/run-tests.mjs`.
+To preview a committed diff against `HEAD`, run
+`npm test -- --base origin/main --dry-run`. On a PR merge checkout, use
+`--base HEAD^1`. Set `AR_TEST_PR_SHARD=0` or `AR_TEST_PR_SHARD=1` to preview
+the corresponding matrix job.
 
 ### AgentOS Reviewer Runtime Routing
 
@@ -2144,7 +2166,14 @@ recording an attestation. Base tip advancement requires a fresh docs-only range
 on the same base branch; terminal audit metadata records that refreshed range.
 Explicit review requests keep full review, withdrawing the waiver with a pending
 gate status at admission, classification or live merge checks. Failed withdrawal
-retains the fast-path wait for retry. No durable review status or smoke promise is added; offline
+retains the fast-path wait for retry. Pending checks and unknown mergeability
+keep the docs waiver while the watcher rechecks the same head. A settled check
+failure or definite mergeability refusal withdraws it and admits ordinary review.
+The exact-head withdrawal receipt keeps ordinary admission active while routing waits.
+Its gate-record flag survives reviewer assignment, running status and routing
+reset, including nullish reviewer fields; new heads are classified independently.
+Discovery wait rows use the existing pending state and stay out of the reviewer
+queue until routing. Offline
 regressions are in `test/docs-fast-path.test.mjs` and
 `test/ama-daemon-merge.test.mjs`. Deploy the companion signer/ledger migration first.
 SRE separately observes the next three docs-only merges within about ten minutes
@@ -3125,7 +3154,7 @@ with `closure-recovery-ownership-unresolved` more than one recovery cycle past
 its deadline; a persistent ledger outage remains an explicit unresolved incident.
 No worker live action is authorized.
 
-<a id="smv-handoff"></a>**smv-handoff:** Trailerless closer publication defers automatic review under a publication barrier; confirmed merged release retires custody. Exhausted no-merge and ordinary pre-claim caps enroll a head-scoped successor once, or persist a typed ownerless refusal and alert through the existing closure-wait surface. The sandbox smoke verifies publication deferral, retirement, idempotent enrollment and refusal alerting. Ended unpublished remediation requeues within its unchanged round budget; spent rounds select hammer without an operator override. Final-round non-blocking findings enqueue one builder fix-all job before any hammer. A terminal no-progress receipt permits the existing hammer fallback; publication/full-review/clean-daemon coverage is pinned by the focused lane fixtures. Expired wake admission verifies a deterministic replacement, replacement dedupe and a named missing-head refusal with one durable alert. OWNERUNREADABLE-02 verifies snapshot-only resolution of terminal lease/receipt placeholders, live retry ownership, failed/partial read fences and one deduplicated hammer wake. After ordinary deployment SRE checks that no terminal ledger launch remains in an R04 retry-chain-unreadable skip more than one wake past its deadline (SEVDOCS-335). HAMRESUMEOWED-01 verifies pending-to-green hammer resume and idempotent audit settlement. Outstanding exact-head receipts receive closure priority each poll without an unrelated wake; red/head movement settle the debt for normal handling. Existing merge gates, leases and caps remain mandatory. After deployment SRE observes the next natural pending-CI stop merging its green recorded head without manual action; offline smoke alone does not establish this live receipt. OWNERUNREADABLE-01 verifies terminal ownership recovery after its anchored deadline selects hammer without re-review while unreadable retry evidence remains fenced. Focused offline fixtures also cover one-read placeholder replacement, bounded backoff, transient recovery, live retries and outage recovery. After deployment SRE observes the next natural R04 case exit within its budget and merge; no worker live operation is authorized. NXA-07 also verifies exact-head validated terminal HAM proof crossing retry selection into pending, failed or green CI gates; mismatched proof retains hammer retry ownership. NXA-07 verifies the common adapter matrix and retains lease/retry settlement; NXA-06 verifies daemon CI changes, operator-approved retry exhaustion selecting R08 hammer repair, live hammer ownership and remote-unconfirmed receipt recovery through the shared decision. NXA-05 verifies that drain/capacity observations
+<a id="smv-handoff"></a>**smv-handoff:** Trailerless closer publication defers automatic review under a publication barrier; confirmed merged release retires custody. Exhausted no-merge and ordinary pre-claim caps enroll a head-scoped successor once or persist `needs-closer` recovery custody and alert through closure-wait. Later passes recheck admission, including from legacy `ownerless-closer-no-merge` receipts. The sandbox smoke verifies publication deferral, retirement, refusal alerting and exactly one later enrollment (`closer-successor.04`). A spent final fix-all returns control to normal hammer admission only when a strict exact-head review with findings selects hammer, including CI repair; other routes retain the needs-closer refusal and page. The watcher independently checks successor receipts after 1800 seconds from the original request and pages once for a confirmed open exact head without a live closer. Poll updates do not extend the deadline. Hammer fallback records `fallbackAt` and owns deadline escalation across retry gaps and caps. Successful refusal or overdue delivery records `escalatedAt` and ends deadline paging. The sweep checks enrolled, escalated and hammer-owned receipts for retirement on a daily cadence and backs off deadline probes for live closers, unreadable closer evidence or unreadable PRs for five minutes. Confirmed terminal or moved heads retire, and their JSON is pruned after seven days while holding and then unlinking its lock. The smoke verifies retirement, deadline backoff across watcher restarts and hammer ownership. Ended unpublished remediation requeues within its unchanged round budget; spent rounds select hammer without an operator override. Final-round non-blocking findings enqueue one builder fix-all job before any hammer. A terminal no-progress receipt permits the existing hammer fallback; publication/full-review/clean-daemon coverage is pinned by the focused lane fixtures. Expired wake admission verifies a deterministic replacement, replacement dedupe and a named missing-head refusal with one durable alert. OWNERUNREADABLE-02 verifies snapshot-only resolution of terminal lease/receipt placeholders, live retry ownership, failed/partial read fences and one deduplicated hammer wake. After ordinary deployment SRE checks that no terminal ledger launch remains in an R04 retry-chain-unreadable skip more than one wake past its deadline (SEVDOCS-335). HAMRESUMEOWED-01 verifies pending-to-green hammer resume and idempotent audit settlement. Outstanding exact-head receipts receive closure priority each poll without an unrelated wake; red/head movement settle the debt for normal handling. Existing merge gates, leases and caps remain mandatory. After deployment SRE observes the next natural pending-CI stop merging its green recorded head without manual action; offline smoke alone does not establish this live receipt. OWNERUNREADABLE-01 verifies terminal ownership recovery after its anchored deadline selects hammer without re-review while unreadable retry evidence remains fenced. Focused offline fixtures also cover one-read placeholder replacement, bounded backoff, transient recovery, live retries and outage recovery. After deployment SRE observes the next natural R04 case exit within its budget and merge; no worker live operation is authorized. NXA-07 also verifies exact-head validated terminal HAM proof crossing retry selection into pending, failed or green CI gates; mismatched proof retains hammer retry ownership. NXA-07 verifies the common adapter matrix and retains lease/retry settlement; NXA-06 verifies daemon CI changes, operator-approved retry exhaustion selecting R08 hammer repair, live hammer ownership and remote-unconfirmed receipt recovery through the shared decision. NXA-05 verifies that drain/capacity observations
 retain hammer intent and its deadline, and current deterministic automatic stops retain
 closure-recovery ownership. STOPSTALE-01 / STOPSTALE-02 verify that all four
 R07 variants (deterministic stop, retry cap, lifetime cap and final no-merge)
@@ -3738,19 +3767,20 @@ stateDiagram-v2
 
 ### closer-successor
 
-Head-scoped exhausted closer and pre-claim-cap successor custody; never merge authority.
+Head-scoped exhausted closer and pre-claim-cap successor custody; never merge authority. Legacy `ownerless-closer-no-merge` receipts follow the `needs-closer` transitions. Retirement overlays the status via `retiredAt`: terminal PRs and moved heads retire, retired receipts prune after seven days, and fresh admission to a returned head can clear retirement for non-enrolled receipts.
 
 ```mermaid
 stateDiagram-v2
     state "successor-pending" as s0
     state "successor-enrolled" as s1
-    state "ownerless-closer-no-merge" as s2
+    state "needs-closer" as s2
     [*] --> s0: closer-successor.01 exhausted no-merge or pre-claim cap atomically enrolls head
     s0 --> s1: closer-successor.02 existing final-fix-all confirms one remediation job
-    s0 --> s2: closer-successor.03 disabled, refused or failed handoff records typed state and alerts
-    s2 --> s1: closer-successor.04 later admitted handoff confirms custody without duplicate source-head work
+    s0 --> s2: closer-successor.03 disabled, refused or failed handoff records recovery custody and alerts
+    s2 --> s1: closer-successor.04 later closure pass enrolls one successor when admission permits
+    s0 --> s0: closer-successor.05 watcher deadline sweep confirms the same open head and the absence of a live closer, hammer fallback and prior escalation, then pages once
+    s2 --> s2: closer-successor.06 watcher deadline sweep confirms the same open head and the absence of a live closer, hammer fallback and prior escalation, then pages once
     s1 --> [*]
-    s2 --> [*]
 ```
 
 <!-- smv:diagrams:end -->
@@ -4371,13 +4401,15 @@ exit status.
 ### V2 repository/base queue foundation (MGQ-01)
 
 The finalization port now has durable lane storage and a fenced single-host
-owner seam in `src/finalization/`; it remains unwired from live execution.
+owner seam in `src/finalization/`. The watcher uses it for transferred queue lanes.
 Acknowledged readiness is atomic, parked entries rejoin the tail explicitly,
 and replay preserves candidate, phase and original infrastructure deadline.
 Owner states are `idle`, `active`, `parked`. A per-lane issuance lock spans
 intent, remote operation and drain; an expired lease cannot authorize takeover
 while a request is ambiguous. Missing stop/drain and authoritative reconciliation
-proof parks the lane. Subject leases continue to protect only individual subjects.
+proof parks the lane. A watcher tick that ends with an unresolved operation
+parks its active fence immediately and retains the prior owner and intent for
+reconciliation. Subject leases continue to protect only individual subjects.
 
 Focused offline fixtures in `test/finalization-queue-owner.test.mjs` exercise
 simultaneous claims, stale generations/routes, paused issuance, ambiguous push
@@ -4417,9 +4449,9 @@ judgement.
 resource release and suppresses duplicate closer dispatch at the admission.
 State is absent until the transaction commits; duplicates, lost replies and
 restart return the same immutable `acknowledged` receipt. Write failure rolls
-back entry/event/readiness. Both seams remain unwired until lane routing lands;
-legacy dispatch and the retry helper retain their behavior. Composition must
-supply a trusted independent evidence reader/verifier.
+back entry/event/readiness. The installed receiver uses authenticated review and
+publication reads and verifies the dispatched launch and generation. The legacy
+retry helper continues to serve lanes under legacy ownership.
 
 `test/finalization-queue-handoff.test.mjs` covers coverage/provenance refusals,
 independent duplicate submitters, crash after commit, lost ack, release ordering,
@@ -4514,8 +4546,8 @@ legacy events remain replayable. Live SHA casing and numeric/string review IDs
 do not change identity, and complete labels are passed as names to shared policy.
 
 The lifecycle is acknowledged → ready, or parked-hold/permission/infrastructure,
-returned-to-closer, or closed-observed. These seams remain uncomposed until lane
-routing; readiness alone grants no merge authority. Focused offline
+returned-to-closer, or closed-observed. The watcher admits only lanes with matching configuration and durable queue
+ownership. Readiness alone grants no merge authority. Focused offline
 `finalization-queue-admission.test.mjs` exercises mixed-source process contention,
 read/recovery races, holds, current-head reads, bounded waits and probe immutability.
 Regressions also cover mixed infrastructure/conflict diagnostics, equivalent head
@@ -4584,9 +4616,8 @@ results or drain reconciliation. Ambient author/committer environment variables
 and `EMAIL` are removed from local Git execution so replay retains the source
 author and uses the synthetic committer.
 
-These seams remain unwired until lane routing. Network Git requires the existing
-entitled credential mechanism through an injected runner; ambient SSH fallback
-is refused. The existing execution brake applies before preparation and push.
+The production consumer uses the existing entitled GitHub credential for
+network Git. The runner refuses ambient SSH credentials. The existing execution brake applies before preparation and push.
 No new CI or smoke step is added.
 
 Focused offline fixtures are `finalization-queue-rebase-proof.test.mjs`,
@@ -4596,14 +4627,14 @@ After normal deployment, the runtime owner runs
 existing bounded load-aware supervisor. Require
 `.capabilities.rebase.available == true` and `.runtime.build != null` and record
 the Git/proof adapter and actual publication observations. Missing organic
-publications and live-adapter/routing composition remain pending. The probe
+publications and unverified loaded routing remain pending. The probe
 checks the real schema and Git executable and never creates a workspace or
 mutates a lane. See the [operator procedure](docs/finalization-executor-promotion-runbook.md#mechanical-rebase-observation-mgq-04-no-activation)
 and [data contract](docs/data-model/finalization-ledger.md#mechanical-rebase-and-publication-mgq-04).
 
 ### V2 candidate checks and parking (MGQ-05)
 
-The unwired v2 finalization waiter resolves and versions the complete existing
+The v2 finalization waiter resolves and versions the complete existing
 required set, enumerates all exact-candidate check-run and legacy-status pages,
 and uses the shared CI classifier. Latest reruns win, with numeric REST IDs or
 GraphQL database IDs breaking timestamp ties. REST runs use start/completion
@@ -4635,7 +4666,7 @@ and [deployment observation procedure](docs/finalization-executor-promotion-runb
 
 ### V2 final eligibility, guarded merge and receipts (MGQ-06)
 
-The unwired v2 merge step consumes a `finalizing` exact candidate. Immediately
+The v2 merge step consumes a `finalizing` exact candidate. Immediately
 before mutation it rereads the existing emergency brake, subject ledger,
 immutable receipt and disposition digest, live head/base/holds, identity, branch
 rights, primary change, existing structural eligibility, the recomputed rebase
@@ -4753,8 +4784,9 @@ and duplicate lanes fail. The existing autonomous execution brake stays separate
 The shared v2 resolver/issuance boundary covers clean-daemon, certified closer
 inline merge and rendered hammer merge commands. A selector change cannot
 transfer ownership without proved drain/reconciliation; rollback returns pending
-entries once through durable handoff keys. Missing live queue composition refuses
-execution. No production selector is changed by this implementation.
+entries once through durable handoff keys. The watcher hosts the queue consumer
+and runs it only for a matching configured and durable queue route. Missing live
+evidence or a missing adapter defers admission or parks the entry.
 
 Use `adversarial-review finalization queue status --repo example/review --base main`
 and `finalization queue receipt --repo example/review --pr 101` (both support
@@ -4824,6 +4856,11 @@ predicate or merges; the queue executor does. Wakes observing the durable ack be
 the final dispatch recheck reuse it; an ack committed after that read can still
 race launch. Returned work owes fresh admission. Clean daemon and certified closer
 recovery only enqueue, confirming the actual stored receipt before reporting queued.
+Hammer receipts retain the full finding inventory. If strict non-blocking
+remediation is explicitly disabled, an unresolved advisory finding can be
+recorded as deferred. Blocking findings still require exact-head evidence.
+The watcher rechecks parked holds and permissions at one-minute intervals
+within original patience and records deadline expiry without a GitHub read.
 Other lanes and rollback retain existing legacy prompts and incident repair.
 Legacy closer preflight reads config and durable routing without a lane lock,
 schema migration or writer journal; unreadable durable routing refuses explicitly.

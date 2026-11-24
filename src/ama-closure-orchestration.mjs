@@ -1,6 +1,6 @@
 import { applyRepositoryMergeOff, MERGE_DISABLED_FOR_REPOSITORY } from './merge-disabled-repositories.mjs';
 import { readPrTenure, queueTenureReview } from './pr-tenure.mjs';
-import { openReviewStateDb, requestReviewRereview } from './review-state.mjs';
+import { openReviewStateDb, queuePrimaryReversalReview, requestReviewRereview } from './review-state.mjs';
 import { readCloserSuccessor, requestCloserSuccessor, settleCloserSuccessor } from './ama/closer-successor.mjs';
 import { repairEpochObservation } from './repair-epochs.mjs';
 import { handoffFinalFixAll } from './ama/final-fix-all.mjs';
@@ -27,7 +27,8 @@ import { withClosureEvaluationReadCache } from './closure-evaluation-cache.mjs';
 import { resolveHqRoot } from './hq-root.mjs';
 import { fleetStopReason } from './fleet-stop.mjs';
 import { recordOperatorNoticeCloserOutcome } from './operator-decision-notice.mjs';
-import { checkPrimaryChange, fetchPrimaryChange } from './ama/primary-change.mjs';
+import { buildPrimaryReversalReviewContext, checkPrimaryChange, fetchPrimaryChange } from './ama/primary-change.mjs';
+import { readPrimaryReversalReview } from './ama/primary-reversal-review.mjs';
 import { readHammerStopForHead, readHammerStopHoldForHead, isInfrastructureStop, canEnrichCiInfrastructureStop, isLegacyReviewHandoffStop } from './ama/hammer-stop-hold.mjs';
 import {
   evaluateHammerRetryCap, readHammerRetryCapLedger, rearmOperatorApprovedCloser, resetHammerSeriesForNonCloserHead,
@@ -72,6 +73,8 @@ import {
 import {
   DAEMON_MERGE_DISPOSITION,
   isDaemonMergeReviewAllowed,
+  isFullyCleanSettledReview,
+  sameFullReviewHead,
 } from './ama/daemon-merge.mjs';
 import * as amaDispatchCloser from './ama/dispatch-closer.mjs';
 import { companionOnlyStop } from './ama/companion-stop-wait.mjs';
@@ -876,6 +879,12 @@ async function maybeDispatchAmaClosureForInner({
     try { amaDispatchCloser.settleRefusedHammerWake({ ...hammerWakeSink.value, result }); }
     catch (error) { options.logger?.warn?.(`[watcher] refused hammer wake reconciliation failed: ${error.message}`); }
   }
+  // The durable queue acknowledgement ends legacy closure ownership. Let the
+  // queue report its own checks/deadline instead of observing another v1 wait.
+  if (result?.queued === true) return { ...result, closureOwner: { owner: 'queue-v2', reason: result.reason } };
+  if (result?.primaryReversalReviewPending || result?.primaryReversalReviewExhausted) {
+    return { ...result, closureOwner: closureOwnerSink.value };
+  }
   const hardStop = orphanRecovery?.fromDiscovery && !result?.dispatched && !result?.boundedWait
     && !result?.needsOperator
     && [result?.reason, ...(Array.isArray(result?.reasons) ? result.reasons : [])].find(reason =>
@@ -1062,6 +1071,7 @@ async function dispatchAmaClosureFor({
   resolveReviewCycleExhaustionImpl = null,
   runDaemonCleanMergeAttemptImpl = runDaemonCleanMergeAttempt,
   fetchPrimaryChangeImpl = fetchPrimaryChange,
+  buildPrimaryReversalReviewContextImpl = buildPrimaryReversalReviewContext,
   headHasValidatedHamTerminalRemediationImpl = headHasValidatedHamTerminalRemediation,
   resolveHeadCloserCommitSuppressionImpl = null,
   fetchHeadCloserVerifiedCommitImpl = fetchHeadCloserVerifiedCommit,
@@ -1864,6 +1874,62 @@ async function dispatchAmaClosureFor({
   }
   let recordedStop = readHammerStopForHeadImpl({ hqRoot: resolveHqRoot(env), repo: repoPath,
     prNumber, headSha: currentPrHeadSha, reviewedSha: reviewState.headSha, logger });
+  const primaryReviewIdentity = { repo: repoPath, prNumber, headSha: currentPrHeadSha };
+  const primaryReviewPolicy = { strictNonBlockingRemediation: cfg?.strictNonBlockingRemediation !== false };
+  const primaryReviewAdmitted = autonomousMergeExecutionEnabled && !probeCloserAuthoredStale
+    && (reviewStateDb || reviewStateRow?.pr_state === 'open')
+    && prMetadata.isOpen && !prMetadata.isDraft && Array.isArray(labelNames)
+    && !labelNames.some(label => [...OPERATOR_HOLD_LABELS, 'adversarial-merge-blocked', 'duplicate-family-hold'].includes(label));
+  const reversalToOperator = async missingEvidence => {
+    const reason = 'primary-reversal-review-exhausted';
+    try {
+      await observeWait({ rootDir, ...primaryReviewIdentity, env, immediate: true, waitClass: reason,
+        reason: `${reason}: ${missingEvidence?.summary || 'the review did not authorize the current reverted regions'}` });
+    } catch (error) { logger?.warn?.(`[watcher] primary-change page delivery failed: ${error.message}`); }
+    if (closureOwnerSink) closureOwnerSink.value = { owner: 'page', reason };
+    return withAmaDispatchMetadata({ dispatched: false, skipMergeAgent: true,
+      needsOperator: true, primaryReversalReviewExhausted: true, reason, missingEvidence }, { amaEnabled: true });
+  };
+  const reviewHandoff = reason => {
+    if (closureOwnerSink) closureOwnerSink.value = { owner: 'review', reason };
+    return withAmaDispatchMetadata({ dispatched: false, skipMergeAgent: true,
+      primaryReversalReviewPending: true, reason }, { amaEnabled: true });
+  };
+  const resolvePrimaryReversal = async evidence => {
+    if (!primaryReviewAdmitted) return {};
+    const receipt = readPrimaryReversalReview(rootDir, { ...primaryReviewIdentity, db: reviewStateDb });
+    if (receipt?.state === 'pending') return { result: reviewHandoff('primary-reversal-review-pending') };
+    if (gateSnapshot.activeFollowUpJob || findLiveAmaCloserLease(rootDir, primaryReviewIdentity)) return {};
+    return runCoexistenceOperation('primary-reversal-review', async ({ signal: operationSignal }) => {
+      const args = { ...primaryReviewIdentity, rootDir, signal: operationSignal,
+        get: createHistoryReader({ env, signal: operationSignal }) };
+      evidence ??= await fetchPrimaryChangeImpl(args);
+      const answer = checkPrimaryChange(evidence, currentPrHeadSha, primaryReviewPolicy);
+      if (answer.ok || answer.reversalReview) return { answer };
+      if (answer.reason !== 'primary-change-reverted') return {};
+      if (receipt) return { result: await reversalToOperator(answer.missingEvidence) };
+      const context = await buildPrimaryReversalReviewContextImpl(args, evidence, primaryReviewPolicy);
+      if (!context) return {};
+      throwIfAborted(operationSignal);
+      const request = queuePrimaryReversalReview({ ...primaryReviewIdentity, rootDir, db: reviewStateDb, context, logger });
+      if (request.triggered || request.status === 'already-pending'
+        || ['another-review-request-pending', 'review-in-flight'].includes(request.reason)) {
+        return { result: reviewHandoff('primary-reversal-review-queued') };
+      }
+      return {};
+    }, { timeoutMs: operationTimeoutMs || loadAwareTimeoutMs(45_000), parentSignal: signal, operationTracker, logger, repoPath, prNumber });
+  };
+  if (primaryReviewAdmitted) {
+    const receipt = readPrimaryReversalReview(rootDir, { ...primaryReviewIdentity, db: reviewStateDb });
+    if (receipt?.state === 'pending') return reviewHandoff('primary-reversal-review-pending');
+    if (recordedStop?.refusal?.reasons?.includes('primary-change-reverted')) {
+      const handoff = await resolvePrimaryReversal(null);
+      if (handoff.result) return handoff.result;
+      if ((handoff.answer?.reversalReview || handoff.answer?.ok) && recordedStop.refusal.reasons.length === 1) {
+        recordedStop = null;
+      }
+    }
+  }
   // Hand off before caps/final no-merge policy can select another closer or
   // park this head. Queue admission retains the existing closer-custody fence.
   const conflictPrimaryHandoff = autonomousMergeExecutionEnabled && prMetadata.isOpen
@@ -2032,13 +2098,19 @@ async function dispatchAmaClosureFor({
       { timeoutMs: operationTimeoutMs, parentSignal: signal, operationTracker, logger, repoPath, prNumber });
     const primary = checkPrimaryChange(refreshedPrimaryChange, currentPrHeadSha,
       { strictNonBlockingRemediation: cfg?.strictNonBlockingRemediation !== false });
+    if (primary.reason === 'primary-change-reverted' && !primary.reversalReview) {
+      const handoff = await resolvePrimaryReversal(refreshedPrimaryChange);
+      if (handoff.result) return handoff.result;
+    }
     shared = reviseClosureNextAction(shared, { progress: {
       ...(shared.snapshot.observations.progress?.value ?? shared.snapshot.observations.progress),
-      primaryChange: { ...primary, headSha: currentPrHeadSha },
+      primaryChange: primary.reversalReview ? null : { ...primary, headSha: currentPrHeadSha },
     } }, passSnapshot);
   }
   const pendingSuccessor = readCloserSuccessor(rootDir, { repo: repoPath, prNumber, headSha: currentPrHeadSha });
-  if (pendingSuccessor && pendingSuccessor.status !== 'successor-enrolled' && prMetadata.isOpen) {
+  let successorHammerFallback = false;
+  if (pendingSuccessor && pendingSuccessor.status !== 'successor-enrolled' && prMetadata.isOpen
+    && shared.decision.action !== 'daemon-merge') {
     requestCloserSuccessor({ rootDir, repo: repoPath, prNumber, headSha: currentPrHeadSha,
       source: pendingSuccessor.source, reviewBody: gateSnapshot.settledReview?.reviewBody,
       refusingReasons: pendingSuccessor.refusingReasons, now: new Date(now()).toISOString() });
@@ -2046,10 +2118,15 @@ async function dispatchAmaClosureFor({
       enabled: autonomousMergeExecutionEnabled, admitted: !prMetadata.isDraft
         && shared.decision.action === 'hammer' && shared.decision.reason !== 'automated-stop'
         && !['R05-structural', 'R10-conflict'].includes(shared.decision.row),
+      allowHammerFallback: cfg?.strictMode !== false && sameFullReviewHead(reviewState.headSha, currentPrHeadSha)
+        && shared.decision.action === 'hammer' && !isFullyCleanSettledReview(reviewState),
       now: new Date(now()).toISOString(), riskClass: reviewState.riskClass,
       handoffImpl: handoffFinalFixAllImpl, observeWaitImpl: observeWait });
-    return withAmaDispatchMetadata({ dispatched: false, skipMergeAgent: true,
-      reason: successor.status, successor, nextAction: shared.decision }, { amaEnabled: true });
+    successorHammerFallback = successor?.action === 'fallback';
+    if (!successorHammerFallback) {
+      return withAmaDispatchMetadata({ dispatched: false, skipMergeAgent: true,
+        reason: successor?.status || 'successor-pending', successor, nextAction: shared.decision }, { amaEnabled: true });
+    }
   }
   if (shared.decision.reason === 'repair-in-place-owned') {
     return bindClosureNextAction(withAmaDispatchMetadata({ dispatched: false, skipMergeAgent: true,
@@ -2060,7 +2137,7 @@ async function dispatchAmaClosureFor({
   }
   // LANEAUTO-01: spend one builder round before findings closure. Ownership,
   // operator holds and structural repair still take precedence in shared policy.
-  if (autonomousMergeExecutionEnabled && prMetadata.isOpen && !prMetadata.isDraft
+  if (!successorHammerFallback && autonomousMergeExecutionEnabled && prMetadata.isOpen && !prMetadata.isDraft
     && parseKnownPrefix(prMetadata.title) && reviewCycleExhausted
     && reviewState.headSha === currentPrHeadSha && reviewState.verdict === 'comment-only'
     && reviewState.blockingFindingState === 'known' && reviewState.blockingFindingCount === 0
@@ -2760,6 +2837,7 @@ async function dispatchAmaClosureFor({
     shared = observeDaemonResult(shared, daemonCleanMerge, passSnapshot);
   }
   if (closureOwnerSink) closureOwnerSink.shared = shared;
+  if (daemonCleanMerge?.queued === true) return withAmaDispatchMetadata(daemonCleanMerge, { amaEnabled: true });
   if (['stacked-base-merged', 'stacked-base-read-failed'].includes(daemonCleanMerge?.reason)) {
     return withAmaDispatchMetadata({ ...daemonCleanMerge, dispatched: false, skipMergeAgent: true }, { amaEnabled: true });
   }
@@ -2767,6 +2845,10 @@ async function dispatchAmaClosureFor({
     try { await observeLag({ rootDir, repo: repoPath, prNumber, headSha: currentPrHeadSha,
       eligible: false, observedAt: closureLagObservedAt, reason: daemonCleanMerge.reason, logger }); }
     catch (error) { logger?.warn?.(`AMA closure-lag observation failed: ${error.message}`); }
+  }
+  if (daemonCleanMerge?.reasons?.includes('primary-change-reverted')) {
+    const handoff = await resolvePrimaryReversal(daemonCleanMerge.liveGate?.primaryChange);
+    if (handoff.result) return handoff.result;
   }
   if (daemonCleanMerge?.needsOperator === true && daemonCleanMerge.reason === 'primary-change-needs-operator') {
     recordDaemonMergePark({ rootDir, repo: repoPath, prNumber,
@@ -3305,6 +3387,11 @@ async function dispatchAmaClosureFor({
       { amaEnabled: Boolean(cfg?.enabled) },
     );
   }
+  if (result?.reasons?.includes('primary-change-reverted')
+    || result?.hammerStop?.refusal?.reasons?.includes('primary-change-reverted')) {
+    const handoff = await resolvePrimaryReversal(null);
+    if (handoff.result) return handoff.result;
+  }
   if (result?.needsOperator && result?.reason === 'primary-change-repair-required') {
     try {
       await observeWait({ rootDir, repo: repoPath, prNumber, headSha: currentPrHeadSha,
@@ -3473,6 +3560,10 @@ async function resolveMergeAgentCoexistenceWithinEvaluation({
       timedOutOperation: operation,
       timeoutMs: err.timeoutMs || operationTimeoutMs || null,
     }, { amaEnabled: true });
+  }
+  if (amaClosureResult?.primaryReversalReviewExhausted) return { outcome: 'await-operator', amaClosureResult };
+  if (amaClosureResult?.primaryReversalReviewPending) {
+    return { outcome: 'ama-pending', amaClosureResult };
   }
   // Partial executor results still project the shared policy. Missing decision
   // evidence is an owned refresh/reconciliation, never proof of launch absence.

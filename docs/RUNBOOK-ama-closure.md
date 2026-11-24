@@ -17,11 +17,29 @@ PR/head successor request carrying the predicate's refusing review. Orchestratio
 passes the canonical `settledReview` snapshot to closer dispatch; dispatch reads
 its review body for successor custody without re-deriving review eligibility. The ordinary
 pre-claim remediation cap uses the same request. The watcher admits at most one
-existing final-fix-all work order for that head, or records and alerts
-`ownerless-closer-no-merge` through closure-wait alerting. Disabled or refused
-handoffs cannot silently terminate custody. See
+existing final-fix-all work order for that head. A disabled or refused handoff
+records `needs-closer` and alerts through closure-wait. Later closure passes
+recheck admission on that head, including from legacy `ownerless-closer-no-merge`
+receipts. If final fix-all has already spent its head-scoped round, only a strict
+exact-head review with findings that selects hammer continues through ordinary
+hammer admission and caps, including when failed CI is the repair reason. A durable `fallbackAt` marker transfers deadline ownership to hammer across retry gaps and cap escalation. Later passes on the same hammer route reuse the marker. Other routes retain `needs-closer` custody and the refusal page. Every
+30 seconds the watcher scans a bounded batch of receipts independently of
+closure selection. After 1800 seconds from the original `requestedAt`, it
+retires a receipt when GitHub confirms a terminal PR or a moved head. For the
+same open head, a live closer launch (including retries) suppresses the overdue
+page while it owns the head. A live closer, pending lease or unreadable PR or
+launch evidence backs off deadline probes for five minutes. Successful immediate or overdue delivery records
+`escalatedAt` and ends deadline paging. Failed delivery remains retryable.
+Enrolled, escalated and hammer-owned receipts get retirement-only probes at
+most daily. The sweep prunes retired JSON and its lock after seven days and
+reaps orphaned legacy lock files under flock.
+Overdue pages share the immediate refusal latch. Poll updates to `updatedAt`
+do not extend the deadline. See
 [successor records](data-model/closer-successors.md) and
 [publication ownership](data-model/hammer-publication-ownership.md).
+Strict exact-head findings remain recognized after the automatic retry-cap stop
+is selected, so an ended launch still reconciles and reaches the existing
+deduplicated cap page instead of retaining a succeeded dispatch as an owner.
 Exits before completing the close retain their existing bounded retry/refund
 executor and cap alert; confirmed no-merge decisions and `no_work_done` take
 the successor path after terminal cleanup and accounting.
@@ -702,6 +720,11 @@ back `getMergeAuthorityConfig().disabledRepositories`. The key has no environmen
 alias. Nothing changes until a repository is listed.
 
 ## Change notes
+
+- **PRIMARYLANEPROV-01:** A closer can cite the authoritative review of a
+  lane-update head. Finding coverage for a pure insertion runs from its first
+  through its last nonblank line. The commit patch still proves what the
+  closer removed. [Change note](changes/PRIMARYLANEPROV-01.md)
 
 - **HAMEDITPLAN-04:** An otherwise admissible `author-lines` plan outside the
   cited finding's ranges receives exit 21 with those ranges and re-planning
@@ -2821,7 +2844,8 @@ cannot inherit that proof. Daemon execution observations update the common polic
 repair admission cannot waive an earlier review, remaining remediation round,
 stop or cap.
 The existing head-scoped approval lane uses the same actor validator as the
-daemon; unclean review overrides still require its enforced operator allowlist.
+daemon and requires zero findings in strict mode. In non-strict mode, an
+unclean review override requires its enforced operator allowlist.
 A passed review ceiling remains repair admission, never current-head merge proof.
 
 Changed proof or queued PR facts create a new immutable generation. Unchanged
@@ -4435,9 +4459,9 @@ identity** (the operator-approval auto-close lane). Apply either:
 (the audit records `mergeAccountability: operator-approval` with the label,
 actor, and event id). `merge-agent-requested` substitutes for worker identity
 only; it still needs a settled-success, strict-clean review. Current-head
-`operator-approved` also overrides the verdict and finding-count gates, so a
-`Request changes` review with blocking findings can use the daemon lane even
-when worker identity resolves. When the live label is present, the audit records
+`operator-approved` can override the verdict. Daemon routing still requires
+zero findings in strict mode. When non-strict mode permits an override of the
+finding-count gate, the audit records
 `closureAuthority: daemon-operator-approved-override`,
 `mergeAccountability: operator-approval`, and `operatorApproval` with the
 actor, event id, observation time, and approved head. A successful merge emits
@@ -5227,6 +5251,27 @@ for the diagnostic command + recovery playbook.
 Expected when AMA is enabled and the dispatch isn't from a current-head
 `merge-agent-requested` label.
 
+### Strict findings that remain on the approved head
+
+If a hammer closes without a new commit and the exact-head review still lists
+non-blocking findings, inspect its closeout after the retry-cap page. Confirm
+whether the findings still apply. If the review no longer reflects the code,
+request a fresh exact-head review through the existing operator re-review
+procedure. If the findings still apply, use the current-head
+`merge-agent-requested` operator fallback for follow-through under its normal
+review and merge gates. Keep strict mode enabled during per-PR recovery.
+Over the first 24 hours after deployment, record distinct sampled strict
+exact-head findings heads, retry-cap pages and manual
+`merge-agent-requested` closures, with PR/head identities and page/closure
+evidence. More than 3 retry-cap pages or more than 3 manual closures fails
+operator acceptance and requires revisiting the policy before broader rollout.
+The operator plan checks the half-open 24-hour window and requires a final
+findings route for every sampled head. Supply the verified page and closure
+evidence as `ACCEPTANCE_EVIDENCE_JSON`; an explicit empty array records zero
+counts. No matching traffic leaves acceptance pending.
+The committed operator plan is
+`modules/worker-pool/post-merge-actions/AMASTRICTROUTE-01.yaml`.
+
 ### `not-eligible` reasons in the closer prompt audit
 
 Each entry in the audit's `attempts[].preMergeReasons` (or
@@ -5236,7 +5281,7 @@ reasons:
 | Reason | Meaning |
 |---|---|
 | `verdict-not-settled-success` | The settled review is not eligible for direct close (and no current-head `operator-approved`). This fires when the latest review is `Request changes` **OR** — when `roles.adversarial.merge_authority.strict_non_blocking_remediation` is on (default) — when a `Comment only`/`Approved` review still carries standing or unknown-state non-blocking findings. In the strict-mode case it is emitted alongside `non-blocking-findings-present` (see that row); a `Comment only` PR refused with *both* reasons was NOT downgraded to `Request changes`. |
-| `non-blocking-findings-present` | Strict mode (`strict_non_blocking_remediation`, default on): the settled review has standing non-blocking findings that have not been remediated, so the PR is not eligible for *direct* close. It still closes via HAM terminal remediation (the hammer addresses the non-blocking findings) or a current-head `operator-approved`. A `known` count of `>0` triggers this; an `unknown` non-blocking state also fails closed in strict mode. HAM may waive this reason on authorized active HAM evidence only in the strict-non-blocking lane described below. |
+| `non-blocking-findings-present` | Strict mode (`strict_non_blocking_remediation`, default on): the settled review has standing non-blocking findings that have not been remediated, so the PR is not eligible for *direct* close. The hammer addresses the remaining findings. With `strict_mode` enabled, a terminal receipt can carry a superseded review but cannot clear findings on an exact-head review. `operator-approved` can override the verdict while strict mode still requires zero findings. The approval override of findings requires `strict_mode: false` and the existing approval and merge gates. A `known` count of `>0` triggers this; an `unknown` non-blocking state also fails closed in strict mode. HAM may waive this reason on authorized active HAM evidence only in the strict-non-blocking lane described below. |
 | `blocking-findings-unknown` | Latest review does not expose a known structured blocking-finding count. |
 | `blocking-findings-present` | Latest review has standing structured blocking findings. |
 | `non-blocking-findings-unknown` | Strict non-blocking remediation is enabled and the settled review does not expose a known structured non-blocking-finding count. |
@@ -5250,7 +5295,7 @@ reasons:
 | `stale-review-head` | The reviewed head doesn't match the PR's current head. |
 | `pr-not-mergeable` | The PR is closed, or GitHub's `mergeableState` is neither `MERGEABLE` nor `UNKNOWN` (usually a conflict; also strict-mode `BEHIND` or an empty/unrecognized enum). Hammer-remediable for a conflicting or behind open PR: the hammer resolves the conflict or rebases. A closed PR or an empty-state read gets no hammer fix. |
 | `pr-mergeability-unknown` | GitHub still reports `mergeableState` `UNKNOWN` after the watcher's bounded re-sampling (it recomputes after a push or base move). Transient: on a non-exhausted review cycle it is not hammer-remediable (an exhausted cycle still hammers any miss without `stale-review-head`), and it never produces a manual-close page; the next tick re-reads. On the daemon clean path an UNKNOWN-only miss inside the lease is re-sampled within the retry budget and then ends as the non-permanent `gate-read-failed`, so the head stays eligible for the daemon on the next tick (a diagnostics park record is still written, as for every non-merged daemon outcome). A pre-lease UNKNOWN decline is never counted as a closer→daemon route disagreement. |
-| `primary-change-reverted` | Trusted first-hammer-parent history shows an author-changed region returning to the merge base, a removed line being restored, or a rename undone. AMA stops both hammer closeout and daemon merge; `operator-approved` does not bypass this gate. The daemon records this park reason for pipeline-health. Inspect the primary and final diffs and the finding authorization described below. The closer pages once per refused head after three observations; both daemon and closer expose scoped operator recovery described below. |
+| `primary-change-reverted` | Trusted first-hammer-parent history shows an author-changed region returning to the merge base, a removed line being restored, or a rename undone. AMA stops both hammer closeout and daemon merge; `operator-approved` does not bypass this gate. The daemon records this park reason for pipeline-health. Inspect the primary and final diffs and the finding authorization described below. The closer requests one exact-head review for an attributable, unverified text reversal. The reviewer receives the reverted regions and their removal commits. A still-unverified reversal after that pass enters scoped operator recovery. |
 | `primary-change-unknown` | Evidence was read but cannot be evaluated: a capped history/file list, omitted patches without identical trusted blob evidence, truncated patches, or unsupported structural evidence. Head races are transient. Text renames (including pure renames) are supported through `previous_filename`. This fails closed without claiming a proven reversal; `operator-approved` does not bypass it. Retain the merge hold while recovering evidence. Deterministic unknown evidence enters the existing scoped escalation route immediately; it never masquerades as `gate-read-failed`. The daemon park records `reason: primary-change-unknown` with an inspection remedy. The recovery router pages after its existing six observations for the same head, deduplicating subsequent pages. Hammer context and stop output include the missing-evidence reason. CAPROUTE-01 holds legacy unknown hammer stops on the live head, including hammer-owner routes, and probes evidence once per closer pass. A computable answer releases the evidence hold through `primary-change-evidence`; ordinary merge gates still apply. |
 | `primary-change-read-failed` | A transient GitHub read failed after the reader's bounded retry budget, or the head raced the read. Installation-token auth outages and cancellation are retryable reads. Permission, missing compare, malformed JSON and process-output failures now produce `history-read-failed` with `historyReadFailed: true` and the underlying error. An actual in-lease read failure remains non-permanent; a structural unknown is a scoped primary-change refusal. This is a retryable outage, including on PRs without hammer commits, and defers closure as `gate-read-failed`. It does not require operator adjudication or write a permanent failed-head marker. The next tick retries. |
 | `remediation-pending` | Adversarial-review remediation work is owed before AMA can close. |
@@ -5276,6 +5321,14 @@ includes `whitespaceOnlyUnitsIgnored`, counting skipped base-line units or
 insertion anchors. Renames, opaque files, test-path rules and required-guard
 proofs retain their existing rules. No configuration or operator override is
 needed for whitespace normalization.
+
+For a closer citation on an ancestor review, a pure insertion's finding range
+must cover from its first through its last nonblank line. Git can group
+surrounding blank lines into the insertion. The closer's patch must still prove
+removal of the full protected insertion in its parent. For provenance, the
+gate verifies the commit carrying the citation. An earlier lane commit must
+prove its own provenance for any reversal it performed. Its lane owner supplies
+no authority for a closer's later reversal.
 
 PRIMARYDEADCODE-01: a finding-authorized deletion can leave an author-added
 import or module binding dead outside the cited lines. Its reversal is part of
@@ -5422,6 +5475,27 @@ changed region in production and config paths must still differ from that base, 
 counts must survive (whitespace is normalized). In-place fixes to added author
 lines are allowed. A preserved result means syntactic region coverage only; it cannot detect adjacent constant changes, false guards, or moved removed lines. This syntactic check does not prove semantic intent;
 reviewers and the hammer still inspect inversions and neutralizations.
+
+A later cross-file move preserves an added author region when its ordered
+content appears in newly added lines of a different production path. Matching
+ignores whitespace and blank lines. Existing copies, reused destination spans
+and test destinations confer no move proof. Scoped history reads expand to
+destination patches only when the protected change contains a possible moved
+insertion. Whole-file rename and author deletion proofs retain their existing
+requirements.
+
+When an exact-head reversal still lacks verified authority, the closer queues
+one full review for that head with a **Reverted primary-change regions** section.
+Each entry names the file, the span on the protected author head and the commit
+that removed it. The closer keeps merge closed while the review is pending. An
+authoritative posted review with known zero blocking findings authorizes the
+recorded regions at that head, and closure records its review ID and head as
+`Reversal-Authorized-By` evidence. Blocking findings enter ordinary remediation.
+An exhausted request or a new unverified region on the same head follows the
+existing operator route. Structural or unreadable evidence uses its existing
+route. CI, strict non-blocking remediation and all other merge predicates still
+apply.
+
 
 Test paths (`test/`, `tests/`, `**/*.test.mjs`, `**/*.test.js`, and
 `**/__tests__/**`, including fixtures under test directories) are excluded from
@@ -6605,7 +6679,7 @@ list and themselves contain only literal paths and numeric ranges. Explanatory
 notes stop secondary parsing. Nested braces, globs, traversal, absolute paths,
 missing coordinates and paths mentioned only in Problem/Recommended fix confer
 no authority. File and Lines are each bounded at 512 characters. All original
-identity, ancestry, currency, patch-content and whole-span checks still apply.
+identity, ancestry, currency, patch-content and line-coverage checks still apply.
 Inputs over 512 characters are refused before parsing, rather than truncated
 into a potentially authorizing prefix. Invalid numeric ranges also refuse
 authorization. The refusal includes the unreadable `Lines:` text (bounded).
@@ -6624,11 +6698,13 @@ A fresh evaluation reads verification again. A verification SHA mismatch records
 snapshots; an otherwise unclassified verification read error records `unverifiable`.
 Equal-length replacements map by line position; unequal-length replacements
 require the finding to cover the entire projected span. Insertion-only regions
-remain protected: deleting the insertion requires a citation covering its entire
-introduced span and HAM removals covering the remaining parent-state added-line
-multiset at its projected parent coordinates (REVERSALPROV-02). In-place repairs
-may still change introduced text while preserving the changed region. A one-line finding cannot waive the uncited
-remainder of a contiguous author hunk.
+remain protected. A closer citing a review in its parent ancestry must cover
+the span from the first through the last nonblank line of the reviewed
+insertion. Lane and rebased citations require the full introduced span. The
+closer's removals must cover the remaining parent-state added-line multiset
+at its projected parent coordinates (REVERSALPROV-02). In-place repairs may
+still change introduced text while preserving the changed region. A one-line
+finding cannot waive uncited content in a contiguous author hunk.
 Unrelated regions, missing trailers and old reviews outside
 the closure cannot authorize a reversal. Restoring a deleted base line requires
 matching HAM additions, including when the author hunk also introduced new lines;
@@ -6824,14 +6900,30 @@ Hammer starting-range check can use that same replay. A known branch reset
 refuses it. A later push needs its own proof, and the new head still requires
 the ordinary merge validation and source-preservation checks.
 
-The patch proof reads at most 256
-linear commits per series, preserves empty commit positions, and permits extra
-commits only with independently authenticated HAM identity and matching
-`Reviewed-Head`, worker ticket/class and close-out trailers. A changed PR patch,
-unattributed extra commit, branch reset or later unrelated push supplies no
-carry-forward authority. Missing objects, capped evidence and unavailable
-provenance name the missing proof and retain no-merge status; they do not imply
-that operator recovery is necessary.
+The patch proof reads at most 256 linear commits per series and preserves
+empty commit positions. Rebase-only proof permits extra commits with
+independently authenticated HAM identity and matching `Reviewed-Head`, worker
+ticket/class and close-out trailers. For finding applicability, the review's
+ordered patches can also match a strict prefix of the live branch. Every
+remaining commit must have its own launch-bound publication in the same PR.
+The reader uses completed remediation worker receipts matched to the commit's
+job and class. A local launch must match the job's resolved reply storage key
+(`replyStorageKey`, then `launchRequestId`, then `jobId`). HQ remediation needs
+a matching produced head attestation. An HQ PR update needs its published
+round with a non-empty `launchRequestId`
+matching the produced branch-push attestation's launch. Legacy accounting-only
+rounds without that identity cannot establish this proof. A multi-commit push
+with only a tip receipt cannot cover unreceipted intermediate commits, even
+when its recorded start head ends the reviewed prefix. HAM and lane extras
+cannot be mixed in either order. The dispute still requires the latest
+authoritative review and concrete evidence at the live head. This proof grants finding applicability
+only. It cannot waive the exact review head match or carry a withdrawal's
+earlier evidence head. A changed PR patch, unattributed extra commit, branch
+reset or later unrelated push supplies no carry-forward authority. Missing
+objects, capped evidence and unavailable provenance name the missing proof
+and retain no-merge status; attestation
+refusals include the identity reason and any transient-read classification.
+They do not imply that operator recovery is necessary.
 Binary-only commits use the same `--binary --full-index` diff and stable patch
 ID proof; a changed binary blob does not preserve currency. If the installed
 Git cannot produce a patch ID for a non-empty diff, the proof fails closed and
@@ -9609,6 +9701,18 @@ mergeability remain separate gates. A live review request withdraws the waiver
 with a pending status before returning to full review, including requests already
 visible at poll admission or classification. A failed withdrawal retains the
 fast-path wait for a later retry; it does not hand off with a stale green waiver.
+Unsettled CI evidence and GitHub's `UNKNOWN` mergeability keep the waiver and
+retry on the same head. A settled CI failure or definite mergeability refusal on
+that head withdraws the waiver before ordinary review admission, where a first
+pass can run with red external CI. While the exact-head withdrawal receipt is
+current, later polls continue ordinary admission even if reviewer routing has
+to wait. An explicit review request preserves an existing withdrawal receipt
+for that head. The gate record retains `docsFastPathWithdrawn: true` when
+queued or running review status replaces the withdrawal reason. Nullish reviewer
+fields and assignment followed by a routing reset therefore keep ordinary review
+admission on that head. Legacy pending withdrawal reasons remain readable.
+See the [gate record contract](data-model/adversarial-gate-status.md).
+A new head is classified independently.
 Under the lease, each attempt revalidates live classification, review requests,
 exact head, required checks and merge eligibility before signing/recording.
 A base tip advance is accepted after classifying the new immutable base/head
@@ -9855,12 +9959,18 @@ daemon inline merge; see `docs/STATE-MACHINE.md`). Legacy lanes are unchanged.
 
 | Step | Owner | Result |
 |---|---|---|
-| Dispatch | `maybeDispatchAmaCloser` | Ordinary hammer prompt, phases and `decision-only` / `terminal-audit` launch. Bootstrap inputs add `HAM_FINALIZATION_EXECUTOR=queue-v2`, the route generation, the installed handoff argv and the closer worker identity. A durable ack for the head suppresses dispatch (`queue-handoff-acknowledged`). |
+| Dispatch | `maybeDispatchAmaCloser` | Ordinary hammer prompt, phases and `decision-only` / `terminal-audit` launch. Bootstrap inputs add `HAM_FINALIZATION_EXECUTOR=queue-v2`, the route generation, the installed handoff argv and the closer worker identity. A durable admission for the head suppresses dispatch (`queue-handoff-acknowledged`). The dispatch result reports the queue entry for both clean reviews and hammer handoffs. |
 | Close | `bin/hammer-close-controller.sh` | Publish, verify-head and exact-head audit as before, then `bin/hammer-queue-handoff.mjs`. No CI wait, predicate or merge. |
-| Handoff | `src/finalization/hammer-queue-handoff.mjs` | Re-reads the live PR (open, head equal to the attested head). Builds a request bound to repo, PR, head, closer launch and the review-proof digest (reviewed head plus the audit published for the exact head). Writes `queue-handoff-request.json` in the run directory and runs the installed command with that path. |
+| Handoff | `src/finalization/hammer-queue-handoff.mjs` | Re-reads the live PR (open, head equal to the attested head). Builds a request bound to repo, PR, head, closer launch and the review-proof digest (reviewed head plus the audit published for the exact head). Writes `queue-handoff-request.json` in the run directory and runs the installed command with that path. The receiver accepts request files up to 1 MiB. |
 | Confirm | same | The reply is not evidence. The durable `finalization_queue_handoff` receipt must carry this head, launch and review-proof digest, and the queue entry must be confirmed (`confirmQueueAdmission`). A retried launch replays an existing admission without a second delivery. |
 | Terminal audit | same | `superseded` attempt, reason `queue-handoff-admitted`, with entry/ack ids and the digest. This satisfies the launch's `terminal-audit` required outcome. No closing comment is posted. |
 | Merge | queue executor | Admission, live re-validation, exact-candidate checks and an expected-head squash merge under the lane fence. Transient failures park and retry the same entry. |
+
+The receiver accounts for every applicable finding. It requires an exact-head
+fix or verified withdrawal for blockers and enforces non-blocking coverage
+under the default strict policy. With `strict_non_blocking_remediation: false`,
+an advisory without a verified fix can be recorded as `deferred`, linked to
+the authenticated audit and original finding. It receives no fix credit.
 
 Stops: `head-changed`, `already-merged` and `pr-closed` are world facts (exit 20;
 a moved head starts a fresh review lifecycle and is never re-hammered from the old
@@ -9915,15 +10025,14 @@ never waives eligibility, current-head review, holds, complete checks or identit
 `resolveLaneRoute` is the shared resolver. `routeFinalizationWriter` protects the
 clean daemon and the closer's certified-head inline writer. The rendered hammer
 merge command uses `bin/legacy-lane-write.mjs`, preserving the existing entitled
-metered transport, arguments and output. Queue admission callbacks are injected
-at the composition boundary; a missing callback returns
-`queue-composition-unavailable`, with no legacy fallback. This slice does not
-start a queue pump or install live evidence/identity/delivery adapters. MRQ-21
-replaces MGQ-10's route-scoped closer prompt: a queue-v2 lane dispatches the
-ordinary hammer, whose controller hands off its attested head (see
-[Queue-v2 hammer handoff](#queue-v2-hammer-handoff-mrq-21)). Those explicit composition requirements must be
-satisfied and observed before an operator promotes a lane. Capability availability
-is not an assertion that such a consumer is running.
+metered transport, arguments and output. The installed clean producer and
+hammer receiver enter the existing FIFO. A missing admission callback returns
+`queue-composition-unavailable`. For a matching queue selector and durable
+route, the watcher advances the FIFO under the owner fence. A queue-v2 lane
+dispatches the ordinary hammer, whose controller hands off its attested head.
+Before transfer, verify the loaded watcher and the required adapters through the
+[whole-lane canary procedure](finalization-queue-canary-runbook.md). See also the
+[queue-v2 hammer handoff](#queue-v2-hammer-handoff-mrq-21).
 
 The native `bin/legacy-pr-write.mjs` wrapper resolves the live PR identity before
 entering `runLegacyLaneWrite`. It uses a metered, owner-aware PR REST read scoped to
@@ -10033,6 +10142,13 @@ intent. Successful queue operations require materialized publication evidence or
 an exact-candidate merge receipt before settlement. Unknown evidence leaves the
 transition pending and both routes fenced. There is no automatic expiry escape.
 The adapter receives a finite, scaled-once timeout clipped to the deadline.
+
+The queue consumer honors the AMA master switch and the autonomous execution
+brake. A warning identifies a tick that remains in flight across three watcher
+intervals. For an ambiguous push or merge, the same watcher retries readback
+after its issuance callback drains. If the outcome remains unknown or the
+previous owner cannot prove drain, the lane retains its fence and queues a
+durable page. Use the existing operator recovery route for that fence.
 
 Promotion and rollback are operator work:
 
@@ -10832,6 +10948,12 @@ After deployment, SRE restarts the watcher through its registered restart path
 and observes closer wakes within two passes. Workers do not perform that live step.
 
 ## Change notes
+
+### DISPUTECURRENCY-01 — review applicability after lane remediation
+
+A patch-equivalent rebase followed by launch-attributed remediation or PR
+updates can preserve the cited findings for fresh adjudication on the live head.
+Earlier withdrawal evidence still requires rebase-only proof.
 
 ### CAPREHEAD-02 — exhausted-cycle builder recovery
 

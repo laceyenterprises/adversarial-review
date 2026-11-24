@@ -1,0 +1,20 @@
+{
+  "version": 1,
+  "entries": [
+    {
+      "id": "finalization-queue-hammer-publication",
+      "title": "Finalization queue hammer publication evidence",
+      "path": "docs/data-model/finalization-ledger.md",
+      "store": "data/reviews.db",
+      "schemaSurface": "src/finalization/queue-handoff-store.mjs",
+      "relatedSchemaSurfaces": ["src/finalization/queue-production-admission.mjs"],
+      "owner": "Merge Authority v2",
+      "optionalFields": [
+        "finalization_queue_handoff.evidence_json.reviewProof.observedAt is the authenticated audit timestamp",
+        "finalization_queue_handoff.evidence_json.attestations.produced.record carries the signed service observation with audit comment, review-proof digest and closer launch identity",
+        "finalization_queue_handoff.evidence_json.builderAttestation retains the original signed builder launch record"
+      ],
+      "compatibility": "The existing queue schema and original signed review records remain readable. Earlier receipts may omit the audit observation time."
+    }
+  ]
+}

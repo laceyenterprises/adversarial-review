@@ -13,6 +13,7 @@ import { promisify } from 'node:util';
 
 import { writeFileAtomic } from './atomic-write.mjs';
 import { resolveGateStatusContext } from './adversarial-gate-context.mjs';
+import { DOCS_WITHDRAWAL_REASON } from './docs-only.mjs';
 import {
   buildScopedOperatorApproval,
   classifyBlockingFindings,
@@ -1408,6 +1409,11 @@ async function publishAdversarialGateStatus(rootDir, {
     description: decision.description,
     reason: decision.reason,
     postedAt: new Date().toISOString(),
+    // Keep the head's review handoff after queued/running status replaces it.
+    ...((existingRecord?.docsFastPathWithdrawn === true
+      || (existingRecord?.state === 'pending' && existingRecord.reason === DOCS_WITHDRAWAL_REASON)
+      || (decision.state === 'pending' && decision.reason === DOCS_WITHDRAWAL_REASON))
+      ? { docsFastPathWithdrawn: true } : {}),
   };
   writeRecordImpl(
     gateRecordPath(rootDir, { repo, prNumber, headSha }),
@@ -1451,6 +1457,15 @@ async function projectAdversarialGateStatus(rootDir, {
     operatorApprovalEvent,
   });
   const decision = pickAdversarialGateStatus({ ...snapshot, env, closerProducedHead });
+  if (decision.reason === 'review-queued' && (reviewRow?.reviewer ?? '') === '' && reviewRow?.revision_ref === headSha) {
+    // A drained watcher can project the unrouted row before assigning a reviewer.
+    // Keep the withdrawal receipt so the next poll stays on the review path.
+    const prior = readGateRecord(rootDir, { repo, prNumber, headSha });
+    if (prior?.state === 'pending' && prior.reason === DOCS_WITHDRAWAL_REASON) {
+      decision.reason = prior.reason;
+      decision.description = prior.description ?? decision.description;
+    }
+  }
   const durableDecision = durableGateDecision(decision, {
     repo,
     prNumber,

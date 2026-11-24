@@ -62,9 +62,21 @@ export async function captureMergeLaneObservation({ rootDir, shared, repo, prNum
   else if (decision.actor === 'remediator') live = snapshot.observations?.remediation?.value?.job?.live ?? null;
   else if (['daemon', 'watcher', 'ci', 'operator'].includes(decision.actor)) live = true;
   else if (!closer && (decision.actor === 'none' || snapshot.observations?.launches?.state === 'complete')) live = false;
+  const reviewSource = snapshot.observations?.reviews;
+  const review = reviewSource?.state === 'complete' ? reviewSource.value : null;
+  const reviewedHead = review?.headSha?.toLowerCase();
+  const postedAtMs = Date.parse(review?.postedAt);
+  const exactReview = reviewedHead && reviewedHead === decision.head?.toLowerCase()
+    && Number.isFinite(postedAtMs) && postedAtMs <= observedMs ? {
+      head: reviewedHead, verdict: review.verdict, postedAtMs,
+      hasFindings: ['blocking', 'nonBlocking'].some(kind =>
+        review[`${kind}FindingState`] === 'known' && review[`${kind}FindingCount`] > 0),
+    } : null;
   const record = { schema: 'merge-lane-observation/v1', kind: 'observation', subjectKey: snapshot.subjectKey,
     repo, prNumber, head: decision.head, generation: snapshot.generation ?? null, passId: snapshot.passId ?? null,
-    observedAt: new Date(observedMs).toISOString(), state: snapshot.observations?.pr?.value?.state ?? 'unknown',
+    observedAt: new Date(observedMs).toISOString(), observedAtMs: observedMs,
+    strictMode: snapshot.observations?.policy?.value?.strictMode === true, exactReview,
+    state: snapshot.observations?.pr?.value?.state ?? 'unknown',
     next: { action: decision.action, actor: decision.actor, row: decision.row, reason: decision.reason,
       deadline: decision.deadline, decisionKey: decision.decisionKey },
     ownership: { live, custody, ownerless: live === true ? false

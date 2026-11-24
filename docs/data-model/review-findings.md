@@ -357,8 +357,8 @@ has no `launched_at` and ages from its claim `day`.
 
 ### Releasing batches whose launch ended (FINDINGSREQUEUE-01)
 
-A batch is released when every launch under its `findings-batch-<batch-id>`
-key (preparation and any publisher) is terminal in the launch ledger and either:
+A batch is released when every launch under its preparation and publication
+keys is terminal in the launch ledger and either:
 
 - settlement failed with an error that cannot clear after the launch ended:
   `batch-push-evidence-missing`, `batch-push-evidence-mismatch`,
@@ -509,9 +509,11 @@ hourly when the claim interval is longer. Startup failures and fleet stops retry
 on the next poll. An in-flight ticker fences overlapping polls.
 
 The sweep reuses `hq dispatch`, the configured remediation worker resolver and
-normal priority. It persists the batch before submission and uses its stable
-idempotency key after a lost receipt. A recorded preparation launch fences further
-preparation until completion, across days and restarts. The manifest and atomic outcome
+normal priority. It persists the batch before submission. If dispatch fails or
+times out, it attempts a scoped read by idempotency key and adopts a matching
+launch. Confirmed absence follows the dispatch-error path. Unreadable evidence
+leaves custody unresolved for a later pass. A recorded preparation launch fences
+further preparation until completion, across days and restarts. The manifest and atomic outcome
 artifact live in `data/finding-batches/<batch-id>/`; retain them until collected.
 FINDINGSSHAPE-01 keeps preparation `decision-only`: workers re-check current main,
 drop stale/no-evidence findings with reasons, and push tested fixes on their batch
@@ -581,10 +583,17 @@ Untyped lifecycle failures carry `batch-decision-publication-failed` so an
 already canceled source also retains its batch as
 `batch-decision-publication-unresolved`. A verified receipt updates both the
 stored row and the in-memory batch before subsequent publication steps.
-Both phases retain the batch ID, ticket and `findings-batch-<batch-id>` idempotency
-key; the dispatcher contract is unchanged. A PR-shaped launch without PR evidence
-still fails. The collector queries the existing launch-ledger adapter by that key,
-including terminal rows, before submission. Any publisher receipt fences another
+Both phases retain the batch ID and ticket. Preparation uses
+`findings-batch-<batch-id>` and publication uses `findings-batch-publish-<batch-id>`.
+After a failed preparation submission or invalid receipt, the collector checks
+the exact preparation key. A matching launch is adopted. Readable absence uses
+the existing dispatch error accounting. An unreadable or unconfirmed probe logs
+a warning and defers that batch for a later pass without charging an attempt.
+Other queued batches continue dispatch and settlement in the same pass.
+A PR-shaped launch without PR evidence still fails. The collector reads scoped
+launch receipts, including terminal rows, before publication. It continues to
+recognize legacy publishers under the preparation key. A publisher with a new
+key has a durable intent before submission. Any publisher receipt fences another
 publisher, even after failure or a lost response. A per-batch file lock serializes
 collectors, and atomic `publish-intent.json` records `batchId`, `branch`,
 `idempotencyKey`, `sourceLaunchId`, ISO `submittedAt`, `dispatchTimeoutMs` (the
@@ -596,7 +605,7 @@ positive integer milliseconds, injectable as `publishReceiptGraceMs` in runner
 options). Only strictly after that bound, with readable keyed evidence containing
 the decision launch, no publisher row, and every keyed row terminal, the collector
 atomically replaces the intent under the same lock and resubmits once on the same
-branch, ticket and key. The replacement has `resubmissionCount: 1` and `resubmitOf`
+branch and ticket using the publication key. The replacement has `resubmissionCount: 1` and `resubmitOf`
 containing the prior submission's `submittedAt` and `dispatchTimeoutMs`. It is
 durable before dispatch, so even another failed submission cannot earn a third.
 Legacy intents without `submittedAt` use file mtime; a missing timeout uses the

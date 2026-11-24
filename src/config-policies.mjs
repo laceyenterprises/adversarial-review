@@ -207,7 +207,7 @@ export function enforceCiHostingSecurityInvariants(merged, trace) {
   });
 }
 
-export function validateOsgShape(value, source = null) {
+export function validateOsgShape(value, source = null, schema) {
   if (!value || typeof value !== 'object' || Array.isArray(value)) {
     throw new AgentOSConfigError('osg: expected mapping', { key: 'osg', source });
   }
@@ -217,9 +217,9 @@ export function validateOsgShape(value, source = null) {
     }
   }
   if (Array.isArray(value.arms)) {
-    const fields = Object.keys(osgArmFields());
+    const fields = Object.entries(osgArmFields(schema) ?? {}).filter(([, field]) => field.__required);
     for (const arm of value.arms) {
-      if (!arm || fields.some(key => !Object.hasOwn(arm, key))) {
+      if (!arm || fields.some(([key]) => !Object.hasOwn(arm, key))) {
         throw new AgentOSConfigError('osg.arms: incomplete arm', { key: 'osg.arms', source });
       }
     }

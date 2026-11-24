@@ -43,7 +43,9 @@ export function gitFixture(t, { second = false, conflict = false, noop = false, 
     ({ fork, base, oldHead } = seed);
   } else {
     mkdirSync(source);
-    g(['init', '-b', 'main']);
+    // Hooks are disabled in these fixtures. Omit stock Git templates so
+    // copying a seed only copies repository state that the tests exercise.
+    g(['init', '--template=', '-b', 'main']);
     const lines = Array.from({ length: 20 }, (_, i) => `line ${i}\n`);
     file('content', sharedFile ? lines.join('') : 'initial\n'); file('base', 'initial\n'); file('INDEX.md', 'initial\n');
     fork = commit('initial');
@@ -54,7 +56,9 @@ export function gitFixture(t, { second = false, conflict = false, noop = false, 
     g(['checkout', 'main']);
     base = fork;
     if (!noop) { file(sharedFile || conflict ? 'content' : 'base', sharedFile ? [...lines.slice(0, -1), 'upstream\n'].join('') : 'upstream\n'); base = commit('base advanced'); }
-    g(['init', '--bare', remote]);
+    g(['init', '--template=', '--bare', remote]);
+    // Receive-pack uses its own Git config, even for an absolute local remote.
+    g(['--git-dir', remote, 'config', 'receive.autogc', 'false']);
     g(['push', remote, 'main', 'topic']);
     mkdirSync(join(root, 'data'));
     const db = new Database(join(root, 'data', 'reviews.db'));

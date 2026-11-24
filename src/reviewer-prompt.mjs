@@ -1,3 +1,4 @@
+import { formatPrimaryReversalReviewContext } from './ama/primary-reversal-review.mjs';
 // Reviewer prompt assembly.
 //
 // ARC-10: extracted from `reviewer.mjs` so prompt construction is a cohesive,
@@ -117,6 +118,7 @@ async function buildReviewerExtraContext({
   reviewedHeadSha = null,
   diff = '',
   advisoryFindings = [],
+  primaryReversalReview,
   guardForbiddenPaths = [],
   fileInventoryContext = '',
   reviewModeDecision = null,
@@ -136,8 +138,9 @@ async function buildReviewerExtraContext({
   // PR metadata can advance while a queued exact-head review is running.
   // Linked document reads and head-scoped context must use the reviewed head.
   if (reviewedHeadSha) prContext = { ...prContext, headRefOid: reviewedHeadSha };
+  const reversalContext = formatPrimaryReversalReviewContext(primaryReversalReview, reviewedHeadSha);
   if (isPublicHygieneRepo(repo, getConfigImpl)) {
-    return PUBLIC_SAFE_REVIEW_ADDENDUM + formatGuardForbiddenPaths(guardForbiddenPaths) + fileInventoryContext;
+    return reversalContext + PUBLIC_SAFE_REVIEW_ADDENDUM + formatGuardForbiddenPaths(guardForbiddenPaths) + fileInventoryContext;
   }
   // The range is daemon-owned metadata, never inferred from PR prose.
   let tenureContext = '';
@@ -159,7 +162,7 @@ async function buildReviewerExtraContext({
   // RPL-08: slim mode trims context, never the review contract. See
   // buildSlimReviewerExtraContext for what is dropped and why.
   if (reviewModeDecision?.slim) {
-    return tenureContext + formatGuardForbiddenPaths(guardForbiddenPaths) + disputeContext + formatPrIntentContext(prContext?.body) + v1GrowthContext + buildSlimReviewerExtraContext({ repo, prNumber, decision: reviewModeDecision, advisoryFindings, log }) + fileInventoryContext;
+    return reversalContext + tenureContext + formatGuardForbiddenPaths(guardForbiddenPaths) + disputeContext + formatPrIntentContext(prContext?.body) + v1GrowthContext + buildSlimReviewerExtraContext({ repo, prNumber, decision: reviewModeDecision, advisoryFindings, log }) + fileInventoryContext;
   }
 
   let extraContext = buildObviousDocsGuidance();
@@ -197,7 +200,7 @@ async function buildReviewerExtraContext({
     log?.error?.(`[reviewer] WARN: failed to build hardening-ledger review context: ${err.message}`);
   }
 
-  return tenureContext + formatGuardForbiddenPaths(guardForbiddenPaths) + extraContext + formatPrIntentContext(prContext?.body) + v1GrowthContext + disputeContext + fileInventoryContext;
+  return reversalContext + tenureContext + formatGuardForbiddenPaths(guardForbiddenPaths) + extraContext + formatPrIntentContext(prContext?.body) + v1GrowthContext + disputeContext + fileInventoryContext;
 }
 
 function buildReviewerPrompt({ promptPrefix, extraContext = '', diff = '' } = {}) {

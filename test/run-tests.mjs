@@ -4,7 +4,8 @@ import { constants, tmpdir } from 'node:os';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { SERIAL_TEST_FILES, orderFiles, workerCount, suiteTimeoutMs } from './helpers/parallel-plan.mjs';
+import { parseArgs } from 'node:util';
+import { SERIAL_TEST_FILES, orderFiles, planPrShards, workerCount, suiteTimeoutMs } from './helpers/parallel-plan.mjs';
 import { fixtureGitEnv } from './helpers/fixture-git-env.mjs';
 import { reclaimAbandonedSandboxes, SANDBOX_OWNER_MARKER } from './helpers/runner-sandbox.mjs';
 
@@ -62,22 +63,59 @@ function listFiles(rootDir) {
 function testFiles() {
   const topLevel = readdirSync(testDir)
     .filter((name) => name.endsWith('.test.mjs'))
-    .map((name) => path.join(testDir, name));
+    .map((name) => `test/${name}`);
   const adaptersDir = path.join(testDir, 'adapters');
   const adapters = readdirSync(adaptersDir)
     .filter((name) => name.endsWith('.test.mjs'))
-    .map((name) => path.join(adaptersDir, name));
-  const files = [...topLevel, ...adapters].sort();
-  const requested = process.argv.slice(2).filter((arg) => !arg.startsWith('-'));
-  if (requested.length === 0) return files;
-  const selected = files.filter((file) => requested.some((name) => (
-    path.resolve(repoRoot, name) === file || path.basename(file) === name
+    .map((name) => `test/adapters/${name}`);
+  return [...topLevel, ...adapters].sort();
+}
+
+async function testPlan(files, requested, base, shardIndex, durations) {
+  if (requested.length > 0 && base !== undefined) {
+    throw new Error('Choose either a diff base or explicit test files');
+  }
+  if (base !== undefined) {
+    const { planAffectedTests } = await import('./helpers/affected-tests.mjs');
+    const selection = planAffectedTests(repoRoot, files, base);
+    const shards = shardIndex === undefined ? null : planPrShards(selection.files, files, durations);
+    return {
+      ...selection,
+      selectedCount: selection.files.length,
+      files: shards ? shards[Number(shardIndex)] : selection.files,
+      shard: shards ? `${Number(shardIndex) + 1}/${shards.length}` : undefined,
+    };
+  }
+  if (requested.length === 0) return { mode: 'full', reason: 'no diff base supplied', files };
+  const selected = files.filter(file => requested.some(name => (
+    path.resolve(repoRoot, name) === path.resolve(repoRoot, file) || path.basename(file) === name
   )));
   if (selected.length !== requested.length) {
     throw new Error(`Expected ${requested.length} test files, found ${selected.length}`);
   }
-  return selected;
+  return { mode: 'explicit', reason: 'test files supplied on the command line', files: selected };
 }
+
+const { values, positionals } = parseArgs({
+  allowPositionals: true,
+  options: { base: { type: 'string' }, 'dry-run': { type: 'boolean' } },
+});
+const base = values.base ?? (process.env.AR_TEST_PR_BASE || undefined);
+const shardIndex = process.env.AR_TEST_PR_SHARD || undefined;
+if (shardIndex !== undefined && (base === undefined || !['0', '1'].includes(shardIndex))) {
+  throw new Error('AR_TEST_PR_SHARD requires a diff base and must be 0 or 1');
+}
+const timingHints = path.join(testDir, 'fixtures', 'suite-durations.json');
+const durations = existsSync(timingHints) ? JSON.parse(readFileSync(timingHints, 'utf8')) : {};
+const plan = await testPlan(testFiles(), positionals, base, shardIndex, durations);
+if (values['dry-run']) {
+  console.log(JSON.stringify({ base, ...plan }, null, 2));
+  process.exit(0);
+}
+const selectedCount = plan.selectedCount ?? plan.files.length;
+console.error(`Test selection: ${plan.mode} (${plan.reason}); ${selectedCount} files`
+  + `${plan.shard ? `, shard ${plan.shard} runs ${plan.files.length}` : ''}.`);
+if (plan.files.length === 0) process.exit(0);
 
 const checkoutDataExistedBefore = existsSync(checkoutDataDir);
 const checkoutDataBefore = listFiles(checkoutDataDir);
@@ -151,9 +189,7 @@ try {
   mkdirSync(coordinatorHome);
   // Include this run's random sandbox name so concurrent suites cannot trip the guard.
   const fixtureProbePrefix = `adversarial-review-tmp-probe-${path.basename(sandboxRoot)}-`;
-  const selected = testFiles().map((file) => path.relative(repoRoot, file));
-  const timingHints = path.join(testDir, 'fixtures', 'suite-durations.json');
-  const durations = existsSync(timingHints) ? JSON.parse(readFileSync(timingHints, 'utf8')) : {};
+  const selected = plan.files;
   const serialFiles = orderFiles(selected.filter(file => SERIAL_TEST_FILES.has(file)), durations);
   const parallelFiles = orderFiles(selected.filter(file => !SERIAL_TEST_FILES.has(file)), durations);
   const files = [...serialFiles, ...parallelFiles];
@@ -184,12 +220,16 @@ try {
   // skip its refresh. Tests set their own synthetic auth inputs rather than
   // inheriting tokens, their launch commands or their expiries.
   const inheritedStatePaths = new Set([
+    // Diff selection applies only to this coordinator. Several test fixtures
+    // invoke their own runner with a different repo or explicit file list.
+    'AR_TEST_PR_BASE', 'AR_TEST_PR_SHARD',
     'AR_TEST_TIMINGS', 'AR_TEST_SHARD_CONFIG', 'NODE_COMPILE_CACHE', 'NODE_TEST_CONTEXT',
     'CODEX_HOME', 'CODEX_SOURCE_HOME', 'CODEX_AUTH_PATH', 'GEMINI_HOME',
     'GEMINI_OAUTH_CREDS_PATH', 'CLAUDE_CONFIG_DIR',
     'CODEX_SESSION_ROOTS', 'CODEX_SESSION_ROOT',
     'CLAUDE_SESSION_ROOTS', 'CLAUDE_SESSION_ROOT', 'CLAUDE_PROJECTS_ROOT',
-    'AGENT_OS_CONFIG_PATH', 'ADVERSARIAL_REVIEW_WORKSPACE_STATE_DIR',
+    'AGENT_OS_CONFIG_PATH', 'AGENT_OS_ROOT', 'AGENT_OS_DEPLOY_CHECKOUT',
+    'ADVERSARIAL_REVIEW_WORKSPACE_STATE_DIR',
     'AGENT_OS_REVIEWER_QUOTA_STATUS_DIR', 'ADVERSARIAL_REVIEW_QUOTA_STATUS_DIR',
     'AGENT_OS_WORKER_RUN_AS_USER', 'HQ_WORKER_RUN_AS_USER',
     // Live-read switches belong to the worker; offline fixtures opt in explicitly.

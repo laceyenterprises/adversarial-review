@@ -1,6 +1,6 @@
 // ONS-07 — the generated Node config validator agrees with the Python loader.
 //
-// fixtures/cfg-parity-cases.v1.json holds YAML inputs and the verdict the
+// fixtures/cfg-parity-cases.*.json hold YAML inputs and the verdict the
 // Python CFG loader returned for each (recorded offline with
 // scripts/record-cfg-parity-cases.py). Both readers must accept the same
 // documents with the same resolved values, and refuse the same documents at
@@ -11,10 +11,13 @@ import assert from 'node:assert/strict';
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
+import { _resetCodeDefaultsForTesting } from '../src/config-cascade.mjs';
 import { AgentOSConfigError, ENV_ALIASES, loadConfig, loadConfigRuntime } from '../src/config-loader.mjs';
 import { CFG_JSON_SCHEMA, schemaV1 } from '../src/config-schema.mjs';
 
-const { cases } = JSON.parse(readFileSync(new URL('./fixtures/cfg-parity-cases.v1.json', import.meta.url), 'utf8'));
+// Keep independently recorded revisions separate so each source remains accurate.
+const cases = ['cfg-parity-cases.v1.json', 'cfg-parity-cases.cfgnodeschema-01.json']
+  .flatMap(file => JSON.parse(readFileSync(new URL(`./fixtures/${file}`, import.meta.url), 'utf8')).cases);
 
 for (const { name, files, modules = [], env = {}, get = [], python } of cases) {
   test(`CFG parity: ${name}`, () => {
@@ -78,6 +81,45 @@ test('the env alias table is the generated CFG table and names real schema keys'
   assert.equal(ENV_ALIASES['reviewer.timeout_ms'].canonical, 'AGENT_OS_REVIEWER_TIMEOUT_MS');
   assert.equal(ENV_ALIASES['session_ledger.backend'].aliases[0][1]('ON'), 'postgres');
   assert.equal(ENV_ALIASES['worker_pool.dispatch.idle_backoff.enabled'].aliases[0][1](' 0 '), 'false');
+});
+
+test('refreshed defaults and disk reclaim aliases resolve on independent loads', t => {
+  const dir = mkdtempSync(join(tmpdir(), 'cfg-defaults-'));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const topPath = join(dir, 'config.yaml');
+  writeFileSync(topPath, 'version: 1\n');
+
+  const first = loadConfig({ topPath, env: {} });
+  assert.equal(first.get('worker_pool.work_items.shadow_gate_days'), 7);
+  assert.equal(first.get('worker_pool.admission.low_priority_max_wait_seconds'), 3600);
+  assert.equal(first.get('worker_pool.admission.low_priority_reserved_slots'), 1);
+  const listKey = 'roles.adversarial.merge_authority.no_ci_repositories';
+  first.get(listKey).push('example/fixture');
+
+  const second = loadConfig({ topPath, env: {
+    AGENT_OS_DISK_RECLAIM_ARCHIVE_REF_RETENTION_DAYS: '14',
+    AGENT_OS_DISK_RECLAIM_DEHYDRATE_UNRECLAIMABLE_RECHECK_HOURS: '3',
+  } });
+  assert.deepEqual(second.get(listKey), []);
+  assert.deepEqual(second.resolutionTrace(listKey), [
+    { source: 'code-default', value: [], path: null },
+  ]);
+  for (const [key, defaultValue, override] of [
+    ['disk_reclaim.archive_ref_retention_days', 30, 14],
+    ['disk_reclaim.dehydrate.unreclaimable_recheck_hours', 6, 3],
+  ]) {
+    assert.equal(first.get(key), defaultValue);
+    assert.equal(second.get(key), override);
+    assert.equal(second.resolutionTrace(key)[0].value, defaultValue);
+  }
+
+  _resetCodeDefaultsForTesting();
+  const afterReset = loadConfig({ topPath, env: {} });
+  const retentionKey = 'disk_reclaim.archive_ref_retention_days';
+  assert.equal(afterReset.get(retentionKey), 30);
+  assert.deepEqual(afterReset.resolutionTrace(retentionKey), [
+    { source: 'code-default', value: 30, path: null },
+  ]);
 });
 
 // Intended difference: Python's strict input validation rejects an ordinary

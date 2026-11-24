@@ -287,6 +287,8 @@ test('default runner never dispatches a selected batch after explicit dispatch f
   const value = manifest([rows[0]]);
   let calls = 0;
   const deps = { db, rootDir, env: { HQ_ROOT: rootDir }, logger: { warn() {} },
+    // A readable empty launch probe lets the runner record the dispatch failure.
+    readLaunches: async () => ({ ok: true, rows: [] }),
     execFileImpl: async () => { calls++; throw Error('synthetic dispatch failure'); } };
   await runFindingBatches({ now: fixtureNow, ...deps, manifest: value });
   assert.equal(calls, 1);

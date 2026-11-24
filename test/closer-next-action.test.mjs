@@ -20,6 +20,7 @@ import { closureOwnerFromDecision, hasHammerDispatchIntent, observeClosureResult
   resolveClosureNextAction, revalidateClosurePr, reviseClosureNextAction, readClosureNextAction, observeDaemonGate } from '../src/ama/closure-next-action.mjs';
 import { migrationRenumberFixture } from './helpers/migration-renumber.mjs';
 import { proveMigrationRenumbers } from '../src/ama/migration-renumber.mjs';
+import { requestCloserSuccessor, settleCloserSuccessor } from '../src/ama/closer-successor.mjs';
 import { maybeDispatchAmaClosureFor, resolveMergeAgentCoexistenceForWatcher } from '../src/ama-closure-orchestration.mjs';
 import { reviewCeilingOwner } from '../src/review-ceiling-owner.mjs';
 import { observeClosureWait, CLOSURE_WAIT_BOUND_MS, CLOSURE_WAIT_RETRY_MS } from '../src/ama/closure-wait.mjs';
@@ -321,6 +322,8 @@ test('existing operator approval keeps exact-head and actor policy before daemon
     reviews: { ...clean, verdict: null, operatorApprovedEvidence: approval },
     policy: { autonomousMergeExecutionEnabled: true, operatorLogins: ['operator-05'] } };
   assert.equal(pair(base(observations)).decision.action, 'daemon-merge');
+  const findings = { ...withFinding, operatorApprovedEvidence: approval };
+  assert.equal(pair(base({ ...observations, reviews: findings })).decision.action, 'hammer');
   for (const evidence of [{ ...approval, observedRevisionRef: OLD }, { ...approval, actor: 'unlisted-05' }]) {
     assert.equal(pair(base({ ...observations, reviews: { ...observations.reviews,
       operatorApprovedEvidence: evidence } })).decision.action, 'review');
@@ -886,8 +889,14 @@ test('terminal-head daemon preflight publishes its validated decision before mut
 });
 
 
-test('a recorded terminal judgment on an unchanged head retains daemon ownership', async t => {
+test('a recorded terminal judgment and zero findings on an unchanged head retain daemon ownership', async t => {
   const f = closureFixture(t);
+  const refused = { rootDir: f.args.rootDir, ...identity, source: 'closer-ended-without-merge' };
+  requestCloserSuccessor({ ...refused, reviewBody: f.args.reviewStateRow.review_body });
+  await settleCloserSuccessor({ ...refused, admitted: false, observeWaitImpl: async () => {} });
+  const body = '## Blocking issues\n- None.\n\n## Non-blocking issues\n- None.\n\n## Verdict\nComment only';
+  f.args.reviewStateRow.review_body = body;
+  f.args.fetchLatestHeadReviewBodiesImpl = async () => [body];
   f.args.headHasValidatedHamTerminalRemediationImpl = () => true;
   f.args.runDaemonCleanMergeAttemptImpl = async () => ({ disposition: 'merged', reason: 'merged', merged: true, remoteMergedConfirmed: true });
   const result = await maybeDispatchAmaClosureFor(f.args);
@@ -1433,4 +1442,62 @@ test('EXHAUSTEDHEADOWNER-01: closure refresh owns the new builder head without o
     reviewState: { ...clean, reviewCycleExhausted: true, verdict: 'comment-only', nonBlockingFindingCount: 1 } } });
   assert.equal(findings.decision.actor, 'hammer');
   assert.equal(hasHammerDispatchIntent(findings, identity), true);
+});
+
+for (const { strictMode, count, expected } of [
+  { strictMode: true, count: 3, expected: ['hammer', 'hammer', 'review-findings-final'] },
+  { strictMode: true, count: 0, expected: ['daemon-merge', 'daemon', 'carried-clean-head'] },
+  { strictMode: false, count: 3, expected: ['daemon-merge', 'daemon', 'carried-clean-head'] },
+]) test(`AMASTRICTROUTE-01: exact-head terminal receipt with strict=${strictMode} and ${count} non-blocking findings`, () => {
+  const snapshot = base({ reviews: { ...withFinding, nonBlockingFindingCount: count },
+    policy: { autonomousMergeExecutionEnabled: true, strictMode },
+    progress: { terminalReview: { validated: true, headSha: HEAD, reviewedHeadSha: HEAD } } });
+  const shared = pair(snapshot);
+  assert.deepEqual(tuple(shared.decision), expected, shared.decision.row);
+  const findings = count ? Array.from({ length: count }, (_, index) =>
+    `- **Finding ${index + 1}**\n  - **File:** fixture-${index + 1}.mjs\n  - **Problem:** synthetic`).join('\n') : '- None.';
+  const reviewBody = `## Blocking issues\n- None.\n\n## Non-blocking issues\n${findings}\n\n## Verdict\nComment only`;
+  const rescue = classifyRescue({ snapshot, headSha: HEAD, reviewBody });
+  assert.equal(rescue.nonBlockingFindings, count);
+  assert.equal(rescue.decision, expected[0] === 'hammer' ? 'hammer-eligible' : 'merge-eligible');
+  if (strictMode && count) {
+    const capped = pair(base({ reviews: { ...withFinding, nonBlockingFindingCount: count },
+      progress: { terminalReview: { validated: true, headSha: HEAD, reviewedHeadSha: HEAD } },
+      policy: { autonomousMergeExecutionEnabled: true, strictMode,
+        hammerCap: { retryExhausted: true, headSha: HEAD, recordedAt: AT } } }));
+    assert.equal(capped.decision.row, 'R07-stop', 'an unchanged terminal audit cannot clear the cap or findings');
+    assert.equal(capped.decision.reason, 'retry-exhausted');
+  }
+});
+
+test('AMASTRICTROUTE-01: closure hands strict exact-head findings to the hammer despite a terminal receipt', async t => {
+  const f = closureFixture(t, {
+    headHasValidatedHamTerminalRemediationImpl: () => true,
+    handoffFinalFixAllImpl: async () => ({ action: 'fallback' }),
+  });
+  const result = await maybeDispatchAmaClosureFor(f.args);
+  assert.equal(result.dispatched, true);
+  assert.deepEqual(f.effects.map(([effect]) => effect), ['wake', 'closer']);
+  assert.deepEqual(tuple(f.effects[1][1].decision), ['hammer', 'hammer', 'review-findings-final']);
+});
+
+test('AMASTRICTROUTE-01: a spent final fix-all does not intercept hammer admission on later passes', async t => {
+  let handoffs = 0;
+  const f = closureFixture(t, {
+    headHasValidatedHamTerminalRemediationImpl: () => true,
+    handoffFinalFixAllImpl: async () => { handoffs++; return { action: 'fallback' }; },
+  });
+  f.args.candidate.title = '[codex] Fixture change';
+  const receipt = { rootDir: f.args.rootDir, ...identity, source: 'closer-ended-without-merge',
+    reviewBody: f.args.reviewStateRow.review_body, now: AT };
+  requestCloserSuccessor(receipt);
+  await settleCloserSuccessor({ ...receipt, admitted: false, observeWaitImpl: async () => {} });
+  for (let pass = 0; pass < 2; pass++) {
+    const result = await maybeDispatchAmaClosureFor(f.args);
+    assert.equal(result.dispatched, true);
+    assert.deepEqual(tuple(result.nextAction), ['hammer', 'hammer', 'review-findings-final']);
+  }
+  assert.equal(handoffs, 1, 'reuse the same-head spent handoff on subsequent passes');
+  assert.equal(f.effects.filter(([effect]) => effect === 'closer').length, 2);
+  assert.equal(f.waits.filter(wait => wait.waitClass === 'closer-successor').length, 0);
 });

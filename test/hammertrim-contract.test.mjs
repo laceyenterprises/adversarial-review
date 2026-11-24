@@ -929,6 +929,9 @@ exec "$REAL_NODE" "$@"
 `, { mode: 0o755 });
     const env = { HAM_PR_URL: 'https://github.com/fixture/repo/pull/1', HAM_PR_NUMBER: prNumber,
       HAM_NODE_BIN: readNode, REAL_NODE: process.execPath,
+      // The schema diagnostic includes this path, whose TLS substring must
+      // never make a permanent probe failure look like a transport error.
+      AGENT_OS_ROOT: join(dir, 'checkout-TLS'),
       HAM_REVIEWED_SHA: before, HAM_REPO: 'fixture/repo', HAM_RUN_DIR: dir, HAM_ROOT_DIR: root, HAM_HQ_ROOT: dir,
       HAM_REVIEWER: 'synthetic-reviewer', HAM_RISK_CLASS: 'low', HAM_MERGE_METHOD: 'squash', HAM_TARGET_REMEDIATION_SHA: before, HAM_PUSHED_HEAD: pushed,
       HAM_PUSHED_FROM_HEAD: before, HAM_TEST_SCENARIO: scenario, PATH: `${dir}:${process.env.PATH}`, TMPDIR: dir };
@@ -999,6 +1002,7 @@ exit "$rc"`], env);
         [2, ...Array(19).fill(15), 13], 'polling clamps its last delay to the deadline');
       assert.equal(JSON.parse(readFileSync(join(dir, 'pr-after.json'), 'utf8')).headRefOid, before);
     } else if (['permanent error', 'permanent numbered URL', 'malformed JSON', 'missing head', 'invalid head'].includes(scenario)) {
+      assert.match(result.stderr, /^\[adversarial-config\] schema source=bundled .*checkout-TLS/m);
       assert.equal(result.status, 1, result.stderr);
       const outcome = ['missing head', 'invalid head'].includes(scenario)
         ? 'published-head-probe-invalid' : 'published-head-probe-failed';

@@ -14,7 +14,7 @@ import { reviewerTimeoutBudget, REVIEWER_TIMEOUT_REPEATED_REASON } from './revie
 import { createReviewerQuotaBlockLogger } from './reviewer-quota-block-log.mjs';
 import { meteredExecFile } from './metered-gh.mjs';
 import {
-  pendingExplicitReviewIntent, reconcileExplicitReviewIntents, explicitReviewRefusalBody,
+  pendingExplicitReviewIntent, reconcileExplicitReviewIntents, explicitReviewRefusalBody, primaryReversalReviewContext,
   settleExplicitReviewIntent, consumeExplicitReviewIntent, refuseFailedExplicitReviewDispatch,
   requeueUnstartedExplicitReviewDispatch, priorityReviewIntent, handoffAutomaticReview, isRemediationReviewIntent,
 } from './explicit-review-intent.mjs';
@@ -185,12 +185,14 @@ import {
 } from './review-cycle-cap.mjs';
 import {
   db,
+  stmtAssignDiscoveredReviewer,
   stmtCreateFastMergeSkippedReviewRow,
   stmtCreateReviewRow,
   stmtFinalizePendingTerminalFailure,
   stmtGetReviewRow,
   stmtHasCompletedReview,
   stmtHasPostedReview,
+  stmtRecordReviewDiscoveryWait,
   stmtMarkAttemptStarted,
   stmtMarkClosed,
   stmtMarkInfraAutoRecoveryAttemptStarted,
@@ -724,9 +726,52 @@ export async function resolveClaudeRuntimeProbeUidForWatcher({
   return resolveClaudeLaunchctlUidFromConfig({ loadConfigImpl, execFileImpl, env, logger });
 }
 
+export async function discoverReviewSubjects(subjectAdapter, repoPath, watcherHeartbeat) {
+  try {
+    const subjectRefs = await subjectAdapter.discoverSubjects();
+    watcherHeartbeat?.markPollProgress?.();
+    return subjectRefs;
+  } catch (err) {
+    if (['REPOSITORY_STATE_BUSY', 'REPOSITORY_IDENTITY_CONFLICT'].includes(err.code)) throw err;
+    console.error(`[watcher] Failed to fetch PRs for ${repoPath}:`, err.message);
+    return null;
+  }
+}
+
 export async function processReviewSubject(entry, ctx) {
+  const { subject, prNumber } = entry;
+  const { repoPath, operatorSurface } = ctx;
+  let wait = ['discovery-interrupted', 'watcher'];
+  try {
+    wait = await runReviewSubjectPhases(entry, ctx);
+  } finally {
+    if (!subject.terminal && Array.isArray(wait)) {
+      try {
+        const ref = subject.ref ?? entry.subjectRef;
+        const domainId = ctx.domainId || entry.domainId || ref?.domainId || subject.domainId
+          || ctx.WATCHER_PRIMARY_DOMAIN_ID || CODE_PR_DOMAIN_ID;
+        const [reason, owner] = wait;
+        const recorded = stmtRecordReviewDiscoveryWait.run({
+          repo: repoPath, prNumber, domainId, subjectId: ref?.subjectExternalId ?? null,
+          head: ref?.revisionRef || subject.headSha || null, now: new Date().toISOString(),
+          ticket: operatorSurface.extractLinearTicketId(subject.title || ''),
+          labels: JSON.stringify(Array.isArray(subject.labels) ? subject.labels : []),
+          draft: Number((subject.isDraft ?? subject.draft) === true),
+          reason: `[${reason}] owner=${owner}`,
+        });
+        if (recorded.changes === 1) {
+          console.log(`[watcher] review discovery wait for ${repoPath}#${prNumber}: ${reason} owner=${owner}`);
+        }
+      } catch (error) {
+        console.warn(`[watcher] review discovery wait could not be recorded for ${repoPath}#${prNumber}: ${error?.message || error}`);
+      }
+    }
+  }
+}
+
+async function runReviewSubjectPhases(entry, ctx) {
   let { subject } = entry;
-  const { prNumber, current: cachedCurrent } = entry;
+  const { prNumber } = entry;
   const {
     octokit,
     operatorSurface,
@@ -815,7 +860,8 @@ export async function processReviewSubject(entry, ctx) {
       if (prLabelNames.includes(MERGE_AGENT_DISPATCHED_LABEL)) {
         activeMergeAgentPRs.push({ repo: repoPath, prNumber, headSha: subject.headSha || null });
       }
-      let existing = cachedCurrent ?? stmtGetReviewRow.get(repoPath, prNumber);
+      // The discovery census also caches misses for the ordering passes.
+      let existing = Object.hasOwn(entry, 'current') ? entry.current : stmtGetReviewRow.get(repoPath, prNumber);
       // ARC-03 review finding: review rows are keyed (repo, pr) but carry a
       // domain identity. Only the owning domain may process a row — without
       // this guard, a second github-pr domain would drive another domain's
@@ -855,37 +901,40 @@ export async function processReviewSubject(entry, ctx) {
       // not inflate either spill lane, including a PR converted back to draft.
       const draft = subject.isDraft ?? subject.draft;
       if (typeof draft === 'boolean') db.prepare(
-        'UPDATE reviewed_prs SET is_draft = ? WHERE repo = ? AND pr_number = ?'
-      ).run(Number(draft), repoPath, prNumber);
-      if (draft === true) return;
+        'UPDATE reviewed_prs SET is_draft = ? WHERE repo = ? AND pr_number = ? AND is_draft IS NOT ?'
+      ).run(Number(draft), repoPath, prNumber, Number(draft));
+      if (draft === true) return ['draft', 'pr-author'];
       if (!subject.terminal) {
         try {
           const loaded = loadConfigCached();
           const authority = resolveMergeAuthorityConfigFromDomain(loadDomainConfig(ROOT, effectiveDomainId),
             loaded.getMergeAuthorityConfig(), { fallbackSources: loaded.sources || {} });
           const recovered = await recoverOverdueOwnership({
-            rootDir: ROOT, repo: repoPath, prNumber, subject, reviewStateRow: existing,
+            rootDir: ROOT, repo: repoPath, prNumber, subject,
+            reviewStateRow: existing?.reviewer === '' ? null : existing,
             domainId: effectiveDomainId, enabled: authority?.enabled,
             allowCloserReconciliation: !readWatcherDrainState().active && !pendingReviewIntent(),
             execFileImpl: execFileAsync, logger: console,
           });
           // Pending review recovery and exhausted routes own this pass too;
           // admission must not reuse the row captured before recovery acted.
-          if (recovered?.outcome != null) return;
+          if (recovered?.outcome === 'ama-dispatched') return ['ama-dispatched', 'ama-closer'];
+          if (recovered?.outcome != null) return ['ownership-recovery', 'watcher-recovery'];
         } catch (error) {
           console.warn(`[watcher] OWNERDEADLINE-01 deadline recovery deferred for ${repoPath} PR ${prNumber}: ${error.message}`);
         }
       }
       // Waiting observation precedes even an in-process handoff deferral.
-      if (reviewerHandoffPending(repoPath, prNumber)) return;
+      if (reviewerHandoffPending(repoPath, prNumber)) return ['reviewer-handoff-pending', 'watcher'];
       if (effectiveDomainId === CODE_PR_DOMAIN_ID && !subject.terminal) {
-        if (await maybeRunDocsFastPath({ subject, reviewRow: existing, rootDir: ROOT,
+        const docsWait = await maybeRunDocsFastPath({ subject, reviewRow: existing, rootDir: ROOT,
           repoPath, prNumber, execFileImpl: execFileAsync,
           loadCfg: () => {
             const loaded = loadConfigCached();
             return resolveMergeAuthorityConfigFromDomain(loadDomainConfig(ROOT, effectiveDomainId),
               loaded.getMergeAuthorityConfig(), { fallbackSources: loaded.sources || {} });
-          }, readReviewRow: () => stmtGetReviewRow.get(repoPath, prNumber) })) return;
+          }, readReviewRow: () => stmtGetReviewRow.get(repoPath, prNumber) });
+        if (docsWait) return docsWait === 'terminal' ? docsWait : [docsWait, 'watcher-docs-fast-path'];
       }
       // Run before admission refusals so unavailable capacity, credentials,
       // CI, routing, or a retained claim cannot strand the transfer silently.
@@ -913,9 +962,10 @@ export async function processReviewSubject(entry, ctx) {
           loadDomainConfig(ROOT, effectiveDomainId), loaded.getMergeAuthorityConfig(),
           { fallbackSources: loaded.sources || {} });
         const ownershipRecovery = await recoverOwnerlessReview({ rootDir: ROOT, repo: repoPath, prNumber,
-          reviewStateRow: existing, domainId: effectiveDomainId, enabled: authority?.enabled,
+          reviewStateRow: existing?.reviewer === '' ? null : existing,
+          domainId: effectiveDomainId, enabled: authority?.enabled,
           execFileImpl: execFileAsync, logger: console });
-        if (ownershipRecovery?.outcome === 'ama-dispatched') return;
+        if (ownershipRecovery?.outcome === 'ama-dispatched') return ['ama-dispatched', 'ama-closer'];
         existing = stmtGetReviewRow.get(repoPath, prNumber) || existing;
       } catch (error) {
         console.warn(`[watcher] OWNERPROOF-01 review ownership probe deferred for ${repoPath} PR ${prNumber}: ${error.message}`);
@@ -952,12 +1002,12 @@ export async function processReviewSubject(entry, ctx) {
             const live = JSON.parse(stdout);
             if (['CLOSED', 'MERGED'].includes(String(live.state).toUpperCase())) {
               markHoldReleaseRouted({ db, release, route: { stage: 'pr-terminal', action: 'none' } });
-              return;
+              return 'terminal';
             }
             // A re-applied hold cancels this intent before any action is armed.
             observeRelease({ db, repo: repoPath, prNumber, headSha: live.headRefOid, liveLabels: live.labels });
             if (!Array.isArray(live.labels) || String(live.state).toUpperCase() !== 'OPEN' || live.headRefOid !== subject.headSha
-              || isOperatorHeld(live.labels)) return;
+              || isOperatorHeld(live.labels)) return ['hold-release-recheck', 'watcher'];
             candidate = { ...live, checksConclusion: summarizeChecksConclusion(live.statusCheckRollup) };
           }
           const ledger = summarizePRRemediationLedger(ROOT, { repo: repoPath, prNumber });
@@ -999,7 +1049,7 @@ export async function processReviewSubject(entry, ctx) {
       }
       if (staleDriftSkip) {
         console.log(staleDriftSkip.message);
-        return;
+        return ['stale-drift', 'pr-author'];
       }
       // REBASETRAILER-01: one memoized head-producer read per poll. The review
       // refresh suppression and the gate below both consume this decision.
@@ -1136,7 +1186,7 @@ export async function processReviewSubject(entry, ctx) {
 
       if (existing?.pr_state === 'merged') {
         await projectGateStatusSafe(existing);
-        return;
+        return 'terminal';
       }
 
       const inlineReviewerReconcile = await reconcileEligibleReviewingClaimInline({
@@ -1332,7 +1382,8 @@ export async function processReviewSubject(entry, ctx) {
           headSha: subject.headSha, execFileImpl: execFileAsync,
           withApiTelemetry });
         if (emptyClose.nonempty) db.prepare('INSERT INTO nonempty_pr_heads(repo,pr_number,head) VALUES (?,?,?) ON CONFLICT(repo,pr_number) DO UPDATE SET head=excluded.head').run(repoPath, prNumber, subject.headSha);
-        if (emptyClose.closed || emptyClose.terminal || emptyClose.reason === 'read-or-close-failed') return;
+        if (emptyClose.closed || emptyClose.terminal) return 'terminal';
+        if (emptyClose.reason === 'read-or-close-failed') return ['empty-diff-read-or-close-failed', 'watcher'];
       }
 
       // ASR-04 — ADDITIVE, and this is the half of the ticket that is easiest to
@@ -1556,7 +1607,7 @@ export async function processReviewSubject(entry, ctx) {
         } catch (error) {
           // A corrupt per-PR ledger or a busy writer defers this subject only.
           console.error(`[watcher] repair/refund observation deferred for ${repoPath}#${prNumber}: ${error.message}`);
-          return;
+          return ['repair-observation-unavailable', 'watcher'];
         }
       }
       // A reservation owns the PR through publication. On a moved head, only
@@ -1567,7 +1618,7 @@ export async function processReviewSubject(entry, ctx) {
           console.log(`[watcher] review-wait-decision repo=${repoPath} pr=${prNumber} admission="discovery" `
             + `decision=repair-reservation-owns-pr reason=repair-reservation-owns-pr epoch=${repairEpoch.id}`);
         }
-        return;
+        return ['repair-reservation-owns-pr', `repair-epoch:${repairEpoch.id}`];
       }
       if (effectiveDomainId === CODE_PR_DOMAIN_ID && (existing?.reviewer_head_sha || repairEpoch)
         && existing?.reviewer_head_sha !== subject.headSha && !subject.terminal
@@ -1601,7 +1652,7 @@ export async function processReviewSubject(entry, ctx) {
           });
         } catch (error) {
           console.warn(`[watcher] exhausted-head verdict admission unresolved for ${repoPath}#${prNumber}: ${error?.message || error}`);
-          return;
+          return ['exhausted-head-verdict-unavailable', 'watcher'];
         }
       }
       const exhaustedHeadVerdict = isExhaustedHeadVerdictRequested(existing, subject.headSha);
@@ -1641,7 +1692,9 @@ export async function processReviewSubject(entry, ctx) {
       // failure is an ownership handoff, including when revision_ref is stale.
       if (!explicitIntentForHead() && !isExplicitOperatorReviewRetrigger(existing) && !isOrphanHeadReviewRequested(existing, subject.headSha)
         && !transferredHeadReview && !exhaustedHeadVerdict) {
-        if ((await routeReviewCycleCapToHammer(stmtGetReviewRow.get(repoPath, prNumber))).handled) return;
+        if ((await routeReviewCycleCapToHammer(stmtGetReviewRow.get(repoPath, prNumber))).handled) {
+          return ['review-cycle-cap', 'hammer'];
+        }
       }
 
       // Auto-refresh stale posted reviews when the PR HEAD has moved.
@@ -1977,7 +2030,7 @@ export async function processReviewSubject(entry, ctx) {
         if (existing) {
           await projectGateStatusSafe(existing);
         }
-        return;
+        return ['watcher-drain', 'watcher-operator'];
       }
 
       // CI reconciliation does not need a reviewer seat or a routing decision.
@@ -2064,7 +2117,7 @@ export async function processReviewSubject(entry, ctx) {
         });
         if (reconciled.deferClaim) {
           console.warn(`[watcher] builder provenance read failed for ${repoPath}#${prNumber}; deferring claim until next tick`);
-          return;
+          return ['builder-provenance-unavailable', 'watcher'];
         }
         subject = reconciled.subject;
       }
@@ -2093,7 +2146,7 @@ export async function processReviewSubject(entry, ctx) {
           `${baseRoute.error?.message || baseRoute.error || 'unknown config error'} — ` +
           `skipping this PR for the tick; fix the config and restart the watcher to recover`
         );
-        return;
+        return ['reviewer-route-config-broken', 'watcher-operator'];
       }
       if (!baseRoute) {
         if (!existing) {
@@ -2164,6 +2217,7 @@ export async function processReviewSubject(entry, ctx) {
         // still accept the older GitHub label-object shape for historical rows.
         if (!holdObservationFailed && subject.labelsKnown !== false) stmtUpdateReviewLabels.run(JSON.stringify(Array.isArray(subject.labels) ? subject.labels : []), repoPath, prNumber);
         await projectGateStatusSafe(stmtGetReviewRow.get(repoPath, prNumber));
+        if (disposition === 'deferred') return ['argus-security-enqueue-unconfirmed', 'argus'];
         return;
       }
       // GMW-02 — layer the gemini always-on / fallback third-reviewer selection
@@ -2354,7 +2408,7 @@ export async function processReviewSubject(entry, ctx) {
       });
       if (route.quotaBlocked && logReviewerQuotaBlock({ repoPath, prNumber, route })) {
         retainWakeForCapacity();
-        return;
+        return ['reviewer-quota-blocked', 'watcher'];
       }
       const getClaudeAccountSelection = () => refreshClaudeAccount(route.claudeAccountSelection || afhGrounding?.claudeAccountSelection);
       let depthSpillReserved = false;
@@ -2516,7 +2570,7 @@ export async function processReviewSubject(entry, ctx) {
       await applyWorkerFallback();
       if (logReviewerQuotaBlock({ repoPath, prNumber, route })) {
         retainWakeForCapacity();
-        return;
+        return ['reviewer-quota-blocked', 'watcher'];
       }
 
       if (route.reviewerModelFallback) {
@@ -2590,7 +2644,7 @@ export async function processReviewSubject(entry, ctx) {
 
       let liveLabels = null;
       const preRoutingUpdateRow = existing;
-      if (!existing) {
+      if (!existing || (existing.reviewer === '' && !existing.rereview_requested_at && !pendingReviewIntent())) {
         liveLabels = await fetchLivePRLabels(octokit, {
           owner,
           repo,
@@ -2673,7 +2727,7 @@ export async function processReviewSubject(entry, ctx) {
                 authorizedAt,
                 skippedAt,
               });
-              stmtCreateFastMergeSkippedReviewRow.run(
+              const skipped = stmtCreateFastMergeSkippedReviewRow.run(
                 repoPath,
                 prNumber,
                 domainId,
@@ -2688,6 +2742,7 @@ export async function processReviewSubject(entry, ctx) {
                 JSON.stringify(auditEntry),
                 null
               );
+              if (skipped.changes !== 1) return ['fast-merge-row-changed', 'watcher'];
               try {
                 writeFastMergeAuditPayload(ROOT, auditEntry);
                 markFastMergeAuditWritten({ repo: repoPath, prNumber });
@@ -2751,6 +2806,10 @@ export async function processReviewSubject(entry, ctx) {
         );
       }
 
+      if (existing?.reviewer === '') {
+        stmtAssignDiscoveredReviewer.run(route.reviewerModel, subject.ref.revisionRef || subject.headSha || null,
+          liveLabels ? JSON.stringify(liveLabels) : null, repoPath, prNumber, domainId);
+      }
       let current = stmtGetReviewRow.get(repoPath, prNumber);
       const pendingRevisionRef = subject.ref?.revisionRef || subject.headSha || null;
       if (current?.review_status === 'failed' && current.reviewer_head_sha &&
@@ -3209,7 +3268,8 @@ export async function processReviewSubject(entry, ctx) {
 
       // HAMATTEST-02: the bounded exact-head recovery request must reach an
       // actor even when earlier heads exhausted the ordinary review budget.
-      const handoffReviewAdmission = isExhaustedHeadVerdictRequested(current, subject.headSha)
+      const handoffReviewAdmission = Boolean(primaryReversalReviewContext(explicitIntentForHead(), subject.headSha))
+        || isExhaustedHeadVerdictRequested(current, subject.headSha)
         || isOrphanHeadReviewRequested(current, subject.headSha)
         || hammerHandoffReviewBypass({ db, rootDir: ROOT,
         repo: repoPath, prNumber, headSha: subject.headSha, row: current });
@@ -3461,7 +3521,11 @@ export async function processReviewSubject(entry, ctx) {
         const completedRemediationRounds = Math.max(0, Number(ledger.completedRoundsForPR) || 0);
         const passKind = reviewerSafetyPassKind({ current, hasPriorPostedReview: dispatchHasPriorPostedReview,
           hasPriorCompletedReview: Boolean(stmtHasCompletedReview.get(repoPath, prNumber)), completedRemediationRounds });
-        return { passKind: explicitIntentForHead() ? 'rereview' : passKind };
+        const intent = explicitIntentForHead();
+        return { passKind: intent ? 'rereview' : passKind,
+          // Older rescue builds wrote this intent only when no row existed.
+          // Keep its dispatch fences without parking an actual first review on red CI.
+          ciPassKind: intent && intent.actor !== 'merge-agent-rescue' ? 'rereview' : passKind };
       };
       const preflightTasks = () => ({
         freshness: () => fetchPullRequestHeadAndState(repoPath, prNumber, { execFileImpl: execFileAsync }),
@@ -3477,7 +3541,7 @@ export async function processReviewSubject(entry, ctx) {
           respawnAgeSeconds: resolvePendingDraftRespawnAgeSeconds(), now: new Date() }),
         hcp: () => getHcpHealthzForTick(),
         ci: () => guardRereviewCiBeforeReviewer({ rootDir: ROOT, repo: repoPath, prNumber,
-          passKind: preflightInputs().passKind, reviewerHeadSha: subject?.headSha || null,
+          passKind: preflightInputs().ciPassKind, reviewerHeadSha: subject?.headSha || null,
           execFileImpl: execFileAsync, env: process.env, log: console, cfg: domainAdapterSet?.domainConfig }),
         fatigue: () => preflightInputs().passKind === 'rereview'
           ? computeVocabularyFatigueFindingForPR({ repoPath, prNumber }) : null,
@@ -4241,8 +4305,9 @@ export async function processReviewSubject(entry, ctx) {
             // (3) Hard attempt ceiling — failed/running attempts are not
             //     reviews and must not spend (2), but they still need their own
             //     larger fuse so a broken reviewer path cannot retry forever.
+            const reversalReview = primaryReversalReviewContext(forcedReviewIntent, reviewerHeadSha);
             let skipReviewerSpawnReason = null;
-            if (forcedReviewIntent) {
+            if (forcedReviewIntent && !reversalReview) {
               const budget = resolveFirstPassReviewBudgetSuppression({
                 rootDir: ROOT, domainId, repoPath, prNumber, linearTicketId,
                 reviewRow: existing, currentHeadSha: reviewerHeadSha, labelNames: prLabelNames, db,
@@ -4259,7 +4324,8 @@ export async function processReviewSubject(entry, ctx) {
               const handoffReviewBypass = !forcedReviewIntent && (isExhaustedHeadVerdictRequested(current, reviewerHeadSha) || orphanHeadReview || hammerHandoffReviewBypass({ db, rootDir: ROOT, repo: repoPath,
                 prNumber, headSha: reviewerHeadSha, row: current }));
               const closerHead = await readPreflight('closer');
-              if (closerHead?.suppressed && !explicitOperatorReviewRetrigger && !orphanHeadReview && !handoffReviewBypass) {
+              if (closerHead?.suppressed && !explicitOperatorReviewRetrigger && !orphanHeadReview && !handoffReviewBypass
+                && !(reversalReview && !['closer-publication-in-progress', 'closer-publication-unconfirmed'].includes(closerHead.reason))) {
                 console.log(
                   `[watcher] Skipping re-review for ${repoPath}#${prNumber}: head ` +
                   `${String(reviewerHeadSha || '').slice(0, 12)} is a terminal closer commit ` +
@@ -4281,7 +4347,7 @@ export async function processReviewSubject(entry, ctx) {
               // from the reviewed head, checked against local git above) may
               // pass both fuses once, exactly like an operator retrigger.
               const fleetSelfRepairTrailerOnlyBypass = !forcedReviewIntent && fleetSelfRepairRereview.honored;
-              const reviewCeilingBypassDetail = explicitOperatorReviewRetrigger
+              const reviewCeilingBypassDetail = reversalReview ? 'the bounded reversal review owns this head' : explicitOperatorReviewRetrigger
                 ? 'rereview_reason is an operator retrigger marker'
                 : 'rereview_reason is a verified FSR-06B trailer-only re-review request';
               // REVIEW-DEDUP: both fuses apply to the current proposed head.
@@ -4300,7 +4366,7 @@ export async function processReviewSubject(entry, ctx) {
                 !skipReviewerSpawnReason &&
                 priorReviewCount >= hardReviewCeiling &&
                 (forcedReviewIntent || !explicitOperatorReviewRetrigger) &&
-                !fleetSelfRepairTrailerOnlyBypass && !handoffReviewBypass
+                !fleetSelfRepairTrailerOnlyBypass && !handoffReviewBypass && !reversalReview
               ) {
                 console.log(
                   `[watcher] Skipping re-review for ${repoPath}#${prNumber}: hard review ` +
@@ -4328,7 +4394,7 @@ export async function processReviewSubject(entry, ctx) {
                 !skipReviewerSpawnReason
                 && priorReviewAttemptCount >= hardReviewAttemptCeiling
                 && (forcedReviewIntent || !explicitOperatorReviewRetrigger)
-                && !fleetSelfRepairTrailerOnlyBypass && (!handoffReviewBypass || isExhaustedHeadVerdictRequested(current, reviewerHeadSha))
+                && !fleetSelfRepairTrailerOnlyBypass && !reversalReview && (!handoffReviewBypass || isExhaustedHeadVerdictRequested(current, reviewerHeadSha))
               ) {
                 console.log(
                   `[watcher] Skipping re-review for ${repoPath}#${prNumber}: hard review ` +
@@ -4409,7 +4475,8 @@ export async function processReviewSubject(entry, ctx) {
               // Share the refreshed account with both fallback selection stages.
               afhGrounding = { ...afhGrounding, codexAccountSelection: refreshCodexAccount() };
               const spawnReviewerArgs = {
-                verdictOnly: isExhaustedHeadVerdictRequested(current, reviewerHeadSha),
+                verdictOnly: !reversalReview && isExhaustedHeadVerdictRequested(current, reviewerHeadSha),
+                ...(reversalReview ? { primaryReversalReview: reversalReview } : {}),
                 ...reviewerArmExecution(route),
                 ...(route.reviewerArmDefaultRoute ? { reviewerArmDefaultRoute: route.reviewerArmDefaultRoute } : {}),
                 branch: subject.headRefName || subject.branch || null,

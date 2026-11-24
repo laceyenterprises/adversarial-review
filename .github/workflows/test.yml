@@ -1,7 +1,7 @@
 name: Test
 
-# Runs the kernel + adapter test suite on every pull request and every push
-# to main. The test suite is fixture-driven and does not require network
+# Runs affected tests on pull requests and the full suite on main, nightly,
+# and on manual dispatch. The fixture-driven suite does not require network
 # access, a real GitHub bot token, or a Linear API key — see
 # `demo/research-finding-walkthrough.sh` for the offline-runnable end-to-end
 # path that mirrors the same byte-stable contracts the CI here exercises.
@@ -14,6 +14,8 @@ on:
   push:
     branches:
       - main
+  schedule:
+    - cron: '37 6 * * *'
 
 # Cancel superseded runs on the same branch so a fast-follow push doesn't
 # burn CI minutes on an already-stale commit. Manual reruns from the UI
@@ -31,10 +33,8 @@ jobs:
     # Move back to the newer image after ARSANDBOXLINUX-01 fixes Linux bwrap isolation.
     runs-on: ubuntu-24.04
     strategy:
-      # Run the suite against every Node major the package.json `engines`
-      # range advertises support for. If a version starts failing here, the
-      # right fix is either a code change or a deliberate `engines` bump in
-      # package.json — not silent removal from this matrix.
+      # Keep both supported Node majors. Broad PR selections share the work
+      # between the two jobs. Main and nightly run every test on both.
       fail-fast: false
       matrix:
         node:
@@ -56,6 +56,10 @@ jobs:
       # updates as PRs so the pin stays current.
       - name: Check out repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          # For PRs, HEAD is the synthetic merge and its first parent is
+          # the base actually used to build it.
+          fetch-depth: 2
 
       - name: Set up Node.js ${{ matrix.node }}
         uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1  # v7.1.0
@@ -90,10 +94,9 @@ jobs:
           if-no-files-found: warn
 
       - name: Run kernel + adapter test suite
-        # `npm test` invokes `node --test test/*.test.mjs test/adapters/*.test.mjs`.
-        # The suite includes byte-equivalence assertions on JSONL transcripts,
-        # which catch accidental delivery-key drift, timestamp instability,
-        # and unordered JSON.
+        env:
+          AR_TEST_PR_BASE: ${{ github.event_name == 'pull_request' && 'HEAD^1' || '' }}
+          AR_TEST_PR_SHARD: ${{ github.event_name == 'pull_request' && (matrix.node == '22' && '0' || '1') || '' }}
         run: npm test
 
       - name: Typecheck contracts

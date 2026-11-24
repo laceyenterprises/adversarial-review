@@ -2776,7 +2776,7 @@ function claimNextFollowUpJob({
         const successor = requestCloserSuccessor({ rootDir, repo: job.repo, prNumber: job.prNumber,
           headSha: job.revisionRef, reviewBody: job.reviewBody, source: 'follow-up-pre-claim-cap',
           refusingReasons: ['remediation-rounds-exhausted'], now: claimedAt });
-        if (finalCapResult) finalCapResult.successorState = successor?.status || 'ownerless-closer-no-merge';
+        if (finalCapResult) finalCapResult.successorState = successor?.status || 'needs-closer';
       }
       let stopped = null;
       try {

@@ -241,6 +241,7 @@ test('advisory-only health includes waiting and fenced notes, launch errors and 
   db.prepare("UPDATE reviewed_prs SET pr_state='merged'").run();
   const [batch] = claimFindingBatches(db, '2026-01-02', { now: fixtureNow });
   await runFindingBatches({ now: fixtureNow, db, rootDir, day: '2026-01-02', env: { HQ_ROOT: rootDir },
+    readLaunches: async () => ({ ok: true, rows: [] }),
     execFileImpl: async () => { throw Error('launch failed'); }, logger: { warn() {} } });
   [area] = summarizeFindingBacklog(db, fixtureNow).areas;
   assert.equal(area.inBatch, 1);
@@ -253,6 +254,84 @@ test('advisory-only health includes waiting and fenced notes, launch errors and 
   assert.equal(summarizeFindingBacklog(db, fixtureNow).areas[0].inBatch, 1);
   settleFindingBatch(db, batch, result, { state: 'MERGED', body: `Finding-Batch: ${batch.batch_id}` });
   assert.deepEqual(summarizeFindingBacklog(db, fixtureNow).areas, []);
+});
+
+test('a preparation dispatch timeout adopts its scoped launch and settles the batch', async t => {
+  const { rootDir, db, pass } = fixture(t);
+  const { runFindingBatches } = await import('../src/findings-batch.mjs');
+  pass();
+  db.prepare("UPDATE reviewed_prs SET pr_state='merged'").run();
+  const options = { rootDir, db, now: fixtureNow, day: '2026-01-02', env: { HQ_ROOT: rootDir },
+    logger: { warn() {} },
+    execFileImpl: async () => { throw Object.assign(Error('dispatch timed out'), { killed: true, signal: 'SIGTERM' }); },
+    readLaunches: async ({ idempotencyKey, repo: targetRepo, projectRef }) => {
+      const { batch_id: batchId } = db.prepare('SELECT batch_id FROM finding_batches').get();
+      assert.equal(idempotencyKey, `findings-batch-${batchId}`);
+      assert.equal(targetRepo, repo);
+      assert.equal(projectRef, 'adversarial-merge-authority');
+      return { ok: true, rows: [{ idempotency_key: idempotencyKey, launch_request_id: 'fixture-lost-receipt',
+        ticket_ref: `FINDINGS-${batchId}`, target_repo: repo, status: 'succeeded' }] };
+    } };
+  await runFindingBatches(options);
+  const batch = db.prepare('SELECT * FROM finding_batches').get();
+  assert.equal(batch.launch_id, 'fixture-lost-receipt');
+  assert.equal(batch.error, null);
+  assert.equal(batch.batch_attempts, 0);
+  const { finding_id: findingId } = db.prepare('SELECT finding_id FROM finding_backlog').get();
+  writeFileSync(join(rootDir, 'data', 'finding-batches', batch.batch_id, 'outcomes.json'), JSON.stringify({
+    batchId: batch.batch_id, findings: [{ findingId, outcome: 'dropped', reason: 'not-reproducible: Already addressed' }],
+  }));
+  await runFindingBatches({ ...options, resolutionOnly: true, execFileImpl: () => assert.fail('no further dispatch') });
+  assert.ok(db.prepare('SELECT completed_at FROM finding_batches').get().completed_at);
+});
+
+test('unreadable preparation recovery defers only its batch', async t => {
+  const { rootDir, db, pass } = fixture(t);
+  const { claimFindingBatches, runFindingBatches } = await import('../src/findings-batch.mjs');
+  pass(1, body.replace('## Verdict', `- **Document the option**
+  - **File:** \`docs/options.md\`
+  - **Lines:** 1
+  - **Problem:** The option lacks a description.
+- **Cover the edge case**
+  - **File:** \`test/result.mjs\`
+  - **Lines:** 1
+  - **Problem:** The edge case lacks coverage.
+## Verdict`));
+  db.prepare("UPDATE reviewed_prs SET pr_state='merged'").run();
+  const day = '2026-01-02';
+  assert.equal(claimFindingBatches(db, day, { now: fixtureNow }).length, 3);
+  const [deferred, ready, finished] = db.prepare('SELECT batch_id FROM finding_batches ORDER BY rowid')
+    .all().map(row => row.batch_id);
+  const { finding_id: findingId } = db.prepare('SELECT finding_id FROM finding_backlog WHERE batch_id=?').get(finished);
+  const dir = join(rootDir, 'data', 'finding-batches', finished);
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(join(dir, 'outcomes.json'), JSON.stringify({
+    batchId: finished, findings: [{ findingId, outcome: 'dropped', reason: 'not-reproducible: Already addressed' }],
+  }));
+
+  const dispatches = [], probes = [], warnings = [];
+  const result = await runFindingBatches({ rootDir, db, now: fixtureNow, day, env: { HQ_ROOT: rootDir },
+    logger: { warn: message => warnings.push(message) },
+    execFileImpl: async (_bin, args) => {
+      const key = args[args.indexOf('--idempotency-key') + 1];
+      dispatches.push(key);
+      if (key === `findings-batch-${deferred}`) throw Error('dispatch timed out');
+      return { stdout: '{"launchRequestId":"fixture-next-receipt"}' };
+    },
+    readLaunches: async ({ idempotencyKey, timeoutMs }) => {
+      probes.push({ idempotencyKey, timeoutMs });
+      return { ok: false };
+    } });
+
+  assert.deepEqual(result, { completed: true });
+  assert.deepEqual(dispatches, [`findings-batch-${deferred}`, `findings-batch-${ready}`]);
+  assert.deepEqual(probes, [{ idempotencyKey: `findings-batch-${deferred}`, timeoutMs: 30_000 }]);
+  assert.ok(warnings.some(message => message.includes(`${deferred}: preparation dispatch receipt unavailable`)));
+  const readBatch = db.prepare('SELECT launch_id,error,batch_attempts,completed_at,released_at FROM finding_batches WHERE batch_id=?');
+  assert.deepEqual(readBatch.get(deferred),
+    { launch_id: null, error: null, batch_attempts: 0, completed_at: null, released_at: null });
+  assert.equal(readBatch.get(ready).launch_id, 'fixture-next-receipt');
+  assert.ok(readBatch.get(finished).completed_at);
 });
 
 test('mixed settlement normalizes note whitespace and persists only validated fields', async t => {
@@ -590,6 +669,7 @@ async function publicationFixture(t, { advice = false, expectedTimeout = null, e
     status: 'succeeded', terminal: true, succeeded: true,
     milestones: { branch_pushed: { status: 'done' } } };
   const key = `findings-batch-${batch.batch_id}`;
+  const publisherKey = `findings-batch-publish-${batch.batch_id}`;
   const launch = { launch_request_id: batch.launch_id, idempotency_key: key,
     ticket_ref: `FINDINGS-${batch.batch_id}`, target_repo: repo, status: 'succeeded' };
   const launches = [launch];
@@ -602,10 +682,10 @@ async function publicationFixture(t, { advice = false, expectedTimeout = null, e
       return publication;
     },
     readLaunches: async args => {
-      assert.equal(args.idempotencyKey, key);
+      assert.ok([key, publisherKey].includes(args.idempotencyKey));
       // The release helper retains its separate 15-second read contract.
       assert.ok(args.timeoutMs === 15_000 || args.timeoutMs === expectedReadTimeout);
-      return { ok: true, rows: launches };
+      return { ok: true, rows: launches.filter(row => row.idempotency_key === args.idempotencyKey) };
     },
     execFileImpl: async (bin, args, options) => {
       assert.equal(bin, 'hq');
@@ -626,7 +706,8 @@ async function publicationFixture(t, { advice = false, expectedTimeout = null, e
       assert.ok(options.timeout >= 900_000);
       if (expectedTimeout !== null) assert.equal(options.timeout, expectedTimeout);
       dispatches.push(args);
-      launches.push({ ...launch, launch_request_id: 'fixture-publish', status: 'running' });
+      assert.equal(args[args.indexOf('--idempotency-key') + 1], publisherKey);
+      launches.push({ ...launch, idempotency_key: publisherKey, launch_request_id: 'fixture-publish', status: 'running' });
       return { stdout: '{"launchRequestId":"fixture-publish"}' };
     } };
   const pr = { number: 81, state: 'OPEN', headRefOid: head, headRefName: status.branch,
@@ -678,6 +759,22 @@ test('FINDINGSDECISIONHOLD-01 a succeeded source never closes a decision', async
   await f.run();
   assert.equal(f.dispatches.length, 2);
   assert.equal(f.handoffs.length, 0);
+});
+
+test('a publication dispatch timeout adopts the publisher without replacing the preparation launch', async t => {
+  const f = await publicationFixture(t);
+  await f.run({ execFileImpl: async (bin, args, options) => {
+    const receipt = await f.options.execFileImpl(bin, args, options);
+    if (args[1] === 'status') return receipt;
+    throw Object.assign(Error('dispatch timed out'), { killed: true, signal: 'SIGTERM' });
+  } });
+  assert.deepEqual(f.db.prepare('SELECT launch_id,error FROM finding_batches').get(),
+    { launch_id: f.batch.launch_id, error: null });
+  await f.run({ now: fixtureNow + 3600000 });
+  assert.equal(f.dispatches.length, 2, 'the adopted publisher fences subsequent dispatch');
+  f.publication.prs = [{ ...f.pr, state: 'MERGED' }];
+  await f.run();
+  assert.ok(f.db.prepare('SELECT completed_at FROM finding_batches').get().completed_at);
 });
 
 test('FINDINGSDECISIONHOLD-01 untyped lifecycle failures retain aged canceled source custody', async t => {
@@ -1028,7 +1125,9 @@ test('FINDINGSSHAPE-01 dispatches decision-only preparation and one pr-shaped pu
     const publish = f.dispatches[1];
     assert.equal(publish[publish.indexOf('--completion-shape') + 1], 'pr');
     assert.equal(publish[publish.indexOf('--branch') + 1], f.status.branch);
-    for (const flag of ['--idempotency-key', '--ticket', '--repo']) {
+    assert.equal(initial[initial.indexOf('--idempotency-key') + 1], `findings-batch-${f.batch.batch_id}`);
+    assert.equal(publish[publish.indexOf('--idempotency-key') + 1], `findings-batch-publish-${f.batch.batch_id}`);
+    for (const flag of ['--ticket', '--repo']) {
       assert.equal(publish[publish.indexOf(flag) + 1], initial[initial.indexOf(flag) + 1]);
     }
     const prompt = readFileSync(publish[publish.indexOf('--prompt') + 1], 'utf8');

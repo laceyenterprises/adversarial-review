@@ -1,0 +1,53 @@
+operator_steps:
+  - description: From the deployed review-service root, set DEPLOYED_AT_UTC to the deployment timestamp (UTC ISO 8601). Inspect natural exact-head Comment-only reviews with findings in Agent OS or set REVIEW_REPO to another managed repository. Acceptance requires a final findings route for every sampled head and zero carried-clean-head or daemon-merge observations for the sampled reviewed heads. Observe 24 hours after deployment; retain the sampled PR/head identities, retry-cap page links and current-head merge-agent-requested closure evidence. Set ACCEPTANCE_EVIDENCE_JSON to a JSON array file of those page and closure events for REVIEW_REPO, with kind (retry-cap-page or manual-closure), prNumber, head, observedAtMs and URL (url). Supply an empty array after checking that both counts are zero. More than 3 retry-cap pages or more than 3 manual closures in that window fails acceptance and requires operator policy review before broader rollout. Record zero counts explicitly; no matching traffic leaves acceptance pending. These are operator acceptance criteria and do not change runtime merge gates.
+    run_as: Service operator with read access to the deployed review store and GitHub
+    command: |
+      set -e
+      : "${DEPLOYED_AT_UTC:?Set the start of the strict-mode deployment window in UTC}"
+      node --input-type=module -e '
+        import { loadConfigCached } from "./src/config-loader.mjs";
+        if (loadConfigCached().getMergeAuthorityConfig().strictMode !== true) {
+          throw new Error("strict mode must be enabled for this observation");
+        }
+      '
+      since=$(node -e '
+        const since = Date.parse(process.argv[1]);
+        if (!Number.isFinite(since)) throw new Error("invalid DEPLOYED_AT_UTC");
+        console.log(since);
+      ' "$DEPLOYED_AT_UTC")
+      until=$((since + 86400000))
+      if [ "$(node -p 'Date.now()')" -lt "$until" ]; then
+        echo 'acceptance pending: the 24-hour deployment window is still open' >&2
+        exit 1
+      fi
+      : "${ACCEPTANCE_EVIDENCE_JSON:?Provide the reviewed retry-cap page and manual closure evidence array}"
+      journal=data/next-action-shadow/observations.jsonl
+      set -- "$journal"
+      if [ -r "$journal.1" ]; then set -- "$journal.1" "$journal"; fi
+      report=$(jq -se --argjson since "$since" --argjson until "$until" \
+        --arg repo "${REVIEW_REPO:-laceyenterprises/agent-os}" --slurpfile evidence "$ACCEPTANCE_EVIDENCE_JSON" '
+        def key: [.prNumber, .head];
+        def in_window: .observedAtMs >= $since and .observedAtMs < $until;
+        def route_outcome:
+          {prNumber: .[0].prNumber, head: .[0].head,
+           daemon: any(.[]; .next.reason == "carried-clean-head" or .next.action == "daemon-merge"),
+           hammer: any(.[]; .next.action == "hammer" and .next.reason == "review-findings-final")};
+        if ($evidence | length) != 1 or ($evidence[0] | type) != "array" or
+          any($evidence[0][]; (.kind != "retry-cap-page" and .kind != "manual-closure") or
+            (.prNumber | type) != "number" or (.head | type) != "string" or
+            (.observedAtMs | type) != "number" or (.url | type) != "string" or .url == "")
+        then error("invalid retry-cap or manual closure evidence") else . end
+        | [.[] | select(.schema == "merge-lane-observation/v1" and .repo == $repo
+            and .strictMode == true and in_window
+            and .exactReview.verdict == "comment-only" and .exactReview.hasFindings == true)]
+        | group_by(key) | map(route_outcome) as $heads
+        | ($heads | map({key: (key | @json), value: true}) | from_entries) as $sample
+        | [$evidence[0][] | select(in_window and $sample[(key | @json)])] | unique_by([.kind, .url]) as $events
+        | {sampledHeads: ($heads | length), heads: $heads,
+           retryCapPages: ([$events[] | select(.kind == "retry-cap-page")] | length),
+           manualClosures: ([$events[] | select(.kind == "manual-closure")] | length), evidence: $events}
+        | . + {accepted: (.sampledHeads > 0 and all(.heads[]; .hammer and (.daemon | not)) and
+                          .retryCapPages <= 3 and .manualClosures <= 3)}
+      ' "$@")
+      printf '%s\n' "$report"
+      printf '%s\n' "$report" | jq -e '.accepted' >/dev/null

@@ -35,7 +35,8 @@ function fixture(t, changeEpoch = () => {}, selector = identity) {
   }
   for (const path of ['package.json', 'package-lock.json', 'config.json',
     'bin/legacy-lane-write.mjs', 'bin/hammer-merge.sh',
-    'bin/hammer-queue-handoff.mjs', 'bin/hammer-close-controller.sh']) {
+    'bin/hammer-queue-handoff.mjs', 'bin/hammer-close-controller.sh',
+    'bin/finalization-queue-handoff.mjs', 'bin/hammer-publish.sh']) {
     copyFileSync(new URL(`../${path}`, import.meta.url), join(root, path));
   }
   const historical = { id: 'historical', ownerKey: 'older', reviewHead: 'c'.repeat(40) };

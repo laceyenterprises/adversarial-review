@@ -1,7 +1,7 @@
 // ONS-07 — the cascade itself: code defaults -> module files -> top-level file
 // -> profile overlay -> *.local.yaml -> env -> CLI, as in the Python loader.
 import { existsSync } from 'node:fs';
-import { schemaV1 } from './config-schema.mjs';
+import { contractSchemaPath, schemaForConfig } from './config-schema.mjs';
 import { ENV_ALIASES, dynamicAppEnvAliases, dynamicAppEnvIds } from './config-env-aliases.mjs';
 import { AgentOSConfigError, DEFAULT_TOP_LEVEL_PATH, checkDeprecatedEnvVars } from './config-base.mjs';
 import { checkLeaf, isEmptyDoc, validateSchemaLayer } from './config-checks.mjs';
@@ -53,26 +53,10 @@ export function loadConfigForIdentityTokenPool({ identity, ...options } = {}) {
   return loadConfigImpl({ ...options, tolerateCheckedInUnknown: true, tokenPoolIdentity: identity });
 }
 
-export function loadConfigImpl({
-  topPath = null,
-  modulePaths = [],
-  env = null,
-  cliOverrides = null,
-  tolerateCheckedInUnknown = false,
-  tokenPoolIdentity,
-  legacyGeminiReviewer = false,
-} = {}) {
-  const envView = env || process.env;
-  // Compose's ${VAR:-} forwards an absent setting as "": absent for every
-  // leaf type and alias form, as in Python. envView keeps loader controls.
-  const envOverrides = Object.fromEntries(Object.entries(envView).filter(([, value]) => value !== ''));
-  checkDeprecatedEnvVars(envOverrides);
-  const schema = schemaV1();
-
+function buildCodeDefaults(schema) {
   const defaults = buildDefaultsDict(schema);
   const merged = {};
   const trace = {};
-  const runtimeDroppedUnknownKeys = [];
   for (const [dotted, value] of Object.entries(flatten(defaults))) {
     setLeaf(merged, dotted, value);
     (trace[dotted] = trace[dotted] || []).push({
@@ -96,6 +80,37 @@ export function loadConfigImpl({
       source: 'code-default', value: {}, path: null,
     });
   }
+  return { merged, trace };
+}
+
+let codeDefaults;
+
+// Internal test hook: the next load rebuilds values and provenance together.
+export function _resetCodeDefaultsForTesting() {
+  codeDefaults = undefined;
+}
+
+export function loadConfigImpl({
+  topPath = null,
+  modulePaths = [],
+  env = null,
+  cliOverrides = null,
+  tolerateCheckedInUnknown = false,
+  tokenPoolIdentity,
+  legacyGeminiReviewer = false,
+} = {}) {
+  const envView = env || process.env;
+  // Compose's ${VAR:-} forwards an absent setting as "": absent for every
+  // leaf type and alias form, as in Python. envView keeps loader controls.
+  const envOverrides = Object.fromEntries(Object.entries(envView).filter(([, value]) => value !== ''));
+  checkDeprecatedEnvVars(envOverrides);
+  const topPathResolved = topPath || envView.AGENT_OS_CONFIG_PATH || DEFAULT_TOP_LEVEL_PATH;
+  const schema = schemaForConfig(contractSchemaPath(envView));
+
+  // Rebuild when the selected schema changes. Clone values and provenance together.
+  if (codeDefaults?.schema !== schema) codeDefaults = { schema, baseline: buildCodeDefaults(schema) };
+  const { merged, trace } = structuredClone(codeDefaults.baseline);
+  const runtimeDroppedUnknownKeys = [];
 
   // --- Layer 2: module files ---
   const moduleAliases = {};
@@ -103,6 +118,7 @@ export function loadConfigImpl({
     const { doc, rawText } = loadLayerFile(rawPath);
     if (doc === null || doc === undefined) continue;
     const { validated, aliases } = validateModuleDoc(doc, rawPath, rawText, {
+      schema,
       tolerateUnknown: tolerateCheckedInUnknown,
       warnUnknownOnce: tolerateCheckedInUnknown,
       droppedUnknownKeys: runtimeDroppedUnknownKeys,
@@ -128,11 +144,10 @@ export function loadConfigImpl({
   }
 
   // --- Layer 3: top-level file ---
-  const topPathResolved =
-    topPath || envView.AGENT_OS_CONFIG_PATH || DEFAULT_TOP_LEVEL_PATH;
   const { doc: topDoc, rawText: topRaw } = loadLayerFile(topPathResolved);
   if (topDoc !== null && topDoc !== undefined && !isEmptyDoc(topDoc)) {
     const validated = validateSchemaLayer(topDoc, {
+      schema,
       source: topPathResolved,
       rawText: topRaw,
       tolerateUnknown: tolerateCheckedInUnknown,
@@ -199,12 +214,14 @@ export function loadConfigImpl({
       'version' in localDoc
     ) {
       validatedLocal = validateSchemaLayer(localDoc, {
+        schema,
         source: local,
         rawText: localRaw,
         tolerateUnknown: true,
       });
     } else {
       const { validated, aliases } = validateModuleDoc(localDoc, local, localRaw, {
+        schema,
         tolerateUnknown: true,
         preserveEmptyMaps: true,
       });
@@ -302,7 +319,7 @@ export function loadConfigImpl({
   const undeclaredGemini = pools && typeof pools === 'object' && !Array.isArray(pools)
     && !Object.hasOwn(pools, 'gemini-reviewer');
   if (!legacyGeminiReviewer || !undeclaredGemini) validateOAuthDeclarations(merged.oauth, trace);
-  validateOsgShape(merged.osg);
+  validateOsgShape(merged.osg, null, schema);
   validateSearch(merged.services?.hcp?.search);
   validatePublicHygiene(merged.worker_pool?.public_hygiene);
   validateWorkerClassVaults(merged.worker_pool?.secrets, trace);

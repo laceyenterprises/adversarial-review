@@ -745,7 +745,7 @@ test('FINALCLOSE-01 dispatch-only closer admits a stale final head and does not 
   f.args.dispatchContext = { ...f.args.dispatchContext, rootDir, reviewedSha: reviewed,
     dispatchRecordHeadSha: reviewed, finalRoundDispatchOnly: true, allowStaleReviewHeadHammerResume: true };
   f.args.reviewState.headSha = reviewed;
-  f.args.prMetadata.mergeableState = 'UNKNOWN';
+  f.args.prMetadata.mergeableState = 'MERGEABLE';
   f.args.resolveHamTerminalRemediationEvidenceImpl = async () => assert.fail('dispatch-only cannot use a merge certificate');
   assert.equal((await maybeDispatchAmaCloser(f.args)).dispatched, true);
   assert.equal(f.launches.length, 1);

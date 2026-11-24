@@ -29,6 +29,7 @@ export const CLOSER_AUTHORED_STALE_DECISIONS = Object.freeze({
   REREVIEW: 'rereview-exact-head',
   NOT_APPLICABLE: 'not-applicable',
   HAMMER_RESUME: 'hammer-resume',
+  CONFLICT_REPAIR: 'conflict-repair',
 });
 const CLOSER_AUTHORED_STALE_AUDIT_SCHEMA_VERSION = 1;
 const SETTLED_SUCCESS = 'settled-success';
@@ -99,7 +100,8 @@ export async function proveCloserAuthoredStaleHead({
  *
  * Decisions: `eligible`; `retry` when the only misses are transient (exact-head
  * CI PENDING, mergeability UNKNOWN) -- wait and re-evaluate, never stop;
- * `not-eligible` for a hard miss (red/unknown CI, resolved non-mergeable head,
+ * `conflict-repair` for a known conflict with green or pending exact-head CI;
+ * `not-eligible` for a hard miss (red/unknown CI, unsupported mergeability,
  * blockers, unsettled verdict);
  * `rereview-exact-head` when a non-closer commit sits after the reviewed head;
  * `not-applicable` when the head is not stale at all.
@@ -113,7 +115,7 @@ export function closerAuthoredStaleEligible({
   checksConclusion,
   mergeability,
 } = {}) {
-  const { ELIGIBLE, RETRY, NOT_ELIGIBLE, REREVIEW, NOT_APPLICABLE } = CLOSER_AUTHORED_STALE_DECISIONS;
+  const { ELIGIBLE, RETRY, NOT_ELIGIBLE, REREVIEW, NOT_APPLICABLE, CONFLICT_REPAIR } = CLOSER_AUTHORED_STALE_DECISIONS;
   const headSummary = {
     reviewedHead: headProof?.reviewedHead || null,
     currentHead: headProof?.currentHead || null,
@@ -147,10 +149,14 @@ export function closerAuthoredStaleEligible({
   else if (checks !== 'SUCCESS') hard.push(checks ? 'ci-not-green' : 'ci-unknown');
   const merge = String(mergeability || '').trim().toUpperCase();
   if (!merge || merge === 'UNKNOWN') transient.push('pr-mergeability-unknown');
-  else if (merge !== 'MERGEABLE') hard.push('pr-not-mergeable');
+  else if (merge !== 'MERGEABLE' && merge !== 'CONFLICTING') hard.push('pr-not-mergeable');
   if (hard.length) {
     return { eligible: false, carryForward, transient: false, ...headSummary,
       decision: NOT_ELIGIBLE, reasons: [...hard, ...transient] };
+  }
+  if (merge === 'CONFLICTING') {
+    return { eligible: false, carryForward, transient: false, ...headSummary,
+      decision: CONFLICT_REPAIR, reasons: ['conflict-rebase'] };
   }
   if (transient.length) {
     return { eligible: false, carryForward, transient: true, ...headSummary,

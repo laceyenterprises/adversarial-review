@@ -2109,8 +2109,13 @@ async function dispatchAmaClosureFor({
   }
   const pendingSuccessor = readCloserSuccessor(rootDir, { repo: repoPath, prNumber, headSha: currentPrHeadSha });
   let successorHammerFallback = false;
+  // Final-fix-all is a findings successor. A confirmed conflict goes through
+  // ordinary hammer admission and its exact-head custody checks.
+  const successorConflictRepair = prMetadata.mergeableState === 'CONFLICTING'
+    && shared.decision.action === 'hammer' && shared.decision.actor === 'hammer'
+    && shared.decision.queue?.intent === 'dispatch';
   if (pendingSuccessor && pendingSuccessor.status !== 'successor-enrolled' && prMetadata.isOpen
-    && shared.decision.action !== 'daemon-merge') {
+    && shared.decision.action !== 'daemon-merge' && !successorConflictRepair) {
     requestCloserSuccessor({ rootDir, repo: repoPath, prNumber, headSha: currentPrHeadSha,
       source: pendingSuccessor.source, reviewBody: gateSnapshot.settledReview?.reviewBody,
       refusingReasons: pendingSuccessor.refusingReasons, now: new Date(now()).toISOString() });

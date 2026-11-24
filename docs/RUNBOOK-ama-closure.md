@@ -5294,7 +5294,7 @@ reasons:
 | `skip-operator-skip` | A hard-stop operator label produced `operator-skip-label`; the watcher is deliberately holding merge/hammer/merge-agent closeout for an open PR. Terminal held PRs are cleaned up instead of held. |
 | `stale-review-head` | The reviewed head doesn't match the PR's current head. |
 | `pr-not-mergeable` | The PR is closed, or GitHub's `mergeableState` is neither `MERGEABLE` nor `UNKNOWN` (usually a conflict; also strict-mode `BEHIND` or an empty/unrecognized enum). Hammer-remediable for a conflicting or behind open PR: the hammer resolves the conflict or rebases. A closed PR or an empty-state read gets no hammer fix. |
-| `pr-mergeability-unknown` | GitHub still reports `mergeableState` `UNKNOWN` after the watcher's bounded re-sampling (it recomputes after a push or base move). Transient: on a non-exhausted review cycle it is not hammer-remediable (an exhausted cycle still hammers any miss without `stale-review-head`), and it never produces a manual-close page; the next tick re-reads. On the daemon clean path an UNKNOWN-only miss inside the lease is re-sampled within the retry budget and then ends as the non-permanent `gate-read-failed`, so the head stays eligible for the daemon on the next tick (a diagnostics park record is still written, as for every non-merged daemon outcome). A pre-lease UNKNOWN decline is never counted as a closer→daemon route disagreement. |
+| `pr-mergeability-unknown` | GitHub still reports `mergeableState` `UNKNOWN` after the watcher's bounded re-sampling (it recomputes after a push or base move). New closer dispatch and queue preparation wait for a known reading, including after an exhausted review cycle. The next tick re-reads mergeability and existing ownership or recovery holds can still be reconciled. On the daemon clean path an UNKNOWN-only miss inside the lease is re-sampled within the retry budget and then ends as the non-permanent `gate-read-failed`, so the head stays eligible for the daemon on the next tick (a diagnostics park record is still written, as for every non-merged daemon outcome). A pre-lease UNKNOWN decline is never counted as a closer→daemon route disagreement. |
 | `primary-change-reverted` | Trusted first-hammer-parent history shows an author-changed region returning to the merge base, a removed line being restored, or a rename undone. AMA stops both hammer closeout and daemon merge; `operator-approved` does not bypass this gate. The daemon records this park reason for pipeline-health. Inspect the primary and final diffs and the finding authorization described below. The closer requests one exact-head review for an attributable, unverified text reversal. The reviewer receives the reverted regions and their removal commits. A still-unverified reversal after that pass enters scoped operator recovery. |
 | `primary-change-unknown` | Evidence was read but cannot be evaluated: a capped history/file list, omitted patches without identical trusted blob evidence, truncated patches, or unsupported structural evidence. Head races are transient. Text renames (including pure renames) are supported through `previous_filename`. This fails closed without claiming a proven reversal; `operator-approved` does not bypass it. Retain the merge hold while recovering evidence. Deterministic unknown evidence enters the existing scoped escalation route immediately; it never masquerades as `gate-read-failed`. The daemon park records `reason: primary-change-unknown` with an inspection remedy. The recovery router pages after its existing six observations for the same head, deduplicating subsequent pages. Hammer context and stop output include the missing-evidence reason. CAPROUTE-01 holds legacy unknown hammer stops on the live head, including hammer-owner routes, and probes evidence once per closer pass. A computable answer releases the evidence hold through `primary-change-evidence`; ordinary merge gates still apply. |
 | `primary-change-read-failed` | A transient GitHub read failed after the reader's bounded retry budget, or the head raced the read. Installation-token auth outages and cancellation are retryable reads. Permission, missing compare, malformed JSON and process-output failures now produce `history-read-failed` with `historyReadFailed: true` and the underlying error. An actual in-lease read failure remains non-permanent; a structural unknown is a scoped primary-change refusal. This is a retryable outage, including on PRs without hammer commits, and defers closure as `gate-read-failed`. It does not require operator adjudication or write a permanent failed-head marker. The next tick retries. |
@@ -8222,8 +8222,9 @@ in `githubGate`; green CI uses `remoteCiStatus: mergeability-unknown`.
 Certified HAM heads resume through the existing bounded deferral queue,
 including its backoff, expiry and lifetime refund bound. Live UNKNOWN alone or
 with pending CI remains a wait in that queue, without a merge or immediate
-operator escalation. Red CI or conflicts still route to bounded repair,
-including red CI alongside UNKNOWN; independent eligibility holds still apply.
+operator escalation. Red CI or conflicts still select bounded repair,
+including red CI alongside UNKNOWN; a new closer dispatch waits for mergeability
+to settle. Independent eligibility holds still apply.
 Fresh exact-head
 eligibility and merge gates remain mandatory before daemon merge or a repair
 dispatch.
@@ -8549,6 +8550,23 @@ All release the lease. A post-rebase PR snapshot retries transient failures with
 the update-branch retry cap and exponential backoff, retaining the last valid
 snapshot. Exhaustion or a permanent failure reports `pr-refresh-failed`
 and releases the lease before returning, including during the in-run CI retry.
+
+If the final GitHub gate sees a confirmed conflict on the validated open,
+non-draft head with only mergeability and possibly pending CI blocking it, the
+close controller yields the lease. It uses the local conflict replay at the
+current base and validates the detached result before its exact-head push.
+It rebuilds the audit and predicate and waits for required checks on the
+published head before trying merge again. At most two final-gate replays are
+allowed per run. A changed patch or unavailable local equivalence proof requires
+independent review of the published head.
+Conflict markers or an exhausted replay budget record `needs-rebase-repair`
+for the current head. The closure sweep can reserve one continuation for that
+head. Closer and successor dispatch can repair a confirmed conflict.
+Draft and closed PRs are refused. UNKNOWN, null, omitted or empty mergeability
+waits for a fresh snapshot before queue preparation or closer dispatch.
+Existing closer ownership and certified deferral queues are still reconciled,
+including their backoff, refunds and expiry, while mergeability is unknown.
+Daemon and executor merge permission still requires `MERGEABLE`.
 PR node-ID resolution shares the update-branch transient retry cap and backoff;
 permanent lookup failures stop immediately. Real read, publication, head-race and
 authority failures continue to fail closed. A non-cooperating base writer during

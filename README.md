@@ -1339,9 +1339,11 @@ approval from the same issuer. HAM reuse checks this proof before the merge
 lease and again before transport; review holds use a five-minute recovery
 backoff. Review-change and operator-veto audit deferrals do not earn an automatic
 retry refund. See the [standing-review contract](docs/RUNBOOK-ama-closure.md#standing-operator-reviews-and-the-merge-writer-lac-2305).
-The wrapper prints each phase's
-bounded diagnostic tail, status, outcome, and lease state. A blocked phase
-stops the flow; a rebase-conflict outcome returns control for local resolution.
+The wrapper prints each phase's bounded diagnostic tail, status, outcome, and
+lease state. A final-gate conflict with green or pending CI and no other blocker
+yields the lease for a bounded replay through local validation and exact-head
+publication. Conflict markers return `needs-rebase-repair` for local resolution
+or same-head recovery.
 
 HAMSELFREBASE-01 keeps a successful server-side rebase in this flow: verify-head
 fetches the exact resulting SHA, detaches the scratch checkout and synchronizes

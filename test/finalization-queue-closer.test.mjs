@@ -99,7 +99,8 @@ test('actual closer dispatcher suppresses twenty duplicate wakes after durable a
   assert.equal(f.released(), 1);
   let launches = 0;
   for (let i = 0; i < 20; i++) {
-    const result = await maybeDispatchAmaCloser({ cfg, prMetadata: { prNumber: f.h.prNumber, headSha: f.h.head, baseBranch: lane.base, isOpen: true },
+    const result = await maybeDispatchAmaCloser({ cfg, prMetadata: { prNumber: f.h.prNumber, headSha: f.h.head, baseBranch: lane.base, isOpen: true,
+      mergeableState: 'MERGEABLE' },
       dispatchContext: { rootDir: f.rootDir, repo: lane.repository },
       execFileImpl: async () => { launches++; assert.fail('duplicate closer'); },
       acquireMergeLeaseImpl: () => assert.fail('queue closer merge lease'),

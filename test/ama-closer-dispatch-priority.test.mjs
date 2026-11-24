@@ -878,6 +878,52 @@ test('STOPSTALE-01: dispatch respects daemon ownership after a superseded automa
   assert.equal(deps.calls.length, 0, 'no hammer launch after passing over an automated stop');
 });
 
+for (const [name, prMetadata, reason] of [
+  ['conflicting', { mergeableState: 'CONFLICTING' }, null],
+  ['draft', { mergeableState: 'CONFLICTING', isDraft: true }, 'pr-is-draft'],
+  ['closed', { mergeableState: 'CONFLICTING', isOpen: false }, 'pr-not-mergeable'],
+  ['unknown', { mergeableState: 'UNKNOWN' }, 'pr-mergeability-unknown'],
+  ['null mergeability', { mergeableState: null }, 'pr-mergeability-unknown'],
+  ['undefined mergeability', { mergeableState: undefined }, 'pr-mergeability-unknown'],
+  ['omitted mergeability', {}, 'pr-mergeability-unknown'],
+  ['empty mergeability', { mergeableState: '' }, 'pr-mergeability-unknown'],
+]) {
+  test(`CLOSERCONFLICT-01: ${name} closer dispatch admission`, async t => {
+    const rootDir = mkdtempSync(join(tmpdir(), 'closer-conflict-admission-'));
+    t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+    const deps = testDeps();
+    const args = findingsRemediationArgs(rootDir, { prMetadata });
+    if (name === 'omitted mergeability') delete args.prMetadata.mergeableState;
+    const result = await maybeDispatchAmaCloser({ ...args, ...deps });
+    assert.equal(result.dispatched, !reason, JSON.stringify(result));
+    if (reason) assert.equal(result.reason, reason);
+    if (reason === 'pr-mergeability-unknown') assert.equal(result.recoveryWait, true);
+    assert.equal(deps.calls.filter(call => call.args[0] === 'dispatch').length, reason ? 0 : 1);
+  });
+}
+
+test('CLOSERCONFLICT-01: null mergeability cannot enter queue preparation', async t => {
+  const rootDir = mkdtempSync(join(tmpdir(), 'closer-unknown-queue-'));
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  const deps = testDeps();
+  let stackedBaseChecks = 0;
+  deps.guardStackedBaseImpl = async () => {
+    stackedBaseChecks += 1;
+    return null;
+  };
+  const args = findingsRemediationArgs(rootDir, {
+    prMetadata: { mergeableState: null },
+    dispatchContext: { baseBranch: 'main' },
+    cfg: { laneRoutes: [{ repository: 'acme/repo', base: 'main', executor: 'queue-v2' }] },
+  });
+  const result = await maybeDispatchAmaCloser({ ...args, ...deps });
+  assert.equal(result.dispatched, false);
+  assert.equal(result.reason, 'pr-mergeability-unknown');
+  assert.equal(result.recoveryWait, true);
+  assert.equal(stackedBaseChecks, 1);
+  assert.equal(deps.calls.length, 0);
+});
+
 test('LCR: findings-remediation hammer dispatches with --priority normal', async (t) => {
   const rootDir = mkdtempSync(join(tmpdir(), 'lcr-priority-remediation-'));
   t.after(() => rmSync(rootDir, { recursive: true, force: true }));

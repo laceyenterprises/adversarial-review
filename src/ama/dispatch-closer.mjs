@@ -4783,7 +4783,10 @@ async function maybeDispatchAmaCloserWithinRepositoryCycle(args) {
     if (args.cfg?.enabled && terminalPr) {
       return noAmaDispatch({ dispatched: false, reason: 'pr-not-mergeable' });
     }
-    if (args.cfg?.enabled) {
+    const draft = args.prMetadata?.isDraft === true;
+    const rawMergeableState = args.prMetadata?.mergeableState;
+    const mergeabilityUnknown = !rawMergeableState || String(rawMergeableState).toUpperCase() === 'UNKNOWN';
+    if (args.cfg?.enabled && !draft && !mergeabilityUnknown) {
       const prepared = await prepareQueueCloserDispatch({
         rootDir: dispatchContext?.rootDir || SUBMODULE_ROOT, cfg: args.cfg,
         lane: { repository: targetRepo, base: dispatchContext?.baseBranch || args.prMetadata?.baseBranch
@@ -4833,6 +4836,9 @@ async function maybeDispatchAmaCloserWithinRepositoryCycle(args) {
       // drain record must not hide a new, unrelated blocker from the lane.
       retireAmaCloserDrainHint(dispatchContext.rootDir, drainIdentity, { logger: args.logger });
     }
+    if (args.cfg?.enabled && draft) {
+      return noAmaDispatch({ dispatched: false, reason: 'pr-is-draft' });
+    }
     const readStatus = args.readLaunchRequestStatusImpl || readLaunchRequestStatusFromLedgerDefault;
     const recovery = args.cfg?.enabled && args.cfg?.autonomousMergeExecutionEnabled !== false && dispatchContext?.rootDir
       ? await refreshClosureRecoveryCustody({ rootDir: dispatchContext.rootDir,
@@ -4845,7 +4851,8 @@ async function maybeDispatchAmaCloserWithinRepositoryCycle(args) {
     decisionSink.value = recovery.shared;
     const result = await maybeDispatchAmaCloserAttempt({ ...args, dispatchContext, sharedNextAction: recovery.shared,
       observeSharedDecision: shared => { decisionSink.value = shared; },
-      prMetadata: { ...args.prMetadata, prNumber: targetPrNumber },
+      prMetadata: { ...args.prMetadata, prNumber: targetPrNumber,
+        ...(mergeabilityUnknown ? { mergeableState: 'UNKNOWN' } : {}) },
       // Preserve the production snapshot contract through the retry wrapper.
       useLaunchSnapshot: args.useLaunchSnapshot ?? !args.readLaunchRequestStatusImpl,
       readLaunchRequestStatusImpl: async request => withLiveLaunchRetry(await readStatus({ ...request, includeRetryChain: true })),
@@ -5183,6 +5190,14 @@ async function maybeDispatchAmaCloserAttempt({
     }
   }
 
+  // Existing custody and evidence holds take precedence over new admission.
+  if (prMetadata.mergeableState === 'UNKNOWN' && !(reconciliationRoot && reconciliationRepo
+    && readAmaCloserDispatchRecordsForPR(reconciliationRoot, { repo: reconciliationRepo, prNumber })
+      .some(record => record.launchRequestId))) {
+    return noAmaDispatch({ dispatched: false, skipMergeAgent: true, recoveryWait: true,
+      reason: 'pr-mergeability-unknown' });
+  }
+
   if (ownerProofRecovery) {
     if (!prMetadata.isOpen || prMetadata.isDraft || isOperatorHeld(prMetadata.labels)) {
       return noAmaDispatch({ dispatched: false, skipMergeAgent: true, reason: 'ownerless-live-pr-held-or-terminal' });
@@ -5291,6 +5306,7 @@ async function maybeDispatchAmaCloserAttempt({
     });
   }
   const verdict = isEligibleForAmaClosure(reviewState, prMetadata, cfg, eligibilityOptions);
+  const mergeabilityUnknown = prMetadata.mergeableState === 'UNKNOWN';
   const decisionIdentity = { repo: dispatchContext?.repo, prNumber, headSha: prMetadata.headSha };
   const reviewHandoffLease = prMetadata.headSha
     ? readAmaCloserLease(dispatchContext.rootDir || SUBMODULE_ROOT, decisionIdentity) : null;
@@ -5330,7 +5346,7 @@ async function maybeDispatchAmaCloserAttempt({
     } : undefined });
   }
   sharedNextAction = reviseClosureNextAction(sharedNextAction, {
-    ...(verdict.repairAdmission.ok ? {} : { controls: {
+    ...(verdict.repairAdmission.ok || mergeabilityUnknown ? {} : { controls: {
       ...sharedNextAction.snapshot.observations.controls?.value,
       safetyRefusal: { deterministic: true, reason: verdict.reasons[0] },
     } }),
@@ -5378,7 +5394,9 @@ async function maybeDispatchAmaCloserAttempt({
   // snapshot retains structural safety refusals for successor resolution.
   const mismatch = hammerDispatchMismatch(selectedNextAction, sharedNextAction, decisionIdentity, { logger });
   if (mismatch) return noAmaDispatch(mismatch);
-  if (!verdict.repairAdmission.ok) return noAmaDispatch({ dispatched: false, skipMergeAgent: true,
+  // UNKNOWN prevents new launches, but existing owners and certified deferral
+  // queues still need observation and bounded accounting below.
+  if (!verdict.repairAdmission.ok && !mergeabilityUnknown) return noAmaDispatch({ dispatched: false, skipMergeAgent: true,
     reason: 'not-eligible', reasons: verdict.reasons, eligibilityRejected: true, safetyRefusal: true, nextActionShared: sharedNextAction });
   const reviewHandoffFindings = reviewHandoffLease?.status === 'handed-to-review'
     && hasHammerDispatchIntent(sharedNextAction, decisionIdentity);
@@ -5389,7 +5407,7 @@ async function maybeDispatchAmaCloserAttempt({
       queuedParkAudit = readAmaAuditEntry(dispatchContext.hqRoot || DEFAULT_HQ_ROOT,
         dispatchContext.repo, prNumber, prMetadata.headSha);
       if (verdict.trace?.hamTerminalRemediation?.ok !== true
-        && queuedParkAudit?.attempts?.at(-1)?.reason !== 'lane-busy'
+        && !['lane-busy', 'needs-rebase-repair'].includes(queuedParkAudit?.attempts?.at(-1)?.reason)
         && !HAMMER_RETRYABLE_READ_OUTCOMES.has(queuedParkAudit?.attempts?.at(-1)?.reason)) queuedParkAudit = null;
     } catch (error) {
       logger?.warn?.(`[ama-closer] park audit unreadable: ${error?.message || error}`);
@@ -5669,6 +5687,10 @@ async function maybeDispatchAmaCloserAttempt({
   const parkAudit = queuedParkAudit || sourceValidationAudit;
   const parkAttempt = parkAudit?.attempts?.at(-1);
   const parkReason = parkAttempt?.reason;
+  const rebaseRepairOwed = parkAudit?.status === 'deferred' && parkReason === 'needs-rebase-repair'
+    && prMetadata.mergeableState === 'CONFLICTING' && parkAttempt.continuation?.headSha === queuedHead
+    && parkAttempt.continuation?.kind === 'redrive' && parkAttempt.continuation?.owner === 'closure-sweep'
+    && Boolean(existingRecord?.launchRequestId) && parkAttempt.launchRequestId === existingRecord.launchRequestId;
   const deferredPark = parkAudit?.status === 'deferred'
     && AMA_CLOSER_RETRYABLE_DEFERRAL_REASONS.has(parkReason)
     && (!parkAttempt?.launchRequestId || parkAttempt.launchRequestId === existingRecord?.launchRequestId)
@@ -6387,14 +6409,14 @@ async function maybeDispatchAmaCloserAttempt({
         }, { level: 'warn' });
       }
     }
-    const reportedNoWork = status === 'failed'
+    const reportedNoWork = status === 'failed' && !rebaseRepairOwed
       && prefetchedLaunchRequestProbe?.row?.failure_class === 'no_work_done';
-    const capFinalDecision = await reconcileCapFinalDecision(status);
+    const capFinalDecision = rebaseRepairOwed ? null : await reconcileCapFinalDecision(status);
     if (capFinalDecision) return capFinalDecision;
     // A timed-out legacy lock wait never issued a merge. Even without current
     // HAM certification, a settled launch must re-enter ordinary repair/admission
     // rather than being classified as a final no-merge or an exit without close.
-    if ((laneBusyPark || infrastructureReadPark) && !certifiedPark && ['succeeded', 'failed'].includes(status)) {
+    if ((laneBusyPark || infrastructureReadPark || rebaseRepairOwed) && !certifiedPark && ['succeeded', 'failed'].includes(status)) {
       status = 'failed';
       existingDispatchStatus = status;
     }
@@ -7511,6 +7533,9 @@ async function maybeDispatchAmaCloserAttempt({
     } } });
   }
   observeSharedDecision(sharedNextAction);
+  if (mergeabilityUnknown) return noAmaDispatch({ dispatched: false, skipMergeAgent: true,
+    recoveryWait: true, reason: deferredPark && !hasHammerDispatchIntent(sharedNextAction, decisionIdentity)
+      ? sharedNextAction.decision.reason : 'pr-mergeability-unknown' });
   const capReport = sharedNextAction.decision.row === 'R07-stop'
     && (sharedNextAction.snapshot.observations.policy?.value?.hammerCap?.retryExhausted
       || sharedNextAction.snapshot.observations.policy?.value?.hammerCap?.lifetimeExhausted);

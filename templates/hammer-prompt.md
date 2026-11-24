@@ -73,6 +73,7 @@ The close command's `close-result.json` `stage` is the phase; `status` is its ex
 | any | 0 | `HAM closing comment` with `posted` or `already-posted` completes closeout. A missing or unconfirmed delivery goes to mandate 7, even if scratch disappeared. |
 | verify-head | 20 | Stop with the printed named outcome. Preserve parked/deferred audits and retry semantics (Appendix B, mandate 0b). Report `already-merged` for operator follow-up. `ci-infrastructure` stops without HQ decision. |
 | verify-head / merge | 21 | Run **Appendix D — Resolving merge conflicts**, starting with its lease-state query/release block. Repair, commit, then rerun the close command. |
+| merge | 21 (`needs-rebase-repair`) | The automatic replay is already stopped at conflict markers. Verify lease release, then use Appendix D `--continue` after staging a safe resolution. If you cannot resolve it safely, preserve the recorded continuation and end with `needs-rebase-repair`. |
 | publish | nonzero | Stop; preserve pushed-head provenance and the named failure. No merge or source re-review. |
 | local-validation | nonzero | Repair proven test failures. For `canonical-validation-deferred`, preserve logs and use the existing cleanup and handoff in Appendix G2. |
 | merge | 20 / 75 / other nonzero | Stop with the printed outcome. Preserve retryable deferrals such as `lane-busy`. Report a possibly accepted merge without a verified own-merge receipt for operator follow-up. |
@@ -304,6 +305,9 @@ other new commits first, verifies head under the lease, revalidates
 builds the claim and predicate, and merges. It prints `close-result.json`
 (`status`, `outcome`); act on them per the exit-code table; 21 enters Appendix D,
 then rerun it. Exit 65 `close-plan-invalid`: correct the plan once and rerun.
+The controller can rebase twice when a confirmed late conflict is the only
+block beyond pending CI. It validates before publishing, then rechecks the new
+head. `exact-head-review-required` means an independent review owns the new head.
 
 GitHub calls: `ham_gh` or `ham_pr`. No `--watch` or polling loops.
 API helpers refresh per call, then refresh and retry once on a credential rejection.

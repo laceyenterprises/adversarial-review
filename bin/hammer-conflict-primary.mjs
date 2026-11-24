@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 import { hammerLocalGit } from '../src/ama/hammer-api-network.mjs';
 import { proveConflictPrimary } from '../src/ama/conflict-primary.mjs';
+import { proveReviewedRebase } from '../src/ama/reviewed-rebase.mjs';
 
 // Exit 1 only when the proof shows a real primary-line conflict: the replay did
 // not preserve the reviewed author commits. A proof without evidence (git or
@@ -8,6 +9,17 @@ import { proveConflictPrimary } from '../src/ama/conflict-primary.mjs';
 const [reviewedHead, sourceHead, base] = process.argv.slice(2);
 const decoder = new TextDecoder('utf-8', { fatal: true });
 const git = async args => decoder.decode(hammerLocalGit(args));
+if (reviewedHead === '--replay-equivalence') {
+  let proof;
+  try {
+    const head = (await git(['rev-parse', 'HEAD'])).trim();
+    proof = await proveReviewedRebase({ reviewedHead: sourceHead, head, base, git });
+  } catch {
+    process.stderr.write('replay-equivalence-unavailable: independent review required\n');
+  }
+  process.stdout.write(proof ? 'equivalent\n' : 'review-required\n');
+  process.exit(0);
+}
 let proof, refusal = 'unavailable';
 try {
   const head = (await git(['rev-parse', 'HEAD'])).trim();

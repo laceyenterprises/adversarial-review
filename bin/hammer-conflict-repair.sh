@@ -64,6 +64,7 @@ done
 HAM_CONFLICT_STATE="$HAM_RUN_DIR/conflict-repair.env"
 # Read by bin/hammer-api-publish.mjs; binds the repaired head to its source.
 HAM_CONFLICT_PUBLISH="$HAM_RUN_DIR/conflict-repair-publish.env"
+ham_conflict_automatic=0
 
 # Git's default '#' comment marker would strip headings and issue references
 # on rebase --continue. Use the same marker for the rebase and its resolver.
@@ -80,10 +81,21 @@ ham_conflict_rebasing() {
 
 if [ "$ham_conflict_continue" -eq 0 ]; then
   export HAM_PROCEDURE_STEP=conflict-sync
-  BASE_BRANCH=$(ham_pr --json baseRefName --jq '.baseRefName') && [ -n "$BASE_BRANCH" ] \
-    || ham_conflict_stop 1 conflict-pr-read-failed
-  HEAD_BRANCH=$(ham_pr --json headRefName --jq '.headRefName') && [ -n "$HEAD_BRANCH" ] \
-    || ham_conflict_stop 1 conflict-pr-read-failed
+  if [ -n "${HAM_FINAL_CONFLICT_HEAD:-}" ]; then
+    ham_conflict_automatic=1
+    ham_conflict_pr=$(ham_pr --json state,isDraft,headRefOid,baseRefName,headRefName) \
+      || ham_conflict_stop 1 conflict-pr-read-failed
+    jq -e --arg head "$HAM_FINAL_CONFLICT_HEAD" '.state == "OPEN" and .isDraft == false and .headRefOid == $head' \
+      <<< "$ham_conflict_pr" >/dev/null || ham_conflict_stop 20 head-changed
+    BASE_BRANCH=$(jq -er '.baseRefName | strings | select(length > 0)' <<< "$ham_conflict_pr") \
+      && HEAD_BRANCH=$(jq -er '.headRefName | strings | select(length > 0)' <<< "$ham_conflict_pr") \
+      || ham_conflict_stop 1 conflict-pr-read-failed
+  else
+    BASE_BRANCH=$(ham_pr --json baseRefName --jq '.baseRefName') && [ -n "$BASE_BRANCH" ] \
+      || ham_conflict_stop 1 conflict-pr-read-failed
+    HEAD_BRANCH=$(ham_pr --json headRefName --jq '.headRefName') && [ -n "$HEAD_BRANCH" ] \
+      || ham_conflict_stop 1 conflict-pr-read-failed
+  fi
   ham_bounded_git_sync "$BASE_BRANCH" "$HEAD_BRANCH" || {
     ham_conflict_sync_status=$?
     [ "$ham_conflict_sync_status" -eq 76 ] && ham_conflict_stop 76 git-credential-refresh-failed
@@ -93,6 +105,9 @@ if [ "$ham_conflict_continue" -eq 0 ]; then
   git check-ref-format "refs/heads/$HEAD_BRANCH" || ham_conflict_stop 1 conflict-pr-read-failed
   HAM_CONFLICT_FETCHED=$(git rev-parse --verify "refs/remotes/origin/$HEAD_BRANCH^{commit}") \
     || ham_conflict_stop 1 conflict-source-unavailable
+  if [ -n "${HAM_FINAL_CONFLICT_HEAD:-}" ] && [ "$HAM_CONFLICT_FETCHED" != "$HAM_FINAL_CONFLICT_HEAD" ]; then
+    ham_conflict_stop 20 head-changed
+  fi
   # Never orphan work: this worktree's HEAD must already be part of the PR head.
   HAM_CONFLICT_LOCAL=$(git rev-parse --verify 'HEAD^{commit}') || ham_conflict_stop 1 conflict-source-unavailable
   git merge-base --is-ancestor "$HAM_CONFLICT_LOCAL" "$HAM_CONFLICT_FETCHED" \
@@ -111,8 +126,8 @@ if [ "$ham_conflict_continue" -eq 0 ]; then
   [ "$HAM_CONFLICT_SOURCE" = "$HAM_CONFLICT_FETCHED" ] \
     && [ "$HAM_CONFLICT_SOURCE" = "$(git rev-parse "origin/$HEAD_BRANCH")" ] \
     || ham_conflict_stop 1 conflict-source-not-fetched-head
-  printf 'HAM_CONFLICT_SOURCE=%s\nHAM_CONFLICT_BASE=%s\nHAM_CONFLICT_BRANCH=%s\n' \
-    "$HAM_CONFLICT_SOURCE" "$HAM_CONFLICT_BASE" "$HAM_CONFLICT_BRANCH" \
+  printf 'HAM_CONFLICT_SOURCE=%s\nHAM_CONFLICT_BASE=%s\nHAM_CONFLICT_BRANCH=%s\nHAM_CONFLICT_AUTOMATIC=%s\n' \
+    "$HAM_CONFLICT_SOURCE" "$HAM_CONFLICT_BASE" "$HAM_CONFLICT_BRANCH" "$ham_conflict_automatic" \
     > "$HAM_CONFLICT_STATE" || ham_conflict_stop 1 conflict-state-unwritable
   if ! ( ham_conflict_comment_char; git rebase "origin/$BASE_BRANCH" ); then
     ham_conflict_rebasing || ham_conflict_stop 1 conflict-rebase-failed
@@ -126,6 +141,7 @@ else
   HAM_CONFLICT_SOURCE=$(sed -n 's/^HAM_CONFLICT_SOURCE=\([0-9a-fA-F]\{40\}\)$/\1/p' "$HAM_CONFLICT_STATE")
   HAM_CONFLICT_BASE=$(sed -n 's/^HAM_CONFLICT_BASE=\([0-9a-fA-F]\{40\}\)$/\1/p' "$HAM_CONFLICT_STATE")
   HAM_CONFLICT_BRANCH=$(sed -n 's/^HAM_CONFLICT_BRANCH=//p' "$HAM_CONFLICT_STATE")
+  if grep -qx 'HAM_CONFLICT_AUTOMATIC=1' "$HAM_CONFLICT_STATE"; then ham_conflict_automatic=1; fi
   if [ -z "$HAM_CONFLICT_SOURCE" ] || [ -z "$HAM_CONFLICT_BASE" ] || [ -z "$HAM_CONFLICT_BRANCH" ] \
     || ! git check-ref-format "refs/heads/$HAM_CONFLICT_BRANCH"; then
     ham_conflict_stop 1 'conflict-state-missing: the captured source/base/branch are unreadable'
@@ -176,12 +192,22 @@ while true; do
   sleep $((HAM_CONFLICT_SUBMODULE_SYNC_ATTEMPT * 2))
   HAM_CONFLICT_SUBMODULE_SYNC_ATTEMPT=$((HAM_CONFLICT_SUBMODULE_SYNC_ATTEMPT + 1))
 done
-rm -f "$HAM_CONFLICT_STATE"
 # The close command publishes HEAD:refs/heads/<branch> only while the branch
 # still names this captured source (the exact-head lease).
 HAM_CONFLICT_HEAD=$(git rev-parse --verify 'HEAD^{commit}') || ham_conflict_stop 1 conflict-rebase-unfinished
+if [ "$ham_conflict_automatic" -eq 1 ] && [ "$HAM_CONFLICT_HEAD" != "$HAM_CONFLICT_SOURCE" ]; then
+  ham_replay_proof=$(ham_read conflict-primary "$HAM_NODE_BIN" "$HAM_ROOT_DIR/bin/hammer-conflict-primary.mjs" \
+    --replay-equivalence "$HAM_CONFLICT_SOURCE" "$HAM_CONFLICT_BASE") || ham_conflict_stop 1 conflict-primary-failed
+  case "$ham_replay_proof" in
+    equivalent) ;;
+    review-required) printf '%s\n' "$HAM_CONFLICT_HEAD" > "$HAM_RUN_DIR/final-gate-review-head" \
+      || ham_conflict_stop 1 conflict-state-unwritable ;;
+    *) ham_conflict_stop 1 conflict-primary-failed ;;
+  esac
+fi
 printf 'source=%s\nhead=%s\nbranch=%s\n' "$HAM_CONFLICT_SOURCE" "$HAM_CONFLICT_HEAD" "$HAM_CONFLICT_BRANCH" \
   > "$HAM_CONFLICT_PUBLISH" || ham_conflict_stop 1 conflict-state-unwritable
+rm -f "$HAM_CONFLICT_STATE"
 echo "HAM conflict repair: rebased $HAM_CONFLICT_SOURCE onto $HAM_CONFLICT_BASE as $(git rev-parse HEAD)" >&2
 echo 'HAM next: rerun the close command; it publishes this head, then re-enters verify-head.' >&2
 exit 0

@@ -123,6 +123,9 @@ ham_close_validation_stop() {
   fi
 }
 
+# Retry from source publication so the new head gets local validation before
+# its fenced push, then fresh CI, review, primary-change and merge evidence.
+while :; do
 # 1. Publish a local remediation or conflict-repair commit the PR does not have.
 HAM_CLOSE_STAGE=live-head-read
 export HAM_PROCEDURE_STEP=live-head-read
@@ -186,6 +189,17 @@ if [ "$ham_close_local_head" != "$ham_close_live_head" ] \
     ham_close_finish "$HAM_PHASE_STATUS" "$HAM_PHASE_OUTCOME"
   fi
   unset HAM_COMMIT_PUBLICATION_ONLY HAM_CLOSE_REBASE_HEAD
+fi
+
+# A replay whose patch changed gets an independent review after publication.
+if [ -f "$HAM_RUN_DIR/final-gate-review-head" ] \
+  && [ "$(cat "$HAM_RUN_DIR/final-gate-review-head")" = "$ham_close_local_head" ]; then
+  HAM_CLOSE_STAGE=review-handoff
+  export POST_REMEDIATION_SHA="$ham_close_local_head"
+  "$HAM_NODE_BIN" "$HAM_CLOSE_ROOT/bin/hammer-review-handoff.mjs" \
+    "$HAM_CLOSE_ROOT" "$HAM_REPO" "$HAM_PR_NUMBER" "$ham_close_local_head" --exact-head \
+    || ham_close_finish 75 review-handoff-unconfirmed
+  ham_close_finish 20 exact-head-review-required
 fi
 
 # Without a usable required-check declaration we can still unblock the PR
@@ -317,4 +331,30 @@ ham_close_phase hammer-merge
 ham_close_merge_status=$HAM_PHASE_STATUS
 rm -f "$HAM_VERDICT_FILE" "$HAM_PRIMARY_CHANGE_FILE"
 HAM_VERDICT_READY_FILE=""
-ham_close_finish "$ham_close_merge_status" "$HAM_PHASE_OUTCOME"
+[ "$HAM_PHASE_OUTCOME" = retry-final-gate-conflict ] || ham_close_finish "$ham_close_merge_status" "$HAM_PHASE_OUTCOME"
+
+ham_close_conflict_count=0
+ham_close_conflict_budget="$HAM_RUN_DIR/final-gate-rebases"
+if [ -f "$ham_close_conflict_budget" ]; then
+  read -r ham_close_conflict_count < "$ham_close_conflict_budget" || ham_close_finish 1 conflict-state-unwritable
+fi
+case "$ham_close_conflict_count" in
+  0|1) ;;
+  2) ham_append_terminal_audit deferred needs-rebase-repair || ham_close_finish 1 procedure-step-failed
+     ham_close_finish 20 needs-rebase-repair ;;
+  *) ham_close_finish 1 conflict-state-unwritable ;;
+esac
+printf '%s\n' "$((ham_close_conflict_count + 1))" > "$ham_close_conflict_budget" \
+  || ham_close_finish 1 conflict-state-unwritable
+ham_close_conflict_status=0
+HAM_FINAL_CONFLICT_HEAD="$POST_REMEDIATION_SHA" /bin/bash "$HAM_CLOSE_ROOT/bin/hammer-conflict-repair.sh" \
+  "$HAM_RUN_DIR/inputs.sh" || ham_close_conflict_status=$?
+case "$ham_close_conflict_status" in
+  0) ;;
+  22) ham_append_terminal_audit deferred needs-rebase-repair || ham_close_finish 1 procedure-step-failed
+      ham_close_finish 21 needs-rebase-repair ;;
+  20) ham_close_finish 20 head-changed ;;
+  76) ham_close_finish 76 git-credential-refresh-failed ;;
+  *) ham_close_finish "$ham_close_conflict_status" conflict-rebase-failed ;;
+esac
+done

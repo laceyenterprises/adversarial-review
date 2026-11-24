@@ -214,6 +214,7 @@ case "$(basename "$path")" in
     fi
     exit "\${FIXTURE_VALIDATE_EXIT:-0}" ;;
   hammer-predicate-inputs.mjs) log predicate-inputs ;;
+  hammer-review-handoff.mjs) log "review-handoff $4 $5" ;;
   hammer-queue-handoff.mjs)
     log "queue-handoff head=$POST_REMEDIATION_SHA audit=$HAM_PUBLISHED_AUDIT_HEAD gen=$HAM_QUEUE_ROUTE_GENERATION"
     printf '{"outcome":"%s"}\n' "\${FIXTURE_QUEUE_OUTCOME:-queue-handoff-admitted}" > "$HAM_RUN_DIR/queue-handoff.json"
@@ -272,7 +273,7 @@ if [ "\${1:-}" = --wait-ci ]; then
   if [ -n "\${FIXTURE_REBASE_REMOTE:-}" ]; then
     log "required-ci head=$POST_REMEDIATION_SHA"
     [ "$POST_REMEDIATION_SHA" = "$(git --git-dir="$FIXTURE_REBASE_REMOTE" rev-parse refs/heads/feature)" ] || return 1
-    if [ "$POST_REMEDIATION_SHA" != "\${FIXTURE_GREEN_HEAD:-}" ]; then
+    if [[ "\${FIXTURE_GREEN_HEAD:-}" != any && "$POST_REMEDIATION_SHA" != "\${FIXTURE_GREEN_HEAD:-}" ]]; then
       HAM_PHASE_OUTCOME=required-checks-pending
       return 75
     fi
@@ -287,6 +288,16 @@ if [ "\${1:-}" = --history-read-abort ]; then
   return 1
 fi
 log "merge-phase held=1 verdict=$(cat "$HAM_VERDICT_FILE")"
+if [ -n "\${FIXTURE_LATE_CONFLICTS:-}" ]; then
+  attempts=0
+  if [ -f "$HAM_RUN_DIR/final-gate-rebases" ]; then read -r attempts < "$HAM_RUN_DIR/final-gate-rebases"; fi
+  if [ "$attempts" -lt "$FIXTURE_LATE_CONFLICTS" ]; then
+    ham_append_terminal_audit() { log "gate-audit $*"; }
+    ham_release_merge_lease --yield final-gate-conflict
+    HAM_PHASE_OUTCOME=retry-final-gate-conflict
+    return 20
+  fi
+fi
 if [ -n "\${FIXTURE_MERGE_REFUSE:-}" ]; then HAM_PHASE_OUTCOME=predicate-not-eligible; ham_release_merge_lease; return 20; fi
 log "gh pr merge --squash --match-head-commit $POST_REMEDIATION_SHA"
 trap - EXIT; ham_release_merge_lease merged
@@ -643,6 +654,76 @@ function conflictRebaseFixture(t, { declared = true } = {}) {
     FIXTURE_DECLARED_CI: String(declared), ...extra });
   return { ...f, close, head, remoteHead: () => git(`--git-dir=${remote}`, 'rev-parse', 'refs/heads/feature'),
     timeout: join(f.dir, 'timed-out') };
+}
+
+for (const mode of ['clean', 'semantic-conflict', 'cap', 'changed-patch']) {
+  test(`CLOSERCONFLICT-01 final gate recovery: ${mode}`, async t => {
+    const f = hammerFixture(t);
+    const gitEnv = { ...f.env, GIT_AUTHOR_NAME: 'Fixture', GIT_AUTHOR_EMAIL: 'fixture@example.invalid',
+      GIT_COMMITTER_NAME: 'Fixture', GIT_COMMITTER_EMAIL: 'fixture@example.invalid' };
+    const git = (...args) => execFileSync('git', args, {
+      cwd: f.checkout, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], env: gitEnv,
+    }).trim();
+    const remote = join(f.dir, 'remote.git');
+    git('init', '-q', '--bare', remote);
+    git('remote', 'add', 'origin', remote);
+    let source = f.shas.head;
+    if (mode === 'changed-patch') {
+      writeFileSync(join(f.checkout, 'duplicate.txt'), 'landed on both sides\n');
+      git('add', 'duplicate.txt');
+      git('commit', '-qm', 'Shared change');
+      source = git('rev-parse', 'HEAD');
+    }
+    git('push', '-q', 'origin', 'HEAD:refs/heads/feature');
+    git('checkout', '-qb', 'upstream', f.shas.reviewed);
+    if (mode === 'semantic-conflict') {
+      mkdirSync(join(f.checkout, 'src'));
+      writeFileSync(join(f.checkout, 'src/example.mjs'), 'export const upstream = true;\n');
+      git('add', 'src/example.mjs');
+    } else if (mode === 'changed-patch') {
+      writeFileSync(join(f.checkout, 'duplicate.txt'), 'landed on both sides\n');
+      git('add', 'duplicate.txt');
+    } else {
+      writeFileSync(join(f.checkout, 'upstream.txt'), 'base only\n');
+      git('add', 'upstream.txt');
+    }
+    git('commit', '-qm', 'Synthetic base advancement');
+    const base = git('rev-parse', 'HEAD');
+    git('push', '-q', 'origin', 'HEAD:refs/heads/main');
+    git('checkout', '-q', '--detach', source);
+    const inputs = join(f.run, 'inputs.sh');
+    writeFileSync(inputs, `${readFileSync(inputs, 'utf8')}
+ham_bounded_git_sync() { git fetch -q origin "$@"; }
+ham_pr() {
+  printf '{"state":"OPEN","isDraft":false,"headRefOid":"%s","baseRefName":"main","headRefName":"feature"}\\n' \
+    "$(git --git-dir="$FIXTURE_REBASE_REMOTE" rev-parse refs/heads/feature)"
+}
+`);
+    const result = await f.close({ ...gitEnv, FIXTURE_LIVE_HEAD: source, FIXTURE_REBASE_REMOTE: remote,
+      FIXTURE_GREEN_HEAD: 'any', FIXTURE_LATE_CONFLICTS: mode === 'cap' ? '3' : '1' });
+    const expected = { clean: [0, 'merged'], 'semantic-conflict': [21, 'needs-rebase-repair'],
+      cap: [20, 'needs-rebase-repair'], 'changed-patch': [20, 'exact-head-review-required'] }[mode];
+    assert.deepEqual([result.status, result.closeResult?.outcome], expected, `${result.stdout}\n${result.stderr}`);
+    assert.equal(result.closeResult.leaseHeld, false);
+    const events = f.events();
+    const remoteHead = git(`--git-dir=${remote}`, 'rev-parse', 'refs/heads/feature');
+    if (mode === 'semantic-conflict') {
+      assert.equal(remoteHead, source);
+      assert.match(events.join('\n'), /gate-audit deferred needs-rebase-repair/);
+      assert.equal(git('diff', '--name-only', '--diff-filter=U'), 'src/example.mjs');
+    } else {
+      assert.notEqual(remoteHead, source);
+      git('merge-base', '--is-ancestor', base, remoteHead);
+      const yieldIndex = events.indexOf('release --yield final-gate-conflict lease=ml_fixture');
+      const validateIndex = events.findIndex(event => event.startsWith('validate '));
+      const pushIndex = events.findIndex(event => event.startsWith('publish publication-only=1 held=0'));
+      assert.ok(yieldIndex >= 0 && yieldIndex < validateIndex && validateIndex < pushIndex, events.join('\n'));
+    }
+    const merges = events.filter(event => event.startsWith('gh pr merge'));
+    assert.deepEqual(merges, mode === 'clean' ? [`gh pr merge --squash --match-head-commit ${remoteHead}`] : []);
+    if (mode === 'cap') assert.equal(readFileSync(join(f.run, 'final-gate-rebases'), 'utf8'), '2\n');
+    if (mode === 'changed-patch') assert.ok(events.includes(`review-handoff ${remoteHead} --exact-head`));
+  });
 }
 
 test('a drained validation timeout publishes the repaired rebase and waits on CI for that exact head', async t => {

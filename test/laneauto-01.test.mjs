@@ -345,6 +345,16 @@ test('watcher persists and alerts a refused successor instead of losing the pre-
 });
 
 
+test('CLOSERCONFLICT-01: a pending successor routes a conflicting PR to the closer', async t => {
+  const f = fixture(t);
+  requestCloserSuccessor({ ...f.identity, reviewBody: BODY, source: 'closer-ended-without-merge' });
+  f.args.candidate = { ...f.args.candidate, mergeable: 'CONFLICTING', mergeStateStatus: 'DIRTY' };
+  f.args.handoffFinalFixAllImpl = async () => assert.fail('findings successor cannot own a conflict');
+  const result = await maybeDispatchAmaClosureFor(f.args);
+  assert.equal(result.dispatched, true, JSON.stringify(result));
+  assert.deepEqual(f.effects, ['closer']);
+});
+
 test('disabled AMA still records and alerts a pending cap successor refusal', async t => {
   const f = fixture(t), alerts = [];
   requestCloserSuccessor({ ...f.identity, reviewBody: BODY, source: 'follow-up-pre-claim-cap' });

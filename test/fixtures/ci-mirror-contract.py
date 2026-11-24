@@ -151,7 +151,11 @@ def main(argv: list[str]) -> int:
             ),
             files,
         )
-    results = run_checks(checks, Path.cwd(), files)
+    if os.environ.get("FIXTURE_MULTI_BATCH"):
+        results = run_checks(checks[:1], Path.cwd(), files)
+        results += run_checks(checks[1:], Path.cwd(), files)
+    else:
+        results = run_checks(checks, Path.cwd(), files)
     if any(r.status == "fail" for r in results):
         return 42
     if os.environ.get("FIXTURE_BUDGET_AFTER_CHECKS"):

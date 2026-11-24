@@ -7,7 +7,8 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'nod
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { __testables__ } from '../src/ama/dispatch-closer.mjs';
-import { continueDeferredSourceCustody, deferredSourceStatus, readDeferredSourceHold, startDeferredSourceCustody } from '../src/ama/deferred-source-custody.mjs';
+import { continueDeferredSourceCustody, deferredSourceStatus, readDeferredSourceHold, retainDeferredControllerCleanup,
+  startDeferredSourceCustody } from '../src/ama/deferred-source-custody.mjs';
 import { observeDeferredSourceDecision } from '../src/ama/closer-successor.mjs';
 import { closerInconclusiveRetryFilePath, recordCloserInconclusiveRetry } from '../src/ama/closer-inconclusive-retry.mjs';
 
@@ -42,6 +43,30 @@ function teardown(f, tearDown) {
     execFileImpl: async () => tearDown(), cleanupScratchImpl() {},
   });
 }
+
+test('mixed-case heads share a custody marker and drain retains diagnostics from a relative receipt', async t => {
+  const root = mkdtempSync(join(tmpdir(), 'deferred-custody-'));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const controller = 'controller-fixture.json';
+  const env = { HAM_HQ_ROOT: root, HAM_RUN_DIR: root, HAM_REPO: repo, HAM_PR_NUMBER: String(prNumber),
+    HAM_CLOSE_VALIDATION_REMOTE_HEAD: liveHead.toUpperCase(), HAM_CONTROLLER_RECORD: join(root, controller) };
+  const dir = startDeferredSourceCustody({ env, launchRequestId, sourceHead: liveHead.toUpperCase() });
+  const identity = { repo, prNumber, headSha: liveHead.toUpperCase() };
+  const hold = readDeferredSourceHold(root, identity);
+  assert.equal(hold.sourceHead, liveHead);
+  assert.equal(readDeferredSourceHold(root, { ...identity, headSha: liveHead }).path, hold.path);
+
+  const name = 'checks.json';
+  const log = join(root, `${name}.check-1.log`);
+  writeFileSync(log, 'retained output');
+  writeFileSync(join(root, name), JSON.stringify({ head: liveHead, checks: [{ diagnostics: [{ path: log }] }] }));
+  writeFileSync(join(root, `validation-deferred-${liveHead}.json`), JSON.stringify({
+    schemaVersion: 1, head: liveHead, localValidationReceipt: name,
+  }));
+  writeFileSync(join(root, `deferred-controller-${controller}`), JSON.stringify({ headSha: liveHead }));
+  await retainDeferredControllerCleanup(env, env.HAM_CONTROLLER_RECORD, { launchRequestId, drained: true });
+  assert.equal(readFileSync(join(dir, `${name}.check-1.log`), 'utf8'), 'retained output');
+});
 
 for (const status of ['local-ref-only', 'workspace-only', 'bundled', 'matches-target', 'unconfirmed']) {
   test(`teardown finds a launch's ${status} source under its published head`, async t => {

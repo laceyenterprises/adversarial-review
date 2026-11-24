@@ -56,7 +56,8 @@ launch the pipeline cancelled before it booted (reason
 Dispatch also records ended `canonical-validation-deferred` launches here,
 including full infrastructure refunds. Optional `sourcePublished: true` records
 launch-bound publication. Optional `launches[].custodyRequired: true` records an
-active unsafe custody hold for fallback if its marker disappears. Legacy entries
+active unsafe custody hold found at either the retry head or the current remote
+head for fallback if its marker disappears. Legacy entries
 without explicit custody evidence do not create operator holds. Readable holds
 with clean matching-target source and confirmed cleanup resume ordinary per-head
 backoff and once-only notification. Corrupt retry files remain preserved for

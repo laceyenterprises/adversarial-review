@@ -319,6 +319,24 @@ test('validation deferral without matching publication proof leaves the external
   }
 });
 
+test('a validation retry records unsafe custody on the current remote head', async t => {
+  const root = scratch(t);
+  const { state, deps, endCurrent, identity } = harness(root, 'canonical-validation-deferred');
+  const run = (at, headSha) => maybeDispatchAmaCloser({
+    ...dispatchArgs(root, minutes(at), { prMetadata: { headSha } }), ...deps,
+  });
+  assert.equal((await run(0, HEAD)).dispatched, true);
+  endCurrent();
+  const env = { HAM_HQ_ROOT: join(root, 'hq'), HAM_REPO: REPO, HAM_PR_NUMBER: String(PR),
+    HAM_TARGET_REMEDIATION_SHA: HEAD, HAM_CLOSE_VALIDATION_REMOTE_HEAD: OTHER,
+    HQ_LAUNCH_REQUEST_ID: state.ended, HQ_WORKER_RUN_ID: `wrun_synthetic-${state.launches}` };
+  startDeferredSourceCustody({ env, launchRequestId: state.ended, sourceHead: HEAD });
+  recordHammerEarlyFailure('canonical-validation-deferred', { headSha: HEAD, env });
+  assert.equal((await run(1, OTHER)).reason, 'canonical-validation-operator-decision');
+  const { heads } = readCloserInconclusiveRetries(root, identity);
+  assert.equal(heads[HEAD].launches[0].custodyRequired, true);
+});
+
 test('site 1: an inconclusive exit spends no budget or no-delivery key, surfaces once at N and stays owned', async t => {
   const root = scratch(t);
   const { state, deps, endCurrent, identity } = harness(root, 'endpoint-bootstrap-failed');

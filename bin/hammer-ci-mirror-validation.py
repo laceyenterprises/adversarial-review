@@ -307,6 +307,8 @@ def main():
                 if result.status == "skipped" and result.reason == "ci-covered":
                     return result
             row.pop("jobs")
+            row.pop("manifest")
+            row.pop("manifestSha256")
             row.update(status="run", reason="ci-evidence-unavailable")
             result = None
         if result is None:
@@ -386,7 +388,7 @@ def main():
         # before a timeout cannot stand in for guards the runner never reached.
         def run_checks(checks, *positional, **keywords):
             selected = list(checks)
-            receipt["selectedCheckCount"] = len(selected)
+            receipt["selectedCheckCount"] = receipt.get("selectedCheckCount", 0) + len(selected)
             persist()
             return original_run_checks(selected, *positional, **keywords)
 

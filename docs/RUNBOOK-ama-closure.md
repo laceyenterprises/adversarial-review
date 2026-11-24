@@ -6549,8 +6549,11 @@ same-head replacements while the hold is active. A readable hold whose clean sou
 standalone cleanup is confirmed finished is marked continued and returns to the
 existing per-head backoff and notification. A legacy retry entry alone does not
 establish unpublished source or unsafe cleanup. New retry observations record
-`custodyRequired: true` only for an active unsafe hold, preserving its fallback
-if the marker disappears. Corrupt retry files are preserved for recovery but
+`custodyRequired: true` only for an active unsafe hold at the retry head or
+the current remote head, preserving its fallback if the marker disappears.
+For a conflict replay, the validator and controller pointer use the captured
+remote publication-lease head to locate custody for the local replay commit.
+Corrupt retry files are preserved for recovery but
 only matching custody evidence holds admission; other heads remain eligible. The validator or closer records
 this deferral with the audit helper without `--final`. The `last-phase` receipt
 supplies the observation for the watcher.

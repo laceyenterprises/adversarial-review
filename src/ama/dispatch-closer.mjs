@@ -450,9 +450,9 @@ export function namedAmaNoDispatchReason(reason, reasons = []) {
 async function ownInconclusiveCloserRetry({ rootDir, hqRoot, repo, prNumber, headSha, launchRequestId, reason,
   currentHeadSha = headSha, sourcePublished = false, cfg, now, deliverAlertImpl, logger }) {
   if (Number.isFinite(now)) now = new Date(now).toISOString();
-  const hold = reason === 'canonical-validation-deferred'
-    ? readDeferredSourceHold(hqRoot, { repo, prNumber, headSha }, { includeContinued: true }) : null;
-  const custodyRequired = deferredSourceNeedsDecision(hold);
+  const custodyHeads = new Set([headSha, currentHeadSha]);
+  const custodyRequired = reason === 'canonical-validation-deferred' && [...custodyHeads].some(candidate =>
+    deferredSourceNeedsDecision(readDeferredSourceHold(hqRoot, { repo, prNumber, headSha: candidate }, { includeContinued: true })));
   try {
     const owned = recordCloserInconclusiveRetry(rootDir, { repo, prNumber }, { headSha, launchRequestId,
       reason, now, sourcePublished, custodyRequired, policy: closerInconclusiveRetryPolicy(cfg) });

@@ -1,12 +1,12 @@
 import { execFile } from 'node:child_process';
 import { closeSync, copyFileSync, fsyncSync, lstatSync, mkdirSync, mkdtempSync, openSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync } from 'node:fs';
 import fsExt from 'fs-ext';
-import { basename, dirname, join } from 'node:path';
+import { basename, dirname, join, resolve } from 'node:path';
 import { promisify } from 'node:util';
 import { writeFileAtomic } from '../atomic-write.mjs';
 import { readDeferredValidationChecks, readUnknownValidationReceipt } from './local-validation-unknown.mjs';
 
-const sha = value => /^[a-f0-9]{40}$/.test(value || '');
+const sha = value => typeof value === 'string' && /^[a-f0-9]{40}$/i.test(value);
 const execGit = promisify(execFile);
 const RETENTION_BACKOFF_MS = 5 * 60_000;
 export const DEFERRED_SOURCE_HOLD = 'canonical-validation-operator-decision';
@@ -16,7 +16,7 @@ function directory(hqRoot, { repo, prNumber, headSha }) {
     || repo.split('/').some(part => part === '.' || part === '..')
     || !/^[1-9]\d*$/.test(String(prNumber)) || !sha(headSha)) return null;
   return join(hqRoot, 'dispatch', 'audit', 'deferred-source-custody',
-    repo.toLowerCase(), `pr-${prNumber}`, headSha);
+    repo.toLowerCase(), `pr-${prNumber}`, headSha.toLowerCase());
 }
 
 function read(path) {
@@ -58,7 +58,7 @@ export function readDeferredSourceHold(hqRoot, identity, { includeContinued = fa
   try {
     if (!lstatSync(path).isFile()) throw new Error('invalid hold file');
     const record = read(path);
-    if (record.schemaVersion !== 1 || record.targetHead !== identity.headSha
+    if (record.schemaVersion !== 1 || record.targetHead !== identity.headSha.toLowerCase()
       || record.repo !== identity.repo.toLowerCase() || record.prNumber !== Number(identity.prNumber)
       || !sha(record.sourceHead) || !/^attempt-[a-zA-Z0-9]+$/.test(record.attempt || '')) throw new Error('invalid hold');
     if (record.continuedAt && !includeContinued) return null;
@@ -95,7 +95,7 @@ export function continueDeferredSourceCustody(hold, { publishedHead, waitMs = 10
 
 export function deferredSourceIdentity(env) {
   return { repo: env.HAM_REPO, prNumber: env.HAM_PR_NUMBER,
-    headSha: env.HAM_CLOSE_VALIDATION_REMOTE_HEAD || env.HAM_TARGET_REMEDIATION_SHA };
+    headSha: (env.HAM_CLOSE_VALIDATION_REMOTE_HEAD || env.HAM_TARGET_REMEDIATION_SHA)?.toLowerCase() };
 }
 
 export function findDeferredSourceHold(env) {
@@ -114,7 +114,8 @@ export function startDeferredSourceCustody({ env, launchRequestId, sourceHead, c
   const controller = env.HAM_CONTROLLER_RECORD ? basename(env.HAM_CONTROLLER_RECORD) : null;
   const validationBase = env.HAM_CLOSE_VALIDATION_BASE || env.HAM_BASE_HEAD;
   const record = { schemaVersion: 1, repo: identity.repo.toLowerCase(), prNumber: Number(identity.prNumber),
-    targetHead: identity.headSha, dispatchHead: env.HAM_TARGET_REMEDIATION_SHA, sourceHead,
+    targetHead: identity.headSha, dispatchHead: env.HAM_TARGET_REMEDIATION_SHA?.toLowerCase(),
+    sourceHead: sourceHead.toLowerCase(),
     launchRequestId, runId: env.HQ_WORKER_RUN_ID, attempt: basename(evidenceDir), controller,
     validationBase, clean, files, runner, workspace: process.cwd(), at: new Date().toISOString() };
   try {
@@ -249,7 +250,8 @@ export async function retainDeferredControllerCleanup(env, recordPath, record) {
   try {
     const deferred = readUnknownValidationReceipt(env.HAM_RUN_DIR, hold.sourceHead);
     const validation = deferred && readDeferredValidationChecks(env.HAM_RUN_DIR, hold.sourceHead, deferred);
-    if (validation) retainDeferredValidation(hold.evidenceDir, deferred, validation, deferred.localValidationReceipt);
+    if (validation) retainDeferredValidation(hold.evidenceDir, deferred, validation,
+      resolve(env.HAM_RUN_DIR, deferred.localValidationReceipt));
   } catch { /* Keep the original snapshot if the final receipt is unreadable. */ }
 }
 

@@ -11,6 +11,9 @@ the repository, PR, target head, original dispatch head, exact local source head
 validation base, launch and run IDs, original checkout, initial runner and file
 selection, exact-head checkout cleanliness, and private `attempt-*` evidence
 directory. Controlled validation also names the owning controller registration.
+The target and source SHAs are stored in lowercase. For a conflict replay,
+the target is the captured remote head used as the publication lease, and the
+source is the local replay commit. The controller pointer uses the same target.
 The marker blocks a successor even if the validator died while writing evidence.
 After complete exact-head coverage, passing local-only checks and confirmed
 standalone cleanup prove CI continuation, the marker gains `continuedAt` (an ISO
@@ -31,7 +34,7 @@ unreadable markers cannot be replaced. Attempt evidence remains private.
 | `source.json` | `matches-target`, `bundled`, `local-ref-only` or `workspace-only`. `bundled` records the advertised Git ref, bundle name and selected prerequisite SHAs. |
 | `source.bundle` | Incremental Git bundle of the original unpublished commit. `source.json` is written after checking the advertised object. Recover on a checkout with the prerequisite commits. |
 | `deferred.json` | Exact source head, UNKNOWN reason and original exit status, recorded local failure, and any proof for CI-authoritative continuation. |
-| `validation.json`, `*.check-*.log` | Independent copy of the exact-head check receipt and available bounded diagnostics. Paths in the copied receipt are relative to this attempt. |
+| `validation.json`, `*.check-*.log` | Independent copy of the exact-head check receipt and available bounded diagnostics. A run-relative input receipt is resolved within the run directory. Copied diagnostic paths are relative to this attempt. |
 | `bounded-cleanup.json` | Standalone bounded runner's actual cleanup verdict, status, reason and launch/head identity. |
 | `controller-cleanup.json` | Final matching controller registration with drain and lease disposition. Its absence leaves cleanup unconfirmed. |
 

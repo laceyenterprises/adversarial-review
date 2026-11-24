@@ -690,13 +690,14 @@ test('an UNKNOWN budget result can reach required CI only after the local-only g
       ['guard', { ci_jobs: ['build'], local_only: true }], ['last', {}]], runs: [['build']] });
     const config = join(f.dir, 'config.yaml');
     writeFileSync(config, 'version: 1\nroles:\n  adversarial:\n    merge_authority:\n      required_check_contexts: [build]\n');
-    const result = await f.standalone({ AGENT_OS_CONFIG_PATH: config, FIXTURE_BUDGET_AFTER_CHECKS: '1',
+    const result = await f.standalone({ AGENT_OS_CONFIG_PATH: config, FIXTURE_BUDGET_AFTER_CHECKS: '1', FIXTURE_MULTI_BATCH: '1',
       HQ_WORKER_RUN_ID: 'wrun_fixture',
       ...(guardFailed ? { FIXTURE_FAILED_GUARD: 'guard', FIXTURE_CHILD_TIMEOUT: 'last' } : {}) }, { timeoutMs: 60_000 });
     const handoffPath = join(f.runDir, `validation-deferred-${f.head}.json`);
     assert.ok(existsSync(handoffPath), `${result.status}: ${result.stderr}\n${result.stdout}`);
     const handoff = JSON.parse(readFileSync(handoffPath, 'utf8'));
     const receipt = JSON.parse(readFileSync(handoff.localValidationReceipt, 'utf8'));
+    assert.equal(receipt.selectedCheckCount, 3);
     assert.deepEqual(f.local(), ['fixture-command guard', 'fixture-command last']);
     assert.equal(receipt.checks[0].status, 'ci-covered');
     assert.equal(receipt.checks[1].reason, 'local-only');
@@ -722,6 +723,22 @@ test('an UNKNOWN budget result can reach required CI only after the local-only g
         'the shipped close preflight and controller reuse the qualifying UNKNOWN receipt');
     }
   }
+});
+
+test('an inconclusive conflict replay holds the captured remote source head', async t => {
+  const f = mirrorFixture(t, { entries: [['broad', {}]], runs: [] });
+  const git = (...args) => execFileSync('git', args, { cwd: f.checkout, encoding: 'utf8',
+    env: { ...process.env, GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_NOSYSTEM: '1' } }).trim();
+  git('-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid',
+    'commit', '--no-verify', '--allow-empty', '-qm', 'Synthetic conflict replay');
+  const replay = git('rev-parse', 'HEAD');
+  const dispatch = readFileSync(join(f.runDir, 'base-head'), 'utf8').trim();
+  assert.notEqual(dispatch, f.head);
+  writeFileSync(join(f.runDir, 'conflict-repair-publish.env'), `source=${f.head}\nhead=${replay}\nbranch=feature\n`);
+  await f.standalone({ FIXTURE_CHILD_TIMEOUT: 'broad' });
+  const identity = { repo: 'fixture/repo', prNumber: 42 };
+  assert.equal(readDeferredSourceHold(f.dir, { ...identity, headSha: f.head })?.sourceHead, replay);
+  assert.equal(readDeferredSourceHold(f.dir, { ...identity, headSha: dispatch }), null);
 });
 
 test('MRQ-20: a timeout that cannot defer to CI gets no second controller round', async t => {
@@ -1018,8 +1035,6 @@ test('a non-matching skip probe executes the check locally and reports its actua
   assert.deepEqual(result.closeResult.localValidation[0].checks, [{
     name: 'verify', cwd: null, status: 'failed', reason: 'ci-evidence-unavailable',
     commandSha256: createHash('sha256').update('fixture-command verify').digest('hex'),
-    manifest: 'scripts/ci-mirror/checks.json',
-    manifestSha256: createHash('sha256').update(readFileSync(join(f.checkout, 'scripts/ci-mirror/checks.json'))).digest('hex'),
     result: 'inconclusive', localReason: 'synthetic timeout',
   }]);
 });

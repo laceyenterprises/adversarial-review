@@ -200,13 +200,17 @@ function deferValidation(reason, status) {
     try { recordHammerPhase(deferredOutcome); } catch { /* The private receipt still records the reason. */ }
   }
   try {
-    const env = binding?.base ? { ...process.env, HAM_CLOSE_VALIDATION_BASE: binding.base } : process.env;
+    const env = binding ? {
+      ...process.env,
+      HAM_CLOSE_VALIDATION_REMOTE_HEAD: binding.source,
+      ...(binding.base && { HAM_CLOSE_VALIDATION_BASE: binding.base }),
+    } : process.env;
     custodyDir = startDeferredSourceCustody({ env, launchRequestId, sourceHead: head,
       clean: startedClean && cleanCheckout() && gitOutput('rev-parse', '--verify', 'HEAD') === head,
       files: validationFiles, runner: validationRunner });
     if (custodyDir && runDir && process.env.HAM_CONTROLLER_RECORD) {
       writeFileAtomic(join(runDir, `deferred-controller-${basename(process.env.HAM_CONTROLLER_RECORD)}`),
-        JSON.stringify({ headSha: deferredSourceIdentity(process.env).headSha }), { mode: 0o600 });
+        JSON.stringify({ headSha: deferredSourceIdentity(env).headSha }), { mode: 0o600 });
     }
     retainValidationEvidence();
     if (custodyDir) console.error(`hammer-validate: retained deferred source and evidence: ${custodyDir}`);

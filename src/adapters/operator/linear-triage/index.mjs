@@ -195,7 +195,7 @@ function normalizeStatusName(status, stateNames) {
 // filed SEVs (including LAC-2089) predate incident labels. This adapter has no
 // incident-acceptance authority, even after a source merge.
 async function incidentIssueReason(issue) {
-  if (/^\s*SEV(?:[- ]?[0-4])?(?=[:\s]|$)/i.test(issue.title || '')) {
+  if (/^\s*(?:\[SEV(?:[- ]?[0-4])?\]|SEV(?:[- ]?[0-4])?(?=[:\s]|$))/i.test(issue.title || '')) {
     return 'legacy-sev-title';
   }
   try {

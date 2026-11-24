@@ -1086,7 +1086,7 @@ their normal token or installation budget identity.
 LAC-2092: the Linear adapter leaves incident acceptance to the incident owner.
 Live Linear labels `incident`, `sev`, or `sev0` through `sev4` (also `sev-3`
 and `sev 3`, case insensitive) identify incidents. Legacy manually filed issues
-with a leading `SEV`, `SEV3:`, `SEV-3`, or `SEV 3` title are also protected;
+with a leading `SEV`, `SEV3:`, `SEV-3`, `SEV 3`, or `[SEV3]` title are also protected;
 LAC-2089 had no labels. Before removing a legacy SEV title, the incident owner
 should retain an incident/severity label; an unlabeled, unprefixed issue has no
 incident binding exposed to this adapter. PR titles, PR labels and review prose do not establish

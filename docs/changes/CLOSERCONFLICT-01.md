@@ -28,6 +28,10 @@ and certified deferral accounting, while refusing new launches. Existing
 conflict and prompt assertions now name the intended `conflict-rebase` repair
 reason and the changed-patch independent-review handoff.
 
+The closer checks existing launch custody, stacked-base guards and prior HAM
+stop evidence before reporting a mergeability wait. Missing mergeability still
+blocks new queue preparation and closer launches.
+
 ## Verification
 
 Synthetic coverage includes the post-lease gate, a real local Git replay,

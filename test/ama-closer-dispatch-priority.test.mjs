@@ -906,6 +906,11 @@ test('CLOSERCONFLICT-01: null mergeability cannot enter queue preparation', asyn
   const rootDir = mkdtempSync(join(tmpdir(), 'closer-unknown-queue-'));
   t.after(() => rmSync(rootDir, { recursive: true, force: true }));
   const deps = testDeps();
+  let stackedBaseChecks = 0;
+  deps.guardStackedBaseImpl = async () => {
+    stackedBaseChecks += 1;
+    return null;
+  };
   const args = findingsRemediationArgs(rootDir, {
     prMetadata: { mergeableState: null },
     dispatchContext: { baseBranch: 'main' },
@@ -915,6 +920,7 @@ test('CLOSERCONFLICT-01: null mergeability cannot enter queue preparation', asyn
   assert.equal(result.dispatched, false);
   assert.equal(result.reason, 'pr-mergeability-unknown');
   assert.equal(result.recoveryWait, true);
+  assert.equal(stackedBaseChecks, 1);
   assert.equal(deps.calls.length, 0);
 });
 

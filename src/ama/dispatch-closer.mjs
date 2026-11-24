@@ -4839,14 +4839,6 @@ async function maybeDispatchAmaCloserWithinRepositoryCycle(args) {
     if (args.cfg?.enabled && draft) {
       return noAmaDispatch({ dispatched: false, reason: 'pr-is-draft' });
     }
-    const hasCloserToObserve = args.cfg?.enabled && mergeabilityUnknown && dispatchContext?.rootDir && targetRepo
-      && readAmaCloserDispatchRecordsForPR(dispatchContext.rootDir, {
-        repo: targetRepo, prNumber: targetPrNumber,
-      }).some(record => record.launchRequestId);
-    if (args.cfg?.enabled && mergeabilityUnknown && !hasCloserToObserve) {
-      return noAmaDispatch({ dispatched: false, skipMergeAgent: true, recoveryWait: true,
-        reason: 'pr-mergeability-unknown' });
-    }
     const readStatus = args.readLaunchRequestStatusImpl || readLaunchRequestStatusFromLedgerDefault;
     const recovery = args.cfg?.enabled && args.cfg?.autonomousMergeExecutionEnabled !== false && dispatchContext?.rootDir
       ? await refreshClosureRecoveryCustody({ rootDir: dispatchContext.rootDir,
@@ -5141,6 +5133,7 @@ async function maybeDispatchAmaCloserAttempt({
     if (baseHold) return noAmaDispatch(baseHold);
   }
 
+  const mergeabilityUnknown = prMetadata.mergeableState === 'UNKNOWN';
   const ownerProofRecovery = dispatchContext?.orphanRecovery?.ownerProof === true
     && dispatchContext.orphanRecovery.headSha === prMetadata?.headSha;
 
@@ -5196,6 +5189,14 @@ async function maybeDispatchAmaCloserAttempt({
         }
       }
     }
+  }
+
+  // Existing custody and evidence holds take precedence over new admission.
+  if (mergeabilityUnknown && !(reconciliationRoot && reconciliationRepo
+    && readAmaCloserDispatchRecordsForPR(reconciliationRoot, { repo: reconciliationRepo, prNumber })
+      .some(record => record.launchRequestId))) {
+    return noAmaDispatch({ dispatched: false, skipMergeAgent: true, recoveryWait: true,
+      reason: 'pr-mergeability-unknown' });
   }
 
   if (ownerProofRecovery) {
@@ -5306,7 +5307,6 @@ async function maybeDispatchAmaCloserAttempt({
     });
   }
   const verdict = isEligibleForAmaClosure(reviewState, prMetadata, cfg, eligibilityOptions);
-  const mergeabilityUnknown = prMetadata.mergeableState === 'UNKNOWN';
   const decisionIdentity = { repo: dispatchContext?.repo, prNumber, headSha: prMetadata.headSha };
   const reviewHandoffLease = prMetadata.headSha
     ? readAmaCloserLease(dispatchContext.rootDir || SUBMODULE_ROOT, decisionIdentity) : null;

@@ -297,12 +297,11 @@ touch "$HAM_RUN_DIR/sync-recovered"
   f.env.PATH = `${join(f.dir, 'bin')}:${process.env.PATH}`;
   const prompt = readFileSync(new URL('../templates/hammer-bootstrap.sh', import.meta.url), 'utf8');
   const step = prompt.match(/^ham_step\(\).*$/m)[0];
-  // HAMCONFLICTSYNC-01: the loop lives in the shipped conflict repair; it runs
-  // to the script's success line, before its final head report.
+  // Exercise the sync loop without running the subsequent replay proof.
   const repair = readFileSync(new URL('../bin/hammer-conflict-repair.sh', import.meta.url), 'utf8');
-  const loopStart = repair.indexOf('HAM_CONFLICT_SUBMODULE_SYNC_CAP=');
-  const loop = repair.slice(loopStart, repair.indexOf('\nrm -f "$HAM_CONFLICT_STATE"', loopStart))
-    .replace('ham_conflict_stop 1 conflict-submodule-sync-failed', 'exit 1');
+  const syncLoop = repair.match(/^HAM_CONFLICT_SUBMODULE_SYNC_CAP=[\s\S]*?^done$/m);
+  assert.ok(syncLoop, 'shipped conflict repair contains the submodule-sync loop');
+  const loop = syncLoop[0].replace('ham_conflict_stop 1 conflict-submodule-sync-failed', 'exit 1');
   const result = f.run(`${step}\nsleep() { :; }\n${loop}`);
   assert.equal(result.status, 0, result.stderr);
   assert.ok(existsSync(join(f.dir, 'sync-recovered')));

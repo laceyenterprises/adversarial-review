@@ -138,19 +138,18 @@ for (const [name, selectors, canonical] of [
   const expected = canonical ? { ...env, AGENT_OS_SESSION_LEDGER_DSN: env.AGENT_OS_SESSION_LEDGER_CANONICAL_DSN.trim() } : env;
   if (canonical) for (const key of ['AGENT_OS_SESSION_LEDGER_DSN_DIRECT', 'AGENT_OS_SESSION_LEDGER_VDB',
     'AGENT_OS_SESSION_LEDGER_VDB_DIRECT_DSN', 'AGENT_OS_SESSION_LEDGER_DB_PATH']) delete expected[key];
-  let calls = 0;
+  const childEnvironments = [];
   const result = await readLaneReversalIdentity({ repo: REPO, prNumber: 7, currentHeadSha: HEAD, env,
     readHeadAttestationChainForPrImpl: options => readHeadAttestationChainForPr({ ...options,
       execFileImpl: async (_command, _argv, { env: childEnv }) => {
-        calls++;
-        assert.deepEqual(childEnv, expected);
+        childEnvironments.push({ ...childEnv });
         return { stdout: '[]' };
       },
     }),
   });
-  assert.equal(calls, 1);
-  assert.equal(result.ok, false);
-  assert.equal(result.ledgerTarget, canonical ? 'canonical-postgres' : 'runtime');
+  assert.deepEqual(childEnvironments, [expected]);
+  assert.deepEqual(result, { ok: false, reason: 'missing-produced-head-attestation',
+    ledgerTarget: canonical ? 'canonical-postgres' : 'runtime' });
   assert.deepEqual(env, original);
 });
 

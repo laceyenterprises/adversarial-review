@@ -28,3 +28,7 @@ The mirror and validation-deferral suites passed, including preservation of
 an ordinary failed check alongside a socket failure. Lint reported zero
 errors, contract typechecking passed, and the research-finding demo produced
 three byte-stable transcript deliveries.
+
+The isolated helper-launch fixture includes the socket-fault module required
+by stop-origin classification. It still omits the audit dependency so it can
+verify that the helper preserves the wrapped command's exit status and receipt.

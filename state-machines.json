@@ -519,6 +519,8 @@
       "owner": "watcher",
       "codeSources": [
         "src/reviewer-reattach.mjs",
+        "src/daemon-bounce-recovery.mjs",
+        "src/daemon-bounce-posted-review.mjs",
         "src/review-state-statements.mjs",
         "src/watcher.mjs",
         "src/review-state.mjs",
@@ -887,6 +889,41 @@
           "to": "posted",
           "trigger": "certain budget suppression restores latest delivered review identity under queued request CAS; live closure gates remain required",
           "codeSource": "src/hamclose-review-admission.mjs"
+        },
+        {
+          "id": "review-row.40",
+          "from": "pending",
+          "to": "reviewing",
+          "trigger": "restore the verified live daemon-bounce claim for the exact head, session and group before admission",
+          "codeSource": "src/daemon-bounce-recovery.mjs"
+        },
+        {
+          "id": "review-row.41",
+          "from": "failed",
+          "to": "reviewing",
+          "trigger": "restore the verified live daemon-bounce claim for the exact head, session and group before admission",
+          "codeSource": "src/daemon-bounce-recovery.mjs"
+        },
+        {
+          "id": "review-row.42",
+          "from": "reviewing",
+          "to": "posted",
+          "trigger": "settle the exact GitHub review artifact after an adopted bounce claim drains",
+          "codeSource": "src/daemon-bounce-posted-review.mjs"
+        },
+        {
+          "id": "review-row.43",
+          "from": "reviewing",
+          "to": "pending",
+          "trigger": "adopted bounce claim has confirmed exit and no posted review; return to bounded recovery without spending an attempt",
+          "codeSource": "src/reviewer-reattach.mjs"
+        },
+        {
+          "id": "review-row.44",
+          "from": "reviewing",
+          "to": "failed",
+          "trigger": "adopted bounce claim has confirmed exit and no posted review while lease recovery is disabled; preserve counters",
+          "codeSource": "src/reviewer-reattach.mjs"
         }
       ]
     },

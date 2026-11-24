@@ -4125,6 +4125,16 @@ unresolved builder identity becomes `failed-orphan` for operator inspection.
 Durable lookup selects the newest matching pass with builder context, accepting
 `first-pass`, canonical `rereview` and compatibility spelling `re-review`, with
 session keys `reviewerSessionUuid`, `sessionUuid` or `session_uuid`.
+
+A watcher bounce can leave a live detached reviewer attached to a `pending`
+or `failed` claim. Before admitting another reviewer, the watcher restores the
+existing claim to `reviewing` when the current head, session, launch record,
+and live group leader agree. Subprocess start time and exact launch arguments
+fence the restoration and any later native cancellation. The original review
+can settle once from its GitHub artifact. Confirmed exit without a post returns
+to bounded bounce recovery with the original counters. See the
+[review lifecycle](docs/STATE-MACHINE.md).
+
 After deployment, SRE verifies the watcher PID start time and observes 24 hours
 with no new family-message `failed-orphan` rows whose run record shows an eligible
 builder/reviewer pair. This observation requires organic runtime evidence.

@@ -15,7 +15,8 @@ import path from 'node:path';
 
 import { ensureReviewStateSchema } from '../src/review-state.mjs';
 import { recoverReviewerRunRecords } from '../src/adapters/reviewer-runtime/index.mjs';
-import { writeReviewerRunRecord } from '../src/adapters/reviewer-runtime/run-state.mjs';
+import { createCliDirectReviewerRuntimeAdapter } from '../src/adapters/reviewer-runtime/cli-direct/index.mjs';
+import { readReviewerRunRecord, settleReviewerRunRecord, writeReviewerRunRecord } from '../src/adapters/reviewer-runtime/run-state.mjs';
 import { reapRunningPassTimeouts, queueFollowUpForRecoveredPostedReview } from '../src/reviewer-pass-reaper.mjs';
 import { reviewRowInTerminalFailureState } from '../src/pollonce-phases.mjs';
 import { infraRecoverableFailureClass } from '../src/reviewer-failure-classification.mjs';
@@ -26,7 +27,10 @@ import {
 import { settleDaemonBouncePostedReview } from '../src/daemon-bounce-posted-review.mjs';
 import { DEFAULT_REVIEWER_LEASE_RECOVERY_MAX_ATTEMPTS } from '../src/reviewer-lease.mjs';
 import { pickAdversarialGateStatus } from '../src/adversarial-gate-status.mjs';
+import { reconcileReviewerSessions } from '../src/reviewer-reattach.mjs';
+import { verifyDirectReviewerIdentity } from '../src/reviewer-process-identity.mjs';
 import {
+  adoptBouncedReviewerBeforeAdmission,
   DAEMON_BOUNCE_FAILURE_CLASS,
   daemonBounceReviewerHold,
   bouncedPostedReviewSettleSql,
@@ -44,6 +48,163 @@ const BOUNCED_AT = new Date('2026-10-09T15:17:16.000Z');
 const POSTED_AT = '2026-10-09T15:19:01.000Z';
 const BOUNCE_MESSAGE = '[daemon-bounce] Reviewer runtime could not reattach after kernel restart; re-queueing review.';
 const QUIET_LOG = { log() {}, warn() {}, error() {} };
+const PROCESS_IDENTITY = { repo: REPO, prNumber: PR, reviewerHeadSha: HEAD, reviewerSessionUuid: SESSION };
+
+function reviewerProcessProbe({ command = PROCESS_IDENTITY, lstart = STARTED_AT, pgid = 7171 } = {}) {
+  return async (_name, args) => {
+    assert.deepEqual(args, ['-ww', '-p', '7171', '-o', 'pgid=,lstart=,command=']);
+    const [weekday, month, day, year, clock] = new Date(lstart).toString().split(' ');
+    return { stdout: `${pgid} ${weekday} ${month} ${day} ${clock} ${year} node /fixture/src/reviewer.mjs ${JSON.stringify(command)}\n` };
+  };
+}
+
+test('a slow preflight does not put a live reviewer into bounce failure accounting', async () => {
+  const { rootDir, db } = setup();
+  try {
+    insertReviewingRow(db);
+    let time = '2026-10-09T15:14:50.000Z';
+    let finish;
+    const adapter = createCliDirectReviewerRuntimeAdapter({
+      rootDir, logger: QUIET_LOG, now: () => time,
+      preflightImpl: async () => { time = '2026-10-09T15:15:10.000Z'; },
+      spawnCapturedImpl: (_command, _args, { onSpawn }) => {
+        time = STARTED_AT;
+        onSpawn({ pgid: 7171 });
+        return new Promise(resolve => { finish = resolve; });
+      },
+    });
+    const run = adapter.spawnReviewer({
+      sessionUuid: SESSION, subjectContext: PROCESS_IDENTITY, model: 'gemini',
+      onReviewerPgid: ({ spawnedAt }) => assert.equal(spawnedAt, STARTED_AT),
+    });
+    const restarted = createCliDirectReviewerRuntimeAdapter({
+      rootDir, logger: QUIET_LOG,
+      execFileImpl: reviewerProcessProbe(),
+      processKillImpl: (pgid, signal) => assert.deepEqual([pgid, signal], [-7171, 0]),
+    });
+    try {
+      await Promise.resolve(); // Let preflight resume and invoke the spawn callback.
+      const record = readReviewerRunRecord(rootDir, SESSION);
+      assert.equal(record.spawnedAt, STARTED_AT);
+      assert.deepEqual(await recoverReviewerRunRecords({ rootDir, db, adapter: restarted, now: BOUNCED_AT, log: QUIET_LOG }),
+        { recovered: 0, pruned: 0 });
+      assert.equal(reviewRow(db).review_status, 'reviewing');
+      assert.equal(readReviewerRunRecord(rootDir, SESSION).adoptedAfterBounce, true);
+    } finally {
+      finish?.({ stdout: 'review complete\n', stderr: '' });
+      await run;
+    }
+  } finally {
+    db.close();
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
+for (const outcome of ['live', 'gone', 'reused-pid', 'different-session', 'different-head', 'moved-head', 'replacement-race']) {
+  test(`bounced pending custody fences ${outcome}`, async () => {
+    const { rootDir, db } = setup();
+    try {
+      insertReviewingRow(db);
+      await bounceWatcher(rootDir, db);
+      writeReviewerRunRecord(rootDir, {
+        sessionUuid: SESSION, runtime: 'cli-direct', state: 'failed', pgid: 7171,
+        spawnedAt: STARTED_AT, subjectContext: PROCESS_IDENTITY,
+      });
+      const original = reviewRow(db);
+      const identityProbe = reviewerProcessProbe({
+        lstart: outcome === 'reused-pid' ? BOUNCED_AT.toISOString() : STARTED_AT,
+        command: { ...PROCESS_IDENTITY,
+          reviewerHeadSha: outcome === 'different-head' ? OTHER_HEAD : HEAD,
+          reviewerSessionUuid: outcome === 'different-session' ? 'replacement-session' : SESSION },
+      });
+      const custody = await adoptBouncedReviewerBeforeAdmission({
+        db, rootDir, row: original, now: BOUNCED_AT,
+        headSha: outcome === 'moved-head' ? OTHER_HEAD : HEAD,
+        isAlive: () => outcome !== 'gone',
+        verifyIdentity: async record => {
+          if (outcome === 'replacement-race') claimInfraRecovery(db, original, DAEMON_BOUNCE_FAILURE_CLASS);
+          return verifyDirectReviewerIdentity(record, { execFileImpl: identityProbe });
+        },
+      });
+      assert.equal(custody.handled, outcome !== 'gone');
+      if (outcome === 'live') {
+        assert.equal(custody.reason, 'adopted-live-reviewer');
+        assert.deepEqual(reviewRow(db), { ...original, review_status: 'reviewing' });
+        assert.equal(readReviewerRunRecord(rootDir, SESSION).state, 'heartbeating');
+        assert.equal(claimInfraRecovery(db, original, DAEMON_BOUNCE_FAILURE_CLASS).changes, 0);
+      } else {
+        assert.equal(readReviewerRunRecord(rootDir, SESSION).state, 'failed');
+        if (outcome === 'replacement-race') {
+          assert.equal(reviewRow(db).reviewer_session_uuid, 'requeued-session');
+        } else {
+          assert.deepEqual(reviewRow(db), original);
+        }
+      }
+    } finally {
+      db.close();
+      rmSync(rootDir, { recursive: true, force: true });
+    }
+  });
+}
+
+for (const posted of [true, false]) {
+  test(`adopted reviewer exit settles ${posted ? 'an exact posted Comment-only review' : 'through the existing bounce cap'}`, async () => {
+    const { rootDir, db } = setup();
+    try {
+      insertReviewingRow(db);
+      await bounceWatcher(rootDir, db);
+      writeReviewerRunRecord(rootDir, {
+        sessionUuid: SESSION, runtime: 'cli-direct', state: 'failed', pgid: 7171, spawnedAt: STARTED_AT,
+        subjectContext: { ...PROCESS_IDENTITY, builderTag: 'codex' },
+      });
+      insertRunningPass(db, { commentId: null });
+      db.exec(`UPDATE reviewer_passes SET metadata_json = json_set(metadata_json, '$.verdictOnly', json('true'))`);
+      const row = reviewRow(db);
+      assert.equal((await adoptBouncedReviewerBeforeAdmission({
+        db, rootDir, row, headSha: HEAD, now: BOUNCED_AT, isAlive: () => true,
+        verifyIdentity: record => verifyDirectReviewerIdentity(record, { execFileImpl: reviewerProcessProbe() }),
+      })).reason, 'adopted-live-reviewer');
+      let runtimeProbes = 0;
+      await recoverReviewerRunRecords({
+        db, rootDir, now: BOUNCED_AT, log: QUIET_LOG,
+        adapter: { reattach: async () => { runtimeProbes++; return { failureClass: 'daemon-bounce' }; } },
+      });
+      assert.equal(runtimeProbes, 0, 'a second restart leaves the restored claim to GitHub reconciliation');
+      const options = {
+        db, rootDir, now: new Date(POSTED_AT), log: QUIET_LOG, leaseRecoveryEnabled: true,
+        probeAlive: () => false, fetchHeadSha: async () => HEAD, postKillReviewReprobeDelaysMs: [],
+        findPostedReview: async (_row, opts) => {
+          assert.deepEqual(opts, { refresh: true, headSha: HEAD });
+          return posted ? { id: 5180008000, commit_id: HEAD, submitted_at: POSTED_AT, state: 'COMMENTED',
+            body: '## Adversarial Review — Gemini\n\n## Verdict\nComment only' } : null;
+        },
+        onTerminalDeadSession: ({ state, settledAt }) => settleReviewerRunRecord(rootDir, SESSION, { state, settledAt }),
+        settleBouncedPosted: args => settleDaemonBouncePostedReview({
+          ...args,
+          queueFollowUp: payload => {
+            const handoff = queueFollowUpForRecoveredPostedReview({
+              ...payload,
+              createFollowUpJobImpl: () => assert.fail('exhausted-head review cannot initiate another round'),
+            });
+            assert.equal(handoff.reason, 'exhausted-head-verdict-only');
+          },
+        }),
+        killProcessGroup: () => assert.fail('an absent group must not receive a signal'),
+      };
+      await reconcileReviewerSessions(options);
+      await reconcileReviewerSessions(options);
+      assert.equal(reviewRow(db).review_status, posted ? 'posted' : 'pending');
+      assert.equal(reviewRow(db).review_attempts, posted ? 1 : 0);
+      assert.equal(reviewRow(db).infra_auto_recover_attempts, 0);
+      assert.equal(readReviewerRunRecord(rootDir, SESSION).state, posted ? 'completed' : 'failed');
+      if (posted) assert.equal(db.prepare('SELECT gh_comment_id FROM reviewer_passes').get().gh_comment_id, '5180008000');
+      assert.equal(claimInfraRecovery(db, row, DAEMON_BOUNCE_FAILURE_CLASS).changes, posted ? 0 : 1);
+    } finally {
+      db.close();
+      rmSync(rootDir, { recursive: true, force: true });
+    }
+  });
+}
 
 function setup() {
   const rootDir = mkdtempSync(path.join(tmpdir(), 'reviewbounce-'));
@@ -112,6 +273,7 @@ function reap(rootDir, db, followUps = []) {
     db,
     rootDir,
     log: QUIET_LOG,
+    isReviewerAlive: () => false,
     now: () => new Date('2026-10-09T15:19:30.000Z'),
     queueFollowUpForRecoveredPostedReviewImpl: (args) => {
       followUps.push(args);

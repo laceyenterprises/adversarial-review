@@ -21,6 +21,9 @@ import {
 import { resolveReviewerTimeoutMs } from './reviewer-timeout.mjs';
 import { recordReviewLatencyEvent } from './review-latency-event-writer.mjs';
 import { prepareMarkClaimFailed, prepareReleaseUnsettledPostedReview } from './review-state-statements.mjs';
+import { isDaemonBounceFailure, verifyBouncedReviewerIdentity } from './daemon-bounce-recovery.mjs';
+import { settleDaemonBouncePostedReview } from './daemon-bounce-posted-review.mjs';
+import { directReviewerIdentity } from './reviewer-process-identity.mjs';
 
 const LEGACY_ORPHAN_FAILURE_MESSAGE =
   'Watcher restarted while review subprocess was in flight. ' +
@@ -195,7 +198,7 @@ function probePgidAlive(pgid) {
   } catch (err) {
     if (err?.code === 'ESRCH') return false;
     if (err?.code === 'EPERM') return true;
-    return false;
+    return true; // An inconclusive liveness probe cannot establish absence.
   }
 }
 
@@ -209,7 +212,7 @@ function probeReviewerSession({ pgid, sessionUuid, probeAlive = probePgidAlive }
   }
 
   try {
-    const stdout = execFileSync('ps', ['-p', String(numericPgid), '-o', 'command='], {
+    const stdout = execFileSync('ps', ['-ww', '-p', String(numericPgid), '-o', 'command='], {
       encoding: 'utf8',
       stdio: ['ignore', 'pipe', 'ignore'],
       timeout: loadAwareTimeoutMs(2_000),
@@ -362,13 +365,18 @@ function prepareStatements(db) {
     releaseUnsettledPostedReview: prepareReleaseUnsettledPostedReview(db),
     markClaimFailed: prepareMarkClaimFailed(db),
     listReviewing: db.prepare(
-      `SELECT repo, pr_number, reviewer, review_attempts, last_attempted_at,
+      `SELECT repo, pr_number, reviewer, review_status, review_attempts, last_attempted_at, linear_ticket,
               reviewer_session_uuid, reviewer_pgid, reviewer_started_at,
               reviewer_head_sha, reviewer_timeout_ms, reviewer_lease_expires_at,
-              infra_auto_recover_attempts, pr_state, merged_at, closed_at
+              infra_auto_recover_attempts, pr_state, merged_at, closed_at, failure_message, failed_at
          FROM reviewed_prs
         WHERE review_status = 'reviewing'`
     ),
+    releaseAdoptedBounce: db.prepare(`UPDATE reviewed_prs
+      SET review_status = ?, reviewer_lease_expires_at = NULL
+      WHERE repo = ? AND pr_number = ? AND pr_state = 'open' AND review_status = 'reviewing'
+        AND reviewer_session_uuid = ? AND reviewer_head_sha = ? AND reviewer_pgid = ?
+        AND reviewer_started_at = ? AND failure_message IS ? AND failed_at IS ?`),
     markTerminalReviewingSkipped: db.prepare(
       `UPDATE reviewed_prs
           SET review_status = 'skipped', failed_at = NULL, failure_message = ?,
@@ -572,6 +580,10 @@ async function reconcileReviewerSessions({
   statements = prepareStatements(db),
   probeAlive = probePgidAlive,
   probeSession,
+  verifyBouncedIdentity = verifyBouncedReviewerIdentity,
+  settleBouncedPosted = settleDaemonBouncePostedReview,
+  defaultBaseBranch = 'main',
+  defaultBaseBranchByRepo = {},
   findReviewerProcess = findReviewerProcessBySessionUuid,
   killProcessGroup = killPgid,
   fetchHeadSha = (row) => fetchCurrentHeadSha(octokit, row),
@@ -719,6 +731,20 @@ async function reconcileReviewerSessions({
 
   for (const listedRow of rows) {
     let row = listedRow;
+    const adoptedBounce = isDaemonBounceFailure(row);
+    const exactDirect = Boolean(directReviewerIdentity(readReviewerRunRecordBestEffort(rootDir, row)));
+    async function probeRecordedSession(candidate) {
+      if ((adoptedBounce || exactDirect) && candidate.reviewer_pgid) {
+        const alive = probeAlive(candidate.reviewer_pgid);
+        return {
+          alive,
+          matched: alive && await verifyBouncedIdentity(readReviewerRunRecordBestEffort(rootDir, candidate), candidate),
+        };
+      }
+      return typeof probeSession === 'function' ? probeSession(candidate) : probeReviewerSession({
+        pgid: candidate.reviewer_pgid, sessionUuid: candidate.reviewer_session_uuid, probeAlive,
+      });
+    }
     let terminalState = String(row.pr_state || '').trim().toLowerCase();
     let terminalConfirmed = terminalState === 'merged';
     let closedPrStateUnverified = false;
@@ -767,11 +793,10 @@ async function reconcileReviewerSessions({
       let killSent = false;
       if (pgid !== null) {
         const sessionRow = { ...row, reviewer_pgid: pgid };
-        const sessionProbe = typeof probeSession === 'function'
-          ? probeSession(sessionRow)
-          : probeReviewerSession({ pgid, sessionUuid: row.reviewer_session_uuid, probeAlive });
+        const sessionProbe = await probeRecordedSession(sessionRow);
         const alive = typeof sessionProbe === 'boolean' ? sessionProbe : sessionProbe?.alive === true;
         const matched = typeof sessionProbe === 'boolean' ? sessionProbe : sessionProbe?.matched === true;
+        if ((adoptedBounce || exactDirect) && alive && !matched) continue;
         if (alive && matched) killSent = killProcessGroup(pgid, 'SIGKILL');
       }
       await onTerminalDeadSession({
@@ -800,19 +825,14 @@ async function reconcileReviewerSessions({
       }
       if (terminalPgid !== null) {
         const terminalRow = { ...row, reviewer_pgid: terminalPgid };
-        const terminalSessionProbe = typeof probeSession === 'function'
-          ? probeSession(terminalRow)
-          : probeReviewerSession({
-            pgid: terminalPgid,
-            sessionUuid: row.reviewer_session_uuid,
-            probeAlive,
-          });
+        const terminalSessionProbe = await probeRecordedSession(terminalRow);
         const terminalAlive = typeof terminalSessionProbe === 'boolean'
           ? terminalSessionProbe
           : terminalSessionProbe?.alive === true;
         const terminalMatched = typeof terminalSessionProbe === 'boolean'
           ? terminalSessionProbe
           : terminalSessionProbe?.matched === true;
+        if ((adoptedBounce || exactDirect) && terminalAlive && !terminalMatched) continue;
         if (terminalAlive && terminalMatched) {
           killResult = killProcessGroup(terminalPgid, 'SIGKILL');
         }
@@ -1079,7 +1099,7 @@ async function reconcileReviewerSessions({
     try {
       currentHeadSha = await fetchHeadSha(row);
     } catch (err) {
-      if (isTransientGithubProbeError(err)) {
+      if (adoptedBounce || isTransientGithubProbeError(err)) {
         log.warn(
           `[watcher] reviewer_reattach_head_probe_transient repo=${row.repo} pr=${row.pr_number} ` +
           `session=${row.reviewer_session_uuid} error=${err?.message || err}; leaving review_status='reviewing' for retry`
@@ -1100,14 +1120,9 @@ async function reconcileReviewerSessions({
       });
       continue;
     }
+    if (adoptedBounce && !currentHeadSha) continue;
 
-    const sessionProbe = typeof probeSession === 'function'
-      ? probeSession(row)
-      : probeReviewerSession({
-        pgid: row.reviewer_pgid,
-        sessionUuid: row.reviewer_session_uuid,
-        probeAlive,
-      });
+    const sessionProbe = await probeRecordedSession(row);
     const alive = typeof sessionProbe === 'boolean' ? sessionProbe : sessionProbe?.alive === true;
     const sessionMatched = typeof sessionProbe === 'boolean' ? sessionProbe : sessionProbe?.matched === true;
     const headChanged = Boolean(
@@ -1122,7 +1137,7 @@ async function reconcileReviewerSessions({
         postedReview = await findPostedReview(row, { refresh, ...(headSha ? { headSha } : {}) });
         return true;
       } catch (err) {
-        if (isTransientGithubProbeError(err)) {
+        if (adoptedBounce || isTransientGithubProbeError(err)) {
           log.warn(
             `[watcher] reviewer_reattach_review_probe_transient repo=${row.repo} pr=${row.pr_number} ` +
             `session=${row.reviewer_session_uuid} error=${err?.message || err}; leaving review_status='reviewing' for retry`
@@ -1168,21 +1183,20 @@ async function reconcileReviewerSessions({
       let lastSignal = null;
 
       for (const signal of recoverySignals) {
+        if (adoptedBounce || exactDirect) {
+          const fresh = await probeRecordedSession(row);
+          if (!fresh.alive || !fresh.matched) return true;
+        }
         lastSignal = signal;
         killProcessGroup(row.reviewer_pgid, signal);
         for (let attempt = 0; attempt < 3; attempt += 1) {
           await sleep(signal === 'SIGTERM' ? 200 : 100);
-          latestSessionProbe = typeof probeSession === 'function'
-            ? probeSession(row)
-            : probeReviewerSession({
-              pgid: row.reviewer_pgid,
-              sessionUuid: row.reviewer_session_uuid,
-              probeAlive,
-            });
+          latestSessionProbe = await probeRecordedSession(row);
           const stillAlive = typeof latestSessionProbe === 'boolean'
             ? latestSessionProbe
             : latestSessionProbe?.alive === true;
           if (!stillAlive) {
+            if (adoptedBounce) return true; // The ordinary dead-session path settles the original claim.
             // Let the next poll settle operator cancellation with the exact-head probe.
             if (operatorCancelled(row)) return true;
             if (!(await probePostedReviewAfterRecoveryDeath())) return true;
@@ -1261,6 +1275,7 @@ async function reconcileReviewerSessions({
 
     if (alive) {
       if (!sessionMatched) {
+        if (adoptedBounce || exactDirect) continue;
         markStickyOrphan({
           statements,
           row,
@@ -1273,6 +1288,7 @@ async function reconcileReviewerSessions({
       }
 
       if (headChanged) {
+        if (adoptedBounce) continue;
         killProcessGroup(row.reviewer_pgid, 'SIGKILL');
         await onTerminalDeadSession({
           row,
@@ -1359,21 +1375,36 @@ async function reconcileReviewerSessions({
 
     const cancelled = operatorCancelled(row);
     if (cancelled && !currentHeadSha) continue;
-    const reviewProbeSucceeded = cancelled
+    const reviewProbeSucceeded = cancelled || adoptedBounce
       ? await probePostedReviewAfterRecoveryDeath({ headSha: row.reviewer_head_sha })
       : await probePostedReviewOrMarkSticky();
     if (!reviewProbeSucceeded) continue;
 
     if (postedReview) {
       if (!canSettlePostedReview(row)) continue;
+      let changes;
+      if (adoptedBounce) {
+        try {
+          changes = settleBouncedPosted({
+            db, rootDir, row, postedAt: postedReview.submitted_at, postedReview,
+            defaultBaseBranch: defaultBaseBranchByRepo[row.repo] || defaultBaseBranch,
+          });
+        } catch (err) {
+          log.warn(`[watcher] adopted reviewer settlement deferred session=${row.reviewer_session_uuid}: ${err.message}`);
+          continue;
+        }
+        if (changes !== 1) continue;
+      }
       await onTerminalDeadSession({
         row,
         state: 'completed',
         settledAt: postedReview.submitted_at,
         reason: 'posted-review-recovered',
       });
-      const markPostedResult = settleRecoveredPostedReview({ statements, row, postedReview, log });
-      if (markPostedResult.changes !== 1) {
+      if (!adoptedBounce) {
+        changes = settleRecoveredPostedReview({ statements, row, postedReview, log }).changes;
+      }
+      if (changes !== 1) {
         log.warn(
           `[watcher] reviewer_reattach_recovered_cas_miss repo=${row.repo} pr=${row.pr_number} ` +
           `session=${row.reviewer_session_uuid || 'unknown'} pgid=${row.reviewer_pgid || 'unknown'}`
@@ -1395,6 +1426,17 @@ async function reconcileReviewerSessions({
 
     if (cancelled) {
       await settleCancelledClaim(row);
+      continue;
+    }
+    if (adoptedBounce) {
+      const released = statements.releaseAdoptedBounce.run(
+        leaseRecoveryEnabled ? 'pending' : 'failed', row.repo, row.pr_number,
+        row.reviewer_session_uuid, row.reviewer_head_sha, row.reviewer_pgid, row.reviewer_started_at,
+        row.failure_message, row.failed_at,
+      );
+      if (released.changes === 1) {
+        await onTerminalDeadSession({ row, state: 'failed', settledAt: failureAt, reason: 'dead-no-review' });
+      }
       continue;
     }
     const canRecover = leaseRecoveryEnabled && recoveryCapAvailable(row);

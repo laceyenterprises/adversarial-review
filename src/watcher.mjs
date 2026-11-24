@@ -1355,6 +1355,8 @@ async function pollOnceWithinBudget(
       shouldReconcileRow: (row, now) => shouldReconcileReviewerSession(row, now),
       leaseRecoveryEnabled: REVIEWER_LEASE_RECOVERY_ENABLED,
       leaseRecoveryMaxAttempts: INFRA_AUTO_RECOVER_CAP,
+      defaultBaseBranch: config.adversarialGateBaseBranch,
+      defaultBaseBranchByRepo: config.adversarialGateBaseBranches,
       onTerminalDeadSession: ({ row, state, settledAt }) => settleDurableReviewerRunState(
         { sessionUuid: row?.reviewer_session_uuid, state, settledAt },
       ),

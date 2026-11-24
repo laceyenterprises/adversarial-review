@@ -2807,10 +2807,10 @@ test('cli-direct reattach does NOT kill a recycled detached pgid (identity misma
     const result = await adapter.reattach(record);
 
     assert.equal(result.ok, false);
-    assert.equal(result.failureClass, 'daemon-bounce');
+    assert.equal(result.failureClass, 'reviewer-custody-unconfirmed');
     assert.equal(result.pgid, sleeper.pid);
-    assert.match(result.stderrTail, /PID has been recycled, NOT killing/);
-    assert.equal(readReviewerRunRecord(rootDir, 'recycled-pgid-session').state, 'failed');
+    assert.match(result.stderrTail, /could not verify live reviewer group/);
+    assert.equal(readReviewerRunRecord(rootDir, 'recycled-pgid-session').state, 'heartbeating');
     // Bystander must survive: identity probe rejected, so no SIGTERM/SIGKILL.
     assert.doesNotThrow(() => process.kill(sleeper.pid, 0));
   } finally {
@@ -2856,12 +2856,12 @@ test('cli-direct reattach refuses to kill when ps probe fails', async () => {
 
     const result = await adapter.reattach(record);
 
-    assert.equal(result.failureClass, 'daemon-bounce');
-    assert.match(result.stderrTail, /PID has been recycled, NOT killing/);
+    assert.equal(result.failureClass, 'reviewer-custody-unconfirmed');
+    assert.match(result.stderrTail, /could not verify live reviewer group/);
     assert.match(result.stderrTail, /ps probe failed/);
     // No SIGTERM/SIGKILL must fire when identity cannot be verified.
     assert.equal(killCalls, 0);
-    assert.equal(readReviewerRunRecord(rootDir, 'ps-probe-failure-session').state, 'failed');
+    assert.equal(readReviewerRunRecord(rootDir, 'ps-probe-failure-session').state, 'heartbeating');
   } finally {
     rmSync(rootDir, { recursive: true, force: true });
   }
@@ -2882,19 +2882,11 @@ test('cli-direct reattach degrades side-channel read errors to daemon-bounce tai
     });
     const paths = reviewerRunSideChannelPaths(rootDir, 'bad-tail-session');
     mkdirSync(paths.stderrPath, { recursive: true });
-    let alive = true;
     const adapter = createCliDirectReviewerRuntimeAdapter({
       rootDir,
       processKillImpl: (pid, signal) => {
-        assert.equal(pid, -8888);
-        if (signal === 0) {
-          if (alive) return true;
-          const err = new Error('no such process');
-          err.code = 'ESRCH';
-          throw err;
-        }
-        alive = false;
-        return true;
+        assert.deepEqual([pid, signal], [-8888, 0]);
+        throw Object.assign(new Error('no such process'), { code: 'ESRCH' });
       },
       sleepImpl: async () => {},
       cancelGraceMs: 1,

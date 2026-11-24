@@ -23,9 +23,10 @@ export function settleDaemonBouncePostedReview({
   }
   return withSqliteBusyRetrySync(() => db.transaction(() => {
     const changes = db.prepare(bouncedPostedReviewSettleSql(
-      'reviewer_session_uuid = ? AND reviewer_started_at = ? AND failed_at = ?'
+      'reviewer_session_uuid = ? AND reviewer_started_at = ? AND failed_at = ? AND reviewer_pgid IS ?',
+      { adopted: row.review_status === 'reviewing' },
     )).run(postedAt, row.repo, row.pr_number, row.reviewer_head_sha,
-      row.reviewer_head_sha, row.reviewer_session_uuid, row.reviewer_started_at, row.failed_at).changes;
+      row.reviewer_head_sha, row.reviewer_session_uuid, row.reviewer_started_at, row.failed_at, row.reviewer_pgid).changes;
     if (changes !== 1) return 0;
 
     const pass = db.prepare(`SELECT * FROM reviewer_passes

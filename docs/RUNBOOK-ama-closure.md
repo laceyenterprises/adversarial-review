@@ -1402,11 +1402,24 @@ refuses `dispatch-read-context-unavailable` with a redacted `detail` and reads
 nothing (REPAIRDISPATCHREAD-01).
 
 The native call is `bin/repair-in-place.mjs ROOT OWNER/REPO PR BASE_HEAD
-OWNER_KEY CONFLICTING [FOLLOW_UP_TICKET LAUNCHER_PID [DISPATCH_PROJECT]]`.
+OWNER_KEY CONFLICTING [FOLLOW_UP_TICKET LAUNCHER_PID [DISPATCH_PROJECT [RECOVERY_EPOCH_ID]]]`.
 Use empty ticket and PID arguments when passing a project without a follow-up
-claim. The project must be the one HQ will record for this dispatch. For a new
-epoch, the helper requires a selector-bound canonical reply under the existing
-exact review-app project/repository grant before it writes the reservation.
+claim. The project must be the one HQ will record for this dispatch.
+The optional tenth argument, `RECOVERY_EPOCH_ID`, selects the retained unbound
+final-fix reservation to replay. Supply its original `ffa-` owner key, base head
+and dispatch project, set `CONFLICTING` to `false`, and leave the ticket and PID
+arguments empty. Recovery requires an unowned queue and fresh paired dispatch
+absence; it compares the unchanged reservation under the intent and retry-ledger
+locks without writing it. An owner state other than missing, null, `unknown`,
+`absent` or `absent-unfenced` refuses before the recovery dispatch lookup.
+The original failed job remains terminal `never-spawned`.
+For protocol discovery, invoke `bin/repair-in-place.mjs
+--final-fix-recovery-protocol` alone. It returns
+`{"ok":true,"protocol":"final-fix-recovery-v1"}` without opening the review
+database or reserving an epoch.
+
+For a new epoch, the helper requires a selector-bound canonical reply under the
+existing exact review-app project/repository grant before it writes the reservation.
 Budget-available updates and existing-key replays follow their existing rules.
 After the read, it checks the follow-up claim and any replacement closer lease.
 It re-evaluates epoch ownership and the cap under the retry-ledger flock.

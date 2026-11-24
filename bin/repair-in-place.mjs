@@ -144,7 +144,8 @@ export async function main(args, {
       && pending.baseHead.toLowerCase() === headSha.toLowerCase();
     if (recoveryEpochId && (!atReservationHead || pending.id !== recoveryEpochId
       || pending.ownerKey !== ownerKey || pending.dispatchProjectRef !== dispatchProjectRef
-      || pending.ownerLaunch != null || pending.publicationHead != null)) {
+      || pending.ownerLaunch != null || pending.publicationHead != null
+      || ![undefined, null, 'unknown', 'absent', 'absent-unfenced'].includes(pending.ownerState))) {
       return { ok: false, reason: 'final-fix-reservation-changed' };
     }
     if (atReservationHead) {

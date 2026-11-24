@@ -71,6 +71,37 @@ const argv = (rootDir, project = 'fixture-project') =>
 let endpoint = 0;
 const freshEnv = () => ({ APP_CONTRACT_ENDPOINT_URL: `https://fixture.invalid/repair-${++endpoint}` });
 
+for (const [ownerState, allowed] of [
+  [undefined, true], [null, true], ['unknown', true], ['absent', true], ['absent-unfenced', true],
+  ['live', false], ['terminal', false], ['unexpected', false],
+]) test(`final-fix recovery pre-checks owner state ${ownerState} before dispatch reads`, async t => {
+  const rootDir = exhaustedPr(t);
+  const identity = { repo, prNumber };
+  const ownerKey = `ffa-${'f'.repeat(64)}`;
+  const dispatchProjectRef = 'pr-merge-orchestration';
+  const { epoch } = reserveRepairEpoch({ rootDir, ...identity, headSha: head, ownerKey,
+    cause: 'review-cycle-exhausted', dispatchProjectRef });
+  if (ownerState !== undefined) {
+    mutateRepairEpochs(rootDir, identity, ledger => {
+      ledger.repairEpochs[0].ownerState = ownerState;
+    });
+  }
+  const before = readHammerRetryCapLedger(rootDir, identity);
+  const calls = mockSdk(t);
+  const result = await main([rootDir, repo, String(prNumber), head, ownerKey,
+    'false', '', '', dispatchProjectRef, epoch.id], { env: freshEnv() });
+  assert.equal(result.ok, allowed);
+  if (allowed) {
+    assert.equal(result.replayed, true);
+    assert.equal(calls.lookup, 1, 'eligible owners still require paired dispatch absence');
+  } else {
+    assert.equal(result.reason, 'final-fix-reservation-changed');
+    assert.equal(calls.connect, 0, 'ineligible owners refuse before dispatch preparation');
+    assert.equal(calls.lookup, 0, 'ineligible owners refuse without a dispatch lookup');
+  }
+  assert.deepEqual(readHammerRetryCapLedger(rootDir, identity), before);
+});
+
 test('final-fix recovery only replays the selected unbound owner under paired absence', async t => {
   const rootDir = exhaustedPr(t);
   const identity = { repo, prNumber };

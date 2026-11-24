@@ -995,3 +995,49 @@ for (const launchStatus of ['succeeded', 'running']) {
     }
   });
 }
+
+test('a primary reversal hands closure to one exact-head review before the operator route', async t => {
+  const rootDir = finalRound(t);
+  const db = openReviewStateDb(rootDir);
+  t.after(() => db.close());
+  ensureReviewStateSchema(db);
+  db.prepare(`INSERT INTO reviewed_prs(repo,pr_number,reviewed_at,reviewer,pr_state,review_status,
+    reviewer_head_sha,revision_ref) VALUES (?,?,'2026-01-01T00:00:00Z','claude','open','posted',?,?)`)
+    .run(repo, prNumber, reviewed, headSha);
+  const fixtureFile = { filename: 'src/fixture.mjs', status: 'modified', additions: 1, deletions: 0,
+    patch: '@@ -1,0 +2 @@\n+return result;' };
+  const primaryChange = { headSha, primaryHead: reviewed, mergeBase: 'f'.repeat(40),
+    hasHammerCommits: true, primaryFiles: [fixtureFile], finalFiles: [], diagnosticCommitRange: [{ sha: headSha }],
+    ciCost: { ok: true, headSha } };
+  const refusal = { dispatched: false, skipMergeAgent: true, needsOperator: true, reason: 'primary-change-repair-required',
+    reasons: ['primary-change-reverted'] };
+  const pages = [];
+  const tick = () => maybeDispatchAmaClosureFor({ rootDir, repoPath: repo, prNumber, reviewStateDb: db,
+    currentRevisionRef: headSha, labelNames: [], now: () => Date.parse(started) + 60_000,
+    reviewStateRow: { repo, pr_number: prNumber, pr_state: 'open', review_status: 'posted', reviewer: 'claude',
+      reviewer_head_sha: reviewed, last_verdict: 'Comment only', posted_at: started },
+    candidate: { headSha, prState: 'open', riskClass: 'low', prAuthor: 'synthetic-builder',
+      mergeable: 'MERGEABLE', statusCheckRollup: [{ name: 'test', status: 'COMPLETED', conclusion: 'SUCCESS' }] },
+    loadConfigImpl: () => ({ getMergeAuthorityConfig: () => ({ enabled: true }) }),
+    resolveAmaHammerDispatchModeImpl: () => 'inline', fetchLatestHeadReviewBodiesImpl: async () => [body],
+    proveCloserAuthoredStaleHeadImpl: async () => ({ proven: false }),
+    runDaemonCleanMergeAttemptImpl: async () => ({ reason: 'not-eligible' }), maybeDispatchAmaCloserImpl: async () => refusal,
+    fetchPrimaryChangeImpl: async () => primaryChange, recoverStrandedCloserHeadImpl: async () => null,
+    observeClosureWaitImpl: async args => { if (args.immediate) pages.push(args.reason); return {}; },
+    logger: { log() {}, warn() {} },
+  });
+  const queued = await tick();
+  assert.equal(queued.reason, 'primary-reversal-review-queued');
+  assert.equal(queued.closureOwner.owner, 'review');
+  assert.equal((await tick()).reason, 'primary-reversal-review-pending');
+  assert.deepEqual(pages, []);
+  const intent = db.prepare('SELECT * FROM explicit_review_intents').get();
+  assert.deepEqual(JSON.parse(intent.context_json).regions, [{ file: 'src/fixture.mjs', start: 2, end: 2, commit: headSha }]);
+  db.prepare("UPDATE explicit_review_intents SET state='consumed'").run();
+  const repeated = await tick();
+  assert.equal(repeated.reason, 'primary-reversal-review-exhausted');
+  assert.equal(repeated.needsOperator, true);
+  assert.equal(repeated.closureOwner.owner, 'page');
+  assert.equal(db.prepare('SELECT COUNT(*) AS count FROM explicit_review_intents').get().count, 1);
+  assert.equal(pages.length, 1);
+});

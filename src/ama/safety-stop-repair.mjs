@@ -12,7 +12,8 @@ import { fleetStopReason } from '../fleet-stop.mjs';
 import { execGhWithRetry, isTransientGhError } from '../gh-cli.mjs';
 import { probeOrphanOwnership } from './orphan-watchdog.mjs';
 import { readHammerRetryCapLedger, reserveHammerRepairDispatch } from './hammer-retry-cap.mjs';
-import { fetchPrimaryChange } from './primary-change.mjs';
+import { checkPrimaryChange, fetchPrimaryChange } from './primary-change.mjs';
+import { readPrimaryReversalReview } from './primary-reversal-review.mjs';
 import { createHistoryReader } from './history-reader.mjs';
 import { primaryChangeRepairEvidence } from './primary-change-repair.mjs';
 import { loadAwareTimeoutMs } from '../load-aware-timeout.mjs';
@@ -72,10 +73,14 @@ export async function dispatchSafetyStopRepair({ rootDir, repo, prNumber, headSh
   }
   let repairEvidence = null;
   if (refusal.reasons?.includes('primary-change-reverted') || refusal.reason === 'primary-change-reverted') {
+    if (readPrimaryReversalReview(rootDir, { repo, prNumber, headSha })?.state === 'pending') {
+      return defer('primary-reversal-review-pending');
+    }
     const evidence = await fetchPrimaryChangeImpl({ repo, prNumber, headSha, rootDir, get, signal });
-    repairEvidence = primaryChangeRepairEvidence(evidence, headSha, {
-      strictNonBlockingRemediation: cfg.strictNonBlockingRemediation !== false,
-    });
+    const policy = { strictNonBlockingRemediation: cfg.strictNonBlockingRemediation !== false };
+    const primary = checkPrimaryChange(evidence, headSha, policy);
+    if (primary.ok || primary.reversalReview) return defer('primary-reversal-review-resolved');
+    repairEvidence = primaryChangeRepairEvidence(evidence, headSha, policy);
   }
   const workerClass = workerClassImpl({}, { env });
   const promptPath = join(rootDir, 'data', 'follow-up-jobs', 'ama-automated-recovery', `${dispatchKey}.md`);

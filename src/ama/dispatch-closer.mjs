@@ -5133,7 +5133,6 @@ async function maybeDispatchAmaCloserAttempt({
     if (baseHold) return noAmaDispatch(baseHold);
   }
 
-  const mergeabilityUnknown = prMetadata.mergeableState === 'UNKNOWN';
   const ownerProofRecovery = dispatchContext?.orphanRecovery?.ownerProof === true
     && dispatchContext.orphanRecovery.headSha === prMetadata?.headSha;
 
@@ -5192,7 +5191,7 @@ async function maybeDispatchAmaCloserAttempt({
   }
 
   // Existing custody and evidence holds take precedence over new admission.
-  if (mergeabilityUnknown && !(reconciliationRoot && reconciliationRepo
+  if (prMetadata.mergeableState === 'UNKNOWN' && !(reconciliationRoot && reconciliationRepo
     && readAmaCloserDispatchRecordsForPR(reconciliationRoot, { repo: reconciliationRepo, prNumber })
       .some(record => record.launchRequestId))) {
     return noAmaDispatch({ dispatched: false, skipMergeAgent: true, recoveryWait: true,
@@ -5307,6 +5306,7 @@ async function maybeDispatchAmaCloserAttempt({
     });
   }
   const verdict = isEligibleForAmaClosure(reviewState, prMetadata, cfg, eligibilityOptions);
+  const mergeabilityUnknown = prMetadata.mergeableState === 'UNKNOWN';
   const decisionIdentity = { repo: dispatchContext?.repo, prNumber, headSha: prMetadata.headSha };
   const reviewHandoffLease = prMetadata.headSha
     ? readAmaCloserLease(dispatchContext.rootDir || SUBMODULE_ROOT, decisionIdentity) : null;
@@ -5364,7 +5364,8 @@ async function maybeDispatchAmaCloserAttempt({
       headSha: prMetadata.headSha },
     } } : {}),
     progress: { ...sharedNextAction.snapshot.observations.progress?.value,
-      primaryChange: { ...verdict.trace.primaryChange, headSha: prMetadata.headSha },
+      primaryChange: verdict.trace.primaryChange.reversalReview ? null
+        : { ...verdict.trace.primaryChange, headSha: prMetadata.headSha },
       ...(verdict.trace.hamTerminalRemediation?.ok === true ? { terminalReview: {
         validated: true, headSha: prMetadata.headSha, reviewedHeadSha: reviewState.headSha,
       } } : {}),
@@ -5377,7 +5378,9 @@ async function maybeDispatchAmaCloserAttempt({
     && selectedNextAction.decision.reason === 'primary-change-repair'
     && hasHammerDispatchIntent(sharedNextAction, decisionIdentity)
     && sharedNextAction.decision.reason === 'primary-change-repair';
-  if (!verdict.trace.primaryChange.ok && !selectedPrimaryRepair) {
+  const reviewedReversalRemediation = verdict.trace.primaryChange.reversalReview?.state === 'remediation'
+    && hasHammerDispatchIntent(sharedNextAction, decisionIdentity);
+  if (!verdict.trace.primaryChange.ok && !selectedPrimaryRepair && !reviewedReversalRemediation) {
     observeSharedDecision(sharedNextAction);
     const primaryChangeRepair = sharedNextAction.decision.actor === 'hammer';
     return noAmaDispatch({ dispatched: false, skipMergeAgent: true, recoveryWait: true,

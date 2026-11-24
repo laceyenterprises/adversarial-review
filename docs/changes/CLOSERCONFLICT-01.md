@@ -47,3 +47,11 @@ Final remediation validation:
 - `bash demo/research-finding-walkthrough.sh`: byte-equivalence demo passed.
 - `node scripts/validate-data-model-catalog.mjs`: 104 entries validated.
 - `git diff --check`: passed. The full suite remains the PR-head CI gate.
+
+## Rescue integration
+
+Integrated the published PRIMARYGATEREVIEW-01 main revision. The runbook retains
+this change's UNKNOWN admission semantics and main's exact-head primary review
+recovery. The original author declaration of `mergeabilityUnknown` stays at the
+verdict boundary; the earlier custody guard reads mergeability directly, so its
+precedence stays intact without removing the primary source region.

@@ -55,6 +55,8 @@ export async function profilePostedReviews(modules, { prCount = 15, delayMs = 20
         entry.count++;
         const migration = sql === 'SELECT 1 FROM schema_migrations WHERE id = ?' ? args[0]
           : sql === 'PRAGMA table_info(waits_by_class)' ? 'waits_by_class.last_paged'
+            : sql === "SELECT 1 FROM pragma_table_info('explicit_review_intents') WHERE name = 'context_json'"
+              ? 'explicit_review_intents.context_json'
             : sql === 'SELECT 1 FROM main.sqlite_schema LIMIT 1' ? 'review-state.bootstrap'
               : sql.trim().replace(/\s+/g, ' ') === "SELECT count(*) AS n FROM main.sqlite_schema WHERE type = 'table' AND name COLLATE NOCASE IN ( 'repository_identities', 'repository_name_history', 'repository_rename_audit' )"
                 ? 'repository-identity.commit-check' : null;

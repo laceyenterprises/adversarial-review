@@ -3219,6 +3219,10 @@ Key control points:
   under the unchanged authorization and merge predicates. Callers without that
   selected intent retain `needsOperator: true`; an attributable current-head
   `merge-agent-requested` event can dispatch the existing operator recovery lane.
+  An attributable text reversal without verified authority first requests one
+  durable exact-head review. Zero blocking findings authorize its recorded
+  regions at that head. Blocking findings enter normal remediation. A second
+  unverified reversal on that head uses the operator route.
   Without selected repair intent, the closer returns `primary-change-repair-required`; the daemon returns
   `primary-change-needs-operator` before the closer. OWNERPROOF-01 admits repair
   after 15 minutes without proven ownership (`OWNERPROOF_IDLE_MINUTES` overrides

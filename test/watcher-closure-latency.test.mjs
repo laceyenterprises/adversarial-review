@@ -692,6 +692,7 @@ test('synthetic posted-review pass pins GitHub and database read counts per step
   const rateIndexMigrationChecks = closure.database.migrationChecks['20261120_findings_rate_indexes.sql'];
   const batchHoldMigrationChecks = closure.database.migrationChecks['20261122_findings_batch_hold.sql'];
   const closureWaitMigrationChecks = closure.database.migrationChecks['waits_by_class.last_paged'];
+  const intentContextMigrationChecks = closure.database.migrationChecks['explicit_review_intents.context_json'];
   const bootstrapChecks = closure.database.migrationChecks['review-state.bootstrap'];
   const identityCommitChecks = closure.database.migrationChecks['repository-identity.commit-check'];
   assert.equal(findingMigrationChecks, 6);
@@ -718,6 +719,7 @@ test('synthetic posted-review pass pins GitHub and database read counts per step
   assert.equal(rateIndexMigrationChecks, 6);
   assert.equal(batchHoldMigrationChecks, 6);
   assert.equal(closureWaitMigrationChecks, 6, 'two reminder-column schema probes per PR');
+  assert.equal(intentContextMigrationChecks, 6, 'two intent context column probes per PR');
   assert.equal(bootstrapChecks, 6, 'one empty-schema check per review-state initialization');
   assert.equal(identityCommitChecks, 6, 'one committed identity-schema check per initialization');
   assert.equal(closure.database.count - findingMigrationChecks - queueMigrationChecks - handoffMigrationChecks - backlogMigrationChecks
@@ -725,8 +727,9 @@ test('synthetic posted-review pass pins GitHub and database read counts per step
     - simplicityMigrationChecks - noteLifecycleMigrationChecks - drainMigrationChecks - requeueMigrationChecks - gradeMigrationChecks
     - manifestMigrationChecks - selectionScopeMigrationChecks - dispatchAttemptsMigrationChecks - gsrMigrationChecks
     - historicalProjectionMigrationChecks - shadowPatternsMigrationChecks - decisionPublicationMigrationChecks
-    - rateIndexMigrationChecks - batchHoldMigrationChecks - closureWaitMigrationChecks - bootstrapChecks - identityCommitChecks, 114,
-    'round counter and wake telemetry reuse the connection; three decisions persist their first-actionable anchors');
+    - rateIndexMigrationChecks - batchHoldMigrationChecks - closureWaitMigrationChecks - intentContextMigrationChecks
+    - bootstrapChecks - identityCommitChecks, 120,
+    'each PR adds one reversal receipt lookup and its legacy table probe to the existing closure reads');
   assert.equal(profile.steps['handler-overhead'].subprocesses.gh, undefined);
   assert.ok(profile.outcomes.every(result => result.handled && !result.terminal));
 });

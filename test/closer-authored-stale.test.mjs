@@ -152,7 +152,7 @@ test('HAMROUNDEDGE-01 mixed edges retain the chain-length limit and eligibility 
     [{ checksConclusion: 'PENDING' }, 'retry'],
     [{ checksConclusion: 'FAILURE' }, 'not-eligible'],
     [{ mergeability: 'UNKNOWN' }, 'retry'],
-    [{ mergeability: 'CONFLICTING' }, 'not-eligible'],
+    [{ mergeability: 'CONFLICTING' }, 'conflict-repair'],
     [{ blockingFindingState: 'present', blockingFindingCount: 1 }, 'not-eligible'],
     [{ verdict: 'request-changes' }, 'not-eligible'],
   ]) {
@@ -233,19 +233,18 @@ test('transient misses (CI pending, mergeability UNKNOWN) retry; never a stop', 
   assert.equal(redUnknown.eligibility.decision, CLOSER_AUTHORED_STALE_DECISIONS.NOT_ELIGIBLE);
 });
 
-test('resolved non-mergeable heads are hard misses even with green exact-head CI', async () => {
+test('confirmed conflicts are dispatch repair work and confer no merge eligibility', async () => {
   const graph = { [C1]: { parent: R, closer: true } };
-  for (const mergeability of ['CONFLICTING', ' conflicting ', 'UNEXPECTED']) {
-    const { eligibility } = await decide(graph, { currentHead: C1, mergeability });
+  for (const checksConclusion of ['SUCCESS', 'PENDING']) {
+    const { eligibility } = await decide(graph, { currentHead: C1, mergeability: ' conflicting ', checksConclusion });
     assert.equal(eligibility.eligible, false);
     assert.equal(eligibility.transient, false);
-    assert.equal(eligibility.decision, CLOSER_AUTHORED_STALE_DECISIONS.NOT_ELIGIBLE);
-    assert.deepEqual(eligibility.reasons, ['pr-not-mergeable']);
+    assert.equal(eligibility.decision, CLOSER_AUTHORED_STALE_DECISIONS.CONFLICT_REPAIR);
+    assert.deepEqual(eligibility.reasons, ['conflict-rebase']);
     assert.equal(eligibility.carryForward, true);
   }
-  const pending = await decide(graph, { currentHead: C1, mergeability: 'CONFLICTING', checksConclusion: 'PENDING' });
-  assert.equal(pending.eligibility.decision, CLOSER_AUTHORED_STALE_DECISIONS.NOT_ELIGIBLE);
-  assert.equal(pending.eligibility.transient, false);
+  const unexpected = await decide(graph, { currentHead: C1, mergeability: 'UNEXPECTED' });
+  assert.deepEqual(unexpected.eligibility.reasons, ['pr-not-mergeable']);
 });
 
 test('blocking, unknown-blocking and unsettled verdicts are not carried forward', async () => {

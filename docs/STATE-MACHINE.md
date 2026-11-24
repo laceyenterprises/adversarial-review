@@ -1607,6 +1607,13 @@ Legacy durable jobs created before `baseBranch` was persisted are hydrated from 
 
 ## MSM two-path merge authority (current)
 
+At the legacy closer's final gate, a confirmed conflict can yield the merge
+lease and re-enter local replay, validation and exact-head publication. The
+controller permits two such replays per run. A changed patch hands the new head
+to independent review. A replay stopped at conflict markers or at the budget
+records `needs-rebase-repair` for same-head closure recovery. Confirmed conflict
+can enter closer dispatch. The daemon and queue executor require `MERGEABLE`.
+
 Completed remediation publishes a priority event for the same posted-review
 closure handler used by the regular poll. The watcher refreshes the subject
 before evaluating it, including during an ongoing poll. The event changes

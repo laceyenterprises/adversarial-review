@@ -878,6 +878,23 @@ test('STOPSTALE-01: dispatch respects daemon ownership after a superseded automa
   assert.equal(deps.calls.length, 0, 'no hammer launch after passing over an automated stop');
 });
 
+for (const [name, prMetadata, reason] of [
+  ['conflicting', { mergeableState: 'CONFLICTING' }, null],
+  ['draft', { mergeableState: 'CONFLICTING', isDraft: true }, 'pr-is-draft'],
+  ['closed', { mergeableState: 'CONFLICTING', isOpen: false }, 'pr-not-mergeable'],
+  ['unknown', { mergeableState: 'UNKNOWN' }, 'pr-mergeability-unknown'],
+]) {
+  test(`CLOSERCONFLICT-01: ${name} closer dispatch admission`, async t => {
+    const rootDir = mkdtempSync(join(tmpdir(), 'closer-conflict-admission-'));
+    t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+    const deps = testDeps();
+    const result = await maybeDispatchAmaCloser({ ...findingsRemediationArgs(rootDir, { prMetadata }), ...deps });
+    assert.equal(result.dispatched, !reason, JSON.stringify(result));
+    if (reason) assert.equal(result.reason, reason);
+    assert.equal(deps.calls.filter(call => call.args[0] === 'dispatch').length, reason ? 0 : 1);
+  });
+}
+
 test('LCR: findings-remediation hammer dispatches with --priority normal', async (t) => {
   const rootDir = mkdtempSync(join(tmpdir(), 'lcr-priority-remediation-'));
   t.after(() => rmSync(rootDir, { recursive: true, force: true }));

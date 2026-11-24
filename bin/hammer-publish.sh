@@ -423,6 +423,13 @@ if [ "${HAM_COMMIT_PUBLICATION_ONLY:-0}" = "1" ]; then
   # This grants no CI validation or merge authority.
   if [ -n "$HAM_PUSHED_HEAD" ] && [ "$HAM_PUSHED_HEAD" != "$HAM_PUSHED_FROM_HEAD" ]; then
     "$HAM_NODE_BIN" "<<ROOT_DIR>>/bin/hammer-progress.mjs" remediation-pushed "$HAM_PUSHED_HEAD" || true
+    # The controller sends a changed replay for independent review. A
+    # carry-forward edge here could let closure reuse the old verdict first.
+    if [ -f "<<RUN_DIR>>/final-gate-review-head" ] \
+      && [ "$(cat "<<RUN_DIR>>/final-gate-review-head")" = "$HAM_PUSHED_HEAD" ]; then
+      HAM_PHASE_OUTCOME=published
+      return 0
+    fi
     if ! /usr/bin/perl -e 'shift or exit 1; exec @ARGV; die $!' "$HAM_NODE_BIN" "<<ROOT_DIR>>/bin/hammer-helper-step.mjs" mutation pushed-attestation 90 540 "$HAM_NODE_BIN" "<<ROOT_DIR>>/bin/hammer-pushed-attestation.mjs" \
       "<<REPO>>" "<<PR_NUMBER>>" "$HAM_PUSHED_FROM_HEAD" "$HAM_PUSHED_HEAD"; then
       HAM_PHASE_OUTCOME=pushed-attestation-unavailable

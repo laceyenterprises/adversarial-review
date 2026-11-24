@@ -10,7 +10,7 @@ export function classifyHammerExit(raw) {
     'remediated-and-pushed': ['remediated-and-pushed'],
     'review-blocked': ['review-blocked', 'predicate-not-eligible', 'findings-unresolved'],
     'ci-red': ['ci-red', 'checks-red', 'checks-failed', 'ci-not-green', 'required-checks-failed', 'validation-failed', 'github-gate-red', 'github-gate-not-green'],
-    conflict: ['conflict', 'merge-conflict', 'rebase-conflict', 'conflicting'],
+    conflict: ['conflict', 'merge-conflict', 'rebase-conflict', 'conflicting', 'needs-rebase-repair'],
     'cycle-exhausted': ['cycle-exhausted', 'hammer-retry-cap-exhausted', 'hammer-wall-clock-exceeded', 'merge-retry-budget-exhausted'],
     'lease-lost': ['lease-lost', 'merge-lease-not-held', 'merge-lease-lost', 'controller-owner-lost', 'lease-owner-lost', 'launch-ended'],
     'token-ceiling': ['token-ceiling', 'hammer-token-ceiling-exceeded'],

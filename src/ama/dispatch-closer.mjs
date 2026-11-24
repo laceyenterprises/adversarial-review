@@ -4783,7 +4783,9 @@ async function maybeDispatchAmaCloserWithinRepositoryCycle(args) {
     if (args.cfg?.enabled && terminalPr) {
       return noAmaDispatch({ dispatched: false, reason: 'pr-not-mergeable' });
     }
-    if (args.cfg?.enabled) {
+    const draft = args.prMetadata?.isDraft === true;
+    const mergeabilityUnknown = String(args.prMetadata?.mergeableState).toUpperCase() === 'UNKNOWN';
+    if (args.cfg?.enabled && !draft && !mergeabilityUnknown) {
       const prepared = await prepareQueueCloserDispatch({
         rootDir: dispatchContext?.rootDir || SUBMODULE_ROOT, cfg: args.cfg,
         lane: { repository: targetRepo, base: dispatchContext?.baseBranch || args.prMetadata?.baseBranch
@@ -4832,6 +4834,13 @@ async function maybeDispatchAmaCloserWithinRepositoryCycle(args) {
       // Retire the scheduling hint before re-evaluating eligibility. An older
       // drain record must not hide a new, unrelated blocker from the lane.
       retireAmaCloserDrainHint(dispatchContext.rootDir, drainIdentity, { logger: args.logger });
+    }
+    if (args.cfg?.enabled && draft) {
+      return noAmaDispatch({ dispatched: false, reason: 'pr-is-draft' });
+    }
+    if (args.cfg?.enabled && mergeabilityUnknown) {
+      return noAmaDispatch({ dispatched: false, skipMergeAgent: true, recoveryWait: true,
+        reason: 'pr-mergeability-unknown' });
     }
     const readStatus = args.readLaunchRequestStatusImpl || readLaunchRequestStatusFromLedgerDefault;
     const recovery = args.cfg?.enabled && args.cfg?.autonomousMergeExecutionEnabled !== false && dispatchContext?.rootDir
@@ -5386,7 +5395,7 @@ async function maybeDispatchAmaCloserAttempt({
       queuedParkAudit = readAmaAuditEntry(dispatchContext.hqRoot || DEFAULT_HQ_ROOT,
         dispatchContext.repo, prNumber, prMetadata.headSha);
       if (verdict.trace?.hamTerminalRemediation?.ok !== true
-        && queuedParkAudit?.attempts?.at(-1)?.reason !== 'lane-busy'
+        && !['lane-busy', 'needs-rebase-repair'].includes(queuedParkAudit?.attempts?.at(-1)?.reason)
         && !HAMMER_RETRYABLE_READ_OUTCOMES.has(queuedParkAudit?.attempts?.at(-1)?.reason)) queuedParkAudit = null;
     } catch (error) {
       logger?.warn?.(`[ama-closer] park audit unreadable: ${error?.message || error}`);
@@ -5666,6 +5675,10 @@ async function maybeDispatchAmaCloserAttempt({
   const parkAudit = queuedParkAudit || sourceValidationAudit;
   const parkAttempt = parkAudit?.attempts?.at(-1);
   const parkReason = parkAttempt?.reason;
+  const rebaseRepairOwed = parkAudit?.status === 'deferred' && parkReason === 'needs-rebase-repair'
+    && prMetadata.mergeableState === 'CONFLICTING' && parkAttempt.continuation?.headSha === queuedHead
+    && parkAttempt.continuation?.kind === 'redrive' && parkAttempt.continuation?.owner === 'closure-sweep'
+    && Boolean(existingRecord?.launchRequestId) && parkAttempt.launchRequestId === existingRecord.launchRequestId;
   const deferredPark = parkAudit?.status === 'deferred'
     && AMA_CLOSER_RETRYABLE_DEFERRAL_REASONS.has(parkReason)
     && (!parkAttempt?.launchRequestId || parkAttempt.launchRequestId === existingRecord?.launchRequestId)
@@ -6384,14 +6397,14 @@ async function maybeDispatchAmaCloserAttempt({
         }, { level: 'warn' });
       }
     }
-    const reportedNoWork = status === 'failed'
+    const reportedNoWork = status === 'failed' && !rebaseRepairOwed
       && prefetchedLaunchRequestProbe?.row?.failure_class === 'no_work_done';
-    const capFinalDecision = await reconcileCapFinalDecision(status);
+    const capFinalDecision = rebaseRepairOwed ? null : await reconcileCapFinalDecision(status);
     if (capFinalDecision) return capFinalDecision;
     // A timed-out legacy lock wait never issued a merge. Even without current
     // HAM certification, a settled launch must re-enter ordinary repair/admission
     // rather than being classified as a final no-merge or an exit without close.
-    if ((laneBusyPark || infrastructureReadPark) && !certifiedPark && ['succeeded', 'failed'].includes(status)) {
+    if ((laneBusyPark || infrastructureReadPark || rebaseRepairOwed) && !certifiedPark && ['succeeded', 'failed'].includes(status)) {
       status = 'failed';
       existingDispatchStatus = status;
     }

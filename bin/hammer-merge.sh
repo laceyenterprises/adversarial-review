@@ -127,6 +127,10 @@ ham_append_terminal_audit() {
       eligibilityTrace: $eligibilityTrace,
       githubGate: $githubGate
     } + (if $reasonDetail != "" then {reasonDetail: $reasonDetail} else {} end)
+      + (if $reason == "needs-rebase-repair" then
+        {continuation: {kind: "redrive", owner: "closure-sweep", headSha: $validatedHead,
+          notBefore: (now | todateiso8601), lease: "fresh"}}
+      else {} end)
       + (if $historyReadError | startswith("history read failed: history-read-failed:") then
       ($historyReadError | capture("^history read failed: [^ ]+ attempts=(?<count>[0-9]+) ")
         | {historyReadAttempts: (.count | tonumber)}) // {}
@@ -456,6 +460,7 @@ console.log(JSON.stringify({
   derivedChanges: primaryIntent?.derivedChanges || [],
   state,
   open,
+  isDraft: rollup.isDraft ?? null,
   headMatches,
   expectedHead,
   liveHead: rollup.headSha || rollup.headRefOid || null,
@@ -533,6 +538,21 @@ ham_required_gate_red() {
 ham_required_gate_pending_only() {
   jq -e '.checksConclusion == "PENDING" and
     (.reasons | type == "array" and length > 0 and all(.[]; . == "ci-not-green"))' "$HAM_GATE_JSON" >/dev/null
+}
+
+ham_required_gate_conflict_only() {
+  jq -e '.state == "OPEN" and .isDraft == false and .headMatches == true
+    and .mergeable == "CONFLICTING"
+    and ((.checksConclusion == "SUCCESS" and .reasons == ["pr-not-mergeable"])
+      or (.checksConclusion == "PENDING" and (.reasons | sort) == ["ci-not-green", "pr-not-mergeable"]))' \
+    "$HAM_GATE_JSON" >/dev/null
+}
+
+ham_yield_for_final_conflict() {
+  ham_release_merge_lease --yield final-gate-conflict || return 1
+  # Internal return to the close controller, without a terminal audit.
+  printf -v HAM_PHASE_OUTCOME '%s' retry-final-gate-conflict
+  return 20
 }
 
 ham_live_head_moved() {
@@ -721,6 +741,10 @@ while :; do
     fi
     ham_release_merge_lease
     return 20
+  fi
+  if [ "$ham_wait_only" -eq 0 ] && ham_required_gate_conflict_only; then
+    ham_yield_for_final_conflict
+    return $?
   fi
   # CONFLICTBEFORECI-01: admit positive conflict to the existing bounded
   # repair path before absent CI can stall it. Reacquisition below repeats
@@ -928,6 +952,10 @@ while [ "$HAM_ALREADY_MERGED_VALIDATED_HEAD" -ne 1 ] && [ "$HAM_MERGE_ATTEMPTS" 
     return 20
   fi
   if ! ham_required_gate_ok; then
+    if ham_required_gate_conflict_only; then
+      ham_yield_for_final_conflict
+      return $?
+    fi
     if ham_required_gate_mergeability_unknown && ! ham_required_gate_red \
       && ! ham_live_head_moved && jq -e '.state == "OPEN"' "$HAM_GATE_JSON" >/dev/null; then
       ham_defer_unknown_mergeability

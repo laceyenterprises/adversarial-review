@@ -59,7 +59,7 @@ ham_renew_ci_retry_lease
   assert.equal(missing.status, 1, missing.stderr);
 });
 
-function runWait(t, { gate, greenAfterSleep = false, greenAfterPolls = 1, launches = 1, overlap = false, rebaseConflict = false, failAfterGreen = false, fixture = null, staleAbortBeforeAcquire = false, daemonDuringWait = false, transientRead = false }) {
+function runWait(t, { gate, greenAfterSleep = false, greenAfterPolls = 1, launches = 1, overlap = false, rebaseConflict = false, failAfterGreen = false, lateGate, fixture = null, staleAbortBeforeAcquire = false, daemonDuringWait = false, transientRead = false }) {
   const dir = mkdtempSync(join(tmpdir(), 'ci-wait-refund-'));
   t.after(() => rmSync(dir, { recursive: true, force: true }));
   writeFileSync(join(dir, 'clock'), '0');
@@ -175,7 +175,11 @@ NODE
   ${staleAbortBeforeAcquire ? '[ "$HAM_MERGE_LEASE_RETRYABLE_ABORT" -eq 0 ] && [ -z "$HAM_MERGE_LEASE_RETRYABLE_ABORT_REASON" ] || exit 90' : ':'}
   wait_phase
   phase_status=$?
-  ${failAfterGreen ? `jq '.ok = false | .checksConclusion = "FAILURE" | .reasons = ["ci-not-green"]' "$HAM_GATE_JSON" > "$TEST_ROOT/red.json"; mv "$TEST_ROOT/red.json" "$HAM_GATE_JSON"
+  ${lateGate ? `printf '%s\\n' ${quote(JSON.stringify({ state: 'OPEN', headMatches: true, isDraft: false, ...lateGate }))} > "$HAM_GATE_JSON"
+  final_gate() { ${finalGate} }
+  final_gate
+  phase_status=$?
+  echo "outcome:$HAM_PHASE_OUTCOME" >> "$TEST_ROOT/audits"` : failAfterGreen ? `jq '.ok = false | .checksConclusion = "FAILURE" | .reasons = ["ci-not-green"]' "$HAM_GATE_JSON" > "$TEST_ROOT/red.json"; mv "$TEST_ROOT/red.json" "$HAM_GATE_JSON"
   final_gate() { ${finalGate}
   }
   final_gate
@@ -471,5 +475,23 @@ printf 'exit:%s outcome:%s held:%s' "$?" "$HAM_PHASE_OUTCOME" "$HAM_MERGE_LEASE_
     assert.deepEqual(audits[0].holders, [{ holderPr: 123 }]);
     assert.match(result.stderr, /lease wait exhausted behind PR 123/);
     assert.match(result.stdout, outcome === 'acquired' ? /exit:0.*held:1/ : /exit:20 outcome:parked:merge-lease-timeout/);
+  });
+}
+
+for (const [name, gate, retry] of [
+  ['green', {}, true],
+  ['pending', { checksConclusion: 'PENDING', reasons: ['pr-not-mergeable', 'ci-not-green'] }, true],
+  ['red', { checksConclusion: 'FAILURE', reasons: ['pr-not-mergeable', 'ci-not-green'] }, false],
+  ['draft', { isDraft: true }, false],
+  ['closed', { state: 'CLOSED' }, false],
+  ['held', { reasons: ['pr-not-mergeable', 'blocking-label-present'] }, false],
+]) {
+  test(`CLOSERCONFLICT-01: late conflict with ${name} gate facts ${retry ? 'requests repair' : 'stays refused'}`, t => {
+    const result = runWait(t, { gate: { ok: false, checksConclusion: 'PENDING', reasons: ['ci-not-green'] },
+      greenAfterSleep: true, lateGate: { ok: false, mergeable: 'CONFLICTING',
+        checksConclusion: 'SUCCESS', reasons: ['pr-not-mergeable'], ...gate } });
+    assert.match(result.audit, retry ? /^outcome:retry-final-gate-conflict\nexit:20\n$/
+      : /^failed-without-merge github-gate-not-green\noutcome:.*\nexit:20\n$/);
+    assert.equal(result.attempts[0].attempts, retry ? 0 : 1);
   });
 }

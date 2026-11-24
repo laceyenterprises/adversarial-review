@@ -8528,6 +8528,19 @@ All release the lease. A post-rebase PR snapshot retries transient failures with
 the update-branch retry cap and exponential backoff, retaining the last valid
 snapshot. Exhaustion or a permanent failure reports `pr-refresh-failed`
 and releases the lease before returning, including during the in-run CI retry.
+
+If the final GitHub gate sees a confirmed conflict on the validated open,
+non-draft head with only mergeability and possibly pending CI blocking it, the
+close controller yields the lease. It uses the local conflict replay at the
+current base and validates the detached result before its exact-head push.
+It rebuilds the audit and predicate and waits for required checks on the
+published head before trying merge again. At most two final-gate replays are
+allowed per run. A changed patch is published for independent review.
+Conflict markers or an exhausted replay budget record `needs-rebase-repair`
+for the current head. The closure sweep can reserve one continuation for that
+head. Closer and successor dispatch can repair a confirmed conflict.
+Draft and closed PRs are refused, and UNKNOWN mergeability waits for a fresh
+snapshot. Daemon and executor merge permission still requires `MERGEABLE`.
 PR node-ID resolution shares the update-branch transient retry cap and backoff;
 permanent lookup failures stop immediately. Real read, publication, head-race and
 authority failures continue to fail closed. A non-cooperating base writer during

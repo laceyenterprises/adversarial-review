@@ -1688,10 +1688,10 @@ existing final-fix-all work order for that head. A disabled or refused handoff
 records `needs-closer`, alerts through closure-wait and retains the receipt for
 later closure passes. A terminal final-fix-all result lets a strict exact-head
 review with findings that selects hammer proceed through ordinary admission and
-retry caps, including when failed CI is the repair reason. Successor custody pages on
+retry caps, including when failed CI is the repair reason. The receipt records `fallbackAt` to transfer deadline ownership to hammer across retry gaps and caps. Successor custody pages on
 refusal; the watcher deadline sweep also escalates after 1800 seconds from the
 original request if the receipt remains unenrolled on the same open head
-without a live closer dispatch or retry. Confirmed terminal or moved heads
+without hammer fallback ownership, prior successful escalation or a live closer dispatch or retry. Successful delivery records `escalatedAt` and stops probes across restarts; failed delivery remains retryable. Retired receipt JSON is pruned after seven days under its persistent lock. Confirmed terminal or moved heads
 retire their receipts from the sweep. Poll updates do not extend that deadline, and both observations share one page
 latch. See
 [successor records](data-model/closer-successors.md) and

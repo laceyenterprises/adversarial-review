@@ -22,12 +22,12 @@ records `needs-closer` and alerts through closure-wait. Later closure passes
 recheck admission on that head, including from legacy `ownerless-closer-no-merge`
 receipts. If final fix-all has already spent its head-scoped round, only a strict
 exact-head review with findings that selects hammer continues through ordinary
-hammer admission and caps, including when failed CI is the repair reason. Other routes retain `needs-closer` custody and the refusal page. Every
+hammer admission and caps, including when failed CI is the repair reason. A durable `fallbackAt` marker transfers deadline ownership to hammer across retry gaps and cap escalation. Other routes retain `needs-closer` custody and the refusal page. Every
 30 seconds the watcher scans a bounded batch of receipts independently of
 closure selection. After 1800 seconds from the original `requestedAt`, it
 retires a receipt when GitHub confirms a terminal PR or a moved head. For the
 same open head, a live closer launch (including retries) suppresses the overdue
-page while it owns the head. Overdue pages share the immediate refusal latch. Poll updates to `updatedAt` do not extend the
+page while it owns the head. Successful immediate or overdue delivery records `escalatedAt` and stops future probes; failed delivery remains retryable. Retired receipt JSON is pruned after seven days under its persistent lock. Overdue pages share the immediate refusal latch. Poll updates to `updatedAt` do not extend the
 deadline. See
 [successor records](data-model/closer-successors.md) and
 [publication ownership](data-model/hammer-publication-ownership.md).
@@ -5254,7 +5254,14 @@ request a fresh exact-head review through the existing operator re-review
 procedure. If the findings still apply, use the current-head
 `merge-agent-requested` operator fallback for follow-through under its normal
 review and merge gates. Keep strict mode enabled during per-PR recovery.
-Record retry-cap page volume during the post-deploy observation window.
+Over the first 24 hours after deployment, record distinct sampled strict
+exact-head findings heads, retry-cap pages and manual
+`merge-agent-requested` closures, with PR/head identities and page/closure
+evidence. More than 3 retry-cap pages or more than 3 manual closures fails
+operator acceptance and requires revisiting the policy before broader rollout.
+Record zero counts explicitly; no matching traffic leaves acceptance pending.
+The committed operator plan is
+`modules/worker-pool/post-merge-actions/AMASTRICTROUTE-01.yaml`.
 
 ### `not-eligible` reasons in the closer prompt audit
 

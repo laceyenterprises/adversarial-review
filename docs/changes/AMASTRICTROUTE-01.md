@@ -99,3 +99,44 @@ Targeted validation covers timer lifecycle, the watcher claim loop, the five
 advisory fixes and the existing state-machine smoke. Lint (zero errors),
 contract typechecking, the 103-entry data-model catalog validator and the
 offline research walkthrough pass; the full suite remains with PR-head CI.
+
+### Final Comment-only advisory remediation
+
+Successor receipts now record `fallbackAt` when the spent fix-all hands custody
+to normal hammer admission. The deadline sweep skips that ownership through
+retry gaps and cap escalation. A different settlement clears the marker.
+Successful immediate or overdue pages record `escalatedAt` under the receipt
+lock and suppress subsequent probes; delivery failures remain retryable.
+Retired receipt JSON expires after seven days, with a locked timestamp recheck
+and retained lock inode. The data-model fragment records these optional fields;
+the generated catalog remains main-owned.
+
+The closer-successor source inventory includes `src/watcher-tick-preflight.mjs`.
+The README, state/smoke declarations and sandbox handoff fixture reflect the
+ownership, successful escalation and retirement behavior.
+The committed operator acceptance plan now records 24 hours of strict
+exact-head findings traffic, retry-cap pages and manual closures. More than
+three pages or more than three manual closures requires policy review before
+broader rollout. Strict runtime merge authority is unchanged.
+
+The live PR body still embeds the older acceptance command. This work order
+permits read-only `gh` queries and guarded code publication; regenerating that
+section from the committed `plan_path` remains a publication-owner follow-up.
+The worker-pool walkthrough and change-fragment obligation live in the Agent OS
+superproject and remain outside this checkout. Shared scanner/head-predicate
+extraction was left unapplied because it broadens the patch across independent
+recovery paths; estimated savings applied in this round: zero lines or probes.
+
+Verification: `bash bin/run-bounded.sh --timeout 120 -- node
+test/run-tests.mjs test/closerrereviewrace-01.test.mjs
+test/pr-blockers.test.mjs` passed all 68 tests, including delivery retry,
+post-page probe suppression, hammer ownership and locked TTL boundaries.
+Lint passed with zero errors (147 existing warnings), contract typechecking,
+the 103-entry catalog validator, the offline walkthrough and `git diff --check`
+passed. The Python worker-validation module is unavailable in this checkout;
+the checked-in bounded runner owns timeout and cleanup.
+The separate SMV/closer-next-action run passed all 120 tests, including the
+sandbox handoff smoke. The watcher claim-loop suite passed all 199 tests within
+its separate 300-second bound. An initial combined run reached its 180-second
+bound without failed assertions; the completed separate runs cover all three
+files. Total completed targeted coverage: 387 tests.

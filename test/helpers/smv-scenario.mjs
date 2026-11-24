@@ -1175,12 +1175,14 @@ if (scenario === 'clean') {
   const terminal = { ...deadlineInput, prNumber: 74 };
   const moved = { ...deadlineInput, prNumber: 75 };
   const enrolled = { ...deadlineInput, prNumber: 76 };
-  for (const subject of [pending, needsCloser, terminal, moved, enrolled]) requestCloserSuccessor(subject);
-  assert.equal((await settleCloserSuccessor({ ...pending, allowHammerFallback: true,
+  const fallback = { ...deadlineInput, prNumber: 77 };
+  for (const subject of [pending, needsCloser, terminal, moved, enrolled, fallback]) requestCloserSuccessor(subject);
+  assert.equal((await settleCloserSuccessor({ ...fallback, allowHammerFallback: true,
     handoffImpl: async () => ({ action: 'fallback' }) })).action, 'fallback');
   for (let elapsed = 30_000; elapsed < 1_800_000; elapsed += 30_000) {
-    await settleCloserSuccessor({ ...needsCloser, enabled: false,
-      now: new Date(Date.parse(custodyNow) + elapsed).toISOString(), observeWaitImpl: async () => {} });
+    await assert.rejects(settleCloserSuccessor({ ...needsCloser, enabled: false,
+      now: new Date(Date.parse(custodyNow) + elapsed).toISOString(),
+      observeWaitImpl: async () => { throw new Error('synthetic page failure'); } }), /synthetic page failure/);
   }
   await settleCloserSuccessor({ ...enrolled, handoffImpl: successorHandoff });
   const pages = [];
@@ -1216,9 +1218,16 @@ if (scenario === 'clean') {
   }
   await sweepAt(Date.parse(custodyNow) + 1_900_000);
   assert.equal(pages.length, 2, 'pages deduplicate across sweep restarts');
+  assert.equal(probes.filter(number => number === needsCloser.prNumber).length, 1, 'paged receipts skip probes');
+  assert.equal(probes.includes(fallback.prNumber), false, 'hammer ownership survives gaps between launches');
   assert.equal(probes.includes(enrolled.prNumber), false);
   for (const subject of [terminal, moved]) {
     assert.equal(probes.filter(prNumber => prNumber === subject.prNumber).length, 1);
+  }
+  await sweepAt(Date.parse(custodyNow) + 1_800_000 + 7 * 86_400_000);
+  for (const subject of [terminal, moved]) {
+    assert.equal(existsSync(closerSuccessorPath(successorDeadlineRoot, subject)), false);
+    assert.equal(existsSync(`${closerSuccessorPath(successorDeadlineRoot, subject)}.lock`), true);
   }
   evidence = { trailerlessPublicationDeferred: true, mergedPublicationRetired: true, successorEnrolledOnce: true, refusedSuccessorAlerted: true, legacySuccessorRecovered: true, overdueSuccessorsPagedOnce: true, hammers, finalFixAllQueuedBeforeHammer: true, finalFixAllTerminalFallback: true, cleanBranchHoldSettled: true, unchangedHeadHasNoPublicationDebt: true, nullHeadConfirmed: true, unknownBranchRetryRecovered: true, terminalScratchRemoved: true, drainingScratchRetained: true, privatePytestTemp: true, agedCwdTimeoutReclaimed: true, scratchCursorResumed: true, scratchLedgerClockIndependent: true, drainResumedNextPass: true, drainCountersUnchanged: true, drainHintExpiredWithoutCloser: true, legacyDrainHintRetired: true, hammerRangeValidated: true, noHammerReviewRequest: true, claimPreserved: true, reviewedHeadRecorded: true,
     headlessPostRequeuedOnce: true, terminalRetryable: true, terminalCapacityFreed: true, terminalNoMergeReclaimedSamePass: true,

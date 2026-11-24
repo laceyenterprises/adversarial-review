@@ -1,7 +1,7 @@
 import fsExt from 'fs-ext';
 import { createHash } from 'node:crypto';
 import { closeSync, mkdirSync, openSync, readFileSync } from 'node:fs';
-import { opendir, readFile } from 'node:fs/promises';
+import { opendir, readFile, unlink } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { writeFileAtomic } from '../atomic-write.mjs';
 import { readLaunchRequestStatusFromLedgerAsync } from '../session-ledger-read-adapter.mjs';
@@ -10,6 +10,7 @@ import { launchRequestInFlight } from './launch-request-status.mjs';
 import { observeClosureWait } from './closure-wait.mjs';
 
 const SUCCESSOR_DEADLINE_MS = 30 * 60_000;
+const RETIRED_TTL_MS = 7 * 24 * 60 * 60_000;
 const waitClass = 'closer-successor';
 
 export const closerSuccessorPath = (rootDir, { repo, prNumber, headSha }) => join(rootDir, 'data', 'closer-successors',
@@ -76,6 +77,7 @@ export async function settleCloserSuccessor({ rootDir, repo, prNumber, headSha, 
     // Fresh admission can revisit a retired head if the PR was reopened or moved back.
     if (record.retiredAt) {
       delete record.retiredAt;
+      delete record.escalatedAt;
       writeFileAtomic(path, `${JSON.stringify(record)}\n`);
     }
     let result;
@@ -84,13 +86,20 @@ export async function settleCloserSuccessor({ rootDir, repo, prNumber, headSha, 
       result = !enabled ? { reason: 'successor-path-disabled' } : !admitted ? { reason: 'successor-admission-refused' }
         : await handoff({ rootDir, repo, prNumber, headSha, reviewBody: record.reviewBody, now, riskClass });
     } catch (error) { result = { reason: 'successor-dispatch-failed', detail: String(error?.message ?? error).slice(0, 300) }; }
-    if (allowHammerFallback && result?.action === 'fallback') return { ...record, action: 'fallback' };
+    if (allowHammerFallback && result?.action === 'fallback') {
+      record.fallbackAt ||= now;
+      writeFileAtomic(path, `${JSON.stringify(record)}\n`);
+      return { ...record, action: 'fallback' };
+    }
+    delete record.fallbackAt;
     record = { ...record, updatedAt: now, status: result?.remediation?.jobId ? 'successor-enrolled' : 'needs-closer',
       successorJobId: result?.remediation?.jobId || null, reason: result?.reason || result?.action || 'successor-dispatch-refused' };
     writeFileAtomic(path, `${JSON.stringify(record)}\n`);
-    if (record.status === 'needs-closer') {
+    if (record.status === 'needs-closer' && !record.escalatedAt) {
       await observeWaitImpl({ rootDir, repo, prNumber, headSha, reason: `${record.status}:${record.reason}`,
         now: Date.parse(now), immediate: true, waitClass });
+      record.escalatedAt = now;
+      writeFileAtomic(path, `${JSON.stringify(record)}\n`);
     }
     return record;
   } finally { closeSync(fd); }
@@ -113,8 +122,10 @@ export function createCloserSuccessorDeadlineSweep({ rootDir, readLive, now = Da
   let running = false;
   let stopped = false;
   const overdue = (record, observedAt) => record && record.schemaVersion === 1
-    && record.status !== 'successor-enrolled' && !record.retiredAt
+    && record.status !== 'successor-enrolled' && !record.retiredAt && !record.fallbackAt && !record.escalatedAt
     && observedAt - Date.parse(record.requestedAt) >= SUCCESSOR_DEADLINE_MS;
+  const expired = (record, observedAt) => record?.schemaVersion === 1
+    && observedAt - Date.parse(record.retiredAt) >= RETIRED_TTL_MS;
 
   async function closeCursor() {
     const current = cursor;
@@ -125,11 +136,19 @@ export function createCloserSuccessorDeadlineSweep({ rootDir, readLive, now = Da
   async function check(entry) {
     const path = join(directory, entry.name);
     const receipt = JSON.parse(await readFile(path, 'utf8'));
-    if (!overdue(receipt, now()) || !/^[\w.-]+\/[\w.-]+$/.test(receipt.repo)
+    if ((!overdue(receipt, now()) && !expired(receipt, now())) || !/^[\w.-]+\/[\w.-]+$/.test(receipt.repo)
       || !Number.isSafeInteger(receipt.prNumber) || receipt.prNumber < 1
       || !/^[0-9a-f]{40}$/i.test(receipt.headSha)
       || closerSuccessorPath(rootDir, receipt) !== path) return false;
     const { repo, prNumber, headSha } = receipt;
+    if (expired(receipt, now())) {
+      const fd = openSync(`${path}.lock`, 'a', 0o640);
+      try {
+        fsExt.flockSync(fd, 'exnb');
+        if (expired(readCloserSuccessor(rootDir, receipt), now())) await unlink(path);
+      } finally { closeSync(fd); }
+      return false;
+    }
     const live = await readLive(repo, prNumber);
     if (stopped) return true;
     const liveHead = /^[0-9a-f]{40}$/i.test(live?.headRefOid) ? live.headRefOid.toLowerCase() : null;
@@ -150,6 +169,7 @@ export function createCloserSuccessorDeadlineSweep({ rootDir, readLive, now = Da
         }
         await observeWaitImpl({ rootDir, repo, prNumber, headSha, now: observedAt,
           reason: 'closer-successor-overdue', immediate: true, waitClass });
+        writeFileAtomic(path, `${JSON.stringify({ ...current, escalatedAt: new Date(observedAt).toISOString() })}\n`);
       }
     } finally { closeSync(fd); }
     return true;

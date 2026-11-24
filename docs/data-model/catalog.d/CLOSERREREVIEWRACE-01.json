@@ -26,10 +26,11 @@
         "src/ama/dispatch-closer.mjs",
         "src/ama-closure-orchestration.mjs",
         "src/follow-up-jobs.mjs",
-        "src/watcher.mjs"
+        "src/watcher.mjs",
+        "src/watcher-tick-preflight.mjs"
       ],
       "owner": "AMA closure orchestration",
-      "optionalField": "retiredAt (UTC ISO 8601); confirms a terminal PR or moved head and suppresses future deadline probes until fresh admission"
+      "optionalField": "retiredAt, fallbackAt, escalatedAt (UTC ISO 8601); retired JSON pruned after seven days under the persistent lock; hammer ownership and successful escalation suppress deadline probes"
     },
     {
       "id": "ama-closure-waits",

@@ -96,6 +96,10 @@ for (const fields of [
   { code: 'ETIMEDOUT' },
   { killed: true, signal: 'SIGTERM' },
   { killed: true, signal: 'SIGKILL' },
+  { killed: false, signal: 'SIGTERM' },
+  { killed: false, signal: 'SIGKILL' },
+  { signal: 'SIGTERM' },
+  { signal: 'SIGKILL' },
 ]) {
   for (const stage of ['compare', 'comments', 'PR lookup', 'git']) {
     test(`findings-only currency propagates ${JSON.stringify(fields)} from ${stage}`, async t => {

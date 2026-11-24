@@ -13,7 +13,7 @@ const SHA = /^[a-f0-9]{40}$/i;
 const LIMIT = 256;
 const isAbort = error => ['AbortError', 'TimeoutError'].includes(error?.name)
   || ['ABORT_ERR', 'ETIMEDOUT'].includes(error?.code)
-  || (error?.killed === true && ['SIGTERM', 'SIGKILL'].includes(error?.signal));
+  || ['SIGTERM', 'SIGKILL'].includes(error?.signal);
 
 // No fetches: callers own checkout hydration. Missing objects are missing proof,
 // never permission to assume that a rewritten review is still current.

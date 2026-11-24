@@ -6839,12 +6839,21 @@ Hammer starting-range check can use that same replay. A known branch reset
 refuses it. A later push needs its own proof, and the new head still requires
 the ordinary merge validation and source-preservation checks.
 
-The patch proof reads at most 256
-linear commits per series, preserves empty commit positions, and permits extra
-commits only with independently authenticated HAM identity and matching
-`Reviewed-Head`, worker ticket/class and close-out trailers. A changed PR patch,
-unattributed extra commit, branch reset or later unrelated push supplies no
-carry-forward authority. Missing objects, capped evidence and unavailable
+The patch proof reads at most 256 linear commits per series and preserves
+empty commit positions. Rebase-only proof permits extra commits with
+independently authenticated HAM identity and matching `Reviewed-Head`, worker
+ticket/class and close-out trailers. For finding applicability, the review's
+ordered patches can also match a strict prefix of the live branch. Every
+remaining commit must have its own launch-bound publication in the same PR.
+The reader uses completed remediation worker receipts matched to the commit's
+job and class. HQ remediation needs a matching produced head attestation.
+An HQ PR update needs its published round and a produced branch-push
+attestation. The dispute still requires the latest authoritative review and
+concrete evidence at the live head. This proof grants finding applicability
+only. It cannot waive the exact review head match or carry a withdrawal's
+earlier evidence head. A changed PR patch, unattributed extra commit, branch
+reset or later unrelated push supplies no carry-forward authority. Missing
+objects, capped evidence and unavailable
 provenance name the missing proof and retain no-merge status; they do not imply
 that operator recovery is necessary.
 Binary-only commits use the same `--binary --full-index` diff and stable patch
@@ -10859,6 +10868,12 @@ After deployment, SRE restarts the watcher through its registered restart path
 and observes closer wakes within two passes. Workers do not perform that live step.
 
 ## Change notes
+
+### DISPUTECURRENCY-01 — review applicability after lane remediation
+
+A patch-equivalent rebase followed by launch-attributed remediation or PR
+updates can preserve the cited findings for fresh adjudication on the live head.
+Earlier withdrawal evidence still requires rebase-only proof.
 
 ### CAPREHEAD-02 — exhausted-cycle builder recovery
 

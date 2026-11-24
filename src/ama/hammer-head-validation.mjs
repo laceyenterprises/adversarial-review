@@ -168,6 +168,7 @@ async function readCompletedJob(path, onOversize) {
 // Read only daemon-owned state under the supplied runtime root. Old rounds
 // without a resulting head cannot establish an edge.
 export async function readCompletedRemediationEvidence(rootDir, repo, prNumber) {
+  const lanePublications = new Map();
   const unavailable = { rounds: [], settledRounds: [], finalPublications: [] };
   if (typeof rootDir !== 'string' || !rootDir || typeof repo !== 'string' || !/^[\w.-]+\/[\w.-]+$/.test(repo)
     || !['number', 'string'].includes(typeof prNumber)
@@ -177,6 +178,7 @@ export async function readCompletedRemediationEvidence(rootDir, repo, prNumber) 
   const finalPublications = [];
   let records = 0;
   let entries = 0;
+  let lanePublicationsCapped = false;
   const capped = (kind, limit) => {
     reportProofLimit(`completed-round proof scan hit the ${kind} limit`, limit, repo, prNumber);
     return { ...unavailable, limitReached: kind };
@@ -206,6 +208,21 @@ export async function readCompletedRemediationEvidence(rootDir, repo, prNumber) 
           if (rounds.size > MAX_COMPLETED_ROUND_EDGES) {
             return capped('round edges', MAX_COMPLETED_ROUND_EDGES);
           }
+          // The completion writer can observe a moved PR even when the worker
+          // did not publish. Only its explicit worker-push receipt binds a lane.
+          const { worker, completion } = round;
+          if (!lanePublicationsCapped && job.kind === 'adversarial-review-follow-up'
+            && typeof job.jobId === 'string' && job.jobId
+            && head !== base && completion?.workerPushedHeadSha === head && !completion.pendingCiOnly
+            && worker?.state === 'completed' && typeof worker.launchRequestId === 'string' && worker.launchRequestId.trim()) {
+            lanePublications.set(`${head}:${job.jobId}`, worker);
+            if (lanePublications.size > MAX_COMPLETED_ROUND_EDGES) {
+              lanePublications.clear();
+              lanePublicationsCapped = true;
+              reportProofLimit('completed-round proof scan hit the lane publications limit',
+                MAX_COMPLETED_ROUND_EDGES, repo, prNumber);
+            }
+          }
         }
         const settled = completedCommentOnlyHandoff(job);
         if (settled) settledRounds.set(`${settled.startHeadSha}:${settled.resultingHeadSha}`, settled);
@@ -218,7 +235,7 @@ export async function readCompletedRemediationEvidence(rootDir, repo, prNumber) 
   } catch {
     return unavailable;
   }
-  return { rounds: [...rounds.values()], settledRounds: [...settledRounds.values()], finalPublications };
+  return { rounds: [...rounds.values()], settledRounds: [...settledRounds.values()], finalPublications, lanePublications };
 }
 
 export async function readCompletedRemediationRounds(rootDir, repo, prNumber) {

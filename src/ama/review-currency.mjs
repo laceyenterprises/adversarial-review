@@ -1,10 +1,13 @@
 import { loadAwareTimeoutMs } from '../load-aware-timeout.mjs';
 import { execFile } from 'node:child_process';
+import { readHeadAttestationChainForPr, resolveDaemonWorkerIdentityFromHeadAttestation } from '../daemon-worker-identity.mjs';
+import { PR_ROUND_KINDS, readPrRoundLedger } from '../pr-round-ledger.mjs';
+import { REMEDIATION_WORKER_IDENTITY_DEFAULTS, remediationWorkerTrailerClass } from '../remediation-worker-provenance.mjs';
 import {
   HAMMER_COMMENTS_CAPPED, hammerAttestationChain, hammerProvenanceCommentsCapped,
   readCompletedRemediationEvidence, readHammerProvenanceComments,
 } from './hammer-head-validation.mjs';
-import { hamCommitIdentityMatches, isHamWorkerTicket, parseCommitTrailers } from './ham-provenance.mjs';
+import { hamCommitIdentityMatches, isHamWorkerTicket, parseCommitTrailers, parseCommitTrailerValues } from './ham-provenance.mjs';
 
 const SHA = /^[a-f0-9]{40}$/i;
 const LIMIT = 256;
@@ -31,9 +34,8 @@ export function rebaseCurrencyCovers(currency, reviewedHead, currentHead) {
 }
 
 // Compare the PR's own ordered patch IDs, retaining empty commit positions.
-// Extra commits must independently carry HAM identity and reviewed-head
-// provenance from GitHub; a local trailer or a fleet push actor is insufficient.
-async function patchEquivalent({ reviewedHead, currentHead, base, git, get, repo }) {
+// Preserve the existing HAM proof. Other lanes can only extend a strict prefix.
+async function patchCurrency({ reviewedHead, currentHead, base, git, get, repo, laneCommit }) {
   const series = async head => {
     const fork = (await git(['merge-base', head, base])).trim();
     if (!SHA.test(fork)) throw new Error('missing merge base');
@@ -57,36 +59,77 @@ async function patchEquivalent({ reviewedHead, currentHead, base, git, get, repo
   const oldIds = [];
   for (const sha of oldSeries.commits) oldIds.push(await patch(sha));
   let index = 0;
+  let hamExtra = false, laneExtra = false;
   for (const sha of newSeries.commits) {
     const id = await patch(sha);
     if (index < oldIds.length && id === oldIds[index]) { index++; continue; }
     const commit = await get(`repos/${repo}/commits/${sha}`);
+    if (commit?.sha !== sha) return null;
     const trailers = parseCommitTrailers(commit?.commit?.message);
-    if (commit?.sha !== sha || !hamCommitIdentityMatches(commit)
-      || !/^hammer(?:-corp|-claude)?$/i.test(trailers['worker-class'] || '')
-      || !isHamWorkerTicket(trailers['worker-ticket']) || trailers['reviewed-head'] !== reviewedHead
-      || trailers['closed-by'] !== 'hammer (adversarial-pipe-mode)') return false;
+    if (!laneExtra && hamCommitIdentityMatches(commit)
+      && /^hammer(?:-corp|-claude)?$/i.test(trailers['worker-class'] || '')
+      && isHamWorkerTicket(trailers['worker-ticket']) && trailers['reviewed-head'] === reviewedHead
+      && trailers['closed-by'] === 'hammer (adversarial-pipe-mode)') {
+      hamExtra = true;
+      continue;
+    }
+    if (hamExtra || index !== oldIds.length || !laneCommit || !await laneCommit(commit, trailers)) return null;
+    laneExtra = true;
   }
-  return index === oldIds.length;
+  if (index !== oldIds.length) return null;
+  return laneExtra ? 'reviewed-rebase-lane-suffix' : 'reviewed-rebase-patch-id';
 }
 
 // One evaluation-local reader for finding admission AND disposition admission.
 // Only an exact current endpoint is covered; a later unrelated push cannot
 // inherit a prior HAM audit edge. Cache reads only within this live evaluation.
 export function createReviewCurrencyReader({ repo, prNumber, rootDir, get, comments = null, loadComments, cwd,
-  git = (args, input) => currencyGit(args, input, { cwd }), pr = null }) {
+  git = (args, input) => currencyGit(args, input, { cwd }), pr = null,
+  readHeadAttestations = readHeadAttestationChainForPr }) {
   const cache = new Map();
-  let commentRead, roundRead, prRead;
+  let commentRead, roundRead, prRead, updateHeads, attestationRead;
   const readComments = () => commentRead ||= loadComments ? Promise.resolve().then(loadComments)
     : comments !== null ? Promise.resolve(comments)
     : readHammerProvenanceComments(page => get(
       `repos/${repo}/issues/${prNumber}/comments?per_page=100${page === 1 ? '' : `&page=${page}`}`));
+  const laneCommitMatches = async (commit, trailers, publications) => {
+    const { sha } = commit;
+    const jobId = trailers['worker-job-id'];
+    const worker = publications?.get(`${sha}:${jobId}`);
+    const workerClass = worker?.workerClass || worker?.model;
+    const matchedRemediation = Object.hasOwn(REMEDIATION_WORKER_IDENTITY_DEFAULTS, workerClass)
+      && remediationWorkerTrailerClass(workerClass) === trailers['worker-class']
+      && parseCommitTrailerValues(commit.commit.message)['worker-job-id']?.length === 1;
+    if (matchedRemediation && !worker.dispatchId && !worker.requiresProducedAttestation
+      && (worker.dispatchMode === undefined || worker.dispatchMode === 'local')) {
+      return worker.launchRequestId === jobId;
+    }
+    // An exact HCP in-place publication round identifies the PR-update lane.
+    // The signed production record supplies its launch and worker identity.
+    updateHeads ??= new Set(readPrRoundLedger(rootDir, { repo, prNumber }).filter(entry =>
+      entry.kind === PR_ROUND_KINDS.HQ_PR_UPDATE && !entry.voided
+      && typeof entry.repo === 'string' && entry.repo.toLowerCase() === repo.toLowerCase()
+      && entry.prNumber === Number(prNumber) && entry.roundId === `hq-pr-update:${entry.headSha}`)
+      .map(entry => entry.headSha));
+    if (!matchedRemediation && !updateHeads.has(sha)) return false;
+    const isPrUpdate = updateHeads.has(sha);
+    const identity = await resolveDaemonWorkerIdentityFromHeadAttestation({
+      rootDir, repo, prNumber, currentHeadSha: sha, requireExactSubject: true,
+      readHeadAttestationChainForPrImpl: async args => {
+        attestationRead ??= Promise.resolve().then(() => readHeadAttestations({ ...args, useDeployVerifier: true }));
+        const rows = await attestationRead;
+        return isPrUpdate ? rows.filter(row => row?.payload?.source === 'hq_branch_push') : rows;
+      },
+    });
+    return identity.ok && (isPrUpdate || (worker.launchRequestId === identity.launchRequestId
+      && workerClass === identity.workerClass));
+  };
   const proveRebase = async (reviewedHead, currentHead, { rebaseOnly, limits, diagnostics }) => {
     const provenance = await readComments().catch(() => null);
     if (hammerProvenanceCommentsCapped(provenance, repo, prNumber)) limits.push(HAMMER_COMMENTS_CAPPED);
     if (hammerAttestationChain(provenance, reviewedHead, currentHead)) return 'closer-rebase-provenance';
     roundRead ??= readCompletedRemediationEvidence(rootDir, repo, prNumber);
-    const { rounds, settledRounds, finalPublications, limitReached } = await roundRead;
+    const { rounds, settledRounds, finalPublications, lanePublications, limitReached } = await roundRead;
     if (limitReached) limits.push(`completed-round proof scan hit the ${limitReached} limit`);
     if (hammerAttestationChain(provenance, reviewedHead, currentHead, settledRounds)) return 'closer-rebase-provenance';
     // The local final publication admits its source review as evidence. It
@@ -97,8 +140,14 @@ export function createReviewCurrencyReader({ repo, prNumber, rootDir, get, comme
     try {
       prRead ||= pr ? Promise.resolve(pr) : get(`repos/${repo}/pulls/${prNumber}`);
       const live = await prRead;
-      if (live?.head?.sha === currentHead && SHA.test(live?.base?.sha || '')
-        && await patchEquivalent({ reviewedHead, currentHead, base: live.base.sha, git, get, repo })) return 'reviewed-rebase-patch-id';
+      if (live?.head?.sha === currentHead && SHA.test(live?.base?.sha || '')) {
+        // Lane changes keep findings applicable for fresh adjudication at the
+        // live head. They carry neither a prior withdrawal nor a head waiver.
+        const laneCommit = rebaseOnly || !rootDir ? null
+          : (commit, trailers) => laneCommitMatches(commit, trailers, lanePublications);
+        const proof = await patchCurrency({ reviewedHead, currentHead, base: live.base.sha, git, get, repo, laneCommit });
+        if (proof) return proof;
+      }
     } catch (error) {
       diagnostics.push(error.message);
     }
@@ -113,7 +162,8 @@ export function createReviewCurrencyReader({ repo, prNumber, rootDir, get, comme
       const result = { reviewedHead, currentHead, current: false };
       if (!SHA.test(reviewedHead || '') || !SHA.test(currentHead || '')) return { ...result, missingProof: 'invalid reviewed or current head' };
       if (reviewedHead === currentHead) return { ...result, current: true, proof: 'exact-head' };
-      const localReplay = rebaseOnly ? '' : ' or a recorded local final-remediation replay';
+      const localReplay = rebaseOnly ? '' : ' or a recorded local final-remediation replay'
+        + ' or a patch-equivalent prefix with a launch-attributed lane suffix';
       const missingProof = `HAM base/head provenance or patch-equivalent PR commits${localReplay} for ${reviewedHead} -> ${currentHead}`;
       const limits = [], diagnostics = [];
       let status;

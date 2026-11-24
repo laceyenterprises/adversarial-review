@@ -3158,8 +3158,12 @@ Key control points:
   daemon's repository- and PR-scoped store for finding applicability.
   A head-match waiver or cross-head withdrawal requires each native edge to
   be a proven comment-only final handoff with re-review suppressed.
-  Ordered patch-ID equivalence apart
-  from authenticated HAM remediation commits is an independent proof. A proven
+  Ordered patch-ID equivalence apart from authenticated HAM remediation commits
+  is an independent proof. A strict patch-equivalent prefix followed entirely
+  by launch-attributed remediation or PR-update commits preserves applicability
+  of the latest authoritative findings. Disputing them requires evidence at
+  the live head. This proof alone cannot waive head match or reuse a withdrawal
+  from before the suffix. A proven
   rebase reuses the original withdrawal without rewriting its durable head or
   posting again. Partial withdrawals reduce the standing blocker count.
   Unproven currency admits neither findings nor dispositions and refuses merge
@@ -3170,7 +3174,7 @@ Key control points:
   Legacy disputes with nullable resolution grant no final prompt authority. Before
   opening the existing database, the helper checks effective UID ownership of
   daemon state and the configured pager sink. Only the latest authoritative
-  review in live-head ancestry may be disputed.
+  review shown applicable to the live head may be disputed.
   Neither reversal authorization nor dispute raises `hq decision raise`. Proven reversal
   refusals hold merge. Selected R05 `primary-change-repair` admits hammer repair
   under the unchanged authorization and merge predicates. Callers without that
@@ -4274,3 +4278,11 @@ Source validation and normal PR publication do not establish organic activation.
 Observe a naturally conflicting published head reach repair before absent-CI
 waiting, followed by new-head hosted checks and normal merge authority; retain
 owner and publication receipts. Do not seize an existing owner to demonstrate it.
+
+## Change notes
+
+### DISPUTECURRENCY-01 — patch-equivalent prefix with an attributed suffix
+
+The shared review-currency reader keeps the findings applicable for fresh
+live-head adjudication when existing launch records account for every suffix
+commit. A superseding authoritative review still invalidates the citation.

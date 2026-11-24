@@ -11,7 +11,7 @@ import { createServer } from 'node:http';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { fileURLToPath } from 'node:url';
-import { main } from '../bin/repair-in-place.mjs';
+import { main as repairMain } from '../bin/repair-in-place.mjs';
 import { dispatchReadTransport } from '../src/dispatch-read-client.mjs';
 import { openReviewStateDb, ensureReviewStateSchema } from '../src/review-state.mjs';
 import { amaCloserLeaseFilePath } from '../src/ama/closer-lease.mjs';
@@ -24,6 +24,11 @@ import { pairedDispatchAbsence } from './helpers/repair-dispatch-scope.mjs';
 
 const repo = 'example/widgets', prNumber = 23, head = 'd'.repeat(40);
 const closerLaunch = 'lrq_synthetic_closer';
+// Keep all recovery fixtures offline while exercising the production boundary.
+const main = (args, options = {}) => repairMain(args, {
+  readLivePrImpl: async () => ({ prState: 'open', headSha: head, baseBranch: 'main' }),
+  ...options,
+});
 
 function exhaustedPr(t) {
   const rootDir = mkdtempSync(join(tmpdir(), 'repair-dispatch-read-'));
@@ -205,10 +210,48 @@ for (const { name, allowed, rounds = 2, state = 'absent-unfenced', lookupFailure
   }
 });
 
+test('final-fix recovery accepts a live publication after its reviewed revision', async t => {
+  const rootDir = exhaustedPr(t);
+  const identity = { repo, prNumber };
+  const ownerKey = 'ffa-' + 'f'.repeat(64);
+  const dispatchProjectRef = 'pr-merge-orchestration';
+  const { epoch } = reserveRepairEpoch({ rootDir, ...identity, headSha: head, ownerKey,
+    cause: 'review-cycle-exhausted', dispatchProjectRef });
+  const reviewedHead = 'a'.repeat(40);
+  const db = openReviewStateDb(rootDir);
+  try {
+    db.prepare('UPDATE reviewed_prs SET revision_ref=?, reviewer_head_sha=?')
+      .run(reviewedHead, reviewedHead);
+  } finally { db.close(); }
+  const before = readHammerRetryCapLedger(rootDir, identity);
+  mockSdk(t);
+  const reads = [];
+  const result = await main([rootDir, repo, String(prNumber), head, ownerKey,
+    'false', '', '', dispatchProjectRef, epoch.id], { env: freshEnv(),
+    readLivePrImpl: async (repository, number, options) => {
+      reads.push({ repository, number, timeoutMs: options.timeoutMs });
+      return { prState: 'open', headSha: head, baseBranch: 'main' };
+    } });
+  assert.equal(result.ok, true, JSON.stringify(result));
+  assert.equal(result.replayed, true);
+  assert.equal(reads.length, 2, 'recheck the live head after scoped owner absence');
+  assert.ok(reads.every(read => read.repository === repo && read.number === prNumber
+    && read.timeoutMs === 15000));
+  assert.deepEqual(readHammerRetryCapLedger(rootDir, identity), before);
+  const after = openReviewStateDb(rootDir);
+  try {
+    assert.deepEqual(after.prepare('SELECT revision_ref,reviewer_head_sha FROM reviewed_prs').get(),
+      { revision_ref: reviewedHead, reviewer_head_sha: reviewedHead });
+  } finally { after.close(); }
+});
+
 for (const [scenario, expected] of [
   ['closed review row', 'final-fix-pr-not-open'],
   ['missing review row', 'final-fix-pr-not-open'],
-  ['advanced review row', 'final-fix-head-mismatch'],
+  ['moved live head', 'final-fix-head-mismatch'],
+  ['closed live PR', 'final-fix-pr-not-open'],
+  ['unavailable live PR', 'final-fix-pr-unavailable'],
+  ['failed live PR read', 'final-fix-pr-unavailable'],
   ['live closer', 'closer-owned-or-unknown'],
   ['unknown closer', 'closer-owned-or-unknown'],
   ['malformed closer lease', { name: 'SyntaxError' }],
@@ -232,9 +275,6 @@ for (const [scenario, expected] of [
     try {
       if (scenario === 'closed review row') db.prepare("UPDATE reviewed_prs SET pr_state = 'closed'").run();
       if (scenario === 'missing review row') db.prepare('DELETE FROM reviewed_prs').run();
-      if (scenario === 'advanced review row') {
-        db.prepare('UPDATE reviewed_prs SET revision_ref = ?').run('e'.repeat(40));
-      }
     } finally { db.close(); }
   }
   if (scenario.endsWith('closer')) closerLease(rootDir);
@@ -257,7 +297,12 @@ for (const [scenario, expected] of [
       : undefined,
   });
 
-  const recover = () => main(args, { env: freshEnv() });
+  const recover = () => main(args, { env: freshEnv(), readLivePrImpl: async () => {
+    if (scenario === 'failed live PR read') throw new Error('synthetic unavailable reader');
+    if (scenario === 'unavailable live PR') return null;
+    return { prState: scenario === 'closed live PR' ? 'closed' : 'open',
+      headSha: scenario === 'moved live head' ? 'e'.repeat(40) : head, baseBranch: 'main' };
+  } });
   if (typeof expected !== 'string') {
     await assert.rejects(recover, expected);
   } else {
@@ -268,6 +313,39 @@ for (const [scenario, expected] of [
   if (!['live closer', 'unknown closer', 'transport failure'].includes(scenario)) {
     assert.equal(calls.lookup, 0);
   }
+  assert.deepEqual(readHammerRetryCapLedger(rootDir, identity), before);
+});
+
+for (const [scenario, reason] of [
+  ['head moves', 'final-fix-head-mismatch'],
+  ['PR closes', 'final-fix-pr-not-open'],
+  ['follow-up appears', 'remediation-owned'],
+]) test('final-fix recovery refuses when ' + scenario + ' during the live-head recheck', async t => {
+  const rootDir = exhaustedPr(t);
+  const identity = { repo, prNumber };
+  const ownerKey = 'ffa-' + 'f'.repeat(64);
+  const dispatchProjectRef = 'pr-merge-orchestration';
+  const { epoch } = reserveRepairEpoch({ rootDir, ...identity, headSha: head, ownerKey,
+    cause: 'review-cycle-exhausted', dispatchProjectRef });
+  const before = readHammerRetryCapLedger(rootDir, identity);
+  mockSdk(t);
+  let reads = 0;
+  const result = await main([rootDir, repo, String(prNumber), head, ownerKey,
+    'false', '', '', dispatchProjectRef, epoch.id], { env: freshEnv(),
+    readLivePrImpl: async () => {
+      reads++;
+      if (reads === 2 && scenario === 'follow-up appears') {
+        const path = join(rootDir, 'data', 'follow-up-jobs', 'pending', 'competing.json');
+        mkdirSync(dirname(path), { recursive: true });
+        writeFileSync(path, JSON.stringify({ ...identity, jobId: 'competing', status: 'pending' }));
+      }
+      return { prState: reads === 2 && scenario === 'PR closes' ? 'closed' : 'open',
+        headSha: reads === 2 && scenario === 'head moves' ? 'e'.repeat(40) : head,
+        baseBranch: 'main' };
+    } });
+  assert.equal(result.ok, false, JSON.stringify(result));
+  assert.equal(result.reason, reason);
+  assert.equal(reads, 2);
   assert.deepEqual(readHammerRetryCapLedger(rootDir, identity), before);
 });
 

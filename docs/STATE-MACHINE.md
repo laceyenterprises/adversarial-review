@@ -1612,6 +1612,13 @@ Legacy durable jobs created before `baseBranch` was persisted are hydrated from 
 
 ## MSM two-path merge authority (current)
 
+After automatic remediation exhausts its round budget, a detected operator PR
+update can replace an `absent-unfenced` repair reservation with fresh canonical
+absence and the existing custody checks. The ledger atomically retires the old
+epoch and reserves the successor, which publishes against its reserved head.
+The [operator PR update procedure](RUNBOOK-ama-closure.md#operator-pr-update-after-the-automatic-remediation-budget-is-spent)
+describes the publication lease and recovery when the head moves.
+
 At the legacy closer's final gate, a confirmed conflict can yield the merge
 lease and re-enter local replay, validation and exact-head publication. The
 controller permits two such replays per run. A changed patch hands the new head

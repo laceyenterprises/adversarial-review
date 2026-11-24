@@ -1246,6 +1246,22 @@ identity/state, publication, review/terminal state and spend fields still fence
 concurrent changes. Watcher observation updates retain their full snapshot CAS
 so a late observation cannot overwrite a newer one.
 
+### Operator PR update after the automatic remediation budget is spent
+
+When rescue shows `operator-hold (repair-absent-unfenced)` on a PR with
+exhausted remediation rounds, the operator can run the ordinary interactive
+`hq dispatch --pr PR --repo REPO`. The review service rechecks canonical owner
+absence and competing custody, preflights the successor's dispatch scope, then
+atomically supersedes the pending reservation. The ledger records the old
+epoch's terminal timestamp and successor dispatch key while retaining charges,
+refunds and cap history. A live owner, unreadable ownership evidence or
+available remediation rounds keeps ordinary admission in force.
+
+The successor publishes with an explicit force-with-lease against the exact
+head it reserved. If a delayed owner moves the branch first, the successor's
+push fails and the operator must reassess the live head. Changed heads still
+require the normal review-currency and ownership evidence.
+
 ### Retire one fenced CWP conflict reservation (LAC-2303)
 
 The HQ owner runs this command outside a worker launch from the deployed

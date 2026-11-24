@@ -16,7 +16,9 @@ import { dispatchReadTransport } from '../src/dispatch-read-client.mjs';
 import { openReviewStateDb, ensureReviewStateSchema } from '../src/review-state.mjs';
 import { amaCloserLeaseFilePath } from '../src/ama/closer-lease.mjs';
 import { mutateRepairEpochs, readHammerRetryCapLedger } from '../src/ama/hammer-retry-cap.mjs';
-import { pendingRepairEpoch, reserveRepairEpoch } from '../src/repair-epochs.mjs';
+import { bindRepairHead, pendingRepairEpoch, reconcileRepairOwner, reserveRepairEpoch,
+  REPAIR_ABSENCE_ESCALATE_MS, REPAIR_OWNER_OBSERVE_MS } from '../src/repair-epochs.mjs';
+import { recordPrRound, PR_ROUND_KINDS } from '../src/pr-round-ledger.mjs';
 import { pairedDispatchAbsence } from './helpers/repair-dispatch-scope.mjs';
 
 const repo = 'example/widgets', prNumber = 23, head = 'd'.repeat(40);
@@ -70,6 +72,100 @@ const argv = (rootDir, project = 'fixture-project') =>
 // A fresh endpoint per test keeps the read client's module session cache apart.
 let endpoint = 0;
 const freshEnv = () => ({ APP_CONTRACT_ENDPOINT_URL: `https://fixture.invalid/repair-${++endpoint}` });
+
+for (const { name, allowed, rounds = 2, state = 'absent-unfenced', lookupFailure,
+  automatic, legacy, movedHead, capped } of [
+  { name: 'operator PR update after budget exhaustion', allowed: true },
+  { name: 'legacy CWP conflict at a moved head and at the cap', allowed: true, legacy: true, movedHead: true, capped: true },
+  { name: 'budget available', rounds: 0 },
+  { name: 'persisted live owner', state: 'live' },
+  { name: 'owner appears live during preflight', lookupFailure: 'live' },
+  { name: 'transport failure after durable absence', lookupFailure: 'transport' },
+  { name: 'automatic or hammer request', automatic: true },
+]) test(`operator repair supersession: ${name}`, async t => {
+  const rootDir = exhaustedPr(t);
+  const identity = { repo, prNumber };
+  const projectRef = legacy ? undefined : 'fixture-project';
+  const oldKey = legacy ? `cwp-${'e'.repeat(24)}` : 'synthetic-old-owner';
+  for (let round = 1; round <= rounds; round++) {
+    recordPrRound(rootDir, { ...identity, roundId: `synthetic-round-${round}`,
+      kind: PR_ROUND_KINDS.FOLLOW_UP_BLOCKING });
+  }
+  if (allowed) {
+    const db = openReviewStateDb(rootDir);
+    try { db.prepare('UPDATE reviewed_prs SET rereview_reason = NULL').run(); }
+    finally { db.close(); }
+  }
+  mutateRepairEpochs(rootDir, identity, ledger => {
+    ledger.attemptCount = 3;
+    ledger.targetAttemptCount = 2;
+    ledger.lifetimeAttemptCount = 4;
+    ledger.selfErrorRefunds = { fixture: ['lrq_synthetic_refund'] };
+  });
+  if (capped) {
+    reserveRepairEpoch({ rootDir, ...identity, headSha: head, ownerKey: 'synthetic-earlier-owner',
+      cause: 'conflict-without-owner' });
+    mutateRepairEpochs(rootDir, identity, ledger => {
+      ledger.repairEpochs[0].terminalAt = '2026-01-01T00:00:00Z';
+    });
+  }
+  const reservedAt = Date.parse('2026-01-01T00:00:00Z');
+  reserveRepairEpoch({ rootDir, ...identity, headSha: head, ownerKey: oldKey,
+    cause: 'conflict-without-owner', dispatchProjectRef: projectRef, now: new Date(reservedAt).toISOString() });
+  const readImpl = async () => ({ ok: true, roots: [],
+    absenceProof: { version: 1, kind: 'canonical-exact-selector-absence' } });
+  for (const elapsed of [REPAIR_ABSENCE_ESCALATE_MS, REPAIR_ABSENCE_ESCALATE_MS + REPAIR_OWNER_OBSERVE_MS]) {
+    await reconcileRepairOwner({ rootDir, ...identity, headSha: head, now: reservedAt + elapsed,
+      readImpl, observeWait: async () => {} });
+  }
+  const prior = pendingRepairEpoch(rootDir, identity);
+  assert.equal(prior.ownerState, 'absent-unfenced');
+  assert.equal(prior.absentObservations, 2);
+  if (state === 'live') mutateRepairEpochs(rootDir, identity, ledger => {
+    ledger.repairEpochs.at(-1).ownerState = state;
+  });
+  const before = readHammerRetryCapLedger(rootDir, identity);
+  let scoped = false;
+  mockSdk(t, { lookup: selector => {
+    if (selector.idempotency_key?.startsWith('repair-read-preflight-')) {
+      scoped = true;
+      return pairedDispatchAbsence(selector);
+    }
+    if (lookupFailure === 'transport') throw Object.assign(new Error('synthetic outage'), { status: 503 });
+    if (lookupFailure === 'live' && scoped) {
+      const row = { launch_request_id: 'lrq_synthetic_live', status: 'running',
+        idempotency_key: oldKey, target_repo: repo, head_sha: head, project_ref: projectRef };
+      return { schema_version: 1, status: 'found', complete: true, roots: [row.launch_request_id],
+        items: [row], retry_edges: [] };
+    }
+    return pairedDispatchAbsence(selector, legacy ? 'cwp-repository-dispatch-read' : undefined);
+  } });
+  const args = argv(rootDir);
+  if (movedHead) args[3] = 'b'.repeat(40);
+  const env = { ...freshEnv(), ...(!automatic && { HQ_REPAIR_REQUEST_KIND: 'operator-pr-update' }) };
+  const result = await main(args, { env });
+  const after = readHammerRetryCapLedger(rootDir, identity);
+  if (!allowed) {
+    assert.equal(result.reason, 'repair-owned');
+    assert.deepEqual(after, before);
+    return;
+  }
+  assert.equal(result.ok, true, JSON.stringify(result));
+  assert.equal(result.epoch.baseHead, args[3]);
+  assert.equal(result.epoch.supersedesEpochId, prior.id);
+  const retired = after.repairEpochs.at(-2);
+  assert.ok(retired.terminalAt);
+  assert.deepEqual(after, { ...before, repairEpochs: [
+    ...before.repairEpochs.slice(0, -1),
+    { ...prior, terminalAt: retired.terminalAt,
+      supersededBy: { kind: 'operator-repair', launch: args[4], at: retired.terminalAt } },
+    result.epoch,
+  ] });
+  assert.equal(bindRepairHead({ rootDir, ...identity, epochId: prior.id, headSha: 'f'.repeat(40) }), null);
+  assert.equal(reserveRepairEpoch({ rootDir, ...identity, headSha: head, ownerKey: oldKey,
+    cause: 'conflict-without-owner' }).reason, 'repair-worker-terminal');
+  assert.deepEqual(readHammerRetryCapLedger(rootDir, identity), after);
+});
 
 for (const [scenario, expected] of [
   ['closed review row', 'final-fix-pr-not-open'],

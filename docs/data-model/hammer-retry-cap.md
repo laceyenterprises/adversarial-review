@@ -1,6 +1,9 @@
 # Data Model - Hammer Retry Cap Ledger
 
-`repairEpochs` is an optional ordered array, capped at two entries per PR.
+`repairEpochs` is an optional ordered array. Ordinary admissions are capped at
+two entries per PR. A qualifying operator supersession may append a replacement
+for the pending epoch even at the cap. Every entry still counts toward the
+ordinary cap.
 Each reservation records `id`, dispatch idempotency `ownerKey`, `baseHead`,
 exhaustion `cause`, `reservedAt`, `priorSpend` (series/head/lifetime counters),
 `refundedSpend` and nullable `reviewHead`. It shares the existing retry-ledger
@@ -32,8 +35,15 @@ except that an unknown observation preserves an existing `absent-unfenced`
 state and count for reservations other than unscoped CWP conflicts. After two
 consecutive absence proofs and ten minutes from `reservedAt`, the watcher
 sets `absent-unfenced`, retains the reservation, projects operator-required
-custody in next-action/TTM, and sends a deduplicated SEV1 page. The operator
-must inspect the submitter and key before releasing custody.
+custody in next-action/TTM, and sends a deduplicated SEV1 page. After the
+automatic remediation round budget is spent, an operator-directed PR update can
+supersede that reservation after another successful canonical absence read.
+The ledger writes `terminalAt` and `supersededBy: {kind, launch, at}` on the
+predecessor and `supersedesEpochId` on the successor in one write. The
+supersession kind is `operator-repair`. `launch` is the successor's dispatch
+idempotency key, available before enqueue. The successor's `baseHead` is the
+exact PR head to use for the publication lease. The transition preserves
+prior spend, refunds and cap history.
 Complete terminal launch/retry evidence at the reservation base head retires
 custody with `terminalAt`, `terminalLaunch` and `terminalReason: owner-terminal-at-base`.
 At a moved head, a successful missing-produced-attestation or foreign-publisher

@@ -1,0 +1,8 @@
+operator_steps:
+  - description: >-
+      After both companions deploy, verify ordinary operator PR-update
+      admission on an eligible PR with exhausted remediation rounds and
+      absent-unfenced repair custody. Retain the predecessor terminal audit,
+      successor dispatch key and exact-head publication receipt.
+    run_as: Operator with registered dispatch access
+    command: hq dispatch --pr PR --repo REPO

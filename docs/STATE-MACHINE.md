@@ -3097,11 +3097,15 @@ Key control points:
   A cited restoration of a primary deletion similarly binds the deleted
   content to the authorizing commit's additions, including in mixed replacements
   whose introduced lines remain present. File/Lines coverage still uses the cited
-  review's coordinates. Insertion-only regions remain protected: their removal
-  needs a citation covering the full introduced span and matching HAM removals
-  with multiplicity. In-place repairs may preserve the region while changing
-  introduced text. Whole-file absence, opaque-file and rename preservation remain
-  independent protections.
+  review's coordinates. Insertion-only regions remain protected. For a closer
+  using a review in its parent ancestry, citation coverage runs from the first
+  through the last nonblank line of the reviewed insertion. The HAM removal
+  proof still matches the full insertion with multiplicity. Rebase and lane
+  citations retain full-span coverage. An earlier lane push needs lane proof
+  for its own cited reversal. The closer's citation takes its authority from
+  the verified finding on the reviewed head. In-place repairs may preserve
+  the region while changing introduced text. Whole-file absence, opaque-file
+  and rename preservation remain independent protections.
   A superseded citation additionally requires the original HAM reversal, with
   the same message, file paths, previous paths, statuses and ordered removed/added
   change lines and valid original authorization, in the first superseding

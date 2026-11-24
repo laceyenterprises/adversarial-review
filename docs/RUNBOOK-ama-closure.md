@@ -1464,7 +1464,13 @@ The optional tenth argument, `RECOVERY_EPOCH_ID`, selects the retained unbound
 final-fix reservation to replay. Supply its original `ffa-` owner key, base head
 and dispatch project, set `CONFLICTING` to `false`, and leave the ticket and PID
 arguments empty. Recovery requires an unowned queue and fresh paired dispatch
-absence; it compares the unchanged reservation under the intent and retry-ledger
+absence, plus an open PR at the original base head. A repository-scoped GitHub
+identity read checks the live head before owner reconciliation and again after
+the absence proof; each read has a 15-second deadline. Unavailable, closed or
+moved live PRs refuse recovery. The last delivered review's revision can be
+older than the published remediation and is retained as review provenance,
+not rewritten to stand in for live head evidence. The helper compares the
+unchanged reservation under the intent and retry-ledger
 locks without writing it. An owner state other than missing, null, `unknown`,
 `absent` or `absent-unfenced` refuses before the recovery dispatch lookup.
 The original failed job remains terminal `never-spawned`.

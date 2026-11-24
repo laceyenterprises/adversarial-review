@@ -17,6 +17,7 @@ import { readRepairFollowUpClaim } from '../src/repair-follow-up-claim.mjs';
 import { launchRequestOwned } from '../src/ama/launch-request-status.mjs';
 import { prepareDispatchReadContext, readDispatchLaunches } from '../src/dispatch-read-client.mjs';
 import { findReceiptedCloserAlias, recoverReceiptedCloserAlias } from '../src/ama/receipted-closer-alias.mjs';
+import { readLivePullRequestIdentity } from '../src/github-pr-identity.mjs';
 
 // REPAIRDISPATCHREAD-01: this cold CLI is a composition root. Dispatch reads
 // stay disabled until it prepares the read context, and an unprepared read
@@ -64,6 +65,7 @@ async function verifyRepairDispatchScope({ repo, dispatchProjectRef, readContext
 export async function main(args, {
   env = process.env, prepareDispatchReadContextImpl = prepareDispatchReadContext,
   pageRepairCapImpl = pageRepairCap,
+  readLivePrImpl = readLivePullRequestIdentity,
 } = {}) {
   if (args.length === 1 && args[0] === '--final-fix-recovery-protocol') {
     return { ok: true, protocol: 'final-fix-recovery-v1' };
@@ -85,16 +87,28 @@ export async function main(args, {
     const row = db.prepare('SELECT * FROM reviewed_prs WHERE repo=? AND pr_number=?').get(repo, prNumber);
     if (recoveryEpochId) {
       if (row?.pr_state !== 'open') return { ok: false, reason: 'final-fix-pr-not-open' };
-      const recordedHead = row.revision_ref || row.reviewer_head_sha;
-      if (recordedHead?.toLowerCase() !== headSha.toLowerCase()) {
-        return { ok: false, reason: 'final-fix-head-mismatch' };
-      }
     }
     if (row && row.pr_state !== 'open') return { ok: true, epoch: null, reason: 'no-open-review-row' };
     if (!row && conflicting !== 'true') return { ok: true, epoch: null, reason: 'no-open-review-row' };
     facts = readRepairFacts({ rootDir, db, repo, prNumber, headSha, row, conflicting: conflicting === 'true' });
   } finally { db.close(); }
   const identity = { repo, prNumber };
+  // Review revisions describe delivered reviews, not later final publications.
+  // Use the shared repository-scoped live identity read without rewriting them.
+  const verifyRecoveryHead = async () => {
+    let live;
+    try { live = await readLivePrImpl(repo, prNumber, { env, timeoutMs: 15000 }); }
+    catch { return { ok: false, reason: 'final-fix-pr-unavailable' }; }
+    if (!live || !['open', 'closed', 'merged'].includes(live.prState)
+      || typeof live.headSha !== 'string' || !/^[0-9a-f]{40}$/i.test(live.headSha)) {
+      return { ok: false, reason: 'final-fix-pr-unavailable' };
+    }
+    if (live.prState !== 'open') return { ok: false, reason: 'final-fix-pr-not-open' };
+    if (live.headSha.toLowerCase() !== headSha.toLowerCase()) {
+      return { ok: false, reason: 'final-fix-head-mismatch' };
+    }
+    return { ok: true };
+  };
   const pending = facts.epochs.find(epoch => !epoch.reviewHead && !epoch.terminalAt);
   const operatorCandidate = operatorPrUpdate && pending?.ownerState === 'absent-unfenced'
     && pending.ownerKey !== ownerKey;
@@ -132,6 +146,18 @@ export async function main(args, {
     if (lease?.status === 'pending' && !abandonedAmaCloserLeaseOutcome(lease)) {
       return { ok: false, reason: 'closer-submission-owned' };
     }
+    const atReservationHead = typeof pending?.baseHead === 'string'
+      && pending.baseHead.toLowerCase() === headSha.toLowerCase();
+    if (recoveryEpochId && (!atReservationHead || pending.id !== recoveryEpochId
+      || pending.ownerKey !== ownerKey || pending.dispatchProjectRef !== dispatchProjectRef
+      || pending.ownerLaunch != null || pending.publicationHead != null
+      || ![undefined, null, 'unknown', 'absent', 'absent-unfenced'].includes(pending.ownerState))) {
+      return { ok: false, reason: 'final-fix-reservation-changed' };
+    }
+    if (recoveryEpochId) {
+      const live = await verifyRecoveryHead();
+      if (!live.ok) return live;
+    }
     let aliasReleased = false;
     if (lease?.lrqId && ['pending', 'dispatched'].includes(lease.status)) {
       const alias = findReceiptedCloserAlias(rootDir, lease);
@@ -155,14 +181,6 @@ export async function main(args, {
         if (owned !== false) return { ok: false, reason: 'closer-owned-or-unknown' };
       }
     }
-    const atReservationHead = typeof pending?.baseHead === 'string'
-      && pending.baseHead.toLowerCase() === headSha.toLowerCase();
-    if (recoveryEpochId && (!atReservationHead || pending.id !== recoveryEpochId
-      || pending.ownerKey !== ownerKey || pending.dispatchProjectRef !== dispatchProjectRef
-      || pending.ownerLaunch != null || pending.publicationHead != null
-      || ![undefined, null, 'unknown', 'absent', 'absent-unfenced'].includes(pending.ownerState))) {
-      return { ok: false, reason: 'final-fix-reservation-changed' };
-    }
     if (atReservationHead || supersede) {
       const ready = await readContext();
       if (!ready.ok) return contextUnavailable(ready);
@@ -183,6 +201,8 @@ export async function main(args, {
         || read.absenceProof?.grant_id !== 'project-repository-dispatch-read') {
         return { ok: false, reason: 'final-fix-owner-absence-unproven' };
       }
+      const live = await verifyRecoveryHead();
+      if (!live.ok) return live;
       const custody = recheckCustody();
       if (!custody.ok) return custody;
       const replay = replayUnenqueuedFinalFixEpoch({ rootDir, repo, prNumber, headSha,

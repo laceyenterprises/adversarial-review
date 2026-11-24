@@ -14,7 +14,7 @@ import { reviewerTimeoutBudget, REVIEWER_TIMEOUT_REPEATED_REASON } from './revie
 import { createReviewerQuotaBlockLogger } from './reviewer-quota-block-log.mjs';
 import { meteredExecFile } from './metered-gh.mjs';
 import {
-  pendingExplicitReviewIntent, reconcileExplicitReviewIntents, explicitReviewRefusalBody,
+  pendingExplicitReviewIntent, reconcileExplicitReviewIntents, explicitReviewRefusalBody, primaryReversalReviewContext,
   settleExplicitReviewIntent, consumeExplicitReviewIntent, refuseFailedExplicitReviewDispatch,
   requeueUnstartedExplicitReviewDispatch, priorityReviewIntent, handoffAutomaticReview, isRemediationReviewIntent,
 } from './explicit-review-intent.mjs';
@@ -3268,7 +3268,8 @@ async function runReviewSubjectPhases(entry, ctx) {
 
       // HAMATTEST-02: the bounded exact-head recovery request must reach an
       // actor even when earlier heads exhausted the ordinary review budget.
-      const handoffReviewAdmission = isExhaustedHeadVerdictRequested(current, subject.headSha)
+      const handoffReviewAdmission = Boolean(primaryReversalReviewContext(explicitIntentForHead(), subject.headSha))
+        || isExhaustedHeadVerdictRequested(current, subject.headSha)
         || isOrphanHeadReviewRequested(current, subject.headSha)
         || hammerHandoffReviewBypass({ db, rootDir: ROOT,
         repo: repoPath, prNumber, headSha: subject.headSha, row: current });
@@ -4304,8 +4305,9 @@ async function runReviewSubjectPhases(entry, ctx) {
             // (3) Hard attempt ceiling — failed/running attempts are not
             //     reviews and must not spend (2), but they still need their own
             //     larger fuse so a broken reviewer path cannot retry forever.
+            const reversalReview = primaryReversalReviewContext(forcedReviewIntent, reviewerHeadSha);
             let skipReviewerSpawnReason = null;
-            if (forcedReviewIntent) {
+            if (forcedReviewIntent && !reversalReview) {
               const budget = resolveFirstPassReviewBudgetSuppression({
                 rootDir: ROOT, domainId, repoPath, prNumber, linearTicketId,
                 reviewRow: existing, currentHeadSha: reviewerHeadSha, labelNames: prLabelNames, db,
@@ -4322,7 +4324,8 @@ async function runReviewSubjectPhases(entry, ctx) {
               const handoffReviewBypass = !forcedReviewIntent && (isExhaustedHeadVerdictRequested(current, reviewerHeadSha) || orphanHeadReview || hammerHandoffReviewBypass({ db, rootDir: ROOT, repo: repoPath,
                 prNumber, headSha: reviewerHeadSha, row: current }));
               const closerHead = await readPreflight('closer');
-              if (closerHead?.suppressed && !explicitOperatorReviewRetrigger && !orphanHeadReview && !handoffReviewBypass) {
+              if (closerHead?.suppressed && !explicitOperatorReviewRetrigger && !orphanHeadReview && !handoffReviewBypass
+                && !(reversalReview && !['closer-publication-in-progress', 'closer-publication-unconfirmed'].includes(closerHead.reason))) {
                 console.log(
                   `[watcher] Skipping re-review for ${repoPath}#${prNumber}: head ` +
                   `${String(reviewerHeadSha || '').slice(0, 12)} is a terminal closer commit ` +
@@ -4344,7 +4347,7 @@ async function runReviewSubjectPhases(entry, ctx) {
               // from the reviewed head, checked against local git above) may
               // pass both fuses once, exactly like an operator retrigger.
               const fleetSelfRepairTrailerOnlyBypass = !forcedReviewIntent && fleetSelfRepairRereview.honored;
-              const reviewCeilingBypassDetail = explicitOperatorReviewRetrigger
+              const reviewCeilingBypassDetail = reversalReview ? 'the bounded reversal review owns this head' : explicitOperatorReviewRetrigger
                 ? 'rereview_reason is an operator retrigger marker'
                 : 'rereview_reason is a verified FSR-06B trailer-only re-review request';
               // REVIEW-DEDUP: both fuses apply to the current proposed head.
@@ -4363,7 +4366,7 @@ async function runReviewSubjectPhases(entry, ctx) {
                 !skipReviewerSpawnReason &&
                 priorReviewCount >= hardReviewCeiling &&
                 (forcedReviewIntent || !explicitOperatorReviewRetrigger) &&
-                !fleetSelfRepairTrailerOnlyBypass && !handoffReviewBypass
+                !fleetSelfRepairTrailerOnlyBypass && !handoffReviewBypass && !reversalReview
               ) {
                 console.log(
                   `[watcher] Skipping re-review for ${repoPath}#${prNumber}: hard review ` +
@@ -4391,7 +4394,7 @@ async function runReviewSubjectPhases(entry, ctx) {
                 !skipReviewerSpawnReason
                 && priorReviewAttemptCount >= hardReviewAttemptCeiling
                 && (forcedReviewIntent || !explicitOperatorReviewRetrigger)
-                && !fleetSelfRepairTrailerOnlyBypass && (!handoffReviewBypass || isExhaustedHeadVerdictRequested(current, reviewerHeadSha))
+                && !fleetSelfRepairTrailerOnlyBypass && !reversalReview && (!handoffReviewBypass || isExhaustedHeadVerdictRequested(current, reviewerHeadSha))
               ) {
                 console.log(
                   `[watcher] Skipping re-review for ${repoPath}#${prNumber}: hard review ` +
@@ -4472,7 +4475,8 @@ async function runReviewSubjectPhases(entry, ctx) {
               // Share the refreshed account with both fallback selection stages.
               afhGrounding = { ...afhGrounding, codexAccountSelection: refreshCodexAccount() };
               const spawnReviewerArgs = {
-                verdictOnly: isExhaustedHeadVerdictRequested(current, reviewerHeadSha),
+                verdictOnly: !reversalReview && isExhaustedHeadVerdictRequested(current, reviewerHeadSha),
+                ...(reversalReview ? { primaryReversalReview: reversalReview } : {}),
                 ...reviewerArmExecution(route),
                 ...(route.reviewerArmDefaultRoute ? { reviewerArmDefaultRoute: route.reviewerArmDefaultRoute } : {}),
                 branch: subject.headRefName || subject.branch || null,

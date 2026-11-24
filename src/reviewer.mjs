@@ -1816,6 +1816,7 @@ async function main() {
     labels = [],
     ticketPipelinePaused = false,
     advisoryFindings = [],
+    primaryReversalReview,
     crossModelReviewWaived = false,
     crossModelReviewWaiverReason = null,
   } = args;
@@ -1897,7 +1898,9 @@ async function main() {
       throw err;
     }
 
-    if (!diff.trim()) return { prContext, diff, emptyDiff: true };
+    if (!diff.trim() && (!primaryReversalReview || primaryReversalReview.headSha !== reviewerHeadSha)) {
+      return { prContext, diff, emptyDiff: true };
+    }
     // REVIEWCHUNK-01: a stale stored base inflates `gh pr diff`; review merge-base(head, base tip)...head.
     const { diff: ownDiff, scope: reviewDiffScope } = await resolvePrOwnReviewDiff({ repo, prNumber, headSha: reviewerHeadSha, baseRef: prContext?.baseRefName, prDiff: diff, log: console });
     diff = ownDiff;
@@ -1948,6 +1951,7 @@ async function main() {
       prContext,
       diff,
       advisoryFindings,
+      primaryReversalReview,
       guardForbiddenPaths,
       reviewModeDecision,
       repoRoot: join(ROOT, '..', '..'),

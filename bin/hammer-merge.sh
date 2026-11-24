@@ -454,6 +454,7 @@ console.log(JSON.stringify({
   primaryChangeMissingEvidence: primaryIntent?.missingEvidence || null,
   guardReversals: primaryIntent?.guardReversals || [],
   derivedChanges: primaryIntent?.derivedChanges || [],
+  ...(primaryIntent?.reversalAuthorization ? { reversalAuthorization: primaryIntent.reversalAuthorization } : {}),
   state,
   open,
   headMatches,

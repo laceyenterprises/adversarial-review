@@ -1,3 +1,4 @@
+import { readPrimaryReversalReview, verifyPrimaryReversalReview } from './primary-reversal-review.mjs';
 import { followUpJobFileFilter } from '../follow-up-job-names.mjs';
 import { findingLocations } from '../kernel/finding-lines.mjs';
 import { checkReversalFinding } from './reversal-finding.mjs';
@@ -884,6 +885,63 @@ function unchangedReplacementPositions(primaryFiles, finalFiles, path) {
   return positions;
 }
 
+// A move must add a new copy to a production path in the final diff. An
+// existing copy, context line, or copy already introduced by the author is
+// insufficient. Consume each destination span at most once per evaluation.
+function crossFileMoveCoverage(evidence, primary, final) {
+  const normalize = lines => lines.map(line => line.trim().replace(/\s+/g, ' ')).filter(Boolean);
+  const sequences = change => (change?.regions || []).map(region => normalize(region.addedLines));
+  let destinations;
+  const readDestinations = () => {
+    destinations = new Map();
+    for (const file of evidence.finalFiles) {
+      if (file.previous_filename || isTestPath(file.filename) || typeof file.patch !== 'string'
+        || !['added', 'modified'].includes(file.status)) continue;
+      try {
+        const baseline = evidence.primaryFiles.find(entry => entry.filename === file.filename);
+        if (baseline && (baseline.previous_filename || typeof baseline.patch !== 'string')) continue;
+        destinations.set(file.filename, {
+          before: sequences(baseline && changes([baseline]).get(file.filename)),
+          after: sequences(changes([file]).get(file.filename)),
+          used: new Set(),
+        });
+      } catch { /* An unreadable destination supplies no move evidence. */ }
+    }
+    return destinations;
+  };
+  const coverage = new Map();
+  for (const [path, change] of primary) {
+    const actual = final.get(path);
+    // Whole-file removals and renames retain their structural proof.
+    if (change.renamed || change.opaque || isTestPath(path) || actual?.renamed || actual?.status === 'removed'
+      || (change.status === 'added' && !actual?.regions.length)) continue;
+    const finalUnits = actual?.regions.flatMap(regionUnits) || [];
+    for (const region of change.regions) {
+      const units = regionUnits(region);
+      const lines = normalize(region.addedLines);
+      if (!lines.length || !units.length || region.removedLines.length
+        || units.some(unit => finalUnits.some(other => unitCovered(unit, other)))) continue;
+      const occurrences = runs => runs.flatMap((run, runIndex) => run.flatMap((line, index) =>
+        line === lines[0] && lines.every((text, offset) => run[index + offset] === text)
+          ? [{ runIndex, index }] : []));
+      for (const [destination, { before, after, used }] of (destinations ?? readDestinations())) {
+        if (destination === change.filename) continue;
+        const matches = occurrences(after);
+        // Multiple possible copies cannot identify which instance is new.
+        if (matches.length !== 1 || occurrences(before).length) continue;
+        const [{ runIndex, index }] = matches;
+        const slots = lines.map((_, offset) => `${runIndex}:${index + offset}`);
+        if (slots.some(slot => used.has(slot))) continue;
+        slots.forEach(slot => used.add(slot));
+        if (!coverage.has(path)) coverage.set(path, new Set());
+        units.forEach(unit => coverage.get(path).add(unit.start));
+        break;
+      }
+    }
+  }
+  return coverage;
+}
+
 // Diagnostic coordinates use the same base and units as the refusal. This
 // describes missing regions without granting any additional authorization.
 function refusedRegions(primary, final, authorized) {
@@ -959,7 +1017,55 @@ export function primaryChangeExactReviewEvidence(trace) {
 
 // Non-blocking waivers require an explicit effective strict-mode policy.
 export function checkPrimaryChange(evidence, headSha, { strictNonBlockingRemediation = false } = {}) {
-  return evaluatePrimaryChange(evidence, headSha, { strictNonBlockingRemediation });
+  const options = { strictNonBlockingRemediation };
+  const answer = evaluatePrimaryChange(evidence, headSha, options);
+  const review = evidence?.primaryReversalReview;
+  if (answer.reason !== 'primary-change-reverted' || review?.headSha !== headSha) return answer;
+  const scope = primaryReversalScope(evidence, headSha, options);
+  if (!scope || scope.scope !== review.scope) return answer;
+  if (review.state === 'remediation') return { ...answer, reversalReview: review };
+  if (review.state !== 'authorized') return answer;
+  return { ...evaluatePrimaryChange(evidence, headSha, options, new Set(scope.paths.map(path => path.path))),
+    reversalAuthorization: { authorization: review.authorization, reviewId: review.reviewId, headSha,
+      scope: scope.scope, paths: scope.paths } };
+}
+
+function primaryReversalScope(evidence, headSha, options) {
+  try {
+    const repair = describePrimaryChangeRepair(evidence, headSha, options);
+    if (!repair.paths.length || repair.paths.some(path => path.evidence !== 'reversal-authorization' || !path.regions.length)) return null;
+    const paths = repair.paths.map(({ path, regions }) => ({ path, regions }))
+      .sort((a, b) => a.path.localeCompare(b.path));
+    return { paths, scope: createHash('sha256').update(JSON.stringify([
+      headSha, repair.reviewedHead, repair.mergeBase, paths,
+    ])).digest('hex') };
+  } catch { return null; }
+}
+
+export async function buildPrimaryReversalReviewContext(args, evidence, options) {
+  const scope = primaryReversalScope(evidence, args.headSha, options);
+  if (!scope) return null;
+  const cache = new Map();
+  const reads = new Map();
+  const get = path => {
+    if (!reads.has(path)) reads.set(path, args.get(path));
+    return reads.get(path);
+  };
+  const regions = [];
+  for (const path of scope.paths) {
+    const diagnostics = await describeRevertedRegions({ ...args, get }, evidence,
+      { path: path.path, missingEvidence: path }, { locateRemoval: true });
+    for (const entry of diagnostics) {
+      if (entry.error || !SHA.test(entry.removalCommit || '')) return null;
+      const { filename, start, end } = projectRegion(evidence.primaryFiles, entry.path, entry, cache,
+        { ignoreInsertionPadding: true });
+      if (!regions.some(region => region.file === filename && region.start === start
+        && region.end === end && region.commit === entry.removalCommit)) {
+        regions.push({ file: filename, start, end, commit: entry.removalCommit });
+      }
+    }
+  }
+  return { headSha: args.headSha, primaryHead: evidence.primaryHead, scope: scope.scope, regions };
 }
 
 // Diagnostic traversal only: keep the complete attribution/authorization
@@ -1028,9 +1134,11 @@ function evaluatePrimaryChange(evidence, headSha, { strictNonBlockingRemediation
       throw new Error('empty primary change');
     }
     const testChanges = testRegionsChanged(primary, final);
+    const moves = crossFileMoveCoverage(evidence, primary, final);
     // Restorations of author deletions never qualify as derived dead code.
     const authorized = (path, unit, cache, restoringDeletion = false) =>
-      reversalAuthorized(evidence, path, unit, cache, strictNonBlockingRemediation, restoringDeletion)
+      (!restoringDeletion && moves.get(path)?.has(unit.start))
+      || reversalAuthorized(evidence, path, unit, cache, strictNonBlockingRemediation, restoringDeletion)
       || (!restoringDeletion && deadCodeAuthorized(evidence, path, unit, primary, cache, strictNonBlockingRemediation));
     const reverted = (path, missing = 'reversal-authorization') => {
       const diagnosticCache = new Map();
@@ -1746,7 +1854,7 @@ async function fetchPrimaryChangeHistory({ repo, prNumber, headSha, get, rootDir
 // HAMPREDICATE-01: attribute a refusal after evaluation, so an unavailable
 // diagnostic never becomes a new merge gate. Compare snapshots in merge-base
 // coordinates: a later commit which leaves the region alone gets no attribution.
-async function describeRevertedRegions(args, evidence, refusal) {
+async function describeRevertedRegions(args, evidence, refusal, { locateRemoval = false } = {}) {
   const { repo, prNumber, get, signal } = args;
   const regions = refusal.missingEvidence.regions || [];
   const diagnostics = regions.map(region => ({ path: refusal.path, ...region, commits: [] }));
@@ -1783,6 +1891,8 @@ async function describeRevertedRegions(args, evidence, refusal) {
   };
   let previous = evidence.primaryFiles;
   try {
+    const protectedChange = locateRemoval ? preservationChanges(evidence.primaryFiles, new Set([refusal.path])).get(refusal.path) : null;
+    const aliases = protectedChange ? new Map([[protectedChange.filename, refusal.path]]) : null;
     let range = evidence.diagnosticCommitRange;
     if (!Array.isArray(range)) {
       // Older stored evidence remains valid. Fill only its missing diagnostics.
@@ -1803,6 +1913,18 @@ async function describeRevertedRegions(args, evidence, refusal) {
       const snapshot = entry.sha === evidence.headSha ? { files: evidence.finalFiles, merge_base_commit: { sha: evidence.mergeBase } }
         : await read(`repos/${repo}/compare/${evidence.mergeBase}...${entry.sha}`);
       if (snapshot.merge_base_commit?.sha !== evidence.mergeBase) throw new Error('diagnostic merge base differs');
+      if (locateRemoval) {
+        const candidate = preservationChanges(snapshot.files, new Set([refusal.path]), aliases,
+          { ignoreBlankRemovals: false }).get(refusal.path);
+        const lost = refusedRegions(protectedChange, candidate, () => false);
+        for (const region of diagnostics) {
+          const missing = lost.some(unit => unit.start === region.start && unit.end === region.end);
+          if (!missing) delete region.removalCommit;
+          else region.removalCommit ||= entry.sha;
+        }
+        previous = snapshot.files;
+        continue;
+      }
       changes(snapshot.files);
       const touched = diagnostics.filter(region => signature(previous, region) !== signature(snapshot.files, region));
       if (touched.length) {
@@ -1915,6 +2037,18 @@ async function collectPrimaryChange(args, {
   const evidence = { ...history, ciCost, ...guardEvidence, ...(derivedArtifacts.length ? { derivedArtifacts } : {}) };
   const result = { ...evidence, ...await fetchGuardReviewSnapshots(args, evidence) };
   args.signal.throwIfAborted();
+  // Base integration reads protected paths first. A syntactic move may need
+  // a destination patch outside that projection, only after a region fails.
+  if (result.finalPatchesScoped && args.get.compareFiles
+    && checkPrimaryChange(result, args.headSha).reason === 'primary-change-reverted') {
+    try {
+      const destinationPatches = await args.get.compareFiles(`repos/${args.repo}/compare/${result.mergeBase}...${args.headSha}`);
+      if (destinationPatches.merge_base_commit?.sha === result.mergeBase && destinationPatches.filesComplete === true) {
+        result.finalFiles = destinationPatches.files;
+        result.finalPatchesScoped = false;
+      }
+    } catch { args.signal.throwIfAborted(); } // The protected projection still supplies the original refusal.
+  }
   // Failed optional attempts record structured diagnostics on this transient
   // result as well; retain them through the predicate and refusal audits.
   const migrationRenumberProofs = await proveMigrationRenumbersImpl(args, result);
@@ -1961,6 +2095,14 @@ async function collectPrimaryChange(args, {
     args.signal.throwIfAborted();
     if (!sources.length) break;
     result.deadCodeSources = [...(result.deadCodeSources || []), ...sources];
+  }
+  if (result.hasHammerCommits && checkPrimaryChange(result, args.headSha, { strictNonBlockingRemediation: false }).reason === 'primary-change-reverted') {
+    const receipt = readPrimaryReversalReview(primaryChangeRoot(args), args);
+    if (receipt?.state === 'posted') {
+      const reviews = await args.get(`repos/${args.repo}/pulls/${args.prNumber}/reviews?per_page=100`);
+      const review = verifyPrimaryReversalReview(receipt, reviews);
+      if (review) result.primaryReversalReview = review;
+    }
   }
   return result;
 }

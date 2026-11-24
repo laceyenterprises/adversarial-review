@@ -240,6 +240,7 @@ function buildReviewerProcessArgs(subjectContext = {}) {
     maxRemediationRounds: subjectContext.maxRemediationRounds,
     passKind: subjectContext.passKind,
     advisoryFindings: subjectContext.advisoryFindings,
+    ...(subjectContext.primaryReversalReview ? { primaryReversalReview: subjectContext.primaryReversalReview } : {}),
     reviewerSessionUuid: subjectContext.reviewerSessionUuid || subjectContext.sessionUuid,
     reviewerSpawnToken: subjectContext.reviewerSpawnToken || null,
     crossModelReviewWaived: subjectContext.crossModelReviewWaived,

@@ -1,7 +1,7 @@
 import { loadAwareTimeoutMs } from './load-aware-timeout.mjs';
 import { meteredExecFile } from './metered-gh.mjs';
 import {
-  ensureExplicitReviewIntentSchema, findExplicitReviewRequest, recordExplicitReviewIntent,
+  ensureExplicitReviewIntentSchema, findExplicitReviewRequest, recordExplicitReviewIntent, isPrimaryReversalReviewIntent,
   isRemediationReviewIntent, pendingExplicitReviewIntent, priorityReviewIntent,
 } from './explicit-review-intent.mjs';
 import { hammerHandoffReviewBypass } from './hammer-handoff-review-bypass.mjs';
@@ -1257,6 +1257,18 @@ function requestReviewRereview({
     if (currentRow?.review_status === 'reviewing') {
       return buildBlockedRereviewResult('review-in-flight', currentRow);
     }
+    const primaryReversalRequest = isPrimaryReversalReviewIntent(explicitReviewRequest, normalizedTargetRevisionRef);
+    if (primaryReversalRequest) {
+      if (currentRow?.pr_state !== 'open' || explicitReviewRequest.context?.headSha !== normalizedTargetRevisionRef) {
+        return buildBlockedRereviewResult('primary-reversal-review-not-actionable', currentRow);
+      }
+      if (pendingExplicitReviewIntent(db, { repo, prNumber, headSha: normalizedTargetRevisionRef })) {
+        return buildBlockedRereviewResult('another-review-request-pending', currentRow);
+      }
+      if (currentRow.review_status === 'pending' && currentRow.revision_ref === normalizedTargetRevisionRef) {
+        return acceptExplicitRequest({ triggered: false, status: 'already-pending', reason: 'review-already-pending', reviewRow: currentRow });
+      }
+    }
     const workerCompletionRequest = isRemediationReviewIntent(explicitReviewRequest);
     if (workerCompletionRequest && currentRow?.pr_state === 'open'
       && currentRow.revision_ref === normalizedTargetRevisionRef
@@ -1276,7 +1288,7 @@ function requestReviewRereview({
       db, rootDir, repo, prNumber, headSha: targetHead,
       row: { revision_ref: targetHead, rereview_requested_at: requestedAt, rereview_reason: reason },
     });
-    if (targetHead && !operatorRequestedRereview && !handoffReview) {
+    if (targetHead && !operatorRequestedRereview && !handoffReview && !primaryReversalRequest) {
       if (hasSettledCommentOnlyVerdict(rootDir, {
         repo, prNumber, headSha: targetHead, db, automaticMalformedRecovery,
       }, logger)) {
@@ -1284,12 +1296,12 @@ function requestReviewRereview({
         return buildBlockedRereviewResult('comment-only-verdict-settled', currentRow);
       }
     }
-    if (targetHead && !operatorRequestedRereview && !handoffReview && !ownerlessRecovery &&
+    if (targetHead && !operatorRequestedRereview && !handoffReview && !primaryReversalRequest && !ownerlessRecovery &&
         hasCommentOnlyFinalRoundPush(rootDir, { repo, prNumber, headSha: targetHead }, logger)) {
       logger.warn?.(`[review-state] Refusing re-review for ${repo}#${prNumber}: comment-only final round completed`);
       return buildBlockedRereviewResult('comment-only-final-round-completed', currentRow);
     }
-    if (targetHead && !operatorRequestedRereview && !handoffReview && !ownerlessRecovery && !automaticWithheldHeadRecovery &&
+    if (targetHead && !operatorRequestedRereview && !handoffReview && !primaryReversalRequest && !ownerlessRecovery && !automaticWithheldHeadRecovery &&
         hasUnprovenCommentOnlyFinalRoundHead(rootDir, { repo, prNumber, headSha: targetHead }, logger)) {
       logger.warn?.(`[review-state] Refusing re-review for ${repo}#${prNumber}: unproven comment-only final-round push`);
       return buildBlockedRereviewResult('comment-only-final-round-push-unproven', currentRow);

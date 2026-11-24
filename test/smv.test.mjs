@@ -8,7 +8,7 @@ import { checkMap, diagrams, digest, stateProjection } from './helpers/smv-contr
 const root = new URL('../', import.meta.url);
 const read = file => readFileSync(new URL(file, root), 'utf8');
 const map = JSON.parse(read('state-machines.json'));
-const GRAPH_HASH = '1d4d2b2bd47b178852fdfefe62381f8c6b7dfa9bfbd3462868edd8d83cd96532'; // Independent reviewed snapshot; not generated at test time.
+const GRAPH_HASH = 'fccc6a226fd76cd4a26c99dff524a04277744b287446d7f04ed9cc0b51010248'; // Independent reviewed snapshot; not generated at test time.
 test('SMV independent graph, producer state and transition drift', () => {
   checkMap(map, read, GRAPH_HASH);
   assert.equal(read('README.md').split('<!-- smv:diagrams:start -->\n')[1].split('\n<!-- smv:diagrams:end -->')[0], diagrams(map));
@@ -100,7 +100,7 @@ test('SMV canonical sandbox smoke merges only disposable Git', () => {
   assert.equal(report.steps.find(s => s.id === 'handoff').evidence.expiredWakeRearmed, true);
   assert.equal(report.steps.find(s => s.id === 'handoff').evidence.missingHeadAlertDeduplicated, true);
   assert.equal(report.steps.find(s => s.id === 'handoff').evidence.endedRoundRecovered, true);
-  for (const property of ['trailerlessPublicationDeferred', 'mergedPublicationRetired', 'successorEnrolledOnce', 'refusedSuccessorAlerted']) {
+  for (const property of ['trailerlessPublicationDeferred', 'mergedPublicationRetired', 'successorEnrolledOnce', 'refusedSuccessorAlerted', 'legacySuccessorRecovered']) {
     assert.equal(report.steps.find(s => s.id === 'handoff').evidence[property], true);
   }
   assert.equal(report.steps.find(s => s.id === 'handoff').evidence.spentRoundHammerOwned, true);

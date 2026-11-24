@@ -187,6 +187,7 @@ import {
   DAEMON_MERGE_DEFAULTS,
   DAEMON_MERGE_DISPOSITION,
   DAEMON_MERGE_SUBPROCESS_TIMEOUT_MS,
+  isFullyCleanSettledReview,
 } from './daemon-merge.mjs';
 import { resolveRequiredCheckContextsFromCfg } from './required-check-contexts.mjs';
 import { resolveCloserDispatchHarness, resolveHarnessAfterResolverError } from './harness-fallback.mjs';
@@ -5434,6 +5435,8 @@ async function maybeDispatchAmaCloserAttempt({
     reviewState?.reviewCycleExhausted === true;
   const validatedHamTerminalRemediation =
     verdict?.trace?.hamTerminalRemediation?.ok === true && !repairCertifiedPark;
+  const strictExactHeadHammerFindings = cfg?.strictMode !== false && forceHammerTerminalRemediationPrompt
+    && reviewState.headSha === prMetadata.headSha && !isFullyCleanSettledReview(reviewState);
   const templatePath = dispatchContext.templatePath || HAMMER_TEMPLATE_PATH;
   const templateBody = readTemplateImpl
     ? readTemplateImpl(templatePath)
@@ -6240,12 +6243,13 @@ async function maybeDispatchAmaCloserAttempt({
     // A durable closing decision outranks the process exit (including failure
     // after posting it) and certified parks. Unknown evidence holds the launch;
     // only a readable absence of a decision permits normal retry admission.
-    const handoffEndedCloser = async headSha => {
+    const handoffEndedCloser = async (headSha, { allowHammerFallback = false } = {}) => {
       requestCloserSuccessor({ rootDir, repo, prNumber, headSha,
         reviewBody: dispatchContext.settledReview?.reviewBody, refusingReasons: verdict.reasons,
         source: 'closer-ended-without-merge', now: dispatchContext.dispatchedAt });
       return settleCloserSuccessorImpl({ rootDir, repo, prNumber, headSha,
         enabled: cfg.autonomousMergeExecutionEnabled !== false, admitted: verdict.repairAdmission?.ok === true,
+        allowHammerFallback,
         riskClass: reviewState.riskClass, now: dispatchContext.dispatchedAt,
         observeWaitImpl: args => observeClosureWait({ ...args, pageImpl: deliverAlertImpl }) });
     };
@@ -6399,11 +6403,12 @@ async function maybeDispatchAmaCloserAttempt({
         (AMA_CLOSER_TERMINAL_HOLD_STATUSES.has(status) || reportedNoWork)
         && !laneBusyPark && !infrastructureReadPark
         && auditTerminalOutcome !== 'succeeded'
-        // HAMBG-02: the validated-HAM exemption holds only while the same-head
-        // daemon merge below can act on it. With a readable merged signal it
-        // fell through to treating the hammer as merged without asking GitHub.
+        // HAMBG-02: the same-head daemon can use validated terminal evidence.
+        // Strict exact-head findings need terminal reconciliation so the
+        // closed launch can hand off or reach the existing retry caps.
         && !certifiedPark
-        && !(currentHeadFinalHammerTerminalRemediation && validatedHamTerminalRemediation && mergedSignalUnknown)
+        && !(currentHeadFinalHammerTerminalRemediation && validatedHamTerminalRemediation && mergedSignalUnknown
+          && !strictExactHeadHammerFindings)
         // Preserve the terminal-success hold below before HAMBG-02 can infer
         // an exit without close from an OPEN PR whose merge may be queued.
         && !(mergedSignalUnknown && !reportedNoWork && !existingDispatchHeadAdvanced && !finalRoundLaunchEnded
@@ -7380,9 +7385,13 @@ async function maybeDispatchAmaCloserAttempt({
         }
       }
       if (hammerEndedWithoutMerge && hammerShouldHandoff && !inconclusiveOutcome && reviewState?.reviewCycleExhausted === true) {
-        const successor = await handoffEndedCloser(hammerEndedHead);
-        return noAmaDispatch({ dispatched: false, skipMergeAgent: true,
-          reason: successor?.status || 'needs-closer', successor });
+        const successor = await handoffEndedCloser(hammerEndedHead, {
+          allowHammerFallback: strictExactHeadHammerFindings && hammerEndedHead === prMetadata.headSha,
+        });
+        if (successor?.action !== 'fallback') {
+          return noAmaDispatch({ dispatched: false, skipMergeAgent: true,
+            reason: successor?.status || 'needs-closer', successor });
+        }
       }
       if (inconclusiveOutcome) {
         const backoff = await ownInconclusiveCloserRetry({ rootDir, repo, prNumber,

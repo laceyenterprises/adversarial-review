@@ -19,7 +19,10 @@ its review body for successor custody without re-deriving review eligibility. Th
 pre-claim remediation cap uses the same request. The watcher admits at most one
 existing final-fix-all work order for that head. A disabled or refused handoff
 records `needs-closer` and alerts through closure-wait. Later closure passes
-recheck admission on that head. See
+recheck admission on that head, including from legacy `ownerless-closer-no-merge`
+receipts. If final fix-all has already spent its head-scoped round, the selected
+hammer continues through ordinary admission and caps. The immediate refusal
+page is deduplicated and the 1800-second target has no timed escalation. See
 [successor records](data-model/closer-successors.md) and
 [publication ownership](data-model/hammer-publication-ownership.md).
 Exits before completing the close retain their existing bounded retry/refund
@@ -5242,7 +5245,7 @@ reasons:
 | Reason | Meaning |
 |---|---|
 | `verdict-not-settled-success` | The settled review is not eligible for direct close (and no current-head `operator-approved`). This fires when the latest review is `Request changes` **OR** — when `roles.adversarial.merge_authority.strict_non_blocking_remediation` is on (default) — when a `Comment only`/`Approved` review still carries standing or unknown-state non-blocking findings. In the strict-mode case it is emitted alongside `non-blocking-findings-present` (see that row); a `Comment only` PR refused with *both* reasons was NOT downgraded to `Request changes`. |
-| `non-blocking-findings-present` | Strict mode (`strict_non_blocking_remediation`, default on): the settled review has standing non-blocking findings that have not been remediated, so the PR is not eligible for *direct* close. It still closes via HAM terminal remediation (the hammer addresses the non-blocking findings) or a current-head `operator-approved`. A `known` count of `>0` triggers this; an `unknown` non-blocking state also fails closed in strict mode. HAM may waive this reason on authorized active HAM evidence only in the strict-non-blocking lane described below. |
+| `non-blocking-findings-present` | Strict mode (`strict_non_blocking_remediation`, default on): the settled review has standing non-blocking findings that have not been remediated, so the PR is not eligible for *direct* close. The hammer addresses the remaining findings. With `strict_mode` enabled, a terminal receipt can carry a superseded review but cannot clear findings on an exact-head review. `operator-approved` can override the verdict while strict mode still requires zero findings. The approval override of findings requires `strict_mode: false` and the existing approval and merge gates. A `known` count of `>0` triggers this; an `unknown` non-blocking state also fails closed in strict mode. HAM may waive this reason on authorized active HAM evidence only in the strict-non-blocking lane described below. |
 | `blocking-findings-unknown` | Latest review does not expose a known structured blocking-finding count. |
 | `blocking-findings-present` | Latest review has standing structured blocking findings. |
 | `non-blocking-findings-unknown` | Strict non-blocking remediation is enabled and the settled review does not expose a known structured non-blocking-finding count. |

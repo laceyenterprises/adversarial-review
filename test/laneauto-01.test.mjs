@@ -332,7 +332,7 @@ test('watcher persists and alerts a refused successor instead of losing the pre-
   const f = fixture(t), alerts = [];
   requestCloserSuccessor({ ...f.identity, reviewBody: BODY, source: 'follow-up-pre-claim-cap' });
   const handoff = f.args.handoffFinalFixAllImpl;
-  f.args.handoffFinalFixAllImpl = async () => ({ action: 'fallback' });
+  f.args.handoffFinalFixAllImpl = async () => ({ action: 'hold', reason: 'final-fix-all-owner-busy' });
   f.args.observeClosureWaitImpl = async input => { alerts.push(input); return {}; };
   const result = await maybeDispatchAmaClosureFor(f.args);
   assert.equal(result.reason, 'needs-closer');

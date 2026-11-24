@@ -1,6 +1,27 @@
 operator_steps:
-  - description: After deploy, a strict-mode Comment-only head with non-blocking findings gets a closer, never an ownerless daemon-merge route
-    run_as: Service operator with read access to the deployed closure audit
-    command: >-
-      rg -n 'review-findings-final|needs-closer|carried-clean-head' --
-      "$CLOSURE_AUDIT_LOG"
+  - description: From the deployed review-service root, set DEPLOYED_AT_UTC to the deployment timestamp (UTC ISO 8601). Inspect natural exact-head Comment-only reviews with findings in Agent OS or set REVIEW_REPO to another managed repository. Acceptance requires an observed final findings route and zero carried-clean-head or daemon-merge observations for the sampled reviewed heads.
+    run_as: Service operator with read access to the deployed review store and GitHub
+    command: |
+      set -e
+      : "${DEPLOYED_AT_UTC:?Set the start of the strict-mode deployment window in UTC}"
+      node --input-type=module -e '
+        import { loadConfigCached } from "./src/config-loader.mjs";
+        if (loadConfigCached().getMergeAuthorityConfig().strictMode !== true) {
+          throw new Error("strict mode must be enabled for this observation");
+        }
+      '
+      report=$(node bin/pr-blockers.mjs --repo "${REVIEW_REPO:-laceyenterprises/agent-os}" --limit 100 --json)
+      journal=data/next-action-shadow/observations.jsonl
+      set -- "$journal"
+      if [ -r "$journal.1" ]; then set -- "$journal.1" "$journal"; fi
+      printf '%s\n' "$report" | jq -se --arg since "$DEPLOYED_AT_UTC" '
+        [first.rows[] | select(.coverage.kind == "exact-head" and .review.headSha == .headSha
+          and .review.verdict == "comment-only" and .review.nonBlockingFindingCount > 0)] as $heads
+        | [.[] | select(.schema == "merge-lane-observation/v1" and .observedAt >= $since)
+          | . as $event | select(any($heads[]; .repo == $event.repo and .number == $event.prNumber
+            and .headSha == $event.head and .review.postedAt != null and .review.postedAt <= $event.observedAt))]
+        | if any(.[]; .next.reason == "carried-clean-head" or .next.action == "daemon-merge") then
+            error("unexpected daemon route for an exact-head review with findings")
+          elif any(.[]; .next.action == "hammer" and .next.reason == "review-findings-final") then .
+          else error("acceptance pending: no matching final findings observation") end
+      ' - "$@"

@@ -12,7 +12,11 @@ terminal proof for a superseded review still goes through daemon preflight.
 
 A refused successor handoff writes `needs-closer` to the existing head-scoped
 receipt. Later closure passes can retry admission from either this state or the
-legacy receipt. A confirmed successor still records its remediation job ID.
+legacy receipt. A confirmed successor records its remediation job ID. If final
+fix-all is already spent, normal hammer admission receives the selected route.
+Successor custody has an immediate refusal alert and no timed escalation.
+The daemon executor also checks strict exact-head finding counts when called
+without a shared decision.
 
 ## Verification
 

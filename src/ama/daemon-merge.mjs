@@ -570,12 +570,14 @@ async function attemptDaemonCleanMergeInner({
     operatorLogins,
     operatorLabelActorEnforcement,
   }, { headSha: liveGate?.candidateHead, labels: liveGate?.labels });
+  const strictExactHead = strictMode !== false && Boolean(validatedHead)
+    && String(reviewState.headSha || '').toLowerCase() === String(validatedHead).toLowerCase();
+  const reviewAllowed = isDaemonMergeReviewAllowed(reviewState, { strictMode });
   if (
     !docsFastPath &&
-    !(allowHamTerminalRemediation === true && hamTerminalVerdict) &&
-    !headCloserCertifiedBypass &&
-    !initialOperatorOverride &&
-    !isDaemonMergeReviewAllowed(reviewState, { strictMode })
+    !reviewAllowed &&
+    (strictExactHead || (!(allowHamTerminalRemediation === true && hamTerminalVerdict)
+      && !headCloserCertifiedBypass && !initialOperatorOverride))
   ) {
     return notTaken(uncleanReason(reviewState, { strictMode }) || 'findings-unknown');
   }

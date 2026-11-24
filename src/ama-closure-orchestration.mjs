@@ -2041,6 +2041,7 @@ async function dispatchAmaClosureFor({
     } }, passSnapshot);
   }
   const pendingSuccessor = readCloserSuccessor(rootDir, { repo: repoPath, prNumber, headSha: currentPrHeadSha });
+  let successorHammerFallback = false;
   if (pendingSuccessor && pendingSuccessor.status !== 'successor-enrolled' && prMetadata.isOpen
     && shared.decision.action !== 'daemon-merge') {
     requestCloserSuccessor({ rootDir, repo: repoPath, prNumber, headSha: currentPrHeadSha,
@@ -2050,10 +2051,13 @@ async function dispatchAmaClosureFor({
       enabled: autonomousMergeExecutionEnabled, admitted: !prMetadata.isDraft
         && shared.decision.action === 'hammer' && shared.decision.reason !== 'automated-stop'
         && !['R05-structural', 'R10-conflict'].includes(shared.decision.row),
-      now: new Date(now()).toISOString(), riskClass: reviewState.riskClass,
+      allowHammerFallback: true, now: new Date(now()).toISOString(), riskClass: reviewState.riskClass,
       handoffImpl: handoffFinalFixAllImpl, observeWaitImpl: observeWait });
-    return withAmaDispatchMetadata({ dispatched: false, skipMergeAgent: true,
-      reason: successor.status, successor, nextAction: shared.decision }, { amaEnabled: true });
+    successorHammerFallback = successor?.action === 'fallback';
+    if (!successorHammerFallback) {
+      return withAmaDispatchMetadata({ dispatched: false, skipMergeAgent: true,
+        reason: successor?.status || 'successor-pending', successor, nextAction: shared.decision }, { amaEnabled: true });
+    }
   }
   if (shared.decision.reason === 'repair-in-place-owned') {
     return bindClosureNextAction(withAmaDispatchMetadata({ dispatched: false, skipMergeAgent: true,
@@ -2064,7 +2068,7 @@ async function dispatchAmaClosureFor({
   }
   // LANEAUTO-01: spend one builder round before findings closure. Ownership,
   // operator holds and structural repair still take precedence in shared policy.
-  if (autonomousMergeExecutionEnabled && prMetadata.isOpen && !prMetadata.isDraft
+  if (!successorHammerFallback && autonomousMergeExecutionEnabled && prMetadata.isOpen && !prMetadata.isDraft
     && parseKnownPrefix(prMetadata.title) && reviewCycleExhausted
     && reviewState.headSha === currentPrHeadSha && reviewState.verdict === 'comment-only'
     && reviewState.blockingFindingState === 'known' && reviewState.blockingFindingCount === 0

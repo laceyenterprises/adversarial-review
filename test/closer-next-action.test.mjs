@@ -1472,3 +1472,24 @@ test('AMASTRICTROUTE-01: closure hands strict exact-head findings to the hammer 
   assert.deepEqual(f.effects.map(([effect]) => effect), ['wake', 'closer']);
   assert.deepEqual(tuple(f.effects[1][1].decision), ['hammer', 'hammer', 'review-findings-final']);
 });
+
+test('AMASTRICTROUTE-01: a spent final fix-all does not intercept hammer admission on later passes', async t => {
+  let handoffs = 0;
+  const f = closureFixture(t, {
+    headHasValidatedHamTerminalRemediationImpl: () => true,
+    handoffFinalFixAllImpl: async () => { handoffs++; return { action: 'fallback' }; },
+  });
+  f.args.candidate.title = '[codex] Fixture change';
+  const receipt = { rootDir: f.args.rootDir, ...identity, source: 'closer-ended-without-merge',
+    reviewBody: f.args.reviewStateRow.review_body, now: AT };
+  requestCloserSuccessor(receipt);
+  await settleCloserSuccessor({ ...receipt, admitted: false, observeWaitImpl: async () => {} });
+  for (let pass = 0; pass < 2; pass++) {
+    const result = await maybeDispatchAmaClosureFor(f.args);
+    assert.equal(result.dispatched, true);
+    assert.deepEqual(tuple(result.nextAction), ['hammer', 'hammer', 'review-findings-final']);
+  }
+  assert.equal(handoffs, 2, 'only one handoff probe per pass');
+  assert.equal(f.effects.filter(([effect]) => effect === 'closer').length, 2);
+  assert.equal(f.waits.filter(wait => wait.waitClass === 'closer-successor').length, 0);
+});

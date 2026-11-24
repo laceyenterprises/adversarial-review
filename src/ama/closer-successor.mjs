@@ -52,7 +52,8 @@ export function requestCloserSuccessor({ rootDir, repo, prNumber, headSha, revie
 }
 
 export async function settleCloserSuccessor({ rootDir, repo, prNumber, headSha, enabled = true,
-  admitted = true, now = new Date().toISOString(), riskClass, handoffImpl, observeWaitImpl = observeClosureWait }) {
+  admitted = true, allowHammerFallback = false, now = new Date().toISOString(), riskClass, handoffImpl,
+  observeWaitImpl = observeClosureWait }) {
   headSha = String(headSha).toLowerCase();
   const identity = { repo, prNumber, headSha };
   const path = closerSuccessorPath(rootDir, identity);
@@ -71,6 +72,7 @@ export async function settleCloserSuccessor({ rootDir, repo, prNumber, headSha, 
       result = !enabled ? { reason: 'successor-path-disabled' } : !admitted ? { reason: 'successor-admission-refused' }
         : await handoff({ rootDir, repo, prNumber, headSha, reviewBody: record.reviewBody, now, riskClass });
     } catch (error) { result = { reason: 'successor-dispatch-failed', detail: String(error?.message ?? error).slice(0, 300) }; }
+    if (allowHammerFallback && result?.action === 'fallback') return { ...record, action: 'fallback' };
     record = { ...record, updatedAt: now, status: result?.remediation?.jobId ? 'successor-enrolled' : 'needs-closer',
       successorJobId: result?.remediation?.jobId || null, reason: result?.reason || result?.action || 'successor-dispatch-refused' };
     writeFileAtomic(path, `${JSON.stringify(record)}\n`);

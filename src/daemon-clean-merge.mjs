@@ -506,8 +506,8 @@ async function runDaemonCleanMergeAttemptInner({
   // per-head hammer retry cap re-dispatches a worker just to wait on CI again).
   // The daemon lands it here once CI settles — the "settled review + green +
   // mergeable, no live worker → daemon merges" path. `attemptDaemonCleanMerge`
-  // still re-verifies green CI + mergeable + head-match LIVE, so a still-pending
-  // head simply declines and falls through unchanged.
+  // still requires a clean strict-mode exact-head review and re-verifies green
+  // CI + mergeable + head-match LIVE.
   //
   // `hamAuditHead` is the EXACT head the AMA audit marker is checked against, and
   // it is the only head this lane may ever merge. Keep it in a variable and pass
@@ -1060,6 +1060,7 @@ async function runDaemonCleanMergeAttemptInner({
     allowHeadCloserCertifiedNonBlocking: headCloserCertifiedNonBlocking,
     docsFastPath,
     reviewState: {
+      headSha: reviewState?.headSha,
       blockingFindingCount: reviewState?.blockingFindingCount,
       blockingFindingState: reviewState?.blockingFindingState,
       nonBlockingFindingCount: reviewState?.nonBlockingFindingCount,

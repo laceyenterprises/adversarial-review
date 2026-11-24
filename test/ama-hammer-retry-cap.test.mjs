@@ -19,6 +19,7 @@ import {
   _resetHammerRetryCapAlertDebounceForTests,
   AMA_CLOSER_PENDING_LEASE_RECLAIM_AGE_MS,
   AMA_CLOSER_REDISPATCH_BOUND,
+  HAM_TERMINAL_REMEDIATION_AUDIT_MARKER,
   amaCloserDispatchFilePath,
   isAmaCloserLaunchInProgress,
   findActiveAmaCloserLaunches,
@@ -1578,6 +1579,51 @@ test('same-head terminal HAM remediation auto-merges when structural gates pass'
     headSha: REVIEWED_HEAD,
   });
   assert.equal(dispatchRecord.closureAuthority, 'ham-terminal-remediation');
+});
+
+test('strict findings on a validated terminal hammer head enroll one successor without merging or relaunching', async t => {
+  const rootDir = mkdtempSync(join(tmpdir(), 'hammer-strict-terminal-findings-'));
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  const initial = await maybeDispatchAmaCloser({ ...hammerDispatchArgs(rootDir), ...hammerDispatchDeps() });
+  assert.equal(initial.dispatched, true);
+
+  const reviewBody = '## Blocking issues\n- None.\n\n## Non-blocking issues\n- Synthetic finding\n\n## Verdict\nComment only';
+  const args = hammerDispatchArgs(rootDir, {
+    reviewState: { nonBlockingFindingCount: 1 },
+    prMetadata: { statusCheckRollup: [{ __typename: 'CheckRun', name: 'test', status: 'COMPLETED', conclusion: 'SUCCESS' }] },
+    dispatchContext: { baseBranch: 'main', dispatchedAt: '2026-07-06T12:02:00Z',
+      dispatchReason: 'exhausted-final-hammer', settledReview: { reviewBody } },
+  });
+  let enrollments = 0;
+  const deps = hammerDispatchDeps({
+    fetchPullRequestRollupImpl: async () => ({
+      state: 'OPEN', headSha: REVIEWED_HEAD, mergeable: 'MERGEABLE',
+      comments: [{ author: 'hammer-worker',
+        body: `${HAM_TERMINAL_REMEDIATION_AUDIT_MARKER}\nHAM-Terminal-Remediation-Head: ${REVIEWED_HEAD}\nMerge: not performed` }],
+    }),
+    execFileImpl: async (_cmd, argv) => {
+      if (argv[0] === 'dispatch' && argv[1] === 'status') return { stdout: '{"status":"succeeded"}' };
+      assert.ok(argv[0] !== 'dispatch' && argv[1] !== 'merge', `unexpected mutation: ${argv.join(' ')}`);
+      return { stdout: '{}' };
+    },
+    attemptDaemonCleanMergeImpl: async () => assert.fail('the daemon must not own strict final findings'),
+    settleCloserSuccessorImpl: async input => {
+      const { settleCloserSuccessor } = await import('../src/ama/closer-successor.mjs');
+      return settleCloserSuccessor({ ...input, handoffImpl: async () => {
+        enrollments++;
+        return { remediation: { jobId: 'fixture-successor' } };
+      } });
+    },
+  });
+  for (let pass = 0; pass < 2; pass++) {
+    const result = await maybeDispatchAmaCloser({ ...args, ...deps,
+      options: validHamTerminalRemediationOptions({ reviewedHead: REVIEWED_HEAD, currentHead: REVIEWED_HEAD }) });
+    assert.equal(result.dispatched, false, JSON.stringify(result));
+    assert.equal(result.successor?.successorJobId, 'fixture-successor',
+      `pass ${pass + 1}: ${result.reason}, ${readClosureNextAction(result)?.decision.row}`);
+    assert.equal(readClosureNextAction(result)?.decision.action, 'hammer');
+  }
+  assert.equal(enrollments, 1);
 });
 
 test('same-head terminal HAM remediation leaves terminal breadcrumb when merge signal emission fails', async (t) => {

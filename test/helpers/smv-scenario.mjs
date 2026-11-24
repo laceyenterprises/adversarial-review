@@ -1129,7 +1129,7 @@ if (scenario === 'clean') {
   assert.equal(existsSync(cursorTrees[2]), false);
   assert.deepEqual(visits.slice(0, 3), ['synthetic-cursor-0', 'synthetic-cursor-1', 'synthetic-cursor-2']);
   const { withHammerPublication, activeHammerPublication, retireHammerPublication } = await import('../../src/ama/hammer-publication-ownership.mjs');
-  const { requestCloserSuccessor, settleCloserSuccessor } = await import('../../src/ama/closer-successor.mjs');
+  const { closerSuccessorPath, requestCloserSuccessor, settleCloserSuccessor } = await import('../../src/ama/closer-successor.mjs');
   const custodyHead = 'd'.repeat(40), custodyNow = '2030-01-01T00:00:00.000Z';
   const custody = { rootDir, repo: 'fixture/custody', prNumber: 71, headSha: custodyHead, now: custodyNow };
   const controllerPath = join(rootDir, 'synthetic-publication-controller.json');
@@ -1160,7 +1160,15 @@ if (scenario === 'clean') {
   assert.equal((await settleCloserSuccessor({ ...refusedInput, handoffImpl: successorHandoff })).status, 'successor-enrolled');
   assert.equal((await settleCloserSuccessor({ ...refusedInput, handoffImpl: successorHandoff })).status, 'successor-enrolled');
   assert.equal(successors, 2);
-  evidence = { trailerlessPublicationDeferred: true, mergedPublicationRetired: true, successorEnrolledOnce: true, refusedSuccessorAlerted: true, hammers, finalFixAllQueuedBeforeHammer: true, finalFixAllTerminalFallback: true, cleanBranchHoldSettled: true, unchangedHeadHasNoPublicationDebt: true, nullHeadConfirmed: true, unknownBranchRetryRecovered: true, terminalScratchRemoved: true, drainingScratchRetained: true, privatePytestTemp: true, agedCwdTimeoutReclaimed: true, scratchCursorResumed: true, scratchLedgerClockIndependent: true, drainResumedNextPass: true, drainCountersUnchanged: true, drainHintExpiredWithoutCloser: true, legacyDrainHintRetired: true, hammerRangeValidated: true, noHammerReviewRequest: true, claimPreserved: true, reviewedHeadRecorded: true,
+  const legacyInput = { ...successorInput, headSha: 'f'.repeat(40) };
+  const legacyRecord = requestCloserSuccessor(legacyInput);
+  writeFileSync(closerSuccessorPath(rootDir, legacyInput),
+    JSON.stringify({ ...legacyRecord, status: 'ownerless-closer-no-merge' }));
+  for (let pass = 0; pass < 2; pass++) {
+    assert.equal((await settleCloserSuccessor({ ...legacyInput, handoffImpl: successorHandoff })).status, 'successor-enrolled');
+  }
+  assert.equal(successors, 3);
+  evidence = { trailerlessPublicationDeferred: true, mergedPublicationRetired: true, successorEnrolledOnce: true, refusedSuccessorAlerted: true, legacySuccessorRecovered: true, hammers, finalFixAllQueuedBeforeHammer: true, finalFixAllTerminalFallback: true, cleanBranchHoldSettled: true, unchangedHeadHasNoPublicationDebt: true, nullHeadConfirmed: true, unknownBranchRetryRecovered: true, terminalScratchRemoved: true, drainingScratchRetained: true, privatePytestTemp: true, agedCwdTimeoutReclaimed: true, scratchCursorResumed: true, scratchLedgerClockIndependent: true, drainResumedNextPass: true, drainCountersUnchanged: true, drainHintExpiredWithoutCloser: true, legacyDrainHintRetired: true, hammerRangeValidated: true, noHammerReviewRequest: true, claimPreserved: true, reviewedHeadRecorded: true,
     headlessPostRequeuedOnce: true, terminalRetryable: true, terminalCapacityFreed: true, terminalNoMergeReclaimedSamePass: true,
     autoMergeHeld: true, autoMergeBoundReleased: true, unreadableCapacityReserved: true,
     wakeRearmed: true, expiredWakeRearmed: true, missingHeadAlertDeduplicated: true,

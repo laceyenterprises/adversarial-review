@@ -1636,10 +1636,9 @@ and CI-covered results before the normal merge gates. See the
 [closure runbook](RUNBOOK-ama-closure.md#leasefair-01-fair-merge-lease-service).
 
 A local validation socket budget refusal or a qualifying runtime socket
-diagnostic records `harness-fault:socket-path` as an infrastructure deferral.
-TAP failures retain their ordinary failure outcome. The socket deferral hands
-the same head back to the watcher's existing uncounted retry, with no local
-validation or merge authority granted.
+diagnostic records `harness-fault:socket-path` and returns exit 75. The
+watcher treats it as a counted validation stop from the first occurrence.
+Mixed socket and test output keeps its ordinary validation outcome.
 
 Durable identity absence at a merge-ready exact head retains page ownership
 with `daemon-identity-absent-parked` and no closer dispatch. The diagnostic reason

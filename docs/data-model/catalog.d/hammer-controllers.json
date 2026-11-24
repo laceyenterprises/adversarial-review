@@ -14,21 +14,23 @@
     {
       "title": "Hammer local validation receipts",
       "path": "docs/data-model/hammer-controllers.md",
-      "store": "<HAM_RUN_DIR>/local-validation.*, adjacent *.check-*.log, <HAM_RUN_DIR>/close-result.json and <HAM_RUN_DIR>/validation-deferred-<head>.json; standalone <HAM_RUN_DIR or system tmp>/ham-validation-evidence-*/local-validation.json and adjacent *.check-*.log",
+      "store": "<HAM_RUN_DIR>/local-validation.*, adjacent *.check-*.log, <HAM_RUN_DIR>/close-result.json and <HAM_RUN_DIR>/validation-deferred-<head>.json; standalone <HAM_RUN_DIR or system tmp>/ham-validation-evidence-*/local-validation.json and adjacent *.check-*.log; <real /tmp or budget-checked caller tmpdir>/ar-hv-*/.validator-pid and .ar-hv-reap-<uid> beside the scratch directories",
       "schemaSurface": "bin/hammer-validate.mjs",
-      "owner": "Versioned closer controller",
+      "relatedSchemaSurfaces": ["bin/hammer-ci-mirror-validation.py", "src/ama/hammer-validation-scratch.mjs"],
+      "owner": "Versioned closer controller or standalone caller for receipts; validator and same-uid orphan reaper for scratch",
       "optionalFields": [
         "close-result.localValidation: validation receipts from one closing invocation",
         "checks[].jobs: GitHub Actions job names and run IDs for a ci-covered check; current step mappings additionally record optional string jobId and step",
         "checks[].diagnostics: private per-command output path, byte cap, exit status and truncation or unavailability evidence",
-        "outcome: harness-fault:socket-path routes a matching-head status 75 to the socket infrastructure deferral",
+        "outcome: harness-fault:socket-path routes a matching-head status 75 to the counted socket stop",
         "socketPathDiagnostic: setup temp root and byte budget, or runtime validation scratch path",
-        "checks[].socketPathFault: true when a failed mirror check has an explicit Unix socket runtime diagnostic and no TAP results",
-        "checks[].localReason: includes harness-fault:socket-path when a failed mirror check becomes inconclusive on a socket deferral",
+        "checks[].socketPathFault: true when a mirror check's single failed command emits only a supported socket diagnostic",
+        "checks[].localReason: includes harness-fault:socket-path when a failed mirror check becomes inconclusive on a socket stop",
         "validation-deferred-<head>.json: run-local unknown outcome with the cause, status, optional validation receipt path and cleanup owner",
         "validation-deferred-<head>.json ciAuthoritative, requiredContexts, localFailureObserved (MRQ-20): whether the UNKNOWN defers to the declared exact-head contexts; absent on older receipts",
         "validation-deferred-<head>.json cleanCheckout, cleanupConfirmed, controllerRecord: evidence that a completed conflict repair started clean and its validation round drained before publication"
-      ]
+      ],
+      "retention": "Passing command logs are deleted immediately. Caller retains failed/interrupted evidence through diagnosis and removes it only after confirmed drain and evidence collection. No automatic expiry or aggregate cap for evidence; 4 MiB per command. Validator removes mode-0700 scratch and mode-0600 PID file after confirmed cleanup. Exit 125, interruption or failed deletion can leave scratch for same-uid reaping after at least 24 hours, with no live PID and a clear process census. The persistent mode-0600 per-uid marker limits scan attempts to once an hour per temp parent, including failed censuses."
     }
   ]
 }

@@ -253,8 +253,8 @@ function recordSocketPathFault(detail) {
   console.error(`hammer-validate: ${SOCKET_PATH_HARNESS_FAULT}: ${detail}`);
   process.exitCode = 75;
   validationUnknown = true;
-  // A local rebase can have an unpublished HEAD. Refund the launch's charge
-  // on its dispatch target, while the validation receipt keeps the tested head.
+  // A local rebase can have an unpublished HEAD. Count the stop against the
+  // dispatch target while the validation receipt keeps the tested head.
   reportHammerEarlyFailure(SOCKET_PATH_HARNESS_FAULT, {
     headSha: process.env.HAM_TARGET_REMEDIATION_SHA || process.env.HAM_REVIEWED_SHA || head,
   });
@@ -365,12 +365,12 @@ async function validate() {
     } else runner = { command: pytest ? 'python3' : args.shift(),
       args: pytest ? ['-u', '-m', 'pytest', '-p', 'ham_pytest_progress', ...args] : args };
     if (valid) {
-      let output = '', packageImportFault = false, socketPathFault, tapOutput, stopReason;
+      let output = '', packageImportFault = false, outputKind, stopReason;
       const pending = { stdout: '', stderr: '' };
       const observeLine = (line, stream) => {
         localTestFailure ||= /^[ \t]*not ok \d+\b/.test(line);
-        tapOutput ||= /^[ \t]*(?:TAP version \d+\b|(?:not )?ok \d+\b)/.test(line);
-        if (stream === 'stderr') socketPathFault ||= isSocketPathFailure(line);
+        if (/^[ \t]*$/.test(line)) return;
+        outputKind = !outputKind && stream === 'stderr' && isSocketPathFailure(line) ? 'socket-only' : 'other';
       };
       let packages = new Set();
       try { if (canonical && !runner?.required) packages = repositoryPythonPackages(process.cwd()); }
@@ -400,10 +400,10 @@ async function validate() {
       // A missing startup receipt distinguishes npm/tool provisioning from a
       // repository script failure. Retry startup once within the same budget.
       for (let attempt = 0; attempt < 2; attempt++) {
-        socketPathFault = tapOutput = false;
+        const attemptEnv = runner?.startupReceipt ? { ...env, HAM_PNPM_VALIDATION_STARTED_FILE: startedFile } : env;
         const remainingMs = Math.max(1, deadline - Date.now());
         process.exitCode = execution ? await runBounded(execution.command, execution.args,
-          { env: runner.startupReceipt ? { ...env, HAM_PNPM_VALIDATION_STARTED_FILE: startedFile } : env,
+          { env: attemptEnv,
             timeoutMs: remainingMs, idleMs: leaseValidationIdleMs(remainingMs),
             observeOutput, stopOnTimeoutExit: mirror,
             observeStop: (reason, status) => {
@@ -423,10 +423,10 @@ async function validate() {
       }
       runnerExit = process.exitCode;
       const failedMirrorChecks = mirror ? readValidationReceipt().checks.filter(check => check.result === 'fail') : [];
-      // TAP names and diagnostics cannot establish that every failed test was a socket fault.
+      // Output from a test reporter or other command makes attribution ambiguous.
       const confirmedSocketPathFault = mirror
         ? runnerExit === 42 && failedMirrorChecks.length > 0 && failedMirrorChecks.every(check => check.socketPathFault)
-        : socketPathFault && !tapOutput && !localTestFailure;
+        : outputKind === 'socket-only';
       if (!stopReason && runnerExit > 0 && runnerExit < 124
         && confirmedSocketPathFault) {
         fallbackReason = SOCKET_PATH_HARNESS_FAULT;

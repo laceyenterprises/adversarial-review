@@ -21,11 +21,14 @@ from types import ModuleType
 LOG_LIMIT = 4 * 1024 * 1024
 PROGRESS_INTERVAL = 15
 SOCKET_PATH_FAILURE = re.compile(
-    r"^[ \t]*(?:OSError: AF_UNIX path too long\b|"
-    r"(?:Error: )?(?:listen|bind) ENAMETOOLONG:)",
-    re.MULTILINE,
+    r"(?:OSError: AF_UNIX path too long|"
+    r"(?:Error: )?(?:listen|bind) ENAMETOOLONG:[^\r\n]*)[ \t]*"
 )
-TAP_OUTPUT = re.compile(r"^[ \t]*(?:TAP version \d+\b|(?:not )?ok \d+\b)", re.MULTILINE)
+
+
+def socket_only_output(output):
+    lines = [line for line in output.split("\n") if line.strip(" \t")]
+    return len(lines) == 1 and SOCKET_PATH_FAILURE.fullmatch(lines[0]) is not None
 
 
 class CheckDeadline(BaseException):
@@ -208,6 +211,7 @@ def main():
     # Their runner combines stderr into stdout (CompletedProcess.stderr is None).
     # A concurrent runner needs separate receipt context before it is supported.
     active = None
+    command_socket_faults = []
 
     def open_diagnostic(row):
         log = None
@@ -255,6 +259,9 @@ def main():
             result = run_attached(
                 command, cwd=cwd, env=env, timeout=timeout, capture=capture
             )
+            command_socket_faults.append(
+                0 < result.returncode < 124 and socket_only_output(result.stdout)
+            )
             diagnostic["exitStatus"] = result.returncode
             persist()
             return result
@@ -288,6 +295,7 @@ def main():
             result = None
         if result is None:
             persist()
+            command_socket_faults.clear()
             active = row
             try:
                 result = original_run(check, *positional, **keywords)
@@ -319,11 +327,7 @@ def main():
             )
         elif result.status in {"fail", "inconclusive"}:
             row.update(status="failed", result=result.status)
-            if (
-                result.status == "fail"
-                and not TAP_OUTPUT.search(output)
-                and SOCKET_PATH_FAILURE.search(output)
-            ):
+            if result.status == "fail" and command_socket_faults == [True]:
                 row["socketPathFault"] = True
         elif result.status == "skipped":
             row.update(status="not-run", result=result.status)

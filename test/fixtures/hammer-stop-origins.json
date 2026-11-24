@@ -95,7 +95,7 @@
   "helper-input-invalid": "closer",
   "helper-kind-mismatch": "closer",
   "helper-step-unavailable": "closer",
-  "harness-fault:socket-path": "infrastructure",
+  "harness-fault:socket-path": "world",
   "history-read-failed": "infrastructure",
   "invalid-pr-context-request": "closer",
   "invalid-pr-reference": "closer",

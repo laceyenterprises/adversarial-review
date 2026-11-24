@@ -9,7 +9,7 @@
 # commit, verify-head (lease, rebase, bounded
 # outside-lease revalidation), publish the audit, exact-head CI wait, predicate
 # inputs, claim, predicate, merge. Terminal stops write close-result.json and
-# keep the phase's exit code (20 stop, 21 conflict repair, 75 retryable deferral).
+# keep the phase's exit code. The named stop outcome determines retryability.
 exec 0</dev/null
 
 HAM_CLOSE_ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P) || exit 1

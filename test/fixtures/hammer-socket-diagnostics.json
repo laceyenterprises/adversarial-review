@@ -28,5 +28,21 @@
     "name": "socket field mentioned in prose",
     "output": "test checked the sun_path field",
     "socketPathFault": false
+  },
+  {
+    "name": "pytest product assertion with a separate inherited socket traceback",
+    "stdout": "F                                                                        [100%]\n=================================== FAILURES ===================================\n____________________________ test_product_behavior _____________________________\n>       assert actual == expected\nE       AssertionError: assert 0 == 1\n=========================== short test summary info ============================\nFAILED test_product.py::test_product_behavior - AssertionError: assert 0 == 1\n1 failed in 0.03s\n",
+    "output": "Traceback (most recent call last):\n  File \"fixture_process.py\", line 3, in <module>\n    sock.bind(path)\nOSError: AF_UNIX path too long\n",
+    "socketPathFault": false
+  },
+  {
+    "name": "pytest socket report",
+    "output": "E   OSError: AF_UNIX path too long\nFAILED test_worker.py::test_fixture - OSError: AF_UNIX path too long\n",
+    "socketPathFault": false
+  },
+  {
+    "name": "Node connect socket error",
+    "output": "Error: connect ENAMETOOLONG: /fixture/run.sock",
+    "socketPathFault": false
   }
 ]

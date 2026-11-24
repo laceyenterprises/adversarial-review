@@ -1,6 +1,7 @@
 import { randomBytes } from 'node:crypto';
 import { constants } from 'node:fs';
 import { chmod, lstat, mkdir, open, readdir, realpath, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { SOCKET_PATH_HARNESS_FAULT } from '../harness-fault.mjs';
 
@@ -10,6 +11,8 @@ const OWNER = '.validator-pid';
 const MAX_SOCKET_BYTES = 92;
 // The longest observed fixture uses 52 suffix bytes. Reserve 64 for nested
 // temp fixtures, leaving at least 12 bytes below Darwin's 104-byte sun_path.
+// The canonical Darwin root /private/tmp/ar-hv-xxxxxxxx is 27 bytes.
+// With the suffix it uses 91 of the 92 budgeted bytes, one byte of margin.
 const SOCKET_SUFFIX_BYTES = 64;
 const ORPHAN_GRACE_MS = 24 * 60 * 60 * 1000;
 const REAP_INTERVAL_MS = 60 * 60 * 1000;
@@ -25,9 +28,11 @@ export function validationScratchEnv(env, root) {
   const result = { ...env, TMPDIR: root, TMP: root, TEMP: root };
   // Replace the closer's fixed pytest basetemp while preserving caller flags.
   if (env.HAM_RUN_DIR && env.PYTEST_ADDOPTS) {
+    const path = join(root, 'p');
+    const quotedPath = /[\s'"\\]/.test(path) ? `'${path.replaceAll("'", "'\\''")}'` : path;
     result.PYTEST_ADDOPTS = env.PYTEST_ADDOPTS.replace(
       /(^|\s)--basetemp=(?:"(?:\\.|[^"\\])*"|'[^']*'|\S+)/g,
-      (_option, space) => `${space}--basetemp=${join(root, 'p')}`);
+      (_option, space) => `${space}--basetemp=${quotedPath}`);
   }
   return result;
 }
@@ -110,7 +115,7 @@ export async function reapValidationScratch(base, { now = Date.now(), snapshot =
   }
 }
 
-export async function createValidationScratch(base = '/tmp') {
+async function createScratchIn(base) {
   // On Darwin /tmp resolves to /private/tmp. Pass the real spelling to tools
   // that canonicalize paths before binding sockets or resolving imports.
   const parent = await realpath(base);
@@ -127,5 +132,16 @@ export async function createValidationScratch(base = '/tmp') {
       await rm(path, { recursive: true, force: true });
       throw error;
     }
+  }
+}
+
+export async function createValidationScratch(base = '/tmp') {
+  try { return await createScratchIn(base); }
+  catch (error) {
+    const fallback = tmpdir();
+    if (fallback === base || !['EACCES', 'EPERM', 'EROFS', 'ENOENT', 'ERR_ACCESS_DENIED'].includes(error.code)) {
+      throw error;
+    }
+    return createScratchIn(fallback);
   }
 }

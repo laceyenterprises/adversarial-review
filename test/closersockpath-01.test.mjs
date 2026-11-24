@@ -6,6 +6,7 @@ import { join } from 'node:path';
 import test from 'node:test';
 import { readAmaAuditEntry } from '../src/ama/audit.mjs';
 import { classifyCloserOutcome } from '../src/ama/closer-inconclusive-retry.mjs';
+import { refundInconclusiveExhaustion } from '../src/ama/closure-budget-escalation.mjs';
 import { createValidationScratch, reapValidationScratch, validationScratchEnv } from '../src/ama/hammer-validation-scratch.mjs';
 
 const validator = new URL('../bin/hammer-validate.mjs', import.meta.url).pathname;
@@ -36,6 +37,8 @@ test('pytest basetemp relocation preserves flags across shell quoting styles', (
   const flags = '-q -k test_basetemp --custom-basetemp=/keep';
   assert.equal(validationScratchEnv({ HAM_RUN_DIR: '/long/run', PYTEST_ADDOPTS: flags }, root).PYTEST_ADDOPTS, flags);
   assert.equal(validationScratchEnv({ HAM_RUN_DIR: '/long/run' }, root).PYTEST_ADDOPTS, undefined);
+  assert.equal(validationScratchEnv({ HAM_RUN_DIR: '/long/run', PYTEST_ADDOPTS: '--basetemp=/old' },
+    '/tmp/a b').PYTEST_ADDOPTS, "--basetemp='/tmp/a b/p'");
 });
 
 test('validation binds a real Unix socket and resolves a local module from a deep checkout', t => {
@@ -88,6 +91,34 @@ test('an overlong real temp parent fails before creating any scratch', async t =
   assert.deepEqual(readdirSync(base), []);
 });
 
+for (const fits of [true, false]) {
+  test(`unwritable primary temp root ${fits ? 'uses a writable caller tmpdir' : 'refuses an over-budget caller tmpdir'}`, t => {
+    const base = realpathSync(fits ? '/tmp' : fixture(t));
+    const module = new URL('../src/ama/hammer-validation-scratch.mjs', import.meta.url);
+    const result = spawnSync(process.execPath, [
+      '--permission', '--allow-fs-read=*', `--allow-fs-write=${base}`, '--input-type=module', '-e', `
+        import assert from 'node:assert/strict';
+        import { lstatSync, rmSync } from 'node:fs';
+        import { createValidationScratch } from ${JSON.stringify(module.href)};
+        if (${fits}) {
+          const scratch = await createValidationScratch('/');
+          try {
+            assert.ok(scratch.startsWith(process.env.TMPDIR + '/ar-hv-'));
+            assert.equal(lstatSync(scratch).mode & 0o777, 0o700);
+          } finally {
+            rmSync(scratch, { recursive: true, force: true });
+          }
+        } else {
+          await assert.rejects(createValidationScratch('/'), /harness-fault:socket-path:.*bytes/);
+        }
+      `,
+    ], { env: { ...process.env, TMPDIR: base }, encoding: 'utf8', timeout: 10_000 });
+    assert.ifError(result.error);
+    assert.equal(result.status, 0, result.stderr);
+    if (!fits) assert.deepEqual(readdirSync(base), []);
+  });
+}
+
 test('orphan reaping preserves live, recent, and symlink candidates', async t => {
   const root = realpathSync(fixture(t));
   for (const id of ['00000001', '00000002', '00000003', '00000004', '00000005']) {
@@ -116,7 +147,7 @@ test('orphan reaping preserves live, recent, and symlink candidates', async t =>
   assert.ok(lstatSync(path('00000006')).isSymbolicLink());
 });
 
-for (const { name, output, socketPathFault } of diagnostics) {
+for (const { name, output, stdout = '', socketPathFault } of diagnostics) {
   test(`validation exit is classified for ${name}`, t => {
     const root = fixture(t);
     const env = { PATH: process.env.PATH, HOME: root, TMPDIR: root,
@@ -124,7 +155,8 @@ for (const { name, output, socketPathFault } of diagnostics) {
       HAM_PR_NUMBER: '42', HAM_REVIEWED_SHA: 'a'.repeat(40), HQ_LAUNCH_REQUEST_ID: 'lrq_fixture',
       HQ_WORKER_RUN_ID: 'wrun_fixture', HAM_CLOSE_VALIDATION_RECEIPT: join(root, 'validation.json') };
     const result = spawnSync(process.execPath, [validator, '--', process.execPath, '-e',
-      `process.stderr.write(${JSON.stringify(output)}); process.exitCode = 1;`], {
+      `process.stdout.write(${JSON.stringify(stdout)});
+       process.stderr.write(${JSON.stringify(output)}); process.exitCode = 1;`], {
       cwd: root, env, encoding: 'utf8', timeout: 10_000,
     });
     assert.ifError(result.error);
@@ -137,16 +169,35 @@ for (const { name, output, socketPathFault } of diagnostics) {
       assert.match(receipt.socketPathDiagnostic, /validation scratch: \/(?:private\/)?tmp\/ar-hv-[a-f0-9]{8}/);
       const attempt = audit.attempts.at(-1);
       assert.equal(attempt.reason, socketFault);
-      assert.equal(attempt.outcome, 'deferred');
-      assert.equal(attempt.continuation.headSha, env.HAM_REVIEWED_SHA);
+      assert.equal(attempt.outcome, 'failed-without-merge');
+      assert.equal(attempt.continuation, undefined);
       assert.deepEqual(classifyCloserOutcome({ reason: attempt.reason }),
-        { kind: 'inconclusive', reason: socketFault, origin: 'infrastructure' });
+        { kind: 'real', reason: socketFault, origin: 'world' });
     } else {
       assert.equal(receipt.socketPathDiagnostic, undefined);
       assert.ok(!audit);
     }
   });
 }
+
+test('closure-budget recovery cannot refund repeated socket stops on the same head', t => {
+  assert.equal(classifyCloserOutcome({ failureClass: socketFault }).kind, 'real');
+  assert.equal(classifyCloserOutcome({ reason: 'hammer-wall-clock-exceeded', failureClass: socketFault }).kind, 'real');
+  const headSha = 'a'.repeat(40);
+  const launches = ['lrq_first', 'lrq_second'];
+  const root = fixture(t);
+  const result = refundInconclusiveExhaustion({
+    rootDir: root, hqRoot: root, repo: 'fixture/example', prNumber: 42, headSha,
+    readLedgerImpl: () => ({ jobKey: headSha, dispatchCharges: Object.fromEntries(launches.map(launchRequestId =>
+      [launchRequestId, { jobKey: headSha, headSha, launchRequestId }])) }),
+    // A legacy socket deferral is still counted when no owner record already refunded it.
+    readAuditImpl: () => ({ attempts: launches.map(launchRequestId =>
+      ({ launchRequestId, reason: socketFault, outcome: 'deferred' })) }),
+    recordRetryImpl: () => assert.fail('no owned infrastructure retry'),
+    refundImpl: () => assert.fail('no infrastructure refund'),
+  });
+  assert.deepEqual(result, { recovered: false, reason: 'real-attempts-spent-budget', realAttempts: 2 });
+});
 
 test('canonical TAP battery preserves a product failure alongside a passing socket diagnostic name', t => {
   const root = fixture(t);
@@ -172,6 +223,37 @@ test('canonical TAP battery preserves a product failure alongside a passing sock
   assert.equal(result.status, 1, result.stderr);
   assert.match(result.stdout, /^ok \d+ - OSError: AF_UNIX path too long$/m);
   assert.match(result.stdout, /^not ok \d+ - product regression$/m);
+  const evidence = JSON.parse(readFileSync(receipt, 'utf8'));
+  assert.equal(evidence.outcome, undefined);
+  assert.equal(evidence.checks[0].status, 'failed');
+});
+
+test('canonical Node spec reporter retains its assertion alongside inherited stderr', t => {
+  const root = fixture(t);
+  const receipt = join(root, 'validation.json');
+  mkdirSync(join(root, 'test'));
+  writeFileSync(join(root, 'package.json'), '{"name":"adversarial-review"}');
+  writeFileSync(join(root, 'test/run-tests.mjs'), `
+    import { spawnSync } from 'node:child_process';
+    spawnSync(process.execPath, ['-e', 'console.error("Error: listen ENAMETOOLONG: /fixture/run.sock")'],
+      { stdio: ['ignore', 'ignore', 'inherit'] });
+    process.exitCode = spawnSync(process.execPath,
+      ['--test', '--test-reporter=spec', ...process.argv.slice(2)], { stdio: 'inherit' }).status;
+  `);
+  writeFileSync(join(root, 'test/mixed.test.mjs'), `
+    import assert from 'node:assert/strict';
+    import test from 'node:test';
+    test('product behavior', () => assert.equal(0, 1));
+  `);
+  const result = spawnSync(process.execPath, [validator, '--canonical', '--', 'test/mixed.test.mjs'], {
+    cwd: root, encoding: 'utf8', timeout: 10_000,
+    env: { PATH: process.env.PATH, HOME: root, NETGUARD_LOG: process.env.NETGUARD_LOG || '',
+      HAM_CLOSE_VALIDATION_RECEIPT: receipt },
+  });
+  assert.ifError(result.error);
+  assert.equal(result.status, 1, result.stderr);
+  assert.match(result.stdout, /AssertionError/);
+  assert.match(result.stdout, /^Error: listen ENAMETOOLONG:/m);
   const evidence = JSON.parse(readFileSync(receipt, 'utf8'));
   assert.equal(evidence.outcome, undefined);
   assert.equal(evidence.checks[0].status, 'failed');

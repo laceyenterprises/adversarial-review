@@ -9,13 +9,13 @@ const wrapper = new URL('../bin/hammer-ci-mirror-validation.py', import.meta.url
 const fixture = readFileSync(new URL('./fixtures/ci-mirror-budget.py', import.meta.url), 'utf8');
 const diagnostics = JSON.parse(readFileSync(new URL('./fixtures/hammer-socket-diagnostics.json', import.meta.url)));
 
-for (const { name, output, socketPathFault } of diagnostics) {
+for (const { name, output, stdout = '', socketPathFault } of diagnostics) {
   test(`failed mirror checks classify buffered output for ${name}`, t => {
     const dir = mkdtempSync(join(tmpdir(), 'ham-mirror-socket-'));
     t.after(() => rmSync(dir, { recursive: true, force: true }));
     const script = join(dir, 'mirror.py');
     const receipt = join(dir, 'receipt.json');
-    writeFileSync(join(dir, 'check.py'), `import sys\nsys.exit(${JSON.stringify(output)})\n`);
+    writeFileSync(join(dir, 'check.py'), `import sys\nsys.stdout.write(${JSON.stringify(stdout)})\nsys.exit(${JSON.stringify(output)})\n`);
     writeFileSync(join(dir, 'plan.json'), '{"manifests":{},"reason":"fixture"}');
     writeFileSync(script, fixture);
     const result = spawnSync('python3', [wrapper, join(dir, 'plan.json'), receipt, script],

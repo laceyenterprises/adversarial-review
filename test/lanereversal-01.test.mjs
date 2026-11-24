@@ -23,7 +23,7 @@ const body = `## Blocking issues\n${finding}\n## Non-blocking issues\n- None.\n#
 
 function fixture(t, { owner = true, mutateJob = () => {}, mutateCommit = () => {},
   mutateReview = () => {}, mutateAttestation = () => {}, cleanReview = true, hammer = false,
-  bucket = 'completed', persistent = false, receiptLedger = 'shared' } = {}) {
+  bucket = 'completed', persistent = false, receiptLedger = 'shared', readError } = {}) {
   const rootDir = mkdtempSync(join(tmpdir(), 'lane-reversal-'));
   t.after(() => rmSync(rootDir, { recursive: true, force: true }));
   const job = { jobId: JOB, repo: REPO, prNumber: 7, revisionRef: PRIMARY, status: 'completed',
@@ -52,7 +52,7 @@ function fixture(t, { owner = true, mutateJob = () => {}, mutateCommit = () => {
   const chainTargets = [];
   const runtimeDsn = 'postgresql://runtime.invalid/ledger';
   const canonicalDsn = 'postgresql://canonical.invalid/ledger';
-  const env = { AGENT_OS_SESSION_LEDGER_DSN: runtimeDsn };
+  const env = { AGENT_OS_SESSION_LEDGER_DSN: runtimeDsn, AGENT_OS_SESSION_LEDGER_POSTGRES_RUNTIME: 'on' };
   if (receiptLedger !== 'shared') env.AGENT_OS_SESSION_LEDGER_CANONICAL_DSN = canonicalDsn;
   const receiptDsn = receiptLedger === 'canonical' ? canonicalDsn : runtimeDsn;
   const readLaneIdentityImpl = args => {
@@ -64,9 +64,11 @@ function fixture(t, { owner = true, mutateJob = () => {}, mutateCommit = () => {
           assert.deepEqual(argv, ['attest', 'chain', '--repo', REPO, '--pr', '7', '--json']);
           const target = childEnv.AGENT_OS_SESSION_LEDGER_DSN;
           chainTargets.push(target);
+          if (readError) throw readError;
           const rows = target === receiptDsn ? [attestation] : [];
           return { stdout: JSON.stringify(rows) };
         },
+        retryDelaysMs: [], logger: { warn() {} },
       }) });
   };
   const get = async path => {
@@ -105,6 +107,97 @@ test('LAC-2235 an empty canonical chain cannot fall back to a runtime receipt', 
   const f = fixture(t, { receiptLedger: 'runtime' });
   assertGates(await f.collect(), false);
   assert.deepEqual(f.chainTargets, [f.env.AGENT_OS_SESSION_LEDGER_CANONICAL_DSN]);
+  assert.match((await f.collect()).rejectedReversalAuthorizations[0].detail,
+    /missing-produced-head-attestation; transient=false; ledgerTarget=canonical-postgres/);
+});
+
+for (const [name, selectors, canonical] of [
+  ['legacy gate on', { AGENT_OS_SESSION_LEDGER_POSTGRES_RUNTIME: ' ON ' }, true],
+  ['legacy gate off', { AGENT_OS_SESSION_LEDGER_POSTGRES_RUNTIME: 'off' }, false],
+  ['SQLite backend', { AGENT_OS_SESSION_LEDGER_BACKEND: 'sqlite' }, false],
+  ['Postgres backend', { AGENT_OS_SESSION_LEDGER_BACKEND: 'postgres' }, true],
+  ['legacy off overrides Postgres backend', { AGENT_OS_SESSION_LEDGER_POSTGRES_RUNTIME: 'off',
+    AGENT_OS_SESSION_LEDGER_BACKEND: 'postgres' }, false],
+  ['legacy on overrides SQLite backend', { AGENT_OS_SESSION_LEDGER_POSTGRES_RUNTIME: 'on',
+    AGENT_OS_SESSION_LEDGER_BACKEND: 'sqlite' }, true],
+  ['unspecified backend', {}, false],
+  ['blank canonical DSN', { AGENT_OS_SESSION_LEDGER_POSTGRES_RUNTIME: 'on',
+    AGENT_OS_SESSION_LEDGER_CANONICAL_DSN: '  ' }, false],
+]) test(`canonical routing preserves the full child environment: ${name}`, async () => {
+  const env = {
+    AGENT_OS_SESSION_LEDGER_DSN: 'postgresql://runtime.invalid/ledger',
+    AGENT_OS_SESSION_LEDGER_CANONICAL_DSN: ' postgresql://canonical.invalid/ledger ',
+    AGENT_OS_SESSION_LEDGER_DSN_DIRECT: 'postgresql://direct.invalid/ledger',
+    AGENT_OS_SESSION_LEDGER_VDB: 'true',
+    AGENT_OS_SESSION_LEDGER_VDB_DIRECT_DSN: 'postgresql://vdb.invalid/ledger',
+    AGENT_OS_SESSION_LEDGER_DB_PATH: '/synthetic/sqlite.db',
+    UNRELATED: 'preserved',
+    ...selectors,
+  };
+  const original = { ...env };
+  const expected = canonical ? { ...env, AGENT_OS_SESSION_LEDGER_DSN: env.AGENT_OS_SESSION_LEDGER_CANONICAL_DSN.trim() } : env;
+  if (canonical) for (const key of ['AGENT_OS_SESSION_LEDGER_DSN_DIRECT', 'AGENT_OS_SESSION_LEDGER_VDB',
+    'AGENT_OS_SESSION_LEDGER_VDB_DIRECT_DSN', 'AGENT_OS_SESSION_LEDGER_DB_PATH']) delete expected[key];
+  let calls = 0;
+  const result = await readLaneReversalIdentity({ repo: REPO, prNumber: 7, currentHeadSha: HEAD, env,
+    readHeadAttestationChainForPrImpl: options => readHeadAttestationChainForPr({ ...options,
+      execFileImpl: async (_command, _argv, { env: childEnv }) => {
+        calls++;
+        assert.deepEqual(childEnv, expected);
+        return { stdout: '[]' };
+      },
+    }),
+  });
+  assert.equal(calls, 1);
+  assert.equal(result.ok, false);
+  assert.equal(result.ledgerTarget, canonical ? 'canonical-postgres' : 'runtime');
+  assert.deepEqual(env, original);
+});
+
+for (const message of ['could not connect to server: Connection refused',
+  'server closed the connection unexpectedly', 'connection to server at "fixture" failed: Connection timed out',
+  'the database system is starting up']) {
+  test(`Postgres failure retries within the chain budget and remains diagnosable: ${message}`, async t => {
+    let calls = 0;
+    const delays = [];
+    const result = await readLaneReversalIdentity({ repo: REPO, prNumber: 7, currentHeadSha: HEAD,
+      env: { AGENT_OS_SESSION_LEDGER_BACKEND: 'postgres', AGENT_OS_SESSION_LEDGER_CANONICAL_DSN: 'postgresql://canonical.invalid/ledger' },
+      readHeadAttestationChainForPrImpl: options => readHeadAttestationChainForPr({ ...options,
+        retryDelaysMs: [1, 2], sleepImpl: async ms => delays.push(ms), logger: { warn() {} },
+        execFileImpl: async () => {
+          calls++;
+          throw Object.assign(new Error('hq attest failed'), { stderr: message });
+        },
+      }),
+    });
+    assert.equal(calls, 3);
+    assert.deepEqual(delays, [1, 2]);
+    assert.equal(result.reason, 'head-attestation-chain-read-failed');
+    assert.equal(result.transient, true);
+    assert.equal(result.ledgerTarget, 'canonical-postgres');
+    const f = fixture(t, { receiptLedger: 'canonical',
+      readError: Object.assign(new Error('hq attest failed'), { stderr: message }) });
+    const evidence = await f.collect();
+    assertGates(evidence, false);
+    assert.match(evidence.rejectedReversalAuthorizations[0].detail,
+      /head-attestation-chain-read-failed; transient=true; ledgerTarget=canonical-postgres/);
+  });
+}
+
+test('permanent canonical read failures remain non-transient and fail closed', async t => {
+  const f = fixture(t, { receiptLedger: 'canonical', readError: new Error('password authentication failed') });
+  const evidence = await f.collect();
+  assertGates(evidence, false);
+  assert.match(evidence.rejectedReversalAuthorizations[0].detail,
+    /head-attestation-chain-read-failed; transient=false; ledgerTarget=canonical-postgres/);
+});
+
+test('a mismatched produced subject is distinct from an absent receipt', async t => {
+  const f = fixture(t, { mutateAttestation: row => { row.repo = 'foreign/repo'; } });
+  const evidence = await f.collect();
+  assertGates(evidence, false);
+  assert.match(evidence.rejectedReversalAuthorizations[0].detail,
+    /produced-attestation-subject-mismatch; transient=false; ledgerTarget=runtime/);
 });
 
 function closer(primaryChange, strictNonBlockingRemediation = true) {
@@ -302,7 +395,7 @@ for (const cited of [true, false]) test(`a later hammer cannot redefine the prim
   assertGates(evidence, cited);
 });
 
-for (const [superseded, replacementContext] of [[false, false], [true, false], [false, true]]) test(`rebased lane reversal ${superseded ? 'pinned by immutable later review' : 'with current citation'} retains patch proof${replacementContext ? ' beside unchanged replacement context' : ''}`, async t => {
+for (const [superseded, replacementContext, failedOriginalRead] of [[false, false], [true, false], [false, true], [true, false, true]]) test(`rebased lane reversal ${superseded ? 'pinned by immutable later review' : 'with current citation'} retains patch proof${replacementContext ? ' beside unchanged replacement context' : ''}${failedOriginalRead ? ' and original read diagnostics' : ''}`, async t => {
   const source = await collectRebased({
     ...(superseded ? { originalRecorded: true, reviews: [rebasedReview(), rebasedReview({
       node_id: 'PRR_clean', commit_id: 'f'.repeat(40), state: 'APPROVED',
@@ -346,10 +439,18 @@ for (const [superseded, replacementContext] of [[false, false], [true, false], [
     return value;
   };
   const evidence = await fetchPrimaryChange({ rootDir: f.rootDir, repo: REPO, prNumber: 8088,
-    headSha: HEAD, get, readLaneIdentityImpl: async ({ currentHeadSha }) => ({
-      ok: true, resolvedBy: 'head-attestation', rowHeadSha: currentHeadSha,
-      launchRequestId: 'lrq_fixture', workerClass: 'remediator-codex-corp',
-    }) }, { fetchCiCostImpl: async () => ({ ok: true, headSha: HEAD }) });
+    headSha: HEAD, get, readLaneIdentityImpl: async ({ currentHeadSha }) =>
+      failedOriginalRead && currentHeadSha !== HEAD
+        ? { ok: false, reason: 'head-attestation-chain-read-failed', transient: true, ledgerTarget: 'canonical-postgres' }
+        : { ok: true, resolvedBy: 'head-attestation', rowHeadSha: currentHeadSha,
+          launchRequestId: 'lrq_fixture', workerClass: 'remediator-codex-corp' },
+  }, { fetchCiCostImpl: async () => ({ ok: true, headSha: HEAD }) });
+  if (failedOriginalRead) {
+    assertGates(evidence, false);
+    assert.ok(evidence.rejectedReversalAuthorizations.some(entry =>
+      entry.detail?.includes('commit-provenance: head-attestation-chain-read-failed; transient=true; ledgerTarget=canonical-postgres')));
+    return;
+  }
   assertGates(evidence, true);
   const bad = structuredClone(evidence);
   bad.reversalAuthorizations[0].commit.files[0].patch =

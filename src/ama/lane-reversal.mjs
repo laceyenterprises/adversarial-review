@@ -66,16 +66,32 @@ export function laneReversalIdentityMatches({ commit, laneOwner, laneIdentity })
     && remediationWorkerTrailerClass(worker.workerClass) === trailers['worker-class'];
 }
 
-export function readLaneReversalIdentity({ env = process.env,
+export function laneReversalIdentityFailureDetail(identity) {
+  if (identity?.ok || !identity?.reason) return undefined;
+  return `${identity.reason}; transient=${identity.transient === true}`
+    + (identity.ledgerTarget ? `; ledgerTarget=${identity.ledgerTarget}` : '');
+}
+
+export async function readLaneReversalIdentity({ env = process.env,
   readHeadAttestationChainForPrImpl = readHeadAttestationChainForPr, ...args }) {
-  // HQ records native produced attestations on the canonical ledger. The
-  // chain CLI reads its runtime target, so route this child to the same ledger.
+  // HQ's legacy runtime selector wins over BACKEND when both are present.
+  // Require an explicit Postgres selection; leave config-only resolution to HQ.
+  const runtime = env.AGENT_OS_SESSION_LEDGER_POSTGRES_RUNTIME?.trim().toLowerCase();
+  const postgres = runtime ? runtime === 'on'
+    : env.AGENT_OS_SESSION_LEDGER_BACKEND?.trim().toLowerCase() === 'postgres';
   const canonicalDsn = env.AGENT_OS_SESSION_LEDGER_CANONICAL_DSN?.trim();
-  const chainEnv = canonicalDsn ? { ...env, AGENT_OS_SESSION_LEDGER_DSN: canonicalDsn } : env;
-  return resolveDaemonWorkerIdentityFromHeadAttestation({ ...args, env: chainEnv,
+  const canonical = postgres && Boolean(canonicalDsn);
+  const chainEnv = canonical ? { ...env, AGENT_OS_SESSION_LEDGER_DSN: canonicalDsn } : env;
+  if (canonical) {
+    for (const key of ['AGENT_OS_SESSION_LEDGER_DSN_DIRECT', 'AGENT_OS_SESSION_LEDGER_VDB',
+      'AGENT_OS_SESSION_LEDGER_VDB_DIRECT_DSN', 'AGENT_OS_SESSION_LEDGER_DB_PATH']) delete chainEnv[key];
+  }
+  const identity = await resolveDaemonWorkerIdentityFromHeadAttestation({ ...args, env: chainEnv,
     requireExactSubject: true,
     readHeadAttestationChainForPrImpl: options => readHeadAttestationChainForPrImpl({
       ...options, useDeployVerifier: true,
     }),
   });
+  // Report the routing mode, never the DSN (which can contain credentials).
+  return identity.ok ? identity : { ...identity, ledgerTarget: canonical ? 'canonical-postgres' : 'runtime' };
 }

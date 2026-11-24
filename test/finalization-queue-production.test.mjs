@@ -25,6 +25,7 @@ import { createQueueGitHub } from '../src/finalization/queue-github.mjs';
 import { resolveQueueHandoffStore } from '../src/finalization/queue-handoff-store.mjs';
 import { createLaneRoutingController } from '../src/finalization/queue-routing.mjs';
 import { ensureReviewStateSchema } from '../src/review-state.mjs';
+import { withRepositoryStateMigration } from '../src/repository-state-lock.mjs';
 import { gitFixture, idle } from './helpers/queue-rebase-fixture.mjs';
 import { queueCleanFixture, queueLiveFixture } from './helpers/queue-clean-fixture.mjs';
 import { handoffTime, queueHandoffFixture, reviewHead } from './helpers/queue-handoff-fixture.mjs';
@@ -187,6 +188,91 @@ function fakeWorld(f, setup, { moved = false, checksGreen = () => true } = {}) {
   });
   return { compose, writes, returns, deliveries };
 }
+
+test('a stalled admission warns once and leaves the repository migration lock available', async t => {
+  const f = gitFixture(t, { noop: true });
+  const routeGeneration = await transfer(f);
+  const fixture = receiptFixture({ prNumber: 102, head: f.oldHead });
+  const production = createProductionQueue({ rootDir: f.root, readConfig: () => cfg, now: f.now, observe: () => fixture });
+  await production.admitClean({ route: { lane, routeGeneration }, prNumber: 102, head: f.oldHead });
+  const world = fakeWorld(f, fixture);
+  const adapters = world.compose();
+  const { read } = adapters.liveAdapter;
+  let enter, release;
+  const entered = new Promise(resolve => { enter = resolve; });
+  const gate = new Promise(resolve => { release = resolve; });
+  let firstRead = true;
+  adapters.liveAdapter.read = async args => {
+    if (firstRead) {
+      firstRead = false;
+      enter();
+      await gate;
+    }
+    return read(args);
+  };
+  const warnings = [];
+  const consumer = createQueueConsumer({ rootDir: f.root, readConfig: () => cfg, now: f.now,
+    compose: () => adapters, logger: { warn: message => warnings.push(message) } });
+  const running = consumer.tick();
+  try {
+    await entered;
+    // An exclusive recovery cycle can run during remote admission I/O.
+    assert.equal(withRepositoryStateMigration(f.root, () => 'available'), 'available');
+    f.clock(179);
+    await consumer.tick();
+    assert.deepEqual(warnings, []);
+    f.clock(180);
+    await consumer.tick();
+    await consumer.tick();
+    assert.deepEqual(warnings, ['[finalization-queue] prior tick is still running beyond its stall threshold']);
+    assert.equal(world.writes.length, 0);
+  } finally {
+    release();
+    await running;
+  }
+  await consumer.tick();
+  assert.equal(world.writes.length, 1);
+});
+
+test('lifting an expired hold permits fresh clean admission and a single merge', async t => {
+  const f = gitFixture(t, { noop: true });
+  const routeGeneration = await transfer(f);
+  const fixture = receiptFixture({ prNumber: 102, head: f.oldHead });
+  const production = createProductionQueue({ rootDir: f.root, readConfig: () => cfg, now: f.now, observe: receiptFixture });
+  const input = { route: { lane, routeGeneration }, prNumber: 102, head: f.oldHead };
+  const original = await production.admitClean(input);
+  const world = fakeWorld(f, fixture);
+  const adapters = world.compose();
+  const { read } = adapters.liveAdapter;
+  let held = true;
+  adapters.liveAdapter.read = args => {
+    const observation = read(args);
+    if (held) observation.subject.labels = ['no-merge-hold'];
+    return observation;
+  };
+  const pages = [];
+  adapters.pageAdapter = { read: ({ payload }) => {
+    pages.push(payload);
+    return { id: payload.causeKey, sourceRef: 'fixture:page' };
+  } };
+  const consumer = createQueueConsumer({ rootDir: f.root, readConfig: () => cfg, now: f.now,
+    compose: () => adapters, logger: { warn: message => assert.fail(message) } });
+  await consumer.tick();
+  assert.equal(f.store.readEntry(original.entryId).phase, 'parked-hold');
+  f.clock(original.patience.effectiveMs / 1000);
+  await consumer.tick();
+  assert.equal(f.store.readEntry(original.entryId).phase, 'returned-to-closer');
+  assert.equal(world.writes.length, 0);
+  held = false;
+  const fresh = await production.admitClean(input);
+  assert.equal(fresh.admissionGeneration, 2);
+  await consumer.tick();
+  await consumer.tick();
+  assert.equal(f.store.readEntry(fresh.entryId).phase, 'merged');
+  assert.equal(world.writes.length, 1);
+  assert.equal(pages.length, 1);
+  assert.equal(pages[0].reason, 'admission-deadline-expired');
+});
 
 for (const remediated of [false, true]) {
   test(`watcher consumer finalizes one exact ${remediated ? 'remediated' : 'clean'} head through the queue and outbox`, async t => {

@@ -55,6 +55,42 @@ Before activation, the operator:
    arrivals faster than checks complete. Tolerances are operator observations,
    not new runtime policy or configuration.
 
+## Watcher progress and recovery signals
+
+Queue scheduling and fresh admission require the AMA master switch
+`merge_authority.enabled: true`, the autonomous execution switch, and matching
+configured and durable queue routes. Disabling either switch stops new work;
+it does not establish drain of an already-issued request.
+
+The watcher emits one `[finalization-queue] prior tick is still running beyond
+its stall threshold` warning when a skipped tick observes an active tick older
+than three configured intervals. Inspect the running adapter and pending
+operations before restarting; a warning does not cancel or reconcile a write.
+Admission reads and check polling release the repository-state lock during
+remote I/O. Individual mutation and recovery calls retain the issuance boundary
+and their bounded operation budgets.
+
+Admission patience expiry records `returned-to-closer` with reason
+`admission-deadline-expired` and enqueues a durable page. That acknowledgement
+no longer suppresses closure evaluation. Once a hold or dependency is repaired,
+a same-head clean submission needs fresh evidence and a new admission generation;
+a Hammer submission additionally needs a fresh launch. Do not extend the old
+entry's patience. Repeated parked observations add at most about 60 scheduling
+events per entry at the default one-minute cadence and 60-minute ceiling.
+
+After its own issuance callback drains, the same running watcher retries an
+ambiguous push or merge readback up to three times within its recovery budget.
+Positive publication or terminal merge evidence can settle the intent without
+reissuing the mutation. An unchanged open PR, unreadable outcome or a different
+watcher identity retains the fence and queues a page. Use the operator drain
+and reconciliation procedure below for those cases; process death alone is
+insufficient evidence.
+
+The Hammer publication signer uses absolute `HQ_BIN`, or the runtime owner's
+`.local/bin/hq` by default; a relative override refuses signing. App-pinned
+legacy commit statuses without attributable App evidence return to closure
+evaluation as `queue-branch-policy-unsupported`.
+
 ## Transfer, change selector and bounce
 
 Use the runtime-owner `createLaneRoutingController.transfer` composition port,

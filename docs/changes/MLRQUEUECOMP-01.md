@@ -40,6 +40,14 @@ entry shape for both intake paths, and the handoff receiver accepts files up to
 1 MiB. Queue subprocesses explicitly bind the entitled token, and the watcher
 logs bounded, redacted tick errors.
 
+The final advisory verification retains all eleven Hammer dispositions. New
+production fixtures prove that a suspended admission permits exclusive repository
+recovery, a stalled tick warns once at its threshold, and lifting an expired hold
+permits a new clean generation to merge exactly once while delivering the expiry
+page. The canary runbook now describes those runtime signals, the signer path,
+unsupported status pins, and the limits of automatic write reconciliation.
+There is no additional runtime interface or persistent schema change.
+
 The Node 26 run on the original remediation head reached the suite deadline
 with 115 files still queued and no failed assertions in the reported TAP.
 Queue tests now copy fixture seeds without unused Git templates or receiver
@@ -74,6 +82,21 @@ and SQLite setup from the request-size test. The five focused queue test
 files passed 150 tests on Node 26.10.0. The Node 22 full-suite run on the
 preceding PR head and the run on its exact `main` base both reached the
 900-second suite deadline.
+
+The final advisory verification's production file passed 26 tests with
+`bash bin/run-bounded.sh --timeout 60 -- node test/run-tests.mjs
+test/finalization-queue-production.test.mjs`. GitHub run `45308751529` on the
+preceding PR head timed out in Node 22 after 900 seconds; its Node 26 job passed.
+The exact main base `f4452765f1f65c5994ca29f078c5a8df26747fb4` has the same
+Node 22 timeout and passing Node 26 result in run `45270411460`. No CI workflow,
+check, concurrency setting or deadline is changed for this baseline failure.
+
+The seven focused production, admission, checks, owner, merge, execution-surface
+and MRQ-21 files passed 183 tests under a 120-second bound. Repository lint
+passed with zero errors (147 existing warnings), the changed test file passed
+ESLint, contract typecheck and the offline byte-equivalence demo passed, and
+the data-model validator accepted all 103 catalog entries. The full suite was
+left to PR-head CI.
 
 ```sh
 node src/finalization/queue-probe.mjs --capability canary --json

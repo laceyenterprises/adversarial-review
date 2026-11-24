@@ -958,6 +958,15 @@ can retire it using matching committed owner and epoch fences and the retained
 conflict submission evidence, or `--ledger-absence` with fresh canonical
 family absence and clear competing custody when the original evidence is unavailable.
 Retirement restores the existing ownerless clock and SEV1 path.
+After automatic rounds are spent, an operator PR update may atomically replace
+an `absent-unfenced` reservation after fresh absence and custody checks.
+Monotonic absence-count growth does not invalidate that snapshot.
+Unscoped CWP reservations retain custody until fenced retirement; the helper
+returns `repair-cwp-enqueue-fence-required`. Replacements beyond the ordinary
+two-entry cap observe the existing deduplicated cap page with full history.
+The companion owns isolation of the operator-intent environment hint; it is
+not authenticated request provenance. See the
+[operator update procedure](docs/RUNBOOK-ama-closure.md#operator-pr-update-after-the-automatic-remediation-budget-is-spent).
 Reviewer harness refunds are bounded to three per PR across heads; later
 failures retain ordinary infrastructure cap and alert handling. Corrupt or busy
 repair/refund ledgers defer only their PR. See the
@@ -1806,6 +1815,10 @@ The [reader contract](docs/producer-contract-readers.md#weekly-evidence-and-admi
 records the evidence/admission truth table and public export fixture refresh.
 
 ## State machines and smoke verification (SMV v1)
+
+Retained final-fix verification follows the matching repair owner key from its
+recovery launch to the managed pushed-head attestation and exact-head review.
+The original failed job stays `never-spawned`.
 
 Terminal HAM review proofs retain any-head operator vetoes. Permanent issuer
 gaps return `terminal-review-issuer-unverifiable` with operator custody; transient
@@ -3549,6 +3562,11 @@ stateDiagram-v2
     s0 --> s4: review-row.37 certain budget suppression restores latest delivered review identity under queued request CAS; live closure gates remain required
     s1 --> s4: review-row.38 certain budget suppression restores latest delivered review identity under queued request CAS; live closure gates remain required
     s3 --> s4: review-row.39 certain budget suppression restores latest delivered review identity under queued request CAS; live closure gates remain required
+    s0 --> s2: review-row.40 restore the verified live daemon-bounce claim for the exact head, session and group before admission
+    s5 --> s2: review-row.41 restore the verified live daemon-bounce claim for the exact head, session and group before admission
+    s2 --> s4: review-row.42 settle the exact GitHub review artifact after an adopted bounce claim drains
+    s2 --> s0: review-row.43 adopted bounce claim has confirmed exit and no posted review; return to bounded recovery without spending an attempt
+    s2 --> s5: review-row.44 adopted bounce claim has confirmed exit and no posted review while lease recovery is disabled; preserve counters
     s4 --> [*]
     s5 --> [*]
     s6 --> [*]
@@ -4121,6 +4139,18 @@ unresolved builder identity becomes `failed-orphan` for operator inspection.
 Durable lookup selects the newest matching pass with builder context, accepting
 `first-pass`, canonical `rereview` and compatibility spelling `re-review`, with
 session keys `reviewerSessionUuid`, `sessionUuid` or `session_uuid`.
+
+A watcher bounce can leave a live detached reviewer attached to a `pending`
+or `failed` claim. Before admitting another reviewer, the watcher restores the
+existing claim to `reviewing` when the current head, session, launch record,
+and live group leader agree. Subprocess start time and exact launch arguments
+fence the restoration and any later native cancellation. Unknown liveness,
+unverified launch identity, or a moved head holds admission only until the
+persisted reviewer deadline or one-hour fallback. The original review can
+settle once from its GitHub artifact. Confirmed exit without a post returns
+to bounded bounce recovery with the original counters. See the
+[review lifecycle](docs/STATE-MACHINE.md).
+
 After deployment, SRE verifies the watcher PID start time and observes 24 hours
 with no new family-message `failed-orphan` rows whose run record shows an eligible
 builder/reviewer pair. This observation requires organic runtime evidence.

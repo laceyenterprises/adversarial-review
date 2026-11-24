@@ -202,6 +202,7 @@ try {
   writeFileSync(configPath, JSON.stringify({
     files, paths, parallelFiles, concurrency, serialFiles, logDir,
     reportPath: process.env.AR_TEST_TIMINGS ? path.resolve(process.env.AR_TEST_TIMINGS) : undefined,
+    checkpointPath: process.env.AR_TEST_CHECKPOINT ? path.resolve(process.env.AR_TEST_CHECKPOINT) : undefined,
     nodeArgs: [
       '--preserve-symlinks', '--preserve-symlinks-main',
       ...['child-leak-guard', 'rate-limit-state-isolation', 'load-aware-timeout-fixture', 'temp-sandbox-guard']
@@ -223,7 +224,7 @@ try {
     // Diff selection applies only to this coordinator. Several test fixtures
     // invoke their own runner with a different repo or explicit file list.
     'AR_TEST_PR_BASE', 'AR_TEST_PR_SHARD',
-    'AR_TEST_TIMINGS', 'AR_TEST_SHARD_CONFIG', 'NODE_COMPILE_CACHE', 'NODE_TEST_CONTEXT',
+    'AR_TEST_TIMINGS', 'AR_TEST_CHECKPOINT', 'AR_TEST_SHARD_CONFIG', 'NODE_COMPILE_CACHE', 'NODE_TEST_CONTEXT',
     'CODEX_HOME', 'CODEX_SOURCE_HOME', 'CODEX_AUTH_PATH', 'GEMINI_HOME',
     'GEMINI_OAUTH_CREDS_PATH', 'CLAUDE_CONFIG_DIR',
     'CODEX_SESSION_ROOTS', 'CODEX_SESSION_ROOT',

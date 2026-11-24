@@ -150,6 +150,7 @@ import {
 import { checkHcpHealthz } from './hcp-health.mjs';
 import { handlePostedReviewRow } from './posted-review-row.mjs';
 import {
+  adoptBouncedReviewerBeforeAdmission,
   DAEMON_BOUNCE_FAILURE_CLASS,
   reconcileDaemonBounceBeforeRetry,
   isDaemonBounceFailure,
@@ -872,6 +873,19 @@ async function runReviewSubjectPhases(entry, ctx) {
         String(existing.domain_id || WATCHER_PRIMARY_DOMAIN_ID) !== String(domainId)
       ) {
         return;
+      }
+      if (!subject.terminal && isDaemonBounceFailure(existing)) {
+        const latest = stmtGetReviewRow.get(repoPath, prNumber);
+        if (latest?.review_status === 'reviewing' && isDaemonBounceFailure(latest)) {
+          return ['reviewer-in-flight', 'watcher-recovery'];
+        }
+        const custody = await adoptBouncedReviewerBeforeAdmission({
+          db, rootDir: ROOT, row: latest, headSha: subject.headSha,
+        });
+        if (custody.handled) {
+          console.log(`[watcher] reviewer bounce custody repo=${repoPath} pr=${prNumber} reason=${custody.reason}`);
+          return [custody.reason, 'watcher-recovery'];
+        }
       }
       const observeReviewLane = decision => observeTtmReviewLane(db, {
         repo: repoPath, prNumber, headSha: subject.headSha, ...decision,
@@ -3098,6 +3112,7 @@ async function runReviewSubjectPhases(entry, ctx) {
       if (infraRecoveryClass === DAEMON_BOUNCE_FAILURE_CLASS) {
         const bounceRecovery = await reconcileDaemonBounceBeforeRetry({
           row: current,
+          rootDir: ROOT,
           findPostedReview: reviewerCommandFailedReviewProbe,
           resolveReviewerLogin: reviewerBotLogin,
           markPosted: ({ row, postedAt, postedReview }) => {

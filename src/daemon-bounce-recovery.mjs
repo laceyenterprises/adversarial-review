@@ -22,6 +22,8 @@
 // verified and confirmed dead, or exhaust the incomplete-evidence hold, before replacement.
 
 import { currentProcessGroupId, verifyPgidIdentitySync } from './process-group-identity.mjs';
+import { readReviewerRunRecord, updateReviewerRunRecord } from './adapters/reviewer-runtime/run-state.mjs';
+import { directReviewerIdentity, verifyDirectReviewerIdentity } from './reviewer-process-identity.mjs';
 
 export const DAEMON_BOUNCE_FAILURE_CLASS = 'daemon-bounce';
 
@@ -45,6 +47,76 @@ function defaultIsAlive(pgid) {
   } catch (err) {
     return err?.code === 'ESRCH' ? false : null;
   }
+}
+
+function matchesBouncedClaim(record, row) {
+  const identity = directReviewerIdentity(record);
+  return identity && identity.repo === row.repo && identity.prNumber === row.pr_number
+    && identity.reviewerHeadSha === row.reviewer_head_sha
+    && identity.reviewerSessionUuid === row.reviewer_session_uuid
+    && record.sessionUuid === row.reviewer_session_uuid && record.pgid === row.reviewer_pgid
+    && record.spawnedAt === row.reviewer_started_at
+    && ['spawned', 'heartbeating', 'failed'].includes(record.state);
+}
+
+export async function verifyBouncedReviewerIdentity(record, row, options) {
+  return matchesBouncedClaim(record, row) && (await verifyDirectReviewerIdentity(record, options)).match;
+}
+
+function readBouncedReviewerRecord(rootDir, row) {
+  try {
+    const record = readReviewerRunRecord(rootDir, row.reviewer_session_uuid);
+    return matchesBouncedClaim(record, row) ? record : null;
+  } catch {
+    return null;
+  }
+}
+
+// Admission holds incomplete custody evidence until its deadline. Adoption
+// requires agreement between GitHub head, row, durable run, and the live
+// group leader. No signal is sent here.
+export async function adoptBouncedReviewerBeforeAdmission({
+  db, rootDir, row, headSha, now = new Date(),
+  isAlive = defaultIsAlive, verifyIdentity = verifyDirectReviewerIdentity,
+}) {
+  if (!['pending', 'failed'].includes(row?.review_status) || !isDaemonBounceFailure(row)
+    || !row.reviewer_session_uuid || !Number.isSafeInteger(row.reviewer_pgid) || row.reviewer_pgid <= 0) {
+    return { handled: false };
+  }
+  const holdUnverified = (reason, alive) => {
+    const { hold } = daemonBounceReviewerHold(row, {
+      now, isAlive: () => alive, verifyIdentity: () => ({ match: false }),
+    });
+    return hold ? { handled: true, reason } : { handled: false };
+  };
+  const alive = isAlive(row.reviewer_pgid);
+  if (alive === false) return { handled: false };
+  if (!headSha || headSha !== row.reviewer_head_sha) return holdUnverified('retained-reviewer-head', alive);
+  if (alive !== true) return holdUnverified('reviewer-liveness-unknown', alive);
+  const record = readBouncedReviewerRecord(rootDir, row);
+  if (!record || !(await verifyIdentity(record)).match) {
+    return holdUnverified('unverified-retained-reviewer', alive);
+  }
+  const adopt = db.transaction(() => {
+    const current = readBouncedReviewerRecord(rootDir, row);
+    if (!current) return { handled: true, reason: 'adoption-fence-missed' };
+    const currentAlive = isAlive(row.reviewer_pgid);
+    if (currentAlive === false) return { handled: false };
+    if (currentAlive !== true) return holdUnverified('reviewer-liveness-unknown', currentAlive);
+    const result = db.prepare(`UPDATE reviewed_prs SET review_status = 'reviewing'
+      WHERE repo = ? AND pr_number = ? AND pr_state = 'open' AND review_status = ?
+        AND reviewer_session_uuid = ? AND reviewer_head_sha = ? AND reviewer_pgid = ?
+        AND reviewer_started_at = ? AND failure_message IS ? AND failed_at IS ?`).run(
+      row.repo, row.pr_number, row.review_status, row.reviewer_session_uuid, row.reviewer_head_sha,
+      row.reviewer_pgid, row.reviewer_started_at, row.failure_message, row.failed_at,
+    );
+    if (result.changes !== 1) return { handled: true, reason: 'adoption-fence-missed' };
+    updateReviewerRunRecord(rootDir, current, {
+      state: 'heartbeating', adoptedAfterBounce: true, lastHeartbeatAt: now.toISOString(),
+    });
+    return { handled: true, reason: 'adopted-live-reviewer' };
+  });
+  return adopt.immediate();
 }
 
 // Timeout expiry is permission to recover, never proof of process exit.
@@ -83,9 +155,11 @@ export function daemonBounceReviewerHold(row, {
 // intact; the caller may claim a replacement only when handled is false.
 export async function reconcileDaemonBounceBeforeRetry({
   row,
+  rootDir = null,
   now = Date.now(),
   isAlive = defaultIsAlive,
   verifyIdentity = verifyPgidIdentitySync,
+  verifyReviewerIdentity = verifyBouncedReviewerIdentity,
   killProcessGroup = (pgid, signal) => process.kill(-pgid, signal),
   ownPgid = currentProcessGroupId,
   sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
@@ -113,6 +187,10 @@ export async function reconcileDaemonBounceBeforeRetry({
         if (decision.processEvidenceMissing) return { handled: true, reason: 'cleanup-identity-lost' };
         if (!decision.hold) break;
         if (!decision.expired) return { handled: true, ...decision };
+        if (rootDir && !(await verifyReviewerIdentity(readBouncedReviewerRecord(rootDir, row), row))) {
+          decision = { ...decision, processEvidenceMissing: true };
+          break;
+        }
         try {
           killProcessGroup(decision.pgid, signal);
         } catch (err) {
@@ -154,7 +232,7 @@ export async function reconcileDaemonBounceBeforeRetry({
 // must equal the row's reviewer_head_sha, and the claim predicate must tie the
 // pass to the row's reviewer session. Same transition as the `reviewing`
 // recovery: the review that posted is the one attempt it spent.
-export function bouncedPostedReviewSettleSql(activeReviewClaimPredicate) {
+export function bouncedPostedReviewSettleSql(activeReviewClaimPredicate, { adopted = false } = {}) {
   return `UPDATE reviewed_prs
         SET review_status = 'posted',
             posted_at = ?,
@@ -166,7 +244,7 @@ export function bouncedPostedReviewSettleSql(activeReviewClaimPredicate) {
             infra_auto_recover_attempts = 0
       WHERE repo = ?
         AND pr_number = ?
-        AND review_status IN ('failed', 'pending')
+        AND ${adopted ? "review_status = 'reviewing'" : "review_status IN ('failed', 'pending')"}
         AND lower(COALESCE(failure_message, '')) LIKE '[${DAEMON_BOUNCE_FAILURE_CLASS}]%'
         AND ? IS NOT NULL
         AND reviewer_head_sha = ?

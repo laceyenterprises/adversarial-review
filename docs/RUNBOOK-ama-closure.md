@@ -222,7 +222,23 @@ under the same finding/region rules as the hammer. Its existing queue record
 must bind `repo`, `prNumber`, `jobId`, `revisionRef` and
 `closureHandoff: { reason: final-fix-all, headSha }` to that source review head.
 The recorded `remediationWorker.launchRequestId` and `workerClass` must match
-the verified **produced** attestation at the exact authorizing commit SHA.
+the verified **produced** attestation for that repository and PR at the exact
+authorizing commit SHA. The source guard uses `hq attest chain` with the
+deployed verifier. When `AGENT_OS_SESSION_LEDGER_POSTGRES_RUNTIME=on` or,
+with that selector absent, `AGENT_OS_SESSION_LEDGER_BACKEND=postgres`, a nonblank
+`AGENT_OS_SESSION_LEDGER_CANONICAL_DSN` routes the chain child to the canonical
+ledger where HQ records the native produced receipt. The child drops
+`AGENT_OS_SESSION_LEDGER_DSN_DIRECT`, `AGENT_OS_SESSION_LEDGER_VDB`,
+`AGENT_OS_SESSION_LEDGER_VDB_DIRECT_DSN` and `AGENT_OS_SESSION_LEDGER_DB_PATH`
+overrides; the parent environment is unchanged. The legacy runtime selector
+takes precedence over `BACKEND`, matching HQ. SQLite, unspecified/config-only
+backend selection and an absent canonical DSN retain HQ's runtime routing.
+An empty or failed canonical read leaves the reversal unproven, without a
+runtime fallback. Provenance refusal detail reports the identity reason,
+whether the failure is transient, and `ledgerTarget=canonical-postgres` or
+`ledgerTarget=runtime`, never the credential-bearing DSN. Temporary Postgres
+connection failures use the existing bounded chain retry and still refuse
+authorization if exhausted.
 Names, emails, title prefixes, a later clean review, and an opener's attestation
 provide no reversal authority. Terminal and archived job receipts retain this
 historical proof without retaining live custody.
@@ -1273,8 +1289,47 @@ reads still run at the normal cadence; a changed identity/state/head/chain or
 expiry forces a fresh publisher read. Verified publication keeps its existing
 durable proof. Successor reservation CAS ignores only `ownerObservedAt`; owner
 identity/state, publication, review/terminal state and spend fields still fence
-concurrent changes. Watcher observation updates retain their full snapshot CAS
-so a late observation cannot overwrite a newer one.
+concurrent changes. Operator supersession additionally tolerates a monotonically
+growing `absentObservations` count while the owner remains `absent-unfenced`;
+a decreased or cleared count still refuses it. Watcher observation updates
+retain their full snapshot CAS so a late observation cannot overwrite a newer one.
+
+### Operator PR update after the automatic remediation budget is spent
+
+When rescue shows `operator-hold (repair-absent-unfenced)` on a PR with
+exhausted remediation rounds, the operator can run the ordinary interactive
+`hq dispatch --pr PR --repo REPO`. The review service rechecks canonical owner
+absence and competing custody, preflights the successor's dispatch scope, then
+atomically supersedes the pending reservation. The ledger records the old
+epoch's terminal timestamp and successor dispatch key while retaining charges,
+refunds and cap history. A live owner, unreadable ownership evidence or
+available remediation rounds keeps ordinary admission in force.
+
+Unscoped CWP conflict reservations return `repair-cwp-enqueue-fence-required`
+and retain custody. Use the committed owner/epoch enqueue-fence and retirement
+procedure below, including `--ledger-absence` when original boot evidence is
+unavailable. A canonical absence read cannot stop an already delayed CWP
+submitter; operator supersession does not waive those fences.
+
+Ordinary admission remains capped at two entries. Operator replacements may
+append beyond that cap, but each such admission observes the existing
+`repair-epoch-cap` SEV1 page with the full ledger history. Its per-PR latch
+deduplicates successful delivery across heads and replacement chains. A failed
+delivery is retried on replay of the replacement reservation.
+
+The local helper currently receives operator intent through
+`HQ_REPAIR_REQUEST_KIND=operator-pr-update`. This is a trusted-caller hint,
+not authenticated request provenance. The Agent OS companion must set it only
+for the current interactive operator dispatch and strip it from worker and
+automatic child environments. This repository cannot enforce the producer's
+environment isolation. Request-bound provenance tied to the dispatch owner key
+remains an Agent OS follow-up; deployments must not treat the ambient variable
+alone as proof of an operator action.
+
+The successor publishes with an explicit force-with-lease against the exact
+head it reserved. If a delayed owner moves the branch first, the successor's
+push fails and the operator must reassess the live head. Changed heads still
+require the normal review-currency and ownership evidence.
 
 ### Retire one fenced CWP conflict reservation (LAC-2303)
 
@@ -1448,11 +1503,24 @@ refuses `dispatch-read-context-unavailable` with a redacted `detail` and reads
 nothing (REPAIRDISPATCHREAD-01).
 
 The native call is `bin/repair-in-place.mjs ROOT OWNER/REPO PR BASE_HEAD
-OWNER_KEY CONFLICTING [FOLLOW_UP_TICKET LAUNCHER_PID [DISPATCH_PROJECT]]`.
+OWNER_KEY CONFLICTING [FOLLOW_UP_TICKET LAUNCHER_PID [DISPATCH_PROJECT [RECOVERY_EPOCH_ID]]]`.
 Use empty ticket and PID arguments when passing a project without a follow-up
-claim. The project must be the one HQ will record for this dispatch. For a new
-epoch, the helper requires a selector-bound canonical reply under the existing
-exact review-app project/repository grant before it writes the reservation.
+claim. The project must be the one HQ will record for this dispatch.
+The optional tenth argument, `RECOVERY_EPOCH_ID`, selects the retained unbound
+final-fix reservation to replay. Supply its original `ffa-` owner key, base head
+and dispatch project, set `CONFLICTING` to `false`, and leave the ticket and PID
+arguments empty. Recovery requires an unowned queue and fresh paired dispatch
+absence; it compares the unchanged reservation under the intent and retry-ledger
+locks without writing it. An owner state other than missing, null, `unknown`,
+`absent` or `absent-unfenced` refuses before the recovery dispatch lookup.
+The original failed job remains terminal `never-spawned`.
+For protocol discovery, invoke `bin/repair-in-place.mjs
+--final-fix-recovery-protocol` alone. It returns
+`{"ok":true,"protocol":"final-fix-recovery-v1"}` without opening the review
+database or reserving an epoch.
+
+For a new epoch, the helper requires a selector-bound canonical reply under the
+existing exact review-app project/repository grant before it writes the reservation.
 Budget-available updates and existing-key replays follow their existing rules.
 After the read, it checks the follow-up claim and any replacement closer lease.
 It re-evaluates epoch ownership and the cap under the retry-ledger flock.
@@ -7057,6 +7125,14 @@ unrelated review vetoes remain. A read or dismissal failure refuses merge; GitHu
 enforces branch protection without an administrative bypass. A withdrawal-only
 PR needs no HAM commit. `ama-check` retains dismissed review bodies as finding
 authority so an interrupted merge can retry; dismissal alone resolves nothing.
+When the exact-head predicate accepts terminal remediation of a complete
+older-head blocker list, cleanup can also recognize a prior queued re-review
+dismissal. It requires the paginated GitHub timeline to show the native bot
+dismissing that review ID with the matching judged SHA and a distinct queued
+head and a `changes_requested` dismissed-review state (case-insensitive).
+The queued head may precede the current head. Cleanup rechecks the review
+and current head and makes no dismissal write in this case. The predicate,
+live merge-writer proof and any admitted HAMFINAL withdrawals still apply.
 Any finding still standing is remediated and
 certified as before. The hammer continues in the same run: it remediates the
 remaining findings, lists each withdrawn finding in its audit as
@@ -8844,6 +8920,16 @@ through a completed comment-only final handoff in the review service's
 repository- and PR-scoped job history. The handoff binds the publication
 proof and the suppressed re-review to the completed round and both endpoint
 SHAs. The exact current head must end in an authenticated Hammer App edge.
+Complete supplied comment rollups retain exact-head Hammer authorship even at
+the comment cap; the capped pagination sentinel leaves it unknown. Neither cap
+case resets retry-series exhaustion. Round-level re-review requests cannot be
+hidden by contradictory job-level suppression. Cancellation and timeout errors
+propagate rather than admitting a fallback findings-only proof. Subprocess
+`SIGTERM` and `SIGKILL` errors propagate even when `killed` is false or absent.
+Rejected currency and underlying inspection promises are evicted from the
+evaluation-local caches, allowing the same reader to retry after a transient
+failure. Concurrent reads still share pending work and successful results stay
+cached. A retry supplies no currency proof unless the fresh inspection proves it.
 All mixed-chain edges count toward the existing length limit. A completed
 non-final round with a pending review can retain findings and range evidence
 after a Hammer push. It supplies no stale-head waiver.

@@ -1,7 +1,15 @@
 import { readHammerRetryCapLedger } from './ama/hammer-retry-cap.mjs';
 import { repairCause, repairOperatorHoldReason, REPAIR_EPOCH_CAP } from './repair-epochs.mjs';
 import { resolveFirstPassReviewBudgetSuppression } from './first-pass-review-suppression.mjs';
-import { isBudgetExhaustedReviewSuppression } from './hamclose-review-admission.mjs';
+import { isBudgetExhaustedReviewSuppression, resolveMaxRemediationRounds } from './hamclose-review-admission.mjs';
+import { resolveRoundBudgetForJob, summarizePRRemediationLedger } from './follow-up-jobs.mjs';
+
+export function automaticRemediationBudgetExhausted(rootDir, identity) {
+  const ledger = summarizePRRemediationLedger(rootDir, identity);
+  const { roundBudget } = resolveRoundBudgetForJob({ riskClass: ledger.latestRiskClass }, { rootDir });
+  const maxRounds = resolveMaxRemediationRounds({ roundBudget, latestMaxRounds: ledger.latestMaxRounds });
+  return Number.isInteger(maxRounds) && maxRounds >= 0 && ledger.completedRoundsForPR >= maxRounds;
+}
 
 export function readRepairFacts({ rootDir, db, repo, prNumber, headSha, row, conflicting = false }) {
   const ledger = readHammerRetryCapLedger(rootDir, { repo, prNumber });

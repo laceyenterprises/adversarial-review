@@ -41,6 +41,81 @@ async function fixture(t) {
   return { ...identity, identity, deps, db, comments, reviews, mutations, headReads: () => headReads };
 }
 
+const reviewedHead = 'b'.repeat(40), queuedHead = 'c'.repeat(40);
+
+function dismissedAfterHeadMove(f) {
+  f.reviews[0] = { ...review, commit_id: reviewedHead, state: 'DISMISSED',
+    user: { login: 'lacey-gemini-reviewer[bot]' },
+    body: body.replace('False finding', 'Admission stall').replace('- None.', '- **Optional-chain advisory**') };
+  // Terminal validation repaired the blocker. Only the advisory was disputed,
+  // so the full predicate supplies no HAMFINAL blocker identities.
+  f.db.prepare('DELETE FROM ham_finding_disputes').run();
+  f.comments.splice(0, 1, {
+    node_id: 'IC_audit', user: { login: 'the-hammer-lacey[bot]' },
+    body: '## Findings addressed\n- **Admission stall** (blocking)\n'
+      + '- **Optional-chain advisory** (non-blocking)\n\nResolution: withdrawn-by-hammer\n'
+      + '```js\nconst row = null;\nconsole.log(row?.[3].match(/node/)?.[1]); // undefined\n```',
+  });
+  return {
+    id: 37162162876, event: 'review_dismissed',
+    actor: { login: 'lacey-merge-agent[bot]', type: 'Bot' },
+    dismissed_review: { review_id: 17, state: 'changes_requested',
+      dismissal_message: `Request changes judged commit ${reviewedHead}; current head is ${queuedHead}. `
+        + 'Re-review requested at 2026-11-24T17:51:24.176Z is queued or running for the current head; dismissing the superseded review.' },
+  };
+}
+
+test('repaired blocker and disputed advisory survive an authenticated queued re-review dismissal', async t => {
+  const f = await fixture(t);
+  const event = dismissedAfterHeadMove(f);
+  const admission = { ...f.identity, terminalReviewedHead: reviewedHead, expectedWithdrawnIdentities: [] };
+  const run = ({ input = admission, events = [event], liveReview = f.reviews[0], livePr } = {}) =>
+    dismissWithdrawnReviews(input, { ...f.deps, get: async path => {
+      if (path.includes('/compare/')) return { status: 'ahead' };
+      if (path === `repos/${repo}/issues/${prNumber}/timeline?per_page=100`) return events;
+      if (path.endsWith('/reviews/17')) return liveReview;
+      if (livePr && path.endsWith('/pulls/42')) return livePr;
+      return f.deps.get(path);
+    } });
+  assert.deepEqual(await run(), { dismissed: [] });
+  for (const state of ['CHANGES_REQUESTED', 'Changes_Requested']) {
+    await t.test(`accepts timeline state ${state}`, async () => assert.deepEqual(await run({
+      events: [{ ...event, dismissed_review: { ...event.dismissed_review, state } }],
+    }), { dismissed: [] }));
+  }
+  for (const state of ['approved', 'commented', 'dismissed', '', null, undefined, 42, {}]) {
+    await t.test(`rejects timeline state ${JSON.stringify(state)}`, async () => assert.rejects(run({
+      events: [{ ...event, dismissed_review: { ...event.dismissed_review, state } }],
+    }), /dismissed review withdrawal authority is missing or invalid/));
+  }
+  for (const [name, invalid] of Object.entries({
+    'missing event': { events: [] },
+    'ambiguous events': { events: [event, { ...event, id: event.id + 1 }] },
+    'wrong reviewer ID': { events: [{ ...event, dismissed_review: { ...event.dismissed_review, review_id: 18 } }] },
+    'human actor': { events: [{ ...event, actor: { ...event.actor, type: 'User' } }] },
+    'foreign bot': { events: [{ ...event, actor: { ...event.actor, login: 'other[bot]' } }] },
+    'withdrawal dismissal': { events: [{ ...event, dismissed_review: { ...event.dismissed_review, dismissal_message: 'HAMFINAL-01: all findings withdrawn-by-hammer' } }] },
+    'wrong judged head': { events: [{ ...event, dismissed_review: { ...event.dismissed_review,
+      dismissal_message: event.dismissed_review.dismissal_message.replace(reviewedHead, headSha) } }] },
+    'no head move': { events: [{ ...event, dismissed_review: { ...event.dismissed_review,
+      dismissal_message: event.dismissed_review.dismissal_message.replace(queuedHead, reviewedHead) } }] },
+    'wrong terminal reviewed head': { input: { ...admission, terminalReviewedHead: queuedHead } },
+  })) {
+    await t.test(name, async () => assert.rejects(run(invalid), /dismissed review withdrawal authority is missing or invalid/));
+  }
+  await assert.rejects(run({ input: { ...admission, expectedWithdrawnIdentities: ['invalid'] } }),
+    /admitted withdrawal authority is missing or invalid/);
+  for (const replacement of [
+    { body: 'edited review' }, { user: { login: 'other[bot]' } }, { commit_id: headSha }, { state: 'CHANGES_REQUESTED' },
+  ]) {
+    await assert.rejects(run({ liveReview: { ...f.reviews[0], ...replacement } }), /review changed before dismissal/);
+  }
+  await assert.rejects(run({ livePr: { state: 'closed', head: { sha: headSha } } }), /head is not live\/open/);
+  f.reviews[0].body = '## Verdict\nRequest changes';
+  await assert.rejects(run(), /dismissed review withdrawal authority is missing or invalid/);
+  assert.deepEqual(f.mutations, []);
+});
+
 test('only authoritative exact-head reviews with complete verified withdrawals lose their veto', async t => {
   const f = await fixture(t);
   f.reviews.push(
@@ -92,7 +167,7 @@ for (const scenario of ['head moved', 'review edited', 'reviews unreadable', 'di
   });
 }
 
-for (const scenario of ['withdrawn', 'standing', 'dismissal refused']) {
+for (const scenario of ['withdrawn', 'standing', 'dismissal refused', 'terminal remediation']) {
   test(`rendered hammer merge respects the GitHub review veto: ${scenario}`, async t => {
     const f = await fixture(t);
     const dir = f.rootDir, bin = join(dir, 'fixture-bin'); mkdirSync(bin);
@@ -101,7 +176,8 @@ for (const scenario of ['withdrawn', 'standing', 'dismissal refused']) {
     writeFileSync(join(dir, 'config.json'), '{}\n');
     const stateFile = join(dir, 'github.json');
     if (scenario === 'standing') f.reviews[0].body = body.replace('False finding', 'Standing finding');
-    writeFileSync(stateFile, JSON.stringify({ reviews: f.reviews, comments: f.comments, events: [] }));
+    const timeline = scenario === 'terminal remediation' ? [dismissedAfterHeadMove(f)] : [];
+    writeFileSync(stateFile, JSON.stringify({ reviews: f.reviews, comments: f.comments, timeline, events: [] }));
     writeFileSync(join(bin, 'gh'), `#!${process.execPath}
 import fs from 'node:fs';
 const path = ${JSON.stringify(stateFile)};
@@ -117,6 +193,11 @@ if (a[0] === 'api') {
     s.reviews[0].state = 'DISMISSED'; s.events.push('dismiss'); result = s.reviews[0];
   } else if (p.includes('/reviews?')) result = [s.reviews];
   else if (p.includes('/comments?')) result = [s.comments];
+  else if (p.includes('/timeline?')) {
+    if (!a.includes('--paginate') || !a.includes('--slurp')) process.exit(1);
+    result = [[], s.timeline];
+  }
+  else if (p.includes('/compare/')) result = {status:'ahead'};
   else if (p.endsWith('/reviews/17')) result = s.reviews[0];
   else result = {state:'open', head:{sha:${JSON.stringify(headSha)}}};
 } else if (a[1] === 'merge') {
@@ -142,15 +223,33 @@ esac
 `, { mode: 0o755 });
     for (const path of ['modules/worker-pool/lib/python', 'platform/session-ledger/src']) mkdirSync(join(dir, path), { recursive: true });
     const python = join(bin, 'fixture-python'); writeFileSync(python, '#!/bin/sh\nexit 0\n', { mode: 0o755 });
-    const verdict = join(dir, 'verdict.json');
-    writeFileSync(verdict, JSON.stringify({ eligible: true, trace: { headMatch: { current: headSha }, branchProtection: { required: true } } }));
     const env = { ...process.env, HAM_RUN_DIR: dir, HAM_ROOT_DIR: dir, HAM_PR_URL: 'https://github.com/fixture/repo/pull/42',
-      HAM_REPO: repo, HAM_PR_NUMBER: '42', HAM_REVIEWED_SHA: headSha, HAM_TARGET_REMEDIATION_SHA: headSha,
+      HAM_REPO: repo, HAM_PR_NUMBER: '42', HAM_REVIEWED_SHA: scenario === 'terminal remediation' ? reviewedHead : headSha,
+      HAM_TARGET_REMEDIATION_SHA: headSha,
       HAM_RISK_CLASS: 'critical', HAM_MERGE_METHOD: 'squash', HAM_HQ_ROOT: dir, HAM_REVIEWER: 'codex',
       HAM_AMA_TRAILERS: composeAmaTrailers({ workerClass: 'hammer', reviewerFamily: 'codex', riskClass: 'critical',
         eligibilityReason: 'hammer-adjudicated', auditRef: `ama-audit:${repo}:pr-42:head-${headSha}` }),
       AGENT_OS_GITHUB_TOKEN_CLASS: 'hammer',
       PATH: `${bin}:${process.env.PATH}`, TMPDIR: dir, AGENT_OS_ROOT: dir, HAM_PYTHON_BIN: python };
+    const verdict = join(dir, 'verdict.json');
+    const trace = { headMatch: { current: headSha }, branchProtection: { required: true } };
+    if (scenario === 'terminal remediation') {
+      trace.headMatch = { ...trace.headMatch, reviewed: reviewedHead, ok: true };
+      trace.hamTerminalRemediation = { ok: true, remediationHead: headSha, terminalReviewProof: { ok: true },
+        waived: ['verdict-not-settled-success', 'blocking-findings-present'] };
+      for (const [key, value] of [
+        ['remediationHead', queuedHead], ['terminalReviewProof', { ok: false }], ['waived', ['verdict-not-settled-success']],
+      ]) {
+        writeFileSync(verdict, JSON.stringify({ eligible: true, trace: { ...trace,
+          hamTerminalRemediation: { ...trace.hamTerminalRemediation, [key]: value } } }));
+        const cleanup = spawnSync(process.execPath, [join(root, 'bin/dismiss-withdrawn-reviews.mjs'),
+          '--root-dir', dir, '--repo', repo, '--pr', String(prNumber), '--head-sha', headSha, '--verdict-file', verdict],
+        { env, encoding: 'utf8', timeout: 15000 });
+        assert.equal(cleanup.status, 1, cleanup.stderr);
+        assert.match(cleanup.stderr, /dismissed review withdrawal authority is missing or invalid/);
+      }
+    }
+    writeFileSync(verdict, JSON.stringify({ eligible: true, trace }));
     const script = join(dir, 'merge.sh');
     writeFileSync(script, renderHammerProcedure('hammer-merge', Object.fromEntries(Object.entries(env).filter(([key]) => key.startsWith('HAM_')).map(([key, value]) => [key.slice(4), value]))));
     const shell = `HAM_MERGE_LEASE_HELD=1 HAM_MERGE_LEASE_ID=fixture POST_REMEDIATION_SHA=${headSha} HAM_PUBLISHED_AUDIT_HEAD=${headSha} HAM_NODE_BIN=${nodeStub} HAM_VERDICT_FILE=${verdict} HAM_VERDICT_READY_FILE=${verdict} HAM_MERGE_RETRY_CAP=1
@@ -166,10 +265,10 @@ exit "$?"
 `;
     const merged = spawnSync('/bin/bash', ['-c', shell, '_', script], { env, encoding: 'utf8', timeout: 15000 });
     const state = JSON.parse(readFileSync(stateFile, 'utf8'));
-    if (scenario === 'withdrawn') {
+    if (scenario === 'withdrawn' || scenario === 'terminal remediation') {
       assert.equal(merged.status, 0, merged.stdout + merged.stderr);
       assert.equal(state.merged, true);
-      assert.deepEqual(state.events, ['dismiss', 'merge']);
+      assert.deepEqual(state.events, scenario === 'withdrawn' ? ['dismiss', 'merge'] : ['merge']);
     } else {
       assert.notEqual(merged.status, 0);
       assert.equal(state.merged, undefined);

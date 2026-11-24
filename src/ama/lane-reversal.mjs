@@ -1,7 +1,7 @@
 import { readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { followUpJobFileFilter } from '../follow-up-job-names.mjs';
-import { resolveDaemonWorkerIdentityFromHeadAttestation } from '../daemon-worker-identity.mjs';
+import { readHeadAttestationChainForPr, resolveDaemonWorkerIdentityFromHeadAttestation } from '../daemon-worker-identity.mjs';
 import { remediationWorkerTrailerClass } from '../remediation-worker-provenance.mjs';
 import { canonicalWorkerClass } from '../worker-class-aliases.mjs';
 import { parseCommitTrailers, parseCommitTrailerValues } from './ham-provenance.mjs';
@@ -66,6 +66,32 @@ export function laneReversalIdentityMatches({ commit, laneOwner, laneIdentity })
     && remediationWorkerTrailerClass(worker.workerClass) === trailers['worker-class'];
 }
 
-// Reuse the gate's verified, exact-commit produced attestation reader. No opener
-// fallback or infrastructure degradation may authorize a lane reversal.
-export const readLaneReversalIdentity = resolveDaemonWorkerIdentityFromHeadAttestation;
+export function laneReversalIdentityFailureDetail(identity) {
+  if (identity?.ok || !identity?.reason) return undefined;
+  return `${identity.reason}; transient=${identity.transient === true}`
+    + (identity.ledgerTarget ? `; ledgerTarget=${identity.ledgerTarget}` : '');
+}
+
+export async function readLaneReversalIdentity({ env = process.env,
+  readHeadAttestationChainForPrImpl = readHeadAttestationChainForPr, ...args }) {
+  // HQ's legacy runtime selector wins over BACKEND when both are present.
+  // Require an explicit Postgres selection; leave config-only resolution to HQ.
+  const runtime = env.AGENT_OS_SESSION_LEDGER_POSTGRES_RUNTIME?.trim().toLowerCase();
+  const postgres = runtime ? runtime === 'on'
+    : env.AGENT_OS_SESSION_LEDGER_BACKEND?.trim().toLowerCase() === 'postgres';
+  const canonicalDsn = env.AGENT_OS_SESSION_LEDGER_CANONICAL_DSN?.trim();
+  const canonical = postgres && Boolean(canonicalDsn);
+  const chainEnv = canonical ? { ...env, AGENT_OS_SESSION_LEDGER_DSN: canonicalDsn } : env;
+  if (canonical) {
+    for (const key of ['AGENT_OS_SESSION_LEDGER_DSN_DIRECT', 'AGENT_OS_SESSION_LEDGER_VDB',
+      'AGENT_OS_SESSION_LEDGER_VDB_DIRECT_DSN', 'AGENT_OS_SESSION_LEDGER_DB_PATH']) delete chainEnv[key];
+  }
+  const identity = await resolveDaemonWorkerIdentityFromHeadAttestation({ ...args, env: chainEnv,
+    requireExactSubject: true,
+    readHeadAttestationChainForPrImpl: options => readHeadAttestationChainForPrImpl({
+      ...options, useDeployVerifier: true,
+    }),
+  });
+  // Report the routing mode, never the DSN (which can contain credentials).
+  return identity.ok ? identity : { ...identity, ledgerTarget: canonical ? 'canonical-postgres' : 'runtime' };
+}

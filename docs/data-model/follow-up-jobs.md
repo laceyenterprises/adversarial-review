@@ -100,6 +100,11 @@ These positively proven broker outages do not spend the separate bounded
 infrastructure-refund allowance described below. Lease mismatches and other
 publication, validation, review or CI failures retain ordinary accounting.
 
+When Worker Pool recovers a pre-enqueue native final fix under its original
+repair key, the failed job remains terminal `never-spawned`. The new LRQ and
+later managed publication are read through the repair reservation's existing
+owner lookup.
+
 ## Nonblocking cap terminal result
 
 A claim refused by the consecutive nonblocking cap retains `status: stopped`
@@ -958,6 +963,11 @@ completed round edges for the selected repository and PR. Unrelated filenames
 consume neither limit. An unreadable directory or an excess of matching records
 or round edges supplies no round proof.
 Authenticated comment and patch-equivalence proofs can still establish currency.
+Round-level re-review requests exclude that round from settled handoff evidence
+when job-level suppression disagrees. Cancellation and timeout errors in
+comparison, comment, PR and Git currency reads propagate to the caller; they
+never become findings-only currency. Ordinary patch-read failures may appear as
+`patchProofError` on findings-only currency, which supplies no head-match waiver.
 The process logs limit hits by repository, PR and limit, at most once per hour
 for each key retained in its bounded diagnostic cache. When a daemon snapshot
 already supplies a complete authenticated Hammer chain, the range validator uses

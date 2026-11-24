@@ -33,9 +33,8 @@ const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 // watcher module consts referenced elsewhere in watcher.mjs; they are re-derived
 // here from the same inputs (config.json + reviewer-lease defaults) so this leaf
 // module avoids a src->watcher circular import while preserving their values.
-const REVIEWER_LEASE_RECOVERY_ENABLED = resolveReviewerLeaseRecoveryEnabled({
-  watcherConfig: JSON.parse(readFileSync(join(ROOT, 'config.json'), 'utf8')),
-});
+const watcherConfig = JSON.parse(readFileSync(join(ROOT, 'config.json'), 'utf8'));
+const REVIEWER_LEASE_RECOVERY_ENABLED = resolveReviewerLeaseRecoveryEnabled({ watcherConfig });
 const INFRA_AUTO_RECOVER_CAP = DEFAULT_REVIEWER_LEASE_RECOVERY_MAX_ATTEMPTS;
 // Grace before a provably-dead reviewer's `reviewing` claim is fast-pathed into
 // reconcile ahead of the full reviewer lease (see
@@ -80,6 +79,8 @@ export async function reconcileOrphanedReviewing(octokit) {
     octokit,
     leaseRecoveryEnabled: REVIEWER_LEASE_RECOVERY_ENABLED,
     leaseRecoveryMaxAttempts: INFRA_AUTO_RECOVER_CAP,
+    defaultBaseBranch: watcherConfig.adversarialGateBaseBranch,
+    defaultBaseBranchByRepo: watcherConfig.adversarialGateBaseBranches,
     onTerminalDeadSession: ({ row, state, settledAt }) => settleDurableReviewerRunState({
       sessionUuid: row?.reviewer_session_uuid,
       state,

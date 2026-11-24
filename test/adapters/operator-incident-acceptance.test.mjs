@@ -94,6 +94,33 @@ test('LAC-2092: first comment-only review precedes remediation and cannot accept
   assert.deepEqual(updates.map((u) => u.stateId), ['progress']);
 });
 
+test('LAC-2342: source review and merged-PR sync preserve bracketed SEV incident acceptance', async (t) => {
+  const title = '[SEV3] Source completion repeatedly closes unresolved rescue incidents';
+
+  await t.test('review completion and replay after operator reopening', async (t) => {
+    const f = fixture(t, { title });
+    await f.adapter.recordReviewCompleted(f.ref, { reviewBody: chronology.review.reviewBody });
+    f.issue.state = { name: 'In Progress', type: 'started' };
+    await f.adapter.recordReviewCompleted(f.ref, { reviewBody: chronology.review.reviewBody });
+    assert.equal(f.issue.state.name, 'In Progress');
+    assert.deepEqual(f.updates, []);
+  });
+
+  await t.test('merged-PR retry settles without changing incident state', async (t) => {
+    const f = fixture(t, { title, state: 'In Progress' });
+    const record = queuePendingTriageSync(f.rootDir, {
+      repo: chronology.repo, prNumber: chronology.prNumber, transition: 'merged', status: 'done',
+    });
+    const result = await attemptPendingTriageSync({
+      rootDir: f.rootDir, record, operatorSurface: f.adapter, buildSubjectRef: () => f.ref,
+    });
+    assert.equal(result.ok, true);
+    assert.deepEqual(listPendingTriageSyncs(f.rootDir), []);
+    assert.equal(f.issue.state.name, 'In Progress');
+    assert.deepEqual(f.updates, []);
+  });
+});
+
 test('incident labels protect renamed tickets and late live metadata changes', async (t) => {
   for (const label of ['incident', 'Incident', 'SEV3', 'sev-2', 'SEV 1']) {
     const f = fixture(t, { title: 'Registry audit lock ordering', labels: [label] });
@@ -175,7 +202,8 @@ test('identity read failures retain owed triage work until a successful retry', 
 });
 
 test('ordinary feature tickets retain review, merge and cancellation synchronization', async (t) => {
-  for (const title of ['Improve routing', 'Add SEV3 dashboard filter', 'Incident response documentation']) {
+  for (const title of ['Improve routing', 'Add SEV3 dashboard filter', 'Incident response documentation',
+    'Add [SEV3] dashboard filter', '[SEV3 dashboard] Improve filtering', 'SEV3Dashboard performance']) {
     const f = fixture(t, { title, labels: ['feature', 'severity-dashboard'] });
     await f.adapter.recordReviewCompleted(f.ref, { reviewBody: chronology.review.reviewBody });
     await f.adapter.syncTriageStatus(f.ref, 'in-progress');

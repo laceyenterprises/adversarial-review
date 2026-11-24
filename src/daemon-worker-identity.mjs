@@ -307,7 +307,7 @@ function isTransientHeadAttestationReadError(err) {
   const code = String(err?.code || '').toUpperCase();
   if (['EAGAIN', 'EBUSY', 'EIO', 'EMFILE', 'ENFILE', 'ETIMEDOUT'].includes(code)) return true;
   const detail = String(err?.stderr || err?.message || err || '');
-  return /database is locked|resource temporarily unavailable|socket hang up/i.test(detail);
+  return /database is locked|resource temporarily unavailable|socket hang up|could not connect to server|connection (?:to server .*?)?(?:refused|timed out)|server closed the connection unexpectedly|the database system is (?:starting up|shutting down|in recovery mode)/i.test(detail);
 }
 
 export async function resolveDaemonWorkerIdentityFromHeadAttestation({

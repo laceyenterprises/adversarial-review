@@ -74,12 +74,11 @@ test('currency git scales and rejects the timeout without consuming partial stdo
   });
   syncBuiltinESMExports();
   await assert.rejects(currencyGit(['synthetic']), { code: 'ETIMEDOUT' });
-  const reader = () => createReviewCurrencyReader({ repo: 'fixture/repo', prNumber: 1, comments: [],
+  const reader = createReviewCurrencyReader({ repo: 'fixture/repo', prNumber: 1, comments: [],
     pr: { head: { sha: sha('b') }, base: { sha: sha('c') } },
     get: async () => ({ status: 'diverged' }), git: () => currencyGit(['synthetic']) });
-  assert.equal((await reader()(sha('a'), sha('b'))).current, false);
-  // A later evaluation can prove currency. No negative receipt was written.
-  assert.equal((await reader()(sha('b'), sha('b'))).current, true);
+  await assert.rejects(reader(sha('a'), sha('b')), { code: 'ETIMEDOUT' });
+  assert.equal((await reader(sha('b'), sha('b'))).proof, 'exact-head');
 });
 
 test('companion read scales and a timeout cannot become open or closed', async t => {

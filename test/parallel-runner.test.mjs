@@ -1,14 +1,40 @@
 import './helpers/rate-limit-state-isolation.mjs';
 import assert from 'node:assert/strict';
 import { execFileSync, spawnSync } from 'node:child_process';
-import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 import { SERIAL_TEST_FILES, orderFiles, workerCount, suiteTimeoutMs } from './helpers/parallel-plan.mjs';
+import { trackNativeFiles } from './helpers/parallel-reporter.mjs';
 import { fixtureGitEnv } from './helpers/fixture-git-env.mjs';
 
 const helper = path.join(import.meta.dirname, 'helpers', 'parallel-runner.mjs');
+
+for (const tagged of [false, true]) test(`plain coordinator events distinguish an identically located worker case (tagged=${tagged})`, () => {
+  const file = '/suite/file.test.mjs';
+  const fileEvent = { name: file, file, nesting: 0, line: 1, column: 1 };
+  const caseEvent = tagged ? { ...fileEvent, entryFile: file } : { ...fileEvent };
+  const track = trackNativeFiles(new Map([[file, 'file.test.mjs']]));
+  const event = (phase, data) => track({ type: `test:${phase}`, data });
+  assert.equal(event('enqueue', fileEvent), undefined);
+  assert.equal(event('dequeue', fileEvent), 'file.test.mjs');
+  assert.equal(event('enqueue', caseEvent), undefined);
+  assert.equal(event('dequeue', caseEvent), undefined);
+  assert.equal(event('complete', caseEvent), undefined);
+  assert.equal(event('complete', fileEvent), 'file.test.mjs');
+  assert.equal(event('complete', fileEvent), undefined);
+});
+
+test('an untagged worker can exit with a matching case still outstanding', () => {
+  const file = '/suite/file.test.mjs';
+  const fileEvent = { __proto__: null, name: file, file, nesting: 0, line: 1, column: 1 };
+  const track = trackNativeFiles(new Map([[file, 'file.test.mjs']]));
+  track({ type: 'test:enqueue', data: fileEvent });
+  track({ type: 'test:dequeue', data: fileEvent });
+  track({ type: 'test:enqueue', data: { ...fileEvent } });
+  assert.equal(track({ type: 'test:complete', data: fileEvent }), 'file.test.mjs');
+});
 
 test('local parallelism uses half the available cores up to four, or an override', () => {
   assert.equal(workerCount(100, {}, 16), 4);
@@ -149,9 +175,10 @@ for (const failure of [false, true]) test(`real parallel processes report every 
   writeFileSync(paths['a.mjs'], `${assertPreloaded} console.log('fixture-a'); process.exitCode = ${failure ? 9 : 0};`);
   writeFileSync(paths['b.mjs'], `${assertPreloaded} console.log('fixture-b');`);
   const reportPath = path.join(root, 'report.json');
+  const checkpointPath = path.join(root, 'checkpoint.jsonl');
   const config = path.join(root, 'config.json');
   writeFileSync(config, JSON.stringify({ files, paths, logDir: root, nodeArgs: ['--import', preload], reportPath,
-    parallelFiles: files, concurrency: 2 }));
+    checkpointPath, parallelFiles: files, concurrency: 2 }));
   const env = { ...process.env };
   delete env.NODE_TEST_CONTEXT;
   const child = spawnSync(process.execPath, [helper, config], { env, encoding: 'utf8', timeout: 20_000 });
@@ -162,6 +189,50 @@ for (const failure of [false, true]) test(`real parallel processes report every 
   assert.deepEqual(report.files.map((r) => r.file), ['a.mjs', 'b.mjs']);
   assert.ok(report.files.every((r) => r.durationMs > 0));
   assert.ok(report.wallMs > 0);
+  const journal = readFileSync(checkpointPath, 'utf8');
+  const [plan, ...outcomes] = journal.trimEnd().split('\n').map(line => JSON.parse(line));
+  assert.deepEqual(plan, { type: 'plan', version: 1, nodeVersion: process.version, concurrency: 2, files });
+  assert.deepEqual(outcomes.sort((a, b) => a.file.localeCompare(b.file)),
+    report.files.map(({ file, status, durationMs }) => ({ type: 'completed', file, status, durationMs })));
+  const duplicate = spawnSync(process.execPath, [helper, config],
+    { env, encoding: 'utf8', timeout: 20_000 });
+  assert.equal(duplicate.status, 1, duplicate.stdout + duplicate.stderr);
+  assert.match(duplicate.stderr, /EEXIST/);
+  assert.equal(readFileSync(checkpointPath, 'utf8'), journal);
+});
+
+test('a checkpoint write error fails the invocation after the native workers finish', t => {
+  const root = mkdtempSync(path.join(tmpdir(), 'checkpoint-write-'));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const files = ['a.mjs', 'b.mjs'];
+  const paths = Object.fromEntries(files.map(file => [file, path.join(root, file)]));
+  for (const file of files) writeFileSync(paths[file], `import test from 'node:test'; test('${file}', () => {});`);
+  const checkpointPath = path.join(root, 'checkpoint.jsonl');
+  const config = path.join(root, 'config.json');
+  writeFileSync(config, JSON.stringify({ files, paths, logDir: root, nodeArgs: [],
+    checkpointPath, parallelFiles: files, concurrency: 2 }));
+  const preload = path.join(root, 'write-error.mjs');
+  writeFileSync(preload, `
+    import fs from 'node:fs';
+    import { syncBuiltinESMExports } from 'node:module';
+    const write = fs.writeFileSync;
+    fs.writeFileSync = (file, data, ...options) => {
+      if (typeof file === 'number' && typeof data === 'string' && data.startsWith('{"type":"completed"')) {
+        throw new Error('simulated checkpoint I/O error');
+      }
+      return write(file, data, ...options);
+    };
+    syncBuiltinESMExports();
+  `);
+  const env = { ...process.env };
+  delete env.NODE_TEST_CONTEXT;
+  const child = spawnSync(process.execPath, ['--import', preload, helper, config],
+    { env, encoding: 'utf8', timeout: 20_000 });
+  assert.equal(child.status, 1, child.stdout + child.stderr);
+  assert.match(child.stderr, /Test checkpoint write failed: Error: simulated checkpoint I\/O error/);
+  assert.match(child.stderr, /Test suite: 2 files, 0 failed/);
+  assert.match(child.stdout, /^# pass 2$/m);
+  assert.doesNotMatch(readFileSync(checkpointPath, 'utf8'), /"type":"completed"/);
 });
 
 for (const [files, ci, seconds] of [[1, 'false', 900], [2, 'false', 7200], [1, 'true', 900], [2, 'true', 900]]) test(`suite timeout bounds ${files} files with CI=${ci} and removes the running sandbox`, (t) => {
@@ -216,7 +287,8 @@ test('deadline tracking removes an out-of-order completed file and counts only q
     symlinkSync(path.join(repo, name), path.join(root, name), 'dir');
   }
   const held = 'test/a-held.test.mjs', finished = 'test/b-finished.test.mjs';
-  writeFileSync(path.join(root, held), `
+  // Match the file wrapper's name and source location on Node 22.
+  writeFileSync(path.join(root, held), `test(import.meta.filename, () => {});
     import test from 'node:test';
     test('held until the deadline', () => new Promise(resolve => setTimeout(resolve, 60_000)));
   `);
@@ -244,7 +316,8 @@ test('deadline tracking removes an out-of-order completed file and counts only q
       return schedule(check, 10);
     };
   `);
-  const env = { ...process.env, ADVERSARIAL_REVIEW_TEST_TEMP_BASE: root, CI: 'true' };
+  const env = { ...process.env, ADVERSARIAL_REVIEW_TEST_TEMP_BASE: root, CI: 'true',
+    AR_TEST_CHECKPOINT: 'checkpoint.jsonl', AR_TEST_TIMINGS: 'timings.json' };
   delete env.NODE_TEST_CONTEXT;
   const child = spawnSync(process.execPath, ['--import', hook, path.join(root, 'test/run-tests.mjs')], {
     cwd: root, encoding: 'utf8', env, timeout: 20_000,
@@ -254,6 +327,14 @@ test('deadline tracking removes an out-of-order completed file and counts only q
   assert.match(child.stderr, /Test suite timed out after 900 seconds/);
   assert.match(child.stderr, /0 files waiting to start\. Active test files: test\/a-held\.test\.mjs\./);
   assert.doesNotMatch(child.stderr, /Active test files: [^\n]*b-finished/);
+  assert.equal(existsSync(path.join(root, 'timings.json')), false);
+  const [plan, outcome, ...remaining] = readFileSync(path.join(root, 'checkpoint.jsonl'), 'utf8')
+    .trimEnd().split('\n').map(line => JSON.parse(line));
+  assert.deepEqual(plan, { type: 'plan', version: 1, nodeVersion: process.version,
+    concurrency: 2, files: [held, finished] });
+  assert.deepEqual(outcome, { type: 'completed', file: finished, status: 0, durationMs: outcome.durationMs });
+  assert.ok(outcome.durationMs > 0);
+  assert.deepEqual(remaining, []);
   assert.equal(readdirSync(root).some(file => file.startsWith('art-')), false);
 });
 

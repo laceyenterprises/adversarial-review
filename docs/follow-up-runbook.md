@@ -1086,7 +1086,7 @@ their normal token or installation budget identity.
 LAC-2092: the Linear adapter leaves incident acceptance to the incident owner.
 Live Linear labels `incident`, `sev`, or `sev0` through `sev4` (also `sev-3`
 and `sev 3`, case insensitive) identify incidents. Legacy manually filed issues
-with a leading `SEV`, `SEV3:`, `SEV-3`, or `SEV 3` title are also protected;
+with a leading `SEV`, `SEV3:`, `SEV-3`, `SEV 3`, or `[SEV3]` title are also protected;
 LAC-2089 had no labels. Before removing a legacy SEV title, the incident owner
 should retain an incident/severity label; an unlabeled, unprefixed issue has no
 incident binding exposed to this adapter. PR titles, PR labels and review prose do not establish
@@ -2167,6 +2167,12 @@ When the loop hits that cap, behavior is governed by the `MERGE_AGENT_FINAL_PASS
   the same HAM route.
 
   After HAM terminal remediation has been accepted and the daemon merge succeeds, the merge signal, reviewer-pass token recording, the succeeded AMA audit, and the terminal AMA closer lease are the critical state updates. The same-head daemon merge handoff must append the succeeded audit and mark the AMA closer lease `terminal` with `terminalOutcome="succeeded"` before emitting `worker.git.merge_signal`; if the signal cannot be emitted, the terminal lease breadcrumb lets the daemon rediscover the merged state instead of ignoring a failed HAM run. Transient merge-commit lookups are retried with bounded backoff before this terminalization point. Hammer worker teardown is still attempted with bounded transient retries, but a teardown failure is logged and returned as non-fatal cleanup debt instead of aborting those post-merge audit writes. The handoff must pass the canonical live-gate shape into the merge predicate: current head, required checks, canonical `mergeable`, `mergeStateStatus`, `prState`, and an explicit `merged` boolean so recovery can distinguish an already-merged head from an open clean head.
+
+  In the hammer merge path, an eligible exact-head terminal remediation can
+  cover blockers from an older review already dismissed by the queued re-review
+  watcher. Withdrawal cleanup requires the matching native-bot GitHub timeline
+  event and rechecks the review and live head before proceeding without a
+  dismissal write. See the [withdrawal revalidation contract](data-model/ham-finding-disputes.md#final-adjudication-hamfinal-01).
 
   For both merge-agent paths, the sub-worker only records two non-apply outcomes:
   - `suggestions_unable_to_apply` for findings that genuinely cannot fit in this PR (multi-PR scope, cross-module refactors, conflicts with PR intent). These do NOT block the merge directly. The merge-agent must file Linear tickets for each follow-up refactor and proceed with the merge when no blocker remains; follow-up tickets must not live only as prose in the PR comment.

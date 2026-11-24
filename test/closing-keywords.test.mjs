@@ -9,10 +9,13 @@ import { composeCloserPrompt, closerTemplateValues } from '../src/ama/dispatch-c
 import { hammerBootstrapInputs } from './helpers/hammer-bootstrap-inputs.mjs';
 import { buildMergeCommitBody, neutralizeClosingKeywords } from '../src/ama/closing-keywords.mjs';
 
-function renderCommitMessageSnippet(endMarker) {
+function renderCommitMessageSnippet() {
   const source = readFileSync('bin/hammer-merge.sh', 'utf8');
+  const start = source.indexOf('  ham_commit_message_abort()');
+  const end = source.indexOf('  # Revalidate HAMFINAL withdrawals', start);
+  assert.ok(start >= 0 && end > start, 'merge commit-message fixture boundaries must exist');
   const snippet = composeCloserPrompt({
-    templateBody: source.slice(source.indexOf('  ham_commit_message_abort()'), source.indexOf(endMarker)),
+    templateBody: source.slice(start, end),
     rootDir: process.cwd(), repo: 'o/r', prNumber: 7,
     prUrl: 'https://github.com/o/r/pull/7', mergeMethod: 'squash',
   });
@@ -59,7 +62,7 @@ test('hammer shell merge runner receives the neutralized body', (t) => {
   t.after(() => rmSync(dir, { recursive: true, force: true }));
   const stdoutPath = join(dir, 'merge.stdout');
   const stderrPath = join(dir, 'merge.stderr');
-  const snippet = renderCommitMessageSnippet('  # Withdrawal-only closure') + `\n  ham_gh pr merge https://github.com/o/r/pull/7 --subject "$HAM_COMMIT_SUBJECT" --body "$HAM_COMMIT_BODY" > "$HAM_MERGE_STDOUT" 2> "$HAM_MERGE_STDERR"\n`;
+  const snippet = renderCommitMessageSnippet() + `\n  ham_gh pr merge https://github.com/o/r/pull/7 --subject "$HAM_COMMIT_SUBJECT" --body "$HAM_COMMIT_BODY" > "$HAM_MERGE_STDOUT" 2> "$HAM_MERGE_STDERR"\n`;
   const stub = `ham_read_protective_predecessor_value() { printf -v "$2" '%s' 'Fix #7732 regression'; }
 ham_gh() { while [ "$#" -gt 0 ]; do if [ "$1" = --subject ]; then printf '%s\\n' "$2"; fi; if [ "$1" = --body ]; then printf '%s' "$2"; return; fi; shift; done; return 1; }\n`;
   const result = spawnSync('bash', ['-c', stub + snippet], { encoding: 'utf8', env: {
@@ -116,7 +119,7 @@ test('dispatched hammer export carries canonical provenance byte for byte', () =
 
 for (const failure of ['sanitizer', 'body', 'subject', 'rewrites', 'title']) {
   test(`hammer ${failure} failure records audit and retryable lease abort`, () => {
-    const snippet = renderCommitMessageSnippet('  # Withdrawal-only closure');
+    const snippet = renderCommitMessageSnippet();
     const stubs = `ham_append_terminal_audit() { echo "audit:$2"; }
 ham_mark_merge_lease_retryable_abort() { echo "retry:$1"; }
 ham_release_merge_lease() { echo release; }
@@ -133,7 +136,7 @@ run() {
 
 for (const failure of ['permanent', 'empty']) {
   test(`hammer ${failure} title prevents a merge with the correct lease outcome`, () => {
-    const snippet = renderCommitMessageSnippet('  # Withdrawal-only closure');
+    const snippet = renderCommitMessageSnippet();
     const stubs = `ham_append_terminal_audit() { echo "audit:$2"; }
 ham_mark_merge_lease_retryable_abort() { echo "retry:$1"; }
 ham_release_merge_lease() { echo release; }

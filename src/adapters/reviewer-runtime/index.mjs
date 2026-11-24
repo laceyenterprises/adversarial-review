@@ -4,6 +4,8 @@ import { createCliDirectReviewerRuntimeAdapter } from './cli-direct/index.mjs';
 import { createFixtureStubReviewerRuntimeAdapter } from './fixture-stub/index.mjs';
 import { pruneReviewerRunRecords, readRecoverableReviewerRunRecords } from './run-state.mjs';
 import { resolveReviewerLeaseRecoveryEnabled } from '../../reviewer-lease.mjs';
+import { directReviewerIdentity } from '../../reviewer-process-identity.mjs';
+import { isDaemonBounceFailure } from '../../daemon-bounce-recovery.mjs';
 import { loadDomainConfig } from '../../domain-config.mjs';
 import {
   KNOWN_REVIEWER_RUNTIME_NAMES,
@@ -108,8 +110,19 @@ async function recoverReviewerRunRecords({
   const activeRecords = readRecoverableReviewerRunRecords(rootDir);
   let recovered = 0;
   for (const record of activeRecords) {
+    const direct = directReviewerIdentity(record);
     let result = null;
     try {
+      if (db && direct && record.adoptedAfterBounce) {
+        const claim = db.prepare(`SELECT failure_message FROM reviewed_prs
+          WHERE repo = ? AND pr_number = ? AND review_status = 'reviewing'
+            AND reviewer_session_uuid = ? AND reviewer_head_sha = ? AND reviewer_pgid = ?
+            AND reviewer_started_at = ?`).get(direct.repo, direct.prNumber, record.sessionUuid,
+          direct.reviewerHeadSha, record.pgid, record.spawnedAt);
+        // The watcher owns GitHub reconciliation for a restored claim, even
+        // when this startup pass could not reach GitHub yet.
+        if (isDaemonBounceFailure(claim)) continue;
+      }
       const recordAdapter = typeof adapterForRecord === 'function'
         ? adapterForRecord(record)
         : adapter;
@@ -123,14 +136,17 @@ async function recoverReviewerRunRecords({
     if (result.failureClass === 'daemon-bounce' && db) {
       // REVIEWBOUNCE-01: a bounce is infra, never a review attempt. The
       // re-queue is bounded by infra_auto_recover_attempts instead.
-      const outcome = db.prepare(
-        leaseRecoveryEnabled
-          ? "UPDATE reviewed_prs SET review_status = 'pending', failed_at = ?, failure_message = ?, reviewer_lease_expires_at = NULL WHERE reviewer_session_uuid = ? AND review_status = 'reviewing'"
-          : "UPDATE reviewed_prs SET review_status = 'failed', failed_at = ?, failure_message = ?, reviewer_lease_expires_at = NULL WHERE reviewer_session_uuid = ? AND review_status = 'reviewing'"
-      ).run(
+      const directFence = direct
+        ? 'AND repo = ? AND pr_number = ? AND reviewer_head_sha = ? AND reviewer_pgid = ? AND reviewer_started_at = ?'
+        : '';
+      const outcome = db.prepare(`UPDATE reviewed_prs
+        SET review_status = ?, failed_at = ?, failure_message = ?, reviewer_lease_expires_at = NULL
+        WHERE reviewer_session_uuid = ? AND review_status = 'reviewing' ${directFence}`).run(
+        leaseRecoveryEnabled ? 'pending' : 'failed',
         now.toISOString(),
         '[daemon-bounce] Reviewer runtime could not reattach after kernel restart; re-queueing review.',
         record.sessionUuid,
+        ...(direct ? [direct.repo, direct.prNumber, direct.reviewerHeadSha, record.pgid, record.spawnedAt] : []),
       );
       if (outcome.changes > 0) recovered += 1;
     }

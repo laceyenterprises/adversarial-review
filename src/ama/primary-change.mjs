@@ -20,7 +20,7 @@ import { parseBlockingFindingsSection, parseNonBlockingFindingsSection } from '.
 import { normalizeEffectiveReviewVerdict } from '../kernel/verdict.mjs';
 import { hamCommitIdentityMatches, isHamWorkerTicket, parseCommitTrailers, parseCommitTrailerValues } from './ham-provenance.mjs';
 import { isRemediationCommit, readLaneReversalOwners, laneReversalOwner,
-  laneReversalIdentityMatches, readLaneReversalIdentity } from './lane-reversal.mjs';
+  laneReversalIdentityMatches, laneReversalIdentityFailureDetail, readLaneReversalIdentity } from './lane-reversal.mjs';
 import { proveDerivedArtifacts, proveGeneratedBlocks } from './derived-artifacts.mjs';
 import { proveLegacyGeneratedPreservation, verifiedLegacyGeneratedPreservation } from './legacy-generated-preservation.mjs';
 import { proveMigrationRenumbers, verifiedMigrationRenumbers } from './migration-renumber.mjs';
@@ -1429,7 +1429,10 @@ async function originalReversalAuthorization({ repo, review, reviews, supersedin
     const laneProof = lane ? { laneOwner, laneIdentity } : {};
     if (original.sha !== candidate.sha || original.commit?.message !== candidate.commit.message
       || (lane ? !laneReversalIdentityMatches({ commit: original, ...laneProof }) : !hamCommitIdentityMatches(original)) || original.parents?.length !== 1
-      || !SHA.test(original.parents[0].sha || '')) { reject('commit-provenance'); continue; }
+      || !SHA.test(original.parents[0].sha || '')) {
+      const detail = lane ? laneReversalIdentityFailureDetail(laneIdentity) : null;
+      reject(`commit-provenance${detail ? `: ${detail}` : ''}`); continue;
+    }
     let originalIdentity;
     try {
       originalIdentity = reversalCommitPatchIdentity(original.files);
@@ -1723,7 +1726,9 @@ async function fetchPrimaryChangeHistory({ repo, prNumber, headSha, get, rootDir
             repo, prNumber, currentHeadSha: commit.sha, rootDir,
           }) : null;
           const laneProof = lane ? { laneOwner, laneIdentity } : {};
-          if (lane && !laneReversalIdentityMatches({ commit, ...laneProof })) { reject('lane-commit-provenance'); continue; }
+          if (lane && !laneReversalIdentityMatches({ commit, ...laneProof })) {
+            reject('lane-commit-provenance', laneReversalIdentityFailureDetail(laneIdentity)); continue;
+          }
           // Stored/recommitted HAM waivers retain their existing proof path.
           // Lane commits must freshly prove their own exact-SHA attestation.
           const stored = !lane && persistAuthorizations

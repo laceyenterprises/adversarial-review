@@ -15,7 +15,8 @@ export async function maybeRunDocsFastPath({ subject, reviewRow, cfg, loadCfg = 
   if (subject.terminal || subject.isDraft) return null;
   const waiverWithdrawn = headSha => {
     const gate = rootDir && headSha && readGateRecordImpl(rootDir, { repo: repoPath, prNumber, headSha });
-    return gate?.state === 'pending' && gate.reason === DOCS_WITHDRAWAL_REASON;
+    return gate?.docsFastPathWithdrawn === true
+      || (gate?.state === 'pending' && gate.reason === DOCS_WITHDRAWAL_REASON);
   };
   const withdrawWaiver = async (headSha, reason = 'docs-review-requested') => {
     try {
@@ -33,7 +34,7 @@ export async function maybeRunDocsFastPath({ subject, reviewRow, cfg, loadCfg = 
   if (reviewRow?.reviewer && (reviewRow.revision_ref === subject.headSha
     || reviewRow.reviewer_head_sha === subject.headSha)) return null;
   // A same-head unrouted wait still belongs to ordinary review after withdrawal.
-  if (reviewRow?.reviewer === '' && reviewRow.revision_ref === subject.headSha
+  if ((reviewRow?.reviewer ?? '') === '' && reviewRow?.revision_ref === subject.headSha
     && waiverWithdrawn(subject.headSha)) return null;
   let evidence = null;
   const read = async args => {

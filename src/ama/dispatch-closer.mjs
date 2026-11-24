@@ -5110,13 +5110,17 @@ async function maybeDispatchAmaCloserAttempt({
       inFlight: true, reason: 'closer-lease-held-by-other-process', existingLease: pendingLaunchLease });
   }
 
+  let writerAuditParseError = null;
   if (reconciliationRepo && prMetadata?.isOpen === true && prMetadata.headSha) {
     const hqRoot = dispatchContext.hqRoot || DEFAULT_HQ_ROOT;
     let hold;
     try { hold = readHammerWriterHold(hqRoot, reconciliationRepo, prNumber, prMetadata.headSha); }
-    catch {
-      return noAmaDispatch({ dispatched: false, skipMergeAgent: true,
+    catch (error) {
+      // The existing park-audit gate diagnoses corrupt JSON with its
+      // certification context before any new launch or merge admission.
+      if (!(error instanceof SyntaxError)) return noAmaDispatch({ dispatched: false, skipMergeAgent: true,
         reason: 'merge-writer-audit-unreadable', recoveryWait: true, preservePredecessorArtifacts: true });
+      writerAuditParseError = error;
     }
     if (hold) {
       const rootDir = reconciliationRoot || SUBMODULE_ROOT;
@@ -5445,6 +5449,7 @@ async function maybeDispatchAmaCloserAttempt({
   let queuedParkAudit = null;
   if (prMetadata?.headSha) {
     try {
+      if (writerAuditParseError) throw writerAuditParseError;
       queuedParkAudit = readAmaAuditEntry(dispatchContext.hqRoot || DEFAULT_HQ_ROOT,
         dispatchContext.repo, prNumber, prMetadata.headSha);
       if (verdict.trace?.hamTerminalRemediation?.ok !== true
@@ -5455,6 +5460,7 @@ async function maybeDispatchAmaCloserAttempt({
       if (verdict.trace?.hamTerminalRemediation?.ok === true) {
         return noAmaDispatch({ dispatched: false, skipMergeAgent: true, reason: 'park-audit-unreadable', needsOperator: true });
       }
+      if (error instanceof SyntaxError) throw error;
     }
   }
   const queuedParkReason = queuedParkAudit?.status === 'deferred'

@@ -2022,7 +2022,7 @@
     "src/ama/closer-lease.mjs": "c2aa021100d2cc5fc0ba2de3ca035dab42d46d416039853d0df4a69a8b2c3900",
     "src/ama/receipted-closer-alias.mjs": "873f9f5084047190a230275cf716b7dcf21b5deef7ab0eb5318dbc9081c3cdac",
     "src/ama/closure-owner.mjs": "2448cded95d11c7a03d85758d16bf1719a433daef79e8d7454c1696c6bfc079e",
-    "src/ama/dispatch-closer.mjs": "8447fc160ca9a94e3118c6c667373e96726e32f9d3d1be8e800d193c0dad907f",
+    "src/ama/dispatch-closer.mjs": "b6ec681b15fb850eab2b1ff1ff60ef8e46d6fb1670128834315854e5860796a7",
     "src/fast-merge-processing.mjs": "ee24d2edf253284bec8fcbce50ac15c91aa8a4154d34ce594e077d3557c411fb",
     "src/follow-up-jobs.mjs": "023fa8d0892a5f669a9dad550403ad56ff4e2d2e4309f989e9e6868b40dec33e",
     "src/follow-up-remediation.mjs": "c6e24842a0659f8e5e2445f7d11690f6ebb13c497ecf080dec7e7f33c7a9041c",

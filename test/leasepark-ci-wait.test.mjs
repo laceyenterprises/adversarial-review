@@ -15,7 +15,9 @@ const merge = readFileSync(join(rootDir, 'bin/hammer-merge.sh'), 'utf8');
 const verify = readFileSync(join(rootDir, 'bin/hammer-verify-head.sh'), 'utf8');
 const head = 'a'.repeat(40);
 const quote = value => `'${String(value).replaceAll("'", "'\\''")}'`;
-const render = source => source.replaceAll('<<ROOT_DIR>>', quote(rootDir))
+const render = source => source
+  .replaceAll('"<<ROOT_DIR>>/bin/hammer-writer-hold.mjs"', quote(join(rootDir, 'bin/hammer-writer-hold.mjs')))
+  .replaceAll('<<ROOT_DIR>>', quote(rootDir))
   .replaceAll('<<TARGET_REMEDIATION_SHA>>', head)
   .replaceAll('<<PR_URL>>', 'fixture-url').replaceAll('<<REPO>>', 'fixture/repo').replaceAll('<<PR_NUMBER>>', '7702')
   .replaceAll('<<HQ_ROOT>>', '$TEST_ROOT').replaceAll('<<REVIEWER>>', 'claude').replaceAll('<<RISK_CLASS>>', 'critical')
@@ -100,7 +102,7 @@ export NODE_OPTIONS="${process.env.NODE_OPTIONS || ''} --import=${join(dir, 'clo
 FAKE_CLOCK_SECONDS=0
 export PATH=${quote(dir)}:"$PATH"
 HAM_NODE_BIN=${quote(process.execPath)}
-TEST_ROOT=${quote(dir)}
+export TEST_ROOT=${quote(dir)}
 BASE_BRANCH=main
 ham_capture_current_base_sha() { HAM_CAPTURED_BASE_SHA=${fixture ? '$(git rev-parse origin/main)' : 'd'.repeat(40)}; }
 export POST_REMEDIATION_SHA=${fixture?.head || head}
@@ -372,6 +374,7 @@ for (const [auditExit, state, outcome] of [[1, 'OPEN', 'parked:merge-lease-timeo
     const stub = join(dir, 'node-stub');
     writeFileSync(stub, `#!/bin/bash
 case "$*" in
+  *hammer-writer-hold.mjs*) exec ${quote(process.execPath)} "$@" ;;
   *merge-lease.mjs*) echo '{"timedOut":true,"waited_s":1}'; exit 75 ;;
   *ama-audit.mjs*) echo "$*" > "$AUDIT_ARGS"; exit ${auditExit} ;;
 esac
@@ -413,6 +416,7 @@ for (const [phase, outcome] of ['initial', 'post-CI'].flatMap(phase =>
     const stub = join(dir, 'node-stub');
     writeFileSync(stub, `#!/bin/bash
 case "$*" in
+  *hammer-writer-hold.mjs*) exec ${quote(process.execPath)} "$@" ;;
   *--input-type=module*) exec ${quote(process.execPath)} "$@" ;;
   *merge-lease.mjs*)
     n=0; [ ! -f "$TEST_ROOT/acquires" ] || n=$(cat "$TEST_ROOT/acquires")

@@ -374,6 +374,9 @@ investigate the named phase and its output. A provably changed head or live
 base branch ref returns through ordinary closure admission. The PR payload's
 base SHA can be historical. Unavailable readback retains
 the hold. `merge-target-unparseable` is a registered closer fault.
+When local writer diagnostics prove transport was never invoked, other
+unclassified preflight refusals settle the intent as `unclassified-merge-failure`.
+The recognized lane-busy deferral keeps its retry refund.
 The closer reuses its initial rollup/proof for its first live gate, then
 refreshes subsequent gates and transports. Initial read failures produce a typed
 unavailable proof before the merge lease; closed/merged snapshots retain normal

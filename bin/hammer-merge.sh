@@ -1375,6 +1375,11 @@ if [ "$HAM_WRITER_READBACK" = merged ] && [ "$HAM_POST_HEAD" = "$POST_REMEDIATIO
 else
   if [ "$HAM_WRITER_READBACK" != unavailable ] && [ "$HAM_POST_HEAD" != "$POST_REMEDIATION_SHA" ]; then
     ham_append_terminal_audit superseded live-head-moved-before-merge || true
+  elif [ "$HAM_MERGE_EXIT" -ne 0 ] && jq -e '.write == "not-invoked" and .reason != "legacy-writer-timeout"' \
+    >/dev/null <<< "$HAM_WRITER_JSON"; then
+    ham_append_terminal_audit failed-without-merge unclassified-merge-failure || true
+    ham_release_merge_lease
+    return 1
   elif [ "$HAM_WRITER_READBACK" = open ] && [ "$HAM_MERGE_EXIT" -ne 0 ] \
     && grep -Eiq 'not mergeable|merge conflict|rebase|base.*(changed|modified|advanced)' "$HAM_MERGE_STDERR" \
     && ham_capture_current_base_sha && [ "$HAM_CAPTURED_BASE_SHA" != "$HAM_MERGE_ATTEMPT_BASE_SHA" ]; then

@@ -1878,7 +1878,9 @@ An interrupted intent also fences unchanged inputs. The ordinary lease release
 keeps the gate charge. A fresh open head or changed base must pass ordinary
 closure admission before a new write. `merge-target-unparseable` is a
 registered closer fault. A blocked preflight that proves no
-merge transport ran settles the local writer reservation. Existing exact-head
+merge transport ran settles the local writer reservation. Unclassified
+preflight refusals retain the terminal failure outcome, and the recognized
+lane-busy deferral retains its refund. Existing exact-head
 CAS, leases and merge retry ownership continue to apply.
 
 CLOSERGATES-01 final remediation keeps repairable conflicts out of terminal

@@ -13,8 +13,9 @@ terminal proof for a superseded review still goes through daemon preflight.
 A refused successor handoff writes `needs-closer` to the existing head-scoped
 receipt. Later closure passes can retry admission from either this state or the
 legacy receipt. A confirmed successor records its remediation job ID. If final
-fix-all is already spent, normal hammer admission receives only strict exact-head
-final findings routes. Other routes retain `needs-closer` and refusal alerting.
+fix-all is already spent, normal hammer admission receives strict exact-head
+hammer routes with findings, including CI repair. Other routes retain
+`needs-closer` and refusal alerting.
 Successor custody has an immediate refusal alert and a 1800-second escalation
 for receipts that remain non-enrolled on the same open head. A bounded watcher
 sweep checks receipts independently of closure selection, using the same page
@@ -87,3 +88,14 @@ the exact head. Strict hammer fallback includes CI repair on a reviewed head
 with findings. Post-deploy acceptance reads the decision journal with numeric
 timestamps so it can detect a daemon route even after the PR closes. The
 closure runbook documents per-PR operator recovery under strict mode.
+
+### Final builder CI repair
+
+Moved recovery timer startup into the existing watcher preflight leaf module,
+preserving immediate execution, independent 30-second cadence, unreferenced
+timers and successor shutdown on SIGTERM/SIGINT. This restores the watcher's
+ARC-18 line budget without changing its ceiling or adding CI checks.
+Targeted validation covers timer lifecycle, the watcher claim loop, the five
+advisory fixes and the existing state-machine smoke. Lint (zero errors),
+contract typechecking, the 103-entry data-model catalog validator and the
+offline research walkthrough pass; the full suite remains with PR-head CI.

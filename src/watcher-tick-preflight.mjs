@@ -1,6 +1,25 @@
 import { checkHcpHealthz } from './hcp-health.mjs';
 import { refreshReviewerBrokerTokens, refreshWatcherGithubToken } from './reviewer-broker-refresh.mjs';
 import { retryPendingReviewedAttestations } from './reviewed-attestation.mjs';
+import { createCloserSuccessorDeadlineSweep } from './ama/closer-successor.mjs';
+
+export function startWatcherRecoveryTimers({ rootDir, overloadRescueRetry, readLive,
+  createSweep = createCloserSuccessorDeadlineSweep, setIntervalImpl = setInterval,
+  clearIntervalImpl = clearInterval, signals = process }) {
+  // Recovery shares the watcher's lifetime, independently of discovery latency.
+  // The shortest overload backoff is 30 seconds.
+  void overloadRescueRetry.tick();
+  setIntervalImpl(() => { void overloadRescueRetry.tick(); }, 30_000).unref();
+  const successorDeadline = createSweep({ rootDir, readLive });
+  void successorDeadline.tick();
+  const timer = setIntervalImpl(() => { void successorDeadline.tick(); }, 30_000).unref();
+  const stop = () => {
+    clearIntervalImpl(timer);
+    void successorDeadline.stop();
+  };
+  signals.once('SIGTERM', stop);
+  signals.once('SIGINT', stop);
+}
 
 let watcherAuthenticationRefreshInFlight = false;
 

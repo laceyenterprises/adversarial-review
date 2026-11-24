@@ -1,13 +1,46 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { EventEmitter } from "node:events";
 
 import {
   WATCHER_AUTH_REFRESH_INTERVAL_MS,
   refreshWatcherAuthenticationForTick,
   startWatcherAuthenticationRefreshTimer,
+  startWatcherRecoveryTimers,
 } from "../src/watcher-tick-preflight.mjs";
 
 const silent = { log() {}, warn() {} };
+
+for (const signal of ["SIGTERM", "SIGINT"]) {
+  test(`recovery sweeps run outside discovery and stop on ${signal}`, () => {
+    const signals = new EventEmitter();
+    const timers = [];
+    let retries = 0, deadlines = 0, stops = 0;
+    const readLive = async () => {};
+    startWatcherRecoveryTimers({
+      rootDir: "/synthetic", signals, readLive,
+      overloadRescueRetry: { tick: () => { retries++; } },
+      createSweep: options => {
+        assert.deepEqual(options, { rootDir: "/synthetic", readLive });
+        return { tick: () => { deadlines++; }, stop: () => { stops++; } };
+      },
+      setIntervalImpl: (fn, ms) => {
+        const timer = { fn, ms, referenced: true, unref() { this.referenced = false; return this; } };
+        timers.push(timer);
+        return timer;
+      },
+      clearIntervalImpl: timer => { timers.splice(timers.indexOf(timer), 1); },
+    });
+    assert.deepEqual([retries, deadlines], [1, 1], "both sweeps start before discovery");
+    assert.ok(timers.every(timer => timer.ms === 30_000 && !timer.referenced));
+    for (const timer of timers) timer.fn();
+    assert.deepEqual([retries, deadlines], [2, 2]);
+    signals.emit(signal);
+    signals.emit(signal);
+    assert.equal(stops, 1, "shutdown listener is one-shot");
+    assert.equal(timers.length, 1, "successor timer is cancelled");
+  });
+}
 
 // Drives the timer callback by hand instead of waiting on real time.
 function fakeInterval() {

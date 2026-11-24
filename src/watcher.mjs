@@ -6,7 +6,6 @@ import { prepareDispatchReadContext } from './dispatch-read-client.mjs';
 import { shutdownAmaHammerBackgroundQueue } from './ama-hammer-background-dispatch.mjs';
 import { resolveHqRoot } from './hq-root.mjs';
 import { createOverloadRescueRetry } from './overload-rescue-retry.mjs';
-import { createCloserSuccessorDeadlineSweep } from './ama/closer-successor.mjs';
 import { withHoldRecordPoll } from './ama/hold-record.mjs';
 import { evaluateCloserHoldsForPoll } from './ama/closer-hold-records.mjs';
 import { WATCHER_POLL_INTERVAL_MS } from './watcher-poll-interval.mjs';
@@ -402,7 +401,7 @@ import {
 } from './conditional-request.mjs';
 import { reviewBodyHasScopeViolationFinding } from './additive-only-scope.mjs';
 import { sweepEtagCache } from './etag-cache.mjs';
-import { refreshWatcherAuthenticationForTick, startWatcherAuthenticationRefreshTimer, createTickHcpHealthzProbe, startPendingReviewedAttestationRetryForWatcher } from './watcher-tick-preflight.mjs';
+import { refreshWatcherAuthenticationForTick, startWatcherAuthenticationRefreshTimer, startWatcherRecoveryTimers, createTickHcpHealthzProbe, startPendingReviewedAttestationRetryForWatcher } from './watcher-tick-preflight.mjs';
 import {
   fetchPullRequestHeadAndState,
   fetchPullRequestMergeability,
@@ -1878,20 +1877,8 @@ async function main() {
   const { createFindingBatchTicker } = await import('./findings-batch.mjs');
   const findingBatchTicker = createFindingBatchTicker({ db, rootDir: ROOT });
   startWatcherAuthenticationRefreshTimer({ log: console });
-  // Recovery shares this watcher's lifetime, but not a long discovery pass's
-  // latency. The shortest overload backoff is 30 seconds.
-  void overloadRescueRetry.tick();
-  setInterval(() => { void overloadRescueRetry.tick(); }, 30_000).unref();
-  const successorDeadline = createCloserSuccessorDeadlineSweep({ rootDir: ROOT,
+  startWatcherRecoveryTimers({ rootDir: ROOT, overloadRescueRetry,
     readLive: (repo, prNumber) => fetchPullRequestHeadAndState(repo, prNumber, { withLabels: false }) });
-  void successorDeadline.tick();
-  const successorDeadlineTimer = setInterval(() => { void successorDeadline.tick(); }, 30_000).unref();
-  const stopSuccessorDeadline = () => {
-    clearInterval(successorDeadlineTimer);
-    void successorDeadline.stop();
-  };
-  process.once('SIGTERM', stopSuccessorDeadline);
-  process.once('SIGINT', stopSuccessorDeadline);
 
   (async function pollLoop() {
     let nextStart = Date.now();

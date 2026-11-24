@@ -1040,11 +1040,13 @@ test('re-review FIFO does not undo first-pass discovery ordering', () => {
   const entries = [
     { prNumber: 1117, current: null },
     { prNumber: 1110, current: { review_status: 'pending', rereview_requested_at: '2026-09-26T05:00:00.000Z' } },
-    { prNumber: 7013, current: null },
+    { prNumber: 7013, current: { review_status: 'pending', reviewer: '' } },
     { prNumber: 1093, current: { review_status: 'pending', rereview_requested_at: '2026-09-26T04:00:00.000Z' } },
   ];
+  const discoveryOrder = orderSubjectEntriesDiscoveryFirst(entries, { logger: silentLogger });
+  assert.deepEqual(discoveryOrder.map(entry => entry.prNumber), [1117, 7013, 1110, 1093]);
   assert.deepEqual(
-    orderSubjectEntriesRereviewOldestFirst(entries, { logger: silentLogger }).map((entry) => entry.prNumber),
+    orderSubjectEntriesRereviewOldestFirst(discoveryOrder, { logger: silentLogger }).map((entry) => entry.prNumber),
     [1117, 7013, 1093, 1110],
   );
 });

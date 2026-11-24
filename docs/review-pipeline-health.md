@@ -141,12 +141,12 @@ lists the database, file and cache participants.
   unreadable. Page on the specific unreadable-ledger Sentinel finding for the
   exists-but-unopenable case; keep any `collector_up == 0` page scoped to the
   missing-ledger case or downgrade it to avoid double-paging the same incident.
-- `review_pipeline_first_pass_queue_depth`: open pending PRs whose durable
+- `review_pipeline_first_pass_queue_depth`: routed, non-draft open pending PRs whose durable
   watcher dispatch state is first-pass (`rereview_requested_at` is empty and
   no review has been posted yet), excluding rows with a current
   CI-regression-stopped follow-up deferral. Historical `reviewer_passes`
   rows are evidence only; they do not relabel the watcher lane.
-- `review_pipeline_pending_queue_depth`: combined open first-pass plus
+- `review_pipeline_pending_queue_depth`: combined routed, non-draft open first-pass plus
   re-review rows waiting in `reviewed_prs.review_status='pending'`, before
   active/requeued/CI-regression-stopped deferrals are split out. Dashboard
   panels or alerts that intentionally need the pre-split combined queue depth

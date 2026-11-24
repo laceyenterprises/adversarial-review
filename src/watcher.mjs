@@ -268,7 +268,7 @@ import {
 } from './adversarial-gate-status.mjs';
 import { runTtmTrackerWatcherTick } from './ttm-tracker.mjs';
 import { fastMergeAuditDir, fastMergeAuditPath } from './fast-merge-audit-storage.mjs';
-import { processReviewSubject } from './pollonce-phases.mjs';
+import { discoverReviewSubjects, processReviewSubject } from './pollonce-phases.mjs';
 import { resolveGateStatusContext } from './adversarial-gate-context.mjs';
 // MSM-04 — the only agent dispatch left on the AMA surface is the hammer.
 // Fully clean PRs merge through the daemon path; dirty/conflicted/red-CI PRs
@@ -1425,13 +1425,8 @@ async function pollOnceWithinBudget(
     // process the same PR before or during discovery, so keep its collectors separate.
     const reviewContext = { ...refillContext, activeMergeAgentPRs: [], currentRepoPRs: [] };
     const { activeMergeAgentPRs, currentRepoPRs } = reviewContext;
-    let subjectRefs;
-    try {
-      subjectRefs = await subjectAdapter.discoverSubjects();
-      watcherHeartbeat?.markPollProgress?.();
-    } catch (err) {
-      if (['REPOSITORY_STATE_BUSY', 'REPOSITORY_IDENTITY_CONFLICT'].includes(err.code)) throw err;
-      console.error(`[watcher] Failed to fetch PRs for ${repoPath}:`, err.message);
+    const subjectRefs = await discoverReviewSubjects(subjectAdapter, repoPath, watcherHeartbeat);
+    if (subjectRefs === null) {
       reconcileWatcherPriorityDiscoveryPending(priorityDiscoveryPending, { repoPath, discoveredPrNumbers: new Set() });
       continue;
     }
@@ -1443,8 +1438,12 @@ async function pollOnceWithinBudget(
     });
     let subjectEntries = (await Promise.all(subjectRefs.map(async (subjectRef) => {
       try {
-        const subject = await subjectAdapter.fetchState(subjectRef);
+        const fetched = await subjectAdapter.fetchState(subjectRef);
         watcherHeartbeat?.markPollProgress?.();
+        const subject = fetched.ref ? fetched : {
+          ...fetched,
+          ref: { ...subjectRef, revisionRef: fetched.headSha ?? subjectRef.revisionRef },
+        };
         const { prNumber } = parseSubjectExternalId(subject.ref.subjectExternalId);
         return { subjectRef, subject, prNumber };
       } catch (err) {
@@ -1459,7 +1458,8 @@ async function pollOnceWithinBudget(
     subjectEntries = subjectEntries
       .map((entry) => ({
         ...entry,
-        current: stmtGetReviewRow.get(repoPath, entry.prNumber), hasPriorPostedReview: Boolean(stmtHasPostedReview.get(repoPath, entry.prNumber)),
+        current: stmtGetReviewRow.get(repoPath, entry.prNumber),
+        hasPriorPostedReview: Boolean(stmtHasPostedReview.get(repoPath, entry.prNumber)),
       }))
       .sort((a, b) =>
         compareWatcherWakeSubjectEntries(wakePayloadForPoll(), repoPath, a, b, compareReviewerDispatchCandidates)
@@ -1469,7 +1469,6 @@ async function pollOnceWithinBudget(
     subjectEntries = orderSubjectEntriesDiscoveryFirst(subjectEntries, {
       repoPath,
       logger: console,
-      hasReviewRow: (entry) => Boolean('current' in entry ? entry.current : (entry.current = stmtGetReviewRow.get(repoPath, entry.prNumber))),
     });
     subjectEntries = orderSubjectEntriesRereviewOldestFirst(subjectEntries, { repoPath, logger: console });
     const duplicateFamilyCensus = await runDuplicateFamilyCensusForWatcher({ db, octokit, subjectEntries, repoPath, rootDir: ROOT, env: process.env });

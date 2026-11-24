@@ -244,6 +244,11 @@ test('latency report backfills critical path and queue state from fixtures', () 
       '2026-09-11T12:10:00.000Z',
       'awaiting rereview',
     );
+    db.prepare(
+      `INSERT INTO reviewed_prs (repo, pr_number, reviewed_at, reviewer, review_status, is_draft)
+       VALUES (?, 6603, '2026-09-11T11:00:00.000Z', '', 'pending', 0),
+              (?, 6604, '2026-09-11T11:00:00.000Z', 'codex', 'pending', 1)`
+    ).run(REPO, REPO);
     recordReviewLatencyEvent(db, {
       repo: REPO,
       prNumber: 6601,

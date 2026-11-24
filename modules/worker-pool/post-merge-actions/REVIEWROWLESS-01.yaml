@@ -1,0 +1,6 @@
+operator_steps:
+  - description: After the watcher deploys, compare open PRs in watched repositories with read-only reviewed_prs rows. Confirm first-review claims or owned discovery waits, and inspect natural rescue audits for review-row-missing refusals.
+    run_as: designated SRE operator
+    command: |
+      root="${AGENT_OS_DEPLOY_CHECKOUT:?Set AGENT_OS_DEPLOY_CHECKOUT}"
+      sqlite3 -readonly "$root/tools/adversarial-review/data/reviews.db" "SELECT repo, pr_number, revision_ref, reviewer, review_status, failure_message FROM reviewed_prs WHERE pr_state = 'open' ORDER BY repo, pr_number;"

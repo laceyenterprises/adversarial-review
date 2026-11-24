@@ -747,6 +747,15 @@ or unreadable subjects are still refused as `durable-refill-subject-changed`.
 A pending re-review refused before admission logs a `review-wait-decision`
 with its filtering reason on every drain, with or without wait pressure.
 
+When discovery cannot route an open PR yet, it logs the PR number, wait
+reason and owner. The `reviewed_prs` row stays `pending` with an empty
+`reviewer` and carries the wait in `failure_message`. The durable reviewer
+refill only picks up assigned rows. The next discovery pass rechecks the
+wait, and assigning a reviewer clears it without consuming a review attempt.
+An active repair reservation retains custody until its normal publication
+or retirement transition. First-pass review can run with red external CI.
+Re-review CI admission and merge eligibility retain their separate checks.
+
 Durable candidates forward the posted timestamp at split capacity release and
 at completion. Without admission splitting, the completed review result (or
 pipeline rollup delivery receipt) supplies the durable timestamp for the
@@ -2188,7 +2197,15 @@ already visible at poll admission or classification do the same; failed status
 withdrawal keeps the PR waiting for a later retry. Kill switch,
 primary-change policy, protection, capability, protective
 predecessors, stop holds and audit remain authoritative. No reviewer result or
-finding count is invented. Pending/red checks wait without reviewer or closer.
+finding count is invented. On a settled check failure or definite mergeability
+refusal for the docs head, the watcher logs the gate reasons, withdraws the
+waiver and takes the ordinary review path. The exact-head withdrawal receipt
+keeps later polls on that path while routing waits. A first review can proceed
+with red external CI. Unsettled checks or `UNKNOWN` mergeability keep the fast-path wait
+and retry on the same head. A failed waiver withdrawal stays with the watcher
+for retry.
+Once an ordinary reviewer is assigned for the head, later polls keep it on
+the ordinary path.
 
 The former `fast-merge:docs` label shortcut is retired; it cannot waive review
 for Markdown outside `docs/`. Other explicit fast-merge categories are unchanged.

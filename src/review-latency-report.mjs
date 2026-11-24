@@ -4,6 +4,7 @@ import { join } from 'node:path';
 
 import { rereviewWakeBacklog } from './rereview-wake.mjs';
 import { resolveSettledCleanStopCode } from './follow-up-jobs.mjs';
+import { routedPendingReviewSql } from './review-queue-depth.mjs';
 
 const DEFAULT_SINCE_MS = 24 * 60 * 60 * 1000;
 const FOLLOW_UP_JOB_DIRS = Object.freeze({
@@ -668,6 +669,7 @@ function queueAges(db, { nowMs }) {
        FROM reviewed_prs
       WHERE COALESCE(pr_state, 'open') = 'open'
         AND review_status IN ('pending', 'pending-upstream', 'reviewing', 'ci-blocked', 'failed', 'failed-orphan')
+        AND (review_status <> 'pending' OR (${routedPendingReviewSql(db)}))
       ORDER BY COALESCE(rereview_requested_at, reviewed_at, last_attempted_at, failed_at, '') ASC`
   );
   const entries = rows.map((row) => {

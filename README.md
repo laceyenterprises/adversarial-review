@@ -2166,7 +2166,12 @@ recording an attestation. Base tip advancement requires a fresh docs-only range
 on the same base branch; terminal audit metadata records that refreshed range.
 Explicit review requests keep full review, withdrawing the waiver with a pending
 gate status at admission, classification or live merge checks. Failed withdrawal
-retains the fast-path wait for retry. No durable review status or smoke promise is added; offline
+retains the fast-path wait for retry. Pending checks and unknown mergeability
+keep the docs waiver while the watcher rechecks the same head. A settled check
+failure or definite mergeability refusal withdraws it and admits ordinary review.
+The exact-head withdrawal receipt keeps ordinary admission active while routing waits.
+Discovery wait rows use the existing pending state and stay out of the reviewer
+queue until routing. Offline
 regressions are in `test/docs-fast-path.test.mjs` and
 `test/ama-daemon-merge.test.mjs`. Deploy the companion signer/ledger migration first.
 SRE separately observes the next three docs-only merges within about ten minutes

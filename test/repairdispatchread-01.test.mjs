@@ -71,6 +71,147 @@ const argv = (rootDir, project = 'fixture-project') =>
 let endpoint = 0;
 const freshEnv = () => ({ APP_CONTRACT_ENDPOINT_URL: `https://fixture.invalid/repair-${++endpoint}` });
 
+for (const [scenario, expected] of [
+  ['closed review row', 'final-fix-pr-not-open'],
+  ['missing review row', 'final-fix-pr-not-open'],
+  ['advanced review row', 'final-fix-head-mismatch'],
+  ['live closer', 'closer-owned-or-unknown'],
+  ['unknown closer', 'closer-owned-or-unknown'],
+  ['malformed closer lease', { name: 'SyntaxError' }],
+  ['in-progress follow-up', 'remediation-owned'],
+  ['transport failure', 'final-fix-owner-absence-unproven'],
+  ['follow-up ticket', /invalid repair request/],
+  ['launcher PID', /invalid repair request/],
+  ['non-final-fix key', /invalid repair request/],
+]) test(`final-fix recovery refuses ${scenario}`, async t => {
+  const rootDir = exhaustedPr(t);
+  const identity = { repo, prNumber };
+  const ownerKey = `ffa-${'f'.repeat(64)}`;
+  const dispatchProjectRef = 'pr-merge-orchestration';
+  const { epoch } = reserveRepairEpoch({ rootDir, ...identity, headSha: head, ownerKey,
+    cause: 'review-cycle-exhausted', dispatchProjectRef });
+  const before = readHammerRetryCapLedger(rootDir, identity);
+  const args = [rootDir, repo, String(prNumber), head, ownerKey, 'false', '', '', dispatchProjectRef, epoch.id];
+
+  if (scenario.endsWith('review row')) {
+    const db = openReviewStateDb(rootDir);
+    try {
+      if (scenario === 'closed review row') db.prepare("UPDATE reviewed_prs SET pr_state = 'closed'").run();
+      if (scenario === 'missing review row') db.prepare('DELETE FROM reviewed_prs').run();
+      if (scenario === 'advanced review row') {
+        db.prepare('UPDATE reviewed_prs SET revision_ref = ?').run('e'.repeat(40));
+      }
+    } finally { db.close(); }
+  }
+  if (scenario.endsWith('closer')) closerLease(rootDir);
+  if (scenario === 'malformed closer lease') {
+    closerLease(rootDir);
+    writeFileSync(amaCloserLeaseFilePath(rootDir, { ...identity, headSha: head }), '{');
+  }
+  if (scenario === 'in-progress follow-up') {
+    const path = join(rootDir, 'data', 'follow-up-jobs', 'in-progress', 'competing.json');
+    mkdirSync(dirname(path), { recursive: true });
+    writeFileSync(path, JSON.stringify({ ...identity, jobId: 'competing', status: 'in_progress' }));
+  }
+  if (scenario === 'follow-up ticket') args[6] = 'competing';
+  if (scenario === 'launcher PID') args[7] = '123';
+  if (scenario === 'non-final-fix key') args[4] = 'repair-submit-synthetic';
+  const calls = mockSdk(t, {
+    launchStatus: 'running',
+    lookup: ['unknown closer', 'transport failure'].includes(scenario)
+      ? () => { throw Object.assign(new Error('synthetic outage'), { status: 503 }); }
+      : undefined,
+  });
+
+  const recover = () => main(args, { env: freshEnv() });
+  if (typeof expected !== 'string') {
+    await assert.rejects(recover, expected);
+  } else {
+    const result = await recover();
+    assert.equal(result.ok, false, JSON.stringify(result));
+    assert.equal(result.reason, expected);
+  }
+  if (!['live closer', 'unknown closer', 'transport failure'].includes(scenario)) {
+    assert.equal(calls.lookup, 0);
+  }
+  assert.deepEqual(readHammerRetryCapLedger(rootDir, identity), before);
+});
+
+for (const [ownerState, allowed] of [
+  [undefined, true], [null, true], ['unknown', true], ['absent', true], ['absent-unfenced', true],
+  ['live', false], ['terminal', false], ['unexpected', false],
+]) test(`final-fix recovery pre-checks owner state ${ownerState} before dispatch reads`, async t => {
+  const rootDir = exhaustedPr(t);
+  const identity = { repo, prNumber };
+  const ownerKey = `ffa-${'f'.repeat(64)}`;
+  const dispatchProjectRef = 'pr-merge-orchestration';
+  const { epoch } = reserveRepairEpoch({ rootDir, ...identity, headSha: head, ownerKey,
+    cause: 'review-cycle-exhausted', dispatchProjectRef });
+  if (ownerState !== undefined) {
+    mutateRepairEpochs(rootDir, identity, ledger => {
+      ledger.repairEpochs[0].ownerState = ownerState;
+    });
+  }
+  const before = readHammerRetryCapLedger(rootDir, identity);
+  const calls = mockSdk(t);
+  const result = await main([rootDir, repo, String(prNumber), head, ownerKey,
+    'false', '', '', dispatchProjectRef, epoch.id], { env: freshEnv() });
+  assert.equal(result.ok, allowed);
+  if (allowed) {
+    assert.equal(result.replayed, true);
+    assert.equal(calls.lookup, 1, 'eligible owners still require paired dispatch absence');
+  } else {
+    assert.equal(result.reason, 'final-fix-reservation-changed');
+    assert.equal(calls.connect, 0, 'ineligible owners refuse before dispatch preparation');
+    assert.equal(calls.lookup, 0, 'ineligible owners refuse without a dispatch lookup');
+  }
+  assert.deepEqual(readHammerRetryCapLedger(rootDir, identity), before);
+});
+
+test('final-fix recovery only replays the selected unbound owner under paired absence', async t => {
+  const rootDir = exhaustedPr(t);
+  const identity = { repo, prNumber };
+  const ownerKey = `ffa-${'f'.repeat(64)}`;
+  const dispatchProjectRef = 'pr-merge-orchestration';
+  const { epoch } = reserveRepairEpoch({ rootDir, ...identity, headSha: head, ownerKey,
+    cause: 'review-cycle-exhausted', dispatchProjectRef });
+  mutateRepairEpochs(rootDir, identity, ledger => {
+    Object.assign(ledger.repairEpochs[0], { ownerState: 'absent-unfenced', ownerLaunch: null, absentObservations: 3 });
+  });
+  const before = readHammerRetryCapLedger(rootDir, identity);
+  let response = pairedDispatchAbsence;
+  const calls = mockSdk(t, { lookup: selector => response(selector) });
+  const recoveryArgs = [rootDir, repo, String(prNumber), head, ownerKey, 'false', '', '', dispatchProjectRef, epoch.id];
+  const recover = (args = recoveryArgs) => main(args, { env: freshEnv() });
+  assert.equal((await recover([...recoveryArgs.slice(0, -1), `repair-${'0'.repeat(8)}-0000-0000-0000-${'0'.repeat(12)}`])).reason,
+    'final-fix-reservation-changed');
+  assert.equal(calls.lookup, 0);
+  response = selector => pairedDispatchAbsence(selector, 'operator-exact-key');
+  assert.equal((await recover()).reason, 'final-fix-owner-absence-unproven');
+  response = selector => ({ ...pairedDispatchAbsence(selector), scope_complete: false });
+  assert.equal((await recover()).reason, 'final-fix-owner-absence-unproven');
+  response = pairedDispatchAbsence;
+  const queuePath = join(rootDir, 'data', 'follow-up-jobs', 'pending', 'competing.json');
+  mkdirSync(dirname(queuePath), { recursive: true });
+  writeFileSync(queuePath, JSON.stringify({ ...identity, jobId: 'competing', status: 'pending' }));
+  assert.equal((await recover()).reason, 'remediation-owned');
+  rmSync(queuePath);
+  const replay = await recover();
+  assert.deepEqual(replay, { ok: true, protocol: 'final-fix-recovery-v1', replayed: true,
+    epoch: before.repairEpochs[0] });
+  assert.deepEqual(readHammerRetryCapLedger(rootDir, identity), before);
+
+  // An owner appears between the snapshot and the compare-and-read.
+  response = selector => {
+    mutateRepairEpochs(rootDir, identity, ledger => {
+      ledger.repairEpochs[0].ownerLaunch = 'lrq_winner';
+    });
+    return pairedDispatchAbsence(selector);
+  };
+  assert.equal((await recover()).reason, 'final-fix-reservation-changed');
+  assert.equal(pendingRepairEpoch(rootDir, identity).ownerLaunch, 'lrq_winner');
+});
+
 test('a denied project/repository read stops a new repair before any reservation', async t => {
   const rootDir = exhaustedPr(t);
   const identity = { repo, prNumber };

@@ -1807,6 +1807,10 @@ records the evidence/admission truth table and public export fixture refresh.
 
 ## State machines and smoke verification (SMV v1)
 
+Retained final-fix verification follows the matching repair owner key from its
+recovery launch to the managed pushed-head attestation and exact-head review.
+The original failed job stays `never-spawned`.
+
 Terminal HAM review proofs retain any-head operator vetoes. Permanent issuer
 gaps return `terminal-review-issuer-unverifiable` with operator custody; transient
 reads retain the five-minute recovery delay. GraphQL bot identity matches REST.

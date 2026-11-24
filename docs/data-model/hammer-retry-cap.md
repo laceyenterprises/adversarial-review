@@ -18,6 +18,11 @@ delivered-pass journal prevent duplicate review. Live/unknown reservations
 exclude another writer. A replay requires the same `ownerKey` and `baseHead`.
 Native follow-up custody can satisfy the reservation's queue check only through
 the existing [pre-spawn claim](follow-up-jobs.md#live-pr-owner-admission-snapshot-remediationowner-01).
+An HQ-owner retained final-fix submission can replay an existing `ffa-` epoch
+after fresh scoped absence, a strict queue-ownership check and a compare-and-read
+under the reservation lock. The comparison requires the same unbound epoch ID,
+owner key, project and exact base head. It writes no epoch or observation. The
+accepted Worker Pool launch supplies the same key through normal owner lookup.
 Before admission, the watcher observes a pending
 reservation at most once per 30 seconds, recording `ownerObservedAt`,
 `ownerState` (`live`, `unknown`, `absent`, `absent-unfenced`, or `terminal`)

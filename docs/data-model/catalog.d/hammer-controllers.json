@@ -29,7 +29,8 @@
         "checks[].socketPathFault: true when a mirror check's single failed command emits only a supported socket diagnostic",
         "checks[].localReason: includes harness-fault:socket-path when a failed mirror check becomes inconclusive on a socket stop",
         "validation-deferred-<head>.json: run-local unknown outcome with the cause, status, optional validation receipt path and cleanup owner",
-        "validation-deferred-<head>.json ciAuthoritative, coverageComplete, cleanup, requiredContexts and localFailureObserved: proof required for UNKNOWN to defer to declared exact-head contexts"
+        "validation-deferred-<head>.json ciAuthoritative, coverageComplete, cleanup, requiredContexts and localFailureObserved: proof required for UNKNOWN to defer to declared exact-head contexts",
+        "validation-deferred-<head>.json cleanCheckout, cleanupConfirmed, controllerRecord: evidence that a completed conflict repair started clean and its validation round drained before publication"
       ],
       "retention": "Passing command logs are deleted immediately. Caller retains failed/interrupted evidence through diagnosis and removes it only after confirmed drain and evidence collection. No automatic expiry or aggregate cap for evidence; 4 MiB per command. Validator removes mode-0700 scratch and mode-0600 PID file after confirmed cleanup. Exit 125, interruption or failed deletion can leave scratch for same-uid reaping after at least 24 hours, with no live PID and a clear process census. The persistent mode-0600 per-uid marker limits scan attempts to once an hour per temp parent, including failed censuses."
     }

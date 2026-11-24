@@ -8804,6 +8804,10 @@ case resets retry-series exhaustion. Round-level re-review requests cannot be
 hidden by contradictory job-level suppression. Cancellation and timeout errors
 propagate rather than admitting a fallback findings-only proof. Subprocess
 `SIGTERM` and `SIGKILL` errors propagate even when `killed` is false or absent.
+Rejected currency and underlying inspection promises are evicted from the
+evaluation-local caches, allowing the same reader to retry after a transient
+failure. Concurrent reads still share pending work and successful results stay
+cached. A retry supplies no currency proof unless the fresh inspection proves it.
 All mixed-chain edges count toward the existing length limit. A completed
 non-final round with a pending review can retain findings and range evidence
 after a Hammer push. It supplies no stale-head waiver.

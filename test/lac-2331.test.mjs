@@ -126,6 +126,42 @@ for (const fields of [
 }
 
 const nativeJobId = 'fixture__repo-pr-42-job';
+
+for (const stage of ['compare', 'comments', 'PR lookup', 'git']) {
+  test(`the same currency reader retries a transient ${stage} rejection`, async t => {
+    const { options } = fixture(t, { rounds: [], comments: [] });
+    const error = Object.assign(new Error('temporary inspection timeout'), { code: 'ETIMEDOUT' });
+    let attempts = 0;
+    const inspect = () => { if (++attempts === 1) throw error; };
+    const currency = createReviewCurrencyReader({ ...options,
+      loadComments: async () => { if (stage === 'comments') inspect(); return []; },
+      get: async path => {
+        if (path.includes('/compare/')) {
+          if (stage === 'compare') inspect();
+          return { status: stage === 'compare' ? 'ahead' : 'diverged' };
+        }
+        if (path.endsWith(`/pulls/${prNumber}`)) {
+          if (stage === 'PR lookup') inspect();
+          return { head: { sha: currentHead }, base: { sha: futureHead } };
+        }
+        return null;
+      },
+      git: async args => {
+        if (stage === 'git' && args[0] === 'merge-base') inspect();
+        return args[0] === 'merge-base' ? futureHead : '';
+      },
+    });
+    const first = currency(reviewedHead, currentHead);
+    assert.equal(currency(reviewedHead, currentHead), first, 'concurrent reads share work');
+    await assert.rejects(first, actual => actual === error);
+    const result = await currency(reviewedHead, currentHead);
+    assert.equal(attempts, 2, 'the rejected underlying read is attempted again');
+    assert.equal(result.current, stage === 'compare', 'retry never fabricates currency');
+    assert.equal(await currency(reviewedHead, currentHead), result, 'settled evidence stays cached');
+    assert.equal(attempts, 2);
+  });
+}
+
 function nativeFinalJob() {
   return {
     kind: 'adversarial-review-follow-up', jobId: nativeJobId, revisionRef: reviewedHead, branch: 'fixture/change', baseBranch: 'main',

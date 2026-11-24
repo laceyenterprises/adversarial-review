@@ -222,7 +222,23 @@ under the same finding/region rules as the hammer. Its existing queue record
 must bind `repo`, `prNumber`, `jobId`, `revisionRef` and
 `closureHandoff: { reason: final-fix-all, headSha }` to that source review head.
 The recorded `remediationWorker.launchRequestId` and `workerClass` must match
-the verified **produced** attestation at the exact authorizing commit SHA.
+the verified **produced** attestation for that repository and PR at the exact
+authorizing commit SHA. The source guard uses `hq attest chain` with the
+deployed verifier. When `AGENT_OS_SESSION_LEDGER_POSTGRES_RUNTIME=on` or,
+with that selector absent, `AGENT_OS_SESSION_LEDGER_BACKEND=postgres`, a nonblank
+`AGENT_OS_SESSION_LEDGER_CANONICAL_DSN` routes the chain child to the canonical
+ledger where HQ records the native produced receipt. The child drops
+`AGENT_OS_SESSION_LEDGER_DSN_DIRECT`, `AGENT_OS_SESSION_LEDGER_VDB`,
+`AGENT_OS_SESSION_LEDGER_VDB_DIRECT_DSN` and `AGENT_OS_SESSION_LEDGER_DB_PATH`
+overrides; the parent environment is unchanged. The legacy runtime selector
+takes precedence over `BACKEND`, matching HQ. SQLite, unspecified/config-only
+backend selection and an absent canonical DSN retain HQ's runtime routing.
+An empty or failed canonical read leaves the reversal unproven, without a
+runtime fallback. Provenance refusal detail reports the identity reason,
+whether the failure is transient, and `ledgerTarget=canonical-postgres` or
+`ledgerTarget=runtime`, never the credential-bearing DSN. Temporary Postgres
+connection failures use the existing bounded chain retry and still refuse
+authorization if exhausted.
 Names, emails, title prefixes, a later clean review, and an opener's attestation
 provide no reversal authority. Terminal and archived job receipts retain this
 historical proof without retaining live custody.

@@ -227,6 +227,12 @@ existing context budget still bounds a retry. This NXA-01 collection change
 does not change the durable record shape, key or reversal-proof semantics.
 
 Entries in `rejectedReversalAuthorizations` retain their existing `reason` codes.
+Lane provenance refusals use the existing optional `detail` string to report
+the identity-read reason, `transient=true|false`, and the credential-free
+`ledgerTarget=canonical-postgres|runtime` routing mode. Original/rebased lane
+candidate failures carry the same diagnostics inside the existing bounded
+candidate detail. These diagnostics change no durable record shape; lane
+authority and its failed reads remain uncached.
 SAFETYSTOPOWNER-01 searches subsequent authoritative review snapshots when an
 intermediate snapshot does not contain the original reversal. The cited finding
 must still be authoritative at the original commit's parent, including when that

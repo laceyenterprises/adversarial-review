@@ -45,6 +45,15 @@ export const ENV_ALIASES = {
     }])),
 };
 
+// The cache indexes this schema metadata once. Freeze every mutable level so
+// the public table and its cached index cannot diverge after module loading.
+for (const row of Object.values(ENV_ALIASES)) {
+  for (const alias of row.aliases) Object.freeze(alias);
+  Object.freeze(row.aliases);
+  Object.freeze(row);
+}
+Object.freeze(ENV_ALIASES);
+
 const APP_ENV_SUFFIXES = { MODE: 'mode', SUBSCRIBES: 'subscribes', CONTRACT_VERSION: 'contract_version' };
 const APP_ENV_PREFIX = 'AGENT_OS_APPS_';
 

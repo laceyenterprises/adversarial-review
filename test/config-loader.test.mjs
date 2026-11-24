@@ -12,6 +12,7 @@ import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync, mkdirSync
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { __testEnvAliasHooks } from '../src/config-cascade.mjs';
 
 import {
   AgentOSConfig,
@@ -1822,11 +1823,15 @@ test('main_catchup.pull_retry_delays_seconds mirror defaults, accepts, and bound
   }
 });
 
-test('env-sourced int lists coerce each item to a number', () => {
+test('env-sourced int lists coerce each item to a number', (t) => {
   // No alias is registered for this key today; register one for the test so
   // the env path a future alias would take is exercised.
   const key = 'main_catchup.pull_retry_delays_seconds';
-  ENV_ALIASES[key] = { canonical: 'AGENT_OS_MAIN_CATCHUP_PULL_RETRY_DELAYS_SECONDS', aliases: [] };
+  const entries = Object.entries(ENV_ALIASES);
+  const aliasHook = t.mock.method(__testEnvAliasHooks, 'entries', () => [
+    ...entries,
+    [key, { canonical: 'AGENT_OS_MAIN_CATCHUP_PULL_RETRY_DELAYS_SECONDS', aliases: [] }],
+  ]);
   const tmp = freshTmp();
   try {
     const top = join(tmp, 'config.yaml');
@@ -1840,7 +1845,7 @@ test('env-sourced int lists coerce each item to a number', () => {
       /pull_retry_delays_seconds\[1\].*not an integer/,
     );
   } finally {
-    delete ENV_ALIASES[key];
+    aliasHook.mock.restore();
     rmSync(tmp, { recursive: true, force: true });
   }
 });

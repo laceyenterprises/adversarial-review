@@ -50,6 +50,9 @@ To refresh the standalone schema or the environment aliases, run
 Node-only keys, enum members or env names, and a key or alias this service needs
 is added to CFG in agent-os first. This replaces CFGREADERSCOPE-01's
 read-surface mirror ([SEV2 report](docs/postmortems/SEV2-every-new-config-key-forced-workers-to-provision-the-review-service-repo-2026-10-31.md)).
+The exported `ENV_ALIASES` table and the table returned by
+`AgentOSConfig.envAliasTable()` are read-only: the registry, rows, alias arrays
+and alias tuples are frozen so cached readers can safely index them once.
 
 AFA-07 mirrors disabled-by-default `cloud_access.aws.enabled`, the fixed
 `us-east-2` region and private project/budget/activation-receipt inputs in the

@@ -183,6 +183,9 @@ function _cacheKeyFor({ topPath, modulePaths, env, legacyGeminiReviewer = false 
   });
 }
 
+// Internal key inspection seam; deliberately not re-exported by config-loader.
+export const __testCacheHooks = { cacheKeyFor: _cacheKeyFor };
+
 function _touchCacheLru(cacheKey) {
   // Map iteration order is insertion order; re-setting moves the entry
   // to the most-recent position. Cheap O(1) LRU touch.

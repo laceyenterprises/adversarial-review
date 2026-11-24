@@ -179,6 +179,39 @@ for (const outcome of ['reused-pid', 'moved-head']) {
   });
 }
 
+for (const livenessLostDuringProbe of [false, true]) {
+  test(`unknown bounce liveness ${livenessLostDuringProbe ? 'after identity probing' : 'at admission'} holds only until the deadline`, async () => {
+    const { rootDir, db } = setup();
+    try {
+      insertReviewingRow(db);
+      await bounceWatcher(rootDir, db);
+      writeReviewerRunRecord(rootDir, {
+        sessionUuid: SESSION, runtime: 'cli-direct', state: 'failed', pgid: 7171,
+        spawnedAt: STARTED_AT, subjectContext: PROCESS_IDENTITY,
+      });
+      const row = reviewRow(db);
+      const admit = (now) => {
+        let liveness = livenessLostDuringProbe ? true : null; // EPERM is not proof of life or death.
+        return adoptBouncedReviewerBeforeAdmission({
+          db, rootDir, row, headSha: HEAD, now,
+          isAlive: () => liveness,
+          verifyIdentity: async () => {
+            liveness = null;
+            return { match: true };
+          },
+        });
+      };
+      assert.equal((await admit(BOUNCED_AT)).handled, true);
+      assert.deepEqual(await admit(new Date(Date.parse(STARTED_AT) + row.reviewer_timeout_ms)), { handled: false });
+      assert.deepEqual(reviewRow(db), row);
+      assert.equal(readReviewerRunRecord(rootDir, SESSION).state, 'failed');
+    } finally {
+      db.close();
+      rmSync(rootDir, { recursive: true, force: true });
+    }
+  });
+}
+
 test('malformed reviewer process output reports a command mismatch', async () => {
   const record = {
     sessionUuid: SESSION, runtime: 'cli-direct', state: 'failed', pgid: 7171,

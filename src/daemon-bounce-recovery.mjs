@@ -72,9 +72,9 @@ function readBouncedReviewerRecord(rootDir, row) {
   }
 }
 
-// Admission must hold a retained handle even if the PR moved heads. Adoption
-// restores the original claim only with agreement between GitHub head, row,
-// durable run, and the live group leader. No signal is sent here.
+// Admission holds incomplete custody evidence until its deadline. Adoption
+// requires agreement between GitHub head, row, durable run, and the live
+// group leader. No signal is sent here.
 export async function adoptBouncedReviewerBeforeAdmission({
   db, rootDir, row, headSha, now = new Date(),
   isAlive = defaultIsAlive, verifyIdentity = verifyDirectReviewerIdentity,
@@ -83,21 +83,26 @@ export async function adoptBouncedReviewerBeforeAdmission({
     || !row.reviewer_session_uuid || !Number.isSafeInteger(row.reviewer_pgid) || row.reviewer_pgid <= 0) {
     return { handled: false };
   }
-  if (isAlive(row.reviewer_pgid) === false) return { handled: false };
-  const holdUnverified = (reason) => {
+  const holdUnverified = (reason, alive) => {
     const { hold } = daemonBounceReviewerHold(row, {
-      now, isAlive, verifyIdentity: () => ({ match: false }),
+      now, isAlive: () => alive, verifyIdentity: () => ({ match: false }),
     });
     return hold ? { handled: true, reason } : { handled: false };
   };
-  if (!headSha || headSha !== row.reviewer_head_sha) return holdUnverified('retained-reviewer-head');
+  const alive = isAlive(row.reviewer_pgid);
+  if (alive === false) return { handled: false };
+  if (!headSha || headSha !== row.reviewer_head_sha) return holdUnverified('retained-reviewer-head', alive);
+  if (alive !== true) return holdUnverified('reviewer-liveness-unknown', alive);
   const record = readBouncedReviewerRecord(rootDir, row);
   if (!record || !(await verifyIdentity(record)).match) {
-    return holdUnverified('unverified-retained-reviewer');
+    return holdUnverified('unverified-retained-reviewer', alive);
   }
   const adopt = db.transaction(() => {
     const current = readBouncedReviewerRecord(rootDir, row);
-    if (!current || isAlive(row.reviewer_pgid) !== true) return false;
+    if (!current) return { handled: true, reason: 'adoption-fence-missed' };
+    const currentAlive = isAlive(row.reviewer_pgid);
+    if (currentAlive === false) return { handled: false };
+    if (currentAlive !== true) return holdUnverified('reviewer-liveness-unknown', currentAlive);
     const result = db.prepare(`UPDATE reviewed_prs SET review_status = 'reviewing'
       WHERE repo = ? AND pr_number = ? AND pr_state = 'open' AND review_status = ?
         AND reviewer_session_uuid = ? AND reviewer_head_sha = ? AND reviewer_pgid = ?
@@ -105,13 +110,13 @@ export async function adoptBouncedReviewerBeforeAdmission({
       row.repo, row.pr_number, row.review_status, row.reviewer_session_uuid, row.reviewer_head_sha,
       row.reviewer_pgid, row.reviewer_started_at, row.failure_message, row.failed_at,
     );
-    if (result.changes !== 1) return false;
+    if (result.changes !== 1) return { handled: true, reason: 'adoption-fence-missed' };
     updateReviewerRunRecord(rootDir, current, {
       state: 'heartbeating', adoptedAfterBounce: true, lastHeartbeatAt: now.toISOString(),
     });
-    return true;
+    return { handled: true, reason: 'adopted-live-reviewer' };
   });
-  return { handled: true, reason: adopt.immediate() ? 'adopted-live-reviewer' : 'adoption-fence-missed' };
+  return adopt.immediate();
 }
 
 // Timeout expiry is permission to recover, never proof of process exit.

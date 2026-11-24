@@ -3553,6 +3553,11 @@ stateDiagram-v2
     s0 --> s4: review-row.37 certain budget suppression restores latest delivered review identity under queued request CAS; live closure gates remain required
     s1 --> s4: review-row.38 certain budget suppression restores latest delivered review identity under queued request CAS; live closure gates remain required
     s3 --> s4: review-row.39 certain budget suppression restores latest delivered review identity under queued request CAS; live closure gates remain required
+    s0 --> s2: review-row.40 restore the verified live daemon-bounce claim for the exact head, session and group before admission
+    s5 --> s2: review-row.41 restore the verified live daemon-bounce claim for the exact head, session and group before admission
+    s2 --> s4: review-row.42 settle the exact GitHub review artifact after an adopted bounce claim drains
+    s2 --> s0: review-row.43 adopted bounce claim has confirmed exit and no posted review; return to bounded recovery without spending an attempt
+    s2 --> s5: review-row.44 adopted bounce claim has confirmed exit and no posted review while lease recovery is disabled; preserve counters
     s4 --> [*]
     s5 --> [*]
     s6 --> [*]
@@ -4130,8 +4135,10 @@ A watcher bounce can leave a live detached reviewer attached to a `pending`
 or `failed` claim. Before admitting another reviewer, the watcher restores the
 existing claim to `reviewing` when the current head, session, launch record,
 and live group leader agree. Subprocess start time and exact launch arguments
-fence the restoration and any later native cancellation. The original review
-can settle once from its GitHub artifact. Confirmed exit without a post returns
+fence the restoration and any later native cancellation. Unknown liveness,
+unverified launch identity, or a moved head holds admission only until the
+persisted reviewer deadline or one-hour fallback. The original review can
+settle once from its GitHub artifact. Confirmed exit without a post returns
 to bounded bounce recovery with the original counters. See the
 [review lifecycle](docs/STATE-MACHINE.md).
 

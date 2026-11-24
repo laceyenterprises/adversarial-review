@@ -1311,13 +1311,12 @@ new PR
   omits its lower time bound so a current-head review already posted by the
   orphan can still be recovered despite local/GitHub clock skew.
 - A `[daemon-bounce]` `failed` or `pending` claim with a retained group blocks
-  admission while that group still exists or its liveness is uncertain, including
-  when the PR head has moved. An unverified group or moved head holds only until
-  the persisted reviewer timeout or the one-hour fallback; expiry yields to
-  bounded bounce recovery without signaling that group. `cli-direct` records
-  the subprocess spawn time
-  after preflight. The watcher restores the original claim to `reviewing` only
-  when the current head, row, durable run, and group leader agree on identity.
+  admission until the persisted reviewer timeout or one-hour fallback if the
+  group's liveness or identity is unverified or the PR head moved. This deadline
+  also applies when liveness becomes unknown during the launch-identity probe.
+  Expiry yields to bounded bounce recovery. `cli-direct` records the subprocess
+  spawn time after preflight. The watcher restores the original claim to
+  `reviewing` only when the current head, row, durable run, and group leader agree.
   The group leader must match the recorded start time and carry the exact repo,
   PR number, head, and session in its reviewer arguments. Bounce cleanup rechecks
   that full launch identity before each signal. Adoption preserves

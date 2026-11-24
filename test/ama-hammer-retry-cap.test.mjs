@@ -3475,7 +3475,7 @@ test('STALECLOSER-03: a conflicting closer head cannot reopen an exhausted serie
     checksConclusion: 'SUCCESS', mergeability: 'CONFLICTING',
   });
   assert.equal(eligibility.eligible, false);
-  assert.deepEqual(eligibility.reasons, ['pr-not-mergeable']);
+  assert.deepEqual(eligibility.reasons, ['conflict-rebase']);
   const args = closerAuthoredStaleCapArgs(rootDir, eligibility);
   const deps = hammerDispatchDeps({ deliverAlertImpl: async () => {} });
   const result = await maybeDispatchAmaCloser({
@@ -4155,12 +4155,12 @@ for (const scenario of ['risk class changes', 'pending CI turns red', 'pending C
     }
     let merges = 0;
     const calls = [];
-    const run = dispatchedAt => maybeDispatchAmaCloser({
+    const run = (dispatchedAt, mergeableOverride) => maybeDispatchAmaCloser({
       ...hammerDispatchArgs(rootDir, {
         reviewState: { reviewCycleExhausted: scenario !== 'risk class changes', ...(scenario === 'risk class changes' ? { riskClass: 'critical' } : {}) },
         dispatchContext: { baseBranch: 'main', dispatchedAt, targetRemediationSha: ADVANCED_HEAD },
         prMetadata: { headSha: scenario === 'missing head' ? null : ADVANCED_HEAD,
-          mergeableState: scenario === 'pending CI becomes conflicting' ? 'CONFLICTING' : scenario === 'pending CI turns red with UNKNOWN' ? 'UNKNOWN' : 'MERGEABLE',
+          mergeableState: mergeableOverride ?? (scenario === 'pending CI becomes conflicting' ? 'CONFLICTING' : scenario === 'pending CI turns red with UNKNOWN' ? 'UNKNOWN' : 'MERGEABLE'),
           statusCheckRollup: [{ __typename: 'CheckRun', name: scenario === 'pending CI turns label-only' ? 'submodule-pointer-gate' : 'test', status: ['stale park pending CI', 'pending CI remains pending'].includes(scenario) ? 'IN_PROGRESS' : 'COMPLETED',
             conclusion: ['stale park pending CI', 'pending CI remains pending'].includes(scenario) ? null : ['pending CI turns red', 'pending CI turns red with UNKNOWN', 'pending CI turns label-only'].includes(scenario) ? 'FAILURE' : 'SUCCESS' }] },
       }),
@@ -4189,7 +4189,14 @@ for (const scenario of ['risk class changes', 'pending CI turns red', 'pending C
       assert.equal(result.reason, 'operator-label-required:allow-submodule-pointer-bump');
       assert.equal(result.dispatched, false);
       assert.equal(calls.some(args => args[0] === 'dispatch' && args[1] !== 'status'), false);
-    } else if (['pending CI turns red', 'pending CI turns red with UNKNOWN', 'pending CI becomes conflicting'].includes(scenario)) {
+    } else if (scenario === 'pending CI turns red with UNKNOWN') {
+      assert.equal(result.dispatched, false);
+      assert.equal(result.reason, 'pr-mergeability-unknown');
+      assert.equal(result.recoveryWait, true);
+      assert.equal(calls.some(args => args[0] === 'dispatch' && args[1] !== 'status'), false);
+      result = await run('2026-07-06T12:09:00Z', 'MERGEABLE');
+      assert.equal(result.dispatched, true, JSON.stringify(result));
+    } else if (['pending CI turns red', 'pending CI becomes conflicting'].includes(scenario)) {
       assert.equal(result.dispatched, true, JSON.stringify(result));
       assert.ok(calls.some(args => args[0] === 'dispatch' && args[1] !== 'status'));
     } else if (scenario === 'stale park active repair') {

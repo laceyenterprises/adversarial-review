@@ -8201,8 +8201,9 @@ in `githubGate`; green CI uses `remoteCiStatus: mergeability-unknown`.
 Certified HAM heads resume through the existing bounded deferral queue,
 including its backoff, expiry and lifetime refund bound. Live UNKNOWN alone or
 with pending CI remains a wait in that queue, without a merge or immediate
-operator escalation. Red CI or conflicts still route to bounded repair,
-including red CI alongside UNKNOWN; independent eligibility holds still apply.
+operator escalation. Red CI or conflicts still select bounded repair,
+including red CI alongside UNKNOWN; a new closer dispatch waits for mergeability
+to settle. Independent eligibility holds still apply.
 Fresh exact-head
 eligibility and merge gates remain mandatory before daemon merge or a repair
 dispatch.
@@ -8535,12 +8536,16 @@ close controller yields the lease. It uses the local conflict replay at the
 current base and validates the detached result before its exact-head push.
 It rebuilds the audit and predicate and waits for required checks on the
 published head before trying merge again. At most two final-gate replays are
-allowed per run. A changed patch is published for independent review.
+allowed per run. A changed patch or unavailable local equivalence proof requires
+independent review of the published head.
 Conflict markers or an exhausted replay budget record `needs-rebase-repair`
 for the current head. The closure sweep can reserve one continuation for that
 head. Closer and successor dispatch can repair a confirmed conflict.
-Draft and closed PRs are refused, and UNKNOWN mergeability waits for a fresh
-snapshot. Daemon and executor merge permission still requires `MERGEABLE`.
+Draft and closed PRs are refused. UNKNOWN, null, omitted or empty mergeability
+waits for a fresh snapshot before queue preparation or closer dispatch.
+Existing closer ownership and certified deferral queues are still reconciled,
+including their backoff, refunds and expiry, while mergeability is unknown.
+Daemon and executor merge permission still requires `MERGEABLE`.
 PR node-ID resolution shares the update-branch transient retry cap and backoff;
 permanent lookup failures stop immediately. Real read, publication, head-race and
 authority failures continue to fail closed. A non-cooperating base writer during

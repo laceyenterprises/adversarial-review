@@ -236,7 +236,8 @@ test('HAMNOREREVIEW-01 prompt keeps hammer responsibility through publication an
   assert.match(HAMMER_TEMPLATE, /tree IDs/);
   assert.match(HAMMER_TEMPLATE, /HAM_BASE_HEAD=<<REVIEWED_SHA>>/);
   assert.match(HAMMER_TEMPLATE, /Failed tests require repair or release for another hammer pass/);
-  assert.doesNotMatch(HAMMER_TEMPLATE, /hammer-review-handoff|exact-head-review-required|daemon merges after a clean review|failed proofs request/);
+  assert.doesNotMatch(HAMMER_TEMPLATE, /hammer-review-handoff|daemon merges after a clean review|failed proofs request/);
+  assert.match(HAMMER_TEMPLATE, /`exact-head-review-required` means an independent review owns the new head/);
   assert.doesNotMatch(HAMMER_TEMPLATE, /90 "\$HAM_NODE_BIN"[^\n]*hammer-head-context\.mjs/,
     'the prompt must reuse the range published under lease');
 });

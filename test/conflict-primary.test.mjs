@@ -190,6 +190,28 @@ test('HAMEMPTYPRIMARY-01: Git errors inside the proof reach the publication diag
   });
 });
 
+test('CLOSERCONFLICT-01: replay equivalence requires review when HEAD cannot be read', t => {
+  const dir = mkdtempSync(join(tmpdir(), 'replay-equivalence-cli-'));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const cli = fileURLToPath(new URL('../bin/hammer-conflict-primary.mjs', import.meta.url));
+  const output = execFileSync(process.execPath, [cli, '--replay-equivalence', 'source', 'base'], {
+    cwd: dir, encoding: 'utf8', timeout: 10000, stdio: ['ignore', 'pipe', 'pipe'],
+    env: { ...process.env, GIT_DIR: join(dir, 'missing.git') },
+  });
+  assert.equal(output, 'review-required\n');
+});
+
+test('CLOSERCONFLICT-01: replay equivalence requires review when proof refs cannot be read', t => {
+  const f = fixture(t);
+  const cli = fileURLToPath(new URL('../bin/hammer-conflict-primary.mjs', import.meta.url));
+  const output = execFileSync(process.execPath, [cli, '--replay-equivalence', '1'.repeat(40), f.base], {
+    cwd: f.dir, encoding: 'utf8', timeout: 10000, stdio: ['ignore', 'pipe', 'pipe'],
+  });
+  assert.equal(output, 'review-required\n');
+  assert.equal(f.git(['rev-parse', 'HEAD']).trim(), f.head);
+  assert.equal(f.git(['status', '--porcelain']), '');
+});
+
 test('HAMEMPTYPRIMARY-01: conflict procedure proves preservation before publication', () => {
   // HAMCONFLICTSYNC-01: the procedure is the shipped conflict repair, and the
   // prompt sends the closer back to the close command (publication) after it.

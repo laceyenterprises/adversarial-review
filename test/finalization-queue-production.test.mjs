@@ -1,6 +1,7 @@
 import { installDispatchFileProducerFixture } from './helpers/dispatch-files-fixture.mjs';
 installDispatchFileProducerFixture();
 import { createHash } from 'node:crypto';
+import { execFileSync } from 'node:child_process';
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { mkdirSync, writeFileSync } from 'node:fs';
@@ -91,7 +92,22 @@ test('the production handoff receiver checks the route fence and replays a commi
   assert.deepEqual(resolveQueueHandoffStore(f.store).read(request).ack, ack);
   assert.equal(observations, 1);
   assert.equal(f.store.entries(lane).length, 1);
-  assert.equal((await prepareQueueCloserDispatch({ rootDir: f.root, cfg, lane, prNumber: 102, head: f.oldHead })).queued, true);
+  const dispatch = await prepareQueueCloserDispatch({ rootDir: f.root, cfg, lane, prNumber: 102, head: f.oldHead });
+  assert.equal(dispatch.queued, true);
+  assert.deepEqual(dispatch.acknowledgement, f.store.readEntry(ack.entryId));
+});
+
+test('the installed handoff receiver accepts larger inventory files within its byte limit', t => {
+  const f = gitFixture(t, { noop: true });
+  const path = join(f.root, 'handoff.json');
+  const receive = () => JSON.parse(execFileSync(process.execPath, ['bin/finalization-queue-handoff.mjs', path], {
+    encoding: 'utf8',
+    env: { ...process.env, HQ_LAUNCH_REQUEST_ID: 'unmatched-fixture' },
+  }));
+  writeFileSync(path, JSON.stringify({ inventory: 'a'.repeat(32 * 1024) }));
+  assert.equal(receive().reason, 'queue-hammer-launch-mismatch');
+  writeFileSync(path, JSON.stringify({ inventory: 'a'.repeat(1024 * 1024) }));
+  assert.equal(receive().reason, 'queue-handoff-request-unreadable');
 });
 
 test('a drain committed during admission prevents the durable acknowledgement', async t => {
@@ -119,7 +135,7 @@ test('installed closer command uses absolute argv and a durable clean receipt su
   const production = createProductionQueue({ rootDir: f.root, readConfig: () => cfg, now: f.now, observe: receiptFixture });
   const result = await production.admitClean({ route: preflight.route, prNumber: 102, head: f.oldHead });
   assert.equal(result.phase, 'acknowledged');
-  assert.equal((await prepareQueueCloserDispatch(target)).acknowledgement.entryId, result.entryId);
+  assert.deepEqual((await prepareQueueCloserDispatch(target)).acknowledgement, f.store.readEntry(result.entryId));
 });
 
 function fakeWorld(f, setup, { moved = false, checksGreen = () => true } = {}) {
@@ -189,6 +205,26 @@ test('a moved head returns its receipt for a fresh review without calling the wr
   assert.deepEqual(world.returns.map(entry => [entry.entryId, entry.reason]), [[ack.entryId, 'external-head-change']]);
 });
 
+test('the watcher relinquishes an active fence after an ambiguous merge response', async t => {
+  const f = gitFixture(t, { noop: true });
+  const generation = await transfer(f);
+  const fixture = receiptFixture({ prNumber: 102, head: f.oldHead });
+  const production = createProductionQueue({ rootDir: f.root, readConfig: () => cfg, now: f.now, observe: () => fixture });
+  await production.admitClean({ route: { lane, routeGeneration: generation }, prNumber: 102, head: f.oldHead });
+  const world = fakeWorld(f, fixture);
+  const adapters = world.compose();
+  let attempts = 0;
+  adapters.mergeSurface.merge = () => { attempts++; throw new Error('lost reply'); };
+  const q = createQueueConsumer({ rootDir: f.root, readConfig: () => cfg, now: f.now, compose: () => adapters,
+    logger: { warn: () => {} } });
+  await q.tick();
+  assert.equal(f.store.readOwner(lane).owner_state, 'parked');
+  assert.equal(f.store.operations(lane).length, 1);
+  await q.tick();
+  assert.equal(attempts, 1);
+  assert.equal(f.store.operations(lane).length, 1);
+});
+
 for (const phase of ['parked-hold', 'parked-permission']) {
   test(`the watcher throttles ${phase} probes across restarts and settles expiry once`, async t => {
     const f = gitFixture(t, { noop: true });
@@ -255,6 +291,21 @@ test('a required check supplied by a foreign App cannot satisfy branch rules', a
   assert.equal(classifyQueueChecks(snapshot).kind, 'green');
 });
 
+test('ruleset-only branches tolerate an absent classic protection endpoint', async () => {
+  const missing = Object.assign(new Error('unavailable'), { stderr: 'gh: HTTP 404' });
+  let protection;
+  const read = async path => {
+    if (path.includes('/rules/')) return [{ type: 'required_status_checks', parameters: {
+      required_status_checks: [{ context: 'unit', integration_id: 7 }],
+    } }];
+    if (path.endsWith('/protection')) throw missing;
+    return { name: lane.base, protected: true, protection, commit: { sha: reviewHead } };
+  };
+  assert.deepEqual((await readQueueBranchPolicy(read, lane)).checkApps, [{ context: 'unit', appId: 7 }]);
+  protection = { enabled: true };
+  await assert.rejects(readQueueBranchPolicy(read, lane), error => error === missing);
+});
+
 test('same-name checks satisfy distinct App pins with each App’s latest run', async () => {
   const policy = await readQueueBranchPolicy(async path => {
     if (path.includes('/rules/')) return [{ type: 'required_status_checks', parameters: { required_status_checks: [{ context: 'unit', integration_id: 7 }] } }];
@@ -281,6 +332,8 @@ test('entitled credentials retain a valid token on transient refresh failure and
       return { token: 'installation-fixture', expiresAtMs: 80_000 };
     } });
   assert.equal((await github.credential(lane.repository, 5_000)).token, 'installation-fixture');
+  assert.equal(github.childEnv('installation-fixture').GH_TOKEN, 'installation-fixture');
+  assert.equal(github.childEnv(null).GH_TOKEN, undefined);
   now = 35_000;
   assert.equal((await github.credential(lane.repository, 5_000)).token, 'installation-fixture');
   now = 79_000;

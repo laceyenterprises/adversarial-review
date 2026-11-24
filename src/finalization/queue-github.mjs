@@ -37,7 +37,10 @@ export function createQueueGitHub({ env = process.env, mint = fetchReviewerToken
     held.set(owner, result);
     return result;
   }
-  const childEnv = token => ({ ...buildAllowlistedGhEnv({ ...env, GITHUB_TOKEN: token }), GH_HOST: 'github.com', GH_PROMPT_DISABLED: '1' });
+  const childEnv = token => ({
+    ...buildAllowlistedGhEnv({ ...env, GITHUB_TOKEN: token, GH_TOKEN: token }),
+    GH_HOST: 'github.com', GH_PROMPT_DISABLED: '1',
+  });
   async function get(repo, args, { timeoutMs, signal }) {
     const deadline = performance.now() + timeoutMs;
     const remaining = () => Math.floor(deadline - performance.now());

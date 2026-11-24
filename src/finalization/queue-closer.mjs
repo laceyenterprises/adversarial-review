@@ -25,9 +25,9 @@ export function readCompletedQueueHandoff(store, { lane, prNumber, head }, { inc
     // A returned entry owes fresh remediation/admission, including same-head
     // returns. Never let an older acknowledgement hide that obligation.
     if (entry.phase === 'returned-to-closer') return null;
-    if (includeClean && resolveCleanReviewStore(store).read(entry.entryId)) return entry;
+    if (includeClean && resolveCleanReviewStore(store).read(entry.entryId)) return { entry, ack: null };
     const ack = receipts.read({ lane, prNumber, head: entry.head, admissionGeneration: entry.admissionGeneration })?.ack;
-    if (ack) { admissions.receipt(entry); return ack; }
+    if (ack) { admissions.receipt(entry); return { entry, ack }; }
   }
   return null;
 }
@@ -61,9 +61,9 @@ export async function prepareQueueCloserDispatch({ rootDir, cfg, lane, prNumber,
     legacy: () => ({ executor: 'legacy' }), queue: route => {
       const store = openFinalizationQueueStore({ rootDir });
       try {
-        const ack = readCompletedQueueHandoff(store, { lane: route.lane, prNumber, head }, { includeClean: true });
-        if (ack) return { dispatched: false, skipMergeAgent: true, queued: true,
-          reason: 'queue-handoff-acknowledged', acknowledgement: ack };
+        const completed = readCompletedQueueHandoff(store, { lane: route.lane, prNumber, head }, { includeClean: true });
+        if (completed) return { dispatched: false, skipMergeAgent: true, queued: true,
+          reason: 'queue-handoff-acknowledged', acknowledgement: completed.entry };
         // MRQ-21: the hammer's close controller delivers its attested-head
         // handoff through this installed command, which invokes the
         // composition's handoff service. No command, no queue-lane closer.
@@ -90,7 +90,7 @@ export function confirmQueueAdmission({ rootDir, lane, prNumber, head, acknowled
     const receipt = resolveQueueAdmissionAdapters(store).receipt(entry);
     if (!receipt) throw new Error('queue admission receipt unavailable');
     return { ok: true, taken: true, dispatched: false, skipMergeAgent: true, queued: true,
-      reason: 'queue-handoff-acknowledged', acknowledgement: ack };
+      reason: 'queue-handoff-acknowledged', acknowledgement: entry };
   } finally { store.close(); }
 }
 

@@ -85,13 +85,13 @@ export function createQueueConsumer({ rootDir, compose, readConfig = loadEffecti
         const current = store.readOwner(lane);
         return current?.owner_state === 'active' && current.owner_id === ownerId
           && current.generation === fence.generation && current.route_generation === fence.routeGeneration
-          && Date.parse(current.expires_at) > Date.parse(now()) && !store.operations(lane).length;
+          && Date.parse(current.expires_at) > Date.parse(now());
       };
       try {
         // Read FIFO after claiming: another process may have advanced the lane.
         let entry = select();
         for (let step = 0; step < maxSteps && entry && stillOwned(); step++) {
-          if (policy.autonomousExecutionDisabled || store.executionHold()) return;
+          if (policy.autonomousExecutionDisabled || store.executionHold() || store.operations(lane).length) return;
           const args = { fence, entryId: entry.entryId };
           let result;
           switch (entry.phase) {
@@ -117,7 +117,7 @@ export function createQueueConsumer({ rootDir, compose, readConfig = loadEffecti
           entry = result;
         }
       } finally {
-        if (stillOwned()) await owner.release({ fence });
+        if (stillOwned()) await owner.release({ fence, parkPending: true });
       }
     }
     const order = admission.order(lane);

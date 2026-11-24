@@ -144,7 +144,7 @@ export function confirmHammerQueueHandoff({ rootDir, request, ack }) {
 function existingAdmission(rootDir, request) {
   const store = openFinalizationQueueStore({ rootDir });
   try {
-    const ack = readCompletedQueueHandoff(store, request);
+    const ack = readCompletedQueueHandoff(store, request)?.ack;
     if (!ack) return null;
     const receipt = resolveQueueHandoffStore(store).read({ lane: request.lane, prNumber: request.prNumber,
       head: ack.head, admissionGeneration: ack.admissionGeneration });

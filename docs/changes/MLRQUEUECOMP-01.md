@@ -32,6 +32,14 @@ token. The watcher passes the validated repository and base to the lane
 resolver. For same-name checks with multiple required App sources, the queue
 requires each source's latest result.
 
+Final Hammer remediation also accepts ruleset-only protection when GitHub
+omits classic protection and returns 404 for that endpoint. The watcher parks
+its fence immediately after an ambiguous mutation, preserving the intent for
+reconciliation before takeover. Completed admissions expose the same queue
+entry shape for both intake paths, and the handoff receiver accepts files up to
+1 MiB. Queue subprocesses explicitly bind the entitled token, and the watcher
+logs bounded, redacted tick errors.
+
 The Node 26 run on the original remediation head reached the suite deadline
 with 115 files still queued and no failed assertions in the reported TAP.
 Queue tests now copy fixture seeds without unused Git templates or receiver

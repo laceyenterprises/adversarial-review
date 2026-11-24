@@ -4385,7 +4385,9 @@ and replay preserves candidate, phase and original infrastructure deadline.
 Owner states are `idle`, `active`, `parked`. A per-lane issuance lock spans
 intent, remote operation and drain; an expired lease cannot authorize takeover
 while a request is ambiguous. Missing stop/drain and authoritative reconciliation
-proof parks the lane. Subject leases continue to protect only individual subjects.
+proof parks the lane. A watcher tick that ends with an unresolved operation
+parks its active fence immediately and retains the prior owner and intent for
+reconciliation. Subject leases continue to protect only individual subjects.
 
 Focused offline fixtures in `test/finalization-queue-owner.test.mjs` exercise
 simultaneous claims, stale generations/routes, paused issuance, ambiguous push

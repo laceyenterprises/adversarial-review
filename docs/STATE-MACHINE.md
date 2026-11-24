@@ -2580,6 +2580,11 @@ if sooner. Expiry without a checks recovery schedule records
 Checks/merge infrastructure parks with a stored probe schedule continue on
 that schedule.
 
+If a queue tick ends with an unresolved push or merge intent, the watcher parks
+its active owner fence so the next claimant can start reconciliation before
+expiry. Takeover still requires proven drain and authoritative outcomes for
+every unresolved operation.
+
 HAMCONFLICTOWNER-01: a closer terminal audit with
 `reason: conflict-primary-unproven` at the live head transfers conflict work
 to the existing follow-up remediation queue before closer retry/cap selection.

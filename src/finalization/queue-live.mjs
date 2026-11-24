@@ -34,10 +34,9 @@ export async function readQueueBranchPolicy(read, lane) {
   if (branch.protected) {
     try { classic = await read(`${path}/protection`); }
     catch (error) {
-      // The branch endpoint explicitly reports whether classic protection has
-      // required checks. Ruleset-only branches may have no classic protection.
+      // Ruleset-only branches may omit the classic protection field.
       if (!/HTTP 404\b/.test(String(error.stderr || '')) || !rules.length
-        || branch.protection?.enabled !== false) throw error;
+        || branch.protection?.enabled === true) throw error;
     }
   }
   if (classic && typeof classic !== 'object') throw new Error('queue-branch-protection-unavailable');

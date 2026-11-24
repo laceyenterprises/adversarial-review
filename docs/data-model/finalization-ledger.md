@@ -196,9 +196,13 @@ append. A paused issuer keeps the lock: takeover returns
 `owner-operation-in-flight` without transferring ownership. A process paused
 outside issuance may lose its generation; on resuming it fails the DB fence
 before invocation. Progress, renew and release check owner id, generation,
-route generation, active state and unexpired owner time. Release never deletes
-the generation counter and refuses unresolved intents. Operation ids deduplicate
-before invocation, including retries in the same timestamp tick.
+route generation, active state and unexpired owner time. Release preserves the
+generation counter. When the watcher yields with an unresolved intent, it parks
+the owner and retains the prior identity and intent for reconciliation without
+waiting for owner expiry. A successor still needs the issuance lock and proven
+drain and outcomes before taking ownership. Other release callers must resolve
+all intents first. Operation ids deduplicate before invocation, including
+retries in the same timestamp tick.
 
 An adapter invocation must include all associated requests and subprocesses in
 its lifetime and must not resolve before they drain. An exception or unproven

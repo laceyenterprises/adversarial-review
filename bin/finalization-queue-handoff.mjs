@@ -6,7 +6,7 @@ import { createQueueGitHub } from '../src/finalization/queue-github.mjs';
 import { createProductionQueue } from '../src/finalization/queue-production.mjs';
 
 async function readRequest(path) {
-  const max = 16_384;
+  const max = 1024 * 1024;
   const file = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
   try {
     const stat = await file.stat();

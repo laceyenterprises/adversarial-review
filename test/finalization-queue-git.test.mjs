@@ -81,6 +81,26 @@ test('network Git has no ambient credential fallback and consumes an injected ru
   assert.equal(calls.length, 1); assert.equal(calls[0].options.timeoutMs, 60_000);
   assert.equal(calls[0].options.repository, f.entry.lane.repository);
   assert.equal(calls[0].args[0], 'fetch');
+  assert.ok(calls[0].args.includes('--no-auto-maintenance'));
+});
+
+test('a no-op checkout proves its source once and remains independently verifiable', async t => {
+  const f = gitFixture(t, { noop: true });
+  const patches = [];
+  const adapter = resolveQueueGitAdapter({ rootDir: f.root, now: f.now, load: idle, resolveRemote: () => f.remote,
+    run(args, options) {
+      if (args[0] === 'diff') patches.push(args);
+      return runQueueGit(args, options);
+    } });
+  const deadline = handoffTime(1800);
+  const prepared = await adapter.prepare({ entry: f.entry, oldHead: f.oldHead, exactBase: f.base,
+    headRepository: f.entry.lane.repository, headRef: 'topic', deadline });
+  assert.equal(prepared.candidate, f.oldHead);
+  assert.equal(prepared.proof.noop, true);
+  assert.equal(patches.length, 1);
+  const entry = { ...f.entry, ...prepared, rebase: { workspace: prepared.workspace } };
+  assert.deepEqual(await adapter.verify({ entry, deadline }), prepared.proof);
+  assert.equal(patches.length, 2);
 });
 
 for (const failure of ['conflict', 'proof', 'fetch']) test(`failed preparation reclaims workspace: ${failure}`, async t => {

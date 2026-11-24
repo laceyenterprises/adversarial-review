@@ -250,6 +250,14 @@ export async function resolveDaemonWorkerIdentityForPr({
   });
 }
 
+export function deployAttestationVerifierEnv(env) {
+  // Only pass the key-file reference to the existing HQ attestation command.
+  if (env.AGENT_OS_HEAD_ATTESTATION_HMAC_KEY_V1 || env.AGENT_OS_HEAD_ATTESTATION_HMAC_KEY_FILE
+    || !isAbsolute(env.AGENT_OS_ROOT || '')) return env;
+  return { ...env, AGENT_OS_HEAD_ATTESTATION_HMAC_KEY_FILE: join(env.AGENT_OS_ROOT,
+    '.secrets', 'local', 'head-attestation-hmac-key-v1') };
+}
+
 export async function readHeadAttestationChainForPr({
   repo,
   prNumber,
@@ -269,11 +277,7 @@ export async function readHeadAttestationChainForPr({
   // The follow-up service supplies the deploy root. Give only the canonical
   // verifier the same key-file reference as the HCP signer. HQ owns reading
   // and validating the file, including its permissions.
-  const verifyEnv = useDeployVerifier && !env.AGENT_OS_HEAD_ATTESTATION_HMAC_KEY_V1
-    && !env.AGENT_OS_HEAD_ATTESTATION_HMAC_KEY_FILE && isAbsolute(env.AGENT_OS_ROOT || '')
-    ? { ...env, AGENT_OS_HEAD_ATTESTATION_HMAC_KEY_FILE: join(env.AGENT_OS_ROOT,
-      '.secrets', 'local', 'head-attestation-hmac-key-v1') }
-    : env;
+  const verifyEnv = useDeployVerifier ? deployAttestationVerifierEnv(env) : env;
   const delays = Array.isArray(retryDelaysMs) ? retryDelaysMs : [];
   let stdout = '';
   for (let attempt = 0; ; attempt += 1) {

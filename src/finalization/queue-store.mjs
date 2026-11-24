@@ -1,4 +1,5 @@
 import Database from 'better-sqlite3';
+import { withRepositoryStateRead } from '../repository-state-lock.mjs';
 import { isDeepStrictEqual } from 'node:util';
 import { existsSync, mkdirSync, readFileSync, realpathSync, statSync } from 'node:fs';
 import { join, resolve } from 'node:path';
@@ -57,7 +58,7 @@ export function openFinalizationQueueStore({ rootDir, db, busyTimeoutMs = 5_000 
   }
   ensureFinalizationQueueSchema(database);
   const gsrHoldStmt = database.prepare('SELECT * FROM finalization_queue_gsr WHERE singleton=1');
-  const tx = fn => database.transaction(fn).immediate();
+  const tx = fn => withRepositoryStateRead(rootDir, () => database.transaction(fn).immediate());
   const laneArgs = lane => Object.values(resolveLaneKey(lane));
   const readOwner = lane => database.prepare('SELECT * FROM finalization_queue_lane WHERE repository=? AND base=?').get(...laneArgs(lane)) ?? null;
   const ensureLane = lane => database.prepare('INSERT INTO finalization_queue_lane(repository,base) VALUES (?,?) ON CONFLICT DO NOTHING').run(...laneArgs(lane));

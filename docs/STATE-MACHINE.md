@@ -2573,6 +2573,23 @@ admission is the infrastructure deferral `queue-handoff-unadmitted` (same-head
 re-drive); a merged or closed PR stops with `already-merged` / `pr-closed`.
 Legacy lanes render no queue inputs and run the two paths unchanged.
 
+The queue watcher schedules admission probes from the last persisted progress
+time, at most once a minute per parked entry, or at original patience expiry
+if sooner. When admission patience expires, the watcher records
+`returned-to-closer` / `admission-deadline-expired` and queues a durable page
+without a remote read. Same-head readmission needs fresh evidence and a new
+generation. A Hammer readmission also needs a fresh launch. Checks and merge
+infrastructure parks with a stored probe schedule continue on that schedule.
+
+Closer preflight uses the latest generation for each admission head. A returned
+generation cannot mask a newer acknowledged admission for that same head.
+
+If a queue tick ends with an unresolved push or merge intent, the watcher parks
+its active owner fence so the next claimant can start reconciliation before
+expiry. The same running watcher can retry authoritative readback for its
+own drained callback. It accepts proven publication or a terminal PR outcome.
+An unresolved operation retains its fence and a durable escalation page.
+
 HAMCONFLICTOWNER-01: a closer terminal audit with
 `reason: conflict-primary-unproven` at the live head transfers conflict work
 to the existing follow-up remediation queue before closer retry/cap selection.
@@ -3903,7 +3920,7 @@ After deployment, SRE verifies no open PR has a closure-recovery deadline more
 than one wake past due. This is read-only post-merge acceptance (SEVDOCS-333);
 worker fixtures never mutate production state.
 
-## V2 queue candidate checks (MGQ-05, unwired)
+## V2 queue candidate checks (MGQ-05)
 
 The candidate waiter advances waiting-checks → finalizing only from a complete,
 versioned required set and current runs/statuses at the exact published head.
@@ -3918,7 +3935,7 @@ Readmission is ordering, not merge authority. See the
 [durable contract](data-model/finalization-ledger.md#candidate-checks-and-infrastructure-parking-mgq-05)
 and [read-only deployed probe](finalization-executor-promotion-runbook.md#checks-and-parking-observation-mgq-05-no-activation).
 
-## V2 queue final merge (MGQ-06, unwired)
+## V2 queue final merge (MGQ-06)
 
 `finalizing` advances to `merged` only after final live rereads, a persisted
 eligible decision, an owner-journaled intent and authoritative reconciliation:
@@ -3957,7 +3974,11 @@ then record the successor. Unknown drain/outcome holds both routes. Rollback
 additionally acknowledges stable-key returns for unfinished/parked entries
 before handing ownership back. A stale cached selector or owner fence refuses
 mutation; other lanes remain independent. Queue admission requires composed
-adapters, without a fallback merge writer. Read-only status/receipt/probe reports
+adapters, without a fallback merge writer. The watcher advances the durable FIFO
+for a matching queue selector and route fence. Clean admission uses the exact
+reviewed head. Hammer admission binds the audit to the recorded launch and
+head before acknowledging. Unknown remote outcomes stay under the existing
+reconciliation boundary. Read-only status/receipt/probe reports
 pending transfers, original entry phases and actual runtime evidence; it never
 advances this state. The closure runbook owns the deployment procedure.
 

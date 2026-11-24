@@ -275,6 +275,7 @@ async function fetchReviewerTokenFromBrokerUrl({
   timeoutMs,
   force = false,
   rejectPatFallback = false,
+  requireInstallation = false,
   owner = null,
 }) {
   // Bound the WHOLE network exchange so a wedged broker can't hang the watcher
@@ -309,6 +310,11 @@ async function fetchReviewerTokenFromBrokerUrl({
     // cannot authorize replacing a reviewer's own installation-token identity.
     if ((owner || rejectPatFallback) && body?.metadata?.credential_source === 'github_pat_fallback') {
       throw new BrokerTokenFetchError('reviewer broker returned a PAT fallback', { transient: false, check: 'PAT fallback' });
+    }
+    if (requireInstallation && (body?.metadata?.credential_source !== 'github_app_installation'
+      || !/^\d+$/.test(String(body?.metadata?.app_id ?? ''))
+      || !/^\d+$/.test(String(body?.metadata?.installation_id ?? '')))) {
+      throw new BrokerTokenFetchError('broker did not verify an installation token', { transient: false, check: 'installation identity missing' });
     }
     // Same metadata verification as scripts/lib/reviewer-broker.sh: never accept
     // a token minted for the wrong App/installation just because the call
@@ -361,7 +367,7 @@ async function fetchReviewerTokenFromBrokerUrl({
 // Resolve one role's token from the broker. Returns { token, expiresAtMs }
 // on success (expiresAtMs is null when the broker omits a parseable
 // expires_at), or throws on any failure (caller keeps the old token on throw).
-export async function fetchReviewerTokenFromBroker({ role, env, fetchImpl = globalThis.fetch, readFileImpl = readFileSync, timeoutMs = loadAwareTimeoutMs(REVIEWER_TOKEN_FETCH_TIMEOUT_MS), force = false, owner = null }) {
+export async function fetchReviewerTokenFromBroker({ role, env, fetchImpl = globalThis.fetch, readFileImpl = readFileSync, timeoutMs = loadAwareTimeoutMs(REVIEWER_TOKEN_FETCH_TIMEOUT_MS), force = false, owner = null, requireInstallation = false }) {
   owner = owner ? String(owner).toLowerCase() : null;
   const config = brokerConfigForRole({ role, env, flag: '' });
   const { brokerUrls, provider, expectedAppId, secretFile } = config;
@@ -404,6 +410,7 @@ export async function fetchReviewerTokenFromBroker({ role, env, fetchImpl = glob
         force,
         owner,
         rejectPatFallback: Boolean(brokerRoleConfig(role)),
+        requireInstallation,
       });
       recordGithubToken(result.token, { role, owner });
       return result;

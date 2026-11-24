@@ -876,6 +876,9 @@ async function maybeDispatchAmaClosureForInner({
     try { amaDispatchCloser.settleRefusedHammerWake({ ...hammerWakeSink.value, result }); }
     catch (error) { options.logger?.warn?.(`[watcher] refused hammer wake reconciliation failed: ${error.message}`); }
   }
+  // The durable queue acknowledgement ends legacy closure ownership. Let the
+  // queue report its own checks/deadline instead of observing another v1 wait.
+  if (result?.queued === true) return { ...result, closureOwner: { owner: 'queue-v2', reason: result.reason } };
   const hardStop = orphanRecovery?.fromDiscovery && !result?.dispatched && !result?.boundedWait
     && !result?.needsOperator
     && [result?.reason, ...(Array.isArray(result?.reasons) ? result.reasons : [])].find(reason =>
@@ -2760,6 +2763,7 @@ async function dispatchAmaClosureFor({
     shared = observeDaemonResult(shared, daemonCleanMerge, passSnapshot);
   }
   if (closureOwnerSink) closureOwnerSink.shared = shared;
+  if (daemonCleanMerge?.queued === true) return withAmaDispatchMetadata(daemonCleanMerge, { amaEnabled: true });
   if (['stacked-base-merged', 'stacked-base-read-failed'].includes(daemonCleanMerge?.reason)) {
     return withAmaDispatchMetadata({ ...daemonCleanMerge, dispatched: false, skipMergeAgent: true }, { amaEnabled: true });
   }

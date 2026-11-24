@@ -25,7 +25,8 @@ export function queueDeliveryPayloads(receipt) {
 export function createQueueMergeActionDelivery({ hqRoot, write = writeMergeActionReceipt }) {
   return { name: 'existing-merge-action-receipt', read({ payload }) {
     const path = write({ hqRoot, ...payload });
-    return { id: payload.deliveryKey, sourceRef: `merge-action:${payload.deliveryKey}`, delivered: Boolean(path) };
+    if (!path) throw new Error('merge-action-delivery-unavailable');
+    return { id: payload.deliveryKey, sourceRef: `merge-action:${payload.deliveryKey}`, delivered: true };
   } };
 }
 

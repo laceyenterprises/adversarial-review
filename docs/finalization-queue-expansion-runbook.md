@@ -19,46 +19,34 @@ check, label, blocking probe or promotion gate is introduced.
 ## Runtime composition and writer inventory
 
 Before deployment or a watcher bounce, inventory both configured and durable
-`queue-v2` lanes, including existing canaries. Production does not install
-`dispatchContext.queueCloser.hammerHandoffCommand` automatically. Without it, **all**
-closer remediation on an already migrated lane refuses with
-`queue-closer-composition-unavailable`, including ordinary findings repair that
-previously used a legacy prompt. Install the reviewed composition before the
-bounce, or complete the existing operator-directed rollback procedure first;
-do not remove a selector to bypass durable ownership. This source change does
-not authorize a bounce or a lane change.
+`queue-v2` lanes, including existing canaries. The deployed watcher supplies the
+handoff command for a durably owned queue lane. A deployment missing the receiver
+refuses closer remediation with `queue-closer-composition-unavailable`. Use the
+operator-directed rollback procedure if the installed composition is unavailable.
 
 Before changing the selector, verify the installed runtime composition:
 
 | Invocation | Queue lane behavior | Legacy/rollback behavior |
 |---|---|---|
 | `maybeDispatchAmaCloser` | Resolve durable route before legacy recovery. A complete handoff observed before the final dispatch recheck suppresses another closer, including after restart. Recheck under the existing per-PR dispatch single-flight after asynchronous reads; a later commit can still race launch. New remediation runs the ordinary hammer (MRQ-21); its close controller stops after publish and the exact-head audit and hands that head off, never reaching the CI wait, predicate or merge. | Read-only route preflight avoids lane locks, schema convergence and writer intents on legacy lanes. Existing prompt, dispatch/closer leases, incident repair and merge procedures remain. |
-| Closer completion | `bin/hammer-queue-handoff.mjs` runs the installed handoff command, which wraps the trusted handoff service through `createQueueCloserComposition` (matching committed ack, then idempotent resource release). The hammer independently confirms the durable receipt (head, launch, review-proof digest) and entry, then records a `superseded` `queue-handoff-admitted` terminal audit. | Existing terminal/retry handoff remains; it is not a queue ack. |
+| Closer completion | `bin/hammer-queue-handoff.mjs` runs the installed handoff command, which verifies the launch-bound audit and commits the handoff within the route fence. The hammer independently confirms the durable receipt (head, launch, review-proof digest) and entry, then records a `superseded` `queue-handoff-admitted` terminal audit. | Existing terminal/retry handoff remains; it is not a queue ack. |
 | Clean daemon and certified closer recovery | Queue admission only. Read the actual stored full receipt/ack before reporting queued; no legacy lease, checks wait or merge click. | Existing daemon/hammer eligibility, reservation, bounded repair and merge paths remain. |
 | Rendered legacy merge command | Existing route/issuance boundary refuses the old writer. Independently running old closers must also be drained, including their publication helpers and requests. | Existing entitled metered command is retained. |
 | Queue owner / subject executor | Existing lane generation, operation intents, shared issuance lock, exact-head checks, expected-head merge and durable delivery remain sole merge execution authority. | Existing transfer/return acknowledgement protocol owns rollback. |
 
-The composition root supplies `dispatchContext.queueCloser.hammerHandoffCommand`:
-the installed handoff command's argv, with an absolute `argv[0]` (never a shell
-string or PATH lookup). The dispatcher renders it into the hammer's inputs with
-the route generation. The command receives the hammer's head-bound request path as
-its last argument. It must build the complete schema-version-1 handoff and submit
-it through `createQueueCloserComposition({rootDir, handoffService,
-handoffInstructions, releaseResources}).handoff(input, {routeGeneration, deadline})`,
-then print the acknowledgement JSON on its last stdout line. Its trusted evidence
-adapter must recompute the review-proof digest from the live audit
-(`hammerReviewProof`); the submitter's own claims are never evidence. Migrated and
-legacy launches both use `decision-only` / `terminal-audit`: on a migrated lane
-the terminal audit is the admitted handoff. Submission and resource release hold
-the existing lane issuance lock; stale dispatch generations and rollback refuse
-submission. Resource release must be idempotent and actually release the closer
-resources it names. Never substitute a no-op release. Queue admission callbacks
-must use the trusted clean/handoff services; replies are independently joined to
-the actual store. Missing composition refuses dispatch/enqueue without legacy
-fallback. These ports do not install a production pump, tool endpoint, evidence
-reader, credentials or service. Uncomposed migrated lanes stall through the
-existing escalation route and require reviewed composition before deployment.
-Missing dispatch inputs fail exactly as on a legacy lane.
+The production composition supplies `bin/finalization-queue-handoff.mjs` with
+an absolute Node executable and command path. The dispatcher renders the argv
+and route generation into the hammer inputs. The command reads the head-bound
+request, rebuilds the proof from the authenticated audit and closer launch, and
+commits the complete handoff under the issuance lock. The controller verifies
+the durable acknowledgement before recording its terminal audit and completing
+normal resource cleanup. Closers with a stale generation or a rolled-back lane
+cannot submit. Explicit integrations can supply their own trusted composition
+through `dispatchContext.queueCloser.hammerHandoffCommand` and
+`createQueueCloserComposition`; they owe the same durable receipt and mandatory
+idempotent resource release. Queue admissions with missing credentials or
+unproven ownership remain pending. Both routes use the existing `decision-only`
+and `terminal-audit` launch types.
 
 Legacy preflight reads the selector and, when present, the durable route through
 a read-only SQLite handle. An absent DB/routing schema or a stable legacy route
@@ -70,9 +58,11 @@ so authoritative writer checks remain at the merge/publication boundaries.
 Certified recovery always retains `withDaemonMergeReservation`, regardless of
 the prepared route snapshot.
 
-Remediation may edit, validate locally, adjudicate all findings and publish its
-remediated head with entitled expected-old-head protection. Terminal adjudication
-remains final without a new model judgement. Only the queue mechanically rebases,
+Remediation may edit, validate locally and publish its remediated head with
+entitled expected-old-head protection. The handoff accounts for every finding
+and can defer unresolved advisories only when strict non-blocking remediation
+is disabled. Terminal adjudication remains final without a new model judgement.
+Only the queue mechanically rebases,
 waits remote CI and merges. Returned same-head entries owe fresh remediation and
 admission; a historical ack cannot hide a return. A terminal/parked acknowledged
 entry suppresses duplicate wakes that observe its ack. Handoff commits take the

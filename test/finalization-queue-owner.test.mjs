@@ -210,14 +210,18 @@ test('ambiguous push requires proven drain AND every outcome; no duplicate issua
   await assert.rejects(f.owner.issue(request), /lost reply/);
   await assert.rejects(f.owner.issue(request), /reconciliation/);
   assert.equal(calls, 1);
-  f.clock(61);
+  await assert.rejects(f.owner.release({ fence: old }), /unreconciled queue operation/);
+  assert.equal((await f.owner.release({ fence: old, parkPending: true })).ok, true);
+  assert.equal(f.store.readOwner(lane).owner_state, 'parked');
+  assert.equal(f.store.operations(lane).length, 1);
+  f.clock(2);
   evidence = { quiescent: true, sourceRef: 'drain:1', results: {} };
   assert.equal((await f.owner.claim({ lane, ownerId: 'owner-b', expiresAt: time(120) })).ok, false);
   evidence.results['push-1'] = { outcome: 'succeeded', sourceRef: 'live-head:new-head' };
   const next = await claim(f, 'owner-b', time(120));
   assert.ok(next);
   assert.equal(f.store.operations(lane).length, 0);
-  const resumed = f.store.progress({ fence: next, entryId: 'q-101', phase: 'publishing', at: time(62), recoveryObservation: {
+  const resumed = f.store.progress({ fence: next, entryId: 'q-101', phase: 'publishing', at: time(3), recoveryObservation: {
     state: 'open', head: 'new-head', base: 'base-head', sourceRef: 'live:1',
   } });
   assert.equal(resumed.phase, 'waiting-checks');

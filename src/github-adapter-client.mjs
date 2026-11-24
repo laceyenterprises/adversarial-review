@@ -602,20 +602,29 @@ async function writeGitHubAdapter(kind, params = {}, {
   execFileImpl,
   env = process.env,
   rootDir,
-  timeoutMs,
+  timeoutMs, envTokenSelector,
 } = {}) {
   if (typeof execFileImpl !== 'function') {
     throw new TypeError('writeGitHubAdapter requires execFileImpl');
   }
   const adapterBin = resolveGitHubAdapterBin({ env, rootDir });
   if (!adapterBin) return null;
-  if (githubOwnerTokens.routedOwner(params.repo)) {
+  if (envTokenSelector != null) {
+    // The caller already resolved an installation for this exact target.
+    // Neither ambient GITHUB_TOKEN nor the default owner router can replace it.
+    if (!env.GH_TOKEN || !/^[a-z0-9-]+$/.test(envTokenSelector)) return null;
+    env = { ...env, GITHUB_TOKEN: env.GH_TOKEN };
+  } else if (githubOwnerTokens.routedOwner(params.repo)) {
     const profile = params.reviewerLogin && REVIEWER_ADAPTER_AUTH_BY_ROLE[reviewerRoleFromLogin(params.reviewerLogin)];
     if (params.reviewerLogin && !profile) throw new GithubOwnerTokenUnavailableError();
     env = await githubEnvForTarget(env, params.repo, { tokenEnv: profile?.tokenEnv, token: profile ? env[profile.tokenEnv] : env.GITHUB_TOKEN || env.GH_TOKEN });
   }
   const execute = kind === 'pull-request-label' ? executeLabelAdapter : (impl, bin, args, options) => impl(bin, args, options);
-  const { stdout } = await execute(execFileImpl, adapterBin, makeAdapterWriteArgs(kind, params, env), {
+  const args = makeAdapterWriteArgs(kind, params, env);
+  if (envTokenSelector) {
+    args.push('--auth', envTokenSelector, '--auth-mode', 'env-token', '--pat-env', 'GH_TOKEN', '--transport', 'gh-cli');
+  }
+  const { stdout } = await execute(execFileImpl, adapterBin, args, {
     maxBuffer: ADAPTER_MAX_BUFFER,
     // Callers with a persisted deadline pass an already-scaled, clipped budget.
     timeout: Number.isFinite(timeoutMs) && timeoutMs > 0 ? Math.min(timeoutMs, MAX_TIMER_DELAY_MS) : loadAwareTimeoutMs(ADAPTER_TIMEOUT_MS),

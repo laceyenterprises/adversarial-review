@@ -4379,13 +4379,15 @@ exit status.
 ### V2 repository/base queue foundation (MGQ-01)
 
 The finalization port now has durable lane storage and a fenced single-host
-owner seam in `src/finalization/`; it remains unwired from live execution.
+owner seam in `src/finalization/`. The watcher uses it for transferred queue lanes.
 Acknowledged readiness is atomic, parked entries rejoin the tail explicitly,
 and replay preserves candidate, phase and original infrastructure deadline.
 Owner states are `idle`, `active`, `parked`. A per-lane issuance lock spans
 intent, remote operation and drain; an expired lease cannot authorize takeover
 while a request is ambiguous. Missing stop/drain and authoritative reconciliation
-proof parks the lane. Subject leases continue to protect only individual subjects.
+proof parks the lane. A watcher tick that ends with an unresolved operation
+parks its active fence immediately and retains the prior owner and intent for
+reconciliation. Subject leases continue to protect only individual subjects.
 
 Focused offline fixtures in `test/finalization-queue-owner.test.mjs` exercise
 simultaneous claims, stale generations/routes, paused issuance, ambiguous push
@@ -4425,9 +4427,9 @@ judgement.
 resource release and suppresses duplicate closer dispatch at the admission.
 State is absent until the transaction commits; duplicates, lost replies and
 restart return the same immutable `acknowledged` receipt. Write failure rolls
-back entry/event/readiness. Both seams remain unwired until lane routing lands;
-legacy dispatch and the retry helper retain their behavior. Composition must
-supply a trusted independent evidence reader/verifier.
+back entry/event/readiness. The installed receiver uses authenticated review and
+publication reads and verifies the dispatched launch and generation. The legacy
+retry helper continues to serve lanes under legacy ownership.
 
 `test/finalization-queue-handoff.test.mjs` covers coverage/provenance refusals,
 independent duplicate submitters, crash after commit, lost ack, release ordering,
@@ -4522,8 +4524,8 @@ legacy events remain replayable. Live SHA casing and numeric/string review IDs
 do not change identity, and complete labels are passed as names to shared policy.
 
 The lifecycle is acknowledged → ready, or parked-hold/permission/infrastructure,
-returned-to-closer, or closed-observed. These seams remain uncomposed until lane
-routing; readiness alone grants no merge authority. Focused offline
+returned-to-closer, or closed-observed. The watcher admits only lanes with matching configuration and durable queue
+ownership. Readiness alone grants no merge authority. Focused offline
 `finalization-queue-admission.test.mjs` exercises mixed-source process contention,
 read/recovery races, holds, current-head reads, bounded waits and probe immutability.
 Regressions also cover mixed infrastructure/conflict diagnostics, equivalent head
@@ -4592,9 +4594,8 @@ results or drain reconciliation. Ambient author/committer environment variables
 and `EMAIL` are removed from local Git execution so replay retains the source
 author and uses the synthetic committer.
 
-These seams remain unwired until lane routing. Network Git requires the existing
-entitled credential mechanism through an injected runner; ambient SSH fallback
-is refused. The existing execution brake applies before preparation and push.
+The production consumer uses the existing entitled GitHub credential for
+network Git. The runner refuses ambient SSH credentials. The existing execution brake applies before preparation and push.
 No new CI or smoke step is added.
 
 Focused offline fixtures are `finalization-queue-rebase-proof.test.mjs`,
@@ -4604,14 +4605,14 @@ After normal deployment, the runtime owner runs
 existing bounded load-aware supervisor. Require
 `.capabilities.rebase.available == true` and `.runtime.build != null` and record
 the Git/proof adapter and actual publication observations. Missing organic
-publications and live-adapter/routing composition remain pending. The probe
+publications and unverified loaded routing remain pending. The probe
 checks the real schema and Git executable and never creates a workspace or
 mutates a lane. See the [operator procedure](docs/finalization-executor-promotion-runbook.md#mechanical-rebase-observation-mgq-04-no-activation)
 and [data contract](docs/data-model/finalization-ledger.md#mechanical-rebase-and-publication-mgq-04).
 
 ### V2 candidate checks and parking (MGQ-05)
 
-The unwired v2 finalization waiter resolves and versions the complete existing
+The v2 finalization waiter resolves and versions the complete existing
 required set, enumerates all exact-candidate check-run and legacy-status pages,
 and uses the shared CI classifier. Latest reruns win, with numeric REST IDs or
 GraphQL database IDs breaking timestamp ties. REST runs use start/completion
@@ -4643,7 +4644,7 @@ and [deployment observation procedure](docs/finalization-executor-promotion-runb
 
 ### V2 final eligibility, guarded merge and receipts (MGQ-06)
 
-The unwired v2 merge step consumes a `finalizing` exact candidate. Immediately
+The v2 merge step consumes a `finalizing` exact candidate. Immediately
 before mutation it rereads the existing emergency brake, subject ledger,
 immutable receipt and disposition digest, live head/base/holds, identity, branch
 rights, primary change, existing structural eligibility, the recomputed rebase
@@ -4761,8 +4762,9 @@ and duplicate lanes fail. The existing autonomous execution brake stays separate
 The shared v2 resolver/issuance boundary covers clean-daemon, certified closer
 inline merge and rendered hammer merge commands. A selector change cannot
 transfer ownership without proved drain/reconciliation; rollback returns pending
-entries once through durable handoff keys. Missing live queue composition refuses
-execution. No production selector is changed by this implementation.
+entries once through durable handoff keys. The watcher hosts the queue consumer
+and runs it only for a matching configured and durable queue route. Missing live
+evidence or a missing adapter defers admission or parks the entry.
 
 Use `adversarial-review finalization queue status --repo example/review --base main`
 and `finalization queue receipt --repo example/review --pr 101` (both support
@@ -4832,6 +4834,11 @@ predicate or merges; the queue executor does. Wakes observing the durable ack be
 the final dispatch recheck reuse it; an ack committed after that read can still
 race launch. Returned work owes fresh admission. Clean daemon and certified closer
 recovery only enqueue, confirming the actual stored receipt before reporting queued.
+Hammer receipts retain the full finding inventory. If strict non-blocking
+remediation is explicitly disabled, an unresolved advisory finding can be
+recorded as deferred. Blocking findings still require exact-head evidence.
+The watcher rechecks parked holds and permissions at one-minute intervals
+within original patience and records deadline expiry without a GitHub read.
 Other lanes and rollback retain existing legacy prompts and incident repair.
 Legacy closer preflight reads config and durable routing without a lane lock,
 schema migration or writer journal; unreadable durable routing refuses explicitly.

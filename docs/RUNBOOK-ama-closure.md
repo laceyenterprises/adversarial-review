@@ -9870,12 +9870,18 @@ daemon inline merge; see `docs/STATE-MACHINE.md`). Legacy lanes are unchanged.
 
 | Step | Owner | Result |
 |---|---|---|
-| Dispatch | `maybeDispatchAmaCloser` | Ordinary hammer prompt, phases and `decision-only` / `terminal-audit` launch. Bootstrap inputs add `HAM_FINALIZATION_EXECUTOR=queue-v2`, the route generation, the installed handoff argv and the closer worker identity. A durable ack for the head suppresses dispatch (`queue-handoff-acknowledged`). |
+| Dispatch | `maybeDispatchAmaCloser` | Ordinary hammer prompt, phases and `decision-only` / `terminal-audit` launch. Bootstrap inputs add `HAM_FINALIZATION_EXECUTOR=queue-v2`, the route generation, the installed handoff argv and the closer worker identity. A durable admission for the head suppresses dispatch (`queue-handoff-acknowledged`). The dispatch result reports the queue entry for both clean reviews and hammer handoffs. |
 | Close | `bin/hammer-close-controller.sh` | Publish, verify-head and exact-head audit as before, then `bin/hammer-queue-handoff.mjs`. No CI wait, predicate or merge. |
-| Handoff | `src/finalization/hammer-queue-handoff.mjs` | Re-reads the live PR (open, head equal to the attested head). Builds a request bound to repo, PR, head, closer launch and the review-proof digest (reviewed head plus the audit published for the exact head). Writes `queue-handoff-request.json` in the run directory and runs the installed command with that path. |
+| Handoff | `src/finalization/hammer-queue-handoff.mjs` | Re-reads the live PR (open, head equal to the attested head). Builds a request bound to repo, PR, head, closer launch and the review-proof digest (reviewed head plus the audit published for the exact head). Writes `queue-handoff-request.json` in the run directory and runs the installed command with that path. The receiver accepts request files up to 1 MiB. |
 | Confirm | same | The reply is not evidence. The durable `finalization_queue_handoff` receipt must carry this head, launch and review-proof digest, and the queue entry must be confirmed (`confirmQueueAdmission`). A retried launch replays an existing admission without a second delivery. |
 | Terminal audit | same | `superseded` attempt, reason `queue-handoff-admitted`, with entry/ack ids and the digest. This satisfies the launch's `terminal-audit` required outcome. No closing comment is posted. |
 | Merge | queue executor | Admission, live re-validation, exact-candidate checks and an expected-head squash merge under the lane fence. Transient failures park and retry the same entry. |
+
+The receiver accounts for every applicable finding. It requires an exact-head
+fix or verified withdrawal for blockers and enforces non-blocking coverage
+under the default strict policy. With `strict_non_blocking_remediation: false`,
+an advisory without a verified fix can be recorded as `deferred`, linked to
+the authenticated audit and original finding. It receives no fix credit.
 
 Stops: `head-changed`, `already-merged` and `pr-closed` are world facts (exit 20;
 a moved head starts a fresh review lifecycle and is never re-hammered from the old
@@ -9930,15 +9936,14 @@ never waives eligibility, current-head review, holds, complete checks or identit
 `resolveLaneRoute` is the shared resolver. `routeFinalizationWriter` protects the
 clean daemon and the closer's certified-head inline writer. The rendered hammer
 merge command uses `bin/legacy-lane-write.mjs`, preserving the existing entitled
-metered transport, arguments and output. Queue admission callbacks are injected
-at the composition boundary; a missing callback returns
-`queue-composition-unavailable`, with no legacy fallback. This slice does not
-start a queue pump or install live evidence/identity/delivery adapters. MRQ-21
-replaces MGQ-10's route-scoped closer prompt: a queue-v2 lane dispatches the
-ordinary hammer, whose controller hands off its attested head (see
-[Queue-v2 hammer handoff](#queue-v2-hammer-handoff-mrq-21)). Those explicit composition requirements must be
-satisfied and observed before an operator promotes a lane. Capability availability
-is not an assertion that such a consumer is running.
+metered transport, arguments and output. The installed clean producer and
+hammer receiver enter the existing FIFO. A missing admission callback returns
+`queue-composition-unavailable`. For a matching queue selector and durable
+route, the watcher advances the FIFO under the owner fence. A queue-v2 lane
+dispatches the ordinary hammer, whose controller hands off its attested head.
+Before transfer, verify the loaded watcher and the required adapters through the
+[whole-lane canary procedure](finalization-queue-canary-runbook.md). See also the
+[queue-v2 hammer handoff](#queue-v2-hammer-handoff-mrq-21).
 
 The native `bin/legacy-pr-write.mjs` wrapper resolves the live PR identity before
 entering `runLegacyLaneWrite`. It uses a metered, owner-aware PR REST read scoped to
@@ -10048,6 +10053,13 @@ intent. Successful queue operations require materialized publication evidence or
 an exact-candidate merge receipt before settlement. Unknown evidence leaves the
 transition pending and both routes fenced. There is no automatic expiry escape.
 The adapter receives a finite, scaled-once timeout clipped to the deadline.
+
+The queue consumer honors the AMA master switch and the autonomous execution
+brake. A warning identifies a tick that remains in flight across three watcher
+intervals. For an ambiguous push or merge, the same watcher retries readback
+after its issuance callback drains. If the outcome remains unknown or the
+previous owner cannot prove drain, the lane retains its fence and queues a
+durable page. Use the existing operator recovery route for that fence.
 
 Promotion and rollback are operator work:
 

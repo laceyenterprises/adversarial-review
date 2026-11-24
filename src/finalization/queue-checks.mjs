@@ -84,8 +84,8 @@ export function createQueueChecksService({ store, owner, checkReader, liveAdapte
       let receipt;
       try { receipt = await readQueueEvidence(pageAdapter, { payload: JSON.parse(row.payload_json) }, timeoutMs); }
       catch { continue; }
-      if (receipt?.id) nonblocking(() => store.db.prepare('UPDATE finalization_queue_check_page SET receipt_json=? WHERE cause_key=? AND receipt_json IS NULL')
-        .run(JSON.stringify(receipt), row.cause_key));
+      if (receipt?.id) nonblocking(() => store.tx(() => store.db.prepare('UPDATE finalization_queue_check_page SET receipt_json=? WHERE cause_key=? AND receipt_json IS NULL')
+        .run(JSON.stringify(receipt), row.cause_key)));
     }
   }
   async function park(entry, fence, reason, checks) {
@@ -155,7 +155,7 @@ export function createQueueChecksService({ store, owner, checkReader, liveAdapte
           ? entry.reason : 'checks-unreadable') };
 
       if (classified.kind === 'green') return progress(entry, fence, 'finalizing', classified.reason, { checks });
-      if (classified.kind === 'red') {
+      if (classified.kind === 'red' || classified.reason === 'queue-branch-policy-unsupported') {
         const result = progress(entry, fence, 'returned-to-closer', classified.reason, { checks });
         await release(fence); return result;
       }

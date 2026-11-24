@@ -1,7 +1,7 @@
 import { readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { followUpJobFileFilter } from '../follow-up-job-names.mjs';
-import { resolveDaemonWorkerIdentityFromHeadAttestation } from '../daemon-worker-identity.mjs';
+import { readHeadAttestationChainForPr, resolveDaemonWorkerIdentityFromHeadAttestation } from '../daemon-worker-identity.mjs';
 import { remediationWorkerTrailerClass } from '../remediation-worker-provenance.mjs';
 import { canonicalWorkerClass } from '../worker-class-aliases.mjs';
 import { parseCommitTrailers, parseCommitTrailerValues } from './ham-provenance.mjs';
@@ -66,6 +66,16 @@ export function laneReversalIdentityMatches({ commit, laneOwner, laneIdentity })
     && remediationWorkerTrailerClass(worker.workerClass) === trailers['worker-class'];
 }
 
-// Reuse the gate's verified, exact-commit produced attestation reader. No opener
-// fallback or infrastructure degradation may authorize a lane reversal.
-export const readLaneReversalIdentity = resolveDaemonWorkerIdentityFromHeadAttestation;
+export function readLaneReversalIdentity({ env = process.env,
+  readHeadAttestationChainForPrImpl = readHeadAttestationChainForPr, ...args }) {
+  // HQ records native produced attestations on the canonical ledger. The
+  // chain CLI reads its runtime target, so route this child to the same ledger.
+  const canonicalDsn = env.AGENT_OS_SESSION_LEDGER_CANONICAL_DSN?.trim();
+  const chainEnv = canonicalDsn ? { ...env, AGENT_OS_SESSION_LEDGER_DSN: canonicalDsn } : env;
+  return resolveDaemonWorkerIdentityFromHeadAttestation({ ...args, env: chainEnv,
+    requireExactSubject: true,
+    readHeadAttestationChainForPrImpl: options => readHeadAttestationChainForPrImpl({
+      ...options, useDeployVerifier: true,
+    }),
+  });
+}

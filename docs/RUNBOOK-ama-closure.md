@@ -222,7 +222,12 @@ under the same finding/region rules as the hammer. Its existing queue record
 must bind `repo`, `prNumber`, `jobId`, `revisionRef` and
 `closureHandoff: { reason: final-fix-all, headSha }` to that source review head.
 The recorded `remediationWorker.launchRequestId` and `workerClass` must match
-the verified **produced** attestation at the exact authorizing commit SHA.
+the verified **produced** attestation for that repository and PR at the exact
+authorizing commit SHA. The source guard uses `hq attest chain` with the
+deployed verifier. If `AGENT_OS_SESSION_LEDGER_CANONICAL_DSN` is configured,
+the source guard sends the chain read to that target, where HQ records the
+native produced receipt. An empty or failed canonical read leaves the reversal
+unproven. With a single configured ledger, the read uses the runtime target.
 Names, emails, title prefixes, a later clean review, and an opener's attestation
 provide no reversal authority. Terminal and archived job receipts retain this
 historical proof without retaining live custody.

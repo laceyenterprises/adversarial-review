@@ -7,7 +7,8 @@ import { join } from 'node:path';
 import { fetchPrimaryChange, checkPrimaryChange } from '../src/ama/primary-change.mjs';
 import { isEligibleForAmaClosure } from '../src/ama/eligibility.mjs';
 import { evaluateMergeEligibility } from '../src/ama/merge-eligibility.mjs';
-import { resolveDaemonWorkerIdentityFromHeadAttestation } from '../src/daemon-worker-identity.mjs';
+import { readHeadAttestationChainForPr } from '../src/daemon-worker-identity.mjs';
+import { readLaneReversalIdentity } from '../src/ama/lane-reversal.mjs';
 import { buildRemediationPrompt } from '../src/remediation-prompt-builder.mjs';
 import { collect as collectRebased, review as rebasedReview } from './helpers/hamclose-history.mjs';
 
@@ -22,7 +23,7 @@ const body = `## Blocking issues\n${finding}\n## Non-blocking issues\n- None.\n#
 
 function fixture(t, { owner = true, mutateJob = () => {}, mutateCommit = () => {},
   mutateReview = () => {}, mutateAttestation = () => {}, cleanReview = true, hammer = false,
-  bucket = 'completed', persistent = false } = {}) {
+  bucket = 'completed', persistent = false, receiptLedger = 'shared' } = {}) {
   const rootDir = mkdtempSync(join(tmpdir(), 'lane-reversal-'));
   t.after(() => rmSync(rootDir, { recursive: true, force: true }));
   const job = { jobId: JOB, repo: REPO, prNumber: 7, revisionRef: PRIMARY, status: 'completed',
@@ -44,14 +45,29 @@ function fixture(t, { owner = true, mutateJob = () => {}, mutateCommit = () => {
   mutateReview(review);
   const reviews = [review, ...(cleanReview ? [{ ...review, node_id: 'PRR_clean', commit_id: HEAD,
     state: 'APPROVED', body: '## Blocking issues\n- None.\n## Non-blocking issues\n- None.\n## Verdict\nApproved' }] : [])];
-  const attestation = { kind: 'produced', valid: true, head_sha: HEAD,
+  const attestation = { repo: REPO, pr_number: 7, kind: 'produced', valid: true, head_sha: HEAD,
     payload: { launch_request_id: 'lrq_fixture', worker_class: 'remediator-codex-corp' } };
   mutateAttestation(attestation);
   let identityReads = 0;
+  const chainTargets = [];
+  const runtimeDsn = 'postgresql://runtime.invalid/ledger';
+  const canonicalDsn = 'postgresql://canonical.invalid/ledger';
+  const env = { AGENT_OS_SESSION_LEDGER_DSN: runtimeDsn };
+  if (receiptLedger !== 'shared') env.AGENT_OS_SESSION_LEDGER_CANONICAL_DSN = canonicalDsn;
+  const receiptDsn = receiptLedger === 'canonical' ? canonicalDsn : runtimeDsn;
   const readLaneIdentityImpl = args => {
     identityReads++;
-    return resolveDaemonWorkerIdentityFromHeadAttestation({ ...args,
-      readHeadAttestationChainForPrImpl: async () => [attestation] });
+    return readLaneReversalIdentity({ ...args, env,
+      readHeadAttestationChainForPrImpl: options => readHeadAttestationChainForPr({ ...options,
+        execFileImpl: async (command, argv, { env: childEnv }) => {
+          assert.equal(command, 'hq');
+          assert.deepEqual(argv, ['attest', 'chain', '--repo', REPO, '--pr', '7', '--json']);
+          const target = childEnv.AGENT_OS_SESSION_LEDGER_DSN;
+          chainTargets.push(target);
+          const rows = target === receiptDsn ? [attestation] : [];
+          return { stdout: JSON.stringify(rows) };
+        },
+      }) });
   };
   const get = async path => {
     if (path === `repos/${REPO}/pulls/7`) return { base: { sha: BASE }, head: { sha: HEAD } };
@@ -74,9 +90,22 @@ function fixture(t, { owner = true, mutateJob = () => {}, mutateCommit = () => {
     rootDir, get, readLaneIdentityImpl }, {
     fetchCiCostImpl: async () => ({ ok: true, headSha: HEAD }),
   });
-  return { collect, get, readLaneIdentityImpl, job, rootDir, attestation, ownerPath: join(dir, `${JOB}.json`),
+  return { collect, get, readLaneIdentityImpl, job, rootDir, attestation, chainTargets, env, ownerPath: join(dir, `${JOB}.json`),
     identityReads: () => identityReads };
 }
+
+test('LAC-2235 reads the exact produced row from the configured canonical ledger', async t => {
+  const f = fixture(t, { receiptLedger: 'canonical', bucket: 'stopped', persistent: true });
+  assertGates(await f.collect(), true);
+  assert.deepEqual(f.chainTargets, [f.env.AGENT_OS_SESSION_LEDGER_CANONICAL_DSN]);
+  assert.equal(f.env.AGENT_OS_SESSION_LEDGER_DSN, 'postgresql://runtime.invalid/ledger');
+});
+
+test('LAC-2235 an empty canonical chain cannot fall back to a runtime receipt', async t => {
+  const f = fixture(t, { receiptLedger: 'runtime' });
+  assertGates(await f.collect(), false);
+  assert.deepEqual(f.chainTargets, [f.env.AGENT_OS_SESSION_LEDGER_CANONICAL_DSN]);
+});
 
 function closer(primaryChange, strictNonBlockingRemediation = true) {
   const head = primaryChange.headSha;
@@ -190,6 +219,8 @@ for (const unreadable of ['empty', 'partial', 'read-error']) {
 for (const [name, options] of [
   ['missing owner', { owner: false }],
   ['wrong PR', { mutateJob: j => { j.prNumber = 8; } }],
+  ['wrong attested PR', { mutateAttestation: a => { a.pr_number = 8; } }],
+  ['wrong attested repository', { mutateAttestation: a => { a.repo = 'other/repo'; } }],
   ['wrong input head', { mutateJob: j => { j.closureHandoff.headSha = BASE; } }],
   ['other handoff', { mutateJob: j => { j.closureHandoff.reason = 'conflict-primary-unproven'; } }],
   ['wrong launch', { mutateAttestation: a => { a.payload.launch_request_id = 'lrq_other'; } }],
@@ -202,6 +233,7 @@ for (const [name, options] of [
   ['wrong attested SHA', { mutateAttestation: a => { a.head_sha = PRIMARY; } }],
   ['reviewed attestation only', { mutateAttestation: a => { a.kind = 'reviewed'; } }],
   ['wrong reviewed head', { mutateCommit: c => { c.commit.message = c.commit.message.replace(`Reviewed-Head: ${PRIMARY}`, `Reviewed-Head: ${BASE}`); } }],
+  ['review absent from the PR', { mutateReview: r => { r.node_id = 'PRR_other'; } }],
   ['uncited reversal', { mutateCommit: c => { c.commit.message = c.commit.message.replace(/\nReversal-Authorized-By:.*/, ''); } }],
   ['missing explicit kind', { mutateCommit: c => { c.commit.message = c.commit.message.replace(' kind=blocking', ''); } }],
   ['wrong job', { mutateCommit: c => { c.commit.message = c.commit.message.replace(JOB, 'other-job'); } }],

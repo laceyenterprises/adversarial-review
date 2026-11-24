@@ -1,10 +1,9 @@
-import { docsReviewRequested, readDocsFastPath } from './docs-only.mjs';
+import { DOCS_WITHDRAWAL_REASON, docsReviewRequested, readDocsFastPath } from './docs-only.mjs';
 import { publishAdversarialGateStatus, readGateRecord } from './adversarial-gate-status.mjs';
 import { createBranchProtectionChecker } from './branch-protection.mjs';
 import { runDaemonCleanMergeAttempt } from './daemon-clean-merge.mjs';
 
 const readProtection = createBranchProtectionChecker();
-const DOCS_WITHDRAWAL_REASON = 'docs-fast-path-not-eligible';
 
 export async function maybeRunDocsFastPath({ subject, reviewRow, cfg, loadCfg = () => cfg, rootDir, repoPath, prNumber,
   execFileImpl, logger = console,

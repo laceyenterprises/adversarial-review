@@ -4,6 +4,8 @@ import { loadAwareTimeoutMs } from './load-aware-timeout.mjs';
 import { isExplicitOperatorRetriggerReason } from './retrigger-review-reason.mjs';
 import { isOperatorHeld } from './operator-hold-labels.mjs';
 
+export const DOCS_WITHDRAWAL_REASON = 'docs-fast-path-not-eligible';
+
 const revisions = repositoryObservationCache(new Map());
 const SHA = /^[0-9a-f]{40}$/i;
 const docsPath = path => typeof path === 'string' && path.startsWith('docs/')

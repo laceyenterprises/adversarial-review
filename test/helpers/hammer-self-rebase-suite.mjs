@@ -633,12 +633,21 @@ export function registerHammerSelfRebaseTests(shard) {
     test(`GATECAPBASE-01: final server merge outcome ${scenario}`, t => {
       const f = fixture(t, scenario);
       const result = f.run();
-      assert.equal(result.status, scenario === 'server-base-conflict' ? 21 : 20, result.stdout + result.stderr);
+      assert.equal(result.status, scenario === 'server-base-conflict' ? 21 : 1, result.stdout + result.stderr);
       assert.equal(existsSync(join(f.dir, 'lease-held')), false);
       const releases = readFileSync(join(f.dir, 'release-args'), 'utf8');
       if (scenario === 'server-base-conflict') {
         assert.match(releases, /--retryable-abort\nbase-advanced-during-server-rebase/);
-      } else assert.doesNotMatch(releases, /base-advanced-during-server-rebase/);
+      } else {
+        assert.match(result.stdout, /merge=1 outcome=permanent-merge-rejection held=0/);
+        assert.doesNotMatch(releases, /base-advanced-during-server-rebase/);
+        // Earlier setup can release a rebase lease. Inspect the final writer
+        // release so that unrelated setup does not mask its classification.
+        const releaseLines = releases.trim().split('\n');
+        const finalRelease = releaseLines.slice(releaseLines.lastIndexOf('release')).join('\n');
+        assert.match(finalRelease, /--reason\npermanent-merge-rejection/);
+        assert.doesNotMatch(finalRelease, /--retryable-abort/);
+      }
     });
   }
 

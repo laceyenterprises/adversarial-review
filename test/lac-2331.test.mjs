@@ -60,7 +60,108 @@ test('LAC-2331 Hammer range composes local completion and exact publication edge
   assert.deepEqual((await fetchHammerHeadRange({ ...options, hammerBaseHead: rebased }))?.commits, range.commits);
 });
 
+for (const requested of [false, true]) {
+  test(`non-final completed round requested=${requested} retains findings without waiving head match`, async t => {
+    const { options, currency } = fixture(t, {
+      rounds: [{ ...round(reviewedHead, remediated), reReview: { requested } }],
+    });
+    const evidence = await currency(reviewedHead, currentHead);
+    assert.equal(evidence.proof, 'completed-remediation-hammer-finding-currency');
+    assert.equal(evidence.current, true);
+    assert.equal(rebaseCurrencyCovers(evidence, reviewedHead, currentHead), false);
+    assert.equal((await currency(reviewedHead, currentHead, { rebaseOnly: true })).current, false);
+    assert.equal((await fetchHammerHeadRange(options))?.proof, 'hammer-app-attestation-chain');
+    assert.equal((await fetchHammerHeadRange({ ...options, hammerBaseHead: remediated }))?.proof,
+      'completed-remediation-round-chain');
+  });
+}
+
+test('findings-only provenance retains a failed patch proof diagnostic without granting a waiver', async t => {
+  const { options } = fixture(t, { job: { reReview: { requested: true } } });
+  const currency = createReviewCurrencyReader({ ...options, get: async path => {
+    if (path.endsWith(`/pulls/${prNumber}`)) throw new Error('PR lookup unavailable');
+    return options.get(path);
+  } });
+  const evidence = await currency(reviewedHead, currentHead);
+  assert.equal(evidence.proof, 'completed-remediation-hammer-finding-currency');
+  assert.equal(evidence.patchProofError, 'PR lookup unavailable');
+  assert.equal(evidence.current, true);
+  assert.equal(rebaseCurrencyCovers(evidence, reviewedHead, currentHead), false);
+});
+
+for (const fields of [
+  { name: 'AbortError' },
+  { code: 'ABORT_ERR' },
+  { name: 'TimeoutError' },
+  { code: 'ETIMEDOUT' },
+  { killed: true, signal: 'SIGTERM' },
+  { killed: true, signal: 'SIGKILL' },
+  { killed: false, signal: 'SIGTERM' },
+  { killed: false, signal: 'SIGKILL' },
+  { signal: 'SIGTERM' },
+  { signal: 'SIGKILL' },
+]) {
+  for (const stage of ['compare', 'comments', 'PR lookup', 'git']) {
+    test(`findings-only currency propagates ${JSON.stringify(fields)} from ${stage}`, async t => {
+      const { options } = fixture(t, { job: { reReview: { requested: true } } });
+      const error = Object.assign(new Error('evaluation cancelled'), fields);
+      const currency = createReviewCurrencyReader({ ...options,
+        loadComments: async () => {
+          if (stage === 'comments') throw error;
+          return options.comments;
+        },
+        get: async path => {
+          if (stage === 'compare' && path.includes('/compare/')) throw error;
+          if (path.endsWith(`/pulls/${prNumber}`)) {
+            if (stage === 'PR lookup') throw error;
+            return { head: { sha: currentHead }, base: { sha: futureHead } };
+          }
+          return options.get(path);
+        },
+        git: async () => { throw error; },
+      });
+      await assert.rejects(currency(reviewedHead, currentHead), actual => actual === error);
+    });
+  }
+}
+
 const nativeJobId = 'fixture__repo-pr-42-job';
+
+for (const stage of ['compare', 'comments', 'PR lookup', 'git']) {
+  test(`the same currency reader retries a transient ${stage} rejection`, async t => {
+    const { options } = fixture(t, { rounds: [], comments: [] });
+    const error = Object.assign(new Error('temporary inspection timeout'), { code: 'ETIMEDOUT' });
+    let attempts = 0;
+    const inspect = () => { if (++attempts === 1) throw error; };
+    const currency = createReviewCurrencyReader({ ...options,
+      loadComments: async () => { if (stage === 'comments') inspect(); return []; },
+      get: async path => {
+        if (path.includes('/compare/')) {
+          if (stage === 'compare') inspect();
+          return { status: stage === 'compare' ? 'ahead' : 'diverged' };
+        }
+        if (path.endsWith(`/pulls/${prNumber}`)) {
+          if (stage === 'PR lookup') inspect();
+          return { head: { sha: currentHead }, base: { sha: futureHead } };
+        }
+        return null;
+      },
+      git: async args => {
+        if (stage === 'git' && args[0] === 'merge-base') inspect();
+        return args[0] === 'merge-base' ? futureHead : '';
+      },
+    });
+    const first = currency(reviewedHead, currentHead);
+    assert.equal(currency(reviewedHead, currentHead), first, 'concurrent reads share work');
+    await assert.rejects(first, actual => actual === error);
+    const result = await currency(reviewedHead, currentHead);
+    assert.equal(attempts, 2, 'the rejected underlying read is attempted again');
+    assert.equal(result.current, stage === 'compare', 'retry never fabricates currency');
+    assert.equal(await currency(reviewedHead, currentHead), result, 'settled evidence stays cached');
+    assert.equal(attempts, 2);
+  });
+}
+
 function nativeFinalJob() {
   return {
     kind: 'adversarial-review-follow-up', jobId: nativeJobId, revisionRef: reviewedHead, branch: 'fixture/change', baseBranch: 'main',
@@ -341,7 +442,7 @@ test('capped snapshots and pagination diagnose missing comment proof and contrib
   assert.deepEqual(pages, Array.from({ length: 10 }, (_, i) => i + 1));
   const capped = await proveCloserAuthoredStaleHead({ ...options, repoPath: repo, comments });
   assert.equal(capped.reason, HAMMER_COMMENTS_CAPPED);
-  assert.equal(capped.currentHeadHammerAttested, undefined);
+  assert.equal(capped.currentHeadHammerAttested, true);
   const complete = comments.slice(0, -1).concat({ event: 'labeled' });
   assert.equal((await createReviewCurrencyReader({ ...options, comments: complete })(reviewedHead, currentHead)).proof,
     'closer-rebase-provenance');

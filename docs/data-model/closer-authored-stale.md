@@ -48,11 +48,22 @@ they never satisfy exact-head validation. All chain readers use
 trailers and authors confer no authority. Pending checks or unknown mergeability defer eligibility; resolved
 non-mergeable states (including `CONFLICTING`) are hard misses. An unbound later head, broken chain or overlong chain requires exact-head review.
 HAMROUNDEDGE-01 loads `startHeadSha` / `resultingHeadSha` edges through
-`readCompletedRemediationRounds(rootDir, repo, prNumber)` from completed
-daemon-owned jobs for the same repository and PR. Only completed rounds with
-both heads bridge into the chain; a round-only head or a round after the last
-hammer edge cannot carry the verdict. Round edges count toward the existing
-chain-length limit. A missing or unreadable round record supplies no edge.
+`readCompletedRemediationEvidence(rootDir, repo, prNumber)` from completed
+daemon-owned jobs for the same repository and PR. The predicate uses
+`settledRounds`, so a completed round bridges a stale-head waiver only when
+its native Comment-only final handoff binds the review, publication proof and
+suppressed re-review. A round that requests another review cannot supply this
+waiver, even if job-level suppression disagrees. Non-final completed rounds can
+keep prior findings applicable without waiving the head match. A round-only
+head or a round after the final Hammer edge cannot carry the verdict. All edges
+count toward the existing chain-length limit. Missing or unreadable records
+supply no edge. Capped comment history supplies no App chain and reports
+`hammer-provenance-comments-capped`.
+For a supplied rollup array, `currentHeadHammerAttested` remains available even
+at the comment cap; the capped pagination sentinel has no authorship bit.
+Capped histories intentionally retain the Hammer retry series: CLOSERPROOF-01
+resets require `hammer-app-attestation-missing`, so the comment-limit reason
+cannot reset exhaustion even when a supplied array reports no exact-head edge.
 The watcher executes that shared decision through the
 [orphan watchdog](orphan-watchdog.md) on the next ownerless observation, once
 per head, recording its reasons; it does not wait for the idle recovery bound. A live

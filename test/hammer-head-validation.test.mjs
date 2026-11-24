@@ -9,15 +9,31 @@ import { exactHammerValidation, fetchHammerHeadRange, fleetCommitIdentityMatches
 const sha = name => name ? createHash('sha1').update(name).digest('hex') : name;
 const repo = 'fixture/repo', prNumber = 1;
 const completed = (start, end, state = 'completed') => ({ state, startHeadSha: sha(start), resultingHeadSha: sha(end) });
-function storeRounds(t, rounds) {
+function storeRounds(t, rounds, number = prNumber) {
   const rootDir = mkdtempSync(join(tmpdir(), 'hammer-completed-rounds-'));
   t.after(() => rmSync(rootDir, { recursive: true, force: true }));
   const dir = join(rootDir, 'data', 'follow-up-jobs', 'completed');
   mkdirSync(dir, { recursive: true });
-  writeFileSync(join(dir, 'fixture__repo-pr-1-job.json'), JSON.stringify({ repo, prNumber, status: 'completed',
+  writeFileSync(join(dir, `fixture__repo-pr-${number}-job.json`), JSON.stringify({ repo, prNumber: number, status: 'completed',
     remediationPlan: { rounds } }));
-  return { rootDir, repo, prNumber };
+  return { rootDir, repo, prNumber: number };
 }
+
+test('completed-round scan warnings recur per limit and PR', async t => {
+  const warnings = t.mock.method(console, 'warn', () => {});
+  const now = t.mock.method(performance, 'now', () => 0);
+  const rounds = Array.from({ length: 257 }, (_, index) => completed('reviewed', `head-${index}`));
+  const scan = ({ rootDir, repo, prNumber }) => readCompletedRemediationRounds(rootDir, repo, prNumber);
+  const first = storeRounds(t, rounds, 17);
+  const second = storeRounds(t, rounds, 18);
+  assert.deepEqual(await scan(first), []);
+  assert.deepEqual(await scan({ ...first, repo: first.repo.toUpperCase() }), []);
+  assert.deepEqual(await scan(second), []);
+  now.mock.mockImplementation(() => 60 * 60 * 1000);
+  assert.deepEqual(await scan(first), []);
+  assert.deepEqual(warnings.mock.calls.map(call => call.arguments[0].split(' ').at(-1)),
+    ['fixture/repo#17', 'fixture/repo#18', 'fixture/repo#17']);
+});
 
 const fleet = sha => ({ sha, author: { login: 'lacey-codex-agent[bot]' }, committer: { login: 'web-flow' },
   commit: { verification: { verified: true, reason: 'valid' } } });

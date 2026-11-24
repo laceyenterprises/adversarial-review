@@ -229,7 +229,7 @@ export async function readCompletedRemediationEvidence(rootDir, repo, prNumber) 
           }
         }
         const settled = completedCommentOnlyHandoff(job);
-        if (settled) settledRounds.set(`${settled.startHeadSha}:${settled.resultingHeadSha}`, settled);
+        if (settled && settled.reReview?.requested !== true) settledRounds.set(`${settled.startHeadSha}:${settled.resultingHeadSha}`, settled);
         const publication = completedLocalCommentOnlyReplay(job);
         if (publication) finalPublications.push(publication);
       } catch {

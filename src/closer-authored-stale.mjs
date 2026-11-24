@@ -70,8 +70,12 @@ export async function proveCloserAuthoredStaleHead({
       args: ['api', `repos/${options.repoPath}/issues/${options.prNumber}/comments?per_page=100&page=${page}`],
       timeoutMs: loadAwareTimeoutMs(15000) })).stdout));
   }
+  // Complete supplied rollups retain authorship even when chain proof is capped.
+  // The pagination sentinel has no comments from which to establish identity.
+  const read = Array.isArray(comments) ? { ...base, currentHeadHammerAttested: comments.some(comment =>
+    sha(hammerProvenanceEdge(comment)?.head).toLowerCase() === current.toLowerCase()) } : base;
   if (hammerProvenanceCommentsCapped(comments, options.repoPath, options.prNumber)) {
-    return { ...base, reason: HAMMER_COMMENTS_CAPPED };
+    return { ...read, reason: HAMMER_COMMENTS_CAPPED };
   }
   if (!Array.isArray(comments)) return { ...base, reason: 'hammer-app-attestation-missing' };
   let chain = hammerAttestationChain(comments, reviewed, current);
@@ -79,10 +83,6 @@ export async function proveCloserAuthoredStaleHead({
     const { settledRounds } = await readCompletedRemediationEvidence(options.rootDir, options.repoPath, options.prNumber);
     chain = hammerAttestationChain(comments, reviewed, current, settledRounds);
   }
-  // Hex case is not identity: a non-lowercase edge head still attests, so the
-  // bit can only err toward keeping the retry cap in force.
-  const read = { ...base, currentHeadHammerAttested: comments.some(comment =>
-    sha(hammerProvenanceEdge(comment)?.head).toLowerCase() === current.toLowerCase()) };
   if (!chain) return { ...read, reason: 'hammer-app-attestation-missing' };
   if (chain.length > maxCommits) return { ...read, reason: 'closer-chain-too-long' };
   return { ...read, proven: true, anchorHead: reviewed, closerCommits: [...chain].reverse(),

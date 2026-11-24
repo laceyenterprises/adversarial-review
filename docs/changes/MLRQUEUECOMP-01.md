@@ -68,6 +68,13 @@ On Node 26.10.0, the repair's focused `node test/run-tests.mjs` run passed
 admission, merge, and ledger replay. The no-op regression verifies that
 preparation reads the patch once and a later verifier reads it independently.
 
+The final comment-only round added direct assertions for both completed
+handoff variants, including the persisted hammer receipt, and removed Git
+and SQLite setup from the request-size test. The five focused queue test
+files passed 150 tests on Node 26.10.0. The Node 22 full-suite run on the
+preceding PR head and the run on its exact `main` base both reached the
+900-second suite deadline.
+
 ```sh
 node src/finalization/queue-probe.mjs --capability canary --json
 ```

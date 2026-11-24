@@ -4,7 +4,8 @@ import { createHash } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { mkdirSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { HAM_AUDIT_COMMENT_AUTHOR_LOGINS } from '../src/ama/ham-provenance.mjs';
 import { openFinalizationQueueStore } from '../src/finalization/queue-store.mjs';
@@ -14,7 +15,7 @@ import { createGithubAdapterMergeSurface } from '../src/finalization/execution-s
 import { createQueueConsumer } from '../src/finalization/queue-consumer.mjs';
 import { createProductionQueue } from '../src/finalization/queue-production.mjs';
 import { createQueueProductionEvidence } from '../src/finalization/queue-production-admission.mjs';
-import { prepareQueueCloserDispatch } from '../src/finalization/queue-closer.mjs';
+import { prepareQueueCloserDispatch, readCompletedQueueHandoff } from '../src/finalization/queue-closer.mjs';
 import { buildHammerQueueHandoffRequest, hammerReviewProof } from '../src/finalization/hammer-queue-handoff.mjs';
 import { createQueueLiveReads, readQueueBranchPolicy } from '../src/finalization/queue-live.mjs';
 import { classifyQueueChecks, resolveQueueRequiredSet } from '../src/finalization/queue-check-reader.mjs';
@@ -92,14 +93,18 @@ test('the production handoff receiver checks the route fence and replays a commi
   assert.deepEqual(resolveQueueHandoffStore(f.store).read(request).ack, ack);
   assert.equal(observations, 1);
   assert.equal(f.store.entries(lane).length, 1);
+  const entry = f.store.readEntry(ack.entryId);
+  assert.deepEqual(readCompletedQueueHandoff(f.store, { lane, prNumber: 102, head: f.oldHead },
+    { includeClean: true }), { entry, ack });
   const dispatch = await prepareQueueCloserDispatch({ rootDir: f.root, cfg, lane, prNumber: 102, head: f.oldHead });
   assert.equal(dispatch.queued, true);
-  assert.deepEqual(dispatch.acknowledgement, f.store.readEntry(ack.entryId));
+  assert.deepEqual(dispatch.acknowledgement, entry);
 });
 
 test('the installed handoff receiver accepts larger inventory files within its byte limit', t => {
-  const f = gitFixture(t, { noop: true });
-  const path = join(f.root, 'handoff.json');
+  const root = mkdtempSync(join(tmpdir(), 'queue-handoff-request-'));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const path = join(root, 'handoff.json');
   const receive = () => JSON.parse(execFileSync(process.execPath, ['bin/finalization-queue-handoff.mjs', path], {
     encoding: 'utf8',
     env: { ...process.env, HQ_LAUNCH_REQUEST_ID: 'unmatched-fixture' },
@@ -135,7 +140,9 @@ test('installed closer command uses absolute argv and a durable clean receipt su
   const production = createProductionQueue({ rootDir: f.root, readConfig: () => cfg, now: f.now, observe: receiptFixture });
   const result = await production.admitClean({ route: preflight.route, prNumber: 102, head: f.oldHead });
   assert.equal(result.phase, 'acknowledged');
-  assert.deepEqual((await prepareQueueCloserDispatch(target)).acknowledgement, f.store.readEntry(result.entryId));
+  const entry = f.store.readEntry(result.entryId);
+  assert.deepEqual(readCompletedQueueHandoff(f.store, target, { includeClean: true }), { entry, ack: null });
+  assert.deepEqual((await prepareQueueCloserDispatch(target)).acknowledgement, entry);
 });
 
 function fakeWorld(f, setup, { moved = false, checksGreen = () => true } = {}) {

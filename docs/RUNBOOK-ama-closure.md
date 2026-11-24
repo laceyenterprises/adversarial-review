@@ -9640,6 +9640,10 @@ mergeability remain separate gates. A live review request withdraws the waiver
 with a pending status before returning to full review, including requests already
 visible at poll admission or classification. A failed withdrawal retains the
 fast-path wait for a later retry; it does not hand off with a stale green waiver.
+Unsettled CI evidence and GitHub's `UNKNOWN` mergeability keep the waiver and
+retry on the same head. A settled CI failure or definite mergeability refusal on
+that head withdraws the waiver before ordinary review admission, where a first
+pass can run with red external CI.
 Under the lease, each attempt revalidates live classification, review requests,
 exact head, required checks and merge eligibility before signing/recording.
 A base tip advance is accepted after classifying the new immutable base/head

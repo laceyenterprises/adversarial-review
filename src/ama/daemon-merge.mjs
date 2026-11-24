@@ -59,6 +59,7 @@ import {
   writeAmaAuditEntry,
 } from './audit.mjs';
 import { evaluateMergeEligibility } from './merge-eligibility.mjs';
+import { rollupFailures } from '../ci-infrastructure.mjs';
 import { isTransientGhError } from '../gh-cli.mjs';
 import { hasOperatorApprovedOverride } from './eligibility.mjs';
 import { evaluateMergeCapabilityEnforcement } from './merge-capability-enforcement.mjs';
@@ -120,6 +121,15 @@ export const TRANSIENT_GATE_READ_REASONS = new Set([
   'ci-cost-unauthorized',
   'pr-mergeability-unknown',
 ]);
+
+function docsGateRefusal(gate, reasons) {
+  const checksBlocked = reasons.includes('ci-not-green');
+  const checksFailed = checksBlocked && rollupFailures(gate.requiredChecks).length > 0;
+  return {
+    reviewRequired: checksFailed || reasons.includes('pr-not-mergeable'),
+    checksUnsettled: checksBlocked && !checksFailed,
+  };
+}
 
 /**
  * Disposition vocabulary returned to the watcher.
@@ -657,7 +667,10 @@ async function attemptDaemonCleanMergeInner({
   }
   if (noCiEvidence) onGateEvidenceImpl?.({ ...preLease, requiredChecks: true });
   if (!preEligibility.eligible) {
-    return notTaken('not-eligible', { reasons: preEligibility.reasons, liveGate: preLease });
+    const docsReviewRequired = docsFastPath && preLease.candidateHead === validatedHead
+      && docsGateRefusal(preLease, preEligibility.reasons).reviewRequired;
+    return notTaken('not-eligible', { reasons: preEligibility.reasons, liveGate: preLease,
+      ...(docsReviewRequired ? { docsReviewRequired: true } : {}) });
   }
   const selected = getNextAction();
   if (selected && (selected.action !== 'daemon-merge' || selected.actor !== 'daemon' || selected.queue?.intent !== 'daemon')) return notTaken(selected.reason);
@@ -917,9 +930,12 @@ async function attemptDaemonCleanMergeInner({
       // made only of transient reads exhausts as `gate-read-failed`; any miss
       // carrying one stays NON-permanent so the next tick retries instead of
       // Gate 3 refusing the head forever on a half-read gate.
-      const transientReadOnly = elig.reasons.length > 0
-        && elig.reasons.every((reason) => TRANSIENT_GATE_READ_REASONS.has(reason));
-      const hasTransientRead = elig.reasons.some((reason) => TRANSIENT_GATE_READ_REASONS.has(reason));
+      const docsRefusal = docsFastPath && live.candidateHead === validatedHead
+        ? docsGateRefusal(live, elig.reasons) : null;
+      const isTransientRead = reason => TRANSIENT_GATE_READ_REASONS.has(reason)
+        || (reason === 'ci-not-green' && docsRefusal?.checksUnsettled);
+      const transientReadOnly = elig.reasons.length > 0 && elig.reasons.every(isTransientRead);
+      const hasTransientRead = elig.reasons.some(isTransientRead);
       if (elig.reasons.includes('pr-mergeability-unknown') && attempts < retryCap) {
         await sleep(daemonMergeBackoffMs(attempts, { baseMs: backoffBaseMs, rng }));
         continue;
@@ -931,6 +947,7 @@ async function attemptDaemonCleanMergeInner({
         // Evidence recovery can repair the same head; retain scoped escalation
         // without writing the permanent failed-head marker.
         permanent: !hasTransientRead && !noCiRevoked && !elig.reasons.includes('primary-change-unknown'),
+        docsReviewRequired: docsRefusal?.reviewRequired,
         reasons: elig.reasons,
         ...(elig.reasons.includes('history-read-failed') ? { historyReadError: live.primaryChange?.reason } : {}),
         liveGate: live,
@@ -1224,6 +1241,7 @@ async function attemptDaemonCleanMergeInner({
     auditWritten,
     manualCloseRequired: cleanParkManualCloseRequired,
     ...(terminal.reasons ? { reasons: terminal.reasons } : {}),
+    ...(terminal.docsReviewRequired ? { docsReviewRequired: true } : {}),
     ...(terminal.liveGate ? { liveGate: terminal.liveGate } : {}),
   };
   })();

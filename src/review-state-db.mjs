@@ -102,7 +102,10 @@ export const stmtRecordReviewDiscoveryWait = db.prepare(
      failure_message = excluded.failure_message, is_draft = excluded.is_draft
    WHERE reviewed_prs.domain_id = excluded.domain_id
      AND reviewed_prs.pr_state = 'open' AND reviewed_prs.review_status = 'pending'
-     AND reviewed_prs.reviewer = '' AND reviewed_prs.rereview_requested_at IS NULL`
+     AND reviewed_prs.reviewer = '' AND reviewed_prs.rereview_requested_at IS NULL
+     AND (reviewed_prs.revision_ref IS NOT excluded.revision_ref
+       OR reviewed_prs.failure_message IS NOT excluded.failure_message
+       OR reviewed_prs.is_draft IS NOT excluded.is_draft)`
 );
 export const stmtAssignDiscoveredReviewer = db.prepare(
   `UPDATE reviewed_prs SET reviewer = ?, failure_message = NULL,

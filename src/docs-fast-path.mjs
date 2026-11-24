@@ -10,22 +10,21 @@ export async function maybeRunDocsFastPath({ subject, reviewRow, cfg, loadCfg = 
   readReviewRow = () => reviewRow, readDocsFastPathImpl = readDocsFastPath,
   publishStatusImpl = publishAdversarialGateStatus,
   fetchProtectionImpl = readProtection,
-  runDaemonImpl = runDaemonCleanMergeAttempt, onHandled = () => {} } = {}) {
-  if (subject.terminal || subject.isDraft) return false;
+  runDaemonImpl = runDaemonCleanMergeAttempt } = {}) {
+  if (subject.terminal || subject.isDraft) return null;
   const withdrawWaiver = async (headSha, reason = 'docs-review-requested') => {
     try {
       await publishStatusImpl(rootDir, { repo: repoPath, prNumber, headSha,
         decision: { state: 'pending', reason, description: 'Adversarial review pending; docs waiver withdrawn.' }, execFileImpl });
-      return false;
+      return null;
     } catch (error) {
       logger.warn?.(`[docs-fast-path] waiver withdrawal unavailable: ${error.message}`);
-      onHandled('docs-waiver-withdrawal-unavailable');
-      return true;
+      return 'docs-waiver-withdrawal-unavailable';
     }
   };
   if (docsReviewRequested({ ...subject, ...reviewRow })) return withdrawWaiver(subject.headSha);
   if (reviewRow?.reviewer && (reviewRow.revision_ref === subject.headSha
-    || reviewRow.reviewer_head_sha === subject.headSha)) return false;
+    || reviewRow.reviewer_head_sha === subject.headSha)) return null;
   let evidence = null;
   const read = async args => {
     const current = await readDocsFastPathImpl({ repoPath, prNumber, execFileImpl, ...args });
@@ -37,17 +36,16 @@ export async function maybeRunDocsFastPath({ subject, reviewRow, cfg, loadCfg = 
   try { evidence = await read({ subject }); }
   catch (error) {
     logger.warn?.(`[docs-fast-path] classification unavailable: ${error.message}`);
-    return false;
+    return null;
   }
   if (evidence?.reviewRequested) return withdrawWaiver(evidence.headSha || subject.headSha);
-  if (!evidence) return false;
-  // An eligible docs head owns its wait, including disabled authority and red CI.
+  if (!evidence) return null;
+  // An eligible docs head owns its wait, including disabled authority and unsettled CI.
   // Neither a reviewer nor a closer is useful while these deterministic gates wait.
   try {
     cfg = loadCfg();
     if (!cfg?.enabled || cfg.autonomousMergeExecutionEnabled === false) {
-      onHandled('docs-merge-disabled');
-      return true;
+      return 'docs-merge-disabled';
     }
     const branchProtection = await fetchProtectionImpl({
       repoPath, baseBranch: evidence.baseBranch, execFileImpl });
@@ -64,16 +62,13 @@ export async function maybeRunDocsFastPath({ subject, reviewRow, cfg, loadCfg = 
     const gates = result?.reasons?.join(',');
     logger.log?.(`[docs-fast-path] ${repoPath} PR ${prNumber}: ${reason}${gates ? ` gates=${gates}` : ''}`);
     if (result?.merged || ['MERGED', 'CLOSED'].includes(result?.liveGate?.prState)) {
-      onHandled(reason, true);
-      return true;
+      return 'terminal';
     }
-    // The daemon declined the shortcut. Restore the pending gate before the
-    // ordinary first pass, which can run while external CI is red.
-    if (reason === 'not-eligible') return withdrawWaiver(evidence.headSha, 'docs-fast-path-not-eligible');
-    onHandled(reason);
+    // Settled CI failures and definite mergeability refusals take ordinary review.
+    if (result?.docsReviewRequired) return withdrawWaiver(evidence.headSha, 'docs-fast-path-not-eligible');
+    return reason;
   } catch (error) {
     logger.warn?.(`[docs-fast-path] merge deferred: ${error.message}`);
-    onHandled('docs-merge-unavailable');
+    return 'docs-merge-unavailable';
   }
-  return true;
 }

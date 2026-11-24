@@ -729,15 +729,14 @@ export async function resolveClaudeRuntimeProbeUidForWatcher({
 export async function processReviewSubject(entry, ctx) {
   const { subject, prNumber } = entry;
   const { repoPath, operatorSurface } = ctx;
-  const domainId = ctx.domainId || entry.domainId || subject.ref.domainId || ctx.WATCHER_PRIMARY_DOMAIN_ID;
-  let wait;
+  let wait = ['discovery-interrupted', 'watcher'];
   try {
     wait = await runReviewSubjectPhases(entry, ctx);
   } finally {
-    if (!subject.terminal && wait !== 'terminal') {
-      const row = stmtGetReviewRow.get(repoPath, prNumber);
-      if (!row || (row.reviewer === '' && row.pr_state === 'open' && row.review_status === 'pending')) {
-        const [reason, owner] = wait || ['discovery-interrupted', 'watcher'];
+    if (!subject.terminal && Array.isArray(wait)) {
+      try {
+        const domainId = ctx.domainId || entry.domainId || subject.ref.domainId || ctx.WATCHER_PRIMARY_DOMAIN_ID;
+        const [reason, owner] = wait;
         const recorded = stmtRecordReviewDiscoveryWait.run({
           repo: repoPath, prNumber, domainId, subjectId: subject.ref.subjectExternalId,
           head: subject.ref.revisionRef || subject.headSha || null, now: new Date().toISOString(),
@@ -749,6 +748,8 @@ export async function processReviewSubject(entry, ctx) {
         if (recorded.changes === 1) {
           console.log(`[watcher] review discovery wait for ${repoPath}#${prNumber}: ${reason} owner=${owner}`);
         }
+      } catch (error) {
+        console.warn(`[watcher] review discovery wait could not be recorded for ${repoPath}#${prNumber}: ${error?.message || error}`);
       }
     }
   }
@@ -885,8 +886,8 @@ async function runReviewSubjectPhases(entry, ctx) {
       // not inflate either spill lane, including a PR converted back to draft.
       const draft = subject.isDraft ?? subject.draft;
       if (typeof draft === 'boolean') db.prepare(
-        'UPDATE reviewed_prs SET is_draft = ? WHERE repo = ? AND pr_number = ?'
-      ).run(Number(draft), repoPath, prNumber);
+        'UPDATE reviewed_prs SET is_draft = ? WHERE repo = ? AND pr_number = ? AND is_draft IS NOT ?'
+      ).run(Number(draft), repoPath, prNumber, Number(draft));
       if (draft === true) return ['draft', 'pr-author'];
       if (!subject.terminal) {
         try {
@@ -894,13 +895,15 @@ async function runReviewSubjectPhases(entry, ctx) {
           const authority = resolveMergeAuthorityConfigFromDomain(loadDomainConfig(ROOT, effectiveDomainId),
             loaded.getMergeAuthorityConfig(), { fallbackSources: loaded.sources || {} });
           const recovered = await recoverOverdueOwnership({
-            rootDir: ROOT, repo: repoPath, prNumber, subject, reviewStateRow: existing,
+            rootDir: ROOT, repo: repoPath, prNumber, subject,
+            reviewStateRow: existing?.reviewer === '' ? null : existing,
             domainId: effectiveDomainId, enabled: authority?.enabled,
             allowCloserReconciliation: !readWatcherDrainState().active && !pendingReviewIntent(),
             execFileImpl: execFileAsync, logger: console,
           });
           // Pending review recovery and exhausted routes own this pass too;
           // admission must not reuse the row captured before recovery acted.
+          if (recovered?.outcome === 'ama-dispatched') return ['ama-dispatched', 'ama-closer'];
           if (recovered?.outcome != null) return ['ownership-recovery', 'watcher-recovery'];
         } catch (error) {
           console.warn(`[watcher] OWNERDEADLINE-01 deadline recovery deferred for ${repoPath} PR ${prNumber}: ${error.message}`);
@@ -909,17 +912,14 @@ async function runReviewSubjectPhases(entry, ctx) {
       // Waiting observation precedes even an in-process handoff deferral.
       if (reviewerHandoffPending(repoPath, prNumber)) return ['reviewer-handoff-pending', 'watcher'];
       if (effectiveDomainId === CODE_PR_DOMAIN_ID && !subject.terminal) {
-        let docsWait;
-        if (await maybeRunDocsFastPath({ subject, reviewRow: existing, rootDir: ROOT,
+        const docsWait = await maybeRunDocsFastPath({ subject, reviewRow: existing, rootDir: ROOT,
           repoPath, prNumber, execFileImpl: execFileAsync,
-          onHandled: (reason, terminal) => { docsWait = terminal ? 'terminal' : [reason, 'watcher-docs-fast-path']; },
           loadCfg: () => {
             const loaded = loadConfigCached();
             return resolveMergeAuthorityConfigFromDomain(loadDomainConfig(ROOT, effectiveDomainId),
               loaded.getMergeAuthorityConfig(), { fallbackSources: loaded.sources || {} });
-          }, readReviewRow: () => stmtGetReviewRow.get(repoPath, prNumber) })) {
-          return docsWait;
-        }
+          }, readReviewRow: () => stmtGetReviewRow.get(repoPath, prNumber) });
+        if (docsWait) return docsWait === 'terminal' ? docsWait : [docsWait, 'watcher-docs-fast-path'];
       }
       // Run before admission refusals so unavailable capacity, credentials,
       // CI, routing, or a retained claim cannot strand the transfer silently.
@@ -950,7 +950,7 @@ async function runReviewSubjectPhases(entry, ctx) {
           reviewStateRow: existing?.reviewer === '' ? null : existing,
           domainId: effectiveDomainId, enabled: authority?.enabled,
           execFileImpl: execFileAsync, logger: console });
-        if (ownershipRecovery?.outcome === 'ama-dispatched') return;
+        if (ownershipRecovery?.outcome === 'ama-dispatched') return ['ama-dispatched', 'ama-closer'];
         existing = stmtGetReviewRow.get(repoPath, prNumber) || existing;
       } catch (error) {
         console.warn(`[watcher] OWNERPROOF-01 review ownership probe deferred for ${repoPath} PR ${prNumber}: ${error.message}`);
@@ -1171,7 +1171,7 @@ async function runReviewSubjectPhases(entry, ctx) {
 
       if (existing?.pr_state === 'merged') {
         await projectGateStatusSafe(existing);
-        return;
+        return 'terminal';
       }
 
       const inlineReviewerReconcile = await reconcileEligibleReviewingClaimInline({
@@ -2202,6 +2202,7 @@ async function runReviewSubjectPhases(entry, ctx) {
         // still accept the older GitHub label-object shape for historical rows.
         if (!holdObservationFailed && subject.labelsKnown !== false) stmtUpdateReviewLabels.run(JSON.stringify(Array.isArray(subject.labels) ? subject.labels : []), repoPath, prNumber);
         await projectGateStatusSafe(stmtGetReviewRow.get(repoPath, prNumber));
+        if (disposition === 'deferred') return ['argus-security-enqueue-unconfirmed', 'argus'];
         return;
       }
       // GMW-02 — layer the gemini always-on / fallback third-reviewer selection

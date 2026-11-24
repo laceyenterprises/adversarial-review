@@ -328,7 +328,7 @@ for (const scenario of ['first review', 'repair custody', 'legacy rescue intent'
             (globalThis.__docsStatuses ||= []).push(decision.state);
           },
           fetchProtectionImpl: async () => ({}),
-          runDaemonImpl: async () => ({ reason: 'not-eligible', reasons: ['ci-not-green'] }),
+          runDaemonImpl: async () => ({ reason: 'not-eligible', reasons: ['ci-not-green'], docsReviewRequired: true }),
         });
       `;
       const loader = buildLoaderSource({
@@ -363,6 +363,8 @@ for (const scenario of ['first review', 'repair custody', 'legacy rescue intent'
             assert.equal(row.review_attempts, 0);
             assert.match(row.failure_message, /repair-reservation-owns-pr.*fixture-epoch/);
             assert.ok(!claims.some(claim => claim.prNumber === 101));
+            await pollOnce(octokit, pollOptions);
+            assert.deepEqual(db.prepare('SELECT * FROM reviewed_prs WHERE pr_number=101').get(), row);
             mutateRepairEpochs(${JSON.stringify(REPO_ROOT)}, ${JSON.stringify(identity)}, ledger => {
               ledger.repairEpochs[0].terminalAt = new Date().toISOString();
             });
@@ -372,7 +374,7 @@ for (const scenario of ['first review', 'repair custody', 'legacy rescue intent'
           assert.equal(readPassRows(db).find(pass => pass.pr_number === 101).pass_kind, ${JSON.stringify(legacyIntent ? 'rereview' : 'first-pass')});
           await pollOnce(octokit, pollOptions);
           assert.equal(claims.filter(claim => claim.prNumber === 101).length, 1);
-          assert.deepEqual(globalThis.__docsStatuses, ${JSON.stringify(repairOwned ? ['success', 'pending', 'success', 'pending'] : ['success', 'pending'])});
+          assert.deepEqual(globalThis.__docsStatuses, ${JSON.stringify(repairOwned ? ['success', 'pending', 'success', 'pending', 'success', 'pending'] : ['success', 'pending'])});
         `,
       }));
       const env = installGhFixture(tmp);
@@ -387,7 +389,8 @@ fi
         { cwd: REPO_ROOT, encoding: 'utf8', env: fixtureEnv({ ...env, WATCHER_CLAIM_LOOP_FIXTURE_HEAD_101: head }), timeout: 60000 });
       assert.equal(result.status, 0, `${result.stdout || ''}${result.stderr || ''}`);
       assert.match(result.stdout, /PR 101: not-eligible gates=ci-not-green/);
-      if (repairOwned) assert.match(result.stdout, /#101:.*repair-reservation-owns-pr.*fixture-epoch/);
+      if (repairOwned) assert.equal(
+        [...result.stdout.matchAll(/review discovery wait for .*#101:.*repair-reservation-owns-pr.*fixture-epoch/g)].length, 1);
     } finally {
       rmSync(hammerRetryCapFilePath(REPO_ROOT, identity), { force: true });
       rmSync(tmp, { recursive: true, force: true });

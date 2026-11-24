@@ -2197,10 +2197,12 @@ already visible at poll admission or classification do the same; failed status
 withdrawal keeps the PR waiting for a later retry. Kill switch,
 primary-change policy, protection, capability, protective
 predecessors, stop holds and audit remain authoritative. No reviewer result or
-finding count is invented. If the daemon declines the shortcut as
-`not-eligible`, the watcher logs the gate reasons, withdraws the waiver and
-takes the ordinary review path. A first review can proceed when that refusal
-is `ci-not-green`. A failed waiver withdrawal stays with the watcher for retry.
+finding count is invented. On a settled check failure or definite mergeability
+refusal for the docs head, the watcher logs the gate reasons, withdraws the
+waiver and takes the ordinary review path. A first review can proceed with red
+external CI. Unsettled checks or `UNKNOWN` mergeability keep the fast-path wait
+and retry on the same head. A failed waiver withdrawal stays with the watcher
+for retry.
 Once an ordinary reviewer is assigned for the head, later polls keep it on
 the ordinary path.
 

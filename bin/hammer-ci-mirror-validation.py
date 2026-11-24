@@ -21,11 +21,11 @@ from types import ModuleType
 LOG_LIMIT = 4 * 1024 * 1024
 PROGRESS_INTERVAL = 15
 SOCKET_PATH_FAILURE = re.compile(
-    r"sun_path|AF_UNIX path too long|"
-    r"(?:socket|listen|bind)[^\r\n]{0,256}(?:ENAMETOOLONG|path (?:is )?too long)|"
-    r"ENAMETOOLONG[^\r\n]{0,256}(?:socket|\.sock\b)",
-    re.IGNORECASE,
+    r"^[ \t]*(?:OSError: AF_UNIX path too long\b|"
+    r"(?:Error: )?(?:listen|bind) ENAMETOOLONG:)",
+    re.MULTILINE,
 )
+TAP_OUTPUT = re.compile(r"^[ \t]*(?:TAP version \d+\b|(?:not )?ok \d+\b)", re.MULTILINE)
 
 
 class CheckDeadline(BaseException):
@@ -319,7 +319,11 @@ def main():
             )
         elif result.status in {"fail", "inconclusive"}:
             row.update(status="failed", result=result.status)
-            if result.status == "fail" and SOCKET_PATH_FAILURE.search(output):
+            if (
+                result.status == "fail"
+                and not TAP_OUTPUT.search(output)
+                and SOCKET_PATH_FAILURE.search(output)
+            ):
                 row["socketPathFault"] = True
         elif result.status == "skipped":
             row.update(status="not-run", result=result.status)

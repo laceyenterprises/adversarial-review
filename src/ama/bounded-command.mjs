@@ -124,15 +124,15 @@ export async function runBounded(command, args, {
       if (now - started >= timeoutMs) stop('absolute-timeout', 124);
       else if (now - lastOutput >= idleMs) stop('no-progress-timeout', 124);
     }, Math.min(100, idleMs, timeoutMs));
-    const capture = chunk => {
+    const capture = (chunk, stream) => {
       // Diagnostic observers cannot interrupt process-group cleanup.
-      try { observeOutput(chunk); } catch { /* Retain the bounded command result. */ }
+      try { observeOutput(chunk, stream); } catch { /* Retain the bounded command result. */ }
       lastOutput = performance.now();
       totalBytes += chunk.length;
       tail = Buffer.concat([tail, chunk.subarray(-tailBytes)]).subarray(-tailBytes);
     };
-    child.stdout.on('data', capture);
-    child.stderr.on('data', capture);
+    child.stdout.on('data', chunk => capture(chunk, 'stdout'));
+    child.stderr.on('data', chunk => capture(chunk, 'stderr'));
     child.on('error', error => {
       stderr.write(`run-bounded: spawn ${error.code}\n`);
       exitCode = 127;

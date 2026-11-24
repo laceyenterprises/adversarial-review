@@ -10,6 +10,7 @@ import { createValidationScratch, reapValidationScratch } from '../src/ama/hamme
 
 const validator = new URL('../bin/hammer-validate.mjs', import.meta.url).pathname;
 const socketFault = 'harness-fault:socket-path';
+const diagnostics = JSON.parse(readFileSync(new URL('./fixtures/hammer-socket-diagnostics.json', import.meta.url)));
 
 function fixture(t) {
   const root = mkdtempSync('/tmp/ar-sock-test-');
@@ -88,27 +89,24 @@ test('orphan reaping preserves live, recent, and symlink candidates', async t =>
   assert.ok(lstatSync(path('00000006')).isSymbolicLink());
 });
 
-for (const [diagnostic, expected] of [
-  ['OSError: AF_UNIX path too long', socketFault],
-  ['listen ENAMETOOLONG: /fixture/run.sock', socketFault],
-  ['ENAMETOOLONG: open an ordinary file', undefined],
-]) {
-  test(`validation exit is classified from ${diagnostic}`, t => {
+for (const { name, output, socketPathFault } of diagnostics) {
+  test(`validation exit is classified for ${name}`, t => {
     const root = fixture(t);
     const env = { PATH: process.env.PATH, HOME: root, TMPDIR: root,
       NETGUARD_LOG: process.env.NETGUARD_LOG || '', HAM_HQ_ROOT: root, HAM_REPO: 'fixture/example',
       HAM_PR_NUMBER: '42', HAM_REVIEWED_SHA: 'a'.repeat(40), HQ_LAUNCH_REQUEST_ID: 'lrq_fixture',
       HQ_WORKER_RUN_ID: 'wrun_fixture', HAM_CLOSE_VALIDATION_RECEIPT: join(root, 'validation.json') };
     const result = spawnSync(process.execPath, [validator, '--', process.execPath, '-e',
-      `console.error(${JSON.stringify(diagnostic)}); process.exit(1);`], {
+      `process.stderr.write(${JSON.stringify(output)}); process.exitCode = 1;`], {
       cwd: root, env, encoding: 'utf8', timeout: 10_000,
     });
     assert.ifError(result.error);
-    assert.equal(result.status, expected ? 75 : 1, result.stderr);
+    assert.equal(result.status, socketPathFault ? 75 : 1, result.stderr);
     const receipt = JSON.parse(readFileSync(env.HAM_CLOSE_VALIDATION_RECEIPT, 'utf8'));
-    assert.equal(receipt.outcome, expected);
+    assert.equal(receipt.outcome, socketPathFault ? socketFault : undefined);
     const audit = readAmaAuditEntry(root, env.HAM_REPO, 42, env.HAM_REVIEWED_SHA);
-    if (expected) {
+    if (socketPathFault) {
+      assert.match(result.stderr, /validation scratch: \/(?:private\/)?tmp\/ar-hv-[a-f0-9]{8}/);
       const attempt = audit.attempts.at(-1);
       assert.equal(attempt.reason, socketFault);
       assert.equal(attempt.outcome, 'deferred');
@@ -118,3 +116,32 @@ for (const [diagnostic, expected] of [
     } else assert.ok(!audit);
   });
 }
+
+test('canonical TAP battery preserves a product failure alongside a passing socket diagnostic name', t => {
+  const root = fixture(t);
+  const receipt = join(root, 'validation.json');
+  mkdirSync(join(root, 'test'));
+  writeFileSync(join(root, 'package.json'), '{"name":"adversarial-review"}');
+  writeFileSync(join(root, 'test/run-tests.mjs'), `
+    import { spawnSync } from 'node:child_process';
+    process.exitCode = spawnSync(process.execPath,
+      ['--test', '--test-reporter=tap', ...process.argv.slice(2)], { stdio: 'inherit' }).status;
+  `);
+  writeFileSync(join(root, 'test/mixed.test.mjs'), `
+    import test from 'node:test';
+    test('OSError: AF_UNIX path too long', () => {});
+    test('product regression', () => { throw new Error('product failure'); });
+  `);
+  const result = spawnSync(process.execPath, [validator, '--canonical', '--', 'test/mixed.test.mjs'], {
+    cwd: root, encoding: 'utf8', timeout: 10_000,
+    env: { PATH: process.env.PATH, HOME: root, NETGUARD_LOG: process.env.NETGUARD_LOG || '',
+      HAM_CLOSE_VALIDATION_RECEIPT: receipt },
+  });
+  assert.ifError(result.error);
+  assert.equal(result.status, 1, result.stderr);
+  assert.match(result.stdout, /^ok \d+ - OSError: AF_UNIX path too long$/m);
+  assert.match(result.stdout, /^not ok \d+ - product regression$/m);
+  const evidence = JSON.parse(readFileSync(receipt, 'utf8'));
+  assert.equal(evidence.outcome, undefined);
+  assert.equal(evidence.checks[0].status, 'failed');
+});

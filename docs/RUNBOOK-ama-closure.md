@@ -6370,9 +6370,14 @@ The validator gives every local test battery its own real, mode-0700 directory
 under the system `/tmp`. It sets `TMPDIR`, `TMP`, and `TEMP` there and moves
 the hammer's pytest base temp there. Checkouts and close receipts still live
 in the run workspace. The validator checks a 92-byte socket-path budget
-before starting the battery. A setup refusal or a validation failure with
-explicit overlong Unix socket evidence records `harness-fault:socket-path`.
-The watcher owns the same-head retry and refunds the failed launch's charges.
+before starting the battery. A socket budget refusal records
+`harness-fault:socket-path`. Other scratch setup errors return
+`validation-environment-failed`. A failed command can qualify for the socket
+deferral with an explicit runtime diagnostic on stderr and no TAP results.
+The mirror requires this diagnostic in the combined output of every failed
+check, with no TAP results in those checks. The watcher owns the same-head
+retry and refunds the failed launch's charges. The validator logs the scratch
+path for diagnosis even when a runtime error occurs with a short temp root.
 Validation removes its private temp directory after command cleanup. Later
 validations reap directories at least a day old when owner and process
 checks show them unused.

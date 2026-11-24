@@ -294,6 +294,11 @@
       "schemaSurface": "bin/hammer-validate.mjs",
       "relatedSchemaSurfaces": ["bin/hammer-ci-mirror-validation.py"],
       "owner": "Versioned closer controller; standalone caller",
+      "optionalFields": [
+        "outcome: harness-fault:socket-path routes a matching-head status 75 to the socket infrastructure deferral",
+        "checks[].socketPathFault: true when a failed mirror check has an explicit Unix socket runtime diagnostic and no TAP results",
+        "checks[].localReason: includes harness-fault:socket-path when a failed mirror check becomes inconclusive on a socket deferral"
+      ],
       "retention": "Passing command logs are deleted immediately. Caller retains failed/interrupted evidence through diagnosis and removes it only after confirmed process drain and evidence collection. No automatic expiry or aggregate cap; 4 MiB per command."
     },
     {

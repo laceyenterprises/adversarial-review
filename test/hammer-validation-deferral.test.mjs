@@ -14,6 +14,7 @@ for (const [reason, status, deferred, runnerStatus = status] of [
   ['canceled:SIGHUP', 125, false],
   ['absolute-timeout', 125, true],
   ['validation-drain-unconfirmed', 125, true],
+  ['scratch-unwritable', 78, false],
   ['socket-path', 75, false, 42],
   ['mixed-socket-and-product-failures', 42, false],
 ]) {
@@ -55,8 +56,20 @@ for (const [reason, status, deferred, runnerStatus = status] of [
     writeFileSync(loader, `
       import { registerHooks } from 'node:module';
       registerHooks({ resolve(specifier, context, next) {
-        if (context.parentURL === ${JSON.stringify(new URL('../bin/hammer-validate.mjs', import.meta.url).href)}
-          && specifier === '../src/ama/bounded-command.mjs') {
+        if (context.parentURL !== ${JSON.stringify(new URL('../bin/hammer-validate.mjs', import.meta.url).href)}) {
+          return next(specifier, context);
+        }
+        if (${reason === 'scratch-unwritable'} && specifier === '../src/ama/hammer-validation-scratch.mjs') {
+          const source = \`
+            export async function createValidationScratch() {
+              throw Object.assign(new Error('fixture setup error'), { code: 'ENOSPC' });
+            }
+            export function reapValidationScratch() {}
+            export function validationScratchEnv() {}
+          \`;
+          return { shortCircuit: true, url: 'data:text/javascript,' + encodeURIComponent(source) };
+        }
+        if (specifier === '../src/ama/bounded-command.mjs') {
           return { shortCircuit: true, url: 'data:text/javascript,' + encodeURIComponent(${JSON.stringify(runner)}) };
         }
         return next(specifier, context);
@@ -76,6 +89,11 @@ for (const [reason, status, deferred, runnerStatus = status] of [
     assert.equal(existsSync(join(root, `validation-deferred-${head}.json`)), deferred);
     const evidence = JSON.parse(readFileSync(receipt, 'utf8'));
     assert.equal(evidence.status, status);
+    if (reason === 'scratch-unwritable') {
+      assert.match(result.stderr, /validation-environment-failed: .*ENOSPC/);
+      assert.equal(evidence.outcome, undefined);
+      assert.equal(evidence.checks[0].reason, 'validation-environment-failed');
+    }
     if (reason === 'socket-path') {
       assert.equal(evidence.outcome, 'harness-fault:socket-path');
       assert.equal(evidence.checks[0].result, 'inconclusive');

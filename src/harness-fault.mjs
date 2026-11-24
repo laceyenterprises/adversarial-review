@@ -1,7 +1,7 @@
 export const SOCKET_PATH_HARNESS_FAULT = 'harness-fault:socket-path';
 
-export function isSocketPathFailure(output) {
-  return /sun_path|AF_UNIX path too long|(?:socket|listen|bind)[^\r\n]{0,256}(?:ENAMETOOLONG|path (?:is )?too long)|ENAMETOOLONG[^\r\n]{0,256}(?:socket|\.sock\b)/i.test(output);
+export function isSocketPathFailure(line) {
+  return /^[ \t]*(?:OSError: AF_UNIX path too long\b|(?:Error: )?(?:listen|bind) ENAMETOOLONG:)/.test(line);
 }
 
 // Execution failures are not adversarial verdicts. A wall-clock expiry alone

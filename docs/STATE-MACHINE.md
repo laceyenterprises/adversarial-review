@@ -1635,9 +1635,11 @@ runs uncovered checks through the existing validator and records the local
 and CI-covered results before the normal merge gates. See the
 [closure runbook](RUNBOOK-ama-closure.md#leasefair-01-fair-merge-lease-service).
 
-An overlong local validation socket path records `harness-fault:socket-path`
-as an infrastructure deferral. It hands the same head back to the watcher's
-existing uncounted retry, with no local validation or merge authority granted.
+A local validation socket budget refusal or a qualifying runtime socket
+diagnostic records `harness-fault:socket-path` as an infrastructure deferral.
+TAP failures retain their ordinary failure outcome. The socket deferral hands
+the same head back to the watcher's existing uncounted retry, with no local
+validation or merge authority granted.
 
 Durable identity absence at a merge-ready exact head retains page ownership
 with `daemon-identity-absent-parked` and no closer dispatch. The diagnostic reason

@@ -16,7 +16,7 @@ const ORPHAN_GRACE_MS = 24 * 60 * 60 * 1000;
 export function assertValidationSocketBudget(root) {
   const bytes = Buffer.byteLength(root) + SOCKET_SUFFIX_BYTES;
   if (bytes > MAX_SOCKET_BYTES) {
-    throw new Error(`${SOCKET_PATH_HARNESS_FAULT}: temp root and fixture suffix need ${bytes} bytes (budget ${MAX_SOCKET_BYTES})`);
+    throw new Error(`${SOCKET_PATH_HARNESS_FAULT}: temp root ${root} and fixture suffix need ${bytes} bytes (budget ${MAX_SOCKET_BYTES})`);
   }
 }
 

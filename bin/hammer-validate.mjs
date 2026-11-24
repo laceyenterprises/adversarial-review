@@ -315,10 +315,16 @@ async function validate() {
   try {
     try { scratch = await createValidationScratch(); }
     catch (error) {
-      outcome = SOCKET_PATH_HARNESS_FAULT;
-      fallbackReason = outcome;
-      recordSocketPathFault(error.message.startsWith(outcome) ? error.message
-        : `${outcome}: unable to create a writable short temp root (${error.code || 'setup failed'})`);
+      if (error.message.startsWith(`${SOCKET_PATH_HARNESS_FAULT}:`)) {
+        outcome = fallbackReason = SOCKET_PATH_HARNESS_FAULT;
+        recordSocketPathFault(error.message);
+      } else {
+        fallbackReason = 'validation-environment-failed';
+        validationUnknown = true;
+        process.exitCode = 78;
+        console.error(`hammer-validate: ${fallbackReason}: unable to prepare validation scratch (${error.code || 'setup failed'})`);
+        recordHammerPhase(fallbackReason);
+      }
       return;
     }
     try { await reapValidationScratch(dirname(scratch)); }
@@ -356,16 +362,23 @@ async function validate() {
     } else runner = { command: pytest ? 'python3' : args.shift(),
       args: pytest ? ['-u', '-m', 'pytest', '-p', 'ham_pytest_progress', ...args] : args };
     if (valid) {
-      let output = '', packageImportFault = false, socketPathFault = false, stopReason;
+      let output = '', packageImportFault = false, socketPathFault, tapOutput, stopReason;
+      const pending = { stdout: '', stderr: '' };
+      const observeLine = (line, stream) => {
+        localTestFailure ||= /^[ \t]*not ok \d+\b/.test(line);
+        tapOutput ||= /^[ \t]*(?:TAP version \d+\b|(?:not )?ok \d+\b)/.test(line);
+        if (stream === 'stderr') socketPathFault ||= isSocketPathFailure(line);
+      };
       let packages = new Set();
       try { if (canonical && !runner?.required) packages = repositoryPythonPackages(process.cwd()); }
       catch { runner = null; }
-      const observeOutput = chunk => {
+      const observeOutput = (chunk, stream = 'stdout') => {
         output += String(chunk);
         packageImportFault ||= ownPackageImportFault(output, packages);
-        socketPathFault ||= isSocketPathFailure(output);
-        localTestFailure ||= /(?:^|\n)[ \t]*not ok \d+/.test(output);
         output = output.slice(-8192);
+        const lines = (pending[stream] + String(chunk)).split(/\r\n?|\n/);
+        pending[stream] = lines.pop().slice(0, 8192);
+        for (const line of lines) observeLine(line, stream);
       };
       const startedFile = join(scratch, 'pnpm-started');
       const mirror = runner?.args[0] === 'scripts/ci-mirror/run-ci-mirror.py';
@@ -384,26 +397,35 @@ async function validate() {
       // A missing startup receipt distinguishes npm/tool provisioning from a
       // repository script failure. Retry startup once within the same budget.
       for (let attempt = 0; attempt < 2; attempt++) {
+        socketPathFault = tapOutput = false;
         const remainingMs = Math.max(1, deadline - Date.now());
         process.exitCode = execution ? await runBounded(execution.command, execution.args,
           { env: runner.startupReceipt ? { ...env, HAM_PNPM_VALIDATION_STARTED_FILE: startedFile } : env,
             timeoutMs: remainingMs, idleMs: leaseValidationIdleMs(remainingMs),
             observeOutput, stopOnTimeoutExit: mirror,
             observeStop: (reason, status) => {
+              for (const stream of ['stdout', 'stderr']) observeLine(pending[stream], stream);
               stopReason = reason;
               if (canonical && (status === 124 || status === 125)) deferValidation(reason, status);
             } }) : 127;
+        for (const stream of ['stdout', 'stderr']) {
+          observeLine(pending[stream], stream);
+          pending[stream] = '';
+        }
         if (!runner?.startupReceipt || existsSync(startedFile) || process.exitCode === 0
           || process.exitCode >= 124 || Date.now() >= deadline) break;
       }
       runnerExit = process.exitCode;
       const failedMirrorChecks = mirror ? readValidationReceipt().checks.filter(check => check.result === 'fail') : [];
+      // TAP names and diagnostics cannot establish that every failed test was a socket fault.
+      const confirmedSocketPathFault = mirror
+        ? runnerExit === 42 && failedMirrorChecks.length > 0 && failedMirrorChecks.every(check => check.socketPathFault)
+        : socketPathFault && !tapOutput && !localTestFailure;
       if (!stopReason && runnerExit > 0 && runnerExit < 124
-        && (mirror ? runnerExit === 42 && failedMirrorChecks.length > 0
-          && failedMirrorChecks.every(check => check.socketPathFault) : socketPathFault)) {
+        && confirmedSocketPathFault) {
         outcome = SOCKET_PATH_HARNESS_FAULT;
         fallbackReason = outcome;
-        recordSocketPathFault(`${outcome}: local validation reported an overlong Unix socket path; retry with a short writable temp root.`);
+        recordSocketPathFault(`${outcome}: local validation reported an overlong Unix socket path (validation scratch: ${scratch}).`);
         return;
       }
       const inspectionUnavailable = mirror && runnerExit === 75

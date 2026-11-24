@@ -50,7 +50,7 @@ export async function disputeFinding({ rootDir, repo, prNumber, headSha, reviewR
   const reviewCurrency = await currency(review.commit_id, headSha);
   if (!await isCurrentAuthoritativeFamilyReview(review, reviews, headSha,
     (from, to) => get(`repos/${repo}/compare/${from}...${to}`), currency)) {
-    throw worldFactError('dispute-review-currency-unproven', 'dispute requires the latest authoritative review in live head ancestry for its family, without a newer reviewed head'
+    throw worldFactError('dispute-review-currency-unproven', 'dispute requires the latest authoritative review applicable to the live head for its family, without a newer reviewed head'
       + (reviewCurrency.current ? '' : `; no merge: ${reviewCurrency.missingProof}`));
   }
   if (blocking.length === 0 && parseNonBlockingFindingsSection(review.body)?.length) {

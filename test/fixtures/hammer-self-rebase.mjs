@@ -82,6 +82,14 @@ if (args[0] === 'advance-base') {
     requiresUpToDateBranch: process.env.HAM_REQUIRES_UP_TO_DATE !== '0',
     mergeStateStatus, prState: 'OPEN', labels: [], candidateHead: state.head, validatedHead: expected });
   log('checks', { at: Number(readFileSync(join(dir, 'clock'), 'utf8')), head: expected, held: existsSync(join(dir, 'lease-held')), conclusion: classifyCheckRollup(checks) });
+  // Model a slow final read without scheduling a real Node child under a
+  // one-second alarm. Production still observes the same absolute deadline.
+  if (['prepredicate-timeout', 'initial-unknown'].includes(process.env.SCENARIO) && state.checkReads === 2) {
+    const latency = Number(process.env.FIXTURE_FINAL_READ_LEAD_SECONDS) - 1;
+    assert.ok(Number.isInteger(latency) && latency > 0);
+    writeFileSync(join(dir, 'clock'), String(now + latency));
+    log('gate-latency', { seconds: latency, completedAt: now + latency });
+  }
   save();
   console.log(JSON.stringify({ ok: verdict.eligible, reasons: verdict.reasons, state: 'OPEN',
     headMatches: state.head === expected, liveHead: state.head, expectedHead: expected,

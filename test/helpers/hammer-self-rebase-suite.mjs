@@ -28,6 +28,9 @@ nodeTest.after(cleanSeeds);
 process.once('exit', cleanSeeds);
 const fixtureClockStart = 1700000000;
 const ciWaitSeconds = 900;
+// Leave real child startup time before the synthetic final read. The fixture
+// consumes the rest as read latency, retaining the final one-second clamp.
+const finalReadLeadSeconds = 17;
 
 // The synchronous shell fixtures can otherwise starve the test reporter until
 // the whole file finishes, tripping a bounded runner's no-output deadline.
@@ -121,10 +124,10 @@ sleep() {
   if [ "$SCENARIO" = ci-shared-deadline ] && [ "$value" -eq 1700000000 ]; then increment=600; fi
   case "$SCENARIO" in
     prepredicate-timeout|initial-unknown)
-      # Both fixtures keep the first observation and the final clamped sleep.
-      # The observation stays the same between those points.
+      # Observe near the deadline with room for a real Node child to start.
+      # Its synthetic read latency retains the final one-second sleep.
       if [ "$(wc -l < "$FIXTURE_DIR/sleeps")" -eq 1 ]; then
-        increment=$((${fixtureClockStart} + ${ciWaitSeconds} - 1 - value))
+        increment=$((${fixtureClockStart} + ${ciWaitSeconds} - ${finalReadLeadSeconds} - value))
       fi ;;
   esac
   printf '%s\\n' "$((value + increment))" > "$FIXTURE_DIR/clock"
@@ -172,7 +175,10 @@ case "$1" in
   --input-type=module)
     if [ -n "\${HAM_RETRY_LEASE_ID:-}" ]; then cat >/dev/null; [ -f "$FIXTURE_DIR/lease-held" ];
     elif [ -n "\${HAM_ADMISSION_ROOT:-}\${HAM_CHECKS_ROOT:-}" ]; then exec "$REAL_NODE" "$@";
-    elif [ -n "\${POST_REMEDIATION_SHA:-}" ]; then cat >/dev/null; exec "$REAL_NODE" "$FIXTURE_HELPER" gate;
+    elif [ -n "\${POST_REMEDIATION_SHA:-}" ]; then
+      cat >/dev/null
+      if [ -n "\${FIXTURE_GATE_REAL_DELAY_SECONDS:-}" ]; then /bin/sleep "$FIXTURE_GATE_REAL_DELAY_SECONDS"; fi
+      exec "$REAL_NODE" "$FIXTURE_HELPER" gate;
     else exec "$REAL_NODE" "$@"; fi ;;
   */hammer-progress.mjs|*/hammer-terminal-audit.mjs) echo '{}' ;;
   */hammer-ci-stop.mjs) exit 0 ;;
@@ -185,7 +191,7 @@ case "$1" in
   *) exec "$REAL_NODE" "$@" ;;
 esac
 `);
-  Object.assign(env, { HAM_NODE_BIN: join(bin, 'node-fixture'), HAM_RUN_DIR: dir, HAM_BASE_HEAD: original,
+  Object.assign(env, { FIXTURE_FINAL_READ_LEAD_SECONDS: String(finalReadLeadSeconds), HAM_NODE_BIN: join(bin, 'node-fixture'), HAM_RUN_DIR: dir, HAM_BASE_HEAD: original,
     HAM_VALIDATION_BASE_SHA: scenario === 'disjoint' ? base : ancestor,
     HAM_AUDIT_DETAILS_FILE: join(dir, 'details'), HAM_AUDIT_REMEDIATED_TOTAL: '2',
     HAM_AUDIT_REMEDIATED_BLOCKING: '1', HAM_AUDIT_REMEDIATED_NON_BLOCKING: '1',
@@ -686,7 +692,8 @@ export function registerHammerSelfRebaseTests(shard) {
     test(`CLOSERCIWAIT-01: ${scenario}`, t => {
       const f = fixture(t, scenario);
       // Exercise the deadline independently of the production default cadence.
-      const result = f.run(scenario === 'prepredicate-timeout' ? { HAM_REMOTE_CI_POLL_SECONDS: '47' } : {});
+      const result = f.run(scenario === 'prepredicate-timeout'
+        ? { HAM_REMOTE_CI_POLL_SECONDS: '47', FIXTURE_GATE_REAL_DELAY_SECONDS: '1.25' } : {});
       const output = result.stdout + result.stderr;
       assert.equal(result.signal, null, output);
       assert.doesNotMatch(output, /predicate-failed|verify-head-error/);
@@ -706,8 +713,10 @@ export function registerHammerSelfRebaseTests(shard) {
         const checkTimes = events.filter(e => e.kind === 'checks').map(e => e.value.at);
         const deadline = checkTimes[0] + ciWaitSeconds;
         const sleeps = readFileSync(join(f.dir, 'sleeps'), 'utf8').trim().split('\n').map(Number);
-        assert.deepEqual(checkTimes, [fixtureClockStart, deadline - 1],
-          'observe pending initially and just short of the absolute deadline');
+        assert.deepEqual(checkTimes, [fixtureClockStart, deadline - finalReadLeadSeconds],
+          'observe pending initially and near the absolute deadline before read latency');
+        assert.deepEqual(events.filter(e => e.kind === 'gate-latency').map(e => e.value),
+          [{ seconds: finalReadLeadSeconds - 1, completedAt: deadline - 1 }]);
         assert.equal(Number(readFileSync(join(f.dir, 'clock'), 'utf8')), deadline);
         assert.equal(sleeps.length, 2, 'one delayed wakeup and one final clamped sleep');
         assert.equal(sleeps[0], 47, 'the fixture accepts a non-default polling cadence');
@@ -809,14 +818,16 @@ export function registerHammerSelfRebaseTests(shard) {
 
   test('CONFLICTBEFORECI-01: UNKNOWN with absent checks observes without rewriting', t => {
     const f = fixture(t, 'initial-unknown');
-    const result = f.run(), output = result.stdout + result.stderr;
+    const result = f.run({ FIXTURE_GATE_REAL_DELAY_SECONDS: '1.25' }), output = result.stdout + result.stderr;
     assert.equal(result.status, 20, output);
     const events = readFileSync(join(f.dir, 'events.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
     assert.equal(events.some(e => e.kind === 'gh' && e.value.some(arg => arg.includes('updatePullRequestBranch'))), false);
     assert.equal(events.some(e => e.kind === 'gh' && e.value[1] === 'merge'), false);
     const checks = events.filter(e => e.kind === 'checks');
     assert.ok(checks.length > 1);
-    assert.deepEqual(checks.map(e => e.value.at), [fixtureClockStart, fixtureClockStart + ciWaitSeconds - 1]);
+    assert.deepEqual(checks.map(e => e.value.at), [fixtureClockStart, fixtureClockStart + ciWaitSeconds - finalReadLeadSeconds]);
+    assert.deepEqual(events.filter(e => e.kind === 'gate-latency').map(e => e.value),
+      [{ seconds: finalReadLeadSeconds - 1, completedAt: fixtureClockStart + ciWaitSeconds - 1 }]);
     assert.equal(Number(readFileSync(join(f.dir, 'clock'), 'utf8')), fixtureClockStart + ciWaitSeconds);
     assert.equal(existsSync(join(f.dir, 'lease-held')), false);
   });

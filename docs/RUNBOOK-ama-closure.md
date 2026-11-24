@@ -7044,7 +7044,8 @@ When the exact-head predicate accepts terminal remediation of a complete
 older-head blocker list, cleanup can also recognize a prior queued re-review
 dismissal. It requires the paginated GitHub timeline to show the native bot
 dismissing that review ID with the matching judged SHA and a distinct queued
-head. The queued head may precede the current head. Cleanup rechecks the review
+head and a `changes_requested` dismissed-review state (case-insensitive).
+The queued head may precede the current head. Cleanup rechecks the review
 and current head and makes no dismissal write in this case. The predicate,
 live merge-writer proof and any admitted HAMFINAL withdrawals still apply.
 Any finding still standing is remediated and

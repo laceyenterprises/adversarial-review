@@ -13,7 +13,8 @@ if (verdict && (verdict.eligible !== true || headMatch?.current !== headSha)) {
   throw new Error('withdrawal revalidation requires eligible exact-head admission');
 }
 const terminal = verdict?.trace?.hamTerminalRemediation;
-// Use the predicate trace only to select a candidate. Cleanup still requires
+// Terminal remediation sets headMatch.ok even when current !== reviewed.
+// Use that trace only to select a candidate. Cleanup still requires
 // the authenticated GitHub event, and the writer still checks live review proof.
 const terminalReviewedHead = headMatch?.ok === true && terminal?.ok === true
   && terminal.terminalReviewProof?.ok === true && terminal.remediationHead === headSha

@@ -19,7 +19,8 @@ function hasQueuedRereviewDismissal(events, review) {
   const actor = event.actor;
   if (!Number.isSafeInteger(event.id) || event.id < 1 || actor?.type !== 'Bot'
     || typeof actor.login !== 'string' || !actor.login.endsWith('[bot]') || !hamAuditCommentAuthorMatches(actor.login)
-    || event.dismissed_review.state !== 'changes_requested') return false;
+    || typeof event.dismissed_review.state !== 'string'
+    || event.dismissed_review.state.toLowerCase() !== 'changes_requested') return false;
   // The request can name an intermediate head. Review currency and terminal
   // validation are checked against today's exact head by the caller.
   const message = /^Request changes judged commit ([a-f0-9]{40}); current head is ([a-f0-9]{40})\. Re-review requested at (\S+) is queued or running for the current head; dismissing the superseded review\.$/

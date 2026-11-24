@@ -78,6 +78,16 @@ test('repaired blocker and disputed advisory survive an authenticated queued re-
       return f.deps.get(path);
     } });
   assert.deepEqual(await run(), { dismissed: [] });
+  for (const state of ['CHANGES_REQUESTED', 'Changes_Requested']) {
+    await t.test(`accepts timeline state ${state}`, async () => assert.deepEqual(await run({
+      events: [{ ...event, dismissed_review: { ...event.dismissed_review, state } }],
+    }), { dismissed: [] }));
+  }
+  for (const state of ['approved', 'commented', 'dismissed', '', null, undefined, 42, {}]) {
+    await t.test(`rejects timeline state ${JSON.stringify(state)}`, async () => assert.rejects(run({
+      events: [{ ...event, dismissed_review: { ...event.dismissed_review, state } }],
+    }), /dismissed review withdrawal authority is missing or invalid/));
+  }
   for (const [name, invalid] of Object.entries({
     'missing event': { events: [] },
     'ambiguous events': { events: [event, { ...event, id: event.id + 1 }] },

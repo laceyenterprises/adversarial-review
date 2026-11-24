@@ -1,9 +1,9 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { existsSync, mkdtempSync, readFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
-import { hasReviewerCancellation } from '../src/adapters/reviewer-runtime/run-state.mjs';
+import { hasReviewerCancellation, writeReviewerRunRecord } from '../src/adapters/reviewer-runtime/run-state.mjs';
 import {
   cancelActiveReview,
   parseArgs,
@@ -23,8 +23,8 @@ function insertReviewingRow(rootDir, overrides = {}) {
       `INSERT INTO reviewed_prs (
         repo, pr_number, reviewed_at, reviewer, pr_state, linear_ticket,
         review_status, review_attempts, reviewer_session_uuid, reviewer_pgid,
-        reviewer_started_at, reviewer_head_sha
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+        reviewer_started_at, reviewer_head_sha, failure_message
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
     ).run(
       overrides.repo || 'laceyenterprises/adversarial-review',
       overrides.prNumber || 149,
@@ -37,11 +37,52 @@ function insertReviewingRow(rootDir, overrides = {}) {
       overrides.reviewerSessionUuid || 'session-149',
       overrides.reviewerPgid ?? 2468,
       overrides.reviewerStartedAt || '2026-05-24T15:01:00.000Z',
-      overrides.reviewerHeadSha || 'abc123'
+      overrides.reviewerHeadSha || 'abc123',
+      overrides.failureMessage || null,
     );
   } finally {
     db.close();
   }
+}
+
+for (const outcome of ['matched', 'reused-group', 'replacement-row']) {
+  test(`native cancel of a restored bounce claim checks ${outcome}`, async () => {
+    const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+    const repo = 'laceyenterprises/adversarial-review';
+    const prNumber = 149;
+    const sessionUuid = 'session-149';
+    const headSha = 'abc123';
+    const pgid = 2468;
+    const spawnedAt = '2026-05-24T15:01:00.000Z';
+    const context = { repo, prNumber, reviewerSessionUuid: sessionUuid, reviewerHeadSha: headSha };
+    try {
+      insertReviewingRow(rootDir, { failureMessage: '[daemon-bounce] Original custody restored' });
+      writeReviewerRunRecord(rootDir, { sessionUuid, pgid, spawnedAt, subjectContext: context });
+      const signals = [];
+      const result = await cancelActiveReview({
+        rootDir, repo, prNumber,
+        processKill: (_target, signal) => signals.push(signal),
+        execFileImpl: async () => {
+          if (outcome === 'replacement-row') {
+            const db = openReviewStateDb(rootDir);
+            try {
+              db.prepare(`UPDATE reviewed_prs SET reviewer_session_uuid = 'replacement'`).run();
+            } finally {
+              db.close();
+            }
+          }
+          const start = outcome === 'reused-group' ? '2026-05-24T15:01:30.000Z' : spawnedAt;
+          const [weekday, month, day, year, clock] = new Date(start).toString().split(' ');
+          return { stdout: `${pgid} ${weekday} ${month} ${day} ${clock} ${year} node /fixture/src/reviewer.mjs ${JSON.stringify(context)}` };
+        },
+      });
+      assert.equal(result.signalled, outcome === 'matched');
+      assert.deepEqual(signals, outcome === 'matched' ? [0, 'SIGTERM'] : [0]);
+      assert.equal(hasReviewerCancellation(rootDir, { sessionUuid, headSha, pgid }), outcome === 'matched');
+    } finally {
+      rmSync(rootDir, { recursive: true, force: true });
+    }
+  });
 }
 
 test('cancelActiveReview signals persisted reviewer process group without mutating review row', async () => {

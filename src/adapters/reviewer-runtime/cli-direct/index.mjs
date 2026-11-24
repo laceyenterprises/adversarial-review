@@ -17,6 +17,7 @@ import {
 } from '../../../reviewer-github-budget.mjs';
 import { resolveNodeBin } from '../../../node-interpreter.mjs';
 import { isPgidAlive, verifyPgidIdentity } from '../../../process-group-identity.mjs';
+import { directReviewerIdentity, verifyDirectReviewerIdentity } from '../../../reviewer-process-identity.mjs';
 import { domainRequiresMcpOAuth } from '../domain-mcp-oauth.mjs';
 import { AGY_IDENTITY_REVIEW_ID_ENV, AGY_IDENTITY_USER_ENV } from '../../../agy-reviewer-identities.mjs';
 import {
@@ -497,7 +498,7 @@ function createCliDirectReviewerRuntimeAdapter({
       runtime: 'cli-direct',
       state: 'launching',
       pgid: null,
-      spawnedAt,
+      spawnedAt: now(),
       lastHeartbeatAt: null,
       reattachToken: sessionUuid,
       subjectContext,
@@ -595,7 +596,7 @@ function createCliDirectReviewerRuntimeAdapter({
                 state: currentRecord.state,
               }).then(() => null, (err) => err);
             } else {
-              const spawnedAt = currentRecord.spawnedAt || authoritativeSpawnedAt;
+              const spawnedAt = currentRecord.pgid ? currentRecord.spawnedAt : authoritativeSpawnedAt;
               const lastHeartbeatAt =
                 currentRecord.lastHeartbeatAt || spawnedAt || authoritativeSpawnedAt;
               record = updateReviewerRunRecord(rootDir, currentRecord, {
@@ -808,16 +809,13 @@ function createCliDirectReviewerRuntimeAdapter({
     const pgid = Number.isInteger(normalized.pgid) ? normalized.pgid : null;
     if (normalized.sessionUuid && pgid && isPgidAlive(pgid, processKillImpl)) {
       const tails = readSideChannelTailsBestEffort(rootDir, normalized.sessionUuid);
-      // Verify the live PGID's start time matches the record's spawnedAt
-      // before reaping. After a daemon bounce, macOS may have recycled the
-      // PID onto an unrelated process (a user shell, another launchd job,
-      // anything). SIGTERM/SIGKILL to that PGID would be a friendly-fire
-      // kill of bystander processes. Only kill when identity is confirmed;
-      // otherwise record as failed `daemon-bounce` without touching the
-      // live PGID.
-      const identity = await verifyPgidIdentity(pgid, normalized.spawnedAt, { execFileImpl });
-      if (identity.match) {
-        const adoptedRecord = updateReviewerRunRecord(rootDir, normalized, {
+      const identity = directReviewerIdentity(normalized)
+        ? await verifyDirectReviewerIdentity(normalized, { execFileImpl })
+        : await verifyPgidIdentity(pgid, normalized.spawnedAt, { execFileImpl });
+      const current = readReviewerRunRecord(rootDir, normalized.sessionUuid);
+      if (identity.match && current?.state === normalized.state
+        && current.state !== 'completed' && current.pgid === pgid && current.spawnedAt === normalized.spawnedAt) {
+        const adoptedRecord = updateReviewerRunRecord(rootDir, current, {
           state: 'heartbeating',
           adoptedAfterBounce: true,
           lastHeartbeatAt: now(),
@@ -835,34 +833,36 @@ function createCliDirectReviewerRuntimeAdapter({
           reattachToken: adoptedRecord.reattachToken,
         });
       }
-      const refusal = `cli-direct refuses to adopt pgid ${pgid}: PID has been recycled, NOT killing (${identity.reason || 'identity probe failed'})`;
+      // A live group with inconclusive identity is neither adopted nor absent.
+      // Leave custody with watcher reconciliation and never project a retry.
+      const refusal = `cli-direct could not verify live reviewer group ${pgid}: ${identity.reason || 'run record changed'}`;
       logger.log?.(`[cli-direct] ${refusal}`);
-      const failedRecord = updateReviewerRunRecord(rootDir, normalized, {
-        state: 'failed',
-        lastHeartbeatAt: now(),
-      });
       return emptyResult({
         ok: false,
-        spawnedAt: failedRecord.spawnedAt,
-        failureClass: 'daemon-bounce',
+        spawnedAt,
+        failureClass: 'reviewer-custody-unconfirmed',
         stderrTail: [refusal, tails.stderrTail].filter(Boolean).join('\n'),
         stdoutTail: tails.stdoutTail,
         pgid,
-        reattachToken: failedRecord.reattachToken,
+        reattachToken: normalized.reattachToken,
         error: refusal,
       });
     }
     const tails = normalized.sessionUuid ? readSideChannelTailsBestEffort(rootDir, normalized.sessionUuid) : {};
+    let failureClass = 'daemon-bounce';
     if (normalized.sessionUuid) {
-      updateReviewerRunRecord(rootDir, normalized, {
-        state: 'failed',
-        lastHeartbeatAt: now(),
-      });
+      const current = readReviewerRunRecord(rootDir, normalized.sessionUuid);
+      if (current?.state === normalized.state && current.state !== 'completed'
+        && current.pgid === normalized.pgid && current.spawnedAt === normalized.spawnedAt) {
+        updateReviewerRunRecord(rootDir, current, { state: 'failed', lastHeartbeatAt: now() });
+      } else {
+        failureClass = 'reviewer-custody-unconfirmed';
+      }
     }
     return emptyResult({
       ok: false,
       spawnedAt,
-      failureClass: 'daemon-bounce',
+      failureClass,
       stderrTail: tails.stderrTail || 'cli-direct reviewer process group is no longer alive after kernel daemon bounce',
       stdoutTail: tails.stdoutTail || null,
       pgid,

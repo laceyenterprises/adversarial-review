@@ -519,6 +519,8 @@
       "owner": "watcher",
       "codeSources": [
         "src/reviewer-reattach.mjs",
+        "src/daemon-bounce-recovery.mjs",
+        "src/daemon-bounce-posted-review.mjs",
         "src/review-state-statements.mjs",
         "src/watcher.mjs",
         "src/review-state.mjs",
@@ -887,6 +889,41 @@
           "to": "posted",
           "trigger": "certain budget suppression restores latest delivered review identity under queued request CAS; live closure gates remain required",
           "codeSource": "src/hamclose-review-admission.mjs"
+        },
+        {
+          "id": "review-row.40",
+          "from": "pending",
+          "to": "reviewing",
+          "trigger": "restore the verified live daemon-bounce claim for the exact head, session and group before admission",
+          "codeSource": "src/daemon-bounce-recovery.mjs"
+        },
+        {
+          "id": "review-row.41",
+          "from": "failed",
+          "to": "reviewing",
+          "trigger": "restore the verified live daemon-bounce claim for the exact head, session and group before admission",
+          "codeSource": "src/daemon-bounce-recovery.mjs"
+        },
+        {
+          "id": "review-row.42",
+          "from": "reviewing",
+          "to": "posted",
+          "trigger": "settle the exact GitHub review artifact after an adopted bounce claim drains",
+          "codeSource": "src/daemon-bounce-posted-review.mjs"
+        },
+        {
+          "id": "review-row.43",
+          "from": "reviewing",
+          "to": "pending",
+          "trigger": "adopted bounce claim has confirmed exit and no posted review; return to bounded recovery without spending an attempt",
+          "codeSource": "src/reviewer-reattach.mjs"
+        },
+        {
+          "id": "review-row.44",
+          "from": "reviewing",
+          "to": "failed",
+          "trigger": "adopted bounce claim has confirmed exit and no posted review while lease recovery is disabled; preserve counters",
+          "codeSource": "src/reviewer-reattach.mjs"
         }
       ]
     },
@@ -2001,6 +2038,8 @@
     }
   ],
   "sourceProjectionSha256": {
+    "src/daemon-bounce-posted-review.mjs": "519aa6ebabec28765a71f80f291b9e4b3c1448a1e35e8f02c5ba441602eae2ea",
+    "src/daemon-bounce-recovery.mjs": "6a237b2cf7d8ed880402de5ad9a9789e36a836e00f66a98ebea5f9b7dcb44b6b",
     "src/explicit-review-intent.mjs": "30ab2cb4f95c2b8ffec30d37a9150fea87efefd430609b8f8d46802e081109e3",
     "src/follow-up-operator-label.mjs": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
     "src/closer-head-rereview-decline.mjs": "21b6becc81f55d341b989d878161c82ad25b25a1ab1e8136c8cdf264315882b8",
@@ -2015,7 +2054,7 @@
     "src/review-statuses.mjs": "e5b4f877397ccae443c0ea47babdad7c83d71b6f474a31ad92130b88382f6a7b",
     "src/adapters/reviewer-runtime/agent-os-hq/index.mjs": "8ecf105dc9f46ac09f6a8fb369c14ff7e9cfd1bc17a46da4d87fa146a1bf4d2d",
     "src/adapters/reviewer-runtime/agent-runtime/index.mjs": "37a25e62f889f9d87e83a20495a9a3baef75f53db163ef6ed7638f7d6ac09f82",
-    "src/adapters/reviewer-runtime/cli-direct/index.mjs": "6cc1691412ebaf017344318149467a4f604ba2a3fb1634d803a6d1964fe66a7d",
+    "src/adapters/reviewer-runtime/cli-direct/index.mjs": "7504ea77f768c47f85cbb5ecf9d4b00e73635571b363460608854e9ed480b991",
     "src/adapters/reviewer-runtime/run-state.mjs": "58c66556e1e4eeb550b001c00daeebcb22ed72daf475d2ced6703926a7ce2729",
     "src/ama-closure-orchestration.mjs": "acf5f358791a967734f8ca3ef415e4fd24ba671c3d09fc8d86170be846a5eb6b",
     "src/ama/closer-lease.mjs": "c2aa021100d2cc5fc0ba2de3ca035dab42d46d416039853d0df4a69a8b2c3900",
@@ -2031,7 +2070,7 @@
     "src/review-state-statements.mjs": "020ca2b4bd412ccfa4eaec2c76e9c7a9d62c8bad9fb17e6e255c668e29bde0a9",
     "src/review-state.mjs": "861c0e309b2cc49c8023a86c7354ea7ab9ec673aec9f9a751510587ad6777b94",
     "src/reviewer-ci-admission.mjs": "b24995f796ae6af2e665d93a30c954b1c78fc59ce62e88074cfb69b965837bdf",
-    "src/reviewer-reattach.mjs": "2b27ac21c80425cf460e18f0080d4decf63c28c7bbbd3f6878514160c989efc7",
+    "src/reviewer-reattach.mjs": "3a2e816e46dce96f70ef53ec38397beb2e85419a26dae48af9424c87a2eaf804",
     "src/reviewer.mjs": "10b8e5b50611cebbcffabc5e5709ffcbf33ed856f469c2a946ed14d72c775e88",
     "src/watcher.mjs": "93ce86a60d5eb815311bbe66546e90969fdd1c0ac4e465cf6f81b30f85669ba9",
     "src/adapters/reviewer-runtime/fixture-stub/index.mjs": "551075e64dc0fba15d5411f1d79297bedec2d3e17accecc5c496c04dab3e26ad",

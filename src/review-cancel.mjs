@@ -3,7 +3,8 @@ import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 import { writeFileAtomic } from './atomic-write.mjs';
 import { isPgidAlive, verifyPgidIdentity } from './process-group-identity.mjs';
-import { recordReviewerCancellation } from './adapters/reviewer-runtime/run-state.mjs';
+import { readReviewerRunRecord, recordReviewerCancellation } from './adapters/reviewer-runtime/run-state.mjs';
+import { isDaemonBounceFailure, verifyBouncedReviewerIdentity } from './daemon-bounce-recovery.mjs';
 import {
   getReviewRow,
   openReviewStateDb,
@@ -24,8 +25,9 @@ const VALID_SIGNALS = new Set(['SIGTERM', 'SIGINT', 'SIGHUP', 'SIGKILL']);
 // The default behavior is unchanged: passing no `--allow-status` flag keeps
 // the strict `reviewing`-only guard.
 const DEFAULT_CANCELLABLE_STATUSES = new Set(['reviewing']);
-// Statuses that may be added via --allow-status. Excludes `pending`
-// (nothing to signal — no subprocess) and the sticky terminal states
+// Statuses that may be added via --allow-status. A bounced `pending` row can
+// retain a live subprocess. The watcher must restore verified custody first.
+// Also excludes sticky terminal states
 // (`failed-orphan`, `malformed`) where cancel semantics don't apply.
 const ALLOW_STATUS_OPTIONS = new Set([
   'reviewing',
@@ -133,6 +135,7 @@ async function sendReviewerSignal({
   signal,
   processKill = process.kill,
   execFileImpl,
+  verifyIdentity = () => verifyPgidIdentity(pgid, startedAt, { execFileImpl }),
   recordIntent,
 } = {}) {
   if (!pgid) {
@@ -144,7 +147,7 @@ async function sendReviewerSignal({
   if (!isPgidAlive(pgid, processKill)) {
     return { signalled: false, target: { kind: 'process-group', id: pgid }, error: 'process-group-not-found' };
   }
-  const identity = await verifyPgidIdentity(pgid, startedAt, { execFileImpl });
+  const identity = await verifyIdentity();
   if (!identity.match) {
     return {
       signalled: false,
@@ -240,12 +243,27 @@ async function cancelActiveReview({
     }
 
     const pgid = reviewerCancelHandle(row);
+    const bounced = isDaemonBounceFailure(row);
+    if (bounced && row.review_status !== 'reviewing') {
+      throw new Error('Bounced reviewer custody must be restored to reviewing before cancellation.');
+    }
     const signalResult = await sendReviewerSignal({
       pgid,
       startedAt: row.reviewer_started_at || null,
       signal,
       processKill,
       execFileImpl,
+      verifyIdentity: bounced ? async () => {
+        if (!row.reviewer_session_uuid) return { match: false };
+        const record = readReviewerRunRecord(rootDir, row.reviewer_session_uuid);
+        const match = await verifyBouncedReviewerIdentity(record, row, { execFileImpl });
+        const fresh = getReviewRow(db, { repo, prNumber });
+        return { match: match && fresh?.review_status === 'reviewing'
+          && fresh.reviewer_session_uuid === row.reviewer_session_uuid
+          && fresh.reviewer_head_sha === row.reviewer_head_sha
+          && fresh.reviewer_pgid === row.reviewer_pgid
+          && fresh.reviewer_started_at === row.reviewer_started_at };
+      } : undefined,
       recordIntent: terminal && row.reviewer_session_uuid && row.reviewer_head_sha
         ? () => recordReviewerCancellation(rootDir, {
           sessionUuid: row.reviewer_session_uuid,

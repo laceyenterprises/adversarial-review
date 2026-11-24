@@ -512,6 +512,16 @@ function reapRunningPassTimeouts({
     try {
       const startedMs = parseTimestampMs(row.started_at);
       if (startedMs == null) continue;
+      const sessionUuid = reviewerSessionUuidFromPass(row);
+      const currentReview = getReviewRow.get(row.repo, row.pr_number);
+      const sameSession = sessionUuid && currentReview?.reviewer_session_uuid === sessionUuid;
+      if (sameSession && isDaemonBounceFailure(currentReview)
+        && (currentReview.review_status === 'reviewing'
+          || (currentReview.reviewer_pgid && isReviewerAlive(currentReview.reviewer_pgid) !== false))) {
+        // Bounce reconciliation owns this claim until it can check GitHub after
+        // exit. A failed run record or an unreadable process probe is not exit.
+        continue;
+      }
       const postedReviewArtifact = hasPostedReviewArtifact(row);
       const bodyCapturedMs = parseTimestampMs(row.body_captured_at);
       const observedNow = now();
@@ -597,7 +607,6 @@ function reapRunningPassTimeouts({
         continue;
       }
       const passMetadata = parseMetadataJson(row.metadata_json);
-      const sessionUuid = reviewerSessionUuidFromPass(row);
       // The CLI run record becomes terminal before post/freshness settlement ends.
       // The watcher owns this session until spawnReviewer finishes its settle.
       if (sessionUuid && inFlightReviewerSessions.has(sessionUuid)) continue;
@@ -608,8 +617,6 @@ function reapRunningPassTimeouts({
         effort: passMetadata.reasoningEffort || row.reasoning_effort,
         ...ceilingConfig,
       });
-      const currentReview = getReviewRow.get(row.repo, row.pr_number);
-      const sameSession = sessionUuid && currentReview?.reviewer_session_uuid === sessionUuid;
       const runRecord = sessionUuid ? readReviewerRunRecord(rootDir, sessionUuid) : null;
       const ownsPass = sameSession || !currentReview;
       const pgid = Number(currentReview?.reviewer_pgid || runRecord?.pgid);

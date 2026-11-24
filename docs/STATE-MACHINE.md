@@ -1237,9 +1237,9 @@ new PR
   this transition is operator-visible: the adversarial gate changes from the
   `failed-orphan` anomaly success projection to the real review verdict
   (`blocking-review`).
-- **Cancellation surface (`src/review-cancel.mjs`).** The canonical CLI for cancelling an in-flight reviewer is `node src/review-cancel.mjs --repo <slug> --pr <n> [--signal SIGTERM] [--allow-status <comma-list>] [reason]`. By default the CLI accepts only rows in `review_status='reviewing'` (the durable claim that a reviewer subprocess is in flight). Supported values for `--allow-status` are `reviewing`, `posted`, `failed`. The flag explicitly excludes `pending` (no subprocess to signal), `failed-orphan` (sticky operator-only recovery; use `npm run retrigger-review` instead), and `malformed` (terminal by design). The canonical surface MUST cover the extended cases so operators do not fall back to `sudo kill -KILL <pgid>` or hand-editing the row to fool the guard.
+- **Cancellation surface (`src/review-cancel.mjs`).** Use `node src/review-cancel.mjs --repo <slug> --pr <n> [--signal SIGTERM] [--allow-status <comma-list>] [reason]`. The default source status is `reviewing`. `--allow-status` accepts `reviewing`, `posted`, and `failed`. A bounced `pending` or `failed` claim can retain a live process. The watcher first restores the verified claim to `reviewing`, after which native cancellation also checks the exact reviewer launch arguments and re-reads the claim before signalling.
   - **`--allow-status posted`** covers the **post-merge race** observed 2026-05-30: a prior attempt's row had already transitioned to `posted` while the watcher had re-spawned a retry whose subprocess outlived the PR's own merge.
-  - **`--allow-status failed`** covers the **draining-subprocess** shape: the subprocess errored (timeout, cleanup-phase exception) and flipped the row to `failed`, but the OS process is still alive — for example holding a file handle, an open Linear API session, or its own SIGTERM teardown timer. Distinct from `failed-orphan`: a `failed` row preserves the reviewer failure evidence for operator inspection unless it matches the bounded infrastructure-recovery classifier (`cascade`, `reviewer-timeout`, `launchctl-bootstrap`, reviewer-spawn `oauth-broken`, or `reviewer-command-failed` from an explicit tag or legacy `[unknown] Command failed...` evidence). Only that dedicated infra claim may promote `failed → reviewing`; generic failed rows are not re-promoted by `stmtMarkAttemptStarted`. The CLI's PID-identity guard (`verifyPgidIdentity` start-time match) is what makes the kill safe if row state changes during cancellation, and the CLI re-fetches the row on `identity-unconfirmed` to surface the new state so the operator can target the live reviewer instead.
+  - **`--allow-status failed`** covers a draining subprocess whose error already flipped the row to `failed`, such as a timeout with cleanup still in progress. Infrastructure retries use the dedicated bounded recovery claim. The CLI checks the process start time before signalling and re-fetches a failed row on `identity-unconfirmed` to surface a concurrent transition.
   - **Audit channel.** The cancellation receipt at `data/review-cancellations/<repo>-pr-<n>-<utc>.json` records the source `review.status`, the resolved `result`, and any `postSignalState` snapshot if the row transitioned mid-cancel. This receipt directory — **not** the SQLite row — is the canonical audit trail for cancels: `cancelActiveReview` runs read-only against `reviewed_prs` (`query_only = 1`), so a successful cancel against a `posted` or `failed` row leaves the row state unchanged. To find historical cancels for a PR after the fact: `ls data/review-cancellations/ | grep -F "pr-<n>"`, then read each JSON to see the source status, requestedBy, requestedAt, reason, and signal outcome.
 - `failed-orphan` is intentionally sticky except for two bounded recovery paths.
   First, if the watcher or `npm run reconcile-posted-orphans -- --apply`
@@ -1310,13 +1310,20 @@ new PR
   no historical `reviewer_started_at` timestamp is available, the GitHub lookup
   omits its lower time bound so a current-head review already posted by the
   orphan can still be recovered despite local/GitHub clock skew.
-- Same-head `[daemon-bounce]` failed/pending claims retain their original session,
-  PGID, start time, and failure evidence while the reviewer is live or recovery
-  is inconclusive within its bounded hold. For a verified live group, timeout
-  expiry requires cleanup before replacement. Before the
-  infrastructure claim, `reconcileDaemonBounceBeforeRetry` verifies the original
-  PGID start time, sends bounded SIGTERM/SIGKILL only to that verified group,
-  confirms group exit, and reprobes GitHub immediately and after 500/1500/3000ms
+- A `[daemon-bounce]` `failed` or `pending` claim with a retained group blocks
+  admission until the persisted reviewer timeout or one-hour fallback if the
+  group's liveness or identity is unverified or the PR head moved. This deadline
+  also applies when liveness becomes unknown during the launch-identity probe.
+  Expiry yields to bounded bounce recovery. `cli-direct` records the subprocess
+  spawn time after preflight. The watcher restores the original claim to
+  `reviewing` only when the current head, row, durable run, and group leader agree.
+  The group leader must match the recorded start time and carry the exact repo,
+  PR number, head, and session in its reviewer arguments. Bounce cleanup rechecks
+  that full launch identity before each signal. Adoption preserves
+  the failure evidence and both counters. A reused group or inconclusive probe
+  grants no authority to adopt or signal.
+- After an adopted reviewer exits, the watcher and the pending-bounce recovery
+  path reprobe GitHub immediately and after 500/1500/3000ms
   for the original reviewer bot's exact-head review since session start. A late
   post persists the exact-head review body, verdict, and GitHub artifact ID in
   the session's matching reviewer pass and queues or deduplicates its follow-up
@@ -1327,13 +1334,11 @@ new PR
   start time, failure timestamp, and head on both failed and pending rows. These
   values travel through admission and queued dispatch; a changed claim loses the
   CAS without clearing the replacement session's evidence or charging an attempt.
-  Missing PGID, start time, liveness or identity evidence holds until the persisted
-  timeout, or a one-hour fallback anchored to failure/start/attempt evidence. After
-  expiry it reprobes GitHub without signaling an unverified process and permits
-  bounded infrastructure recovery. Missing session/head/login evidence falls back
-  to that claim directly; nullable claim fields use exact NULL-safe CAS equality.
-  Unconfirmed exit after verified cleanup, unsafe watcher PGID, or failed GitHub
-  probes defer recovery without spending an attempt or clearing original evidence.
+  Legacy bounce claims without a retained process handle use the existing bounded
+  evidence hold and infrastructure claim. The hold uses the persisted timeout
+  or the one-hour fallback anchored to failure/start/attempt evidence. Nullable
+  claim fields use exact NULL-safe CAS equality. A failed GitHub probe defers
+  recovery without spending an attempt or clearing the original evidence.
 - Overdue orphan auto-retry is deliberately narrow. The watcher only attempts it when the row persisted the original launch timeout and an authoritative reviewer spawn timestamp, the orphan age exceeds that persisted timeout from the actual subprocess start, the process group is confirmed dead after the bounded recovery loop, and GitHub is reprobed over a short delayed window with no late review found. That same steady-state recovery path also settles the runtime reviewer run-state ledger before the SQLite row flips terminal. Any ambiguity falls back to sticky `failed-orphan` instead of launching a second reviewer.
 - Re-review does **not** happen because of prose. It happens because reconciliation resets the row to `pending`.
 - A PR can move from `posted` back to `pending` only via explicit recovery logic or a valid rereview request.

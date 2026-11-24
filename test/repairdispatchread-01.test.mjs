@@ -4,7 +4,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { withoutConfigSchemaDiagnostics } from './helpers/config-schema-diagnostic.mjs';
-import { mkdtempSync, rmSync, mkdirSync, writeFileSync, readFileSync } from 'node:fs';
+import { mkdtempSync, rmSync, mkdirSync, writeFileSync, readFileSync, symlinkSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { createServer } from 'node:http';
@@ -498,6 +498,35 @@ test('a newly observed publication fences a successor during scope verification'
 
 const execute = promisify(execFile);
 const helper = fileURLToPath(new URL('../bin/repair-in-place.mjs', import.meta.url));
+
+for (const [scenario, makeLeaseEntry, diagnostic] of [
+  ['unreadable lease', path => mkdirSync(path), /EISDIR/],
+  ['vanished lease target', path => symlinkSync('missing-lease.json', path), /closer lease snapshot unavailable/],
+]) test(`final-fix recovery CLI fails closed on ${scenario}`, async t => {
+  const rootDir = exhaustedPr(t);
+  const identity = { repo, prNumber };
+  const ownerKey = `ffa-${'f'.repeat(64)}`;
+  const dispatchProjectRef = 'pr-merge-orchestration';
+  const { epoch } = reserveRepairEpoch({ rootDir, ...identity, headSha: head, ownerKey,
+    cause: 'review-cycle-exhausted', dispatchProjectRef });
+  const before = readHammerRetryCapLedger(rootDir, identity);
+  const path = amaCloserLeaseFilePath(rootDir, { ...identity, headSha: head });
+  mkdirSync(dirname(path), { recursive: true });
+  makeLeaseEntry(path);
+  const args = [rootDir, repo, String(prNumber), head, ownerKey, 'false', '', '', dispatchProjectRef, epoch.id];
+
+  await assert.rejects(execute(process.execPath, [helper, ...args], {
+    env: { HQ_ROOT: rootDir, NODE_OPTIONS: process.env.NODE_OPTIONS },
+    timeout: 15000,
+  }), error => {
+    assert.equal(error.code, 75);
+    assert.equal(error.stdout, '');
+    assert.match(withoutConfigSchemaDiagnostics(error.stderr), diagnostic);
+    return true;
+  });
+  assert.deepEqual(readHammerRetryCapLedger(rootDir, identity), before);
+});
+
 const project = 'fixture-project';
 const ownerKey = 'fixture-original-key';
 const launch = 'lrq_fixture_owner';

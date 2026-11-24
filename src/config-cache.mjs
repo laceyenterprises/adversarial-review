@@ -45,6 +45,15 @@ import { contractSchemaPath } from './config-schema.mjs';
 // outside the documented per-tick / per-job hot paths.
 const _CACHE_MAX_SLOTS = 16;
 
+// Static aliases are schema metadata. Preserve duplicate declarations while
+// indexing them once; Unix process.env usually contains only a few of them.
+const _staticEnvAliasCounts = new Map();
+for (const { canonical, aliases } of Object.values(ENV_ALIASES)) {
+  for (const name of [canonical, ...(aliases || []).map(([name]) => name)]) {
+    _staticEnvAliasCounts.set(name, (_staticEnvAliasCounts.get(name) || 0) + 1);
+  }
+}
+
 const _SIGNATURE_HASH_TTL_MS = 1000;
 
 const _configCache = new Map();
@@ -141,9 +150,17 @@ function _cacheKeyFor({ topPath, modulePaths, env, legacyGeminiReviewer = false 
       envAliases.push([name, envView[name]]);
     }
   };
-  for (const { canonical, aliases } of Object.values(ENV_ALIASES)) {
-    addAlias(canonical);
-    for (const [name] of aliases || []) addAlias(name);
+  if (envNames) {
+    for (const name of envNames) {
+      const count = _staticEnvAliasCounts.get(name) || 0;
+      for (let i = 0; i < count; i++) addAlias(name);
+    }
+  } else {
+    // Keep explicit-object and Windows property lookup semantics unchanged.
+    for (const { canonical, aliases } of Object.values(ENV_ALIASES)) {
+      addAlias(canonical);
+      for (const [name] of aliases || []) addAlias(name);
+    }
   }
   for (const [, { canonical, aliases }] of dynamicAppEnvAliases(envView)) {
     addAlias(canonical);
@@ -165,6 +182,9 @@ function _cacheKeyFor({ topPath, modulePaths, env, legacyGeminiReviewer = false 
     legacyGeminiReviewer,
   });
 }
+
+// Internal key inspection seam; deliberately not re-exported by config-loader.
+export const __testCacheHooks = { cacheKeyFor: _cacheKeyFor };
 
 function _touchCacheLru(cacheKey) {
   // Map iteration order is insertion order; re-setting moves the entry

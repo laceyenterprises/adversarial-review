@@ -12,6 +12,9 @@ import { buildDefaultsDict, canonicalSchemaLeaves, flatten, getLeaf, schemaAlias
 import { enforceCiHostingSecurityInvariants, validateGoalLineageConfig, validateGrokRolePins, validateOAuthDeclarations, validateOsgShape, validatePublicHygiene, validateSearch, validateWorkerClassVaults } from './config-policies.mjs';
 import { OVERLAY_PROFILE, loadLayerFile, localSibling, nonBlankString, profileOverlaySibling, resolveProfile } from './config-profile.mjs';
 
+// Internal injection seam for env coercion tests; the public registry is frozen.
+export const __testEnvAliasHooks = { entries: () => Object.entries(ENV_ALIASES) };
+
 export function loadConfig({
   topPath = null,
   modulePaths = [],
@@ -245,7 +248,7 @@ export function loadConfigImpl({
   const appIdsBeforeEnv = ownMapEntryIds(getLeaf(merged, 'apps'));
   const dynamicAppIds = dynamicAppEnvIds(envOverrides);
   const envAliasEntries = [
-    ...Object.entries(ENV_ALIASES),
+    ...__testEnvAliasHooks.entries(),
     ...dynamicAppEnvAliases(envOverrides),
   ];
   for (const [key, info] of envAliasEntries) {

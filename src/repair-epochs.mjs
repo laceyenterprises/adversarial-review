@@ -7,7 +7,7 @@ import { readDispatchLaunches, launchProbe } from './dispatch-read-client.mjs';
 import { launchRequestOwned } from './ama/launch-request-status.mjs';
 import { readHeadAttestationChainForPr, resolveDaemonWorkerIdentityFromHeadAttestation } from './daemon-worker-identity.mjs';
 import { hasUnsettledAmaCloserDispatch } from './ama/dispatch-record-read.mjs';
-import { tryAcquireCloserIntentLock } from './ama/pre-receipt-intent.mjs';
+import { tryAcquireCloserIntentLock, withCloserIntentWriteLock } from './ama/pre-receipt-intent.mjs';
 
 export const REPAIR_EPOCH_CAP = 2;
 export const REPAIR_READ_PREFLIGHT_REQUIRED = 'repair-dispatch-read-preflight-required';
@@ -64,11 +64,13 @@ export function repairOperatorHoldReason(epoch) {
   return repairOwnerProofOverdue(epoch) ? 'repair-owner-unproven' : null;
 }
 
-function canObserveCwpAbsence(rootDir, identity, epoch, now, logger) {
+function canObserveCwpAbsence(rootDir, identity, epoch, now, logger, closerIntentToken) {
   if (!Number.isSafeInteger(identity.prNumber) || identity.prNumber <= 0
     || epoch.ownerLaunch != null || epoch.retryLaunches?.length || epoch.publicationHead || epoch.publicationLaunch
     || !(now - Date.parse(epoch.reservedAt) >= REPAIR_ABSENCE_ESCALATE_MS)) return false;
   try {
+    if (closerIntentToken) return withCloserIntentWriteLock(rootDir, identity, closerIntentToken,
+      () => !hasUnsettledAmaCloserDispatch(rootDir, identity));
     const unlock = tryAcquireCloserIntentLock(rootDir, identity);
     if (!unlock) return false;
     try { return !hasUnsettledAmaCloserDispatch(rootDir, identity); }
@@ -93,6 +95,16 @@ function sameReservationSnapshot(left, right) {
   };
   return isDeepStrictEqual(withoutObservationTime(left), withoutObservationTime(right));
 }
+
+function sameSupersessionSnapshot(current, snapshot) {
+  // The watcher keeps counting canonical absence after absent-unfenced. Growth
+  // alone cannot invalidate a fresh absence proof; resets and all other fields
+  // still fence supersession. Other reservation CAS callers remain strict.
+  return Number.isSafeInteger(snapshot?.absentObservations) && snapshot.absentObservations >= 2
+    && Number.isSafeInteger(current.absentObservations)
+    && current.absentObservations >= snapshot.absentObservations
+    && sameReservationSnapshot(current, { ...snapshot, absentObservations: current.absentObservations });
+}
 const readRepairPublisher = ({ execFileImpl, ...args }) => resolveDaemonWorkerIdentityFromHeadAttestation({
   ...args, readHeadAttestationChainForPrImpl: options => readHeadAttestationChainForPr({
     ...options, execFileImpl, retryDelaysMs: [], timeoutMs: 8000,
@@ -104,7 +116,7 @@ const EXHAUSTION = new Set(['closure-retry-exhausted', 'closure-lifetime-exhaust
   'remediation-round-budget-exhausted', 'review-cycle-cap-paused']);
 
 export async function observeRepairOwner({ rootDir, repo, prNumber, epoch, now = Date.now(),
-  readImpl = readDispatchLaunches, logger = console }) {
+  readImpl = readDispatchLaunches, logger = console, closerIntentToken }) {
   if (!epoch || epoch.reviewHead || epoch.terminalAt) return epoch;
   const unknown = { ...epoch, ownerState: 'unknown' };
   if (typeof repo !== 'string' || !REPO.test(repo) || repo !== repo.trim()
@@ -132,7 +144,7 @@ export async function observeRepairOwner({ rootDir, repo, prNumber, epoch, now =
   if (!result.ok) return unknown;
   if (result.roots?.length === 0 && result.absenceProof?.version === 1
     && result.absenceProof.kind === 'canonical-exact-selector-absence') {
-    if (unscopedCwp && !canObserveCwpAbsence(rootDir, { repo, prNumber }, epoch, now, logger)) return unknown;
+    if (unscopedCwp && !canObserveCwpAbsence(rootDir, { repo, prNumber }, epoch, now, logger, closerIntentToken)) return unknown;
     return { ...epoch, ownerState: 'absent', absentObservations: (epoch.absentObservations || 0) + 1 };
   }
   if (result.roots?.length !== 1) return unknown;
@@ -263,7 +275,7 @@ export async function reconcileRepairOwner({ rootDir, repo, prNumber, headSha, n
   });
   if (reconciled?.ownerState === 'absent-unfenced') {
     const action = isUnscopedCwp(reconciled)
-      ? 'Operator must verify custody and use the CWP enqueue fence and retirement procedure. Use --ledger-absence when the original boot evidence is unavailable.'
+      ? 'Operator must verify custody and use the CWP enqueue fence and retirement procedure; an operator PR update cannot supersede this unscoped reservation. Use --ledger-absence when the original boot evidence is unavailable.'
       : 'Operator must inspect the submitter and key before releasing custody.';
     await observeWait({ rootDir, repo, prNumber, headSha: `${reconciled.baseHead}:${reconciled.id}`,
       waitClass: 'repair-absent-unfenced', immediate: true, now,
@@ -305,7 +317,7 @@ export function repairCause({ ledger, row, cycleExhausted = false, conflicting =
 // reservation; another request cannot mint a second writer on the same head.
 export function reserveRepairEpoch({ rootDir, repo, prNumber, headSha, ownerKey, cause,
   now = new Date().toISOString(), dispatchProjectRef, terminalOwner = null, ownerSnapshot = null,
-  requireReadPreflight = false }) {
+  operatorAbsence = null, requireReadPreflight = false }) {
   if (!SHA.test(headSha) || !ownerKey || !cause
     || (dispatchProjectRef !== undefined && !validProject(dispatchProjectRef))) throw new Error('invalid repair identity');
   return mutateRepairEpochs(rootDir, { repo, prNumber }, ledger => {
@@ -318,10 +330,20 @@ export function reserveRepairEpoch({ rootDir, repo, prNumber, headSha, ownerKey,
       && epochs.find(epoch => epoch.id === terminalOwner.id && epoch.ownerKey === terminalOwner.ownerKey
         && !epoch.reviewHead && !epoch.terminalAt && sameReservationSnapshot(epoch, ownerSnapshot));
     const pending = epochs.find(epoch => epoch !== ended && !epoch.reviewHead && !epoch.terminalAt);
+    const superseded = !replay && pending && operatorAbsence?.ownerState === 'absent'
+      && pending.ownerState === 'absent-unfenced' && pending.absentObservations >= 2
+      && Date.parse(pending.ownerObservedAt) - Date.parse(pending.reservedAt) >= REPAIR_ABSENCE_ESCALATE_MS
+      && !pending.publicationHead && !pending.publicationLaunch
+      && operatorAbsence.id === pending.id && sameSupersessionSnapshot(pending, ownerSnapshot);
+    // A legacy CWP submitter may already have passed its reservation check.
+    // Canonical absence cannot replace the committed enqueue-fence procedure.
+    if (superseded && isUnscopedCwp(pending)) {
+      return { ok: false, reason: 'repair-cwp-enqueue-fence-required', epoch: pending };
+    }
     // Ask the native caller to prove the pair only when this transaction
     // would mint a new epoch. Leave even a terminal predecessor untouched
     // until the caller returns and the same snapshot is checked again.
-    if (requireReadPreflight && !replay && !pending && epochs.length < REPAIR_EPOCH_CAP) {
+    if (requireReadPreflight && (superseded || !replay && !pending && epochs.length < REPAIR_EPOCH_CAP)) {
       return { ok: false, reason: REPAIR_READ_PREFLIGHT_REQUIRED };
     }
     if (ended) {
@@ -332,14 +354,21 @@ export function reserveRepairEpoch({ rootDir, repo, prNumber, headSha, ownerKey,
     if (replay) return replay.terminalAt
       ? { ok: false, reason: 'repair-worker-terminal', epoch: replay }
       : { ok: true, epoch: replay, replayed: true };
-    if (pending) return { ok: false, reason: 'repair-owned', epoch: pending };
-    if (epochs.length >= REPAIR_EPOCH_CAP) return { ok: false, reason: 'repair-epoch-cap', epochs };
+    if (pending && !superseded) return { ok: false, reason: 'repair-owned', epoch: pending };
+    if (!superseded && epochs.length >= REPAIR_EPOCH_CAP) return { ok: false, reason: 'repair-epoch-cap', epochs };
     const epoch = { id: `repair-${randomUUID()}`, ownerKey, baseHead: headSha, cause,
       reservedAt: now, reviewHead: null,
       ...(dispatchProjectRef === undefined ? {} : { dispatchProjectRef }),
       priorSpend: { series: ledger.attemptCount || 0, head: ledger.targetAttemptCount || 0,
         lifetime: ledger.lifetimeAttemptCount || 0 },
       refundedSpend: ledger.selfErrorRefunds || {} };
+    if (superseded) {
+      pending.terminalAt = now;
+      // The successor LRQ does not exist yet. The dispatch key identifies it
+      // and its retry family through the same canonical lookup as ownerKey.
+      pending.supersededBy = { kind: 'operator-repair', launch: ownerKey, at: now };
+      epoch.supersedesEpochId = pending.id;
+    }
     epochs.push(epoch);
     return { ok: true, epoch };
   }, { shouldWrite: result => result.reason !== REPAIR_READ_PREFLIGHT_REQUIRED });

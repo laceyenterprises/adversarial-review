@@ -958,6 +958,15 @@ can retire it using matching committed owner and epoch fences and the retained
 conflict submission evidence, or `--ledger-absence` with fresh canonical
 family absence and clear competing custody when the original evidence is unavailable.
 Retirement restores the existing ownerless clock and SEV1 path.
+After automatic rounds are spent, an operator PR update may atomically replace
+an `absent-unfenced` reservation after fresh absence and custody checks.
+Monotonic absence-count growth does not invalidate that snapshot.
+Unscoped CWP reservations retain custody until fenced retirement; the helper
+returns `repair-cwp-enqueue-fence-required`. Replacements beyond the ordinary
+two-entry cap observe the existing deduplicated cap page with full history.
+The companion owns isolation of the operator-intent environment hint; it is
+not authenticated request provenance. See the
+[operator update procedure](docs/RUNBOOK-ama-closure.md#operator-pr-update-after-the-automatic-remediation-budget-is-spent).
 Reviewer harness refunds are bounded to three per PR across heads; later
 failures retain ordinary infrastructure cap and alert handling. Corrupt or busy
 repair/refund ledgers defer only their PR. See the

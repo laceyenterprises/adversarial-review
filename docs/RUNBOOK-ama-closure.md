@@ -1243,8 +1243,47 @@ reads still run at the normal cadence; a changed identity/state/head/chain or
 expiry forces a fresh publisher read. Verified publication keeps its existing
 durable proof. Successor reservation CAS ignores only `ownerObservedAt`; owner
 identity/state, publication, review/terminal state and spend fields still fence
-concurrent changes. Watcher observation updates retain their full snapshot CAS
-so a late observation cannot overwrite a newer one.
+concurrent changes. Operator supersession additionally tolerates a monotonically
+growing `absentObservations` count while the owner remains `absent-unfenced`;
+a decreased or cleared count still refuses it. Watcher observation updates
+retain their full snapshot CAS so a late observation cannot overwrite a newer one.
+
+### Operator PR update after the automatic remediation budget is spent
+
+When rescue shows `operator-hold (repair-absent-unfenced)` on a PR with
+exhausted remediation rounds, the operator can run the ordinary interactive
+`hq dispatch --pr PR --repo REPO`. The review service rechecks canonical owner
+absence and competing custody, preflights the successor's dispatch scope, then
+atomically supersedes the pending reservation. The ledger records the old
+epoch's terminal timestamp and successor dispatch key while retaining charges,
+refunds and cap history. A live owner, unreadable ownership evidence or
+available remediation rounds keeps ordinary admission in force.
+
+Unscoped CWP conflict reservations return `repair-cwp-enqueue-fence-required`
+and retain custody. Use the committed owner/epoch enqueue-fence and retirement
+procedure below, including `--ledger-absence` when original boot evidence is
+unavailable. A canonical absence read cannot stop an already delayed CWP
+submitter; operator supersession does not waive those fences.
+
+Ordinary admission remains capped at two entries. Operator replacements may
+append beyond that cap, but each such admission observes the existing
+`repair-epoch-cap` SEV1 page with the full ledger history. Its per-PR latch
+deduplicates successful delivery across heads and replacement chains. A failed
+delivery is retried on replay of the replacement reservation.
+
+The local helper currently receives operator intent through
+`HQ_REPAIR_REQUEST_KIND=operator-pr-update`. This is a trusted-caller hint,
+not authenticated request provenance. The Agent OS companion must set it only
+for the current interactive operator dispatch and strip it from worker and
+automatic child environments. This repository cannot enforce the producer's
+environment isolation. Request-bound provenance tied to the dispatch owner key
+remains an Agent OS follow-up; deployments must not treat the ambient variable
+alone as proof of an operator action.
+
+The successor publishes with an explicit force-with-lease against the exact
+head it reserved. If a delayed owner moves the branch first, the successor's
+push fails and the operator must reassess the live head. Changed heads still
+require the normal review-currency and ownership evidence.
 
 ### Retire one fenced CWP conflict reservation (LAC-2303)
 

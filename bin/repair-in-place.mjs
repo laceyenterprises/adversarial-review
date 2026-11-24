@@ -8,7 +8,8 @@ import {
   reserveRepairEpoch, pageRepairCap, observeRepairOwner, replayUnenqueuedFinalFixEpoch,
   REPAIR_READ_PREFLIGHT_REQUIRED,
 } from '../src/repair-epochs.mjs';
-import { readRepairFacts } from '../src/repair-facts.mjs';
+import { automaticRemediationBudgetExhausted, readRepairFacts } from '../src/repair-facts.mjs';
+import { readHammerRetryCapLedger } from '../src/ama/hammer-retry-cap.mjs';
 import { tryAcquireCloserIntentLock } from '../src/ama/pre-receipt-intent.mjs';
 import { readAmaCloserLease, abandonedAmaCloserLeaseOutcome, findLiveAmaCloserLease } from '../src/ama/closer-lease.mjs';
 import { readLaunchRequestStatusFromLedgerAsync } from '../src/session-ledger-read-adapter.mjs';
@@ -62,11 +63,13 @@ async function verifyRepairDispatchScope({ repo, dispatchProjectRef, readContext
 
 export async function main(args, {
   env = process.env, prepareDispatchReadContextImpl = prepareDispatchReadContext,
+  pageRepairCapImpl = pageRepairCap,
 } = {}) {
   if (args.length === 1 && args[0] === '--final-fix-recovery-protocol') {
     return { ok: true, protocol: 'final-fix-recovery-v1' };
   }
   const [rootDir, repo, prRaw, headSha, ownerKey, conflicting, ticket, launcherPidRaw, dispatchProjectRaw, recoveryEpochId] = args;
+  const operatorPrUpdate = !recoveryEpochId && env.HQ_REPAIR_REQUEST_KIND === 'operator-pr-update';
   const dispatchProjectRef = dispatchProjectRaw === '' ? undefined : dispatchProjectRaw;
   const prNumber = Number(prRaw);
   if (!rootDir || !/^[^/\s]+\/[^/\s]+$/.test(repo ?? '') || !(prNumber > 0) || !ownerKey
@@ -91,8 +94,14 @@ export async function main(args, {
     if (!row && conflicting !== 'true') return { ok: true, epoch: null, reason: 'no-open-review-row' };
     facts = readRepairFacts({ rootDir, db, repo, prNumber, headSha, row, conflicting: conflicting === 'true' });
   } finally { db.close(); }
-  if (!facts.cause && !recoveryEpochId) return { ok: true, epoch: null, reason: 'budget-available' };
-  let release = tryAcquireCloserIntentLock(rootDir, { repo, prNumber });
+  const identity = { repo, prNumber };
+  const pending = facts.epochs.find(epoch => !epoch.reviewHead && !epoch.terminalAt);
+  const operatorCandidate = operatorPrUpdate && pending?.ownerState === 'absent-unfenced'
+    && pending.ownerKey !== ownerKey;
+  const supersede = operatorCandidate && automaticRemediationBudgetExhausted(rootDir, identity);
+  const cause = facts.cause || (supersede ? 'remediation-round-budget-exhausted' : null);
+  if (!cause && !recoveryEpochId) return { ok: true, epoch: null, reason: 'budget-available' };
+  let release = tryAcquireCloserIntentLock(rootDir, identity);
   if (!release) return { ok: false, reason: 'closer-submission-owned' };
   const readContext = dispatchReadContext(env, prepareDispatchReadContextImpl);
   const readImpl = (selector, readArgs) => readDispatchLaunches(selector, { ...readArgs, env });
@@ -101,7 +110,7 @@ export async function main(args, {
     const checkClaim = () => readRepairFollowUpClaim(rootDir, {
       repo, prNumber, headSha, ticket,
       launcherPid: /^[1-9]\d*$/.test(launcherPidRaw) ? Number(launcherPidRaw) : null,
-      requireUnowned: Boolean(recoveryEpochId),
+      requireUnowned: Boolean(recoveryEpochId || supersede),
     });
     const claim = checkClaim();
     if (!claim.ok) return claim;
@@ -112,8 +121,8 @@ export async function main(args, {
       && !facts.epochs.some(epoch => epoch.ownerKey === ownerKey || !epoch.reviewHead && !epoch.terminalAt)) {
       return projectRequired(repo);
     }
-    const prLease = (claim.claimedAt || recoveryEpochId)
-      && findLiveAmaCloserLease(rootDir, { repo, prNumber, strict: Boolean(recoveryEpochId) });
+    const prLease = (claim.claimedAt || recoveryEpochId || supersede)
+      && findLiveAmaCloserLease(rootDir, { repo, prNumber, strict: Boolean(recoveryEpochId || supersede) });
     if (prLease && (prLease.headSha.toLowerCase() !== headSha.toLowerCase()
       || !['pending', 'dispatched'].includes(prLease.lease.status)
       || (prLease.lease.status === 'dispatched' && !prLease.lease.lrqId))) {
@@ -146,7 +155,6 @@ export async function main(args, {
         if (owned !== false) return { ok: false, reason: 'closer-owned-or-unknown' };
       }
     }
-    const pending = facts.epochs.find(epoch => !epoch.reviewHead && !epoch.terminalAt);
     const atReservationHead = typeof pending?.baseHead === 'string'
       && pending.baseHead.toLowerCase() === headSha.toLowerCase();
     if (recoveryEpochId && (!atReservationHead || pending.id !== recoveryEpochId
@@ -155,7 +163,7 @@ export async function main(args, {
       || ![undefined, null, 'unknown', 'absent', 'absent-unfenced'].includes(pending.ownerState))) {
       return { ok: false, reason: 'final-fix-reservation-changed' };
     }
-    if (atReservationHead) {
+    if (atReservationHead || supersede) {
       const ready = await readContext();
       if (!ready.ok) return contextUnavailable(ready);
     }
@@ -181,22 +189,36 @@ export async function main(args, {
         ownerKey, dispatchProjectRef, recoveryEpochId, ownerSnapshot: pending });
       return { ...replay, protocol: 'final-fix-recovery-v1' };
     }
-    const terminalOwner = await observeRepairOwner({ rootDir, repo,
-      epoch: atReservationHead ? pending : null, readImpl });
+    const observeOwner = () => observeRepairOwner({ rootDir, ...identity,
+      epoch: atReservationHead || supersede ? pending : null, readImpl, closerIntentToken: release });
+    const observed = await observeOwner();
     const custody = recheckCustody();
     if (!custody.ok) return custody;
-    const reservation = { rootDir, repo, prNumber, headSha, ownerKey,
-      cause: facts.cause, dispatchProjectRef, terminalOwner, ownerSnapshot: pending };
+    const reservation = { rootDir, ...identity, headSha, ownerKey, cause, dispatchProjectRef,
+      terminalOwner: atReservationHead ? observed : null, ownerSnapshot: pending,
+      operatorAbsence: supersede ? observed : null };
     result = reserveRepairEpoch({ ...reservation, requireReadPreflight: true });
     if (result.reason === REPAIR_READ_PREFLIGHT_REQUIRED) {
       const scope = await verifyRepairDispatchScope({ repo, dispatchProjectRef, readContext, readImpl });
       if (!scope.ok) return scope;
+      // Scope verification can take time. Repeat the old owner's read before
+      // committing a supersession, then CAS the persisted reservation.
+      if (reservation.operatorAbsence?.ownerState === 'absent') {
+        const refreshed = await observeOwner();
+        reservation.operatorAbsence = automaticRemediationBudgetExhausted(rootDir, identity) ? refreshed : null;
+      }
       const current = recheckCustody();
       if (!current.ok) return current;
       result = reserveRepairEpoch(reservation);
     }
   } finally { release?.(); }
-  if (result.reason === 'repair-epoch-cap') await pageRepairCap({ rootDir, repo, prNumber, epochs: result.epochs });
+  // Replays retry a failed alert too; the existing per-PR latch deduplicates
+  // successful delivery across replacement chains, heads and process restarts.
+  const history = result.ok && result.epoch?.supersedesEpochId
+    ? readHammerRetryCapLedger(rootDir, identity)?.repairEpochs : null;
+  if (result.reason === 'repair-epoch-cap' || history?.length > facts.epochCap) {
+    await pageRepairCapImpl({ rootDir, repo, prNumber, epochs: history || result.epochs });
+  }
   return { ...result, refundedSpend: facts.refundedSpend };
 }
 

@@ -1897,7 +1897,7 @@ async function dispatchAmaClosureFor({
   };
   const resolvePrimaryReversal = async evidence => {
     if (!primaryReviewAdmitted) return {};
-    const receipt = readPrimaryReversalReview(rootDir, primaryReviewIdentity);
+    const receipt = readPrimaryReversalReview(rootDir, { ...primaryReviewIdentity, db: reviewStateDb });
     if (receipt?.state === 'pending') return { result: reviewHandoff('primary-reversal-review-pending') };
     if (gateSnapshot.activeFollowUpJob || findLiveAmaCloserLease(rootDir, primaryReviewIdentity)) return {};
     return runCoexistenceOperation('primary-reversal-review', async ({ signal: operationSignal }) => {
@@ -1920,7 +1920,7 @@ async function dispatchAmaClosureFor({
     }, { timeoutMs: operationTimeoutMs || loadAwareTimeoutMs(45_000), parentSignal: signal, operationTracker, logger, repoPath, prNumber });
   };
   if (primaryReviewAdmitted) {
-    const receipt = readPrimaryReversalReview(rootDir, primaryReviewIdentity);
+    const receipt = readPrimaryReversalReview(rootDir, { ...primaryReviewIdentity, db: reviewStateDb });
     if (receipt?.state === 'pending') return reviewHandoff('primary-reversal-review-pending');
     if (recordedStop?.refusal?.reasons?.includes('primary-change-reverted')) {
       const handoff = await resolvePrimaryReversal(null);

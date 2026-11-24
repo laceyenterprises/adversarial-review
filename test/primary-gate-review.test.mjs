@@ -9,6 +9,7 @@ import { formatPrimaryReversalReviewContext, queuePrimaryReversalReview, readPri
 import { consumeExplicitReviewIntent } from '../src/explicit-review-intent.mjs';
 import { ensureReviewStateSchema, openReviewStateDb } from '../src/review-state.mjs';
 import { evaluateMergeEligibility } from '../src/ama/merge-eligibility.mjs';
+import { buildReviewerExtraContext } from '../src/reviewer-prompt.mjs';
 import { primaryChangeFixture } from './helpers/primary-change.mjs';
 
 const headSha = 'c'.repeat(40);
@@ -27,6 +28,31 @@ function evidence(finalFiles = []) {
   return { ...primaryChangeFixture(headSha), primaryFiles: [source], finalFiles,
     diagnosticCommitRange: [{ sha: removedAt }, { sha: headSha }] };
 }
+
+test('reversal prompt context follows the reviewed head even after PR metadata advances', async () => {
+  const options = {
+    repo: 'fixture/repo',
+    prNumber: 7,
+    prContext: { headRefOid: removedAt },
+    primaryReversalReview: {
+      headSha,
+      primaryHead,
+      regions: [{ file: source.filename, start: 3, end: 5, commit: removedAt }],
+    },
+    readTenureReviewRangeImpl: () => null,
+    readFindingDisputeReservationsImpl: () => [],
+    fetchLinkedSpecContentsImpl: async () => '',
+    buildHardeningReviewContextImpl: () => '',
+    log: null,
+  };
+  const prompt = await buildReviewerExtraContext({ ...options, reviewedHeadSha: headSha });
+  assert.match(prompt, /## Reverted primary-change regions/);
+  assert.match(prompt, new RegExp(`src/source.mjs.*3–5.*${removedAt}`));
+  for (const reviewedHeadSha of [removedAt, null]) {
+    const otherPrompt = await buildReviewerExtraContext({ ...options, reviewedHeadSha });
+    assert.doesNotMatch(otherPrompt, /## Reverted primary-change regions/);
+  }
+});
 
 test('a later cross-file move preserves the normalized region', () => {
   assert.equal(checkPrimaryChange(evidence([destination]), headSha).ok, true);
@@ -85,6 +111,8 @@ async function runReplay(t, { body, rejected = [] }) {
   assert.equal(request.triggered, true);
   assert.equal(request.reviewRow.review_attempts, 4);
   assert.equal(readPrimaryReversalReview(rootDir, args).state, 'pending');
+  assert.equal(readPrimaryReversalReview(join(rootDir, 'unused'), { ...args, db }).state, 'pending');
+  assert.equal(db.open, true);
   const sessionUuid = 'fixture-review';
   db.prepare(`UPDATE reviewed_prs SET review_status='reviewing', reviewer_head_sha=?, reviewer_session_uuid=?`).run(headSha, sessionUuid);
   assert.equal(consumeExplicitReviewIntent(db, request.explicitReviewIntent, { headSha, sessionUuid }), true);
@@ -99,7 +127,10 @@ async function runReplay(t, { body, rejected = [] }) {
   const replay = queuePrimaryReversalReview({ ...args, db, context });
   assert.equal(replay.triggered, false);
   assert.equal(replay.reason, 'explicit-review-request-consumed');
-  return { refreshed, review, receipt: readPrimaryReversalReview(rootDir, args) };
+  const receipt = readPrimaryReversalReview(rootDir, { ...args, db });
+  assert.deepEqual(receipt, readPrimaryReversalReview(rootDir, args));
+  assert.equal(db.open, true);
+  return { refreshed, review, receipt };
 }
 
 test('a provenance rejection requests one contextual review and returns its verified authorization to merge eligibility', async t => {

@@ -13,10 +13,13 @@ export function queuePrimaryReversalReview({ rootDir, repo, prNumber, headSha, d
     explicitReviewRequest: { ...primaryReversalReviewRequest(headSha), context } });
 }
 
-export function readPrimaryReversalReview(rootDir, { repo, prNumber, headSha }) {
-  const path = join(rootDir, 'data', 'reviews.db');
-  if (!existsSync(path)) return null;
-  const db = new Database(path, { fileMustExist: true, readonly: true, timeout: 100 });
+export function readPrimaryReversalReview(rootDir, { repo, prNumber, headSha, db: existingDb }) {
+  let db = existingDb;
+  if (!db) {
+    const path = join(rootDir, 'data', 'reviews.db');
+    if (!existsSync(path)) return null;
+    db = new Database(path, { fileMustExist: true, readonly: true, timeout: 100 });
+  }
   try {
     if (!db.prepare("SELECT 1 FROM sqlite_schema WHERE name = 'explicit_review_intents'").get()) return null;
     const intent = findExplicitReviewRequest(db, { repo, prNumber, ...primaryReversalReviewRequest(headSha) });
@@ -31,7 +34,7 @@ export function readPrimaryReversalReview(rootDir, { repo, prNumber, headSha }) 
     const active = db.prepare(`SELECT 1 FROM reviewed_prs WHERE repo = ? AND pr_number = ?
       AND reviewer_head_sha = ? AND review_status = 'reviewing'`).get(repo, prNumber, headSha);
     return { context, state: posted ? 'posted' : active ? 'pending' : 'spent', reviewId: posted?.gh_comment_id };
-  } finally { db.close(); }
+  } finally { if (!existingDb) db.close(); }
 }
 
 export function verifyPrimaryReversalReview(receipt, reviews) {

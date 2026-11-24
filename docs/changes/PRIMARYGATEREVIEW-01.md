@@ -11,3 +11,5 @@ The reviewer prompt can include a **Reverted primary-change regions** section. M
 ## Verification
 
 Synthetic replay covers moves, lane-provenance failures, silent reverts, one request per head and previously verified citations. Run `node test/run-tests.mjs test/primary-gate-review.test.mjs test/finalclose-01.test.mjs test/lanereversal-01.test.mjs` offline.
+
+Remediation verifies that the prompt uses the reviewed head even when live PR metadata advances. Closer receipt reads reuse the caller's review-state connection when available. The offline replay covers both connection paths and verifies that the caller's connection remains open.

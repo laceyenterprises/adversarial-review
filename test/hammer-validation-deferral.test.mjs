@@ -13,6 +13,7 @@ for (const [reason, status, deferred, runnerStatus = status] of [
   ['canceled:SIGINT', 125, false],
   ['canceled:SIGHUP', 125, false],
   ['absolute-timeout', 125, true],
+  ['absolute-timeout-with-trailing-failure', 125, true],
   ['validation-drain-unconfirmed', 125, true],
   ['scratch-unwritable', 78, false],
   ['scratch-budget', 75, false],
@@ -50,8 +51,13 @@ for (const [reason, status, deferred, runnerStatus = status] of [
             checks.push({ name: 'product', status: 'failed', result: 'fail' });
           }
           writeFileSync(process.env.HAM_CLOSE_VALIDATION_RECEIPT, JSON.stringify({ checks }));
-        } else options.observeStop(${JSON.stringify(reason)},
-          ${reason.startsWith('canceled:') ? 143 : 125});
+        } else {
+          if (${reason === 'absolute-timeout-with-trailing-failure'}) {
+            options.observeOutput('not ok 1 - product failure without a trailing newline');
+          }
+          options.observeStop(${JSON.stringify(reason)},
+            ${reason.startsWith('canceled:') ? 143 : 125});
+        }
         return ${runnerStatus};
       }`;
     writeFileSync(loader, `
@@ -91,6 +97,11 @@ for (const [reason, status, deferred, runnerStatus = status] of [
     assert.equal(result.status, status, result.stderr);
     assert.doesNotMatch(result.stderr, /local-battery-skipped-github-required-gate-authoritative/);
     assert.equal(existsSync(join(root, `validation-deferred-${head}.json`)), deferred);
+    if (reason === 'absolute-timeout-with-trailing-failure') {
+      const deferral = JSON.parse(readFileSync(join(root, `validation-deferred-${head}.json`), 'utf8'));
+      assert.equal(deferral.localFailureObserved, true);
+      assert.equal(deferral.ciAuthoritative, false);
+    }
     const evidence = JSON.parse(readFileSync(receipt, 'utf8'));
     assert.equal(evidence.status, status);
     if (reason === 'scratch-unwritable') {

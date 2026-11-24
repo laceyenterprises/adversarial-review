@@ -6,7 +6,7 @@ import { join } from 'node:path';
 import test from 'node:test';
 import { readAmaAuditEntry } from '../src/ama/audit.mjs';
 import { classifyCloserOutcome } from '../src/ama/closer-inconclusive-retry.mjs';
-import { createValidationScratch, reapValidationScratch } from '../src/ama/hammer-validation-scratch.mjs';
+import { createValidationScratch, reapValidationScratch, validationScratchEnv } from '../src/ama/hammer-validation-scratch.mjs';
 
 const validator = new URL('../bin/hammer-validate.mjs', import.meta.url).pathname;
 const socketFault = 'harness-fault:socket-path';
@@ -17,6 +17,26 @@ function fixture(t) {
   t.after(() => rmSync(root, { recursive: true, force: true }));
   return root;
 }
+
+test('pytest basetemp relocation preserves flags across shell quoting styles', () => {
+  const root = '/tmp/ar-hv-12345678';
+  for (const option of [
+    '--basetemp=/long/run/tmp-tests',
+    '--basetemp="/long/run with spaces/tmp-tests"',
+    "--basetemp='/long/run with spaces/tmp-tests'",
+    '--basetemp="/long/run with \\"quotes\\"/tmp-tests"',
+    '--basetemp=/first --basetemp="/last path"',
+  ]) {
+    const env = { HAM_RUN_DIR: '/long/run', PYTEST_ADDOPTS: `-q ${option} -o tmp_path_retention_count=1` };
+    const relocated = validationScratchEnv(env, root);
+    const basetemps = option.includes('/first') ? `--basetemp=${root}/p --basetemp=${root}/p` : `--basetemp=${root}/p`;
+    assert.equal(relocated.PYTEST_ADDOPTS, `-q ${basetemps} -o tmp_path_retention_count=1`);
+    assert.equal(env.PYTEST_ADDOPTS, `-q ${option} -o tmp_path_retention_count=1`);
+  }
+  const flags = '-q -k test_basetemp --custom-basetemp=/keep';
+  assert.equal(validationScratchEnv({ HAM_RUN_DIR: '/long/run', PYTEST_ADDOPTS: flags }, root).PYTEST_ADDOPTS, flags);
+  assert.equal(validationScratchEnv({ HAM_RUN_DIR: '/long/run' }, root).PYTEST_ADDOPTS, undefined);
+});
 
 test('validation binds a real Unix socket and resolves a local module from a deep checkout', t => {
   const root = fixture(t);

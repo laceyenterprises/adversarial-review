@@ -25,8 +25,9 @@ export function validationScratchEnv(env, root) {
   const result = { ...env, TMPDIR: root, TMP: root, TEMP: root };
   // Replace the closer's fixed pytest basetemp while preserving caller flags.
   if (env.HAM_RUN_DIR && env.PYTEST_ADDOPTS) {
-    const old = `--basetemp=${JSON.stringify(join(env.HAM_RUN_DIR, 'tmp-tests'))}`;
-    result.PYTEST_ADDOPTS = env.PYTEST_ADDOPTS.replace(old, `--basetemp=${join(root, 'p')}`);
+    result.PYTEST_ADDOPTS = env.PYTEST_ADDOPTS.replace(
+      /(^|\s)--basetemp=(?:"(?:\\.|[^"\\])*"|'[^']*'|\S+)/g,
+      (_option, space) => `${space}--basetemp=${join(root, 'p')}`);
   }
   return result;
 }

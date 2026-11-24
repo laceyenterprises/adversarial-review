@@ -36,3 +36,10 @@ three byte-stable transcript deliveries.
 The isolated helper-launch fixture includes the socket-fault module required
 by stop-origin classification. It still omits the audit dependency so it can
 verify that the helper preserves the wrapped command's exit status and receipt.
+
+Final advisory remediation relocates pytest basetemp arguments with unquoted,
+single-quoted, or double-quoted values while preserving other caller flags.
+The validation observer clears each stream's pending fragment when a stop
+flushes it, preventing the normal completion flush from replaying that fragment.
+Focused scratch and deferral regressions cover quoting and a trailing TAP
+failure observed before timeout deferral.

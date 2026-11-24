@@ -407,7 +407,10 @@ async function validate() {
             timeoutMs: remainingMs, idleMs: leaseValidationIdleMs(remainingMs),
             observeOutput, stopOnTimeoutExit: mirror,
             observeStop: (reason, status) => {
-              for (const stream of ['stdout', 'stderr']) observeLine(pending[stream], stream);
+              for (const stream of ['stdout', 'stderr']) {
+                observeLine(pending[stream], stream);
+                pending[stream] = '';
+              }
               stopReason = reason;
               if (canonical && (status === 124 || status === 125)) deferValidation(reason, status);
             } }) : 127;

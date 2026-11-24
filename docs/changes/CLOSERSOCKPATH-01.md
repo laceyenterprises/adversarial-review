@@ -5,7 +5,8 @@
 Hammer and closer validation use a real, worker-owned temp directory under
 `/tmp`. Node continues to resolve modules from the checkout, and Unix socket
 fixtures have space for their nested paths. The validator cleans up after
-each battery and checks for abandoned directories before subsequent runs.
+each battery and checks for abandoned directories at most once an hour per
+user, including after a timed-out census.
 
 ## Interface changes
 
@@ -15,7 +16,10 @@ runtime socket diagnostic produces `harness-fault:socket-path` and a same-head
 retry through the existing infrastructure deferral flow. TAP output retains
 its ordinary validation status. Other scratch setup errors use
 `validation-environment-failed`. The local validation receipt documents the
-socket outcome and optional per-check evidence.
+socket outcome, the setup or runtime scratch diagnostic, and optional
+per-check evidence. The controller reads the exact-head receipt to route a
+socket fault through the watcher; timeout deferral receipts govern validation
+drain and can allow exact-head GitHub checks to decide.
 
 ## Verification
 

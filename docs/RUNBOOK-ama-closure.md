@@ -6376,11 +6376,15 @@ before starting the battery. A socket budget refusal records
 deferral with an explicit runtime diagnostic on stderr and no TAP results.
 The mirror requires this diagnostic in the combined output of every failed
 check, with no TAP results in those checks. The watcher owns the same-head
-retry and refunds the failed launch's charges. The validator logs the scratch
-path for diagnosis even when a runtime error occurs with a short temp root.
-Validation removes its private temp directory after command cleanup. Later
-validations reap directories at least a day old when owner and process
-checks show them unused.
+retry and refunds the failed launch's charges. The log and local validation
+receipt record the root and budget for a setup refusal or the scratch path
+for a runtime error. A runtime fault can use a socket location outside that
+scratch directory. For repeats, inspect the failed command's diagnostic and
+the location it uses to bind the socket.
+Validation removes its private temp directory after command cleanup. At
+most once an hour per user, a validator scans for directories at least a day
+old and reaps only those that pass the owner and process checks. An
+unavailable census also starts the cooldown.
 
 Local validation uses `hammer-validate.mjs --canonical -- <changed files>`.
 Absolute paths, leading hyphens and parent traversal segments print canonical

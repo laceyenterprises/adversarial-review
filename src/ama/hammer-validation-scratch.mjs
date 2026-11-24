@@ -12,6 +12,7 @@ const MAX_SOCKET_BYTES = 92;
 // temp fixtures, leaving at least 12 bytes below Darwin's 104-byte sun_path.
 const SOCKET_SUFFIX_BYTES = 64;
 const ORPHAN_GRACE_MS = 24 * 60 * 60 * 1000;
+const REAP_INTERVAL_MS = 60 * 60 * 1000;
 
 export function assertValidationSocketBudget(root) {
   const bytes = Buffer.byteLength(root) + SOCKET_SUFFIX_BYTES;
@@ -64,7 +65,31 @@ async function readProcessSnapshot() {
   return readHammerScratchProcessSnapshot({ timeout: 3000, logger: {} });
 }
 
+async function claimReapInterval(base, now) {
+  const uid = process.getuid();
+  const { default: fsExt } = await import('fs-ext');
+  const marker = await open(join(base, `.ar-hv-reap-${uid}`),
+    constants.O_CREAT | constants.O_RDWR | constants.O_NOFOLLOW | constants.O_NONBLOCK, 0o600);
+  try {
+    const stat = await marker.stat();
+    if (!stat.isFile() || stat.uid !== uid || stat.nlink !== 1 || (stat.mode & 0o777) !== 0o600) return false;
+    try { fsExt.flockSync(marker.fd, 'exnb'); }
+    catch (error) {
+      if (['EAGAIN', 'EWOULDBLOCK'].includes(error.code)) return false;
+      throw error;
+    }
+    // A fresh marker is empty. Checkpoint before scanning so a failed census
+    // or an interrupted validator still gives other launches a cooldown.
+    const last = await marker.stat();
+    if (last.size && now - last.mtimeMs < REAP_INTERVAL_MS) return false;
+    await marker.write('1', 0);
+    await marker.utimes(now / 1000, now / 1000);
+    return true;
+  } finally { await marker.close(); }
+}
+
 export async function reapValidationScratch(base, { now = Date.now(), snapshot = readProcessSnapshot } = {}) {
+  if (!await claimReapInterval(base, now)) return;
   const candidates = new Map();
   for (const entry of await readdir(base, { withFileTypes: true })) {
     if (!entry.isDirectory() || !NAME.test(entry.name)) continue;

@@ -219,7 +219,7 @@ function readValidationReceipt() {
   catch { return receipt; }
 }
 
-function finishValidationReceipt(runner, runnerExit, fallbackReason, outcome) {
+function finishValidationReceipt(runner, runnerExit, fallbackReason, socketPathDiagnostic) {
   const observed = readValidationReceipt();
   const status = process.exitCode;
   if (!observed.checks.length && (!observed.perCheck || runnerExit !== 0)) {
@@ -234,9 +234,9 @@ function finishValidationReceipt(runner, runnerExit, fallbackReason, outcome) {
   delete observed.perCheck;
   // A timeout can kill the mirror before its last check records a result.
   for (const check of observed.checks) {
-    if (outcome === SOCKET_PATH_HARNESS_FAULT && check.socketPathFault) {
+    if (socketPathDiagnostic && check.socketPathFault) {
       check.result = 'inconclusive';
-      check.localReason = outcome;
+      check.localReason = SOCKET_PATH_HARNESS_FAULT;
     }
     if (check.status === 'run' && !check.result && runnerExit !== 0) {
       check.status = 'failed';
@@ -245,11 +245,12 @@ function finishValidationReceipt(runner, runnerExit, fallbackReason, outcome) {
       check.localReason = 'validation-interrupted';
     }
   }
-  writeValidationReceipt({ ...observed, status, ...(outcome ? { outcome } : {}) });
+  writeValidationReceipt({ ...observed, status,
+    ...(socketPathDiagnostic ? { outcome: SOCKET_PATH_HARNESS_FAULT, socketPathDiagnostic } : {}) });
 }
 
 function recordSocketPathFault(detail) {
-  console.error(`hammer-validate: ${detail}`);
+  console.error(`hammer-validate: ${SOCKET_PATH_HARNESS_FAULT}: ${detail}`);
   process.exitCode = 75;
   validationUnknown = true;
   // A local rebase can have an unpublished HEAD. Refund the launch's charge
@@ -310,14 +311,16 @@ async function validate() {
     cleanConflictRebase = canonical && hasCompletedConflictRebase() && gitOutput('status', '--porcelain') === '';
   } catch { /* An unreadable binding gives validation no publication authority. */ }
   let scratch;
-  let runner, runnerExit, fallbackReason, outcome;
+  let runner, runnerExit, fallbackReason, socketPathDiagnostic;
   if (closeReceipt) writeValidationReceipt(receipt);
   try {
     try { scratch = await createValidationScratch(); }
     catch (error) {
-      if (error.message.startsWith(`${SOCKET_PATH_HARNESS_FAULT}:`)) {
-        outcome = fallbackReason = SOCKET_PATH_HARNESS_FAULT;
-        recordSocketPathFault(error.message);
+      const prefix = `${SOCKET_PATH_HARNESS_FAULT}: `;
+      if (error.message.startsWith(prefix)) {
+        fallbackReason = SOCKET_PATH_HARNESS_FAULT;
+        socketPathDiagnostic = error.message.slice(prefix.length);
+        recordSocketPathFault(socketPathDiagnostic);
       } else {
         fallbackReason = 'validation-environment-failed';
         validationUnknown = true;
@@ -423,9 +426,9 @@ async function validate() {
         : socketPathFault && !tapOutput && !localTestFailure;
       if (!stopReason && runnerExit > 0 && runnerExit < 124
         && confirmedSocketPathFault) {
-        outcome = SOCKET_PATH_HARNESS_FAULT;
-        fallbackReason = outcome;
-        recordSocketPathFault(`${outcome}: local validation reported an overlong Unix socket path (validation scratch: ${scratch}).`);
+        fallbackReason = SOCKET_PATH_HARNESS_FAULT;
+        socketPathDiagnostic = `local validation reported an overlong Unix socket path (validation scratch: ${scratch}).`;
+        recordSocketPathFault(socketPathDiagnostic);
         return;
       }
       const inspectionUnavailable = mirror && runnerExit === 75
@@ -493,7 +496,7 @@ async function validate() {
       }
     }
   } finally {
-    if (closeReceipt) finishValidationReceipt(runner, runnerExit, fallbackReason, outcome);
+    if (closeReceipt) finishValidationReceipt(runner, runnerExit, fallbackReason, socketPathDiagnostic);
     if (scratch) {
       if (process.exitCode === undefined || process.exitCode === 125) {
         console.error(`hammer-validate: scratch retained for orphan cleanup: ${scratch}`);

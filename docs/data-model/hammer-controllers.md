@@ -190,6 +190,7 @@ controller has no receipt for that invocation.
 | `head` | Full commit SHA captured before the local validation stage |
 | `status` | Effective validator exit code once the helper finishes |
 | `outcome` | Present as `harness-fault:socket-path` for a socket infrastructure deferral. The closer uses it to route exit 75 when the receipt head matches the validation head. |
+| `socketPathDiagnostic` | Present with the socket outcome. Records the over-budget temp root and byte budget for setup refusals, or the allocated scratch path for runtime failures. |
 | `checks` | Ordered records with check name, status and reason, plus local result or exit status when available |
 | `checks[].jobs` | For `ci-covered`, each declared job's `name` and GitHub Actions `runId` (strings); current step mappings also include string `jobId` and the exact `step` name. Legacy job mappings and older receipts omit these optional fields. |
 | `checks[].socketPathFault` | Optional flag set to `true` by the mirror for a failed check with an explicit Unix socket runtime diagnostic and no TAP results. |

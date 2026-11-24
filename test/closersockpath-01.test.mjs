@@ -80,9 +80,16 @@ test('orphan reaping preserves live, recent, and symlink candidates', async t =>
   await reapValidationScratch(root, { snapshot: () => { assert.fail('recent scratch should not request a census'); } });
   await reapValidationScratch(root, { now, snapshot: async () => ({ ps: 'unavailable', lsof: '', cwdTimedOut: true }) });
   assert.ok(existsSync(path('00000001')));
-  await reapValidationScratch(root, { now, snapshot: async () => ({
-    ps: `child TMPDIR=${path('00000003')}`, lsof: `n${path('00000004')}/child`,
-  }) });
+  await reapValidationScratch(root, { now: now + 60_000,
+    snapshot: () => { assert.fail('timed-out census must still enforce the cooldown'); } });
+  assert.ok(existsSync(path('00000001')));
+  let censuses = 0;
+  const later = { now: now + 2 * 60 * 60 * 1000, snapshot: async () => {
+    censuses++;
+    return { ps: `child TMPDIR=${path('00000003')}`, lsof: `n${path('00000004')}/child` };
+  } };
+  await Promise.all([reapValidationScratch(root, later), reapValidationScratch(root, later)]);
+  assert.equal(censuses, 1);
   assert.equal(existsSync(path('00000001')), false);
   assert.equal(existsSync(path('00000005')), false);
   for (const id of ['00000002', '00000003', '00000004']) assert.ok(existsSync(path(id)));
@@ -107,13 +114,17 @@ for (const { name, output, socketPathFault } of diagnostics) {
     const audit = readAmaAuditEntry(root, env.HAM_REPO, 42, env.HAM_REVIEWED_SHA);
     if (socketPathFault) {
       assert.match(result.stderr, /validation scratch: \/(?:private\/)?tmp\/ar-hv-[a-f0-9]{8}/);
+      assert.match(receipt.socketPathDiagnostic, /validation scratch: \/(?:private\/)?tmp\/ar-hv-[a-f0-9]{8}/);
       const attempt = audit.attempts.at(-1);
       assert.equal(attempt.reason, socketFault);
       assert.equal(attempt.outcome, 'deferred');
       assert.equal(attempt.continuation.headSha, env.HAM_REVIEWED_SHA);
       assert.deepEqual(classifyCloserOutcome({ reason: attempt.reason }),
         { kind: 'inconclusive', reason: socketFault, origin: 'infrastructure' });
-    } else assert.ok(!audit);
+    } else {
+      assert.equal(receipt.socketPathDiagnostic, undefined);
+      assert.ok(!audit);
+    }
   });
 }
 

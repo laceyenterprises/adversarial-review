@@ -15,6 +15,7 @@ for (const [reason, status, deferred, runnerStatus = status] of [
   ['absolute-timeout', 125, true],
   ['validation-drain-unconfirmed', 125, true],
   ['scratch-unwritable', 78, false],
+  ['scratch-budget', 75, false],
   ['socket-path', 75, false, 42],
   ['mixed-socket-and-product-failures', 42, false],
 ]) {
@@ -59,9 +60,12 @@ for (const [reason, status, deferred, runnerStatus = status] of [
         if (context.parentURL !== ${JSON.stringify(new URL('../bin/hammer-validate.mjs', import.meta.url).href)}) {
           return next(specifier, context);
         }
-        if (${reason === 'scratch-unwritable'} && specifier === '../src/ama/hammer-validation-scratch.mjs') {
+        if (${reason.startsWith('scratch-')} && specifier === '../src/ama/hammer-validation-scratch.mjs') {
           const source = \`
             export async function createValidationScratch() {
+              if (${reason === 'scratch-budget'}) {
+                throw new Error('harness-fault:socket-path: temp root /fixture/overlong needs 98 bytes');
+              }
               throw Object.assign(new Error('fixture setup error'), { code: 'ENOSPC' });
             }
             export function reapValidationScratch() {}
@@ -92,10 +96,16 @@ for (const [reason, status, deferred, runnerStatus = status] of [
     if (reason === 'scratch-unwritable') {
       assert.match(result.stderr, /validation-environment-failed: .*ENOSPC/);
       assert.equal(evidence.outcome, undefined);
+      assert.equal(evidence.socketPathDiagnostic, undefined);
       assert.equal(evidence.checks[0].reason, 'validation-environment-failed');
+    }
+    if (reason === 'scratch-budget') {
+      assert.equal(evidence.outcome, 'harness-fault:socket-path');
+      assert.equal(evidence.socketPathDiagnostic, 'temp root /fixture/overlong needs 98 bytes');
     }
     if (reason === 'socket-path') {
       assert.equal(evidence.outcome, 'harness-fault:socket-path');
+      assert.match(evidence.socketPathDiagnostic, /validation scratch: \/(?:private\/)?tmp\/ar-hv-/);
       assert.equal(evidence.checks[0].result, 'inconclusive');
     }
     if (reason.startsWith('mixed')) {

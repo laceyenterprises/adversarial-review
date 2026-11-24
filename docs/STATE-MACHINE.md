@@ -2284,27 +2284,30 @@ HAMVALTIMEOUTFLAKE-01 requires an unreadable latest completed read for
 `launch-unreadable`; a scheduling stall alone cannot trigger that transition.
 A validator timeout records `validation-stopped` in the controller and
 `canonical-validation-deferred` for the exact head in the closer. The deferral
-supplies no validation audit. A process-inspection no-verdict uses the same
-deferred handoff. The run will not start another battery on that head.
-LAC-2332: a validation deferral persists source custody outside run scratch,
-keyed to repository, PR and the current target head. The exact local head may
-differ after remediation or rebase. The cleanup owner retains the source bundle,
-check receipts and standalone or controller cleanup proof. Incomplete retention
-keeps source custody in the original workspace. An ended deferral keeps its
-infrastructure refund. Its live head enters `canonical-validation-operator-decision`
-and cannot dispatch a successor until the head changes or the operator resolves
-the hold. A controller stop cannot start a new round. MRQ-20 continuation still
-requires authenticated exact-head coverage, a full set of executed local-only
-checks, confirmed standalone cleanup and declared green GitHub contexts. Legacy
-or incomplete receipts cannot supply that authority. A genuine failed check
-blocks. Cancellation with unknown cleanup retains its cancellation outcome.
-Proved standalone continuation records `continuedAt` on the archived marker and
-CI-authoritative last-phase instead of deferred last-phase; watcher/successor
-gates ignore that marker and its legacy retry fallback. Workspace teardown still
-checks all target-head markers belonging to the ending launch, including
-continued markers, and retains incomplete source. Source/cleanup evidence
-changes refresh the operator notice; corrupt retry evidence holds. Standalone
-SIGKILL cleanup allows one bounded second for group disappearance.
+preserves UNKNOWN, the check evidence and the local source in HQ custody. The
+cleanup owner retains the exact unpublished commit and records drain separately.
+Ordinary same-head stops do not start a fresh battery. Standalone UNKNOWN can
+continue with complete per-check coverage, a clean exact head and confirmed
+cleanup. Current declared contexts must all report green on that head before
+merge.
+
+A completed local conflict repair validates before source-fenced publication
+outside the merge lease. A confirmed local failure blocks its push. An active
+validation stop leaves the terminal result unwritten. Confirmed drain and
+readable launch-bound evidence allow one fresh round to publish an eligible
+UNKNOWN with the captured source as the Git lease. Verify-head reuses a passing
+pre-publish battery or qualified CI deferral only on the same published SHA.
+Without complete selected-check evidence or declared CI, publication leaves a
+watcher continuation. A launch-bound push receipt transfers retry backoff to
+the published head. The watcher refunds the old launch and holds unrecovered
+source on its corresponding live head. Notice refresh follows changes in
+source and cleanup facts. Unreadable custody or an explicitly recorded unsafe custody fallback holds.
+A clean matching-target hold with confirmed cleanup is continued and returns
+to existing paced retry. Legacy retry rows alone and corrupt retry files cannot
+hold unrelated heads. Teardown
+matches the ending launch across target heads and preserves incomplete source.
+The `telegram-responder-guard` no-verdict takes precedence over import-fault
+fallback, and cancellation retains its own outcome with unconfirmed drain.
 Supported CI-mirror commands run in the registered group. An inner command
 deadline also requests group teardown and ends the battery. Per-command
 diagnostics are written beside the validation receipt during execution, so

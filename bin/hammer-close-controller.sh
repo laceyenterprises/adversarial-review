@@ -214,8 +214,15 @@ fi
 # Settle source custody only after the exact repaired head is live.
 if [[ "$ham_close_rebase_state" = ci || "$ham_close_rebase_state" = redrive ]]; then
   [ "${HAM_PUSHED_HEAD:-$ham_close_live_head}" = "$ham_close_local_head" ] || ham_close_finish 20 head-changed
-  "$HAM_NODE_BIN" "$HAM_CLOSE_ROOT/bin/hammer-validate.mjs" --complete-rebase-publication "$ham_close_local_head" \
-    || ham_close_finish $? canonical-validation-deferred
+  ham_close_completion_status=1
+  for ham_close_completion_attempt in 1 2 3; do
+    ham_close_completion_status=0
+    "$HAM_NODE_BIN" "$HAM_CLOSE_ROOT/bin/hammer-validate.mjs" --complete-rebase-publication "$ham_close_local_head" \
+      || ham_close_completion_status=$?
+    [ "$ham_close_completion_status" -ne 0 ] || break
+    [ "$ham_close_completion_attempt" -eq 3 ] || sleep 0.1
+  done
+  [ "$ham_close_completion_status" -eq 0 ] || ham_close_finish "$ham_close_completion_status" canonical-validation-deferred
 fi
 if [ "$ham_close_rebase_state" = redrive ]; then
   export POST_REMEDIATION_SHA="$ham_close_local_head" HAM_PROCEDURE_STEP=local-validation

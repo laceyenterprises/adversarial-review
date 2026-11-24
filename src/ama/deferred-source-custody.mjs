@@ -3,6 +3,7 @@ import { closeSync, copyFileSync, lstatSync, mkdirSync, mkdtempSync, openSync, r
 import fsExt from 'fs-ext';
 import { basename, dirname, join } from 'node:path';
 import { writeFileAtomic } from '../atomic-write.mjs';
+import { readDeferredValidationChecks, readUnknownValidationReceipt } from './local-validation-unknown.mjs';
 
 const sha = value => /^[a-f0-9]{40}$/.test(value || '');
 export const DEFERRED_SOURCE_HOLD = 'canonical-validation-operator-decision';
@@ -19,10 +20,17 @@ function read(path) {
   return JSON.parse(readFileSync(path, 'utf8'));
 }
 
-function withHoldLock(path, action) {
+function withHoldLock(path, action, waitMs = 0) {
   const fd = openSync(`${path}.lock`, 'a', 0o600);
   try {
-    fsExt.flockSync(fd, 'exnb');
+    const deadline = Date.now() + waitMs;
+    for (;;) {
+      try { fsExt.flockSync(fd, 'exnb'); break; }
+      catch (error) {
+        if (!['EAGAIN', 'EWOULDBLOCK'].includes(error.code) || Date.now() >= deadline) throw error;
+        Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 25);
+      }
+    }
     return action();
   } finally { closeSync(fd); }
 }
@@ -60,17 +68,17 @@ export function readDeferredSourceHoldsForLaunch(hqRoot, identity) {
   }
 }
 
-export function continueDeferredSourceCustody(hold) {
+export function continueDeferredSourceCustody(hold, { publishedHead } = {}) {
   return withHoldLock(hold.path, () => {
     const record = read(hold.path);
     if (record.launchRequestId !== hold.launchRequestId || record.sourceHead !== hold.sourceHead
       || record.attempt !== hold.attempt) {
       throw new Error('deferred source identity changed');
     }
-    if (!['bundled', 'matches-target'].includes(deferredSourceStatus(hold))) return false;
-    writeFileAtomic(hold.path, JSON.stringify({ ...record, continuedAt: new Date().toISOString() }), { mode: 0o600 });
+    if (publishedHead !== hold.sourceHead && !['bundled', 'matches-target'].includes(deferredSourceStatus(hold))) return false;
+    writeFileAtomic(hold.path, JSON.stringify({ ...record, continuedAt: new Date().toISOString(), ...(publishedHead && { publishedHead }) }), { mode: 0o600 });
     return true;
-  });
+  }, 1000);
 }
 
 export function deferredSourceIdentity(env) {
@@ -122,7 +130,11 @@ export function retainDeferredCommit(hold, env) {
     try {
       git('update-ref', ref, sourceHead);
       source = { status: 'local-ref-only', ref };
-      const prerequisites = [...new Set([targetHead, ...(sha(validationBase) ? [validationBase] : [])])];
+      // Missing prerequisite objects must not prevent a self-contained bundle.
+      const prerequisites = [...new Set([targetHead, ...(sha(validationBase) ? [validationBase] : [])])]
+        .filter(head => {
+          try { git('cat-file', '-e', `${head}^{commit}`); return true; } catch { return false; }
+        });
       const bundle = join(evidenceDir, 'source.bundle');
       git('bundle', 'create', bundle, ref, ...prerequisites.map(head => `^${head}`));
       const advertised = git('bundle', 'list-heads', bundle, ref);
@@ -157,16 +169,33 @@ export function retainDeferredControllerCleanup(env, recordPath, record) {
   // The validator receives the verify-head snapshot in its own environment.
   // Find its hold through either the dispatch head or the live head it passed
   // back to the owning controller via the run-local pointer.
+  const controller = basename(recordPath);
+  const identity = deferredSourceIdentity(env);
+  let hold;
   try {
-    const { headSha } = read(join(env.HAM_RUN_DIR, `deferred-controller-${basename(recordPath)}`));
-    const hold = readDeferredSourceHold(env.HAM_HQ_ROOT, { ...deferredSourceIdentity(env), headSha });
-    if (hold?.launchRequestId !== record.launchRequestId || hold.controller !== basename(recordPath)) return;
+    const { headSha } = read(join(env.HAM_RUN_DIR, `deferred-controller-${controller}`));
+    hold = readDeferredSourceHold(env.HAM_HQ_ROOT, { ...identity, headSha });
+  } catch { /* A missing pointer may leave a launch-bound marker. */ }
+  if (hold?.launchRequestId !== record.launchRequestId || hold.controller !== controller) {
+    if (record.reason !== 'validation-stopped') return;
+    hold = readDeferredSourceHoldsForLaunch(env.HAM_HQ_ROOT, { ...identity, launchRequestId: record.launchRequestId })
+      .find(candidate => candidate.controller === controller && !candidate.continuedAt);
+  }
+  if (!hold) return;
+  try {
     writeFileAtomic(join(hold.evidenceDir, 'controller-cleanup.json'), JSON.stringify(record), { mode: 0o600 });
     retainDeferredCommit(hold, env);
   } catch { /* A missing final receipt leaves cleanup unconfirmed. */ }
+  if (!record.drained) return;
+  try {
+    const deferred = readUnknownValidationReceipt(env.HAM_RUN_DIR, hold.sourceHead);
+    const validation = deferred && readDeferredValidationChecks(env.HAM_RUN_DIR, hold.sourceHead, deferred);
+    if (validation) retainDeferredValidation(hold.evidenceDir, deferred, validation, deferred.localValidationReceipt);
+  } catch { /* Keep the original snapshot if the final receipt is unreadable. */ }
 }
 
 export function deferredSourceStatus(hold) {
+  if (hold.clean === false) return 'workspace-only';
   try {
     const source = read(join(hold.evidenceDir, 'source.json'));
     if (source.status === 'bundled') {
@@ -176,21 +205,33 @@ export function deferredSourceStatus(hold) {
     if (['matches-target', 'local-ref-only', 'workspace-only'].includes(source.status)) return source.status;
     return 'unconfirmed';
   }
-  catch { return 'unconfirmed'; }
+  catch (error) {
+    return error.code === 'ENOENT' && error.path === join(hold.evidenceDir, 'source.json')
+      && hold.sourceHead === hold.targetHead ? 'matches-target' : 'unconfirmed';
+  }
 }
 
-export function deferredSourceNotice(hold) {
+export function deferredCleanupFinished(hold) {
   let cleanup;
   if (hold.evidenceDir) {
     try { cleanup = read(join(hold.evidenceDir, 'controller-cleanup.json')); } catch {
       try { cleanup = read(join(hold.evidenceDir, 'bounded-cleanup.json')); } catch { /* Unconfirmed cleanup. */ }
     }
   }
-  const finished = cleanup && cleanup.launchRequestId === hold.launchRequestId && (hold.controller
+  return Boolean(cleanup && cleanup.launchRequestId === hold.launchRequestId && (hold.controller
     ? cleanup.state === 'quiescent' && cleanup.drained === true
       && (cleanup.leaseCleanup?.released === true
         || ['already-released', 'no-acquisition-receipt'].includes(cleanup.leaseCleanup?.reason))
-    : cleanup.head === hold.sourceHead && cleanup.cleanup === 'finished');
+    : cleanup.head === hold.sourceHead && cleanup.cleanup === 'finished'));
+}
+
+export function deferredSourceNeedsDecision(hold) {
+  return Boolean(hold && !hold.continuedAt && (hold.unreadable
+    || deferredSourceStatus(hold) !== 'matches-target' || !deferredCleanupFinished(hold)));
+}
+
+export function deferredSourceNotice(hold) {
+  const finished = deferredCleanupFinished(hold);
   return `Operator decision required for ${hold.sourceHead || 'unknown source'} (launch ${hold.launchRequestId || 'unknown'}, `
     + `source ${deferredSourceStatus(hold)}, cleanup ${finished ? 'recorded finished' : 'unconfirmed'}). `
     + (hold.evidenceDir || hold.path ? `Evidence: ${hold.evidenceDir || hold.path}. ` : 'The launch left no readable custody package. ')

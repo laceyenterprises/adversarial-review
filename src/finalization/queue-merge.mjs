@@ -6,7 +6,7 @@ import { isDeepStrictEqual } from 'node:util';
 import { classifyQueueAdmission, resolveQueueAdmissionAdapters } from './queue-admission.mjs';
 import { classifyQueueChecks } from './queue-check-reader.mjs';
 import { createQueueChecksService } from './queue-checks.mjs';
-import { handoffDigest, queueLocalValidationUnknown } from './queue-handoff.mjs';
+import { handoffDigest } from './queue-handoff.mjs';
 import { unknownValidationCiGate } from '../ama/local-validation-unknown.mjs';
 import { resolveQueueGitAdapter } from './queue-git.mjs';
 import { verifyQueueDerivation } from './queue-rebase-proof.mjs';
@@ -205,7 +205,7 @@ export function createQueueMergeService({ store, owner, liveAdapter, checkReader
     if (classified.kind !== 'green') return { phase: 'waiting-checks', reason: classified.reason, checks: checks ?? null };
     // MRQ-20: UNKNOWN local validation merges only on declared, green contexts;
     // the configured no-CI proof is never enough.
-    if (queueLocalValidationUnknown(receipt.evidence, { clean: receipt.kind === 'clean' })) {
+    if (receipt.evidence?.localValidation?.result === 'unknown') {
       const gate = unknownValidationCiGate({ checks: checks.results, requiredContexts: checks.requiredSet.contexts });
       if (!gate.ok) return { phase: 'returned-to-closer', reason: gate.reason, checks };
     }

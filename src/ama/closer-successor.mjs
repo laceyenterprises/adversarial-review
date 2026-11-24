@@ -9,7 +9,7 @@ import { isCurrentAmaCloserLease, readAmaCloserLease } from './closer-lease.mjs'
 import { launchRequestInFlight } from './launch-request-status.mjs';
 import { observeClosureWait } from './closure-wait.mjs';
 import { readCloserInconclusiveRetries } from './closer-inconclusive-retry.mjs';
-import { DEFERRED_SOURCE_HOLD, deferredSourceNotice, readDeferredSourceHold } from './deferred-source-custody.mjs';
+import { DEFERRED_SOURCE_HOLD, continueDeferredSourceCustody, deferredSourceNeedsDecision, deferredSourceNotice, readDeferredSourceHold } from './deferred-source-custody.mjs';
 
 const SUCCESSOR_DEADLINE_MS = 30 * 60_000;
 const DEADLINE_PROBE_BACKOFF_MS = 5 * 60_000;
@@ -44,12 +44,20 @@ export async function observeDeferredSourceDecision({ rootDir, hqRoot, repo, prN
   observeWaitImpl = observeClosureWait, pageImpl, logger = console }) {
   const identity = { repo, prNumber, headSha };
   let hold = readDeferredSourceHold(hqRoot, identity, { includeContinued: true });
-  if (hold?.continuedAt) return null;
+  if (hold && !deferredSourceNeedsDecision(hold)) {
+    if (!hold.continuedAt) {
+      try { if (!continueDeferredSourceCustody(hold)) return { status: DEFERRED_SOURCE_HOLD, reason: DEFERRED_SOURCE_HOLD, needsOperator: true }; }
+      catch { return { status: DEFERRED_SOURCE_HOLD, reason: DEFERRED_SOURCE_HOLD, needsOperator: true }; }
+    }
+    return null;
+  }
   if (!hold) {
     const retries = readCloserInconclusiveRetries(rootDir, identity);
     const entry = retries.heads[headSha];
-    if (Array.isArray(entry?.launches)) hold = entry.launches.findLast(launch => launch?.reason === 'canonical-validation-deferred');
-    if (retries.__corrupt) hold = { unreadable: true };
+    // Legacy deferrals alone do not prove unpublished source or unsafe cleanup.
+    // New observations explicitly record custody when those facts are known.
+    hold = entry?.launches?.findLast(launch => launch?.reason === 'canonical-validation-deferred'
+      && launch.custodyRequired === true);
   }
   if (!hold) return null;
   try {

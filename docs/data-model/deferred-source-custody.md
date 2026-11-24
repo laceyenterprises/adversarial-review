@@ -18,7 +18,9 @@ timestamp), provided source retention is complete. Evidence stays archived, but 
 lookups ignore this marker, including the legacy retry fallback. The standalone
 last-phase receipt records CI-authoritative continuation instead of deferral.
 Controlled stops still record deferral before requesting drain.
-A persistent sibling flock serializes marker creation and continuation. A later
+A persistent sibling flock serializes marker creation and continuation.
+Continuation waits up to one second for contention; post-publication completion
+is retried up to three times without repeating the push. A later
 deferral may replace a continued marker only with complete retained source; it
 first copies the old marker to that attempt's `continued-hold.json`. Active or
 unreadable markers cannot be replaced. Attempt evidence remains private.
@@ -33,12 +35,20 @@ unreadable markers cannot be replaced. Attempt evidence remains private.
 | `controller-cleanup.json` | Final matching controller registration with drain and lease disposition. Its absence leaves cleanup unconfirmed. |
 
 An incomplete bundle retains the original workspace for recovery. Teardown
+retries retention before refusing; unavailable prerequisite objects are omitted
+so retention can create a self-contained bundle. A missing source receipt means
+`matches-target` only when source equals target and `clean !== false`; corrupt
+receipts still mean unconfirmed. Teardown
 checks all target-head markers for the PR and matches their launch ID, including
 continued markers; it cannot assume the dispatch and published heads agree.
 Unreadable markers retain the workspace. Missing cleanup proof is UNKNOWN.
 The watcher deduplicates unchanged operator decision notices through the
 existing closure-wait store and refreshes delivery when source or cleanup facts
-change. A corrupt legacy retry record also holds the head. The close controller
+change. A clean matching-target hold with confirmed cleanup gains `continuedAt`
+and returns to ordinary per-head retry backoff; this grants no CI authority.
+Corrupt retry files are preserved but cannot hold unrelated heads. A legacy
+retry alone does not establish custody; new unsafe observations explicitly
+record `custodyRequired` to retain fallback custody if the marker disappears. The close controller
 and conflict repair also respect holds. Source custody grants zero publication,
 provenance, review, validation or merge authority.
 

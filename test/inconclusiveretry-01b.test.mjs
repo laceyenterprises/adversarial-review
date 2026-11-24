@@ -3,7 +3,7 @@
 import './helpers/dispatch-read-fixture.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import { tmpdir, userInfo } from 'node:os';
 import { join } from 'node:path';
@@ -179,6 +179,29 @@ function harness(root, lastPhase) {
 }
 
 const minutes = n => new Date(Date.parse('2026-11-01T00:00:00Z') + n * 60_000).toISOString();
+
+test('a published-head timeout with confirmed controller cleanup uses paced retry without a source page', async t => {
+  const root = scratch(t);
+  const { state, deps, endCurrent } = harness(root, 'canonical-validation-deferred');
+  const run = at => {
+    const args = dispatchArgs(root, at);
+    args.cfg.closerInconclusiveRetry = { surfaceAfterAttempts: 1, backoffBaseMs: 60_000 };
+    return maybeDispatchAmaCloser({ ...args, ...deps });
+  };
+  assert.equal((await run(minutes(0))).dispatched, true);
+  endCurrent();
+  const env = { HAM_HQ_ROOT: join(root, 'hq'), HAM_REPO: REPO, HAM_PR_NUMBER: String(PR),
+    HAM_TARGET_REMEDIATION_SHA: HEAD, HAM_CONTROLLER_RECORD: '/fixture/controller.json' };
+  const evidence = startDeferredSourceCustody({ env, launchRequestId: state.ended, sourceHead: HEAD, clean: true });
+  writeFileSync(join(evidence, 'controller-cleanup.json'), JSON.stringify({
+    launchRequestId: state.ended, state: 'quiescent', drained: true, leaseCleanup: { released: true },
+  }));
+  recordHammerEarlyFailure('canonical-validation-deferred', { env: { ...env, HQ_LAUNCH_REQUEST_ID: state.ended } });
+  assert.equal((await run(minutes(1))).reason, 'closer-inconclusive-retry-backoff');
+  assert.equal((await run(minutes(2))).dispatched, true);
+  assert.equal(state.launches, 2);
+  assert.equal(state.alerts.filter(alert => alert.options?.event === 'ama_closer.deferred_source_decision').length, 0);
+});
 
 test('a canonical validation deferral stops same-head dispatch and asks for one operator decision', async t => {
   const root = scratch(t);

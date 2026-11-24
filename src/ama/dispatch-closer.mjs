@@ -2,7 +2,7 @@ import { readPrTenure } from '../pr-tenure.mjs';
 import { isLivePackDeferralText } from '../kernel/remediation-reply.mjs';
 import { isGitHubRateLimitError } from '../rate-limit-throttle.mjs';
 import { observeDeferredSourceDecision, requestCloserSuccessor, settleCloserSuccessor } from './closer-successor.mjs';
-import { deferredSourceStatus, readDeferredSourceHoldsForLaunch } from './deferred-source-custody.mjs';
+import { deferredSourceStatus, deferredSourceNeedsDecision, readDeferredSourceHold, retainDeferredCommit, readDeferredSourceHoldsForLaunch } from './deferred-source-custody.mjs';
 import { samePrHammerHolderWorktreePaths } from './branch-holder-paths.mjs';
 export { samePrHammerHolderWorktreePaths } from './branch-holder-paths.mjs';
 import { isZeroOutputRefusal, escalateZeroOutputRefusal } from './zero-output-refusal.mjs';
@@ -447,17 +447,20 @@ export function namedAmaNoDispatchReason(reason, reasons = []) {
 // INCONCLUSIVERETRY-01b: the watcher owns an inconclusive ended launch. Record
 // it, surface it once from attempt N on, and pace the next ordinary dispatch.
 // The canonical-validation hold is resolved separately from ordinary backoff.
-async function ownInconclusiveCloserRetry({ rootDir, repo, prNumber, headSha, launchRequestId, reason,
-  currentHeadSha = headSha, cfg, now, deliverAlertImpl, logger }) {
+async function ownInconclusiveCloserRetry({ rootDir, hqRoot, repo, prNumber, headSha, launchRequestId, reason,
+  currentHeadSha = headSha, sourcePublished = false, cfg, now, deliverAlertImpl, logger }) {
+  const hold = reason === 'canonical-validation-deferred'
+    ? readDeferredSourceHold(hqRoot, { repo, prNumber, headSha }, { includeContinued: true }) : null;
+  const custodyRequired = deferredSourceNeedsDecision(hold);
   try {
     const owned = recordCloserInconclusiveRetry(rootDir, { repo, prNumber }, { headSha, launchRequestId,
-      reason, now, policy: closerInconclusiveRetryPolicy(cfg) });
+      reason, now, sourcePublished, custodyRequired, policy: closerInconclusiveRetryPolicy(cfg) });
     if (owned.recorded) logAmaCloserDispatchEvent(logger, 'ama_closer.inconclusive_owned_retry', {
       repo, prNumber, headSha, launchRequestId, ...owned.entry, launches: undefined });
   } catch (error) {
     logger?.warn?.(`[ama-closer] inconclusive retry record failed for ${repo}#${prNumber}: ${error?.message || error}`);
   }
-  if (reason === 'canonical-validation-deferred') return null;
+  if (custodyRequired) return null;
   return currentHeadSha === headSha
     ? gateInconclusiveCloserRetry({ rootDir, repo, prNumber, headSha, now, deliverAlertImpl, logger }) : null;
 }
@@ -1063,6 +1066,11 @@ async function cleanupHammerCloserWorker({
   if (!workerId) return null;
   const holds = readDeferredSourceHoldsForLaunch(hqRoot, { repo: existingRecord?.repo, prNumber,
     launchRequestId: existingRecord?.launchRequestId });
+  for (const hold of holds) {
+    if (!hold.unreadable && ['local-ref-only', 'workspace-only', 'unconfirmed'].includes(deferredSourceStatus(hold))) {
+      try { retainDeferredCommit(hold, process.env); } catch { /* Retain the workspace if recovery still fails. */ }
+    }
+  }
   if (holds.some(hold => hold.unreadable
     || !['bundled', 'matches-target'].includes(deferredSourceStatus(hold)))) {
     return { ok: false, workerId, reason, error: 'deferred-source-retained-in-workspace' };
@@ -5756,7 +5764,7 @@ async function maybeDispatchAmaCloserAttempt({
         return { ...current, selfErrorRefundedLaunchRequestId: existingRecord.launchRequestId,
           unexecutedRefundCount: Number(current.unexecutedRefundCount || 0) + 1 };
       }) || existingRecord;
-      const backoff = await ownInconclusiveCloserRetry({ rootDir, repo, prNumber, headSha: existingRecord.headSha,
+      const backoff = await ownInconclusiveCloserRetry({ rootDir, hqRoot, repo, prNumber, headSha: existingRecord.headSha,
         launchRequestId: existingRecord.launchRequestId, reason: parkReason, cfg,
         now: dispatchContext.dispatchedAt, deliverAlertImpl, logger });
       if (backoff) {
@@ -5785,9 +5793,16 @@ async function maybeDispatchAmaCloserAttempt({
     // Keep the infrastructure refund, but let the shared owner pace and surface
     // repeated same-head launches rather than immediately relaunching forever.
     if (parkLedger && validationPark) {
-      const backoff = await ownInconclusiveCloserRetry({ rootDir, repo, prNumber,
-        headSha: validationRetryHead, currentHeadSha: queuedHead, launchRequestId: existingRecord.launchRequestId,
+      const backoff = await ownInconclusiveCloserRetry({ rootDir, hqRoot, repo, prNumber,
+        headSha: validationRetryHead, currentHeadSha: queuedHead,
+        sourcePublished: validationRetryHead !== existingRecord.headSha, launchRequestId: existingRecord.launchRequestId,
         reason: parkReason, cfg, now: dispatchContext.dispatchedAt, deliverAlertImpl, logger });
+      if (backoff) {
+        finalizeAmaCloserLeaseBestEffort({ rootDir, leaseIdentity: existingRecordLeaseIdentity,
+          terminalOutcome: `retryable-${parkReason}`, launchRequestId: existingRecord.launchRequestId,
+          now: dispatchContext.dispatchedAt, logger, repo, prNumber });
+        return backoff;
+      }
     }
   }
   if (certifiedPark && !parkLedger) {
@@ -7432,7 +7447,7 @@ async function maybeDispatchAmaCloserAttempt({
         }
       }
       if (inconclusiveOutcome) {
-        const backoff = await ownInconclusiveCloserRetry({ rootDir, repo, prNumber,
+        const backoff = await ownInconclusiveCloserRetry({ rootDir, hqRoot, repo, prNumber,
           headSha: existingRecord.headSha, launchRequestId: existingRecord.launchRequestId,
           ...(inconclusiveOutcome.reason === 'canonical-validation-deferred' ? { currentHeadSha: queuedHead } : {}),
           reason: inconclusiveOutcome.reason, cfg, now: dispatchContext.dispatchedAt, deliverAlertImpl, logger });

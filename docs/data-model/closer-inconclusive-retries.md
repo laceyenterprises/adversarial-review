@@ -39,7 +39,8 @@ and when the next ordinary dispatch is due. It grants no authority. See the
 
 The file keeps the eight most recently attempted heads and 32 launches per head.
 Writes are atomic. Recording is idempotent per launch. An unreadable file reads
-as corrupt and is rebuilt on the next record; at worst that delays a backoff.
+as corrupt and is preserved for recovery; recording refuses to overwrite it.
+Matching unsafe custody evidence still holds only its own head.
 `closure-budget-escalation` reads `launches[].launchRequestId` across heads and
 refunds each open series charge whose launch is listed (CLOSERRETRYREFUND-01:
 per charge, not only when every charge is listed). It also records launches it
@@ -47,9 +48,13 @@ proves were closer faults from the AMA audit, and `closer-supersede` records a
 launch the pipeline cancelled before it booted (reason
 `superseded-by-clean-exact-head-review`).
 Dispatch also records ended `canonical-validation-deferred` launches here,
-including those with a deferred audit and infrastructure refund. These entries
-back the [deferred source hold](deferred-source-custody.md) when a legacy launch
-left no readable custody package. They do not authorize another same-head launch.
+including full infrastructure refunds. Optional `sourcePublished: true` records
+launch-bound publication. Optional `launches[].custodyRequired: true` records an
+active unsafe custody hold for fallback if its marker disappears. Legacy entries
+without explicit custody evidence do not create operator holds. Readable holds
+with clean matching-target source and confirmed cleanup resume ordinary per-head
+backoff and once-only notification. Corrupt retry files remain preserved for
+recovery; admission holds only heads with matching unsafe custody evidence.
 
 `reviewServiceRevision` (optional, CLOSERRETRYREFUND-01) is the service revision
 that recorded the entry's latest launch. When the running revision differs, the

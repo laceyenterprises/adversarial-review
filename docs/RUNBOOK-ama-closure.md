@@ -6479,24 +6479,37 @@ Unavailable canonical mirror setup is UNKNOWN when the runner cannot establish
 which local checks ran. The exact-head gate still applies. Genuine test failures
 require repair.
 
-Canonical timeouts, the mirror's budget stop, an external kill, unconfirmed
-validation drain, and the Telegram guard's explicit process-inspection no-verdict
-use `canonical-validation-deferred`. Its per-head receipt records UNKNOWN and
-names the cleanup owner. Cancellation keeps its own outcome, including if drain
-is unconfirmed. Only `telegram-responder-guard` can report the Python-lane
-inspection no-verdict. Reload cases and other checks quoting the line supply no
-such proof.
+Canonical absolute, idle, check and SIGALRM deadlines, mirror budget stops,
+unexpected kills, unconfirmed validation drain and the Telegram guard's
+explicit process-inspection no-verdict use `canonical-validation-deferred`.
+The exact-head receipt records UNKNOWN and names the cleanup owner. Inspect the
+controller registration for group drain and lease disposition, or the
+bounded-command cleanup receipt for standalone validation. Only
+`telegram-responder-guard` can report the Python-lane inspection no-verdict. Reload
+cases and other checks quoting that line supply no proof. An UNKNOWN receipt
+takes precedence over own-package import-fault fallback. Operator cancellation
+retains its own outcome even when drain is unconfirmed.
 
-**Continuing after UNKNOWN (MRQ-20, LAC-2332).** Declared GitHub contexts cannot
-substitute for local-only checks. On a clean, already-published exact head, the
-closer can proceed only when the canonical mirror proves its full selected check
-count, every check has a local pass or authenticated coverage under the existing
-manifest policy, no local failure was observed, and standalone cleanup is
-confirmed. The overall local outcome stays UNKNOWN. At merge, required contexts
-must be declared under the current policy and all must have reported green on
-that same head. An unreadable, older or incomplete receipt blocks. A controller
-stop never starts a fresh controller round. Repeating validation or close
-without a qualifying receipt returns 75 before another battery or controller.
+**Continuing after UNKNOWN (MRQ-20, LAC-2332).** On a clean, already-published
+exact head, standalone validation can continue with UNKNOWN when the canonical
+mirror proves its full selection, every selected check passed locally or has
+exact-head authenticated coverage under the existing manifest policy, no local
+failure was observed, and the standalone runner confirmed cleanup.
+
+A completed local conflict repair validates outside the lease before publication.
+An eligible UNKNOWN can publish only with a clean checkout, an exact source
+binding, confirmed drain and readable evidence without failed checks. An active
+stop leaves the close result unwritten and its supervisor confirms drain before
+allowing one fresh controller round to publish. `source-publication-refused`
+identifies a blocked source check. Verify-head reuses a passing pre-publication
+battery or a CI-authoritative UNKNOWN only on the same published SHA. An UNKNOWN
+can enter the exact-head CI gate only with complete selected-check evidence and
+currently declared required contexts. A published repair lacking that evidence
+ends with a durable watcher continuation on the published head. Launch-bound
+push evidence lets the watcher pace that head under INCONCLUSIVERETRY-01b,
+using its existing backoff, notification and infrastructure refund. Repeating
+validation or close after an unrecovered deferral returns 75 before another
+battery starts. A changed head remains subject to ordinary validation.
 Declare contexts per repository in
 `roles.adversarial.merge_authority.required_check_contexts_by_repository`
 (`- repository: owner/name` with `contexts: [...]`). `required_check_contexts`
@@ -6504,54 +6517,63 @@ applies to every repository, so a context that only one repository runs
 belongs in the per-repository list. Both lists also make an absent context
 read PENDING at the hammer gate and in the queue-v2 required set. The daemon
 and closer read only the global list until they are given the repository.
-Once standalone continuation is proved, its custody marker records `continuedAt`
-and its last-phase records CI-authoritative continuation. The archived evidence
-remains, while watcher and successor holds ignore this continued marker and its
-legacy retry fallback. A later pending/red CI result or merge transport failure
-therefore follows ordinary closure retry rather than an unrecovered-source page.
+A proved standalone CI continuation and a confirmed conflict publication mark
+custody `continuedAt`. The CI-authoritative phase makes no claim of a local
+pass. Retained evidence remains available and a continued launch's marker and
+legacy fallback do not block normal closure. Current required contexts must all
+report green on that exact head before merge.
 Queue-v2 admits a handoff whose trusted local-validation read is
 `result: unknown` only with `ciAuthoritative: true`, `coverageComplete: true`,
 `cleanup: finished` and `localFailureObserved: false`, even if the read also
 claims `ok: true`;
 its final merge gate requires the same declared, green
-contexts and never accepts the configured no-CI proof for it.
+contexts for every UNKNOWN, including legacy receipts without coverage fields,
+and never accepts the configured no-CI proof for it.
 
-**Operator decision for retained source.** Before requesting process drain, the
+**Operator decision for unrecovered source.** Before requesting drain, the
 validator writes an exact-target hold in the [HQ custody store](data-model/deferred-source-custody.md).
-The cleanup owner preserves the validation and cleanup receipts and retains the
-unpublished commit as an incremental Git bundle. A bundle failure leaves the
-original workspace under custody. The watcher observes the ended launch and
-keeps infrastructure refund accounting. On the same live head it suppresses a
-new launch or successor and sends one operator decision notice. Legacy deferrals
-with missing custody evidence also hold when the matching ended launch was
-recorded. Exit code, token use, and PID disappearance supply no validation or
-drain verdict.
-Teardown finds all custody markers for the ending launch across target heads,
-including after publication changed the dispatch head. Incomplete source
-retention keeps the worker, even if continuation was recorded. Unreadable custody
-or legacy retry records fail closed. Notices refresh when source or cleanup
-facts change; unchanged observations do not page again. After SIGKILL the bounded
-runner allows up to one second for group disappearance before calling cleanup
-unconfirmed.
+The cleanup owner retains check and cleanup receipts and an incremental Git
+bundle for an unpublished commit. A bundle failure keeps the original workspace
+under custody. The watcher retains the infrastructure refund and suppresses
+same-head replacements while the hold is active. A readable hold whose clean source matches the target and whose controller or
+standalone cleanup is confirmed finished is marked continued and returns to the
+existing per-head backoff and notification. A legacy retry entry alone does not
+establish unpublished source or unsafe cleanup. New retry observations record
+`custodyRequired: true` only for an active unsafe hold, preserving its fallback
+if the marker disappears. Corrupt retry files are preserved for recovery but
+only matching custody evidence holds admission; other heads remain eligible. The validator or closer records
+this deferral with the audit helper without `--final`. The `last-phase` receipt
+supplies the observation for the watcher.
 
-Use the notice's launch, head, and evidence directory to choose whether to
-recover the exact source for the outstanding guards and normal publication, or
-explicitly discard the attempt. Confirm cleanup before acting. Inspect the Git
-bundle and prerequisites from `source.json` in an operator-owned recovery
-checkout. Verify the imported object matches `sourceHead`. Preserve original
-commit identity and follow the ordinary source, review, lease and required CI
-gates. A live head change naturally scopes the hold out of the next dispatch.
-For an authorized same-head release, archive the custody marker and the matching
-canonical deferral entries from the existing inconclusive retry record together,
-under the canonical runtime owner's custody. Keep the evidence and audit history.
-There is currently no single release command. Pause admission through the
-runtime owner's supported controls while handling both records, preserve their
-originals, then verify that neither an active `hold.json` nor a matching
-`canonical-validation-deferred` retry entry remains before resuming. Archiving
-only the marker does not release the legacy hold. A combined runtime-owned
-release command remains a follow-up. Environment-unavailable deferrals continue
-to hold and page per head because local guard coverage is unproved; grouping a
-host-wide toolchain incident into one page remains a separate follow-up.
+Teardown checks all custody markers for the ending launch across target heads,
+including after publication changed the dispatch head. Incomplete source
+retention keeps the worker even for a continued marker. Unreadable custody fails closed. Teardown retries incomplete source retention
+before refusing reclamation; missing local prerequisite objects are omitted so
+the bundle can be self-contained. A missing source receipt implies matches-target
+only when source equals target and cleanliness is not explicitly false. Corrupt
+source receipts remain unconfirmed. Custody continuation waits up to one second
+for its lock; the controller retries post-publication completion three times
+before ending deferred, without repeating publication. Notices refresh when source or cleanup facts
+change and unchanged observations retain their delivery latch. After SIGKILL,
+the bounded runner allows up to one second for the group to disappear before
+reporting unconfirmed cleanup.
+
+Confirm cleanup using the notice's launch, head and evidence directory. To
+recover, inspect the Git bundle and prerequisites in `source.json` from an
+operator-owned recovery checkout, verify the imported object matches
+`sourceHead`, and preserve the commit identity through the outstanding guards
+and normal publication gates. To discard, inspect and explicitly dispose of the
+attempt under the runtime owner's custody. A different live head scopes the
+hold out of its dispatch.
+
+For authorized same-head release, pause admission through the runtime owner's
+supported controls and archive both the custody marker and the matching
+`canonical-validation-deferred` entries in the inconclusive retry record. Keep
+the original evidence and audit history. Verify that both records are clear of
+the active hold before resuming. Archiving the marker alone leaves an explicitly recorded custody fallback active. A combined runtime-owned release command and host-wide toolchain
+incident paging remain follow-ups. Environment-unavailable deferrals with unpublished source or unconfirmed
+cleanup still page per affected head; published clean sources with confirmed
+cleanup use ordinary retry backoff.
 The validator owns its timeout and process cleanup. Avoid a second shell alarm
 around it. If the outer tool returns 124 or 142 first, follow the same handoff
 from the available diagnostics and keep unconfirmed cleanup explicit.

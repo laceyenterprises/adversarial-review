@@ -1083,10 +1083,11 @@ child.wait()
       assert.equal(existsSync(handoffPath), false, 'operator cancellation retains its own outcome');
     } else {
       const bytes = readFileSync(handoffPath, 'utf8');
-      assert.partialDeepStrictEqual(JSON.parse(bytes), { schemaVersion: 1, head: checkoutHead, outcome: 'deferred',
+      assert.deepEqual(JSON.parse(bytes), { schemaVersion: 1, head: checkoutHead, outcome: 'deferred',
         validation: 'unknown', reason: mode === 'inner' ? 'child-check-timeout' : 'absolute-timeout',
         status: 124, ciAuthoritative: false, requiredContexts: [], localFailureObserved: true,
-        localValidationReceipt: validationPath, cleanupOwner: 'controller' });
+        localValidationReceipt: validationPath, cleanupOwner: 'controller',
+        controllerRecord: `controller-${f.receipt().token}.json`, coverageComplete: false, cleanup: 'controller-owned' });
       if (mode === 'inner') {
         const retry = spawnSync(process.execPath, [join(root, 'bin/hammer-validate.mjs'), '--canonical', '--', 'check.py'],
           { cwd: checkout, env: { ...process.env, HAM_RUN_DIR: f.dir }, encoding: 'utf8', timeout: 3000 });

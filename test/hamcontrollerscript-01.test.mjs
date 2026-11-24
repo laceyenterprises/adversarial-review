@@ -175,6 +175,13 @@ case "$(basename "$path")" in
     esac ;;
   hammer-validate.mjs)
     if [ "$1" = --check-rebase-publication ]; then exec ${shellQuote(process.execPath)} "$path" "$@"; fi
+    if [ "$1" = --complete-rebase-publication ]; then
+      log complete-publication
+      if [ -n "\${FIXTURE_COMPLETION_FAIL_ONCE:-}" ] && [ ! -f "$FIXTURE_COMPLETION_FAIL_ONCE" ]; then
+        : > "$FIXTURE_COMPLETION_FAIL_ONCE"; exit 1
+      fi
+      exit 0
+    fi
     if [ "$1" != --check-deferred ]; then log "validate $*"; fi
     if [ "\${FIXTURE_REAL_VALIDATE:-0}" = 1 ]; then exec ${shellQuote(process.execPath)} "$path" "$@"; fi
     if [ "$1" = --check-deferred ]; then
@@ -191,18 +198,18 @@ case "$(basename "$path")" in
         record=controller-00000000-0000-0000-0000-000000000000.json
         jq -cn --arg head "$head" --arg record "$record" --arg ci "\${FIXTURE_DECLARED_CI:-false}" \
           --arg receipt "$HAM_CLOSE_VALIDATION_RECEIPT" \
-          '{head:$head,validation:"unknown",reason:"absolute-timeout",localFailureObserved:false,
+          '{schemaVersion:1,head:$head,validation:"unknown",reason:"absolute-timeout",localFailureObserved:false,
             cleanCheckout:true,ciAuthoritative:($ci == "true"),controllerRecord:$record,localValidationReceipt:$receipt}' \
           > "$HAM_RUN_DIR/validation-deferred-$head.json"
         case "\${FIXTURE_VALIDATION_EVIDENCE:-unknown}" in
           failed) printf '{"checks":[{"result":"fail"}]}\\n' ;;
           unreadable) printf '{\\n' ;;
-          *) printf '{"checks":[]}\\n' ;;
+          *) jq -cn --arg head "$head" '{head:$head,selectedCheckCount:1,checks:[{name:"local",result:"pass"}]}' ;;
         esac > "$HAM_CLOSE_VALIDATION_RECEIPT"
         state="\${FIXTURE_DRAIN_STATE:-quiescent}"
         if [ -n "\${FIXTURE_TIMEOUT_EXIT:-}" ]; then state=running; fi
         jq -cn --arg launch "$HQ_LAUNCH_REQUEST_ID" --arg state "$state" \
-          '{launchRequestId:$launch,state:$state,reason:"validation-stopped",drained:($state == "quiescent")}' \
+          '{launchRequestId:$launch,state:$state,reason:"validation-stopped",drained:($state == "quiescent"),leaseCleanup:{released:true}}' \
           > "$HAM_RUN_DIR/$record"
       else
         printf '{"validation":"unknown","reason":"absolute-timeout"}' > "$HAM_RUN_DIR/validation-deferred-$head.json"
@@ -828,6 +835,17 @@ test('a drained validation timeout publishes the repaired rebase and waits on CI
   }
 });
 
+test('post-publication completion retries a transient failure without pushing again', async t => {
+  const f = conflictRebaseFixture(t);
+  const result = await f.close({ FIXTURE_TIMEOUT_ONCE: f.timeout,
+    FIXTURE_COMPLETION_FAIL_ONCE: join(f.dir, 'completion-failed'), FIXTURE_GREEN_HEAD: f.head });
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(result.closeResult.outcome, 'merged');
+  assert.equal(f.remoteHead(), f.head);
+  assert.equal(f.events().filter(event => event === 'complete-publication').length, 2);
+  assert.equal(f.events().filter(event => event.startsWith('publish publication-only=1')).length, 1);
+});
+
 test('a passing conflict repair reuses validation only on the same published head', async t => {
   for (const moved of [false, true]) {
     const f = conflictRebaseFixture(t);
@@ -929,9 +947,10 @@ test('the close skips only explicitly mapped, successful exact-head mirror check
     .map(name => `fixture-command ${name}`), 'python3 scripts/host-check.py']);
   const [receipt] = result.closeResult.localValidation;
   assert.equal(receipt.head, f.head);
-  assert.partialDeepStrictEqual(receipt.checks[0], { name: 'covered', cwd: null, status: 'ci-covered',
+  assert.deepEqual(receipt.checks[0], { name: 'covered', cwd: null, status: 'ci-covered',
     commandSha256: createHash('sha256').update('fixture-command covered').digest('hex'),
     manifest: 'scripts/ci-mirror/checks.json',
+    manifestSha256: createHash('sha256').update(readFileSync(join(f.checkout, 'scripts/ci-mirror/checks.json'))).digest('hex'),
     reason: 'exact-head-ci-success', jobs: [{ name: 'build', runId: '123' }, { name: 'lint', runId: '123' }] });
   assert.deepEqual(receipt.checks.slice(1).map(row => [row.status, row.reason]), [
     ['run', 'ci-job-skipped'], ['run', 'ci-job-neutral'], ['run', 'ci-job-head-mismatch'], ['run', 'no-ci-mapping'],
@@ -958,8 +977,11 @@ test('a non-matching skip probe executes the check locally and reports its actua
   const result = await f.run({ FIXTURE_SKIP_REASON: 'prefixed: ci-covered' });
   assert.equal(result.status, 75, result.stderr);
   assert.deepEqual(f.local(), ['fixture-command verify']);
-  assert.partialDeepStrictEqual(result.closeResult.localValidation[0].checks, [{
+  assert.deepEqual(result.closeResult.localValidation[0].checks, [{
     name: 'verify', cwd: null, status: 'failed', reason: 'ci-evidence-unavailable',
+    commandSha256: createHash('sha256').update('fixture-command verify').digest('hex'),
+    manifest: 'scripts/ci-mirror/checks.json',
+    manifestSha256: createHash('sha256').update(readFileSync(join(f.checkout, 'scripts/ci-mirror/checks.json'))).digest('hex'),
     result: 'inconclusive', localReason: 'synthetic timeout',
   }]);
 });
@@ -1031,8 +1053,9 @@ test('unreadable evidence, changed manifests and the off switch retain local val
     assert.equal(result.closeResult.outcome, 'canonical-validation-deferred');
     assert.equal(result.closeResult.stage, 'local-validation');
     assert.deepEqual(f.local(), ['fixture-command verify']);
-    assert.partialDeepStrictEqual(result.closeResult.localValidation[0].checks, [{
-      name: 'verify', cwd: null, status: 'failed', reason, result: 'inconclusive', localReason: 'synthetic timeout',
+    assert.deepEqual(result.closeResult.localValidation[0].checks, [{
+      name: 'verify', cwd: null, status: 'failed',
+      commandSha256: createHash('sha256').update('fixture-command verify').digest('hex'), reason, result: 'inconclusive', localReason: 'synthetic timeout',
     }]);
     assert.ok(!f.events().some(event => event.startsWith('wait-ci') || event.startsWith('gh pr merge')));
     assert.equal(f.earlyAuditExists(), false, 'optional reads must not write a terminal audit');

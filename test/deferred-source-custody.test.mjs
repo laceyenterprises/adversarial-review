@@ -1,11 +1,13 @@
 import './helpers/dispatch-read-fixture.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { execFileSync, spawn } from 'node:child_process';
+import { once } from 'node:events';
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { __testables__ } from '../src/ama/dispatch-closer.mjs';
-import { continueDeferredSourceCustody, readDeferredSourceHold, startDeferredSourceCustody } from '../src/ama/deferred-source-custody.mjs';
+import { continueDeferredSourceCustody, deferredSourceStatus, readDeferredSourceHold, startDeferredSourceCustody } from '../src/ama/deferred-source-custody.mjs';
 import { observeDeferredSourceDecision } from '../src/ama/closer-successor.mjs';
 import { closerInconclusiveRetryFilePath, recordCloserInconclusiveRetry } from '../src/ama/closer-inconclusive-retry.mjs';
 
@@ -72,7 +74,7 @@ test('custody notices refresh on final evidence, retry delivery and deduplicate 
   assert.notEqual(pages[0].metadata.dedupKey, pages[1].metadata.dedupKey);
 });
 
-test('a corrupt legacy retry record holds instead of failing open', async t => {
+test('a corrupt legacy retry record does not hold heads without custody evidence', async t => {
   const f = fixture(t);
   rmSync(f.hold.path);
   const path = closerInconclusiveRetryFilePath(f.root, f.identity);
@@ -81,8 +83,8 @@ test('a corrupt legacy retry record holds instead of failing open', async t => {
   let paged = false;
   const result = await observeDeferredSourceDecision({ rootDir: f.root, hqRoot: f.root, ...f.identity,
     now: '2026-11-23T00:00:00Z', pageImpl: async () => { paged = true; } });
-  assert.equal(result.needsOperator, true);
-  assert.equal(paged, true);
+  assert.equal(result, null);
+  assert.equal(paged, false);
 });
 
 test('continued custody retains evidence and ignores even a legacy deferred fallback', async t => {
@@ -105,4 +107,52 @@ test('continued custody retains evidence and ignores even a legacy deferred fall
   assert.ok(JSON.parse(readFileSync(join(f.dir, 'continued-hold.json'), 'utf8')).continuedAt);
   assert.throws(() => continueDeferredSourceCustody(f.hold), /identity changed/);
   assert.equal(readDeferredSourceHold(f.root, f.identity).launchRequestId, 'lrq_next');
+});
+
+test('teardown retries retention and bundles source without unavailable prerequisite objects', async t => {
+  const f = fixture(t);
+  const workspace = join(f.root, 'checkout');
+  mkdirSync(workspace);
+  const git = (...args) => execFileSync('git', args, { cwd: workspace, encoding: 'utf8' }).trim();
+  git('init', '-q');
+  git('-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid', 'commit', '--allow-empty', '-qm', 'source');
+  const head = git('rev-parse', 'HEAD');
+  writeFileSync(f.hold.path, JSON.stringify({ ...JSON.parse(readFileSync(f.hold.path)), workspace, sourceHead: head, clean: true }));
+  writeFileSync(join(f.dir, 'source.json'), JSON.stringify({ status: 'local-ref-only' }));
+  let tornDown = false;
+  await __testables__.cleanupHammerCloserWorker({
+    prNumber, hqRoot: f.root, hqPath: '/fixture/hq', reason: 'ended', logger: {},
+    existingRecord: { repo, headSha: dispatchHead, launchRequestId, workerClass: 'hammer', workerId: 'hammer-ama-pr-42' },
+    execFileImpl: async () => { tornDown = true; }, cleanupScratchImpl() {},
+  });
+  assert.equal(tornDown, true);
+  const retained = JSON.parse(readFileSync(join(f.dir, 'source.json')));
+  assert.equal(retained.status, 'bundled');
+  assert.deepEqual(retained.prerequisites, []);
+  assert.match(git('bundle', 'list-heads', join(f.dir, 'source.bundle')), new RegExp(`^${head} `));
+});
+
+test('missing source receipt infers only a clean matching target', t => {
+  const f = fixture(t);
+  assert.equal(deferredSourceStatus({ ...f.hold, sourceHead: liveHead }), 'matches-target');
+  assert.equal(deferredSourceStatus({ ...f.hold, sourceHead: liveHead, clean: false }), 'workspace-only');
+  writeFileSync(join(f.dir, 'source.json'), '{broken');
+  assert.equal(deferredSourceStatus({ ...f.hold, sourceHead: liveHead }), 'unconfirmed');
+});
+
+test('custody completion waits for short lock contention', async t => {
+  const f = fixture(t);
+  const child = spawn(process.execPath, ['--input-type=module', '-e', `
+    import fsExt from 'fs-ext';
+    import { openSync, closeSync } from 'node:fs';
+    const fd = openSync(process.argv[1], 'a');
+    fsExt.flockSync(fd, 'ex');
+    process.stdout.write('locked');
+    setTimeout(() => closeSync(fd), 200);
+  `, `${f.hold.path}.lock`], { stdio: ['ignore', 'pipe', 'pipe'] });
+  const closed = once(child, 'close');
+  await once(child.stdout, 'data');
+  assert.equal(continueDeferredSourceCustody(f.hold, { publishedHead: sourceHead }), true);
+  assert.equal((await closed)[0], 0);
+  assert.ok(JSON.parse(readFileSync(f.hold.path)).continuedAt);
 });

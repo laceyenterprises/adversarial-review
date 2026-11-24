@@ -137,11 +137,12 @@ function runValidator({ root, head, config }, scenario, extraArgs = ['--canonica
     export async function runBounded(_command, _args, options) {
       appendFileSync(${JSON.stringify(calls)}, 'run\\n');
       const scenario = ${JSON.stringify(scenario)};
-      if (scenario.rows) writeFileSync(process.env.HAM_CLOSE_VALIDATION_RECEIPT, JSON.stringify({ checks: scenario.rows }));
+      if (scenario.rows) writeFileSync(process.env.HAM_CLOSE_VALIDATION_RECEIPT, JSON.stringify({ head: process.env.HAM_CLOSE_VALIDATION_HEAD, selectedCheckCount: scenario.rows.length, checks: scenario.rows }));
       if (scenario.output) options.observeOutput(scenario.output);
       if (scenario.concurrentReceipt) writeFileSync(${JSON.stringify(join(root, `validation-deferred-${head}.json`))},
         JSON.stringify(scenario.concurrentReceipt));
       if (scenario.stop) options.observeStop(...scenario.stop);
+      options.observeCleanup?.({ cleanup: scenario.exit === 125 ? 'unconfirmed' : 'finished' });
       return scenario.exit;
     }`;
   const loader = join(root, 'loader.mjs');
@@ -155,7 +156,7 @@ function runValidator({ root, head, config }, scenario, extraArgs = ['--canonica
     } });
   `);
   const env = { ...process.env, HAM_RUN_DIR: root, HAM_CLOSE_VALIDATION_RECEIPT: receipt,
-    HAM_LOCAL_VALIDATION_CI_DEDUP: '0', HAM_HQ_ROOT: root, HAM_REPO: REPO, HAM_PR_NUMBER: '42',
+    HAM_LOCAL_VALIDATION_CI_DEDUP: '0', HAM_CLOSE_VALIDATION_HEAD: head, HAM_HQ_ROOT: root, HAM_REPO: REPO, HAM_PR_NUMBER: '42',
     AGENT_OS_CONFIG_PATH: config, TMPDIR: root };
   for (const key of ['HQ_LAUNCH_REQUEST_ID', 'LAUNCH_REQUEST_ID', 'HQ_WORKER_RUN_ID', 'HAM_CONTROLLER_RECORD']) delete env[key];
   const result = spawnSync(process.execPath, ['--import', loader, validator, ...extraArgs], {
@@ -194,12 +195,26 @@ test('hammer-validate: without declared contexts a timeout keeps the existing de
   assert.equal(runValidator(repo, { exit: 0 }, ['--check-deferred']).status, 75);
 });
 
+test('hammer-validate: an all-local-pass selection can continue after a standalone budget stop', t => {
+  const repo = fixture(t);
+  writeFileSync(join(repo.root, '.git/info/exclude'), '/*\n');
+  const result = runValidator(repo, { rows: [{ name: 'local guard', status: 'run', result: 'pass' }],
+    stop: ['absolute-timeout', 124], exit: 124 });
+  assert.equal(result.status, 0, result.stderr);
+  const receipt = deferralOf(repo);
+  assert.equal(receipt.ciAuthoritative, true);
+  assert.equal(receipt.coverageComplete, true);
+  assert.equal(receipt.cleanup, 'finished');
+  assert.equal(runValidator(repo, { exit: 1 }, ['--check-deferred']).status, 0);
+});
+
 test('hammer-validate: a concurrently recorded deferral decides only if its exact-head evidence permits CI', t => {
   for (const [receiptOverride, exit, expected] of [[{}, 124, 0], [{ ciAuthoritative: false }, 124, 75],
     [{ head: HEAD }, 124, 75], [{}, 125, 125]]) {
     const repo = fixture(t);
-    const concurrentReceipt = { head: repo.head, validation: 'unknown', reason: 'absolute-timeout',
-      ciAuthoritative: true, localFailureObserved: false, ...receiptOverride };
+    writeFileSync(join(repo.root, '.git/info/exclude'), '/*\n');
+    const concurrentReceipt = { schemaVersion: 1, head: repo.head, validation: 'unknown', reason: 'absolute-timeout',
+      ciAuthoritative: true, coverageComplete: true, cleanup: 'finished', localFailureObserved: false, ...receiptOverride };
     const first = runValidator(repo, { concurrentReceipt, stop: ['absolute-timeout', 124], exit });
     assert.equal(first.status, expected, first.stderr);
     assert.deepEqual(deferralOf(repo), concurrentReceipt);
@@ -212,7 +227,7 @@ test('a clean conflict rebase retains cleanup evidence for publication after a t
     writeFileSync(join(repo.root, '.git/info/exclude'), '/*\n');
     writeFileSync(join(repo.root, 'conflict-repair-publish.env'),
       `source=${HEAD}\nhead=${repo.head}\nbranch=feature\n`);
-    const result = runValidator(repo, { stop: ['absolute-timeout', 124], exit: 124 });
+    const result = runValidator(repo, { rows: [{ name: 'local', result: 'pass' }], stop: ['absolute-timeout', 124], exit: 124 });
     assert.equal(result.status, declared ? 0 : 124, result.stderr);
     const receipt = deferralOf(repo);
     assert.equal(receipt.cleanCheckout, true);

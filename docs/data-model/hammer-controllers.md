@@ -223,13 +223,24 @@ from that owner's record or output. MRQ-20 adds
 `ciAuthoritative` (boolean), `requiredContexts` (the declared exact-head
 contexts the UNKNOWN would defer to, possibly empty) and `localFailureObserved`
 (a failed mirror check row or a TAP `not ok` line was seen before the stop).
-The final receipt adds `coverageComplete` and the actual standalone `cleanup`
-result. A qualifying receipt must record `coverageComplete: true`,
-`cleanup: finished` and `localFailureObserved: false`. Repeat validation
-returns 75 unless the original launch still has qualifying complete evidence
-under current policy. The required GitHub contexts must still be green on that
-exact head. The [HQ custody store](deferred-source-custody.md) preserves the
-matching evidence separately from run scratch.
+CI continuation requires `coverageComplete: true`, `cleanup: finished`,
+`localFailureObserved: false` and an eligible reason under current policy.
+Unqualified or unreadable receipts return 75 before another battery on that head.
+Exact-head merge still requires all declared GitHub contexts to be green. The
+[HQ custody store](deferred-source-custody.md) retains evidence beyond run scratch.
+
+A completed conflict repair writes `cleanCheckout` for its exact rebased head.
+Its private `conflict-repair-publish.env` binds source, head and branch. New
+bindings also record the exact rebase base for deferred bundle prerequisites.
+`cleanupConfirmed` records drain when the validator can confirm it directly.
+Otherwise `controllerRecord` names the launch-bound registration; an active
+validation stop leaves the close result unwritten. After quiescence, the launcher
+checks drain, lease disposition and the final per-check evidence before allowing
+one fresh round to publish through the bound source lease. A passing pre-publish
+battery or qualifying UNKNOWN is reused on the same published head. A clean,
+drained repair without complete coverage or declared contexts can publish and
+hand off to watcher backoff, with merge still blocked. Local failure, unreadable
+check evidence or unconfirmed cleanup blocks the UNKNOWN publication route.
 
 Retention belongs to the caller/run-directory owner. Passing checks delete their
 command logs immediately. Failed or interrupted diagnostic files remain with

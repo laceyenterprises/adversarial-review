@@ -206,7 +206,7 @@ if [ "$ham_conflict_automatic" -eq 1 ] && [ "$HAM_CONFLICT_HEAD" != "$HAM_CONFLI
     *) ham_conflict_stop 1 conflict-primary-failed ;;
   esac
 fi
-printf 'source=%s\nhead=%s\nbranch=%s\n' "$HAM_CONFLICT_SOURCE" "$HAM_CONFLICT_HEAD" "$HAM_CONFLICT_BRANCH" \
+printf 'source=%s\nhead=%s\nbranch=%s\nbase=%s\n' "$HAM_CONFLICT_SOURCE" "$HAM_CONFLICT_HEAD" "$HAM_CONFLICT_BRANCH" "$HAM_CONFLICT_BASE" \
   > "$HAM_CONFLICT_PUBLISH" || ham_conflict_stop 1 conflict-state-unwritable
 rm -f "$HAM_CONFLICT_STATE"
 echo "HAM conflict repair: rebased $HAM_CONFLICT_SOURCE onto $HAM_CONFLICT_BASE as $(git rev-parse HEAD)" >&2

@@ -105,13 +105,13 @@ function controllerDrain(recorded) {
   return 'unconfirmed';
 }
 
-function completeCoverage(observed, { conflict = false } = {}) {
+function completeCoverage(observed) {
   return observed?.head === head && observed.selectedCheckCount > 0
     && observed.selectedCheckCount === observed.checks.length
     && (observed.checks.some(check => check.status === 'ci-covered')
       ? observed.coverage?.head === head && observed.coverage.repo === process.env.HAM_REPO
         && observed.coverage.prNumber === Number(process.env.HAM_PR_NUMBER)
-      : conflict)
+      : true)
     && observed.checks.every(check => check.status === 'ci-covered'
       ? check.reason === 'exact-head-ci-success' && check.result !== 'fail'
       : check.result === 'pass');
@@ -131,7 +131,7 @@ function conflictRebasePublication(binding = conflictBinding()) {
     // final check receipt after drain, before deciding whether source can move.
     const evidence = readDeferredValidationChecks(runDir, head, recorded);
     if (evidence?.checks.some(check => check.result === 'fail')) return 'blocked';
-    const coverageComplete = completeCoverage(evidence, { conflict: true });
+    const coverageComplete = completeCoverage(evidence);
     const decision = unknownValidationDeferral({ reason: recorded.reason, requiredContexts: requiredContexts() });
     if (!coverageComplete || !decision.ciAuthoritative) return 'redrive';
     if (!recordedUnknownDefersToCi(recorded, requiredContexts())) {

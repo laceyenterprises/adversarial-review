@@ -2,7 +2,7 @@ import { loadAwareTimeoutMs } from './load-aware-timeout.mjs';
 import { meteredExecFile } from './metered-gh.mjs';
 import {
   ensureExplicitReviewIntentSchema, findExplicitReviewRequest, recordExplicitReviewIntent, isPrimaryReversalReviewIntent,
-  isRemediationReviewIntent, pendingExplicitReviewIntent, priorityReviewIntent,
+  isRemediationReviewIntent, pendingExplicitReviewIntent, primaryReversalReviewRequest, priorityReviewIntent,
 } from './explicit-review-intent.mjs';
 import { hammerHandoffReviewBypass } from './hammer-handoff-review-bypass.mjs';
 import { isOperatorHeld } from './operator-hold-labels.mjs';
@@ -1175,6 +1175,12 @@ function buildBlockedRereviewResult(reason, reviewRow = null, extra = {}) {
     reviewRow,
     ...extra,
   };
+}
+
+export function queuePrimaryReversalReview({ rootDir, repo, prNumber, headSha, db, context, logger }) {
+  return requestReviewRereview({ rootDir, repo, prNumber, db, targetRevisionRef: headSha,
+    preserveBudgets: true, reason: 'system-primary-reversal-review', logger,
+    explicitReviewRequest: { ...primaryReversalReviewRequest(headSha), context } });
 }
 
 function requestReviewRereview({

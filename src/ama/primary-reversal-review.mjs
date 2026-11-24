@@ -3,15 +3,8 @@ import { join } from 'node:path';
 import { existsSync } from 'node:fs';
 import { findExplicitReviewRequest, primaryReversalReviewContext, primaryReversalReviewRequest } from '../explicit-review-intent.mjs';
 import { parseReviewFindings } from '../kernel/review-findings.mjs';
-import { requestReviewRereview } from '../review-state.mjs';
 import { normalizeEffectiveReviewVerdict } from '../kernel/verdict.mjs';
 import { amaReviewerFamilyForLogin } from './reviewer-authority.mjs';
-
-export function queuePrimaryReversalReview({ rootDir, repo, prNumber, headSha, db, context, logger }) {
-  return requestReviewRereview({ rootDir, repo, prNumber, db, targetRevisionRef: headSha,
-    preserveBudgets: true, reason: 'system-primary-reversal-review', logger,
-    explicitReviewRequest: { ...primaryReversalReviewRequest(headSha), context } });
-}
 
 export function readPrimaryReversalReview(rootDir, { repo, prNumber, headSha, db: existingDb }) {
   let db = existingDb;

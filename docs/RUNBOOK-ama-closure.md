@@ -5479,8 +5479,10 @@ reviewers and the hammer still inspect inversions and neutralizations.
 A later cross-file move preserves an added author region when its ordered
 content appears in newly added lines of a different production path. Matching
 ignores whitespace and blank lines. Existing copies, reused destination spans
-and test destinations confer no move proof. Whole-file rename and author
-deletion proofs retain their existing requirements.
+and test destinations confer no move proof. Scoped history reads expand to
+destination patches only when the protected change contains a possible moved
+insertion. Whole-file rename and author deletion proofs retain their existing
+requirements.
 
 When an exact-head reversal still lacks verified authority, the closer queues
 one full review for that head with a **Reverted primary-change regions** section.

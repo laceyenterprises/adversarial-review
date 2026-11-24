@@ -4,10 +4,10 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { buildPrimaryReversalReviewContext, checkPrimaryChange, fetchPrimaryChange } from '../src/ama/primary-change.mjs';
-import { formatPrimaryReversalReviewContext, queuePrimaryReversalReview, readPrimaryReversalReview,
+import { formatPrimaryReversalReviewContext, readPrimaryReversalReview,
   verifyPrimaryReversalReview } from '../src/ama/primary-reversal-review.mjs';
 import { consumeExplicitReviewIntent } from '../src/explicit-review-intent.mjs';
-import { ensureReviewStateSchema, openReviewStateDb } from '../src/review-state.mjs';
+import { ensureReviewStateSchema, openReviewStateDb, queuePrimaryReversalReview } from '../src/review-state.mjs';
 import { evaluateMergeEligibility } from '../src/ama/merge-eligibility.mjs';
 import { buildReviewerExtraContext } from '../src/reviewer-prompt.mjs';
 import { primaryChangeFixture } from './helpers/primary-change.mjs';

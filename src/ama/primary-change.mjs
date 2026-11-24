@@ -885,6 +885,10 @@ function unchangedReplacementPositions(primaryFiles, finalFiles, path) {
   return positions;
 }
 
+function isMoveInsertion(region) {
+  return region.addedLines.some(line => line.trim()) && !region.removedLines.length;
+}
+
 // A move must add a new copy to a production path in the final diff. An
 // existing copy, context line, or copy already introduced by the author is
 // insufficient. Consume each destination span at most once per evaluation.
@@ -917,10 +921,10 @@ function crossFileMoveCoverage(evidence, primary, final) {
       || (change.status === 'added' && !actual?.regions.length)) continue;
     const finalUnits = actual?.regions.flatMap(regionUnits) || [];
     for (const region of change.regions) {
+      if (!isMoveInsertion(region)) continue;
       const units = regionUnits(region);
+      if (!units.length || units.some(unit => finalUnits.some(other => unitCovered(unit, other)))) continue;
       const lines = normalize(region.addedLines);
-      if (!lines.length || !units.length || region.removedLines.length
-        || units.some(unit => finalUnits.some(other => unitCovered(unit, other)))) continue;
       const occurrences = runs => runs.flatMap((run, runIndex) => run.flatMap((line, index) =>
         line === lines[0] && lines.every((text, offset) => run[index + offset] === text)
           ? [{ runIndex, index }] : []));
@@ -1043,6 +1047,7 @@ function primaryReversalScope(evidence, headSha, options) {
 }
 
 export async function buildPrimaryReversalReviewContext(args, evidence, options) {
+  if (!SHA.test(args.headSha || '') || !SHA.test(evidence?.primaryHead || '')) return null;
   const scope = primaryReversalScope(evidence, args.headSha, options);
   if (!scope) return null;
   const cache = new Map();
@@ -1065,7 +1070,7 @@ export async function buildPrimaryReversalReviewContext(args, evidence, options)
       }
     }
   }
-  return { headSha: args.headSha, primaryHead: evidence.primaryHead, scope: scope.scope, regions };
+  return regions.length ? { headSha: args.headSha, primaryHead: evidence.primaryHead, scope: scope.scope, regions } : null;
 }
 
 // Diagnostic traversal only: keep the complete attribution/authorization
@@ -2040,7 +2045,9 @@ async function collectPrimaryChange(args, {
   // Base integration reads protected paths first. A syntactic move may need
   // a destination patch outside that projection, only after a region fails.
   if (result.finalPatchesScoped && args.get.compareFiles
-    && checkPrimaryChange(result, args.headSha).reason === 'primary-change-reverted') {
+    && checkPrimaryChange(result, args.headSha).reason === 'primary-change-reverted'
+    && [...preservationChanges(result.primaryFiles).values()].some(change =>
+      !change.renamed && !change.opaque && !isTestPath(change.filename) && change.regions.some(isMoveInsertion))) {
     try {
       const destinationPatches = await args.get.compareFiles(`repos/${args.repo}/compare/${result.mergeBase}...${args.headSha}`);
       if (destinationPatches.merge_base_commit?.sha === result.mergeBase && destinationPatches.filesComplete === true) {

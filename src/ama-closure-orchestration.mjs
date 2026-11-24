@@ -1,6 +1,6 @@
 import { applyRepositoryMergeOff, MERGE_DISABLED_FOR_REPOSITORY } from './merge-disabled-repositories.mjs';
 import { readPrTenure, queueTenureReview } from './pr-tenure.mjs';
-import { openReviewStateDb, requestReviewRereview } from './review-state.mjs';
+import { openReviewStateDb, queuePrimaryReversalReview, requestReviewRereview } from './review-state.mjs';
 import { readCloserSuccessor, requestCloserSuccessor, settleCloserSuccessor } from './ama/closer-successor.mjs';
 import { repairEpochObservation } from './repair-epochs.mjs';
 import { handoffFinalFixAll } from './ama/final-fix-all.mjs';
@@ -28,7 +28,7 @@ import { resolveHqRoot } from './hq-root.mjs';
 import { fleetStopReason } from './fleet-stop.mjs';
 import { recordOperatorNoticeCloserOutcome } from './operator-decision-notice.mjs';
 import { buildPrimaryReversalReviewContext, checkPrimaryChange, fetchPrimaryChange } from './ama/primary-change.mjs';
-import { queuePrimaryReversalReview, readPrimaryReversalReview } from './ama/primary-reversal-review.mjs';
+import { readPrimaryReversalReview } from './ama/primary-reversal-review.mjs';
 import { readHammerStopForHead, readHammerStopHoldForHead, isInfrastructureStop, canEnrichCiInfrastructureStop, isLegacyReviewHandoffStop } from './ama/hammer-stop-hold.mjs';
 import {
   evaluateHammerRetryCap, readHammerRetryCapLedger, rearmOperatorApprovedCloser, resetHammerSeriesForNonCloserHead,

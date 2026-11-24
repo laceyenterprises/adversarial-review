@@ -10,6 +10,9 @@ reservation owns the PR. Unrouted waits keep discovery-first priority. Routed
 non-draft pending rows are eligible for reviewer queue reporting and durable refill.
 An intent left by an older rowless rescue keeps its dispatch fences and does
 not impose a re-review CI prerequisite on a first review.
+The watcher reuses the exact-head waiver withdrawal receipt while ordinary
+review routing waits. Discovery waits can use the original discovery reference
+or the available head when the fetched subject has no reference.
 
 ## Interface changes
 
@@ -24,3 +27,5 @@ Offline fixtures in `docs-fast-path.test.mjs`, `watcher-claim-loop.test.mjs`,
 `review-pipeline-health.test.mjs`, and `review-latency-report.test.mjs` exercise
 same-head merge after transient gates settle, waiver withdrawal on red CI,
 first-pass claim after repair custody clears, and queue accounting.
+The remediation fixtures also cover repeated polls after waiver withdrawal,
+new-head reconsideration, and wait persistence without a fetched reference.

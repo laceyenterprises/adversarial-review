@@ -2199,8 +2199,9 @@ primary-change policy, protection, capability, protective
 predecessors, stop holds and audit remain authoritative. No reviewer result or
 finding count is invented. On a settled check failure or definite mergeability
 refusal for the docs head, the watcher logs the gate reasons, withdraws the
-waiver and takes the ordinary review path. A first review can proceed with red
-external CI. Unsettled checks or `UNKNOWN` mergeability keep the fast-path wait
+waiver and takes the ordinary review path. The exact-head withdrawal receipt
+keeps later polls on that path while routing waits. A first review can proceed
+with red external CI. Unsettled checks or `UNKNOWN` mergeability keep the fast-path wait
 and retry on the same head. A failed waiver withdrawal stays with the watcher
 for retry.
 Once an ordinary reviewer is assigned for the head, later polls keep it on

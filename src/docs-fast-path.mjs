@@ -1,14 +1,16 @@
 import { docsReviewRequested, readDocsFastPath } from './docs-only.mjs';
-import { publishAdversarialGateStatus } from './adversarial-gate-status.mjs';
+import { publishAdversarialGateStatus, readGateRecord } from './adversarial-gate-status.mjs';
 import { createBranchProtectionChecker } from './branch-protection.mjs';
 import { runDaemonCleanMergeAttempt } from './daemon-clean-merge.mjs';
 
 const readProtection = createBranchProtectionChecker();
+const DOCS_WITHDRAWAL_REASON = 'docs-fast-path-not-eligible';
 
 export async function maybeRunDocsFastPath({ subject, reviewRow, cfg, loadCfg = () => cfg, rootDir, repoPath, prNumber,
   execFileImpl, logger = console,
   readReviewRow = () => reviewRow, readDocsFastPathImpl = readDocsFastPath,
   publishStatusImpl = publishAdversarialGateStatus,
+  readGateRecordImpl = readGateRecord,
   fetchProtectionImpl = readProtection,
   runDaemonImpl = runDaemonCleanMergeAttempt } = {}) {
   if (subject.terminal || subject.isDraft) return null;
@@ -40,6 +42,9 @@ export async function maybeRunDocsFastPath({ subject, reviewRow, cfg, loadCfg = 
   }
   if (evidence?.reviewRequested) return withdrawWaiver(evidence.headSha || subject.headSha);
   if (!evidence) return null;
+  const gate = rootDir && readGateRecordImpl(rootDir, { repo: repoPath, prNumber, headSha: evidence.headSha });
+  // A recorded withdrawal hands this head to ordinary review even if routing must wait.
+  if (gate?.state === 'pending' && gate.reason === DOCS_WITHDRAWAL_REASON) return null;
   // An eligible docs head owns its wait, including disabled authority and unsettled CI.
   // Neither a reviewer nor a closer is useful while these deterministic gates wait.
   try {
@@ -65,7 +70,7 @@ export async function maybeRunDocsFastPath({ subject, reviewRow, cfg, loadCfg = 
       return 'terminal';
     }
     // Settled CI failures and definite mergeability refusals take ordinary review.
-    if (result?.docsReviewRequired) return withdrawWaiver(evidence.headSha, 'docs-fast-path-not-eligible');
+    if (result?.docsReviewRequired) return withdrawWaiver(evidence.headSha, DOCS_WITHDRAWAL_REASON);
     return reason;
   } catch (error) {
     logger.warn?.(`[docs-fast-path] merge deferred: ${error.message}`);

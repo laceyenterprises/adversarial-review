@@ -735,11 +735,13 @@ export async function processReviewSubject(entry, ctx) {
   } finally {
     if (!subject.terminal && Array.isArray(wait)) {
       try {
-        const domainId = ctx.domainId || entry.domainId || subject.ref.domainId || ctx.WATCHER_PRIMARY_DOMAIN_ID;
+        const ref = subject.ref ?? entry.subjectRef;
+        const domainId = ctx.domainId || entry.domainId || ref?.domainId || subject.domainId
+          || ctx.WATCHER_PRIMARY_DOMAIN_ID || CODE_PR_DOMAIN_ID;
         const [reason, owner] = wait;
         const recorded = stmtRecordReviewDiscoveryWait.run({
-          repo: repoPath, prNumber, domainId, subjectId: subject.ref.subjectExternalId,
-          head: subject.ref.revisionRef || subject.headSha || null, now: new Date().toISOString(),
+          repo: repoPath, prNumber, domainId, subjectId: ref?.subjectExternalId ?? null,
+          head: ref?.revisionRef || subject.headSha || null, now: new Date().toISOString(),
           ticket: operatorSurface.extractLinearTicketId(subject.title || ''),
           labels: JSON.stringify(Array.isArray(subject.labels) ? subject.labels : []),
           draft: Number((subject.isDraft ?? subject.draft) === true),

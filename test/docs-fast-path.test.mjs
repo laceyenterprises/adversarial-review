@@ -258,6 +258,34 @@ test('DOCSFASTPATH-01 prior waiver is withdrawn before admission hands an explic
   assert.equal(daemonCalls, 1);
 });
 
+test('REVIEWROWLESS-01 settled refusal hands the head to review while routing waits', async () => {
+  const receipts = new Map(), states = [];
+  let currentEvidence = evidence, daemonCalls = 0;
+  const args = { rootDir: '/unused', subject: { headSha: head, labels: [] }, repoPath: 'example/docs', prNumber: 6,
+    cfg: { enabled: true }, logger: quiet,
+    readDocsFastPathImpl: async () => currentEvidence,
+    readGateRecordImpl: (_root, { headSha }) => receipts.get(headSha),
+    publishStatusImpl: async (_root, { headSha, decision }) => {
+      states.push(decision.state);
+      receipts.set(headSha, decision);
+    },
+    fetchProtectionImpl: async () => ({}), runDaemonImpl: async () => {
+      daemonCalls++;
+      return { docsReviewRequired: currentEvidence.headSha === head };
+    } };
+  assert.equal(await maybeRunDocsFastPath(args), null);
+  const reviewRow = { reviewer: '', revision_ref: head, failure_message: '[reviewer-capacity] owner=watcher' };
+  assert.equal(await maybeRunDocsFastPath({ ...args, reviewRow }), null);
+  assert.deepEqual(states, ['success', 'pending']);
+  assert.equal(daemonCalls, 1);
+  currentEvidence = { ...evidence, headSha: 'f'.repeat(40) };
+  assert.equal(await maybeRunDocsFastPath({ ...args, reviewRow, subject: {
+    ...args.subject, headSha: currentEvidence.headSha,
+  } }), 'docs-merge-deferred');
+  assert.deepEqual(states, ['success', 'pending', 'success']);
+  assert.equal(daemonCalls, 2);
+});
+
 test('DOCSFASTPATH-01 reader delegates live labels and retains row requests after discovery', async () => {
   let row = {}, liveReads = 0;
   const statuses = [];

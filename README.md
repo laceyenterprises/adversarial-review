@@ -2155,6 +2155,7 @@ gate status at admission, classification or live merge checks. Failed withdrawal
 retains the fast-path wait for retry. Pending checks and unknown mergeability
 keep the docs waiver while the watcher rechecks the same head. A settled check
 failure or definite mergeability refusal withdraws it and admits ordinary review.
+The exact-head withdrawal receipt keeps ordinary admission active while routing waits.
 Discovery wait rows use the existing pending state and stay out of the reviewer
 queue until routing. Offline
 regressions are in `test/docs-fast-path.test.mjs` and

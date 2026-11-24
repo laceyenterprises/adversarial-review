@@ -322,10 +322,14 @@ for (const scenario of ['first review', 'repair custody', 'legacy rescue intent'
       const docsUrl = fileUrl('src', 'docs-fast-path.mjs');
       const docsFixture = `
         import { maybeRunDocsFastPath as actual } from ${JSON.stringify(`${docsUrl}?actual`)};
+        const gateRecords = new Map();
+        const key = ({ repo, prNumber, headSha }) => repo + '#' + prNumber + '@' + headSha;
         export const maybeRunDocsFastPath = args => actual({ ...args,
           loadCfg: () => ({ enabled: true }),
-          publishStatusImpl: async (_root, { decision }) => {
-            (globalThis.__docsStatuses ||= []).push(decision.state);
+          readGateRecordImpl: (_root, identity) => gateRecords.get(key(identity)),
+          publishStatusImpl: async (_root, status) => {
+            gateRecords.set(key(status), status.decision);
+            (globalThis.__docsStatuses ||= []).push(status.decision.state);
           },
           fetchProtectionImpl: async () => ({}),
           runDaemonImpl: async () => ({ reason: 'not-eligible', reasons: ['ci-not-green'], docsReviewRequired: true }),
@@ -374,7 +378,21 @@ for (const scenario of ['first review', 'repair custody', 'legacy rescue intent'
           assert.equal(readPassRows(db).find(pass => pass.pr_number === 101).pass_kind, ${JSON.stringify(legacyIntent ? 'rereview' : 'first-pass')});
           await pollOnce(octokit, pollOptions);
           assert.equal(claims.filter(claim => claim.prNumber === 101).length, 1);
-          assert.deepEqual(globalThis.__docsStatuses, ${JSON.stringify(repairOwned ? ['success', 'pending', 'success', 'pending', 'success', 'pending'] : ['success', 'pending'])});
+          assert.deepEqual(globalThis.__docsStatuses, ['success', 'pending']);
+          if (${repairOwned}) {
+            const { processReviewSubject } = await import(${JSON.stringify(fileUrl('src', 'pollonce-phases.mjs'))});
+            const repoPath = ${JSON.stringify(identity.repo)};
+            const ctx = { repoPath, domainId: 'code-pr', currentRepoPRs: [],
+              operatorSurface: { extractLinearTicketId: () => null } };
+            const subject = { headSha: '${head}', isDraft: true };
+            const subjectRef = { subjectExternalId: repoPath + '#103', revisionRef: '${head}' };
+            await processReviewSubject({ prNumber: 103, subject, subjectRef }, ctx);
+            await processReviewSubject({ prNumber: 104, subject }, ctx);
+            const waits = db.prepare('SELECT subject_external_id, revision_ref, failure_message FROM reviewed_prs WHERE pr_number IN (103,104) ORDER BY pr_number').all();
+            assert.deepEqual(waits, [subjectRef.subjectExternalId, null].map(subject_external_id => ({
+              subject_external_id, revision_ref: '${head}', failure_message: '[draft] owner=pr-author',
+            })));
+          }
         `,
       }));
       const env = installGhFixture(tmp);

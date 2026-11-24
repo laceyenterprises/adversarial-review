@@ -16,8 +16,9 @@ import { resolveRepositoryRequiredCheckContexts, resolveRequiredCheckContextsFro
   from '../src/ama/required-check-contexts.mjs';
 import {
   UNKNOWN_CONTEXTS_NOT_GREEN, UNKNOWN_CONTEXTS_UNDECLARED, recordedUnknownDefersToCi,
-  unknownValidationCiGate, unknownValidationDeferral,
+  readDeferredValidationChecks, unknownValidationCiGate, unknownValidationDeferral,
 } from '../src/ama/local-validation-unknown.mjs';
+import { startDeferredSourceCustody } from '../src/ama/deferred-source-custody.mjs';
 import { classifyQueueChecks, resolveQueueRequiredSet } from '../src/finalization/queue-check-reader.mjs';
 import { queueLocalValidationUnknown, validateQueueHandoff } from '../src/finalization/queue-handoff.mjs';
 import { queueHandoffFixture } from './helpers/queue-handoff-fixture.mjs';
@@ -30,6 +31,30 @@ const cfg = { requiredCheckContexts: [],
   requiredCheckContextsByRepository: [{ repository: REPO, contexts: ['repo-guards'] }] };
 const run = (name, conclusion = 'SUCCESS') => ({ __typename: 'CheckRun', name, status: 'COMPLETED', conclusion });
 const green = [run('repo-guards'), run('lint')];
+
+test('deferred check receipts handle absent evidence and normalize unreadable payloads', t => {
+  const dir = mkdtempSync(join(tmpdir(), 'mrq20-receipt-'));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  for (const recorded of [null, undefined, {}]) {
+    assert.equal(readDeferredValidationChecks(dir, HEAD, recorded), null);
+  }
+  const recorded = { localValidationReceipt: join(dir, 'checks.json') };
+  assert.equal(readDeferredValidationChecks(dir, HEAD, recorded), null);
+  for (const payload of ['{', 'null', '{}', JSON.stringify({ head: HEAD, checks: [null] })]) {
+    writeFileSync(recorded.localValidationReceipt, payload);
+    assert.throws(() => readDeferredValidationChecks(dir, HEAD, recorded), /^Error: invalid validation receipt$/);
+  }
+  const evidence = { head: HEAD, checks: [{ result: 'pass' }] };
+  writeFileSync(recorded.localValidationReceipt, JSON.stringify(evidence));
+  assert.deepEqual(readDeferredValidationChecks(dir, HEAD, recorded), evidence);
+  assert.throws(() => readDeferredValidationChecks(dir, 'b'.repeat(40), recorded), /invalid validation receipt/);
+  assert.throws(() => readDeferredValidationChecks(dir, HEAD,
+    { localValidationReceipt: join(dir, '..', 'checks.json') }), /invalid validation receipt path/);
+  const unreadable = join(dir, 'directory');
+  mkdirSync(unreadable);
+  assert.throws(() => readDeferredValidationChecks(dir, HEAD,
+    { localValidationReceipt: unreadable }), /^Error: invalid validation receipt$/);
+});
 
 test('repository-scoped contexts bind to one repository and keep global callers unchanged', () => {
   assert.deepEqual(resolveRequiredCheckContextsFromCfg(cfg, { repository: REPO }), ['repo-guards']);
@@ -255,6 +280,24 @@ test('a clean conflict rebase retains cleanup evidence for publication after a t
     assert.equal(undrained.status, 75, undrained.stderr);
     assert.equal(undrained.batteries, 1);
   }
+});
+
+test('deferred conflict validation finds source custody without a remote-head environment hint', t => {
+  const repo = fixture(t);
+  writeFileSync(join(repo.root, '.git/info/exclude'), '/*\n');
+  writeFileSync(join(repo.root, 'conflict-repair-publish.env'),
+    `source=${HEAD}\nhead=${repo.head}\nbranch=feature\n`);
+  const hold = startDeferredSourceCustody({
+    env: { HAM_HQ_ROOT: repo.root, HAM_REPO: REPO, HAM_PR_NUMBER: '42',
+      HAM_CLOSE_VALIDATION_REMOTE_HEAD: HEAD },
+    launchRequestId: 'lrq_other', sourceHead: repo.head, clean: true, files: [], runner: 'canonical',
+  });
+  assert.ok(hold);
+  const result = runValidator(repo, { exit: 0 }, ['--check-deferred']);
+  assert.equal(result.status, 75, result.stderr);
+  assert.match(result.stderr, /canonical-validation-deferred/);
+  assert.match(result.stderr, /hold\.json/);
+  assert.equal(result.batteries, 0);
 });
 
 test('hammer-validate: a real local failure still blocks', t => {

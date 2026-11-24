@@ -6500,6 +6500,10 @@ the receipt and diagnostics say `selection-size-unavailable`. That UNKNOWN
 cannot use CI continuation.
 
 A completed local conflict repair validates outside the lease before publication.
+Revalidation keys custody to the last pushed head, or the live PR head when no
+push was needed. An active conflict-publication binding keys deferred hold
+lookups to its remote source head. Missing check receipts provide no evidence;
+unreadable or malformed receipts fail with `invalid validation receipt`.
 An eligible UNKNOWN can publish only with a clean checkout, an exact source
 binding, confirmed drain and readable evidence without failed checks. An active
 stop leaves the close result unwritten and its supervisor confirms drain before

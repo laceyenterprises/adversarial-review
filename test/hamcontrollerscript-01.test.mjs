@@ -185,6 +185,9 @@ case "$(basename "$path")" in
       exit 0
     fi
     if [ "$1" != --check-deferred ]; then log "validate $*"; fi
+    if [ -n "\${FIXTURE_VALIDATION_REMOTE_HEAD:-}" ] && [ "$1" != --check-deferred ]; then
+      printf '%s\\n' "\${HAM_CLOSE_VALIDATION_REMOTE_HEAD:-}" > "$FIXTURE_VALIDATION_REMOTE_HEAD"
+    fi
     if [ "\${FIXTURE_REAL_VALIDATE:-0}" = 1 ]; then exec ${shellQuote(process.execPath)} "$path" "$@"; fi
     if [ "$1" = --check-deferred ]; then
       if [ -n "\${FIXTURE_CHECK_DEFERRED_EXIT:-}" ] && ls "$HAM_RUN_DIR"/validation-deferred-*.json >/dev/null 2>&1; then
@@ -265,6 +268,7 @@ fi
 POST_REMEDIATION_SHA=$(git rev-parse HEAD); HAM_PRODUCED_HEAD="$POST_REMEDIATION_SHA"; HAM_CURRENT_BASE_SHA="$HAM_REVIEWED_SHA"
 if [ "\${FIXTURE_VERIFY_EXIT:-0}" != 0 ]; then HAM_PHASE_OUTCOME=rebase-conflict; ham_release_merge_lease; return "$FIXTURE_VERIFY_EXIT"; fi
 if [ -n "\${FIXTURE_NEEDS_REVALIDATION:-}" ] && [ -z "\${HAM_LOCALLY_VALIDATED_HEAD:-}" ]; then HAM_NEEDS_REVALIDATION=true; else HAM_NEEDS_REVALIDATION=false; fi
+if [ "\${HAM_NEEDS_REVALIDATION:-false}" = true ] && [ "\${FIXTURE_UNSET_POST_SHA:-0}" = 1 ]; then unset POST_REMEDIATION_SHA; fi
 HAM_PHASE_OUTCOME=verified
 return 0
 `);
@@ -430,6 +434,18 @@ test('a local commit the PR lacks is published before verify-head; revalidation 
   const validated = events.indexOf('validate --canonical -- src/example.mjs');
   const secondVerify = events.indexOf(`verify-head validated=${f.shas.head}`);
   assert.ok(firstVerify < yielded && yielded < validated && validated < secondVerify, events.join('\n'));
+});
+
+test('outside-lease revalidation binds custody to the live or pushed head without a post-remediation SHA', async t => {
+  for (const liveHead of [undefined, 'reviewed']) {
+    const f = hammerFixture(t, { liveHead });
+    const receipt = join(f.run, 'remote-head');
+    const result = await f.close({ FIXTURE_NEEDS_REVALIDATION: '1', FIXTURE_UNSET_POST_SHA: '1',
+      FIXTURE_VALIDATION_REMOTE_HEAD: receipt,
+      ...(liveHead === 'reviewed' ? { HAM_PUSHED_HEAD: f.shas.head } : {}) });
+    assert.equal(result.status, 0, `${result.stderr}\n${result.stdout}`);
+    assert.equal(readFileSync(receipt, 'utf8').trim(), f.shas.head);
+  }
 });
 
 function mirrorFixture(t, { entries, runs, manifestFailure, checkFailure, partialChecks, localFailure, remoteDrift, baseDrift, baseFailure, subcontext, duplicateGlobs, currentRegistry, jobDetails, deferJobReadsAfter } = {}) {

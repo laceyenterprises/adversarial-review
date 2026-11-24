@@ -82,11 +82,16 @@ export function readUnknownValidationReceipt(runDir, head) {
 
 // Read the private check receipt after its process group has drained.
 export function readDeferredValidationChecks(runDir, head, recorded) {
-  if (!recorded.localValidationReceipt) return null;
+  if (!recorded?.localValidationReceipt) return null;
   const path = relative(runDir, recorded.localValidationReceipt);
   if (!path || isAbsolute(path) || path.split(sep)[0] === '..') throw new Error('invalid validation receipt path');
-  const evidence = JSON.parse(readFileSync(recorded.localValidationReceipt, 'utf8'));
-  if (evidence.head !== head || !Array.isArray(evidence.checks)
+  let evidence;
+  try { evidence = JSON.parse(readFileSync(recorded.localValidationReceipt, 'utf8')); }
+  catch (error) {
+    if (error.code === 'ENOENT') return null;
+    throw new Error('invalid validation receipt', { cause: error });
+  }
+  if (evidence?.head !== head || !Array.isArray(evidence.checks)
     || evidence.checks.some(check => !check || typeof check !== 'object')) throw new Error('invalid validation receipt');
   return evidence;
 }

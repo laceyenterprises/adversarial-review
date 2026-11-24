@@ -143,12 +143,13 @@ function conflictRebasePublication(binding = conflictBinding()) {
 }
 
 function validationDeferred() {
-  const hold = matchingHold();
+  const binding = conflictBinding();
+  const hold = matchingHold(binding);
   const recorded = readUnknownValidationReceipt(runDir, head);
   if (!hold && !recorded) return false;
   if ((!expectedHead || expectedHead === head) && !hold && cleanCheckout()
     && recordedUnknownDefersToCi(recorded, requiredContexts())
-    && (!conflictBinding() || conflictRebasePublication() === 'ci')) {
+    && (!binding || conflictRebasePublication(binding) === 'ci')) {
     console.error(`hammer-validate: ${ciAuthoritativeOutcome}: ${deferredPath}; no local pass is claimed. Proceed to the close; it merges only when this exact head's declared required GitHub contexts are all green.`);
     process.exitCode = 0;
     return true;

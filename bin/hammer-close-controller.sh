@@ -249,7 +249,7 @@ while :; do
   if { [ "$ham_close_rebase_state" != ci ] && [ "$ham_close_saved_head" != "$ham_close_prevalidated_head" ]; } \
     || [ "$ham_close_saved_head" != "$ham_close_local_head" ] \
     || [ "$ham_close_saved_head" != "${HAM_PUSHED_HEAD:-$ham_close_live_head}" ]; then
-    ham_close_validate "$ham_close_saved_head" "$ham_close_saved_base" "$POST_REMEDIATION_SHA" \
+    ham_close_validate "$ham_close_saved_head" "$ham_close_saved_base" "${HAM_PUSHED_HEAD:-$ham_close_live_head}" \
       || ham_close_validation_stop "$?" "$ham_close_saved_head"
   fi
   [ "$(git rev-parse HEAD)" = "$ham_close_saved_head" ] || ham_close_finish 20 head-changed

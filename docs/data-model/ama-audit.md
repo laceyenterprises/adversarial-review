@@ -25,7 +25,7 @@ HAMWRITERREFUND-01 adds optional `attempts[].mergeWriter` on
 `hammer-gh-pr-merge` attempts. `merge-writer-intent` records the exact
 `validatedHead`, `baseRef` and `baseSha` before calling the legacy writer.
 The result records `phase`, `elapsedMs`, `phaseElapsedMs`, `exitCode`,
-`reason`, and bounded redacted `stdout` and `stderr` when available. `write`
+`reason`, and redacted `stdout` and `stderr` bounded to 16 KiB per stream when available. `write`
 is `not-invoked`, `acknowledged` or `unknown`. `readback` is `open`, `closed`,
 `merged` or `unavailable`, separately from `readbackHead` and `readExit`.
 `merge-writer-deferred` retains a `park` continuation owned by
@@ -33,7 +33,10 @@ is `not-invoked`, `acknowledged` or `unknown`. `readback` is `open`, `closed`,
 evidence. Before a bounded transport retry the lease owner records the open
 readback as another `merge-writer-intent`, keeping the hold until the next
 click has its own intent. `permanent-merge-rejection` records a definitive
-refusal with exact open readback. An operator may append
+refusal with exact open readback and no prior unresolved click. A proven
+pre-transport `legacy-writer-timeout` or `legacy-writer-preflight-refused`
+settles its intent as a charged redrive
+when no prior click remains unresolved. An operator may append
 `merge-writer-reconciled` through the runbook procedure, linking the inspected
 hold with `reconcilesAttemptNumber` and the fresh readback in `mergeWriter`.
 Later generic audits do not settle either hold. The closure-wait store

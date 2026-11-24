@@ -1347,7 +1347,11 @@ changes survive pushes and rebases until dismissed or followed by a later
 approval from the same issuer. HAM reuse checks this proof before the merge
 lease and again before transport; review holds use a five-minute recovery
 backoff. Review-change and operator-veto audit deferrals do not earn an automatic
-retry refund. See the [standing-review contract](docs/RUNBOOK-ama-closure.md#standing-operator-reviews-and-the-merge-writer-lac-2305).
+retry refund. A proven pre-transport writer timeout keeps its charge and can
+re-enter bounded closure admission. An unresolved writer keeps its head and
+base fenced for reconciliation. The daemon checks that fence before taking
+the lease and again while holding it.
+See the [standing-review contract](docs/RUNBOOK-ama-closure.md#standing-operator-reviews-and-the-merge-writer-lac-2305).
 The wrapper prints each phase's bounded diagnostic tail, status, outcome, and
 lease state. A final-gate conflict with green or pending CI and no other blocker
 yields the lease for a bounded replay through local validation and exact-head

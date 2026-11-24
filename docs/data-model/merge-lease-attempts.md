@@ -69,9 +69,12 @@ closer arrivals across all heads of that PR. Changing the head or observed base 
 existing 30-day attempt expiry still applies. Gate charges and retryable refunds
 preserve these fields and cannot erase a park.
 
-HAMWRITERREFUND-01 releases `merge-writer-deferred` as an ordinary
-chargeable release. The exact-head/base [AMA writer audit](ama-audit.md)
-fences another click even if this counter later expires or is reset.
+HAMWRITERREFUND-01 charges `merge-writer-deferred` and proven pre-transport
+`legacy-writer-timeout` or `legacy-writer-preflight-refused` releases. The exact-head/base
+[AMA writer audit](ama-audit.md) fences another click for an unresolved writer
+even if this counter later expires or is reset. The daemon avoids acquiring a
+lease for an already known hold and charges the release if the hold appears
+during admission.
 
 Both normal and retryable-abort no-merge releases update this state under the
 holder/waiter and attempt locks. Refund and release identity persist atomically
@@ -81,7 +84,7 @@ Explicit merged or terminal releases skip re-entry. The CLI accepts mutually
 exclusive `release --merged`, `--terminal`, `--yield`, or `--retryable-abort`,
 plus `--reason`. The hammer uses `--yield --reason required-checks-wait` before
 its first CI wait, refunding the provisional gate charge. Retryable aborts also refund
-that charge. The daemon marks non-permanent failed outcomes as `yielded: true`,
+that charge. Outside the writer hold fence, the daemon marks non-permanent failed outcomes as `yielded: true`,
 so transient reads and retry exhaustion cannot cause failure parking. Unknown
 exceptions remain chargeable. Repeated-failure parks carry a closing status and
 use the hammer's existing audit, comment and page path for gate-cap parks.

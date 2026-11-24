@@ -375,7 +375,9 @@ multiplier) and bounded only by the remaining command budget, with no fixed cap;
 expiry aborts the read and returns `legacy-writer-timeout` without transport.
 HAMWRITERREFUND-01 records an exact-head and base writer intent under the
 merge lease before calling the legacy lane. A proof timeout retains
-`legacy-writer-timeout` in its diagnostics with `write: not-invoked`.
+`legacy-writer-timeout` and `write: not-invoked` in its diagnostics. It keeps
+the launch and lease charges and returns to ordinary bounded admission when
+the diagnostics rule out transport and no earlier click remains unresolved.
 Unconfirmed transport retains `write: unknown` and the bounded, redacted
 output. Fresh GitHub readback distinguishes a confirmed merge, a moved head,
 an open or closed PR, and unavailable evidence. Open readback only describes
@@ -384,20 +386,28 @@ live base, a green gate, and the same lease, a recognized transient transport
 failure can retry within the same writer budget (at most three clicks). A
 credential rejection allows one forced refresh before its next fenced click.
 Each click records writer intent and rechecks review proof. A definitive
-rejection with matching open readback records a refused merge-action receipt.
+rejection with matching open readback records a refused merge-action receipt
+when no earlier click remains unresolved.
 A confirmed merge following an ambiguous write settles the PR without an
 own-merge receipt unless a later, individually acknowledged click owns it.
+If the gate already observed the validated head merged before any click,
+unavailable confirmation keeps the accepted-confirmation deferral.
 
 `merge-writer-deferred` releases the merge lease without a retry refund.
 The watcher keeps that head parked at the same base and pages once per head
 with the AMA audit attempt number. An interrupted writer intent provides
-the same fence. Inspect the named audit, reconcile the PR on GitHub, and
+the same fence. The daemon checks the local audit before starting a lease
+attempt and checks again under the lease. Repeat daemon passes retain the
+existing charge and recheck unchanged or unavailable GitHub identity at
+five-minute intervals. Inspect the named audit, reconcile the PR on GitHub, and
 investigate the named phase and its output. A provably changed head or live
-base branch ref returns through ordinary closure admission. The PR payload's
-base SHA can be historical. Unavailable readback retains
+base branch ref returns through ordinary closure admission. A verified branch
+lookup can supply the live ref SHA when the Git ref endpoint fails. The PR
+payload's base SHA can be historical. Unavailable readback retains
 the hold. `merge-target-unparseable` is a registered closer fault.
 When local writer diagnostics prove transport was never invoked, other
-unclassified preflight refusals settle the intent as `unclassified-merge-failure`.
+unclassified preflight refusals settle the intent as
+`legacy-writer-preflight-refused` and keep their charge through bounded redrive.
 The recognized lane-busy deferral keeps its retry refund. An unreadable writer
 identity parks and pages once per head under `merge-writer-audit-unreadable`.
 

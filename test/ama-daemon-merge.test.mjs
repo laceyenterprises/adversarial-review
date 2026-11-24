@@ -6,7 +6,7 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { hostname, tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { acquireDaemonMergeLease, acquireMergeLease, releaseMergeLease, withDaemonMergeReservation, readMergeLeaseWaiters, readMergeLeaseAttempts } from '../src/ama/merge-lease.mjs';
+import { acquireDaemonMergeLease, acquireMergeLease, releaseMergeLease, withDaemonMergeReservation, readMergeLeaseWaiters, readMergeLeaseAttempts, recordMergeLeaseGateAttempt } from '../src/ama/merge-lease.mjs';
 import { primaryChangeFixture } from './helpers/primary-change.mjs';
 import { migrationRenumberFixture } from './helpers/migration-renumber.mjs';
 import { proveMigrationRenumbers } from '../src/ama/migration-renumber.mjs';
@@ -188,9 +188,21 @@ function baseArgs(harness, overrides = {}) {
   };
 }
 
-test('the shared lease writer checks for a hammer intent that appeared during daemon admission', async () => {
+test('a raced hammer hold charges one daemon release and later passes avoid lease, gate, audit and page work', async t => {
+  const rootDir = mkdtempSync(join(tmpdir(), 'daemon-writer-hold-'));
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
   const h = makeHarness();
-  const acquire = h.deps.acquireLeaseImpl;
+  const lane = { rootDir, repo: 'o/r', base: 'main', holderPid: process.pid, holderHost: hostname() };
+  let now = '2026-11-24T00:00:00.000Z';
+  recordMergeLeaseGateAttempt({ ...lane, pr: 7, head: HEAD, now });
+  const acquire = () => {
+    h.calls.acquire++;
+    return acquireDaemonMergeLease({ ...lane, holderPr: 7, holderHead: HEAD, now });
+  };
+  h.deps.releaseLeaseImpl = (lease, outcome) => {
+    h.calls.release++;
+    assert.equal(releaseMergeLease({ rootDir, ...lease, now, ...outcome }).released, true);
+  };
   const originalBase = 'b'.repeat(40);
   h.deps.acquireLeaseImpl = async () => {
     h.auditStore.set(`o/r#7@${HEAD}`, { status: 'deferred', attempts: [{
@@ -202,7 +214,9 @@ test('the shared lease writer checks for a hammer intent that appeared during da
   };
   let baseSha = originalBase;
   const identityReadAcquisitions = [];
-  const overrides = { readWriterIdentityImpl: async () => {
+  let pages = 0;
+  const overrides = { rootDir, hqRoot: rootDir, now: () => now, writerHoldPageImpl: async () => { pages++; },
+    readWriterIdentityImpl: async () => {
     identityReadAcquisitions.push(h.calls.acquire);
     return { prState: 'open', headSha: HEAD, baseBranch: 'main', baseSha };
   } };
@@ -210,16 +224,29 @@ test('the shared lease writer checks for a hammer intent that appeared during da
   assert.equal(hold.reason, 'merge-writer-deferred');
   assert.equal(h.calls.merge, 0);
   assert.equal(h.calls.release, 1);
-  const repeat = await attemptDaemonCleanMerge(baseArgs(h, overrides));
-  assert.equal(repeat.reason, 'merge-writer-deferred');
-  assert.equal(h.calls.release, 2);
+  for (const minute of ['01', '02', '03']) {
+    now = `2026-11-24T00:${minute}:00.000Z`;
+    const repeat = await attemptDaemonCleanMerge(baseArgs(h, overrides));
+    assert.equal(repeat.reason, 'merge-writer-deferred');
+    assert.equal(repeat.leaseAcquired, false);
+    const [retry] = readMergeLeaseAttempts(rootDir, lane);
+    assert.equal(retry.attempts, 1);
+    assert.equal(retry.consecutiveNoMergeReleases, 1);
+    assert.equal(retry.retryable || 0, 0);
+  }
+  assert.equal(h.calls.release, 1);
+  assert.equal(h.calls.fetchLiveGate, 0);
+  assert.equal(h.calls.auditWrites.length, 0);
   assert.equal(h.calls.merge, 0);
+  assert.equal(pages, 1);
+  assert.deepEqual(identityReadAcquisitions, [1]);
   baseSha = 'c'.repeat(40);
+  now = '2026-11-24T00:05:00.000Z';
   const changed = await attemptDaemonCleanMerge(baseArgs(h, overrides));
   assert.equal(changed.merged, true);
   assert.equal(h.calls.merge, 1);
-  assert.equal(h.calls.release, 3);
-  assert.deepEqual(identityReadAcquisitions, [1, 2, 3]);
+  assert.equal(h.calls.release, 2);
+  assert.deepEqual(identityReadAcquisitions, [1, 1, 2, 2]);
 });
 
 test('HAMLATEAUDIT-01: changed terminal review proof refuses merge under the held daemon lease', async () => {

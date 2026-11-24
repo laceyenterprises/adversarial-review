@@ -59,6 +59,7 @@ export const HAMMER_INFRASTRUCTURE_OUTCOMES = new Set([
   // That is a transport/observation deadline, not a fact about the PR: no
   // merge was invoked, so the same head is retried under a fresh lease.
   'legacy-writer-timeout',
+  'legacy-writer-preflight-refused',
   // MRQ-02: the durable reason of a stop whose own code is unregistered. The
   // attempt keeps the original code in originalReason and reasonDetail; the
   // stop rides the same owned retry as every other infrastructure deferral.

@@ -7,6 +7,11 @@ import { buildMergeCommitBody } from './closing-keywords.mjs';
 import { readLivePullRequestIdentity } from '../github-pr-identity.mjs';
 import { HAMMER_WRITER_HOLD, hammerWriterInputsChanged, pageHammerWriterHold, readHammerWriterHold } from './hammer-writer-hold.mjs';
 import { readMergeLeaseHolders } from './merge-lease.mjs';
+
+// Cache only observations that retain a hold. Clearing a hold on a changed base
+// always requires fresh evidence, including at the click boundary.
+const WRITER_HOLD_PROBE_INTERVAL_MS = 300_000;
+const writerHoldObservations = new Map();
 /**
  * MSM-03 — daemon clean-path merge ("Path B").
  *
@@ -456,20 +461,34 @@ async function attemptDaemonCleanMergeInner({
     auditWritten: false,
     ...extra,
   });
-  async function checkWriterHold({ attempts = 0, leaseAcquired = false } = {}) {
+  async function checkWriterHold({ attempts = 0, leaseAcquired = false, auditWritten = false } = {}) {
     const deferred = { disposition: DAEMON_MERGE_DISPOSITION.DEFERRED, merged: false, attempts,
-      leaseAcquired, skipMergeAgent: true, recoveryWait: true };
+      leaseAcquired, auditWritten, skipMergeAgent: true, recoveryWait: true };
     let hold;
     try { hold = readHammerWriterHold(hqRoot, repo, prNumber, validatedHead, readAuditImpl); }
     catch { return { ...deferred, reason: 'merge-writer-audit-unreadable' }; }
     if (!hold) return null;
+    const key = JSON.stringify([hqRoot, repo, prNumber, validatedHead,
+      hold.attemptNumber, hold.mergeWriter.baseRef, hold.mergeWriter.baseSha]);
+    const observedAt = Date.parse(now());
+    const previous = writerHoldObservations.get(key);
+    const held = { ...deferred, reason: HAMMER_WRITER_HOLD };
+    if (previous && observedAt >= previous.observedAt
+      && observedAt - previous.observedAt < WRITER_HOLD_PROBE_INTERVAL_MS) {
+      return { ...held, writerHoldObservation: previous };
+    }
     const identity = await Promise.resolve().then(() => readWriterIdentityImpl(repo, prNumber, {
       includeBaseSha: true, env: mergeEnv, timeoutMs: loadAwareTimeoutMs(5000, { maxMs: 30000 }),
     })).catch(() => null);
     const atTarget = identity?.prState === 'open' && identity.headSha === validatedHead;
     if (atTarget && hammerWriterInputsChanged(hold, { state: 'OPEN', headSha: identity.headSha,
       baseRef: identity.baseBranch, baseSha: identity.baseSha })) return null;
-    return { ...deferred, reason: HAMMER_WRITER_HOLD, ...(atTarget || !identity ? { writerHold: hold } : {}) };
+    const observation = { observedAt, hold, pagePending: !previous?.paged && (atTarget || !identity),
+      paged: previous?.paged === true };
+    writerHoldObservations.delete(key);
+    writerHoldObservations.set(key, observation);
+    if (writerHoldObservations.size > 4096) writerHoldObservations.delete(writerHoldObservations.keys().next().value);
+    return { ...held, writerHoldObservation: observation };
   }
 
   if (isMergeDisabledForRepository(disabledRepositories, repo)) {
@@ -731,6 +750,9 @@ async function attemptDaemonCleanMergeInner({
     return { ...notTaken('merge-title-missing'), disposition: DAEMON_MERGE_DISPOSITION.DEFERRED };
   }
 
+  const preLeaseWriterHold = await checkWriterHold();
+  if (preLeaseWriterHold) return preLeaseWriterHold;
+
   // Observability sees the live, head-bound eligibility decision before lease
   // contention can defer it. Observer failures never change merge authority.
   if (typeof onEligibleImpl === 'function') {
@@ -782,7 +804,8 @@ async function attemptDaemonCleanMergeInner({
     try {
       releaseLeaseImpl(lease, { merged: releaseOutcome?.merged === true,
         terminal: releaseOutcome?.permanent === true || releaseOutcome?.disposition === DAEMON_MERGE_DISPOSITION.NOT_TAKEN,
-        yielded: releaseOutcome?.merged === false && releaseOutcome?.permanent !== true,
+        yielded: releaseOutcome?.merged === false && releaseOutcome?.permanent !== true
+          && ![HAMMER_WRITER_HOLD, 'merge-writer-audit-unreadable'].includes(releaseOutcome?.reason),
         reason: releaseOutcome?.reason || 'holder-exception' });
     } catch (err) {
       logger?.warn?.(
@@ -793,6 +816,10 @@ async function attemptDaemonCleanMergeInner({
 
   try {
   releaseOutcome = await (async () => {
+  // A hammer can leave an unresolved intent between the local check and
+  // acquisition. Recheck under this lease before starting the daemon attempt.
+  const acquiredWriterHold = await checkWriterHold({ leaseAcquired: true });
+  if (acquiredWriterHold) return acquiredWriterHold;
   // ── Bootstrap the daemon-merge audit doc (in_progress). If we can't even
   // record intent, don't merge — release and defer. ─────────────────────────
   const auditKeys = { hqRoot, repo, prNumber, headSha: validatedHead };
@@ -1090,7 +1117,7 @@ async function attemptDaemonCleanMergeInner({
 
     // A hammer may have released the shared lease with its write still
     // unresolved. Check under the lease acquired by this daemon attempt.
-    const writerDeferred = await checkWriterHold({ attempts, leaseAcquired: true });
+    const writerDeferred = await checkWriterHold({ attempts, leaseAcquired: true, auditWritten: true });
     if (writerDeferred) return writerDeferred;
 
     // Click the button.
@@ -1300,7 +1327,7 @@ export async function attemptDaemonCleanMerge(args = {}) {
   let remoteMergedConfirmed = false;
   let executedAt;
   let mergedAt;
-  const { writerHold, ...result } = await attemptDaemonCleanMergeInner({ ...args,
+  const { writerHoldObservation, ...result } = await attemptDaemonCleanMergeInner({ ...args,
     runMergeImpl: async (target) => {
       const response = await args.runMergeImpl(target);
       if (Number(response?.exitCode) === 0 && !/already merged/i.test(`${response?.stdout || ''} ${response?.stderr || ''}`)) {
@@ -1310,12 +1337,15 @@ export async function attemptDaemonCleanMerge(args = {}) {
       return response;
     },
   });
-  if (writerHold && args.rootDir) {
+  if (writerHoldObservation?.pagePending && args.rootDir) {
+    const { hold } = writerHoldObservation;
     try {
       const lane = { rootDir: args.rootDir, repo: args.repo, prNumber: args.prNumber };
-      if (!readMergeLeaseHolders(lane).some(lease => lease.holderHead === writerHold.validatedHead)) {
-        await pageHammerWriterHold({ ...lane, hold: writerHold,
+      if (!readMergeLeaseHolders(lane).some(lease => lease.holderHead === hold.validatedHead)) {
+        await pageHammerWriterHold({ ...lane, hold,
           now: Date.parse(args.now?.()) || Date.now(), pageImpl: args.writerHoldPageImpl });
+        writerHoldObservation.paged = true;
+        writerHoldObservation.pagePending = false;
       }
     } catch (error) {
       args.logger?.warn?.(`[daemon-merge] writer handoff delivery failed: ${error?.message || error}`);

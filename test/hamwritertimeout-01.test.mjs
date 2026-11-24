@@ -206,12 +206,12 @@ function harness(root) {
   };
   const identity = { repo: REPO, prNumber: PR, headSha: HEAD };
   // The ended hammer left the click-hold audit its merge script appends.
-  const endCurrent = reason => {
+  const endCurrent = (reason, mergeWriter) => {
     const record = readAmaCloserDispatchRecord(root, identity);
     updateAmaCloserDispatchRecord(root, identity, current => ({ ...current, workerRunId: `wrun_synthetic-${state.launches}` }));
     appendAmaAuditAttempt({ hqRoot: join(root, 'hq'), repo: REPO, prNumber: PR, headSha: HEAD,
       attempt: hammerPhaseAttempt({ outcome: 'deferred', reason, launchRequestId: record.launchRequestId,
-        attemptPhase: 'hammer-gh-pr-merge', preMergeEligible: true }),
+        attemptPhase: 'hammer-gh-pr-merge', preMergeEligible: true, ...(mergeWriter ? { mergeWriter } : {}) }),
       metadata: { closureAuthority: 'ham-terminal-remediation' } });
     state.ended = record.launchRequestId;
   };
@@ -253,6 +253,26 @@ test('historical timeouts without writer receipts retain the legacy backoff', as
   for (const result of results) assert.notEqual(result.needsOperator, true, JSON.stringify(result));
   assert.ok(state.launches >= 2);
 });
+
+for (const [reason, phase] of [['legacy-writer-timeout', 'review-proof'],
+  ['legacy-writer-preflight-refused', 'lane-admission']]) {
+  test(`a proven no-write ${reason} re-enters ordinary closer admission with both launches charged`, async t => {
+    const root = scratch(t);
+    const { state, deps, endCurrent, identity } = harness(root);
+    const pass = minutes => maybeDispatchAmaCloser({ ...dispatchArgs(root, at(minutes)), ...deps });
+    assert.equal((await pass(0)).dispatched, true);
+    endCurrent(reason, { baseSha: 'b'.repeat(40), baseRef: 'main',
+      phase, write: 'not-invoked', readback: 'open', readbackHead: HEAD });
+    const redrive = await pass(10);
+    assert.equal(redrive.dispatched, true, JSON.stringify(redrive));
+    assert.equal(state.launches, 2);
+    assert.deepEqual(state.alerts, []);
+    const ledger = readHammerRetryCapLedger(root, identity);
+    for (const key of ['attemptCount', 'targetAttemptCount', 'lifetimeAttemptCount']) {
+      assert.equal(ledger[key], 2, key);
+    }
+  });
+}
 
 test('an unresolved writer intent stays parked across watcher passes and pages once', async t => {
   const root = scratch(t);

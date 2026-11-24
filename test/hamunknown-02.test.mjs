@@ -323,24 +323,27 @@ test('HAMUNKNOWN-02: recovered gate uses latest-run classification and excludes 
   assert.equal((await evaluateHammerStopHold({ ...externalRed.args, excludeContexts: [context] })).action, 'hold');
 });
 
-for (const [reason, exitCode, outcome] of [
-  ['owner-operation-in-flight; lane-busy; waited 3000ms', 75, 'deferred'],
-  ['lane-transfer-required', 75, 'failed-without-merge'],
-  ['owner-operation-in-flight', 75, 'failed-without-merge'],
-  ['owner-operation-in-flight; lane-busy; waited 3000ms', 17, 'failed-without-merge'],
+for (const [reason, exitCode, retryableLaneBusy] of [
+  ['owner-operation-in-flight; lane-busy; waited 3000ms', 75, true],
+  ['lane-transfer-required', 75, false],
+  ['owner-operation-in-flight', 75, false],
+  ['owner-operation-in-flight; lane-busy; waited 3000ms', 17, false],
 ]) test(`HAMLANEWAIT-01: rendered closer classifies ${reason}, exit ${exitCode}`, t => {
   const result = runMerge(t, [green], { laneRefusal: `legacy lane write refused: ${reason}`, laneExit: exitCode });
-  assert.equal(result.status, outcome === 'deferred' ? 75 : 1, result.stderr);
+  assert.equal(result.status, retryableLaneBusy ? 75 : 20, result.stderr);
   const audit = result.events.findLast(event => event.outcome);
-  assert.equal(audit.outcome, outcome);
-  assert.equal(audit.attempt.reason, outcome === 'deferred' ? 'lane-busy' : 'unclassified-merge-failure');
+  assert.equal(audit.outcome, 'deferred');
+  assert.equal(audit.attempt.reason, retryableLaneBusy ? 'lane-busy' : 'legacy-writer-preflight-refused');
   assert.ok(!result.events.some(event => event.merge));
-  if (outcome === 'deferred') {
+  if (retryableLaneBusy) {
     assert.match(result.stderr, /waited 3000ms/);
     assert.match(result.release, /release:lane-busy/);
     assert.equal(result.lease.status, 'terminal');
     assert.equal(result.lease.terminalOutcome, 'retryable-lane-busy');
     assert.ok(!result.events.some(event => event.outcome === 'failed-without-merge'));
+  } else {
+    assert.doesNotMatch(result.release, /release:lane-busy/);
+    assert.equal(audit.attempt.mergeWriter.write, 'not-invoked');
   }
 });
 

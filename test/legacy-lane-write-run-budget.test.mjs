@@ -103,7 +103,7 @@ test('hammer audit diagnostics retain actual output, redact credentials and dist
     onPhase('review-proof');
     onPhase('transport');
     return { ok: false, reason: 'legacy writer command timed out after 10 ms', stdout: 'upstream progress\n',
-      stderr: `writer log\n${'.'.repeat(5000)}\nHTTP 502 upstream disconnected; Bearer synthetic-secret github_pat_SYNTHETICSECRET` };
+      stderr: `writer log\n${'.'.repeat(2500)}\nRuleset diagnostic\n${'.'.repeat(8000)}\nHTTP 502 upstream disconnected; Bearer synthetic-secret github_pat_SYNTHETICSECRET` };
   } });
   const receipt = JSON.parse(readFileSync(diagnostics, 'utf8'));
   assert.equal(status, 75);
@@ -112,11 +112,18 @@ test('hammer audit diagnostics retain actual output, redact credentials and dist
   assert.ok(receipt.elapsedMs >= receipt.phaseElapsedMs);
   assert.equal(receipt.stdout, 'upstream progress\n');
   for (const output of [receipt.stderr, stderr.text]) {
-    assert.match(output, /\[output truncated\]/);
+    assert.doesNotMatch(output, /\[output truncated\]/);
+    assert.match(output, /Ruleset diagnostic/);
     assert.match(output, /HTTP 502 upstream disconnected/);
     assert.doesNotMatch(output, /synthetic-secret|SYNTHETICSECRET/);
   }
   assert.match(stderr.text, /\nlegacy lane write refused: legacy writer command timed out/);
+  await legacyLaneWriteMain(argv, { stdout: buffer(), stderr: buffer(), run: async () => ({
+    stdout: `begin\n${'🎯'.repeat(5000)}\nend`,
+  }) });
+  const large = JSON.parse(readFileSync(diagnostics, 'utf8')).stdout;
+  assert.match(large, /^begin\n[\s\S]*\[output truncated\][\s\S]*\nend$/);
+  assert.ok(Buffer.byteLength(large) <= 16 * 1024);
 });
 
 test('expiry sends SIGTERM, keeps partial output and names the timeout', async t => {

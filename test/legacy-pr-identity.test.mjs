@@ -26,10 +26,11 @@ const result = value => ({ stdout: JSON.stringify(value), stderr: '' });
 test('a writer hold observes the current branch ref and ignores the PR snapshot base SHA', async () => {
   const stale = 'b'.repeat(40);
   const live = 'c'.repeat(40);
-  for (const branch of [
-    { ref: `refs/heads/${base}`, object: { type: 'commit', sha: live } },
-    { ref: 'refs/heads/foreign', object: { type: 'commit', sha: live } },
-    null,
+  for (const [branch, fallback, expected] of [
+    [{ ref: `refs/heads/${base}`, object: { type: 'commit', sha: live } }, null, live],
+    [{ ref: 'refs/heads/foreign', object: { type: 'commit', sha: live } }, { name: 'foreign', commit: { sha: live } }, null],
+    [null, { name: base, commit: { sha: live } }, live],
+    [null, null, null],
   ]) {
     const calls = [];
     const pr = await readLivePullRequestIdentity(repository, prNumber, {
@@ -37,12 +38,14 @@ test('a writer hold observes the current branch ref and ignores the PR snapshot 
       execFileImpl: async (_, args) => {
         calls.push(args[1]);
         if (calls.length === 1) return result({ ...identity, baseSha: stale });
-        if (!branch) throw new Error('ref unavailable');
-        return result(branch);
+        const response = calls.length === 2 ? branch : fallback;
+        if (!response) throw new Error('ref unavailable');
+        return result(response);
       },
     });
-    assert.deepEqual(calls, [`repos/${repository}/pulls/${prNumber}`, `repos/${repository}/git/ref/heads/${base}`]);
-    assert.equal(pr.baseSha, branch?.ref === `refs/heads/${base}` ? live : null);
+    assert.deepEqual(calls, [`repos/${repository}/pulls/${prNumber}`, `repos/${repository}/git/ref/heads/${base}`,
+      ...(branch?.ref === `refs/heads/${base}` ? [] : [`repos/${repository}/branches/Release%2FStable`])]);
+    assert.equal(pr.baseSha, expected);
   }
 });
 

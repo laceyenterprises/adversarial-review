@@ -615,7 +615,7 @@ ham_merge_error_auth_rejected() {
 
 ham_merge_error_permanent() {
   if grep -Eq '^github-rate-limit: (primary|secondary|deferred)$' "$1"; then return 1; fi
-  grep -Eiq 'match-head-commit|head.*(mismatch|changed|does not match)|not authorized|permission denied|HTTP 401|HTTP 403|forbidden|branch protection|ruleset|required check|status checks? (not|have not)|not mergeable|merge conflict|pull request.*(not open|closed|draft)' "$1"
+  grep -Eiq 'match-head-commit|head.*(mismatch|changed|does not match)|not authorized|permission denied|not accessible by integration|must have (admin|write) rights|HTTP 401|HTTP 403|bad credentials|authentication required|forbidden|branch protection|ruleset|required check|status checks? (not|have not)|not mergeable|merge conflict|pull request.*(not open|closed|draft)' "$1"
 }
 
 ham_merge_error_already_merged() {
@@ -1216,6 +1216,7 @@ fi
 
 local ham_writer_auth_attempted=0 ham_writer_refresh_auth=0
 local ham_writer_first_base="" ham_writer_retry_delay=0
+local ham_writer_permanent=0 ham_writer_prior_unresolved=null
 # The initial click and any re-clicks share one writer budget and lease.
 while :; do
 if [ "$HAM_MERGE_ATTEMPTS" -gt 1 ]; then
@@ -1286,6 +1287,9 @@ if [ "$HAM_ALREADY_MERGED_VALIDATED_HEAD" -ne 1 ]; then
   HAM_WRITER_DIAGNOSTICS=$(mktemp "${HAM_MERGE_TMP_PREFIX}.writer.XXXXXX") || { ham_release_merge_lease; return 1; }
   # Write intent before entering the legacy lane. If the controller is
   # stopped before readback, the next pass must reconcile this head first.
+  if [ "$HAM_MERGE_ATTEMPTS" -gt 1 ] && [ "$ham_writer_permanent" -eq 0 ]; then
+    ham_writer_prior_unresolved="$HAM_WRITER_JSON"
+  fi
   HAM_WRITER_JSON=$(jq -cn --arg baseSha "$HAM_MERGE_ATTEMPT_BASE_SHA" --arg baseRef "$BASE_BRANCH" \
     '{baseSha:$baseSha, baseRef:$baseRef, write:"unknown", readback:"unavailable"}') || {
     rm -f "$HAM_WRITER_DIAGNOSTICS"
@@ -1400,6 +1404,11 @@ if [ "$HAM_WRITER_JSON" != null ]; then
     '. + {readback:$readback, readbackHead:(if $head | test("^[a-fA-F0-9]{40}$") then $head else null end), readExit:$readExit}' \
     <<< "$HAM_WRITER_JSON")
 fi
+ham_writer_permanent=0
+if [ "$HAM_MERGE_EXIT" -ne 0 ] && jq -e '.phase == "transport" and .write == "unknown" and .reason == "writer-error"' >/dev/null <<< "$HAM_WRITER_JSON" \
+  && ham_merge_error_permanent "$HAM_MERGE_STDERR"; then
+  ham_writer_permanent=1
+fi
 # A timeout in the proof or lane is never a transport retry. A failed
 # readback, moved head, or changed base also leaves reconciliation to recovery.
 if [ "$HAM_WRITER_READBACK" != open ] || [ "$HAM_POST_HEAD" != "$POST_REMEDIATION_SHA" ] \
@@ -1410,11 +1419,11 @@ if [ "$HAM_WRITER_READBACK" != open ] || [ "$HAM_POST_HEAD" != "$POST_REMEDIATIO
   break
 fi
 ham_writer_refresh_auth=0
-if ham_merge_error_auth_rejected "$HAM_MERGE_STDERR"; then
+if [ "$ham_writer_permanent" -eq 1 ] && ham_merge_error_auth_rejected "$HAM_MERGE_STDERR"; then
   if [ "$ham_writer_auth_attempted" -eq 1 ]; then break; fi
   ham_writer_auth_attempted=1
   ham_writer_refresh_auth=1
-elif ham_merge_error_permanent "$HAM_MERGE_STDERR" || ! ham_merge_error_retryable "$HAM_MERGE_STDERR"; then
+elif [ "$ham_writer_permanent" -eq 1 ] || ! ham_merge_error_retryable "$HAM_MERGE_STDERR"; then
   break
 fi
 ham_writer_retry_delay=$(( HAM_MERGE_BACKOFF_BASE_SECONDS * (1 << (HAM_MERGE_ATTEMPTS - 1)) ))
@@ -1446,12 +1455,17 @@ if [ "$HAM_WRITER_READBACK" = merged ] && [ "$HAM_POST_HEAD" = "$POST_REMEDIATIO
 else
   if [ "$HAM_WRITER_READBACK" != unavailable ] && [ "$HAM_POST_HEAD" != "$POST_REMEDIATION_SHA" ]; then
     ham_append_terminal_audit superseded live-head-moved-before-merge || true
-  elif [ "$HAM_WRITER_READBACK" = open ] && [ "$HAM_MERGE_ATTEMPTS" -eq 1 ] \
-    && [ "$HAM_MERGE_EXIT" -ne 0 ] && jq -e '.write == "not-invoked" and .reason != "legacy-writer-timeout"' \
-    >/dev/null <<< "$HAM_WRITER_JSON"; then
-    ham_append_terminal_audit failed-without-merge unclassified-merge-failure || true
+  elif [ "$HAM_WRITER_JSON" = null ]; then
+    ham_append_terminal_audit deferred merge-confirmation-read-failed-after-merge-accepted || true
+  elif [ "$ham_writer_prior_unresolved" = null ] \
+    && [ "$HAM_MERGE_EXIT" -ne 0 ] && jq -e '.write == "not-invoked"' >/dev/null <<< "$HAM_WRITER_JSON"; then
+    local ham_no_write_reason=legacy-writer-preflight-refused
+    if jq -e '.reason == "legacy-writer-timeout"' >/dev/null <<< "$HAM_WRITER_JSON"; then
+      ham_no_write_reason=legacy-writer-timeout
+    fi
+    ham_append_terminal_audit deferred "$ham_no_write_reason" || true
     ham_release_merge_lease
-    return 1
+    return 20
   elif [ "$HAM_WRITER_READBACK" = open ] && [ "$HAM_MERGE_ATTEMPTS" -eq 1 ] \
     && [ "$HAM_MERGE_EXIT" -ne 0 ] && grep -Eiq 'not mergeable|merge conflict|rebase|base.*(changed|modified|advanced)' "$HAM_MERGE_STDERR" \
     && ham_capture_current_base_sha && [ "$HAM_CAPTURED_BASE_SHA" != "$HAM_MERGE_ATTEMPT_BASE_SHA" ]; then
@@ -1459,14 +1473,18 @@ else
     ham_append_terminal_audit deferred rebase-conflict || true
     ham_release_merge_lease || return 1
     return 21
-  elif [ "$HAM_WRITER_READBACK" = open ] && [ "$HAM_MERGE_ATTEMPTS" -eq 1 ] \
-    && [ "$HAM_MERGE_EXIT" -ne 0 ] && jq -e '.phase == "transport" and .write == "unknown"' >/dev/null <<< "$HAM_WRITER_JSON" \
-    && ham_merge_error_permanent "$HAM_MERGE_STDERR"; then
+  elif [ "$HAM_WRITER_READBACK" = open ] && [ "$ham_writer_prior_unresolved" = null ] \
+    && [ "$ham_writer_permanent" -eq 1 ]; then
     HAM_PHASE_OUTCOME=permanent-merge-rejection
     ham_append_terminal_audit failed-without-merge permanent-merge-rejection || true
     ham_release_merge_lease
     return 1
   else
+    # A later refusal cannot settle an earlier ambiguous write.
+    if [ "$ham_writer_prior_unresolved" != null ] && { [ "$ham_writer_permanent" -eq 1 ] \
+      || jq -e '.write == "not-invoked"' >/dev/null <<< "$HAM_WRITER_JSON"; }; then
+      HAM_WRITER_JSON="$ham_writer_prior_unresolved"
+    fi
     echo "HAM merge deferred for $POST_REMEDIATION_SHA: GitHub readback=$HAM_WRITER_READBACK; closure recovery owns reconciliation." >&2
     ham_append_terminal_audit deferred merge-writer-deferred || true
   fi

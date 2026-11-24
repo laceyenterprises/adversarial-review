@@ -5755,6 +5755,8 @@ async function maybeDispatchAmaCloserAttempt({
     && (!parkAttempt?.launchRequestId || parkAttempt.launchRequestId === existingRecord?.launchRequestId)
     && Date.parse(parkAttempt?.startedAt) >= Date.parse(existingRecord?.dispatchedAt);
   const infrastructureReadPark = deferredPark && HAMMER_RETRYABLE_READ_OUTCOMES.has(parkReason);
+  const chargedWriterRefusal = deferredPark && ['legacy-writer-timeout', 'legacy-writer-preflight-refused'].includes(parkReason)
+    && parkAttempt.mergeWriter?.write === 'not-invoked';
   const certifiedPark = resumeCertifiedPark && deferredPark;
   const laneBusyPark = deferredPark && parkReason === 'lane-busy';
   if (!ownerProofRecovery && certifiedContentionPark && (!existingRecord || !existingRecord.launchRequestId)) {
@@ -5770,7 +5772,7 @@ async function maybeDispatchAmaCloserAttempt({
       ledgerTarget: dispatchContext.ledgerTarget, ledgerDbPath: dispatchContext.ledgerDbPath,
       env, signal, includeRetryChain: true,
     })).catch(() => ({ ok: false })) : null;
-  const refundableReadAbort = infrastructureAbortProbe?.ok
+  const endedReadAbort = infrastructureAbortProbe?.ok
     && !infrastructureAbortProbe.retryChainUnreadable && !infrastructureAbortProbe.liveRetryLaunchRequestId
     && (!infrastructureAbortProbe.row?.ticket_ref
       || isAmaHammerLaunchTicket(infrastructureAbortProbe.row.ticket_ref, prNumber))
@@ -5779,13 +5781,16 @@ async function maybeDispatchAmaCloserAttempt({
   let validationRetryHead = existingRecord?.headSha;
   // A live-head audit can describe an unpushed repair. Move its retry only
   // when the ended run also recorded publication of that exact head.
-  if (validationPark && refundableReadAbort && queuedHead !== validationRetryHead
+  if (validationPark && endedReadAbort && queuedHead !== validationRetryHead
     && parkAudit === queuedParkAudit && parkAttempt.launchRequestId === existingRecord.launchRequestId) {
     const { pushedHeadSha } = hammerNoMergeDetails({ hqRoot, launchRequestId: existingRecord.launchRequestId,
       runId: infrastructureAbortProbe.row.run_id || existingRecord.workerRunId });
     if (pushedHeadSha === queuedHead) validationRetryHead = queuedHead;
   }
-  if (deferredPark && existingRecord?.launchRequestId && (!infrastructureReadPark || refundableReadAbort)) {
+  if (chargedWriterRefusal && endedReadAbort) {
+    const ledger = readHammerRetryCapLedger(rootDir, { repo, prNumber });
+    if (ledger?.jobKey === reviewedSha && !ledger.__corrupt) parkLedger = ledger;
+  } else if (deferredPark && existingRecord?.launchRequestId && (!infrastructureReadPark || endedReadAbort)) {
     if (HAMMER_CLOSER_FAULTS.has(parkReason)) {
       const refund = refundCloserSelfError(rootDir, { repo, prNumber }, {
         jobKey: reviewedSha, headSha: existingRecord.headSha,
@@ -5859,7 +5864,7 @@ async function maybeDispatchAmaCloserAttempt({
     }
   }
   const parkAppliesToLiveHead = !validationPark || validationRetryHead === queuedHead;
-  if (deferredPark && parkLedger
+  if (deferredPark && parkLedger && !chargedWriterRefusal
     && (parkLedger.overloadDeferral || (parkAppliesToLiveHead && (!certifiedPark || laneBusyPark)))) {
     const { expired, backoff } = evaluateHammerDeferralQueue(parkLedger, dispatchContext.dispatchedAt);
     if (expired || backoff) {
@@ -6689,7 +6694,7 @@ async function maybeDispatchAmaCloserAttempt({
         validatedHamTerminalRemediation && mergedSignalUnknown)) &&
         (AMA_CLOSER_TERMINAL_HOLD_STATUSES.has(status) || (certifiedPark && status === 'failed'))
       ) {
-        if (certifiedPark && parkLedger) {
+        if (certifiedPark && parkLedger && !chargedWriterRefusal) {
           const { expired, backoff } = evaluateHammerDeferralQueue(parkLedger, dispatchContext.dispatchedAt);
           if (expired || backoff) {
             return noAmaDispatch({ dispatched: false, skipMergeAgent: true,

@@ -106,6 +106,7 @@
   "launch-environment-read-unavailable": "infrastructure",
   "launch-environment-read-unavailable-at-closure": "infrastructure",
   "lease-state-unavailable": "world",
+  "legacy-writer-preflight-refused": "infrastructure",
   "legacy-writer-timeout": "infrastructure",
   "live-head-moved-before-merge": "world",
   "live-head-read-failed": "infrastructure",

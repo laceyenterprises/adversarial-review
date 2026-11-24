@@ -8,8 +8,13 @@ function safeOutput(value) {
   const safe = redactPublicSafeText(String(value || '').replace(/\bgithub_pat_\w+/g, '[REDACTED_GITHUB_TOKEN]')
     .replace(/\b(?:GH_TOKEN|GITHUB_TOKEN)\s*[:=]\s*\S+/gi, '[REDACTED_GITHUB_TOKEN]')
     .replace(/[\u0000-\u0008\u000b-\u001f\u007f]/g, ''), Infinity);
-  if (safe.length <= 4096) return safe;
-  return `${safe.slice(0, 1000)}\n[output truncated]\n${safe.slice(-3072)}`;
+  const limit = 16 * 1024;
+  if (Buffer.byteLength(safe) <= limit) return safe;
+  const bytes = Buffer.from(safe);
+  const marker = '\n[output truncated]\n';
+  const prefix = bytes.subarray(0, 4096).toString().replace(/\uFFFD+$/, '');
+  const suffix = bytes.subarray(-(limit - 4096 - marker.length)).toString().replace(/^\uFFFD+/, '');
+  return `${prefix}${marker}${suffix}`;
 }
 
 export async function legacyLaneWriteMain(argv, { stdout = process.stdout, stderr = process.stderr, run = runLegacyLaneWrite } = {}) {

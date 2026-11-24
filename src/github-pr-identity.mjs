@@ -65,6 +65,15 @@ export async function readLivePullRequestIdentity(repository, prNumber, {
         && /^[a-f\d]{40}$/i.test(branch.object.sha || '') && performance.now() < deadline) baseSha = branch.object.sha;
     } catch { /* PR identity may still be useful without base-change evidence. */ }
     signal?.throwIfAborted();
+    if (!baseSha && performance.now() < deadline) {
+      try {
+        const response = await read([`repos/${repository}/branches/${encodeURIComponent(pr.baseBranch)}`]);
+        const branch = JSON.parse(response.stdout);
+        if (branch.name === pr.baseBranch && /^[a-f\d]{40}$/i.test(branch.commit?.sha || '')
+          && performance.now() < deadline) baseSha = branch.commit.sha;
+      } catch { /* Unavailable branch evidence cannot clear a writer hold. */ }
+    }
+    signal?.throwIfAborted();
     return { ...pr, baseSha };
   }
 }

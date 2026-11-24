@@ -1892,14 +1892,18 @@ unconfirmed write, GitHub readback drives the transition. An exact-head merge
 settles the PR and a moved head supersedes the attempt. Exact open readback at
 an unchanged base and a fresh green gate permit a bounded retry of recognized
 transport failures under the same lease and writer deadline. A definitive
-rejection at the same open head records a refusal. Unresolved outcomes defer
+rejection at the same open head records a refusal when all earlier clicks
+were definitively rejected. Unresolved outcomes defer
 with `merge-writer-deferred` and one closure recovery page per head. An
 interrupted intent also fences unchanged inputs. The ordinary lease release
-keeps the gate charge. Proven input movement or an operator reconciliation
+keeps the gate charge. A proven no-write preflight refusal returns to bounded admission
+with launch and lease charges intact. The daemon checks the local audit before
+lease acquisition and again under the lease. Repeated daemon observations
+of a held head/base preserve its existing charge. Proven input movement or an operator reconciliation
 receipt permits ordinary closure admission before a new write. `merge-target-unparseable` is a
 registered closer fault. A blocked preflight that proves no
 merge transport ran settles the local writer reservation. Unclassified
-preflight refusals retain the terminal failure outcome, and the recognized
+preflight refusals use `legacy-writer-preflight-refused`, and the recognized
 lane-busy deferral retains its refund. Existing exact-head
 CAS, leases and merge retry ownership continue to apply.
 

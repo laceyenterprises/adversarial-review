@@ -8,11 +8,15 @@ export function ensureExplicitReviewIntentSchema(db) {
     repo TEXT NOT NULL, pr_number INTEGER NOT NULL, request_id TEXT NOT NULL,
     head_sha TEXT NOT NULL, actor TEXT NOT NULL, requested_at TEXT NOT NULL,
     expires_at TEXT NOT NULL, state TEXT NOT NULL DEFAULT 'pending',
-    settled_at TEXT, reason TEXT, reviewer_session_uuid TEXT, notified_at TEXT,
+    settled_at TEXT, reason TEXT, reviewer_session_uuid TEXT, notified_at TEXT, context_json TEXT,
     PRIMARY KEY (repo, pr_number, request_id)
   );
   CREATE UNIQUE INDEX IF NOT EXISTS explicit_review_intent_pending_head
     ON explicit_review_intents(repo, pr_number, head_sha) WHERE state = 'pending'`);
+  if (!db.prepare("SELECT 1 FROM pragma_table_info('explicit_review_intents') WHERE name = 'context_json'").get()) {
+    try { db.exec('ALTER TABLE explicit_review_intents ADD COLUMN context_json TEXT'); }
+    catch (error) { if (!/duplicate column name: context_json/i.test(error.message)) throw error; }
+  }
 }
 
 export function findExplicitReviewRequest(db, { repo, prNumber, requestId }) {
@@ -24,6 +28,25 @@ export function pendingExplicitReviewIntent(db, { repo, prNumber, headSha }) {
   return db.prepare(`SELECT * FROM explicit_review_intents WHERE repo = ? AND pr_number = ?
     AND head_sha = ? AND state = 'pending'`)
     .get(repo, prNumber, headSha);
+}
+
+export function primaryReversalReviewRequest(headSha) {
+  return { requestId: `primary-reversal:${headSha}`, actor: 'primary-change-gate' };
+}
+
+export function isPrimaryReversalReviewIntent(intent, headSha) {
+  const request = primaryReversalReviewRequest(headSha);
+  return intent?.actor === request.actor && (intent.request_id ?? intent.requestId) === request.requestId
+    && (intent.head_sha ?? headSha) === headSha;
+}
+
+export function primaryReversalReviewContext(intent, headSha) {
+  if (!isPrimaryReversalReviewIntent(intent, headSha) || !intent.context_json) return null;
+  try {
+    const context = JSON.parse(intent.context_json);
+    return context?.headSha === headSha && /^[a-f0-9]{64}$/.test(context.scope)
+      && Array.isArray(context.regions) && context.regions.length ? context : null;
+  } catch { return null; }
 }
 
 export function remediationReviewRequest(jobId, round) {
@@ -53,7 +76,7 @@ export function priorityReviewIntent(intent) {
 // Called inside requestReviewRereview's IMMEDIATE transaction. Concurrent
 // requests coalesce onto the pending receipt without changing its wait observation.
 export function recordExplicitReviewIntent(db, {
-  repo, prNumber, headSha, requestId, actor, requestedAt, waitOptions = {},
+  repo, prNumber, headSha, requestId, actor, requestedAt, context = null, waitOptions = {},
 }) {
   const existing = pendingExplicitReviewIntent(db, { repo, prNumber, headSha });
   // A trusted request arriving second must retain its own provenance and win
@@ -71,10 +94,10 @@ export function recordExplicitReviewIntent(db, {
     { ...waitOptions, maxSeconds: Infinity });
   const expiresAt = new Date(Date.parse(requestedAt) + waitSeconds * 1000).toISOString();
   db.prepare(`INSERT INTO explicit_review_intents
-    (repo, pr_number, request_id, head_sha, actor, requested_at, expires_at, state, reason)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(repo, prNumber, requestId, headSha, actor,
+    (repo, pr_number, request_id, head_sha, actor, requested_at, expires_at, state, reason, context_json)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(repo, prNumber, requestId, headSha, actor,
     requestedAt, existing?.expires_at || expiresAt, existing && !promote ? 'coalesced' : 'pending',
-    existing && !promote ? `coalesced:${existing.request_id}` : null);
+    existing && !promote ? `coalesced:${existing.request_id}` : null, context ? JSON.stringify(context) : null);
   return existing && !promote ? existing : findExplicitReviewRequest(db, { repo, prNumber, requestId });
 }
 

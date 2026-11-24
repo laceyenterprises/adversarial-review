@@ -223,7 +223,7 @@ test('watcher terminal rereview skip releases claim and falls through to close p
   const guardIndex = source.indexOf("let skipReviewerSpawnReason = null;");
   const closerProbeIndex = source.indexOf("const closerHead = await readPreflight('closer')", guardIndex);
   const closerSuppressedUnlessOperatorIndex = source.indexOf(
-    "if (closerHead?.suppressed && !explicitOperatorReviewRetrigger && !orphanHeadReview && !handoffReviewBypass) {",
+    "if (closerHead?.suppressed && !explicitOperatorReviewRetrigger && !orphanHeadReview && !handoffReviewBypass",
     guardIndex
   );
   const closerSuppressedIndex = closerSuppressedUnlessOperatorIndex;
@@ -248,6 +248,8 @@ test('watcher terminal rereview skip releases claim and falls through to close p
   );
   assert.ok(closerProbeIndex > guardIndex, 'closer-head evidence should be consumed inside the rereview guard');
   assert.ok(closerSuppressedIndex > closerProbeIndex, 'terminal closer-head check should follow the probe');
+  assert.match(source.slice(closerSuppressedIndex, hardCeilingIndex),
+    /reversalReview && !\['closer-publication-in-progress', 'closer-publication-unconfirmed'\]/);
   assert.equal(
     closerSuppressedIndex,
     closerSuppressedUnlessOperatorIndex,

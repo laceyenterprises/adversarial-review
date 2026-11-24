@@ -5348,7 +5348,8 @@ async function maybeDispatchAmaCloserAttempt({
       headSha: prMetadata.headSha },
     } } : {}),
     progress: { ...sharedNextAction.snapshot.observations.progress?.value,
-      primaryChange: { ...verdict.trace.primaryChange, headSha: prMetadata.headSha },
+      primaryChange: verdict.trace.primaryChange.reversalReview ? null
+        : { ...verdict.trace.primaryChange, headSha: prMetadata.headSha },
       ...(verdict.trace.hamTerminalRemediation?.ok === true ? { terminalReview: {
         validated: true, headSha: prMetadata.headSha, reviewedHeadSha: reviewState.headSha,
       } } : {}),
@@ -5361,7 +5362,9 @@ async function maybeDispatchAmaCloserAttempt({
     && selectedNextAction.decision.reason === 'primary-change-repair'
     && hasHammerDispatchIntent(sharedNextAction, decisionIdentity)
     && sharedNextAction.decision.reason === 'primary-change-repair';
-  if (!verdict.trace.primaryChange.ok && !selectedPrimaryRepair) {
+  const reviewedReversalRemediation = verdict.trace.primaryChange.reversalReview?.state === 'remediation'
+    && hasHammerDispatchIntent(sharedNextAction, decisionIdentity);
+  if (!verdict.trace.primaryChange.ok && !selectedPrimaryRepair && !reviewedReversalRemediation) {
     observeSharedDecision(sharedNextAction);
     const primaryChangeRepair = sharedNextAction.decision.actor === 'hammer';
     return noAmaDispatch({ dispatched: false, skipMergeAgent: true, recoveryWait: true,

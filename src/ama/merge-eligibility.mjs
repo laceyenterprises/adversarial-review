@@ -258,6 +258,7 @@ export function evaluateMergeEligibility(state = {}) {
   if (state.terminalReviewProof?.ok === false) reasons.push(state.terminalReviewProof.reason);
   let guardReversals = [];
   let derivedChanges = [];
+  let reversalAuthorization;
   if (state.primaryChange || state.requirePrimaryChange === true) {
     const intent = checkPrimaryChange(state.primaryChange, state.candidateHead, {
       strictNonBlockingRemediation: state.strictNonBlockingRemediation,
@@ -266,6 +267,7 @@ export function evaluateMergeEligibility(state = {}) {
     else {
       guardReversals = intent.guardReversals || [];
       derivedChanges = intent.derivedChanges || [];
+      reversalAuthorization = intent.reversalAuthorization;
     }
   }
   const operatorOverride = hasOperatorApprovedOverride({
@@ -299,7 +301,8 @@ export function evaluateMergeEligibility(state = {}) {
 
   return { eligible: reasons.length === 0, reasons,
     ...(guardReversals.length ? { guardReversals } : {}),
-    ...(derivedChanges.length ? { derivedChanges } : {}) };
+    ...(derivedChanges.length ? { derivedChanges } : {}),
+    ...(reversalAuthorization ? { reversalAuthorization } : {}) };
 }
 
 // Internal helpers exposed for unit tests so each gate can be probed in

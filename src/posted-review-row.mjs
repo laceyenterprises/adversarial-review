@@ -907,7 +907,7 @@ async function handlePostedReviewRowWithinReadCache({
       return { handled: true, outcome: 'ama-pending', urgent: coexistenceDecision.urgent === true,
         // CIWAITLANE-01: the CI wait must reach the lane ledger as the selected action.
         ...(expectedHead || operatorHoldReason || remediationMissing || amaClosureResult?.reason === 'deferred-by-drain'
-          || leaseWaitMessage || isCiWaitNextAction(amaClosureResult?.nextAction)
+          || leaseWaitMessage || amaClosureResult?.primaryReversalReviewPending || isCiWaitNextAction(amaClosureResult?.nextAction)
           ? { amaClosureResult } : {}),
         ...(operatorHoldReason ? { operatorHoldReason } : {}),
         ...(gateProjection?.decision?.operatorDecisionRequired === true

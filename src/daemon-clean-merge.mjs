@@ -461,11 +461,12 @@ async function runDaemonCleanMergeAttemptInner({
   };
   const base = candidate?.baseBranch;
   const validatedHead = docsFastPath?.headSha || gateSnapshot?.reviewedHeadSha || reviewState?.headSha || null;
+  const strictMode = cfg?.strictMode !== false;
   const NOT_TAKEN = (reason, extra = {}) => ({ disposition: DAEMON_MERGE_DISPOSITION.NOT_TAKEN, reason, ...extra });
   try {
     if (await readPrTenure({ repo: repoPath, prNumber, rootDir, env })
       && (candidate?.headSha !== reviewState?.headSha
-        || !isDaemonMergeReviewAllowed(reviewState, { strictMode: cfg?.strictMode !== false }))) {
+        || !isDaemonMergeReviewAllowed(reviewState, { strictMode }))) {
       return NOT_TAKEN('tenure-independent-review-required', { exactHeadReview: true });
     }
   } catch {
@@ -483,7 +484,6 @@ async function runDaemonCleanMergeAttemptInner({
     return NOT_TAKEN('daemon-inputs-missing');
   }
   if (docsFastPath && cfg?.autonomousMergeExecutionEnabled === false) return NOT_TAKEN('autonomous-merge-execution-disabled');
-  const strictMode = cfg?.strictMode !== false;
   const branchProtectionRequired = cfg?.branchProtection?.required !== false;
   const requiredGateContext = resolveGateStatusContext(env);
   const branchProtectionRequiredContexts = Array.isArray(candidate?.branchProtection?.requiredContexts)

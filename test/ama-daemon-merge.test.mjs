@@ -850,7 +850,7 @@ test('HAM terminal remediation verdict may merge over remediated findings after 
 });
 
 for (const path of ['approval', 'terminal HAM', 'closer certification']) {
-  test(`strict exact-head findings forbid the ${path} daemon bypass without a shared decision`, async () => {
+  test(`default strict mode forbids the ${path} daemon bypass for exact-head findings`, async () => {
     const gate = greenGate({ labels: ['operator-approved'] });
     const h = makeHarness({ liveGate: gate });
     const bypass = path === 'approval' ? {
@@ -862,7 +862,10 @@ for (const path of ['approval', 'terminal HAM', 'closer certification']) {
       verdict: 'ham_terminal_remediation_validated', allowHamTerminalRemediation: true,
     } : { allowHeadCloserCertifiedNonBlocking: true };
     const result = await attemptDaemonCleanMerge(baseArgs(h, {
-      ...bypass, liveGate: gate, reviewState: cleanReview({ headSha: HEAD, nonBlockingFindingCount: 1 }),
+      ...bypass,
+      flags: { autonomousMergeExecutionEnabled: true },
+      liveGate: gate,
+      reviewState: cleanReview({ headSha: HEAD, nonBlockingFindingCount: 1 }),
     }));
     assert.equal(result.reason, 'non-blocking-findings-present');
     assert.equal(h.calls.acquire, 0);

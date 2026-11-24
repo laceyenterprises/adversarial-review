@@ -56,8 +56,11 @@ The reported strict-mode default bypass does not reproduce: the executor
 already normalizes `cfg?.strictMode !== false` before computing `strictExactHead`.
 Regression cases cover omitted, undefined and enabled configuration with
 exact-head findings and valid operator approval; each declines before identity,
-certification, live-head or merge calls. The legacy certification parameter
-remains necessary for superseded reviews and non-strict mode.
+certification, live-head or merge calls. The executor uses the same normalized
+strict setting for tenure checks, and the lower-level merge gate also rejects
+all three exact-head bypass attempts with strict mode omitted. The legacy
+certification parameter remains necessary for superseded reviews and non-strict
+mode.
 Final-review validation passed: 164 tests across the watcher daemon, successor
 and SMV files; lint with zero errors (147 existing warnings), contract
 typechecking, the data-model catalog validator (103 entries), the offline

@@ -288,6 +288,9 @@ def main():
         }
         receipt["checks"].append(row)
         jobs = decision.get("jobs")
+        if jobs and not (decision.get("manifest") and decision.get("manifestSha256")):
+            jobs = None
+            row["reason"] = "ci-evidence-unavailable"
         result = None
         if jobs and not check.skip_reason:
             row.update(

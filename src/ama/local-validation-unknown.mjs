@@ -5,7 +5,7 @@
 // repository's declared required contexts are all present and green. It never
 // passes when they are red, pending, absent, or when none are declared.
 import { readFileSync } from 'node:fs';
-import { isAbsolute, join, relative, sep } from 'node:path';
+import { isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { classifyCheckRollup } from '../checks-summary.mjs';
 import { resolveRequiredCheckContextsFromCfg } from './required-check-contexts.mjs';
 
@@ -83,10 +83,11 @@ export function readUnknownValidationReceipt(runDir, head) {
 // Read the private check receipt after its process group has drained.
 export function readDeferredValidationChecks(runDir, head, recorded) {
   if (!recorded?.localValidationReceipt) return null;
-  const path = relative(runDir, recorded.localValidationReceipt);
+  const receiptPath = resolve(runDir, recorded.localValidationReceipt);
+  const path = relative(runDir, receiptPath);
   if (!path || isAbsolute(path) || path.split(sep)[0] === '..') throw new Error('invalid validation receipt path');
   let evidence;
-  try { evidence = JSON.parse(readFileSync(recorded.localValidationReceipt, 'utf8')); }
+  try { evidence = JSON.parse(readFileSync(receiptPath, 'utf8')); }
   catch (error) {
     if (error.code === 'ENOENT') return null;
     throw new Error('invalid validation receipt', { cause: error });

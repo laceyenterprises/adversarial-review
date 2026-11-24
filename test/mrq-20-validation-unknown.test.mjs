@@ -47,9 +47,12 @@ test('deferred check receipts handle absent evidence and normalize unreadable pa
   const evidence = { head: HEAD, checks: [{ result: 'pass' }] };
   writeFileSync(recorded.localValidationReceipt, JSON.stringify(evidence));
   assert.deepEqual(readDeferredValidationChecks(dir, HEAD, recorded), evidence);
+  assert.deepEqual(readDeferredValidationChecks(dir, HEAD, { localValidationReceipt: 'checks.json' }), evidence);
   assert.throws(() => readDeferredValidationChecks(dir, 'b'.repeat(40), recorded), /invalid validation receipt/);
   assert.throws(() => readDeferredValidationChecks(dir, HEAD,
     { localValidationReceipt: join(dir, '..', 'checks.json') }), /invalid validation receipt path/);
+  assert.throws(() => readDeferredValidationChecks(dir, HEAD,
+    { localValidationReceipt: '../checks.json' }), /invalid validation receipt path/);
   const unreadable = join(dir, 'directory');
   mkdirSync(unreadable);
   assert.throws(() => readDeferredValidationChecks(dir, HEAD,

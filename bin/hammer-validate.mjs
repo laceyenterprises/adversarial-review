@@ -204,7 +204,7 @@ function deferValidation(reason, status) {
     custodyDir = startDeferredSourceCustody({ env, launchRequestId, sourceHead: head,
       clean: startedClean && cleanCheckout() && gitOutput('rev-parse', '--verify', 'HEAD') === head,
       files: validationFiles, runner: validationRunner });
-    if (custodyDir && process.env.HAM_CONTROLLER_RECORD) {
+    if (custodyDir && runDir && process.env.HAM_CONTROLLER_RECORD) {
       writeFileAtomic(join(runDir, `deferred-controller-${basename(process.env.HAM_CONTROLLER_RECORD)}`),
         JSON.stringify({ headSha: deferredSourceIdentity(process.env).headSha }), { mode: 0o600 });
     }

@@ -449,6 +449,7 @@ export function namedAmaNoDispatchReason(reason, reasons = []) {
 // The canonical-validation hold is resolved separately from ordinary backoff.
 async function ownInconclusiveCloserRetry({ rootDir, hqRoot, repo, prNumber, headSha, launchRequestId, reason,
   currentHeadSha = headSha, sourcePublished = false, cfg, now, deliverAlertImpl, logger }) {
+  if (Number.isFinite(now)) now = new Date(now).toISOString();
   const hold = reason === 'canonical-validation-deferred'
     ? readDeferredSourceHold(hqRoot, { repo, prNumber, headSha }, { includeContinued: true }) : null;
   const custodyRequired = deferredSourceNeedsDecision(hold);

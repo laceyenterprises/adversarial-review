@@ -581,7 +581,11 @@ export async function runHammerController(script, args = [], {
     try { record.leaseCleanup = releaseImpl({ env, shellPid: child.pid, startedAt, drained, terminationReason: reason }); }
     catch { record.leaseCleanup = { released: false, reason: 'lease-cleanup-failed' }; }
     persist();
-    await retainDeferredControllerCleanup(env, recordPath, record);
+    try {
+      await retainDeferredControllerCleanup(env, recordPath, record);
+    } catch (error) {
+      console.error(`hammer-controller: could not retain deferred cleanup (${error.code || 'unknown'})`);
+    }
     if (record.leaseCleanup.reason === 'lease-cleanup-failed' || record.leaseCleanup.reason === 'mutation-lock-busy') return 125;
     if (drained && reason === 'shell-exited' && status !== 0) {
       reportHammerEarlyFailure('controller-shell-ended', { env });
@@ -624,7 +628,11 @@ export async function runHammerController(script, args = [], {
       catch { record.leaseCleanup = { released: false, reason: 'lease-cleanup-failed' }; }
     }
     try { persist(); } catch { /* Keep the original registration if disk failed. */ }
-    await retainDeferredControllerCleanup(env, recordPath, record);
+    try {
+      await retainDeferredControllerCleanup(env, recordPath, record);
+    } catch (error) {
+      console.error(`hammer-controller: could not retain deferred cleanup (${error.code || 'unknown'})`);
+    }
     if (!ready) reportHammerEarlyFailure('controller-setup-failed', { env });
     return 125;
   } finally {

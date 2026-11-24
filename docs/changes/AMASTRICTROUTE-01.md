@@ -78,3 +78,12 @@ All 1,173 tests across these eight targeted files pass (785 + 199 + 142 + 47).
 `npm run typecheck:contracts`, `node scripts/validate-data-model-catalog.mjs`
 (103 entries), `bash demo/research-finding-walkthrough.sh` and
 `git diff --check` pass. The full suite remains the PR-head CI responsibility.
+
+### Hammer closeout
+
+The successor deadline sweep retires receipts after confirmed closure or head
+movement, and suppresses the overdue page while a closer launch or retry owns
+the exact head. Strict hammer fallback includes CI repair on a reviewed head
+with findings. Post-deploy acceptance reads the decision journal with numeric
+timestamps so it can detect a daemon route even after the PR closes. The
+closure runbook documents per-PR operator recovery under strict mode.

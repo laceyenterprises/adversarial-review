@@ -1686,11 +1686,13 @@ PR/head successor request carrying the predicate's refusing review. The ordinary
 pre-claim remediation cap uses the same request. The watcher admits at most one
 existing final-fix-all work order for that head. A disabled or refused handoff
 records `needs-closer`, alerts through closure-wait and retains the receipt for
-later closure passes. A terminal final-fix-all result lets the selected hammer
-proceed through ordinary admission and retry caps. Successor custody pages on
+later closure passes. A terminal final-fix-all result lets a strict exact-head
+review with findings that selects hammer proceed through ordinary admission and
+retry caps, including when failed CI is the repair reason. Successor custody pages on
 refusal; the watcher deadline sweep also escalates after 1800 seconds from the
-original request if the receipt remains unenrolled on the same open head.
-Poll updates do not extend that deadline, and both observations share one page
+original request if the receipt remains unenrolled on the same open head
+without a live closer dispatch or retry. Confirmed terminal or moved heads
+retire their receipts from the sweep. Poll updates do not extend that deadline, and both observations share one page
 latch. See
 [successor records](data-model/closer-successors.md) and
 [publication ownership](data-model/hammer-publication-ownership.md).

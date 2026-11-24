@@ -31,36 +31,33 @@ const fixture = async t => {
   return root;
 };
 
-for (const scenario of ['row-error', 'report-error', 'daemon-route', 'no-observation']) {
-  test(`strict-route acceptance handles ${scenario} explicitly`, async t => {
+for (const scenario of ['matching-route', 'merged-daemon-route', 'no-observation']) {
+  test(`strict-route journal acceptance handles ${scenario}`, async t => {
     const root = await fixture(t);
-    const bin = join(root, 'bin'), journalDir = join(root, 'data', 'next-action-shadow');
-    await mkdir(bin);
+    const journalDir = join(root, 'data', 'next-action-shadow');
+    await mkdir(join(root, 'src'));
     await mkdir(journalDir, { recursive: true });
-    const reportPath = join(root, 'report.json');
-    const sample = { repo, number: 7, headSha: head, errors: [], coverage: { kind: 'exact-head' },
-      review: { headSha: head, verdict: 'comment-only', nonBlockingFindingCount: 1,
-        postedAt: '2026-01-02T11:55:00Z' } };
-    await writeFile(reportPath, JSON.stringify({ errors: scenario === 'report-error' ? ['listing unavailable'] : [],
-      rows: [sample, { ...sample, number: 8, errors: ['unrelated read failed'] }] }));
-    // Model pr-blockers' documented exit 1 while preserving its usable JSON.
-    await writeFile(join(bin, 'node'), '#!/bin/sh\nif [ "$1" = "bin/pr-blockers.mjs" ]; then\n/bin/cat "$FIXTURE_REPORT"\nexit 1\nfi\nexit 0\n', { mode: 0o755 });
-    const event = number => ({ schema: 'merge-lane-observation/v1', repo, prNumber: number, head,
-      observedAt: '2026-01-02T12:00:00Z',
-      next: { action: scenario === 'daemon-route' || number === 8 ? 'daemon-merge' : 'hammer',
-        reason: 'review-findings-final' } });
-    // The erroneous row's daemon observation must never enter the acceptance sample.
-    await writeFile(join(journalDir, 'observations.jsonl'),
-      (scenario === 'no-observation' ? [] : [event(7), event(8)]).map(event => JSON.stringify(event)).join('\n') + '\n');
+    await writeFile(join(root, 'src', 'config-loader.mjs'),
+      'export function loadConfigCached() { return { getMergeAuthorityConfig: () => ({ strictMode: true }) }; }');
+    const sample = { schema: 'merge-lane-observation/v1', repo, prNumber: 7, head,
+      observedAt: new Date(now).toISOString(), observedAtMs: now, strictMode: true,
+      exactReview: { head, verdict: 'comment-only', postedAtMs: now - 10, hasFindings: true },
+      next: { action: 'hammer', reason: 'review-findings-final' } };
+    const daemon = { ...sample, prNumber: 8, state: 'MERGED', next: { action: 'daemon-merge' } };
+    const outsideWindow = { ...daemon, observedAt: '2026-01-02T12:00:00Z', observedAtMs: now };
+    const observations = [outsideWindow, { ...daemon, observedAtMs: now + 2, exactReview: null }];
+    if (scenario !== 'no-observation') observations.push({ ...sample, observedAtMs: now + 2 });
+    if (scenario === 'merged-daemon-route') {
+      await writeFile(join(journalDir, 'observations.jsonl.1'), JSON.stringify({ ...daemon, observedAtMs: now + 1 }) + '\n');
+    }
+    await writeFile(join(journalDir, 'observations.jsonl'), observations.map(event => JSON.stringify(event)).join('\n') + '\n');
     const plan = loadYaml(await readFile(new URL('../modules/worker-pool/post-merge-actions/AMASTRICTROUTE-01.yaml', import.meta.url), 'utf8'));
     const result = spawnSync('/bin/sh', ['-c', plan.operator_steps[0].command], {
       cwd: root, encoding: 'utf8', timeout: 5000,
-      env: { ...process.env, PATH: `${bin}:${process.env.PATH}`, FIXTURE_REPORT: reportPath,
-        DEPLOYED_AT_UTC: '2026-01-02T11:00:00Z' },
+      env: { ...process.env, REVIEW_REPO: repo, DEPLOYED_AT_UTC: '2026-01-02T12:00:00.001Z' },
     });
-    assert.equal(result.status, scenario === 'row-error' ? 0 : 5, result.stderr);
-    if (scenario === 'report-error') assert.match(result.stderr, /pr-blockers report unavailable/);
-    if (scenario === 'daemon-route') assert.match(result.stderr, /unexpected daemon route/);
+    assert.equal(result.status, scenario === 'matching-route' ? 0 : 5, result.stderr);
+    if (scenario === 'merged-daemon-route') assert.match(result.stderr, /unexpected daemon route/);
     if (scenario === 'no-observation') assert.match(result.stderr, /acceptance pending/);
   });
 }

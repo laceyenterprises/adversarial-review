@@ -1185,8 +1185,10 @@ if (scenario === 'clean') {
   await settleCloserSuccessor({ ...enrolled, handoffImpl: successorHandoff });
   const pages = [];
   const probes = [];
+  let closerLive = true;
   let sweepTime = Date.parse(custodyNow) + 1_799_999;
   const sweepOptions = { rootDir: successorDeadlineRoot, now: () => sweepTime,
+    hasLiveCloserImpl: async (_root, identity) => identity.prNumber === pending.prNumber && closerLive,
     readLive: async (_repo, number) => {
       probes.push(number);
       return { state: number === terminal.prNumber ? 'merged' : 'open',
@@ -1204,6 +1206,10 @@ if (scenario === 'clean') {
   assert.deepEqual(pages, []);
   assert.deepEqual(probes, []);
   await sweepAt(Date.parse(custodyNow) + 1_800_000);
+  assert.equal(pages.length, 1);
+  assert.ok(pages[0].includes(`PR ${needsCloser.prNumber}@`));
+  closerLive = false;
+  await sweepAt(Date.parse(custodyNow) + 1_850_000);
   assert.equal(pages.length, 2);
   for (const subject of [pending, needsCloser]) {
     assert.ok(pages.some(page => page.includes(`PR ${subject.prNumber}@`) && page.includes('closer-successor-overdue')));
@@ -1211,6 +1217,9 @@ if (scenario === 'clean') {
   await sweepAt(Date.parse(custodyNow) + 1_900_000);
   assert.equal(pages.length, 2, 'pages deduplicate across sweep restarts');
   assert.equal(probes.includes(enrolled.prNumber), false);
+  for (const subject of [terminal, moved]) {
+    assert.equal(probes.filter(prNumber => prNumber === subject.prNumber).length, 1);
+  }
   evidence = { trailerlessPublicationDeferred: true, mergedPublicationRetired: true, successorEnrolledOnce: true, refusedSuccessorAlerted: true, legacySuccessorRecovered: true, overdueSuccessorsPagedOnce: true, hammers, finalFixAllQueuedBeforeHammer: true, finalFixAllTerminalFallback: true, cleanBranchHoldSettled: true, unchangedHeadHasNoPublicationDebt: true, nullHeadConfirmed: true, unknownBranchRetryRecovered: true, terminalScratchRemoved: true, drainingScratchRetained: true, privatePytestTemp: true, agedCwdTimeoutReclaimed: true, scratchCursorResumed: true, scratchLedgerClockIndependent: true, drainResumedNextPass: true, drainCountersUnchanged: true, drainHintExpiredWithoutCloser: true, legacyDrainHintRetired: true, hammerRangeValidated: true, noHammerReviewRequest: true, claimPreserved: true, reviewedHeadRecorded: true,
     headlessPostRequeuedOnce: true, terminalRetryable: true, terminalCapacityFreed: true, terminalNoMergeReclaimedSamePass: true,
     autoMergeHeld: true, autoMergeBoundReleased: true, unreadableCapacityReserved: true,

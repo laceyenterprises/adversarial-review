@@ -10,22 +10,20 @@ operator_steps:
           throw new Error("strict mode must be enabled for this observation");
         }
       '
-      report=$(node bin/pr-blockers.mjs --repo "${REVIEW_REPO:-laceyenterprises/agent-os}" --limit 100 --json || true)
+      since=$(node -e '
+        const since = Date.parse(process.argv[1]);
+        if (!Number.isFinite(since)) throw new Error("invalid DEPLOYED_AT_UTC");
+        console.log(since);
+      ' "$DEPLOYED_AT_UTC")
       journal=data/next-action-shadow/observations.jsonl
       set -- "$journal"
       if [ -r "$journal.1" ]; then set -- "$journal.1" "$journal"; fi
-      printf '%s\n' "$report" | jq -se --arg since "$DEPLOYED_AT_UTC" '
-        first as $report
-        | if ($report.errors | length) > 0 then error("pr-blockers report unavailable: \($report.errors | join("; "))")
-          else . end
-        | [$report.rows[] | select((.errors | length) == 0)
-          | select(.coverage.kind == "exact-head" and .review.headSha == .headSha
-          and .review.verdict == "comment-only" and .review.nonBlockingFindingCount > 0)] as $heads
-        | [.[] | select(.schema == "merge-lane-observation/v1" and .observedAt >= $since)
-          | . as $event | select(any($heads[]; .repo == $event.repo and .number == $event.prNumber
-            and .headSha == $event.head and .review.postedAt != null and .review.postedAt <= $event.observedAt))]
+      jq -se --argjson since "$since" --arg repo "${REVIEW_REPO:-laceyenterprises/agent-os}" '
+        [.[] | select(.schema == "merge-lane-observation/v1" and .repo == $repo
+          and .strictMode == true and .observedAtMs >= $since
+          and .exactReview.verdict == "comment-only" and .exactReview.hasFindings == true)]
         | if any(.[]; .next.reason == "carried-clean-head" or .next.action == "daemon-merge") then
             error("unexpected daemon route for an exact-head review with findings")
           elif any(.[]; .next.action == "hammer" and .next.reason == "review-findings-final") then .
           else error("acceptance pending: no matching final findings observation") end
-      ' - "$@"
+      ' "$@"

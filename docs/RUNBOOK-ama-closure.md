@@ -21,12 +21,13 @@ existing final-fix-all work order for that head. A disabled or refused handoff
 records `needs-closer` and alerts through closure-wait. Later closure passes
 recheck admission on that head, including from legacy `ownerless-closer-no-merge`
 receipts. If final fix-all has already spent its head-scoped round, only a strict
-exact-head final findings route continues through ordinary hammer admission and
-caps. Other routes retain `needs-closer` custody and the refusal page. Every
+exact-head review with findings that selects hammer continues through ordinary
+hammer admission and caps, including when failed CI is the repair reason. Other routes retain `needs-closer` custody and the refusal page. Every
 30 seconds the watcher scans a bounded batch of receipts independently of
 closure selection. After 1800 seconds from the original `requestedAt`, it
-confirms the PR still has the same open head and uses the same durable page
-latch as an immediate refusal. Poll updates to `updatedAt` do not extend the
+retires a receipt when GitHub confirms a terminal PR or a moved head. For the
+same open head, a live closer launch (including retries) suppresses the overdue
+page while it owns the head. Overdue pages share the immediate refusal latch. Poll updates to `updatedAt` do not extend the
 deadline. See
 [successor records](data-model/closer-successors.md) and
 [publication ownership](data-model/hammer-publication-ownership.md).
@@ -5243,6 +5244,17 @@ for the diagnostic command + recovery playbook.
 
 Expected when AMA is enabled and the dispatch isn't from a current-head
 `merge-agent-requested` label.
+
+### Strict findings that remain on the approved head
+
+If a hammer closes without a new commit and the exact-head review still lists
+non-blocking findings, inspect its closeout after the retry-cap page. Confirm
+whether the findings still apply. If the review no longer reflects the code,
+request a fresh exact-head review through the existing operator re-review
+procedure. If the findings still apply, use the current-head
+`merge-agent-requested` operator fallback for follow-through under its normal
+review and merge gates. Keep strict mode enabled during per-PR recovery.
+Record retry-cap page volume during the post-deploy observation window.
 
 ### `not-eligible` reasons in the closer prompt audit
 

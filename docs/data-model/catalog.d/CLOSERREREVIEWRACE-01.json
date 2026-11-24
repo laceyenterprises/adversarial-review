@@ -28,7 +28,8 @@
         "src/follow-up-jobs.mjs",
         "src/watcher.mjs"
       ],
-      "owner": "AMA closure orchestration"
+      "owner": "AMA closure orchestration",
+      "optionalField": "retiredAt (UTC ISO 8601); confirms a terminal PR or moved head and suppresses future deadline probes until fresh admission"
     },
     {
       "id": "ama-closure-waits",

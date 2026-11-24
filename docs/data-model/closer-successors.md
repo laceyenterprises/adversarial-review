@@ -28,15 +28,18 @@ updatedAt, then calls the existing closure-wait alert surface immediately with
 waitClass `closer-successor`. Its persistent page latch deduplicates repeated
 observations. Delivery failures remain retryable. The closure pass can retry
 admission from `needs-closer` or the legacy `ownerless-closer-no-merge` value.
-When a terminal final-fix-all job returns fallback for strict exact-head final
-findings, the watcher leaves the receipt intact and passes the selected hammer
+When a terminal final-fix-all job returns fallback for a strict exact-head
+review with findings that selects hammer (including failed-CI repair), the watcher leaves the receipt intact and passes the selected hammer
 decision to normal admission. Other routes record `needs-closer` with the
 handoff's reason and surface the refusal instead of admitting another hammer.
 Final-fix-all's durable claim prevents duplicate work. An independent watcher
 sweep checks non-enrolled receipts after 1800 seconds from the original
 `requestedAt`; poll updates to `updatedAt` do not extend custody. The sweep
-confirms the PR is open at the recorded head and rechecks the receipt under its
-flock before paging.
+records optional `retiredAt` (UTC ISO 8601) under the receipt flock if GitHub
+confirms the PR is terminal or its head moved. Retired receipts skip future
+probes. Fresh admission can clear the marker if the PR returns to that head.
+A same-head open PR only pages after a locked receipt recheck and when the
+sweep cannot confirm a live closer dispatch or retry on that head.
 The immediate refusal and overdue escalation share one page latch.
 
 A pending receipt grants no merge, review or budget authority. Head matching,

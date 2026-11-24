@@ -128,6 +128,14 @@ This supersedes the uncoordinated best-effort retention and optional paging desc
 
 `observations.jsonl` records `merge-lane-observation/v1`: subject/repository/PR/head, pass generation, observation time, PR state, NXA action/actor/row/reason/deadline, and tri-state launch liveness/branch custody/ownerless evidence. Process birth time is corroborated against the producer's registration timestamp; mismatches and failed reads remain unknown because registration time is not a guaranteed birth fingerprint. Retry descendants use their own process/custody record. Git inspection is read-only. Detached or unreadable refs leave `branch: null` while status inspection still runs. An unreadable status leaves custody unknown without discarding verified process liveness. Terminal dirty custody supplies ownerless evidence only for a matching head (or a legacy closer without a head), and a current live owner always takes precedence over dirty custody.
 
+Strict-mode rollout acceptance samples the journal directly and includes PRs
+that subsequently merge or close. New observations include numeric
+`observedAtMs`, the decision snapshot's `strictMode`, and `exactReview` when a
+complete same-head review was posted by observation time. The review projection
+contains `head`, `verdict`, numeric `postedAtMs`, and `hasFindings` (at least one
+known positive finding count). Older journal entries remain readable and do not
+qualify for the rollout sample.
+
 `episodes.json` is an atomic, bounded 8 MiB map keyed by SHA-256 subject identity. Each entry has the NXA fingerprint, episode start and last observation time. The same journal lock serializes cursor changes. Older samples cannot rewind it. Entries do not expire merely because observation pauses: rotation, restart and idle gaps cannot re-arm the same episode. At the size limit new observations fail closed to missing/stale telemetry; they do not reset receipts. The cursor is diagnostic and grants no dispatch authority.
 
 The read model combines both journal rotations with fresh live inventory. Journal episode keys and status grouping both prefer `subjectKey`, falling back to `repo#prNumber` only when it is absent. Missing/stale evidence is explicit, terminal inventory wins, and only the current head supplies PR deadlines. Observed anchors use the cursor; non-owner budgets and page grace use shared capped load scaling. Owner deadlines remain authoritative. Ownerless minutes integrate known intervals only, capped by freshness; gaps remain unobserved. The separate Sentinel PRAGE producer owns durable page dedupe, not these files.

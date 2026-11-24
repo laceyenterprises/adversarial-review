@@ -4,6 +4,9 @@ import { closeSync, mkdirSync, openSync, readFileSync } from 'node:fs';
 import { opendir, readFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { writeFileAtomic } from '../atomic-write.mjs';
+import { readLaunchRequestStatusFromLedgerAsync } from '../session-ledger-read-adapter.mjs';
+import { isCurrentAmaCloserLease, readAmaCloserLease } from './closer-lease.mjs';
+import { launchRequestInFlight } from './launch-request-status.mjs';
 import { observeClosureWait } from './closure-wait.mjs';
 
 const SUCCESSOR_DEADLINE_MS = 30 * 60_000;
@@ -70,6 +73,11 @@ export async function settleCloserSuccessor({ rootDir, repo, prNumber, headSha, 
     let record = readCloserSuccessor(rootDir, identity);
     if (!record) return { status: 'successor-pending' };
     if (record.status === 'successor-enrolled') return record;
+    // Fresh admission can revisit a retired head if the PR was reopened or moved back.
+    if (record.retiredAt) {
+      delete record.retiredAt;
+      writeFileAtomic(path, `${JSON.stringify(record)}\n`);
+    }
     let result;
     try {
       const handoff = handoffImpl || (await import('./final-fix-all.mjs')).handoffFinalFixAll;
@@ -88,16 +96,24 @@ export async function settleCloserSuccessor({ rootDir, repo, prNumber, headSha, 
   } finally { closeSync(fd); }
 }
 
+async function hasLiveCloser(rootDir, identity) {
+  const lease = readAmaCloserLease(rootDir, identity);
+  if (lease?.status !== 'dispatched' || !lease.lrqId) return false;
+  const probe = await readLaunchRequestStatusFromLedgerAsync({ rootDir, launchRequestId: lease.lrqId,
+    includeRetryChain: true });
+  return launchRequestInFlight(probe) === true && isCurrentAmaCloserLease(rootDir, lease);
+}
+
 // Scan independently of dispatch selection. An old receipt only warrants a
 // page if GitHub still confirms the same open head.
 export function createCloserSuccessorDeadlineSweep({ rootDir, readLive, now = Date.now,
-  observeWaitImpl = observeClosureWait, logger = console }) {
+  hasLiveCloserImpl = hasLiveCloser, observeWaitImpl = observeClosureWait, logger = console }) {
   const directory = join(rootDir, 'data', 'closer-successors');
   let cursor;
   let running = false;
   let stopped = false;
   const overdue = (record, observedAt) => record && record.schemaVersion === 1
-    && record.status !== 'successor-enrolled'
+    && record.status !== 'successor-enrolled' && !record.retiredAt
     && observedAt - Date.parse(record.requestedAt) >= SUCCESSOR_DEADLINE_MS;
 
   async function closeCursor() {
@@ -115,13 +131,23 @@ export function createCloserSuccessorDeadlineSweep({ rootDir, readLive, now = Da
       || closerSuccessorPath(rootDir, receipt) !== path) return false;
     const { repo, prNumber, headSha } = receipt;
     const live = await readLive(repo, prNumber);
-    if (stopped || live?.state !== 'open' || live.mergedAt || live.closedAt || live.headRefOid !== headSha) return true;
+    if (stopped) return true;
+    const liveHead = /^[0-9a-f]{40}$/i.test(live?.headRefOid) ? live.headRefOid.toLowerCase() : null;
+    const retire = ['closed', 'merged'].includes(live?.state) || live?.mergedAt || live?.closedAt
+      || (live?.state === 'open' && liveHead && liveHead !== headSha);
+    if (!retire && (live?.state !== 'open' || liveHead !== headSha
+      || await hasLiveCloserImpl(rootDir, { repo, prNumber, headSha }))) return true;
+    if (stopped) return true;
     const fd = openSync(`${path}.lock`, 'a', 0o640);
     try {
       fsExt.flockSync(fd, 'exnb');
       const current = readCloserSuccessor(rootDir, receipt);
       const observedAt = now();
       if (overdue(current, observedAt)) {
+        if (retire) {
+          writeFileAtomic(path, `${JSON.stringify({ ...current, retiredAt: new Date(observedAt).toISOString() })}\n`);
+          return true;
+        }
         await observeWaitImpl({ rootDir, repo, prNumber, headSha, now: observedAt,
           reason: 'closer-successor-overdue', immediate: true, waitClass });
       }

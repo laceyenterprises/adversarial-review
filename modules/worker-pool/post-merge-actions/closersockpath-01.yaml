@@ -1,0 +1,10 @@
+operator_steps:
+  - description: >-
+      After deploy, confirm a closer on a PR with AF_UNIX socket tests passes
+      local validation. Inspect that launch's validation receipt and use its
+      log as CLOSER_VALIDATION_LOG. The diagnostic search should return no matches.
+    run_as: designated SRE operator
+    command: >-
+      rg -n 'sun_path|AF_UNIX path too long|harness-fault:socket-path'
+      "${CLOSER_VALIDATION_LOG:?Set this to the post-deploy closer log}"
+actions: []

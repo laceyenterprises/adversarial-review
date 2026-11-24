@@ -21,7 +21,7 @@ import { join } from 'node:path';
 import { writeFileAtomic } from '../atomic-write.mjs';
 import { REVIEW_SERVICE_REVISION } from '../review-service-revision.mjs';
 import { registeredHammerStopOrigin } from './hammer-stop-origin.mjs';
-import { isHarnessFault } from '../harness-fault.mjs';
+import { isHarnessFault, SOCKET_PATH_HARNESS_FAULT } from '../harness-fault.mjs';
 
 export const CLOSER_INCONCLUSIVE_RETRY_OWNER = 'watcher';
 export const CLOSER_INCONCLUSIVE_WAIT_CLASS = 'closer-inconclusive';
@@ -60,7 +60,8 @@ const MAX_HEADS = 8;
 const MAX_LAUNCHES = 32;
 
 function code(value) {
-  return String(value ?? '').trim().split(':')[0].toLowerCase().replace(/_/g, '-');
+  const text = String(value ?? '').trim().toLowerCase().replace(/_/g, '-');
+  return text === SOCKET_PATH_HARNESS_FAULT ? text : text.split(':')[0];
 }
 
 /**
@@ -68,10 +69,14 @@ function code(value) {
  */
 export function classifyCloserOutcome({ reason = null, failureClass = null } = {}) {
   const raw = String(reason ?? '').trim();
+  const launch = code(failureClass);
+  // A generic harness diagnostic cannot make a registered counted stop refundable.
+  const launchHarnessFault = isHarnessFault(launch)
+    && (CLOSER_INCONCLUSIVE_LAUNCH_FAILURES.has(launch) || registeredHammerStopOrigin(launch) !== 'world');
   // A wall-clock stop can be the outer supervisor expiring while provision
   // waits. Require positive launch evidence; a bare expiry stays counted.
   if (code(raw) === 'hammer-wall-clock-exceeded'
-    && isHarnessFault(code(failureClass))) {
+    && launchHarnessFault) {
     return { kind: 'inconclusive', reason: code(raw), origin: 'infrastructure' };
   }
   if (raw) {
@@ -89,10 +94,9 @@ export function classifyCloserOutcome({ reason = null, failureClass = null } = {
     // An unregistered code seen only at launch end (not through the terminal
     // audit) keeps the bounded, counted exit refund below: no extra credit.
   }
-  if (isHarnessFault(code(failureClass))) {
-    return { kind: 'inconclusive', reason: code(failureClass), origin: 'infrastructure' };
+  if (launchHarnessFault) {
+    return { kind: 'inconclusive', reason: launch, origin: 'infrastructure' };
   }
-  const launch = code(failureClass);
   if (CLOSER_INCONCLUSIVE_LAUNCH_FAILURES.has(launch)) return { kind: 'inconclusive', reason: launch, origin: 'launch' };
   return { kind: 'real', reason: code(raw) || launch || 'unclassified', origin: 'unknown' };
 }

@@ -7,6 +7,27 @@ import { spawnSync } from 'node:child_process';
 
 const wrapper = new URL('../bin/hammer-ci-mirror-validation.py', import.meta.url).pathname;
 const fixture = readFileSync(new URL('./fixtures/ci-mirror-budget.py', import.meta.url), 'utf8');
+const diagnostics = JSON.parse(readFileSync(new URL('./fixtures/hammer-socket-diagnostics.json', import.meta.url)));
+
+for (const { name, output, stdout = '', socketPathFault } of diagnostics) {
+  test(`failed mirror checks classify buffered output for ${name}`, t => {
+    const dir = mkdtempSync(join(tmpdir(), 'ham-mirror-socket-'));
+    t.after(() => rmSync(dir, { recursive: true, force: true }));
+    const script = join(dir, 'mirror.py');
+    const receipt = join(dir, 'receipt.json');
+    writeFileSync(join(dir, 'check.py'), `import sys\nsys.stdout.write(${JSON.stringify(stdout)})\nsys.exit(${JSON.stringify(output)})\n`);
+    writeFileSync(join(dir, 'plan.json'), '{"manifests":{},"reason":"fixture"}');
+    writeFileSync(script, fixture);
+    const result = spawnSync('python3', [wrapper, join(dir, 'plan.json'), receipt, script],
+      { cwd: dir, encoding: 'utf8', timeout: 5000 });
+    assert.ifError(result.error);
+    assert.equal(result.status, 42, result.stderr);
+    const { checks } = JSON.parse(readFileSync(receipt, 'utf8'));
+    assert.ok(checks.length > 0);
+    assert.ok(checks.every(check => check.result === 'fail'
+      && check.socketPathFault === (socketPathFault ? true : undefined)));
+  });
+}
 
 for (const [name, signature, extraCall, compatible] of [
   ['annotated production contract',

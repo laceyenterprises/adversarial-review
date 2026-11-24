@@ -32,7 +32,7 @@ test('every registered stop reason has a pinned origin; new reasons require an e
   assert.deepEqual(HAMMER_STOP_ORIGINS, table);
   for (const [reason, origin] of Object.entries(table)) {
     assert.equal(hammerStopOrigin(reason), origin);
-    assert.equal(hammerStopOrigin(`${reason}:synthetic-detail`), origin);
+    if (!reason.includes(':')) assert.equal(hammerStopOrigin(`${reason}:synthetic-detail`), origin);
     assert.equal(hammerPhaseAttempt({ outcome: 'failed-without-merge', reason }).outcome,
       origin === 'world' ? 'failed-without-merge' : 'deferred', reason);
   }
@@ -50,7 +50,8 @@ test('command errors remain closer faults without legacy infrastructure membersh
   // Load an isolated registry as if the legacy Set entry had been pruned.
   const source = readFileSync(moduleUrl, 'utf8')
     .replace("  'hammer-command-error',\n", '')
-    .replace("'../atomic-write.mjs'", JSON.stringify(new URL('../atomic-write.mjs', moduleUrl).href));
+    .replace("'../atomic-write.mjs'", JSON.stringify(new URL('../atomic-write.mjs', moduleUrl).href))
+    .replace("'../harness-fault.mjs'", JSON.stringify(new URL('../harness-fault.mjs', moduleUrl).href));
   const registry = await import(`data:text/javascript;base64,${Buffer.from(source).toString('base64')}`);
   assert.equal(registry.HAMMER_INFRASTRUCTURE_OUTCOMES.has('hammer-command-error'), false);
   assert.equal(registry.hammerStopOrigin('hammer-command-error'), 'closer');
@@ -77,7 +78,7 @@ function emittedStops(source) {
     /HAM_PHASE_OUTCOME=["']?([a-z][a-z0-9-]+)/g,
     /(?:reportHammerEarlyFailure|recordHammerEarlyFailure|refuseEnvironment|closerHelperError|worldFactError)\(['"`]([a-z][a-z0-9-]+)/g,
     /phaseOutcome:\s*['"]([a-z][a-z0-9-]+)/g,
-    /ham_(?:conflict_stop|close_finish)\s+(?:[0-9]+|\$\?)[ \t]+["']?([a-z][a-z0-9-]+)/g,
+    /ham_(?:conflict_stop|close_finish)\s+(?:[0-9]+|\$\?)[ \t]+["']?([a-z][a-z0-9-]*(?::[a-z][a-z0-9-]*)?)/g,
     /ham_append_terminal_audit\s+[a-z-]+\s+["']?([a-z][a-z0-9-]+)/g,
     /ham_commit_message_abort\s+([a-z][a-z0-9-]+)/g,
     /HAM_CONFLICT_PROOF_REASON=([a-z][a-z0-9-]+)/g,

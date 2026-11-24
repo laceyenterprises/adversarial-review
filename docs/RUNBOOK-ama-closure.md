@@ -6366,6 +6366,35 @@ three-refund park with an owned retry; see "Inconclusive closer results" below.
 Head/review changes do not erase a head's refund history; a world refusal still
 wins over a later generic controller failure. This adds no merge authority.
 
+The validator gives every local test battery a real, mode-0700 directory
+under `/tmp`. If `/tmp` is unavailable for writing, it tries the caller's
+system temp directory under the same 92-byte socket-path budget. It sets
+`TMPDIR`, `TMP`, and `TEMP` to the chosen scratch directory and moves the
+hammer's pytest base temp there. Checkouts and close receipts live in the run
+workspace.
+
+A budget refusal records `harness-fault:socket-path`. Other scratch setup
+errors return `validation-environment-failed`. Runtime classification
+requires that the failed command's entire nonblank output consist of one
+unindented diagnostic line. The accepted forms are `OSError: AF_UNIX path too
+long` and Node `listen ENAMETOOLONG:` or `bind ENAMETOOLONG:`, with an optional
+`Error: ` prefix for Node. Outside the mirror the line must be on stderr.
+In the mirror every failed check must qualify on the combined output of its
+single failed command. TAP, pytest and spec reports, full tracebacks and
+`connect ENAMETOOLONG` keep their ordinary validation handling.
+
+The socket outcome keeps exit 75 and enters the watcher's ordinary counted
+stop handling from the first occurrence. The log and validation receipt
+record the root and budget for a setup refusal or the scratch path for a
+runtime error. Inspect the failed command for the actual socket location,
+which can be outside scratch.
+
+Validation removes scratch after command cleanup and retains it on unconfirmed
+cleanup (exit 125). A per-uid marker in each selected temp parent limits
+orphan scans to once an hour, including when process inspection fails.
+Reaping begins after at least 24 hours and requires matching ownership,
+private permissions and a census that clears the directory of live use.
+
 Local validation uses `hammer-validate.mjs --canonical -- <changed files>`.
 Absolute paths, leading hyphens and parent traversal segments print canonical
 usage and exit 64, without a validation verdict or environment-fallback receipt.

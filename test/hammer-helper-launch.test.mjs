@@ -22,7 +22,7 @@ test('an unavailable audit dependency preserves the wrapped failure status and r
   writeFileSync(join(dir, 'bin/load-aware-timeout.mjs'), "process.stdout.write('1');\n");
   writeFileSync(join(dir, 'src/load-aware-timeout.mjs'), 'export const MAX_TIMER_DELAY_MS = 2 ** 31 - 1;\nexport const loadAwareTimeoutMs = ms => ms;\n');
   writeFileSync(join(dir, 'src/config-loader.mjs'), 'export const getConfig = (_key, fallback) => fallback;\n');
-  for (const name of ['overload-deferral.mjs', 'atomic-write.mjs']) {
+  for (const name of ['overload-deferral.mjs', 'atomic-write.mjs', 'harness-fault.mjs']) {
     writeFileSync(join(dir, 'src', name), readFileSync(join(root, 'src', name)));
   }
   const result = spawnSync(process.execPath, [

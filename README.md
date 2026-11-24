@@ -303,8 +303,17 @@ The full unit + adapter test suite runs the same way:
 npm test
 ```
 
-CI runs both on Node 22 and Node 26 on every PR. Node 22.10 or newer is required
-for native test-runner `execArgv` support, which installs each file's preloads.
+CI runs the full suite on Node 22 and Node 26 on main, at 06:37 UTC nightly
+and on manual dispatch. Pull requests select tests from the diff against the
+checked-out merge commit's first parent. The selection follows reverse imports
+and literal source references, including CLI invocations. Harness, dependency,
+workflow and shared fixture changes use the full file set. Unclassified changes
+and unavailable selection also use the full set. Docs-only and empty diffs run
+zero Node test files. Each existing job runs a small selection, and the two
+jobs split broad selections when they reach a third of the suite by file count
+or estimated work. Both keep their existing check names. Node 22.10 or newer
+is required for native test-runner `execArgv` support, which installs each
+file's preloads.
 The runner schedules files by measured duration. Local runs default to half
 the available logical CPUs rounded down, with a minimum of one and a maximum
 of four. Set `AR_TEST_CONCURRENCY` to a positive integer to override the
@@ -328,8 +337,13 @@ Generic bounded validation wrappers preserve command arguments.
 Set `AR_TEST_TIMINGS=/absolute/path.json` to
 record per-file wall times and total suite wall time. Relative report paths
 resolve against the caller's working directory and survive sandbox cleanup.
-Scheduling hints in `test/fixtures/suite-durations.json` never control which files run.
+Scheduling hints in `test/fixtures/suite-durations.json` control execution
+order and shard balance. The selection comes from the diff and dependency graph.
 For a focused run, pass exact paths or basenames to `node test/run-tests.mjs`.
+To preview a committed diff against `HEAD`, run
+`npm test -- --base origin/main --dry-run`. On a PR merge checkout, use
+`--base HEAD^1`. Set `AR_TEST_PR_SHARD=0` or `AR_TEST_PR_SHARD=1` to preview
+the corresponding matrix job.
 
 ### AgentOS Reviewer Runtime Routing
 

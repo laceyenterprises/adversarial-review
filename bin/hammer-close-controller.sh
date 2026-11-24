@@ -9,7 +9,7 @@
 # commit, verify-head (lease, rebase, bounded
 # outside-lease revalidation), publish the audit, exact-head CI wait, predicate
 # inputs, claim, predicate, merge. Terminal stops write close-result.json and
-# keep the phase's exit code (20 stop, 21 conflict repair, 75 retryable deferral).
+# keep the phase's exit code. The named stop outcome determines retryability.
 exec 0</dev/null
 
 HAM_CLOSE_ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P) || exit 1
@@ -88,6 +88,7 @@ ham_close_validate() {
   HAM_CLOSE_STAGE=local-validation
   export HAM_PROCEDURE_STEP=local-validation
   HAM_PHASE_OUTCOME=targeted-validation-failed
+  HAM_CLOSE_VALIDATION_OUTCOME=
   if [ "${#files[@]}" -eq 0 ]; then
     changed_paths=$(mktemp "$HAM_RUN_DIR/validation-files.XXXXXX") || return 1
     if ! git diff -z --name-only --diff-filter=d "$HAM_REVIEWED_SHA" "$head" -- > "$changed_paths"; then
@@ -105,6 +106,9 @@ ham_close_validate() {
     "$HAM_NODE_BIN" "$HAM_CLOSE_ROOT/bin/hammer-validate.mjs" --canonical -- "${files[@]}" || status=$?
   if [ -s "$receipt" ]; then
     ham_close_validation_receipts+=("$receipt")
+    HAM_CLOSE_VALIDATION_OUTCOME=$(jq -r --arg head "$head" \
+      'select(.head == $head and .status == 75) | .outcome // empty' "$receipt" 2>/dev/null) \
+      || HAM_CLOSE_VALIDATION_OUTCOME=
   elif [ -n "$receipt" ]; then
     rm -f "$receipt"
   fi
@@ -114,7 +118,9 @@ ham_close_validate() {
 ham_close_validation_stop() {
   local status="$1" head="$2"
   HAM_CLOSE_STAGE=local-validation
-  if [ -f "$HAM_RUN_DIR/validation-deferred-$head.json" ]; then
+  if [ "$status" -eq 75 ] && [ "${HAM_CLOSE_VALIDATION_OUTCOME:-}" = harness-fault:socket-path ]; then
+    ham_close_finish 75 harness-fault:socket-path
+  elif [ -f "$HAM_RUN_DIR/validation-deferred-$head.json" ]; then
     ham_close_finish "$status" canonical-validation-deferred
   elif [ "$status" -eq 78 ]; then
     ham_close_finish 78 validation-environment-failed

@@ -189,8 +189,12 @@ controller has no receipt for that invocation.
 | `schemaVersion` | `1` |
 | `head` | Full commit SHA captured before the local validation stage |
 | `status` | Effective validator exit code once the helper finishes |
+| `outcome` | Present as `harness-fault:socket-path` for a counted socket stop. The closer uses it to recognize exit 75 when the receipt head matches the validation head. |
+| `socketPathDiagnostic` | Present with the socket outcome. Records the over-budget temp root and byte budget for setup refusals, or the allocated scratch path for runtime failures. |
 | `checks` | Ordered records with check name, status and reason, plus local result or exit status when available |
 | `checks[].jobs` | For `ci-covered`, each declared job's `name` and GitHub Actions `runId` (strings); current step mappings also include string `jobId` and the exact `step` name. Legacy job mappings and older receipts omit these optional fields. |
+| `checks[].socketPathFault` | Optional flag set to `true` by the mirror when a single failed command's only nonblank output is a supported socket diagnostic. |
+| `checks[].localReason` | Optional local check reason. `harness-fault:socket-path` accompanies an inconclusive result when all failed mirror checks qualify for the socket stop. |
 | `checks[].diagnostics` | Optional ordered diagnostics for a check that did not pass or was interrupted |
 | `checks[].diagnostics[].path` | Private combined stdout/stderr file beside the original validation receipt |
 | `checks[].diagnostics[].limitBytes` | Maximum retained bytes per command, currently 4 MiB |
@@ -245,3 +249,13 @@ private run directory. A standalone caller removes the printed
 `ham-validation-evidence-*` directory under the same conditions. There is no
 automatic expiry or aggregate byte cap; each command can retain 4 MiB. Do not
 delete files while process drain is unconfirmed.
+
+Each validator owns a mode-0700 `ar-hv-<8 hex>` directory in the canonical
+`/tmp` parent (`/private/tmp` on Darwin) or a budget-checked caller temp
+parent. Its mode-0600 `.validator-pid` records the validator PID. Confirmed
+cleanup removes both. Exit 125, interruption or failed deletion can leave
+scratch for the same uid's orphan reaper. A candidate must be at least 24
+hours old, have no live recorded validator and pass the environment and
+working-directory process census. The mode-0600 `.ar-hv-reap-<uid>` marker
+in each selected parent persists across runs and gates scan attempts to
+once per hour, including attempts with an unavailable census.

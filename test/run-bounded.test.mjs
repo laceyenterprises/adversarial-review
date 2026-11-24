@@ -90,8 +90,10 @@ test('reserved cleanup failure retains private scratch instead of unlinking evid
   const result = spawnSync(process.execPath, ['bin/hammer-validate.mjs', '--', process.execPath,
     '-e', 'process.exit(125)'], { env: { ...process.env, TMPDIR: dir }, encoding: 'utf8', timeout: 20_000 });
   assert.equal(result.status, 125, result.stderr);
-  assert.match(result.stderr, /scratch retained for canonical cleanup/);
-  assert.equal(readdirSync(dir).filter(name => name.startsWith('ham-validation-')).length, 1);
+  const scratch = result.stderr.match(/scratch retained for orphan cleanup: (.+)/)?.[1];
+  assert.match(scratch, /^\/(?:private\/)?tmp\/ar-hv-[a-f0-9]{8}$/);
+  t.after(() => rmSync(scratch, { recursive: true, force: true }));
+  assert.ok(readdirSync(scratch).includes('.validator-pid'));
 });
 
 test('silent work fails on idle, independently of a load-expanded ceiling', async t => {

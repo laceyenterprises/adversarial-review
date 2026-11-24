@@ -8,6 +8,7 @@ import { writeFileAtomic } from '../atomic-write.mjs';
 import { UNREGISTERED_STOP_CODE, closerFaultRecovery, hammerStopOrigin, registeredHammerStopOrigin,
 } from './hammer-stop-origin.mjs';
 import { readLaunchWorldRefusal } from './closer-head-pin.mjs';
+import { SOCKET_PATH_HARNESS_FAULT } from '../harness-fault.mjs';
 
 export class CloserCorrectionRequired extends Error {
   constructor(reason) {
@@ -77,7 +78,7 @@ export function recordHammerEarlyFailure(reason, { env = process.env, headSha, f
   const origin = hammerStopOrigin(reason);
   if (unregistered) reason = UNREGISTERED_STOP_CODE;
   const parts = reason.split(':');
-  if (parts[0] !== 'history-read-failed' || parts[1] === 'transient') {
+  if (reason !== SOCKET_PATH_HARNESS_FAULT && (parts[0] !== 'history-read-failed' || parts[1] === 'transient')) {
     reason = origin === 'closer' && parts[0] === 'review-evidence-invalid' ? parts[1] : parts[0];
   }
   const identity = {

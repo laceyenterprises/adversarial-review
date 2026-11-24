@@ -2,6 +2,17 @@
   "version": 1,
   "entries": [
     {
+      "id": "adversarial-gate-status",
+      "title": "Adversarial Gate Status",
+      "path": "docs/data-model/adversarial-gate-status.md",
+      "store": "data/adversarial-gate-status/",
+      "schemaSurface": "src/adversarial-gate-status.mjs",
+      "relatedSchemaSurfaces": ["src/docs-fast-path.mjs"],
+      "owner": "watcher gate projection and docs fast path",
+      "optionalFields": ["docsFastPathWithdrawn: true"],
+      "compatibility": "Additive head-scoped withdrawal evidence retained across status replacement. Legacy pending docs-fast-path-not-eligible records remain readable and gain the flag on their next changed publication. New heads do not inherit it."
+    },
+    {
       "id": "follow-up-reviewer-role",
       "title": "Follow-up alternate-owner reviewer role",
       "path": "docs/data-model/follow-up-jobs.md",
@@ -292,7 +303,7 @@
       "store": "<watcher root>/data/next-action-shadow/{disagreements,observations}.jsonl, their .1 rotations, and episodes.json",
       "schemaSurface": "src/pr-next-action-shadow.mjs",
       "relatedSchemaSurfaces": ["src/pr-next-action.mjs", "src/pr-next-action-consumer.mjs", "src/next-action-disagreements.mjs", "src/ama/closure-next-action.mjs", "src/ama/closure-owner.mjs", "src/merge-lane-journal.mjs", "src/merge-lane-observation.mjs", "src/merge-lane-status.mjs"],
-      "mergeLaneEvidence": "MLR-01: episode and status keys prefer subjectKey over repo#prNumber. Detached/unreadable refs leave branch null while status inspection continues; Git failures preserve verified process liveness. Terminal dirty custody is head-bound (legacy missing head accepted) and cannot override a current live owner. Existing v1 fields and lifecycle states are unchanged.",
+      "mergeLaneEvidence": "MLR-01: episode and status keys prefer subjectKey over repo#prNumber. Detached/unreadable refs leave branch null while status inspection continues; Git failures preserve verified process liveness. Terminal dirty custody is head-bound (legacy missing head accepted) and cannot override a current live owner. Optional v1 rollout evidence includes observedAtMs, strictMode and exactReview (head, verdict, postedAtMs and hasFindings) for journal-based acceptance including subsequently closed PRs.",
       "owner": "NXA-02 closure observation and rollout owner"
     },
     {
@@ -772,6 +783,7 @@
       "relatedSchemaSurfaces": ["migrations/20261029_finalization_queue_routing.sql", "src/finalization/queue-routing.mjs", "src/finalization/queue-status.mjs", "migrations/20261023_finalization_queue.sql", "migrations/20261024_finalization_queue_handoff.sql", "migrations/20261025_finalization_queue_admission.sql", "src/finalization/queue-admission.mjs", "src/finalization/queue-clean-review.mjs", "src/finalization/queue-read.mjs", "migrations/20261026_finalization_queue_checks.sql", "src/finalization/queue-checks.mjs", "migrations/20261027_finalization_queue_merge.sql", "src/finalization/queue-merge.mjs", "src/finalization/queue-delivery.mjs", "src/finalization/queue-check-reader.mjs", "src/finalization/queue-check-transport.mjs", "src/finalization/queue-rebase.mjs", "src/finalization/queue-rebase-proof.mjs", "src/finalization/queue-git.mjs", "src/finalization/queue-store.mjs", "src/finalization/queue-owner.mjs", "src/finalization/queue-handoff.mjs", "src/finalization/queue-handoff-store.mjs", "src/ama/closer-queue-handoff.mjs", "src/finalization/ledger-events.mjs", "src/finalization/ledger-fold.mjs", "src/finalization/queue-probe.mjs"],
       "owner": "Merge Authority v2 subject ledger and repository/base queue",
       "queueLocalValidation": "MRQ-20: trusted result unknown requires explicit ciAuthoritative true and localFailureObserved not true, even with ok true. Exact-candidate declared contexts must still be non-empty and green at merge. Existing receipt fields and lifecycle values are unchanged.",
+      "queueFindingDeferral": "finalization_queue_handoff.handoff_json.dispositions allows deferred for non-blocking findings linked to the authenticated review-proof audit only when trusted evidence_json.strictNonBlockingRemediation is false. Older receipts omit the policy field and require fix or withdrawal evidence for every finding.",
       "liveSnapshotIngestion": "Fact-transition replay keys retain unchanged observations across poll times; one app-root handle/schema setup; configured CI contexts survive absent protection; omitted domains retain facts while failed refreshes escalate.",
       "custodyReceipts": "Existing owner-matched app store required; conflicting replay content refuses acknowledgment. Unknown custody payloads remain readable; custody does not advance merge eligibility currency. GSR reports present/accepted/released and exits nonzero on token refusal.",
       "queueCheckTimestamps": "REST check-run createdAt normalizes started_at then completed_at, or null for undated runs retained without deduplication; legacy statuses require created_at. Numeric REST IDs or GraphQL databaseId break timestamp ties despite opaque node IDs. Repeated Link headers and canonical repository-ID next links retain the exact candidate/endpoint and original named repository reads.",
@@ -779,6 +791,7 @@
       "queueMergeReceipts": "Final re-fold/live reads precede a persisted eligible decision, owner-journaled merge intent and the existing expected-head squash surface. Success requires live merged state at the candidate, structured merge SHA and the attributed bot as merger. finalization_queue_merge_receipt(entry_id, repository, base, pr_number, candidate, merge_sha, operation_id, receipt_digest, receipt_json) and finalization_queue_delivery(delivery_key, entry_id, kind, payload_json, attempts, last_error, receipt_json) commit with the merged phase and a subject-ledger finalized event. Delivery keys are delivery:<kind>:<entryId>:<mergeSha>; pending rows remain visible after lane release. Outbox operations retain the configured SQLite busy timeout. Recent receipt recordedAt projects merge.mergedAt. Remediated receipts preserve handoff.closer; clean input receipts prohibit closer adjudication and record null.",
       "queueChecksParking": "Complete versioned required set and all exact-candidate check/status pages; original nominal/effective/ceiling/deadline retained. Infrastructure parking journals cause_key/entry_id/payload_json/receipt_json in finalization_queue_check_page and releases the lane. Existing alert bus deduplicates per cause across lost enqueue receipts; bounded recovery rechecks proof/currency/holds and appends tail readiness without fresh CI patience. Local validation remains at source SHA. Read-only checks probe observes real schema/store; production composition and routing remain pending.",
       "queueRebaseRecovery": "Admission recomputes every contiguous derivation proof and receipt digest before candidate or expected-old-head readmission; transient proof execution failures park, computed mismatches return, and expired patience is checked first; retained candidates resume ready through rebasing and publishing. Drained explicit Git success settles with git:push:<candidate>:refs/heads/<head-ref> provenance despite API lag; single-ref porcelain rejection and deterministic pre-invocation refusals settle not-applied. Already-published progress rechecks holds and permissions. Failed prepares remove unreturned workspaces; successful workspace retention and full prior-proof/snapshot duplication still require follow-up before routing.",
+      "queueAdmissionExpiry": "Expired admission returns to the closer and enqueues a durable page. A fresh same-head admission uses a new generation with new evidence.",
       "queueProgressAudit": "New progress events retain priorPhase before patch.phase is applied; legacy events without priorPhase still replay. Terminal admission returns retain the matching structural reason."
     },
     {

@@ -608,7 +608,7 @@ test('exhausted no-merge hands off even outside the review-cycle cap route', asy
     ...deps,
   });
   assert.equal(result.dispatched, false, JSON.stringify(result));
-  assert.equal(result.reason, 'ownerless-closer-no-merge');
+  assert.equal(result.reason, 'needs-closer');
   assert.equal(result.successor.headSha, REMEDIATED_HEAD);
   assert.match(result.successor.reviewBody, /Preserve the original error/);
   assert.equal(deps.launches.length, 0);

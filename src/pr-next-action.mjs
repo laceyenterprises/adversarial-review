@@ -20,7 +20,7 @@ import { createHash } from 'node:crypto';
 import { isUnresolvedLaunchReference } from './launch-reference.mjs';
 import { classifyCheckRollup } from './checks-summary.mjs';
 import { hasOperatorApprovedOverride, SETTLED_SUCCESS_VERDICTS } from './ama/eligibility.mjs';
-import { isDaemonMergeReviewAllowed } from './ama/daemon-merge.mjs';
+import { isDaemonMergeReviewAllowed, isFullyCleanSettledReview } from './ama/daemon-merge.mjs';
 import { isTransientDaemonDecline } from './ama/daemon-decline.mjs';
 import { launchRequestOwned, withLiveLaunchRetry } from './ama/launch-request-status.mjs';
 import { AMA_CLOSER_DISPATCHED_LEASE_RECLAIM_AGE_MS, AMA_CLOSER_PENDING_LEASE_RECLAIM_AGE_MS } from './ama/closer-lease.mjs';
@@ -150,8 +150,7 @@ function reviewFacts(reviews, head, policy, labels) {
     clean,
     // Strict zero, independent of strict-mode demotion: no blocking and no
     // non-blocking (including demoted) findings at all.
-    zeroFindings: lower(value.blockingFindingState) === 'known' && value.blockingFindingCount === 0
-      && lower(value.nonBlockingFindingState) === 'known' && value.nonBlockingFindingCount === 0,
+    zeroFindings: isFullyCleanSettledReview(value),
     hasFindings: (value.blockingFindingState === 'known' && value.blockingFindingCount > 0)
       || (value.nonBlockingFindingState === 'known' && value.nonBlockingFindingCount > 0),
     operatorOverride: hasOperatorApprovedOverride({ operatorApprovedEvidence: value.operatorApprovedEvidence,
@@ -601,8 +600,13 @@ function selectRow(facts, options = {}) {
   }
   const handedToReview = leaseForHead && lease.status === 'handed-to-review';
   const terminalReview = progress?.terminalReview;
-  const terminalHead = terminalReview?.validated === true && sameHead(terminalReview.headSha, head)
+  const strictMode = policy?.strictMode !== false;
+  const exactHeadFindingsUncleared = strictMode && sameHead(review.reviewedHead, head) && !review.zeroFindings;
+  const terminalReceipt = terminalReview?.validated === true && sameHead(terminalReview.headSha, head)
     && sameHead(terminalReview.reviewedHeadSha, review.reviewedHead) && !handedToReview;
+  // A terminal receipt can cover findings from a superseded review. A review
+  // of the current head must establish its own zero-finding result.
+  const terminalHead = terminalReceipt && !exactHeadFindingsUncleared;
   const closerCarry = plain(progress?.closerAuthoredStale);
   const closerPair = Boolean(closerCarry && sameHead(closerCarry.currentHead, head)
     && sameHead(closerCarry.reviewedHead, review.reviewedHead));
@@ -611,6 +615,7 @@ function selectRow(facts, options = {}) {
   // Certified terminal evidence proceeds through the CI and review gates below.
   // R08: terminal no-merge with retry remaining (exit zero is not merged).
   const approvedHead = review.known && review.operatorOverride && review.attestation !== 'invalid'
+    && (!strictMode || review.zeroFindings)
     && checks.state === 'SUCCESS' && pr.mergeable === 'MERGEABLE';
   // Approval must not reselect a daemon that exhausted its transport budget.
   // Other heads still pass review/source proof before daemon repair at R15.
@@ -743,7 +748,7 @@ function selectRow(facts, options = {}) {
 
   // R14: findings go to a remaining remediation round or the final hammer.
   if (!review.clean && !terminalHead) {
-    if (handedToReview || attestedCarry) {
+    if (handedToReview || attestedCarry || (terminalReceipt && exactHeadFindingsUncleared)) {
       return { row: 'R14-findings', action: 'hammer', actor: 'hammer', reason: 'review-findings-final', deadlineKind: 'admission', queue: 'dispatch' };
     }
     if (remediation.roundsLeft === null) return refresh('rounds-unknown');

@@ -180,6 +180,69 @@ ham_release_merge_lease
   }
 });
 
+for (const helper of ['ham_wait_for_published_head', 'ham_lease_pr_view']) {
+  test(`VERIFYHEADTRANSIENT-01: ${helper} retries large stderr under pipefail`, t => {
+    const rootDir = fixture(t);
+    const rendered = renderHammerProcedure('hammer-verify-head', {
+      REPO: identity.repo, PR_NUMBER: '42', HQ_ROOT: rootDir, ROOT_DIR: rootDir,
+      RUN_DIR: rootDir, TARGET_REMEDIATION_SHA: head, REVIEWED_SHA: head,
+      REVIEWER: 'fixture', RISK_CLASS: 'low', PR_URL: 'https://example.invalid/pr/42',
+    });
+    const start = rendered.indexOf(`${helper}() {`);
+    const end = rendered.indexOf('\n}\n', start) + 3;
+    assert.ok(start >= 0 && end > start, `missing rendered helper ${helper}`);
+    const payload = 'HTTP 502 Bad Gateway\n' + 'diagnostic padding\n'.repeat(65536)
+      + 'end of stderr\n';
+    assert.ok(Buffer.byteLength(payload) > 64 * 1024);
+    const stderrPath = join(rootDir, 'large-stderr');
+    const attemptsPath = join(rootDir, 'attempts');
+    const response = JSON.stringify({ headRefOid: head });
+    const runtime = join(rootDir, 'runtime');
+    writeFileSync(stderrPath, payload);
+    writeFileSync(runtime, `#!/bin/bash
+attempt=0
+if [ -f "$PROBE_ATTEMPTS" ]; then read -r attempt < "$PROBE_ATTEMPTS"; fi
+attempt=$((attempt + 1))
+printf '%s\\n' "$attempt" > "$PROBE_ATTEMPTS"
+if [ "$attempt" -lt 3 ]; then
+  cat "$PROBE_STDERR" >&2
+  exit 1
+fi
+printf '%s\\n' '${response}'
+`, { mode: 0o755 });
+    const script = join(rootDir, 'probe.sh');
+    writeFileSync(script, `set -euo pipefail
+${rendered.slice(start, end)}
+# Exercise the real filters without spending wall time on retry backoff.
+sleep() { :; }
+ham_pr() { "$HAM_NODE_BIN" "$@"; }
+HAM_HEAD_WAITED_SECONDS=0
+HAM_REQUIRED_CHECKS_WAITED_SECONDS=0
+HAM_PUSHED_FROM_HEAD=${'b'.repeat(40)}
+POST_REMEDIATION_SHA=$HAM_PUSHED_FROM_HEAD
+HAM_PUSHED_HEAD=${head}
+${helper} --json headRefOid
+${helper === 'ham_wait_for_published_head'
+    ? 'printf \'%s\\n\' "$POST_REMEDIATION_SHA"'
+    : 'test "$HAM_LEASE_PROBE_TRANSIENT" -eq 0'}
+`);
+    const result = spawnSync('/bin/bash', ['--noprofile', '--norc', script], {
+      encoding: 'utf8', timeout: 5000, maxBuffer: 4 * 1024 * 1024,
+      env: { PATH: process.env.PATH, HAM_NODE_BIN: runtime, TMPDIR: rootDir,
+        PROBE_ATTEMPTS: attemptsPath, PROBE_STDERR: stderrPath },
+    });
+    assert.equal(result.error, undefined);
+    assert.equal(result.status, 0, result.stderr.slice(-2000));
+    assert.equal(readFileSync(attemptsPath, 'utf8'), '3\n');
+    assert.equal(result.stderr, payload.repeat(2));
+    assert.equal(result.stdout.trim(), helper === 'ham_wait_for_published_head' ? head : response);
+    if (helper === 'ham_wait_for_published_head') {
+      assert.deepEqual(JSON.parse(readFileSync(join(rootDir, 'pr-after.json'), 'utf8')),
+        { headRefOid: head });
+    }
+  });
+}
+
 test('VERIFYHEADTRANSIENT-01: controller fallback refunds only the drained matching read abort', t => {
   const rootDir = fixture(t), startedAt = at, acquiredAt = '2026-01-01T00:00:01Z';
   const env = { HAM_HQ_ROOT: rootDir, HAM_RUN_DIR: rootDir, HAM_ROOT_DIR: rootDir,

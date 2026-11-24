@@ -57,6 +57,14 @@ export const FIRST_PASS_REVIEW_QUEUE_DEPTH_UNIT =
   + 'newer than its posted review; excluding held, draft, malformed, Argus-only '
   + 'and already-admitted rows)';
 
+const draftColumnAvailable = new WeakMap();
+export function routedPendingReviewSql(db) {
+  if (!draftColumnAvailable.has(db)) {
+    draftColumnAvailable.set(db, db.pragma('table_info(reviewed_prs)').some(column => column.name === 'is_draft'));
+  }
+  return `reviewer <> ''${draftColumnAvailable.get(db) ? ' AND COALESCE(is_draft, 0) = 0' : ''}`;
+}
+
 export const REVIEW_QUEUE_DEPTH_FAILOVER_CFG_KEY =
   'watcher.first_pass_review_queue_depth_failover_threshold';
 export const REREVIEW_QUEUE_DEPTH_FAILOVER_CFG_KEY =

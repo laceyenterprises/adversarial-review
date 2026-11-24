@@ -2,6 +2,7 @@
 // contract with a synthetic CLI and exercise the current queue CLI as well.
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { withoutConfigSchemaDiagnostics } from './helpers/config-schema-diagnostic.mjs';
 import { spawnSync } from 'node:child_process';
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -49,7 +50,7 @@ for (const platform of ['linux', 'darwin']) {
           assert.match(result.stderr, /\[load-aware-timeout\] config unavailable/);
           assert.match(result.stderr, /\[load-aware-timeout\] CPU sample unavailable/);
           assert.ok(result.stderr.endsWith(expected), result.stderr);
-        } else assert.equal(result.stderr, expected);
+        } else assert.equal(withoutConfigSchemaDiagnostics(result.stderr), expected);
       }
     });
   }

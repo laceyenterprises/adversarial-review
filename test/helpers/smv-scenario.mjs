@@ -1129,7 +1129,7 @@ if (scenario === 'clean') {
   assert.equal(existsSync(cursorTrees[2]), false);
   assert.deepEqual(visits.slice(0, 3), ['synthetic-cursor-0', 'synthetic-cursor-1', 'synthetic-cursor-2']);
   const { withHammerPublication, activeHammerPublication, retireHammerPublication } = await import('../../src/ama/hammer-publication-ownership.mjs');
-  const { requestCloserSuccessor, settleCloserSuccessor } = await import('../../src/ama/closer-successor.mjs');
+  const { closerSuccessorPath, createCloserSuccessorDeadlineSweep, readCloserSuccessor, requestCloserSuccessor, settleCloserSuccessor } = await import('../../src/ama/closer-successor.mjs');
   const custodyHead = 'd'.repeat(40), custodyNow = '2030-01-01T00:00:00.000Z';
   const custody = { rootDir, repo: 'fixture/custody', prNumber: 71, headSha: custodyHead, now: custodyNow };
   const controllerPath = join(rootDir, 'synthetic-publication-controller.json');
@@ -1155,9 +1155,92 @@ if (scenario === 'clean') {
   const refusedInput = { ...successorInput, headSha: 'e'.repeat(40) };
   requestCloserSuccessor(refusedInput);
   assert.equal((await settleCloserSuccessor({ ...refusedInput, enabled: false,
-    observeWaitImpl: async () => { ownerlessAlerts++; } })).status, 'ownerless-closer-no-merge');
+    observeWaitImpl: async () => { ownerlessAlerts++; } })).status, 'needs-closer');
   assert.equal(ownerlessAlerts, 1);
-  evidence = { trailerlessPublicationDeferred: true, mergedPublicationRetired: true, successorEnrolledOnce: true, refusedSuccessorAlerted: true, hammers, finalFixAllQueuedBeforeHammer: true, finalFixAllTerminalFallback: true, cleanBranchHoldSettled: true, unchangedHeadHasNoPublicationDebt: true, nullHeadConfirmed: true, unknownBranchRetryRecovered: true, terminalScratchRemoved: true, drainingScratchRetained: true, privatePytestTemp: true, agedCwdTimeoutReclaimed: true, scratchCursorResumed: true, scratchLedgerClockIndependent: true, drainResumedNextPass: true, drainCountersUnchanged: true, drainHintExpiredWithoutCloser: true, legacyDrainHintRetired: true, hammerRangeValidated: true, noHammerReviewRequest: true, claimPreserved: true, reviewedHeadRecorded: true,
+  assert.equal((await settleCloserSuccessor({ ...refusedInput, handoffImpl: successorHandoff })).status, 'successor-enrolled');
+  assert.equal((await settleCloserSuccessor({ ...refusedInput, handoffImpl: successorHandoff })).status, 'successor-enrolled');
+  assert.equal(successors, 2);
+  const legacyInput = { ...successorInput, headSha: 'f'.repeat(40) };
+  const legacyRecord = requestCloserSuccessor(legacyInput);
+  writeFileSync(closerSuccessorPath(rootDir, legacyInput),
+    JSON.stringify({ ...legacyRecord, status: 'ownerless-closer-no-merge' }));
+  for (let pass = 0; pass < 2; pass++) {
+    assert.equal((await settleCloserSuccessor({ ...legacyInput, handoffImpl: successorHandoff })).status, 'successor-enrolled');
+  }
+  assert.equal(successors, 3);
+  const successorDeadlineRoot = join(rootDir, 'successor-deadline');
+  const deadlineInput = { ...successorInput, rootDir: successorDeadlineRoot };
+  const pending = { ...deadlineInput, prNumber: 72 };
+  const needsCloser = { ...deadlineInput, prNumber: 73 };
+  const terminal = { ...deadlineInput, prNumber: 74 };
+  const moved = { ...deadlineInput, prNumber: 75 };
+  const enrolled = { ...deadlineInput, prNumber: 76 };
+  const fallback = { ...deadlineInput, prNumber: 77 };
+  for (const subject of [pending, needsCloser, terminal, moved, enrolled, fallback]) requestCloserSuccessor(subject);
+  assert.equal((await settleCloserSuccessor({ ...fallback, allowHammerFallback: true,
+    handoffImpl: async () => ({ action: 'fallback' }) })).action, 'fallback');
+  for (let elapsed = 30_000; elapsed < 1_800_000; elapsed += 30_000) {
+    await assert.rejects(settleCloserSuccessor({ ...needsCloser, enabled: false,
+      now: new Date(Date.parse(custodyNow) + elapsed).toISOString(),
+      observeWaitImpl: async () => { throw new Error('synthetic page failure'); } }), /synthetic page failure/);
+  }
+  await settleCloserSuccessor({ ...enrolled, handoffImpl: successorHandoff });
+  const pages = [];
+  const probes = [];
+  let closerLive = null;
+  let settledHeadsClosed = false;
+  let sweepTime = Date.parse(custodyNow) + 1_799_999;
+  const sweepOptions = { rootDir: successorDeadlineRoot, now: () => sweepTime,
+    hasLiveCloserImpl: async (_root, identity) => identity.prNumber === pending.prNumber && closerLive,
+    readLive: async (_repo, number) => {
+      probes.push(number);
+      const closed = settledHeadsClosed && [fallback.prNumber, enrolled.prNumber].includes(number);
+      return { state: number === terminal.prNumber ? 'merged' : closed ? 'closed' : 'open',
+        headRefOid: number === moved.prNumber ? 'a'.repeat(40) : custodyHead };
+    },
+    observeWaitImpl: args => observeClosureWait({ ...args, pageImpl: async message => { pages.push(message); } }),
+  };
+  async function sweepAt(time) {
+    sweepTime = time;
+    const sweep = createCloserSuccessorDeadlineSweep(sweepOptions);
+    try { await sweep.tick(); await sweep.tick(); }
+    finally { await sweep.stop(); }
+  }
+  await sweepAt(sweepTime);
+  assert.deepEqual(pages, []);
+  assert.deepEqual(probes, []);
+  await sweepAt(Date.parse(custodyNow) + 1_800_000);
+  assert.equal(pages.length, 1);
+  assert.ok(pages[0].includes(`PR ${needsCloser.prNumber}@`));
+  closerLive = false;
+  await sweepAt(Date.parse(custodyNow) + 1_850_000);
+  assert.equal(pages.length, 1, 'unknown closer observation backs off across restarts');
+  await sweepAt(Date.parse(custodyNow) + 2_100_000);
+  assert.equal(pages.length, 2);
+  for (const subject of [pending, needsCloser]) {
+    assert.ok(pages.some(page => page.includes(`PR ${subject.prNumber}@`) && page.includes('closer-successor-overdue')));
+  }
+  await sweepAt(Date.parse(custodyNow) + 2_130_000);
+  assert.equal(pages.length, 2, 'pages deduplicate across sweep restarts');
+  assert.equal(probes.filter(number => number === needsCloser.prNumber).length, 1, 'paged receipts back off retirement probes');
+  for (const subject of [fallback, enrolled]) {
+    assert.equal(probes.filter(number => number === subject.prNumber).length, 1);
+    assert.equal(readCloserSuccessor(successorDeadlineRoot, subject).retiredAt, undefined);
+  }
+  for (const subject of [terminal, moved]) {
+    assert.equal(probes.filter(prNumber => prNumber === subject.prNumber).length, 1);
+  }
+  settledHeadsClosed = true;
+  await sweepAt(Date.parse(custodyNow) + 1_800_000 + 86_400_000);
+  for (const subject of [fallback, enrolled]) {
+    assert.ok(readCloserSuccessor(successorDeadlineRoot, subject).retiredAt);
+  }
+  await sweepAt(Date.parse(custodyNow) + 1_800_000 + 7 * 86_400_000);
+  for (const subject of [terminal, moved]) {
+    assert.equal(existsSync(closerSuccessorPath(successorDeadlineRoot, subject)), false);
+    assert.equal(existsSync(`${closerSuccessorPath(successorDeadlineRoot, subject)}.lock`), false);
+  }
+  evidence = { trailerlessPublicationDeferred: true, mergedPublicationRetired: true, successorEnrolledOnce: true, refusedSuccessorAlerted: true, legacySuccessorRecovered: true, overdueSuccessorsPagedOnce: true, hammers, finalFixAllQueuedBeforeHammer: true, finalFixAllTerminalFallback: true, cleanBranchHoldSettled: true, unchangedHeadHasNoPublicationDebt: true, nullHeadConfirmed: true, unknownBranchRetryRecovered: true, terminalScratchRemoved: true, drainingScratchRetained: true, privatePytestTemp: true, agedCwdTimeoutReclaimed: true, scratchCursorResumed: true, scratchLedgerClockIndependent: true, drainResumedNextPass: true, drainCountersUnchanged: true, drainHintExpiredWithoutCloser: true, legacyDrainHintRetired: true, hammerRangeValidated: true, noHammerReviewRequest: true, claimPreserved: true, reviewedHeadRecorded: true,
     headlessPostRequeuedOnce: true, terminalRetryable: true, terminalCapacityFreed: true, terminalNoMergeReclaimedSamePass: true,
     autoMergeHeld: true, autoMergeBoundReleased: true, unreadableCapacityReserved: true,
     wakeRearmed: true, expiredWakeRearmed: true, missingHeadAlertDeduplicated: true,

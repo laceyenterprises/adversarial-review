@@ -242,6 +242,9 @@ test('closure uses an initialized database while rereading the current round cou
     // A borrowed connection exposes only the query seam: schema initialization
     // or closing this connection would fail this test.
     const reviewStateDb = { prepare(sql) {
+      if (sql === "SELECT 1 FROM sqlite_schema WHERE name = 'explicit_review_intents'") {
+        return { get: () => undefined };
+      }
       assert.match(sql, /SELECT COUNT\(\*\) AS count[\s\S]*FROM reviewer_passes/);
       return { get() { reads++; return { count }; } };
     } };

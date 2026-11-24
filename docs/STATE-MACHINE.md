@@ -747,6 +747,15 @@ or unreadable subjects are still refused as `durable-refill-subject-changed`.
 A pending re-review refused before admission logs a `review-wait-decision`
 with its filtering reason on every drain, with or without wait pressure.
 
+When discovery cannot route an open PR yet, it logs the PR number, wait
+reason and owner. The `reviewed_prs` row stays `pending` with an empty
+`reviewer` and carries the wait in `failure_message`. The durable reviewer
+refill only picks up assigned rows. The next discovery pass rechecks the
+wait, and assigning a reviewer clears it without consuming a review attempt.
+An active repair reservation retains custody until its normal publication
+or retirement transition. First-pass review can run with red external CI.
+Re-review CI admission and merge eligibility retain their separate checks.
+
 Durable candidates forward the posted timestamp at split capacity release and
 at completion. Without admission splitting, the completed review result (or
 pipeline rollup delivery receipt) supplies the durable timestamp for the
@@ -1684,9 +1693,22 @@ worker exit. The merge remains terminal throughout comment recovery.
 An exhausted closer that confirms an open PR without merging enrolls a durable
 PR/head successor request carrying the predicate's refusing review. The ordinary
 pre-claim remediation cap uses the same request. The watcher admits at most one
-existing final-fix-all work order for that head, or records and alerts
-`ownerless-closer-no-merge` through closure-wait alerting. Disabled or refused
-handoffs cannot silently terminate custody. See
+existing final-fix-all work order for that head. A disabled or refused handoff
+records `needs-closer`, alerts through closure-wait and retains the receipt for
+later closure passes. A terminal final-fix-all result lets a strict exact-head
+review with findings that selects hammer proceed through ordinary admission and
+retry caps, including when failed CI is the repair reason. The receipt records `fallbackAt` to transfer deadline ownership to hammer across retry gaps and caps. Successor custody pages on
+refusal; the watcher deadline sweep also escalates after 1800 seconds from the
+original request if the receipt remains unenrolled on the same open head
+without hammer fallback ownership, prior successful escalation or a live closer
+dispatch or retry. A live closer, pending lease or unreadable PR or launch evidence backs off deadline probes for
+five minutes across restarts. Successful delivery records `escalatedAt` and
+ends deadline paging. Failed delivery remains retryable. Enrolled, escalated
+and hammer-owned receipts get retirement-only probes at most daily. Confirmed
+terminal or moved heads retire their receipts, and retired JSON is pruned after
+seven days under its lock, which the sweep also unlinks. Poll updates do not extend the deadline,
+and both observations share one page
+latch. See
 [successor records](data-model/closer-successors.md) and
 [publication ownership](data-model/hammer-publication-ownership.md).
 Exits before completing the close retain their existing bounded retry/refund
@@ -2188,7 +2210,17 @@ already visible at poll admission or classification do the same; failed status
 withdrawal keeps the PR waiting for a later retry. Kill switch,
 primary-change policy, protection, capability, protective
 predecessors, stop holds and audit remain authoritative. No reviewer result or
-finding count is invented. Pending/red checks wait without reviewer or closer.
+finding count is invented. On a settled check failure or definite mergeability
+refusal for the docs head, the watcher logs the gate reasons, withdraws the
+waiver and takes the ordinary review path. The exact-head withdrawal receipt
+keeps later polls on that path while routing waits. A first review can proceed
+with red external CI. Unsettled checks or `UNKNOWN` mergeability keep the fast-path wait
+and retry on the same head. A failed waiver withdrawal stays with the watcher
+for retry.
+Once an ordinary reviewer is assigned for the head, later polls keep it on
+the ordinary path. The head's gate record retains `docsFastPathWithdrawn: true`
+across queued/running status replacement and a later routing reset; nullish
+reviewer fields also preserve withdrawal. A new head is classified independently.
 
 The former `fast-merge:docs` label shortcut is retired; it cannot waive review
 for Markdown outside `docs/`. Other explicit fast-merge categories are unchanged.
@@ -2549,7 +2581,7 @@ guards still apply, and an already captured prompt path must remain unchanged.
 | Path | When | What happens |
 |---|---|---|
 | **Hammer (repair and fallback)** | Blocking final findings, conflicts, CI-only repair, or findings remaining after the bounded builder fix-all; configured eligibility still applies | The watcher dispatches exactly one hammer terminal-remediation worker (`templates/hammer-prompt.md`, via `src/ama/dispatch-closer.mjs`). In the default `watcher.ama_hammer_dispatch_mode: inline` mode, the posted-review phase awaits that `hq dispatch` attempt. In `background` mode, the phase submits the same closer call to a bounded in-process queue keyed by PR@head with durable pending intent under `data/ama-hammer-background/` (recovered through normal guards on the first adoption phase after restart), returns retained ownership (`ama-pending`) with reason `ama-closer-dispatch-backgrounded`, and lets the closer's lease/dispatch-record guards prevent duplicate launches on later ticks. The hammer remediates, rebases only when GitHub reports a conflict or strict/unknown BEHIND, holds the required-checks-plus-changed-surface-tests merge bar, waits out GitHub required checks on the exact post-remediation head inside a bounded remote-CI window, and merges under its own lease with `--match-head-commit`. LEASEFAIR-01 releases the lease during the first CI wait. HAMRESUMEOWED-01 retains CLEAN and known non-strict MERGEABLE BEHIND heads, including overlapping-file base advances; only GitHub conflict or strict/unknown BEHIND requires rebase. LEASEFAIR-02 handles a required rebase with one in-run rebase and at most `HAM_CI_RETRY_WAIT_SECONDS` (default/minimum 120) wall-clock seconds of exact-head CI while retaining that lease, then rebuilds audit and predicate authority. |
-| **Daemon inline merge (clean completion)** | Final review, including a full re-review after builder fix-all, is fully clean — zero blocking AND zero non-blocking findings, both classifications known — or a current-head `operator-approved` overrides the verdict and finding gates; green required checks (or explicit no-CI bootstrap evidence), a MERGEABLE PR, and a live validated head remain mandatory | The watcher daemon clicks merge inline through a bounded `gh pr merge --match-head-commit` subprocess under the shared merge lease (`src/ama/daemon-merge.mjs`). An approval override records operator evidence and distinct closure authority in the audit. No agent is spawned. Dispositions: `merged`, `failed-closed` (conflicts, real CI failures and stale heads fall through to capped HAM; a current MERGEABLE clean head waiting on empty/no-CI evidence or cancelled recovery returns to the merge-agent path), `deferred` (lease contention; retry next tick), `not-taken` (a current MERGEABLE zero-finding settled head waiting on empty/no-CI evidence or cancelled recovery returns to the merge path; remediable failures and reviews with findings fall through to HAM). Protective predecessor and revoked-approval holds remain authoritative. |
+| **Daemon inline merge (clean completion)** | Final review, including a full re-review after builder fix-all, is fully clean — zero blocking AND zero non-blocking findings, both classifications known — or a current-head `operator-approved` overrides the verdict (strict mode still requires zero findings; `strict_mode: false` permits the configured approval override of findings); green required checks (or explicit no-CI bootstrap evidence), a MERGEABLE PR, and a live validated head remain mandatory | The watcher daemon clicks merge inline through a bounded `gh pr merge --match-head-commit` subprocess under the shared merge lease (`src/ama/daemon-merge.mjs`). An approval override records operator evidence and distinct closure authority in the audit. No agent is spawned. Dispositions: `merged`, `failed-closed` (conflicts, real CI failures and stale heads fall through to capped HAM; a current MERGEABLE clean head waiting on empty/no-CI evidence or cancelled recovery returns to the merge-agent path), `deferred` (lease contention; retry next tick), `not-taken` (a current MERGEABLE zero-finding settled head waiting on empty/no-CI evidence or cancelled recovery returns to the merge path; remediable failures and reviews with findings fall through to HAM). Protective predecessor and revoked-approval holds remain authoritative. |
 
 
 **Queue-v2 lanes (MRQ-21).** The two paths above are the legacy rule. On a
@@ -2572,6 +2604,23 @@ with world `head-changed` and never re-hammers the old head. Unconfirmed
 admission is the infrastructure deferral `queue-handoff-unadmitted` (same-head
 re-drive); a merged or closed PR stops with `already-merged` / `pr-closed`.
 Legacy lanes render no queue inputs and run the two paths unchanged.
+
+The queue watcher schedules admission probes from the last persisted progress
+time, at most once a minute per parked entry, or at original patience expiry
+if sooner. When admission patience expires, the watcher records
+`returned-to-closer` / `admission-deadline-expired` and queues a durable page
+without a remote read. Same-head readmission needs fresh evidence and a new
+generation. A Hammer readmission also needs a fresh launch. Checks and merge
+infrastructure parks with a stored probe schedule continue on that schedule.
+
+Closer preflight uses the latest generation for each admission head. A returned
+generation cannot mask a newer acknowledged admission for that same head.
+
+If a queue tick ends with an unresolved push or merge intent, the watcher parks
+its active owner fence so the next claimant can start reconciliation before
+expiry. The same running watcher can retry authoritative readback for its
+own drained callback. It accepts proven publication or a terminal PR outcome.
+An unresolved operation retains its fence and a durable escalation page.
 
 HAMCONFLICTOWNER-01: a closer terminal audit with
 `reason: conflict-primary-unproven` at the live head transfers conflict work
@@ -3097,11 +3146,15 @@ Key control points:
   A cited restoration of a primary deletion similarly binds the deleted
   content to the authorizing commit's additions, including in mixed replacements
   whose introduced lines remain present. File/Lines coverage still uses the cited
-  review's coordinates. Insertion-only regions remain protected: their removal
-  needs a citation covering the full introduced span and matching HAM removals
-  with multiplicity. In-place repairs may preserve the region while changing
-  introduced text. Whole-file absence, opaque-file and rename preservation remain
-  independent protections.
+  review's coordinates. Insertion-only regions remain protected. For a closer
+  using a review in its parent ancestry, citation coverage runs from the first
+  through the last nonblank line of the reviewed insertion. The HAM removal
+  proof still matches the full insertion with multiplicity. Rebase and lane
+  citations retain full-span coverage. An earlier lane push needs lane proof
+  for its own cited reversal. The closer's citation takes its authority from
+  the verified finding on the reviewed head. In-place repairs may preserve
+  the region while changing introduced text. Whole-file absence, opaque-file
+  and rename preservation remain independent protections.
   A superseded citation additionally requires the original HAM reversal, with
   the same message, file paths, previous paths, statuses and ordered removed/added
   change lines and valid original authorization, in the first superseding
@@ -3137,8 +3190,12 @@ Key control points:
   daemon's repository- and PR-scoped store for finding applicability.
   A head-match waiver or cross-head withdrawal requires each native edge to
   be a proven comment-only final handoff with re-review suppressed.
-  Ordered patch-ID equivalence apart
-  from authenticated HAM remediation commits is an independent proof. A proven
+  Ordered patch-ID equivalence apart from authenticated HAM remediation commits
+  is an independent proof. A strict patch-equivalent prefix followed entirely
+  by launch-attributed remediation or PR-update commits preserves applicability
+  of the latest authoritative findings. Disputing them requires evidence at
+  the live head. This proof alone cannot waive head match or reuse a withdrawal
+  from before the suffix. A proven
   rebase reuses the original withdrawal without rewriting its durable head or
   posting again. Partial withdrawals reduce the standing blocker count.
   Unproven currency admits neither findings nor dispositions and refuses merge
@@ -3149,12 +3206,16 @@ Key control points:
   Legacy disputes with nullable resolution grant no final prompt authority. Before
   opening the existing database, the helper checks effective UID ownership of
   daemon state and the configured pager sink. Only the latest authoritative
-  review in live-head ancestry may be disputed.
+  review shown applicable to the live head may be disputed.
   Neither reversal authorization nor dispute raises `hq decision raise`. Proven reversal
   refusals hold merge. Selected R05 `primary-change-repair` admits hammer repair
   under the unchanged authorization and merge predicates. Callers without that
   selected intent retain `needsOperator: true`; an attributable current-head
   `merge-agent-requested` event can dispatch the existing operator recovery lane.
+  An attributable text reversal without verified authority first requests one
+  durable exact-head review. Zero blocking findings authorize its recorded
+  regions at that head. Blocking findings enter normal remediation. A second
+  unverified reversal on that head uses the operator route.
   Without selected repair intent, the closer returns `primary-change-repair-required`; the daemon returns
   `primary-change-needs-operator` before the closer. OWNERPROOF-01 admits repair
   after 15 minutes without proven ownership (`OWNERPROOF_IDLE_MINUTES` overrides
@@ -3177,8 +3238,8 @@ Key control points:
 - **`strict_mode`** (default `true`): the ordinary daemon lane requires a
   zero-finding review. Explicitly setting it `false` permits daemon merge
   over *known non-blocking* findings. A current-head `operator-approved`
-  overrides the verdict and finding gates; the daemon verifies the approval
-  again inside the merge lease and holds the tick if it was removed.
+  can override the verdict. Strict-mode routing requires zero findings even
+  with approval. The daemon verifies approval again inside the merge lease.
 - **`auto_hammer_on_eligibility_miss`** (default `false`): historical.
   It gated the auto-hammer dispatch when it was introduced, but since MSM-04
   the runtime no longer reads it — the hammer route keys on the configured
@@ -3899,7 +3960,7 @@ After deployment, SRE verifies no open PR has a closure-recovery deadline more
 than one wake past due. This is read-only post-merge acceptance (SEVDOCS-333);
 worker fixtures never mutate production state.
 
-## V2 queue candidate checks (MGQ-05, unwired)
+## V2 queue candidate checks (MGQ-05)
 
 The candidate waiter advances waiting-checks → finalizing only from a complete,
 versioned required set and current runs/statuses at the exact published head.
@@ -3914,7 +3975,7 @@ Readmission is ordering, not merge authority. See the
 [durable contract](data-model/finalization-ledger.md#candidate-checks-and-infrastructure-parking-mgq-05)
 and [read-only deployed probe](finalization-executor-promotion-runbook.md#checks-and-parking-observation-mgq-05-no-activation).
 
-## V2 queue final merge (MGQ-06, unwired)
+## V2 queue final merge (MGQ-06)
 
 `finalizing` advances to `merged` only after final live rereads, a persisted
 eligible decision, an owner-journaled intent and authoritative reconciliation:
@@ -3953,7 +4014,11 @@ then record the successor. Unknown drain/outcome holds both routes. Rollback
 additionally acknowledges stable-key returns for unfinished/parked entries
 before handing ownership back. A stale cached selector or owner fence refuses
 mutation; other lanes remain independent. Queue admission requires composed
-adapters, without a fallback merge writer. Read-only status/receipt/probe reports
+adapters, without a fallback merge writer. The watcher advances the durable FIFO
+for a matching queue selector and route fence. Clean admission uses the exact
+reviewed head. Hammer admission binds the audit to the recorded launch and
+head before acknowledging. Unknown remote outcomes stay under the existing
+reconciliation boundary. Read-only status/receipt/probe reports
 pending transfers, original entry phases and actual runtime evidence; it never
 advances this state. The closure runbook owns the deployment procedure.
 
@@ -4249,3 +4314,11 @@ Source validation and normal PR publication do not establish organic activation.
 Observe a naturally conflicting published head reach repair before absent-CI
 waiting, followed by new-head hosted checks and normal merge authority; retain
 owner and publication receipts. Do not seize an existing owner to demonstrate it.
+
+## Change notes
+
+### DISPUTECURRENCY-01 — patch-equivalent prefix with an attributed suffix
+
+The shared review-currency reader keeps the findings applicable for fresh
+live-head adjudication when existing launch records account for every suffix
+commit. A superseding authoritative review still invalidates the citation.

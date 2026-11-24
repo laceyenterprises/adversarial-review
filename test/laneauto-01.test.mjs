@@ -331,13 +331,17 @@ test('exhausted pre-claim successor request reaches one real final-fix-all job t
 test('watcher persists and alerts a refused successor instead of losing the pre-claim cap handoff', async t => {
   const f = fixture(t), alerts = [];
   requestCloserSuccessor({ ...f.identity, reviewBody: BODY, source: 'follow-up-pre-claim-cap' });
-  f.args.handoffFinalFixAllImpl = async () => ({ action: 'fallback' });
+  const handoff = f.args.handoffFinalFixAllImpl;
+  f.args.handoffFinalFixAllImpl = async () => ({ action: 'hold', reason: 'final-fix-all-owner-busy' });
   f.args.observeClosureWaitImpl = async input => { alerts.push(input); return {}; };
   const result = await maybeDispatchAmaClosureFor(f.args);
-  assert.equal(result.reason, 'ownerless-closer-no-merge');
-  assert.equal(readCloserSuccessor(f.rootDir, f.identity).status, 'ownerless-closer-no-merge');
+  assert.equal(result.reason, 'needs-closer');
+  assert.equal(readCloserSuccessor(f.rootDir, f.identity).status, 'needs-closer');
   assert.equal(alerts.some(input => input.waitClass === 'closer-successor' && input.immediate), true);
   assert.deepEqual(f.effects, []);
+  f.args.handoffFinalFixAllImpl = handoff;
+  assert.equal((await maybeDispatchAmaClosureFor(f.args)).reason, 'successor-enrolled');
+  assert.equal(listFollowUpJobsInDir(f.rootDir, 'pending').length, 1);
 });
 
 
@@ -347,8 +351,26 @@ test('disabled AMA still records and alerts a pending cap successor refusal', as
   f.args.loadConfigImpl = () => ({ getMergeAuthorityConfig: () => ({ enabled: false }) });
   f.args.observeClosureWaitImpl = async input => { alerts.push(input); return {}; };
   const result = await maybeDispatchAmaClosureFor(f.args);
-  assert.equal(result.reason, 'ownerless-closer-no-merge');
+  assert.equal(result.reason, 'needs-closer');
   assert.equal(readCloserSuccessor(f.rootDir, f.identity).reason, 'successor-path-disabled');
   assert.equal(alerts.length, 1);
   assert.deepEqual(f.effects, []);
+});
+
+for (const strictMode of [true, false]) test(`spent successor fallback respects strict exact-head scope (strict=${strictMode})`, async t => {
+  const f = fixture(t);
+  requestCloserSuccessor({ ...f.identity, reviewBody: BODY, source: 'follow-up-pre-claim-cap' });
+  // Failed CI keeps both modes on the hammer route, isolating fallback policy.
+  f.args.candidate.statusCheckRollup[0].conclusion = 'FAILURE';
+  f.args.loadConfigImpl = () => ({ getMergeAuthorityConfig: () => ({ enabled: true, strictMode }) });
+  f.args.handoffFinalFixAllImpl = async () => ({ action: 'fallback', reason: 'final-fix-all-spent' });
+  const result = await maybeDispatchAmaClosureFor(f.args);
+  if (strictMode) {
+    assert.deepEqual(f.effects, ['closer']);
+    assert.equal(result.nextAction.action, 'hammer');
+  } else {
+    assert.deepEqual(f.effects, []);
+    assert.equal(result.reason, 'needs-closer');
+    assert.equal(readCloserSuccessor(f.rootDir, f.identity).reason, 'final-fix-all-spent');
+  }
 });

@@ -1,3 +1,4 @@
+import { formatPrimaryReversalReviewContext } from './ama/primary-reversal-review.mjs';
 import { parseReviewerBudgetDeferral, REVIEWER_GITHUB_BUDGET_DEFERRED } from './reviewer-github-budget.mjs';
 import { formatTenureReviewRange, readTenureReviewRange } from './pr-tenure.mjs';
 import { withRepositoryStateCycle } from './repository-state-lock.mjs';
@@ -856,6 +857,7 @@ async function spawnReviewerOnceWithAccount({
   pipelineGeminiSeats = 0,
   maxRemediationRounds,
   advisoryFindings = [],
+  primaryReversalReview,
   reviewerSessionUuid,
   reviewerTimeoutMs = null,
   workspacePath = null,
@@ -1042,6 +1044,7 @@ async function spawnReviewerOnceWithAccount({
         branch,
         builderTag,
         reviewerBuildId: REVIEWER_BUILD_ID,
+        ...(primaryReversalReview ? { primaryReversalReview: primaryReversalReview.scope } : {}),
         reviewerSessionUuid,
         reviewerModel,
         reviewAttemptNumber,
@@ -1081,7 +1084,7 @@ async function spawnReviewerOnceWithAccount({
       }
       const runtimeRequest = {
         model: reviewerModel,
-        prompt: tenurePrompt,
+        prompt: tenurePrompt + formatPrimaryReversalReviewContext(primaryReversalReview, reviewerHeadSha),
         subjectContext: {
           domainId,
           repo,
@@ -1100,6 +1103,7 @@ async function spawnReviewerOnceWithAccount({
           maxRemediationRounds,
           verdictOnly,
           advisoryFindings,
+          ...(primaryReversalReview ? { primaryReversalReview } : {}),
           reviewerSessionUuid,
           reviewerSpawnToken,
           crossModelReviewWaived,

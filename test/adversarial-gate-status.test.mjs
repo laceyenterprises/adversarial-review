@@ -1099,6 +1099,26 @@ test('publishAdversarialGateStatus skips duplicate decisions already recorded fo
   assert.equal(record.description, decision.description);
 });
 
+test('publishAdversarialGateStatus retains legacy docs withdrawal across status changes', async () => {
+  const records = new Map();
+  const identity = { repo: 'example/docs', prNumber: 7, headSha: 'withdrawn-head' };
+  let record = { ...identity, state: 'pending', reason: 'docs-fast-path-not-eligible' };
+  const publish = (headSha, reason) => publishAdversarialGateStatus('/virtual/root', {
+    ...identity, headSha, decision: { state: 'pending', reason, description: reason },
+    env: { GITHUB_TOKEN: 'fixture', PATH: '/usr/bin:/bin' },
+    execFileImpl: async () => ({ stdout: '{}', stderr: '' }),
+    mkdirImpl: () => {},
+    readRecordImpl: () => JSON.stringify(record),
+    writeRecordImpl: (file, content) => records.set(file, JSON.parse(content)),
+  });
+  const queued = await publish(identity.headSha, 'review-queued');
+  assert.equal(queued.record.docsFastPathWithdrawn, true);
+  record = queued.record;
+  const running = await publish(identity.headSha, 'review-in-progress');
+  assert.equal(running.record.docsFastPathWithdrawn, true);
+  assert.equal(records.size, 1);
+});
+
 test('publishAdversarialGateStatus sends byte-equivalent required fields through adapter mutation', async () => {
   const rootDir = mkdtempSync(path.join(tmpdir(), 'gate-status-adapter-'));
   const calls = [];

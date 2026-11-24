@@ -175,10 +175,16 @@ export function createQueueOwner({ store, now = () => new Date().toISOString(), 
         return { ok: true };
       }));
     },
-    release({ fence }) {
+    release({ fence, parkPending = false }) {
       return locked(fence.lane, lane => store.tx(() => {
         const at = queueTime(now()); store.assertFence(fence, at);
-        if (store.operations(lane).length) throw new Error('unreconciled queue operation');
+        if (store.operations(lane).length) {
+          if (!parkPending) throw new Error('unreconciled queue operation');
+          // Revoke the active fence while retaining the prior owner and intent
+          // for the next claimant's drain and outcome reconciliation.
+          park(lane, at, 'prior-operation-quiescence-unproven');
+          return { ok: true };
+        }
         db.prepare("UPDATE finalization_queue_lane SET owner_state='idle',owner_id=NULL WHERE repository=? AND base=?").run(...args(lane));
         store.append('owner-released', lane, { at, owner: store.readOwner(lane) });
         return { ok: true };

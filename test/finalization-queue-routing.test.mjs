@@ -309,7 +309,9 @@ test('HAMLANEWAIT-01: waking rechecks lane transfer and never invokes the old le
     syncBuiltinESMExports();
   });
   const flockSync = fsExt.flockSync;
-  t.mock.method(fsExt, 'flockSync', (...args) => {
+  t.mock.method(fsExt, 'flockSync', (fd, mode) => {
+    // Queue transactions also take a shared repository-state lock.
+    if (mode !== 'exnb') return flockSync(fd, mode);
     // Release at the next lock attempt after contention, independent of how
     // often routing or deadline bookkeeping reads the clock.
     if (refusals === 1 && release !== null) {
@@ -318,7 +320,7 @@ test('HAMLANEWAIT-01: waking rechecks lane transfer and never invokes the old le
       release = null;
     }
     try {
-      const result = flockSync(...args);
+      const result = flockSync(fd, mode);
       if (refusals > 0) {
         assert.equal(release, null, 'contended acquisition must follow holder release');
         recheckAcquisitions++;
@@ -361,9 +363,10 @@ test('HAMLANEWAIT-01: watcher wake rechecks the route after a pending wait', { t
   t.after(() => release?.());
   let refusals = 0, releasedAfterRecheck = false, wakeAcquisitions = 0;
   const flockSync = fsExt.flockSync;
-  t.mock.method(fsExt, 'flockSync', (...args) => {
+  t.mock.method(fsExt, 'flockSync', (fd, mode) => {
+    if (mode !== 'exnb') return flockSync(fd, mode);
     try {
-      const result = flockSync(...args);
+      const result = flockSync(fd, mode);
       if (releasedAfterRecheck) wakeAcquisitions++;
       return result;
     } catch (error) {

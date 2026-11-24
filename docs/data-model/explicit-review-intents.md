@@ -20,6 +20,7 @@ review reset. Existing actor/provenance checks remain at request boundaries.
 | `settled_at`, `reason` | Consumption/refusal time and refusal reason; coalesced receipts name the original request in `reason`. |
 | `reviewer_session_uuid` | Consuming review claim, set only by the claim/head/session CAS. |
 | `notified_at` | Successful waiting/refusal notice delivery; null retains notification debt across restart. Settlement clears an earlier waiting receipt so the terminal notice can be delivered. |
+| `context_json` | Nullable review context. A primary-change reversal receipt records its exact head, protected author head, region scope digest, and attributed regions. Existing rows read as null. |
 
 A partial unique index permits one pending receipt per `(repo, pr, head)`.
 Concurrent requests coalesce without changing the waiting threshold. A receipt
@@ -95,3 +96,13 @@ already-pending requests preserve both. The observer never requeues an old
 stopped job or changes its stop provenance or round budget. Labels applied
 before the gated review require removal and reapplication. No store shape or
 receipt lifecycle changes are introduced.
+
+The `primary-change-gate` actor uses `primary-reversal:<head_sha>`. Queue admission
+stores the context in the same transaction as the review reset and will wait
+for another pending intent rather than coalescing its proof. This single pass
+may run after the ordinary review cycle reaches its cap. The existing claim
+CAS and head freshness checks apply. The reviewer pass records the region scope
+digest in `metadata_json.primaryReversalReview`. Merge authority joins the
+consumed receipt to a completed pass and verifies its posted GitHub review ID,
+exact head, reviewer identity, verdict and current region scope before using
+its authorization. A spent receipt cannot queue another pass on that head.

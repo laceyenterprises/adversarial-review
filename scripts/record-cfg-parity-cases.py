@@ -8,6 +8,13 @@ Each case names YAML files written to a scratch directory (`config.yaml` is
 the top file), optional `modules` and `env`, and dotted keys to `get`. The
 script rewrites each case's `python` field with the loader's verdict, so the
 offline Node suite (test/config-cfg-parity.test.mjs) can assert agreement.
+
+The supplied JSON is also the input suite: cases are authored here, not
+imported from an upstream test list. Recording preserves all case inputs.
+Use a clean agent-os checkout and set the fixture's `source` to its full
+commit SHA after recording. For cases recorded against a newer revision,
+use a separate cfg-parity-cases.<name>.json and include it in the Node test
+so the older cases retain their original provenance.
 """
 
 import json
@@ -39,10 +46,15 @@ for case in doc["cases"]:
         try:
             cfg = load_config(
                 top_path=os.path.join(scratch, "config.yaml"),
-                module_paths=[os.path.join(scratch, m) for m in (case.get("modules") or [])],
+                module_paths=[
+                    os.path.join(scratch, m) for m in (case.get("modules") or [])
+                ],
                 env=env,
             )
-            case["python"] = {"ok": True, "values": {k: cfg.get(k) for k in (case.get("get") or [])}}
+            case["python"] = {
+                "ok": True,
+                "values": {k: cfg.get(k) for k in (case.get("get") or [])},
+            }
         except AgentOSConfigError as exc:
             case["python"] = {"ok": False, "key": exc.key}
 with open(path, "w", encoding="utf-8") as handle:

@@ -1,6 +1,7 @@
 import './helpers/load-aware-timeout-fixture.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { withoutConfigSchemaDiagnostics } from './helpers/config-schema-diagnostic.mjs';
 import { spawnSync } from 'node:child_process';
 
 import {
@@ -414,7 +415,7 @@ test('macOS one-shot CLI uses cold CPU corroboration with debug on or off', () =
     });
     assert.equal(result.status, 0, result.stderr);
     assert.equal(result.stdout, '784');
-    assert.equal(result.stderr, '');
+    assert.equal(withoutConfigSchemaDiagnostics(result.stderr), '');
   }
 });
 

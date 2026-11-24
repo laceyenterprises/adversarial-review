@@ -1584,11 +1584,21 @@
     "disk_reclaim": {
       "additionalProperties": false,
       "properties": {
+        "archive_ref_retention_days": {
+          "default": 30,
+          "minimum": 1,
+          "type": "integer"
+        },
         "dehydrate": {
           "additionalProperties": false,
           "properties": {
             "after_publish_hours": {
               "default": 2,
+              "minimum": 0,
+              "type": "integer"
+            },
+            "unreclaimable_recheck_hours": {
+              "default": 6,
               "minimum": 0,
               "type": "integer"
             }
@@ -9476,6 +9486,16 @@
               "minimum": 0,
               "type": "integer"
             },
+            "low_priority_max_wait_seconds": {
+              "default": 3600,
+              "minimum": 0,
+              "type": "integer"
+            },
+            "low_priority_reserved_slots": {
+              "default": 1,
+              "minimum": 0,
+              "type": "integer"
+            },
             "normal_priority_worker_rss_estimate_mb": {
               "default": 4000,
               "minimum": 0,
@@ -13791,6 +13811,11 @@
           "properties": {
             "anti_entropy_seconds": {
               "default": 3600,
+              "minimum": 1,
+              "type": "integer"
+            },
+            "shadow_gate_days": {
+              "default": 7,
               "minimum": 1,
               "type": "integer"
             }

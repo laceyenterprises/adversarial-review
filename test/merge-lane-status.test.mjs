@@ -101,6 +101,25 @@ test('terminal launch dirty worktree is ownerless; unreadable custody stays unkn
   assert.equal((await readBranchCustody('lrq-fixture', { readWorker: async () => ({ ok: false }) })).state, 'unknown');
 });
 
+test('journal captures only complete exact-head reviews known at observation time', async () => {
+  const head = 'a'.repeat(40), writes = [];
+  const review = { headSha: head.toUpperCase(), verdict: 'comment-only', postedAt: new Date(NOW).toISOString(),
+    nonBlockingFindingState: 'known', nonBlockingFindingCount: 1 };
+  for (const value of [review, { ...review, headSha: 'b'.repeat(40) },
+    { ...review, postedAt: new Date(NOW + 1).toISOString() }]) {
+    const shared = { snapshot: { observations: { reviews: { state: 'complete', value },
+      policy: { state: 'complete', value: { strictMode: true } } } },
+    decision: { head, action: 'daemon-merge', actor: 'daemon' } };
+    await captureMergeLaneObservation({ rootDir: 'unused', shared, repo: 'fixture/repo', prNumber: 1, observedMs: NOW,
+      write: (...args) => writes.push(args[2]) });
+  }
+  assert.equal(writes[0].strictMode, true);
+  assert.equal(writes[0].observedAtMs, NOW);
+  assert.deepEqual(writes.map(event => event.exactReview), [
+    { head, verdict: 'comment-only', postedAtMs: NOW, hasFindings: true }, null, null,
+  ]);
+});
+
 test('both journals rotate within the byte bound; malformed records do not become healthy evidence', t => {
   const root = mkdtempSync(join(tmpdir(), 'merge-lane-'));
   t.after(() => rmSync(root, { recursive: true, force: true }));

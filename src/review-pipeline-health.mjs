@@ -8,6 +8,7 @@ import { loadAwareTimeoutMs } from './load-aware-timeout.mjs';
 import { resolveHqRoot } from './hq-root.mjs';
 import { meteredExecFileSync } from './metered-gh.mjs';
 import { excludingHeldOpenRows, isOperatorHeld, readHeldOpenPrCount } from './operator-hold-labels.mjs';
+import { routedPendingReviewSql } from './review-queue-depth.mjs';
 import Database from 'better-sqlite3';
 import { listPipelineOpenPrs, readPipelineGithub } from './pipeline-health-github.mjs';
 import { collectDagAutowalkHealth } from './dag-autowalk-health.mjs';
@@ -2427,7 +2428,7 @@ function summarizeFirstPassQueue(db, { nowMs, stoppedCiRegressionJobs = null }) 
             ) AS current_head_rereview_claim_starts
        FROM reviewed_prs
       WHERE COALESCE(pr_state, 'open') = 'open'
-        AND review_status = 'pending'`
+        AND review_status = 'pending' AND ${routedPendingReviewSql(db)}`
   );
   let oldest = null;
   let oldestFirstPass = null;
@@ -2893,7 +2894,7 @@ function summarizeDeferredRereviews(db, followUpJobs, { nowMs, stoppedCiRegressi
             ) AS latest_rereview_metadata_json
        FROM reviewed_prs
       WHERE COALESCE(pr_state, 'open') = 'open'
-        AND review_status = 'pending'`
+        AND review_status = 'pending' AND ${routedPendingReviewSql(db)}`
   );
   const prs = [];
   for (const row of rows) {
@@ -2979,7 +2980,7 @@ function summarizeQueuedRereviews(db, followUpJobs, { nowMs, stoppedCiRegression
             ) AS reviewer_claim_starts
        FROM reviewed_prs
       WHERE COALESCE(pr_state, 'open') = 'open'
-        AND review_status = 'pending'
+        AND review_status = 'pending' AND ${routedPendingReviewSql(db)}
       ORDER BY COALESCE(NULLIF(rereview_requested_at, ''), failed_at, last_attempted_at, reviewed_at, posted_at) ASC,
                repo ASC,
                pr_number ASC`

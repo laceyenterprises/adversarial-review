@@ -242,15 +242,19 @@ export function derivePostedReviewExpensiveStepBudgetMs(
   return Math.max(1, Math.floor(availableForStepsMs / effectiveStepCount));
 }
 
+function hasRoutedReviewRow(entry) {
+  return Boolean(entry?.current && entry.current.reviewer !== '');
+}
+
 /**
- * Stable partition: subjects with no review row first, everything else after, each
- * group keeping its incoming relative order.
+ * Stable partition: subjects without a routed review row first, each group
+ * keeping its incoming relative order.
  *
  * `hasReviewRow` is injected rather than reading SQLite here so this stays a pure,
  * cheaply-testable ordering decision.
  */
 export function orderSubjectEntriesDiscoveryFirst(entries, {
-  hasReviewRow,
+  hasReviewRow = hasRoutedReviewRow,
   repoPath = null,
   logger = console,
 } = {}) {
@@ -294,7 +298,7 @@ function pendingRereviewRequestedAt(entry) {
  * Stable partition for within-lane re-review fairness.
  *
  * Pending re-review rows are reviewer work the pipeline has already promised.
- * Walk them oldest-first without undoing the no-row first-pass promotion that
+ * Walk them oldest-first without undoing the unrouted first-pass promotion that
  * orderSubjectEntriesDiscoveryFirst already applied. Posted rows follow.
  */
 export function orderSubjectEntriesRereviewOldestFirst(entries, {
@@ -307,7 +311,7 @@ export function orderSubjectEntriesRereviewOldestFirst(entries, {
   const rereviews = [];
   const rest = [];
   entries.forEach((entry, index) => {
-    if (!entry?.current) {
+    if (!hasRoutedReviewRow(entry)) {
       undiscovered.push(entry);
       return;
     }

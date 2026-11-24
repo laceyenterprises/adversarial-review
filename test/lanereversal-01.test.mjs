@@ -104,6 +104,63 @@ function assertGates(evidence, eligible, strict = true) {
   }
 }
 
+test('PRIMARYLANEPROV-01: a closer reversal uses the review of the lane head and covers all inserted content', async t => {
+  const rootDir = mkdtempSync(join(tmpdir(), 'reviewed-lane-head-'));
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  const laneHead = 'd'.repeat(40);
+  const file = 'src/preview.mjs';
+  const insertion = { filename: file, status: 'modified', additions: 4, deletions: 0,
+    patch: '@@ -9,0 +10,4 @@\n+\n+enablePreview();\n+recordPreview();\n+ \t' };
+  const laneFile = { filename: 'src/lane.mjs', status: 'added', additions: 1, deletions: 0,
+    patch: '@@ -0,0 +1 @@\n+export const ready = true;' };
+  const builder = { sha: PRIMARY, parents: [{ sha: BASE }], commit: { message: 'Add preview' } };
+  const lane = { sha: laneHead, parents: [{ sha: PRIMARY }],
+    commit: { message: `Prepare preview\n\nWorker-Class: codex-remediation\nWorker-Job-Id: ${JOB}\nReviewed-Head: ${PRIMARY}\nReversal-Authorized-By: PRR_older finding=1 kind=non-blocking` } };
+  for (const [name, { path = file, lines = '11-12', login = 'lacey-claude-reviewer[bot]',
+    reviewedHead = laneHead, cite = true, eligible = false, reason }] of Object.entries({
+    'adjacent blanks are outside the cited content': { eligible: true },
+    'adjacent nonblank content is outside the citation': { lines: '11', reason: 'not-covered-by-cited-finding' },
+    'the cited path differs': { path: 'src/other.mjs', reason: 'not-covered-by-cited-finding' },
+    'the closer has no citation': { cite: false },
+    'the reviewer is unknown': { login: 'untrusted-reviewer[bot]', reason: 'review-not-current' },
+    'the review head is outside the closer ancestry': { reviewedHead: 'e'.repeat(40), reason: 'review-not-current' },
+  })) await t.test(name, async () => {
+    const ham = { sha: HEAD, parents: [{ sha: laneHead }],
+      author: { login: 'the-hammer-lacey[bot]' }, committer: { login: 'the-hammer-lacey[bot]' },
+      commit: { message: ['Remove unused preview', '', 'Worker-Class: hammer', 'Worker-Ticket: HAM',
+        `Reviewed-Head: ${reviewedHead}`, ...(cite ? ['Reversal-Authorized-By: PRR_preview finding=1 kind=non-blocking'] : [])].join('\n') },
+      files: [{ ...insertion, additions: 0, deletions: 4,
+        patch: '@@ -10,4 +9,0 @@\n-\n-enablePreview();\n-recordPreview();\n- \t' }] };
+    const review = { node_id: 'PRR_preview', commit_id: reviewedHead, state: 'COMMENTED', user: { login },
+      body: `## Non-blocking issues\n- **Unused preview**\n  - **File:** \`${path}\`\n  - **Lines:** \`${lines}\`\n  - **Problem:** Preview is unreachable.\n  - **Recommended fix:** Remove preview calls.\n\n## Verdict\nComment only` };
+    const get = async endpoint => {
+      if (endpoint.endsWith('/pulls/7')) return { base: { sha: BASE }, head: { sha: HEAD } };
+      if (endpoint.includes('/reviews?')) return [review];
+      if (endpoint.endsWith(`/commits/${laneHead}`)) return lane;
+      if (endpoint.endsWith(`/commits/${HEAD}`)) return ham;
+      const [from, to] = endpoint.split('/compare/')[1].split('...');
+      return { status: from === to ? 'identical' : from === reviewedHead && from !== laneHead ? 'behind' : 'ahead',
+        merge_base_commit: { sha: BASE },
+        files: to === PRIMARY ? [insertion] : to === laneHead ? [insertion, laneFile] : [laneFile],
+        ...(from === BASE && to === HEAD ? { total_commits: 3, commits: [builder, lane, ham] } : {}) };
+    };
+    const identityReads = [];
+    const evidence = await fetchPrimaryChange({ repo: REPO, prNumber: 7, headSha: HEAD, rootDir, get,
+      readLaneIdentityImpl: ({ currentHeadSha }) => { identityReads.push(currentHeadSha); return null; } },
+    { fetchCiCostImpl: async () => ({ ok: true, headSha: HEAD }) });
+    assert.deepEqual(identityReads, []);
+    assert.equal(evidence.primaryHead, PRIMARY);
+    assert.deepEqual(evidence.rejectedReversalAuthorizations[0], {
+      commit: laneHead, review: 'PRR_older', finding: 1, kind: 'non-blocking', reason: 'lane-commit-provenance',
+    });
+    assertGates(evidence, eligible);
+    if (reason) {
+      const reversal = checkPrimaryChange(evidence, HEAD, { strictNonBlockingRemediation: true });
+      assert.ok(reversal.missingEvidence.rejected.some(entry => entry.commit === HEAD && entry.reason === reason));
+    }
+  });
+});
+
 for (const bucket of ['in-progress', 'completed', 'stopped-archived/fixture-date']) {
   test(`attested fix-all owner in ${bucket} authorizes a cited reversal at both gates after clean re-review`, async t => {
     const f = fixture(t, { bucket });

@@ -36,11 +36,12 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { maybeRunDocsFastPath } from '../src/docs-fast-path.mjs';
+import { projectAdversarialGateStatus, publishAdversarialGateStatus, readGateRecord } from '../src/adversarial-gate-status.mjs';
 import { runDaemonCleanMergeAttempt } from '../src/daemon-clean-merge.mjs';
 import { emitDocsFastPathAttestation } from '../src/reviewed-attestation.mjs';
 import { isEligibleForAmaClosure } from '../src/ama/eligibility.mjs';
 import { readAmaAuditEntry } from '../src/ama/audit.mjs';
-import { inspectMergeLease } from '../src/ama/merge-lease.mjs';
+import { acquireMergeLease, inspectMergeLease } from '../src/ama/merge-lease.mjs';
 import { docsReviewRequested } from '../src/docs-only.mjs';
 import { fastMergeDecisionFromLabels, fastMergeFileMatchesCategory } from '../src/adapters/subject/github-pr/fast-merge.mjs';
 
@@ -52,8 +53,9 @@ test('DOCSFASTPATH-01 merge uses the daemon lease, green exact head and recorded
   const rootDir = mkdtempSync(join(tmpdir(), 'docs-fast-path-'));
   t.after(() => rmSync(rootDir, { recursive: true, force: true }));
   let merged = 0, attested = 0, rollupReads = 0;
-  const published = [], comparedRanges = [];
+  const published = [], comparedRanges = [], daemonResults = [];
   let scenario = 'green';
+  let leaseClockOffset = 0;
   const repoPath = 'example/docs-service';
   let prNumber = 2;
   const cfg = { enabled: true, strictMode: true, autonomousMergeExecutionEnabled: true,
@@ -61,13 +63,17 @@ test('DOCSFASTPATH-01 merge uses the daemon lease, green exact head and recorded
   const subject = { headSha: head, labels: [], state: 'open' };
   const runDaemonImpl = args => runDaemonCleanMergeAttempt({ ...args,
     env: { HQ_ROOT: rootDir }, logger: quiet,
+    acquireMergeLeaseImpl: options => acquireMergeLease({ ...options,
+      now: new Date(Date.parse(options.now) + leaseClockOffset).toISOString() }),
     fetchRollupImpl: async () => { rollupReads++; return {
       headSha: scenario === 'moved' && rollupReads > 1 ? 'f'.repeat(40) : head,
       title: 'Document the service', body: '', state: 'OPEN', labels: [],
-      mergeable: scenario === 'conflict' || (scenario === 'live-conflict' && rollupReads > 1)
+      mergeable: scenario === 'mergeability-unknown' ? 'UNKNOWN'
+        : scenario === 'conflict' || (scenario === 'live-conflict' && rollupReads > 1)
         ? 'CONFLICTING' : 'MERGEABLE', mergeStateStatus: 'CLEAN',
-      checks: [{ name: 'ci', status: 'COMPLETED', conclusion: scenario === 'red'
-        || (scenario === 'live-red' && rollupReads > 1) ? 'FAILURE' : 'SUCCESS' },
+      checks: [{ name: 'ci', ...(scenario === 'pending-ci' || (scenario === 'live-pending-ci' && rollupReads > 1)
+        ? { status: 'IN_PROGRESS' } : { status: 'COMPLETED', conclusion: scenario === 'red'
+          || (scenario === 'live-red' && rollupReads > 1) ? 'FAILURE' : 'SUCCESS' }) },
         { context: 'agent-os/adversarial-gate', state: 'SUCCESS' }],
     }; },
     fetchPrimaryChangeImpl: async ({ headSha }) => ({ headSha, hasHammerCommits: false,
@@ -101,20 +107,49 @@ test('DOCSFASTPATH-01 merge uses the daemon lease, green exact head and recorded
   const run = () => maybeRunDocsFastPath({ rootDir, repoPath, prNumber, cfg, subject, logger: quiet,
     readDocsFastPathImpl: async () => evidence,
     publishStatusImpl: async (_root, { decision }) => { published.push(decision.state); },
-    fetchProtectionImpl: async () => ({ requiredContexts: ['ci', 'agent-os/adversarial-gate'] }), runDaemonImpl });
+    fetchProtectionImpl: async () => ({ requiredContexts: ['ci', 'agent-os/adversarial-gate'] }),
+    runDaemonImpl: async args => {
+      const result = await runDaemonImpl(args);
+      daemonResults.push(result);
+      return result;
+    } });
   for (scenario of ['red', 'conflict', 'live-red', 'live-conflict', 'moved', 'attestation-outage', 'late-review', 'retarget', 'base-non-docs']) {
     rollupReads = 0; prNumber++;
     const priorAttested = attested;
-    assert.equal(await run(), scenario !== 'late-review', scenario);
+    const handled = await run();
+    const normalReview = ['red', 'conflict', 'live-red', 'live-conflict', 'late-review'].includes(scenario);
+    if (scenario === 'red') {
+      assert.equal(daemonResults.at(-1).reason, 'not-eligible');
+      assert.ok(daemonResults.at(-1).reasons.includes('ci-not-green'));
+    }
+    assert.equal(Boolean(handled), !normalReview, scenario);
     assert.equal(merged, 0, scenario);
     assert.equal(attested - priorAttested, scenario === 'attestation-outage' ? 1 : 0, scenario);
-    assert.equal(published.at(-1), scenario === 'late-review' ? 'pending' : 'success', scenario);
+    assert.equal(published.at(-1), normalReview ? 'pending' : 'success', scenario);
     assert.equal(inspectMergeLease({ rootDir, repo: repoPath, base: 'main' }).lease, null, scenario);
+  }
+  for (const unsettled of ['pending-ci', 'mergeability-unknown', 'live-pending-ci']) {
+    scenario = unsettled;
+    rollupReads = 0; prNumber++;
+    const priorMerged = merged;
+    const priorAttested = attested;
+    const priorPublished = published.length;
+    assert.equal(await run(), unsettled === 'live-pending-ci' ? 'gate-read-failed' : 'not-eligible', unsettled);
+    assert.equal(daemonResults.at(-1).permanent, unsettled === 'live-pending-ci' ? false : undefined);
+    assert.equal(merged, priorMerged);
+    assert.equal(attested, priorAttested);
+    assert.deepEqual(published.slice(priorPublished), ['success']);
+    scenario = 'green';
+    rollupReads = 0;
+    leaseClockOffset = unsettled === 'live-pending-ci' ? 30_000 : 0;
+    assert.equal(await run(), 'terminal', unsettled);
+    leaseClockOffset = 0;
+    assert.equal(merged, priorMerged + 1, unsettled);
   }
   for (scenario of ['green', 'base-advanced']) {
     rollupReads = 0; prNumber++;
     const priorMerged = merged;
-    assert.equal(await run(), true);
+    assert.equal(await run(), 'terminal');
     assert.equal(merged, priorMerged + 1);
     const audit = readAmaAuditEntry(rootDir, repoPath, prNumber, head);
     assert.equal(audit.closureAuthority, 'docs-fast-path');
@@ -162,8 +197,8 @@ test('DOCSFASTPATH-01 merge uses the daemon lease, green exact head and recorded
   assert.equal('attestation_id' in recorded, false);
   assert.equal('recorded_at' in recorded, false);
   cfg.autonomousMergeExecutionEnabled = false;
-  assert.equal(await run(), true);
-  assert.equal(merged, 2);
+  assert.equal(await run(), 'docs-merge-disabled');
+  assert.equal(merged, 5);
 });
 
 test('DOCSFASTPATH-01 request-review and operator requests select the full path, including a late request', async () => {
@@ -174,15 +209,15 @@ test('DOCSFASTPATH-01 request-review and operator requests select the full path,
     runDaemonImpl: async () => { calls++; return { disposition: 'deferred' }; } };
   let configReads = 0;
   assert.equal(await maybeRunDocsFastPath({ ...args, readDocsFastPathImpl: async () => null,
-    loadCfg: () => { configReads++; return args.cfg; } }), false);
+    loadCfg: () => { configReads++; return args.cfg; } }), null);
   assert.equal(configReads, 0, 'ordinary heads add no configuration read');
-  assert.equal(await maybeRunDocsFastPath(args), true);
+  assert.equal(await maybeRunDocsFastPath(args), 'deferred');
   for (const overrides of [
     { subject: { ...args.subject, labels: ['request-review'] } },
     { subject: { ...args.subject, labels: ['retrigger-review'] } },
     { subject: { ...args.subject, requested_reviewers: [{ login: 'example-reviewer' }] } },
     { reviewRow: { rereview_reason: 'retrigger-review: operator requested review' } },
-  ]) assert.equal(await maybeRunDocsFastPath({ ...args, ...overrides }), false);
+  ]) assert.equal(await maybeRunDocsFastPath({ ...args, ...overrides }), null);
   assert.equal(calls, 1);
   assert.equal(docsReviewRequested({ labels: [], requested_teams: [{ slug: 'example-team' }] }), true);
   // The former label-only docs waiver must not route instructions around review.
@@ -199,7 +234,7 @@ test('DOCSFASTPATH-01 prior waiver is withdrawn before admission hands an explic
     cfg: { enabled: true }, logger: quiet, readDocsFastPathImpl: async () => evidence,
     publishStatusImpl: async (_root, status) => { statuses.push(status); },
     fetchProtectionImpl: async () => ({}), runDaemonImpl: async () => { daemonCalls++; } };
-  assert.equal(await maybeRunDocsFastPath(args), true);
+  assert.equal(await maybeRunDocsFastPath(args), 'docs-merge-deferred');
   assert.equal(statuses.at(-1).decision.state, 'success');
   for (const override of [
     { subject: { ...args.subject, labels: ['request-review'] } },
@@ -211,7 +246,7 @@ test('DOCSFASTPATH-01 prior waiver is withdrawn before admission hands an explic
     { readReviewRow: () => ({ rereview_reason: 'retrigger-review: operator requested review' }) },
   ]) {
     const before = statuses.length;
-    assert.equal(await maybeRunDocsFastPath({ ...args, ...override }), false);
+    assert.equal(await maybeRunDocsFastPath({ ...args, ...override }), null);
     assert.equal(statuses.length, before + 1);
     assert.equal(statuses.at(-1).headSha, head);
     assert.equal(statuses.at(-1).decision.state, 'pending');
@@ -219,9 +254,99 @@ test('DOCSFASTPATH-01 prior waiver is withdrawn before admission hands an explic
     assert.equal(daemonCalls, 1, 'review-request admission cannot merge');
   }
   assert.equal(await maybeRunDocsFastPath({ ...args, subject: { ...args.subject, labels: ['request-review'] },
-    publishStatusImpl: async () => { throw new Error('status service unavailable'); } }), true,
+    publishStatusImpl: async () => { throw new Error('status service unavailable'); } }), 'docs-waiver-withdrawal-unavailable',
   'failed withdrawal owns the wait until the waiver can be withdrawn');
   assert.equal(daemonCalls, 1);
+});
+
+test('REVIEWROWLESS-01 settled refusal hands the head to review while routing waits', async () => {
+  const receipts = new Map(), states = [];
+  let currentEvidence = evidence, daemonCalls = 0, classificationReads = 0;
+  const args = { rootDir: '/unused', subject: { headSha: head, labels: [] }, repoPath: 'example/docs', prNumber: 6,
+    cfg: { enabled: true }, logger: quiet,
+    readDocsFastPathImpl: async () => { classificationReads++; return currentEvidence; },
+    readGateRecordImpl: (_root, { headSha }) => receipts.get(headSha),
+    publishStatusImpl: async (_root, { headSha, decision }) => {
+      states.push(decision.state);
+      receipts.set(headSha, decision);
+    },
+    fetchProtectionImpl: async () => ({}), runDaemonImpl: async () => {
+      daemonCalls++;
+      return { docsReviewRequired: currentEvidence.headSha === head };
+    } };
+  assert.equal(await maybeRunDocsFastPath(args), null);
+  const reviewRow = { reviewer: '', revision_ref: head, failure_message: '[reviewer-capacity] owner=watcher' };
+  assert.equal(await maybeRunDocsFastPath({ ...args, reviewRow }), null);
+  assert.equal(await maybeRunDocsFastPath({ ...args, reviewRow,
+    subject: { ...args.subject, labels: ['request-review'] } }), null);
+  assert.equal(receipts.get(head).reason, 'docs-fast-path-not-eligible');
+  assert.equal(classificationReads, 1);
+  assert.deepEqual(states, ['success', 'pending']);
+  assert.equal(daemonCalls, 1);
+  currentEvidence = { ...evidence, headSha: 'f'.repeat(40) };
+  assert.equal(await maybeRunDocsFastPath({ ...args, reviewRow: { ...reviewRow, revision_ref: currentEvidence.headSha }, subject: {
+    ...args.subject, headSha: currentEvidence.headSha,
+  } }), 'docs-merge-deferred');
+  assert.deepEqual(states, ['success', 'pending', 'success']);
+  assert.equal(daemonCalls, 2);
+});
+
+test('queued-review projection keeps a withdrawn docs waiver pending across drained polls', async t => {
+  const rootDir = mkdtempSync(join(tmpdir(), 'docs-withdrawal-projection-'));
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  const identity = { repo: 'example/docs', prNumber: 7, headSha: head };
+  const env = { GITHUB_TOKEN: 'fixture', PATH: '/usr/bin:/bin' };
+  const statuses = [];
+  const execFileImpl = async (_command, args) => {
+    statuses.push(args.find(arg => arg.startsWith('state=')));
+    return { stdout: '{}', stderr: '' };
+  };
+  let daemonCalls = 0;
+  const args = { rootDir, repoPath: identity.repo, prNumber: identity.prNumber, execFileImpl,
+    subject: { headSha: head, labels: [] }, cfg: { enabled: true }, logger: quiet,
+    readDocsFastPathImpl: async () => evidence, fetchProtectionImpl: async () => ({}),
+    publishStatusImpl: (root, status) => publishAdversarialGateStatus(root, { ...status, env }),
+    runDaemonImpl: async () => { daemonCalls++; return { docsReviewRequired: true }; } };
+  assert.equal(await maybeRunDocsFastPath(args), null);
+  const reviewRow = { reviewer: '', revision_ref: head, review_status: 'pending',
+    failure_message: '[watcher-drain] owner=watcher-operator' };
+  for (const reviewer of ['', null, undefined]) {
+    const unrouted = { ...reviewRow, reviewer };
+    if (reviewer === undefined) delete unrouted.reviewer;
+    for (let tick = 0; tick < 2; tick++) {
+      assert.equal(await maybeRunDocsFastPath({ ...args, reviewRow: unrouted }), null);
+      const projected = await projectAdversarialGateStatus(rootDir, { ...identity, reviewRow: unrouted, execFileImpl, env });
+      assert.equal(projected.decision.reason, 'docs-fast-path-not-eligible');
+    }
+  }
+  assert.equal(daemonCalls, 1);
+  assert.deepEqual(statuses, ['state=success', 'state=pending']);
+
+  const routed = await projectAdversarialGateStatus(rootDir, {
+    ...identity, reviewRow: { ...reviewRow, reviewer: 'claude' }, execFileImpl, env,
+  });
+  assert.equal(routed.decision.reason, 'review-queued');
+  assert.equal(routed.publish.posted, true);
+  assert.equal(routed.publish.record.docsFastPathWithdrawn, true);
+
+  // Running status and a later routing reset must not resurrect this head's waiver.
+  await projectAdversarialGateStatus(rootDir, { ...identity,
+    reviewRow: { ...reviewRow, reviewer: 'claude', review_status: 'reviewing' }, execFileImpl, env });
+  for (const reviewer of ['', null, undefined]) {
+    const unrouted = { ...reviewRow, reviewer };
+    await projectAdversarialGateStatus(rootDir, { ...identity, reviewRow: unrouted, execFileImpl, env });
+    assert.equal(readGateRecord(rootDir, identity).docsFastPathWithdrawn, true);
+    assert.equal(await maybeRunDocsFastPath({ ...args, reviewRow: unrouted }), null);
+  }
+  assert.equal(daemonCalls, 1);
+
+  const movedHead = 'f'.repeat(40);
+  assert.equal(await maybeRunDocsFastPath({ ...args,
+    subject: { ...args.subject, headSha: movedHead },
+    reviewRow: { ...reviewRow, revision_ref: movedHead },
+    readDocsFastPathImpl: async () => ({ ...evidence, headSha: movedHead }),
+  }), null);
+  assert.equal(daemonCalls, 2, 'a new head gets an independent fast-path attempt');
 });
 
 test('DOCSFASTPATH-01 reader delegates live labels and retains row requests after discovery', async () => {
@@ -241,7 +366,7 @@ test('DOCSFASTPATH-01 reader delegates live labels and retains row requests afte
       row = { rereview_reason: 'retrigger-review: operator requested review' };
       assert.equal((await readDocsFastPathImpl({ live: false })).reviewRequested, true);
       return { liveGate: { docsFastPath: { reviewRequested: true } } };
-    } }), false);
+    } }), null);
   assert.equal(liveReads, 1);
   assert.deepEqual(statuses, ['success', 'pending']);
 });

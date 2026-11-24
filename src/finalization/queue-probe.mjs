@@ -177,7 +177,7 @@ export function probeQueueOwner({ rootDir = resolve(moduleDir, '../..'), now = n
       result.shadow = { mode: queue?.mode ?? adapter.mode, consumer: queue?.consumer ?? null,
         lastObservationAt: latest?.observed_at ?? null, lastObservationUnknown: queue?.error != null,
         noMutation: true, ...counts, organicEvidence: latest ? 'observed' : 'pending',
-        composition: 'explicit-consumer-required; no production routing installed' };
+        composition: 'explicit shadow observer; independent of queue execution' };
       result.capabilities.shadow = { available: true, adapter: adapter.name, schema: '20261028_finalization_queue_shadow' };
     } catch { result.capabilities.shadow.reason = 'shadow-store-or-read-adapter-unavailable'; }
     try {
@@ -189,7 +189,7 @@ export function probeQueueOwner({ rootDir = resolve(moduleDir, '../..'), now = n
       const adapter = resolveQueueRoutingStore({ db });
       result.observations.routing = { lanes: lanes.map(lane => ({ ...resolveLaneRoute(config, lane), ...adapter.read(lane) })),
         organicRoutingObserved: lanes.some(lane => adapter.read(lane).route?.runtime != null),
-        composition: 'queue admission/execution adapters must be composed before promotion; uncomposed routes refuse execution' };
+        composition: 'queue execution requires matching selector and durable transfer; verify loaded writers separately' };
       result.capabilities.routing = { available: true, adapter: adapter.name, schema: '20261029_finalization_queue_routing',
         selector: 'roles.adversarial.merge_authority.lane_routes', defaultExecutor: 'legacy' };
     } catch { result.capabilities.routing.reason = 'routing-store-config-or-adapter-unavailable'; }

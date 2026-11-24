@@ -123,11 +123,12 @@ function appendLaneCommit(f, message, suffix = 'first') {
   return sha;
 }
 
-function recordLanePublication(f, sha, worker = { model: 'codex', launchRequestId: laneJob }) {
+function recordLanePublication(f, sha, worker = { model: 'codex', launchRequestId: laneJob }, jobFields = {}) {
   const dir = join(f.dir, 'data', 'follow-up-jobs', 'completed');
   mkdirSync(dir, { recursive: true });
   writeFileSync(join(dir, `${laneJob}.json`), JSON.stringify({
     repo, prNumber, kind: 'adversarial-review-follow-up', status: 'completed', jobId: laneJob,
+    ...jobFields,
     remediationPlan: { rounds: [{
       state: 'completed', startHeadSha: f.a, resultingHeadSha: sha,
       worker: { state: 'completed', ...worker }, completion: { workerPushedHeadSha: sha },
@@ -158,11 +159,62 @@ for (const scenario of ['attributed', 'unattributed', 'changed-prefix', 'newer-r
       assert.equal((await dispute).headSha, head, 'requires fresh evidence after a lane commit');
       assert.equal(f.posted.length, 2, 'does not reuse the withdrawal from the reviewed head');
     } else {
-      await assert.rejects(dispute, { phaseOutcome: 'dispute-review-currency-unproven' });
+      await assert.rejects(dispute, error => {
+        assert.equal(error.phaseOutcome, 'dispute-review-currency-unproven');
+        assert.match(error.message, /latest authoritative review applicable to the live head/);
+        return true;
+      });
       assert.equal(f.posted.length, 1);
     }
   });
 }
+
+for (const key of ['replyStorageKey', 'launchRequestId']) {
+  test(`DISPUTECURRENCY-01: local launch binds to persisted ${key}, not jobId`, async t => {
+    const f = await fixture(t);
+    const head = appendLaneCommit(f, `Repair\n\nWorker-Class: codex-remediation\nWorker-Job-Id: ${laneJob}`);
+    let reads = 0;
+    const currency = () => createReviewCurrencyReader({ repo, prNumber, rootDir: f.dir, get: f.get, git: f.git,
+      readHeadAttestations: async () => { reads++; throw new Error('local workers need no attestation'); } });
+    const worker = { model: 'codex', launchRequestId: 'local_reply_key', dispatchMode: 'local' };
+    // replyStorageKey takes precedence even when an older launch ID exists.
+    const fields = key === 'replyStorageKey'
+      ? { launchRequestId: 'older_launch', replyStorageKey: worker.launchRequestId }
+      : { launchRequestId: worker.launchRequestId };
+    recordLanePublication(f, head, worker, fields);
+    assert.equal((await currency()(f.a, head)).proof, 'reviewed-rebase-lane-suffix');
+    recordLanePublication(f, head, { ...worker, launchRequestId: 'foreign_launch' }, fields);
+    assert.equal((await currency()(f.a, head)).current, false);
+    assert.equal(reads, 0, 'a mismatched local receipt cannot fall through to attestation authority');
+  });
+}
+
+for (const order of ['HAM then lane', 'lane then HAM']) {
+  test(`DISPUTECURRENCY-01: mixed suffix ${order} fails closed`, async t => {
+    const f = await fixture(t, { remediation: order === 'HAM then lane' });
+    const lane = appendLaneCommit(f, `Repair\n\nWorker-Class: codex-remediation\nWorker-Job-Id: ${laneJob}`);
+    recordLanePublication(f, lane);
+    let head = lane;
+    if (order === 'lane then HAM') {
+      const message = `Hammer repair\n\nWorker-Class: hammer\nWorker-Ticket: HAM\nReviewed-Head: ${f.a}\nClosed-By: hammer (adversarial-pipe-mode)`;
+      head = appendLaneCommit(f, message, 'hammer');
+      f.authenticatedCommits.set(head, { sha: head, author: { login: 'hammer-worker' }, commit: { message } });
+    }
+    const currency = createReviewCurrencyReader({ repo, prNumber, rootDir: f.dir, get: f.get, git: f.git });
+    assert.equal((await currency(f.a, head)).current, false);
+    assert.equal((await currency(f.a, head, { rebaseOnly: true })).current, false);
+  });
+}
+
+test('DISPUTECURRENCY-01: a tip-only remediation receipt cannot cover intermediate commits', async t => {
+  const f = await fixture(t);
+  const message = `Repair\n\nWorker-Class: codex-remediation\nWorker-Job-Id: ${laneJob}`;
+  appendLaneCommit(f, message);
+  const head = appendLaneCommit(f, message, 'second');
+  recordLanePublication(f, head);
+  const currency = createReviewCurrencyReader({ repo, prNumber, rootDir: f.dir, get: f.get, git: f.git });
+  assert.equal((await currency(f.a, head)).current, false);
+});
 
 test('DISPUTECURRENCY-01: HQ remediation receipt requires its own verified launch', async t => {
   const f = await fixture(t, { twoPatches: true });
@@ -179,6 +231,32 @@ test('DISPUTECURRENCY-01: HQ remediation receipt requires its own verified launc
   assert.equal((await currency()(f.a, head)).proof, 'reviewed-rebase-lane-suffix');
 });
 
+for (const failure of ['transient read', 'missing verifier', 'subject mismatch', 'invalid signature']) {
+  test(`DISPUTECURRENCY-01: missing proof diagnoses ${failure}`, async t => {
+    const f = await fixture(t);
+    const head = appendLaneCommit(f, `Repair\n\nWorker-Class: codex-remediation\nWorker-Job-Id: ${laneJob}`);
+    const worker = { workerClass: 'remediator-codex', launchRequestId: 'lrq_fixture', dispatchMode: 'hq' };
+    recordLanePublication(f, head, worker);
+    const currency = createReviewCurrencyReader({ repo, prNumber, rootDir: f.dir, get: f.get, git: f.git,
+      readHeadAttestations: async () => {
+        if (failure === 'transient read') throw Object.assign(new Error('timed out'), { code: 'ETIMEDOUT' });
+        if (failure === 'missing verifier') throw new Error('verifier key unavailable');
+        return [{ repo, pr_number: failure === 'subject mismatch' ? prNumber + 1 : prNumber,
+          head_sha: head, kind: 'produced', valid: failure !== 'invalid signature',
+          payload: { launch_request_id: worker.launchRequestId, worker_class: worker.workerClass } }];
+      } });
+    const result = await currency(f.a, head);
+    assert.equal(result.current, false);
+    assert.ok(result.missingProof.includes(`lane publication ${head}:`));
+    const expected = { 'transient read': /head-attestation-chain-read-failed \(transient\)/,
+      'missing verifier': /head-attestation-chain-read-failed/,
+      'subject mismatch': /produced-attestation-subject-mismatch/,
+      'invalid signature': /invalid-produced-head-attestation/ };
+    assert.match(result.missingProof, expected[failure]);
+    if (failure !== 'transient read') assert.doesNotMatch(result.missingProof, /\(transient\)/);
+  });
+}
+
 test('DISPUTECURRENCY-01: in-place update requires a launch attestation and a round for each suffix commit', async t => {
   const f = await fixture(t, { twoPatches: true });
   const first = appendLaneCommit(f, 'First update');
@@ -189,8 +267,8 @@ test('DISPUTECURRENCY-01: in-place update requires a launch attestation and a ro
   let attestations = [produced(first), produced(head)];
   const currency = () => createReviewCurrencyReader({ repo, prNumber, rootDir: f.dir, get: f.get, git: f.git,
     readHeadAttestations: async () => { reads++; return attestations; } });
-  const record = sha => recordPrRound(f.dir, { repo, prNumber, kind: PR_ROUND_KINDS.HQ_PR_UPDATE,
-    roundId: `hq-pr-update:${sha}`, headSha: sha });
+  const record = (sha, launchRequestId = 'lrq_fixture') => recordPrRound(f.dir, { repo, prNumber, kind: PR_ROUND_KINDS.HQ_PR_UPDATE,
+    roundId: `hq-pr-update:${sha}`, headSha: sha, launchRequestId });
   record(head);
   assert.equal((await currency()(f.a, head)).current, false, 'a signed head without an update round cannot activate the proof');
   assert.equal(reads, 0);
@@ -199,6 +277,26 @@ test('DISPUTECURRENCY-01: in-place update requires a launch attestation and a ro
   assert.equal(reads, 1, 'the same verified chain covers both exact heads');
   attestations = [produced(first), { ...produced(head), pr_number: prNumber + 1 }];
   assert.equal((await currency()(f.a, head)).current, false);
+  attestations = [produced(first), { ...produced(head), payload: { ...produced(head).payload, launch_request_id: 'lrq_other' } }];
+  assert.equal((await currency()(f.a, head)).current, false, 'a different launch cannot borrow the round');
+});
+
+test('DISPUTECURRENCY-01: an accounting-only PR-update round without a launch fails closed', async t => {
+  const f = await fixture(t);
+  const head = appendLaneCommit(f, 'Update');
+  recordPrRound(f.dir, { repo, prNumber, kind: PR_ROUND_KINDS.HQ_PR_UPDATE,
+    roundId: `hq-pr-update:${head}`, headSha: head });
+  let reads = 0;
+  const currency = createReviewCurrencyReader({ repo, prNumber, rootDir: f.dir, get: f.get, git: f.git,
+    readHeadAttestations: async () => {
+      reads++;
+      return [{ repo, pr_number: prNumber, head_sha: head, kind: 'produced', valid: true,
+        payload: { source: 'hq_branch_push', launch_request_id: 'lrq_fixture', worker_class: 'codex' } }];
+    } });
+  const result = await currency(f.a, head);
+  assert.equal(result.current, false);
+  assert.match(result.missingProof, /missing PR-update round launchRequestId/);
+  assert.equal(reads, 0);
 });
 
 for (const proof of ['provenance', 'patch-id']) {

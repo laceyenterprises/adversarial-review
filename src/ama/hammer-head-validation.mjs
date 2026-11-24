@@ -6,6 +6,7 @@ import { open, opendir } from 'node:fs/promises';
 import { join } from 'node:path';
 import { HAM_AUDIT_COMMENT_AUTHOR_LOGINS, hamAuditCommentAuthorMatches } from './ham-provenance.mjs';
 import { completedCommentOnlyHandoff, completedLocalCommentOnlyReplay } from '../comment-only-final-round.mjs';
+import { resolveReplyStorageKey } from '../remediation-reply-paths.mjs';
 
 const isAbort = error => error?.name === 'AbortError' || error?.code === 'ABORT_ERR';
 const isHistoryReadFailure = error => error?.hammerHistoryReadFailed || error?.primaryChangeReadFailed || isTransientGhError(error);
@@ -169,7 +170,7 @@ async function readCompletedJob(path, onOversize) {
 // without a resulting head cannot establish an edge.
 export async function readCompletedRemediationEvidence(rootDir, repo, prNumber) {
   const lanePublications = new Map();
-  const unavailable = { rounds: [], settledRounds: [], finalPublications: [] };
+  const unavailable = { rounds: [], settledRounds: [], finalPublications: [], lanePublications: new Map() };
   if (typeof rootDir !== 'string' || !rootDir || typeof repo !== 'string' || !/^[\w.-]+\/[\w.-]+$/.test(repo)
     || !['number', 'string'].includes(typeof prNumber)
     || !Number.isSafeInteger(Number(prNumber)) || Number(prNumber) < 1) return unavailable;
@@ -215,6 +216,9 @@ export async function readCompletedRemediationEvidence(rootDir, repo, prNumber) 
             && typeof job.jobId === 'string' && job.jobId
             && head !== base && completion?.workerPushedHeadSha === head && !completion.pendingCiOnly
             && worker?.state === 'completed' && typeof worker.launchRequestId === 'string' && worker.launchRequestId.trim()) {
+            const local = !worker.dispatchId && !worker.requiresProducedAttestation
+              && (worker.dispatchMode === undefined || worker.dispatchMode === 'local');
+            if (local && worker.launchRequestId !== resolveReplyStorageKey(job)) continue;
             lanePublications.set(`${head}:${job.jobId}`, worker);
             if (lanePublications.size > MAX_COMPLETED_ROUND_EDGES) {
               lanePublications.clear();

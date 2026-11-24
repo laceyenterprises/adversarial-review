@@ -87,12 +87,12 @@ export function createReviewCurrencyReader({ repo, prNumber, rootDir, get, comme
   git = (args, input) => currencyGit(args, input, { cwd }), pr = null,
   readHeadAttestations = readHeadAttestationChainForPr }) {
   const cache = new Map();
-  let commentRead, roundRead, prRead, updateHeads, attestationRead;
+  let commentRead, roundRead, prRead, updateRounds, attestationRead;
   const readComments = () => commentRead ||= loadComments ? Promise.resolve().then(loadComments)
     : comments !== null ? Promise.resolve(comments)
     : readHammerProvenanceComments(page => get(
       `repos/${repo}/issues/${prNumber}/comments?per_page=100${page === 1 ? '' : `&page=${page}`}`));
-  const laneCommitMatches = async (commit, trailers, publications) => {
+  const laneCommitMatches = async (commit, trailers, publications, diagnostics) => {
     const { sha } = commit;
     const jobId = trailers['worker-job-id'];
     const worker = publications?.get(`${sha}:${jobId}`);
@@ -102,17 +102,24 @@ export function createReviewCurrencyReader({ repo, prNumber, rootDir, get, comme
       && parseCommitTrailerValues(commit.commit.message)['worker-job-id']?.length === 1;
     if (matchedRemediation && !worker.dispatchId && !worker.requiresProducedAttestation
       && (worker.dispatchMode === undefined || worker.dispatchMode === 'local')) {
-      return worker.launchRequestId === jobId;
+      // The evidence reader already bound the local launch to the job's
+      // resolved reply key, which can differ from its provenance job ID.
+      return true;
     }
     // An exact HCP in-place publication round identifies the PR-update lane.
     // The signed production record supplies its launch and worker identity.
-    updateHeads ??= new Set(readPrRoundLedger(rootDir, { repo, prNumber }).filter(entry =>
+    updateRounds ??= new Map(readPrRoundLedger(rootDir, { repo, prNumber }).filter(entry =>
       entry.kind === PR_ROUND_KINDS.HQ_PR_UPDATE && !entry.voided
       && typeof entry.repo === 'string' && entry.repo.toLowerCase() === repo.toLowerCase()
       && entry.prNumber === Number(prNumber) && entry.roundId === `hq-pr-update:${entry.headSha}`)
-      .map(entry => entry.headSha));
-    if (!matchedRemediation && !updateHeads.has(sha)) return false;
-    const isPrUpdate = updateHeads.has(sha);
+      .map(entry => [entry.headSha, entry]));
+    const updateRound = updateRounds.get(sha);
+    if (!matchedRemediation && !updateRound) return false;
+    const isPrUpdate = !matchedRemediation;
+    if (isPrUpdate && !updateRound.launchRequestId) {
+      diagnostics.push(`lane publication ${sha}: missing PR-update round launchRequestId`);
+      return false;
+    }
     const identity = await resolveDaemonWorkerIdentityFromHeadAttestation({
       rootDir, repo, prNumber, currentHeadSha: sha, requireExactSubject: true,
       readHeadAttestationChainForPrImpl: async args => {
@@ -121,8 +128,14 @@ export function createReviewCurrencyReader({ repo, prNumber, rootDir, get, comme
         return isPrUpdate ? rows.filter(row => row?.payload?.source === 'hq_branch_push') : rows;
       },
     });
-    return identity.ok && (isPrUpdate || (worker.launchRequestId === identity.launchRequestId
-      && workerClass === identity.workerClass));
+    if (!identity.ok) {
+      diagnostics.push(`lane publication ${sha}: ${identity.reason}${identity.transient ? ' (transient)' : ''}`);
+      return false;
+    }
+    const matched = isPrUpdate ? identity.launchRequestId === updateRound.launchRequestId
+      : worker.launchRequestId === identity.launchRequestId && workerClass === identity.workerClass;
+    if (!matched) diagnostics.push(`lane publication ${sha}: launch or worker identity mismatch`);
+    return matched;
   };
   const proveRebase = async (reviewedHead, currentHead, { rebaseOnly, limits, diagnostics }) => {
     const provenance = await readComments().catch(() => null);
@@ -144,7 +157,7 @@ export function createReviewCurrencyReader({ repo, prNumber, rootDir, get, comme
         // Lane changes keep findings applicable for fresh adjudication at the
         // live head. They carry neither a prior withdrawal nor a head waiver.
         const laneCommit = rebaseOnly || !rootDir ? null
-          : (commit, trailers) => laneCommitMatches(commit, trailers, lanePublications);
+          : (commit, trailers) => laneCommitMatches(commit, trailers, lanePublications, diagnostics);
         const proof = await patchCurrency({ reviewedHead, currentHead, base: live.base.sha, git, get, repo, laneCommit });
         if (proof) return proof;
       }

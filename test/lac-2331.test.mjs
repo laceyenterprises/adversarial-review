@@ -266,6 +266,15 @@ test('completed proof work is scoped to the matching PR in a large shared direct
   assert.equal(evidence.settledRounds.length, 1);
 });
 
+test('unavailable completed proof returns an empty lane publication map', async t => {
+  const { options } = fixture(t);
+  for (const rootDir of [null, join(options.rootDir, 'absent')]) {
+    const evidence = await readCompletedRemediationEvidence(rootDir, repo, prNumber);
+    assert.deepEqual(evidence, { rounds: [], settledRounds: [], finalPublications: [], lanePublications: new Map() });
+    assert.equal(evidence.lanePublications.get('unknown'), undefined);
+  }
+});
+
 test('completed proof scan stops after a bounded number of unrelated directory entries', async t => {
   const { options, record } = fixture(t, { job: nativeFinalJob() });
   const opendir = fs.opendir;
@@ -279,7 +288,7 @@ test('completed proof scan stops after a bounded number of unrelated directory e
   syncBuiltinESMExports();
   t.after(() => { replacement.mock.restore(); syncBuiltinESMExports(); });
   const evidence = await readCompletedRemediationEvidence(options.rootDir, repo, prNumber);
-  assert.deepEqual(evidence, { rounds: [], settledRounds: [], finalPublications: [],
+  assert.deepEqual(evidence, { rounds: [], settledRounds: [], finalPublications: [], lanePublications: new Map(),
     limitReached: 'directory entries' });
 });
 
@@ -292,7 +301,8 @@ test('record and edge limits are attributed to their target and rate limited per
     for (let i = 0; i < 257; i++) writeFileSync(record.replace('42-job', `${number}-job-${i}`), '{}');
     for (const name of [repo, repo.toUpperCase()]) {
       const evidence = await readCompletedRemediationEvidence(options.rootDir, name, number);
-      assert.deepEqual(evidence, { rounds: [], settledRounds: [], finalPublications: [], limitReached: 'matching records' });
+      assert.deepEqual(evidence, { rounds: [], settledRounds: [], finalPublications: [], lanePublications: new Map(),
+        limitReached: 'matching records' });
     }
   }
   const many = Array.from({ length: 257 }, (_, i) => round(reviewedHead, i.toString(16).padStart(40, '0')));
@@ -304,6 +314,7 @@ test('record and edge limits are attributed to their target and rate limited per
   const evidence = await readCompletedRemediationEvidence(options.rootDir, repo, 4201);
   assert.equal(evidence.limitReached, 'round edges');
   assert.equal(evidence.rounds.length, 0);
+  assert.deepEqual(evidence.lanePublications, new Map());
   clock = 60 * 60 * 1000;
   await readCompletedRemediationEvidence(options.rootDir, repo, 4202);
   assert.deepEqual(logs.mock.calls.map(call => call.arguments[0].split(' for ')), [

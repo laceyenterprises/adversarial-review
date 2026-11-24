@@ -2809,7 +2809,7 @@ for (const scenario of ['audit', 'no audit', 'auto-merge armed', 'expired auto-m
       assert.equal(events.filter(event => event.event === 'ama_closer.auto_merge_hold_released').length, 1);
     }
     if (scenario === 'audit') {
-      assert.equal(result.reason, 'ownerless-closer-no-merge');
+      assert.equal(result.reason, 'needs-closer');
       assert.equal(result.successor.headSha, HEAD);
       assert.equal(deps.calls.filter(c => c.args[0] === 'dispatch').length, 0);
       return;

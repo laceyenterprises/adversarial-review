@@ -157,7 +157,7 @@ for (const disabled of [false, true]) test(`successor ${disabled ? 'disabled' : 
   requestCloserSuccessor(input);
   const result = await settleCloserSuccessor({ ...input, enabled: !disabled,
     handoffImpl: async () => ({ action: 'fallback' }), observeWaitImpl: async args => pages.push(args) });
-  assert.equal(result.status, 'ownerless-closer-no-merge');
+  assert.equal(result.status, 'needs-closer');
   assert.equal(readCloserSuccessor(f.rootDir, input).status, result.status);
   assert.equal(pages.length, 1);
   assert.equal(pages[0].immediate, true);
@@ -185,7 +185,7 @@ test('a dispatch exception still persists and alerts typed ownerlessness', async
   const alerts = [];
   const result = await settleCloserSuccessor({ ...input, handoffImpl: async () => { throw null; },
     observeWaitImpl: async args => alerts.push(args) });
-  assert.equal(result.status, 'ownerless-closer-no-merge');
+  assert.equal(result.status, 'needs-closer');
   assert.equal(result.reason, 'successor-dispatch-failed');
   assert.equal(readCloserSuccessor(f.rootDir, input).status, result.status);
   assert.equal(alerts.length, 1);
@@ -245,4 +245,14 @@ test('an unproven asynchronous rebase result never acquires exact-head custody',
     return { head };
   }), /rebase-result-unproven/);
   assert.equal(hammerHeadOwnership(probe(f), HEAD), null);
+});
+
+test('AMASTRICTROUTE-01: refused successor admission leaves a durable needs-closer receipt', async t => {
+  const f = fixture(t), input = { ...f, headSha: HEAD, source: 'closer-ended-without-merge' };
+  requestCloserSuccessor({ ...input, reviewBody: 'Synthetic refusing finding.' });
+  const result = await settleCloserSuccessor({ ...input, admitted: false,
+    handoffImpl: async () => assert.fail('refused admission cannot dispatch'), observeWaitImpl: async () => {} });
+  assert.equal(result.reason, 'successor-admission-refused');
+  assert.equal(result.status, 'needs-closer');
+  assert.deepEqual(readCloserSuccessor(f.rootDir, input), result);
 });

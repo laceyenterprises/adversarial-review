@@ -1155,8 +1155,11 @@ if (scenario === 'clean') {
   const refusedInput = { ...successorInput, headSha: 'e'.repeat(40) };
   requestCloserSuccessor(refusedInput);
   assert.equal((await settleCloserSuccessor({ ...refusedInput, enabled: false,
-    observeWaitImpl: async () => { ownerlessAlerts++; } })).status, 'ownerless-closer-no-merge');
+    observeWaitImpl: async () => { ownerlessAlerts++; } })).status, 'needs-closer');
   assert.equal(ownerlessAlerts, 1);
+  assert.equal((await settleCloserSuccessor({ ...refusedInput, handoffImpl: successorHandoff })).status, 'successor-enrolled');
+  assert.equal((await settleCloserSuccessor({ ...refusedInput, handoffImpl: successorHandoff })).status, 'successor-enrolled');
+  assert.equal(successors, 2);
   evidence = { trailerlessPublicationDeferred: true, mergedPublicationRetired: true, successorEnrolledOnce: true, refusedSuccessorAlerted: true, hammers, finalFixAllQueuedBeforeHammer: true, finalFixAllTerminalFallback: true, cleanBranchHoldSettled: true, unchangedHeadHasNoPublicationDebt: true, nullHeadConfirmed: true, unknownBranchRetryRecovered: true, terminalScratchRemoved: true, drainingScratchRetained: true, privatePytestTemp: true, agedCwdTimeoutReclaimed: true, scratchCursorResumed: true, scratchLedgerClockIndependent: true, drainResumedNextPass: true, drainCountersUnchanged: true, drainHintExpiredWithoutCloser: true, legacyDrainHintRetired: true, hammerRangeValidated: true, noHammerReviewRequest: true, claimPreserved: true, reviewedHeadRecorded: true,
     headlessPostRequeuedOnce: true, terminalRetryable: true, terminalCapacityFreed: true, terminalNoMergeReclaimedSamePass: true,
     autoMergeHeld: true, autoMergeBoundReleased: true, unreadableCapacityReserved: true,

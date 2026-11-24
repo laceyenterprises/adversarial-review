@@ -1684,9 +1684,9 @@ worker exit. The merge remains terminal throughout comment recovery.
 An exhausted closer that confirms an open PR without merging enrolls a durable
 PR/head successor request carrying the predicate's refusing review. The ordinary
 pre-claim remediation cap uses the same request. The watcher admits at most one
-existing final-fix-all work order for that head, or records and alerts
-`ownerless-closer-no-merge` through closure-wait alerting. Disabled or refused
-handoffs cannot silently terminate custody. See
+existing final-fix-all work order for that head. A disabled or refused handoff
+records `needs-closer`, alerts through closure-wait and retains the receipt for
+later closure passes. See
 [successor records](data-model/closer-successors.md) and
 [publication ownership](data-model/hammer-publication-ownership.md).
 Exits before completing the close retain their existing bounded retry/refund
@@ -3202,8 +3202,8 @@ Key control points:
 - **`strict_mode`** (default `true`): the ordinary daemon lane requires a
   zero-finding review. Explicitly setting it `false` permits daemon merge
   over *known non-blocking* findings. A current-head `operator-approved`
-  overrides the verdict and finding gates; the daemon verifies the approval
-  again inside the merge lease and holds the tick if it was removed.
+  can override the verdict. Strict-mode routing requires zero findings even
+  with approval. The daemon verifies approval again inside the merge lease.
 - **`auto_hammer_on_eligibility_miss`** (default `false`): historical.
   It gated the auto-hammer dispatch when it was introduced, but since MSM-04
   the runtime no longer reads it — the hammer route keys on the configured

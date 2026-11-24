@@ -71,10 +71,10 @@ export async function settleCloserSuccessor({ rootDir, repo, prNumber, headSha, 
       result = !enabled ? { reason: 'successor-path-disabled' } : !admitted ? { reason: 'successor-admission-refused' }
         : await handoff({ rootDir, repo, prNumber, headSha, reviewBody: record.reviewBody, now, riskClass });
     } catch (error) { result = { reason: 'successor-dispatch-failed', detail: String(error?.message ?? error).slice(0, 300) }; }
-    record = { ...record, updatedAt: now, status: result?.remediation?.jobId ? 'successor-enrolled' : 'ownerless-closer-no-merge',
+    record = { ...record, updatedAt: now, status: result?.remediation?.jobId ? 'successor-enrolled' : 'needs-closer',
       successorJobId: result?.remediation?.jobId || null, reason: result?.reason || result?.action || 'successor-dispatch-refused' };
     writeFileAtomic(path, `${JSON.stringify(record)}\n`);
-    if (record.status === 'ownerless-closer-no-merge') {
+    if (record.status === 'needs-closer') {
       await observeWaitImpl({ rootDir, repo, prNumber, headSha, reason: `${record.status}:${record.reason}`,
         now: Date.parse(now), immediate: true, waitClass: 'closer-successor' });
     }

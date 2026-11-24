@@ -52,7 +52,7 @@
       ],
       "owner": "follow-up remediation queue",
       "optionalField": "finalCapResult",
-      "successorState": "successor-pending or ownerless-closer-no-merge; enrollment precedes terminal move"
+      "successorState": "successor-pending or needs-closer; enrollment precedes terminal move"
     }
   ]
 }

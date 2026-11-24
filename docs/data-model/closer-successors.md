@@ -23,11 +23,13 @@ existing bounded retry and cap-alert executor.
 Settlement holds the receipt's exclusive flock across admission and enqueue.
 A confirmed remediation job records `successor-enrolled` and successorJobId;
 repeated settlement returns that receipt without dispatch. Disabled, refused,
-failed or unreadable handoff records `ownerless-closer-no-merge`, reason and
+failed or unreadable handoff records `needs-closer`, reason and
 updatedAt, then calls the existing closure-wait alert surface immediately with
 waitClass `closer-successor`. Its persistent page latch deduplicates repeated
-observations; delivery failures remain retryable. An ownerless receipt can retry
-admission, while final-fix-all's own durable claim prevents duplicate work.
+observations. Delivery failures remain retryable. The closure pass can retry
+admission from `needs-closer` or the legacy `ownerless-closer-no-merge` value.
+The rescue bridge exposes only the status and head to closure recovery.
+Final-fix-all's durable claim prevents duplicate work.
 
 A pending receipt grants no merge, review or budget authority. Head matching,
 operator holds, strict findings remediation, CI and both closure paths keep their

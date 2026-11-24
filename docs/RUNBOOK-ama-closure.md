@@ -17,9 +17,9 @@ PR/head successor request carrying the predicate's refusing review. Orchestratio
 passes the canonical `settledReview` snapshot to closer dispatch; dispatch reads
 its review body for successor custody without re-deriving review eligibility. The ordinary
 pre-claim remediation cap uses the same request. The watcher admits at most one
-existing final-fix-all work order for that head, or records and alerts
-`ownerless-closer-no-merge` through closure-wait alerting. Disabled or refused
-handoffs cannot silently terminate custody. See
+existing final-fix-all work order for that head. A disabled or refused handoff
+records `needs-closer` and alerts through closure-wait. Later closure passes
+recheck admission on that head. See
 [successor records](data-model/closer-successors.md) and
 [publication ownership](data-model/hammer-publication-ownership.md).
 Exits before completing the close retain their existing bounded retry/refund
@@ -2826,7 +2826,8 @@ cannot inherit that proof. Daemon execution observations update the common polic
 repair admission cannot waive an earlier review, remaining remediation round,
 stop or cap.
 The existing head-scoped approval lane uses the same actor validator as the
-daemon; unclean review overrides still require its enforced operator allowlist.
+daemon and requires zero findings in strict mode. In non-strict mode, an
+unclean review override requires its enforced operator allowlist.
 A passed review ceiling remains repair admission, never current-head merge proof.
 
 Changed proof or queued PR facts create a new immutable generation. Unchanged
@@ -4440,9 +4441,9 @@ identity** (the operator-approval auto-close lane). Apply either:
 (the audit records `mergeAccountability: operator-approval` with the label,
 actor, and event id). `merge-agent-requested` substitutes for worker identity
 only; it still needs a settled-success, strict-clean review. Current-head
-`operator-approved` also overrides the verdict and finding-count gates, so a
-`Request changes` review with blocking findings can use the daemon lane even
-when worker identity resolves. When the live label is present, the audit records
+`operator-approved` can override the verdict. Daemon routing still requires
+zero findings in strict mode. When non-strict mode permits an override of the
+finding-count gate, the audit records
 `closureAuthority: daemon-operator-approved-override`,
 `mergeAccountability: operator-approval`, and `operatorApproval` with the
 actor, event id, observation time, and approved head. A successful merge emits

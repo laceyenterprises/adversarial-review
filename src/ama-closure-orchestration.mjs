@@ -2041,7 +2041,8 @@ async function dispatchAmaClosureFor({
     } }, passSnapshot);
   }
   const pendingSuccessor = readCloserSuccessor(rootDir, { repo: repoPath, prNumber, headSha: currentPrHeadSha });
-  if (pendingSuccessor && pendingSuccessor.status !== 'successor-enrolled' && prMetadata.isOpen) {
+  if (pendingSuccessor && pendingSuccessor.status !== 'successor-enrolled' && prMetadata.isOpen
+    && shared.decision.action !== 'daemon-merge') {
     requestCloserSuccessor({ rootDir, repo: repoPath, prNumber, headSha: currentPrHeadSha,
       source: pendingSuccessor.source, reviewBody: gateSnapshot.settledReview?.reviewBody,
       refusingReasons: pendingSuccessor.refusingReasons, now: new Date(now()).toISOString() });

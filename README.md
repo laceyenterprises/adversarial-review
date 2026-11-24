@@ -3766,13 +3766,12 @@ Head-scoped exhausted closer and pre-claim-cap successor custody; never merge au
 stateDiagram-v2
     state "successor-pending" as s0
     state "successor-enrolled" as s1
-    state "ownerless-closer-no-merge" as s2
+    state "needs-closer" as s2
     [*] --> s0: closer-successor.01 exhausted no-merge or pre-claim cap atomically enrolls head
     s0 --> s1: closer-successor.02 existing final-fix-all confirms one remediation job
-    s0 --> s2: closer-successor.03 disabled, refused or failed handoff records typed state and alerts
-    s2 --> s1: closer-successor.04 later admitted handoff confirms custody without duplicate source-head work
+    s0 --> s2: closer-successor.03 disabled, refused or failed handoff records recovery custody and alerts
+    s2 --> s1: closer-successor.04 later closure pass enrolls one successor when admission permits
     s1 --> [*]
-    s2 --> [*]
 ```
 
 <!-- smv:diagrams:end -->

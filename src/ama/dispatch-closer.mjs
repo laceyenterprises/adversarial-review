@@ -7382,7 +7382,7 @@ async function maybeDispatchAmaCloserAttempt({
       if (hammerEndedWithoutMerge && hammerShouldHandoff && !inconclusiveOutcome && reviewState?.reviewCycleExhausted === true) {
         const successor = await handoffEndedCloser(hammerEndedHead);
         return noAmaDispatch({ dispatched: false, skipMergeAgent: true,
-          reason: successor?.status || 'ownerless-closer-no-merge', successor });
+          reason: successor?.status || 'needs-closer', successor });
       }
       if (inconclusiveOutcome) {
         const backoff = await ownInconclusiveCloserRetry({ rootDir, repo, prNumber,

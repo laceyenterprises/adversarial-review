@@ -39,8 +39,11 @@ and when the next ordinary dispatch is due. It grants no authority. See the
 
 The file keeps the eight most recently attempted heads and 32 launches per head.
 Writes are atomic. Recording is idempotent per launch. An unreadable file reads
-as corrupt and is preserved for recovery; recording refuses to overwrite it.
-Matching unsafe custody evidence still holds only its own head.
+as corrupt and is preserved for recovery. When the watcher observes an ended
+inconclusive launch for the live head, it logs `retry-record-unreadable`, holds
+that retry, and issues a deduplicated closure-wait notice. Restore a validated
+record through the runtime owner before retrying. A new head requires its own
+ended-launch evidence. Matching unsafe custody evidence still holds its own head.
 `closure-budget-escalation` reads `launches[].launchRequestId` across heads and
 refunds each open series charge whose launch is listed (CLOSERRETRYREFUND-01:
 per charge, not only when every charge is listed). It also records launches it

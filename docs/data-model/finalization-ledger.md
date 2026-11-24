@@ -313,8 +313,9 @@ and honor the already-sized timeout and abort signal. Its observation fields are
   admits `localValidation.result: unknown` only with `ciAuthoritative: true`,
   `coverageComplete: true`, `cleanup: finished` and `localFailureObserved: false`.
   Missing authority or an observed failure
-  refuses admission even if `ok: true` is present. The final merge still
-  requires non-empty declared contexts green on the exact candidate. A direct
+  refuses admission even if `ok: true` is present. Final merge rechecks the same
+  completeness proof for all UNKNOWN receipts, including entries admitted before
+  this change, and requires non-empty declared green contexts on the exact candidate. A direct
   clean admission has no Hammer battery and keeps its existing CI-only evidence
   contract after signed, exact-head, zero-finding review validation.
 

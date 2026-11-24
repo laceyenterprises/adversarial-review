@@ -224,7 +224,7 @@ for (const drains of [true, false]) test(`KILL gets a bounded asynchronous group
   assert.equal(settled, false, 'KILL delivery does not synchronously finish cleanup');
   present = !drains;
   await clock.advance(drains ? 50 : 1000);
-  assert.equal(await pending, 7);
+  assert.equal(await pending, drains ? 7 : 125);
   assert.match(err, drains ? /cleanup=finished/ : /cleanup=unconfirmed/);
 });
 

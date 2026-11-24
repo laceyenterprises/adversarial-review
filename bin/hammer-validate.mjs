@@ -592,7 +592,7 @@ async function validate() {
         retainValidationEvidence();
         const hold = findDeferredSourceHold(process.env);
         if (custodyDir && hold?.evidenceDir === custodyDir && !hold.controller) {
-          retainDeferredCommit(hold, process.env);
+          await retainDeferredCommit(hold, process.env);
           if (ciAuthoritative) ciAuthoritative = continueDeferredSourceCustody(hold);
         } else if (hold || launchRequestId) {
           ciAuthoritative = false;

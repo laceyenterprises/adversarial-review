@@ -88,6 +88,19 @@ test('legacy UNKNOWN receipts still require declared CI even when ordinary no-CI
   assert.equal(p.calls.length, 0);
 });
 
+test('green declared CI cannot merge a legacy UNKNOWN receipt with incomplete local evidence', async t => {
+  const p = await finalizing(t);
+  const evidence = structuredClone(p.a.e);
+  evidence.localValidation = { ...evidence.localValidation, result: 'unknown',
+    ciAuthoritative: true, localFailureObserved: false };
+  p.f.store.db.prepare('UPDATE finalization_queue_clean_review SET evidence_json=? WHERE entry_id=?')
+    .run(JSON.stringify(evidence), p.entry.entryId);
+  const result = await p.finalize();
+  assert.equal(result.phase, 'returned-to-closer');
+  assert.equal(result.reason, 'local-validation-unknown-evidence-incomplete');
+  assert.equal(p.calls.length, 0);
+});
+
 test('final eligibility merges the exact candidate once and journals a complete attributed receipt', async t => {
   const p = await finalizing(t); const { f, a } = p;
   const before = f.store.readEntry(a.ack.entryId);

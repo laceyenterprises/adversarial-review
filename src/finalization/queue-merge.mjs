@@ -7,7 +7,7 @@ import { classifyQueueAdmission, resolveQueueAdmissionAdapters } from './queue-a
 import { classifyQueueChecks } from './queue-check-reader.mjs';
 import { createQueueChecksService } from './queue-checks.mjs';
 import { handoffDigest } from './queue-handoff.mjs';
-import { unknownValidationCiGate } from '../ama/local-validation-unknown.mjs';
+import { hasCompletedUnknownValidationEvidence, unknownValidationCiGate } from '../ama/local-validation-unknown.mjs';
 import { resolveQueueGitAdapter } from './queue-git.mjs';
 import { verifyQueueDerivation } from './queue-rebase-proof.mjs';
 import { readQueueEvidence } from './queue-read.mjs';
@@ -208,6 +208,9 @@ export function createQueueMergeService({ store, owner, liveAdapter, checkReader
     if (receipt.evidence?.localValidation?.result === 'unknown') {
       const gate = unknownValidationCiGate({ checks: checks.results, requiredContexts: checks.requiredSet.contexts });
       if (!gate.ok) return { phase: 'returned-to-closer', reason: gate.reason, checks };
+      if (!hasCompletedUnknownValidationEvidence(receipt.evidence.localValidation)) {
+        return { phase: 'returned-to-closer', reason: 'local-validation-unknown-evidence-incomplete', checks };
+      }
     }
     // Identity read-through is mandatory here: absence is not local mode,
     // because the receipt must attribute the bot that performs the merge.

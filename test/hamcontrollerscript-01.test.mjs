@@ -174,6 +174,7 @@ case "$(basename "$path")" in
         exec /bin/bash -c 'IFS= read -r ready || true; source "$@"' hammer-controller "$ctl" "$@" < /dev/null ;;
     esac ;;
   hammer-validate.mjs)
+    if [ "$1" = --check-custody ] && [ "\${FIXTURE_CUSTODY_HOLD:-0}" -eq 1 ]; then exit 75; fi
     if [ "$1" = --check-rebase-publication ]; then exec ${shellQuote(process.execPath)} "$path" "$@"; fi
     if [ "$1" = --complete-rebase-publication ]; then
       log complete-publication
@@ -748,7 +749,7 @@ function conflictRebaseFixture(t, { declared = true } = {}) {
     timeout: join(f.dir, 'timed-out') };
 }
 
-for (const mode of ['clean', 'semantic-conflict', 'cap', 'changed-patch']) {
+for (const mode of ['clean', 'semantic-conflict', 'cap', 'changed-patch', 'custody-hold']) {
   test(`CLOSERCONFLICT-01 final gate recovery: ${mode}`, async t => {
     const f = hammerFixture(t);
     const gitEnv = { ...f.env, GIT_AUTHOR_NAME: 'Fixture', GIT_AUTHOR_EMAIL: 'fixture@example.invalid',
@@ -792,9 +793,11 @@ ham_pr() {
 }
 `);
     const result = await f.close({ ...gitEnv, FIXTURE_LIVE_HEAD: source, FIXTURE_REBASE_REMOTE: remote,
+      FIXTURE_CUSTODY_HOLD: mode === 'custody-hold' ? '1' : '0',
       FIXTURE_GREEN_HEAD: 'any', FIXTURE_LATE_CONFLICTS: mode === 'cap' ? '3' : '1' });
     const expected = { clean: [0, 'merged'], 'semantic-conflict': [21, 'needs-rebase-repair'],
-      cap: [20, 'needs-rebase-repair'], 'changed-patch': [20, 'exact-head-review-required'] }[mode];
+      cap: [20, 'needs-rebase-repair'], 'changed-patch': [20, 'exact-head-review-required'],
+      'custody-hold': [75, 'canonical-validation-deferred'] }[mode];
     assert.deepEqual([result.status, result.closeResult?.outcome], expected, `${result.stdout}\n${result.stderr}`);
     assert.equal(result.closeResult.leaseHeld, false);
     const events = f.events();
@@ -803,6 +806,10 @@ ham_pr() {
       assert.equal(remoteHead, source);
       assert.match(events.join('\n'), /gate-audit deferred needs-rebase-repair/);
       assert.equal(git('diff', '--name-only', '--diff-filter=U'), 'src/example.mjs');
+    } else if (mode === 'custody-hold') {
+      assert.equal(remoteHead, source);
+      assert.ok(events.includes('gate-audit deferred canonical-validation-deferred'));
+      assert.match(result.stderr, /HAM conflict repair: canonical-validation-deferred/);
     } else {
       assert.notEqual(remoteHead, source);
       git('merge-base', '--is-ancestor', base, remoteHead);

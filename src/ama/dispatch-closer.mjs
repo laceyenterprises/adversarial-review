@@ -2,7 +2,7 @@ import { readPrTenure } from '../pr-tenure.mjs';
 import { isLivePackDeferralText } from '../kernel/remediation-reply.mjs';
 import { isGitHubRateLimitError } from '../rate-limit-throttle.mjs';
 import { observeDeferredSourceDecision, requestCloserSuccessor, settleCloserSuccessor } from './closer-successor.mjs';
-import { deferredSourceStatus, deferredSourceNeedsDecision, readDeferredSourceHold, retainDeferredCommit, readDeferredSourceHoldsForLaunch } from './deferred-source-custody.mjs';
+import { deferredSourceRetained, deferredSourceNeedsDecision, readDeferredSourceHold, retainDeferredCommit, readDeferredSourceHoldsForLaunch } from './deferred-source-custody.mjs';
 import { samePrHammerHolderWorktreePaths } from './branch-holder-paths.mjs';
 export { samePrHammerHolderWorktreePaths } from './branch-holder-paths.mjs';
 import { isZeroOutputRefusal, escalateZeroOutputRefusal } from './zero-output-refusal.mjs';
@@ -457,6 +457,22 @@ async function ownInconclusiveCloserRetry({ rootDir, hqRoot, repo, prNumber, hea
       reason, now, sourcePublished, custodyRequired, policy: closerInconclusiveRetryPolicy(cfg) });
     if (owned.recorded) logAmaCloserDispatchEvent(logger, 'ama_closer.inconclusive_owned_retry', {
       repo, prNumber, headSha, launchRequestId, ...owned.entry, launches: undefined });
+    else if (owned.reason === 'retry-record-unreadable') {
+      logger?.warn?.(`[ama-closer] ${owned.reason} for ${repo}#${prNumber} at ${headSha}`);
+      if (currentHeadSha === headSha) {
+        try {
+          await observeClosureWait({ rootDir, repo, prNumber, headSha, waitClass: 'retry-record-unreadable',
+            reason: 'Closer retry record is unreadable. Preserve it and restore the validated retry record before retrying this head.',
+            immediate: true, now: Date.parse(now),
+            pageImpl: message => deliverAlertImpl(message, { event: 'ama_closer.inconclusive_retry_record_unreadable',
+              payload: { repo, prNumber, headSha } }) });
+        } catch (error) {
+          logger?.warn?.(`[ama-closer] retry-record-unreadable notice failed for ${repo}#${prNumber}: ${error.message}`);
+        }
+        if (!custodyRequired) return noAmaDispatch({ dispatched: false, skipMergeAgent: true, recoveryWait: true,
+          needsOperator: true, reason: owned.reason });
+      }
+    }
   } catch (error) {
     logger?.warn?.(`[ama-closer] inconclusive retry record failed for ${repo}#${prNumber}: ${error?.message || error}`);
   }
@@ -1064,15 +1080,18 @@ async function cleanupHammerCloserWorker({
   if (!isHammerWorkerClass(effectiveWorkerClass)) return null;
   const workerId = hammerCloserWorkerIdFromRecord(prNumber, existingRecord);
   if (!workerId) return null;
-  const holds = readDeferredSourceHoldsForLaunch(hqRoot, { repo: existingRecord?.repo, prNumber,
-    launchRequestId: existingRecord?.launchRequestId });
+  const holdIdentity = { repo: existingRecord?.repo, prNumber, launchRequestId: existingRecord?.launchRequestId };
+  const holds = readDeferredSourceHoldsForLaunch(hqRoot, holdIdentity);
   for (const hold of holds) {
-    if (!hold.unreadable && ['local-ref-only', 'workspace-only', 'unconfirmed'].includes(deferredSourceStatus(hold))) {
-      try { retainDeferredCommit(hold, process.env); } catch { /* Retain the workspace if recovery still fails. */ }
+    if (!hold.unreadable && !deferredSourceRetained(hold)) {
+      try { await retainDeferredCommit(hold, process.env, { workerRoot: join(hqRoot, 'workers', workerId) }); }
+      catch { /* Retain the workspace if recovery still fails. */ }
     }
   }
-  if (holds.some(hold => hold.unreadable
-    || !['bundled', 'matches-target'].includes(deferredSourceStatus(hold)))) {
+  const currentHolds = holds.length ? readDeferredSourceHoldsForLaunch(hqRoot, holdIdentity) : holds;
+  if (currentHolds.some(hold => !deferredSourceRetained(hold))
+    || holds.some(hold => !deferredSourceRetained(hold)
+      && !currentHolds.some(current => current.path === hold.path && current.attempt === hold.attempt))) {
     return { ok: false, workerId, reason, error: 'deferred-source-retained-in-workspace' };
   }
   const args = ['worker', 'tear-down', workerId, '--force', '--root', hqRoot];

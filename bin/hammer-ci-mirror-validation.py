@@ -388,6 +388,14 @@ def main():
             return original_run_checks(selected, *positional, **keywords)
 
         mirror.run_checks = run_checks
+    else:
+        receipt["selectionSizeReason"] = "selection-size-unavailable"
+        persist()
+        print(
+            "hammer CI mirror: selection-size-unavailable; UNKNOWN cannot use CI continuation",
+            file=sys.stderr,
+            flush=True,
+        )
     shell_runner = getattr(mirror, "run_shell_command", None)
     if callable(shell_runner) and compatible_shell_runner(shell_runner):
         mirror.run_shell_command = run_shell_command

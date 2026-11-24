@@ -190,6 +190,7 @@ controller has no receipt for that invocation.
 | `head` | Full commit SHA captured before the local validation stage |
 | `status` | Runner exit code for UNKNOWN, otherwise the validator exit code |
 | `selectedCheckCount` | Optional, the complete mirror selection size recorded before the first check |
+| `selectionSizeReason` | `selection-size-unavailable` when the mirror lacks a hook exposing the full selection before execution. UNKNOWN cannot use CI continuation on that receipt. |
 | `coverage` | Optional authenticated mapping identity with repository, PR, head and base |
 | `outcome` | Present as `harness-fault:socket-path` for a counted socket stop. The closer uses it to recognize exit 75 when the receipt head matches the validation head. |
 | `socketPathDiagnostic` | Present with the socket outcome. Records the over-budget temp root and byte budget for setup refusals, or the allocated scratch path for runtime failures. |

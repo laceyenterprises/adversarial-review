@@ -28,6 +28,7 @@
         "socketPathDiagnostic: setup temp root and byte budget, or runtime validation scratch path",
         "checks[].socketPathFault: true when a mirror check's single failed command emits only a supported socket diagnostic",
         "checks[].localReason: includes harness-fault:socket-path when a failed mirror check becomes inconclusive on a socket stop",
+        "selectionSizeReason: selection-size-unavailable exposes an unsupported mirror selection interface; UNKNOWN cannot use CI continuation",
         "validation-deferred-<head>.json: run-local unknown outcome with the cause, status, optional validation receipt path and cleanup owner",
         "validation-deferred-<head>.json ciAuthoritative, coverageComplete, cleanup, requiredContexts and localFailureObserved: proof required for UNKNOWN to defer to declared exact-head contexts",
         "validation-deferred-<head>.json cleanCheckout, cleanupConfirmed, controllerRecord: evidence that a completed conflict repair started clean and its validation round drained before publication"

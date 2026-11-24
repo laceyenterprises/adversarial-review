@@ -25,7 +25,22 @@ function fixture(t) {
     HAM_TARGET_REMEDIATION_SHA: dispatchHead, HAM_CLOSE_VALIDATION_REMOTE_HEAD: liveHead };
   const dir = startDeferredSourceCustody({ env, launchRequestId, sourceHead });
   const identity = { repo, prNumber, headSha: liveHead };
-  return { root, dir, identity, hold: readDeferredSourceHold(root, identity) };
+  const workspace = join(root, 'workers', 'hammer-ama-pr-42', 'checkout');
+  mkdirSync(workspace, { recursive: true });
+  const git = (...args) => execFileSync('git', args, { cwd: workspace, encoding: 'utf8' }).trim();
+  git('init', '-q');
+  const hold = readDeferredSourceHold(root, identity);
+  writeFileSync(hold.path, JSON.stringify({ ...JSON.parse(readFileSync(hold.path)), workspace }));
+  return { root, dir, identity, git, workspace, hold: readDeferredSourceHold(root, identity) };
+}
+
+function teardown(f, tearDown) {
+  return __testables__.cleanupHammerCloserWorker({
+    prNumber, hqRoot: f.root, hqPath: '/fixture/hq', reason: 'ended', logger: {},
+    existingRecord: { repo, headSha: dispatchHead, targetRemediationSha: dispatchHead,
+      launchRequestId, workerClass: 'hammer', workerId: 'hammer-ama-pr-42' },
+    execFileImpl: async () => tearDown(), cleanupScratchImpl() {},
+  });
 }
 
 for (const status of ['local-ref-only', 'workspace-only', 'bundled', 'matches-target', 'unconfirmed']) {
@@ -34,13 +49,7 @@ for (const status of ['local-ref-only', 'workspace-only', 'bundled', 'matches-ta
     if (status !== 'unconfirmed') writeFileSync(join(f.dir, 'source.json'), JSON.stringify({ status, bundle: 'source.bundle' }));
     if (status === 'bundled') writeFileSync(join(f.dir, 'source.bundle'), 'fixture');
     let tornDown = false;
-    const result = await __testables__.cleanupHammerCloserWorker({
-      prNumber, hqRoot: f.root, hqPath: '/fixture/hq', reason: 'ended', logger: {},
-      existingRecord: { repo, headSha: dispatchHead, targetRemediationSha: dispatchHead,
-        launchRequestId, workerClass: 'hammer', workerId: 'hammer-ama-pr-42' },
-      execFileImpl: async () => { tornDown = true; },
-      cleanupScratchImpl() {},
-    });
+    const result = await teardown(f, () => { tornDown = true; });
     const safe = ['bundled', 'matches-target'].includes(status);
     assert.equal(tornDown, safe);
     assert.equal(result.ok, safe);
@@ -111,25 +120,43 @@ test('continued custody retains evidence and ignores even a legacy deferred fall
 
 test('teardown retries retention and bundles source without unavailable prerequisite objects', async t => {
   const f = fixture(t);
-  const workspace = join(f.root, 'checkout');
-  mkdirSync(workspace);
-  const git = (...args) => execFileSync('git', args, { cwd: workspace, encoding: 'utf8' }).trim();
+  const { git, workspace } = f;
   git('init', '-q');
   git('-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid', 'commit', '--allow-empty', '-qm', 'source');
   const head = git('rev-parse', 'HEAD');
   writeFileSync(f.hold.path, JSON.stringify({ ...JSON.parse(readFileSync(f.hold.path)), workspace, sourceHead: head, clean: true }));
   writeFileSync(join(f.dir, 'source.json'), JSON.stringify({ status: 'local-ref-only' }));
   let tornDown = false;
-  await __testables__.cleanupHammerCloserWorker({
-    prNumber, hqRoot: f.root, hqPath: '/fixture/hq', reason: 'ended', logger: {},
-    existingRecord: { repo, headSha: dispatchHead, launchRequestId, workerClass: 'hammer', workerId: 'hammer-ama-pr-42' },
-    execFileImpl: async () => { tornDown = true; }, cleanupScratchImpl() {},
-  });
+  await teardown(f, () => { tornDown = true; });
   assert.equal(tornDown, true);
   const retained = JSON.parse(readFileSync(join(f.dir, 'source.json')));
   assert.equal(retained.status, 'bundled');
   assert.deepEqual(retained.prerequisites, []);
   assert.match(git('bundle', 'list-heads', join(f.dir, 'source.bundle')), new RegExp(`^${head} `));
+  assert.equal(git('for-each-ref', 'refs/hammer/deferred/'), '');
+});
+
+test('teardown fences the recorded workspace and paces failed retention', async t => {
+  const f = fixture(t);
+  const record = JSON.parse(readFileSync(f.hold.path));
+  writeFileSync(f.hold.path, JSON.stringify({ ...record, workspace: f.root }));
+  const rejectTeardown = () => assert.fail('source is not safe to release');
+  assert.equal((await teardown(f, rejectTeardown)).ok, false);
+  assert.equal(JSON.parse(readFileSync(f.hold.path)).lastRetentionAttemptAt, undefined);
+  writeFileSync(f.hold.path, JSON.stringify(record));
+  assert.equal((await teardown(f, rejectTeardown)).ok, false);
+  assert.ok(JSON.parse(readFileSync(f.hold.path)).lastRetentionAttemptAt);
+  writeFileSync(join(f.dir, 'source.json'), JSON.stringify({ status: 'local-ref-only' }));
+  assert.equal((await teardown(f, rejectTeardown)).ok, false);
+  assert.equal(deferredSourceStatus(f.hold), 'local-ref-only', 'the next pass must not run retention again');
+});
+
+test('a continued exact published source allows teardown without a bundle', async t => {
+  const f = fixture(t);
+  assert.equal(continueDeferredSourceCustody(f.hold, { publishedHead: sourceHead }), true);
+  let tornDown = false;
+  assert.equal((await teardown(f, () => { tornDown = true; })).ok, true);
+  assert.equal(tornDown, true);
 });
 
 test('missing source receipt infers only a clean matching target', t => {
@@ -140,18 +167,25 @@ test('missing source receipt infers only a clean matching target', t => {
   assert.equal(deferredSourceStatus({ ...f.hold, sourceHead: liveHead }), 'unconfirmed');
 });
 
-test('custody completion waits for short lock contention', async t => {
+test('the watcher defers under lock contention while explicit completion can wait', async t => {
   const f = fixture(t);
+  writeFileSync(join(f.dir, 'source.json'), JSON.stringify({ status: 'matches-target' }));
+  writeFileSync(join(f.dir, 'bounded-cleanup.json'), JSON.stringify({ head: sourceHead, launchRequestId, cleanup: 'finished' }));
   const child = spawn(process.execPath, ['--input-type=module', '-e', `
     import fsExt from 'fs-ext';
     import { openSync, closeSync } from 'node:fs';
     const fd = openSync(process.argv[1], 'a');
     fsExt.flockSync(fd, 'ex');
     process.stdout.write('locked');
-    setTimeout(() => closeSync(fd), 200);
-  `, `${f.hold.path}.lock`], { stdio: ['ignore', 'pipe', 'pipe'] });
+    process.stdin.once('data', () => setTimeout(() => closeSync(fd), 200));
+  `, `${f.hold.path}.lock`], { cwd: new URL('..', import.meta.url), stdio: ['pipe', 'pipe', 'pipe'] });
+  t.after(() => { child.kill(); });
   const closed = once(child, 'close');
-  await once(child.stdout, 'data');
+  const ready = await Promise.race([once(child.stdout, 'data'), closed.then(() => [])]);
+  assert.equal(String(ready[0]), 'locked', 'fs-ext child must lock before exiting');
+  const watcher = await observeDeferredSourceDecision({ rootDir: f.root, hqRoot: f.root, ...f.identity });
+  assert.equal(watcher?.recoveryWait, true);
+  child.stdin.end('release');
   assert.equal(continueDeferredSourceCustody(f.hold, { publishedHead: sourceHead }), true);
   assert.equal((await closed)[0], 0);
   assert.ok(JSON.parse(readFileSync(f.hold.path)).continuedAt);

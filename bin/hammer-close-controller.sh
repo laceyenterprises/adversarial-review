@@ -373,6 +373,8 @@ case "$ham_close_conflict_status" in
   22) ham_append_terminal_audit deferred needs-rebase-repair || ham_close_finish 1 procedure-step-failed
       ham_close_finish 21 needs-rebase-repair ;;
   20) ham_close_finish 20 head-changed ;;
+  75) ham_append_terminal_audit deferred canonical-validation-deferred || ham_close_finish 1 procedure-step-failed
+      ham_close_finish 75 canonical-validation-deferred ;;
   76) ham_close_finish 76 git-credential-refresh-failed ;;
   *) ham_close_finish "$ham_close_conflict_status" conflict-rebase-failed ;;
 esac

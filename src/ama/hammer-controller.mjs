@@ -581,7 +581,7 @@ export async function runHammerController(script, args = [], {
     try { record.leaseCleanup = releaseImpl({ env, shellPid: child.pid, startedAt, drained, terminationReason: reason }); }
     catch { record.leaseCleanup = { released: false, reason: 'lease-cleanup-failed' }; }
     persist();
-    retainDeferredControllerCleanup(env, recordPath, record);
+    await retainDeferredControllerCleanup(env, recordPath, record);
     if (record.leaseCleanup.reason === 'lease-cleanup-failed' || record.leaseCleanup.reason === 'mutation-lock-busy') return 125;
     if (drained && reason === 'shell-exited' && status !== 0) {
       reportHammerEarlyFailure('controller-shell-ended', { env });
@@ -624,7 +624,7 @@ export async function runHammerController(script, args = [], {
       catch { record.leaseCleanup = { released: false, reason: 'lease-cleanup-failed' }; }
     }
     try { persist(); } catch { /* Keep the original registration if disk failed. */ }
-    retainDeferredControllerCleanup(env, recordPath, record);
+    await retainDeferredControllerCleanup(env, recordPath, record);
     if (!ready) reportHammerEarlyFailure('controller-setup-failed', { env });
     return 125;
   } finally {

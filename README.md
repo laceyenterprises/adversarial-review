@@ -2242,6 +2242,10 @@ drain. Across launches, the watcher records these deferrals as owned inconclusiv
 retries: full refunds, exponential backoff from the configured attempt threshold,
 and one notification, using the existing last-phase receipt without a final
 terminal-stop receipt.
+If the record for an observed ended inconclusive launch is unreadable, the
+watcher holds that head's retry and sends one operator notice. Teardown paces
+retention failures per hold and accepts continued custody with exact-source
+publication.
 Pytest reports real collection and test
 phase boundaries and uses local ledger routing; explicit disposable-Postgres
 test settings remain intact. Standalone TERM/INT/HUP cancellation initiates group TERM,

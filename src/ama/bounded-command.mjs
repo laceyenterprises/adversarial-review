@@ -88,7 +88,7 @@ export async function runBounded(command, args, {
       for (const [signal, handler] of handlers) process.off(signal, handler);
       // A successful KILL delivery alone does not confirm group drain.
       const unconfirmed = cleanupFailed || (!controlled && escalated && groupPresent());
-      if (cleanupFailed || (unconfirmed && exitCode === 0)) exitCode = 125;
+      if (unconfirmed) exitCode = 125;
       stdout.write(tail);
       stdout.write('\n');
       const cleanup = unconfirmed ? 'unconfirmed' : controlled && outcome ? 'controller-owned' : 'finished';

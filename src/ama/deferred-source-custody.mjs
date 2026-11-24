@@ -1,11 +1,14 @@
-import { execFileSync } from 'node:child_process';
-import { closeSync, copyFileSync, lstatSync, mkdirSync, mkdtempSync, openSync, readFileSync, readdirSync, rmSync } from 'node:fs';
+import { execFile } from 'node:child_process';
+import { closeSync, copyFileSync, fsyncSync, lstatSync, mkdirSync, mkdtempSync, openSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync } from 'node:fs';
 import fsExt from 'fs-ext';
 import { basename, dirname, join } from 'node:path';
+import { promisify } from 'node:util';
 import { writeFileAtomic } from '../atomic-write.mjs';
 import { readDeferredValidationChecks, readUnknownValidationReceipt } from './local-validation-unknown.mjs';
 
 const sha = value => /^[a-f0-9]{40}$/.test(value || '');
+const execGit = promisify(execFile);
+const RETENTION_BACKOFF_MS = 5 * 60_000;
 export const DEFERRED_SOURCE_HOLD = 'canonical-validation-operator-decision';
 
 function directory(hqRoot, { repo, prNumber, headSha }) {
@@ -20,7 +23,7 @@ function read(path) {
   return JSON.parse(readFileSync(path, 'utf8'));
 }
 
-function withHoldLock(path, action, waitMs = 0) {
+function acquireHoldLock(path, waitMs = 0) {
   const fd = openSync(`${path}.lock`, 'a', 0o600);
   try {
     const deadline = Date.now() + waitMs;
@@ -31,8 +34,21 @@ function withHoldLock(path, action, waitMs = 0) {
         Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 25);
       }
     }
-    return action();
-  } finally { closeSync(fd); }
+    return fd;
+  } catch (error) { closeSync(fd); throw error; }
+}
+
+function withHoldLock(path, action, waitMs = 0) {
+  const fd = acquireHoldLock(path, waitMs);
+  try { return action(); }
+  finally { closeSync(fd); }
+}
+
+function currentHold(hold) {
+  const record = read(hold.path);
+  if (record.launchRequestId !== hold.launchRequestId || record.sourceHead !== hold.sourceHead
+    || record.attempt !== hold.attempt) throw new Error('deferred source identity changed');
+  return record;
 }
 
 export function readDeferredSourceHold(hqRoot, identity, { includeContinued = false } = {}) {
@@ -68,17 +84,13 @@ export function readDeferredSourceHoldsForLaunch(hqRoot, identity) {
   }
 }
 
-export function continueDeferredSourceCustody(hold, { publishedHead } = {}) {
+export function continueDeferredSourceCustody(hold, { publishedHead, waitMs = 1000 } = {}) {
   return withHoldLock(hold.path, () => {
-    const record = read(hold.path);
-    if (record.launchRequestId !== hold.launchRequestId || record.sourceHead !== hold.sourceHead
-      || record.attempt !== hold.attempt) {
-      throw new Error('deferred source identity changed');
-    }
-    if (publishedHead !== hold.sourceHead && !['bundled', 'matches-target'].includes(deferredSourceStatus(hold))) return false;
+    const record = currentHold(hold);
+    if (publishedHead !== hold.sourceHead && !deferredSourceRetained({ ...hold, ...record })) return false;
     writeFileAtomic(hold.path, JSON.stringify({ ...record, continuedAt: new Date().toISOString(), ...(publishedHead && { publishedHead }) }), { mode: 0o600 });
     return true;
-  }, 1000);
+  }, waitMs);
 }
 
 export function deferredSourceIdentity(env) {
@@ -108,7 +120,7 @@ export function startDeferredSourceCustody({ env, launchRequestId, sourceHead, c
   try {
     withHoldLock(path, () => {
       const previous = readDeferredSourceHold(env.HAM_HQ_ROOT, identity, { includeContinued: true });
-      if (previous?.continuedAt && ['bundled', 'matches-target'].includes(deferredSourceStatus(previous))) {
+      if (previous?.continuedAt && deferredSourceRetained(previous)) {
         writeFileAtomic(join(previous.evidenceDir, 'continued-hold.json'), JSON.stringify(read(path)), { mode: 0o600 });
         writeFileAtomic(path, JSON.stringify(record), { mode: 0o600 });
       } else writeFileAtomic(path, JSON.stringify(record), { mode: 0o600, overwrite: false });
@@ -118,33 +130,80 @@ export function startDeferredSourceCustody({ env, launchRequestId, sourceHead, c
   return evidenceDir;
 }
 
-export function retainDeferredCommit(hold, env) {
-  const { evidenceDir, sourceHead, targetHead, launchRequestId, validationBase } = hold;
-  // The hold fences successors and workspace reclamation while the cleanup
-  // owner drains the validation group. Pack only after the stop is underway.
-  const git = (...args) => execFileSync('git', args, { cwd: hold.workspace, env, encoding: 'utf8',
-    stdio: ['ignore', 'pipe', 'ignore'], timeout: 5000 }).trim();
+export function deferredSourceRetained(hold) {
+  return !hold.unreadable && (Boolean(hold.continuedAt && hold.publishedHead === hold.sourceHead)
+    || ['bundled', 'matches-target'].includes(deferredSourceStatus(hold)));
+}
+
+export async function retainDeferredCommit(hold, env, { workerRoot, now = Date.now() } = {}) {
+  const fd = acquireHoldLock(hold.path);
+  try {
+    const record = currentHold(hold);
+    if (record.continuedAt || deferredSourceStatus({ ...hold, ...record }) === 'bundled') return;
+    if (workerRoot) {
+      if (record.clean === false) return;
+      const parent = realpathSync(dirname(workerRoot));
+      const root = realpathSync(workerRoot);
+      const workspace = realpathSync(record.workspace);
+      const dotGit = lstatSync(join(workspace, '.git'));
+      if (root !== join(parent, basename(workerRoot)) || dirname(workspace) !== root
+        || !(dotGit.isDirectory() || dotGit.isFile())) return;
+      const lastAttempt = Date.parse(record.lastRetentionAttemptAt);
+      if (Number.isFinite(lastAttempt) && now - lastAttempt < RETENTION_BACKOFF_MS) return;
+      writeFileAtomic(hold.path, JSON.stringify({ ...record, lastRetentionAttemptAt: new Date(now).toISOString() }), { mode: 0o600 });
+      // Use only the resolved worker checkout and a local Git environment.
+      await retainCommit({ ...hold, ...record, workspace }, { PATH: env.PATH, GIT_CONFIG_NOSYSTEM: '1',
+        GIT_CONFIG_GLOBAL: '/dev/null', GIT_TERMINAL_PROMPT: '0', GIT_NO_REPLACE_OBJECTS: '1',
+        GIT_NO_LAZY_FETCH: '1' });
+    } else {
+      await retainCommit({ ...hold, ...record }, env);
+    }
+  } finally { closeSync(fd); }
+}
+
+async function retainCommit({ evidenceDir, sourceHead, targetHead, launchRequestId, validationBase, workspace }, env) {
+  const deadline = Date.now() + 5000;
+  const git = async (...args) => {
+    const timeout = deadline - Date.now();
+    if (timeout <= 0) throw new Error('deferred source retention deadline reached');
+    const { stdout } = await execGit('git', ['-c', 'core.hooksPath=/dev/null', '-c', 'gc.auto=0', ...args],
+      { cwd: workspace, env, encoding: 'utf8', timeout, killSignal: 'SIGKILL' });
+    return stdout.trim();
+  };
+  if (!/^lrq_[a-zA-Z0-9-]+$/.test(launchRequestId || '')) return;
   const ref = `refs/hammer/deferred/${launchRequestId}/${sourceHead}`;
   let source = { status: 'matches-target' };
   if (sourceHead !== targetHead) {
+    let temporary;
     try {
-      git('update-ref', ref, sourceHead);
+      await git('update-ref', ref, sourceHead);
       source = { status: 'local-ref-only', ref };
       // Missing prerequisite objects must not prevent a self-contained bundle.
-      const prerequisites = [...new Set([targetHead, ...(sha(validationBase) ? [validationBase] : [])])]
-        .filter(head => {
-          try { git('cat-file', '-e', `${head}^{commit}`); return true; } catch { return false; }
-        });
-      const bundle = join(evidenceDir, 'source.bundle');
-      git('bundle', 'create', bundle, ref, ...prerequisites.map(head => `^${head}`));
-      const advertised = git('bundle', 'list-heads', bundle, ref);
+      const prerequisites = [];
+      for (const head of new Set([targetHead, ...(sha(validationBase) ? [validationBase] : [])])) {
+        try { await git('cat-file', '-e', `${head}^{commit}`); prerequisites.push(head); }
+        catch { /* Try a self-contained bundle if the object is unavailable. */ }
+      }
+      temporary = mkdtempSync(join(evidenceDir, 'retention-'));
+      const bundle = join(temporary, 'source.bundle');
+      await git('bundle', 'create', bundle, ref, ...prerequisites.map(head => `^${head}`));
+      const advertised = await git('bundle', 'list-heads', bundle, ref);
       if (advertised !== `${sourceHead} ${ref}`) throw new Error('bundle head mismatch');
+      const bundleFd = openSync(bundle, 'r');
+      try { fsyncSync(bundleFd); } finally { closeSync(bundleFd); }
+      renameSync(bundle, join(evidenceDir, 'source.bundle'));
       source = { status: 'bundled', ref, prerequisites, bundle: basename(bundle) };
     } catch {
       if (!source.ref) source = { status: 'workspace-only' };
+    } finally {
+      if (temporary) rmSync(temporary, { recursive: true, force: true });
     }
   }
   writeFileAtomic(join(evidenceDir, 'source.json'), JSON.stringify(source), { mode: 0o600 });
+  if (source.status === 'bundled') {
+    try { await git('update-ref', '-d', ref, sourceHead); }
+    catch { /* The bundle is durable. Leave any remaining ref for custody maintenance. */ }
+  }
 }
 
 export function retainDeferredValidation(dir, deferral, validation, receiptPath) {
@@ -165,7 +224,7 @@ export function retainDeferredValidation(dir, deferral, validation, receiptPath)
   writeFileAtomic(join(dir, 'deferred.json'), JSON.stringify(deferral), { mode: 0o600 });
 }
 
-export function retainDeferredControllerCleanup(env, recordPath, record) {
+export async function retainDeferredControllerCleanup(env, recordPath, record) {
   // The validator receives the verify-head snapshot in its own environment.
   // Find its hold through either the dispatch head or the live head it passed
   // back to the owning controller via the run-local pointer.
@@ -184,7 +243,7 @@ export function retainDeferredControllerCleanup(env, recordPath, record) {
   if (!hold) return;
   try {
     writeFileAtomic(join(hold.evidenceDir, 'controller-cleanup.json'), JSON.stringify(record), { mode: 0o600 });
-    retainDeferredCommit(hold, env);
+    await retainDeferredCommit(hold, env);
   } catch { /* A missing final receipt leaves cleanup unconfirmed. */ }
   if (!record.drained) return;
   try {

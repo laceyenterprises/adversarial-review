@@ -2304,8 +2304,12 @@ source on its corresponding live head. Notice refresh follows changes in
 source and cleanup facts. Unreadable custody or an explicitly recorded unsafe custody fallback holds.
 A clean matching-target hold with confirmed cleanup is continued and returns
 to existing paced retry. Legacy retry rows alone and corrupt retry files cannot
-hold unrelated heads. Teardown
-matches the ending launch across target heads and preserves incomplete source.
+hold unrelated heads. An ended inconclusive launch with an unreadable retry
+record pauses its own retry and surfaces a deduplicated operator notice.
+Teardown matches the ending launch across target heads, retries retention in the
+resolved worker checkout with per-hold backoff, and accepts continued custody
+with exact-source publication. The watcher attempts the custody lock once per
+pass. Unconfirmed group cleanup exits 125.
 The `telegram-responder-guard` no-verdict takes precedence over import-fault
 fallback, and cancellation retains its own outcome with unconfirmed drain.
 Supported CI-mirror commands run in the registered group. An inner command

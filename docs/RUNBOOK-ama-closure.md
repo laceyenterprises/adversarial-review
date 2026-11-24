@@ -6495,6 +6495,9 @@ exact head, standalone validation can continue with UNKNOWN when the canonical
 mirror proves its full selection, every selected check passed locally or has
 exact-head authenticated coverage under the existing manifest policy, no local
 failure was observed, and the standalone runner confirmed cleanup.
+When the mirror interface cannot report the full selection before execution,
+the receipt and diagnostics say `selection-size-unavailable`. That UNKNOWN
+cannot use CI continuation.
 
 A completed local conflict repair validates outside the lease before publication.
 An eligible UNKNOWN can publish only with a clean checkout, an exact source
@@ -6546,17 +6549,22 @@ this deferral with the audit helper without `--final`. The `last-phase` receipt
 supplies the observation for the watcher.
 
 Teardown checks all custody markers for the ending launch across target heads,
-including after publication changed the dispatch head. Incomplete source
-retention keeps the worker even for a continued marker. Unreadable custody fails closed. Teardown retries incomplete source retention
-before refusing reclamation; missing local prerequisite objects are omitted so
-the bundle can be self-contained. A missing source receipt implies matches-target
+including after publication changed the dispatch head. A continued marker with
+confirmed exact-source publication can release a workspace without a bundle.
+Unreadable custody fails closed. Teardown retries incomplete source retention
+asynchronously at most once per hold every five minutes in the resolved
+checkout under the ending launch's worker root. Missing local prerequisite
+objects are omitted so the bundle can be self-contained. The retention owner
+prunes its temporary ref after persisting the verified bundle receipt. A missing source receipt implies matches-target
 only when source equals target and cleanliness is not explicitly false. Corrupt
-source receipts remain unconfirmed. Custody continuation waits up to one second
-for its lock; the controller retries post-publication completion three times
+source receipts remain unconfirmed. The watcher tries the lock once per pass.
+Explicit continuation waits up to one second for the lock, and the controller
+retries post-publication completion three times
 before ending deferred, without repeating publication. Notices refresh when source or cleanup facts
 change and unchanged observations retain their delivery latch. After SIGKILL,
 the bounded runner allows up to one second for the group to disappear before
-reporting unconfirmed cleanup.
+reporting unconfirmed cleanup with exit 125. A custody refusal during conflict
+repair exits 75 with the `canonical-validation-deferred` outcome.
 
 Confirm cleanup using the notice's launch, head and evidence directory. To
 recover, inspect the Git bundle and prerequisites in `source.json` from an
@@ -6574,6 +6582,9 @@ the active hold before resuming. Archiving the marker alone leaves an explicitly
 incident paging remain follow-ups. Environment-unavailable deferrals with unpublished source or unconfirmed
 cleanup still page per affected head; published clean sources with confirmed
 cleanup use ordinary retry backoff.
+If an ended inconclusive launch's retry record is unreadable, the watcher logs
+`retry-record-unreadable`, keeps the record, and pauses that head's retry with
+one operator notice. Restore a validated copy before resuming that retry.
 The validator owns its timeout and process cleanup. Avoid a second shell alarm
 around it. If the outer tool returns 124 or 142 first, follow the same handoff
 from the available diagnostics and keep unconfirmed cleanup explicit.

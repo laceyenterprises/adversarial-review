@@ -3,10 +3,10 @@
 import './helpers/dispatch-read-fixture.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import { tmpdir, userInfo } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 
 import { maybeDispatchAmaCloser, readAmaCloserDispatchRecord,
   updateAmaCloserDispatchRecord } from '../src/ama/dispatch-closer.mjs';
@@ -19,7 +19,7 @@ import { updateAmaCloserLease } from '../src/ama/closer-lease.mjs';
 import { proveConflictPrimary } from '../src/ama/conflict-primary.mjs';
 import { readHammerRetryCapLedger, recordHammerRetryDispatch } from '../src/ama/hammer-retry-cap.mjs';
 import { readCloserNoDeliveryLedger } from '../src/ama/closer-no-delivery.mjs';
-import { CLOSER_INCONCLUSIVE_RETRY_DEFAULTS, classifyCloserOutcome, closerInconclusiveRetryDelayMs,
+import { CLOSER_INCONCLUSIVE_RETRY_DEFAULTS, classifyCloserOutcome, closerInconclusiveRetryDelayMs, closerInconclusiveRetryFilePath,
   closerInconclusiveRetryPolicy, evaluateCloserInconclusiveRetryGate, readCloserInconclusiveRetries,
   recordCloserInconclusiveRetry } from '../src/ama/closer-inconclusive-retry.mjs';
 import { escalateClosureBudget, refundInconclusiveExhaustion } from '../src/ama/closure-budget-escalation.mjs';
@@ -201,6 +201,33 @@ test('a published-head timeout with confirmed controller cleanup uses paced retr
   assert.equal((await run(minutes(2))).dispatched, true);
   assert.equal(state.launches, 2);
   assert.equal(state.alerts.filter(alert => alert.options?.event === 'ama_closer.deferred_source_decision').length, 0);
+});
+
+test('corrupt retry evidence blocks repeated ended validation retries and pages once', async t => {
+  const root = scratch(t);
+  const { state, deps, endCurrent, identity } = harness(root, 'canonical-validation-deferred');
+  const run = at => maybeDispatchAmaCloser({ ...dispatchArgs(root, minutes(at)), ...deps });
+  const path = closerInconclusiveRetryFilePath(root, identity);
+  mkdirSync(dirname(path), { recursive: true });
+  assert.equal((await run(0)).dispatched, true);
+  for (const firstPass of [1, 4]) {
+    endCurrent();
+    recordHammerEarlyFailure('canonical-validation-deferred', { env: { HAM_HQ_ROOT: join(root, 'hq'),
+      HAM_REPO: REPO, HAM_PR_NUMBER: String(PR), HAM_TARGET_REMEDIATION_SHA: HEAD, HQ_LAUNCH_REQUEST_ID: state.ended } });
+    writeFileSync(path, '{broken');
+    for (const at of [firstPass, firstPass + 1]) {
+      const result = await run(at);
+      assert.equal(result.reason, 'retry-record-unreadable');
+      assert.equal(result.recoveryWait, true);
+      assert.equal(readFileSync(path, 'utf8'), '{broken');
+    }
+    if (firstPass === 1) {
+      rmSync(path);
+      assert.equal((await run(3)).dispatched, true);
+    }
+  }
+  assert.equal(state.launches, 2);
+  assert.equal(state.alerts.filter(alert => alert.options?.event === 'ama_closer.inconclusive_retry_record_unreadable').length, 1);
 });
 
 test('a canonical validation deferral stops same-head dispatch and asks for one operator decision', async t => {

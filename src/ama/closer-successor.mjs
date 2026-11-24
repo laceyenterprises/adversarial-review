@@ -46,8 +46,9 @@ export async function observeDeferredSourceDecision({ rootDir, hqRoot, repo, prN
   let hold = readDeferredSourceHold(hqRoot, identity, { includeContinued: true });
   if (hold && !deferredSourceNeedsDecision(hold)) {
     if (!hold.continuedAt) {
-      try { if (!continueDeferredSourceCustody(hold)) return { status: DEFERRED_SOURCE_HOLD, reason: DEFERRED_SOURCE_HOLD, needsOperator: true }; }
-      catch { return { status: DEFERRED_SOURCE_HOLD, reason: DEFERRED_SOURCE_HOLD, needsOperator: true }; }
+      try { if (continueDeferredSourceCustody(hold, { waitMs: 0 })) return null; }
+      catch { /* Retry continuation on the next watcher pass. */ }
+      return { status: DEFERRED_SOURCE_HOLD, reason: DEFERRED_SOURCE_HOLD, recoveryWait: true };
     }
     return null;
   }

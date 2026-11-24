@@ -1180,8 +1180,8 @@ EOF_HAM_PROTECTIVE_PREDECESSORS
     return 1
   }
 
-  # Withdrawal-only closure has no superseding HAM commit. Clear just those
-  # same-head authoritative vetoes whose full blocker lists were withdrawn.
+  # Revalidate HAMFINAL withdrawals and distinguish an already-dismissed
+  # superseded review of findings covered by terminal remediation.
   if ! "$HAM_NODE_BIN" "<<ROOT_DIR>>/bin/dismiss-withdrawn-reviews.mjs" \
     --root-dir "<<ROOT_DIR>>" --repo <<REPO>> --pr <<PR_NUMBER>> \
     --head-sha "$POST_REMEDIATION_SHA" --verdict-file "$HAM_VERDICT_FILE"; then

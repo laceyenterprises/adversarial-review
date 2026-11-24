@@ -2,19 +2,43 @@ import { carryHammerWithdrawals, createReviewCurrencyReader } from './review-cur
 import { normalizeEffectiveReviewVerdict } from '../kernel/verdict.mjs';
 import { classifyBlockingFindings } from '../follow-up-merge-agent.mjs';
 import { amaAllAuthoritativeReviewerLogins, isCurrentAuthoritativeFamilyReview } from './reviewer-authority.mjs';
+import { hamAuditCommentAuthorMatches } from './ham-provenance.mjs';
 import {
   blockingFindingIdentitiesFromBody, hammerWithdrawalsFromComments, readHammerWithdrawals,
   resolveHammerAdjudication,
 } from './hammer-adjudication.mjs';
 
-// HAMFINAL-01: remove only the GitHub veto whose complete blocker list has
-// durable, comment-verified withdrawals at the live head. This grants no merge
-// authority and does not use the older-head terminal-remediation dismissal.
-export async function dismissWithdrawnReviews({ rootDir, repo, prNumber, headSha, expectedWithdrawnIdentities = [] }, {
+const sha = /^[a-f0-9]{40}$/i;
+
+function hasQueuedRereviewDismissal(events, review) {
+  if (!Array.isArray(events)) throw new Error('missing review dismissal timeline');
+  const matches = events.filter(event => event?.event === 'review_dismissed'
+    && event.dismissed_review?.review_id === review.id);
+  if (matches.length !== 1) return false;
+  const [event] = matches;
+  const actor = event.actor;
+  if (!Number.isSafeInteger(event.id) || event.id < 1 || actor?.type !== 'Bot'
+    || typeof actor.login !== 'string' || !actor.login.endsWith('[bot]') || !hamAuditCommentAuthorMatches(actor.login)
+    || typeof event.dismissed_review.state !== 'string'
+    || event.dismissed_review.state.toLowerCase() !== 'changes_requested') return false;
+  // The request can name an intermediate head. Review currency and terminal
+  // validation are checked against today's exact head by the caller.
+  const message = /^Request changes judged commit ([a-f0-9]{40}); current head is ([a-f0-9]{40})\. Re-review requested at (\S+) is queued or running for the current head; dismissing the superseded review\.$/
+    .exec(event.dismissed_review.dismissal_message);
+  return Boolean(message && message[1] === review.commit_id && message[2] !== review.commit_id
+    && Number.isFinite(Date.parse(message[3])));
+}
+
+// HAMFINAL-01: remove only a veto whose complete blocker list has durable,
+// comment-verified withdrawals. A verified queued re-review dismissal on a
+// terminally remediated head is a separate, read-only case.
+export async function dismissWithdrawnReviews({
+  rootDir, repo, prNumber, headSha, expectedWithdrawnIdentities = [], terminalReviewedHead = null,
+}, {
   get, dismiss, readWithdrawals = readHammerWithdrawals, git,
 } = {}) {
   if (!/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(repo || '')
-    || !Number.isInteger(prNumber) || prNumber < 1 || !/^[a-f0-9]{40}$/i.test(headSha || '')) {
+    || !Number.isInteger(prNumber) || prNumber < 1 || !sha.test(headSha || '')) {
     throw new Error('withdrawn review dismissal requires PR identity and exact head');
   }
   const recorded = readWithdrawals({ rootDir, repo, prNumber, strict: true });
@@ -37,6 +61,7 @@ export async function dismissWithdrawnReviews({ rootDir, repo, prNumber, headSha
     throw new Error('admitted withdrawal authority is missing or invalid');
   }
   const dismissed = [];
+  let timeline;
   for (const review of reviews) {
     if (!Number.isSafeInteger(review.id) || review.id < 1 || !['CHANGES_REQUESTED', 'DISMISSED'].includes(review.state)
       || !amaAllAuthoritativeReviewerLogins().includes(String(review.user?.login || '').replace(/\[bot\]$/, ''))
@@ -50,8 +75,14 @@ export async function dismissWithdrawnReviews({ rootDir, repo, prNumber, headSha
       reviewedHead: review.commit_id, currentHead: headSha,
     }, withdrawals);
     if (!adjudication.allBlockingWithdrawn) {
-      if (review.state === 'DISMISSED') throw new Error('dismissed review withdrawal authority is missing or invalid');
-      continue;
+      if (review.state === 'CHANGES_REQUESTED') continue;
+      const terminalRepair = adjudication.applicable && review.commit_id === terminalReviewedHead
+        && terminalReviewedHead !== headSha;
+      if (!terminalRepair || !hasQueuedRereviewDismissal(
+        timeline ??= await get(`repos/${repo}/issues/${prNumber}/timeline?per_page=100`), review,
+      )) {
+        throw new Error('dismissed review withdrawal authority is missing or invalid');
+      }
     }
     // Recheck the selected review and live head immediately before mutation.
     const liveReview = await get(`${prPath}/reviews/${review.id}`);

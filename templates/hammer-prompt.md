@@ -121,12 +121,18 @@ timeout 142/143) is retried by rerunning the same close command in this
 workspace; never end the run to obtain a fresh workspace for it. Resume
 with verify-head and fresh lease/head checks; never replay publication or merge.
 An unknown cleanup or live owner retains custody and forbids a second controller.
-`canonical-validation-deferred` is UNKNOWN. The validator holds the exact source
-and names the custody directory. Preserve the existing cleanup receipt and any
-unpublished commit. Invoke `hammer-terminal-audit.mjs canonical-validation-deferred <head>`
-without `--final`, then end the run. The watcher holds the live head for the
-operator to recover the retained source or discard the attempt. Do not retry
-validation, conflict repair, publication or close on that head after this stop.
+`canonical-validation-deferred` is UNKNOWN. Keep its exact-head receipt
+`validation-deferred-<head>.json` and custody directory.
+Preserve the existing cleanup receipt and any unpublished commit.
+The shipped close command handles a completed Appendix D
+repair: after confirmed drain it can publish to the captured source branch,
+reuse qualifying validation and continue to exact-head CI, or redrive via the
+watcher on a confirmed published head. For unrecovered source invoke
+`hammer-terminal-audit.mjs canonical-validation-deferred <head>` without `--final`,
+then end the run. The watcher holds the corresponding live head for recovery.
+Do not retry
+validation, conflict repair, publication or close on that head after this stop,
+even with green required CI. This takes precedence over setup retry.
 An exhausted closer fault is a **deferred harness fault**, never a terminal PR
 decision. Record its exact named reason with the terminal helper; dispatch
 refunds the charged attempt and parks/pages once after three refunds per head.

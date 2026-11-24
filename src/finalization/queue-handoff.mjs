@@ -54,8 +54,12 @@ export function normalizeQueueHandoff(input) {
 
 // A trusted read that local validation ended with no verdict (timed out,
 // killed for load, process inspection denied). A real failure is never this.
-export const queueLocalValidationUnknown = evidence => evidence?.localValidation?.result === 'unknown'
-  && hasCompletedUnknownValidationEvidence(evidence.localValidation);
+// A separately verified direct clean admission has no Hammer battery. Its
+// existing CI-only receipt still requires declared contexts at the merge gate.
+export const queueLocalValidationUnknown = (evidence, { clean = false } = {}) =>
+  evidence?.localValidation?.result === 'unknown' && (clean
+    ? evidence.localValidation.ciAuthoritative === true && evidence.localValidation.localFailureObserved !== true
+    : hasCompletedUnknownValidationEvidence(evidence.localValidation));
 
 const findingKey = finding => handoffJson([finding.reviewId, finding.reviewCommitId, finding.findingId]);
 
@@ -68,7 +72,7 @@ const findingKey = finding => handoffJson([finding.reviewId, finding.reviewCommi
  * A missing/unreadable/partial fact fails closed. No submitter-provided `valid`
  * field, markdown acknowledgement or exhausted budget substitutes for these reads.
  */
-export function validateQueueHandoff(h, e) {
+export function validateQueueHandoff(h, e, { clean = false } = {}) {
   requireFact(e && e.subject?.state === 'open' && isDeepStrictEqual(e.subject.lane, h.lane)
     && e.subject.prNumber === h.prNumber && e.subject.head === h.head && text(e.subject.sourceRef), 'subject currency');
   requireFact(e.review?.complete === true && e.review.id === h.sourceReview.id
@@ -99,7 +103,7 @@ export function validateQueueHandoff(h, e) {
     // MRQ-20: UNKNOWN local validation (no verdict) is admissible; the
     // executor's final gate then requires declared exact-candidate contexts.
     const read = kind === 'localValidation' && e[kind]?.result === 'unknown'
-      ? queueLocalValidationUnknown(e) : e[kind]?.ok === true;
+      ? queueLocalValidationUnknown(e, { clean }) : e[kind]?.ok === true;
     requireFact(read && e[kind].head === h.head && e[kind].sourceRef === h[kind].sourceRef, `failed ${kind}`);
   }
   requireFact(Array.isArray(e.review.findings), 'unknown finding inventory');

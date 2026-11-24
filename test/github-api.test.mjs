@@ -2211,6 +2211,9 @@ export async function load(url, context, nextLoad) {
         export function recordMergeCloseoutScrapeFailure() { return { changes: 0 }; }
         export function recordReviewLatencyEvent() { return { event_id: 0 }; }
         export function requestReviewRereview() { return { changes: 0 }; }
+        export function queuePrimaryReversalReview() {
+          throw new Error('Lifecycle sync must not queue a primary reversal review');
+        }
         // Imported by src/follow-up-stuck-claim-sweep.mjs. Exported inertly so
         // this handwritten stub stays a superset of the real module's
         // sweep-facing surface: a production module that joins this loader's

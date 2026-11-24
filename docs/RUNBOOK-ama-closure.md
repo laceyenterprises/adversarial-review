@@ -17,11 +17,29 @@ PR/head successor request carrying the predicate's refusing review. Orchestratio
 passes the canonical `settledReview` snapshot to closer dispatch; dispatch reads
 its review body for successor custody without re-deriving review eligibility. The ordinary
 pre-claim remediation cap uses the same request. The watcher admits at most one
-existing final-fix-all work order for that head, or records and alerts
-`ownerless-closer-no-merge` through closure-wait alerting. Disabled or refused
-handoffs cannot silently terminate custody. See
+existing final-fix-all work order for that head. A disabled or refused handoff
+records `needs-closer` and alerts through closure-wait. Later closure passes
+recheck admission on that head, including from legacy `ownerless-closer-no-merge`
+receipts. If final fix-all has already spent its head-scoped round, only a strict
+exact-head review with findings that selects hammer continues through ordinary
+hammer admission and caps, including when failed CI is the repair reason. A durable `fallbackAt` marker transfers deadline ownership to hammer across retry gaps and cap escalation. Later passes on the same hammer route reuse the marker. Other routes retain `needs-closer` custody and the refusal page. Every
+30 seconds the watcher scans a bounded batch of receipts independently of
+closure selection. After 1800 seconds from the original `requestedAt`, it
+retires a receipt when GitHub confirms a terminal PR or a moved head. For the
+same open head, a live closer launch (including retries) suppresses the overdue
+page while it owns the head. A live closer, pending lease or unreadable PR or
+launch evidence backs off deadline probes for five minutes. Successful immediate or overdue delivery records
+`escalatedAt` and ends deadline paging. Failed delivery remains retryable.
+Enrolled, escalated and hammer-owned receipts get retirement-only probes at
+most daily. The sweep prunes retired JSON and its lock after seven days and
+reaps orphaned legacy lock files under flock.
+Overdue pages share the immediate refusal latch. Poll updates to `updatedAt`
+do not extend the deadline. See
 [successor records](data-model/closer-successors.md) and
 [publication ownership](data-model/hammer-publication-ownership.md).
+Strict exact-head findings remain recognized after the automatic retry-cap stop
+is selected, so an ended launch still reconciles and reaches the existing
+deduplicated cap page instead of retaining a succeeded dispatch as an owner.
 Exits before completing the close retain their existing bounded retry/refund
 executor and cap alert; confirmed no-merge decisions and `no_work_done` take
 the successor path after terminal cleanup and accounting.
@@ -2826,7 +2844,8 @@ cannot inherit that proof. Daemon execution observations update the common polic
 repair admission cannot waive an earlier review, remaining remediation round,
 stop or cap.
 The existing head-scoped approval lane uses the same actor validator as the
-daemon; unclean review overrides still require its enforced operator allowlist.
+daemon and requires zero findings in strict mode. In non-strict mode, an
+unclean review override requires its enforced operator allowlist.
 A passed review ceiling remains repair admission, never current-head merge proof.
 
 Changed proof or queued PR facts create a new immutable generation. Unchanged
@@ -4440,9 +4459,9 @@ identity** (the operator-approval auto-close lane). Apply either:
 (the audit records `mergeAccountability: operator-approval` with the label,
 actor, and event id). `merge-agent-requested` substitutes for worker identity
 only; it still needs a settled-success, strict-clean review. Current-head
-`operator-approved` also overrides the verdict and finding-count gates, so a
-`Request changes` review with blocking findings can use the daemon lane even
-when worker identity resolves. When the live label is present, the audit records
+`operator-approved` can override the verdict. Daemon routing still requires
+zero findings in strict mode. When non-strict mode permits an override of the
+finding-count gate, the audit records
 `closureAuthority: daemon-operator-approved-override`,
 `mergeAccountability: operator-approval`, and `operatorApproval` with the
 actor, event id, observation time, and approved head. A successful merge emits
@@ -5232,6 +5251,27 @@ for the diagnostic command + recovery playbook.
 Expected when AMA is enabled and the dispatch isn't from a current-head
 `merge-agent-requested` label.
 
+### Strict findings that remain on the approved head
+
+If a hammer closes without a new commit and the exact-head review still lists
+non-blocking findings, inspect its closeout after the retry-cap page. Confirm
+whether the findings still apply. If the review no longer reflects the code,
+request a fresh exact-head review through the existing operator re-review
+procedure. If the findings still apply, use the current-head
+`merge-agent-requested` operator fallback for follow-through under its normal
+review and merge gates. Keep strict mode enabled during per-PR recovery.
+Over the first 24 hours after deployment, record distinct sampled strict
+exact-head findings heads, retry-cap pages and manual
+`merge-agent-requested` closures, with PR/head identities and page/closure
+evidence. More than 3 retry-cap pages or more than 3 manual closures fails
+operator acceptance and requires revisiting the policy before broader rollout.
+The operator plan checks the half-open 24-hour window and requires a final
+findings route for every sampled head. Supply the verified page and closure
+evidence as `ACCEPTANCE_EVIDENCE_JSON`; an explicit empty array records zero
+counts. No matching traffic leaves acceptance pending.
+The committed operator plan is
+`modules/worker-pool/post-merge-actions/AMASTRICTROUTE-01.yaml`.
+
 ### `not-eligible` reasons in the closer prompt audit
 
 Each entry in the audit's `attempts[].preMergeReasons` (or
@@ -5241,7 +5281,7 @@ reasons:
 | Reason | Meaning |
 |---|---|
 | `verdict-not-settled-success` | The settled review is not eligible for direct close (and no current-head `operator-approved`). This fires when the latest review is `Request changes` **OR** — when `roles.adversarial.merge_authority.strict_non_blocking_remediation` is on (default) — when a `Comment only`/`Approved` review still carries standing or unknown-state non-blocking findings. In the strict-mode case it is emitted alongside `non-blocking-findings-present` (see that row); a `Comment only` PR refused with *both* reasons was NOT downgraded to `Request changes`. |
-| `non-blocking-findings-present` | Strict mode (`strict_non_blocking_remediation`, default on): the settled review has standing non-blocking findings that have not been remediated, so the PR is not eligible for *direct* close. It still closes via HAM terminal remediation (the hammer addresses the non-blocking findings) or a current-head `operator-approved`. A `known` count of `>0` triggers this; an `unknown` non-blocking state also fails closed in strict mode. HAM may waive this reason on authorized active HAM evidence only in the strict-non-blocking lane described below. |
+| `non-blocking-findings-present` | Strict mode (`strict_non_blocking_remediation`, default on): the settled review has standing non-blocking findings that have not been remediated, so the PR is not eligible for *direct* close. The hammer addresses the remaining findings. With `strict_mode` enabled, a terminal receipt can carry a superseded review but cannot clear findings on an exact-head review. `operator-approved` can override the verdict while strict mode still requires zero findings. The approval override of findings requires `strict_mode: false` and the existing approval and merge gates. A `known` count of `>0` triggers this; an `unknown` non-blocking state also fails closed in strict mode. HAM may waive this reason on authorized active HAM evidence only in the strict-non-blocking lane described below. |
 | `blocking-findings-unknown` | Latest review does not expose a known structured blocking-finding count. |
 | `blocking-findings-present` | Latest review has standing structured blocking findings. |
 | `non-blocking-findings-unknown` | Strict non-blocking remediation is enabled and the settled review does not expose a known structured non-blocking-finding count. |

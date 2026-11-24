@@ -23,6 +23,7 @@ import { resolveMergeAgentCoexistenceForWatcher } from '../src/ama-closure-orche
 import { readDaemonMergeParks } from '../src/daemon-merge-park-log.mjs';
 import { appendAmaAuditAttempt } from '../src/ama/audit.mjs';
 import { __testables__ as daemonCleanMergeTestables } from '../src/daemon-clean-merge.mjs';
+import { hasOperatorApprovedOverride } from '../src/ama/eligibility.mjs';
 
 // Integration test for the MSM-03 wiring seam in `maybeDispatchAmaClosureFor`:
 // the daemon clean-merge attempt runs BEFORE the AMA closer dispatch, and any
@@ -1683,6 +1684,7 @@ test('daemon clean merge fail-closes when worker LRQ identity cannot be resolved
 
 test('daemon clean merge strict mode declines non-blocking findings before identity reads', async () => {
   const rootDir = tempRoot();
+  const head = 'a'.repeat(40);
   try {
     let identityReads = 0;
     let liveFetches = 0;
@@ -1699,24 +1701,27 @@ test('daemon clean merge strict mode declines non-blocking findings before ident
       prNumber: 563,
       candidate: {
         baseBranch: 'main',
-        headSha: 'finding-head',
+        headSha: head,
         statusCheckRollup: [],
         mergeable: 'MERGEABLE',
         mergeStateStatus: 'CLEAN',
         prState: 'open',
       },
       gateSnapshot: {
-        reviewedHeadSha: 'finding-head',
+        reviewedHeadSha: head,
         settledReview: { verdict: 'comment-only' },
       },
       mergeabilityForGate: { mergeable: 'MERGEABLE', mergeStateStatus: 'CLEAN' },
       reviewState: {
+        headSha: head.toUpperCase(),
         blockingFindingCount: 0,
         blockingFindingState: 'known',
         nonBlockingFindingCount: 1,
         nonBlockingFindingState: 'known',
       },
-      currentPrHeadSha: 'finding-head',
+      currentPrHeadSha: head,
+      resolveHeadCloserCommitSuppressionImpl: () => assert.fail('exact-head findings cannot use closer certification'),
+      headHasValidatedHamTerminalRemediationImpl: () => assert.fail('exact-head findings cannot use the HAM audit'),
       readBuildCompletionSignalForPrImpl: () => {
         identityReads += 1;
         return {
@@ -1724,7 +1729,7 @@ test('daemon clean merge strict mode declines non-blocking findings before ident
           row: {
             launch_request_id: 'lrq_with_finding',
             worker_class: 'codex',
-            head_sha: 'finding-head',
+            head_sha: head,
           },
         };
       },
@@ -1732,7 +1737,7 @@ test('daemon clean merge strict mode declines non-blocking findings before ident
         liveFetches += 1;
         return {
           state: 'OPEN',
-          headSha: 'finding-head',
+          headSha: head,
           headRefName: 'worker/finding-head',
           statusCheckRollup: [],
           mergeable: 'MERGEABLE',
@@ -1761,6 +1766,28 @@ test('daemon clean merge strict mode declines non-blocking findings before ident
   } finally {
     rmSync(rootDir, { recursive: true, force: true });
   }
+});
+
+test('#5053 strict exact-head closer findings route directly to the hammer', async t => {
+  const rootDir = tempRoot();
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  const args = findingsArgs(rootDir);
+  let hammers = 0;
+  const routed = await maybeDispatchAmaClosureFor({ ...args,
+    resolveHeadCloserCommitSuppressionImpl: () => assert.fail('strict final findings must skip daemon certification'),
+    runDaemonCleanMergeAttemptImpl: () => assert.fail('shared decision must route directly to hammer'),
+    maybeDispatchAmaCloserImpl: async input => {
+      hammers++;
+      assert.equal(input.reviewState.headSha, 'head-live');
+      assert.equal(input.reviewState.nonBlockingFindingCount, 1);
+      assert.equal(input.reviewState.nonBlockingFindingState, 'known');
+      assert.match(input.settledReview.reviewBody, /Improve the error message/);
+      return { dispatched: true };
+    },
+  });
+  assert.equal(routed.nextAction.action, 'hammer');
+  assert.equal(routed.nextAction.reason, 'review-findings-final');
+  assert.equal(hammers, 1);
 });
 
 test('daemon clean merge defers when the live PR head moved after the tick snapshot', async () => {
@@ -2814,6 +2841,42 @@ function operatorApprovedEventAt(head, overrides = {}) {
   };
 }
 
+for (const configMode of ['omitted', 'undefined', true, 'superseded']) {
+  test(`strict-mode default refuses findings despite current-head approval (${configMode})`, async t => {
+    const rootDir = tempRoot();
+    t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+    const head = 'a'.repeat(40), event = operatorApprovedEventAt(head);
+    const args = unattributedDaemonArgs({ rootDir, head });
+    const cfg = { operatorLogins: [event.actor], operatorLabelActorEnforcement: 'enforce' };
+    if (configMode !== 'omitted') cfg.strictMode = configMode === 'undefined' ? undefined : true;
+    const reviewedHead = configMode === 'superseded' ? 'b'.repeat(40) : head;
+    const operatorApprovedEvidence = { applied: true, observedRevisionRef: head,
+      actor: event.actor, eventId: event.id, observedAt: event.createdAt };
+    assert.equal(hasOperatorApprovedOverride({ ...cfg, operatorApprovedEvidence },
+      { headSha: head, labels: ['operator-approved'] }), true, 'fixture has a valid exact-head override');
+    const result = await runDaemonCleanMergeAttempt({
+      ...args, cfg,
+      candidate: { ...args.candidate, labels: ['operator-approved'] },
+      gateSnapshot: { ...args.gateSnapshot, reviewedHeadSha: reviewedHead },
+      reviewState: { ...args.reviewState, headSha: reviewedHead,
+        nonBlockingFindingCount: 1, operatorApprovedEvidence },
+      readBuildCompletionSignalForPrImpl: () => assert.fail('decline before identity reads'),
+      resolveHeadCloserCommitSuppressionImpl: () => {
+        assert.equal(configMode, 'superseded');
+        return { suppressed: false };
+      },
+      headHasValidatedHamTerminalRemediationImpl: () => {
+        assert.equal(configMode, 'superseded');
+        return false;
+      },
+      fetchRollupImpl: () => assert.fail('decline before live reads'),
+      attemptDaemonCleanMergeImpl: () => assert.fail('operator approval cannot bypass strict findings'),
+    });
+    assert.equal(result.disposition, DAEMON_MERGE_DISPOSITION.NOT_TAKEN);
+    assert.equal(result.reason, 'non-blocking-findings-present');
+  });
+}
+
 test('file stop refuses daemon closure before dependencies and recovers without reload', async () => {
   const rootDir = tempRoot();
   try {
@@ -2916,7 +2979,7 @@ test('Deliverable 1: operator-approved at the current head substitutes for worke
   }
 });
 
-test('current-head operator approval routes an older request-changes review to daemon merge', async () => {
+test('outside strict mode current-head operator approval can override findings on an older review', async () => {
   const rootDir = tempRoot();
   try {
     const head = 'remediated-head';
@@ -2926,7 +2989,7 @@ test('current-head operator approval routes an older request-changes review to d
     let mergeArgs = null;
     const result = await runDaemonCleanMergeAttempt({
       ...args,
-      cfg: { ...args.cfg, operatorLogins: ['VirtualPaul'], operatorLabelActorEnforcement: 'enforce' },
+      cfg: { ...args.cfg, strictMode: false, operatorLogins: ['VirtualPaul'], operatorLabelActorEnforcement: 'enforce' },
       candidate: { ...args.candidate, labels: ['operator-approved'] },
       fetchRollupImpl: async () => ({
         state: 'OPEN', headRefOid: head, checks: args.candidate.statusCheckRollup,
@@ -2964,7 +3027,7 @@ test('operator override on an attributed worker records approval instead of work
     let mergeArgs;
     const result = await runDaemonCleanMergeAttempt({
       ...args,
-      cfg: { ...args.cfg, operatorLogins: ['VirtualPaul'], operatorLabelActorEnforcement: 'enforce' },
+      cfg: { ...args.cfg, strictMode: false, operatorLogins: ['VirtualPaul'], operatorLabelActorEnforcement: 'enforce' },
       candidate: { ...args.candidate, labels: ['operator-approved'] },
       fetchRollupImpl: async () => ({
         state: 'OPEN', headRefOid: head, checks: args.candidate.statusCheckRollup,

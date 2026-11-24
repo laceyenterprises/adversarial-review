@@ -1693,9 +1693,22 @@ worker exit. The merge remains terminal throughout comment recovery.
 An exhausted closer that confirms an open PR without merging enrolls a durable
 PR/head successor request carrying the predicate's refusing review. The ordinary
 pre-claim remediation cap uses the same request. The watcher admits at most one
-existing final-fix-all work order for that head, or records and alerts
-`ownerless-closer-no-merge` through closure-wait alerting. Disabled or refused
-handoffs cannot silently terminate custody. See
+existing final-fix-all work order for that head. A disabled or refused handoff
+records `needs-closer`, alerts through closure-wait and retains the receipt for
+later closure passes. A terminal final-fix-all result lets a strict exact-head
+review with findings that selects hammer proceed through ordinary admission and
+retry caps, including when failed CI is the repair reason. The receipt records `fallbackAt` to transfer deadline ownership to hammer across retry gaps and caps. Successor custody pages on
+refusal; the watcher deadline sweep also escalates after 1800 seconds from the
+original request if the receipt remains unenrolled on the same open head
+without hammer fallback ownership, prior successful escalation or a live closer
+dispatch or retry. A live closer, pending lease or unreadable PR or launch evidence backs off deadline probes for
+five minutes across restarts. Successful delivery records `escalatedAt` and
+ends deadline paging. Failed delivery remains retryable. Enrolled, escalated
+and hammer-owned receipts get retirement-only probes at most daily. Confirmed
+terminal or moved heads retire their receipts, and retired JSON is pruned after
+seven days under its lock, which the sweep also unlinks. Poll updates do not extend the deadline,
+and both observations share one page
+latch. See
 [successor records](data-model/closer-successors.md) and
 [publication ownership](data-model/hammer-publication-ownership.md).
 Exits before completing the close retain their existing bounded retry/refund
@@ -2568,7 +2581,7 @@ guards still apply, and an already captured prompt path must remain unchanged.
 | Path | When | What happens |
 |---|---|---|
 | **Hammer (repair and fallback)** | Blocking final findings, conflicts, CI-only repair, or findings remaining after the bounded builder fix-all; configured eligibility still applies | The watcher dispatches exactly one hammer terminal-remediation worker (`templates/hammer-prompt.md`, via `src/ama/dispatch-closer.mjs`). In the default `watcher.ama_hammer_dispatch_mode: inline` mode, the posted-review phase awaits that `hq dispatch` attempt. In `background` mode, the phase submits the same closer call to a bounded in-process queue keyed by PR@head with durable pending intent under `data/ama-hammer-background/` (recovered through normal guards on the first adoption phase after restart), returns retained ownership (`ama-pending`) with reason `ama-closer-dispatch-backgrounded`, and lets the closer's lease/dispatch-record guards prevent duplicate launches on later ticks. The hammer remediates, rebases only when GitHub reports a conflict or strict/unknown BEHIND, holds the required-checks-plus-changed-surface-tests merge bar, waits out GitHub required checks on the exact post-remediation head inside a bounded remote-CI window, and merges under its own lease with `--match-head-commit`. LEASEFAIR-01 releases the lease during the first CI wait. HAMRESUMEOWED-01 retains CLEAN and known non-strict MERGEABLE BEHIND heads, including overlapping-file base advances; only GitHub conflict or strict/unknown BEHIND requires rebase. LEASEFAIR-02 handles a required rebase with one in-run rebase and at most `HAM_CI_RETRY_WAIT_SECONDS` (default/minimum 120) wall-clock seconds of exact-head CI while retaining that lease, then rebuilds audit and predicate authority. |
-| **Daemon inline merge (clean completion)** | Final review, including a full re-review after builder fix-all, is fully clean — zero blocking AND zero non-blocking findings, both classifications known — or a current-head `operator-approved` overrides the verdict and finding gates; green required checks (or explicit no-CI bootstrap evidence), a MERGEABLE PR, and a live validated head remain mandatory | The watcher daemon clicks merge inline through a bounded `gh pr merge --match-head-commit` subprocess under the shared merge lease (`src/ama/daemon-merge.mjs`). An approval override records operator evidence and distinct closure authority in the audit. No agent is spawned. Dispositions: `merged`, `failed-closed` (conflicts, real CI failures and stale heads fall through to capped HAM; a current MERGEABLE clean head waiting on empty/no-CI evidence or cancelled recovery returns to the merge-agent path), `deferred` (lease contention; retry next tick), `not-taken` (a current MERGEABLE zero-finding settled head waiting on empty/no-CI evidence or cancelled recovery returns to the merge path; remediable failures and reviews with findings fall through to HAM). Protective predecessor and revoked-approval holds remain authoritative. |
+| **Daemon inline merge (clean completion)** | Final review, including a full re-review after builder fix-all, is fully clean — zero blocking AND zero non-blocking findings, both classifications known — or a current-head `operator-approved` overrides the verdict (strict mode still requires zero findings; `strict_mode: false` permits the configured approval override of findings); green required checks (or explicit no-CI bootstrap evidence), a MERGEABLE PR, and a live validated head remain mandatory | The watcher daemon clicks merge inline through a bounded `gh pr merge --match-head-commit` subprocess under the shared merge lease (`src/ama/daemon-merge.mjs`). An approval override records operator evidence and distinct closure authority in the audit. No agent is spawned. Dispositions: `merged`, `failed-closed` (conflicts, real CI failures and stale heads fall through to capped HAM; a current MERGEABLE clean head waiting on empty/no-CI evidence or cancelled recovery returns to the merge-agent path), `deferred` (lease contention; retry next tick), `not-taken` (a current MERGEABLE zero-finding settled head waiting on empty/no-CI evidence or cancelled recovery returns to the merge path; remediable failures and reviews with findings fall through to HAM). Protective predecessor and revoked-approval holds remain authoritative. |
 
 
 **Queue-v2 lanes (MRQ-21).** The two paths above are the legacy rule. On a
@@ -3221,8 +3234,8 @@ Key control points:
 - **`strict_mode`** (default `true`): the ordinary daemon lane requires a
   zero-finding review. Explicitly setting it `false` permits daemon merge
   over *known non-blocking* findings. A current-head `operator-approved`
-  overrides the verdict and finding gates; the daemon verifies the approval
-  again inside the merge lease and holds the tick if it was removed.
+  can override the verdict. Strict-mode routing requires zero findings even
+  with approval. The daemon verifies approval again inside the merge lease.
 - **`auto_hammer_on_eligibility_miss`** (default `false`): historical.
   It gated the auto-hammer dispatch when it was introduced, but since MSM-04
   the runtime no longer reads it — the hammer route keys on the configured

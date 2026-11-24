@@ -179,6 +179,11 @@ export function isFullyCleanSettledReview(reviewState = {}) {
   return blockingCount === 0 && nonBlockingCount === 0;
 }
 
+export function sameFullReviewHead(left, right) {
+  return typeof left === 'string' && typeof right === 'string'
+    && /^[0-9a-f]{40}$/i.test(left) && left.toLowerCase() === right.toLowerCase();
+}
+
 export function isDaemonMergeReviewAllowed(reviewState = {}, { strictMode = true } = {}) {
   const blockingState = String(reviewState.blockingFindingState || '').trim().toLowerCase();
   const nonBlockingState = String(reviewState.nonBlockingFindingState || '').trim().toLowerCase();
@@ -393,7 +398,7 @@ async function attemptDaemonCleanMergeInner({
   verdict,
   docsFastPath = null,
   beforeMergeImpl = null,
-  operatorApprovedEvidence = null,
+  operatorApprovedEvidence: observedOperatorApproval = null,
   operatorLogins = [],
   operatorLabelActorEnforcement = 'observe',
   reviewState = {},
@@ -575,18 +580,18 @@ async function attemptDaemonCleanMergeInner({
   const headCloserCertifiedBypass =
     allowHeadCloserCertifiedNonBlocking === true &&
     isDaemonMergeReviewAllowed(reviewState, { strictMode: false });
+  const reviewAllowed = isDaemonMergeReviewAllowed(reviewState, { strictMode });
+  const operatorApprovedEvidence = strictMode !== false && !reviewAllowed ? null : observedOperatorApproval;
   const initialOperatorOverride = hasOperatorApprovedOverride({
     operatorApprovedEvidence,
     operatorLogins,
     operatorLabelActorEnforcement,
   }, { headSha: liveGate?.candidateHead, labels: liveGate?.labels });
-  if (
-    !docsFastPath &&
-    !(allowHamTerminalRemediation === true && hamTerminalVerdict) &&
-    !headCloserCertifiedBypass &&
-    !initialOperatorOverride &&
-    !isDaemonMergeReviewAllowed(reviewState, { strictMode })
-  ) {
+  const strictExactHead = strictMode !== false && Boolean(validatedHead)
+    && String(reviewState.headSha || '').toLowerCase() === String(validatedHead).toLowerCase();
+  const findingsBypass = !strictExactHead && ((allowHamTerminalRemediation === true && hamTerminalVerdict)
+    || headCloserCertifiedBypass || initialOperatorOverride);
+  if (!docsFastPath && !reviewAllowed && !findingsBypass) {
     return notTaken(uncleanReason(reviewState, { strictMode }) || 'findings-unknown');
   }
 

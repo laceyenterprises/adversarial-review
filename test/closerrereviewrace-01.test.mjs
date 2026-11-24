@@ -2,13 +2,13 @@ import './helpers/rate-limit-state-isolation.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import fsExt from 'fs-ext';
-import { mkdtempSync, readFileSync, writeFileSync, rmSync } from 'node:fs';
+import { closeSync, existsSync, mkdtempSync, openSync, readFileSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { withHammerPublication, activeHammerPublication, retireHammerPublication, settleHammerRebasePublication, hammerPublicationPath } from '../src/ama/hammer-publication-ownership.mjs';
 import { getHeadCloserCommitSuppression } from '../src/head-closer-commit-suppression.mjs';
 import { hammerHeadOwnership } from '../src/hammer-head-ownership.mjs';
-import { requestCloserSuccessor, settleCloserSuccessor, readCloserSuccessor, closerSuccessorPath } from '../src/ama/closer-successor.mjs';
+import { requestCloserSuccessor, settleCloserSuccessor, readCloserSuccessor, closerSuccessorPath, createCloserSuccessorDeadlineSweep } from '../src/ama/closer-successor.mjs';
 import { acquireMergeLease, releaseMergeLease } from '../src/ama/merge-lease.mjs';
 
 const NOW = '2030-01-01T00:00:00.000Z';
@@ -157,7 +157,7 @@ for (const disabled of [false, true]) test(`successor ${disabled ? 'disabled' : 
   requestCloserSuccessor(input);
   const result = await settleCloserSuccessor({ ...input, enabled: !disabled,
     handoffImpl: async () => ({ action: 'fallback' }), observeWaitImpl: async args => pages.push(args) });
-  assert.equal(result.status, 'ownerless-closer-no-merge');
+  assert.equal(result.status, 'needs-closer');
   assert.equal(readCloserSuccessor(f.rootDir, input).status, result.status);
   assert.equal(pages.length, 1);
   assert.equal(pages[0].immediate, true);
@@ -185,7 +185,7 @@ test('a dispatch exception still persists and alerts typed ownerlessness', async
   const alerts = [];
   const result = await settleCloserSuccessor({ ...input, handoffImpl: async () => { throw null; },
     observeWaitImpl: async args => alerts.push(args) });
-  assert.equal(result.status, 'ownerless-closer-no-merge');
+  assert.equal(result.status, 'needs-closer');
   assert.equal(result.reason, 'successor-dispatch-failed');
   assert.equal(readCloserSuccessor(f.rootDir, input).status, result.status);
   assert.equal(alerts.length, 1);
@@ -246,3 +246,215 @@ test('an unproven asynchronous rebase result never acquires exact-head custody',
   }), /rebase-result-unproven/);
   assert.equal(hammerHeadOwnership(probe(f), HEAD), null);
 });
+
+test('AMASTRICTROUTE-01: refused successor admission leaves a durable needs-closer receipt', async t => {
+  const f = fixture(t), input = { ...f, headSha: HEAD, source: 'closer-ended-without-merge' };
+  requestCloserSuccessor({ ...input, reviewBody: 'Synthetic refusing finding.' });
+  const result = await settleCloserSuccessor({ ...input, admitted: false,
+    handoffImpl: async () => assert.fail('refused admission cannot dispatch'), observeWaitImpl: async () => {} });
+  assert.equal(result.reason, 'successor-admission-refused');
+  assert.equal(result.status, 'needs-closer');
+  assert.deepEqual(readCloserSuccessor(f.rootDir, input), result);
+});
+
+test('successor deadline survives repeated poll updates, including during the live-head read', async t => {
+  const f = fixture(t), input = { ...f, headSha: HEAD, source: 'closer-ended-without-merge' };
+  requestCloserSuccessor(input);
+  const start = Date.parse(NOW), pages = [], probes = [];
+  const settleAt = elapsed => assert.rejects(settleCloserSuccessor({ ...input, admitted: false,
+    now: new Date(start + elapsed).toISOString(),
+    observeWaitImpl: async () => { throw new Error('synthetic delivery failure'); } }), /synthetic delivery failure/);
+  for (let elapsed = 30_000; elapsed < 1_800_000; elapsed += 30_000) await settleAt(elapsed);
+  const sweepAt = async elapsed => {
+    const sweep = createCloserSuccessorDeadlineSweep({ rootDir: f.rootDir, now: () => start + elapsed,
+      readLive: async () => {
+        probes.push(elapsed);
+        await settleAt(elapsed); // The locked recheck must use the original request too.
+        return { state: 'open', headRefOid: HEAD };
+      },
+      observeWaitImpl: async args => pages.push(args) });
+    try { await sweep.tick(); } finally { await sweep.stop(); }
+  };
+  await sweepAt(1_799_999);
+  assert.deepEqual(probes, []);
+  assert.deepEqual(pages, []);
+  await sweepAt(1_800_000);
+  assert.deepEqual(probes, [1_800_000]);
+  assert.equal(pages.length, 1);
+  assert.equal(pages[0].reason, 'closer-successor-overdue');
+  const receipt = readCloserSuccessor(f.rootDir, input);
+  assert.equal(receipt.requestedAt, NOW);
+  assert.equal(receipt.updatedAt, new Date(start + 1_800_000).toISOString());
+});
+
+test('hammer fallback owns its receipt between launches and at the retry cap', async t => {
+  const f = fixture(t), input = { ...f, headSha: HEAD, source: 'closer-ended-without-merge' };
+  requestCloserSuccessor(input);
+  const result = await settleCloserSuccessor({ ...input, allowHammerFallback: true,
+    handoffImpl: async () => ({ action: 'fallback' }) });
+  assert.equal(result.action, 'fallback');
+  assert.equal(readCloserSuccessor(f.rootDir, input).fallbackAt, NOW);
+  let probes = 0;
+  const sweep = createCloserSuccessorDeadlineSweep({ rootDir: f.rootDir,
+    now: () => Date.parse(NOW) + 86_400_000,
+    readLive: async () => { probes++; return { state: 'open', headRefOid: HEAD }; },
+    hasLiveCloserImpl: async () => assert.fail('retirement-only probes do not read the ledger'),
+    observeWaitImpl: async () => assert.fail('hammer owns retry gaps and cap escalation') });
+  try { await sweep.tick(); await sweep.tick(); } finally { await sweep.stop(); }
+  assert.equal(probes, 1);
+  await settleCloserSuccessor({ ...input, admitted: false, observeWaitImpl: async () => {} });
+  const refused = readCloserSuccessor(f.rootDir, input);
+  assert.equal(refused.fallbackAt, undefined, 'another disposition returns custody to the successor path');
+  assert.equal(refused.escalatedAt, NOW);
+});
+
+for (const disposition of ['escalated', 'enrolled', 'fallback']) {
+  test(`the sweep retires and prunes ${disposition} receipts after head movement or closure`, async t => {
+    const f = fixture(t), input = { ...f, headSha: HEAD, source: 'closer-ended-without-merge' };
+    requestCloserSuccessor(input);
+    await settleCloserSuccessor({ ...input, allowHammerFallback: true,
+      handoffImpl: async () => disposition === 'enrolled' ? { remediation: { jobId: 'synthetic-successor' } }
+        : disposition === 'fallback' ? { action: 'fallback' } : { reason: 'synthetic-refusal' },
+      observeWaitImpl: async () => {} });
+    const day = 86_400_000;
+    let elapsed = day, probes = 0;
+    let live = { state: 'open', headRefOid: HEAD };
+    const sweep = createCloserSuccessorDeadlineSweep({ rootDir: f.rootDir, now: () => Date.parse(NOW) + elapsed,
+      readLive: async () => { probes++; return live; },
+      hasLiveCloserImpl: async () => assert.fail('retirement does not read custody'),
+      observeWaitImpl: async () => assert.fail('retirement does not page') });
+    t.after(() => sweep.stop());
+    await sweep.tick();
+    assert.equal(probes, 1);
+    live = disposition === 'fallback' ? { state: 'open', headRefOid: 'b'.repeat(40) } : { state: 'merged' };
+    elapsed += day - 1;
+    await sweep.tick();
+    assert.equal(probes, 1);
+    elapsed++;
+    await sweep.tick();
+    assert.equal(probes, 2);
+    assert.equal(Date.parse(readCloserSuccessor(f.rootDir, input).retiredAt), Date.parse(NOW) + elapsed);
+    elapsed += 7 * day;
+    await sweep.tick();
+    assert.equal(readCloserSuccessor(f.rootDir, input), null);
+    assert.equal(probes, 2, 'pruning uses the locked receipt, without a network read');
+  });
+}
+
+test('overdue live or unreadable heads back off for five minutes across sweep restarts', async t => {
+  const f = fixture(t), input = { ...f, headSha: HEAD, source: 'closer-ended-without-merge' };
+  requestCloserSuccessor(input);
+  let elapsed = 1_800_000, probes = 0, ledgerReads = 0, pages = 0;
+  const tick = async () => {
+    const sweep = createCloserSuccessorDeadlineSweep({ rootDir: f.rootDir, now: () => Date.parse(NOW) + elapsed,
+      readLive: async () => {
+        if (++probes === 2) throw new Error('synthetic unavailable PR read');
+        return { state: 'open', headRefOid: HEAD };
+      },
+      hasLiveCloserImpl: async () => ++ledgerReads === 1,
+      observeWaitImpl: async () => { pages++; },
+      logger: { warn() {} },
+    });
+    try { await sweep.tick(); } finally { await sweep.stop(); }
+  };
+  await tick();
+  assert.deepEqual([probes, ledgerReads, pages], [1, 1, 0]);
+  for (const expected of [[2, 1, 0], [3, 2, 1]]) {
+    elapsed += 299_999;
+    const previous = [probes, ledgerReads, pages];
+    await tick();
+    assert.deepEqual([probes, ledgerReads, pages], previous);
+    elapsed++;
+    await tick();
+    assert.deepEqual([probes, ledgerReads, pages], expected);
+  }
+});
+
+test('successful successor pages stop probes across restarts; failed delivery remains retryable', async t => {
+  const f = fixture(t), input = { ...f, headSha: HEAD, source: 'closer-ended-without-merge' };
+  requestCloserSuccessor(input);
+  let pages = 0, probes = 0, fail = true;
+  const sweepAt = async () => {
+    const sweep = createCloserSuccessorDeadlineSweep({ rootDir: f.rootDir,
+      now: () => Date.parse(NOW) + 1_800_000,
+      readLive: async () => { probes++; return { state: 'open', headRefOid: HEAD }; },
+      hasLiveCloserImpl: async () => false,
+      observeWaitImpl: async () => { if (fail) throw new Error('synthetic delivery failure'); pages++; },
+      logger: { warn() {} } });
+    try { await sweep.tick(); } finally { await sweep.stop(); }
+  };
+  await sweepAt();
+  assert.equal(readCloserSuccessor(f.rootDir, input).escalatedAt, undefined);
+  fail = false;
+  await sweepAt();
+  await sweepAt();
+  assert.equal(pages, 1);
+  assert.equal(probes, 2);
+  assert.equal(readCloserSuccessor(f.rootDir, input).escalatedAt, '2030-01-01T00:30:00.000Z');
+  let dispatches = 0;
+  await settleCloserSuccessor({ ...input, handoffImpl: async () => {
+    dispatches++; return { remediation: { jobId: 'synthetic-successor' } };
+  } });
+  assert.equal(dispatches, 1, 'escalation does not block later admission');
+});
+
+test('retired receipt TTL prunes under the exclusive lock and fresh admission preserves custody', async t => {
+  const f = fixture(t), input = { ...f, headSha: HEAD, source: 'closer-ended-without-merge' };
+  const record = requestCloserSuccessor(input), path = closerSuccessorPath(f.rootDir, input);
+  const sweepAt = async elapsed => {
+    const sweep = createCloserSuccessorDeadlineSweep({ rootDir: f.rootDir, now: () => Date.parse(NOW) + elapsed,
+      readLive: async () => assert.fail('retired receipts need no GitHub probe') });
+    try { await sweep.tick(); } finally { await sweep.stop(); }
+  };
+  writeFileSync(path, JSON.stringify({ ...record, retiredAt: NOW }));
+  const ttl = 7 * 86_400_000;
+  await sweepAt(ttl - 1);
+  assert.ok(readCloserSuccessor(f.rootDir, input));
+  const fd = openSync(`${path}.lock`, 'a');
+  try {
+    fsExt.flockSync(fd, 'exnb');
+    await sweepAt(ttl);
+    assert.ok(readCloserSuccessor(f.rootDir, input), 'contended receipts cannot be pruned');
+  } finally { closeSync(fd); }
+  await settleCloserSuccessor({ ...input, allowHammerFallback: true,
+    handoffImpl: async () => ({ action: 'fallback' }) });
+  await sweepAt(ttl);
+  assert.equal(readCloserSuccessor(f.rootDir, input).retiredAt, undefined);
+  writeFileSync(path, JSON.stringify({ ...record, retiredAt: NOW }));
+  await sweepAt(ttl);
+  assert.equal(readCloserSuccessor(f.rootDir, input), null);
+  assert.equal(existsSync(`${path}.lock`), false);
+  writeFileSync(`${path}.lock`, ''); // Legacy orphan from a prior cleanup.
+  await sweepAt(ttl);
+  assert.equal(existsSync(`${path}.lock`), false);
+  assert.equal(requestCloserSuccessor(input).status, 'successor-pending');
+});
+
+for (const [name, probe] of [
+  ['unknown ledger evidence', async () => null],
+  ['thrown liveness read', async () => { throw new Error('ledger unavailable'); }],
+]) {
+  test(`successor deadline backs off on ${name} and pages only after confirmed absence`, async t => {
+    const f = fixture(t), input = { ...f, headSha: HEAD, source: 'closer-ended-without-merge' };
+    requestCloserSuccessor(input);
+    const due = Date.parse(NOW) + 1_800_000;
+    let now = due, reads = 0, pages = 0;
+    const run = async () => {
+      const sweep = createCloserSuccessorDeadlineSweep({ rootDir: f.rootDir, now: () => now,
+        readLive: async () => { reads++; return { state: 'open', headRefOid: HEAD }; },
+        hasLiveCloserImpl: async () => now === due ? probe() : false,
+        observeWaitImpl: async () => { pages++; }, logger: {} });
+      try { await sweep.tick(); } finally { await sweep.stop(); }
+    };
+    await run();
+    const receipt = readCloserSuccessor(f.rootDir, input);
+    assert.equal(Date.parse(receipt.lastProbedAt), due);
+    assert.equal(receipt.escalatedAt, undefined);
+    now += 299_999;
+    await run();
+    assert.deepEqual({ reads, pages }, { reads: 1, pages: 0 });
+    now++;
+    await run();
+    assert.deepEqual({ reads, pages }, { reads: 2, pages: 1 });
+  });
+}

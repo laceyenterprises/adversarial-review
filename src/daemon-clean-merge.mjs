@@ -461,11 +461,12 @@ async function runDaemonCleanMergeAttemptInner({
   };
   const base = candidate?.baseBranch;
   const validatedHead = docsFastPath?.headSha || gateSnapshot?.reviewedHeadSha || reviewState?.headSha || null;
+  const strictMode = cfg?.strictMode !== false;
   const NOT_TAKEN = (reason, extra = {}) => ({ disposition: DAEMON_MERGE_DISPOSITION.NOT_TAKEN, reason, ...extra });
   try {
     if (await readPrTenure({ repo: repoPath, prNumber, rootDir, env })
       && (candidate?.headSha !== reviewState?.headSha
-        || !isDaemonMergeReviewAllowed(reviewState, { strictMode: cfg?.strictMode !== false }))) {
+        || !isDaemonMergeReviewAllowed(reviewState, { strictMode }))) {
       return NOT_TAKEN('tenure-independent-review-required', { exactHeadReview: true });
     }
   } catch {
@@ -483,7 +484,6 @@ async function runDaemonCleanMergeAttemptInner({
     return NOT_TAKEN('daemon-inputs-missing');
   }
   if (docsFastPath && cfg?.autonomousMergeExecutionEnabled === false) return NOT_TAKEN('autonomous-merge-execution-disabled');
-  const strictMode = cfg?.strictMode !== false;
   const branchProtectionRequired = cfg?.branchProtection?.required !== false;
   const requiredGateContext = resolveGateStatusContext(env);
   const branchProtectionRequiredContexts = Array.isArray(candidate?.branchProtection?.requiredContexts)
@@ -506,8 +506,8 @@ async function runDaemonCleanMergeAttemptInner({
   // per-head hammer retry cap re-dispatches a worker just to wait on CI again).
   // The daemon lands it here once CI settles — the "settled review + green +
   // mergeable, no live worker → daemon merges" path. `attemptDaemonCleanMerge`
-  // still re-verifies green CI + mergeable + head-match LIVE, so a still-pending
-  // head simply declines and falls through unchanged.
+  // still requires a clean strict-mode exact-head review and re-verifies green
+  // CI + mergeable + head-match LIVE.
   //
   // `hamAuditHead` is the EXACT head the AMA audit marker is checked against, and
   // it is the only head this lane may ever merge. Keep it in a variable and pass
@@ -516,6 +516,8 @@ async function runDaemonCleanMergeAttemptInner({
   // head-match assertion compare `liveHead` to itself, so a head that advanced
   // after this audit check would be merged unvalidated.
   const hamAuditHead = currentPrHeadSha || candidate?.headSha || null;
+  const strictExactHead = strictMode && Boolean(hamAuditHead)
+    && String(reviewState?.headSha || '').toLowerCase() === String(hamAuditHead).toLowerCase();
   let hamTerminalRemediationHead = false;
   // FIX (stale-review-head spin, #5053): a SECOND head-match certification for the
   // daemon re-merge lane. A settled-success (comment-only / approved) review whose
@@ -532,10 +534,13 @@ async function runDaemonCleanMergeAttemptInner({
   let headCloserCertifiedNonBlocking = false;
   let cleanCloserCommitAccountability = null;
   let cleanCloserCommitSuppression = null;
-  const operatorApprovedEvidence = reviewState?.operatorApprovedEvidence || null;
+  const reviewAllowed = isDaemonMergeReviewAllowed(reviewState, { strictMode });
+  const operatorApprovedEvidence = !strictMode || reviewAllowed
+    ? reviewState?.operatorApprovedEvidence || null
+    : null;
   const ordinaryReviewAllowed =
     SETTLED_SUCCESS_VERDICTS.has(gateSnapshot?.settledReview?.verdict) &&
-    isDaemonMergeReviewAllowed(reviewState, { strictMode });
+    reviewAllowed;
   // Clearing a verdict or findings gate in the inline lane requires an
   // allowlisted operator even when the broader closer policy is observing.
   const daemonOperatorActorEnforcement = ordinaryReviewAllowed
@@ -546,9 +551,11 @@ async function runDaemonCleanMergeAttemptInner({
     operatorLogins: cfg?.operatorLogins,
     operatorLabelActorEnforcement: daemonOperatorActorEnforcement,
   }, { headSha: hamAuditHead, labels: candidate?.labels });
-  if (!docsFastPath && !snapshotOperatorOverride && !isDaemonMergeReviewAllowed(reviewState, { strictMode })) {
+  if (!docsFastPath && !snapshotOperatorOverride && !reviewAllowed) {
     const uncleanReason =
       resolveDaemonMergeUncleanReason(reviewState, { strictMode }) || 'findings-unknown';
+    // These proofs cannot clear strict exact-head findings in the executor.
+    if (strictExactHead) return NOT_TAKEN(uncleanReason);
     hamTerminalRemediationHead =
       hamTerminalRemediationValidated === true ||
       headHasValidatedHamTerminalRemediationImpl({
@@ -1060,6 +1067,7 @@ async function runDaemonCleanMergeAttemptInner({
     allowHeadCloserCertifiedNonBlocking: headCloserCertifiedNonBlocking,
     docsFastPath,
     reviewState: {
+      headSha: reviewState?.headSha,
       blockingFindingCount: reviewState?.blockingFindingCount,
       blockingFindingState: reviewState?.blockingFindingState,
       nonBlockingFindingCount: reviewState?.nonBlockingFindingCount,

@@ -401,7 +401,7 @@ import {
 } from './conditional-request.mjs';
 import { reviewBodyHasScopeViolationFinding } from './additive-only-scope.mjs';
 import { sweepEtagCache } from './etag-cache.mjs';
-import { refreshWatcherAuthenticationForTick, startWatcherAuthenticationRefreshTimer, createTickHcpHealthzProbe, startPendingReviewedAttestationRetryForWatcher } from './watcher-tick-preflight.mjs';
+import { refreshWatcherAuthenticationForTick, startWatcherAuthenticationRefreshTimer, startWatcherRecoveryTimers, createTickHcpHealthzProbe, startPendingReviewedAttestationRetryForWatcher } from './watcher-tick-preflight.mjs';
 import {
   fetchPullRequestHeadAndState,
   fetchPullRequestMergeability,
@@ -1876,10 +1876,8 @@ async function main() {
   const { createFindingBatchTicker } = await import('./findings-batch.mjs');
   const findingBatchTicker = createFindingBatchTicker({ db, rootDir: ROOT });
   startWatcherAuthenticationRefreshTimer({ log: console });
-  // Recovery shares this watcher's lifetime, but not a long discovery pass's
-  // latency. The shortest overload backoff is 30 seconds.
-  void overloadRescueRetry.tick();
-  setInterval(() => { void overloadRescueRetry.tick(); }, 30_000).unref();
+  startWatcherRecoveryTimers({ rootDir: ROOT, overloadRescueRetry,
+    readLive: (repo, prNumber) => fetchPullRequestHeadAndState(repo, prNumber, { withLabels: false }) });
 
   (async function pollLoop() {
     let nextStart = Date.now();

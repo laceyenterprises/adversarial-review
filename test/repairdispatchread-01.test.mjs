@@ -71,6 +71,72 @@ const argv = (rootDir, project = 'fixture-project') =>
 let endpoint = 0;
 const freshEnv = () => ({ APP_CONTRACT_ENDPOINT_URL: `https://fixture.invalid/repair-${++endpoint}` });
 
+for (const [scenario, expected] of [
+  ['closed review row', 'final-fix-pr-not-open'],
+  ['missing review row', 'final-fix-pr-not-open'],
+  ['advanced review row', 'final-fix-head-mismatch'],
+  ['live closer', 'closer-owned-or-unknown'],
+  ['unknown closer', 'closer-owned-or-unknown'],
+  ['malformed closer lease', { name: 'SyntaxError' }],
+  ['in-progress follow-up', 'remediation-owned'],
+  ['transport failure', 'final-fix-owner-absence-unproven'],
+  ['follow-up ticket', /invalid repair request/],
+  ['launcher PID', /invalid repair request/],
+  ['non-final-fix key', /invalid repair request/],
+]) test(`final-fix recovery refuses ${scenario}`, async t => {
+  const rootDir = exhaustedPr(t);
+  const identity = { repo, prNumber };
+  const ownerKey = `ffa-${'f'.repeat(64)}`;
+  const dispatchProjectRef = 'pr-merge-orchestration';
+  const { epoch } = reserveRepairEpoch({ rootDir, ...identity, headSha: head, ownerKey,
+    cause: 'review-cycle-exhausted', dispatchProjectRef });
+  const before = readHammerRetryCapLedger(rootDir, identity);
+  const args = [rootDir, repo, String(prNumber), head, ownerKey, 'false', '', '', dispatchProjectRef, epoch.id];
+
+  if (scenario.endsWith('review row')) {
+    const db = openReviewStateDb(rootDir);
+    try {
+      if (scenario === 'closed review row') db.prepare("UPDATE reviewed_prs SET pr_state = 'closed'").run();
+      if (scenario === 'missing review row') db.prepare('DELETE FROM reviewed_prs').run();
+      if (scenario === 'advanced review row') {
+        db.prepare('UPDATE reviewed_prs SET revision_ref = ?').run('e'.repeat(40));
+      }
+    } finally { db.close(); }
+  }
+  if (scenario.endsWith('closer')) closerLease(rootDir);
+  if (scenario === 'malformed closer lease') {
+    closerLease(rootDir);
+    writeFileSync(amaCloserLeaseFilePath(rootDir, { ...identity, headSha: head }), '{');
+  }
+  if (scenario === 'in-progress follow-up') {
+    const path = join(rootDir, 'data', 'follow-up-jobs', 'in-progress', 'competing.json');
+    mkdirSync(dirname(path), { recursive: true });
+    writeFileSync(path, JSON.stringify({ ...identity, jobId: 'competing', status: 'in_progress' }));
+  }
+  if (scenario === 'follow-up ticket') args[6] = 'competing';
+  if (scenario === 'launcher PID') args[7] = '123';
+  if (scenario === 'non-final-fix key') args[4] = 'repair-submit-synthetic';
+  const calls = mockSdk(t, {
+    launchStatus: 'running',
+    lookup: ['unknown closer', 'transport failure'].includes(scenario)
+      ? () => { throw Object.assign(new Error('synthetic outage'), { status: 503 }); }
+      : undefined,
+  });
+
+  const recover = () => main(args, { env: freshEnv() });
+  if (typeof expected !== 'string') {
+    await assert.rejects(recover, expected);
+  } else {
+    const result = await recover();
+    assert.equal(result.ok, false, JSON.stringify(result));
+    assert.equal(result.reason, expected);
+  }
+  if (!['live closer', 'unknown closer', 'transport failure'].includes(scenario)) {
+    assert.equal(calls.lookup, 0);
+  }
+  assert.deepEqual(readHammerRetryCapLedger(rootDir, identity), before);
+});
+
 for (const [ownerState, allowed] of [
   [undefined, true], [null, true], ['unknown', true], ['absent', true], ['absent-unfenced', true],
   ['live', false], ['terminal', false], ['unexpected', false],

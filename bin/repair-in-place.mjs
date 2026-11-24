@@ -80,6 +80,13 @@ export async function main(args, {
   let facts;
   try {
     const row = db.prepare('SELECT * FROM reviewed_prs WHERE repo=? AND pr_number=?').get(repo, prNumber);
+    if (recoveryEpochId) {
+      if (row?.pr_state !== 'open') return { ok: false, reason: 'final-fix-pr-not-open' };
+      const recordedHead = row.revision_ref || row.reviewer_head_sha;
+      if (recordedHead?.toLowerCase() !== headSha.toLowerCase()) {
+        return { ok: false, reason: 'final-fix-head-mismatch' };
+      }
+    }
     if (row && row.pr_state !== 'open') return { ok: true, epoch: null, reason: 'no-open-review-row' };
     if (!row && conflicting !== 'true') return { ok: true, epoch: null, reason: 'no-open-review-row' };
     facts = readRepairFacts({ rootDir, db, repo, prNumber, headSha, row, conflicting: conflicting === 'true' });

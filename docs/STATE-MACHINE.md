@@ -3689,6 +3689,14 @@ checks changes or a conflict can also release the hold. Release resumes
 ordinary gates, leases and retry caps. A proven primary-change reversal remains
 refused. Launch records alone cannot establish a baseline.
 
+LAC-2355 allows the shared source predicate to account for a completed local
+final documentation follow-up between a forward-rebased review and the first
+HAM commit. The exact worker publication, linear commit replay and disjoint
+documentation delta are checked within the live evaluation. Reversal authority
+still requires the cited finding to cover the full reviewed span and the HAM
+patch to cover the corresponding parent content. A refusal retains the
+existing primary-change transition. [Published parent proof](RUNBOOK-ama-closure.md#completed-documentation-remediation-between-review-and-ham-lac-2355)
+
 PRIMARYOPAQUE-01: a changed opaque added/modified file can leave the evidence
 hold when an unchanged `package.json` artifact build script, already declared
 at the author head, rebuilds the final head's exact blob in a bounded,

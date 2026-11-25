@@ -6904,6 +6904,28 @@ that restoration does not require deleting the retained author additions.
 Opaque files and rename checks remain
 fail-closed. Other merge safety checks remain unchanged.
 
+#### Completed documentation remediation between review and HAM (LAC-2355)
+
+When the reviewed head diverged from the first HAM parent, source authority can
+account for one completed local final follow-up commit on a forward rebase. The
+daemon-owned job and round must agree on the review, worker, launch and exact
+published SHA. GitHub must record the exact review-to-publication force push
+by the worker's fleet App after the review. Each commit of the reviewed series must match
+the corresponding rebased commit by the paths, modes and blob identities on
+both sides of its change. The intervening commit must be the direct parent of
+the current HAM head and add or modify only regular SPEC or module change-note
+files named in the validated reply for a blocking finding. Those files must be
+disjoint from the reviewed changes. The collector checks up to eight reviewed
+commits and 64 changed entries in each comparison.
+
+The parent comparison accounts for those exact documentation paths. All other
+files still participate in the parent-patch comparison. The existing finding
+projection, full cited span, strict non-blocking policy and HAM removal content
+checks still apply. Missing, ambiguous, capped or mismatched evidence leaves the
+ordinary refusal in place. The proof is collected for the current evaluation
+and grants no review-currency or merge authority. See the
+[PR 11584 incident report](postmortems/SEV3-source-authority-refused-after-completed-docs-remediation-2026-11-24.md).
+
 **Verified historical reversals (REVERSALPROOF-01).** The canonical collector
 records a reversal only after the shared region evaluator proves its cited
 finding, review authority, HAM provenance and parent-state patch. Durable

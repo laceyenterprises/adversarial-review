@@ -12,6 +12,7 @@ import { discardHistoryProgress, storedHistoryRead } from './primary-change-stor
 
 const commitFields = '{sha, commit: {message: .commit.message, author: .commit.author, committer: .commit.committer}, author, committer, parents: [.parents[] | {sha}]}';
 const treeFields = 'tree: [.tree[] | {path, mode, type, sha}], truncated';
+const MAX_SOURCE_CHANGES = 64;
 
 // REST compare files are capped at 300 and cannot be paginated. Read only
 // comparison metadata/commit pages, then walk immutable trees (skipping equal
@@ -57,7 +58,7 @@ export function createHistoryReader(options = {}) {
   };
   // checkpointProjection may differ from jq only by optional fields whose
   // absence the reader tolerates; required fields must change the durable key.
-  const json = async (path, jq = '.', checkpointProjection = jq) => {
+  const json = async (path, jq = '.', checkpointProjection = jq, fields = []) => {
     let attempts = 0;
     try {
       // Only object-addressed evidence is immutable. Keep PR metadata, refs,
@@ -69,7 +70,7 @@ export function createHistoryReader(options = {}) {
           execFileImpl: (...args) => { attempts++; return execFile(...args); },
           // Include response headers so failed rate-limit reads retain the
           // server's Retry-After; strip headers before parsing successful JSON.
-          args: ['api', path, '--jq', jq, '--include'], timeoutMs: loadAwareTimeoutMs(15000),
+          args: ['api', path, ...fields, '--jq', jq, '--include'], timeoutMs: loadAwareTimeoutMs(15000),
           retries: /\/(?:git\/(?:trees|blobs|commits)|commits)\//.test(path) ? 4 : 2,
           retryDelayMs: historyReadRetryDelayMs, totalTimeoutMs: remainingMs(), nowMs });
         // CLI reads must defer an exhausted shared quota instead of entering an
@@ -117,7 +118,7 @@ export function createHistoryReader(options = {}) {
     if (bytes.length !== data.size) throw invalidHistory(`incomplete blob ${entry.sha}`);
     return bytes;
   };
-  const filesBetween = async (repo, base, head, includePatch = () => true) => {
+  const filesBetween = async (repo, base, head, includePatch = () => true, inventoryOnly = false) => {
     const changed = [];
     // A complete recursive snapshot coalesces directory reads. Inspect roots
     // first: flat histories need no extra request, and truncated recursive
@@ -199,8 +200,10 @@ export function createHistoryReader(options = {}) {
     const [beforeSnapshot, afterSnapshot] = await Promise.all([snapshot(base), snapshot(head)]);
     if (beforeSnapshot && afterSnapshot) {
       for (const path of new Set([...beforeSnapshot.keys(), ...afterSnapshot.keys()])) {
+        if (inventoryOnly) remainingMs();
         const a = beforeSnapshot.get(path), b = afterSnapshot.get(path);
         if (a?.sha !== b?.sha || a?.mode !== b?.mode) changed.push({ path, a, b });
+        if (inventoryOnly && changed.length > MAX_SOURCE_CHANGES) return null;
       }
     }
     // Process independent directories in bounded waves. A depth-first await
@@ -230,10 +233,12 @@ export function createHistoryReader(options = {}) {
       }));
       const failed = settled.find(result => result.status === 'rejected');
       if (failed) throw failed.reason;
+      if (inventoryOnly && changed.length > MAX_SOURCE_CHANGES) return null;
       for (const result of settled) for (const child of result.value) pending.push(child);
     }
     // Completion order of concurrent requests must not affect the evidence.
     changed.sort((a, b) => a.path < b.path ? -1 : a.path > b.path ? 1 : 0);
+    if (inventoryOnly) return changed;
     const files = new Array(changed.length);
     const dir = await mkdtemp(join(tmpdir(), 'ham-history-'));
     const changedBlob = async entry => {
@@ -380,6 +385,26 @@ export function createHistoryReader(options = {}) {
   });
   // Cost/ancestry consumers need metadata, not reconstructed per-file patches.
   reader.commitHistory = path => bounded(() => commitHistory(path));
+  // The caller establishes exact parentage. Compare those two trees directly,
+  // retaining both blob identities and modes without opening any changed blobs.
+  reader.exactFileChanges = (repo, before, after) => bounded(() =>
+    filesBetween(repo, before, after, undefined, true));
+  reader.forcePushTimelinePage = async (repo, prNumber, cursor) => {
+    const [owner, name] = repo.split('/');
+    const query = `query($owner: String!, $name: String!, $number: Int!, $cursor: String) {
+      repository(owner: $owner, name: $name) { pullRequest(number: $number) {
+        timelineItems(first: 100, after: $cursor, itemTypes: [HEAD_REF_FORCE_PUSHED_EVENT]) {
+          nodes { __typename ... on HeadRefForcePushedEvent {
+            createdAt actor { __typename login } beforeCommit { oid } afterCommit { oid }
+          } } pageInfo { hasNextPage endCursor }
+        }
+      } }
+    }`;
+    const fields = ['-f', `query=${query}`, '-f', `owner=${owner}`, '-f', `name=${name}`, '-F', `number=${prNumber}`];
+    if (cursor) fields.push('-f', `cursor=${cursor}`);
+    const response = await json('graphql', '.', undefined, fields);
+    return response.errors ? null : response.data?.repository?.pullRequest?.timelineItems;
+  };
   // Completed history publication removes durable progress; retain immutable
   // metadata for the rest of this evaluation without rereading it for CI cost.
   reader.metadata = path => bounded(() => (/\/compare\/[0-9a-f]{40}\.\.\.[0-9a-f]{40}$/i.test(path) ? cached : json)(

@@ -54,7 +54,7 @@ function publishedPaths(job, review, head) {
 // the cited region against the original review and checks the HAM removal.
 export async function proveSourceRemediationParent({
   repo, prNumber, rootDir, review, oldBase, mergeBase, reviewedCommits, history,
-  commit, primaryHead, parentFiles, reviewedFiles, exactFileChanges, compareBase, loadTimelinePage,
+  commit, primaryHead, parentFiles, reviewedFiles, exactFileChanges, compareBase, loadTimelinePage, env,
 }) {
   const parent = commit.parents[0].sha;
   if (!exactFileChanges || !loadTimelinePage || parent !== primaryHead || oldBase === mergeBase
@@ -75,7 +75,7 @@ export async function proveSourceRemediationParent({
   const workerClass = receipt.worker.workerClass;
   if (!Object.hasOwn(REMEDIATION_WORKER_PUSH_PROVIDER_DEFAULTS, workerClass)) return null;
   const appIdentity = REMEDIATION_WORKER_PUSH_PROVIDER_DEFAULTS[workerClass].replace(/^github-app-/, '');
-  if (!await exactRemediationForcePush(loadTimelinePage, review, parent, appIdentity)) return null;
+  if (!await exactRemediationForcePush(loadTimelinePage, review, parent, appIdentity, env)) return null;
 
   const ancestry = await compareBase(oldBase, mergeBase);
   if (ancestry.status !== 'ahead' || ancestry.merge_base_commit?.sha !== oldBase) return null;

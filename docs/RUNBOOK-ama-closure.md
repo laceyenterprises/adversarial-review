@@ -6913,8 +6913,10 @@ published SHA. GitHub must record the exact review-to-publication force push
 by the worker's fleet App after the review. Each commit of the reviewed series must match
 the corresponding rebased commit by the paths, modes and blob identities on
 both sides of its change. The intervening commit must be the direct parent of
-the current HAM head and add or modify only regular SPEC or module change-note
-files named in the validated reply for a blocking finding. Those files must be
+the current HAM head and add or modify only regular files within the proof's
+documentation path scope. This covers `docs/SPEC.md`, `docs/SPEC-*.md`, and
+Markdown directly inside a nested `changes/` directory. Every file must be
+named in the validated reply for a blocking finding. Those files must be
 disjoint from the reviewed changes. The collector checks up to eight reviewed
 commits and 64 changed entries in each comparison.
 
@@ -6922,8 +6924,13 @@ The parent comparison accounts for those exact documentation paths. All other
 files still participate in the parent-patch comparison. The existing finding
 projection, full cited span, strict non-blocking policy and HAM removal content
 checks still apply. Missing, ambiguous, capped or mismatched evidence leaves the
-ordinary refusal in place. The proof is collected for the current evaluation
-and grants no review-currency or merge authority. See the
+ordinary refusal in place. Invalid tree data in the optional inventory also
+leaves that refusal in place without aborting other reads. A transient read
+failure leaves the history unreadable and uncached, so the same head can retry.
+Successful proof paths are part of the returned history. The publication's
+worker-job trailer marks the history as a lane candidate, so the completed
+history store does not persist that record. This evidence grants no review-currency
+or merge authority. See the
 [PR 11584 incident report](postmortems/SEV3-source-authority-refused-after-completed-docs-remediation-2026-11-24.md).
 
 **Verified historical reversals (REVERSALPROOF-01).** The canonical collector

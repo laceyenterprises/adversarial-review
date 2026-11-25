@@ -1,6 +1,6 @@
 import './helpers/load-aware-timeout-fixture.mjs';
 import assert from 'node:assert/strict';
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
@@ -35,6 +35,7 @@ const blob = digit => ({ mode: '100644', type: 'blob', sha: sha(digit) });
 async function run(t, mutate = () => {}, strict = true) {
   const rootDir = mkdtempSync(join(tmpdir(), 'source-remediation-parent-'));
   t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  const store = join(rootDir, 'data', 'primary-change-history');
   const { transport } = await collect({ reviews: [review], cites: ['PRR_cited finding=1 kind=non-blocking'] });
   const original = await transport(`repos/${repo}/compare/${oldBase}...${reviewedHead}`);
   const primary = await transport(`repos/${repo}/compare/${base}...${rebased}`);
@@ -71,6 +72,7 @@ async function run(t, mutate = () => {}, strict = true) {
     publishedDelta: [{ path: spec, b: blob('a') }],
   };
   mutate(fixture);
+  if (fixture.persist) mkdirSync(store, { recursive: true });
   if (fixture.job) {
     const completed = join(rootDir, 'data', 'follow-up-jobs', 'completed');
     mkdirSync(completed, { recursive: true });
@@ -91,21 +93,61 @@ async function run(t, mutate = () => {}, strict = true) {
     if (path.endsWith(`/commits/${head}`)) return fixture.hammer;
     return comparisons.get(path.split('/compare/')[1]) || transport(path);
   };
+  get.persistPrimaryChange = fixture.persist;
+  get.metadata = get;
+  get.env = fixture.env;
   get.exactFileChanges = async (_repo, before, after) => {
+    if (fixture.treeError) throw fixture.treeError;
     assert.equal(before, new Map([[parent, rebased], [reviewedHead, oldBase], [rebased, base]]).get(after));
     return new Map([[parent, fixture.publishedDelta], [reviewedHead, fixture.originalDelta],
       [rebased, fixture.replayDelta]]).get(after);
   };
-  get.forcePushTimelinePage = async () => fixture.timeline;
-  const evidence = await fetchPrimaryChange({ repo, prNumber, headSha: head, get, rootDir },
+  get.forcePushTimelinePage = async () => {
+    if (fixture.timelineError) throw fixture.timelineError;
+    return fixture.timeline;
+  };
+  const read = () => fetchPrimaryChange({ repo, prNumber, headSha: head, get, rootDir },
     { fetchCiCostImpl: async () => ({ ok: true, headSha: head }) });
-  return { evidence, result: checkPrimaryChange(evidence, head, { strictNonBlockingRemediation: strict }) };
+  const evidence = await read();
+  return { evidence, result: checkPrimaryChange(evidence, head, { strictNonBlockingRemediation: strict }), read, fixture, store };
 }
 
 test('completed docs publication between rebased review and closer preserves exact source authority', async t => {
   const { evidence, result } = await run(t);
   assert.deepEqual(evidence.reversalAuthorizations[0].sourceRemediationPaths, [spec]);
   assert.equal(result.ok, true, JSON.stringify(result));
+});
+
+test('completed docs publication uses the reader environment for the worker App', async t => {
+  const { result } = await run(t, f => {
+    f.env = { OAUTH_BROKER_CODEX_AGENT_PROVIDER: 'github-app-renamed-codex' };
+    f.timeline.nodes[0].actor.login = 'renamed-codex[bot]';
+  });
+  assert.equal(result.ok, true, JSON.stringify(result));
+});
+
+test('failed publication reads are uncached and retried on the same head', async t => {
+  for (const [key, flags] of [
+    ['timelineError', { primaryChangeReadFailed: true }],
+    ['timelineError', { authOutage: true }],
+    ['treeError', { primaryChangeReadFailed: true }],
+  ]) {
+    await t.test(`${key}: ${Object.keys(flags)[0]}`, async t => {
+      const { evidence, read, fixture, store } = await run(t, f => {
+        f.persist = true;
+        f[key] = Object.assign(new Error('fixture publication read failed'), flags);
+      });
+      assert.equal(evidence.historyReadFailed, true, JSON.stringify(evidence));
+      assert.equal(evidence.readFailed, true);
+      assert.deepEqual(readdirSync(store), []);
+
+      delete fixture[key];
+      const recovered = await read();
+      assert.deepEqual(recovered.reversalAuthorizations[0].sourceRemediationPaths, [spec]);
+      assert.equal(recovered.laneReversalHistory, true, 'the publication carries a worker-job trailer');
+      assert.deepEqual(readdirSync(store), []);
+    });
+  }
 });
 
 test('missing or mismatched publication or immutable replay retains reviewed-parent refusal', async t => {

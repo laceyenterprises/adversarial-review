@@ -113,6 +113,37 @@ test('boolean inventory flags also work without progress and with a different me
   }
 });
 
+test('invalid optional source inventory preserves protected history progress', async t => {
+  const rootDir = mkdtempSync(join(tmpdir(), 'source-inventory-progress-'));
+  t.after(() => rmSync(rootDir, { force: true, recursive: true }));
+  const old = 'b'.repeat(40), missing = 'd'.repeat(40);
+  const compare = `repos/${repo}/compare/${base}...${head}`;
+  const progress = { rootDir, repo, prNumber, headSha: head };
+  const broken = { path: 'docs', type: 'tree', mode: '040000', sha: 'e'.repeat(40) };
+  const responses = new Map([
+    [compare, { status: 'ahead', total_commits: 0, merge_base_commit: { sha: base } }],
+    [`repos/${repo}/git/trees/${base}`, { truncated: false, tree: [] }],
+    [`repos/${repo}/git/trees/${head}`, { truncated: false, tree: [] }],
+    [`repos/${repo}/git/trees/${old}`, { truncated: false, tree: [broken] }],
+    [`repos/${repo}/git/trees/${old}?recursive=1`, { truncated: false, tree: [] }],
+    [`repos/${repo}/git/trees/${missing}`, { truncated: true, tree: [] }],
+  ]);
+  let compareReads = 0;
+  const reader = () => createHistoryReader({ progress, execGhWithRetryImpl: async ({ args }) => {
+    if (args[1] === compare) compareReads++;
+    assert.ok(responses.has(args[1]), args[1]);
+    return { stdout: JSON.stringify(responses.get(args[1])) };
+  } });
+  const get = reader();
+  const metadata = await get.metadata(compare);
+  assert.equal(await get.exactFileChanges(repo, base, old), null);
+  assert.equal(await get.exactFileChanges(repo, base, missing), null);
+  assert.deepEqual(await get.metadata(compare), metadata);
+  assert.deepEqual(await reader().metadata(compare), metadata);
+  assert.equal(compareReads, 1);
+  assert.deepEqual((await get.compareFiles(compare, false)).files, []);
+});
+
 test('HISTREADLOAD-01: a fresh reader resumes persisted pages across bounded attempts and head changes invalidate them', async t => {
   const rootDir = mkdtempSync(join(tmpdir(), 'history-progress-'));
   t.after(() => rmSync(rootDir, { force: true, recursive: true }));

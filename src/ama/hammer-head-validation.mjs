@@ -9,7 +9,8 @@ import { completedCommentOnlyHandoff, completedLocalCommentOnlyReplay } from '..
 import { resolveReplyStorageKey } from '../remediation-reply-paths.mjs';
 
 const isAbort = error => error?.name === 'AbortError' || error?.code === 'ABORT_ERR';
-const isHistoryReadFailure = error => error?.hammerHistoryReadFailed || error?.primaryChangeReadFailed || isTransientGhError(error);
+const isHistoryReadFailure = error => error?.hammerHistoryReadFailed || error?.primaryChangeReadFailed
+  || error?.code === 'HISTORY_READ_INVALID' || error?.authOutage === true || isTransientGhError(error);
 function rethrowReadFailure(error) {
   if (isHistoryReadFailure(error) || isAbort(error)) throw error;
 }
@@ -280,11 +281,11 @@ function fleetBotIdentityMatches(actor, fleetLogins) {
   return actor?.__typename === 'Bot' && fleetLogins.map(login).includes(login(actor.login));
 }
 
-export async function exactRemediationForcePush(loadPage, review, head, appIdentity) {
+export async function exactRemediationForcePush(loadPage, review, head, appIdentity, env = process.env) {
   const events = await readForcePushEvents(loadPage);
   const event = events?.findLast(entry => entry.beforeCommit?.oid === review.commit_id);
   return event?.afterCommit?.oid === head && Date.parse(event.createdAt) >= Date.parse(review.submitted_at)
-    && fleetBotIdentityMatches(event.actor, await resolveFleetLogins(process.env, [appIdentity]));
+    && fleetBotIdentityMatches(event.actor, await resolveFleetLogins(env, [appIdentity]));
 }
 
 async function fleetForcePushProves(events, base, head, repo, get, fleetLogins) {

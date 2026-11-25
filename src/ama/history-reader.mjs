@@ -103,14 +103,14 @@ export function createHistoryReader(options = {}) {
     }
     return cache.get(key);
   };
-  const readTree = async (repo, ref) => {
+  const readTree = async (repo, ref, invalidTree = invalidHistory) => {
     // Existing checkpoints without the optional SHA can still supply all
     // root entries and use the original ref-addressed recursive lookup.
     const data = await cached(`repos/${repo}/git/trees/${ref}`, `{sha, ${treeFields}}`, `{${treeFields}}`);
-    if (data.truncated || !Array.isArray(data.tree)) throw invalidHistory(`incomplete tree ${ref}`);
+    if (data.truncated || !Array.isArray(data.tree)) throw invalidTree(`incomplete tree ${ref}`);
     return { sha: data.sha, entries: new Map(data.tree.map(entry => [entry.path, entry])) };
   };
-  const tree = async (repo, ref) => (await readTree(repo, ref)).entries;
+  const tree = async (repo, ref, invalidTree) => (await readTree(repo, ref, invalidTree)).entries;
   const blob = async (repo, entry) => {
     const data = await cached(`repos/${repo}/git/blobs/${entry.sha}`, '{encoding, content, size}');
     if (data.encoding !== 'base64' || typeof data.content !== 'string') throw invalidHistory(`unreadable blob ${entry.sha}`);
@@ -120,12 +120,15 @@ export function createHistoryReader(options = {}) {
   };
   const filesBetween = async (repo, base, head, includePatch = () => true, inventoryOnly = false) => {
     const changed = [];
+    const invalidTree = inventoryOnly
+      ? message => Object.assign(new Error(message), { code: 'SOURCE_INVENTORY_INVALID' })
+      : invalidHistory;
     // A complete recursive snapshot coalesces directory reads. Inspect roots
     // first: flat histories need no extra request, and truncated recursive
     // responses must fall back to the uncapped subtree walker below.
     const snapshot = async ref => {
       if (!ref) return new Map();
-      const { sha, entries: root } = await readTree(repo, ref);
+      const { sha, entries: root } = await readTree(repo, ref, invalidTree);
       if (![...root.values()].some(entry => entry.type === 'tree')) return root;
       // Different commits can name the same tree. Each exact ref still reads
       // its own root and validates the shared response against those entries.
@@ -146,7 +149,7 @@ export function createHistoryReader(options = {}) {
         return null;
       }
       if (data.truncated === true) return null;
-      if (data.truncated !== false || !Array.isArray(data.tree)) throw invalidHistory(`incomplete recursive tree ${ref}`);
+      if (data.truncated !== false || !Array.isArray(data.tree)) throw invalidTree(`incomplete recursive tree ${ref}`);
       const entries = new Map();
       const children = new Map();
       let unsupportedMode = false;
@@ -155,14 +158,14 @@ export function createHistoryReader(options = {}) {
         if (typeof entry.path !== 'string' || !entry.path || entry.path.split('/').some(part => !part || part === '.' || part === '..')
           || entries.has(entry.path) || !/^[0-9a-f]{40}$/i.test(entry.sha || '')
           || !['tree', 'blob', 'commit'].includes(entry.type)
-          || typeof entry.mode !== 'string' || !/^[0-7]{6}$/.test(entry.mode)) throw invalidHistory(`invalid recursive tree ${ref}`);
+          || typeof entry.mode !== 'string' || !/^[0-7]{6}$/.test(entry.mode)) throw invalidTree(`invalid recursive tree ${ref}`);
         if (!({ tree: ['040000'], blob: ['100644', '100755', '120000'], commit: ['160000'] })[entry.type].includes(entry.mode)) unsupportedMode = true;
         entries.set(entry.path, entry);
       }
       for (const [path, entry] of entries) {
         remainingMs();
         const parent = path.includes('/') ? path.slice(0, path.lastIndexOf('/')) : null;
-        if (parent && entries.get(parent)?.type !== 'tree') throw invalidHistory(`incomplete recursive tree ${ref}`);
+        if (parent && entries.get(parent)?.type !== 'tree') throw invalidTree(`incomplete recursive tree ${ref}`);
         if (parent) {
           if (!children.has(parent)) children.set(parent, []);
           children.get(parent).push(entry);
@@ -170,11 +173,11 @@ export function createHistoryReader(options = {}) {
         if (!parent) {
           const original = root.get(path);
           if (!original || original.sha !== entry.sha || original.mode !== entry.mode || original.type !== entry.type) {
-            throw invalidHistory(`inconsistent recursive tree ${ref}`);
+            throw invalidTree(`inconsistent recursive tree ${ref}`);
           }
         }
       }
-      for (const name of root.keys()) if (!entries.has(name)) throw invalidHistory(`incomplete recursive tree ${ref}`);
+      for (const name of root.keys()) if (!entries.has(name)) throw invalidTree(`incomplete recursive tree ${ref}`);
       // Legacy modes cannot be rebuilt canonically. The existing walker can
       // still skip equal directories without interpreting their stored bytes.
       if (unsupportedMode) {
@@ -192,7 +195,7 @@ export function createHistoryReader(options = {}) {
         }).sort((a, b) => Buffer.compare(a.key, b.key));
         const body = Buffer.concat(rows.map(row => row.bytes));
         const digest = createHash('sha1').update(`tree ${body.length}\0`).update(body).digest('hex');
-        if (digest !== entry.sha) throw invalidHistory(`incomplete recursive tree ${ref}: ${path}`);
+        if (digest !== entry.sha) throw invalidTree(`incomplete recursive tree ${ref}: ${path}`);
       }
       remainingMs();
       return new Map([...entries].filter(([, entry]) => entry.type !== 'tree'));
@@ -214,8 +217,8 @@ export function createHistoryReader(options = {}) {
       const settled = await Promise.allSettled(wave.map(async ({ beforeRef, afterRef, prefix }) => {
         if (beforeRef && beforeRef === afterRef) return [];
         const [before, after] = await Promise.all([
-          beforeRef ? tree(repo, beforeRef) : new Map(),
-          afterRef ? tree(repo, afterRef) : new Map(),
+          beforeRef ? tree(repo, beforeRef, invalidTree) : new Map(),
+          afterRef ? tree(repo, afterRef, invalidTree) : new Map(),
         ]);
         const children = [];
         for (const name of new Set([...before.keys(), ...after.keys()])) {
@@ -387,8 +390,15 @@ export function createHistoryReader(options = {}) {
   reader.commitHistory = path => bounded(() => commitHistory(path));
   // The caller establishes exact parentage. Compare those two trees directly,
   // retaining both blob identities and modes without opening any changed blobs.
-  reader.exactFileChanges = (repo, before, after) => bounded(() =>
-    filesBetween(repo, before, after, undefined, true));
+  reader.exactFileChanges = (repo, before, after) => bounded(async () => {
+    try {
+      return await filesBetween(repo, before, after, undefined, true);
+    } catch (error) {
+      if (error?.code !== 'SOURCE_INVENTORY_INVALID') throw error;
+      remainingMs();
+      return null;
+    }
+  });
   reader.forcePushTimelinePage = async (repo, prNumber, cursor) => {
     const [owner, name] = repo.split('/');
     const query = `query($owner: String!, $name: String!, $number: Int!, $cursor: String) {
@@ -495,5 +505,6 @@ export function createHistoryReader(options = {}) {
   reader.withProgress = progress => createHistoryReader({ ...options, progress,
     contextTimeoutMs: remainingMs(), signal: ghOptions.signal });
   reader.persistPrimaryChange = true;
+  reader.env = env;
   return reader;
 }

@@ -1502,7 +1502,7 @@ async function recordedReversalAuthorization(args) {
 
 // get is an injected bounded JSON API reader. Compare caps are errors, not empty diffs.
 async function fetchPrimaryChangeHistory({ repo, prNumber, headSha, get, rootDir, builderHead, persistAuthorizations = false, historyOnly = false,
-  readLaneIdentityImpl = readLaneReversalIdentity }) {
+  readLaneIdentityImpl = readLaneReversalIdentity, historyEnv }) {
   // Reuse only within this evaluation. The in-lease evaluation must re-read live state.
   const responses = new Map();
   const laneIdentityReads = new Map();
@@ -1821,23 +1821,16 @@ async function fetchPrimaryChangeHistory({ repo, prNumber, headSha, get, rootDir
             && parentSha === primaryHead && mergeBase === comparisonMergeBase
             && reviewed.total_commits === reviewed.commits?.length
             && (reviewed.filesComplete === true || reviewed.files.length < 300)
-            && (parent.filesComplete === true || parent.files.length < 300)) {
-            try {
-              if (reversalPatchIdentity(reviewed.files) !== reversalPatchIdentity(parent.files)) {
-                sourceRemediationPaths = await proveSourceRemediationParent({
-                  repo, prNumber, rootDir: primaryChangeRoot({ rootDir }), review,
-                  oldBase: reviewed.merge_base_commit.sha, mergeBase, reviewedCommits: reviewed.commits,
-                  history: history.commits, commit, primaryHead, parentFiles: parent.files, reviewedFiles: reviewed.files,
-                  exactFileChanges: get.exactFileChanges,
-                  compareBase: (from, to) => metadata(`repos/${repo}/compare/${from}...${to}`),
-                  loadTimelinePage: cursor => get.forcePushTimelinePage(repo, prNumber, cursor),
-                });
-              }
-            } catch (error) {
-              if (error?.name === 'AbortError' || error?.code === 'ABORT_ERR') throw error;
-              // Optional evidence could not establish the intervening edge.
-              // The ordinary parent-patch check retains the refusal.
-            }
+            && (parent.filesComplete === true || parent.files.length < 300)
+            && reversalPatchIdentity(reviewed.files) !== reversalPatchIdentity(parent.files)) {
+            sourceRemediationPaths = await proveSourceRemediationParent({
+              repo, prNumber, rootDir: primaryChangeRoot({ rootDir }), review,
+              oldBase: reviewed.merge_base_commit.sha, mergeBase, reviewedCommits: reviewed.commits,
+              history: history.commits, commit, primaryHead, parentFiles: parent.files, reviewedFiles: reviewed.files,
+              exactFileChanges: get.exactFileChanges,
+              compareBase: (from, to) => metadata(`repos/${repo}/compare/${from}...${to}`),
+              loadTimelinePage: cursor => get.forcePushTimelinePage(repo, prNumber, cursor), env: historyEnv,
+            });
           }
           const authorization = { commit, review, mergeBase, reviewedFiles: reviewed.files, parentFiles: parent.files,
             ...laneProof,
@@ -2021,7 +2014,7 @@ export async function fetchPrimaryChange(args, options = {}) {
         'exactFileChanges', 'forcePushTimelinePage']) {
         if (source[method]) get[method] = read(source[method].bind(source));
       }
-      return collectPrimaryChange({ ...args, get, signal }, options);
+      return collectPrimaryChange({ ...args, get, signal, historyEnv: source.env ?? args.env }, options);
     }, { signal: args.signal, timeoutMs });
   } catch (error) {
     return { headSha: args.headSha, hasHammerCommits: null, readFailed: true, historyReadFailed: true,

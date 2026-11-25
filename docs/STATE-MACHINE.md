@@ -3692,10 +3692,13 @@ refused. Launch records alone cannot establish a baseline.
 LAC-2355 allows the shared source predicate to account for a completed local
 final documentation follow-up between a forward-rebased review and the first
 HAM commit. The exact worker publication, linear commit replay and disjoint
-documentation delta are checked within the live evaluation. Reversal authority
-still requires the cited finding to cover the full reviewed span and the HAM
-patch to cover the corresponding parent content. A refusal retains the
-existing primary-change transition. [Published parent proof](RUNBOOK-ama-closure.md#completed-documentation-remediation-between-review-and-ham-lac-2355)
+documentation delta are checked when collecting the head's history. The
+publication's worker-job trailer keeps that history out of the completed
+cache. Transient reads use the existing uncached primary-change evidence
+hold and allow another attempt on the same head.
+Reversal authority still requires the cited finding to cover the full reviewed
+span and the HAM patch to cover the corresponding parent content. A refusal
+retains the existing primary-change transition. [Published parent proof](RUNBOOK-ama-closure.md#completed-documentation-remediation-between-review-and-ham-lac-2355)
 
 PRIMARYOPAQUE-01: a changed opaque added/modified file can leave the evidence
 hold when an unchanged `package.json` artifact build script, already declared

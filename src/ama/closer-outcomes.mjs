@@ -2,6 +2,9 @@ import { appendFileSync, mkdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { launchRequestMeaning } from './launch-request-status.mjs';
 import { projectCloserPassAfterOutcome } from './closer-pass-projection.mjs';
+import { readHammerPublication } from './hammer-outcome.mjs';
+import { readLaunchWorldRefusal, worldRefusalLeaseOutcome } from './closer-head-pin.mjs';
+import { resolveHqRoot } from '../hq-root.mjs';
 
 // Independent telemetry: a process exit is not evidence of a merge. Keep the
 // launch-terminal observation separate from the authoritative lease outcome.
@@ -36,6 +39,7 @@ export function closerOutcomeObservation(record, kind) {
 
 export function appendCloserOutcome(rootDir, record, kind, {
   append = appendFileSync, mkdir = mkdirSync, warn = message => console.warn(message),
+  hqRoot = process.env.NODE_TEST_CONTEXT ? rootDir : resolveHqRoot(),
 } = {}) {
   try {
     const observation = closerOutcomeObservation(record, kind);
@@ -47,6 +51,13 @@ export function appendCloserOutcome(rootDir, record, kind, {
         throw new Error('Invalid terminal observation');
       }
       return false;
+    }
+    const publication = readHammerPublication({ hqRoot, launchRequestId: observation.launchRequestId,
+      startHeadSha: record.rekeyedFromHeadSha || record.headSha });
+    if (publication) Object.assign(observation, publication);
+    if (observation.outcome === 'failed-without-merge'
+      && worldRefusalLeaseOutcome(readLaunchWorldRefusal(hqRoot, observation, observation.launchRequestId)) === 'failed-without-merge') {
+      observation.substantiveRefusal = true;
     }
     const dir = join(rootDir, 'data', 'ama-closer-outcomes');
     // One O_APPEND write per small row; concurrent writers never rewrite

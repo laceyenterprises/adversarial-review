@@ -26,7 +26,7 @@ Writers:
 | `markFollowUpJobSpawned` | the remediation worker spawned | `follow-up-*`, `final-fix-all`, `conflict-primary` |
 | `requeueInProgressFollowUpJobForRetry` | transient requeue (the next claim reuses the round number) | `void` |
 | `createFollowUpJob` | a posted review queued its follow-up (closure hand-offs excluded) | `review-pass` |
-| `recordHammerRetryDispatch`, `reserveHammerRepairDispatch` | a hammer dispatch was charged | `hammer` |
+| `recordHammerRetryDispatch`, `reserveHammerRepairDispatch` | a closer launch or safety repair reservation was recorded | `hammer` |
 | `refundUnexecutedHammerDispatch` | the dispatch never executed | `void` |
 | `voidHostRestartLostHammerDispatch` | the closer's launch row carries a terminal class in `VOID_TERMINAL_CLASSES` (`worker_lost_to_host_restart`) | `void` |
 | `retrigger-review` | before the review reset; voided if the reset is refused or throws | `operator-retrigger` |
@@ -34,6 +34,16 @@ Writers:
 
 Hammer records and refunds preserve the caller's `domainId`, defaulting to
 `code-pr` when omitted.
+
+For launched AMA hammers, a dispatch record is an attempt. The budget
+projection joins the exact launch to the
+[closer outcome journal](ama-closer-outcomes.md). A published head distinct
+from the starting head, an authoritative merge, a substantive refusal, or an
+operator terminal counts once. A deferral, supersession, or ended process with
+no substantive outcome spends zero without publication. Older journal entries
+use retained launch-scoped push receipts and audits for the same determination.
+Safety repair reservations and ordinary follow-up and review-pass accounting
+retain their own rules.
 
 Readers:
 

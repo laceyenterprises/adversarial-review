@@ -1232,6 +1232,7 @@ async function dispatchAmaClosureFor({
   // error leaves the signal false (AMA keeps its normal strict gates).
   let reviewCycleExhausted = false;
   let reviewCycleKnown = true;
+  let falseCloserExhaustion = false;
   let finalRoundCompletedAt = null;
   let completedRemediationRoundsForPR = null;
   let completedRereviewRoundsForPR = null;
@@ -1267,7 +1268,7 @@ async function dispatchAmaClosureFor({
         ? resolved.commentOnlyFinalRoundPushedHeads
         : [];
     } else {
-      const remLedger = summarizePRRemediationLedger(rootDir, { repo: repoPath, prNumber });
+      const remLedger = summarizePRRemediationLedger(rootDir, { repo: repoPath, prNumber }, { hqRoot: resolveHqRoot(env) });
       ledgerRiskClass = remLedger?.latestRiskClass || null;
       finalRoundCompletedAt = (remLedger.completedRoundTimestamps || [])
         .map(entry => Date.parse(entry.terminalAt)).filter(Number.isFinite).sort((a, b) => b - a)[0] || null;
@@ -1314,6 +1315,10 @@ async function dispatchAmaClosureFor({
         completedRemediationRounds: completedRemediationRoundsForPR,
         completedRereviewRounds: completedRereviewRoundsForPR,
       });
+      falseCloserExhaustion = reviewCycleKnown && !reviewCycleExhausted && reviewCycleExhaustedFromRounds({
+        effectiveRoundBudget,
+        completedRemediationRounds: completedRemediationRoundsForPR + remLedger.unpublishedCloserTerminals,
+      });
     }
   } catch (err) {
     reviewCycleKnown = false;
@@ -1322,7 +1327,8 @@ async function dispatchAmaClosureFor({
         `treating cycle as NOT exhausted: ${err?.message || err}`,
     );
   }
-  if ((dispatchJob?.remediationStopCode || dispatchJob?.remediationPlan?.stop?.code) === 'max-rounds-reached') {
+  if (!falseCloserExhaustion
+    && (dispatchJob?.remediationStopCode || dispatchJob?.remediationPlan?.stop?.code) === 'max-rounds-reached') {
     reviewCycleExhausted = true;
   }
   // CYCLECAPHAM-01: the watcher's review-cycle-cap hand-off. The cap stops
@@ -1349,7 +1355,11 @@ async function dispatchAmaClosureFor({
       .filter(check => requiredCiContexts.size === 0 || requiredCiContexts.has(String(check?.name || '').toLowerCase())) : [];
   const ciBlockedHammerOwner = dispatchJob?.ciBlockedHammerOwner === true
     || derivedCiFailedChecks.length > 0;
-  if (reviewCycleCapReached || ciBlockedHammerOwner) reviewCycleExhausted = true;
+  // The prior automatic handoff still assigns a closer. A handoff derived
+  // from launch-only charges cannot arm exhausted-cycle merge predicates.
+  const staleBudgetHandoff = falseCloserExhaustion && !remediationHandoff && dispatchJob?.reviewCycleCapReached !== true
+    && reviewStateRow?.rereview_reason === 'system-budget-exhausted-closure';
+  if ((reviewCycleCapReached && !staleBudgetHandoff) || ciBlockedHammerOwner) reviewCycleExhausted = true;
 
   const finalHead = candidate?.headSha || currentRevisionRef || null;
   const finalPush = commentOnlyFinalRoundPushedHeads.find(entry => entry.workerPushedHeadSha === finalHead);
@@ -2081,7 +2091,7 @@ async function dispatchAmaClosureFor({
     anchors: { postedAt: reviewState.postedAt || reviewStateRow?.posted_at || null, finalRoundCompletedAt },
     checksRollup: candidate?.statusCheckRollup,
     candidate: { ...candidate, ...mergeabilityForGate }, labels: prMetadata.labels });
-  let shared = (ownerCap.operatorApprovalApplied || infrastructureOwnerReleased || conflictPrimaryHandoff
+  let shared = (ownerCap.operatorApprovalApplied || infrastructureOwnerReleased || conflictPrimaryHandoff || staleBudgetHandoff
     ? null : resolvedNextAction) || await resolveOwner();
   if (resolvedNextAction) shared = reviseClosureNextAction(shared, { progress: {
     ...shared.snapshot.observations.progress?.value, hammerResume,

@@ -1501,3 +1501,76 @@ test('AMASTRICTROUTE-01: a spent final fix-all does not intercept hammer admissi
   assert.equal(f.effects.filter(([effect]) => effect === 'closer').length, 2);
   assert.equal(f.waits.filter(wait => wait.waitClass === 'closer-successor').length, 0);
 });
+
+test('ROUNDBUDGETDEFER-01: a persisted automatic handoff keeps its closer with corrected round evidence', async t => {
+  const { appendCloserOutcome } = await import('../src/ama/closer-outcomes.mjs');
+  const { recordPrRound, PR_ROUND_KINDS } = await import('../src/pr-round-ledger.mjs');
+  let dispatched;
+  const { args } = closureFixture(t, {
+    fetchLatestHeadReviewBodiesImpl: async () => [],
+    resolveHeadCloserCommitSuppressionImpl: async () => ({ suppressed: false }),
+    proveCloserAuthoredStaleHeadImpl: async () => ({ proven: false, reason: 'synthetic-stale',
+      reviewedHead: OLD, currentHead: HEAD }),
+    maybeDispatchAmaCloserImpl: async input => {
+      dispatched = input;
+      return { dispatched: true, launchRequestId: 'lrq_fixture-successor' };
+    },
+  });
+  args.env = { HQ_ROOT: args.rootDir };
+  args.reviewStateRow.reviewer_head_sha = OLD;
+  args.reviewStateRow.rereview_reason = 'system-budget-exhausted-closure';
+  for (const launchRequestId of ['lrq_fixture-deferred-a', 'lrq_fixture-deferred-b']) {
+    const attempt = { ...identity, headSha: OLD, launchRequestId };
+    recordPrRound(args.rootDir, { ...attempt, roundId: `hammer:lrq:${launchRequestId}`,
+      kind: PR_ROUND_KINDS.HAMMER, source: 'ama-closer', recordedAt: AT });
+    assert.equal(appendCloserOutcome(args.rootDir, { ...attempt, lrqId: launchRequestId,
+      updatedAt: AT, status: 'terminal', terminalOutcome: 'retryable-canonical-validation-deferred' }, 'lease-terminal'), true);
+  }
+  const result = await maybeDispatchAmaClosureFor(args);
+  assert.equal(result.dispatched, true, JSON.stringify(result));
+  assert.equal(dispatched.reviewState.completedRemediationRounds, 0);
+  assert.equal(dispatched.reviewState.reviewCycleExhausted, false);
+  assert.equal(dispatched.dispatchContext.reviewCycleCapReached, true);
+});
+
+for (const [name, publications, count, hold] of [
+  ['two unpublished deferrals leave closer admission open', [false, false], 0, false],
+  ['one published round and one deferral spend one round', [true, false], 1, false],
+  ['two published rounds exhaust the tier', [true, true], 2, false],
+  ['an operator hold still blocks closer admission', [false, false], 0, true],
+]) test(`ROUNDBUDGETDEFER-01: ${name}`, async t => {
+  const rootDir = root(t);
+  const { appendCloserOutcome } = await import('../src/ama/closer-outcomes.mjs');
+  const { recordHammerProgress } = await import('../src/ama/hammer-progress.mjs');
+  const { recordPrRound, PR_ROUND_KINDS } = await import('../src/pr-round-ledger.mjs');
+  const { summarizePRRemediationLedger } = await import('../src/follow-up-jobs.mjs');
+  const { reviewCycleExhaustedFromRounds } = await import('../src/review-ceiling-metrics.mjs');
+  const { repairCause } = await import('../src/repair-epochs.mjs');
+  for (let i = 1; i <= 2; i++) {
+    const launchRequestId = `lrq_fixture-${i}`;
+    recordPrRound(rootDir, { ...identity, roundId: `hammer:lrq:${launchRequestId}`,
+      kind: PR_ROUND_KINDS.HAMMER, launchRequestId, source: 'ama-closer', recordedAt: AT });
+    if (publications[i - 1]) recordHammerProgress('remediation-pushed', {
+      env: { HAM_HQ_ROOT: rootDir, HQ_LAUNCH_REQUEST_ID: launchRequestId, HQ_WORKER_RUN_ID: `wrun_fixture-${i}` },
+      headSha: OTHER,
+    });
+    assert.equal(appendCloserOutcome(rootDir, { ...identity, lrqId: launchRequestId,
+      updatedAt: AT, status: 'terminal', terminalOutcome: 'retryable-canonical-validation-deferred' }, 'lease-terminal'), true);
+  }
+  // Settlement keeps publication credit after progress artifacts are pruned.
+  rmSync(join(rootDir, 'dispatch'), { recursive: true, force: true });
+  const { completedRoundsForPR } = summarizePRRemediationLedger(rootDir, identity);
+  const exhausted = reviewCycleExhaustedFromRounds({ effectiveRoundBudget: 2, completedRemediationRounds: completedRoundsForPR });
+  const labels = hold ? ['no-merge-hold'] : [];
+  const shared = await resolveClosureNextAction({
+    input: { reviewState: { ...clean, headSha: OLD, reviewCycleExhausted: exhausted }, currentHead: HEAD,
+      lease: null, reviewCeilingReached: true, roundsLeft: !exhausted, checks: 'SUCCESS' },
+    candidate: { headSha: HEAD, prState: 'OPEN', mergeable: 'MERGEABLE' },
+    subjectKey: `${identity.repo}#${identity.prNumber}`, labels, observedAt: AT, autonomousMergeExecutionEnabled: true,
+  });
+  assert.equal(completedRoundsForPR, count);
+  assert.equal(exhausted, count === 2);
+  assert.equal(repairCause({ cycleExhausted: exhausted }), count === 2 ? 'review-cycle-exhausted' : null);
+  if (hold) assert.deepEqual(tuple(shared.decision), ['operator-hold', 'operator', 'hold-label']);
+  else if (!exhausted) assert.equal(hasHammerDispatchIntent(shared, identity), true, JSON.stringify(shared.decision));
+});

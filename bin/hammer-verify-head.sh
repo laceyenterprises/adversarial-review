@@ -793,7 +793,7 @@ ham_rebase_head() {
     HAM_PUSHED_FROM_HEAD="$ham_rebase_from"
     HAM_PUSHED_HEAD="$POST_REMEDIATION_SHA"
     export HAM_PUSHED_FROM_HEAD HAM_PUSHED_HEAD
-    "$HAM_NODE_BIN" "<<ROOT_DIR>>/bin/hammer-progress.mjs" remediation-pushed || true
+    "$HAM_NODE_BIN" "<<ROOT_DIR>>/bin/hammer-progress.mjs" remediation-pushed "$HAM_PUSHED_HEAD" || true
     if ! /usr/bin/perl -e 'shift or exit 1; exec @ARGV; die $!' "$HAM_NODE_BIN" "<<ROOT_DIR>>/bin/hammer-helper-step.mjs" mutation pushed-attestation 90 540 "$HAM_NODE_BIN" "<<ROOT_DIR>>/bin/hammer-pushed-attestation.mjs" \
       "<<REPO>>" "<<PR_NUMBER>>" "$HAM_PUSHED_FROM_HEAD" "$HAM_PUSHED_HEAD"; then
       HAM_PHASE_OUTCOME=pushed-attestation-unavailable

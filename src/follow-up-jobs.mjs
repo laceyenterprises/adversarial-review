@@ -1730,7 +1730,7 @@ function reapTerminalFollowUpWorkspaces({
 // scanned directories must NOT silently zero out the directory's
 // contribution to the ledger for unrelated PRs. Errors are caught
 // per-file (logged + skipped), not per-directory.
-function summarizePRRemediationLedger(rootDir, { domainId = 'code-pr', repo, prNumber }, { refundsOnly = false } = {}) {
+function summarizePRRemediationLedger(rootDir, { domainId = 'code-pr', repo, prNumber }, { refundsOnly = false, hqRoot } = {}) {
   const targetDomainId = String(domainId || 'code-pr');
   const targetRepo = String(repo ?? '');
   const targetPr = Number(prNumber);
@@ -1971,7 +1971,7 @@ function summarizePRRemediationLedger(rootDir, { domainId = 'code-pr', repo, prN
   // ledger keeps its spent budget; the ledger can only raise the count.
   const prRoundLedger = refundsOnly ? null : summarizePrRoundLedger(rootDir, {
     domainId: targetDomainId, repo: targetRepo, prNumber: targetPr,
-  }, { excludeJobIds: activeJobIds, budget: ROUND_BUDGET_BY_RISK_CLASS[latestRiskClass] ?? null });
+  }, { excludeJobIds: activeJobIds, budget: ROUND_BUDGET_BY_RISK_CLASS[latestRiskClass] ?? null, hqRoot });
   if (prRoundLedger) {
     // Follow-up rounds already carry their terminal timestamps above; only
     // rounds from other producers add a budget-reached timestamp.
@@ -1985,6 +1985,7 @@ function summarizePRRemediationLedger(rootDir, { domainId = 'code-pr', repo, prN
 
   return {
     completedRoundsForPR,
+    unpublishedCloserTerminals: prRoundLedger?.unpublishedCloserTerminals || 0,
     infrastructureRefundsForPR: infrastructureRefunds.size,
     publishedRoundsForPR: publishedRounds.size,
     consecutiveNonBlockingRounds,

@@ -1,0 +1,12 @@
+operator_steps:
+  - description: >-
+      After deploy, PRs exhausted only by infra-deferred rounds are closer-eligible
+      again (ama.closer_queue_depth eligibleBacklog rises) and close without
+      operator repair. Observe natural watcher passes and correlate eligibility
+      with closer or terminal receipts. Confirm operator holds remain in force.
+    run_as: Runtime owner after ordinary deployment
+    command: >-
+      /usr/bin/printf '%s\n' 'ROUNDBUDGETDEFER-01. Observe closer queue depth and natural closure without operator repair after deploy.'
+catchup:
+  catchup_timeout_s: 1800
+contact_on_failure: operator

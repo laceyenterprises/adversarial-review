@@ -4,7 +4,8 @@ installDispatchFileProducerFixture();
 // restart with the terminal class `worker_lost_to_host_restart`, which does not
 // charge an attempt. The PR round ledger and the hammer retry cap must agree:
 // that closer voids its round and gives its retry-cap charge back, so a reboot
-// can never walk a clean PR into cap exhaustion. Every other class still charges.
+// can never walk a clean PR into cap exhaustion. Other classes keep their
+// dispatch charge on this path. The PR budget counts settled rounds.
 //
 // Synthetic fixtures only.
 
@@ -32,6 +33,7 @@ import {
   voidHostRestartLostHammerDispatch,
 } from '../src/ama/hammer-retry-cap.mjs';
 import { readCloserNoDeliveryLedger } from '../src/ama/closer-no-delivery.mjs';
+import { recordHammerProgress } from '../src/ama/hammer-progress.mjs';
 import { VOID_TERMINAL_CLASSES, isVoidTerminalClass, prRoundLedgerPath, readPrRoundLedger, summarizePrRoundLedger } from '../src/pr-round-ledger.mjs';
 import { noWorkVerdict } from './fixtures/execution-verdict.mjs';
 
@@ -53,6 +55,13 @@ function chargeHammer(rootDir, launchRequestId, { now = '2026-11-01T00:00:00Z' }
     dispatchKey: `intent-${launchRequestId}`, launchRequestId, now });
 }
 
+function recordPriorPublishedHammer(rootDir) {
+  chargeHammer(rootDir, 'lrq_first');
+  recordHammerProgress('remediation-pushed', { env: {
+    HAM_HQ_ROOT: rootDir, HQ_LAUNCH_REQUEST_ID: 'lrq_first', HQ_WORKER_RUN_ID: 'wrun_first',
+  }, headSha: 'b'.repeat(40), now: new Date('2026-11-01T00:30:00Z') });
+}
+
 function counts(rootDir) {
   const ledger = readHammerRetryCapLedger(rootDir, IDENTITY);
   return { attemptCount: ledger.attemptCount, targetAttemptCount: ledger.targetAttemptCount,
@@ -72,10 +81,10 @@ test('only the exact structured host-restart class is void', () => {
 
 test('a host-restart closer leaves the round and retry counts unchanged', (t) => {
   const rootDir = tempRoot(t, 'void');
-  chargeHammer(rootDir, 'lrq_first');
+  recordPriorPublishedHammer(rootDir);
   const before = counts(rootDir);
   chargeHammer(rootDir, 'lrq_lost', { now: '2026-11-01T01:00:00Z' });
-  assert.deepEqual(counts(rootDir), { attemptCount: 2, targetAttemptCount: 2, lifetimeAttemptCount: 2, rounds: 2 });
+  assert.deepEqual(counts(rootDir), { attemptCount: 2, targetAttemptCount: 2, lifetimeAttemptCount: 2, rounds: 1 });
   assert.equal(evaluateHammerRetryCap(readHammerRetryCapLedger(rootDir, IDENTITY), { jobKey: HEAD, headSha: HEAD })
     .capExhausted, true, 'two charged closers exhaust the series cap');
 
@@ -114,7 +123,7 @@ test('the void survives a later charge in the same series', (t) => {
   assert.ok(readHammerRetryCapLedger(rootDir, IDENTITY).hostRestartVoids, 'the receipt is durable');
   assert.equal(voidHostRestartLostHammerDispatch(rootDir, IDENTITY, { launchRequestId: 'lrq_lost', terminalClass: LOST })
     .reason, 'already-refunded');
-  assert.deepEqual(counts(rootDir), { attemptCount: 1, targetAttemptCount: 1, lifetimeAttemptCount: 1, rounds: 1 });
+  assert.deepEqual(counts(rootDir), { attemptCount: 1, targetAttemptCount: 1, lifetimeAttemptCount: 1, rounds: 0 });
 });
 
 for (const priorRefund of ['host-restart', 'no-work']) {
@@ -131,7 +140,8 @@ for (const priorRefund of ['host-restart', 'no-work']) {
     }
     // Model interruption after the retry refund committed, before the round void.
     writeFileSync(path, chargedRound);
-    assert.equal(summarizePrRoundLedger(rootDir, IDENTITY).remediationRoundsUsed, 1);
+    assert.equal(readPrRoundLedger(rootDir, IDENTITY)[0].voided, false);
+    assert.equal(summarizePrRoundLedger(rootDir, IDENTITY).remediationRoundsUsed, 0);
     assert.deepEqual(voidHostRestartLostHammerDispatch(rootDir, IDENTITY, {
       launchRequestId: 'lrq_lost', terminalClass: LOST,
     }), { voided: true, refunded: false, reason: 'already-refunded' });
@@ -166,7 +176,7 @@ for (const [label, damage, reason] of refusedLedgers) {
       launchRequestId: 'lrq_lost', dispatchKey: 'intent-lrq_lost', terminalClass: LOST,
     }), { voided: false, refunded: false, reason });
     assert.deepEqual(readHammerRetryCapLedger(rootDir, IDENTITY), damaged);
-    assert.equal(summarizePrRoundLedger(rootDir, IDENTITY).remediationRoundsUsed, 1);
+    assert.equal(summarizePrRoundLedger(rootDir, IDENTITY).remediationRoundsUsed, 0);
     assert.equal(readPrRoundLedger(rootDir, IDENTITY)[0].voided, false);
 
     writeFileSync(path, original);
@@ -216,7 +226,7 @@ test('the existing infrastructure refund classes are unchanged', (t) => {
 // --- Closer replay through the real maybeDispatchAmaCloser -----------------
 
 function seedSecondDeadCloser(rootDir, lostLaunch) {
-  chargeHammer(rootDir, 'lrq_first', { now: '2026-11-01T00:00:00Z' });
+  recordPriorPublishedHammer(rootDir);
   chargeHammer(rootDir, lostLaunch, { now: '2026-11-01T01:00:00Z' });
   const at = '2026-11-01T01:00:00Z';
   updateAmaCloserDispatchRecord(rootDir, { ...IDENTITY, headSha: HEAD }, () => ({
@@ -311,8 +321,8 @@ test('closer replay: a second closer lost to a host restart re-dispatches instea
   assert.equal(deps.launches.length, 1);
   assert.deepEqual(deps.events.filter(e => e.event === 'ama_closer.host_restart_void').map(e => [e.launchRequestId, e.refunded]),
     [['lrq_lost', true]]);
-  // The lost closer is uncharged; only the first closer and the new dispatch count.
-  assert.deepEqual(counts(rootDir), { attemptCount: 2, targetAttemptCount: 2, lifetimeAttemptCount: 2, rounds: 2 });
+  // The new dispatch spends firing capacity. The first publication spends a round.
+  assert.deepEqual(counts(rootDir), { attemptCount: 2, targetAttemptCount: 2, lifetimeAttemptCount: 2, rounds: 1 });
   assert.deepEqual(readPrRoundLedger(rootDir, IDENTITY).filter(e => e.voided).map(e => e.launchRequestId), ['lrq_lost']);
   const record = readAmaCloserDispatchRecord(rootDir, { ...IDENTITY, headSha: HEAD });
   assert.equal(record.launchRequestId, 'lrq_next');
@@ -334,7 +344,7 @@ test('closer replay: a second closer that crashed still exhausts the cap', async
   assert.equal(deps.launches.length, 0);
   assert.deepEqual(counts(rootDir), { attemptCount: HAMMER_RETRY_CAP_TOTAL_DISPATCHES,
     targetAttemptCount: HAMMER_RETRY_CAP_TOTAL_DISPATCHES, lifetimeAttemptCount: HAMMER_RETRY_CAP_TOTAL_DISPATCHES,
-    rounds: 2 });
+    rounds: 1 });
   assert.equal(deps.events.filter(e => e.event === 'ama_closer.host_restart_void').length, 0);
   assert.equal(readHammerRetryCapLedger(rootDir, IDENTITY).hostRestartVoids, undefined);
 });
@@ -358,7 +368,7 @@ for (const [label, damage] of refusedLedgers) {
       assert.equal(result.dispatched, false);
       assert.equal(deps.launches.length, 0);
       assert.deepEqual(readHammerRetryCapLedger(rootDir, IDENTITY), damaged);
-      assert.equal(summarizePrRoundLedger(rootDir, IDENTITY).remediationRoundsUsed, 2);
+      assert.equal(summarizePrRoundLedger(rootDir, IDENTITY).remediationRoundsUsed, 1);
       const record = readAmaCloserDispatchRecord(rootDir, { ...IDENTITY, headSha: HEAD });
       assert.equal(record.launchRequestId, 'lrq_lost');
       assert.equal(record.hostRestartVoidedLaunchRequestId, undefined);
@@ -373,6 +383,6 @@ for (const [label, damage] of refusedLedgers) {
     assert.equal(recovered.dispatched, true, JSON.stringify(recovered));
     assert.equal(deps.launches.length, 1);
     assert.deepEqual(readPrRoundLedger(rootDir, IDENTITY).filter(e => e.voided).map(e => e.launchRequestId), ['lrq_lost']);
-    assert.deepEqual(counts(rootDir), { attemptCount: 2, targetAttemptCount: 2, lifetimeAttemptCount: 2, rounds: 2 });
+    assert.deepEqual(counts(rootDir), { attemptCount: 2, targetAttemptCount: 2, lifetimeAttemptCount: 2, rounds: 1 });
   });
 }

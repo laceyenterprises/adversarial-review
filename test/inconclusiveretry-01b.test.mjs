@@ -27,6 +27,7 @@ import { CLOSER_INCONCLUSIVE_RETRY_DEFAULTS, classifyCloserOutcome, closerInconc
 import { escalateClosureBudget, refundInconclusiveExhaustion } from '../src/ama/closure-budget-escalation.mjs';
 import { observeClosureWait } from '../src/ama/closure-wait.mjs';
 import { loadConfig } from '../src/config-loader.mjs';
+import { summarizePRRemediationLedger } from '../src/follow-up-jobs.mjs';
 
 const REPO = 'synthetic/repo';
 const PR = 42;
@@ -718,12 +719,17 @@ test('a succeeded launch that pushed nothing after a helper timeout is an owned 
     let result = await run(minutes(attempt * 10));
     if (result.reason === 'closer-inconclusive-retry-backoff') {
       results.push(result);
+      const launches = state.launches;
+      const early = await run(new Date(Date.parse(result.ownedRetry.nextAttemptAt) - 1).toISOString());
+      assert.equal(early.reason, 'closer-inconclusive-retry-backoff');
+      assert.equal(state.launches, launches);
       result = await run(result.ownedRetry.nextAttemptAt);
     }
     assert.equal(result.dispatched, true, `attempt ${attempt}: ${JSON.stringify(result)}`);
     assert.notEqual(result.reason, 'closer-self-error-budget-exhausted');
     const ledger = readHammerRetryCapLedger(root, identity);
     for (const key of ['attemptCount', 'targetAttemptCount', 'lifetimeAttemptCount']) assert.equal(ledger[key], 1, key);
+    assert.equal(summarizePRRemediationLedger(root, identity, { hqRoot: join(root, 'hq') }).completedRoundsForPR, 0);
   }
   assert.ok(results.every(result => result.needsOperator !== true && result.ownedRetry.reason === 'controller-setup-failed'));
   assert.equal(results.length, 2, 'attempts 3 and 4 wait for their backoff');

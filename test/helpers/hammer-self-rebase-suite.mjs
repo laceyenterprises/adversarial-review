@@ -64,10 +64,15 @@ function fixture(t, scenario) {
   } else {
     git(['init', '--bare', '--quiet', remote]);
     const surfaceTest = `import { readFileSync } from 'node:fs';\nimport assert from 'node:assert/strict';\nassert.equal(readFileSync('surface.txt', 'utf8'), 'base-new\\nbody\\nhammer-new\\n');\n`;
+    const objects = new Map();
+    const blobFor = (text) => {
+      if (!objects.has(text)) objects.set(text, git(['--git-dir', remote, 'hash-object', '-w', '--stdin'], text));
+      return objects.get(text);
+    };
+    const tests = blobFor(surfaceTest);
     const commit = (text, parent, extra = false) => {
-      const blob = git(['--git-dir', remote, 'hash-object', '-w', '--stdin'], text);
-      const tests = git(['--git-dir', remote, 'hash-object', '-w', '--stdin'], surfaceTest);
-      const extraBlob = extra ? git(['--git-dir', remote, 'hash-object', '-w', '--stdin'], 'unrelated base\n') : '';
+      const blob = blobFor(text);
+      const extraBlob = extra ? blobFor('unrelated base\n') : '';
       const tree = git(['--git-dir', remote, 'mktree'], `100644 blob ${blob}\tsurface.txt\n100644 blob ${tests}\tsurface.test.mjs\n${extra ? `100644 blob ${extraBlob}\tunrelated.txt\n` : ''}`);
       return git(['--git-dir', remote, 'commit-tree', tree, ...(parent ? ['-p', parent] : [])], 'Synthetic change\n');
     };
@@ -78,8 +83,8 @@ function fixture(t, scenario) {
     foreign = commit('foreign\n', rebased);
     nextBase = commit(disjoint ? 'base-new\nbody\nhammer-old\n' : 'base-new\nadvanced\nhammer-old\n', base, disjoint);
     nextRebased = commit(disjoint ? 'base-new\nbody\nhammer-new\n' : 'base-new\nadvanced\nhammer-new\n', nextBase, disjoint);
-    git(['--git-dir', remote, 'update-ref', 'refs/heads/main', base]);
-    git(['--git-dir', remote, 'update-ref', 'refs/heads/topic', startsRebased ? rebased : original]);
+    git(['--git-dir', remote, 'update-ref', '--stdin'],
+      `create refs/heads/main ${base}\ncreate refs/heads/topic ${startsRebased ? rebased : original}\n`);
     git(['init', '--quiet']);
     git(['remote', 'add', 'origin', remote]);
     // Seed only A and its parent. B must be fetched by the production procedure.

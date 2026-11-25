@@ -23,6 +23,7 @@ const otherHead = 'c'.repeat(40);
 const at = '2026-11-21T08:00:00.000Z';
 const expiredAt = '2026-11-21T07:00:00.000Z';
 const repeats = 12;
+const repairReason = `system-repair-epoch:repair-22a92295-e0ce-44c9-a369-ba6b1829384c:${headSha}`;
 
 function repeat(run) {
   const rootDir = mkdtempSync(join(tmpdir(), 'lac2293-custody-'));
@@ -199,44 +200,92 @@ function assertNoClaim(claim, row, reason) {
   assert.equal(row.review_attempts, 2);
 }
 
-test(`LAC-2293: a native lease granted after a precheck wins ${repeats}/${repeats} claims`, () => {
-  repeat(({ identity, grant, release, row, claim, seed }) => {
-    seed();
-    assert.equal(inspectMergeLease(identity).holder, null);
-    const lease = assertGranted(grant({
-      // Capture happens under the per-base lock, before holder publication.
-      captureProcessImpl: () => {
-        assert.equal(inspectMergeLease(identity).holder, null);
-        assertNoClaim(claim(), row(), 'merge-lease-mutation-busy');
-        return { startedAt: expiredAt };
-      },
-      _afterHolderWrite: () => assert.equal(row().review_status, 'pending'),
-    }));
-    assertNoClaim(claim(), row(), 'native-merge-custody');
-    assert.equal(row().rereview_reason, exhaustedHeadVerdictReason(headSha));
-    release(lease);
-    assert.equal(claim().claim.changes, 1);
+for (const reason of [exhaustedHeadVerdictReason(headSha), repairReason]) {
+  test(`LAC-2293: a native lease granted after a precheck wins ${repeats}/${repeats} claims (${reason})`, () => {
+    let lateClaims = 0;
+    repeat(({ identity, grant, release, row, claim, seed }) => {
+      seed({ reason });
+      assert.equal(exhaustedHeadMergeCustodyDeferral({
+        ...identity, row: row(), hasPriorityIntent: () => false,
+      }) ?? null, null);
+      const lease = assertGranted(grant({
+        // Capture happens under the per-base lock, before holder publication.
+        captureProcessImpl: () => {
+          assert.equal(inspectMergeLease(identity).holder, null);
+          const result = claim();
+          if (result.claim?.changes) lateClaims += 1;
+          else assertNoClaim(result, row(), 'merge-lease-mutation-busy');
+          return { startedAt: expiredAt };
+        },
+      }));
+      if (row().review_status === 'pending') {
+        assertNoClaim(claim(), row(), 'native-merge-custody');
+        assert.equal(row().rereview_reason, reason);
+      }
+      release(lease);
+      if (row().review_status === 'pending') assert.equal(claim().claim.changes, 1);
+    });
+    assert.equal(lateClaims, 0, `${lateClaims}/${repeats} claims while the grant was publishing`);
   });
-});
 
-test(`LAC-2293: reviewer-first commits before native owner check ${repeats}/${repeats} times`, () => {
-  repeat(({ grant, release, row, claim, seed }) => {
-    seed();
-    assert.equal(claim({ beforeCAS: () => {
-      assert.equal(row().review_status, 'pending');
-      assert.throws(() => grant(), /mutation lock busy/);
-    } }).claim.changes, 1);
-    const lease = assertGranted(grant({
-      _afterHolderWrite: () => {
-        const current = row(); // independent connection, after holder publication
-        assert.equal(current.review_status, 'reviewing');
-        assert.equal(current.reviewer_session_uuid, 'fixture-reviewer');
-        assert.equal(current.reviewer_head_sha, headSha);
-      },
-    }));
-    release(lease);
+  test(`LAC-2293: reviewer-first commits before native owner check ${repeats}/${repeats} times (${reason})`, () => {
+    let grantsBeforeCommit = 0;
+    repeat(({ grant, release, row, claim, seed }) => {
+      seed({ reason });
+      let competingLease;
+      assert.equal(claim({ beforeCAS: () => {
+        assert.equal(row().review_status, 'pending');
+        try {
+          competingLease = assertGranted(grant());
+          grantsBeforeCommit += 1;
+        } catch (error) {
+          assert.match(error.message, /mutation lock busy/);
+        }
+      } }).claim.changes, 1);
+      if (competingLease) release(competingLease);
+      const lease = assertGranted(grant({
+        _afterHolderWrite: () => {
+          const current = row(); // independent connection, after holder publication
+          assert.equal(current.review_status, 'reviewing');
+          assert.equal(current.reviewer_session_uuid, 'fixture-reviewer');
+          assert.equal(current.reviewer_head_sha, headSha);
+        },
+      }));
+      release(lease);
+    });
+    assert.equal(grantsBeforeCommit, 0, `${grantsBeforeCommit}/${repeats} grants before reviewer commit`);
   });
-});
+}
+
+for (const [label, holderArgs, observations, priority, expected] of [
+  ['matching live holder', {}, {}, false, 'native-merge-custody'],
+  ['unknown local holder', { now: expiredAt }, { captureProcessImpl: () => null }, false, 'native-merge-custody'],
+  ['another PR', { holderPr: 1987 }, {}, false, null],
+  ['another head', { holderHead: otherHead }, {}, false, null],
+  ['new operator request', {}, {}, true, null],
+]) {
+  test(`LAC-2293 recurrence: repair epoch and ${label}`, () => {
+    const outcomes = [];
+    repeat(({ identity, grant, release, row, claim, seed, human }) => {
+      seed({ reason: repairReason });
+      if (priority) human();
+      const lease = assertGranted(grant(holderArgs));
+      const before = row();
+      const precheck = exhaustedHeadMergeCustodyDeferral({
+        ...identity, row: before, hasPriorityIntent: () => priority, now: at,
+        pidAliveFn: () => true, captureProcessImpl: () => ({ startedAt: expiredAt }), ...observations,
+      });
+      const result = claim(observations);
+      outcomes.push([precheck ?? null, result.reason ?? null, result.claim?.changes ?? 0]);
+      if (result.reason) assert.deepEqual(row(), before);
+      release(lease);
+      if (result.reason) assert.equal(claim().claim.changes, 1);
+    });
+    const wanted = [expected, expected, expected ? 0 : 1];
+    assert.deepEqual(outcomes, Array.from({ length: repeats }, () => wanted),
+      `${outcomes.filter(([, , changes]) => changes === 1).length}/${repeats} claims before release`);
+  });
+}
 
 for (const [name, leaseArgs, claimArgs, mode] of [
   ['current owner', {}, {}, 'defer'],

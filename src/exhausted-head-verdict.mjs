@@ -35,17 +35,20 @@ function isSystemExhaustedHeadVerdictRequested(row, headSha) {
     && (!row.revision_ref || row.revision_ref.toLowerCase() === headSha.toLowerCase()));
 }
 
-export function isExhaustedHeadVerdictRequested(row, headSha) {
-  if (isSystemExhaustedHeadVerdictRequested(row, headSha)) return true;
+export function isRepairEpochReviewRequested(row, headSha) {
   if (!headSha || !row?.rereview_requested_at
     || row.revision_ref?.toLowerCase() !== headSha.toLowerCase()) return false;
   return REPAIR_HEAD_REASON.exec(row.rereview_reason || '')?.[1].toLowerCase() === headSha.toLowerCase();
 }
 
+export function isExhaustedHeadVerdictRequested(row, headSha) {
+  return isSystemExhaustedHeadVerdictRequested(row, headSha) || isRepairEpochReviewRequested(row, headSha);
+}
+
 function requiresMergeCustodyCheck(row, headSha, hasPriorityIntent) {
   if (row?.failed_at) return false;
   if (row?.rereview_reason === DISPUTE_REVIEW_REASON) return isDisputedFindingsReviewIntent(hasPriorityIntent(), headSha);
-  return isSystemExhaustedHeadVerdictRequested(row, headSha) && !hasPriorityIntent();
+  return isExhaustedHeadVerdictRequested(row, headSha) && !hasPriorityIntent();
 }
 
 // Scheduling hint only; the claim transaction still owns the final decision.

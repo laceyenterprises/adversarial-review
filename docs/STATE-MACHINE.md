@@ -4261,8 +4261,9 @@ For incident triage, the final-stage banner displays completed remediation
 rounds plus one over the configured round budget plus one. The ratio does
 not identify the review request or the number of reviewer launches.
 
-For `system-exhausted-head-verdict`, the watcher re-reads the admission row and
-priority intent inside the claim transaction. The claim commits under the native
+For `system-exhausted-head-verdict` and exact-head `system-repair-epoch` requests,
+the watcher re-reads the admission row and priority intent inside the claim
+transaction. The claim commits under the native
 merge lease's `(repo, base)` mutation lock. A matching PR and head with a
 retained lease leaves the request pending without a reviewer claim or charge.
 An unlocked local check suppresses queueing, dedup preflight and memory
@@ -4281,6 +4282,12 @@ When the review commits first, the native merge owner's under-lease check sees
 and remote-expiry rules. Human requests, independent repair and tenure reviews,
 and ordinary first-pass and failure retries retain their own admission rules.
 Remaining findings and required review evidence still govern merge eligibility.
+
+A repair epoch with publication from an active final fix-all job waits for that
+job to settle. A proven completed handoff at the live head routes to closure.
+The watcher can restore a pending automatic epoch request to the source verdict
+when that verdict is still the last delivered review. The restore CAS preserves
+an active claim and gives priority to a new operator review request.
 
 The reviewer uses the final-round prompt and captures `metadata_json.verdictOnly`
 in its pass journal. Both normal completion and recovered posting suppress new

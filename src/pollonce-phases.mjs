@@ -283,8 +283,10 @@ import {
   spawnReviewer,
 } from './reviewer-spawn-settle.mjs';
 import { maybeDispatchReviewerTimeoutExhaustedMergeAgent } from './reviewer-timeout-exhausted-dispatch.mjs';
-import { admitExhaustedHeadVerdict, claimWithExhaustedHeadMergeCustody, exhaustedHeadMergeCustodyDeferral, isExhaustedHeadVerdictRequested } from './exhausted-head-verdict.mjs';
+import { admitExhaustedHeadVerdict, claimWithExhaustedHeadMergeCustody, exhaustedHeadMergeCustodyDeferral,
+  isExhaustedHeadVerdictRequested, isRepairEpochReviewRequested } from './exhausted-head-verdict.mjs';
 import { reconcileRepairOwner, bindRepairHead, repairReservationOwnsPr } from './repair-epochs.mjs';
+import { finalFixAllQueueOwner } from './ama/final-fix-all.mjs';
 import { refundReviewHarnessFault } from './review-harness-retry.mjs';
 import { isReviewCycleCapRoutedToHammer, maybeRouteReviewCycleCapToHammer } from './review-cycle-cap-hammer.mjs';
 import { latestReviewedHeadSha, maybeRouteCiBlockedToHammer } from './ci-blocked-hammer.mjs';
@@ -1607,8 +1609,8 @@ async function runReviewSubjectPhases(entry, ctx) {
         }
         return remediationBudget;
       };
-      const finalRemediationPush = effectiveDomainId === CODE_PR_DOMAIN_ID && !subject.terminal
-        ? findFinalRemediationPushJob(ROOT, { repo: repoPath, prNumber, headSha: subject.headSha }) : null;
+      const readFinalRemediationPush = () =>
+        findFinalRemediationPushJob(ROOT, { repo: repoPath, prNumber, headSha: subject.headSha });
       // EXHAUSTEDHEADOWNER-01: one delivered verdict per distinct builder head.
       // The request CAS coalesces ticks and refuses to overwrite a live claim.
       let repairEpoch = null;
@@ -1635,11 +1637,30 @@ async function runReviewSubjectPhases(entry, ctx) {
         }
         return ['repair-reservation-owns-pr', `repair-epoch:${repairEpoch.id}`];
       }
+      // A repair launch may publish before its final fix-all job settles.
+      // Keep its verdict request behind that job until the terminal handoff
+      // has either proved closure or relinquished custody.
+      const repairFinalFixAllPending = () => {
+        if (!repairEpoch?.publicationLaunch
+          || repairEpoch.publicationHead?.toLowerCase() !== subject.headSha?.toLowerCase()) return false;
+        const owner = finalFixAllQueueOwner(ROOT, { repo: repoPath, prNumber });
+        const launch = owner?.remediationWorker?.launchRequestId;
+        return Boolean(launch && [repairEpoch.ownerLaunch, repairEpoch.publicationLaunch].includes(launch)
+          && owner.revisionRef?.toLowerCase() === repairEpoch.baseHead?.toLowerCase());
+      };
+      if (existing?.review_status !== 'reviewing' && !tenureReviewRequired
+        && !explicitIntentForHead() && !isExplicitOperatorReviewRetrigger(existing)
+        && repairFinalFixAllPending()) {
+        return ['final-fix-all-handoff-pending', 'remediation'];
+      }
+      const finalRemediationPush = effectiveDomainId === CODE_PR_DOMAIN_ID && !subject.terminal
+        ? readFinalRemediationPush() : null;
+      const finalRemediationCompleted = isCompletedFinalRemediationJob(finalRemediationPush);
       if (effectiveDomainId === CODE_PR_DOMAIN_ID && (existing?.reviewer_head_sha || repairEpoch)
         && existing?.reviewer_head_sha !== subject.headSha && !subject.terminal
         && !isExhaustedHeadVerdictRequested(existing, subject.headSha)
-        && (repairEpoch || !pendingReviewIntent())
-        && (repairEpoch || !isCompletedFinalRemediationJob(finalRemediationPush))) {
+        && (repairEpoch ? !explicitIntentForHead() && !isExplicitOperatorReviewRetrigger(existing) : !pendingReviewIntent())
+        && !finalRemediationCompleted) {
         const { ledger, effectiveRoundBudget } = resolveRemediationBudget();
         const exhausted = reviewCycleExhaustedFromRounds({
           effectiveRoundBudget,
@@ -1782,14 +1803,15 @@ async function runReviewSubjectPhases(entry, ctx) {
       if (!tenureReviewRequired && effectiveDomainId === CODE_PR_DOMAIN_ID && existing && !subject.terminal
         && ['posted', 'pending', 'pending-upstream', 'ci-blocked'].includes(existing.review_status)
         && !explicitIntentForHead() && !isExactHeadReviewRecoveryRequested(existing)
-        && !isOrphanHeadReviewRequested(existing, subject.headSha) && !transferredHeadReview && !exhaustedHeadVerdict) {
+        && !isOrphanHeadReviewRequested(existing, subject.headSha) && !transferredHeadReview
+        && (!exhaustedHeadVerdict || finalRemediationCompleted)) {
         const finalPush = finalRemediationPush;
         const handoff = finalPush?.reReview?.nextAction;
         const deadlineMs = Date.parse(handoff?.deadline?.at || '');
         const overdueHandoff = finalPush?.status === 'completed' && handoff?.action === 'hammer'
           && ['hammer', 'closer'].includes(handoff.actor)
           && Number.isFinite(deadlineMs) && deadlineMs <= Date.now();
-        if ((isCompletedFinalRemediationJob(finalPush) || overdueHandoff) && finalPush.revisionRef) {
+        if ((finalRemediationCompleted || overdueHandoff) && finalPush.revisionRef) {
           const queued = existing.review_status !== 'posted';
           if (existing.review_status !== 'posted'
             && latestReviewedHeadSha({ db, repoPath, prNumber }) === finalPush.revisionRef) {
@@ -3890,8 +3912,9 @@ async function runReviewSubjectPhases(entry, ctx) {
             // never checks or charges infra_auto_recover_attempts.
             // Queue admission can outlive another watcher's timeout settlement.
             // Recheck the shared budget immediately before the single-claim CAS.
+            const claimRow = stmtGetReviewRow.get(repoPath, prNumber);
             if (reviewerTimeoutBudget(readCascadeState(ROOT, { repo: repoPath, prNumber }), {
-              headSha: reviewerHeadSha, row: stmtGetReviewRow.get(repoPath, prNumber),
+              headSha: reviewerHeadSha, row: claimRow,
             }).parked) return { dispatched: false, reason: REVIEWER_TIMEOUT_REPEATED_REASON };
             const claimBranch = tokenRefreshRecovery ? 'token-refresh'
               : infraRecoveryClass === DAEMON_BOUNCE_FAILURE_CLASS ? 'daemon-bounce'
@@ -3991,6 +4014,11 @@ async function runReviewSubjectPhases(entry, ctx) {
             let result;
             if (effectiveDomainId === CODE_PR_DOMAIN_ID && claimBranch === 'pending'
               && /^[a-f0-9]{40}$/i.test(reviewerHeadSha || '') && !tenureReviewRequired) {
+              // The final job may have settled while preflight was running.
+              if (isRepairEpochReviewRequested(claimRow, reviewerHeadSha) && !explicitIntentForHead()
+                && (repairFinalFixAllPending() || isCompletedFinalRemediationJob(readFinalRemediationPush()))) {
+                return { dispatched: false, reason: 'final-fix-all-handoff' };
+              }
               result = claimWithExhaustedHeadMergeCustody({
                 db, rootDir: ROOT, repo: repoPath,
                 base: mergeCustodyBase(),

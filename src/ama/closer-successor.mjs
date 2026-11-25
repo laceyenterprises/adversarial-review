@@ -9,7 +9,8 @@ import { isCurrentAmaCloserLease, readAmaCloserLease } from './closer-lease.mjs'
 import { launchRequestInFlight } from './launch-request-status.mjs';
 import { observeClosureWait } from './closure-wait.mjs';
 import { readCloserInconclusiveRetries } from './closer-inconclusive-retry.mjs';
-import { DEFERRED_SOURCE_HOLD, continueDeferredSourceCustody, deferredSourceNeedsDecision, deferredSourceNotice, readDeferredSourceHold } from './deferred-source-custody.mjs';
+import { DEFERRED_SOURCE_HOLD, continueDeferredSourceCustody, deferredProcessInspectionUnavailable,
+  deferredSourceNeedsDecision, deferredSourceNotice, readDeferredSourceHold } from './deferred-source-custody.mjs';
 
 const SUCCESSOR_DEADLINE_MS = 30 * 60_000;
 const DEADLINE_PROBE_BACKOFF_MS = 5 * 60_000;
@@ -44,7 +45,8 @@ export async function observeDeferredSourceDecision({ rootDir, hqRoot, repo, prN
   observeWaitImpl = observeClosureWait, pageImpl, logger = console }) {
   const identity = { repo, prNumber, headSha };
   let hold = readDeferredSourceHold(hqRoot, identity, { includeContinued: true });
-  if (hold && !deferredSourceNeedsDecision(hold)) {
+  const inspectionUnavailable = deferredProcessInspectionUnavailable(hold);
+  if (hold && !deferredSourceNeedsDecision(hold, inspectionUnavailable)) {
     if (!hold.continuedAt) {
       try { if (continueDeferredSourceCustody(hold, { waitMs: 0 })) return null; }
       catch { /* Retry continuation on the next watcher pass. */ }
@@ -62,7 +64,7 @@ export async function observeDeferredSourceDecision({ rootDir, hqRoot, repo, prN
   }
   if (!hold) return null;
   try {
-    await observeWaitImpl({ rootDir, ...identity, reason: deferredSourceNotice(hold),
+    await observeWaitImpl({ rootDir, ...identity, reason: deferredSourceNotice(hold, inspectionUnavailable),
       waitClass: DEFERRED_SOURCE_HOLD, immediate: true, refreshOnReasonChange: true, now: Date.parse(now), pageImpl });
   } catch (error) {
     logger?.warn?.(`[ama-closer] deferred source decision delivery failed for ${repo}#${prNumber}: ${error.message}`);

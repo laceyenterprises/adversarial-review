@@ -427,6 +427,14 @@ drain. Across launches, the watcher records these deferrals as owned inconclusiv
 retries: full refunds, exponential backoff from the configured attempt threshold,
 and one notification, using the existing last-phase receipt without a final
 terminal-stop receipt.
+
+A retained Telegram guard process-inspection refusal holds the exact target
+for operator recovery, including when a previous watcher continued the source
+hold. This refusal is ineligible for CI continuation. For an already published
+SHA, standalone native recovery requires operator closure under the normal
+merge gates. See the [closure runbook](RUNBOOK-ama-closure.md) for recovery and
+hold release.
+
 If the record for an observed ended inconclusive launch is unreadable, the
 watcher holds that head's retry and sends one operator notice. Teardown paces
 retention failures per hold and accepts continued custody with exact-source

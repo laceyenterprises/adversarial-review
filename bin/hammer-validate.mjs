@@ -22,7 +22,7 @@ import { loadEffectiveMergeAuthorityConfig } from '../src/ama/effective-policy.m
 import { conflictPublishBinding } from '../src/ama/hammer-conflict-binding.mjs';
 import { createValidationScratch, reapValidationScratch, validationScratchEnv } from '../src/ama/hammer-validation-scratch.mjs';
 import { isSocketPathFailure, SOCKET_PATH_HARNESS_FAULT } from '../src/harness-fault.mjs';
-import { CI_AUTHORITATIVE_UNKNOWN_REASONS, declaredRequiredContexts, readDeferredValidationChecks, readUnknownValidationReceipt,
+import { CI_AUTHORITATIVE_UNKNOWN_REASONS, PROCESS_INSPECTION_UNAVAILABLE, declaredRequiredContexts, readDeferredValidationChecks, readUnknownValidationReceipt,
   recordedUnknownDefersToCi, unknownValidationDeferral, unknownValidationReceiptPath } from '../src/ama/local-validation-unknown.mjs';
 import { assertHammerController, controllerLaunchId } from '../src/ama/hammer-controller.mjs';
 import { continueDeferredSourceCustody, deferredSourceIdentity, deferredSourceNotice, findDeferredSourceHold, retainDeferredCommit, retainDeferredValidation,
@@ -518,8 +518,8 @@ async function validate() {
         return;
       }
       const inspectionUnavailable = mirror && runnerExit === 75
-        && readValidationReceipt().checks.some(check => check.localReason === 'process-inspection-unavailable');
-      if (inspectionUnavailable) deferValidation('process-inspection-unavailable', runnerExit);
+        && readValidationReceipt().checks.some(check => check.localReason === PROCESS_INSPECTION_UNAVAILABLE);
+      if (inspectionUnavailable) deferValidation(PROCESS_INSPECTION_UNAVAILABLE, runnerExit);
       if (canonical && runnerExit === 125 && !stopReason?.startsWith('canceled:')) {
         deferValidation('validation-drain-unconfirmed', runnerExit);
       }

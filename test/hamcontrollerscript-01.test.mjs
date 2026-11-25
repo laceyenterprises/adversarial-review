@@ -637,6 +637,23 @@ test('a different check quoting the Telegram no-verdict line keeps its passing r
   assert.equal(existsSync(join(f.runDir, `validation-deferred-${f.head}.json`)), false);
 });
 
+test('the current registry display name reports a denied process census before later checks', async t => {
+  const guard = 'Telegram responder guard';
+  const f = mirrorFixture(t, { currentRegistry: true,
+    entries: [['telegram-responder-guard', { name: guard, local_only: true }], ['later', {}]], runs: [] });
+  const result = await f.standalone({ FIXTURE_INSPECTION_DENIED: guard, FIXTURE_INSPECTION_LANE: 'node',
+    FIXTURE_INSPECTION_RESULT: 'inconclusive' });
+  assert.equal(result.status, 75, result.stderr);
+  const handoff = JSON.parse(readFileSync(join(f.runDir, `validation-deferred-${f.head}.json`), 'utf8'));
+  assert.equal(handoff.reason, 'process-inspection-unavailable');
+  assert.equal(handoff.ciAuthoritative, false);
+  const receipt = JSON.parse(readFileSync(handoff.localValidationReceipt, 'utf8'));
+  assert.equal(receipt.selectedCheckCount, 2);
+  assert.deepEqual(receipt.checks.map(({ name, result, localReason }) => [name, result, localReason]),
+    [[guard, 'inconclusive', 'process-inspection-unavailable']]);
+  assert.deepEqual(f.local(), ['fixture-command telegram-responder-guard']);
+});
+
 test('a second closer keeps the unpublished repair and does not rerun the broad battery', async t => {
   const f = mirrorFixture(t, { entries: [['broad', {}], ['local-guard', { local_only: true }]], runs: [] });
   const git = (cwd, ...args) => execFileSync('git', args, { cwd, encoding: 'utf8',

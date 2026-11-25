@@ -2325,8 +2325,11 @@ watcher continuation. A launch-bound push receipt transfers retry backoff to
 the published head. The watcher refunds the old launch and holds unrecovered
 source on its corresponding live head. Notice refresh follows changes in
 source and cleanup facts. Unreadable custody or an explicitly recorded unsafe custody fallback holds.
-A clean matching-target hold with confirmed cleanup is continued and returns
-to existing paced retry. Legacy retry rows alone and corrupt retry files cannot
+A clean matching-target hold with confirmed cleanup ordinarily returns
+to existing paced retry. A retained Telegram process-inspection no-verdict
+holds the exact target for operator recovery even if the source marker was
+previously continued. The process-inspection refusal is ineligible for CI
+continuation. Legacy retry rows alone and corrupt retry files cannot
 hold unrelated heads. An ended inconclusive launch with an unreadable retry
 record pauses its own retry and surfaces a deduplicated operator notice.
 Teardown matches the ending launch across target heads, retries retention in the

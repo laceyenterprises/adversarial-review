@@ -3,6 +3,8 @@ import assert from 'node:assert/strict';
 import { execFileSync, spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import fs from 'node:fs/promises';
+import { syncBuiltinESMExports } from 'node:module';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createReviewCurrencyReader, currencyGit, carryHammerWithdrawals, rebaseCurrencyCovers } from '../src/ama/review-currency.mjs';
@@ -144,6 +146,31 @@ test('LAC-2354: upstream hunk context changes the old patch ID but preserves ord
   assert.equal(rebaseCurrencyCovers(result, f.a, f.b), true);
 });
 
+test('LAC-2354: unsupported contextual replay has a distinct Git capability diagnostic', async t => {
+  const f = await fixture(t, { contextRebase: true });
+  const currency = createReviewCurrencyReader({ repo, prNumber, get: f.get, git: (args, ...rest) => {
+    if (args[0] === 'merge-file') throw Object.assign(new Error('unknown option object-id'), { code: 129 });
+    return f.git(args, ...rest);
+  } });
+  const result = await currency(f.a, f.b, { rebaseOnly: true });
+  assert.equal(result.current, false);
+  assert.match(result.missingProof, /git merge-file --object-id unsupported \(requires Git 2\.43\+\)/);
+});
+
+test('LAC-2354: missing proof describes ordered replay and scoped native recovery', async t => {
+  const f = await fixture(t, { changed: true });
+  for (const rootDir of [undefined, f.dir]) {
+    const currency = createReviewCurrencyReader({ repo, prNumber, rootDir, get: f.get, git: f.git });
+    for (const rebaseOnly of [false, true]) {
+      const result = await currency(f.a, f.b, { rebaseOnly });
+      assert.equal(result.current, false);
+      assert.match(result.missingProof, /ordered replay of PR commits/);
+      assert.doesNotMatch(result.missingProof, /patch-equivalent/);
+      assert.equal(result.missingProof.includes('native repair suffix'), Boolean(rootDir) && !rebaseOnly);
+    }
+  }
+});
+
 for (const scenario of ['different function', 'different file', 'swapped commits', 'extra addition', 'backward base', 'merge commit']) {
   test(`LAC-2354: contextual replay refuses ${scenario}`, async t => {
     const f = await fixture(t, { contextRebase: true, twoPatches: true });
@@ -206,7 +233,7 @@ function recordLanePublication(f, sha, worker = { model: 'codex', launchRequestI
   }));
 }
 
-test('LAC-2354: rebased completed source and exact native repair publications carry findings only', async t => {
+async function nativeRepairFixture(t) {
   const f = await fixture(t, { contextRebase: true, twoPatches: true });
   const prior = `Prior review repair\n\nWorker-Class: codex-remediation\nWorker-Job-Id: ${laneJob}`;
   f.run('checkout', '-qb', 'original-round', f.b);
@@ -234,8 +261,14 @@ test('LAC-2354: rebased completed source and exact native repair publications ca
     payload: { source: 'hq_branch_push', branch: 'fixture-branch', launch_request_id: launch, worker_class: 'codex', ...payload },
   });
   let attestations = [attest(intermediate), attest(head)];
-  const currency = () => createReviewCurrencyReader({ repo, prNumber, rootDir: f.dir, get: f.get, git: f.git,
-    readHeadAttestations: async () => attestations });
+  const currency = (overrides = {}) => createReviewCurrencyReader({ repo, prNumber, rootDir: f.dir, get: f.get, git: f.git,
+    readHeadAttestations: async () => attestations, ...overrides });
+  return { f, originalSource, head, intermediate, launch, epoch, writeEpoch, attest, currency,
+    setAttestations: value => { attestations = value; } };
+}
+
+test('LAC-2354: rebased completed source and exact native repair publications carry findings only', async t => {
+  const { f, originalSource, head, intermediate, writeEpoch, attest, currency, setAttestations } = await nativeRepairFixture(t);
   assert.equal((await currency()(f.a, head)).current, false, 'signed commits alone supply no source custody');
   writeEpoch({});
   const result = await currency()(f.a, head);
@@ -249,10 +282,10 @@ test('LAC-2354: rebased completed source and exact native repair publications ca
     [attest(intermediate), attest(head, { launch_request_id: 'lrq_other' })],
     [attest(intermediate), { ...attest(head), producer_identity: 'different-worker' }],
   ]) {
-    attestations = wrong;
+    setAttestations(wrong);
     assert.equal((await currency()(f.a, head)).current, false);
   }
-  attestations = [attest(intermediate), attest(head)];
+  setAttestations([attest(intermediate), attest(head)]);
   writeEpoch({ ownerKey: `ffa-${'0'.repeat(64)}` });
   assert.equal((await currency()(f.a, head)).current, false, 'a different reservation cannot grant authority');
   writeEpoch({});
@@ -262,9 +295,75 @@ test('LAC-2354: rebased completed source and exact native repair publications ca
   f.authenticatedCommits.set(originalSource, originalCommit);
   const otherJob = `${laneJob}-other`;
   recordLanePublication(f, originalSource, { model: 'codex', launchRequestId: otherJob }, { jobId: otherJob });
+  // Exercise both directory orders: edge deduplication must not discard the
+  // exact publication worker, and a same-edge foreign round cannot lend proof.
+  const opendir = fs.opendir;
+  let reverse = false;
+  const replacement = t.mock.method(fs, 'opendir', async path => {
+    const entries = [];
+    for await (const entry of await opendir(path)) entries.push(entry);
+    entries.sort((a, b) => a.name.localeCompare(b.name));
+    if (reverse) entries.reverse();
+    return (async function* () { yield* entries; })();
+  });
+  syncBuiltinESMExports();
+  t.after(() => { replacement.mock.restore(); syncBuiltinESMExports(); });
+  for (const order of [false, true]) {
+    reverse = order;
+    assert.equal((await currency()(f.a, head)).proof, 'reviewed-rebase-lane-suffix');
+  }
   recordLanePublication(f, originalSource, undefined, { startHeadSha: f.b });
-  assert.equal((await currency()(f.a, head)).current, false, 'a different round cannot lend its start head to the worker receipt');
+  for (const order of [false, true]) {
+    reverse = order;
+    assert.equal((await currency()(f.a, head)).current, false, 'a different round cannot lend its start head to the worker receipt');
+  }
 });
+
+test('LAC-2354: native passes share successful commit delta reads by SHA', async t => {
+  const { f, head, writeEpoch, currency } = await nativeRepairFixture(t);
+  writeEpoch({});
+  const reads = new Map();
+  const result = await currency({ git: (args, ...rest) => {
+    if (args[0] === 'diff-tree') reads.set(args.at(-1), (reads.get(args.at(-1)) || 0) + 1);
+    return f.git(args, ...rest);
+  } })(f.a, head);
+  assert.equal(result.proof, 'reviewed-rebase-lane-suffix', JSON.stringify(result));
+  assert.ok(reads.size > 3, 'exercise ordinary replay, source replay and native replay');
+  assert.ok([...reads.values()].every(count => count === 1), JSON.stringify([...reads]));
+});
+
+for (const failure of ['ordinary replay', 'epoch source', 'epoch replay']) {
+  for (const abort of [false, true]) {
+    test(`LAC-2354: ${failure} ${abort ? 'abort stops evaluation' : 'failure permits native recovery'}`, async t => {
+      const { f, head, epoch, writeEpoch, currency } = await nativeRepairFixture(t);
+      writeEpoch({});
+      if (failure !== 'ordinary replay') {
+        mutateRepairEpochs(f.dir, { repo, prNumber }, ledger => {
+          ledger.repairEpochs = [
+            { ...epoch, baseHead: failure === 'epoch source' ? 'f'.repeat(40) : f.a },
+            epoch,
+          ];
+        });
+      }
+      const error = Object.assign(new Error('injected replay failure'), { ...(abort ? { name: 'AbortError' } : { code: 1 }) });
+      let injected = false, reviewedSeriesReads = 0;
+      const reader = currency({ git: (args, ...rest) => {
+        if (args[0] === 'merge-base' && args[1] === f.a) reviewedSeriesReads++;
+        const matches = failure === 'ordinary replay' ? args[0] === 'merge-base' && reviewedSeriesReads === 1
+          : failure === 'epoch source' ? args[0] === 'rev-list' && args.at(-1) === 'f'.repeat(40)
+          : args[0] === 'merge-base' && args[1] === f.a && reviewedSeriesReads === 2;
+        if (!injected && matches) { injected = true; throw error; }
+        return f.git(args, ...rest);
+      } });
+      if (abort) await assert.rejects(reader(f.a, head), { name: 'AbortError' });
+      else {
+        const result = await reader(f.a, head);
+        assert.equal(result.proof, 'reviewed-rebase-lane-suffix', JSON.stringify(result));
+      }
+      assert.equal(injected, true);
+    });
+  }
+}
 
 for (const scenario of ['attributed', 'unattributed', 'changed-prefix', 'newer-review', 'unattributed-tail']) {
   test(`DISPUTECURRENCY-01: blocking dispute with lane suffix scenario ${scenario}`, async t => {
@@ -488,7 +587,7 @@ for (const scenario of ['changed patch', 'third-party push', 'untrusted provenan
       ? createReviewCurrencyReader({ repo, prNumber, get: f.get, git: async () => { throw new Error('reviewed Git object unavailable'); } }) : f.currency();
     const admitted = await currency(f.a, currentHead);
     assert.equal(admitted.current, false, JSON.stringify(admitted));
-    assert.match(admitted.missingProof, /HAM base\/head provenance or patch-equivalent PR commits/);
+    assert.match(admitted.missingProof, /HAM base\/head provenance or ordered replay of PR commits/);
     const state = { ...f.state, currentHead, reviewCurrency: admitted };
     const withdrawals = await carryHammerWithdrawals(f.withdrawals(), currentHead, currency);
     assert.equal(resolveHammerAdjudication(state, withdrawals).withdrawnCount, 0);

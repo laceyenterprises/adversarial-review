@@ -7077,7 +7077,9 @@ An explicit `behind` comparison refuses carry-forward from the discarded
 head. An unavailable comparison supplies no ancestry evidence. The protected
 round and exact Hammer comment chain can independently preserve finding applicability.
 The completed-job proof reader scans at most 125,000 directory entries per
-evaluation, independently of its 256 matching-record and 256 round-edge limits.
+evaluation, independently of its 256 matching-record and 256 per-job round-edge limits.
+Identical edges in different jobs retain their own worker receipts; source
+attribution selects the round matching the publication worker.
 An exhausted directory scan reports `completed-round proof scan hit the directory
 entries limit` and supplies no partial round proof. Review citation checks use
 proof-limit diagnostics only for reviews that could supersede the cited review;
@@ -7118,7 +7120,12 @@ remediation round started on that review, with a parent proven by ordered
 replay. The entire source series must replay as the live prefix. Every suffix
 commit, including the epoch's bound publication head,
 requires an exact repository, PR, and branch produced attestation from the
-same launch and worker, with matching job and worker trailers. HAM and lane extras
+same launch and worker, with matching job and worker trailers. Native recovery
+must use the original owner launch: retry-launch publications are excluded
+until their distinct idempotency-key chain can be independently verified.
+Non-abort replay failures are diagnostic to that proof attempt; native recovery
+still runs after a failed ordinary replay, and a failed epoch cannot suppress
+later epochs. Abort and timeout errors stop the evaluation. HAM and lane extras
 cannot be mixed in either order. The dispute still requires the latest
 authoritative review and concrete evidence at the live head. This proof grants finding applicability
 only. It cannot waive the exact review head match or carry a withdrawal's
@@ -7129,8 +7136,12 @@ and retain no-merge status; attestation
 refusals include the identity reason and any transient-read classification.
 They do not imply that operator recovery is necessary.
 Binary and non-regular entries use exact delta identity. A changed binary blob
-does not preserve currency. Git must support `merge-file --object-id` to replay
-contextual edits. Local proof never fetches objects or writes replayed blobs to
+does not preserve currency. Git 2.43+ must support `merge-file --object-id` to replay
+contextual edits; unsupported Git reports a distinct missing-proof diagnostic.
+See the service-account capability preflight in `DEPLOYMENT.md`. Commit deltas
+are cached by SHA within one currency reader, shared across ordinary replay,
+source verification and native epochs, and failed reads remain retryable.
+Local proof never fetches objects or writes replayed blobs to
 the object store. Daemon callers with a hydrated
 target checkout can pass `reviewCurrencyCwd` to `buildAdversarialGateSnapshot`
 or `projectAdversarialGateStatus`. The lower-level `createReviewCurrencyReader`

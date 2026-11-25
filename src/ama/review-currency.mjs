@@ -85,6 +85,7 @@ async function replaysBlob(git, target, source) {
     bytes = await git(['merge-file', '--object-id', '--stdout', target.before, source.before, source.after],
       undefined, { encoding: 'buffer' });
   } catch (error) {
+    if (error.code === 129) throw new Error('git merge-file --object-id unsupported (requires Git 2.43+)', { cause: error });
     if (Number.isInteger(error.code) && error.code > 0 && error.code <= 127) return false;
     throw error;
   }
@@ -96,7 +97,7 @@ async function replaysBlob(git, target, source) {
 // modes and exact before/after blobs cover the fast path. When upstream changed
 // a file, replay in both directions so absorbed or additional edits fail.
 // Preserve the existing HAM proof. Other lanes can only extend a strict prefix.
-async function replayCurrency({ reviewedHead, currentHead, base, git, readCommit, laneCommit, nativeSuffix }) {
+async function replayCurrency({ reviewedHead, currentHead, base, git, readDelta, readCommit, laneCommit, nativeSuffix }) {
   const series = async head => {
     const fork = (await git(['merge-base', head, base])).trim();
     if (!SHA.test(fork)) throw new Error('missing merge base');
@@ -129,14 +130,14 @@ async function replayCurrency({ reviewedHead, currentHead, base, git, readCommit
     return true;
   };
   let index = 0;
-  let expected = await commitDelta(git, oldSeries.commits[index]);
+  let expected = await readDelta(oldSeries.commits[index]);
   let hamExtra = false, laneExtra = false;
   const suffix = [];
   for (const sha of newSeries.commits) {
-    const delta = await commitDelta(git, sha);
+    const delta = await readDelta(sha);
     if (expected && await equivalent(expected, delta)) {
       const next = oldSeries.commits[++index];
-      expected = next ? await commitDelta(git, next) : null;
+      expected = next ? await readDelta(next) : null;
       continue;
     }
     if (nativeSuffix) {
@@ -171,20 +172,20 @@ function remediationPublicationWorker(commit, publications) {
     && parseCommitTrailerValues(commit.commit?.message)['worker-job-id']?.length === 1 ? worker : null;
 }
 
-async function hasPublishedSource({ reviewedHead, sourceHead, base, git, readCommit, rounds, publications, laneCommit }) {
+async function hasPublishedSource({ reviewedHead, sourceHead, base, git, readDelta, readCommit, rounds, publications, laneCommit }) {
   if (sourceHead === reviewedHead) return true;
   // A completed round may have rebased before publishing its own commit.
   // Attribute that exact publication and independently prove its parent.
-  const round = rounds.find(round => round.startHeadSha === reviewedHead && round.resultingHeadSha === sourceHead);
-  if (!round) return false;
   const [sha, parent, ...other] = (await git(['rev-list', '--parents', '-n1', sourceHead])).trim().split(/\s+/);
   if (sha !== sourceHead || !SHA.test(parent || '') || other.length) return false;
   const commit = await readCommit(sourceHead);
   const worker = commit && remediationPublicationWorker(commit, publications);
+  const round = worker && rounds.find(round => round.worker === worker
+    && round.startHeadSha === reviewedHead && round.resultingHeadSha === sourceHead);
   // Both indexes come from the same read. Require the worker receipt from
   // this exact round so a different round ending at the same SHA cannot lend it.
-  if (!worker || round.worker !== worker || !await laneCommit(commit)) return false;
-  return parent === reviewedHead || Boolean(await replayCurrency({ reviewedHead, currentHead: parent, base, git }));
+  if (!round || !await laneCommit(commit)) return false;
+  return parent === reviewedHead || Boolean(await replayCurrency({ reviewedHead, currentHead: parent, base, git, readDelta }));
 }
 
 // One evaluation-local reader for finding admission AND disposition admission.
@@ -195,6 +196,7 @@ export function createReviewCurrencyReader({ repo, prNumber, rootDir, get, comme
   readHeadAttestations = readHeadAttestationChainForPr }) {
   const cache = new Map();
   const sharedReads = new Map();
+  const readDelta = sha => memoizedRead(sharedReads, `delta:${sha}`, () => commitDelta(git, sha));
   let updateRounds;
   const readCommit = async sha => {
     const commit = await memoizedRead(sharedReads, `commit:${sha}`, () => get(`repos/${repo}/commits/${sha}`));
@@ -300,8 +302,13 @@ export function createReviewCurrencyReader({ repo, prNumber, rootDir, get, comme
         // live head. They carry neither a prior withdrawal nor a head waiver.
         const laneCommit = rebaseOnly || !rootDir ? null
           : commit => laneCommitMatches(commit, lanePublications, diagnostics);
-        const proof = await replayCurrency({ reviewedHead, currentHead, base: live.base.sha, git, readCommit, laneCommit });
-        if (proof) return proof;
+        try {
+          const proof = await replayCurrency({ reviewedHead, currentHead, base: live.base.sha, git, readDelta, readCommit, laneCommit });
+          if (proof) return proof;
+        } catch (error) {
+          if (isAbort(error)) throw error;
+          diagnostics.push(error.message);
+        }
         if (laneCommit && live.head.ref && live.head.repo?.full_name?.toLowerCase() === repo.toLowerCase()) {
           const ledger = await memoizedRead(sharedReads, 'repair-epochs', () => readHammerRetryCapLedger(rootDir, { repo, prNumber }));
           const epochs = ledger?.repairEpochs;
@@ -312,16 +319,21 @@ export function createReviewCurrencyReader({ repo, prNumber, rootDir, get, comme
                 || !/^ffa-[a-f0-9]{64}$/.test(epoch.ownerKey || '') || !epoch.boundAt
                 || !/^lrq_[a-z0-9-]+$/i.test(epoch.publicationLaunch || '')
                 || epoch.ownerLaunch !== epoch.publicationLaunch || epoch.terminalAt) continue;
-              if (!await hasPublishedSource({ reviewedHead, sourceHead: epoch.baseHead, base: live.base.sha, git, readCommit,
-                rounds, publications: lanePublications, laneCommit })) {
-                diagnostics.push(`native repair source ${epoch.baseHead}: completed worker publication unproven`);
-                continue;
+              try {
+                if (!await hasPublishedSource({ reviewedHead, sourceHead: epoch.baseHead, base: live.base.sha, git, readDelta, readCommit,
+                  rounds, publications: lanePublications, laneCommit })) {
+                  diagnostics.push(`native repair source ${epoch.baseHead}: completed worker publication unproven`);
+                  continue;
+                }
+                const beforeReplay = diagnostics.length;
+                const native = await replayCurrency({ reviewedHead: epoch.baseHead, currentHead, base: live.base.sha, git, readDelta,
+                  nativeSuffix: suffix => nativeSuffixMatches(suffix, epoch, live.head.ref, diagnostics) });
+                if (native) return native;
+                if (diagnostics.length === beforeReplay) diagnostics.push(`native repair source ${epoch.baseHead}: ordered prefix replay unproven`);
+              } catch (error) {
+                if (isAbort(error)) throw error;
+                diagnostics.push(`native repair source ${epoch.baseHead}: ${error.message}`);
               }
-              const beforeReplay = diagnostics.length;
-              const native = await replayCurrency({ reviewedHead: epoch.baseHead, currentHead, base: live.base.sha, git,
-                nativeSuffix: suffix => nativeSuffixMatches(suffix, epoch, live.head.ref, diagnostics) });
-              if (native) return native;
-              if (diagnostics.length === beforeReplay) diagnostics.push(`native repair source ${epoch.baseHead}: ordered prefix replay unproven`);
             }
           }
         }
@@ -342,8 +354,9 @@ export function createReviewCurrencyReader({ repo, prNumber, rootDir, get, comme
       if (!SHA.test(reviewedHead || '') || !SHA.test(currentHead || '')) return { ...result, missingProof: 'invalid reviewed or current head' };
       if (reviewedHead === currentHead) return { ...result, current: true, proof: 'exact-head' };
       const localReplay = rebaseOnly ? '' : ' or a recorded local final-remediation replay'
-        + ' or a patch-equivalent prefix with a launch-attributed lane suffix';
-      const missingProof = `HAM base/head provenance or patch-equivalent PR commits${localReplay} for ${reviewedHead} -> ${currentHead}`;
+        + ' or an ordered replay prefix with a launch-attributed lane suffix'
+        + (rootDir ? ' or an attributed native repair suffix from a verified repair-epoch source' : '');
+      const missingProof = `HAM base/head provenance or ordered replay of PR commits${localReplay} for ${reviewedHead} -> ${currentHead}`;
       const limits = [], diagnostics = [];
       let status;
       try {

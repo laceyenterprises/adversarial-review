@@ -1,0 +1,16 @@
+operator_steps:
+  - description: >-
+      After deploy, JSON-parse-errored findings batches settle to their fix PRs
+      and no new 'Unexpected end of JSON input' batch errors appear. Record the
+      running build and observe ordinary settlement passes read-only. For a
+      previously affected batch with sufficient PR evidence, record that
+      settlement applied the findings to the existing PR without a replacement
+      launch. If no eligible batch is observed, leave recovery unverified.
+    run_as: designated review runtime owner
+    command: >-
+      /usr/bin/printf '%s\n' 'FINDINGSGHEMPTY-01 requires a read-only observation
+      of ordinary findings settlement after normal deployment.'
+actions: []
+catchup:
+  catchup_timeout_s: 1800
+contact_on_failure: operator

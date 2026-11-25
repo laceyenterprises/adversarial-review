@@ -759,16 +759,24 @@ test('a drop citation from another repository never becomes a batch PR lookup', 
   assert.ok(row.completed_at);
 });
 
-test('invalid JSON is not reported while preparation is live and after exit has a typed error', async t => {
+test('incomplete outcomes keep custody while preparation is live and retry after exit', async t => {
   const f = await publicationFixture(t);
   Object.assign(f.status, { status: 'running', terminal: false, succeeded: false });
   writeFileSync(f.outputPath, '{"batchId":');
-  const get = () => f.db.prepare('SELECT completed_at,error FROM finding_batches').get();
-  await f.run();
-  assert.deepEqual(get(), { completed_at: null, error: null });
+  const get = () => f.db.prepare('SELECT completed_at,released_at,error FROM finding_batches').get();
+  const pending = { completed_at: null, released_at: null, error: null };
+  const warnings = [];
+  const options = { now: fixtureNow + 86400001, logger: { warn: message => warnings.push(message) } };
+  await f.run(options);
+  assert.deepEqual(get(), pending);
+  assert.deepEqual(warnings, []);
   Object.assign(f.status, { status: 'succeeded', terminal: true, succeeded: true });
-  await f.run();
-  assert.deepEqual(get(), { completed_at: null, error: 'batch-outcome-invalid-json' });
+  await f.run(options);
+  assert.deepEqual(get(), pending);
+  assert.match(warnings[0], /publication read will retry:.*outcomes\.json.*11 bytes/);
+  writeFileSync(f.outputPath, JSON.stringify({ ...f.result, prNumber: f.pr.number }));
+  await f.run({ ...options, fetchPr: async () => ({ ...f.pr, state: 'MERGED' }) });
+  assert.ok(get().completed_at);
 });
 
 test('numbered publication uses the artifact and retries transient GraphQL failures', async t => {
@@ -787,6 +795,110 @@ test('numbered publication uses the artifact and retries transient GraphQL failu
   const row = f.db.prepare('SELECT completed_at,error FROM finding_batches').get();
   assert.equal(row.error, null);
   assert.ok(row.completed_at);
+});
+
+test('numbered publication retries empty and truncated GitHub stdout on the next tick', async t => {
+  for (const [name, stdout] of [['empty', ''], ['truncated', '{"state":']]) await t.test(name, async t => {
+    const f = await publicationFixture(t);
+    writeFileSync(f.outputPath, JSON.stringify({ ...f.result, prNumber: f.pr.number }));
+    const warnings = [];
+    let calls = 0;
+    const options = {
+      now: fixtureNow + 86400001,
+      logger: { warn: message => warnings.push(message) },
+      execFileImpl: async (bin, args) => {
+        assert.equal(bin, 'gh');
+        assert.deepEqual(args.slice(0, 5), ['pr', 'view', String(f.pr.number), '--repo', repo]);
+        return { stdout: ++calls === 1 ? stdout : JSON.stringify({ ...f.pr, state: 'MERGED' }) };
+      },
+    };
+    const get = () => f.db.prepare('SELECT completed_at,released_at,error FROM finding_batches').get();
+    await f.run(options);
+    assert.deepEqual(get(), { completed_at: null, released_at: null, error: null });
+    assert.equal(calls, 1);
+    assert.match(warnings[0], new RegExp(`publication read will retry:.*gh pr view.*${Buffer.byteLength(stdout)} bytes`));
+    await f.run({ ...options, now: options.now + 3600000 });
+    assert.ok(get().completed_at);
+    assert.equal(calls, 2);
+    assert.deepEqual(f.db.prepare('SELECT outcome,result_pr,batch_attempts FROM finding_backlog').get(),
+      { outcome: 'applied', result_pr: f.pr.number, batch_attempts: 0 });
+    assert.equal(f.dispatches.length, 1);
+  });
+});
+
+test('legacy JSON parse errors settle to the original open fix PR after preparation ends', async t => {
+  for (const numbered of [true, false]) await t.test(numbered ? 'numbered PR' : 'marked branch PR', async t => {
+    const f = await publicationFixture(t);
+    if (numbered) writeFileSync(f.outputPath, JSON.stringify({ ...f.result, prNumber: f.pr.number }));
+    else f.publication.prs = [f.pr];
+    const legacyError = 'Unexpected end of JSON input';
+    f.db.prepare('UPDATE finding_batches SET error=?').run(legacyError);
+    const get = () => f.db.prepare('SELECT launch_id,completed_at,released_at,error FROM finding_batches').get();
+    let reads = 0;
+    const options = { now: fixtureNow + 86400001, resolutionOnly: false, fetchPr: async (target, number) => {
+      assert.equal(target, repo);
+      assert.equal(number, f.pr.number);
+      reads++;
+      return f.pr;
+    } };
+    Object.assign(f.status, { status: 'running', terminal: false, succeeded: false });
+    await f.run(options);
+    assert.deepEqual(get(), { launch_id: f.batch.launch_id, completed_at: null, released_at: null, error: legacyError });
+    assert.equal(reads, 0);
+    Object.assign(f.status, { status: 'succeeded', terminal: true, succeeded: true });
+    await f.run({ ...options, now: options.now + 3600000 });
+    assert.deepEqual(get(), { launch_id: f.batch.launch_id, completed_at: null, released_at: null, error: legacyError });
+    await f.run({ ...options, now: options.now + 7200000, fetchPr: async () => { throw Error('HTTP 403 Forbidden'); } });
+    assert.deepEqual(get(), { launch_id: f.batch.launch_id, completed_at: null, released_at: null, error: legacyError });
+    f.db.prepare(`INSERT INTO reviewed_prs(repo,pr_number,reviewed_at,reviewer,pr_state,revision_ref,review_status)
+      VALUES (?,?,?,'codex','open',?,'pending')`).run(repo, f.pr.number, new Date(fixtureNow).toISOString(), head);
+    await f.run({ ...options, now: options.now + 10800000 });
+    assert.ok(get().completed_at);
+    assert.equal(get().released_at, null);
+    assert.equal(get().error, null);
+    assert.equal(get().launch_id, f.batch.launch_id);
+    assert.equal(f.db.prepare('SELECT count(*) AS n FROM finding_batches').get().n, 1);
+    assert.deepEqual(f.db.prepare('SELECT outcome,result_pr,batch_attempts FROM finding_backlog').get(),
+      { outcome: 'applied', result_pr: f.pr.number, batch_attempts: 0 });
+    assert.equal(reads, 2);
+    assert.equal(f.dispatches.length, 1);
+  });
+});
+
+test('branch publication retries malformed list and ref reads before recovering the marked PR', async t => {
+  const f = await publicationFixture(t);
+  const warnings = [];
+  let listCalls = 0;
+  let refCalls = 0;
+  const options = { now: fixtureNow + 86400001, fetchPublication: undefined,
+    logger: { warn: message => warnings.push(message) },
+    fetchPr: async () => ({ ...f.pr, state: 'MERGED' }),
+    execFileImpl: async (bin, args, opts) => {
+      if (bin === 'hq') return f.options.execFileImpl(bin, args, opts);
+      assert.equal(bin, 'gh');
+      if (args[0] === 'pr' && args[1] === 'list') {
+        return { stdout: ['', '[]', JSON.stringify([f.pr])][listCalls++] };
+      }
+      assert.equal(args[0], 'api');
+      refCalls++;
+      return { stdout: '{"object":' };
+    },
+  };
+  const get = () => f.db.prepare('SELECT completed_at,released_at,error FROM finding_batches').get();
+  const pending = { completed_at: null, released_at: null, error: null };
+  await f.run(options);
+  assert.deepEqual(get(), pending);
+  assert.equal(refCalls, 0);
+  await f.run({ ...options, now: options.now + 3600000 });
+  assert.deepEqual(get(), pending);
+  assert.equal(refCalls, 1);
+  await f.run({ ...options, now: options.now + 7200000 });
+  assert.ok(get().completed_at);
+  assert.equal(listCalls, 3);
+  assert.equal(refCalls, 1);
+  assert.equal(f.dispatches.length, 1);
+  assert.match(warnings[0], /publication read will retry:.*gh pr list.*0 bytes/);
+  assert.match(warnings[1], /publication read will retry:.*gh api branch ref.*10 bytes/);
 });
 
 test('GitHub failure after retries keeps aged work pending for the next pass', async t => {
@@ -978,7 +1090,7 @@ test('FINDINGSDECISIONHOLD-01 malformed lifecycle responses retain the canceled 
     await f.run({ now: fixtureNow + 86400001, execFileImpl: async (bin, args, options) =>
       args[0] === 'decision' ? { stdout } : f.options.execFileImpl(bin, args, options) });
     const row = f.db.prepare('SELECT error,released_at FROM finding_batches').get();
-    assert.match(row.error, /^batch-decision-publication-receipt-(invalid|mismatch)$/);
+    assert.equal(row.error, stdout === 'null' ? 'batch-decision-publication-receipt-mismatch' : null);
     assert.equal(row.released_at, null);
     assert.equal(f.dispatches.length, 1);
   });

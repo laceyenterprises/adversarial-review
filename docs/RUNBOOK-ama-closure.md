@@ -10048,13 +10048,17 @@ watcher log. Timeout diagnostics include the effective bound. Network
 failures, timeouts and signals keep the batch pending for later collection
 without spending preparation attempts. A probe whose output exceeds its cap
 records `output exceeded limit` in the batch error.
-Collection waits for terminal preparation and retries incomplete JSON before
-recording `batch-outcome-invalid-json`. Once outcomes identify a published PR,
-collection skips further preparation probes. A single valid marked branch PR
+Collection waits for terminal preparation and retries incomplete outcomes JSON
+locally before deferring to the next tick. Once outcomes identify a published
+PR, collection ordinarily skips further preparation probes. A launched batch
+with a legacy settlement JSON error verifies terminal preparation before
+returning to its original settlement path. A single valid marked branch PR
 recovers a missing artifact PR number/head atomically, then follows numbered
-settlement without needing a surviving publisher. Permanent GitHub failures stay
-visible and follow the existing timeout and terminal-custody release rules;
-only transient transport, timeout and signal failures defer without an error.
+settlement without needing a surviving publisher. Empty or malformed JSON reads
+log the operation and byte count and retain batch custody. Failed legacy
+recovery reads keep the original batch assigned. Ordinary permanent GitHub
+failures stay visible and follow the existing timeout and terminal-custody
+release rules.
 Non-applied outcomes settle without
 GitHub. For applied outcomes, collection reads `state,mergedAt,body,headRefOid`
 with `gh pr view` using only `outcomes.json`'s PR number in the batch repository.

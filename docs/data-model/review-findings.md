@@ -524,8 +524,12 @@ without GitHub, a push, or a publication launch. Preparation and publication
 write complete JSON to a temporary file in the same directory and rename it to
 `outcomes.json` with mode `0664`. The collector reads a dispatched batch's
 provisional artifact after observing terminal preparation. Published outcomes with
-an existing PR number skip further preparation status probes. It retries JSON parse failures
-after 50, 100 and 200 ms before recording `batch-outcome-invalid-json`.
+an existing PR number skip further preparation status probes except when
+recovering a legacy settlement JSON error. The collector retries malformed
+outcomes after 50, 100 and 200 ms, then defers to the next collection pass.
+A launched batch with a legacy JSON parse error waits for terminal preparation
+and reuses its existing artifact and PR evidence without releasing its findings
+when recovery cannot verify publication.
 
 For provisional applied findings or advice, the collector validates complete
 manifest coverage, waits for terminal preparation (including a launch parked at
@@ -555,12 +559,12 @@ requires a positive PR number and valid head SHA as well as the branch,
 same-repository and exact-marker checks. It then uses the ordinary numbered PR
 lookup in the batch repository for settlement; no live publisher is required.
 An unmerged close stays unresolved. Foreign, unmarked, or ambiguous branch PR
-evidence retains the batch fence. Exhausted GitHub read retries keep the batch
-pending for the next collection pass without recording a terminal error only
-for transient transport, timeout or signal failures. Permanent authentication,
-permission, repository and malformed-response errors remain visible in the batch
-error and enter the existing timeout/terminal-custody release path. They do not
-charge the invalid-dispatch-receipt counter; release charges finding attempts.
+evidence retains the batch fence. Transient transport, timeout, signal and JSON
+parse failures keep the batch pending for the next collection pass. Parse
+diagnostics log the operation and byte count. Permanent authentication,
+permission, repository and valid-JSON evidence failures remain visible in the
+batch error and enter the existing timeout and terminal-custody release path.
+Only release charges finding attempts for those failures.
 
 With no existing PR, a matching remote branch SHA permits one follow-up
 `--completion-shape pr --branch <existing-branch>` launch. If preparation ended

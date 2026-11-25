@@ -37,7 +37,7 @@ class PublicationReadError extends Error {}
 
 // Older collectors persisted the outcomes parser's error code or the raw
 // V8 SyntaxError message from a GitHub read.
-const LEGACY_SETTLEMENT_JSON_ERROR = /^(?:batch-outcome-invalid-json|Unexpected end of JSON input|.+(?:in|after) JSON at position \d+(?: \(line \d+ column \d+\))?|(?:Unexpected token .+|".*") is not valid JSON)$/;
+const LEGACY_SETTLEMENT_JSON_ERROR = /^(?:batch-outcome-invalid-json|Unexpected end of JSON input|(?:Unexpected (?:token .+|number|string) in|Unexpected non-whitespace character after|Expected (?:property name or '}'|double-quoted property name|':' after property name|',' or '}' after property value|',' or ']' after array element) in) JSON at position \d+(?: \(line \d+ column \d+\))?|(?:Unexpected token .+|".*") is not valid JSON)$/;
 
 function hasLegacySettlementJsonError(batch) {
   return Boolean(batch?.launch_id && LEGACY_SETTLEMENT_JSON_ERROR.test(batch.error || ''));
@@ -72,11 +72,22 @@ function publicationProbeError(error, operation, timeoutMs, fallback = error.mes
   });
 }
 
-async function fetchFindingBatchPr(repo, prNumber, { execFileImpl, env, logger }) {
-  const { stdout } = await execGhWithRetry({ execFileImpl, env, log: logger,
-    args: ['pr', 'view', String(prNumber), '--repo', repo, '--json', 'state,mergedAt,body,headRefOid'],
-    timeoutMs: 15_000 });
-  return parsePublicationReadJson(stdout, 'gh pr view');
+async function readGithubPublicationJson(args, context, { execFileImpl, env, logger }) {
+  // Retry only unusable JSON here; transport/auth retry policy stays in gh-cli.
+  for (const waitMs of [0, 50, 100]) {
+    if (waitMs) await delay(waitMs);
+    const { stdout } = await execGhWithRetry({ execFileImpl, env, log: logger, args, timeoutMs: 15_000 });
+    try { return parsePublicationReadJson(stdout, context); }
+    catch (error) {
+      if (!(error instanceof PublicationReadError) || waitMs === 100) throw error;
+    }
+  }
+}
+
+async function fetchFindingBatchPr(repo, prNumber, options) {
+  return readGithubPublicationJson(
+    ['pr', 'view', String(prNumber), '--repo', repo, '--json', 'state,mergedAt,body,headRefOid'],
+    'gh pr view', options);
 }
 
 async function readPublicationEvidence(reader, args, { numberedPr = false } = {}) {
@@ -461,11 +472,8 @@ export function findingBatchDispatchArgs({ batch, workerClass, promptPath, env, 
     '--prompt', promptPath, '--root', resolveHqRoot(env)];
 }
 
-async function fetchFindingBatchPublication(repo, branch, { execFileImpl, env, logger }) {
-  const run = async (args, context) => {
-    const { stdout } = await execGhWithRetry({ execFileImpl, env, log: logger, args, timeoutMs: 15_000 });
-    return parsePublicationReadJson(stdout, context);
-  };
+async function fetchFindingBatchPublication(repo, branch, options) {
+  const run = (args, context) => readGithubPublicationJson(args, context, options);
   const prs = await run(['pr', 'list', '--repo', repo, '--head', branch, '--state', 'all', '--limit', '100',
     '--json', 'number,headRefOid,body,headRefName,isCrossRepository'], 'gh pr list');
   // A deleted branch is normal after merge; PR recovery must precede ref lookup.
@@ -488,7 +496,7 @@ Do not commit the artifact. If publication fails, leave the batch unresolved.
 `;
 }
 
-async function readFindingBatchPreparation(batch, { execFileImpl, env, timeoutMs }) {
+async function readFindingBatchPreparation(batch, { execFileImpl, env, timeoutMs, numberedLegacy = false }) {
   let stdout;
   try {
     ({ stdout } = await execFileImpl(env.HQ_BIN || 'hq',
@@ -503,15 +511,20 @@ async function readFindingBatchPreparation(batch, { execFileImpl, env, timeoutMs
     if (error instanceof DispatchStdoutJsonError) {
       throw new PublicationReadError(`hq dispatch status: invalid JSON (${Buffer.byteLength(stdout ?? '')} bytes)`, { cause: error });
     }
-    throw Error('batch-launch-status-invalid', { cause: error });
+    const ErrorType = numberedLegacy ? PublicationReadError : Error;
+    throw new ErrorType('batch-launch-status-invalid', { cause: error });
   }
   const workspaceRepo = typeof status.repo === 'string' && isAbsolute(status.repo);
   if (readDispatchReceipt(status).launchRequestId !== batch.launch_id
     || (status.repo != null && !workspaceRepo && ![batch.repo, batch.repo.split('/').at(-1)].includes(status.repo))) {
-    throw Error('batch-launch-evidence-mismatch');
+    const ErrorType = numberedLegacy ? PublicationReadError : Error;
+    throw new ErrorType('batch-launch-evidence-mismatch');
   }
   const preparation = readDispatchStatus(status);
-  if (preparation.diagnostics.length) throw Error('batch-launch-status-invalid');
+  if (preparation.diagnostics.length) {
+    const ErrorType = numberedLegacy ? PublicationReadError : Error;
+    throw new ErrorType('batch-launch-status-invalid');
+  }
   return preparation;
 }
 
@@ -647,8 +660,9 @@ async function publishFindingBatch({ db, batch, result, dir, outputPath, env, ro
           }
           throw error;
         }
-        try { handoff = JSON.parse(stdout); }
-        catch { throw Error('batch-decision-publication-receipt-invalid'); }
+        // The mutation may already have succeeded. Retry the bound lifecycle
+        // operation next pass so it can re-emit its idempotent receipt.
+        handoff = parsePublicationReadJson(stdout, 'hq decision supersede-publication');
       }
       if (!handoff || handoff.state !== 'superseded' || handoff.branchReleased !== true
         || Object.entries(binding).some(([key, value]) => handoff[key] !== value)) {
@@ -907,7 +921,8 @@ export async function runFindingBatches({ db, rootDir, env = process.env, day = 
         catch (error) { readError = error; }
         // Historical imports can have artifacts without a launch receipt.
         const preparation = batch.launch_id && (recoveringJsonError || result?.prNumber == null)
-          ? await readFindingBatchPreparation(batch, { execFileImpl, env, timeoutMs: probeTimeoutMs }) : null;
+          ? await readFindingBatchPreparation(batch, { execFileImpl, env, timeoutMs: probeTimeoutMs,
+            numberedLegacy: recoveringJsonError && Number.isSafeInteger(result?.prNumber) && result.prNumber > 0 }) : null;
         if (preparation && !preparation.terminal) return;
         if (readError) throw readError;
         // Applied claims that fail validation are re-verified, never published.
@@ -976,9 +991,14 @@ export async function runFindingBatches({ db, rootDir, env = process.env, day = 
       const detail = redactPublicSafeText(String(cause), 300).replace(/\s+/g, ' ').trim();
       const diagnostic = stderr ? `\nstderr:\n${redactPublicSafeText(stderr, Infinity)}` : '';
       if (error instanceof PublicationReadError) {
-        // Legacy recovery clears its original error only after validating the
-        // numbered artifact. Leave any intervening error write intact here.
-        if (!recoveringJsonError) clearFindingBatchError(db, batch);
+        // Failed reads never overwrite diagnostics or release custody. Make
+        // persistent failures visible to the existing held-batch alert.
+        if (batchAgeMs(batch, now) > timeoutMs) {
+          const reason = 'batch-publication-read-malformed';
+          needsOperator.set(batch.batch_id, reason);
+          try { recordFindingBatchHold(db, batch.batch_id, reason, now); }
+          catch (holdError) { logger.warn?.(`[findings-batch] ${batch.batch_id}: hold record failed: ${holdError.message}`); }
+        }
         logger.warn?.(`[findings-batch] ${batch.batch_id}: publication read will retry: ${detail}${diagnostic}`);
         return;
       }

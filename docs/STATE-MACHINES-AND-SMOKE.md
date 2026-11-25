@@ -320,18 +320,30 @@ resubmission. A second absence retains the existing stale release/requeue path.
 Existing failed publishers stay visible for same-launch repair. A single validated
 marked branch PR recovers a missing artifact PR number/head after publication.
 Numbered outcomes ordinarily skip further preparation status reads. A launched
-batch with a legacy settlement JSON error first verifies terminal preparation,
-then clears the legacy error once numbered outcomes are valid. Empty or
+batch with a recognized historical V8 settlement JSON error first verifies terminal preparation,
+then clears the legacy error once numbered outcomes are valid. Numbered legacy
+artifacts retain custody if the old preparation status has an invalid shape or
+contradictory launch/repository identity; they retry rather than release or publish.
+Unrelated diagnostic prefixes and JSON-position suffixes do not trigger recovery. Empty or
 malformed GitHub or HQ preparation-status stdout, and literal `null` from a
-GitHub publication read, defer collection, retain batch custody and log the
-operation and byte count. Definitive legacy
+GitHub publication read, retain batch custody and log the
+operation and byte count. GitHub PR view, PR list and branch-ref JSON reads retry
+twice locally after 50 and 100 ms before deferring. Failed reads preserve the
+stored error and attempt counts. Strictly past the batch timeout, they record
+`batch-publication-read-malformed` in `hold_json` for the existing held-batch
+alert; repeated failures retain the original hold time. Definitive legacy
 recovery failures follow ordinary release rules. Persistently malformed
 outcomes and malformed publisher intents record errors for the existing
-timeout and terminal-custody release path. Malformed decision supersession
-stdout records a receipt error and surfaces an overdue operator hold. After
+timeout and terminal-custody release path. Empty, malformed or null decision
+supersession stdout retries the bound lifecycle operation on the next pass,
+allowing an already canceled source to re-emit its receipt. It uses the same
+overdue read hold; a valid but mismatched receipt remains a hard receipt error. After
 normal deployment, the runtime owner
 observes ordinary collection for eligible legacy errors settling to their
-existing PRs and checks for fresh JSON parse errors in the batch error summary.
+existing PRs, checks for fresh JSON parse errors in the batch error summary and
+retains any naturally occurring overdue read hold in the existing health receipt.
+Offline fixtures cover local retry exhaustion and canceled-source receipt recovery;
+no additional live smoke action is authorized.
 Simplicity advisories keep their final-review enrollment and validated outcome
 rules, sharing the cap and marked result PR with findings. Failed initial dispatch
 subprocesses retain the same batch/key for retry, even after the batch timeout,

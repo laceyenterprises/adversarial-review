@@ -525,15 +525,25 @@ write complete JSON to a temporary file in the same directory and rename it to
 `outcomes.json` with mode `0664`. The collector reads a dispatched batch's
 provisional artifact after observing terminal preparation. Published outcomes with
 an existing PR number skip further preparation status probes. When recovering
-a legacy settlement JSON error, the collector verifies terminal preparation
-and clears the legacy error once numbered outcomes are valid. The collector
+a recognized historical V8 settlement JSON error, the collector verifies terminal preparation
+and clears the legacy error once numbered outcomes are valid. For numbered legacy
+artifacts, invalid status shape or mismatched launch/repository evidence retains
+custody for a retry instead of releasing findings. Unrelated prefixed diagnostics
+and messages that merely end in a JSON-position suffix do not trigger recovery. The collector
 retries malformed outcomes after 50, 100 and 200 ms, then records
 `batch-outcome-invalid-json` once preparation is terminal. Definitive legacy
 recovery failures and persistent artifact errors use the existing
 timeout and ledger custody checks. Malformed publisher intents record
 `batch-publish-receipt-pending` and fence resubmission. Malformed decision
-supersession receipts record `batch-decision-publication-receipt-invalid` and
-surface through `hold_json` after the batch timeout.
+supersession stdout retries the bound operation on the next pass, including when
+the source was already canceled. Valid but mismatched receipts still record a
+hard receipt error. GitHub PR view, PR list and branch-ref JSON reads retry twice
+locally after 50 and 100 ms. Exhausted malformed/null stdout reads preserve the
+stored error, findings ownership and attempt counts. Strictly past the batch timeout,
+`hold_json` records `batch-publication-read-malformed` against the unchanged error
+for the existing `heldBatches` health projection; repeated failures preserve
+`heldAt`. A later successful settlement clears the hold through the ordinary path.
+No column, table or lifecycle enum changes.
 
 For provisional applied findings or advice, the collector validates complete
 manifest coverage, waits for terminal preparation (including a launch parked at

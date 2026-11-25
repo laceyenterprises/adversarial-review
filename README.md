@@ -111,15 +111,17 @@ The full unit + adapter test suite runs the same way:
 npm test
 ```
 
-CI runs the full suite on Node 22 and Node 26 on main, at 06:37 UTC nightly
-and on manual dispatch. Pull requests select tests from the diff against the
+CI runs every file on Node 22 and Node 26 on main, at 06:37 UTC nightly
+and on manual dispatch. Each major has two measured, non-overlapping shards;
+all four jobs must pass. Pull requests retain two jobs and select tests from the diff against the
 checked-out merge commit's first parent. The selection follows reverse imports
 and literal source references, including CLI invocations. Harness, dependency,
 workflow and shared fixture changes use the full file set. Unclassified changes
 and unavailable selection also use the full set. Docs-only and empty diffs run
 zero Node test files. Each existing job runs a small selection, and the two
 jobs split broad selections when they reach a third of the suite by file count
-or estimated work. Both keep their existing check names. Node 22.10 or newer
+or estimated work. Both PR jobs keep their existing check names; full-run names
+also identify the shard. Node 22.10 or newer
 is required for native test-runner `execArgv` support, which installs each
 file's preloads.
 The runner schedules files by measured duration. Local runs default to half
@@ -135,6 +137,8 @@ and garbage collection for fixture commits, fetches and pushes even with a fresh
 home. Push receivers own their server-side configuration. Helpers that replace
 Git command configuration own their settings. Repeated CLI fixtures use
 private compile caches.
+Every shard installs its own dependencies. CDM, contract checks, the offline
+demo, canary and drill run once per Node major, in the first full shard.
 The suite deadline stays at 900 seconds when the selected parallel files fit
 within the configured worker limit. Otherwise it is
 `900 * 8 / min(8, limit)` seconds: 1800 seconds with a four-worker limit and
@@ -143,7 +147,11 @@ deadline, the runner prints the active test files and the number still queued.
 Generic bounded validation wrappers preserve command arguments.
 `AR_TEST_CONCURRENCY` applies only to this repository’s runner.
 Set `AR_TEST_TIMINGS=/absolute/path.json` to
-record per-file wall times and total suite wall time. Relative report paths
+record per-file wall times and total suite wall time. Set `AR_TEST_CHECKPOINT`
+to a different absolute path for an append-only plan and file-completion journal
+that survives a suite timeout. CI uploads the checkpoint journal's partial progress
+on failure or timeout; the timings file is written only when the run completes.
+Relative report paths
 resolve against the caller's working directory and survive sandbox cleanup.
 Scheduling hints in `test/fixtures/suite-durations.json` control execution
 order and shard balance. The selection comes from the diff and dependency graph.
@@ -151,7 +159,9 @@ For a focused run, pass exact paths or basenames to `node test/run-tests.mjs`.
 To preview a committed diff against `HEAD`, run
 `npm test -- --base origin/main --dry-run`. On a PR merge checkout, use
 `--base HEAD^1`. Set `AR_TEST_PR_SHARD=0` or `AR_TEST_PR_SHARD=1` to preview
-the corresponding matrix job.
+the corresponding PR matrix job. For a full run without a diff base or explicit
+file list, set `AR_TEST_FULL_SHARD=0` or `AR_TEST_FULL_SHARD=1` instead.
+With neither shard setting, local `npm test` still runs the complete inventory.
 
 ### AgentOS Reviewer Runtime Routing
 

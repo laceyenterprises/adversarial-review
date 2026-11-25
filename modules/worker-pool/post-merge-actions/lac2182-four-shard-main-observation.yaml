@@ -1,0 +1,24 @@
+operator_steps:
+  - description: >-
+      Designated SRE selects the first ordinary main Test workflow run whose
+      head contains the merged LAC-2182 change. Verify successful completion of
+      all four jobs: npm test (Node 22, shard 1/2), npm test (Node 22, shard 2/2),
+      npm test (Node 26, shard 1/2), and npm test (Node 26, shard 2/2).
+      Inspect each major’s two completion journals for full, non-overlapping file
+      coverage. Inspect each test step to confirm it ran rather than being skipped,
+      completed within the unchanged 900-second suite deadline, and uploaded
+      its completed-run timings and checkpoint. Retain the head SHA, run link,
+      four job links and test-step durations in the LAC-2182 PR acceptance
+      receipt. A CDM artifact-name collision, missing shard, skipped test step
+      or timeout leaves acceptance unproven; report it to the operator for
+      repair. This four-shard observation applies to full main runs; PR runs
+      retain their two existing job names. Do not trigger workflows, change
+      required checks or make live changes.
+    run_as: designated SRE
+    command: >-
+      gh run list --repo laceyenterprises/adversarial-review --branch main --workflow test.yml --event push --limit 10
+      --json databaseId,headSha,conclusion,url
+actions: []
+catchup:
+  catchup_timeout_s: 1800
+contact_on_failure: operator

@@ -42,7 +42,9 @@ function fixture(t, patch = {}, lease = true) {
     lastAttemptedAt: started, dispatchTimeoutMs: 600_000, lastError: null,
     custom: 'preserved', ...patch };
   updateAmaCloserDispatchRecord(rootDir, identity, () => record);
-  if (lease) acquireAmaCloserLease({ rootDir, ...identity, now: started, watcherPid: 12345 });
+  // A synthetic PID can exist on the CI host; its real birth must not seed a fixture lease.
+  if (lease) acquireAmaCloserLease({ rootDir, ...identity, now: started, watcherPid: 12345,
+    captureProcessImpl: () => null });
   const options = { ledgerDbPath, env: { AGENT_OS_SESSION_LEDGER_BACKEND: 'sqlite' }, now,
     readPullRequestStateImpl: async () => ({ state: 'OPEN' }),
     processKillImpl: dead, deliverAlertImpl: async () => {}, logger: { warn() {} } };

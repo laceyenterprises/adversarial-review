@@ -5,7 +5,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, 
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
-import { SERIAL_TEST_FILES, orderFiles, workerCount, suiteTimeoutMs } from './helpers/parallel-plan.mjs';
+import { SERIAL_TEST_FILES, orderFiles, planFullShards, workerCount, suiteTimeoutMs } from './helpers/parallel-plan.mjs';
 import { trackNativeFiles } from './helpers/parallel-reporter.mjs';
 import { fixtureGitEnv } from './helpers/fixture-git-env.mjs';
 
@@ -107,6 +107,41 @@ test('measured order is longest first with deterministic ties and unknown files'
   assert.deepEqual(orderFiles([...files].reverse(), durations), expected);
   assert.deepEqual(orderFiles(['z', 'a', 'b'], {}), ['a', 'b', 'z']);
   assert.deepEqual(orderFiles([], {}), []);
+});
+
+test('full shards partition every file exactly once with deterministic measured balance', () => {
+  const files = ['a', 'b', 'c', 'd', 'e'];
+  const durations = { a: 8, b: 7, c: 6, d: 5, e: 4 };
+  const shards = planFullShards(files, durations);
+  assert.deepEqual(shards, [['a', 'd', 'e'], ['b', 'c']]);
+  assert.deepEqual(planFullShards([...files].reverse(), durations), shards);
+  assert.deepEqual(shards.flat().sort(), [...files].sort());
+  assert.equal(new Set(shards.flat()).size, files.length);
+  assert.deepEqual(planFullShards([], {}), [[], []]);
+  assert.deepEqual(planFullShards(['only'], {}), [['only'], []]);
+});
+
+test('full-shard CLI plans cover the complete inventory and reject mixed selectors', () => {
+  const runner = path.join(import.meta.dirname, 'run-tests.mjs');
+  const env = { ...process.env };
+  for (const key of ['AR_TEST_PR_BASE', 'AR_TEST_PR_SHARD', 'AR_TEST_FULL_SHARD']) delete env[key];
+  const plan = (extra = {}) => JSON.parse(execFileSync(process.execPath, [runner, '--dry-run'], {
+    env: { ...env, ...extra }, encoding: 'utf8', timeout: 10_000,
+  }));
+  const full = plan();
+  const parts = ['0', '1'].map(index => plan({ AR_TEST_FULL_SHARD: index }));
+  const actual = parts.flatMap(part => part.files);
+  assert.deepEqual([...actual].sort(), [...full.files].sort());
+  assert.equal(new Set(actual).size, full.files.length);
+  assert.ok(parts.every(part => part.selectedCount === full.files.length));
+  for (const extra of [{ AR_TEST_FULL_SHARD: '2' },
+    { AR_TEST_FULL_SHARD: '0', AR_TEST_PR_BASE: 'HEAD' }]) {
+    const result = spawnSync(process.execPath, [runner, '--dry-run'], {
+      env: { ...env, ...extra }, encoding: 'utf8', timeout: 10_000,
+    });
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, /AR_TEST_FULL_SHARD requires the full suite/);
+  }
 });
 
 test('controller and repair CLI suites are scheduled ahead of median-duration files', () => {
@@ -447,6 +482,41 @@ for (const failure of [false, true]) test(`exclusive phase preserves aggregate o
   assert.match(child.stdout, /phase diagnostic retained/);
   assert.equal(JSON.parse(readFileSync(reportPath)).files.length, 3);
   if (failure) assert.match(child.stderr, /Failed test file: serial.mjs/);
+});
+
+test('full-run shard selection is not inherited by workers or nested explicit runners', t => {
+  const root = mkdtempSync(path.join(tmpdir(), 'full-shard-env-'));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const repo = path.dirname(import.meta.dirname);
+  mkdirSync(path.join(root, 'test', 'adapters'), { recursive: true });
+  writeFileSync(path.join(root, 'package.json'), '{"type":"module"}');
+  writeFileSync(path.join(root, 'test', 'run-tests.mjs'),
+    readFileSync(path.join(repo, 'test/run-tests.mjs')));
+  for (const name of ['src', 'node_modules', 'test/helpers']) {
+    symlinkSync(path.join(repo, name), path.join(root, name), 'dir');
+  }
+  const runner = path.join(root, 'test/run-tests.mjs');
+  writeFileSync(path.join(root, 'test', 'probe.test.mjs'), `
+    import assert from 'node:assert/strict';
+    import { execFileSync } from 'node:child_process';
+    import test from 'node:test';
+    test('nested explicit selection', () => {
+      assert.equal(process.env.AR_TEST_FULL_SHARD, undefined);
+      const plan = JSON.parse(execFileSync(process.execPath,
+        [${JSON.stringify(runner)}, 'probe.test.mjs', '--dry-run'],
+        { encoding: 'utf8', timeout: 10_000 }));
+      assert.deepEqual(plan.files, ['test/probe.test.mjs']);
+    });
+  `);
+  const env = { ...process.env, AR_TEST_FULL_SHARD: '0',
+    ADVERSARIAL_REVIEW_TEST_TEMP_BASE: root };
+  for (const key of ['NODE_TEST_CONTEXT', 'AR_TEST_PR_BASE', 'AR_TEST_PR_SHARD']) delete env[key];
+  const child = spawnSync(process.execPath, [runner],
+    { cwd: root, env, encoding: 'utf8', timeout: 20_000 });
+  assert.equal(child.error, undefined, child.stdout + child.stderr);
+  assert.equal(child.status, 0, child.stdout + child.stderr);
+  assert.match(child.stderr, /1 files, 0 exclusive, 1 parallel workers/);
+  assert.match(child.stdout, /# pass 1/);
 });
 
 test('runner executes measured order across double-digit worker ranks', (t) => {

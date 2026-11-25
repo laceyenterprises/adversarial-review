@@ -5,7 +5,7 @@ import path from 'node:path';
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { parseArgs } from 'node:util';
-import { SERIAL_TEST_FILES, orderFiles, planPrShards, workerCount, suiteTimeoutMs } from './helpers/parallel-plan.mjs';
+import { SERIAL_TEST_FILES, orderFiles, planPrShards, planFullShards, workerCount, suiteTimeoutMs } from './helpers/parallel-plan.mjs';
 import { fixtureGitEnv } from './helpers/fixture-git-env.mjs';
 import { reclaimAbandonedSandboxes, SANDBOX_OWNER_MARKER } from './helpers/runner-sandbox.mjs';
 
@@ -86,7 +86,12 @@ async function testPlan(files, requested, base, shardIndex, durations) {
       shard: shards ? `${Number(shardIndex) + 1}/${shards.length}` : undefined,
     };
   }
-  if (requested.length === 0) return { mode: 'full', reason: 'no diff base supplied', files };
+  if (requested.length === 0) {
+    const shards = fullShardIndex === undefined ? null : planFullShards(files, durations);
+    return { mode: 'full', reason: 'no diff base supplied', selectedCount: files.length,
+      files: shards ? shards[Number(fullShardIndex)] : files,
+      shard: shards ? `${Number(fullShardIndex) + 1}/${shards.length}` : undefined };
+  }
   const selected = files.filter(file => requested.some(name => (
     path.resolve(repoRoot, name) === path.resolve(repoRoot, file) || path.basename(file) === name
   )));
@@ -102,8 +107,13 @@ const { values, positionals } = parseArgs({
 });
 const base = values.base ?? (process.env.AR_TEST_PR_BASE || undefined);
 const shardIndex = process.env.AR_TEST_PR_SHARD || undefined;
+const fullShardIndex = process.env.AR_TEST_FULL_SHARD || undefined;
 if (shardIndex !== undefined && (base === undefined || !['0', '1'].includes(shardIndex))) {
   throw new Error('AR_TEST_PR_SHARD requires a diff base and must be 0 or 1');
+}
+if (fullShardIndex !== undefined && (base !== undefined || shardIndex !== undefined
+  || positionals.length > 0 || !['0', '1'].includes(fullShardIndex))) {
+  throw new Error('AR_TEST_FULL_SHARD requires the full suite and must be 0 or 1');
 }
 const timingHints = path.join(testDir, 'fixtures', 'suite-durations.json');
 const durations = existsSync(timingHints) ? JSON.parse(readFileSync(timingHints, 'utf8')) : {};
@@ -224,7 +234,7 @@ try {
   const inheritedStatePaths = new Set([
     // Diff selection applies only to this coordinator. Several test fixtures
     // invoke their own runner with a different repo or explicit file list.
-    'AR_TEST_PR_BASE', 'AR_TEST_PR_SHARD',
+    'AR_TEST_PR_BASE', 'AR_TEST_PR_SHARD', 'AR_TEST_FULL_SHARD',
     'AR_TEST_TIMINGS', 'AR_TEST_CHECKPOINT', 'AR_TEST_SHARD_CONFIG', 'NODE_COMPILE_CACHE', 'NODE_TEST_CONTEXT',
     'CODEX_HOME', 'CODEX_SOURCE_HOME', 'CODEX_AUTH_PATH', 'GEMINI_HOME',
     'GEMINI_OAUTH_CREDS_PATH', 'CLAUDE_CONFIG_DIR',

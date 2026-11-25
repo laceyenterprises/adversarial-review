@@ -1,7 +1,7 @@
 name: Test
 
-# Runs affected tests on pull requests and the full suite on main, nightly,
-# and on manual dispatch. The fixture-driven suite does not require network
+# Runs affected tests on pull requests and every file on each Node major for
+# main, nightly and manual runs, in two shards per major. The suite requires no network
 # access, a real GitHub bot token, or a Linear API key — see
 # `demo/research-finding-walkthrough.sh` for the offline-runnable end-to-end
 # path that mirrors the same byte-stable contracts the CI here exercises.
@@ -29,17 +29,19 @@ permissions:
 
 jobs:
   test:
-    name: npm test (Node ${{ matrix.node }})
+    name: npm test (Node ${{ matrix.node }}${{ matrix.shard != 'pr' && format(', shard {0}/2', matrix.shard == '0' && '1' || '2') || '' }})
     # Move back to the newer image after ARSANDBOXLINUX-01 fixes Linux bwrap isolation.
     runs-on: ubuntu-24.04
     strategy:
       # Keep both supported Node majors. Broad PR selections share the work
-      # between the two jobs. Main and nightly run every test on both.
+      # between the two PR jobs. Full runs split within each major, so every
+      # test still runs on both versions. All four full jobs must succeed.
       fail-fast: false
       matrix:
         node:
           - '22'
           - '26'
+        shard: ${{ fromJSON(github.event_name == 'pull_request' && '["pr"]' || '["0","1"]') }}
         include:
           # 2026-10-12: fs-ext 2.1.1 fails with Node 26.11.1 headers:
           # field 'work_req' has incomplete type 'uv__work'. Pin production's
@@ -76,6 +78,7 @@ jobs:
         run: node bin/ci-install.mjs
 
       - name: Run CDM review-gate re-derivation guard
+        if: matrix.shard != '1'
         # CDM-07AR: verdict/head/mergeability gate facts must come from
         # `src/adversarial-gate-status.mjs`, not be re-derived by consumers.
         # Allowlisted exceptions stay visible in the uploaded JSON artifact.
@@ -86,7 +89,7 @@ jobs:
             --out /tmp/cdm-rederivation-audit.json
 
       - name: Upload CDM re-derivation audit artifact
-        if: always()
+        if: always() && matrix.shard != '1'
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
         with:
           name: cdm-rederivation-audit-${{ matrix.node }}-${{ github.sha }}
@@ -97,15 +100,30 @@ jobs:
         env:
           AR_TEST_PR_BASE: ${{ github.event_name == 'pull_request' && 'HEAD^1' || '' }}
           AR_TEST_PR_SHARD: ${{ github.event_name == 'pull_request' && (matrix.node == '22' && '0' || '1') || '' }}
+          AR_TEST_FULL_SHARD: ${{ github.event_name != 'pull_request' && matrix.shard || '' }}
+          AR_TEST_TIMINGS: ${{ runner.temp }}/ar-tests-${{ matrix.node }}-${{ matrix.shard }}-timings.json
+          AR_TEST_CHECKPOINT: ${{ runner.temp }}/ar-tests-${{ matrix.node }}-${{ matrix.shard }}-progress.jsonl
         run: npm test
 
+      - name: Upload test timings and completion checkpoint
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
+        with:
+          name: test-progress-${{ matrix.node }}-${{ matrix.shard }}-${{ github.sha }}
+          path: |
+            ${{ runner.temp }}/ar-tests-${{ matrix.node }}-${{ matrix.shard }}-timings.json
+            ${{ runner.temp }}/ar-tests-${{ matrix.node }}-${{ matrix.shard }}-progress.jsonl
+          if-no-files-found: warn
+
       - name: Typecheck contracts
+        if: matrix.shard != '1'
         # The `src/kernel/contracts.d.ts` declarations are the public adapter
         # contract. They're typechecked separately so a contract drift fails
         # CI even when the runtime `.mjs` modules still parse.
         run: npm run typecheck:contracts
 
       - name: Run offline end-to-end demo
+        if: matrix.shard != '1'
         # The demo proves the documented five-minute new-contributor path
         # actually works against the same kernel/adapter contracts the unit
         # tests exercise. It builds a temporary fixture, drives the markdown
@@ -115,6 +133,7 @@ jobs:
         run: bash demo/research-finding-walkthrough.sh
 
       - name: Run fallback canary (fixture)
+        if: matrix.shard != '1'
         # ARC-09: drive a synthetic review through the `local` outage-lifeline
         # runtime against a fixture reviewer. Proves the runtime port +
         # admission + verdict-parse + status-file + alerting path all still
@@ -124,6 +143,7 @@ jobs:
         run: node scripts/adversarial-runtime-canary.mjs --root "$RUNNER_TEMP/canary" --fixture
 
       - name: Run failover drill (sandboxed)
+        if: matrix.shard != '1'
         # ARC-09: exercise the ARC-07 health router through a full kill →
         # failover → restore → resume → reconcile cycle in an in-memory fixture
         # harness, asserting automatic failover, automatic resume, and ZERO

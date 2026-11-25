@@ -2310,33 +2310,34 @@ HAMVALTIMEOUTFLAKE-01 requires an unreadable latest completed read for
 `launch-unreadable`; a scheduling stall alone cannot trigger that transition.
 A validator timeout records `validation-stopped` in the controller and
 `canonical-validation-deferred` for the exact head in the closer. The deferral
-supplies no validation audit. A process-inspection no-verdict uses the same
-deferred handoff. The run will not start another battery on that head.
-MRQ-20: when the repository declares required contexts
-(`required_check_contexts` or `required_check_contexts_by_repository`) and no
-local failure was seen before the stop, that UNKNOWN instead hands its verdict
-to exact-head CI. `hammer-close.sh` starts one fresh controller round, which
-reuses the receipt without another battery and continues to publish, CI wait,
-predicate and merge. The gate merges only when every declared context is
-present and green on that head. The mirror's own budget stop (exit 75) and a
-battery killed by a signal the validator did not send are UNKNOWN too.
-A completed local conflict repair enters canonical validation before publication
-and outside the merge lease. A genuine local failure blocks the push. An active
-validation stop leaves the controller's terminal result unwritten so one fresh
-round can publish a head-bound UNKNOWN after confirmed drain, using the captured
-source as its Git lease. A blocked publication check reports
-`source-publication-refused`. Verify-head reuses a passing pre-publish battery
-or CI deferral at the same SHA, and declared required CI gates the published
-head. If CI
-authority is unavailable, the close records a watcher-owned re-drive on that
-head and ends deferred. Dispatch refunds the source launch and schedules the
-retry against the live published head when the launch's push receipt names it.
-The no-verdict signal is scoped to `telegram-responder-guard` and UNKNOWN
-cannot fall through to import-fault success. Cancellation with unconfirmed
-drain retains cancellation instead of writing a validation deferral. Ended
-validation deferrals use INCONCLUSIVERETRY-01b's per-head owned retry, full
-refund, exponential backoff and one notification; the deferred last-phase
-receipt is sufficient, without a terminal-stop receipt.
+preserves UNKNOWN, the check evidence and the local source in HQ custody. The
+cleanup owner retains the exact unpublished commit and records drain separately.
+Ordinary same-head stops do not start a fresh battery. Standalone UNKNOWN can
+continue with complete per-check coverage, a clean exact head and confirmed
+cleanup. Current declared contexts must all report green on that head before
+merge.
+
+A completed local conflict repair validates before source-fenced publication
+outside the merge lease. A confirmed local failure blocks its push. An active
+validation stop leaves the terminal result unwritten. Confirmed drain and
+readable launch-bound evidence allow one fresh round to publish an eligible
+UNKNOWN with the captured source as the Git lease. Verify-head reuses a passing
+pre-publish battery or qualified CI deferral only on the same published SHA.
+Without complete selected-check evidence or declared CI, publication leaves a
+watcher continuation. A launch-bound push receipt transfers retry backoff to
+the published head. The watcher refunds the old launch and holds unrecovered
+source on its corresponding live head. Notice refresh follows changes in
+source and cleanup facts. Unreadable custody or an explicitly recorded unsafe custody fallback holds.
+A clean matching-target hold with confirmed cleanup is continued and returns
+to existing paced retry. Legacy retry rows alone and corrupt retry files cannot
+hold unrelated heads. An ended inconclusive launch with an unreadable retry
+record pauses its own retry and surfaces a deduplicated operator notice.
+Teardown matches the ending launch across target heads, retries retention in the
+resolved worker checkout with per-hold backoff, and accepts continued custody
+with exact-source publication. The watcher attempts the custody lock once per
+pass. Unconfirmed group cleanup exits 125.
+The `telegram-responder-guard` no-verdict takes precedence over import-fault
+fallback, and cancellation retains its own outcome with unconfirmed drain.
 Supported CI-mirror commands run in the registered group. An inner command
 deadline also requests group teardown and ends the battery. Per-command
 diagnostics are written beside the validation receipt during execution, so

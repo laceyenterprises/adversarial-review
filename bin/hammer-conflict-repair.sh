@@ -26,7 +26,7 @@
 # needed and a concurrent update of the branch refuses the push.
 #
 # Exit codes: 0 rebased head ready to publish; 22 hand-written conflicts to
-# resolve, then --continue; 76 git-credential-refresh-failed (retryable); any
+# resolve, then --continue; 75 deferred source custody; 76 git-credential-refresh-failed (retryable); any
 # other nonzero stops with the printed reason.
 exec 0</dev/null
 
@@ -57,6 +57,8 @@ if [ "$(cd "${HAM_ROOT_DIR:-/nonexistent}" 2>/dev/null && pwd -P)" != "$HAM_CONF
   || [ "$(cd "${HAM_RUN_DIR:-/nonexistent}" 2>/dev/null && pwd -P)" != "$HAM_CONFLICT_RUN_DIR" ]; then
   ham_conflict_stop 1 'dispatch-inputs-missing: inputs.sh names another checkout or run directory'
 fi
+"$HAM_NODE_BIN" "$HAM_CONFLICT_ROOT/bin/hammer-validate.mjs" --check-custody \
+  || ham_conflict_stop "$?" canonical-validation-deferred
 for ham_conflict_helper in ham_pr ham_step ham_read ham_bounded_git_sync; do
   declare -F "$ham_conflict_helper" >/dev/null \
     || ham_conflict_stop 1 "conflict-repair-helper-missing: $ham_conflict_helper"
@@ -205,7 +207,7 @@ if [ "$ham_conflict_automatic" -eq 1 ] && [ "$HAM_CONFLICT_HEAD" != "$HAM_CONFLI
     *) ham_conflict_stop 1 conflict-primary-failed ;;
   esac
 fi
-printf 'source=%s\nhead=%s\nbranch=%s\n' "$HAM_CONFLICT_SOURCE" "$HAM_CONFLICT_HEAD" "$HAM_CONFLICT_BRANCH" \
+printf 'source=%s\nhead=%s\nbranch=%s\nbase=%s\n' "$HAM_CONFLICT_SOURCE" "$HAM_CONFLICT_HEAD" "$HAM_CONFLICT_BRANCH" "$HAM_CONFLICT_BASE" \
   > "$HAM_CONFLICT_PUBLISH" || ham_conflict_stop 1 conflict-state-unwritable
 rm -f "$HAM_CONFLICT_STATE"
 echo "HAM conflict repair: rebased $HAM_CONFLICT_SOURCE onto $HAM_CONFLICT_BASE as $(git rev-parse HEAD)" >&2

@@ -1520,7 +1520,13 @@ The optional tenth argument, `RECOVERY_EPOCH_ID`, selects the retained unbound
 final-fix reservation to replay. Supply its original `ffa-` owner key, base head
 and dispatch project, set `CONFLICTING` to `false`, and leave the ticket and PID
 arguments empty. Recovery requires an unowned queue and fresh paired dispatch
-absence; it compares the unchanged reservation under the intent and retry-ledger
+absence, plus an open PR at the original base head. A repository-scoped GitHub
+identity read checks the live head before owner reconciliation and again after
+the absence proof; each read has a 15-second deadline. Unavailable, closed or
+moved live PRs refuse recovery. The last delivered review's revision can be
+older than the published remediation and is retained as review provenance,
+not rewritten to stand in for live head evidence. The helper compares the
+unchanged reservation under the intent and retry-ledger
 locks without writing it. An owner state other than missing, null, `unknown`,
 `absent` or `absent-unfenced` refuses before the recovery dispatch lookup.
 The original failed job remains terminal `never-spawned`.
@@ -6570,63 +6576,48 @@ any per-check receipt with `result: fail` takes precedence over import-fault
 output and environment exit codes. Even a battery whose only failed check
 reports an own-package `ModuleNotFoundError` remains red (`validation-failed`);
 inspect its retained diagnostic and repair the environment before retrying.
-Without explicit failed-check evidence, unavailable
-canonical setup records `local-battery-skipped-github-required-gate-authoritative`
-and no local pass, then proceeds to fresh verify-head and the exact-head required
-GitHub checks. Genuine test failures require repair. No strict-mode, predicate,
-head, attestation, reversal, lease or CI requirement is waived.
+Unavailable canonical mirror setup is UNKNOWN when the runner cannot establish
+which local checks ran. The exact-head gate still applies. Genuine test failures
+require repair.
 
-Canonical absolute, idle, check and SIGALRM deadlines, unconfirmed controller
-validation drain, and the Telegram guard's explicit Python-lane process-inspection
-no-verdict stop with `canonical-validation-deferred`. The exact-head private
-receipt names the reason and cleanup owner. The validation result is UNKNOWN.
-Read adjacent logs and the existing cleanup evidence. Use the controller
-registration for owned drain and lease disposition, or the bounded-command
-cleanup line for a standalone run. Preserve unknown cleanup for the recovery
-owner. The closer ends the run with the existing deferred audit. Repeating
-validation or close on that head in the run returns 75 before another battery
-or controller starts. A changed head remains subject to ordinary validation.
-The close command makes a narrow exception for a completed local conflict
-repair with a clean, head-bound UNKNOWN receipt and confirmed cleanup. It
-leaves an active controller stop to the supervisor without a terminal close
-result. Only a confirmed drain and a fresh evidence check allow one more
-controller round to publish. A blocked publication check reports
-`source-publication-refused`, including on re-entry with a deferral receipt.
-Verify-head reuses a successful pre-publish validation or a CI deferral for
-the same published SHA. If declared required contexts
-cannot supply merge authority, the close records the watcher continuation
-on the published head before returning 75. The watcher uses launch-bound push
-evidence before assigning the published head retry backoff.
-Only the `telegram-responder-guard` check can supply the Python-lane no-verdict
-signal; another check quoting that line retains its own result. A passing
-Telegram result containing that explicit no-verdict still defers: the reload
-cases do not establish the unavailable process-inspection verdict. A recorded
-UNKNOWN handoff takes precedence over own-package import-fault fallback.
-Operator cancellation retains its own outcome even when cleanup returns 125;
-it does not become a canonical-validation deferral.
+Canonical absolute, idle, check and SIGALRM deadlines, mirror budget stops,
+unexpected kills, unconfirmed validation drain and the Telegram guard's
+explicit process-inspection no-verdict use `canonical-validation-deferred`.
+The exact-head receipt records UNKNOWN and names the cleanup owner. Inspect the
+controller registration for group drain and lease disposition, or the
+bounded-command cleanup receipt for standalone validation. Only
+`telegram-responder-guard` can report the Python-lane inspection no-verdict. Reload
+cases and other checks quoting that line supply no proof. An UNKNOWN receipt
+takes precedence over own-package import-fault fallback. Operator cancellation
+retains its own outcome even when drain is unconfirmed.
 
-**UNKNOWN defers to exact-head CI (MRQ-20).** A host-local battery that timed
-out (absolute, idle, check or SIGALRM deadline), was killed for load (the
-mirror's own budget stop, exit 75, or a signal the validator did not send), or
-was denied process inspection has no verdict. When the repository declares
-required contexts, that UNKNOWN does not block: the receipt records
-`ciAuthoritative: true` and the declared `requiredContexts`, no early-failure
-audit is written, and the validator exits 0 without claiming a pass
-(`local-validation-unknown-github-required-gate-authoritative`). A timeout
-also stops the controller round, so `hammer-close.sh` starts one fresh round;
-its validator reuses the receipt instead of re-running the battery. The
-hammer's exact-head gate then merges only when every declared context has
-reported and is green on that head; red, pending or absent contexts block as
-before (`local-validation-unknown-required-contexts-not-green` or
-`ci-not-green`). Without declared contexts, a recorded local failure before
-the stop (a mirror check with `result: fail` or a TAP `not ok` line), or
-unconfirmed drain after a finished battery, the existing deferral above still
-applies. A genuine local failure still blocks and the hammer remediates it.
-The merge gate revalidates any existing exact-head deferral receipt before
-consulting CI: `ciAuthoritative` must be explicitly true, the reason must
-permit deferral, no local failure may have been observed, and current required
-contexts must be non-empty. Unreadable, legacy or demoted receipts continue
-blocking even when GitHub CI is green.
+**Continuing after UNKNOWN (MRQ-20, LAC-2332).** On a clean, already-published
+exact head, standalone validation can continue with UNKNOWN when the canonical
+mirror proves its full selection, every selected check passed locally or has
+exact-head authenticated coverage under the existing manifest policy, no local
+failure was observed, and the standalone runner confirmed cleanup.
+When the mirror interface cannot report the full selection before execution,
+the receipt and diagnostics say `selection-size-unavailable`. That UNKNOWN
+cannot use CI continuation.
+
+A completed local conflict repair validates outside the lease before publication.
+Revalidation keys custody to the last pushed head, or the live PR head when no
+push was needed. An active conflict-publication binding keys deferred hold
+lookups to its remote source head. Missing check receipts provide no evidence;
+unreadable or malformed receipts fail with `invalid validation receipt`.
+An eligible UNKNOWN can publish only with a clean checkout, an exact source
+binding, confirmed drain and readable evidence without failed checks. An active
+stop leaves the close result unwritten and its supervisor confirms drain before
+allowing one fresh controller round to publish. `source-publication-refused`
+identifies a blocked source check. Verify-head reuses a passing pre-publication
+battery or a CI-authoritative UNKNOWN only on the same published SHA. An UNKNOWN
+can enter the exact-head CI gate only with complete selected-check evidence and
+currently declared required contexts. A published repair lacking that evidence
+ends with a durable watcher continuation on the published head. Launch-bound
+push evidence lets the watcher pace that head under INCONCLUSIVERETRY-01b,
+using its existing backoff, notification and infrastructure refund. Repeating
+validation or close after an unrecovered deferral returns 75 before another
+battery starts. A changed head remains subject to ordinary validation.
 Declare contexts per repository in
 `roles.adversarial.merge_authority.required_check_contexts_by_repository`
 (`- repository: owner/name` with `contexts: [...]`). `required_check_contexts`
@@ -6634,23 +6625,126 @@ applies to every repository, so a context that only one repository runs
 belongs in the per-repository list. Both lists also make an absent context
 read PENDING at the hammer gate and in the queue-v2 required set. The daemon
 and closer read only the global list until they are given the repository.
+A proved standalone CI continuation and a confirmed conflict publication mark
+custody `continuedAt`. The CI-authoritative phase makes no claim of a local
+pass. Retained evidence remains available and a continued launch's marker and
+legacy fallback do not block normal closure. Current required contexts must all
+report green on that exact head before merge.
 Queue-v2 admits a handoff whose trusted local-validation read is
-`result: unknown` only with `ciAuthoritative: true` and
-`localFailureObserved !== true`, even if that read also claims `ok: true`;
+`result: unknown` only with `ciAuthoritative: true`, `coverageComplete: true`,
+`cleanup: finished` and `localFailureObserved: false`, even if the read also
+claims `ok: true`;
 its final merge gate requires the same declared, green
-contexts and never accepts the configured no-CI proof for it.
+contexts for every UNKNOWN, including legacy receipts without coverage fields,
+and never accepts the configured no-CI proof for it.
+Signed, exact-head, zero-finding clean admissions have no closer battery and
+retain their CI-only UNKNOWN evidence at both admission and merge. Only
+remediated UNKNOWN receipts require the completed local-evidence fields.
 
-The validator records the deferred audit and `last-phase` receipt non-finally.
-The closer repeats the audit helper without `--final` and ends the run; no
-`terminal-stop` progress receipt is expected. Once the matching launch ends,
-dispatch records `canonical-validation-deferred` in the existing per-head
-inconclusive retry store, keyed by the live head for a published rebase.
-Its watcher owner retains full refunds, applies
-exponential backoff from attempt N (default three, starting at five minutes,
-capped at one hour), and surfaces one notification through the existing
-closure-wait receipt. Re-observing a launch neither increments its attempt nor
-advances its deadline. This follows INCONCLUSIVERETRY-01b rather than parking
-the PR or consuming adjudication budget.
+**Operator decision for unrecovered source.** Before requesting drain, the
+validator writes an exact-target hold in the [HQ custody store](data-model/deferred-source-custody.md).
+The cleanup owner retains check and cleanup receipts and an incremental Git
+bundle for an unpublished commit. A bundle failure keeps the original workspace
+under custody. The watcher retains the infrastructure refund and suppresses
+same-head replacements while the hold is active. A readable hold whose clean source matches the target and whose controller or
+standalone cleanup is confirmed finished is marked continued and returns to the
+existing per-head backoff and notification. A legacy retry entry alone does not
+establish unpublished source or unsafe cleanup. New retry observations record
+`custodyRequired: true` only for an active unsafe hold at the retry head or
+the current remote head, preserving its fallback if the marker disappears.
+For a conflict replay, the validator and controller pointer use the captured
+remote publication-lease head to locate custody for the local replay commit.
+Corrupt retry files are preserved for recovery but
+only matching custody evidence holds admission; other heads remain eligible. The validator or closer records
+this deferral with the audit helper without `--final`. The `last-phase` receipt
+supplies the observation for the watcher.
+
+Teardown checks all custody markers for the ending launch across target heads,
+including after publication changed the dispatch head. A continued marker with
+confirmed exact-source publication can release a workspace without a bundle.
+Unreadable custody fails closed. Teardown retries incomplete source retention
+asynchronously at most once per hold every five minutes in the resolved
+checkout under the ending launch's worker root. Missing local prerequisite
+objects are omitted so the bundle can be self-contained. The retention owner
+prunes its temporary ref after persisting the verified bundle receipt. A missing source receipt implies matches-target
+only when source equals target and cleanliness is not explicitly false. Corrupt
+source receipts remain unconfirmed. The watcher tries the lock once per pass.
+Explicit continuation waits up to one second for the lock, and the controller
+retries post-publication completion three times
+before ending `canonical-validation-deferred` with exit 75, without repeating
+publication. Notices refresh when source or cleanup facts
+change and unchanged observations retain their delivery latch. After SIGKILL,
+the bounded runner allows up to one second for the group to disappear before
+reporting unconfirmed cleanup with exit 125. A custody refusal during conflict
+repair exits 75 with the `canonical-validation-deferred` outcome.
+
+Confirm cleanup using the notice's launch, head and evidence directory. To
+recover, inspect the Git bundle and prerequisites in `source.json` from an
+operator-owned recovery checkout, verify the imported object matches
+`sourceHead`, and preserve the commit identity through the outstanding guards
+and normal publication gates. To discard, inspect and explicitly dispose of the
+attempt under the runtime owner's custody. A different live head scopes the
+hold out of its dispatch.
+
+For authorized same-head release, pause admission through the runtime owner's
+supported controls and archive both the custody marker and the matching
+`canonical-validation-deferred` entries in the inconclusive retry record. Keep
+the original evidence and audit history. Verify that both records are clear of
+the active hold before resuming. Archiving the marker alone leaves an explicitly recorded custody fallback active. A combined runtime-owned release command and host-wide toolchain
+incident paging remain follow-ups. Environment-unavailable deferrals with unpublished source or unconfirmed
+cleanup still page per affected head; published clean sources with confirmed
+cleanup use ordinary retry backoff.
+If an ended inconclusive launch's retry record is unreadable, the watcher logs
+`retry-record-unreadable`, keeps the record, and pauses that head's retry with
+one operator notice. Restore a validated copy before resuming that retry.
+
+#### Restore an unreadable retry record
+
+The runtime owner first pauses closer admission and confirms no writer remains
+for this PR. Use a known-good backup
+that preserves all heads' attempt counts, launch IDs, backoff and custody flags;
+do not delete the record to reset the budget. From this checkout, set
+`RETRY_ROOT` to the adversarial-review runtime root, `RETRY_REPO` to `owner/repo`,
+`RETRY_PR` to the PR number and `RETRY_BACKUP` to that backup's absolute path.
+The following command validates the backup with the production reader in an
+isolated directory, archives the corrupt bytes beside the original, then
+atomically installs and revalidates the copy:
+
+```bash
+node --input-type=module <<'JS'
+import { constants, copyFileSync, mkdtempSync, mkdirSync, readFileSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { dirname, join } from 'node:path';
+import { closerInconclusiveRetryFilePath, readCloserInconclusiveRetries } from './src/ama/closer-inconclusive-retry.mjs';
+import { writeFileAtomic } from './src/atomic-write.mjs';
+const { RETRY_ROOT: root, RETRY_REPO: repo, RETRY_PR: pr, RETRY_BACKUP: backup } = process.env;
+if (!root || !repo || !backup || !/^[1-9][0-9]*$/.test(pr || '')) throw Error('Set all RETRY_* inputs');
+const identity = { repo, prNumber: Number(pr) };
+const stage = mkdtempSync(join(tmpdir(), 'retry-restore-'));
+try {
+  const staged = closerInconclusiveRetryFilePath(stage, identity);
+  mkdirSync(dirname(staged), { recursive: true });
+  copyFileSync(backup, staged);
+  const valid = doc => !doc.__corrupt && doc.schemaVersion === 1
+    && doc.repo === repo && doc.prNumber === identity.prNumber && doc.owner === 'watcher';
+  if (!valid(readCloserInconclusiveRetries(stage, identity))) throw Error('Backup validation failed; original unchanged');
+  const file = closerInconclusiveRetryFilePath(root, identity);
+  const archive = `${file}.corrupt-${Date.now()}`;
+  copyFileSync(file, archive, constants.COPYFILE_EXCL);
+  writeFileAtomic(file, readFileSync(staged), { mode: 0o600 });
+  if (!valid(readCloserInconclusiveRetries(root, identity))) throw Error(`Restore failed; preserve ${archive}`);
+  console.log(`Validated retry record restored; original retained at ${archive}`);
+} finally { rmSync(stage, { recursive: true, force: true }); }
+JS
+```
+
+If there is no valid backup, retain the hold for operator reconstruction from
+launch/audit evidence; never silently rebuild empty accounting. Before resuming
+admission, verify the restored record retains the affected head and launches.
+On the next watcher pass confirm `retry-record-unreadable` clears, then verify
+the normal backoff or dispatch decision. Matching unsafe source custody remains
+held until the separate source-recovery procedure above is complete.
+
 The validator owns its timeout and process cleanup. Avoid a second shell alarm
 around it. If the outer tool returns 124 or 142 first, follow the same handoff
 from the available diagnostics and keep unconfirmed cleanup explicit.
@@ -6665,7 +6759,8 @@ No live receipt is claimed by offline tests.
 ### Inconclusive closer results (INCONCLUSIVERETRY-01b)
 
 A closer result that cannot conclude is an **owned retry with backoff**. It is
-never a closer failure, never spends closer budget and never parks the PR.
+never a closer failure or a charge against closer budget. Canonical validation
+deferrals with unproved continuation enter the operator hold above.
 `src/ama/closer-inconclusive-retry.mjs` holds the one classifier and the one
 owned-retry record shared by both sites below.
 
@@ -9845,17 +9940,27 @@ other batch work. At 6×, those probe/handoff/dispatch budgets total 103 minutes
 at 20×, they total 334 minutes. These are per-publication budgets, not a whole-pass
 deadline; workers run with bounded parallelism and may process multiple batches.
 Timeout, signal and output-limit failures name the probe and cause in the
-bounded batch error and watcher log. Timeout diagnostics include the effective
-bound; output-limit kills are reported as `output exceeded limit`, even when
-the child was killed. These read failures retry
-on later collection passes without spending preparation attempts; the existing
-stale-release and launch-custody rules still apply.
-Collection reads `state,mergedAt,body,headRefOid` with `gh pr view` through the
-retrying GitHub transport. Applied findings require a merged batch PR with its
-exact batch ID on a marker line; whitespace, bold and HTML-comment wrappers
-are accepted. Valid manifest and marker evidence clears prior batch errors even
-while the PR awaits merge; finding outcomes remain pending. Missing or foreign
-markers and unreadable PRs remain unresolved.
+watcher log. Timeout diagnostics include the effective bound. Network
+failures, timeouts and signals keep the batch pending for later collection
+without spending preparation attempts. A probe whose output exceeds its cap
+records `output exceeded limit` in the batch error.
+Collection waits for terminal preparation and retries incomplete JSON before
+recording `batch-outcome-invalid-json`. Once outcomes identify a published PR,
+collection skips further preparation probes. A single valid marked branch PR
+recovers a missing artifact PR number/head atomically, then follows numbered
+settlement without needing a surviving publisher. Permanent GitHub failures stay
+visible and follow the existing timeout and terminal-custody release rules;
+only transient transport, timeout and signal failures defer without an error.
+Non-applied outcomes settle without
+GitHub. For applied outcomes, collection reads `state,mergedAt,body,headRefOid`
+with `gh pr view` using only `outcomes.json`'s PR number in the batch repository.
+The GitHub transport backs off on transient failures. If its retries are
+exhausted, collection keeps the batch pending for another pass. Applied
+findings require a merged batch PR or an open PR with a current-head review
+attachment. Both require the exact batch ID on a marker line, which accepts
+whitespace, bold and HTML-comment wrappers. Valid manifest and marker evidence
+clears prior errors while the PR awaits attachment or merge. Missing or foreign
+markers and unreadable PRs leave the findings unresolved.
 See [the store contract](data-model/review-findings.md#non-blocking-backlog-findingsbatch-01)
 for outcome validation and restart fencing. Preserve batch artifacts until their
 outcomes are collected. An incomplete batch stays fenced and visible for repair.

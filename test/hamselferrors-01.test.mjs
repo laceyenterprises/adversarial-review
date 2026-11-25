@@ -220,7 +220,7 @@ if(process.argv[2] !== 'blocking') {
   assert.deepEqual(reports, ['helper-kind-mismatch']);
 });
 
-test('canonical runner replaces ad-hoc validation and own-package import faults use the GitHub gate without claiming a pass', t => {
+test('canonical runner replaces ad-hoc validation and holds mirror setup faults as UNKNOWN', t => {
   const root = scratch(t);
   mkdirSync(join(root, 'scripts/ci-mirror'), { recursive: true });
   mkdirSync(join(root, 'modules/example/src/synthetic_package'), { recursive: true });
@@ -233,12 +233,12 @@ test('canonical runner replaces ad-hoc validation and own-package import faults 
     HQ_LAUNCH_REQUEST_ID: 'lrq_synthetic-validation', HQ_WORKER_RUN_ID: 'wrun_synthetic-validation' };
   const result = spawnSync(process.execPath, [new URL('../bin/hammer-validate.mjs', import.meta.url).pathname,
     '--canonical', '--', 'modules/example/src/example.py'], { cwd: root, env: validationEnv, encoding: 'utf8', timeout: 20000 });
-  assert.equal(result.status, 0, result.stderr);
-  assert.match(result.stderr, /local-battery-skipped-github-required-gate-authoritative/);
+  assert.equal(result.status, 1, result.stderr);
+  assert.match(result.stderr, /canonical-validation-deferred: canonical-mirror-environment-unavailable/);
   const progress = join(root, 'dispatch', validationEnv.HQ_LAUNCH_REQUEST_ID,
     'hammer-progress', validationEnv.HQ_WORKER_RUN_ID);
   assert.equal(JSON.parse(readFileSync(join(progress, 'last-phase.json'))).reason,
-    'local-battery-skipped-github-required-gate-authoritative');
+    'canonical-validation-deferred');
   for (const receipt of ['validation-passed', 'validation-failed', 'terminal-stop']) {
     assert.equal(existsSync(join(progress, `${receipt}.json`)), false, receipt);
   }
@@ -247,8 +247,12 @@ test('canonical runner replaces ad-hoc validation and own-package import faults 
     '--pytest', '--', 'arbitrary-ad-hoc-test.py'], { cwd: root,
     env: { ...isolatedEnv(root), HAM_REPO: 'synthetic/agent-os', PATH: `${root}:${process.env.PATH}` },
     encoding: 'utf8', timeout: 20000 });
-  assert.equal(legacy.status, 0, legacy.stderr);
-  assert.match(legacy.stderr, /local-battery-skipped-github-required-gate-authoritative/);
+  assert.equal(legacy.status, 1, legacy.stderr);
+  assert.match(legacy.stderr, /canonical-validation-deferred: canonical-mirror-environment-unavailable/);
+  const noGit = spawnSync(process.execPath, [new URL('../bin/hammer-validate.mjs', import.meta.url).pathname,
+    '--', 'arbitrary-ad-hoc-test.py'], { cwd: root, env: validationEnv, encoding: 'utf8', timeout: 20000 });
+  assert.equal(noGit.status, 127, noGit.stderr);
+  assert.match(noGit.stderr, /canonical-validation-deferred: canonical-mirror-environment-unavailable/);
   writeFileSync(join(root, 'scripts/ci-mirror/run-ci-mirror.py'), 'import sys\nprint("FAILED synthetic assertion")\nsys.exit(1)\n');
   const failure = spawnSync(process.execPath, [new URL('../bin/hammer-validate.mjs', import.meta.url).pathname,
     '--canonical', '--', 'modules/example/src/example.py'], { cwd: root, env: isolatedEnv(root), encoding: 'utf8', timeout: 20000 });

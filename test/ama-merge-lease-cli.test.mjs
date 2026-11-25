@@ -22,6 +22,7 @@ import { EventEmitter } from 'node:events';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { hostname, tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 import { defaultPidAliveFn, main as mergeLeaseMain } from '../bin/merge-lease.mjs';
 import { hammerPublicationPath } from '../src/ama/hammer-publication-ownership.mjs';
@@ -45,6 +46,23 @@ import {
 const REPO = 'owner/name';
 const BASE = 'main';
 const HOST = 'test-host';
+
+test.before(t => {
+  // Fake PID liveness and start times must describe the same process table.
+  // A real PID collision can otherwise make a fixture lease look abandoned.
+  const execFileSync = childProcess.execFileSync;
+  const ps = t.mock.method(childProcess, 'execFileSync', (command, args, options) => {
+    if (command === 'ps' && args?.[0] === '-o' && args[1] === 'lstart=' && args[2] === '-p') {
+      return 'Fri Jun 19 18:00:00 2026\n';
+    }
+    return execFileSync(command, args, options);
+  });
+  syncBuiltinESMExports();
+  t.after(() => {
+    ps.mock.restore();
+    syncBuiltinESMExports();
+  });
+});
 
 function freshRoot() {
   return mkdtempSync(join(tmpdir(), 'ama-merge-lease-cli-'));
@@ -135,6 +153,58 @@ async function runCli(rootDir, args, overrides = {}) {
   const code = await mergeLeaseMain([args[0], '--root-dir', rootDir, ...args.slice(1)], deps);
   return { code, io };
 }
+
+test('merge-lease executable reports timeout, interruption and cap as distinct outcomes', async t => {
+  const rootDir = freshRoot();
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  const now = new Date().toISOString();
+  const held = acquireFixture(rootDir, { holderHost: 'remote-fixture', now });
+  assert.equal(held.acquired, true);
+  const executable = fileURLToPath(new URL('../bin/merge-lease.mjs', import.meta.url));
+  const head = 'waiting-head';
+  const args = [executable, 'acquire', '--root-dir', rootDir, '--repo', REPO, '--base', BASE,
+    '--pr', '779', '--head', head, '--owner-pid', String(process.pid)];
+  const options = { encoding: 'utf8', timeout: 5000, killSignal: 'SIGKILL',
+    env: { ...process.env, AMG_MAX_GATE_ATTEMPTS: '1' } };
+
+  const timedOut = childProcess.spawnSync(process.execPath, [...args, '--wait', '0'], options);
+  assert.ifError(timedOut.error);
+  assert.equal(timedOut.signal, null);
+  assert.equal(timedOut.status, 75, timedOut.stderr);
+  assert.equal(JSON.parse(timedOut.stdout).timedOut, true);
+
+  let sentTerm = false;
+  const interrupted = await new Promise(resolve => {
+    const child = childProcess.execFile(process.execPath, [...args, '--wait', '30'], options,
+      (error, stdout, stderr) => resolve({ error, stdout, stderr }));
+    let progress = '';
+    child.stderr.on('data', chunk => {
+      progress += chunk;
+      if (!sentTerm && progress.includes('HAM merge lease wait:')) sentTerm = child.kill('SIGTERM');
+    });
+  });
+  assert.equal(sentTerm, true, interrupted.stderr);
+  assert.equal(interrupted.error?.signal, null);
+  assert.equal(interrupted.error?.code, 75, interrupted.stderr);
+  const stop = JSON.parse(interrupted.stdout);
+  assert.equal(stop.acquired, false);
+  assert.equal(stop.reason, 'lease-wait-interrupted');
+  assert.equal(stop.signal, 'SIGTERM');
+  assert.deepEqual(readMergeLeaseWaiters(rootDir, { repo: REPO, base: BASE }), []);
+  const refunded = readMergeLeaseAttempts(rootDir, { repo: REPO, base: BASE }).find(row => row.pr === 779);
+  assert.equal(refunded.attempts, 0);
+  assert.equal(refunded.retryable, 2);
+
+  recordMergeLeaseGateAttempt({ rootDir, repo: REPO, base: BASE, pr: 779, head, maxAttempts: 1 });
+  const capped = childProcess.spawnSync(process.execPath, [...args, '--wait', '0'], options);
+  assert.ifError(capped.error);
+  assert.equal(capped.signal, null);
+  assert.equal(capped.status, 70, capped.stderr);
+  const cap = JSON.parse(capped.stdout);
+  assert.equal(cap.parked, true);
+  assert.equal(cap.reason, 'max-gate-attempts');
+  assert.equal(inspectMergeLease({ rootDir, repo: REPO, base: BASE }).holder.leaseId, held.lease.leaseId);
+});
 
 test('merge-lease acquire when free prints acquired:true and exits 0', async () => {
   const rootDir = freshRoot();

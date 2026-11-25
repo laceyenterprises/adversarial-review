@@ -22,7 +22,10 @@ for (const { name, output, stdout = '', socketPathFault } of diagnostics) {
       { cwd: dir, encoding: 'utf8', timeout: 5000 });
     assert.ifError(result.error);
     assert.equal(result.status, 42, result.stderr);
-    const { checks } = JSON.parse(readFileSync(receipt, 'utf8'));
+    const { checks, selectedCheckCount, selectionSizeReason } = JSON.parse(readFileSync(receipt, 'utf8'));
+    assert.equal(selectedCheckCount, undefined);
+    assert.equal(selectionSizeReason, 'selection-size-unavailable');
+    assert.match(result.stderr, /selection-size-unavailable/);
     assert.ok(checks.length > 0);
     assert.ok(checks.every(check => check.result === 'fail'
       && check.socketPathFault === (socketPathFault ? true : undefined)));

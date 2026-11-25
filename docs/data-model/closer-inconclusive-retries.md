@@ -39,7 +39,14 @@ and when the next ordinary dispatch is due. It grants no authority. See the
 
 The file keeps the eight most recently attempted heads and 32 launches per head.
 Writes are atomic. Recording is idempotent per launch. An unreadable file reads
-as corrupt and is rebuilt on the next record; at worst that delays a backoff.
+as corrupt and is preserved for recovery. When the watcher observes an ended
+inconclusive launch for the live head, it logs `retry-record-unreadable`, holds
+that retry, and issues a deduplicated closure-wait notice. Restore a validated
+record through the runtime owner before retrying, using the runbook's
+[restore and validate command](../RUNBOOK-ama-closure.md#restore-an-unreadable-retry-record).
+Preserve the corrupt bytes and every head's accounting; do not reset the file
+to bypass the hold. A new head requires its own
+ended-launch evidence. Matching unsafe custody evidence still holds its own head.
 `closure-budget-escalation` reads `launches[].launchRequestId` across heads and
 refunds each open series charge whose launch is listed (CLOSERRETRYREFUND-01:
 per charge, not only when every charge is listed). It also records launches it
@@ -47,14 +54,14 @@ proves were closer faults from the AMA audit, and `closer-supersede` records a
 launch the pipeline cancelled before it booted (reason
 `superseded-by-clean-exact-head-review`).
 Dispatch also records ended `canonical-validation-deferred` launches here,
-including those with a deferred audit and infrastructure refund. A closer that
-published a conflict-resolving rebase before deferring records its continuation
-against the live published head when the ended launch's `remediation-pushed`
-receipt names that SHA. Without matching publication evidence, the dispatch
-head retains the retry entry and a different live head can proceed without that
-backoff. The refund remains tied to the original launch.
-Repeated same-head no-verdict or deadline outcomes share the configured
-backoff and notification instead of starting an immediate unpaced retry.
+including full infrastructure refunds. Optional `sourcePublished: true` records
+launch-bound publication. Optional `launches[].custodyRequired: true` records an
+active unsafe custody hold found at either the retry head or the current remote
+head for fallback if its marker disappears. Legacy entries
+without explicit custody evidence do not create operator holds. Readable holds
+with clean matching-target source and confirmed cleanup resume ordinary per-head
+backoff and once-only notification. Corrupt retry files remain preserved for
+recovery; admission holds only heads with matching unsafe custody evidence.
 
 `reviewServiceRevision` (optional, CLOSERRETRYREFUND-01) is the service revision
 that recorded the entry's latest launch. When the running revision differs, the

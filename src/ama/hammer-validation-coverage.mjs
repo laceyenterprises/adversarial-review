@@ -124,6 +124,7 @@ export async function hammerValidationCoverage({ root, repo, prNumber, head, ena
   } catch { return fallback('manifest-read-failed'); }
 
   let rows = [];
+  let verifiedBase;
   const jobDetails = new Map();
   let checkReadFailure;
   if (hasMapping) {
@@ -146,6 +147,7 @@ export async function hammerValidationCoverage({ root, repo, prNumber, head, ena
           }
         }
         if (verifiedMapping) {
+          verifiedBase = base;
           const checks = [];
           for await (const page of pages()) checks.push(...page);
           // Current registries map individual workflow steps, which may be
@@ -184,6 +186,7 @@ export async function hammerValidationCoverage({ root, repo, prNumber, head, ena
 
   return {
     reason: 'no-ci-mapping',
+    ...(verifiedBase && !checkReadFailure ? { source: { repo, prNumber: Number(prNumber), head, base: verifiedBase } } : {}),
     manifests: Object.fromEntries([...manifests].map(([path, { bytes, checks, reason }]) => [path, {
       sha256: createHash('sha256').update(bytes).digest('hex'),
       checks: [...checks].map(([key, mapping]) => {

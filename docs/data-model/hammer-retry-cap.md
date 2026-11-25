@@ -28,6 +28,12 @@ after fresh scoped absence, a strict queue-ownership check and a compare-and-rea
 under the reservation lock. The comparison requires the same unbound epoch ID,
 owner key, project and exact base head. It writes no epoch or observation. The
 accepted Worker Pool launch supplies the same key through normal owner lookup.
+The helper checks that the PR is still open at that head with a bounded,
+repository-scoped GitHub identity read before owner reconciliation and again
+after scoped absence, before the final custody check and replay. A missing,
+failed, closed or changed live identity refuses recovery. The review row's
+`revision_ref` and `reviewer_head_sha` retain the delivered review's revision;
+they can precede the published final remediation and are not live-head proof.
 Before admission, the watcher observes a pending
 reservation at most once per 30 seconds, recording `ownerObservedAt`,
 `ownerState` (`live`, `unknown`, `absent`, `absent-unfenced`, or `terminal`)
@@ -553,10 +559,9 @@ retain their existing bounded budget; a later real failure is charged normally. 
 
 `canonical-validation-deferred` retains infrastructure refund accounting, but
 dispatch also records its ended launch in the existing
-[closer inconclusive retry store](closer-inconclusive-retries.md). That per-head
-owner applies exponential backoff from the configured threshold and one
-closure-wait notification. Immediate lease-wait refund timestamps alone never
-authorize bypassing that retry deadline. Repeated observations dedupe by launch.
+[closer inconclusive retry store](closer-inconclusive-retries.md). The watcher uses that record as a fallback when a legacy deferral has no
+readable [custody package](deferred-source-custody.md). It holds the live head for
+an operator decision. Repeated observations dedupe by launch.
 No retry-ledger fields or caps change.
 
 ## Read-only activation

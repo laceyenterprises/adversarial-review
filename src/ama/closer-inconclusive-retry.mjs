@@ -148,7 +148,9 @@ export function readCloserInconclusiveRetries(rootDir, identity) {
   try {
     const parsed = JSON.parse(raw);
     if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)
-      || !parsed.heads || typeof parsed.heads !== 'object' || Array.isArray(parsed.heads)) throw new Error('shape');
+      || !parsed.heads || typeof parsed.heads !== 'object' || Array.isArray(parsed.heads)
+      || Object.values(parsed.heads).some(entry => !entry || typeof entry !== 'object'
+        || (entry.launches !== undefined && !Array.isArray(entry.launches)))) throw new Error('shape');
     return parsed;
   } catch { return { ...emptyRecord(identity), __corrupt: true }; }
 }
@@ -165,15 +167,16 @@ function writeRecord(rootDir, identity, doc) {
 /**
  * Record one inconclusive ended launch. Idempotent per launch: the closer
  * re-observes an ended launch on every pass until it is replaced.
- * A corrupt record is repaired from scratch: it only ever delays a retry.
+ * Preserve a corrupt record for recovery. It may contain a source hold.
  */
 export function recordCloserInconclusiveRetry(rootDir, identity, {
   headSha, launchRequestId, reason, now = new Date().toISOString(), policy = CLOSER_INCONCLUSIVE_RETRY_DEFAULTS,
-  reviewServiceRevision = REVIEW_SERVICE_REVISION,
+  reviewServiceRevision = REVIEW_SERVICE_REVISION, sourcePublished = false, custodyRequired = false,
 } = {}) {
   if (!headSha || !launchRequestId) return { recorded: false, reason: 'identity-missing', entry: null };
   const current = readCloserInconclusiveRetries(rootDir, identity);
-  const doc = current.__corrupt ? emptyRecord(identity) : current;
+  if (current.__corrupt) return { recorded: false, reason: 'retry-record-unreadable', entry: null };
+  const doc = current;
   const prior = doc.heads[headSha];
   const launches = Array.isArray(prior?.launches) ? prior.launches : [];
   if (launches.some(launch => launch?.launchRequestId === launchRequestId)) {
@@ -188,7 +191,7 @@ export function recordCloserInconclusiveRetry(rootDir, identity, {
     surfaceAfterAttempts: policy.surfaceAfterAttempts,
     surfacedAt: prior?.surfacedAt || null,
     reviewServiceRevision: reviewServiceRevision || null,
-    launches: [...launches, { launchRequestId, reason, at: now }].slice(-MAX_LAUNCHES),
+    launches: [...launches, { launchRequestId, reason, at: now, ...(sourcePublished && { sourcePublished }), ...(custodyRequired && { custodyRequired }) }].slice(-MAX_LAUNCHES),
   };
   writeRecord(rootDir, identity, { ...doc, heads: { ...doc.heads, [headSha]: entry } });
   return { recorded: true, entry };

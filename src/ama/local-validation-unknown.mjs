@@ -4,8 +4,8 @@
 // all. UNKNOWN defers to GitHub CI on the exact head, and only when that
 // repository's declared required contexts are all present and green. It never
 // passes when they are red, pending, absent, or when none are declared.
-import { existsSync, readFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { readFileSync } from 'node:fs';
+import { isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { classifyCheckRollup } from '../checks-summary.mjs';
 import { resolveRequiredCheckContextsFromCfg } from './required-check-contexts.mjs';
 
@@ -73,18 +73,40 @@ export function unknownValidationReceiptPath(runDir, head) {
 
 export function readUnknownValidationReceipt(runDir, head) {
   const path = unknownValidationReceiptPath(runDir, head);
-  if (!path || !existsSync(path)) return null;
+  if (!path) return null;
   try {
     const receipt = JSON.parse(readFileSync(path, 'utf8'));
-    return receipt && typeof receipt === 'object' ? receipt : { unreadable: true };
-  } catch { return { unreadable: true }; }
+    return receipt && receipt.schemaVersion === 1 && receipt.head === head ? receipt : { unreadable: true };
+  } catch (error) { return error.code === 'ENOENT' ? null : { unreadable: true }; }
+}
+
+// Read the private check receipt after its process group has drained.
+export function readDeferredValidationChecks(runDir, head, recorded) {
+  if (!recorded?.localValidationReceipt) return null;
+  const receiptPath = resolve(runDir, recorded.localValidationReceipt);
+  const path = relative(runDir, receiptPath);
+  if (!path || isAbsolute(path) || path.split(sep)[0] === '..') throw new Error('invalid validation receipt path');
+  let evidence;
+  try { evidence = JSON.parse(readFileSync(receiptPath, 'utf8')); }
+  catch (error) {
+    if (error.code === 'ENOENT') return null;
+    throw new Error('invalid validation receipt', { cause: error });
+  }
+  if (evidence?.head !== head || !Array.isArray(evidence.checks)
+    || evidence.checks.some(check => !check || typeof check !== 'object')) throw new Error('invalid validation receipt');
+  return evidence;
 }
 
 // Re-judge a recorded UNKNOWN against current configuration. An unreadable
 // receipt, absent/withdrawn CI authority, a recorded local failure or an
 // ineligible reason stays deferred.
+export function hasCompletedUnknownValidationEvidence(receipt) {
+  return receipt?.ciAuthoritative === true && receipt.cleanup === 'finished'
+    && receipt.coverageComplete === true && receipt.localFailureObserved === false;
+}
+
 export function recordedUnknownDefersToCi(receipt, requiredContexts) {
-  if (!receipt || receipt.unreadable || receipt.validation !== 'unknown' || receipt.ciAuthoritative !== true) return false;
+  if (receipt?.validation !== 'unknown' || !hasCompletedUnknownValidationEvidence(receipt)) return false;
   return unknownValidationDeferral({ reason: receipt.reason, requiredContexts,
     localFailureObserved: receipt.localFailureObserved === true }).ciAuthoritative;
 }

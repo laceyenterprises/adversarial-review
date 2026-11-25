@@ -19,7 +19,8 @@ import { mkdtempSync, rmSync, statSync, utimesSync, writeFileSync } from 'node:f
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-import { __testYamlHooks } from '../src/config-loader.mjs';
+import { __testYamlHooks, ENV_ALIASES, AgentOSConfig } from '../src/config-loader.mjs';
+import { __testCacheHooks } from '../src/config-cache.mjs';
 import { loadRoleConfig, resetRoleConfigCache } from '../src/role-config.mjs';
 import { routeSubject } from '../src/adapters/subject/github-pr/routing.mjs';
 
@@ -214,6 +215,107 @@ test('CFG-09 cache sees native env alias changes and removal without reset', () 
     rmSync(tmp, { recursive: true, force: true });
   }
 });
+
+test('native cache keys retain both aliases and ignore unrelated environment changes', () => {
+  const tmp = makeTmp();
+  const topPath = join(tmp, 'top.yaml');
+  const canonical = 'AGENT_OS_ROLES_REMEDIATOR';
+  const legacy = 'ADVERSARIAL_REVIEW_DEFAULT_REMEDIATOR';
+  const unrelated = 'AR_CONFIG_CACHE_UNRELATED_FIXTURE';
+  const names = [canonical, legacy, unrelated];
+  const previous = names.map(name => process.env[name]);
+  const load = () => loadRoleConfig({ topPath, env: process.env });
+  try {
+    writeYaml(topPath, 'version: 1\nroles:\n  remediator: codex\n');
+    process.env[canonical] = 'codex';
+    process.env[legacy] = 'codex';
+    const both = load();
+    process.env[unrelated] = 'first';
+    assert.equal(load(), both);
+    process.env[unrelated] = 'second';
+    assert.equal(load(), both, 'undeclared values cannot invalidate the alias cache');
+    delete process.env[legacy];
+    const canonicalOnly = load();
+    assert.notEqual(canonicalOnly, both, 'removal of a present legacy alias changes identity');
+    assert.equal(canonicalOnly.get('roles.remediator'), 'codex');
+    process.env[canonical] = 'gemini';
+    assert.equal(load().get('roles.remediator'), 'gemini');
+    delete process.env[canonical];
+    process.env[legacy] = 'claude-code';
+    assert.equal(load().get('roles.remediator'), 'claude-code');
+  } finally {
+    for (const [index, name] of names.entries()) {
+      if (previous[index] === undefined) delete process.env[name];
+      else process.env[name] = previous[index];
+    }
+    resetRoleConfigCache();
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test('static env alias metadata is deeply immutable through its public accessor', () => {
+  const table = new AgentOSConfig({}).envAliasTable();
+  assert.equal(table, ENV_ALIASES);
+  assert.ok(Object.isFrozen(table));
+  for (const row of Object.values(table)) {
+    assert.ok(Object.isFrozen(row));
+    assert.ok(Object.isFrozen(row.aliases));
+    for (const alias of row.aliases) assert.ok(Object.isFrozen(alias));
+  }
+  assert.throws(() => { table['test.alias'] = { canonical: 'AR_TEST_ALIAS', aliases: [] }; }, TypeError);
+  assert.throws(() => { table['roles.remediator'].canonical = 'AR_TEST_ALIAS'; }, TypeError);
+  assert.throws(() => { table['roles.remediator'].aliases.push(['AR_TEST_ALIAS', value => value]); }, TypeError);
+  assert.throws(() => { table['roles.remediator'].aliases[0][0] = 'AR_TEST_ALIAS'; }, TypeError);
+});
+
+test('native and explicit cache keys match including duplicate declarations without a native registry walk',
+  { skip: process.platform === 'win32' }, (t) => {
+    const values = {
+      AGENT_OS_ROLES_REMEDIATOR: 'codex',
+      ADVERSARIAL_REVIEW_DEFAULT_REMEDIATOR: 'codex',
+      AGENT_OS_POLICY_DEDUP_UNCOMMITTED_LINE_THRESHOLD: '9',
+      AGENT_OS_FEATURE_FLAGS_RESUME_CONTEXT_ENVELOPE: 'true',
+      AGENT_OS_APPS_CACHE_PARITY_MODE: 'enabled',
+      AGENT_OS_PROFILE: ' core ',
+      AR_CONFIG_CACHE_UNRELATED_FIXTURE: 'ignored',
+    };
+    const previous = Object.keys(values).map(name => [name, process.env[name]]);
+    try {
+      Object.assign(process.env, values);
+      const originalValues = Object.values;
+      let registryWalks = 0;
+      const valuesSpy = t.mock.method(Object, 'values', value => {
+        if (value === ENV_ALIASES) registryWalks++;
+        return originalValues(value);
+      });
+      let nativeKey;
+      try {
+        const options = { topPath: '/cache-parity.yaml', modulePaths: ['/cache-module.yaml'] };
+        nativeKey = __testCacheHooks.cacheKeyFor({ ...options, env: process.env });
+        assert.equal(registryWalks, 0, 'native keys must use the prebuilt index');
+        const explicitKey = __testCacheHooks.cacheKeyFor({ ...options, env: { ...process.env } });
+        assert.equal(registryWalks, 1, 'explicit objects retain the reference traversal');
+        assert.equal(nativeKey, explicitKey);
+      } finally {
+        valuesSpy.mock.restore();
+      }
+      const { envAliases } = JSON.parse(nativeKey);
+      for (const name of [
+        'AGENT_OS_POLICY_DEDUP_UNCOMMITTED_LINE_THRESHOLD',
+        'AGENT_OS_FEATURE_FLAGS_RESUME_CONTEXT_ENVELOPE',
+      ]) {
+        assert.deepEqual(envAliases.filter(([alias]) => alias === name), [
+          [name, values[name]], [name, values[name]],
+        ], 'duplicate declarations must remain in the serialized key');
+      }
+      assert.ok(!envAliases.some(([name]) => name === 'AR_CONFIG_CACHE_UNRELATED_FIXTURE'));
+    } finally {
+      for (const [name, value] of previous) {
+        if (value === undefined) delete process.env[name];
+        else process.env[name] = value;
+      }
+    }
+  });
 
 // ── N2 hot path regression: routeSubject × ~10 PRs × repeated ticks ──
 

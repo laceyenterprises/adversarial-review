@@ -1,0 +1,12 @@
+operator_steps:
+  - description: >-
+      After deployment, record the running collector revision and observe
+      normal findings collection over one day. Confirm no batch with a succeeded
+      worker and valid outcomes.json ends errored, and the errored count stays
+      zero. Use the existing read-only pipeline health reports and organic
+      settlement receipts.
+    run_as: Review service operator
+    command: >-
+      /usr/bin/printf '%s\n' 'FINDINGSPUBSETTLE-01: record the running collector revision and one day of organic findings settlement and error counts.'
+actions: []
+contact_on_failure: operator

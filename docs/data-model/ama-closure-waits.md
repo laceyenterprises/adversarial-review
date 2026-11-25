@@ -111,6 +111,13 @@ leave `paged=1` without a delivered alert; this store has no automatic reservati
 expiry for ordinary once-only classes. Operators must verify delivery before
 resetting that head/class reservation.
 
+Deferred-source decisions opt into `refreshOnReasonChange`. Changed evidence
+updates the reason and clears the page latch within the same transaction,
+then reserves a refreshed page without resetting the wait deadline. Delivery
+failure keeps the refresh retryable. These delivery keys append a SHA-256 digest
+of the reason so the original notice does not suppress updated source/cleanup
+facts. Unchanged facts keep their existing latch.
+
 RECOVERYSTALL-01 opts `closure-recovery-deadline` into `repeatAfterMs=21600000`.
 An immediate transaction reserves a reminder when `paged=0`, `last_paged` is
 missing on a legacy receipt, or six hours have passed since that timestamp.

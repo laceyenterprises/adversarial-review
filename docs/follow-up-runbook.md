@@ -2492,10 +2492,12 @@ offline fixture is not evidence that historical findings are resolved.
    valid manifest coverage. The dispatch `branch_pushed` milestone is not push
    authority: decision-only launches may retain its default `not_started`.
    Read PRs on the original branch across all states before
-   the remote ref: recover only one same-repository PR with the exact batch
-   marker. Without that PR, require the remote head equal to the tested pushed
-   `headSha`. A closed unmerged PR remains unresolved. Preserve every finding
-   and advisory decision; publication only updates PR number/head.
+   the remote ref. A single same-repository PR with the exact batch marker
+   prevents duplicate publication. The collector can settle once `outcomes.json`
+   records the PR number and GitHub confirms it in the batch repository. Without
+   an existing PR, require the remote head equal to the tested pushed `headSha`.
+   A closed unmerged PR remains unresolved. Preserve every finding and advisory
+   decision. Publication only updates PR number/head through an atomic rename.
 5. After the fix is deployed normally, let the existing hourly collector process
    eligible artifacts. Do not invoke the whole-queue `resolutionOnly` API as a
    single-batch command: it scans every unresolved batch. An existing publisher

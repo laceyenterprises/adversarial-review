@@ -639,8 +639,8 @@ update the affected declarations and the owner state doc, plus the smoke
 harness when a verified promise changed.
 Resolve the owner state doc from `documentationPath` relative to the
 declaration directory. If omitted, use the existing owner-local state/smoke
-section for non-root owners or a dedicated page under `docs/` for a root
-owner. Document new behavior in its topic page under `docs/` or the per-ticket
+section for non-root owners or `docs/STATE-MACHINES-AND-SMOKE.md` for a
+root owner. Document new behavior in its topic page under `docs/` or the per-ticket
 change fragment. Keep lifecycle and feature updates out of the repository root
 README.
 Regenerate any committed generated state index if the repository has one (for

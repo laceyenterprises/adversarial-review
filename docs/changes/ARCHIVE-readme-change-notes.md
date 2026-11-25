@@ -17,7 +17,7 @@
   for missing credentials and separate approval clauses. Regression cases now
   live in the existing ownership and service-home suites discovered by `npm test`.
 
-New repository notes live in [`docs/changes/`](README.md), one
+New repository notes live in [`docs/changes/README.md`](README.md), one
 `<TICKET-ID>.md` file per ticket. Follow that convention for new work; the
 entries below are preserved historical notes. No per-ticket README or index
 update is needed.

@@ -586,7 +586,7 @@ not establish live activation. After normal deployment, the runtime owner can
 inspect natural decision reasons and execution provenance read-only. Enabling
 MES or restarting services remains an operator step for MES-12/MES-13.
 See [the consumer contract](data-model/mes-review-enforcement.md).
-The [operator handoff](../modules/worker-pool/post-merge-actions/mes-09-review-enforcement.yaml)
+The [operator handoff](https://github.com/laceyenterprises/agent-os/blob/main/modules/worker-pool/post-merge-actions/mes-09-review-enforcement.yaml)
 declares deployment and read-only acceptance without automated activation.
 
 Run selected suites through `node test/run-tests.mjs <test files>` to isolate
@@ -612,34 +612,6 @@ so a later run reclaims its marked sandbox once it is old enough and both owners
 are absent. Exit-hook cleanup errors are logged without replacing the original
 exit status.
 
-### V2 repository/base queue foundation (MGQ-01)
-
-The finalization port now has durable lane storage and a fenced single-host
-owner seam in `src/finalization/`. The watcher uses it for transferred queue lanes.
-Acknowledged readiness is atomic, parked entries rejoin the tail explicitly,
-and replay preserves candidate, phase and original infrastructure deadline.
-Owner states are `idle`, `active`, `parked`. A per-lane issuance lock spans
-intent, remote operation and drain; an expired lease cannot authorize takeover
-while a request is ambiguous. Missing stop/drain and authoritative reconciliation
-proof parks the lane. A watcher tick that ends with an unresolved operation
-parks its active fence immediately and retains the prior owner and intent for
-reconciliation. Subject leases continue to protect only individual subjects.
-
-Focused offline fixtures in `test/finalization-queue-owner.test.mjs` exercise
-simultaneous claims, stale generations/routes, paused issuance, ambiguous push
-and merge intents, phase replay, FIFO/readmission, publication restart cases,
-bounded waits and a probe that performs no store mutation. These are focused
-fixtures; the existing smoke promises gain no new live action or CI check.
-
-After normal deployment, the operator runs
-`node src/finalization/queue-probe.mjs --capability owner --json` under the
-runtime account in the deployed checkout. It checks actual schema/adapter
-availability and reports the probe's runtime module digest and existing claims.
-Empty lanes mean organic execution evidence is pending. No route/config flag,
-service bounce or synthetic traffic is part of this slice. See the
-[owner observation and recovery procedure](finalization-executor-promotion-runbook.md#queue-owner-storage-observation-mgq-01-no-activation)
-and [store contract](data-model/finalization-ledger.md#repositorybase-queue-mgq-01).
-
 RCV-01 shared configuration: the strict Node loader recognizes the full
 `worker_pool.recovery` subtree, matching Python and the shell export reader.
 `test/fixtures/recovery-parity.json` is the shared synthetic acceptance/rejection
@@ -647,40 +619,6 @@ fixture. This reader-support change publishes no recovery config values and
 changes no review, queue, merge or hammer authority. Merge/deploy compatible
 readers before an operator publishes recovery host settings. Normal Agent OS
 submodule float carries the merged companion; no feature-head pointer bump.
-
-### V2 durable closer handoff (MGQ-02)
-
-`createQueueHandoffService` validates complete terminal finding coverage and
-persists pushed head, source review id/commit, signed evidence, worker/closer
-identities, primary-change/local-validation provenance and fixed/withdrawn
-dispositions with the queue entry and ack in one transaction. Real non-blocking
-findings require dispositions too. Fixes need concrete evidence; withdrawals
-also need source explanations and locations. Original signatures and finding
-identities survive candidate derivations without rebinding or another model
-judgement.
-
-`createCloserQueueHandoffBoundary` confirms durable acknowledgement before
-resource release and suppresses duplicate closer dispatch at the admission.
-State is absent until the transaction commits; duplicates, lost replies and
-restart return the same immutable `acknowledged` receipt. Write failure rolls
-back entry/event/readiness. The installed receiver uses authenticated review and
-publication reads and verifies the dispatched launch and generation. The legacy
-retry helper continues to serve lanes under legacy ownership.
-
-`test/finalization-queue-handoff.test.mjs` covers coverage/provenance refusals,
-independent duplicate submitters, crash after commit, lost ack, release ordering,
-signature/disposition preservation, bounded waits and a read-only probe. Existing
-smoke promises are unchanged; there is no new live action or CI check.
-
-After source deployment and both additive queue migrations, the operator runs
-`node src/finalization/queue-probe.mjs --capability handoff --json` from the
-deployed checkout under its runtime account, using the bounded load-aware
-supervisor in the [observation procedure](finalization-executor-promotion-runbook.md#durable-handoff-observation-mgq-02-no-activation).
-Require `.capabilities.handoff.available == true` and `.runtime.build != null`.
-The probe resolves the durable adapter against real schema and reports ack
-counts. Zero means organic evidence is pending. Availability does not assert
-live evidence-reader composition, lane routing or a running watcher's build.
-See the [handoff contract](data-model/finalization-ledger.md#durable-closer-handoff-mgq-02).
 
 ### Shadow replay policy and parsing (OSG-11)
 
@@ -742,41 +680,6 @@ Evidence-read failures use exit 126 (the consuming activation contract's
 inconclusive. Exit zero means evidence was collected; the declaration evaluates
 that evidence for pass or fail.
 
-### V2 FIFO admission (MGQ-03)
-
-`createCleanReviewService` admits signed, complete zero-finding exact-head reviews
-through the same transactional readiness counter as terminal closer handoffs.
-`createQueueAdmissionService` reads live subject/head/base, complete labels,
-identity, write rights and shared structural policy. Clean work retains its final
-current-head review read; complete terminal adjudication needs no re-review.
-Live/unknown holds park outside actionable FIFO. Closed/merged observations
-reconcile without dispatch. External author changes return for fresh adjudication.
-Parked recovery and repairs join the tail with fresh evidence, retaining history;
-duplicate wakes and restarts preserve position and the original absolute deadline.
-Snapshot comparison prevents late recovery reads from overwriting a newer hold.
-Terminal structural returns record the matching reversion/conflict reason even
-when infrastructure also fails. Progress events retain the phase before mutation;
-legacy events remain replayable. Live SHA casing and numeric/string review IDs
-do not change identity, and complete labels are passed as names to shared policy.
-
-The lifecycle is acknowledged → ready, or parked-hold/permission/infrastructure,
-returned-to-closer, or closed-observed. The watcher admits only lanes with matching configuration and durable queue
-ownership. Readiness alone grants no merge authority. Focused offline
-`finalization-queue-admission.test.mjs` exercises mixed-source process contention,
-read/recovery races, holds, current-head reads, bounded waits and probe immutability.
-Regressions also cover mixed infrastructure/conflict diagnostics, equivalent head
-and review identities, label objects and durable prior-phase audit/replay.
-Existing smoke promises gain no new live action, CI check or promotion gate.
-
-After normal source deployment and all three queue migrations, the operator runs
-`node src/finalization/queue-probe.mjs --capability admission --json` from the
-deployed checkout under its runtime account with the existing bounded load-aware
-supervisor. Require `.capabilities.admission.available == true` and
-`.runtime.build != null`; record actual source/disposition/observation counts.
-Empty organic evidence and live-reader/routing composition remain pending.
-See the [store contract](data-model/finalization-ledger.md#fifo-admission-and-clean-reviews-mgq-03)
-and [operator observation procedure](finalization-executor-promotion-runbook.md#fifo-admission-observation-mgq-03-no-activation).
-
 LAC-2096 deployment restores automatic daemon intent reconciliation; pre-deploy reader grants and affected intents must be checked. Canonical identity/absence guarantees are PostgreSQL-scoped; producer-shaped SQLite ticket recovery remains fenced. See the recovery deployment boundaries in the closure runbook.
 
 LVR-04 mirrors the strict boolean
@@ -787,174 +690,6 @@ service does not dispatch incidents or change merge authority through this knob.
 and invalid values with synthetic configs only. Deploy the reader before enabling
 the setting in a host overlay.
 
-### V2 mechanical rebase (MGQ-04)
-
-`createQueueRebaseService` prepares conservative rebases in isolated repositories,
-proves every ordered change including binary data, whitespace, paths, modes,
-symlinks and gitlinks, and persists the candidate/base/source before the fenced
-expected-old-head push. Empty commits, unsupported histories and unprovable
-preservation return to the closer. Full-index patches must match byte for byte:
-even conflict-free edits to a file changed upstream fail proof. Disjoint-file
-rebases are the supported case. Generated files receive no exception.
-Original signed evidence stays at its source head; author warning and permission
-notice intents remain durable for the delivery composition.
-
-The execution lifecycle is ready → rebasing → publishing → waiting-checks,
-with permission/hold/infrastructure parking outside FIFO and terminal returns
-for author changes or failed proof. Restart verifies the persisted candidate and
-reconciles outstanding operations before retry. A published candidate resumes
-checks without repushing. A no-op keeps the SHA with explicit proof. Outside base
-movement keeps the original absolute deadline and records the derivation chain.
-Admission re-proves a queue-published candidate against its immutable receipt
-before readmission; retained candidates resume via rebasing → publishing. Explicit
-Git push success settles the intent despite API lag, with a Git-sourced publication
-reference. Explicit single-ref remote refusals settle as not-applied; unknown
-transport outcomes still require drain recovery. Failed preparation removes its
-unreturned workspace. Successful workspaces remain for restart proof and require
-operator retention cleanup; no automatic retention sweep is wired. Rewritten
-commits default to `Queue Rebase <queue@example.invalid>` as committer, with the
-original author and message preserved. Full prior proofs and live snapshots are
-still duplicated in progress events; compact evidence storage remains follow-up
-work before production routing.
-
-Recovery verifies every contiguous derivation from the admission head, including
-prior workspaces, before accepting either the current candidate or its proven
-expected old head. This includes a park after a second candidate was prepared
-but before publication. A computed proof mismatch returns to the closer;
-unavailable Git execution parks as infrastructure, and expired patience parks
-before proof execution. Both already-published paths recheck live holds and
-permissions before advancing to checks. Deterministic workspace, remote, runner
-or deadline refusals before transport invocation settle `not-applied` with
-`git:push-not-spawned`; failures after invocation still require authoritative
-results or drain reconciliation. Ambient author/committer environment variables
-and `EMAIL` are removed from local Git execution so replay retains the source
-author and uses the synthetic committer.
-
-The production consumer uses the existing entitled GitHub credential for
-network Git. The runner refuses ambient SSH credentials. The existing execution brake applies before preparation and push.
-No new CI or smoke step is added.
-
-Focused offline fixtures are `finalization-queue-rebase-proof.test.mjs`,
-`finalization-queue-rebase.test.mjs` and `finalization-queue-git.test.mjs`.
-After normal deployment, the runtime owner runs
-`node src/finalization/queue-probe.mjs --capability rebase --json` under the
-existing bounded load-aware supervisor. Require
-`.capabilities.rebase.available == true` and `.runtime.build != null` and record
-the Git/proof adapter and actual publication observations. Missing organic
-publications and unverified loaded routing remain pending. The probe
-checks the real schema and Git executable and never creates a workspace or
-mutates a lane. See the [operator procedure](finalization-executor-promotion-runbook.md#mechanical-rebase-observation-mgq-04-no-activation)
-and [data contract](data-model/finalization-ledger.md#mechanical-rebase-and-publication-mgq-04).
-
-### V2 candidate checks and parking (MGQ-05)
-
-The v2 finalization waiter resolves and versions the complete existing
-required set, enumerates all exact-candidate check-run and legacy-status pages,
-and uses the shared CI classifier. Latest reruns win, with numeric REST IDs or
-GraphQL database IDs breaking timestamp ties. REST runs use start/completion
-timestamps; undated queued runs remain pending evidence. Missing, pending,
-stale, partial, unreadable and inconclusive
-evidence never authorizes finalization. Existing explicit no-CI policy still
-requires a fresh candidate proof. Original local validation stays at its source
-SHA in the immutable receipt.
-
-The lifecycle is waiting-checks → finalizing for green, returned-to-closer for
-completed red, or parked-infrastructure on expiry. The entry retains its original
-30-minute nominal infrastructure patience, scaled once with a 60-minute hard
-ceiling across polls, restart and base churn. Infrastructure parking releases the
-lane and journals one stable cause page through existing Sentinel delivery;
-outages never dispatch or charge remediation. Bounded recovery revalidates the
-candidate/base, derivation, holds and existing admission policy before tail
-readmission. An expired entry gets no new CI wait. Readmission grants no merge
-rights; final eligibility remains the executor's responsibility.
-
-No production route, new config, CI check or smoke step is installed. Source
-fixtures are `finalization-queue-checks.test.mjs`,
-`finalization-queue-check-transport.test.mjs`, `finalization-queue-check-race.test.mjs`,
-`checks-summary.test.mjs`,
-`hammer-token.test.mjs` and `alert-delivery.test.mjs`. The runtime owner separately
-runs `node src/finalization/queue-probe.mjs --capability checks --json` from the
-deployed checkout with a bounded load-aware supervisor. See the
-[store contract](data-model/finalization-ledger.md#candidate-checks-and-infrastructure-parking-mgq-05)
-and [deployment observation procedure](finalization-executor-promotion-runbook.md#checks-and-parking-observation-mgq-05-no-activation).
-
-### V2 final eligibility, guarded merge and receipts (MGQ-06)
-
-The v2 merge step consumes a `finalizing` exact candidate. Immediately
-before mutation it rereads the existing emergency brake, subject ledger,
-immutable receipt and disposition digest, live head/base/holds, identity, branch
-rights, primary change, existing structural eligibility, the recomputed rebase
-proof and a complete exact-candidate check snapshot. The live owner fence and
-route generation replace only the legacy merge-lease execution input. Head
-changes return to the closer; holds and the brake park; an outside base write
-clears stale readiness and rebases/retests under the original deadline.
-
-The final decision and owner-journaled intent precede the existing squash
-expected-head surface. A reply is never success: only live merged state at the
-candidate with a structured merge SHA and the attributed bot as merger records a
-receipt. Mismatched, unstructured or foreign already-merged replies are not
-success, and an invisible ambiguous merge waits for drained owner takeover. The
-receipt (old/new head, base, rebase provenance, check snapshot, decision, merge
-SHA, bot/closer attribution) commits with the merged phase, a subject-ledger
-`merge_observed` landing event and stable-key outbox rows for the existing merge-action
-accounting and AMA closure audit. Delivery retries never repeat the merge or an
-action, and pending delivery stays visible after the lane advances. The subject
-retains a post-merge delivery owner until a matching PMA run supplies verified
-activation evidence; landing alone never writes `finalized`. Custody changes
-invalidate authorization and select owned reconciliation from the shared fold.
-Outbox database operations retain the store's configured busy timeout so a
-transient writer can finish after lane release. The merge probe's recent receipt
-`recordedAt` is the authoritative merge time (`merge.mergedAt`). Clean reviews
-have no closer; remediated receipts retain the admitted closer attribution.
-
-No production route, new config, CI check or smoke step is installed. Source
-fixtures are `finalization-queue-merge.test.mjs` and
-`finalization-execution-surfaces.test.mjs`. The runtime owner separately runs
-`node src/finalization/queue-probe.mjs --capability merge --json` from the
-deployed checkout with a bounded load-aware supervisor. See the
-[store contract](data-model/finalization-ledger.md#final-eligibility-merge-receipts-and-delivery-outbox-mgq-06)
-and [deployment observation procedure](finalization-executor-promotion-runbook.md#merge-and-receipt-delivery-observation-mgq-06-no-activation).
-
-### V2 queue shadow decisions and throughput (MGQ-07)
-
-The finalization port exposes a read-only queue observation consumer alongside
-the existing shadow recorder/store/report. Paired observations carry v1 action
-provenance, lane readiness/order, rebase/check/final proposals and evidence.
-Only telemetry is written; no owner claim, push, merge, remediation dispatch or
-closer budget is available to this consumer. Live composition belongs to the
-routing slice. Unknown store/fold/read results stay open for operator escalation;
-queue differences can be attributed to either v1 or queue defects with recorded
-disposition evidence.
-
-`finalization shadow-report --days 7 --json` now includes separate organic and
-synthetic per-lane metrics: sample/window denominators, total/mean completed
-service time, oldest ready age, arrivals/merges/returns per hour, check waits and
-infrastructure/hold parking. Durable lifecycle replay preserves denominators
-and readiness age over duplicate ticks and restart. Synthetic replay cannot
-establish organic coverage. The text report rounds hourly rates to two decimal
-places; the JSON model retains numeric precision. Existing promotion criteria
-and smoke promises remain; this adds no CI check or automated gate. Focused
-offline fixtures are `test/finalization-queue-shadow.test.mjs` and the existing
-shadow tests.
-
-After deployment, the runtime owner runs
-`node src/finalization/queue-probe.mjs --capability shadow --json` under the
-existing bounded load-aware supervisor. It reports real schema/adapter
-availability, the probe build, latest organic consumer/time and observation-only
-mode. A null `shadow.lastObservationAt` with `shadow.organicEvidence == "pending"`
-is valid pending evidence; an organic observation requires a timestamp. See the
-[shadow deployment observation procedure](finalization-executor-promotion-runbook.md#queue-shadow-observation-mgq-07-no-activation),
-[triage guide](finalization-shadow-divergence-triage.md#queue-decision-evidence-mgq-07)
-and [store contract](data-model/finalization-shadow.md#queue-observations-mgq-07).
-
-The existing next-action observer also feeds legacy-lane snapshots/results into
-the same ledger and shadow report. `hq merge-lane shadow report [--json]`
-forwards the service read model; `promotionGate` adds MLR-04's 50 distinct
-organic terminal-subject requirement, terminal head-move/exhaustion examples and
-full-history triage/error arithmetic. Both MGQ and MLR readiness are required.
-See the [deployment handoff](https://github.com/laceyenterprises/agent-os/blob/main/modules/worker-pool/post-merge-actions/mlr-07-shadow.yaml): after both
-repository PRs merge and normal deployment, Main Loop 6/SRE reloads the watcher
-through its registered service path and proves row growth across natural
-traffic in every active lane. Historical nonzero rows alone are insufficient.
-Shadow has no execution port; frozen v1 policy and existing smoke commands
-remain unchanged. Focused synthetic fixtures exercise the live ingestion seam.
+The [V2 finalization queue contracts](production-pipeline.md#v2-finalization-queue)
+cover MGQ-01 through MGQ-07: ownership, closer handoff, FIFO admission, rebase,
+candidate checks, guarded merge and shadow observation.

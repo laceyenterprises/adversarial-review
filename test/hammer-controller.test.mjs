@@ -1083,7 +1083,7 @@ child.wait()
       assert.equal(existsSync(handoffPath), false, 'operator cancellation retains its own outcome');
     } else {
       const bytes = readFileSync(handoffPath, 'utf8');
-      const { coverageComplete, cleanup, ...handoff } = JSON.parse(bytes);
+      const { coverageComplete, cleanCheckout, cleanup, ...handoff } = JSON.parse(bytes);
       assert.deepEqual(handoff, { schemaVersion: 1, head: checkoutHead, outcome: 'deferred',
         validation: 'unknown', reason: mode === 'inner' ? 'child-check-timeout' : 'absolute-timeout',
         status: 124, ciAuthoritative: false, requiredContexts: [], localFailureObserved: true,
@@ -1093,6 +1093,7 @@ child.wait()
       // write. Its separate cleanup receipt is checked below in both cases.
       if (coverageComplete !== undefined || cleanup !== undefined) {
         assert.equal(coverageComplete, false);
+        assert.equal(cleanCheckout, false);
         assert.equal(cleanup, 'controller-owned');
       }
       if (mode === 'inner') {

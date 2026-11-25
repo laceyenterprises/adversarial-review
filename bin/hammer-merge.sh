@@ -356,7 +356,7 @@ import { readFileSync } from 'node:fs';
 import { closerReviewProof } from '<<ROOT_DIR>>/src/ama/closer-review-proof.mjs';
 import { tenureHeadNeedsReview } from '<<ROOT_DIR>>/src/pr-tenure.mjs';
 import { resolveRequiredCheckContextsFromCfg } from '<<ROOT_DIR>>/src/ama/required-check-contexts.mjs';
-import { readUnknownValidationReceipt, recordedUnknownDefersToCi, unknownValidationCiGate } from '<<ROOT_DIR>>/src/ama/local-validation-unknown.mjs';
+import { finalizedUnknownDefersToCi, readUnknownValidationReceipt, unknownValidationCiGate } from '<<ROOT_DIR>>/src/ama/local-validation-unknown.mjs';
 
 const repo = '<<REPO>>';
 const prNumber = Number('<<PR_NUMBER>>');
@@ -437,7 +437,7 @@ if (tenureHeadNeedsReview('<<TENURE_REVIEW_ARG>>', '<<REVIEWED_SHA>>', expectedH
 // Invalid receipts block independently of CI; valid receipts with pending/red
 // contexts keep the existing ci-not-green wait/repair handling.
 const unknownReceipt = readUnknownValidationReceipt('<<RUN_DIR>>', expectedHead);
-const unknownDefersToCi = recordedUnknownDefersToCi(unknownReceipt, requiredContexts);
+const unknownDefersToCi = finalizedUnknownDefersToCi('<<RUN_DIR>>', expectedHead, unknownReceipt, requiredContexts);
 const unknownValidation = !unknownReceipt ? null : unknownDefersToCi
   ? unknownValidationCiGate({ checks, requiredContexts })
   : { ok: false, reason: unknownReceipt.reason || 'local-validation-unknown-not-deferrable' };

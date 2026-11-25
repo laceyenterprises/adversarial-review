@@ -1,10 +1,12 @@
 import { execFile } from 'node:child_process';
 import { closeSync, copyFileSync, fsyncSync, lstatSync, mkdirSync, mkdtempSync, openSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync } from 'node:fs';
 import fsExt from 'fs-ext';
-import { basename, dirname, join, resolve } from 'node:path';
+import { basename, dirname, isAbsolute, join, resolve, sep } from 'node:path';
 import { promisify } from 'node:util';
 import { writeFileAtomic } from '../atomic-write.mjs';
-import { PROCESS_INSPECTION_UNAVAILABLE, readDeferredValidationChecks, readUnknownValidationReceipt } from './local-validation-unknown.mjs';
+import { amaCloserPromptDir, readAmaCloserDispatchRecord } from './dispatch-record-read.mjs';
+import { CI_AUTHORITATIVE_UNKNOWN_REASONS, PROCESS_INSPECTION_UNAVAILABLE, processInspectionRefused,
+  readDeferredValidationChecks, readUnknownValidationReceipt, unknownDefersToCi } from './local-validation-unknown.mjs';
 
 const sha = value => typeof value === 'string' && /^[a-f0-9]{40}$/i.test(value);
 const execGit = promisify(execFile);
@@ -89,10 +91,17 @@ export function readDeferredSourceHoldsForLaunch(hqRoot, identity) {
   }
 }
 
-export function continueDeferredSourceCustody(hold, { publishedHead, waitMs = 1000 } = {}) {
+export function continueDeferredSourceCustody(hold, { publishedHead, watcherEvidence, waitMs = 1000 } = {}) {
   return withHoldLock(hold.path, () => {
     const record = currentHold(hold);
-    if (publishedHead !== hold.sourceHead && !deferredSourceRetained({ ...hold, ...record })) return false;
+    const current = { ...hold, ...record };
+    if (watcherEvidence) {
+      if (record.continuedAt) return !deferredSourceNeedsDecision(current);
+      upgradeLegacyControllerCleanup(current, watcherEvidence);
+      publishedHead = deferredSourcePublishedCiAuthoritative(current, watcherEvidence) ? current.sourceHead : undefined;
+      if (!publishedHead && deferredSourceNeedsDecision(current)) return false;
+    }
+    if (publishedHead !== hold.sourceHead && !deferredSourceRetained(current)) return false;
     writeFileAtomic(hold.path, JSON.stringify({ ...record, continuedAt: new Date().toISOString(), ...(publishedHead && { publishedHead }) }), { mode: 0o600 });
     return true;
   }, waitMs);
@@ -250,17 +259,23 @@ export async function retainDeferredControllerCleanup(env, recordPath, record) {
       .find(candidate => candidate.controller === controller && !candidate.continuedAt);
   }
   if (!hold) return;
+  let validationFinalized = false;
   try {
-    writeFileAtomic(join(hold.evidenceDir, 'controller-cleanup.json'), JSON.stringify(record), { mode: 0o600 });
-    await retainDeferredCommit(hold, env);
-  } catch { /* A missing final receipt leaves cleanup unconfirmed. */ }
-  if (!record.drained) return;
-  try {
-    const deferred = readUnknownValidationReceipt(env.HAM_RUN_DIR, hold.sourceHead);
-    const validation = deferred && readDeferredValidationChecks(env.HAM_RUN_DIR, hold.sourceHead, deferred);
-    if (validation) retainDeferredValidation(hold.evidenceDir, deferred, validation,
-      resolve(env.HAM_RUN_DIR, deferred.localValidationReceipt));
+    if (record.drained === true) {
+      const deferred = readUnknownValidationReceipt(env.HAM_RUN_DIR, hold.sourceHead);
+      const validation = deferred && (!deferred.controllerRecord || deferred.controllerRecord === controller)
+        && readDeferredValidationChecks(env.HAM_RUN_DIR, hold.sourceHead, deferred);
+      if (validation) {
+        retainDeferredValidation(hold.evidenceDir, deferred, validation, resolve(env.HAM_RUN_DIR, deferred.localValidationReceipt));
+        validationFinalized = record.state === 'quiescent' && deferred.controllerRecord === controller;
+      }
+    }
   } catch { /* Keep the original snapshot if the final receipt is unreadable. */ }
+  // Publish the cleanup proof after the check snapshot so a watcher cannot
+  // pair confirmed drain with evidence collected while descendants were live.
+  writeFileAtomic(join(hold.evidenceDir, 'controller-cleanup.json'),
+    JSON.stringify({ ...record, controller, validationFinalized }), { mode: 0o600 });
+  await retainDeferredCommit(hold, env);
 }
 
 export function deferredSourceStatus(hold) {
@@ -280,18 +295,80 @@ export function deferredSourceStatus(hold) {
   }
 }
 
-export function deferredCleanupFinished(hold) {
+function deferredCleanupReceipt(hold) {
   let cleanup;
   if (hold.evidenceDir) {
     try { cleanup = read(join(hold.evidenceDir, 'controller-cleanup.json')); } catch {
       try { cleanup = read(join(hold.evidenceDir, 'bounded-cleanup.json')); } catch { /* Unconfirmed cleanup. */ }
     }
   }
+  return cleanup;
+}
+
+export function deferredCleanupFinished(hold, cleanup = deferredCleanupReceipt(hold)) {
   return Boolean(cleanup && cleanup.launchRequestId === hold.launchRequestId && (hold.controller
     ? cleanup.state === 'quiescent' && cleanup.drained === true
       && (cleanup.leaseCleanup?.released === true
         || ['already-released', 'no-acquisition-receipt'].includes(cleanup.leaseCleanup?.reason))
     : cleanup.head === hold.sourceHead && cleanup.cleanup === 'finished'));
+}
+
+function legacyRunDir(hold, { rootDir, repo }) {
+  const dispatch = readAmaCloserDispatchRecord(rootDir,
+    { repo, prNumber: hold.prNumber, headSha: hold.dispatchHead ?? hold.targetHead });
+  if (dispatch?.launchRequestId === hold.launchRequestId && dispatch.scratchDir && dispatch.promptDir) {
+    return { runDir: dispatch.scratchDir, promptDir: dispatch.promptDir };
+  }
+  // A later dispatch may have replaced the record. The old cleanup writer
+  // could already have archived the absolute receipt reference.
+  const { localValidationReceipt } = read(join(hold.evidenceDir, 'deferred.json'));
+  if (typeof localValidationReceipt === 'string' && isAbsolute(localValidationReceipt)) {
+    return { runDir: dirname(localValidationReceipt), promptDir: amaCloserPromptDir(rootDir) };
+  }
+  return {};
+}
+
+// Called with the hold lock. The old cleanup receipt precedes the copy, so
+// even an apparently complete archive cannot establish post-drain evidence.
+function upgradeLegacyControllerCleanup(hold, { rootDir, repo, liveHead, requiredContexts }) {
+  if (!rootDir || hold.clean !== true || hold.sourceHead !== liveHead?.toLowerCase()
+    || !requiredContexts?.length || !/^controller-[a-f0-9-]{36}\.json$/.test(hold.controller)) return;
+  const cleanup = deferredCleanupReceipt(hold);
+  if (cleanup?.validationFinalized !== undefined || !deferredCleanupFinished(hold, cleanup)
+    || `controller-${cleanup.token}.json` !== hold.controller) return;
+
+  let deferred, validation, receiptPath;
+  try {
+    const run = legacyRunDir(hold, { rootDir, repo });
+    if (!run.runDir || !basename(run.runDir).startsWith('hammer-scratch-')
+      || !lstatSync(run.runDir).isDirectory()) return;
+    const runDir = resolve(run.runDir);
+    const canonicalRunDir = realpathSync(runDir);
+    if (dirname(canonicalRunDir) !== realpathSync(run.promptDir)) return;
+    const controllerPath = join(runDir, hold.controller);
+    if (!lstatSync(controllerPath).isFile()) return;
+    const controller = read(controllerPath);
+    if (controller.token !== cleanup.token || !controller.finishedAt
+      || controller.finishedAt !== cleanup.finishedAt || !deferredCleanupFinished(hold, controller)) return;
+
+    if (!lstatSync(join(runDir, `validation-deferred-${hold.sourceHead}.json`)).isFile()) return;
+    deferred = readUnknownValidationReceipt(runDir, hold.sourceHead);
+    if (deferred?.validation !== 'unknown' || deferred.controllerRecord !== hold.controller
+      || deferred.localFailureObserved !== false || typeof deferred.localValidationReceipt !== 'string') return;
+    receiptPath = resolve(runDir, deferred.localValidationReceipt);
+    if (!receiptPath.startsWith(`${runDir}${sep}`)
+      || realpathSync(receiptPath) !== join(canonicalRunDir, receiptPath.slice(runDir.length + 1))
+      || !lstatSync(receiptPath).isFile()) return;
+    validation = readDeferredValidationChecks(runDir, hold.sourceHead, deferred);
+    // Pre-upgrade ordinary validators recorded cleanliness on the hold only.
+    const cleanCheckout = deferred.cleanCheckout === undefined ? hold.clean : deferred.cleanCheckout;
+    if (!validation || !unknownDefersToCi({ reason: deferred.reason, requiredContexts,
+      checks: validation.checks, cleanCheckout }).ciAuthoritative) return;
+  } catch { return; } // Original evidence may be unavailable this pass.
+
+  retainDeferredValidation(hold.evidenceDir, { ...deferred, cleanCheckout: true }, validation, receiptPath);
+  writeFileAtomic(join(hold.evidenceDir, 'controller-cleanup.json'),
+    JSON.stringify({ ...cleanup, controller: hold.controller, validationFinalized: true }), { mode: 0o600 });
 }
 
 export function deferredProcessInspectionUnavailable(hold) {
@@ -302,6 +379,10 @@ export function deferredProcessInspectionUnavailable(hold) {
     const deferred = read(deferredPath);
     if (deferred.head !== hold.sourceHead || deferred.validation !== 'unknown') return false;
     if (deferred.reason === PROCESS_INSPECTION_UNAVAILABLE) return true;
+    if (CI_AUTHORITATIVE_UNKNOWN_REASONS.includes(deferred.reason)) {
+      const evidence = read(join(hold.evidenceDir, 'validation.json'));
+      return evidence.head === hold.sourceHead && Array.isArray(evidence.checks) && processInspectionRefused(evidence.checks);
+    }
     // Older mirrors used the display name and surfaced the guard's exit 75
     // as an environment fault. Recover the typed result from the same attempt.
     if (deferred.reason !== 'canonical-mirror-environment-unavailable' || deferred.status !== 76) return false;
@@ -333,7 +414,49 @@ export function deferredSourceNeedsDecision(hold, inspectionUnavailable = deferr
   // continuedAt can describe retained source that was already published. It
   // says nothing about whether the next validator can perform the local guard.
   return Boolean(inspectionUnavailable || (hold && !hold.continuedAt && (hold.unreadable
-    || deferredSourceStatus(hold) !== 'matches-target' || !deferredCleanupFinished(hold))));
+    || deferredSourceStatus(hold) !== 'matches-target' || !deferredCleanupFinished(hold)
+    || deferredTimeoutEvidence(hold) === false)));
+}
+
+// Undefined leaves legacy non-timeout recovery to the ordinary custody rule.
+// False means a timeout was observed but its finalized evidence cannot release it.
+function deferredTimeoutEvidence(hold) {
+  let deferred;
+  try { deferred = read(join(hold.evidenceDir, 'deferred.json')); }
+  catch (error) { return error.code === 'ENOENT' && !hold.controller ? undefined : false; }
+  if (deferred?.head !== hold.sourceHead || deferred.validation !== 'unknown'
+    || typeof deferred.reason !== 'string') return false;
+  if (!CI_AUTHORITATIVE_UNKNOWN_REASONS.includes(deferred.reason)) return undefined;
+  try {
+    const cleanup = deferredCleanupReceipt(hold);
+    if (!deferredCleanupFinished(hold, cleanup) || (hold.controller && (cleanup.validationFinalized !== true
+      || cleanup.controller !== hold.controller || deferred.controllerRecord !== hold.controller))) return false;
+    const validation = read(join(hold.evidenceDir, 'validation.json'));
+    if (validation.head !== hold.sourceHead
+      || !Array.isArray(validation.checks) || validation.checks.some(check => !check || typeof check !== 'object')
+      || deferred.localFailureObserved !== false || validation.checks.some(check => check.result === 'fail')
+      || processInspectionRefused(validation.checks)) return false;
+    return { deferred, checks: validation.checks };
+  } catch { return false; }
+}
+
+// HAMCIAUTH-01: custody whose validated source IS the published PR head and
+// whose retained UNKNOWN qualifies for CI authority (deferrable reason, no local
+// failure in the retained receipt or checks, a clean committed head, declared
+// contexts) needs no operator. Exact-head CI and the unchanged merge gates
+// decide. Unpublished or dirty source, a denied process inspection and
+// unreadable evidence still park.
+export function deferredSourcePublishedCiAuthoritative(hold, { liveHead, requiredContexts } = {}) {
+  if (!hold || hold.unreadable || !hold.evidenceDir || hold.clean !== true || !sha(liveHead)
+    || hold.sourceHead !== liveHead.toLowerCase() || deferredProcessInspectionUnavailable(hold)) return false;
+  const evidence = deferredTimeoutEvidence(hold);
+  return Boolean(evidence && unknownDefersToCi({ reason: evidence.deferred.reason, requiredContexts,
+    checks: evidence.checks, cleanCheckout: evidence.deferred.cleanCheckout === true }).ciAuthoritative);
+}
+
+export function deferredSourceNeedsOperator(hold, { liveHead, requiredContexts } = {}) {
+  return deferredSourceNeedsDecision(hold)
+    && !(!hold?.continuedAt && deferredSourcePublishedCiAuthoritative(hold, { liveHead, requiredContexts }));
 }
 
 export function deferredSourceNotice(hold, inspectionUnavailable = deferredProcessInspectionUnavailable(hold)) {

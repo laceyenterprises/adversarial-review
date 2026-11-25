@@ -291,3 +291,20 @@ export function reviewCycleExhaustedFromRounds({
     (Number.isFinite(rereview) && rereview >= effectiveRoundBudget)
   );
 }
+
+// Reconstruct only a stored automatic handoff. Current admission still uses
+// the independent remediation and re-review caps above.
+export function wasBudgetExhaustedByUnpublishedCloserRounds({
+  effectiveRoundBudget,
+  completedRemediationRounds,
+  completedRereviewRounds,
+  unpublishedCloserTerminals,
+}) {
+  if (!Number.isInteger(effectiveRoundBudget) || effectiveRoundBudget <= 0 || !(unpublishedCloserTerminals > 0)
+    || reviewCycleExhaustedFromRounds({ effectiveRoundBudget, completedRemediationRounds, completedRereviewRounds })) {
+    return false;
+  }
+  const combinedRounds = completedRemediationRounds + completedRereviewRounds;
+  return completedRemediationRounds + unpublishedCloserTerminals >= effectiveRoundBudget
+    || (combinedRounds < effectiveRoundBudget && combinedRounds + unpublishedCloserTerminals >= effectiveRoundBudget);
+}

@@ -60,6 +60,9 @@ launch-bound evidence and preserves explicit operator custody. After ordinary
 deployment, check natural backlog and closer outcomes for recovery without
 operator repair. [SEV1 report](postmortems/SEV1-ROUNDBUDGETDEFER-01-unpublished-closer-rounds-exhausted-review-budget.md)
 
+The recovery check includes automatic handoffs with both a completed re-review
+and an unpublished closer exit. A genuinely exhausted re-review cap still holds.
+
 HAMCIAUTH-01: a validation timeout or load stop with no local failure, on a
 clean committed head, in a repository with declared required contexts, defers
 validation to the exact-head required GitHub checks, including under the hammer

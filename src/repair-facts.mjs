@@ -5,6 +5,7 @@ import {
   BUDGET_EXHAUSTED_CLOSURE_REASON, isBudgetExhaustedReviewSuppression, resolveMaxRemediationRounds,
 } from './hamclose-review-admission.mjs';
 import { resolveRoundBudgetForJob, summarizePRRemediationLedger } from './follow-up-jobs.mjs';
+import { countCompletedReviewerRereviewRounds, wasBudgetExhaustedByUnpublishedCloserRounds } from './review-ceiling-metrics.mjs';
 
 export function automaticRemediationBudgetExhausted(rootDir, identity) {
   const ledger = summarizePRRemediationLedger(rootDir, identity);
@@ -21,11 +22,15 @@ export function readRepairFacts({ rootDir, db, repo, prNumber, headSha, row, con
   // Recheck only the automatic handoff, whose stored reason may predate the
   // closer-round correction. An operator or repair epoch still owns its hold.
   let repairRow = row;
-  if (!cycleExhausted && row?.rereview_reason === BUDGET_EXHAUSTED_CLOSURE_REASON) {
+  if (!cycleExhausted && Number.isInteger(suppression?.roundBudget)
+    && row?.rereview_reason === BUDGET_EXHAUSTED_CLOSURE_REASON) {
     const { completedRoundsForPR, unpublishedCloserTerminals } = summarizePRRemediationLedger(rootDir, { repo, prNumber });
-    const budget = suppression?.roundBudget;
-    if (Number.isInteger(budget) && completedRoundsForPR < budget
-      && completedRoundsForPR + unpublishedCloserTerminals >= budget) {
+    if (unpublishedCloserTerminals > 0 && wasBudgetExhaustedByUnpublishedCloserRounds({
+      effectiveRoundBudget: suppression.roundBudget,
+      completedRemediationRounds: completedRoundsForPR,
+      completedRereviewRounds: countCompletedReviewerRereviewRounds({ db, rootDir, repoPath: repo, prNumber }),
+      unpublishedCloserTerminals,
+    })) {
       repairRow = { ...row, rereview_reason: null };
     }
   }

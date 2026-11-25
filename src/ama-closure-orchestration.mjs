@@ -156,6 +156,7 @@ import {
   countCompletedReviewerRereviewRounds,
   countReviewCeilingUnits,
   reviewCycleExhaustedFromRounds,
+  wasBudgetExhaustedByUnpublishedCloserRounds,
 } from './review-ceiling-metrics.mjs';
 
 // Rolling process-local diagnostics include acknowledgements from background
@@ -1315,9 +1316,11 @@ async function dispatchAmaClosureFor({
         completedRemediationRounds: completedRemediationRoundsForPR,
         completedRereviewRounds: completedRereviewRoundsForPR,
       });
-      falseCloserExhaustion = reviewCycleKnown && !reviewCycleExhausted && reviewCycleExhaustedFromRounds({
+      falseCloserExhaustion = reviewCycleKnown && wasBudgetExhaustedByUnpublishedCloserRounds({
         effectiveRoundBudget,
-        completedRemediationRounds: completedRemediationRoundsForPR + remLedger.unpublishedCloserTerminals,
+        completedRemediationRounds: completedRemediationRoundsForPR,
+        completedRereviewRounds: completedRereviewRoundsForPR,
+        unpublishedCloserTerminals: remLedger.unpublishedCloserTerminals,
       });
     }
   } catch (err) {

@@ -129,17 +129,23 @@ test('repair facts count only refund receipts with both identity fields in infor
   assert.equal(facts.refundedSpend.review, 1);
 });
 
-test('repair facts release an automatic budget handoff backed only by unpublished closer exits', t => {
+for (const rereviews of [0, 1, 2]) test(
+  `repair facts recheck an automatic budget handoff with ${rereviews} completed re-reviews`, t => {
   const f = fixture(t), db = reviewDb(t);
   const row = { ...db.prepare('SELECT * FROM reviewed_prs').get(), rereview_reason: 'system-budget-exhausted-closure' };
   const now = '2026-01-02T00:00:00.000Z';
-  for (const launchRequestId of ['lrq_fixture-first', 'lrq_fixture-second']) {
+  const addPass = db.prepare(`INSERT INTO reviewer_passes
+    (repo, pr_number, head_sha, attempt_number, reviewer_class, started_at, pass_kind, status)
+    VALUES (?, ?, ?, ?, 'synthetic', ?, 'rereview', 'completed')`);
+  for (let i = 0; i < rereviews; i++) addPass.run(repo, prNumber, old, i + 1, now);
+  for (let i = 0; i < (rereviews === 0 ? 2 : 1); i++) {
+    const launchRequestId = `lrq_fixture-deferred-${i}`;
     recordPrRound(f.rootDir, { ...f, roundId: `hammer:lrq:${launchRequestId}`, launchRequestId,
       kind: PR_ROUND_KINDS.HAMMER, source: 'ama-closer', recordedAt: now });
     assert.equal(appendCloserOutcome(f.rootDir, { ...f, lrqId: launchRequestId, status: 'terminal',
       terminalOutcome: 'retryable-canonical-validation-deferred', updatedAt: now }, 'lease-terminal'), true);
   }
-  assert.equal(readRepairFacts({ ...f, db, row }).cause, null);
+  assert.equal(readRepairFacts({ ...f, db, row }).cause, rereviews === 2 ? row.rereview_reason : null);
   const escalated = { ...row, next_action_json: { reason: 'closure-retry-exhausted' } };
   assert.equal(readRepairFacts({ ...f, db, row: escalated }).cause, 'closure-retry-exhausted');
 });

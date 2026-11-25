@@ -23,6 +23,7 @@ import { proveMigrationRenumbers } from '../src/ama/migration-renumber.mjs';
 import { requestCloserSuccessor, settleCloserSuccessor } from '../src/ama/closer-successor.mjs';
 import { maybeDispatchAmaClosureFor, resolveMergeAgentCoexistenceForWatcher } from '../src/ama-closure-orchestration.mjs';
 import { reviewCeilingOwner } from '../src/review-ceiling-owner.mjs';
+import { ensureReviewStateSchema } from '../src/review-state.mjs';
 import { observeClosureWait, CLOSURE_WAIT_BOUND_MS, CLOSURE_WAIT_RETRY_MS } from '../src/ama/closure-wait.mjs';
 import { followUpJobFilePrefix } from '../src/follow-up-job-names.mjs';
 import { createFollowUpJob, getFollowUpJobDir, markFollowUpJobStopped, FOLLOW_UP_JOB_SCHEMA_VERSION } from '../src/follow-up-jobs.mjs';
@@ -1502,7 +1503,8 @@ test('AMASTRICTROUTE-01: a spent final fix-all does not intercept hammer admissi
   assert.equal(f.waits.filter(wait => wait.waitClass === 'closer-successor').length, 0);
 });
 
-test('ROUNDBUDGETDEFER-01: a persisted automatic handoff keeps its closer with corrected round evidence', async t => {
+for (const rereviews of [0, 1, 2]) test(
+  `ROUNDBUDGETDEFER-01: a persisted automatic handoff with ${rereviews} completed re-reviews`, async t => {
   const { appendCloserOutcome } = await import('../src/ama/closer-outcomes.mjs');
   const { recordPrRound, PR_ROUND_KINDS } = await import('../src/pr-round-ledger.mjs');
   let dispatched;
@@ -1519,7 +1521,15 @@ test('ROUNDBUDGETDEFER-01: a persisted automatic handoff keeps its closer with c
   args.env = { HQ_ROOT: args.rootDir };
   args.reviewStateRow.reviewer_head_sha = OLD;
   args.reviewStateRow.rereview_reason = 'system-budget-exhausted-closure';
-  for (const launchRequestId of ['lrq_fixture-deferred-a', 'lrq_fixture-deferred-b']) {
+  args.reviewStateDb = new Database(':memory:');
+  t.after(() => args.reviewStateDb.close());
+  ensureReviewStateSchema(args.reviewStateDb);
+  const addPass = args.reviewStateDb.prepare(`INSERT INTO reviewer_passes
+    (repo, pr_number, head_sha, attempt_number, reviewer_class, started_at, pass_kind, status)
+    VALUES (?, ?, ?, ?, 'synthetic', ?, 'rereview', 'completed')`);
+  for (let i = 0; i < rereviews; i++) addPass.run(identity.repo, identity.prNumber, OLD, i + 1, AT);
+  for (let i = 0; i < (rereviews === 0 ? 2 : 1); i++) {
+    const launchRequestId = `lrq_fixture-deferred-${i}`;
     const attempt = { ...identity, headSha: OLD, launchRequestId };
     recordPrRound(args.rootDir, { ...attempt, roundId: `hammer:lrq:${launchRequestId}`,
       kind: PR_ROUND_KINDS.HAMMER, source: 'ama-closer', recordedAt: AT });
@@ -1529,7 +1539,8 @@ test('ROUNDBUDGETDEFER-01: a persisted automatic handoff keeps its closer with c
   const result = await maybeDispatchAmaClosureFor(args);
   assert.equal(result.dispatched, true, JSON.stringify(result));
   assert.equal(dispatched.reviewState.completedRemediationRounds, 0);
-  assert.equal(dispatched.reviewState.reviewCycleExhausted, false);
+  assert.equal(dispatched.reviewState.completedRereviewRounds, rereviews);
+  assert.equal(dispatched.reviewState.reviewCycleExhausted, rereviews === 2);
   assert.equal(dispatched.dispatchContext.reviewCycleCapReached, true);
 });
 

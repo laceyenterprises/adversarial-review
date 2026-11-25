@@ -7,6 +7,9 @@ reach a substantive outcome. Existing paced retry owns unpublished
 infrastructure stops. Recompute older charges on the next pass and preserve
 operator holds. [SEV1 report](../postmortems/SEV1-ROUNDBUDGETDEFER-01-unpublished-closer-rounds-exhausted-review-budget.md)
 
+Closure dispatch and repair inspection also recover stale automatic handoffs
+formed from both completed re-reviews and unpublished closer exits.
+
 ## Interface changes
 
 Version 1 closer outcome records accept optional `publishedHeadSha`,

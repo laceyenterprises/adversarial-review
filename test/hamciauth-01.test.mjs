@@ -235,6 +235,10 @@ test('undeclared contexts, a dirty checkout or an unconfirmed drain keep the exi
     assert.equal(check.status, 75, JSON.stringify(options) + check.stderr);
     assert.equal(deferralOf(repo).ciAuthoritative, false);
   }
+  const dirty = fixture(t, { clean: false });
+  const uncommitted = runValidator(dirty, { rows: PARTIAL, stop: ['absolute-timeout', 124], exit: 124 });
+  assert.equal(uncommitted.status, 124, uncommitted.stderr);
+  assert.match(uncommitted.stderr, /validating an uncommitted checkout.*commit the remediation first/s);
   const standalone = fixture(t, { declared: false });
   const result = runValidator(standalone, { rows: PARTIAL, stop: ['absolute-timeout', 124], exit: 124 });
   assert.equal(result.status, 124, result.stderr);

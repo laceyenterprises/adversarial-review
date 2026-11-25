@@ -433,6 +433,10 @@ async function validate() {
   let scratch;
   let runner, runnerExit, fallbackReason, socketPathDiagnostic;
   startedClean = cleanCheckout();
+  if (canonical && !startedClean) {
+    console.error('hammer-validate: validating an uncommitted checkout. A timeout here cannot defer to exact-head CI'
+      + ' and keeps the edits in operator custody; commit the remediation first (HAMCIAUTH-01).');
+  }
   binding = conflictBinding();
   if (closeReceipt) writeValidationReceipt(receipt);
   try {

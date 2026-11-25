@@ -47,6 +47,11 @@ operator custody.
   - `validation.json` has no failed row;
   - the repository declares required contexts.
   `dispatch-closer` and closure orchestration pass the declared contexts in.
+- `bin/hammer-validate.mjs` prints an advisory notice when canonical validation
+  starts on an uncommitted checkout. The incident's retained custody showed
+  that every stranded run validated uncommitted edits. A timeout there cannot
+  defer to CI, because no published head would carry those edits. The notice
+  does not refuse the run: merge-agent callers can still validate a dirty tree.
 - `templates/hammer-prompt.md`: the repair step commits before validation. The
   G2 deferral rule says that a timeout with no local failure continues to the
   close and is never parked.
@@ -64,7 +69,7 @@ watcher-side source keep the existing custody.
   and cleanup finished, `--check-deferred` exited 75 with "Operator decision
   required". The standalone timeout with 2 of 5 passing checks exited 124 with
   `ciAuthoritative: false`. The watcher paged for a published clean head.
-- `node --test test/hamciauth-01.test.mjs`: 9/9 pass.
+- `node --test test/hamciauth-01.test.mjs`: 9/9 pass. One test also checks the notice for uncommitted checkouts.
 - Related suites: `mrq-20-validation-unknown`, `hammer-validation-deferral`,
   `deferred-source-custody`, `inconclusiveretry-01b`, `hamconflictcustody-01`,
   `closersockpath-01`, `finalization-queue-merge`, `hamcontrollerscript-01`,

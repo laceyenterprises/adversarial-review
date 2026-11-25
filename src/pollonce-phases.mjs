@@ -4758,6 +4758,12 @@ async function runReviewSubjectPhases(entry, ctx) {
               // The non-split path has no early post callback to forward this
               // timestamp to admission's post-to-spawn handoff metric.
               if (Number.isFinite(result.durablePostedAt)) dispatchCandidate.durablePostedAt = result.durablePostedAt;
+              if (result.ok && depthSpillReserved) {
+                // A runtime may settle without the start callback. A successful
+                // result still consumed the reserved spill.
+                firstPassSpilloverController?.commitSpill?.({ repo: repoPath, prNumber });
+                depthSpillReserved = false;
+              }
               // Some runtime adapters settle without a process-start callback.
               // A failed launch keeps even a fresh, already-consumed wake alive.
               if (result.ok) retainedWatcherWakes?.drop(wakeIdentity);
@@ -4799,14 +4805,15 @@ async function runReviewSubjectPhases(entry, ctx) {
                 });
                 reviewRowPosted = settlement?.posted !== false;
               }
-              if (!result.ok && result.failureClass === 'quota-probe-unavailable') {
-                this.refundDepthSpill(result.failureClass);
-                return { dispatched: false, reason: result.failureClass };
-              }
               try {
+                if (!result.ok && result.failureClass === 'quota-probe-unavailable') {
+                  return { dispatched: false, reason: result.failureClass };
+                }
                 if (reviewRowPosted) await handoff(result);
               } finally {
-                releaseAdmissionCapacity?.({ dispatched: true });
+                releaseAdmissionCapacity?.({
+                  dispatched: result.failureClass !== 'quota-probe-unavailable',
+                });
               }
             }
           } finally {

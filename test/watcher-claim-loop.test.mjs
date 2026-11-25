@@ -2875,7 +2875,7 @@ test('REBASETRAILER-01: a non-closer rebase of a closer commit refreshes the rev
   assert.ok(gateInputs.every((input) => input?.suppressed !== true), output);
 });
 
-function runDepthDiscoveryScenario({ burst = false, depthEngaged = true, drainOutcome = null, stalePriority = false, ageSpill = false, lateAccountHold = false, rereviewAge = null, primaryClaude = false, accountEvidence = 'ready', pooledAccountStale = null, quotaProbeFailure = false } = {}) {
+function runDepthDiscoveryScenario({ burst = false, depthEngaged = true, drainOutcome = null, stalePriority = false, ageSpill = false, lateAccountHold = false, rereviewAge = null, primaryClaude = false, accountEvidence = 'ready', pooledAccountStale = null, quotaProbeFailure = false, lateLaunchMode = null } = {}) {
   const tmp = mkdtempSync(path.join(tmpdir(), 'watcher-depth-discovery-'));
   try {
     const loaderPath = path.join(tmp, 'loader.mjs');
@@ -2917,10 +2917,21 @@ function runDepthDiscoveryScenario({ burst = false, depthEngaged = true, drainOu
         export * from '${depthUrl}?actual';
         globalThis.__watcherDepthDiagnostics = {};
         export function createFirstPassSpilloverController(args) {
-          return actual.createFirstPassSpilloverController({ ...args, rootDir: ${JSON.stringify(tmp)},
+          const controller = actual.createFirstPassSpilloverController({ ...args, rootDir: ${JSON.stringify(tmp)},
             writeFileImpl: (_path, contents) => {
               globalThis.__watcherDepthDiagnostics.report = JSON.parse(contents);
             } });
+          return { ...controller,
+            commitSpill(coordinates) {
+              if (coordinates.prNumber === 101) globalThis.__watcherDepthDiagnostics.spillCommits =
+                (globalThis.__watcherDepthDiagnostics.spillCommits || 0) + 1;
+              return controller.commitSpill(coordinates);
+            },
+            refundSpill(coordinates) {
+              if (coordinates.prNumber === 101) globalThis.__watcherDepthDiagnostics.spillRefunds =
+                (globalThis.__watcherDepthDiagnostics.spillRefunds || 0) + 1;
+              return controller.refundSpill(coordinates);
+            } };
         }
       `,
       [burstUrl]: `
@@ -2947,6 +2958,42 @@ function runDepthDiscoveryScenario({ burst = false, depthEngaged = true, drainOu
         }
       `,
     };
+    if (lateLaunchMode) {
+      const spawnUrl = fileUrl('src', 'reviewer-spawn-settle.mjs');
+      sources[spawnUrl] = `
+        import * as actual from '${spawnUrl}?actual';
+        export * from '${spawnUrl}?actual';
+        export async function spawnReviewer(args) {
+          if (args.prNumber !== 101) return actual.spawnReviewer(args);
+          if (${JSON.stringify(lateLaunchMode)} === 'quota-refusal') return actual.spawnReviewer({
+            ...args, readReviewerQuotaDecisionImpl: async () => ({
+              available: false, capped: true, state: 'probe-error', provider: 'anthropic',
+              quotaReason: 'quota-unverifiable-credit-capable'
+            })
+          });
+          return actual.spawnReviewer({ ...args, onReviewerRuntimeStarted: () => {} });
+        }
+      `;
+      sources[poolUrl] = `
+        import * as actual from '${poolUrl}?actual';
+        export * from '${poolUrl}?actual';
+        export async function runBoundedReviewerDispatchQueue(candidates, options) {
+          for (const candidate of candidates) {
+            if (candidate.prNumber !== 101) continue;
+            const run = candidate.run;
+            candidate.run = function (...args) {
+              const release = this.admissionReleaseCapacity;
+              if (release) this.admissionReleaseCapacity = receipt => {
+                (globalThis.__watcherDepthDiagnostics.capacityReleases ||= []).push(receipt);
+                release(receipt);
+              };
+              return run.apply(this, args);
+            };
+          }
+          return actual.runBoundedReviewerDispatchQueue(candidates, options);
+        }
+      `;
+    }
     if (pooledAccountStale !== null) {
       const quotaUrl = fileUrl('src', 'watcher-reviewer-quota.mjs');
       sources[quotaUrl] = `
@@ -3082,6 +3129,7 @@ function runDepthDiscoveryScenario({ burst = false, depthEngaged = true, drainOu
             AGENT_OS_CONFIG_PATH: configPath,
           } : {}),
           ADVERSARIAL_REVIEW_REVIEWER_WORKER_CLASS_FALLBACK: 'claude-code',
+          ADVERSARIAL_REVIEW_ADMISSION_SETTLEMENT_SPLIT: lateLaunchMode ? 'true' : 'false',
           // These scenarios pin depth/burst behavior independently of age.
           ADVERSARIAL_REVIEW_FIRST_PASS_REVIEW_MAX_WAIT_SECONDS: ageSpill ? '480' : '0',
           ADVERSARIAL_REVIEW_REREVIEW_MAX_WAIT_SECONDS: ageSpill ? '900' : '0',
@@ -3362,6 +3410,24 @@ test('LAC-2352: overdue Gemini preference recovers from unreadable Claude spill 
   assert.equal(summary.depthDiagnostics.report?.cost?.spilloverReviewsTotal || 0, 0);
   assert.ok(summary.reviewerPassRows.every(row => row.reviewer_model === 'gemini'), output);
   assert.doesNotMatch(output, /Quota-exhausted reviewer failure/);
+});
+
+test('LAC-2352: late quota refusal releases admission and refunds one spill', () => {
+  const { summary, output } = runDepthDiscoveryScenario({
+    depthEngaged: false, ageSpill: true, lateLaunchMode: 'quota-refusal',
+  });
+  assert.equal(summary.rows['101'].review_status, 'pending', output);
+  assert.deepEqual(summary.depthDiagnostics.capacityReleases, [{ dispatched: false }], output);
+  assert.equal(summary.depthDiagnostics.spillRefunds, 1, output);
+  assert.equal(summary.depthDiagnostics.spillCommits || 0, 0, output);
+});
+
+test('LAC-2352: successful settlement commits spill without a runtime start callback', () => {
+  const { summary, output } = runDepthDiscoveryScenario({
+    depthEngaged: false, ageSpill: true, lateLaunchMode: 'no-start-callback',
+  });
+  assert.equal(summary.depthDiagnostics.spillCommits, 1, output);
+  assert.equal(summary.depthDiagnostics.spillRefunds || 0, 0, output);
 });
 
 for (const race of ['none', 'row-moved', 'operator-request']) test(`LAC-2231: cycle-cap handoff settles only its worker receipt (${race})`, () => {

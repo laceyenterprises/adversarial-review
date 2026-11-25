@@ -1143,7 +1143,10 @@ new PR
   and spends neither review nor infrastructure attempts. Only the typed
   `skipped` pass is exempt from the hard review-attempt ceiling. At spill selection
   the same refusal can invoke the existing AFH fallback before the pool
-  reserves capacity for the final route.
+  reserves capacity for the final route. A launch-time refusal releases pool
+  admission capacity as undispatched and refunds a reserved spill once.
+  Successful settlement commits a reserved spill even when its runtime adapter
+  omits the process-start callback.
   `oauth-broken` also maintains a model-scoped outage file under
   `data/reviewer-credential-outages/` after failures hit the distinct-PR
   threshold. That preflight hold parks further spawns for the affected model

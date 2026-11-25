@@ -1906,6 +1906,15 @@ merge transport ran settles the local writer reservation. Unclassified
 preflight refusals use `legacy-writer-preflight-refused`, and the recognized
 lane-busy deferral retains its refund. Existing exact-head
 CAS, leases and merge retry ownership continue to apply.
+Malformed audit JSON yields the existing `park-audit-unreadable` operator hold
+without requiring terminal-remediation certification. Its original bytes stay
+intact, and the pass admits no launch or attempt charge.
+A same-head GitHub MERGED or CLOSED observation now passes through the normal
+final live probe and existing target finalizer instead of writer backoff. A
+valid changed head returns `merge-writer-head-superseded` with
+`candidateSuperseded: true` and `observedHeadSha`; admission waits for a fresh
+snapshot. The old ambiguous writer evidence remains intact and grants no
+own-merge credit. Unknown or unchanged inputs retain their existing hold.
 
 CLOSERGATES-01 final remediation keeps repairable conflicts out of terminal
 AMA state: both final and non-final observations count the current head once;

@@ -269,3 +269,10 @@ notice per head/launch/acquisition across watcher restarts, retries failed deliv
 and reports await-operator without changing the shared execution decision.
 Operators inspect outcome receipts and active work before using supported HQ
 lifecycle controls. Source publication alone does not prove autonomous closure.
+
+The non-persistent dispatch observation `merge-writer-head-superseded` carries
+`candidateSuperseded: true` and the verified `observedHeadSha`. It invalidates
+only the old admission candidate and asks the next pass for fresh metadata;
+it does not certify the old writer execution, cancel a worker or mint a merge
+receipt. A same-head closed/merged observation uses the existing target
+finalizer and retains ambiguous writer evidence.

@@ -410,6 +410,15 @@ unclassified preflight refusals settle the intent as
 `legacy-writer-preflight-refused` and keep their charge through bounded redrive.
 The recognized lane-busy deferral keeps its retry refund. An unreadable writer
 identity parks and pages once per head under `merge-writer-audit-unreadable`.
+Malformed audit JSON instead returns `park-audit-unreadable` with
+`needsOperator: true`, whether or not terminal-remediation certification exists.
+The corrupt evidence is retained; no replacement launch or merge is admitted.
+A same-head GitHub MERGED or CLOSED observation now passes through the normal
+final live probe and existing target finalizer instead of writer backoff. A
+valid changed head returns `merge-writer-head-superseded` with
+`candidateSuperseded: true` and `observedHeadSha`; admission waits for a fresh
+snapshot. The old ambiguous writer evidence remains intact and grants no
+own-merge credit. Unknown or unchanged inputs retain their existing hold.
 
 To settle an unchanged writer hold, the operator first confirms the earlier
 writer has drained and acquires the shared merge lease for the PR, head and

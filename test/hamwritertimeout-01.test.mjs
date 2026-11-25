@@ -5,7 +5,7 @@
 import './helpers/dispatch-read-fixture.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, readFileSync, rmSync, existsSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync, existsSync, writeFileSync } from 'node:fs';
 import { tmpdir, userInfo } from 'node:os';
 import { join } from 'node:path';
 
@@ -13,9 +13,9 @@ import { HAMMER_CLOSER_FAULTS, HAMMER_INFRASTRUCTURE_OUTCOMES, HAMMER_STOP_ORIGI
 } from '../src/ama/hammer-stop-origin.mjs';
 import { HAMMER_RETRYABLE_READ_OUTCOMES, hammerPhaseAttempt } from '../src/ama/hammer-phase-outcome.mjs';
 import { CloserCorrectionRequired, recordHammerEarlyFailure } from '../src/ama/hammer-terminal-audit.mjs';
-import { appendAmaAuditAttempt, readAmaAuditEntry } from '../src/ama/audit.mjs';
+import { appendAmaAuditAttempt, readAmaAuditEntry, amaAuditFilePath } from '../src/ama/audit.mjs';
 import { recordHammerPhase } from '../src/ama/hammer-outcome.mjs';
-import { AMA_CLOSER_RETRYABLE_DEFERRAL_REASONS, retryableAmaCloserDeferralOutcome } from '../src/ama/closer-lease.mjs';
+import { AMA_CLOSER_RETRYABLE_DEFERRAL_REASONS, retryableAmaCloserDeferralOutcome, readAmaCloserLease } from '../src/ama/closer-lease.mjs';
 import { maybeDispatchAmaCloser, readAmaCloserDispatchRecord,
   updateAmaCloserDispatchRecord } from '../src/ama/dispatch-closer.mjs';
 import { readHammerRetryCapLedger } from '../src/ama/hammer-retry-cap.mjs';
@@ -286,8 +286,7 @@ test('an unresolved writer intent stays parked across watcher passes and pages o
   const pass = minutes => maybeDispatchAmaCloser({ ...dispatchArgs(root, at(minutes)), ...deps,
     readPullRequestStateImpl: () => live });
   const active = { state: 'OPEN', headRefOid: HEAD, baseRefName: 'main', baseRefOid: base };
-  for (const [index, observation] of [null, active, { ...active, state: 'MERGED' },
-    { ...active, headRefOid: 'd'.repeat(40) }].entries()) {
+  for (const [index, observation] of [null, active].entries()) {
     live = observation;
     const result = await pass(index);
     assert.equal(result.dispatched, false);
@@ -301,6 +300,79 @@ test('an unresolved writer intent stays parked across watcher passes and pages o
   const changed = await pass(5);
   assert.equal(changed.dispatched, true, JSON.stringify(changed));
   assert.equal(state.launches, 1);
+});
+
+for (const observedState of ['MERGED', 'CLOSED']) {
+  test(`writer hold yields to the normal ${observedState} finalizer without launching`, async t => {
+    const root = scratch(t);
+    const { state, deps, identity } = harness(root);
+    appendAmaAuditAttempt({ hqRoot: join(root, 'hq'), ...identity, attempt: {
+      outcome: 'in_progress', reason: 'merge-writer-intent', attemptPhase: 'hammer-gh-pr-merge', validatedHead: HEAD,
+      mergeWriter: { baseSha: 'b'.repeat(40), baseRef: 'main', write: 'unknown', readback: 'unavailable' },
+    } });
+    const live = { state: observedState, headRefOid: HEAD, baseRefName: 'main', baseRefOid: 'b'.repeat(40) };
+    const args = dispatchArgs(root, at(0));
+    args.dispatchContext.livePrProbeImpl = async () => ({ ...live, headBranchExists: false });
+    const result = await maybeDispatchAmaCloser({ ...args, ...deps, readPullRequestStateImpl: () => live });
+    assert.equal(result.dispatched, false);
+    assert.notEqual(result.reason, 'merge-writer-deferred');
+    assert.equal(result.prState, observedState);
+    assert.equal(state.launches, 0);
+    assert.equal(state.alerts.length, 0);
+    const lease = readAmaCloserLease(root, identity);
+    if (observedState === 'MERGED') {
+      assert.equal(lease.status, 'terminal');
+      assert.equal(lease.terminalOutcome, 'succeeded');
+    } else assert.equal(lease, null);
+    assert.equal(readAmaAuditEntry(join(root, 'hq'), REPO, PR, HEAD).status, 'in_progress',
+      'a confirmed target does not manufacture the old writer own-merge receipt');
+  });
+}
+
+test('a moved writer target waits for a fresh snapshot and does not wedge the new head', async t => {
+  const root = scratch(t);
+  const { state, deps, identity } = harness(root);
+  appendAmaAuditAttempt({ hqRoot: join(root, 'hq'), ...identity, attempt: {
+    outcome: 'in_progress', reason: 'merge-writer-intent', attemptPhase: 'hammer-gh-pr-merge', validatedHead: HEAD,
+    mergeWriter: { baseSha: 'b'.repeat(40), baseRef: 'main', write: 'unknown', readback: 'unavailable' },
+  } });
+  const next = 'd'.repeat(40);
+  const live = { state: 'OPEN', headRefOid: next, baseRefName: 'main', baseRefOid: 'b'.repeat(40) };
+  const first = await maybeDispatchAmaCloser({ ...dispatchArgs(root, at(0)), ...deps,
+    readPullRequestStateImpl: () => live });
+  assert.equal(first.dispatched, false);
+  assert.equal(first.reason, 'merge-writer-head-superseded');
+  assert.equal(first.candidateSuperseded, true);
+  assert.equal(first.observedHeadSha, next);
+  assert.equal(state.launches, 0);
+  assert.equal(readAmaCloserLease(root, identity), null);
+  const fresh = dispatchArgs(root, at(1));
+  fresh.prMetadata.headSha = next;
+  fresh.reviewState.headSha = next;
+  fresh.dispatchContext.reviewedSha = next;
+  const result = await maybeDispatchAmaCloser({ ...fresh, ...deps, readPullRequestStateImpl: () => live });
+  assert.equal(result.dispatched, true, JSON.stringify(result));
+  assert.equal(state.launches, 1);
+});
+
+test('malformed audit without terminal certification returns a structured hold without launching', async t => {
+  const root = scratch(t);
+  const { state, deps } = harness(root);
+  const hqRoot = join(root, 'hq');
+  appendAmaAuditAttempt({ hqRoot, repo: REPO, prNumber: PR, headSha: HEAD,
+    attempt: { outcome: 'in_progress', reason: 'merge-writer-intent' } });
+  const file = amaAuditFilePath(hqRoot, REPO, PR, HEAD);
+  writeFileSync(file, '{broken');
+  for (const minutes of [0, 1]) {
+    const result = await maybeDispatchAmaCloser({ ...dispatchArgs(root, at(minutes)), ...deps });
+    assert.equal(result.dispatched, false);
+    assert.equal(result.skipMergeAgent, true);
+    assert.equal(result.reason, 'park-audit-unreadable');
+    assert.equal(result.needsOperator, true);
+    assert.equal(readFileSync(file, 'utf8'), '{broken', 'retain the original corrupt evidence');
+  }
+  assert.equal(state.launches, 0);
+  assert.equal(readHammerRetryCapLedger(root, { repo: REPO, prNumber: PR }), null, 'no attempt ledger is admitted');
 });
 
 test('an invalid writer audit pages once and parks without a launch', async t => {

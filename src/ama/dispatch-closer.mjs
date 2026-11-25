@@ -5183,9 +5183,17 @@ async function maybeDispatchAmaCloserAttempt({
       const live = await Promise.resolve().then(() =>
         readPullRequestStateImpl({ repo: reconciliationRepo, prNumber, env, signal, includeBase: true })).catch(() => null);
       throwIfAborted(signal);
-      if (live?.state === 'MERGED' || live?.state === 'CLOSED'
-        || (live?.headRefOid && live.headRefOid !== prMetadata.headSha)) return noAmaDispatch(result);
-      if (!hammerWriterInputsChanged(hold, { state: live?.state, headSha: live?.headRefOid,
+      if (/^[a-f0-9]{40}$/i.test(live?.headRefOid || '') && live.headRefOid !== prMetadata.headSha) {
+        // This observation invalidates the candidate, not the old writer's
+        // unknown execution. Keep its evidence and wait for a fresh snapshot.
+        return noAmaDispatch({ dispatched: false, skipMergeAgent: true,
+          reason: 'merge-writer-head-superseded', candidateSuperseded: true,
+          observedHeadSha: live.headRefOid, preservePredecessorArtifacts: true });
+      }
+      // Let the ordinary final live probe settle a closed/merged target. A
+      // stale OPEN metadata snapshot must not keep it in writer backoff.
+      if (!['MERGED', 'CLOSED'].includes(live?.state)
+        && !hammerWriterInputsChanged(hold, { state: live?.state, headSha: live?.headRefOid,
         baseSha: live?.baseRefOid, baseRef: live?.baseRefName })) {
         if (readMergeLeaseHolders({ rootDir, repo: reconciliationRepo, prNumber })
           .some(lease => lease.holderHead === prMetadata.headSha)) return noAmaDispatch({ ...result, inFlight: true });
@@ -5511,10 +5519,9 @@ async function maybeDispatchAmaCloserAttempt({
         && !HAMMER_RETRYABLE_READ_OUTCOMES.has(queuedParkAudit?.attempts?.at(-1)?.reason)) queuedParkAudit = null;
     } catch (error) {
       logger?.warn?.(`[ama-closer] park audit unreadable: ${error?.message || error}`);
-      if (verdict.trace?.hamTerminalRemediation?.ok === true) {
+      if (verdict.trace?.hamTerminalRemediation?.ok === true || error instanceof SyntaxError) {
         return noAmaDispatch({ dispatched: false, skipMergeAgent: true, reason: 'park-audit-unreadable', needsOperator: true });
       }
-      if (error instanceof SyntaxError) throw error;
     }
   }
   const queuedParkReason = queuedParkAudit?.status === 'deferred'
